@@ -75,7 +75,9 @@ xforge/
 │   │   │   ├── file_ops.rs
 │   │   │   └── ... (one file per operator group)
 │   │   └── Cargo.toml
-│   ├── xforge-engine/      # Execution engine (exec_exec equivalent)
+│   ├── xforge-engine/      # Execution engine (eval loop)
+│   │   └── ...
+│   ├── xforge-render/      # Rendering backend (tiny-skia) [Phase 3]
 │   │   └── ...
 │   └── xforge-cli/         # Binary entry point
 │       └── ...
@@ -254,31 +256,54 @@ No external rendering dependencies in Phase 1. Pure Rust.
 
 ---
 
-## Phase 3: Graphics Foundation (Size: XL)
+## Phase 3: Graphics Foundation (Size: XL) — COMPLETE
 
 **Goal**: Complete graphics state, path construction, matrix operations, basic color, painting operators. First raster output (PNG).
 
 **Done when**: Can render PostForge's `samples/tiger.ps` to PNG.
 
-### Key Components
-- **Graphics state**: 28 operators (gsave, grestore, setlinewidth, setlinecap, setlinejoin, setdash, setmiterlimit, etc.)
-- **Path construction**: 12 operators (moveto, lineto, curveto, arc, arcn, arcto, closepath, newpath, currentpoint, rmoveto, rlineto, rcurveto)
-- **Matrix ops**: 16 operators (matrix, currentmatrix, setmatrix, translate, scale, rotate, concat, transform, itransform, dtransform, idtransform, invertmatrix, identmatrix, defaultmatrix, initmatrix, concatmatrix)
-- **Basic color**: DeviceGray, DeviceRGB, DeviceCMYK only (7 device color + 4 colorspace operators)
-- **Painting**: 7 operators (fill, eofill, stroke, fillstroke, erasepage, showpage, copypage)
-- **Clipping**: 7 operators (clip, eoclip, clippath, initclip, rectclip, pathbbox, clipsave/cliprestore)
-- **Path query**: 6 operators (pathbbox, flattenpath, reversepath, strokepath, pathforall, currentpoint)
-- **Display list**: Build during execution, consume for rendering
-- **PNG device**: Cairo-based raster output via `cairo-rs` crate
+**Status**: Complete (2026-02-25). 5-crate workspace (new: xforge-render), ~189 operators, 270 tests passing, zero clippy warnings. tiger.ps renders correctly at any DPI. Release build renders 300 DPI tiger (2550×3300) in ~110ms.
 
-### New Rust Dependencies
+### Key Components (Implemented)
+- **Graphics state**: `GraphicsState` struct on Context with `gstate_stack: Vec<GraphicsState>` for gsave/grestore. 18 operators — gsave, grestore, grestoreall, setlinewidth, currentlinewidth, setlinecap, currentlinecap, setlinejoin, currentlinejoin, setmiterlimit, currentmiterlimit, setdash, currentdash, setflat, currentflat, setstrokeadjust, currentstrokeadjust, initgraphics
+- **Path construction**: Paths stored in user space as `Vec<PathSegment>` (MoveTo, LineTo, CurveTo, ClosePath). Arc-to-bezier conversion ported from PostForge (≤90° segments). 13 operators — newpath, currentpoint, moveto, rmoveto, lineto, rlineto, curveto, rcurveto, closepath, arc, arcn, arcto, arct
+- **Matrix ops**: `Matrix` struct (6 f64s, Clone+Copy). PostScript row-vector convention: `concat` does `self.multiply(other)` in column-vector convention = `M × CTM` in row-vector. 16 operators — matrix, identmatrix, currentmatrix, setmatrix, defaultmatrix, initmatrix, translate, scale, rotate, concat, concatmatrix, invertmatrix, transform, itransform, dtransform, idtransform
+- **Color**: `DeviceColor { r, g, b: f64 }` with conversions from gray, RGB, CMYK, HSB. CMYK→RGB: `r = 1-(c+k)` clamped. All colors convert to RGB internally. 12 operators — setgray, currentgray, setrgbcolor, currentrgbcolor, setcmykcolor, currentcmykcolor, sethsbcolor, currenthsbcolor, setcolorspace, currentcolorspace, setcolor, currentcolor
+- **Painting**: Immediate-mode rendering (no display list). fill/stroke call device methods directly with CTM passed at paint time. 7 operators — fill, eofill, stroke, rectfill, rectstroke, erasepage, showpage
+- **Clipping**: Device clip via tiny-skia Mask. Clip intersection via `Mask::intersect_path`. Path NOT cleared after clip (unlike fill/stroke). 7 operators — clip, eoclip, clippath, initclip, rectclip, clipsave, cliprestore
+- **Path query**: Conservative control-point hull for pathbbox. De Casteljau recursive subdivision for flattenpath. 5 operators — pathbbox, flattenpath, reversepath, strokepath, pathforall
+- **Renderer**: `RasterDevice` trait in xforge-core, `SkiaDevice` implementation in new xforge-render crate using tiny-skia 0.11. All internal math f64, convert to f32 only at tiny-skia boundary
+- **CLI**: `--dpi` flag for rendering resolution (default 72). Output PNG derived from input filename
+
+### Architecture Decisions
+- **Immediate-mode rendering** (no display list): fill/stroke invoke device directly. Simpler for Phase 3; display list can be layered in Phase 7
+- **Paths in user space**: Unlike PostForge (device space at construction), xforge stores paths in user space. CTM captured at paint time and passed to tiny-skia as Transform. This gives correct currentpoint/pathbbox without inverse CTM and handles anisotropic strokes naturally
+- **Trait-based device**: `RasterDevice` trait enables future backend swaps without changing operator code
+- **Deferred flag**: ObjFlags bit 6 marks nested executable arrays in procedure bodies so the eval loop pushes them to o_stack (preserving executable flag for `if`/`ifelse`) rather than executing them
+
+### New Crate
+- **xforge-render** — tiny-skia 0.11 device implementation (`SkiaDevice`)
+
+### New Files (12)
+- `crates/xforge-core/src/graphics_state.rs` — Matrix, PsPath, GraphicsState, DeviceColor
+- `crates/xforge-core/src/device.rs` — RasterDevice trait, FillParams, StrokeParams, ClipParams
+- `crates/xforge-ops/src/matrix_ops.rs` — 16 operators
+- `crates/xforge-ops/src/path_ops.rs` — 13 operators
+- `crates/xforge-ops/src/color_ops.rs` — 12 operators
+- `crates/xforge-ops/src/graphics_state_ops.rs` — 18 operators
+- `crates/xforge-ops/src/paint_ops.rs` — 7 operators
+- `crates/xforge-ops/src/clip_ops.rs` — 7 operators
+- `crates/xforge-ops/src/path_query_ops.rs` — 5 operators
+- `crates/xforge-render/src/lib.rs` + `src/skia_device.rs` — tiny-skia device
+- `crates/xforge-engine/tests/rendering.rs` — 10 integration tests
+
+### New Dependencies
 ```toml
-cairo-rs = "0.20"       # 2D rendering (paths, fills, strokes, text)
-png = "0.17"             # PNG encoding (alternative to cairo PNG surface)
+tiny-skia = "0.11"      # 2D rasterization (paths, fills, strokes, clipping)
 ```
 
-### Operators Added: ~83
-### Test Suites: `graphics_state_tests.ps`, `path_tests.ps`, `matrix_tests.ps`, `color_tests.ps`, `clipping_tests.ps`
+### Operators Added: ~78 (total: ~189)
+### Tests Added: 109 (total: 270)
 
 ---
 
@@ -300,7 +325,7 @@ png = "0.17"             # PNG encoding (alternative to cairo PNG surface)
 
 ### New Rust Dependencies
 ```toml
-freetype-rs = "0.37"    # Font rasterization (optional, for hinting)
+# TBD — may use freetype-rs or pure-Rust font rasterizer
 ```
 
 ### Operators Added: ~22
@@ -382,8 +407,8 @@ clap = "4"               # CLI argument parsing
   - ToUnicode CMap generation (searchable text)
   - CMYK/Gray color space preservation
   - Image XObject construction
-- **SVG device**: Cairo-based vector with selectable text, `--text-as-paths` option
-- **TIFF device**: Cairo + image encoding, multi-page, CMYK support
+- **SVG device**: Vector output with selectable text, `--text-as-paths` option
+- **TIFF device**: Raster + image encoding, multi-page, CMYK support
 - **Interactive display**: GUI window with zoom/pan (egui, winit, or similar Rust GUI)
 
 ### New Rust Dependencies

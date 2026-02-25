@@ -10,6 +10,8 @@ authors = ["Scott Bowman <scott@bowmans.org>"]
 
 [workspace.dependencies]
 thiserror = "2"
+tiny-skia = "0.11"
 xforge-core = { path = "crates/xforge-core" }
 xforge-ops = { path = "crates/xforge-ops" }
 xforge-engine = { path = "crates/xforge-engine" }
+xforge-render = { path = "crates/xforge-render" }
