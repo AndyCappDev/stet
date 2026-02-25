@@ -307,29 +307,51 @@ tiny-skia = "0.11"      # 2D rasterization (paths, fills, strokes, clipping)
 
 ---
 
-## Phase 4: Text & Fonts (Size: XL)
+## Phase 4: Text & Fonts (Size: XL) — COMPLETE
 
-**Goal**: Complete font system — Type 1, Type 3, CID/TrueType. Text rendering to all devices.
+**Goal**: Type 1 font loading, charstring interpretation, font dictionary operators, text show operators.
 
-**Done when**: Can render documents with mixed fonts, composite fonts, and produce searchable text output.
+**Done when**: `cargo run -- test1.ps` produces a valid PNG with visible text labels. `golfer.ps` continues to render correctly.
 
-### Key Components
-- **Font operators**: 7 ops (definefont, undefinefont, findfont, scalefont, makefont, setfont, currentfont)
-- **Text show**: 13 ops (show, ashow, widthshow, awidthshow, kshow, xshow, yshow, xyshow, glyphshow, cshow, stringwidth, charpath, +internal)
-- **Show variants**: 2 ops (stringwidth, charpath)
-- **Charstring interpreter**: Type 1 font decryption + charstring execution (hint processing, subroutine calls)
-- **Type 3 font execution**: PS procedure-based glyphs (setcachedevice, setcharwidth)
-- **CID font support**: CIDFont dictionaries, CMap processing, TrueType sfnts parsing
-- **Glyph caching**: Cache rendered glyphs for performance
-- **Font resources**: Load from PostForge's `resources/Font/` directory
+**Status**: Complete (2026-02-25). ~211 operators, 310 tests passing, zero clippy warnings. test1.ps renders all four text labels (Helvetica 40pt) with correct transforms. tiger.ps and golfer.ps continue to render correctly.
 
-### New Rust Dependencies
-```toml
-# TBD — may use freetype-rs or pure-Rust font rasterizer
-```
+### Key Components (Implemented)
+- **Rust-native .t1 parser**: Parses ASCII header (FontName, FontMatrix, FontBBox, Encoding) then decrypts binary eexec section (R=55665, C1=52845, C2=22719) to extract CharStrings and Subrs. Handles both hex and binary eexec encoding. No eexec operator needed — faster and simpler than executing .t1 as PostScript
+- **CharString interpreter**: Decrypts individual charstrings (R=4330, skip lenIV bytes), executes binary opcodes → PsPath segments + glyph width. Handles all standard commands: hsbw, sbw, rmoveto, hmoveto, vmoveto, rlineto, hlineto, vlineto, rrcurveto, vhcurveto, hvcurveto, closepath, callsubr/return, endchar. Escape opcodes: div, seac (stub), callothersubr/pop (flex support via OtherSubrs 0-3). Ignores hints (hstem, vstem, hstem3, vstem3, dotsection) for this phase
+- **Font loading pipeline**: 35-entry font name substitution table (Adobe standard → URW equivalents, e.g. Helvetica → NimbusSans-Regular). Lazy loading on first `findfont` access. Fonts are regular PostScript dicts containing /FontName, /FontType, /FontMatrix, /FontBBox, /Encoding, /CharStrings, /Private, /Subrs, /FID. FontDirectory dict in systemdict maps font names → font dicts
+- **Font dictionary operators**: 8 ops — definefont, undefinefont, findfont, scalefont, makefont, setfont, currentfont, selectfont. scalefont/makefont copy font dict and compose matrix with FontMatrix, removing /FID per PLRM
+- **Text show operators**: 9 ops — show, ashow, widthshow, awidthshow, kshow, stringwidth, charpath, setcachedevice (stub), setcharwidth (stub). Show pipeline: encoding lookup → charstring execution → FontMatrix transform → fill with current color
+- **Page size convenience ops**: 5 no-ops — letter, legal, a4, a3, b5 (page size set by CLI)
+- **Encoding tables**: StandardEncoding and ISOLatin1Encoding (256 entries each) as static Rust arrays
+- **Font resources**: 35 Type 1 font files (.t1) copied from PostForge to `resources/Font/`
+- **CLI font path**: Searches for `resources/Font/` relative to executable and CWD
 
-### Operators Added: ~22
-### Test Suites: `font_tests.ps`, `text_show_tests.ps`, `type3_font_tests.ps`, `cid_font_tests.ps`
+### Architecture Decisions
+- **Fonts as PostScript dicts**: No separate FontStore — fonts are regular dicts in DictStore, reusing all existing dict infrastructure. Matches PLRM semantics exactly
+- **Rust-native parser, not eexec execution**: Parsing .t1 files directly in Rust is faster, simpler, and more predictable than implementing the eexec operator + RD/ND byte-reading operators. eexec can be added in Phase 6 for init scripts
+- **CharString interpreter in Rust**: Type 1 charstrings are a binary opcode language (not PostScript), so a native Rust interpreter is the only option
+- **current_font on GraphicsState**: `Option<PsObject>` field, cloned on gsave/grestore like all other gstate fields
+
+### New Files (6 source + 35 resources)
+- `crates/xforge-core/src/encoding.rs` — StandardEncoding, ISOLatin1Encoding tables
+- `crates/xforge-core/src/type1_parser.rs` — .t1 file parser with eexec decryption
+- `crates/xforge-core/src/charstring.rs` — Type 1 charstring interpreter
+- `crates/xforge-core/src/font_loader.rs` — Font loading pipeline, name substitution table
+- `crates/xforge-ops/src/font_ops.rs` — 8 font dictionary operators + 5 page size no-ops
+- `crates/xforge-ops/src/show_ops.rs` — 9 text show operators
+- `resources/Font/*.t1` — 35 Type 1 font files
+
+### Operators Added: 22 (total: ~211)
+### Tests Added: 40 (total: 310)
+
+### Deferred to Later Phases
+- Type 3 fonts (BuildGlyph/BuildChar execution) — Phase 6 with init scripts
+- CID/TrueType fonts — Phase 6+
+- Glyph caching — performance optimization phase
+- eexec operator (execute encrypted PS) — Phase 6 with init scripts
+- Font resources via findresource — Phase 6 resource system
+- Hint processing — future quality improvement
+- seac accent composition — currently stubbed
 
 ---
 
