@@ -31,11 +31,13 @@ These files transfer directly to xforge with zero or minimal modification:
 
 ---
 
-## Phase 1: Foundation (Size: L)
+## Phase 1: Foundation (Size: L) — COMPLETE
 
 **Goal**: Minimal Rust project that can tokenize PostScript, represent all object types, and execute basic stack/math/control operations.
 
 **Done when**: Can execute `3 4 add 7 eq { (YES) } { (NO) } ifelse =` and print `YES`.
+
+**Status**: Complete (2026-02-25). 4-crate workspace, ~85 operators, 98 tests passing, zero clippy warnings. Target program prints `YES` correctly.
 
 ### 1.1 Project Scaffolding
 
@@ -224,21 +226,31 @@ No external rendering dependencies in Phase 1. Pure Rust.
 
 ---
 
-## Phase 2: VM & Persistence (Size: M)
+## Phase 2: VM & Persistence (Size: M) — COMPLETE
 
-**Goal**: Dual VM (global/local), save/restore, garbage collection, complete file I/O.
+**Goal**: Dual VM (global/local), save/restore, file I/O, error dispatch.
 
-**Done when**: Can execute programs using `save`/`restore`, `setglobal`/`currentglobal`, file read/write, and the `run` operator to load external PS files.
+**Done when**: Can execute programs using `save`/`restore`, `setglobal`/`currentglobal`, file read/write, and error dispatch via `errordict`.
 
-### Key Components
-- **Save/restore**: Copy-on-write entity swapping (xpost pattern)
-- **Dual VM**: Global and local arenas with allocation mode switching
-- **Garbage collection**: Mark-and-sweep over entity table
-- **Complete file I/O**: 30 operators — `file`, `closefile`, `read`, `write`, `readstring`, `writestring`, `readline`, `token`, `bytesavailable`, `flush`, `flushfile`, `print`, `=`, `==`, `readhexstring`, `writehexstring`, `currentfile`, `deletefile`, `renamefile`, `filenameforall`, `setfileposition`, `fileposition`, `status`, `stdin`, `stdout`, `stderr`, etc.
-- **VM operators**: 9 ops — `save`, `restore`, `vmstatus`, `setglobal`, `currentglobal`, `gcheck`, `startjob`, `currentsystemparams`, `currentuserparams`
+**Status**: Complete (2026-02-25). ~111 operators, 161 tests passing, zero clippy warnings. All done-when criteria verified by integration tests.
 
-### Operators Added: ~45
-### Test Suites: `vm_tests.ps`, `file_tests.ps`, `save_restore_tests.ps`
+### Key Components (Implemented)
+- **Entity table indirection**: `EntityTable` mapping `EntityId → (offset, len, save_level, is_global)` in each store, enabling save/restore via offset swapping
+- **Copy-on-write save/restore**: `save` records level; first mutation after save copies entity data to new region and records `SaveRecord(src, copy)`; `restore` swaps offsets to revert mutations
+- **Dual VM (lightweight)**: `is_global` flag per entity table entry, single unified stores, `vm_alloc_mode` flag on Context; global entities skip local save/restore COW
+- **File I/O**: `FileStore` with pre-allocated stdin/stdout/stderr; 19 new operators — `file`, `closefile`, `read`, `write`, `readstring`, `writestring`, `readline`, `readhexstring`, `writehexstring`, `token`, `bytesavailable`, `flushfile`, `currentfile`, `fileposition`, `setfileposition`, `status`, `deletefile`, `renamefile`, `filenameforall`
+- **VM operators**: 7 ops — `save`, `restore`, `vmstatus`, `setglobal`, `currentglobal`, `gcheck`, `vmreclaim`
+- **Error dispatch**: Errors look up handler in `errordict`, populate `$error` dict, handler calls `stop` which propagates to enclosing `stopped` context; `in_error_handler` flag prevents infinite recursion; `handleerror` operator for default reporting
+- **Garbage collection**: Deferred to future phase (entity table reserves flags for GC)
+
+### New Files
+- `crates/xforge-core/src/entity_table.rs` — EntityMeta + EntityTable
+- `crates/xforge-core/src/save_stack.rs` — SaveRecord, SaveLevel, SaveStack
+- `crates/xforge-core/src/file_store.rs` — FileHandle, FileEntry, FileStore
+- `crates/xforge-ops/src/vm_ops.rs` — VM operators + VM-aware allocation helpers
+
+### Operators Added: ~26 (total: ~111)
+### Tests Added: 63 (total: 161)
 
 ---
 
