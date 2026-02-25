@@ -1,0 +1,15 @@
+[workspace]
+members = ["crates/*"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+authors = ["Scott Bowman <scott@bowmans.org>"]
+
+[workspace.dependencies]
+thiserror = "2"
+xforge-core = { path = "crates/xforge-core" }
+xforge-ops = { path = "crates/xforge-ops" }
+xforge-engine = { path = "crates/xforge-engine" }
