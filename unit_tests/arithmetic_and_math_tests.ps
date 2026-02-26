@@ -1,0 +1,282 @@
+%% Arithmetic and Math tests
+
+userdict /$unittest known not {(unit_tests/unittest.ps) run} if
+
+
+%% add %%
+4 3 /add [7] assert
+9.9 1.1 /add [11.0] assert
+    % add errors
+    /add [/stackunderflow] assert
+    1 /add [1 /stackunderflow] assert
+    1 (a) /add [1 (a) /typecheck] assert
+    (a) 1 /add [(a) 1 /typecheck] assert
+
+
+%% div %%
+3 2 /div [1.5] assert
+4 2 /div [2.0] assert
+    % div errors
+    /div [/stackunderflow] assert
+    3 /div [3 /stackunderflow] assert
+    (3) 1 /div [(3) 1 /typecheck] assert
+    3 /1 /div [3 /1 /typecheck] assert
+
+
+%% idiv %%
+3 2 /idiv [1] assert
+4 2 /idiv [2] assert
+-5 2 /idiv [-2] assert
+    % idiv errors
+    /idiv [/stackunderflow] assert
+    2 /idiv [2 /stackunderflow] assert
+    (1) 2 /idiv [(1) 2 /typecheck]  assert
+    1 (2) /idiv [1 (2) /typecheck] assert
+    1 2.0 /idiv [1 2.0 /typecheck] assert
+    1.0 2 /idiv [1.0 2 /typecheck] assert
+
+
+%% mod %%
+5 3 /mod [2] assert
+5 2 /mod [1] assert
+-5 3 /mod [-2] assert
+    % mod errors
+    /mod [/stackunderflow] assert
+    2 /mod [2 /stackunderflow] assert
+    (1) 2 /mod [(1) 2 /typecheck]  assert
+    1 (2) /mod [1 (2) /typecheck] assert
+    1 2.0 /mod [1 2.0 /typecheck] assert
+    1.0 2 /mod [1.0 2 /typecheck] assert
+
+
+%% mul %%
+2 3 /mul [6] assert
+2.0 3 /mul [6.0] assert
+2 3.0 /mul [6.0] assert
+3.8 9.4 /mul [35.72] assert
+    % mul errors
+    /mul [/stackunderflow] assert
+    2 /mul [2 /stackunderflow] assert
+    (1) 2 /mul [(1) 2 /typecheck]  assert
+    1 (2) /mul [1 (2) /typecheck] assert
+
+
+%% sub %%
+2 3 /sub [-1] assert
+2.0 3 /sub [-1.0] assert
+3.0 2 /sub [1.0] assert
+9.4 3.8 /sub [5.6] assert
+    % sub errors
+    /sub [/stackunderflow] assert
+    1 /sub [1 /stackunderflow] assert
+    1 (a) /sub [1 (a) /typecheck] assert
+    (a) 1 /sub [(a) 1 /typecheck] assert
+
+
+%% abs %%
+4.5 /abs [4.5] assert
+-3 /abs [3] assert
+0 /abs [0] assert
+    % abs errors
+    /abs [/stackunderflow] assert
+    (a) /abs [(a) /typecheck] assert
+    [1] /abs [[1] /typecheck] assert
+    true /abs [true /typecheck] assert
+
+
+%% neg %%
+4.5 /neg [-4.5] assert
+-3 /neg [3] assert
+    % neg errors
+    /neg [/stackunderflow] assert
+    (a) /neg [(a) /typecheck] assert
+    [1] /neg [[1] /typecheck] assert
+    true /neg [true /typecheck] assert
+
+
+3.2 /ceiling [4.0] assert
+-4.8 /ceiling [-4.0] assert
+99 /ceiling [99] assert
+    % ceiling errors
+    /ceiling [/stackunderflow] assert
+    (a) /ceiling [(a) /typecheck] assert
+    [1.5] /ceiling [[1.5] /typecheck] assert
+    true /ceiling [true /typecheck] assert
+
+
+%% floor %%
+3.2 floor /floor [3.0] assert
+-4.8 floor /floor [-5.0] assert
+99 floor /floor [99] assert
+    % floor errors
+    /floor [/stackunderflow] assert
+    (a) /floor [(a) /typecheck] assert
+    [1.5] /floor [[1.5] /typecheck] assert
+    true /floor [true /typecheck] assert
+
+
+%% round %%
+3.2 /round [3.0] assert
+6.5 /round [7.0] assert
+-4.8 /round [-5.0] assert
+-6.5 /round [-6.0] assert
+99 /round [99] assert
+    % round errors
+    /round [/stackunderflow] assert
+    (a) /round [(a) /typecheck] assert
+    [1.5] /round [[1.5] /typecheck] assert
+    true /round [true /typecheck] assert
+
+
+%% truncate %%
+3.2 /truncate [3.0] assert
+-4.8 /truncate [-4.0] assert
+99 /truncate [99] assert
+    % truncate errors
+    /truncate [/stackunderflow] assert
+    (a) /truncate [(a) /typecheck] assert
+    [1.5] /truncate [[1.5] /typecheck] assert
+    true /truncate [true /typecheck] assert
+
+
+%% sqrt %%
+4 /sqrt [2.0] assert
+8 /sqrt [2.8284] assert
+    % sqrt errors
+    /sqrt [/stackunderflow] assert
+    (a) /sqrt [(a) /typecheck] assert
+    [1.5] /sqrt [[1.5] /typecheck] assert
+    true /sqrt [true /typecheck] assert
+
+
+%% atan %%
+0 1.0 /atan [0.0] assert
+1 0 /atan [90.0] assert
+-100.0 0 /atan [270.0] assert
+4 4 /atan [45.0] assert
+    % atan errors
+    /atan [/stackunderflow] assert
+    1 /atan [1 /stackunderflow] assert
+    1 (a) /atan [1 (a) /typecheck] assert
+    (a) 1 /atan [(a) 1 /typecheck] assert
+
+
+%% cos %%
+0 /cos [1.0] assert
+90 /cos [0.0] assert
+    % cos errors
+    /cos [/stackunderflow] assert
+    (a) /cos [(a) /typecheck] assert
+    [1.5] /cos [[1.5] /typecheck] assert
+    true /cos [true /typecheck] assert
+
+
+%% sin %%
+90 /sin [1.0] assert
+0 /sin [0.0] assert
+270 /sin [-1.0] assert
+    % sin errors
+    /sin [/stackunderflow] assert
+    (a) /sin [(a) /typecheck] assert
+    [1.5] /sin [[1.5] /typecheck] assert
+    true /sin [true /typecheck] assert
+
+
+%% exp %%
+9 0.5 /exp [3.0] assert
+-9 -1 /exp [-0.111111] assert
+    % exp errors
+    /exp [/stackunderflow] assert
+    1 /exp [1 /stackunderflow] assert
+    1 (a) /exp [1 (a) /typecheck] assert
+    (a) 1 /exp [(a) 1 /typecheck] assert
+
+
+%% ln %%
+10 /ln [2.30259] assert
+100 /ln [4.60517] assert
+    % ln errors
+    /ln [/stackunderflow] assert
+    (a) /ln [(a) /typecheck] assert
+    [1.5] /ln [[1.5] /typecheck] assert
+    true /ln [true /typecheck] assert
+
+
+%% log %%
+10 /log [1.0] assert
+100 /log [2.0] assert
+    % sin errors
+    /log [/stackunderflow] assert
+    (a) /log [(a) /typecheck] assert
+    [1.5] /log [[1.5] /typecheck] assert
+    true /log [true /typecheck] assert
+
+
+%% srand and rand %%
+28790653 {srand rand rand} [302400654 1182077843] assert
+    % srand tests
+    /srand [/stackunderflow] assert
+    (a) /srand [(a) /typecheck] assert
+    [1.5] /srand [[1.5] /typecheck] assert
+    true /srand [true /typecheck] assert
+
+%% rrand %%
+/rrand [28790653] assert
+
+
+%% Division by zero %%
+3 0 /div [3 0 /undefinedresult] assert
+3.0 0 /div [3.0 0 /undefinedresult] assert
+3 0.0 /div [3 0.0 /undefinedresult] assert
+3 0 /idiv [3 0 /undefinedresult] assert
+-5 0 /idiv [-5 0 /undefinedresult] assert
+3 0 /mod [3 0 /undefinedresult] assert
+-5 0 /mod [-5 0 /undefinedresult] assert
+
+
+%% sqrt of negative %%
+-4 /sqrt [-4 /rangecheck] assert
+-1 /sqrt [-1 /rangecheck] assert
+-0.001 /sqrt [-0.001 /rangecheck] assert
+
+
+%% ln of zero/negative %%
+0 /ln [0 /rangecheck] assert
+-1 /ln [-1 /rangecheck] assert
+-100.5 /ln [-100.5 /rangecheck] assert
+
+
+%% log of zero/negative %%
+0 /log [0 /rangecheck] assert
+-1 /log [-1 /rangecheck] assert
+-5 /log [-5 /rangecheck] assert
+
+
+%% atan 0 0 %%
+0 0 /atan [0 0 /undefinedresult] assert
+
+
+%% max %%
+3 5 /max [5] assert
+5 3 /max [5] assert
+3.0 5 /max [5] assert
+3 5.0 /max [5.0] assert
+-1 -5 /max [-1] assert
+    % max errors
+    /max [/stackunderflow] assert
+    1 /max [1 /stackunderflow] assert
+    1 (a) /max [1 (a) /typecheck] assert
+    (a) 1 /max [(a) 1 /typecheck] assert
+
+
+%% min %%
+3 5 /min [3] assert
+5 3 /min [3] assert
+3.0 5 /min [3.0] assert
+3 5.0 /min [3] assert
+-1 -5 /min [-5] assert
+    % min errors
+    /min [/stackunderflow] assert
+    1 /min [1 /stackunderflow] assert
+    1 (a) /min [1 (a) /typecheck] assert
+    (a) 1 /min [(a) 1 /typecheck] assert

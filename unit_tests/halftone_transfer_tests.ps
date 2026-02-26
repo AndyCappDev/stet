@@ -1,0 +1,165 @@
+%!PS
+% Halftone / Transfer / Black Generation / Undercolor Removal Tests
+% Deeper coverage beyond gstate_tests.ps basics
+
+userdict /$unittest known not {(unit_tests/unittest.ps) run} if
+
+
+%% =============================================================================
+%% settransfer / currenttransfer — deeper coverage
+%% =============================================================================
+
+%% settransfer round-trip: proc is preserved %%
+/test_transfer_proc { 2 mul } def
+{ 2 mul } settransfer
+currenttransfer xcheck [true] assert
+
+%% settransfer: gsave/grestore preservation %%
+{0.5 mul} settransfer
+gsave
+  {0.25 mul} settransfer
+  currenttransfer xcheck [true] assert
+grestore
+currenttransfer xcheck [true] assert
+
+%% settransfer error: stackunderflow %%
+/settransfer [/stackunderflow] assert
+
+%% settransfer error: typecheck with non-proc %%
+123 /settransfer [123 /typecheck] assert
+(string) /settransfer [(string) /typecheck] assert
+[1 2 3] /settransfer [[1 2 3] /typecheck] assert
+
+%% settransfer error: typecheck with literal array (not executable) %%
+[1 2 3] /settransfer [[1 2 3] /typecheck] assert
+
+
+%% =============================================================================
+%% setblackgeneration / currentblackgeneration
+%% =============================================================================
+
+%% setblackgeneration round-trip %%
+{0.5 mul} setblackgeneration
+currentblackgeneration xcheck [true] assert
+
+%% setblackgeneration: proc execution (verify it's a real proc) %%
+{2 mul} setblackgeneration
+currentblackgeneration type /arraytype eq [true] assert
+currentblackgeneration xcheck [true] assert
+
+%% setblackgeneration: gsave/grestore preservation %%
+{0.1 mul} setblackgeneration
+gsave
+  {0.9 mul} setblackgeneration
+  currentblackgeneration xcheck [true] assert
+grestore
+% After grestore, should have the outer proc back
+currentblackgeneration xcheck [true] assert
+
+%% setblackgeneration error: stackunderflow %%
+/setblackgeneration [/stackunderflow] assert
+
+%% setblackgeneration error: typecheck with integer %%
+42 /setblackgeneration [42 /typecheck] assert
+
+%% setblackgeneration error: typecheck with string %%
+(hello) /setblackgeneration [(hello) /typecheck] assert
+
+%% setblackgeneration error: typecheck with literal array %%
+[1 2] /setblackgeneration [[1 2] /typecheck] assert
+
+
+%% =============================================================================
+%% setundercolorremoval / currentundercolorremoval
+%% =============================================================================
+
+%% setundercolorremoval round-trip %%
+{0.3 mul} setundercolorremoval
+currentundercolorremoval xcheck [true] assert
+
+%% setundercolorremoval: proc execution (verify it's a real proc) %%
+{3 mul} setundercolorremoval
+currentundercolorremoval type /arraytype eq [true] assert
+currentundercolorremoval xcheck [true] assert
+
+%% setundercolorremoval: gsave/grestore preservation %%
+{0.2 mul} setundercolorremoval
+gsave
+  {0.8 mul} setundercolorremoval
+  currentundercolorremoval xcheck [true] assert
+grestore
+% After grestore, should have the outer proc back
+currentundercolorremoval xcheck [true] assert
+
+%% setundercolorremoval error: stackunderflow %%
+/setundercolorremoval [/stackunderflow] assert
+
+%% setundercolorremoval error: typecheck with integer %%
+99 /setundercolorremoval [99 /typecheck] assert
+
+%% setundercolorremoval error: typecheck with string %%
+(test) /setundercolorremoval [(test) /typecheck] assert
+
+%% setundercolorremoval error: typecheck with literal array %%
+[5 6] /setundercolorremoval [[5 6] /typecheck] assert
+
+
+%% =============================================================================
+%% Cross-operator gsave/grestore integration
+%% =============================================================================
+
+%% All three operators preserved across gsave/grestore %%
+{0.1 mul} settransfer
+{0.2 mul} setblackgeneration
+{0.3 mul} setundercolorremoval
+
+gsave
+  % Change all three inside gsave
+  {0.9 mul} settransfer
+  {0.8 mul} setblackgeneration
+  {0.7 mul} setundercolorremoval
+
+  % Verify inner values are set
+  currenttransfer xcheck [true] assert
+  currentblackgeneration xcheck [true] assert
+  currentundercolorremoval xcheck [true] assert
+grestore
+
+% After grestore, all three should be restored to outer values
+currenttransfer xcheck [true] assert
+currentblackgeneration xcheck [true] assert
+currentundercolorremoval xcheck [true] assert
+
+%% Nested gsave: all three operators %%
+{0.1 mul} settransfer
+{0.2 mul} setblackgeneration
+{0.3 mul} setundercolorremoval
+gsave
+  {0.4 mul} settransfer
+  {0.5 mul} setblackgeneration
+  {0.6 mul} setundercolorremoval
+  gsave
+    {0.7 mul} settransfer
+    {0.8 mul} setblackgeneration
+    {0.9 mul} setundercolorremoval
+  grestore
+  % Middle level restored
+  currenttransfer xcheck [true] assert
+  currentblackgeneration xcheck [true] assert
+  currentundercolorremoval xcheck [true] assert
+grestore
+% Outer level restored
+currenttransfer xcheck [true] assert
+currentblackgeneration xcheck [true] assert
+currentundercolorremoval xcheck [true] assert
+
+
+%% =============================================================================
+%% currenthalftone tests
+%% =============================================================================
+
+%% currenthalftone returns a dict %%
+{currenthalftone type} [/dicttype] assert
+
+%% currenthalftone result type is dicttype %%
+{currenthalftone type /dicttype eq} [true] assert

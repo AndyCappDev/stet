@@ -1,0 +1,180 @@
+%% Run all PostScript unit test files
+
+(unit_tests/unittest.ps) run
+
+
+% Create/truncate the stats file for accumulating test results.
+% Per-file stats are written to disk before each save/restore reverts the
+% in-memory counters.  Standalone tests (which destroy VM via startjob)
+% write directly to the same file.  Final totals are read back at the end.
+% Format: one line per test file (or standalone test), "errors tests\n"
+(unit_tests/.test_stats.tmp) (w) file closefile
+
+
+% run_testfile expects the name of the test file to run (a PostScript string)
+/run_testfile { %def
+    /unittestsave save def
+    //$unittest begin
+        dup /testfile exch def
+        /errors 0 def
+    end % $unittest
+    dup (Test file: ) print print NL print
+    run
+    //$unittest begin
+        (  Tests: ) print total_tests cvsprint (Errors: ) print errors cvsprint NL print NL print
+        % Write per-file stats to disk before restore reverts the counters
+        (unit_tests/.test_stats.tmp) (a) file
+        dup errors tstring cvs writestring
+        dup ( ) writestring
+        dup total_tests tstring cvs writestring
+        dup (\n) writestring
+        closefile
+    end % unittest
+    unittestsave restore
+} def
+
+% run_standalone_testfile runs a standalone test file that writes its own
+% stats directly to the stats temp file.  Cannot use $unittest counters
+% because startjob/exitserver destroy VM state.
+/run_standalone_testfile { %def
+    (Test file: ) print dup print NL print
+    run
+    NL print
+} def
+
+% make sure we start with an empty operand stack
+clear
+
+
+(\n%%%%% Running PS Unit Tests %%%%%\n\n) print
+
+
+% operator tests
+(unit_tests/operand_stack_tests.ps) run_testfile
+(unit_tests/arithmetic_and_math_tests.ps) run_testfile
+(unit_tests/array_tests.ps) run_testfile
+(unit_tests/packedarray_tests.ps) run_testfile
+(unit_tests/dictionary_tests.ps) run_testfile
+(unit_tests/string_tests.ps) run_testfile
+(unit_tests/rel_bool_bitwise_tests.ps) run_testfile
+(unit_tests/control_tests.ps) run_testfile
+(unit_tests/type_attrib_conv_tests.ps) run_testfile
+(unit_tests/file_tests.ps) run_testfile
+(unit_tests/matrix_tests.ps) run_testfile
+(unit_tests/misc_tests.ps) run_testfile
+(unit_tests/path_tests.ps) run_testfile
+(unit_tests/font_tests.ps) run_testfile
+
+% Color operator tests
+(unit_tests/color_operators_tests.ps) run_testfile
+
+% filter tests
+(unit_tests/flate_filter_tests.ps) run_testfile
+(unit_tests/dct_filter_tests.ps) run_testfile
+
+% % Standard I/O compliance tests
+(unit_tests/stdio_tests.ps) run_testfile
+(unit_tests/print_integration_tests.ps) run_testfile
+
+% additional tests
+(unit_tests/gstate_tests.ps) run_testfile
+(unit_tests/vm_gstate_integration_tests.ps) run_testfile
+(unit_tests/context_param_tests.ps) run_testfile
+(unit_tests/image_tests.ps) run_testfile
+(unit_tests/save_invalidation_tests.ps) run_testfile
+
+% Device operator tests
+(unit_tests/nulldevice_tests.ps) run_testfile
+
+% Job control tests (startjob/exitserver operators) - unittest framework version
+(unit_tests/job_control_tests.ps) run_testfile
+
+% User path operator tests
+(unit_tests/userpath_tests.ps) run_testfile
+
+% Graphics operator tests
+(unit_tests/graphics_state_params_tests.ps) run_testfile
+(unit_tests/painting_tests.ps) run_testfile
+(unit_tests/clipping_tests.ps) run_testfile
+
+% VM/Resource/File tests
+(unit_tests/vm_operators_tests.ps) run_testfile
+(unit_tests/resource_tests.ps) run_testfile
+(unit_tests/file_operators_tests.ps) run_testfile
+
+% Device/Pattern/PS-defined tests
+(unit_tests/device_operator_tests.ps) run_testfile
+(unit_tests/pattern_form_tests.ps) run_testfile
+(unit_tests/defined_ps_operator_tests.ps) run_testfile
+
+% Binary token encoding tests
+(unit_tests/binary_token_tests.ps) run_testfile
+
+% Interpreter parameter tests
+(unit_tests/interpreter_param_tests.ps) run_testfile
+
+% Extended filter tests
+(unit_tests/filter_extended_tests.ps) run_testfile
+
+% Halftone/transfer function tests
+(unit_tests/halftone_transfer_tests.ps) run_testfile
+
+% Filter chain and edge case tests
+(unit_tests/filter_chain_tests.ps) run_testfile
+
+% Arc, flattenpath, and shading tests
+(unit_tests/arc_shading_tests.ps) run_testfile
+
+% Show variant tests (cshow, kshow, glyphshow error conditions)
+(unit_tests/show_variant_tests.ps) run_testfile
+
+% Strokepath tests
+(unit_tests/strokepath_tests.ps) run_testfile
+
+% CFF font tests
+(unit_tests/cff_tests.ps) run_testfile
+
+% Type 1 font tests
+(unit_tests/type1_font_tests.ps) run_testfile
+
+% Standalone job control tests - these destroy VM via startjob/exitserver
+% and cannot use the unittest framework.  They write results directly to
+% the stats file.
+(unit_tests/job_control_tests_standalone.ps) run_standalone_testfile
+
+
+%% ====================================================================
+%% Final totals — read accumulated stats from disk
+%% This code is inline (not in a procedure) because startjob in the
+%% standalone tests may have wiped all userdict definitions.
+%% ====================================================================
+
+/final_errors 0 def
+/final_tests 0 def
+/final_files 0 def
+/ft_str 20 string def
+
+(unit_tests/.test_stats.tmp) (r) file
+{
+    dup token not { exit } if          % errors
+    exch dup token not { exit } if     % tests
+    exch                               % stack: errors tests file
+    3 1 roll                           % stack: file errors tests
+    /final_tests exch final_tests add def
+    /final_errors exch final_errors add def
+    /final_files final_files 1 add def
+} loop
+closefile
+
+(\n============================\n) print
+(Total Test Files: ) print final_files ft_str cvs print (\n) print
+(Total Tests:      ) print final_tests ft_str cvs print (\n) print
+(Total Errors:     ) print final_errors ft_str cvs print (\n) print
+(\n) print
+
+% Clean up the temp file
+(unit_tests/.test_stats.tmp) deletefile
+
+% Exit with non-zero code if any tests failed
+final_errors 0 gt { 1 .quitwithcode } if
+quit

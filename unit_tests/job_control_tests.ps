@@ -1,0 +1,107 @@
+%% PostScript Job Control Operators Test Suite
+%% Tests for startjob and exitserver operators
+%% PLRM Section 3.7.7 "Job Execution Environment"
+
+userdict /$unittest known not {(unit_tests/unittest.ps) run} if
+
+
+%% ========================================
+%% startjob operator tests  
+%% ========================================
+
+%% Test 1: startjob with incorrect password (should fail)
+true 999 /startjob [false] assert
+
+%% Test 2: startjob with wrong operand types - typecheck error
+(string) 0 /startjob [(string) 0 /typecheck] assert
+0 (string) /startjob [0 (string) /typecheck] assert
+true 0.5 /startjob [true 0.5 /typecheck] assert
+false {} /startjob [false {} /typecheck] assert
+/invalidname 0 /startjob [/invalidname 0 /typecheck] assert
+
+%% Test 3: startjob with insufficient operands - stackunderflow error
+/startjob [/stackunderflow] assert
+0 /startjob [0 /stackunderflow] assert
+
+%% Test 4: startjob with wrong string password (should fail with default password)
+true (1) /startjob [false] assert  % String "0" != integer 0
+false (wrong) /startjob [false] assert
+
+%% Test 5: startjob nested save level test
+%% This tests the PLRM condition: "save nesting not deeper than job start"
+/savetest save def                    % Create nested save
+true 0 /startjob [false] assert  % Should fail due to nested save
+savetest restore                  % Clean up
+
+% ========================================
+% exitserver operator tests
+% ========================================
+
+%% Test 6: exitserver with correct password (should work via serverdict)
+%% Note: exitserver should be available in serverdict
+serverdict /exitserver /known [true] assert
+
+%% Test 7: Basic exitserver functionality test
+%% exitserver is equivalent to: true password startjob not {invalidaccess error} if
+%% We test the operator exists and has correct type
+serverdict /exitserver get /type [/operatortype] assert
+
+%% Test 8: exitserver with wrong operand types
+serverdict begin
+    true /exitserver [true /typecheck] assert
+    {} /exitserver [{} /typecheck] assert
+    [1 2 3] /exitserver [[1 2 3] /typecheck] assert
+end
+
+%% Test 9: exitserver with insufficient operands
+serverdict begin
+    /exitserver [/stackunderflow] assert
+end
+
+%% Test 10: exitserver with wrong password - should throw invalidaccess
+serverdict begin
+    999 /exitserver [999 /invalidaccess] assert
+end
+
+%% ========================================
+%% Operator registration verification tests
+%% ========================================
+
+%% Test 12: Verify exitserver is also in serverdict  
+serverdict /exitserver known [true] assert
+
+%% Test 13: Verify proper operator types
+systemdict /startjob get type /operatortype eq [true] assert
+systemdict /exitserver get type /operatortype eq [true] assert
+serverdict /exitserver get type /operatortype eq [true] assert
+
+%% ========================================
+%% Additional edge case tests
+%% ========================================
+
+%% Test 14: Test various password formats - negative integers
+true -1 /startjob [false] assert    % Negative integer password
+true -999 /startjob [false] assert  % Large negative password
+
+%% Test 15: Test with empty string password
+true () /startjob [false] assert       % Empty string
+false () /startjob [false] assert      % Empty string with false flag
+
+%% Test 16: Test deep save nesting (multiple levels)
+/savelevel_1 save def
+/savelevel_2 save def
+/savelevel_3 save def                    % Three nested saves
+true 0 /startjob [false] assert  % Should fail
+savelevel_3 restore
+savelevel_2 restore  
+savelevel_1 restore                  % Clean up
+
+%% Test 17: Test 1 additional layer deep
+/savelevel_1 save def
+true 0 /startjob [false] assert  % Should fail
+savelevel_1 restore                  % Clean up
+
+%% Test 18: Test startjob boundary conditions
+%% Test with maximum/minimum integer values (implementation dependent)
+true 2147483647 /startjob [false] assert   % Max 32-bit int (likely wrong password)
+true -2147483648 /startjob [false] assert  % Min 32-bit int (likely wrong password)

@@ -1,0 +1,236 @@
+%!PS-Adobe-3.0
+%%Title: CFF / Type 2 Font Tests
+%%EndComments
+
+% Load test framework if not already loaded
+userdict /$unittest known not {(unit_tests/unittest.ps) run} if
+
+% ============================================================
+% Load CFF font via FontSet resource file
+% ============================================================
+
+% Load the CFF FontSet file (must not error)
+(resources/FontSet/NimbusRoman-Regular-CFF.ps) run
+end  % Pop FontSetInit ProcSet from d_stack (FontSet file does begin but binary data prevents end)
+
+% Test that the font has FontType 2
+/NimbusRoman-Regular findfont /FontType get
+[2] assert
+
+% Test that FontMatrix exists and has 6 elements
+/NimbusRoman-Regular findfont /FontMatrix get length
+[6] assert
+
+% Test that CharStrings dictionary exists
+/NimbusRoman-Regular findfont /CharStrings known
+[true] assert
+
+% Test that Private dictionary exists
+/NimbusRoman-Regular findfont /Private known
+[true] assert
+
+% Test that the font has an Encoding array
+/NimbusRoman-Regular findfont /Encoding get length
+[256] assert
+
+% Test that CharStrings has .notdef
+/NimbusRoman-Regular findfont /CharStrings get /.notdef known
+[true] assert
+
+% Test that CharStrings has common glyphs
+/NimbusRoman-Regular findfont /CharStrings get /A known
+[true] assert
+
+/NimbusRoman-Regular findfont /CharStrings get /space known
+[true] assert
+
+% CharStrings has many glyphs (NimbusRoman is a full font)
+/NimbusRoman-Regular findfont /CharStrings get length 50 gt
+[true] assert
+
+% Additional common glyphs exist
+/NimbusRoman-Regular findfont /CharStrings get /B known
+[true] assert
+
+/NimbusRoman-Regular findfont /CharStrings get /period known
+[true] assert
+
+% Font dictionary has FID of type fontID (inserted by definefont per PLRM)
+/NimbusRoman-Regular findfont /FID known
+[true] assert
+
+/NimbusRoman-Regular findfont /FID {get type} [/fonttype] assert
+
+% Private dict contains CFF-specific keys (defaultWidthX or nominalWidthX or Subrs)
+/NimbusRoman-Regular findfont /Private get
+dup /defaultWidthX known
+exch dup /nominalWidthX known
+exch /Subrs known
+or or
+[true] assert
+
+% ============================================================
+% scalefont / makefont
+% ============================================================
+
+% Test scalefont works with CFF font
+/NimbusRoman-Regular findfont 12 scalefont
+/FontType get
+[2] assert
+
+% Test makefont works with CFF font
+/NimbusRoman-Regular findfont [0.012 0 0 0.012 0 0] makefont
+/FontType get
+[2] assert
+
+% ============================================================
+% stringwidth
+% ============================================================
+
+% Set up font for width testing
+/NimbusRoman-Regular findfont 12 scalefont setfont
+
+% Test stringwidth returns non-zero width for 'A'
+(A) stringwidth pop 0 gt
+[true] assert
+
+% Space should have non-zero width
+( ) stringwidth pop 0 gt
+[true] assert
+
+% Multiple characters should have larger width than single
+(Hello) stringwidth pop
+(H) stringwidth pop
+gt
+[true] assert
+
+% 'M' should be wider than 'i' (proportional font)
+(M) stringwidth pop
+(i) stringwidth pop
+gt
+[true] assert
+
+% Space should be narrower than 'M'
+( ) stringwidth pop
+(M) stringwidth pop
+lt
+[true] assert
+
+% Y-component of stringwidth should be 0 for horizontal font
+(Hello) stringwidth exch pop 0 eq
+[true] assert
+
+% Empty string has zero width
+() stringwidth pop 0 eq
+[true] assert
+
+% Proportional scaling: 24pt width should be 2x 12pt width
+/NimbusRoman-Regular findfont 12 scalefont setfont
+(Test) stringwidth pop
+/NimbusRoman-Regular findfont 24 scalefont setfont
+(Test) stringwidth pop
+exch 2 mul sub abs 0.01 lt
+[true] assert
+
+% ============================================================
+% show (rendering)
+% ============================================================
+
+% Set up for rendering
+/NimbusRoman-Regular findfont 24 scalefont setfont
+
+% Test show doesn't crash
+100 700 moveto
+(Hello, CFF World!) show
+
+% Test currentpoint advances after show
+100 650 moveto
+(Test) show
+currentpoint pop
+% x should have advanced past 100
+100 gt
+[true] assert
+
+% currentfont returns CFF font after setfont
+/NimbusRoman-Regular findfont 12 scalefont setfont
+currentfont /FontType get
+[2] assert
+
+% show with empty string doesn't advance currentpoint
+gsave
+100 400 moveto
+() show
+currentpoint pop 100 sub abs 0.01 lt
+[true] assert
+grestore
+
+% ============================================================
+% ashow / widthshow / awidthshow
+% ============================================================
+
+/NimbusRoman-Regular findfont 12 scalefont setfont
+
+% ashow test
+100 600 moveto
+1 0 (Test) ashow
+
+% widthshow test
+100 550 moveto
+1 0 32 (Hello World) widthshow
+
+% awidthshow test
+100 500 moveto
+1 0 32 0.5 0 (Hello World) awidthshow
+
+% ashow should advance further than plain show for same string
+gsave
+100 700 moveto
+(Test) show
+currentpoint pop
+grestore
+gsave
+100 700 moveto
+1 0 (Test) ashow
+currentpoint pop
+grestore
+lt   % show_x < ashow_x
+[true] assert
+
+% widthshow with space adjustment advances further than show
+gsave
+100 600 moveto
+(Hello World) show
+currentpoint pop
+grestore
+gsave
+100 600 moveto
+2 0 32 (Hello World) widthshow
+currentpoint pop
+grestore
+lt   % show_x < widthshow_x
+[true] assert
+
+% ============================================================
+% charpath
+% ============================================================
+
+newpath
+100 450 moveto
+(ABC) false charpath
+
+% Path should exist (pathbbox should succeed)
+% pathbbox returns: llx lly urx ury — verify urx > llx (non-empty path)
+pathbbox  % llx lly urx ury
+pop exch pop  % llx urx
+lt  % llx < urx (i.e. path has width)
+[true] assert
+
+% Clean up
+newpath
+
+% ============================================================
+% findfont fallback
+% ============================================================
+
+% findfont for non-existent font should fall back (not crash)
+{ /NonExistentFont12345 findfont pop } stopped [false] assert

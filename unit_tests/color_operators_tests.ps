@@ -1,0 +1,750 @@
+%!PS-Adobe-3.0
+% PostForge Color Operators Unit Tests
+% Tests for color operators:
+% - setgray (single component, DeviceGray color space)
+% - setrgbcolor (DeviceRGB color space, value clamping)
+% - sethsbcolor (HSB→RGB conversion, hexcone model)
+% - setcolor (context-aware, supports DeviceGray/DeviceRGB/DeviceCMYK)
+% - Graphics state consistency (color space and components)
+
+%% Include testing framework (guard: skip if already loaded by ps_tests.ps)
+userdict /$unittest known not {(unit_tests/unittest.ps) run} if
+
+%% =============================================================================
+%% setgray operator tests
+%% =============================================================================
+
+%% Basic setgray functionality
+0.5 /setgray [] assert                    % Basic gray setting
+0.0 /setgray [] assert                    % Black
+1.0 /setgray [] assert                    % White
+
+%% Value clamping (PLRM requirement)
+-0.5 /setgray [] assert                   % Clamp negative to 0.0
+1.5 /setgray [] assert                    % Clamp > 1.0 to 1.0
+
+%% Error conditions
+/setgray [/stackunderflow] assert         % No operands
+(string) /setgray [(string) /typecheck] assert  % Wrong type
+
+%% Graphics state verification (this is critical - setgray must set color space)
+0.5 setgray
+/currentcolorspace [[/DeviceGray]] assert    % Color space should be [/DeviceGray] array
+/currentcolor [0.5] assert                   % Color should be [0.5] for DeviceGray
+
+%% =============================================================================
+%% setrgbcolor operator tests  
+%% =============================================================================
+
+%% Basic setrgbcolor functionality
+1.0 0.0 0.0 /setrgbcolor [] assert        % Pure red
+0.0 1.0 0.0 /setrgbcolor [] assert        % Pure green
+0.0 0.0 1.0 /setrgbcolor [] assert        % Pure blue
+0.5 0.5 0.5 /setrgbcolor [] assert        % Gray via RGB
+
+%% Value clamping (PLRM requirement)
+-0.1 1.1 0.5 /setrgbcolor [] assert       % Clamp out-of-range values
+1.5 -0.2 2.0 /setrgbcolor [] assert       % Multiple out-of-range values
+
+%% Error conditions  
+0.5 0.5 /setrgbcolor [0.5 0.5 /stackunderflow] assert  % Insufficient operands
+1.0 0.0 (string) /setrgbcolor [1.0 0.0 (string) /typecheck] assert  % Wrong type
+
+%% Graphics state verification
+0.2 0.7 0.4 setrgbcolor
+/currentcolorspace [[/DeviceRGB]] assert    % Color space should be [/DeviceRGB] array
+/currentcolor [0.2 0.7 0.4] assert         % Color should be [0.2 0.7 0.4] for DeviceRGB
+
+%% =============================================================================
+%% sethsbcolor operator tests (HSB→RGB conversion)
+%% =============================================================================
+
+%% Basic sethsbcolor functionality - test key hexcone sectors
+0.0 1.0 1.0 /sethsbcolor [] assert        % Pure red (hue=0, sector 0)
+0.167 1.0 1.0 /sethsbcolor [] assert      % Pure green (hue=1/6≈0.167, sector 1) 
+0.333 1.0 1.0 /sethsbcolor [] assert      % Pure blue (hue=1/3≈0.333, sector 2)
+
+%% Achromatic colors (saturation = 0)
+0.5 0.0 0.8 /sethsbcolor [] assert        % Gray (s=0, should ignore hue)
+0.0 0.0 1.0 /sethsbcolor [] assert        % White (s=0, b=1)
+0.0 0.0 0.0 /sethsbcolor [] assert        % Black (b=0)
+
+%% Value clamping
+-0.1 1.1 0.5 /sethsbcolor [] assert       % Clamp HSB values
+1.5 -0.2 2.0 /sethsbcolor [] assert       % Multiple out-of-range HSB values
+
+%% Error conditions
+0.5 0.5 /sethsbcolor [0.5 0.5 /stackunderflow] assert  % Insufficient operands
+1.0 0.0 (string) /sethsbcolor [1.0 0.0 (string) /typecheck] assert  % Wrong type
+
+%% Graphics state verification (sethsbcolor converts to RGB, sets DeviceRGB space)
+0.0 1.0 1.0 sethsbcolor  % Pure red via HSB
+/currentcolorspace [[/DeviceRGB]] assert    % Should set DeviceRGB color space
+currentcolor [1.0 0.0 0.0] assert         % Should be RGB red [1,0,0]
+
+% =============================================================================  
+% setcolor operator tests (context-aware)
+% =============================================================================
+% setcolorspace and currentcolorspace operator tests
+% =============================================================================
+
+%% Basic setcolorspace functionality - name form
+/DeviceGray /setcolorspace [] assert
+/currentcolorspace [[/DeviceGray]] assert
+
+/DeviceRGB /setcolorspace [] assert
+/currentcolorspace [[/DeviceRGB]] assert
+
+/DeviceCMYK /setcolorspace [] assert
+/currentcolorspace [[/DeviceCMYK]] assert
+
+%% Basic setcolorspace functionality - array form  
+[/DeviceGray] /setcolorspace [] assert
+/currentcolorspace [[/DeviceGray]] assert
+
+[/DeviceRGB] /setcolorspace [] assert
+/currentcolorspace [[/DeviceRGB]] assert
+
+[/DeviceCMYK] /setcolorspace [] assert
+/currentcolorspace [[/DeviceCMYK]] assert
+
+%% Error conditions for setcolorspace
+/setcolorspace [/stackunderflow] assert        % No operands
+(string) /setcolorspace [(string) /typecheck] assert  % Wrong type
+/InvalidSpace /setcolorspace [/InvalidSpace /undefined] assert  % Invalid color space name
+[] /setcolorspace [[] /rangecheck] assert      % Empty array
+
+%% Error conditions for currentcolorspace  
+% currentcolorspace can only fail with stackoverflow - can't easily test without filling stack
+
+%% Test that setcolorspace sets initial color values per PLRM
+/DeviceGray setcolorspace
+currentcolor [0.0] assert                     % DeviceGray: initial color should be [0.0] (black)
+
+/DeviceRGB setcolorspace  
+currentcolor [0.0 0.0 0.0] assert             % DeviceRGB: initial color should be [0.0 0.0 0.0] (black)
+
+/DeviceCMYK setcolorspace
+currentcolor [0.0 0.0 0.0 1.0] assert         % DeviceCMYK: initial color should be [0.0 0.0 0.0 1.0] (black)
+
+%% =============================================================================
+%% setcolor operator tests (context-aware)
+%% =============================================================================
+
+%% DeviceGray context (1 component required)
+0.0 setgray  % Set DeviceGray color space
+0.8 /setcolor [] assert                   % Single gray component should work
+
+%% DeviceGray setcolor takes 1 component and succeeds (leaves extra operands on stack)
+0.0 setgray  % DeviceGray context  
+0.5 0.3 /setcolor [0.5] assert                   % Takes 0.3, leaves 0.5 on stack
+
+%% DeviceRGB context (3 components required)  
+1.0 0.0 0.0 setrgbcolor  % Set DeviceRGB color space
+0.2 0.7 0.4 /setcolor [] assert           % Three RGB components should work
+
+%% Error: insufficient components for DeviceRGB
+1.0 0.0 0.0 setrgbcolor  % DeviceRGB context  
+0.5 /setcolor [0.5 /stackunderflow] assert  % Only 1 component, needs 3
+
+%% Value clamping in setcolor
+1.0 0.0 0.0 setrgbcolor  % DeviceRGB context
+-0.1 1.1 0.5 /setcolor [] assert          % Should clamp values to [0,1]
+
+%% Error conditions
+/setcolor [/stackunderflow] assert        % No operands (in any context)
+0.0 setgray  % DeviceGray context
+(string) /setcolor [(string) /typecheck] assert  % Wrong type
+
+%% =============================================================================
+%% Graphics state consistency tests
+%% =============================================================================
+
+%% Test that color space and color components are always consistent
+%% This was the major bug - DeviceGray space with RGB [0,0,0] color
+
+%% After setgray, color space should be DeviceGray with single component
+0.3 setgray
+/currentcolorspace [[/DeviceGray]] assert     % Color space should be DeviceGray array
+currentcolor [0.3] assert                     % Should be [0.3], NOT [0.3, 0.3, 0.3]
+
+%% After setrgbcolor, color space should be DeviceRGB with three components  
+0.1 0.6 0.9 setrgbcolor
+/currentcolorspace [[/DeviceRGB]] assert      % Color space should be DeviceRGB array
+currentcolor [0.1 0.6 0.9] assert            % Should be [0.1, 0.6, 0.9]
+
+%% After sethsbcolor, should convert to RGB and set DeviceRGB
+0.333 0.8 0.7 sethsbcolor  % Blue-ish color (HSB: hue=120°, sat=80%, bright=70%)
+/currentcolorspace [[/DeviceRGB]] assert      % Should be DeviceRGB (not HSB!)
+% HSB(0.333, 0.8, 0.7) should convert to RGB - test that currentcolor returns RGB values
+currentcolor 3 array astore /length [3] assert % Should return exactly 3 RGB components
+
+%% =============================================================================
+%% Hexcone model validation tests for sethsbcolor
+%% =============================================================================
+
+%% Test specific hexcone sectors for correctness
+%% These test the _hsb_to_rgb() conversion algorithm
+
+%% Sector 0: Red to Yellow (hue 0.0 to 0.167)  
+0.0 1.0 1.0 sethsbcolor    % Should produce RGB [1.0, 0.0, 0.0] (pure red)
+0.083 1.0 1.0 sethsbcolor  % Should produce RGB [1.0, 0.5, 0.0] (red-yellow mix)
+
+%% Sector 1: Yellow to Green (hue 0.167 to 0.333)
+0.167 1.0 1.0 sethsbcolor  % Should produce RGB [1.0, 1.0, 0.0] (pure yellow)  
+0.25 1.0 1.0 sethsbcolor   % Should produce RGB [0.5, 1.0, 0.0] (yellow-green mix)
+
+%% Sector 2: Green to Cyan (hue 0.333 to 0.5)
+0.333 1.0 1.0 sethsbcolor  % Should produce RGB [0.0, 1.0, 0.0] (pure green)
+0.417 1.0 1.0 sethsbcolor  % Should produce RGB [0.0, 1.0, 0.5] (green-cyan mix)
+
+%% Test saturation effects
+0.0 0.5 1.0 sethsbcolor    % Red with 50% saturation (should be [1.0, 0.5, 0.5])
+0.0 0.0 1.0 sethsbcolor    % Red with 0% saturation (should be [1.0, 1.0, 1.0] white)
+
+%% Test brightness effects  
+0.0 1.0 0.5 sethsbcolor    % Red with 50% brightness (should be [0.5, 0.0, 0.0])
+0.0 1.0 0.0 sethsbcolor    % Red with 0% brightness (should be [0.0, 0.0, 0.0] black)
+
+%% =============================================================================
+%% Integration tests - mixed operator usage
+%% =============================================================================
+
+%% Test switching between different color spaces
+0.5 setgray                % DeviceGray
+1.0 0.0 0.0 setrgbcolor    % Switch to DeviceRGB  
+0.0 1.0 1.0 sethsbcolor    % Stay in DeviceRGB (via HSB conversion)
+0.8 setgray                % Switch back to DeviceGray
+
+%% Test setcolor in different contexts
+0.2 setgray                % DeviceGray context
+0.9 setcolor               % Should work with 1 component
+0.1 0.5 0.9 setrgbcolor    % DeviceRGB context  
+0.3 0.7 0.1 setcolor       % Should work with 3 components
+
+%% Test error handling consistency across operators
+%% All operators should leave operands on stack when validation fails
+0.5 (string) /setgray [0.5 (string) /typecheck] assert
+0.1 0.2 (string) /setrgbcolor [0.1 0.2 (string) /typecheck] assert  
+0.1 0.2 (string) /sethsbcolor [0.1 0.2 (string) /typecheck] assert
+
+0.0 setgray  % DeviceGray context
+0.1 0.2 /setcolor [0.1] assert  % Takes 0.2, leaves 0.1 on stack
+
+%% =============================================================================
+%% current*color operator tests (Level 2 device color conversion)
+%% =============================================================================
+
+%% currentcolor tests - returns components in current color space
+0.3 setgray
+/currentcolor [0.3] assert               % DeviceGray: should return single component
+
+0.1 0.5 0.9 setrgbcolor
+/currentcolor [0.1 0.5 0.9] assert       % DeviceRGB: should return three components
+
+%% currentgray tests - converts any color space to DeviceGray
+0.7 setgray
+/currentgray [0.7] assert                % DeviceGray: should return same value
+
+0.3 0.6 0.1 setrgbcolor  
+/currentgray [0.4549999] assert              % DeviceRGB: should use NTSC formula (0.3*0.3 + 0.59*0.6 + 0.11*0.1)
+
+%% currentrgbcolor tests - converts any color space to DeviceRGB  
+0.5 setgray
+/currentrgbcolor [0.5 0.5 0.5] assert   % DeviceGray: should replicate gray to R,G,B
+
+0.2 0.8 0.4 setrgbcolor
+/currentrgbcolor [0.2 0.8 0.4] assert   % DeviceRGB: should return same values
+
+%% currenthsbcolor tests - converts any color space to HSB
+0.0 setgray  
+/currenthsbcolor [0.0 0.0 0.0] assert   % Black: H=0, S=0, B=0
+
+1.0 setgray
+/currenthsbcolor [0.0 0.0 1.0] assert   % White: H=0, S=0, B=1
+
+1.0 0.0 0.0 setrgbcolor  % Pure red
+% currenthsbcolor should return [0.0 1.0 1.0] for pure red (H=0, S=1, B=1)
+
+%% currentcmykcolor tests - converts any color space to DeviceCMYK
+0.0 setgray  % Black
+/currentcmykcolor [0.0 0.0 0.0 1.0] assert  % Black: C=0, M=0, Y=0, K=1
+
+1.0 setgray  % White  
+/currentcmykcolor [0.0 0.0 0.0 0.0] assert  % White: C=0, M=0, Y=0, K=0
+
+1.0 0.0 0.0 setrgbcolor  % Pure red
+% currentcmykcolor should convert red RGB to CMYK
+
+%% Error conditions for current*color operators
+% All current*color operators can only fail with stackoverflow
+% Can't easily test stackoverflow without filling entire stack
+
+%% =============================================================================  
+%% Cross-conversion verification tests
+%% =============================================================================
+
+%% Test that conversion chains are consistent (Gray -> RGB -> Gray)
+0.6 setgray
+currentrgbcolor setrgbcolor     % Convert gray to RGB and back to RGB space
+currentgray                     % Convert back to gray
+0.6 sub abs 0.001 lt            % Should be very close to original 0.6
+not { (Gray->RGB->Gray conversion inconsistent) print } if
+% pop  % Remove test result
+
+%% Test RGB -> HSB -> RGB consistency
+0.3 0.7 0.2 setrgbcolor         % Set specific RGB color
+currenthsbcolor                 % Get as HSB: B S H (on stack)
+% Test that all HSB components are in valid [0,1] range
+% Check H: 0 <= H <= 1
+dup 0.0 ge exch 1.0 le and      % Stack: B S valid_h
+% Check S: 0 <= S <= 1  
+exch dup 0.0 ge exch 1.0 le and % Stack: B valid_h valid_s
+and                             % Stack: B valid_h_s
+% Check B: 0 <= B <= 1
+exch dup 0.0 ge exch 1.0 le and % Stack: valid_h_s valid_b
+and                             % Stack: all_valid
+not { (HSB values out of range) print } if
+
+%% =============================================================================
+%% Indexed color space tests
+%% =============================================================================
+
+%% Basic setcolorspace with Indexed string lookup (DeviceRGB base)
+[/Indexed /DeviceRGB 2 <FF0000 00FF00 0000FF>] /setcolorspace [] assert
+
+%% currentcolorspace returns correct array structure
+currentcolorspace length 4 eq
+not { (Indexed currentcolorspace length != 4) print } if
+
+%% After setcolorspace, initial color should be index 0 resolved via palette
+%% Index 0 = <FF0000> = RGB(1.0, 0.0, 0.0) (red)
+[/Indexed /DeviceRGB 2 <FF0000 00FF00 0000FF>] setcolorspace
+currentcolor 3 array astore /length [3] assert  % Should have 3 components (resolved RGB)
+
+%% setcolor with Indexed - set specific indices
+[/Indexed /DeviceRGB 2 <FF0000 00FF00 0000FF>] setcolorspace
+1 /setcolor [] assert                    % Index 1 = green, should succeed
+
+%% setcolor with index 0
+[/Indexed /DeviceRGB 2 <FF0000 00FF00 0000FF>] setcolorspace
+0 /setcolor [] assert                    % Index 0 = red
+
+%% setcolor with index 2
+[/Indexed /DeviceRGB 2 <FF0000 00FF00 0000FF>] setcolorspace
+2 /setcolor [] assert                    % Index 2 = blue
+
+%% Float index rounding per PLRM (round to nearest int)
+[/Indexed /DeviceRGB 2 <FF0000 00FF00 0000FF>] setcolorspace
+1.4 /setcolor [] assert                  % Rounds to 1
+1.6 /setcolor [] assert                  % Rounds to 2
+
+%% Out-of-range clamping (negative → 0, > hival → hival)
+[/Indexed /DeviceRGB 2 <FF0000 00FF00 0000FF>] setcolorspace
+-1 /setcolor [] assert                   % Clamps to 0
+5 /setcolor [] assert                    % Clamps to 2 (hival)
+
+%% Indexed with DeviceGray base
+[/Indexed /DeviceGray 3 <00 55 AA FF>] /setcolorspace [] assert
+
+%% Indexed with DeviceCMYK base
+[/Indexed /DeviceCMYK 1 <FF000000 00FF0000>] /setcolorspace [] assert
+
+%% Error conditions for Indexed setcolorspace
+%% Invalid base space (Pattern not allowed)
+[/Indexed /Pattern 2 <000000>] /setcolorspace [[/Indexed /Pattern 2 <000000>] /rangecheck] assert
+
+%% hival out of range (negative)
+[/Indexed /DeviceRGB -1 <>] /setcolorspace [[/Indexed /DeviceRGB -1 <>] /rangecheck] assert
+
+%% Wrong lookup string length (too short)
+[/Indexed /DeviceRGB 2 <FF00>] /setcolorspace [[/Indexed /DeviceRGB 2 <FF00>] /rangecheck] assert
+
+%% Non-numeric setcolor operand in Indexed space
+[/Indexed /DeviceRGB 2 <FF0000 00FF00 0000FF>] setcolorspace
+(string) /setcolor [(string) /typecheck] assert
+
+%% setcolor stackunderflow in Indexed space
+[/Indexed /DeviceRGB 2 <FF0000 00FF00 0000FF>] setcolorspace
+/setcolor [/stackunderflow] assert
+
+%% =============================================================================
+%% CIEBasedABC color space tests
+%% =============================================================================
+
+%% Basic CIEBasedABC setcolorspace (sRGB-wrapped CIE)
+[/CIEBasedABC << /WhitePoint [0.9505 1 1.089] /RangeABC [0 1 0 1 0 1] >>] /setcolorspace [] assert
+
+%% currentcolorspace returns 2-element array with /CIEBasedABC first
+[/CIEBasedABC << /WhitePoint [0.9505 1 1.089] >>] setcolorspace
+currentcolorspace length 2 eq
+not { (CIEBasedABC currentcolorspace length != 2) print } if
+
+%% After setcolorspace, initial color should be resolved RGB (3 components)
+[/CIEBasedABC << /WhitePoint [0.9505 1 1.089] >>] setcolorspace
+currentcolor 3 array astore /length [3] assert
+
+%% CIEBasedABC setcolor - set white-ish
+[/CIEBasedABC << /WhitePoint [0.9505 1 1.089] /RangeABC [0 1 0 1 0 1] >>] setcolorspace
+1 1 1 /setcolor [] assert
+
+%% CIEBasedABC setcolor - set black
+[/CIEBasedABC << /WhitePoint [0.9505 1 1.089] /RangeABC [0 1 0 1 0 1] >>] setcolorspace
+0 0 0 /setcolor [] assert
+
+%% CIEBasedABC setcolor - verify 3 components returned
+[/CIEBasedABC << /WhitePoint [0.9505 1 1.089] /RangeABC [0 1 0 1 0 1] >>] setcolorspace
+0.5 0.3 0.7 setcolor
+currentcolor 3 array astore /length [3] assert
+
+%% =============================================================================
+%% CIEBasedA color space tests
+%% =============================================================================
+
+%% Basic CIEBasedA setcolorspace
+[/CIEBasedA << /WhitePoint [0.9505 1 1.089] >>] /setcolorspace [] assert
+
+%% currentcolorspace returns 2-element array with /CIEBasedA first
+[/CIEBasedA << /WhitePoint [0.9505 1 1.089] >>] setcolorspace
+currentcolorspace length 2 eq
+not { (CIEBasedA currentcolorspace length != 2) print } if
+
+%% CIEBasedA setcolor - single component
+[/CIEBasedA << /WhitePoint [0.9505 1 1.089] >>] setcolorspace
+0.5 /setcolor [] assert
+
+%% CIEBasedA setcolor - set 0 (dark)
+[/CIEBasedA << /WhitePoint [0.9505 1 1.089] >>] setcolorspace
+0 /setcolor [] assert
+
+%% CIEBasedA setcolor - set 1 (light)
+[/CIEBasedA << /WhitePoint [0.9505 1 1.089] >>] setcolorspace
+1 /setcolor [] assert
+
+%% CIEBasedA setcolor - verify 3 components returned (resolved to RGB)
+[/CIEBasedA << /WhitePoint [0.9505 1 1.089] >>] setcolorspace
+0.5 setcolor
+currentcolor 3 array astore /length [3] assert
+
+%% =============================================================================
+%% CIE color space error conditions
+%% =============================================================================
+
+%% Missing WhitePoint → rangecheck (use variable to get same dict object in expected)
+/cie_abc_noWP [/CIEBasedABC << /RangeABC [0 1 0 1 0 1] >>] def
+cie_abc_noWP /setcolorspace [cie_abc_noWP /rangecheck] assert
+
+%% Missing WhitePoint for CIEBasedA → rangecheck
+/cie_a_noWP [/CIEBasedA << /RangeA [0 1] >>] def
+cie_a_noWP /setcolorspace [cie_a_noWP /rangecheck] assert
+
+%% Non-dict second element → typecheck
+[/CIEBasedABC 42] /setcolorspace [[/CIEBasedABC 42] /typecheck] assert
+[/CIEBasedA (string)] /setcolorspace [[/CIEBasedA (string)] /typecheck] assert
+
+%% Wrong number of setcolor operands for CIEBasedABC → stackunderflow
+[/CIEBasedABC << /WhitePoint [0.9505 1 1.089] >>] setcolorspace
+0.5 /setcolor [0.5 /stackunderflow] assert
+
+%% Type error for CIEBasedABC setcolor
+[/CIEBasedABC << /WhitePoint [0.9505 1 1.089] >>] setcolorspace
+0.5 0.5 (string) /setcolor [0.5 0.5 (string) /typecheck] assert
+
+%% Type error for CIEBasedA setcolor
+[/CIEBasedA << /WhitePoint [0.9505 1 1.089] >>] setcolorspace
+(string) /setcolor [(string) /typecheck] assert
+
+%% Stackunderflow for CIEBasedA setcolor
+[/CIEBasedA << /WhitePoint [0.9505 1 1.089] >>] setcolorspace
+/setcolor [/stackunderflow] assert
+
+%% =============================================================================
+%% ICCBased color space tests (Tier 1 — Alternate/Fallback)
+%% =============================================================================
+
+%% ICCBased N=3 (RGB) setcolorspace
+[/ICCBased << /N 3 >>] /setcolorspace [] assert
+
+%% ICCBased N=1 (Gray) setcolorspace
+[/ICCBased << /N 1 >>] /setcolorspace [] assert
+
+%% ICCBased N=4 (CMYK) setcolorspace
+[/ICCBased << /N 4 >>] /setcolorspace [] assert
+
+%% ICCBased with /Alternate key
+[/ICCBased << /N 3 /Alternate /DeviceRGB >>] /setcolorspace [] assert
+
+%% currentcolorspace returns 2-element array with /ICCBased first
+[/ICCBased << /N 3 >>] setcolorspace
+currentcolorspace length 2 eq
+not { (ICCBased currentcolorspace length != 2) print } if
+
+%% Initial color for N=3 should be [0 0 0] (black)
+[/ICCBased << /N 3 >>] setcolorspace
+currentcolor 3 array astore /length [3] assert
+
+%% Initial color for N=4 should be [0 0 0 1] (CMYK black)
+[/ICCBased << /N 4 >>] setcolorspace
+/currentcolor [0.0 0.0 0.0 1.0] assert
+
+%% Initial color for N=1 should be [0] (gray black)
+[/ICCBased << /N 1 >>] setcolorspace
+/currentcolor [0.0] assert
+
+%% ICCBased N=3 setcolor
+[/ICCBased << /N 3 >>] setcolorspace
+0.5 0.6 0.7 /setcolor [] assert
+
+%% ICCBased N=3 currentrgbcolor returns stored values
+[/ICCBased << /N 3 >>] setcolorspace
+0.5 0.6 0.7 setcolor
+/currentrgbcolor [0.5 0.6 0.7] assert
+
+%% ICCBased N=1 setcolor
+[/ICCBased << /N 1 >>] setcolorspace
+0.5 /setcolor [] assert
+
+%% ICCBased N=1 currentgray returns stored value
+[/ICCBased << /N 1 >>] setcolorspace
+0.5 setcolor
+/currentgray [0.5] assert
+
+%% ICCBased N=4 setcolor
+[/ICCBased << /N 4 >>] setcolorspace
+0.1 0.2 0.3 0.4 /setcolor [] assert
+
+%% ICCBased N=4 currentcmykcolor returns stored values
+[/ICCBased << /N 4 >>] setcolorspace
+0.1 0.2 0.3 0.4 setcolor
+/currentcmykcolor [0.1 0.2 0.3 0.4] assert
+
+%% ICCBased N=3 currentgray uses RGB-to-gray conversion
+[/ICCBased << /N 3 >>] setcolorspace
+0.3 0.6 0.1 setcolor
+% NTSC formula: 0.3*0.3 + 0.59*0.6 + 0.11*0.1 = 0.455
+/currentgray [0.455] assert
+
+%% ICCBased N=1 currentrgbcolor expands gray to RGB
+[/ICCBased << /N 1 >>] setcolorspace
+0.5 setcolor
+/currentrgbcolor [0.5 0.5 0.5] assert
+
+%% ICCBased setcolor value clamping
+[/ICCBased << /N 3 >>] setcolorspace
+-0.1 1.5 0.5 /setcolor [] assert
+/currentrgbcolor [0.0 1.0 0.5] assert
+
+%% ICCBased setcolor stackunderflow
+[/ICCBased << /N 3 >>] setcolorspace
+0.5 /setcolor [0.5 /stackunderflow] assert
+
+%% ICCBased setcolor typecheck
+[/ICCBased << /N 3 >>] setcolorspace
+0.5 0.5 (string) /setcolor [0.5 0.5 (string) /typecheck] assert
+
+%% ICCBased setcolorspace rangecheck for invalid /N (use variable for same object)
+/icc_n2 [/ICCBased << /N 2 >>] def
+icc_n2 /setcolorspace [icc_n2 /rangecheck] assert
+
+%% ICCBased setcolorspace rangecheck for wrong length
+/icc_long [/ICCBased << /N 3 >> 42] def
+icc_long /setcolorspace [icc_long /rangecheck] assert
+
+%% ICCBased N=4 currentgray via CMYK-to-RGB-to-gray path
+[/ICCBased << /N 4 >>] setcolorspace
+0.0 0.0 0.0 0.0 setcolor
+% CMYK (0,0,0,0) = white → RGB (1,1,1) → gray via NTSC: 0.3*1+0.59*1+0.11*1 = 1.0
+/currentgray [1.0] assert
+
+%% ICCBased N=4 currentrgbcolor via CMYK-to-RGB path
+[/ICCBased << /N 4 >>] setcolorspace
+0.0 0.0 0.0 1.0 setcolor
+% CMYK (0,0,0,1) = black → RGB (0,0,0)
+/currentrgbcolor [0.0 0.0 0.0] assert
+
+%% ICCBased N=3 currenthsbcolor returns correct HSB
+[/ICCBased << /N 3 >>] setcolorspace
+1.0 0.0 0.0 setcolor
+% Pure red → HSB (0,1,1)
+/currenthsbcolor [0.0 1.0 1.0] assert
+
+%% ICCBased N=3 currentcmykcolor via RGB-to-CMYK
+[/ICCBased << /N 3 >>] setcolorspace
+1.0 1.0 1.0 setcolor
+% White → CMYK (0,0,0,0)
+/currentcmykcolor [0.0 0.0 0.0 0.0] assert
+
+%% ICCBased N=1 currentcmykcolor via gray-to-RGB-to-CMYK
+[/ICCBased << /N 1 >>] setcolorspace
+0.0 setcolor
+% Black → RGB(0,0,0) → CMYK (0,0,0,1)
+/currentcmykcolor [0.0 0.0 0.0 1.0] assert
+
+%% ICCBased N=1 currenthsbcolor via gray-to-RGB-to-HSB
+[/ICCBased << /N 1 >>] setcolorspace
+1.0 setcolor
+% White → RGB(1,1,1) → HSB (0,0,1)
+/currenthsbcolor [0.0 0.0 1.0] assert
+
+%% ICCBased N=4 currenthsbcolor via CMYK-to-RGB-to-HSB
+[/ICCBased << /N 4 >>] setcolorspace
+1.0 0.0 0.0 0.0 setcolor
+% Cyan = CMYK(1,0,0,0) → RGB(0,1,1) → HSB (0.5,1,1)
+/currenthsbcolor [0.5 1.0 1.0] assert
+
+%% ICCBased with /Alternate preserves correct fallback behavior
+[/ICCBased << /N 3 /Alternate /DeviceRGB >>] setcolorspace
+0.2 0.4 0.6 setcolor
+/currentrgbcolor [0.2 0.4 0.6] assert
+
+%% ICCBased N=4 with /Alternate /DeviceCMYK
+[/ICCBased << /N 4 /Alternate /DeviceCMYK >>] setcolorspace
+0.1 0.2 0.3 0.4 setcolor
+/currentcmykcolor [0.1 0.2 0.3 0.4] assert
+
+%% =============================================================================
+%% setcmykcolor operator tests
+%% =============================================================================
+
+%% Basic setcmykcolor functionality %%
+0.0 0.0 0.0 1.0 /setcmykcolor [] assert           % Pure black (K=1)
+1.0 0.0 0.0 0.0 /setcmykcolor [] assert           % Pure cyan
+0.0 1.0 0.0 0.0 /setcmykcolor [] assert           % Pure magenta
+0.0 0.0 1.0 0.0 /setcmykcolor [] assert           % Pure yellow
+0.5 0.3 0.2 0.1 /setcmykcolor [] assert           % Mixed CMYK
+
+%% setcmykcolor sets DeviceCMYK color space %%
+0.1 0.2 0.3 0.4 setcmykcolor
+/currentcolorspace [[/DeviceCMYK]] assert
+/currentcolor [0.1 0.2 0.3 0.4] assert
+
+%% setcmykcolor value clamping %%
+-0.5 1.5 -0.1 2.0 setcmykcolor
+/currentcolor [0.0 1.0 0.0 1.0] assert             % Clamped to [0,1]
+
+%% setcmykcolor error: stackunderflow %%
+0.5 0.5 0.5 /setcmykcolor [0.5 0.5 0.5 /stackunderflow] assert
+
+%% setcmykcolor error: typecheck %%
+0.1 0.2 0.3 (bad) /setcmykcolor [0.1 0.2 0.3 (bad) /typecheck] assert
+
+%% =============================================================================
+%% UseCIEColor page device parameter tests (PLRM 6.2.5)
+%% =============================================================================
+
+%% --- Baseline: UseCIEColor absent/false — no remapping ---
+0.5 setgray
+/currentcolorspace [[/DeviceGray]] assert
+
+%% --- Fallback: UseCIEColor true but no Default* resources in VM ---
+%% Must fall back to device space, not error
+<< /UseCIEColor true >> setpagedevice
+0.5 setgray
+/currentcolorspace [[/DeviceGray]] assert              % Asserts fallback, not just "no error"
+1.0 0.0 0.0 setrgbcolor
+/currentcolorspace [[/DeviceRGB]] assert               % RGB fallback too
+0.1 0.2 0.3 0.4 setcmykcolor
+/currentcolorspace [[/DeviceCMYK]] assert              % CMYK fallback too
+
+%% Turn off UseCIEColor while defining resources (avoid interference)
+<< /UseCIEColor false >> setpagedevice
+
+%% --- Define Default* CIE resources via defineresource ---
+/DefaultRGB [
+    /CIEBasedABC <<
+        /WhitePoint [0.9505 1.0 1.089]
+        /RangeABC [0.0 1.0 0.0 1.0 0.0 1.0]
+        /MatrixABC [
+            0.4124 0.2126 0.0193
+            0.3576 0.7152 0.1192
+            0.1805 0.0722 0.9505
+        ]
+    >>
+] /ColorSpace defineresource pop
+
+/DefaultGray [
+    /CIEBasedA <<
+        /WhitePoint [0.9505 1.0 1.089]
+        /RangeA [0.0 1.0]
+        /MatrixA [0.9505 1.0 1.089]
+    >>
+] /ColorSpace defineresource pop
+
+%% DefaultCMYK: pass-through [/DeviceCMYK] — CMYK→CIE is complex and
+%% implementation-dependent per PLRM. The lookup path is verified by
+%% confirming that the resource IS found (vs. fallback when no resource).
+/DefaultCMYK [/DeviceCMYK] /ColorSpace defineresource pop
+
+%% --- Now enable UseCIEColor and test remapping ---
+<< /UseCIEColor true >> setpagedevice
+1.0 0.0 0.0 setrgbcolor
+currentcolorspace 0 get /CIEBasedABC eq
+not { (UseCIEColor: setrgbcolor should remap to CIEBasedABC) print } if
+/currentcolor [1.0 0.0 0.0] assert                    % Color values preserved
+
+%% --- setgray remapping: space changes, color value preserved ---
+0.5 setgray
+currentcolorspace 0 get /CIEBasedA eq
+not { (UseCIEColor: setgray should remap to CIEBasedA) print } if
+/currentcolor [0.5] assert                             % Color value preserved
+
+%% --- setcmykcolor with DefaultCMYK as pass-through [/DeviceCMYK] ---
+%% DefaultCMYK IS defined (as pass-through), so the lookup succeeds but
+%% the result is still DeviceCMYK. Color values must be preserved.
+0.1 0.2 0.3 0.4 setcmykcolor
+currentcolorspace 0 get /DeviceCMYK eq
+not { (UseCIEColor: setcmykcolor with pass-through DefaultCMYK should be DeviceCMYK) print } if
+/currentcolor [0.1 0.2 0.3 0.4] assert                % Color values preserved
+
+%% --- setcolorspace remapping for all three device spaces ---
+[/DeviceRGB] setcolorspace
+currentcolorspace 0 get /CIEBasedABC eq
+not { (UseCIEColor: setcolorspace [/DeviceRGB] should remap to CIEBasedABC) print } if
+
+[/DeviceGray] setcolorspace
+currentcolorspace 0 get /CIEBasedA eq
+not { (UseCIEColor: setcolorspace [/DeviceGray] should remap to CIEBasedA) print } if
+
+[/DeviceCMYK] setcolorspace
+currentcolorspace 0 get /DeviceCMYK eq
+not { (UseCIEColor: setcolorspace [/DeviceCMYK] with pass-through default should stay DeviceCMYK) print } if
+
+%% --- Non-device spaces must NOT be remapped ---
+%% Separation: tint transform takes 1 tint → 3 RGB values
+[/Separation /CustomColor /DeviceRGB {1.0 exch sub dup dup}] setcolorspace
+currentcolorspace 0 get /Separation eq
+not { (UseCIEColor: Separation space should NOT be remapped) print } if
+
+[/Indexed /DeviceRGB 2 <FF0000 00FF00 0000FF>] setcolorspace
+currentcolorspace 0 get /Indexed eq
+not { (UseCIEColor: Indexed space should NOT be remapped) print } if
+
+[/CIEBasedABC << /WhitePoint [0.9505 1 1.089] >>] setcolorspace
+currentcolorspace 0 get /CIEBasedABC eq
+not { (UseCIEColor: CIEBasedABC space should NOT be remapped) print } if
+
+%% --- Disable UseCIEColor — reverts to device spaces ---
+<< /UseCIEColor false >> setpagedevice
+0.5 setgray
+/currentcolorspace [[/DeviceGray]] assert
+1.0 0.0 0.0 setrgbcolor
+/currentcolorspace [[/DeviceRGB]] assert
+0.1 0.2 0.3 0.4 setcmykcolor
+/currentcolorspace [[/DeviceCMYK]] assert
+
+%% =============================================================================
+%% ProcessColorModel page device parameter tests (PLRM 6.2)
+%% =============================================================================
+
+%% ProcessColorModel can be set without error
+<< /ProcessColorModel /DeviceRGB >> /setpagedevice [] assert
+
+%% ProcessColorModel is stored in page device
+currentpagedevice /ProcessColorModel get /DeviceRGB eq
+not { (ProcessColorModel should be stored in page device) print } if
+
+%% Note: ProcessColorModel's effect on color conversion happens in the rendering
+%% pipeline (convert_to_device_color), which cannot be tested from PostScript.
+%% The color conversion is verified by rendering tests (e.g. samples/tiger.ps).
+
+% Test completed - use the standard unittest framework summary

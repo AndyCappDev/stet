@@ -1,0 +1,101 @@
+%% Array tests
+
+userdict /$unittest known not {(unit_tests/unittest.ps) run} if
+
+
+%% array %%
+3 /array [[null null null]] assert
+    % array errors
+    /array [/stackunderflow] assert
+    (a) /array [(a) /typecheck] assert
+    [1.5] /array [[1.5] /typecheck] assert
+    true /array [true /typecheck] assert
+
+
+%% length %%
+/ar 20 array def ar /length [20] assert
+    % length errors
+    /length [/stackunderflow] assert
+    null /length [null /typecheck] assert
+    1 /length [1 /typecheck] assert
+
+
+%% get %%
+[31 41 59] 0 /get [31] assert
+[0 (string) [] {add 2 div}] 2 /get [[]] assert
+    % get errors
+    /get [/stackunderflow] assert
+    [31 41 59] 1.0 /get [[31 41 59] 1.0 /typecheck] assert
+    [31 41 59] -1 /get [[31 41 59] -1 /rangecheck] assert
+    [31 41 59] 3 /get [[31 41 59] 3 /rangecheck] assert
+    %[31 41 59] noaccess 0 /get [[31 41 59] 0 /invalidaccess] assert
+
+
+%% put %%
+/ar [5 17 3 8] def ar 2 (abcd) {put ar} [[5 17 (abcd) 8]] assert
+    % put errors
+    /put [/stackunderflow] assert
+    [5 17 3 8] /put [[5 17 3 8] /stackunderflow] assert
+    [5 17 3 8] 0 /put [[5 17 3 8] 0 /stackunderflow] assert
+    [5 17 3 8] (a) 0 /put [[5 17 3 8] (a) 0 /typecheck] assert
+    [5 17 3 8] (a) (b) /put [[5 17 3 8] (a) (b) /typecheck] assert
+    true setglobal [5 17 3 8] false setglobal 0 (b) /put [[5 17 3 8] 0 (b) /invalidaccess] assert
+
+
+%% getinterval %%
+[9 8 7 6 5] 1 3 /getinterval [[8 7 6]] assert
+    % getinterval errors
+    5 -1 3 /getinterval [5 -1 3 /typecheck] assert
+    [9 8 7 6 5] (a) 3 /getinterval [[9 8 7 6 5] (a) 3 /typecheck] assert
+    [9 8 7 6 5] 1 (a) /getinterval [[9 8 7 6 5] 1 (a) /typecheck] assert
+    [9 8 7 6 5] -1 3 /getinterval [[9 8 7 6 5] -1 3 /rangecheck] assert
+    [9 8 7 6 5] 0 6 /getinterval [[9 8 7 6 5] 0 6 /rangecheck] assert
+
+
+%% putinterval %%
+/ar [5 8 2 7 3] def ar 1 [(a) (b) (c)] {putinterval ar} [[5 (a) (b) (c) 3]] assert
+    % putinterval errors
+    1 1 [(a) (b) (c)] /putinterval [1 1 [(a) (b) (c)] /typecheck] assert
+    [5 8 2 7 3] (a) [(a) (b) (c)] /putinterval [[5 8 2 7 3] (a) [(a) (b) (c)] /typecheck] assert
+    [5 8 2 7 3] 1 1 /putinterval [[5 8 2 7 3] 1 1 /typecheck] assert
+    [5 8 2 7 3] 1 (abcde) /putinterval [[5 8 2 7 3] 1 (abcde) /typecheck] assert
+    (abcde) 1 [(a) (b) (c)] /putinterval [(abcde) 1 [(a) (b) (c)] /typecheck] assert
+    [5 8 2 7 3] 3 [(a) (b) (c)] /putinterval [[5 8 2 7 3] 3 [(a) (b) (c)] /rangecheck] assert
+    true setglobal [5 8 2 7 3] false setglobal 1 [(a) (b) (c)] /putinterval [[5 8 2 7 3] 1 [(a) (b) (c)] /invalidaccess] assert
+
+
+%% astore %%
+(a) (bcd) (ef) 3 array /astore [[(a) (bcd) (ef)]] assert
+0 array /astore [[]] assert
+    % astore errors
+    (a) /astore [(a) /typecheck] assert
+    /astore [/stackunderflow] assert
+    1 array /astore [1 array /stackunderflow] assert
+    (a) 2 array /astore [(a) 2 array /stackunderflow] assert
+    true setglobal (a) false setglobal (b) true setglobal 2 array false setglobal /astore [(a) (b) 2 array /invalidaccess] assert
+
+
+%% aload %%
+[23 (ab) -6] /aload [23 (ab) -6 [23 (ab) -6]] assert
+[] /aload [[]] assert
+    % aload errors
+    /aload [/stackunderflow] assert
+    (a) /aload [(a) /typecheck] assert
+
+
+%% copy %%
+/a1 [1 2 3] def a1 dup length 1 add array /copy [[1 2 3]] assert
+    % copy errors
+    [1 (2) 3] [4 5] /copy [[1 (2) 3] [4 5] /rangecheck] assert
+    [1 (2) 3] 4 5 6 3 packedarray /copy [[1 (2) 3] [4 5 6] /typecheck] assert
+    [1 (2) 3] true setglobal [4 5 6] false setglobal /copy [[1 (2) 3] [4 5 6] /invalidaccess] assert
+
+
+%% forall %%
+0 [13 29 3 -8 21] {add} /forall [58] assert
+[1 2 3 4 5] {} /forall [1 2 3 4 5] assert
+    % forall errors
+    /forall [/stackunderflow] assert
+    [1 2 3 4 5] /forall [[1 2 3 4 5] /stackunderflow] assert
+    1 {} /forall [1 {} /typecheck] assert
+    [1 2 3 4 5] 1 /forall [[1 2 3 4 5] 1 /typecheck] assert

@@ -1,0 +1,382 @@
+%% Binary Token Encoding Tests (PLRM Section 3.14.1)
+%% Tests binary tokens via the token operator on files with binary content.
+
+userdict /$unittest known not {(unit_tests/unittest.ps) run} if
+
+
+% Helper: write bytes to temp file and return read-mode file
+% Usage: [byte1 byte2 ...] btfile  ->  file
+/bt_file (unit_tests/.bt_tmp.ps) def
+/btfile {
+    bt_file (w) file
+    exch { 1 index exch write } forall
+    closefile
+    bt_file (r) file
+} bind def
+
+
+%% ========================================
+%% Integer tokens (types 132-136)
+%% ========================================
+
+%% Type 132: 32-bit integer, big-endian
+% Value = 0
+[132 0 0 0 0] btfile
+{token pop} {exec} [0] assert
+
+% Value = 1
+[132 0 0 0 1] btfile
+{token pop} {exec} [1] assert
+
+% Value = 256
+[132 0 0 1 0] btfile
+{token pop} {exec} [256] assert
+
+% Value = 12345  (0x00003039)
+[132 0 0 48 57] btfile
+{token pop} {exec} [12345] assert
+
+% Value = -1  (0xFFFFFFFF in two's complement)
+[132 255 255 255 255] btfile
+{token pop} {exec} [-1] assert
+
+% Value = -256
+[132 255 255 255 0] btfile
+{token pop} {exec} [-256] assert
+
+% Value = 2147483647 (max 32-bit signed: 0x7FFFFFFF)
+[132 127 255 255 255] btfile
+{token pop} {exec} [2147483647] assert
+
+% Value = -2147483648 (min 32-bit signed: 0x80000000)
+[132 128 0 0 0] btfile
+{token pop} {exec} [-2147483648] assert
+
+
+%% Type 133: 32-bit integer, little-endian
+% Value = 1
+[133 1 0 0 0] btfile
+{token pop} {exec} [1] assert
+
+% Value = 12345  (LE: 39 30 00 00)
+[133 57 48 0 0] btfile
+{token pop} {exec} [12345] assert
+
+% Value = -1
+[133 255 255 255 255] btfile
+{token pop} {exec} [-1] assert
+
+
+%% Type 134: 16-bit integer, big-endian
+% Value = 0
+[134 0 0] btfile
+{token pop} {exec} [0] assert
+
+% Value = 1
+[134 0 1] btfile
+{token pop} {exec} [1] assert
+
+% Value = 256
+[134 1 0] btfile
+{token pop} {exec} [256] assert
+
+% Value = -1 (0xFFFF)
+[134 255 255] btfile
+{token pop} {exec} [-1] assert
+
+% Value = 32767 (max 16-bit signed)
+[134 127 255] btfile
+{token pop} {exec} [32767] assert
+
+% Value = -32768 (min 16-bit signed)
+[134 128 0] btfile
+{token pop} {exec} [-32768] assert
+
+
+%% Type 135: 16-bit integer, little-endian
+% Value = 1
+[135 1 0] btfile
+{token pop} {exec} [1] assert
+
+% Value = 256
+[135 0 1] btfile
+{token pop} {exec} [256] assert
+
+% Value = -1
+[135 255 255] btfile
+{token pop} {exec} [-1] assert
+
+
+%% Type 136: 8-bit signed integer
+% Value = 0
+[136 0] btfile
+{token pop} {exec} [0] assert
+
+% Value = 1
+[136 1] btfile
+{token pop} {exec} [1] assert
+
+% Value = 127
+[136 127] btfile
+{token pop} {exec} [127] assert
+
+% Value = -128 (0x80)
+[136 128] btfile
+{token pop} {exec} [-128] assert
+
+% Value = -1 (0xFF)
+[136 255] btfile
+{token pop} {exec} [-1] assert
+
+
+%% ========================================
+%% Real tokens (types 138-140)
+%% ========================================
+
+%% Type 138: 32-bit IEEE real, big-endian
+% Value = 0.0 (0x00000000)
+[138 0 0 0 0] btfile
+{token pop} {exec} [0.0] assert
+
+% Value = 1.0 (0x3F800000 BE)
+[138 63 128 0 0] btfile
+{token pop} {exec} [1.0] assert
+
+% Value = -1.0 (0xBF800000 BE)
+[138 191 128 0 0] btfile
+{token pop} {exec} [-1.0] assert
+
+
+%% Type 139: 32-bit IEEE real, little-endian
+% Value = 1.0 (0x3F800000 LE = 00 00 80 3F)
+[139 0 0 128 63] btfile
+{token pop} {exec} [1.0] assert
+
+% Value = -1.0 (0xBF800000 LE = 00 00 80 BF)
+[139 0 0 128 191] btfile
+{token pop} {exec} [-1.0] assert
+
+
+%% Type 140: native real (same as LE on x86)
+% Value = 1.0
+[140 0 0 128 63] btfile
+{token pop} {exec} [1.0] assert
+
+
+%% ========================================
+%% Boolean token (type 141)
+%% ========================================
+
+% false (0)
+[141 0] btfile
+{token pop} {exec} [false] assert
+
+% true (1)
+[141 1] btfile
+{token pop} {exec} [true] assert
+
+% nonzero = true (255)
+[141 255] btfile
+{token pop} {exec} [true] assert
+
+
+%% ========================================
+%% String tokens (types 142-144)
+%% ========================================
+
+%% Type 142: short string (1-byte length)
+% Empty string (length=0)
+[142 0] btfile
+{token pop} {exec} [() ] assert
+
+% "AB" (length=2, bytes 65 66)
+[142 2 65 66] btfile
+{token pop} {exec} [(AB)] assert
+
+% 5-byte string "Hello"
+[142 5 72 101 108 108 111] btfile
+{token pop} {exec} [(Hello)] assert
+
+
+%% Type 143: long string, big-endian length
+% Empty string (length=0x0000)
+[143 0 0] btfile
+{token pop} {exec} [() ] assert
+
+% "Hi" (length=0x0002 BE)
+[143 0 2 72 105] btfile
+{token pop} {exec} [(Hi)] assert
+
+
+%% Type 144: long string, little-endian length
+% "Hi" (length=0x0002 LE = 02 00)
+[144 2 0 72 105] btfile
+{token pop} {exec} [(Hi)] assert
+
+
+%% ========================================
+%% System name tokens (types 145-146)
+%% ========================================
+
+%% Type 145: literal system name
+% Index 0 = /abs
+[145 0] btfile
+{token pop} {exec} [/abs] assert
+
+% Index 1 = /add
+[145 1] btfile
+{token pop} {exec} [/add] assert
+
+% Index 51 = /def
+[145 51] btfile
+{token pop} {exec} [/def] assert
+
+% Index 160 = /show
+[145 160] btfile
+{token pop} {exec} [/show] assert
+
+% Index 161 = /showpage
+[145 161] btfile
+{token pop} {exec} [/showpage] assert
+
+% Index 113 = /null
+[145 113] btfile
+{token pop} {exec} [/null] assert
+
+
+%% Type 146: executable system name
+% Index 1 = add (executable) - check it's executable via xcheck
+[146 1] btfile
+{token pop xcheck} {exec} [true] assert
+
+% Type 145 should be literal (xcheck = false)
+[145 51] btfile
+{token pop xcheck} {exec} [false] assert
+
+
+%% ========================================
+%% Fixed-point tokens (type 137)
+%% ========================================
+
+%% 32-bit BE, scale=0 -> integer
+% r=0, value = 0x00000001 = 1
+[137 0 0 0 0 1] btfile
+{token pop} {exec} [1] assert
+
+%% 32-bit BE, scale=0 -> negative integer
+% r=0, value = 0xFFFFFFFF = -1
+[137 0 255 255 255 255] btfile
+{token pop} {exec} [-1] assert
+
+%% 32-bit BE, scale=8 -> real
+% r=8, value = 0x00000100 = 256, result = 256/256 = 1.0
+[137 8 0 0 1 0] btfile
+{token pop} {exec} [1.0] assert
+
+%% 16-bit BE, scale=0 -> integer
+% r=32, value = 0x0001 = 1
+[137 32 0 1] btfile
+{token pop} {exec} [1] assert
+
+%% 16-bit BE, scale=4 -> real
+% r=36, value = 0x0010 = 16, result = 16/16 = 1.0
+[137 36 0 16] btfile
+{token pop} {exec} [1.0] assert
+
+%% 32-bit LE, scale=0 -> integer
+% r=128, value = 0x01000000 LE = 1
+[137 128 1 0 0 0] btfile
+{token pop} {exec} [1] assert
+
+%% 16-bit LE, scale=0 -> integer
+% r=160, value = 0x0100 LE = 1
+[137 160 1 0] btfile
+{token pop} {exec} [1] assert
+
+
+%% ========================================
+%% Homogeneous number array (type 149)
+%% ========================================
+
+%% 32-bit integers BE, scale=0, count=2: [1, 2]
+% r=0, count=0x0002 BE, values: 0x00000001, 0x00000002
+[149 0 0 2  0 0 0 1  0 0 0 2] btfile
+{token pop} {exec} [[1 2]] assert
+
+%% 32-bit integers LE, scale=0, count=2: [1, 2]
+% r=128, count=0x0002 LE, values: 1 LE, 2 LE
+[149 128 2 0  1 0 0 0  2 0 0 0] btfile
+{token pop} {exec} [[1 2]] assert
+
+%% Empty array
+[149 0 0 0] btfile
+{token pop} {exec} [[]] assert
+
+%% 32-bit IEEE real BE (r=48), count=1: [1.0]
+% 1.0 = 0x3F800000
+[149 48 0 1  63 128 0 0] btfile
+{token pop} {exec} [[1.0]] assert
+
+%% 32-bit IEEE real LE (r=176), count=1: [1.0]
+[149 176 1 0  0 0 128 63] btfile
+{token pop} {exec} [[1.0]] assert
+
+%% 16-bit integers BE, scale=0 (r=32), count=3: [1, 2, 3]
+[149 32 0 3  0 1  0 2  0 3] btfile
+{token pop} {exec} [[1 2 3]] assert
+
+
+%% ========================================
+%% Binary token as name/number terminator
+%% ========================================
+
+% An ASCII "5" followed by binary int8 token (136) with value 3
+% Should parse as integer 5, then integer 3
+% Save file ref with dup so we can read both tokens
+[53 136 3] btfile
+{dup token pop exch token pop} {exec} [5 3] assert
+
+
+%% ========================================
+%% Multiple binary tokens in sequence
+%% ========================================
+
+% Two 8-bit integers back to back: 10 and 20
+[136 10 136 20] btfile
+{dup token pop exch token pop} {exec} [10 20] assert
+
+% Binary int followed by binary string
+[136 42 142 2 72 105] btfile
+{dup token pop exch token pop} {exec} [42 (Hi)] assert
+
+
+%% ========================================
+%% Execution of binary-encoded programs
+%% ========================================
+
+% Helper: write bytes to temp file and run it
+/btrun {
+    bt_file (w) file
+    exch { 1 index exch write } forall
+    closefile
+    bt_file run
+} bind def
+
+% Binary-encoded "1 2 add" using executable system name for add (index 1)
+% 136 1 = int8 value 1, 136 2 = int8 value 2, 146 1 = exec sysname "add"
+{[136 1 136 2 146 1] btrun} {exec} [3] assert
+
+% Binary-encoded "10 20 sub" (sub = index 169)
+{[136 10 136 20 146 169] btrun} {exec} [-10] assert
+
+% Binary-encoded "3 dup mul" (dup = index 56, mul = index 108)
+{[136 3 146 56 146 108] btrun} {exec} [9] assert
+
+% Mix ASCII and binary: ASCII "100" followed by binary int8 50, then binary "add"
+{[49 48 48 136 50 146 1] btrun} {exec} [150] assert
+
+
+%% ========================================
+%% Cleanup
+%% ========================================
+bt_file status { pop pop pop pop bt_file deletefile } if

@@ -1,0 +1,812 @@
+%% Font tests
+
+userdict /$unittest known not {(unit_tests/unittest.ps) run} if
+
+
+%!PS-Adobe-3.0
+%%Title: Font Resource Unit Tests
+%%Creator: PostForge Testing Framework
+%%EndComments
+
+% Font Resource Tests %%
+% Test basic Type 1 font defineresource with valid font dictionary
+% Correct order: key instance category (must be created in global VM)
+true setglobal
+/TestFont1 << /FontType 1 /FontMatrix [0.001 0 0 0.001 0 0] /FontName /TestFont1 >>
+dup /expected_font exch def 
+/Font defineresource pop
+
+% Test that findresource returns a dictionary
+/TestFont1 /Font /findresource [expected_font] assert
+
+% Test FontDirectory synchronization after defineresource
+/TestFont1 FontDirectory exch known [true] assert
+
+% Test findfont still works (Level 1 compatibility)
+/TestFont1 findfont
+/TestFont1 /Font findresource
+eq [true] assert
+
+% Test definefont still works (Level 1 compatibility)  
+/TestFont2
+<< /FontType 1 /FontMatrix [0.001 0 0 0.001 0 0] /FontName /TestFont2 >>
+%3 -1 roll setglobal
+definefont pop
+{/TestFont2 FontDirectory exch known} [true] assert
+/TestFont2 /Font findresource pop
+FontDirectory /TestFont2 get pop
+
+
+
+% Test FontType validation - invalid FontType
+/BadFontType << /FontType 99 /FontMatrix [0.001 0 0 0.001 0 0] >>
+dup /expected_font exch def  % Save reference to compare later
+/definefont [/BadFontType expected_font /invalidfont] assert
+
+% Test FontType validation - missing FontType
+/NoFontType << /FontMatrix [0.001 0 0 0.001 0 0] >>
+dup /expected_font exch def  % Save reference to compare later
+/definefont [/NoFontType expected_font /invalidfont] assert
+
+% Test FontMatrix validation - missing FontMatrix
+/NoFontMatrix << /FontType 1 >>
+dup /expected_font exch def  % Save reference to compare later
+/definefont [/NoFontMatrix expected_font /invalidfont] assert
+
+% Test FontMatrix validation - wrong array length
+/BadMatrixLength << /FontType 1 /FontMatrix [0.001 0 0] >>
+dup /expected_font exch def  % Save reference to compare later
+/definefont [/BadMatrixLength expected_font /invalidfont] assert
+
+% Test FontMatrix validation - non-numeric elements
+/BadMatrixElement << /FontType 1 /FontMatrix [0.001 0 0 (bad) 0 0] >>
+dup /expected_font exch def  % Save reference to compare later
+/definefont [/BadMatrixElement expected_font /invalidfont] assert
+
+% Test FontMatrix validation - not an array
+/MatrixNotArray << /FontType 1 /FontMatrix 123 >>
+dup /expected_font exch def  % Save reference to compare later
+/definefont [/MatrixNotArray expected_font /invalidfont] assert
+
+% Test font dictionary validation - not a dictionary
+/NotDict (not a dict) /definefont [/NotDict (not a dict) /typecheck] assert
+
+% Test valid FontType 3 (user-defined)
+/TestFont3 << /FontType 3 /FontMatrix [0.001 0 0 0.001 0 0] /FontName /TestFont3 >>
+/Font defineresource pop
+/TestFont3 /Font findresource /FontType get [3] assert
+
+% Test FontDirectory persistence across operations
+/TestFont1 FontDirectory exch known [true] assert
+/TestFont2 FontDirectory exch known [true] assert  
+/TestFont3 FontDirectory exch known [true] assert
+
+% Test font resource status
+{/TestFont1 /Font resourcestatus exch pop exch pop} [true] assert  % status 0 = explicitly defined
+
+% Test undefineresource removes from both systems
+/TestFont3 /Font undefineresource
+/TestFont3 FontDirectory exch known [false] assert
+/TestFont3 /Font resourcestatus [false] assert
+
+% Test complex font dictionary with additional entries
+/ComplexFont
+<<
+    /FontType 1
+    /FontMatrix [0.001 0 0 0.001 0 0]
+    /FontName /ComplexFont
+    /FontBBox [-168 -218 1000 898]
+    /UniqueID 12345
+    /Encoding StandardEncoding
+>>
+/Font defineresource pop
+/ComplexFont /Font findresource
+{/FontName get} [/ComplexFont] assert
+
+% Test font with real numbers in FontMatrix
+/RealMatrixFont
+<< /FontType 1 /FontMatrix [0.001 0.0 0.0 0.001 0.0 0.0] >>
+/Font defineresource
+/RealMatrixFont /Font findresource pop
+{/FontMatrix get 0 get type} [/realtype] assert
+
+% Test font with integers in FontMatrix
+/IntMatrixFont
+<< /FontType 1 /FontMatrix [1 0 0 1 0 0] >>
+/Font defineresource pop
+/IntMatrixFont /Font findresource
+{/FontMatrix get 0 get type} [/integertype] assert
+
+% Test that FontDirectory synchronization works with both findfont and findresource
+/SyncTest
+<< /FontType 1 /FontMatrix [0.001 0 0 0.001 0 0] /FontName /SyncTest >>
+/Font defineresource pop
+
+% Both should return the same font object
+/SyncTest findfont
+/SyncTest /Font findresource  
+/eq [true] assert
+
+% Test FontType validation with invalid FontType value
+/FontType99 << /FontType 99 /FontMatrix [0.001 0 0 0.001 0 0] >> def
+/FontType99 FontType99 /definefont [/FontType99 FontType99 /invalidfont] assert
+
+% Test that FontType 1 fonts always go to global VM per PLRM (regardless of current VM mode)
+currentglobal
+false setglobal  % Switch to local mode
+% FontType 1 should still be forced to global VM per PLRM
+/LocalModeFont1
+<< /FontType 1 /FontMatrix [0.001 0 0 0.001 0 0] /FontName /LocalModeFont1 >>
+/Font defineresource pop
+{/LocalModeFont1 FontDirectory exch known} [true true] assert
+true
+
+true setglobal   % Switch to global mode  
+/GlobalModeFont1
+<< /FontType 1 /FontMatrix [0.001 0 0 0.001 0 0] /FontName /GlobalModeFont1 >>
+/Font defineresource pop
+{/GlobalModeFont1 FontDirectory exch known} [true true] assert
+true
+
+% Test that FontType 3 fonts respect current VM allocation mode
+false setglobal  % Switch to local mode
+/LocalFont3
+<< /FontType 3 /FontMatrix [0.001 0 0 0.001 0 0] /FontName /LocalFont3 >>
+/Font defineresource pop
+{/LocalFont3 FontDirectory exch known} [true true] assert
+true
+
+true setglobal   % Switch to global mode  
+/GlobalFont3
+<< /FontType 3 /FontMatrix [0.001 0 0 0.001 0 0] /FontName /GlobalFont3 >>
+/Font defineresource pop
+{/GlobalFont3 FontDirectory exch known} [true true] assert
+true
+setglobal  % Restore original mode
+
+% Test resourceforall with Font category
+(*) { pop } 256 string /Font resourceforall
+% Should execute without error
+
+% Test finding fonts that don't exist
+% PostForge implements font substitution: when a requested font is not found,
+% it substitutes the default font (Helvetica) rather than raising undefinedresource.
+% This provides graceful degradation for documents using unavailable fonts.
+% The substituted font dictionary has its FontName rewritten to the requested name
+% for transparent substitution.
+/NonExistentFont findfont
+dup type /dicttype eq {pop true} {false} ifelse
+[true] assert
+
+/NonExistentFont /Font findresource
+dup type /dicttype eq {pop true} {false} ifelse
+[true] assert
+
+% Font Transformation Operators %%
+
+% Test scalefont with valid font and positive scale
+/Times-Roman findfont 2.0 scalefont
+{/FontMatrix get 0 get} [0.002] assert
+
+% Test scalefont with integer scale
+/Helvetica findfont 3 scalefont  
+/FontMatrix get 0 get [0.003] assert
+
+% Test scalefont with negative scale (180-degree rotation)
+/Times-Roman findfont -1.0 scalefont
+/FontMatrix get 0 get [-0.001] assert
+
+% Test makefont with identity matrix (no change)
+/Helvetica findfont [1 0 0 1 0 0] makefont
+/FontMatrix get 0 get [0.001] assert
+
+% Test makefont with scaling matrix
+/Times-Roman findfont [2 0 0 2 0 0] makefont
+/FontMatrix get 0 get [0.002] assert
+
+% Test setfont and currentfont
+/Helvetica findfont setfont
+currentfont /FontName /get [/Helvetica] assert
+
+%% Font Operator Error Conditions %%
+
+% Test scalefont with wrong operand types
+/scalefont [/stackunderflow] assert
+(string) /scalefont [(string) /stackunderflow] assert  
+123 (string) /scalefont [123 (string) /typecheck] assert
+
+% Test makefont with wrong matrix size
+/Times-Roman findfont dup /savedFont exch def [1 0 0] /makefont [savedFont [1 0 0] /rangecheck] assert
+
+% Test makefont with non-numeric matrix elements
+/Helvetica findfont dup /savedFont exch def [1 0 (bad) 1 0 0] /makefont [savedFont [1 0 (bad) 1 0 0] /typecheck] assert
+
+% Test setfont with invalid font
+(not-font) /setfont [(not-font) /typecheck] assert
+
+%% Text Rendering Tests (Basic) %%
+
+% % Test stringwidth with simple font
+/Times-Roman findfont setfont
+(A) stringwidth pop 0 /gt [true] assert  % Should return some width > 0
+
+% Test stringwidth with simple font
+/Times-Roman findfont 12 scalefont setfont %(He) stringwidth
+(A) stringwidth pop 0 /gt [true] assert  % Should return some width > 0
+
+% Test show requires current point
+50 100 moveto
+(Hello) /show [] assert  % Should execute without error
+
+% Test show without current point 
+newpath
+(Hello) /show [(Hello) /nocurrentpoint] assert
+
+% Test stringwidth with empty string
+() /stringwidth [0 0] assert
+
+% Test ashow with spacing parameters  
+100 85 moveto
+5 0 (Test) ashow  % Should execute without error
+
+
+%% widthshow Operator Tests %%
+
+% Test widthshow with space character modification
+/Times-Roman findfont 12 scalefont setfont
+100 200 moveto
+6 0 32 (Wide word spacing) widthshow  % 32 is ASCII space
+% Should execute without error
+
+% Test widthshow with no matching character (should behave like show)
+100 180 moveto  
+5 0 65 (Hello) widthshow  % 65 is ASCII 'A', 'Hello' has no 'A'
+% Should render identically to normal show
+
+% Test widthshow with character that appears multiple times
+100 160 moveto
+3 0 108 (little letters) widthshow  % 108 is ASCII 'l', appears 3 times
+% Each 'l' should get extra 3 units spacing
+
+%% widthshow Error Conditions %%
+
+% Test widthshow with insufficient operands
+/widthshow [/stackunderflow] assert
+
+% Test widthshow with wrong operand types  
+(string) /widthshow [(string) /stackunderflow] assert
+1 (string) /widthshow [1 (string) /stackunderflow] assert
+1 2 (string) /widthshow [1 2 (string) /stackunderflow] assert
+
+% Test widthshow with wrong type for cx (should be number)
+(bad) 0 65 (test) /widthshow [(bad) 0 65 (test) /typecheck] assert
+
+% Test widthshow with wrong type for cy (should be number)  
+0 (bad) 65 (test) /widthshow [0 (bad) 65 (test) /typecheck] assert
+
+% Test widthshow with wrong type for char (should be integer)
+0 0 (bad) (test) /widthshow [0 0 (bad) (test) /typecheck] assert
+
+% Test widthshow with wrong type for string (should be string)
+0 0 65 123 /widthshow [0 0 65 123 /typecheck] assert
+
+% Test widthshow with character code out of range (negative)
+0 0 -1 (test) /widthshow [0 0 -1 (test) /rangecheck] assert
+
+% Test widthshow with character code out of range (> 255)
+0 0 256 (test) /widthshow [0 0 256 (test) /rangecheck] assert
+
+% Test widthshow without current point
+newpath
+0 0 65 (test) /widthshow [0 0 65 (test) /nocurrentpoint] assert
+
+%% widthshow Functionality Tests %%
+
+% Test widthshow with integer coordinates
+100 120 moveto
+5 2 65 (ABC) widthshow  % Integer cx, cy should work
+
+% Test widthshow with real coordinates
+100 100 moveto  
+2.5 1.5 65 (ABC) widthshow  % Real cx, cy should work
+
+% Test widthshow with zero spacing (should behave like show)
+100 80 moveto
+0 0 65 (ABC) widthshow  % Zero spacing should render like normal show
+
+% Test widthshow with negative spacing (characters should overlap)
+100 60 moveto
+-2 0 32 (a b c) widthshow  % Negative cx should cause overlapping
+
+% Test widthshow with empty string
+100 40 moveto
+5 0 65 () widthshow  % Empty string should execute without error
+
+% Test widthshow with single character that matches
+100 20 moveto
+10 0 65 (A) widthshow  % Single 'A' should get extra spacing
+
+% Test widthshow with mixed case (testing case sensitivity)
+% ASCII codes: A=65, a=97 
+100 0 moveto
+5 0 65 (AaA) widthshow  % Only uppercase 'A' (65) should get extra spacing
+
+erasepage
+
+%% awidthshow Operator Tests %%
+
+% Test awidthshow with space character modification and general spacing
+/Times-Roman findfont 12 scalefont setfont
+100 350 moveto
+6 0 32 2 0 (Wide word and letter spacing) awidthshow  % 32 is ASCII space
+% Should add (2,1) to ALL characters AND additional (6,0) to spaces
+
+% Test awidthshow with no matching character (should behave like ashow)
+100 330 moveto  
+0 0 65 3 0 (Hello) awidthshow  % 65 is ASCII 'A', 'Hello' has no 'A'
+% Should render like ashow with (3,0) spacing
+
+% Test awidthshow with character that appears multiple times
+100 310 moveto
+2 0 108 1 0 (little letters) awidthshow  % 108 is ASCII 'l', appears 3 times
+% Each 'l' should get (1,0) + (2,0) = (3,0), others get (1,0)
+
+%% awidthshow Error Conditions %%
+
+% Test awidthshow with insufficient operands
+/awidthshow [/stackunderflow] assert
+
+% Test awidthshow with wrong operand types - step by step validation
+(string) /awidthshow [(string) /stackunderflow] assert
+1 (string) /awidthshow [1 (string) /stackunderflow] assert
+1 2 (string) /awidthshow [1 2 (string) /stackunderflow] assert
+1 2 3 (string) /awidthshow [1 2 3 (string) /stackunderflow] assert
+1 2 3 4 (string) /awidthshow [1 2 3 4 (string) /stackunderflow] assert
+
+% Test awidthshow with wrong type for cx (should be number)
+(bad) 0 65 1 0 (test) /awidthshow [(bad) 0 65 1 0 (test) /typecheck] assert
+
+% Test awidthshow with wrong type for cy (should be number)  
+0 (bad) 65 1 0 (test) /awidthshow [0 (bad) 65 1 0 (test) /typecheck] assert
+
+% Test awidthshow with wrong type for char (should be integer)
+0 0 (bad) 1 0 (test) /awidthshow [0 0 (bad) 1 0 (test) /typecheck] assert
+
+% Test awidthshow with wrong type for ax (should be number)
+0 0 65 (bad) 0 (test) /awidthshow [0 0 65 (bad) 0 (test) /typecheck] assert
+
+% Test awidthshow with wrong type for ay (should be number)
+0 0 65 1 (bad) (test) /awidthshow [0 0 65 1 (bad) (test) /typecheck] assert
+
+% Test awidthshow with wrong type for string (should be string)
+0 0 65 1 0 123 /awidthshow [0 0 65 1 0 123 /typecheck] assert
+
+% Test awidthshow with character code out of range (negative)
+0 0 -1 1 0 (test) /awidthshow [0 0 -1 1 0 (test) /rangecheck] assert
+
+% Test awidthshow with character code out of range (> 255)
+0 0 256 1 0 (test) /awidthshow [0 0 256 1 0 (test) /rangecheck] assert
+
+% Test awidthshow without current point
+newpath
+0 0 65 1 0 (test) /awidthshow [0 0 65 1 0 (test) /nocurrentpoint] assert
+
+%% awidthshow Functionality Tests %%
+
+% Test awidthshow with integer coordinates
+100 290 moveto
+5 2 65 3 1 (ABC) awidthshow  % All integer operands should work
+
+% Test awidthshow with real coordinates
+100 270 moveto  
+2.5 1.5 65 1.5 0.5 (ABC) awidthshow  % All real operands should work
+
+% Test awidthshow with mixed integer/real coordinates
+100 250 moveto
+3 1.5 65 2.5 1 (ABC) awidthshow  % Mixed operands should work
+
+% Test awidthshow with zero spacing (should behave like show)
+100 230 moveto
+0 0 65 0 0 (ABC) awidthshow  % Zero spacing should render like normal show
+
+% Test awidthshow with negative spacing (characters should overlap)
+100 210 moveto
+-3 0 32 -1 0 (a b c) awidthshow  % Negative spacing should cause overlapping
+
+% Test awidthshow with empty string
+100 190 moveto
+5 0 65 2 0 () awidthshow  % Empty string should execute without error
+
+% Test awidthshow with single character that matches
+100 170 moveto
+10 0 65 3 0 (A) awidthshow  % Single 'A' should get (3,0) + (10,0) = (13,0)
+
+% Test awidthshow with mixed case (testing case sensitivity)
+% ASCII codes: A=65, a=97 
+100 150 moveto
+5 0 65 2 0 (AaA) awidthshow  % Only uppercase 'A' (65) should get (2,0) + (5,0)
+
+% Test awidthshow effect combination - should equal sum of ashow and widthshow effects
+% This demonstrates that awidthshow truly combines both operators
+100 130 moveto
+4 0 101 2 0 (test example) awidthshow  % 'e' (101) gets both spacings
+
+erasepage
+
+%% xyshow Operator Tests %%
+
+% Test xyshow with array of x,y displacement pairs
+/Times-Roman findfont 12 scalefont setfont
+100 450 moveto
+(ABC) [10 0 15 5 20 -3] xyshow  % Custom x,y displacements for A, B, C
+% A: advance (10,0), B: advance (15,5), C: advance (20,-3)
+
+% Test xyshow with zero displacements (should position normally)
+100 430 moveto
+(DEF) [0 0 0 0 0 0] xyshow  % Zero displacements should work
+
+% Test xyshow with negative displacements (overlapping characters)
+100 410 moveto
+(GHI) [-5 0 -5 0 -5 0] xyshow  % Negative x displacement causes overlap
+
+%% xyshow Error Conditions %%
+
+% Test xyshow with insufficient operands
+/xyshow [/stackunderflow] assert
+
+% Test xyshow with wrong operand types
+(string) /xyshow [(string) /stackunderflow] assert
+
+% Test xyshow with wrong type for string
+123 [1 2] /xyshow [123 [1 2] /typecheck] assert
+
+% Test xyshow with wrong type for displacement array
+(test) 123 /xyshow [(test) 123 /typecheck] assert
+
+% Test xyshow with non-numeric array elements
+(AB) [1 (bad) 3 4] /xyshow [(AB) [1 (bad) 3 4] /typecheck] assert
+
+% Test xyshow with insufficient displacement values (rangecheck)
+(ABC) [10 0 15] /xyshow [(ABC) [10 0 15] /rangecheck] assert  % Need 6 values for 3 chars
+
+% Test xyshow without current point
+newpath
+(test) [1 2 3 4] /xyshow [(test) [1 2 3 4] /nocurrentpoint] assert
+
+%% xyshow Functionality Tests %%
+
+% Test xyshow with mixed positive/negative values
+100 390 moveto
+(JKL) [8 2 -3 4 12 -1] xyshow  % Mixed displacement values
+
+% Test xyshow with real number displacements
+100 370 moveto
+(MNO) [7.5 1.5 9.2 -2.1 11.8 0.8] xyshow  % Real number displacements
+
+% Test xyshow with empty string
+100 350 moveto
+() [] xyshow  % Empty string with empty array should work
+
+% Test xyshow with single character
+100 330 moveto
+(P) [15 3] xyshow  % Single character with displacement pair
+
+erasepage
+
+%% xshow Operator Tests %%
+
+% Test xshow with array of x displacement values
+/Times-Roman findfont 12 scalefont setfont
+100 450 moveto
+(ABC) [10 15 20] xshow  % Custom x displacements, y=0 for all
+% A: advance (10,0), B: advance (15,0), C: advance (20,0)
+
+% Test xshow with zero displacements (should stack characters)
+100 430 moveto
+(DEF) [0 0 0] xshow  % Zero x displacement causes stacking
+
+% Test xshow with negative displacements (overlapping characters)
+100 410 moveto
+(GHI) [-5 -3 -2] xshow  % Negative x displacement causes overlap
+
+%% xshow Error Conditions %%
+
+% Test xshow with insufficient operands
+/xshow [/stackunderflow] assert
+
+% Test xshow with wrong operand types
+(string) /xshow [(string) /stackunderflow] assert
+
+% Test xshow with wrong type for string
+123 [1 2] /xshow [123 [1 2] /typecheck] assert
+
+% Test xshow with wrong type for displacement array
+(test) 123 /xshow [(test) 123 /typecheck] assert
+
+% Test xshow with non-numeric array elements
+(AB) [1 (bad)] /xshow [(AB) [1 (bad)] /typecheck] assert
+
+% Test xshow with insufficient displacement values (rangecheck)
+(ABC) [10 15] /xshow [(ABC) [10 15] /rangecheck] assert  % Need 3 values for 3 chars
+
+% Test xshow without current point
+newpath
+(test) [1 2 3 4] /xshow [(test) [1 2 3 4] /nocurrentpoint] assert
+
+%% xshow Functionality Tests %%
+
+% Test xshow with mixed positive/negative values
+100 390 moveto
+(JKL) [8 -3 12] xshow  % Mixed x displacement values
+
+% Test xshow with real number displacements  
+100 370 moveto
+(MNO) [7.5 9.2 11.8] xshow  % Real number x displacements
+
+% Test xshow with empty string
+100 350 moveto
+() [] xshow  % Empty string with empty array should work
+
+% Test xshow with single character
+100 330 moveto
+(P) [15] xshow  % Single character with x displacement
+
+% Test xshow vs xyshow equivalence - should produce same result
+% xshow with [a b c] should equal xyshow with [a 0 b 0 c 0]
+100 310 moveto
+(QRS) [5 10 15] xshow  % xshow version
+100 290 moveto  
+(QRS) [5 0 10 0 15 0] xyshow  % equivalent xyshow version
+
+erasepage
+
+%% yshow Operator Tests %%
+
+% Test yshow with array of y displacement values
+/Times-Roman findfont 12 scalefont setfont
+100 450 moveto
+(ABC) [0 5 -3] yshow  % Custom y displacements, x=0 for all
+% A: advance (0,0), B: advance (0,5), C: advance (0,-3)
+
+% Test yshow with zero displacements (should render horizontally)
+120 430 moveto
+(DEF) [0 0 0] yshow  % Zero y displacement
+
+% Test yshow with positive displacements (ascending characters)
+140 410 moveto
+(GHI) [2 4 6] yshow  % Positive y displacements create ascending text
+
+% Test yshow with negative displacements (descending characters)
+160 390 moveto
+(JKL) [-2 -4 -6] yshow  % Negative y displacements create descending text
+
+%% yshow Error Conditions %%
+
+% Test yshow with insufficient operands
+/yshow [/stackunderflow] assert
+
+% Test yshow with wrong operand types
+(string) /yshow [(string) /stackunderflow] assert
+
+% Test yshow with wrong type for string
+123 [1 2] /yshow [123 [1 2] /typecheck] assert
+
+% Test yshow with wrong type for displacement array
+(test) 123 /yshow [(test) 123 /typecheck] assert
+
+% Test yshow with non-numeric array elements
+(AB) [1 (bad)] /yshow [(AB) [1 (bad)] /typecheck] assert
+
+% Test yshow with insufficient displacement values (rangecheck)
+(ABC) [10 15] /yshow [(ABC) [10 15] /rangecheck] assert  % Need 3 values for 3 chars
+
+% Test yshow without current point
+newpath
+(test) [1 2 3 4] /yshow [(test) [1 2 3 4] /nocurrentpoint] assert
+
+%% yshow Functionality Tests %%
+
+% Test yshow with mixed positive/negative values
+180 370 moveto
+(MNO) [3 -2 4] yshow  % Mixed y displacement values
+
+% Test yshow with real number displacements  
+200 350 moveto
+(PQR) [1.5 -2.2 3.8] yshow  % Real number y displacements
+
+% Test yshow with empty string
+220 330 moveto
+() [] yshow  % Empty string with empty array should work
+
+% Test yshow with single character
+240 310 moveto
+(S) [8] yshow  % Single character with y displacement
+
+% Test yshow vs xyshow equivalence - should produce same result
+% yshow with [a b c] should equal xyshow with [0 a 0 b 0 c]
+260 290 moveto
+(TUV) [2 4 -1] yshow  % yshow version
+280 270 moveto  
+(TUV) [0 2 0 4 0 -1] xyshow  % equivalent xyshow version
+
+% Test yshow creating vertical text effect
+300 250 moveto
+(VERTICAL) [0 -10 -20 -30 -40 -50 -60 -70] yshow  % Stacked vertically
+
+% Test yshow creating wave effect
+320 200 moveto
+(WAVE) [0 5 0 -5] yshow  % Up-down wave pattern
+
+erasepage
+
+%% charpath Operator Tests %%
+
+% Test charpath with stroke flag false (suitable for stroking)
+/Times-Roman findfont 24 scalefont setfont
+newpath  % Start with empty path
+100 400 moveto  % Set current point AFTER newpath
+(ABC) false charpath  % Append glyph paths, suitable for stroking
+% Path should now contain glyph outlines, current point advanced
+.3 setlinewidth
+stroke
+
+% Test charpath with stroke flag true (suitable for filling/clipping)  
+newpath  % Start with empty path
+150 380 moveto  % Set current point AFTER newpath
+(DEF) true charpath  % Append converted glyph paths, suitable for filling
+% Path should contain strokepath-converted outlines (when strokepath available)
+stroke
+
+% Test charpath advances current point like show
+200 360 moveto
+(GHI) false charpath
+% Ending point should be advanced by string width
+stroke 
+
+% Test charpath with empty string
+newpath
+250 340 moveto  % Set current point AFTER newpath
+() false charpath  % Should execute without error, no path changes
+stroke
+
+% Test charpath with single character
+newpath
+300 320 moveto  % Set current point AFTER newpath
+(X) false charpath  % Single character path
+stroke
+
+%% charpath Error Conditions %%
+
+% Test charpath with insufficient operands
+/charpath [/stackunderflow] assert
+
+% Test charpath with wrong operand types
+(string) /charpath [(string) /stackunderflow] assert
+
+% Test charpath with wrong type for string
+123 false /charpath [123 false /typecheck] assert
+
+% Test charpath with wrong type for bool flag
+(test) 123 /charpath [(test) 123 /typecheck] assert
+
+% Test charpath with wrong type for bool flag (string)
+(test) (bad) /charpath [(test) (bad) /typecheck] assert
+
+% Test charpath without current point
+newpath  % Clear path, making current point undefined
+(test) false /charpath [(test) false /nocurrentpoint] assert
+
+%% charpath Functionality Tests %%
+
+% Test charpath with both boolean values
+newpath
+100 300 moveto  % Set current point AFTER newpath
+(TEST) false charpath  % stroke-suitable paths
+stroke
+150 280 moveto  % Set current point AFTER newpath
+(TEST) true charpath   % fill-suitable paths (when strokepath available)
+stroke
+
+% Test charpath with mixed case string
+newpath
+200 260 moveto  % Set current point AFTER newpath
+(MiXeD) false charpath  % Mixed case should work
+stroke
+
+% Test charpath with numbers and symbols
+newpath
+250 240 moveto  % Set current point AFTER newpath
+(123!@#) false charpath  % Numbers and symbols should work
+stroke
+
+% Test charpath with special characters
+newpath
+300 220 moveto  % Set current point AFTER newpath
+(()[]<>) false charpath  % Special PostScript characters
+stroke
+
+% % %% full page of 10 point text
+% % % /x 50 def /y 72 def
+% % % /nl {x y 15 add /y exch def y moveto} def
+% % % /line (Hello osadkfdidhsdpguwqtr[tm xc9xvc734554-54m,xzvnxvios.xcbmc0vcvksa;dxmxcv;szg0w373q40-43678sdflnmsalsfgdjnbn]) def
+% % % 42 {nl line show} repeat
+% % % showpage
+
+
+%% undefinefont %%
+% undefinefont round-trip: define then undefine
+true setglobal
+/UndTestFont << /FontType 1 /FontMatrix [0.001 0 0 0.001 0 0] /FontName /UndTestFont >> definefont pop
+/UndTestFont FontDirectory exch known [true] assert
+/UndTestFont undefinefont
+/UndTestFont FontDirectory exch known [false] assert
+false setglobal
+
+
+%% kshow %%
+% kshow calls proc between each pair of adjacent characters
+% For "ABC", proc is called twice: between A-B and B-C
+% Each call pushes charcode_just_shown and charcode_next
+nulldevice
+/Courier findfont 10 scalefont setfont
+0 0 moveto
+/kshow_count 0 def
+/kshow_code1_0 0 def /kshow_code2_0 0 def
+/kshow_code1_1 0 def /kshow_code2_1 0 def
+{
+    % stack: charcode_shown charcode_next
+    kshow_count 0 eq {
+        /kshow_code2_0 exch def /kshow_code1_0 exch def
+    } {
+        /kshow_code2_1 exch def /kshow_code1_1 exch def
+    } ifelse
+    /kshow_count kshow_count 1 add def
+} (ABC) kshow
+
+% Should have 2 proc calls
+kshow_count 2 eq [true] assert
+% First pair: A(65) shown, B(66) next
+kshow_code1_0 65 eq [true] assert
+kshow_code2_0 66 eq [true] assert
+% Second pair: B(66) shown, C(67) next
+kshow_code1_1 66 eq [true] assert
+kshow_code2_1 67 eq [true] assert
+
+% kshow with single character - no proc calls
+/kshow_called false def
+0 0 moveto
+{ pop pop /kshow_called true def } (X) kshow
+kshow_called [false] assert
+
+% kshow with empty string - no proc calls
+/kshow_called2 false def
+0 0 moveto
+{ pop pop /kshow_called2 true def } () kshow
+kshow_called2 [false] assert
+
+
+%% glyphshow %%
+% glyphshow renders a single glyph by name
+/Courier findfont 10 scalefont setfont
+0 0 moveto
+/A glyphshow
+% currentpoint should have advanced
+currentpoint pop 0 ne [true] assert
+
+% glyphshow with .notdef (should not crash)
+0 0 moveto
+/.notdef glyphshow
+
+%% rootfont %%
+% rootfont returns same as currentfont in normal context
+/Courier findfont 10 scalefont setfont
+rootfont currentfont eq [true] assert
+
+% rootfont after selectfont
+/Helvetica 12 selectfont
+rootfont currentfont eq [true] assert
+
+% rootfont type is dict
+rootfont type /dicttype eq [true] assert
+
+showpage

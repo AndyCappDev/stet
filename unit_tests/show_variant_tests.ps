@@ -1,0 +1,125 @@
+%!PS
+% Show Variant Tests for PostForge
+% Primary focus: cshow (zero existing tests)
+% Secondary: kshow/glyphshow error conditions not in font_tests.ps
+
+userdict /$unittest known not {(unit_tests/unittest.ps) run} if
+
+% All tests under nulldevice with a font selected
+gsave nulldevice
+/Courier 12 selectfont
+0 0 moveto
+
+
+%% =============================================================================
+%% cshow — proc called per character
+%% =============================================================================
+
+%% cshow: count calls for 5-char string %%
+% cshow pushes charcode wx wy on stack (charcode deepest, wy on top), then calls proc
+% We count how many times proc is called
+/cshow_count 0 def
+{pop pop pop /cshow_count cshow_count 1 add def} (Hello) cshow
+cshow_count 5 eq [true] assert
+
+%% cshow: proc receives correct charcode %%
+% Collect charcodes pushed by cshow
+/cshow_codes [] def
+{
+    pop pop             % pop wy and wx (top two)
+    /cshow_cc exch def  % charcode (bottom)
+    /cshow_codes [ cshow_codes aload pop cshow_cc ] def
+} (AB) cshow
+cshow_codes length 2 eq [true] assert
+cshow_codes 0 get 65 eq [true] assert     % 'A' = 65
+cshow_codes 1 get 66 eq [true] assert     % 'B' = 66
+
+%% cshow: empty string (no calls) %%
+/cshow_empty_count 0 def
+{pop pop pop /cshow_empty_count cshow_empty_count 1 add def} () cshow
+cshow_empty_count 0 eq [true] assert
+
+%% cshow: single character %%
+/cshow_single_count 0 def
+{pop pop pop /cshow_single_count cshow_single_count 1 add def} (X) cshow
+cshow_single_count 1 eq [true] assert
+
+%% cshow: longer string call count %%
+/cshow_long_count 0 def
+{pop pop pop /cshow_long_count cshow_long_count 1 add def} (PostScript) cshow
+cshow_long_count 10 eq [true] assert
+
+%% cshow: wx is numeric (width component) %%
+% For Courier (monospaced), wx should be non-zero
+/cshow_wx_val 0 def
+{
+    pop                     % pop wy (top)
+    /cshow_wx_val exch def  % save wx (middle)
+    pop                     % pop charcode (bottom)
+} (A) cshow
+cshow_wx_val type dup /integertype eq exch /realtype eq or [true] assert
+
+%% cshow: does not advance currentpoint (unlike show) %%
+0 0 moveto
+{pop pop pop} (ABC) cshow
+currentpoint /cy exch def /cx exch def
+cx 0 eq [true] assert
+cy 0 eq [true] assert
+
+
+%% =============================================================================
+%% cshow error conditions
+%% =============================================================================
+
+%% cshow error: stackunderflow %%
+0 0 moveto
+/cshow [/stackunderflow] assert
+
+%% cshow error: stackunderflow (one operand) %%
+0 0 moveto
+(test) /cshow [(test) /stackunderflow] assert
+
+%% cshow error: typecheck — non-string second arg %%
+0 0 moveto
+{pop pop pop} 123 /cshow [{pop pop pop} 123 /typecheck] assert
+
+%% cshow error: typecheck — non-proc first arg %%
+0 0 moveto
+123 (test) /cshow [123 (test) /typecheck] assert
+
+
+%% =============================================================================
+%% kshow additional error conditions
+%% =============================================================================
+
+%% kshow error: typecheck — non-string %%
+0 0 moveto
+{pop pop} 123 /kshow [{pop pop} 123 /typecheck] assert
+
+%% kshow error: typecheck — non-proc %%
+0 0 moveto
+123 (test) /kshow [123 (test) /typecheck] assert
+
+%% kshow error: stackunderflow %%
+0 0 moveto
+/kshow [/stackunderflow] assert
+
+
+%% =============================================================================
+%% glyphshow error conditions
+%% =============================================================================
+
+%% glyphshow error: stackunderflow %%
+0 0 moveto
+/glyphshow [/stackunderflow] assert
+
+%% glyphshow error: nocurrentpoint %%
+% glyphshow requires a current point
+newpath
+/A /glyphshow [/A /nocurrentpoint] assert
+
+% Restore currentpoint for any subsequent tests
+0 0 moveto
+
+
+grestore

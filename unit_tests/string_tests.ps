@@ -1,0 +1,182 @@
+%% String tests
+
+userdict /$unittest known not {(unit_tests/unittest.ps) run} if
+
+
+%% string %%
+10 {string dup type exch length} [/stringtype 10] assert
+    % string errors
+    /string [/stackunderflow] assert
+    -1 /string [-1 /rangecheck] assert
+    (a) /string [(a) /typecheck] assert
+
+
+%% length %%
+10 string /length [10] assert
+/length [/stackunderflow] assert
+1 /length [1 /typecheck] assert
+
+
+%% get %%%
+(abc) 1 get [98] assert
+(a) 0 get [97] assert
+    % get errors
+    /get [/stackunderflow] assert
+    (abc) /get [(abc) /stackunderflow] assert
+    1 /get [1 /stackunderflow] assert
+    (abc) [] /get [(abc) [] /typecheck] assert
+    (abc) -1 /get [(abc) -1 /rangecheck] assert
+    (abc) 3 /get [(abc) 3 /rangecheck] assert
+
+
+%% put %%
+/st (abc) def st 0 65 {put st} [(Abc)] assert
+    % put errors
+    /put [/stackunderflow] assert
+    (abc) 0 /put [(abc) 0 /stackunderflow] assert
+    1 0 65 /put [1 0 65 /typecheck] assert
+    (abc) -1 65 /put [(abc) -1 65 /rangecheck] assert
+    (abc) 3 65 /put [(abc) 3 65 /rangecheck] assert
+    (abc) 0 -1 /put [(abc) 0 -1 /rangecheck] assert
+    (abc) 0 256 /put [(abc) 0 256 /rangecheck] assert
+
+
+%% getinterval %%
+(abcde) 1 3 /getinterval [(bcd)] assert
+(abcde) 0 0 /getinterval [()] assert
+    % getinterval errors
+    /getinterval [/stackunderflow] assert
+    (abcde) /getinterval [(abcde) /stackunderflow] assert
+    (abcde) 1 /getinterval [(abcde) 1 /stackunderflow] assert
+    1 1 3 /getinterval [1 1 3 /typecheck] assert
+    (abcde) -1 3 /getinterval [(abcde) -1 3 /rangecheck] assert
+    (abcde) 4 3 /getinterval [(abcde) 4 3 /rangecheck] assert
+    (abcde) 0 6 /getinterval [(abcde) 0 6 /rangecheck] assert
+
+
+%% putinterval %%
+/st (abc) def st 1 (de) {putinterval st} [(ade)] assert
+/st (abc) def st 1 () {putinterval st} [(abc)] assert
+    % putinterval errors
+    /putinterval [/stackunderflow] assert
+    (abc) /putinterval [(abc) /stackunderflow] assert
+    (abc) 1 /putinterval [(abc) 1 /stackunderflow] assert
+    1 1 (ab) /putinterval [1 1 (ab) /typecheck] assert
+    (ab) 1 1 /putinterval [(ab) 1 1 /typecheck] assert
+    (abc) -1 (de) /putinterval [(abc) -1 (de) /rangecheck] assert
+    (abc) 2 (de) /putinterval [(abc) 2 (de) /rangecheck] assert
+
+
+%% copy %%
+/dst (abcde) def (123) dst {copy dst} [(123) (123de)] assert
+/dst (abcde) def () dst {copy dst} [() (abcde)] assert
+    % copy errors
+    /copy [/stackunderflow] assert
+    (abc) /copy [(abc) /stackunderflow] assert
+    1 (abc) /copy [1 (abc) /typecheck] assert
+
+
+%% forall %%
+() {} /forall [] assert
+(abc) {} /forall [97 98 99] assert
+0 (abc) {add} /forall [294] assert
+    % forall errors
+    /forall [/stackunderflow] assert
+    (abc) /forall [(abc) /stackunderflow] assert
+    1 {} /forall [1 {} /typecheck] assert
+    (abc) 1 /forall [(abc) 1 /typecheck] assert
+
+
+%% search %%
+(abbc) (ab) /search [(bc) (ab) () true] assert
+(abbc) (bb) /search [(c) (bb) (a) true] assert
+(abbc) (bc) /search [() (bc) (ab) true] assert
+(abbc) (B) /search [(abbc) false] assert
+    % search errors
+    /search [/stackunderflow] assert
+    (a) /search [(a) /stackunderflow] assert
+    (a) [] /search [(a) [] /typecheck] assert
+    [] (a) /search [[] (a) /typecheck] assert
+
+
+%% anchorsearch %%
+(abbc) (ab) /anchorsearch [(bc) (ab) true] assert
+(abbc) (bb) /anchorsearch [(abbc) false] assert
+(abbc) (bc) /anchorsearch [(abbc) false] assert
+(abbc) (B) /anchorsearch [(abbc) false] assert
+    % anchorsearch errors
+    /anchorsearch [/stackunderflow] assert
+    (abbc) /anchorsearch [(abbc) /stackunderflow] assert
+    (abbc) /name /anchorsearch [(abbc) /name /typecheck] assert
+    1 (a) /anchorsearch [1 (a) /typecheck] assert
+
+
+%% token %%
+% PLRM examples - string token post any true
+(15(St1) {1 2 add}) /token [((St1) {1 2 add}) 15 true] assert
+((St1) {1 2 add}) /token [( {1 2 add}) (St1) true] assert
+( {1 2 add}) /token [() {1 2 add} true] assert
+() /token [false] assert
+
+% Simple tokens - numbers
+(42) /token [() 42 true] assert
+(-17) /token [() -17 true] assert
+(3.14) /token [() 3.14 true] assert
+(-2.5e10) /token [() -2.5e10 true] assert
+
+% Simple tokens - names
+(/name) /token [() /name true] assert
+(executable) /token [() /executable true] assert
+
+% Simple tokens - strings
+((hello)) /token [() (hello) true] assert
+((nested (parens) here)) /token [() (nested (parens) here) true] assert
+(<48656C6C6F>) /token [() (Hello) true] assert  % hex string
+(<48 65 6C 6C 6F>) /token [() (Hello) true] assert  % hex string with spaces
+
+% Arrays
+([1 2 3]) /token [() [1 2 3] true] assert
+([]) /token [() [] true] assert
+([/a /b /c]) /token [() [/a /b /c] true] assert
+
+% Nested arrays
+([[1 2] [3 4]]) /token [() [[1 2] [3 4]] true] assert
+
+% Procedures
+({1 2 3}) /token [() {1 2 3} true] assert
+({}) /token [() {} true] assert
+
+% Nested procedures
+({{4 5}}) /token [() {{4 5}} true] assert
+({6 {7 8} 9}) /token [() {6 {7 8} 9} true] assert
+
+% Mixed nesting
+([1 {2 3} 4]) /token [() [1 {2 3} 4] true] assert
+
+% Dictionary marks (individual tokens, not composite)
+(<<) /token [() << true] assert
+% NOTE: >> tests cause execution issues because >> is an executable operator
+% (>>) /token [() >> true] assert
+% (<< /key value >>) /token [( /key value >>) << true] assert
+
+% Comments are skipped
+(42 % comment) /token [(% comment) 42 true] assert
+(% comment) /token [false] assert
+
+% Multiple tokens in sequence  
+(/xyz 123 /def) /token [( 123 /def) /xyz true] assert
+
+% Whitespace handling
+(   42   ) /token [(  ) 42 true] assert
+(\t\n\r 42) /token [() 42 true] assert
+
+% EOF cases
+() /token [false] assert
+(   ) /token [false] assert  % whitespace only
+(% comment only\n) /token [false] assert
+
+% Error conditions
+    % token errors
+    /token [/stackunderflow] assert
+    123 /token [123 /typecheck] assert
+    /name /token [/name /typecheck] assert

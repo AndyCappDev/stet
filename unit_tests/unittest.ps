@@ -1,0 +1,160 @@
+20 dict dup /$unittest exch def begin
+
+    /errors 0 def
+    /total_errors 0 def
+    /total_test_files 0 def
+    /total_tests 0 def
+
+    /tstring 50 string def
+    /cvsprint {tstring cvs print ( ) print} def
+
+    % Approximate equality for floating-point comparison
+    % Uses relative tolerance for larger values, absolute tolerance near zero
+    /approxeq { %def        % num1 num2 approxeq bool
+        2 copy sub abs      % num1 num2 |diff|
+        3 1 roll            % |diff| num1 num2
+        abs exch abs        % |diff| |num2| |num1|
+        2 copy gt { exch } if pop  % |diff| max(|num1|,|num2|)
+        dup 1e-10 lt {
+            % Both values near zero - use absolute tolerance
+            pop 1e-10 lt
+        } {
+            % Use relative tolerance (1e-5)
+            1e-5 mul gt not
+        } ifelse
+    } bind def
+
+    /arrayeq { %def         % array1 array2 arrayeq bool
+        2 copy eq { %if
+            pop pop true
+        } { %else
+            2 copy length exch length eq { %if
+                % We now have to compare all elements
+                true % arr arr true
+                0 1 3 index length 1 sub { %for
+                    3 index 1 index get % arr arr bool index val1
+                    3 index 2 index get % arr arr bool index val1 val2
+                    % Check if both elements are arrays
+                    2 copy type /arraytype eq exch type /arraytype eq and { %if
+                        % Both are arrays - recursively compare
+                        arrayeq
+                    } { %else
+                        % Check if both are numeric
+                        2 copy
+                        type dup /integertype eq exch /realtype eq or
+                        exch type dup /integertype eq exch /realtype eq or
+                        and { %if
+                            % Both numeric - use approximate comparison
+                            approxeq
+                        } { %else
+                            % Non-numeric - use exact comparison
+                            eq
+                        } ifelse
+                    } ifelse
+                    exch pop and % arr arr bool
+                    dup not { %if
+                        % exit early if not true
+                        exit
+                    } if
+                } for
+                exch pop exch pop
+            } { %else
+                % if lengths are not equal, return false
+                pop pop false
+            } ifelse
+        } ifelse
+    } bind def
+    /arrayne { arrayeq not } bind def
+
+
+    /doerror { %def
+        /errors ++
+        /total_errors ++
+        (    * Failed - ) print
+        (line ) print currentfile line cvsprint ( : ) print
+        /command load dup type /arraytype eq {printarray} {cvsprint} ifelse
+        NL print
+
+        % now print the operand stack
+        (               operand stack: ) print ostack printarray NL print
+    } bind def
+
+
+    /++ { %def          % key ++ -
+        dup load 1 add def
+    } bind def
+
+
+    % assert expects:
+    % 1) The operand stack preloaded with the arguments for the command being tested
+    % 2) A command/procedure to test. The command should be one of:
+    %    a) The name of the command being tested. For example: /add
+    %       or...
+    %    b) A procedure
+    % 3) an array of items that represent the expected state (results) of the operand
+    %    stack after the command is run
+    /assert { %def
+        //$unittest begin
+            /command_global currentglobal def
+            //false setglobal
+
+            /total_tests ++
+            /results exch reverse def
+
+            command_global setglobal
+            /command exch def
+        end % $unittest
+
+        {//$unittest /command get cvx exec} stopped { %if   % execute the command - trapping any errors
+            //$error /errorname get                         % put the error name on the operand stack
+            //$error /newerror false put                    % set newerror back to false
+        } if
+
+        //false setglobal
+
+        //$unittest begin
+            count array astore /ostack exch def             % save the state of the operand stack
+            ostack aload pop                                % restore the operand stack from the saved state
+
+            % check the results
+            count results length eq { %if
+                results { %forall
+                    dup type /arraytype eq { %if
+                        % value is an array - make sure all array values are the same
+                        arrayeq
+                    } { %else
+                        % Check if both values are numeric types (treat int/real as equivalent)
+                        2 copy
+                        type dup /integertype eq exch /realtype eq or
+                        exch type dup /integertype eq exch /realtype eq or
+                        and { %if
+                            % Both are numeric - use approximate comparison for floats
+                            approxeq
+                        } { %else
+                            % Non-numeric types - require both type and value equality
+                            1 index type 1 index type eq 3 1 roll eq and
+                        } ifelse
+                    } ifelse
+                    not { %if
+                        doerror
+                        exit
+                    } if
+                } forall
+            } { %else
+                doerror
+            } ifelse
+            clear   % clear the operand stack after we are done
+            command_global setglobal
+        end % $unittest
+    } bind def
+
+/assert dup load
+/arrayeq dup load
+/arrayne dup load
+/approxeq dup load
+end % $unittest
+
+def % defines the approxeq proc in the userdict
+def % defines the arrayne proc in the userdict
+def % defines the arrayeq proc in the userdict
+def % defines the assert proc in the userdict

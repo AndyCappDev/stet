@@ -1,0 +1,180 @@
+%% nulldevice operator tests
+
+userdict /$unittest known not {(unit_tests/unittest.ps) run} if
+
+
+%% nulldevice - basic operation %%
+% nulldevice should set CTM to identity
+gsave
+  nulldevice
+  matrix currentmatrix aload pop
+  [1.0 0.0 0.0 1.0 0.0 0.0] assert
+grestore
+
+% nulldevice defaultmatrix should return identity
+gsave
+  nulldevice
+  matrix defaultmatrix aload pop
+  [1.0 0.0 0.0 1.0 0.0 0.0] assert
+grestore
+
+
+%% nulldevice - graphics state operators still work %%
+% moveto/currentpoint should work under nulldevice
+gsave
+  nulldevice
+  100 200 moveto
+  currentpoint
+  [100.0 200.0] assert
+grestore
+
+% setlinewidth/currentlinewidth should work under nulldevice
+gsave
+  nulldevice
+  5 setlinewidth
+  /currentlinewidth [5] assert
+grestore
+
+% translate should work under nulldevice (identity CTM)
+gsave
+  nulldevice
+  10 20 translate
+  matrix currentmatrix aload pop
+  [1.0 0.0 0.0 1.0 10.0 20.0] assert
+grestore
+
+% scale should work under nulldevice
+gsave
+  nulldevice
+  2 3 scale
+  matrix currentmatrix aload pop
+  [2.0 0.0 0.0 3.0 0.0 0.0] assert
+grestore
+
+
+%% nulldevice - grestore restores real device %%
+% After grestore, page device should be restored
+gsave
+  nulldevice
+  % CTM is identity under nulldevice
+  matrix currentmatrix aload pop
+  [1.0 0.0 0.0 1.0 0.0 0.0] assert
+grestore
+% After grestore, CTM should no longer be identity (real device matrix).
+% The Y scale (element 3) is always negative (-dpi/72) on a real device,
+% unlike the identity matrix where it is 1.0.
+matrix currentmatrix 3 get 0 lt
+[true] assert
+
+
+%% nulldevice - currentpagedevice returns a dict %%
+gsave
+  nulldevice
+  currentpagedevice type /dicttype eq
+  [true] assert
+grestore
+
+
+%% nulldevice - initmatrix under nulldevice resets to identity %%
+gsave
+  nulldevice
+  2 3 scale    % modify CTM
+  initmatrix   % should reset to identity, not device default
+  matrix currentmatrix aload pop
+  [1.0 0.0 0.0 1.0 0.0 0.0] assert
+grestore
+
+
+%% nulldevice - initclip under nulldevice %%
+% initclip should not error under nulldevice
+gsave
+  nulldevice
+  initclip  % should not crash
+grestore
+
+
+%% nulldevice - showpage is no-op under nulldevice %%
+% showpage should not crash or produce output under nulldevice
+gsave
+  nulldevice
+  showpage  % should be a no-op
+grestore
+
+
+%% nulldevice - copypage is no-op under nulldevice %%
+% copypage should not crash under nulldevice
+gsave
+  nulldevice
+  copypage  % should be a no-op
+grestore
+
+
+%% nulldevice - coordinate transforms work %%
+% transform with identity CTM
+gsave
+  nulldevice
+  10 20 transform
+  [10.0 20.0] assert
+grestore
+
+% itransform with identity CTM
+gsave
+  nulldevice
+  10 20 itransform
+  [10.0 20.0] assert
+grestore
+
+
+%% setpagedevice after nulldevice - rebuilds device from scratch (PLRM) %%
+% setpagedevice should recover from nulldevice and create a full page device
+gsave
+  nulldevice
+  << /PageSize [300 400] >> setpagedevice
+  currentpagedevice /PageSize get aload pop
+  [300 400] assert
+grestore
+
+% nulldevice + empty setpagedevice restores the previous device
+gsave
+  currentpagedevice /OutputDevice get  % remember what device is currently active
+  nulldevice
+  << >> setpagedevice                  % empty request — should restore previous
+  currentpagedevice /OutputDevice get
+  {eq} [true] assert
+grestore
+
+% nulldevice + setpagedevice restores switched device, not original
+gsave
+  << /OutputDevice /png >> setpagedevice       % switch to png
+  currentpagedevice /OutputDevice get          % read back the active device name
+  nulldevice
+  << >> setpagedevice                          % should restore png
+  currentpagedevice /OutputDevice get
+  {eq} [true] assert
+grestore
+
+% request dict OutputDevice takes priority over previous device
+gsave
+  nulldevice
+  << /OutputDevice /png >> setpagedevice       % request png explicitly
+  currentpagedevice /OutputDevice get /png
+  {eq} [true] assert
+grestore
+
+% setpagedevice after nulldevice creates a proper page device (.IsPageDevice true)
+gsave
+  nulldevice
+  << >> setpagedevice
+  currentpagedevice /.IsPageDevice get
+  {} [true] assert
+grestore
+
+% setpagedevice after nulldevice has Install/BeginPage/EndPage procs
+gsave
+  nulldevice
+  << >> setpagedevice
+  currentpagedevice /Install known
+  currentpagedevice /BeginPage known
+  currentpagedevice /EndPage known
+  {} [true true true] assert
+grestore

@@ -1,0 +1,253 @@
+%% Interpreter parameter operator tests
+
+userdict /$unittest known not {(unit_tests/unittest.ps) run} if
+
+
+%%% vmreclaim %%%
+
+% Basic valid values
+0 /vmreclaim [] assert
+1 /vmreclaim [] assert
+2 /vmreclaim [] assert
+-1 /vmreclaim [] assert
+-2 /vmreclaim [] assert
+
+% Error: invalid value (rangecheck)
+3 /vmreclaim [3 /rangecheck] assert
+-3 /vmreclaim [-3 /rangecheck] assert
+100 /vmreclaim [100 /rangecheck] assert
+
+% Error: typecheck
+(hello) /vmreclaim [(hello) /typecheck] assert
+1.5 /vmreclaim [1.5 /typecheck] assert
+
+% Error: stackunderflow
+/vmreclaim [/stackunderflow] assert
+
+
+%%% setvmthreshold %%%
+
+% Basic valid values
+0 /setvmthreshold [] assert
+100 /setvmthreshold [] assert
+-1 /setvmthreshold [] assert
+
+% Error: negative (not -1) is rangecheck
+-2 /setvmthreshold [-2 /rangecheck] assert
+-100 /setvmthreshold [-100 /rangecheck] assert
+
+% Error: typecheck
+(hello) /setvmthreshold [(hello) /typecheck] assert
+1.5 /setvmthreshold [1.5 /typecheck] assert
+
+% Error: stackunderflow
+/setvmthreshold [/stackunderflow] assert
+
+
+%%% cachestatus %%%
+
+% Returns 7 integers, all integertype
+{cachestatus 7 array astore
+  true exch {type /integertype eq and} forall} [true] assert
+
+
+%%% setcacheparams / currentcacheparams %%%
+
+% currentcacheparams returns mark followed by 3 ints
+{currentcacheparams counttomark 3 eq exch pop exch pop exch pop exch pop} [true] assert
+
+% setcacheparams with upper value only
+mark 5000 /setcacheparams [] assert
+
+% Verify upper was set via currentcacheparams
+{currentcacheparams
+  /upper exch def
+  /lower exch def
+  /size exch def
+  pop % mark
+  upper} [5000] assert
+
+% setcacheparams with upper and lower
+mark 100 7500 /setcacheparams [] assert
+{currentcacheparams
+  /upper exch def
+  /lower exch def
+  /size exch def
+  pop % mark
+  upper lower} [7500 100] assert
+
+% setcacheparams with size, lower, upper
+mark 1000000 200 8000 /setcacheparams [] assert
+{currentcacheparams
+  /upper exch def
+  /lower exch def
+  /size exch def
+  pop % mark
+  size lower upper} [1000000 200 8000] assert
+
+% Restore original MaxFontCache
+mark 67108864 0 0 setcacheparams
+
+% Error: typecheck (non-numeric above mark)
+mark (bad) 100 /setcacheparams [null (bad) 100 /typecheck] dup 0 mark put assert
+
+% Error: rangecheck (negative value)
+mark -1 /setcacheparams [null -1 /rangecheck] dup 0 mark put assert
+
+
+%%% setucacheparams / ucachestatus %%%
+
+% ucachestatus returns mark followed by 5 ints
+{ucachestatus counttomark 5 eq
+  exch pop exch pop exch pop exch pop exch pop exch pop} [true] assert
+
+% setucacheparams with blimit
+mark 4096 /setucacheparams [] assert
+
+% Verify via ucachestatus
+{ucachestatus
+  /blimit exch def
+  pop pop pop pop  % rmax rsize bmax bsize
+  pop  % mark
+  blimit} [4096] assert
+
+% Reset
+mark 0 setucacheparams
+
+% Error: typecheck
+mark (bad) /setucacheparams [null (bad) /typecheck] dup 0 mark put assert
+
+% Error: rangecheck
+mark -5 /setucacheparams [null -5 /rangecheck] dup 0 mark put assert
+
+
+%%% setdevparams / currentdevparams %%%
+
+% setdevparams accepts string and dict
+(%stdin) << >> /setdevparams [] assert
+(%stdout) << >> /setdevparams [] assert
+
+% currentdevparams returns a dict
+{(%stdin) currentdevparams type} [/dicttype] assert
+
+% Error: typecheck - second arg not dict
+(dev) 123 /setdevparams [(dev) 123 /typecheck] assert
+
+% Error: stackunderflow
+/setdevparams [/stackunderflow] assert
+(dev) /setdevparams [(dev) /stackunderflow] assert
+
+% currentdevparams errors
+/currentdevparams [/stackunderflow] assert
+123 /currentdevparams [123 /typecheck] assert
+
+
+%%% setcachelimit %%%
+
+% Basic usage
+1000 /setcachelimit [] assert
+
+% Verify via currentcacheparams (upper = MaxFontItem)
+{currentcacheparams
+  /upper exch def
+  pop pop  % lower size
+  pop  % mark
+  upper} [1000] assert
+
+% Reset
+0 setcachelimit
+
+% Error: typecheck
+(hello) /setcachelimit [(hello) /typecheck] assert
+1.5 /setcachelimit [1.5 /typecheck] assert
+
+% Error: rangecheck
+-1 /setcachelimit [-1 /rangecheck] assert
+
+% Error: stackunderflow
+/setcachelimit [/stackunderflow] assert
+
+
+%%% Integration: setcachelimit == setuserparams MaxFontItem %%%
+
+% Set via setcachelimit, verify via currentuserparams
+42 setcachelimit
+{currentuserparams /MaxFontItem get} [42] assert
+
+% Set via setuserparams, verify via currentcacheparams
+<< /MaxFontItem 99 >> setuserparams
+{currentcacheparams
+  /upper exch def
+  pop pop  % lower size
+  pop  % mark
+  upper} [99] assert
+
+% Clean up
+0 setcachelimit
+
+
+%%% currentsystemparams %%%
+
+% currentsystemparams returns a dict
+{currentsystemparams type} [/dicttype] assert
+
+% currentsystemparams dict has known key MaxFontCache
+{currentsystemparams /MaxFontCache known} [true] assert
+
+% currentsystemparams dict has known key StartJobPassword
+{currentsystemparams /StartJobPassword known} [true] assert
+
+
+%%% setsystemparams basic %%%
+
+% setsystemparams accepts a dict (with string password)
+<< /Password (0) >> /setsystemparams [] assert
+
+% setsystemparams error: stackunderflow
+/setsystemparams [/stackunderflow] assert
+
+% setsystemparams error: typecheck (non-dict)
+123 /setsystemparams [123 /typecheck] assert
+
+
+%% =============================================================================
+%% Level 3 user parameters
+%% =============================================================================
+
+%% IdiomRecognition exists and defaults to true
+{currentuserparams /IdiomRecognition get} [true] assert
+
+%% IdiomRecognition can be set to false
+<< /IdiomRecognition false >> setuserparams
+{currentuserparams /IdiomRecognition get} [false] assert
+
+%% Restore IdiomRecognition to true
+<< /IdiomRecognition true >> setuserparams
+
+%% AccurateScreens exists and defaults to false
+{currentuserparams /AccurateScreens get} [false] assert
+
+%% AccurateScreens can be set to true
+<< /AccurateScreens true >> setuserparams
+{currentuserparams /AccurateScreens get} [true] assert
+
+%% Restore AccurateScreens to false
+<< /AccurateScreens false >> setuserparams
+
+%% HalftoneMode exists and defaults to 0
+{currentuserparams /HalftoneMode get} [0] assert
+
+%% HalftoneMode can be set
+<< /HalftoneMode 1 >> setuserparams
+{currentuserparams /HalftoneMode get} [1] assert
+
+%% Restore HalftoneMode to 0
+<< /HalftoneMode 0 >> setuserparams
+
+
+%% =============================================================================
+%% Level 3 system parameters
+%% =============================================================================
+
+%% LicenseID exists in system params
+{currentsystemparams /LicenseID known} [true] assert

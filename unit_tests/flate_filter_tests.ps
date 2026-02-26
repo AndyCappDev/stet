@@ -1,0 +1,107 @@
+%!PS
+% Flate Filter Predictor Tests for PostForge
+% Tests FlateDecode/FlateEncode with PNG and TIFF predictor functions
+
+userdict /$unittest known not {(unit_tests/unittest.ps) run} if
+
+% Helper: round-trip encode then decode through Flate with predictor params
+% Usage: (data) params_dict flate_roundtrip -> decoded_string
+/flate_roundtrip {
+    /frparams exch def
+    /frdata exch def
+    /frdatalen frdata length def
+
+    % Step 1: Encode to temp file
+    (unit_tests/.flate_tmp.bin) (w) file /froutfile exch def
+    froutfile frparams /FlateEncode filter /frencoder exch def
+    frencoder frdata writestring
+    frencoder closefile
+
+    % Step 2: Decode from temp file
+    (unit_tests/.flate_tmp.bin) (r) file frparams /FlateDecode filter /frdecoder exch def
+    frdecoder frdatalen string readstring pop
+    frdecoder closefile
+} def
+
+
+%% Flate no predictor round-trip %%
+% Basic Flate encode/decode without predictors (regression guard)
+(Hello World! This is a test of Flate compression.)
+<< >> flate_roundtrip
+(Hello World! This is a test of Flate compression.)
+{eq} [true] assert
+
+%% Flate PNG Sub predictor round-trip (Predictor 11) %%
+% 4 columns, 3 colors, 8bpc => 12-byte rows
+% Create 24-byte test data (2 rows)
+/pngdata 24 string def
+0 1 23 { /i exch def pngdata i i 10 mul 256 mod put } for
+pngdata
+<< /Predictor 11 /Columns 4 /Colors 3 /BitsPerComponent 8 >>
+flate_roundtrip
+pngdata {eq} [true] assert
+
+%% Flate PNG Up predictor round-trip (Predictor 12) %%
+/updata 24 string def
+0 1 23 { /i exch def updata i i 5 mul 256 mod put } for
+updata
+<< /Predictor 12 /Columns 4 /Colors 3 /BitsPerComponent 8 >>
+flate_roundtrip
+updata {eq} [true] assert
+
+%% Flate TIFF Predictor 2 round-trip %%
+/tiffdata 24 string def
+0 1 23 { /i exch def tiffdata i i 7 mul 256 mod put } for
+tiffdata
+<< /Predictor 2 /Columns 4 /Colors 3 /BitsPerComponent 8 >>
+flate_roundtrip
+tiffdata {eq} [true] assert
+
+%% Flate PNG Sub with 1 color round-trip %%
+/graydata 16 string def
+0 1 15 { /i exch def graydata i i 17 mul 256 mod put } for
+graydata
+<< /Predictor 11 /Columns 16 /Colors 1 /BitsPerComponent 8 >>
+flate_roundtrip
+graydata {eq} [true] assert
+
+%% Flate TIFF Predictor 2 with 1 color round-trip %%
+graydata
+<< /Predictor 2 /Columns 16 /Colors 1 /BitsPerComponent 8 >>
+flate_roundtrip
+graydata {eq} [true] assert
+
+%% Flate PNG Sub with 4 colors round-trip (CMYK-like) %%
+/cmykdata 32 string def
+0 1 31 { /i exch def cmykdata i i 11 mul 256 mod put } for
+cmykdata
+<< /Predictor 11 /Columns 8 /Colors 4 /BitsPerComponent 8 >>
+flate_roundtrip
+cmykdata {eq} [true] assert
+
+%% Flate TIFF Predictor 2 with 4 colors round-trip %%
+cmykdata
+<< /Predictor 2 /Columns 8 /Colors 4 /BitsPerComponent 8 >>
+flate_roundtrip
+cmykdata {eq} [true] assert
+
+%% Flate PNG predictor with larger data round-trip %%
+% 10 rows of 30 bytes each (10 columns, 3 colors)
+/largedata 300 string def
+0 1 299 { /i exch def largedata i i 13 mul 256 mod put } for
+largedata
+<< /Predictor 11 /Columns 10 /Colors 3 /BitsPerComponent 8 >>
+flate_roundtrip
+largedata {eq} [true] assert
+
+%% Flate PNG predictor 10 (None hint) round-trip %%
+% Predictor=10 suggests None, but encoder uses Sub; decoder reads per-row byte
+/nonedata 24 string def
+0 1 23 { /i exch def nonedata i i 3 mul 256 mod put } for
+nonedata
+<< /Predictor 10 /Columns 4 /Colors 3 /BitsPerComponent 8 >>
+flate_roundtrip
+nonedata {eq} [true] assert
+
+% Clean up temp file
+(unit_tests/.flate_tmp.bin) deletefile

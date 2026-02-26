@@ -1,0 +1,109 @@
+%% Context parameter tests
+
+userdict /$unittest known not {(unit_tests/unittest.ps) run} if
+
+
+%% Context Parameter Save/Restore %%
+% Tests that save/restore properly handle context parameters
+
+%% Array packing mode %%
+% Basic packing mode save/restore
+false setpacking save /mysave exch def true setpacking 
+mysave restore /currentpacking [false] assert
+
+% Nested packing mode operations
+false setpacking save /outer_save exch def true setpacking
+save /inner_save exch def false setpacking
+inner_save restore /currentpacking [true] assert
+outer_save restore /currentpacking [false] assert
+
+
+%% VM allocation mode %%
+% Basic VM allocation mode save/restore
+false setglobal save /mysave exch def true setglobal 
+mysave restore /currentglobal [false] assert
+
+% Nested VM allocation mode operations
+false setglobal save /outer_save exch def true setglobal
+save /inner_save exch def false setglobal
+inner_save restore /currentglobal [true] assert
+outer_save restore /currentglobal [false] assert
+
+
+%% Combined parameter operations %%
+% Both packing and VM allocation mode together
+false setpacking false setglobal save /mysave exch def
+true setpacking true setglobal
+mysave restore
+/currentpacking [false] assert
+/currentglobal [false] assert
+
+% Verify parameters work independently
+false setpacking true setglobal save /mysave exch def
+true setpacking false setglobal
+mysave restore
+/currentpacking [false] assert
+/currentglobal [true] assert
+
+
+%% Complex nested parameter scenarios %%
+% Multiple save levels with different parameter combinations
+false setpacking false setglobal save /save1 exch def
+true setpacking false setglobal save /save2 exch def  
+false setpacking true setglobal save /save3 exch def
+true setpacking true setglobal
+% Test current state
+/currentpacking [true] assert
+/currentglobal [true] assert
+% Restore in sequence
+save3 restore
+/currentpacking [false] assert
+/currentglobal [true] assert
+save2 restore
+/currentpacking [true] assert
+/currentglobal [false] assert
+save1 restore
+/currentpacking [false] assert
+/currentglobal [false] assert
+
+
+%% Context parameters with graphics state integration %%
+% Test that context parameter restoration works with graphics operations
+false setpacking 1 setlinewidth save /mysave exch def
+true setpacking 5 setlinewidth gsave 10 setlinewidth gsave 20 setlinewidth
+mysave restore
+/currentpacking [false] assert
+/currentlinewidth [1] assert
+
+% Verify context parameters persist across gsave/grestore but restore with save/restore
+false setpacking false setglobal save /mysave exch def
+true setpacking true setglobal gsave
+% Parameters should persist through gsave
+/currentpacking [true] assert  
+/currentglobal [true] assert
+grestore
+% Parameters should still be changed after grestore
+/currentpacking [true] assert
+/currentglobal [true] assert  
+mysave restore
+% Parameters should be restored after restore
+/currentpacking [false] assert
+/currentglobal [false] assert
+
+
+%% Edge cases and validation %%
+% Ensure packing mode changes don't affect existing arrays
+false setpacking [1 2 3] /test_array exch break def
+save /mysave exch def true setpacking
+test_array length 3 eq [true] assert  % Array should be unaffected
+mysave restore
+
+% Test parameter restoration after complex operations
+true setpacking true setglobal save /mysave exch def
+false setpacking false setglobal
+% Create some arrays and objects while parameters are changed
+[1 2 3] /temp_array exch def
+5 dict /temp_dict exch def
+mysave restore
+/currentpacking [true] assert
+/currentglobal [true] assert

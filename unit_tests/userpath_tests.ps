@@ -1,0 +1,191 @@
+%% User Path operator tests
+
+userdict /$unittest known not {(unit_tests/unittest.ps) run} if
+
+
+%% setbbox %%
+% Normal setbbox stores bounding box for pathbbox
+0 0 moveto 100 0 lineto 100 100 lineto 0 100 lineto closepath
+10 20 200 300 {setbbox pathbbox} [10.0 20.0 200.0 300.0] assert newpath
+
+% setbbox errors
+10 20 200 /setbbox [10 20 200 /stackunderflow] assert
+10 20 200 () /setbbox [10 20 200 () /typecheck] assert
+% rangecheck: urx < llx
+200 20 10 300 /setbbox [200 20 10 300 /rangecheck] assert
+% rangecheck: ury < lly
+10 300 200 20 /setbbox [10 300 200 20 /rangecheck] assert
+
+
+%% ucache %%
+% ucache is a no-op; should not error
+{ucache} [] assert
+
+
+%% uappend - ordinary form %%
+% Ordinary user path with moveto and lineto
+newpath
+{0 0 100 100 setbbox 0 0 moveto 100 0 lineto 100 100 lineto closepath}
+{uappend pathbbox}
+[0.0 0.0 100.0 100.0] assert newpath
+
+% Ordinary user path with ucache (should be ignored)
+newpath
+{ucache 0 0 50 50 setbbox 0 0 moveto 50 50 lineto}
+{uappend currentpoint}
+[50.0 50.0] assert newpath
+
+
+%% uappend - encoded form %%
+% Encoded user path: [data_array opcode_string]
+% Opcode 0=setbbox(4), 1=moveto(2), 3=lineto(2), 10=closepath(0)
+newpath
+[
+    [0 0 100 100   0 0   100 0   100 100]   % data: setbbox args, moveto, 2x lineto
+    <00 01 03 03 0A>                          % opcodes: setbbox moveto lineto lineto closepath
+]
+{uappend pathbbox}
+[0.0 0.0 100.0 100.0] assert newpath
+
+% Encoded user path with repeat prefix
+% Repeat prefix: byte 34 = repeat next op 2 times (34-32=2)
+newpath
+[
+    [0 0 100 100   0 0   50 0   100 50]     % data
+    <00 01 22 03>                             % setbbox, moveto, repeat(2) lineto
+]
+{uappend currentpoint}
+[100.0 50.0] assert newpath
+
+
+%% uappend errors %%
+/uappend [/stackunderflow] assert
+() /uappend [() /typecheck] assert
+
+
+%% upath %%
+% Create path and extract user path
+newpath 0 0 moveto 100 0 lineto 100 100 lineto closepath
+false {upath} exec
+% Verify it is an executable array
+{xcheck} [true] assert
+
+% upath with ucache=true includes ucache as first element
+newpath 0 0 moveto 50 50 lineto
+true {upath} exec
+% The first element should be the name ucache
+{0 get} [/ucache] assert
+newpath
+
+% upath errors
+/upath [/stackunderflow] assert
+() /upath [() /typecheck] assert
+newpath true /upath [true /nocurrentpoint] assert
+
+
+%% ufill %%
+% ufill should execute without error; test via display list (non-empty path)
+{0 0 100 100 setbbox 0 0 moveto 100 0 lineto 100 100 lineto closepath}
+{ufill} [] assert
+
+% ufill errors
+/ufill [/stackunderflow] assert
+() /ufill [() /typecheck] assert
+
+
+%% ueofill %%
+{0 0 100 100 setbbox 0 0 moveto 100 0 lineto 100 100 lineto closepath}
+{ueofill} [] assert
+
+% ueofill errors
+/ueofill [/stackunderflow] assert
+() /ueofill [() /typecheck] assert
+
+
+%% ustroke %%
+% Simple form - should not error
+{0 0 100 100 setbbox 0 0 moveto 100 0 lineto}
+{ustroke} [] assert
+
+% ustroke errors
+/ustroke [/stackunderflow] assert
+() /ustroke [() /typecheck] assert
+
+
+%% ustrokepath %%
+% ustrokepath replaces current path with stroke outline
+newpath
+{0 0 100 100 setbbox 0 0 moveto 100 0 lineto}
+{ustrokepath currentpoint} exec
+% Should have a currentpoint (from the stroke outline)
+count 2 ge {pop pop true} {false} ifelse
+[true] assert newpath
+
+
+%% inufill %%
+% Point inside a filled rectangle user path
+50 50 {0 0 100 100 setbbox 0 0 moveto 100 0 lineto 100 100 lineto 0 100 lineto closepath}
+{inufill} [true] assert
+
+% Point outside
+200 200 {0 0 100 100 setbbox 0 0 moveto 100 0 lineto 100 100 lineto 0 100 lineto closepath}
+{inufill} [false] assert
+
+% inufill errors
+50 /inufill [50 /stackunderflow] assert
+50 50 () /inufill [50 50 () /typecheck] assert
+50 () {0 0 moveto} /inufill [50 () {0 0 moveto} /typecheck] assert
+() 50 {0 0 moveto} /inufill [() 50 {0 0 moveto} /typecheck] assert
+
+
+%% inueofill %%
+% Point inside
+50 50 {0 0 100 100 setbbox 0 0 moveto 100 0 lineto 100 100 lineto 0 100 lineto closepath}
+{inueofill} [true] assert
+
+% Point outside
+200 200 {0 0 100 100 setbbox 0 0 moveto 100 0 lineto 100 100 lineto 0 100 lineto closepath}
+{inueofill} [false] assert
+
+% inueofill errors
+50 /inueofill [50 /stackunderflow] assert
+
+
+%% inustroke %%
+% Point on the stroke of a line (use a point right on the line)
+50 0 {0 0 100 100 setbbox 0 0 moveto 100 0 lineto}
+{inustroke} [true] assert
+
+% Point far from stroke
+50 50 {0 0 100 100 setbbox 0 0 moveto 100 0 lineto}
+{inustroke} [false] assert
+
+% inustroke errors
+50 /inustroke [50 /stackunderflow] assert
+
+
+%% Encoded user paths with inufill %%
+% Verify encoded user paths work with insideness testing
+50 50
+[
+    [0 0 100 100   0 0   100 0   100 100   0 100]
+    <00 01 03 03 03 0A>    % setbbox moveto lineto lineto lineto closepath
+]
+{inufill} [true] assert
+
+% Point outside
+200 200
+[
+    [0 0 100 100   0 0   100 0   100 100   0 100]
+    <00 01 03 03 03 0A>
+]
+{inufill} [false] assert
+
+
+%% newpath clears bbox %%
+% After setbbox + newpath, the stored bbox should be cleared.
+% We verify that pathbbox does NOT return the stored values (10 20 200 300).
+0 0 moveto 10 20 200 300 setbbox
+newpath
+0 0 moveto 100 0 lineto 100 100 lineto closepath
+{pathbbox} [0.0 0.0 100.0 100.0] assert newpath

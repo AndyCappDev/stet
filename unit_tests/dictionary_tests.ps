@@ -1,0 +1,189 @@
+%% Dictionary tests
+
+userdict /$unittest known not {(unit_tests/unittest.ps) run} if
+
+
+%% dict %%
+10 {dict type} [/dicttype] assert
+    % dict errors
+    /dict [/stackunderflow] assert
+    (a) /dict [(a) /typecheck] assert
+
+
+%% def %%
+/testdef (abc) def {testdef} [(abc)] assert
+    % def errors
+    /def [/stackunderflow] assert
+    /key /def [/key /stackunderflow] assert
+    true setglobal 5 dict false setglobal begin
+    /key (value) /def [/key (value) /invalidaccess] assert end
+    systemdict begin /key (value) /def [/key (value) /invalidaccess] assert end
+
+
+%% length %%
+10 dict /length [0] assert
+    % length errors
+    /length [/stackunderflow] assert
+    1 /length [1 /typecheck] assert
+
+
+%% maxlength %%
+10 {dict maxlength} [0] assert
+    % maxlength errors
+    /maxlength [/stackunderflow] assert
+    1 /maxlength [1 /typecheck] assert
+
+
+%% >> mark construction
+<< /string (abc) /int 23 >> dup /length [2 index 2] assert
+    % dictionary mark errors
+    /string (abc) /int 23 {>>} [/string (abc) /int 23 /unmatchedmark] assert
+    << /string (abc) /int {>>} [null /string (abc) /int /rangecheck] dup 0 << put assert
+
+
+%% begin %%
+/testdict 10 dict def {testdict begin currentdict} [testdict] assert
+    % begin errors
+    /begin [/stackunderflow] assert
+    (a) /begin [(a) /typecheck] assert
+
+
+%% end %%
+{end currentdict testdict eq} [false] assert
+    % end errors
+    /end [/dictstackunderflow] assert
+
+
+%% load %%
+/systemdict /load [systemdict] assert
+    % load errors
+    /load [/stackunderflow] assert
+    /nothing /load [/nothing /undefined] assert
+
+
+%% get %%
+systemdict /true /get [true] assert
+    % get errors
+    /get [/stackunderflow] assert
+    1 /key /get [1 /key /typecheck] assert
+    userdict /nothing /get [userdict /nothing /undefined] assert
+
+
+%% put %%
+/mydict 5 dict def mydict /abc 123 {put mydict /abc get} [123] assert
+    % put errors
+    /put [/stackunderflow] assert
+    mydict /put [mydict /stackunderflow] assert
+    1 123 /put [1 123 /stackunderflow] assert
+    mydict [] 123 /put [mydict [] 123 /typecheck] assert
+    % PLRM: string keys must be copied on put (not stored by reference)
+    % Test that modifying a string after put does not corrupt the dict key
+    /sd 5 dict def
+    /s (A) def sd s 100 put s 0 97 put sd (A) /known [true] assert
+    % Test that string keys from a shared literal in a loop produce independent entries
+    % This reproduces the PSChess bug: ( ) inside a proc body shares storage
+    /sd2 5 dict def
+    [(P) (N) (B)] { /orig exch def sd2 ( ) dup 0 orig 0 get put 1 put } forall
+    sd2 {length} [3] assert
+    sd2 (P) /known [true] assert
+    sd2 (N) /known [true] assert
+    sd2 (B) /known [true] assert
+    % Test string key lookup with getinterval matches stored key
+    /sd3 << (hello) 42 >> def
+    sd3 (helloworld) 0 5 getinterval /known [true] assert
+
+
+%% where %%
+/nothing /where [false] assert
+/userdict /where [systemdict true] assert
+/t [1 2] def t 15 def t /where [currentdict true] assert
+    % where errors
+    /where [/stackunderflow] assert
+
+
+%% known %%
+<</total 0>> {dup /total known exch /badname known} [true false] assert
+currentdict t /known [true] assert
+currentdict [1 2] /known [false] assert
+    % known errors
+    /known [/stackunderflow] assert
+    systemdict /known [systemdict /stackunderflow] assert
+    1 /nothing /known [1 /nothing /typecheck] assert
+
+
+%% store %%
+/mydict 5 dict def
+/abc 123 {store /abc where pop} [userdict] assert
+/abc 456 {store abc} [456] assert
+mydict begin /abc 789 {store /abc where pop} [userdict] assert end
+mydict begin /abcd 0 {store /abcd where pop} [mydict] assert end
+    % store errors
+    /store [/stackunderflow] assert
+    /abc /store [/abc /stackunderflow] assert
+    true setglobal /mydict 5 dict def false setglobal mydict begin /abcd (abcd) /store [/abcd (abcd) /invalidaccess] assert end
+
+
+%% copy %%
+<< /abc 123 /cde (cde) /arr [1 (b) 2] >> 1 dict {copy length} [3] assert
+    % copy errors
+    /copy [/stackunderflow] assert
+    1 mydict /copy [1 mydict /typecheck] assert
+    /td1 << /abc 123 /cde (cde) /arr [1 (b) 2] >> def
+        true setglobal /td2 1 dict def false setglobal
+        td1 td2 /copy [td1 td2 /invalidaccess] assert
+
+
+%% forall %%
+% not sure how to test this yet since forall returns items in arbitrary order
+
+
+%% currentdict %%
+/currentdict [userdict] assert
+
+
+%% errordict %%
+/errordict [errordict] assert
+
+
+%% $error %%
+/$error [$error] assert
+
+
+%% systemdict %%
+/systemdict [systemdict] assert
+
+
+%% systemdict %%
+/userdict [userdict] assert
+
+
+%% systemdict %%
+/globaldict [globaldict] assert
+
+
+%% statusdict %%
+/statusdict [statusdict] assert
+
+
+%% undef %%
+/mydict << /abc 123 /cde (cde) /arr [1 (b) 2] >> def mydict /arr {undef mydict /arr get} [mydict /arr /undefined] assert
+mydict /unknownkey /undef [] assert
+    % undef errors
+    /undef [/stackunderflow] assert
+    mydict /undef [mydict /stackunderflow] assert
+    1 /arr /undef [1 /arr /typecheck] assert
+
+
+%% dictstack
+4 array /dictstack [[systemdict globaldict userdict]] assert
+    % dictstack errors
+    /dictstack [/stackunderflow] assert
+    () /dictstack [() /typecheck] assert
+    2 array /dictstack [2 array /rangecheck] assert
+
+
+%% cleardictstack
+{cleardictstack 3 array dictstack} [[systemdict globaldict userdict]] assert
+5 dict begin {cleardictstack 3 array dictstack} [[systemdict globaldict userdict]] assert
+
+%<< /key1 1 /key2 (value) >> {} break forall

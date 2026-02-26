@@ -1,0 +1,209 @@
+%% Clipping Operator tests
+%% Tests for clip, eoclip, clippath, initclip, rectclip, clipsave/cliprestore
+
+userdict /$unittest known not {(unit_tests/unittest.ps) run} if
+
+% All tests run under nulldevice
+gsave nulldevice
+
+
+%% =============================================================================
+%% clip
+%% =============================================================================
+
+%% clip - does NOT consume current path %%
+gsave
+  newpath
+  50 50 moveto 200 50 lineto 200 200 lineto 50 200 lineto closepath
+  clip
+  % Path should still exist - currentpoint should work
+  currentpoint pop pop
+grestore
+
+%% clip - restricts clip region %%
+gsave
+  newpath
+  10 20 moveto 110 20 lineto 110 220 lineto 10 220 lineto closepath
+  clip
+  clippath pathbbox
+  /ury exch def /urx exch def /lly exch def /llx exch def
+  llx 10 ge [true] assert
+  lly 20 ge [true] assert
+  urx 110 le [true] assert
+  ury 220 le [true] assert
+grestore
+
+%% clip - successive clips replace path %%
+gsave
+  newpath
+  0 0 moveto 200 0 lineto 200 200 lineto 0 200 lineto closepath
+  clip
+  newpath
+  100 100 moveto 300 100 lineto 300 300 lineto 100 300 lineto closepath
+  clip
+  clippath pathbbox
+  /ury exch def /urx exch def /lly exch def /llx exch def
+  % Second clip replaces first (PostForge does not compute true intersection)
+  llx 100 ge [true] assert
+  lly 100 ge [true] assert
+grestore
+
+
+%% =============================================================================
+%% eoclip
+%% =============================================================================
+
+%% eoclip - does NOT consume current path %%
+gsave
+  newpath
+  50 50 moveto 200 50 lineto 200 200 lineto 50 200 lineto closepath
+  eoclip
+  currentpoint pop pop
+grestore
+
+%% eoclip - restricts clip region %%
+gsave
+  newpath
+  20 30 moveto 120 30 lineto 120 130 lineto 20 130 lineto closepath
+  eoclip
+  clippath pathbbox
+  /ury exch def /urx exch def /lly exch def /llx exch def
+  llx 20 ge [true] assert
+  lly 30 ge [true] assert
+  urx 120 le [true] assert
+  ury 130 le [true] assert
+grestore
+
+
+%% =============================================================================
+%% clippath
+%% =============================================================================
+
+%% clippath - sets current path to clipping boundary %%
+gsave
+  initclip
+  clippath
+  % Under nulldevice, initclip creates degenerate clip (single point at origin)
+  % pathbbox should still succeed (returns 0 0 0 0)
+  {pathbbox pop pop pop pop} stopped [false] assert
+grestore
+
+%% clippath - after rectclip %%
+gsave
+  10 20 100 200 rectclip
+  newpath
+  clippath
+  pathbbox
+  /ury exch def /urx exch def /lly exch def /llx exch def
+  llx 10 ge [true] assert
+  lly 20 ge [true] assert
+grestore
+
+
+%% =============================================================================
+%% initclip
+%% =============================================================================
+
+%% initclip - resets to device default clip %%
+gsave
+  % Restrict clip
+  10 10 moveto 50 10 lineto 50 50 lineto 10 50 lineto closepath clip
+  % Reset
+  initclip
+  % Clip should be back to device default
+  clippath pathbbox
+  /ury exch def /urx exch def /lly exch def /llx exch def
+  % Under nulldevice these can vary, just verify it runs
+grestore
+
+%% initclip - no error %%
+{initclip} stopped [false] assert
+
+
+%% =============================================================================
+%% rectclip
+%% =============================================================================
+
+%% rectclip - 4-number form %%
+gsave
+  50 50 100 100 rectclip
+  clippath pathbbox
+  /ury exch def /urx exch def /lly exch def /llx exch def
+  llx 50 ge [true] assert
+  lly 50 ge [true] assert
+  urx 150 le [true] assert
+  ury 150 le [true] assert
+grestore
+
+%% rectclip - array form %%
+gsave
+  [25 25 200 200] rectclip
+  clippath pathbbox
+  /ury exch def /urx exch def /lly exch def /llx exch def
+  llx 25 ge [true] assert
+  lly 25 ge [true] assert
+grestore
+
+%% rectclip - clears current path %%
+gsave
+  100 200 moveto
+  50 50 100 100 rectclip
+  {currentpoint} stopped [true] assert
+  clear
+grestore
+
+%% rectclip - error conditions %%
+/rectclip [/stackunderflow] assert
+10 20 100 /rectclip [10 20 100 /stackunderflow] assert
+(a) 20 100 200 /rectclip [(a) 20 100 200 /typecheck] assert
+
+%% rectclip - array not multiple of 4 %%
+[10 20 100] /rectclip [[10 20 100] /rangecheck] assert
+
+
+%% =============================================================================
+%% clipsave / cliprestore
+%% =============================================================================
+
+%% clipsave/cliprestore - save and restore clip %%
+gsave
+  % Get initial clip bounds
+  clippath pathbbox
+  /orig_ury exch def /orig_urx exch def /orig_lly exch def /orig_llx exch def
+
+  clipsave
+
+  % Modify clip
+  50 50 100 100 rectclip
+  clippath pathbbox
+  /clip_ury exch def /clip_urx exch def /clip_lly exch def /clip_llx exch def
+  clip_llx 50 ge [true] assert
+
+  cliprestore
+
+  % Clip should be restored to original
+  newpath clippath pathbbox
+  /rest_ury exch def /rest_urx exch def /rest_lly exch def /rest_llx exch def
+  rest_llx orig_llx eq [true] assert
+  rest_lly orig_lly eq [true] assert
+grestore
+
+%% clipsave/cliprestore - nested %%
+gsave
+  clipsave
+    50 50 200 200 rectclip
+    clipsave
+      100 100 50 50 rectclip
+      clippath pathbbox
+      /inner_ury exch def /inner_urx exch def /inner_lly exch def /inner_llx exch def
+      inner_llx 100 ge [true] assert
+    cliprestore
+    % Should be back to 50,50,200,200
+    newpath clippath pathbbox
+    /mid_ury exch def /mid_urx exch def /mid_lly exch def /mid_llx exch def
+    mid_llx 50 ge [true] assert
+  cliprestore
+grestore
+
+
+grestore

@@ -1,0 +1,751 @@
+%% File tests
+
+userdict /$unittest known not {(unit_tests/unittest.ps) run} if
+
+
+%% File I/O Operators Tests %%
+
+%% readstring %%
+% Basic readstring functionality
+% Create test file first
+(testfile.txt) (w) file /myfile exch def
+myfile (Hello World)
+/writestring [] assert
+myfile closefile
+
+% Test reading full string
+(testfile.txt) (r) file /myfile exch def
+myfile 11 string
+/readstring [(Hello World) true] assert
+%try reading again
+myfile 1 string
+/readstring [() false] assert
+myfile closefile
+
+% Test reading entire string
+(testfile.txt) (r) file /myfile exch def
+myfile 5 string
+/readstring [(Hello) true] assert
+myfile closefile
+
+% Test reading more than available (EOF)
+(testfile.txt) (r) file /myfile exch def
+myfile 50 string
+/readstring [(Hello World) false] assert
+myfile closefile
+
+% readstring errors
+/readstring [/stackunderflow] assert
+(%stdin) (r) file /readstring [(%stdin) (r) file /stackunderflow] assert
+123 /readstring [123 /stackunderflow] assert
+(%stdin) (r) file 123 /readstring [(%stdin) (r) file 123 /typecheck] assert
+(%stdin) (r) file (string) /readstring [(%stdin) (r) file (string) /typecheck] assert
+
+%% writestring %%
+% Test basic writestring
+(testfile2.txt) (w) file
+dup (Test Data) writestring
+closefile
+
+% Verify the written data
+(testfile2.txt) (r) file dup /myfile exch def
+20 string readstring
+[(Test Data) false] assert
+myfile closefile
+
+% Test binary data writestring
+(testfile3.txt) (w) file dup /myfile exch def
+(\000\001\255\254) writestring
+myfile closefile
+
+% Verify binary data
+(testfile3.txt) (r) file dup /myfile exch def
+10 string readstring
+[(\000\001\255\254) false] assert
+myfile closefile
+
+% writestring errors
+/writestring [/stackunderflow] assert
+(%stdout) (w) file /writestring [(%stdout) (w) file /stackunderflow] assert
+123 /writestring [123 /stackunderflow] assert
+(%stdout) (w) file 123 /writestring [(%stdout) (w) file 123 /typecheck] assert
+123 (string) /writestring [123 (string) /typecheck] assert
+
+
+%% readhexstring %%
+% Create hex test file
+(testhex.txt) (w) file
+dup (<48656C6C6F20576F726C64>) writestring  % "Hello World" in hex
+closefile
+
+% Test reading hex string
+(testhex.txt) (r) file dup /myfile exch def
+20 string readhexstring
+[(Hello World) false] assert
+myfile closefile
+
+% Test hex with whitespace (should be ignored)
+(testhex2.txt) (w) file
+dup (<48 65 6C 6C 6F>) writestring  % "Hello" in hex with spaces
+closefile
+
+(testhex2.txt) (r) file dup /myfile exch def
+10 string readhexstring
+[(Hello) false] assert
+myfile closefile
+
+% Test hex with mixed case
+(testhex3.txt) (w) file
+dup (<48656c6c6f>) writestring  % "Hello" in mixed case hex
+closefile
+
+(testhex3.txt) (r) file dup /myfile exch def
+10 string readhexstring
+[(Hello) false] assert
+myfile closefile
+
+% Test odd number of hex digits (should pad with 0)
+(testhex4.txt) (w) file
+dup (<48656C6C6>) writestring  % "Hell" + "60" (6 padded with 0)
+closefile
+
+(testhex4.txt) (r) file dup /myfile exch def
+10 string readhexstring
+[(Hell`) false] assert  % 60 hex = 96 decimal = '`' character
+myfile closefile
+
+% readhexstring errors
+/readhexstring [/stackunderflow] assert
+(%stdin) (r) file /readhexstring [(%stdin) (r) file /stackunderflow] assert
+123 /readhexstring [123 /stackunderflow] assert
+(%stdin) (r) file 123 /readhexstring [(%stdin) (r) file 123 /typecheck] assert
+
+
+%% writehexstring %%
+% Test basic writehexstring
+(testhex5.txt) (w) file
+dup (ABC) writehexstring
+closefile
+
+% Verify hex output
+(testhex5.txt) (r) file dup /myfile exch def
+20 string readstring
+[(414243) false] assert  % "ABC" = 41 42 43 in hex
+myfile closefile
+
+% Test binary data writehexstring
+(testhex6.txt) (w) file
+dup (\000\001\255) writehexstring
+closefile
+
+% Verify binary hex output
+(testhex6.txt) (r) file dup /myfile exch def
+20 string readstring
+[(0001ad) false] assert  % 0, 1, 255 in hex
+myfile closefile
+
+% writehexstring errors
+/writehexstring [/stackunderflow] assert
+(%stdout) (w) file /writehexstring [(%stdout) (w) file /stackunderflow] assert
+123 /writehexstring [123 /stackunderflow] assert
+(%stdout) (w) file 123 /writehexstring [(%stdout) (w) file 123 /typecheck] assert
+
+% Clean up test files
+(testfile.txt) deletefile
+(testfile2.txt) deletefile  
+(testfile3.txt) deletefile
+(testhex.txt) deletefile
+(testhex2.txt) deletefile
+(testhex3.txt) deletefile
+(testhex4.txt) deletefile
+(testhex5.txt) deletefile
+(testhex6.txt) deletefile
+
+
+%% bytesavailable %%
+% Create test file with known content
+(bytestest.txt) (w) file
+dup (Hello World!) writestring
+closefile
+
+% Test bytesavailable on file opened for reading
+(bytestest.txt) (r) file dup /myfile exch def
+/bytesavailable [12] assert  % Should have 12 bytes available
+
+% Read some bytes and check remaining
+myfile 5 string readstring pop pop  % Read "Hello"
+myfile /bytesavailable [7] assert   % Should have 7 bytes remaining
+
+% Read more and check
+myfile 3 string readstring pop pop  % Read " Wo" 
+myfile /bytesavailable [4] assert   % Should have 4 bytes remaining
+
+% Read to end and check
+myfile 4 string readstring pop pop  % Read "rld!"
+myfile /bytesavailable [-1] assert  % Should return -1 at EOF
+
+myfile closefile
+
+% Test bytesavailable on closed file
+myfile /bytesavailable [-1] assert  % Should return -1 for closed file
+
+%Test bytesavailable on standard input (should return -1)
+(%stdin) (r) file /bytesavailable [-1] assert
+
+% Test bytesavailable on standard output (should return -1)
+(%stdout) (w) file /bytesavailable [-1] assert
+
+% Test bytesavailable on standard error (should return -1)
+(%stderr) (w) file /bytesavailable [-1] assert
+
+% Test bytesavailable on output file (should return -1)
+(bytestest2.txt) (w) file /myfile exch def
+myfile /bytesavailable [-1] assert  % Output files return -1
+myfile closefile
+
+% bytesavailable errors
+/bytesavailable [/stackunderflow] assert
+123 /bytesavailable [123 /typecheck] assert
+(string) /bytesavailable [(string) /typecheck] assert
+
+% Clean up bytesavailable test files
+(bytestest.txt) deletefile
+(bytestest2.txt) deletefile
+
+
+%% setfileposition %%
+% Create test file with known content
+(postest.txt) (w) file
+dup (0123456789ABCDEF) writestring
+closefile
+
+% Test invalid access mode first 
+(postest.txt) (t) /file [(postest.txt) (t) /invalidfileaccess] assert
+
+% Test setfileposition basic functionality
+(postest.txt) (r+) file /myfile exch def
+
+% Test setting position to beginning
+myfile 0 setfileposition
+myfile 1 string readstring
+[(0) true] assert
+
+% Test setting position to middle
+myfile 5 setfileposition  
+myfile 1 string readstring
+[(5) true] assert
+
+% Test setting position to end
+myfile 16 setfileposition
+myfile 1 string readstring
+[() false] assert  % Should get EOF
+
+% Test writing after setfileposition
+myfile 10 setfileposition
+myfile (XYZ) writestring
+
+% Verify the write by reading back
+myfile 10 setfileposition
+myfile 3 string readstring
+[(XYZ) true] assert
+
+myfile closefile
+
+% Test setfileposition on read-only file
+(postest.txt) (r) file /myfile exch def
+myfile 5 setfileposition
+myfile 1 string readstring
+[(5) true] assert
+myfile closefile
+
+% Test setfileposition errors
+% stackunderflow
+/setfileposition [/stackunderflow] assert
+123 /setfileposition [123 /stackunderflow] assert
+
+% typecheck
+(string) 5 /setfileposition [(string) 5 /typecheck] assert
+123 5 /setfileposition [123 5 /typecheck] assert
+(postest.txt) (r) file dup /myfile exch def (string) /setfileposition [myfile (string) /typecheck] assert
+myfile closefile
+
+% rangecheck - negative position
+(postest.txt) (r) file dup /myfile exch def
+-1 /setfileposition [myfile -1 /rangecheck] assert
+myfile closefile
+
+% ioerror - closed file
+(postest.txt) (r) file /myfile exch def
+myfile closefile
+myfile 0 /setfileposition [myfile 0 /ioerror] assert
+
+% ioerror - standard files (not positionable)
+(%stdin) (r) file 0 /setfileposition [(%stdin) (r) file 0 /ioerror] assert
+(%stdout) (w) file 0 /setfileposition [(%stdout) (w) file 0 /ioerror] assert
+(%stderr) (w) file 0 /setfileposition [(%stderr) (w) file 0 /ioerror] assert
+
+% Clean up setfileposition test files
+(postest.txt) deletefile
+
+%% renamefile %%
+% Create test file for renaming
+(original.txt) (w) file
+dup (Test content for rename) writestring
+closefile
+
+% Test basic renamefile functionality
+(original.txt) (renamed.txt) renamefile
+
+% Verify the file was renamed
+(renamed.txt) {status 5 1 roll pop pop pop pop} [true] assert  % Should return true for file exists
+
+% Verify original file no longer exists
+(original.txt) status
+[false] assert  % Should return false for file doesn't exist
+
+% Test renaming back
+(renamed.txt) (backtooriginal.txt) renamefile
+
+% Verify the rename worked
+(backtooriginal.txt) (r) file /myfile exch def
+myfile 5 string readstring
+[(Test ) true] assert
+myfile closefile
+
+% Test renamefile errors
+% stackunderflow
+/renamefile [/stackunderflow] assert
+(file1) /renamefile [(file1) /stackunderflow] assert
+
+% typecheck
+123 (file2) /renamefile [123 (file2) /typecheck] assert
+(file1) 456 /renamefile [(file1) 456 /typecheck] assert
+
+% undefinedfilename - source file doesn't exist
+(nonexistent.txt) (newname.txt) /renamefile [(nonexistent.txt) (newname.txt) /undefinedfilename] assert
+
+% invalidfileaccess - special file names
+(%stdin) (newname.txt) /renamefile [(%stdin) (newname.txt) /invalidfileaccess] assert
+(somefile.txt) (%stdout) /renamefile [(somefile.txt) (%stdout) /invalidfileaccess] assert
+(%stderr) (newname.txt) /renamefile [(%stderr) (newname.txt) /invalidfileaccess] assert
+
+% Clean up renamefile test files
+(backtooriginal.txt) deletefile
+
+
+%% resetfile %%
+% Test resetfile on output file (should flush without error)
+(resettest.txt) (w) file /myfile exch def
+myfile (Hello) writestring
+myfile resetfile
+myfile (World) writestring
+myfile closefile
+
+% Verify both writes made it (flush worked)
+(resettest.txt) (r) file /myfile exch def
+myfile 10 string /readstring [(HelloWorld) true] assert
+myfile closefile
+
+% Test resetfile on plain input file (should not error)
+(resettest.txt) (r) file /myfile exch def
+myfile 5 string readstring pop pop  % Read "Hello"
+myfile resetfile                     % Discard any buffered input
+myfile closefile
+
+% Test resetfile on filtered input file (ASCIIHexDecode)
+% Create file with hex data
+(resethex.txt) (w) file /myfile exch def
+myfile (48656C6C6F576F726C6421) writestring  % "HelloWorld!" in hex
+myfile closefile
+
+% Open as hex filter, read partially, then resetfile
+(resethex.txt) (r) file /ASCIIHexDecode filter /myfilter exch def
+myfilter 5 string readstring pop pop  % Read "Hello"
+myfilter resetfile                     % Discard buffered decoded data
+myfilter closefile
+
+% Test resetfile on standard output (should not error)
+(%stdout) (w) file resetfile
+
+% Test resetfile on standard input (should not error)
+(%stdin) (r) file resetfile
+
+% resetfile errors
+% stackunderflow
+/resetfile [/stackunderflow] assert
+
+% typecheck - non-file operands
+123 /resetfile [123 /typecheck] assert
+(string) /resetfile [(string) /typecheck] assert
+[1 2 3] /resetfile [[1 2 3] /typecheck] assert
+
+% Clean up resetfile test files
+(resettest.txt) deletefile
+(resethex.txt) deletefile
+
+
+%% setobjectformat / currentobjectformat %%
+% default value is 0
+currentobjectformat [0] assert
+
+% set and get each valid value
+0 setobjectformat currentobjectformat [0] assert
+1 setobjectformat currentobjectformat [1] assert
+2 setobjectformat currentobjectformat [2] assert
+3 setobjectformat currentobjectformat [3] assert
+4 setobjectformat currentobjectformat [4] assert
+
+% rangecheck for out-of-range values
+5 /setobjectformat [5 /rangecheck] assert
+-1 /setobjectformat [-1 /rangecheck] assert
+
+% typecheck for non-integer
+1.0 /setobjectformat [1.0 /typecheck] assert
+(string) /setobjectformat [(string) /typecheck] assert
+
+% stackunderflow
+/setobjectformat [/stackunderflow] assert
+
+% subject to save/restore
+0 setobjectformat
+/savedstate save def
+3 setobjectformat
+currentobjectformat [3] assert
+savedstate restore
+currentobjectformat [0] assert
+
+% clear the op stack for the next test
+clear
+
+%% printobject / writeobject %%
+
+% --- Error condition tests ---
+
+% printobject: stackunderflow with 0 operands
+/printobject [/stackunderflow] assert
+
+% printobject: stackunderflow with 1 operand
+42 /printobject [42 /stackunderflow] assert
+
+% printobject: typecheck - tag must be integer
+0 setobjectformat  % need to reset, tests below set it
+1 setobjectformat
+42 1.5 /printobject [42 1.5 /typecheck] assert
+
+% printobject: rangecheck - tag out of range
+42 256 /printobject [42 256 /rangecheck] assert
+42 -1 /printobject [42 -1 /rangecheck] assert
+
+% printobject: undefined when object_format is 0
+0 setobjectformat
+42 0 /printobject [42 0 /undefined] assert
+
+% writeobject: stackunderflow with < 3 operands
+/writeobject [/stackunderflow] assert
+42 /writeobject [42 /stackunderflow] assert
+42 0 /writeobject [42 0 /stackunderflow] assert
+
+% writeobject: typecheck - file must be a file object
+1 setobjectformat
+(notafile) 42 0 /writeobject [(notafile) 42 0 /typecheck] assert
+
+% writeobject: typecheck - tag must be integer
+% Use stdout to get a comparable file object
+1 setobjectformat
+(%stdout) (w) file 42 1.5 /writeobject [(%stdout) (w) file 42 1.5 /typecheck] assert
+
+% writeobject: rangecheck - tag out of range
+(%stdout) (w) file 42 256 /writeobject [(%stdout) (w) file 42 256 /rangecheck] assert
+
+% writeobject: undefined when object_format is 0
+0 setobjectformat
+(%stdout) (w) file 42 0 /writeobject [(%stdout) (w) file 42 0 /undefined] assert
+
+% --- Functional tests using writeobject ---
+% Strategy: write to file, read back raw bytes, verify expected structure
+% Format (PLRM 3.14.2): header(4) + object(8) [+ subsidiaries] [+ string data]
+% No wrapper array — user object is directly the top-level entry.
+
+% Test 1: Integer value 42, big-endian (format 1), tag 7
+1 setobjectformat
+(writeobj_test.bin) (w) file /wf exch def
+wf 42 7 writeobject
+wf closefile
+
+% Read back and verify: 4-byte header + 8-byte integer = 12 bytes
+(writeobj_test.bin) (r) file /rf exch def
+
+% Header byte 0: token type = 128 (127+1)
+rf /read [128 true] assert
+% Header byte 1: overall length = 12 (4 header + 8 int)
+rf /read [12 true] assert
+% Header bytes 2-3: top-level count = 1 (big-endian: 0, 1)
+rf /read [0 true] assert
+rf /read [1 true] assert
+
+% Integer object (8 bytes):
+% byte 0: type = 1 (integer), literal
+rf /read [1 true] assert
+% byte 1: tag = 7
+rf /read [7 true] assert
+% bytes 2-3: length = 0
+rf /read [0 true] assert
+rf /read [0 true] assert
+% bytes 4-7: value = 42 (big-endian: 0, 0, 0, 42)
+rf /read [0 true] assert
+rf /read [0 true] assert
+rf /read [0 true] assert
+rf /read [42 true] assert
+
+% Should be at EOF
+rf /read [false] assert
+rf closefile
+
+% Test 2: Boolean true, little-endian (format 2), tag 0
+2 setobjectformat
+(writeobj_test.bin) (w) file /wf exch def
+wf true 0 writeobject
+wf closefile
+
+% Read back: 4-byte header + 8-byte boolean = 12 bytes
+(writeobj_test.bin) (r) file /rf exch def
+% Header byte 0: token type = 129 (127+2)
+rf /read [129 true] assert
+% Header byte 1: overall length = 12
+rf /read [12 true] assert
+% Header bytes 2-3: 1 (little-endian: 1, 0)
+rf /read [1 true] assert
+rf /read [0 true] assert
+
+% Boolean object: type=4, value=1
+rf /read [4 true] assert     % type 4 (boolean), literal
+rf /read [0 true] assert     % tag = 0
+rf /read [0 true] assert     % length 0 LE
+rf /read [0 true] assert
+rf /read [1 true] assert     % value 1 (true) LE
+rf /read [0 true] assert
+rf /read [0 true] assert
+rf /read [0 true] assert
+rf /read [false] assert
+rf closefile
+
+% Test 3: null object
+1 setobjectformat
+(writeobj_test.bin) (w) file /wf exch def
+wf null 0 writeobject
+wf closefile
+
+(writeobj_test.bin) (r) file /rf exch def
+% Skip header (4 bytes)
+rf 4 string readstring pop pop
+% Null object: type=0
+rf /read [0 true] assert     % type 0 (null)
+rf /read [0 true] assert     % tag = 0
+rf /read [0 true] assert     % length
+rf /read [0 true] assert
+rf /read [0 true] assert     % value
+rf /read [0 true] assert
+rf /read [0 true] assert
+rf /read [0 true] assert
+rf /read [false] assert
+rf closefile
+
+% Test 4: String value
+1 setobjectformat
+(writeobj_test.bin) (w) file /wf exch def
+wf (Hi) 0 writeobject
+wf closefile
+
+(writeobj_test.bin) (r) file /rf exch def
+% Header: 4 bytes, string obj: 8 bytes, string data: 2 bytes = 14
+% Skip header
+rf 4 string readstring pop pop
+% String object: type=5, length=2, value=offset to string data
+% String data starts at: 1 object * 8 = 8 bytes from start of first object
+rf /read [5 true] assert     % type 5 (string)
+rf /read [0 true] assert     % tag = 0
+rf /read [0 true] assert     % length=2 BE high
+rf /read [2 true] assert     % length=2 BE low
+rf /read [0 true] assert     % offset=8 BE (0,0,0,8)
+rf /read [0 true] assert
+rf /read [0 true] assert
+rf /read [8 true] assert
+% String data: "Hi"
+rf /read [72 true] assert    % 'H'
+rf /read [105 true] assert   % 'i'
+rf /read [false] assert
+rf closefile
+
+% Test 5: Mark object
+1 setobjectformat
+(writeobj_test.bin) (w) file /wf exch def
+wf mark 0 writeobject
+wf closefile
+
+(writeobj_test.bin) (r) file /rf exch def
+rf 4 string readstring pop pop
+% Mark object: type=10
+rf /read [10 true] assert    % type 10 (mark)
+rf /read [0 true] assert     % tag = 0
+rf /read [0 true] assert
+rf /read [0 true] assert
+rf /read [0 true] assert
+rf /read [0 true] assert
+rf /read [0 true] assert
+rf /read [0 true] assert
+rf /read [false] assert
+rf closefile
+
+% Test 6: Name object
+1 setobjectformat
+(writeobj_test.bin) (w) file /wf exch def
+wf /myname 0 writeobject
+wf closefile
+
+(writeobj_test.bin) (r) file /rf exch def
+rf 4 string readstring pop pop
+% Name object: type=3, length=6 (myname), offset to string data
+% String data starts at 1 object * 8 = 8 bytes from start of first object
+rf /read [3 true] assert     % type 3 (name), literal
+rf /read [0 true] assert     % tag = 0
+rf /read [0 true] assert     % length=6 BE high
+rf /read [6 true] assert     % length=6 BE low
+rf /read [0 true] assert     % offset=8 BE
+rf /read [0 true] assert
+rf /read [0 true] assert
+rf /read [8 true] assert
+% String data: "myname"
+rf /read [109 true] assert   % 'm'
+rf /read [121 true] assert   % 'y'
+rf /read [110 true] assert   % 'n'
+rf /read [97 true] assert    % 'a'
+rf /read [109 true] assert   % 'm'
+rf /read [101 true] assert   % 'e'
+rf /read [false] assert
+rf closefile
+
+% Test 7: Nested array [1 2]
+1 setobjectformat
+(writeobj_test.bin) (w) file /wf exch def
+wf [1 2] 0 writeobject
+wf closefile
+
+(writeobj_test.bin) (r) file /rf exch def
+% Structure: header(4) + array_obj(8) + int1(8) + int2(8) = 28
+rf 4 string readstring pop pop
+% Array object: type=9 (literal array), length=2
+rf /read [9 true] assert     % type 9, literal (no 0x80)
+rf /read [0 true] assert     % tag = 0
+rf /read [0 true] assert     % length=2 BE
+rf /read [2 true] assert
+rf /read [0 true] assert     % offset=8 (children start at objects[1]) BE
+rf /read [0 true] assert
+rf /read [0 true] assert
+rf /read [8 true] assert
+% int 1
+rf /read [1 true] assert     % type 1
+rf /read [0 true] assert
+rf /read [0 true] assert
+rf /read [0 true] assert
+rf /read [0 true] assert     % value=1
+rf /read [0 true] assert
+rf /read [0 true] assert
+rf /read [1 true] assert
+% int 2
+rf /read [1 true] assert     % type 1
+rf /read [0 true] assert
+rf /read [0 true] assert
+rf /read [0 true] assert
+rf /read [0 true] assert     % value=2
+rf /read [0 true] assert
+rf /read [0 true] assert
+rf /read [2 true] assert
+rf /read [false] assert
+rf closefile
+
+% Test 8: Verify writeobject works with tag 0
+% (already verified via earlier functional tests - this confirms basic round-trip)
+1 setobjectformat
+(writeobj_test.bin) (w) file /wf exch def
+wf 99 0 writeobject
+wf closefile
+(writeobj_test.bin) (r) file /rf exch def
+% Skip to integer value: 4 (header) + 4 (first 4 bytes of int obj) = 8
+rf 8 string readstring pop pop
+rf /read [0 true] assert     % value byte 1
+rf /read [0 true] assert     % value byte 2
+rf /read [0 true] assert     % value byte 3
+rf /read [99 true] assert    % value byte 4 = 99
+rf closefile
+
+% Clean up temp file
+(writeobj_test.bin) deletefile
+
+% reset object format
+0 setobjectformat
+clear
+
+
+%% Binary object sequence parsing (round-trip tests) %%
+% Strategy: write with writeobject, read back with run, verify values
+
+% Integer round-trip (big-endian, format 1)
+1 setobjectformat
+(bos_rt.bin) (w) file dup 42 0 writeobject closefile
+{(bos_rt.bin) run} [42] assert
+
+% Negative integer round-trip (little-endian, format 2)
+2 setobjectformat
+(bos_rt.bin) (w) file dup -99 0 writeobject closefile
+{(bos_rt.bin) run} [-99] assert
+
+% Real round-trip (exact in float32)
+1 setobjectformat
+(bos_rt.bin) (w) file dup 1.5 0 writeobject closefile
+{(bos_rt.bin) run} [1.5] assert
+
+% Boolean true round-trip
+1 setobjectformat
+(bos_rt.bin) (w) file dup true 0 writeobject closefile
+{(bos_rt.bin) run} [true] assert
+
+% Boolean false round-trip (little-endian)
+2 setobjectformat
+(bos_rt.bin) (w) file dup false 0 writeobject closefile
+{(bos_rt.bin) run} [false] assert
+
+% String round-trip
+1 setobjectformat
+(bos_rt.bin) (w) file dup (hello) 0 writeobject closefile
+{(bos_rt.bin) run} [(hello)] assert
+
+% Name round-trip
+1 setobjectformat
+(bos_rt.bin) (w) file dup /myname 0 writeobject closefile
+{(bos_rt.bin) run} [/myname] assert
+
+% Null round-trip
+1 setobjectformat
+(bos_rt.bin) (w) file dup null 0 writeobject closefile
+{(bos_rt.bin) run} [null] assert
+
+% Nested array round-trip
+1 setobjectformat
+(bos_rt.bin) (w) file dup [1 (Hi) [2 3]] 0 writeobject closefile
+{(bos_rt.bin) run} [[1 (Hi) [2 3]]] assert
+
+% Both byte orders produce same result
+1 setobjectformat
+(bos_rt_be.bin) (w) file dup 12345 0 writeobject closefile
+2 setobjectformat
+(bos_rt_le.bin) (w) file dup 12345 0 writeobject closefile
+{(bos_rt_be.bin) run} [12345] assert
+{(bos_rt_le.bin) run} [12345] assert
+
+% Clean up round-trip test files
+(bos_rt.bin) deletefile
+(bos_rt_be.bin) deletefile
+(bos_rt_le.bin) deletefile
+
+0 setobjectformat
+clear

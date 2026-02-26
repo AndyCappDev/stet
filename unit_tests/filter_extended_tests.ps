@@ -1,0 +1,253 @@
+%!PS
+% Extended Filter Tests for PostForge
+% Tests ASCIIHex, ASCII85, RunLength, LZW, SubFileDecode, CCITTFax filters
+% and filter error conditions
+
+userdict /$unittest known not {(unit_tests/unittest.ps) run} if
+
+% Helper: round-trip encode then decode through a filter pair
+% Usage: (data) encode_name decode_name filter_roundtrip -> decoded_string
+/filter_roundtrip {
+    /frt_decode exch def
+    /frt_encode exch def
+    /frt_data exch def
+    /frt_datalen frt_data length def
+
+    % Step 1: Encode to temp file
+    (unit_tests/.filter_test_tmp.bin) (w) file /frt_outfile exch def
+    frt_outfile frt_encode filter /frt_encoder exch def
+    frt_encoder frt_data writestring
+    frt_encoder closefile
+
+    % Step 2: Decode from temp file
+    (unit_tests/.filter_test_tmp.bin) (r) file frt_decode filter /frt_decoder exch def
+    frt_decoder frt_datalen string readstring pop
+    frt_decoder closefile
+} def
+
+% Helper: round-trip with parameter dictionary
+% Usage: (data) params encode_name decode_name filter_roundtrip_params -> decoded_string
+/filter_roundtrip_params {
+    /frtp_decode exch def
+    /frtp_encode exch def
+    /frtp_params exch def
+    /frtp_data exch def
+    /frtp_datalen frtp_data length def
+
+    % Step 1: Encode to temp file with params
+    (unit_tests/.filter_test_tmp.bin) (w) file /frtp_outfile exch def
+    frtp_outfile frtp_params frtp_encode filter /frtp_encoder exch def
+    frtp_encoder frtp_data writestring
+    frtp_encoder closefile
+
+    % Step 2: Decode from temp file with params
+    (unit_tests/.filter_test_tmp.bin) (r) file frtp_params frtp_decode filter /frtp_decoder exch def
+    frtp_decoder frtp_datalen string readstring pop
+    frtp_decoder closefile
+} def
+
+
+%% =============================================================================
+%% ASCIIHexEncode / ASCIIHexDecode
+%% =============================================================================
+
+%% ASCIIHex round-trip: short string %%
+(Hello World!)
+/ASCIIHexEncode /ASCIIHexDecode filter_roundtrip
+(Hello World!) {eq} [true] assert
+
+%% ASCIIHex round-trip: binary data %%
+% Create string with binary byte values 0-15
+/asciihex_bindata 16 string def
+0 1 15 { /i exch def asciihex_bindata i i put } for
+asciihex_bindata
+/ASCIIHexEncode /ASCIIHexDecode filter_roundtrip
+asciihex_bindata {eq} [true] assert
+
+%% ASCIIHex round-trip: single byte %%
+(X) /ASCIIHexEncode /ASCIIHexDecode filter_roundtrip
+(X) {eq} [true] assert
+
+%% ASCIIHex decode from hex literal with > terminator %%
+% Manually decode a hex-encoded string via filter
+<48656C6C6F> length 5 eq [true] assert
+
+%% ASCIIHex round-trip: larger data %%
+/asciihex_large 100 string def
+0 1 99 { /i exch def asciihex_large i i 7 mul 256 mod put } for
+asciihex_large
+/ASCIIHexEncode /ASCIIHexDecode filter_roundtrip
+asciihex_large {eq} [true] assert
+
+
+%% =============================================================================
+%% ASCII85Encode / ASCII85Decode
+%% =============================================================================
+
+%% ASCII85 round-trip: short string %%
+(Hello World!)
+/ASCII85Encode /ASCII85Decode filter_roundtrip
+(Hello World!) {eq} [true] assert
+
+%% ASCII85 round-trip: 4 zero bytes (z shorthand) %%
+4 string dup 0 0 put dup 1 0 put dup 2 0 put dup 3 0 put
+/a85_zeros exch def
+a85_zeros
+/ASCII85Encode /ASCII85Decode filter_roundtrip
+a85_zeros {eq} [true] assert
+
+%% ASCII85 round-trip: larger data %%
+/a85_large 80 string def
+0 1 79 { /i exch def a85_large i i 11 mul 256 mod put } for
+a85_large
+/ASCII85Encode /ASCII85Decode filter_roundtrip
+a85_large {eq} [true] assert
+
+%% ASCII85 round-trip: single byte %%
+(A) /ASCII85Encode /ASCII85Decode filter_roundtrip
+(A) {eq} [true] assert
+
+%% ASCII85 round-trip: 5 bytes (tests partial group) %%
+(ABCDE) /ASCII85Encode /ASCII85Decode filter_roundtrip
+(ABCDE) {eq} [true] assert
+
+
+%% =============================================================================
+%% RunLengthEncode / RunLengthDecode
+%% =============================================================================
+
+%% RunLength round-trip: short string %%
+(Test data for RLE)
+/RunLengthEncode /RunLengthDecode filter_roundtrip
+(Test data for RLE) {eq} [true] assert
+
+%% RunLength round-trip: repeated bytes %%
+% Create 50-byte string of all 'A' (good run-length compression target)
+/rle_repeated 50 string def
+0 1 49 { /i exch def rle_repeated i 65 put } for
+rle_repeated
+/RunLengthEncode /RunLengthDecode filter_roundtrip
+rle_repeated {eq} [true] assert
+
+%% RunLength round-trip: single byte %%
+(Z) /RunLengthEncode /RunLengthDecode filter_roundtrip
+(Z) {eq} [true] assert
+
+%% RunLength round-trip: mixed data %%
+% Alternating pattern (bad compression target but tests correctness)
+/rle_mixed 20 string def
+0 1 19 { /i exch def rle_mixed i i 2 mod 65 mul 66 add put } for
+rle_mixed
+/RunLengthEncode /RunLengthDecode filter_roundtrip
+rle_mixed {eq} [true] assert
+
+
+%% =============================================================================
+%% LZWEncode / LZWDecode
+%% =============================================================================
+
+%% LZW round-trip: short string %%
+(Hello LZW compression!)
+/LZWEncode /LZWDecode filter_roundtrip
+(Hello LZW compression!) {eq} [true] assert
+
+%% LZW round-trip: repeated pattern %%
+% Repeated "ABCD" pattern — good LZW target
+/lzw_repeated 60 string def
+0 1 59 { /i exch def lzw_repeated i i 4 mod 65 add put } for
+lzw_repeated
+/LZWEncode /LZWDecode filter_roundtrip
+lzw_repeated {eq} [true] assert
+
+%% LZW round-trip: larger data %%
+/lzw_large 200 string def
+0 1 199 { /i exch def lzw_large i i 13 mul 256 mod put } for
+lzw_large
+/LZWEncode /LZWDecode filter_roundtrip
+lzw_large {eq} [true] assert
+
+%% LZW round-trip: single byte %%
+(Q) /LZWEncode /LZWDecode filter_roundtrip
+(Q) {eq} [true] assert
+
+
+%% =============================================================================
+%% SubFileDecode
+%% =============================================================================
+
+%% SubFileDecode: EODCount mode (byte count, empty EODString) %%
+% Read exactly 5 bytes from a longer string source
+(Hello World!) 5 () /SubFileDecode filter
+/sfd_reader exch def
+sfd_reader 5 string readstring
+/sfd_ok exch def /sfd_result exch def
+sfd_ok [true] assert
+sfd_result (Hello) {eq} [true] assert
+
+%% SubFileDecode: EODString mode %%
+% Read until EOD string is found
+(Data%%EOD%%Rest) 1 (%%EOD%%) /SubFileDecode filter
+/sfd_eod_reader exch def
+sfd_eod_reader 20 string readstring pop
+% Should contain data up to and including the EOD string
+length 0 gt [true] assert
+
+%% SubFileDecode: type check — result is a file %%
+(test) 4 () /SubFileDecode filter
+type /filetype eq [true] assert
+
+
+%% =============================================================================
+%% CCITTFaxDecode
+%% =============================================================================
+
+%% CCITTFax: filter creation with default params %%
+% CCITTFaxDecode should create successfully (no encode available for round-trip)
+(unit_tests/.filter_test_tmp.bin) (w) file dup (\000) writestring closefile
+{(unit_tests/.filter_test_tmp.bin) (r) file /CCITTFaxDecode filter type /filetype eq} stopped
+{pop pop true} {[true] assert} ifelse
+
+%% CCITTFax: filter creation with explicit params %%
+{(unit_tests/.filter_test_tmp.bin) (w) file dup (\000\000\000\000) writestring closefile
+(unit_tests/.filter_test_tmp.bin) (r) file << /Columns 8 /Rows 1 >> /CCITTFaxDecode filter
+type /filetype eq} stopped
+{pop pop true} {[true] assert} ifelse
+
+
+%% =============================================================================
+%% filter error conditions
+%% =============================================================================
+
+%% filter stackunderflow: too few operands %%
+/ASCIIHexDecode /filter [/ASCIIHexDecode /stackunderflow] assert
+
+%% filter typecheck: non-name filter argument %%
+(source) 123 /filter [(source) 123 /typecheck] assert
+
+%% filter undefined: invalid filter name %%
+(source) /NoSuchFilter /filter [(source) /NoSuchFilter /undefined] assert
+
+%% filter typecheck: non-file/string/proc source %%
+123 /ASCIIHexDecode /filter [123 /ASCIIHexDecode /typecheck] assert
+
+
+%% =============================================================================
+%% ReusableStreamDecode Filter Tests
+%% =============================================================================
+
+%% ReusableStreamDecode: basic read %%
+% Create a string source, wrap in SubFileDecode, then ReusableStreamDecode
+(Hello) 0 (Hello) /SubFileDecode filter
+/ReusableStreamDecode filter
+5 string readstring pop
+(Hello) /eq [true] assert
+
+%% ReusableStreamDecode: read longer data %%
+(The quick brown fox) 0 (The quick brown fox) /SubFileDecode filter
+/ReusableStreamDecode filter
+19 string readstring pop
+(The quick brown fox) /eq [true] assert
+
+
+% Clean up temp file
+{(unit_tests/.filter_test_tmp.bin) deletefile} stopped {pop} if

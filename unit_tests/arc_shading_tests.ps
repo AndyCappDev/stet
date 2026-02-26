@@ -1,0 +1,174 @@
+%!PS
+% Arc, Flattenpath, and Shading Tests for PostForge
+% Tests arc, arcn, flattenpath, and shfill operators
+
+userdict /$unittest known not {(unit_tests/unittest.ps) run} if
+
+gsave nulldevice
+
+
+%% =============================================================================
+%% arc operator tests
+%% =============================================================================
+
+%% Basic arc - full circle (0 to 360) %%
+newpath 100 100 50 0 360 /arc [] assert
+% After arc, current point should exist
+{currentpoint pop pop true} [true] assert
+newpath
+
+%% Quarter arc (0 to 90) %%
+newpath 100 100 50 0 90 /arc [] assert
+{currentpoint pop pop true} [true] assert
+newpath
+
+%% Semicircle (0 to 180) %%
+newpath 100 100 50 0 180 /arc [] assert
+{currentpoint pop pop true} [true] assert
+newpath
+
+%% Arc with current point adds line segment %%
+% When there is a current point, arc adds a line from current point to arc start
+newpath 0 0 moveto 100 100 50 0 90 /arc [] assert
+% Path should contain moveto, lineto (to arc start), then curveto segments
+/arc_elem_count 0 def
+{/arc_elem_count arc_elem_count 1 add def pop pop}
+{/arc_elem_count arc_elem_count 1 add def pop pop}
+{/arc_elem_count arc_elem_count 1 add def pop pop pop pop pop pop}
+{/arc_elem_count arc_elem_count 1 add def}
+pathforall
+arc_elem_count 2 gt [true] assert   % At least moveto + lineto + curveto
+newpath
+
+%% Arc without current point - no error, does implicit moveto %%
+newpath 100 100 50 0 90 /arc [] assert
+{currentpoint pop pop true} [true] assert
+newpath
+
+%% Arc error: stackunderflow %%
+100 100 50 0 /arc [100 100 50 0 /stackunderflow] assert
+
+%% Arc error: typecheck %%
+100 100 50 0 (bad) /arc [100 100 50 0 (bad) /typecheck] assert
+100 100 50 (bad) 90 /arc [100 100 50 (bad) 90 /typecheck] assert
+100 100 (bad) 0 90 /arc [100 100 (bad) 0 90 /typecheck] assert
+100 (bad) 50 0 90 /arc [100 (bad) 50 0 90 /typecheck] assert
+(bad) 100 50 0 90 /arc [(bad) 100 50 0 90 /typecheck] assert
+
+
+%% =============================================================================
+%% arcn operator tests
+%% =============================================================================
+
+%% Basic arcn - clockwise quarter arc %%
+newpath 100 100 50 90 0 /arcn [] assert
+{currentpoint pop pop true} [true] assert
+newpath
+
+%% arcn full circle matches arc for full circle %%
+% Both should produce a complete circle path
+newpath 100 100 50 360 0 /arcn [] assert
+{currentpoint pop pop true} [true] assert
+newpath
+
+%% arcn without current point - implicit moveto %%
+newpath 100 100 50 90 0 /arcn [] assert
+{currentpoint pop pop true} [true] assert
+newpath
+
+%% arcn error: stackunderflow %%
+100 100 50 0 /arcn [100 100 50 0 /stackunderflow] assert
+
+%% arcn error: typecheck %%
+100 100 50 0 (bad) /arcn [100 100 50 0 (bad) /typecheck] assert
+(bad) 100 50 0 90 /arcn [(bad) 100 50 0 90 /typecheck] assert
+
+
+%% =============================================================================
+%% flattenpath operator tests
+%% =============================================================================
+
+%% Curve becomes line segments after flattenpath %%
+newpath 0 0 moveto 10 20 30 40 50 60 curveto
+flattenpath
+% After flattenpath, pathforall should have no curveto elements
+/fp_has_curve false def
+{pop pop} {pop pop} {/fp_has_curve true def pop pop pop pop pop pop} {} pathforall
+fp_has_curve [false] assert
+newpath
+
+%% flattenpath on line-only path is identity %%
+newpath 0 0 moveto 100 0 lineto 100 100 lineto
+/fp_line_count 0 def
+{pop pop /fp_line_count fp_line_count 1 add def}
+{pop pop /fp_line_count fp_line_count 1 add def}
+{pop pop pop pop pop pop /fp_line_count fp_line_count 1 add def}
+{/fp_line_count fp_line_count 1 add def}
+pathforall
+/fp_before fp_line_count def
+% Now flattenpath and count again
+newpath 0 0 moveto 100 0 lineto 100 100 lineto
+flattenpath
+/fp_line_count2 0 def
+{pop pop /fp_line_count2 fp_line_count2 1 add def}
+{pop pop /fp_line_count2 fp_line_count2 1 add def}
+{pop pop pop pop pop pop /fp_line_count2 fp_line_count2 1 add def}
+{/fp_line_count2 fp_line_count2 1 add def}
+pathforall
+fp_line_count2 fp_before {eq} [true] assert
+newpath
+
+%% pathforall after flattenpath on arc has no curveto %%
+newpath 100 100 50 0 90 arc
+flattenpath
+/fp_arc_curve false def
+{pop pop} {pop pop} {/fp_arc_curve true def pop pop pop pop pop pop} {} pathforall
+fp_arc_curve [false] assert
+newpath
+
+
+%% =============================================================================
+%% shfill operator tests
+%% =============================================================================
+
+%% shfill error: stackunderflow %%
+/shfill [/stackunderflow] assert
+
+%% shfill error: typecheck (non-dict) %%
+123 /shfill [123 /typecheck] assert
+(string) /shfill [(string) /typecheck] assert
+
+%% shfill error: rangecheck - missing ShadingType %%
+/shfill_noST << /ColorSpace /DeviceRGB >> def
+shfill_noST /shfill [shfill_noST /rangecheck] assert
+
+%% shfill error: rangecheck - invalid ShadingType value %%
+/shfill_st0 << /ShadingType 0 /ColorSpace /DeviceRGB >> def
+shfill_st0 /shfill [shfill_st0 /rangecheck] assert
+
+/shfill_st8 << /ShadingType 8 /ColorSpace /DeviceRGB >> def
+shfill_st8 /shfill [shfill_st8 /rangecheck] assert
+
+%% Axial shading (Type 2) doesn't crash %%
+% We just verify it doesn't error - actual rendering is device-dependent
+{<<
+    /ShadingType 2
+    /ColorSpace /DeviceRGB
+    /Coords [0 0 100 100]
+    /Function << /FunctionType 2 /Domain [0 1] /C0 [1 0 0] /C1 [0 0 1] /N 1 >>
+>> shfill} stopped
+% If it stopped (error), that's OK for nulldevice - just clean up
+{pop} if
+% Test passes as long as we get here without crashing
+
+%% Radial shading (Type 3) doesn't crash %%
+{<<
+    /ShadingType 3
+    /ColorSpace /DeviceRGB
+    /Coords [50 50 0 50 50 100]
+    /Function << /FunctionType 2 /Domain [0 1] /C0 [1 0 0] /C1 [0 0 1] /N 1 >>
+>> shfill} stopped
+{pop} if
+% Test passes as long as we get here without crashing
+
+grestore

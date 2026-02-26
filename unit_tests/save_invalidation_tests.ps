@@ -1,0 +1,64 @@
+%% Save Object Invalidation Tests %%
+% Tests that save objects become invalid after restore and cannot be reused
+
+userdict /$unittest known not {(unit_tests/unittest.ps) run} if
+
+
+%% Basic invalidation %%
+% Save object should become invalid after restore
+save /mysave exch def mysave restore
+{ mysave restore } stopped [true] assert  % Should return true (error occurred)
+clear  % Clear any error objects from stack
+
+%%% Multiple saves with selective invalidation %%
+/save1 save def /save2 save def /save3 save def
+save1 restore
+% save2 and save3 should be invalidated
+{ save2 restore } stopped [true] assert
+clear
+{ save3 restore } stopped [true] assert
+clear
+
+%% Sequential restore operations %%
+% Sequential restores should work properly (no errors)
+/s1 null def /s2 null def /s3 null def
+save /s1 exch def save /s2 exch def save /s3 exch def
+{ s3 restore } stopped [false] assert  % Should work (no error)
+{ s2 restore } stopped [false] assert  % Should work (no error)
+{ s1 restore } stopped [false] assert  % Should work (no error)
+
+%% Proper invalidation order %%
+/sa save def /sb save def /sc save def
+sb restore  % Restoring sb should invalidate sc but leave sa valid
+{ sc restore } stopped [true] assert   % sc should be invalid
+clear
+{ sa restore } stopped [false] assert  % sa should still be valid
+
+%% VM state changes with invalidation %%
+[10 20 30] /test_array exch def
+save /array_save exch def
+test_array 1 99 put
+test_array 1 get 99 eq [true] assert
+array_save restore
+test_array 1 get 20 eq [true] assert  % Should be restored
+{ array_save restore } stopped [true] assert  % Save should be invalid
+clear
+
+%% Variable definition restoration %%
+/test_new_var where [false] assert  % Should not exist initially
+save /vm_save exch def
+/test_new_var 123 def  % Create new variable in save context
+/test_new_var where [userdict true] assert  % Should exist
+vm_save restore
+/test_new_var where [false] assert  % Should be gone after restore
+{ vm_save restore } stopped [true] assert  % Save should be invalid
+clear
+
+%% Edge cases %%
+% Test immediate save/restore cycle
+/immediate save def 
+{ immediate restore } stopped [false] assert  % Should work
+{ immediate restore } stopped [true] assert   % Should fail (now invalid)
+clear
+{ immediate restore } stopped [true] assert   % Should still fail (still invalid)
+clear

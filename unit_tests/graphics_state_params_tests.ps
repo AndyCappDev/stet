@@ -1,0 +1,238 @@
+%% Graphics State Parameter tests
+%% Tests for setlinecap, setlinejoin, setmiterlimit, setdash, setflat, initgraphics
+
+userdict /$unittest known not {(unit_tests/unittest.ps) run} if
+
+% All tests run under nulldevice
+gsave nulldevice
+
+
+%% =============================================================================
+%% setlinecap / currentlinecap
+%% =============================================================================
+
+%% setlinecap - valid values %%
+0 setlinecap /currentlinecap [0] assert
+1 setlinecap /currentlinecap [1] assert
+2 setlinecap /currentlinecap [2] assert
+
+%% setlinecap - error conditions %%
+/setlinecap [/stackunderflow] assert
+(a) /setlinecap [(a) /typecheck] assert
+true /setlinecap [true /typecheck] assert
+-1 /setlinecap [-1 /rangecheck] assert
+3 /setlinecap [3 /rangecheck] assert
+
+%% currentlinecap - default value %%
+% Default linecap is 0 (butt cap)
+initgraphics /currentlinecap [0] assert
+
+%% setlinecap - gsave/grestore preservation %%
+0 setlinecap
+gsave
+  2 setlinecap
+  /currentlinecap [2] assert
+grestore
+/currentlinecap [0] assert
+
+
+%% =============================================================================
+%% setlinejoin / currentlinejoin
+%% =============================================================================
+
+%% setlinejoin - valid values %%
+0 setlinejoin /currentlinejoin [0] assert
+1 setlinejoin /currentlinejoin [1] assert
+2 setlinejoin /currentlinejoin [2] assert
+
+%% setlinejoin - error conditions %%
+/setlinejoin [/stackunderflow] assert
+(a) /setlinejoin [(a) /typecheck] assert
+true /setlinejoin [true /typecheck] assert
+-1 /setlinejoin [-1 /rangecheck] assert
+3 /setlinejoin [3 /rangecheck] assert
+
+%% currentlinejoin - default value %%
+initgraphics /currentlinejoin [0] assert
+
+%% setlinejoin - gsave/grestore preservation %%
+0 setlinejoin
+gsave
+  2 setlinejoin
+  /currentlinejoin [2] assert
+grestore
+/currentlinejoin [0] assert
+
+
+%% =============================================================================
+%% setlinewidth / currentlinewidth
+%% =============================================================================
+
+%% setlinewidth - various values %%
+1 setlinewidth /currentlinewidth [1] assert
+0 setlinewidth /currentlinewidth [0] assert
+0.5 setlinewidth /currentlinewidth [0.5] assert
+10 setlinewidth /currentlinewidth [10] assert
+
+%% setlinewidth - error conditions %%
+/setlinewidth [/stackunderflow] assert
+(a) /setlinewidth [(a) /typecheck] assert
+true /setlinewidth [true /typecheck] assert
+
+%% setlinewidth - default value %%
+initgraphics /currentlinewidth [1] assert
+
+%% setlinewidth - gsave/grestore preservation %%
+1 setlinewidth
+gsave
+  5 setlinewidth
+  /currentlinewidth [5] assert
+grestore
+/currentlinewidth [1] assert
+
+
+%% =============================================================================
+%% setmiterlimit / currentmiterlimit
+%% =============================================================================
+
+%% setmiterlimit - valid values %%
+1 setmiterlimit /currentmiterlimit [1.0] assert
+10 setmiterlimit /currentmiterlimit [10.0] assert
+1.414 setmiterlimit /currentmiterlimit [1.414] assert
+100 setmiterlimit /currentmiterlimit [100.0] assert
+
+%% setmiterlimit - error conditions %%
+/setmiterlimit [/stackunderflow] assert
+(a) /setmiterlimit [(a) /typecheck] assert
+true /setmiterlimit [true /typecheck] assert
+0.5 /setmiterlimit [0.5 /rangecheck] assert
+0 /setmiterlimit [0 /rangecheck] assert
+
+%% currentmiterlimit - default value %%
+initgraphics /currentmiterlimit [10.0] assert
+
+%% setmiterlimit - gsave/grestore preservation %%
+10 setmiterlimit
+gsave
+  1 setmiterlimit
+  /currentmiterlimit [1.0] assert
+grestore
+/currentmiterlimit [10.0] assert
+
+
+%% =============================================================================
+%% setdash / currentdash
+%% =============================================================================
+
+%% setdash - solid line (empty array) %%
+[] 0 setdash
+currentdash /dash_offset exch def /dash_array exch def
+dash_array length 0 eq [true] assert
+dash_offset [0.0] assert
+
+%% setdash - simple dash pattern %%
+[3] 0 setdash
+currentdash /dash_offset exch def /dash_array exch def
+dash_array [3.0] arrayeq [true] assert
+dash_offset [0.0] assert
+
+%% setdash - two-element pattern %%
+[2 1] 0 setdash
+currentdash /dash_offset exch def /dash_array exch def
+dash_array [2.0 1.0] arrayeq [true] assert
+dash_offset [0.0] assert
+
+%% setdash - with offset %%
+[3 5] 6 setdash
+currentdash /dash_offset exch def /dash_array exch def
+dash_array [3.0 5.0] arrayeq [true] assert
+dash_offset [6.0] assert
+
+%% setdash - error conditions %%
+/setdash [/stackunderflow] assert
+[] /setdash [[] /stackunderflow] assert
+(a) 0 /setdash [(a) 0 /typecheck] assert
+[] (a) /setdash [[] (a) /typecheck] assert
+
+%% setdash - gsave/grestore preservation %%
+[] 0 setdash
+gsave
+  [3 5] 6 setdash
+  currentdash pop length 2 eq [true] assert
+grestore
+currentdash pop length 0 eq [true] assert
+
+
+%% =============================================================================
+%% setflat / currentflat
+%% =============================================================================
+
+%% setflat - normal values %%
+1 setflat /currentflat [1.0] assert
+50 setflat /currentflat [50.0] assert
+0.5 setflat /currentflat [0.5] assert
+
+%% setflat - clamping %%
+% Per PLRM, setflat clamps to implementation range [0.2, 100]
+0.1 setflat currentflat 0.2 ge [true] assert
+200 setflat currentflat 100 le [true] assert
+
+%% setflat - error conditions %%
+/setflat [/stackunderflow] assert
+(a) /setflat [(a) /typecheck] assert
+true /setflat [true /typecheck] assert
+
+%% setflat - default value %%
+initgraphics /currentflat [1.0] assert
+
+%% setflat - gsave/grestore preservation %%
+1 setflat
+gsave
+  50 setflat
+  /currentflat [50.0] assert
+grestore
+/currentflat [1.0] assert
+
+
+%% =============================================================================
+%% initgraphics
+%% =============================================================================
+
+%% initgraphics resets all parameters to defaults %%
+% Set everything to non-default values
+2 setlinecap
+2 setlinejoin
+20 setmiterlimit
+5 setlinewidth
+50 setflat
+[3 5] 6 setdash
+
+% Reset
+initgraphics
+
+% Verify all defaults
+/currentlinecap [0] assert
+/currentlinejoin [0] assert
+/currentmiterlimit [10.0] assert
+/currentlinewidth [1] assert
+/currentflat [1.0] assert
+currentdash pop length 0 eq [true] assert
+
+%% initgraphics resets CTM to default %%
+10 20 translate
+initgraphics
+matrix currentmatrix matrix defaultmatrix arrayeq [true] assert
+
+%% initgraphics resets color to black %%
+1 0 0 setrgbcolor
+initgraphics
+currentrgbcolor [0.0 0.0 0.0] assert
+
+%% initgraphics clears current path %%
+100 200 moveto
+initgraphics
+{currentpoint} stopped [true] assert
+clear
+
+
+grestore

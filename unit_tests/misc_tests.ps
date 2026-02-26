@@ -1,0 +1,195 @@
+%!PS-Adobe-3.0
+%%Title: Miscellaneous Operator Tests  
+%%Creator: PostForge Unit Test Framework
+%%EndComments
+
+userdict /$unittest known not {(unit_tests/unittest.ps) run} if
+
+
+%% eexec %%
+% Test basic eexec error conditions
+
+% Stack underflow error
+/eexec [/stackunderflow] assert
+
+% Type check error - invalid operand types  
+123 /eexec [123 /typecheck] assert
+/somename /eexec [/somename /typecheck] assert
+[1 2 3] /eexec [[1 2 3] /typecheck] assert
+
+% % TODO: Add tests with actual encrypted content once we have sample eexec data
+% % For now, test basic validation and error handling
+
+%% bind %%
+% Test bind operator - replaces executable names with operators in procedures
+
+% bind replaces known operator names with operators
+{add} bind 0 get type /operatortype eq [true] assert
+
+% bind leaves undefined names unchanged
+{undefinedxyz123} bind 0 get type /nametype eq [true] assert
+
+% bind leaves literals unchanged - integers stay as integers
+{123} bind 0 get 123 eq [true] assert
+
+% bind returns same array (modifies in place)
+/myproc {add} def /myproc load bind /myproc load eq [true] assert
+
+% bind stack underflow
+/bind [/stackunderflow] assert
+
+% bind type check
+123 /bind [123 /typecheck] assert
+(string) /bind [(string) /typecheck] assert
+
+%% echo %%
+% echo sets the echo flag (bool -> nothing)
+true /echo [] assert
+false /echo [] assert
+
+% echo typecheck - non-bool operand
+123 /echo [123 /typecheck] assert
+(string) /echo [(string) /typecheck] assert
+
+% echo stackunderflow
+/echo [/stackunderflow] assert
+
+%% defineuserobject %%
+% basic define and retrieve via UserObjects
+0 (hello) defineuserobject
+UserObjects 0 get (hello) eq [true] assert
+
+% define at higher index
+5 42 defineuserobject
+UserObjects 5 get 42 eq [true] assert
+
+% overwrite existing
+0 (world) defineuserobject
+UserObjects 0 get (world) eq [true] assert
+
+% defineuserobject stackunderflow
+/defineuserobject [/stackunderflow] assert
+1 /defineuserobject [1 /stackunderflow] assert
+
+% defineuserobject typecheck (non-integer index)
+1.0 (x) /defineuserobject [1.0 (x) /typecheck] assert
+
+% defineuserobject rangecheck (negative index)
+-1 (x) /defineuserobject [-1 (x) /rangecheck] assert
+
+%% execuserobject %%
+% exec a literal object pushes it
+0 (testval) defineuserobject
+0 execuserobject (testval) eq [true] assert
+
+% exec an executable procedure
+1 {2 3 add} defineuserobject
+1 execuserobject [5] assert
+
+% execuserobject stackunderflow
+/execuserobject [/stackunderflow] assert
+
+% execuserobject typecheck
+1.0 /execuserobject [1.0 /typecheck] assert
+
+% execuserobject rangecheck (out of bounds)
+9999 /execuserobject [9999 /rangecheck] assert
+
+% execuserobject rangecheck (negative)
+-1 /execuserobject [-1 /rangecheck] assert
+
+%% undefineuserobject %%
+% undefine sets element to null
+0 (data) defineuserobject
+0 undefineuserobject
+UserObjects 0 get type /nulltype eq [true] assert
+
+% undefineuserobject stackunderflow
+/undefineuserobject [/stackunderflow] assert
+
+% undefineuserobject typecheck
+1.0 /undefineuserobject [1.0 /typecheck] assert
+
+% undefineuserobject rangecheck (out of bounds)
+9999 /undefineuserobject [9999 /rangecheck] assert
+
+% undefineuserobject rangecheck (negative)
+-1 /undefineuserobject [-1 /rangecheck] assert
+
+
+%% usertime %%
+% usertime returns an integer
+usertime type /integertype eq [true] assert
+
+% usertime returns non-negative value
+usertime 0 ge [true] assert
+
+% calling usertime twice: second >= first
+usertime usertime exch sub 0 ge [true] assert
+
+
+%% realtime %%
+% realtime returns an integer
+realtime type /integertype eq [true] assert
+
+% realtime returns non-negative value
+realtime 0 ge [true] assert
+
+% calling realtime twice: second >= first
+realtime realtime exch sub 0 ge [true] assert
+
+
+%% internaldict %%
+% Valid password returns a dictionary
+{1183615869 internaldict type} [/dicttype] assert
+
+% Invalid password should cause invalidaccess
+0 /internaldict [0 /invalidaccess] assert
+1234 /internaldict [1234 /invalidaccess] assert
+
+% Stackunderflow
+/internaldict [/stackunderflow] assert
+
+% Typecheck
+(bad) /internaldict [(bad) /typecheck] assert
+1.0 /internaldict [1.0 /typecheck] assert
+
+
+%% type %%
+% Verify type returns correct type names for various objects
+1 /type [/integertype] assert
+1.0 /type [/realtype] assert
+(str) /type [/stringtype] assert
+/name /type [/nametype] assert
+true /type [/booleantype] assert
+[1 2] /type [/arraytype] assert
+<< >> /type [/dicttype] assert
+    % type errors
+    /type [/stackunderflow] assert
+
+
+%% cvlit / cvx %%
+% cvlit makes executable objects literal (procedure becomes literal array)
+{add} cvlit xcheck not [true] assert
+
+% cvx makes literal objects executable
+/add /cvx [/add] assert
+(2 3 add) cvx exec [5] assert
+
+    % cvlit errors
+    /cvlit [/stackunderflow] assert
+    % cvx errors
+    /cvx [/stackunderflow] assert
+
+
+%% xcheck %%
+% Executable objects return true
+{add} /xcheck [true] assert
+
+% Literal objects return false
+(hello) /xcheck [false] assert
+123 /xcheck [false] assert
+/name /xcheck [false] assert
+
+    % xcheck errors
+    /xcheck [/stackunderflow] assert

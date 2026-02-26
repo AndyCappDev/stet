@@ -1,0 +1,390 @@
+%% Image tests
+
+userdict /$unittest known not {(unit_tests/unittest.ps) run} if
+
+
+%% Image Processing Operators %%
+% Tests for image, imagemask, and colorimage operators
+
+%% Basic image operator %%
+% Test that basic grayscale image doesn't crash
+/testdata <00 FF FF 00> def
+{ 2 2 8 [2 0 0 -2 0 2] testdata image } stopped [false] assert
+
+% Test string data source
+{ 2 2 8 [2 0 0 -2 0 2] <80 FF> image } stopped [true] assert  % string source too short
+
+%% ImageMask operator %%
+% Test basic imagemask operation
+0.5 0.5 0.5 setrgbcolor
+/maskdata <F0 0F> def
+{ 2 2 true [2 0 0 -2 0 2] maskdata imagemask } stopped [false] assert
+
+% Test imagemask with false polarity
+{ 2 2 false [2 0 0 -2 0 2] maskdata imagemask } stopped [false] assert
+
+%% ColorImage operator %%
+% Test RGB colorimage operation  
+/rgbdata <FF0000 00FF00> def  % Red, Green
+{ 2 1 8 [2 0 0 -1 0 1] rgbdata false 3 colorimage } stopped [false] assert
+
+% Test different RGB data
+/rgbdata2 <FF FF FF 00 00 00> def  % White, Black
+{ 2 1 8 [2 0 0 -1 0 1] rgbdata2 false 3 colorimage } stopped [false] assert
+
+%% Error condition testing %%
+% stackunderflow - insufficient operands for image
+{ 2 2 8 image } stopped [2 2 8 true] assert
+clear
+
+% Invalid matrix size for image  
+{ 2 2 8 [2 0 0] <FF00> image } stopped [2 2 8 [2 0 0] <FF00> true] assert
+clear
+
+% Invalid bits per component
+{ 2 2 9 [2 0 0 -2 0 2] <FF00> image } stopped [2 2 9 [2 0 0 -2 0 2] <FF00> true] assert
+clear
+
+% ImageMask missing polarity
+{ 2 2 1 [2 0 0 -2 0 2] <F0> imagemask } stopped [2 2 1 [2 0 0 -2 0 2] <F0> true] assert
+clear
+
+% ColorImage invalid component count
+{ 2 2 8 [2 0 0 -2 0 2] <FF00> false 2 colorimage } stopped [2 2 8 [2 0 0 -2 0 2] <FF00> false 2 true] assert
+clear
+
+% Zero width dimension
+{ 0 2 8 [2 0 0 -2 0 2] <FF00> image } stopped [0 2 8 [2 0 0 -2 0 2] <FF00> true] assert
+clear
+
+% Zero height dimension
+{ 2 0 8 [2 0 0 -2 0 2] <FF00> image } stopped [2 0 8 [2 0 0 -2 0 2] <FF00> true] assert
+clear
+
+%% Advanced image testing %%
+% Test 1-bit image data (2x2 image needs 2 bytes: 1 byte per row)
+{ 2 2 1 [2 0 0 -2 0 2] <C0 C0> image } stopped [false] assert
+
+% Test 4-bit image data
+{ 2 2 4 [2 0 0 -2 0 2] <F0 C3> image } stopped [false] assert
+
+% Test larger image dimensions
+/large_data <FF 00 80 40 C0 60 E0 F0> def
+{ 4 2 8 [4 0 0 -2 0 2] large_data image } stopped [false] assert
+
+%% ColorImage multi-component testing %%
+% Test 4-component CMYK colorimage
+/cmyk_data <FF 00 80 40 C0 60 E0 F0> def
+{ 2 1 8 [2 0 0 -1 0 1] cmyk_data false 4 colorimage } stopped [false] assert
+
+%% Matrix transformation testing %%
+% Test different matrix transformations
+{ 2 2 8 [1 0 0 1 0 0] <FF 00 80 C0> image } stopped [false] assert  % Identity matrix
+{ 2 2 8 [-2 0 0 2 2 0] <FF 00 80 C0> image } stopped [false] assert  % Flip horizontal
+
+
+%% Error condition tests under nulldevice %%
+gsave nulldevice
+
+% Helper: run proc, check if stopped, clean up any leaked operands
+% Usage: { ... } should_error -> true/false
+/should_error {
+    count 1 sub /se_base exch def
+    stopped /se_result exch def
+    count se_base sub { pop } repeat
+    se_result
+} bind def
+
+% image typecheck - non-integer width
+{ 2.0 2 8 [2 0 0 -2 0 2] <FF00FF00> image } should_error [true] assert
+
+% image typecheck - non-integer height
+{ 2 2.0 8 [2 0 0 -2 0 2] <FF00FF00> image } should_error [true] assert
+
+% image typecheck - non-integer bits
+{ 2 2 8.0 [2 0 0 -2 0 2] <FF00FF00> image } should_error [true] assert
+
+% image rangecheck - negative width
+{ -1 2 8 [2 0 0 -2 0 2] <FF00> image } should_error [true] assert
+
+% image rangecheck - negative height
+{ 2 -1 8 [2 0 0 -2 0 2] <FF00> image } should_error [true] assert
+
+% image rangecheck - invalid bits per component (not 1, 2, 4, 8, 12)
+{ 2 2 3 [2 0 0 -2 0 2] <FF00> image } should_error [true] assert
+
+% imagemask - typecheck for non-boolean polarity
+{ 2 2 1 [2 0 0 -2 0 2] <F0> imagemask } should_error [true] assert
+
+% colorimage - typecheck for non-integer ncomp
+{ 2 1 8 [2 0 0 -1 0 1] <FF0000> false 3.0 colorimage } should_error [true] assert
+
+% colorimage - rangecheck for invalid ncomp (5)
+{ 2 1 8 [2 0 0 -1 0 1] <FF00> false 5 colorimage } should_error [true] assert
+
+% Procedure data source works
+/imgcount 0 def
+{ 2 2 8 [2 0 0 -2 0 2] { /imgcount imgcount 1 add def <FF00> } image } stopped [false] assert
+
+%% ============================================================
+%% Dict form (Type 1) image tests
+%% ============================================================
+
+% Ensure DeviceGray color space for dict-form tests (Decode [0 1] = 1 component)
+0 setgray
+
+% Basic dict form image with all required keys - no error
+{
+  <<
+    /ImageType 1
+    /Width 2
+    /Height 2
+    /BitsPerComponent 8
+    /ImageMatrix [2 0 0 -2 0 2]
+    /DataSource <FF00FF00>
+    /Decode [0 1]
+  >> image
+} should_error [false] assert
+
+% Dict form with inverted Decode array [1 0] - no error
+{
+  <<
+    /ImageType 1
+    /Width 2
+    /Height 2
+    /BitsPerComponent 8
+    /ImageMatrix [2 0 0 -2 0 2]
+    /DataSource <FF00FF00>
+    /Decode [1 0]
+  >> image
+} should_error [false] assert
+
+% Dict form with procedure DataSource - no error
+{
+  <<
+    /ImageType 1
+    /Width 2
+    /Height 2
+    /BitsPerComponent 8
+    /ImageMatrix [2 0 0 -2 0 2]
+    /DataSource { <FF00> }
+    /Decode [0 1]
+  >> image
+} should_error [false] assert
+
+% Dict ImageType 4 (color-key masking) - no error
+{
+  <<
+    /ImageType 4
+    /Width 2
+    /Height 2
+    /BitsPerComponent 8
+    /ImageMatrix [2 0 0 -2 0 2]
+    /DataSource <FF00FF00>
+    /Decode [0 1]
+    /MaskColor [0]
+  >> image
+} should_error [false] assert
+
+%% Dict form error conditions %%
+
+% Dict missing ImageType -> typecheck
+{
+  <<
+    /Width 2
+    /Height 2
+    /BitsPerComponent 8
+    /ImageMatrix [2 0 0 -2 0 2]
+    /DataSource <FF00FF00>
+    /Decode [0 1]
+  >> image
+} should_error [true] assert
+
+% Dict invalid ImageType (99) -> rangecheck
+{
+  <<
+    /ImageType 99
+    /Width 2
+    /Height 2
+    /BitsPerComponent 8
+    /ImageMatrix [2 0 0 -2 0 2]
+    /DataSource <FF00FF00>
+    /Decode [0 1]
+  >> image
+} should_error [true] assert
+
+% Dict missing Width -> typecheck
+{
+  <<
+    /ImageType 1
+    /Height 2
+    /BitsPerComponent 8
+    /ImageMatrix [2 0 0 -2 0 2]
+    /DataSource <FF00FF00>
+    /Decode [0 1]
+  >> image
+} should_error [true] assert
+
+% Dict missing DataSource -> typecheck
+{
+  <<
+    /ImageType 1
+    /Width 2
+    /Height 2
+    /BitsPerComponent 8
+    /ImageMatrix [2 0 0 -2 0 2]
+    /Decode [0 1]
+  >> image
+} should_error [true] assert
+
+% Dict non-integer Width -> typecheck
+{
+  <<
+    /ImageType 1
+    /Width 2.0
+    /Height 2
+    /BitsPerComponent 8
+    /ImageMatrix [2 0 0 -2 0 2]
+    /DataSource <FF00FF00>
+    /Decode [0 1]
+  >> image
+} should_error [true] assert
+
+% Dict negative Width -> rangecheck
+{
+  <<
+    /ImageType 1
+    /Width -2
+    /Height 2
+    /BitsPerComponent 8
+    /ImageMatrix [2 0 0 -2 0 2]
+    /DataSource <FF00FF00>
+    /Decode [0 1]
+  >> image
+} should_error [true] assert
+
+% Dict zero Width -> rangecheck
+{
+  <<
+    /ImageType 1
+    /Width 0
+    /Height 2
+    /BitsPerComponent 8
+    /ImageMatrix [2 0 0 -2 0 2]
+    /DataSource <FF00FF00>
+    /Decode [0 1]
+  >> image
+} should_error [true] assert
+
+% Dict zero Height -> rangecheck
+{
+  <<
+    /ImageType 1
+    /Width 2
+    /Height 0
+    /BitsPerComponent 8
+    /ImageMatrix [2 0 0 -2 0 2]
+    /DataSource <FF00FF00>
+    /Decode [0 1]
+  >> image
+} should_error [true] assert
+
+% Dict invalid BPC (3) -> rangecheck
+{
+  <<
+    /ImageType 1
+    /Width 2
+    /Height 2
+    /BitsPerComponent 3
+    /ImageMatrix [2 0 0 -2 0 2]
+    /DataSource <FF00FF00>
+    /Decode [0 1]
+  >> image
+} should_error [true] assert
+
+%% ============================================================
+%% BPC coverage
+%% ============================================================
+
+% 2-bit BPC image (2x2, each row = 2 pixels * 2 bits = 4 bits padded to 1 byte)
+{ 2 2 2 [2 0 0 -2 0 2] <C3 3C> image } should_error [false] assert
+
+% 12-bit BPC image (2x1, 2 samples * 12 bits = 24 bits = 3 bytes)
+{ 2 1 12 [2 0 0 -1 0 1] <FFF000> image } should_error [false] assert
+
+%% ============================================================
+%% Dict form imagemask
+%% ============================================================
+
+% Dict form imagemask with Decode [1 0] (inverted) - no error
+{
+  <<
+    /ImageType 1
+    /Width 2
+    /Height 2
+    /ImageMatrix [2 0 0 -2 0 2]
+    /DataSource <F00F>
+    /Decode [1 0]
+  >> imagemask
+} should_error [false] assert
+
+% Dict form imagemask with Decode [0 1] (normal) - no error
+{
+  <<
+    /ImageType 1
+    /Width 2
+    /Height 2
+    /ImageMatrix [2 0 0 -2 0 2]
+    /DataSource <F00F>
+    /Decode [0 1]
+  >> imagemask
+} should_error [false] assert
+
+%% ============================================================
+%% Colorimage variants
+%% ============================================================
+
+% 1-component colorimage (grayscale via colorimage) - no error
+{ 2 2 8 [2 0 0 -2 0 2] <FF00FF00> false 1 colorimage } should_error [false] assert
+
+% multi=true RGB colorimage with separate data sources - no error
+{ 2 1 8 [2 0 0 -1 0 1] <FF00> <00FF> <8040> true 3 colorimage } should_error [false] assert
+
+%% ============================================================
+%% Larger image and matrix variants
+%% ============================================================
+
+% 8x8 grayscale image (64 bytes) - no error
+{
+  8 8 8 [8 0 0 -8 0 8] <
+    FF FF FF FF FF FF FF FF
+    00 00 00 00 00 00 00 00
+    FF FF FF FF FF FF FF FF
+    00 00 00 00 00 00 00 00
+    FF FF FF FF FF FF FF FF
+    00 00 00 00 00 00 00 00
+    FF FF FF FF FF FF FF FF
+    00 00 00 00 00 00 00 00
+  > image
+} should_error [false] assert
+
+% Vertical flip matrix [w 0 0 h 0 0] - no error
+{ 2 2 8 [2 0 0 2 0 0] <FF00FF00> image } should_error [false] assert
+
+% Non-unit scale matrix [4 0 0 -4 0 4] - no error
+{ 2 2 8 [4 0 0 -4 0 4] <FF00FF00> image } should_error [false] assert
+
+%% ============================================================
+%% Stackunderflow with 0 operands
+%% ============================================================
+
+% image with empty stack
+{ image } should_error [true] assert
+
+% imagemask with empty stack
+{ imagemask } should_error [true] assert
+
+% colorimage with empty stack
+{ colorimage } should_error [true] assert
+
+grestore

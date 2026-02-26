@@ -1,0 +1,85 @@
+%% Device Operator tests
+%% Tests for currentpagedevice, showpage, copypage, flushpage, setpagedevice
+
+userdict /$unittest known not {(unit_tests/unittest.ps) run} if
+
+
+%% =============================================================================
+%% currentpagedevice
+%% =============================================================================
+
+%% currentpagedevice - returns dict %%
+currentpagedevice type /dicttype eq [true] assert
+
+%% currentpagedevice - dict has required keys %%
+currentpagedevice /PageSize known [true] assert
+
+%% currentpagedevice - under nulldevice %%
+gsave
+  nulldevice
+  currentpagedevice type /dicttype eq [true] assert
+grestore
+
+
+%% =============================================================================
+%% showpage / copypage / flushpage
+%% =============================================================================
+
+%% showpage - no error under nulldevice %%
+gsave
+  nulldevice
+  {showpage} stopped [false] assert
+grestore
+
+%% copypage - no error under nulldevice %%
+gsave
+  nulldevice
+  {copypage} stopped [false] assert
+grestore
+
+
+%% =============================================================================
+%% setpagedevice
+%% =============================================================================
+
+%% setpagedevice - basic dict %%
+gsave
+  << /PageSize [300 400] >> setpagedevice
+  currentpagedevice /PageSize get aload pop
+  [300 400] assert
+grestore
+
+%% setpagedevice - empty dict (no-op) %%
+gsave
+  {<< >> setpagedevice} stopped [false] assert
+grestore
+
+%% setpagedevice - error conditions %%
+/setpagedevice [/stackunderflow] assert
+123 /setpagedevice [123 /typecheck] assert
+(string) /setpagedevice [(string) /typecheck] assert
+
+
+%% =============================================================================
+%% nulldevice
+%% =============================================================================
+
+%% nulldevice - runs without error %%
+gsave
+  {nulldevice} stopped [false] assert
+grestore
+
+%% nulldevice - sets identity CTM %%
+gsave
+  nulldevice
+  matrix currentmatrix aload pop
+  [1.0 0.0 0.0 1.0 0.0 0.0] assert
+grestore
+
+
+%% =============================================================================
+%% deviceinfo-related queries
+%% =============================================================================
+
+%% currentdevice returns something (implementation-specific) %%
+{currentdevice pop} stopped [false] assert

@@ -1,0 +1,139 @@
+%% Relational, Boolean, and Bitwise tests
+
+userdict /$unittest known not {(unit_tests/unittest.ps) run} if
+
+
+%% and %%
+true true /and [true] assert
+true false /and [false] assert
+false true /and [false] assert
+false false /and [false] assert
+99 1 /and [1] assert
+52 7 /and [4] assert
+    % and errors
+    /and [/stackunderflow] assert
+    1 /and [1 /stackunderflow] assert
+    (a) false /and [(a) false /typecheck] assert
+    false 1 /and [false 1 /typecheck] assert
+
+
+%% eq %%
+4.0 4 /eq [true] assert
+(abc) (abc) /eq [true] assert
+(abc) /abc /eq [true] assert
+[1 2 3] dup /eq [true] assert
+[1 2 3] [1 2 3] /eq [false] assert
+[1 2 3] 1 /eq [false] assert
+[1 2 3] (a) /eq [false] assert
+<< /key1 1 /key2 (a) >> << /key1 1 /key2 (a) >> /eq [false] assert
+<< /key1 1 /key2 (a) >> dup /eq [true] assert
+    % eq errors
+    /eq [/stackunderflow] assert
+    1 /eq [1 /stackunderflow] assert
+
+
+%% ne %%
+4.0 4 /ne [false] assert
+(abc) (abc) /ne [false] assert
+(abc) /abc /ne [false] assert
+[1 2 3] dup /ne [false] assert
+[1 2 3] [1 2 3] /ne [true] assert
+[1 2 3] 1 /ne [true] assert
+[1 2 3] (a) /ne [true] assert
+<< /key1 1 /key2 (a) >> << /key1 1 /key2 (a) >> /ne [true] assert
+<< /key1 1 /key2 (a) >> dup /ne [false] assert
+    % ne errors
+    /ne [/stackunderflow] assert
+    1 /ne [1 /stackunderflow] assert
+
+
+%% ge %%
+4.2 4 /ge [true] assert
+(abc) (d) /ge [false] assert
+(aba) (ab) /ge [true] assert
+(aba) (aba) /ge [true] assert
+    % ge errors
+    /ge [/stackunderflow] assert
+    1 /ge [1 /stackunderflow] assert
+
+
+%% gt %%
+4.2 4 /gt [true] assert
+(abc) (d) /gt [false] assert
+(aba) (ab) /gt [true] assert
+(aba) (aba) /gt [false] assert
+    % gt errors
+    /gt [/stackunderflow] assert
+    1 /gt [1 /stackunderflow] assert
+
+
+%% le %%
+4.2 4 /le [false] assert
+(abc) (d) /le [true] assert
+(aba) (ab) /le [false] assert
+(aba) (aba) /le [true] assert
+    % le errors
+    /le [/stackunderflow] assert
+    1 /le [1 /stackunderflow] assert
+
+
+%% lt %%
+4.2 4 /lt [false] assert
+(abc) (d) /lt [true] assert
+(aba) (ab) /lt [false] assert
+(aba) (aba) /lt [false] assert
+    % lt errors
+    /lt [/stackunderflow] assert
+    1 /lt [1 /stackunderflow] assert
+
+
+%% not %%
+true /not [false] assert
+false /not [true] assert
+52 /not [-53] assert
+    % not errors
+    /not [/stackunderflow] assert
+    [] /not [[] /typecheck] assert
+
+
+%% or %%
+true true /or [true] assert
+true false /or [true] assert
+false true /or [true] assert
+false false /or [false] assert
+17 5 /or [21] assert
+    % or errors
+    /or [/stackunderflow] assert
+    true /or [true /stackunderflow] assert
+    true [] /or [true [] /typecheck] assert
+
+
+%% xor %%
+true true /xor [false] assert
+true false /xor [true] assert
+false true /xor [true] assert
+false false /xor [false] assert
+7 3 /xor [4] assert
+12 3 /xor [15] assert
+    % xor errors
+    /xor [/stackunderflow] assert
+    true /xor [true /stackunderflow] assert
+    true [] /xor [true [] /typecheck] assert
+
+
+%% true %%
+/true [true] assert
+
+
+%% false %%
+/false [false] assert
+
+
+%% bitshift %%
+7 3 /bitshift [56] assert
+142 -3 /bitshift [17] assert
+    % bitshift errors
+    /bitshift [/stackunderflow] assert
+    7 /bitshift [7 /stackunderflow] assert
+    () 4 /bitshift [() 4 /typecheck] assert
+    4 () /bitshift [4 () /typecheck] assert

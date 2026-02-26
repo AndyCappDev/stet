@@ -1,0 +1,480 @@
+%% Graphics State tests
+
+userdict /$unittest known not {(unit_tests/unittest.ps) run} if
+
+
+%% gsave %%
+% Basic gsave functionality - should save current graphics state
+5 setlinewidth gsave 10 setlinewidth grestore /currentlinewidth [5] assert
+
+% gsave with nested levels and should work up to graphics stack limit
+% Start with clean state: 1 setlinewidth, then push 9 gsave levels (max is 10 total)
+1 setlinewidth
+gsave 2 setlinewidth
+gsave 3 setlinewidth  
+gsave 4 setlinewidth
+gsave 5 setlinewidth
+gsave 6 setlinewidth
+gsave 7 setlinewidth
+gsave 8 setlinewidth
+gsave 9 setlinewidth
+% gsave 10 setlinewidth
+/currentlinewidth [9] assert
+% grestore /currentlinewidth [9] assert
+grestore /currentlinewidth [8] assert
+grestore /currentlinewidth [7] assert
+grestore /currentlinewidth [6] assert
+grestore /currentlinewidth [5] assert
+grestore /currentlinewidth [4] assert
+grestore /currentlinewidth [3] assert
+grestore /currentlinewidth [2] assert
+grestore /currentlinewidth [1] assert
+
+
+%% grestore %%
+% Basic grestore functionality
+1 setlinewidth gsave 5 setlinewidth grestore /currentlinewidth [1] assert
+
+% grestore should work when called without user gsave (restores to init save state)
+2 setlinewidth grestore currentlinewidth /test_width exch def
+test_width test_width eq [true] assert  % Just verify grestore doesn't crash
+
+% grestore with multiple nested levels
+3 setlinewidth gsave 6 setlinewidth gsave 9 setlinewidth
+grestore /currentlinewidth [6] assert
+grestore /currentlinewidth [3] assert
+
+
+%% grestoreall %%
+% grestoreall should restore to save boundary (init save state)
+1 setlinewidth gsave 2 setlinewidth gsave 3 setlinewidth gsave 4 setlinewidth
+grestoreall currentlinewidth /restored_width exch def
+restored_width restored_width eq [true] assert  % Verify grestoreall doesn't crash
+
+% grestoreall should clear all user gsave levels
+5 setlinewidth gsave 10 setlinewidth gsave 15 setlinewidth gsave 20 setlinewidth
+grestoreall /currentlinewidth [1] assert
+
+% Test graphics state parameter preservation across save/restore cycles
+% Set distinctive value, gsave, change it, grestore, verify restoration
+7 setlinewidth gsave 14 setlinewidth grestore /currentlinewidth [7] assert
+
+% Verify graphics state isolation - changes in gsave don't affect outer state
+8 setlinewidth 
+/outer_state currentlinewidth def
+gsave 16 setlinewidth /inner_state currentlinewidth def grestore
+/final_state currentlinewidth def
+outer_state final_state eq [true] assert
+inner_state 16 eq [true] assert
+
+% Test that setlinewidth changes are properly preserved in graphics state
+12 setlinewidth gsave 
+  currentlinewidth 12 eq [true] assert  % Should inherit outer state
+  24 setlinewidth
+  currentlinewidth 24 eq [true] assert  % Should see new value
+grestore
+currentlinewidth 12 eq [true] assert    % Should be restored to outer state
+
+
+%% setstrokeadjust %%
+% Basic setstrokeadjust functionality
+true /setstrokeadjust [] assert
+false /setstrokeadjust [] assert
+
+% Test with currentstrokeadjust to verify setting
+true setstrokeadjust /currentstrokeadjust [true] assert
+false setstrokeadjust /currentstrokeadjust [false] assert
+
+% Error conditions - stackunderflow
+/setstrokeadjust [/stackunderflow] assert
+
+% Error conditions - typecheck  
+123 /setstrokeadjust [123 /typecheck] assert
+(string) /setstrokeadjust [(string) /typecheck] assert
+[] /setstrokeadjust [[] /typecheck] assert
+{} /setstrokeadjust [{} /typecheck] assert
+
+
+%% currentstrokeadjust %%
+% Basic currentstrokeadjust functionality - should return boolean
+currentstrokeadjust type /booleantype eq [true] assert
+
+% Test state preservation across graphics state operations
+false setstrokeadjust
+gsave
+  /currentstrokeadjust [false] assert  % Should inherit outer state
+  true setstrokeadjust
+  /currentstrokeadjust [true] assert   % Should see new value
+grestore
+/currentstrokeadjust [false] assert    % Should be restored to outer state
+
+% Test state preservation across nested gsave/grestore
+true setstrokeadjust
+gsave
+  false setstrokeadjust
+  gsave
+    true setstrokeadjust  
+    /currentstrokeadjust [true] assert   % Inner level
+  grestore
+  /currentstrokeadjust [false] assert    % Middle level restored
+grestore  
+/currentstrokeadjust [true] assert       % Outer level restored
+
+% Test that grestoreall properly restores stroke adjust state
+false setstrokeadjust
+gsave true setstrokeadjust gsave false setstrokeadjust gsave true setstrokeadjust
+grestoreall
+% After grestoreall, should be restored to device-dependent initial value
+currentstrokeadjust type /booleantype eq [true] assert  % Just verify it's boolean
+
+
+%% setoverprint %%
+% Basic setoverprint functionality
+true /setoverprint [] assert
+false /setoverprint [] assert
+
+% Test with currentoverprint to verify setting
+true setoverprint /currentoverprint [true] assert
+false setoverprint /currentoverprint [false] assert
+
+% Error conditions - stackunderflow
+/setoverprint [/stackunderflow] assert
+
+% Error conditions - typecheck  
+123 /setoverprint [123 /typecheck] assert
+(string) /setoverprint [(string) /typecheck] assert
+[] /setoverprint [[] /typecheck] assert
+{} /setoverprint [{} /typecheck] assert
+
+
+%% currentoverprint %%
+% Basic currentoverprint functionality - should return boolean
+currentoverprint type /booleantype eq [true] assert
+
+% Test state preservation across graphics state operations
+false setoverprint
+gsave
+  /currentoverprint [false] assert  % Should inherit outer state
+  true setoverprint
+  /currentoverprint [true] assert   % Should see new value
+grestore
+/currentoverprint [false] assert    % Should be restored to outer state
+
+% Test state preservation across nested gsave/grestore
+true setoverprint
+gsave
+  false setoverprint
+  gsave
+    true setoverprint  
+    /currentoverprint [true] assert   % Inner level
+  grestore
+  /currentoverprint [false] assert    % Middle level restored
+grestore  
+/currentoverprint [true] assert       % Outer level restored
+
+% Test that grestoreall properly restores overprint state
+false setoverprint
+gsave true setoverprint gsave false setoverprint gsave true setoverprint
+grestoreall
+% After grestoreall, should be restored to initial value (false per PLRM)
+/currentoverprint [false] assert
+
+% Verify default overprint value is false per PLRM
+% Reset to clean state and check default
+grestoreall /currentoverprint [false] assert
+
+
+%% =============================================================================
+%% GSTATE OBJECT OPERATORS (PostScript Level 2)
+%% =============================================================================
+
+%% gstate %%
+% Basic gstate functionality - should create new gstate object
+gstate type /gstatetype eq [true] assert
+
+% gstate should capture current graphics state
+5 setlinewidth gstate /saved_gstate exch def
+10 setlinewidth  % Change current state
+saved_gstate setgstate  % Restore from gstate object
+/currentlinewidth [5] assert
+
+% Test multiple gstate objects are independent
+1 setlinewidth gstate /gstate1 exch def
+2 setlinewidth gstate /gstate2 exch def
+3 setlinewidth  % Change current state
+gstate1 setgstate /currentlinewidth [1] assert
+gstate2 setgstate /currentlinewidth [2] assert
+
+% Test gstate captures complex state (multiple parameters)
+1 setlinewidth false setstrokeadjust true setoverprint
+gstate /complex_gstate exch def
+5 setlinewidth true setstrokeadjust false setoverprint  % Change everything
+complex_gstate setgstate
+/currentlinewidth [1] assert
+/currentstrokeadjust [false] assert
+/currentoverprint [true] assert
+
+% Test gstate works independently of graphics state stack
+2 setlinewidth gsave 4 setlinewidth gstate /stack_test exch def grestore
+/currentlinewidth [2] assert  % Should be restored by grestore
+stack_test setgstate /currentlinewidth [4] assert  % gstate should override
+
+% Error conditions - should succeed (no stackunderflow possible for gstate)
+gstate pop  % Just verify it creates something
+
+
+%% currentgstate %%
+% Test that currentgstate updates gstate object with current graphics state
+1 setlinewidth gstate /my_gstate exch def  % Create gstate with linewidth 1
+5 setlinewidth                             % Change current state to linewidth 5
+my_gstate currentgstate setgstate         % Update gstate and use returned value immediately
+/currentlinewidth [5] assert              % Should now have linewidth 5
+
+% Alternative: Store updated gstate back in variable
+3 setlinewidth gstate /update_test exch def
+6 setlinewidth  % Change current state
+/update_test update_test currentgstate def  % Store updated gstate back in variable
+update_test setgstate /currentlinewidth [6] assert  % Should reflect new state
+
+% Test currentgstate with multiple state changes
+2 setlinewidth false setstrokeadjust gstate /multi_update exch def
+7 setlinewidth true setstrokeadjust  % Change state
+multi_update setgstate  % Use returned updated gstate directly
+/currentlinewidth [2] assert
+/currentstrokeadjust [false] assert
+
+% Error conditions - stackunderflow
+/currentgstate [/stackunderflow] assert
+
+% Error conditions - typecheck
+123 /currentgstate [123 /typecheck] assert
+(string) /currentgstate [(string) /typecheck] assert
+[] /currentgstate [[] /typecheck] assert
+{} /currentgstate [{} /typecheck] assert
+true /currentgstate [true /typecheck] assert
+
+
+%% setgstate %%
+% Basic setgstate functionality tested above in gstate section
+
+% Test setgstate completely replaces graphics state
+1 setlinewidth false setstrokeadjust false setoverprint
+8 setlinewidth true setstrokeadjust true setoverprint gstate /complete_state exch def
+2 setlinewidth false setstrokeadjust false setoverprint  % Different state
+complete_state setgstate
+/currentlinewidth [8] assert
+/currentstrokeadjust [true] assert
+/currentoverprint [true] assert
+
+% Test setgstate doesn't affect graphics state stack
+3 setlinewidth gsave 6 setlinewidth gstate /setgstate_test exch def
+9 setlinewidth grestore  % Should restore to 3
+/currentlinewidth [3] assert
+setgstate_test setgstate /currentlinewidth [6] assert  % setgstate overrides
+
+% Test setgstate with nested graphics state stack operations
+4 setlinewidth gsave 7 setlinewidth gstate /nested_test exch def
+10 setlinewidth gsave 13 setlinewidth  % Nested gsave
+nested_test setgstate /currentlinewidth [7] assert  % setgstate works in nested context
+grestore /currentlinewidth [10] assert  % grestore doesn't affect setgstate result
+grestore /currentlinewidth [4] assert  % Still preserved
+
+% Test multiple setgstate operations
+11 setlinewidth gstate /state_a exch def
+22 setlinewidth gstate /state_b exch def
+33 setlinewidth  % Current state
+state_a setgstate /currentlinewidth [11] assert
+state_b setgstate /currentlinewidth [22] assert
+state_a setgstate /currentlinewidth [11] assert  % Can switch back
+
+% Test setgstate copies state (modifications don't affect original)
+14 setlinewidth gstate /copy_test exch def
+copy_test setgstate
+28 setlinewidth  % Modify current state
+copy_test setgstate /currentlinewidth [14] assert  % Original gstate unchanged
+
+% Error conditions - stackunderflow
+/setgstate [/stackunderflow] assert
+
+% Error conditions - typecheck
+123 /setgstate [123 /typecheck] assert
+(string) /setgstate [(string) /typecheck] assert
+[] /setgstate [[] /typecheck] assert
+{} /setgstate [{} /typecheck] assert
+true /setgstate [true /typecheck] assert
+
+
+%% Integration Tests %%
+% Test gstate operators work with traditional graphics state stack
+15 setlinewidth gsave
+  30 setlinewidth gstate /integration_test exch def
+  45 setlinewidth
+grestore  % Should restore to 15
+/currentlinewidth [15] assert
+integration_test setgstate /currentlinewidth [30] assert
+
+% Test gstate captures and restores clipping path state
+% (Basic test - detailed clipping tests would be in separate clipping test file)
+gstate /clip_test exch def
+clip_test setgstate  % Should work without error
+
+% Test gstate with transformation matrix changes
+% (Basic test - detailed matrix tests would be in matrix test file)
+1 2 translate gstate /transform_test exch def
+6 array currentmatrix
+0 0 translate  % Reset transform
+transform_test setgstate  % Should restore translation
+6 array currentmatrix arrayeq [true] assert
+
+% Verify gstate operators don't interfere with VM save/restore
+% (This is tested more thoroughly in vm_gstate_integration_tests.ps)
+16 setlinewidth gstate /vm_test exch def
+save /vm_save exch def
+32 setlinewidth
+vm_save restore
+vm_test setgstate /currentlinewidth [16] assert
+
+
+%% setscreen / currentscreen %%
+% setscreen stores and currentscreen retrieves screen params
+60 45 {pop} setscreen
+currentscreen pop  % pop proc, stack: freq angle
+/test_angle exch def /test_freq exch def
+test_angle 45 eq [true] assert
+test_freq 60 eq [true] assert
+
+% currentscreen with halftone dictionary
+<< /HalftoneType 1 /Frequency 100 /Angle 30 /SpotFunction {pop} >> sethalftone
+currentscreen
+/test_ht exch def /test_angle exch def /test_freq exch def
+test_ht /HalftoneType known [true] assert
+test_angle 30 eq [true] assert
+test_freq 100 eq [true] assert
+
+% Restore default
+60 45 {pop} setscreen
+
+
+%% currenttransfer %%
+% Default: should return empty proc (executable array)
+currenttransfer xcheck [true] assert
+
+% After settransfer, currenttransfer returns what was set
+{1 add} settransfer
+currenttransfer xcheck [true] assert
+
+
+%% setcolorscreen / currentcolorscreen %%
+% 12 operands: red(freq,ang,proc) green(freq,ang,proc) blue(freq,ang,proc) gray(freq,ang,proc)
+10 20 {pop} 30 40 {pop} 50 60 {pop} 70 80 {pop} setcolorscreen
+currentcolorscreen
+% Pop all 12 into variables: gray(top) blue green red(bottom)
+/cs_gray_proc exch def /cs_gray_ang exch def /cs_gray_freq exch def
+/cs_blue_proc exch def /cs_blue_ang exch def /cs_blue_freq exch def
+/cs_green_proc exch def /cs_green_ang exch def /cs_green_freq exch def
+/cs_red_proc exch def /cs_red_ang exch def /cs_red_freq exch def
+cs_gray_freq 70 eq [true] assert
+cs_gray_ang 80 eq [true] assert
+cs_blue_freq 50 eq [true] assert
+cs_blue_ang 60 eq [true] assert
+cs_green_freq 30 eq [true] assert
+cs_green_ang 40 eq [true] assert
+cs_red_freq 10 eq [true] assert
+cs_red_ang 20 eq [true] assert
+
+% setcolorscreen also updates currentscreen with gray component
+currentscreen pop /sc_ang exch def /sc_freq exch def
+sc_ang 80 eq [true] assert
+sc_freq 70 eq [true] assert
+
+
+%% setcolortransfer / currentcolortransfer %%
+{1 add} {2 add} {3 add} {4 add} setcolortransfer
+currentcolortransfer
+% 4 procs on stack: red(bottom) green blue gray(top)
+/ct_gray exch def /ct_blue exch def /ct_green exch def /ct_red exch def
+/ct_gray load xcheck [true] assert
+/ct_blue load xcheck [true] assert
+/ct_green load xcheck [true] assert
+/ct_red load xcheck [true] assert
+
+% setcolortransfer also sets transfer_function to gray proc
+currenttransfer xcheck [true] assert
+
+
+%% setcolorrendering / currentcolorrendering %%
+% Default: should return empty dict
+currentcolorrendering type /dicttype eq [true] assert
+
+% Round-trip
+<< /ColorRenderingType 1 /WhitePoint [0.9505 1 1.089] >> setcolorrendering
+currentcolorrendering /ColorRenderingType get 1 eq [true] assert
+
+%% setsmoothness / currentsmoothness %%
+% Default value is 1.0
+currentsmoothness 1.0 eq [true] assert
+
+% Basic set/get
+0.5 setsmoothness /currentsmoothness [0.5] assert
+0.0 setsmoothness /currentsmoothness [0.0] assert
+1.0 setsmoothness /currentsmoothness [1.0] assert
+
+% Clamping below 0
+-0.5 setsmoothness /currentsmoothness [0.0] assert
+
+% Clamping above 1
+2.0 setsmoothness /currentsmoothness [1.0] assert
+
+% Integer operand accepted
+0 setsmoothness /currentsmoothness [0.0] assert
+1 setsmoothness /currentsmoothness [1.0] assert
+
+% gsave/grestore preservation
+0.7 setsmoothness gsave 0.3 setsmoothness grestore
+/currentsmoothness [0.7] assert
+
+% Error conditions - typecheck
+(string) /setsmoothness [(string) /typecheck] assert
+
+% Error conditions - stackunderflow
+/setsmoothness [/stackunderflow] assert
+
+% Restore default
+1.0 setsmoothness
+
+
+%% screen_params preserved across gsave/grestore %%
+90 15 {pop} setscreen
+gsave
+45 30 {pop} setscreen
+currentscreen pop /ig_ang exch def /ig_freq exch def
+ig_ang 30 eq [true] assert
+ig_freq 45 eq [true] assert
+grestore
+currentscreen pop /og_ang exch def /og_freq exch def
+og_ang 15 eq [true] assert
+og_freq 90 eq [true] assert
+
+
+%% =============================================================================
+%% settrapparams / currenttrapparams / settrapzone (Level 3 trapping stubs)
+%% =============================================================================
+
+%% settrapparams accepts a dict without error
+<< /TrapWidth 0.5 >> /settrapparams [] assert
+
+%% settrapparams with empty dict
+<< >> /settrapparams [] assert
+
+%% settrapparams error: stackunderflow
+/settrapparams [/stackunderflow] assert
+
+%% settrapparams error: typecheck (non-dict operand)
+42 /settrapparams [42 /typecheck] assert
+(string) /settrapparams [(string) /typecheck] assert
+
+%% currenttrapparams returns a dict
+{currenttrapparams type} [/dicttype] assert
+
+%% settrapzone runs without error (no operands needed)
+/settrapzone [] assert

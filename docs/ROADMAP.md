@@ -419,29 +419,40 @@ jpeg-decoder = "0.3"     # JPEG decoding (pure Rust)
 
 ---
 
-## Phase 6: Resource System & Init Scripts (Size: M)
+## Phase 6: Resource System & Init Scripts (Size: L) — IN PROGRESS
 
-**Goal**: Named resource system, PS init scripts running, interpreter fully self-hosting.
+**Goal**: Named resource system, PS init scripts running, interpreter fully self-hosting. All PostForge sample files render correctly.
 
-**Done when**: `sysdict.ps` and all init scripts execute successfully. `findresource` loads resources from disk. All 345 operators registered. Interactive prompt works.
+**Done when**: Init scripts execute at startup. `findresource` loads resources from disk. **All ~76 PostForge sample files render correctly** (missing operators added as needed). Error handlers produce formatted output.
 
-### Key Components
-- **Resource operators**: 12 ops (findresource, defineresource, undefineresource, resourcestatus, resourceforall, etc.)
-- **Resource categories**: 11 standard categories (Font, Encoding, Form, Pattern, ProcSet, ColorSpace, CMap, CIDFont, FontSet, OutputDevice, IdiomSet)
-- **Filesystem loading**: On-demand resource loading from `resources/` directory
-- **Init script execution**: Run sysdict.ps → fontcategory.ps → resourcecategories.ps → fontmapping.ps at startup
-- **Remaining operators**: Device output (6), interpreter params (14), job control (3), userpath (10), packed arrays (3), insideness (3), strokepath (1), misc stragglers
-- **Interactive REPL**: Command-line prompt with readline-style editing
-- **CLI**: Argument parsing, device selection, file input, stdin piping
+**Status**: Resource system core complete (2026-02-25). Init scripts run at startup. ~268 operators, 368 tests, zero clippy warnings. 4 sample files verified (tiger.ps, test1.ps, golfer.ps, turkey-imagemask.ps). Remaining: systematic sample file verification and bug fixing.
 
-### New Rust Dependencies
-```toml
-rustyline = "14"         # Interactive line editing
-clap = "4"               # CLI argument parsing
-```
+### 6a: Resource System Core — COMPLETE
+- **Resource operators**: 8 ops — findresource, defineresource, undefineresource, resourcestatus, resourceforall, globalresourcedict, localresourcedict, categoryimpdict
+- **Resource storage**: global_resources, local_resources, category_registry dicts on Context
+- **Resource dispatch**: Category impl dicts with PS procedure dispatch (array-type check prevents infinite recursion with operator self-references)
+- **Parameter operators**: 6 ops — setuserparams, currentuserparams, setsystemparams, currentsystemparams, setdevparams, currentdevparams
+- **Utility operators**: ~16 ops — countexecstack, execstack, join, .nextfid, .loadsystemfont, .loadbinarysystemfont, .loadbinaryfontfile, .systemundef, .setinteractivepaint, pauseexechistory, resumeexechistory, exechistorystack, exitserver, startjob, .loadfont, createresourcecategory
+- **Incremental string scanning**: `PsValue::StringSource` variant for one-token-at-a-time execution of PS files (fixes `//name` immediate lookups)
+- **Init scripts**: sysdict.ps, resourcecategories.ps, fontcategory.ps, fontmapping.ps — adapted from PostForge
+- **Encoding resources**: StandardEncoding.ps, ISOLatin1Encoding.ps, SymbolEncoding.ps
+- **Font loading via resource system**: `.loadfont` native operator bypasses eexec dependency
 
-### Operators Added: ~52 (remaining operators to reach 345)
-### Test Suites: Run ALL 49 PostForge test suites — full regression
+### 6b: Sample File Verification — IN PROGRESS
+Systematically run all ~76 PostForge sample files (`~/Projects/postforge/samples/*.ps` and `*.eps`). For each failure, diagnose and fix the missing operator or bug. Categories of expected issues:
+- Missing operators (e.g., `setpacking`, `currentpacking`, `ineofill`, `instroke`, `inufill`, `infill`)
+- Error handling (formatted error output from PS-defined handlers)
+- Edge cases in existing operators
+- EPS/DSC comment handling
+
+### New Files (9 source + 3 resources)
+- `crates/xforge-ops/src/resource_ops.rs` — 8 resource operators
+- `crates/xforge-ops/src/param_ops.rs` — 6 parameter operators
+- `resources/Init/sysdict.ps`, `resourcecategories.ps`, `fontcategory.ps`, `fontmapping.ps`
+- `resources/Encoding/StandardEncoding.ps`, `ISOLatin1Encoding.ps`, `SymbolEncoding.ps`
+
+### Operators Added: ~32 so far (total: ~268)
+### Tests Added: 16 so far (total: 368)
 
 ---
 

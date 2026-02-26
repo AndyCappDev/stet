@@ -1,0 +1,151 @@
+%% Resource Operator tests
+%% Tests for findresource, resourcestatus, defineresource, undefineresource, resourceforall
+
+userdict /$unittest known not {(unit_tests/unittest.ps) run} if
+
+
+%% =============================================================================
+%% findresource
+%% =============================================================================
+
+%% findresource - known encoding %%
+{/ISOLatin1Encoding /Encoding findresource length} [256] assert
+
+%% findresource - StandardEncoding %%
+{/StandardEncoding /Encoding findresource length} [256] assert
+
+%% findresource - error for unknown resource %%
+% Note: findresource pops category before calling FindResource proc,
+% so only the key remains on stack when error fires
+/NonexistentXYZ123 /Encoding /findresource [/NonexistentXYZ123 /undefinedresource] assert
+
+%% findresource - error conditions %%
+/findresource [/stackunderflow] assert
+/Encoding /findresource [/Encoding /stackunderflow] assert
+
+
+%% =============================================================================
+%% resourcestatus
+%% =============================================================================
+
+%% resourcestatus - known resource returns true + status %%
+% resourcestatus returns: status size true (or just false)
+% Use 3 1 roll pop pop to keep the bool and discard status and size
+{/ISOLatin1Encoding /Encoding resourcestatus 3 1 roll pop pop} [true] assert
+
+%% resourcestatus - unknown resource returns false %%
+/NonexistentXYZ123 /Encoding /resourcestatus [false] assert
+
+%% resourcestatus - error conditions %%
+/resourcestatus [/stackunderflow] assert
+/Encoding /resourcestatus [/Encoding /stackunderflow] assert
+
+
+%% =============================================================================
+%% defineresource / undefineresource
+%% =============================================================================
+
+%% defineresource - define custom generic resource %%
+% Define a simple resource in Generic category
+/TestResource123 (test value) /Generic defineresource
+(test value) eq [true] assert
+
+%% defineresource - verify with resourcestatus %%
+{/TestResource123 /Generic resourcestatus 3 1 roll pop pop} [true] assert
+
+%% defineresource - error conditions %%
+/defineresource [/stackunderflow] assert
+(val) /Generic /defineresource [(val) /Generic /stackunderflow] assert
+
+%% undefineresource - runs without error %%
+{/TestResource123 /Generic undefineresource} stopped [false] assert
+
+%% undefineresource - error conditions %%
+/undefineresource [/stackunderflow] assert
+/Generic /undefineresource [/Generic /stackunderflow] assert
+
+
+%% =============================================================================
+%% resourceforall
+%% =============================================================================
+
+%% resourceforall - count Font resources %%
+% Ensure at least one font is loaded into the resource dict
+/Courier findfont pop
+/font_count 0 def
+(*) { pop /font_count font_count 1 add def } 100 string /Font resourceforall
+font_count 0 gt [true] assert
+
+%% resourceforall - count Encoding resources %%
+% Ensure at least one encoding is loaded into the resource dict
+/ISOLatin1Encoding /Encoding findresource pop
+/enc_count 0 def
+(*) { pop /enc_count enc_count 1 add def } 100 string /Encoding resourceforall
+enc_count 0 gt [true] assert
+
+%% resourceforall - callback def writes to userdict %%
+% This exercises the fix for dict stack pollution: def inside a
+% resourceforall callback must write to userdict, not an internal dict.
+/ISOLatin1Encoding /Encoding findresource pop
+/rfa_marker 0 def
+(*) {
+    pop
+    /rfa_marker rfa_marker 10 add def
+    /rfa_secondary (found) def
+} 100 string /Encoding resourceforall
+% Verify def actually persisted in userdict after resourceforall completed
+rfa_marker 0 gt [true] assert
+rfa_secondary (found) eq [true] assert
+
+%% resourceforall - collect names with template %%
+% Test that callback can compare string values and accumulate results
+% Pre-load both encodings so they're in the resource dict
+/ISOLatin1Encoding /Encoding findresource pop
+/StandardEncoding /Encoding findresource pop
+/found_iso false def
+/found_std false def
+(*) {
+    dup (ISOLatin1Encoding) eq { /found_iso true def } if
+    (StandardEncoding) eq { /found_std true def } if
+} 100 string /Encoding resourceforall
+found_iso [true] assert
+found_std [true] assert
+
+%% resourceforall - template pattern matching %%
+% Test that template filters resource names (ISO* should match ISOLatin1Encoding)
+/found_iso_pattern false def
+(ISO*) {
+    (ISOLatin1Encoding) eq { /found_iso_pattern true def } if
+} 100 string /Encoding resourceforall
+found_iso_pattern [true] assert
+
+%% resourceforall - non-matching template finds nothing %%
+/found_nonmatch 0 def
+(ZZZ_NoMatch_*) { pop /found_nonmatch found_nonmatch 1 add def } 100 string /Encoding resourceforall
+found_nonmatch [0] assert
+
+%% resourceforall - error conditions %%
+/resourceforall [/stackunderflow] assert
+
+
+%% =============================================================================
+%% Level 3 resource categories (registration verification)
+%% =============================================================================
+
+%% IdiomSet category is registered
+{/IdiomSet /Category findresource pop true} [true] assert
+
+%% ControlLanguage category is registered
+{/ControlLanguage /Category findresource pop true} [true] assert
+
+%% Localization category is registered
+{/Localization /Category findresource pop true} [true] assert
+
+%% PDL category is registered
+{/PDL /Category findresource pop true} [true] assert
+
+%% HWOptions category is registered
+{/HWOptions /Category findresource pop true} [true] assert
+
+%% FontSet category is registered (was already present, but verify)
+{/FontSet /Category findresource pop true} [true] assert

@@ -1,0 +1,133 @@
+%!PS
+% Strokepath Tests for PostForge
+% Tests line width interaction, curved paths, dash patterns, multi-subpath
+% Complements basic strokepath tests in painting_tests.ps
+
+userdict /$unittest known not {(unit_tests/unittest.ps) run} if
+
+% All tests under nulldevice
+gsave nulldevice
+
+
+%% =============================================================================
+%% Line width interaction
+%% =============================================================================
+
+%% strokepath: thin linewidth produces narrow bounds %%
+newpath
+1 setlinewidth
+100 100 moveto 200 100 lineto
+strokepath
+pathbbox
+/sp_ury exch def /sp_urx exch def /sp_lly exch def /sp_llx exch def
+% Horizontal line at y=100 with linewidth 1: height ~1, width ~100 (butt caps)
+sp_ury sp_lly sub 2 lt [true] assert    % Height should be small (linewidth ~1)
+sp_urx sp_llx sub 98 gt [true] assert   % Width should be close to 100
+
+%% strokepath: thick linewidth produces wider bounds %%
+newpath
+10 setlinewidth
+100 100 moveto 200 100 lineto
+strokepath
+pathbbox
+/sp2_ury exch def /sp2_urx exch def /sp2_lly exch def /sp2_llx exch def
+% With linewidth 10, height should be ~10
+sp2_ury sp2_lly sub 8 gt [true] assert   % Height should be at least ~10
+sp2_ury sp2_lly sub 12 lt [true] assert  % But not excessively large
+
+%% strokepath: thick vs thin — thick bounds are larger %%
+sp2_ury sp2_lly sub sp_ury sp_lly sub gt [true] assert
+
+
+%% =============================================================================
+%% Path types
+%% =============================================================================
+
+%% strokepath: curved path (curveto) %%
+newpath
+2 setlinewidth
+0 0 moveto 50 100 100 100 150 0 curveto
+strokepath
+{pathbbox pop pop pop pop} stopped [false] assert
+
+%% strokepath: multi-segment path %%
+newpath
+2 setlinewidth
+0 0 moveto 100 0 lineto 100 100 lineto 0 100 lineto
+strokepath
+{pathbbox pop pop pop pop} stopped [false] assert
+
+%% strokepath: multi-subpath %%
+newpath
+2 setlinewidth
+0 0 moveto 100 0 lineto
+200 200 moveto 300 200 lineto
+strokepath
+pathbbox
+/ms_ury exch def /ms_urx exch def /ms_lly exch def /ms_llx exch def
+% Bounds should encompass both subpaths
+ms_urx 298 gt [true] assert    % Should reach near 300+cap
+ms_lly 0 lt [true] assert      % Should reach below 0 (linewidth)
+
+%% strokepath: closepath creates joined corners %%
+newpath
+2 setlinewidth
+0 0 moveto 100 0 lineto 100 100 lineto closepath
+strokepath
+{pathbbox pop pop pop pop} stopped [false] assert
+
+
+%% =============================================================================
+%% Dash pattern
+%% =============================================================================
+
+%% strokepath: dashed line %%
+newpath
+2 setlinewidth
+[6 3] 0 setdash
+0 0 moveto 100 0 lineto
+strokepath
+{pathbbox pop pop pop pop} stopped [false] assert
+
+%% strokepath: reset to solid after dash test %%
+[] 0 setdash
+newpath
+2 setlinewidth
+0 0 moveto 100 0 lineto
+strokepath
+{pathbbox pop pop pop pop} stopped [false] assert
+
+
+%% =============================================================================
+%% currentpoint after strokepath
+%% =============================================================================
+
+%% strokepath: currentpoint exists after strokepath %%
+newpath
+2 setlinewidth
+50 50 moveto 150 50 lineto
+strokepath
+{currentpoint pop pop} stopped [false] assert
+
+
+%% =============================================================================
+%% Edge cases
+%% =============================================================================
+
+%% strokepath: moveto-only path (no segments) — should not crash %%
+newpath
+2 setlinewidth
+50 50 moveto
+{strokepath} stopped [false] assert
+
+%% strokepath: zero linewidth — should not crash %%
+newpath
+0 setlinewidth
+0 0 moveto 100 0 lineto
+{strokepath} stopped [false] assert
+
+% Restore linewidth for other tests
+1 setlinewidth
+
+
+grestore

@@ -1,0 +1,86 @@
+%% Operand Stack tests
+
+userdict /$unittest known not {(unit_tests/unittest.ps) run} if
+
+
+%% count %%
+1 2 3 4 5 /count [1 2 3 4 5 5] assert
+/count [0] assert
+
+%% clear %%
+1 2 {clear count} [0] assert
+{clear count} [0] assert
+
+%% dup %%
+(a) (b) (c) (d) /dup [(a) (b) (c) (d) (d)] assert
+    % dup error checks
+    /dup [/stackunderflow] assert
+
+%% exch %%
+1 2 /exch [2 1] assert
+    % exch error checks
+    /exch [/stackunderflow] assert
+    1 /exch [1 /stackunderflow] assert
+
+%% index %%
+1 2 3 4 5 {2 index} [1 2 3 4 5 3] assert
+1 2 3 4 5 {4 index} [1 2 3 4 5 1] assert
+1 2 3 4 5 {0 index} [1 2 3 4 5 5] assert
+    % index error checks
+    /index [/stackunderflow] assert
+    (a) /index [(a) /typecheck] assert
+    1.0 /index [1.0 /typecheck] assert
+    2 /index [2 /rangecheck] assert
+    1 1 1 -1 /index [1 1 1 -1 /rangecheck] assert
+    1 2 /index [1 2 /rangecheck] assert
+
+% roll %%
+(a) (b) (c) 3 -1 /roll [(b) (c) (a)] assert
+(a) (b) (c) 3 1 /roll [(c) (a) (b)] assert
+(a) (b) (c) 3 0 /roll [(a) (b) (c)] assert
+(a) (b) (c) 0 0 /roll [(a) (b) (c)] assert
+    % roll error checks
+    /roll [/stackunderflow] assert
+    3 /roll [3 /stackunderflow] assert
+    (a) (b) (c) (z) -1 /roll [(a) (b) (c) (z) -1 /typecheck] assert
+    (a) (b) (c) 3 (z) /roll [(a) (b) (c) 3 (z) /typecheck] assert
+    1 -1 /roll [1 -1 /rangecheck] assert
+    (a) (b) (c) -3 -1 /roll [(a) (b) (c) -3 -1 /rangecheck] assert
+    (a) (b) (c) 4 -1 /roll [(a) (b) (c) 4 -1 /rangecheck] assert
+
+%% pop %%
+1 /pop [] assert
+    % pop error checks
+    /pop [/stackunderflow] assert
+
+%% counttomark
+1 mark 2 3 /counttomark [1 null 2 3 2] dup 1 mark put assert
+    % counttomark error tests
+    1 2 3 /counttomark [1 2 3 /unmatchedmark] assert
+
+%% cleartomark %%
+1 2 mark 3 4 5 /cleartomark [1 2] assert
+    % cleartomark error tests
+    1 2 3 /cleartomark [1 2 3 /unmatchedmark] assert
+
+%% mark
+/mark [null] dup 0 mark put assert
+
+%% copy %%
+% first form
+(a) (b) (c) 2 /copy [(a) (b) (c) (b) (c)] assert
+(a) (b) (c) 0 /copy [(a) (b) (c)] assert
+%% second form
+/src [1 (2) 3] def /dst [null null null null] def {src dst copy src dst} [[1 (2) 3] [1 (2) 3] [1 (2) 3 null]] assert
+/src (source str) def /dst (destxx str with more) def {src dst copy src dst} [(source str) (source str) (source str with more)] assert
+%<</Duplex true /PageSize [612 792] /Collate false>> 5 dict /copy [<</Duplex true /PageSize [612 792] /Collate false>>] assert
+    % copy error tests
+    /copy [/stackunderflow] assert
+    null break /copy [null /typecheck] assert
+    (a) (b) 3 /copy [(a) (b) 3 /stackoverflow] assert
+    (a) (b) -3 /copy [(a) (b) -3 /rangecheck] assert
+    (abc) [123] /copy [(abc) [123] /typecheck] assert
+    [1 2] 1 2 2 packedarray /copy [[1 2] 1 2 2 packedarray /typecheck] assert
+    1 2 2 packedarray 1 2 2 packedarray /copy [1 2 2 packedarray 1 2 2 packedarray /typecheck] assert
+    [1 2 3 4] [1 2 3] /copy [[1 2 3 4] [1 2 3] /rangecheck] assert
+    false setglobal [(a) (b)] true setglobal [1 2] false setglobal /copy [[(a) (b)] [1 2] /invalidaccess] assert

@@ -1,0 +1,60 @@
+%% Pattern and Form Operator tests
+%% Tests for makepattern, setpattern, execform error conditions
+
+userdict /$unittest known not {(unit_tests/unittest.ps) run} if
+
+% All tests run under nulldevice
+gsave nulldevice
+
+
+%% =============================================================================
+%% makepattern
+%% =============================================================================
+
+%% makepattern - error conditions %%
+/makepattern [/stackunderflow] assert
+[1 0 0 1 0 0] /makepattern [[1 0 0 1 0 0] /stackunderflow] assert
+
+% typecheck - non-dict pattern
+123 [1 0 0 1 0 0] /makepattern [123 [1 0 0 1 0 0] /typecheck] assert
+
+% typecheck - non-array matrix (use named dict so eq works on identity)
+/test_pat << /PatternType 1 /PaintType 1 /TilingType 1
+   /BBox [0 0 10 10] /XStep 10 /YStep 10
+   /PaintProc { pop } >> def
+test_pat 123 /makepattern [test_pat 123 /typecheck] assert
+
+
+%% =============================================================================
+%% setpattern
+%% =============================================================================
+
+%% setpattern - error conditions %%
+/setpattern [/stackunderflow] assert
+
+% typecheck - non-dict pattern
+123 /setpattern [123 /typecheck] assert
+
+
+%% =============================================================================
+%% execform
+%% =============================================================================
+
+%% execform - error conditions %%
+/execform [/stackunderflow] assert
+
+% typecheck - non-dict form
+123 /execform [123 /typecheck] assert
+(string) /execform [(string) /typecheck] assert
+
+%% execform - valid form runs without error %%
+% Create a minimal form dictionary
+<<
+  /FormType 1
+  /BBox [0 0 100 100]
+  /Matrix [1 0 0 1 0 0]
+  /PaintProc { pop }
+>> {execform} stopped [false] assert
+
+
+grestore

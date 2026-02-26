@@ -1,0 +1,60 @@
+%!PS-3.0
+% PostScript Print and Standard I/O Integration Tests
+%
+% Tests to ensure print operator works correctly with standard file objects
+
+userdict /$unittest known not {(unit_tests/unittest.ps) run} if
+
+
+%% Test: Basic print functionality %%
+{(Hello from print test) print NL print} [] assert
+
+%% Test: Print followed by flush %%
+{(Test message) print NL print flush} [] assert
+
+%% Test: Print with newlines %%
+{(Line 1) print (\n) print (Line 2) print (\n) print flush} [] assert
+
+%% Test: Multiple consecutive prints %%
+{(Part1) print ( ) print (Part2) print ( ) print (Part3) print (\n) print flush} [] assert
+
+%% Test: Empty string print %%
+{() print} [] assert
+
+%% Test: Print with special characters %%
+{(Test\ttab\nNewline) print flush} [] assert
+
+
+%% print error conditions %%
+% typecheck - non-string operand
+123 /print [123 /typecheck] assert
+true /print [true /typecheck] assert
+[1 2] /print [[1 2] /typecheck] assert
+
+% stackunderflow
+/print [/stackunderflow] assert
+
+
+%% write operator tests %%
+% write - writes single byte to stdout
+{(%stdout) (w) file 65 write} stopped [false] assert
+
+% write - writes single byte to a temp file and verify
+(print_write_test.txt) (w) file /wf exch def
+wf 65 write
+wf closefile
+(print_write_test.txt) (r) file 10 string readstring [(A) false] assert
+(print_write_test.txt) deletefile
+
+% write - error conditions
+/write [/stackunderflow] assert
+123 /write [123 /stackunderflow] assert
+
+% writestring to stdout
+{(%stdout) (w) file (Hi) writestring} stopped [false] assert
+
+% writestring - error conditions
+/writestring [/stackunderflow] assert
+
+% flush - runs without error
+{flush} stopped [false] assert

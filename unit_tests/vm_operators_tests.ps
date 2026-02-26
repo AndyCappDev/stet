@@ -1,0 +1,125 @@
+%% VM Operator tests
+%% Tests for currentglobal, setglobal, currentshared, gcheck, vmstatus, save/restore
+
+userdict /$unittest known not {(unit_tests/unittest.ps) run} if
+
+
+%% =============================================================================
+%% currentglobal / setglobal
+%% =============================================================================
+
+%% currentglobal - returns boolean %%
+currentglobal type /booleantype eq [true] assert
+
+%% setglobal - toggle and verify %%
+currentglobal /saved_global exch def
+false setglobal /currentglobal [false] assert
+true setglobal /currentglobal [true] assert
+saved_global setglobal
+
+%% setglobal - error conditions %%
+/setglobal [/stackunderflow] assert
+123 /setglobal [123 /typecheck] assert
+(a) /setglobal [(a) /typecheck] assert
+
+
+%% =============================================================================
+%% currentshared (alias for currentglobal)
+%% =============================================================================
+
+%% currentshared returns same as currentglobal %%
+currentglobal currentshared eq [true] assert
+
+%% setshared sets same as setglobal %%
+false setshared /currentglobal [false] assert
+true setshared /currentglobal [true] assert
+false setglobal
+
+
+%% =============================================================================
+%% gcheck
+%% =============================================================================
+
+%% gcheck - simple objects %%
+% Simple objects (int, real, bool, name) are always global
+1 /gcheck [true] assert
+1.5 /gcheck [true] assert
+true /gcheck [true] assert
+/name /gcheck [true] assert
+
+%% gcheck - local composite object %%
+false setglobal
+3 array /gcheck [false] assert
+(hello) /gcheck [false] assert
+3 dict /gcheck [false] assert
+
+%% gcheck - global composite object %%
+true setglobal
+3 array /gcheck [true] assert
+(hello) /gcheck [true] assert
+3 dict /gcheck [true] assert
+false setglobal
+
+%% gcheck - error conditions %%
+/gcheck [/stackunderflow] assert
+
+
+%% =============================================================================
+%% vmstatus
+%% =============================================================================
+
+%% vmstatus - returns 3 integers %%
+vmstatus
+/vm_max exch def /vm_used exch def /vm_level exch def
+vm_level type /integertype eq [true] assert
+vm_used type /integertype eq [true] assert
+vm_max type /integertype eq [true] assert
+
+%% vmstatus - level >= 0 %%
+vmstatus pop pop 0 ge [true] assert
+
+%% vmstatus - used <= maximum %%
+vmstatus /vm_max exch def /vm_used exch def pop
+vm_used vm_max le [true] assert
+
+
+%% =============================================================================
+%% save / restore
+%% =============================================================================
+
+%% save returns a save object %%
+save type /savetype eq [true] assert
+% Must restore what we just saved
+count 0 gt { restore } if
+
+%% save/restore preserves VM state %%
+/test_before (before) def
+save /mysave exch def
+/test_before (modified) def
+mysave restore
+test_before (before) eq [true] assert
+
+%% save/restore nesting %%
+/outer_val 1 def
+save /save1 exch def
+/outer_val 2 def
+save /save2 exch def
+/outer_val 3 def
+save2 restore
+outer_val 2 eq [true] assert
+save1 restore
+outer_val 1 eq [true] assert
+
+
+%% =============================================================================
+%% vmreclaim
+%% =============================================================================
+
+%% vmreclaim - runs without error %%
+{0 vmreclaim} stopped [false] assert
+{1 vmreclaim} stopped [false] assert
+{2 vmreclaim} stopped [false] assert
+
+%% vmreclaim - error conditions %%
+/vmreclaim [/stackunderflow] assert
+(a) /vmreclaim [(a) /typecheck] assert

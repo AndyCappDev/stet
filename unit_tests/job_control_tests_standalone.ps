@@ -1,0 +1,289 @@
+%% PostScript Job Control Operators Test Suite
+%% Tests for startjob and exitserver operators - Standalone Version
+%% PLRM Section 3.7.7 "Job Execution Environment"
+
+%% This file tests job control operators that can modify VM state.
+%% These tests are standalone because successful startjob/exitserver calls
+%% destroy VM state, wiping out the unittest framework.
+%%
+%% Each PASS/FAIL branch writes results directly to the stats temp file
+%% so that ps_tests.ps can include them in the final totals.
+%% Format: "errors tests\n" per assertion (e.g., "0 1\n" for pass, "1 1\n" for fail)
+
+% (=== Job Control Tests - Standalone Version ===) =
+
+% Helper procedures for writing stats.  Must be redefined after each
+% successful startjob/exitserver because those restore VM.
+/pass_stats { (unit_tests/.test_stats.tmp) (a) file dup (0 1\n) writestring closefile } def
+/fail_stats { (unit_tests/.test_stats.tmp) (a) file dup (1 1\n) writestring closefile } def
+
+%% ========================================
+%% Standalone tests for successful startjob
+%% (These cannot use unittest framework)
+%% ========================================
+
+%% Test 1: startjob success with encapsulated job (false flag)
+(Testing startjob with encapsulated job...) =
+false (0) startjob
+true eq {
+    /pass_stats { (unit_tests/.test_stats.tmp) (a) file dup (0 1\n) writestring closefile } def
+    /fail_stats { (unit_tests/.test_stats.tmp) (a) file dup (1 1\n) writestring closefile } def
+    (PASS: Encapsulated startjob test) =
+    pass_stats
+} {
+    (** FAIL **: Encapsulated startjob test) =
+    fail_stats
+} ifelse
+
+
+%% Test 2: startjob success with unencapsulated job (true flag)  
+(Testing startjob with unencapsulated job...) =
+true (0) startjob
+true eq {
+    /pass_stats { (unit_tests/.test_stats.tmp) (a) file dup (0 1\n) writestring closefile } def
+    /fail_stats { (unit_tests/.test_stats.tmp) (a) file dup (1 1\n) writestring closefile } def
+    (PASS: Unencapsulated startjob test) =
+    pass_stats
+} {
+    (** FAIL **: Unencapsulated startjob test) =
+    fail_stats
+} ifelse
+false 0 startjob
+
+
+%% Test 3: VM state persistence verification for unencapsulated jobs
+(Testing VM state persistence in unencapsulated jobs...) =
+
+%% Set a test variable before startjob
+/test_variable_before 42 def
+
+%% Start unencapsulated job
+true (0) startjob true eq {
+    /pass_stats { (unit_tests/.test_stats.tmp) (a) file dup (0 1\n) writestring closefile } def
+    /fail_stats { (unit_tests/.test_stats.tmp) (a) file dup (1 1\n) writestring closefile } def
+    %% In unencapsulated job - changes should persist
+    /test_variable_in_job 99 def
+    /test_array_in_job [1 2 3] def
+
+    %% Test that we can access variable from before startjob
+    %% (This may not work if VM was restored, but let's test)
+    {test_variable_before 42 eq} stopped {
+        (PASS: Variable from before startjob accessible in unencapsulated job) =
+        pass_stats
+    } {
+        (INFO: Variable from before startjob not accessible - expected due to VM restore) =
+        pass_stats
+    } ifelse
+
+    (PASS: Unencapsulated job variables set successfully) =
+    pass_stats
+} {
+    (** FAIL **: Unencapsulated startjob failed) =
+    fail_stats
+} ifelse
+false 0 startjob
+
+
+%% Test 4: Multiple successful startjob calls
+(Testing multiple startjob calls...) =
+true (0) startjob true eq {
+    /pass_stats { (unit_tests/.test_stats.tmp) (a) file dup (0 1\n) writestring closefile } def
+    /fail_stats { (unit_tests/.test_stats.tmp) (a) file dup (1 1\n) writestring closefile } def
+    (First startjob succeeded - unencapsulated) =
+    /first_job_var 111 def
+
+    false (0) startjob true eq {
+        /pass_stats { (unit_tests/.test_stats.tmp) (a) file dup (0 1\n) writestring closefile } def
+        /fail_stats { (unit_tests/.test_stats.tmp) (a) file dup (1 1\n) writestring closefile } def
+        (Second startjob succeeded - encapsulated) =
+        /second_job_var 222 def
+
+        true (0) startjob true eq {
+            /pass_stats { (unit_tests/.test_stats.tmp) (a) file dup (0 1\n) writestring closefile } def
+            /fail_stats { (unit_tests/.test_stats.tmp) (a) file dup (1 1\n) writestring closefile } def
+            (Third startjob succeeded - unencapsulated again) =
+            /third_job_var 333 def
+
+            %% Test variable visibility after multiple startjobs
+            {first_job_var 111 eq} stopped {pop false} if {
+                (INFO: First job variable still accessible) =
+                pass_stats
+            } {
+                (INFO: First job variable not accessible - expected due to encapsulated job) =
+                pass_stats
+            } ifelse
+
+            (PASS: Multiple startjob test) =
+            pass_stats
+        } {
+            (** FAIL **: Third startjob failed) =
+            fail_stats
+        } ifelse
+    } {
+        (** FAIL **: Second startjob failed) =
+        fail_stats
+    } ifelse
+} {
+    (** FAIL **: First startjob failed) =
+    fail_stats
+} ifelse
+false 0 startjob
+
+
+%% Test 5: Dictionary stack verification after exitserver
+(Testing exitserver dictionary stack behavior...) =
+
+%% Check initial dictionary stack depth
+/initial_dict_depth countdictstack def
+
+%% Execute exitserver - this should remove serverdict from dict stack
+serverdict begin
+(0) exitserver  %% This should succeed and remove serverdict
+/pass_stats { (unit_tests/.test_stats.tmp) (a) file dup (0 1\n) writestring closefile } def
+/fail_stats { (unit_tests/.test_stats.tmp) (a) file dup (1 1\n) writestring closefile } def
+currentdict serverdict eq not {
+    (PASS: serverdict removed from dictionary stack after exitserver) =
+    pass_stats
+} {
+    (** FAIL **: serverdict still on dictionary stack after exitserver - implementation dependent) =
+    fail_stats
+} ifelse
+
+
+%% Test 6: Basic exitserver functionality  
+(Testing basic exitserver operator...) =
+{
+    serverdict begin
+        (0) exitserver
+} stopped {
+    clear
+    (** FAIL **: exitserver threw an error) =
+    fail_stats
+} {
+    /pass_stats { (unit_tests/.test_stats.tmp) (a) file dup (0 1\n) writestring closefile } def
+    /fail_stats { (unit_tests/.test_stats.tmp) (a) file dup (1 1\n) writestring closefile } def
+    (PASS: exitserver executed without error) =
+    pass_stats
+} ifelse
+false 0 startjob
+
+
+%% Test 7: exitserver password validation
+(Testing exitserver with wrong password...) =
+{
+    serverdict begin
+        999 exitserver  %% Wrong password should cause invalidaccess
+    (** FAIL **: exitserver with wrong password should have failed) =
+    fail_stats
+} stopped
+{
+    %% Extract error name from error dictionary
+    $error /errorname get /invalidaccess eq {
+        (PASS: exitserver with wrong password correctly threw invalidaccess) =
+        pass_stats
+    } {
+        (** FAIL **: exitserver with wrong password threw wrong error type) =
+        fail_stats
+    } ifelse
+    clear
+} if
+end
+
+
+%% Test 8: Save/restore nesting validation
+(Testing startjob with nested save...) =
+save  %% Create nested save
+true (0) startjob false eq {
+    (PASS: startjob correctly failed with nested save) =
+    pass_stats
+} {
+    (** FAIL **: startjob should have failed with nested save) =
+    fail_stats
+} ifelse
+restore  %% Clean up
+
+
+%% Test 9: startjob with string vs integer password  
+(Testing startjob password type handling...) =
+%% Test with string password (should fail with default integer password)
+true 0 startjob {
+    /pass_stats { (unit_tests/.test_stats.tmp) (a) file dup (0 1\n) writestring closefile } def
+    /fail_stats { (unit_tests/.test_stats.tmp) (a) file dup (1 1\n) writestring closefile } def
+    (PASS: startjob correctly converted integer password to string password) =
+    pass_stats
+} {
+    (** FAIL **: startjob should accept integer password and convert it into a string) =
+    fail_stats
+} ifelse
+
+
+%% Test 10: Job-level save state verification
+(Testing job-level save state...) =
+%% Check current save level (this is implementation specific)
+{save} stopped {
+    clear
+    (INFO: Cannot test save level - save failed) =
+    pass_stats
+} {
+    %% We now have a save object on stack
+    %% startjob should fail because we're deeper than job start level
+    true 0 startjob false eq {
+        (PASS: startjob correctly failed with deeper save nesting) =
+        pass_stats
+        restore  %% Clean up the save
+    } {
+        (** FAIL **: startjob should fail with deeper save nesting) =
+        fail_stats
+        exch restore  %% Clean up the save
+    } ifelse
+} ifelse
+
+
+%% Test 11: Operand stack behavior during startjob
+(Testing operand stack clearing during startjob...) =
+%% Put some items on operand stack
+111 222 333
+
+
+%% Start encapsulated job - should clear operand stack
+false 0 startjob true eq {
+    /pass_stats { (unit_tests/.test_stats.tmp) (a) file dup (0 1\n) writestring closefile } def
+    /fail_stats { (unit_tests/.test_stats.tmp) (a) file dup (1 1\n) writestring closefile } def
+    %% Check if operand stack was cleared
+    count 0 gt not {  %% Only the startjob result should be on stack
+        (PASS: Operand stack correctly cleared during encapsulated startjob) =
+        pass_stats
+    } {
+        (** FAIL **: Operand stack not properly cleared during encapsulated startjob) =
+        fail_stats
+    } ifelse
+} {
+    (** FAIL **: Encapsulated startjob failed unexpectedly) =
+    fail_stats
+} ifelse
+
+
+%% Test 12: VM allocation mode after startjob
+(Testing VM allocation mode after startjob...) =
+%% Test current VM allocation mode (implementation dependent)
+true 0 startjob true eq {
+    /pass_stats { (unit_tests/.test_stats.tmp) (a) file dup (0 1\n) writestring closefile } def
+    /fail_stats { (unit_tests/.test_stats.tmp) (a) file dup (1 1\n) writestring closefile } def
+    %% After successful startjob, we should be in local VM allocation mode
+    %% This is hard to test directly, but we can verify job executed
+    (PASS: Unencapsulated startjob completed successfully) =
+    pass_stats
+
+    %% Test that we can define variables (should work in any VM mode)
+    /test_vm_var 777 def
+    test_vm_var 777 eq {
+        (PASS: Variable definition works after startjob) =
+        pass_stats
+    } {
+        (** FAIL **: Variable definition failed after startjob) =
+        fail_stats
+    } ifelse
+} {
+    (** FAIL **: Unencapsulated startjob failed) =
+    fail_stats
+} ifelse

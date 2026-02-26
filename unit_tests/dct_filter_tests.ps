@@ -1,0 +1,96 @@
+%!PS
+% DCT Filter Tests for PostForge
+% Tests DCTDecode and DCTEncode filters per PLRM Section 3.13
+
+userdict /$unittest known not {(unit_tests/unittest.ps) run} if
+
+%% DCTDecode basic creation %%
+% Basic DCTDecode filter creation with empty parameters
+(test) <<>> {/DCTDecode filter type} [/filetype] assert
+
+%% DCTEncode basic creation %%
+% Basic DCTEncode filter creation with required parameters
+() << /Columns 8 /Rows 8 /Colors 3 >> {/DCTEncode filter type} [/filetype] assert
+
+%% DCTEncode missing parameters %%
+% DCTEncode requires Columns, Rows, Colors parameters
+/ddict <<>> def
+() ddict /DCTEncode /filter [() ddict /DCTEncode /rangecheck] assert
+
+%% DCTEncode invalid Colors %%
+% Colors parameter must be 1, 2, 3, or 4
+/ddict << /Columns 8 /Rows 8 /Colors 5 >> def
+() ddict /DCTEncode /filter [() ddict /DCTEncode /rangecheck] assert
+
+%% DCTEncode negative dimensions %%
+% Columns and Rows must be positive
+/ddict << /Columns -1 /Rows 8 /Colors 3 >> def
+()  ddict /DCTEncode /filter [() ddict /DCTEncode/rangecheck] assert
+/ddict << /Columns 8 /Rows 0 /Colors 3 >> def
+() ddict /DCTEncode /filter [() ddict /DCTEncode /rangecheck] assert
+
+%% DCTDecode ColorTransform parameter %%
+% Valid ColorTransform values are 0 and 1
+(test) << /ColorTransform 0 >> /DCTDecode filter {type} [/filetype] assert
+(test) << /ColorTransform 1 >> /DCTDecode filter {type} [/filetype] assert
+
+%% DCTDecode invalid ColorTransform %%
+% ColorTransform must be 0 or 1
+/ddict << /ColorTransform 2 >> def
+(test) ddict /DCTDecode /filter [(test) ddict /DCTDecode /rangecheck] assert
+
+%% DCTEncode optional parameters %%
+% DCTEncode with QFactor and ColorTransform
+/ddict << /Columns 4 /Rows 4 /Colors 3 /QFactor 0.8 /ColorTransform 1 >> def
+() ddict /DCTEncode filter {type} [/filetype] assert
+
+%% DCTEncode sampling factors %%
+% Valid HSamples and VSamples (1, 2, 3, 4)
+/ddict << /Columns 8 /Rows 8 /Colors 3 /HSamples [1 2 3] /VSamples [2 1 1] >> def
+() ddict /DCTEncode {filter type} [/filetype] assert
+
+%% DCTEncode invalid sampling factors %%
+% HSamples values must be 1-4
+/ddict << /Columns 8 /Rows 8 /Colors 3 /HSamples [5 1 1] >> def
+() ddict /DCTEncode /filter [() ddict /DCTEncode /rangecheck] assert
+
+%% DCTEncode invalid QFactor %%
+% QFactor must be positive
+/ddict << /Columns 4 /Rows 4 /Colors 3 /QFactor 0 >> def
+() ddict /DCTEncode /filter [() ddict /DCTEncode /rangecheck] assert
+
+%% DCTEncode sampling array length %%
+% HSamples array length must match Colors
+/ddict << /Columns 8 /Rows 8 /Colors 3 /HSamples [1 2] >> def
+() ddict /DCTEncode /filter [() ddict /DCTEncode /rangecheck] assert
+
+%% DCTEncode type validation %%
+% Parameters must be correct types
+/ddict << /Columns (invalid) /Rows 8 /Colors 3 >> def
+() ddict /DCTEncode /filter [() ddict /DCTEncode /typecheck] assert
+
+
+%% DCTEncode additional parameter tests %%
+
+% DCTEncode with 1 color (grayscale)
+/ddict << /Columns 4 /Rows 4 /Colors 1 >> def
+() ddict /DCTEncode filter {type} [/filetype] assert
+
+% DCTEncode with 4 colors (CMYK)
+/ddict << /Columns 4 /Rows 4 /Colors 4 >> def
+() ddict /DCTEncode filter {type} [/filetype] assert
+
+% DCTEncode with large dimensions
+/ddict << /Columns 1024 /Rows 768 /Colors 3 >> def
+() ddict /DCTEncode filter {type} [/filetype] assert
+
+% DCTDecode with valid ColorTransform on string source
+(test) << /ColorTransform 0 >> /DCTDecode filter {type} [/filetype] assert
+(test) << /ColorTransform 1 >> /DCTDecode filter {type} [/filetype] assert
+
+
+%% DCTDecode stackunderflow %%
+/DCTDecode /filter [/DCTDecode /stackunderflow] assert
+
+%% DCTEncode stackunderflow %%
+/DCTEncode /filter [/DCTEncode /stackunderflow] assert

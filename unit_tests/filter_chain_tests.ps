@@ -1,0 +1,216 @@
+%!PS
+% Filter Chain Tests for PostForge
+% Tests chained encode/decode, partial reads, byte-at-a-time reads,
+% readline through filters, bytesavailable, and empty data handling.
+
+userdict /$unittest known not {(unit_tests/unittest.ps) run} if
+
+% Temp files for two-step encoding
+/filter_tmp_file (unit_tests/.filter_chain_tmp.bin) def
+/filter_tmp_file2 (unit_tests/.filter_chain_tmp2.bin) def
+
+% Helper: encode data through a single filter to a temp file
+% Usage: (data) /EncodeName filepath single_encode_to_file -
+/single_encode_to_file {
+    /se_path exch def
+    /se_enc exch def
+    /se_data exch def
+    se_path (w) file /se_raw exch def
+    se_raw se_enc filter /se_f exch def
+    se_f se_data writestring
+    se_f closefile
+} def
+
+% Helper: re-encode a file through a second filter to another file
+% Usage: srcpath /EncodeName dstpath reencode_file -
+/reencode_file {
+    /re_dstpath exch def
+    /re_enc exch def
+    /re_srcpath exch def
+    re_dstpath (w) file /re_dst exch def
+    re_dst re_enc filter /re_filt exch def
+    re_srcpath (r) file /re_src exch def
+    % Read source and write to encoded destination
+    /re_buf 4096 string def
+    {
+        re_src re_buf readstring
+        /re_full exch def
+        re_filt exch writestring
+        re_full not { exit } if
+    } loop
+    re_src closefile
+    re_filt closefile
+} def
+
+
+%% =============================================================================
+%% Chained encode/decode round-trips
+%% Two-step encoding avoids reliance on cascade-close for encode filters.
+%% The decode side uses real chained filters (the main thing we test).
+%% =============================================================================
+
+%% Flate -> ASCII85 round-trip %%
+% Step 1: Flate encode to tmp1
+(Hello, chained filter world!)
+/FlateEncode filter_tmp_file single_encode_to_file
+% Step 2: Re-encode tmp1 through ASCII85 to tmp2
+filter_tmp_file /ASCII85Encode filter_tmp_file2 reencode_file
+% Step 3: Decode through chained ASCII85Decode -> FlateDecode
+filter_tmp_file2 (r) file /ASCII85Decode filter /FlateDecode filter
+/fc_reader exch def
+fc_reader 28 string readstring
+/fc_ok exch def /fc_result exch def
+fc_reader closefile
+fc_ok [true] assert
+fc_result (Hello, chained filter world!) {eq} [true] assert
+
+%% ASCII85 -> Flate round-trip %%
+% Step 1: ASCII85 encode to tmp1
+(Testing ASCII85 then Flate compression!)
+/ASCII85Encode filter_tmp_file single_encode_to_file
+% Step 2: Re-encode tmp1 through Flate to tmp2
+filter_tmp_file /FlateEncode filter_tmp_file2 reencode_file
+% Step 3: Decode through chained FlateDecode -> ASCII85Decode
+filter_tmp_file2 (r) file /FlateDecode filter /ASCII85Decode filter
+/fc2_reader exch def
+fc2_reader 39 string readstring
+/fc2_ok exch def /fc2_result exch def
+fc2_reader closefile
+fc2_ok [true] assert
+fc2_result (Testing ASCII85 then Flate compression!) {eq} [true] assert
+
+%% LZW -> ASCIIHex round-trip %%
+% Step 1: LZW encode to tmp1
+(LZW and ASCIIHex together!)
+/LZWEncode filter_tmp_file single_encode_to_file
+% Step 2: Re-encode tmp1 through ASCIIHex to tmp2
+filter_tmp_file /ASCIIHexEncode filter_tmp_file2 reencode_file
+% Step 3: Decode through chained ASCIIHexDecode -> LZWDecode
+filter_tmp_file2 (r) file /ASCIIHexDecode filter /LZWDecode filter
+/fc3_reader exch def
+fc3_reader 26 string readstring
+/fc3_ok exch def /fc3_result exch def
+fc3_reader closefile
+fc3_ok [true] assert
+fc3_result (LZW and ASCIIHex together!) {eq} [true] assert
+
+
+%% =============================================================================
+%% Partial reads via readstring with small buffer
+%% =============================================================================
+
+%% readstring with small buffer on filter - read 5 of 50 bytes %%
+/pr_data 50 string def
+0 1 49 { /i exch def pr_data i i 65 add 26 mod 65 add put } for
+% Encode to file via Flate
+pr_data /FlateEncode filter_tmp_file single_encode_to_file
+% Read back with small 5-byte buffer
+filter_tmp_file (r) file /FlateDecode filter /pr_dec exch def
+pr_dec 5 string readstring
+/pr_ok1 exch def /pr_chunk1 exch def
+pr_ok1 [true] assert
+pr_chunk1 length [5] assert
+% Read next 5 bytes
+pr_dec 5 string readstring
+/pr_ok2 exch def /pr_chunk2 exch def
+pr_ok2 [true] assert
+pr_chunk2 length [5] assert
+% Verify first chunk matches expected data
+pr_chunk1 0 get pr_data 0 get {eq} [true] assert
+pr_chunk1 4 get pr_data 4 get {eq} [true] assert
+pr_dec closefile
+
+%% readstring at EOF returns partial + false %%
+% Encode short data via single Flate filter
+(Hi) /FlateEncode filter_tmp_file single_encode_to_file
+filter_tmp_file (r) file /FlateDecode filter /pr_eof exch def
+% Read with buffer bigger than data - should return partial + false
+pr_eof 100 string readstring
+/pr_eof_ok exch def /pr_eof_str exch def
+pr_eof_ok [false] assert
+pr_eof_str length [2] assert
+pr_eof_str (Hi) {eq} [true] assert
+pr_eof closefile
+
+
+%% =============================================================================
+%% Byte-at-a-time read on filter file
+%% =============================================================================
+
+%% read operator on filter file returns int+true %%
+(ABC) /FlateEncode filter_tmp_file single_encode_to_file
+filter_tmp_file (r) file /FlateDecode filter /rd_f exch def
+rd_f {read} [65 true] assert     % 'A' = 65
+rd_f {read} [66 true] assert     % 'B' = 66
+rd_f {read} [67 true] assert     % 'C' = 67
+
+%% read at EOF returns false %%
+rd_f {read} [false] assert
+rd_f closefile
+
+
+%% =============================================================================
+%% readline on filter
+%% =============================================================================
+
+%% readline through decoded filter with embedded newlines %%
+% Create data with newlines
+/rl_data (Line1\nLine2\n) def
+rl_data /FlateEncode filter_tmp_file single_encode_to_file
+filter_tmp_file (r) file /FlateDecode filter /rl_dec exch def
+rl_dec 100 string readline
+/rl_ok exch def /rl_line exch def
+rl_ok [true] assert
+rl_line (Line1) {eq} [true] assert
+% Read second line
+rl_dec 100 string readline
+/rl_ok2 exch def /rl_line2 exch def
+rl_ok2 [true] assert
+rl_line2 (Line2) {eq} [true] assert
+rl_dec closefile
+
+
+%% =============================================================================
+%% bytesavailable on filter
+%% =============================================================================
+
+%% bytesavailable returns -1 on filter files (PLRM: unknown length) %%
+(test data for bytesavailable)
+/FlateEncode filter_tmp_file single_encode_to_file
+filter_tmp_file (r) file /FlateDecode filter /ba_dec exch def
+ba_dec {bytesavailable} [-1] assert
+ba_dec closefile
+
+
+%% =============================================================================
+%% Empty data through filter round-trip
+%% =============================================================================
+
+%% Empty string through Flate round-trip %%
+filter_tmp_file (w) file /em_out exch def
+em_out /FlateEncode filter /em_enc exch def
+em_enc () writestring
+em_enc closefile
+filter_tmp_file (r) file /FlateDecode filter /em_dec exch def
+em_dec 10 string readstring
+/em_ok exch def /em_str exch def
+em_ok [false] assert
+em_str length [0] assert
+em_dec closefile
+
+%% Empty string through ASCII85 round-trip %%
+filter_tmp_file (w) file /em2_out exch def
+em2_out /ASCII85Encode filter /em2_enc exch def
+em2_enc () writestring
+em2_enc closefile
+filter_tmp_file (r) file /ASCII85Decode filter /em2_dec exch def
+em2_dec 10 string readstring
+/em2_ok exch def /em2_str exch def
+em2_ok [false] assert
+em2_str length [0] assert
+em2_dec closefile
+
+
+% Clean up temp files
+{filter_tmp_file deletefile} stopped {pop} if
+{filter_tmp_file2 deletefile} stopped {pop} if

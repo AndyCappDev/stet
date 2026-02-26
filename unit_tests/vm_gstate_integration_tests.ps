@@ -1,0 +1,70 @@
+%% VM/Graphics State Integration %%
+% Tests that save/restore properly handle graphics state integration
+
+userdict /$unittest known not {(unit_tests/unittest.ps) run} if
+
+
+%% save with graphics state %%
+% save should implicitly perform gsave - test basic integration
+1 setlinewidth save /mysave exch def 5 setlinewidth 
+mysave restore /currentlinewidth [1] assert
+
+% save/restore with nested gsave operations
+1 setlinewidth save /mysave exch def 
+2 setlinewidth gsave 3 setlinewidth gsave 4 setlinewidth
+mysave restore /currentlinewidth [1] assert
+
+% Multiple graphics state changes across save/restore boundary
+1 setlinewidth save /mysave exch def 10 setlinewidth
+gsave 20 setlinewidth gsave 30 setlinewidth
+mysave restore /currentlinewidth [1] assert
+
+
+%% save/restore with gsave levels %%
+% Test that restore calls grestoreall properly
+2 setlinewidth save /mysave exch def
+gsave 4 setlinewidth gsave 6 setlinewidth gsave 8 setlinewidth
+mysave restore /currentlinewidth [2] assert
+
+% Verify save-created gstate behavior with grestore
+3 setlinewidth save /mysave exch def 6 setlinewidth
+% grestore should restore to save-created state but not pop it
+grestore /currentlinewidth [3] assert
+% Another grestore should still have access to save-created state  
+9 setlinewidth grestore /currentlinewidth [3] assert
+mysave restore
+
+% Test save/restore preserves graphics state across multiple operations
+5 setlinewidth save /save1 exch def
+10 setlinewidth gsave 15 setlinewidth gsave 20 setlinewidth
+save1 restore /currentlinewidth [5] assert
+
+
+%% Complex nested save/gsave combinations %%
+% Test multiple saves with graphics state changes
+1 setlinewidth save /save1 exch def
+2 setlinewidth save /save2 exch def  
+4 setlinewidth gsave 8 setlinewidth
+save2 restore /currentlinewidth [2] assert
+save1 restore /currentlinewidth [1] assert
+
+% Verify graphics state isolation across save boundaries
+10 setlinewidth save /outer_save exch def
+20 setlinewidth gsave 30 setlinewidth save /inner_save exch def
+40 setlinewidth gsave 50 setlinewidth
+inner_save restore /currentlinewidth [30] assert  % Should restore to state before inner save
+outer_save restore /currentlinewidth [10] assert  % Should restore to state before outer save
+
+% Test that save-created graphics states have proper saved flag behavior
+7 setlinewidth save /test_save exch def
+14 setlinewidth
+% grestore should work on save-created state
+grestore /currentlinewidth [7] assert
+% Modify state again and verify grestore still works
+21 setlinewidth grestore /currentlinewidth [7] assert  
+test_save restore
+
+% Verify proper graphics state stack management with mixed save/gsave
+12 setlinewidth gsave 24 setlinewidth save /mixed_save exch def
+36 setlinewidth gsave 48 setlinewidth
+mixed_save restore /currentlinewidth [24] assert  % Should restore the save level

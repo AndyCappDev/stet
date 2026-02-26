@@ -1,0 +1,156 @@
+%% Type, Attribute, and Conversion tests
+
+userdict /$unittest known not {(unit_tests/unittest.ps) run} if
+
+
+%% type %%
+[] /type [/arraytype] assert
+true /type [/booleantype] assert
+systemdict /type [/dicttype] assert
+currentfile /type [/filetype] assert
+% font /type [/fonttype] assert
+% gstate /type [/gstatetype] assert
+1 /type [/integertype] assert
+/name /type [/nametype] assert
+null /type [/nulltype] assert
+systemdict /add get /type [/operatortype] assert
+1 1 packedarray /type [/packedarraytype] assert
+1.0 /type [/realtype] assert
+% save /type [/savetype] assert
+() /type [/stringtype] assert
+    % type errors
+    /type [/stackunderflow] assert
+
+
+%% cvlit %%
+{1 2} /cvlit [[1 2]] assert
+    % cvlit errors
+    /cvlit [/stackunderflow] assert
+
+
+%% cvx %%
+[1 2] /cvx [{1 2}] assert
+    % cvx errors
+    /cvx [/stackunderflow] assert
+
+
+%% xcheck %%
+{1 2} /xcheck [true] assert
+[1 2] /xcheck [false] assert
+    % xcheck errors
+    /xcheck [/stackunderflow] assert
+
+
+%% executeonly %%
+[1 2] {executeonly rcheck} [false] assert
+(a) {executeonly rcheck} [false] assert
+    % executeonly errors
+    /executeonly [/stackunderflow] assert
+    1 /executeonly [1 /typecheck] assert
+    systemdict /executeonly [systemdict /typecheck] assert
+
+
+%% rcheck %%
+(a) /rcheck [true] assert
+(a) noaccess /rcheck [false] assert
+    % rcheck errors
+    /rcheck [/stackunderflow] assert
+    1 /rcheck [1 /typecheck] assert
+
+
+%% wcheck %%
+(a) /wcheck [true] assert
+systemdict wcheck [false] assert
+    % wcheck errors
+    /wcheck [/stackunderflow] assert
+    1 /wcheck [1 /typecheck] assert
+
+
+%% noaccess %%
+[1 2] {noaccess rcheck} [false] assert
+(hello) {noaccess rcheck} [false] assert
+currentfile {noaccess rcheck} [false] assert
+    % noaccess errors
+    /noaccess [/stackunderflow] assert
+    1 /noaccess [1 /typecheck] assert
+    true /noaccess [true /typecheck] assert
+    systemdict /noaccess [systemdict /invalidaccess] assert
+
+
+%% readonly %%
+[1 2] {readonly wcheck} [false] assert
+[1 2] {readonly rcheck} [true] assert
+(hello) {readonly wcheck} [false] assert
+(hello) {readonly rcheck} [true] assert
+systemdict {readonly wcheck} [false] assert
+systemdict {readonly rcheck} [true] assert
+currentfile {readonly wcheck} [false] assert
+currentfile {readonly rcheck} [true] assert
+    % readonly errors
+    /readonly [/stackunderflow] assert
+    1 /readonly [1 /typecheck] assert
+    true /readonly [true /typecheck] assert
+
+
+%% cvi %%
+(3.3E1) /cvi [33] assert
+-47.8 /cvi [-47] assert
+520.9 /cvi [520] assert
+4 /cvi [4] assert
+    % cvi errors
+    /cvi [/stackunderflow] assert
+    [] /cvi [[] /typecheck] assert
+    (abc) /cvi [(abc) /syntaxerror] assert
+
+
+%% cvn %%
+(abc) /cvn [/abc] assert
+(abc) cvx /cvn [/abc cvx] assert
+    % cvn errors
+    /cvn [/stackunderflow] assert
+    1 /cvn [1 /typecheck] assert
+    [] /cvn [[] /typecheck] assert
+
+
+%% cvr %%
+(3.3E1) /cvr [33.0] assert
+-47.8 /cvr [-47.8] assert
+520.9 /cvr [520.9] assert
+4 /cvr [4.0] assert
+    % cvi errors
+    /cvr [/stackunderflow] assert
+    [] /cvr [[] /typecheck] assert
+    (abc) /cvr [(abc) /syntaxerror] assert
+
+
+% cvrs %%
+/st 20 string def
+123 10 st /cvrs [(123)] assert
+-123 10 st /cvrs [(-123)] assert
+123.4 10 st /cvrs [(123.4)] assert
+123 16 st /cvrs [(7B)] assert
+-123 16 st /cvrs [(FFFFFF85)] assert
+123.4 16 st /cvrs [(7B)] assert
+    % cvrs errors
+    123 10 /cvrs [123 10 /stackunderflow] assert
+    123 10 10 /cvrs [123 10 10 /typecheck] assert
+    123 () st /cvrs [123 () st /typecheck] assert
+    () 10 st /cvrs [() 10 st /typecheck] assert
+    123 0 st /cvrs [123 0 st /rangecheck] assert
+    123 37 st /cvrs [123 37 st /rangecheck] assert
+    123 10 (  ) /cvrs [123 10 (  ) /rangecheck] assert
+
+
+%% cvs %%
+123 456 add st /cvs [(579)] assert
+123.9 st /cvs [(123.9)] assert
+true st /cvs [(true)] assert
+(abc) st /cvs [(abc)] assert
+/name st /cvs [(name)] assert
+/add st /cvs [(add)] assert
+[] st /cvs [(--nostringval--)] assert
+systemdict st /cvs [(--nostringval--)] assert
+    % cvs errors
+    st /cvs [st /stackunderflow] assert
+    1 1 /cvs [1 1 /typecheck] assert
+    [] (              ) /cvs [[] (              ) /rangecheck] assert

@@ -1,0 +1,50 @@
+%!PS-3.0
+% PostScript Standard I/O Unit Tests
+%
+% Tests for stdin/stdout/stderr file object compliance
+% Per PostScript Language Reference Manual Section 3.8.3
+
+userdict /$unittest known not {(unit_tests/unittest.ps) run} if
+
+
+%% Test: Multiple (%stdin) (r) file calls return same object %%
+{(%stdin) (r) file (%stdin) (r) file eq} [true] assert
+{(%stdin) (r) file pop} [] assert  % Clean up
+
+%% Test: Multiple (%stdout) (w) file calls return same object %%
+{(%stdout) (w) file (%stdout) (w) file eq} [true] assert
+{(%stdout) (w) file pop} [] assert  % Clean up
+
+%% Test: Multiple (%stderr) (w) file calls return same object %%
+{(%stderr) (w) file (%stderr) (w) file eq} [true] assert
+{(%stderr) (w) file pop} [] assert  % Clean up
+
+%% Test: Invalid access modes should cause invalidfileaccess error %%
+{(%stdin) (w) file} [(%stdin) (w) /invalidfileaccess] assert
+{(%stdout) (r) file} [(%stdout) (r) /invalidfileaccess] assert  
+{(%stderr) (r) file} [(%stderr) (r) /invalidfileaccess] assert
+
+%% Test: Standard files have correct type %%
+{(%stdin) (r) file type} [/filetype] assert
+{(%stdin) (r) file pop} [] assert
+{(%stdout) (w) file type} [/filetype] assert
+{(%stdout) (w) file pop} [] assert
+{(%stderr) (w) file type} [/filetype] assert
+{(%stderr) (w) file pop} [] assert
+
+%% Test: filename operator works with standard files %%
+{(%stdin) (r) file filename (%stdin) eq} [true] assert
+{(%stdout) (w) file filename (%stdout) eq} [true] assert
+{(%stderr) (w) file filename (%stderr) eq} [true] assert
+
+%% Test: flush operator works without error %%
+{flush} [] assert
+
+%% Test: Standard files cannot be closed (closefile should be no-op) %%
+{(%stdout) (w) file dup closefile status} [true] assert
+
+%% Test: Basic print functionality %%
+{(Hello from stdio test) print NL print} [] assert
+
+%% Test: print followed by flush %%
+{(Test message) print NL print flush} [] assert

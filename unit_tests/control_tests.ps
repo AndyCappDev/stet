@@ -1,0 +1,158 @@
+%% Control tests
+
+userdict /$unittest known not {(unit_tests/unittest.ps) run} if
+
+
+%% exec %%
+    % integer
+1 /exec [1] assert
+    % real
+1.0 /exec [1.0] assert
+    % literal string
+(a) /exec [(a)] assert
+    % executable string
+(2 3 add) cvx /exec [5] assert
+    % literal array
+[1 2 3] /exec [[1 2 3]] assert
+    % procedure
+{2 3 add} /exec [5] assert
+    % dictionary
+<< /key (value) >> dup {exec eq} [true] assert
+    % exec errors
+    /exec [/stackunderflow] assert
+
+
+%% if %%
+3 4 lt {(3 is less than 4)} /if [(3 is less than 4)] assert
+3 4 gt {(3 is less than 4)} /if [] assert
+    % if errors
+    /if [/stackunderflow] assert
+    true /if [true /stackunderflow] assert
+    {} false /if [{} false /typecheck] assert
+
+
+%% ifelse %%
+3 4 lt {(TruePart)} {(FalsePart)} /ifelse [(TruePart)] assert
+3 4 gt {(TruePart)} {(FalsePart)} /ifelse [(FalsePart)] assert
+    % ifelse errors
+    /ifelse [/stackunderflow] assert
+    true /ifelse [true /stackunderflow] assert
+    true {} /ifelse [true {} /stackunderflow] assert
+    1 {} {} /ifelse [1 {} {} /typecheck] assert
+    true [] {} /ifelse [true [] {} /typecheck] assert
+    true {} [] /ifelse [true {} [] /typecheck] assert
+
+
+%% for %%
+0 1 1 4 {add} /for [10] assert
+1 2 6 {} /for [1 3 5] assert
+3 -.5 1 {} /for [3.0 2.5 2.0 1.5 1.0] assert
+    % for errors
+    /for [/stackunderflow] assert
+    1 2 6 /for [1 2 6 /stackunderflow] assert
+    () 2 6 {} /for [() 2 6 {} /typecheck] assert
+    1 2 6 [] /for [1 2 6 [] /typecheck] assert
+
+
+%% forall %%
+0 [13 29 3 -8 21] {add} /forall [58] assert
+(abc) {} /forall [97 98 99] assert
+    % forall errors
+    (abc) /forall [(abc) /stackunderflow] assert
+    1 {} /forall [1 {} /typecheck] assert
+
+
+%% repeat %%
+4 {(abc)} /repeat [(abc) (abc) (abc) (abc)] assert
+1 2 3 4 3 {pop} /repeat [1] assert
+4 {} /repeat [] assert
+mark 0 {(will not happen)} /repeat [null] dup 0 mark put assert
+    % repeat errors
+    1 /repeat [1 /stackunderflow] assert
+    1 [] /repeat [1 [] /typecheck] assert
+    (a) {} /repeat [(a) {} /typecheck] assert
+
+
+%% loop %%
+0 {dup 1 add dup 5 eq {exit} if} /loop [0 1 2 3 4 5] assert
+    % loop errors
+    /loop [/stackunderflow] assert
+    [] /loop [[] /typecheck] assert
+
+
+%% stop and stopped %%
+{} /stopped [false] assert
+{stop} /stopped [true] assert
+{add} {stopped $error /newerror false put} [true] assert
+    % stopped errors
+    /stopped [/stackunderflow] assert
+
+
+%% exit %%
+1 1 3 {exit} /for [1] assert
+[1 2 3] {exit} /forall [1] assert
+10 {1 exit} /repeat [1] assert
+{1 exit} /loop [1] assert
+% cshow
+% filenameforall
+% kshow
+% pathforall
+% resourceforall
+    % exit errors
+    /exit [/invalidexit] assert
+
+
+%% countexecstack and execstack
+{countexecstack dup array execstack length eq} [true] assert
+    % execstack errors
+    /execstack [/stackunderflow] assert
+    () /execstack [() /typecheck] assert
+    true setglobal 10 array false setglobal [1 index /invalidaccess] /execstack exch assert
+
+
+%% Nested loop stress tests %%
+
+% Nested for loops: outer pushes 1,2,3; inner adds i to accumulator twice each
+0 1 1 3 { add } /for [6] assert
+
+% Nested repeat
+0 3 { 1 add } /repeat [3] assert
+
+% exit from nested loops exits innermost only
+/result 0 def
+1 1 3 {
+    pop  % discard outer for counter
+    1 1 5 { dup 3 eq { pop exit } if pop } for
+    /result result 1 add def
+} for
+result [3] assert
+
+% stopped inside for loop - stop terminates the stopped context
+0 1 1 3 { {add stop} stopped pop } /for [6] assert
+
+% Deep stopped nesting - stop only stops innermost stopped
+{{{stop} stopped} stopped} [true false] assert
+
+% Nested loop with exit and stopped
+/nestresult 0 def
+{
+    1 1 5 {
+        dup 3 eq { pop exit } if
+        pop  % discard for counter
+        /nestresult nestresult 1 add def
+    } for
+} stopped
+nestresult [false 2] assert
+
+% repeat 0 times executes nothing
+0 {(should not happen)} /repeat [] assert
+
+% for with negative step
+5 -1 1 {} /for [5 4 3 2 1] assert
+
+% loop with immediate exit
+{exit} /loop [] assert
+
+
+%% start %%
+% ???????

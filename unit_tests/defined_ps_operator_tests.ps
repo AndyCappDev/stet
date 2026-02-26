@@ -1,0 +1,130 @@
+%% PS-Defined Operator tests
+%% Tests for operators defined in resources/Init/sysdict.ps:
+%% =, ==, cleardictstack, selectfont, findencoding
+
+userdict /$unittest known not {(unit_tests/unittest.ps) run} if
+
+
+%% =============================================================================
+%% = (print top of stack)
+%% =============================================================================
+
+%% = - pops and prints without error %%
+{42 =} stopped [false] assert
+{(hello) =} stopped [false] assert
+{/name =} stopped [false] assert
+{true =} stopped [false] assert
+{[1 2 3] =} stopped [false] assert
+
+%% = - error on empty stack %%
+% = handles errors internally via handleerror; suppress handleerror
+% output during this test to keep CI clean
+/saved_handleerror /handleerror load def
+/handleerror {} def
+{=} stopped pop clear
+/handleerror /saved_handleerror load def
+
+
+%% =============================================================================
+%% == (print with detail)
+%% =============================================================================
+
+%% == - pops and prints without error %%
+{42 ==} stopped [false] assert
+{(hello) ==} stopped [false] assert
+{/name ==} stopped [false] assert
+{true ==} stopped [false] assert
+{[1 2 3] ==} stopped [false] assert
+{<< /a 1 >> ==} stopped [false] assert
+
+%% == - error on empty stack %%
+/saved_handleerror /handleerror load def
+/handleerror {} def
+{==} stopped pop clear
+/handleerror /saved_handleerror load def
+
+
+%% =============================================================================
+%% cleardictstack
+%% =============================================================================
+
+%% cleardictstack - leaves exactly 3 dicts %%
+% Push an extra dict first
+5 dict begin
+cleardictstack
+/countdictstack [3] assert
+
+%% cleardictstack - multiple extra dicts %%
+5 dict begin 5 dict begin 5 dict begin
+cleardictstack
+/countdictstack [3] assert
+
+%% cleardictstack - already at 3 dicts %%
+cleardictstack
+/countdictstack [3] assert
+
+
+%% =============================================================================
+%% selectfont
+%% =============================================================================
+
+%% selectfont - basic usage %%
+/Courier 12 selectfont
+currentfont /FontName get /Courier eq [true] assert
+
+%% selectfont - with different size %%
+% selectfont is findfont + scalefont + setfont
+% FontMatrix[0] for a standard 1000-unit font is 0.001
+% After scalefont by 24, FontMatrix[0] should be 0.024
+/Courier 24 selectfont
+{currentfont /FontMatrix get 0 get 0.024 sub abs 0.001 lt} [true] assert
+
+%% selectfont - error conditions %%
+/selectfont [/stackunderflow] assert
+12 /selectfont [12 /stackunderflow] assert
+
+% typecheck - non-numeric scale
+/Courier (bad) /selectfont [/Courier (bad) /typecheck] assert
+
+
+%% =============================================================================
+%% findencoding
+%% =============================================================================
+
+%% findencoding - ISOLatin1Encoding %%
+{/ISOLatin1Encoding findencoding length} [256] assert
+
+%% findencoding - StandardEncoding %%
+{/StandardEncoding findencoding length} [256] assert
+
+%% findencoding - unknown encoding %%
+/NonexistentEnc999 /findencoding [/NonexistentEnc999 /undefinedresource] assert
+
+
+%% =============================================================================
+%% pstack
+%% =============================================================================
+
+%% pstack - prints stack without consuming %%
+1 2 3 {pstack} stopped
+% pstack doesn't consume, so 1 2 3 should still be on stack
+% Assert array is bottom-to-top: [bottom ... top]
+[1 2 3 false] assert
+
+
+%% =============================================================================
+%% stack
+%% =============================================================================
+
+%% stack - prints stack without consuming %%
+1 2 3 {stack} stopped
+[1 2 3 false] assert
+
+
+%% =============================================================================
+%% prompt
+%% =============================================================================
+
+%% prompt - runs without error %%
+% prompt prints the prompt string; verify it doesn't crash
+{prompt} stopped pop clear

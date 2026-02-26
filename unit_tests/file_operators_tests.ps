@@ -1,0 +1,188 @@
+%% File Operators tests (supplementary)
+%% Tests for read, readline, fileposition, flushfile, filenameforall, line
+%% Fills gaps not covered by file_tests.ps
+
+userdict /$unittest known not {(unit_tests/unittest.ps) run} if
+
+
+%% =============================================================================
+%% read - byte-by-byte reading
+%% =============================================================================
+
+% Create test file
+(ft_read_test.txt) (w) file dup (ABC) writestring closefile
+
+%% read - basic byte reading %%
+(ft_read_test.txt) (r) file /rf exch def
+rf /read [65 true] assert    % 'A'
+rf /read [66 true] assert    % 'B'
+rf /read [67 true] assert    % 'C'
+rf /read [false] assert      % EOF
+rf closefile
+
+%% read - error conditions %%
+/read [/stackunderflow] assert
+123 /read [123 /typecheck] assert
+(string) /read [(string) /typecheck] assert
+
+
+%% =============================================================================
+%% readline - read lines from file
+%% =============================================================================
+
+% Create test file with newlines
+(ft_readline_test.txt) (w) file dup
+(Line1\nLine2\nLine3) writestring closefile
+
+%% readline - basic line reading %%
+(ft_readline_test.txt) (r) file /rf exch def
+rf 100 string /readline [(Line1) true] assert
+rf 100 string /readline [(Line2) true] assert
+rf 100 string /readline [(Line3) false] assert  % Last line, no trailing newline
+rf closefile
+
+%% readline - error conditions %%
+/readline [/stackunderflow] assert
+123 string /readline [123 string /stackunderflow] assert
+123 100 string /readline [123 100 string /typecheck] assert
+
+% Clean up
+(ft_read_test.txt) deletefile
+(ft_readline_test.txt) deletefile
+
+
+%% =============================================================================
+%% fileposition - track position after reads
+%% =============================================================================
+
+% Create test file
+(ft_pos_test.txt) (w) file dup (0123456789) writestring closefile
+
+%% fileposition - basic tracking %%
+(ft_pos_test.txt) (r) file /rf exch def
+rf /fileposition [0] assert
+rf 3 string readstring pop pop
+rf /fileposition [3] assert
+rf 5 string readstring pop pop
+rf /fileposition [8] assert
+rf closefile
+
+%% fileposition - error conditions %%
+/fileposition [/stackunderflow] assert
+123 /fileposition [123 /typecheck] assert
+
+% Clean up
+(ft_pos_test.txt) deletefile
+
+
+%% =============================================================================
+%% flushfile - discard remaining data
+%% =============================================================================
+
+% Create test file
+(ft_flush_test.txt) (w) file dup (Hello World) writestring closefile
+
+%% flushfile - discards remaining data on read file %%
+(ft_flush_test.txt) (r) file /rf exch def
+rf 5 string readstring pop pop    % Read "Hello"
+rf flushfile                       % Discard rest
+% File should be at EOF / closed after flushfile
+rf /read [false] assert
+
+%% flushfile - error conditions %%
+/flushfile [/stackunderflow] assert
+123 /flushfile [123 /typecheck] assert
+
+% Clean up
+(ft_flush_test.txt) deletefile
+
+
+%% =============================================================================
+%% filenameforall - enumerate files
+%% =============================================================================
+
+%% filenameforall - find at least one file %%
+/fn_count 0 def
+(unit_tests/*.ps) { pop /fn_count fn_count 1 add def } 100 string filenameforall
+fn_count 0 gt [true] assert
+
+%% filenameforall - pattern matching %%
+% Should find the unittest.ps file
+/found_unittest false def
+(unit_tests/unittest.ps) {
+    (unit_tests/unittest.ps) eq { /found_unittest true def } if
+} 100 string filenameforall
+found_unittest [true] assert
+
+%% filenameforall - error conditions %%
+/filenameforall [/stackunderflow] assert
+(*) {} /filenameforall [(*) {} /stackunderflow] assert
+
+
+%% =============================================================================
+%% write - single byte write
+%% =============================================================================
+
+% Create file and write individual bytes
+(ft_write_test.txt) (w) file /wf exch def
+wf 72 write     % 'H'
+wf 105 write    % 'i'
+wf closefile
+
+% Verify
+(ft_write_test.txt) (r) file /rf exch def
+rf 10 string readstring [(Hi) false] assert
+rf closefile
+
+%% write - error conditions %%
+/write [/stackunderflow] assert
+123 /write [123 /stackunderflow] assert
+(str) 65 /write [(str) 65 /typecheck] assert
+
+% Clean up
+(ft_write_test.txt) deletefile
+
+
+%% =============================================================================
+%% closefile
+%% =============================================================================
+
+%% closefile - basic %%
+(ft_close_test.txt) (w) file /wf exch def
+wf (test) writestring
+wf /closefile [] assert
+
+%% closefile - error conditions %%
+/closefile [/stackunderflow] assert
+123 /closefile [123 /typecheck] assert
+
+% Clean up
+(ft_close_test.txt) deletefile
+
+
+%% =============================================================================
+%% deletefile
+%% =============================================================================
+
+%% deletefile - basic %%
+(ft_del_test.txt) (w) file dup (temp) writestring closefile
+% status returns: pages bytes ref created true (or false)
+% Keep the bool (top of stack), discard the 4 integers below it
+{(ft_del_test.txt) status 5 1 roll pop pop pop pop} [true] assert
+(ft_del_test.txt) deletefile
+{(ft_del_test.txt) status} [false] assert
+
+%% deletefile - error conditions %%
+/deletefile [/stackunderflow] assert
+123 /deletefile [123 /typecheck] assert
+
+
+%% =============================================================================
+%% line - current line number
+%% =============================================================================
+
+%% line - returns an integer %%
+currentfile line type /integertype eq [true] assert
+
+%% line - value is positive %%
+currentfile line 0 gt [true] assert

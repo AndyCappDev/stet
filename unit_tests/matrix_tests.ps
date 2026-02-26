@@ -1,0 +1,209 @@
+%% Matrix tests
+
+userdict /$unittest known not {(unit_tests/unittest.ps) run} if
+
+
+%% matrix %%
+/matrix [[1 0 0 1 0 0]] assert
+
+
+%% initmatrix %%
+% Under nulldevice, initmatrix resets to identity
+gsave
+  nulldevice
+  2 3 scale
+  initmatrix
+  matrix currentmatrix aload pop
+  [1.0 0.0 0.0 1.0 0.0 0.0] assert
+grestore
+
+%% identmatrix %%
+6 array /identmatrix [[1 0 0 1 0 0]] assert
+    % identmatrix errors
+    /identmatrix [/stackunderflow] assert
+    1 /identmatrix [1 /typecheck] assert
+    2 array /identmatrix [2 array /rangecheck] assert
+
+
+
+
+%% currentmatrix %%
+[1 2 3 4 5 6] setmatrix 6 array /currentmatrix [[1 2 3 4 5 6]] assert
+    % currentmatrix errors
+    /currentmatrix [/stackunderflow] assert
+    (a) /currentmatrix [(a) /typecheck] assert
+    5 array /currentmatrix [5 array /rangecheck] assert
+
+
+%% setmatrix %%
+[1 2 3 4 5 6] setmatrix 6 array /currentmatrix [[1 2 3 4 5 6]] assert
+    % setmatrix errors
+    /setmatrix [/stackunderflow] assert
+    () /setmatrix [() /typecheck] assert
+    [1 2 3 () 5 6] /setmatrix [[1 2 3 () 5 6] /typecheck] assert
+    [1 2 3 4 5] /setmatrix [[1 2 3 4 5] /rangecheck] assert
+
+
+%% translate %%
+10 20 6 array /translate [[1 0 0 1 10 20]] assert
+[2 3 0 2 2 2] setmatrix 10 10 {translate 6 array currentmatrix} [[2.00 3.00 0.00 2.00 22.00 52.00]] assert
+    % translate errors
+    /translate [/stackunderflow] assert
+    10 /translate [10 /stackunderflow] assert
+    6 array /translate [6 array /stackunderflow] assert
+    10 6 array /translate [10 6 array /stackunderflow] assert
+    () () /translate [() () /typecheck] assert
+    () () 6 array /translate [() () 6 array /typecheck] assert
+    10 10 () /translate [10 10 () /typecheck] assert
+    10 10 5 array /translate [10 10 5 array /rangecheck] assert
+
+
+%% scale %%
+10 20 6 array /scale [[10 0 0 20 0 0]] assert
+[2 3 0 2 2 2] setmatrix 10 20 {scale 6 array currentmatrix} [[20.0 30.0 0.0 40.0 2.0 2.0]] assert
+    % translate errors
+    % first form
+    /scale [/stackunderflow] assert
+    10 /scale [10 /stackunderflow] assert
+    6 array /scale [6 array /stackunderflow] assert
+    10 6 array /scale [10 6 array /stackunderflow] assert
+    () () /scale [() () /typecheck] assert
+    () () 6 array /scale [() () 6 array /typecheck] assert
+    10 10 () /scale [10 10 () /typecheck] assert
+    10 10 5 array /scale [10 10 5 array /rangecheck] assert
+
+
+%% rotate %%
+35 6 array /rotate [[0.8191520 0.5735764 -0.5735764 0.8191520 0.0 0.0]] assert
+[2 3 0 2 2 2] setmatrix 35 {rotate 6 array currentmatrix} [[1.6383040 3.6046090 -1.1471528 -0.0824252 2.0 2.0]] assert
+    % rotate errors
+    /rotate [/stackunderflow] assert
+    6 array /rotate [6 array /stackunderflow] assert
+    () /rotate [() /typecheck] assert
+    () 6 array /rotate [() 6 array /typecheck] assert
+    35 () /rotate [35 () /typecheck] assert
+    35 5 array /rotate [35 5 array /rangecheck] assert
+
+
+%% concat %%
+[2 3 0 2 2 2] setmatrix [72 0 0 72 0 0] {concat 6 array currentmatrix} [[144.0 216.0 0.0 144.0 2.0 2.0]] assert
+    % concat errors
+    /concat [/stackunderflow] assert
+    [1 2 3 4 5] /concat [[1 2 3 4 5] /rangecheck] assert
+    () /concat [() /typecheck] assert
+    [1 2 3 () 5 6] /concat [[1 2 3 () 5 6] /typecheck]  assert
+
+
+%% concatmatrix %%
+[2 3 0 2 2 2] [72 0 0 72 0 0] 6 array /concatmatrix [[144 216 0 144 144 144]] assert
+    % concat errors
+    [] [] /concatmatrix [[] [] /stackunderflow] assert
+    [] [] () /concatmatrix [[] [] () /typecheck] assert
+    [] () [] /concatmatrix [[] () [] /typecheck] assert
+    () [] [] /concatmatrix [() [] [] /typecheck] assert
+    [2 3 0 2 2 2] [72 0 0 72 0 0] 5 array /concatmatrix [[2 3 0 2 2 2] [72 0 0 72 0 0] 5 array /rangecheck] assert
+    [2 3 0 2 2 2] [72 0 0 72 0] 6 array /concatmatrix [[2 3 0 2 2 2] [72 0 0 72 0] 6 array /rangecheck] assert
+    [2 3 0 2 2] [72 0 0 72 0 0] 6 array /concatmatrix [[2 3 0 2 2] [72 0 0 72 0 0] 6 array /rangecheck] assert
+    [2 3 0 2 2 2] [72 0 0 () 0 0] 6 array /concatmatrix [[2 3 0 2 2 2] [72 0 0 () 0 0] 6 array /typecheck] assert
+    [2 () 0 2 2 2] [72 0 0 72 0 0] 6 array /concatmatrix [[2 () 0 2 2 2] [72 0 0 72 0 0] 6 array /typecheck] assert
+
+
+%% transform %%
+[2 3 0 2 2 2] setmatrix 10 20 /transform [22.0 72.0] assert
+6 array identmatrix setmatrix 10 20 [2 3 0 2 2 2] /transform [22.0 72.0] assert
+    % transform errors
+    /transform [/stackunderflow] assert
+    10 /transform [10 /stackunderflow] assert
+    6 array /transform [6 array /stackunderflow] assert
+    10 6 array /transform [10 6 array /stackunderflow] assert
+    () () /transform [() () /typecheck] assert
+    () () 6 array /transform [() () 6 array /typecheck] assert
+    10 10 () /transform [10 10 () /typecheck] assert
+    10 10 5 array /transform [10 10 5 array /rangecheck] assert
+
+
+%% dtransform %%
+[2 3 0 2 2 2] setmatrix 10 20 /dtransform [20.0 70.0] assert
+6 array identmatrix setmatrix 10 20 [2 3 0 2 2 2] /dtransform [20.0 70.0] assert
+    % dtransform errors
+    /dtransform [/stackunderflow] assert
+    10 /dtransform [10 /stackunderflow] assert
+    6 array /dtransform [6 array /stackunderflow] assert
+    10 6 array /dtransform [10 6 array /stackunderflow] assert
+    () () /dtransform [() () /typecheck] assert
+    () () 6 array /dtransform [() () 6 array /typecheck] assert
+    10 10 () /dtransform [10 10 () /typecheck] assert
+    10 10 5 array /dtransform [10 10 5 array /rangecheck] assert
+
+
+%% itransform %%
+10 20 [2 3 0 2 2 2] transform [2 3 0 2 2 2] /itransform [10.0 20.0] assert
+[2 3 0 2 2 2] setmatrix 10 20 transform /itransform [10.0 20.0] assert
+    % itransform errors
+    /itransform [/stackunderflow] assert
+    10 /itransform [10 /stackunderflow] assert
+    6 array /itransform [6 array /stackunderflow] assert
+    10 6 array /itransform [10 6 array /stackunderflow] assert
+    () () /itransform [() () /typecheck] assert
+    () () 6 array /itransform [() () 6 array /typecheck] assert
+    10 10 () /itransform [10 10 () /typecheck] assert
+    10 10 5 array /itransform [10 10 5 array /rangecheck] assert
+
+
+%% idtransform %%
+10 20 [2 3 0 2 2 2] /idtransform [5.0 2.5] assert
+[2 3 0 2 2 2] setmatrix 10 20 /idtransform [5.0 2.5] assert
+    % idtransform errors
+    /idtransform [/stackunderflow] assert
+    10 /idtransform [10 /stackunderflow] assert
+    6 array /idtransform [6 array /stackunderflow] assert
+    10 6 array /idtransform [10 6 array /stackunderflow] assert
+    () () /idtransform [() () /typecheck] assert
+    () () 6 array /idtransform [() () 6 array /typecheck] assert
+    10 10 () /idtransform [10 10 () /typecheck] assert
+    10 10 5 array /idtransform [10 10 5 array /rangecheck] assert
+
+
+%% invertmatrix %%
+[2 3 0 2 2 2] 6 array /invertmatrix [[0.5 -0.75 0.0 0.5 -1.0 0.5]] assert
+    % invertmatrix errors
+    [] /invertmatrix [[] /stackunderflow] assert
+    () [] /invertmatrix [() [] /typecheck] assert
+    [] () /invertmatrix [[] () /typecheck] assert
+    [2 3 0 2 2 2] 5 array /invertmatrix [[2 3 0 2 2 2] 5 array /rangecheck] assert
+    [2 3 0 2 2] 6 array /invertmatrix [[2 3 0 2 2] 6 array /rangecheck] assert
+    [2 3 () 2 2 2] 6 array /invertmatrix [[2 3 () 2 2 2] 6 array /typecheck] assert
+    % Singular matrix (determinant = 0)
+    [1 2 2 4 0 0] 6 array /invertmatrix [[1 2 2 4 0 0] 6 array /undefinedresult] assert
+    [0 0 0 0 0 0] 6 array /invertmatrix [[0 0 0 0 0 0] 6 array /undefinedresult] assert
+
+
+%% defaultmatrix %%
+% Under nulldevice, defaultmatrix returns identity
+gsave
+  nulldevice
+  matrix /defaultmatrix [[1 0 0 1 0 0]] assert
+grestore
+    % defaultmatrix errors
+    /defaultmatrix [/stackunderflow] assert
+    (a) /defaultmatrix [(a) /typecheck] assert
+    5 array /defaultmatrix [5 array /rangecheck] assert
+
+
+%% initmatrix additional tests %%
+% initmatrix under nulldevice after translate
+gsave
+  nulldevice
+  50 100 translate
+  initmatrix
+  matrix currentmatrix aload pop
+  [1.0 0.0 0.0 1.0 0.0 0.0] assert
+grestore
+% initmatrix under nulldevice after rotate
+gsave
+  nulldevice
+  45 rotate
+  initmatrix
+  matrix currentmatrix aload pop
+  [1.0 0.0 0.0 1.0 0.0 0.0] assert
+grestore

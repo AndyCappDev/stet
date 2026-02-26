@@ -1,0 +1,141 @@
+%% Painting Operator tests
+%% Tests for fill, eofill, stroke, rectfill, rectstroke, erasepage, strokepath
+
+userdict /$unittest known not {(unit_tests/unittest.ps) run} if
+
+% All tests run under nulldevice
+gsave nulldevice
+
+
+%% =============================================================================
+%% fill
+%% =============================================================================
+
+%% fill - consumes current path %%
+100 200 moveto 200 200 lineto 200 300 lineto closepath
+fill
+{currentpoint} stopped [true] assert
+clear
+
+%% fill - no error on empty path %%
+{fill} stopped [false] assert
+
+%% fill - basic rectangle %%
+0 0 moveto 100 0 lineto 100 100 lineto 0 100 lineto closepath
+{fill} stopped [false] assert
+
+
+%% =============================================================================
+%% eofill
+%% =============================================================================
+
+%% eofill - consumes current path %%
+100 200 moveto 200 200 lineto 200 300 lineto closepath
+eofill
+{currentpoint} stopped [true] assert
+clear
+
+%% eofill - no error on empty path %%
+{eofill} stopped [false] assert
+
+%% eofill - basic rectangle %%
+0 0 moveto 100 0 lineto 100 100 lineto 0 100 lineto closepath
+{eofill} stopped [false] assert
+
+
+%% =============================================================================
+%% stroke
+%% =============================================================================
+
+%% stroke - consumes current path %%
+100 200 moveto 300 400 lineto
+stroke
+{currentpoint} stopped [true] assert
+clear
+
+%% stroke - no error on empty path %%
+{stroke} stopped [false] assert
+
+%% stroke - basic line %%
+0 0 moveto 100 100 lineto
+{stroke} stopped [false] assert
+
+
+%% =============================================================================
+%% rectfill
+%% =============================================================================
+
+%% rectfill - 4-number form %%
+{10 20 100 200 rectfill} stopped [false] assert
+
+%% rectfill - array form (single rect) %%
+{[10 20 100 200] rectfill} stopped [false] assert
+
+%% rectfill - multi-rect array %%
+{[10 20 100 200 50 60 70 80] rectfill} stopped [false] assert
+
+%% rectfill - clears current path %%
+% After rectfill, the current path is consumed
+newpath 10 20 100 200 rectfill
+% Verify rectfill ran without error (path is implicitly tested by running)
+
+%% rectfill - error conditions %%
+/rectfill [/stackunderflow] assert
+10 20 100 /rectfill [10 20 100 /stackunderflow] assert
+(a) 20 100 200 /rectfill [(a) 20 100 200 /typecheck] assert
+
+%% rectfill - array not multiple of 4 %%
+[10 20 100] /rectfill [[10 20 100] /rangecheck] assert
+
+
+%% =============================================================================
+%% rectstroke
+%% =============================================================================
+
+%% rectstroke - 4-number form %%
+{10 20 100 200 rectstroke} stopped [false] assert
+
+%% rectstroke - array form (single rect) %%
+{[10 20 100 200] rectstroke} stopped [false] assert
+
+%% rectstroke - multi-rect array %%
+{[10 20 100 200 50 60 70 80] rectstroke} stopped [false] assert
+
+%% rectstroke - error conditions %%
+/rectstroke [/stackunderflow] assert
+10 20 100 /rectstroke [10 20 100 /stackunderflow] assert
+(a) 20 100 200 /rectstroke [(a) 20 100 200 /typecheck] assert
+
+
+%% =============================================================================
+%% erasepage
+%% =============================================================================
+
+%% erasepage - runs without error %%
+{erasepage} stopped [false] assert
+
+
+%% =============================================================================
+%% strokepath
+%% =============================================================================
+
+%% strokepath - converts stroked path to fillable outline %%
+2 setlinewidth
+100 200 moveto 300 400 lineto
+strokepath
+% Path should still exist - verify via pathbbox
+{pathbbox pop pop pop pop} stopped [false] assert
+
+%% strokepath - no error on empty path %%
+newpath
+{strokepath} stopped [false] assert
+
+%% strokepath - rectangle path %%
+newpath
+0 0 moveto 100 0 lineto 100 100 lineto 0 100 lineto closepath
+strokepath
+% Verify path exists
+{pathbbox pop pop pop pop} stopped [false] assert
+
+
+grestore
