@@ -22,8 +22,8 @@
         % set the color space here with setcolorspace
         % this device is DeviceRGB
         /DeviceRGB setcolorspace
-    }
-    /BeginPage {pop}
+    } bind
+    /BeginPage {pop} bind
     /EndPage {
         dup 0 eq { %% called from showpage
             pop (showpage: Creating png file for page ) print 1 add == true
@@ -34,7 +34,7 @@
                 pop false
             } ifelse
         } ifelse
-    }
+    } bind
     /InputAttributes <<>>
     /OutputAttributes <<>>
     /ColorModel /DeviceRGB
