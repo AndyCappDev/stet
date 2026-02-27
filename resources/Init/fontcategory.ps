@@ -195,10 +195,13 @@ true setglobal
 
             file_path null ne {
                 currentglobal true setglobal
-                % Use native .loadfont instead of 'run' since .t1 files
-                % use eexec which xforge doesn't implement as a PS operator
-                font_name .loadfont {
-                    /loaded_font exch def
+                file_path run
+                % Clean up mark left by "mark currentfile closefile" in eexec section
+                { cleartomark } stopped pop
+                setglobal
+                % Font now in FontDirectory via definefont in .t1 file
+                FontDirectory font_name known {
+                    FontDirectory font_name get /loaded_font exch def
                     % Also register in resource dict for future lookups
                     font_name loaded_font
                     Category globalresourcedict {
@@ -207,7 +210,6 @@ true setglobal
                         pop pop
                     } ifelse
                 } if
-                setglobal
             } if
         } if
 
