@@ -1,0 +1,21 @@
+%!PS-Adobe-3.0 Resource-ProcSet
+%%Title: FontSetInit
+%%Creator: PostForge
+%%VMusage: 1000 100
+%%EndComments
+
+% FontSetInit ProcSet — provides CFF font loading via StartData operator.
+% CFF fonts appear in PostScript as:
+%   /FontSetInit /ProcSet findresource begin
+%   /FontSetName byte_count StartData <binary CFF data>
+
+<<
+    /Title (Font Set Init)
+    /Version 1.0
+    /Revision 0
+
+    % StartData: read binary CFF data from current file and register fonts
+    % Stack: fontsetname byte_count StartData -
+    % Pops fontsetname, passes byte_count to .cff_startdata
+    /StartData { exch pop .cff_startdata } bind
+>>

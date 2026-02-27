@@ -165,11 +165,18 @@ true setglobal
         /loaded_font null def
 
         % ---- STEP 1: Return font if already loaded ----
-        currentglobal not {
-            Category localresourcedict {
-                dup font_name known {
-                    font_name get /loaded_font exch def
-                } { pop } ifelse
+        % Check FontDirectory first (definefont registers here)
+        FontDirectory font_name known {
+            FontDirectory font_name get /loaded_font exch def
+        } if
+
+        loaded_font null eq {
+            currentglobal not {
+                Category localresourcedict {
+                    dup font_name known {
+                        font_name get /loaded_font exch def
+                    } { pop } ifelse
+                } if
             } if
         } if
 
