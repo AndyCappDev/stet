@@ -812,23 +812,22 @@ rootfont type /dicttype eq [true] assert
 %% .loadfont respects vm_alloc_mode %%
 % When true setglobal is active, .loadfont should create global font dicts
 % so they can be stored in global resource dicts without invalidaccess
+% Use fonts not already cached by earlier tests in this file.
 true setglobal
-/NimbusSans-Regular .loadfont {
+/NimbusRoman-Italic .loadfont {
     gcheck [true] assert
-    pop
 } {
     (font not found - skipping test) =
 } ifelse
 
 % Fonts loaded in global mode can be found via findresource in global mode
 true setglobal
-{/NimbusSans-Regular /Font findresource type} [/dicttype] assert
+{/NimbusRoman-Italic /Font findresource type} [/dicttype] assert
 
 % When false setglobal is active, .loadfont should create local font dicts
 false setglobal
 /NimbusMonoPS-Regular .loadfont {
     gcheck [false] assert
-    pop
 } {
     (font not found - skipping test) =
 } ifelse
