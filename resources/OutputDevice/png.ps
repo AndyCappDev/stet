@@ -26,10 +26,12 @@
     /BeginPage {pop} bind
     /EndPage {
         dup 0 eq { %% called from showpage
-            pop (showpage: Creating png file for page ) print 1 add == true
+            pop (showpage: Creating png file for page ) print
+            1 add 20 string cvs print (\n) print true
         } {
             1 eq { %% called from copypage
-                (copypage: Creating png file for page ) print 1 add == true
+                (copypage: Creating png file for page ) print
+                1 add 20 string cvs print (\n) print true
             } { %% called from device deactivation
                 pop false
             } ifelse
