@@ -19,7 +19,7 @@ use stet_core::graphics_state::{ColorSpace, DeviceColor, Matrix};
 use stet_core::mesh_shading;
 use stet_core::object::{EntityId, PsObject, PsValue};
 
-use crate::color_ops::resolve_color_space_from_obj;
+use crate::color_ops::{precompute_cie_decode_tables, resolve_color_space_from_obj};
 
 // Number of samples for function-based gradients (matches PostForge).
 const NUM_GRADIENT_SAMPLES: usize = 64;
@@ -52,6 +52,7 @@ pub fn op_shfill(ctx: &mut Context) -> Result<(), PsError> {
     let cs_obj = get_dict_obj(ctx, dict_entity, b"ColorSpace")
         .ok_or(PsError::Undefined)?;
     let (color_space, n_comps) = resolve_color_space_from_obj(ctx, &cs_obj)?;
+    let color_space = precompute_cie_decode_tables(ctx, color_space)?;
 
     // Extract optional BBox [llx lly urx ury]
     let bbox = get_dict_bbox(ctx, dict_entity);
@@ -762,6 +763,18 @@ fn components_to_device_color(comps: &[f64], color_space: &ColorSpace) -> Device
             comps[2].clamp(0.0, 1.0),
             comps[3].clamp(0.0, 1.0),
         ),
+        ColorSpace::CIEBasedABC { params, .. } if comps.len() >= 3 => {
+            DeviceColor::from_cie_abc(comps[0], comps[1], comps[2], params)
+        }
+        ColorSpace::CIEBasedA { params, .. } => {
+            DeviceColor::from_cie_a(comps.first().copied().unwrap_or(0.0), params)
+        }
+        ColorSpace::CIEBasedDEF { params, .. } if comps.len() >= 3 => {
+            DeviceColor::from_cie_def(comps[0], comps[1], comps[2], params)
+        }
+        ColorSpace::CIEBasedDEFG { params, .. } if comps.len() >= 4 => {
+            DeviceColor::from_cie_defg(comps[0], comps[1], comps[2], comps[3], params)
+        }
         ColorSpace::ICCBased { n, .. } => match n {
             1 => DeviceColor::from_gray(comps.first().copied().unwrap_or(0.0).clamp(0.0, 1.0)),
             3 if comps.len() >= 3 => DeviceColor::from_rgb(
@@ -1180,17 +1193,28 @@ fn pop_color_components(
                 DeviceColor::from_gray(0.0)
             }
         }
-        ColorSpace::CIEBasedABC { .. } | ColorSpace::CIEBasedA { .. } => {
-            // CIE spaces: function output is already in the target space,
-            // treat as RGB for simplicity (most shading uses device spaces)
+        ColorSpace::CIEBasedABC { params, .. } => {
             if comps.len() >= 3 {
-                DeviceColor::from_rgb(
-                    comps[0].clamp(0.0, 1.0),
-                    comps[1].clamp(0.0, 1.0),
-                    comps[2].clamp(0.0, 1.0),
-                )
+                DeviceColor::from_cie_abc(comps[0], comps[1], comps[2], params)
             } else {
-                DeviceColor::from_gray(comps.first().copied().unwrap_or(0.0).clamp(0.0, 1.0))
+                DeviceColor::from_gray(0.0)
+            }
+        }
+        ColorSpace::CIEBasedA { params, .. } => {
+            DeviceColor::from_cie_a(comps.first().copied().unwrap_or(0.0), params)
+        }
+        ColorSpace::CIEBasedDEF { params, .. } => {
+            if comps.len() >= 3 {
+                DeviceColor::from_cie_def(comps[0], comps[1], comps[2], params)
+            } else {
+                DeviceColor::from_gray(0.0)
+            }
+        }
+        ColorSpace::CIEBasedDEFG { params, .. } => {
+            if comps.len() >= 4 {
+                DeviceColor::from_cie_defg(comps[0], comps[1], comps[2], comps[3], params)
+            } else {
+                DeviceColor::from_gray(0.0)
             }
         }
         ColorSpace::ICCBased { n, .. } => match n {

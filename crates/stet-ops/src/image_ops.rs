@@ -142,8 +142,10 @@ fn image_dict_form(ctx: &mut Context) -> Result<(), PsError> {
     } else {
         match ctx.gstate.color_space {
             ColorSpace::DeviceGray | ColorSpace::Indexed { .. } | ColorSpace::CIEBasedA { .. } => 1,
-            ColorSpace::DeviceRGB | ColorSpace::CIEBasedABC { .. } => 3,
-            ColorSpace::DeviceCMYK => 4,
+            ColorSpace::DeviceRGB
+            | ColorSpace::CIEBasedABC { .. }
+            | ColorSpace::CIEBasedDEF { .. } => 3,
+            ColorSpace::DeviceCMYK | ColorSpace::CIEBasedDEFG { .. } => 4,
             ColorSpace::ICCBased { n, .. } => n,
             ColorSpace::Separation {
                 num_alt_components, ..

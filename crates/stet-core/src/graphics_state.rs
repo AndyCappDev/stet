@@ -4,6 +4,8 @@
 
 //! Graphics state: transforms, paths, colors, and rendering parameters.
 
+use std::sync::Arc;
+
 /// Round to 10 decimal places to eliminate floating-point artifacts.
 /// Matches PostForge's `Decimal.quantize(Decimal('0.0000000001'))`.
 #[inline]
@@ -410,23 +412,62 @@ impl DeviceColor {
         ]
     }
 
+    /// Linear interpolation in a pre-evaluated decode table.
+    /// Table has N entries mapping input [0,1] to output values.
+    fn decode_lookup(table: &[f64], value: f64) -> f64 {
+        let n = table.len();
+        if n < 2 {
+            return table.first().copied().unwrap_or(value);
+        }
+        let idx = value * (n - 1) as f64;
+        let i0 = (idx as usize).min(n - 2);
+        let frac = idx - i0 as f64;
+        table[i0] + (table[i0 + 1] - table[i0]) * frac
+    }
+
     /// Convert CIEBasedABC color to sRGB.
     ///
-    /// Pipeline: input → RangeABC clamp → MatrixABC → RangeLMN clamp → MatrixLMN → XYZ → sRGB
-    /// (Decode procedures are not evaluated in this static path.)
+    /// Pipeline: input → RangeABC clamp → DecodeABC → MatrixABC → RangeLMN clamp → DecodeLMN → MatrixLMN → XYZ → sRGB
     pub fn from_cie_abc(a: f64, b: f64, c: f64, params: &CieAbcParams) -> Self {
         // RangeABC clamp
-        let a = a.clamp(params.range_abc[0], params.range_abc[1]);
-        let b = b.clamp(params.range_abc[2], params.range_abc[3]);
-        let c = c.clamp(params.range_abc[4], params.range_abc[5]);
+        let mut a = a.clamp(params.range_abc[0], params.range_abc[1]);
+        let mut b = b.clamp(params.range_abc[2], params.range_abc[3]);
+        let mut c = c.clamp(params.range_abc[4], params.range_abc[5]);
+
+        // DecodeABC (pre-evaluated lookup tables)
+        if let Some(ref tables) = params.decode_abc {
+            // Normalize to [0,1] for table lookup
+            let ra = params.range_abc[1] - params.range_abc[0];
+            let rb = params.range_abc[3] - params.range_abc[2];
+            let rc = params.range_abc[5] - params.range_abc[4];
+            let na = if ra > 0.0 { (a - params.range_abc[0]) / ra } else { 0.0 };
+            let nb = if rb > 0.0 { (b - params.range_abc[2]) / rb } else { 0.0 };
+            let nc = if rc > 0.0 { (c - params.range_abc[4]) / rc } else { 0.0 };
+            a = Self::decode_lookup(&tables[0], na);
+            b = Self::decode_lookup(&tables[1], nb);
+            c = Self::decode_lookup(&tables[2], nc);
+        }
 
         // MatrixABC (column-major 3×3)
         let lmn = Self::apply_matrix_3x3(&params.matrix_abc, &[a, b, c]);
 
         // RangeLMN clamp
-        let l = lmn[0].clamp(params.range_lmn[0], params.range_lmn[1]);
-        let m = lmn[1].clamp(params.range_lmn[2], params.range_lmn[3]);
-        let n = lmn[2].clamp(params.range_lmn[4], params.range_lmn[5]);
+        let mut l = lmn[0].clamp(params.range_lmn[0], params.range_lmn[1]);
+        let mut m = lmn[1].clamp(params.range_lmn[2], params.range_lmn[3]);
+        let mut n = lmn[2].clamp(params.range_lmn[4], params.range_lmn[5]);
+
+        // DecodeLMN (pre-evaluated lookup tables)
+        if let Some(ref tables) = params.decode_lmn {
+            let rl = params.range_lmn[1] - params.range_lmn[0];
+            let rm = params.range_lmn[3] - params.range_lmn[2];
+            let rn = params.range_lmn[5] - params.range_lmn[4];
+            let nl = if rl > 0.0 { (l - params.range_lmn[0]) / rl } else { 0.0 };
+            let nm = if rm > 0.0 { (m - params.range_lmn[2]) / rm } else { 0.0 };
+            let nn = if rn > 0.0 { (n - params.range_lmn[4]) / rn } else { 0.0 };
+            l = Self::decode_lookup(&tables[0], nl);
+            m = Self::decode_lookup(&tables[1], nm);
+            n = Self::decode_lookup(&tables[2], nn);
+        }
 
         // MatrixLMN → XYZ
         let xyz = Self::apply_matrix_3x3(&params.matrix_lmn, &[l, m, n]);
@@ -436,11 +477,17 @@ impl DeviceColor {
 
     /// Convert CIEBasedA color to sRGB.
     ///
-    /// Pipeline: input → RangeA clamp → MatrixA → RangeLMN clamp → MatrixLMN → XYZ → sRGB
-    /// (Decode procedures are not evaluated in this static path.)
+    /// Pipeline: input → RangeA clamp → DecodeA → MatrixA → RangeLMN clamp → DecodeLMN → MatrixLMN → XYZ → sRGB
     pub fn from_cie_a(a: f64, params: &CieAParams) -> Self {
         // RangeA clamp
-        let a = a.clamp(params.range_a[0], params.range_a[1]);
+        let mut a = a.clamp(params.range_a[0], params.range_a[1]);
+
+        // DecodeA (pre-evaluated lookup table)
+        if let Some(ref table) = params.decode_a {
+            let ra = params.range_a[1] - params.range_a[0];
+            let na = if ra > 0.0 { (a - params.range_a[0]) / ra } else { 0.0 };
+            a = Self::decode_lookup(table, na);
+        }
 
         // MatrixA: 3-element vector multiplied by scalar A
         let lmn = [
@@ -450,19 +497,155 @@ impl DeviceColor {
         ];
 
         // RangeLMN clamp
-        let l = lmn[0].clamp(params.range_lmn[0], params.range_lmn[1]);
-        let m = lmn[1].clamp(params.range_lmn[2], params.range_lmn[3]);
-        let n = lmn[2].clamp(params.range_lmn[4], params.range_lmn[5]);
+        let mut l = lmn[0].clamp(params.range_lmn[0], params.range_lmn[1]);
+        let mut m = lmn[1].clamp(params.range_lmn[2], params.range_lmn[3]);
+        let mut n = lmn[2].clamp(params.range_lmn[4], params.range_lmn[5]);
+
+        // DecodeLMN (pre-evaluated lookup tables)
+        if let Some(ref tables) = params.decode_lmn {
+            let rl = params.range_lmn[1] - params.range_lmn[0];
+            let rm = params.range_lmn[3] - params.range_lmn[2];
+            let rn = params.range_lmn[5] - params.range_lmn[4];
+            let nl = if rl > 0.0 { (l - params.range_lmn[0]) / rl } else { 0.0 };
+            let nm = if rm > 0.0 { (m - params.range_lmn[2]) / rm } else { 0.0 };
+            let nn = if rn > 0.0 { (n - params.range_lmn[4]) / rn } else { 0.0 };
+            l = Self::decode_lookup(&tables[0], nl);
+            m = Self::decode_lookup(&tables[1], nm);
+            n = Self::decode_lookup(&tables[2], nn);
+        }
 
         // MatrixLMN → XYZ
         let xyz = Self::apply_matrix_3x3(&params.matrix_lmn, &[l, m, n]);
 
         Self::from_xyz(xyz[0], xyz[1], xyz[2])
     }
+
+    /// Convert CIEBasedDEF color to sRGB via pre-converted trilinear interpolation table.
+    pub fn from_cie_def(d: f64, e: f64, f: f64, params: &CieDefParams) -> Self {
+        let (m1, m2, m3) = (params.m1, params.m2, params.m3);
+        if m1 < 2 || m2 < 2 || m3 < 2 {
+            return Self::from_gray(0.0);
+        }
+
+        // Normalize DEF to [0, m-1] indices using RangeDEF
+        let d_range = params.range_def[1] - params.range_def[0];
+        let e_range = params.range_def[3] - params.range_def[2];
+        let f_range = params.range_def[5] - params.range_def[4];
+
+        let di = if d_range > 0.0 {
+            ((d - params.range_def[0]) / d_range * (m1 - 1) as f64).clamp(0.0, (m1 - 1) as f64)
+        } else {
+            0.0
+        };
+        let ei = if e_range > 0.0 {
+            ((e - params.range_def[2]) / e_range * (m2 - 1) as f64).clamp(0.0, (m2 - 1) as f64)
+        } else {
+            0.0
+        };
+        let fi = if f_range > 0.0 {
+            ((f - params.range_def[4]) / f_range * (m3 - 1) as f64).clamp(0.0, (m3 - 1) as f64)
+        } else {
+            0.0
+        };
+
+        // Trilinear interpolation in ABC space
+        let di0 = (di as usize).min(m1 - 2);
+        let ei0 = (ei as usize).min(m2 - 2);
+        let fi0 = (fi as usize).min(m3 - 2);
+        let di1 = di0 + 1;
+        let ei1 = ei0 + 1;
+        let fi1 = fi0 + 1;
+        let dd = di - di0 as f64;
+        let de = ei - ei0 as f64;
+        let df = fi - fi0 as f64;
+
+        let stride_e = m3;
+        let stride_d = m2 * m3;
+
+        let mut abc = [0.0f64; 3];
+        for (ch, table) in [&params.a_table, &params.b_table, &params.c_table]
+            .iter()
+            .enumerate()
+        {
+            let c000 = table[di0 * stride_d + ei0 * stride_e + fi0];
+            let c001 = table[di0 * stride_d + ei0 * stride_e + fi1];
+            let c010 = table[di0 * stride_d + ei1 * stride_e + fi0];
+            let c011 = table[di0 * stride_d + ei1 * stride_e + fi1];
+            let c100 = table[di1 * stride_d + ei0 * stride_e + fi0];
+            let c101 = table[di1 * stride_d + ei0 * stride_e + fi1];
+            let c110 = table[di1 * stride_d + ei1 * stride_e + fi0];
+            let c111 = table[di1 * stride_d + ei1 * stride_e + fi1];
+
+            let c00 = c000 * (1.0 - df) + c001 * df;
+            let c01 = c010 * (1.0 - df) + c011 * df;
+            let c10 = c100 * (1.0 - df) + c101 * df;
+            let c11 = c110 * (1.0 - df) + c111 * df;
+
+            let c0 = c00 * (1.0 - de) + c01 * de;
+            let c1 = c10 * (1.0 - de) + c11 * de;
+
+            abc[ch] = c0 * (1.0 - dd) + c1 * dd;
+        }
+
+        // Convert interpolated ABC through the CIE pipeline
+        Self::from_cie_abc(abc[0], abc[1], abc[2], &params.abc_params)
+    }
+
+    /// Convert CIEBasedDEFG color to sRGB via pre-converted nearest-neighbor 4D table.
+    pub fn from_cie_defg(d: f64, e: f64, f: f64, g: f64, params: &CieDefgParams) -> Self {
+        let (m1, m2, m3, m4) = (params.m1, params.m2, params.m3, params.m4);
+        if m1 == 0 || m2 == 0 || m3 == 0 || m4 == 0 {
+            return Self::from_gray(0.0);
+        }
+
+        // Normalize DEFG to [0, m-1] and round to nearest
+        let d_range = params.range_defg[1] - params.range_defg[0];
+        let e_range = params.range_defg[3] - params.range_defg[2];
+        let f_range = params.range_defg[5] - params.range_defg[4];
+        let g_range = params.range_defg[7] - params.range_defg[6];
+
+        let di = if d_range > 0.0 {
+            ((d - params.range_defg[0]) / d_range * (m1 - 1) as f64 + 0.5) as usize
+        } else {
+            0
+        }
+        .min(m1 - 1);
+        let ei = if e_range > 0.0 {
+            ((e - params.range_defg[2]) / e_range * (m2 - 1) as f64 + 0.5) as usize
+        } else {
+            0
+        }
+        .min(m2 - 1);
+        let fi = if f_range > 0.0 {
+            ((f - params.range_defg[4]) / f_range * (m3 - 1) as f64 + 0.5) as usize
+        } else {
+            0
+        }
+        .min(m3 - 1);
+        let gi = if g_range > 0.0 {
+            ((g - params.range_defg[6]) / g_range * (m4 - 1) as f64 + 0.5) as usize
+        } else {
+            0
+        }
+        .min(m4 - 1);
+
+        let idx = di * m2 * m3 * m4 + ei * m3 * m4 + fi * m4 + gi;
+        if idx >= params.a_table.len() {
+            return Self::from_gray(0.0);
+        }
+
+        // Look up ABC values and convert through CIE pipeline
+        Self::from_cie_abc(
+            params.a_table[idx],
+            params.b_table[idx],
+            params.c_table[idx],
+            &params.abc_params,
+        )
+    }
 }
 
 /// Color space identifier.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub enum ColorSpace {
     DeviceGray,
     DeviceRGB,
@@ -475,10 +658,22 @@ pub enum ColorSpace {
     },
     /// CIE-based ABC color space (3 components): `[/CIEBasedABC dict]`.
     CIEBasedABC {
+        params: Arc<CieAbcParams>,
         dict_entity: crate::object::EntityId,
     },
     /// CIE-based A color space (1 component): `[/CIEBasedA dict]`.
     CIEBasedA {
+        params: Arc<CieAParams>,
+        dict_entity: crate::object::EntityId,
+    },
+    /// CIE-based DEF color space (3 components → 3D table → ABC → sRGB).
+    CIEBasedDEF {
+        params: Arc<CieDefParams>,
+        dict_entity: crate::object::EntityId,
+    },
+    /// CIE-based DEFG color space (4 components → 4D table → ABC → sRGB).
+    CIEBasedDEFG {
+        params: Arc<CieDefgParams>,
         dict_entity: crate::object::EntityId,
     },
     /// ICC-based color space: `[/ICCBased dict]` where dict has /N components.
@@ -504,12 +699,104 @@ pub enum ColorSpace {
     },
 }
 
+impl PartialEq for ColorSpace {
+    fn eq(&self, other: &Self) -> bool {
+        use ColorSpace::*;
+        match (self, other) {
+            (DeviceGray, DeviceGray) | (DeviceRGB, DeviceRGB) | (DeviceCMYK, DeviceCMYK) => true,
+            (
+                Indexed {
+                    base: b1,
+                    hival: h1,
+                    lookup: l1,
+                },
+                Indexed {
+                    base: b2,
+                    hival: h2,
+                    lookup: l2,
+                },
+            ) => b1 == b2 && h1 == h2 && l1 == l2,
+            (
+                CIEBasedABC {
+                    dict_entity: d1, ..
+                },
+                CIEBasedABC {
+                    dict_entity: d2, ..
+                },
+            ) => d1 == d2,
+            (
+                CIEBasedA {
+                    dict_entity: d1, ..
+                },
+                CIEBasedA {
+                    dict_entity: d2, ..
+                },
+            ) => d1 == d2,
+            (
+                CIEBasedDEF {
+                    dict_entity: d1, ..
+                },
+                CIEBasedDEF {
+                    dict_entity: d2, ..
+                },
+            ) => d1 == d2,
+            (
+                CIEBasedDEFG {
+                    dict_entity: d1, ..
+                },
+                CIEBasedDEFG {
+                    dict_entity: d2, ..
+                },
+            ) => d1 == d2,
+            (
+                ICCBased {
+                    dict_entity: d1,
+                    n: n1,
+                },
+                ICCBased {
+                    dict_entity: d2,
+                    n: n2,
+                },
+            ) => d1 == d2 && n1 == n2,
+            (
+                Separation {
+                    alt_space: a1,
+                    tint_transform: t1,
+                    num_alt_components: n1,
+                },
+                Separation {
+                    alt_space: a2,
+                    tint_transform: t2,
+                    num_alt_components: n2,
+                },
+            ) => a1 == a2 && t1 == t2 && n1 == n2,
+            (
+                DeviceN {
+                    num_colorants: nc1,
+                    alt_space: a1,
+                    tint_transform: t1,
+                    num_alt_components: n1,
+                },
+                DeviceN {
+                    num_colorants: nc2,
+                    alt_space: a2,
+                    tint_transform: t2,
+                    num_alt_components: n2,
+                },
+            ) => nc1 == nc2 && a1 == a2 && t1 == t2 && n1 == n2,
+            _ => false,
+        }
+    }
+}
+
 /// Extracted parameters for CIEBasedABC color conversion.
 #[derive(Clone, Debug)]
 pub struct CieAbcParams {
     pub range_abc: [f64; 6],  // [min_a, max_a, min_b, max_b, min_c, max_c]
+    pub decode_abc: Option<[Vec<f64>; 3]>, // 256-point pre-evaluated tables
     pub matrix_abc: [f64; 9], // Column-major 3×3 (default identity)
     pub range_lmn: [f64; 6],  // [min_l, max_l, min_m, max_m, min_n, max_n]
+    pub decode_lmn: Option<[Vec<f64>; 3]>, // 256-point pre-evaluated tables
     pub matrix_lmn: [f64; 9], // Column-major 3×3 (default identity)
 }
 
@@ -517,8 +804,10 @@ impl Default for CieAbcParams {
     fn default() -> Self {
         Self {
             range_abc: [0.0, 1.0, 0.0, 1.0, 0.0, 1.0],
+            decode_abc: None,
             matrix_abc: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
             range_lmn: [0.0, 1.0, 0.0, 1.0, 0.0, 1.0],
+            decode_lmn: None,
             matrix_lmn: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
         }
     }
@@ -528,8 +817,10 @@ impl Default for CieAbcParams {
 #[derive(Clone, Debug)]
 pub struct CieAParams {
     pub range_a: [f64; 2],    // [min, max]
+    pub decode_a: Option<Vec<f64>>, // 256-point pre-evaluated table
     pub matrix_a: [f64; 3],   // 3-element vector (default [1,1,1])
     pub range_lmn: [f64; 6],  // [min_l, max_l, min_m, max_m, min_n, max_n]
+    pub decode_lmn: Option<[Vec<f64>; 3]>, // 256-point pre-evaluated tables
     pub matrix_lmn: [f64; 9], // Column-major 3×3 (default identity)
 }
 
@@ -537,11 +828,40 @@ impl Default for CieAParams {
     fn default() -> Self {
         Self {
             range_a: [0.0, 1.0],
+            decode_a: None,
             matrix_a: [1.0, 1.0, 1.0],
             range_lmn: [0.0, 1.0, 0.0, 1.0, 0.0, 1.0],
+            decode_lmn: None,
             matrix_lmn: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
         }
     }
+}
+
+/// Pre-converted parameters for CIEBasedDEF color space (3D table → RGB).
+#[derive(Clone, Debug)]
+pub struct CieDefParams {
+    pub range_def: [f64; 6], // [min_d, max_d, min_e, max_e, min_f, max_f]
+    pub m1: usize,           // table dimension 1
+    pub m2: usize,           // table dimension 2
+    pub m3: usize,           // table dimension 3
+    pub a_table: Vec<f64>,   // ABC-space A values (m1*m2*m3)
+    pub b_table: Vec<f64>,   // ABC-space B values (m1*m2*m3)
+    pub c_table: Vec<f64>,   // ABC-space C values (m1*m2*m3)
+    pub abc_params: CieAbcParams, // CIE ABC pipeline params (with pre-evaluated decode tables)
+}
+
+/// Parameters for CIEBasedDEFG color space (4D table → ABC → CIE pipeline).
+#[derive(Clone, Debug)]
+pub struct CieDefgParams {
+    pub range_defg: [f64; 8], // [min_d, max_d, min_e, max_e, min_f, max_f, min_g, max_g]
+    pub m1: usize,
+    pub m2: usize,
+    pub m3: usize,
+    pub m4: usize,
+    pub a_table: Vec<f64>, // ABC-space A values (m1*m2*m3*m4)
+    pub b_table: Vec<f64>, // ABC-space B values (m1*m2*m3*m4)
+    pub c_table: Vec<f64>, // ABC-space C values (m1*m2*m3*m4)
+    pub abc_params: CieAbcParams, // CIE ABC pipeline params
 }
 
 /// Dash pattern for stroked paths.

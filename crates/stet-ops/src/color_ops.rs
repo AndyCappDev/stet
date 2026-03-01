@@ -6,10 +6,14 @@
 //! setcmykcolor, currentcmykcolor, sethsbcolor, currenthsbcolor,
 //! setcolorspace, currentcolorspace, setcolor, currentcolor.
 
+use std::sync::Arc;
+
 use stet_core::context::Context;
 use stet_core::dict::DictKey;
 use stet_core::error::PsError;
-use stet_core::graphics_state::{CieAParams, CieAbcParams, ColorSpace, DeviceColor};
+use stet_core::graphics_state::{
+    CieAParams, CieAbcParams, CieDefParams, CieDefgParams, ColorSpace, DeviceColor,
+};
 use stet_core::object::{EntityId, PsObject, PsValue};
 
 /// `setgray`: num → —
@@ -161,11 +165,14 @@ pub fn op_setcolorspace(ctx: &mut Context) -> Result<(), PsError> {
                     b"Indexed" if len >= 4 => parse_indexed_colorspace(ctx, entity, start)?,
                     b"CIEBasedABC" => parse_cie_abc_colorspace(ctx, entity, start, len)?,
                     b"CIEBasedA" => parse_cie_a_colorspace(ctx, entity, start, len)?,
+                    b"CIEBasedDEF" => parse_cie_def_colorspace(ctx, entity, start, len)?,
+                    b"CIEBasedDEFG" => parse_cie_defg_colorspace(ctx, entity, start, len)?,
                     b"ICCBased" => parse_iccbased_colorspace(ctx, entity, start, len)?,
                     b"Separation" if len >= 4 => parse_separation_colorspace(ctx, entity, start)?,
                     b"DeviceN" if len >= 4 => parse_devicen_colorspace(ctx, entity, start)?,
                     _ => return Err(PsError::Undefined),
                 };
+                let cs = precompute_cie_decode_tables(ctx, cs)?;
                 ctx.o_stack.pop()?;
                 ctx.gstate.color = default_color_for_space(&cs, ctx);
                 ctx.gstate.color_space = cs;
@@ -197,6 +204,8 @@ pub fn op_currentcolorspace(ctx: &mut Context) -> Result<(), PsError> {
                 ColorSpace::Indexed { .. } => b"Indexed",
                 ColorSpace::CIEBasedABC { .. } => b"CIEBasedABC",
                 ColorSpace::CIEBasedA { .. } => b"CIEBasedA",
+                ColorSpace::CIEBasedDEF { .. } => b"CIEBasedDEF",
+                ColorSpace::CIEBasedDEFG { .. } => b"CIEBasedDEFG",
                 ColorSpace::ICCBased { .. } => b"ICCBased",
                 ColorSpace::Separation { .. } => b"Separation",
                 ColorSpace::DeviceN { .. } => b"DeviceN",
@@ -216,7 +225,7 @@ pub fn op_currentcolorspace(ctx: &mut Context) -> Result<(), PsError> {
             let arr = crate::vm_ops::make_array_obj(ctx, entity, 4);
             ctx.o_stack.push(arr)?;
         }
-        ColorSpace::CIEBasedABC { dict_entity } => {
+        ColorSpace::CIEBasedABC { dict_entity, .. } => {
             let dict_entity = *dict_entity;
             let name_id = ctx.names.intern(b"CIEBasedABC");
             let name_obj = PsObject::name_lit(name_id);
@@ -226,9 +235,29 @@ pub fn op_currentcolorspace(ctx: &mut Context) -> Result<(), PsError> {
             let arr = crate::vm_ops::make_array_obj(ctx, entity, 2);
             ctx.o_stack.push(arr)?;
         }
-        ColorSpace::CIEBasedA { dict_entity } => {
+        ColorSpace::CIEBasedA { dict_entity, .. } => {
             let dict_entity = *dict_entity;
             let name_id = ctx.names.intern(b"CIEBasedA");
+            let name_obj = PsObject::name_lit(name_id);
+            let dict_obj = crate::vm_ops::make_dict_obj(ctx, dict_entity);
+            let items = [name_obj, dict_obj];
+            let entity = crate::vm_ops::alloc_array_from(ctx, &items);
+            let arr = crate::vm_ops::make_array_obj(ctx, entity, 2);
+            ctx.o_stack.push(arr)?;
+        }
+        ColorSpace::CIEBasedDEF { dict_entity, .. } => {
+            let dict_entity = *dict_entity;
+            let name_id = ctx.names.intern(b"CIEBasedDEF");
+            let name_obj = PsObject::name_lit(name_id);
+            let dict_obj = crate::vm_ops::make_dict_obj(ctx, dict_entity);
+            let items = [name_obj, dict_obj];
+            let entity = crate::vm_ops::alloc_array_from(ctx, &items);
+            let arr = crate::vm_ops::make_array_obj(ctx, entity, 2);
+            ctx.o_stack.push(arr)?;
+        }
+        ColorSpace::CIEBasedDEFG { dict_entity, .. } => {
+            let dict_entity = *dict_entity;
+            let name_id = ctx.names.intern(b"CIEBasedDEFG");
             let name_obj = PsObject::name_lit(name_id);
             let dict_obj = crate::vm_ops::make_dict_obj(ctx, dict_entity);
             let items = [name_obj, dict_obj];
@@ -272,8 +301,10 @@ pub fn op_setcolor(ctx: &mut Context) -> Result<(), PsError> {
         ColorSpace::DeviceRGB => op_setrgbcolor(ctx),
         ColorSpace::DeviceCMYK => op_setcmykcolor(ctx),
         ColorSpace::Indexed { .. } => set_indexed_color(ctx),
-        ColorSpace::CIEBasedABC { dict_entity } => set_cie_abc_color(ctx, dict_entity),
-        ColorSpace::CIEBasedA { dict_entity } => set_cie_a_color(ctx, dict_entity),
+        ColorSpace::CIEBasedABC { params, .. } => set_cie_abc_color(ctx, &params),
+        ColorSpace::CIEBasedA { params, .. } => set_cie_a_color(ctx, &params),
+        ColorSpace::CIEBasedDEF { params, .. } => set_cie_def_color(ctx, &params),
+        ColorSpace::CIEBasedDEFG { params, .. } => set_cie_defg_color(ctx, &params),
         ColorSpace::ICCBased { n, .. } => match n {
             1 => op_setgray(ctx),
             3 => op_setrgbcolor(ctx),
@@ -374,7 +405,10 @@ pub fn op_currentcolor(ctx: &mut Context) -> Result<(), PsError> {
                 }
             }
         }
-        ColorSpace::CIEBasedABC { .. } | ColorSpace::CIEBasedA { .. } => {
+        ColorSpace::CIEBasedABC { .. }
+        | ColorSpace::CIEBasedA { .. }
+        | ColorSpace::CIEBasedDEF { .. }
+        | ColorSpace::CIEBasedDEFG { .. } => {
             // CIE spaces store resolved RGB color
             ctx.o_stack.push(PsObject::real(ctx.gstate.color.r))?;
             ctx.o_stack.push(PsObject::real(ctx.gstate.color.g))?;
@@ -512,18 +546,16 @@ fn set_indexed_color(ctx: &mut Context) -> Result<(), PsError> {
 }
 
 /// Return the default (initial) color for a color space per PLRM.
-fn default_color_for_space(cs: &ColorSpace, ctx: &Context) -> DeviceColor {
+fn default_color_for_space(cs: &ColorSpace, _ctx: &Context) -> DeviceColor {
     match cs {
         ColorSpace::DeviceGray => DeviceColor::from_gray(0.0),
         ColorSpace::DeviceRGB => DeviceColor::from_rgb(0.0, 0.0, 0.0),
         ColorSpace::DeviceCMYK => DeviceColor::from_cmyk(0.0, 0.0, 0.0, 1.0),
-        ColorSpace::CIEBasedABC { dict_entity } => {
-            let params = extract_cie_abc_params(ctx, *dict_entity);
-            DeviceColor::from_cie_abc(0.0, 0.0, 0.0, &params)
-        }
-        ColorSpace::CIEBasedA { dict_entity } => {
-            let params = extract_cie_a_params(ctx, *dict_entity);
-            DeviceColor::from_cie_a(0.0, &params)
+        ColorSpace::CIEBasedABC { params, .. } => DeviceColor::from_cie_abc(0.0, 0.0, 0.0, params),
+        ColorSpace::CIEBasedA { params, .. } => DeviceColor::from_cie_a(0.0, params),
+        ColorSpace::CIEBasedDEF { params, .. } => DeviceColor::from_cie_def(0.0, 0.0, 0.0, params),
+        ColorSpace::CIEBasedDEFG { params, .. } => {
+            DeviceColor::from_cie_defg(0.0, 0.0, 0.0, 0.0, params)
         }
         ColorSpace::ICCBased { n, .. } => match n {
             1 => DeviceColor::from_gray(0.0),
@@ -596,22 +628,14 @@ pub fn resolve_color_space_from_obj(
                     b"Indexed" if len >= 4 => parse_indexed_colorspace(ctx, entity, start)?,
                     b"CIEBasedABC" => parse_cie_abc_colorspace(ctx, entity, start, len)?,
                     b"CIEBasedA" => parse_cie_a_colorspace(ctx, entity, start, len)?,
+                    b"CIEBasedDEF" => parse_cie_def_colorspace(ctx, entity, start, len)?,
+                    b"CIEBasedDEFG" => parse_cie_defg_colorspace(ctx, entity, start, len)?,
                     b"ICCBased" => parse_iccbased_colorspace(ctx, entity, start, len)?,
                     b"Separation" if len >= 4 => parse_separation_colorspace(ctx, entity, start)?,
                     b"DeviceN" if len >= 4 => parse_devicen_colorspace(ctx, entity, start)?,
                     _ => return Err(PsError::Undefined),
                 };
-                let n_comps = match &cs {
-                    ColorSpace::DeviceGray => 1,
-                    ColorSpace::DeviceRGB => 3,
-                    ColorSpace::DeviceCMYK => 4,
-                    ColorSpace::CIEBasedABC { .. } => 3,
-                    ColorSpace::CIEBasedA { .. } => 1,
-                    ColorSpace::ICCBased { n, .. } => *n as usize,
-                    ColorSpace::Indexed { .. } => 1,
-                    ColorSpace::Separation { .. } => 1,
-                    ColorSpace::DeviceN { num_colorants, .. } => *num_colorants as usize,
-                };
+                let n_comps = color_space_components(&cs);
                 Ok((cs, n_comps))
             } else {
                 Err(PsError::TypeCheck)
@@ -707,7 +731,11 @@ fn parse_cie_abc_colorspace(
     if !has_white_point(ctx, dict_entity) {
         return Err(PsError::RangeCheck);
     }
-    Ok(ColorSpace::CIEBasedABC { dict_entity })
+    let params = extract_cie_abc_params(ctx, dict_entity);
+    Ok(ColorSpace::CIEBasedABC {
+        params: Arc::new(params),
+        dict_entity,
+    })
 }
 
 /// Parse `[/CIEBasedA dict]` from an array.
@@ -729,7 +757,96 @@ fn parse_cie_a_colorspace(
     if !has_white_point(ctx, dict_entity) {
         return Err(PsError::RangeCheck);
     }
-    Ok(ColorSpace::CIEBasedA { dict_entity })
+    let params = extract_cie_a_params(ctx, dict_entity);
+    Ok(ColorSpace::CIEBasedA {
+        params: Arc::new(params),
+        dict_entity,
+    })
+}
+
+/// Parse `[/CIEBasedDEF dict]` from an array.
+fn parse_cie_def_colorspace(
+    ctx: &Context,
+    entity: EntityId,
+    start: u32,
+    len: u32,
+) -> Result<ColorSpace, PsError> {
+    if len != 2 {
+        return Err(PsError::RangeCheck);
+    }
+    let dict_obj = ctx.arrays.get_element(entity, start + 1);
+    let dict_entity = match dict_obj.value {
+        PsValue::Dict(e) => e,
+        _ => return Err(PsError::TypeCheck),
+    };
+    if !has_white_point(ctx, dict_entity) {
+        return Err(PsError::RangeCheck);
+    }
+    // Start with empty params; precompute_cie_decode_tables will fill the table
+    let range_def_vec = get_cie_float_array(ctx, dict_entity, b"RangeDEF", &[0.0, 1.0, 0.0, 1.0, 0.0, 1.0]);
+    let mut range_def = [0.0, 1.0, 0.0, 1.0, 0.0, 1.0];
+    if range_def_vec.len() >= 6 {
+        range_def.copy_from_slice(&range_def_vec[..6]);
+    }
+    let params = CieDefParams {
+        range_def,
+        m1: 0,
+        m2: 0,
+        m3: 0,
+        a_table: Vec::new(),
+        b_table: Vec::new(),
+        c_table: Vec::new(),
+        abc_params: CieAbcParams::default(),
+    };
+    Ok(ColorSpace::CIEBasedDEF {
+        params: Arc::new(params),
+        dict_entity,
+    })
+}
+
+/// Parse `[/CIEBasedDEFG dict]` from an array.
+fn parse_cie_defg_colorspace(
+    ctx: &Context,
+    entity: EntityId,
+    start: u32,
+    len: u32,
+) -> Result<ColorSpace, PsError> {
+    if len != 2 {
+        return Err(PsError::RangeCheck);
+    }
+    let dict_obj = ctx.arrays.get_element(entity, start + 1);
+    let dict_entity = match dict_obj.value {
+        PsValue::Dict(e) => e,
+        _ => return Err(PsError::TypeCheck),
+    };
+    if !has_white_point(ctx, dict_entity) {
+        return Err(PsError::RangeCheck);
+    }
+    let range_defg_vec = get_cie_float_array(
+        ctx,
+        dict_entity,
+        b"RangeDEFG",
+        &[0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0],
+    );
+    let mut range_defg = [0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0];
+    if range_defg_vec.len() >= 8 {
+        range_defg.copy_from_slice(&range_defg_vec[..8]);
+    }
+    let params = CieDefgParams {
+        range_defg,
+        m1: 0,
+        m2: 0,
+        m3: 0,
+        m4: 0,
+        a_table: Vec::new(),
+        b_table: Vec::new(),
+        c_table: Vec::new(),
+        abc_params: CieAbcParams::default(),
+    };
+    Ok(ColorSpace::CIEBasedDEFG {
+        params: Arc::new(params),
+        dict_entity,
+    })
 }
 
 /// Parse `[/ICCBased dict]` from an array.
@@ -910,7 +1027,7 @@ fn extract_cie_a_params(ctx: &Context, dict_entity: EntityId) -> CieAParams {
 }
 
 /// Set color in CIEBasedABC color space: c1 c2 c3 → —
-fn set_cie_abc_color(ctx: &mut Context, dict_entity: EntityId) -> Result<(), PsError> {
+fn set_cie_abc_color(ctx: &mut Context, params: &Arc<CieAbcParams>) -> Result<(), PsError> {
     if ctx.o_stack.len() < 3 {
         return Err(PsError::StackUnderflow);
     }
@@ -921,26 +1038,475 @@ fn set_cie_abc_color(ctx: &mut Context, dict_entity: EntityId) -> Result<(), PsE
     let b = b_obj.as_f64().ok_or(PsError::TypeCheck)?;
     let c = c_obj.as_f64().ok_or(PsError::TypeCheck)?;
 
-    let params = extract_cie_abc_params(ctx, dict_entity);
     ctx.o_stack.pop()?;
     ctx.o_stack.pop()?;
     ctx.o_stack.pop()?;
-    ctx.gstate.color = DeviceColor::from_cie_abc(a, b, c, &params);
+    ctx.gstate.color = DeviceColor::from_cie_abc(a, b, c, params);
     Ok(())
 }
 
 /// Set color in CIEBasedA color space: comp → —
-fn set_cie_a_color(ctx: &mut Context, dict_entity: EntityId) -> Result<(), PsError> {
+fn set_cie_a_color(ctx: &mut Context, params: &Arc<CieAParams>) -> Result<(), PsError> {
     if ctx.o_stack.is_empty() {
         return Err(PsError::StackUnderflow);
     }
     let a_obj = ctx.o_stack.peek(0)?;
     let a = a_obj.as_f64().ok_or(PsError::TypeCheck)?;
 
-    let params = extract_cie_a_params(ctx, dict_entity);
     ctx.o_stack.pop()?;
-    ctx.gstate.color = DeviceColor::from_cie_a(a, &params);
+    ctx.gstate.color = DeviceColor::from_cie_a(a, params);
     Ok(())
+}
+
+/// Set color in CIEBasedDEF color space: d e f → —
+fn set_cie_def_color(ctx: &mut Context, params: &Arc<CieDefParams>) -> Result<(), PsError> {
+    if ctx.o_stack.len() < 3 {
+        return Err(PsError::StackUnderflow);
+    }
+    let f_obj = ctx.o_stack.peek(0)?;
+    let e_obj = ctx.o_stack.peek(1)?;
+    let d_obj = ctx.o_stack.peek(2)?;
+    let d = d_obj.as_f64().ok_or(PsError::TypeCheck)?;
+    let e = e_obj.as_f64().ok_or(PsError::TypeCheck)?;
+    let f = f_obj.as_f64().ok_or(PsError::TypeCheck)?;
+
+    ctx.o_stack.pop()?;
+    ctx.o_stack.pop()?;
+    ctx.o_stack.pop()?;
+    ctx.gstate.color = DeviceColor::from_cie_def(d, e, f, params);
+    Ok(())
+}
+
+/// Set color in CIEBasedDEFG color space: d e f g → —
+fn set_cie_defg_color(ctx: &mut Context, params: &Arc<CieDefgParams>) -> Result<(), PsError> {
+    if ctx.o_stack.len() < 4 {
+        return Err(PsError::StackUnderflow);
+    }
+    let g_obj = ctx.o_stack.peek(0)?;
+    let f_obj = ctx.o_stack.peek(1)?;
+    let e_obj = ctx.o_stack.peek(2)?;
+    let d_obj = ctx.o_stack.peek(3)?;
+    let d = d_obj.as_f64().ok_or(PsError::TypeCheck)?;
+    let e = e_obj.as_f64().ok_or(PsError::TypeCheck)?;
+    let f = f_obj.as_f64().ok_or(PsError::TypeCheck)?;
+    let g = g_obj.as_f64().ok_or(PsError::TypeCheck)?;
+
+    ctx.o_stack.pop()?;
+    ctx.o_stack.pop()?;
+    ctx.o_stack.pop()?;
+    ctx.o_stack.pop()?;
+    ctx.gstate.color = DeviceColor::from_cie_defg(d, e, f, g, params);
+    Ok(())
+}
+
+/// Get the number of color components for a color space.
+pub fn color_space_components(cs: &ColorSpace) -> usize {
+    match cs {
+        ColorSpace::DeviceGray => 1,
+        ColorSpace::DeviceRGB => 3,
+        ColorSpace::DeviceCMYK => 4,
+        ColorSpace::CIEBasedABC { .. } => 3,
+        ColorSpace::CIEBasedA { .. } => 1,
+        ColorSpace::CIEBasedDEF { .. } => 3,
+        ColorSpace::CIEBasedDEFG { .. } => 4,
+        ColorSpace::ICCBased { n, .. } => *n as usize,
+        ColorSpace::Indexed { .. } => 1,
+        ColorSpace::Separation { .. } => 1,
+        ColorSpace::DeviceN { num_colorants, .. } => *num_colorants as usize,
+    }
+}
+
+/// Pre-evaluate CIE decode procedures and DEF/DEFG lookup tables.
+///
+/// For CIEBasedABC/A: evaluates DecodeABC, DecodeLMN, DecodeA procedures at 256
+/// sample points via exec_sync, storing the results as lookup tables.
+/// For CIEBasedDEF/DEFG: pre-converts the entire 3D/4D table through the CIE
+/// pipeline to sRGB for fast interpolation at render time.
+pub fn precompute_cie_decode_tables(
+    ctx: &mut Context,
+    cs: ColorSpace,
+) -> Result<ColorSpace, PsError> {
+    match cs {
+        ColorSpace::CIEBasedABC {
+            params,
+            dict_entity,
+        } => {
+            let mut p = (*params).clone();
+
+            // Pre-evaluate DecodeABC
+            if let Some(decode_abc_procs) = get_cie_decode_procs(ctx, dict_entity, b"DecodeABC", 3)
+            {
+                let mut tables: [Vec<f64>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+                for (ch, proc) in decode_abc_procs.iter().enumerate() {
+                    tables[ch] = eval_decode_table(ctx, *proc, 256)?;
+                }
+                p.decode_abc = Some(tables);
+            }
+
+            // Pre-evaluate DecodeLMN
+            if let Some(decode_lmn_procs) = get_cie_decode_procs(ctx, dict_entity, b"DecodeLMN", 3)
+            {
+                let mut tables: [Vec<f64>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+                for (ch, proc) in decode_lmn_procs.iter().enumerate() {
+                    tables[ch] = eval_decode_table(ctx, *proc, 256)?;
+                }
+                p.decode_lmn = Some(tables);
+            }
+
+            Ok(ColorSpace::CIEBasedABC {
+                params: Arc::new(p),
+                dict_entity,
+            })
+        }
+        ColorSpace::CIEBasedA {
+            params,
+            dict_entity,
+        } => {
+            let mut p = (*params).clone();
+
+            // Pre-evaluate DecodeA (single procedure, not array)
+            if let Some(decode_a_proc) = get_cie_decode_proc_single(ctx, dict_entity, b"DecodeA") {
+                p.decode_a = Some(eval_decode_table(ctx, decode_a_proc, 256)?);
+            }
+
+            // Pre-evaluate DecodeLMN
+            if let Some(decode_lmn_procs) = get_cie_decode_procs(ctx, dict_entity, b"DecodeLMN", 3)
+            {
+                let mut tables: [Vec<f64>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+                for (ch, proc) in decode_lmn_procs.iter().enumerate() {
+                    tables[ch] = eval_decode_table(ctx, *proc, 256)?;
+                }
+                p.decode_lmn = Some(tables);
+            }
+
+            Ok(ColorSpace::CIEBasedA {
+                params: Arc::new(p),
+                dict_entity,
+            })
+        }
+        ColorSpace::CIEBasedDEF { dict_entity, .. } => {
+            let params = precompute_cie_def_table(ctx, dict_entity)?;
+            Ok(ColorSpace::CIEBasedDEF {
+                params: Arc::new(params),
+                dict_entity,
+            })
+        }
+        ColorSpace::CIEBasedDEFG { dict_entity, .. } => {
+            let params = precompute_cie_defg_table(ctx, dict_entity)?;
+            Ok(ColorSpace::CIEBasedDEFG {
+                params: Arc::new(params),
+                dict_entity,
+            })
+        }
+        // Non-CIE color spaces pass through unchanged
+        other => Ok(other),
+    }
+}
+
+/// Extract an array of decode procedures from a CIE dict entry.
+/// Returns None if the key is not present or not an array of procedures.
+fn get_cie_decode_procs(
+    ctx: &Context,
+    dict_entity: EntityId,
+    key: &[u8],
+    expected: usize,
+) -> Option<Vec<PsObject>> {
+    let name_id = ctx.names.find(key)?;
+    let dk = DictKey::Name(name_id);
+    let obj = ctx.dicts.get(dict_entity, &dk)?;
+    match obj.value {
+        PsValue::Array { entity, start, len } => {
+            if (len as usize) < expected {
+                return None;
+            }
+            let mut procs = Vec::with_capacity(expected);
+            for i in 0..expected as u32 {
+                let elem = ctx.arrays.get_element(entity, start + i);
+                // Each element should be an executable array (procedure)
+                match elem.value {
+                    PsValue::Array { .. } if elem.flags.is_executable() => procs.push(elem),
+                    _ => return None,
+                }
+            }
+            Some(procs)
+        }
+        _ => None,
+    }
+}
+
+/// Extract a single decode procedure from a CIE dict entry (for DecodeA).
+fn get_cie_decode_proc_single(
+    ctx: &Context,
+    dict_entity: EntityId,
+    key: &[u8],
+) -> Option<PsObject> {
+    let name_id = ctx.names.find(key)?;
+    let dk = DictKey::Name(name_id);
+    let obj = ctx.dicts.get(dict_entity, &dk)?;
+    match obj.value {
+        PsValue::Array { .. } if obj.flags.is_executable() => Some(obj),
+        _ => None,
+    }
+}
+
+/// Evaluate a decode procedure at N evenly-spaced sample points in [0,1].
+fn eval_decode_table(
+    ctx: &mut Context,
+    proc: PsObject,
+    n: usize,
+) -> Result<Vec<f64>, PsError> {
+    let mut table = Vec::with_capacity(n);
+    for i in 0..n {
+        let input = i as f64 / (n - 1) as f64;
+        ctx.o_stack.push(PsObject::real(input))?;
+        ctx.exec_sync(proc)?;
+        let result = if !ctx.o_stack.is_empty() {
+            ctx.o_stack.pop()?.as_f64().unwrap_or(input)
+        } else {
+            input
+        };
+        table.push(result);
+    }
+    Ok(table)
+}
+
+/// Pre-convert a CIEBasedDEF 3D lookup table to sRGB.
+fn precompute_cie_def_table(
+    ctx: &mut Context,
+    dict_entity: EntityId,
+) -> Result<CieDefParams, PsError> {
+    // Extract RangeDEF
+    let range_def_vec = get_cie_float_array(ctx, dict_entity, b"RangeDEF", &[0.0, 1.0, 0.0, 1.0, 0.0, 1.0]);
+    let mut range_def = [0.0, 1.0, 0.0, 1.0, 0.0, 1.0];
+    if range_def_vec.len() >= 6 {
+        range_def.copy_from_slice(&range_def_vec[..6]);
+    }
+
+    // Extract Table: [m1 m2 m3 [string1 ... string_m1]]
+    let table_obj = get_dict_obj_by_key(ctx, dict_entity, b"Table");
+    let (m1, m2, m3, strings_entity, strings_start) = match table_obj {
+        Some(obj) => match obj.value {
+            PsValue::Array { entity, start, len } if len >= 4 => {
+                let m1 = ctx.arrays.get_element(entity, start).as_i32().unwrap_or(0) as usize;
+                let m2 = ctx.arrays.get_element(entity, start + 1).as_i32().unwrap_or(0) as usize;
+                let m3 = ctx.arrays.get_element(entity, start + 2).as_i32().unwrap_or(0) as usize;
+                let strings_obj = ctx.arrays.get_element(entity, start + 3);
+                match strings_obj.value {
+                    PsValue::Array {
+                        entity: se,
+                        start: ss,
+                        ..
+                    } => (m1, m2, m3, se, ss),
+                    _ => return Err(PsError::TypeCheck),
+                }
+            }
+            _ => return Err(PsError::TypeCheck),
+        },
+        None => return Err(PsError::Undefined),
+    };
+
+    if m1 == 0 || m2 == 0 || m3 == 0 {
+        return Err(PsError::RangeCheck);
+    }
+
+    // Build CIE ABC params for conversion (with decode tables)
+    let abc_params = extract_cie_abc_params(ctx, dict_entity);
+    // Pre-evaluate DecodeABC and DecodeLMN if present
+    let mut abc_params = abc_params;
+    if let Some(procs) = get_cie_decode_procs(ctx, dict_entity, b"DecodeABC", 3) {
+        let mut tables: [Vec<f64>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+        for (ch, proc) in procs.iter().enumerate() {
+            tables[ch] = eval_decode_table(ctx, *proc, 256)?;
+        }
+        abc_params.decode_abc = Some(tables);
+    }
+    if let Some(procs) = get_cie_decode_procs(ctx, dict_entity, b"DecodeLMN", 3) {
+        let mut tables: [Vec<f64>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+        for (ch, proc) in procs.iter().enumerate() {
+            tables[ch] = eval_decode_table(ctx, *proc, 256)?;
+        }
+        abc_params.decode_lmn = Some(tables);
+    }
+
+    // Extract RangeABC for byte scaling
+    let abc_min = [
+        abc_params.range_abc[0],
+        abc_params.range_abc[2],
+        abc_params.range_abc[4],
+    ];
+    let abc_scale = [
+        (abc_params.range_abc[1] - abc_params.range_abc[0]) / 255.0,
+        (abc_params.range_abc[3] - abc_params.range_abc[2]) / 255.0,
+        (abc_params.range_abc[5] - abc_params.range_abc[4]) / 255.0,
+    ];
+
+    // Extract table ABC values (interpolation done in ABC space, not RGB)
+    let total = m1 * m2 * m3;
+    let mut a_table = vec![0.0f64; total];
+    let mut b_table = vec![0.0f64; total];
+    let mut c_table = vec![0.0f64; total];
+
+    let mut idx = 0;
+    for di in 0..m1 {
+        let string_obj = ctx.arrays.get_element(strings_entity, strings_start + di as u32);
+        let data = match string_obj.value {
+            PsValue::String {
+                entity: se,
+                start: ss,
+                len: sl,
+            } => ctx.strings.get(se, ss, sl).to_vec(),
+            _ => continue,
+        };
+
+        for ei in 0..m2 {
+            for fi in 0..m3 {
+                let offset = (ei * m3 + fi) * 3;
+                if offset + 2 < data.len() {
+                    a_table[idx] = abc_min[0] + data[offset] as f64 * abc_scale[0];
+                    b_table[idx] = abc_min[1] + data[offset + 1] as f64 * abc_scale[1];
+                    c_table[idx] = abc_min[2] + data[offset + 2] as f64 * abc_scale[2];
+                }
+                idx += 1;
+            }
+        }
+    }
+
+    Ok(CieDefParams {
+        range_def,
+        m1,
+        m2,
+        m3,
+        a_table,
+        b_table,
+        c_table,
+        abc_params,
+    })
+}
+
+/// Pre-convert a CIEBasedDEFG 4D lookup table to sRGB.
+fn precompute_cie_defg_table(
+    ctx: &mut Context,
+    dict_entity: EntityId,
+) -> Result<CieDefgParams, PsError> {
+    // Extract RangeDEFG
+    let range_defg_vec = get_cie_float_array(
+        ctx,
+        dict_entity,
+        b"RangeDEFG",
+        &[0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0],
+    );
+    let mut range_defg = [0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0];
+    if range_defg_vec.len() >= 8 {
+        range_defg.copy_from_slice(&range_defg_vec[..8]);
+    }
+
+    // Extract Table: [m1 m2 m3 m4 [string1 ... string_m1]]
+    let table_obj = get_dict_obj_by_key(ctx, dict_entity, b"Table");
+    let (m1, m2, m3, m4, strings_entity, strings_start) = match table_obj {
+        Some(obj) => match obj.value {
+            PsValue::Array { entity, start, len } if len >= 5 => {
+                let m1 = ctx.arrays.get_element(entity, start).as_i32().unwrap_or(0) as usize;
+                let m2 = ctx.arrays.get_element(entity, start + 1).as_i32().unwrap_or(0) as usize;
+                let m3 = ctx.arrays.get_element(entity, start + 2).as_i32().unwrap_or(0) as usize;
+                let m4 = ctx.arrays.get_element(entity, start + 3).as_i32().unwrap_or(0) as usize;
+                let strings_obj = ctx.arrays.get_element(entity, start + 4);
+                match strings_obj.value {
+                    PsValue::Array {
+                        entity: se,
+                        start: ss,
+                        ..
+                    } => (m1, m2, m3, m4, se, ss),
+                    _ => return Err(PsError::TypeCheck),
+                }
+            }
+            _ => return Err(PsError::TypeCheck),
+        },
+        None => return Err(PsError::Undefined),
+    };
+
+    if m1 == 0 || m2 == 0 || m3 == 0 || m4 == 0 {
+        return Err(PsError::RangeCheck);
+    }
+
+    // Build CIE ABC params for conversion (with decode tables)
+    let mut abc_params = extract_cie_abc_params(ctx, dict_entity);
+    if let Some(procs) = get_cie_decode_procs(ctx, dict_entity, b"DecodeABC", 3) {
+        let mut tables: [Vec<f64>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+        for (ch, proc) in procs.iter().enumerate() {
+            tables[ch] = eval_decode_table(ctx, *proc, 256)?;
+        }
+        abc_params.decode_abc = Some(tables);
+    }
+    if let Some(procs) = get_cie_decode_procs(ctx, dict_entity, b"DecodeLMN", 3) {
+        let mut tables: [Vec<f64>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+        for (ch, proc) in procs.iter().enumerate() {
+            tables[ch] = eval_decode_table(ctx, *proc, 256)?;
+        }
+        abc_params.decode_lmn = Some(tables);
+    }
+
+    let abc_min = [
+        abc_params.range_abc[0],
+        abc_params.range_abc[2],
+        abc_params.range_abc[4],
+    ];
+    let abc_scale = [
+        (abc_params.range_abc[1] - abc_params.range_abc[0]) / 255.0,
+        (abc_params.range_abc[3] - abc_params.range_abc[2]) / 255.0,
+        (abc_params.range_abc[5] - abc_params.range_abc[4]) / 255.0,
+    ];
+
+    // Extract table ABC values (conversion done at lookup time, not pre-converted)
+    let total = m1 * m2 * m3 * m4;
+    let mut a_table = vec![0.0f64; total];
+    let mut b_table = vec![0.0f64; total];
+    let mut c_table = vec![0.0f64; total];
+
+    let mut idx = 0;
+    for di in 0..m1 {
+        let string_obj = ctx.arrays.get_element(strings_entity, strings_start + di as u32);
+        let data = match string_obj.value {
+            PsValue::String {
+                entity: se,
+                start: ss,
+                len: sl,
+            } => ctx.strings.get(se, ss, sl).to_vec(),
+            _ => continue,
+        };
+
+        for ei in 0..m2 {
+            for fi in 0..m3 {
+                for gi in 0..m4 {
+                    let offset = (ei * m3 * m4 + fi * m4 + gi) * 3;
+                    if offset + 2 < data.len() {
+                        a_table[idx] = abc_min[0] + data[offset] as f64 * abc_scale[0];
+                        b_table[idx] = abc_min[1] + data[offset + 1] as f64 * abc_scale[1];
+                        c_table[idx] = abc_min[2] + data[offset + 2] as f64 * abc_scale[2];
+                    }
+                    idx += 1;
+                }
+            }
+        }
+    }
+
+    Ok(CieDefgParams {
+        range_defg,
+        m1,
+        m2,
+        m3,
+        m4,
+        a_table,
+        b_table,
+        c_table,
+        abc_params,
+    })
+}
+
+/// Get a dict entry as a PsObject.
+fn get_dict_obj_by_key(ctx: &Context, dict_entity: EntityId, key: &[u8]) -> Option<PsObject> {
+    let name_id = ctx.names.find(key)?;
+    let dk = DictKey::Name(name_id);
+    ctx.dicts.get(dict_entity, &dk)
 }
 
 #[cfg(test)]
