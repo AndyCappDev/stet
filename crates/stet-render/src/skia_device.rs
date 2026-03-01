@@ -786,6 +786,186 @@ fn offset_transform(t: Transform, y_offset: f32) -> Transform {
     Transform::from_row(t.sx, t.ky, t.kx, t.sy, t.tx, t.ty - y_offset)
 }
 
+/// Lanczos3 windowed-sinc kernel.
+fn lanczos3(x: f64) -> f64 {
+    if x.abs() < 1e-8 {
+        1.0
+    } else if x.abs() >= 3.0 {
+        0.0
+    } else {
+        let px = std::f64::consts::PI * x;
+        (px.sin() / px) * ((px / 3.0).sin() / (px / 3.0))
+    }
+}
+
+/// Lanczos3 separable resample (two-pass: horizontal then vertical).
+fn lanczos3_resample(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
+    // Pass 1: horizontal (sw → dw for each of sh rows), into f64 intermediate.
+    let ratio_x = sw as f64 / dw as f64;
+    let radius_x = 3.0 * ratio_x.max(1.0);
+    let inv_ratio_x = ratio_x.max(1.0);
+    let mut tmp = vec![0.0f64; dw as usize * sh as usize * 4];
+
+    for y in 0..sh as usize {
+        let src_row = y * sw as usize * 4;
+        let dst_row = y * dw as usize * 4;
+        for ox in 0..dw as usize {
+            let center = (ox as f64 + 0.5) * ratio_x - 0.5;
+            let left = (center - radius_x).ceil() as i64;
+            let right = (center + radius_x).floor() as i64;
+            let left = left.max(0) as usize;
+            let right = right.min(sw as i64 - 1) as usize;
+
+            let (mut sr, mut sg, mut sb, mut sa, mut sw_sum) = (0.0, 0.0, 0.0, 0.0, 0.0);
+            for ix in left..=right {
+                let w = lanczos3((ix as f64 - center) / inv_ratio_x);
+                let si = src_row + ix * 4;
+                sr += src[si] as f64 * w;
+                sg += src[si + 1] as f64 * w;
+                sb += src[si + 2] as f64 * w;
+                sa += src[si + 3] as f64 * w;
+                sw_sum += w;
+            }
+            if sw_sum > 0.0 {
+                let inv = 1.0 / sw_sum;
+                let di = dst_row + ox * 4;
+                tmp[di] = sr * inv;
+                tmp[di + 1] = sg * inv;
+                tmp[di + 2] = sb * inv;
+                tmp[di + 3] = sa * inv;
+            }
+        }
+    }
+
+    // Pass 2: vertical (sh → dh for each of dw columns), f64 → u8.
+    let ratio_y = sh as f64 / dh as f64;
+    let radius_y = 3.0 * ratio_y.max(1.0);
+    let inv_ratio_y = ratio_y.max(1.0);
+    let tmp_stride = dw as usize * 4;
+    let mut out = vec![0u8; dw as usize * dh as usize * 4];
+
+    for x in 0..dw as usize {
+        for oy in 0..dh as usize {
+            let center = (oy as f64 + 0.5) * ratio_y - 0.5;
+            let top = (center - radius_y).ceil() as i64;
+            let bottom = (center + radius_y).floor() as i64;
+            let top = top.max(0) as usize;
+            let bottom = bottom.min(sh as i64 - 1) as usize;
+
+            let (mut sr, mut sg, mut sb, mut sa, mut sw_sum) = (0.0, 0.0, 0.0, 0.0, 0.0);
+            for iy in top..=bottom {
+                let w = lanczos3((iy as f64 - center) / inv_ratio_y);
+                let si = iy * tmp_stride + x * 4;
+                sr += tmp[si] * w;
+                sg += tmp[si + 1] * w;
+                sb += tmp[si + 2] * w;
+                sa += tmp[si + 3] * w;
+                sw_sum += w;
+            }
+            if sw_sum > 0.0 {
+                let inv = 1.0 / sw_sum;
+                let di = (oy * dw as usize + x) * 4;
+                out[di] = (sr * inv).round().clamp(0.0, 255.0) as u8;
+                out[di + 1] = (sg * inv).round().clamp(0.0, 255.0) as u8;
+                out[di + 2] = (sb * inv).round().clamp(0.0, 255.0) as u8;
+                out[di + 3] = (sa * inv).round().clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+    out
+}
+
+/// Pre-downsample an image when the transform indicates significant downscaling.
+///
+/// tiny-skia's bilinear filter only samples a 2×2 neighborhood — it has no mipmap
+/// support, so large downscale ratios cause severe aliasing (e.g., 300 DPI bitmap
+/// fonts rendered at screen resolution).
+///
+/// For axis-aligned transforms: Lanczos3 resample to the exact target dimensions
+/// (matching Cairo's FILTER_BEST quality).
+///
+/// For rotated/sheared transforms: integer box-filter pre-downsample, leaving
+/// the fractional remainder to tiny-skia's bilinear.
+///
+/// Returns `None` if no pre-scaling is needed.
+fn prescale_image(
+    rgba_data: &[u8],
+    w: u32,
+    h: u32,
+    transform: Transform,
+) -> Option<(Vec<u8>, u32, u32, Transform)> {
+    // Compute effective scale factors from the 2×2 part of the transform.
+    let scale_x = (transform.sx * transform.sx + transform.ky * transform.ky).sqrt();
+    let scale_y = (transform.kx * transform.kx + transform.sy * transform.sy).sqrt();
+    let min_scale = scale_x.min(scale_y);
+
+    // Only pre-scale if downscaling by more than 2.5× (e.g., 300 DPI bitmap
+    // fonts at screen resolution). Lower ratios stay crisp with bilinear alone.
+    if min_scale >= 0.4 {
+        return None;
+    }
+
+    // Axis-aligned: use exact Lanczos3 resample to target dimensions.
+    let is_axis_aligned = transform.kx.abs() < 1e-4 && transform.ky.abs() < 1e-4;
+    if is_axis_aligned && w >= 2 && h >= 2 {
+        let dw = (w as f32 * transform.sx.abs()).ceil().max(1.0) as u32;
+        let dh = (h as f32 * transform.sy.abs()).ceil().max(1.0) as u32;
+        if dw < w || dh < h {
+            let resampled = lanczos3_resample(rgba_data, w, h, dw, dh);
+            // Adjust transform so scale ≈ ±1 (sign preserved), same translation.
+            let new_sx = transform.sx * w as f32 / dw as f32;
+            let new_sy = transform.sy * h as f32 / dh as f32;
+            let adjusted = Transform::from_row(
+                new_sx, transform.ky, transform.kx, new_sy, transform.tx, transform.ty,
+            );
+            return Some((resampled, dw, dh, adjusted));
+        }
+    }
+
+    // Fallback for rotated/sheared: integer box filter.
+    let factor = (1.0 / min_scale) as u32;
+    if factor < 2 || w < factor || h < factor {
+        return None;
+    }
+    let nw = w / factor;
+    let nh = h / factor;
+    if nw == 0 || nh == 0 {
+        return None;
+    }
+    let area = (factor * factor) as u32;
+    let half = area / 2;
+    let stride = w as usize * 4;
+    let mut out = vec![0u8; (nw * nh * 4) as usize];
+    for dy in 0..nh {
+        for dx in 0..nw {
+            let (mut r, mut g, mut b, mut a) = (0u32, 0u32, 0u32, 0u32);
+            let sy0 = (dy * factor) as usize;
+            let sx0 = (dx * factor) as usize;
+            for iy in 0..factor as usize {
+                let row = (sy0 + iy) * stride + sx0 * 4;
+                for ix in 0..factor as usize {
+                    let i = row + ix * 4;
+                    r += rgba_data[i] as u32;
+                    g += rgba_data[i + 1] as u32;
+                    b += rgba_data[i + 2] as u32;
+                    a += rgba_data[i + 3] as u32;
+                }
+            }
+            let di = (dy * nw + dx) as usize * 4;
+            out[di] = ((r + half) / area) as u8;
+            out[di + 1] = ((g + half) / area) as u8;
+            out[di + 2] = ((b + half) / area) as u8;
+            out[di + 3] = ((a + half) / area) as u8;
+        }
+    }
+    let f = factor as f32;
+    let adjusted = Transform::from_row(
+        transform.sx * f, transform.ky * f, transform.kx * f, transform.sy * f,
+        transform.tx, transform.ty,
+    );
+    Some((out, nw, nh, adjusted))
+}
+
 /// Translate a device-space ClipRect into band-local coordinates.
 fn translate_clip_rect(rect: &ClipRect, y_start: u32, band_h: u32) -> ClipRect {
     ClipRect {
@@ -898,10 +1078,18 @@ fn render_element_to_band(
                 return;
             };
             let combined = params.ctm.concat(&image_inv);
-            let transform = offset_transform(to_transform(&combined), y_off);
+            let raw_transform = offset_transform(to_transform(&combined), y_off);
 
-            // Resolve clip for image draw
-            let Some(img_pixmap) = tiny_skia::PixmapRef::from_bytes(rgba_data, iw, ih) else {
+            // Pre-downsample if significantly downscaling (box filter for proper
+            // area-averaging that tiny-skia's bilinear filter can't provide).
+            let prescaled = prescale_image(rgba_data, iw, ih, raw_transform);
+            let (img_data, img_w, img_h, transform) = match &prescaled {
+                Some((data, w, h, t)) => (data.as_slice(), *w, *h, *t),
+                None => (rgba_data.as_slice(), iw, ih, raw_transform),
+            };
+
+            let Some(img_pixmap) = tiny_skia::PixmapRef::from_bytes(img_data, img_w, img_h)
+            else {
                 return;
             };
             #[allow(unused_assignments)]
@@ -920,11 +1108,24 @@ fn render_element_to_band(
                     }
                 }
             };
+            // Use Nearest for upscaling (keeps bitmap/pixel-art crisp),
+            // Bilinear for downscaling (avoids aliasing).
+            let eff_sx = (transform.sx * transform.sx + transform.ky * transform.ky).sqrt();
+            let eff_sy = (transform.kx * transform.kx + transform.sy * transform.sy).sqrt();
+            let quality = if eff_sx >= 0.9 && eff_sy >= 0.9 {
+                tiny_skia::FilterQuality::Nearest
+            } else {
+                tiny_skia::FilterQuality::Bilinear
+            };
+            let img_paint = tiny_skia::PixmapPaint {
+                quality,
+                ..tiny_skia::PixmapPaint::default()
+            };
             pixmap.draw_pixmap(
                 0,
                 0,
                 img_pixmap,
-                &tiny_skia::PixmapPaint::default(),
+                &img_paint,
                 transform,
                 mask_ref,
             );
@@ -1221,18 +1422,24 @@ impl OutputDevice for SkiaDevice {
             return;
         }
 
-        // Create a pixmap from RGBA data
-        let Some(img_pixmap) = tiny_skia::PixmapRef::from_bytes(rgba_data, w, h) else {
-            return;
-        };
-
         // PostScript image_matrix maps image space → user space.
         // We need: image space → device space = CTM × inv(image_matrix)
         let Some(image_inv) = params.image_matrix.invert() else {
             return;
         };
         let combined = params.ctm.concat(&image_inv);
-        let transform = to_transform(&combined);
+        let raw_transform = to_transform(&combined);
+
+        // Pre-downsample if significantly downscaling.
+        let prescaled = prescale_image(rgba_data, w, h, raw_transform);
+        let (img_data, img_w, img_h, transform) = match &prescaled {
+            Some((data, pw, ph, t)) => (data.as_slice(), *pw, *ph, *t),
+            None => (rgba_data, w, h, raw_transform),
+        };
+
+        let Some(img_pixmap) = tiny_skia::PixmapRef::from_bytes(img_data, img_w, img_h) else {
+            return;
+        };
 
         let (pw, ph) = (self.pixmap.width(), self.pixmap.height());
         let mut temp_mask = None;
@@ -1240,11 +1447,22 @@ impl OutputDevice for SkiaDevice {
             return; // empty clip
         };
 
+        let eff_sx = (transform.sx * transform.sx + transform.ky * transform.ky).sqrt();
+        let eff_sy = (transform.kx * transform.kx + transform.sy * transform.sy).sqrt();
+        let quality = if eff_sx >= 0.9 && eff_sy >= 0.9 {
+            tiny_skia::FilterQuality::Nearest
+        } else {
+            tiny_skia::FilterQuality::Bilinear
+        };
+        let paint = tiny_skia::PixmapPaint {
+            quality,
+            ..tiny_skia::PixmapPaint::default()
+        };
         self.pixmap.draw_pixmap(
             0,
             0,
             img_pixmap,
-            &tiny_skia::PixmapPaint::default(),
+            &paint,
             transform,
             mask_ref,
         );
