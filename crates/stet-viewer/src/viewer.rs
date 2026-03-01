@@ -110,11 +110,12 @@ impl ViewerApp {
         self.dpi_sent = true;
     }
 
-    /// Resize the window to fit the rendered image at 1:1 zoom.
+    /// Resize the window to fit the rendered image.
     ///
-    /// The image was rendered at a DPI chosen so it fills ~85% of screen
-    /// height, so the window just needs to match the image size (in logical
-    /// points) plus the status bar overhead.
+    /// For auto-DPI the image is already sized to ~85% of screen height, so
+    /// the window matches 1:1.  For high --dpi overrides the image may be
+    /// larger than the screen — cap the window at 85% of monitor dimensions
+    /// and let fit_scale shrink the image to fit.
     fn size_window_to_page(&mut self, ctx: &egui::Context) {
         if self.window_sized || self.pages.is_empty() {
             return;
@@ -133,11 +134,30 @@ impl ViewerApp {
         let logical_w = img_w / ppp;
         let logical_h = img_h / ppp;
 
-        // Add status bar overhead so the central panel fits the image exactly.
+        // Status bar overhead so the central panel fits the image.
         let panel_overhead = ctx.screen_rect().height() - ctx.available_rect().height();
 
-        let win_w = logical_w.max(400.0);
-        let win_h = (logical_h + panel_overhead).max(300.0);
+        // Cap window to 85% of monitor dimensions.
+        let (max_w, max_h) = ctx.input(|i| {
+            if let Some(monitor) = i.viewport().monitor_size {
+                (monitor.x * 0.85, monitor.y * 0.85)
+            } else {
+                (1024.0, 768.0)
+            }
+        });
+
+        // Cap the image content area to screen limits, then add overhead.
+        let mut win_w = logical_w;
+        let mut win_h = logical_h;
+        if win_w > max_w || win_h > max_h {
+            let scale = (max_w / win_w).min(max_h / win_h);
+            win_w *= scale;
+            win_h *= scale;
+        }
+        win_h += panel_overhead;
+
+        let win_w = win_w.max(400.0);
+        let win_h = win_h.max(300.0);
 
         ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(win_w, win_h)));
 
