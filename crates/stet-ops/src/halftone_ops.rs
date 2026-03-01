@@ -9,6 +9,7 @@
 //! affecting rendering quality.
 
 use stet_core::context::Context;
+use stet_core::dict::DictKey;
 use stet_core::error::PsError;
 use stet_core::object::{PsObject, PsValue};
 
@@ -148,8 +149,30 @@ pub fn op_sethalftone(ctx: &mut Context) -> Result<(), PsError> {
 }
 
 /// `currenthalftone`: — → dict
+///
+/// Returns a Type 1 halftone dictionary with default frequency/angle
+/// matching `currentscreen`. Adobe prolog code (AI, dvips, etc.) often
+/// does `currenthalftone begin HalftoneType ...` to query the current
+/// screen frequency, so the returned dict must contain these keys.
 pub fn op_currenthalftone(ctx: &mut Context) -> Result<(), PsError> {
-    let entity = crate::vm_ops::alloc_dict(ctx, 0, b"halftone");
+    let entity = crate::vm_ops::alloc_dict(ctx, 5, b"halftone");
+    // /HalftoneType 1
+    ctx.dicts
+        .put(entity, DictKey::Name(ctx.names.intern(b"HalftoneType")), PsObject::int(1));
+    // /Frequency 60
+    ctx.dicts
+        .put(entity, DictKey::Name(ctx.names.intern(b"Frequency")), PsObject::real(60.0));
+    // /Angle 45
+    ctx.dicts
+        .put(entity, DictKey::Name(ctx.names.intern(b"Angle")), PsObject::real(45.0));
+    // /SpotFunction (empty proc)
+    let proc_entity = ctx.arrays.allocate_from(&[]);
+    ctx.dicts.put(
+        entity,
+        DictKey::Name(ctx.names.intern(b"SpotFunction")),
+        PsObject::procedure(proc_entity, 0),
+    );
+
     ctx.o_stack.push(PsObject::dict(entity))?;
     Ok(())
 }

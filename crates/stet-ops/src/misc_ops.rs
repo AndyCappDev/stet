@@ -593,6 +593,18 @@ pub fn op_currentcacheparams(ctx: &mut Context) -> Result<(), PsError> {
     Ok(())
 }
 
+/// `cachestatus`: — → bsize bmax msize mmax csize cmax blimit
+pub fn op_cachestatus(ctx: &mut Context) -> Result<(), PsError> {
+    ctx.o_stack.push(PsObject::int(0))?; // bsize (current bytes)
+    ctx.o_stack.push(PsObject::int(1000000))?; // bmax
+    ctx.o_stack.push(PsObject::int(0))?; // msize
+    ctx.o_stack.push(PsObject::int(100000))?; // mmax
+    ctx.o_stack.push(PsObject::int(0))?; // csize
+    ctx.o_stack.push(PsObject::int(500))?; // cmax
+    ctx.o_stack.push(PsObject::int(100000))?; // blimit
+    Ok(())
+}
+
 /// `copypage`: — → — (copy current page, no-op in single-page mode)
 pub fn op_copypage(_ctx: &mut Context) -> Result<(), PsError> {
     Ok(())
