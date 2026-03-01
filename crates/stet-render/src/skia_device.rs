@@ -80,6 +80,8 @@ pub struct SkiaDevice {
     /// the pixmap during banded rendering without losing page size info.
     page_w: u32,
     page_h: u32,
+    /// Device resolution in DPI (for hairline width decisions).
+    dpi: f64,
     clip_region: Option<ClipRegion>,
     /// Cache of rasterized clip masks keyed by path hash.
     /// Only paths seen more than once are cached (cache-on-second-sight).
@@ -110,6 +112,10 @@ impl SkiaDevice {
         height: u32,
         sink_factory: Box<dyn PageSinkFactory>,
     ) -> Self {
+        // Estimate DPI from page height (assumes ~792pt US Letter as reference).
+        // Close enough for hairline width threshold decisions.
+        let dpi = height as f64 * 72.0 / 792.0;
+
         // Start with a tiny placeholder. The full-page pixmap is allocated
         // lazily only when the non-banded path is used (small pages / low DPI).
         // For banded rendering, band-sized pixmaps are created in replay_and_show.
@@ -118,6 +124,7 @@ impl SkiaDevice {
             pixmap,
             page_w: width,
             page_h: height,
+            dpi,
             clip_region: None,
             clip_mask_cache: HashMap::new(),
             clip_mask_seen: HashSet::new(),
@@ -790,13 +797,16 @@ fn translate_clip_rect(rect: &ClipRect, y_start: u32, band_h: u32) -> ClipRect {
 }
 
 /// Build a stroke with minimum line-width enforcement (shared by trait impl and band rendering).
-fn build_stroke(params: &StrokeParams) -> Stroke {
+/// `dpi` is the device resolution, used to select the hairline minimum width:
+/// at ≤150 DPI use 0.6 device pixels; above 150 DPI use 1.0 device pixel.
+fn build_stroke(params: &StrokeParams, dpi: f64) -> Stroke {
     let min_lw = {
         let (a, b, c, d) = (params.ctm.a, params.ctm.b, params.ctm.c, params.ctm.d);
         let sum_sq = a * a + b * b + c * c + d * d;
         let diff = ((a * a + b * b - c * c - d * d).powi(2) + 4.0 * (a * c + b * d).powi(2)).sqrt();
         let s_max = (0.5 * (sum_sq + diff)).max(0.0).sqrt();
-        if s_max > 1e-10 { 1.0 / s_max } else { 1.0 }
+        let min_px = if dpi <= 150.0 { 0.5 } else { 1.0 };
+        if s_max > 1e-10 { min_px / s_max } else { min_px }
     };
     let mut stroke = Stroke {
         width: (params.line_width as f32).max(min_lw as f32),
@@ -827,6 +837,7 @@ fn render_element_to_band(
     y_start: u32,
     band_w: u32,
     band_h: u32,
+    dpi: f64,
 ) {
     let y_off = y_start as f32;
     match element {
@@ -857,7 +868,7 @@ fn render_element_to_band(
             };
             let paint = to_paint(&params.color);
             let transform = offset_transform(to_transform(&params.ctm), y_off);
-            let stroke = build_stroke(params);
+            let stroke = build_stroke(params, dpi);
             pixmap.stroke_path(&skia_path, &paint, &stroke, transform, mask_ref);
         }
         DisplayElement::Clip { path, params } => {
@@ -1081,7 +1092,7 @@ impl OutputDevice for SkiaDevice {
         };
         let paint = to_paint(&params.color);
         let transform = to_transform(&params.ctm);
-        let stroke = build_stroke(params);
+        let stroke = build_stroke(params, self.dpi);
 
         let (w, h) = (self.pixmap.width(), self.pixmap.height());
         let mut temp_mask = None;
@@ -1307,13 +1318,14 @@ impl OutputDevice for SkiaDevice {
 
         // Create the sink for this page before spawning background work
         let mut sink = self.sink_factory.create_sink(output_path)?;
+        let dpi = self.dpi;
 
         // Spawn banded rendering on rayon's thread pool, overlapping with
         // interpretation of the next page. Using rayon::spawn avoids OS thread
         // creation overhead and keeps work on the warmed-up pool.
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         rayon::spawn(move || {
-            let result = render_banded_to_sink(page_w, page_h, band_h, &list, &mut *sink);
+            let result = render_banded_to_sink(page_w, page_h, band_h, dpi, &list, &mut *sink);
             let _ = tx.send(result);
         });
         self.pending_render = Some(rx);
@@ -1357,6 +1369,7 @@ fn render_banded_to_sink(
     page_w: u32,
     page_h: u32,
     band_h: u32,
+    dpi: f64,
     list: &DisplayList,
     sink: &mut dyn stet_core::device::PageSink,
 ) -> Result<(), String> {
@@ -1447,6 +1460,7 @@ fn render_banded_to_sink(
                             render_y_start,
                             page_w,
                             render_h,
+                            dpi,
                         );
                     }
                 }
