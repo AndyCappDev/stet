@@ -210,14 +210,29 @@ pub fn build_system_dict(ctx: &mut Context) {
     register(ctx, sd, "currentoverprint", misc_ops::op_currentoverprint);
     register(ctx, sd, "break", misc_ops::op_break);
     register(ctx, sd, "setcacheparams", misc_ops::op_setcacheparams);
-    register(ctx, sd, "currentcacheparams", misc_ops::op_currentcacheparams);
+    register(
+        ctx,
+        sd,
+        "currentcacheparams",
+        misc_ops::op_currentcacheparams,
+    );
     register(ctx, sd, "copypage", device_ops::op_copypage);
     register(ctx, sd, "resetfile", misc_ops::op_resetfile);
     register(ctx, sd, "defineuserobject", misc_ops::op_defineuserobject);
-    register(ctx, sd, "undefineuserobject", misc_ops::op_undefineuserobject);
+    register(
+        ctx,
+        sd,
+        "undefineuserobject",
+        misc_ops::op_undefineuserobject,
+    );
     register(ctx, sd, "execuserobject", misc_ops::op_execuserobject);
     register(ctx, sd, "setobjectformat", misc_ops::op_setobjectformat);
-    register(ctx, sd, "currentobjectformat", misc_ops::op_currentobjectformat);
+    register(
+        ctx,
+        sd,
+        "currentobjectformat",
+        misc_ops::op_currentobjectformat,
+    );
     register(ctx, sd, "printobject", misc_ops::op_printobject);
     register(ctx, sd, "writeobject", misc_ops::op_writeobject);
 
@@ -226,10 +241,25 @@ pub fn build_system_dict(ctx: &mut Context) {
     register(ctx, sd, ".loadsystemfont", misc_ops::op_loadsystemfont);
     register(ctx, sd, ".loadfont", font_ops::op_dot_loadfont);
     register(ctx, sd, ".cff_startdata", cff_ops::op_cff_startdata);
-    register(ctx, sd, ".loadbinarysystemfont", misc_ops::op_loadbinarysystemfont);
-    register(ctx, sd, ".loadbinaryfontfile", misc_ops::op_loadbinaryfontfile);
+    register(
+        ctx,
+        sd,
+        ".loadbinarysystemfont",
+        misc_ops::op_loadbinarysystemfont,
+    );
+    register(
+        ctx,
+        sd,
+        ".loadbinaryfontfile",
+        misc_ops::op_loadbinaryfontfile,
+    );
     register(ctx, sd, ".systemundef", misc_ops::op_systemundef);
-    register(ctx, sd, ".setinteractivepaint", misc_ops::op_setinteractivepaint);
+    register(
+        ctx,
+        sd,
+        ".setinteractivepaint",
+        misc_ops::op_setinteractivepaint,
+    );
     register(ctx, sd, "pauseexechistory", misc_ops::op_pauseexechistory);
     register(ctx, sd, "resumeexechistory", misc_ops::op_resumeexechistory);
     register(ctx, sd, "exechistorystack", misc_ops::op_exechistorystack);
@@ -253,20 +283,45 @@ pub fn build_system_dict(ctx: &mut Context) {
 
     // --- Parameter operators ---
     register(ctx, sd, "setuserparams", param_ops::op_setuserparams);
-    register(ctx, sd, "currentuserparams", param_ops::op_currentuserparams);
+    register(
+        ctx,
+        sd,
+        "currentuserparams",
+        param_ops::op_currentuserparams,
+    );
     register(ctx, sd, "setsystemparams", param_ops::op_setsystemparams);
-    register(ctx, sd, "currentsystemparams", param_ops::op_currentsystemparams);
+    register(
+        ctx,
+        sd,
+        "currentsystemparams",
+        param_ops::op_currentsystemparams,
+    );
     register(ctx, sd, "setdevparams", param_ops::op_setdevparams);
     register(ctx, sd, "currentdevparams", param_ops::op_currentdevparams);
 
     // --- Resource operators ---
     register(ctx, sd, "findresource", resource_ops::op_findresource);
     register(ctx, sd, "defineresource", resource_ops::op_defineresource);
-    register(ctx, sd, "undefineresource", resource_ops::op_undefineresource);
+    register(
+        ctx,
+        sd,
+        "undefineresource",
+        resource_ops::op_undefineresource,
+    );
     register(ctx, sd, "resourcestatus", resource_ops::op_resourcestatus);
     register(ctx, sd, "resourceforall", resource_ops::op_resourceforall);
-    register(ctx, sd, "globalresourcedict", resource_ops::op_globalresourcedict);
-    register(ctx, sd, "localresourcedict", resource_ops::op_localresourcedict);
+    register(
+        ctx,
+        sd,
+        "globalresourcedict",
+        resource_ops::op_globalresourcedict,
+    );
+    register(
+        ctx,
+        sd,
+        "localresourcedict",
+        resource_ops::op_localresourcedict,
+    );
     register(ctx, sd, "categoryimpdict", resource_ops::op_categoryimpdict);
 
     // --- Matrix operators ---
@@ -312,7 +367,12 @@ pub fn build_system_dict(ctx: &mut Context) {
     register(ctx, sd, "sethsbcolor", color_ops::op_sethsbcolor);
     register(ctx, sd, "currenthsbcolor", color_ops::op_currenthsbcolor);
     register(ctx, sd, "setcolorspace", color_ops::op_setcolorspace);
-    register(ctx, sd, "currentcolorspace", color_ops::op_currentcolorspace);
+    register(
+        ctx,
+        sd,
+        "currentcolorspace",
+        color_ops::op_currentcolorspace,
+    );
     register(ctx, sd, "setcolor", color_ops::op_setcolor);
     register(ctx, sd, "currentcolor", color_ops::op_currentcolor);
 
@@ -321,19 +381,54 @@ pub fn build_system_dict(ctx: &mut Context) {
     register(ctx, sd, "grestore", graphics_state_ops::op_grestore);
     register(ctx, sd, "grestoreall", graphics_state_ops::op_grestoreall);
     register(ctx, sd, "setlinewidth", graphics_state_ops::op_setlinewidth);
-    register(ctx, sd, "currentlinewidth", graphics_state_ops::op_currentlinewidth);
+    register(
+        ctx,
+        sd,
+        "currentlinewidth",
+        graphics_state_ops::op_currentlinewidth,
+    );
     register(ctx, sd, "setlinecap", graphics_state_ops::op_setlinecap);
-    register(ctx, sd, "currentlinecap", graphics_state_ops::op_currentlinecap);
+    register(
+        ctx,
+        sd,
+        "currentlinecap",
+        graphics_state_ops::op_currentlinecap,
+    );
     register(ctx, sd, "setlinejoin", graphics_state_ops::op_setlinejoin);
-    register(ctx, sd, "currentlinejoin", graphics_state_ops::op_currentlinejoin);
-    register(ctx, sd, "setmiterlimit", graphics_state_ops::op_setmiterlimit);
-    register(ctx, sd, "currentmiterlimit", graphics_state_ops::op_currentmiterlimit);
+    register(
+        ctx,
+        sd,
+        "currentlinejoin",
+        graphics_state_ops::op_currentlinejoin,
+    );
+    register(
+        ctx,
+        sd,
+        "setmiterlimit",
+        graphics_state_ops::op_setmiterlimit,
+    );
+    register(
+        ctx,
+        sd,
+        "currentmiterlimit",
+        graphics_state_ops::op_currentmiterlimit,
+    );
     register(ctx, sd, "setdash", graphics_state_ops::op_setdash);
     register(ctx, sd, "currentdash", graphics_state_ops::op_currentdash);
     register(ctx, sd, "setflat", graphics_state_ops::op_setflat);
     register(ctx, sd, "currentflat", graphics_state_ops::op_currentflat);
-    register(ctx, sd, "setstrokeadjust", graphics_state_ops::op_setstrokeadjust);
-    register(ctx, sd, "currentstrokeadjust", graphics_state_ops::op_currentstrokeadjust);
+    register(
+        ctx,
+        sd,
+        "setstrokeadjust",
+        graphics_state_ops::op_setstrokeadjust,
+    );
+    register(
+        ctx,
+        sd,
+        "currentstrokeadjust",
+        graphics_state_ops::op_currentstrokeadjust,
+    );
     register(ctx, sd, "initgraphics", graphics_state_ops::op_initgraphics);
 
     // --- Painting operators ---
@@ -404,19 +499,54 @@ pub fn build_system_dict(ctx: &mut Context) {
     register(ctx, sd, "setscreen", halftone_ops::op_setscreen);
     register(ctx, sd, "currentscreen", halftone_ops::op_currentscreen);
     register(ctx, sd, "setcolorscreen", halftone_ops::op_setcolorscreen);
-    register(ctx, sd, "currentcolorscreen", halftone_ops::op_currentcolorscreen);
+    register(
+        ctx,
+        sd,
+        "currentcolorscreen",
+        halftone_ops::op_currentcolorscreen,
+    );
     register(ctx, sd, "sethalftone", halftone_ops::op_sethalftone);
     register(ctx, sd, "currenthalftone", halftone_ops::op_currenthalftone);
 
     // --- Transfer function operators ---
     register(ctx, sd, "settransfer", halftone_ops::op_settransfer);
     register(ctx, sd, "currenttransfer", halftone_ops::op_currenttransfer);
-    register(ctx, sd, "setcolortransfer", halftone_ops::op_setcolortransfer);
-    register(ctx, sd, "currentcolortransfer", halftone_ops::op_currentcolortransfer);
-    register(ctx, sd, "setblackgeneration", halftone_ops::op_setblackgeneration);
-    register(ctx, sd, "currentblackgeneration", halftone_ops::op_currentblackgeneration);
-    register(ctx, sd, "setundercolorremoval", halftone_ops::op_setundercolorremoval);
-    register(ctx, sd, "currentundercolorremoval", halftone_ops::op_currentundercolorremoval);
+    register(
+        ctx,
+        sd,
+        "setcolortransfer",
+        halftone_ops::op_setcolortransfer,
+    );
+    register(
+        ctx,
+        sd,
+        "currentcolortransfer",
+        halftone_ops::op_currentcolortransfer,
+    );
+    register(
+        ctx,
+        sd,
+        "setblackgeneration",
+        halftone_ops::op_setblackgeneration,
+    );
+    register(
+        ctx,
+        sd,
+        "currentblackgeneration",
+        halftone_ops::op_currentblackgeneration,
+    );
+    register(
+        ctx,
+        sd,
+        "setundercolorremoval",
+        halftone_ops::op_setundercolorremoval,
+    );
+    register(
+        ctx,
+        sd,
+        "currentundercolorremoval",
+        halftone_ops::op_currentundercolorremoval,
+    );
 
     // --- Pattern/shading operators ---
     register(ctx, sd, "shfill", shading_ops::op_shfill);
@@ -425,10 +555,25 @@ pub fn build_system_dict(ctx: &mut Context) {
 
     // --- Page device operators ---
     register(ctx, sd, "setpagedevice", device_ops::op_setpagedevice);
-    register(ctx, sd, "currentpagedevice", device_ops::op_currentpagedevice);
+    register(
+        ctx,
+        sd,
+        "currentpagedevice",
+        device_ops::op_currentpagedevice,
+    );
     register(ctx, sd, "nulldevice", device_ops::op_nulldevice);
-    register(ctx, sd, ".showpage_continue", device_ops::op_showpage_continue);
-    register(ctx, sd, ".copypage_continue", device_ops::op_copypage_continue);
+    register(
+        ctx,
+        sd,
+        ".showpage_continue",
+        device_ops::op_showpage_continue,
+    );
+    register(
+        ctx,
+        sd,
+        ".copypage_continue",
+        device_ops::op_copypage_continue,
+    );
 
     // --- Page size no-ops ---
     register(ctx, sd, "letter", font_ops::op_letter);

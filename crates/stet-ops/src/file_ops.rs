@@ -1082,9 +1082,7 @@ mod tests {
         ctx.o_stack.pop().unwrap(); // pages
 
         // Test non-existing file — returns false
-        let ent2 = ctx
-            .strings
-            .allocate_from(b"/tmp/stet_nonexistent_file_xyz");
+        let ent2 = ctx.strings.allocate_from(b"/tmp/stet_nonexistent_file_xyz");
         ctx.o_stack.push(PsObject::string(ent2, 29)).unwrap();
         op_status(&mut ctx).unwrap();
         assert!(matches!(

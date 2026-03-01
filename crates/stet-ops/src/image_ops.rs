@@ -70,7 +70,14 @@ pub fn op_image(ctx: &mut Context) -> Result<(), PsError> {
         ctx.o_stack.pop()?; // width
 
         let data = collect_proc_data(ctx, procedure, total_bytes)?;
-        let samples = unpack_samples(&data, width as u32, height as u32, bps as u32, ncomp as u32, false);
+        let samples = unpack_samples(
+            &data,
+            width as u32,
+            height as u32,
+            bps as u32,
+            ncomp as u32,
+            false,
+        );
         let rgba = samples_to_rgba(
             ctx,
             &samples,
@@ -96,7 +103,14 @@ pub fn op_image(ctx: &mut Context) -> Result<(), PsError> {
     let decode: Vec<f64> = (0..ncomp).flat_map(|_| [0.0, 1.0]).collect();
 
     // Unpack samples, convert to RGBA
-    let samples = unpack_samples(&data, width as u32, height as u32, bps as u32, ncomp as u32, false);
+    let samples = unpack_samples(
+        &data,
+        width as u32,
+        height as u32,
+        bps as u32,
+        ncomp as u32,
+        false,
+    );
     let rgba = samples_to_rgba(
         ctx,
         &samples,
@@ -413,8 +427,14 @@ pub fn op_colorimage(ctx: &mut Context) -> Result<(), PsError> {
             );
 
             let decode: Vec<f64> = (0..ncomp).flat_map(|_| [0.0, 1.0]).collect();
-            let samples =
-                unpack_samples(&data, width as u32, height as u32, bps as u32, ncomp as u32, false);
+            let samples = unpack_samples(
+                &data,
+                width as u32,
+                height as u32,
+                bps as u32,
+                ncomp as u32,
+                false,
+            );
             let rgba = samples_to_rgba(
                 ctx,
                 &samples,
@@ -456,8 +476,14 @@ pub fn op_colorimage(ctx: &mut Context) -> Result<(), PsError> {
             }
             let data = collect_proc_data(ctx, procedure, total_bytes)?;
             let decode: Vec<f64> = (0..ncomp).flat_map(|_| [0.0, 1.0]).collect();
-            let samples =
-                unpack_samples(&data, width as u32, height as u32, bps as u32, ncomp as u32, false);
+            let samples = unpack_samples(
+                &data,
+                width as u32,
+                height as u32,
+                bps as u32,
+                ncomp as u32,
+                false,
+            );
             let rgba = samples_to_rgba(
                 ctx,
                 &samples,
@@ -480,7 +506,14 @@ pub fn op_colorimage(ctx: &mut Context) -> Result<(), PsError> {
     // Default decode
     let decode: Vec<f64> = (0..ncomp).flat_map(|_| [0.0, 1.0]).collect();
 
-    let samples = unpack_samples(&data, width as u32, height as u32, bps as u32, ncomp as u32, false);
+    let samples = unpack_samples(
+        &data,
+        width as u32,
+        height as u32,
+        bps as u32,
+        ncomp as u32,
+        false,
+    );
     let rgba = samples_to_rgba(
         ctx,
         &samples,
@@ -625,7 +658,14 @@ fn read_multi_source_data(
 }
 
 /// Unpack samples from raw data (1/2/4/8/12 bits) to 8-bit values.
-fn unpack_samples(raw: &[u8], width: u32, height: u32, bps: u32, ncomp: u32, indexed: bool) -> Vec<u8> {
+fn unpack_samples(
+    raw: &[u8],
+    width: u32,
+    height: u32,
+    bps: u32,
+    ncomp: u32,
+    indexed: bool,
+) -> Vec<u8> {
     if bps == 8 {
         return raw.to_vec();
     }
@@ -966,11 +1006,7 @@ fn dict_get_matrix(
 }
 
 /// Look up any object in a dict by name.
-fn dict_get_obj(
-    ctx: &Context,
-    dict: stet_core::object::EntityId,
-    name: &[u8],
-) -> Option<PsObject> {
+fn dict_get_obj(ctx: &Context, dict: stet_core::object::EntityId, name: &[u8]) -> Option<PsObject> {
     let id = ctx.names.find(name)?;
     ctx.dicts.get(dict, &DictKey::Name(id))
 }

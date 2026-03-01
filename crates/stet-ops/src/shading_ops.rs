@@ -42,15 +42,13 @@ pub fn op_shfill(ctx: &mut Context) -> Result<(), PsError> {
     };
 
     // Extract ShadingType (required, integer 1-7)
-    let shading_type = get_dict_int(ctx, dict_entity, b"ShadingType")
-        .ok_or(PsError::Undefined)?;
+    let shading_type = get_dict_int(ctx, dict_entity, b"ShadingType").ok_or(PsError::Undefined)?;
     if !(1..=7).contains(&shading_type) {
         return Err(PsError::RangeCheck);
     }
 
     // Extract ColorSpace (required)
-    let cs_obj = get_dict_obj(ctx, dict_entity, b"ColorSpace")
-        .ok_or(PsError::Undefined)?;
+    let cs_obj = get_dict_obj(ctx, dict_entity, b"ColorSpace").ok_or(PsError::Undefined)?;
     let (color_space, n_comps) = resolve_color_space_from_obj(ctx, &cs_obj)?;
     let color_space = precompute_cie_decode_tables(ctx, color_space)?;
 
@@ -87,8 +85,7 @@ fn build_type2_shading(
     bbox: Option<[f64; 4]>,
 ) -> Result<(), PsError> {
     // Coords [x0 y0 x1 y1] (required)
-    let coords = get_dict_float_vec(ctx, dict, b"Coords")
-        .ok_or(PsError::Undefined)?;
+    let coords = get_dict_float_vec(ctx, dict, b"Coords").ok_or(PsError::Undefined)?;
     if coords.len() < 4 {
         return Err(PsError::RangeCheck);
     }
@@ -104,8 +101,7 @@ fn build_type2_shading(
     let (extend_start, extend_end) = get_dict_extend(ctx, dict);
 
     // Function (required)
-    let function = get_dict_obj(ctx, dict, b"Function")
-        .ok_or(PsError::Undefined)?;
+    let function = get_dict_obj(ctx, dict, b"Function").ok_or(PsError::Undefined)?;
 
     // Sample the function to produce color stops
     let color_stops = sample_shading_function(
@@ -145,8 +141,7 @@ fn build_type3_shading(
     bbox: Option<[f64; 4]>,
 ) -> Result<(), PsError> {
     // Coords [x0 y0 r0 x1 y1 r1] (required)
-    let coords = get_dict_float_vec(ctx, dict, b"Coords")
-        .ok_or(PsError::Undefined)?;
+    let coords = get_dict_float_vec(ctx, dict, b"Coords").ok_or(PsError::Undefined)?;
     if coords.len() < 6 {
         return Err(PsError::RangeCheck);
     }
@@ -162,8 +157,7 @@ fn build_type3_shading(
     let (extend_start, extend_end) = get_dict_extend(ctx, dict);
 
     // Function (required)
-    let function = get_dict_obj(ctx, dict, b"Function")
-        .ok_or(PsError::Undefined)?;
+    let function = get_dict_obj(ctx, dict, b"Function").ok_or(PsError::Undefined)?;
 
     let color_stops = sample_shading_function(
         ctx,
@@ -211,12 +205,10 @@ fn build_type1_shading(
     };
 
     // Matrix (optional, default identity) — maps domain to user space
-    let shading_matrix = get_dict_matrix(ctx, dict, b"Matrix")
-        .unwrap_or_else(Matrix::identity);
+    let shading_matrix = get_dict_matrix(ctx, dict, b"Matrix").unwrap_or_else(Matrix::identity);
 
     // Function (required — 2 inputs, n_comps outputs)
-    let function = get_dict_obj(ctx, dict, b"Function")
-        .ok_or(PsError::Undefined)?;
+    let function = get_dict_obj(ctx, dict, b"Function").ok_or(PsError::Undefined)?;
 
     let size = FUNCTION_SHADING_SIZE;
     let x_min = domain[0];
@@ -268,9 +260,7 @@ fn build_type1_shading(
                         comps[i] = ctx.o_stack.pop()?.as_f64().unwrap_or(0.0);
                     }
                     match convert_tint_color(ctx, &comps, color_space) {
-                        Ok(alt) => {
-                            components_to_device_color(&alt, get_alt_space(color_space))
-                        }
+                        Ok(alt) => components_to_device_color(&alt, get_alt_space(color_space)),
                         Err(_) => continue,
                     }
                 } else {
@@ -338,19 +328,16 @@ fn build_type4_shading(
     ctm: Matrix,
     bbox: Option<[f64; 4]>,
 ) -> Result<(), PsError> {
-    let ds_obj = get_dict_obj(ctx, dict, b"DataSource")
-        .ok_or(PsError::Undefined)?;
+    let ds_obj = get_dict_obj(ctx, dict, b"DataSource").ok_or(PsError::Undefined)?;
 
     let triangles = match ds_obj.value {
         PsValue::String { entity, start, len } => {
-            let bpc = get_dict_int(ctx, dict, b"BitsPerCoordinate")
-                .ok_or(PsError::Undefined)? as usize;
-            let bpco = get_dict_int(ctx, dict, b"BitsPerComponent")
-                .ok_or(PsError::Undefined)? as usize;
-            let bpfl = get_dict_int(ctx, dict, b"BitsPerFlag")
-                .ok_or(PsError::Undefined)? as usize;
-            let decode = get_dict_float_vec(ctx, dict, b"Decode")
-                .ok_or(PsError::Undefined)?;
+            let bpc =
+                get_dict_int(ctx, dict, b"BitsPerCoordinate").ok_or(PsError::Undefined)? as usize;
+            let bpco =
+                get_dict_int(ctx, dict, b"BitsPerComponent").ok_or(PsError::Undefined)? as usize;
+            let bpfl = get_dict_int(ctx, dict, b"BitsPerFlag").ok_or(PsError::Undefined)? as usize;
+            let decode = get_dict_float_vec(ctx, dict, b"Decode").ok_or(PsError::Undefined)?;
             let data = ctx.strings.get(entity, start, len).to_vec();
             mesh_shading::parse_type4_mesh(&data, bpc, bpco, bpfl, &decode, n_comps)
         }
@@ -385,19 +372,17 @@ fn build_type5_shading(
     ctm: Matrix,
     bbox: Option<[f64; 4]>,
 ) -> Result<(), PsError> {
-    let verts_per_row = get_dict_int(ctx, dict, b"VerticesPerRow")
-        .ok_or(PsError::Undefined)? as usize;
-    let ds_obj = get_dict_obj(ctx, dict, b"DataSource")
-        .ok_or(PsError::Undefined)?;
+    let verts_per_row =
+        get_dict_int(ctx, dict, b"VerticesPerRow").ok_or(PsError::Undefined)? as usize;
+    let ds_obj = get_dict_obj(ctx, dict, b"DataSource").ok_or(PsError::Undefined)?;
 
     let triangles = match ds_obj.value {
         PsValue::String { entity, start, len } => {
-            let bpc = get_dict_int(ctx, dict, b"BitsPerCoordinate")
-                .ok_or(PsError::Undefined)? as usize;
-            let bpco = get_dict_int(ctx, dict, b"BitsPerComponent")
-                .ok_or(PsError::Undefined)? as usize;
-            let decode = get_dict_float_vec(ctx, dict, b"Decode")
-                .ok_or(PsError::Undefined)?;
+            let bpc =
+                get_dict_int(ctx, dict, b"BitsPerCoordinate").ok_or(PsError::Undefined)? as usize;
+            let bpco =
+                get_dict_int(ctx, dict, b"BitsPerComponent").ok_or(PsError::Undefined)? as usize;
+            let decode = get_dict_float_vec(ctx, dict, b"Decode").ok_or(PsError::Undefined)?;
             let data = ctx.strings.get(entity, start, len).to_vec();
             mesh_shading::parse_type5_mesh(&data, bpc, bpco, &decode, n_comps, verts_per_row)
         }
@@ -433,26 +418,22 @@ fn build_type6_shading(
     ctm: Matrix,
     bbox: Option<[f64; 4]>,
 ) -> Result<(), PsError> {
-    let ds_obj = get_dict_obj(ctx, dict, b"DataSource")
-        .ok_or(PsError::Undefined)?;
+    let ds_obj = get_dict_obj(ctx, dict, b"DataSource").ok_or(PsError::Undefined)?;
 
     let patches = match ds_obj.value {
         PsValue::String { entity, start, len } => {
-            let bpc = get_dict_int(ctx, dict, b"BitsPerCoordinate")
-                .ok_or(PsError::Undefined)? as usize;
-            let bpco = get_dict_int(ctx, dict, b"BitsPerComponent")
-                .ok_or(PsError::Undefined)? as usize;
-            let bpfl = get_dict_int(ctx, dict, b"BitsPerFlag")
-                .ok_or(PsError::Undefined)? as usize;
-            let decode = get_dict_float_vec(ctx, dict, b"Decode")
-                .ok_or(PsError::Undefined)?;
+            let bpc =
+                get_dict_int(ctx, dict, b"BitsPerCoordinate").ok_or(PsError::Undefined)? as usize;
+            let bpco =
+                get_dict_int(ctx, dict, b"BitsPerComponent").ok_or(PsError::Undefined)? as usize;
+            let bpfl = get_dict_int(ctx, dict, b"BitsPerFlag").ok_or(PsError::Undefined)? as usize;
+            let decode = get_dict_float_vec(ctx, dict, b"Decode").ok_or(PsError::Undefined)?;
             let data = ctx.strings.get(entity, start, len).to_vec();
             mesh_shading::parse_type6_patches(&data, bpc, bpco, bpfl, &decode, n_comps)
         }
         PsValue::Array { entity, start, len } => {
             let values = extract_float_array(ctx, entity, start, len);
-            let (values, eff_n) =
-                convert_type6_array_colors(ctx, values, n_comps, color_space)?;
+            let (values, eff_n) = convert_type6_array_colors(ctx, values, n_comps, color_space)?;
             mesh_shading::build_type6_from_array(&values, eff_n)
         }
         _ => return Err(PsError::TypeCheck),
@@ -460,11 +441,7 @@ fn build_type6_shading(
 
     if !patches.is_empty() {
         ctx.display_list.push(DisplayElement::PatchShading {
-            params: PatchShadingParams {
-                patches,
-                ctm,
-                bbox,
-            },
+            params: PatchShadingParams { patches, ctm, bbox },
         });
     }
 
@@ -479,26 +456,22 @@ fn build_type7_shading(
     ctm: Matrix,
     bbox: Option<[f64; 4]>,
 ) -> Result<(), PsError> {
-    let ds_obj = get_dict_obj(ctx, dict, b"DataSource")
-        .ok_or(PsError::Undefined)?;
+    let ds_obj = get_dict_obj(ctx, dict, b"DataSource").ok_or(PsError::Undefined)?;
 
     let patches = match ds_obj.value {
         PsValue::String { entity, start, len } => {
-            let bpc = get_dict_int(ctx, dict, b"BitsPerCoordinate")
-                .ok_or(PsError::Undefined)? as usize;
-            let bpco = get_dict_int(ctx, dict, b"BitsPerComponent")
-                .ok_or(PsError::Undefined)? as usize;
-            let bpfl = get_dict_int(ctx, dict, b"BitsPerFlag")
-                .ok_or(PsError::Undefined)? as usize;
-            let decode = get_dict_float_vec(ctx, dict, b"Decode")
-                .ok_or(PsError::Undefined)?;
+            let bpc =
+                get_dict_int(ctx, dict, b"BitsPerCoordinate").ok_or(PsError::Undefined)? as usize;
+            let bpco =
+                get_dict_int(ctx, dict, b"BitsPerComponent").ok_or(PsError::Undefined)? as usize;
+            let bpfl = get_dict_int(ctx, dict, b"BitsPerFlag").ok_or(PsError::Undefined)? as usize;
+            let decode = get_dict_float_vec(ctx, dict, b"Decode").ok_or(PsError::Undefined)?;
             let data = ctx.strings.get(entity, start, len).to_vec();
             mesh_shading::parse_type7_patches(&data, bpc, bpco, bpfl, &decode, n_comps)
         }
         PsValue::Array { entity, start, len } => {
             let values = extract_float_array(ctx, entity, start, len);
-            let (values, eff_n) =
-                convert_type7_array_colors(ctx, values, n_comps, color_space)?;
+            let (values, eff_n) = convert_type7_array_colors(ctx, values, n_comps, color_space)?;
             mesh_shading::build_type7_from_array(&values, eff_n)
         }
         _ => return Err(PsError::TypeCheck),
@@ -506,11 +479,7 @@ fn build_type7_shading(
 
     if !patches.is_empty() {
         ctx.display_list.push(DisplayElement::PatchShading {
-            params: PatchShadingParams {
-                patches,
-                ctm,
-                bbox,
-            },
+            params: PatchShadingParams { patches, ctm, bbox },
         });
     }
 
@@ -521,14 +490,18 @@ fn build_type7_shading(
 
 /// Check if a color space requires tint transform conversion (Separation/DeviceN).
 fn needs_tint_conversion(cs: &ColorSpace) -> bool {
-    matches!(cs, ColorSpace::Separation { .. } | ColorSpace::DeviceN { .. })
+    matches!(
+        cs,
+        ColorSpace::Separation { .. } | ColorSpace::DeviceN { .. }
+    )
 }
 
 /// Get the alternative color space for Separation/DeviceN.
 fn get_alt_space(cs: &ColorSpace) -> &ColorSpace {
     match cs {
-        ColorSpace::Separation { alt_space, .. }
-        | ColorSpace::DeviceN { alt_space, .. } => alt_space.as_ref(),
+        ColorSpace::Separation { alt_space, .. } | ColorSpace::DeviceN { alt_space, .. } => {
+            alt_space.as_ref()
+        }
         _ => cs,
     }
 }
@@ -821,12 +794,10 @@ fn evaluate_ps_function(
     func_entity: EntityId,
     inputs: &[f64],
 ) -> Result<Vec<f64>, PsError> {
-    let func_type = get_dict_int(ctx, func_entity, b"FunctionType")
-        .ok_or(PsError::Undefined)?;
+    let func_type = get_dict_int(ctx, func_entity, b"FunctionType").ok_or(PsError::Undefined)?;
 
     // Get Domain for input clamping
-    let domain = get_dict_float_vec(ctx, func_entity, b"Domain")
-        .unwrap_or_default();
+    let domain = get_dict_float_vec(ctx, func_entity, b"Domain").unwrap_or_default();
 
     // Clamp inputs to domain
     let mut clamped_inputs = Vec::with_capacity(inputs.len());
@@ -863,14 +834,10 @@ fn eval_type0_sampled(
     func_entity: EntityId,
     inputs: &[f64],
 ) -> Result<Vec<f64>, PsError> {
-    let domain = get_dict_float_vec(ctx, func_entity, b"Domain")
-        .unwrap_or_default();
-    let range = get_dict_float_vec(ctx, func_entity, b"Range")
-        .unwrap_or_default();
-    let size_vec = get_dict_float_vec(ctx, func_entity, b"Size")
-        .ok_or(PsError::Undefined)?;
-    let bps = get_dict_int(ctx, func_entity, b"BitsPerSample")
-        .ok_or(PsError::Undefined)? as usize;
+    let domain = get_dict_float_vec(ctx, func_entity, b"Domain").unwrap_or_default();
+    let range = get_dict_float_vec(ctx, func_entity, b"Range").unwrap_or_default();
+    let size_vec = get_dict_float_vec(ctx, func_entity, b"Size").ok_or(PsError::Undefined)?;
+    let bps = get_dict_int(ctx, func_entity, b"BitsPerSample").ok_or(PsError::Undefined)? as usize;
 
     let encode = get_dict_float_vec(ctx, func_entity, b"Encode");
     let decode = get_dict_float_vec(ctx, func_entity, b"Decode");
@@ -884,12 +851,9 @@ fn eval_type0_sampled(
     let sizes: Vec<usize> = size_vec.iter().map(|s| *s as usize).collect();
 
     // Get sample data
-    let ds_obj = get_dict_obj(ctx, func_entity, b"DataSource")
-        .ok_or(PsError::Undefined)?;
+    let ds_obj = get_dict_obj(ctx, func_entity, b"DataSource").ok_or(PsError::Undefined)?;
     let sample_data = match ds_obj.value {
-        PsValue::String { entity, start, len } => {
-            ctx.strings.get(entity, start, len).to_vec()
-        }
+        PsValue::String { entity, start, len } => ctx.strings.get(entity, start, len).to_vec(),
         _ => return Err(PsError::TypeCheck),
     };
 
@@ -899,8 +863,13 @@ fn eval_type0_sampled(
     if m == 1 {
         let d_min = domain.first().copied().unwrap_or(0.0);
         let d_max = domain.get(1).copied().unwrap_or(1.0);
-        let e_min = encode.as_ref().and_then(|e| e.first().copied()).unwrap_or(0.0);
-        let e_max = encode.as_ref().and_then(|e| e.get(1).copied())
+        let e_min = encode
+            .as_ref()
+            .and_then(|e| e.first().copied())
+            .unwrap_or(0.0);
+        let e_max = encode
+            .as_ref()
+            .and_then(|e| e.get(1).copied())
             .unwrap_or((sizes[0] - 1) as f64);
 
         // Encode: map domain to sample index space
@@ -949,8 +918,13 @@ fn eval_type0_sampled(
         // Encode x
         let dx_min = domain.first().copied().unwrap_or(0.0);
         let dx_max = domain.get(1).copied().unwrap_or(1.0);
-        let ex_min = encode.as_ref().and_then(|e| e.first().copied()).unwrap_or(0.0);
-        let ex_max = encode.as_ref().and_then(|e| e.get(1).copied())
+        let ex_min = encode
+            .as_ref()
+            .and_then(|e| e.first().copied())
+            .unwrap_or(0.0);
+        let ex_max = encode
+            .as_ref()
+            .and_then(|e| e.get(1).copied())
             .unwrap_or((sx - 1) as f64);
         let ex = if (dx_max - dx_min).abs() < 1e-10 {
             ex_min
@@ -962,8 +936,13 @@ fn eval_type0_sampled(
         // Encode y
         let dy_min = domain.get(2).copied().unwrap_or(0.0);
         let dy_max = domain.get(3).copied().unwrap_or(1.0);
-        let ey_min = encode.as_ref().and_then(|e| e.get(2).copied()).unwrap_or(0.0);
-        let ey_max = encode.as_ref().and_then(|e| e.get(3).copied())
+        let ey_min = encode
+            .as_ref()
+            .and_then(|e| e.get(2).copied())
+            .unwrap_or(0.0);
+        let ey_max = encode
+            .as_ref()
+            .and_then(|e| e.get(3).copied())
             .unwrap_or((sy - 1) as f64);
         let ey = if (dy_max - dy_min).abs() < 1e-10 {
             ey_min
@@ -993,8 +972,7 @@ fn eval_type0_sampled(
             let v01 = read_sample(&sample_data, idx01 * bps, bps) as f64 / max_sample;
             let v11 = read_sample(&sample_data, idx11 * bps, bps) as f64 / max_sample;
 
-            let interpolated =
-                v00 * (1.0 - fx) * (1.0 - fy)
+            let interpolated = v00 * (1.0 - fx) * (1.0 - fy)
                 + v10 * fx * (1.0 - fy)
                 + v01 * (1.0 - fx) * fy
                 + v11 * fx * fy;
@@ -1048,17 +1026,11 @@ fn read_sample(data: &[u8], bit_pos: usize, bps: usize) -> u32 {
 
 /// Evaluate FunctionType 2: exponential interpolation.
 /// y_j = C0_j + x^N * (C1_j - C0_j)
-fn eval_type2_exponential(
-    ctx: &Context,
-    func_entity: EntityId,
-    inputs: &[f64],
-) -> Vec<f64> {
+fn eval_type2_exponential(ctx: &Context, func_entity: EntityId, inputs: &[f64]) -> Vec<f64> {
     let x = inputs.first().copied().unwrap_or(0.0);
     let n_exp = get_dict_float(ctx, func_entity, b"N").unwrap_or(1.0);
-    let c0 = get_dict_float_vec(ctx, func_entity, b"C0")
-        .unwrap_or_else(|| vec![0.0]);
-    let c1 = get_dict_float_vec(ctx, func_entity, b"C1")
-        .unwrap_or_else(|| vec![1.0]);
+    let c0 = get_dict_float_vec(ctx, func_entity, b"C0").unwrap_or_else(|| vec![0.0]);
+    let c1 = get_dict_float_vec(ctx, func_entity, b"C1").unwrap_or_else(|| vec![1.0]);
 
     let num_outputs = c0.len().max(c1.len());
     let mut results = Vec::with_capacity(num_outputs);
@@ -1092,16 +1064,12 @@ fn eval_type3_stitching(
     inputs: &[f64],
 ) -> Result<Vec<f64>, PsError> {
     let x = inputs.first().copied().unwrap_or(0.0);
-    let domain = get_dict_float_vec(ctx, func_entity, b"Domain")
-        .unwrap_or_else(|| vec![0.0, 1.0]);
-    let bounds = get_dict_float_vec(ctx, func_entity, b"Bounds")
-        .ok_or(PsError::Undefined)?;
-    let encode = get_dict_float_vec(ctx, func_entity, b"Encode")
-        .ok_or(PsError::Undefined)?;
+    let domain = get_dict_float_vec(ctx, func_entity, b"Domain").unwrap_or_else(|| vec![0.0, 1.0]);
+    let bounds = get_dict_float_vec(ctx, func_entity, b"Bounds").ok_or(PsError::Undefined)?;
+    let encode = get_dict_float_vec(ctx, func_entity, b"Encode").ok_or(PsError::Undefined)?;
 
     // Get the Functions array
-    let funcs_obj = get_dict_obj(ctx, func_entity, b"Functions")
-        .ok_or(PsError::Undefined)?;
+    let funcs_obj = get_dict_obj(ctx, func_entity, b"Functions").ok_or(PsError::Undefined)?;
     let (funcs_entity, funcs_start, funcs_len) = match funcs_obj.value {
         PsValue::Array { entity, start, len } => (entity, start, len as usize),
         _ => return Err(PsError::TypeCheck),
@@ -1142,7 +1110,9 @@ fn eval_type3_stitching(
     };
 
     // Evaluate the sub-function
-    let sub_func = ctx.arrays.get_element(funcs_entity, funcs_start + idx as u32);
+    let sub_func = ctx
+        .arrays
+        .get_element(funcs_entity, funcs_start + idx as u32);
     match sub_func.value {
         PsValue::Dict(sub_entity) => evaluate_ps_function(ctx, sub_entity, &[encoded]),
         _ => Err(PsError::TypeCheck),
@@ -1163,7 +1133,12 @@ fn pop_color_components(
     let mut comps = vec![0.0f64; n_comps];
     // Components are pushed in order, so last pushed is on top
     for i in (0..n_comps).rev() {
-        comps[i] = ctx.o_stack.pop().ok().and_then(|o| o.as_f64()).unwrap_or(0.0);
+        comps[i] = ctx
+            .o_stack
+            .pop()
+            .ok()
+            .and_then(|o| o.as_f64())
+            .unwrap_or(0.0);
     }
 
     match color_space {
@@ -1274,7 +1249,12 @@ fn get_dict_float_vec(ctx: &Context, dict: EntityId, key: &[u8]) -> Option<Vec<f
         PsValue::Array { entity, start, len } => {
             let mut result = Vec::with_capacity(len as usize);
             for i in 0..len {
-                result.push(ctx.arrays.get_element(entity, start + i).as_f64().unwrap_or(0.0));
+                result.push(
+                    ctx.arrays
+                        .get_element(entity, start + i)
+                        .as_f64()
+                        .unwrap_or(0.0),
+                );
             }
             Some(result)
         }
@@ -1306,7 +1286,11 @@ fn get_dict_matrix(ctx: &Context, dict: EntityId, key: &[u8]) -> Option<Matrix> 
         PsValue::Array { entity, start, len } if len >= 6 => {
             let mut m = [0.0f64; 6];
             for (i, v) in m.iter_mut().enumerate() {
-                *v = ctx.arrays.get_element(entity, start + i as u32).as_f64().unwrap_or(0.0);
+                *v = ctx
+                    .arrays
+                    .get_element(entity, start + i as u32)
+                    .as_f64()
+                    .unwrap_or(0.0);
             }
             Some(Matrix::new(m[0], m[1], m[2], m[3], m[4], m[5]))
         }

@@ -227,11 +227,7 @@ pub fn parse_type4_mesh(
                     let v1 = vertices[len - 1].clone();
                     vertices.push(vertex);
                     let v2 = vertices.last().unwrap().clone();
-                    triangles.push(ShadingTriangle {
-                        v0,
-                        v1,
-                        v2,
-                    });
+                    triangles.push(ShadingTriangle { v0, v1, v2 });
                 }
             }
             2 => {
@@ -242,11 +238,7 @@ pub fn parse_type4_mesh(
                     let v1 = vertices[len - 1].clone();
                     vertices.push(vertex);
                     let v2 = vertices.last().unwrap().clone();
-                    triangles.push(ShadingTriangle {
-                        v0,
-                        v1,
-                        v2,
-                    });
+                    triangles.push(ShadingTriangle { v0, v1, v2 });
                 }
             }
             _ => {}
@@ -792,8 +784,7 @@ pub fn build_type6_from_array(values: &[f64], n_comps: usize) -> Vec<ShadingPatc
                     points.push((values[pos + i * 2], values[pos + i * 2 + 1]));
                 }
                 pos += 18;
-                let mut colors =
-                    vec![inherited_colors[0].clone(), inherited_colors[1].clone()];
+                let mut colors = vec![inherited_colors[0].clone(), inherited_colors[1].clone()];
                 for _ in 0..2 {
                     let comps: Vec<f64> = values[pos..pos + n_comps].to_vec();
                     colors.push(components_to_color(&comps));

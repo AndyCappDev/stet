@@ -441,9 +441,21 @@ impl DeviceColor {
             let ra = params.range_abc[1] - params.range_abc[0];
             let rb = params.range_abc[3] - params.range_abc[2];
             let rc = params.range_abc[5] - params.range_abc[4];
-            let na = if ra > 0.0 { (a - params.range_abc[0]) / ra } else { 0.0 };
-            let nb = if rb > 0.0 { (b - params.range_abc[2]) / rb } else { 0.0 };
-            let nc = if rc > 0.0 { (c - params.range_abc[4]) / rc } else { 0.0 };
+            let na = if ra > 0.0 {
+                (a - params.range_abc[0]) / ra
+            } else {
+                0.0
+            };
+            let nb = if rb > 0.0 {
+                (b - params.range_abc[2]) / rb
+            } else {
+                0.0
+            };
+            let nc = if rc > 0.0 {
+                (c - params.range_abc[4]) / rc
+            } else {
+                0.0
+            };
             a = Self::decode_lookup(&tables[0], na);
             b = Self::decode_lookup(&tables[1], nb);
             c = Self::decode_lookup(&tables[2], nc);
@@ -462,9 +474,21 @@ impl DeviceColor {
             let rl = params.range_lmn[1] - params.range_lmn[0];
             let rm = params.range_lmn[3] - params.range_lmn[2];
             let rn = params.range_lmn[5] - params.range_lmn[4];
-            let nl = if rl > 0.0 { (l - params.range_lmn[0]) / rl } else { 0.0 };
-            let nm = if rm > 0.0 { (m - params.range_lmn[2]) / rm } else { 0.0 };
-            let nn = if rn > 0.0 { (n - params.range_lmn[4]) / rn } else { 0.0 };
+            let nl = if rl > 0.0 {
+                (l - params.range_lmn[0]) / rl
+            } else {
+                0.0
+            };
+            let nm = if rm > 0.0 {
+                (m - params.range_lmn[2]) / rm
+            } else {
+                0.0
+            };
+            let nn = if rn > 0.0 {
+                (n - params.range_lmn[4]) / rn
+            } else {
+                0.0
+            };
             l = Self::decode_lookup(&tables[0], nl);
             m = Self::decode_lookup(&tables[1], nm);
             n = Self::decode_lookup(&tables[2], nn);
@@ -486,7 +510,11 @@ impl DeviceColor {
         // DecodeA (pre-evaluated lookup table)
         if let Some(ref table) = params.decode_a {
             let ra = params.range_a[1] - params.range_a[0];
-            let na = if ra > 0.0 { (a - params.range_a[0]) / ra } else { 0.0 };
+            let na = if ra > 0.0 {
+                (a - params.range_a[0]) / ra
+            } else {
+                0.0
+            };
             a = Self::decode_lookup(table, na);
         }
 
@@ -507,9 +535,21 @@ impl DeviceColor {
             let rl = params.range_lmn[1] - params.range_lmn[0];
             let rm = params.range_lmn[3] - params.range_lmn[2];
             let rn = params.range_lmn[5] - params.range_lmn[4];
-            let nl = if rl > 0.0 { (l - params.range_lmn[0]) / rl } else { 0.0 };
-            let nm = if rm > 0.0 { (m - params.range_lmn[2]) / rm } else { 0.0 };
-            let nn = if rn > 0.0 { (n - params.range_lmn[4]) / rn } else { 0.0 };
+            let nl = if rl > 0.0 {
+                (l - params.range_lmn[0]) / rl
+            } else {
+                0.0
+            };
+            let nm = if rm > 0.0 {
+                (m - params.range_lmn[2]) / rm
+            } else {
+                0.0
+            };
+            let nn = if rn > 0.0 {
+                (n - params.range_lmn[4]) / rn
+            } else {
+                0.0
+            };
             l = Self::decode_lookup(&tables[0], nl);
             m = Self::decode_lookup(&tables[1], nm);
             n = Self::decode_lookup(&tables[2], nn);
@@ -798,10 +838,10 @@ impl PartialEq for ColorSpace {
 /// Extracted parameters for CIEBasedABC color conversion.
 #[derive(Clone, Debug)]
 pub struct CieAbcParams {
-    pub range_abc: [f64; 6],  // [min_a, max_a, min_b, max_b, min_c, max_c]
+    pub range_abc: [f64; 6], // [min_a, max_a, min_b, max_b, min_c, max_c]
     pub decode_abc: Option<[Vec<f64>; 3]>, // 256-point pre-evaluated tables
     pub matrix_abc: [f64; 9], // Column-major 3×3 (default identity)
-    pub range_lmn: [f64; 6],  // [min_l, max_l, min_m, max_m, min_n, max_n]
+    pub range_lmn: [f64; 6], // [min_l, max_l, min_m, max_m, min_n, max_n]
     pub decode_lmn: Option<[Vec<f64>; 3]>, // 256-point pre-evaluated tables
     pub matrix_lmn: [f64; 9], // Column-major 3×3 (default identity)
 }
@@ -822,12 +862,12 @@ impl Default for CieAbcParams {
 /// Extracted parameters for CIEBasedA color conversion.
 #[derive(Clone, Debug)]
 pub struct CieAParams {
-    pub range_a: [f64; 2],    // [min, max]
-    pub decode_a: Option<Vec<f64>>, // 256-point pre-evaluated table
-    pub matrix_a: [f64; 3],   // 3-element vector (default [1,1,1])
-    pub range_lmn: [f64; 6],  // [min_l, max_l, min_m, max_m, min_n, max_n]
+    pub range_a: [f64; 2],                 // [min, max]
+    pub decode_a: Option<Vec<f64>>,        // 256-point pre-evaluated table
+    pub matrix_a: [f64; 3],                // 3-element vector (default [1,1,1])
+    pub range_lmn: [f64; 6],               // [min_l, max_l, min_m, max_m, min_n, max_n]
     pub decode_lmn: Option<[Vec<f64>; 3]>, // 256-point pre-evaluated tables
-    pub matrix_lmn: [f64; 9], // Column-major 3×3 (default identity)
+    pub matrix_lmn: [f64; 9],              // Column-major 3×3 (default identity)
 }
 
 impl Default for CieAParams {
@@ -846,13 +886,13 @@ impl Default for CieAParams {
 /// Pre-converted parameters for CIEBasedDEF color space (3D table → RGB).
 #[derive(Clone, Debug)]
 pub struct CieDefParams {
-    pub range_def: [f64; 6], // [min_d, max_d, min_e, max_e, min_f, max_f]
-    pub m1: usize,           // table dimension 1
-    pub m2: usize,           // table dimension 2
-    pub m3: usize,           // table dimension 3
-    pub a_table: Vec<f64>,   // ABC-space A values (m1*m2*m3)
-    pub b_table: Vec<f64>,   // ABC-space B values (m1*m2*m3)
-    pub c_table: Vec<f64>,   // ABC-space C values (m1*m2*m3)
+    pub range_def: [f64; 6],      // [min_d, max_d, min_e, max_e, min_f, max_f]
+    pub m1: usize,                // table dimension 1
+    pub m2: usize,                // table dimension 2
+    pub m3: usize,                // table dimension 3
+    pub a_table: Vec<f64>,        // ABC-space A values (m1*m2*m3)
+    pub b_table: Vec<f64>,        // ABC-space B values (m1*m2*m3)
+    pub c_table: Vec<f64>,        // ABC-space C values (m1*m2*m3)
     pub abc_params: CieAbcParams, // CIE ABC pipeline params (with pre-evaluated decode tables)
 }
 
@@ -864,9 +904,9 @@ pub struct CieDefgParams {
     pub m2: usize,
     pub m3: usize,
     pub m4: usize,
-    pub a_table: Vec<f64>, // ABC-space A values (m1*m2*m3*m4)
-    pub b_table: Vec<f64>, // ABC-space B values (m1*m2*m3*m4)
-    pub c_table: Vec<f64>, // ABC-space C values (m1*m2*m3*m4)
+    pub a_table: Vec<f64>,        // ABC-space A values (m1*m2*m3*m4)
+    pub b_table: Vec<f64>,        // ABC-space B values (m1*m2*m3*m4)
+    pub c_table: Vec<f64>,        // ABC-space C values (m1*m2*m3*m4)
     pub abc_params: CieAbcParams, // CIE ABC pipeline params
 }
 

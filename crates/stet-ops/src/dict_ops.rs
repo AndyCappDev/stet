@@ -38,7 +38,8 @@ pub fn op_dict(ctx: &mut Context) -> Result<(), PsError> {
     };
     ctx.o_stack.pop()?;
     let entity = crate::vm_ops::alloc_dict(ctx, max_len, b"");
-    ctx.o_stack.push(crate::vm_ops::make_dict_obj(ctx, entity))?;
+    ctx.o_stack
+        .push(crate::vm_ops::make_dict_obj(ctx, entity))?;
     Ok(())
 }
 

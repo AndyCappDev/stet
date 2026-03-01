@@ -4,22 +4,29 @@
 
 //! egui viewer application — displays rendered PostScript pages.
 
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::{Receiver, Sender, SyncSender};
 
 use egui::{ColorImage, TextureHandle, TextureOptions, Vec2};
 
 use crate::{PageImage, ViewerEnd};
 
+/// Default page height in points (US Letter).
+const DEFAULT_PAGE_HEIGHT_PTS: f64 = 792.0;
+
 /// Interactive viewer for rendered PostScript pages.
 pub struct ViewerApp {
     page_receiver: Receiver<PageImage>,
     continue_sender: Sender<()>,
+    dpi_sender: Option<SyncSender<f64>>,
+    dpi_override: Option<f64>,
     /// All received pages (for back-navigation).
     pages: Vec<StoredPage>,
     /// Index into `pages` of the currently displayed page.
     current_page: usize,
     /// Zoom level (1.0 = fit to window).
     zoom: f32,
+    /// Maximum zoom (where effective_scale = 1.0, i.e., native DPI).
+    max_zoom: f32,
     /// Pan offset in screen pixels.
     pan_offset: Vec2,
     /// Whether the user is currently dragging to pan.
@@ -31,6 +38,12 @@ pub struct ViewerApp {
     /// Whether we've sent a continue signal for the current page
     /// (to avoid double-sending).
     continue_sent: bool,
+    /// Whether we've already sent DPI to the interpreter.
+    dpi_sent: bool,
+    /// Whether the window has been resized to match the first page.
+    window_sized: bool,
+    /// Pending window size for centering (set by size_window_to_page).
+    pending_center: Option<Vec2>,
 }
 
 /// A page image with its egui texture.
@@ -43,19 +56,117 @@ struct StoredPage {
 }
 
 impl ViewerApp {
-    pub fn new(viewer_end: ViewerEnd) -> Self {
+    pub fn new(viewer_end: ViewerEnd, dpi_override: Option<f64>) -> Self {
         Self {
             page_receiver: viewer_end.page_receiver,
             continue_sender: viewer_end.continue_sender,
+            dpi_sender: Some(viewer_end.dpi_sender),
+            dpi_override,
             pages: Vec::new(),
             current_page: 0,
             zoom: 1.0,
+            max_zoom: 1.0,
             pan_offset: Vec2::ZERO,
             dragging: false,
             last_drag_pos: None,
             interpreter_done: false,
             continue_sent: false,
+            dpi_sent: false,
+            window_sized: false,
+            pending_center: None,
         }
+    }
+
+    /// Auto-calculate DPI from monitor size and send to interpreter.
+    ///
+    /// PostForge formula: DPI = floor(screen_h * 0.85 * 72 / page_h_pts)
+    /// This produces a rendered image that fills 85% of screen height
+    /// at native resolution (no upscaling needed).
+    fn send_dpi(&mut self, ctx: &egui::Context) {
+        if self.dpi_sent {
+            return;
+        }
+
+        let dpi = if let Some(override_dpi) = self.dpi_override {
+            override_dpi
+        } else {
+            // Query monitor size from egui viewport info.
+            // This may be None on the first few frames — defer until available.
+            let monitor_size = ctx.input(|i| i.viewport().monitor_size);
+            let Some(monitor) = monitor_size else {
+                return; // try again next frame
+            };
+
+            // Use physical pixel height for DPI calculation (matches PostForge).
+            // egui's monitor_size is in logical points; multiply by scale factor
+            // to get physical pixels, so the rendered image maps ~1:1 to screen.
+            let ppp = ctx.input(|i| {
+                i.viewport().native_pixels_per_point.unwrap_or(1.0)
+            }) as f64;
+            let physical_h = monitor.y as f64 * ppp;
+
+            // Measure actual panel overhead from egui layout (status bar + margins).
+            let panel_overhead = (ctx.screen_rect().height() - ctx.available_rect().height()) as f64;
+            let available_h = physical_h * 0.85 - panel_overhead * ppp;
+            let dpi = (available_h * 72.0 / DEFAULT_PAGE_HEIGHT_PTS).floor();
+            dpi.clamp(36.0, 9600.0)
+        };
+
+        if let Some(sender) = self.dpi_sender.take() {
+            let _ = sender.send(dpi);
+        }
+        self.dpi_sent = true;
+    }
+
+    /// Resize the window to match the first page's aspect ratio.
+    ///
+    /// Window height = 85% of monitor height.
+    /// Window width follows from the page aspect ratio.
+    fn size_window_to_page(&mut self, ctx: &egui::Context) {
+        if self.window_sized || self.pages.is_empty() {
+            return;
+        }
+        self.window_sized = true;
+
+        let page = &self.pages[0];
+        let img_w = page.width as f32;
+        let img_h = page.height as f32;
+        if img_w <= 0.0 || img_h <= 0.0 {
+            return;
+        }
+
+        let (max_w, max_h) = ctx.input(|i| {
+            if let Some(monitor) = i.viewport().monitor_size {
+                // Portrait pages: 60% width, 85% height
+                // Landscape pages: 85% width, 85% height
+                let width_frac = if img_w > img_h { 0.85 } else { 0.60 };
+                (monitor.x * width_frac, monitor.y * 0.85)
+            } else {
+                (1024.0, 768.0)
+            }
+        });
+
+        // Account for panel overhead (status bar) so the central panel
+        // has exactly enough room for the image at 1:1.
+        let panel_overhead = ctx.screen_rect().height() - ctx.available_rect().height();
+
+        // Use rendered image dimensions + overhead, capped to screen
+        let mut win_w = img_w;
+        let mut win_h = img_h + panel_overhead;
+        if win_w > max_w || win_h > max_h {
+            let scale = (max_w / win_w).min(max_h / win_h);
+            win_w *= scale;
+            win_h *= scale;
+        }
+
+        // Enforce minimum
+        win_w = win_w.max(400.0);
+        win_h = win_h.max(300.0);
+
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(win_w, win_h)));
+
+        // Store the window size for deferred centering.
+        self.pending_center = Some(Vec2::new(win_w, win_h));
     }
 
     /// Check for newly arrived pages (non-blocking).
@@ -82,9 +193,10 @@ impl ViewerApp {
         }
 
         if !had_pages && !self.pages.is_empty() {
-            // First page arrived — show it
+            // First page arrived — show it and size the window
             self.current_page = 0;
             self.reset_view();
+            self.size_window_to_page(ctx);
         } else if self.continue_sent && self.current_page + 1 < self.pages.len() {
             // User requested next page and it has arrived — advance
             self.current_page += 1;
@@ -114,6 +226,9 @@ impl ViewerApp {
                 self.interpreter_done = true;
             }
             self.continue_sent = true;
+        } else if self.interpreter_done {
+            // No more pages — quit
+            self.continue_sent = true; // triggers close in poll_pages
         }
     }
 
@@ -158,8 +273,50 @@ impl ViewerApp {
 
 impl eframe::App for ViewerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Status bar at the bottom — rendered first so send_dpi can measure
+        // the actual panel overhead instead of using a hardcoded constant.
+        egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                if self.pages.is_empty() {
+                    ui.label("Waiting for page...");
+                } else {
+                    let total = if self.interpreter_done {
+                        format!("{}", self.pages.len())
+                    } else {
+                        format!("{}+", self.pages.len())
+                    };
+                    ui.label(format!(
+                        "Page {} of {} | Zoom: {:.0}%",
+                        self.current_page + 1,
+                        total,
+                        self.zoom * 100.0,
+                    ));
+                    ui.separator();
+                    ui.label("Space/Right: next | Left: prev | +/-: zoom | 0: fit | Q: quit");
+                }
+            });
+        });
+
+        // On first frame, calculate DPI and send to interpreter
+        self.send_dpi(ctx);
+
         // Poll for new pages
         self.poll_pages(ctx);
+
+        // Center the window (deferred from size_window_to_page so the resize
+        // has taken effect and outer_rect reflects actual window dimensions).
+        // On X11, center window after resize (Wayland ignores this but
+        // centers the initial window automatically via the compositor).
+        if let Some(win_size) = self.pending_center.take()
+            && let Some(monitor) = ctx.input(|i| i.viewport().monitor_size)
+        {
+            let pos_x = (monitor.x - win_size.x) / 2.0;
+            let pos_y = (monitor.y - win_size.y) / 2.0;
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
+                pos_x.max(0.0),
+                pos_y.max(0.0),
+            )));
+        }
 
         // Handle keyboard input
         ctx.input(|i| {
@@ -171,9 +328,10 @@ impl eframe::App for ViewerApp {
                 return;
             }
 
-            // Zoom
+            // Zoom (capped at native DPI: effective_scale = fit * zoom <= 1.0)
+            let max_z = self.max_zoom;
             if i.key_pressed(egui::Key::Equals) || i.key_pressed(egui::Key::Plus) {
-                self.zoom = (self.zoom * 1.25).min(10.0);
+                self.zoom = (self.zoom * 1.25).min(max_z);
             }
             if i.key_pressed(egui::Key::Minus) {
                 self.zoom = (self.zoom / 1.25).max(0.1);
@@ -182,15 +340,19 @@ impl eframe::App for ViewerApp {
                 self.reset_view();
             }
 
-            // Mouse wheel zoom (zoom toward cursor)
+            // Mouse wheel zoom (zoom toward cursor).
+            // egui's smooth_scroll_delta: ±40 pts per mouse wheel notch (native
+            // line_scroll_speed=40), continuous small values for trackpads.
+            // Map 40 pts → 1.25× to match keyboard +/- step size.
             let scroll = i.smooth_scroll_delta.y;
-            if scroll != 0.0 {
-                let factor = if scroll > 0.0 { 1.1 } else { 1.0 / 1.1 };
-                let new_zoom = (self.zoom * factor).clamp(0.1, 10.0);
+            if scroll.abs() > 0.5 {
+                let factor = 1.25_f32.powf(scroll / 40.0);
+                let new_zoom = (self.zoom * factor).clamp(0.1, max_z);
                 if let Some(pos) = i.pointer.latest_pos() {
                     // Zoom toward cursor position
                     let center = pos.to_vec2();
-                    self.pan_offset = center - (center - self.pan_offset) * (new_zoom / self.zoom);
+                    self.pan_offset =
+                        center - (center - self.pan_offset) * (new_zoom / self.zoom);
                 }
                 self.zoom = new_zoom;
             }
@@ -245,31 +407,10 @@ impl eframe::App for ViewerApp {
             }
         });
 
-        // Status bar at the bottom
-        egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                if self.pages.is_empty() {
-                    ui.label("Waiting for page...");
-                } else {
-                    let total = if self.interpreter_done {
-                        format!("{}", self.pages.len())
-                    } else {
-                        format!("{}+", self.pages.len())
-                    };
-                    ui.label(format!(
-                        "Page {} of {} | Zoom: {:.0}%",
-                        self.current_page + 1,
-                        total,
-                        self.zoom * 100.0,
-                    ));
-                    ui.separator();
-                    ui.label("Space/Right: next | Left: prev | +/-: zoom | 0: fit | Q: quit");
-                }
-            });
-        });
-
-        // Main content area
-        egui::CentralPanel::default().show(ctx, |ui| {
+        // Main content area (no inner margins — image centering is handled manually)
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE.fill(ctx.style().visuals.panel_fill))
+            .show(ctx, |ui| {
             if self.pages.is_empty() {
                 ui.centered_and_justified(|ui| {
                     ui.label("Waiting for first page to render...");
@@ -285,6 +426,11 @@ impl eframe::App for ViewerApp {
             if let Some(ref texture) = page.texture {
                 let available = ui.available_size();
                 let fit = self.fit_scale(available, page);
+
+                // Update max zoom: effective_scale = fit * zoom <= 1.0
+                self.max_zoom = if fit > 0.0 { (1.0 / fit).max(1.0) } else { 1.0 };
+                self.zoom = self.zoom.min(self.max_zoom);
+
                 let effective_scale = fit * self.zoom;
 
                 let img_size = Vec2::new(

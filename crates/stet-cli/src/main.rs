@@ -97,12 +97,6 @@ fn main() {
         }
     });
 
-    // Set DPI defaults based on device (user override takes precedence)
-    let dpi = dpi.unwrap_or(match device.as_str() {
-        "viewer" => 150.0,
-        _ => 300.0,
-    });
-
     // Configure rayon thread pool — default cap at 8 (sequential PNG writing
     // bottleneck means additional cores yield no speedup), override with --threads.
     let pool_size = threads.unwrap_or(8);
@@ -115,7 +109,10 @@ fn main() {
         });
 
     match device.as_str() {
-        "png" => run_png_mode(dpi, file_args),
+        "png" => {
+            let dpi = dpi.unwrap_or(300.0);
+            run_png_mode(dpi, file_args);
+        }
         #[cfg(feature = "viewer")]
         "viewer" => run_viewer_mode(dpi, file_args),
         #[cfg(not(feature = "viewer"))]
@@ -146,8 +143,12 @@ fn run_png_mode(dpi: f64, file_args: Vec<String>) {
 }
 
 /// Run in viewer mode — interpreter on background thread, viewer on main thread.
+///
+/// `dpi_override`: if `Some`, use this DPI instead of auto-calculating from
+/// monitor size. When `None`, the viewer calculates DPI from monitor dimensions
+/// and sends it to the interpreter via a channel.
 #[cfg(feature = "viewer")]
-fn run_viewer_mode(dpi: f64, file_args: Vec<String>) {
+fn run_viewer_mode(dpi_override: Option<f64>, file_args: Vec<String>) {
     if file_args.is_empty() {
         // REPL mode — no viewer, just run interactively
         let mut ctx = create_context();
@@ -157,10 +158,24 @@ fn run_viewer_mode(dpi: f64, file_args: Vec<String>) {
     }
 
     let (interp_end, viewer_end) = stet_viewer::create_channels();
-    let factory = stet_viewer::ViewerSinkFactory::new(interp_end);
+
+    // Extract DPI receiver before giving the rest to ViewerSinkFactory
+    let dpi_receiver = interp_end.dpi_receiver;
+    let factory =
+        stet_viewer::ViewerSinkFactory::new(interp_end.page_sender, interp_end.continue_receiver);
 
     // Spawn interpreter on background thread (egui/winit requires main thread)
     std::thread::spawn(move || {
+        // Wait for the viewer to calculate DPI from monitor size and send it.
+        // This blocks until the viewer's first frame, which queries the monitor.
+        let dpi = match dpi_receiver.recv() {
+            Ok(d) => d,
+            Err(_) => {
+                // Viewer closed before sending DPI — nothing to do
+                return;
+            }
+        };
+
         let mut ctx = create_context();
 
         // Register device factory with viewer sink
@@ -176,8 +191,8 @@ fn run_viewer_mode(dpi: f64, file_args: Vec<String>) {
         run_file_jobs(&mut ctx, dpi, &file_args, "viewer");
     });
 
-    // Main thread: run viewer
-    stet_viewer::run_viewer(viewer_end);
+    // Main thread: run viewer (passes override so viewer knows whether to auto-calc)
+    stet_viewer::run_viewer(viewer_end, dpi_override);
     std::process::exit(0);
 }
 

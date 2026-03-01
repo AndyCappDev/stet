@@ -204,8 +204,7 @@ fn test_tiger_ps() {
     }
 
     let source = std::fs::read(tiger_path).expect("read tiger.ps");
-    let tmp_path =
-        std::env::temp_dir().join(format!("stet_tiger_test_{}.png", std::process::id()));
+    let tmp_path = std::env::temp_dir().join(format!("stet_tiger_test_{}.png", std::process::id()));
     let path_str = tmp_path.to_str().unwrap().to_string();
 
     let mut ctx = render_ctx(612, 792);

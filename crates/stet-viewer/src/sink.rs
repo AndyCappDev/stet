@@ -22,11 +22,14 @@ pub struct ViewerSinkFactory {
 }
 
 impl ViewerSinkFactory {
-    /// Create a new factory from the interpreter-side channel endpoints.
-    pub fn new(interp_end: crate::InterpreterEnd) -> Self {
+    /// Create a new factory from channel endpoints.
+    pub fn new(
+        page_sender: SyncSender<PageImage>,
+        continue_receiver: Receiver<()>,
+    ) -> Self {
         Self {
-            page_sender: interp_end.page_sender,
-            continue_receiver: Arc::new(Mutex::new(interp_end.continue_receiver)),
+            page_sender,
+            continue_receiver: Arc::new(Mutex::new(continue_receiver)),
             page_num: Arc::new(AtomicU32::new(1)),
         }
     }

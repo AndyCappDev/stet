@@ -17,9 +17,9 @@
     /BeginPage {pop} bind
     /EndPage {
         dup 0 eq {
-            pop true
+            pop pop true
         } {
-            1 eq { true } { pop false } ifelse
+            1 eq { pop true } { pop false } ifelse
         } ifelse
     } bind
     /InputAttributes <<>>

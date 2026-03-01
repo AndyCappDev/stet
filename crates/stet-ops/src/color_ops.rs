@@ -793,7 +793,12 @@ fn parse_cie_def_colorspace(
         return Err(PsError::RangeCheck);
     }
     // Start with empty params; precompute_cie_decode_tables will fill the table
-    let range_def_vec = get_cie_float_array(ctx, dict_entity, b"RangeDEF", &[0.0, 1.0, 0.0, 1.0, 0.0, 1.0]);
+    let range_def_vec = get_cie_float_array(
+        ctx,
+        dict_entity,
+        b"RangeDEF",
+        &[0.0, 1.0, 0.0, 1.0, 0.0, 1.0],
+    );
     let mut range_def = [0.0, 1.0, 0.0, 1.0, 0.0, 1.0];
     if range_def_vec.len() >= 6 {
         range_def.copy_from_slice(&range_def_vec[..6]);
@@ -1132,10 +1137,7 @@ pub fn color_space_components(cs: &ColorSpace) -> usize {
 /// If the Indexed color space has a procedure-based lookup, pre-evaluate it
 /// by calling the procedure for each index 0..hival, collecting the color
 /// component bytes into a lookup Vec<u8>.
-fn resolve_indexed_proc_lookup(
-    ctx: &mut Context,
-    cs: ColorSpace,
-) -> Result<ColorSpace, PsError> {
+fn resolve_indexed_proc_lookup(ctx: &mut Context, cs: ColorSpace) -> Result<ColorSpace, PsError> {
     if let ColorSpace::Indexed {
         ref base,
         hival,
@@ -1309,11 +1311,7 @@ fn get_cie_decode_proc_single(
 }
 
 /// Evaluate a decode procedure at N evenly-spaced sample points in [0,1].
-fn eval_decode_table(
-    ctx: &mut Context,
-    proc: PsObject,
-    n: usize,
-) -> Result<Vec<f64>, PsError> {
+fn eval_decode_table(ctx: &mut Context, proc: PsObject, n: usize) -> Result<Vec<f64>, PsError> {
     let mut table = Vec::with_capacity(n);
     for i in 0..n {
         let input = i as f64 / (n - 1) as f64;
@@ -1335,7 +1333,12 @@ fn precompute_cie_def_table(
     dict_entity: EntityId,
 ) -> Result<CieDefParams, PsError> {
     // Extract RangeDEF
-    let range_def_vec = get_cie_float_array(ctx, dict_entity, b"RangeDEF", &[0.0, 1.0, 0.0, 1.0, 0.0, 1.0]);
+    let range_def_vec = get_cie_float_array(
+        ctx,
+        dict_entity,
+        b"RangeDEF",
+        &[0.0, 1.0, 0.0, 1.0, 0.0, 1.0],
+    );
     let mut range_def = [0.0, 1.0, 0.0, 1.0, 0.0, 1.0];
     if range_def_vec.len() >= 6 {
         range_def.copy_from_slice(&range_def_vec[..6]);
@@ -1347,8 +1350,16 @@ fn precompute_cie_def_table(
         Some(obj) => match obj.value {
             PsValue::Array { entity, start, len } if len >= 4 => {
                 let m1 = ctx.arrays.get_element(entity, start).as_i32().unwrap_or(0) as usize;
-                let m2 = ctx.arrays.get_element(entity, start + 1).as_i32().unwrap_or(0) as usize;
-                let m3 = ctx.arrays.get_element(entity, start + 2).as_i32().unwrap_or(0) as usize;
+                let m2 = ctx
+                    .arrays
+                    .get_element(entity, start + 1)
+                    .as_i32()
+                    .unwrap_or(0) as usize;
+                let m3 = ctx
+                    .arrays
+                    .get_element(entity, start + 2)
+                    .as_i32()
+                    .unwrap_or(0) as usize;
                 let strings_obj = ctx.arrays.get_element(entity, start + 3);
                 match strings_obj.value {
                     PsValue::Array {
@@ -1407,7 +1418,9 @@ fn precompute_cie_def_table(
 
     let mut idx = 0;
     for di in 0..m1 {
-        let string_obj = ctx.arrays.get_element(strings_entity, strings_start + di as u32);
+        let string_obj = ctx
+            .arrays
+            .get_element(strings_entity, strings_start + di as u32);
         let data = match string_obj.value {
             PsValue::String {
                 entity: se,
@@ -1465,9 +1478,21 @@ fn precompute_cie_defg_table(
         Some(obj) => match obj.value {
             PsValue::Array { entity, start, len } if len >= 5 => {
                 let m1 = ctx.arrays.get_element(entity, start).as_i32().unwrap_or(0) as usize;
-                let m2 = ctx.arrays.get_element(entity, start + 1).as_i32().unwrap_or(0) as usize;
-                let m3 = ctx.arrays.get_element(entity, start + 2).as_i32().unwrap_or(0) as usize;
-                let m4 = ctx.arrays.get_element(entity, start + 3).as_i32().unwrap_or(0) as usize;
+                let m2 = ctx
+                    .arrays
+                    .get_element(entity, start + 1)
+                    .as_i32()
+                    .unwrap_or(0) as usize;
+                let m3 = ctx
+                    .arrays
+                    .get_element(entity, start + 2)
+                    .as_i32()
+                    .unwrap_or(0) as usize;
+                let m4 = ctx
+                    .arrays
+                    .get_element(entity, start + 3)
+                    .as_i32()
+                    .unwrap_or(0) as usize;
                 let strings_obj = ctx.arrays.get_element(entity, start + 4);
                 match strings_obj.value {
                     PsValue::Array {
@@ -1523,7 +1548,9 @@ fn precompute_cie_defg_table(
 
     let mut idx = 0;
     for di in 0..m1 {
-        let string_obj = ctx.arrays.get_element(strings_entity, strings_start + di as u32);
+        let string_obj = ctx
+            .arrays
+            .get_element(strings_entity, strings_start + di as u32);
         let data = match string_obj.value {
             PsValue::String {
                 entity: se,
