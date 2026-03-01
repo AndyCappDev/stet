@@ -98,7 +98,12 @@ impl ViewerApp {
                 i.viewport().native_pixels_per_point.unwrap_or(1.0)
             }) as f64;
             let physical_h = monitor.y as f64 * ppp;
-            let dpi = (physical_h * 0.85 * 72.0 / DEFAULT_PAGE_HEIGHT_PTS).floor();
+
+            // Subtract panel overhead (status bar) so the image fits the
+            // available area at 1:1 zoom, not just the full window height.
+            let panel_overhead = (ctx.screen_rect().height() - ctx.available_rect().height()) as f64;
+            let available_h = physical_h * 0.85 - panel_overhead * ppp;
+            let dpi = (available_h * 72.0 / DEFAULT_PAGE_HEIGHT_PTS).floor();
             dpi.clamp(36.0, 9600.0)
         };
 
@@ -263,6 +268,30 @@ impl ViewerApp {
 
 impl eframe::App for ViewerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Status bar — rendered first so send_dpi can measure the actual panel
+        // overhead via ctx.available_rect() instead of using a hardcoded constant.
+        egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                if self.pages.is_empty() {
+                    ui.label("Waiting for page...");
+                } else {
+                    let total = if self.interpreter_done {
+                        format!("{}", self.pages.len())
+                    } else {
+                        format!("{}+", self.pages.len())
+                    };
+                    ui.label(format!(
+                        "Page {} of {} | Zoom: {:.0}%",
+                        self.current_page + 1,
+                        total,
+                        self.zoom * 100.0,
+                    ));
+                    ui.separator();
+                    ui.label("Space/Right: next | Left: prev | +/-: zoom | 0: fit | Q: quit");
+                }
+            });
+        });
+
         // Send render DPI to interpreter (deferred until monitor size is available)
         self.send_dpi(ctx);
 
@@ -371,29 +400,6 @@ impl eframe::App for ViewerApp {
             {
                 self.reset_view();
             }
-        });
-
-        // Status bar
-        egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                if self.pages.is_empty() {
-                    ui.label("Waiting for page...");
-                } else {
-                    let total = if self.interpreter_done {
-                        format!("{}", self.pages.len())
-                    } else {
-                        format!("{}+", self.pages.len())
-                    };
-                    ui.label(format!(
-                        "Page {} of {} | Zoom: {:.0}%",
-                        self.current_page + 1,
-                        total,
-                        self.zoom * 100.0,
-                    ));
-                    ui.separator();
-                    ui.label("Space/Right: next | Left: prev | +/-: zoom | 0: fit | Q: quit");
-                }
-            });
         });
 
         // Main content area (no inner margins — image centering is handled manually)
