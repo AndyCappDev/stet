@@ -70,7 +70,7 @@ pub fn op_image(ctx: &mut Context) -> Result<(), PsError> {
         ctx.o_stack.pop()?; // width
 
         let data = collect_proc_data(ctx, procedure, total_bytes)?;
-        let samples = unpack_samples(&data, width as u32, height as u32, bps as u32, ncomp as u32);
+        let samples = unpack_samples(&data, width as u32, height as u32, bps as u32, ncomp as u32, false);
         let rgba = samples_to_rgba(
             ctx,
             &samples,
@@ -96,7 +96,7 @@ pub fn op_image(ctx: &mut Context) -> Result<(), PsError> {
     let decode: Vec<f64> = (0..ncomp).flat_map(|_| [0.0, 1.0]).collect();
 
     // Unpack samples, convert to RGBA
-    let samples = unpack_samples(&data, width as u32, height as u32, bps as u32, ncomp as u32);
+    let samples = unpack_samples(&data, width as u32, height as u32, bps as u32, ncomp as u32, false);
     let rgba = samples_to_rgba(
         ctx,
         &samples,
@@ -190,7 +190,8 @@ fn image_dict_form(ctx: &mut Context) -> Result<(), PsError> {
     };
 
     // Unpack and convert
-    let samples = unpack_samples(&data, width, height, bps, ncomp);
+    let indexed = matches!(ctx.gstate.color_space, ColorSpace::Indexed { .. });
+    let samples = unpack_samples(&data, width, height, bps, ncomp, indexed);
     let rgba = samples_to_rgba(ctx, &samples, width, height, ncomp, &decode);
 
     draw_image_to_device(ctx, rgba, width, height, false, &image_matrix);
@@ -413,7 +414,7 @@ pub fn op_colorimage(ctx: &mut Context) -> Result<(), PsError> {
 
             let decode: Vec<f64> = (0..ncomp).flat_map(|_| [0.0, 1.0]).collect();
             let samples =
-                unpack_samples(&data, width as u32, height as u32, bps as u32, ncomp as u32);
+                unpack_samples(&data, width as u32, height as u32, bps as u32, ncomp as u32, false);
             let rgba = samples_to_rgba(
                 ctx,
                 &samples,
@@ -456,7 +457,7 @@ pub fn op_colorimage(ctx: &mut Context) -> Result<(), PsError> {
             let data = collect_proc_data(ctx, procedure, total_bytes)?;
             let decode: Vec<f64> = (0..ncomp).flat_map(|_| [0.0, 1.0]).collect();
             let samples =
-                unpack_samples(&data, width as u32, height as u32, bps as u32, ncomp as u32);
+                unpack_samples(&data, width as u32, height as u32, bps as u32, ncomp as u32, false);
             let rgba = samples_to_rgba(
                 ctx,
                 &samples,
@@ -479,7 +480,7 @@ pub fn op_colorimage(ctx: &mut Context) -> Result<(), PsError> {
     // Default decode
     let decode: Vec<f64> = (0..ncomp).flat_map(|_| [0.0, 1.0]).collect();
 
-    let samples = unpack_samples(&data, width as u32, height as u32, bps as u32, ncomp as u32);
+    let samples = unpack_samples(&data, width as u32, height as u32, bps as u32, ncomp as u32, false);
     let rgba = samples_to_rgba(
         ctx,
         &samples,
@@ -624,7 +625,7 @@ fn read_multi_source_data(
 }
 
 /// Unpack samples from raw data (1/2/4/8/12 bits) to 8-bit values.
-fn unpack_samples(raw: &[u8], width: u32, height: u32, bps: u32, ncomp: u32) -> Vec<u8> {
+fn unpack_samples(raw: &[u8], width: u32, height: u32, bps: u32, ncomp: u32, indexed: bool) -> Vec<u8> {
     if bps == 8 {
         return raw.to_vec();
     }
@@ -675,8 +676,13 @@ fn unpack_samples(raw: &[u8], width: u32, height: u32, bps: u32, ncomp: u32) -> 
                 let bit_offset = (samples_per_byte - 1 - (s % samples_per_byte)) * bps as usize;
                 let byte_val = raw.get(byte_idx).copied().unwrap_or(0);
                 let sample = (byte_val >> bit_offset) & mask;
-                // Scale to 8-bit
-                result.push((sample as f64 / max_val * 255.0).round() as u8);
+                if indexed {
+                    // Indexed: raw value is palette index, don't scale
+                    result.push(sample);
+                } else {
+                    // Scale to 8-bit
+                    result.push((sample as f64 / max_val * 255.0).round() as u8);
+                }
             }
         }
     }
@@ -992,7 +998,7 @@ mod tests {
     #[test]
     fn test_unpack_8bit() {
         let data = vec![0, 128, 255];
-        let result = unpack_samples(&data, 3, 1, 8, 1);
+        let result = unpack_samples(&data, 3, 1, 8, 1, false);
         assert_eq!(result, vec![0, 128, 255]);
     }
 
@@ -1000,7 +1006,7 @@ mod tests {
     fn test_unpack_1bit() {
         // 0b10110000 = 0xB0 → samples: 1,0,1,1,0,0,0,0
         let data = vec![0xB0];
-        let result = unpack_samples(&data, 4, 1, 1, 1);
+        let result = unpack_samples(&data, 4, 1, 1, 1, false);
         // 1 bit: 1→255, 0→0
         assert_eq!(result[0], 255); // bit 1
         assert_eq!(result[1], 0); // bit 0
@@ -1012,7 +1018,7 @@ mod tests {
     fn test_unpack_4bit() {
         // 0xAC → high nibble 0xA=10, low nibble 0xC=12
         let data = vec![0xAC];
-        let result = unpack_samples(&data, 2, 1, 4, 1);
+        let result = unpack_samples(&data, 2, 1, 4, 1, false);
         // 10/15 * 255 = 170, 12/15 * 255 = 204
         assert_eq!(result[0], 170);
         assert_eq!(result[1], 204);
