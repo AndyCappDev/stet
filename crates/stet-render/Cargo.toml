@@ -1,0 +1,13 @@
+[package]
+name = "stet-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "tiny-skia rendering backend for stet PostScript interpreter"
+
+[dependencies]
+stet-core.workspace = true
+tiny-skia.workspace = true
+png.workspace = true
+rayon.workspace = true

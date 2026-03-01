@@ -1,4 +1,4 @@
-# xforge Phase 4: Text & Fonts — Implementation Plan
+# stet Phase 4: Text & Fonts — Implementation Plan
 
 ## Context
 
@@ -70,23 +70,23 @@ Add `current_font: Option<PsObject>` to `GraphicsState`. The font is a dict obje
 ## Implementation Steps (10 steps, always compiling)
 
 ### Step 1: GraphicsState + Context Changes
-**Modify**: `crates/xforge-core/src/graphics_state.rs`
+**Modify**: `crates/stet-core/src/graphics_state.rs`
 - Add `current_font: Option<PsObject>` to `GraphicsState` (default: `None`)
 
-**Modify**: `crates/xforge-core/src/context.rs`
+**Modify**: `crates/stet-core/src/context.rs`
 - Add `font_directory: EntityId` (a dict mapping font names → font dicts)
 - Add `font_resource_path: Option<String>` (path to font directory on disk)
 - Allocate `FontDirectory` dict in `Context::new()`
 - Put `FontDirectory` in systemdict
 - Pre-intern font-related names in `NameCache`: `FontName`, `FontType`, `FontMatrix`, `FontBBox`, `Encoding`, `CharStrings`, `Private`, `FID`, `PaintType`
 
-**Modify**: `crates/xforge-core/src/object.rs`
+**Modify**: `crates/stet-core/src/object.rs`
 - Implement `PsObject::is_dict()` convenience method if not present
 
 ~0 new tests (structural changes only).
 
 ### Step 2: Standard Encoding Table
-**New file**: `crates/xforge-core/src/encoding.rs`
+**New file**: `crates/stet-core/src/encoding.rs`
 
 Define `STANDARD_ENCODING: [&str; 256]` — the PostScript StandardEncoding mapping byte values to glyph names. This is a static table (not a PostScript array).
 
@@ -99,7 +99,7 @@ Register `StandardEncoding` and `ISOLatin1Encoding` as arrays in systemdict duri
 ~4 tests (spot-check encoding lookups: 'A' at 65, 'space' at 32, etc.).
 
 ### Step 3: Type 1 Font Parser
-**New file**: `crates/xforge-core/src/type1_parser.rs`
+**New file**: `crates/stet-core/src/type1_parser.rs`
 
 Parse `.t1` files and return structured data:
 
@@ -136,7 +136,7 @@ The eexec decryption handles both binary and hex-encoded formats. The parser ext
 ~8 tests (parse StandardSymbolsPS.t1, extract NimbusSans-Regular metadata, verify charstring count, encoding spot-checks).
 
 ### Step 4: CharString Interpreter
-**New file**: `crates/xforge-core/src/charstring.rs`
+**New file**: `crates/stet-core/src/charstring.rs`
 
 Execute Type 1 charstrings → path segments + width.
 
@@ -202,7 +202,7 @@ pub fn execute_charstring(
 ~15 tests (decrypt charstring, execute simple glyph like 'space'/'A'/'o', verify path segment count, verify width extraction, test subroutine call, test seac).
 
 ### Step 5: Font Loading Pipeline
-**New file**: `crates/xforge-core/src/font_loader.rs`
+**New file**: `crates/stet-core/src/font_loader.rs`
 
 ```rust
 /// Load a Type 1 font from a .t1 file and register it as a PostScript dict.
@@ -273,7 +273,7 @@ const FONT_SUBSTITUTIONS: &[(&str, &str)] = &[
 ~6 tests (load NimbusSans-Regular.t1, verify dict structure, verify encoding, verify charstring count).
 
 ### Step 6: Font Dictionary Operators
-**New file**: `crates/xforge-ops/src/font_ops.rs`
+**New file**: `crates/stet-ops/src/font_ops.rs`
 
 7 operators:
 
@@ -298,7 +298,7 @@ const FONT_SUBSTITUTIONS: &[(&str, &str)] = &[
 ~10 tests (definefont/findfont roundtrip, scalefont matrix composition, makefont, setfont/currentfont, findfont with substitution, findfont error on unknown font).
 
 ### Step 7: Text Show Operators
-**New file**: `crates/xforge-ops/src/show_ops.rs`
+**New file**: `crates/stet-ops/src/show_ops.rs`
 
 Core text rendering operators:
 
@@ -358,7 +358,7 @@ fn render_show(ctx, string_bytes, extra_ax, extra_ay, width_char, cx, cy):
 ~12 tests (show renders non-empty PNG, stringwidth returns positive width, ashow spacing, charpath appends to path, setcachedevice/setcharwidth stack behavior).
 
 ### Step 8: Page Size Convenience Operators + selectfont
-**Modify**: `crates/xforge-ops/src/lib.rs`
+**Modify**: `crates/stet-ops/src/lib.rs`
 
 Define convenience operators as no-ops (page size already set by CLI):
 - `letter`, `legal`, `a4`, `a3`, `b5` — all no-ops
@@ -372,18 +372,18 @@ Define convenience operators as no-ops (page size already set by CLI):
 cp ~/Projects/postforge/postforge/resources/Font/*.t1 resources/Font/
 ```
 
-**Modify**: `crates/xforge-cli/src/main.rs`
+**Modify**: `crates/stet-cli/src/main.rs`
 - Set `ctx.font_resource_path` to locate `resources/Font/` directory
 - Search relative to executable, then relative to CWD, then absolute path
 
 **Modify**: `Cargo.toml` / workspace config if needed
 
 ### Step 10: Operator Registration + Integration Tests
-**Modify**: `crates/xforge-ops/src/lib.rs`
+**Modify**: `crates/stet-ops/src/lib.rs`
 - Register all new operators (7 font + 9 show + convenience ops)
 - Add `pub mod font_ops`, `pub mod show_ops`
 
-**New/Modify**: `crates/xforge-engine/tests/rendering.rs`
+**New/Modify**: `crates/stet-engine/tests/rendering.rs`
 - Add font rendering integration tests:
   1. Simple show: `findfont scalefont setfont (Hello) show` → non-empty PNG
   2. stringwidth returns positive values
@@ -415,19 +415,19 @@ golfer.ps defines font operators (`z`, `Z`, `_s`/`_S`, `_E`) but only executes t
 ## Files Summary
 
 **New files (6):**
-- `crates/xforge-core/src/encoding.rs` — StandardEncoding, ISOLatin1Encoding tables
-- `crates/xforge-core/src/type1_parser.rs` — .t1 file parser with eexec decryption
-- `crates/xforge-core/src/charstring.rs` — Type 1 charstring interpreter
-- `crates/xforge-core/src/font_loader.rs` — Font loading pipeline, name mapping
-- `crates/xforge-ops/src/font_ops.rs` — 7 font dictionary operators
-- `crates/xforge-ops/src/show_ops.rs` — 9 text show operators
+- `crates/stet-core/src/encoding.rs` — StandardEncoding, ISOLatin1Encoding tables
+- `crates/stet-core/src/type1_parser.rs` — .t1 file parser with eexec decryption
+- `crates/stet-core/src/charstring.rs` — Type 1 charstring interpreter
+- `crates/stet-core/src/font_loader.rs` — Font loading pipeline, name mapping
+- `crates/stet-ops/src/font_ops.rs` — 7 font dictionary operators
+- `crates/stet-ops/src/show_ops.rs` — 9 text show operators
 
 **Modified files (5):**
-- `crates/xforge-core/src/lib.rs` — add `encoding`, `type1_parser`, `charstring`, `font_loader` modules
-- `crates/xforge-core/src/graphics_state.rs` — add `current_font` to GraphicsState
-- `crates/xforge-core/src/context.rs` — add `font_directory`, `font_resource_path`, font name cache entries
-- `crates/xforge-ops/src/lib.rs` — register ~18 new operators, add 2 new modules
-- `crates/xforge-cli/src/main.rs` — set font resource path
+- `crates/stet-core/src/lib.rs` — add `encoding`, `type1_parser`, `charstring`, `font_loader` modules
+- `crates/stet-core/src/graphics_state.rs` — add `current_font` to GraphicsState
+- `crates/stet-core/src/context.rs` — add `font_directory`, `font_resource_path`, font name cache entries
+- `crates/stet-ops/src/lib.rs` — register ~18 new operators, add 2 new modules
+- `crates/stet-cli/src/main.rs` — set font resource path
 
 **Copied resources:**
 - `resources/Font/*.t1` — 35 Type 1 font files from PostForge

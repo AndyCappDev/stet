@@ -1,4 +1,4 @@
-# xforge Phase 2: VM & Persistence — Detailed Implementation Plan
+# stet Phase 2: VM & Persistence — Detailed Implementation Plan
 
 ## Goal
 
@@ -56,7 +56,7 @@ The `ObjFlags` already has a `GLOBAL_BIT` (bit 4). Phase 2 uses this consistentl
 
 ### Decision 4: File I/O Scope
 
-Implement 19 new file operators (expanding file_ops.rs from 5 to 24). New `FileStore` in xforge-core holds open file handles. Filter-based I/O (flate, ascii85, etc.) deferred to Phase 5.
+Implement 19 new file operators (expanding file_ops.rs from 5 to 24). New `FileStore` in stet-core holds open file handles. Filter-based I/O (flate, ascii85, etc.) deferred to Phase 5.
 
 **Reference**: PostForge's `file_types.py` (File, StandardFile, StandardFileProxy classes) and `file.py` operators.
 
@@ -76,7 +76,7 @@ Not needed for Phase 2's scope. Stores remain append-only. The `EntityMeta` stru
 
 ## Step 1: Entity Table Module
 
-**New file**: `crates/xforge-core/src/entity_table.rs`
+**New file**: `crates/stet-core/src/entity_table.rs`
 
 Standalone indirection layer with no dependencies on existing stores.
 
@@ -117,7 +117,7 @@ impl EntityTable {
 
 ## Step 2: Refactor StringStore with EntityTable
 
-**Modify**: `crates/xforge-core/src/string_store.rs`
+**Modify**: `crates/stet-core/src/string_store.rs`
 
 The backing `Vec<u8>` remains identical. The change: `EntityId` no longer IS the offset; it's an index into the entity table which holds the offset.
 
@@ -165,7 +165,7 @@ All existing tests pass unchanged — zero behavioral change, only internal indi
 
 ## Step 3: Refactor ArrayStore with EntityTable
 
-**Modify**: `crates/xforge-core/src/array_store.rs`
+**Modify**: `crates/stet-core/src/array_store.rs`
 
 Same pattern as StringStore. Backing `Vec<PsObject>` unchanged. Entity table provides indirection.
 
@@ -180,7 +180,7 @@ pub struct ArrayStore {
 
 ## Step 4: Refactor DictStore with EntityTable
 
-**Modify**: `crates/xforge-core/src/dict.rs`
+**Modify**: `crates/stet-core/src/dict.rs`
 
 DictStore already uses `Vec<DictEntry>` indexed by `EntityId.0`. The refactor adds entity table wrapper for uniformity and save_level tracking. Functionally, `entity_table[id].offset == id.0` initially, but the indirection enables future COW address swapping.
 
@@ -195,7 +195,7 @@ pub struct DictStore {
 
 ## Step 5: SaveStack Module
 
-**New file**: `crates/xforge-core/src/save_stack.rs`
+**New file**: `crates/stet-core/src/save_stack.rs`
 
 ```rust
 /// A record of one entity that was COW-copied at a save level.
@@ -269,7 +269,7 @@ impl SaveStack {
 
 ## Step 6: Wire Save/Restore + COW into Context
 
-**Modify**: `crates/xforge-core/src/context.rs`
+**Modify**: `crates/stet-core/src/context.rs`
 
 Add fields:
 ```rust
@@ -400,7 +400,7 @@ In `composite_ops.rs`:
 
 ## Step 8: VM Operators
 
-**New file**: `crates/xforge-ops/src/vm_ops.rs`
+**New file**: `crates/stet-ops/src/vm_ops.rs`
 
 ### 8.1 `save` — `— save`
 
@@ -505,7 +505,7 @@ No-op for Phase 2 (GC deferred). Pop the int and return Ok.
 
 ## Step 9: FileStore Module
 
-**New file**: `crates/xforge-core/src/file_store.rs`
+**New file**: `crates/stet-core/src/file_store.rs`
 
 ```rust
 use std::fs::File;
@@ -598,7 +598,7 @@ impl FileStore {
 
 ## Step 10: File I/O Operators
 
-**Modify**: `crates/xforge-ops/src/file_ops.rs` — expand from 5 to 24 operators.
+**Modify**: `crates/stet-ops/src/file_ops.rs` — expand from 5 to 24 operators.
 
 ### New Operators (19)
 
@@ -651,7 +651,7 @@ Phase 2 approach: read remaining file content into a buffer, tokenize one token,
 
 ### 11.1 Enhanced `run`
 
-**Modify**: `crates/xforge-ops/src/misc_ops.rs`
+**Modify**: `crates/stet-ops/src/misc_ops.rs`
 
 Current `run` reads a file into a string and pushes it as an executable string. Enhanced version:
 1. Open the file via `ctx.files.open(filename, "r", ...)`
@@ -662,7 +662,7 @@ Current `run` reads a file into a string and pushes it as an executable string. 
 
 ### 11.2 File Execution Path in Eval Loop
 
-**Modify**: `crates/xforge-engine/src/eval.rs`
+**Modify**: `crates/stet-engine/src/eval.rs`
 
 Add a case for `PsValue::File(entity)` on the execution stack:
 
@@ -702,7 +702,7 @@ PsValue::File(entity) => {
 
 ## Step 12: Error Dispatch via errordict
 
-**Modify**: `crates/xforge-engine/src/eval.rs`
+**Modify**: `crates/stet-engine/src/eval.rs`
 
 Replace the `eprintln!` catch-all in the operator dispatch error handler:
 
@@ -751,7 +751,7 @@ Err(e) => {
 
 ## Step 13: Operator Registration
 
-**Modify**: `crates/xforge-ops/src/lib.rs`
+**Modify**: `crates/stet-ops/src/lib.rs`
 
 Add `pub mod vm_ops;` and register all new operators:
 
@@ -867,26 +867,26 @@ Port and adapt relevant tests from PostForge:
 
 | File | Purpose |
 |------|---------|
-| `crates/xforge-core/src/entity_table.rs` | EntityTable: EntityId → (offset, len, save_level, is_global) |
-| `crates/xforge-core/src/save_stack.rs` | SaveStack, SaveRecord, SaveFrame, restore logic |
-| `crates/xforge-core/src/file_store.rs` | FileStore, FileEntry, FileHandle enum |
-| `crates/xforge-ops/src/vm_ops.rs` | 7 VM operators (save, restore, vmstatus, etc.) |
+| `crates/stet-core/src/entity_table.rs` | EntityTable: EntityId → (offset, len, save_level, is_global) |
+| `crates/stet-core/src/save_stack.rs` | SaveStack, SaveRecord, SaveFrame, restore logic |
+| `crates/stet-core/src/file_store.rs` | FileStore, FileEntry, FileHandle enum |
+| `crates/stet-ops/src/vm_ops.rs` | 7 VM operators (save, restore, vmstatus, etc.) |
 | `tests/ps/*.ps` | PostScript integration tests |
 
 ### Modified Files (10)
 
 | File | Changes |
 |------|---------|
-| `crates/xforge-core/src/lib.rs` | `pub mod entity_table; save_stack; file_store;` |
-| `crates/xforge-core/src/string_store.rs` | Add EntityTable, route all access through it |
-| `crates/xforge-core/src/array_store.rs` | Add EntityTable, same pattern |
-| `crates/xforge-core/src/dict.rs` | Add EntityTable, same pattern |
-| `crates/xforge-core/src/context.rs` | Add save_stack, file_store, vm_alloc_mode, COW methods, error state |
-| `crates/xforge-core/src/error.rs` | Add `plrm_name()` method |
-| `crates/xforge-ops/src/lib.rs` | Register ~26 new operators, add `pub mod vm_ops` |
-| `crates/xforge-ops/src/file_ops.rs` | Expand from 5 to 24 operators |
-| `crates/xforge-ops/src/composite_ops.rs` | Add COW checks before string/array/dict mutations |
-| `crates/xforge-engine/src/eval.rs` | File execution path, error dispatch |
+| `crates/stet-core/src/lib.rs` | `pub mod entity_table; save_stack; file_store;` |
+| `crates/stet-core/src/string_store.rs` | Add EntityTable, route all access through it |
+| `crates/stet-core/src/array_store.rs` | Add EntityTable, same pattern |
+| `crates/stet-core/src/dict.rs` | Add EntityTable, same pattern |
+| `crates/stet-core/src/context.rs` | Add save_stack, file_store, vm_alloc_mode, COW methods, error state |
+| `crates/stet-core/src/error.rs` | Add `plrm_name()` method |
+| `crates/stet-ops/src/lib.rs` | Register ~26 new operators, add `pub mod vm_ops` |
+| `crates/stet-ops/src/file_ops.rs` | Expand from 5 to 24 operators |
+| `crates/stet-ops/src/composite_ops.rs` | Add COW checks before string/array/dict mutations |
+| `crates/stet-engine/src/eval.rs` | File execution path, error dispatch |
 
 ---
 

@@ -1,10 +1,10 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code when working with the xforge codebase.
+This file provides guidance to Claude Code when working with the stet codebase.
 
 ## Project Overview
 
-**xforge** is a PostScript Level 3 interpreter written in Rust, targeting production-grade performance. It is a ground-up reimplementation — NOT a port — using two sister projects as references:
+**stet** is a PostScript Level 3 interpreter written in Rust, targeting production-grade performance. It is a ground-up reimplementation — NOT a port — using two sister projects as references:
 
 - **PostForge** (`~/Projects/postforge`) — A complete PostScript Level 3 interpreter in Python (345 operators, 49 test suites, 5 output devices). This is the **reference implementation and test oracle**. When questions arise about PostScript operator behavior, consult PostForge's implementation first.
 - **xpost** (`~/Projects/xpost`) — A PostScript Level 1-2 interpreter in C. This provides **architectural inspiration**, particularly the arena/entity indirection memory model and dual VM design.
@@ -26,12 +26,12 @@ Always consult these manuals for operator behavior, error conditions, and langua
 
 ## Architecture
 
-xforge uses a **Cargo workspace** with four crates:
+stet uses a **Cargo workspace** with four crates:
 
-- **`xforge-core`** — Type system, arena allocator, VM, tokenizer, context, errors
-- **`xforge-ops`** — All PostScript operator implementations
-- **`xforge-engine`** — Execution engine (the core eval loop)
-- **`xforge-cli`** — Binary entry point (file input and interactive REPL)
+- **`stet-core`** — Type system, arena allocator, VM, tokenizer, context, errors
+- **`stet-ops`** — All PostScript operator implementations
+- **`stet-engine`** — Execution engine (the core eval loop)
+- **`stet-cli`** — Binary entry point (file input and interactive REPL)
 
 ### Key Design Decisions
 
@@ -76,7 +76,7 @@ cargo fmt                      # Format
 All new Rust source files must include:
 
 ```rust
-// xforge - A PostScript Interpreter
+// stet - A PostScript Interpreter
 // Copyright (c) 2026 Scott Bowman
 // SPDX-License-Identifier: AGPL-3.0-or-later
 ```
@@ -86,7 +86,7 @@ All new Rust source files must include:
 - **User email**: scott@bowmans.org
 - **User name**: Scott Bowman
 - **Branch strategy**: `main` + feature branches
-- **Remote**: GitHub (primary)
+- **Remote**: NAS (primary) — `ssh://scott@nas/volume1/git/stet`
 
 ### Git Commit Rules
 
@@ -105,14 +105,14 @@ All new Rust source files must include:
 
 ### PostScript Test Suites
 
-PostForge's test suites (`~/Projects/postforge/unit_tests/*.ps`) serve as integration tests. These use a custom `assert` framework defined in `unittest.ps`. Port and run these as xforge matures.
+PostForge's test suites (`~/Projects/postforge/unit_tests/*.ps`) serve as integration tests. These use a custom `assert` framework defined in `unittest.ps`. Port and run these as stet matures.
 
 ### Test Execution
 
 ```bash
 cargo test                              # All Rust tests
-cargo test --package xforge-ops         # Operator tests only
-cargo test --package xforge-core        # Core type/tokenizer tests only
+cargo test --package stet-ops         # Operator tests only
+cargo test --package stet-core        # Core type/tokenizer tests only
 cargo run -- tests/ps/some_test.ps      # Run a PostScript test file
 ```
 
@@ -127,7 +127,7 @@ When implementing a PostScript operator:
 
 ## Reusable Assets from PostForge
 
-These PostScript resource files will be copied into xforge's `resources/` directory when needed (Phase 6+):
+These PostScript resource files will be copied into stet's `resources/` directory when needed (Phase 6+):
 
 | Asset | Source Path |
 |-------|-------------|

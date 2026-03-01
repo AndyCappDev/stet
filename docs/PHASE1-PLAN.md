@@ -1,4 +1,4 @@
-# xforge Phase 1: Foundation — Detailed Implementation Plan
+# stet Phase 1: Foundation — Detailed Implementation Plan
 
 ## Goal
 
@@ -15,14 +15,14 @@ Build the minimal Rust infrastructure to tokenize, parse, and execute basic Post
 ### 1.1 Create Cargo Workspace
 
 ```
-~/Projects/xforge/
+~/Projects/stet/
 ├── Cargo.toml                  # Workspace root
 ├── LICENSE                     # AGPL-3.0-or-later
 ├── README.md
 ├── ROADMAP.md                  # Already exists
 ├── PHASE1-PLAN.md              # This file
 ├── crates/
-│   ├── xforge-core/            # Types, arena, VM, tokenizer, context, errors
+│   ├── stet-core/            # Types, arena, VM, tokenizer, context, errors
 │   │   ├── Cargo.toml
 │   │   └── src/
 │   │       ├── lib.rs
@@ -36,8 +36,8 @@ Build the minimal Rust infrastructure to tokenize, parse, and execute basic Post
 │   │       ├── context.rs      # Context (stacks, VM refs, state)
 │   │       ├── tokenizer.rs    # PostScript tokenizer
 │   │       └── error.rs        # PsError enum, error codes
-│   ├── xforge-ops/             # Operator implementations
-│   │   ├── Cargo.toml          # depends on xforge-core
+│   ├── stet-ops/             # Operator implementations
+│   │   ├── Cargo.toml          # depends on stet-core
 │   │   └── src/
 │   │       ├── lib.rs          # Operator registration (build_system_dict)
 │   │       ├── stack_ops.rs    # pop, dup, exch, roll, index, etc.
@@ -51,13 +51,13 @@ Build the minimal Rust infrastructure to tokenize, parse, and execute basic Post
 │   │       ├── composite_ops.rs # get, put, getinterval, putinterval, length, copy
 │   │       ├── file_ops.rs     # print, =, ==, flush (stdout only for Phase 1)
 │   │       └── misc_ops.rs     # bind, null, version, languagelevel, pstack, run
-│   ├── xforge-engine/          # Execution engine
-│   │   ├── Cargo.toml          # depends on xforge-core, xforge-ops
+│   ├── stet-engine/          # Execution engine
+│   │   ├── Cargo.toml          # depends on stet-core, stet-ops
 │   │   └── src/
 │   │       ├── lib.rs
 │   │       └── eval.rs         # exec_exec equivalent (the core loop)
-│   └── xforge-cli/             # Binary entry point
-│       ├── Cargo.toml          # depends on xforge-engine
+│   └── stet-cli/             # Binary entry point
+│       ├── Cargo.toml          # depends on stet-engine
 │       └── src/
 │           └── main.rs         # CLI: file input or interactive REPL
 └── tests/
@@ -81,9 +81,9 @@ authors = ["Scott Bowman <scott@bowmans.org>"]
 
 [workspace.dependencies]
 thiserror = "2"
-xforge-core = { path = "crates/xforge-core" }
-xforge-ops = { path = "crates/xforge-ops" }
-xforge-engine = { path = "crates/xforge-engine" }
+stet-core = { path = "crates/stet-core" }
+stet-ops = { path = "crates/stet-ops" }
+stet-engine = { path = "crates/stet-engine" }
 ```
 
 ### 1.3 Initial Files
@@ -95,7 +95,7 @@ xforge-engine = { path = "crates/xforge-engine" }
 
 ---
 
-## Step 2: Core Type System (`xforge-core/src/object.rs`)
+## Step 2: Core Type System (`stet-core/src/object.rs`)
 
 ### 2.1 Object Flags
 
@@ -253,7 +253,7 @@ impl PsObject {
 
 ---
 
-## Step 3: Storage Infrastructure (`xforge-core/src/`)
+## Step 3: Storage Infrastructure (`stet-core/src/`)
 
 ### 3.1 Name Table (`name.rs`)
 
@@ -366,7 +366,7 @@ impl DictStore {
 
 ---
 
-## Step 4: Context & Stack (`xforge-core/src/`)
+## Step 4: Context & Stack (`stet-core/src/`)
 
 ### 4.1 Stack (`stack.rs`)
 
@@ -472,7 +472,7 @@ impl Context {
 
 ---
 
-## Step 5: Error System (`xforge-core/src/error.rs`)
+## Step 5: Error System (`stet-core/src/error.rs`)
 
 ```rust
 #[derive(Debug, Clone, thiserror::Error)]
@@ -516,7 +516,7 @@ pub enum PsError {
 
 ---
 
-## Step 6: Tokenizer (`xforge-core/src/tokenizer.rs`)
+## Step 6: Tokenizer (`stet-core/src/tokenizer.rs`)
 
 ### 6.1 Token Types
 
@@ -590,7 +590,7 @@ impl<'a> Tokenizer<'a> {
 
 ---
 
-## Step 7: Execution Engine (`xforge-engine/src/eval.rs`)
+## Step 7: Execution Engine (`stet-engine/src/eval.rs`)
 
 ### 7.1 Core Eval Loop
 
@@ -768,7 +768,7 @@ pub enum LoopType {
 
 ---
 
-## Step 8: Operator Implementations (`xforge-ops/src/`)
+## Step 8: Operator Implementations (`stet-ops/src/`)
 
 ### 8.1 Operator Registration
 
@@ -887,7 +887,7 @@ pub fn op_name(ctx: &mut Context) -> Result<(), PsError> {
 
 ---
 
-## Step 9: CLI Entry Point (`xforge-cli/src/main.rs`)
+## Step 9: CLI Entry Point (`stet-cli/src/main.rs`)
 
 ### Phase 1 CLI (minimal)
 

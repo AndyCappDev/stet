@@ -1,14 +1,14 @@
-# xforge — Rust PostScript Level 3 Interpreter Roadmap
+# stet — Rust PostScript Level 3 Interpreter Roadmap
 
 ## Context
 
-PostForge is a complete PostScript Level 3 interpreter in Python (345 operators, 49 test suites, 5 output devices). It works well as a reference implementation but Python's inherent overhead limits production throughput. **xforge** is a ground-up Rust reimplementation targeting production-grade speed while using PostForge as the specification oracle and test source.
+PostForge is a complete PostScript Level 3 interpreter in Python (345 operators, 49 test suites, 5 output devices). It works well as a reference implementation but Python's inherent overhead limits production throughput. **stet** is a ground-up Rust reimplementation targeting production-grade speed while using PostForge as the specification oracle and test source.
 
 The architecture draws from xpost's proven C patterns (arena/entity indirection, dual VM, save/restore via entity swapping) translated into idiomatic Rust (enums for tagged objects, `Vec`-backed arenas, `Result` error propagation).
 
-**Project**: xforge
+**Project**: stet
 **License**: AGPL-3.0-or-later
-**Location**: ~/Projects/xforge (separate repo)
+**Location**: ~/Projects/stet (separate repo)
 **Reference implementation**: PostForge (~/Projects/postforge)
 **Architectural inspiration**: xpost (~/Projects/xpost)
 
@@ -16,7 +16,7 @@ The architecture draws from xpost's proven C patterns (arena/entity indirection,
 
 ## Reusable Assets from PostForge
 
-These files transfer directly to xforge with zero or minimal modification:
+These files transfer directly to stet with zero or minimal modification:
 
 | Asset | Path (in PostForge) | Notes |
 |-------|---------------------|-------|
@@ -42,12 +42,12 @@ These files transfer directly to xforge with zero or minimal modification:
 ### 1.1 Project Scaffolding
 
 ```
-xforge/
+stet/
 ├── Cargo.toml              # Workspace root
 ├── LICENSE                  # AGPL-3.0
 ├── README.md
 ├── crates/
-│   ├── xforge-core/        # Type system, VM, arena, tokenizer
+│   ├── stet-core/        # Type system, VM, arena, tokenizer
 │   │   ├── src/
 │   │   │   ├── lib.rs
 │   │   │   ├── object.rs       # PsObject enum, ObjectTag, AccessLevel
@@ -61,7 +61,7 @@ xforge/
 │   │   │   ├── error.rs        # PostScript error types
 │   │   │   └── array.rs        # Array/PackedArray storage
 │   │   └── Cargo.toml
-│   ├── xforge-ops/         # All PostScript operators
+│   ├── stet-ops/         # All PostScript operators
 │   │   ├── src/
 │   │   │   ├── lib.rs
 │   │   │   ├── stack_ops.rs    # pop, dup, exch, roll, index, etc.
@@ -75,11 +75,11 @@ xforge/
 │   │   │   ├── file_ops.rs
 │   │   │   └── ... (one file per operator group)
 │   │   └── Cargo.toml
-│   ├── xforge-engine/      # Execution engine (eval loop)
+│   ├── stet-engine/      # Execution engine (eval loop)
 │   │   └── ...
-│   ├── xforge-render/      # Rendering backend (tiny-skia) [Phase 3]
+│   ├── stet-render/      # Rendering backend (tiny-skia) [Phase 3]
 │   │   └── ...
-│   └── xforge-cli/         # Binary entry point
+│   └── stet-cli/         # Binary entry point
 │       └── ...
 ├── resources/              # Copied from PostForge (PS scripts, fonts, encodings)
 └── tests/                  # Integration tests (PostForge test suites)
@@ -246,10 +246,10 @@ No external rendering dependencies in Phase 1. Pure Rust.
 - **Garbage collection**: Deferred to future phase (entity table reserves flags for GC)
 
 ### New Files
-- `crates/xforge-core/src/entity_table.rs` — EntityMeta + EntityTable
-- `crates/xforge-core/src/save_stack.rs` — SaveRecord, SaveLevel, SaveStack
-- `crates/xforge-core/src/file_store.rs` — FileHandle, FileEntry, FileStore
-- `crates/xforge-ops/src/vm_ops.rs` — VM operators + VM-aware allocation helpers
+- `crates/stet-core/src/entity_table.rs` — EntityMeta + EntityTable
+- `crates/stet-core/src/save_stack.rs` — SaveRecord, SaveLevel, SaveStack
+- `crates/stet-core/src/file_store.rs` — FileHandle, FileEntry, FileStore
+- `crates/stet-ops/src/vm_ops.rs` — VM operators + VM-aware allocation helpers
 
 ### Operators Added: ~26 (total: ~111)
 ### Tests Added: 63 (total: 161)
@@ -262,7 +262,7 @@ No external rendering dependencies in Phase 1. Pure Rust.
 
 **Done when**: Can render PostForge's `samples/tiger.ps` to PNG.
 
-**Status**: Complete (2026-02-25). 5-crate workspace (new: xforge-render), ~189 operators, 270 tests passing, zero clippy warnings. tiger.ps renders correctly at any DPI. Release build renders 300 DPI tiger (2550×3300) in ~110ms.
+**Status**: Complete (2026-02-25). 5-crate workspace (new: stet-render), ~189 operators, 270 tests passing, zero clippy warnings. tiger.ps renders correctly at any DPI. Release build renders 300 DPI tiger (2550×3300) in ~110ms.
 
 ### Key Components (Implemented)
 - **Graphics state**: `GraphicsState` struct on Context with `gstate_stack: Vec<GraphicsState>` for gsave/grestore. 18 operators — gsave, grestore, grestoreall, setlinewidth, currentlinewidth, setlinecap, currentlinecap, setlinejoin, currentlinejoin, setmiterlimit, currentmiterlimit, setdash, currentdash, setflat, currentflat, setstrokeadjust, currentstrokeadjust, initgraphics
@@ -272,30 +272,30 @@ No external rendering dependencies in Phase 1. Pure Rust.
 - **Painting**: Immediate-mode rendering (no display list). fill/stroke call device methods directly with CTM passed at paint time. 7 operators — fill, eofill, stroke, rectfill, rectstroke, erasepage, showpage
 - **Clipping**: Device clip via tiny-skia Mask. Clip intersection via `Mask::intersect_path`. Path NOT cleared after clip (unlike fill/stroke). 7 operators — clip, eoclip, clippath, initclip, rectclip, clipsave, cliprestore
 - **Path query**: Conservative control-point hull for pathbbox. De Casteljau recursive subdivision for flattenpath. 5 operators — pathbbox, flattenpath, reversepath, strokepath, pathforall
-- **Renderer**: `RasterDevice` trait in xforge-core, `SkiaDevice` implementation in new xforge-render crate using tiny-skia 0.11. All internal math f64, convert to f32 only at tiny-skia boundary
+- **Renderer**: `RasterDevice` trait in stet-core, `SkiaDevice` implementation in new stet-render crate using tiny-skia 0.11. All internal math f64, convert to f32 only at tiny-skia boundary
 - **CLI**: `--dpi` flag for rendering resolution (default 72). Output PNG derived from input filename
 
 ### Architecture Decisions
 - **Immediate-mode rendering** (no display list): fill/stroke invoke device directly. Simpler for Phase 3; display list can be layered in Phase 7
-- **Paths in user space**: Unlike PostForge (device space at construction), xforge stores paths in user space. CTM captured at paint time and passed to tiny-skia as Transform. This gives correct currentpoint/pathbbox without inverse CTM and handles anisotropic strokes naturally
+- **Paths in user space**: Unlike PostForge (device space at construction), stet stores paths in user space. CTM captured at paint time and passed to tiny-skia as Transform. This gives correct currentpoint/pathbbox without inverse CTM and handles anisotropic strokes naturally
 - **Trait-based device**: `RasterDevice` trait enables future backend swaps without changing operator code
 - **Deferred flag**: ObjFlags bit 6 marks nested executable arrays in procedure bodies so the eval loop pushes them to o_stack (preserving executable flag for `if`/`ifelse`) rather than executing them
 
 ### New Crate
-- **xforge-render** — tiny-skia 0.11 device implementation (`SkiaDevice`)
+- **stet-render** — tiny-skia 0.11 device implementation (`SkiaDevice`)
 
 ### New Files (12)
-- `crates/xforge-core/src/graphics_state.rs` — Matrix, PsPath, GraphicsState, DeviceColor
-- `crates/xforge-core/src/device.rs` — RasterDevice trait, FillParams, StrokeParams, ClipParams
-- `crates/xforge-ops/src/matrix_ops.rs` — 16 operators
-- `crates/xforge-ops/src/path_ops.rs` — 13 operators
-- `crates/xforge-ops/src/color_ops.rs` — 12 operators
-- `crates/xforge-ops/src/graphics_state_ops.rs` — 18 operators
-- `crates/xforge-ops/src/paint_ops.rs` — 7 operators
-- `crates/xforge-ops/src/clip_ops.rs` — 7 operators
-- `crates/xforge-ops/src/path_query_ops.rs` — 5 operators
-- `crates/xforge-render/src/lib.rs` + `src/skia_device.rs` — tiny-skia device
-- `crates/xforge-engine/tests/rendering.rs` — 10 integration tests
+- `crates/stet-core/src/graphics_state.rs` — Matrix, PsPath, GraphicsState, DeviceColor
+- `crates/stet-core/src/device.rs` — RasterDevice trait, FillParams, StrokeParams, ClipParams
+- `crates/stet-ops/src/matrix_ops.rs` — 16 operators
+- `crates/stet-ops/src/path_ops.rs` — 13 operators
+- `crates/stet-ops/src/color_ops.rs` — 12 operators
+- `crates/stet-ops/src/graphics_state_ops.rs` — 18 operators
+- `crates/stet-ops/src/paint_ops.rs` — 7 operators
+- `crates/stet-ops/src/clip_ops.rs` — 7 operators
+- `crates/stet-ops/src/path_query_ops.rs` — 5 operators
+- `crates/stet-render/src/lib.rs` + `src/skia_device.rs` — tiny-skia device
+- `crates/stet-engine/tests/rendering.rs` — 10 integration tests
 
 ### New Dependencies
 ```toml
@@ -333,12 +333,12 @@ tiny-skia = "0.11"      # 2D rasterization (paths, fills, strokes, clipping)
 - **current_font on GraphicsState**: `Option<PsObject>` field, cloned on gsave/grestore like all other gstate fields
 
 ### New Files (6 source + 35 resources)
-- `crates/xforge-core/src/encoding.rs` — StandardEncoding, ISOLatin1Encoding tables
-- `crates/xforge-core/src/type1_parser.rs` — .t1 file parser with eexec decryption
-- `crates/xforge-core/src/charstring.rs` — Type 1 charstring interpreter
-- `crates/xforge-core/src/font_loader.rs` — Font loading pipeline, name substitution table
-- `crates/xforge-ops/src/font_ops.rs` — 8 font dictionary operators + 5 page size no-ops
-- `crates/xforge-ops/src/show_ops.rs` — 9 text show operators
+- `crates/stet-core/src/encoding.rs` — StandardEncoding, ISOLatin1Encoding tables
+- `crates/stet-core/src/type1_parser.rs` — .t1 file parser with eexec decryption
+- `crates/stet-core/src/charstring.rs` — Type 1 charstring interpreter
+- `crates/stet-core/src/font_loader.rs` — Font loading pipeline, name substitution table
+- `crates/stet-ops/src/font_ops.rs` — 8 font dictionary operators + 5 page size no-ops
+- `crates/stet-ops/src/show_ops.rs` — 9 text show operators
 - `resources/Font/*.t1` — 35 Type 1 font files
 
 ### Operators Added: 22 (total: ~211)
@@ -377,24 +377,24 @@ tiny-skia = "0.11"      # 2D rasterization (paths, fills, strokes, clipping)
 - **Image device infrastructure**: `ImageParams` struct + `draw_image` on `RasterDevice` trait. SkiaDevice implementation uses `draw_pixmap` with computed CTM × inv(image_matrix) transform.
 
 ### Architecture Decisions
-- **Filters inside FileStore**: Filters are a `FileHandle` variant, not a separate store. Factory methods on `FilterKind` keep codec dependencies (flate2, weezl, jpeg-decoder) in xforge-core only.
+- **Filters inside FileStore**: Filters are a `FileHandle` variant, not a separate store. Factory methods on `FilterKind` keep codec dependencies (flate2, weezl, jpeg-decoder) in stet-core only.
 - **Temporary-swap pattern**: Filter reads use `std::mem::replace` to take `FilterState` out of `FileHandle`, read from source, decode, then put it back. Avoids `&mut` aliasing.
 - **Immediate RGBA conversion**: Image operators convert all sample formats to RGBA before calling device. Device only handles RGBA pixel painting.
 - **FlateDecode predictors**: PNG row filters (None, Sub, Up, Average, Paeth) and TIFF horizontal differencing supported in the filter layer.
 
 ### New Files (3)
-- `crates/xforge-ops/src/filter_ops.rs` — `filter` operator
-- `crates/xforge-ops/src/image_ops.rs` — `image`, `imagemask`, `colorimage` operators
-- `crates/xforge-ops/src/halftone_ops.rs` — 19 halftone/transfer/pattern/device stubs
+- `crates/stet-ops/src/filter_ops.rs` — `filter` operator
+- `crates/stet-ops/src/image_ops.rs` — `image`, `imagemask`, `colorimage` operators
+- `crates/stet-ops/src/halftone_ops.rs` — 19 halftone/transfer/pattern/device stubs
 
 ### Modified Files (7)
-- `crates/xforge-core/src/file_store.rs` — FilterState, FilterKind, StringSource, all filter decode logic
-- `crates/xforge-core/src/device.rs` — ImageParams, draw_image on RasterDevice trait
-- `crates/xforge-core/src/graphics_state.rs` — Indexed color space variant
-- `crates/xforge-core/Cargo.toml` — add flate2, weezl, jpeg-decoder
-- `crates/xforge-render/src/skia_device.rs` — draw_image implementation
-- `crates/xforge-ops/src/lib.rs` — register ~25 new operators, 3 new modules
-- `crates/xforge-ops/src/color_ops.rs` — setcolorspace Indexed parsing
+- `crates/stet-core/src/file_store.rs` — FilterState, FilterKind, StringSource, all filter decode logic
+- `crates/stet-core/src/device.rs` — ImageParams, draw_image on RasterDevice trait
+- `crates/stet-core/src/graphics_state.rs` — Indexed color space variant
+- `crates/stet-core/Cargo.toml` — add flate2, weezl, jpeg-decoder
+- `crates/stet-render/src/skia_device.rs` — draw_image implementation
+- `crates/stet-ops/src/lib.rs` — register ~25 new operators, 3 new modules
+- `crates/stet-ops/src/color_ops.rs` — setcolorspace Indexed parsing
 
 ### New Rust Dependencies
 ```toml
@@ -446,8 +446,8 @@ Systematically run all ~76 PostForge sample files (`~/Projects/postforge/samples
 - EPS/DSC comment handling
 
 ### New Files (9 source + 3 resources)
-- `crates/xforge-ops/src/resource_ops.rs` — 8 resource operators
-- `crates/xforge-ops/src/param_ops.rs` — 6 parameter operators
+- `crates/stet-ops/src/resource_ops.rs` — 8 resource operators
+- `crates/stet-ops/src/param_ops.rs` — 6 parameter operators
 - `resources/Init/sysdict.ps`, `resourcecategories.ps`, `fontcategory.ps`, `fontmapping.ps`
 - `resources/Encoding/StandardEncoding.ps`, `ISOLatin1Encoding.ps`, `SymbolEncoding.ps`
 
@@ -568,7 +568,7 @@ fn op_add(ctx: &mut Context) -> Result<(), PsError> {
 Note: Following PostForge's pattern — validate ALL operands BEFORE popping.
 
 ### Git Configuration
-- Remotes: GitHub (primary for xforge)
+- Remotes: GitHub (primary for stet)
 - CI: GitHub Actions (Linux, macOS, Windows matrix)
 - Branch strategy: `main` + feature branches
 

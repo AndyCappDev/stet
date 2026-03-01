@@ -1,0 +1,18 @@
+[package]
+name = "stet-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "CLI entry point for stet PostScript interpreter"
+
+[[bin]]
+name = "stet"
+path = "src/main.rs"
+
+[dependencies]
+stet-core.workspace = true
+stet-engine.workspace = true
+stet-ops.workspace = true
+stet-render.workspace = true
+rayon.workspace = true

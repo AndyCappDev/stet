@@ -1,0 +1,15 @@
+[package]
+name = "stet-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Execution engine for stet PostScript interpreter"
+
+[dependencies]
+stet-core.workspace = true
+stet-ops.workspace = true
+
+[dev-dependencies]
+stet-render.workspace = true
+flate2 = "1"

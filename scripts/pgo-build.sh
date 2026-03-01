@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# PGO (Profile-Guided Optimization) build script for xforge
+# PGO (Profile-Guided Optimization) build script for stet
 #
 # Usage:
 #   ./scripts/pgo-build.sh          # full PGO build with default workloads
 #   ./scripts/pgo-build.sh --quick  # use only the fast workloads
 #
-# The resulting binary is at: target/release/xforge-cli
+# The resulting binary is at: target/release/stet
 #
 # Prerequisites: rustup component add llvm-tools-preview
 
@@ -89,9 +89,9 @@ rm -rf "$PROFILE_DIR"
 mkdir -p "$PROFILE_DIR"
 
 RUSTFLAGS="-Cprofile-generate=$PROFILE_DIR" \
-    cargo build --release --bin xforge-cli 2>&1
+    cargo build --release --bin stet 2>&1
 
-INSTRUMENTED_BIN="$PROJECT_DIR/target/release/xforge-cli"
+INSTRUMENTED_BIN="$PROJECT_DIR/target/release/stet"
 if [ ! -x "$INSTRUMENTED_BIN" ]; then
     echo "ERROR: Instrumented binary not found at $INSTRUMENTED_BIN"
     exit 1
@@ -131,11 +131,11 @@ echo ""
 echo "=== Step 4/4: Building PGO-optimized binary ==="
 
 RUSTFLAGS="-Cprofile-use=$PROFILE_DIR/merged.profdata -Cllvm-args=-pgo-warn-missing-function" \
-    cargo build --release --bin xforge-cli 2>&1
+    cargo build --release --bin stet 2>&1
 
 echo ""
 echo "=== PGO build complete ==="
-echo "Binary: $PROJECT_DIR/target/release/xforge-cli"
+echo "Binary: $PROJECT_DIR/target/release/stet"
 echo ""
 
 # --- Quick benchmark ---
@@ -143,7 +143,7 @@ echo "=== Quick benchmark (mandelbrot.ps at 72 DPI) ==="
 for i in 1 2 3; do
     echo -n "  Run $i: "
     START=$(date +%s%N)
-    "$PROJECT_DIR/target/release/xforge-cli" --dpi 72 "$SAMPLES_DIR/mandelbrot.ps" > /dev/null 2>&1
+    "$PROJECT_DIR/target/release/stet" --dpi 72 "$SAMPLES_DIR/mandelbrot.ps" > /dev/null 2>&1
     END=$(date +%s%N)
     ELAPSED_MS=$(( (END - START) / 1000000 ))
     echo "${ELAPSED_MS}ms"

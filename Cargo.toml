@@ -13,7 +13,7 @@ thiserror = "2"
 png = "0.17"
 rayon = "1"
 tiny-skia = "0.11"
-xforge-core = { path = "crates/xforge-core" }
-xforge-ops = { path = "crates/xforge-ops" }
-xforge-engine = { path = "crates/xforge-engine" }
-xforge-render = { path = "crates/xforge-render" }
+stet-core = { path = "crates/stet-core" }
+stet-ops = { path = "crates/stet-ops" }
+stet-engine = { path = "crates/stet-engine" }
+stet-render = { path = "crates/stet-render" }

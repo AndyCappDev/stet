@@ -1,17 +1,17 @@
 #!/bin/bash
-# xforge Visual Regression Test Launcher
+# stet Visual Regression Test Launcher
 # Runs visual_test.py with passed arguments
 #
 # Usage:
 #   ./visual_test.sh --baseline                  # Generate baseline
 #   ./visual_test.sh                             # Compare against baseline
 #   ./visual_test.sh --samples tiger.ps          # Test specific sample
-#   ./visual_test.sh -- --dpi 600                # Pass --dpi 600 to xforge
+#   ./visual_test.sh -- --dpi 600                # Pass --dpi 600 to stet
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Split arguments at "--" separator: args before go to visual_test.py,
-# args after get forwarded to xforge via --flags.
+# args after get forwarded to stet via --flags.
 VISUAL_ARGS=()
 XFORGE_ARGS=()
 FOUND_SEP=false

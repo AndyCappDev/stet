@@ -1,4 +1,4 @@
-# xforge Phase 3: Graphics Foundation — Implementation Plan
+# stet Phase 3: Graphics Foundation — Implementation Plan
 
 ## Context
 
@@ -12,7 +12,7 @@ Phase 2 is complete: ~111 operators, 161 tests, zero clippy warnings. The interp
 
 ### 1. Trait-Based Device Abstraction
 
-A `RasterDevice` trait in xforge-core provides the abstraction boundary. tiny-skia is the default implementation in a new `xforge-render` crate. Operators never see tiny-skia — they call trait methods. This lets us swap in cairo or any other backend later.
+A `RasterDevice` trait in stet-core provides the abstraction boundary. tiny-skia is the default implementation in a new `stet-render` crate. Operators never see tiny-skia — they call trait methods. This lets us swap in cairo or any other backend later.
 
 ### 2. Immediate-Mode Rendering (No Display List)
 
@@ -20,7 +20,7 @@ For Phase 3 (PNG only), painting operators invoke the device immediately. No dis
 
 ### 3. Paths in User Space
 
-Unlike PostForge (which transforms to device space at construction time), xforge stores paths in **user space**. The CTM is captured at paint time and passed to tiny-skia as its `Transform` parameter. This is cleaner because:
+Unlike PostForge (which transforms to device space at construction time), stet stores paths in **user space**. The CTM is captured at paint time and passed to tiny-skia as its `Transform` parameter. This is cleaner because:
 - Matches tiny-skia's API naturally (transform parameter exists for this purpose)
 - `currentpoint` returns user-space coordinates directly — no inverse CTM needed
 - `pathbbox` returns user-space bounds directly
@@ -30,9 +30,9 @@ Unlike PostForge (which transforms to device space at construction time), xforge
 
 `GraphicsState` is a plain Rust struct (not a PostScript object), cloned for `gsave`/`grestore`. The gsave stack is `Vec<GraphicsState>` on Context — separate from PostScript `save`/`restore`.
 
-### 5. New Crate: xforge-render
+### 5. New Crate: stet-render
 
-The device trait goes in xforge-core (so operators can reference it). The tiny-skia implementation goes in a new `xforge-render` crate. xforge-cli depends on xforge-render to create the device.
+The device trait goes in stet-core (so operators can reference it). The tiny-skia implementation goes in a new `stet-render` crate. stet-cli depends on stet-render to create the device.
 
 ### 6. Page Setup
 
@@ -43,7 +43,7 @@ Hardcoded for Phase 3: 612×792 points (US Letter), 72 DPI. Default CTM: `[1, 0,
 ## Implementation Steps (13 steps, always compiling)
 
 ### Step 1: Graphics State Module
-**New file**: `crates/xforge-core/src/graphics_state.rs`
+**New file**: `crates/stet-core/src/graphics_state.rs`
 
 Core data structures:
 
@@ -58,12 +58,12 @@ Core data structures:
 - `DashPattern` — `{ array: Vec<f64>, offset: f64 }`
 - `GraphicsState` — all of the above plus `current_point`, `line_width`, `miter_limit`, `flatness`, `stroke_adjust`, `clip_path`
 
-**Modify**: `crates/xforge-core/src/context.rs` — add `gstate: GraphicsState`, `gstate_stack: Vec<GraphicsState>`, `device: Option<Box<dyn RasterDevice>>`, `page_width/height: u32`, `output_path: Option<String>`
+**Modify**: `crates/stet-core/src/context.rs` — add `gstate: GraphicsState`, `gstate_stack: Vec<GraphicsState>`, `device: Option<Box<dyn RasterDevice>>`, `page_width/height: u32`, `output_path: Option<String>`
 
 ~12 unit tests (matrix math, color conversion, defaults).
 
 ### Step 2: Device Trait
-**New file**: `crates/xforge-core/src/device.rs`
+**New file**: `crates/stet-core/src/device.rs`
 
 ```rust
 pub trait RasterDevice {
@@ -80,7 +80,7 @@ pub trait RasterDevice {
 Plus `FillParams`, `StrokeParams`, `ClipParams` structs bundling the parameters each method needs. No tests needed — trait definition only.
 
 ### Step 3: Matrix Operators (16)
-**New file**: `crates/xforge-ops/src/matrix_ops.rs`
+**New file**: `crates/stet-ops/src/matrix_ops.rs`
 
 `matrix`, `identmatrix`, `currentmatrix`, `setmatrix`, `defaultmatrix`, `initmatrix`, `translate`, `scale`, `rotate`, `concat`, `concatmatrix`, `invertmatrix`, `transform`, `itransform`, `dtransform`, `idtransform`
 
@@ -89,7 +89,7 @@ Helpers: `read_matrix_from_array(ctx, entity, start)` → Matrix, `write_matrix_
 ~20 tests.
 
 ### Step 4: Path Construction Operators (13)
-**New file**: `crates/xforge-ops/src/path_ops.rs`
+**New file**: `crates/stet-ops/src/path_ops.rs`
 
 `newpath`, `currentpoint`, `moveto`, `rmoveto`, `lineto`, `rlineto`, `curveto`, `rcurveto`, `closepath`, `arc`, `arcn`, `arcto`, `arct`
 
@@ -98,7 +98,7 @@ Arc-to-bezier conversion ported from PostForge's `_acuteArcToBezier` — approxi
 ~18 tests.
 
 ### Step 5: Color Operators (12)
-**New file**: `crates/xforge-ops/src/color_ops.rs`
+**New file**: `crates/stet-ops/src/color_ops.rs`
 
 `setgray`, `currentgray`, `setrgbcolor`, `currentrgbcolor`, `setcmykcolor`, `currentcmykcolor`, `sethsbcolor`, `currenthsbcolor`, `setcolorspace`, `currentcolorspace`, `setcolor`, `currentcolor`
 
@@ -107,7 +107,7 @@ All colors convert to RGB internally via `DeviceColor`. CMYK→RGB: `r=1-(c+k)`,
 ~10 tests.
 
 ### Step 6: Graphics State Operators (18)
-**New file**: `crates/xforge-ops/src/graphics_state_ops.rs`
+**New file**: `crates/stet-ops/src/graphics_state_ops.rs`
 
 `gsave`, `grestore`, `grestoreall`, `setlinewidth`, `currentlinewidth`, `setlinecap`, `currentlinecap`, `setlinejoin`, `currentlinejoin`, `setmiterlimit`, `currentmiterlimit`, `setdash`, `currentdash`, `setflat`, `currentflat`, `setstrokeadjust`, `currentstrokeadjust`, `initgraphics`
 
@@ -116,7 +116,7 @@ All colors convert to RGB internally via `DeviceColor`. CMYK→RGB: `r=1-(c+k)`,
 ~14 tests.
 
 ### Step 7: Painting Operators (7)
-**New file**: `crates/xforge-ops/src/paint_ops.rs`
+**New file**: `crates/stet-ops/src/paint_ops.rs`
 
 `fill`, `eofill`, `stroke`, `rectfill`, `rectstroke`, `erasepage`, `showpage`
 
@@ -125,7 +125,7 @@ All colors convert to RGB internally via `DeviceColor`. CMYK→RGB: `r=1-(c+k)`,
 ~8 tests.
 
 ### Step 8: Clipping Operators (7)
-**New file**: `crates/xforge-ops/src/clip_ops.rs`
+**New file**: `crates/stet-ops/src/clip_ops.rs`
 
 `clip`, `eoclip`, `clippath`, `initclip`, `rectclip`, `clipsave`, `cliprestore`
 
@@ -134,7 +134,7 @@ All colors convert to RGB internally via `DeviceColor`. CMYK→RGB: `r=1-(c+k)`,
 ~6 tests.
 
 ### Step 9: Path Query Operators (5)
-**New file**: `crates/xforge-ops/src/path_query_ops.rs`
+**New file**: `crates/stet-ops/src/path_query_ops.rs`
 
 `pathbbox`, `flattenpath`, `reversepath`, `strokepath`, `pathforall`
 
@@ -143,7 +143,7 @@ All colors convert to RGB internally via `DeviceColor`. CMYK→RGB: `r=1-(c+k)`,
 ~8 tests.
 
 ### Step 10: tiny-skia Renderer
-**New crate**: `crates/xforge-render/`
+**New crate**: `crates/stet-render/`
 
 `SkiaDevice` implements `RasterDevice`:
 - `Pixmap` for pixel buffer
@@ -160,12 +160,12 @@ All internal math stays f64. Convert to f32 only at the tiny-skia boundary.
 ~6 tests.
 
 ### Step 11: Operator Registration
-**Modify**: `crates/xforge-ops/src/lib.rs`
+**Modify**: `crates/stet-ops/src/lib.rs`
 
 Register all ~78 new operators. Add 7 new `pub mod` declarations.
 
 ### Step 12: Wire into CLI
-**Modify**: `crates/xforge-cli/src/main.rs` and `Cargo.toml`
+**Modify**: `crates/stet-cli/src/main.rs` and `Cargo.toml`
 
 Create `SkiaDevice(612, 792)`, set default CTM `[1, 0, 0, -1, 0, 792]`, wire device into Context. Output path derived from input filename (`.ps` → `.png`).
 
@@ -199,25 +199,25 @@ Also uses: `clippath fill` (fill clip with background), `translate`, `scale`, `w
 ## Files Summary
 
 **New files (12):**
-- `crates/xforge-core/src/graphics_state.rs` — Matrix, PsPath, GraphicsState, DeviceColor
-- `crates/xforge-core/src/device.rs` — RasterDevice trait
-- `crates/xforge-ops/src/matrix_ops.rs` — 16 operators
-- `crates/xforge-ops/src/path_ops.rs` — 13 operators
-- `crates/xforge-ops/src/color_ops.rs` — 12 operators
-- `crates/xforge-ops/src/graphics_state_ops.rs` — 18 operators
-- `crates/xforge-ops/src/paint_ops.rs` — 7 operators
-- `crates/xforge-ops/src/clip_ops.rs` — 7 operators
-- `crates/xforge-ops/src/path_query_ops.rs` — 5 operators
-- `crates/xforge-render/Cargo.toml` + `src/lib.rs` — new crate
-- `crates/xforge-render/src/skia_device.rs` — tiny-skia device
+- `crates/stet-core/src/graphics_state.rs` — Matrix, PsPath, GraphicsState, DeviceColor
+- `crates/stet-core/src/device.rs` — RasterDevice trait
+- `crates/stet-ops/src/matrix_ops.rs` — 16 operators
+- `crates/stet-ops/src/path_ops.rs` — 13 operators
+- `crates/stet-ops/src/color_ops.rs` — 12 operators
+- `crates/stet-ops/src/graphics_state_ops.rs` — 18 operators
+- `crates/stet-ops/src/paint_ops.rs` — 7 operators
+- `crates/stet-ops/src/clip_ops.rs` — 7 operators
+- `crates/stet-ops/src/path_query_ops.rs` — 5 operators
+- `crates/stet-render/Cargo.toml` + `src/lib.rs` — new crate
+- `crates/stet-render/src/skia_device.rs` — tiny-skia device
 
 **Modified files (6):**
-- `Cargo.toml` — add xforge-render to workspace
-- `crates/xforge-core/src/lib.rs` — add `graphics_state`, `device` modules
-- `crates/xforge-core/src/context.rs` — add gstate, gstate_stack, device, page dims
-- `crates/xforge-ops/src/lib.rs` — register ~78 operators, 7 new modules
-- `crates/xforge-cli/Cargo.toml` — add xforge-render dependency
-- `crates/xforge-cli/src/main.rs` — create device, set CTM, wire output
+- `Cargo.toml` — add stet-render to workspace
+- `crates/stet-core/src/lib.rs` — add `graphics_state`, `device` modules
+- `crates/stet-core/src/context.rs` — add gstate, gstate_stack, device, page dims
+- `crates/stet-ops/src/lib.rs` — register ~78 operators, 7 new modules
+- `crates/stet-cli/Cargo.toml` — add stet-render dependency
+- `crates/stet-cli/src/main.rs` — create device, set CTM, wire output
 
 ---
 

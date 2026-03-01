@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# xforge - A PostScript Interpreter
+# stet - A PostScript Interpreter
 # Copyright (c) 2026 Scott Bowman
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-"""Visual regression testing for xforge sample PostScript files.
+"""Visual regression testing for stet sample PostScript files.
 
 Usage:
     # Generate baseline reference images
@@ -21,7 +21,7 @@ Usage:
     # Exclude specific samples
     ./visual_test.sh --exclude eazybbs.ps
 
-    # Pass extra flags to xforge-cli
+    # Pass extra flags to stet-cli
     ./visual_test.sh -- --dpi 600
 """
 
@@ -44,7 +44,7 @@ except ImportError:
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 SAMPLES_DIR = PROJECT_ROOT / "samples"
-XFORGE_CLI = PROJECT_ROOT / "target" / "release" / "xforge-cli"
+XFORGE_CLI = PROJECT_ROOT / "target" / "release" / "stet-cli"
 
 
 def get_dirs():
@@ -101,13 +101,13 @@ def get_sample_files(specific=None, exclude=None):
 
 
 def render_one(ps_file, output_dir, timeout, extra_flags):
-    """Render a single sample file. Copies input to output dir, runs xforge,
+    """Render a single sample file. Copies input to output dir, runs stet,
     removes the copy, keeps the PNGs."""
     name = ps_file.stem
     sample_out = output_dir / name
     sample_out.mkdir(parents=True, exist_ok=True)
 
-    # Copy sample into output dir so xforge writes PNGs there
+    # Copy sample into output dir so stet writes PNGs there
     local_copy = sample_out / ps_file.name
     shutil.copy2(ps_file, local_copy)
 
@@ -472,11 +472,11 @@ def generate_html_report(report_data, html_path, baseline_timings, current_timin
         )
 
     html = f"""<!DOCTYPE html>
-<html><head><title>xforge Visual Regression Report</title>
+<html><head><title>stet Visual Regression Report</title>
 <style>
 {REPORT_CSS}
 </style></head><body>
-<h1>xforge Visual Regression Report</h1>
+<h1>stet Visual Regression Report</h1>
 {summary}
 <table>
 <thead><tr><th>Sample</th><th>Status</th><th>Baseline Time</th><th>Current Time</th><th>Images</th></tr></thead>
@@ -618,7 +618,7 @@ def cmd_compare(args, dirs):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Visual regression testing for xforge")
+    parser = argparse.ArgumentParser(description="Visual regression testing for stet")
     parser.add_argument("--baseline", action="store_true", help="Generate baseline images")
     parser.add_argument("--threshold", type=float, default=0,
                         help="Max allowed pixel difference %% (default: 0)")
@@ -631,11 +631,11 @@ def main():
     parser.add_argument("-j", "--jobs", type=int, default=4,
                         help="Number of parallel render workers (default: 4)")
     parser.add_argument("--flags", nargs=argparse.REMAINDER, default=None,
-                        help="Extra flags to pass to xforge-cli (must be last argument)")
+                        help="Extra flags to pass to stet-cli (must be last argument)")
     args = parser.parse_args()
 
     if not XFORGE_CLI.exists():
-        print(f"Error: xforge-cli not found at {XFORGE_CLI}")
+        print(f"Error: stet-cli not found at {XFORGE_CLI}")
         print("Run 'cargo build --release' first.")
         return 1
 

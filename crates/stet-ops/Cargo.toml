@@ -1,0 +1,11 @@
+[package]
+name = "stet-ops"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "PostScript operator implementations for stet"
+
+[dependencies]
+stet-core.workspace = true
+flate2 = "1"
