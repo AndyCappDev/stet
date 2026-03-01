@@ -44,7 +44,7 @@ except ImportError:
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 SAMPLES_DIR = PROJECT_ROOT / "samples"
-XFORGE_CLI = PROJECT_ROOT / "target" / "release" / "stet-cli"
+XFORGE_CLI = PROJECT_ROOT / "target" / "release" / "stet"
 
 
 def get_dirs():
@@ -113,7 +113,7 @@ def render_one(ps_file, output_dir, timeout, extra_flags):
 
     start = time.monotonic()
     try:
-        cmd = [str(XFORGE_CLI)]
+        cmd = [str(XFORGE_CLI), "--device", "png"]
         if extra_flags:
             cmd.extend(extra_flags)
         cmd.append(local_copy.name)
