@@ -8,16 +8,13 @@ use std::sync::mpsc::{Receiver, Sender, SyncSender};
 
 use egui::{ColorImage, TextureHandle, TextureOptions, Vec2};
 
-use crate::{PageImage, ViewerEnd};
-
-/// Default page height in points (US Letter).
-const DEFAULT_PAGE_HEIGHT_PTS: f64 = 792.0;
+use crate::{PageImage, ScreenInfo, ViewerEnd};
 
 /// Interactive viewer for rendered PostScript pages.
 pub struct ViewerApp {
     page_receiver: Receiver<PageImage>,
     continue_sender: Sender<()>,
-    dpi_sender: Option<SyncSender<f64>>,
+    screen_info_sender: Option<SyncSender<ScreenInfo>>,
     dpi_override: Option<f64>,
     /// All received pages (for back-navigation).
     pages: Vec<StoredPage>,
@@ -38,8 +35,8 @@ pub struct ViewerApp {
     /// Whether we've sent a continue signal for the current page
     /// (to avoid double-sending).
     continue_sent: bool,
-    /// Whether we've already sent DPI to the interpreter.
-    dpi_sent: bool,
+    /// Whether we've already sent screen info to the interpreter.
+    screen_info_sent: bool,
     /// Whether the window has been resized to match the first page.
     window_sized: bool,
     /// Pending window size for centering (set by size_window_to_page).
@@ -60,7 +57,7 @@ impl ViewerApp {
         Self {
             page_receiver: viewer_end.page_receiver,
             continue_sender: viewer_end.continue_sender,
-            dpi_sender: Some(viewer_end.dpi_sender),
+            screen_info_sender: Some(viewer_end.screen_info_sender),
             dpi_override,
             pages: Vec::new(),
             current_page: 0,
@@ -71,23 +68,24 @@ impl ViewerApp {
             last_drag_pos: None,
             interpreter_done: false,
             continue_sent: false,
-            dpi_sent: false,
+            screen_info_sent: false,
             window_sized: false,
             pending_center: None,
         }
     }
 
-    /// Send render DPI to the interpreter.
+    /// Send screen info to the interpreter for DPI calculation.
     ///
-    /// Uses the user's --dpi override if provided, otherwise auto-calculates
-    /// from monitor size so the rendered image fills 85% of screen height.
-    fn send_dpi(&mut self, ctx: &egui::Context) {
-        if self.dpi_sent {
+    /// If --dpi was specified, sends the override directly. Otherwise sends
+    /// the available pixel height (monitor_h * 0.85) so the interpreter can
+    /// calculate DPI based on the actual page height.
+    fn send_screen_info(&mut self, ctx: &egui::Context) {
+        if self.screen_info_sent {
             return;
         }
 
-        let dpi = if let Some(override_dpi) = self.dpi_override {
-            override_dpi
+        let info = if let Some(override_dpi) = self.dpi_override {
+            ScreenInfo::DpiOverride(override_dpi)
         } else {
             let monitor_size = ctx.input(|i| i.viewport().monitor_size);
             let Some(monitor) = monitor_size else {
@@ -97,17 +95,14 @@ impl ViewerApp {
             let ppp = ctx.input(|i| {
                 i.viewport().native_pixels_per_point.unwrap_or(1.0)
             }) as f64;
-            let physical_h = monitor.y as f64 * ppp;
-
-            let available_h = physical_h * 0.85;
-            let dpi = (available_h * 72.0 / DEFAULT_PAGE_HEIGHT_PTS).floor();
-            dpi.clamp(36.0, 9600.0)
+            let available_h = monitor.y as f64 * ppp * 0.85;
+            ScreenInfo::AvailableHeight(available_h)
         };
 
-        if let Some(sender) = self.dpi_sender.take() {
-            let _ = sender.send(dpi);
+        if let Some(sender) = self.screen_info_sender.take() {
+            let _ = sender.send(info);
         }
-        self.dpi_sent = true;
+        self.screen_info_sent = true;
     }
 
     /// Resize the window to fit the rendered image.
@@ -293,8 +288,8 @@ impl eframe::App for ViewerApp {
             });
         });
 
-        // Send render DPI to interpreter (deferred until monitor size is available)
-        self.send_dpi(ctx);
+        // Send screen info to interpreter (deferred until monitor size is available)
+        self.send_screen_info(ctx);
 
         // Poll for new pages
         self.poll_pages(ctx);

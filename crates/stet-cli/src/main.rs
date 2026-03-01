@@ -159,8 +159,8 @@ fn run_viewer_mode(dpi_override: Option<f64>, file_args: Vec<String>) {
 
     let (interp_end, viewer_end) = stet_viewer::create_channels();
 
-    // Extract DPI receiver before giving the rest to ViewerSinkFactory
-    let dpi_receiver = interp_end.dpi_receiver;
+    // Extract screen info receiver before giving the rest to ViewerSinkFactory
+    let screen_info_receiver = interp_end.screen_info_receiver;
     let factory =
         stet_viewer::ViewerSinkFactory::new(interp_end.page_sender, interp_end.continue_receiver);
 
@@ -170,12 +170,12 @@ fn run_viewer_mode(dpi_override: Option<f64>, file_args: Vec<String>) {
     let viewer_wait = factory.wait_time_tracker();
 
     std::thread::spawn(move || {
-        // Wait for the viewer to calculate DPI from monitor size and send it.
+        // Wait for the viewer to send screen info (monitor size or DPI override).
         // This blocks until the viewer's first frame, which queries the monitor.
-        let dpi = match dpi_receiver.recv() {
-            Ok(d) => d,
+        let screen_info = match screen_info_receiver.recv() {
+            Ok(info) => info,
             Err(_) => {
-                // Viewer closed before sending DPI — nothing to do
+                // Viewer closed before sending info — nothing to do
                 return;
             }
         };
@@ -192,7 +192,7 @@ fn run_viewer_mode(dpi_override: Option<f64>, file_args: Vec<String>) {
             ))
         }));
 
-        run_file_jobs(&mut ctx, dpi, &file_args, "viewer", Some(&viewer_wait));
+        run_file_jobs_viewer(&mut ctx, screen_info, &file_args, &viewer_wait);
     });
 
     // Main thread: run viewer (passes override so viewer knows whether to auto-calc)
@@ -220,6 +220,153 @@ fn create_context() -> Context {
     run_init_scripts(&mut ctx);
 
     ctx
+}
+
+/// Calculate DPI from screen info and page height in points.
+fn dpi_from_screen_info(screen_info: &stet_viewer::ScreenInfo, page_height_pts: f64) -> f64 {
+    match screen_info {
+        stet_viewer::ScreenInfo::DpiOverride(dpi) => *dpi,
+        stet_viewer::ScreenInfo::AvailableHeight(available_h) => {
+            let dpi = (available_h * 72.0 / page_height_pts).floor();
+            dpi.clamp(36.0, 9600.0)
+        }
+    }
+}
+
+/// Default page height in points (US Letter).
+const DEFAULT_PAGE_HEIGHT_PTS: f64 = 792.0;
+
+/// Run file jobs in viewer mode, calculating DPI per-job based on actual page size.
+#[cfg(feature = "viewer")]
+fn run_file_jobs_viewer(
+    ctx: &mut Context,
+    screen_info: stet_viewer::ScreenInfo,
+    file_args: &[String],
+    viewer_wait: &std::sync::Arc<std::sync::atomic::AtomicU64>,
+) {
+    let num_jobs = file_args.len();
+
+    for (job_idx, filename) in file_args.iter().enumerate() {
+        let display_name = std::path::Path::new(filename)
+            .canonicalize()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| filename.to_string());
+
+        eprintln!("\n{}", "=".repeat(60));
+        eprintln!(
+            "Processing Job {}/{}: {}",
+            job_idx + 1,
+            num_jobs,
+            display_name
+        );
+        eprintln!("{}", "=".repeat(60));
+
+        let filename_lower = filename.to_ascii_lowercase();
+
+        // Derive output path: strip known extensions, add .png
+        let output_base = filename
+            .strip_suffix(".ps")
+            .or_else(|| filename.strip_suffix(".PS"))
+            .or_else(|| filename.strip_suffix(".eps"))
+            .or_else(|| filename.strip_suffix(".EPS"))
+            .or_else(|| filename.strip_suffix(".epsf"))
+            .or_else(|| filename.strip_suffix(".EPSF"))
+            .unwrap_or(filename);
+        ctx.output_path = Some(format!("{}.png", output_base));
+
+        let source = match std::fs::read(filename) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("Error: cannot read '{}': {}", filename, e);
+                std::process::exit(1);
+            }
+        };
+
+        // Strip DOS EPS binary header if present
+        let ps_data = strip_dos_eps_header(&source);
+        let is_eps = filename_lower.ends_with(".eps") || filename_lower.ends_with(".epsf");
+
+        // Calculate DPI based on actual page height (from BoundingBox for EPS)
+        let page_height = if is_eps {
+            read_eps_bounding_box(ps_data)
+                .map(|(_, lly, _, ury)| ury - lly)
+                .filter(|h| *h > 0.0)
+                .unwrap_or(DEFAULT_PAGE_HEIGHT_PTS)
+        } else {
+            DEFAULT_PAGE_HEIGHT_PTS
+        };
+        let dpi = dpi_from_screen_info(&screen_info, page_height);
+
+        let job_start = std::time::Instant::now();
+        let wait_before = viewer_wait.load(std::sync::atomic::Ordering::Relaxed);
+
+        let exec_result = if is_eps {
+            run_eps_file(ctx, dpi, ps_data, "viewer")
+        } else {
+            if job_idx == 0 {
+                install_device(ctx, dpi, "viewer");
+            }
+            parse_and_exec(ctx, ps_data)
+        };
+
+        // Wait for any pipelined background render to complete before timing
+        if let Some(ref mut dev) = ctx.device
+            && let Err(e) = dev.finish()
+        {
+            eprintln!("render error: {}", e);
+        }
+
+        let wait_after = viewer_wait.load(std::sync::atomic::Ordering::Relaxed);
+        let viewer_wait_dur =
+            std::time::Duration::from_nanos(wait_after - wait_before);
+        let job_duration = job_start.elapsed() - viewer_wait_dur;
+
+        match exec_result {
+            Ok(()) => {
+                eprintln!(
+                    "\nJob execution time: {:.3} seconds",
+                    job_duration.as_secs_f64()
+                );
+                eprintln!(
+                    "Job {} completed successfully: {}",
+                    job_idx + 1,
+                    display_name
+                );
+            }
+            Err(e) => {
+                eprintln!(
+                    "\nJob execution time: {:.3} seconds",
+                    job_duration.as_secs_f64()
+                );
+                match e {
+                    stet_core::error::PsError::Quit => {
+                        eprintln!("Job {} completed (quit): {}", job_idx + 1, display_name);
+                    }
+                    stet_core::error::PsError::Stop => {
+                        let _ = parse_and_exec(ctx, b"{ handleerror } stopped pop");
+                        eprintln!("Job {} FAILED: {}", job_idx + 1, display_name);
+                    }
+                    _ => {
+                        eprintln!("Error: {}", e);
+                        eprintln!("Job {} FAILED: {}", job_idx + 1, display_name);
+                    }
+                }
+            }
+        }
+
+        eprintln!();
+    }
+
+    // Print final state
+    eprintln!("{}", "=".repeat(60));
+    eprintln!("Processed {} job{}", num_jobs, if num_jobs == 1 { "" } else { "s" });
+    eprintln!("{}", "=".repeat(60));
+    eprintln!();
+    eprint!("Final operand stack:\n");
+    print_stack(ctx);
+    eprintln!("\nexecution stack");
+    print_exec_stack(ctx);
+    eprintln!();
 }
 
 /// Run PostScript file jobs.

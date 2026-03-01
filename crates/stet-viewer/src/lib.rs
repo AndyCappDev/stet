@@ -23,20 +23,29 @@ pub struct PageImage {
     pub page_num: u32,
 }
 
+/// Screen information sent from viewer to interpreter for DPI calculation.
+pub enum ScreenInfo {
+    /// User specified an explicit DPI override via --dpi.
+    DpiOverride(f64),
+    /// Available pixel height for rendering (monitor_h * 0.85, in physical pixels).
+    /// The interpreter calculates DPI from this and the actual page height.
+    AvailableHeight(f64),
+}
+
 /// Interpreter-side channel endpoints.
 pub struct InterpreterEnd {
     pub page_sender: mpsc::SyncSender<PageImage>,
     pub continue_receiver: mpsc::Receiver<()>,
-    /// Receives the auto-calculated DPI from the viewer (based on monitor size).
-    pub dpi_receiver: mpsc::Receiver<f64>,
+    /// Receives screen info from the viewer for DPI calculation.
+    pub screen_info_receiver: mpsc::Receiver<ScreenInfo>,
 }
 
 /// Viewer-side channel endpoints.
 pub struct ViewerEnd {
     pub page_receiver: mpsc::Receiver<PageImage>,
     pub continue_sender: mpsc::Sender<()>,
-    /// Sends the auto-calculated DPI to the interpreter.
-    pub dpi_sender: mpsc::SyncSender<f64>,
+    /// Sends screen info to the interpreter.
+    pub screen_info_sender: mpsc::SyncSender<ScreenInfo>,
 }
 
 /// Create matched channel pairs for interpreter ↔ viewer communication.
@@ -46,18 +55,18 @@ pub struct ViewerEnd {
 pub fn create_channels() -> (InterpreterEnd, ViewerEnd) {
     let (page_tx, page_rx) = mpsc::sync_channel(1);
     let (cont_tx, cont_rx) = mpsc::channel();
-    let (dpi_tx, dpi_rx) = mpsc::sync_channel(1);
+    let (info_tx, info_rx) = mpsc::sync_channel(1);
 
     (
         InterpreterEnd {
             page_sender: page_tx,
             continue_receiver: cont_rx,
-            dpi_receiver: dpi_rx,
+            screen_info_receiver: info_rx,
         },
         ViewerEnd {
             page_receiver: page_rx,
             continue_sender: cont_tx,
-            dpi_sender: dpi_tx,
+            screen_info_sender: info_tx,
         },
     )
 }
