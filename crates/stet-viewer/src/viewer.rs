@@ -99,10 +99,7 @@ impl ViewerApp {
             }) as f64;
             let physical_h = monitor.y as f64 * ppp;
 
-            // Subtract panel overhead (status bar) so the image fits the
-            // available area at 1:1 zoom, not just the full window height.
-            let panel_overhead = (ctx.screen_rect().height() - ctx.available_rect().height()) as f64;
-            let available_h = physical_h * 0.85 - panel_overhead * ppp;
+            let available_h = physical_h * 0.85;
             let dpi = (available_h * 72.0 / DEFAULT_PAGE_HEIGHT_PTS).floor();
             dpi.clamp(36.0, 9600.0)
         };
@@ -113,10 +110,11 @@ impl ViewerApp {
         self.dpi_sent = true;
     }
 
-    /// Resize the window to match the first page's aspect ratio.
+    /// Resize the window to fit the rendered image at 1:1 zoom.
     ///
-    /// Window height = 85% of monitor height.
-    /// Window width follows from the page aspect ratio.
+    /// The image was rendered at a DPI chosen so it fills ~85% of screen
+    /// height, so the window just needs to match the image size (in logical
+    /// points) plus the status bar overhead.
     fn size_window_to_page(&mut self, ctx: &egui::Context) {
         if self.window_sized || self.pages.is_empty() {
             return;
@@ -130,33 +128,16 @@ impl ViewerApp {
             return;
         }
 
-        let (max_w, max_h) = ctx.input(|i| {
-            if let Some(monitor) = i.viewport().monitor_size {
-                // Portrait pages: 60% width, 85% height
-                // Landscape pages: 85% width, 85% height
-                let width_frac = if img_w > img_h { 0.85 } else { 0.60 };
-                (monitor.x * width_frac, monitor.y * 0.85)
-            } else {
-                (1024.0, 768.0)
-            }
-        });
+        // Image dimensions are in physical pixels; convert to logical points.
+        let ppp = ctx.input(|i| i.viewport().native_pixels_per_point.unwrap_or(1.0));
+        let logical_w = img_w / ppp;
+        let logical_h = img_h / ppp;
 
-        // Account for panel overhead (status bar) so the central panel
-        // has exactly enough room for the image at 1:1.
+        // Add status bar overhead so the central panel fits the image exactly.
         let panel_overhead = ctx.screen_rect().height() - ctx.available_rect().height();
 
-        // Use rendered image dimensions + overhead, capped to screen
-        let mut win_w = img_w;
-        let mut win_h = img_h + panel_overhead;
-        if win_w > max_w || win_h > max_h {
-            let scale = (max_w / win_w).min(max_h / win_h);
-            win_w *= scale;
-            win_h *= scale;
-        }
-
-        // Enforce minimum
-        win_w = win_w.max(400.0);
-        win_h = win_h.max(300.0);
+        let win_w = logical_w.max(400.0);
+        let win_h = (logical_h + panel_overhead).max(300.0);
 
         ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(win_w, win_h)));
 
