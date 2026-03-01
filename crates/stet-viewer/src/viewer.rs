@@ -12,8 +12,8 @@ use crate::{PageImage, ScreenInfo, ViewerEnd};
 
 /// Interactive viewer for rendered PostScript pages.
 pub struct ViewerApp {
-    page_receiver: Receiver<PageImage>,
-    continue_sender: Sender<()>,
+    page_receiver: Option<Receiver<PageImage>>,
+    continue_sender: Option<Sender<()>>,
     screen_info_sender: Option<SyncSender<ScreenInfo>>,
     dpi_override: Option<f64>,
     /// All received pages (for back-navigation).
@@ -41,6 +41,8 @@ pub struct ViewerApp {
     window_sized: bool,
     /// Pending window size for centering (set by size_window_to_page).
     pending_center: Option<Vec2>,
+    /// Set by Q/Escape handler; processed at the top of next update().
+    quit_requested: bool,
 }
 
 /// A page image with its egui texture.
@@ -55,8 +57,8 @@ struct StoredPage {
 impl ViewerApp {
     pub fn new(viewer_end: ViewerEnd, dpi_override: Option<f64>) -> Self {
         Self {
-            page_receiver: viewer_end.page_receiver,
-            continue_sender: viewer_end.continue_sender,
+            page_receiver: Some(viewer_end.page_receiver),
+            continue_sender: Some(viewer_end.continue_sender),
             screen_info_sender: Some(viewer_end.screen_info_sender),
             dpi_override,
             pages: Vec::new(),
@@ -71,6 +73,7 @@ impl ViewerApp {
             screen_info_sent: false,
             window_sized: false,
             pending_center: None,
+            quit_requested: false,
         }
     }
 
@@ -164,8 +167,11 @@ impl ViewerApp {
     fn poll_pages(&mut self, ctx: &egui::Context) {
         use std::sync::mpsc::TryRecvError;
         let had_pages = !self.pages.is_empty();
+        let Some(receiver) = &self.page_receiver else {
+            return;
+        };
         loop {
-            match self.page_receiver.try_recv() {
+            match receiver.try_recv() {
                 Ok(page) => {
                     self.pages.push(StoredPage {
                         width: page.width,
@@ -213,7 +219,11 @@ impl ViewerApp {
             self.reset_view();
         } else if !self.interpreter_done && !self.continue_sent {
             // Signal interpreter to render the next page
-            if self.continue_sender.send(()).is_err() {
+            let send_ok = self
+                .continue_sender
+                .as_ref()
+                .map_or(false, |s| s.send(()).is_ok());
+            if !send_ok {
                 self.interpreter_done = true;
             }
             self.continue_sent = true;
@@ -264,6 +274,19 @@ impl ViewerApp {
 
 impl eframe::App for ViewerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Handle quit: drop channels to unblock the interpreter, then close.
+        // Done here (not inside ctx.input()) so the close command is processed
+        // at the top level of update() rather than inside a locked input callback.
+        if self.quit_requested {
+            // Drop channels — this unblocks the interpreter wherever it's waiting
+            // (page_sender.send() gets Err, continue_receiver.recv() gets Err).
+            self.page_receiver = None;
+            self.continue_sender = None;
+            self.screen_info_sender = None;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+
         // Status bar — rendered first so send_dpi can measure the actual panel
         // overhead via ctx.available_rect() instead of using a hardcoded constant.
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
@@ -313,9 +336,7 @@ impl eframe::App for ViewerApp {
         ctx.input(|i| {
             // Quit
             if i.key_pressed(egui::Key::Q) || i.key_pressed(egui::Key::Escape) {
-                // Signal interpreter to unblock and let it exit
-                let _ = self.continue_sender.send(());
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                self.quit_requested = true;
                 return;
             }
 
