@@ -204,11 +204,10 @@ pub fn op_setflat(ctx: &mut Context) -> Result<(), PsError> {
     }
     let obj = ctx.o_stack.peek(0)?;
     let v = obj.as_f64().ok_or(PsError::TypeCheck)?;
-    if !(0.2..=100.0).contains(&v) {
-        return Err(PsError::RangeCheck);
-    }
     ctx.o_stack.pop()?;
-    ctx.gstate.flatness = v;
+    // PLRM: "If num is outside this range, the nearest valid value
+    // is substituted without error indication."
+    ctx.gstate.flatness = v.clamp(0.2, 100.0);
     Ok(())
 }
 
@@ -391,10 +390,19 @@ mod tests {
     }
 
     #[test]
-    fn test_setflat_rangecheck() {
+    fn test_setflat_clamps_low() {
         let mut ctx = setup();
         ctx.o_stack.push(PsObject::real(0.1)).unwrap();
-        assert_eq!(op_setflat(&mut ctx), Err(PsError::RangeCheck));
+        op_setflat(&mut ctx).unwrap();
+        assert!((ctx.gstate.flatness - 0.2).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_setflat_clamps_high() {
+        let mut ctx = setup();
+        ctx.o_stack.push(PsObject::real(200.0)).unwrap();
+        op_setflat(&mut ctx).unwrap();
+        assert!((ctx.gstate.flatness - 100.0).abs() < 1e-10);
     }
 
     #[test]

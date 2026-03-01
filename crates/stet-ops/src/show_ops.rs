@@ -487,11 +487,6 @@ pub fn op_xshow(ctx: &mut Context) -> Result<(), PsError> {
         return Err(PsError::NoCurrentPoint);
     }
 
-    // Need at least as many displacements as characters
-    if displacements.len() < str_len as usize {
-        return Err(PsError::RangeCheck);
-    }
-
     let bytes = ctx.strings.get(str_entity, str_start, str_len).to_vec();
 
     ctx.o_stack.pop()?;
@@ -522,11 +517,6 @@ pub fn op_yshow(ctx: &mut Context) -> Result<(), PsError> {
         return Err(PsError::NoCurrentPoint);
     }
 
-    // Need at least as many displacements as characters
-    if displacements.len() < str_len as usize {
-        return Err(PsError::RangeCheck);
-    }
-
     let bytes = ctx.strings.get(str_entity, str_start, str_len).to_vec();
 
     ctx.o_stack.pop()?;
@@ -555,11 +545,6 @@ pub fn op_xyshow(ctx: &mut Context) -> Result<(), PsError> {
 
     if ctx.gstate.current_point.is_none() {
         return Err(PsError::NoCurrentPoint);
-    }
-
-    // Need at least 2 displacements per character (x,y pairs)
-    if displacements.len() < str_len as usize * 2 {
-        return Err(PsError::RangeCheck);
     }
 
     let bytes = ctx.strings.get(str_entity, str_start, str_len).to_vec();
