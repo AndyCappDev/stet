@@ -4,7 +4,10 @@
 
 //! Display list — records drawing operations for deferred replay to a device.
 
-use crate::device::{ClipParams, FillParams, ImageParams, RasterDevice, StrokeParams};
+use crate::device::{
+    AxialShadingParams, ClipParams, FillParams, ImageParams, MeshShadingParams,
+    PatchShadingParams, RadialShadingParams, RasterDevice, StrokeParams,
+};
 use crate::graphics_state::PsPath;
 
 /// A single recorded drawing operation.
@@ -24,6 +27,14 @@ pub enum DisplayElement {
     },
     /// Erase the page (fill with white).
     ErasePage,
+    /// Axial (linear) gradient shading.
+    AxialShading { params: AxialShadingParams },
+    /// Radial gradient shading.
+    RadialShading { params: RadialShadingParams },
+    /// Gouraud-shaded triangle mesh.
+    MeshShading { params: MeshShadingParams },
+    /// Coons/tensor-product patch mesh.
+    PatchShading { params: PatchShadingParams },
 }
 
 /// An ordered list of drawing operations for a single page.
@@ -82,6 +93,18 @@ pub fn replay_to_device(list: &DisplayList, device: &mut dyn RasterDevice) {
             }
             DisplayElement::ErasePage => {
                 device.erase_page();
+            }
+            DisplayElement::AxialShading { params } => {
+                device.paint_axial_shading(params);
+            }
+            DisplayElement::RadialShading { params } => {
+                device.paint_radial_shading(params);
+            }
+            DisplayElement::MeshShading { params } => {
+                device.paint_mesh_shading(params);
+            }
+            DisplayElement::PatchShading { params } => {
+                device.paint_patch_shading(params);
             }
         }
     }

@@ -50,6 +50,86 @@ pub struct ImageParams {
     pub image_matrix: Matrix,
 }
 
+/// A single color stop in a gradient.
+#[derive(Clone, Debug)]
+pub struct ColorStop {
+    /// Position along the gradient, normalized to 0.0..=1.0.
+    pub position: f64,
+    /// Color at this position.
+    pub color: DeviceColor,
+}
+
+/// Parameters for axial (linear) gradient shading (Type 2).
+#[derive(Clone, Debug)]
+pub struct AxialShadingParams {
+    pub x0: f64,
+    pub y0: f64,
+    pub x1: f64,
+    pub y1: f64,
+    pub color_stops: Vec<ColorStop>,
+    pub extend_start: bool,
+    pub extend_end: bool,
+    pub ctm: Matrix,
+    pub bbox: Option<[f64; 4]>,
+}
+
+/// Parameters for radial gradient shading (Type 3).
+#[derive(Clone, Debug)]
+pub struct RadialShadingParams {
+    pub x0: f64,
+    pub y0: f64,
+    pub r0: f64,
+    pub x1: f64,
+    pub y1: f64,
+    pub r1: f64,
+    pub color_stops: Vec<ColorStop>,
+    pub extend_start: bool,
+    pub extend_end: bool,
+    pub ctm: Matrix,
+    pub bbox: Option<[f64; 4]>,
+}
+
+/// A vertex in a shading triangle mesh.
+#[derive(Clone, Debug)]
+pub struct ShadingVertex {
+    pub x: f64,
+    pub y: f64,
+    pub color: DeviceColor,
+}
+
+/// A triangle in a shading mesh.
+#[derive(Clone, Debug)]
+pub struct ShadingTriangle {
+    pub v0: ShadingVertex,
+    pub v1: ShadingVertex,
+    pub v2: ShadingVertex,
+}
+
+/// Parameters for Gouraud-shaded triangle mesh shading (Types 4 & 5).
+#[derive(Clone, Debug)]
+pub struct MeshShadingParams {
+    pub triangles: Vec<ShadingTriangle>,
+    pub ctm: Matrix,
+    pub bbox: Option<[f64; 4]>,
+}
+
+/// A patch in a Coons or tensor-product patch mesh.
+#[derive(Clone, Debug)]
+pub struct ShadingPatch {
+    /// Control points: 12 for Coons (Type 6), 16 for tensor (Type 7).
+    pub points: Vec<(f64, f64)>,
+    /// Colors at the 4 corners.
+    pub colors: [DeviceColor; 4],
+}
+
+/// Parameters for Coons/tensor-product patch mesh shading (Types 6 & 7).
+#[derive(Clone, Debug)]
+pub struct PatchShadingParams {
+    pub patches: Vec<ShadingPatch>,
+    pub ctm: Matrix,
+    pub bbox: Option<[f64; 4]>,
+}
+
 /// Trait for raster rendering devices.
 ///
 /// Operators never see the concrete implementation — they call trait methods.
@@ -80,6 +160,18 @@ pub trait RasterDevice {
     /// to device space.
     fn draw_image(&mut self, rgba_data: &[u8], params: &ImageParams);
 
+    /// Paint an axial (linear) gradient shading.
+    fn paint_axial_shading(&mut self, _params: &AxialShadingParams) {}
+
+    /// Paint a radial gradient shading.
+    fn paint_radial_shading(&mut self, _params: &RadialShadingParams) {}
+
+    /// Paint a Gouraud-shaded triangle mesh.
+    fn paint_mesh_shading(&mut self, _params: &MeshShadingParams) {}
+
+    /// Paint a Coons/tensor-product patch mesh.
+    fn paint_patch_shading(&mut self, _params: &PatchShadingParams) {}
+
     /// Page dimensions in device pixels.
     fn page_size(&self) -> (u32, u32);
 
@@ -106,6 +198,10 @@ pub trait RasterDevice {
                 DisplayElement::InitClip => self.init_clip(),
                 DisplayElement::Image { rgba_data, params } => self.draw_image(rgba_data, params),
                 DisplayElement::ErasePage => self.erase_page(),
+                DisplayElement::AxialShading { params } => self.paint_axial_shading(params),
+                DisplayElement::RadialShading { params } => self.paint_radial_shading(params),
+                DisplayElement::MeshShading { params } => self.paint_mesh_shading(params),
+                DisplayElement::PatchShading { params } => self.paint_patch_shading(params),
             }
         }
         self.show_page(output_path)

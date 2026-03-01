@@ -28,6 +28,7 @@ pub mod path_ops;
 pub mod path_query_ops;
 pub mod relational_ops;
 pub mod resource_ops;
+pub mod shading_ops;
 pub mod show_ops;
 pub mod stack_ops;
 pub mod string_ops;
@@ -418,7 +419,7 @@ pub fn build_system_dict(ctx: &mut Context) {
     register(ctx, sd, "currentundercolorremoval", halftone_ops::op_currentundercolorremoval);
 
     // --- Pattern/shading operators ---
-    register(ctx, sd, "shfill", halftone_ops::op_shfill);
+    register(ctx, sd, "shfill", shading_ops::op_shfill);
     register(ctx, sd, "makepattern", halftone_ops::op_makepattern);
     register(ctx, sd, "execform", halftone_ops::op_execform);
 

@@ -13,7 +13,10 @@ use tiny_skia::{
     PathBuilder, Pixmap, Stroke, StrokeDash, Transform,
 };
 
-use stet_core::device::{ClipParams, FillParams, ImageParams, RasterDevice, StrokeParams};
+use stet_core::device::{
+    AxialShadingParams, ClipParams, FillParams, ImageParams, MeshShadingParams,
+    PatchShadingParams, RadialShadingParams, RasterDevice, StrokeParams,
+};
 use stet_core::graphics_state::{
     DeviceColor, FillRule, LineCap, LineJoin, Matrix, PathSegment, PsPath,
 };
@@ -517,9 +520,42 @@ fn precompute_bboxes(list: &DisplayList) -> Vec<Option<YBBox>> {
             DisplayElement::Fill { path, .. } => path_y_bbox(path),
             DisplayElement::Stroke { path, params } => stroke_device_y_bbox(path, params),
             DisplayElement::Image { params, .. } => image_y_bbox(params),
+            DisplayElement::AxialShading { params } => shading_y_bbox_from_bbox(&params.bbox, &params.ctm),
+            DisplayElement::RadialShading { params } => shading_y_bbox_from_bbox(&params.bbox, &params.ctm),
+            DisplayElement::MeshShading { params } => shading_y_bbox_from_bbox(&params.bbox, &params.ctm),
+            DisplayElement::PatchShading { params } => shading_y_bbox_from_bbox(&params.bbox, &params.ctm),
             _ => None, // Clip, InitClip, ErasePage: always process
         })
         .collect()
+}
+
+/// Compute device-space Y bounding box for a shading element.
+/// Uses the BBox if present, otherwise returns a full-page sentinel
+/// (y_min=0, y_max=very large) so the element is never culled.
+fn shading_y_bbox_from_bbox(bbox: &Option<[f64; 4]>, ctm: &Matrix) -> Option<YBBox> {
+    if let Some(bbox) = bbox {
+        let corners = [
+            (bbox[0], bbox[1]),
+            (bbox[2], bbox[1]),
+            (bbox[0], bbox[3]),
+            (bbox[2], bbox[3]),
+        ];
+        let mut y_min = f64::INFINITY;
+        let mut y_max = f64::NEG_INFINITY;
+        for (x, y) in &corners {
+            let (_, dy) = ctm.transform_point(*x, *y);
+            y_min = y_min.min(dy);
+            y_max = y_max.max(dy);
+        }
+        Some(YBBox { y_min, y_max })
+    } else {
+        // No BBox — shading covers unbounded area; return sentinel so it's
+        // never culled by band processing.
+        Some(YBBox {
+            y_min: 0.0,
+            y_max: 1e9,
+        })
+    }
 }
 
 /// Compute device-space Y bounding box for a stroke element.
@@ -863,6 +899,42 @@ fn render_element_to_band(
                 mask_ref,
             );
         }
+        DisplayElement::AxialShading { params } => {
+            let mut temp_mask = None;
+            let Some(mask_ref) =
+                resolve_clip_mask(&band_state.clip_region, &mut temp_mask, band_w, band_h)
+            else {
+                return;
+            };
+            render_axial_shading_to_pixmap(pixmap, params, y_start, mask_ref);
+        }
+        DisplayElement::RadialShading { params } => {
+            let mut temp_mask = None;
+            let Some(mask_ref) =
+                resolve_clip_mask(&band_state.clip_region, &mut temp_mask, band_w, band_h)
+            else {
+                return;
+            };
+            render_radial_shading_to_pixmap(pixmap, params, y_start, mask_ref);
+        }
+        DisplayElement::MeshShading { params } => {
+            let mut temp_mask = None;
+            let Some(mask_ref) =
+                resolve_clip_mask(&band_state.clip_region, &mut temp_mask, band_w, band_h)
+            else {
+                return;
+            };
+            render_mesh_shading_to_pixmap(pixmap, params, y_start, mask_ref);
+        }
+        DisplayElement::PatchShading { params } => {
+            let mut temp_mask = None;
+            let Some(mask_ref) =
+                resolve_clip_mask(&band_state.clip_region, &mut temp_mask, band_w, band_h)
+            else {
+                return;
+            };
+            render_patch_shading_to_pixmap(pixmap, params, y_start, mask_ref);
+        }
     }
 }
 
@@ -1148,6 +1220,46 @@ impl RasterDevice for SkiaDevice {
         );
     }
 
+    fn paint_axial_shading(&mut self, params: &AxialShadingParams) {
+        self.ensure_full_pixmap();
+        let (w, h) = (self.pixmap.width(), self.pixmap.height());
+        let mut temp_mask = None;
+        let Some(mask_ref) = resolve_clip_mask(&self.clip_region, &mut temp_mask, w, h) else {
+            return;
+        };
+        render_axial_shading_to_pixmap(&mut self.pixmap, params, 0, mask_ref);
+    }
+
+    fn paint_radial_shading(&mut self, params: &RadialShadingParams) {
+        self.ensure_full_pixmap();
+        let (w, h) = (self.pixmap.width(), self.pixmap.height());
+        let mut temp_mask = None;
+        let Some(mask_ref) = resolve_clip_mask(&self.clip_region, &mut temp_mask, w, h) else {
+            return;
+        };
+        render_radial_shading_to_pixmap(&mut self.pixmap, params, 0, mask_ref);
+    }
+
+    fn paint_mesh_shading(&mut self, params: &MeshShadingParams) {
+        self.ensure_full_pixmap();
+        let (w, h) = (self.pixmap.width(), self.pixmap.height());
+        let mut temp_mask = None;
+        let Some(mask_ref) = resolve_clip_mask(&self.clip_region, &mut temp_mask, w, h) else {
+            return;
+        };
+        render_mesh_shading_to_pixmap(&mut self.pixmap, params, 0, mask_ref);
+    }
+
+    fn paint_patch_shading(&mut self, params: &PatchShadingParams) {
+        self.ensure_full_pixmap();
+        let (w, h) = (self.pixmap.width(), self.pixmap.height());
+        let mut temp_mask = None;
+        let Some(mask_ref) = resolve_clip_mask(&self.clip_region, &mut temp_mask, w, h) else {
+            return;
+        };
+        render_patch_shading_to_pixmap(&mut self.pixmap, params, 0, mask_ref);
+    }
+
     fn page_size(&self) -> (u32, u32) {
         (self.page_w, self.page_h)
     }
@@ -1378,6 +1490,574 @@ fn save_png_compressed(
         .write_image_data(rgba_data)
         .map_err(|e| format!("Failed to write PNG data '{}': {}", path, e))?;
     Ok(())
+}
+
+// ---- Shading rendering ----
+
+/// Render an axial (linear) gradient shading to a pixmap.
+fn render_axial_shading_to_pixmap(
+    pixmap: &mut Pixmap,
+    params: &AxialShadingParams,
+    y_start: u32,
+    clip_mask: Option<&Mask>,
+) {
+    let pw = pixmap.width();
+    let ph = pixmap.height();
+    if params.color_stops.is_empty() || pw == 0 || ph == 0 {
+        return;
+    }
+
+    // Transform gradient endpoints from user space to device space via CTM
+    let (dx0, dy0) = params.ctm.transform_point(params.x0, params.y0);
+    let (dx1, dy1) = params.ctm.transform_point(params.x1, params.y1);
+
+    // Build gradient stops for tiny-skia
+    let stops = build_gradient_stops(&params.color_stops);
+    if stops.is_empty() {
+        return;
+    }
+
+    let start = tiny_skia::Point::from_xy(dx0 as f32, (dy0 - y_start as f64) as f32);
+    let end = tiny_skia::Point::from_xy(dx1 as f32, (dy1 - y_start as f64) as f32);
+
+    let Some(gradient) =
+        tiny_skia::LinearGradient::new(start, end, stops, tiny_skia::SpreadMode::Pad, Transform::identity())
+    else {
+        return;
+    };
+
+    let paint = Paint {
+        shader: gradient,
+        anti_alias: true,
+        ..Paint::default()
+    };
+
+    // Build the fill rect: start with BBox (or full page), then clip based on extend flags.
+    let (mut rx_min, mut ry_min, mut rx_max, mut ry_max) = if let Some(bbox) = &params.bbox {
+        let (bx0, by0) = params.ctm.transform_point(bbox[0], bbox[1]);
+        let (bx1, by1) = params.ctm.transform_point(bbox[2], bbox[3]);
+        (
+            bx0.min(bx1).max(0.0),
+            (by0.min(by1) - y_start as f64).max(0.0),
+            bx0.max(bx1).min(pw as f64),
+            (by0.max(by1) - y_start as f64).min(ph as f64),
+        )
+    } else {
+        (0.0, 0.0, pw as f64, ph as f64)
+    };
+
+    // When extend is false on one side, clip the fill rect so the gradient
+    // doesn't paint beyond the endpoint in the gradient axis direction.
+    if !params.extend_start || !params.extend_end {
+        let axis_x = dx1 - dx0;
+        let axis_y = dy1 - dy0;
+        let gy0 = dy0 - y_start as f64;
+        let gy1 = dy1 - y_start as f64;
+
+        if axis_x.abs() >= axis_y.abs() {
+            // Primarily horizontal gradient — clip x bounds
+            if !params.extend_start {
+                if axis_x >= 0.0 { rx_min = rx_min.max(dx0); }
+                else { rx_max = rx_max.min(dx0); }
+            }
+            if !params.extend_end {
+                if axis_x >= 0.0 { rx_max = rx_max.min(dx1); }
+                else { rx_min = rx_min.max(dx1); }
+            }
+        } else {
+            // Primarily vertical gradient — clip y bounds
+            if !params.extend_start {
+                if axis_y >= 0.0 { ry_min = ry_min.max(gy0); }
+                else { ry_max = ry_max.min(gy0); }
+            }
+            if !params.extend_end {
+                if axis_y >= 0.0 { ry_max = ry_max.min(gy1); }
+                else { ry_min = ry_min.max(gy1); }
+            }
+        }
+    }
+
+    let rw = (rx_max - rx_min) as f32;
+    let rh = (ry_max - ry_min) as f32;
+    let (rx, ry) = (rx_min as f32, ry_min as f32);
+
+    let Some(rect) = tiny_skia::Rect::from_xywh(rx, ry, rw.max(1.0), rh.max(1.0)) else {
+        return;
+    };
+    let mut pb = PathBuilder::new();
+    pb.push_rect(rect);
+    let Some(path) = pb.finish() else {
+        return;
+    };
+
+    pixmap.fill_path(
+        &path,
+        &paint,
+        SkiaFillRule::Winding,
+        Transform::identity(),
+        clip_mask,
+    );
+}
+
+/// Render a radial gradient shading to a pixmap.
+fn render_radial_shading_to_pixmap(
+    pixmap: &mut Pixmap,
+    params: &RadialShadingParams,
+    y_start: u32,
+    clip_mask: Option<&Mask>,
+) {
+    let pw = pixmap.width();
+    let ph = pixmap.height();
+    if params.color_stops.is_empty() || pw == 0 || ph == 0 {
+        return;
+    }
+
+    // Transform endpoints to device space
+    let (dx0, dy0) = params.ctm.transform_point(params.x0, params.y0);
+    let (dx1, dy1) = params.ctm.transform_point(params.x1, params.y1);
+
+    // Scale radii by CTM (approximate: use average scale factor)
+    let ctm_scale = ((params.ctm.a * params.ctm.a + params.ctm.b * params.ctm.b).sqrt()
+        + (params.ctm.c * params.ctm.c + params.ctm.d * params.ctm.d).sqrt())
+        / 2.0;
+    let dr0 = params.r0 * ctm_scale;
+    let dr1 = params.r1 * ctm_scale;
+
+    // Compute pixel bounds (default: full pixmap, clipped by BBox if present)
+    let (px_min, py_min, px_max, py_max) = if let Some(bbox) = &params.bbox {
+        let (bx0, by0) = params.ctm.transform_point(bbox[0], bbox[1]);
+        let (bx1, by1) = params.ctm.transform_point(bbox[2], bbox[3]);
+        let x_min = bx0.min(bx1).max(0.0) as u32;
+        let y_min_dev = by0.min(by1).max(0.0);
+        let x_max = (bx0.max(bx1).ceil() as u32).min(pw);
+        let y_max_dev = by0.max(by1).ceil();
+        // Adjust for band offset
+        let y_min = if y_min_dev > y_start as f64 {
+            (y_min_dev - y_start as f64) as u32
+        } else {
+            0
+        };
+        let y_max = ((y_max_dev - y_start as f64).ceil() as u32).min(ph);
+        (x_min, y_min, x_max, y_max)
+    } else {
+        (0, 0, pw, ph)
+    };
+
+    // Software rasterize the radial gradient
+    let data = pixmap.data_mut();
+    let stride = pw as usize * 4;
+
+    for py in py_min..py_max {
+        let dev_y = py as f64 + y_start as f64;
+        for px in px_min..px_max {
+            let dev_x = px as f64;
+
+            // Solve for t: point is on circle(center(t), radius(t))
+            // center(t) = (1-t)*c0 + t*c1, radius(t) = (1-t)*r0 + t*r1
+            // |P - center(t)|^2 = radius(t)^2
+            let t = solve_radial_t(dev_x, dev_y, dx0, dy0, dr0, dx1, dy1, dr1);
+            if let Some(t) = t {
+                let clamped = t.clamp(0.0, 1.0);
+                // Check extend
+                if t < 0.0 && !params.extend_start {
+                    continue;
+                }
+                if t > 1.0 && !params.extend_end {
+                    continue;
+                }
+                let color = interpolate_color_stops(&params.color_stops, clamped);
+                let offset = py as usize * stride + px as usize * 4;
+                let r = (color.r * 255.0).round().clamp(0.0, 255.0) as u8;
+                let g = (color.g * 255.0).round().clamp(0.0, 255.0) as u8;
+                let b = (color.b * 255.0).round().clamp(0.0, 255.0) as u8;
+
+                // Apply clip mask
+                if let Some(mask) = clip_mask {
+                    let mask_val = mask.data()[py as usize * pw as usize + px as usize];
+                    if mask_val == 0 {
+                        continue;
+                    }
+                }
+
+                data[offset] = r;
+                data[offset + 1] = g;
+                data[offset + 2] = b;
+                data[offset + 3] = 255;
+            }
+        }
+    }
+}
+
+/// Solve for the parameter t of a two-circle radial gradient at point (px, py).
+/// Returns the largest valid t, or None if no solution exists.
+#[allow(clippy::too_many_arguments)]
+fn solve_radial_t(
+    px: f64,
+    py: f64,
+    x0: f64,
+    y0: f64,
+    r0: f64,
+    x1: f64,
+    y1: f64,
+    r1: f64,
+) -> Option<f64> {
+    // Parametric: C(t) = (1-t)*C0 + t*C1, R(t) = (1-t)*r0 + t*r1
+    // Solve: (px - Cx(t))^2 + (py - Cy(t))^2 = R(t)^2
+    let cdx = x1 - x0;
+    let cdy = y1 - y0;
+    let dr = r1 - r0;
+
+    let a = cdx * cdx + cdy * cdy - dr * dr;
+    let dpx = px - x0;
+    let dpy = py - y0;
+    let b = 2.0 * (dpx * cdx + dpy * cdy - r0 * dr);
+    let c = dpx * dpx + dpy * dpy - r0 * r0;
+
+    if a.abs() < 1e-10 {
+        // Linear case
+        if b.abs() < 1e-10 {
+            return None;
+        }
+        let t = -c / b;
+        let radius = r0 + t * dr;
+        if radius >= 0.0 {
+            return Some(t);
+        }
+        return None;
+    }
+
+    let discriminant = b * b - 4.0 * a * c;
+    if discriminant < 0.0 {
+        return None;
+    }
+    let sqrt_d = discriminant.sqrt();
+    let t1 = (-b + sqrt_d) / (2.0 * a);
+    let t2 = (-b - sqrt_d) / (2.0 * a);
+
+    // Pick the largest t where radius >= 0
+    let mut best: Option<f64> = None;
+    for t in [t1, t2] {
+        let radius = r0 + t * dr;
+        if radius >= 0.0 {
+            best = Some(match best {
+                Some(prev) => prev.max(t),
+                None => t,
+            });
+        }
+    }
+    best
+}
+
+/// Render a Gouraud-shaded triangle mesh to a pixmap.
+fn render_mesh_shading_to_pixmap(
+    pixmap: &mut Pixmap,
+    params: &MeshShadingParams,
+    y_start: u32,
+    clip_mask: Option<&Mask>,
+) {
+    let pw = pixmap.width() as usize;
+    let ph = pixmap.height() as usize;
+    if pw == 0 || ph == 0 {
+        return;
+    }
+    let data = pixmap.data_mut();
+    let stride = pw * 4;
+
+    for tri in &params.triangles {
+        // Transform vertices to device space
+        let (x0, y0) = params.ctm.transform_point(tri.v0.x, tri.v0.y);
+        let (x1, y1) = params.ctm.transform_point(tri.v1.x, tri.v1.y);
+        let (x2, y2) = params.ctm.transform_point(tri.v2.x, tri.v2.y);
+
+        // Offset for banding
+        let y0b = y0 - y_start as f64;
+        let y1b = y1 - y_start as f64;
+        let y2b = y2 - y_start as f64;
+
+        // Bounding box (clamp to pixmap)
+        let min_x = x0.min(x1).min(x2).floor().max(0.0) as usize;
+        let max_x = (x0.max(x1).max(x2).ceil() as usize).min(pw);
+        let min_y = y0b.min(y1b).min(y2b).floor().max(0.0) as usize;
+        let max_y = (y0b.max(y1b).max(y2b).ceil() as usize).min(ph);
+
+        if min_x >= max_x || min_y >= max_y {
+            continue;
+        }
+
+        // Precompute barycentric denominator
+        let denom = (y1b - y2b) * (x0 - x2) + (x2 - x1) * (y0b - y2b);
+        if denom.abs() < 1e-10 {
+            continue; // degenerate triangle
+        }
+        let inv_denom = 1.0 / denom;
+
+        for py in min_y..max_y {
+            for px in min_x..max_x {
+                let pxf = px as f64 + 0.5;
+                let pyf = py as f64 + 0.5;
+
+                // Barycentric coordinates
+                let w0 = ((y1b - y2b) * (pxf - x2) + (x2 - x1) * (pyf - y2b)) * inv_denom;
+                let w1 = ((y2b - y0b) * (pxf - x2) + (x0 - x2) * (pyf - y2b)) * inv_denom;
+                let w2 = 1.0 - w0 - w1;
+
+                if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
+                    continue;
+                }
+
+                // Apply clip mask
+                if let Some(mask) = clip_mask {
+                    let mask_val = mask.data()[py * pw + px];
+                    if mask_val == 0 {
+                        continue;
+                    }
+                }
+
+                // Interpolate color
+                let r = w0 * tri.v0.color.r + w1 * tri.v1.color.r + w2 * tri.v2.color.r;
+                let g = w0 * tri.v0.color.g + w1 * tri.v1.color.g + w2 * tri.v2.color.g;
+                let b = w0 * tri.v0.color.b + w1 * tri.v1.color.b + w2 * tri.v2.color.b;
+
+                let offset = py * stride + px * 4;
+                data[offset] = (r * 255.0).round().clamp(0.0, 255.0) as u8;
+                data[offset + 1] = (g * 255.0).round().clamp(0.0, 255.0) as u8;
+                data[offset + 2] = (b * 255.0).round().clamp(0.0, 255.0) as u8;
+                data[offset + 3] = 255;
+            }
+        }
+    }
+}
+
+/// Render a Coons/tensor-product patch mesh by subdividing into triangles.
+fn render_patch_shading_to_pixmap(
+    pixmap: &mut Pixmap,
+    params: &PatchShadingParams,
+    y_start: u32,
+    clip_mask: Option<&Mask>,
+) {
+    // Subdivide each patch into triangles, then render as mesh
+    let mut triangles = Vec::new();
+
+    for patch in &params.patches {
+        if patch.points.len() >= 12 {
+            subdivide_patch_to_triangles(patch, &mut triangles);
+        }
+    }
+
+    if !triangles.is_empty() {
+        let mesh_params = MeshShadingParams {
+            triangles,
+            ctm: params.ctm,
+            bbox: params.bbox,
+        };
+        render_mesh_shading_to_pixmap(pixmap, &mesh_params, y_start, clip_mask);
+    }
+}
+
+/// Subdivide a Coons/tensor patch into triangles via recursive de Casteljau.
+/// Uses a simple grid subdivision approach: evaluate the patch at NxN points
+/// and triangulate the resulting grid.
+fn subdivide_patch_to_triangles(
+    patch: &stet_core::device::ShadingPatch,
+    triangles: &mut Vec<stet_core::device::ShadingTriangle>,
+) {
+    let n = 8; // Subdivision level (8x8 grid = 128 triangles per patch)
+
+    // Evaluate patch at grid points
+    let mut grid: Vec<(f64, f64, DeviceColor)> = Vec::with_capacity((n + 1) * (n + 1));
+
+    for row in 0..=n {
+        let v = row as f64 / n as f64;
+        for col in 0..=n {
+            let u = col as f64 / n as f64;
+            let (x, y) = eval_coons_patch(patch, u, v);
+            let color = bilinear_color(&patch.colors, u, v);
+            grid.push((x, y, color));
+        }
+    }
+
+    // Triangulate grid
+    let cols = n + 1;
+    for row in 0..n {
+        for col in 0..n {
+            let i00 = row * cols + col;
+            let i10 = i00 + 1;
+            let i01 = i00 + cols;
+            let i11 = i01 + 1;
+
+            let (x00, y00, c00) = &grid[i00];
+            let (x10, y10, c10) = &grid[i10];
+            let (x01, y01, c01) = &grid[i01];
+            let (x11, y11, c11) = &grid[i11];
+
+            use stet_core::device::ShadingVertex;
+            triangles.push(stet_core::device::ShadingTriangle {
+                v0: ShadingVertex {
+                    x: *x00,
+                    y: *y00,
+                    color: c00.clone(),
+                },
+                v1: ShadingVertex {
+                    x: *x10,
+                    y: *y10,
+                    color: c10.clone(),
+                },
+                v2: ShadingVertex {
+                    x: *x01,
+                    y: *y01,
+                    color: c01.clone(),
+                },
+            });
+            triangles.push(stet_core::device::ShadingTriangle {
+                v0: ShadingVertex {
+                    x: *x10,
+                    y: *y10,
+                    color: c10.clone(),
+                },
+                v1: ShadingVertex {
+                    x: *x11,
+                    y: *y11,
+                    color: c11.clone(),
+                },
+                v2: ShadingVertex {
+                    x: *x01,
+                    y: *y01,
+                    color: c01.clone(),
+                },
+            });
+        }
+    }
+}
+
+/// Evaluate a Coons patch at parameter (u, v).
+/// The 12 control points define 4 cubic Bezier boundary curves.
+fn eval_coons_patch(patch: &stet_core::device::ShadingPatch, u: f64, v: f64) -> (f64, f64) {
+    let pts = &patch.points;
+    if pts.len() < 12 {
+        return (0.0, 0.0);
+    }
+
+    // Side 0 (bottom): pts[0..4], u goes 0→1
+    // Side 1 (right): pts[3..7], v goes 0→1
+    // Side 2 (top): pts[6..10], u goes 1→0 (reversed)
+    // Side 3 (left): pts[9..12] + pts[0], v goes 1→0 (reversed)
+    let c0 = eval_cubic_bezier(pts[0], pts[1], pts[2], pts[3], u);
+    let c2 = eval_cubic_bezier(pts[6], pts[7], pts[8], pts[9], 1.0 - u);
+    let d0 = eval_cubic_bezier(pts[0], pts[11], pts[10], pts[9], v);
+    let d1 = eval_cubic_bezier(pts[3], pts[4], pts[5], pts[6], v);
+
+    // Bilinear blending of corners
+    let p00 = pts[0];
+    let p10 = pts[3];
+    let p01 = pts[9];
+    let p11 = pts[6];
+    let bx = (1.0 - u) * (1.0 - v) * p00.0
+        + u * (1.0 - v) * p10.0
+        + (1.0 - u) * v * p01.0
+        + u * v * p11.0;
+    let by = (1.0 - u) * (1.0 - v) * p00.1
+        + u * (1.0 - v) * p10.1
+        + (1.0 - u) * v * p01.1
+        + u * v * p11.1;
+
+    // Coons blending: S(u,v) = c(u,v) + d(u,v) - B(u,v)
+    let x = (1.0 - v) * c0.0 + v * c2.0 + (1.0 - u) * d0.0 + u * d1.0 - bx;
+    let y = (1.0 - v) * c0.1 + v * c2.1 + (1.0 - u) * d0.1 + u * d1.1 - by;
+
+    (x, y)
+}
+
+/// Evaluate a cubic Bezier curve at parameter t.
+fn eval_cubic_bezier(
+    p0: (f64, f64),
+    p1: (f64, f64),
+    p2: (f64, f64),
+    p3: (f64, f64),
+    t: f64,
+) -> (f64, f64) {
+    let s = 1.0 - t;
+    let s2 = s * s;
+    let t2 = t * t;
+    let b0 = s2 * s;
+    let b1 = 3.0 * s2 * t;
+    let b2 = 3.0 * s * t2;
+    let b3 = t2 * t;
+    (
+        b0 * p0.0 + b1 * p1.0 + b2 * p2.0 + b3 * p3.0,
+        b0 * p0.1 + b1 * p1.1 + b2 * p2.1 + b3 * p3.1,
+    )
+}
+
+/// Bilinear color interpolation across patch corners.
+fn bilinear_color(colors: &[DeviceColor; 4], u: f64, v: f64) -> DeviceColor {
+    let r = (1.0 - u) * (1.0 - v) * colors[0].r
+        + u * (1.0 - v) * colors[1].r
+        + (1.0 - u) * v * colors[3].r
+        + u * v * colors[2].r;
+    let g = (1.0 - u) * (1.0 - v) * colors[0].g
+        + u * (1.0 - v) * colors[1].g
+        + (1.0 - u) * v * colors[3].g
+        + u * v * colors[2].g;
+    let b = (1.0 - u) * (1.0 - v) * colors[0].b
+        + u * (1.0 - v) * colors[1].b
+        + (1.0 - u) * v * colors[3].b
+        + u * v * colors[2].b;
+    DeviceColor::from_rgb(r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0))
+}
+
+/// Build tiny-skia gradient stops from color stops.
+fn build_gradient_stops(
+    stops: &[stet_core::device::ColorStop],
+) -> Vec<tiny_skia::GradientStop> {
+    let mut result = Vec::with_capacity(stops.len());
+    for stop in stops {
+        let r = (stop.color.r * 255.0).round().clamp(0.0, 255.0) as u8;
+        let g = (stop.color.g * 255.0).round().clamp(0.0, 255.0) as u8;
+        let b = (stop.color.b * 255.0).round().clamp(0.0, 255.0) as u8;
+        result.push(tiny_skia::GradientStop::new(
+            stop.position as f32,
+            Color::from_rgba8(r, g, b, 255),
+        ));
+    }
+    result
+}
+
+/// Interpolate between color stops at a given position (0.0..=1.0).
+fn interpolate_color_stops(
+    stops: &[stet_core::device::ColorStop],
+    position: f64,
+) -> DeviceColor {
+    if stops.is_empty() {
+        return DeviceColor::from_gray(0.0);
+    }
+    if stops.len() == 1 || position <= stops[0].position {
+        return stops[0].color.clone();
+    }
+    if position >= stops.last().unwrap().position {
+        return stops.last().unwrap().color.clone();
+    }
+
+    // Find the two stops bracketing this position
+    for i in 1..stops.len() {
+        if position <= stops[i].position {
+            let t0 = stops[i - 1].position;
+            let t1 = stops[i].position;
+            let frac = if (t1 - t0).abs() < 1e-10 {
+                0.0
+            } else {
+                (position - t0) / (t1 - t0)
+            };
+            let c0 = &stops[i - 1].color;
+            let c1 = &stops[i].color;
+            return DeviceColor::from_rgb(
+                (c0.r + frac * (c1.r - c0.r)).clamp(0.0, 1.0),
+                (c0.g + frac * (c1.g - c0.g)).clamp(0.0, 1.0),
+                (c0.b + frac * (c1.b - c0.b)).clamp(0.0, 1.0),
+            );
+        }
+    }
+
+    stops.last().unwrap().color.clone()
 }
 
 #[cfg(test)]

@@ -154,16 +154,7 @@ pub fn op_currenthalftone(ctx: &mut Context) -> Result<(), PsError> {
     Ok(())
 }
 
-// ---------- Pattern/shading stubs ----------
-
-/// `shfill`: dict → —
-pub fn op_shfill(ctx: &mut Context) -> Result<(), PsError> {
-    if ctx.o_stack.is_empty() {
-        return Err(PsError::StackUnderflow);
-    }
-    ctx.o_stack.pop()?;
-    Ok(())
-}
+// ---------- Pattern stubs ----------
 
 /// `makepattern`: dict matrix → dict
 pub fn op_makepattern(ctx: &mut Context) -> Result<(), PsError> {

@@ -18,6 +18,7 @@ pub mod error;
 pub mod file_store;
 pub mod font_loader;
 pub mod graphics_state;
+pub mod mesh_shading;
 pub mod name;
 pub mod object;
 pub mod save_stack;

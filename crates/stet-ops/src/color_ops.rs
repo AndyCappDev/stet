@@ -566,6 +566,61 @@ fn default_color_for_space(cs: &ColorSpace, ctx: &Context) -> DeviceColor {
     }
 }
 
+/// Resolve a color space from a PsObject (name or array).
+/// Returns the ColorSpace and its number of components.
+pub fn resolve_color_space_from_obj(
+    ctx: &Context,
+    obj: &PsObject,
+) -> Result<(ColorSpace, usize), PsError> {
+    match obj.value {
+        PsValue::Name(id) => {
+            let name = ctx.names.get_bytes(id);
+            match name {
+                b"DeviceGray" => Ok((ColorSpace::DeviceGray, 1)),
+                b"DeviceRGB" => Ok((ColorSpace::DeviceRGB, 3)),
+                b"DeviceCMYK" => Ok((ColorSpace::DeviceCMYK, 4)),
+                _ => Err(PsError::Undefined),
+            }
+        }
+        PsValue::Array { entity, start, len } => {
+            if len == 0 {
+                return Err(PsError::RangeCheck);
+            }
+            let first = ctx.arrays.get_element(entity, start);
+            if let PsValue::Name(id) = first.value {
+                let name = ctx.names.get_bytes(id).to_vec();
+                let cs = match name.as_slice() {
+                    b"DeviceGray" => ColorSpace::DeviceGray,
+                    b"DeviceRGB" => ColorSpace::DeviceRGB,
+                    b"DeviceCMYK" => ColorSpace::DeviceCMYK,
+                    b"Indexed" if len >= 4 => parse_indexed_colorspace(ctx, entity, start)?,
+                    b"CIEBasedABC" => parse_cie_abc_colorspace(ctx, entity, start, len)?,
+                    b"CIEBasedA" => parse_cie_a_colorspace(ctx, entity, start, len)?,
+                    b"ICCBased" => parse_iccbased_colorspace(ctx, entity, start, len)?,
+                    b"Separation" if len >= 4 => parse_separation_colorspace(ctx, entity, start)?,
+                    b"DeviceN" if len >= 4 => parse_devicen_colorspace(ctx, entity, start)?,
+                    _ => return Err(PsError::Undefined),
+                };
+                let n_comps = match &cs {
+                    ColorSpace::DeviceGray => 1,
+                    ColorSpace::DeviceRGB => 3,
+                    ColorSpace::DeviceCMYK => 4,
+                    ColorSpace::CIEBasedABC { .. } => 3,
+                    ColorSpace::CIEBasedA { .. } => 1,
+                    ColorSpace::ICCBased { n, .. } => *n as usize,
+                    ColorSpace::Indexed { .. } => 1,
+                    ColorSpace::Separation { .. } => 1,
+                    ColorSpace::DeviceN { num_colorants, .. } => *num_colorants as usize,
+                };
+                Ok((cs, n_comps))
+            } else {
+                Err(PsError::TypeCheck)
+            }
+        }
+        _ => Err(PsError::TypeCheck),
+    }
+}
+
 /// Parse `[/Indexed base hival lookup]` from an array.
 fn parse_indexed_colorspace(
     ctx: &Context,
