@@ -31,18 +31,19 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
 
     // Parse flags
-    let mut dpi: f64 = 300.0;
+    let mut dpi: Option<f64> = None;
     let mut threads: Option<usize> = None;
-    let mut file_args: Vec<&str> = Vec::new();
+    let mut device_name: Option<String> = None;
+    let mut file_args: Vec<String> = Vec::new();
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
             "--dpi" => {
                 if i + 1 < args.len() {
-                    dpi = args[i + 1].parse().unwrap_or_else(|_| {
+                    dpi = Some(args[i + 1].parse().unwrap_or_else(|_| {
                         eprintln!("Error: invalid DPI value '{}'", args[i + 1]);
                         std::process::exit(1);
-                    });
+                    }));
                     i += 2;
                     continue;
                 } else {
@@ -68,11 +69,39 @@ fn main() {
                     std::process::exit(1);
                 }
             }
+            "--device" => {
+                if i + 1 < args.len() {
+                    device_name = Some(args[i + 1].clone());
+                    i += 2;
+                    continue;
+                } else {
+                    eprintln!("Error: --device requires a value");
+                    std::process::exit(1);
+                }
+            }
             _ => {}
         }
-        file_args.push(&args[i]);
+        file_args.push(args[i].clone());
         i += 1;
     }
+
+    // Determine the output device
+    let device = device_name.unwrap_or_else(|| {
+        if file_args.is_empty() {
+            // REPL mode — no rendering device needed
+            "png".to_string()
+        } else if cfg!(feature = "viewer") {
+            "viewer".to_string()
+        } else {
+            "png".to_string()
+        }
+    });
+
+    // Set DPI defaults based on device (user override takes precedence)
+    let dpi = dpi.unwrap_or(match device.as_str() {
+        "viewer" => 150.0,
+        _ => 300.0,
+    });
 
     // Configure rayon thread pool — default cap at 8 (sequential PNG writing
     // bottleneck means additional cores yield no speedup), override with --threads.
@@ -85,6 +114,75 @@ fn main() {
             std::process::exit(1);
         });
 
+    match device.as_str() {
+        "png" => run_png_mode(dpi, file_args),
+        #[cfg(feature = "viewer")]
+        "viewer" => run_viewer_mode(dpi, file_args),
+        #[cfg(not(feature = "viewer"))]
+        "viewer" => {
+            eprintln!("Error: viewer not available (built without 'viewer' feature)");
+            std::process::exit(1);
+        }
+        other => {
+            eprintln!("Error: unknown device '{}'", other);
+            eprintln!("Available devices: png, viewer");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Run in PNG output mode (existing behavior).
+fn run_png_mode(dpi: f64, file_args: Vec<String>) {
+    let mut ctx = create_context();
+
+    // Register device factory (before setpagedevice)
+    ctx.device_factory = Some(Box::new(|w, h| Box::new(SkiaDevice::new(w, h))));
+
+    if !file_args.is_empty() {
+        run_file_jobs(&mut ctx, dpi, &file_args, "png");
+    } else {
+        run_repl(&mut ctx);
+    }
+}
+
+/// Run in viewer mode — interpreter on background thread, viewer on main thread.
+#[cfg(feature = "viewer")]
+fn run_viewer_mode(dpi: f64, file_args: Vec<String>) {
+    if file_args.is_empty() {
+        // REPL mode — no viewer, just run interactively
+        let mut ctx = create_context();
+        ctx.device_factory = Some(Box::new(|w, h| Box::new(SkiaDevice::new(w, h))));
+        run_repl(&mut ctx);
+        return;
+    }
+
+    let (interp_end, viewer_end) = stet_viewer::create_channels();
+    let factory = stet_viewer::ViewerSinkFactory::new(interp_end);
+
+    // Spawn interpreter on background thread (egui/winit requires main thread)
+    std::thread::spawn(move || {
+        let mut ctx = create_context();
+
+        // Register device factory with viewer sink
+        let factory_clone = factory.clone();
+        ctx.device_factory = Some(Box::new(move |w, h| {
+            Box::new(SkiaDevice::with_sink_factory(
+                w,
+                h,
+                Box::new(factory_clone.clone()),
+            ))
+        }));
+
+        run_file_jobs(&mut ctx, dpi, &file_args, "viewer");
+    });
+
+    // Main thread: run viewer
+    stet_viewer::run_viewer(viewer_end);
+    std::process::exit(0);
+}
+
+/// Create and initialize a Context with the resource system.
+fn create_context() -> Context {
     let mut ctx = Context::new();
     ctx.exec_sync_fn = Some(stet_engine::eval::exec_sync);
     build_system_dict(&mut ctx);
@@ -93,7 +191,6 @@ fn main() {
     let resource_path = find_resource_path();
     if let Some(ref rp) = resource_path {
         ctx.resource_base_path = Some(rp.clone());
-        // Also set font_resource_path for backward compatibility
         let font_path = PathBuf::from(rp).join("Font");
         if font_path.is_dir() {
             ctx.font_resource_path = Some(font_path.to_string_lossy().to_string());
@@ -103,147 +200,149 @@ fn main() {
     // Run init scripts to bootstrap the resource system.
     run_init_scripts(&mut ctx);
 
-    // Register device factory (before setpagedevice)
-    ctx.device_factory = Some(Box::new(|w, h| Box::new(SkiaDevice::new(w, h))));
+    ctx
+}
 
-    if !file_args.is_empty() {
-        let num_jobs = file_args.len();
+/// Run PostScript file jobs.
+fn run_file_jobs(ctx: &mut Context, dpi: f64, file_args: &[String], device: &str) {
+    let num_jobs = file_args.len();
 
-        for (job_idx, filename) in file_args.iter().enumerate() {
-            let display_name = std::path::Path::new(filename)
-                .canonicalize()
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|_| filename.to_string());
+    for (job_idx, filename) in file_args.iter().enumerate() {
+        let display_name = std::path::Path::new(filename)
+            .canonicalize()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| filename.to_string());
 
-            eprintln!("\n{}", "=".repeat(60));
-            eprintln!(
-                "Processing Job {}/{}: {}",
-                job_idx + 1,
-                num_jobs,
-                display_name
-            );
-            eprintln!("{}", "=".repeat(60));
+        eprintln!("\n{}", "=".repeat(60));
+        eprintln!(
+            "Processing Job {}/{}: {}",
+            job_idx + 1,
+            num_jobs,
+            display_name
+        );
+        eprintln!("{}", "=".repeat(60));
 
-            let filename_lower = filename.to_ascii_lowercase();
+        let filename_lower = filename.to_ascii_lowercase();
 
-            // Derive output path: strip known extensions, add .png
-            let output_base = filename
-                .strip_suffix(".ps")
-                .or_else(|| filename.strip_suffix(".PS"))
-                .or_else(|| filename.strip_suffix(".eps"))
-                .or_else(|| filename.strip_suffix(".EPS"))
-                .or_else(|| filename.strip_suffix(".epsf"))
-                .or_else(|| filename.strip_suffix(".EPSF"))
-                .unwrap_or(filename);
-            ctx.output_path = Some(format!("{}.png", output_base));
+        // Derive output path: strip known extensions, add .png
+        let output_base = filename
+            .strip_suffix(".ps")
+            .or_else(|| filename.strip_suffix(".PS"))
+            .or_else(|| filename.strip_suffix(".eps"))
+            .or_else(|| filename.strip_suffix(".EPS"))
+            .or_else(|| filename.strip_suffix(".epsf"))
+            .or_else(|| filename.strip_suffix(".EPSF"))
+            .unwrap_or(filename);
+        ctx.output_path = Some(format!("{}.png", output_base));
 
-            let source = match std::fs::read(filename) {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("Error: cannot read '{}': {}", filename, e);
-                    std::process::exit(1);
-                }
-            };
-
-            // Strip DOS EPS binary header if present
-            let ps_data = strip_dos_eps_header(&source);
-            let is_eps = filename_lower.ends_with(".eps") || filename_lower.ends_with(".epsf");
-
-            let job_start = std::time::Instant::now();
-
-            let exec_result = if is_eps {
-                run_eps_file(&mut ctx, dpi, ps_data)
-            } else {
-                // Regular PS file — run as-is (DOS header still stripped)
-                if job_idx == 0 {
-                    install_png_device(&mut ctx, dpi);
-                }
-                parse_and_exec(&mut ctx, ps_data)
-            };
-
-            // Wait for any pipelined background render to complete before timing
-            if let Some(ref mut device) = ctx.device
-                && let Err(e) = device.finish()
-            {
-                eprintln!("render error: {}", e);
+        let source = match std::fs::read(filename) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("Error: cannot read '{}': {}", filename, e);
+                std::process::exit(1);
             }
+        };
 
-            let job_duration = job_start.elapsed();
+        // Strip DOS EPS binary header if present
+        let ps_data = strip_dos_eps_header(&source);
+        let is_eps = filename_lower.ends_with(".eps") || filename_lower.ends_with(".epsf");
 
-            match exec_result {
-                Ok(()) => {
-                    eprintln!(
-                        "\nJob execution time: {:.3} seconds",
-                        job_duration.as_secs_f64()
-                    );
-                    eprintln!(
-                        "Job {} completed successfully: {}",
-                        job_idx + 1,
-                        display_name
-                    );
-                }
-                Err(e) => {
-                    eprintln!(
-                        "\nJob execution time: {:.3} seconds",
-                        job_duration.as_secs_f64()
-                    );
-                    match e {
-                        stet_core::error::PsError::Quit => {
-                            eprintln!("Job {} completed (quit): {}", job_idx + 1, display_name);
-                        }
-                        stet_core::error::PsError::Stop => {
-                            // .error already populated $error; call handleerror
-                            let _ = parse_and_exec(&mut ctx, b"{ handleerror } stopped pop");
-                            eprintln!("Job {} FAILED: {}", job_idx + 1, display_name);
-                        }
-                        _ => {
-                            eprintln!("Error: {}", e);
-                            eprintln!("Job {} FAILED: {}", job_idx + 1, display_name);
-                        }
+        let job_start = std::time::Instant::now();
+
+        let exec_result = if is_eps {
+            run_eps_file(ctx, dpi, ps_data, device)
+        } else {
+            // Regular PS file — run as-is (DOS header still stripped)
+            if job_idx == 0 {
+                install_device(ctx, dpi, device);
+            }
+            parse_and_exec(ctx, ps_data)
+        };
+
+        // Wait for any pipelined background render to complete before timing
+        if let Some(ref mut dev) = ctx.device
+            && let Err(e) = dev.finish()
+        {
+            eprintln!("render error: {}", e);
+        }
+
+        let job_duration = job_start.elapsed();
+
+        match exec_result {
+            Ok(()) => {
+                eprintln!(
+                    "\nJob execution time: {:.3} seconds",
+                    job_duration.as_secs_f64()
+                );
+                eprintln!(
+                    "Job {} completed successfully: {}",
+                    job_idx + 1,
+                    display_name
+                );
+            }
+            Err(e) => {
+                eprintln!(
+                    "\nJob execution time: {:.3} seconds",
+                    job_duration.as_secs_f64()
+                );
+                match e {
+                    stet_core::error::PsError::Quit => {
+                        eprintln!("Job {} completed (quit): {}", job_idx + 1, display_name);
+                    }
+                    stet_core::error::PsError::Stop => {
+                        // .error already populated $error; call handleerror
+                        let _ = parse_and_exec(ctx, b"{ handleerror } stopped pop");
+                        eprintln!("Job {} FAILED: {}", job_idx + 1, display_name);
+                    }
+                    _ => {
+                        eprintln!("Error: {}", e);
+                        eprintln!("Job {} FAILED: {}", job_idx + 1, display_name);
                     }
                 }
             }
         }
+    }
 
-        // Final summary
-        eprintln!("\n{}", "=".repeat(60));
-        eprintln!(
-            "Processed {} job{}",
-            num_jobs,
-            if num_jobs == 1 { "" } else { "s" }
-        );
-        eprintln!("{}", "=".repeat(60));
+    // Final summary
+    eprintln!("\n{}", "=".repeat(60));
+    eprintln!(
+        "Processed {} job{}",
+        num_jobs,
+        if num_jobs == 1 { "" } else { "s" }
+    );
+    eprintln!("{}", "=".repeat(60));
 
-        // Dump final stacks
-        eprintln!("\nFinal operand stack:");
-        print_stack(&ctx);
-        eprintln!("\nexecution stack");
-        print_exec_stack(&ctx);
-    } else {
-        // Interactive REPL
-        let stdin = std::io::stdin();
-        let mut line = String::new();
-        loop {
-            eprint!("PS> ");
-            std::io::stderr().flush().ok();
-            line.clear();
-            match stdin.read_line(&mut line) {
-                Ok(0) => break, // EOF
-                Ok(_) => {
-                    if let Err(e) = parse_and_exec(&mut ctx, line.as_bytes()) {
-                        match e {
-                            stet_core::error::PsError::Quit => break,
-                            stet_core::error::PsError::Stop => {
-                                let _ = parse_and_exec(&mut ctx, b"{ handleerror } stopped pop");
-                            }
-                            _ => eprintln!("Error: {}", e),
+    // Dump final stacks
+    eprintln!("\nFinal operand stack:");
+    print_stack(ctx);
+    eprintln!("\nexecution stack");
+    print_exec_stack(ctx);
+}
+
+/// Run the interactive REPL.
+fn run_repl(ctx: &mut Context) {
+    let stdin = std::io::stdin();
+    let mut line = String::new();
+    loop {
+        eprint!("PS> ");
+        std::io::stderr().flush().ok();
+        line.clear();
+        match stdin.read_line(&mut line) {
+            Ok(0) => break, // EOF
+            Ok(_) => {
+                if let Err(e) = parse_and_exec(ctx, line.as_bytes()) {
+                    match e {
+                        stet_core::error::PsError::Quit => break,
+                        stet_core::error::PsError::Stop => {
+                            let _ = parse_and_exec(ctx, b"{ handleerror } stopped pop");
                         }
+                        _ => eprintln!("Error: {}", e),
                     }
                 }
-                Err(e) => {
-                    eprintln!("Error reading input: {}", e);
-                    break;
-                }
+            }
+            Err(e) => {
+                eprintln!("Error reading input: {}", e);
+                break;
             }
         }
     }
@@ -340,27 +439,27 @@ fn sync_context_after_init(ctx: &mut Context) {
     }
 }
 
-/// Install the PNG device via `setpagedevice`.
-///
-/// Loads the device dict from `resources/OutputDevice/png.ps`, overrides
-/// HWResolution with the requested DPI, and calls `setpagedevice`.
-fn install_png_device(ctx: &mut Context, dpi: f64) {
+/// Install the output device via `setpagedevice`.
+fn install_device(ctx: &mut Context, dpi: f64, device: &str) {
+    let resource_name = match device {
+        "viewer" => "viewer",
+        _ => "png",
+    };
     let setup = format!(
-        "/png /OutputDevice findresource dup /HWResolution [{0} {0}] put setpagedevice",
-        dpi
+        "/{} /OutputDevice findresource dup /HWResolution [{1} {1}] put setpagedevice",
+        resource_name, dpi
     );
     if let Err(e) = parse_and_exec(ctx, setup.as_bytes()) {
-        // Fallback: set up device manually if resource system isn't available
         eprintln!(
             "Warning: setpagedevice via resource failed ({}), using fallback",
             e
         );
-        install_png_device_fallback(ctx, dpi);
+        install_device_fallback(ctx, dpi);
     }
 }
 
 /// Fallback device setup when the resource system isn't available.
-fn install_png_device_fallback(ctx: &mut Context, dpi: f64) {
+fn install_device_fallback(ctx: &mut Context, dpi: f64) {
     use stet_core::graphics_state::Matrix;
 
     let scale = dpi / 72.0;
@@ -380,13 +479,14 @@ fn run_eps_file(
     ctx: &mut Context,
     dpi: f64,
     ps_data: &[u8],
+    device: &str,
 ) -> Result<(), stet_core::error::PsError> {
     if let Some((llx, lly, urx, ury)) = read_eps_bounding_box(ps_data) {
         let w = urx - llx;
         let h = ury - lly;
         if w > 0.0 && h > 0.0 {
             // Install device with EPS bounding box dimensions
-            install_png_device_with_size(ctx, dpi, w, h);
+            install_device_with_size(ctx, dpi, w, h, device);
             // Translate origin if bbox doesn't start at (0,0)
             let wrapper = format!("gsave {} {} translate", -llx, -lly);
             parse_and_exec(ctx, wrapper.as_bytes())?;
@@ -396,24 +496,28 @@ fn run_eps_file(
         }
     }
     // No valid bbox — use default page size, add showpage
-    install_png_device(ctx, dpi);
+    install_device(ctx, dpi, device);
     parse_and_exec(ctx, ps_data)?;
     parse_and_exec(ctx, b"showpage")
 }
 
-/// Install the PNG device with a custom page size (for EPS bounding boxes).
-fn install_png_device_with_size(ctx: &mut Context, dpi: f64, width: f64, height: f64) {
+/// Install the device with a custom page size (for EPS bounding boxes).
+fn install_device_with_size(ctx: &mut Context, dpi: f64, width: f64, height: f64, device: &str) {
+    let resource_name = match device {
+        "viewer" => "viewer",
+        _ => "png",
+    };
     let setup = format!(
-        "/png /OutputDevice findresource dup /HWResolution [{0} {0}] put \
-         dup /PageSize [{1} {2}] put setpagedevice",
-        dpi, width, height
+        "/{} /OutputDevice findresource dup /HWResolution [{1} {1}] put \
+         dup /PageSize [{2} {3}] put setpagedevice",
+        resource_name, dpi, width, height
     );
     if let Err(e) = parse_and_exec(ctx, setup.as_bytes()) {
         eprintln!(
             "Warning: setpagedevice with size failed ({}), using fallback",
             e
         );
-        install_png_device_fallback(ctx, dpi);
+        install_device_fallback(ctx, dpi);
     }
 }
 

@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Scott Bowman
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! Raster device trait — abstraction boundary for rendering backends.
+//! Output device trait — abstraction boundary for rendering backends.
 
 use crate::graphics_state::{
     DashPattern, DeviceColor, FillRule, LineCap, LineJoin, Matrix, PsPath,
@@ -134,7 +134,7 @@ pub struct PatchShadingParams {
 ///
 /// Operators never see the concrete implementation — they call trait methods.
 /// This enables backend swaps (tiny-skia, cairo, etc.) without changing operator code.
-pub trait RasterDevice {
+pub trait OutputDevice {
     /// Fill a path with the given color.
     fn fill_path(&mut self, path: &PsPath, params: &FillParams);
 
@@ -232,7 +232,7 @@ impl NullDevice {
     }
 }
 
-impl RasterDevice for NullDevice {
+impl OutputDevice for NullDevice {
     fn fill_path(&mut self, _path: &PsPath, _params: &FillParams) {}
     fn stroke_path(&mut self, _path: &PsPath, _params: &StrokeParams) {}
     fn clip_path(&mut self, _path: &PsPath, _params: &ClipParams) {}
@@ -245,4 +245,29 @@ impl RasterDevice for NullDevice {
     fn page_size(&self) -> (u32, u32) {
         (self.width, self.height)
     }
+}
+
+/// Trait for consuming rendered page pixel data.
+///
+/// Output backends (PNG, TIFF, viewer) implement this trait to receive
+/// rendered RGBA rows from the rasterization engine. The engine calls
+/// methods in order: begin_page → write_rows (one or more) → end_page.
+pub trait PageSink: Send {
+    /// Start a new page with the given pixel dimensions.
+    fn begin_page(&mut self, width: u32, height: u32) -> Result<(), String>;
+
+    /// Write one or more rows of RGBA pixel data (4 bytes per pixel, row-major).
+    fn write_rows(&mut self, rgba_rows: &[u8], num_rows: u32) -> Result<(), String>;
+
+    /// Finish the current page. May block (e.g., viewer waits for user input).
+    fn end_page(&mut self) -> Result<(), String>;
+}
+
+/// Factory for creating per-page sinks.
+///
+/// Called once per showpage with the output path for that page.
+/// File-based backends use the path; the viewer ignores it.
+pub trait PageSinkFactory: Send + Sync {
+    /// Create a new sink for a single page.
+    fn create_sink(&self, output_path: &str) -> Result<Box<dyn PageSink>, String>;
 }

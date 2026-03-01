@@ -7,7 +7,7 @@
 use std::io::Write;
 
 use crate::array_store::ArrayStore;
-use crate::device::RasterDevice;
+use crate::device::OutputDevice;
 use crate::dict::{DictKey, DictStore};
 use crate::display_list::DisplayList;
 use crate::error::PsError;
@@ -158,14 +158,14 @@ pub struct Context {
     // Graphics state
     pub gstate: GraphicsState,
     pub gstate_stack: Vec<GraphicsState>,
-    pub device: Option<Box<dyn RasterDevice>>,
+    pub device: Option<Box<dyn OutputDevice>>,
     pub display_list: DisplayList,
     pub page_width: u32,
     pub page_height: u32,
     pub output_path: Option<String>,
     /// Factory closure for creating raster devices (registered by CLI).
     #[allow(clippy::type_complexity)]
-    pub device_factory: Option<Box<dyn Fn(u32, u32) -> Box<dyn RasterDevice>>>,
+    pub device_factory: Option<Box<dyn Fn(u32, u32) -> Box<dyn OutputDevice>>>,
 
     // Font system
     pub font_directory: EntityId,

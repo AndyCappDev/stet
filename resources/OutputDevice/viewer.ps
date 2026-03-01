@@ -1,0 +1,34 @@
+%% pagedevice dictionary for interactive viewer
+
+<<
+    /OutputDeviceName (viewer)
+    /OutputDevice /viewer
+    /PageSize [612 792]
+    /HWResolution [150 150]
+    /Margins [0.0 0.0]
+    /PageOffset [0 0]
+    /BitsPerPixel 24
+    /NumCopies null
+    /Install {
+        .9 setflat
+        {} settransfer
+        /DeviceRGB setcolorspace
+    } bind
+    /BeginPage {pop} bind
+    /EndPage {
+        dup 0 eq {
+            pop true
+        } {
+            1 eq { true } { pop false } ifelse
+        } ifelse
+    } bind
+    /InputAttributes <<>>
+    /OutputAttributes <<>>
+    /ColorModel /DeviceRGB
+    /ProcessColorModel /DeviceRGB
+    /Policies <<>>
+    /PageCount 0
+    /.IsPageDevice true
+    /Separations false
+    /Colors 3
+>>

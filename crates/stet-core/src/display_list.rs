@@ -5,8 +5,8 @@
 //! Display list — records drawing operations for deferred replay to a device.
 
 use crate::device::{
-    AxialShadingParams, ClipParams, FillParams, ImageParams, MeshShadingParams,
-    PatchShadingParams, RadialShadingParams, RasterDevice, StrokeParams,
+    AxialShadingParams, ClipParams, FillParams, ImageParams, MeshShadingParams, OutputDevice,
+    PatchShadingParams, RadialShadingParams, StrokeParams,
 };
 use crate::graphics_state::PsPath;
 
@@ -73,7 +73,7 @@ impl Default for DisplayList {
 }
 
 /// Replay a display list to any raster device.
-pub fn replay_to_device(list: &DisplayList, device: &mut dyn RasterDevice) {
+pub fn replay_to_device(list: &DisplayList, device: &mut dyn OutputDevice) {
     for element in &list.elements {
         match element {
             DisplayElement::Fill { path, params } => {

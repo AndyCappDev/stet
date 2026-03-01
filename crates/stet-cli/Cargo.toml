@@ -16,3 +16,8 @@ stet-engine.workspace = true
 stet-ops.workspace = true
 stet-render.workspace = true
 rayon.workspace = true
+stet-viewer = { workspace = true, optional = true }
+
+[features]
+default = ["viewer"]
+viewer = ["dep:stet-viewer"]

@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Scott Bowman
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! tiny-skia implementation of the `RasterDevice` trait.
+//! tiny-skia implementation of the `OutputDevice` trait.
 
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -14,8 +14,8 @@ use tiny_skia::{
 };
 
 use stet_core::device::{
-    AxialShadingParams, ClipParams, FillParams, ImageParams, MeshShadingParams,
-    PatchShadingParams, RadialShadingParams, RasterDevice, StrokeParams,
+    AxialShadingParams, ClipParams, FillParams, ImageParams, MeshShadingParams, OutputDevice,
+    PageSinkFactory, PatchShadingParams, RadialShadingParams, StrokeParams,
 };
 use stet_core::graphics_state::{
     DeviceColor, FillRule, LineCap, LineJoin, Matrix, PathSegment, PsPath,
@@ -90,15 +90,26 @@ pub struct SkiaDevice {
     /// Receiver for background render result (pipelined multi-page rendering).
     /// Uses rayon::spawn + oneshot channel to avoid OS thread spawn overhead.
     pending_render: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
+    /// Factory for creating page sinks (PNG, viewer, etc.).
+    sink_factory: Box<dyn PageSinkFactory>,
 }
 
 impl SkiaDevice {
-    /// Create a new device with the given page dimensions.
+    /// Create a new device with the given page dimensions and default PNG output.
     ///
     /// Defers the full-page pixmap allocation — only a 1×1 placeholder is
     /// created here. The full pixmap is allocated lazily in `replay_and_show`
     /// only when the non-banded rendering path is needed.
     pub fn new(width: u32, height: u32) -> Self {
+        Self::with_sink_factory(width, height, Box::new(crate::PngSinkFactory))
+    }
+
+    /// Create a new device with a custom page sink factory.
+    pub fn with_sink_factory(
+        width: u32,
+        height: u32,
+        sink_factory: Box<dyn PageSinkFactory>,
+    ) -> Self {
         // Start with a tiny placeholder. The full-page pixmap is allocated
         // lazily only when the non-banded path is used (small pages / low DPI).
         // For banded rendering, band-sized pixmaps are created in replay_and_show.
@@ -112,6 +123,7 @@ impl SkiaDevice {
             clip_mask_seen: HashSet::new(),
             spare_mask: None,
             pending_render: None,
+            sink_factory,
         }
     }
 
@@ -405,7 +417,6 @@ fn intersect_masks(dst: &mut Mask, src: &Mask) {
 
 // ---- Banded rendering support ----
 
-use std::io::Write;
 use stet_core::display_list::{DisplayElement, DisplayList};
 
 /// Band-local clip state, rebuilt for each band.
@@ -520,10 +531,18 @@ fn precompute_bboxes(list: &DisplayList) -> Vec<Option<YBBox>> {
             DisplayElement::Fill { path, .. } => path_y_bbox(path),
             DisplayElement::Stroke { path, params } => stroke_device_y_bbox(path, params),
             DisplayElement::Image { params, .. } => image_y_bbox(params),
-            DisplayElement::AxialShading { params } => shading_y_bbox_from_bbox(&params.bbox, &params.ctm),
-            DisplayElement::RadialShading { params } => shading_y_bbox_from_bbox(&params.bbox, &params.ctm),
-            DisplayElement::MeshShading { params } => shading_y_bbox_from_bbox(&params.bbox, &params.ctm),
-            DisplayElement::PatchShading { params } => shading_y_bbox_from_bbox(&params.bbox, &params.ctm),
+            DisplayElement::AxialShading { params } => {
+                shading_y_bbox_from_bbox(&params.bbox, &params.ctm)
+            }
+            DisplayElement::RadialShading { params } => {
+                shading_y_bbox_from_bbox(&params.bbox, &params.ctm)
+            }
+            DisplayElement::MeshShading { params } => {
+                shading_y_bbox_from_bbox(&params.bbox, &params.ctm)
+            }
+            DisplayElement::PatchShading { params } => {
+                shading_y_bbox_from_bbox(&params.bbox, &params.ctm)
+            }
             _ => None, // Clip, InitClip, ErasePage: always process
         })
         .collect()
@@ -1035,7 +1054,7 @@ fn clip_path_band(
     }
 }
 
-impl RasterDevice for SkiaDevice {
+impl OutputDevice for SkiaDevice {
     fn fill_path(&mut self, path: &PsPath, params: &FillParams) {
         self.ensure_full_pixmap();
         let Some(skia_path) = build_skia_path(path) else {
@@ -1174,12 +1193,12 @@ impl RasterDevice for SkiaDevice {
     }
 
     fn show_page(&mut self, output_path: &str) -> Result<(), String> {
-        save_png_compressed(
-            self.pixmap.data(),
-            self.pixmap.width(),
-            self.pixmap.height(),
-            output_path,
-        )
+        let w = self.pixmap.width();
+        let h = self.pixmap.height();
+        let mut sink = self.sink_factory.create_sink(output_path)?;
+        sink.begin_page(w, h)?;
+        sink.write_rows(self.pixmap.data(), h)?;
+        sink.end_page()
     }
 
     fn draw_image(&mut self, rgba_data: &[u8], params: &ImageParams) {
@@ -1286,13 +1305,15 @@ impl RasterDevice for SkiaDevice {
             self.pixmap = Pixmap::new(1, 1).expect("Failed to create placeholder pixmap");
         }
 
+        // Create the sink for this page before spawning background work
+        let mut sink = self.sink_factory.create_sink(output_path)?;
+
         // Spawn banded rendering on rayon's thread pool, overlapping with
         // interpretation of the next page. Using rayon::spawn avoids OS thread
         // creation overhead and keeps work on the warmed-up pool.
-        let output_owned = output_path.to_string();
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         rayon::spawn(move || {
-            let result = render_banded_to_file(page_w, page_h, band_h, &list, &output_owned);
+            let result = render_banded_to_sink(page_w, page_h, band_h, &list, &mut *sink);
             let _ = tx.send(result);
         });
         self.pending_render = Some(rx);
@@ -1330,14 +1351,14 @@ impl SkiaDevice {
 /// Banded rendering as a free function — runs on a background thread.
 ///
 /// Renders the display list in horizontal bands and streams the output
-/// to a PNG file. This function is self-contained: it creates its own
-/// band pixmaps, clip state, and PNG writer.
-fn render_banded_to_file(
+/// to a `PageSink`. This function is self-contained: it creates its own
+/// band pixmaps, clip state, and streams rows to the sink.
+fn render_banded_to_sink(
     page_w: u32,
     page_h: u32,
     band_h: u32,
     list: &DisplayList,
-    output_path: &str,
+    sink: &mut dyn stet_core::device::PageSink,
 ) -> Result<(), String> {
     // Precompute Y bounding boxes for culling
     let bboxes = precompute_bboxes(list);
@@ -1357,31 +1378,17 @@ fn render_banded_to_file(
 
     let render_h = band_h + 2 * BAND_OVERLAP;
 
-    // Open streaming PNG writer
-    let file = std::fs::File::create(output_path)
-        .map_err(|e| format!("Failed to create PNG '{}': {}", output_path, e))?;
-    // 256KB I/O buffer — default 8KB causes hundreds of write() syscalls per band
-    let buf_writer = std::io::BufWriter::with_capacity(256 * 1024, file);
-    let mut encoder = png::Encoder::new(buf_writer, page_w, page_h);
-    encoder.set_color(png::ColorType::Rgba);
-    encoder.set_depth(png::BitDepth::Eight);
-    encoder.set_compression(png::Compression::Default);
-    encoder.set_adaptive_filter(png::AdaptiveFilterType::Adaptive);
-    let mut writer = encoder
-        .write_header()
-        .map_err(|e| format!("Failed to write PNG header '{}': {}", output_path, e))?;
-    let mut stream = writer
-        .stream_writer_with_size(band_h as usize * page_w as usize * 4)
-        .map_err(|e| format!("Failed to create PNG stream '{}': {}", output_path, e))?;
+    // Initialize the sink for this page
+    sink.begin_page(page_w, page_h)?;
 
     let num_bands = page_h.div_ceil(band_h);
     let elements = list.elements();
     let row_bytes = page_w as usize * 4;
 
-    // Render bands in parallel, write to PNG in order.
+    // Render bands in parallel, write to sink in order.
     // Process in chunks of `chunk_size` bands to limit peak memory
     // (each rendered band is ~band_h * page_w * 4 bytes).
-    // Cap at 8 threads — sequential PNG writing bottleneck means
+    // Cap at 8 threads — sequential sink writing bottleneck means
     // additional cores yield no speedup (benchmarked: 8→7.8s plateau).
     let chunk_size = rayon::current_num_threads().clamp(1, 8);
 
@@ -1451,45 +1458,16 @@ fn render_banded_to_file(
             })
             .collect();
 
-        // Write completed bands to PNG in order
-        for band_data in &rendered {
-            stream
-                .write_all(band_data)
-                .map_err(|e| format!("Failed to write PNG band '{}': {}", output_path, e))?;
+        // Write completed bands to sink in order
+        for (i, band_data) in rendered.iter().enumerate() {
+            let band_idx = chunk_start + i as u32;
+            let y_start = band_idx * band_h;
+            let actual_h = (page_h - y_start).min(band_h);
+            sink.write_rows(band_data, actual_h)?;
         }
     }
 
-    stream
-        .finish()
-        .map_err(|e| format!("Failed to finish PNG '{}': {}", output_path, e))?;
-
-    Ok(())
-}
-
-/// Save RGBA pixel data as a compressed PNG using the `png` crate.
-fn save_png_compressed(
-    rgba_data: &[u8],
-    width: u32,
-    height: u32,
-    path: &str,
-) -> Result<(), String> {
-    let file = std::fs::File::create(path)
-        .map_err(|e| format!("Failed to create PNG '{}': {}", path, e))?;
-    let w = &mut std::io::BufWriter::new(file);
-
-    let mut encoder = png::Encoder::new(w, width, height);
-    encoder.set_color(png::ColorType::Rgba);
-    encoder.set_depth(png::BitDepth::Eight);
-    encoder.set_compression(png::Compression::Default);
-    encoder.set_adaptive_filter(png::AdaptiveFilterType::Adaptive);
-
-    let mut writer = encoder
-        .write_header()
-        .map_err(|e| format!("Failed to write PNG header '{}': {}", path, e))?;
-    writer
-        .write_image_data(rgba_data)
-        .map_err(|e| format!("Failed to write PNG data '{}': {}", path, e))?;
-    Ok(())
+    sink.end_page()
 }
 
 // ---- Shading rendering ----
@@ -1520,9 +1498,13 @@ fn render_axial_shading_to_pixmap(
     let start = tiny_skia::Point::from_xy(dx0 as f32, (dy0 - y_start as f64) as f32);
     let end = tiny_skia::Point::from_xy(dx1 as f32, (dy1 - y_start as f64) as f32);
 
-    let Some(gradient) =
-        tiny_skia::LinearGradient::new(start, end, stops, tiny_skia::SpreadMode::Pad, Transform::identity())
-    else {
+    let Some(gradient) = tiny_skia::LinearGradient::new(
+        start,
+        end,
+        stops,
+        tiny_skia::SpreadMode::Pad,
+        Transform::identity(),
+    ) else {
         return;
     };
 
@@ -1557,22 +1539,34 @@ fn render_axial_shading_to_pixmap(
         if axis_x.abs() >= axis_y.abs() {
             // Primarily horizontal gradient — clip x bounds
             if !params.extend_start {
-                if axis_x >= 0.0 { rx_min = rx_min.max(dx0); }
-                else { rx_max = rx_max.min(dx0); }
+                if axis_x >= 0.0 {
+                    rx_min = rx_min.max(dx0);
+                } else {
+                    rx_max = rx_max.min(dx0);
+                }
             }
             if !params.extend_end {
-                if axis_x >= 0.0 { rx_max = rx_max.min(dx1); }
-                else { rx_min = rx_min.max(dx1); }
+                if axis_x >= 0.0 {
+                    rx_max = rx_max.min(dx1);
+                } else {
+                    rx_min = rx_min.max(dx1);
+                }
             }
         } else {
             // Primarily vertical gradient — clip y bounds
             if !params.extend_start {
-                if axis_y >= 0.0 { ry_min = ry_min.max(gy0); }
-                else { ry_max = ry_max.min(gy0); }
+                if axis_y >= 0.0 {
+                    ry_min = ry_min.max(gy0);
+                } else {
+                    ry_max = ry_max.min(gy0);
+                }
             }
             if !params.extend_end {
-                if axis_y >= 0.0 { ry_max = ry_max.min(gy1); }
-                else { ry_min = ry_min.max(gy1); }
+                if axis_y >= 0.0 {
+                    ry_max = ry_max.min(gy1);
+                } else {
+                    ry_min = ry_min.max(gy1);
+                }
             }
         }
     }
@@ -2006,9 +2000,7 @@ fn bilinear_color(colors: &[DeviceColor; 4], u: f64, v: f64) -> DeviceColor {
 }
 
 /// Build tiny-skia gradient stops from color stops.
-fn build_gradient_stops(
-    stops: &[stet_core::device::ColorStop],
-) -> Vec<tiny_skia::GradientStop> {
+fn build_gradient_stops(stops: &[stet_core::device::ColorStop]) -> Vec<tiny_skia::GradientStop> {
     let mut result = Vec::with_capacity(stops.len());
     for stop in stops {
         let r = (stop.color.r * 255.0).round().clamp(0.0, 255.0) as u8;
@@ -2023,10 +2015,7 @@ fn build_gradient_stops(
 }
 
 /// Interpolate between color stops at a given position (0.0..=1.0).
-fn interpolate_color_stops(
-    stops: &[stet_core::device::ColorStop],
-    position: f64,
-) -> DeviceColor {
+fn interpolate_color_stops(stops: &[stet_core::device::ColorStop], position: f64) -> DeviceColor {
     if stops.is_empty() {
         return DeviceColor::from_gray(0.0);
     }
