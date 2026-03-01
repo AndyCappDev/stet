@@ -376,11 +376,10 @@ pub fn op_pathforall(ctx: &mut Context) -> Result<(), PsError> {
     // Clone segments to iterate (path might be modified during iteration)
     let segments = ctx.gstate.path.segments.clone();
 
-    // Push a loop marker so `exit` inside callbacks can terminate pathforall.
-    // Use Repeat with counter=0 so advance_loop terminates immediately when
-    // all segment steps have been processed normally.
+    // Use incremental PathForall loop — processes one segment per eval iteration
+    // to avoid blowing up the e_stack for paths with thousands of segments.
     let loop_entity = ctx.alloc_loop(stet_core::context::LoopState {
-        loop_type: stet_core::context::LoopType::Repeat,
+        loop_type: stet_core::context::LoopType::PathForall,
         proc_entity: EntityId(0),
         proc_start: 0,
         proc_len: 0,
@@ -391,54 +390,11 @@ pub fn op_pathforall(ctx: &mut Context) -> Result<(), PsError> {
         source: PsObject::null(),
         index: 0,
         dict_keys: None,
+        path_segments: Some(segments),
+        path_procs: Some([move_proc, line_proc, curve_proc, close_proc]),
+        path_ictm: Some(ictm),
     });
     ctx.e_stack.push(PsObject::loop_mark(loop_entity))?;
-
-    // Build a sequence of: push args + proc for each segment (reverse order for e_stack)
-    for seg in segments.iter().rev() {
-        match seg {
-            PathSegment::MoveTo(dx, dy) => {
-                let (ux, uy) = ictm.transform_point(*dx, *dy);
-                push_pathforall_step(ctx, &[ux, uy], move_proc)?;
-            }
-            PathSegment::LineTo(dx, dy) => {
-                let (ux, uy) = ictm.transform_point(*dx, *dy);
-                push_pathforall_step(ctx, &[ux, uy], line_proc)?;
-            }
-            PathSegment::CurveTo {
-                x1,
-                y1,
-                x2,
-                y2,
-                x3,
-                y3,
-            } => {
-                let (ux1, uy1) = ictm.transform_point(*x1, *y1);
-                let (ux2, uy2) = ictm.transform_point(*x2, *y2);
-                let (ux3, uy3) = ictm.transform_point(*x3, *y3);
-                push_pathforall_step(ctx, &[ux1, uy1, ux2, uy2, ux3, uy3], curve_proc)?;
-            }
-            PathSegment::ClosePath => {
-                push_pathforall_step(ctx, &[], close_proc)?;
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// Push a pathforall step onto the exec stack: first args, then proc.
-fn push_pathforall_step(ctx: &mut Context, args: &[f64], proc: PsObject) -> Result<(), PsError> {
-    // Push proc first (will be exec'd after args are pushed)
-    ctx.e_stack.push(proc)?;
-
-    // Push an arg-pusher: we create a small procedure that pushes the args
-    if !args.is_empty() {
-        let items: Vec<PsObject> = args.iter().map(|&v| PsObject::real(v)).collect();
-        let entity = crate::vm_ops::alloc_array_from(ctx, &items);
-        let arg_proc = PsObject::procedure(entity, items.len() as u32);
-        ctx.e_stack.push(arg_proc)?;
-    }
 
     Ok(())
 }

@@ -120,6 +120,9 @@ pub fn op_for(ctx: &mut Context) -> Result<(), PsError> {
         source: PsObject::null(),
         index: 0,
         dict_keys: None,
+        path_segments: None,
+        path_procs: None,
+        path_ictm: None,
     };
 
     let loop_entity = ctx.alloc_loop(loop_state);
@@ -171,6 +174,9 @@ pub fn op_repeat(ctx: &mut Context) -> Result<(), PsError> {
         source: PsObject::null(),
         index: 0,
         dict_keys: None,
+        path_segments: None,
+        path_procs: None,
+        path_ictm: None,
     };
 
     let loop_entity = ctx.alloc_loop(loop_state);
@@ -206,6 +212,9 @@ pub fn op_loop(ctx: &mut Context) -> Result<(), PsError> {
         source: PsObject::null(),
         index: 0,
         dict_keys: None,
+        path_segments: None,
+        path_procs: None,
+        path_ictm: None,
     };
 
     let loop_entity = ctx.alloc_loop(loop_state);
@@ -260,6 +269,9 @@ pub fn op_forall(ctx: &mut Context) -> Result<(), PsError> {
         source,
         index: 0,
         dict_keys,
+        path_segments: None,
+        path_procs: None,
+        path_ictm: None,
     };
 
     let loop_entity = ctx.alloc_loop(loop_state);

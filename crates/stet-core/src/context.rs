@@ -12,7 +12,7 @@ use crate::dict::{DictKey, DictStore};
 use crate::display_list::DisplayList;
 use crate::error::PsError;
 use crate::file_store::FileStore;
-use crate::graphics_state::GraphicsState;
+use crate::graphics_state::{GraphicsState, Matrix, PathSegment};
 use crate::name::NameTable;
 use crate::object::{EntityId, NameId, ObjFlags, PsObject, PsValue, SaveLevel};
 use crate::save_stack::{SaveRecord, SaveStack, StoreType};
@@ -80,6 +80,11 @@ pub struct LoopState {
     pub index: u32,
     /// Snapshot of dict keys for dict forall (avoids re-collecting every iteration).
     pub dict_keys: Option<Vec<DictKey>>,
+
+    // pathforall state
+    pub path_segments: Option<Vec<PathSegment>>,
+    pub path_procs: Option<[PsObject; 4]>, // [move, line, curve, close]
+    pub path_ictm: Option<Matrix>,
 }
 
 /// Type of loop iteration.
@@ -88,6 +93,7 @@ pub enum LoopType {
     Repeat,
     Loop,
     Forall,
+    PathForall,
 }
 
 /// Function pointer type for synchronous procedure execution.

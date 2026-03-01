@@ -661,6 +661,7 @@ fn advance_loop(ctx: &mut Context, loop_entity: EntityId) -> Result<(), PsError>
         LoopType::Repeat => 1,
         LoopType::Loop => 2,
         LoopType::Forall => 3,
+        LoopType::PathForall => 4,
     };
     let proc_entity = loop_state.proc_entity;
     let proc_start = loop_state.proc_start;
@@ -717,6 +718,10 @@ fn advance_loop(ctx: &mut Context, loop_entity: EntityId) -> Result<(), PsError>
         3 => {
             // Forall
             advance_forall(ctx, loop_entity, proc_entity, proc_start, proc_len)?;
+        }
+        4 => {
+            // PathForall
+            advance_pathforall(ctx, loop_entity)?;
         }
         _ => unreachable!(),
     }
@@ -777,6 +782,80 @@ fn advance_forall(
         }
         _ => return Err(PsError::TypeCheck),
     }
+
+    Ok(())
+}
+
+/// Advance a pathforall iteration: process one path segment per call.
+fn advance_pathforall(ctx: &mut Context, loop_entity: EntityId) -> Result<(), PsError> {
+    use stet_core::graphics_state::PathSegment;
+
+    let index = ctx.get_loop(loop_entity).index as usize;
+
+    // Check if we've exhausted all segments
+    let seg_len = ctx
+        .get_loop(loop_entity)
+        .path_segments
+        .as_ref()
+        .map_or(0, |s| s.len());
+    if index >= seg_len {
+        return Ok(());
+    }
+
+    // Extract segment data, ictm, and proc for this iteration
+    let loop_state = ctx.get_loop(loop_entity);
+    let seg = loop_state.path_segments.as_ref().unwrap()[index].clone();
+    let ictm = loop_state.path_ictm.unwrap();
+    let procs = loop_state.path_procs.unwrap();
+
+    // Determine which proc to call and push the arguments
+    let proc = match seg {
+        PathSegment::MoveTo(dx, dy) => {
+            let (ux, uy) = ictm.transform_point(dx, dy);
+            ctx.o_stack.push(PsObject::real(ux))?;
+            ctx.o_stack.push(PsObject::real(uy))?;
+            procs[0] // move_proc
+        }
+        PathSegment::LineTo(dx, dy) => {
+            let (ux, uy) = ictm.transform_point(dx, dy);
+            ctx.o_stack.push(PsObject::real(ux))?;
+            ctx.o_stack.push(PsObject::real(uy))?;
+            procs[1] // line_proc
+        }
+        PathSegment::CurveTo {
+            x1,
+            y1,
+            x2,
+            y2,
+            x3,
+            y3,
+        } => {
+            let (ux1, uy1) = ictm.transform_point(x1, y1);
+            let (ux2, uy2) = ictm.transform_point(x2, y2);
+            let (ux3, uy3) = ictm.transform_point(x3, y3);
+            ctx.o_stack.push(PsObject::real(ux1))?;
+            ctx.o_stack.push(PsObject::real(uy1))?;
+            ctx.o_stack.push(PsObject::real(ux2))?;
+            ctx.o_stack.push(PsObject::real(uy2))?;
+            ctx.o_stack.push(PsObject::real(ux3))?;
+            ctx.o_stack.push(PsObject::real(uy3))?;
+            procs[2] // curve_proc
+        }
+        PathSegment::ClosePath => {
+            procs[3] // close_proc
+        }
+    };
+
+    // Advance index for next iteration
+    ctx.get_loop_mut(loop_entity).index = (index + 1) as u32;
+
+    // Push loop marker back, then the callback procedure
+    ctx.e_stack.push(PsObject::loop_mark(loop_entity))?;
+    let (proc_entity, proc_start, proc_len) = match proc.value {
+        PsValue::Array { entity, start, len } => (entity, start, len),
+        _ => return Err(PsError::TypeCheck),
+    };
+    exec_procedure(ctx, proc_entity, proc_start, proc_len)?;
 
     Ok(())
 }
