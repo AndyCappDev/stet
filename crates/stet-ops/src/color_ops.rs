@@ -173,6 +173,7 @@ pub fn op_setcolorspace(ctx: &mut Context) -> Result<(), PsError> {
                     _ => return Err(PsError::Undefined),
                 };
                 let cs = precompute_cie_decode_tables(ctx, cs)?;
+                let cs = resolve_indexed_proc_lookup(ctx, cs)?;
                 ctx.o_stack.pop()?;
                 ctx.gstate.color = default_color_for_space(&cs, ctx);
                 ctx.gstate.color_space = cs;
@@ -192,6 +193,7 @@ pub fn op_currentcolorspace(ctx: &mut Context) -> Result<(), PsError> {
             base,
             hival,
             lookup,
+            ..
         } => {
             // Return [/Indexed base hival lookup_string]
             let idx_id = ctx.names.intern(b"Indexed");
@@ -499,6 +501,7 @@ fn set_indexed_color(ctx: &mut Context) -> Result<(), PsError> {
             base,
             hival,
             lookup,
+            ..
         } => (base.clone(), *hival, lookup.clone()),
         _ => return Err(PsError::TypeCheck),
     };
@@ -674,33 +677,40 @@ fn parse_indexed_colorspace(
     }
     let hival = hival_i as u32;
 
-    // Element 3: lookup table (string of bytes)
+    // Element 3: lookup table (string of bytes) or procedure
     let lookup_obj = ctx.arrays.get_element(entity, start + 3);
-    let lookup = match lookup_obj.value {
+    let (lookup, lookup_proc) = match lookup_obj.value {
         PsValue::String {
             entity: se,
             start,
             len,
-        } => ctx.strings.get(se, start, len).to_vec(),
+        } => (ctx.strings.get(se, start, len).to_vec(), None),
+        PsValue::ExecArray { .. } | PsValue::Array { .. } => {
+            // Procedure lookup — will be pre-evaluated in resolve_indexed_proc_lookup
+            (Vec::new(), Some(lookup_obj))
+        }
         _ => return Err(PsError::TypeCheck),
     };
 
-    // Validate lookup length: must have (hival+1) * components_per_color bytes
-    let components_per_color = match &base {
-        ColorSpace::DeviceGray => 1,
-        ColorSpace::DeviceRGB => 3,
-        ColorSpace::DeviceCMYK => 4,
-        _ => 1,
-    };
-    let required_len = (hival as usize + 1) * components_per_color;
-    if lookup.len() < required_len {
-        return Err(PsError::RangeCheck);
+    if lookup_proc.is_none() {
+        // Validate lookup length: must have (hival+1) * components_per_color bytes
+        let components_per_color = match &base {
+            ColorSpace::DeviceGray => 1,
+            ColorSpace::DeviceRGB => 3,
+            ColorSpace::DeviceCMYK => 4,
+            _ => 1,
+        };
+        let required_len = (hival as usize + 1) * components_per_color;
+        if lookup.len() < required_len {
+            return Err(PsError::RangeCheck);
+        }
     }
 
     Ok(ColorSpace::Indexed {
         base: Box::new(base),
         hival,
         lookup,
+        lookup_proc,
     })
 }
 
@@ -1119,6 +1129,55 @@ pub fn color_space_components(cs: &ColorSpace) -> usize {
 /// Pre-evaluate CIE decode procedures and DEF/DEFG lookup tables.
 ///
 /// For CIEBasedABC/A: evaluates DecodeABC, DecodeLMN, DecodeA procedures at 256
+/// If the Indexed color space has a procedure-based lookup, pre-evaluate it
+/// by calling the procedure for each index 0..hival, collecting the color
+/// component bytes into a lookup Vec<u8>.
+fn resolve_indexed_proc_lookup(
+    ctx: &mut Context,
+    cs: ColorSpace,
+) -> Result<ColorSpace, PsError> {
+    if let ColorSpace::Indexed {
+        ref base,
+        hival,
+        ref lookup_proc,
+        ..
+    } = cs
+    {
+        if let Some(proc_obj) = *lookup_proc {
+            let ncomp = match base.as_ref() {
+                ColorSpace::DeviceGray => 1,
+                ColorSpace::DeviceRGB => 3,
+                ColorSpace::DeviceCMYK => 4,
+                _ => 3,
+            };
+            let base = base.clone();
+            let mut lookup = Vec::with_capacity((hival as usize + 1) * ncomp);
+            for idx in 0..=hival {
+                ctx.o_stack.push(PsObject::int(idx as i32))?;
+                ctx.exec_sync(proc_obj)?;
+                // Pop ncomp values (in reverse order)
+                let mut components = vec![0u8; ncomp];
+                for c in (0..ncomp).rev() {
+                    let val = if !ctx.o_stack.is_empty() {
+                        ctx.o_stack.pop()?.as_f64().unwrap_or(0.0).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                    components[c] = (val * 255.0).round() as u8;
+                }
+                lookup.extend_from_slice(&components);
+            }
+            return Ok(ColorSpace::Indexed {
+                base,
+                hival,
+                lookup,
+                lookup_proc: None,
+            });
+        }
+    }
+    Ok(cs)
+}
+
 /// sample points via exec_sync, storing the results as lookup tables.
 /// For CIEBasedDEF/DEFG: pre-converts the entire 3D/4D table through the CIE
 /// pipeline to sRGB for fast interpolation at render time.

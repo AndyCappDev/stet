@@ -4,6 +4,7 @@
 
 //! Graphics state: transforms, paths, colors, and rendering parameters.
 
+use crate::object::PsObject;
 use std::sync::Arc;
 
 /// Round to 10 decimal places to eliminate floating-point artifacts.
@@ -650,11 +651,14 @@ pub enum ColorSpace {
     DeviceGray,
     DeviceRGB,
     DeviceCMYK,
-    /// Indexed color space: `[/Indexed base hival lookup_bytes]`.
+    /// Indexed color space: `[/Indexed base hival lookup]`.
+    /// `lookup_proc` is `Some(proc_object)` when the lookup is a procedure that
+    /// needs to be pre-evaluated via exec_sync during setcolorspace.
     Indexed {
         base: Box<ColorSpace>,
         hival: u32,
         lookup: Vec<u8>,
+        lookup_proc: Option<PsObject>,
     },
     /// CIE-based ABC color space (3 components): `[/CIEBasedABC dict]`.
     CIEBasedABC {
@@ -709,11 +713,13 @@ impl PartialEq for ColorSpace {
                     base: b1,
                     hival: h1,
                     lookup: l1,
+                    ..
                 },
                 Indexed {
                     base: b2,
                     hival: h2,
                     lookup: l2,
+                    ..
                 },
             ) => b1 == b2 && h1 == h2 && l1 == l2,
             (

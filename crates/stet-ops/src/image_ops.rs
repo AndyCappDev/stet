@@ -707,6 +707,7 @@ fn samples_to_rgba(
         ref base,
         hival,
         ref lookup,
+        ..
     } = ctx.gstate.color_space
     {
         // Each sample is an index into the lookup table
