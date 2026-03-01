@@ -168,6 +168,7 @@ fn run_viewer_mode(dpi_override: Option<f64>, file_args: Vec<String>) {
     // Get a handle to the viewer wait time tracker so job timing
     // can exclude time spent waiting for the user to advance pages.
     let viewer_wait = factory.wait_time_tracker();
+    let first_file = file_args.first().cloned();
 
     std::thread::spawn(move || {
         // Wait for the viewer to send screen info (monitor size or DPI override).
@@ -196,7 +197,7 @@ fn run_viewer_mode(dpi_override: Option<f64>, file_args: Vec<String>) {
     });
 
     // Main thread: run viewer (passes override so viewer knows whether to auto-calc)
-    stet_viewer::run_viewer(viewer_end, dpi_override);
+    stet_viewer::run_viewer(viewer_end, dpi_override, first_file.as_deref());
     std::process::exit(0);
 }
 

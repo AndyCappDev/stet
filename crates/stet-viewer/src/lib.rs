@@ -81,8 +81,19 @@ const DEFAULT_PAGE_H: f64 = 792.0;
 /// monitor size. The chosen DPI is sent to the interpreter via the channel.
 ///
 /// This function blocks until the viewer window is closed.
-pub fn run_viewer(viewer_end: ViewerEnd, dpi_override: Option<f64>) {
+pub fn run_viewer(viewer_end: ViewerEnd, dpi_override: Option<f64>, filename: Option<&str>) {
     let app = viewer::ViewerApp::new(viewer_end, dpi_override);
+
+    let title = match filename {
+        Some(name) => {
+            let base = std::path::Path::new(name)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| name.to_string());
+            format!("stet — {}", base)
+        }
+        None => "stet".to_string(),
+    };
 
     // Estimate the initial window size so the compositor (especially Wayland)
     // places the window correctly from the start. We don't know the actual
@@ -97,7 +108,7 @@ pub fn run_viewer(viewer_end: ViewerEnd, dpi_override: Option<f64>) {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("stet")
+            .with_title(&title)
             .with_inner_size([init_w, init_h]),
         centered: true,
         ..Default::default()
