@@ -136,7 +136,7 @@ fn run_png_mode(dpi: f64, file_args: Vec<String>) {
     ctx.device_factory = Some(Box::new(|w, h| Box::new(SkiaDevice::new(w, h))));
 
     if !file_args.is_empty() {
-        run_file_jobs(&mut ctx, dpi, &file_args, "png");
+        run_file_jobs(&mut ctx, dpi, &file_args, "png", None);
     } else {
         run_repl(&mut ctx);
     }
@@ -165,6 +165,10 @@ fn run_viewer_mode(dpi_override: Option<f64>, file_args: Vec<String>) {
         stet_viewer::ViewerSinkFactory::new(interp_end.page_sender, interp_end.continue_receiver);
 
     // Spawn interpreter on background thread (egui/winit requires main thread)
+    // Get a handle to the viewer wait time tracker so job timing
+    // can exclude time spent waiting for the user to advance pages.
+    let viewer_wait = factory.wait_time_tracker();
+
     std::thread::spawn(move || {
         // Wait for the viewer to calculate DPI from monitor size and send it.
         // This blocks until the viewer's first frame, which queries the monitor.
@@ -188,7 +192,7 @@ fn run_viewer_mode(dpi_override: Option<f64>, file_args: Vec<String>) {
             ))
         }));
 
-        run_file_jobs(&mut ctx, dpi, &file_args, "viewer");
+        run_file_jobs(&mut ctx, dpi, &file_args, "viewer", Some(&viewer_wait));
     });
 
     // Main thread: run viewer (passes override so viewer knows whether to auto-calc)
@@ -219,7 +223,16 @@ fn create_context() -> Context {
 }
 
 /// Run PostScript file jobs.
-fn run_file_jobs(ctx: &mut Context, dpi: f64, file_args: &[String], device: &str) {
+///
+/// `viewer_wait`: if provided, tracks cumulative nanoseconds the viewer spent
+/// waiting for user input — subtracted from job timing.
+fn run_file_jobs(
+    ctx: &mut Context,
+    dpi: f64,
+    file_args: &[String],
+    device: &str,
+    viewer_wait: Option<&std::sync::Arc<std::sync::atomic::AtomicU64>>,
+) {
     let num_jobs = file_args.len();
 
     for (job_idx, filename) in file_args.iter().enumerate() {
@@ -263,6 +276,9 @@ fn run_file_jobs(ctx: &mut Context, dpi: f64, file_args: &[String], device: &str
         let is_eps = filename_lower.ends_with(".eps") || filename_lower.ends_with(".epsf");
 
         let job_start = std::time::Instant::now();
+        let wait_before = viewer_wait
+            .map(|w| w.load(std::sync::atomic::Ordering::Relaxed))
+            .unwrap_or(0);
 
         let exec_result = if is_eps {
             run_eps_file(ctx, dpi, ps_data, device)
@@ -281,7 +297,12 @@ fn run_file_jobs(ctx: &mut Context, dpi: f64, file_args: &[String], device: &str
             eprintln!("render error: {}", e);
         }
 
-        let job_duration = job_start.elapsed();
+        let wait_after = viewer_wait
+            .map(|w| w.load(std::sync::atomic::Ordering::Relaxed))
+            .unwrap_or(0);
+        let viewer_wait_dur =
+            std::time::Duration::from_nanos(wait_after - wait_before);
+        let job_duration = job_start.elapsed() - viewer_wait_dur;
 
         match exec_result {
             Ok(()) => {

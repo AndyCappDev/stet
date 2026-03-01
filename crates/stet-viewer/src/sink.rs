@@ -4,7 +4,7 @@
 
 //! Viewer page sink — sends rendered pages to the viewer via channels.
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 
@@ -19,6 +19,8 @@ pub struct ViewerSinkFactory {
     page_sender: SyncSender<PageImage>,
     continue_receiver: Arc<Mutex<Receiver<()>>>,
     page_num: Arc<AtomicU32>,
+    /// Cumulative nanoseconds spent blocking on user page advancement.
+    wait_nanos: Arc<AtomicU64>,
 }
 
 impl ViewerSinkFactory {
@@ -31,7 +33,13 @@ impl ViewerSinkFactory {
             page_sender,
             continue_receiver: Arc::new(Mutex::new(continue_receiver)),
             page_num: Arc::new(AtomicU32::new(1)),
+            wait_nanos: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Returns a shared handle to the cumulative viewer wait time.
+    pub fn wait_time_tracker(&self) -> Arc<AtomicU64> {
+        self.wait_nanos.clone()
     }
 }
 
@@ -41,6 +49,7 @@ impl Clone for ViewerSinkFactory {
             page_sender: self.page_sender.clone(),
             continue_receiver: self.continue_receiver.clone(),
             page_num: self.page_num.clone(),
+            wait_nanos: self.wait_nanos.clone(),
         }
     }
 }
@@ -51,6 +60,7 @@ impl PageSinkFactory for ViewerSinkFactory {
             page_sender: self.page_sender.clone(),
             continue_receiver: self.continue_receiver.clone(),
             page_num: self.page_num.fetch_add(1, Ordering::Relaxed),
+            wait_nanos: self.wait_nanos.clone(),
             buffer: Vec::new(),
             width: 0,
             height: 0,
@@ -63,6 +73,7 @@ struct ViewerSink {
     page_sender: SyncSender<PageImage>,
     continue_receiver: Arc<Mutex<Receiver<()>>>,
     page_num: u32,
+    wait_nanos: Arc<AtomicU64>,
     buffer: Vec<u8>,
     width: u32,
     height: u32,
@@ -95,9 +106,13 @@ impl PageSink for ViewerSink {
             .send(image)
             .map_err(|_| "Viewer closed".to_string())?;
 
-        // Block until the viewer signals to continue (user pressed next page)
+        // Block until the viewer signals to continue (user pressed next page).
+        // Track wait time so the CLI can exclude it from job timing.
+        let wait_start = std::time::Instant::now();
         let rx = self.continue_receiver.lock().unwrap();
         let _ = rx.recv(); // Returns Err if viewer closed, which is fine
+        self.wait_nanos
+            .fetch_add(wait_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
         Ok(())
     }
