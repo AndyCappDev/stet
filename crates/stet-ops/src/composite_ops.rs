@@ -51,6 +51,7 @@ pub fn op_get(ctx: &mut Context) -> Result<(), PsError> {
         PsValue::Array { entity, start, len } | PsValue::PackedArray { entity, start, len } => {
             let idx = match idx_obj.value {
                 PsValue::Int(v) => v,
+                PsValue::Real(v) => v as i32,
                 _ => return Err(PsError::TypeCheck),
             };
             if idx < 0 || idx as u32 >= len {
@@ -64,6 +65,7 @@ pub fn op_get(ctx: &mut Context) -> Result<(), PsError> {
         PsValue::String { entity, start, len } => {
             let idx = match idx_obj.value {
                 PsValue::Int(v) => v,
+                PsValue::Real(v) => v as i32,
                 _ => return Err(PsError::TypeCheck),
             };
             if idx < 0 || idx as u32 >= len {
@@ -207,13 +209,6 @@ pub fn op_getinterval(ctx: &mut Context) -> Result<(), PsError> {
     let idx_obj = ctx.o_stack.peek(1)?;
     let coll_obj = ctx.o_stack.peek(2)?;
 
-    // Type checks first — count and index must be integers
-    if !matches!(count_obj.value, PsValue::Int(_)) {
-        return Err(PsError::TypeCheck);
-    }
-    if !matches!(idx_obj.value, PsValue::Int(_)) {
-        return Err(PsError::TypeCheck);
-    }
     // Collection must be array, packedarray, or string
     if !matches!(
         coll_obj.value,
@@ -222,7 +217,7 @@ pub fn op_getinterval(ctx: &mut Context) -> Result<(), PsError> {
         return Err(PsError::TypeCheck);
     }
 
-    // Now safe to extract values for range checks
+    // Extract count and index, accepting both int and real
     let count = match count_obj.value {
         PsValue::Int(v) => {
             if v < 0 {
@@ -230,7 +225,14 @@ pub fn op_getinterval(ctx: &mut Context) -> Result<(), PsError> {
             }
             v as u32
         }
-        _ => unreachable!(),
+        PsValue::Real(v) => {
+            let vi = v as i32;
+            if vi < 0 {
+                return Err(PsError::RangeCheck);
+            }
+            vi as u32
+        }
+        _ => return Err(PsError::TypeCheck),
     };
     let idx = match idx_obj.value {
         PsValue::Int(v) => {
@@ -239,7 +241,14 @@ pub fn op_getinterval(ctx: &mut Context) -> Result<(), PsError> {
             }
             v as u32
         }
-        _ => unreachable!(),
+        PsValue::Real(v) => {
+            let vi = v as i32;
+            if vi < 0 {
+                return Err(PsError::RangeCheck);
+            }
+            vi as u32
+        }
+        _ => return Err(PsError::TypeCheck),
     };
 
     match coll_obj.value {
@@ -318,8 +327,8 @@ pub fn op_putinterval(ctx: &mut Context) -> Result<(), PsError> {
     ) {
         return Err(PsError::TypeCheck);
     }
-    // Type check: index must be integer
-    if !matches!(idx_obj.value, PsValue::Int(_)) {
+    // Type check: index must be integer or real
+    if !matches!(idx_obj.value, PsValue::Int(_) | PsValue::Real(_)) {
         return Err(PsError::TypeCheck);
     }
     // Type compatibility: array dest requires array/packedarray source, string dest requires string source
@@ -347,7 +356,14 @@ pub fn op_putinterval(ctx: &mut Context) -> Result<(), PsError> {
             }
             v as u32
         }
-        _ => unreachable!(),
+        PsValue::Real(v) => {
+            let vi = v as i32;
+            if vi < 0 {
+                return Err(PsError::RangeCheck);
+            }
+            vi as u32
+        }
+        _ => return Err(PsError::TypeCheck),
     };
 
     match dest_obj.value {
