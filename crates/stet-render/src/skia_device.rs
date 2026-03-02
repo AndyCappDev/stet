@@ -1100,6 +1100,7 @@ fn fill_adjust_path(path: &PsPath, adjust: f64) -> Option<PsPath> {
     let mut needs_adjust = false;
     for &(start, end) in &subpaths {
         let mut points: Vec<(f64, f64)> = Vec::new();
+        let mut has_curves = false;
         let (mut x_min, mut x_max) = (f64::INFINITY, f64::NEG_INFINITY);
         let (mut y_min, mut y_max) = (f64::INFINITY, f64::NEG_INFINITY);
         for seg in &segs[start..end] {
@@ -1112,6 +1113,7 @@ fn fill_adjust_path(path: &PsPath, adjust: f64) -> Option<PsPath> {
                     y_max = y_max.max(*y);
                 }
                 PathSegment::CurveTo { x1, y1, x2, y2, x3, y3 } => {
+                    has_curves = true;
                     points.push((*x3, *y3));
                     x_min = x_min.min(*x1).min(*x2).min(*x3);
                     x_max = x_max.max(*x1).max(*x2).max(*x3);
@@ -1123,8 +1125,8 @@ fn fill_adjust_path(path: &PsPath, adjust: f64) -> Option<PsPath> {
         }
         let w = x_max - x_min;
         let h = y_max - y_min;
-        // Needs adjust if thin bbox OR zero-area line
-        if w < adjust * 2.0 || h < adjust * 2.0 || is_zero_area_line(&points) {
+        // Needs adjust if thin bbox OR zero-area line (curves have area, skip them)
+        if w < adjust * 2.0 || h < adjust * 2.0 || (!has_curves && is_zero_area_line(&points)) {
             needs_adjust = true;
             break;
         }
@@ -1138,12 +1140,14 @@ fn fill_adjust_path(path: &PsPath, adjust: f64) -> Option<PsPath> {
 
     for &(start, end) in &subpaths {
         let mut points: Vec<(f64, f64)> = Vec::new();
+        let mut has_curves = false;
         for seg in &segs[start..end] {
             match seg {
                 PathSegment::MoveTo(x, y) | PathSegment::LineTo(x, y) => {
                     points.push((*x, *y));
                 }
                 PathSegment::CurveTo { x3, y3, .. } => {
+                    has_curves = true;
                     points.push((*x3, *y3));
                 }
                 PathSegment::ClosePath => {}
@@ -1166,7 +1170,7 @@ fn fill_adjust_path(path: &PsPath, adjust: f64) -> Option<PsPath> {
         let w = x_max - x_min;
         let h = y_max - y_min;
 
-        if is_zero_area_line(&points) && points.len() >= 2 {
+        if !has_curves && is_zero_area_line(&points) && points.len() >= 2 {
             // Zero-area line: expand into a thin rectangle perpendicular to line
             let (x0, y0) = points[0];
             let (x1, y1) = *points.last().unwrap();
@@ -2565,8 +2569,9 @@ fn render_element_to_viewport(
     match element {
         DisplayElement::Fill { path, params } => {
             // Apply fill adjust: expand zero-area / very thin subpaths.
-            // For viewport rendering, adjust threshold accounts for the scale.
-            let adj_amount = 0.5 * (scale_x as f64).max(scale_y as f64);
+            // Threshold is 0.5 reference-DPI pixels (same as banded renderer).
+            // The viewport scale only affects rendering, not path geometry.
+            let adj_amount = 0.5;
             let adjusted;
             let draw_path = if let Some(adj) = fill_adjust_path(path, adj_amount) {
                 adjusted = adj;
