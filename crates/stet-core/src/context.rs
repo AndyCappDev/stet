@@ -154,6 +154,9 @@ pub struct Context {
     pub in_error_handler: bool,
     /// True during init script execution — relaxes access checks.
     pub initializing: bool,
+    /// When true, PS programs can change HWResolution via setpagedevice.
+    /// Set by WASM frontend; CLI leaves false to keep DPI under user control.
+    pub allow_ps_resolution: bool,
 
     // Graphics state
     pub gstate: GraphicsState,
@@ -162,7 +165,8 @@ pub struct Context {
     pub display_list: DisplayList,
     /// When `Some`, each showpage clones the display list here before consuming it.
     /// Used by the WASM frontend to retain display lists for viewport re-rendering.
-    pub capture_display_lists: Option<Vec<DisplayList>>,
+    /// Each entry is (DisplayList, dpi) where dpi is from the pagedevice HWResolution.
+    pub capture_display_lists: Option<Vec<(DisplayList, f64)>>,
     pub page_width: u32,
     pub page_height: u32,
     pub output_path: Option<String>,
@@ -496,6 +500,7 @@ impl Context {
             current_operator: None,
             in_error_handler: false,
             initializing: true,
+            allow_ps_resolution: false,
             gstate: GraphicsState::new(),
             gstate_stack: Vec::new(),
             device: None,
@@ -651,12 +656,36 @@ impl Context {
     /// Take the display list, optionally capturing a clone for viewport re-rendering.
     ///
     /// This replaces `std::mem::take(&mut ctx.display_list)` at showpage/copypage
-    /// call sites. When `capture_display_lists` is active, a clone is saved.
+    /// call sites. When `capture_display_lists` is active, a clone is saved
+    /// along with the current page DPI from the pagedevice HWResolution.
     pub fn take_display_list(&mut self) -> DisplayList {
-        if let Some(ref mut captures) = self.capture_display_lists {
-            captures.push(self.display_list.clone());
+        if self.capture_display_lists.is_some() {
+            let dpi = self.current_page_dpi();
+            if let Some(ref mut captures) = self.capture_display_lists {
+                captures.push((self.display_list.clone(), dpi));
+            }
         }
         std::mem::take(&mut self.display_list)
+    }
+
+    /// Read the current page DPI from the pagedevice HWResolution, defaulting to 72.
+    fn current_page_dpi(&self) -> f64 {
+        use crate::dict::DictKey;
+        if let Some(pd) = self.gstate.page_device {
+            if let Some(name_id) = self.names.find(b"HWResolution") {
+                if let Some(obj) = self.dicts.get(pd, &DictKey::Name(name_id)) {
+                    if let PsValue::Array { entity, .. } = obj.value {
+                        let first = self.arrays.get_element(entity, 0);
+                        return match first.value {
+                            PsValue::Real(r) => r,
+                            PsValue::Int(i) => i as f64,
+                            _ => 72.0,
+                        };
+                    }
+                }
+            }
+        }
+        72.0
     }
 
     // --- VM save/restore ---

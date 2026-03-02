@@ -26,10 +26,13 @@ use memory_sink::{MemorySinkFactory, PageData, set_sink_callback};
 
 /// Page metadata stored alongside display lists for viewport rendering.
 struct PageInfo {
-    /// Page width in device-space pixels at the reference DPI.
+    /// Page width in device-space pixels at this page's DPI.
     width: u32,
-    /// Page height in device-space pixels at the reference DPI.
+    /// Page height in device-space pixels at this page's DPI.
     height: u32,
+    /// The DPI this page was rendered at (may differ from initial reference
+    /// if the PS program called setpagedevice with a different HWResolution).
+    dpi: f64,
 }
 
 /// A fully initialized PostScript interpreter context.
@@ -103,6 +106,7 @@ pub fn create_interpreter() -> Interpreter {
 
     log("stet: wiring exec_sync...");
     ctx.exec_sync_fn = Some(stet_engine::eval::exec_sync);
+    ctx.allow_ps_resolution = true;
 
     log("stet: building system dict...");
     stet_ops::build_system_dict(&mut ctx);
@@ -301,8 +305,8 @@ pub fn page_count(interp: &Interpreter) -> u32 {
     interp.page_display_lists.len() as u32
 }
 
-/// Get page dimensions (at the reference DPI) for a specific page.
-/// Returns [width, height] or null if page index is out of range.
+/// Get page dimensions and DPI for a specific page.
+/// Returns [width, height, dpi] or null if page index is out of range.
 #[wasm_bindgen]
 pub fn page_dimensions(interp: &Interpreter, page_index: u32) -> JsValue {
     let i = page_index as usize;
@@ -311,13 +315,14 @@ pub fn page_dimensions(interp: &Interpreter, page_index: u32) -> JsValue {
         let arr = js_sys::Array::new();
         arr.push(&JsValue::from(info.width));
         arr.push(&JsValue::from(info.height));
+        arr.push(&JsValue::from(info.dpi));
         arr.into()
     } else {
         JsValue::NULL
     }
 }
 
-/// Get the reference DPI used during interpretation.
+/// Get the initial reference DPI used during interpretation.
 #[wasm_bindgen]
 pub fn reference_dpi(interp: &Interpreter) -> f64 {
     interp.reference_dpi
@@ -353,6 +358,7 @@ pub fn render_viewport(
     }
 
     let list = &interp.page_display_lists[i];
+    let page_dpi = interp.page_info[i].dpi;
     let rgba = stet_render::render_region(
         list,
         vp_x,
@@ -361,7 +367,7 @@ pub fn render_viewport(
         vp_h,
         pixel_w,
         pixel_h,
-        interp.reference_dpi,
+        page_dpi,
     );
 
     Ok(Page {
@@ -421,19 +427,20 @@ fn extract_pages(pages_ref: &Arc<Mutex<Vec<PageData>>>) -> Vec<PageData> {
 /// Collect captured display lists and page info from Context into Interpreter.
 fn collect_display_lists(interp: &mut Interpreter, pages: &[PageData]) {
     let captured = interp.ctx.capture_display_lists.take().unwrap_or_default();
-    for (i, dl) in captured.into_iter().enumerate() {
+    for (i, (dl, dpi)) in captured.into_iter().enumerate() {
         interp.page_display_lists.push(dl);
-        // Get page dimensions from the rendered page data
         if i < pages.len() {
             interp.page_info.push(PageInfo {
                 width: pages[i].width,
                 height: pages[i].height,
+                dpi,
             });
         } else {
-            // Fallback: compute from reference DPI and default page size
+            // Fallback: compute from captured DPI and default page size
             interp.page_info.push(PageInfo {
-                width: (612.0 * interp.reference_dpi / 72.0) as u32,
-                height: (792.0 * interp.reference_dpi / 72.0) as u32,
+                width: (612.0 * dpi / 72.0) as u32,
+                height: (792.0 * dpi / 72.0) as u32,
+                dpi,
             });
         }
     }

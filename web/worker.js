@@ -36,11 +36,11 @@ self.onmessage = async function(e) {
             const numPages = render(interpreter, data, dpi, filename);
             const elapsed = performance.now() - start;
 
-            // Collect page dimensions
+            // Collect page dimensions and per-page DPI
             const pages = [];
             for (let i = 0; i < numPages; i++) {
                 const dims = page_dimensions(interpreter, i);
-                pages.push({ width: dims[0], height: dims[1] });
+                pages.push({ width: dims[0], height: dims[1], dpi: dims[2] });
             }
 
             self.postMessage({

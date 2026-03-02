@@ -456,9 +456,13 @@ fn copy_dict(ctx: &mut Context, src: EntityId, dst: EntityId) {
 }
 
 /// Merge request dict entries into page device dict.
-/// Skips HWResolution (CLI-controlled, matching PostForge behavior).
+/// Skips HWResolution unless `allow_ps_resolution` is set (WASM mode).
 fn merge_request_dict(ctx: &mut Context, req: EntityId, pd: EntityId) {
-    let hw_res_name = ctx.names.find(b"HWResolution");
+    let hw_res_name = if !ctx.allow_ps_resolution {
+        ctx.names.find(b"HWResolution")
+    } else {
+        None
+    };
     let entries: Vec<(DictKey, PsObject)> = ctx
         .dicts
         .entry(req)
@@ -467,7 +471,7 @@ fn merge_request_dict(ctx: &mut Context, req: EntityId, pd: EntityId) {
         .map(|(k, v)| (k.clone(), *v))
         .collect();
     for (key, value) in entries {
-        // Skip HWResolution — CLI-controlled
+        // Skip HWResolution in CLI mode (user-controlled)
         if let DictKey::Name(id) = &key
             && hw_res_name == Some(*id)
         {

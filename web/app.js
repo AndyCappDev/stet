@@ -84,8 +84,8 @@ worker.onmessage = function(e) {
 
         // Compute page size in points for status
         const p = pageDims[0];
-        const ptW = Math.round(p.width * 72 / referenceDpi);
-        const ptH = Math.round(p.height * 72 / referenceDpi);
+        const ptW = Math.round(p.width * 72 / p.dpi);
+        const ptH = Math.round(p.height * 72 / p.dpi);
         statusEl.textContent =
             `Interpreted in ${(msg.elapsed / 1000).toFixed(3)}s \u00b7 ` +
             `${ptW}\u00d7${ptH} pt \u00b7 ` +
@@ -332,9 +332,14 @@ function applyCanvasLayout() {
     updateZoomLabel();
 }
 
+function currentPageDpi() {
+    const page = pageDims[currentPage];
+    return page ? page.dpi : referenceDpi;
+}
+
 function updateZoomLabel() {
     const effectiveScale = fitMode ? fitScale : zoom;
-    const renderDpi = Math.round(referenceDpi * effectiveScale);
+    const renderDpi = Math.round(currentPageDpi() * effectiveScale);
     zoomLevelEl.textContent = renderDpi + ' dpi';
 }
 
