@@ -536,14 +536,7 @@ fn precompute_bboxes(list: &DisplayList, dpi: f64) -> Vec<Option<YBBox>> {
     list.elements()
         .iter()
         .map(|elem| match elem {
-            DisplayElement::Fill { path, .. } => path_y_bbox(path).map(|mut bbox| {
-                // Expand for fill adjust: thin/zero-area fills get expanded
-                // by ±0.5 device pixels at render time, so bboxes must account
-                // for that to avoid culling visible elements.
-                bbox.y_min -= 0.5;
-                bbox.y_max += 0.5;
-                bbox
-            }),
+            DisplayElement::Fill { path, .. } => path_y_bbox(path),
             DisplayElement::Stroke { path, params } => stroke_device_y_bbox(path, params, dpi),
             DisplayElement::Image { params, .. } => image_y_bbox(params),
             DisplayElement::AxialShading { params } => {
@@ -1041,220 +1034,6 @@ fn build_stroke(params: &StrokeParams, dpi: f64) -> Stroke {
     stroke
 }
 
-/// Apply fill adjust: expand zero-area and very thin fill subpaths so they
-/// produce at least 1 device pixel of visible output.
-///
-/// GhostScript calls this "fill adjust" (FilladjustX/Y). For each subpath:
-/// - If it's a single line segment (zero enclosed area), expand into a thin
-///   rectangle perpendicular to the line direction (0.5px each side).
-/// - If it's a closed shape thinner than 1px in either dimension, expand the
-///   thin dimension to ensure minimum 1px coverage.
-///
-/// `adjust` is the expansion amount in device pixels (typically 0.5).
-fn fill_adjust_path(path: &PsPath, adjust: f64) -> Option<PsPath> {
-    // Split into subpaths and check each one
-    let mut subpaths: Vec<(usize, usize)> = Vec::new(); // (start, end) indices
-    let mut current_start = 0;
-    let segs = &path.segments;
-
-    for (i, seg) in segs.iter().enumerate() {
-        if let PathSegment::MoveTo(_, _) = seg {
-            if i > current_start {
-                subpaths.push((current_start, i));
-            }
-            current_start = i;
-        }
-    }
-    if current_start < segs.len() {
-        subpaths.push((current_start, segs.len()));
-    }
-
-    // Helper: check if a subpath is a zero-area line (all points collinear)
-    let is_zero_area_line = |points: &[(f64, f64)]| -> bool {
-        if points.len() <= 2 {
-            return points.len() == 2;
-        }
-        // Check collinearity: all points on the line from first to last
-        let (x0, y0) = points[0];
-        let (x1, y1) = *points.last().unwrap();
-        let dx = x1 - x0;
-        let dy = y1 - y0;
-        let len_sq = dx * dx + dy * dy;
-        if len_sq < 1e-10 {
-            // First ≈ last: if only 2 points, it's a degenerate point.
-            // If 3+ points, it's a closed loop (e.g. glyph contour), not
-            // a zero-area line — return false to avoid destroying it.
-            return points.len() <= 2;
-        }
-        // Check cross product of each point relative to the line
-        for &(px, py) in &points[1..points.len() - 1] {
-            let cross = (px - x0) * dy - (py - y0) * dx;
-            if cross.abs() > len_sq.sqrt() * 0.5 {
-                return false; // Point is > 0.5px from the line
-            }
-        }
-        true
-    };
-
-    // First pass: check if any subpath needs adjustment
-    let mut needs_adjust = false;
-    for &(start, end) in &subpaths {
-        let mut points: Vec<(f64, f64)> = Vec::new();
-        let mut has_curves = false;
-        let (mut x_min, mut x_max) = (f64::INFINITY, f64::NEG_INFINITY);
-        let (mut y_min, mut y_max) = (f64::INFINITY, f64::NEG_INFINITY);
-        for seg in &segs[start..end] {
-            match seg {
-                PathSegment::MoveTo(x, y) | PathSegment::LineTo(x, y) => {
-                    points.push((*x, *y));
-                    x_min = x_min.min(*x);
-                    x_max = x_max.max(*x);
-                    y_min = y_min.min(*y);
-                    y_max = y_max.max(*y);
-                }
-                PathSegment::CurveTo { x1, y1, x2, y2, x3, y3 } => {
-                    has_curves = true;
-                    points.push((*x3, *y3));
-                    x_min = x_min.min(*x1).min(*x2).min(*x3);
-                    x_max = x_max.max(*x1).max(*x2).max(*x3);
-                    y_min = y_min.min(*y1).min(*y2).min(*y3);
-                    y_max = y_max.max(*y1).max(*y2).max(*y3);
-                }
-                PathSegment::ClosePath => {}
-            }
-        }
-        let w = x_max - x_min;
-        let h = y_max - y_min;
-        // Needs adjust if thin bbox OR zero-area line (curves have area, skip them)
-        if w < adjust * 2.0 || h < adjust * 2.0 || (!has_curves && is_zero_area_line(&points)) {
-            needs_adjust = true;
-            break;
-        }
-    }
-
-    if !needs_adjust {
-        return None;
-    }
-
-    let mut result = PsPath::new();
-
-    for &(start, end) in &subpaths {
-        let mut points: Vec<(f64, f64)> = Vec::new();
-        let mut has_curves = false;
-        for seg in &segs[start..end] {
-            match seg {
-                PathSegment::MoveTo(x, y) | PathSegment::LineTo(x, y) => {
-                    points.push((*x, *y));
-                }
-                PathSegment::CurveTo { x3, y3, .. } => {
-                    has_curves = true;
-                    points.push((*x3, *y3));
-                }
-                PathSegment::ClosePath => {}
-            }
-        }
-
-        if points.is_empty() {
-            continue;
-        }
-
-        // Compute subpath bbox
-        let (mut x_min, mut x_max) = (f64::INFINITY, f64::NEG_INFINITY);
-        let (mut y_min, mut y_max) = (f64::INFINITY, f64::NEG_INFINITY);
-        for &(x, y) in &points {
-            x_min = x_min.min(x);
-            x_max = x_max.max(x);
-            y_min = y_min.min(y);
-            y_max = y_max.max(y);
-        }
-        let w = x_max - x_min;
-        let h = y_max - y_min;
-
-        if !has_curves && is_zero_area_line(&points) && points.len() >= 2 {
-            // Zero-area line: expand into a thin rectangle perpendicular to line
-            let (x0, y0) = points[0];
-            let (x1, y1) = *points.last().unwrap();
-            let dx = x1 - x0;
-            let dy = y1 - y0;
-            let len = (dx * dx + dy * dy).sqrt();
-            if len < 1e-10 {
-                continue; // Degenerate point
-            }
-            // For multi-point collinear lines, emit each segment as a thin quad
-            for i in 0..points.len() - 1 {
-                let (ax, ay) = points[i];
-                let (bx, by) = points[i + 1];
-                let sdx = bx - ax;
-                let sdy = by - ay;
-                let slen = (sdx * sdx + sdy * sdy).sqrt();
-                if slen < 1e-10 {
-                    continue;
-                }
-                let spx = -sdy / slen * adjust;
-                let spy = sdx / slen * adjust;
-                result.segments.push(PathSegment::MoveTo(ax + spx, ay + spy));
-                result.segments.push(PathSegment::LineTo(bx + spx, by + spy));
-                result.segments.push(PathSegment::LineTo(bx - spx, by - spy));
-                result.segments.push(PathSegment::LineTo(ax - spx, ay - spy));
-                result.segments.push(PathSegment::ClosePath);
-            }
-        } else if w < adjust * 2.0 || h < adjust * 2.0 {
-            // Thin closed shape: scale proportionally from bbox center to
-            // ensure minimum 1px in each thin dimension. This preserves the
-            // shape (unlike the old binary left/right classification which
-            // collapsed all points to just 2 coordinates per axis).
-            let cx = (x_min + x_max) * 0.5;
-            let cy = (y_min + y_max) * 0.5;
-            let sx = if w > 1e-10 && w < adjust * 2.0 {
-                (adjust * 2.0) / w
-            } else {
-                1.0
-            };
-            let sy = if h > 1e-10 && h < adjust * 2.0 {
-                (adjust * 2.0) / h
-            } else {
-                1.0
-            };
-
-            for seg in &segs[start..end] {
-                let scale_pt = |x: f64, y: f64| -> (f64, f64) {
-                    (cx + (x - cx) * sx, cy + (y - cy) * sy)
-                };
-                match seg {
-                    PathSegment::MoveTo(x, y) => {
-                        let (ax, ay) = scale_pt(*x, *y);
-                        result.segments.push(PathSegment::MoveTo(ax, ay));
-                    }
-                    PathSegment::LineTo(x, y) => {
-                        let (ax, ay) = scale_pt(*x, *y);
-                        result.segments.push(PathSegment::LineTo(ax, ay));
-                    }
-                    PathSegment::CurveTo { x1, y1, x2, y2, x3, y3 } => {
-                        let (ax1, ay1) = scale_pt(*x1, *y1);
-                        let (ax2, ay2) = scale_pt(*x2, *y2);
-                        let (ax3, ay3) = scale_pt(*x3, *y3);
-                        result.segments.push(PathSegment::CurveTo {
-                            x1: ax1, y1: ay1,
-                            x2: ax2, y2: ay2,
-                            x3: ax3, y3: ay3,
-                        });
-                    }
-                    PathSegment::ClosePath => {
-                        result.segments.push(PathSegment::ClosePath);
-                    }
-                }
-            }
-        } else {
-            // Subpath doesn't need adjustment — copy as-is
-            for seg in &segs[start..end] {
-                result.segments.push(seg.clone());
-            }
-        }
-    }
-
-    Some(result)
-}
-
 /// Apply stroke adjustment: snap axis-aligned path segments to device pixel
 /// centers so thin strokes render with consistent weight.
 ///
@@ -1468,15 +1247,7 @@ fn render_element_to_band(
     let y_off = y_start as f32;
     match element {
         DisplayElement::Fill { path, params } => {
-            // Apply fill adjust: expand zero-area / very thin subpaths
-            let adjusted;
-            let draw_path = if let Some(adj) = fill_adjust_path(path, 0.5) {
-                adjusted = adj;
-                &adjusted
-            } else {
-                path
-            };
-            let Some(skia_path) = build_skia_path(draw_path) else {
+            let Some(skia_path) = build_skia_path(path) else {
                 return;
             };
             let mut temp_mask = None;
@@ -1733,15 +1504,7 @@ fn clip_path_band(
 impl OutputDevice for SkiaDevice {
     fn fill_path(&mut self, path: &PsPath, params: &FillParams) {
         self.ensure_full_pixmap();
-        // Apply fill adjust
-        let adjusted;
-        let draw_path = if let Some(adj) = fill_adjust_path(path, 0.5) {
-            adjusted = adj;
-            &adjusted
-        } else {
-            path
-        };
-        let Some(skia_path) = build_skia_path(draw_path) else {
+        let Some(skia_path) = build_skia_path(path) else {
             return;
         };
         let (w, h) = (self.pixmap.width(), self.pixmap.height());
@@ -2215,16 +1978,7 @@ fn precompute_full_bboxes(list: &DisplayList, dpi: f64) -> Vec<Option<BBox2D>> {
     list.elements()
         .iter()
         .map(|elem| match elem {
-            DisplayElement::Fill { path, .. } => path_full_bbox(path).map(|mut bbox| {
-                // Expand for fill adjust: thin/zero-area fills get expanded
-                // by ±0.5 device pixels at render time, so bboxes must account
-                // for that to avoid culling visible elements.
-                bbox.x_min -= 0.5;
-                bbox.x_max += 0.5;
-                bbox.y_min -= 0.5;
-                bbox.y_max += 0.5;
-                bbox
-            }),
+            DisplayElement::Fill { path, .. } => path_full_bbox(path),
             DisplayElement::Stroke { path, params } => {
                 path_full_bbox(path).map(|mut bbox| {
                     // Use effective line width: actual width or hairline minimum
@@ -2559,18 +2313,7 @@ fn render_element_to_viewport(
 ) {
     match element {
         DisplayElement::Fill { path, params } => {
-            // Apply fill adjust: expand zero-area / very thin subpaths.
-            // Threshold is 0.5 reference-DPI pixels (same as banded renderer).
-            // The viewport scale only affects rendering, not path geometry.
-            let adj_amount = 0.5;
-            let adjusted;
-            let draw_path = if let Some(adj) = fill_adjust_path(path, adj_amount) {
-                adjusted = adj;
-                &adjusted
-            } else {
-                path
-            };
-            let Some(skia_path) = build_skia_path(draw_path) else {
+            let Some(skia_path) = build_skia_path(path) else {
                 return;
             };
             let mut temp_mask = None;
