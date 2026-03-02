@@ -568,8 +568,10 @@ pub fn op_status(ctx: &mut Context) -> Result<(), PsError> {
         PsValue::String { entity, start, len } => {
             let name = ctx.strings.get(entity, start, len).to_vec();
             let path = String::from_utf8(name).map_err(|_| PsError::TypeCheck)?;
-            // Try literal path first, then resolve via resource_base_path
-            if std::path::Path::new(&path).exists() {
+            // Check embedded files first (for WASM builds)
+            if ctx.files.get_embedded_file(&path).is_some() {
+                true
+            } else if std::path::Path::new(&path).exists() {
                 true
             } else if let Some(ref base) = ctx.resource_base_path {
                 let relative = path.strip_prefix("resources/").unwrap_or(&path);

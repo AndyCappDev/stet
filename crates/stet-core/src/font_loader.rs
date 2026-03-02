@@ -73,16 +73,29 @@ pub fn find_substitution(name: &str) -> Option<&'static str> {
     None
 }
 
-/// Try to load a font from disk by name, using the substitution table.
-/// Returns the font data bytes if found.
-pub fn load_font_file(font_name: &str, resource_path: &str) -> Option<Vec<u8>> {
-    // Try the font name directly first
+/// Try to load a font by name, using the substitution table.
+/// Checks embedded files first (for WASM), then falls back to disk.
+pub fn load_font_file(
+    font_name: &str,
+    resource_path: &str,
+    files: &crate::file_store::FileStore,
+) -> Option<Vec<u8>> {
+    // Try embedded files first (for WASM builds)
     let direct_path = format!("{}/{}.t1", resource_path, font_name);
+    if let Some(data) = files.get_embedded_file(&direct_path) {
+        return Some(data.to_vec());
+    }
+    if let Some(urw_name) = find_substitution(font_name) {
+        let sub_path = format!("{}/{}.t1", resource_path, urw_name);
+        if let Some(data) = files.get_embedded_file(&sub_path) {
+            return Some(data.to_vec());
+        }
+    }
+
+    // Fall back to disk I/O
     if let Ok(data) = std::fs::read(&direct_path) {
         return Some(data);
     }
-
-    // Try the substitution table
     if let Some(urw_name) = find_substitution(font_name) {
         let sub_path = format!("{}/{}.t1", resource_path, urw_name);
         if let Ok(data) = std::fs::read(&sub_path) {
@@ -254,7 +267,7 @@ pub fn find_font(ctx: &mut Context, name_bytes: &[u8]) -> Result<PsObject, Strin
         .clone()
         .ok_or_else(|| format!("Font '{}' not found and no resource path set", font_name))?;
 
-    let font_data = load_font_file(&font_name, &resource_path)
+    let font_data = load_font_file(&font_name, &resource_path, &ctx.files)
         .ok_or_else(|| format!("Font '{}' not found in {}", font_name, resource_path))?;
 
     let font_obj = load_type1_font(ctx, &font_data)?;

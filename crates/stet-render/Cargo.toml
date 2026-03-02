@@ -6,8 +6,12 @@ license.workspace = true
 authors.workspace = true
 description = "tiny-skia rendering backend for stet PostScript interpreter"
 
+[features]
+default = ["parallel"]
+parallel = ["rayon"]
+
 [dependencies]
 stet-core.workspace = true
 tiny-skia.workspace = true
 png.workspace = true
-rayon.workspace = true
+rayon = { workspace = true, optional = true }

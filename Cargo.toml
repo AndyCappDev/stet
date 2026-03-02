@@ -1,5 +1,6 @@
 [workspace]
 members = ["crates/*"]
+exclude = ["crates/stet-wasm"]
 resolver = "2"
 
 [workspace.package]

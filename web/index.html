@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>stet — PostScript Interpreter</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <header>
+        <div class="header-left">
+            <span class="logo">stet</span>
+            <span id="filename" class="filename"></span>
+        </div>
+        <div class="header-right">
+            <select id="dpi-select" title="Resolution">
+                <option value="72">72 DPI</option>
+                <option value="150" selected>150 DPI</option>
+                <option value="300">300 DPI</option>
+                <option value="600">600 DPI</option>
+            </select>
+            <div id="page-nav" class="page-nav hidden">
+                <button id="prev-page" title="Previous page">&lt;</button>
+                <span id="page-info">1 / 1</span>
+                <button id="next-page" title="Next page">&gt;</button>
+            </div>
+        </div>
+    </header>
+
+    <main id="main">
+        <div id="drop-zone" class="drop-zone">
+            <div class="drop-content">
+                <div class="drop-icon">&#9654;</div>
+                <p>Drop a PostScript or EPS file here</p>
+                <p class="drop-sub">or click to browse</p>
+            </div>
+            <input type="file" id="file-input" accept=".ps,.eps,.PS,.EPS" hidden>
+        </div>
+
+        <div id="canvas-container" class="canvas-container hidden">
+            <canvas id="canvas"></canvas>
+        </div>
+
+        <div id="loading" class="loading hidden">
+            <div class="spinner"></div>
+            <span>Rendering...</span>
+        </div>
+    </main>
+
+    <footer>
+        <span id="status">Loading WASM module...</span>
+    </footer>
+
+    <script type="module" src="app.js"></script>
+</body>
+</html>

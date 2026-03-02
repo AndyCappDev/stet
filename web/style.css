@@ -1,0 +1,210 @@
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+:root {
+    --bg: #1a1a2e;
+    --bg-light: #16213e;
+    --surface: #0f3460;
+    --accent: #e94560;
+    --text: #eee;
+    --text-dim: #999;
+    --border: #333;
+    --shadow: rgba(0, 0, 0, 0.4);
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    overflow: hidden;
+}
+
+header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.5rem 1rem;
+    background: var(--bg-light);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+}
+
+.header-left {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.logo {
+    font-size: 1.25rem;
+    font-weight: 700;
+    font-style: italic;
+    color: var(--accent);
+    letter-spacing: 0.05em;
+}
+
+.filename {
+    color: var(--text-dim);
+    font-size: 0.875rem;
+}
+
+.header-right {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+}
+
+select {
+    background: var(--surface);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0.25rem 0.5rem;
+    font-size: 0.875rem;
+    cursor: pointer;
+}
+
+.page-nav {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.page-nav button {
+    background: var(--surface);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    width: 2rem;
+    height: 1.75rem;
+    cursor: pointer;
+    font-size: 0.875rem;
+}
+
+.page-nav button:hover {
+    background: var(--accent);
+}
+
+#page-info {
+    font-size: 0.875rem;
+    color: var(--text-dim);
+    min-width: 3rem;
+    text-align: center;
+}
+
+main {
+    flex: 1;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    overflow: auto;
+    position: relative;
+}
+
+.drop-zone {
+    width: 400px;
+    height: 240px;
+    border: 2px dashed var(--border);
+    border-radius: 12px;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    cursor: pointer;
+    transition: border-color 0.2s, background 0.2s;
+}
+
+.drop-zone:hover,
+.drop-zone.drag-over {
+    border-color: var(--accent);
+    background: rgba(233, 69, 96, 0.08);
+}
+
+.drop-content {
+    text-align: center;
+}
+
+.drop-icon {
+    font-size: 2.5rem;
+    color: var(--accent);
+    margin-bottom: 0.75rem;
+}
+
+.drop-content p {
+    font-size: 1rem;
+    color: var(--text);
+}
+
+.drop-sub {
+    color: var(--text-dim) !important;
+    font-size: 0.875rem !important;
+    margin-top: 0.25rem;
+}
+
+.canvas-container {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    padding: 2rem;
+    width: 100%;
+    height: 100%;
+}
+
+canvas {
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
+    box-shadow: 0 4px 24px var(--shadow);
+}
+
+.loading {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(26, 26, 46, 0.85);
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    gap: 1rem;
+    z-index: 10;
+}
+
+.spinner {
+    width: 40px;
+    height: 40px;
+    border: 3px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+
+footer {
+    padding: 0.375rem 1rem;
+    background: var(--bg-light);
+    border-top: 1px solid var(--border);
+    font-size: 0.8rem;
+    color: var(--text-dim);
+    flex-shrink: 0;
+}
+
+.hidden {
+    display: none !important;
+}
+
+/* Drag-over overlay for the whole page when a file is being dragged */
+body.dragging .drop-zone {
+    border-color: var(--accent);
+    background: rgba(233, 69, 96, 0.08);
+}

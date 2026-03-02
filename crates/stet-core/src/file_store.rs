@@ -11,6 +11,7 @@
 //! that decodes data from an underlying source file, and `FileHandle::StringSource`
 //! provides a read-only byte stream from in-memory data.
 
+use std::collections::HashMap;
 use std::io::{self, BufReader, IsTerminal, Read, Seek, Write};
 
 use crate::object::EntityId;
@@ -119,6 +120,9 @@ pub struct FileEntry {
 /// Storage for all open PostScript files.
 pub struct FileStore {
     files: Vec<FileEntry>,
+    /// Virtual filesystem: maps paths to embedded byte data.
+    /// Used in WASM builds to serve resources without real filesystem access.
+    embedded_files: HashMap<String, &'static [u8]>,
 }
 
 /// Well-known file entity IDs.
@@ -129,7 +133,10 @@ pub const FILE_STDERR: EntityId = EntityId(2);
 impl FileStore {
     /// Create a new FileStore with stdin/stdout/stderr pre-allocated.
     pub fn new() -> Self {
-        let mut store = Self { files: Vec::new() };
+        let mut store = Self {
+            files: Vec::new(),
+            embedded_files: HashMap::new(),
+        };
         // Pre-allocate standard streams at known positions
         store.files.push(FileEntry {
             handle: FileHandle::Stdin,
@@ -155,7 +162,32 @@ impl FileStore {
         store
     }
 
+    /// Register an embedded file mapping (path → static byte data).
+    pub fn add_embedded_file(&mut self, path: &str, data: &'static [u8]) {
+        self.embedded_files.insert(path.to_string(), data);
+    }
+
+    /// Look up an embedded file by path. Returns the data if found.
+    ///
+    /// Normalizes the path by stripping leading `/` and collapsing `//` to `/`
+    /// to handle paths like `/resources/Font//Helvetica.t1` built by PS code.
+    pub fn get_embedded_file(&self, path: &str) -> Option<&'static [u8]> {
+        if let Some(data) = self.embedded_files.get(path) {
+            return Some(*data);
+        }
+        // Normalize: strip leading "/" and collapse "//" → "/"
+        let normalized = path
+            .trim_start_matches('/')
+            .replace("//", "/");
+        if normalized != path {
+            return self.embedded_files.get(normalized.as_str()).copied();
+        }
+        None
+    }
+
     /// Open a file, returning its EntityId.
+    ///
+    /// For read mode, checks the embedded file map first (for WASM builds).
     pub fn open(&mut self, name: &str, mode: &str) -> io::Result<EntityId> {
         // Handle special names
         match name {
@@ -163,6 +195,22 @@ impl FileStore {
             "%stdout" => return Ok(FILE_STDOUT),
             "%stderr" => return Ok(FILE_STDERR),
             _ => {}
+        }
+
+        // Check embedded files for read access
+        if mode == "r" && let Some(data) = self.embedded_files.get(name) {
+            let id = EntityId(self.files.len() as u32);
+            self.files.push(FileEntry {
+                handle: FileHandle::StringSource {
+                    data: data.to_vec(),
+                    pos: 0,
+                },
+                name: name.to_string(),
+                mode: mode.to_string(),
+                line_num: 1,
+                pending_newlines: 0,
+            });
+            return Ok(id);
         }
 
         let file = match mode {

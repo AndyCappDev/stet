@@ -7,6 +7,7 @@
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
+#[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use tiny_skia::{
     Color, FillRule as SkiaFillRule, LineCap as SkiaLineCap, LineJoin as SkiaLineJoin, Mask, Paint,
@@ -1538,15 +1539,23 @@ impl OutputDevice for SkiaDevice {
         let mut sink = self.sink_factory.create_sink(output_path)?;
         let dpi = self.dpi;
 
-        // Spawn banded rendering on rayon's thread pool, overlapping with
-        // interpretation of the next page. Using rayon::spawn avoids OS thread
-        // creation overhead and keeps work on the warmed-up pool.
-        let (tx, rx) = std::sync::mpsc::sync_channel(1);
-        rayon::spawn(move || {
-            let result = render_banded_to_sink(page_w, page_h, band_h, dpi, &list, &mut *sink);
-            let _ = tx.send(result);
-        });
-        self.pending_render = Some(rx);
+        #[cfg(feature = "parallel")]
+        {
+            // Spawn banded rendering on rayon's thread pool, overlapping with
+            // interpretation of the next page. Using rayon::spawn avoids OS thread
+            // creation overhead and keeps work on the warmed-up pool.
+            let (tx, rx) = std::sync::mpsc::sync_channel(1);
+            rayon::spawn(move || {
+                let result =
+                    render_banded_to_sink(page_w, page_h, band_h, dpi, &list, &mut *sink);
+                let _ = tx.send(result);
+            });
+            self.pending_render = Some(rx);
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            render_banded_to_sink(page_w, page_h, band_h, dpi, &list, &mut *sink)?;
+        }
 
         Ok(())
     }
@@ -1616,86 +1625,99 @@ fn render_banded_to_sink(
     let elements = list.elements();
     let row_bytes = page_w as usize * 4;
 
-    // Render bands in parallel, write to sink in order.
-    // Process in chunks of `chunk_size` bands to limit peak memory
-    // (each rendered band is ~band_h * page_w * 4 bytes).
-    // Cap at 8 threads — sequential sink writing bottleneck means
-    // additional cores yield no speedup (benchmarked: 8→7.8s plateau).
-    let chunk_size = rayon::current_num_threads().clamp(1, 8);
+    // Closure that renders a single band and returns its RGBA pixels.
+    let render_band = |band_idx: u32| -> Vec<u8> {
+        let y_start = band_idx * band_h;
+        let actual_h = (page_h - y_start).min(band_h);
 
-    for chunk_start in (0..num_bands).step_by(chunk_size) {
-        let chunk_end = (chunk_start + chunk_size as u32).min(num_bands);
+        let render_y_start = y_start.saturating_sub(BAND_OVERLAP);
+        let render_y_end_f = ((y_start + actual_h + BAND_OVERLAP).min(page_h)) as f64;
+        let band_offset = y_start - render_y_start;
 
-        // Render this chunk of bands in parallel
-        let rendered: Vec<Vec<u8>> = (chunk_start..chunk_end)
-            .into_par_iter()
-            .map(|band_idx| {
+        let mut band_pixmap =
+            Pixmap::new(page_w, render_h).expect("Failed to create band pixmap");
+        band_pixmap.as_mut().data_mut().fill(0xFF);
+
+        let mut band_state = BandState {
+            clip_region: None,
+            spare_mask: None,
+            clip_mask_cache: HashMap::new(),
+            clip_mask_seen: clip_seen.clone(),
+            mask_pool: Vec::new(),
+        };
+
+        // Epoch-based replay
+        for epoch in &epochs {
+            if !epoch.has_erase_page {
+                match epoch.paint_bbox {
+                    Some(ref pb)
+                        if pb.y_max <= render_y_start as f64
+                            || pb.y_min >= render_y_end_f =>
+                    {
+                        continue;
+                    }
+                    None => continue,
+                    _ => {}
+                }
+            }
+
+            for i in epoch.start_idx..epoch.end_idx {
+                if let Some(ref bbox) = bboxes[i]
+                    && (bbox.y_max <= render_y_start as f64 || bbox.y_min >= render_y_end_f)
+                {
+                    continue;
+                }
+                render_element_to_band(
+                    &mut band_pixmap,
+                    &mut band_state,
+                    &elements[i],
+                    render_y_start,
+                    page_w,
+                    render_h,
+                    dpi,
+                );
+            }
+        }
+
+        // Extract only the actual band rows (skip overlap)
+        let start_byte = band_offset as usize * row_bytes;
+        let total_bytes = actual_h as usize * row_bytes;
+        band_pixmap.data()[start_byte..start_byte + total_bytes].to_vec()
+    };
+
+    // Render bands in parallel (when available), write to sink in order.
+    #[cfg(feature = "parallel")]
+    {
+        // Process in chunks of `chunk_size` bands to limit peak memory
+        // (each rendered band is ~band_h * page_w * 4 bytes).
+        // Cap at 8 threads — sequential sink writing bottleneck means
+        // additional cores yield no speedup (benchmarked: 8→7.8s plateau).
+        let chunk_size = rayon::current_num_threads().clamp(1, 8);
+
+        for chunk_start in (0..num_bands).step_by(chunk_size) {
+            let chunk_end = (chunk_start + chunk_size as u32).min(num_bands);
+
+            let rendered: Vec<Vec<u8>> = (chunk_start..chunk_end)
+                .into_par_iter()
+                .map(&render_band)
+                .collect();
+
+            for (i, band_data) in rendered.iter().enumerate() {
+                let band_idx = chunk_start + i as u32;
                 let y_start = band_idx * band_h;
                 let actual_h = (page_h - y_start).min(band_h);
-
-                let render_y_start = y_start.saturating_sub(BAND_OVERLAP);
-                let render_y_end_f = ((y_start + actual_h + BAND_OVERLAP).min(page_h)) as f64;
-                let band_offset = y_start - render_y_start;
-
-                // Each thread gets its own pixmap and clip state
-                let mut band_pixmap =
-                    Pixmap::new(page_w, render_h).expect("Failed to create band pixmap");
-                band_pixmap.as_mut().data_mut().fill(0xFF);
-
-                let mut band_state = BandState {
-                    clip_region: None,
-                    spare_mask: None,
-                    clip_mask_cache: HashMap::new(),
-                    clip_mask_seen: clip_seen.clone(),
-                    mask_pool: Vec::new(),
-                };
-
-                // Epoch-based replay
-                for epoch in &epochs {
-                    if !epoch.has_erase_page {
-                        match epoch.paint_bbox {
-                            Some(ref pb)
-                                if pb.y_max <= render_y_start as f64
-                                    || pb.y_min >= render_y_end_f =>
-                            {
-                                continue;
-                            }
-                            None => continue,
-                            _ => {}
-                        }
-                    }
-
-                    for i in epoch.start_idx..epoch.end_idx {
-                        if let Some(ref bbox) = bboxes[i]
-                            && (bbox.y_max <= render_y_start as f64 || bbox.y_min >= render_y_end_f)
-                        {
-                            continue;
-                        }
-                        render_element_to_band(
-                            &mut band_pixmap,
-                            &mut band_state,
-                            &elements[i],
-                            render_y_start,
-                            page_w,
-                            render_h,
-                            dpi,
-                        );
-                    }
-                }
-
-                // Extract only the actual band rows (skip overlap)
-                let start_byte = band_offset as usize * row_bytes;
-                let total_bytes = actual_h as usize * row_bytes;
-                band_pixmap.data()[start_byte..start_byte + total_bytes].to_vec()
-            })
-            .collect();
-
-        // Write completed bands to sink in order
-        for (i, band_data) in rendered.iter().enumerate() {
-            let band_idx = chunk_start + i as u32;
+                sink.write_rows(band_data, actual_h)?;
+            }
+        }
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        // Sequential single-threaded rendering
+        for band_idx in 0..num_bands {
+            let band_data = render_band(band_idx);
             let y_start = band_idx * band_h;
             let actual_h = (page_h - y_start).min(band_h);
-            sink.write_rows(band_data, actual_h)?;
+            sink.write_rows(&band_data, actual_h)?;
         }
     }
 

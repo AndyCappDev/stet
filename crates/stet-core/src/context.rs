@@ -195,7 +195,7 @@ pub struct Context {
     pub cshow_pending_cid: Option<i32>,
 
     // Timing
-    pub start_time: std::time::Instant,
+    pub start_time: Option<std::time::Instant>,
 
     // Name resolution cache: invalidated on begin/end/def
     pub dict_version: u64,
@@ -514,7 +514,10 @@ impl Context {
             exec_sync_fn: None,
             char_width: None,
             cshow_pending_cid: None,
-            start_time: std::time::Instant::now(),
+            #[cfg(not(target_arch = "wasm32"))]
+            start_time: Some(std::time::Instant::now()),
+            #[cfg(target_arch = "wasm32")]
+            start_time: None,
             dict_version: 0,
             name_resolve_cache: Vec::new(),
         }

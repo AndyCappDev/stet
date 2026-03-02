@@ -10,5 +10,5 @@ description = "Core type system, storage, tokenizer, and context for stet PostSc
 thiserror.workspace = true
 flate2 = "1"
 weezl = "0.1"
-jpeg-decoder = "0.3"
+jpeg-decoder = { version = "0.3", default-features = false }
 rustc-hash = "2"

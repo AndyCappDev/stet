@@ -143,6 +143,18 @@ pub fn op_run(ctx: &mut Context) -> Result<(), PsError> {
 
     ctx.o_stack.pop()?;
 
+    // Check embedded files first (for WASM builds where no real filesystem exists).
+    // get_embedded_file normalizes paths (strips leading "/", collapses "//").
+    if let Some(data) = ctx.files.get_embedded_file(&filename) {
+        let ps_data = stet_core::eps::strip_dos_eps_header(data);
+        let file_entity = ctx.files.create_string_source(ps_data.to_vec());
+        ctx.e_stack.push(PsObject {
+            value: PsValue::File(file_entity),
+            flags: stet_core::object::ObjFlags::executable_composite(),
+        })?;
+        return Ok(());
+    }
+
     // Try the literal path first
     let resolved = if std::path::Path::new(&filename).exists() {
         filename.clone()
@@ -898,10 +910,13 @@ pub fn op_currentobjectformat(ctx: &mut Context) -> Result<(), PsError> {
 /// Returns milliseconds since an arbitrary epoch. Used for seeding RNG
 /// and interval timing.
 pub fn op_realtime(ctx: &mut Context) -> Result<(), PsError> {
+    #[cfg(not(target_arch = "wasm32"))]
     let ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64;
+    #[cfg(target_arch = "wasm32")]
+    let ms: i64 = 0;
     // Wrap to i32 range (PLRM: wraps to most negative integer)
     ctx.o_stack.push(PsObject::int(ms as i32))?;
     Ok(())
@@ -911,7 +926,10 @@ pub fn op_realtime(ctx: &mut Context) -> Result<(), PsError> {
 ///
 /// Returns milliseconds of execution time since the interpreter started.
 pub fn op_usertime(ctx: &mut Context) -> Result<(), PsError> {
-    let ms = ctx.start_time.elapsed().as_millis() as i64;
+    let ms = ctx
+        .start_time
+        .map(|t| t.elapsed().as_millis() as i64)
+        .unwrap_or(0);
     ctx.o_stack.push(PsObject::int(ms as i32))?;
     Ok(())
 }
