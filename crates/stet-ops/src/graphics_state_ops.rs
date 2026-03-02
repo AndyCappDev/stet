@@ -41,9 +41,9 @@ pub fn op_grestoreall(ctx: &mut Context) -> Result<(), PsError> {
     Ok(())
 }
 
-/// Restore device clip after grestore/grestoreall.
+/// Restore device clip after grestore/grestoreall/restore.
 /// Skips emitting display list elements if the clip hasn't changed.
-fn restore_device_clip(ctx: &mut Context, old_version: u32) {
+pub fn restore_device_clip(ctx: &mut Context, old_version: u32) {
     if ctx.gstate.clip_path_version == old_version {
         return; // clip unchanged, skip
     }

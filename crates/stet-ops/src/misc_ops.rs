@@ -605,6 +605,15 @@ pub fn op_cachestatus(ctx: &mut Context) -> Result<(), PsError> {
     Ok(())
 }
 
+/// `setcachelimit`: int → — (set maximum cached character bitmap size)
+pub fn op_setcachelimit(ctx: &mut Context) -> Result<(), PsError> {
+    if ctx.o_stack.is_empty() {
+        return Err(PsError::StackUnderflow);
+    }
+    ctx.o_stack.pop()?; // ignore the limit value
+    Ok(())
+}
+
 /// `copypage`: — → — (copy current page, no-op in single-page mode)
 pub fn op_copypage(_ctx: &mut Context) -> Result<(), PsError> {
     Ok(())

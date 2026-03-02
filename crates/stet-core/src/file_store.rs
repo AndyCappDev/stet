@@ -467,9 +467,11 @@ impl FileStore {
                 }
                 Some(b'\r') => {
                     hit_newline = true;
-                    // Consume optional \n after \r
-                    if let Some(b'\n') = self.read_byte(entity)? {
-                        // \r\n consumed
+                    // Consume optional \n after \r (CR+LF is one line ending)
+                    match self.read_byte(entity)? {
+                        Some(b'\n') => {} // \r\n consumed as single line ending
+                        Some(other) => self.putback_bytes(entity, &[other]),
+                        None => {}
                     }
                     break;
                 }

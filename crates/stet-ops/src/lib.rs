@@ -217,6 +217,7 @@ pub fn build_system_dict(ctx: &mut Context) {
         misc_ops::op_currentcacheparams,
     );
     register(ctx, sd, "cachestatus", misc_ops::op_cachestatus);
+    register(ctx, sd, "setcachelimit", misc_ops::op_setcachelimit);
     register(ctx, sd, "copypage", device_ops::op_copypage);
     register(ctx, sd, "resetfile", misc_ops::op_resetfile);
     register(ctx, sd, "defineuserobject", misc_ops::op_defineuserobject);

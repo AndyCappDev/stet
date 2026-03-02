@@ -1748,13 +1748,22 @@ fn render_axial_shading_to_pixmap(
 
     // Build the fill rect: start with BBox (or full page), then clip based on extend flags.
     let (mut rx_min, mut ry_min, mut rx_max, mut ry_max) = if let Some(bbox) = &params.bbox {
-        let (bx0, by0) = params.ctm.transform_point(bbox[0], bbox[1]);
-        let (bx1, by1) = params.ctm.transform_point(bbox[2], bbox[3]);
+        // Transform all 4 BBox corners for correct bounds under rotation/shear
+        let corners = [
+            params.ctm.transform_point(bbox[0], bbox[1]),
+            params.ctm.transform_point(bbox[2], bbox[1]),
+            params.ctm.transform_point(bbox[0], bbox[3]),
+            params.ctm.transform_point(bbox[2], bbox[3]),
+        ];
+        let x_min_f = corners.iter().map(|c| c.0).fold(f64::INFINITY, f64::min);
+        let y_min_f = corners.iter().map(|c| c.1).fold(f64::INFINITY, f64::min);
+        let x_max_f = corners.iter().map(|c| c.0).fold(f64::NEG_INFINITY, f64::max);
+        let y_max_f = corners.iter().map(|c| c.1).fold(f64::NEG_INFINITY, f64::max);
         (
-            bx0.min(bx1).max(0.0),
-            (by0.min(by1) - y_start as f64).max(0.0),
-            bx0.max(bx1).min(pw as f64),
-            (by0.max(by1) - y_start as f64).min(ph as f64),
+            x_min_f.max(0.0),
+            (y_min_f - y_start as f64).max(0.0),
+            x_max_f.min(pw as f64),
+            (y_max_f - y_start as f64).min(ph as f64),
         )
     } else {
         (0.0, 0.0, pw as f64, ph as f64)
@@ -1826,6 +1835,11 @@ fn render_axial_shading_to_pixmap(
 }
 
 /// Render a radial gradient shading to a pixmap.
+///
+/// Solves the two-circle radial gradient equation in **user space** for each
+/// device pixel by inverse-transforming through the CTM. This correctly handles
+/// arbitrary CTMs (rotation, shear, non-uniform scaling, X-flip) where circles
+/// in user space become ellipses in device space.
 fn render_radial_shading_to_pixmap(
     pixmap: &mut Pixmap,
     params: &RadialShadingParams,
@@ -1838,26 +1852,29 @@ fn render_radial_shading_to_pixmap(
         return;
     }
 
-    // Transform endpoints to device space
-    let (dx0, dy0) = params.ctm.transform_point(params.x0, params.y0);
-    let (dx1, dy1) = params.ctm.transform_point(params.x1, params.y1);
-
-    // Scale radii by CTM (approximate: use average scale factor)
-    let ctm_scale = ((params.ctm.a * params.ctm.a + params.ctm.b * params.ctm.b).sqrt()
-        + (params.ctm.c * params.ctm.c + params.ctm.d * params.ctm.d).sqrt())
-        / 2.0;
-    let dr0 = params.r0 * ctm_scale;
-    let dr1 = params.r1 * ctm_scale;
+    // Inverse CTM: device space → user space (where circles are circular)
+    let Some(inv_ctm) = params.ctm.invert() else {
+        return; // Degenerate CTM
+    };
 
     // Compute pixel bounds (default: full pixmap, clipped by BBox if present)
     let (px_min, py_min, px_max, py_max) = if let Some(bbox) = &params.bbox {
-        let (bx0, by0) = params.ctm.transform_point(bbox[0], bbox[1]);
-        let (bx1, by1) = params.ctm.transform_point(bbox[2], bbox[3]);
-        let x_min = bx0.min(bx1).max(0.0) as u32;
-        let y_min_dev = by0.min(by1).max(0.0);
-        let x_max = (bx0.max(bx1).ceil() as u32).min(pw);
-        let y_max_dev = by0.max(by1).ceil();
-        // Adjust for band offset
+        // Transform all 4 BBox corners to get correct device-space bounds
+        // (2 corners is wrong when CTM has rotation/shear)
+        let corners = [
+            params.ctm.transform_point(bbox[0], bbox[1]),
+            params.ctm.transform_point(bbox[2], bbox[1]),
+            params.ctm.transform_point(bbox[0], bbox[3]),
+            params.ctm.transform_point(bbox[2], bbox[3]),
+        ];
+        let x_min_f = corners.iter().map(|c| c.0).fold(f64::INFINITY, f64::min);
+        let y_min_f = corners.iter().map(|c| c.1).fold(f64::INFINITY, f64::min);
+        let x_max_f = corners.iter().map(|c| c.0).fold(f64::NEG_INFINITY, f64::max);
+        let y_max_f = corners.iter().map(|c| c.1).fold(f64::NEG_INFINITY, f64::max);
+        let x_min = x_min_f.max(0.0) as u32;
+        let y_min_dev = y_min_f.max(0.0);
+        let x_max = (x_max_f.ceil() as u32).min(pw);
+        let y_max_dev = y_max_f.ceil();
         let y_min = if y_min_dev > y_start as f64 {
             (y_min_dev - y_start as f64) as u32
         } else {
@@ -1878,12 +1895,14 @@ fn render_radial_shading_to_pixmap(
         for px in px_min..px_max {
             let dev_x = px as f64;
 
-            // Solve for t: point is on circle(center(t), radius(t))
-            // center(t) = (1-t)*c0 + t*c1, radius(t) = (1-t)*r0 + t*r1
-            // |P - center(t)|^2 = radius(t)^2
-            let t = solve_radial_t(dev_x, dev_y, dx0, dy0, dr0, dx1, dy1, dr1);
+            // Inverse-transform device pixel to user space
+            let (ux, uy) = inv_ctm.transform_point(dev_x, dev_y);
+
+            // Solve for t in user space where circles are circular
+            let t = solve_radial_t(
+                ux, uy, params.x0, params.y0, params.r0, params.x1, params.y1, params.r1,
+            );
             if let Some(t) = t {
-                let clamped = t.clamp(0.0, 1.0);
                 // Check extend
                 if t < 0.0 && !params.extend_start {
                     continue;
@@ -1891,6 +1910,7 @@ fn render_radial_shading_to_pixmap(
                 if t > 1.0 && !params.extend_end {
                     continue;
                 }
+                let clamped = t.clamp(0.0, 1.0);
                 let color = interpolate_color_stops(&params.color_stops, clamped);
                 let offset = py as usize * stride + px as usize * 4;
                 let r = (color.r * 255.0).round().clamp(0.0, 255.0) as u8;

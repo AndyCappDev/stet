@@ -29,7 +29,16 @@ pub fn op_restore(ctx: &mut Context) -> Result<(), PsError> {
     // INVALIDRESTORE check: scan stacks for local composites newer than save level
     // For now, we do a simplified check — just validate the save_id
     ctx.o_stack.pop()?;
+
+    // Capture clip version before restore so we can emit InitClip+Clip if it changed
+    let old_clip_version = ctx.gstate.clip_path_version;
+
     ctx.vm_restore(save_id)?;
+
+    // Restore device clip in the display list (vm_restore restores the gstate
+    // including clip_path, but doesn't update the display list)
+    crate::graphics_state_ops::restore_device_clip(ctx, old_clip_version);
+
     Ok(())
 }
 

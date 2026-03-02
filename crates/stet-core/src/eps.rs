@@ -60,9 +60,10 @@ fn scan_for_bbox(
     hires_bbox: &mut Option<(f64, f64, f64, f64)>,
     need_atend: &mut bool,
 ) {
-    for line in data.split(|&b| b == b'\n') {
-        // Strip trailing \r
-        let line = line.strip_suffix(b"\r").unwrap_or(line);
+    for line in data.split(|&b| b == b'\n' || b == b'\r') {
+        if line.is_empty() {
+            continue;
+        }
 
         if line.starts_with(b"%%HiResBoundingBox:") {
             let rest = &line[b"%%HiResBoundingBox:".len()..];
@@ -161,6 +162,14 @@ mod tests {
         let data = b"%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: -50 -25 150 275\n";
         let bbox = read_eps_bounding_box(data);
         assert_eq!(bbox, Some((-50.0, -25.0, 150.0, 275.0)));
+    }
+
+    #[test]
+    fn test_bbox_cr_line_endings() {
+        // Old Mac-style CR-only line endings (used by some Adobe Illustrator files)
+        let data = b"%!PS-Adobe-3.0 EPSF-3.0\r%%BoundingBox: 0 9 360 135\r%%HiResBoundingBox: 0 9.001 360 135\r";
+        let bbox = read_eps_bounding_box(data);
+        assert_eq!(bbox, Some((0.0, 9.001, 360.0, 135.0)));
     }
 
     #[test]
