@@ -510,8 +510,9 @@ pub fn op_fileposition(ctx: &mut Context) -> Result<(), PsError> {
         PsValue::File(e) => e,
         _ => return Err(PsError::TypeCheck),
     };
-    ctx.o_stack.pop()?;
+    // Validate position BEFORE popping — error recovery depends on intact stack
     let pos = ctx.files.position(entity).map_err(|_| PsError::IOError)?;
+    ctx.o_stack.pop()?;
     ctx.o_stack.push(PsObject::int(pos as i32))?;
     Ok(())
 }
@@ -564,12 +565,19 @@ pub fn op_status(ctx: &mut Context) -> Result<(), PsError> {
         return Err(PsError::StackUnderflow);
     }
     let obj = ctx.o_stack.peek(0)?;
-    let exists = match obj.value {
+    match obj.value {
+        // file status → bool (true if file is still open)
+        PsValue::File(entity) => {
+            let is_open = ctx.files.is_open(entity);
+            ctx.o_stack.pop()?;
+            ctx.o_stack.push(PsObject::bool(is_open))?;
+        }
+        // filename status → pages bytes referenced created true | false
         PsValue::String { entity, start, len } => {
             let name = ctx.strings.get(entity, start, len).to_vec();
             let path = String::from_utf8(name).map_err(|_| PsError::TypeCheck)?;
             // Check embedded files first (for WASM builds)
-            if ctx.files.get_embedded_file(&path).is_some() {
+            let exists = if ctx.files.get_embedded_file(&path).is_some() {
                 true
             } else if std::path::Path::new(&path).exists() {
                 true
@@ -578,19 +586,19 @@ pub fn op_status(ctx: &mut Context) -> Result<(), PsError> {
                 std::path::Path::new(base).join(relative).exists()
             } else {
                 false
+            };
+            ctx.o_stack.pop()?;
+            if exists {
+                ctx.o_stack.push(PsObject::int(0))?; // pages
+                ctx.o_stack.push(PsObject::int(0))?; // bytes
+                ctx.o_stack.push(PsObject::int(0))?; // referenced
+                ctx.o_stack.push(PsObject::int(0))?; // created
+                ctx.o_stack.push(PsObject::bool(true))?;
+            } else {
+                ctx.o_stack.push(PsObject::bool(false))?;
             }
         }
         _ => return Err(PsError::TypeCheck),
-    };
-    ctx.o_stack.pop()?;
-    if exists {
-        ctx.o_stack.push(PsObject::int(0))?; // pages
-        ctx.o_stack.push(PsObject::int(0))?; // bytes
-        ctx.o_stack.push(PsObject::int(0))?; // referenced
-        ctx.o_stack.push(PsObject::int(0))?; // created
-        ctx.o_stack.push(PsObject::bool(true))?;
-    } else {
-        ctx.o_stack.push(PsObject::bool(false))?;
     }
     Ok(())
 }

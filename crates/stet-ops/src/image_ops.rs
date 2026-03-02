@@ -133,6 +133,14 @@ fn image_dict_form(ctx: &mut Context) -> Result<(), PsError> {
         _ => return Err(PsError::TypeCheck),
     };
 
+    // Check ImageType — default to 1
+    let image_type = dict_get_int(ctx, dict_entity, b"ImageType").unwrap_or(1);
+    match image_type {
+        1 | 4 => {} // Type 1 and Type 4 share most logic; Type 4 adds MaskColor
+        3 => return image_type3_form(ctx, dict_entity),
+        _ => return Err(PsError::RangeCheck),
+    }
+
     // Extract required dict keys
     let width = dict_get_int(ctx, dict_entity, b"Width").ok_or(PsError::Undefined)? as u32;
     let height = dict_get_int(ctx, dict_entity, b"Height").ok_or(PsError::Undefined)? as u32;
@@ -206,10 +214,465 @@ fn image_dict_form(ctx: &mut Context) -> Result<(), PsError> {
     // Unpack and convert
     let indexed = matches!(ctx.gstate.color_space, ColorSpace::Indexed { .. });
     let samples = unpack_samples(&data, width, height, bps, ncomp, indexed);
-    let rgba = samples_to_rgba(ctx, &samples, width, height, ncomp, &decode);
+    let mut rgba = samples_to_rgba(ctx, &samples, width, height, ncomp, &decode);
+
+    // ImageType 4: apply MaskColor transparency
+    if image_type == 4 {
+        if let Some(mask_color) = dict_get_mask_color(ctx, dict_entity, ncomp) {
+            apply_mask_color(&mut rgba, &samples, width, height, ncomp, &mask_color);
+        }
+    }
 
     draw_image_to_device(ctx, rgba, width, height, false, &image_matrix);
     Ok(())
+}
+
+/// Type 3 masked image: outer dict has InterleaveType, DataDict, MaskDict.
+fn image_type3_form(
+    ctx: &mut Context,
+    outer_dict: stet_core::object::EntityId,
+) -> Result<(), PsError> {
+    // Extract outer dict keys
+    let interleave_type =
+        dict_get_int(ctx, outer_dict, b"InterleaveType").ok_or(PsError::TypeCheck)?;
+    if !matches!(interleave_type, 1 | 2 | 3) {
+        return Err(PsError::RangeCheck);
+    }
+
+    let data_dict_obj = dict_get_obj(ctx, outer_dict, b"DataDict").ok_or(PsError::TypeCheck)?;
+    let mask_dict_obj = dict_get_obj(ctx, outer_dict, b"MaskDict").ok_or(PsError::TypeCheck)?;
+
+    let data_dict = match data_dict_obj.value {
+        PsValue::Dict(e) => e,
+        _ => return Err(PsError::TypeCheck),
+    };
+    let mask_dict = match mask_dict_obj.value {
+        PsValue::Dict(e) => e,
+        _ => return Err(PsError::TypeCheck),
+    };
+
+    // Extract DataDict parameters
+    let img_w = dict_get_int(ctx, data_dict, b"Width").ok_or(PsError::Undefined)? as u32;
+    let img_h = dict_get_int(ctx, data_dict, b"Height").ok_or(PsError::Undefined)? as u32;
+    let img_bps =
+        dict_get_int(ctx, data_dict, b"BitsPerComponent").ok_or(PsError::Undefined)? as u32;
+    let img_matrix =
+        dict_get_matrix(ctx, data_dict, b"ImageMatrix").ok_or(PsError::Undefined)?;
+    let img_decode = dict_get_decode(ctx, data_dict).unwrap_or_default();
+    let img_data_source = dict_get_obj(ctx, data_dict, b"DataSource");
+    let img_multi = dict_get_obj(ctx, data_dict, b"MultipleDataSources")
+        .and_then(|o| match o.value {
+            PsValue::Bool(b) => Some(b),
+            _ => None,
+        })
+        .unwrap_or(false);
+
+    // Extract MaskDict parameters
+    let mask_w = dict_get_int(ctx, mask_dict, b"Width").ok_or(PsError::Undefined)? as u32;
+    let mask_h = dict_get_int(ctx, mask_dict, b"Height").ok_or(PsError::Undefined)? as u32;
+    let mask_bps =
+        dict_get_int(ctx, mask_dict, b"BitsPerComponent").unwrap_or(1) as u32;
+    let mask_decode = dict_get_decode(ctx, mask_dict).unwrap_or_else(|| vec![0.0, 1.0]);
+    let mask_data_source = dict_get_obj(ctx, mask_dict, b"DataSource");
+
+    // Mask polarity from Decode: [0 1] means 1=paint, [1 0] means 0=paint
+    let mask_polarity = mask_decode.first().copied().unwrap_or(0.0) < 0.5;
+
+    // Determine ncomp from image Decode array or color space
+    let ncomp = if img_decode.len() >= 2 {
+        (img_decode.len() / 2) as u32
+    } else {
+        match ctx.gstate.color_space {
+            ColorSpace::DeviceGray | ColorSpace::Indexed { .. } | ColorSpace::CIEBasedA { .. } => 1,
+            ColorSpace::DeviceRGB
+            | ColorSpace::CIEBasedABC { .. }
+            | ColorSpace::CIEBasedDEF { .. } => 3,
+            ColorSpace::DeviceCMYK | ColorSpace::CIEBasedDEFG { .. } => 4,
+            ColorSpace::ICCBased { n, .. } => n,
+            ColorSpace::Separation {
+                num_alt_components, ..
+            }
+            | ColorSpace::DeviceN {
+                num_alt_components, ..
+            } => num_alt_components,
+        }
+    };
+
+    let img_decode = if img_decode.is_empty() {
+        (0..ncomp).flat_map(|_| [0.0, 1.0]).collect()
+    } else {
+        img_decode
+    };
+
+    // Pop the outer dict from operand stack
+    ctx.o_stack.pop()?;
+
+    // Read image and mask data based on InterleaveType
+    let (img_data, mask_data) = match interleave_type {
+        1 => read_type3_interleave1(
+            ctx,
+            img_data_source.ok_or(PsError::Undefined)?,
+            img_multi,
+            img_w,
+            img_h,
+            img_bps,
+            ncomp,
+        )?,
+        2 => read_type3_interleave2(
+            ctx,
+            img_data_source.ok_or(PsError::Undefined)?,
+            img_w,
+            img_h,
+            img_bps,
+            ncomp,
+            mask_w,
+            mask_h,
+        )?,
+        3 => read_type3_interleave3(
+            ctx,
+            img_data_source.ok_or(PsError::Undefined)?,
+            img_multi,
+            mask_data_source.ok_or(PsError::Undefined)?,
+            img_w,
+            img_h,
+            img_bps,
+            ncomp,
+            mask_w,
+            mask_h,
+            mask_bps,
+        )?,
+        _ => unreachable!(),
+    };
+
+    // Convert image data to RGBA
+    let indexed = matches!(ctx.gstate.color_space, ColorSpace::Indexed { .. });
+    let samples = unpack_samples(&img_data, img_w, img_h, img_bps, ncomp, indexed);
+    let mut rgba = samples_to_rgba(ctx, &samples, img_w, img_h, ncomp, &img_decode);
+
+    // Apply stencil mask to alpha channel
+    apply_stencil_mask(
+        &mut rgba,
+        img_w,
+        img_h,
+        &mask_data,
+        mask_w,
+        mask_h,
+        mask_bps,
+        mask_polarity,
+    );
+
+    draw_image_to_device(ctx, rgba, img_w, img_h, false, &img_matrix);
+    Ok(())
+}
+
+/// InterleaveType 1: mask and image samples interleaved per pixel.
+/// Data layout: [Mask, C1, C2, ..., Mask, C1, C2, ...] per pixel.
+/// Mask uses same BPS as image. Single DataSource in DataDict.
+fn read_type3_interleave1(
+    ctx: &mut Context,
+    data_source: PsObject,
+    multi: bool,
+    img_w: u32,
+    img_h: u32,
+    img_bps: u32,
+    ncomp: u32,
+) -> Result<(Vec<u8>, Vec<u8>), PsError> {
+    let total_comp = 1 + ncomp; // mask + image components
+    let bits_per_row = img_w as usize * total_comp as usize * img_bps as usize;
+    let bytes_per_row = bits_per_row.div_ceil(8);
+    let total_bytes = bytes_per_row * img_h as usize;
+
+    let raw = if multi {
+        read_multi_source_data(ctx, data_source, total_comp, img_w, img_h, img_bps)?
+    } else if is_procedure(&data_source) {
+        collect_proc_data(ctx, data_source, total_bytes)?
+    } else {
+        read_image_data(ctx, data_source, total_bytes)?
+    };
+
+    // Separate mask and image data
+    if img_bps == 8 {
+        // Simple byte-level separation
+        let pixel_count = (img_w * img_h) as usize;
+        let mut img_data = Vec::with_capacity(pixel_count * ncomp as usize);
+        let mut mask_data = Vec::with_capacity(pixel_count);
+
+        for row in 0..img_h as usize {
+            let row_start = row * bytes_per_row;
+            for col in 0..img_w as usize {
+                let pixel_start = row_start + col * total_comp as usize;
+                // First sample is mask
+                mask_data.push(*raw.get(pixel_start).unwrap_or(&0));
+                // Remaining samples are image components
+                for c in 0..ncomp as usize {
+                    img_data.push(*raw.get(pixel_start + 1 + c).unwrap_or(&0));
+                }
+            }
+        }
+        Ok((img_data, mask_data))
+    } else {
+        // Sub-byte or 12-bit: extract at bit level
+        let img_bits_per_row = img_w as usize * ncomp as usize * img_bps as usize;
+        let img_bytes_per_row = img_bits_per_row.div_ceil(8);
+        let mask_bits_per_row = img_w as usize * img_bps as usize;
+        let mask_bytes_per_row = mask_bits_per_row.div_ceil(8);
+
+        let mut img_data = vec![0u8; img_bytes_per_row * img_h as usize];
+        let mut mask_data = vec![0u8; mask_bytes_per_row * img_h as usize];
+
+        for row in 0..img_h as usize {
+            let src_row_start = row * bytes_per_row;
+            let mut src_bit = 0usize;
+            let mut img_bit = 0usize;
+            let mut mask_bit = 0usize;
+
+            for _col in 0..img_w as usize {
+                // Extract mask sample
+                let mask_val =
+                    extract_bits(&raw, src_row_start, src_bit, img_bps as usize);
+                set_bits(
+                    &mut mask_data,
+                    row * mask_bytes_per_row,
+                    mask_bit,
+                    img_bps as usize,
+                    mask_val,
+                );
+                src_bit += img_bps as usize;
+                mask_bit += img_bps as usize;
+
+                // Extract image samples
+                for _ in 0..ncomp {
+                    let val =
+                        extract_bits(&raw, src_row_start, src_bit, img_bps as usize);
+                    set_bits(
+                        &mut img_data,
+                        row * img_bytes_per_row,
+                        img_bit,
+                        img_bps as usize,
+                        val,
+                    );
+                    src_bit += img_bps as usize;
+                    img_bit += img_bps as usize;
+                }
+            }
+        }
+        Ok((img_data, mask_data))
+    }
+}
+
+/// InterleaveType 2: data interleaved by row blocks.
+/// Block structure: [mask rows][image rows] repeated.
+/// Mask is always 1 BPS.
+fn read_type3_interleave2(
+    ctx: &mut Context,
+    data_source: PsObject,
+    img_w: u32,
+    img_h: u32,
+    img_bps: u32,
+    ncomp: u32,
+    mask_w: u32,
+    mask_h: u32,
+) -> Result<(Vec<u8>, Vec<u8>), PsError> {
+    let mask_bytes_per_row = (mask_w as usize).div_ceil(8); // 1 bps
+    let img_bits_per_row = img_w as usize * ncomp as usize * img_bps as usize;
+    let img_bytes_per_row = img_bits_per_row.div_ceil(8);
+
+    // Determine block structure from height ratio
+    let (mask_rows_per_block, img_rows_per_block, num_blocks) = if img_h >= mask_h {
+        let ratio = if mask_h > 0 { img_h / mask_h } else { 1 };
+        (1usize, ratio as usize, mask_h as usize)
+    } else {
+        let ratio = if img_h > 0 { mask_h / img_h } else { 1 };
+        (ratio as usize, 1usize, img_h as usize)
+    };
+
+    let bytes_per_block =
+        mask_rows_per_block * mask_bytes_per_row + img_rows_per_block * img_bytes_per_row;
+    let total_bytes = bytes_per_block * num_blocks;
+
+    let raw = if is_procedure(&data_source) {
+        collect_proc_data(ctx, data_source, total_bytes)?
+    } else {
+        read_image_data(ctx, data_source, total_bytes)?
+    };
+
+    // Separate mask and image rows
+    let mut mask_data = Vec::with_capacity(mask_bytes_per_row * mask_h as usize);
+    let mut img_data = Vec::with_capacity(img_bytes_per_row * img_h as usize);
+
+    let mut offset = 0;
+    for _ in 0..num_blocks {
+        for _ in 0..mask_rows_per_block {
+            let end = (offset + mask_bytes_per_row).min(raw.len());
+            if offset < raw.len() {
+                mask_data.extend_from_slice(&raw[offset..end]);
+            }
+            offset += mask_bytes_per_row;
+        }
+        for _ in 0..img_rows_per_block {
+            let end = (offset + img_bytes_per_row).min(raw.len());
+            if offset < raw.len() {
+                img_data.extend_from_slice(&raw[offset..end]);
+            }
+            offset += img_bytes_per_row;
+        }
+    }
+
+    Ok((img_data, mask_data))
+}
+
+/// InterleaveType 3: separate data sources for image and mask.
+fn read_type3_interleave3(
+    ctx: &mut Context,
+    img_data_source: PsObject,
+    img_multi: bool,
+    mask_data_source: PsObject,
+    img_w: u32,
+    img_h: u32,
+    img_bps: u32,
+    ncomp: u32,
+    mask_w: u32,
+    mask_h: u32,
+    mask_bps: u32,
+) -> Result<(Vec<u8>, Vec<u8>), PsError> {
+    // Read image data
+    let img_bits_per_row = img_w as usize * ncomp as usize * img_bps as usize;
+    let img_bytes_per_row = img_bits_per_row.div_ceil(8);
+    let img_total = img_bytes_per_row * img_h as usize;
+
+    let img_data = if img_multi {
+        read_multi_source_data(ctx, img_data_source, ncomp, img_w, img_h, img_bps)?
+    } else if is_procedure(&img_data_source) {
+        collect_proc_data(ctx, img_data_source, img_total)?
+    } else {
+        read_image_data(ctx, img_data_source, img_total)?
+    };
+
+    // Read mask data
+    let mask_bits_per_row = mask_w as usize * mask_bps as usize;
+    let mask_bytes_per_row = mask_bits_per_row.div_ceil(8);
+    let mask_total = mask_bytes_per_row * mask_h as usize;
+
+    let mask_data = if is_procedure(&mask_data_source) {
+        collect_proc_data(ctx, mask_data_source, mask_total)?
+    } else {
+        read_image_data(ctx, mask_data_source, mask_total)?
+    };
+
+    Ok((img_data, mask_data))
+}
+
+/// Apply a stencil mask to RGBA data, setting alpha=0 where mask says "don't paint".
+fn apply_stencil_mask(
+    rgba: &mut [u8],
+    img_w: u32,
+    img_h: u32,
+    mask_data: &[u8],
+    mask_w: u32,
+    mask_h: u32,
+    mask_bps: u32,
+    polarity: bool, // true: nonzero=paint, false: zero=paint
+) {
+    let mask_samples_per_row = mask_w as usize;
+    let mask_bits_per_row = mask_samples_per_row * mask_bps as usize;
+    let mask_bytes_per_row = mask_bits_per_row.div_ceil(8);
+
+    for y in 0..img_h as usize {
+        // Map image row to mask row (scale if dimensions differ)
+        let mask_y = if mask_h == img_h {
+            y
+        } else {
+            (y * mask_h as usize) / img_h as usize
+        };
+
+        for x in 0..img_w as usize {
+            let mask_x = if mask_w == img_w {
+                x
+            } else {
+                (x * mask_w as usize) / img_w as usize
+            };
+
+            // Extract mask sample value
+            let sample = if mask_bps == 1 {
+                let byte_idx = mask_y * mask_bytes_per_row + mask_x / 8;
+                let bit_offset = 7 - (mask_x % 8);
+                let byte_val = mask_data.get(byte_idx).copied().unwrap_or(0);
+                (byte_val >> bit_offset) & 1
+            } else if mask_bps == 8 {
+                let idx = mask_y * mask_w as usize + mask_x;
+                mask_data.get(idx).copied().unwrap_or(0)
+            } else {
+                // General case for other BPS
+                extract_bits(mask_data, mask_y * mask_bytes_per_row, mask_x * mask_bps as usize, mask_bps as usize) as u8
+            };
+
+            // Determine if this pixel should paint
+            let paint = if polarity {
+                sample != 0
+            } else {
+                sample == 0
+            };
+
+            if !paint {
+                let pi = (y * img_w as usize + x) * 4;
+                if pi + 3 < rgba.len() {
+                    rgba[pi + 3] = 0; // Set alpha to 0 (transparent)
+                }
+            }
+        }
+    }
+}
+
+/// Extract bits from a byte buffer at a specific bit position.
+fn extract_bits(data: &[u8], byte_offset: usize, bit_pos: usize, num_bits: usize) -> u16 {
+    let abs_bit = byte_offset * 8 + bit_pos;
+    let byte_idx = abs_bit / 8;
+    let bit_offset = abs_bit % 8;
+
+    if byte_idx >= data.len() {
+        return 0;
+    }
+
+    if num_bits <= 8 - bit_offset {
+        // Fits within one byte
+        let shift = 8 - bit_offset - num_bits;
+        let mask = ((1u16 << num_bits) - 1) as u8;
+        ((data[byte_idx] >> shift) & mask) as u16
+    } else {
+        // Spans two bytes
+        let hi = data[byte_idx] as u16;
+        let lo = data.get(byte_idx + 1).copied().unwrap_or(0) as u16;
+        let combined = (hi << 8) | lo;
+        let shift = 16 - bit_offset - num_bits;
+        let mask = (1u16 << num_bits) - 1;
+        (combined >> shift) & mask
+    }
+}
+
+/// Set bits in a byte buffer at a specific bit position.
+fn set_bits(data: &mut [u8], byte_offset: usize, bit_pos: usize, num_bits: usize, value: u16) {
+    let abs_bit = byte_offset * 8 + bit_pos;
+    let byte_idx = abs_bit / 8;
+    let bit_offset = abs_bit % 8;
+
+    if byte_idx >= data.len() {
+        return;
+    }
+
+    if num_bits <= 8 - bit_offset {
+        let shift = 8 - bit_offset - num_bits;
+        let mask = ((1u16 << num_bits) - 1) as u8;
+        data[byte_idx] &= !(mask << shift);
+        data[byte_idx] |= (value as u8 & mask) << shift;
+    } else if byte_idx + 1 < data.len() {
+        let shift = 16 - bit_offset - num_bits;
+        let mask = (1u16 << num_bits) - 1;
+        let combined = ((data[byte_idx] as u16) << 8) | data[byte_idx + 1] as u16;
+        let cleared = combined & !(mask << shift);
+        let result = cleared | ((value & mask) << shift);
+        data[byte_idx] = (result >> 8) as u8;
+        data[byte_idx + 1] = result as u8;
+    }
 }
 
 // ---------- imagemask operator ----------
@@ -1025,6 +1488,69 @@ fn dict_get_decode(ctx: &Context, dict: stet_core::object::EntityId) -> Option<V
             Some(decode)
         }
         _ => None,
+    }
+}
+
+/// Look up MaskColor array from a dict. Returns raw integer values.
+/// Format: [c1 c2 ... cn] (exact match) or [min1 max1 min2 max2 ...] (range match).
+fn dict_get_mask_color(
+    ctx: &Context,
+    dict: stet_core::object::EntityId,
+    _ncomp: u32,
+) -> Option<Vec<i32>> {
+    let id = ctx.names.find(b"MaskColor")?;
+    let val = ctx.dicts.get(dict, &DictKey::Name(id))?;
+    match val.value {
+        PsValue::Array { entity, start, len } => {
+            let mut values = Vec::with_capacity(len as usize);
+            for i in 0..len {
+                let elem = ctx.arrays.get_element(entity, start + i);
+                values.push(elem.as_i32()?);
+            }
+            Some(values)
+        }
+        _ => None,
+    }
+}
+
+/// Apply ImageType 4 MaskColor: set alpha=0 for pixels matching the mask color.
+/// MaskColor is either ncomp values (exact match) or 2*ncomp values (range match).
+fn apply_mask_color(
+    rgba: &mut [u8],
+    samples: &[u8],
+    width: u32,
+    height: u32,
+    ncomp: u32,
+    mask_color: &[i32],
+) {
+    let pixel_count = (width * height) as usize;
+    let is_range = mask_color.len() == 2 * ncomp as usize;
+
+    for i in 0..pixel_count {
+        let si = i * ncomp as usize;
+        let matched = if is_range {
+            // Range match: sample[c] in [min_c, max_c] for ALL components
+            (0..ncomp as usize).all(|c| {
+                let sample = samples.get(si + c).copied().unwrap_or(0) as i32;
+                let min_val = mask_color[c * 2];
+                let max_val = mask_color[c * 2 + 1];
+                sample >= min_val && sample <= max_val
+            })
+        } else {
+            // Exact match: sample[c] == mask_color[c] for ALL components
+            (0..ncomp as usize).all(|c| {
+                let sample = samples.get(si + c).copied().unwrap_or(0) as i32;
+                let target = mask_color.get(c).copied().unwrap_or(0);
+                sample == target
+            })
+        };
+
+        if matched {
+            let pi = i * 4;
+            if pi + 3 < rgba.len() {
+                rgba[pi + 3] = 0; // Transparent
+            }
+        }
     }
 }
 
