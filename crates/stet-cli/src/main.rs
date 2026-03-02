@@ -224,6 +224,7 @@ fn create_context() -> Context {
 }
 
 /// Calculate DPI from screen info and page height in points.
+#[cfg(feature = "viewer")]
 fn dpi_from_screen_info(screen_info: &stet_viewer::ScreenInfo, page_height_pts: f64) -> f64 {
     match screen_info {
         stet_viewer::ScreenInfo::DpiOverride(dpi) => *dpi,
