@@ -1081,7 +1081,10 @@ fn fill_adjust_path(path: &PsPath, adjust: f64) -> Option<PsPath> {
         let dy = y1 - y0;
         let len_sq = dx * dx + dy * dy;
         if len_sq < 1e-10 {
-            return true; // All same point
+            // First ≈ last: if only 2 points, it's a degenerate point.
+            // If 3+ points, it's a closed loop (e.g. glyph contour), not
+            // a zero-area line — return false to avoid destroying it.
+            return points.len() <= 2;
         }
         // Check cross product of each point relative to the line
         for &(px, py) in &points[1..points.len() - 1] {

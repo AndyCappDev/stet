@@ -1,4 +1,4 @@
-console.log('stet-web v7 — viewport rendering');
+console.log('stet-web v8 — DPR-correct viewport rendering');
 
 // --- State ---
 let workerReady = false;
@@ -199,9 +199,12 @@ function renderPS(data) {
 function computeFitScale() {
     const page = pageDims[currentPage];
     if (!page) return 1;
+    const dpr = window.devicePixelRatio || 1;
     const cw = canvasContainer.clientWidth - 48;
     const ch = canvasContainer.clientHeight - 48;
-    return Math.min(cw / page.width, ch / page.height, 1);
+    // page.width/height are in reference-DPI pixels (= physical display pixels
+    // at effectiveScale=1). Divide by dpr to get CSS pixel dimensions.
+    return Math.min(cw / (page.width / dpr), ch / (page.height / dpr), 1);
 }
 
 function requestViewportRender() {
@@ -209,12 +212,13 @@ function requestViewportRender() {
     const page = pageDims[currentPage];
     if (!page) return;
 
+    const dpr = window.devicePixelRatio || 1;
     fitScale = computeFitScale();
     const effectiveScale = fitMode ? fitScale : zoom;
 
-    // Full rendered page size in CSS pixels
-    const fullW = page.width * effectiveScale;
-    const fullH = page.height * effectiveScale;
+    // Full page size in CSS pixels (ref-DPI pixels / dpr, scaled by zoom)
+    const fullW = (page.width / dpr) * effectiveScale;
+    const fullH = (page.height / dpr) * effectiveScale;
 
     // Visible region in CSS pixels (from scroll position + container size)
     const containerW = canvasContainer.clientWidth;
@@ -229,7 +233,6 @@ function requestViewportRender() {
         visH = fullH;
     } else {
         // Zoomed: compute visible rect from scroll position
-        // The canvas is inside padding, offset by the container's centering/padding
         visX = canvasContainer.scrollLeft;
         visY = canvasContainer.scrollTop;
         visW = Math.min(containerW, fullW - visX);
@@ -237,13 +240,13 @@ function requestViewportRender() {
     }
 
     // Convert visible CSS rect → device-space coordinates (at reference DPI)
-    const vpX = (visX / effectiveScale);
-    const vpY = (visY / effectiveScale);
-    const vpW = (visW / effectiveScale);
-    const vpH = (visH / effectiveScale);
+    // CSS pixels × dpr / effectiveScale = ref-DPI pixels
+    const vpX = visX * dpr / effectiveScale;
+    const vpY = visY * dpr / effectiveScale;
+    const vpW = visW * dpr / effectiveScale;
+    const vpH = visH * dpr / effectiveScale;
 
-    // Output pixels = visible CSS size × devicePixelRatio for sharp rendering
-    const dpr = window.devicePixelRatio || 1;
+    // Output pixels = visible CSS size × dpr for sharp 1:1 physical pixel rendering
     const pixelW = Math.round(visW * dpr);
     const pixelH = Math.round(visH * dpr);
 
@@ -281,9 +284,10 @@ function applyCanvasLayout() {
     const page = pageDims[currentPage];
     if (!page) return;
 
+    const dpr = window.devicePixelRatio || 1;
     const effectiveScale = fitMode ? fitScale : zoom;
-    const fullW = page.width * effectiveScale;
-    const fullH = page.height * effectiveScale;
+    const fullW = (page.width / dpr) * effectiveScale;
+    const fullH = (page.height / dpr) * effectiveScale;
     const containerW = canvasContainer.clientWidth;
     const containerH = canvasContainer.clientHeight;
     const isZoomed = !fitMode && (fullW > containerW || fullH > containerH);
@@ -338,7 +342,10 @@ function currentPageDpi() {
 }
 
 function updateZoomLabel() {
+    const dpr = window.devicePixelRatio || 1;
     const effectiveScale = fitMode ? fitScale : zoom;
+    // Actual render DPI: effectiveScale scales ref-DPI pixels to physical
+    // display pixels, so the effective DPI seen on screen is ref_dpi * scale.
     const renderDpi = Math.round(currentPageDpi() * effectiveScale);
     zoomLevelEl.textContent = renderDpi + ' dpi';
 }
@@ -378,17 +385,21 @@ const ZOOM_STEPS = [0.5, 1, 2, 4, 8, 16, 32];
 function getViewCenter() {
     const page = pageDims[currentPage];
     if (!page) return { x: 0, y: 0 };
+    const dpr = window.devicePixelRatio || 1;
     const oldScale = fitMode ? fitScale : zoom;
-    const cx = (canvasContainer.scrollLeft + canvasContainer.clientWidth / 2) / oldScale;
-    const cy = (canvasContainer.scrollTop + canvasContainer.clientHeight / 2) / oldScale;
+    // CSS scroll → ref-DPI device coords: multiply by dpr/effectiveScale
+    const cx = (canvasContainer.scrollLeft + canvasContainer.clientWidth / 2) * dpr / oldScale;
+    const cy = (canvasContainer.scrollTop + canvasContainer.clientHeight / 2) * dpr / oldScale;
     return { x: cx, y: cy };
 }
 
 // Scroll so the given device-space point is at the center of the visible area
 function scrollToCenter(center) {
+    const dpr = window.devicePixelRatio || 1;
     const newScale = fitMode ? fitScale : zoom;
-    canvasContainer.scrollLeft = center.x * newScale - canvasContainer.clientWidth / 2;
-    canvasContainer.scrollTop = center.y * newScale - canvasContainer.clientHeight / 2;
+    // Ref-DPI device coords → CSS scroll: multiply by effectiveScale/dpr
+    canvasContainer.scrollLeft = center.x * newScale / dpr - canvasContainer.clientWidth / 2;
+    canvasContainer.scrollTop = center.y * newScale / dpr - canvasContainer.clientHeight / 2;
 }
 
 function zoomIn() {
@@ -556,9 +567,10 @@ function updateMinimap() {
     const page = pageDims[currentPage];
     if (!page) return;
 
+    const dpr = window.devicePixelRatio || 1;
     const effectiveScale = fitMode ? fitScale : zoom;
-    const fullW = page.width * effectiveScale;
-    const fullH = page.height * effectiveScale;
+    const fullW = (page.width / dpr) * effectiveScale;
+    const fullH = (page.height / dpr) * effectiveScale;
     const containerW = canvasContainer.clientWidth;
     const containerH = canvasContainer.clientHeight;
     const isZoomed = !fitMode && (fullW > containerW || fullH > containerH);
@@ -657,9 +669,10 @@ window.addEventListener('mousemove', e => {
     const page = pageDims[currentPage];
     if (!page) return;
 
+    const dpr = window.devicePixelRatio || 1;
     const effectiveScale = fitMode ? fitScale : zoom;
-    const fullW = page.width * effectiveScale;
-    const fullH = page.height * effectiveScale;
+    const fullW = (page.width / dpr) * effectiveScale;
+    const fullH = (page.height / dpr) * effectiveScale;
     const containerW = canvasContainer.clientWidth;
     const containerH = canvasContainer.clientHeight;
 
@@ -684,9 +697,10 @@ minimapCanvas.addEventListener('mousedown', e => {
     const page = pageDims[currentPage];
     if (!page) return;
 
+    const dpr = window.devicePixelRatio || 1;
     const effectiveScale = fitMode ? fitScale : zoom;
-    const fullW = page.width * effectiveScale;
-    const fullH = page.height * effectiveScale;
+    const fullW = (page.width / dpr) * effectiveScale;
+    const fullH = (page.height / dpr) * effectiveScale;
     const containerW = canvasContainer.clientWidth;
     const containerH = canvasContainer.clientHeight;
 
