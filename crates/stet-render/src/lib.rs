@@ -9,3 +9,4 @@ mod skia_device;
 
 pub use png_sink::PngSinkFactory;
 pub use skia_device::SkiaDevice;
+pub use skia_device::render_region;

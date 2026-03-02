@@ -16,12 +16,21 @@ use wasm_bindgen::prelude::*;
 
 use stet_core::context::Context;
 use stet_core::device::OutputDevice;
+use stet_core::display_list::DisplayList;
 use stet_core::eps::read_eps_bounding_box;
 use stet_core::error::PsError;
 use stet_engine::eval::parse_and_exec;
 use stet_render::SkiaDevice;
 
-use memory_sink::{MemorySinkFactory, PageData, set_page_ready_callback};
+use memory_sink::{MemorySinkFactory, PageData, set_sink_callback};
+
+/// Page metadata stored alongside display lists for viewport rendering.
+struct PageInfo {
+    /// Page width in device-space pixels at the reference DPI.
+    width: u32,
+    /// Page height in device-space pixels at the reference DPI.
+    height: u32,
+}
 
 /// A fully initialized PostScript interpreter context.
 ///
@@ -29,12 +38,13 @@ use memory_sink::{MemorySinkFactory, PageData, set_page_ready_callback};
 #[wasm_bindgen]
 pub struct Interpreter {
     ctx: Context,
-}
-
-/// Result of rendering a PostScript file: one or more RGBA pages.
-#[wasm_bindgen]
-pub struct RenderResult {
-    pages: Vec<PageData>,
+    /// Display lists captured during rendering, one per page.
+    /// Retained for viewport re-rendering at arbitrary zoom levels.
+    page_display_lists: Vec<DisplayList>,
+    /// Per-page dimensions at the reference DPI.
+    page_info: Vec<PageInfo>,
+    /// The DPI used during interpretation (reference DPI for display list coordinates).
+    reference_dpi: f64,
 }
 
 /// A single rendered page with dimensions and RGBA pixel data.
@@ -63,30 +73,6 @@ impl Page {
     #[wasm_bindgen(getter)]
     pub fn rgba(&self) -> Vec<u8> {
         self.rgba.clone()
-    }
-}
-
-#[wasm_bindgen]
-impl RenderResult {
-    /// Number of rendered pages.
-    #[wasm_bindgen(getter)]
-    pub fn page_count(&self) -> u32 {
-        self.pages.len() as u32
-    }
-
-    /// Get a specific page by index.
-    pub fn get_page(&mut self, index: u32) -> Option<Page> {
-        let i = index as usize;
-        if i < self.pages.len() {
-            let page = &mut self.pages[i];
-            Some(Page {
-                width: page.width,
-                height: page.height,
-                rgba: std::mem::take(&mut page.rgba),
-            })
-        } else {
-            None
-        }
     }
 }
 
@@ -135,23 +121,38 @@ pub fn create_interpreter() -> Interpreter {
     run_embedded_init_scripts(&mut ctx);
 
     log("stet: interpreter ready");
-    Interpreter { ctx }
+    Interpreter {
+        ctx,
+        page_display_lists: Vec::new(),
+        page_info: Vec::new(),
+        reference_dpi: 150.0,
+    }
 }
 
-/// Register a JS callback that fires after each page is rendered.
+/// Register a JS callback for streaming render events.
 ///
-/// The callback receives (index, width, height, rgbaUint8Array).
-/// Used by the Web Worker to stream pages to the main thread during rendering.
+/// The callback receives (event, arg1, arg2, arg3, data):
+///   event=0 (begin_page): arg1=index, arg2=width, arg3=height
+///   event=1 (rows): data=Uint8Array of RGBA band pixels
+///   event=2 (end_page): arg1=index
+///
+/// This streams bands directly to JS so WASM never holds a full page
+/// in memory — critical at high DPI where a page can exceed 2 GB.
 #[wasm_bindgen]
 pub fn set_page_callback(callback: &js_sys::Function) {
     let callback = callback.clone();
-    set_page_ready_callback(Some(Box::new(move |index, width, height, rgba| {
-        let arr = js_sys::Uint8Array::from(rgba);
+    set_sink_callback(Some(Box::new(move |event, arg1, arg2, arg3, data| {
         let args = js_sys::Array::new();
-        args.push(&JsValue::from(index));
-        args.push(&JsValue::from(width));
-        args.push(&JsValue::from(height));
-        args.push(&arr.into());
+        args.push(&JsValue::from(event));
+        args.push(&JsValue::from(arg1));
+        args.push(&JsValue::from(arg2));
+        args.push(&JsValue::from(arg3));
+        if !data.is_empty() {
+            let arr = js_sys::Uint8Array::from(data);
+            args.push(&arr.into());
+        } else {
+            args.push(&JsValue::NULL);
+        }
         let _ = callback.apply(&JsValue::NULL, &args);
     })));
 }
@@ -159,21 +160,28 @@ pub fn set_page_callback(callback: &js_sys::Function) {
 /// Clear the page callback.
 #[wasm_bindgen]
 pub fn clear_page_callback() {
-    set_page_ready_callback(None);
+    set_sink_callback(None);
 }
 
 /// Render PostScript or EPS data at the specified DPI.
 ///
-/// Returns a `RenderResult` containing one or more rendered pages.
+/// Interprets the PostScript, renders an overview of each page, and retains
+/// display lists for viewport re-rendering via `render_viewport()`.
 /// The interpreter state is reset after rendering so it can be reused.
 #[wasm_bindgen]
-pub fn render(interp: &mut Interpreter, ps_data: &[u8], dpi: f64, filename: &str) -> Result<RenderResult, JsValue> {
+pub fn render(interp: &mut Interpreter, ps_data: &[u8], dpi: f64, filename: &str) -> Result<JsValue, JsValue> {
     log(&format!("stet: render() called — {} bytes, dpi={}, file={}", ps_data.len(), dpi, filename));
-    let ctx = &mut interp.ctx;
+
+    // Clear previous display lists
+    interp.page_display_lists.clear();
+    interp.page_info.clear();
+    interp.reference_dpi = dpi;
+
+    // Enable display list capture
+    interp.ctx.capture_display_lists = Some(Vec::new());
 
     // Set up shared page collection for the memory sink
     let (_sink_factory, pages_ref) = MemorySinkFactory::new();
-    // _sink_factory is unused — device_factory creates sinks via from_shared(pages_ref)
 
     // Strip DOS EPS header and check for EPS bounding box
     let ps_data = stet_core::eps::strip_dos_eps_header(ps_data);
@@ -196,72 +204,63 @@ pub fn render(interp: &mut Interpreter, ps_data: &[u8], dpi: f64, filename: &str
 
         // Set up device_factory with MemorySinkFactory, then use setpagedevice
         let pages_for_factory = pages_ref.clone();
-        ctx.device_factory = Some(Box::new(move |w, h| {
+        interp.ctx.device_factory = Some(Box::new(move |w, h| {
             let factory = MemorySinkFactory::from_shared(pages_for_factory.clone());
             Box::new(SkiaDevice::with_sink_factory(w, h, Box::new(factory)))
                 as Box<dyn OutputDevice>
         }));
 
-        install_device_via_setpagedevice(ctx, dpi, w, h)
+        install_device_via_setpagedevice(&mut interp.ctx, dpi, w, h)
             .map_err(|e| JsValue::from_str(&format!("Device setup error: {}", e)))?;
 
-        let save_obj = ctx.vm_save();
+        let save_obj = interp.ctx.vm_save();
         let save_id = match save_obj.value {
             stet_core::object::PsValue::Save(stet_core::object::SaveLevel(id)) => id,
             _ => unreachable!(),
         };
         let wrapper = format!("gsave {} {} translate", -llx, -lly);
-        parse_and_exec(ctx, wrapper.as_bytes())
+        parse_and_exec(&mut interp.ctx, wrapper.as_bytes())
             .map_err(|e| JsValue::from_str(&format!("PS error (translate): {}", e)))?;
 
-        log(&format!(
-            "stet: EPS before exec — display_list={}",
-            ctx.display_list.elements().len()
-        ));
-        parse_and_exec(ctx, ps_data)
+        parse_and_exec(&mut interp.ctx, ps_data)
             .map_err(|e| JsValue::from_str(&format!("PS error (exec): {}", e)))?;
-        log(&format!(
-            "stet: EPS after exec — display_list={} device={}",
-            ctx.display_list.elements().len(),
-            ctx.device.is_some()
-        ));
 
         // grestore to undo our translate; only call showpage if the EPS didn't already
         let need_showpage = pages_ref.lock().map(|g| g.is_empty()).unwrap_or(true);
         if need_showpage {
-            parse_and_exec(ctx, b"grestore showpage")
+            parse_and_exec(&mut interp.ctx, b"grestore showpage")
                 .map_err(|e| JsValue::from_str(&format!("PS error (showpage): {}", e)))?;
         } else {
-            parse_and_exec(ctx, b"grestore")
+            parse_and_exec(&mut interp.ctx, b"grestore")
                 .map_err(|e| JsValue::from_str(&format!("PS error (grestore): {}", e)))?;
         }
 
-        finish_device(ctx);
+        finish_device(&mut interp.ctx);
         let pages = extract_pages(&pages_ref);
-        let _ = ctx.vm_restore(save_id);
-        reset_context(ctx);
-        return Ok(RenderResult { pages });
+        collect_display_lists(interp, &pages);
+        let _ = interp.ctx.vm_restore(save_id);
+        reset_context(&mut interp.ctx);
+        let page_count = interp.page_display_lists.len() as u32;
+        return Ok(JsValue::from(page_count));
     }
 
     // Non-EPS or no valid bounding box: standard page rendering
-    // Set up device_factory with MemorySinkFactory, then use setpagedevice
-    // (matching CLI behavior for proper EndPage/BeginPage continuation on multi-page files)
     let pages_for_factory = pages_ref.clone();
-    ctx.device_factory = Some(Box::new(move |w, h| {
+    interp.ctx.device_factory = Some(Box::new(move |w, h| {
         let factory = MemorySinkFactory::from_shared(pages_for_factory.clone());
         Box::new(SkiaDevice::with_sink_factory(w, h, Box::new(factory))) as Box<dyn OutputDevice>
     }));
 
-    install_device_via_setpagedevice(ctx, dpi, 612.0, 792.0)
+    install_device_via_setpagedevice(&mut interp.ctx, dpi, 612.0, 792.0)
         .map_err(|e| JsValue::from_str(&format!("Device setup error: {}", e)))?;
 
     // Wrap execution in save/restore to isolate VM changes between renders
-    let save_obj = ctx.vm_save();
+    let save_obj = interp.ctx.vm_save();
     let save_id = match save_obj.value {
         stet_core::object::PsValue::Save(stet_core::object::SaveLevel(id)) => id,
         _ => unreachable!(),
     };
-    match parse_and_exec(ctx, ps_data) {
+    match parse_and_exec(&mut interp.ctx, ps_data) {
         Ok(()) => {}
         Err(PsError::Quit) => {
             log("stet: after exec — Quit");
@@ -270,33 +269,106 @@ pub fn render(interp: &mut Interpreter, ps_data: &[u8], dpi: f64, filename: &str
             log(&format!(
                 "stet: render error: {} | o_stack={} e_stack={} d_stack={}",
                 e,
-                ctx.o_stack.len(),
-                ctx.e_stack.len(),
-                ctx.d_stack.len()
+                interp.ctx.o_stack.len(),
+                interp.ctx.e_stack.len(),
+                interp.ctx.d_stack.len()
             ));
-            // Dump top of e_stack for debugging
-            for i in 0..ctx.e_stack.len().min(10) {
-                if let Ok(obj) = ctx.e_stack.peek(i) {
-                    log(&format!("  e_stack[{}]: {:?}", i, obj.value));
-                }
-            }
-            // Try to salvage any rendered pages before reporting error
-            finish_device(ctx);
+            finish_device(&mut interp.ctx);
             let pages = extract_pages(&pages_ref);
-            let _ = ctx.vm_restore(save_id);
-            reset_context(ctx);
-            if pages.is_empty() {
+            collect_display_lists(interp, &pages);
+            let _ = interp.ctx.vm_restore(save_id);
+            reset_context(&mut interp.ctx);
+            let page_count = interp.page_display_lists.len() as u32;
+            if page_count == 0 {
                 return Err(JsValue::from_str(&format!("PS error: {}", e)));
             }
-            return Ok(RenderResult { pages });
+            return Ok(JsValue::from(page_count));
         }
     }
 
-    finish_device(ctx);
+    finish_device(&mut interp.ctx);
     let pages = extract_pages(&pages_ref);
-    let _ = ctx.vm_restore(save_id);
-    reset_context(ctx);
-    Ok(RenderResult { pages })
+    collect_display_lists(interp, &pages);
+    let _ = interp.ctx.vm_restore(save_id);
+    reset_context(&mut interp.ctx);
+    let page_count = interp.page_display_lists.len() as u32;
+    Ok(JsValue::from(page_count))
+}
+
+/// Get the number of pages available for viewport rendering.
+#[wasm_bindgen]
+pub fn page_count(interp: &Interpreter) -> u32 {
+    interp.page_display_lists.len() as u32
+}
+
+/// Get page dimensions (at the reference DPI) for a specific page.
+/// Returns [width, height] or null if page index is out of range.
+#[wasm_bindgen]
+pub fn page_dimensions(interp: &Interpreter, page_index: u32) -> JsValue {
+    let i = page_index as usize;
+    if i < interp.page_info.len() {
+        let info = &interp.page_info[i];
+        let arr = js_sys::Array::new();
+        arr.push(&JsValue::from(info.width));
+        arr.push(&JsValue::from(info.height));
+        arr.into()
+    } else {
+        JsValue::NULL
+    }
+}
+
+/// Get the reference DPI used during interpretation.
+#[wasm_bindgen]
+pub fn reference_dpi(interp: &Interpreter) -> f64 {
+    interp.reference_dpi
+}
+
+/// Render a rectangular viewport region of a stored display list.
+///
+/// Arguments:
+/// - `page_index`: Which page's display list to render
+/// - `vp_x, vp_y, vp_w, vp_h`: Viewport rectangle in device-space pixels
+///   (at the reference DPI used during interpretation)
+/// - `pixel_w, pixel_h`: Output pixel dimensions
+///
+/// Returns a `Page` with the rendered RGBA data.
+#[wasm_bindgen]
+pub fn render_viewport(
+    interp: &Interpreter,
+    page_index: u32,
+    vp_x: f64,
+    vp_y: f64,
+    vp_w: f64,
+    vp_h: f64,
+    pixel_w: u32,
+    pixel_h: u32,
+) -> Result<Page, JsValue> {
+    let i = page_index as usize;
+    if i >= interp.page_display_lists.len() {
+        return Err(JsValue::from_str(&format!(
+            "Page index {} out of range (have {} pages)",
+            page_index,
+            interp.page_display_lists.len()
+        )));
+    }
+
+    let list = &interp.page_display_lists[i];
+    let rgba = stet_render::render_region(
+        list,
+        vp_x,
+        vp_y,
+        vp_w,
+        vp_h,
+        pixel_w,
+        pixel_h,
+        interp.reference_dpi,
+    );
+
+    Ok(Page {
+        width: pixel_w,
+        height: pixel_h,
+        rgba,
+    })
 }
 
 /// Install a rendering device via setpagedevice (matching CLI behavior).
@@ -346,11 +418,34 @@ fn extract_pages(pages_ref: &Arc<Mutex<Vec<PageData>>>) -> Vec<PageData> {
     }
 }
 
+/// Collect captured display lists and page info from Context into Interpreter.
+fn collect_display_lists(interp: &mut Interpreter, pages: &[PageData]) {
+    let captured = interp.ctx.capture_display_lists.take().unwrap_or_default();
+    for (i, dl) in captured.into_iter().enumerate() {
+        interp.page_display_lists.push(dl);
+        // Get page dimensions from the rendered page data
+        if i < pages.len() {
+            interp.page_info.push(PageInfo {
+                width: pages[i].width,
+                height: pages[i].height,
+            });
+        } else {
+            // Fallback: compute from reference DPI and default page size
+            interp.page_info.push(PageInfo {
+                width: (612.0 * interp.reference_dpi / 72.0) as u32,
+                height: (792.0 * interp.reference_dpi / 72.0) as u32,
+            });
+        }
+    }
+    interp.ctx.capture_display_lists = None;
+}
+
 /// Reset interpreter state for the next render call.
 fn reset_context(ctx: &mut Context) {
     ctx.device = None;
     ctx.output_path = None;
     ctx.display_list.clear();
+    ctx.capture_display_lists = None;
     ctx.o_stack.clear();
     ctx.e_stack.clear();
     ctx.gstate = stet_core::graphics_state::GraphicsState::new();

@@ -306,13 +306,16 @@ pub fn op_copypage(ctx: &mut Context) -> Result<(), PsError> {
     }
 
     // Fallback: direct copy (replay but don't clear)
-    if let Some(ref mut device) = ctx.device {
-        if let Some(ref path) = ctx.output_path {
-            let list = std::mem::take(&mut ctx.display_list);
+    if ctx.device.is_some() {
+        if ctx.output_path.is_some() {
+            let list = ctx.take_display_list();
+            let device = ctx.device.as_mut().unwrap();
+            let path = ctx.output_path.as_ref().unwrap();
             if let Err(e) = device.replay_and_show(list, path) {
                 eprintln!("copypage error: {}", e);
             }
         } else {
+            let device = ctx.device.as_mut().unwrap();
             stet_core::display_list::replay_to_device(&ctx.display_list, device.as_mut());
         }
     }
@@ -342,7 +345,7 @@ pub fn op_showpage_continue(ctx: &mut Context) -> Result<(), PsError> {
         set_pd_int(ctx, b"PageCount", page_count);
 
         // Replay display list and render
-        let list = std::mem::take(&mut ctx.display_list);
+        let list = ctx.take_display_list();
         if let Some(ref mut device) = ctx.device {
             let output_path = generate_output_path(ctx.output_path.as_deref(), page_count);
             if let Err(e) = device.replay_and_show(list, &output_path) {
@@ -423,7 +426,7 @@ pub fn op_copypage_continue(ctx: &mut Context) -> Result<(), PsError> {
 
         // Replay display list (copypage preserves page content, but we must
         // transfer ownership for pipelined rendering)
-        let list = std::mem::take(&mut ctx.display_list);
+        let list = ctx.take_display_list();
         if let Some(ref mut device) = ctx.device {
             let output_path = generate_output_path(ctx.output_path.as_deref(), page_count);
             if let Err(e) = device.replay_and_show(list, &output_path) {

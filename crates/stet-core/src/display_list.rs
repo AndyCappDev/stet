@@ -11,6 +11,7 @@ use crate::device::{
 use crate::graphics_state::PsPath;
 
 /// A single recorded drawing operation.
+#[derive(Clone)]
 pub enum DisplayElement {
     /// Fill a path.
     Fill { path: PsPath, params: FillParams },
@@ -38,6 +39,7 @@ pub enum DisplayElement {
 }
 
 /// An ordered list of drawing operations for a single page.
+#[derive(Clone)]
 pub struct DisplayList {
     elements: Vec<DisplayElement>,
 }
@@ -63,6 +65,11 @@ impl DisplayList {
     /// Discard all recorded operations.
     pub fn clear(&mut self) {
         self.elements.clear();
+    }
+
+    /// Returns true if the display list has no elements.
+    pub fn is_empty(&self) -> bool {
+        self.elements.is_empty()
     }
 }
 

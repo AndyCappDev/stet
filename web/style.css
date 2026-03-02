@@ -147,19 +147,83 @@ main {
 }
 
 .canvas-container {
-    display: flex;
-    justify-content: center;
-    align-items: center;
+    overflow: auto;
     padding: 2rem;
     width: 100%;
     height: 100%;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+}
+
+/* When zoomed beyond fit, align to top-left so scrolling works naturally */
+.canvas-container.zoomed {
+    align-items: flex-start;
+    justify-content: flex-start;
+    cursor: grab;
+}
+
+.canvas-container.zoomed.panning {
+    cursor: grabbing;
+}
+
+/* Wider scrollbars for easier panning */
+.canvas-container::-webkit-scrollbar {
+    width: 14px;
+    height: 14px;
+}
+
+.canvas-container::-webkit-scrollbar-track {
+    background: var(--bg);
+}
+
+.canvas-container::-webkit-scrollbar-thumb {
+    background: #555;
+    border-radius: 7px;
+    border: 2px solid var(--bg);
+}
+
+.canvas-container::-webkit-scrollbar-thumb:hover {
+    background: #777;
+}
+
+.canvas-container::-webkit-scrollbar-corner {
+    background: var(--bg);
 }
 
 canvas {
-    max-width: 100%;
-    max-height: 100%;
-    object-fit: contain;
     box-shadow: 0 4px 24px var(--shadow);
+    transform-origin: 0 0;
+    flex-shrink: 0;
+}
+
+.zoom-controls {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+}
+
+.zoom-controls button {
+    background: var(--surface);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    width: 1.75rem;
+    height: 1.75rem;
+    cursor: pointer;
+    font-size: 1rem;
+    line-height: 1;
+}
+
+.zoom-controls button:hover {
+    background: var(--accent);
+}
+
+#zoom-level {
+    font-size: 0.8rem;
+    color: var(--text-dim);
+    min-width: 2.5rem;
+    text-align: center;
 }
 
 .loading {
@@ -201,6 +265,38 @@ footer {
 
 .hidden {
     display: none !important;
+}
+
+/* Minimap navigator */
+.minimap {
+    position: absolute;
+    bottom: 1rem;
+    right: 1rem;
+    background: var(--bg-light);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    box-shadow: 0 2px 12px var(--shadow);
+    padding: 4px;
+    z-index: 5;
+    user-select: none;
+}
+
+.minimap canvas {
+    display: block;
+    max-width: 200px;
+    max-height: 260px;
+}
+
+#minimap-viewport {
+    position: absolute;
+    border: 2px solid var(--accent);
+    background: rgba(233, 69, 96, 0.15);
+    cursor: grab;
+    pointer-events: auto;
+}
+
+#minimap-viewport:active {
+    cursor: grabbing;
 }
 
 /* Drag-over overlay for the whole page when a file is being dragged */

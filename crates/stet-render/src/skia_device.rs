@@ -787,6 +787,22 @@ fn offset_transform(t: Transform, y_offset: f32) -> Transform {
     Transform::from_row(t.sx, t.ky, t.kx, t.sy, t.tx, t.ty - y_offset)
 }
 
+/// Apply a combined offset + scale to a tiny-skia Transform for viewport rendering.
+/// Maps device-space coordinates into viewport-local pixel coordinates:
+///   output_x = (device_x - vp_x) * scale_x
+///   output_y = (device_y - vp_y) * scale_y
+fn viewport_transform(t: Transform, vp_x: f32, vp_y: f32, scale_x: f32, scale_y: f32) -> Transform {
+    // Post-compose: first apply `t` (path→device), then translate(-vp_x,-vp_y), then scale
+    Transform::from_row(
+        t.sx * scale_x,
+        t.ky * scale_y,
+        t.kx * scale_x,
+        t.sy * scale_y,
+        (t.tx - vp_x) * scale_x,
+        (t.ty - vp_y) * scale_y,
+    )
+}
+
 /// Lanczos3 windowed-sinc kernel.
 fn lanczos3(x: f64) -> f64 {
     if x.abs() < 1e-8 {
@@ -1724,6 +1740,528 @@ fn render_banded_to_sink(
     sink.end_page()
 }
 
+/// 2D bounding box in device pixels.
+struct BBox2D {
+    x_min: f64,
+    y_min: f64,
+    x_max: f64,
+    y_max: f64,
+}
+
+/// Compute full 2D bounding boxes for display list elements (for viewport culling).
+fn precompute_full_bboxes(list: &DisplayList) -> Vec<Option<BBox2D>> {
+    list.elements()
+        .iter()
+        .map(|elem| match elem {
+            DisplayElement::Fill { path, .. } => path_full_bbox(path),
+            DisplayElement::Stroke { path, params } => {
+                path_full_bbox(path).map(|mut bbox| {
+                    let expand = params.line_width * params.miter_limit * 0.5;
+                    let m = &params.ctm;
+                    let is_identity = m.a == 1.0
+                        && m.b == 0.0
+                        && m.c == 0.0
+                        && m.d == 1.0
+                        && m.tx == 0.0
+                        && m.ty == 0.0;
+                    if is_identity {
+                        bbox.x_min -= expand;
+                        bbox.x_max += expand;
+                        bbox.y_min -= expand;
+                        bbox.y_max += expand;
+                    } else {
+                        let col_x_len = (m.a * m.a + m.b * m.b).sqrt().max(1.0);
+                        let col_y_len = (m.c * m.c + m.d * m.d).sqrt().max(1.0);
+                        let expand_x = params.line_width * col_x_len * params.miter_limit * 0.5;
+                        let expand_y = params.line_width * col_y_len * params.miter_limit * 0.5;
+                        bbox.x_min -= expand_x;
+                        bbox.x_max += expand_x;
+                        bbox.y_min -= expand_y;
+                        bbox.y_max += expand_y;
+                    }
+                    bbox
+                })
+            }
+            DisplayElement::Image { params, .. } => image_full_bbox(params),
+            DisplayElement::AxialShading { params } => {
+                shading_full_bbox(&params.bbox, &params.ctm)
+            }
+            DisplayElement::RadialShading { params } => {
+                shading_full_bbox(&params.bbox, &params.ctm)
+            }
+            DisplayElement::MeshShading { params } => {
+                shading_full_bbox(&params.bbox, &params.ctm)
+            }
+            DisplayElement::PatchShading { params } => {
+                shading_full_bbox(&params.bbox, &params.ctm)
+            }
+            _ => None, // Clip, InitClip, ErasePage: always process
+        })
+        .collect()
+}
+
+/// Compute full 2D bounds from path segments.
+fn path_full_bbox(path: &PsPath) -> Option<BBox2D> {
+    let mut x_min = f64::INFINITY;
+    let mut x_max = f64::NEG_INFINITY;
+    let mut y_min = f64::INFINITY;
+    let mut y_max = f64::NEG_INFINITY;
+    for seg in &path.segments {
+        match seg {
+            PathSegment::MoveTo(x, y) | PathSegment::LineTo(x, y) => {
+                x_min = x_min.min(*x);
+                x_max = x_max.max(*x);
+                y_min = y_min.min(*y);
+                y_max = y_max.max(*y);
+            }
+            PathSegment::CurveTo {
+                x1, y1, x2, y2, x3, y3,
+            } => {
+                x_min = x_min.min(*x1).min(*x2).min(*x3);
+                x_max = x_max.max(*x1).max(*x2).max(*x3);
+                y_min = y_min.min(*y1).min(*y2).min(*y3);
+                y_max = y_max.max(*y1).max(*y2).max(*y3);
+            }
+            PathSegment::ClosePath => {}
+        }
+    }
+    if x_min <= x_max {
+        Some(BBox2D { x_min, y_min, x_max, y_max })
+    } else {
+        None
+    }
+}
+
+/// Compute full 2D bounds for an image from its transform.
+fn image_full_bbox(params: &ImageParams) -> Option<BBox2D> {
+    let m = &params.ctm;
+    let im = &params.image_matrix;
+    let Some(im_inv) = im.invert() else {
+        return None;
+    };
+    let combined = m.concat(&im_inv);
+    // Image occupies [0, width] × [0, height] in image space
+    let w = params.width as f64;
+    let h = params.height as f64;
+    let corners = [
+        combined.transform_point(0.0, 0.0),
+        combined.transform_point(w, 0.0),
+        combined.transform_point(0.0, h),
+        combined.transform_point(w, h),
+    ];
+    let mut x_min = f64::INFINITY;
+    let mut x_max = f64::NEG_INFINITY;
+    let mut y_min = f64::INFINITY;
+    let mut y_max = f64::NEG_INFINITY;
+    for (x, y) in &corners {
+        x_min = x_min.min(*x);
+        x_max = x_max.max(*x);
+        y_min = y_min.min(*y);
+        y_max = y_max.max(*y);
+    }
+    Some(BBox2D { x_min, y_min, x_max, y_max })
+}
+
+/// Compute full 2D bounds for a shading element from its BBox.
+fn shading_full_bbox(bbox: &Option<[f64; 4]>, ctm: &Matrix) -> Option<BBox2D> {
+    if let Some(bbox) = bbox {
+        let corners = [
+            ctm.transform_point(bbox[0], bbox[1]),
+            ctm.transform_point(bbox[2], bbox[1]),
+            ctm.transform_point(bbox[0], bbox[3]),
+            ctm.transform_point(bbox[2], bbox[3]),
+        ];
+        let mut x_min = f64::INFINITY;
+        let mut x_max = f64::NEG_INFINITY;
+        let mut y_min = f64::INFINITY;
+        let mut y_max = f64::NEG_INFINITY;
+        for (x, y) in &corners {
+            x_min = x_min.min(*x);
+            x_max = x_max.max(*x);
+            y_min = y_min.min(*y);
+            y_max = y_max.max(*y);
+        }
+        Some(BBox2D { x_min, y_min, x_max, y_max })
+    } else {
+        Some(BBox2D {
+            x_min: 0.0,
+            y_min: 0.0,
+            x_max: 1e9,
+            y_max: 1e9,
+        })
+    }
+}
+
+/// Build 2D clip epochs for viewport culling.
+fn build_viewport_epochs(list: &DisplayList, bboxes: &[Option<BBox2D>]) -> Vec<ViewportEpoch> {
+    let elements = list.elements();
+    let mut epochs = Vec::new();
+    let mut epoch_start = 0;
+    let mut x_min = f64::INFINITY;
+    let mut x_max = f64::NEG_INFINITY;
+    let mut y_min = f64::INFINITY;
+    let mut y_max = f64::NEG_INFINITY;
+    let mut has_erase = false;
+
+    for (i, element) in elements.iter().enumerate() {
+        if matches!(element, DisplayElement::InitClip) && i > epoch_start {
+            epochs.push(ViewportEpoch {
+                start_idx: epoch_start,
+                end_idx: i,
+                paint_bbox: if x_min <= x_max {
+                    Some(BBox2D { x_min, y_min, x_max, y_max })
+                } else {
+                    None
+                },
+                has_erase_page: has_erase,
+            });
+            epoch_start = i;
+            x_min = f64::INFINITY;
+            x_max = f64::NEG_INFINITY;
+            y_min = f64::INFINITY;
+            y_max = f64::NEG_INFINITY;
+            has_erase = false;
+        }
+        if matches!(element, DisplayElement::ErasePage) {
+            has_erase = true;
+        }
+        if let Some(ref bbox) = bboxes[i] {
+            x_min = x_min.min(bbox.x_min);
+            x_max = x_max.max(bbox.x_max);
+            y_min = y_min.min(bbox.y_min);
+            y_max = y_max.max(bbox.y_max);
+        }
+    }
+    if epoch_start < elements.len() {
+        epochs.push(ViewportEpoch {
+            start_idx: epoch_start,
+            end_idx: elements.len(),
+            paint_bbox: if x_min <= x_max {
+                Some(BBox2D { x_min, y_min, x_max, y_max })
+            } else {
+                None
+            },
+            has_erase_page: has_erase,
+        });
+    }
+    epochs
+}
+
+/// Clip epoch with full 2D bounding box for viewport culling.
+struct ViewportEpoch {
+    start_idx: usize,
+    end_idx: usize,
+    paint_bbox: Option<BBox2D>,
+    has_erase_page: bool,
+}
+
+/// Render a rectangular viewport region of a display list to RGBA pixels.
+///
+/// - `list`: The display list to render (in device-space coordinates at the reference DPI)
+/// - `vp_x, vp_y, vp_w, vp_h`: Viewport rectangle in device-space pixels
+/// - `pixel_w, pixel_h`: Output pixel dimensions
+/// - `dpi`: Reference DPI (for hairline width decisions)
+///
+/// Returns RGBA pixel data of size `pixel_w × pixel_h × 4`.
+#[allow(clippy::too_many_arguments)]
+pub fn render_region(
+    list: &DisplayList,
+    vp_x: f64,
+    vp_y: f64,
+    vp_w: f64,
+    vp_h: f64,
+    pixel_w: u32,
+    pixel_h: u32,
+    dpi: f64,
+) -> Vec<u8> {
+    if pixel_w == 0 || pixel_h == 0 || vp_w <= 0.0 || vp_h <= 0.0 {
+        return vec![0xFF; pixel_w as usize * pixel_h as usize * 4];
+    }
+
+    let scale_x = pixel_w as f64 / vp_w;
+    let scale_y = pixel_h as f64 / vp_h;
+    // Effective DPI for hairline decisions — reference DPI scaled by zoom
+    let effective_dpi = dpi * scale_x;
+
+    let bboxes = precompute_full_bboxes(list);
+    let epochs = build_viewport_epochs(list, &bboxes);
+    let clip_seen = precompute_clip_seen(list);
+
+    let mut pixmap = Pixmap::new(pixel_w, pixel_h).expect("Failed to create viewport pixmap");
+    pixmap.fill(Color::WHITE);
+
+    let mut state = BandState {
+        clip_region: None,
+        spare_mask: None,
+        clip_mask_cache: HashMap::new(),
+        clip_mask_seen: clip_seen,
+        mask_pool: Vec::new(),
+    };
+
+    let elements = list.elements();
+    let vp_x_f = vp_x as f32;
+    let vp_y_f = vp_y as f32;
+    let sx = scale_x as f32;
+    let sy = scale_y as f32;
+    let vp_x_max = vp_x + vp_w;
+    let vp_y_max = vp_y + vp_h;
+
+    for epoch in &epochs {
+        // Epoch-level culling
+        if !epoch.has_erase_page {
+            match epoch.paint_bbox {
+                Some(ref pb)
+                    if pb.x_max <= vp_x
+                        || pb.x_min >= vp_x_max
+                        || pb.y_max <= vp_y
+                        || pb.y_min >= vp_y_max =>
+                {
+                    continue;
+                }
+                None => continue,
+                _ => {}
+            }
+        }
+
+        for i in epoch.start_idx..epoch.end_idx {
+            // Element-level culling
+            if let Some(ref bbox) = bboxes[i] {
+                if bbox.x_max <= vp_x
+                    || bbox.x_min >= vp_x_max
+                    || bbox.y_max <= vp_y
+                    || bbox.y_min >= vp_y_max
+                {
+                    continue;
+                }
+            }
+            render_element_to_viewport(
+                &mut pixmap,
+                &mut state,
+                &elements[i],
+                vp_x_f,
+                vp_y_f,
+                sx,
+                sy,
+                pixel_w,
+                pixel_h,
+                effective_dpi,
+            );
+        }
+    }
+
+    pixmap.data().to_vec()
+}
+
+/// Render a single display element into a viewport-local pixmap.
+#[allow(clippy::too_many_arguments)]
+fn render_element_to_viewport(
+    pixmap: &mut Pixmap,
+    state: &mut BandState,
+    element: &DisplayElement,
+    vp_x: f32,
+    vp_y: f32,
+    scale_x: f32,
+    scale_y: f32,
+    out_w: u32,
+    out_h: u32,
+    dpi: f64,
+) {
+    match element {
+        DisplayElement::Fill { path, params } => {
+            let Some(skia_path) = build_skia_path(path) else {
+                return;
+            };
+            let mut temp_mask = None;
+            let Some(mask_ref) =
+                resolve_clip_mask(&state.clip_region, &mut temp_mask, out_w, out_h)
+            else {
+                return;
+            };
+            let paint = to_paint(&params.color);
+            let transform = viewport_transform(to_transform(&params.ctm), vp_x, vp_y, scale_x, scale_y);
+            let fill_rule = to_fill_rule(&params.fill_rule);
+            pixmap.fill_path(&skia_path, &paint, fill_rule, transform, mask_ref);
+        }
+        DisplayElement::Stroke { path, params } => {
+            let Some(skia_path) = build_skia_path(path) else {
+                return;
+            };
+            let mut temp_mask = None;
+            let Some(mask_ref) =
+                resolve_clip_mask(&state.clip_region, &mut temp_mask, out_w, out_h)
+            else {
+                return;
+            };
+            let paint = to_paint(&params.color);
+            let transform = viewport_transform(to_transform(&params.ctm), vp_x, vp_y, scale_x, scale_y);
+            let stroke = build_stroke(params, dpi);
+            pixmap.stroke_path(&skia_path, &paint, &stroke, transform, mask_ref);
+        }
+        DisplayElement::Clip { path, params } => {
+            clip_path_viewport(state, path, params, vp_x, vp_y, scale_x, scale_y, out_w, out_h);
+        }
+        DisplayElement::InitClip => {
+            if let Some(ClipRegion::Mask(mask)) = state.clip_region.take() {
+                state.recycle_mask(mask);
+            }
+            state.clip_region = None;
+        }
+        DisplayElement::ErasePage => {
+            pixmap.fill(Color::WHITE);
+            if let Some(ClipRegion::Mask(mask)) = state.clip_region.take() {
+                state.recycle_mask(mask);
+            }
+            state.clip_region = None;
+        }
+        DisplayElement::Image { rgba_data, params } => {
+            let iw = params.width;
+            let ih = params.height;
+            let expected = (iw * ih * 4) as usize;
+            if rgba_data.len() < expected || iw == 0 || ih == 0 {
+                return;
+            }
+            let Some(image_inv) = params.image_matrix.invert() else {
+                return;
+            };
+            let combined = params.ctm.concat(&image_inv);
+            let raw_transform = viewport_transform(to_transform(&combined), vp_x, vp_y, scale_x, scale_y);
+
+            let prescaled = prescale_image(rgba_data, iw, ih, raw_transform);
+            let (img_data, img_w, img_h, transform) = match &prescaled {
+                Some((data, w, h, t)) => (data.as_slice(), *w, *h, *t),
+                None => (rgba_data.as_slice(), iw, ih, raw_transform),
+            };
+
+            let Some(img_pixmap) = tiny_skia::PixmapRef::from_bytes(img_data, img_w, img_h)
+            else {
+                return;
+            };
+            #[allow(unused_assignments)]
+            let mut temp_mask = None;
+            let mask_ref = match &state.clip_region {
+                None => None,
+                Some(ClipRegion::Mask(m)) => Some(m as &Mask),
+                Some(ClipRegion::Rect(rect)) => {
+                    if rect.is_empty() {
+                        return;
+                    } else if rect.is_full_page(out_w, out_h) {
+                        None
+                    } else {
+                        temp_mask = rect.make_mask(out_w, out_h);
+                        temp_mask.as_ref()
+                    }
+                }
+            };
+            let eff_sx = (transform.sx * transform.sx + transform.ky * transform.ky).sqrt();
+            let eff_sy = (transform.kx * transform.kx + transform.sy * transform.sy).sqrt();
+            let quality = if eff_sx >= 0.9 && eff_sy >= 0.9 {
+                tiny_skia::FilterQuality::Nearest
+            } else {
+                tiny_skia::FilterQuality::Bilinear
+            };
+            let img_paint = tiny_skia::PixmapPaint {
+                quality,
+                ..tiny_skia::PixmapPaint::default()
+            };
+            pixmap.draw_pixmap(0, 0, img_pixmap, &img_paint, transform, mask_ref);
+        }
+        DisplayElement::AxialShading { params } => {
+            let mut temp_mask = None;
+            let Some(mask_ref) =
+                resolve_clip_mask(&state.clip_region, &mut temp_mask, out_w, out_h)
+            else {
+                return;
+            };
+            render_axial_shading_viewport(pixmap, params, vp_x, vp_y, scale_x, scale_y, mask_ref);
+        }
+        DisplayElement::RadialShading { params } => {
+            let mut temp_mask = None;
+            let Some(mask_ref) =
+                resolve_clip_mask(&state.clip_region, &mut temp_mask, out_w, out_h)
+            else {
+                return;
+            };
+            render_radial_shading_viewport(pixmap, params, vp_x, vp_y, scale_x, scale_y, mask_ref);
+        }
+        DisplayElement::MeshShading { params } => {
+            let mut temp_mask = None;
+            let Some(mask_ref) =
+                resolve_clip_mask(&state.clip_region, &mut temp_mask, out_w, out_h)
+            else {
+                return;
+            };
+            render_mesh_shading_viewport(pixmap, params, vp_x, vp_y, scale_x, scale_y, mask_ref);
+        }
+        DisplayElement::PatchShading { params } => {
+            let mut temp_mask = None;
+            let Some(mask_ref) =
+                resolve_clip_mask(&state.clip_region, &mut temp_mask, out_w, out_h)
+            else {
+                return;
+            };
+            render_patch_shading_viewport(pixmap, params, vp_x, vp_y, scale_x, scale_y, mask_ref);
+        }
+    }
+}
+
+/// Clip path handling for viewport rendering.
+#[allow(clippy::too_many_arguments)]
+fn clip_path_viewport(
+    state: &mut BandState,
+    path: &PsPath,
+    params: &ClipParams,
+    vp_x: f32,
+    vp_y: f32,
+    scale_x: f32,
+    scale_y: f32,
+    out_w: u32,
+    out_h: u32,
+) {
+    let fill_rule = to_fill_rule(&params.fill_rule);
+    let path_hash = hash_clip_path(path, &params.fill_rule);
+    let prev_region = state.clip_region.take();
+
+    let mut mask = state.take_mask(out_w, out_h);
+
+    let path_mask = if let Some(cached) = state.clip_mask_cache.get(&path_hash) {
+        mask.data_mut().copy_from_slice(cached.data());
+        mask
+    } else {
+        let Some(skia_path) = build_skia_path(path) else {
+            state.recycle_mask(mask);
+            state.clip_region = prev_region;
+            return;
+        };
+        let transform = viewport_transform(to_transform(&params.ctm), vp_x, vp_y, scale_x, scale_y);
+        mask.data_mut().fill(0);
+        mask.fill_path(&skia_path, fill_rule, true, transform);
+        if !state.clip_mask_seen.insert(path_hash) {
+            state.clip_mask_cache.insert(path_hash, mask.clone());
+        }
+        mask
+    };
+
+    match prev_region {
+        None => {
+            state.clip_region = Some(ClipRegion::Mask(path_mask));
+        }
+        Some(ClipRegion::Rect(rect)) => {
+            if rect.is_empty() {
+                state.recycle_mask(path_mask);
+            } else {
+                let mut mask = path_mask;
+                intersect_mask_with_rect(&mut mask, &rect, out_w, out_h);
+                state.clip_region = Some(ClipRegion::Mask(mask));
+            }
+        }
+        Some(ClipRegion::Mask(mut existing)) => {
+            intersect_masks(&mut existing, &path_mask);
+            state.recycle_mask(path_mask);
+            state.clip_region = Some(ClipRegion::Mask(existing));
+        }
+    }
+}
+
 // ---- Shading rendering ----
 
 /// Render an axial (linear) gradient shading to a pixmap.
@@ -2321,6 +2859,287 @@ fn interpolate_color_stops(stops: &[stet_core::device::ColorStop], position: f64
     }
 
     stops.last().unwrap().color.clone()
+}
+
+// ---- Viewport shading renderers ----
+// These map device-space coordinates into viewport-local pixel coordinates
+// using the viewport transform: output = (device - vp) * scale
+
+/// Render an axial shading into viewport-local coordinates.
+fn render_axial_shading_viewport(
+    pixmap: &mut Pixmap,
+    params: &AxialShadingParams,
+    vp_x: f32,
+    vp_y: f32,
+    scale_x: f32,
+    scale_y: f32,
+    clip_mask: Option<&Mask>,
+) {
+    let pw = pixmap.width();
+    let ph = pixmap.height();
+    if params.color_stops.is_empty() || pw == 0 || ph == 0 {
+        return;
+    }
+
+    let (dx0, dy0) = params.ctm.transform_point(params.x0, params.y0);
+    let (dx1, dy1) = params.ctm.transform_point(params.x1, params.y1);
+
+    let stops = build_gradient_stops(&params.color_stops);
+    if stops.is_empty() {
+        return;
+    }
+
+    let start = tiny_skia::Point::from_xy(
+        (dx0 as f32 - vp_x) * scale_x,
+        (dy0 as f32 - vp_y) * scale_y,
+    );
+    let end = tiny_skia::Point::from_xy(
+        (dx1 as f32 - vp_x) * scale_x,
+        (dy1 as f32 - vp_y) * scale_y,
+    );
+
+    let Some(gradient) = tiny_skia::LinearGradient::new(
+        start,
+        end,
+        stops,
+        tiny_skia::SpreadMode::Pad,
+        Transform::identity(),
+    ) else {
+        return;
+    };
+
+    let paint = Paint {
+        shader: gradient,
+        anti_alias: true,
+        ..Paint::default()
+    };
+
+    // Build fill rect from BBox (transformed to viewport coords) or full pixmap
+    let (rx_min, ry_min, rx_max, ry_max) = if let Some(bbox) = &params.bbox {
+        let corners = [
+            params.ctm.transform_point(bbox[0], bbox[1]),
+            params.ctm.transform_point(bbox[2], bbox[1]),
+            params.ctm.transform_point(bbox[0], bbox[3]),
+            params.ctm.transform_point(bbox[2], bbox[3]),
+        ];
+        let x_min = corners.iter().map(|c| c.0).fold(f64::INFINITY, f64::min);
+        let y_min = corners.iter().map(|c| c.1).fold(f64::INFINITY, f64::min);
+        let x_max = corners.iter().map(|c| c.0).fold(f64::NEG_INFINITY, f64::max);
+        let y_max = corners.iter().map(|c| c.1).fold(f64::NEG_INFINITY, f64::max);
+        (
+            ((x_min as f32 - vp_x) * scale_x).max(0.0),
+            ((y_min as f32 - vp_y) * scale_y).max(0.0),
+            ((x_max as f32 - vp_x) * scale_x).min(pw as f32),
+            ((y_max as f32 - vp_y) * scale_y).min(ph as f32),
+        )
+    } else {
+        (0.0, 0.0, pw as f32, ph as f32)
+    };
+
+    if rx_max <= rx_min || ry_max <= ry_min {
+        return;
+    }
+
+    let rect =
+        tiny_skia::Rect::from_ltrb(rx_min, ry_min, rx_max, ry_max).unwrap_or(tiny_skia::Rect::from_xywh(0.0, 0.0, 1.0, 1.0).unwrap());
+    pixmap.fill_rect(rect, &paint, Transform::identity(), clip_mask);
+}
+
+/// Render a radial shading into viewport-local coordinates.
+fn render_radial_shading_viewport(
+    pixmap: &mut Pixmap,
+    params: &RadialShadingParams,
+    vp_x: f32,
+    vp_y: f32,
+    scale_x: f32,
+    scale_y: f32,
+    clip_mask: Option<&Mask>,
+) {
+    let pw = pixmap.width();
+    let ph = pixmap.height();
+    if params.color_stops.is_empty() || pw == 0 || ph == 0 {
+        return;
+    }
+
+    let Some(inv_ctm) = params.ctm.invert() else {
+        return;
+    };
+
+    let (px_min, py_min, px_max, py_max) = if let Some(bbox) = &params.bbox {
+        let corners = [
+            params.ctm.transform_point(bbox[0], bbox[1]),
+            params.ctm.transform_point(bbox[2], bbox[1]),
+            params.ctm.transform_point(bbox[0], bbox[3]),
+            params.ctm.transform_point(bbox[2], bbox[3]),
+        ];
+        let x_min = corners.iter().map(|c| c.0 as f32).fold(f32::INFINITY, f32::min);
+        let y_min = corners.iter().map(|c| c.1 as f32).fold(f32::INFINITY, f32::min);
+        let x_max = corners.iter().map(|c| c.0 as f32).fold(f32::NEG_INFINITY, f32::max);
+        let y_max = corners.iter().map(|c| c.1 as f32).fold(f32::NEG_INFINITY, f32::max);
+        (
+            ((x_min - vp_x) * scale_x).max(0.0) as u32,
+            ((y_min - vp_y) * scale_y).max(0.0) as u32,
+            (((x_max - vp_x) * scale_x).ceil() as u32).min(pw),
+            (((y_max - vp_y) * scale_y).ceil() as u32).min(ph),
+        )
+    } else {
+        (0, 0, pw, ph)
+    };
+
+    let inv_sx = 1.0 / scale_x as f64;
+    let inv_sy = 1.0 / scale_y as f64;
+
+    let data = pixmap.data_mut();
+    let stride = pw as usize * 4;
+
+    for py in py_min..py_max {
+        // Map viewport pixel back to device space
+        let dev_y = py as f64 * inv_sy + vp_y as f64;
+        for px in px_min..px_max {
+            let dev_x = px as f64 * inv_sx + vp_x as f64;
+
+            let (ux, uy) = inv_ctm.transform_point(dev_x, dev_y);
+
+            let t = solve_radial_t(
+                ux, uy, params.x0, params.y0, params.r0, params.x1, params.y1, params.r1,
+            );
+            if let Some(t) = t {
+                if t < 0.0 && !params.extend_start {
+                    continue;
+                }
+                if t > 1.0 && !params.extend_end {
+                    continue;
+                }
+                let clamped = t.clamp(0.0, 1.0);
+                let color = interpolate_color_stops(&params.color_stops, clamped);
+
+                if let Some(mask) = clip_mask {
+                    let mask_val = mask.data()[py as usize * pw as usize + px as usize];
+                    if mask_val == 0 {
+                        continue;
+                    }
+                }
+
+                let offset = py as usize * stride + px as usize * 4;
+                data[offset] = (color.r * 255.0).round().clamp(0.0, 255.0) as u8;
+                data[offset + 1] = (color.g * 255.0).round().clamp(0.0, 255.0) as u8;
+                data[offset + 2] = (color.b * 255.0).round().clamp(0.0, 255.0) as u8;
+                data[offset + 3] = 255;
+            }
+        }
+    }
+}
+
+/// Render a Gouraud-shaded triangle mesh into viewport-local coordinates.
+fn render_mesh_shading_viewport(
+    pixmap: &mut Pixmap,
+    params: &MeshShadingParams,
+    vp_x: f32,
+    vp_y: f32,
+    scale_x: f32,
+    scale_y: f32,
+    clip_mask: Option<&Mask>,
+) {
+    let pw = pixmap.width() as usize;
+    let ph = pixmap.height() as usize;
+    if pw == 0 || ph == 0 {
+        return;
+    }
+    let data = pixmap.data_mut();
+    let stride = pw * 4;
+
+    for tri in &params.triangles {
+        let (dx0, dy0) = params.ctm.transform_point(tri.v0.x, tri.v0.y);
+        let (dx1, dy1) = params.ctm.transform_point(tri.v1.x, tri.v1.y);
+        let (dx2, dy2) = params.ctm.transform_point(tri.v2.x, tri.v2.y);
+
+        // Map to viewport pixels
+        let x0 = (dx0 as f32 - vp_x) * scale_x;
+        let y0 = (dy0 as f32 - vp_y) * scale_y;
+        let x1 = (dx1 as f32 - vp_x) * scale_x;
+        let y1 = (dy1 as f32 - vp_y) * scale_y;
+        let x2 = (dx2 as f32 - vp_x) * scale_x;
+        let y2 = (dy2 as f32 - vp_y) * scale_y;
+
+        let min_x = (x0.min(x1).min(x2).floor().max(0.0)) as usize;
+        let max_x = (x0.max(x1).max(x2).ceil() as usize).min(pw);
+        let min_y = (y0.min(y1).min(y2).floor().max(0.0)) as usize;
+        let max_y = (y0.max(y1).max(y2).ceil() as usize).min(ph);
+
+        if min_x >= max_x || min_y >= max_y {
+            continue;
+        }
+
+        let x0 = x0 as f64;
+        let y0 = y0 as f64;
+        let x1 = x1 as f64;
+        let y1 = y1 as f64;
+        let x2 = x2 as f64;
+        let y2 = y2 as f64;
+        let denom = (y1 - y2) * (x0 - x2) + (x2 - x1) * (y0 - y2);
+        if denom.abs() < 1e-10 {
+            continue;
+        }
+        let inv_denom = 1.0 / denom;
+
+        for py in min_y..max_y {
+            for px in min_x..max_x {
+                let pxf = px as f64 + 0.5;
+                let pyf = py as f64 + 0.5;
+
+                let w0 = ((y1 - y2) * (pxf - x2) + (x2 - x1) * (pyf - y2)) * inv_denom;
+                let w1 = ((y2 - y0) * (pxf - x2) + (x0 - x2) * (pyf - y2)) * inv_denom;
+                let w2 = 1.0 - w0 - w1;
+
+                if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
+                    continue;
+                }
+
+                if let Some(mask) = clip_mask {
+                    let mask_val = mask.data()[py * pw + px];
+                    if mask_val == 0 {
+                        continue;
+                    }
+                }
+
+                let r = w0 * tri.v0.color.r + w1 * tri.v1.color.r + w2 * tri.v2.color.r;
+                let g = w0 * tri.v0.color.g + w1 * tri.v1.color.g + w2 * tri.v2.color.g;
+                let b = w0 * tri.v0.color.b + w1 * tri.v1.color.b + w2 * tri.v2.color.b;
+
+                let offset = py * stride + px * 4;
+                data[offset] = (r * 255.0).round().clamp(0.0, 255.0) as u8;
+                data[offset + 1] = (g * 255.0).round().clamp(0.0, 255.0) as u8;
+                data[offset + 2] = (b * 255.0).round().clamp(0.0, 255.0) as u8;
+                data[offset + 3] = 255;
+            }
+        }
+    }
+}
+
+/// Render a patch mesh into viewport-local coordinates.
+fn render_patch_shading_viewport(
+    pixmap: &mut Pixmap,
+    params: &PatchShadingParams,
+    vp_x: f32,
+    vp_y: f32,
+    scale_x: f32,
+    scale_y: f32,
+    clip_mask: Option<&Mask>,
+) {
+    let mut triangles = Vec::new();
+    for patch in &params.patches {
+        if patch.points.len() >= 12 {
+            subdivide_patch_to_triangles(patch, &mut triangles);
+        }
+    }
+    if !triangles.is_empty() {
+        let mesh_params = MeshShadingParams {
+            triangles,
+            ctm: params.ctm,
+            bbox: params.bbox,
+        };
+        render_mesh_shading_viewport(pixmap, &mesh_params, vp_x, vp_y, scale_x, scale_y, clip_mask);
+    }
 }
 
 #[cfg(test)]

@@ -13,12 +13,12 @@
             <span id="filename" class="filename"></span>
         </div>
         <div class="header-right">
-            <select id="dpi-select" title="Resolution">
-                <option value="72">72 DPI</option>
-                <option value="150" selected>150 DPI</option>
-                <option value="300">300 DPI</option>
-                <option value="600">600 DPI</option>
-            </select>
+            <div class="zoom-controls">
+                <button id="zoom-out" title="Zoom out">&minus;</button>
+                <span id="zoom-level">Fit</span>
+                <button id="zoom-in" title="Zoom in">+</button>
+                <button id="zoom-fit" title="Fit to view">Fit</button>
+            </div>
             <div id="page-nav" class="page-nav hidden">
                 <button id="prev-page" title="Previous page">&lt;</button>
                 <span id="page-info">1 / 1</span>
@@ -39,6 +39,11 @@
 
         <div id="canvas-container" class="canvas-container hidden">
             <canvas id="canvas"></canvas>
+        </div>
+
+        <div id="minimap" class="minimap hidden">
+            <canvas id="minimap-canvas"></canvas>
+            <div id="minimap-viewport"></div>
         </div>
 
         <div id="loading" class="loading hidden">

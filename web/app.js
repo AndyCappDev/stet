@@ -1,11 +1,28 @@
-console.log('stet-web v6');
+console.log('stet-web v7 — viewport rendering');
 
-let pages = [];
-let pageCount = 0;
-let currentPage = 0;
+// --- State ---
+let workerReady = false;
 let currentFileName = '';
 let currentPsData = null;
-let workerReady = false;
+
+// Per-document state
+let pageCount = 0;
+let pageDims = [];     // [{width, height}] in device pixels at reference DPI
+let referenceDpi = 150;
+let currentPage = 0;
+
+// Zoom/pan state
+let zoom = 1.0;        // 1.0 = fit-to-viewport
+let panX = 0;          // pan offset in CSS pixels
+let panY = 0;
+let fitScale = 1;      // computed scale for fit mode
+let fitMode = true;
+
+// Render request tracking
+let nextRequestId = 0;
+let pendingRequestId = null;
+let pendingThumbnailId = null;
+let renderDebounceTimer = null;
 
 const $ = id => document.getElementById(id);
 const dropZone = $('drop-zone');
@@ -15,17 +32,20 @@ const canvas = $('canvas');
 const loading = $('loading');
 const statusEl = $('status');
 const filenameEl = $('filename');
-const dpiSelect = $('dpi-select');
 const pageNav = $('page-nav');
 const pageInfo = $('page-info');
 const prevBtn = $('prev-page');
 const nextBtn = $('next-page');
+const zoomInBtn = $('zoom-in');
+const zoomOutBtn = $('zoom-out');
+const zoomLevelEl = $('zoom-level');
+const minimap = $('minimap');
+const minimapCanvas = $('minimap-canvas');
+const minimapViewport = $('minimap-viewport');
 
 // --- Web Worker setup ---
 
 const worker = new Worker('./worker.js', { type: 'module' });
-
-let renderStart = 0;
 
 worker.onmessage = function(e) {
     const msg = e.data;
@@ -34,30 +54,13 @@ worker.onmessage = function(e) {
         workerReady = true;
         statusEl.textContent = 'Ready \u2014 drop a PostScript or EPS file';
 
-    } else if (msg.type === 'page') {
-        // Page streamed from worker during rendering
-        const rgba = new Uint8Array(msg.rgba);
-        pages[msg.index] = {
-            width: msg.width,
-            height: msg.height,
-            rgba: rgba
-        };
-        pageCount = msg.index + 1;
-
-        if (msg.index === 0) {
-            // First page — display immediately
-            currentPage = 0;
-            displayPage(0);
-            loading.classList.add('hidden');
-            canvasContainer.classList.remove('hidden');
-        }
-        updatePageNav();
-
-    } else if (msg.type === 'done') {
-        const elapsed = msg.elapsed;
+    } else if (msg.type === 'interpreted') {
+        // PS interpretation complete — display lists captured
         pageCount = msg.pageCount;
+        pageDims = msg.pages;
+        referenceDpi = msg.referenceDpi;
+
         loading.classList.add('hidden');
-        canvasContainer.classList.remove('hidden');
 
         if (pageCount === 0) {
             statusEl.textContent = 'No pages rendered';
@@ -66,6 +69,12 @@ worker.onmessage = function(e) {
             return;
         }
 
+        currentPage = 0;
+        fitMode = true;
+
+        canvasContainer.classList.remove('hidden');
+        canvasContainer.classList.remove('zoomed');
+
         if (pageCount > 1) {
             pageNav.classList.remove('hidden');
         } else {
@@ -73,15 +82,60 @@ worker.onmessage = function(e) {
         }
         updatePageNav();
 
-        const dpi = parseInt(dpiSelect.value, 10);
-        const p = pages[0];
-        if (p) {
-            const ptW = Math.round(p.width * 72 / dpi);
-            const ptH = Math.round(p.height * 72 / dpi);
-            statusEl.textContent =
-                `Rendered in ${(elapsed / 1000).toFixed(3)}s \u00b7 ` +
-                `${ptW}\u00d7${ptH} pt \u00b7 ${dpi} DPI \u00b7 ` +
-                `${pageCount} page${pageCount > 1 ? 's' : ''}`;
+        // Compute page size in points for status
+        const p = pageDims[0];
+        const ptW = Math.round(p.width * 72 / referenceDpi);
+        const ptH = Math.round(p.height * 72 / referenceDpi);
+        statusEl.textContent =
+            `Interpreted in ${(msg.elapsed / 1000).toFixed(3)}s \u00b7 ` +
+            `${ptW}\u00d7${ptH} pt \u00b7 ` +
+            `${pageCount} page${pageCount > 1 ? 's' : ''}`;
+
+        // Render the first page at fit-to-viewport resolution
+        requestViewportRender();
+
+    } else if (msg.type === 'viewport') {
+        if (msg.requestId === pendingThumbnailId) {
+            // Minimap thumbnail render complete
+            pendingThumbnailId = null;
+            const rgba = new Uint8Array(msg.rgba);
+            minimapThumbnail = document.createElement('canvas');
+            minimapThumbnail.width = msg.width;
+            minimapThumbnail.height = msg.height;
+            const tctx = minimapThumbnail.getContext('2d');
+            const imageData = new ImageData(
+                new Uint8ClampedArray(rgba.buffer),
+                msg.width, msg.height
+            );
+            tctx.putImageData(imageData, 0, 0);
+            updateMinimap();
+            return;
+        }
+
+        // Viewport render complete — only apply if it matches current request
+        if (msg.requestId !== pendingRequestId) return;
+        pendingRequestId = null;
+
+        const rgba = new Uint8Array(msg.rgba);
+        canvas.width = msg.width;
+        canvas.height = msg.height;
+        const ctx2d = canvas.getContext('2d');
+        const imageData = new ImageData(
+            new Uint8ClampedArray(rgba.buffer),
+            msg.width, msg.height
+        );
+        ctx2d.putImageData(imageData, 0, 0);
+
+        // Capture thumbnail for minimap on fit-mode renders
+        if (fitMode) captureThumbnail();
+
+        applyCanvasLayout();
+        updateMinimap();
+
+    } else if (msg.type === 'viewport_error') {
+        if (msg.requestId === pendingRequestId) {
+            pendingRequestId = null;
+            console.error('Viewport render error:', msg.message);
         }
 
     } else if (msg.type === 'error') {
@@ -117,40 +171,174 @@ function handleFile(file) {
 }
 
 function renderPS(data) {
-    const dpi = parseInt(dpiSelect.value, 10);
     loading.classList.remove('hidden');
     dropZone.classList.add('hidden');
     canvasContainer.classList.add('hidden');
     pageNav.classList.add('hidden');
-    statusEl.textContent = 'Rendering...';
+    statusEl.textContent = 'Interpreting...';
 
-    // Reset page state
-    pages = [];
+    // Reset state
     pageCount = 0;
+    pageDims = [];
     currentPage = 0;
+    fitMode = true;
+    zoom = 1.0;
+    panX = 0;
+    panY = 0;
 
     // Send data to worker (transfer the buffer for zero-copy)
     const buf = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
     worker.postMessage(
-        { type: 'render', buffer: buf, dpi, filename: currentFileName },
+        { type: 'render', buffer: buf, filename: currentFileName },
         [buf]
     );
 }
 
-// --- Page display ---
+// --- Viewport rendering ---
 
-function displayPage(index) {
-    const page = pages[index];
-    if (!page) return;
-    canvas.width = page.width;
-    canvas.height = page.height;
-    const ctx = canvas.getContext('2d');
-    const imageData = new ImageData(
-        new Uint8ClampedArray(page.rgba.buffer),
-        page.width, page.height
-    );
-    ctx.putImageData(imageData, 0, 0);
+function computeFitScale() {
+    const page = pageDims[currentPage];
+    if (!page) return 1;
+    const cw = canvasContainer.clientWidth - 48;
+    const ch = canvasContainer.clientHeight - 48;
+    return Math.min(cw / page.width, ch / page.height, 1);
 }
+
+function requestViewportRender() {
+    if (pageCount === 0) return;
+    const page = pageDims[currentPage];
+    if (!page) return;
+
+    fitScale = computeFitScale();
+    const effectiveScale = fitMode ? fitScale : zoom;
+
+    // Full rendered page size in CSS pixels
+    const fullW = page.width * effectiveScale;
+    const fullH = page.height * effectiveScale;
+
+    // Visible region in CSS pixels (from scroll position + container size)
+    const containerW = canvasContainer.clientWidth;
+    const containerH = canvasContainer.clientHeight;
+
+    let visX, visY, visW, visH;
+    if (fitMode || fullW <= containerW && fullH <= containerH) {
+        // Whole page fits — render it all
+        visX = 0;
+        visY = 0;
+        visW = fullW;
+        visH = fullH;
+    } else {
+        // Zoomed: compute visible rect from scroll position
+        // The canvas is inside padding, offset by the container's centering/padding
+        visX = canvasContainer.scrollLeft;
+        visY = canvasContainer.scrollTop;
+        visW = Math.min(containerW, fullW - visX);
+        visH = Math.min(containerH, fullH - visY);
+    }
+
+    // Convert visible CSS rect → device-space coordinates (at reference DPI)
+    const vpX = (visX / effectiveScale);
+    const vpY = (visY / effectiveScale);
+    const vpW = (visW / effectiveScale);
+    const vpH = (visH / effectiveScale);
+
+    // Output pixels = visible CSS size × devicePixelRatio for sharp rendering
+    const dpr = window.devicePixelRatio || 1;
+    const pixelW = Math.round(visW * dpr);
+    const pixelH = Math.round(visH * dpr);
+
+    if (pixelW <= 0 || pixelH <= 0) return;
+
+    // Cancel any pending debounce
+    if (renderDebounceTimer) {
+        clearTimeout(renderDebounceTimer);
+        renderDebounceTimer = null;
+    }
+
+    const requestId = nextRequestId++;
+    pendingRequestId = requestId;
+
+    worker.postMessage({
+        type: 'viewport',
+        pageIndex: currentPage,
+        vpX, vpY, vpW, vpH,
+        pixelW, pixelH,
+        requestId,
+    });
+}
+
+function requestViewportRenderDebounced() {
+    if (renderDebounceTimer) clearTimeout(renderDebounceTimer);
+    renderDebounceTimer = setTimeout(() => {
+        renderDebounceTimer = null;
+        requestViewportRender();
+    }, 150);
+}
+
+// --- Canvas layout ---
+
+function applyCanvasLayout() {
+    const page = pageDims[currentPage];
+    if (!page) return;
+
+    const effectiveScale = fitMode ? fitScale : zoom;
+    const fullW = page.width * effectiveScale;
+    const fullH = page.height * effectiveScale;
+    const containerW = canvasContainer.clientWidth;
+    const containerH = canvasContainer.clientHeight;
+    const isZoomed = !fitMode && (fullW > containerW || fullH > containerH);
+
+    if (isZoomed) {
+        canvasContainer.classList.add('zoomed');
+        // Canvas is viewport-sized, use CSS to display at the visible region size
+        const dpr = window.devicePixelRatio || 1;
+        const visW = Math.min(containerW, fullW - canvasContainer.scrollLeft);
+        const visH = Math.min(containerH, fullH - canvasContainer.scrollTop);
+        canvas.style.width = visW + 'px';
+        canvas.style.height = visH + 'px';
+
+        // Use a spacer to maintain the full scroll range
+        let spacer = document.getElementById('scroll-spacer');
+        if (!spacer) {
+            spacer = document.createElement('div');
+            spacer.id = 'scroll-spacer';
+            spacer.style.position = 'absolute';
+            spacer.style.top = '0';
+            spacer.style.left = '0';
+            spacer.style.pointerEvents = 'none';
+            canvasContainer.style.position = 'relative';
+            canvasContainer.insertBefore(spacer, canvas);
+        }
+        spacer.style.width = fullW + 'px';
+        spacer.style.height = fullH + 'px';
+
+        // Position canvas at current scroll offset
+        canvas.style.position = 'sticky';
+        canvas.style.top = '0';
+        canvas.style.left = '0';
+    } else {
+        canvasContainer.classList.remove('zoomed');
+        // Remove spacer if present
+        const spacer = document.getElementById('scroll-spacer');
+        if (spacer) spacer.remove();
+        canvas.style.position = '';
+        canvas.style.top = '';
+        canvas.style.left = '';
+
+        canvas.style.width = fullW + 'px';
+        canvas.style.height = fullH + 'px';
+    }
+
+    updateZoomLabel();
+}
+
+function updateZoomLabel() {
+    const effectiveScale = fitMode ? fitScale : zoom;
+    const renderDpi = Math.round(referenceDpi * effectiveScale);
+    zoomLevelEl.textContent = renderDpi + ' dpi';
+}
+
+// --- Page navigation ---
 
 function updatePageNav() {
     if (pageCount <= 1) {
@@ -163,28 +351,138 @@ function updatePageNav() {
     nextBtn.disabled = currentPage === pageCount - 1;
 }
 
-// --- Navigation ---
-
-prevBtn.addEventListener('click', () => {
-    if (currentPage > 0) {
-        currentPage--;
-        displayPage(currentPage);
-        updatePageNav();
+function goToPage(index) {
+    if (index < 0 || index >= pageCount || index === currentPage) return;
+    currentPage = index;
+    minimapThumbnail = null;
+    updatePageNav();
+    // Request a fit-mode thumbnail for the minimap, then re-render at current zoom
+    if (!fitMode) {
+        requestMinimapThumbnail();
     }
-});
+    requestViewportRender();
+}
 
-nextBtn.addEventListener('click', () => {
-    if (currentPage < pageCount - 1) {
-        currentPage++;
-        displayPage(currentPage);
-        updatePageNav();
+// --- Zoom ---
+
+// Zoom steps as DPI values: 150, 300, 600, 1200, 2400, 4800, 9600
+// Stored as scale factors relative to reference DPI (300)
+const ZOOM_STEPS = [0.5, 1, 2, 4, 8, 16, 32];
+
+// Get the device-space point at the center of the visible area
+function getViewCenter() {
+    const page = pageDims[currentPage];
+    if (!page) return { x: 0, y: 0 };
+    const oldScale = fitMode ? fitScale : zoom;
+    const cx = (canvasContainer.scrollLeft + canvasContainer.clientWidth / 2) / oldScale;
+    const cy = (canvasContainer.scrollTop + canvasContainer.clientHeight / 2) / oldScale;
+    return { x: cx, y: cy };
+}
+
+// Scroll so the given device-space point is at the center of the visible area
+function scrollToCenter(center) {
+    const newScale = fitMode ? fitScale : zoom;
+    canvasContainer.scrollLeft = center.x * newScale - canvasContainer.clientWidth / 2;
+    canvasContainer.scrollTop = center.y * newScale - canvasContainer.clientHeight / 2;
+}
+
+function zoomIn() {
+    if (pageCount === 0) return;
+    const center = getViewCenter();
+    const current = fitMode ? fitScale : zoom;
+    const next = ZOOM_STEPS.find(s => s > current + 0.01);
+    if (next !== undefined) {
+        zoom = next;
+        fitMode = false;
+        applyCanvasLayout();
+        scrollToCenter(center);
+        updateMinimap();
+        requestViewportRenderDebounced();
     }
+}
+
+function zoomOut() {
+    if (pageCount === 0) return;
+    const center = getViewCenter();
+    const current = fitMode ? fitScale : zoom;
+    let prev;
+    for (let i = ZOOM_STEPS.length - 1; i >= 0; i--) {
+        if (ZOOM_STEPS[i] < current - 0.01) {
+            prev = ZOOM_STEPS[i];
+            break;
+        }
+    }
+    if (prev !== undefined) {
+        zoom = prev;
+        fitMode = false;
+        applyCanvasLayout();
+        scrollToCenter(center);
+        updateMinimap();
+        requestViewportRenderDebounced();
+    }
+}
+
+function resetZoom() {
+    fitMode = true;
+    minimap.classList.add('hidden');
+    requestViewportRender();
+}
+
+// --- Event handlers ---
+
+zoomInBtn.addEventListener('click', zoomIn);
+zoomOutBtn.addEventListener('click', zoomOut);
+zoomLevelEl.addEventListener('click', resetZoom);
+$('zoom-fit').addEventListener('click', resetZoom);
+
+// Mouse wheel zoom on the canvas area
+canvasContainer.addEventListener('wheel', e => {
+    if (pageCount === 0) return;
+    e.preventDefault();
+    if (e.deltaY < 0) zoomIn();
+    else if (e.deltaY > 0) zoomOut();
+}, { passive: false });
+
+// Scroll → re-render visible viewport (debounced) + update minimap
+canvasContainer.addEventListener('scroll', () => {
+    if (pageCount === 0 || fitMode) return;
+    updateMinimap();
+    requestViewportRenderDebounced();
 });
 
-// DPI change re-renders
-dpiSelect.addEventListener('change', () => {
-    if (currentPsData) renderPS(currentPsData);
+// Click-drag panning when zoomed
+let isPanning = false;
+let panStartX = 0;
+let panStartY = 0;
+let scrollStartX = 0;
+let scrollStartY = 0;
+
+canvasContainer.addEventListener('mousedown', e => {
+    if (fitMode || pageCount === 0 || e.button !== 0) return;
+    isPanning = true;
+    panStartX = e.clientX;
+    panStartY = e.clientY;
+    scrollStartX = canvasContainer.scrollLeft;
+    scrollStartY = canvasContainer.scrollTop;
+    canvasContainer.classList.add('panning');
+    e.preventDefault();
 });
+
+window.addEventListener('mousemove', e => {
+    if (!isPanning) return;
+    canvasContainer.scrollLeft = scrollStartX - (e.clientX - panStartX);
+    canvasContainer.scrollTop = scrollStartY - (e.clientY - panStartY);
+});
+
+window.addEventListener('mouseup', () => {
+    if (!isPanning) return;
+    isPanning = false;
+    canvasContainer.classList.remove('panning');
+});
+
+// Page navigation
+prevBtn.addEventListener('click', () => goToPage(currentPage - 1));
+nextBtn.addEventListener('click', () => goToPage(currentPage + 1));
 
 // File input
 dropZone.addEventListener('click', () => fileInput.click());
@@ -218,16 +516,185 @@ document.addEventListener('drop', e => {
     if (e.dataTransfer.files.length > 0) handleFile(e.dataTransfer.files[0]);
 });
 
-// Keyboard navigation
+// Keyboard navigation and zoom
 document.addEventListener('keydown', e => {
     if (pageCount === 0) return;
     if (e.key === 'ArrowLeft' && currentPage > 0) {
-        currentPage--;
-        displayPage(currentPage);
-        updatePageNav();
+        goToPage(currentPage - 1);
     } else if (e.key === 'ArrowRight' && currentPage < pageCount - 1) {
-        currentPage++;
-        displayPage(currentPage);
-        updatePageNav();
+        goToPage(currentPage + 1);
+    } else if (e.key === '+' || e.key === '=') {
+        e.preventDefault();
+        zoomIn();
+    } else if (e.key === '-') {
+        e.preventDefault();
+        zoomOut();
+    } else if (e.key === '0') {
+        e.preventDefault();
+        resetZoom();
     }
+});
+
+// Resize handler — re-render at new fit scale
+window.addEventListener('resize', () => {
+    if (pageCount === 0) return;
+    if (fitMode) {
+        requestViewportRenderDebounced();
+    }
+});
+
+// --- Minimap ---
+
+let minimapScale = 1;   // ratio: minimap CSS pixels per device-space pixel
+
+function updateMinimap() {
+    const page = pageDims[currentPage];
+    if (!page) return;
+
+    const effectiveScale = fitMode ? fitScale : zoom;
+    const fullW = page.width * effectiveScale;
+    const fullH = page.height * effectiveScale;
+    const containerW = canvasContainer.clientWidth;
+    const containerH = canvasContainer.clientHeight;
+    const isZoomed = !fitMode && (fullW > containerW || fullH > containerH);
+
+    if (!isZoomed) {
+        minimap.classList.add('hidden');
+        return;
+    }
+
+    minimap.classList.remove('hidden');
+
+    // Size minimap canvas to fit in 200×260 box, maintaining aspect ratio
+    const maxW = 200, maxH = 260;
+    minimapScale = Math.min(maxW / fullW, maxH / fullH);
+    const mw = Math.round(fullW * minimapScale);
+    const mh = Math.round(fullH * minimapScale);
+    minimapCanvas.style.width = mw + 'px';
+    minimapCanvas.style.height = mh + 'px';
+
+    // Draw the fit-mode overview onto the minimap canvas
+    // Reuse the main canvas content scaled down, or render a tiny version
+    // For now, copy the initial fit render if available, or draw a grey rect
+    minimapCanvas.width = mw;
+    minimapCanvas.height = mh;
+    const mctx = minimapCanvas.getContext('2d');
+    mctx.fillStyle = '#fff';
+    mctx.fillRect(0, 0, mw, mh);
+
+    // If we have a cached thumbnail, draw it
+    if (minimapThumbnail) {
+        mctx.drawImage(minimapThumbnail, 0, 0, mw, mh);
+    }
+
+    // Position the viewport rectangle
+    const scrollX = canvasContainer.scrollLeft;
+    const scrollY = canvasContainer.scrollTop;
+    const vpLeft = scrollX * minimapScale;
+    const vpTop = scrollY * minimapScale;
+    const vpW = Math.min(containerW, fullW) * minimapScale;
+    const vpH = Math.min(containerH, fullH) * minimapScale;
+
+    // +4px for minimap padding
+    minimapViewport.style.left = (vpLeft + 4) + 'px';
+    minimapViewport.style.top = (vpTop + 4) + 'px';
+    minimapViewport.style.width = vpW + 'px';
+    minimapViewport.style.height = vpH + 'px';
+}
+
+// Cache a thumbnail of the page for the minimap
+let minimapThumbnail = null;
+
+function requestMinimapThumbnail() {
+    const page = pageDims[currentPage];
+    if (!page) return;
+    // Render the full page at a small size for the thumbnail
+    const thumbScale = Math.min(200 / page.width, 260 / page.height, 1);
+    const pixelW = Math.round(page.width * thumbScale);
+    const pixelH = Math.round(page.height * thumbScale);
+    if (pixelW <= 0 || pixelH <= 0) return;
+
+    const requestId = nextRequestId++;
+    pendingThumbnailId = requestId;
+
+    worker.postMessage({
+        type: 'viewport',
+        pageIndex: currentPage,
+        vpX: 0, vpY: 0,
+        vpW: page.width, vpH: page.height,
+        pixelW, pixelH,
+        requestId,
+    });
+}
+
+function captureThumbnail() {
+    // Capture current canvas as thumbnail when in fit mode or on first render
+    if (canvas.width > 0 && canvas.height > 0) {
+        minimapThumbnail = document.createElement('canvas');
+        minimapThumbnail.width = canvas.width;
+        minimapThumbnail.height = canvas.height;
+        minimapThumbnail.getContext('2d').drawImage(canvas, 0, 0);
+    }
+}
+
+// Minimap drag interaction
+let isMinimapDragging = false;
+
+minimapViewport.addEventListener('mousedown', e => {
+    isMinimapDragging = true;
+    e.preventDefault();
+    e.stopPropagation();
+});
+
+window.addEventListener('mousemove', e => {
+    if (!isMinimapDragging) return;
+    const rect = minimapCanvas.getBoundingClientRect();
+    const page = pageDims[currentPage];
+    if (!page) return;
+
+    const effectiveScale = fitMode ? fitScale : zoom;
+    const fullW = page.width * effectiveScale;
+    const fullH = page.height * effectiveScale;
+    const containerW = canvasContainer.clientWidth;
+    const containerH = canvasContainer.clientHeight;
+
+    // Mouse position relative to minimap canvas center of viewport
+    const vpW = Math.min(containerW, fullW) * minimapScale;
+    const vpH = Math.min(containerH, fullH) * minimapScale;
+    const mx = e.clientX - rect.left - vpW / 2;
+    const my = e.clientY - rect.top - vpH / 2;
+
+    // Convert minimap coords to scroll position
+    canvasContainer.scrollLeft = mx / minimapScale;
+    canvasContainer.scrollTop = my / minimapScale;
+});
+
+window.addEventListener('mouseup', () => {
+    isMinimapDragging = false;
+});
+
+// Click on minimap background to jump
+minimapCanvas.addEventListener('mousedown', e => {
+    const rect = minimapCanvas.getBoundingClientRect();
+    const page = pageDims[currentPage];
+    if (!page) return;
+
+    const effectiveScale = fitMode ? fitScale : zoom;
+    const fullW = page.width * effectiveScale;
+    const fullH = page.height * effectiveScale;
+    const containerW = canvasContainer.clientWidth;
+    const containerH = canvasContainer.clientHeight;
+
+    const vpW = Math.min(containerW, fullW) * minimapScale;
+    const vpH = Math.min(containerH, fullH) * minimapScale;
+    const mx = e.clientX - rect.left - vpW / 2;
+    const my = e.clientY - rect.top - vpH / 2;
+
+    canvasContainer.scrollLeft = mx / minimapScale;
+    canvasContainer.scrollTop = my / minimapScale;
+
+    // Start dragging immediately
+    isMinimapDragging = true;
+    e.preventDefault();
+    e.stopPropagation();
 });

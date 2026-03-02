@@ -160,6 +160,9 @@ pub struct Context {
     pub gstate_stack: Vec<GraphicsState>,
     pub device: Option<Box<dyn OutputDevice>>,
     pub display_list: DisplayList,
+    /// When `Some`, each showpage clones the display list here before consuming it.
+    /// Used by the WASM frontend to retain display lists for viewport re-rendering.
+    pub capture_display_lists: Option<Vec<DisplayList>>,
     pub page_width: u32,
     pub page_height: u32,
     pub output_path: Option<String>,
@@ -497,6 +500,7 @@ impl Context {
             gstate_stack: Vec::new(),
             device: None,
             display_list: DisplayList::new(),
+            capture_display_lists: None,
             page_width: 612,
             page_height: 792,
             output_path: None,
@@ -642,6 +646,17 @@ impl Context {
     /// Get a mutable loop state by EntityId.
     pub fn get_loop_mut(&mut self, entity: EntityId) -> &mut LoopState {
         &mut self.loops[entity.0 as usize]
+    }
+
+    /// Take the display list, optionally capturing a clone for viewport re-rendering.
+    ///
+    /// This replaces `std::mem::take(&mut ctx.display_list)` at showpage/copypage
+    /// call sites. When `capture_display_lists` is active, a clone is saved.
+    pub fn take_display_list(&mut self) -> DisplayList {
+        if let Some(ref mut captures) = self.capture_display_lists {
+            captures.push(self.display_list.clone());
+        }
+        std::mem::take(&mut self.display_list)
     }
 
     // --- VM save/restore ---

@@ -4,77 +4,111 @@
 
 //! In-memory page sink for WASM builds.
 //!
-//! Collects rendered RGBA pixels into a `Vec<PageData>` instead of writing
-//! to files or displaying in a window.
+//! When a streaming callback is registered, rendered bands are forwarded
+//! directly to JS without accumulating the full page in WASM memory.
+//! This is critical at high DPI where a single page can exceed 2 GB.
 
 use std::cell::RefCell;
 use std::sync::{Arc, Mutex};
 
 use stet_core::device::{PageSink, PageSinkFactory};
 
-fn log(msg: &str) {
-    web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(msg));
-}
-
-/// Callback invoked when a page finishes rendering (index, width, height, rgba).
-type PageCallback = Box<dyn Fn(u32, u32, u32, &[u8])>;
+/// Streaming callback events:
+///   event=0 (begin): index, width, height, data=empty
+///   event=1 (rows):  0, 0, 0, data=rgba_rows
+///   event=2 (end):   index, 0, 0, data=empty
+type SinkCallback = Box<dyn Fn(u32, u32, u32, u32, &[u8])>;
 
 thread_local! {
-    static ON_PAGE_READY: RefCell<Option<PageCallback>> = RefCell::new(None);
+    static SINK_CALLBACK: RefCell<Option<SinkCallback>> = RefCell::new(None);
 }
 
-/// Set (or clear) the callback invoked after each page is rendered.
-pub fn set_page_ready_callback(cb: Option<PageCallback>) {
-    ON_PAGE_READY.with(|cell| {
+/// Set (or clear) the streaming callback.
+pub fn set_sink_callback(cb: Option<SinkCallback>) {
+    SINK_CALLBACK.with(|cell| {
         *cell.borrow_mut() = cb;
     });
 }
 
-/// Rendered page data: dimensions and RGBA pixel buffer.
+/// Rendered page data: dimensions (and optionally RGBA pixel buffer).
 pub struct PageData {
     pub width: u32,
     pub height: u32,
+    /// RGBA pixels — populated in non-streaming mode, empty in streaming mode.
+    /// May be unused when only page dimensions are needed (viewport rendering).
+    #[allow(dead_code)]
     pub rgba: Vec<u8>,
 }
 
 /// In-memory page sink that accumulates RGBA pixel data.
+///
+/// When a streaming callback is active, bands are forwarded directly
+/// and no RGBA data is accumulated locally.
 pub struct MemorySink {
     pages: Arc<Mutex<Vec<PageData>>>,
     current_width: u32,
     current_height: u32,
     current_page: Vec<u8>,
+    streaming: bool,
 }
 
 impl PageSink for MemorySink {
     fn begin_page(&mut self, width: u32, height: u32) -> Result<(), String> {
-        log(&format!("MemorySink::begin_page({}x{})", width, height));
         self.current_width = width;
         self.current_height = height;
-        self.current_page.clear();
-        self.current_page
-            .reserve(width as usize * height as usize * 4);
+
+        // Check if streaming callback is active
+        self.streaming = SINK_CALLBACK.with(|cell| cell.borrow().is_some());
+
+        if self.streaming {
+            let index = self.pages.lock().map(|g| g.len() as u32).unwrap_or(0);
+            SINK_CALLBACK.with(|cell| {
+                if let Some(ref cb) = *cell.borrow() {
+                    cb(0, index, width, height, &[]);
+                }
+            });
+        } else {
+            self.current_page.clear();
+            self.current_page
+                .reserve(width as usize * height as usize * 4);
+        }
         Ok(())
     }
 
     fn write_rows(&mut self, rgba_rows: &[u8], _num_rows: u32) -> Result<(), String> {
-        self.current_page.extend_from_slice(rgba_rows);
+        if self.streaming {
+            SINK_CALLBACK.with(|cell| {
+                if let Some(ref cb) = *cell.borrow() {
+                    cb(1, 0, 0, 0, rgba_rows);
+                }
+            });
+        } else {
+            self.current_page.extend_from_slice(rgba_rows);
+        }
         Ok(())
     }
 
     fn end_page(&mut self) -> Result<(), String> {
         let index = self.pages.lock().map(|g| g.len() as u32).unwrap_or(0);
 
-        // Notify JS callback (if set) so it can display the page immediately
-        ON_PAGE_READY.with(|cell| {
-            if let Some(ref cb) = *cell.borrow() {
-                cb(index, self.current_width, self.current_height, &self.current_page);
-            }
-        });
+        if self.streaming {
+            SINK_CALLBACK.with(|cell| {
+                if let Some(ref cb) = *cell.borrow() {
+                    cb(2, index, 0, 0, &[]);
+                }
+            });
+        }
+
+        let rgba = if self.streaming {
+            Vec::new()
+        } else {
+            std::mem::take(&mut self.current_page)
+        };
 
         let page = PageData {
             width: self.current_width,
             height: self.current_height,
-            rgba: std::mem::take(&mut self.current_page),
+            rgba,
         };
         self.pages
             .lock()
@@ -108,12 +142,12 @@ impl MemorySinkFactory {
 
 impl PageSinkFactory for MemorySinkFactory {
     fn create_sink(&self, _output_path: &str) -> Result<Box<dyn PageSink>, String> {
-        log("MemorySinkFactory::create_sink() called");
         Ok(Box::new(MemorySink {
             pages: Arc::clone(&self.pages),
             current_width: 0,
             current_height: 0,
             current_page: Vec::new(),
+            streaming: false,
         }))
     }
 }
