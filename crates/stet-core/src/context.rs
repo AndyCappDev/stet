@@ -167,6 +167,11 @@ pub struct Context {
     /// Used by the WASM frontend to retain display lists for viewport re-rendering.
     /// Each entry is (DisplayList, dpi) where dpi is from the pagedevice HWResolution.
     pub capture_display_lists: Option<Vec<(DisplayList, f64)>>,
+    /// When `Some`, each showpage sends a clone of the display list through this channel.
+    /// Used by the CLI viewer for incremental display list delivery.
+    /// Tuple: (DisplayList, dpi, page_width, page_height).
+    pub display_list_sender:
+        Option<std::sync::mpsc::Sender<(DisplayList, f64, u32, u32)>>,
     pub page_width: u32,
     pub page_height: u32,
     pub output_path: Option<String>,
@@ -506,6 +511,7 @@ impl Context {
             device: None,
             display_list: DisplayList::new(),
             capture_display_lists: None,
+            display_list_sender: None,
             page_width: 612,
             page_height: 792,
             output_path: None,
@@ -664,6 +670,17 @@ impl Context {
             if let Some(ref mut captures) = self.capture_display_lists {
                 captures.push((self.display_list.clone(), dpi));
             }
+        }
+        if let Some(ref sender) = self.display_list_sender {
+            let dpi = self.current_page_dpi();
+            // Use the device's actual page size (device pixels), not
+            // self.page_width/page_height which are point values.
+            let (w, h) = self
+                .device
+                .as_ref()
+                .map(|d| d.page_size())
+                .unwrap_or((self.page_width, self.page_height));
+            let _ = sender.send((self.display_list.clone(), dpi, w, h));
         }
         std::mem::take(&mut self.display_list)
     }

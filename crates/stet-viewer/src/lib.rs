@@ -4,22 +4,26 @@
 
 //! Interactive egui viewer for the stet PostScript interpreter.
 //!
-//! Displays rendered pages in a window with zoom, pan, and page navigation.
-//! The interpreter sends rendered pages via channels; the viewer blocks the
-//! interpreter at each showpage until the user advances.
+//! Displays rendered PostScript pages in a window with zoom, pan, and page
+//! navigation. The interpreter sends display lists via channels; the viewer
+//! renders visible viewport regions on demand via `render_region()`.
 
-mod sink;
 mod viewer;
 
 use std::sync::mpsc;
 
-pub use sink::ViewerSinkFactory;
+use stet_core::display_list::DisplayList;
 
-/// A rendered page image ready for display.
-pub struct PageImage {
+/// Raw display list tuple sent by Context at each showpage:
+/// (DisplayList, dpi, page_width, page_height).
+pub type DisplayListMsg = (DisplayList, f64, u32, u32);
+
+/// A page ready for display, carrying its resolution-independent display list.
+pub struct PageReady {
+    pub display_list: DisplayList,
     pub width: u32,
     pub height: u32,
-    pub rgba_data: Vec<u8>,
+    pub dpi: f64,
     pub page_num: u32,
 }
 
@@ -34,40 +38,45 @@ pub enum ScreenInfo {
 
 /// Interpreter-side channel endpoints.
 pub struct InterpreterEnd {
-    pub page_sender: mpsc::SyncSender<PageImage>,
-    pub continue_receiver: mpsc::Receiver<()>,
+    /// Receives raw display list tuples from Context's display_list_sender.
+    pub dl_receiver: mpsc::Receiver<DisplayListMsg>,
+    /// Sends wrapped PageReady to the viewer.
+    pub page_sender: mpsc::Sender<PageReady>,
     /// Receives screen info from the viewer for DPI calculation.
     pub screen_info_receiver: mpsc::Receiver<ScreenInfo>,
 }
 
 /// Viewer-side channel endpoints.
 pub struct ViewerEnd {
-    pub page_receiver: mpsc::Receiver<PageImage>,
-    pub continue_sender: mpsc::Sender<()>,
+    pub page_receiver: mpsc::Receiver<PageReady>,
     /// Sends screen info to the interpreter.
     pub screen_info_sender: mpsc::SyncSender<ScreenInfo>,
 }
 
-/// Create matched channel pairs for interpreter ↔ viewer communication.
+/// Create matched channel pairs for interpreter <-> viewer communication.
 ///
-/// The page channel is bounded (capacity 1) to provide backpressure —
-/// the interpreter blocks if it gets more than 1 page ahead of the viewer.
-pub fn create_channels() -> (InterpreterEnd, ViewerEnd) {
-    let (page_tx, page_rx) = mpsc::sync_channel(1);
-    let (cont_tx, cont_rx) = mpsc::channel();
+/// Returns `(InterpreterEnd, ViewerEnd, dl_sender)` where `dl_sender` should
+/// be set on `Context.display_list_sender` for incremental delivery.
+pub fn create_channels() -> (InterpreterEnd, ViewerEnd, mpsc::Sender<DisplayListMsg>)
+{
+    // Display list pipe: unbounded (interpreter never blocks at showpage)
+    let (dl_tx, dl_rx) = mpsc::channel();
+    // Page pipe: unbounded (display lists are lightweight metadata)
+    let (page_tx, page_rx) = mpsc::channel();
+    // Screen info: bounded (single message)
     let (info_tx, info_rx) = mpsc::sync_channel(1);
 
     (
         InterpreterEnd {
+            dl_receiver: dl_rx,
             page_sender: page_tx,
-            continue_receiver: cont_rx,
             screen_info_receiver: info_rx,
         },
         ViewerEnd {
             page_receiver: page_rx,
-            continue_sender: cont_tx,
             screen_info_sender: info_tx,
         },
+        dl_tx,
     )
 }
 
@@ -96,12 +105,7 @@ pub fn run_viewer(viewer_end: ViewerEnd, dpi_override: Option<f64>, filename: Op
     };
 
     // Estimate the initial window size so the compositor (especially Wayland)
-    // places the window correctly from the start. We don't know the actual
-    // monitor dimensions yet, so overestimate based on 1440p — if the window
-    // is too large the compositor clamps it, and when the first page arrives
-    // the resize only SHRINKS (stays within bounds). Underestimating causes
-    // the resize to grow the window off-screen since Wayland compositors
-    // keep the top-left fixed on resize.
+    // places the window correctly from the start.
     let est_win_h = 1440.0 * 0.85;
     let init_h = est_win_h as f32;
     let init_w = init_h * (DEFAULT_PAGE_W / DEFAULT_PAGE_H) as f32;

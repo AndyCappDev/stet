@@ -144,11 +144,13 @@ fn run_png_mode(dpi: f64, file_args: Vec<String>) {
 
 /// Run in viewer mode — interpreter on background thread, viewer on main thread.
 ///
-/// `dpi_override`: if `Some`, use this DPI instead of auto-calculating from
-/// monitor size. When `None`, the viewer calculates DPI from monitor dimensions
-/// and sends it to the interpreter via a channel.
+/// The interpreter uses NullDevice (no rendering) and sends display lists to
+/// the viewer via channels. The viewer renders visible viewport regions on
+/// demand using `render_region()`.
 #[cfg(feature = "viewer")]
 fn run_viewer_mode(dpi_override: Option<f64>, file_args: Vec<String>) {
+    use stet_core::device::NullDevice;
+
     if file_args.is_empty() {
         // REPL mode — no viewer, just run interactively
         let mut ctx = create_context();
@@ -157,46 +159,55 @@ fn run_viewer_mode(dpi_override: Option<f64>, file_args: Vec<String>) {
         return;
     }
 
-    let (interp_end, viewer_end) = stet_viewer::create_channels();
-
-    // Extract screen info receiver before giving the rest to ViewerSinkFactory
-    let screen_info_receiver = interp_end.screen_info_receiver;
-    let factory =
-        stet_viewer::ViewerSinkFactory::new(interp_end.page_sender, interp_end.continue_receiver);
-
-    // Spawn interpreter on background thread (egui/winit requires main thread)
-    // Get a handle to the viewer wait time tracker so job timing
-    // can exclude time spent waiting for the user to advance pages.
-    let viewer_wait = factory.wait_time_tracker();
+    let (interp_end, viewer_end, dl_sender) = stet_viewer::create_channels();
     let first_file = file_args.first().cloned();
 
+    // Spawn relay thread: converts raw display list tuples from Context's
+    // sender into PageReady messages for the viewer. Runs concurrently with
+    // interpretation so pages appear in the viewer as they're produced.
+    let page_sender = interp_end.page_sender;
+    let dl_receiver = interp_end.dl_receiver;
+    std::thread::spawn(move || {
+        let mut page_num = 1u32;
+        while let Ok((dl, dpi, w, h)) = dl_receiver.recv() {
+            let _ = page_sender.send(stet_viewer::PageReady {
+                display_list: dl,
+                width: w,
+                height: h,
+                dpi,
+                page_num,
+            });
+            page_num += 1;
+        }
+        // dl_sender dropped (interpreter done) → loop ends → page_sender drops
+        // → viewer sees Disconnected
+    });
+
+    // Spawn interpreter thread
+    let screen_info_receiver = interp_end.screen_info_receiver;
     std::thread::spawn(move || {
         // Wait for the viewer to send screen info (monitor size or DPI override).
-        // This blocks until the viewer's first frame, which queries the monitor.
         let screen_info = match screen_info_receiver.recv() {
             Ok(info) => info,
-            Err(_) => {
-                // Viewer closed before sending info — nothing to do
-                return;
-            }
+            Err(_) => return, // Viewer closed before sending info
         };
 
         let mut ctx = create_context();
 
-        // Register device factory with viewer sink
-        let factory_clone = factory.clone();
-        ctx.device_factory = Some(Box::new(move |w, h| {
-            Box::new(SkiaDevice::with_sink_factory(
-                w,
-                h,
-                Box::new(factory_clone.clone()),
-            ))
+        // Set display_list_sender for incremental delivery at each showpage
+        ctx.display_list_sender = Some(dl_sender);
+
+        // NullDevice: no-op rendering — display list capture is the output
+        ctx.device_factory = Some(Box::new(|w, h| {
+            Box::new(NullDevice::new(w, h))
         }));
 
-        run_file_jobs_viewer(&mut ctx, screen_info, &file_args, &viewer_wait);
+        // Run jobs (non-blocking — no viewer wait time to track)
+        run_file_jobs_viewer(&mut ctx, screen_info, &file_args);
+        // ctx drops here → display_list_sender drops → relay thread ends
     });
 
-    // Main thread: run viewer (passes override so viewer knows whether to auto-calc)
+    // Main thread: run viewer
     stet_viewer::run_viewer(viewer_end, dpi_override, first_file.as_deref());
     std::process::exit(0);
 }
@@ -239,12 +250,14 @@ fn dpi_from_screen_info(screen_info: &stet_viewer::ScreenInfo, page_height_pts: 
 const DEFAULT_PAGE_HEIGHT_PTS: f64 = 792.0;
 
 /// Run file jobs in viewer mode, calculating DPI per-job based on actual page size.
+///
+/// Uses NullDevice — no rendering happens here. Display lists are sent to the
+/// viewer via `Context.display_list_sender` at each showpage.
 #[cfg(feature = "viewer")]
 fn run_file_jobs_viewer(
     ctx: &mut Context,
     screen_info: stet_viewer::ScreenInfo,
     file_args: &[String],
-    viewer_wait: &std::sync::Arc<std::sync::atomic::AtomicU64>,
 ) {
     let num_jobs = file_args.len();
 
@@ -265,7 +278,7 @@ fn run_file_jobs_viewer(
 
         let filename_lower = filename.to_ascii_lowercase();
 
-        // Derive output path: strip known extensions, add .png
+        // Derive output path (still needed for setpagedevice resource lookup)
         let output_base = filename
             .strip_suffix(".ps")
             .or_else(|| filename.strip_suffix(".PS"))
@@ -300,7 +313,6 @@ fn run_file_jobs_viewer(
         let dpi = dpi_from_screen_info(&screen_info, page_height);
 
         let job_start = std::time::Instant::now();
-        let wait_before = viewer_wait.load(std::sync::atomic::Ordering::Relaxed);
 
         let exec_result = if is_eps {
             run_eps_file(ctx, dpi, ps_data, "viewer")
@@ -311,17 +323,7 @@ fn run_file_jobs_viewer(
             parse_and_exec(ctx, ps_data)
         };
 
-        // Wait for any pipelined background render to complete before timing
-        if let Some(ref mut dev) = ctx.device
-            && let Err(e) = dev.finish()
-        {
-            eprintln!("render error: {}", e);
-        }
-
-        let wait_after = viewer_wait.load(std::sync::atomic::Ordering::Relaxed);
-        let viewer_wait_dur =
-            std::time::Duration::from_nanos(wait_after - wait_before);
-        let job_duration = job_start.elapsed() - viewer_wait_dur;
+        let job_duration = job_start.elapsed();
 
         match exec_result {
             Ok(()) => {
