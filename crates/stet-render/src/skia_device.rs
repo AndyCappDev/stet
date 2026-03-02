@@ -1199,49 +1199,40 @@ fn fill_adjust_path(path: &PsPath, adjust: f64) -> Option<PsPath> {
                 result.segments.push(PathSegment::ClosePath);
             }
         } else if w < adjust * 2.0 || h < adjust * 2.0 {
-            // Thin closed shape: expand the thin dimension
+            // Thin closed shape: scale proportionally from bbox center to
+            // ensure minimum 1px in each thin dimension. This preserves the
+            // shape (unlike the old binary left/right classification which
+            // collapsed all points to just 2 coordinates per axis).
             let cx = (x_min + x_max) * 0.5;
             let cy = (y_min + y_max) * 0.5;
-            let expand_x = if w < adjust * 2.0 {
-                let snapped_cx = cx.floor() + 0.5;
-                Some((snapped_cx, adjust))
+            let sx = if w > 1e-10 && w < adjust * 2.0 {
+                (adjust * 2.0) / w
             } else {
-                None
+                1.0
             };
-            let expand_y = if h < adjust * 2.0 {
-                let snapped_cy = cy.floor() + 0.5;
-                Some((snapped_cy, adjust))
+            let sy = if h > 1e-10 && h < adjust * 2.0 {
+                (adjust * 2.0) / h
             } else {
-                None
+                1.0
             };
 
             for seg in &segs[start..end] {
-                let adjust_point = |x: f64, y: f64| -> (f64, f64) {
-                    let ax = if let Some((center, half)) = expand_x {
-                        if x <= cx { center - half } else { center + half }
-                    } else {
-                        x
-                    };
-                    let ay = if let Some((center, half)) = expand_y {
-                        if y <= cy { center - half } else { center + half }
-                    } else {
-                        y
-                    };
-                    (ax, ay)
+                let scale_pt = |x: f64, y: f64| -> (f64, f64) {
+                    (cx + (x - cx) * sx, cy + (y - cy) * sy)
                 };
                 match seg {
                     PathSegment::MoveTo(x, y) => {
-                        let (ax, ay) = adjust_point(*x, *y);
+                        let (ax, ay) = scale_pt(*x, *y);
                         result.segments.push(PathSegment::MoveTo(ax, ay));
                     }
                     PathSegment::LineTo(x, y) => {
-                        let (ax, ay) = adjust_point(*x, *y);
+                        let (ax, ay) = scale_pt(*x, *y);
                         result.segments.push(PathSegment::LineTo(ax, ay));
                     }
                     PathSegment::CurveTo { x1, y1, x2, y2, x3, y3 } => {
-                        let (ax1, ay1) = adjust_point(*x1, *y1);
-                        let (ax2, ay2) = adjust_point(*x2, *y2);
-                        let (ax3, ay3) = adjust_point(*x3, *y3);
+                        let (ax1, ay1) = scale_pt(*x1, *y1);
+                        let (ax2, ay2) = scale_pt(*x2, *y2);
+                        let (ax3, ay3) = scale_pt(*x3, *y3);
                         result.segments.push(PathSegment::CurveTo {
                             x1: ax1, y1: ay1,
                             x2: ax2, y2: ay2,
