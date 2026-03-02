@@ -26,6 +26,9 @@ pub struct StrokeParams {
     pub miter_limit: f64,
     pub dash_pattern: DashPattern,
     pub ctm: Matrix,
+    /// When true, snap thin stroke coordinates to device pixel centers
+    /// for consistent line weight (PostScript `setstrokeadjust`).
+    pub stroke_adjust: bool,
 }
 
 /// Parameters for clipping.

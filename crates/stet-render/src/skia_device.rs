@@ -532,12 +532,19 @@ fn select_band_height(w: u32, h: u32) -> u32 {
 ///
 /// All returned Y values are in **device space** (pixel coordinates) so they can be
 /// compared directly against band boundaries.
-fn precompute_bboxes(list: &DisplayList) -> Vec<Option<YBBox>> {
+fn precompute_bboxes(list: &DisplayList, dpi: f64) -> Vec<Option<YBBox>> {
     list.elements()
         .iter()
         .map(|elem| match elem {
-            DisplayElement::Fill { path, .. } => path_y_bbox(path),
-            DisplayElement::Stroke { path, params } => stroke_device_y_bbox(path, params),
+            DisplayElement::Fill { path, .. } => path_y_bbox(path).map(|mut bbox| {
+                // Expand for fill adjust: thin/zero-area fills get expanded
+                // by ±0.5 device pixels at render time, so bboxes must account
+                // for that to avoid culling visible elements.
+                bbox.y_min -= 0.5;
+                bbox.y_max += 0.5;
+                bbox
+            }),
+            DisplayElement::Stroke { path, params } => stroke_device_y_bbox(path, params, dpi),
             DisplayElement::Image { params, .. } => image_y_bbox(params),
             DisplayElement::AxialShading { params } => {
                 shading_y_bbox_from_bbox(&params.bbox, &params.ctm)
@@ -591,15 +598,18 @@ fn shading_y_bbox_from_bbox(bbox: &Option<[f64; 4]>, ctm: &Matrix) -> Option<YBB
 /// `path_y_bbox` gives device-space bounds directly. Anisotropic strokes have
 /// paths in user space with the full CTM — we must transform the bounding box
 /// through the CTM to get device-space bounds.
-fn stroke_device_y_bbox(path: &PsPath, params: &StrokeParams) -> Option<YBBox> {
+fn stroke_device_y_bbox(path: &PsPath, params: &StrokeParams, dpi: f64) -> Option<YBBox> {
     let m = &params.ctm;
     let is_identity =
         m.a == 1.0 && m.b == 0.0 && m.c == 0.0 && m.d == 1.0 && m.tx == 0.0 && m.ty == 0.0;
 
+    // Use effective line width: actual width or hairline minimum, whichever is larger
+    let effective_lw = params.line_width.max(hairline_min_width(&params.ctm, dpi));
+
     if is_identity {
         // Path in device space — just read Y coords and expand for stroke width.
         return path_y_bbox(path).map(|mut bbox| {
-            let expand = params.line_width * params.miter_limit * 0.5;
+            let expand = effective_lw * params.miter_limit * 0.5;
             bbox.y_min -= expand;
             bbox.y_max += expand;
             bbox
@@ -656,7 +666,7 @@ fn stroke_device_y_bbox(path: &PsPath, params: &StrokeParams) -> Option<YBBox> {
     // Expand for stroke width + miter in device-space units.
     // ||[c,d]|| converts user-space line_width to device-space Y expansion.
     let col_y_len = (m.c * m.c + m.d * m.d).sqrt().max(1.0);
-    let expand = params.line_width * col_y_len * params.miter_limit * 0.5;
+    let expand = effective_lw * col_y_len * params.miter_limit * 0.5;
     dev_y_min -= expand;
     dev_y_max += expand;
 
@@ -993,18 +1003,23 @@ fn translate_clip_rect(rect: &ClipRect, y_start: u32, band_h: u32) -> ClipRect {
     }
 }
 
+/// Compute minimum line width for hairline strokes at a given DPI and CTM.
+/// Returns the minimum width in user-space units that ensures at least
+/// 0.5 device pixels at ≤150 DPI or 1.0 device pixel above 150 DPI.
+fn hairline_min_width(ctm: &Matrix, dpi: f64) -> f64 {
+    let (a, b, c, d) = (ctm.a, ctm.b, ctm.c, ctm.d);
+    let sum_sq = a * a + b * b + c * c + d * d;
+    let diff = ((a * a + b * b - c * c - d * d).powi(2) + 4.0 * (a * c + b * d).powi(2)).sqrt();
+    let s_max = (0.5 * (sum_sq + diff)).max(0.0).sqrt();
+    let min_px = if dpi <= 150.0 { 0.5 } else { 1.0 };
+    if s_max > 1e-10 { min_px / s_max } else { min_px }
+}
+
 /// Build a stroke with minimum line-width enforcement (shared by trait impl and band rendering).
 /// `dpi` is the device resolution, used to select the hairline minimum width:
 /// at ≤150 DPI use 0.6 device pixels; above 150 DPI use 1.0 device pixel.
 fn build_stroke(params: &StrokeParams, dpi: f64) -> Stroke {
-    let min_lw = {
-        let (a, b, c, d) = (params.ctm.a, params.ctm.b, params.ctm.c, params.ctm.d);
-        let sum_sq = a * a + b * b + c * c + d * d;
-        let diff = ((a * a + b * b - c * c - d * d).powi(2) + 4.0 * (a * c + b * d).powi(2)).sqrt();
-        let s_max = (0.5 * (sum_sq + diff)).max(0.0).sqrt();
-        let min_px = if dpi <= 150.0 { 0.5 } else { 1.0 };
-        if s_max > 1e-10 { min_px / s_max } else { min_px }
-    };
+    let min_lw = hairline_min_width(&params.ctm, dpi);
     let mut stroke = Stroke {
         width: (params.line_width as f32).max(min_lw as f32),
         line_cap: to_line_cap(params.line_cap),
@@ -1026,6 +1041,422 @@ fn build_stroke(params: &StrokeParams, dpi: f64) -> Stroke {
     stroke
 }
 
+/// Apply fill adjust: expand zero-area and very thin fill subpaths so they
+/// produce at least 1 device pixel of visible output.
+///
+/// GhostScript calls this "fill adjust" (FilladjustX/Y). For each subpath:
+/// - If it's a single line segment (zero enclosed area), expand into a thin
+///   rectangle perpendicular to the line direction (0.5px each side).
+/// - If it's a closed shape thinner than 1px in either dimension, expand the
+///   thin dimension to ensure minimum 1px coverage.
+///
+/// `adjust` is the expansion amount in device pixels (typically 0.5).
+fn fill_adjust_path(path: &PsPath, adjust: f64) -> Option<PsPath> {
+    // Split into subpaths and check each one
+    let mut subpaths: Vec<(usize, usize)> = Vec::new(); // (start, end) indices
+    let mut current_start = 0;
+    let segs = &path.segments;
+
+    for (i, seg) in segs.iter().enumerate() {
+        if let PathSegment::MoveTo(_, _) = seg {
+            if i > current_start {
+                subpaths.push((current_start, i));
+            }
+            current_start = i;
+        }
+    }
+    if current_start < segs.len() {
+        subpaths.push((current_start, segs.len()));
+    }
+
+    // Helper: check if a subpath is a zero-area line (all points collinear)
+    let is_zero_area_line = |points: &[(f64, f64)]| -> bool {
+        if points.len() <= 2 {
+            return points.len() == 2;
+        }
+        // Check collinearity: all points on the line from first to last
+        let (x0, y0) = points[0];
+        let (x1, y1) = *points.last().unwrap();
+        let dx = x1 - x0;
+        let dy = y1 - y0;
+        let len_sq = dx * dx + dy * dy;
+        if len_sq < 1e-10 {
+            return true; // All same point
+        }
+        // Check cross product of each point relative to the line
+        for &(px, py) in &points[1..points.len() - 1] {
+            let cross = (px - x0) * dy - (py - y0) * dx;
+            if cross.abs() > len_sq.sqrt() * 0.5 {
+                return false; // Point is > 0.5px from the line
+            }
+        }
+        true
+    };
+
+    // First pass: check if any subpath needs adjustment
+    let mut needs_adjust = false;
+    for &(start, end) in &subpaths {
+        let mut points: Vec<(f64, f64)> = Vec::new();
+        let (mut x_min, mut x_max) = (f64::INFINITY, f64::NEG_INFINITY);
+        let (mut y_min, mut y_max) = (f64::INFINITY, f64::NEG_INFINITY);
+        for seg in &segs[start..end] {
+            match seg {
+                PathSegment::MoveTo(x, y) | PathSegment::LineTo(x, y) => {
+                    points.push((*x, *y));
+                    x_min = x_min.min(*x);
+                    x_max = x_max.max(*x);
+                    y_min = y_min.min(*y);
+                    y_max = y_max.max(*y);
+                }
+                PathSegment::CurveTo { x1, y1, x2, y2, x3, y3 } => {
+                    points.push((*x3, *y3));
+                    x_min = x_min.min(*x1).min(*x2).min(*x3);
+                    x_max = x_max.max(*x1).max(*x2).max(*x3);
+                    y_min = y_min.min(*y1).min(*y2).min(*y3);
+                    y_max = y_max.max(*y1).max(*y2).max(*y3);
+                }
+                PathSegment::ClosePath => {}
+            }
+        }
+        let w = x_max - x_min;
+        let h = y_max - y_min;
+        // Needs adjust if thin bbox OR zero-area line
+        if w < adjust * 2.0 || h < adjust * 2.0 || is_zero_area_line(&points) {
+            needs_adjust = true;
+            break;
+        }
+    }
+
+    if !needs_adjust {
+        return None;
+    }
+
+    let mut result = PsPath::new();
+
+    for &(start, end) in &subpaths {
+        let mut points: Vec<(f64, f64)> = Vec::new();
+        for seg in &segs[start..end] {
+            match seg {
+                PathSegment::MoveTo(x, y) | PathSegment::LineTo(x, y) => {
+                    points.push((*x, *y));
+                }
+                PathSegment::CurveTo { x3, y3, .. } => {
+                    points.push((*x3, *y3));
+                }
+                PathSegment::ClosePath => {}
+            }
+        }
+
+        if points.is_empty() {
+            continue;
+        }
+
+        // Compute subpath bbox
+        let (mut x_min, mut x_max) = (f64::INFINITY, f64::NEG_INFINITY);
+        let (mut y_min, mut y_max) = (f64::INFINITY, f64::NEG_INFINITY);
+        for &(x, y) in &points {
+            x_min = x_min.min(x);
+            x_max = x_max.max(x);
+            y_min = y_min.min(y);
+            y_max = y_max.max(y);
+        }
+        let w = x_max - x_min;
+        let h = y_max - y_min;
+
+        if is_zero_area_line(&points) && points.len() >= 2 {
+            // Zero-area line: expand into a thin rectangle perpendicular to line
+            let (x0, y0) = points[0];
+            let (x1, y1) = *points.last().unwrap();
+            let dx = x1 - x0;
+            let dy = y1 - y0;
+            let len = (dx * dx + dy * dy).sqrt();
+            if len < 1e-10 {
+                continue; // Degenerate point
+            }
+            // For multi-point collinear lines, emit each segment as a thin quad
+            for i in 0..points.len() - 1 {
+                let (ax, ay) = points[i];
+                let (bx, by) = points[i + 1];
+                let sdx = bx - ax;
+                let sdy = by - ay;
+                let slen = (sdx * sdx + sdy * sdy).sqrt();
+                if slen < 1e-10 {
+                    continue;
+                }
+                let spx = -sdy / slen * adjust;
+                let spy = sdx / slen * adjust;
+                result.segments.push(PathSegment::MoveTo(ax + spx, ay + spy));
+                result.segments.push(PathSegment::LineTo(bx + spx, by + spy));
+                result.segments.push(PathSegment::LineTo(bx - spx, by - spy));
+                result.segments.push(PathSegment::LineTo(ax - spx, ay - spy));
+                result.segments.push(PathSegment::ClosePath);
+            }
+        } else if w < adjust * 2.0 || h < adjust * 2.0 {
+            // Thin closed shape: expand the thin dimension
+            let cx = (x_min + x_max) * 0.5;
+            let cy = (y_min + y_max) * 0.5;
+            let expand_x = if w < adjust * 2.0 {
+                let snapped_cx = cx.floor() + 0.5;
+                Some((snapped_cx, adjust))
+            } else {
+                None
+            };
+            let expand_y = if h < adjust * 2.0 {
+                let snapped_cy = cy.floor() + 0.5;
+                Some((snapped_cy, adjust))
+            } else {
+                None
+            };
+
+            for seg in &segs[start..end] {
+                let adjust_point = |x: f64, y: f64| -> (f64, f64) {
+                    let ax = if let Some((center, half)) = expand_x {
+                        if x <= cx { center - half } else { center + half }
+                    } else {
+                        x
+                    };
+                    let ay = if let Some((center, half)) = expand_y {
+                        if y <= cy { center - half } else { center + half }
+                    } else {
+                        y
+                    };
+                    (ax, ay)
+                };
+                match seg {
+                    PathSegment::MoveTo(x, y) => {
+                        let (ax, ay) = adjust_point(*x, *y);
+                        result.segments.push(PathSegment::MoveTo(ax, ay));
+                    }
+                    PathSegment::LineTo(x, y) => {
+                        let (ax, ay) = adjust_point(*x, *y);
+                        result.segments.push(PathSegment::LineTo(ax, ay));
+                    }
+                    PathSegment::CurveTo { x1, y1, x2, y2, x3, y3 } => {
+                        let (ax1, ay1) = adjust_point(*x1, *y1);
+                        let (ax2, ay2) = adjust_point(*x2, *y2);
+                        let (ax3, ay3) = adjust_point(*x3, *y3);
+                        result.segments.push(PathSegment::CurveTo {
+                            x1: ax1, y1: ay1,
+                            x2: ax2, y2: ay2,
+                            x3: ax3, y3: ay3,
+                        });
+                    }
+                    PathSegment::ClosePath => {
+                        result.segments.push(PathSegment::ClosePath);
+                    }
+                }
+            }
+        } else {
+            // Subpath doesn't need adjustment — copy as-is
+            for seg in &segs[start..end] {
+                result.segments.push(seg.clone());
+            }
+        }
+    }
+
+    Some(result)
+}
+
+/// Apply stroke adjustment: snap axis-aligned path segments to device pixel
+/// centers so thin strokes render with consistent weight.
+///
+/// For a stroke of width W in device pixels:
+/// - Odd-integer width (1, 3, ...): snap to half-pixel (floor(x) + 0.5)
+/// - Even-integer width or non-integer: snap to pixel edge (round(x))
+/// - For hairlines (device width < 1.5): always snap to half-pixel
+///
+/// Only axis-aligned segments (horizontal/vertical lines) are snapped.
+/// Diagonal/curved segments are left as-is since snapping would distort them.
+fn stroke_adjust_path(path: &PsPath, device_width: f64) -> PsPath {
+    // Determine snap mode: half-pixel for hairlines/odd widths, whole-pixel for even
+    let use_half_pixel = device_width < 1.5 || (device_width.round() as i32) % 2 == 1;
+
+    let snap = |v: f64| -> f64 {
+        if use_half_pixel {
+            v.floor() + 0.5
+        } else {
+            v.round()
+        }
+    };
+
+    let mut result = PsPath::new();
+    let mut prev_x = 0.0_f64;
+    let mut prev_y = 0.0_f64;
+
+    for seg in &path.segments {
+        match *seg {
+            PathSegment::MoveTo(x, y) => {
+                prev_x = x;
+                prev_y = y;
+                result.segments.push(PathSegment::MoveTo(x, y));
+            }
+            PathSegment::LineTo(x, y) => {
+                let is_horizontal = (y - prev_y).abs() < 1e-6;
+                let is_vertical = (x - prev_x).abs() < 1e-6;
+
+                if is_horizontal {
+                    // Snap Y coordinate to pixel center, adjust previous MoveTo/LineTo too
+                    let snapped_y = snap(y);
+                    // Also fix the previous segment's Y if it was the start of this H-line
+                    if let Some(last) = result.segments.last_mut() {
+                        match last {
+                            PathSegment::MoveTo(_, ly) | PathSegment::LineTo(_, ly) => {
+                                *ly = snapped_y;
+                            }
+                            _ => {}
+                        }
+                    }
+                    result.segments.push(PathSegment::LineTo(x, snapped_y));
+                    prev_x = x;
+                    prev_y = snapped_y;
+                } else if is_vertical {
+                    // Snap X coordinate to pixel center
+                    let snapped_x = snap(x);
+                    if let Some(last) = result.segments.last_mut() {
+                        match last {
+                            PathSegment::MoveTo(lx, _) | PathSegment::LineTo(lx, _) => {
+                                *lx = snapped_x;
+                            }
+                            _ => {}
+                        }
+                    }
+                    result.segments.push(PathSegment::LineTo(snapped_x, y));
+                    prev_x = snapped_x;
+                    prev_y = y;
+                } else {
+                    // Diagonal — leave as-is
+                    result.segments.push(PathSegment::LineTo(x, y));
+                    prev_x = x;
+                    prev_y = y;
+                }
+            }
+            PathSegment::CurveTo {
+                x1,
+                y1,
+                x2,
+                y2,
+                x3,
+                y3,
+            } => {
+                // Curves: leave as-is
+                result.segments.push(PathSegment::CurveTo {
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    x3,
+                    y3,
+                });
+                prev_x = x3;
+                prev_y = y3;
+            }
+            PathSegment::ClosePath => {
+                result.segments.push(PathSegment::ClosePath);
+            }
+        }
+    }
+    result
+}
+
+/// Apply stroke adjustment for viewport rendering.
+///
+/// Path coordinates are in reference-DPI device space. The viewport transform
+/// maps them to output pixels: out = (ref - vp_origin) * scale.
+/// We snap in output pixel space then map back to reference space.
+fn stroke_adjust_path_viewport(
+    path: &PsPath,
+    device_width: f64,
+    scale_x: f64,
+    scale_y: f64,
+    vp_x: f64,
+    vp_y: f64,
+) -> PsPath {
+    let use_half_pixel = device_width < 1.5 || (device_width.round() as i32) % 2 == 1;
+
+    // Snap a reference-space coordinate to the output pixel grid, then map back
+    let snap_x = |v: f64| -> f64 {
+        let out = (v - vp_x) * scale_x;
+        let snapped = if use_half_pixel {
+            out.floor() + 0.5
+        } else {
+            out.round()
+        };
+        snapped / scale_x + vp_x
+    };
+    let snap_y = |v: f64| -> f64 {
+        let out = (v - vp_y) * scale_y;
+        let snapped = if use_half_pixel {
+            out.floor() + 0.5
+        } else {
+            out.round()
+        };
+        snapped / scale_y + vp_y
+    };
+
+    let mut result = PsPath::new();
+    let mut prev_x = 0.0_f64;
+    let mut prev_y = 0.0_f64;
+
+    for seg in &path.segments {
+        match *seg {
+            PathSegment::MoveTo(x, y) => {
+                prev_x = x;
+                prev_y = y;
+                result.segments.push(PathSegment::MoveTo(x, y));
+            }
+            PathSegment::LineTo(x, y) => {
+                let is_horizontal = (y - prev_y).abs() < 1e-6;
+                let is_vertical = (x - prev_x).abs() < 1e-6;
+
+                if is_horizontal {
+                    let snapped_y = snap_y(y);
+                    if let Some(last) = result.segments.last_mut() {
+                        match last {
+                            PathSegment::MoveTo(_, ly) | PathSegment::LineTo(_, ly) => {
+                                *ly = snapped_y;
+                            }
+                            _ => {}
+                        }
+                    }
+                    result.segments.push(PathSegment::LineTo(x, snapped_y));
+                    prev_x = x;
+                    prev_y = snapped_y;
+                } else if is_vertical {
+                    let snapped_x = snap_x(x);
+                    if let Some(last) = result.segments.last_mut() {
+                        match last {
+                            PathSegment::MoveTo(lx, _) | PathSegment::LineTo(lx, _) => {
+                                *lx = snapped_x;
+                            }
+                            _ => {}
+                        }
+                    }
+                    result.segments.push(PathSegment::LineTo(snapped_x, y));
+                    prev_x = snapped_x;
+                    prev_y = y;
+                } else {
+                    result.segments.push(PathSegment::LineTo(x, y));
+                    prev_x = x;
+                    prev_y = y;
+                }
+            }
+            PathSegment::CurveTo {
+                x1, y1, x2, y2, x3, y3,
+            } => {
+                result.segments.push(PathSegment::CurveTo {
+                    x1, y1, x2, y2, x3, y3,
+                });
+                prev_x = x3;
+                prev_y = y3;
+            }
+            PathSegment::ClosePath => {
+                result.segments.push(PathSegment::ClosePath);
+            }
+        }
+    }
+    result
+}
+
 /// Process a single display list element into a band-sized pixmap.
 fn render_element_to_band(
     pixmap: &mut Pixmap,
@@ -1039,7 +1470,15 @@ fn render_element_to_band(
     let y_off = y_start as f32;
     match element {
         DisplayElement::Fill { path, params } => {
-            let Some(skia_path) = build_skia_path(path) else {
+            // Apply fill adjust: expand zero-area / very thin subpaths
+            let adjusted;
+            let draw_path = if let Some(adj) = fill_adjust_path(path, 0.5) {
+                adjusted = adj;
+                &adjusted
+            } else {
+                path
+            };
+            let Some(skia_path) = build_skia_path(draw_path) else {
                 return;
             };
             let mut temp_mask = None;
@@ -1054,7 +1493,16 @@ fn render_element_to_band(
             pixmap.fill_path(&skia_path, &paint, fill_rule, transform, mask_ref);
         }
         DisplayElement::Stroke { path, params } => {
-            let Some(skia_path) = build_skia_path(path) else {
+            let stroke = build_stroke(params, dpi);
+            // Apply stroke adjustment for thin strokes when enabled
+            let adjusted;
+            let draw_path = if (params.stroke_adjust || params.line_width == 0.0) && stroke.width <= 2.0 {
+                adjusted = stroke_adjust_path(path, stroke.width as f64);
+                &adjusted
+            } else {
+                path
+            };
+            let Some(skia_path) = build_skia_path(draw_path) else {
                 return;
             };
             let mut temp_mask = None;
@@ -1065,7 +1513,6 @@ fn render_element_to_band(
             };
             let paint = to_paint(&params.color);
             let transform = offset_transform(to_transform(&params.ctm), y_off);
-            let stroke = build_stroke(params, dpi);
             pixmap.stroke_path(&skia_path, &paint, &stroke, transform, mask_ref);
         }
         DisplayElement::Clip { path, params } => {
@@ -1251,10 +1698,12 @@ fn clip_path_band(
             band_state.clip_region = prev_region;
             return;
         };
-        // Rasterize with Y-offset into band-sized mask
+        // Rasterize with Y-offset into band-sized mask.
+        // Anti-alias disabled: AA clip edges cause visible seams between
+        // adjacent clipped regions (e.g. AGM EPS tiled fills).
         let transform = offset_transform(to_transform(&params.ctm), y_start as f32);
         mask.data_mut().fill(0);
-        mask.fill_path(&skia_path, fill_rule, true, transform);
+        mask.fill_path(&skia_path, fill_rule, false, transform);
         // Cache on second sight
         if !band_state.clip_mask_seen.insert(path_hash) {
             band_state.clip_mask_cache.insert(path_hash, mask.clone());
@@ -1286,7 +1735,15 @@ fn clip_path_band(
 impl OutputDevice for SkiaDevice {
     fn fill_path(&mut self, path: &PsPath, params: &FillParams) {
         self.ensure_full_pixmap();
-        let Some(skia_path) = build_skia_path(path) else {
+        // Apply fill adjust
+        let adjusted;
+        let draw_path = if let Some(adj) = fill_adjust_path(path, 0.5) {
+            adjusted = adj;
+            &adjusted
+        } else {
+            path
+        };
+        let Some(skia_path) = build_skia_path(draw_path) else {
             return;
         };
         let (w, h) = (self.pixmap.width(), self.pixmap.height());
@@ -1305,12 +1762,19 @@ impl OutputDevice for SkiaDevice {
 
     fn stroke_path(&mut self, path: &PsPath, params: &StrokeParams) {
         self.ensure_full_pixmap();
-        let Some(skia_path) = build_skia_path(path) else {
+        let stroke = build_stroke(params, self.dpi);
+        let adjusted;
+        let draw_path = if (params.stroke_adjust || params.line_width == 0.0) && stroke.width <= 2.0 {
+            adjusted = stroke_adjust_path(path, stroke.width as f64);
+            &adjusted
+        } else {
+            path
+        };
+        let Some(skia_path) = build_skia_path(draw_path) else {
             return;
         };
         let paint = to_paint(&params.color);
         let transform = to_transform(&params.ctm);
-        let stroke = build_stroke(params, self.dpi);
 
         let (w, h) = (self.pixmap.width(), self.pixmap.height());
         let mut temp_mask = None;
@@ -1374,7 +1838,7 @@ impl OutputDevice for SkiaDevice {
             let transform = to_transform(&params.ctm);
             let mut mask = take_spare!(self, w, h);
             mask.data_mut().fill(0); // zero before rasterizing (spare may have old data)
-            mask.fill_path(&skia_path, fill_rule, true, transform);
+            mask.fill_path(&skia_path, fill_rule, false, transform);
             // Cache on second sight: first time just record, second time store
             if !self.clip_mask_seen.insert(path_hash) {
                 // Seen before — cache it (this clone only happens once per unique path)
@@ -1617,7 +2081,7 @@ fn render_banded_to_sink(
     sink: &mut dyn stet_core::device::PageSink,
 ) -> Result<(), String> {
     // Precompute Y bounding boxes for culling
-    let bboxes = precompute_bboxes(list);
+    let bboxes = precompute_bboxes(list, dpi);
 
     // Build clip epochs — groups of elements between InitClip boundaries.
     // Epochs whose paint elements don't overlap a band can be skipped entirely,
@@ -1749,14 +2213,26 @@ struct BBox2D {
 }
 
 /// Compute full 2D bounding boxes for display list elements (for viewport culling).
-fn precompute_full_bboxes(list: &DisplayList) -> Vec<Option<BBox2D>> {
+fn precompute_full_bboxes(list: &DisplayList, dpi: f64) -> Vec<Option<BBox2D>> {
     list.elements()
         .iter()
         .map(|elem| match elem {
-            DisplayElement::Fill { path, .. } => path_full_bbox(path),
+            DisplayElement::Fill { path, .. } => path_full_bbox(path).map(|mut bbox| {
+                // Expand for fill adjust: thin/zero-area fills get expanded
+                // by ±0.5 device pixels at render time, so bboxes must account
+                // for that to avoid culling visible elements.
+                bbox.x_min -= 0.5;
+                bbox.x_max += 0.5;
+                bbox.y_min -= 0.5;
+                bbox.y_max += 0.5;
+                bbox
+            }),
             DisplayElement::Stroke { path, params } => {
                 path_full_bbox(path).map(|mut bbox| {
-                    let expand = params.line_width * params.miter_limit * 0.5;
+                    // Use effective line width: actual width or hairline minimum
+                    let effective_lw =
+                        params.line_width.max(hairline_min_width(&params.ctm, dpi));
+                    let expand = effective_lw * params.miter_limit * 0.5;
                     let m = &params.ctm;
                     let is_identity = m.a == 1.0
                         && m.b == 0.0
@@ -1774,8 +2250,8 @@ fn precompute_full_bboxes(list: &DisplayList) -> Vec<Option<BBox2D>> {
                         // transform bbox corners through CTM to device space.
                         let col_x_len = (m.a * m.a + m.b * m.b).sqrt().max(1.0);
                         let col_y_len = (m.c * m.c + m.d * m.d).sqrt().max(1.0);
-                        let expand_x = params.line_width * col_x_len * params.miter_limit * 0.5;
-                        let expand_y = params.line_width * col_y_len * params.miter_limit * 0.5;
+                        let expand_x = effective_lw * col_x_len * params.miter_limit * 0.5;
+                        let expand_y = effective_lw * col_y_len * params.miter_limit * 0.5;
                         bbox.x_min -= expand_x;
                         bbox.x_max += expand_x;
                         bbox.y_min -= expand_y;
@@ -2000,7 +2476,7 @@ pub fn render_region(
     // Effective DPI for hairline decisions — reference DPI scaled by zoom
     let effective_dpi = dpi * scale_x;
 
-    let bboxes = precompute_full_bboxes(list);
+    let bboxes = precompute_full_bboxes(list, effective_dpi);
     let epochs = build_viewport_epochs(list, &bboxes);
     let clip_seen = precompute_clip_seen(list);
 
@@ -2085,7 +2561,17 @@ fn render_element_to_viewport(
 ) {
     match element {
         DisplayElement::Fill { path, params } => {
-            let Some(skia_path) = build_skia_path(path) else {
+            // Apply fill adjust: expand zero-area / very thin subpaths.
+            // For viewport rendering, adjust threshold accounts for the scale.
+            let adj_amount = 0.5 * (scale_x as f64).max(scale_y as f64);
+            let adjusted;
+            let draw_path = if let Some(adj) = fill_adjust_path(path, adj_amount) {
+                adjusted = adj;
+                &adjusted
+            } else {
+                path
+            };
+            let Some(skia_path) = build_skia_path(draw_path) else {
                 return;
             };
             let mut temp_mask = None;
@@ -2100,7 +2586,38 @@ fn render_element_to_viewport(
             pixmap.fill_path(&skia_path, &paint, fill_rule, transform, mask_ref);
         }
         DisplayElement::Stroke { path, params } => {
-            let Some(skia_path) = build_skia_path(path) else {
+            let transform = viewport_transform(to_transform(&params.ctm), vp_x, vp_y, scale_x, scale_y);
+            // For viewport rendering, build the stroke using the composited
+            // transform (original CTM × viewport transform) so hairline width
+            // calculations account for the actual output resolution.
+            let vp_ctm = Matrix {
+                a: transform.sx as f64,
+                b: transform.ky as f64,
+                c: transform.kx as f64,
+                d: transform.sy as f64,
+                tx: 0.0,
+                ty: 0.0,
+            };
+            let vp_params = StrokeParams {
+                ctm: vp_ctm,
+                ..params.clone()
+            };
+            let stroke = build_stroke(&vp_params, effective_dpi);
+            // Apply stroke adjustment — snap in output device space.
+            // Path coords are in reference-DPI device space, so we scale
+            // the snap grid to match the viewport transform.
+            let adjusted;
+            let draw_path = if (params.stroke_adjust || params.line_width == 0.0) && stroke.width <= 2.0 {
+                // Snap in output pixel space: transform coords, snap, inverse-transform.
+                // For identity CTM (isotropic strokes in device space), we can snap
+                // directly using the viewport scale factors.
+                adjusted = stroke_adjust_path_viewport(path, stroke.width as f64,
+                    scale_x as f64, scale_y as f64, vp_x as f64, vp_y as f64);
+                &adjusted
+            } else {
+                path
+            };
+            let Some(skia_path) = build_skia_path(draw_path) else {
                 return;
             };
             let mut temp_mask = None;
@@ -2110,21 +2627,6 @@ fn render_element_to_viewport(
                 return;
             };
             let paint = to_paint(&params.color);
-            let transform = viewport_transform(to_transform(&params.ctm), vp_x, vp_y, scale_x, scale_y);
-            // Build stroke with the composited transform so hairline minimum
-            // accounts for viewport scaling, not just the original CTM.
-            let vp_params = StrokeParams {
-                ctm: Matrix {
-                    a: transform.sx as f64,
-                    b: transform.ky as f64,
-                    c: transform.kx as f64,
-                    d: transform.sy as f64,
-                    tx: 0.0,
-                    ty: 0.0,
-                },
-                ..params.clone()
-            };
-            let stroke = build_stroke(&vp_params, effective_dpi);
             pixmap.stroke_path(&skia_path, &paint, &stroke, transform, mask_ref);
         }
         DisplayElement::Clip { path, params } => {
@@ -2264,7 +2766,7 @@ fn clip_path_viewport(
         };
         let transform = viewport_transform(to_transform(&params.ctm), vp_x, vp_y, scale_x, scale_y);
         mask.data_mut().fill(0);
-        mask.fill_path(&skia_path, fill_rule, true, transform);
+        mask.fill_path(&skia_path, fill_rule, false, transform);
         if !state.clip_mask_seen.insert(path_hash) {
             state.clip_mask_cache.insert(path_hash, mask.clone());
         }
@@ -3222,6 +3724,7 @@ mod tests {
             miter_limit: 10.0,
             dash_pattern: DashPattern::solid(),
             ctm: Matrix::identity(),
+            stroke_adjust: false,
         };
         dev.stroke_path(&path, &params);
 

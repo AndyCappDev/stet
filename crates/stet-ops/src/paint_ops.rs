@@ -162,6 +162,7 @@ pub fn op_stroke(ctx: &mut Context) -> Result<(), PsError> {
                 miter_limit: ctx.gstate.miter_limit,
                 dash_pattern: ctx.gstate.dash_pattern.clone(),
                 ctm: ctx.gstate.ctm,
+                stroke_adjust: ctx.gstate.stroke_adjust,
             };
             ctx.display_list.push(DisplayElement::Stroke {
                 path: user_path,
@@ -188,6 +189,7 @@ pub fn op_stroke(ctx: &mut Context) -> Result<(), PsError> {
                 offset: ctx.gstate.dash_pattern.offset * scale,
             },
             ctm: Matrix::identity(),
+            stroke_adjust: ctx.gstate.stroke_adjust,
         };
         ctx.display_list.push(DisplayElement::Stroke {
             path: ctx.gstate.path.clone(),
@@ -280,6 +282,7 @@ pub fn op_rectstroke(ctx: &mut Context) -> Result<(), PsError> {
             miter_limit: ctx.gstate.miter_limit,
             dash_pattern: ctx.gstate.dash_pattern.clone(),
             ctm: ctx.gstate.ctm,
+            stroke_adjust: ctx.gstate.stroke_adjust,
         };
         ctx.display_list
             .push(DisplayElement::Stroke { path, params });
@@ -316,6 +319,7 @@ pub fn op_rectstroke(ctx: &mut Context) -> Result<(), PsError> {
                 offset: ctx.gstate.dash_pattern.offset * scale,
             },
             ctm: Matrix::identity(),
+            stroke_adjust: ctx.gstate.stroke_adjust,
         };
         ctx.display_list
             .push(DisplayElement::Stroke { path, params });
