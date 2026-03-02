@@ -1770,6 +1770,8 @@ fn precompute_full_bboxes(list: &DisplayList) -> Vec<Option<BBox2D>> {
                         bbox.y_min -= expand;
                         bbox.y_max += expand;
                     } else {
+                        // Path is in user space — expand for stroke, then
+                        // transform bbox corners through CTM to device space.
                         let col_x_len = (m.a * m.a + m.b * m.b).sqrt().max(1.0);
                         let col_y_len = (m.c * m.c + m.d * m.d).sqrt().max(1.0);
                         let expand_x = params.line_width * col_x_len * params.miter_limit * 0.5;
@@ -1778,6 +1780,21 @@ fn precompute_full_bboxes(list: &DisplayList) -> Vec<Option<BBox2D>> {
                         bbox.x_max += expand_x;
                         bbox.y_min -= expand_y;
                         bbox.y_max += expand_y;
+                        // Transform all 4 corners to device space
+                        let corners = [
+                            (m.a * bbox.x_min + m.c * bbox.y_min + m.tx,
+                             m.b * bbox.x_min + m.d * bbox.y_min + m.ty),
+                            (m.a * bbox.x_max + m.c * bbox.y_min + m.tx,
+                             m.b * bbox.x_max + m.d * bbox.y_min + m.ty),
+                            (m.a * bbox.x_min + m.c * bbox.y_max + m.tx,
+                             m.b * bbox.x_min + m.d * bbox.y_max + m.ty),
+                            (m.a * bbox.x_max + m.c * bbox.y_max + m.tx,
+                             m.b * bbox.x_max + m.d * bbox.y_max + m.ty),
+                        ];
+                        bbox.x_min = corners.iter().map(|c| c.0).fold(f64::INFINITY, f64::min);
+                        bbox.x_max = corners.iter().map(|c| c.0).fold(f64::NEG_INFINITY, f64::max);
+                        bbox.y_min = corners.iter().map(|c| c.1).fold(f64::INFINITY, f64::min);
+                        bbox.y_max = corners.iter().map(|c| c.1).fold(f64::NEG_INFINITY, f64::max);
                     }
                     bbox
                 })
@@ -2064,7 +2081,7 @@ fn render_element_to_viewport(
     scale_y: f32,
     out_w: u32,
     out_h: u32,
-    dpi: f64,
+    effective_dpi: f64,
 ) {
     match element {
         DisplayElement::Fill { path, params } => {
@@ -2094,7 +2111,20 @@ fn render_element_to_viewport(
             };
             let paint = to_paint(&params.color);
             let transform = viewport_transform(to_transform(&params.ctm), vp_x, vp_y, scale_x, scale_y);
-            let stroke = build_stroke(params, dpi);
+            // Build stroke with the composited transform so hairline minimum
+            // accounts for viewport scaling, not just the original CTM.
+            let vp_params = StrokeParams {
+                ctm: Matrix {
+                    a: transform.sx as f64,
+                    b: transform.ky as f64,
+                    c: transform.kx as f64,
+                    d: transform.sy as f64,
+                    tx: 0.0,
+                    ty: 0.0,
+                },
+                ..params.clone()
+            };
+            let stroke = build_stroke(&vp_params, effective_dpi);
             pixmap.stroke_path(&skia_path, &paint, &stroke, transform, mask_ref);
         }
         DisplayElement::Clip { path, params } => {
