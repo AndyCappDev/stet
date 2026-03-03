@@ -1021,12 +1021,18 @@ fn build_stroke(params: &StrokeParams, dpi: f64) -> Stroke {
         ..Stroke::default()
     };
     if !params.dash_pattern.array.is_empty() {
-        let dash_array: Vec<f32> = params
+        let mut dash_array: Vec<f32> = params
             .dash_pattern
             .array
             .iter()
             .map(|&v| v as f32)
             .collect();
+        // PostScript allows odd-length dash arrays (implicitly doubled),
+        // but tiny-skia requires even length. Double odd arrays to match PS semantics.
+        if dash_array.len() % 2 == 1 {
+            let clone = dash_array.clone();
+            dash_array.extend_from_slice(&clone);
+        }
         if let Some(dash) = StrokeDash::new(dash_array, params.dash_pattern.offset as f32) {
             stroke.dash = Some(dash);
         }
