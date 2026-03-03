@@ -629,12 +629,14 @@ impl eframe::App for ViewerApp {
                     let page = &self.pages[self.current_page];
                     let eff_dpi = self.dpi_preset
                         .unwrap_or_else(|| self.effective_dpi(self.central_available, page));
+                    let fit = self.fit_scale(self.central_available, page);
+                    let zoom_pct = fit * self.zoom * 100.0;
                     ui.label(egui::RichText::new(format!(
                         "Page {} of {} | {:.0} DPI | Zoom: {:.0}%",
                         self.current_page + 1,
                         total,
                         eff_dpi,
-                        self.zoom * 100.0,
+                        zoom_pct,
                     )).font(status_font.clone()));
                     ui.separator();
                     ui.label(egui::RichText::new(
