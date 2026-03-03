@@ -194,6 +194,24 @@ impl FileStore {
             "%stdin" => return Ok(FILE_STDIN),
             "%stdout" => return Ok(FILE_STDOUT),
             "%stderr" => return Ok(FILE_STDERR),
+            "%lineedit" | "%statementedit" => {
+                if mode != "r" {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "read-only special file",
+                    ));
+                }
+                // Read one line from stdin, strip trailing newline
+                let mut line = String::new();
+                io::stdin().read_line(&mut line)?;
+                if line.ends_with('\n') {
+                    line.pop();
+                    if line.ends_with('\r') {
+                        line.pop();
+                    }
+                }
+                return Ok(self.create_string_source(line.into_bytes()));
+            }
             _ => {}
         }
 
