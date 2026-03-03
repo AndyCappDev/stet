@@ -16,7 +16,58 @@ use stet_core::error::PsError;
 use stet_core::file_store;
 use stet_core::object::{EntityId, ObjFlags, PsObject, PsValue};
 
+use std::path::Path;
+
 use crate::type_ops::write_obj_equal;
+
+/// Resolve a relative filename against likely directories.
+///
+/// Fallback chain (matches PostForge's `_resolve_filename`):
+/// 1. Absolute or exists as-is → return it
+/// 2. Exec stack walk → scan for File entries, try parent directory of innermost real file
+/// 3. Resource base path → try `resource_base_path/filename`
+/// 4. Return original → let the caller produce the appropriate error
+pub(crate) fn resolve_filename(ctx: &Context, filename: &str) -> String {
+    let path = Path::new(filename);
+
+    // 1. Absolute or already exists
+    if path.is_absolute() || path.exists() {
+        return filename.to_string();
+    }
+
+    // 2. Walk exec stack for the innermost real file's directory
+    for i in 0..ctx.e_stack.len() {
+        if let Ok(obj) = ctx.e_stack.peek(i)
+            && let PsValue::File(entity) = obj.value
+        {
+            let name = ctx.files.name(entity);
+            // Skip synthetic names (filters, string sources, stdio)
+            if name.starts_with('%') {
+                continue;
+            }
+            if let Some(parent) = Path::new(name).parent() {
+                let candidate = parent.join(filename);
+                if candidate.exists() {
+                    return candidate.to_string_lossy().to_string();
+                }
+            }
+            // Only check the innermost real file (matches PostForge)
+            break;
+        }
+    }
+
+    // 3. Resource base path
+    if let Some(ref base) = ctx.resource_base_path {
+        let relative = filename.strip_prefix("resources/").unwrap_or(filename);
+        let candidate = Path::new(base).join(relative);
+        if candidate.exists() {
+            return candidate.to_string_lossy().to_string();
+        }
+    }
+
+    // 4. Return original
+    filename.to_string()
+}
 
 /// `print`: string → — (write string to stdout)
 pub fn op_print(ctx: &mut Context) -> Result<(), PsError> {
@@ -100,9 +151,12 @@ pub fn op_file(ctx: &mut Context) -> Result<(), PsError> {
         _ => return Err(PsError::TypeCheck),
     };
 
+    // Resolve relative paths against the currently executing file's directory
+    let resolved = resolve_filename(ctx, &name);
+
     let file_entity = ctx
         .files
-        .open(&name, &mode)
+        .open(&resolved, &mode)
         .map_err(|_| PsError::InvalidFileAccess)?;
 
     ctx.o_stack.pop()?;
@@ -579,13 +633,11 @@ pub fn op_status(ctx: &mut Context) -> Result<(), PsError> {
             // Check embedded files first (for WASM builds)
             let exists = if ctx.files.get_embedded_file(&path).is_some() {
                 true
-            } else if std::path::Path::new(&path).exists() {
-                true
-            } else if let Some(ref base) = ctx.resource_base_path {
-                let relative = path.strip_prefix("resources/").unwrap_or(&path);
-                std::path::Path::new(base).join(relative).exists()
             } else {
-                false
+                // resolve_filename returns the original if nothing matched,
+                // so check whether the resolved path actually exists
+                let resolved = resolve_filename(ctx, &path);
+                Path::new(&resolved).exists()
             };
             ctx.o_stack.pop()?;
             if exists {

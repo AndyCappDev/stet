@@ -125,9 +125,11 @@ pub fn op_handleerror(ctx: &mut Context) -> Result<(), PsError> {
 
 /// `run`: filename → — (execute a PostScript file)
 ///
-/// Resolves paths relative to `resource_base_path` if the file doesn't
-/// exist at the literal path. This allows init scripts to use paths like
-/// `(resources/Init/fontmapping.ps)` which get resolved to the actual location.
+/// Resolves paths using `resolve_filename`: tries the literal path, then
+/// the directory of the currently executing file (exec stack walk), then
+/// `resource_base_path`. This allows init scripts to use paths like
+/// `(resources/Init/fontmapping.ps)` and PS files to `run` siblings via
+/// relative paths.
 pub fn op_run(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.o_stack.is_empty() {
         return Err(PsError::StackUnderflow);
@@ -155,23 +157,7 @@ pub fn op_run(ctx: &mut Context) -> Result<(), PsError> {
         return Ok(());
     }
 
-    // Try the literal path first
-    let resolved = if std::path::Path::new(&filename).exists() {
-        filename.clone()
-    } else if let Some(ref base) = ctx.resource_base_path {
-        // Try relative to the resource base path
-        // If filename starts with "resources/", strip that prefix since base_path
-        // already points to the resources/ directory
-        let relative = filename.strip_prefix("resources/").unwrap_or(&filename);
-        let candidate = std::path::Path::new(base).join(relative);
-        if candidate.exists() {
-            candidate.to_string_lossy().to_string()
-        } else {
-            filename.clone()
-        }
-    } else {
-        filename.clone()
-    };
+    let resolved = crate::file_ops::resolve_filename(ctx, &filename);
 
     let source = std::fs::read(&resolved).map_err(|_| PsError::UndefinedFilename)?;
 
@@ -181,7 +167,17 @@ pub fn op_run(ctx: &mut Context) -> Result<(), PsError> {
     // Create a file-backed source and push it on the exec stack.
     // Using File (not String) means `currentfile` can find it —
     // matching PostForge's Run object behavior.
+    // Set the resolved path as the file name so nested run/file calls
+    // can find this file's directory on the exec stack.
     let file_entity = ctx.files.create_string_source(ps_data.to_vec());
+    ctx.files.set_name(
+        file_entity,
+        std::path::Path::new(&resolved)
+            .canonicalize()
+            .unwrap_or_else(|_| std::path::PathBuf::from(&resolved))
+            .to_string_lossy()
+            .to_string(),
+    );
     ctx.e_stack.push(PsObject {
         value: PsValue::File(file_entity),
         flags: stet_core::object::ObjFlags::executable_composite(),

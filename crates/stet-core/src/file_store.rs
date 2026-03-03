@@ -679,6 +679,11 @@ impl FileStore {
         &self.files[entity.0 as usize].name
     }
 
+    /// Set the name of a file (e.g. to record the resolved path for `run`).
+    pub fn set_name(&mut self, entity: EntityId, name: String) {
+        self.files[entity.0 as usize].name = name;
+    }
+
     /// Get the mode of a file.
     pub fn mode(&self, entity: EntityId) -> &str {
         &self.files[entity.0 as usize].mode

@@ -999,6 +999,30 @@ pub fn parse_and_exec(ctx: &mut Context, source: &[u8]) -> Result<(), PsError> {
     eval(ctx)
 }
 
+/// Execute PostScript source loaded from a named file.
+///
+/// Like `parse_and_exec`, but records the file path on the StringSource
+/// entity so that `resolve_filename` can find the file's parent directory
+/// when resolving relative paths in nested `run`/`file` calls.
+pub fn parse_and_exec_file(
+    ctx: &mut Context,
+    source: &[u8],
+    path: &str,
+) -> Result<(), PsError> {
+    let file_entity = ctx.files.create_string_source(source.to_vec());
+    // Record the canonical path so resolve_filename can extract its directory.
+    let canonical = std::path::Path::new(path)
+        .canonicalize()
+        .unwrap_or_else(|_| std::path::PathBuf::from(path));
+    ctx.files
+        .set_name(file_entity, canonical.to_string_lossy().to_string());
+    ctx.e_stack.push(PsObject {
+        value: PsValue::File(file_entity),
+        flags: ObjFlags::executable_composite(),
+    })?;
+    eval(ctx)
+}
+
 /// Parse a `{ ... }` procedure body (recursive for nested procedures).
 fn parse_procedure(ctx: &mut Context, tokenizer: &mut Tokenizer) -> Result<PsObject, PsError> {
     let mut elements = Vec::new();

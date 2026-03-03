@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use stet_core::context::Context;
 use stet_core::eps::{read_eps_bounding_box, strip_dos_eps_header};
-use stet_engine::eval::parse_and_exec;
+use stet_engine::eval::{parse_and_exec, parse_and_exec_file};
 use stet_ops::build_system_dict;
 use stet_render::SkiaDevice;
 
@@ -285,12 +285,12 @@ fn run_file_jobs_viewer(
         let job_start = std::time::Instant::now();
 
         let exec_result = if is_eps {
-            run_eps_file(ctx, dpi_override, ps_data, "viewer")
+            run_eps_file(ctx, dpi_override, ps_data, "viewer", filename)
         } else {
             if job_idx == 0 {
                 install_device(ctx, dpi_override, "viewer");
             }
-            parse_and_exec(ctx, ps_data)
+            parse_and_exec_file(ctx, ps_data, filename)
         };
 
         let job_duration = job_start.elapsed();
@@ -402,13 +402,13 @@ fn run_file_jobs(
             .unwrap_or(0);
 
         let exec_result = if is_eps {
-            run_eps_file(ctx, dpi_override, ps_data, device)
+            run_eps_file(ctx, dpi_override, ps_data, device, filename)
         } else {
             // Regular PS file — run as-is (DOS header still stripped)
             if job_idx == 0 {
                 install_device(ctx, dpi_override, device);
             }
-            parse_and_exec(ctx, ps_data)
+            parse_and_exec_file(ctx, ps_data, filename)
         };
 
         // Wait for any pipelined background render to complete before timing
@@ -647,6 +647,7 @@ fn run_eps_file(
     dpi_override: Option<f64>,
     ps_data: &[u8],
     device: &str,
+    filename: &str,
 ) -> Result<(), stet_core::error::PsError> {
     if let Some((llx, lly, urx, ury)) = read_eps_bounding_box(ps_data) {
         let w = urx - llx;
@@ -657,14 +658,14 @@ fn run_eps_file(
             // Translate origin if bbox doesn't start at (0,0)
             let wrapper = format!("gsave {} {} translate", -llx, -lly);
             parse_and_exec(ctx, wrapper.as_bytes())?;
-            parse_and_exec(ctx, ps_data)?;
+            parse_and_exec_file(ctx, ps_data, filename)?;
             parse_and_exec(ctx, b"grestore showpage")?;
             return Ok(());
         }
     }
     // No valid bbox — use default page size, add showpage
     install_device(ctx, dpi_override, device);
-    parse_and_exec(ctx, ps_data)?;
+    parse_and_exec_file(ctx, ps_data, filename)?;
     parse_and_exec(ctx, b"showpage")
 }
 
