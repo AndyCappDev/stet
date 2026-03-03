@@ -13,13 +13,13 @@ use stet_core::object::{PsObject, PsValue};
 
 /// Compute the scale factor of a CTM for converting user-space line widths to device space.
 /// Uses the length of the first column vector (X-axis scale factor).
-fn ctm_scale_factor(ctm: &Matrix) -> f64 {
+pub(crate) fn ctm_scale_factor(ctm: &Matrix) -> f64 {
     (ctm.a * ctm.a + ctm.b * ctm.b).sqrt()
 }
 
 /// Compute SVD singular values of the 2x2 matrix portion of the CTM.
 /// Returns `(s_max, s_min)` — the maximum and minimum singular values.
-fn ctm_singular_values(ctm: &Matrix) -> (f64, f64) {
+pub(crate) fn ctm_singular_values(ctm: &Matrix) -> (f64, f64) {
     let a = ctm.a;
     let b = ctm.b;
     let c = ctm.c;
@@ -34,7 +34,7 @@ fn ctm_singular_values(ctm: &Matrix) -> (f64, f64) {
 
 /// Check if CTM has anisotropic scaling (non-uniform in X vs Y).
 /// Uses the ratio of SVD singular values, matching PostForge's threshold.
-fn is_anisotropic(ctm: &Matrix) -> bool {
+pub(crate) fn is_anisotropic(ctm: &Matrix) -> bool {
     let (s_max, s_min) = ctm_singular_values(ctm);
     let det = (ctm.a * ctm.d - ctm.b * ctm.c).abs();
     s_min > 1e-10 && s_max / s_min > 1.01 && det > 1e-10
@@ -150,8 +150,31 @@ pub fn op_eofill(ctx: &mut Context) -> Result<(), PsError> {
 /// X/Y scaling), inverse-transform the path back to user space and pass the
 /// actual CTM to the device so it handles direction-dependent stroke widths.
 pub fn op_stroke(ctx: &mut Context) -> Result<(), PsError> {
+    if use_native_stroke(ctx) {
+        stroke_native(ctx)
+    } else {
+        stroke_via_strokepath(ctx)
+    }
+}
+
+/// Check pagedevice StrokeMethod: /NativeStroke uses tiny-skia, /StrokePathFill
+/// (default) uses strokepath+fill.
+fn use_native_stroke(ctx: &Context) -> bool {
+    use stet_core::dict::DictKey;
+    if let Some(pd) = ctx.gstate.page_device
+        && let Some(name_id) = ctx.names.find(b"StrokeMethod")
+        && let Some(obj) = ctx.dicts.get(pd, &DictKey::Name(name_id))
+    {
+        if let PsValue::Name(nid) = obj.value {
+            return ctx.names.get_bytes(nid) == b"NativeStroke";
+        }
+    }
+    false // default: StrokePathFill
+}
+
+/// Native stroke: emit DisplayElement::Stroke for tiny-skia to render.
+fn stroke_native(ctx: &mut Context) -> Result<(), PsError> {
     if is_anisotropic(&ctx.gstate.ctm) {
-        // Anisotropic: inverse-transform path to user space, pass CTM to device
         if let Some(inv_ctm) = ctx.gstate.ctm.invert() {
             let user_path = inverse_transform_path(&ctx.gstate.path, &inv_ctm);
             let params = StrokeParams {
@@ -170,7 +193,6 @@ pub fn op_stroke(ctx: &mut Context) -> Result<(), PsError> {
             });
         }
     } else {
-        // Isotropic: use single scale factor, pass identity transform
         let scale = ctm_scale_factor(&ctx.gstate.ctm);
         let params = StrokeParams {
             color: ctx.gstate.color.clone(),
@@ -199,6 +221,19 @@ pub fn op_stroke(ctx: &mut Context) -> Result<(), PsError> {
     ctx.gstate.path.clear();
     ctx.gstate.current_point = None;
     Ok(())
+}
+
+/// StrokePathFill: convert stroke to filled outline via strokepath, then fill.
+/// Clamps line width to minimum 1 device pixel so thin lines remain visible.
+fn stroke_via_strokepath(ctx: &mut Context) -> Result<(), PsError> {
+    // Clamp line width to at least 1 device pixel
+    let scale = ctm_scale_factor(&ctx.gstate.ctm);
+    let device_width = ctx.gstate.line_width * scale;
+    if device_width < 1.0 && device_width > 1e-12 {
+        ctx.gstate.line_width = 1.0 / scale;
+    }
+    crate::path_query_ops::op_strokepath(ctx)?;
+    op_fill(ctx)
 }
 
 /// `rectfill`: x y width height → —

@@ -337,12 +337,222 @@ fn reverse_subpath(segments: &[PathSegment], result: &mut Vec<PathSegment>) {
     }
 }
 
-/// `strokepath`: — → — (replace path with stroked outline — simplified stub)
-pub fn op_strokepath(_ctx: &mut Context) -> Result<(), PsError> {
-    // Full strokepath requires computing the stroke outline, which is complex.
-    // For now, provide a simplified stub that leaves the path unchanged.
-    // This is sufficient for tiger.ps which doesn't use strokepath.
+/// `strokepath`: — → — (replace current path with its stroked outline)
+///
+/// Replaces the current path with a path that outlines the area that would
+/// be painted by `stroke` using the current graphics state parameters.
+pub fn op_strokepath(ctx: &mut Context) -> Result<(), PsError> {
+    use crate::paint_ops::{ctm_singular_values, is_anisotropic};
+    use crate::strokepath_algorithm as algo;
+
+
+    if ctx.gstate.path.is_empty() {
+        return Ok(());
+    }
+
+    let line_width = ctx.gstate.line_width;
+    let line_cap = ctx.gstate.line_cap as i32;
+    let line_join = ctx.gstate.line_join as i32;
+    let miter_limit = ctx.gstate.miter_limit;
+    let dash_array = ctx.gstate.dash_pattern.array.clone();
+    let dash_offset = ctx.gstate.dash_pattern.offset;
+
+    let ctm = ctx.gstate.ctm;
+    let a = ctm.a;
+    let b = ctm.b;
+    let c = ctm.c;
+    let d = ctm.d;
+    let tx = ctm.tx;
+    let ty = ctm.ty;
+    let det = a * d - b * c;
+
+    let anisotropic = is_anisotropic(&ctm);
+
+    // Convert PS path to algorithm format (list of subpaths)
+    let mut algo_path = ps_path_to_algo(&ctx.gstate.path);
+
+    let groups = if anisotropic {
+        // Anisotropic path: transform to user space, stroke there, transform back
+        let inv_a = d / det;
+        let inv_b = -b / det;
+        let inv_c = -c / det;
+        let inv_d = a / det;
+
+        let user_path = algo::transform_algo_path(&algo_path, inv_a, inv_b, inv_c, inv_d, tx, ty);
+
+        let (s_max, _s_min) = ctm_singular_values(&ctm);
+        let min_user_lw = if s_max > 0.0 { 1.0 / s_max } else { 1.0 };
+        let mut user_lw = line_width.max(min_user_lw);
+        if user_lw < 1e-12 {
+            user_lw = min_user_lw;
+        }
+
+        let da = if dash_array.is_empty() {
+            None
+        } else {
+            Some(dash_array.as_slice())
+        };
+
+        let groups = algo::strokepath_grouped(
+            &user_path,
+            user_lw,
+            line_cap,
+            line_join,
+            miter_limit,
+            da,
+            dash_offset,
+            (user_lw * 0.05).min(0.1),
+        );
+
+        algo::transform_stroke_groups(&groups, a, b, c, d, tx, ty)
+    } else {
+        // Isotropic path: stroke in device space with pixel snapping
+        let scale = det.abs().sqrt().max(1e-12);
+
+        let mut device_line_width = line_width * scale;
+        if device_line_width < 1e-12 {
+            device_line_width = 1.0;
+        }
+
+        let device_dash_array: Vec<f64> = dash_array.iter().map(|v| v * scale).collect();
+        let device_dash_offset = dash_offset * scale;
+
+        // Pixel-snap path coordinates
+        let half_width = device_line_width / 2.0;
+        algo::snap_path_to_pixels(&mut algo_path, half_width);
+
+        let da = if device_dash_array.is_empty() {
+            None
+        } else {
+            Some(device_dash_array.as_slice())
+        };
+
+        algo::strokepath_grouped(
+            &algo_path,
+            device_line_width,
+            line_cap,
+            line_join,
+            miter_limit,
+            da,
+            device_dash_offset,
+            (device_line_width * 0.05).min(0.1),
+        )
+    };
+
+    // Convert result back to PS path
+    let new_path = algo_path_to_ps(&groups);
+
+    // Update current point to last point of new path
+    let new_cp = find_last_point(&new_path);
+
+    ctx.gstate.path = new_path;
+    ctx.gstate.current_point = new_cp;
+
     Ok(())
+}
+
+/// Convert PsPath → algorithm format (list of subpaths, each a Vec<PathElement>).
+fn ps_path_to_algo(ps_path: &PsPath) -> crate::strokepath_algorithm::Path {
+    use crate::strokepath_algorithm::PathElement as AE;
+
+    let mut result: Vec<Vec<AE>> = Vec::new();
+    let mut current_sp: Vec<AE> = Vec::new();
+
+    for seg in &ps_path.segments {
+        match seg {
+            PathSegment::MoveTo(x, y) => {
+                if !current_sp.is_empty() {
+                    result.push(std::mem::take(&mut current_sp));
+                }
+                current_sp.push(AE::MoveTo(*x, *y));
+            }
+            PathSegment::LineTo(x, y) => {
+                current_sp.push(AE::LineTo(*x, *y));
+            }
+            PathSegment::CurveTo {
+                x1,
+                y1,
+                x2,
+                y2,
+                x3,
+                y3,
+            } => {
+                current_sp.push(AE::CurveTo {
+                    x1: *x1,
+                    y1: *y1,
+                    x2: *x2,
+                    y2: *y2,
+                    x3: *x3,
+                    y3: *y3,
+                });
+            }
+            PathSegment::ClosePath => {
+                current_sp.push(AE::ClosePath);
+            }
+        }
+    }
+    if !current_sp.is_empty() {
+        result.push(current_sp);
+    }
+    result
+}
+
+/// Convert algorithm output (groups of subpaths) back to PsPath.
+fn algo_path_to_ps(groups: &[crate::strokepath_algorithm::Path]) -> PsPath {
+    use crate::strokepath_algorithm::PathElement as AE;
+
+    let mut path = PsPath::new();
+    for group in groups {
+        for sp in group {
+            for elem in sp {
+                match elem {
+                    AE::MoveTo(x, y) => {
+                        path.segments.push(PathSegment::MoveTo(*x, *y));
+                    }
+                    AE::LineTo(x, y) => {
+                        path.segments.push(PathSegment::LineTo(*x, *y));
+                    }
+                    AE::CurveTo {
+                        x1,
+                        y1,
+                        x2,
+                        y2,
+                        x3,
+                        y3,
+                    } => {
+                        path.segments.push(PathSegment::CurveTo {
+                            x1: *x1,
+                            y1: *y1,
+                            x2: *x2,
+                            y2: *y2,
+                            x3: *x3,
+                            y3: *y3,
+                        });
+                    }
+                    AE::ClosePath => {
+                        path.segments.push(PathSegment::ClosePath);
+                    }
+                }
+            }
+        }
+    }
+    path
+}
+
+/// Find the last point in a path for currentpoint update.
+fn find_last_point(path: &PsPath) -> Option<(f64, f64)> {
+    for seg in path.segments.iter().rev() {
+        match seg {
+            PathSegment::MoveTo(x, y) | PathSegment::LineTo(x, y) => {
+                return Some((*x, *y));
+            }
+            PathSegment::CurveTo { x3, y3, .. } => {
+                return Some((*x3, *y3));
+            }
+            PathSegment::ClosePath => {}
+        }
+    }
+    None
 }
 
 /// `pathforall`: moveproc lineproc curveproc closeproc → —

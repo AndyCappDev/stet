@@ -110,7 +110,6 @@ fn main() {
 
     match device.as_str() {
         "png" => {
-            let dpi = dpi.unwrap_or(300.0);
             run_png_mode(dpi, file_args);
         }
         #[cfg(feature = "viewer")]
@@ -129,14 +128,14 @@ fn main() {
 }
 
 /// Run in PNG output mode (existing behavior).
-fn run_png_mode(dpi: f64, file_args: Vec<String>) {
+fn run_png_mode(dpi_override: Option<f64>, file_args: Vec<String>) {
     let mut ctx = create_context();
 
     // Register device factory (before setpagedevice)
     ctx.device_factory = Some(Box::new(|w, h| Box::new(SkiaDevice::new(w, h))));
 
     if !file_args.is_empty() {
-        run_file_jobs(&mut ctx, dpi, &file_args, "png", None);
+        run_file_jobs(&mut ctx, dpi_override, &file_args, "png", None);
     } else {
         run_repl(&mut ctx);
     }
@@ -184,14 +183,8 @@ fn run_viewer_mode(dpi_override: Option<f64>, file_args: Vec<String>) {
     });
 
     // Spawn interpreter thread
-    let screen_info_receiver = interp_end.screen_info_receiver;
+    let _screen_info_receiver = interp_end.screen_info_receiver;
     std::thread::spawn(move || {
-        // Wait for the viewer to send screen info (monitor size or DPI override).
-        let screen_info = match screen_info_receiver.recv() {
-            Ok(info) => info,
-            Err(_) => return, // Viewer closed before sending info
-        };
-
         let mut ctx = create_context();
 
         // Set display_list_sender for incremental delivery at each showpage
@@ -202,8 +195,8 @@ fn run_viewer_mode(dpi_override: Option<f64>, file_args: Vec<String>) {
             Box::new(NullDevice::new(w, h))
         }));
 
-        // Run jobs (non-blocking — no viewer wait time to track)
-        run_file_jobs_viewer(&mut ctx, screen_info, &file_args);
+        // DPI comes from viewer.ps HWResolution by default, --dpi overrides
+        run_file_jobs_viewer(&mut ctx, dpi_override, &file_args);
         // ctx drops here → display_list_sender drops → relay thread ends
     });
 
@@ -234,29 +227,17 @@ fn create_context() -> Context {
     ctx
 }
 
-/// Calculate DPI from screen info and page height in points.
-#[cfg(feature = "viewer")]
-fn dpi_from_screen_info(screen_info: &stet_viewer::ScreenInfo, page_height_pts: f64) -> f64 {
-    match screen_info {
-        stet_viewer::ScreenInfo::DpiOverride(dpi) => *dpi,
-        stet_viewer::ScreenInfo::AvailableHeight(available_h) => {
-            let dpi = (available_h * 72.0 / page_height_pts).floor();
-            dpi.clamp(36.0, 9600.0)
-        }
-    }
-}
 
-/// Default page height in points (US Letter).
-const DEFAULT_PAGE_HEIGHT_PTS: f64 = 792.0;
-
-/// Run file jobs in viewer mode, calculating DPI per-job based on actual page size.
+/// Run file jobs in viewer mode.
 ///
 /// Uses NullDevice — no rendering happens here. Display lists are sent to the
 /// viewer via `Context.display_list_sender` at each showpage.
+/// DPI comes from the viewer.ps pagedevice HWResolution by default,
+/// overridden only by explicit `--dpi` flag.
 #[cfg(feature = "viewer")]
 fn run_file_jobs_viewer(
     ctx: &mut Context,
-    screen_info: stet_viewer::ScreenInfo,
+    dpi_override: Option<f64>,
     file_args: &[String],
 ) {
     let num_jobs = file_args.len();
@@ -301,24 +282,13 @@ fn run_file_jobs_viewer(
         let ps_data = strip_dos_eps_header(&source);
         let is_eps = filename_lower.ends_with(".eps") || filename_lower.ends_with(".epsf");
 
-        // Calculate DPI based on actual page height (from BoundingBox for EPS)
-        let page_height = if is_eps {
-            read_eps_bounding_box(ps_data)
-                .map(|(_, lly, _, ury)| ury - lly)
-                .filter(|h| *h > 0.0)
-                .unwrap_or(DEFAULT_PAGE_HEIGHT_PTS)
-        } else {
-            DEFAULT_PAGE_HEIGHT_PTS
-        };
-        let dpi = dpi_from_screen_info(&screen_info, page_height);
-
         let job_start = std::time::Instant::now();
 
         let exec_result = if is_eps {
-            run_eps_file(ctx, dpi, ps_data, "viewer")
+            run_eps_file(ctx, dpi_override, ps_data, "viewer")
         } else {
             if job_idx == 0 {
-                install_device(ctx, dpi, "viewer");
+                install_device(ctx, dpi_override, "viewer");
             }
             parse_and_exec(ctx, ps_data)
         };
@@ -379,7 +349,7 @@ fn run_file_jobs_viewer(
 /// waiting for user input — subtracted from job timing.
 fn run_file_jobs(
     ctx: &mut Context,
-    dpi: f64,
+    dpi_override: Option<f64>,
     file_args: &[String],
     device: &str,
     viewer_wait: Option<&std::sync::Arc<std::sync::atomic::AtomicU64>>,
@@ -432,11 +402,11 @@ fn run_file_jobs(
             .unwrap_or(0);
 
         let exec_result = if is_eps {
-            run_eps_file(ctx, dpi, ps_data, device)
+            run_eps_file(ctx, dpi_override, ps_data, device)
         } else {
             // Regular PS file — run as-is (DOS header still stripped)
             if job_idx == 0 {
-                install_device(ctx, dpi, device);
+                install_device(ctx, dpi_override, device);
             }
             parse_and_exec(ctx, ps_data)
         };
@@ -627,21 +597,31 @@ fn sync_context_after_init(ctx: &mut Context) {
 }
 
 /// Install the output device via `setpagedevice`.
-fn install_device(ctx: &mut Context, dpi: f64, device: &str) {
+///
+/// If `dpi_override` is `Some`, overwrite the device's HWResolution.
+/// Otherwise, use the HWResolution from the device's .ps resource file.
+fn install_device(ctx: &mut Context, dpi_override: Option<f64>, device: &str) {
     let resource_name = match device {
         "viewer" => "viewer",
         _ => "png",
     };
-    let setup = format!(
-        "/{} /OutputDevice findresource dup /HWResolution [{1} {1}] put setpagedevice",
-        resource_name, dpi
-    );
+    let setup = if let Some(dpi) = dpi_override {
+        format!(
+            "/{} /OutputDevice findresource dup /HWResolution [{1} {1}] put setpagedevice",
+            resource_name, dpi
+        )
+    } else {
+        format!(
+            "/{} /OutputDevice findresource setpagedevice",
+            resource_name
+        )
+    };
     if let Err(e) = parse_and_exec(ctx, setup.as_bytes()) {
         eprintln!(
             "Warning: setpagedevice via resource failed ({}), using fallback",
             e
         );
-        install_device_fallback(ctx, dpi);
+        install_device_fallback(ctx, dpi_override.unwrap_or(300.0));
     }
 }
 
@@ -664,7 +644,7 @@ fn install_device_fallback(ctx: &mut Context, dpi: f64) {
 /// Run an EPS file with BoundingBox page sizing and automatic `showpage`.
 fn run_eps_file(
     ctx: &mut Context,
-    dpi: f64,
+    dpi_override: Option<f64>,
     ps_data: &[u8],
     device: &str,
 ) -> Result<(), stet_core::error::PsError> {
@@ -673,7 +653,7 @@ fn run_eps_file(
         let h = ury - lly;
         if w > 0.0 && h > 0.0 {
             // Install device with EPS bounding box dimensions
-            install_device_with_size(ctx, dpi, w, h, device);
+            install_device_with_size(ctx, dpi_override, w, h, device);
             // Translate origin if bbox doesn't start at (0,0)
             let wrapper = format!("gsave {} {} translate", -llx, -lly);
             parse_and_exec(ctx, wrapper.as_bytes())?;
@@ -683,28 +663,41 @@ fn run_eps_file(
         }
     }
     // No valid bbox — use default page size, add showpage
-    install_device(ctx, dpi, device);
+    install_device(ctx, dpi_override, device);
     parse_and_exec(ctx, ps_data)?;
     parse_and_exec(ctx, b"showpage")
 }
 
 /// Install the device with a custom page size (for EPS bounding boxes).
-fn install_device_with_size(ctx: &mut Context, dpi: f64, width: f64, height: f64, device: &str) {
+fn install_device_with_size(
+    ctx: &mut Context,
+    dpi_override: Option<f64>,
+    width: f64,
+    height: f64,
+    device: &str,
+) {
     let resource_name = match device {
         "viewer" => "viewer",
         _ => "png",
     };
-    let setup = format!(
-        "/{} /OutputDevice findresource dup /HWResolution [{1} {1}] put \
-         dup /PageSize [{2} {3}] put setpagedevice",
-        resource_name, dpi, width, height
-    );
+    let setup = if let Some(dpi) = dpi_override {
+        format!(
+            "/{} /OutputDevice findresource dup /HWResolution [{1} {1}] put \
+             dup /PageSize [{2} {3}] put setpagedevice",
+            resource_name, dpi, width, height
+        )
+    } else {
+        format!(
+            "/{} /OutputDevice findresource dup /PageSize [{} {}] put setpagedevice",
+            resource_name, width, height
+        )
+    };
     if let Err(e) = parse_and_exec(ctx, setup.as_bytes()) {
         eprintln!(
             "Warning: setpagedevice with size failed ({}), using fallback",
             e
         );
-        install_device_fallback(ctx, dpi);
+        install_device_fallback(ctx, dpi_override.unwrap_or(300.0));
     }
 }
 

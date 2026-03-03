@@ -30,6 +30,7 @@ pub mod relational_ops;
 pub mod resource_ops;
 pub mod shading_ops;
 pub mod show_ops;
+pub mod strokepath_algorithm;
 pub mod stack_ops;
 pub mod string_ops;
 pub mod type_ops;
