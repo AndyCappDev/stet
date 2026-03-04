@@ -72,14 +72,15 @@ pub fn op_astore(ctx: &mut Context) -> Result<(), PsError> {
     }
 
     // VM access check: if array is global, all elements must be non-composite or global
-    if arr.flags.is_global() {
+    // Use entity tag bit (authoritative) rather than PsObject flags
+    if entity.is_global() {
         let slice = ctx.o_stack.as_slice();
         // Elements are below the array on the stack: slice[..slice.len()-1] top-to-bottom
         // The array is at the top (index slice.len()-1), elements are below it
         let arr_idx = slice.len() - 1;
         for i in 0..len as usize {
             let elem = &slice[arr_idx - 1 - i];
-            if elem.is_composite() && !elem.flags.is_global() {
+            if elem.is_composite() && !elem.is_global_vm() {
                 return Err(PsError::InvalidAccess);
             }
         }
@@ -121,6 +122,15 @@ pub fn op_array_from_mark(ctx: &mut Context) -> Result<(), PsError> {
     // Collect elements above the mark
     let elements: Vec<PsObject> = slice[mark_pos + 1..].to_vec();
 
+    // VM access check: if allocating in global mode, all elements must be non-composite or global
+    if ctx.vm_alloc_mode {
+        for elem in &elements {
+            if elem.is_composite() && !elem.is_global_vm() {
+                return Err(PsError::InvalidAccess);
+            }
+        }
+    }
+
     // Pop all elements + mark
     ctx.o_stack.truncate(mark_pos);
 
@@ -151,6 +161,16 @@ pub fn op_dict_from_mark(ctx: &mut Context) -> Result<(), PsError> {
     }
 
     let pairs: Vec<PsObject> = slice[mark_pos + 1..].to_vec();
+
+    // VM access check: if allocating in global mode, all values must be non-composite or global
+    if ctx.vm_alloc_mode {
+        for chunk in pairs.chunks(2) {
+            if chunk[1].is_composite() && !chunk[1].is_global_vm() {
+                return Err(PsError::InvalidAccess);
+            }
+        }
+    }
+
     ctx.o_stack.truncate(mark_pos);
 
     let dict_entity = crate::vm_ops::alloc_dict(ctx, n_elements / 2, b"");

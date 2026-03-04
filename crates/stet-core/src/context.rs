@@ -270,17 +270,17 @@ impl Context {
         // Only systemdict is pre-allocated in Rust — it's needed to register native
         // operators. All other well-known dicts (globaldict, userdict, errordict, $error,
         // FontDirectory) are created by the init scripts in sysdict.ps.
-        let systemdict = dicts.allocate_with(400, b"systemdict", 0, true);
-        let globaldict = dicts.allocate_with(100, b"globaldict", 0, true);
+        let systemdict = dicts.allocate_with(400, b"systemdict", 0, true, 0);
+        let globaldict = dicts.allocate_with(100, b"globaldict", 0, true, 0);
         let userdict = dicts.allocate(200, b"userdict");
         let errordict = dicts.allocate(50, b"errordict");
         let dollar_error = dicts.allocate(20, b"$error");
         let font_directory = dicts.allocate(50, b"FontDirectory");
 
         // Resource system dicts (global VM)
-        let global_resources = dicts.allocate_with(20, b"GlobalResources", 0, true);
+        let global_resources = dicts.allocate_with(20, b"GlobalResources", 0, true, 0);
         let local_resources = dicts.allocate(20, b"LocalResources");
-        let category_registry = dicts.allocate_with(30, b"CategoryRegistry", 0, true);
+        let category_registry = dicts.allocate_with(30, b"CategoryRegistry", 0, true, 0);
 
         // Parameter dicts — pre-populate user_params with recognized keys
         // (matching PostForge context_init.py). setuserparams only updates
@@ -878,7 +878,8 @@ impl Context {
             Token::String(bytes) => {
                 let save_level = self.save_stack.current_level();
                 let global = self.vm_alloc_mode;
-                let entity = self.strings.allocate_with(bytes.len(), save_level, global);
+                let created = self.save_stack.last_save_id();
+                let entity = self.strings.allocate_with(bytes.len(), save_level, global, created);
                 self.strings
                     .get_mut(entity, 0, bytes.len() as u32)
                     .copy_from_slice(&bytes);

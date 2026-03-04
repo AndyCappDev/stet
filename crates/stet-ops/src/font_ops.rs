@@ -372,9 +372,10 @@ pub fn op_composefont(ctx: &mut Context) -> Result<(), PsError> {
     // Build Type 0 font dictionary
     let save_level = ctx.save_stack.current_level();
     let global = ctx.vm_alloc_mode;
+    let created = ctx.save_stack.last_save_id();
     let font_entity = ctx
         .dicts
-        .allocate_with(12, b"type0font", save_level, global);
+        .allocate_with(12, b"type0font", save_level, global, created);
 
     // FontType 0
     let ft_key = DictKey::Name(ctx.name_cache.n_font_type);
@@ -386,7 +387,7 @@ pub fn op_composefont(ctx: &mut Context) -> Result<(), PsError> {
         .put(font_entity, DictKey::Name(fmap_id), PsObject::int(9));
 
     // FontMatrix [1 0 0 1 0 0] (identity)
-    let fm_entity = ctx.arrays.allocate_with(6, save_level, global);
+    let fm_entity = ctx.arrays.allocate_with(6, save_level, global, created);
     let fm_data = ctx.arrays.get_mut(fm_entity, 0, 6);
     fm_data[0] = PsObject::real(1.0);
     fm_data[1] = PsObject::real(0.0);
@@ -400,7 +401,7 @@ pub fn op_composefont(ctx: &mut Context) -> Result<(), PsError> {
 
     // Encoding: identity [0, 1, 2, ...]
     let enc_len = resolved_fonts.len();
-    let enc_entity = ctx.arrays.allocate_with(enc_len, save_level, global);
+    let enc_entity = ctx.arrays.allocate_with(enc_len, save_level, global, created);
     let enc_data = ctx.arrays.get_mut(enc_entity, 0, enc_len as u32);
     for (i, slot) in enc_data.iter_mut().enumerate() {
         *slot = PsObject::int(i as i32);
@@ -415,7 +416,7 @@ pub fn op_composefont(ctx: &mut Context) -> Result<(), PsError> {
     // FDepVector: the resolved fonts
     let fdep_entity_new = ctx
         .arrays
-        .allocate_with(resolved_fonts.len(), save_level, global);
+        .allocate_with(resolved_fonts.len(), save_level, global, created);
     let fdep_data = ctx
         .arrays
         .get_mut(fdep_entity_new, 0, resolved_fonts.len() as u32);

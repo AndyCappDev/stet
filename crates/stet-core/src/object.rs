@@ -414,6 +414,19 @@ impl PsObject {
         self.flags.is_composite()
     }
 
+    /// Check if this object is in global VM using authoritative entity tag bits
+    /// for composite types, falling back to ObjFlags for simple types.
+    pub fn is_global_vm(&self) -> bool {
+        match self.value {
+            PsValue::Dict(e) => e.is_global(),
+            PsValue::Array { entity, .. } | PsValue::PackedArray { entity, .. } => {
+                entity.is_global()
+            }
+            PsValue::String { entity, .. } => entity.is_global(),
+            _ => self.flags.is_global(),
+        }
+    }
+
     /// PostScript type name as bytes (e.g. `b"integertype"`).
     pub fn type_name(&self) -> &'static [u8] {
         match self.value {

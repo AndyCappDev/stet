@@ -22,6 +22,10 @@ pub struct EntityMeta {
     pub save_level: u16,
     /// Bit 0: is_global, Bit 1: gc_mark (reserved for future use).
     pub flags: u8,
+    /// Save ID that was active when this entity was created (0 = before any save).
+    /// Used for invalidrestore: entities with created_after_save >= target_save_id
+    /// are "newer than the snapshot being restored."
+    pub created_after_save: u32,
 }
 
 impl EntityMeta {
@@ -57,7 +61,14 @@ impl EntityTable {
 
     /// Allocate a new entity, returning its `EntityId`.
     /// The returned EntityId is tagged with the global bit based on the `global` param.
-    pub fn allocate(&mut self, offset: u32, len: u32, save_level: u16, global: bool) -> EntityId {
+    pub fn allocate(
+        &mut self,
+        offset: u32,
+        len: u32,
+        save_level: u16,
+        global: bool,
+        created_after_save: u32,
+    ) -> EntityId {
         let index = self.entries.len() as u32;
         let id = if global {
             EntityId::global(index)
@@ -73,6 +84,7 @@ impl EntityTable {
             len,
             save_level,
             flags,
+            created_after_save,
         });
         id
     }
@@ -112,7 +124,7 @@ mod tests {
     #[test]
     fn test_allocate_and_get() {
         let mut table = EntityTable::new();
-        let id = table.allocate(0, 10, 0, false);
+        let id = table.allocate(0, 10, 0, false, 0);
         assert_eq!(id, EntityId::local(0));
         assert!(!id.is_global());
         let meta = table.get(id);
@@ -125,8 +137,8 @@ mod tests {
     #[test]
     fn test_multiple_allocations() {
         let mut table = EntityTable::new();
-        let id0 = table.allocate(0, 5, 0, false);
-        let id1 = table.allocate(5, 10, 0, true);
+        let id0 = table.allocate(0, 5, 0, false, 0);
+        let id1 = table.allocate(5, 10, 0, true, 0);
         assert_eq!(id0, EntityId::local(0));
         assert_eq!(id1, EntityId::global(1));
         assert_eq!(table.len(), 2);
@@ -137,7 +149,7 @@ mod tests {
     #[test]
     fn test_get_mut() {
         let mut table = EntityTable::new();
-        let id = table.allocate(0, 5, 0, false);
+        let id = table.allocate(0, 5, 0, false, 0);
         table.get_mut(id).offset = 100;
         assert_eq!(table.get(id).offset, 100);
     }
@@ -145,7 +157,7 @@ mod tests {
     #[test]
     fn test_global_flag() {
         let mut table = EntityTable::new();
-        let id = table.allocate(0, 5, 0, false);
+        let id = table.allocate(0, 5, 0, false, 0);
         assert!(!table.get(id).is_global());
         table.get_mut(id).set_global(true);
         assert!(table.get(id).is_global());
@@ -156,7 +168,7 @@ mod tests {
     #[test]
     fn test_save_level_tracking() {
         let mut table = EntityTable::new();
-        let id = table.allocate(0, 5, 1, false);
+        let id = table.allocate(0, 5, 1, false, 0);
         assert_eq!(table.get(id).save_level, 1);
         table.get_mut(id).save_level = 2;
         assert_eq!(table.get(id).save_level, 2);
@@ -178,9 +190,9 @@ mod tests {
     #[test]
     fn test_len_after_allocations() {
         let mut table = EntityTable::new();
-        table.allocate(0, 1, 0, false);
-        table.allocate(1, 2, 0, false);
-        table.allocate(3, 3, 0, false);
+        table.allocate(0, 1, 0, false, 0);
+        table.allocate(1, 2, 0, false, 0);
+        table.allocate(3, 3, 0, false, 0);
         assert_eq!(table.len(), 3);
         assert!(!table.is_empty());
     }

@@ -55,11 +55,14 @@ impl DualDictStore {
         name: &[u8],
         save_level: u16,
         global: bool,
+        created_after_save: u32,
     ) -> EntityId {
         if global {
-            self.global.allocate_with(max_length, name, save_level, global)
+            self.global
+                .allocate_with(max_length, name, save_level, global, created_after_save)
         } else {
-            self.local.allocate_with(max_length, name, save_level, global)
+            self.local
+                .allocate_with(max_length, name, save_level, global, created_after_save)
         }
     }
 

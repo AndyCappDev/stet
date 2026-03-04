@@ -30,14 +30,15 @@ impl ArrayStore {
     pub fn allocate(&mut self, len: usize) -> EntityId {
         let offset = self.data.len() as u32;
         self.data.resize(self.data.len() + len, PsObject::null());
-        self.entities.allocate(offset, len as u32, 0, false)
+        self.entities.allocate(offset, len as u32, 0, false, 0)
     }
 
     /// Allocate and copy `items` into the store.
     pub fn allocate_from(&mut self, items: &[PsObject]) -> EntityId {
         let offset = self.data.len() as u32;
         self.data.extend_from_slice(items);
-        self.entities.allocate(offset, items.len() as u32, 0, false)
+        self.entities
+            .allocate(offset, items.len() as u32, 0, false, 0)
     }
 
     /// Allocate and copy `items` with a specific save level and global flag.
@@ -46,19 +47,26 @@ impl ArrayStore {
         items: &[PsObject],
         save_level: u16,
         global: bool,
+        created_after_save: u32,
     ) -> EntityId {
         let offset = self.data.len() as u32;
         self.data.extend_from_slice(items);
         self.entities
-            .allocate(offset, items.len() as u32, save_level, global)
+            .allocate(offset, items.len() as u32, save_level, global, created_after_save)
     }
 
     /// Allocate with a specific save level and global flag.
-    pub fn allocate_with(&mut self, len: usize, save_level: u16, global: bool) -> EntityId {
+    pub fn allocate_with(
+        &mut self,
+        len: usize,
+        save_level: u16,
+        global: bool,
+        created_after_save: u32,
+    ) -> EntityId {
         let offset = self.data.len() as u32;
         self.data.resize(self.data.len() + len, PsObject::null());
         self.entities
-            .allocate(offset, len as u32, save_level, global)
+            .allocate(offset, len as u32, save_level, global, created_after_save)
     }
 
     /// Get a slice of array elements via entity table indirection.
@@ -95,6 +103,7 @@ impl ArrayStore {
         let len = meta.len;
         let save_level = meta.save_level;
         let is_global = meta.is_global();
+        let created_after_save = meta.created_after_save;
 
         let temp: Vec<PsObject> = self.data[old_offset..old_offset + len as usize].to_vec();
         let new_offset = self.data.len() as u32;
@@ -106,6 +115,7 @@ impl ArrayStore {
             len,
             save_level,
             is_global,
+            created_after_save,
         );
 
         // Original entity now points to new copy

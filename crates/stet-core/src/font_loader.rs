@@ -113,11 +113,12 @@ pub fn load_type1_font(ctx: &mut Context, font_data: &[u8]) -> Result<PsObject, 
 
     let save_level = ctx.save_stack.current_level();
     let global = ctx.vm_alloc_mode;
+    let created = ctx.save_stack.last_save_id();
 
     // Create the font dictionary (respects current VM allocation mode)
     let font_dict = ctx
         .dicts
-        .allocate_with(30, font.font_name.as_bytes(), save_level, global);
+        .allocate_with(30, font.font_name.as_bytes(), save_level, global, created);
 
     // /FontName → name object
     let name_id = ctx.names.intern(font.font_name.as_bytes());
@@ -140,7 +141,7 @@ pub fn load_type1_font(ctx: &mut Context, font_data: &[u8]) -> Result<PsObject, 
         .iter()
         .map(|&v| PsObject::real(v))
         .collect();
-    let fm_entity = ctx.arrays.allocate_from_with(&fm_items, save_level, global);
+    let fm_entity = ctx.arrays.allocate_from_with(&fm_items, save_level, global, created);
     ctx.dicts.put(
         font_dict,
         DictKey::Name(ctx.name_cache.n_font_matrix),
@@ -149,7 +150,7 @@ pub fn load_type1_font(ctx: &mut Context, font_data: &[u8]) -> Result<PsObject, 
 
     // /FontBBox → array of 4 reals
     let bb_items: Vec<PsObject> = font.font_bbox.iter().map(|&v| PsObject::real(v)).collect();
-    let bb_entity = ctx.arrays.allocate_from_with(&bb_items, save_level, global);
+    let bb_entity = ctx.arrays.allocate_from_with(&bb_items, save_level, global, created);
     ctx.dicts.put(
         font_dict,
         DictKey::Name(ctx.name_cache.n_font_bbox),
@@ -174,7 +175,7 @@ pub fn load_type1_font(ctx: &mut Context, font_data: &[u8]) -> Result<PsObject, 
         .collect();
     let enc_entity = ctx
         .arrays
-        .allocate_from_with(&enc_items, save_level, global);
+        .allocate_from_with(&enc_items, save_level, global, created);
     ctx.dicts.put(
         font_dict,
         DictKey::Name(ctx.name_cache.n_encoding),
@@ -187,10 +188,11 @@ pub fn load_type1_font(ctx: &mut Context, font_data: &[u8]) -> Result<PsObject, 
         b"CharStrings",
         save_level,
         global,
+        created,
     );
     for (glyph_name, bytes) in &font.charstrings {
         let glyph_name_id = ctx.names.intern(glyph_name.as_bytes());
-        let str_entity = ctx.strings.allocate_from_with(bytes, save_level, global);
+        let str_entity = ctx.strings.allocate_from_with(bytes, save_level, global, created);
         let str_obj = PsObject::string(str_entity, bytes.len() as u32);
         ctx.dicts
             .put(cs_dict, DictKey::Name(glyph_name_id), str_obj);
@@ -202,7 +204,7 @@ pub fn load_type1_font(ctx: &mut Context, font_data: &[u8]) -> Result<PsObject, 
     );
 
     // /Private → dict with lenIV and Subrs (standard Type 1 structure)
-    let priv_dict = ctx.dicts.allocate_with(10, b"Private", save_level, global);
+    let priv_dict = ctx.dicts.allocate_with(10, b"Private", save_level, global, created);
     ctx.dicts.put(
         priv_dict,
         DictKey::Name(ctx.name_cache.n_len_iv),
@@ -214,13 +216,13 @@ pub fn load_type1_font(ctx: &mut Context, font_data: &[u8]) -> Result<PsObject, 
         .subrs
         .iter()
         .map(|bytes| {
-            let entity = ctx.strings.allocate_from_with(bytes, save_level, global);
+            let entity = ctx.strings.allocate_from_with(bytes, save_level, global, created);
             PsObject::string(entity, bytes.len() as u32)
         })
         .collect();
     let subrs_entity = ctx
         .arrays
-        .allocate_from_with(&subr_items, save_level, global);
+        .allocate_from_with(&subr_items, save_level, global, created);
     ctx.dicts.put(
         priv_dict,
         DictKey::Name(ctx.name_cache.n_subrs),

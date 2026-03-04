@@ -452,7 +452,7 @@ pub fn op_globalresourcedict(ctx: &mut Context) -> Result<(), PsError> {
     }
 
     // Not found — create one and return it
-    let d = ctx.dicts.allocate_with(20, b"global_res_cat", 0, true);
+    let d = ctx.dicts.allocate_with(20, b"global_res_cat", 0, true, 0);
     ctx.dicts
         .put(ctx.global_resources, cat_key, PsObject::dict(d));
     ctx.o_stack.push(PsObject::dict(d))?;

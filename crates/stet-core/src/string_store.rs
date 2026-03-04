@@ -28,30 +28,43 @@ impl StringStore {
     pub fn allocate(&mut self, len: usize) -> EntityId {
         let offset = self.data.len() as u32;
         self.data.resize(self.data.len() + len, 0);
-        self.entities.allocate(offset, len as u32, 0, false)
+        self.entities.allocate(offset, len as u32, 0, false, 0)
     }
 
     /// Allocate and copy `bytes` into the store.
     pub fn allocate_from(&mut self, bytes: &[u8]) -> EntityId {
         let offset = self.data.len() as u32;
         self.data.extend_from_slice(bytes);
-        self.entities.allocate(offset, bytes.len() as u32, 0, false)
+        self.entities
+            .allocate(offset, bytes.len() as u32, 0, false, 0)
     }
 
     /// Allocate and copy `bytes` with a specific save level and global flag.
-    pub fn allocate_from_with(&mut self, bytes: &[u8], save_level: u16, global: bool) -> EntityId {
+    pub fn allocate_from_with(
+        &mut self,
+        bytes: &[u8],
+        save_level: u16,
+        global: bool,
+        created_after_save: u32,
+    ) -> EntityId {
         let offset = self.data.len() as u32;
         self.data.extend_from_slice(bytes);
         self.entities
-            .allocate(offset, bytes.len() as u32, save_level, global)
+            .allocate(offset, bytes.len() as u32, save_level, global, created_after_save)
     }
 
     /// Allocate with a specific save level and global flag.
-    pub fn allocate_with(&mut self, len: usize, save_level: u16, global: bool) -> EntityId {
+    pub fn allocate_with(
+        &mut self,
+        len: usize,
+        save_level: u16,
+        global: bool,
+        created_after_save: u32,
+    ) -> EntityId {
         let offset = self.data.len() as u32;
         self.data.resize(self.data.len() + len, 0);
         self.entities
-            .allocate(offset, len as u32, save_level, global)
+            .allocate(offset, len as u32, save_level, global, created_after_save)
     }
 
     /// Get a slice of the string data via entity table indirection.
@@ -89,6 +102,7 @@ impl StringStore {
         let len = meta.len;
         let save_level = meta.save_level;
         let is_global = meta.is_global();
+        let created_after_save = meta.created_after_save;
 
         // Copy data to a new region
         let temp: Vec<u8> = self.data[old_offset..old_offset + len as usize].to_vec();
@@ -101,6 +115,7 @@ impl StringStore {
             len,
             save_level,
             is_global,
+            created_after_save,
         );
 
         // Update the original entity to point at the NEW copy
@@ -207,7 +222,7 @@ mod tests {
     #[test]
     fn test_allocate_with_save_level() {
         let mut store = StringStore::new();
-        let id = store.allocate_with(5, 2, true);
+        let id = store.allocate_with(5, 2, true, 0);
         let meta = store.entities.get(id);
         assert_eq!(meta.save_level, 2);
         assert!(meta.is_global());

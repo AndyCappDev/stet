@@ -20,15 +20,23 @@ pub fn op_restore(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.o_stack.is_empty() {
         return Err(PsError::StackUnderflow);
     }
-    let obj = ctx.o_stack.peek(0)?;
-    let save_id = match obj.value {
+    let save_obj = ctx.o_stack.peek(0)?;
+    let save_id = match save_obj.value {
         PsValue::Save(SaveLevel(id)) => id,
         _ => return Err(PsError::TypeCheck),
     };
 
-    // INVALIDRESTORE check: scan stacks for local composites newer than save level
-    // For now, we do a simplified check — just validate the save_id
+    // Pop the save object before scanning stacks
     ctx.o_stack.pop()?;
+
+    // INVALIDRESTORE: scan stacks for local composites newer than the save being restored.
+    // Per PLRM 3.7.3.2: "If any of those objects is composite and its value is in local VM
+    // that is newer than the snapshot being restored, an invalidrestore error occurs."
+    if let Err(e) = check_invalidrestore(ctx, save_id) {
+        // Push save object back — PLRM says stacks are not altered on error
+        let _ = ctx.o_stack.push(save_obj);
+        return Err(e);
+    }
 
     // Capture clip version before restore so we can emit InitClip+Clip if it changed
     let old_clip_version = ctx.gstate.clip_path_version;
@@ -40,6 +48,50 @@ pub fn op_restore(ctx: &mut Context) -> Result<(), PsError> {
     crate::graphics_state_ops::restore_device_clip(ctx, old_clip_version);
 
     Ok(())
+}
+
+/// Check if any stack contains local composite objects newer than the save being restored.
+fn check_invalidrestore(ctx: &Context, save_id: u32) -> Result<(), PsError> {
+    // Check operand stack
+    for obj in ctx.o_stack.as_slice() {
+        if is_newer_local(ctx, obj, save_id) {
+            return Err(PsError::InvalidRestore);
+        }
+    }
+    // Check execution stack
+    for obj in ctx.e_stack.as_slice() {
+        if is_newer_local(ctx, obj, save_id) {
+            return Err(PsError::InvalidRestore);
+        }
+    }
+    // Check dict stack (skip systemdict and globaldict at bottom)
+    for &dict_entity in ctx.d_stack.iter().skip(2) {
+        if !dict_entity.is_global()
+            && ctx.dicts.entity_meta(dict_entity).created_after_save >= save_id
+        {
+            return Err(PsError::InvalidRestore);
+        }
+    }
+    Ok(())
+}
+
+/// Check if a single object is a local composite created after the given save.
+fn is_newer_local(ctx: &Context, obj: &PsObject, save_id: u32) -> bool {
+    match obj.value {
+        PsValue::Save(SaveLevel(sid)) => sid >= save_id,
+        PsValue::Dict(e) if !e.is_global() => {
+            ctx.dicts.entity_meta(e).created_after_save >= save_id
+        }
+        PsValue::Array { entity, .. } | PsValue::PackedArray { entity, .. }
+            if !entity.is_global() =>
+        {
+            ctx.arrays.entity_meta(entity).created_after_save >= save_id
+        }
+        PsValue::String { entity, .. } if !entity.is_global() => {
+            ctx.strings.entity_meta(entity).created_after_save >= save_id
+        }
+        _ => false,
+    }
 }
 
 /// `vmstatus`: — → level used max (report VM memory state)
@@ -115,7 +167,8 @@ pub fn op_vmreclaim(ctx: &mut Context) -> Result<(), PsError> {
 pub fn alloc_string(ctx: &mut Context, bytes: &[u8]) -> stet_core::object::EntityId {
     let save_level = ctx.save_stack.current_level();
     let global = ctx.vm_alloc_mode;
-    let entity = ctx.strings.allocate_with(bytes.len(), save_level, global);
+    let created = ctx.save_stack.last_save_id();
+    let entity = ctx.strings.allocate_with(bytes.len(), save_level, global, created);
     ctx.strings
         .get_mut(entity, 0, bytes.len() as u32)
         .copy_from_slice(bytes);
@@ -126,21 +179,24 @@ pub fn alloc_string(ctx: &mut Context, bytes: &[u8]) -> stet_core::object::Entit
 pub fn alloc_string_empty(ctx: &mut Context, len: usize) -> stet_core::object::EntityId {
     let save_level = ctx.save_stack.current_level();
     let global = ctx.vm_alloc_mode;
-    ctx.strings.allocate_with(len, save_level, global)
+    let created = ctx.save_stack.last_save_id();
+    ctx.strings.allocate_with(len, save_level, global, created)
 }
 
 /// Helper: allocate an array in the current VM mode.
 pub fn alloc_array(ctx: &mut Context, len: usize) -> stet_core::object::EntityId {
     let save_level = ctx.save_stack.current_level();
     let global = ctx.vm_alloc_mode;
-    ctx.arrays.allocate_with(len, save_level, global)
+    let created = ctx.save_stack.last_save_id();
+    ctx.arrays.allocate_with(len, save_level, global, created)
 }
 
 /// Helper: allocate an array from initial elements in the current VM mode.
 pub fn alloc_array_from(ctx: &mut Context, items: &[PsObject]) -> stet_core::object::EntityId {
     let save_level = ctx.save_stack.current_level();
     let global = ctx.vm_alloc_mode;
-    let entity = ctx.arrays.allocate_with(items.len(), save_level, global);
+    let created = ctx.save_stack.last_save_id();
+    let entity = ctx.arrays.allocate_with(items.len(), save_level, global, created);
     let dest = ctx.arrays.get_mut(entity, 0, items.len() as u32);
     dest.copy_from_slice(items);
     entity
@@ -154,8 +210,9 @@ pub fn alloc_dict(
 ) -> stet_core::object::EntityId {
     let save_level = ctx.save_stack.current_level();
     let global = ctx.vm_alloc_mode;
+    let created = ctx.save_stack.last_save_id();
     ctx.dicts
-        .allocate_with(max_length, name, save_level, global)
+        .allocate_with(max_length, name, save_level, global, created)
 }
 
 /// Helper: create a PsObject array with the global flag set appropriately.

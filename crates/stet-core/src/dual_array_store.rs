@@ -59,20 +59,31 @@ impl DualArrayStore {
         items: &[PsObject],
         save_level: u16,
         global: bool,
+        created_after_save: u32,
     ) -> EntityId {
         if global {
-            self.global.allocate_from_with(items, save_level, global)
+            self.global
+                .allocate_from_with(items, save_level, global, created_after_save)
         } else {
-            self.local.allocate_from_with(items, save_level, global)
+            self.local
+                .allocate_from_with(items, save_level, global, created_after_save)
         }
     }
 
     /// Allocate with a specific save level and global flag.
-    pub fn allocate_with(&mut self, len: usize, save_level: u16, global: bool) -> EntityId {
+    pub fn allocate_with(
+        &mut self,
+        len: usize,
+        save_level: u16,
+        global: bool,
+        created_after_save: u32,
+    ) -> EntityId {
         if global {
-            self.global.allocate_with(len, save_level, global)
+            self.global
+                .allocate_with(len, save_level, global, created_after_save)
         } else {
-            self.local.allocate_with(len, save_level, global)
+            self.local
+                .allocate_with(len, save_level, global, created_after_save)
         }
     }
 

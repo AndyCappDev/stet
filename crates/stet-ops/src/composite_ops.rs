@@ -9,18 +9,6 @@ use stet_core::dict::DictKey;
 use stet_core::error::PsError;
 use stet_core::object::{PsObject, PsValue};
 
-/// Check if a composite PsObject is truly global by looking at its entity's
-/// tag bit. This is authoritative — PsObject flags can lose the
-/// global bit when objects are reconstructed (e.g. `currentdict`, `get`).
-fn is_entity_global(_ctx: &Context, obj: &PsObject) -> bool {
-    match obj.value {
-        PsValue::Dict(e) => e.is_global(),
-        PsValue::Array { entity, .. } | PsValue::PackedArray { entity, .. } => entity.is_global(),
-        PsValue::String { entity, .. } => entity.is_global(),
-        _ => obj.flags.is_global(),
-    }
-}
-
 /// `length`: composite → int
 pub fn op_length(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.o_stack.is_empty() {
@@ -126,7 +114,7 @@ pub fn op_put(ctx: &mut Context) -> Result<(), PsError> {
             // Use entity-level global status (authoritative) rather than PsObject
             // flags which can lose the global bit (e.g. after currentdict).
             let coll_global = entity.is_global();
-            if coll_global && val.is_composite() && !is_entity_global(ctx, &val) {
+            if coll_global && val.is_composite() && !val.is_global_vm() {
                 return Err(PsError::InvalidAccess);
             }
             if idx < 0 || idx as u32 >= len {
@@ -179,7 +167,7 @@ pub fn op_put(ctx: &mut Context) -> Result<(), PsError> {
             // VM access check: global dict cannot hold local composite value.
             // Use entity-level global status (authoritative).
             let coll_global = dict_entity.is_global();
-            if coll_global && val.is_composite() && !is_entity_global(ctx, &val) {
+            if coll_global && val.is_composite() && !val.is_global_vm() {
                 return Err(PsError::InvalidAccess);
             }
             let key = ctx.make_dict_key(&idx_obj)?;
@@ -381,10 +369,11 @@ pub fn op_putinterval(ctx: &mut Context) -> Result<(), PsError> {
                 return Err(PsError::RangeCheck);
             }
             // VM access check: if dest is global, all source elements must be non-composite or global
-            if dest_obj.flags.is_global() {
+            // Use entity tag bit (authoritative) rather than PsObject flags
+            if de.is_global() {
                 let src_elems = ctx.arrays.get(se, ss, sl);
                 for elem in src_elems {
-                    if elem.is_composite() && !elem.flags.is_global() {
+                    if elem.is_composite() && !elem.is_global_vm() {
                         return Err(PsError::InvalidAccess);
                     }
                 }
@@ -465,10 +454,11 @@ pub fn op_copy_composite(ctx: &mut Context) -> Result<(), PsError> {
                 return Err(PsError::RangeCheck);
             }
             // VM access check: if dest is global, check all source elements
-            if dest_obj.flags.is_global() {
+            // Use entity tag bit (authoritative) rather than PsObject flags
+            if de.is_global() {
                 let src_elems = ctx.arrays.get(se, ss, sl);
                 for elem in src_elems {
-                    if elem.is_composite() && !elem.flags.is_global() {
+                    if elem.is_composite() && !elem.is_global_vm() {
                         return Err(PsError::InvalidAccess);
                     }
                 }
@@ -519,11 +509,12 @@ pub fn op_copy_composite(ctx: &mut Context) -> Result<(), PsError> {
         }
         (PsValue::Dict(se), PsValue::Dict(de)) => {
             // VM access check: if dest dict is global, check all source values
-            if dest_obj.flags.is_global() {
+            // Use entity tag bit (authoritative) rather than PsObject flags
+            if de.is_global() {
                 let entries: Vec<PsObject> =
                     ctx.dicts.entry(se).entries.values().copied().collect();
                 for val in &entries {
-                    if val.is_composite() && !val.flags.is_global() {
+                    if val.is_composite() && !val.is_global_vm() {
                         return Err(PsError::InvalidAccess);
                     }
                 }

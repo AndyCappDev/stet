@@ -124,6 +124,12 @@ impl SaveStack {
         self.levels.last().map(|l| l.level).unwrap_or(0)
     }
 
+    /// Save ID of the most recent save (0 if no save active).
+    /// Used for entity creation tracking (invalidrestore).
+    pub fn last_save_id(&self) -> u32 {
+        self.levels.last().map(|l| l.save_id).unwrap_or(0)
+    }
+
     /// Check if a save_id is valid (exists and not invalidated).
     pub fn is_valid(&self, save_id: u32) -> bool {
         self.levels.iter().any(|l| l.save_id == save_id && l.valid)

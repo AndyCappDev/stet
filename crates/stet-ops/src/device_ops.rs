@@ -147,6 +147,7 @@ pub fn op_setpagedevice(ctx: &mut Context) -> Result<(), PsError> {
             b"pagedevice",
             0,
             true,
+            0,
         );
         copy_dict(ctx, base_pd, new_pd);
         new_pd

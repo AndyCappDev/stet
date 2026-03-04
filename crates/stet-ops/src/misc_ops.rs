@@ -505,7 +505,8 @@ pub fn op_packedarray(ctx: &mut Context) -> Result<(), PsError> {
 
     let save_level = ctx.save_stack.current_level();
     let global = ctx.vm_alloc_mode;
-    let entity = ctx.arrays.allocate_with(count, save_level, global);
+    let created = ctx.save_stack.last_save_id();
+    let entity = ctx.arrays.allocate_with(count, save_level, global, created);
     let dest = ctx.arrays.get_mut(entity, 0, count as u32);
     dest.copy_from_slice(&elements);
     // Packed arrays are read-only

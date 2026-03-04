@@ -9,18 +9,6 @@ use stet_core::context::Context;
 use stet_core::error::PsError;
 use stet_core::object::{ObjFlags, PsObject, PsValue};
 
-/// Check if a composite PsObject is truly global by looking at its entity's
-/// tag bit. This is authoritative — PsObject flags can lose the
-/// global bit when objects are reconstructed (e.g. `currentdict`, `get`).
-fn is_entity_global(_ctx: &Context, obj: &PsObject) -> bool {
-    match obj.value {
-        PsValue::Dict(e) => e.is_global(),
-        PsValue::Array { entity, .. } | PsValue::PackedArray { entity, .. } => entity.is_global(),
-        PsValue::String { entity, .. } => entity.is_global(),
-        _ => obj.flags.is_global(),
-    }
-}
-
 /// `dict`: int → dict (create new dict with capacity)
 pub fn op_dict(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.o_stack.is_empty() {
@@ -94,7 +82,7 @@ pub fn op_def(ctx: &mut Context) -> Result<(), PsError> {
         // Use entity-level global status (authoritative) rather than PsObject
         // flags which can lose the global bit (e.g. after currentdict, get).
         let dict_is_global = current_dict.is_global();
-        if dict_is_global && val.is_composite() && !is_entity_global(ctx, &val) {
+        if dict_is_global && val.is_composite() && !val.is_global_vm() {
             return Err(PsError::InvalidAccess);
         }
     }
@@ -148,7 +136,7 @@ pub fn op_store(ctx: &mut Context) -> Result<(), PsError> {
             .copied()
             .unwrap_or(*ctx.d_stack.last().unwrap());
         let dict_is_global = target_dict.is_global();
-        if dict_is_global && val.is_composite() && !is_entity_global(ctx, &val) {
+        if dict_is_global && val.is_composite() && !val.is_global_vm() {
             return Err(PsError::InvalidAccess);
         }
     }

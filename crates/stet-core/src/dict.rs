@@ -62,7 +62,7 @@ impl DictStore {
             name: name.to_vec(),
         });
         // Entity offset = index into dicts vec
-        self.entities.allocate(index, 0, 0, false)
+        self.entities.allocate(index, 0, 0, false, 0)
     }
 
     /// Allocate with a specific save level and global flag.
@@ -72,6 +72,7 @@ impl DictStore {
         name: &[u8],
         save_level: u16,
         global: bool,
+        created_after_save: u32,
     ) -> EntityId {
         let index = self.dicts.len() as u32;
         self.dicts.push(DictEntry {
@@ -80,7 +81,8 @@ impl DictStore {
             access: ObjFlags::ACCESS_UNLIMITED,
             name: name.to_vec(),
         });
-        self.entities.allocate(index, 0, save_level, global)
+        self.entities
+            .allocate(index, 0, save_level, global, created_after_save)
     }
 
     /// Resolve entity to dict index.
@@ -170,8 +172,10 @@ impl DictStore {
     /// points at the original data (the backup).
     pub fn cow_copy(&mut self, entity: EntityId) -> EntityId {
         let idx = self.dict_index(entity);
-        let save_level = self.entities.get(entity).save_level;
-        let is_global = self.entities.get(entity).is_global();
+        let meta = self.entities.get(entity);
+        let save_level = meta.save_level;
+        let is_global = meta.is_global();
+        let created_after_save = meta.created_after_save;
 
         // Clone the dict
         let orig = &self.dicts[idx];
@@ -188,7 +192,7 @@ impl DictStore {
         // Backup points to original index
         let backup_id = self.entities.allocate(
             idx as u32, // original dict index
-            0, save_level, is_global,
+            0, save_level, is_global, created_after_save,
         );
 
         // Original entity now points to new copy
