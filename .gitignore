@@ -4,6 +4,7 @@ Cargo.lock
 *.pdb
 *.png
 visual_tests_*
+tests/pixeldiff/
 web/pkg/
 crates/stet-wasm/pkg/
 .test_stats.tmp
