@@ -126,8 +126,40 @@ impl ObjFlags {
 pub struct NameId(pub u32);
 
 /// Index into an arena store (strings, arrays, dicts, loop states).
+///
+/// Bit 31 is the global VM tag: set = global, clear = local.
+/// Bits 0-30 are the index into the store's entity table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct EntityId(pub u32);
+
+impl EntityId {
+    const GLOBAL_BIT: u32 = 1 << 31;
+    const INDEX_MASK: u32 = !(1 << 31);
+
+    /// Create a local VM entity ID.
+    pub fn local(index: u32) -> Self {
+        debug_assert!(index & Self::GLOBAL_BIT == 0, "index overflows into tag bit");
+        EntityId(index)
+    }
+
+    /// Create a global VM entity ID.
+    pub fn global(index: u32) -> Self {
+        debug_assert!(index & Self::GLOBAL_BIT == 0, "index overflows into tag bit");
+        EntityId(index | Self::GLOBAL_BIT)
+    }
+
+    /// Check if this entity is in global VM.
+    #[inline]
+    pub fn is_global(self) -> bool {
+        self.0 & Self::GLOBAL_BIT != 0
+    }
+
+    /// Get the raw index (bits 0-30) for indexing into a store's entity table.
+    #[inline]
+    pub fn raw_index(self) -> usize {
+        (self.0 & Self::INDEX_MASK) as usize
+    }
+}
 
 /// Index into the operator dispatch table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

@@ -138,9 +138,21 @@ pub fn op_setpagedevice(ctx: &mut Context) -> Result<(), PsError> {
     };
 
     // Store as current page device.
-    // Mark it global so save/restore COW doesn't revert PageCount etc.
+    // Must be in global VM so save/restore COW doesn't revert PageCount etc.
     // (PostForge's page device dict is a Python dict not subject to PS VM save/restore.)
-    ctx.dicts.entities.get_mut(base_pd).set_global(true);
+    // If the dict is local, copy it to a new global dict.
+    let base_pd = if !base_pd.is_global() {
+        let new_pd = ctx.dicts.allocate_with(
+            ctx.dicts.max_length(base_pd),
+            b"pagedevice",
+            0,
+            true,
+        );
+        copy_dict(ctx, base_pd, new_pd);
+        new_pd
+    } else {
+        base_pd
+    };
     ctx.gstate.page_device = Some(base_pd);
 
     // Compute MediaSize from PageSize and HWResolution (with sensible defaults)

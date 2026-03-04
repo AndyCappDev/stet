@@ -56,8 +56,14 @@ impl EntityTable {
     }
 
     /// Allocate a new entity, returning its `EntityId`.
+    /// The returned EntityId is tagged with the global bit based on the `global` param.
     pub fn allocate(&mut self, offset: u32, len: u32, save_level: u16, global: bool) -> EntityId {
-        let id = EntityId(self.entries.len() as u32);
+        let index = self.entries.len() as u32;
+        let id = if global {
+            EntityId::global(index)
+        } else {
+            EntityId::local(index)
+        };
         let mut flags = 0u8;
         if global {
             flags |= EntityMeta::FLAG_GLOBAL;
@@ -74,12 +80,12 @@ impl EntityTable {
     /// Get metadata for an entity (read-only).
     #[inline]
     pub fn get(&self, id: EntityId) -> &EntityMeta {
-        &self.entries[id.0 as usize]
+        &self.entries[id.raw_index()]
     }
 
     /// Get mutable metadata for an entity.
     pub fn get_mut(&mut self, id: EntityId) -> &mut EntityMeta {
-        &mut self.entries[id.0 as usize]
+        &mut self.entries[id.raw_index()]
     }
 
     /// Number of entities allocated.
@@ -107,7 +113,8 @@ mod tests {
     fn test_allocate_and_get() {
         let mut table = EntityTable::new();
         let id = table.allocate(0, 10, 0, false);
-        assert_eq!(id, EntityId(0));
+        assert_eq!(id, EntityId::local(0));
+        assert!(!id.is_global());
         let meta = table.get(id);
         assert_eq!(meta.offset, 0);
         assert_eq!(meta.len, 10);
@@ -120,11 +127,11 @@ mod tests {
         let mut table = EntityTable::new();
         let id0 = table.allocate(0, 5, 0, false);
         let id1 = table.allocate(5, 10, 0, true);
-        assert_eq!(id0, EntityId(0));
-        assert_eq!(id1, EntityId(1));
+        assert_eq!(id0, EntityId::local(0));
+        assert_eq!(id1, EntityId::global(1));
         assert_eq!(table.len(), 2);
-        assert!(!table.get(id0).is_global());
-        assert!(table.get(id1).is_global());
+        assert!(!id0.is_global());
+        assert!(id1.is_global());
     }
 
     #[test]

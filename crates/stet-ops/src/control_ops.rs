@@ -325,7 +325,7 @@ pub fn op_execstack(ctx: &mut Context) -> Result<(), PsError> {
     };
 
     // VM access check: global array cannot receive local composite values
-    let arr_is_global = ctx.arrays.entities.get(entity).is_global();
+    let arr_is_global = entity.is_global();
     if arr_is_global {
         let e_slice = ctx.e_stack.as_slice();
         for elem in e_slice {

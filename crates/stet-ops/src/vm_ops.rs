@@ -46,7 +46,7 @@ pub fn op_restore(ctx: &mut Context) -> Result<(), PsError> {
 pub fn op_vmstatus(ctx: &mut Context) -> Result<(), PsError> {
     let level = ctx.save_stack.depth() as i32;
     // Approximate used memory from store data sizes
-    let used = (ctx.strings.data().len() + ctx.arrays.entities.len() * 16) as i32;
+    let used = (ctx.strings.data().len() + ctx.arrays.entity_count() * 16) as i32;
     let max_mem = 1_000_000i32; // 1MB nominal max
     ctx.o_stack.push(PsObject::int(level))?;
     ctx.o_stack.push(PsObject::int(used))?;
@@ -82,11 +82,14 @@ pub fn op_gcheck(ctx: &mut Context) -> Result<(), PsError> {
     }
     let obj = ctx.o_stack.peek(0)?;
     let is_global = match obj.value {
-        PsValue::String { entity, .. } => ctx.strings.entities.get(entity).is_global(),
-        PsValue::Array { entity, .. } => ctx.arrays.entities.get(entity).is_global(),
-        PsValue::Dict(entity) => ctx.dicts.entities.get(entity).is_global(),
-        // Simple types: global flag is in ObjFlags
-        _ => obj.flags.is_global(),
+        // Composite types: check entity tag bit
+        PsValue::String { entity, .. } => entity.is_global(),
+        PsValue::Array { entity, .. } | PsValue::PackedArray { entity, .. } => {
+            entity.is_global()
+        }
+        PsValue::Dict(entity) => entity.is_global(),
+        // Simple types are not in VM — always global per PLRM
+        _ => true,
     };
     ctx.o_stack.pop()?;
     ctx.o_stack.push(PsObject::bool(is_global))?;
@@ -232,11 +235,12 @@ mod tests {
     #[test]
     fn test_gcheck_simple() {
         let mut ctx = test_ctx();
+        // Simple objects are not in VM — gcheck always returns true per PLRM
         ctx.o_stack.push(PsObject::int(42)).unwrap();
         op_gcheck(&mut ctx).unwrap();
         assert!(matches!(
             ctx.o_stack.pop().unwrap().value,
-            PsValue::Bool(false)
+            PsValue::Bool(true)
         ));
     }
 

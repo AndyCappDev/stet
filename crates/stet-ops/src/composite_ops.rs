@@ -10,13 +10,13 @@ use stet_core::error::PsError;
 use stet_core::object::{PsObject, PsValue};
 
 /// Check if a composite PsObject is truly global by looking at its entity's
-/// allocation status. This is authoritative — PsObject flags can lose the
+/// tag bit. This is authoritative — PsObject flags can lose the
 /// global bit when objects are reconstructed (e.g. `currentdict`, `get`).
-fn is_entity_global(ctx: &Context, obj: &PsObject) -> bool {
+fn is_entity_global(_ctx: &Context, obj: &PsObject) -> bool {
     match obj.value {
-        PsValue::Dict(e) => ctx.dicts.entities.get(e).is_global(),
-        PsValue::Array { entity, .. } => ctx.arrays.entities.get(entity).is_global(),
-        PsValue::String { entity, .. } => ctx.strings.entities.get(entity).is_global(),
+        PsValue::Dict(e) => e.is_global(),
+        PsValue::Array { entity, .. } | PsValue::PackedArray { entity, .. } => entity.is_global(),
+        PsValue::String { entity, .. } => entity.is_global(),
         _ => obj.flags.is_global(),
     }
 }
@@ -125,7 +125,7 @@ pub fn op_put(ctx: &mut Context) -> Result<(), PsError> {
             // VM access check: global array cannot hold local composite.
             // Use entity-level global status (authoritative) rather than PsObject
             // flags which can lose the global bit (e.g. after currentdict).
-            let coll_global = ctx.arrays.entities.get(entity).is_global();
+            let coll_global = entity.is_global();
             if coll_global && val.is_composite() && !is_entity_global(ctx, &val) {
                 return Err(PsError::InvalidAccess);
             }
@@ -178,7 +178,7 @@ pub fn op_put(ctx: &mut Context) -> Result<(), PsError> {
             }
             // VM access check: global dict cannot hold local composite value.
             // Use entity-level global status (authoritative).
-            let coll_global = ctx.dicts.entities.get(dict_entity).is_global();
+            let coll_global = dict_entity.is_global();
             if coll_global && val.is_composite() && !is_entity_global(ctx, &val) {
                 return Err(PsError::InvalidAccess);
             }

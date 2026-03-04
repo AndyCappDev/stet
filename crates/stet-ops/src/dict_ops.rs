@@ -10,13 +10,13 @@ use stet_core::error::PsError;
 use stet_core::object::{ObjFlags, PsObject, PsValue};
 
 /// Check if a composite PsObject is truly global by looking at its entity's
-/// allocation status. This is authoritative — PsObject flags can lose the
+/// tag bit. This is authoritative — PsObject flags can lose the
 /// global bit when objects are reconstructed (e.g. `currentdict`, `get`).
-fn is_entity_global(ctx: &Context, obj: &PsObject) -> bool {
+fn is_entity_global(_ctx: &Context, obj: &PsObject) -> bool {
     match obj.value {
-        PsValue::Dict(e) => ctx.dicts.entities.get(e).is_global(),
-        PsValue::Array { entity, .. } => ctx.arrays.entities.get(entity).is_global(),
-        PsValue::String { entity, .. } => ctx.strings.entities.get(entity).is_global(),
+        PsValue::Dict(e) => e.is_global(),
+        PsValue::Array { entity, .. } | PsValue::PackedArray { entity, .. } => entity.is_global(),
+        PsValue::String { entity, .. } => entity.is_global(),
         _ => obj.flags.is_global(),
     }
 }
@@ -93,7 +93,7 @@ pub fn op_def(ctx: &mut Context) -> Result<(), PsError> {
         // Check VM access: global dict + local composite value = invalidaccess.
         // Use entity-level global status (authoritative) rather than PsObject
         // flags which can lose the global bit (e.g. after currentdict, get).
-        let dict_is_global = ctx.dicts.entities.get(current_dict).is_global();
+        let dict_is_global = current_dict.is_global();
         if dict_is_global && val.is_composite() && !is_entity_global(ctx, &val) {
             return Err(PsError::InvalidAccess);
         }
@@ -147,7 +147,7 @@ pub fn op_store(ctx: &mut Context) -> Result<(), PsError> {
             .find(|&&d| ctx.dicts.known(d, &key))
             .copied()
             .unwrap_or(*ctx.d_stack.last().unwrap());
-        let dict_is_global = ctx.dicts.entities.get(target_dict).is_global();
+        let dict_is_global = target_dict.is_global();
         if dict_is_global && val.is_composite() && !is_entity_global(ctx, &val) {
             return Err(PsError::InvalidAccess);
         }

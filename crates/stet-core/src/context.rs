@@ -6,10 +6,12 @@
 
 use std::io::Write;
 
-use crate::array_store::ArrayStore;
 use crate::device::OutputDevice;
-use crate::dict::{DictKey, DictStore};
+use crate::dict::DictKey;
 use crate::display_list::DisplayList;
+use crate::dual_array_store::DualArrayStore;
+use crate::dual_dict_store::DualDictStore;
+use crate::dual_string_store::DualStringStore;
 use crate::error::PsError;
 use crate::file_store::FileStore;
 use crate::graphics_state::{GraphicsState, Matrix, PathSegment};
@@ -17,7 +19,6 @@ use crate::name::NameTable;
 use crate::object::{EntityId, NameId, ObjFlags, PsObject, PsValue, SaveLevel};
 use crate::save_stack::{SaveRecord, SaveStack, StoreType};
 use crate::stack::Stack;
-use crate::string_store::StringStore;
 
 /// Operator table entry: function pointer + name.
 pub struct OpEntry {
@@ -107,9 +108,9 @@ pub struct Context {
     pub d_stack: Vec<EntityId>,
 
     // Storage
-    pub strings: StringStore,
-    pub arrays: ArrayStore,
-    pub dicts: DictStore,
+    pub strings: DualStringStore,
+    pub arrays: DualArrayStore,
+    pub dicts: DualDictStore,
     pub names: NameTable,
     pub files: FileStore,
 
@@ -263,14 +264,14 @@ impl Context {
             n_build_glyph: names.intern(b"BuildGlyph"),
         };
 
-        let mut strings = StringStore::new();
-        let mut dicts = DictStore::new();
+        let mut strings = DualStringStore::new();
+        let mut dicts = DualDictStore::new();
 
         // Only systemdict is pre-allocated in Rust — it's needed to register native
         // operators. All other well-known dicts (globaldict, userdict, errordict, $error,
         // FontDirectory) are created by the init scripts in sysdict.ps.
         let systemdict = dicts.allocate_with(400, b"systemdict", 0, true);
-        let globaldict = dicts.allocate(100, b"globaldict");
+        let globaldict = dicts.allocate_with(100, b"globaldict", 0, true);
         let userdict = dicts.allocate(200, b"userdict");
         let errordict = dicts.allocate(50, b"errordict");
         let dollar_error = dicts.allocate(20, b"$error");
@@ -482,7 +483,7 @@ impl Context {
             e_stack: Stack::new(250),
             d_stack,
             strings,
-            arrays: ArrayStore::new(),
+            arrays: DualArrayStore::new(),
             dicts,
             names,
             files: FileStore::new(),
@@ -756,15 +757,15 @@ impl Context {
                 match record.store_type {
                     StoreType::String => {
                         self.strings.swap_offsets(record.src, record.copy);
-                        self.strings.entities.get_mut(record.src).save_level = 0;
+                        self.strings.entity_meta_mut(record.src).save_level = 0;
                     }
                     StoreType::Array => {
                         self.arrays.swap_offsets(record.src, record.copy);
-                        self.arrays.entities.get_mut(record.src).save_level = 0;
+                        self.arrays.entity_meta_mut(record.src).save_level = 0;
                     }
                     StoreType::Dict => {
                         self.dicts.swap_offsets(record.src, record.copy);
-                        self.dicts.entities.get_mut(record.src).save_level = 0;
+                        self.dicts.entity_meta_mut(record.src).save_level = 0;
                     }
                 }
             }
@@ -797,17 +798,17 @@ impl Context {
             return; // No save active
         }
 
-        let meta = self.strings.entities.get(entity);
-        if meta.is_global() {
+        if entity.is_global() {
             return; // Global entities skip local COW
         }
+        let meta = self.strings.entity_meta(entity);
         if meta.save_level >= current_level {
             return; // Already copied at this level
         }
 
         // Perform COW copy
         let copy_id = self.strings.cow_copy(entity);
-        self.strings.entities.get_mut(entity).save_level = current_level;
+        self.strings.entity_meta_mut(entity).save_level = current_level;
 
         self.save_stack.add_record(SaveRecord {
             src: entity,
@@ -823,16 +824,16 @@ impl Context {
             return;
         }
 
-        let meta = self.arrays.entities.get(entity);
-        if meta.is_global() {
+        if entity.is_global() {
             return;
         }
+        let meta = self.arrays.entity_meta(entity);
         if meta.save_level >= current_level {
             return;
         }
 
         let copy_id = self.arrays.cow_copy(entity);
-        self.arrays.entities.get_mut(entity).save_level = current_level;
+        self.arrays.entity_meta_mut(entity).save_level = current_level;
 
         self.save_stack.add_record(SaveRecord {
             src: entity,
@@ -848,16 +849,16 @@ impl Context {
             return;
         }
 
-        let meta = self.dicts.entities.get(entity);
-        if meta.is_global() {
+        if entity.is_global() {
             return;
         }
+        let meta = self.dicts.entity_meta(entity);
         if meta.save_level >= current_level {
             return;
         }
 
         let copy_id = self.dicts.cow_copy(entity);
-        self.dicts.entities.get_mut(entity).save_level = current_level;
+        self.dicts.entity_meta_mut(entity).save_level = current_level;
 
         self.save_stack.add_record(SaveRecord {
             src: entity,
@@ -922,6 +923,14 @@ impl Context {
             }
             Token::ProcBegin | Token::ProcEnd | Token::Eof => Err(PsError::SyntaxError),
         }
+    }
+
+    /// Reset local VM stores (for job boundary cleanup).
+    /// Full implementation deferred until job server loop is built.
+    pub fn reset_local_vm(&mut self) {
+        self.strings.reset_local();
+        self.arrays.reset_local();
+        self.dicts.reset_local();
     }
 }
 
