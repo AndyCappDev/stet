@@ -4,17 +4,18 @@
 
 //! egui viewer application — renders PostScript pages on demand from display lists.
 
-use std::sync::mpsc::{Receiver, SyncSender};
+use std::sync::mpsc::{Receiver, SyncSender, TryRecvError};
 
 use egui::{ColorImage, TextureHandle, TextureOptions, Vec2};
 use stet_core::display_list::DisplayList;
 
-use crate::{PageReady, ScreenInfo, ViewerEnd};
+use crate::{ScreenInfo, ViewerEnd, ViewerMsg};
 
 /// Interactive viewer for PostScript pages with viewport-based rendering.
 pub struct ViewerApp {
-    page_receiver: Option<Receiver<PageReady>>,
+    page_receiver: Option<Receiver<ViewerMsg>>,
     screen_info_sender: Option<SyncSender<ScreenInfo>>,
+    advance_sender: Option<SyncSender<()>>,
     dpi_override: Option<f64>,
     /// All received pages (for back-navigation).
     pages: Vec<StoredPage>,
@@ -30,12 +31,13 @@ pub struct ViewerApp {
     last_drag_pos: Option<egui::Pos2>,
     /// Whether the interpreter has finished sending pages.
     interpreter_done: bool,
+    job_done: bool,
     /// Whether we've already sent screen info to the interpreter.
     screen_info_sent: bool,
     /// Whether the window has been resized to match the first page.
     window_sized: bool,
-    /// Pending window size for centering (set by size_window_to_page).
-    pending_center: Option<Vec2>,
+    /// Deferred window position after resize (computed from old center point).
+    pending_position: Option<egui::Pos2>,
     /// Set by Q/Escape handler; processed at the top of next update().
     quit_requested: bool,
     /// When a DPI preset is active, store its exact value for display
@@ -104,6 +106,7 @@ impl ViewerApp {
         Self {
             page_receiver: Some(viewer_end.page_receiver),
             screen_info_sender: Some(viewer_end.screen_info_sender),
+            advance_sender: Some(viewer_end.advance_sender),
             dpi_override,
             pages: Vec::new(),
             current_page: 0,
@@ -112,9 +115,10 @@ impl ViewerApp {
             dragging: false,
             last_drag_pos: None,
             interpreter_done: false,
+            job_done: false,
             screen_info_sent: false,
             window_sized: false,
-            pending_center: None,
+            pending_position: None,
             dpi_preset: None,
             quit_requested: false,
             render_dirty: true,
@@ -152,20 +156,38 @@ impl ViewerApp {
         self.screen_info_sent = true;
     }
 
-    /// Resize the window to 85% of screen height, matching the page aspect ratio.
+    /// Resize the window to match the page aspect ratio.
     ///
-    /// The window is sized from the page's point dimensions (not device pixels),
-    /// then the page is fit to whatever window size results.
+    /// On the first call (initial window), always resizes since the compositor
+    /// already placed the window correctly via `centered: true`.
+    ///
+    /// On subsequent calls (new jobs), only resizes if `outer_rect` is available
+    /// (X11/Mac/Windows) so we can re-center. On Wayland, `outer_rect` is
+    /// unavailable and repositioning is impossible, so we skip the resize and
+    /// let zoom-to-fit handle the content.
     fn size_window_to_page(&mut self, ctx: &egui::Context) {
         if self.window_sized || self.pages.is_empty() {
             return;
         }
-        self.window_sized = true;
 
         let page = &self.pages[0];
         if page.width == 0 || page.height == 0 || page.dpi <= 0.0 {
+            self.window_sized = true;
             return;
         }
+
+        // Check if we can reposition (X11/Mac/Windows provide outer_rect;
+        // Wayland does not). On the very first call outer_rect may be None
+        // even on X11 (window just created), which is fine — the initial
+        // window size was already set correctly by run_viewer.
+        let outer = ctx.input(|i| i.viewport().outer_rect);
+        let is_first_sizing = !self.window_sized;
+        if !is_first_sizing && outer.is_none() {
+            // Subsequent job on Wayland — can't reposition, skip resize
+            self.window_sized = true;
+            return;
+        }
+        self.window_sized = true;
 
         // Recover page dimensions in PostScript points from device pixels + DPI
         let page_pts_w = page.width as f32 * 72.0 / page.dpi as f32;
@@ -196,20 +218,30 @@ impl ViewerApp {
         let win_w = win_w.max(400.0);
         let win_h = win_h.max(300.0);
 
+        // On X11/Mac/Windows: compute new position to keep window's center
+        // point fixed on the same monitor after resize.
+        if let Some(outer) = outer {
+            let cx = outer.min.x + outer.width() / 2.0;
+            let cy = outer.min.y + outer.height() / 2.0;
+            self.pending_position = Some(egui::pos2(
+                (cx - win_w / 2.0).max(0.0),
+                (cy - win_h / 2.0).max(0.0),
+            ));
+        }
+
         ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(win_w, win_h)));
-        self.pending_center = Some(Vec2::new(win_w, win_h));
     }
 
     /// Check for newly arrived pages (non-blocking).
     fn poll_pages(&mut self, ctx: &egui::Context) {
-        use std::sync::mpsc::TryRecvError;
         let had_pages = !self.pages.is_empty();
+        let mut pages_cleared = false;
         let Some(receiver) = &self.page_receiver else {
             return;
         };
         loop {
             match receiver.try_recv() {
-                Ok(page) => {
+                Ok(ViewerMsg::Page(page)) => {
                     self.pages.push(StoredPage {
                         display_list: page.display_list,
                         width: page.width,
@@ -219,6 +251,26 @@ impl ViewerApp {
                         cached_render: None,
                     });
                 }
+                Ok(ViewerMsg::NewJob) => {
+                    // New job starting — clear accumulated pages
+                    self.pages.clear();
+                    self.current_page = 0;
+                    self.job_done = false;
+                    self.render_dirty = true;
+                    self.minimap = None;
+                    self.window_sized = false;
+                    pages_cleared = true;
+                }
+                Ok(ViewerMsg::JobDone) => {
+                    self.job_done = true;
+                    // Zero-page job — auto-advance to next job
+                    if self.pages.is_empty() {
+                        if let Some(ref sender) = self.advance_sender {
+                            let _ = sender.send(());
+                        }
+                        self.job_done = false;
+                    }
+                }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     self.interpreter_done = true;
@@ -227,11 +279,16 @@ impl ViewerApp {
             }
         }
 
-        if !had_pages && !self.pages.is_empty() {
-            // First page arrived — show it and size the window
+        if (!had_pages || pages_cleared) && !self.pages.is_empty() {
+            // First page of a new job — show it and resize the window
             self.current_page = 0;
             self.reset_view();
             self.size_window_to_page(ctx);
+        }
+
+        // Interpreter finished without producing any pages — auto-quit
+        if self.interpreter_done && self.pages.is_empty() {
+            self.quit_requested = true;
         }
     }
 
@@ -249,8 +306,14 @@ impl ViewerApp {
         if self.current_page + 1 < self.pages.len() {
             self.current_page += 1;
             self.reset_view();
+        } else if self.job_done && !self.interpreter_done {
+            // Last page of current job, more jobs pending — advance
+            if let Some(ref sender) = self.advance_sender {
+                let _ = sender.send(());
+            }
+            self.job_done = false;
         } else if self.interpreter_done {
-            // No more pages — quit
+            // No more pages, no more jobs — quit
             self.quit_requested = true;
         }
     }
@@ -652,16 +715,9 @@ impl eframe::App for ViewerApp {
         // Poll for new pages
         self.poll_pages(ctx);
 
-        // Center the window (deferred)
-        if let Some(win_size) = self.pending_center.take()
-            && let Some(monitor) = ctx.input(|i| i.viewport().monitor_size)
-        {
-            let pos_x = (monitor.x - win_size.x) / 2.0;
-            let pos_y = (monitor.y - win_size.y) / 2.0;
-            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
-                pos_x.max(0.0),
-                pos_y.max(0.0),
-            )));
+        // Apply deferred window position (keeps center fixed after resize)
+        if let Some(pos) = self.pending_position.take() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
         }
 
         // Handle keyboard input

@@ -112,6 +112,9 @@ fn main() {
         "png" => {
             run_png_mode(dpi, file_args);
         }
+        "null" => {
+            run_null_mode(dpi, file_args);
+        }
         #[cfg(feature = "viewer")]
         "viewer" => run_viewer_mode(dpi, file_args),
         #[cfg(not(feature = "viewer"))]
@@ -121,7 +124,7 @@ fn main() {
         }
         other => {
             eprintln!("Error: unknown device '{}'", other);
-            eprintln!("Available devices: png, viewer");
+            eprintln!("Available devices: png, null, viewer");
             std::process::exit(1);
         }
     }
@@ -135,7 +138,23 @@ fn run_png_mode(dpi_override: Option<f64>, file_args: Vec<String>) {
     ctx.device_factory = Some(Box::new(|w, h| Box::new(SkiaDevice::new(w, h))));
 
     if !file_args.is_empty() {
-        run_file_jobs(&mut ctx, dpi_override, &file_args, "png", None);
+        run_file_jobs(&mut ctx, dpi_override, &file_args, "png", None, None);
+    } else {
+        run_repl(&mut ctx);
+    }
+}
+
+/// Run in null device mode — no rendering output, no user interaction.
+///
+/// Useful for running test suites and scripts that don't produce pages.
+fn run_null_mode(dpi_override: Option<f64>, file_args: Vec<String>) {
+    use stet_core::device::NullDevice;
+
+    let mut ctx = create_context();
+    ctx.device_factory = Some(Box::new(|w, h| Box::new(NullDevice::new(w, h))));
+
+    if !file_args.is_empty() {
+        run_file_jobs(&mut ctx, dpi_override, &file_args, "null", None, None);
     } else {
         run_repl(&mut ctx);
     }
@@ -158,8 +177,30 @@ fn run_viewer_mode(dpi_override: Option<f64>, file_args: Vec<String>) {
         return;
     }
 
-    let (interp_end, viewer_end, dl_sender) = stet_viewer::create_channels();
+    let (interp_end, viewer_end, dl_sender, advance_rx) = stet_viewer::create_channels();
     let first_file = file_args.first().cloned();
+
+    // Determine page size for the first file so the window is created at the
+    // correct aspect ratio. On Wayland the compositor centers the window at
+    // creation time and ignores later repositioning, so getting this right
+    // upfront is essential.
+    let first_page_size = first_file.as_deref().and_then(|path| {
+        let lower = path.to_lowercase();
+        if lower.ends_with(".eps") || lower.ends_with(".epsf") {
+            let data = std::fs::read(path).ok()?;
+            let ps_data = strip_dos_eps_header(&data);
+            let (llx, lly, urx, ury) = read_eps_bounding_box(ps_data)?;
+            let w = urx - llx;
+            let h = ury - lly;
+            if w > 0.0 && h > 0.0 {
+                Some((w, h))
+            } else {
+                None
+            }
+        } else {
+            None // PS files use default US Letter
+        }
+    });
 
     // Spawn relay thread: converts raw display list tuples from Context's
     // sender into PageReady messages for the viewer. Runs concurrently with
@@ -169,13 +210,25 @@ fn run_viewer_mode(dpi_override: Option<f64>, file_args: Vec<String>) {
     std::thread::spawn(move || {
         let mut page_num = 1u32;
         while let Ok((dl, dpi, w, h)) = dl_receiver.recv() {
-            let _ = page_sender.send(stet_viewer::PageReady {
+            // Sentinel: zero dimensions = control message
+            if w == 0 && h == 0 {
+                if dpi < 0.0 {
+                    // JobDone sentinel
+                    let _ = page_sender.send(stet_viewer::ViewerMsg::JobDone);
+                } else {
+                    // NewJob sentinel
+                    let _ = page_sender.send(stet_viewer::ViewerMsg::NewJob);
+                    page_num = 1;
+                }
+                continue;
+            }
+            let _ = page_sender.send(stet_viewer::ViewerMsg::Page(stet_viewer::PageReady {
                 display_list: dl,
                 width: w,
                 height: h,
                 dpi,
                 page_num,
-            });
+            }));
             page_num += 1;
         }
         // dl_sender dropped (interpreter done) → loop ends → page_sender drops
@@ -196,12 +249,12 @@ fn run_viewer_mode(dpi_override: Option<f64>, file_args: Vec<String>) {
         }));
 
         // DPI comes from viewer.ps HWResolution by default, --dpi overrides
-        run_file_jobs_viewer(&mut ctx, dpi_override, &file_args);
+        run_file_jobs_viewer(&mut ctx, dpi_override, &file_args, advance_rx);
         // ctx drops here → display_list_sender drops → relay thread ends
     });
 
     // Main thread: run viewer
-    stet_viewer::run_viewer(viewer_end, dpi_override, first_file.as_deref());
+    stet_viewer::run_viewer(viewer_end, dpi_override, first_file.as_deref(), first_page_size);
     std::process::exit(0);
 }
 
@@ -228,132 +281,31 @@ fn create_context() -> Context {
 }
 
 
-/// Run file jobs in viewer mode.
-///
-/// Uses NullDevice — no rendering happens here. Display lists are sent to the
-/// viewer via `Context.display_list_sender` at each showpage.
-/// DPI comes from the viewer.ps pagedevice HWResolution by default,
-/// overridden only by explicit `--dpi` flag.
+/// Run file jobs in viewer mode with per-job save/restore isolation.
 #[cfg(feature = "viewer")]
 fn run_file_jobs_viewer(
     ctx: &mut Context,
     dpi_override: Option<f64>,
     file_args: &[String],
+    advance_rx: std::sync::mpsc::Receiver<()>,
 ) {
-    let num_jobs = file_args.len();
-
-    for (job_idx, filename) in file_args.iter().enumerate() {
-        let display_name = std::path::Path::new(filename)
-            .canonicalize()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|_| filename.to_string());
-
-        eprintln!("\n{}", "=".repeat(60));
-        eprintln!(
-            "Processing Job {}/{}: {}",
-            job_idx + 1,
-            num_jobs,
-            display_name
-        );
-        eprintln!("{}", "=".repeat(60));
-
-        let filename_lower = filename.to_ascii_lowercase();
-
-        // Derive output path (still needed for setpagedevice resource lookup)
-        let output_base = filename
-            .strip_suffix(".ps")
-            .or_else(|| filename.strip_suffix(".PS"))
-            .or_else(|| filename.strip_suffix(".eps"))
-            .or_else(|| filename.strip_suffix(".EPS"))
-            .or_else(|| filename.strip_suffix(".epsf"))
-            .or_else(|| filename.strip_suffix(".EPSF"))
-            .unwrap_or(filename);
-        ctx.output_path = Some(format!("{}.png", output_base));
-
-        let source = match std::fs::read(filename) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("Error: cannot read '{}': {}", filename, e);
-                std::process::exit(1);
-            }
-        };
-
-        // Strip DOS EPS binary header if present
-        let ps_data = strip_dos_eps_header(&source);
-        let is_eps = filename_lower.ends_with(".eps") || filename_lower.ends_with(".epsf");
-
-        let job_start = std::time::Instant::now();
-
-        let exec_result = if is_eps {
-            run_eps_file(ctx, dpi_override, ps_data, "viewer", filename)
-        } else {
-            if job_idx == 0 {
-                install_device(ctx, dpi_override, "viewer");
-            }
-            parse_and_exec_file(ctx, ps_data, filename)
-        };
-
-        let job_duration = job_start.elapsed();
-
-        match exec_result {
-            Ok(()) => {
-                eprintln!(
-                    "\nJob execution time: {:.3} seconds",
-                    job_duration.as_secs_f64()
-                );
-                eprintln!(
-                    "Job {} completed successfully: {}",
-                    job_idx + 1,
-                    display_name
-                );
-            }
-            Err(e) => {
-                eprintln!(
-                    "\nJob execution time: {:.3} seconds",
-                    job_duration.as_secs_f64()
-                );
-                match e {
-                    stet_core::error::PsError::Quit => {
-                        eprintln!("Job {} completed (quit): {}", job_idx + 1, display_name);
-                    }
-                    stet_core::error::PsError::Stop => {
-                        let _ = parse_and_exec(ctx, b"{ handleerror } stopped pop");
-                        eprintln!("Job {} FAILED: {}", job_idx + 1, display_name);
-                    }
-                    _ => {
-                        eprintln!("Error: {}", e);
-                        eprintln!("Job {} FAILED: {}", job_idx + 1, display_name);
-                    }
-                }
-            }
-        }
-
-        eprintln!();
-    }
-
-    // Print final state
-    eprintln!("{}", "=".repeat(60));
-    eprintln!("Processed {} job{}", num_jobs, if num_jobs == 1 { "" } else { "s" });
-    eprintln!("{}", "=".repeat(60));
-    eprintln!();
-    eprint!("Final operand stack:\n");
-    print_stack(ctx);
-    eprintln!("\nexecution stack");
-    print_exec_stack(ctx);
-    eprintln!();
+    run_file_jobs(ctx, dpi_override, file_args, "viewer", None, Some(&advance_rx));
 }
 
-/// Run PostScript file jobs.
+/// Run PostScript file jobs with per-job save/restore isolation.
 ///
-/// `viewer_wait`: if provided, tracks cumulative nanoseconds the viewer spent
-/// waiting for user input — subtracted from job timing.
+/// `advance_receiver`: if provided (viewer mode), the interpreter waits
+/// between jobs for the viewer to signal advancement.
 fn run_file_jobs(
     ctx: &mut Context,
     dpi_override: Option<f64>,
     file_args: &[String],
     device: &str,
     viewer_wait: Option<&std::sync::Arc<std::sync::atomic::AtomicU64>>,
+    advance_receiver: Option<&std::sync::mpsc::Receiver<()>>,
 ) {
+    use stet_core::display_list::DisplayList;
+
     let num_jobs = file_args.len();
 
     for (job_idx, filename) in file_args.iter().enumerate() {
@@ -396,27 +348,19 @@ fn run_file_jobs(
         let ps_data = strip_dos_eps_header(&source);
         let is_eps = filename_lower.ends_with(".eps") || filename_lower.ends_with(".epsf");
 
+        // Signal new job to viewer (clear previous job's pages)
+        if job_idx > 0
+            && let Some(ref sender) = ctx.display_list_sender
+        {
+            let _ = sender.send((DisplayList::new(), 0.0, 0, 0));
+        }
+
         let job_start = std::time::Instant::now();
         let wait_before = viewer_wait
             .map(|w| w.load(std::sync::atomic::Ordering::Relaxed))
             .unwrap_or(0);
 
-        let exec_result = if is_eps {
-            run_eps_file(ctx, dpi_override, ps_data, device, filename)
-        } else {
-            // Regular PS file — run as-is (DOS header still stripped)
-            if job_idx == 0 {
-                install_device(ctx, dpi_override, device);
-            }
-            parse_and_exec_file(ctx, ps_data, filename)
-        };
-
-        // Wait for any pipelined background render to complete before timing
-        if let Some(ref mut dev) = ctx.device
-            && let Err(e) = dev.finish()
-        {
-            eprintln!("render error: {}", e);
-        }
+        let exec_result = execjob(ctx, dpi_override, ps_data, filename, device, is_eps);
 
         let wait_after = viewer_wait
             .map(|w| w.load(std::sync::atomic::Ordering::Relaxed))
@@ -446,17 +390,22 @@ fn run_file_jobs(
                     stet_core::error::PsError::Quit => {
                         eprintln!("Job {} completed (quit): {}", job_idx + 1, display_name);
                     }
-                    stet_core::error::PsError::Stop => {
-                        // .error already populated $error; call handleerror
-                        let _ = parse_and_exec(ctx, b"{ handleerror } stopped pop");
-                        eprintln!("Job {} FAILED: {}", job_idx + 1, display_name);
-                    }
                     _ => {
-                        eprintln!("Error: {}", e);
                         eprintln!("Job {} FAILED: {}", job_idx + 1, display_name);
                     }
                 }
             }
+        }
+
+        // Signal job done and wait for viewer to advance (between jobs only)
+        if let Some(adv_rx) = advance_receiver
+            && job_idx + 1 < num_jobs
+        {
+            if let Some(ref sender) = ctx.display_list_sender {
+                let _ = sender.send((DisplayList::new(), -1.0, 0, 0));
+            }
+            // Block until viewer signals advance (or disconnects)
+            let _ = adv_rx.recv();
         }
     }
 
@@ -503,6 +452,126 @@ fn run_repl(ctx: &mut Context) {
             }
         }
     }
+}
+
+/// Execute a single PostScript job with PLRM 3.7.7 save/restore isolation.
+///
+/// Each job runs bracketed by `save`/`restore` so that state changes
+/// (userdict definitions, graphics state, local VM mutations) don't bleed
+/// across files.
+fn execjob(
+    ctx: &mut Context,
+    dpi_override: Option<f64>,
+    ps_data: &[u8],
+    filename: &str,
+    device_name: &str,
+    is_eps: bool,
+) -> Result<(), stet_core::error::PsError> {
+    use stet_core::error::PsError;
+    use stet_core::object::PsValue;
+
+    // --- Job start (PLRM 3.7.7 steps 1-3) ---
+
+    // 1. Save VM state
+    let save_obj = ctx.vm_save();
+    let save_id = match save_obj.value {
+        PsValue::Save(sl) => sl.0,
+        _ => unreachable!(),
+    };
+
+    // 2. Clear execution state
+    ctx.o_stack.clear();
+    ctx.e_stack.clear();
+    ctx.loops.clear();
+
+    // 3. Reset d_stack to base (systemdict, globaldict, userdict)
+    ctx.d_stack.truncate(3);
+
+    // 4. Reset graphics state
+    let _ = parse_and_exec(ctx, b"initgraphics");
+
+    // 5. Local VM allocation mode
+    ctx.vm_alloc_mode = false;
+
+    // 6. Clear transient state
+    ctx.display_list.clear();
+    ctx.in_error_handler = false;
+    ctx.current_operator = None;
+
+    // 7. Install device for this job
+    if is_eps {
+        if let Some((llx, lly, urx, ury)) = read_eps_bounding_box(ps_data) {
+            let w = urx - llx;
+            let h = ury - lly;
+            if w > 0.0 && h > 0.0 {
+                install_device_with_size(ctx, dpi_override, w, h, device_name);
+            } else {
+                install_device(ctx, dpi_override, device_name);
+            }
+        } else {
+            install_device(ctx, dpi_override, device_name);
+        }
+    } else {
+        install_device(ctx, dpi_override, device_name);
+    }
+
+    // --- Job execution (step 4) ---
+    let exec_result = if is_eps {
+        (|| {
+            if let Some((llx, lly, _urx, _ury)) = read_eps_bounding_box(ps_data) {
+                if llx != 0.0 || lly != 0.0 {
+                    let wrapper = format!("gsave {} {} translate", -llx, -lly);
+                    parse_and_exec(ctx, wrapper.as_bytes())?;
+                    parse_and_exec_file(ctx, ps_data, filename)?;
+                    parse_and_exec(ctx, b"grestore showpage")
+                } else {
+                    parse_and_exec_file(ctx, ps_data, filename)?;
+                    parse_and_exec(ctx, b"showpage")
+                }
+            } else {
+                parse_and_exec_file(ctx, ps_data, filename)?;
+                parse_and_exec(ctx, b"showpage")
+            }
+        })()
+    } else {
+        parse_and_exec_file(ctx, ps_data, filename)
+    };
+
+    // --- Error handling ---
+    let job_result = match &exec_result {
+        Err(PsError::Stop) => {
+            let _ = parse_and_exec(ctx, b"{ handleerror } stopped pop");
+            exec_result
+        }
+        _ => exec_result,
+    };
+
+    // --- Job cleanup (always runs, like PostForge's _cleanup_job finally) ---
+
+    // 1. Flush device BEFORE restore (restore reverts gstate.page_device)
+    if let Some(ref mut dev) = ctx.device
+        && let Err(e) = dev.finish()
+    {
+        eprintln!("render error: {}", e);
+    }
+
+    // 2. Clear execution state
+    ctx.o_stack.clear();
+    ctx.e_stack.clear();
+    ctx.loops.clear();
+    ctx.d_stack.truncate(3);
+
+    // 3. Restore VM (reverts local VM + graphics state)
+    let _ = ctx.vm_restore(save_id);
+
+    // 4. Clear display list (rendering state, not VM)
+    ctx.display_list.clear();
+
+    // 5. Reset transient error state
+    ctx.in_error_handler = false;
+    ctx.current_operator = None;
+
+    job_result
 }
 
 /// Run init scripts to bootstrap the resource system, error handlers, and
@@ -601,13 +670,20 @@ fn sync_context_after_init(ctx: &mut Context) {
 /// If `dpi_override` is `Some`, overwrite the device's HWResolution.
 /// Otherwise, use the HWResolution from the device's .ps resource file.
 fn install_device(ctx: &mut Context, dpi_override: Option<f64>, device: &str) {
+    if device == "null" {
+        let _ = parse_and_exec(ctx, b"nulldevice");
+        return;
+    }
     let resource_name = match device {
         "viewer" => "viewer",
         _ => "png",
     };
+    // Copy the resource dict before modifying HWResolution — the original is
+    // in global VM and must not be mutated (would bleed into subsequent jobs).
     let setup = if let Some(dpi) = dpi_override {
         format!(
-            "/{} /OutputDevice findresource dup /HWResolution [{1} {1}] put setpagedevice",
+            "/{0} /OutputDevice findresource dup length dict copy \
+             dup /HWResolution [{1} {1}] put setpagedevice",
             resource_name, dpi
         )
     } else {
@@ -641,34 +717,6 @@ fn install_device_fallback(ctx: &mut Context, dpi: f64) {
     ctx.gstate.default_ctm = default_ctm;
 }
 
-/// Run an EPS file with BoundingBox page sizing and automatic `showpage`.
-fn run_eps_file(
-    ctx: &mut Context,
-    dpi_override: Option<f64>,
-    ps_data: &[u8],
-    device: &str,
-    filename: &str,
-) -> Result<(), stet_core::error::PsError> {
-    if let Some((llx, lly, urx, ury)) = read_eps_bounding_box(ps_data) {
-        let w = urx - llx;
-        let h = ury - lly;
-        if w > 0.0 && h > 0.0 {
-            // Install device with EPS bounding box dimensions
-            install_device_with_size(ctx, dpi_override, w, h, device);
-            // Translate origin if bbox doesn't start at (0,0)
-            let wrapper = format!("gsave {} {} translate", -llx, -lly);
-            parse_and_exec(ctx, wrapper.as_bytes())?;
-            parse_and_exec_file(ctx, ps_data, filename)?;
-            parse_and_exec(ctx, b"grestore showpage")?;
-            return Ok(());
-        }
-    }
-    // No valid bbox — use default page size, add showpage
-    install_device(ctx, dpi_override, device);
-    parse_and_exec_file(ctx, ps_data, filename)?;
-    parse_and_exec(ctx, b"showpage")
-}
-
 /// Install the device with a custom page size (for EPS bounding boxes).
 fn install_device_with_size(
     ctx: &mut Context,
@@ -677,19 +725,27 @@ fn install_device_with_size(
     height: f64,
     device: &str,
 ) {
+    if device == "null" {
+        let _ = parse_and_exec(ctx, b"nulldevice");
+        return;
+    }
     let resource_name = match device {
         "viewer" => "viewer",
         _ => "png",
     };
+    // Copy the resource dict before modifying PageSize — the original is in
+    // global VM and must not be mutated (would bleed into subsequent jobs).
     let setup = if let Some(dpi) = dpi_override {
         format!(
-            "/{} /OutputDevice findresource dup /HWResolution [{1} {1}] put \
+            "/{0} /OutputDevice findresource dup length dict copy \
+             dup /HWResolution [{1} {1}] put \
              dup /PageSize [{2} {3}] put setpagedevice",
             resource_name, dpi, width, height
         )
     } else {
         format!(
-            "/{} /OutputDevice findresource dup /PageSize [{} {}] put setpagedevice",
+            "/{0} /OutputDevice findresource dup length dict copy \
+             dup /PageSize [{1} {2}] put setpagedevice",
             resource_name, width, height
         )
     };
