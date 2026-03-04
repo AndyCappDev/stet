@@ -932,6 +932,16 @@ impl Default for DashPattern {
     }
 }
 
+/// Entry on the graphics state stack, tracking whether it was created by
+/// `save` (implicit gsave) or `gsave`.
+#[derive(Clone, Debug)]
+pub struct GstateEntry {
+    pub state: GraphicsState,
+    /// True if created by `save`, false if by `gsave`.
+    /// `grestore` skips save-created entries; `grestoreall` stops at them.
+    pub saved_by_save: bool,
+}
+
 /// Complete graphics state (cloned for gsave/grestore).
 #[derive(Clone, Debug)]
 pub struct GraphicsState {
@@ -949,6 +959,8 @@ pub struct GraphicsState {
     pub dash_pattern: DashPattern,
     pub flatness: f64,
     pub stroke_adjust: bool,
+    pub overprint: bool,
+    pub smoothness: f64,
     pub default_ctm: Matrix,
 
     // Clip save/restore stack (per graphics state)
@@ -963,6 +975,27 @@ pub struct GraphicsState {
 
     // Page device dict (EntityId into DictStore)
     pub page_device: Option<crate::object::EntityId>,
+
+    // Halftone screen parameters (set by setscreen/setcolorscreen/sethalftone)
+    pub screen_freq: f64,
+    pub screen_angle: f64,
+    pub screen_proc: Option<crate::object::PsObject>,
+    /// Per-component color screen: [red, green, blue, gray] × (freq, angle, proc)
+    pub color_screen: Option<[(f64, f64, crate::object::PsObject); 4]>,
+    /// Halftone dictionary (set by sethalftone)
+    pub halftone: Option<crate::object::PsObject>,
+
+    // Transfer functions
+    pub transfer_function: Option<crate::object::PsObject>,
+    /// Per-component transfer: [red, green, blue, gray]
+    pub color_transfer: Option<[crate::object::PsObject; 4]>,
+
+    // Black generation / undercolor removal
+    pub black_generation: Option<crate::object::PsObject>,
+    pub undercolor_removal: Option<crate::object::PsObject>,
+
+    // Color rendering dictionary
+    pub color_rendering: Option<crate::object::PsObject>,
 }
 
 impl GraphicsState {
@@ -983,11 +1016,23 @@ impl GraphicsState {
             dash_pattern: DashPattern::solid(),
             flatness: 1.0,
             stroke_adjust: false,
+            overprint: false,
+            smoothness: 1.0,
             default_ctm: Matrix::identity(),
             clip_stack: Vec::new(),
             current_font: None,
             root_font: None,
             page_device: None,
+            screen_freq: 60.0,
+            screen_angle: 45.0,
+            screen_proc: None,
+            color_screen: None,
+            halftone: None,
+            transfer_function: None,
+            color_transfer: None,
+            black_generation: None,
+            undercolor_removal: None,
+            color_rendering: None,
         }
     }
 }

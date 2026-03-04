@@ -178,3 +178,38 @@ gsave
   currentpagedevice /EndPage known
   {} [true true true] assert
 grestore
+
+
+%% =============================================================================
+%% Device switching via setpagedevice (without nulldevice)
+%% =============================================================================
+
+%% switching OutputDevice triggers full reload from resource
+gsave
+  << /OutputDevice /png >> setpagedevice
+  currentpagedevice /OutputDevice get /png eq [true] assert
+  currentpagedevice /.IsPageDevice get [true] assert
+grestore
+
+%% switching back to original device
+gsave
+  << /OutputDevice /png >> setpagedevice
+  << /OutputDevice /viewer >> setpagedevice
+  currentpagedevice /OutputDevice get /viewer eq [true] assert
+grestore
+
+%% switching device preserves request dict params (e.g. PageSize)
+gsave
+  << /OutputDevice /png /PageSize [200 300] >> setpagedevice
+  currentpagedevice /PageSize get aload pop [200 300] assert
+  currentpagedevice /OutputDevice get /png eq [true] assert
+grestore
+
+%% same device name does NOT trigger full reload (incremental merge)
+gsave
+  currentpagedevice /OutputDevice get
+  1 dict dup 3 -1 roll /OutputDevice exch put  % << /OutputDevice /currentname >>
+  setpagedevice
+  % Should still be a valid page device
+  currentpagedevice /.IsPageDevice get [true] assert
+grestore

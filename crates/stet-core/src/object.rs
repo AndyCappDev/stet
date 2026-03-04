@@ -209,6 +209,8 @@ pub enum PsValue {
     File(EntityId),
     Save(SaveLevel),
     FontID(i32),
+    /// Gstate object (index into Context.gstate_store)
+    Gstate(u32),
 
     // Control flow (internal, not user-visible)
     Stopped,
@@ -444,6 +446,7 @@ impl PsObject {
             PsValue::File(_) => b"filetype",
             PsValue::Save(_) => b"savetype",
             PsValue::FontID(_) => b"fonttype",
+            PsValue::Gstate(_) => b"gstatetype",
             _ => b"nulltype", // internal types
         }
     }

@@ -161,7 +161,9 @@ pub struct Context {
 
     // Graphics state
     pub gstate: GraphicsState,
-    pub gstate_stack: Vec<GraphicsState>,
+    pub gstate_stack: Vec<crate::graphics_state::GstateEntry>,
+    /// Storage for gstate objects (PsValue::Gstate indexes into this).
+    pub gstate_store: Vec<GraphicsState>,
     pub device: Option<Box<dyn OutputDevice>>,
     pub display_list: DisplayList,
     /// When `Some`, each showpage clones the display list here before consuming it.
@@ -509,6 +511,7 @@ impl Context {
             allow_ps_resolution: false,
             gstate: GraphicsState::new(),
             gstate_stack: Vec::new(),
+            gstate_store: Vec::new(),
             device: None,
             display_list: DisplayList::new(),
             capture_display_lists: None,
@@ -723,8 +726,12 @@ impl Context {
             gstate_stack_snapshot,
         );
 
-        // Update save_level on newly allocated entities from here on
-        // (the save_level is read by cow_check_* methods)
+        // Implicit gsave: push current gstate marked as save-created (per PLRM).
+        // grestoreall stops at this entry; grestore skips it.
+        self.gstate_stack.push(crate::graphics_state::GstateEntry {
+            state: self.gstate.clone(),
+            saved_by_save: true,
+        });
 
         PsObject {
             value: PsValue::Save(SaveLevel(save_id)),

@@ -7,7 +7,7 @@
 //! Implements copy-on-write save/restore: `save` records a level, mutations
 //! create COW copies, and `restore` swaps offsets to revert changes.
 
-use crate::graphics_state::GraphicsState;
+use crate::graphics_state::{GraphicsState, GstateEntry};
 use crate::object::EntityId;
 
 /// Which store type a save record refers to.
@@ -49,7 +49,7 @@ pub struct SaveLevel {
     pub object_format: i32,
     /// Saved graphics state and graphics state stack.
     pub gstate: GraphicsState,
-    pub gstate_stack: Vec<GraphicsState>,
+    pub gstate_stack: Vec<GstateEntry>,
 }
 
 /// The save/restore stack.
@@ -75,7 +75,7 @@ impl SaveStack {
         vm_alloc_mode: bool,
         object_format: i32,
         gstate: GraphicsState,
-        gstate_stack: Vec<GraphicsState>,
+        gstate_stack: Vec<GstateEntry>,
     ) -> (u16, u32) {
         let level = (self.levels.len() + 1) as u16;
         let save_id = self.next_save_id;

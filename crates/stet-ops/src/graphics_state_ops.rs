@@ -10,34 +10,71 @@
 use stet_core::context::Context;
 use stet_core::display_list::DisplayElement;
 use stet_core::error::PsError;
-use stet_core::graphics_state::{DashPattern, FillRule, GraphicsState, LineCap, LineJoin};
+use stet_core::graphics_state::{DashPattern, FillRule, GraphicsState, GstateEntry, LineCap, LineJoin};
 use stet_core::object::{PsObject, PsValue};
 
 /// `gsave`: — → — (push graphics state)
 pub fn op_gsave(ctx: &mut Context) -> Result<(), PsError> {
     let snapshot = ctx.gstate.clone();
-    ctx.gstate_stack.push(snapshot);
+    ctx.gstate_stack.push(GstateEntry {
+        state: snapshot,
+        saved_by_save: false,
+    });
     Ok(())
 }
 
 /// `grestore`: — → — (pop graphics state)
+///
+/// PLRM: pops the topmost gsave-created entry. If the topmost entry was
+/// created by `save`, grestore restores from it but leaves it on the stack.
 pub fn op_grestore(ctx: &mut Context) -> Result<(), PsError> {
-    if let Some(restored) = ctx.gstate_stack.pop() {
+    if let Some(top) = ctx.gstate_stack.last() {
         let old_version = ctx.gstate.clip_path_version;
-        ctx.gstate = restored;
+        if top.saved_by_save {
+            // save-created entry: restore from it but don't pop
+            ctx.gstate = top.state.clone();
+        } else {
+            // gsave-created entry: restore and pop
+            let entry = ctx.gstate_stack.pop().unwrap();
+            ctx.gstate = entry.state;
+        }
         restore_device_clip(ctx, old_version);
     }
     Ok(())
 }
 
-/// `grestoreall`: — → — (pop all graphics states)
+/// `grestoreall`: — → — (restore to bottommost graphics state)
+///
+/// PLRM: repeatedly performs grestore until hitting a save-created entry,
+/// restoring from it but leaving it on the stack. If no save-created entry
+/// exists (unencapsulated job), restores from the bottommost entry and
+/// clears the stack.
 pub fn op_grestoreall(ctx: &mut Context) -> Result<(), PsError> {
-    if let Some(first) = ctx.gstate_stack.first().cloned() {
-        let old_version = ctx.gstate.clip_path_version;
-        ctx.gstate = first;
-        ctx.gstate_stack.clear();
-        restore_device_clip(ctx, old_version);
+    if ctx.gstate_stack.is_empty() {
+        return Ok(());
     }
+
+    let old_version = ctx.gstate.clip_path_version;
+
+    // Check if any save-created entry exists
+    let has_save = ctx.gstate_stack.iter().any(|e| e.saved_by_save);
+
+    if has_save {
+        // Pop gsave-created entries until we hit a save-created one
+        while ctx.gstate_stack.last().is_some_and(|e| !e.saved_by_save) {
+            ctx.gstate_stack.pop();
+        }
+        // Restore from save-created entry (leave it on stack)
+        if let Some(entry) = ctx.gstate_stack.last() {
+            ctx.gstate = entry.state.clone();
+        }
+    } else {
+        // No save-created entries: restore from bottommost, clear stack
+        ctx.gstate = ctx.gstate_stack[0].state.clone();
+        ctx.gstate_stack.clear();
+    }
+
+    restore_device_clip(ctx, old_version);
     Ok(())
 }
 
@@ -58,6 +95,50 @@ pub fn restore_device_clip(ctx: &mut Context, old_version: u32) {
             params,
         });
     }
+}
+
+/// `gstate`: — → gstate (create new gstate object from current graphics state)
+pub fn op_gstate(ctx: &mut Context) -> Result<(), PsError> {
+    let snapshot = ctx.gstate.clone();
+    let idx = ctx.gstate_store.len() as u32;
+    ctx.gstate_store.push(snapshot);
+    ctx.o_stack.push(PsObject {
+        value: PsValue::Gstate(idx),
+        flags: stet_core::object::ObjFlags::literal(),
+    })?;
+    Ok(())
+}
+
+/// `currentgstate`: gstate → gstate (copy current graphics state into gstate object)
+pub fn op_currentgstate(ctx: &mut Context) -> Result<(), PsError> {
+    if ctx.o_stack.is_empty() {
+        return Err(PsError::StackUnderflow);
+    }
+    let idx = match ctx.o_stack.peek(0)?.value {
+        PsValue::Gstate(i) => i as usize,
+        _ => return Err(PsError::TypeCheck),
+    };
+    // Replace the stored graphics state with current state
+    ctx.gstate_store[idx] = ctx.gstate.clone();
+    // Leave the gstate object on the stack
+    Ok(())
+}
+
+/// `setgstate`: gstate → — (replace current graphics state from gstate object)
+pub fn op_setgstate(ctx: &mut Context) -> Result<(), PsError> {
+    if ctx.o_stack.is_empty() {
+        return Err(PsError::StackUnderflow);
+    }
+    let idx = match ctx.o_stack.peek(0)?.value {
+        PsValue::Gstate(i) => i as usize,
+        _ => return Err(PsError::TypeCheck),
+    };
+    let old_version = ctx.gstate.clip_path_version;
+    // Deep copy from gstate store — modifications to current state won't affect the stored gstate
+    ctx.gstate = ctx.gstate_store[idx].clone();
+    ctx.o_stack.pop()?;
+    restore_device_clip(ctx, old_version);
+    Ok(())
 }
 
 /// `setlinewidth`: num → —

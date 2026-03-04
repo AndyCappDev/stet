@@ -384,6 +384,9 @@ pub fn build_system_dict(ctx: &mut Context) {
     register(ctx, sd, "gsave", graphics_state_ops::op_gsave);
     register(ctx, sd, "grestore", graphics_state_ops::op_grestore);
     register(ctx, sd, "grestoreall", graphics_state_ops::op_grestoreall);
+    register(ctx, sd, "gstate", graphics_state_ops::op_gstate);
+    register(ctx, sd, "currentgstate", graphics_state_ops::op_currentgstate);
+    register(ctx, sd, "setgstate", graphics_state_ops::op_setgstate);
     register(ctx, sd, "setlinewidth", graphics_state_ops::op_setlinewidth);
     register(
         ctx,
@@ -551,6 +554,39 @@ pub fn build_system_dict(ctx: &mut Context) {
         "currentundercolorremoval",
         halftone_ops::op_currentundercolorremoval,
     );
+
+    // --- Color rendering ---
+    register(
+        ctx,
+        sd,
+        "setcolorrendering",
+        halftone_ops::op_setcolorrendering,
+    );
+    register(
+        ctx,
+        sd,
+        "currentcolorrendering",
+        halftone_ops::op_currentcolorrendering,
+    );
+
+    // --- Smoothness ---
+    register(ctx, sd, "setsmoothness", halftone_ops::op_setsmoothness);
+    register(
+        ctx,
+        sd,
+        "currentsmoothness",
+        halftone_ops::op_currentsmoothness,
+    );
+
+    // --- Trapping stubs ---
+    register(ctx, sd, "settrapparams", halftone_ops::op_settrapparams);
+    register(
+        ctx,
+        sd,
+        "currenttrapparams",
+        halftone_ops::op_currenttrapparams,
+    );
+    register(ctx, sd, "settrapzone", halftone_ops::op_settrapzone);
 
     // --- Pattern/shading operators ---
     register(ctx, sd, "shfill", shading_ops::op_shfill);

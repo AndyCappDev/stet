@@ -565,17 +565,18 @@ pub fn op_setoverprint(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.o_stack.is_empty() {
         return Err(PsError::StackUnderflow);
     }
-    match ctx.o_stack.peek(0)?.value {
-        PsValue::Bool(_) => {}
+    let val = match ctx.o_stack.peek(0)?.value {
+        PsValue::Bool(b) => b,
         _ => return Err(PsError::TypeCheck),
-    }
+    };
     ctx.o_stack.pop()?;
+    ctx.gstate.overprint = val;
     Ok(())
 }
 
 /// `currentoverprint`: — → bool
 pub fn op_currentoverprint(ctx: &mut Context) -> Result<(), PsError> {
-    ctx.o_stack.push(PsObject::bool(false))?;
+    ctx.o_stack.push(PsObject::bool(ctx.gstate.overprint))?;
     Ok(())
 }
 

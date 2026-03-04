@@ -115,19 +115,86 @@ pub fn op_setpagedevice(ctx: &mut Context) -> Result<(), PsError> {
     };
     ctx.o_stack.pop()?;
 
-    // If the request dict itself has .IsPageDevice, it's a full device dict
-    // (loaded by findresource before calling setpagedevice). Use it directly.
-    // Otherwise, COW copy the existing page_device and merge request entries.
-    let is_page_name = ctx.names.find(b".IsPageDevice");
-    let req_is_full = is_page_name
-        .and_then(|id| ctx.dicts.get(req_entity, &DictKey::Name(id)))
-        .is_some();
+    // PLRM: when current device is not a page device (e.g. after nulldevice),
+    // or when switching to a different output device, create a new device
+    // dictionary from scratch before merging request params.
+    // This matches PostForge's setpagedevice detection logic exactly.
+    let is_page_name = ctx.names.intern(b".IsPageDevice");
+    let od_name = ctx.names.intern(b"OutputDevice");
 
-    let base_pd = if req_is_full {
-        // Full device dict from findresource — use directly
-        req_entity
+    // Check if current page device has .IsPageDevice
+    let cur_has_is_page = ctx.gstate.page_device.map_or(false, |pd| {
+        ctx.dicts.get(pd, &DictKey::Name(is_page_name)).is_some()
+    });
+
+    let mut need_full_reload = !cur_has_is_page;
+
+    // Also reload when switching to a different output device
+    if !need_full_reload {
+        let req_od = ctx.dicts.get(req_entity, &DictKey::Name(od_name));
+        let cur_od = ctx
+            .gstate
+            .page_device
+            .and_then(|pd| ctx.dicts.get(pd, &DictKey::Name(od_name)));
+        if let (Some(req), Some(cur)) = (req_od, cur_od) {
+            if req.value != cur.value {
+                need_full_reload = true;
+            }
+        }
+    }
+
+    let base_pd = if need_full_reload {
+        // Determine device: request dict /OutputDevice > .PrevOutputDevice > fallback
+        let prev_od_name = ctx.names.intern(b".PrevOutputDevice");
+        let device_name_obj = ctx
+            .dicts
+            .get(req_entity, &DictKey::Name(od_name))
+            .or_else(|| {
+                ctx.gstate
+                    .page_device
+                    .and_then(|pd| ctx.dicts.get(pd, &DictKey::Name(prev_od_name)))
+            })
+            .or_else(|| {
+                // Fallback: use "viewer" if available, else "png"
+                let fallback = ctx.names.intern(b"viewer");
+                Some(PsObject::name_lit(fallback))
+            });
+        if let Some(name_obj) = device_name_obj {
+            // Load full device dict via findresource on OutputDevice category
+            let fr_name = ctx.names.intern(b"findresource");
+            let cat_name_id = ctx.names.intern(b"OutputDevice");
+            let proc_elements = [
+                name_obj,
+                PsObject::name_lit(cat_name_id),
+                PsObject::name_exec(fr_name),
+            ];
+            let proc_entity = ctx.arrays.allocate_from(&proc_elements);
+            let proc_obj = PsObject::procedure(proc_entity, proc_elements.len() as u32);
+            let dev_entity = if ctx.exec_sync(proc_obj).is_ok() {
+                ctx.o_stack.pop().ok().and_then(|obj| {
+                    if let PsValue::Dict(e) = obj.value {
+                        Some(e)
+                    } else {
+                        None
+                    }
+                })
+            } else {
+                None
+            };
+            if let Some(dev_entity) = dev_entity {
+                // Copy device resource dict, merge request entries on top
+                let new_pd = crate::vm_ops::alloc_dict(ctx, 50, b"pagedevice");
+                copy_dict(ctx, dev_entity, new_pd);
+                merge_request_dict(ctx, req_entity, new_pd);
+                new_pd
+            } else {
+                req_entity
+            }
+        } else {
+            req_entity
+        }
     } else if let Some(old_pd) = ctx.gstate.page_device {
-        // COW copy of existing page device, then merge request
+        // Incremental merge: COW copy of existing page device, then merge request
         let new_pd = crate::vm_ops::alloc_dict(ctx, 50, b"pagedevice");
         copy_dict(ctx, old_pd, new_pd);
         merge_request_dict(ctx, req_entity, new_pd);
