@@ -46,6 +46,9 @@ pub fn op_anchorsearch(ctx: &mut Context) -> Result<(), PsError> {
         PsValue::String { entity, start, len } => (entity, start, len),
         _ => return Err(PsError::TypeCheck),
     };
+    // Access checks: both strings must be readable
+    str_obj.flags.require_read()?;
+    seek_obj.flags.require_read()?;
 
     let str_bytes = ctx.strings.get(str_entity, str_start, str_len).to_vec();
     let seek_bytes = ctx.strings.get(seek_entity, seek_start, seek_len).to_vec();
@@ -102,6 +105,9 @@ pub fn op_search(ctx: &mut Context) -> Result<(), PsError> {
         PsValue::String { entity, start, len } => (entity, start, len),
         _ => return Err(PsError::TypeCheck),
     };
+    // Access checks: both strings must be readable
+    str_obj.flags.require_read()?;
+    seek_obj.flags.require_read()?;
 
     let str_bytes = ctx.strings.get(str_entity, str_start, str_len).to_vec();
     let seek_bytes = ctx.strings.get(seek_entity, seek_start, seek_len).to_vec();

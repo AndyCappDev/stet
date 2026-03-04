@@ -86,7 +86,10 @@ pub fn op_findfont(ctx: &mut Context) -> Result<(), PsError> {
     let key_obj = ctx.o_stack.peek(0)?;
     let name_bytes = match key_obj.value {
         PsValue::Name(id) => ctx.names.get_bytes(id).to_vec(),
-        PsValue::String { entity, start, len } => ctx.strings.get(entity, start, len).to_vec(),
+        PsValue::String { entity, start, len } => {
+            key_obj.flags.require_read()?;
+            ctx.strings.get(entity, start, len).to_vec()
+        }
         _ => return Err(PsError::TypeCheck),
     };
 
@@ -114,6 +117,7 @@ pub fn op_scalefont(ctx: &mut Context) -> Result<(), PsError> {
         PsValue::Dict(e) => e,
         _ => return Err(PsError::TypeCheck),
     };
+    ctx.dicts.require_read(font_entity)?;
 
     ctx.o_stack.pop()?;
     ctx.o_stack.pop()?;
@@ -146,11 +150,13 @@ pub fn op_makefont(ctx: &mut Context) -> Result<(), PsError> {
         }
         _ => return Err(PsError::TypeCheck),
     };
+    matrix_obj.flags.require_read()?;
 
     let font_entity = match font_obj.value {
         PsValue::Dict(e) => e,
         _ => return Err(PsError::TypeCheck),
     };
+    ctx.dicts.require_read(font_entity)?;
 
     // Read matrix values
     let elems = ctx.arrays.get(mat_entity, mat_start, mat_len);
@@ -175,9 +181,11 @@ pub fn op_setfont(ctx: &mut Context) -> Result<(), PsError> {
     let font_obj = ctx.o_stack.peek(0)?;
 
     // Must be a dict
-    if !matches!(font_obj.value, PsValue::Dict(_)) {
-        return Err(PsError::TypeCheck);
-    }
+    let font_entity = match font_obj.value {
+        PsValue::Dict(e) => e,
+        _ => return Err(PsError::TypeCheck),
+    };
+    ctx.dicts.require_read(font_entity)?;
 
     ctx.o_stack.pop()?;
     ctx.gstate.current_font = Some(font_obj);

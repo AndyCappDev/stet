@@ -239,10 +239,14 @@ pub fn op_forall(ctx: &mut Context) -> Result<(), PsError> {
 
     // Validate source is iterable
     match source_obj.value {
-        PsValue::Array { .. }
-        | PsValue::PackedArray { .. }
-        | PsValue::String { .. }
-        | PsValue::Dict(_) => {}
+        PsValue::Array { .. } | PsValue::PackedArray { .. } | PsValue::String { .. } => {
+            // Access check: source must be readable
+            source_obj.flags.require_read()?;
+        }
+        PsValue::Dict(entity) => {
+            // Access check: dict must be readable
+            ctx.dicts.require_read(entity)?;
+        }
         _ => return Err(PsError::TypeCheck),
     }
 
@@ -323,6 +327,8 @@ pub fn op_execstack(ctx: &mut Context) -> Result<(), PsError> {
         PsValue::Array { entity, start, len } => (entity, start, len),
         _ => return Err(PsError::TypeCheck),
     };
+    // Access check: dest array must be writable
+    obj.flags.require_write()?;
 
     // VM access check: global array cannot receive local composite values
     let arr_is_global = entity.is_global();

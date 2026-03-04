@@ -52,6 +52,8 @@ pub fn op_cvn(ctx: &mut Context) -> Result<(), PsError> {
     let obj = ctx.o_stack.peek(0)?;
     match obj.value {
         PsValue::String { entity, start, len } => {
+            // Access check: string must be readable
+            obj.flags.require_read()?;
             let bytes = ctx.strings.get(entity, start, len).to_vec();
             let name_id = ctx.names.intern(&bytes);
             ctx.o_stack.pop()?;
@@ -78,6 +80,8 @@ pub fn op_cvs(ctx: &mut Context) -> Result<(), PsError> {
         PsValue::String { entity, start, len } => (entity, start, len),
         _ => return Err(PsError::TypeCheck),
     };
+    // Access check: dest string must be writable
+    str_obj.flags.require_write()?;
 
     let repr = format_object_cvs(ctx, &val_obj);
 
@@ -161,6 +165,8 @@ pub fn op_cvrs(ctx: &mut Context) -> Result<(), PsError> {
         PsValue::String { entity, start, len } => (entity, start, len),
         _ => return Err(PsError::TypeCheck),
     };
+    // Access check: dest string must be writable
+    str_obj.flags.require_write()?;
 
     let radix = match radix_obj.value {
         PsValue::Int(v) => {
@@ -246,6 +252,8 @@ pub fn op_cvi(ctx: &mut Context) -> Result<(), PsError> {
             }
         }
         PsValue::String { entity, start, len } => {
+            // Access check: string must be readable
+            obj.flags.require_read()?;
             let bytes = ctx.strings.get(entity, start, len);
             let s = std::str::from_utf8(bytes).map_err(|_| PsError::SyntaxError)?;
             let s = s.trim();
@@ -279,6 +287,8 @@ pub fn op_cvr(ctx: &mut Context) -> Result<(), PsError> {
         PsValue::Int(v) => PsObject::real(v as f64),
         PsValue::Real(_) => obj,
         PsValue::String { entity, start, len } => {
+            // Access check: string must be readable
+            obj.flags.require_read()?;
             let bytes = ctx.strings.get(entity, start, len);
             let s = std::str::from_utf8(bytes).map_err(|_| PsError::SyntaxError)?;
             let v: f64 = s.trim().parse().map_err(|_| PsError::SyntaxError)?;
@@ -333,6 +343,10 @@ pub fn op_executeonly(ctx: &mut Context) -> Result<(), PsError> {
     let obj = ctx.o_stack.peek(0)?;
     if matches!(obj.value, PsValue::Dict(_)) || !is_access_type(&obj) {
         return Err(PsError::TypeCheck);
+    }
+    // Can't elevate from noaccess
+    if obj.flags.access() == ObjFlags::ACCESS_NONE {
+        return Err(PsError::InvalidAccess);
     }
     let obj = ctx.o_stack.peek_mut(0)?;
     obj.flags.set_access(ObjFlags::ACCESS_EXECUTE_ONLY);

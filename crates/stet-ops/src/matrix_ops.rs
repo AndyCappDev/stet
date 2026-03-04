@@ -65,6 +65,7 @@ pub fn op_identmatrix(ctx: &mut Context) -> Result<(), PsError> {
     }
     let arr = ctx.o_stack.peek(0)?;
     let (entity, start, len) = extract_array(&arr)?;
+    arr.flags.require_write()?;
     if len != 6 {
         return Err(PsError::RangeCheck);
     }
@@ -81,6 +82,7 @@ pub fn op_currentmatrix(ctx: &mut Context) -> Result<(), PsError> {
     }
     let arr = ctx.o_stack.peek(0)?;
     let (entity, start, len) = extract_array(&arr)?;
+    arr.flags.require_write()?;
     if len != 6 {
         return Err(PsError::RangeCheck);
     }
@@ -96,6 +98,7 @@ pub fn op_setmatrix(ctx: &mut Context) -> Result<(), PsError> {
     }
     let arr = ctx.o_stack.peek(0)?;
     let (entity, start, len) = extract_array(&arr)?;
+    arr.flags.require_read()?;
     let m = read_matrix_from_array(ctx, entity, start, len)?;
     ctx.o_stack.pop()?;
     ctx.gstate.ctm = m;
@@ -109,6 +112,7 @@ pub fn op_defaultmatrix(ctx: &mut Context) -> Result<(), PsError> {
     }
     let arr = ctx.o_stack.peek(0)?;
     let (entity, start, len) = extract_array(&arr)?;
+    arr.flags.require_write()?;
     if len != 6 {
         return Err(PsError::RangeCheck);
     }
@@ -157,6 +161,7 @@ pub fn op_translate(ctx: &mut Context) -> Result<(), PsError> {
         if ctx.o_stack.len() < 3 {
             return Err(PsError::StackUnderflow);
         }
+        top.flags.require_write()?;
         if len != 6 {
             return Err(PsError::RangeCheck);
         }
@@ -195,6 +200,7 @@ pub fn op_scale(ctx: &mut Context) -> Result<(), PsError> {
         if ctx.o_stack.len() < 3 {
             return Err(PsError::StackUnderflow);
         }
+        top.flags.require_write()?;
         if len != 6 {
             return Err(PsError::RangeCheck);
         }
@@ -232,6 +238,7 @@ pub fn op_rotate(ctx: &mut Context) -> Result<(), PsError> {
         if ctx.o_stack.len() < 2 {
             return Err(PsError::StackUnderflow);
         }
+        top.flags.require_write()?;
         if len != 6 {
             return Err(PsError::RangeCheck);
         }
@@ -259,6 +266,7 @@ pub fn op_concat(ctx: &mut Context) -> Result<(), PsError> {
     }
     let arr = ctx.o_stack.peek(0)?;
     let (entity, start, len) = extract_array(&arr)?;
+    arr.flags.require_read()?;
     let m = read_matrix_from_array(ctx, entity, start, len)?;
     ctx.o_stack.pop()?;
     ctx.gstate.ctm = ctx.gstate.ctm.concat(&m);
@@ -277,6 +285,9 @@ pub fn op_concatmatrix(ctx: &mut Context) -> Result<(), PsError> {
     let (e3, s3, l3) = extract_array(&arr3)?;
     let (e2, s2, l2) = extract_array(&arr2)?;
     let (e1, s1, l1) = extract_array(&arr1)?;
+    arr1.flags.require_read()?;
+    arr2.flags.require_read()?;
+    arr3.flags.require_write()?;
 
     let m1 = read_matrix_from_array(ctx, e1, s1, l1)?;
     let m2 = read_matrix_from_array(ctx, e2, s2, l2)?;
@@ -302,6 +313,8 @@ pub fn op_invertmatrix(ctx: &mut Context) -> Result<(), PsError> {
     let arr1 = ctx.o_stack.peek(1)?;
     let (e2, s2, l2) = extract_array(&arr2)?;
     let (e1, s1, l1) = extract_array(&arr1)?;
+    arr1.flags.require_read()?;
+    arr2.flags.require_write()?;
 
     let m1 = read_matrix_from_array(ctx, e1, s1, l1)?;
     if l2 != 6 {
@@ -325,6 +338,7 @@ pub fn op_transform(ctx: &mut Context) -> Result<(), PsError> {
     let top = ctx.o_stack.peek(0)?;
     if let PsValue::Array { entity, start, len } = top.value {
         // x y matrix → x' y'
+        top.flags.require_read()?;
         if ctx.o_stack.len() < 3 {
             return Err(PsError::StackUnderflow);
         }
@@ -362,6 +376,7 @@ pub fn op_itransform(ctx: &mut Context) -> Result<(), PsError> {
 
     let top = ctx.o_stack.peek(0)?;
     if let PsValue::Array { entity, start, len } = top.value {
+        top.flags.require_read()?;
         if ctx.o_stack.len() < 3 {
             return Err(PsError::StackUnderflow);
         }
@@ -400,6 +415,7 @@ pub fn op_dtransform(ctx: &mut Context) -> Result<(), PsError> {
 
     let top = ctx.o_stack.peek(0)?;
     if let PsValue::Array { entity, start, len } = top.value {
+        top.flags.require_read()?;
         if ctx.o_stack.len() < 3 {
             return Err(PsError::StackUnderflow);
         }
@@ -436,6 +452,7 @@ pub fn op_idtransform(ctx: &mut Context) -> Result<(), PsError> {
 
     let top = ctx.o_stack.peek(0)?;
     if let PsValue::Array { entity, start, len } = top.value {
+        top.flags.require_read()?;
         if ctx.o_stack.len() < 3 {
             return Err(PsError::StackUnderflow);
         }

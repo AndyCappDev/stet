@@ -137,6 +137,7 @@ pub fn op_run(ctx: &mut Context) -> Result<(), PsError> {
     let obj = ctx.o_stack.peek(0)?;
     let filename = match obj.value {
         PsValue::String { entity, start, len } => {
+            obj.flags.require_read()?;
             let bytes = ctx.strings.get(entity, start, len).to_vec();
             String::from_utf8(bytes).map_err(|_| PsError::SyntaxError)?
         }

@@ -42,6 +42,8 @@ pub fn op_aload(ctx: &mut Context) -> Result<(), PsError> {
         }
         _ => return Err(PsError::TypeCheck),
     };
+    // Access check: array must be readable
+    arr.flags.require_read()?;
 
     let elements: Vec<PsObject> = ctx.arrays.get(entity, start, len).to_vec();
     ctx.o_stack.pop()?;
@@ -66,6 +68,8 @@ pub fn op_astore(ctx: &mut Context) -> Result<(), PsError> {
         PsValue::Array { entity, start, len } => (entity, start, len),
         _ => return Err(PsError::TypeCheck),
     };
+    // Access check: array must be writable
+    arr.flags.require_write()?;
 
     if ctx.o_stack.len() < (len as usize) + 1 {
         return Err(PsError::StackUnderflow);

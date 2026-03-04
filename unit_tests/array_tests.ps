@@ -25,7 +25,7 @@ userdict /$unittest known not {(unit_tests/unittest.ps) run} if
 [0 (string) [] {add 2 div}] 2 /get [[]] assert
     % get errors
     /get [/stackunderflow] assert
-    [31 41 59] 1.0 /get [[31 41 59] 1.0 /typecheck] assert
+    [31 41 59] 1.0 /get [41] assert
     [31 41 59] -1 /get [[31 41 59] -1 /rangecheck] assert
     [31 41 59] 3 /get [[31 41 59] 3 /rangecheck] assert
     %[31 41 59] noaccess 0 /get [[31 41 59] 0 /invalidaccess] assert

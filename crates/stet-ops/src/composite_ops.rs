@@ -16,9 +16,18 @@ pub fn op_length(ctx: &mut Context) -> Result<(), PsError> {
     }
     let obj = ctx.o_stack.peek(0)?;
     let len = match obj.value {
-        PsValue::Array { len, .. } | PsValue::PackedArray { len, .. } => len as i32,
-        PsValue::String { len, .. } => len as i32,
-        PsValue::Dict(entity) => ctx.dicts.length(entity) as i32,
+        PsValue::Array { len, .. } | PsValue::PackedArray { len, .. } => {
+            obj.flags.require_read()?;
+            len as i32
+        }
+        PsValue::String { len, .. } => {
+            obj.flags.require_read()?;
+            len as i32
+        }
+        PsValue::Dict(entity) => {
+            ctx.dicts.require_read(entity)?;
+            ctx.dicts.length(entity) as i32
+        }
         PsValue::Name(id) => ctx.names.get_bytes(id).len() as i32,
         _ => return Err(PsError::TypeCheck),
     };
@@ -42,6 +51,7 @@ pub fn op_get(ctx: &mut Context) -> Result<(), PsError> {
                 PsValue::Real(v) => v as i32,
                 _ => return Err(PsError::TypeCheck),
             };
+            coll_obj.flags.require_read()?;
             if idx < 0 || idx as u32 >= len {
                 return Err(PsError::RangeCheck);
             }
@@ -56,6 +66,7 @@ pub fn op_get(ctx: &mut Context) -> Result<(), PsError> {
                 PsValue::Real(v) => v as i32,
                 _ => return Err(PsError::TypeCheck),
             };
+            coll_obj.flags.require_read()?;
             if idx < 0 || idx as u32 >= len {
                 return Err(PsError::RangeCheck);
             }
@@ -65,6 +76,7 @@ pub fn op_get(ctx: &mut Context) -> Result<(), PsError> {
             ctx.o_stack.push(PsObject::int(byte as i32))?;
         }
         PsValue::Dict(dict_entity) => {
+            ctx.dicts.require_read(dict_entity)?;
             let key = ctx.make_dict_key(&idx_obj)?;
             match ctx.dicts.get(dict_entity, &key) {
                 Some(val) => {
@@ -110,6 +122,8 @@ pub fn op_put(ctx: &mut Context) -> Result<(), PsError> {
                 PsValue::Real(v) => v as i32,
                 _ => return Err(PsError::TypeCheck),
             };
+            // Access check: array must be writable
+            coll_obj.flags.require_write()?;
             // VM access check: global array cannot hold local composite.
             // Use entity-level global status (authoritative) rather than PsObject
             // flags which can lose the global bit (e.g. after currentdict).
@@ -133,6 +147,8 @@ pub fn op_put(ctx: &mut Context) -> Result<(), PsError> {
                 PsValue::Real(v) => v as i32,
                 _ => return Err(PsError::TypeCheck),
             };
+            // Access check: string must be writable
+            coll_obj.flags.require_write()?;
             // Type check: value must be integer for string put
             let byte = match val.value {
                 PsValue::Int(v) => {
@@ -164,6 +180,8 @@ pub fn op_put(ctx: &mut Context) -> Result<(), PsError> {
             ) {
                 return Err(PsError::TypeCheck);
             }
+            // Access check: dict must be writable
+            ctx.dicts.require_write(dict_entity)?;
             // VM access check: global dict cannot hold local composite value.
             // Use entity-level global status (authoritative).
             let coll_global = dict_entity.is_global();
@@ -204,6 +222,9 @@ pub fn op_getinterval(ctx: &mut Context) -> Result<(), PsError> {
     ) {
         return Err(PsError::TypeCheck);
     }
+
+    // Access check: source must be readable
+    coll_obj.flags.require_read()?;
 
     // Extract count and index, accepting both int and real
     let count = match count_obj.value {
@@ -319,6 +340,10 @@ pub fn op_putinterval(ctx: &mut Context) -> Result<(), PsError> {
     if !matches!(idx_obj.value, PsValue::Int(_) | PsValue::Real(_)) {
         return Err(PsError::TypeCheck);
     }
+    // Access checks: read on source, write on dest
+    src_obj.flags.require_read()?;
+    dest_obj.flags.require_write()?;
+
     // Type compatibility: array dest requires array/packedarray source, string dest requires string source
     match dest_obj.value {
         PsValue::Array { .. } => {
@@ -430,6 +455,26 @@ pub fn op_copy_composite(ctx: &mut Context) -> Result<(), PsError> {
     // Type check: packed arrays cannot be copy destination
     if matches!(dest_obj.value, PsValue::PackedArray { .. }) {
         return Err(PsError::TypeCheck);
+    }
+
+    // Access checks: read source, write dest
+    match src_obj.value {
+        PsValue::Array { .. } | PsValue::PackedArray { .. } | PsValue::String { .. } => {
+            src_obj.flags.require_read()?;
+        }
+        PsValue::Dict(e) => {
+            ctx.dicts.require_read(e)?;
+        }
+        _ => {}
+    }
+    match dest_obj.value {
+        PsValue::Array { .. } | PsValue::String { .. } => {
+            dest_obj.flags.require_write()?;
+        }
+        PsValue::Dict(e) => {
+            ctx.dicts.require_write(e)?;
+        }
+        _ => {}
     }
 
     match (src_obj.value, dest_obj.value) {

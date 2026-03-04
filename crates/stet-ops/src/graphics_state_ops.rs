@@ -240,6 +240,7 @@ pub fn op_setdash(ctx: &mut Context) -> Result<(), PsError> {
         PsValue::Array { entity, start, len } => (entity, start, len),
         _ => return Err(PsError::TypeCheck),
     };
+    arr_obj.flags.require_read()?;
 
     // Read dash array values
     let mut dash_array = Vec::with_capacity(len as usize);

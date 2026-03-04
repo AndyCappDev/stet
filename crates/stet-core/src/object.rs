@@ -119,6 +119,36 @@ impl ObjFlags {
     pub fn clear_deferred(&mut self) {
         self.0 &= !Self::DEFERRED_BIT;
     }
+
+    /// Require read access (>= READ_ONLY). Returns InvalidAccess if not.
+    #[inline]
+    pub fn require_read(self) -> Result<(), crate::error::PsError> {
+        if self.access() >= Self::ACCESS_READ_ONLY {
+            Ok(())
+        } else {
+            Err(crate::error::PsError::InvalidAccess)
+        }
+    }
+
+    /// Require write access (>= UNLIMITED) for non-file composites. Returns InvalidAccess if not.
+    #[inline]
+    pub fn require_write(self) -> Result<(), crate::error::PsError> {
+        if self.access() >= Self::ACCESS_UNLIMITED {
+            Ok(())
+        } else {
+            Err(crate::error::PsError::InvalidAccess)
+        }
+    }
+
+    /// Require file write access (>= WRITE_ONLY). Returns InvalidAccess if not.
+    #[inline]
+    pub fn require_file_write(self) -> Result<(), crate::error::PsError> {
+        if self.access() >= Self::ACCESS_WRITE_ONLY {
+            Ok(())
+        } else {
+            Err(crate::error::PsError::InvalidAccess)
+        }
+    }
 }
 
 /// Index into the name interning table.

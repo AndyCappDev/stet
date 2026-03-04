@@ -152,6 +152,7 @@ pub fn op_setcolorspace(ctx: &mut Context) -> Result<(), PsError> {
         }
         // Also accept array form [/DeviceGray] or [/Indexed base hival lookup]
         PsValue::Array { entity, start, len } => {
+            obj.flags.require_read()?;
             if len == 0 {
                 return Err(PsError::RangeCheck);
             }

@@ -140,6 +140,9 @@ fn objects_compare(
                 len: lb,
             },
         ) => {
+            // Access check: both strings must be readable
+            a.flags.require_read()?;
+            b.flags.require_read()?;
             let bytes_a = ctx.strings.get(*ea, *sa, *la);
             let bytes_b = ctx.strings.get(*eb, *sb, *lb);
             Ok(bytes_a.cmp(bytes_b))
@@ -149,6 +152,10 @@ fn objects_compare(
 }
 
 /// `eq`: any1 any2 → bool
+///
+/// PLRM 3.3.1: "The access attribute of objects are not considered
+/// in comparisons between objects."  Therefore `eq`/`ne` do NOT
+/// perform access checks on their operands.
 pub fn op_eq(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.o_stack.len() < 2 {
         return Err(PsError::StackUnderflow);

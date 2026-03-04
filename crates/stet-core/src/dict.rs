@@ -161,6 +161,26 @@ impl DictStore {
         self.dicts[self.dict_index(entity)].access
     }
 
+    /// Require read access on a dict. Returns InvalidAccess if access < READ_ONLY.
+    #[inline]
+    pub fn require_read(&self, entity: EntityId) -> Result<(), crate::error::PsError> {
+        if self.access(entity) >= ObjFlags::ACCESS_READ_ONLY {
+            Ok(())
+        } else {
+            Err(crate::error::PsError::InvalidAccess)
+        }
+    }
+
+    /// Require write access on a dict. Returns InvalidAccess if access < UNLIMITED.
+    #[inline]
+    pub fn require_write(&self, entity: EntityId) -> Result<(), crate::error::PsError> {
+        if self.access(entity) >= ObjFlags::ACCESS_UNLIMITED {
+            Ok(())
+        } else {
+            Err(crate::error::PsError::InvalidAccess)
+        }
+    }
+
     /// Set the access level of a dictionary.
     pub fn set_access(&mut self, entity: EntityId, access: u8) {
         let idx = self.dict_index(entity);

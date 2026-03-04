@@ -77,6 +77,8 @@ pub fn op_print(ctx: &mut Context) -> Result<(), PsError> {
     let obj = ctx.o_stack.peek(0)?;
     match obj.value {
         PsValue::String { entity, start, len } => {
+            // Access check: string must be readable
+            obj.flags.require_read()?;
             let bytes = ctx.strings.get(entity, start, len).to_vec();
             ctx.o_stack.pop()?;
             ctx.stdout.write_all(&bytes).map_err(|_| PsError::IOError)?;
@@ -135,6 +137,14 @@ pub fn op_file(ctx: &mut Context) -> Result<(), PsError> {
     }
     let mode_obj = ctx.o_stack.peek(0)?;
     let name_obj = ctx.o_stack.peek(1)?;
+
+    // Both string operands require read access (PLRM: invalidaccess)
+    if mode_obj.flags.access() < ObjFlags::ACCESS_READ_ONLY {
+        return Err(PsError::InvalidAccess);
+    }
+    if name_obj.flags.access() < ObjFlags::ACCESS_READ_ONLY {
+        return Err(PsError::InvalidAccess);
+    }
 
     let mode = match mode_obj.value {
         PsValue::String { entity, start, len } => {
@@ -198,6 +208,8 @@ pub fn op_read(ctx: &mut Context) -> Result<(), PsError> {
         PsValue::File(e) => e,
         _ => return Err(PsError::TypeCheck),
     };
+    // Access check: file must be readable
+    obj.flags.require_read()?;
     ctx.o_stack.pop()?;
 
     match ctx.files.read_byte(entity).map_err(|_| PsError::IOError)? {
@@ -233,6 +245,8 @@ pub fn op_write(ctx: &mut Context) -> Result<(), PsError> {
         PsValue::File(e) => e,
         _ => return Err(PsError::TypeCheck),
     };
+    // Access check: file must be writable
+    file_obj.flags.require_file_write()?;
 
     ctx.o_stack.pop()?;
     ctx.o_stack.pop()?;
@@ -347,6 +361,9 @@ pub fn op_readline(ctx: &mut Context) -> Result<(), PsError> {
         PsValue::File(e) => e,
         _ => return Err(PsError::TypeCheck),
     };
+    // Access checks: file must be readable, string must be writable
+    file_obj.flags.require_read()?;
+    str_obj.flags.require_write()?;
 
     ctx.o_stack.pop()?;
     ctx.o_stack.pop()?;
@@ -389,6 +406,9 @@ pub fn op_readhexstring(ctx: &mut Context) -> Result<(), PsError> {
         PsValue::File(e) => e,
         _ => return Err(PsError::TypeCheck),
     };
+    // Access checks: file must be readable, string must be writable
+    file_obj.flags.require_read()?;
+    str_obj.flags.require_write()?;
 
     ctx.o_stack.pop()?;
     ctx.o_stack.pop()?;
@@ -465,6 +485,9 @@ pub fn op_writehexstring(ctx: &mut Context) -> Result<(), PsError> {
         PsValue::File(e) => e,
         _ => return Err(PsError::TypeCheck),
     };
+    // Access checks: file must be writable, string must be readable
+    file_obj.flags.require_file_write()?;
+    str_obj.flags.require_read()?;
 
     let bytes = ctx.strings.get(str_entity, str_start, str_len).to_vec();
     ctx.o_stack.pop()?;
@@ -830,10 +853,14 @@ pub fn op_token(ctx: &mut Context) -> Result<(), PsError> {
 
     match obj.value {
         PsValue::File(file_entity) => {
+            // Access check: file must be readable
+            obj.flags.require_read()?;
             ctx.o_stack.pop()?;
             token_from_file(ctx, file_entity)
         }
         PsValue::String { entity, start, len } => {
+            // Access check: string must be readable
+            obj.flags.require_read()?;
             // token from string: string → post any true | false
             let bytes = ctx.strings.get(entity, start, len).to_vec();
             ctx.o_stack.pop()?;

@@ -129,6 +129,18 @@ impl DualDictStore {
         self.store(entity).access(entity)
     }
 
+    /// Require read access on a dict.
+    #[inline]
+    pub fn require_read(&self, entity: EntityId) -> Result<(), crate::error::PsError> {
+        self.store(entity).require_read(entity)
+    }
+
+    /// Require write access on a dict.
+    #[inline]
+    pub fn require_write(&self, entity: EntityId) -> Result<(), crate::error::PsError> {
+        self.store(entity).require_write(entity)
+    }
+
     /// Set the access level of a dictionary.
     pub fn set_access(&mut self, entity: EntityId, access: u8) {
         self.store_mut(entity).set_access(entity, access);

@@ -41,6 +41,8 @@ pub fn op_begin(ctx: &mut Context) -> Result<(), PsError> {
         PsValue::Dict(e) => e,
         _ => return Err(PsError::TypeCheck),
     };
+    // Access check: dict must be readable to begin
+    ctx.dicts.require_read(entity)?;
     if ctx.d_stack.len() >= 250 {
         return Err(PsError::DictStackOverflow);
     }
@@ -126,7 +128,7 @@ pub fn op_store(ctx: &mut Context) -> Result<(), PsError> {
     let key_obj = ctx.o_stack.peek(1)?;
     let key = ctx.make_dict_key(&key_obj)?;
 
-    // VM access check: find the target dict and check global/local
+    // Access + VM checks: find the target dict and validate
     if !ctx.initializing {
         let target_dict = ctx
             .d_stack
@@ -135,6 +137,9 @@ pub fn op_store(ctx: &mut Context) -> Result<(), PsError> {
             .find(|&&d| ctx.dicts.known(d, &key))
             .copied()
             .unwrap_or(*ctx.d_stack.last().unwrap());
+        // Access check: target dict must be writable
+        ctx.dicts.require_write(target_dict)?;
+        // VM access check: global dict cannot hold local composite value
         let dict_is_global = target_dict.is_global();
         if dict_is_global && val.is_composite() && !val.is_global_vm() {
             return Err(PsError::InvalidAccess);
@@ -159,6 +164,8 @@ pub fn op_known(ctx: &mut Context) -> Result<(), PsError> {
         PsValue::Dict(e) => e,
         _ => return Err(PsError::TypeCheck),
     };
+    // Access check: dict must be readable
+    ctx.dicts.require_read(dict_entity)?;
 
     let key = ctx.make_dict_key(&key_obj)?;
     let result = ctx.dicts.known(dict_entity, &key);
@@ -202,6 +209,8 @@ pub fn op_maxlength(ctx: &mut Context) -> Result<(), PsError> {
         PsValue::Dict(e) => e,
         _ => return Err(PsError::TypeCheck),
     };
+    // Access check: dict must be readable
+    ctx.dicts.require_read(entity)?;
     let max_len = ctx.dicts.length(entity) as i32;
     ctx.o_stack.pop()?;
     ctx.o_stack.push(PsObject::int(max_len))?;
@@ -231,6 +240,8 @@ pub fn op_dictstack(ctx: &mut Context) -> Result<(), PsError> {
         PsValue::Array { entity, start, len } => (entity, start, len),
         _ => return Err(PsError::TypeCheck),
     };
+    // Access check: dest array must be writable
+    arr_obj.flags.require_write()?;
 
     let d_len = ctx.d_stack.len();
     if d_len > arr_len as usize {
@@ -268,6 +279,8 @@ pub fn op_undef(ctx: &mut Context) -> Result<(), PsError> {
         PsValue::Dict(e) => e,
         _ => return Err(PsError::TypeCheck),
     };
+    // Access check: dict must be writable
+    ctx.dicts.require_write(dict_entity)?;
 
     let key = ctx.make_dict_key(&key_obj)?;
     ctx.o_stack.pop()?;

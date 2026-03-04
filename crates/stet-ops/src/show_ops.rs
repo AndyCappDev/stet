@@ -28,6 +28,8 @@ pub fn op_show(ctx: &mut Context) -> Result<(), PsError> {
         PsValue::String { entity, start, len } => (entity, start, len),
         _ => return Err(PsError::TypeCheck),
     };
+    // Access check: string must be readable
+    str_obj.flags.require_read()?;
 
     if ctx.gstate.current_point.is_none() {
         return Err(PsError::NoCurrentPoint);
@@ -55,6 +57,8 @@ pub fn op_ashow(ctx: &mut Context) -> Result<(), PsError> {
         PsValue::String { entity, start, len } => (entity, start, len),
         _ => return Err(PsError::TypeCheck),
     };
+    // Access check: string must be readable
+    str_obj.flags.require_read()?;
     let ay = ay_obj.as_f64().ok_or(PsError::TypeCheck)?;
     let ax = ax_obj.as_f64().ok_or(PsError::TypeCheck)?;
 
@@ -87,6 +91,8 @@ pub fn op_widthshow(ctx: &mut Context) -> Result<(), PsError> {
         PsValue::String { entity, start, len } => (entity, start, len),
         _ => return Err(PsError::TypeCheck),
     };
+    // Access check: string must be readable
+    str_obj.flags.require_read()?;
     let width_char = match char_obj.value {
         PsValue::Int(v) => v,
         _ => return Err(PsError::TypeCheck),
@@ -130,6 +136,8 @@ pub fn op_awidthshow(ctx: &mut Context) -> Result<(), PsError> {
         PsValue::String { entity, start, len } => (entity, start, len),
         _ => return Err(PsError::TypeCheck),
     };
+    // Access check: string must be readable
+    str_obj.flags.require_read()?;
     let ay = ay_obj.as_f64().ok_or(PsError::TypeCheck)?;
     let ax = ax_obj.as_f64().ok_or(PsError::TypeCheck)?;
     let width_char = match char_obj.value {
@@ -172,6 +180,8 @@ pub fn op_kshow(ctx: &mut Context) -> Result<(), PsError> {
         PsValue::String { entity, start, len } => (entity, start, len),
         _ => return Err(PsError::TypeCheck),
     };
+    // Access check: string must be readable
+    str_obj.flags.require_read()?;
     // Proc must be an executable array
     if !proc_obj.is_array_type() || !proc_obj.flags.is_executable() {
         return Err(PsError::TypeCheck);
@@ -221,6 +231,8 @@ pub fn op_stringwidth(ctx: &mut Context) -> Result<(), PsError> {
         PsValue::String { entity, start, len } => (entity, start, len),
         _ => return Err(PsError::TypeCheck),
     };
+    // Access check: string must be readable
+    str_obj.flags.require_read()?;
 
     let bytes = ctx.strings.get(entity, start, len).to_vec();
     ctx.o_stack.pop()?;
@@ -249,6 +261,8 @@ pub fn op_charpath(ctx: &mut Context) -> Result<(), PsError> {
         PsValue::String { entity, start, len } => (entity, start, len),
         _ => return Err(PsError::TypeCheck),
     };
+    // Access check: string must be readable
+    str_obj.flags.require_read()?;
 
     if ctx.gstate.current_point.is_none() {
         return Err(PsError::NoCurrentPoint);
@@ -281,6 +295,8 @@ pub fn op_cshow(ctx: &mut Context) -> Result<(), PsError> {
         PsValue::String { entity, start, len } => (entity, start, len),
         _ => return Err(PsError::TypeCheck),
     };
+    // Access check: string must be readable
+    str_obj.flags.require_read()?;
 
     // Proc must be executable array
     if !proc_obj.is_array_type() || !proc_obj.flags.is_executable() {
@@ -481,6 +497,8 @@ pub fn op_xshow(ctx: &mut Context) -> Result<(), PsError> {
         PsValue::String { entity, start, len } => (entity, start, len),
         _ => return Err(PsError::TypeCheck),
     };
+    // Access check: string must be readable
+    str_obj.flags.require_read()?;
     let displacements = extract_displacements(ctx, &disp_obj)?;
 
     if ctx.gstate.current_point.is_none() {
@@ -516,6 +534,8 @@ pub fn op_yshow(ctx: &mut Context) -> Result<(), PsError> {
         PsValue::String { entity, start, len } => (entity, start, len),
         _ => return Err(PsError::TypeCheck),
     };
+    // Access check: string must be readable
+    str_obj.flags.require_read()?;
     let displacements = extract_displacements(ctx, &disp_obj)?;
 
     if ctx.gstate.current_point.is_none() {
@@ -551,6 +571,8 @@ pub fn op_xyshow(ctx: &mut Context) -> Result<(), PsError> {
         PsValue::String { entity, start, len } => (entity, start, len),
         _ => return Err(PsError::TypeCheck),
     };
+    // Access check: string must be readable
+    str_obj.flags.require_read()?;
     let displacements = extract_displacements(ctx, &disp_obj)?;
 
     if ctx.gstate.current_point.is_none() {
