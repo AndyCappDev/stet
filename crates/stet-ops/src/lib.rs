@@ -188,6 +188,7 @@ pub fn build_system_dict(ctx: &mut Context) {
     register(ctx, sd, "flushfile", file_ops::op_flushfile);
     register(ctx, sd, "currentfile", file_ops::op_currentfile);
     register(ctx, sd, "line", file_ops::op_line);
+    register(ctx, sd, "filename", file_ops::op_filename);
     register(ctx, sd, "fileposition", file_ops::op_fileposition);
     register(ctx, sd, "setfileposition", file_ops::op_setfileposition);
     register(ctx, sd, "status", file_ops::op_status);

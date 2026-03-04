@@ -557,6 +557,25 @@ pub fn op_line(ctx: &mut Context) -> Result<(), PsError> {
     Ok(())
 }
 
+/// `filename`: file → name
+///
+/// Returns the name of the file as a name object.
+pub fn op_filename(ctx: &mut Context) -> Result<(), PsError> {
+    if ctx.o_stack.is_empty() {
+        return Err(PsError::StackUnderflow);
+    }
+    let obj = ctx.o_stack.peek(0)?;
+    let entity = match obj.value {
+        PsValue::File(e) => e,
+        _ => return Err(PsError::TypeCheck),
+    };
+    let name = ctx.files.name(entity);
+    let name_id = ctx.names.intern(name.as_bytes());
+    ctx.o_stack.pop()?;
+    ctx.o_stack.push(PsObject::name_lit(name_id))?;
+    Ok(())
+}
+
 /// `fileposition`: file → int
 pub fn op_fileposition(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.o_stack.is_empty() {

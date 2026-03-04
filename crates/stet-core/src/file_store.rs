@@ -191,9 +191,33 @@ impl FileStore {
     pub fn open(&mut self, name: &str, mode: &str) -> io::Result<EntityId> {
         // Handle special names
         match name {
-            "%stdin" => return Ok(FILE_STDIN),
-            "%stdout" => return Ok(FILE_STDOUT),
-            "%stderr" => return Ok(FILE_STDERR),
+            "%stdin" => {
+                if mode != "r" {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "%stdin is read-only",
+                    ));
+                }
+                return Ok(FILE_STDIN);
+            }
+            "%stdout" => {
+                if mode != "w" {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "%stdout is write-only",
+                    ));
+                }
+                return Ok(FILE_STDOUT);
+            }
+            "%stderr" => {
+                if mode != "w" {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "%stderr is write-only",
+                    ));
+                }
+                return Ok(FILE_STDERR);
+            }
             "%lineedit" | "%statementedit" => {
                 if mode != "r" {
                     return Err(io::Error::new(

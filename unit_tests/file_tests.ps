@@ -39,7 +39,7 @@ myfile closefile
 (%stdin) (r) file /readstring [(%stdin) (r) file /stackunderflow] assert
 123 /readstring [123 /stackunderflow] assert
 (%stdin) (r) file 123 /readstring [(%stdin) (r) file 123 /typecheck] assert
-(%stdin) (r) file (string) /readstring [(%stdin) (r) file (string) /typecheck] assert
+(%stdin) (r) file (string) noaccess /readstring [(%stdin) (r) file (string) noaccess /invalidaccess] assert
 
 %% writestring %%
 % Test basic writestring
