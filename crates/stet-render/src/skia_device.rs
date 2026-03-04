@@ -2206,6 +2206,120 @@ struct ViewportEpoch {
     has_erase_page: bool,
 }
 
+/// Pre-computed metadata for fast viewport rendering.
+///
+/// Compute once per display list via [`prepare_display_list()`],
+/// reuse across all [`render_region_prepared()`] calls. This avoids
+/// three expensive traversals (bboxes, epochs, clip_seen) on every pan.
+pub struct PreparedDisplayList {
+    bboxes: Vec<Option<BBox2D>>,
+    epochs: Vec<ViewportEpoch>,
+    clip_seen: HashSet<u64>,
+}
+
+/// Precompute display list metadata for fast viewport rendering.
+///
+/// Uses a conservative DPI (72.0) for hairline expansion in bounding boxes,
+/// producing safe overestimates that work at any zoom level without recomputation.
+pub fn prepare_display_list(list: &DisplayList) -> PreparedDisplayList {
+    let bboxes = precompute_full_bboxes(list, 72.0);
+    let epochs = build_viewport_epochs(list, &bboxes);
+    let clip_seen = precompute_clip_seen(list);
+    PreparedDisplayList {
+        bboxes,
+        epochs,
+        clip_seen,
+    }
+}
+
+/// Render a rectangular viewport region using precomputed metadata.
+///
+/// Like [`render_region()`] but skips the three precomputation passes,
+/// using the [`PreparedDisplayList`] instead. Significantly faster for
+/// repeated renders of the same display list (e.g., panning at a fixed zoom).
+#[allow(clippy::too_many_arguments)]
+pub fn render_region_prepared(
+    list: &DisplayList,
+    prepared: &PreparedDisplayList,
+    vp_x: f64,
+    vp_y: f64,
+    vp_w: f64,
+    vp_h: f64,
+    pixel_w: u32,
+    pixel_h: u32,
+    dpi: f64,
+) -> Vec<u8> {
+    if pixel_w == 0 || pixel_h == 0 || vp_w <= 0.0 || vp_h <= 0.0 {
+        return vec![0xFF; pixel_w as usize * pixel_h as usize * 4];
+    }
+
+    let scale_x = pixel_w as f64 / vp_w;
+    let scale_y = pixel_h as f64 / vp_h;
+    let effective_dpi = dpi * scale_x;
+
+    let mut pixmap = Pixmap::new(pixel_w, pixel_h).expect("Failed to create viewport pixmap");
+    pixmap.fill(Color::WHITE);
+
+    let mut state = BandState {
+        clip_region: None,
+        spare_mask: None,
+        clip_mask_cache: HashMap::new(),
+        clip_mask_seen: prepared.clip_seen.clone(),
+        mask_pool: Vec::new(),
+    };
+
+    let elements = list.elements();
+    let vp_x_f = vp_x as f32;
+    let vp_y_f = vp_y as f32;
+    let sx = scale_x as f32;
+    let sy = scale_y as f32;
+    let vp_x_max = vp_x + vp_w;
+    let vp_y_max = vp_y + vp_h;
+
+    for epoch in &prepared.epochs {
+        if !epoch.has_erase_page {
+            match epoch.paint_bbox {
+                Some(ref pb)
+                    if pb.x_max <= vp_x
+                        || pb.x_min >= vp_x_max
+                        || pb.y_max <= vp_y
+                        || pb.y_min >= vp_y_max =>
+                {
+                    continue;
+                }
+                None => continue,
+                _ => {}
+            }
+        }
+
+        for i in epoch.start_idx..epoch.end_idx {
+            if let Some(ref bbox) = prepared.bboxes[i] {
+                if bbox.x_max <= vp_x
+                    || bbox.x_min >= vp_x_max
+                    || bbox.y_max <= vp_y
+                    || bbox.y_min >= vp_y_max
+                {
+                    continue;
+                }
+            }
+            render_element_to_viewport(
+                &mut pixmap,
+                &mut state,
+                &elements[i],
+                vp_x_f,
+                vp_y_f,
+                sx,
+                sy,
+                pixel_w,
+                pixel_h,
+                effective_dpi,
+            );
+        }
+    }
+
+    pixmap.data().to_vec()
+}
+
 /// Render a rectangular viewport region of a display list to RGBA pixels.
 ///
 /// - `list`: The display list to render (in device-space coordinates at the reference DPI)

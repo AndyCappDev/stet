@@ -20,7 +20,7 @@ use stet_core::display_list::DisplayList;
 use stet_core::eps::read_eps_bounding_box;
 use stet_core::error::PsError;
 use stet_engine::eval::parse_and_exec;
-use stet_render::SkiaDevice;
+use stet_render::{PreparedDisplayList, SkiaDevice};
 
 use memory_sink::{MemorySinkFactory, PageData, set_sink_callback};
 
@@ -44,6 +44,9 @@ pub struct Interpreter {
     /// Display lists captured during rendering, one per page.
     /// Retained for viewport re-rendering at arbitrary zoom levels.
     page_display_lists: Vec<DisplayList>,
+    /// Pre-computed metadata for each display list (bboxes, epochs, clip_seen).
+    /// Avoids recomputing on every viewport render.
+    page_prepared: Vec<PreparedDisplayList>,
     /// Per-page dimensions at the reference DPI.
     page_info: Vec<PageInfo>,
     /// The DPI used during interpretation (reference DPI for display list coordinates).
@@ -128,6 +131,7 @@ pub fn create_interpreter() -> Interpreter {
     Interpreter {
         ctx,
         page_display_lists: Vec::new(),
+        page_prepared: Vec::new(),
         page_info: Vec::new(),
         reference_dpi: 150.0,
     }
@@ -178,6 +182,7 @@ pub fn render(interp: &mut Interpreter, ps_data: &[u8], dpi: f64, filename: &str
 
     // Clear previous display lists
     interp.page_display_lists.clear();
+    interp.page_prepared.clear();
     interp.page_info.clear();
     interp.reference_dpi = dpi;
 
@@ -359,16 +364,30 @@ pub fn render_viewport(
 
     let list = &interp.page_display_lists[i];
     let page_dpi = interp.page_info[i].dpi;
-    let rgba = stet_render::render_region(
-        list,
-        vp_x,
-        vp_y,
-        vp_w,
-        vp_h,
-        pixel_w,
-        pixel_h,
-        page_dpi,
-    );
+    let rgba = if i < interp.page_prepared.len() {
+        stet_render::render_region_prepared(
+            list,
+            &interp.page_prepared[i],
+            vp_x,
+            vp_y,
+            vp_w,
+            vp_h,
+            pixel_w,
+            pixel_h,
+            page_dpi,
+        )
+    } else {
+        stet_render::render_region(
+            list,
+            vp_x,
+            vp_y,
+            vp_w,
+            vp_h,
+            pixel_w,
+            pixel_h,
+            page_dpi,
+        )
+    };
 
     Ok(Page {
         width: pixel_w,
@@ -428,7 +447,9 @@ fn extract_pages(pages_ref: &Arc<Mutex<Vec<PageData>>>) -> Vec<PageData> {
 fn collect_display_lists(interp: &mut Interpreter, pages: &[PageData]) {
     let captured = interp.ctx.capture_display_lists.take().unwrap_or_default();
     for (i, (dl, dpi)) in captured.into_iter().enumerate() {
+        let prepared = stet_render::prepare_display_list(&dl);
         interp.page_display_lists.push(dl);
+        interp.page_prepared.push(prepared);
         if i < pages.len() {
             interp.page_info.push(PageInfo {
                 width: pages[i].width,

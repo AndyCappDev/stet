@@ -1,4 +1,4 @@
-console.log('stet-web v8 — DPR-correct viewport rendering');
+console.log('stet-web v9 — precomputed display list metadata');
 
 // --- State ---
 let workerReady = false;
