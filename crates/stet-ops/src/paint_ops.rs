@@ -239,37 +239,90 @@ fn stroke_via_strokepath(ctx: &mut Context) -> Result<(), PsError> {
 /// `rectfill`: x y width height → —
 ///
 /// Builds rect in user space, transforms corners through CTM to device space.
-pub fn op_rectfill(ctx: &mut Context) -> Result<(), PsError> {
-    if ctx.o_stack.len() < 4 {
+/// Extract rectangles from operand stack or array argument.
+/// Returns a vec of (x, y, w, h) tuples and pops the consumed operands.
+fn extract_rects(ctx: &mut Context) -> Result<Vec<(f64, f64, f64, f64)>, PsError> {
+    if ctx.o_stack.is_empty() {
         return Err(PsError::StackUnderflow);
     }
-    let h_obj = ctx.o_stack.peek(0)?;
-    let w_obj = ctx.o_stack.peek(1)?;
-    let y_obj = ctx.o_stack.peek(2)?;
-    let x_obj = ctx.o_stack.peek(3)?;
-    let x = x_obj.as_f64().ok_or(PsError::TypeCheck)?;
-    let y = y_obj.as_f64().ok_or(PsError::TypeCheck)?;
-    let w = w_obj.as_f64().ok_or(PsError::TypeCheck)?;
-    let h = h_obj.as_f64().ok_or(PsError::TypeCheck)?;
-    ctx.o_stack.pop()?;
-    ctx.o_stack.pop()?;
-    ctx.o_stack.pop()?;
-    ctx.o_stack.pop()?;
+    let top = ctx.o_stack.peek(0)?;
+    match top.value {
+        PsValue::Array { entity, start, len } | PsValue::PackedArray { entity, start, len } => {
+            // Array form: array must have length multiple of 4
+            if len % 4 != 0 || len == 0 {
+                return Err(PsError::RangeCheck);
+            }
+            // Validate all elements are numeric before popping
+            let mut rects = Vec::with_capacity((len / 4) as usize);
+            for i in (0..len).step_by(4) {
+                let x_obj = ctx.arrays.get_element(entity, start + i);
+                let y_obj = ctx.arrays.get_element(entity, start + i + 1);
+                let w_obj = ctx.arrays.get_element(entity, start + i + 2);
+                let h_obj = ctx.arrays.get_element(entity, start + i + 3);
+                let x = x_obj.as_f64().ok_or(PsError::TypeCheck)?;
+                let y = y_obj.as_f64().ok_or(PsError::TypeCheck)?;
+                let w = w_obj.as_f64().ok_or(PsError::TypeCheck)?;
+                let h = h_obj.as_f64().ok_or(PsError::TypeCheck)?;
+                rects.push((x, y, w, h));
+            }
+            ctx.o_stack.pop()?;
+            Ok(rects)
+        }
+        _ => {
+            // 4-number form: x y width height
+            if ctx.o_stack.len() < 4 {
+                return Err(PsError::StackUnderflow);
+            }
+            let h_obj = ctx.o_stack.peek(0)?;
+            let w_obj = ctx.o_stack.peek(1)?;
+            let y_obj = ctx.o_stack.peek(2)?;
+            let x_obj = ctx.o_stack.peek(3)?;
+            let x = x_obj.as_f64().ok_or(PsError::TypeCheck)?;
+            let y = y_obj.as_f64().ok_or(PsError::TypeCheck)?;
+            let w = w_obj.as_f64().ok_or(PsError::TypeCheck)?;
+            let h = h_obj.as_f64().ok_or(PsError::TypeCheck)?;
+            ctx.o_stack.pop()?;
+            ctx.o_stack.pop()?;
+            ctx.o_stack.pop()?;
+            ctx.o_stack.pop()?;
+            Ok(vec![(x, y, w, h)])
+        }
+    }
+}
 
-    // Build rect path in device space
-    let ctm = &ctx.gstate.ctm;
-    let (dx0, dy0) = ctm.transform_point(x, y);
-    let (dx1, dy1) = ctm.transform_point(x + w, y);
-    let (dx2, dy2) = ctm.transform_point(x + w, y + h);
-    let (dx3, dy3) = ctm.transform_point(x, y + h);
-
+/// Build a device-space path from rectangles, transforming through CTM.
+fn build_rect_path_device(ctm: &Matrix, rects: &[(f64, f64, f64, f64)]) -> PsPath {
     let mut path = PsPath::new();
-    path.segments.push(PathSegment::MoveTo(dx0, dy0));
-    path.segments.push(PathSegment::LineTo(dx1, dy1));
-    path.segments.push(PathSegment::LineTo(dx2, dy2));
-    path.segments.push(PathSegment::LineTo(dx3, dy3));
-    path.segments.push(PathSegment::ClosePath);
+    for &(x, y, w, h) in rects {
+        let (dx0, dy0) = ctm.transform_point(x, y);
+        let (dx1, dy1) = ctm.transform_point(x + w, y);
+        let (dx2, dy2) = ctm.transform_point(x + w, y + h);
+        let (dx3, dy3) = ctm.transform_point(x, y + h);
+        path.segments.push(PathSegment::MoveTo(dx0, dy0));
+        path.segments.push(PathSegment::LineTo(dx1, dy1));
+        path.segments.push(PathSegment::LineTo(dx2, dy2));
+        path.segments.push(PathSegment::LineTo(dx3, dy3));
+        path.segments.push(PathSegment::ClosePath);
+    }
+    path
+}
 
+/// Build a user-space path from rectangles (no CTM transform).
+fn build_rect_path_user(rects: &[(f64, f64, f64, f64)]) -> PsPath {
+    let mut path = PsPath::new();
+    for &(x, y, w, h) in rects {
+        path.segments.push(PathSegment::MoveTo(x, y));
+        path.segments.push(PathSegment::LineTo(x + w, y));
+        path.segments.push(PathSegment::LineTo(x + w, y + h));
+        path.segments.push(PathSegment::LineTo(x, y + h));
+        path.segments.push(PathSegment::ClosePath);
+    }
+    path
+}
+
+pub fn op_rectfill(ctx: &mut Context) -> Result<(), PsError> {
+    let rects = extract_rects(ctx)?;
+    let path = build_rect_path_device(&ctx.gstate.ctm, &rects);
     let params = FillParams {
         color: ctx.gstate.color.clone(),
         fill_rule: FillRule::NonZeroWinding,
@@ -284,31 +337,10 @@ pub fn op_rectfill(ctx: &mut Context) -> Result<(), PsError> {
 /// Builds rect in user space, transforms corners through CTM to device space.
 /// For anisotropic CTMs, builds path in user space and passes CTM to device.
 pub fn op_rectstroke(ctx: &mut Context) -> Result<(), PsError> {
-    if ctx.o_stack.len() < 4 {
-        return Err(PsError::StackUnderflow);
-    }
-    let h_obj = ctx.o_stack.peek(0)?;
-    let w_obj = ctx.o_stack.peek(1)?;
-    let y_obj = ctx.o_stack.peek(2)?;
-    let x_obj = ctx.o_stack.peek(3)?;
-    let x = x_obj.as_f64().ok_or(PsError::TypeCheck)?;
-    let y = y_obj.as_f64().ok_or(PsError::TypeCheck)?;
-    let w = w_obj.as_f64().ok_or(PsError::TypeCheck)?;
-    let h = h_obj.as_f64().ok_or(PsError::TypeCheck)?;
-    ctx.o_stack.pop()?;
-    ctx.o_stack.pop()?;
-    ctx.o_stack.pop()?;
-    ctx.o_stack.pop()?;
+    let rects = extract_rects(ctx)?;
 
     if is_anisotropic(&ctx.gstate.ctm) {
-        // Build rect path in user space, pass CTM for anisotropic stroke
-        let mut path = PsPath::new();
-        path.segments.push(PathSegment::MoveTo(x, y));
-        path.segments.push(PathSegment::LineTo(x + w, y));
-        path.segments.push(PathSegment::LineTo(x + w, y + h));
-        path.segments.push(PathSegment::LineTo(x, y + h));
-        path.segments.push(PathSegment::ClosePath);
-
+        let path = build_rect_path_user(&rects);
         let params = StrokeParams {
             color: ctx.gstate.color.clone(),
             line_width: ctx.gstate.line_width,
@@ -322,20 +354,7 @@ pub fn op_rectstroke(ctx: &mut Context) -> Result<(), PsError> {
         ctx.display_list
             .push(DisplayElement::Stroke { path, params });
     } else {
-        // Build rect path in device space, use scalar scale factor
-        let ctm = &ctx.gstate.ctm;
-        let (dx0, dy0) = ctm.transform_point(x, y);
-        let (dx1, dy1) = ctm.transform_point(x + w, y);
-        let (dx2, dy2) = ctm.transform_point(x + w, y + h);
-        let (dx3, dy3) = ctm.transform_point(x, y + h);
-
-        let mut path = PsPath::new();
-        path.segments.push(PathSegment::MoveTo(dx0, dy0));
-        path.segments.push(PathSegment::LineTo(dx1, dy1));
-        path.segments.push(PathSegment::LineTo(dx2, dy2));
-        path.segments.push(PathSegment::LineTo(dx3, dy3));
-        path.segments.push(PathSegment::ClosePath);
-
+        let path = build_rect_path_device(&ctx.gstate.ctm, &rects);
         let scale = ctm_scale_factor(&ctx.gstate.ctm);
         let params = StrokeParams {
             color: ctx.gstate.color.clone(),

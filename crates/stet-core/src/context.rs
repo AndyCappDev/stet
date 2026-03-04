@@ -302,6 +302,7 @@ impl Context {
             "MaxLocalVM",
             "VMReclaim",
             "VMThreshold",
+            "UCacheBLimit",
         ] {
             dicts.put(
                 user_params,
@@ -395,6 +396,11 @@ impl Context {
             system_params,
             DictKey::Name(names.intern(b"StartJobPassword")),
             PsObject::string(pw_str2, 1),
+        );
+        dicts.put(
+            system_params,
+            DictKey::Name(names.intern(b"LicenseID")),
+            PsObject::int(0),
         );
 
         // Put self-referencing entries

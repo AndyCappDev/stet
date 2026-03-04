@@ -9,3 +9,4 @@ description = "PostScript operator implementations for stet"
 [dependencies]
 stet-core.workspace = true
 flate2 = "1"
+glob = "0.3"

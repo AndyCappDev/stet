@@ -759,14 +759,64 @@ pub fn op_filenameforall(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.o_stack.len() < 3 {
         return Err(PsError::StackUnderflow);
     }
-    let _scratch_obj = ctx.o_stack.peek(0)?;
-    let _proc_obj = ctx.o_stack.peek(1)?;
-    let _template_obj = ctx.o_stack.peek(2)?;
+    let scratch_obj = ctx.o_stack.peek(0)?;
+    let proc_obj = ctx.o_stack.peek(1)?;
+    let template_obj = ctx.o_stack.peek(2)?;
 
-    // Phase 2: simplified no-op (full glob matching deferred)
+    // Validate types
+    let (scratch_entity, scratch_start, scratch_len) = match scratch_obj.value {
+        PsValue::String { entity, start, len } => (entity, start, len),
+        _ => return Err(PsError::TypeCheck),
+    };
+    if !proc_obj.is_array_type() || !proc_obj.flags.is_executable() {
+        return Err(PsError::TypeCheck);
+    }
+    let template = match template_obj.value {
+        PsValue::String { entity, start, len } => {
+            String::from_utf8_lossy(ctx.strings.get(entity, start, len)).into_owned()
+        }
+        _ => return Err(PsError::TypeCheck),
+    };
+
     ctx.o_stack.pop()?;
+    let proc = ctx.o_stack.pop()?;
     ctx.o_stack.pop()?;
-    ctx.o_stack.pop()?;
+
+    // Use glob to expand the template pattern
+    let mut matches: Vec<String> = Vec::new();
+    if let Ok(paths) = glob::glob(&template) {
+        for entry in paths {
+            if let Ok(path) = entry {
+                matches.push(path.to_string_lossy().into_owned());
+            }
+        }
+    }
+    matches.sort();
+
+    // Execute callback for each match
+    for name in &matches {
+        let name_bytes = name.as_bytes();
+        let copy_len = name_bytes.len().min(scratch_len as usize);
+        let scratch_slice = ctx.strings.get_mut(scratch_entity, scratch_start, scratch_len);
+        scratch_slice[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
+
+        let str_obj = PsObject {
+            value: PsValue::String {
+                entity: scratch_entity,
+                start: scratch_start,
+                len: copy_len as u32,
+            },
+            flags: ObjFlags::literal_composite(),
+        };
+        ctx.o_stack.push(str_obj)?;
+
+        match ctx.exec_sync(proc) {
+            Ok(()) => {}
+            Err(PsError::Stop) => break,
+            Err(e) => return Err(e),
+        }
+    }
+
     Ok(())
 }
 

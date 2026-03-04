@@ -388,42 +388,167 @@ fn resource_exists(ctx: &Context, cat_name: stet_core::object::NameId, key: &Dic
 }
 
 /// `resourceforall`: template proc scratch category → —
+/// Match a resource name against a PostScript template pattern.
+/// Supports `*` (match any sequence) and `?` (match single char).
+fn template_matches(template: &[u8], name: &[u8]) -> bool {
+    let mut ti = 0;
+    let mut ni = 0;
+    let mut star_ti = usize::MAX;
+    let mut star_ni = 0;
+
+    while ni < name.len() {
+        if ti < template.len() && (template[ti] == b'?' || template[ti] == name[ni]) {
+            ti += 1;
+            ni += 1;
+        } else if ti < template.len() && template[ti] == b'*' {
+            star_ti = ti;
+            star_ni = ni;
+            ti += 1;
+        } else if star_ti != usize::MAX {
+            ti = star_ti + 1;
+            star_ni += 1;
+            ni = star_ni;
+        } else {
+            return false;
+        }
+    }
+    while ti < template.len() && template[ti] == b'*' {
+        ti += 1;
+    }
+    ti == template.len()
+}
+
+/// `resourceforall`: template proc scratch category → —
+///
+/// Native implementation that enumerates resource names without pushing
+/// category impl dicts onto d_stack (avoids dict stack pollution in callbacks).
 pub fn op_resourceforall(ctx: &mut Context) -> Result<(), PsError> {
+    use stet_core::object::NameId;
+
     if ctx.o_stack.len() < 4 {
         return Err(PsError::StackUnderflow);
     }
+    // Validate types: category (name), scratch (string), proc (exec array), template (string)
     let cat_obj = ctx.o_stack.peek(0)?;
+    let scratch_obj = ctx.o_stack.peek(1)?;
+    let proc_obj = ctx.o_stack.peek(2)?;
+    let template_obj = ctx.o_stack.peek(3)?;
 
     let cat_name = match cat_obj.value {
         PsValue::Name(id) => id,
         _ => return Err(PsError::TypeCheck),
     };
+    let (scratch_entity, scratch_start, scratch_len) = match scratch_obj.value {
+        PsValue::String { entity, start, len } => (entity, start, len),
+        _ => return Err(PsError::TypeCheck),
+    };
+    if !proc_obj.is_array_type() || !proc_obj.flags.is_executable() {
+        return Err(PsError::TypeCheck);
+    }
+    let template_bytes = match template_obj.value {
+        PsValue::String { entity, start, len } => {
+            ctx.strings.get(entity, start, len).to_vec()
+        }
+        _ => return Err(PsError::TypeCheck),
+    };
+
+    // Pop all 4 operands
+    let _cat = ctx.o_stack.pop()?;
+    let _scratch = ctx.o_stack.pop()?;
+    let proc = ctx.o_stack.pop()?;
+    let _template = ctx.o_stack.pop()?;
 
     let cat_key = DictKey::Name(cat_name);
 
-    // Check if the category has a ResourceForAll procedure
-    if let Some(obj) = ctx.dicts.get(ctx.category_registry, &cat_key)
-        && let PsValue::Dict(impl_entity) = obj.value
-        && let Some(proc) = ctx.dicts.get(
-            impl_entity,
-            &DictKey::Name(ctx.name_cache.n_resource_for_all),
-        )
-        && proc.is_array_type()
-        && proc.flags.is_executable()
-    {
-        ctx.o_stack.pop()?; // category
-        ctx.d_stack.push(impl_entity);
-        ctx.invalidate_name_cache();
-        ctx.e_stack.push(PsObject::dict_end(impl_entity))?;
-        ctx.e_stack.push(proc)?;
-        return Ok(());
+    // Collect matching resource names from global (and local if in local mode) dicts.
+    // We collect NameIds first to avoid borrowing issues during iteration.
+    let mut name_ids: Vec<NameId> = Vec::new();
+
+    // Global resources
+    if let Some(dict_obj) = ctx.dicts.get(ctx.global_resources, &cat_key) {
+        if let PsValue::Dict(res_dict) = dict_obj.value {
+            for key in ctx.dicts.keys(res_dict) {
+                if let DictKey::Name(nid) = key {
+                    name_ids.push(*nid);
+                }
+            }
+        }
     }
 
-    // Stub: just pop all 4 arguments
-    ctx.o_stack.pop()?; // category
-    ctx.o_stack.pop()?; // scratch
-    ctx.o_stack.pop()?; // proc
-    ctx.o_stack.pop()?; // template
+    // Local resources (only when in local VM mode)
+    if !ctx.vm_alloc_mode {
+        if let Some(dict_obj) = ctx.dicts.get(ctx.local_resources, &cat_key) {
+            if let PsValue::Dict(res_dict) = dict_obj.value {
+                for key in ctx.dicts.keys(res_dict) {
+                    if let DictKey::Name(nid) = key {
+                        if !name_ids.contains(nid) {
+                            name_ids.push(*nid);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Also check FontDirectory for Font category
+    let font_name_id = ctx.names.find(b"Font");
+    if font_name_id == Some(cat_name) {
+        if let Some(font_dir_obj) = ctx.dicts.get(
+            ctx.systemdict,
+            &DictKey::Name(ctx.names.intern(b"FontDirectory")),
+        ) {
+            if let PsValue::Dict(font_dir) = font_dir_obj.value {
+                for key in ctx.dicts.keys(font_dir) {
+                    if let DictKey::Name(nid) = key {
+                        if !name_ids.contains(nid) {
+                            name_ids.push(*nid);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Filter by template pattern and sort
+    let mut matching_names: Vec<(NameId, Vec<u8>)> = name_ids
+        .into_iter()
+        .filter_map(|nid| {
+            let bytes = ctx.names.get_bytes(nid).to_vec();
+            if template_matches(&template_bytes, &bytes) {
+                Some((nid, bytes))
+            } else {
+                None
+            }
+        })
+        .collect();
+    matching_names.sort_by(|a, b| a.1.cmp(&b.1));
+
+    // Execute callback for each matching name.
+    // Write name into scratch string and push substring onto o_stack.
+    for (_nid, name_bytes) in &matching_names {
+        let copy_len = name_bytes.len().min(scratch_len as usize);
+        let scratch_slice = ctx.strings.get_mut(scratch_entity, scratch_start, scratch_len);
+        scratch_slice[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
+
+        // Push a substring view of the scratch string (just the written portion)
+        let str_obj = PsObject {
+            value: PsValue::String {
+                entity: scratch_entity,
+                start: scratch_start,
+                len: copy_len as u32,
+            },
+            flags: stet_core::object::ObjFlags::literal(),
+        };
+        ctx.o_stack.push(str_obj)?;
+
+        // Execute the callback proc
+        match ctx.exec_sync(proc) {
+            Ok(()) => {}
+            Err(PsError::Stop) => break,
+            Err(e) => return Err(e),
+        }
+    }
+
     Ok(())
 }
 

@@ -155,9 +155,13 @@ pub fn op_vmreclaim(ctx: &mut Context) -> Result<(), PsError> {
     }
     let obj = ctx.o_stack.peek(0)?;
     match obj.value {
-        PsValue::Int(_) => {
+        PsValue::Int(i) => {
+            // Valid values: -2, -1, 0, 1, 2
+            if !(-2..=2).contains(&i) {
+                return Err(PsError::RangeCheck);
+            }
             ctx.o_stack.pop()?;
-            Ok(()) // No-op
+            Ok(()) // No-op (no GC in stet)
         }
         _ => Err(PsError::TypeCheck),
     }

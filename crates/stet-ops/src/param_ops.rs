@@ -124,17 +124,37 @@ pub fn op_currentsystemparams(ctx: &mut Context) -> Result<(), PsError> {
     Ok(())
 }
 
-/// `setdevparams`: dict → — (stub: pop, no-op)
+/// `setdevparams`: string dict → — (set device parameters, no-op stub)
 pub fn op_setdevparams(ctx: &mut Context) -> Result<(), PsError> {
-    if ctx.o_stack.is_empty() {
+    if ctx.o_stack.len() < 2 {
         return Err(PsError::StackUnderflow);
     }
+    let dict_obj = ctx.o_stack.peek(0)?;
+    let str_obj = ctx.o_stack.peek(1)?;
+    match dict_obj.value {
+        PsValue::Dict(_) => {}
+        _ => return Err(PsError::TypeCheck),
+    }
+    match str_obj.value {
+        PsValue::String { .. } => {}
+        _ => return Err(PsError::TypeCheck),
+    }
+    ctx.o_stack.pop()?;
     ctx.o_stack.pop()?;
     Ok(())
 }
 
-/// `currentdevparams`: — → dict (stub: return empty dict)
+/// `currentdevparams`: string → dict (get device parameters, stub returns empty dict)
 pub fn op_currentdevparams(ctx: &mut Context) -> Result<(), PsError> {
+    if ctx.o_stack.is_empty() {
+        return Err(PsError::StackUnderflow);
+    }
+    let obj = ctx.o_stack.peek(0)?;
+    match obj.value {
+        PsValue::String { .. } => {}
+        _ => return Err(PsError::TypeCheck),
+    }
+    ctx.o_stack.pop()?;
     let d = ctx.dicts.allocate(5, b"devparams");
     ctx.o_stack.push(PsObject::dict(d))?;
     Ok(())
@@ -186,6 +206,8 @@ mod tests {
     #[test]
     fn test_currentdevparams() {
         let mut ctx = test_ctx();
+        let s = ctx.strings.allocate_from(b"%stdin");
+        ctx.o_stack.push(PsObject::string(s, 6)).unwrap();
         op_currentdevparams(&mut ctx).unwrap();
         let result = ctx.o_stack.pop().unwrap();
         assert!(matches!(result.value, PsValue::Dict(_)));

@@ -7,7 +7,7 @@
 use stet_core::context::Context;
 use stet_core::dict::DictKey;
 use stet_core::error::PsError;
-use stet_core::object::{ObjFlags, PsObject, PsValue};
+use stet_core::object::{NameId, ObjFlags, PsObject, PsValue};
 
 /// `bind`: proc → proc (replace names in proc with operator objects)
 pub fn op_bind(ctx: &mut Context) -> Result<(), PsError> {
@@ -374,23 +374,96 @@ pub fn op_exechistorystack(ctx: &mut Context) -> Result<(), PsError> {
     }
 }
 
-/// `exitserver`: password → — (no-op, just pop the password)
+/// Check if a password operand matches `StartJobPassword` in system params.
+/// Password can be integer or string; integers are compared as string representation.
+fn check_start_job_password(ctx: &Context, password_obj: &PsObject) -> bool {
+    // Get StartJobPassword from system params (default "0")
+    let key = DictKey::Name(ctx.names.find(b"StartJobPassword").unwrap_or(NameId(0)));
+    let stored = match ctx.dicts.get(ctx.system_params, &key) {
+        Some(obj) => match obj.value {
+            PsValue::String { entity, start, len } => {
+                ctx.strings.get(entity, start, len).to_vec()
+            }
+            _ => b"0".to_vec(),
+        },
+        None => b"0".to_vec(),
+    };
+
+    match password_obj.value {
+        PsValue::Int(i) => {
+            let pw_str = i.to_string();
+            pw_str.as_bytes() == stored.as_slice()
+        }
+        PsValue::String { entity, start, len } => {
+            ctx.strings.get(entity, start, len) == stored.as_slice()
+        }
+        _ => false,
+    }
+}
+
+/// `exitserver`: password → — (PLRM 3.7.7)
+///
+/// Equivalent to: `true password startjob not { /exitserver /invalidaccess .error } if`
 pub fn op_exitserver(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.o_stack.is_empty() {
         return Err(PsError::StackUnderflow);
     }
+    // Validate type: must be integer or string
+    let pw_obj = ctx.o_stack.peek(0)?;
+    match pw_obj.value {
+        PsValue::Int(_) | PsValue::String { .. } => {}
+        _ => return Err(PsError::TypeCheck),
+    }
+
+    // Check password before popping (validate-before-pop)
+    if !check_start_job_password(ctx, &pw_obj) {
+        return Err(PsError::InvalidAccess);
+    }
+
+    // Password correct — pop and succeed
     ctx.o_stack.pop()?;
     Ok(())
 }
 
-/// `startjob`: password bool → bool (pop args, push true)
+/// `startjob`: bool password → bool (PLRM 3.7.7)
+///
+/// Three conditions must be met for success (returns true):
+/// 1. Current execution context supports job encapsulation
+/// 2. Password matches StartJobPassword system parameter
+/// 3. Save nesting not deeper than job start level
+/// On failure, returns false.
 pub fn op_startjob(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.o_stack.len() < 2 {
         return Err(PsError::StackUnderflow);
     }
-    ctx.o_stack.pop()?;
-    ctx.o_stack.pop()?;
-    ctx.o_stack.push(PsObject::bool(true))?;
+    // Validate types: password (top) must be integer or string, bool below
+    let pw_obj = ctx.o_stack.peek(0)?;
+    let bool_obj = ctx.o_stack.peek(1)?;
+    match pw_obj.value {
+        PsValue::Int(_) | PsValue::String { .. } => {}
+        _ => return Err(PsError::TypeCheck),
+    }
+    match bool_obj.value {
+        PsValue::Bool(_) => {}
+        _ => return Err(PsError::TypeCheck),
+    }
+
+    let pw_obj = ctx.o_stack.pop()?;
+    let _bool_obj = ctx.o_stack.pop()?;
+
+    // Condition 2: Password must match StartJobPassword
+    let password_ok = check_start_job_password(ctx, &pw_obj);
+
+    // Condition 3: Save nesting must not be deeper than job start level.
+    // Job starts at save level 0 (no saves), so any active save means failure.
+    let save_nesting_ok = ctx.save_stack.depth() == 0;
+
+    if password_ok && save_nesting_ok {
+        // Success: job would start (simplified — no full job server sequence)
+        ctx.o_stack.push(PsObject::bool(true))?;
+    } else {
+        ctx.o_stack.push(PsObject::bool(false))?;
+    }
     Ok(())
 }
 
@@ -581,25 +654,97 @@ pub fn op_currentoverprint(ctx: &mut Context) -> Result<(), PsError> {
 }
 
 /// `setcacheparams`: mark int ... → — (set font cache parameters)
+/// `setcacheparams`: mark ... int(s) → —
+///
+/// PLRM: Accepts 1-3 ints above the mark: [upper], [lower upper], [size lower upper].
+/// Stores upper as MaxFontItem, lower as MinFontCompress, size as MaxFontCache.
 pub fn op_setcacheparams(ctx: &mut Context) -> Result<(), PsError> {
-    // Pop until we find a mark
+    // Validate all elements above the mark before popping any
+    let mut count = 0;
     loop {
-        if ctx.o_stack.is_empty() {
+        if count >= ctx.o_stack.len() {
             return Err(PsError::UnmatchedMark);
         }
-        let obj = ctx.o_stack.pop()?;
+        let obj = ctx.o_stack.peek(count)?;
         if matches!(obj.value, PsValue::Mark | PsValue::DictMark) {
             break;
         }
+        match obj.value {
+            PsValue::Int(i) => {
+                if i < 0 {
+                    return Err(PsError::RangeCheck);
+                }
+            }
+            _ => return Err(PsError::TypeCheck),
+        }
+        count += 1;
+    }
+
+    // Now pop: values above mark (in stack order: top first), then mark
+    let mut values: Vec<i32> = Vec::new();
+    for _ in 0..count {
+        let obj = ctx.o_stack.pop()?;
+        if let PsValue::Int(i) = obj.value {
+            values.push(i);
+        }
+    }
+    ctx.o_stack.pop()?; // mark
+    values.reverse(); // stack order → positional order
+
+    let up_key = DictKey::Name(ctx.names.intern(b"MaxFontItem"));
+    let lo_key = DictKey::Name(ctx.names.intern(b"MinFontCompress"));
+    let sz_key = DictKey::Name(ctx.names.intern(b"MaxFontCache"));
+
+    match values.len() {
+        1 => {
+            ctx.dicts
+                .put(ctx.user_params, up_key, PsObject::int(values[0]));
+        }
+        2 => {
+            ctx.dicts
+                .put(ctx.user_params, lo_key, PsObject::int(values[0]));
+            ctx.dicts
+                .put(ctx.user_params, up_key, PsObject::int(values[1]));
+        }
+        3 => {
+            ctx.dicts
+                .put(ctx.system_params, sz_key, PsObject::int(values[0]));
+            ctx.dicts
+                .put(ctx.user_params, lo_key, PsObject::int(values[1]));
+            ctx.dicts
+                .put(ctx.user_params, up_key, PsObject::int(values[2]));
+        }
+        _ => {} // 0 values: no-op
     }
     Ok(())
 }
 
-/// `currentcacheparams`: — → mark int int
+/// `currentcacheparams`: — → mark size lower upper
 pub fn op_currentcacheparams(ctx: &mut Context) -> Result<(), PsError> {
+    let sz_key = DictKey::Name(ctx.names.intern(b"MaxFontCache"));
+    let lo_key = DictKey::Name(ctx.names.intern(b"MinFontCompress"));
+    let up_key = DictKey::Name(ctx.names.intern(b"MaxFontItem"));
+
+    let size = ctx
+        .dicts
+        .get(ctx.system_params, &sz_key)
+        .and_then(|o| o.as_i32())
+        .unwrap_or(67108864);
+    let lower = ctx
+        .dicts
+        .get(ctx.user_params, &lo_key)
+        .and_then(|o| o.as_i32())
+        .unwrap_or(0);
+    let upper = ctx
+        .dicts
+        .get(ctx.user_params, &up_key)
+        .and_then(|o| o.as_i32())
+        .unwrap_or(0);
+
     ctx.o_stack.push(PsObject::mark())?;
-    ctx.o_stack.push(PsObject::int(0))?; // curFonts
-    ctx.o_stack.push(PsObject::int(0))?; // maxFonts
+    ctx.o_stack.push(PsObject::int(size))?;
+    ctx.o_stack.push(PsObject::int(lower))?;
+    ctx.o_stack.push(PsObject::int(upper))?;
     Ok(())
 }
 
@@ -615,13 +760,107 @@ pub fn op_cachestatus(ctx: &mut Context) -> Result<(), PsError> {
     Ok(())
 }
 
+/// `setvmthreshold`: int → — (set GC threshold, no-op)
+///
+/// Valid values: -1 (disable) or >= 0 (threshold). Other negatives are rangecheck.
+pub fn op_setvmthreshold(ctx: &mut Context) -> Result<(), PsError> {
+    if ctx.o_stack.is_empty() {
+        return Err(PsError::StackUnderflow);
+    }
+    let obj = ctx.o_stack.peek(0)?;
+    match obj.value {
+        PsValue::Int(i) => {
+            if i < -1 {
+                return Err(PsError::RangeCheck);
+            }
+            ctx.o_stack.pop()?;
+            Ok(()) // No-op (no GC in stet)
+        }
+        _ => Err(PsError::TypeCheck),
+    }
+}
+
+/// `ucachestatus`: — → mark bsize bmax rsize rmax blimit
+pub fn op_ucachestatus(ctx: &mut Context) -> Result<(), PsError> {
+    let blimit_key = DictKey::Name(ctx.names.intern(b"UCacheBLimit"));
+    let blimit = ctx
+        .dicts
+        .get(ctx.user_params, &blimit_key)
+        .and_then(|o| o.as_i32())
+        .unwrap_or(0);
+
+    ctx.o_stack.push(PsObject::mark())?;
+    ctx.o_stack.push(PsObject::int(0))?; // bsize
+    ctx.o_stack.push(PsObject::int(0))?; // bmax
+    ctx.o_stack.push(PsObject::int(0))?; // rsize
+    ctx.o_stack.push(PsObject::int(0))?; // rmax
+    ctx.o_stack.push(PsObject::int(blimit))?; // blimit
+    Ok(())
+}
+
+/// `setucacheparams`: mark ... int → —
+///
+/// Sets user path cache parameters. Only the topmost int (blimit) is used.
+pub fn op_setucacheparams(ctx: &mut Context) -> Result<(), PsError> {
+    // Validate all elements above the mark before popping any
+    let mut count = 0;
+    loop {
+        if count >= ctx.o_stack.len() {
+            return Err(PsError::UnmatchedMark);
+        }
+        let obj = ctx.o_stack.peek(count)?;
+        if matches!(obj.value, PsValue::Mark | PsValue::DictMark) {
+            break;
+        }
+        match obj.value {
+            PsValue::Int(i) => {
+                if i < 0 {
+                    return Err(PsError::RangeCheck);
+                }
+            }
+            _ => return Err(PsError::TypeCheck),
+        }
+        count += 1;
+    }
+
+    // Now pop values and mark
+    let mut values: Vec<i32> = Vec::new();
+    for _ in 0..count {
+        let obj = ctx.o_stack.pop()?;
+        if let PsValue::Int(i) = obj.value {
+            values.push(i);
+        }
+    }
+    ctx.o_stack.pop()?; // mark
+    // The first value (was topmost on stack) is blimit
+    if let Some(&blimit) = values.first() {
+        let key = DictKey::Name(ctx.names.intern(b"UCacheBLimit"));
+        ctx.dicts
+            .put(ctx.user_params, key, PsObject::int(blimit));
+    }
+    Ok(())
+}
+
 /// `setcachelimit`: int → — (set maximum cached character bitmap size)
+///
+/// Equivalent to `mark exch setcacheparams`. Stores value as MaxFontItem.
 pub fn op_setcachelimit(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.o_stack.is_empty() {
         return Err(PsError::StackUnderflow);
     }
-    ctx.o_stack.pop()?; // ignore the limit value
-    Ok(())
+    let obj = ctx.o_stack.peek(0)?;
+    match obj.value {
+        PsValue::Int(i) => {
+            if i < 0 {
+                return Err(PsError::RangeCheck);
+            }
+            ctx.o_stack.pop()?;
+            let key = DictKey::Name(ctx.names.intern(b"MaxFontItem"));
+            ctx.dicts.put(ctx.user_params, key, PsObject::int(i));
+            Ok(())
+        }
+        _ => Err(PsError::TypeCheck),
+    }
 }
 
 /// `copypage`: — → — (copy current page, no-op in single-page mode)
@@ -1014,13 +1253,50 @@ mod tests {
     }
 
     #[test]
-    fn test_startjob() {
+    fn test_startjob_correct_password() {
         let mut ctx = test_ctx();
-        ctx.o_stack.push(PsObject::int(0)).unwrap();
         ctx.o_stack.push(PsObject::bool(false)).unwrap();
+        ctx.o_stack.push(PsObject::int(0)).unwrap();
         op_startjob(&mut ctx).unwrap();
         let result = ctx.o_stack.pop().unwrap();
+        // Correct password (0), no save nesting → true
         assert!(matches!(result.value, PsValue::Bool(true)));
+    }
+
+    #[test]
+    fn test_startjob_wrong_password() {
+        let mut ctx = test_ctx();
+        ctx.o_stack.push(PsObject::bool(true)).unwrap();
+        ctx.o_stack.push(PsObject::int(999)).unwrap();
+        op_startjob(&mut ctx).unwrap();
+        let result = ctx.o_stack.pop().unwrap();
+        // Wrong password → false
+        assert!(matches!(result.value, PsValue::Bool(false)));
+    }
+
+    #[test]
+    fn test_startjob_typecheck() {
+        let mut ctx = test_ctx();
+        ctx.o_stack.push(PsObject::bool(true)).unwrap();
+        ctx.o_stack.push(PsObject::real(0.5)).unwrap();
+        let err = op_startjob(&mut ctx).unwrap_err();
+        assert!(matches!(err, PsError::TypeCheck));
+    }
+
+    #[test]
+    fn test_exitserver_wrong_password() {
+        let mut ctx = test_ctx();
+        ctx.o_stack.push(PsObject::int(999)).unwrap();
+        let err = op_exitserver(&mut ctx).unwrap_err();
+        assert!(matches!(err, PsError::InvalidAccess));
+    }
+
+    #[test]
+    fn test_exitserver_typecheck() {
+        let mut ctx = test_ctx();
+        ctx.o_stack.push(PsObject::bool(true)).unwrap();
+        let err = op_exitserver(&mut ctx).unwrap_err();
+        assert!(matches!(err, PsError::TypeCheck));
     }
 
     #[test]

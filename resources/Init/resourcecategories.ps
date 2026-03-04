@@ -92,32 +92,8 @@ systemdict begin
             } ifelse
         } bind put
 
-        % ResourceForAll: enumerate valid instances
-        dup /ResourceForAll {
-            /rfa_scratch exch def
-            /rfa_proc exch def
-            /rfa_template exch def
-            rfa_template (*) eq {
-                Instances {
-                    pop
-                    rfa_scratch cvs
-                    rfa_proc exec
-                } forall
-            } {
-                Instances {
-                    pop
-                    rfa_scratch cvs
-                    dup rfa_template eq {
-                        rfa_proc exec
-                    } {
-                        pop
-                    } ifelse
-                } forall
-            } ifelse
-            currentdict /rfa_template undef
-            currentdict /rfa_proc undef
-            currentdict /rfa_scratch undef
-        } bind put
+        % ResourceForAll: handled natively by the resourceforall operator
+        % (avoids dict stack pollution when callbacks use def)
 
         1 index 1 index exch /Category exch put
         /Category defineresource pop

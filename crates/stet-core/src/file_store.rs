@@ -430,7 +430,7 @@ impl FileStore {
                 // Take the filter state out to avoid aliasing issues
                 self.read_byte_filter(entity)
             }
-            FileHandle::Closed => Err(io::Error::other("file closed")),
+            FileHandle::Closed => Ok(None), // Closed files return EOF
             _ => Err(io::Error::other("not readable")),
         }
     }
@@ -610,7 +610,10 @@ impl FileStore {
         match &entry.handle {
             FileHandle::Real(_) => {
                 let entry = &mut self.files[entity.0 as usize];
-                if let FileHandle::Real(f) = &mut entry.handle {
+                if entry.mode.starts_with('r') {
+                    // Read file: consume remaining data and close (PLRM)
+                    entry.handle = FileHandle::Closed;
+                } else if let FileHandle::Real(f) = &mut entry.handle {
                     f.get_mut().flush()?;
                 }
             }
