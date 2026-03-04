@@ -342,8 +342,8 @@ pub fn op_execstack(ctx: &mut Context) -> Result<(), PsError> {
 
     ctx.o_stack.pop()?;
 
-    // Copy exec stack contents into the array, converting ExecArray
-    // cursors to regular Array objects (the PS-visible representation)
+    // Copy exec stack contents into the array, converting internal
+    // markers to PS-visible representations
     let e_slice = ctx.e_stack.as_slice();
     for (i, &elem) in e_slice.iter().enumerate() {
         let visible = match elem.value {
@@ -360,6 +360,18 @@ pub fn op_execstack(ctx: &mut Context) -> Result<(), PsError> {
                 },
                 flags: elem.flags,
             },
+            PsValue::Stopped => {
+                let s = ctx.strings.allocate_from(b"-stopped-");
+                PsObject::string(s, 9)
+            }
+            PsValue::Loop(_) => {
+                let s = ctx.strings.allocate_from(b"-loop-");
+                PsObject::string(s, 6)
+            }
+            PsValue::DictEnd(_) => {
+                let s = ctx.strings.allocate_from(b"-dictend-");
+                PsObject::string(s, 9)
+            }
             _ => elem,
         };
         ctx.arrays.set_element(entity, i as u32, visible);

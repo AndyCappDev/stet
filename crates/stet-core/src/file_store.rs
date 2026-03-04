@@ -203,7 +203,11 @@ impl FileStore {
                 }
                 // Read one line from stdin, strip trailing newline
                 let mut line = String::new();
-                io::stdin().read_line(&mut line)?;
+                let n = io::stdin().read_line(&mut line)?;
+                if n == 0 {
+                    // EOF — signal undefinedfilename (executive catches this and exits)
+                    return Err(io::Error::new(io::ErrorKind::NotFound, "EOF on stdin"));
+                }
                 if line.ends_with('\n') {
                     line.pop();
                     if line.ends_with('\r') {

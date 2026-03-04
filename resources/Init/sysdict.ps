@@ -137,7 +137,7 @@ false setglobal
 
         /booleantype {cvsprint} def
         /dicttype {dictname (<<-) tprint =string cvs tprint (->> ) tprint} bind def
-        /filetype {(-filestream- ) tprint} bind def
+        /filetype {pop (-filestream- ) tprint} bind def
         /fonttype {pop (-fontid- ) tprint} bind def
         /integertype {cvsprint} def
         /marktype {pop (-mark- ) tprint} bind def
@@ -284,6 +284,7 @@ false setglobal
 
 //$error begin
     /newerror false def
+    /doclose false def
     /ostackarry null def
 end % $error
 
@@ -639,6 +640,105 @@ end % statusdict
 serverdict begin
     systemdict /exitserver get /exitserver exch def
 end
+
+
+%%% Executive %%%
+/execdict 20 dict def
+execdict begin
+    /execdepth 0 def
+    /continueflag false def
+
+    /checkquit {
+        quitflag {exit} if
+        continueflag {exit} if
+    } bind def
+
+    /cvsprint {=string cvs print} bind def
+end % execdict
+
+systemdict begin
+    true setglobal
+
+    /prompt {
+        (PS[) print countexecstack cvsprint ( ) print
+        countdictstack 1 sub cvsprint ( ) print count cvsprint
+        (]) print execdepth { (>) print } repeat ( ) print flush
+    } bind def
+
+    /continue {
+        //execdict /continueflag true put
+    } bind def
+
+    /cont {
+        //execdict /continueflag true put
+    } bind def
+
+    /executive {
+        true {
+            //execdict begin
+            /execdepth execdepth 1 add def
+            /continueflag false def
+            true .setinteractivepaint
+            execdepth 1 eq {
+                product print ( ) print (Version ) print revisionstring print ( \() print revisiondate print (\)\n) print
+                (Copyright \(C\) ) print revisiondate 0 4 getinterval print ( Scott Bowman, All rights reserved.\n) print
+                (This software is licensed under the GNU AGPL v3.0 or later.\n) print
+            } if
+            { %loop
+                /quitflag false def
+                //$error /newerror false put
+                /prompt load stopped {
+                    handleerror
+                    (Error during prompt execution\n) print exit
+                } if
+                { %stopped
+                    mark
+                    /stmtfile (%statementedit) (r) file def
+                } stopped {
+                    cleartomark
+                    //$error /newerror get {
+                        //$error /errorname get /undefinedfilename ne {
+                            handleerror
+                        } if
+                        //$error /newerror false put exit
+                    } if
+                }
+                {
+                    pop stmtfile end { %stopped
+                        cvx exec
+                    } stopped
+                    //execdict begin {
+                        handleerror
+                        stmtfile closefile
+                    } if
+                } ifelse
+                checkquit
+            } loop
+            false .setinteractivepaint
+            continueflag {
+                /continueflag false def
+                /execdepth execdepth 1 sub def
+            end % execdict
+            } {
+                /quitflag false def
+                /execdepth execdepth 1 sub def
+            end % execdict
+                //$error /doclose false put
+                stop
+            } ifelse
+        } {
+            (Only one level of executive allowed\n) print
+        } ifelse
+    } bind def
+end % systemdict
+
+false setglobal
+
+% PS-level quit (shadows native quit in userdict)
+/quit {
+    //$error /newerror false put
+    //execdict /quitflag true put stop
+} bind def
 
 
 systemdict begin

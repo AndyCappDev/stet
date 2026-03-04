@@ -154,10 +154,13 @@ pub fn op_file(ctx: &mut Context) -> Result<(), PsError> {
     // Resolve relative paths against the currently executing file's directory
     let resolved = resolve_filename(ctx, &name);
 
-    let file_entity = ctx
-        .files
-        .open(&resolved, &mode)
-        .map_err(|_| PsError::InvalidFileAccess)?;
+    let file_entity = ctx.files.open(&resolved, &mode).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            PsError::UndefinedFilename
+        } else {
+            PsError::InvalidFileAccess
+        }
+    })?;
 
     ctx.o_stack.pop()?;
     ctx.o_stack.pop()?;

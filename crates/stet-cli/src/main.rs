@@ -425,32 +425,13 @@ fn run_file_jobs(
     print_exec_stack(ctx);
 }
 
-/// Run the interactive REPL.
+/// Run the interactive REPL via PostScript's executive procedure.
 fn run_repl(ctx: &mut Context) {
-    let stdin = std::io::stdin();
-    let mut line = String::new();
-    loop {
-        eprint!("PS> ");
-        std::io::stderr().flush().ok();
-        line.clear();
-        match stdin.read_line(&mut line) {
-            Ok(0) => break, // EOF
-            Ok(_) => {
-                if let Err(e) = parse_and_exec(ctx, line.as_bytes()) {
-                    match e {
-                        stet_core::error::PsError::Quit => break,
-                        stet_core::error::PsError::Stop => {
-                            let _ = parse_and_exec(ctx, b"{ handleerror } stopped pop");
-                        }
-                        _ => eprintln!("Error: {}", e),
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!("Error reading input: {}", e);
-                break;
-            }
-        }
+    match parse_and_exec(ctx, b"{executive} stopped pop") {
+        Ok(()) => {}
+        Err(stet_core::error::PsError::Quit) => {}
+        Err(stet_core::error::PsError::Stop) => {}
+        Err(e) => eprintln!("Error: {}", e),
     }
 }
 
