@@ -147,9 +147,9 @@ pub fn op_settransfer(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.o_stack.is_empty() {
         return Err(PsError::StackUnderflow);
     }
-    match ctx.o_stack.peek(0)?.value {
-        PsValue::Array { .. } | PsValue::PackedArray { .. } => {}
-        _ => return Err(PsError::TypeCheck),
+    let obj = ctx.o_stack.peek(0)?;
+    if !obj.is_array_type() || !obj.flags.is_executable() {
+        return Err(PsError::TypeCheck);
     }
     let proc_obj = ctx.o_stack.pop()?;
     ctx.gstate.transfer_function = Some(proc_obj);
@@ -219,9 +219,9 @@ pub fn op_setblackgeneration(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.o_stack.is_empty() {
         return Err(PsError::StackUnderflow);
     }
-    match ctx.o_stack.peek(0)?.value {
-        PsValue::Array { .. } | PsValue::PackedArray { .. } => {}
-        _ => return Err(PsError::TypeCheck),
+    let obj = ctx.o_stack.peek(0)?;
+    if !obj.is_array_type() || !obj.flags.is_executable() {
+        return Err(PsError::TypeCheck);
     }
     let proc_obj = ctx.o_stack.pop()?;
     ctx.gstate.black_generation = Some(proc_obj);
@@ -245,9 +245,9 @@ pub fn op_setundercolorremoval(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.o_stack.is_empty() {
         return Err(PsError::StackUnderflow);
     }
-    match ctx.o_stack.peek(0)?.value {
-        PsValue::Array { .. } | PsValue::PackedArray { .. } => {}
-        _ => return Err(PsError::TypeCheck),
+    let obj = ctx.o_stack.peek(0)?;
+    if !obj.is_array_type() || !obj.flags.is_executable() {
+        return Err(PsError::TypeCheck);
     }
     let proc_obj = ctx.o_stack.pop()?;
     ctx.gstate.undercolor_removal = Some(proc_obj);

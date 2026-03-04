@@ -42,7 +42,7 @@ pub fn op_shfill(ctx: &mut Context) -> Result<(), PsError> {
     };
 
     // Extract ShadingType (required, integer 1-7)
-    let shading_type = get_dict_int(ctx, dict_entity, b"ShadingType").ok_or(PsError::Undefined)?;
+    let shading_type = get_dict_int(ctx, dict_entity, b"ShadingType").ok_or(PsError::RangeCheck)?;
     if !(1..=7).contains(&shading_type) {
         return Err(PsError::RangeCheck);
     }
