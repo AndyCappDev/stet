@@ -8,3 +8,6 @@ tests/pixeldiff/
 web/pkg/
 crates/stet-wasm/pkg/
 .test_stats.tmp
+tests/corpus/*/
+tests/corpus/manifest.txt
+tests/corpus-results/
