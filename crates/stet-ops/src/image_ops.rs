@@ -39,7 +39,7 @@ pub fn op_image(ctx: &mut Context) -> Result<(), PsError> {
     let width = w_obj.as_i32().ok_or(PsError::TypeCheck)?;
     let height = h_obj.as_i32().ok_or(PsError::TypeCheck)?;
     let bps = bps_obj.as_i32().ok_or(PsError::TypeCheck)?;
-    if width < 0 || height < 0 {
+    if width <= 0 || height <= 0 {
         return Err(PsError::RangeCheck);
     }
     if !matches!(bps, 1 | 2 | 4 | 8 | 12) {
@@ -90,14 +90,15 @@ pub fn op_image(ctx: &mut Context) -> Result<(), PsError> {
         return Ok(());
     }
 
-    // Read data from source
-    let data = read_image_data(ctx, src_obj, total_bytes)?;
-
+    // Pop all 5 operands before reading data (matches PostForge behavior)
     ctx.o_stack.pop()?; // src
     ctx.o_stack.pop()?; // matrix
     ctx.o_stack.pop()?; // bps
     ctx.o_stack.pop()?; // height
     ctx.o_stack.pop()?; // width
+
+    // Read data from source
+    let data = read_image_data(ctx, src_obj, total_bytes)?;
 
     // Default decode: [0 1] per component
     let decode: Vec<f64> = (0..ncomp).flat_map(|_| [0.0, 1.0]).collect();
@@ -133,17 +134,25 @@ fn image_dict_form(ctx: &mut Context) -> Result<(), PsError> {
         _ => return Err(PsError::TypeCheck),
     };
 
-    // Check ImageType — default to 1
-    let image_type = dict_get_int(ctx, dict_entity, b"ImageType").unwrap_or(1);
+    // Check ImageType — required per PostForge (TypeCheck if missing or non-integer)
+    let image_type_obj = dict_get_obj(ctx, dict_entity, b"ImageType").ok_or(PsError::TypeCheck)?;
+    let image_type = image_type_obj.as_i32().ok_or(PsError::TypeCheck)?;
     match image_type {
         1 | 4 => {} // Type 1 and Type 4 share most logic; Type 4 adds MaskColor
         3 => return image_type3_form(ctx, dict_entity),
         _ => return Err(PsError::RangeCheck),
     }
 
-    // Extract required dict keys
-    let width = dict_get_int(ctx, dict_entity, b"Width").ok_or(PsError::Undefined)? as u32;
-    let height = dict_get_int(ctx, dict_entity, b"Height").ok_or(PsError::Undefined)? as u32;
+    // Extract required dict keys with strict type validation
+    let width_obj = dict_get_obj(ctx, dict_entity, b"Width").ok_or(PsError::TypeCheck)?;
+    let width = width_obj.as_i32().ok_or(PsError::TypeCheck)?;
+    let height_obj = dict_get_obj(ctx, dict_entity, b"Height").ok_or(PsError::TypeCheck)?;
+    let height = height_obj.as_i32().ok_or(PsError::TypeCheck)?;
+    if width <= 0 || height <= 0 {
+        return Err(PsError::RangeCheck);
+    }
+    let width = width as u32;
+    let height = height as u32;
     let bps = dict_get_int(ctx, dict_entity, b"BitsPerComponent").ok_or(PsError::Undefined)? as u32;
     let image_matrix =
         dict_get_matrix(ctx, dict_entity, b"ImageMatrix").ok_or(PsError::Undefined)?;
@@ -705,7 +714,7 @@ pub fn op_imagemask(ctx: &mut Context) -> Result<(), PsError> {
         PsValue::Bool(b) => b,
         _ => return Err(PsError::TypeCheck),
     };
-    if width < 0 || height < 0 {
+    if width <= 0 || height <= 0 {
         return Err(PsError::RangeCheck);
     }
     let image_matrix = extract_matrix(ctx, mat_obj)?;
@@ -828,7 +837,7 @@ pub fn op_colorimage(ctx: &mut Context) -> Result<(), PsError> {
     let width = w_obj.as_i32().ok_or(PsError::TypeCheck)?;
     let height = h_obj.as_i32().ok_or(PsError::TypeCheck)?;
     let bps = bps_obj.as_i32().ok_or(PsError::TypeCheck)?;
-    if width < 0 || height < 0 {
+    if width <= 0 || height <= 0 {
         return Err(PsError::RangeCheck);
     }
     if !matches!(bps, 1 | 2 | 4 | 8 | 12) {
@@ -1020,6 +1029,9 @@ fn read_image_data(
 ) -> Result<Vec<u8>, PsError> {
     match src.value {
         PsValue::String { entity, start, len } => {
+            if (len as usize) < bytes_needed {
+                return Err(PsError::IOError);
+            }
             let data = ctx.strings.get(entity, start, len).to_vec();
             Ok(data)
         }
@@ -1133,7 +1145,7 @@ fn unpack_samples(
         return raw.to_vec();
     }
 
-    let total_samples = width as usize * height as usize * ncomp as usize;
+    let total_samples = (width as usize) * (height as usize) * (ncomp as usize);
     let mut result = Vec::with_capacity(total_samples);
 
     if bps == 12 {
@@ -1202,7 +1214,7 @@ fn samples_to_rgba(
     ncomp: u32,
     decode: &[f64],
 ) -> Vec<u8> {
-    let pixel_count = (width * height) as usize;
+    let pixel_count = width as usize * height as usize;
     let mut rgba = vec![255u8; pixel_count * 4]; // Pre-fill alpha = 255
 
     // Check for Indexed color space
@@ -1307,7 +1319,7 @@ fn mask_to_rgba(
     polarity: bool,
     color: &DeviceColor,
 ) -> Vec<u8> {
-    let pixel_count = (width * height) as usize;
+    let pixel_count = width as usize * height as usize;
     let mut rgba = vec![0u8; pixel_count * 4];
     let bytes_per_row = (width as usize).div_ceil(8);
 
@@ -1352,7 +1364,7 @@ fn interleave_components(
 ) -> Vec<u8> {
     if bps == 8 {
         // Simple byte interleave
-        let pixel_count = (width * height) as usize;
+        let pixel_count = width as usize * height as usize;
         let mut result = Vec::with_capacity(pixel_count * ncomp as usize);
         for i in 0..pixel_count {
             for comp in comp_data {
@@ -1523,7 +1535,7 @@ fn apply_mask_color(
     ncomp: u32,
     mask_color: &[i32],
 ) {
-    let pixel_count = (width * height) as usize;
+    let pixel_count = width as usize * height as usize;
     let is_range = mask_color.len() == 2 * ncomp as usize;
 
     for i in 0..pixel_count {

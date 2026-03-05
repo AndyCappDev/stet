@@ -169,6 +169,13 @@ pub fn op_put(ctx: &mut Context) -> Result<(), PsError> {
             ctx.strings.put_byte(entity, start + idx as u32, byte);
         }
         PsValue::Dict(dict_entity) => {
+            // Type check: arrays and dicts are not valid dict keys (PLRM)
+            if matches!(
+                idx_obj.value,
+                PsValue::Array { .. } | PsValue::PackedArray { .. } | PsValue::Dict(_)
+            ) {
+                return Err(PsError::TypeCheck);
+            }
             // Access check: dict must be writable
             ctx.dicts.require_write(dict_entity)?;
             // VM access check: global dict cannot hold local composite value.

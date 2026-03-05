@@ -20,7 +20,8 @@ pub fn op_bind(ctx: &mut Context) -> Result<(), PsError> {
             bind_procedure(ctx, entity, start, len);
             Ok(())
         }
-        _ => Ok(()), // bind on non-proc is a no-op per PLRM
+        PsValue::Array { .. } | PsValue::PackedArray { .. } => Ok(()), // literal array: no-op
+        _ => Err(PsError::TypeCheck),
     }
 }
 
@@ -1233,15 +1234,11 @@ pub fn op_currentobjectformat(ctx: &mut Context) -> Result<(), PsError> {
 /// Returns milliseconds since an arbitrary epoch. Used for seeding RNG
 /// and interval timing.
 pub fn op_realtime(ctx: &mut Context) -> Result<(), PsError> {
-    #[cfg(not(target_arch = "wasm32"))]
-    let ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64;
-    #[cfg(target_arch = "wasm32")]
-    let ms: i64 = 0;
-    // Wrap to i32 range (PLRM: wraps to most negative integer)
-    ctx.o_stack.push(PsObject::int(ms as i32))?;
+    let ms = ctx
+        .start_time
+        .map(|t| t.elapsed().as_millis() as i32)
+        .unwrap_or(0);
+    ctx.o_stack.push(PsObject::int(ms))?;
     Ok(())
 }
 
@@ -1266,12 +1263,11 @@ mod tests {
     }
 
     #[test]
-    fn test_bind_noop_on_non_proc() {
+    fn test_bind_typecheck_on_non_proc() {
         let mut ctx = test_ctx();
         ctx.o_stack.push(PsObject::int(42)).unwrap();
-        op_bind(&mut ctx).unwrap();
-        // Should be unchanged
-        assert_eq!(ctx.o_stack.peek(0).unwrap().as_i32(), Some(42));
+        let err = op_bind(&mut ctx).unwrap_err();
+        assert_eq!(err, PsError::TypeCheck);
     }
 
     #[test]
