@@ -169,17 +169,6 @@ pub fn op_put(ctx: &mut Context) -> Result<(), PsError> {
             ctx.strings.put_byte(entity, start + idx as u32, byte);
         }
         PsValue::Dict(dict_entity) => {
-            // Type check: dict keys must be name, string, int, real, or bool
-            if !matches!(
-                idx_obj.value,
-                PsValue::Name(_)
-                    | PsValue::String { .. }
-                    | PsValue::Int(_)
-                    | PsValue::Real(_)
-                    | PsValue::Bool(_)
-            ) {
-                return Err(PsError::TypeCheck);
-            }
             // Access check: dict must be writable
             ctx.dicts.require_write(dict_entity)?;
             // VM access check: global dict cannot hold local composite value.
