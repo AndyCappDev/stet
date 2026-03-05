@@ -8,7 +8,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use stet_core::context::Context;
-use stet_core::eps::{read_eps_bounding_box, strip_dos_eps_header};
+use stet_core::eps::{content_is_epsf, read_eps_bounding_box, strip_dos_eps_header};
 use stet_engine::eval::{parse_and_exec, parse_and_exec_file};
 use stet_ops::build_system_dict;
 use stet_render::SkiaDevice;
@@ -346,7 +346,9 @@ fn run_file_jobs(
 
         // Strip DOS EPS binary header if present
         let ps_data = strip_dos_eps_header(&source);
-        let is_eps = filename_lower.ends_with(".eps") || filename_lower.ends_with(".epsf");
+        let is_eps = filename_lower.ends_with(".eps")
+            || filename_lower.ends_with(".epsf")
+            || content_is_epsf(ps_data);
 
         // Signal new job to viewer (clear previous job's pages)
         if job_idx > 0

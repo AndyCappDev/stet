@@ -17,7 +17,7 @@ use wasm_bindgen::prelude::*;
 use stet_core::context::Context;
 use stet_core::device::OutputDevice;
 use stet_core::display_list::DisplayList;
-use stet_core::eps::read_eps_bounding_box;
+use stet_core::eps::{content_is_epsf, read_eps_bounding_box};
 use stet_core::error::PsError;
 use stet_engine::eval::parse_and_exec;
 use stet_render::{PreparedDisplayList, SkiaDevice};
@@ -197,7 +197,9 @@ pub fn render(interp: &mut Interpreter, ps_data: &[u8], dpi: f64, filename: &str
 
     // Use EPS mode only when the file extension is .eps or .epsf (matching CLI behavior)
     let filename_lower = filename.to_ascii_lowercase();
-    let is_eps = filename_lower.ends_with(".eps") || filename_lower.ends_with(".epsf");
+    let is_eps = filename_lower.ends_with(".eps")
+        || filename_lower.ends_with(".epsf")
+        || content_is_epsf(ps_data);
 
     if is_eps
         && let Some((llx, lly, urx, ury)) = read_eps_bounding_box(ps_data)
