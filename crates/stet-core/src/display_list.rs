@@ -6,7 +6,7 @@
 
 use crate::device::{
     AxialShadingParams, ClipParams, FillParams, ImageParams, MeshShadingParams, OutputDevice,
-    PatchShadingParams, RadialShadingParams, StrokeParams,
+    PatchShadingParams, PatternFillParams, RadialShadingParams, StrokeParams,
 };
 use crate::graphics_state::PsPath;
 
@@ -36,6 +36,8 @@ pub enum DisplayElement {
     MeshShading { params: MeshShadingParams },
     /// Coons/tensor-product patch mesh.
     PatchShading { params: PatchShadingParams },
+    /// Tiled pattern fill.
+    PatternFill { params: PatternFillParams },
 }
 
 /// An ordered list of drawing operations for a single page.
@@ -112,6 +114,9 @@ pub fn replay_to_device(list: &DisplayList, device: &mut dyn OutputDevice) {
             }
             DisplayElement::PatchShading { params } => {
                 device.paint_patch_shading(params);
+            }
+            DisplayElement::PatternFill { params } => {
+                device.paint_pattern_fill(params);
             }
         }
     }

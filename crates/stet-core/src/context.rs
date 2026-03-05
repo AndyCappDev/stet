@@ -14,7 +14,7 @@ use crate::dual_dict_store::DualDictStore;
 use crate::dual_string_store::DualStringStore;
 use crate::error::PsError;
 use crate::file_store::FileStore;
-use crate::graphics_state::{GraphicsState, Matrix, PathSegment};
+use crate::graphics_state::{GraphicsState, Matrix, PatternData, PathSegment};
 use crate::name::NameTable;
 use crate::object::{EntityId, NameId, ObjFlags, PsObject, PsValue, SaveLevel};
 use crate::save_stack::{SaveRecord, SaveStack, StoreType};
@@ -208,6 +208,12 @@ pub struct Context {
 
     // CID passed from cshow to nested show call for Type 0 composite fonts
     pub cshow_pending_cid: Option<i32>,
+
+    // Pattern/form support
+    /// Storage for pattern instances created by `makepattern`.
+    pub pattern_store: Vec<PatternData>,
+    /// Cache of form display lists keyed by dict EntityId.
+    pub form_cache: rustc_hash::FxHashMap<EntityId, DisplayList>,
 
     // Timing
     pub start_time: Option<std::time::Instant>,
@@ -539,6 +545,8 @@ impl Context {
             exec_sync_fn: None,
             char_width: None,
             cshow_pending_cid: None,
+            pattern_store: Vec::new(),
+            form_cache: rustc_hash::FxHashMap::default(),
             #[cfg(not(target_arch = "wasm32"))]
             start_time: Some(std::time::Instant::now()),
             #[cfg(target_arch = "wasm32")]

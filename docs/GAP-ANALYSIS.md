@@ -1,6 +1,6 @@
 # stet vs PostForge: Gap Analysis
 
-**Date**: 2026-03-05
+**Date**: 2026-03-05 (updated 2026-03-05)
 **Purpose**: Comprehensive comparison of stet (Rust) against PostForge (Python) — the reference PostScript Level 3 interpreter — to identify all gaps that must be closed for 1:1 feature parity.
 
 ---
@@ -9,14 +9,13 @@
 
 stet has strong foundations across core interpreter mechanics, graphics, fonts, images, shading, filters, and resources. However, significant gaps remain in several areas:
 
-- **12 missing operators** (userpath, pattern/form, path, misc, filter categories)
+- **9 missing operators** (userpath, path, misc, filter categories)
 - **Encode filters** are stub pass-throughs
 - **CCITTFax filters** not implemented
 - **Binary Object Sequences (BOS)** not implemented
-- **Pattern rendering** is stubbed (makepattern/execform/setpattern)
 - **Output devices**: stet has PNG + viewer; PF also has PDF, SVG, TIFF
 - **Glyph caching** not implemented (plan exists)
-- **Feature gaps** causing 8 test suites to fail (~127 total failures)
+- **Feature gaps** causing 7 test suites to fail (~121 total failures)
 
 ### Test Suite Status (stet unit_tests)
 
@@ -24,9 +23,9 @@ Results from running stet's own copy of the test suites (`~/Projects/stet/unit_t
 
 | Status | Count | Suites |
 |--------|-------|--------|
-| **PASS** | 40 | arc_shading, arithmetic_and_math, array, cff, clipping, color_operators, context_param, control, defined_ps_operator, device_operator, **dictionary**, file_operators, filter_chain, flate_filter, font, graphics_state_params, gstate, halftone_transfer, **image**, interpreter_param, job_control, job_control_tests_standalone, matrix, nulldevice, operand_stack, packedarray, painting, path, print_integration, rel_bool_bitwise, resource, save_invalidation, show_variant, stdio, string, strokepath, type1_font, type_attrib_conv, vm_gstate_integration, vm_operators |
-| **FAIL** | 8 | binary_token(55), dct_filter(9), file(11), filter_extended(13), misc(5), pattern_form(6), ps(16), userpath(12) |
-| **Total** | 48 | (excluding unittest.ps framework file) |
+| **PASS** | 40 | arc_shading, arithmetic_and_math, array, cff, clipping, color_operators, context_param, control, defined_ps_operator, device_operator, dictionary, file_operators, filter_chain, flate_filter, font, graphics_state_params, gstate, halftone_transfer, image, interpreter_param, job_control, job_control_tests_standalone, matrix, nulldevice, operand_stack, packedarray, painting, path, **pattern_form**, print_integration, rel_bool_bitwise, resource, save_invalidation, show_variant, stdio, string, strokepath, type1_font, type_attrib_conv, vm_gstate_integration, vm_operators |
+| **FAIL** | 7 | binary_token(55), dct_filter(9), file(11), filter_extended(13), misc(5), ps(16), userpath(12) |
+| **Total** | 47 | (excluding unittest.ps framework file) |
 
 ---
 
@@ -56,7 +55,6 @@ PostForge implements the full userpath operator set. stet has none of these.
 
 | Operator | Description | In PF | In stet | Notes |
 |----------|-------------|-------|---------|-------|
-| `setpattern` | Set pattern color | Yes | **No** | Registered but no-op in PF's pattern_form; not in stet at all |
 | `flushpage` | Flush page output | Yes | **No** | Simple no-op for non-printer devices |
 | `echo` | Toggle echo mode | Yes | **No** | Interactive REPL feature |
 | `loopname` | Get current loop name | Yes | **No** | Debugging aid |
@@ -71,15 +69,9 @@ PostForge implements the full userpath operator set. stet has none of these.
 
 ## 2. Stubbed/Incomplete Operators
 
-### 2.1 Pattern & Form Support (STUBBED)
+### ~~2.1 Pattern & Form Support~~ — RESOLVED (2026-03-05)
 
-Both `makepattern` and `execform` exist in stet but are **no-op stubs** that just pop arguments. PostForge has full implementations (701 lines in pattern_form.py):
-
-- **`makepattern`**: PF creates pattern dict with PaintProc, matrix, bounding box, tiling. stet pops matrix and returns dict unchanged.
-- **`execform`**: PF renders Form XObjects with caching. stet just pops the dict.
-- **`setpattern`**: PF sets pattern color space. stet doesn't have this operator at all.
-
-**Impact**: 6 failures in pattern_form_tests.ps. Any PS file using tiled patterns or Form XObjects won't render correctly.
+`makepattern`, `setpattern`, and `execform` fully implemented. Tiled patterns render via `DisplayElement::PatternFill` with tile replay in SkiaDevice. Form XObjects cached at identity CTM, replayed with path-point transformation through real CTM. All 6 pattern_form_tests pass; visual output matches PostForge.
 
 ### 2.2 Encode Filters (ALL STUBBED)
 
@@ -180,7 +172,6 @@ These suites fail entirely because of unimplemented features, not defects:
 | userpath | 12 | Userpath operators (P1) |
 | file | 11 | All failures are BOS-related — bos_rt.bin etc. (P1) |
 | dct_filter | 9 | DCTEncode parameter validation (P1) |
-| pattern_form | 6 | Pattern/Form rendering stubs (P1) |
 
 ---
 
@@ -256,7 +247,7 @@ Font support is at feature parity for correctness. Gaps are performance (caching
 | Indexed | Full | Full | None |
 | Separation | Full | Full | None |
 | DeviceN | Full | Full | None |
-| Pattern | Full | **Stubbed** | makepattern/setpattern are stubs |
+| Pattern | Full | Full | makepattern/setpattern/execform implemented |
 | ICC Profile | Full | **No** | See 3.3 |
 
 ---
@@ -329,7 +320,7 @@ All 7 shading types are implemented in both interpreters. **No gaps.**
 ~~All P0 bugs resolved (2026-03-05).~~
 
 ### P1 — High (Missing functionality used by real-world PS files)
-1. **Pattern/Form rendering** (makepattern, setpattern, execform) — 701 lines in PF
+~~1. **Pattern/Form rendering** — RESOLVED (2026-03-05)~~
 2. **Encode filters** (ASCIIHex, ASCII85, RunLength, Flate, LZW, DCT, NullEncode)
 3. **Binary Object Sequences** — needed for some workflows
 4. **Userpath operators** (11 operators) — used in some PS programs
@@ -359,7 +350,7 @@ All 7 shading types are implemented in both interpreters. **No gaps.**
 
 ```
 breaki            echo              flushpage         help
-loopname          printostack       runlibfile        setpattern
+loopname          printostack       runlibfile
 createresourcecategory               setbbox
 uappend           ucache            ueofill           ufill
 upath             ustroke           ustrokepath
@@ -376,7 +367,7 @@ selectfont (native)  .showpage_continue  .copypage_continue
 
 ### Operators in both — implemented identically (feature parity)
 
-All standard PLRM operators for: stack, math, relational/boolean/bitwise, type/conversion, dictionary, control flow, composite, array, string, file I/O, filter (decode), VM, matrix, path construction, color, graphics state, painting, clipping, path query, insideness (infill/ineofill/instroke), font management, text show, halftone/transfer, shading, image, resource, interpreter parameters, device setup, CFF.
+All standard PLRM operators for: stack, math, relational/boolean/bitwise, type/conversion, dictionary, control flow, composite, array, string, file I/O, filter (decode), VM, matrix, path construction, color, graphics state, painting, clipping, path query, insideness (infill/ineofill/instroke), font management, text show, halftone/transfer, shading, image, pattern/form (makepattern/setpattern/execform), resource, interpreter parameters, device setup, CFF.
 
 ---
 
@@ -392,8 +383,8 @@ Results from stet's own unit_tests directory (`~/Projects/stet/unit_tests/`).
 | userpath | 12 | Missing operators |
 | file | 11 | File I/O edge cases (BOS) |
 | dct_filter | 9 | DCT param handling |
-| pattern_form | 6 | Stubbed operators |
 | misc | 5 | Missing `echo` operator |
+| ~~pattern_form~~ | ~~0~~ | ~~Fixed (2026-03-05)~~ |
 | ~~dictionary~~ | ~~0~~ | ~~Fixed (2026-03-05)~~ |
 | ~~image~~ | ~~0~~ | ~~Fixed (2026-03-05)~~ |
-| **Total** | **~127** | |
+| **Total** | **~121** | |

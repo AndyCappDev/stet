@@ -4,6 +4,7 @@
 
 //! Output device trait — abstraction boundary for rendering backends.
 
+use crate::display_list::DisplayList;
 use crate::graphics_state::{
     DashPattern, DeviceColor, FillRule, LineCap, LineJoin, Matrix, PsPath,
 };
@@ -133,6 +134,29 @@ pub struct PatchShadingParams {
     pub bbox: Option<[f64; 4]>,
 }
 
+/// Parameters for a tiled pattern fill.
+#[derive(Clone)]
+pub struct PatternFillParams {
+    /// The path to fill with the pattern.
+    pub path: PsPath,
+    /// Fill rule for the path.
+    pub fill_rule: FillRule,
+    /// Pre-rendered display list for a single tile.
+    pub tile: DisplayList,
+    /// Pattern matrix (pattern space → device space).
+    pub pattern_matrix: Matrix,
+    /// Bounding box of one tile in pattern space.
+    pub bbox: [f64; 4],
+    /// Horizontal step between tile origins.
+    pub xstep: f64,
+    /// Vertical step between tile origins.
+    pub ystep: f64,
+    /// Paint type: 1 = colored, 2 = uncolored.
+    pub paint_type: i32,
+    /// For uncolored patterns, the fill color.
+    pub underlying_color: Option<DeviceColor>,
+}
+
 /// Trait for raster rendering devices.
 ///
 /// Operators never see the concrete implementation — they call trait methods.
@@ -175,6 +199,9 @@ pub trait OutputDevice {
     /// Paint a Coons/tensor-product patch mesh.
     fn paint_patch_shading(&mut self, _params: &PatchShadingParams) {}
 
+    /// Paint a tiled pattern fill.
+    fn paint_pattern_fill(&mut self, _params: &PatternFillParams) {}
+
     /// Page dimensions in device pixels.
     fn page_size(&self) -> (u32, u32);
 
@@ -205,6 +232,7 @@ pub trait OutputDevice {
                 DisplayElement::RadialShading { params } => self.paint_radial_shading(params),
                 DisplayElement::MeshShading { params } => self.paint_mesh_shading(params),
                 DisplayElement::PatchShading { params } => self.paint_patch_shading(params),
+                DisplayElement::PatternFill { params } => self.paint_pattern_fill(params),
             }
         }
         self.show_page(output_path)

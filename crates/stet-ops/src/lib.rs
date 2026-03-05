@@ -594,6 +594,7 @@ pub fn build_system_dict(ctx: &mut Context) {
     // --- Pattern/shading operators ---
     register(ctx, sd, "shfill", shading_ops::op_shfill);
     register(ctx, sd, "makepattern", halftone_ops::op_makepattern);
+    register(ctx, sd, "setpattern", halftone_ops::op_setpattern);
     register(ctx, sd, "execform", halftone_ops::op_execform);
 
     // --- Page device operators ---

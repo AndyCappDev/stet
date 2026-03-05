@@ -12,7 +12,9 @@
 
 use stet_core::context::Context;
 use stet_core::dict::DictKey;
+use stet_core::display_list::DisplayList;
 use stet_core::error::PsError;
+use stet_core::graphics_state::{Matrix, PatternData};
 use stet_core::object::{PsObject, PsValue};
 
 // ---------- Halftone screen operators ----------
@@ -419,22 +421,512 @@ pub fn op_settrapzone(ctx: &mut Context) -> Result<(), PsError> {
 
 // ---------- Pattern stubs ----------
 
+/// Helper: extract 6-element f64 array from a PS array object.
+fn extract_matrix(ctx: &Context, obj: &PsObject) -> Result<Matrix, PsError> {
+    match obj.value {
+        PsValue::Array { entity, start, len } | PsValue::PackedArray { entity, start, len } => {
+            if len != 6 {
+                return Err(PsError::TypeCheck);
+            }
+            let mut vals = [0.0f64; 6];
+            for (i, val) in vals.iter_mut().enumerate() {
+                *val = ctx
+                    .arrays
+                    .get_element(entity, start + i as u32)
+                    .as_f64()
+                    .ok_or(PsError::TypeCheck)?;
+            }
+            Ok(Matrix::new(vals[0], vals[1], vals[2], vals[3], vals[4], vals[5]))
+        }
+        _ => Err(PsError::TypeCheck),
+    }
+}
+
+/// Helper: extract a 4-element f64 array from a PS array (BBox).
+fn extract_bbox(ctx: &Context, obj: &PsObject) -> Result<[f64; 4], PsError> {
+    match obj.value {
+        PsValue::Array { entity, start, len } | PsValue::PackedArray { entity, start, len } => {
+            if len != 4 {
+                return Err(PsError::RangeCheck);
+            }
+            let mut vals = [0.0f64; 4];
+            for (i, val) in vals.iter_mut().enumerate() {
+                *val = ctx
+                    .arrays
+                    .get_element(entity, start + i as u32)
+                    .as_f64()
+                    .ok_or(PsError::TypeCheck)?;
+            }
+            Ok(vals)
+        }
+        _ => Err(PsError::TypeCheck),
+    }
+}
+
 /// `makepattern`: dict matrix → dict
+///
+/// Instantiates a pattern: copies the dict, computes the pattern matrix,
+/// executes PaintProc to capture a display list, and stores the result.
 pub fn op_makepattern(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.o_stack.len() < 2 {
         return Err(PsError::StackUnderflow);
     }
+
+    // Validate matrix (top of stack)
+    let matrix_obj = ctx.o_stack.peek(0)?;
+    let matrix = extract_matrix(ctx, &matrix_obj)?;
+
+    // Validate dict (second on stack)
+    let dict_obj = ctx.o_stack.peek(1)?;
+    let dict_entity = match dict_obj.value {
+        PsValue::Dict(entity) => entity,
+        _ => return Err(PsError::TypeCheck),
+    };
+
+    // Validate PatternType
+    let pt_key = DictKey::Name(ctx.names.intern(b"PatternType"));
+    let pattern_type = ctx
+        .dicts
+        .get(dict_entity, &pt_key)
+        .and_then(|o| o.as_i32())
+        .ok_or(PsError::Undefined)?;
+    if pattern_type != 1 && pattern_type != 2 {
+        return Err(PsError::RangeCheck);
+    }
+
+    // For Type 1, validate required keys
+    let mut paint_type = 1;
+    let mut tiling_type = 1;
+    let mut bbox = [0.0f64; 4];
+    let mut xstep = 0.0f64;
+    let mut ystep = 0.0f64;
+    let mut paint_proc = None;
+
+    if pattern_type == 1 {
+        let paint_type_key = DictKey::Name(ctx.names.intern(b"PaintType"));
+        paint_type = ctx
+            .dicts
+            .get(dict_entity, &paint_type_key)
+            .and_then(|o| o.as_i32())
+            .ok_or(PsError::Undefined)?;
+        if paint_type != 1 && paint_type != 2 {
+            return Err(PsError::RangeCheck);
+        }
+
+        let tt_key = DictKey::Name(ctx.names.intern(b"TilingType"));
+        tiling_type = ctx
+            .dicts
+            .get(dict_entity, &tt_key)
+            .and_then(|o| o.as_i32())
+            .ok_or(PsError::Undefined)?;
+        if !(1..=3).contains(&tiling_type) {
+            return Err(PsError::RangeCheck);
+        }
+
+        let bbox_key = DictKey::Name(ctx.names.intern(b"BBox"));
+        let bbox_obj = ctx
+            .dicts
+            .get(dict_entity, &bbox_key)
+            .ok_or(PsError::Undefined)?;
+        bbox = extract_bbox(ctx, &bbox_obj)?;
+
+        let xs_key = DictKey::Name(ctx.names.intern(b"XStep"));
+        xstep = ctx
+            .dicts
+            .get(dict_entity, &xs_key)
+            .and_then(|o| o.as_f64())
+            .ok_or(PsError::Undefined)?;
+        if xstep == 0.0 {
+            return Err(PsError::RangeCheck);
+        }
+
+        let ys_key = DictKey::Name(ctx.names.intern(b"YStep"));
+        ystep = ctx
+            .dicts
+            .get(dict_entity, &ys_key)
+            .and_then(|o| o.as_f64())
+            .ok_or(PsError::Undefined)?;
+        if ystep == 0.0 {
+            return Err(PsError::RangeCheck);
+        }
+
+        let pp_key = DictKey::Name(ctx.names.intern(b"PaintProc"));
+        paint_proc = ctx.dicts.get(dict_entity, &pp_key);
+        if paint_proc.is_none() {
+            return Err(PsError::Undefined);
+        }
+    }
+
+    // Pop operands
     ctx.o_stack.pop()?; // matrix
-    // Leave dict on stack
+    ctx.o_stack.pop()?; // dict
+
+    // Copy dict to new entity (local VM)
+    let new_dict = crate::vm_ops::alloc_dict(ctx, 20, b"pattern");
+    // Copy all entries from original dict
+    let entries: Vec<(DictKey, PsObject)> = ctx
+        .dicts
+        .entry(dict_entity)
+        .entries
+        .iter()
+        .map(|(k, v)| (k.clone(), *v))
+        .collect();
+    for (k, v) in entries {
+        ctx.dicts.put(new_dict, k, v);
+    }
+
+    // Compute pattern_matrix = matrix_arg × CTM (row-vector convention)
+    let pattern_matrix = ctx.gstate.ctm.concat(&matrix);
+
+    // Execute PaintProc to capture display list (Type 1 only)
+    let cached_display_list = if pattern_type == 1 {
+        let pp = paint_proc.unwrap();
+
+        // Save display list, gsave, set CTM to identity
+        let saved_dl = std::mem::take(&mut ctx.display_list);
+
+        // Push pattern dict on o_stack for PaintProc to consume
+        ctx.o_stack.push(PsObject::dict(new_dict))?;
+
+        // Execute PaintProc
+        let result = ctx.exec_sync(pp);
+
+        // Capture resulting display list regardless of error
+        let captured = std::mem::replace(&mut ctx.display_list, saved_dl);
+
+        result?;
+        captured
+    } else {
+        DisplayList::new()
+    };
+
+    // Build PatternData and store
+    let pattern_id = ctx.pattern_store.len() as u32;
+    ctx.pattern_store.push(PatternData {
+        pattern_type,
+        paint_type,
+        tiling_type,
+        bbox,
+        xstep,
+        ystep,
+        pattern_matrix,
+        cached_display_list,
+    });
+
+    // Store Implementation in the copied dict
+    let impl_key = DictKey::Name(ctx.names.intern(b"Implementation"));
+    ctx.dicts
+        .put(new_dict, impl_key, PsObject::int(pattern_id as i32));
+
+    // Push result dict
+    ctx.o_stack.push(PsObject::dict(new_dict))?;
     Ok(())
 }
 
+/// `setpattern`: pattern → — (colored) or comp... pattern → — (uncolored)
+///
+/// Sets the current pattern for subsequent fill/stroke operations.
+pub fn op_setpattern(ctx: &mut Context) -> Result<(), PsError> {
+    if ctx.o_stack.is_empty() {
+        return Err(PsError::StackUnderflow);
+    }
+
+    let dict_obj = ctx.o_stack.peek(0)?;
+    let dict_entity = match dict_obj.value {
+        PsValue::Dict(entity) => entity,
+        _ => return Err(PsError::TypeCheck),
+    };
+
+    // Must have /Implementation (proof of makepattern)
+    let impl_key = DictKey::Name(ctx.names.intern(b"Implementation"));
+    let impl_obj = ctx
+        .dicts
+        .get(dict_entity, &impl_key)
+        .ok_or(PsError::TypeCheck)?;
+    let pattern_id = impl_obj.as_i32().ok_or(PsError::TypeCheck)? as u32;
+
+    // Get paint type
+    let pt_key = DictKey::Name(ctx.names.intern(b"PaintType"));
+    let paint_type = ctx
+        .dicts
+        .get(dict_entity, &pt_key)
+        .and_then(|o| o.as_i32())
+        .unwrap_or(1);
+
+    ctx.o_stack.pop()?; // dict
+
+    if paint_type == 2 {
+        // Uncolored pattern: pop underlying color components
+        // For now, pop one component (gray) as a simple case
+        if ctx.o_stack.is_empty() {
+            return Err(PsError::StackUnderflow);
+        }
+        let color_val = ctx
+            .o_stack
+            .peek(0)?
+            .as_f64()
+            .ok_or(PsError::TypeCheck)?;
+        ctx.o_stack.pop()?;
+        ctx.gstate.pattern_underlying_color =
+            Some(stet_core::graphics_state::DeviceColor::from_gray(color_val));
+    }
+
+    ctx.gstate.current_pattern = Some(pattern_id);
+    Ok(())
+}
+
+/// Transform cached form-space display list elements through a CTM and append
+/// to the target display list. Cached elements have identity-CTM coordinates
+/// (form space); path points are transformed directly, while elements with
+/// their own CTM (Stroke, Image) get their CTM composed with the real CTM.
+fn replay_form_elements(
+    cached: &stet_core::display_list::DisplayList,
+    ctm: &Matrix,
+    target: &mut stet_core::display_list::DisplayList,
+) {
+    use stet_core::display_list::DisplayElement;
+    use stet_core::graphics_state::PathSegment;
+
+    let transform_path = |path: &stet_core::graphics_state::PsPath| -> stet_core::graphics_state::PsPath {
+        let mut result = stet_core::graphics_state::PsPath::new();
+        for seg in &path.segments {
+            match seg {
+                PathSegment::MoveTo(x, y) => {
+                    let (nx, ny) = ctm.transform_point(*x, *y);
+                    result.segments.push(PathSegment::MoveTo(nx, ny));
+                }
+                PathSegment::LineTo(x, y) => {
+                    let (nx, ny) = ctm.transform_point(*x, *y);
+                    result.segments.push(PathSegment::LineTo(nx, ny));
+                }
+                PathSegment::CurveTo { x1, y1, x2, y2, x3, y3 } => {
+                    let (nx1, ny1) = ctm.transform_point(*x1, *y1);
+                    let (nx2, ny2) = ctm.transform_point(*x2, *y2);
+                    let (nx3, ny3) = ctm.transform_point(*x3, *y3);
+                    result.segments.push(PathSegment::CurveTo {
+                        x1: nx1, y1: ny1, x2: nx2, y2: ny2, x3: nx3, y3: ny3,
+                    });
+                }
+                PathSegment::ClosePath => {
+                    result.segments.push(PathSegment::ClosePath);
+                }
+            }
+        }
+        result
+    };
+
+    for elem in cached.elements() {
+        match elem {
+            DisplayElement::Fill { path, params } => {
+                let new_path = transform_path(path);
+                // Path points already transformed to device space; use identity CTM
+                let new_params = stet_core::device::FillParams {
+                    color: params.color.clone(),
+                    fill_rule: params.fill_rule,
+                    ctm: Matrix::identity(),
+                };
+                target.push(DisplayElement::Fill {
+                    path: new_path,
+                    params: new_params,
+                });
+            }
+            DisplayElement::Stroke { path, params } => {
+                let new_path = transform_path(path);
+                // Scale line width by CTM scale factor (form space → device space)
+                let scale = (ctm.a * ctm.a + ctm.b * ctm.b).sqrt();
+                let new_params = stet_core::device::StrokeParams {
+                    color: params.color.clone(),
+                    line_width: params.line_width * scale,
+                    line_cap: params.line_cap,
+                    line_join: params.line_join,
+                    miter_limit: params.miter_limit,
+                    dash_pattern: params.dash_pattern.clone(),
+                    ctm: Matrix::identity(),
+                    stroke_adjust: params.stroke_adjust,
+                };
+                target.push(DisplayElement::Stroke {
+                    path: new_path,
+                    params: new_params,
+                });
+            }
+            DisplayElement::Clip { path, params } => {
+                let new_path = transform_path(path);
+                let new_params = stet_core::device::ClipParams {
+                    fill_rule: params.fill_rule,
+                    ctm: Matrix::identity(),
+                };
+                target.push(DisplayElement::Clip {
+                    path: new_path,
+                    params: new_params,
+                });
+            }
+            DisplayElement::Image { rgba_data, params } => {
+                let new_params = stet_core::device::ImageParams {
+                    width: params.width,
+                    height: params.height,
+                    is_mask: params.is_mask,
+                    ctm: ctm.concat(&params.ctm),
+                    image_matrix: params.image_matrix,
+                };
+                target.push(DisplayElement::Image {
+                    rgba_data: rgba_data.clone(),
+                    params: new_params,
+                });
+            }
+            // Skip ErasePage/InitClip — shouldn't appear in form PaintProc
+            DisplayElement::ErasePage | DisplayElement::InitClip => {}
+            // For shading elements, compose CTM
+            DisplayElement::AxialShading { params } => {
+                let mut new_params = params.clone();
+                new_params.ctm = ctm.concat(&params.ctm);
+                target.push(DisplayElement::AxialShading { params: new_params });
+            }
+            DisplayElement::RadialShading { params } => {
+                let mut new_params = params.clone();
+                new_params.ctm = ctm.concat(&params.ctm);
+                target.push(DisplayElement::RadialShading { params: new_params });
+            }
+            DisplayElement::MeshShading { params } => {
+                let mut new_params = params.clone();
+                new_params.ctm = ctm.concat(&params.ctm);
+                target.push(DisplayElement::MeshShading { params: new_params });
+            }
+            DisplayElement::PatchShading { params } => {
+                let mut new_params = params.clone();
+                new_params.ctm = ctm.concat(&params.ctm);
+                target.push(DisplayElement::PatchShading { params: new_params });
+            }
+            DisplayElement::PatternFill { params } => {
+                let new_path = transform_path(&params.path);
+                let mut new_params = params.clone();
+                new_params.path = new_path;
+                target.push(DisplayElement::PatternFill { params: new_params });
+            }
+        }
+    }
+}
+
 /// `execform`: dict → —
+///
+/// Execute a Form XObject. Per PLRM: gsave, concat form Matrix, clip to BBox,
+/// execute PaintProc (caching in form space on first call), replay cached
+/// elements transformed through current CTM, grestore.
 pub fn op_execform(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.o_stack.is_empty() {
         return Err(PsError::StackUnderflow);
     }
-    ctx.o_stack.pop()?;
+
+    let dict_obj = ctx.o_stack.peek(0)?;
+    let dict_entity = match dict_obj.value {
+        PsValue::Dict(entity) => entity,
+        _ => return Err(PsError::TypeCheck),
+    };
+
+    // Check if already has Implementation (cached)
+    let impl_key = DictKey::Name(ctx.names.intern(b"Implementation"));
+    let first_invocation = ctx.dicts.get(dict_entity, &impl_key).is_none();
+
+    if first_invocation {
+        // Validate FormType
+        let ft_key = DictKey::Name(ctx.names.intern(b"FormType"));
+        let form_type = ctx
+            .dicts
+            .get(dict_entity, &ft_key)
+            .and_then(|o| o.as_i32())
+            .ok_or(PsError::TypeCheck)?;
+        if form_type != 1 {
+            return Err(PsError::RangeCheck);
+        }
+
+        // Validate BBox, Matrix, PaintProc exist
+        let bbox_key = DictKey::Name(ctx.names.intern(b"BBox"));
+        if ctx.dicts.get(dict_entity, &bbox_key).is_none() {
+            return Err(PsError::TypeCheck);
+        }
+        let matrix_key = DictKey::Name(ctx.names.intern(b"Matrix"));
+        if ctx.dicts.get(dict_entity, &matrix_key).is_none() {
+            return Err(PsError::TypeCheck);
+        }
+        let pp_key = DictKey::Name(ctx.names.intern(b"PaintProc"));
+        if ctx.dicts.get(dict_entity, &pp_key).is_none() {
+            return Err(PsError::TypeCheck);
+        }
+    }
+
+    ctx.o_stack.pop()?; // dict
+
+    // 1. gsave
+    crate::graphics_state_ops::op_gsave(ctx)?;
+
+    // 2. Concat form's Matrix with CTM
+    let matrix_key = DictKey::Name(ctx.names.intern(b"Matrix"));
+    let matrix_obj = ctx
+        .dicts
+        .get(dict_entity, &matrix_key)
+        .ok_or(PsError::TypeCheck)?;
+    ctx.o_stack.push(matrix_obj)?;
+    crate::matrix_ops::op_concat(ctx)?;
+
+    // 3. Clip to BBox via rectclip
+    let bbox_key = DictKey::Name(ctx.names.intern(b"BBox"));
+    let bbox_obj = ctx
+        .dicts
+        .get(dict_entity, &bbox_key)
+        .ok_or(PsError::TypeCheck)?;
+    let bbox = extract_bbox(ctx, &bbox_obj)?;
+    ctx.o_stack.push(PsObject::real(bbox[0]))?;
+    ctx.o_stack.push(PsObject::real(bbox[1]))?;
+    ctx.o_stack.push(PsObject::real(bbox[2] - bbox[0]))?;
+    ctx.o_stack.push(PsObject::real(bbox[3] - bbox[1]))?;
+    crate::clip_ops::op_rectclip(ctx)?;
+
+    // Save the real CTM (after concat + rectclip) for replay
+    let real_ctm = ctx.gstate.ctm;
+
+    // 4. Cache PaintProc output if first invocation
+    if first_invocation {
+        // Set CTM to identity so display list is in form space
+        ctx.gstate.ctm = Matrix::identity();
+
+        // Save display list, execute PaintProc
+        let saved_dl = std::mem::take(&mut ctx.display_list);
+
+        // Push form dict for PaintProc to consume
+        ctx.o_stack.push(PsObject::dict(dict_entity))?;
+
+        let pp_key = DictKey::Name(ctx.names.intern(b"PaintProc"));
+        let paint_proc = ctx
+            .dicts
+            .get(dict_entity, &pp_key)
+            .ok_or(PsError::TypeCheck)?;
+
+        let result = ctx.exec_sync(paint_proc);
+
+        let captured = std::mem::replace(&mut ctx.display_list, saved_dl);
+        result?;
+
+        ctx.form_cache.insert(dict_entity, captured);
+
+        // Restore real CTM for replay
+        ctx.gstate.ctm = real_ctm;
+
+        // Mark as cached
+        ctx.cow_check_dict(dict_entity);
+        let impl_key = DictKey::Name(ctx.names.intern(b"Implementation"));
+        ctx.dicts
+            .put(dict_entity, impl_key, PsObject::bool(true));
+    }
+
+    // 5. Replay cached elements transformed through real CTM
+    if let Some(cached) = ctx.form_cache.get(&dict_entity) {
+        // Clone to avoid borrow conflict (cached borrows ctx.form_cache)
+        let cached_clone = cached.clone();
+        replay_form_elements(&cached_clone, &real_ctm, &mut ctx.display_list);
+    }
+
+    // 6. grestore
+    crate::graphics_state_ops::op_grestore(ctx)?;
+
     Ok(())
 }
 

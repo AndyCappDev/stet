@@ -4,6 +4,7 @@
 
 //! Graphics state: transforms, paths, colors, and rendering parameters.
 
+use crate::display_list::DisplayList;
 use crate::object::PsObject;
 use std::sync::Arc;
 
@@ -910,6 +911,27 @@ pub struct CieDefgParams {
     pub abc_params: CieAbcParams, // CIE ABC pipeline params
 }
 
+/// Pattern instance data created by `makepattern`.
+#[derive(Clone)]
+pub struct PatternData {
+    /// Pattern type: 1 = tiling, 2 = shading.
+    pub pattern_type: i32,
+    /// Paint type: 1 = colored, 2 = uncolored.
+    pub paint_type: i32,
+    /// Tiling type: 1 = constant spacing, 2 = no distortion, 3 = fast.
+    pub tiling_type: i32,
+    /// Bounding box [llx, lly, urx, ury] in pattern space.
+    pub bbox: [f64; 4],
+    /// X step between tile origins.
+    pub xstep: f64,
+    /// Y step between tile origins.
+    pub ystep: f64,
+    /// Combined matrix: matrix_arg × CTM at makepattern time.
+    pub pattern_matrix: Matrix,
+    /// Pre-rendered display list from executing PaintProc.
+    pub cached_display_list: DisplayList,
+}
+
 /// Dash pattern for stroked paths.
 #[derive(Clone, Debug)]
 pub struct DashPattern {
@@ -996,6 +1018,12 @@ pub struct GraphicsState {
 
     // Color rendering dictionary
     pub color_rendering: Option<crate::object::PsObject>,
+
+    // Pattern state (set by setpattern, consumed by fill/eofill)
+    /// Index into `Context.pattern_store` for the active tiling pattern.
+    pub current_pattern: Option<u32>,
+    /// Underlying color for uncolored (PaintType 2) patterns.
+    pub pattern_underlying_color: Option<DeviceColor>,
 }
 
 impl GraphicsState {
@@ -1033,6 +1061,8 @@ impl GraphicsState {
             black_generation: None,
             undercolor_removal: None,
             color_rendering: None,
+            current_pattern: None,
+            pattern_underlying_color: None,
         }
     }
 }

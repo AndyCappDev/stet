@@ -5,7 +5,7 @@
 //! Painting operators: fill, eofill, stroke, rectfill, rectstroke, erasepage, showpage.
 
 use stet_core::context::Context;
-use stet_core::device::{FillParams, StrokeParams};
+use stet_core::device::{FillParams, PatternFillParams, StrokeParams};
 use stet_core::display_list::DisplayElement;
 use stet_core::error::PsError;
 use stet_core::graphics_state::{DashPattern, FillRule, Matrix, PathSegment, PsPath};
@@ -110,17 +110,40 @@ fn close_subpaths(path: &PsPath) -> PsPath {
     result
 }
 
+/// Push either a normal fill or a pattern fill element depending on gstate.
+fn push_fill_element(ctx: &mut Context, path: PsPath, fill_rule: FillRule) {
+    if let Some(pattern_id) = ctx.gstate.current_pattern
+        && let Some(pat) = ctx.pattern_store.get(pattern_id as usize)
+    {
+        let params = PatternFillParams {
+            path,
+            fill_rule,
+            tile: pat.cached_display_list.clone(),
+            pattern_matrix: pat.pattern_matrix,
+            bbox: pat.bbox,
+            xstep: pat.xstep,
+            ystep: pat.ystep,
+            paint_type: pat.paint_type,
+            underlying_color: ctx.gstate.pattern_underlying_color.clone(),
+        };
+        ctx.display_list
+            .push(DisplayElement::PatternFill { params });
+        return;
+    }
+    let params = FillParams {
+        color: ctx.gstate.color.clone(),
+        fill_rule,
+        ctm: Matrix::identity(),
+    };
+    ctx.display_list.push(DisplayElement::Fill { path, params });
+}
+
 /// `fill`: — → — (fill current path, non-zero winding)
 ///
 /// Path is already in device space; pass identity transform to device.
 pub fn op_fill(ctx: &mut Context) -> Result<(), PsError> {
     let path = close_subpaths(&ctx.gstate.path);
-    let params = FillParams {
-        color: ctx.gstate.color.clone(),
-        fill_rule: FillRule::NonZeroWinding,
-        ctm: Matrix::identity(),
-    };
-    ctx.display_list.push(DisplayElement::Fill { path, params });
+    push_fill_element(ctx, path, FillRule::NonZeroWinding);
     // newpath after fill
     ctx.gstate.path.clear();
     ctx.gstate.current_point = None;
@@ -132,12 +155,7 @@ pub fn op_fill(ctx: &mut Context) -> Result<(), PsError> {
 /// Path is already in device space; pass identity transform to device.
 pub fn op_eofill(ctx: &mut Context) -> Result<(), PsError> {
     let path = close_subpaths(&ctx.gstate.path);
-    let params = FillParams {
-        color: ctx.gstate.color.clone(),
-        fill_rule: FillRule::EvenOdd,
-        ctm: Matrix::identity(),
-    };
-    ctx.display_list.push(DisplayElement::Fill { path, params });
+    push_fill_element(ctx, path, FillRule::EvenOdd);
     ctx.gstate.path.clear();
     ctx.gstate.current_point = None;
     Ok(())

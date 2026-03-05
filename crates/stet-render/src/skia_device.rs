@@ -551,6 +551,7 @@ fn precompute_bboxes(list: &DisplayList, dpi: f64) -> Vec<Option<YBBox>> {
             DisplayElement::PatchShading { params } => {
                 shading_y_bbox_from_bbox(&params.bbox, &params.ctm)
             }
+            DisplayElement::PatternFill { params } => path_y_bbox(&params.path),
             _ => None, // Clip, InitClip, ErasePage: always process
         })
         .collect()
@@ -1405,7 +1406,181 @@ fn render_element_to_band(
             };
             render_patch_shading_to_pixmap(pixmap, params, y_start, mask_ref);
         }
+        DisplayElement::PatternFill { params } => {
+            render_pattern_fill_to_band(pixmap, band_state, params, y_start, band_w, band_h, dpi);
+        }
     }
+}
+
+/// Render a tiled pattern fill into a band.
+fn render_pattern_fill_to_band(
+    pixmap: &mut Pixmap,
+    band_state: &mut BandState,
+    params: &stet_core::device::PatternFillParams,
+    y_start: u32,
+    band_w: u32,
+    band_h: u32,
+    dpi: f64,
+) {
+    let Some(skia_path) = build_skia_path(&params.path) else {
+        return;
+    };
+    let mut temp_mask = None;
+    let Some(mask_ref) = resolve_clip_mask(&band_state.clip_region, &mut temp_mask, band_w, band_h)
+    else {
+        return;
+    };
+
+    let pm = &params.pattern_matrix;
+
+    // Compute tile size in device pixels
+    let tile_w = (params.xstep * pm.a).abs() + (params.xstep * pm.b).abs();
+    let tile_h = (params.ystep * pm.c).abs() + (params.ystep * pm.d).abs();
+
+    // Clamp tile size
+    let tile_w_px = (tile_w.ceil() as u32).clamp(1, 2048);
+    let tile_h_px = (tile_h.ceil() as u32).clamp(1, 2048);
+
+    // Render one tile to an offscreen pixmap
+    let Some(mut tile_pixmap) = Pixmap::new(tile_w_px, tile_h_px) else {
+        return;
+    };
+
+    // For colored patterns (PaintType 1), render the tile's display list
+    // Transform from pattern space to tile-pixmap space
+    if params.paint_type == 1 {
+        // Build transform: pattern_space → device tile pixels
+        // Scale pattern coords (0..xstep, 0..ystep) to (0..tile_w_px, 0..tile_h_px)
+        let sx = tile_w_px as f64 / params.xstep.abs();
+        let sy = tile_h_px as f64 / params.ystep.abs();
+
+        // Create a temporary SkiaDevice-like rendering: replay tile display list
+        // We build a simple device for the tile
+        let tile_elements = params.tile.elements();
+        for elem in tile_elements {
+            match elem {
+                DisplayElement::Fill { path, params: fp } => {
+                    if let Some(sp) = build_skia_path(path) {
+                        let paint = to_paint(&fp.color);
+                        let t = to_transform(&fp.ctm);
+                        // Scale from pattern space to tile space
+                        let tile_transform = Transform::from_scale(sx as f32, sy as f32)
+                            .post_concat(t);
+                        let fill_rule = to_fill_rule(&fp.fill_rule);
+                        tile_pixmap.fill_path(&sp, &paint, fill_rule, tile_transform, None);
+                    }
+                }
+                DisplayElement::Stroke { path, params: sp } => {
+                    if let Some(skp) = build_skia_path(path) {
+                        let stroke = build_stroke(sp, dpi);
+                        let paint = to_paint(&sp.color);
+                        let t = to_transform(&sp.ctm);
+                        let tile_transform = Transform::from_scale(sx as f32, sy as f32)
+                            .post_concat(t);
+                        tile_pixmap.stroke_path(&skp, &paint, &stroke, tile_transform, None);
+                    }
+                }
+                DisplayElement::Image { rgba_data, params: ip } => {
+                    let iw = ip.width;
+                    let ih = ip.height;
+                    let expected = (iw * ih * 4) as usize;
+                    if rgba_data.len() >= expected && iw > 0 && ih > 0 {
+                        if let Some(image_inv) = ip.image_matrix.invert() {
+                            let combined = ip.ctm.concat(&image_inv);
+                            let t = to_transform(&combined);
+                            let tile_transform = Transform::from_scale(sx as f32, sy as f32)
+                                .post_concat(t);
+                            if let Some(img_pixmap) =
+                                tiny_skia::PixmapRef::from_bytes(rgba_data, iw, ih)
+                            {
+                                let paint = tiny_skia::PixmapPaint::default();
+                                tile_pixmap.draw_pixmap(
+                                    0,
+                                    0,
+                                    img_pixmap,
+                                    &paint,
+                                    tile_transform,
+                                    None,
+                                );
+                            }
+                        }
+                    }
+                }
+                _ => {} // Skip clip/initclip/erasepage in pattern tiles
+            }
+        }
+    } else {
+        // PaintType 2 (uncolored): render tile as alpha, then colorize
+        // For now, just render with underlying color
+        let color = params
+            .underlying_color
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(DeviceColor::black);
+
+        let sx = tile_w_px as f64 / params.xstep.abs();
+        let sy = tile_h_px as f64 / params.ystep.abs();
+
+        for elem in params.tile.elements() {
+            if let DisplayElement::Fill { path, params: fp } = elem {
+                if let Some(sp) = build_skia_path(path) {
+                    let paint = to_paint(&color);
+                    let t = to_transform(&fp.ctm);
+                    let tile_transform =
+                        Transform::from_scale(sx as f32, sy as f32).post_concat(t);
+                    let fill_rule = to_fill_rule(&fp.fill_rule);
+                    tile_pixmap.fill_path(&sp, &paint, fill_rule, tile_transform, None);
+                }
+            }
+        }
+    }
+
+    // Create a tiny-skia Pattern shader from the tile
+    let tile_ref = tile_pixmap.as_ref();
+    let pattern = tiny_skia::Pattern::new(
+        tile_ref,
+        tiny_skia::SpreadMode::Repeat,
+        tiny_skia::FilterQuality::Bilinear,
+        1.0, // opacity
+        Transform::identity(),
+    );
+
+    // Build paint with the pattern shader
+    let mut paint = Paint::default();
+    paint.shader = pattern;
+    paint.anti_alias = true;
+
+    // Build the transform: we need to map from the fill path's device space
+    // to pattern-tile-space so the repeat shader tiles correctly.
+    // The fill path is already in device space, so we need identity for the
+    // path transform, but the pattern needs to be positioned via the pattern matrix.
+    let y_off = y_start as f32;
+    let fill_rule = to_fill_rule(&params.fill_rule);
+
+    // The pattern shader repeats in tile_pixmap coordinates. We need to apply
+    // the pattern origin offset. Pattern matrix gives us where tile (0,0) is
+    // in device space.
+    let pattern_origin_x = pm.tx as f32;
+    let pattern_origin_y = pm.ty as f32;
+
+    // The path is in device space. We render with identity transform (offset for band).
+    // The shader needs to be offset so tiles align with pattern_matrix origin.
+    let shader_transform = Transform::from_translate(
+        pattern_origin_x,
+        pattern_origin_y - y_off,
+    );
+
+    // Recreate pattern with proper transform
+    let pattern = tiny_skia::Pattern::new(
+        tile_pixmap.as_ref(),
+        tiny_skia::SpreadMode::Repeat,
+        tiny_skia::FilterQuality::Bilinear,
+        1.0,
+        shader_transform,
+    );
+    paint.shader = pattern;
+
+    pixmap.fill_path(&skia_path, &paint, fill_rule, Transform::identity(), mask_ref);
 }
 
 /// Clip path handling for band rendering. Same logic as SkiaDevice::clip_path
@@ -1756,6 +1931,24 @@ impl OutputDevice for SkiaDevice {
         render_patch_shading_to_pixmap(&mut self.pixmap, params, 0, mask_ref);
     }
 
+    fn paint_pattern_fill(&mut self, params: &stet_core::device::PatternFillParams) {
+        self.ensure_full_pixmap();
+        let w = self.pixmap.width();
+        let h = self.pixmap.height();
+        let mut band_state = BandState {
+            clip_region: self.clip_region.take(),
+            spare_mask: self.spare_mask.take(),
+            clip_mask_cache: HashMap::new(),
+            clip_mask_seen: HashSet::new(),
+            mask_pool: Vec::new(),
+        };
+        render_pattern_fill_to_band(&mut self.pixmap, &mut band_state, params, 0, w, h, self.dpi);
+        self.clip_region = band_state.clip_region.take();
+        if let Some(mask) = band_state.spare_mask.take() {
+            self.spare_mask = Some(mask);
+        }
+    }
+
     fn page_size(&self) -> (u32, u32) {
         (self.page_w, self.page_h)
     }
@@ -2046,6 +2239,7 @@ fn precompute_full_bboxes(list: &DisplayList, dpi: f64) -> Vec<Option<BBox2D>> {
             DisplayElement::PatchShading { params } => {
                 shading_full_bbox(&params.bbox, &params.ctm)
             }
+            DisplayElement::PatternFill { params } => path_full_bbox(&params.path),
             _ => None, // Clip, InitClip, ErasePage: always process
         })
         .collect()
@@ -2594,6 +2788,20 @@ fn render_element_to_viewport(
                 return;
             };
             render_patch_shading_viewport(pixmap, params, vp_x, vp_y, scale_x, scale_y, mask_ref);
+        }
+        DisplayElement::PatternFill { params } => {
+            // For viewport rendering, delegate to band renderer with y_start=0
+            // and the viewport dimensions. This is a simplification that works
+            // because the path is already in device space.
+            let mut band_state = BandState {
+                clip_region: state.clip_region.take(),
+                spare_mask: None,
+                clip_mask_cache: HashMap::new(),
+                clip_mask_seen: HashSet::new(),
+                mask_pool: Vec::new(),
+            };
+            render_pattern_fill_to_band(pixmap, &mut band_state, params, 0, out_w, out_h, 72.0);
+            state.clip_region = band_state.clip_region.take();
         }
     }
 }
