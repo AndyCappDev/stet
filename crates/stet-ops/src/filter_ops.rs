@@ -64,10 +64,10 @@ pub fn op_filter(ctx: &mut Context) -> Result<(), PsError> {
     };
 
     // Extract filter parameters from dict
-    let (predictor, columns, colors, bpc) = if let Some(de) = dict_entity {
+    let (predictor, columns, colors, bpc, early_change) = if let Some(de) = dict_entity {
         extract_filter_params(ctx, de)
     } else {
-        (1u8, 1u32, 1u32, 8u32)
+        (1u8, 1u32, 1u32, 8u32, 1i32)
     };
 
     // Get the data source
@@ -98,6 +98,7 @@ pub fn op_filter(ctx: &mut Context) -> Result<(), PsError> {
             columns,
             colors,
             bpc,
+            early_change,
         )?;
 
         let file_obj = PsObject {
@@ -126,6 +127,7 @@ pub fn op_filter(ctx: &mut Context) -> Result<(), PsError> {
         columns,
         colors,
         bpc,
+        early_change,
     )?;
 
     // Push the filter file object
@@ -276,11 +278,12 @@ fn resolve_source(ctx: &mut Context, obj: PsObject) -> Result<EntityId, PsError>
 }
 
 /// Extract filter parameters from a dict.
-fn extract_filter_params(ctx: &Context, dict_entity: EntityId) -> (u8, u32, u32, u32) {
+fn extract_filter_params(ctx: &Context, dict_entity: EntityId) -> (u8, u32, u32, u32, i32) {
     let mut predictor = 1u8;
     let mut columns = 1u32;
     let mut colors = 1u32;
     let mut bpc = 8u32;
+    let mut early_change = 1i32;
 
     // Helper: look up an integer value by name
     let lookup_int = |ctx: &Context, name: &[u8]| -> Option<i32> {
@@ -301,8 +304,11 @@ fn extract_filter_params(ctx: &Context, dict_entity: EntityId) -> (u8, u32, u32,
     if let Some(v) = lookup_int(ctx, b"BitsPerComponent") {
         bpc = v as u32;
     }
+    if let Some(v) = lookup_int(ctx, b"EarlyChange") {
+        early_change = v;
+    }
 
-    (predictor, columns, colors, bpc)
+    (predictor, columns, colors, bpc, early_change)
 }
 
 /// Create a filter by name, returning the filter EntityId.
@@ -314,6 +320,7 @@ fn create_filter_by_name(
     columns: u32,
     colors: u32,
     bpc: u32,
+    early_change: i32,
 ) -> Result<EntityId, PsError> {
     match name {
         b"ASCIIHexDecode" => Ok(ctx
@@ -329,10 +336,9 @@ fn create_filter_by_name(
             source,
             FilterKind::flate_decode(predictor, columns, colors, bpc),
         )),
-        b"LZWDecode" => ctx
+        b"LZWDecode" => Ok(ctx
             .files
-            .create_lzw_filter(source)
-            .map_err(|_| PsError::IOError),
+            .create_filter(source, FilterKind::lzw_decode(early_change != 0))),
         b"DCTDecode" => Ok(ctx.files.create_dct_filter(source)),
         b"SubFileDecode" => Ok(ctx
             .files

@@ -50,9 +50,8 @@ pub enum FilterKind {
         prev_row: Vec<u8>,
     },
     LZWDecode {
-        /// All decoded data (weezl decodes all at once).
-        decoded: Vec<u8>,
-        pos: usize,
+        decoder: weezl::decode::Decoder,
+        raw_buf: Vec<u8>,
     },
     /// JPEG: lazily decoded on first read from source.
     DCTDecode {
@@ -804,21 +803,14 @@ impl FileStore {
                     &mut state.eof,
                 )?;
             }
-            FilterKind::LZWDecode { decoded, pos } => {
-                // LZW was decoded all at once; just return a chunk
-                let remaining = decoded.len() - *pos;
-                if remaining == 0 {
-                    state.eof = true;
-                } else {
-                    let chunk = remaining.min(4096);
-                    state
-                        .output_buf
-                        .extend_from_slice(&decoded[*pos..*pos + chunk]);
-                    *pos += chunk;
-                    if *pos >= decoded.len() {
-                        state.eof = true;
-                    }
-                }
+            FilterKind::LZWDecode { .. } => {
+                let source = state.source;
+                self.refill_lzw(
+                    source,
+                    &mut state.kind,
+                    &mut state.output_buf,
+                    &mut state.eof,
+                )?;
             }
             FilterKind::DCTDecode { decoded } => {
                 if !*decoded {
@@ -1135,6 +1127,81 @@ impl FileStore {
         }
 
         Ok(())
+    }
+
+    /// Refill LZWDecode: read compressed data from source, decompress incrementally.
+    fn refill_lzw(
+        &mut self,
+        source: EntityId,
+        kind: &mut FilterKind,
+        out: &mut Vec<u8>,
+        eof: &mut bool,
+    ) -> io::Result<()> {
+        let (decoder, raw_buf) = match kind {
+            FilterKind::LZWDecode { decoder, raw_buf } => (decoder, raw_buf),
+            _ => return Err(io::Error::other("not LZW")),
+        };
+
+        let mut decompressed = vec![0u8; 16384];
+
+        loop {
+            // Read a chunk of compressed data from source if buffer is empty
+            if raw_buf.is_empty() {
+                let mut chunk = vec![0u8; 8192];
+                let mut total = 0;
+                while let Some(b) = self.read_byte(source)? {
+                    chunk[total] = b;
+                    total += 1;
+                    if total >= chunk.len() {
+                        break;
+                    }
+                }
+                if total == 0 {
+                    *eof = true;
+                    return Ok(());
+                }
+                raw_buf.extend_from_slice(&chunk[..total]);
+            }
+
+            // Decompress
+            let result = decoder.decode_bytes(raw_buf, &mut decompressed);
+            let consumed_in = result.consumed_in;
+            let consumed_out = result.consumed_out;
+
+            // Remove consumed bytes from raw_buf
+            raw_buf.drain(..consumed_in);
+
+            match result.status {
+                Ok(weezl::LzwStatus::Done) => {
+                    out.extend_from_slice(&decompressed[..consumed_out]);
+                    *eof = true;
+                    return Ok(());
+                }
+                Ok(weezl::LzwStatus::NoProgress) => {
+                    if consumed_out > 0 {
+                        out.extend_from_slice(&decompressed[..consumed_out]);
+                        return Ok(());
+                    }
+                    // No input left and no output — need more input
+                    if raw_buf.is_empty() {
+                        continue; // will try to read more from source
+                    }
+                    *eof = true;
+                    return Ok(());
+                }
+                Ok(weezl::LzwStatus::Ok) => {
+                    out.extend_from_slice(&decompressed[..consumed_out]);
+                    if consumed_out > 0 {
+                        return Ok(());
+                    }
+                    // Consumed input but no output yet — keep going
+                    continue;
+                }
+                Err(e) => {
+                    return Err(io::Error::other(format!("LZW decode error: {}", e)));
+                }
+            }
+        }
     }
 
     /// Refill SubFileDecode.
@@ -1521,9 +1588,17 @@ impl FilterKind {
         }
     }
 
-    /// Create a new LZWDecode filter from already-decoded data.
-    pub fn lzw_decode(decoded: Vec<u8>) -> Self {
-        Self::LZWDecode { decoded, pos: 0 }
+    /// Create a new streaming LZWDecode filter.
+    pub fn lzw_decode(early_change: bool) -> Self {
+        let decoder = if early_change {
+            weezl::decode::Decoder::with_tiff_size_switch(weezl::BitOrder::Msb, 8)
+        } else {
+            weezl::decode::Decoder::new(weezl::BitOrder::Msb, 8)
+        };
+        Self::LZWDecode {
+            decoder,
+            raw_buf: Vec::new(),
+        }
     }
 
     /// Create a new DCTDecode filter (lazily decoded on first read).
@@ -1556,16 +1631,6 @@ impl FilterKind {
 }
 
 impl FileStore {
-    /// Decode LZW-compressed data and create a filter.
-    pub fn create_lzw_filter(&mut self, source: EntityId) -> io::Result<EntityId> {
-        let compressed = self.read_all(source)?;
-        let mut decoder = weezl::decode::Decoder::new(weezl::BitOrder::Msb, 8);
-        let decoded = decoder
-            .decode(&compressed)
-            .map_err(|e| io::Error::other(format!("LZW decode error: {}", e)))?;
-        Ok(self.create_filter(source, FilterKind::lzw_decode(decoded)))
-    }
-
     /// Create a lazy DCTDecode filter (decodes on first read).
     pub fn create_dct_filter(&mut self, source: EntityId) -> EntityId {
         self.create_filter(source, FilterKind::dct_decode())
@@ -1925,22 +1990,15 @@ mod tests {
     #[test]
     fn test_lzw_decode() {
         // LZW-compressed data for "TOBEORNOTTOBEORTOBEORNOT"
-        // We'll test with weezl-encoded data
+        // Encode with early-change (tiff_size_switch) to match default PS behavior
         let original = b"TOBEORNOTTOBEORTOBEORNOT";
-        let mut encoder = weezl::encode::Encoder::new(weezl::BitOrder::Msb, 8);
+        let mut encoder =
+            weezl::encode::Encoder::with_tiff_size_switch(weezl::BitOrder::Msb, 8);
         let compressed = encoder.encode(original).unwrap();
 
-        let mut decoder = weezl::decode::Decoder::new(weezl::BitOrder::Msb, 8);
-        let decoded_data = decoder.decode(&compressed).unwrap();
-
         let mut store = FileStore::new();
-        let filt = store.create_filter(
-            EntityId(0), // dummy source, not used
-            FilterKind::LZWDecode {
-                decoded: decoded_data,
-                pos: 0,
-            },
-        );
+        let src = store.create_string_source(compressed);
+        let filt = store.create_filter(src, FilterKind::lzw_decode(true));
         let mut result = Vec::new();
         loop {
             match store.read_byte(filt).unwrap() {
