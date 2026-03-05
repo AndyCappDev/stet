@@ -1,6 +1,6 @@
 # stet vs PostForge: Gap Analysis
 
-**Date**: 2026-03-05 (updated 2026-03-05)
+**Date**: 2026-03-05 (updated 2026-03-06)
 **Purpose**: Comprehensive comparison of stet (Rust) against PostForge (Python) — the reference PostScript Level 3 interpreter — to identify all gaps that must be closed for 1:1 feature parity.
 
 ---
@@ -10,12 +10,12 @@
 stet has strong foundations across core interpreter mechanics, graphics, fonts, images, shading, filters, and resources. However, significant gaps remain in several areas:
 
 - **9 missing operators** (userpath, path, misc, filter categories)
-- **Encode filters** are stub pass-throughs
+- ~~**Encode filters** are stub pass-throughs~~ — **RESOLVED** (2026-03-06)
 - **CCITTFax filters** not implemented
 - **Binary Object Sequences (BOS)** not implemented
 - **Output devices**: stet has PNG + viewer; PF also has PDF, SVG, TIFF
 - **Glyph caching** not implemented (plan exists)
-- **Feature gaps** causing 7 test suites to fail (~121 total failures)
+- **Feature gaps** causing 6 test suites to fail (~108 total failures)
 
 ### Test Suite Status (stet unit_tests)
 
@@ -23,8 +23,8 @@ Results from running stet's own copy of the test suites (`~/Projects/stet/unit_t
 
 | Status | Count | Suites |
 |--------|-------|--------|
-| **PASS** | 40 | arc_shading, arithmetic_and_math, array, cff, clipping, color_operators, context_param, control, defined_ps_operator, device_operator, dictionary, file_operators, filter_chain, flate_filter, font, graphics_state_params, gstate, halftone_transfer, image, interpreter_param, job_control, job_control_tests_standalone, matrix, nulldevice, operand_stack, packedarray, painting, path, **pattern_form**, print_integration, rel_bool_bitwise, resource, save_invalidation, show_variant, stdio, string, strokepath, type1_font, type_attrib_conv, vm_gstate_integration, vm_operators |
-| **FAIL** | 7 | binary_token(55), dct_filter(9), file(11), filter_extended(13), misc(5), ps(16), userpath(12) |
+| **PASS** | 41 | arc_shading, arithmetic_and_math, array, cff, clipping, color_operators, context_param, control, defined_ps_operator, device_operator, dictionary, file_operators, filter_chain, **filter_extended**, flate_filter, font, graphics_state_params, gstate, halftone_transfer, image, interpreter_param, job_control, job_control_tests_standalone, matrix, nulldevice, operand_stack, packedarray, painting, path, **pattern_form**, print_integration, rel_bool_bitwise, resource, save_invalidation, show_variant, stdio, string, strokepath, type1_font, type_attrib_conv, vm_gstate_integration, vm_operators |
+| **FAIL** | 6 | binary_token(55), dct_filter(9), file(11), misc(5), ps(16), userpath(12) |
 | **Total** | 47 | (excluding unittest.ps framework file) |
 
 ---
@@ -73,21 +73,9 @@ PostForge implements the full userpath operator set. stet has none of these.
 
 `makepattern`, `setpattern`, and `execform` fully implemented. Tiled patterns render via `DisplayElement::PatternFill` with tile replay in SkiaDevice. Form XObjects cached at identity CTM, replayed with path-point transformation through real CTM. All 6 pattern_form_tests pass; visual output matches PostForge.
 
-### 2.2 Encode Filters (ALL STUBBED)
+### ~~2.2 Encode Filters~~ — RESOLVED (2026-03-06)
 
-stet's filter operator handles encode filter names but returns the source file unchanged (pass-through):
-
-| Filter | PF Status | stet Status |
-|--------|-----------|-------------|
-| `ASCIIHexEncode` | Full impl | **Stub (pass-through)** |
-| `ASCII85Encode` | Full impl | **Stub (pass-through)** |
-| `RunLengthEncode` | Full impl | **Stub (pass-through)** |
-| `FlateEncode` | Full impl | **Stub (pass-through)** |
-| `LZWEncode` | Full impl | **Stub (pass-through)** |
-| `DCTEncode` | Full impl | **Stub (pass-through)** |
-| `NullEncode` | Full impl | **Stub (pass-through)** |
-
-**Impact**: 13 failures in filter_extended_tests.ps. Any PS program that writes encoded data (e.g., generating PS output, PDF generation, font embedding) will produce wrong results.
+Encode filters fully implemented: ASCIIHexEncode, ASCII85Encode, RunLengthEncode, FlateEncode, LZWEncode, NullEncode. Write-direction filters use swap-out pattern for `encode_write` dispatch, with finalization on `closefile` (flush remaining data, write EOD markers, close target). DCTEncode remains a stub (JPEG encoding is complex and rarely used in PS programs). All 18 encode/decode roundtrip tests in filter_extended_tests.ps pass. Also fixed a pre-existing LZW decode bug with short streams.
 
 ### 2.3 CCITTFax Filters (NOT IMPLEMENTED)
 
@@ -168,10 +156,10 @@ These suites fail entirely because of unimplemented features, not defects:
 | Suite | Failures | Missing Feature |
 |-------|----------|----------------|
 | binary_token | 55 | Binary Object Sequences (P1) |
-| filter_extended | 13 | Encode filters (P1) |
 | userpath | 12 | Userpath operators (P1) |
 | file | 11 | All failures are BOS-related — bos_rt.bin etc. (P1) |
 | dct_filter | 9 | DCTEncode parameter validation (P1) |
+| ~~filter_extended~~ | ~~0~~ | ~~Encode filters — RESOLVED (2026-03-06)~~ |
 
 ---
 
@@ -282,15 +270,15 @@ All 7 shading types are implemented in both interpreters. **No gaps.**
 
 | Filter | Decode (PF) | Decode (stet) | Encode (PF) | Encode (stet) |
 |--------|-------------|---------------|-------------|----------------|
-| ASCIIHex | Full | Full | Full | **Stub** |
-| ASCII85 | Full | Full | Full | **Stub** |
-| RunLength | Full | Full | Full | **Stub** |
-| Flate | Full | Full | Full | **Stub** |
-| LZW | Full | Full | Full | **Stub** |
+| ASCIIHex | Full | Full | Full | Full |
+| ASCII85 | Full | Full | Full | Full |
+| RunLength | Full | Full | Full | Full |
+| Flate | Full | Full | Full | Full |
+| LZW | Full | Full | Full | Full |
 | DCT | Full | Full | Full | **Stub** |
 | CCITTFax | Full | **Missing** | Full | **Missing** |
 | SubFile | Full | Full | N/A | N/A |
-| NullEncode | N/A | N/A | Full | **Stub** |
+| NullEncode | N/A | N/A | Full | Full |
 | ReusableStreamDecode | Full | Full | N/A | N/A |
 | Eexec | Full | Full | N/A | N/A |
 
@@ -321,7 +309,7 @@ All 7 shading types are implemented in both interpreters. **No gaps.**
 
 ### P1 — High (Missing functionality used by real-world PS files)
 ~~1. **Pattern/Form rendering** — RESOLVED (2026-03-05)~~
-2. **Encode filters** (ASCIIHex, ASCII85, RunLength, Flate, LZW, DCT, NullEncode)
+~~2. **Encode filters** — RESOLVED (2026-03-06): ASCIIHex, ASCII85, RunLength, Flate, LZW, NullEncode implemented. DCTEncode still stub.~~
 3. **Binary Object Sequences** — needed for some workflows
 4. **Userpath operators** (11 operators) — used in some PS programs
 5. **DCTEncode parameter validation** — validate params even though encode is a stub
@@ -379,12 +367,12 @@ Results from stet's own unit_tests directory (`~/Projects/stet/unit_tests/`).
 |-----------|----------|-------------------|
 | binary_token | 55 | Missing feature (BOS) |
 | ps | 16 | Sum of file + misc failures |
-| filter_extended | 13 | Missing encode filters |
 | userpath | 12 | Missing operators |
 | file | 11 | File I/O edge cases (BOS) |
 | dct_filter | 9 | DCT param handling |
 | misc | 5 | Missing `echo` operator |
+| ~~filter_extended~~ | ~~0~~ | ~~Fixed (2026-03-06): encode filters implemented + LZW decode fix~~ |
 | ~~pattern_form~~ | ~~0~~ | ~~Fixed (2026-03-05)~~ |
 | ~~dictionary~~ | ~~0~~ | ~~Fixed (2026-03-05)~~ |
 | ~~image~~ | ~~0~~ | ~~Fixed (2026-03-05)~~ |
-| **Total** | **~121** | |
+| **Total** | **~108** | |

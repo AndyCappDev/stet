@@ -343,9 +343,26 @@ fn create_filter_by_name(
         b"SubFileDecode" => Ok(ctx
             .files
             .create_filter(source, FilterKind::sub_file_decode(Vec::new(), 0, None))),
-        // Encode filters — stub as pass-through for now
-        b"ASCIIHexEncode" | b"ASCII85Encode" | b"RunLengthEncode" | b"FlateEncode"
-        | b"LZWEncode" | b"DCTEncode" | b"NullEncode" => Ok(source),
+        // Encode filters
+        b"ASCIIHexEncode" => Ok(ctx
+            .files
+            .create_encode_filter(source, FilterKind::ascii_hex_encode())),
+        b"ASCII85Encode" => Ok(ctx
+            .files
+            .create_encode_filter(source, FilterKind::ascii85_encode())),
+        b"RunLengthEncode" => Ok(ctx
+            .files
+            .create_encode_filter(source, FilterKind::run_length_encode())),
+        b"FlateEncode" => Ok(ctx
+            .files
+            .create_encode_filter(source, FilterKind::flate_encode())),
+        b"LZWEncode" => Ok(ctx
+            .files
+            .create_encode_filter(source, FilterKind::lzw_encode(early_change != 0))),
+        b"NullEncode" => Ok(ctx
+            .files
+            .create_encode_filter(source, FilterKind::null_encode())),
+        b"DCTEncode" => Ok(source), // DCTEncode deferred
         _ => Err(PsError::Undefined),
     }
 }

@@ -73,6 +73,31 @@ pub enum FilterKind {
         /// Leftover hex digit from previous refill (hex mode only).
         hex_leftover: Option<u8>,
     },
+    // -- Encode filters (write direction) --
+    /// Bytes → hex digit pairs, EOD = `>`.
+    ASCIIHexEncode,
+    /// Bytes → base-85 groups, EOD = `~>`.
+    ASCII85Encode {
+        /// Accumulates up to 4 bytes before encoding a group.
+        buf: Vec<u8>,
+        /// Column counter for line breaking (~80 chars).
+        col: usize,
+    },
+    /// Bytes → run-length encoded data, EOD = byte 128.
+    RunLengthEncode {
+        /// Buffered input (encoded on close).
+        buf: Vec<u8>,
+    },
+    /// Bytes → zlib-compressed data.
+    FlateEncode {
+        compressor: flate2::Compress,
+    },
+    /// Bytes → LZW-compressed data.
+    LZWEncode {
+        encoder: weezl::encode::Encoder,
+    },
+    /// Identity encode filter (pass-through).
+    NullEncode,
 }
 
 /// Decoded-data buffer state for a filter file.
@@ -101,6 +126,50 @@ pub enum FileHandle {
     Filter(Box<FilterState>),
     /// In-memory byte source (for string-backed data).
     StringSource { data: Vec<u8>, pos: usize },
+}
+
+/// Encode a byte slice using PostScript RLE format.
+///
+/// Produces literal runs (prefix = len-1, 0..127) and repeat runs
+/// (prefix = 257-len, then the byte, for runs of 2..128). Does NOT
+/// append the EOD byte (128) — caller must do that.
+fn rle_encode(data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let len = data.len();
+    let mut i = 0;
+    while i < len {
+        // Count how many times data[i] repeats
+        let b = data[i];
+        let mut run = 1usize;
+        while i + run < len && data[i + run] == b && run < 128 {
+            run += 1;
+        }
+        if run >= 2 {
+            // Repeat run: prefix = 257 - run, then the byte
+            out.push((257 - run) as u8);
+            out.push(b);
+            i += run;
+        } else {
+            // Literal run: collect non-repeating bytes (up to 128)
+            let start = i;
+            let mut lit_end = i + 1;
+            while lit_end < len && lit_end - start < 128 {
+                // If next byte starts a repeat run of >=3, stop literal here
+                if lit_end + 1 < len && data[lit_end] == data[lit_end + 1] {
+                    // Check for run of 3
+                    if lit_end + 2 < len && data[lit_end] == data[lit_end + 2] {
+                        break;
+                    }
+                }
+                lit_end += 1;
+            }
+            let count = lit_end - start;
+            out.push((count - 1) as u8);
+            out.extend_from_slice(&data[start..lit_end]);
+            i = lit_end;
+        }
+    }
+    out
 }
 
 /// Metadata and handle for one open file.
@@ -328,6 +397,26 @@ impl FileStore {
         id
     }
 
+    /// Create an encode filter that writes encoded data to `target`.
+    pub fn create_encode_filter(&mut self, target: EntityId, kind: FilterKind) -> EntityId {
+        let id = EntityId(self.files.len() as u32);
+        self.files.push(FileEntry {
+            handle: FileHandle::Filter(Box::new(FilterState {
+                kind,
+                source: target, // "source" is the write target for encode filters
+                output_buf: Vec::new(),
+                output_pos: 0,
+                putback: Vec::new(),
+                eof: false,
+            })),
+            name: "%filter".to_string(),
+            mode: "w".to_string(),
+            line_num: 1,
+            pending_newlines: 0,
+        });
+        id
+    }
+
     /// Create a string-backed data source.
     pub fn create_string_source(&mut self, data: Vec<u8>) -> EntityId {
         let id = EntityId(self.files.len() as u32);
@@ -382,6 +471,15 @@ impl FileStore {
 
     /// Close a file.
     pub fn close(&mut self, entity: EntityId) -> io::Result<()> {
+        // Check if this is an encode filter that needs finalization
+        let is_encode = matches!(
+            &self.files[entity.0 as usize].handle,
+            FileHandle::Filter(state) if state.kind.is_encode()
+        );
+        if is_encode {
+            return self.close_encode_filter(entity);
+        }
+
         let entry = &mut self.files[entity.0 as usize];
         match entry.handle {
             FileHandle::Stdin | FileHandle::Stdout | FileHandle::Stderr => Ok(()),
@@ -522,18 +620,19 @@ impl FileStore {
 
     /// Write one byte to a file.
     pub fn write_byte(&mut self, entity: EntityId, byte: u8) -> io::Result<()> {
-        let entry = &mut self.files[entity.0 as usize];
-        match &mut entry.handle {
-            FileHandle::Real(f) => f.get_mut().write_all(&[byte]),
-            FileHandle::Stdout => io::stdout().write_all(&[byte]),
-            FileHandle::Stderr => io::stderr().write_all(&[byte]),
-            FileHandle::Closed => Err(io::Error::other("file closed")),
-            _ => Err(io::Error::other("not writable")),
-        }
+        self.write_from(entity, &[byte])
     }
 
     /// Write bytes from a buffer.
     pub fn write_from(&mut self, entity: EntityId, buf: &[u8]) -> io::Result<()> {
+        // Check if this is an encode filter (needs swap-out pattern)
+        let is_encode = matches!(
+            &self.files[entity.0 as usize].handle,
+            FileHandle::Filter(state) if state.kind.is_encode()
+        );
+        if is_encode {
+            return self.encode_write(entity, buf);
+        }
         let entry = &mut self.files[entity.0 as usize];
         match &mut entry.handle {
             FileHandle::Real(f) => f.get_mut().write_all(buf),
@@ -542,6 +641,198 @@ impl FileStore {
             FileHandle::Closed => Err(io::Error::other("file closed")),
             _ => Err(io::Error::other("not writable")),
         }
+    }
+
+    /// Write data through an encode filter using swap-out pattern.
+    fn encode_write(&mut self, entity: EntityId, data: &[u8]) -> io::Result<()> {
+        // Swap out filter state to avoid borrow conflicts
+        let entry = &mut self.files[entity.0 as usize];
+        let mut state = match std::mem::replace(&mut entry.handle, FileHandle::Closed) {
+            FileHandle::Filter(s) => s,
+            other => {
+                entry.handle = other;
+                return Err(io::Error::other("not an encode filter"));
+            }
+        };
+
+        let target = state.source;
+        let result = match &mut state.kind {
+            FilterKind::ASCIIHexEncode => {
+                // Each byte → 2 uppercase hex chars
+                let mut hex = Vec::with_capacity(data.len() * 2);
+                for &b in data {
+                    hex.push(b"0123456789ABCDEF"[(b >> 4) as usize]);
+                    hex.push(b"0123456789ABCDEF"[(b & 0xF) as usize]);
+                }
+                self.write_from(target, &hex)
+            }
+            FilterKind::ASCII85Encode { buf, col } => {
+                let mut encoded = Vec::new();
+                for &byte in data {
+                    buf.push(byte);
+                    if buf.len() == 4 {
+                        let val = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
+                        if val == 0 {
+                            encoded.push(b'z');
+                            *col += 1;
+                        } else {
+                            let mut chars = [0u8; 5];
+                            let mut v = val;
+                            for c in chars.iter_mut().rev() {
+                                *c = (v % 85) as u8 + b'!';
+                                v /= 85;
+                            }
+                            encoded.extend_from_slice(&chars);
+                            *col += 5;
+                        }
+                        buf.clear();
+                        if *col >= 75 {
+                            encoded.push(b'\n');
+                            *col = 0;
+                        }
+                    }
+                }
+                if encoded.is_empty() {
+                    Ok(())
+                } else {
+                    self.write_from(target, &encoded)
+                }
+            }
+            FilterKind::RunLengthEncode {
+                buf: rle_buf,
+            } => {
+                // Buffer all input; encode on close
+                rle_buf.extend_from_slice(data);
+                Ok(())
+            }
+            FilterKind::FlateEncode { compressor } => {
+                let mut out = vec![0u8; data.len() + 64];
+                let mut input_pos = 0;
+                loop {
+                    let before_in = compressor.total_in() as usize;
+                    let before_out = compressor.total_out() as usize;
+                    let status = compressor
+                        .compress(
+                            &data[input_pos..],
+                            &mut out,
+                            flate2::FlushCompress::None,
+                        )
+                        .map_err(|e| io::Error::other(e.to_string()))?;
+                    let consumed = compressor.total_in() as usize - before_in;
+                    let produced = compressor.total_out() as usize - before_out;
+                    input_pos += consumed;
+                    if produced > 0 {
+                        self.write_from(target, &out[..produced])?;
+                    }
+                    if input_pos >= data.len() || matches!(status, flate2::Status::StreamEnd) {
+                        break;
+                    }
+                }
+                Ok(())
+            }
+            FilterKind::LZWEncode { encoder } => {
+                let mut out = vec![0u8; data.len() * 2 + 64];
+                let result = encoder.encode_bytes(data, &mut out);
+                if result.consumed_out > 0 {
+                    self.write_from(target, &out[..result.consumed_out])?;
+                }
+                Ok(())
+            }
+            FilterKind::NullEncode => self.write_from(target, data),
+            _ => Err(io::Error::other("not an encode filter")),
+        };
+
+        // Put state back
+        self.files[entity.0 as usize].handle = FileHandle::Filter(state);
+        result
+    }
+
+    /// Finalize and close an encode filter, flushing remaining data and EOD markers.
+    fn close_encode_filter(&mut self, entity: EntityId) -> io::Result<()> {
+        // Swap out filter state
+        let entry = &mut self.files[entity.0 as usize];
+        let mut state = match std::mem::replace(&mut entry.handle, FileHandle::Closed) {
+            FileHandle::Filter(s) => s,
+            other => {
+                entry.handle = other;
+                return Ok(());
+            }
+        };
+
+        let target = state.source;
+        match &mut state.kind {
+            FilterKind::ASCIIHexEncode => {
+                self.write_from(target, b">")?;
+            }
+            FilterKind::ASCII85Encode { buf, .. } => {
+                // Flush remaining 1-3 bytes
+                if !buf.is_empty() {
+                    let n = buf.len();
+                    // Pad to 4 bytes with zeros
+                    while buf.len() < 4 {
+                        buf.push(0);
+                    }
+                    let val = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
+                    let mut chars = [0u8; 5];
+                    let mut v = val;
+                    for c in chars.iter_mut().rev() {
+                        *c = (v % 85) as u8 + b'!';
+                        v /= 85;
+                    }
+                    // Output n+1 chars (for n input bytes)
+                    self.write_from(target, &chars[..n + 1])?;
+                }
+                self.write_from(target, b"~>")?;
+            }
+            FilterKind::RunLengthEncode {
+                buf: rle_buf,
+            } => {
+                // Encode buffered data using simple RLE
+                let encoded = rle_encode(rle_buf);
+                self.write_from(target, &encoded)?;
+                // EOD byte
+                self.write_from(target, &[128])?;
+            }
+            FilterKind::FlateEncode { compressor } => {
+                // Flush with Finish
+                let mut out = vec![0u8; 256];
+                loop {
+                    let before_out = compressor.total_out() as usize;
+                    let status = compressor
+                        .compress(&[], &mut out, flate2::FlushCompress::Finish)
+                        .map_err(|e| io::Error::other(e.to_string()))?;
+                    let produced = compressor.total_out() as usize - before_out;
+                    if produced > 0 {
+                        self.write_from(target, &out[..produced])?;
+                    }
+                    if matches!(status, flate2::Status::StreamEnd) {
+                        break;
+                    }
+                }
+            }
+            FilterKind::LZWEncode { encoder } => {
+                // Mark stream as ended, then flush remaining encoded data
+                encoder.finish();
+                let mut out = vec![0u8; 256];
+                loop {
+                    let result = encoder.encode_bytes(&[], &mut out);
+                    if result.consumed_out > 0 {
+                        self.write_from(target, &out[..result.consumed_out])?;
+                    }
+                    if result.consumed_out == 0 {
+                        break;
+                    }
+                }
+            }
+            FilterKind::NullEncode => {}
+            _ => {}
+        }
+
+        // Close the target file (per PLRM, closing a filter closes its target)
+        self.close(target)?;
+
+        // entry.handle is already Closed from swap-out
+        Ok(())
     }
 
     /// Read a line (up to newline or EOF). Returns (bytes_read, hit_newline).
@@ -845,6 +1136,10 @@ impl FileStore {
                     &mut state.output_buf,
                     &mut state.eof,
                 )?;
+            }
+            // Encode filters are write-only, never refilled via read path
+            _ => {
+                state.eof = true;
             }
         }
         Ok(())
@@ -1157,6 +1452,11 @@ impl FileStore {
                     }
                 }
                 if total == 0 {
+                    // Source exhausted — try one more decode to flush decoder internals
+                    let result = decoder.decode_bytes(&[], &mut decompressed);
+                    if result.consumed_out > 0 {
+                        out.extend_from_slice(&decompressed[..result.consumed_out]);
+                    }
                     *eof = true;
                     return Ok(());
                 }
@@ -1182,10 +1482,11 @@ impl FileStore {
                         out.extend_from_slice(&decompressed[..consumed_out]);
                         return Ok(());
                     }
-                    // No input left and no output — need more input
+                    // No progress — need more input data
                     if raw_buf.is_empty() {
                         continue; // will try to read more from source
                     }
+                    // raw_buf has data but decoder made no progress — done
                     *eof = true;
                     return Ok(());
                 }
@@ -1628,6 +1929,59 @@ impl FilterKind {
             hex_leftover: None,
         }
     }
+
+    /// Create a new ASCIIHexEncode filter.
+    pub fn ascii_hex_encode() -> Self {
+        Self::ASCIIHexEncode
+    }
+
+    /// Create a new ASCII85Encode filter.
+    pub fn ascii85_encode() -> Self {
+        Self::ASCII85Encode {
+            buf: Vec::with_capacity(4),
+            col: 0,
+        }
+    }
+
+    /// Create a new RunLengthEncode filter.
+    pub fn run_length_encode() -> Self {
+        Self::RunLengthEncode { buf: Vec::new() }
+    }
+
+    /// Create a new FlateEncode filter.
+    pub fn flate_encode() -> Self {
+        Self::FlateEncode {
+            compressor: flate2::Compress::new(flate2::Compression::default(), true),
+        }
+    }
+
+    /// Create a new LZWEncode filter (EarlyChange=1 by default).
+    pub fn lzw_encode(early_change: bool) -> Self {
+        let encoder = if early_change {
+            weezl::encode::Encoder::with_tiff_size_switch(weezl::BitOrder::Msb, 8)
+        } else {
+            weezl::encode::Encoder::new(weezl::BitOrder::Msb, 8)
+        };
+        Self::LZWEncode { encoder }
+    }
+
+    /// Create a new NullEncode filter.
+    pub fn null_encode() -> Self {
+        Self::NullEncode
+    }
+
+    /// Returns true if this is an encode (write-direction) filter.
+    pub fn is_encode(&self) -> bool {
+        matches!(
+            self,
+            Self::ASCIIHexEncode
+                | Self::ASCII85Encode { .. }
+                | Self::RunLengthEncode { .. }
+                | Self::FlateEncode { .. }
+                | Self::LZWEncode { .. }
+                | Self::NullEncode
+        )
+    }
 }
 
 impl FileStore {
@@ -2007,5 +2361,152 @@ mod tests {
             }
         }
         assert_eq!(&result, original);
+    }
+
+    #[test]
+    fn test_lzw_encode_single_byte() {
+        let mut store = FileStore::new();
+        let path = "/tmp/stet_test_lzw_single.bin";
+
+        let target = store.open(path, "w").unwrap();
+        let enc = store.create_encode_filter(target, FilterKind::lzw_encode(true));
+        store.write_from(enc, b"Q").unwrap();
+        store.close(enc).unwrap();
+
+        let src = store.open(path, "r").unwrap();
+        let dec = store.create_filter(src, FilterKind::lzw_decode(true));
+        let mut result = Vec::new();
+        loop {
+            match store.read_byte(dec).unwrap() {
+                Some(b) => result.push(b),
+                None => break,
+            }
+        }
+        assert_eq!(&result, b"Q");
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_lzw_encode_roundtrip() {
+        let mut store = FileStore::new();
+        let original = b"Hello LZW!";
+
+        // Create a string source as the write target (we'll use a temp file)
+        let path = "/tmp/stet_test_lzw_encode.bin";
+        let target = store.open(path, "w").unwrap();
+        let enc = store.create_encode_filter(target, FilterKind::lzw_encode(true));
+
+        // Write data through encoder
+        store.write_from(enc, original).unwrap();
+        store.close(enc).unwrap();
+
+        // Read back and decode
+        let src = store.open(path, "r").unwrap();
+        let dec = store.create_filter(src, FilterKind::lzw_decode(true));
+        let mut result = Vec::new();
+        loop {
+            match store.read_byte(dec).unwrap() {
+                Some(b) => result.push(b),
+                None => break,
+            }
+        }
+        assert_eq!(&result, original);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_ascii_hex_encode_roundtrip() {
+        let mut store = FileStore::new();
+        let original = b"Hello";
+        let path = "/tmp/stet_test_hex_encode.bin";
+
+        let target = store.open(path, "w").unwrap();
+        let enc = store.create_encode_filter(target, FilterKind::ascii_hex_encode());
+        store.write_from(enc, original).unwrap();
+        store.close(enc).unwrap();
+
+        let src = store.open(path, "r").unwrap();
+        let dec = store.create_filter(src, FilterKind::ascii_hex_decode());
+        let mut result = Vec::new();
+        loop {
+            match store.read_byte(dec).unwrap() {
+                Some(b) => result.push(b),
+                None => break,
+            }
+        }
+        assert_eq!(&result, original);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_ascii85_encode_roundtrip() {
+        let mut store = FileStore::new();
+        let original = b"Man sure.";
+        let path = "/tmp/stet_test_a85_encode.bin";
+
+        let target = store.open(path, "w").unwrap();
+        let enc = store.create_encode_filter(target, FilterKind::ascii85_encode());
+        store.write_from(enc, original).unwrap();
+        store.close(enc).unwrap();
+
+        let src = store.open(path, "r").unwrap();
+        let dec = store.create_filter(src, FilterKind::ascii85_decode());
+        let mut result = Vec::new();
+        loop {
+            match store.read_byte(dec).unwrap() {
+                Some(b) => result.push(b),
+                None => break,
+            }
+        }
+        assert_eq!(&result, original);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_rle_encode_roundtrip() {
+        let mut store = FileStore::new();
+        let original = b"AAAAAABCBCBCBC";
+        let path = "/tmp/stet_test_rle_encode.bin";
+
+        let target = store.open(path, "w").unwrap();
+        let enc = store.create_encode_filter(target, FilterKind::run_length_encode());
+        store.write_from(enc, original).unwrap();
+        store.close(enc).unwrap();
+
+        let src = store.open(path, "r").unwrap();
+        let dec = store.create_filter(src, FilterKind::run_length_decode());
+        let mut result = Vec::new();
+        loop {
+            match store.read_byte(dec).unwrap() {
+                Some(b) => result.push(b),
+                None => break,
+            }
+        }
+        assert_eq!(&result, original);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_flate_encode_roundtrip() {
+        let mut store = FileStore::new();
+        let original = b"Hello Flate compression test data!";
+        let path = "/tmp/stet_test_flate_encode.bin";
+
+        let target = store.open(path, "w").unwrap();
+        let enc = store.create_encode_filter(target, FilterKind::flate_encode());
+        store.write_from(enc, original).unwrap();
+        store.close(enc).unwrap();
+
+        let src = store.open(path, "r").unwrap();
+        let dec = store.create_filter(src, FilterKind::flate_decode(1, 1, 1, 8));
+        let mut result = Vec::new();
+        loop {
+            match store.read_byte(dec).unwrap() {
+                Some(b) => result.push(b),
+                None => break,
+            }
+        }
+        assert_eq!(&result, original);
+        std::fs::remove_file(path).ok();
     }
 }
