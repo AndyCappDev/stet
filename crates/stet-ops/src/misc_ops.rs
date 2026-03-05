@@ -7,7 +7,7 @@
 use stet_core::context::Context;
 use stet_core::dict::DictKey;
 use stet_core::error::PsError;
-use stet_core::object::{NameId, ObjFlags, PsObject, PsValue};
+use stet_core::object::{EntityId, NameId, ObjFlags, PsObject, PsValue};
 
 /// `bind`: proc → proc (replace names in proc with operator objects)
 pub fn op_bind(ctx: &mut Context) -> Result<(), PsError> {
@@ -882,31 +882,116 @@ pub fn op_resetfile(ctx: &mut Context) -> Result<(), PsError> {
     Ok(())
 }
 
+/// Helper: get the UserObjects array entity + length from userdict, if it exists.
+fn get_userobjects(ctx: &Context) -> Option<(EntityId, u32)> {
+    let name_id = ctx.names.find(b"UserObjects")?;
+    let obj = ctx.dicts.get(ctx.userdict, &DictKey::Name(name_id))?;
+    match obj.value {
+        PsValue::Array { entity, start: 0, len } => Some((entity, len)),
+        _ => None,
+    }
+}
+
 /// `defineuserobject`: index obj → — (define a user object)
+///
+/// Stores obj at the given index in the UserObjects array in userdict.
+/// Creates or grows the array as needed.
 pub fn op_defineuserobject(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.o_stack.len() < 2 {
         return Err(PsError::StackUnderflow);
     }
+    let obj = ctx.o_stack.peek(0)?;
+    let idx_obj = ctx.o_stack.peek(1)?;
+    let index = match idx_obj.value {
+        PsValue::Int(v) if v >= 0 => v as u32,
+        PsValue::Int(_) => return Err(PsError::RangeCheck),
+        _ => return Err(PsError::TypeCheck),
+    };
+
+    // Pop operands after validation
     ctx.o_stack.pop()?;
     ctx.o_stack.pop()?;
+
+    let needed = index + 1;
+
+    match get_userobjects(ctx) {
+        Some((entity, len)) if needed <= len => {
+            // Array exists and is large enough — just store
+            ctx.arrays.set_element(entity, index, obj);
+        }
+        Some((entity, old_len)) => {
+            // Array exists but too small — allocate new, copy old, store
+            let new_len = needed.max(old_len * 2);
+            let old_data: Vec<PsObject> =
+                ctx.arrays.get(entity, 0, old_len).to_vec();
+            let new_entity = ctx.arrays.allocate(new_len as usize);
+            let new_slice = ctx.arrays.get_mut(new_entity, 0, new_len);
+            new_slice[..old_len as usize].copy_from_slice(&old_data);
+            ctx.arrays.set_element(new_entity, index, obj);
+            // Update userdict to point to new array
+            let name_id = ctx.names.intern(b"UserObjects");
+            let arr_obj = PsObject::array(new_entity, new_len);
+            ctx.dicts.put(ctx.userdict, DictKey::Name(name_id), arr_obj);
+        }
+        None => {
+            // No UserObjects array — create one
+            let new_len = needed.max(4);
+            let new_entity = ctx.arrays.allocate(new_len as usize);
+            ctx.arrays.set_element(new_entity, index, obj);
+            let name_id = ctx.names.intern(b"UserObjects");
+            let arr_obj = PsObject::array(new_entity, new_len);
+            ctx.dicts.put(ctx.userdict, DictKey::Name(name_id), arr_obj);
+        }
+    }
+
     Ok(())
 }
 
-/// `undefineuserobject`: index → — (remove a user object)
+/// `undefineuserobject`: index → — (remove a user object by setting to null)
 pub fn op_undefineuserobject(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.o_stack.is_empty() {
         return Err(PsError::StackUnderflow);
     }
+    let idx_obj = ctx.o_stack.peek(0)?;
+    let index = match idx_obj.value {
+        PsValue::Int(v) if v >= 0 => v as u32,
+        PsValue::Int(_) => return Err(PsError::RangeCheck),
+        _ => return Err(PsError::TypeCheck),
+    };
+
+    let (entity, len) = get_userobjects(ctx).ok_or(PsError::Undefined)?;
+    if index >= len {
+        return Err(PsError::RangeCheck);
+    }
+
     ctx.o_stack.pop()?;
+    ctx.arrays.set_element(entity, index, PsObject::null());
     Ok(())
 }
 
 /// `execuserobject`: index → — (execute a user object)
+///
+/// Equivalent to: userdict /UserObjects get exch get exec
 pub fn op_execuserobject(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.o_stack.is_empty() {
         return Err(PsError::StackUnderflow);
     }
+    let idx_obj = ctx.o_stack.peek(0)?;
+    let index = match idx_obj.value {
+        PsValue::Int(v) if v >= 0 => v as u32,
+        PsValue::Int(_) => return Err(PsError::RangeCheck),
+        _ => return Err(PsError::TypeCheck),
+    };
+
+    let (entity, len) = get_userobjects(ctx).ok_or(PsError::Undefined)?;
+    if index >= len {
+        return Err(PsError::RangeCheck);
+    }
+
+    let obj = ctx.arrays.get_element(entity, index);
     ctx.o_stack.pop()?;
+    // Push on e_stack like op_exec — eval loop handles literal vs executable
+    ctx.e_stack.push(obj)?;
     Ok(())
 }
 
