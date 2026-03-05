@@ -18,6 +18,15 @@ pub fn op_pathbbox(ctx: &mut Context) -> Result<(), PsError> {
         return Err(PsError::NoCurrentPoint);
     }
 
+    // If setbbox was called, return the stored user-space bbox
+    if let Some(bbox) = ctx.gstate.bbox {
+        ctx.o_stack.push(PsObject::real(bbox[0]))?;
+        ctx.o_stack.push(PsObject::real(bbox[1]))?;
+        ctx.o_stack.push(PsObject::real(bbox[2]))?;
+        ctx.o_stack.push(PsObject::real(bbox[3]))?;
+        return Ok(());
+    }
+
     let (dev_min_x, dev_min_y, dev_max_x, dev_max_y) = path_bbox(&ctx.gstate.path);
     let ictm = ctx.gstate.ctm.invert().ok_or(PsError::UndefinedResult)?;
 

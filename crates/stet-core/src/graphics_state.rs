@@ -1024,6 +1024,9 @@ pub struct GraphicsState {
     pub current_pattern: Option<u32>,
     /// Underlying color for uncolored (PaintType 2) patterns.
     pub pattern_underlying_color: Option<DeviceColor>,
+
+    // Userpath bounding box (set by setbbox, cleared by newpath)
+    pub bbox: Option<[f64; 4]>,
 }
 
 impl GraphicsState {
@@ -1063,6 +1066,7 @@ impl GraphicsState {
             color_rendering: None,
             current_pattern: None,
             pattern_underlying_color: None,
+            bbox: None,
         }
     }
 }

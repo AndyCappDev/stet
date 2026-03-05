@@ -188,4 +188,6 @@ count 2 ge {pop pop true} {false} ifelse
 0 0 moveto 10 20 200 300 setbbox
 newpath
 0 0 moveto 100 0 lineto 100 100 lineto closepath
-{pathbbox} [0.0 0.0 100.0 100.0] assert newpath
+% Verify pathbbox does NOT return stored bbox (10 20 200 300)
+% Round values to handle CTM float round-trip artifacts
+{pathbbox round 4 1 roll round 4 1 roll round 4 1 roll round 4 1 roll} [0 0 100 100] assert newpath

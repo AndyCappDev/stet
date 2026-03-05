@@ -16,6 +16,7 @@ use stet_core::object::PsObject;
 pub fn op_newpath(ctx: &mut Context) -> Result<(), PsError> {
     ctx.gstate.path.clear();
     ctx.gstate.current_point = None;
+    ctx.gstate.bbox = None;
     Ok(())
 }
 

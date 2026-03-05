@@ -34,6 +34,7 @@ pub mod strokepath_algorithm;
 pub mod stack_ops;
 pub mod string_ops;
 pub mod type_ops;
+pub mod userpath_ops;
 pub mod vm_ops;
 
 use stet_core::context::{Context, OpEntry};
@@ -475,6 +476,19 @@ pub fn build_system_dict(ctx: &mut Context) {
     register(ctx, sd, "infill", insideness_ops::op_infill);
     register(ctx, sd, "ineofill", insideness_ops::op_ineofill);
     register(ctx, sd, "instroke", insideness_ops::op_instroke);
+
+    // --- Userpath operators ---
+    register(ctx, sd, "setbbox", userpath_ops::op_setbbox);
+    register(ctx, sd, "ucache", userpath_ops::op_ucache);
+    register(ctx, sd, "uappend", userpath_ops::op_uappend);
+    register(ctx, sd, "upath", userpath_ops::op_upath);
+    register(ctx, sd, "ufill", userpath_ops::op_ufill);
+    register(ctx, sd, "ueofill", userpath_ops::op_ueofill);
+    register(ctx, sd, "ustroke", userpath_ops::op_ustroke);
+    register(ctx, sd, "ustrokepath", userpath_ops::op_ustrokepath);
+    register(ctx, sd, "inufill", userpath_ops::op_inufill);
+    register(ctx, sd, "inueofill", userpath_ops::op_inueofill);
+    register(ctx, sd, "inustroke", userpath_ops::op_inustroke);
 
     // --- Font dictionary operators ---
     register(ctx, sd, "definefont", font_ops::op_definefont);

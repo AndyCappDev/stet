@@ -1,6 +1,6 @@
 # stet vs PostForge: Gap Analysis
 
-**Date**: 2026-03-05 (updated 2026-03-06)
+**Date**: 2026-03-05 (updated 2026-03-07)
 **Purpose**: Comprehensive comparison of stet (Rust) against PostForge (Python) — the reference PostScript Level 3 interpreter — to identify all gaps that must be closed for 1:1 feature parity.
 
 ---
@@ -9,13 +9,13 @@
 
 stet has strong foundations across core interpreter mechanics, graphics, fonts, images, shading, filters, and resources. However, significant gaps remain in several areas:
 
-- **9 missing operators** (userpath, path, misc, filter categories)
+- ~~**9 missing operators** (userpath, path, misc, filter categories)~~ — userpath operators **RESOLVED** (2026-03-07)
 - ~~**Encode filters** are stub pass-throughs~~ — **RESOLVED** (2026-03-06)
 - **CCITTFax filters** not implemented
 - **Binary Object Sequences (BOS)** not implemented
 - **Output devices**: stet has PNG + viewer; PF also has PDF, SVG, TIFF
 - **Glyph caching** not implemented (plan exists)
-- **Feature gaps** causing 6 test suites to fail (~108 total failures)
+- **Feature gaps** causing 5 test suites to fail (~96 total failures)
 
 ### Test Suite Status (stet unit_tests)
 
@@ -23,33 +23,17 @@ Results from running stet's own copy of the test suites (`~/Projects/stet/unit_t
 
 | Status | Count | Suites |
 |--------|-------|--------|
-| **PASS** | 41 | arc_shading, arithmetic_and_math, array, cff, clipping, color_operators, context_param, control, defined_ps_operator, device_operator, dictionary, file_operators, filter_chain, **filter_extended**, flate_filter, font, graphics_state_params, gstate, halftone_transfer, image, interpreter_param, job_control, job_control_tests_standalone, matrix, nulldevice, operand_stack, packedarray, painting, path, **pattern_form**, print_integration, rel_bool_bitwise, resource, save_invalidation, show_variant, stdio, string, strokepath, type1_font, type_attrib_conv, vm_gstate_integration, vm_operators |
-| **FAIL** | 6 | binary_token(55), dct_filter(9), file(11), misc(5), ps(16), userpath(12) |
+| **PASS** | 42 | arc_shading, arithmetic_and_math, array, cff, clipping, color_operators, context_param, control, defined_ps_operator, device_operator, dictionary, file_operators, filter_chain, **filter_extended**, flate_filter, font, graphics_state_params, gstate, halftone_transfer, image, interpreter_param, job_control, job_control_tests_standalone, matrix, nulldevice, operand_stack, packedarray, painting, path, **pattern_form**, print_integration, rel_bool_bitwise, resource, save_invalidation, show_variant, stdio, string, strokepath, type1_font, type_attrib_conv, **userpath**, vm_gstate_integration, vm_operators |
+| **FAIL** | 5 | binary_token(55), dct_filter(9), file(11), misc(5), ps(16) |
 | **Total** | 47 | (excluding unittest.ps framework file) |
 
 ---
 
 ## 1. Missing Operators
 
-### 1.1 Userpath Operators (12 ops — COMPLETELY MISSING)
+### ~~1.1 Userpath Operators~~ — RESOLVED (2026-03-07)
 
-PostForge implements the full userpath operator set. stet has none of these.
-
-| Operator | Description | PLRM |
-|----------|-------------|------|
-| `uappend` | Append user path to current path | L2 |
-| `ucache` | Declare user path cacheable | L2 |
-| `ueofill` | Even-odd fill user path | L2 |
-| `ufill` | Fill user path | L2 |
-| `upath` | Create user path from current path | L2 |
-| `ustroke` | Stroke user path | L2 |
-| `ustrokepath` | Convert user path stroke to path | L2 |
-| `inufill` | Test point inside user path fill | L2 |
-| `inueofill` | Test point inside user path eofill | L2 |
-| `inustroke` | Test point inside user path stroke | L2 |
-| `setbbox` | Set path bounding box | L2 |
-
-**Impact**: 12 test failures in userpath_tests.ps. Some real-world PS files use user paths.
+All 11 userpath operators implemented: `setbbox`, `ucache`, `uappend`, `upath`, `ufill`, `ueofill`, `ustroke`, `ustrokepath`, `inufill`, `inueofill`, `inustroke`. Supports both ordinary (executable array) and encoded (data+opcode) userpath formats. All userpath_tests.ps tests pass.
 
 ### 1.2 Missing Individual Operators
 
@@ -63,7 +47,6 @@ PostForge implements the full userpath operator set. stet has none of these.
 | `runlibfile` | Run library file | Yes | **No** | Like `run` but searches lib paths |
 | `breaki` | Break with interrupt | Yes | **No** | Control flow |
 | `createresourcecategory` | Create new resource category | Yes | **No** | Resource system extension |
-| `setbbox` | Set bounding box hint | Yes | **No** | Path construction hint |
 
 ---
 
@@ -156,9 +139,9 @@ These suites fail entirely because of unimplemented features, not defects:
 | Suite | Failures | Missing Feature |
 |-------|----------|----------------|
 | binary_token | 55 | Binary Object Sequences (P1) |
-| userpath | 12 | Userpath operators (P1) |
 | file | 11 | All failures are BOS-related — bos_rt.bin etc. (P1) |
 | dct_filter | 9 | DCTEncode parameter validation (P1) |
+| ~~userpath~~ | ~~0~~ | ~~Userpath operators — RESOLVED (2026-03-07)~~ |
 | ~~filter_extended~~ | ~~0~~ | ~~Encode filters — RESOLVED (2026-03-06)~~ |
 
 ---
@@ -311,14 +294,14 @@ All 7 shading types are implemented in both interpreters. **No gaps.**
 ~~1. **Pattern/Form rendering** — RESOLVED (2026-03-05)~~
 ~~2. **Encode filters** — RESOLVED (2026-03-06): ASCIIHex, ASCII85, RunLength, Flate, LZW, NullEncode implemented. DCTEncode still stub.~~
 3. **Binary Object Sequences** — needed for some workflows
-4. **Userpath operators** (11 operators) — used in some PS programs
+~~4. **Userpath operators** (11 operators) — RESOLVED (2026-03-07)~~
 5. **DCTEncode parameter validation** — validate params even though encode is a stub
 6. **Missing `echo` operator** — trivial but needed for test suite
 
 ### P2 — Medium (Feature completeness)
 11. **CCITTFax filters** — used in scanned documents
 12. **System font discovery** — find system-installed fonts
-13. **Missing misc operators** (flushpage, runlibfile, loopname, help, printostack, breaki, createresourcecategory, setbbox)
+13. **Missing misc operators** (flushpage, runlibfile, loopname, help, printostack, breaki, createresourcecategory)
 14. **Default ColorSpace resources** (DefaultGray, DefaultRGB, DefaultCMYK)
 15. **Glyph caching** — performance improvement
 
@@ -339,10 +322,7 @@ All 7 shading types are implemented in both interpreters. **No gaps.**
 ```
 breaki            echo              flushpage         help
 loopname          printostack       runlibfile
-createresourcecategory               setbbox
-uappend           ucache            ueofill           ufill
-upath             ustroke           ustrokepath
-inufill           inueofill         inustroke
+createresourcecategory
 ```
 
 ### Operators in stet but NOT in PostForge
@@ -355,7 +335,7 @@ selectfont (native)  .showpage_continue  .copypage_continue
 
 ### Operators in both — implemented identically (feature parity)
 
-All standard PLRM operators for: stack, math, relational/boolean/bitwise, type/conversion, dictionary, control flow, composite, array, string, file I/O, filter (decode), VM, matrix, path construction, color, graphics state, painting, clipping, path query, insideness (infill/ineofill/instroke), font management, text show, halftone/transfer, shading, image, pattern/form (makepattern/setpattern/execform), resource, interpreter parameters, device setup, CFF.
+All standard PLRM operators for: stack, math, relational/boolean/bitwise, type/conversion, dictionary, control flow, composite, array, string, file I/O, filter (decode), VM, matrix, path construction, color, graphics state, painting, clipping, path query, insideness (infill/ineofill/instroke), userpath (setbbox/ucache/uappend/upath/ufill/ueofill/ustroke/ustrokepath/inufill/inueofill/inustroke), font management, text show, halftone/transfer, shading, image, pattern/form (makepattern/setpattern/execform), resource, interpreter parameters, device setup, CFF.
 
 ---
 
@@ -367,12 +347,12 @@ Results from stet's own unit_tests directory (`~/Projects/stet/unit_tests/`).
 |-----------|----------|-------------------|
 | binary_token | 55 | Missing feature (BOS) |
 | ps | 16 | Sum of file + misc failures |
-| userpath | 12 | Missing operators |
 | file | 11 | File I/O edge cases (BOS) |
 | dct_filter | 9 | DCT param handling |
 | misc | 5 | Missing `echo` operator |
+| ~~userpath~~ | ~~0~~ | ~~Fixed (2026-03-07): all 11 userpath operators implemented~~ |
 | ~~filter_extended~~ | ~~0~~ | ~~Fixed (2026-03-06): encode filters implemented + LZW decode fix~~ |
 | ~~pattern_form~~ | ~~0~~ | ~~Fixed (2026-03-05)~~ |
 | ~~dictionary~~ | ~~0~~ | ~~Fixed (2026-03-05)~~ |
 | ~~image~~ | ~~0~~ | ~~Fixed (2026-03-05)~~ |
-| **Total** | **~108** | |
+| **Total** | **~96** | |
