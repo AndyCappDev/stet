@@ -355,7 +355,7 @@ fn create_filter_by_name(
             .create_encode_filter(source, FilterKind::run_length_encode())),
         b"FlateEncode" => Ok(ctx
             .files
-            .create_encode_filter(source, FilterKind::flate_encode())),
+            .create_encode_filter(source, FilterKind::flate_encode(predictor, columns, colors, bpc))),
         b"LZWEncode" => Ok(ctx
             .files
             .create_encode_filter(source, FilterKind::lzw_encode(early_change != 0))),

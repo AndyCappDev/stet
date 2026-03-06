@@ -88,9 +88,21 @@ pub enum FilterKind {
         /// Buffered input (encoded on close).
         buf: Vec<u8>,
     },
-    /// Bytes → zlib-compressed data.
+    /// Bytes → zlib-compressed data (with optional predictor pre-processing).
     FlateEncode {
         compressor: flate2::Compress,
+        predictor: u8,
+        columns: u32,
+        colors: u32,
+        bpc: u32,
+        /// Row width in bytes (columns * colors * bpc / 8).
+        row_width: usize,
+        /// Bytes per pixel for PNG Sub filter.
+        bpp: usize,
+        /// Buffer for accumulating input until a full row is available.
+        encode_buf: Vec<u8>,
+        /// Previous row for PNG predictor (unused for TIFF predictor 2).
+        prev_row: Vec<u8>,
     },
     /// Bytes → LZW-compressed data.
     LZWEncode {
@@ -705,30 +717,38 @@ impl FileStore {
                 rle_buf.extend_from_slice(data);
                 Ok(())
             }
-            FilterKind::FlateEncode { compressor } => {
-                let mut out = vec![0u8; data.len() + 64];
-                let mut input_pos = 0;
-                loop {
-                    let before_in = compressor.total_in() as usize;
-                    let before_out = compressor.total_out() as usize;
-                    let status = compressor
-                        .compress(
-                            &data[input_pos..],
-                            &mut out,
-                            flate2::FlushCompress::None,
-                        )
-                        .map_err(|e| io::Error::other(e.to_string()))?;
-                    let consumed = compressor.total_in() as usize - before_in;
-                    let produced = compressor.total_out() as usize - before_out;
-                    input_pos += consumed;
-                    if produced > 0 {
-                        self.write_from(target, &out[..produced])?;
+            FilterKind::FlateEncode {
+                compressor,
+                predictor,
+                row_width,
+                bpp,
+                encode_buf,
+                prev_row,
+                ..
+            } => {
+                if *predictor <= 1 {
+                    // No predictor — compress directly
+                    flate_compress_data(compressor, data, |chunk| self.write_from(target, chunk))
+                } else {
+                    // Buffer input, process complete rows with predictor
+                    encode_buf.extend_from_slice(data);
+                    let rw = *row_width;
+                    let pred = *predictor;
+                    let bp = *bpp;
+                    while encode_buf.len() >= rw {
+                        let row: Vec<u8> = encode_buf.drain(..rw).collect();
+                        let encoded = if pred >= 10 {
+                            encode_png_row(&row, bp)
+                        } else {
+                            encode_tiff_row(&row, bp)
+                        };
+                        prev_row.copy_from_slice(&row);
+                        flate_compress_data(compressor, &encoded, |chunk| {
+                            self.write_from(target, chunk)
+                        })?;
                     }
-                    if input_pos >= data.len() || matches!(status, flate2::Status::StreamEnd) {
-                        break;
-                    }
+                    Ok(())
                 }
-                Ok(())
             }
             FilterKind::LZWEncode { encoder } => {
                 let mut out = vec![0u8; data.len() * 2 + 64];
@@ -793,7 +813,31 @@ impl FileStore {
                 // EOD byte
                 self.write_from(target, &[128])?;
             }
-            FilterKind::FlateEncode { compressor } => {
+            FilterKind::FlateEncode {
+                compressor,
+                predictor,
+                row_width,
+                bpp,
+                encode_buf,
+                ..
+            } => {
+                // Flush any remaining partial row with predictor
+                if *predictor > 1 && !encode_buf.is_empty() {
+                    let rw = *row_width;
+                    let pred = *predictor;
+                    let bp = *bpp;
+                    // Pad partial row to row_width with zeros
+                    encode_buf.resize(rw, 0);
+                    let row: Vec<u8> = encode_buf.drain(..).collect();
+                    let encoded = if pred >= 10 {
+                        encode_png_row(&row, bp)
+                    } else {
+                        encode_tiff_row(&row, bp)
+                    };
+                    flate_compress_data(compressor, &encoded, |chunk| {
+                        self.write_from(target, chunk)
+                    })?;
+                }
                 // Flush with Finish
                 let mut out = vec![0u8; 256];
                 loop {
@@ -1785,6 +1829,58 @@ fn ascii85_decode_partial(group: &[u8], out: &mut Vec<u8>) {
     out.extend_from_slice(&bytes[..n - 1]);
 }
 
+/// Compress data through a flate compressor, writing output via callback.
+fn flate_compress_data(
+    compressor: &mut flate2::Compress,
+    data: &[u8],
+    mut write_fn: impl FnMut(&[u8]) -> io::Result<()>,
+) -> io::Result<()> {
+    let mut out = vec![0u8; data.len() + 64];
+    let mut input_pos = 0;
+    loop {
+        let before_in = compressor.total_in() as usize;
+        let before_out = compressor.total_out() as usize;
+        let status = compressor
+            .compress(
+                &data[input_pos..],
+                &mut out,
+                flate2::FlushCompress::None,
+            )
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        let consumed = compressor.total_in() as usize - before_in;
+        let produced = compressor.total_out() as usize - before_out;
+        input_pos += consumed;
+        if produced > 0 {
+            write_fn(&out[..produced])?;
+        }
+        if input_pos >= data.len() || matches!(status, flate2::Status::StreamEnd) {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// Encode a row using PNG Sub filter (type 1) for FlateEncode predictor.
+fn encode_png_row(row: &[u8], bpp: usize) -> Vec<u8> {
+    let mut encoded = Vec::with_capacity(1 + row.len());
+    encoded.push(1); // Sub filter type byte
+    for i in 0..row.len() {
+        let left = if i >= bpp { row[i - bpp] } else { 0 };
+        encoded.push(row[i].wrapping_sub(left));
+    }
+    encoded
+}
+
+/// Encode a row using TIFF Predictor 2 (horizontal differencing) for FlateEncode.
+fn encode_tiff_row(row: &[u8], colors: usize) -> Vec<u8> {
+    let mut encoded = Vec::from(row);
+    // Work backwards to avoid clobbering values we still need
+    for i in (colors..encoded.len()).rev() {
+        encoded[i] = encoded[i].wrapping_sub(encoded[i - colors]);
+    }
+    encoded
+}
+
 /// Apply TIFF horizontal differencing predictor.
 fn apply_tiff_predictor(data: &[u8], out: &mut Vec<u8>, columns: u32, colors: u32, bpc: u32) {
     let bytes_per_pixel = (colors * bpc).div_ceil(8);
@@ -1964,10 +2060,20 @@ impl FilterKind {
         Self::RunLengthEncode { buf: Vec::new() }
     }
 
-    /// Create a new FlateEncode filter.
-    pub fn flate_encode() -> Self {
+    /// Create a new FlateEncode filter with optional predictor parameters.
+    pub fn flate_encode(predictor: u8, columns: u32, colors: u32, bpc: u32) -> Self {
+        let row_width = (columns as usize * colors as usize * bpc as usize + 7) / 8;
+        let bpp = (colors as usize * bpc as usize + 7) / 8;
         Self::FlateEncode {
             compressor: flate2::Compress::new(flate2::Compression::default(), true),
+            predictor,
+            columns,
+            colors,
+            bpc,
+            row_width,
+            bpp: bpp.max(1),
+            encode_buf: Vec::new(),
+            prev_row: vec![0u8; row_width],
         }
     }
 
@@ -2509,7 +2615,7 @@ mod tests {
         let path = "/tmp/stet_test_flate_encode.bin";
 
         let target = store.open(path, "w").unwrap();
-        let enc = store.create_encode_filter(target, FilterKind::flate_encode());
+        let enc = store.create_encode_filter(target, FilterKind::flate_encode(1, 1, 1, 8));
         store.write_from(enc, original).unwrap();
         store.close(enc).unwrap();
 
