@@ -953,6 +953,18 @@ impl FileStore {
         )
     }
 
+    /// Read exactly N bytes from a file. Returns error on premature EOF.
+    pub fn read_n_bytes(&mut self, entity: EntityId, n: usize) -> io::Result<Vec<u8>> {
+        let mut result = Vec::with_capacity(n);
+        for _ in 0..n {
+            match self.read_byte(entity)? {
+                Some(b) => result.push(b),
+                None => return Err(io::Error::other("unexpected EOF")),
+            }
+        }
+        Ok(result)
+    }
+
     /// Put bytes back into a file so they'll be returned on the next read.
     /// For filters, uses the filter's putback buffer. For StringSource,
     /// decrements position.
@@ -967,6 +979,10 @@ impl FileStore {
             }
             FileHandle::StringSource { pos, .. } => {
                 *pos = pos.saturating_sub(bytes.len());
+            }
+            FileHandle::Real(f) => {
+                // Seek backwards to put bytes back
+                let _ = f.seek(std::io::SeekFrom::Current(-(bytes.len() as i64)));
             }
             _ => {}
         }

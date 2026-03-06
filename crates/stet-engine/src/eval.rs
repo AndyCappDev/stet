@@ -220,7 +220,7 @@ fn eval_one(ctx: &mut Context, obj: PsObject) -> Result<(), PsError> {
             let bytes = ctx.strings.get(entity, start, len);
             let (ptr, byte_len) = (bytes.as_ptr(), bytes.len());
             let bytes = unsafe { std::slice::from_raw_parts(ptr, byte_len) };
-            if let Some((tok_obj, consumed, is_immediate)) = scan_token_from_bytes(ctx, bytes)? {
+            if let Some((tok_obj, consumed, is_immediate, auto_exec)) = scan_token_from_bytes(ctx, bytes)? {
                 let newlines = count_newlines(&bytes[..consumed]);
                 ctx.current_source_line += newlines;
 
@@ -237,7 +237,11 @@ fn eval_one(ctx: &mut Context, obj: PsObject) -> Result<(), PsError> {
                     })?;
                 }
 
-                dispatch_scanned_token(ctx, tok_obj, is_immediate)?;
+                if auto_exec {
+                    ctx.e_stack.push(tok_obj)?;
+                } else {
+                    dispatch_scanned_token(ctx, tok_obj, is_immediate)?;
+                }
             }
         }
 
@@ -457,7 +461,7 @@ fn eval_one(ctx: &mut Context, obj: PsObject) -> Result<(), PsError> {
             let (ptr, len) = (remaining.as_ptr(), remaining.len());
             if len > 0 {
                 let remaining = unsafe { std::slice::from_raw_parts(ptr, len) };
-                if let Some((tok_obj, consumed, is_immediate)) =
+                if let Some((tok_obj, consumed, is_immediate, auto_exec)) =
                     scan_token_from_bytes(ctx, remaining)?
                 {
                     let newlines = count_newlines(&remaining[..consumed]);
@@ -467,7 +471,11 @@ fn eval_one(ctx: &mut Context, obj: PsObject) -> Result<(), PsError> {
                     if consumed < remaining.len() {
                         ctx.e_stack.push(obj)?;
                     }
-                    dispatch_scanned_token(ctx, tok_obj, is_immediate)?;
+                    if auto_exec {
+                        ctx.e_stack.push(tok_obj)?;
+                    } else {
+                        dispatch_scanned_token(ctx, tok_obj, is_immediate)?;
+                    }
                 }
             } else if ctx.files.is_readable(file_entity) {
                 // Streaming path: filter/real files — byte-at-a-time tokenization
@@ -475,15 +483,25 @@ fn eval_one(ctx: &mut Context, obj: PsObject) -> Result<(), PsError> {
                     ctx.current_source_line += newlines;
                     ctx.files.add_pending_newlines(file_entity, newlines);
                     let is_immediate = matches!(token, Token::ImmediateName(_));
-                    let tok_obj = if matches!(token, Token::ProcBegin) {
-                        stream_parse_procedure(ctx, file_entity)?
+                    let (tok_obj, auto_exec) = if let Token::BinaryTokenByte(tag) = token {
+                        let result = stet_core::binary_token::parse_from_stream(ctx, tag, file_entity)?;
+                        match result {
+                            stet_core::binary_token::BinaryTokenResult::Single(o) => (o, false),
+                            stet_core::binary_token::BinaryTokenResult::Sequence(o) => (o, true),
+                        }
+                    } else if matches!(token, Token::ProcBegin) {
+                        (stream_parse_procedure(ctx, file_entity)?, false)
                     } else {
-                        token_to_object(ctx, token)?
+                        (token_to_object(ctx, token)?, false)
                     };
                     if ctx.files.is_readable(file_entity) {
                         ctx.e_stack.push(obj)?;
                     }
-                    dispatch_scanned_token(ctx, tok_obj, is_immediate)?;
+                    if auto_exec {
+                        ctx.e_stack.push(tok_obj)?;
+                    } else {
+                        dispatch_scanned_token(ctx, tok_obj, is_immediate)?;
+                    }
                 }
             }
         }
@@ -542,13 +560,28 @@ fn exec_procedure(
 
 /// Scan one token from a byte slice, handling procedures and immediate names.
 ///
-/// Returns `(token_object, bytes_consumed, is_immediate)` or `None` at EOF.
+/// Returns `(token_object, bytes_consumed, is_immediate, auto_exec)` or `None` at EOF.
+/// `auto_exec` is true for BOS sequences which should be pushed to e_stack.
 fn scan_token_from_bytes(
     ctx: &mut Context,
     bytes: &[u8],
-) -> Result<Option<(PsObject, usize, bool)>, PsError> {
+) -> Result<Option<(PsObject, usize, bool, bool)>, PsError> {
     let mut tokenizer = Tokenizer::new(bytes);
     match tokenizer.next_token()? {
+        Some(Token::BinaryTokenByte(tag)) => {
+            let pos = tokenizer.position();
+            let (result, consumed) =
+                stet_core::binary_token::parse_from_slice(ctx, tag, &bytes[pos..])?;
+            let total = pos + consumed;
+            match result {
+                stet_core::binary_token::BinaryTokenResult::Single(obj) => {
+                    Ok(Some((obj, total, false, false)))
+                }
+                stet_core::binary_token::BinaryTokenResult::Sequence(obj) => {
+                    Ok(Some((obj, total, false, true)))
+                }
+            }
+        }
         Some(token) => {
             let is_immediate = matches!(token, Token::ImmediateName(_));
             // Numbers and executable names: consume one trailing whitespace (PLRM)
@@ -563,7 +596,7 @@ fn scan_token_from_bytes(
             if eats_whitespace && consumed < bytes.len() && is_ps_whitespace(bytes[consumed]) {
                 consumed += 1;
             }
-            Ok(Some((tok_obj, consumed, is_immediate)))
+            Ok(Some((tok_obj, consumed, is_immediate, false)))
         }
         None => Ok(None),
     }
@@ -605,6 +638,14 @@ fn stream_parse_procedure(ctx: &mut Context, file_entity: EntityId) -> Result<Ps
             Some((Token::ProcBegin, _)) => {
                 let nested = stream_parse_procedure(ctx, file_entity)?;
                 elements.push(nested);
+            }
+            Some((Token::BinaryTokenByte(tag), _)) => {
+                let result = stet_core::binary_token::parse_from_stream(ctx, tag, file_entity)?;
+                let obj = match result {
+                    stet_core::binary_token::BinaryTokenResult::Single(o) => o,
+                    stet_core::binary_token::BinaryTokenResult::Sequence(o) => o,
+                };
+                elements.push(obj);
             }
             Some((token, _)) => {
                 let obj = token_to_object(ctx, token)?;
@@ -1034,6 +1075,20 @@ fn parse_procedure(ctx: &mut Context, tokenizer: &mut Tokenizer) -> Result<PsObj
             Some(Token::ProcBegin) => {
                 let nested = parse_procedure(ctx, tokenizer)?;
                 elements.push(nested);
+            }
+            Some(Token::BinaryTokenByte(tag)) => {
+                let pos = tokenizer.position();
+                // SAFETY: tokenizer borrows from a stable slice; we access the
+                // underlying input via position.
+                let input_bytes = tokenizer.remaining_from(pos);
+                let (result, consumed) =
+                    stet_core::binary_token::parse_from_slice(ctx, tag, input_bytes)?;
+                tokenizer.advance(consumed);
+                let obj = match result {
+                    stet_core::binary_token::BinaryTokenResult::Single(o) => o,
+                    stet_core::binary_token::BinaryTokenResult::Sequence(o) => o,
+                };
+                elements.push(obj);
             }
             Some(token) => {
                 let obj = token_to_object(ctx, token)?;

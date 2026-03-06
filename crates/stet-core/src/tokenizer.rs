@@ -26,6 +26,8 @@ pub enum Token {
     ArrayEnd,               // ]
     DictBegin,              // <<
     DictEnd,                // >>
+    /// Binary token byte (128-159) — caller must invoke the binary token parser.
+    BinaryTokenByte(u8),
     Eof,
 }
 
@@ -43,6 +45,16 @@ impl<'a> Tokenizer<'a> {
     /// Current byte position in the input.
     pub fn position(&self) -> usize {
         self.pos
+    }
+
+    /// Return the remaining input bytes starting at the given position.
+    pub fn remaining_from(&self, pos: usize) -> &[u8] {
+        &self.input[pos..]
+    }
+
+    /// Advance the position by the given number of bytes.
+    pub fn advance(&mut self, n: usize) {
+        self.pos += n;
     }
 
     /// Return the next token, or `None` at EOF.
@@ -99,6 +111,11 @@ impl<'a> Tokenizer<'a> {
                     Ok(Some(self.scan_literal_name()))
                 }
             }
+            // Binary token bytes
+            128..=159 => {
+                self.pos += 1;
+                Ok(Some(Token::BinaryTokenByte(b)))
+            }
             _ => {
                 // Try number first, fall back to name
                 if let Some(tok) = self.try_scan_number() {
@@ -139,9 +156,13 @@ impl<'a> Tokenizer<'a> {
             return None;
         }
 
-        // Collect the token (up to whitespace or delimiter)
+        // Collect the token (up to whitespace, delimiter, or binary token byte)
         let mut end = start;
-        while end < len && !Self::is_whitespace(bytes[end]) && !Self::is_delimiter(bytes[end]) {
+        while end < len
+            && !Self::is_whitespace(bytes[end])
+            && !Self::is_delimiter(bytes[end])
+            && !is_binary_token_byte(bytes[end])
+        {
             end += 1;
         }
 
@@ -164,6 +185,7 @@ impl<'a> Tokenizer<'a> {
         while self.pos < self.input.len()
             && !Self::is_whitespace(self.input[self.pos])
             && !Self::is_delimiter(self.input[self.pos])
+            && !is_binary_token_byte(self.input[self.pos])
         {
             self.pos += 1;
         }
@@ -176,6 +198,7 @@ impl<'a> Tokenizer<'a> {
         while self.pos < self.input.len()
             && !Self::is_whitespace(self.input[self.pos])
             && !Self::is_delimiter(self.input[self.pos])
+            && !is_binary_token_byte(self.input[self.pos])
         {
             self.pos += 1;
         }
@@ -188,6 +211,7 @@ impl<'a> Tokenizer<'a> {
         while self.pos < self.input.len()
             && !Self::is_whitespace(self.input[self.pos])
             && !Self::is_delimiter(self.input[self.pos])
+            && !is_binary_token_byte(self.input[self.pos])
         {
             self.pos += 1;
         }
@@ -390,6 +414,11 @@ fn is_whitespace(b: u8) -> bool {
     b <= b' '
 }
 
+/// Binary token byte (128-159) — terminates names and numbers.
+fn is_binary_token_byte(b: u8) -> bool {
+    (128..=159).contains(&b)
+}
+
 /// PostScript delimiter characters.
 fn is_delimiter(b: u8) -> bool {
     matches!(
@@ -586,6 +615,8 @@ pub fn stream_next_token(
                 Token::LiteralName(Vec::new())
             }
         },
+        // Binary token bytes
+        128..=159 => Token::BinaryTokenByte(first),
         _ => {
             // Number or executable name — collect bytes until delimiter.
             let mut token_bytes = vec![first];
@@ -602,6 +633,11 @@ pub fn stream_next_token(
                         break;
                     }
                     Some(b) if is_delimiter(b) => {
+                        files.putback_bytes(entity, &[b]);
+                        break;
+                    }
+                    // Binary token bytes terminate names/numbers
+                    Some(b @ 128..=159) => {
                         files.putback_bytes(entity, &[b]);
                         break;
                     }
@@ -623,7 +659,7 @@ fn stream_read_name_bytes(files: &mut FileStore, entity: EntityId) -> Result<Vec
     loop {
         match files.read_byte(entity).map_err(|_| PsError::IOError)? {
             None => break,
-            Some(b) if is_whitespace(b) || is_delimiter(b) => {
+            Some(b) if is_whitespace(b) || is_delimiter(b) || is_binary_token_byte(b) => {
                 files.putback_bytes(entity, &[b]);
                 break;
             }

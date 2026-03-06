@@ -943,7 +943,9 @@ impl Context {
                 let id = self.names.intern(b">>");
                 Ok(PsObject::name_exec(id))
             }
-            Token::ProcBegin | Token::ProcEnd | Token::Eof => Err(PsError::SyntaxError),
+            Token::ProcBegin | Token::ProcEnd | Token::Eof | Token::BinaryTokenByte(_) => {
+                Err(PsError::SyntaxError)
+            }
         }
     }
 

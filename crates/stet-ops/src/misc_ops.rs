@@ -1083,11 +1083,7 @@ fn serialize_binary_object(ctx: &Context, obj: PsObject, tag: u8) -> Result<Vec<
             PsValue::Int(v) => (1, 0, v as u32),
             PsValue::Real(v) => {
                 let f = v as f32;
-                let bits = if big_endian {
-                    u32::from_be_bytes(f.to_be_bytes())
-                } else {
-                    u32::from_le_bytes(f.to_le_bytes())
-                };
+                let bits = f.to_bits();
                 (2, 0, bits)
             }
             PsValue::Name(name_id) => {

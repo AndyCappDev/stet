@@ -875,6 +875,15 @@ fn token_from_file(ctx: &mut Context, file_entity: EntityId) -> Result<(), PsErr
     use stet_core::tokenizer::stream_next_token;
 
     match stream_next_token(&mut ctx.files, file_entity)? {
+        Some((stet_core::tokenizer::Token::BinaryTokenByte(tag), _newlines)) => {
+            let result = stet_core::binary_token::parse_from_stream(ctx, tag, file_entity)?;
+            let obj = match result {
+                stet_core::binary_token::BinaryTokenResult::Single(o) => o,
+                stet_core::binary_token::BinaryTokenResult::Sequence(o) => o,
+            };
+            ctx.o_stack.push(obj)?;
+            ctx.o_stack.push(PsObject::bool(true))?;
+        }
         Some((token, _newlines)) => {
             let obj = ctx.token_to_object(token)?;
             ctx.o_stack.push(obj)?;
@@ -929,6 +938,20 @@ fn token_from_string(
         }
         Some(Token::ProcEnd) => {
             return Err(PsError::SyntaxError);
+        }
+        Some(Token::BinaryTokenByte(tag)) => {
+            let pos = tokenizer.position();
+            let input_bytes = tokenizer.remaining_from(pos);
+            let (result, consumed) =
+                stet_core::binary_token::parse_from_slice(ctx, tag, input_bytes)?;
+            let total = (pos + consumed) as u32;
+            let obj = match result {
+                stet_core::binary_token::BinaryTokenResult::Single(o) => o,
+                stet_core::binary_token::BinaryTokenResult::Sequence(o) => o,
+            };
+            push_remainder_string(ctx, entity, start, bytes.len() as u32, total)?;
+            ctx.o_stack.push(obj)?;
+            ctx.o_stack.push(PsObject::bool(true))?;
         }
         Some(Token::Eof) => {
             ctx.o_stack.push(PsObject::bool(false))?;

@@ -1,6 +1,6 @@
 # stet vs PostForge: Gap Analysis
 
-**Date**: 2026-03-05 (updated 2026-03-07)
+**Date**: 2026-03-05 (updated 2026-03-08)
 **Purpose**: Comprehensive comparison of stet (Rust) against PostForge (Python) — the reference PostScript Level 3 interpreter — to identify all gaps that must be closed for 1:1 feature parity.
 
 ---
@@ -12,10 +12,10 @@ stet has strong foundations across core interpreter mechanics, graphics, fonts, 
 - ~~**9 missing operators** (userpath, path, misc, filter categories)~~ — userpath operators **RESOLVED** (2026-03-07)
 - ~~**Encode filters** are stub pass-throughs~~ — **RESOLVED** (2026-03-06)
 - **CCITTFax filters** not implemented
-- **Binary Object Sequences (BOS)** not implemented
+- ~~**Binary Object Sequences (BOS)** not implemented~~ — **RESOLVED** (2026-03-08)
 - **Output devices**: stet has PNG + viewer; PF also has PDF, SVG, TIFF
 - **Glyph caching** not implemented (plan exists)
-- **Feature gaps** causing 5 test suites to fail (~96 total failures)
+- **Feature gaps** causing 2 test suites to fail (~14 total failures)
 
 ### Test Suite Status (stet unit_tests)
 
@@ -23,8 +23,8 @@ Results from running stet's own copy of the test suites (`~/Projects/stet/unit_t
 
 | Status | Count | Suites |
 |--------|-------|--------|
-| **PASS** | 42 | arc_shading, arithmetic_and_math, array, cff, clipping, color_operators, context_param, control, defined_ps_operator, device_operator, dictionary, file_operators, filter_chain, **filter_extended**, flate_filter, font, graphics_state_params, gstate, halftone_transfer, image, interpreter_param, job_control, job_control_tests_standalone, matrix, nulldevice, operand_stack, packedarray, painting, path, **pattern_form**, print_integration, rel_bool_bitwise, resource, save_invalidation, show_variant, stdio, string, strokepath, type1_font, type_attrib_conv, **userpath**, vm_gstate_integration, vm_operators |
-| **FAIL** | 5 | binary_token(55), dct_filter(9), file(11), misc(5), ps(16) |
+| **PASS** | 45 | arc_shading, arithmetic_and_math, array, **binary_token**, cff, clipping, color_operators, context_param, control, defined_ps_operator, device_operator, dictionary, **file**, file_operators, filter_chain, **filter_extended**, flate_filter, font, graphics_state_params, gstate, halftone_transfer, image, interpreter_param, job_control, job_control_tests_standalone, matrix, nulldevice, operand_stack, packedarray, painting, path, **pattern_form**, print_integration, rel_bool_bitwise, resource, save_invalidation, show_variant, stdio, string, strokepath, type1_font, type_attrib_conv, **userpath**, vm_gstate_integration, vm_operators |
+| **FAIL** | 2 | dct_filter(9), misc(5) |
 | **Total** | 47 | (excluding unittest.ps framework file) |
 
 ---
@@ -73,16 +73,9 @@ Encode filters fully implemented: ASCIIHexEncode, ASCII85Encode, RunLengthEncode
 
 ## 3. Missing Core Features
 
-### 3.1 Binary Object Sequences / Binary Tokens (NOT IMPLEMENTED)
+### ~~3.1 Binary Object Sequences / Binary Tokens~~ — RESOLVED (2026-03-08)
 
-PostForge has a full binary token parser (718 lines in `binary_token.py`). stet has no binary token support.
-
-Binary Object Sequences (BOS) are a compact binary representation of PS objects defined in PLRM Section 3.14. They are used by:
-- Some RIP workflows
-- NeXT-generated PS files
-- Binary-encoded PS programs for performance
-
-**Impact**: 55 failures in binary_token_tests.ps. Files using `\x92` and other binary token prefixes won't parse.
+Full binary token and BOS parser implemented in `binary_token.rs` (580 lines). Supports all token types 128-149: integers (132-136), fixed-point (137), reals (138-140), booleans (141), strings (142-144), system names (145-146), homogeneous number arrays (149), and binary object sequences (128-131). Includes 481-entry system name table per PLRM Appendix F. Both slice-based (fast path) and streaming parsing paths. BOS auto-execution at top level. Also fixed `putback_bytes` for real files (was silently discarding) and real serialization bug in `writeobject`. All 55 binary_token_tests.ps and 11 file_tests.ps BOS failures resolved.
 
 ### 3.2 Glyph Caching (NOT IMPLEMENTED)
 
@@ -129,8 +122,8 @@ All P0 bugs have been fixed. The following were fixed on 2026-03-05:
 ### 4.1 misc (5 failures — feature gap only)
 - `echo` operator not implemented (5 failures, lines 47-55) — **feature gap, not bug**
 
-### 4.2 ps (16 failures)
-- Meta-runner that executes all other test suites; its failures are the sum of file(11) + misc(5) — not independent bugs
+### 4.2 ps (meta-runner)
+- Meta-runner that executes all other test suites; its failures are the sum of sub-suite failures + test harness artifacts — not independent bugs
 
 ### 4.3 Suites Failing Due to Feature Gaps (NOT bugs)
 
@@ -138,9 +131,9 @@ These suites fail entirely because of unimplemented features, not defects:
 
 | Suite | Failures | Missing Feature |
 |-------|----------|----------------|
-| binary_token | 55 | Binary Object Sequences (P1) |
-| file | 11 | All failures are BOS-related — bos_rt.bin etc. (P1) |
 | dct_filter | 9 | DCTEncode parameter validation (P1) |
+| ~~binary_token~~ | ~~0~~ | ~~Binary Object Sequences — RESOLVED (2026-03-08)~~ |
+| ~~file~~ | ~~0~~ | ~~BOS round-trip tests — RESOLVED (2026-03-08)~~ |
 | ~~userpath~~ | ~~0~~ | ~~Userpath operators — RESOLVED (2026-03-07)~~ |
 | ~~filter_extended~~ | ~~0~~ | ~~Encode filters — RESOLVED (2026-03-06)~~ |
 
@@ -293,7 +286,7 @@ All 7 shading types are implemented in both interpreters. **No gaps.**
 ### P1 — High (Missing functionality used by real-world PS files)
 ~~1. **Pattern/Form rendering** — RESOLVED (2026-03-05)~~
 ~~2. **Encode filters** — RESOLVED (2026-03-06): ASCIIHex, ASCII85, RunLength, Flate, LZW, NullEncode implemented. DCTEncode still stub.~~
-3. **Binary Object Sequences** — needed for some workflows
+~~3. **Binary Object Sequences** — RESOLVED (2026-03-08): Full binary token/BOS parser, all token types 128-149, 481-entry system name table, slice and streaming paths, BOS auto-execution. Also fixed putback_bytes for real files and writeobject real serialization bug.~~
 ~~4. **Userpath operators** (11 operators) — RESOLVED (2026-03-07)~~
 5. **DCTEncode parameter validation** — validate params even though encode is a stub
 6. **Missing `echo` operator** — trivial but needed for test suite
@@ -345,14 +338,13 @@ Results from stet's own unit_tests directory (`~/Projects/stet/unit_tests/`).
 
 | Test Suite | Failures | Root Cause Category |
 |-----------|----------|-------------------|
-| binary_token | 55 | Missing feature (BOS) |
-| ps | 16 | Sum of file + misc failures |
-| file | 11 | File I/O edge cases (BOS) |
 | dct_filter | 9 | DCT param handling |
 | misc | 5 | Missing `echo` operator |
+| ~~binary_token~~ | ~~0~~ | ~~Fixed (2026-03-08): full binary token/BOS parser implemented~~ |
+| ~~file~~ | ~~0~~ | ~~Fixed (2026-03-08): BOS round-trip tests pass; also fixed putback_bytes for real files~~ |
 | ~~userpath~~ | ~~0~~ | ~~Fixed (2026-03-07): all 11 userpath operators implemented~~ |
 | ~~filter_extended~~ | ~~0~~ | ~~Fixed (2026-03-06): encode filters implemented + LZW decode fix~~ |
 | ~~pattern_form~~ | ~~0~~ | ~~Fixed (2026-03-05)~~ |
 | ~~dictionary~~ | ~~0~~ | ~~Fixed (2026-03-05)~~ |
 | ~~image~~ | ~~0~~ | ~~Fixed (2026-03-05)~~ |
-| **Total** | **~96** | |
+| **Total** | **14** | |

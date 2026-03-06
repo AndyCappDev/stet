@@ -5,6 +5,7 @@
 //! Core type system, storage, tokenizer, and context for the stet PostScript interpreter.
 
 pub mod array_store;
+pub mod binary_token;
 pub mod cff_parser;
 pub mod charstring;
 pub mod context;
