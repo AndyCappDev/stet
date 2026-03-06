@@ -11,7 +11,7 @@ stet has strong foundations across core interpreter mechanics, graphics, fonts, 
 
 - ~~**9 missing operators** (userpath, path, misc, filter categories)~~ — userpath operators **RESOLVED** (2026-03-07)
 - ~~**Encode filters** are stub pass-throughs~~ — **RESOLVED** (2026-03-06)
-- **CCITTFax filters** not implemented
+- ~~**CCITTFax filters** not implemented~~ — **CCITTFaxDecode RESOLVED** (2026-03-06); CCITTFaxEncode deferred
 - ~~**Binary Object Sequences (BOS)** not implemented~~ — **RESOLVED** (2026-03-08)
 - **Output devices**: stet has PNG + viewer; PF also has PDF, SVG, TIFF
 - **Glyph caching** not implemented (plan exists)
@@ -60,14 +60,14 @@ All 11 userpath operators implemented: `setbbox`, `ucache`, `uappend`, `upath`, 
 
 Encode filters fully implemented: ASCIIHexEncode, ASCII85Encode, RunLengthEncode, FlateEncode, LZWEncode, NullEncode, DCTEncode. Write-direction filters use swap-out pattern for `encode_write` dispatch, with finalization on `closefile` (flush remaining data, write EOD markers, close target). DCTEncode uses `jpeg-encoder` crate (buffered: collects all input, encodes on close). All 18 encode/decode roundtrip tests in filter_extended_tests.ps pass. Also fixed a pre-existing LZW decode bug with short streams. Additional fixes (2026-03-06): `filter` operator validates filter name before popping operands (prevents stack corruption on unknown filters like CCITTFaxDecode); SubFileDecode now includes EOD string in output per PLRM spec; RunLengthEncode converted from buffered to streaming.
 
-### 2.3 CCITTFax Filters (NOT IMPLEMENTED)
+### ~~2.3 CCITTFax Filters~~ — CCITTFaxDecode RESOLVED (2026-03-06)
 
 | Filter | PF Status | stet Status |
 |--------|-----------|-------------|
-| `CCITTFaxDecode` | Full impl (271 lines) | **Not implemented** |
-| `CCITTFaxEncode` | Full impl | **Not implemented** |
+| `CCITTFaxDecode` | Full impl (271 lines) | **Implemented** (fax crate) |
+| `CCITTFaxEncode` | Listed but not functional | **Not implemented** (deferred) |
 
-**Impact**: CCITT Group 3/4 fax compression is used in some scanned document PS files and older fax-originated documents.
+CCITTFaxDecode implemented using the `fax` Rust crate (MIT, from pdf-rs). Supports all PLRM parameters: K (Group 3/4 selection), Columns, Rows, EndOfLine, EncodedByteAlign, EndOfBlock, BlackIs1. Buffered decode pattern (like DCTDecode). CCITTFaxEncode deferred — PostForge doesn't implement it either, no test coverage, rarely used.
 
 ---
 
@@ -252,7 +252,7 @@ All 7 shading types are implemented in both interpreters. **No gaps.**
 | Flate | Full | Full | Full | Full |
 | LZW | Full | Full | Full | Full |
 | DCT | Full | Full | Full | Full (buffered) |
-| CCITTFax | Full | **Missing** | Full | **Missing** |
+| CCITTFax | Full | Full (fax crate) | Full | **Missing** (deferred) |
 | SubFile | Full | Full | N/A | N/A |
 | NullEncode | N/A | N/A | Full | Full |
 | ReusableStreamDecode | Full | Full | N/A | N/A |
@@ -293,7 +293,7 @@ All 7 shading types are implemented in both interpreters. **No gaps.**
 ~~6. **`echo` operator** — RESOLVED (2026-03-06)~~
 
 ### P2 — Medium (Feature completeness)
-11. **CCITTFax filters** — used in scanned documents
+~~11. **CCITTFax filters** — RESOLVED (2026-03-06): CCITTFaxDecode implemented via fax crate; CCITTFaxEncode deferred~~
 12. **System font discovery** — find system-installed fonts
 13. **Missing misc operators** (flushpage, runlibfile, loopname, help, printostack, breaki, createresourcecategory)
 14. **Default ColorSpace resources** (DefaultGray, DefaultRGB, DefaultCMYK)

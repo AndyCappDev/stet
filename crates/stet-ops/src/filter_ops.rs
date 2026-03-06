@@ -454,6 +454,58 @@ fn validate_dct_decode_params(ctx: &Context, dict_entity: EntityId) -> Result<Op
     }
 }
 
+/// Extract CCITTFaxDecode parameters from a dict, with PLRM defaults.
+fn extract_ccitt_params(
+    ctx: &Context,
+    dict_entity: EntityId,
+) -> Result<(i32, u32, u32, bool, bool, bool, bool), PsError> {
+    let lookup_obj = |name: &[u8]| -> Option<PsObject> {
+        let id = ctx.names.find(name)?;
+        ctx.dicts.get(dict_entity, &DictKey::Name(id))
+    };
+
+    let lookup_int = |name: &[u8], default: i32| -> Result<i32, PsError> {
+        match lookup_obj(name) {
+            Some(obj) => obj.as_i32().ok_or(PsError::TypeCheck),
+            None => Ok(default),
+        }
+    };
+
+    let lookup_bool = |name: &[u8], default: bool| -> Result<bool, PsError> {
+        match lookup_obj(name) {
+            Some(obj) => match obj.value {
+                PsValue::Bool(v) => Ok(v),
+                _ => Err(PsError::TypeCheck),
+            },
+            None => Ok(default),
+        }
+    };
+
+    let k = lookup_int(b"K", 0)?;
+    let columns = lookup_int(b"Columns", 1728)?;
+    if columns < 1 {
+        return Err(PsError::RangeCheck);
+    }
+    let rows = lookup_int(b"Rows", 0)?;
+    if rows < 0 {
+        return Err(PsError::RangeCheck);
+    }
+    let end_of_line = lookup_bool(b"EndOfLine", false)?;
+    let encoded_byte_align = lookup_bool(b"EncodedByteAlign", false)?;
+    let end_of_block = lookup_bool(b"EndOfBlock", true)?;
+    let black_is1 = lookup_bool(b"BlackIs1", false)?;
+
+    Ok((
+        k,
+        columns as u32,
+        rows as u32,
+        end_of_line,
+        encoded_byte_align,
+        end_of_block,
+        black_is1,
+    ))
+}
+
 /// Create a filter by name, returning the filter EntityId.
 fn create_filter_by_name(
     ctx: &mut Context,
@@ -490,6 +542,26 @@ fn create_filter_by_name(
                 None
             };
             Ok(ctx.files.create_dct_filter(source, ct))
+        }
+        b"CCITTFaxDecode" => {
+            let (k, columns, rows, end_of_line, encoded_byte_align, end_of_block, black_is1) =
+                if let Some(de) = dict_entity {
+                    extract_ccitt_params(ctx, de)?
+                } else {
+                    (0, 1728, 0, false, false, true, false)
+                };
+            Ok(ctx.files.create_filter(
+                source,
+                FilterKind::ccittfax_decode(
+                    k,
+                    columns,
+                    rows,
+                    end_of_line,
+                    encoded_byte_align,
+                    end_of_block,
+                    black_is1,
+                ),
+            ))
         }
         b"SubFileDecode" => Ok(ctx
             .files
@@ -547,6 +619,7 @@ fn is_known_filter_name(name: &[u8]) -> bool {
             | b"LZWEncode"
             | b"NullEncode"
             | b"DCTEncode"
+            | b"CCITTFaxDecode"
     )
 }
 

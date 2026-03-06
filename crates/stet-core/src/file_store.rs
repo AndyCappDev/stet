@@ -63,6 +63,25 @@ pub enum FilterKind {
         eod_count: i32,
         bytes_remaining: Option<i64>,
     },
+    /// CCITT Group 3/4 fax decode (lazily decoded on first read).
+    CCITTFaxDecode {
+        /// Whether decoding has been performed yet.
+        decoded: bool,
+        /// K parameter: <0 = Group 4, =0 = Group 3 1-D, >0 = Group 3 2-D.
+        k: i32,
+        /// Image width in pixels.
+        columns: u32,
+        /// Image height (0 = unknown).
+        rows: u32,
+        /// Whether to expect EOL patterns.
+        end_of_line: bool,
+        /// Whether encoded lines are byte-aligned.
+        encoded_byte_align: bool,
+        /// Whether EOFB/RTC terminates data.
+        end_of_block: bool,
+        /// Pixel polarity: false = 0 is black (PS default).
+        black_is1: bool,
+    },
     /// eexec decryption filter (Type 1 font encryption).
     EexecDecode {
         /// Current cipher state (initial: 55665).
@@ -1283,6 +1302,22 @@ impl FileStore {
                     state.eof = true;
                 }
             }
+            FilterKind::CCITTFaxDecode { decoded, .. } => {
+                if !*decoded {
+                    let source = state.source;
+                    let ccitt_data = self.read_all(source)?;
+                    let decoded_bytes =
+                        Self::decode_ccittfax(&ccitt_data, &mut state.kind)?;
+                    state.output_buf = decoded_bytes;
+                    state.output_pos = 0;
+                    // Mark as decoded (re-borrow after decode_ccittfax)
+                    if let FilterKind::CCITTFaxDecode { decoded, .. } = &mut state.kind {
+                        *decoded = true;
+                    }
+                } else {
+                    state.eof = true;
+                }
+            }
             FilterKind::SubFileDecode { .. } => {
                 let source = state.source;
                 self.refill_subfile(
@@ -1750,6 +1785,92 @@ impl FileStore {
         Ok(())
     }
 
+    /// Decode CCITT Group 3 or Group 4 fax data using the `fax` crate.
+    fn decode_ccittfax(data: &[u8], kind: &mut FilterKind) -> io::Result<Vec<u8>> {
+        let FilterKind::CCITTFaxDecode {
+            k,
+            columns,
+            rows,
+            end_of_block,
+            black_is1,
+            ..
+        } = kind
+        else {
+            return Err(io::Error::other("not a CCITTFaxDecode filter"));
+        };
+        let k = *k;
+        let width = *columns as u16;
+        let rows_limit = *rows;
+        let end_of_block = *end_of_block;
+        let black_is1 = *black_is1;
+
+        // Bytes per scan line (1 bit per pixel, padded to byte boundary)
+        let row_bytes = ((width as usize) + 7) / 8;
+        let mut output = Vec::new();
+        let mut line_count: u32 = 0;
+
+        // Callback to process each decoded line
+        let mut process_line = |transitions: &[u16]| {
+            // Stop after Rows lines if EndOfBlock is false and Rows > 0
+            if !end_of_block && rows_limit > 0 && line_count >= rows_limit {
+                return;
+            }
+
+            // Convert transitions to pixels and pack into bytes
+            let line = fax::decoder::Line {
+                transitions,
+                width,
+            };
+            let mut row = vec![0u8; row_bytes];
+            for (i, color) in line.pels().enumerate() {
+                if i >= width as usize {
+                    break;
+                }
+                // fax crate: Color::Black = mark bit, Color::White = no bit
+                // Pack MSB-first: pixel 0 in bit 7
+                let is_set = matches!(color, fax::Color::Black);
+                if is_set {
+                    row[i / 8] |= 0x80 >> (i % 8);
+                }
+            }
+
+            // Apply BlackIs1 polarity:
+            // CCITT convention: 1 = black (mark). fax crate follows this.
+            // PostScript convention (BlackIs1=false, default): 0 = black, 1 = white
+            // So when BlackIs1 is false, we invert all bits.
+            if !black_is1 {
+                for byte in &mut row {
+                    *byte = !*byte;
+                }
+            }
+
+            output.extend_from_slice(&row);
+            line_count += 1;
+        };
+
+        if k < 0 {
+            // Group 4
+            let height = if rows_limit > 0 {
+                Some(rows_limit as u16)
+            } else {
+                None
+            };
+            fax::decoder::decode_g4(
+                data.iter().copied(),
+                width,
+                height,
+                |transitions| process_line(transitions),
+            );
+        } else {
+            // Group 3 (K=0: 1-D only, K>0: mixed 1-D/2-D)
+            fax::decoder::decode_g3(data.iter().copied(), |transitions| {
+                process_line(transitions);
+            });
+        }
+
+        Ok(output)
+    }
+
     /// Refill EexecDecode: read from source, decrypt with eexec cipher.
     /// Uses a small target (256 bytes) to limit read-ahead, since the
     /// encrypted section is followed by a finite cleartext padding area.
@@ -2150,6 +2271,28 @@ impl FilterKind {
             eod_string,
             eod_count,
             bytes_remaining,
+        }
+    }
+
+    /// Create a new CCITTFaxDecode filter with PLRM defaults.
+    pub fn ccittfax_decode(
+        k: i32,
+        columns: u32,
+        rows: u32,
+        end_of_line: bool,
+        encoded_byte_align: bool,
+        end_of_block: bool,
+        black_is1: bool,
+    ) -> Self {
+        Self::CCITTFaxDecode {
+            decoded: false,
+            k,
+            columns,
+            rows,
+            end_of_line,
+            encoded_byte_align,
+            end_of_block,
+            black_is1,
         }
     }
 

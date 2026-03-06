@@ -13,3 +13,4 @@ weezl = "0.1"
 jpeg-decoder = { version = "0.3", default-features = false }
 jpeg-encoder = "0.7"
 rustc-hash = "2"
+fax = "0.2"
