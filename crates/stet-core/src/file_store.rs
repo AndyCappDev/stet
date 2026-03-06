@@ -85,9 +85,14 @@ pub enum FilterKind {
         col: usize,
     },
     /// Bytes → run-length encoded data, EOD = byte 128.
+    /// Encodes incrementally during writes (streaming).
     RunLengthEncode {
-        /// Buffered input (encoded on close).
-        buf: Vec<u8>,
+        /// Pending literal bytes not yet emitted (max 128).
+        pending: Vec<u8>,
+        /// Current repeat byte being tracked.
+        run_byte: Option<u8>,
+        /// Count of current repeat run.
+        run_count: usize,
     },
     /// Bytes → zlib-compressed data (with optional predictor pre-processing).
     FlateEncode {
@@ -152,46 +157,20 @@ pub enum FileHandle {
 
 /// Encode a byte slice using PostScript RLE format.
 ///
-/// Produces literal runs (prefix = len-1, 0..127) and repeat runs
-/// (prefix = 257-len, then the byte, for runs of 2..128). Does NOT
-/// append the EOD byte (128) — caller must do that.
-fn rle_encode(data: &[u8]) -> Vec<u8> {
-    let mut out = Vec::new();
-    let len = data.len();
-    let mut i = 0;
-    while i < len {
-        // Count how many times data[i] repeats
-        let b = data[i];
-        let mut run = 1usize;
-        while i + run < len && data[i + run] == b && run < 128 {
-            run += 1;
-        }
-        if run >= 2 {
-            // Repeat run: prefix = 257 - run, then the byte
-            out.push((257 - run) as u8);
-            out.push(b);
-            i += run;
-        } else {
-            // Literal run: collect non-repeating bytes (up to 128)
-            let start = i;
-            let mut lit_end = i + 1;
-            while lit_end < len && lit_end - start < 128 {
-                // If next byte starts a repeat run of >=3, stop literal here
-                if lit_end + 1 < len && data[lit_end] == data[lit_end + 1] {
-                    // Check for run of 3
-                    if lit_end + 2 < len && data[lit_end] == data[lit_end + 2] {
-                        break;
-                    }
-                }
-                lit_end += 1;
-            }
-            let count = lit_end - start;
-            out.push((count - 1) as u8);
-            out.extend_from_slice(&data[start..lit_end]);
-            i = lit_end;
-        }
+/// Emit a literal run (prefix = len-1, then the bytes).
+fn rle_emit_literals(pending: &[u8]) -> Vec<u8> {
+    if pending.is_empty() {
+        return Vec::new();
     }
+    let mut out = Vec::with_capacity(pending.len() + 1);
+    out.push((pending.len() - 1) as u8);
+    out.extend_from_slice(pending);
     out
+}
+
+/// Emit a repeat run (prefix = 257-count, then the byte).
+fn rle_emit_repeat(byte: u8, count: usize) -> [u8; 2] {
+    [(257 - count) as u8, byte]
 }
 
 /// Metadata and handle for one open file.
@@ -721,10 +700,58 @@ impl FileStore {
                 }
             }
             FilterKind::RunLengthEncode {
-                buf: rle_buf,
+                pending,
+                run_byte,
+                run_count,
             } => {
-                // Buffer all input; encode on close
-                rle_buf.extend_from_slice(data);
+                // Streaming RLE: emit runs incrementally as input arrives
+                for &b in data {
+                    if let Some(rb) = *run_byte {
+                        if b == rb {
+                            *run_count += 1;
+                            if *run_count >= 128 {
+                                // Max repeat run — flush
+                                let lit = rle_emit_literals(pending);
+                                if !lit.is_empty() {
+                                    self.write_from(target, &lit)?;
+                                    pending.clear();
+                                }
+                                let rep = rle_emit_repeat(rb, 128);
+                                self.write_from(target, &rep)?;
+                                *run_byte = None;
+                                *run_count = 0;
+                            }
+                        } else {
+                            // Different byte — decide what to do with accumulated run
+                            if *run_count >= 3 {
+                                // Emit pending literals, then the repeat run
+                                let lit = rle_emit_literals(pending);
+                                if !lit.is_empty() {
+                                    self.write_from(target, &lit)?;
+                                    pending.clear();
+                                }
+                                let rep = rle_emit_repeat(rb, *run_count);
+                                self.write_from(target, &rep)?;
+                            } else {
+                                // Short run (1-2) — absorb into pending literals
+                                for _ in 0..*run_count {
+                                    pending.push(rb);
+                                }
+                                if pending.len() >= 128 {
+                                    let lit = rle_emit_literals(pending);
+                                    self.write_from(target, &lit)?;
+                                    pending.clear();
+                                }
+                            }
+                            *run_byte = Some(b);
+                            *run_count = 1;
+                        }
+                    } else {
+                        // No current run byte — start tracking
+                        *run_byte = Some(b);
+                        *run_count = 1;
+                    }
+                }
                 Ok(())
             }
             FilterKind::FlateEncode {
@@ -770,6 +797,9 @@ impl FileStore {
             }
             FilterKind::NullEncode => self.write_from(target, data),
             FilterKind::DCTEncode { buf, .. } => {
+                // Buffering is inherent to JPEG — DCT transform, Huffman table
+                // optimization, and quantization all require the full image.
+                // PostForge also buffers entirely. Not convertible to streaming.
                 buf.extend_from_slice(data);
                 Ok(())
             }
@@ -819,11 +849,32 @@ impl FileStore {
                 self.write_from(target, b"~>")?;
             }
             FilterKind::RunLengthEncode {
-                buf: rle_buf,
+                pending,
+                run_byte,
+                run_count,
             } => {
-                // Encode buffered data using simple RLE
-                let encoded = rle_encode(rle_buf);
-                self.write_from(target, &encoded)?;
+                // Flush remaining state
+                if let Some(rb) = *run_byte {
+                    if *run_count >= 3 {
+                        let lit = rle_emit_literals(pending);
+                        if !lit.is_empty() {
+                            self.write_from(target, &lit)?;
+                        }
+                        let rep = rle_emit_repeat(rb, *run_count);
+                        self.write_from(target, &rep)?;
+                    } else {
+                        for _ in 0..*run_count {
+                            pending.push(rb);
+                        }
+                        let lit = rle_emit_literals(pending);
+                        if !lit.is_empty() {
+                            self.write_from(target, &lit)?;
+                        }
+                    }
+                } else if !pending.is_empty() {
+                    let lit = rle_emit_literals(pending);
+                    self.write_from(target, &lit)?;
+                }
                 // EOD byte
                 self.write_from(target, &[128])?;
             }
@@ -2125,7 +2176,11 @@ impl FilterKind {
 
     /// Create a new RunLengthEncode filter.
     pub fn run_length_encode() -> Self {
-        Self::RunLengthEncode { buf: Vec::new() }
+        Self::RunLengthEncode {
+            pending: Vec::new(),
+            run_byte: None,
+            run_count: 0,
+        }
     }
 
     /// Create a new FlateEncode filter with optional predictor parameters.

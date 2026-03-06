@@ -15,7 +15,7 @@ stet has strong foundations across core interpreter mechanics, graphics, fonts, 
 - ~~**Binary Object Sequences (BOS)** not implemented~~ — **RESOLVED** (2026-03-08)
 - **Output devices**: stet has PNG + viewer; PF also has PDF, SVG, TIFF
 - **Glyph caching** not implemented (plan exists)
-- **Feature gaps** causing 1 test suite to fail (~5 total failures)
+- **No test suite failures** — all 47 suites pass
 
 ### Test Suite Status (stet unit_tests)
 
@@ -23,8 +23,8 @@ Results from running stet's own copy of the test suites (`~/Projects/stet/unit_t
 
 | Status | Count | Suites |
 |--------|-------|--------|
-| **PASS** | 46 | arc_shading, arithmetic_and_math, array, **binary_token**, cff, clipping, color_operators, context_param, control, **dct_filter**, defined_ps_operator, device_operator, dictionary, **file**, file_operators, filter_chain, **filter_extended**, flate_filter, font, graphics_state_params, gstate, halftone_transfer, image, interpreter_param, job_control, job_control_tests_standalone, matrix, nulldevice, operand_stack, packedarray, painting, path, **pattern_form**, print_integration, rel_bool_bitwise, resource, save_invalidation, show_variant, stdio, string, strokepath, type1_font, type_attrib_conv, **userpath**, vm_gstate_integration, vm_operators |
-| **FAIL** | 1 | misc(5) |
+| **PASS** | 47 | arc_shading, arithmetic_and_math, array, **binary_token**, cff, clipping, color_operators, context_param, control, **dct_filter**, defined_ps_operator, device_operator, dictionary, **file**, file_operators, filter_chain, **filter_extended**, flate_filter, font, graphics_state_params, gstate, halftone_transfer, image, interpreter_param, job_control, job_control_tests_standalone, matrix, **misc**, nulldevice, operand_stack, packedarray, painting, path, **pattern_form**, print_integration, rel_bool_bitwise, resource, save_invalidation, show_variant, stdio, string, strokepath, type1_font, type_attrib_conv, **userpath**, vm_gstate_integration, vm_operators |
+| ~~FAIL~~ | 0 | ~~All resolved~~ |
 | **Total** | 47 | (excluding unittest.ps framework file) |
 
 ---
@@ -40,7 +40,7 @@ All 11 userpath operators implemented: `setbbox`, `ucache`, `uappend`, `upath`, 
 | Operator | Description | In PF | In stet | Notes |
 |----------|-------------|-------|---------|-------|
 | `flushpage` | Flush page output | Yes | **No** | Simple no-op for non-printer devices |
-| `echo` | Toggle echo mode | Yes | **No** | Interactive REPL feature |
+| ~~`echo`~~ | ~~Toggle echo mode~~ | ~~Yes~~ | ~~Yes~~ | ~~Implemented (2026-03-06)~~ |
 | `loopname` | Get current loop name | Yes | **No** | Debugging aid |
 | `help` | Print help | Yes | **No** | Interactive REPL feature |
 | `printostack` | Print operand stack | Yes | **No** | Debugging variant |
@@ -119,8 +119,8 @@ All P0 bugs have been fixed. The following were fixed on 2026-03-05:
 - **bind** — now raises TypeCheck for non-procedure operands (literal arrays still no-op)
 - **realtime** — changed from epoch millis (overflows i32) to elapsed time since interpreter start
 
-### 4.1 misc (5 failures — feature gap only)
-- `echo` operator not implemented (5 failures, lines 47-55) — **feature gap, not bug**
+### ~~4.1 misc~~ — RESOLVED (2026-03-06)
+- ~~`echo` operator implemented — all 5 failures resolved~~
 
 ### 4.2 ps (meta-runner)
 - Meta-runner that executes all other test suites; its failures are the sum of sub-suite failures + test harness artifacts — not independent bugs
@@ -289,8 +289,8 @@ All 7 shading types are implemented in both interpreters. **No gaps.**
 ~~3. **Binary Object Sequences** — RESOLVED (2026-03-08): Full binary token/BOS parser, all token types 128-149, 481-entry system name table, slice and streaming paths, BOS auto-execution. Also fixed putback_bytes for real files and writeobject real serialization bug.~~
 ~~4. **Userpath operators** (11 operators) — RESOLVED (2026-03-07)~~
 ~~5. **DCTEncode** — RESOLVED (2026-03-06): Full JPEG encoding via jpeg-encoder crate + parameter validation~~
-6. **Encode filter streaming debt** — RunLengthEncode and DCTEncode buffer all input, encode on close. Should be converted to streaming encoders for large images
-6. **Missing `echo` operator** — trivial but needed for test suite
+~~6. **Encode filter streaming debt** — RESOLVED (2026-03-06): RunLengthEncode converted to streaming encoder. DCTEncode buffering is inherent to JPEG (DCT transform requires complete image data); not technical debt.~~
+~~6. **`echo` operator** — RESOLVED (2026-03-06)~~
 
 ### P2 — Medium (Feature completeness)
 11. **CCITTFax filters** — used in scanned documents
@@ -340,7 +340,7 @@ Results from stet's own unit_tests directory (`~/Projects/stet/unit_tests/`).
 | Test Suite | Failures | Root Cause Category |
 |-----------|----------|-------------------|
 | ~~dct_filter~~ | ~~0~~ | ~~Fixed (2026-03-06): DCTEncode/DCTDecode param validation + JPEG encoding~~ |
-| misc | 5 | Missing `echo` operator |
+| ~~misc~~ | ~~0~~ | ~~Fixed (2026-03-06): `echo` operator implemented~~ |
 | ~~binary_token~~ | ~~0~~ | ~~Fixed (2026-03-08): full binary token/BOS parser implemented~~ |
 | ~~file~~ | ~~0~~ | ~~Fixed (2026-03-08): BOS round-trip tests pass; also fixed putback_bytes for real files~~ |
 | ~~userpath~~ | ~~0~~ | ~~Fixed (2026-03-07): all 11 userpath operators implemented~~ |
