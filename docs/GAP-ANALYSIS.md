@@ -295,7 +295,7 @@ All 7 shading types are implemented in both interpreters. **No gaps.**
 ### P2 — Medium (Feature completeness)
 ~~11. **CCITTFax filters** — RESOLVED (2026-03-06): CCITTFaxDecode implemented via fax crate; CCITTFaxEncode deferred~~
 ~~12. **System font discovery** — RESOLVED (2026-03-06): Platform font dir scanning, JSON cache, TTF/OTF loading~~
-13. **Missing misc operators** (flushpage, runlibfile, loopname, help, printostack, breaki, createresourcecategory)
+~~13. **Missing misc operators** — RESOLVED (2026-03-06): flushpage (native), runlibfile (PS alias for run), createresourcecategory (already in resourcecategories.ps). loopname/help/printostack/breaki not needed~~
 14. **Default ColorSpace resources** (DefaultGray, DefaultRGB, DefaultCMYK)
 15. **Glyph caching** — performance improvement
 

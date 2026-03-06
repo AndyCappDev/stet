@@ -706,7 +706,7 @@ impl Context {
     }
 
     /// Read the current page DPI from the pagedevice HWResolution, defaulting to 72.
-    fn current_page_dpi(&self) -> f64 {
+    pub fn current_page_dpi(&self) -> f64 {
         use crate::dict::DictKey;
         if let Some(pd) = self.gstate.page_device {
             if let Some(name_id) = self.names.find(b"HWResolution") {

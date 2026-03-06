@@ -225,6 +225,7 @@ pub fn build_system_dict(ctx: &mut Context) {
     register(ctx, sd, "ucachestatus", misc_ops::op_ucachestatus);
     register(ctx, sd, "setucacheparams", misc_ops::op_setucacheparams);
     register(ctx, sd, "copypage", device_ops::op_copypage);
+    register(ctx, sd, "flushpage", device_ops::op_flushpage);
     register(ctx, sd, "resetfile", misc_ops::op_resetfile);
     register(ctx, sd, "defineuserobject", misc_ops::op_defineuserobject);
     register(

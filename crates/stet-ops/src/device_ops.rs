@@ -354,6 +354,39 @@ pub fn op_nulldevice(ctx: &mut Context) -> Result<(), PsError> {
     Ok(())
 }
 
+// ---------- flushpage ----------
+
+/// `flushpage`: — → — (render current page without any state changes)
+///
+/// Forces immediate rendering of the current page contents to the output
+/// device without erasing the page, advancing the page count, or
+/// reinitializing the graphics state. Does not call EndPage/BeginPage.
+pub fn op_flushpage(ctx: &mut Context) -> Result<(), PsError> {
+    if is_null_device(ctx) {
+        return Ok(());
+    }
+
+    // In viewer mode, send a clone of the display list through the channel
+    // without clearing it (unlike showpage's take_display_list).
+    if let Some(ref sender) = ctx.display_list_sender {
+        let dpi = ctx.current_page_dpi();
+        let (w, h) = ctx
+            .device
+            .as_ref()
+            .map(|d| d.page_size())
+            .unwrap_or((ctx.page_width, ctx.page_height));
+        let _ = sender.send((ctx.display_list.clone(), dpi, w, h));
+        return Ok(());
+    }
+
+    // Non-viewer mode: replay directly to device without consuming the list
+    if let Some(ref mut device) = ctx.device {
+        stet_core::display_list::replay_to_device(&ctx.display_list, device.as_mut());
+    }
+
+    Ok(())
+}
+
 // ---------- copypage ----------
 
 /// `copypage`: — → — (copy current page without erasing)
