@@ -167,7 +167,7 @@ These suites fail entirely because of unimplemented features, not defects:
 | ProcSet | 3 (CIDInit, FontSetInit, TestProcSet) | 2 (CIDInit, FontSetInit) | Missing TestProcSet |
 | OutputDevice | 5 (png, qt, svg, pdf, tiff) | 2 (png, viewer) | Missing svg, pdf, tiff |
 | CMap | 0 | 2 (Identity-H, Identity-V) | stet ahead |
-| ColorSpace | 4 (DefaultGray/RGB/CMYK, Test) | 0 | Missing defaults |
+| ColorSpace | 4 (DefaultGray/RGB/CMYK, Test) | 3 (DefaultGray/RGB/CMYK) | Missing Test |
 | ColorRendering | 1 (Test) | 0 | Missing |
 | Halftone | 1 (Test) | 0 | Missing |
 | Pattern | 1 (Test) | 0 | Missing |
@@ -296,7 +296,7 @@ All 7 shading types are implemented in both interpreters. **No gaps.**
 ~~11. **CCITTFax filters** — RESOLVED (2026-03-06): CCITTFaxDecode implemented via fax crate; CCITTFaxEncode deferred~~
 ~~12. **System font discovery** — RESOLVED (2026-03-06): Platform font dir scanning, JSON cache, TTF/OTF loading~~
 ~~13. **Missing misc operators** — RESOLVED (2026-03-06): flushpage (native), runlibfile (PS alias for run), createresourcecategory (already in resourcecategories.ps). loopname/help/printostack/breaki not needed~~
-14. **Default ColorSpace resources** (DefaultGray, DefaultRGB, DefaultCMYK)
+~~14. **Default ColorSpace resources** — RESOLVED (2026-03-06): DefaultGray/RGB/CMYK resource files + UseCIEColor remapping in setgray/setrgbcolor/setcmykcolor/setcolorspace~~
 15. **Glyph caching** — performance improvement
 
 ### P3 — Low (Nice-to-have)

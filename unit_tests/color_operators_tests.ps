@@ -421,10 +421,10 @@ not { (CIEBasedA currentcolorspace length != 2) print } if
 [/CIEBasedA << /WhitePoint [0.9505 1 1.089] >>] setcolorspace
 1 /setcolor [] assert
 
-%% CIEBasedA setcolor - verify 3 components returned (resolved to RGB)
+%% CIEBasedA setcolor - verify 1 component returned (PLRM: N components for N-component space)
 [/CIEBasedA << /WhitePoint [0.9505 1 1.089] >>] setcolorspace
 0.5 setcolor
-currentcolor 3 array astore /length [3] assert
+currentcolor 1 array astore /length [1] assert
 
 %% =============================================================================
 %% CIE color space error conditions

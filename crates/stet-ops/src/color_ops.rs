@@ -26,6 +26,12 @@ pub fn op_setgray(ctx: &mut Context) -> Result<(), PsError> {
     ctx.o_stack.pop()?;
     ctx.gstate.color = DeviceColor::from_gray(gray.clamp(0.0, 1.0));
     ctx.gstate.color_space = ColorSpace::DeviceGray;
+    // UseCIEColor remapping (PLRM 6.2.5)
+    if is_use_cie_color(ctx) {
+        if let Some(cs) = lookup_default_colorspace(ctx, b"DeviceGray") {
+            ctx.gstate.color_space = cs;
+        }
+    }
     Ok(())
 }
 
@@ -53,6 +59,12 @@ pub fn op_setrgbcolor(ctx: &mut Context) -> Result<(), PsError> {
     ctx.gstate.color =
         DeviceColor::from_rgb(r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0));
     ctx.gstate.color_space = ColorSpace::DeviceRGB;
+    // UseCIEColor remapping (PLRM 6.2.5)
+    if is_use_cie_color(ctx) {
+        if let Some(cs) = lookup_default_colorspace(ctx, b"DeviceRGB") {
+            ctx.gstate.color_space = cs;
+        }
+    }
     Ok(())
 }
 
@@ -88,6 +100,12 @@ pub fn op_setcmykcolor(ctx: &mut Context) -> Result<(), PsError> {
         k.clamp(0.0, 1.0),
     );
     ctx.gstate.color_space = ColorSpace::DeviceCMYK;
+    // UseCIEColor remapping (PLRM 6.2.5)
+    if is_use_cie_color(ctx) {
+        if let Some(cs) = lookup_default_colorspace(ctx, b"DeviceCMYK") {
+            ctx.gstate.color_space = cs;
+        }
+    }
     Ok(())
 }
 
@@ -139,13 +157,27 @@ pub fn op_setcolorspace(ctx: &mut Context) -> Result<(), PsError> {
     match obj.value {
         PsValue::Name(id) => {
             let name = ctx.names.get_bytes(id);
-            let cs = match name {
+            let mut cs = match name {
                 b"DeviceGray" => ColorSpace::DeviceGray,
                 b"DeviceRGB" => ColorSpace::DeviceRGB,
                 b"DeviceCMYK" => ColorSpace::DeviceCMYK,
                 _ => return Err(PsError::Undefined),
             };
             ctx.o_stack.pop()?;
+            // UseCIEColor remapping (PLRM 6.2.5)
+            if is_use_cie_color(ctx) {
+                let device_name = match &cs {
+                    ColorSpace::DeviceGray => Some(&b"DeviceGray"[..]),
+                    ColorSpace::DeviceRGB => Some(&b"DeviceRGB"[..]),
+                    ColorSpace::DeviceCMYK => Some(&b"DeviceCMYK"[..]),
+                    _ => None,
+                };
+                if let Some(dn) = device_name
+                    && let Some(cie_cs) = lookup_default_colorspace(ctx, dn)
+                {
+                    cs = cie_cs;
+                }
+            }
             ctx.gstate.color = default_color_for_space(&cs, ctx);
             ctx.gstate.color_space = cs;
             Ok(())
@@ -175,6 +207,23 @@ pub fn op_setcolorspace(ctx: &mut Context) -> Result<(), PsError> {
                 };
                 let cs = precompute_cie_decode_tables(ctx, cs)?;
                 let cs = resolve_indexed_proc_lookup(ctx, cs)?;
+                // UseCIEColor remapping for device spaces in array form (PLRM 6.2.5)
+                let cs = if is_use_cie_color(ctx) {
+                    match &cs {
+                        ColorSpace::DeviceGray => {
+                            lookup_default_colorspace(ctx, b"DeviceGray").unwrap_or(cs)
+                        }
+                        ColorSpace::DeviceRGB => {
+                            lookup_default_colorspace(ctx, b"DeviceRGB").unwrap_or(cs)
+                        }
+                        ColorSpace::DeviceCMYK => {
+                            lookup_default_colorspace(ctx, b"DeviceCMYK").unwrap_or(cs)
+                        }
+                        _ => cs,
+                    }
+                } else {
+                    cs
+                };
                 ctx.o_stack.pop()?;
                 ctx.gstate.color = default_color_for_space(&cs, ctx);
                 ctx.gstate.color_space = cs;
@@ -408,14 +457,23 @@ pub fn op_currentcolor(ctx: &mut Context) -> Result<(), PsError> {
                 }
             }
         }
-        ColorSpace::CIEBasedABC { .. }
-        | ColorSpace::CIEBasedA { .. }
-        | ColorSpace::CIEBasedDEF { .. }
-        | ColorSpace::CIEBasedDEFG { .. } => {
-            // CIE spaces store resolved RGB color
+        ColorSpace::CIEBasedA { .. } => {
+            // CIEBasedA has 1 component
+            ctx.o_stack.push(PsObject::real(ctx.gstate.color.r))?;
+        }
+        ColorSpace::CIEBasedABC { .. } | ColorSpace::CIEBasedDEF { .. } => {
+            // CIEBasedABC/DEF have 3 components
             ctx.o_stack.push(PsObject::real(ctx.gstate.color.r))?;
             ctx.o_stack.push(PsObject::real(ctx.gstate.color.g))?;
             ctx.o_stack.push(PsObject::real(ctx.gstate.color.b))?;
+        }
+        ColorSpace::CIEBasedDEFG { .. } => {
+            // CIEBasedDEFG has 4 components
+            let (c, m, y, k) = ctx.gstate.color.to_cmyk();
+            ctx.o_stack.push(PsObject::real(c))?;
+            ctx.o_stack.push(PsObject::real(m))?;
+            ctx.o_stack.push(PsObject::real(y))?;
+            ctx.o_stack.push(PsObject::real(k))?;
         }
         ColorSpace::ICCBased { n, .. } => {
             // ICCBased falls back to device space behavior
@@ -721,6 +779,94 @@ fn has_white_point(ctx: &Context, dict_entity: EntityId) -> bool {
         Some(id) => ctx.dicts.known(dict_entity, &DictKey::Name(id)),
         None => false,
     }
+}
+
+/// Check if `UseCIEColor` is true in the current page device dictionary.
+fn is_use_cie_color(ctx: &Context) -> bool {
+    let pd = match ctx.gstate.page_device {
+        Some(pd) => pd,
+        None => return false,
+    };
+    let key_id = match ctx.names.find(b"UseCIEColor") {
+        Some(id) => id,
+        None => return false,
+    };
+    match ctx.dicts.get(pd, &DictKey::Name(key_id)) {
+        Some(obj) => matches!(obj.value, PsValue::Bool(true)),
+        None => false,
+    }
+}
+
+/// Look up a Default* ColorSpace resource and parse it into a `ColorSpace`.
+/// Maps "DeviceGray" → "DefaultGray", "DeviceRGB" → "DefaultRGB",
+/// "DeviceCMYK" → "DefaultCMYK". Returns None if not found or not parseable.
+fn lookup_default_colorspace(ctx: &mut Context, device_space: &[u8]) -> Option<ColorSpace> {
+    let default_name = match device_space {
+        b"DeviceGray" => b"DefaultGray" as &[u8],
+        b"DeviceRGB" => b"DefaultRGB",
+        b"DeviceCMYK" => b"DefaultCMYK",
+        _ => return None,
+    };
+
+    // Look up in ColorSpace resource category (local then global)
+    let cat_name_id = ctx.names.find(b"ColorSpace")?;
+    let cat_key = DictKey::Name(cat_name_id);
+
+    let res_name_id = ctx.names.intern(default_name);
+    let res_key = DictKey::Name(res_name_id);
+
+    // Search local resources first, then global
+    let resource_obj = if !ctx.vm_alloc_mode {
+        ctx.dicts
+            .get(ctx.local_resources, &cat_key)
+            .and_then(|cat_obj| {
+                if let PsValue::Dict(cat) = cat_obj.value {
+                    ctx.dicts.get(cat, &res_key)
+                } else {
+                    None
+                }
+            })
+    } else {
+        None
+    }
+    .or_else(|| {
+        ctx.dicts
+            .get(ctx.global_resources, &cat_key)
+            .and_then(|cat_obj| {
+                if let PsValue::Dict(cat) = cat_obj.value {
+                    ctx.dicts.get(cat, &res_key)
+                } else {
+                    None
+                }
+            })
+    })?;
+
+    // Parse the resource array as a color space
+    let (entity, start, len) = match resource_obj.value {
+        PsValue::Array { entity, start, len } => (entity, start, len),
+        _ => return None,
+    };
+    if len == 0 {
+        return None;
+    }
+    let first = ctx.arrays.get_element(entity, start);
+    let cs = if let PsValue::Name(id) = first.value {
+        let name = ctx.names.get_bytes(id).to_vec();
+        match name.as_slice() {
+            b"DeviceGray" => Some(ColorSpace::DeviceGray),
+            b"DeviceRGB" => Some(ColorSpace::DeviceRGB),
+            b"DeviceCMYK" => Some(ColorSpace::DeviceCMYK),
+            b"CIEBasedABC" => parse_cie_abc_colorspace(ctx, entity, start, len).ok(),
+            b"CIEBasedA" => parse_cie_a_colorspace(ctx, entity, start, len).ok(),
+            b"CIEBasedDEF" => parse_cie_def_colorspace(ctx, entity, start, len).ok(),
+            b"CIEBasedDEFG" => parse_cie_defg_colorspace(ctx, entity, start, len).ok(),
+            _ => None,
+        }
+    } else {
+        None
+    }?;
+    // Precompute CIE decode tables if needed
+    precompute_cie_decode_tables(ctx, cs).ok()
 }
 
 /// Parse `[/CIEBasedABC dict]` from an array.
