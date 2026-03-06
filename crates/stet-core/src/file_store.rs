@@ -56,6 +56,7 @@ pub enum FilterKind {
     /// JPEG: lazily decoded on first read from source.
     DCTDecode {
         decoded: bool,
+        color_transform: Option<bool>,
     },
     SubFileDecode {
         eod_string: Vec<u8>,
@@ -110,6 +111,15 @@ pub enum FilterKind {
     },
     /// Identity encode filter (pass-through).
     NullEncode,
+    /// JPEG encode: buffers all input, encodes on close.
+    DCTEncode {
+        buf: Vec<u8>,
+        columns: u32,
+        rows: u32,
+        colors: u32,
+        quality: u8,
+        color_transform: bool,
+    },
 }
 
 /// Decoded-data buffer state for a filter file.
@@ -759,6 +769,10 @@ impl FileStore {
                 Ok(())
             }
             FilterKind::NullEncode => self.write_from(target, data),
+            FilterKind::DCTEncode { buf, .. } => {
+                buf.extend_from_slice(data);
+                Ok(())
+            }
             _ => Err(io::Error::other("not an encode filter")),
         };
 
@@ -869,6 +883,45 @@ impl FileStore {
                 }
             }
             FilterKind::NullEncode => {}
+            FilterKind::DCTEncode {
+                buf,
+                columns,
+                rows,
+                colors,
+                quality,
+                color_transform,
+            } => {
+                let w = *columns as u16;
+                let h = *rows as u16;
+                let nc = *colors as u8;
+                let q = *quality;
+                let ct = *color_transform;
+
+                // Determine color type for jpeg-encoder
+                let color_type = match nc {
+                    1 => jpeg_encoder::ColorType::Luma,
+                    3 => {
+                        if ct {
+                            jpeg_encoder::ColorType::Rgb
+                        } else {
+                            jpeg_encoder::ColorType::Rgb
+                        }
+                    }
+                    4 => jpeg_encoder::ColorType::Cmyk,
+                    _ => jpeg_encoder::ColorType::Rgb,
+                };
+
+                let expected_len = w as usize * h as usize * nc as usize;
+                // Pad or truncate to expected size
+                buf.resize(expected_len, 0);
+
+                let mut jpeg_data = Vec::new();
+                let encoder = jpeg_encoder::Encoder::new(&mut jpeg_data, q);
+                encoder
+                    .encode(buf, w, h, color_type)
+                    .map_err(|e| io::Error::other(format!("JPEG encode error: {e}")))?;
+                self.write_from(target, &jpeg_data)?;
+            }
             _ => {}
         }
 
@@ -1163,7 +1216,7 @@ impl FileStore {
                     &mut state.eof,
                 )?;
             }
-            FilterKind::DCTDecode { decoded } => {
+            FilterKind::DCTDecode { decoded, .. } => {
                 if !*decoded {
                     // Lazy decode: read all JPEG data from source, then decode
                     let source = state.source;
@@ -2015,8 +2068,23 @@ impl FilterKind {
     }
 
     /// Create a new DCTDecode filter (lazily decoded on first read).
-    pub fn dct_decode() -> Self {
-        Self::DCTDecode { decoded: false }
+    pub fn dct_decode(color_transform: Option<bool>) -> Self {
+        Self::DCTDecode {
+            decoded: false,
+            color_transform,
+        }
+    }
+
+    /// Create a new DCTEncode filter.
+    pub fn dct_encode(columns: u32, rows: u32, colors: u32, quality: u8, color_transform: bool) -> Self {
+        Self::DCTEncode {
+            buf: Vec::new(),
+            columns,
+            rows,
+            colors,
+            quality,
+            color_transform,
+        }
     }
 
     /// Create a new SubFileDecode filter.
@@ -2102,14 +2170,31 @@ impl FilterKind {
                 | Self::FlateEncode { .. }
                 | Self::LZWEncode { .. }
                 | Self::NullEncode
+                | Self::DCTEncode { .. }
         )
     }
 }
 
 impl FileStore {
     /// Create a lazy DCTDecode filter (decodes on first read).
-    pub fn create_dct_filter(&mut self, source: EntityId) -> EntityId {
-        self.create_filter(source, FilterKind::dct_decode())
+    pub fn create_dct_filter(&mut self, source: EntityId, color_transform: Option<bool>) -> EntityId {
+        self.create_filter(source, FilterKind::dct_decode(color_transform))
+    }
+
+    /// Create a DCTEncode filter.
+    pub fn create_dct_encode_filter(
+        &mut self,
+        target: EntityId,
+        columns: u32,
+        rows: u32,
+        colors: u32,
+        quality: u8,
+        color_transform: bool,
+    ) -> EntityId {
+        self.create_encode_filter(
+            target,
+            FilterKind::dct_encode(columns, rows, colors, quality, color_transform),
+        )
     }
 }
 

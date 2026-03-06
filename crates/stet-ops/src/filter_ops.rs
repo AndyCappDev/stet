@@ -70,6 +70,17 @@ pub fn op_filter(ctx: &mut Context) -> Result<(), PsError> {
         (1u8, 1u32, 1u32, 8u32, 1i32)
     };
 
+    // Validate DCT parameters BEFORE popping (per validate-before-pop rule)
+    if filter_name == b"DCTEncode" {
+        let de = dict_entity.ok_or(PsError::RangeCheck)?;
+        // This will return error if params are invalid, before any pops
+        extract_dct_encode_params(ctx, de)?;
+    } else if filter_name == b"DCTDecode" {
+        if let Some(de) = dict_entity {
+            validate_dct_decode_params(ctx, de)?;
+        }
+    }
+
     // Get the data source
     let source_obj = ctx.o_stack.peek(source_idx)?;
 
@@ -99,6 +110,7 @@ pub fn op_filter(ctx: &mut Context) -> Result<(), PsError> {
             colors,
             bpc,
             early_change,
+            dict_entity,
         )?;
 
         let file_obj = PsObject {
@@ -128,6 +140,7 @@ pub fn op_filter(ctx: &mut Context) -> Result<(), PsError> {
         colors,
         bpc,
         early_change,
+        dict_entity,
     )?;
 
     // Push the filter file object
@@ -311,6 +324,131 @@ fn extract_filter_params(ctx: &Context, dict_entity: EntityId) -> (u8, u32, u32,
     (predictor, columns, colors, bpc, early_change)
 }
 
+/// Parameters for DCTEncode filter creation.
+struct DctEncodeParams {
+    columns: u32,
+    rows: u32,
+    colors: u32,
+    quality: u8,
+    color_transform: bool,
+}
+
+/// Extract and validate DCTEncode parameters from a dict.
+fn extract_dct_encode_params(ctx: &Context, dict_entity: EntityId) -> Result<DctEncodeParams, PsError> {
+    let lookup_obj = |name: &[u8]| -> Option<PsObject> {
+        let id = ctx.names.find(name)?;
+        ctx.dicts.get(dict_entity, &DictKey::Name(id))
+    };
+
+    // Required: Columns (int, > 0)
+    let columns = match lookup_obj(b"Columns") {
+        Some(obj) => match obj.as_i32() {
+            Some(v) if v > 0 => v as u32,
+            Some(_) => return Err(PsError::RangeCheck),
+            None => return Err(PsError::TypeCheck),
+        },
+        None => return Err(PsError::RangeCheck),
+    };
+
+    // Required: Rows (int, > 0)
+    let rows = match lookup_obj(b"Rows") {
+        Some(obj) => match obj.as_i32() {
+            Some(v) if v > 0 => v as u32,
+            Some(_) => return Err(PsError::RangeCheck),
+            None => return Err(PsError::TypeCheck),
+        },
+        None => return Err(PsError::RangeCheck),
+    };
+
+    // Required: Colors (int, 1-4)
+    let colors = match lookup_obj(b"Colors") {
+        Some(obj) => match obj.as_i32() {
+            Some(v) if (1..=4).contains(&v) => v as u32,
+            Some(_) => return Err(PsError::RangeCheck),
+            None => return Err(PsError::TypeCheck),
+        },
+        None => return Err(PsError::RangeCheck),
+    };
+
+    // Optional: QFactor (number, > 0.0, default 1.0)
+    let qfactor = match lookup_obj(b"QFactor") {
+        Some(obj) => match obj.as_f64() {
+            Some(v) if v > 0.0 => v,
+            Some(_) => return Err(PsError::RangeCheck),
+            None => return Err(PsError::TypeCheck),
+        },
+        None => 1.0,
+    };
+    let quality = (50.0 / qfactor).round().max(1.0).min(100.0) as u8;
+
+    // Optional: ColorTransform (int, 0 or 1)
+    let color_transform = match lookup_obj(b"ColorTransform") {
+        Some(obj) => match obj.as_i32() {
+            Some(0) => false,
+            Some(1) => true,
+            Some(_) => return Err(PsError::RangeCheck),
+            None => return Err(PsError::TypeCheck),
+        },
+        None => colors >= 3, // default: 1 for 3+ components, 0 otherwise
+    };
+
+    // Optional: HSamples (array of ints, each 1-4, length == Colors)
+    if let Some(obj) = lookup_obj(b"HSamples") {
+        validate_sample_array(ctx, obj, colors)?;
+    }
+
+    // Optional: VSamples (array of ints, each 1-4, length == Colors)
+    if let Some(obj) = lookup_obj(b"VSamples") {
+        validate_sample_array(ctx, obj, colors)?;
+    }
+
+    Ok(DctEncodeParams {
+        columns,
+        rows,
+        colors,
+        quality,
+        color_transform,
+    })
+}
+
+/// Validate an HSamples or VSamples array.
+fn validate_sample_array(ctx: &Context, obj: PsObject, colors: u32) -> Result<(), PsError> {
+    match obj.value {
+        PsValue::Array { entity, start, len } => {
+            if len as u32 != colors {
+                return Err(PsError::RangeCheck);
+            }
+            for i in 0..len {
+                let elem = ctx.arrays.get_element(entity, start + i);
+                match elem.as_i32() {
+                    Some(v) if (1..=4).contains(&v) => {}
+                    Some(_) => return Err(PsError::RangeCheck),
+                    None => return Err(PsError::TypeCheck),
+                }
+            }
+            Ok(())
+        }
+        _ => Err(PsError::TypeCheck),
+    }
+}
+
+/// Validate DCTDecode ColorTransform parameter from a dict.
+fn validate_dct_decode_params(ctx: &Context, dict_entity: EntityId) -> Result<Option<bool>, PsError> {
+    let id = match ctx.names.find(b"ColorTransform") {
+        Some(id) => id,
+        None => return Ok(None),
+    };
+    match ctx.dicts.get(dict_entity, &DictKey::Name(id)) {
+        Some(obj) => match obj.as_i32() {
+            Some(0) => Ok(Some(false)),
+            Some(1) => Ok(Some(true)),
+            Some(_) => Err(PsError::RangeCheck),
+            None => Err(PsError::TypeCheck),
+        },
+        None => Ok(None),
+    }
+}
+
 /// Create a filter by name, returning the filter EntityId.
 fn create_filter_by_name(
     ctx: &mut Context,
@@ -321,6 +459,7 @@ fn create_filter_by_name(
     colors: u32,
     bpc: u32,
     early_change: i32,
+    dict_entity: Option<EntityId>,
 ) -> Result<EntityId, PsError> {
     match name {
         b"ASCIIHexDecode" => Ok(ctx
@@ -339,7 +478,14 @@ fn create_filter_by_name(
         b"LZWDecode" => Ok(ctx
             .files
             .create_filter(source, FilterKind::lzw_decode(early_change != 0))),
-        b"DCTDecode" => Ok(ctx.files.create_dct_filter(source)),
+        b"DCTDecode" => {
+            let ct = if let Some(de) = dict_entity {
+                validate_dct_decode_params(ctx, de)?
+            } else {
+                None
+            };
+            Ok(ctx.files.create_dct_filter(source, ct))
+        }
         b"SubFileDecode" => Ok(ctx
             .files
             .create_filter(source, FilterKind::sub_file_decode(Vec::new(), 0, None))),
@@ -362,7 +508,18 @@ fn create_filter_by_name(
         b"NullEncode" => Ok(ctx
             .files
             .create_encode_filter(source, FilterKind::null_encode())),
-        b"DCTEncode" => Ok(source), // DCTEncode deferred
+        b"DCTEncode" => {
+            let de = dict_entity.ok_or(PsError::RangeCheck)?;
+            let params = extract_dct_encode_params(ctx, de)?;
+            Ok(ctx.files.create_dct_encode_filter(
+                source,
+                params.columns,
+                params.rows,
+                params.colors,
+                params.quality,
+                params.color_transform,
+            ))
+        }
         _ => Err(PsError::Undefined),
     }
 }
