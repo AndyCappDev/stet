@@ -134,6 +134,8 @@ pub struct Context {
     pub current_source_line: u32,
     /// Packing mode for array/procedure creation (setpacking/currentpacking).
     pub packing_mode: bool,
+    /// Echo mode for %lineedit/%statementedit (PLRM echo operator).
+    pub echo: bool,
 
     // Pre-interned names
     pub name_cache: NameCache,
@@ -512,6 +514,7 @@ impl Context {
             rand_seed: 0,
             current_source_line: 1,
             packing_mode: false,
+            echo: false,
             name_cache,
             stdout: Box::new(std::io::stdout()),
             save_stack: SaveStack::new(),

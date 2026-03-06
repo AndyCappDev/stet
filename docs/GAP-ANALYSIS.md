@@ -58,7 +58,7 @@ All 11 userpath operators implemented: `setbbox`, `ucache`, `uappend`, `upath`, 
 
 ### ~~2.2 Encode Filters~~ — RESOLVED (2026-03-06)
 
-Encode filters fully implemented: ASCIIHexEncode, ASCII85Encode, RunLengthEncode, FlateEncode, LZWEncode, NullEncode, DCTEncode. Write-direction filters use swap-out pattern for `encode_write` dispatch, with finalization on `closefile` (flush remaining data, write EOD markers, close target). DCTEncode uses `jpeg-encoder` crate (buffered: collects all input, encodes on close). All 18 encode/decode roundtrip tests in filter_extended_tests.ps pass. Also fixed a pre-existing LZW decode bug with short streams.
+Encode filters fully implemented: ASCIIHexEncode, ASCII85Encode, RunLengthEncode, FlateEncode, LZWEncode, NullEncode, DCTEncode. Write-direction filters use swap-out pattern for `encode_write` dispatch, with finalization on `closefile` (flush remaining data, write EOD markers, close target). DCTEncode uses `jpeg-encoder` crate (buffered: collects all input, encodes on close). All 18 encode/decode roundtrip tests in filter_extended_tests.ps pass. Also fixed a pre-existing LZW decode bug with short streams. Additional fixes (2026-03-06): `filter` operator validates filter name before popping operands (prevents stack corruption on unknown filters like CCITTFaxDecode); SubFileDecode now includes EOD string in output per PLRM spec; RunLengthEncode converted from buffered to streaming.
 
 ### 2.3 CCITTFax Filters (NOT IMPLEMENTED)
 
@@ -348,4 +348,4 @@ Results from stet's own unit_tests directory (`~/Projects/stet/unit_tests/`).
 | ~~pattern_form~~ | ~~0~~ | ~~Fixed (2026-03-05)~~ |
 | ~~dictionary~~ | ~~0~~ | ~~Fixed (2026-03-05)~~ |
 | ~~image~~ | ~~0~~ | ~~Fixed (2026-03-05)~~ |
-| **Total** | **14** | |
+| **Total** | **0** | All resolved |

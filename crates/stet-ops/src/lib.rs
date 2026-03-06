@@ -268,6 +268,7 @@ pub fn build_system_dict(ctx: &mut Context) {
         ".setinteractivepaint",
         misc_ops::op_setinteractivepaint,
     );
+    register(ctx, sd, "echo", misc_ops::op_echo);
     register(ctx, sd, "pauseexechistory", misc_ops::op_pauseexechistory);
     register(ctx, sd, "resumeexechistory", misc_ops::op_resumeexechistory);
     register(ctx, sd, "exechistorystack", misc_ops::op_exechistorystack);

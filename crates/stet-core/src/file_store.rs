@@ -1726,6 +1726,8 @@ impl FileStore {
                             match_pos += 1;
                             if match_pos == eod.len() {
                                 found_count += 1;
+                                // Per PLRM: EOD string is included in output
+                                out.extend_from_slice(&eod);
                                 match_pos = 0;
                                 if found_count >= target_count {
                                     *eof = true;

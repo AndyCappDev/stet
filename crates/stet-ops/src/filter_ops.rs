@@ -81,6 +81,11 @@ pub fn op_filter(ctx: &mut Context) -> Result<(), PsError> {
         }
     }
 
+    // Validate filter name is known BEFORE popping operands
+    if !is_known_filter_name(&filter_name) {
+        return Err(PsError::Undefined);
+    }
+
     // Get the data source
     let source_obj = ctx.o_stack.peek(source_idx)?;
 
@@ -522,6 +527,27 @@ fn create_filter_by_name(
         }
         _ => Err(PsError::Undefined),
     }
+}
+
+/// Check if a filter name is recognized (used for validate-before-pop).
+fn is_known_filter_name(name: &[u8]) -> bool {
+    matches!(
+        name,
+        b"ASCIIHexDecode"
+            | b"ASCII85Decode"
+            | b"RunLengthDecode"
+            | b"FlateDecode"
+            | b"LZWDecode"
+            | b"DCTDecode"
+            | b"SubFileDecode"
+            | b"ASCIIHexEncode"
+            | b"ASCII85Encode"
+            | b"RunLengthEncode"
+            | b"FlateEncode"
+            | b"LZWEncode"
+            | b"NullEncode"
+            | b"DCTEncode"
+    )
 }
 
 /// Check if an object is an executable array (procedure).

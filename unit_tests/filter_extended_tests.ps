@@ -205,13 +205,15 @@ type /filetype eq [true] assert
 % CCITTFaxDecode should create successfully (no encode available for round-trip)
 (unit_tests/.filter_test_tmp.bin) (w) file dup (\000) writestring closefile
 {(unit_tests/.filter_test_tmp.bin) (r) file /CCITTFaxDecode filter type /filetype eq} stopped
-{pop pop true} {[true] assert} ifelse
+{clear true} if
+[true] assert
 
 %% CCITTFax: filter creation with explicit params %%
 {(unit_tests/.filter_test_tmp.bin) (w) file dup (\000\000\000\000) writestring closefile
 (unit_tests/.filter_test_tmp.bin) (r) file << /Columns 8 /Rows 1 >> /CCITTFaxDecode filter
 type /filetype eq} stopped
-{pop pop true} {[true] assert} ifelse
+{clear true} if
+[true] assert
 
 
 %% =============================================================================

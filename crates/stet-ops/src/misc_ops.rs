@@ -341,6 +341,24 @@ pub fn op_setinteractivepaint(ctx: &mut Context) -> Result<(), PsError> {
     Ok(())
 }
 
+/// `echo`: bool → —
+///
+/// Sets the echo flag for %lineedit/%statementedit.
+pub fn op_echo(ctx: &mut Context) -> Result<(), PsError> {
+    if ctx.o_stack.is_empty() {
+        return Err(PsError::StackUnderflow);
+    }
+    let obj = ctx.o_stack.peek(0)?;
+    match obj.value {
+        PsValue::Bool(b) => {
+            ctx.o_stack.pop()?;
+            ctx.echo = b;
+            Ok(())
+        }
+        _ => Err(PsError::TypeCheck),
+    }
+}
+
 /// `pauseexechistory`: — → — (no-op)
 pub fn op_pauseexechistory(_ctx: &mut Context) -> Result<(), PsError> {
     Ok(())
