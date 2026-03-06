@@ -10,7 +10,9 @@
 use stet_core::context::Context;
 use stet_core::display_list::DisplayElement;
 use stet_core::error::PsError;
-use stet_core::graphics_state::{DashPattern, FillRule, GraphicsState, GstateEntry, LineCap, LineJoin};
+use stet_core::graphics_state::{
+    DashPattern, FillRule, GraphicsState, GstateEntry, LineCap, LineJoin,
+};
 use stet_core::object::{PsObject, PsValue};
 
 /// `gsave`: — → — (push graphics state)

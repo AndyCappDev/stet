@@ -30,7 +30,10 @@ pub fn strip_dos_eps_header(data: &[u8]) -> &[u8] {
 /// This catches EPS files with `.ps` extensions that GhostScript would still treat as EPS.
 pub fn content_is_epsf(data: &[u8]) -> bool {
     // Check just the first line (up to first newline or 256 bytes)
-    let end = data.iter().position(|&b| b == b'\n' || b == b'\r').unwrap_or(data.len().min(256));
+    let end = data
+        .iter()
+        .position(|&b| b == b'\n' || b == b'\r')
+        .unwrap_or(data.len().min(256));
     let first_line = &data[..end];
     first_line.windows(4).any(|w| w == b"EPSF")
 }
@@ -148,9 +151,15 @@ mod tests {
 
     #[test]
     fn test_content_is_epsf() {
-        assert!(content_is_epsf(b"%!PS-Adobe-2.0 EPSF-1.2\n%%BoundingBox: 0 0 100 100\n"));
-        assert!(content_is_epsf(b"%!PS-Adobe-3.0 EPSF-3.0\r%%BoundingBox: 0 0 100 100\r"));
-        assert!(!content_is_epsf(b"%!PS-Adobe-3.0\n%%BoundingBox: 0 0 100 100\n"));
+        assert!(content_is_epsf(
+            b"%!PS-Adobe-2.0 EPSF-1.2\n%%BoundingBox: 0 0 100 100\n"
+        ));
+        assert!(content_is_epsf(
+            b"%!PS-Adobe-3.0 EPSF-3.0\r%%BoundingBox: 0 0 100 100\r"
+        ));
+        assert!(!content_is_epsf(
+            b"%!PS-Adobe-3.0\n%%BoundingBox: 0 0 100 100\n"
+        ));
         assert!(!content_is_epsf(b"/Helvetica findfont\n"));
     }
 

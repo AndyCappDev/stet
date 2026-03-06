@@ -120,7 +120,10 @@ impl DualArrayStore {
 
     /// Swap offsets between two entities (used by restore, always local).
     pub fn swap_offsets(&mut self, a: EntityId, b: EntityId) {
-        debug_assert!(!a.is_global() && !b.is_global(), "swap_offsets on global entity");
+        debug_assert!(
+            !a.is_global() && !b.is_global(),
+            "swap_offsets on global entity"
+        );
         self.local.swap_offsets(a, b);
     }
 

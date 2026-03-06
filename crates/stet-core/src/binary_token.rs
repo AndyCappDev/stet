@@ -27,153 +27,532 @@ pub enum BinaryTokenResult {
 /// System name table. Indices 226-255 are reserved (None).
 static SYSTEM_NAME_TABLE: [Option<&[u8]>; 481] = [
     // 0-9
-    Some(b"abs"), Some(b"add"), Some(b"aload"), Some(b"anchorsearch"), Some(b"and"),
-    Some(b"arc"), Some(b"arcn"), Some(b"arct"), Some(b"arcto"), Some(b"array"),
+    Some(b"abs"),
+    Some(b"add"),
+    Some(b"aload"),
+    Some(b"anchorsearch"),
+    Some(b"and"),
+    Some(b"arc"),
+    Some(b"arcn"),
+    Some(b"arct"),
+    Some(b"arcto"),
+    Some(b"array"),
     // 10-19
-    Some(b"ashow"), Some(b"astore"), Some(b"awidthshow"), Some(b"begin"), Some(b"bind"),
-    Some(b"bitshift"), Some(b"ceiling"), Some(b"charpath"), Some(b"clear"), Some(b"cleartomark"),
+    Some(b"ashow"),
+    Some(b"astore"),
+    Some(b"awidthshow"),
+    Some(b"begin"),
+    Some(b"bind"),
+    Some(b"bitshift"),
+    Some(b"ceiling"),
+    Some(b"charpath"),
+    Some(b"clear"),
+    Some(b"cleartomark"),
     // 20-29
-    Some(b"clip"), Some(b"clippath"), Some(b"closepath"), Some(b"concat"), Some(b"concatmatrix"),
-    Some(b"copy"), Some(b"count"), Some(b"counttomark"), Some(b"currentcmykcolor"), Some(b"currentdash"),
+    Some(b"clip"),
+    Some(b"clippath"),
+    Some(b"closepath"),
+    Some(b"concat"),
+    Some(b"concatmatrix"),
+    Some(b"copy"),
+    Some(b"count"),
+    Some(b"counttomark"),
+    Some(b"currentcmykcolor"),
+    Some(b"currentdash"),
     // 30-39
-    Some(b"currentdict"), Some(b"currentfile"), Some(b"currentfont"), Some(b"currentgray"), Some(b"currentgstate"),
-    Some(b"currenthsbcolor"), Some(b"currentlinecap"), Some(b"currentlinejoin"), Some(b"currentlinewidth"), Some(b"currentmatrix"),
+    Some(b"currentdict"),
+    Some(b"currentfile"),
+    Some(b"currentfont"),
+    Some(b"currentgray"),
+    Some(b"currentgstate"),
+    Some(b"currenthsbcolor"),
+    Some(b"currentlinecap"),
+    Some(b"currentlinejoin"),
+    Some(b"currentlinewidth"),
+    Some(b"currentmatrix"),
     // 40-49
-    Some(b"currentpoint"), Some(b"currentrgbcolor"), Some(b"currentshared"), Some(b"curveto"), Some(b"cvi"),
-    Some(b"cvlit"), Some(b"cvn"), Some(b"cvr"), Some(b"cvrs"), Some(b"cvs"),
+    Some(b"currentpoint"),
+    Some(b"currentrgbcolor"),
+    Some(b"currentshared"),
+    Some(b"curveto"),
+    Some(b"cvi"),
+    Some(b"cvlit"),
+    Some(b"cvn"),
+    Some(b"cvr"),
+    Some(b"cvrs"),
+    Some(b"cvs"),
     // 50-59
-    Some(b"cvx"), Some(b"def"), Some(b"defineusername"), Some(b"dict"), Some(b"div"),
-    Some(b"dtransform"), Some(b"dup"), Some(b"end"), Some(b"eoclip"), Some(b"eofill"),
+    Some(b"cvx"),
+    Some(b"def"),
+    Some(b"defineusername"),
+    Some(b"dict"),
+    Some(b"div"),
+    Some(b"dtransform"),
+    Some(b"dup"),
+    Some(b"end"),
+    Some(b"eoclip"),
+    Some(b"eofill"),
     // 60-69
-    Some(b"eoviewclip"), Some(b"eq"), Some(b"exch"), Some(b"exec"), Some(b"exit"),
-    Some(b"file"), Some(b"fill"), Some(b"findfont"), Some(b"flattenpath"), Some(b"floor"),
+    Some(b"eoviewclip"),
+    Some(b"eq"),
+    Some(b"exch"),
+    Some(b"exec"),
+    Some(b"exit"),
+    Some(b"file"),
+    Some(b"fill"),
+    Some(b"findfont"),
+    Some(b"flattenpath"),
+    Some(b"floor"),
     // 70-79
-    Some(b"flush"), Some(b"flushfile"), Some(b"for"), Some(b"forall"), Some(b"ge"),
-    Some(b"get"), Some(b"getinterval"), Some(b"grestore"), Some(b"gsave"), Some(b"gstate"),
+    Some(b"flush"),
+    Some(b"flushfile"),
+    Some(b"for"),
+    Some(b"forall"),
+    Some(b"ge"),
+    Some(b"get"),
+    Some(b"getinterval"),
+    Some(b"grestore"),
+    Some(b"gsave"),
+    Some(b"gstate"),
     // 80-89
-    Some(b"gt"), Some(b"identmatrix"), Some(b"idiv"), Some(b"idtransform"), Some(b"if"),
-    Some(b"ifelse"), Some(b"image"), Some(b"imagemask"), Some(b"index"), Some(b"ineofill"),
+    Some(b"gt"),
+    Some(b"identmatrix"),
+    Some(b"idiv"),
+    Some(b"idtransform"),
+    Some(b"if"),
+    Some(b"ifelse"),
+    Some(b"image"),
+    Some(b"imagemask"),
+    Some(b"index"),
+    Some(b"ineofill"),
     // 90-99
-    Some(b"infill"), Some(b"initviewclip"), Some(b"inueofill"), Some(b"inufill"), Some(b"invertmatrix"),
-    Some(b"itransform"), Some(b"known"), Some(b"le"), Some(b"length"), Some(b"lineto"),
+    Some(b"infill"),
+    Some(b"initviewclip"),
+    Some(b"inueofill"),
+    Some(b"inufill"),
+    Some(b"invertmatrix"),
+    Some(b"itransform"),
+    Some(b"known"),
+    Some(b"le"),
+    Some(b"length"),
+    Some(b"lineto"),
     // 100-109
-    Some(b"load"), Some(b"loop"), Some(b"lt"), Some(b"makefont"), Some(b"matrix"),
-    Some(b"maxlength"), Some(b"mod"), Some(b"moveto"), Some(b"mul"), Some(b"ne"),
+    Some(b"load"),
+    Some(b"loop"),
+    Some(b"lt"),
+    Some(b"makefont"),
+    Some(b"matrix"),
+    Some(b"maxlength"),
+    Some(b"mod"),
+    Some(b"moveto"),
+    Some(b"mul"),
+    Some(b"ne"),
     // 110-119
-    Some(b"neg"), Some(b"newpath"), Some(b"not"), Some(b"null"), Some(b"or"),
-    Some(b"pathbbox"), Some(b"pathforall"), Some(b"pop"), Some(b"print"), Some(b"printobject"),
+    Some(b"neg"),
+    Some(b"newpath"),
+    Some(b"not"),
+    Some(b"null"),
+    Some(b"or"),
+    Some(b"pathbbox"),
+    Some(b"pathforall"),
+    Some(b"pop"),
+    Some(b"print"),
+    Some(b"printobject"),
     // 120-129
-    Some(b"put"), Some(b"putinterval"), Some(b"rcurveto"), Some(b"read"), Some(b"readhexstring"),
-    Some(b"readline"), Some(b"readstring"), Some(b"rectclip"), Some(b"rectfill"), Some(b"rectstroke"),
+    Some(b"put"),
+    Some(b"putinterval"),
+    Some(b"rcurveto"),
+    Some(b"read"),
+    Some(b"readhexstring"),
+    Some(b"readline"),
+    Some(b"readstring"),
+    Some(b"rectclip"),
+    Some(b"rectfill"),
+    Some(b"rectstroke"),
     // 130-139
-    Some(b"rectviewclip"), Some(b"repeat"), Some(b"restore"), Some(b"rlineto"), Some(b"rmoveto"),
-    Some(b"roll"), Some(b"rotate"), Some(b"round"), Some(b"save"), Some(b"scale"),
+    Some(b"rectviewclip"),
+    Some(b"repeat"),
+    Some(b"restore"),
+    Some(b"rlineto"),
+    Some(b"rmoveto"),
+    Some(b"roll"),
+    Some(b"rotate"),
+    Some(b"round"),
+    Some(b"save"),
+    Some(b"scale"),
     // 140-149
-    Some(b"scalefont"), Some(b"search"), Some(b"selectfont"), Some(b"setbbox"), Some(b"setcachedevice"),
-    Some(b"setcachedevice2"), Some(b"setcharwidth"), Some(b"setcmykcolor"), Some(b"setdash"), Some(b"setfont"),
+    Some(b"scalefont"),
+    Some(b"search"),
+    Some(b"selectfont"),
+    Some(b"setbbox"),
+    Some(b"setcachedevice"),
+    Some(b"setcachedevice2"),
+    Some(b"setcharwidth"),
+    Some(b"setcmykcolor"),
+    Some(b"setdash"),
+    Some(b"setfont"),
     // 150-159
-    Some(b"setgray"), Some(b"setgstate"), Some(b"sethsbcolor"), Some(b"setlinecap"), Some(b"setlinejoin"),
-    Some(b"setlinewidth"), Some(b"setmatrix"), Some(b"setrgbcolor"), Some(b"setshared"), Some(b"shareddict"),
+    Some(b"setgray"),
+    Some(b"setgstate"),
+    Some(b"sethsbcolor"),
+    Some(b"setlinecap"),
+    Some(b"setlinejoin"),
+    Some(b"setlinewidth"),
+    Some(b"setmatrix"),
+    Some(b"setrgbcolor"),
+    Some(b"setshared"),
+    Some(b"shareddict"),
     // 160-169
-    Some(b"show"), Some(b"showpage"), Some(b"stop"), Some(b"stopped"), Some(b"store"),
-    Some(b"string"), Some(b"stringwidth"), Some(b"stroke"), Some(b"strokepath"), Some(b"sub"),
+    Some(b"show"),
+    Some(b"showpage"),
+    Some(b"stop"),
+    Some(b"stopped"),
+    Some(b"store"),
+    Some(b"string"),
+    Some(b"stringwidth"),
+    Some(b"stroke"),
+    Some(b"strokepath"),
+    Some(b"sub"),
     // 170-179
-    Some(b"systemdict"), Some(b"token"), Some(b"transform"), Some(b"translate"), Some(b"truncate"),
-    Some(b"type"), Some(b"uappend"), Some(b"ucache"), Some(b"ueofill"), Some(b"ufill"),
+    Some(b"systemdict"),
+    Some(b"token"),
+    Some(b"transform"),
+    Some(b"translate"),
+    Some(b"truncate"),
+    Some(b"type"),
+    Some(b"uappend"),
+    Some(b"ucache"),
+    Some(b"ueofill"),
+    Some(b"ufill"),
     // 180-189
-    Some(b"undef"), Some(b"upath"), Some(b"userdict"), Some(b"ustroke"), Some(b"viewclip"),
-    Some(b"viewclippath"), Some(b"where"), Some(b"widthshow"), Some(b"write"), Some(b"writehexstring"),
+    Some(b"undef"),
+    Some(b"upath"),
+    Some(b"userdict"),
+    Some(b"ustroke"),
+    Some(b"viewclip"),
+    Some(b"viewclippath"),
+    Some(b"where"),
+    Some(b"widthshow"),
+    Some(b"write"),
+    Some(b"writehexstring"),
     // 190-199
-    Some(b"writeobject"), Some(b"writestring"), Some(b"wtranslation"), Some(b"xor"), Some(b"xshow"),
-    Some(b"xyshow"), Some(b"yshow"), Some(b"FontDirectory"), Some(b"SharedFontDirectory"), Some(b"Courier"),
+    Some(b"writeobject"),
+    Some(b"writestring"),
+    Some(b"wtranslation"),
+    Some(b"xor"),
+    Some(b"xshow"),
+    Some(b"xyshow"),
+    Some(b"yshow"),
+    Some(b"FontDirectory"),
+    Some(b"SharedFontDirectory"),
+    Some(b"Courier"),
     // 200-209
-    Some(b"Courier-Bold"), Some(b"Courier-BoldOblique"), Some(b"Courier-Oblique"), Some(b"Helvetica"),
-    Some(b"Helvetica-Bold"), Some(b"Helvetica-BoldOblique"), Some(b"Helvetica-Oblique"), Some(b"Symbol"),
-    Some(b"Times-Bold"), Some(b"Times-BoldItalic"),
+    Some(b"Courier-Bold"),
+    Some(b"Courier-BoldOblique"),
+    Some(b"Courier-Oblique"),
+    Some(b"Helvetica"),
+    Some(b"Helvetica-Bold"),
+    Some(b"Helvetica-BoldOblique"),
+    Some(b"Helvetica-Oblique"),
+    Some(b"Symbol"),
+    Some(b"Times-Bold"),
+    Some(b"Times-BoldItalic"),
     // 210-219
-    Some(b"Times-Italic"), Some(b"Times-Roman"), Some(b"execuserobject"), Some(b"currentcolor"),
-    Some(b"currentcolorspace"), Some(b"currentglobal"), Some(b"execform"), Some(b"filter"),
-    Some(b"findresource"), Some(b"globaldict"),
+    Some(b"Times-Italic"),
+    Some(b"Times-Roman"),
+    Some(b"execuserobject"),
+    Some(b"currentcolor"),
+    Some(b"currentcolorspace"),
+    Some(b"currentglobal"),
+    Some(b"execform"),
+    Some(b"filter"),
+    Some(b"findresource"),
+    Some(b"globaldict"),
     // 220-225
-    Some(b"makepattern"), Some(b"setcolor"), Some(b"setcolorspace"), Some(b"setglobal"),
-    Some(b"setpagedevice"), Some(b"setpattern"),
+    Some(b"makepattern"),
+    Some(b"setcolor"),
+    Some(b"setcolorspace"),
+    Some(b"setglobal"),
+    Some(b"setpagedevice"),
+    Some(b"setpattern"),
     // 226-255: reserved (30 entries)
-    None, None, None, None, None, None, None, None, None, None,
-    None, None, None, None, None, None, None, None, None, None,
-    None, None, None, None, None, None, None, None, None, None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
     // 256-259
-    Some(b"="), Some(b"=="), Some(b"ISOLatin1Encoding"), Some(b"StandardEncoding"),
+    Some(b"="),
+    Some(b"=="),
+    Some(b"ISOLatin1Encoding"),
+    Some(b"StandardEncoding"),
     // 260-269
-    Some(b"["), Some(b"]"), Some(b"atan"), Some(b"banddevice"), Some(b"bytesavailable"),
-    Some(b"cachestatus"), Some(b"closefile"), Some(b"colorimage"), Some(b"condition"), Some(b"copypage"),
+    Some(b"["),
+    Some(b"]"),
+    Some(b"atan"),
+    Some(b"banddevice"),
+    Some(b"bytesavailable"),
+    Some(b"cachestatus"),
+    Some(b"closefile"),
+    Some(b"colorimage"),
+    Some(b"condition"),
+    Some(b"copypage"),
     // 270-279
-    Some(b"cos"), Some(b"countdictstack"), Some(b"countexecstack"), Some(b"cshow"),
-    Some(b"currentblackgeneration"), Some(b"currentcacheparams"), Some(b"currentcolorscreen"),
-    Some(b"currentcolortransfer"), Some(b"currentcontext"), Some(b"currentflat"),
+    Some(b"cos"),
+    Some(b"countdictstack"),
+    Some(b"countexecstack"),
+    Some(b"cshow"),
+    Some(b"currentblackgeneration"),
+    Some(b"currentcacheparams"),
+    Some(b"currentcolorscreen"),
+    Some(b"currentcolortransfer"),
+    Some(b"currentcontext"),
+    Some(b"currentflat"),
     // 280-289
-    Some(b"currenthalftone"), Some(b"currenthalftonephase"), Some(b"currentmiterlimit"),
-    Some(b"currentobjectformat"), Some(b"currentpacking"), Some(b"currentscreen"),
-    Some(b"currentstrokeadjust"), Some(b"currenttransfer"), Some(b"currentundercolorremoval"),
+    Some(b"currenthalftone"),
+    Some(b"currenthalftonephase"),
+    Some(b"currentmiterlimit"),
+    Some(b"currentobjectformat"),
+    Some(b"currentpacking"),
+    Some(b"currentscreen"),
+    Some(b"currentstrokeadjust"),
+    Some(b"currenttransfer"),
+    Some(b"currentundercolorremoval"),
     Some(b"defaultmatrix"),
     // 290-299
-    Some(b"definefont"), Some(b"deletefile"), Some(b"detach"), Some(b"deviceinfo"), Some(b"dictstack"),
-    Some(b"echo"), Some(b"erasepage"), Some(b"errordict"), Some(b"execstack"), Some(b"executeonly"),
+    Some(b"definefont"),
+    Some(b"deletefile"),
+    Some(b"detach"),
+    Some(b"deviceinfo"),
+    Some(b"dictstack"),
+    Some(b"echo"),
+    Some(b"erasepage"),
+    Some(b"errordict"),
+    Some(b"execstack"),
+    Some(b"executeonly"),
     // 300-309
-    Some(b"exp"), Some(b"false"), Some(b"filenameforall"), Some(b"fileposition"), Some(b"fork"),
-    Some(b"framedevice"), Some(b"grestoreall"), Some(b"handleerror"), Some(b"initclip"), Some(b"initgraphics"),
+    Some(b"exp"),
+    Some(b"false"),
+    Some(b"filenameforall"),
+    Some(b"fileposition"),
+    Some(b"fork"),
+    Some(b"framedevice"),
+    Some(b"grestoreall"),
+    Some(b"handleerror"),
+    Some(b"initclip"),
+    Some(b"initgraphics"),
     // 310-319
-    Some(b"initmatrix"), Some(b"instroke"), Some(b"inustroke"), Some(b"join"), Some(b"kshow"),
-    Some(b"ln"), Some(b"lock"), Some(b"log"), Some(b"mark"), Some(b"monitor"),
+    Some(b"initmatrix"),
+    Some(b"instroke"),
+    Some(b"inustroke"),
+    Some(b"join"),
+    Some(b"kshow"),
+    Some(b"ln"),
+    Some(b"lock"),
+    Some(b"log"),
+    Some(b"mark"),
+    Some(b"monitor"),
     // 320-329
-    Some(b"noaccess"), Some(b"notify"), Some(b"nulldevice"), Some(b"packedarray"), Some(b"quit"),
-    Some(b"rand"), Some(b"rcheck"), Some(b"readonly"), Some(b"realtime"), Some(b"renamefile"),
+    Some(b"noaccess"),
+    Some(b"notify"),
+    Some(b"nulldevice"),
+    Some(b"packedarray"),
+    Some(b"quit"),
+    Some(b"rand"),
+    Some(b"rcheck"),
+    Some(b"readonly"),
+    Some(b"realtime"),
+    Some(b"renamefile"),
     // 330-339
-    Some(b"renderbands"), Some(b"resetfile"), Some(b"reversepath"), Some(b"rootfont"), Some(b"rrand"),
-    Some(b"run"), Some(b"scheck"), Some(b"setblackgeneration"), Some(b"setcachelimit"), Some(b"setcacheparams"),
+    Some(b"renderbands"),
+    Some(b"resetfile"),
+    Some(b"reversepath"),
+    Some(b"rootfont"),
+    Some(b"rrand"),
+    Some(b"run"),
+    Some(b"scheck"),
+    Some(b"setblackgeneration"),
+    Some(b"setcachelimit"),
+    Some(b"setcacheparams"),
     // 340-349
-    Some(b"setcolorscreen"), Some(b"setcolortransfer"), Some(b"setfileposition"), Some(b"setflat"),
-    Some(b"sethalftone"), Some(b"sethalftonephase"), Some(b"setmiterlimit"), Some(b"setobjectformat"),
-    Some(b"setpacking"), Some(b"setscreen"),
+    Some(b"setcolorscreen"),
+    Some(b"setcolortransfer"),
+    Some(b"setfileposition"),
+    Some(b"setflat"),
+    Some(b"sethalftone"),
+    Some(b"sethalftonephase"),
+    Some(b"setmiterlimit"),
+    Some(b"setobjectformat"),
+    Some(b"setpacking"),
+    Some(b"setscreen"),
     // 350-359
-    Some(b"setstrokeadjust"), Some(b"settransfer"), Some(b"setucacheparams"),
-    Some(b"setundercolorremoval"), Some(b"sin"), Some(b"sqrt"), Some(b"srand"), Some(b"stack"),
-    Some(b"status"), Some(b"statusdict"),
+    Some(b"setstrokeadjust"),
+    Some(b"settransfer"),
+    Some(b"setucacheparams"),
+    Some(b"setundercolorremoval"),
+    Some(b"sin"),
+    Some(b"sqrt"),
+    Some(b"srand"),
+    Some(b"stack"),
+    Some(b"status"),
+    Some(b"statusdict"),
     // 360-369
-    Some(b"true"), Some(b"ucachestatus"), Some(b"undefinefont"), Some(b"usertime"), Some(b"ustrokepath"),
-    Some(b"version"), Some(b"vmreclaim"), Some(b"vmstatus"), Some(b"wait"), Some(b"wcheck"),
+    Some(b"true"),
+    Some(b"ucachestatus"),
+    Some(b"undefinefont"),
+    Some(b"usertime"),
+    Some(b"ustrokepath"),
+    Some(b"version"),
+    Some(b"vmreclaim"),
+    Some(b"vmstatus"),
+    Some(b"wait"),
+    Some(b"wcheck"),
     // 370-379
-    Some(b"xcheck"), Some(b"yield"), Some(b"defineuserobject"), Some(b"undefineuserobject"),
-    Some(b"UserObjects"), Some(b"cleardictstack"), Some(b"A"), Some(b"B"), Some(b"C"), Some(b"D"),
+    Some(b"xcheck"),
+    Some(b"yield"),
+    Some(b"defineuserobject"),
+    Some(b"undefineuserobject"),
+    Some(b"UserObjects"),
+    Some(b"cleardictstack"),
+    Some(b"A"),
+    Some(b"B"),
+    Some(b"C"),
+    Some(b"D"),
     // 380-389
-    Some(b"E"), Some(b"F"), Some(b"G"), Some(b"H"), Some(b"I"), Some(b"J"), Some(b"K"), Some(b"L"), Some(b"M"), Some(b"N"),
+    Some(b"E"),
+    Some(b"F"),
+    Some(b"G"),
+    Some(b"H"),
+    Some(b"I"),
+    Some(b"J"),
+    Some(b"K"),
+    Some(b"L"),
+    Some(b"M"),
+    Some(b"N"),
     // 390-399
-    Some(b"O"), Some(b"P"), Some(b"Q"), Some(b"R"), Some(b"S"), Some(b"T"), Some(b"U"), Some(b"V"), Some(b"W"), Some(b"X"),
+    Some(b"O"),
+    Some(b"P"),
+    Some(b"Q"),
+    Some(b"R"),
+    Some(b"S"),
+    Some(b"T"),
+    Some(b"U"),
+    Some(b"V"),
+    Some(b"W"),
+    Some(b"X"),
     // 400-409
-    Some(b"Y"), Some(b"Z"), Some(b"a"), Some(b"b"), Some(b"c"), Some(b"d"), Some(b"e"), Some(b"f"), Some(b"g"), Some(b"h"),
+    Some(b"Y"),
+    Some(b"Z"),
+    Some(b"a"),
+    Some(b"b"),
+    Some(b"c"),
+    Some(b"d"),
+    Some(b"e"),
+    Some(b"f"),
+    Some(b"g"),
+    Some(b"h"),
     // 410-419
-    Some(b"i"), Some(b"j"), Some(b"k"), Some(b"l"), Some(b"m"), Some(b"n"), Some(b"o"), Some(b"p"), Some(b"q"), Some(b"r"),
+    Some(b"i"),
+    Some(b"j"),
+    Some(b"k"),
+    Some(b"l"),
+    Some(b"m"),
+    Some(b"n"),
+    Some(b"o"),
+    Some(b"p"),
+    Some(b"q"),
+    Some(b"r"),
     // 420-429
-    Some(b"s"), Some(b"t"), Some(b"u"), Some(b"v"), Some(b"w"), Some(b"x"), Some(b"y"), Some(b"z"),
-    Some(b"setvmthreshold"), Some(b"<<"),
+    Some(b"s"),
+    Some(b"t"),
+    Some(b"u"),
+    Some(b"v"),
+    Some(b"w"),
+    Some(b"x"),
+    Some(b"y"),
+    Some(b"z"),
+    Some(b"setvmthreshold"),
+    Some(b"<<"),
     // 430-439
-    Some(b">>"), Some(b"currentcolorrendering"), Some(b"currentdevparams"), Some(b"currentoverprint"),
-    Some(b"currentpagedevice"), Some(b"currentsystemparams"), Some(b"currentuserparams"),
-    Some(b"defineresource"), Some(b"findencoding"), Some(b"gcheck"),
+    Some(b">>"),
+    Some(b"currentcolorrendering"),
+    Some(b"currentdevparams"),
+    Some(b"currentoverprint"),
+    Some(b"currentpagedevice"),
+    Some(b"currentsystemparams"),
+    Some(b"currentuserparams"),
+    Some(b"defineresource"),
+    Some(b"findencoding"),
+    Some(b"gcheck"),
     // 440-449
-    Some(b"glyphshow"), Some(b"languagelevel"), Some(b"product"), Some(b"pstack"), Some(b"resourceforall"),
-    Some(b"resourcestatus"), Some(b"revision"), Some(b"serialnumber"), Some(b"setcolorrendering"),
+    Some(b"glyphshow"),
+    Some(b"languagelevel"),
+    Some(b"product"),
+    Some(b"pstack"),
+    Some(b"resourceforall"),
+    Some(b"resourcestatus"),
+    Some(b"revision"),
+    Some(b"serialnumber"),
+    Some(b"setcolorrendering"),
     Some(b"setdevparams"),
     // 450-459
-    Some(b"setoverprint"), Some(b"setsystemparams"), Some(b"setuserparams"), Some(b"startjob"),
-    Some(b"undefineresource"), Some(b"GlobalFontDirectory"), Some(b"ASCII85Decode"),
-    Some(b"ASCII85Encode"), Some(b"ASCIIHexDecode"), Some(b"ASCIIHexEncode"),
+    Some(b"setoverprint"),
+    Some(b"setsystemparams"),
+    Some(b"setuserparams"),
+    Some(b"startjob"),
+    Some(b"undefineresource"),
+    Some(b"GlobalFontDirectory"),
+    Some(b"ASCII85Decode"),
+    Some(b"ASCII85Encode"),
+    Some(b"ASCIIHexDecode"),
+    Some(b"ASCIIHexEncode"),
     // 460-469
-    Some(b"CCITTFaxDecode"), Some(b"CCITTFaxEncode"), Some(b"DCTDecode"), Some(b"DCTEncode"),
-    Some(b"LZWDecode"), Some(b"LZWEncode"), Some(b"NullEncode"), Some(b"RunLengthDecode"),
-    Some(b"RunLengthEncode"), Some(b"SubFileDecode"),
+    Some(b"CCITTFaxDecode"),
+    Some(b"CCITTFaxEncode"),
+    Some(b"DCTDecode"),
+    Some(b"DCTEncode"),
+    Some(b"LZWDecode"),
+    Some(b"LZWEncode"),
+    Some(b"NullEncode"),
+    Some(b"RunLengthDecode"),
+    Some(b"RunLengthEncode"),
+    Some(b"SubFileDecode"),
     // 470-479
-    Some(b"CIEBasedA"), Some(b"CIEBasedABC"), Some(b"DeviceCMYK"), Some(b"DeviceGray"), Some(b"DeviceRGB"),
-    Some(b"Indexed"), Some(b"Pattern"), Some(b"Separation"), Some(b"CIEBasedDEF"), Some(b"CIEBasedDEFG"),
+    Some(b"CIEBasedA"),
+    Some(b"CIEBasedABC"),
+    Some(b"DeviceCMYK"),
+    Some(b"DeviceGray"),
+    Some(b"DeviceRGB"),
+    Some(b"Indexed"),
+    Some(b"Pattern"),
+    Some(b"Separation"),
+    Some(b"CIEBasedDEF"),
+    Some(b"CIEBasedDEFG"),
     // 480
     Some(b"DeviceN"),
 ];
@@ -232,7 +611,9 @@ fn need(data: &[u8], n: usize) -> Result<(), PsError> {
 }
 
 fn read_n_bytes(files: &mut FileStore, entity: EntityId, n: usize) -> Result<Vec<u8>, PsError> {
-    files.read_n_bytes(entity, n).map_err(|_| PsError::SyntaxError)
+    files
+        .read_n_bytes(entity, n)
+        .map_err(|_| PsError::SyntaxError)
 }
 
 // ─── Integer parsers (132-136) ──────────────────────────────────────────────
@@ -368,10 +749,7 @@ fn fixed_repr_info(r: u8) -> Result<(usize, u8), PsError> {
 
 // ─── Real parsers (138-140) ─────────────────────────────────────────────────
 
-fn parse_real_from_slice(
-    tag: u8,
-    data: &[u8],
-) -> Result<(BinaryTokenResult, usize), PsError> {
+fn parse_real_from_slice(tag: u8, data: &[u8]) -> Result<(BinaryTokenResult, usize), PsError> {
     need(data, 4)?;
     let v = match tag {
         138 => f32::from_be_bytes([data[0], data[1], data[2], data[3]]),
@@ -385,7 +763,9 @@ fn parse_real_from_stream(
     files: &mut FileStore,
     file_entity: EntityId,
 ) -> Result<BinaryTokenResult, PsError> {
-    let b = files.read_n_bytes(file_entity, 4).map_err(|_| PsError::SyntaxError)?;
+    let b = files
+        .read_n_bytes(file_entity, 4)
+        .map_err(|_| PsError::SyntaxError)?;
     let v = match tag {
         138 => f32::from_be_bytes([b[0], b[1], b[2], b[3]]),
         _ => f32::from_le_bytes([b[0], b[1], b[2], b[3]]),
@@ -404,7 +784,9 @@ fn parse_bool_from_stream(
     files: &mut FileStore,
     file_entity: EntityId,
 ) -> Result<BinaryTokenResult, PsError> {
-    let b = files.read_n_bytes(file_entity, 1).map_err(|_| PsError::SyntaxError)?;
+    let b = files
+        .read_n_bytes(file_entity, 1)
+        .map_err(|_| PsError::SyntaxError)?;
     Ok(BinaryTokenResult::Single(PsObject::bool(b[0] != 0)))
 }
 
@@ -465,8 +847,12 @@ fn alloc_string(ctx: &mut Context, bytes: &[u8]) -> PsObject {
     let save_level = ctx.save_stack.current_level();
     let global = ctx.vm_alloc_mode;
     let created = ctx.save_stack.last_save_id();
-    let entity = ctx.strings.allocate_with(bytes.len(), save_level, global, created);
-    ctx.strings.get_mut(entity, 0, bytes.len() as u32).copy_from_slice(bytes);
+    let entity = ctx
+        .strings
+        .allocate_with(bytes.len(), save_level, global, created);
+    ctx.strings
+        .get_mut(entity, 0, bytes.len() as u32)
+        .copy_from_slice(bytes);
     let mut obj = PsObject::string(entity, bytes.len() as u32);
     if global {
         obj.flags = ObjFlags::new(ObjFlags::ACCESS_UNLIMITED, false, true, true);
@@ -498,7 +884,11 @@ fn parse_system_name_from_stream(
     Ok(BinaryTokenResult::Single(obj))
 }
 
-fn resolve_system_name(ctx: &mut Context, idx: usize, executable: bool) -> Result<PsObject, PsError> {
+fn resolve_system_name(
+    ctx: &mut Context,
+    idx: usize,
+    executable: bool,
+) -> Result<PsObject, PsError> {
     if idx >= SYSTEM_NAME_TABLE.len() {
         return Err(PsError::Undefined);
     }
@@ -528,7 +918,14 @@ fn parse_number_array_from_slice(
     let body_start = 3;
     let body_len = count * elem_size;
     need(data, body_start + body_len)?;
-    let elements = decode_number_elements(&data[body_start..], count, elem_size, is_real, scale, big_endian);
+    let elements = decode_number_elements(
+        &data[body_start..],
+        count,
+        elem_size,
+        is_real,
+        scale,
+        big_endian,
+    );
     let obj = alloc_array(ctx, &elements);
     Ok((BinaryTokenResult::Single(obj), body_start + body_len))
 }
@@ -617,7 +1014,9 @@ fn alloc_array(ctx: &mut Context, elements: &[PsObject]) -> PsObject {
     let save_level = ctx.save_stack.current_level();
     let global = ctx.vm_alloc_mode;
     let created = ctx.save_stack.last_save_id();
-    let entity = ctx.arrays.allocate_with(elements.len(), save_level, global, created);
+    let entity = ctx
+        .arrays
+        .allocate_with(elements.len(), save_level, global, created);
     let dest = ctx.arrays.get_mut(entity, 0, elements.len() as u32);
     dest.copy_from_slice(elements);
     let mut obj = PsObject {
@@ -669,7 +1068,9 @@ fn parse_bos_from_slice(
     // Note: overall_length includes the tag byte (already consumed) + rest of header + body.
     // The data slice starts AFTER the tag byte. So body starts at (header_size - 1) from
     // the start of data, and total data consumed = overall_length - 1.
-    let data_size = overall_length.checked_sub(header_size).ok_or(PsError::SyntaxError)?;
+    let data_size = overall_length
+        .checked_sub(header_size)
+        .ok_or(PsError::SyntaxError)?;
     let body_offset = header_size - 1; // -1 because tag byte not in data
     need(data, body_offset + data_size)?;
     let body = &data[body_offset..body_offset + data_size];
@@ -706,7 +1107,9 @@ fn parse_bos_from_stream(
         (ext, 8usize)
     };
 
-    let data_size = overall_length.checked_sub(header_size).ok_or(PsError::SyntaxError)?;
+    let data_size = overall_length
+        .checked_sub(header_size)
+        .ok_or(PsError::SyntaxError)?;
     let body = read_n_bytes(&mut ctx.files, file_entity, data_size)?;
 
     let obj = parse_bos_body(ctx, &body, data_size, top_level_count, big_endian)?;
@@ -735,7 +1138,9 @@ fn parse_bos_body(
     let save_level = ctx.save_stack.current_level();
     let global = ctx.vm_alloc_mode;
     let created = ctx.save_stack.last_save_id();
-    let entity = ctx.arrays.allocate_with(results.len(), save_level, global, created);
+    let entity = ctx
+        .arrays
+        .allocate_with(results.len(), save_level, global, created);
     let dest = ctx.arrays.get_mut(entity, 0, results.len() as u32);
     dest.copy_from_slice(&results);
 
@@ -886,7 +1291,8 @@ fn build_bos_object(
             let offset = value_u32 as usize;
             let mut elements = Vec::with_capacity(count);
             for i in 0..count {
-                let child = build_bos_object(ctx, data, data_size, offset + i * 8, big_endian, depth + 1)?;
+                let child =
+                    build_bos_object(ctx, data, data_size, offset + i * 8, big_endian, depth + 1)?;
                 elements.push(child);
             }
             let mut obj = alloc_array(ctx, &elements);

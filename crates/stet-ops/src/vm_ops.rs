@@ -136,9 +136,7 @@ pub fn op_gcheck(ctx: &mut Context) -> Result<(), PsError> {
     let is_global = match obj.value {
         // Composite types: check entity tag bit
         PsValue::String { entity, .. } => entity.is_global(),
-        PsValue::Array { entity, .. } | PsValue::PackedArray { entity, .. } => {
-            entity.is_global()
-        }
+        PsValue::Array { entity, .. } | PsValue::PackedArray { entity, .. } => entity.is_global(),
         PsValue::Dict(entity) => entity.is_global(),
         // Simple types are not in VM — always global per PLRM
         _ => true,
@@ -172,7 +170,9 @@ pub fn alloc_string(ctx: &mut Context, bytes: &[u8]) -> stet_core::object::Entit
     let save_level = ctx.save_stack.current_level();
     let global = ctx.vm_alloc_mode;
     let created = ctx.save_stack.last_save_id();
-    let entity = ctx.strings.allocate_with(bytes.len(), save_level, global, created);
+    let entity = ctx
+        .strings
+        .allocate_with(bytes.len(), save_level, global, created);
     ctx.strings
         .get_mut(entity, 0, bytes.len() as u32)
         .copy_from_slice(bytes);
@@ -200,7 +200,9 @@ pub fn alloc_array_from(ctx: &mut Context, items: &[PsObject]) -> stet_core::obj
     let save_level = ctx.save_stack.current_level();
     let global = ctx.vm_alloc_mode;
     let created = ctx.save_stack.last_save_id();
-    let entity = ctx.arrays.allocate_with(items.len(), save_level, global, created);
+    let entity = ctx
+        .arrays
+        .allocate_with(items.len(), save_level, global, created);
     let dest = ctx.arrays.get_mut(entity, 0, items.len() as u32);
     dest.copy_from_slice(items);
     entity

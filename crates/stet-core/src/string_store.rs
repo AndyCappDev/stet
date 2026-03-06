@@ -49,8 +49,13 @@ impl StringStore {
     ) -> EntityId {
         let offset = self.data.len() as u32;
         self.data.extend_from_slice(bytes);
-        self.entities
-            .allocate(offset, bytes.len() as u32, save_level, global, created_after_save)
+        self.entities.allocate(
+            offset,
+            bytes.len() as u32,
+            save_level,
+            global,
+            created_after_save,
+        )
     }
 
     /// Allocate with a specific save level and global flag.

@@ -265,8 +265,7 @@ fn image_type3_form(
     let img_h = dict_get_int(ctx, data_dict, b"Height").ok_or(PsError::Undefined)? as u32;
     let img_bps =
         dict_get_int(ctx, data_dict, b"BitsPerComponent").ok_or(PsError::Undefined)? as u32;
-    let img_matrix =
-        dict_get_matrix(ctx, data_dict, b"ImageMatrix").ok_or(PsError::Undefined)?;
+    let img_matrix = dict_get_matrix(ctx, data_dict, b"ImageMatrix").ok_or(PsError::Undefined)?;
     let img_decode = dict_get_decode(ctx, data_dict).unwrap_or_default();
     let img_data_source = dict_get_obj(ctx, data_dict, b"DataSource");
     let img_multi = dict_get_obj(ctx, data_dict, b"MultipleDataSources")
@@ -279,8 +278,7 @@ fn image_type3_form(
     // Extract MaskDict parameters
     let mask_w = dict_get_int(ctx, mask_dict, b"Width").ok_or(PsError::Undefined)? as u32;
     let mask_h = dict_get_int(ctx, mask_dict, b"Height").ok_or(PsError::Undefined)? as u32;
-    let mask_bps =
-        dict_get_int(ctx, mask_dict, b"BitsPerComponent").unwrap_or(1) as u32;
+    let mask_bps = dict_get_int(ctx, mask_dict, b"BitsPerComponent").unwrap_or(1) as u32;
     let mask_decode = dict_get_decode(ctx, mask_dict).unwrap_or_else(|| vec![0.0, 1.0]);
     let mask_data_source = dict_get_obj(ctx, mask_dict, b"DataSource");
 
@@ -437,8 +435,7 @@ fn read_type3_interleave1(
 
             for _col in 0..img_w as usize {
                 // Extract mask sample
-                let mask_val =
-                    extract_bits(&raw, src_row_start, src_bit, img_bps as usize);
+                let mask_val = extract_bits(&raw, src_row_start, src_bit, img_bps as usize);
                 set_bits(
                     &mut mask_data,
                     row * mask_bytes_per_row,
@@ -451,8 +448,7 @@ fn read_type3_interleave1(
 
                 // Extract image samples
                 for _ in 0..ncomp {
-                    let val =
-                        extract_bits(&raw, src_row_start, src_bit, img_bps as usize);
+                    let val = extract_bits(&raw, src_row_start, src_bit, img_bps as usize);
                     set_bits(
                         &mut img_data,
                         row * img_bytes_per_row,
@@ -612,15 +608,16 @@ fn apply_stencil_mask(
                 mask_data.get(idx).copied().unwrap_or(0)
             } else {
                 // General case for other BPS
-                extract_bits(mask_data, mask_y * mask_bytes_per_row, mask_x * mask_bps as usize, mask_bps as usize) as u8
+                extract_bits(
+                    mask_data,
+                    mask_y * mask_bytes_per_row,
+                    mask_x * mask_bps as usize,
+                    mask_bps as usize,
+                ) as u8
             };
 
             // Determine if this pixel should paint
-            let paint = if polarity {
-                sample != 0
-            } else {
-                sample == 0
-            };
+            let paint = if polarity { sample != 0 } else { sample == 0 };
 
             if !paint {
                 let pi = (y * img_w as usize + x) * 4;

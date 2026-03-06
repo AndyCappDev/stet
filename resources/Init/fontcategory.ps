@@ -10,6 +10,7 @@ true setglobal
 /Font <<
     /InstanceType /dicttype
     /ResourceDir (resources/Font)
+    /ResourceExtensions [(.t1) (.pfa) (.pfb) (.ttf) (.otf)]
     /ResourceExtension (.t1)
     /Category /Font
     /DefaultFont /Helvetica
@@ -146,8 +147,9 @@ true setglobal
 
     % Font FindResource — search order:
     %   1. Already loaded (in-memory resource dicts)
-    %   2. resources/Font/ directory (.t1 files)
-    %   3. Fallback to DefaultFont
+    %   2. resources/Font/ directory (.t1, .pfa, .pfb, .ttf, .otf)
+    %   3. System font cache (.loadsystemfont, .loadbinarysystemfont)
+    %   4. Fallback to DefaultFont
     /FindResource {
         % Stack: key
         12 dict begin
@@ -188,37 +190,102 @@ true setglobal
             } if
         } if
 
-        % ---- STEP 2: Search resources/Font/ directory ----
+        % ---- STEP 2: Search resources/Font/ directory (multiple extensions) ----
         loaded_font null eq {
             /file_path null def
+            /file_ext null def
 
-            (/) [ResourceDir () [font_name =fstring cvs ResourceExtension] =fstring join] =fstring join
-            dup status {
-                4 {pop} repeat
-                /file_path exch def
-            } {
-                pop
-            } ifelse
+            ResourceExtensions {
+                /try_ext exch def
+                file_path null eq {
+                    (/) [ResourceDir () [font_name =fstring cvs try_ext] =fstring join] =fstring join
+                    dup status {
+                        4 {pop} repeat
+                        /file_path exch def
+                        /file_ext try_ext def
+                    } {
+                        pop
+                    } ifelse
+                } if
+            } forall
 
             file_path null ne {
-                currentglobal true setglobal
-                file_path run
-                setglobal
-                % Font now in FontDirectory via definefont in .t1 file
+                % Check if this is a binary font (.ttf or .otf)
+                file_ext (.ttf) eq file_ext (.otf) eq or {
+                    % Binary font — load via native operator
+                    font_name file_path .loadbinaryfontfile {
+                        FontDirectory font_name known {
+                            FontDirectory font_name get /loaded_font exch def
+                            font_name loaded_font
+                            Category globalresourcedict {
+                                3 1 roll put
+                            } {
+                                pop pop
+                            } ifelse
+                        } if
+                    } if
+                } {
+                    % Text font (.t1, .pfa, .pfb) — run as PS
+                    currentglobal true setglobal
+                    file_path run
+                    setglobal
+                    % Font now in FontDirectory via definefont in .t1 file
+                    FontDirectory font_name known {
+                        FontDirectory font_name get /loaded_font exch def
+                        font_name loaded_font
+                        Category globalresourcedict {
+                            3 1 roll put
+                        } {
+                            pop pop
+                        } ifelse
+                    } if
+                } ifelse
+            } if
+        } if
+
+        % ---- STEP 3: Try system fonts ----
+        loaded_font null eq {
+            % First try text-based system fonts (.pfa/.t1)
+            font_name .loadsystemfont {
+                % Stack: path_string
+                /saved_global currentglobal def
+                true setglobal
+                exch run
+                saved_global setglobal
                 FontDirectory font_name known {
                     FontDirectory font_name get /loaded_font exch def
-                    % Also register in resource dict for future lookups
+                    /saved_global2 currentglobal def
+                    true setglobal
                     font_name loaded_font
                     Category globalresourcedict {
                         3 1 roll put
                     } {
                         pop pop
                     } ifelse
+                    saved_global2 setglobal
                 } if
             } if
         } if
 
-        % ---- STEP 3: Fallback ----
+        loaded_font null eq {
+            % Try binary system fonts (.ttf/.otf)
+            font_name .loadbinarysystemfont {
+                FontDirectory font_name known {
+                    FontDirectory font_name get /loaded_font exch def
+                    /saved_global currentglobal def
+                    true setglobal
+                    font_name loaded_font
+                    Category globalresourcedict {
+                        3 1 roll put
+                    } {
+                        pop pop
+                    } ifelse
+                    saved_global setglobal
+                } if
+            } if
+        } if
+
+        % ---- STEP 4: Fallback ----
         loaded_font null eq {
             original_font_name FontFallback /loaded_font exch def
         } if

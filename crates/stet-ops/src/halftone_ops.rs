@@ -93,8 +93,14 @@ pub fn op_setcolorscreen(ctx: &mut Context) -> Result<(), PsError> {
             PsValue::Array { .. } | PsValue::PackedArray { .. } | PsValue::Dict(_) => {}
             _ => return Err(PsError::TypeCheck),
         }
-        ctx.o_stack.peek(base + 1)?.as_f64().ok_or(PsError::TypeCheck)?;
-        ctx.o_stack.peek(base + 2)?.as_f64().ok_or(PsError::TypeCheck)?;
+        ctx.o_stack
+            .peek(base + 1)?
+            .as_f64()
+            .ok_or(PsError::TypeCheck)?;
+        ctx.o_stack
+            .peek(base + 2)?
+            .as_f64()
+            .ok_or(PsError::TypeCheck)?;
     }
     // Now pop: gray(top), blue, green, red(bottom)
     let mut components: [(f64, f64, PsObject); 4] = [(0.0, 0.0, PsObject::null()); 4];
@@ -436,7 +442,9 @@ fn extract_matrix(ctx: &Context, obj: &PsObject) -> Result<Matrix, PsError> {
                     .as_f64()
                     .ok_or(PsError::TypeCheck)?;
             }
-            Ok(Matrix::new(vals[0], vals[1], vals[2], vals[3], vals[4], vals[5]))
+            Ok(Matrix::new(
+                vals[0], vals[1], vals[2], vals[3], vals[4], vals[5],
+            ))
         }
         _ => Err(PsError::TypeCheck),
     }
@@ -661,11 +669,7 @@ pub fn op_setpattern(ctx: &mut Context) -> Result<(), PsError> {
         if ctx.o_stack.is_empty() {
             return Err(PsError::StackUnderflow);
         }
-        let color_val = ctx
-            .o_stack
-            .peek(0)?
-            .as_f64()
-            .ok_or(PsError::TypeCheck)?;
+        let color_val = ctx.o_stack.peek(0)?.as_f64().ok_or(PsError::TypeCheck)?;
         ctx.o_stack.pop()?;
         ctx.gstate.pattern_underlying_color =
             Some(stet_core::graphics_state::DeviceColor::from_gray(color_val));
@@ -687,33 +691,46 @@ fn replay_form_elements(
     use stet_core::display_list::DisplayElement;
     use stet_core::graphics_state::PathSegment;
 
-    let transform_path = |path: &stet_core::graphics_state::PsPath| -> stet_core::graphics_state::PsPath {
-        let mut result = stet_core::graphics_state::PsPath::new();
-        for seg in &path.segments {
-            match seg {
-                PathSegment::MoveTo(x, y) => {
-                    let (nx, ny) = ctm.transform_point(*x, *y);
-                    result.segments.push(PathSegment::MoveTo(nx, ny));
-                }
-                PathSegment::LineTo(x, y) => {
-                    let (nx, ny) = ctm.transform_point(*x, *y);
-                    result.segments.push(PathSegment::LineTo(nx, ny));
-                }
-                PathSegment::CurveTo { x1, y1, x2, y2, x3, y3 } => {
-                    let (nx1, ny1) = ctm.transform_point(*x1, *y1);
-                    let (nx2, ny2) = ctm.transform_point(*x2, *y2);
-                    let (nx3, ny3) = ctm.transform_point(*x3, *y3);
-                    result.segments.push(PathSegment::CurveTo {
-                        x1: nx1, y1: ny1, x2: nx2, y2: ny2, x3: nx3, y3: ny3,
-                    });
-                }
-                PathSegment::ClosePath => {
-                    result.segments.push(PathSegment::ClosePath);
+    let transform_path =
+        |path: &stet_core::graphics_state::PsPath| -> stet_core::graphics_state::PsPath {
+            let mut result = stet_core::graphics_state::PsPath::new();
+            for seg in &path.segments {
+                match seg {
+                    PathSegment::MoveTo(x, y) => {
+                        let (nx, ny) = ctm.transform_point(*x, *y);
+                        result.segments.push(PathSegment::MoveTo(nx, ny));
+                    }
+                    PathSegment::LineTo(x, y) => {
+                        let (nx, ny) = ctm.transform_point(*x, *y);
+                        result.segments.push(PathSegment::LineTo(nx, ny));
+                    }
+                    PathSegment::CurveTo {
+                        x1,
+                        y1,
+                        x2,
+                        y2,
+                        x3,
+                        y3,
+                    } => {
+                        let (nx1, ny1) = ctm.transform_point(*x1, *y1);
+                        let (nx2, ny2) = ctm.transform_point(*x2, *y2);
+                        let (nx3, ny3) = ctm.transform_point(*x3, *y3);
+                        result.segments.push(PathSegment::CurveTo {
+                            x1: nx1,
+                            y1: ny1,
+                            x2: nx2,
+                            y2: ny2,
+                            x3: nx3,
+                            y3: ny3,
+                        });
+                    }
+                    PathSegment::ClosePath => {
+                        result.segments.push(PathSegment::ClosePath);
+                    }
                 }
             }
-        }
-        result
-    };
+            result
+        };
 
     for elem in cached.elements() {
         match elem {
@@ -913,8 +930,7 @@ pub fn op_execform(ctx: &mut Context) -> Result<(), PsError> {
         // Mark as cached
         ctx.cow_check_dict(dict_entity);
         let impl_key = DictKey::Name(ctx.names.intern(b"Implementation"));
-        ctx.dicts
-            .put(dict_entity, impl_key, PsObject::bool(true));
+        ctx.dicts.put(dict_entity, impl_key, PsObject::bool(true));
     }
 
     // 5. Replay cached elements transformed through real CTM

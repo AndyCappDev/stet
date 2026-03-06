@@ -40,18 +40,18 @@ type OpFn = fn(&mut Context) -> Result<(), PsError>;
 
 /// Dispatch table for encoded userpath opcodes.
 const OPCODE_FNS: [OpFn; 12] = [
-    op_setbbox,     // 0
-    op_moveto,      // 1
-    op_rmoveto,     // 2
-    op_lineto,      // 3
-    op_rlineto,     // 4
-    op_curveto,     // 5
-    op_rcurveto,    // 6
-    op_arc,         // 7
-    op_arcn,        // 8
-    op_arct,        // 9
-    op_closepath,   // 10
-    op_ucache,      // 11
+    op_setbbox,   // 0
+    op_moveto,    // 1
+    op_rmoveto,   // 2
+    op_lineto,    // 3
+    op_rlineto,   // 4
+    op_curveto,   // 5
+    op_rcurveto,  // 6
+    op_arc,       // 7
+    op_arcn,      // 8
+    op_arct,      // 9
+    op_closepath, // 10
+    op_ucache,    // 11
 ];
 
 /// `setbbox`: llx lly urx ury → —
@@ -114,9 +114,7 @@ fn uappend_encoded(ctx: &mut Context, entity: EntityId, start: u32) -> Result<()
 
     // Extract opcode string bytes
     let ops_bytes = match ops_obj.value {
-        PsValue::String { entity, start, len } => {
-            ctx.strings.get(entity, start, len).to_vec()
-        }
+        PsValue::String { entity, start, len } => ctx.strings.get(entity, start, len).to_vec(),
         _ => return Err(PsError::TypeCheck),
     };
 
@@ -244,7 +242,14 @@ pub fn op_upath(ctx: &mut Context) -> Result<(), PsError> {
                     PathSegment::MoveTo(x, y) | PathSegment::LineTo(x, y) => {
                         vec![ictm.transform_point(*x, *y)]
                     }
-                    PathSegment::CurveTo { x1, y1, x2, y2, x3, y3 } => {
+                    PathSegment::CurveTo {
+                        x1,
+                        y1,
+                        x2,
+                        y2,
+                        x3,
+                        y3,
+                    } => {
                         vec![
                             ictm.transform_point(*x1, *y1),
                             ictm.transform_point(*x2, *y2),
@@ -290,7 +295,14 @@ pub fn op_upath(ctx: &mut Context) -> Result<(), PsError> {
                 elems.push(PsObject::real(uy));
                 elems.push(PsObject::name_exec(lineto_name));
             }
-            PathSegment::CurveTo { x1, y1, x2, y2, x3, y3 } => {
+            PathSegment::CurveTo {
+                x1,
+                y1,
+                x2,
+                y2,
+                x3,
+                y3,
+            } => {
                 let (ux1, uy1) = ictm.transform_point(*x1, *y1);
                 let (ux2, uy2) = ictm.transform_point(*x2, *y2);
                 let (ux3, uy3) = ictm.transform_point(*x3, *y3);
@@ -364,7 +376,11 @@ fn is_matrix_on_stack(ctx: &Context) -> bool {
         Err(_) => return false,
     };
     match top.value {
-        PsValue::Array { entity, start, len: 6 } => {
+        PsValue::Array {
+            entity,
+            start,
+            len: 6,
+        } => {
             let elems = ctx.arrays.get(entity, start, 6);
             elems.iter().all(|e| e.as_f64().is_some())
         }

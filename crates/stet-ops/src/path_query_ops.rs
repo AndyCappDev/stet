@@ -354,7 +354,6 @@ pub fn op_strokepath(ctx: &mut Context) -> Result<(), PsError> {
     use crate::paint_ops::{ctm_singular_values, is_anisotropic};
     use crate::strokepath_algorithm as algo;
 
-
     if ctx.gstate.path.is_empty() {
         return Ok(());
     }

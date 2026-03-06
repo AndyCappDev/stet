@@ -117,13 +117,7 @@ fn lerp(a: Point, b: Point, t: f64) -> Point {
 }
 
 /// Split cubic Bézier at parameter t. Returns (left, right) each as 4 Points.
-fn split_cubic(
-    p0: Point,
-    p1: Point,
-    p2: Point,
-    p3: Point,
-    t: f64,
-) -> ([Point; 4], [Point; 4]) {
+fn split_cubic(p0: Point, p1: Point, p2: Point, p3: Point, t: f64) -> ([Point; 4], [Point; 4]) {
     let q0 = lerp(p0, p1, t);
     let q1 = lerp(p1, p2, t);
     let q2 = lerp(p2, p3, t);
@@ -148,13 +142,23 @@ fn cubic_arc_length_approx(
         return (chord + poly) / 2.0;
     }
     let (left, right) = split_cubic(p0, p1, p2, p3, 0.5);
-    cubic_arc_length_approx(left[0], left[1], left[2], left[3], depth + 1, max_depth, tol)
-        + cubic_arc_length_approx(
-            right[0], right[1], right[2], right[3],
-            depth + 1,
-            max_depth,
-            tol,
-        )
+    cubic_arc_length_approx(
+        left[0],
+        left[1],
+        left[2],
+        left[3],
+        depth + 1,
+        max_depth,
+        tol,
+    ) + cubic_arc_length_approx(
+        right[0],
+        right[1],
+        right[2],
+        right[3],
+        depth + 1,
+        max_depth,
+        tol,
+    )
 }
 
 fn line_length(p0: Point, p1: Point) -> f64 {
@@ -178,8 +182,7 @@ fn find_cubic_t_for_length(
     for _ in 0..depth {
         let mid = (lo + hi) / 2.0;
         let (left, _) = split_cubic(p0, p1, p2, p3, mid);
-        let left_len =
-            cubic_arc_length_approx(left[0], left[1], left[2], left[3], 0, 12, 0.1);
+        let left_len = cubic_arc_length_approx(left[0], left[1], left[2], left[3], 0, 12, 0.1);
         if left_len < target_len {
             lo = mid;
         } else {
@@ -195,11 +198,7 @@ enum DashSeg {
     Curve(Point, Point, Point, Point),
 }
 
-pub fn apply_dash_pattern(
-    subpaths: &Path,
-    dash_array: &[f64],
-    dash_offset: f64,
-) -> Path {
+pub fn apply_dash_pattern(subpaths: &Path, dash_array: &[f64], dash_offset: f64) -> Path {
     if dash_array.is_empty() {
         return subpaths.clone();
     }
@@ -289,8 +288,7 @@ pub fn apply_dash_pattern(
 
         let mut drawing = dash_idx % 2 == 0;
         let starts_drawing = drawing;
-        let mut dash_remaining =
-            dash_array[dash_idx % dash_array.len()] - remaining_offset;
+        let mut dash_remaining = dash_array[dash_idx % dash_array.len()] - remaining_offset;
 
         let mut current_subpath: SubPath = Vec::new();
         let mut seg_idx = 0usize;
@@ -332,7 +330,8 @@ pub fn apply_dash_pattern(
                         }
                         DashSeg::Curve(p0, p1, p2, p3) => {
                             let (rp0, rp1, rp2, rp3) = if seg_consumed > 1e-12 {
-                                let t = find_cubic_t_for_length(*p0, *p1, *p2, *p3, seg_consumed, 20);
+                                let t =
+                                    find_cubic_t_for_length(*p0, *p1, *p2, *p3, seg_consumed, 20);
                                 let (_, right) = split_cubic(*p0, *p1, *p2, *p3, t);
                                 (right[0], right[1], right[2], right[3])
                             } else {
@@ -794,14 +793,8 @@ fn circle_line_intersection(
     let t1 = (-b - sqrt_disc) / (2.0 * a);
     let t2 = (-b + sqrt_disc) / (2.0 * a);
     vec![
-        Point::new(
-            line_pt.x + t1 * line_dir.x,
-            line_pt.y + t1 * line_dir.y,
-        ),
-        Point::new(
-            line_pt.x + t2 * line_dir.x,
-            line_pt.y + t2 * line_dir.y,
-        ),
+        Point::new(line_pt.x + t1 * line_dir.x, line_pt.y + t1 * line_dir.y),
+        Point::new(line_pt.x + t2 * line_dir.x, line_pt.y + t2 * line_dir.y),
     ]
 }
 
@@ -1192,9 +1185,8 @@ pub fn strokepath_grouped(
                     let p1 = Point::new(*x1, *y1);
                     let p2 = Point::new(*x2, *y2);
                     let p3 = Point::new(*x3, *y3);
-                    total_len += p1.sub(*start).length()
-                        + p2.sub(p1).length()
-                        + p3.sub(p2).length();
+                    total_len +=
+                        p1.sub(*start).length() + p2.sub(p1).length() + p3.sub(p2).length();
                 }
                 _ => {
                     let ep = segment_endpoint(seg).unwrap_or(*start);
@@ -1360,9 +1352,7 @@ fn reverse_closed_outline(sp: &[PathElement]) -> SubPath {
             PathElement::LineTo(..) => {
                 result.push(PathElement::LineTo(target.x, target.y));
             }
-            PathElement::CurveTo {
-                x1, y1, x2, y2, ..
-            } => {
+            PathElement::CurveTo { x1, y1, x2, y2, .. } => {
                 result.push(PathElement::CurveTo {
                     x1: *x2,
                     y1: *y2,
@@ -1453,13 +1443,8 @@ fn assemble_closed_outline(
             is_outside = true;
         }
         if !is_outside {
-            let trim_pt = compute_inner_join_point(
-                end,
-                prev_tangent,
-                next_start,
-                next_tangent,
-                half_width,
-            );
+            let trim_pt =
+                compute_inner_join_point(end, prev_tangent, next_start, next_tangent, half_width);
             if let Some(tp) = trim_pt {
                 trim_outline_end(&mut outline, tp);
                 continue;
@@ -1583,14 +1568,8 @@ fn assemble_open_outline(
                 if let Some(tp) = trim_pt {
                     // Check if trim overshoots past the NEXT segment's end
                     let next_end = left_offsets[i + 1].2;
-                    let next_fwd = Point::new(
-                        next_end.x - next_start.x,
-                        next_end.y - next_start.y,
-                    );
-                    let trim_from_next_start = Point::new(
-                        tp.x - next_start.x,
-                        tp.y - next_start.y,
-                    );
+                    let next_fwd = Point::new(next_end.x - next_start.x, next_end.y - next_start.y);
+                    let trim_from_next_start = Point::new(tp.x - next_start.x, tp.y - next_start.y);
                     let next_len_sq = next_fwd.dot(next_fwd);
                     let t_param = if next_len_sq > 0.0 {
                         next_fwd.dot(trim_from_next_start) / next_len_sq
@@ -1644,8 +1623,7 @@ fn assemble_open_outline(
         let next_right_end = right_offsets[last_ri - 1].2;
         let mut prev_tangent_r = tangent_at_start(segments[last_ri].0, &segments[last_ri].1);
         prev_tangent_r = prev_tangent_r.neg();
-        let mut next_tangent_r =
-            tangent_at_end(segments[last_ri - 1].0, &segments[last_ri - 1].1);
+        let mut next_tangent_r = tangent_at_end(segments[last_ri - 1].0, &segments[last_ri - 1].1);
         next_tangent_r = next_tangent_r.neg();
 
         let cross = prev_tangent_r.cross(next_tangent_r);
@@ -1720,8 +1698,7 @@ fn assemble_open_outline(
                     outline.extend(arc_elems);
                 }
             } else {
-                let cap_elems =
-                    make_cap(end_point, end_tangent, half_width, line_cap, false);
+                let cap_elems = make_cap(end_point, end_tangent, half_width, line_cap, false);
                 outline.extend(cap_elems);
             }
         } else {
@@ -1731,8 +1708,7 @@ fn assemble_open_outline(
     } else if degenerate_last_right && line_cap == 1 {
         // Truncated round cap on RIGHT side
         let seg0_right_end = right_offsets[last_ri - 1].2;
-        let seg0_tangent =
-            tangent_at_end(segments[last_ri - 1].0, &segments[last_ri - 1].1);
+        let seg0_tangent = tangent_at_end(segments[last_ri - 1].0, &segments[last_ri - 1].1);
         let seg0_dir = seg0_tangent.normalized();
 
         let hits = circle_line_intersection(end_point, half_width, seg0_right_end, seg0_dir);
@@ -1769,8 +1745,7 @@ fn assemble_open_outline(
                     degenerate_trim_pt.unwrap().y,
                 ));
             } else {
-                let cap_elems =
-                    make_cap(end_point, end_tangent, half_width, line_cap, false);
+                let cap_elems = make_cap(end_point, end_tangent, half_width, line_cap, false);
                 outline.extend(cap_elems);
             }
         } else {
@@ -1793,11 +1768,9 @@ fn assemble_open_outline(
         } else if line_cap == 1 && i > 0 {
             let prev_right_start = right_offsets[i].1;
             let next_right_end = right_offsets[i - 1].2;
-            let mut prev_tangent_chk =
-                tangent_at_start(segments[i].0, &segments[i].1);
+            let mut prev_tangent_chk = tangent_at_start(segments[i].0, &segments[i].1);
             prev_tangent_chk = prev_tangent_chk.neg();
-            let mut next_tangent_chk =
-                tangent_at_end(segments[i - 1].0, &segments[i - 1].1);
+            let mut next_tangent_chk = tangent_at_end(segments[i - 1].0, &segments[i - 1].1);
             next_tangent_chk = next_tangent_chk.neg();
 
             let cross = prev_tangent_chk.cross(next_tangent_chk);
@@ -1818,10 +1791,8 @@ fn assemble_open_outline(
                         right_offsets[i].1.x - right_offsets[i].2.x,
                         right_offsets[i].1.y - right_offsets[i].2.y,
                     );
-                    let trim_dir = Point::new(
-                        tp.x - right_offsets[i].2.x,
-                        tp.y - right_offsets[i].2.y,
-                    );
+                    let trim_dir =
+                        Point::new(tp.x - right_offsets[i].2.x, tp.y - right_offsets[i].2.y);
                     if orig_dir.dot(trim_dir) < 0.0 {
                         skip_reversed = true;
                     }
@@ -1842,8 +1813,7 @@ fn assemble_open_outline(
             let next_right_end = right_offsets[i - 1].2;
             let mut prev_tangent = tangent_at_start(segments[i].0, &segments[i].1);
             prev_tangent = prev_tangent.neg();
-            let mut next_tangent =
-                tangent_at_end(segments[i - 1].0, &segments[i - 1].1);
+            let mut next_tangent = tangent_at_end(segments[i - 1].0, &segments[i - 1].1);
             next_tangent = next_tangent.neg();
 
             let cross = prev_tangent.cross(next_tangent);
@@ -1864,10 +1834,7 @@ fn assemble_open_outline(
                     trim_outline_end(&mut outline, tp);
                     continue;
                 } else {
-                    outline.push(PathElement::LineTo(
-                        next_right_end.x,
-                        next_right_end.y,
-                    ));
+                    outline.push(PathElement::LineTo(next_right_end.x, next_right_end.y));
                     continue;
                 }
             }
@@ -1899,14 +1866,12 @@ fn assemble_open_outline(
         let seg1_tangent = tangent_at_start(segments[1].0, &segments[1].1);
         let seg1_dir = seg1_tangent.normalized();
 
-        let hits =
-            circle_line_intersection(first_seg_start, half_width, seg1_left_start, seg1_dir);
+        let hits = circle_line_intersection(first_seg_start, half_width, seg1_left_start, seg1_dir);
         if hits.len() >= 2 {
             let mut best_hit: Option<Point> = None;
             let mut best_angle_dist = -1.0f64;
             for h in &hits {
-                let a_h =
-                    (h.y - first_seg_start.y).atan2(h.x - first_seg_start.x);
+                let a_h = (h.y - first_seg_start.y).atan2(h.x - first_seg_start.x);
                 let mut delta = a_start_angle - a_h;
                 while delta < 0.0 {
                     delta += 2.0 * PI;
@@ -1921,8 +1886,7 @@ fn assemble_open_outline(
             }
 
             if let Some(bh) = best_hit {
-                let a_end_angle =
-                    (bh.y - first_seg_start.y).atan2(bh.x - first_seg_start.x);
+                let a_end_angle = (bh.y - first_seg_start.y).atan2(bh.x - first_seg_start.x);
                 if (a_start_angle - a_end_angle).abs() > 1e-10 {
                     let arc_elems =
                         arc_to_cubics(first_seg_start, half_width, a_start_angle, a_end_angle);
@@ -1938,13 +1902,11 @@ fn assemble_open_outline(
                 outline.extend(cap_elems);
             }
         } else {
-            let cap_elems =
-                make_cap(first_seg_start, start_tangent, half_width, line_cap, true);
+            let cap_elems = make_cap(first_seg_start, start_tangent, half_width, line_cap, true);
             outline.extend(cap_elems);
         }
     } else {
-        let cap_elems =
-            make_cap(first_seg_start, start_tangent, half_width, line_cap, true);
+        let cap_elems = make_cap(first_seg_start, start_tangent, half_width, line_cap, true);
         outline.extend(cap_elems);
     }
 
@@ -1973,9 +1935,7 @@ fn reverse_offset_elements(elems: &[PathElement], start: Point) -> Vec<PathEleme
             PathElement::LineTo(..) => {
                 result.push(PathElement::LineTo(target.x, target.y));
             }
-            PathElement::CurveTo {
-                x1, y1, x2, y2, ..
-            } => {
+            PathElement::CurveTo { x1, y1, x2, y2, .. } => {
                 result.push(PathElement::CurveTo {
                     x1: *x2,
                     y1: *y2,

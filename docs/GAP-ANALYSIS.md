@@ -101,11 +101,11 @@ PostForge has a DSC parser (dsc_parser.py: 62 lines). stet has basic EPS Boundin
 
 **Impact**: Limited — mainly affects page-level metadata extraction.
 
-### 3.6 System Font Discovery (NOT IMPLEMENTED)
+### 3.6 System Font Discovery (IMPLEMENTED)
 
-PostForge has system font loading from OS font directories (system_font_loader.py: 550 lines, system_font_cache.py: 463 lines). stet only loads fonts from its bundled `resources/Font/` directory.
+stet scans platform-specific font directories (Linux: `/usr/share/fonts`, `/usr/local/share/fonts`, `~/.local/share/fonts`, `~/.fonts`; macOS: `/System/Library/Fonts`, `/Library/Fonts`, `~/Library/Fonts`), extracts PostScript names from `.t1`/`.pfa`/`.pfb`/`.otf`/`.ttf` files, and caches the mapping to `~/.cache/stet/system_fonts.json` with directory mtime-based staleness checking. Three native operators (`.loadsystemfont`, `.loadbinarysystemfont`, `.loadbinaryfontfile`) load system fonts on demand: OTF+CFF via the CFF parser pipeline, TTF via Type 42 font dict construction (sfnts, Encoding from cmap, CharStrings GID mapping). `fontcategory.ps` searches `resources/Font/` with multiple extensions (`.t1`/`.pfa`/`.pfb`/`.ttf`/`.otf`), then falls back to system fonts before the default font substitution.
 
-**Impact**: PS files referencing fonts not in the bundled URW set will fail to find them even if installed on the system. Note: system font discovery is only applicable to native CLI/viewer builds — the WASM viewer runs in a browser sandbox with no filesystem access and will always be limited to bundled fonts.
+**Remaining gaps**: PFB system fonts (rare on modern systems), `.ttc` font collection files, WASM builds (no filesystem access — limited to bundled fonts).
 
 ---
 
@@ -193,7 +193,7 @@ The "Test" resources in PF are used by the test suite. The Default ColorSpace re
 | System font discovery | Yes | **No** | See 3.6 |
 | `composefont` | Yes | Yes | None |
 
-Font support is at feature parity for correctness. Gaps are performance (caching) and discovery (system fonts).
+Font support is at feature parity for correctness. System font discovery is implemented. Remaining gap is performance (glyph caching).
 
 ---
 

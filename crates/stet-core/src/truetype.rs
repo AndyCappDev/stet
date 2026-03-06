@@ -11,19 +11,19 @@ use crate::graphics_state::{PathSegment, PsPath};
 
 /// Read a big-endian u16 from a byte slice at the given offset.
 #[inline]
-fn read_u16(data: &[u8], offset: usize) -> u16 {
+pub fn read_u16(data: &[u8], offset: usize) -> u16 {
     u16::from_be_bytes([data[offset], data[offset + 1]])
 }
 
 /// Read a big-endian i16 from a byte slice at the given offset.
 #[inline]
-fn read_i16(data: &[u8], offset: usize) -> i16 {
+pub fn read_i16(data: &[u8], offset: usize) -> i16 {
     i16::from_be_bytes([data[offset], data[offset + 1]])
 }
 
 /// Read a big-endian u32 from a byte slice at the given offset.
 #[inline]
-fn read_u32(data: &[u8], offset: usize) -> u32 {
+pub fn read_u32(data: &[u8], offset: usize) -> u32 {
     u32::from_be_bytes([
         data[offset],
         data[offset + 1],

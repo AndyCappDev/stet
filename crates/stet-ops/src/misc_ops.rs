@@ -277,38 +277,112 @@ pub fn op_nextfid(ctx: &mut Context) -> Result<(), PsError> {
 
 /// `.loadsystemfont`: name → path true | false
 ///
-/// Return false — stet has no system font cache.
+/// Look up font name in the system font cache. For .pfa/.t1 files, return the
+/// path string and true (caller will `run` the file). For binary fonts or if
+/// not found, return false.
 pub fn op_loadsystemfont(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.o_stack.is_empty() {
         return Err(PsError::StackUnderflow);
     }
+    let name_obj = ctx.o_stack.peek(0)?;
+    let name_bytes = match name_obj.value {
+        PsValue::Name(id) => ctx.names.get_bytes(id).to_vec(),
+        PsValue::String { entity, start, len } => ctx.strings.get(entity, start, len).to_vec(),
+        _ => return Err(PsError::TypeCheck),
+    };
+
     ctx.o_stack.pop()?;
-    ctx.o_stack.push(PsObject::bool(false))?;
+
+    let cache = stet_core::system_fonts::get_system_font_cache();
+    let name_str = String::from_utf8_lossy(&name_bytes);
+
+    if let Some(path) = cache.get_font_path(&name_str) {
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase());
+        match ext.as_deref() {
+            Some("pfa" | "t1") => {
+                // Return path string + true
+                let path_str = path.to_string_lossy();
+                let path_bytes = path_str.as_bytes();
+                let str_entity = ctx.strings.allocate_from(path_bytes);
+                ctx.o_stack
+                    .push(PsObject::string(str_entity, path_bytes.len() as u32))?;
+                ctx.o_stack.push(PsObject::bool(true))?;
+            }
+            _ => {
+                // Binary font — not handled by this operator
+                ctx.o_stack.push(PsObject::bool(false))?;
+            }
+        }
+    } else {
+        ctx.o_stack.push(PsObject::bool(false))?;
+    }
     Ok(())
 }
 
-/// `.loadbinarysystemfont`: name → bool
+/// `.loadbinarysystemfont`: name → true | false
 ///
-/// Return false — stet has no binary system font support.
+/// Look up font name in system font cache. If found and it's a binary font
+/// (.otf/.ttf/.pfb), load it directly and register as a PostScript font.
 pub fn op_loadbinarysystemfont(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.o_stack.is_empty() {
         return Err(PsError::StackUnderflow);
     }
+    let name_obj = ctx.o_stack.peek(0)?;
+    let name_bytes = match name_obj.value {
+        PsValue::Name(id) => ctx.names.get_bytes(id).to_vec(),
+        PsValue::String { entity, start, len } => ctx.strings.get(entity, start, len).to_vec(),
+        _ => return Err(PsError::TypeCheck),
+    };
+
     ctx.o_stack.pop()?;
-    ctx.o_stack.push(PsObject::bool(false))?;
+
+    let cache = stet_core::system_fonts::get_system_font_cache();
+    let name_str = String::from_utf8_lossy(&name_bytes);
+
+    if let Some(path) = cache.get_font_path(&name_str) {
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase());
+        match ext.as_deref() {
+            Some("otf" | "ttf") => {
+                let ok = stet_core::system_font_loader::load_binary_font(ctx, path);
+                ctx.o_stack.push(PsObject::bool(ok))?;
+            }
+            _ => {
+                ctx.o_stack.push(PsObject::bool(false))?;
+            }
+        }
+    } else {
+        ctx.o_stack.push(PsObject::bool(false))?;
+    }
     Ok(())
 }
 
-/// `.loadbinaryfontfile`: name path → bool
+/// `.loadbinaryfontfile`: name path → true | false
 ///
-/// Return false — stet has no binary font file loading.
+/// Load a binary font from an explicit file path. Used by fontcategory.ps
+/// when .ttf/.otf files are found in resources/Font/.
 pub fn op_loadbinaryfontfile(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.o_stack.len() < 2 {
         return Err(PsError::StackUnderflow);
     }
+    let path_obj = ctx.o_stack.peek(0)?;
+    let path_bytes = match path_obj.value {
+        PsValue::String { entity, start, len } => ctx.strings.get(entity, start, len).to_vec(),
+        _ => return Err(PsError::TypeCheck),
+    };
+
     ctx.o_stack.pop()?;
-    ctx.o_stack.pop()?;
-    ctx.o_stack.push(PsObject::bool(false))?;
+    ctx.o_stack.pop()?; // font name (unused — the font file declares its own name)
+
+    let path_str = String::from_utf8_lossy(&path_bytes);
+    let path = std::path::Path::new(path_str.as_ref());
+    let ok = stet_core::system_font_loader::load_binary_font(ctx, path);
+    ctx.o_stack.push(PsObject::bool(ok))?;
     Ok(())
 }
 
@@ -401,9 +475,7 @@ fn check_start_job_password(ctx: &Context, password_obj: &PsObject) -> bool {
     let key = DictKey::Name(ctx.names.find(b"StartJobPassword").unwrap_or(NameId(0)));
     let stored = match ctx.dicts.get(ctx.system_params, &key) {
         Some(obj) => match obj.value {
-            PsValue::String { entity, start, len } => {
-                ctx.strings.get(entity, start, len).to_vec()
-            }
+            PsValue::String { entity, start, len } => ctx.strings.get(entity, start, len).to_vec(),
             _ => b"0".to_vec(),
         },
         None => b"0".to_vec(),
@@ -855,8 +927,7 @@ pub fn op_setucacheparams(ctx: &mut Context) -> Result<(), PsError> {
     // The first value (was topmost on stack) is blimit
     if let Some(&blimit) = values.first() {
         let key = DictKey::Name(ctx.names.intern(b"UCacheBLimit"));
-        ctx.dicts
-            .put(ctx.user_params, key, PsObject::int(blimit));
+        ctx.dicts.put(ctx.user_params, key, PsObject::int(blimit));
     }
     Ok(())
 }
@@ -906,7 +977,11 @@ fn get_userobjects(ctx: &Context) -> Option<(EntityId, u32)> {
     let name_id = ctx.names.find(b"UserObjects")?;
     let obj = ctx.dicts.get(ctx.userdict, &DictKey::Name(name_id))?;
     match obj.value {
-        PsValue::Array { entity, start: 0, len } => Some((entity, len)),
+        PsValue::Array {
+            entity,
+            start: 0,
+            len,
+        } => Some((entity, len)),
         _ => None,
     }
 }
@@ -941,8 +1016,7 @@ pub fn op_defineuserobject(ctx: &mut Context) -> Result<(), PsError> {
         Some((entity, old_len)) => {
             // Array exists but too small — allocate new, copy old, store
             let new_len = needed.max(old_len * 2);
-            let old_data: Vec<PsObject> =
-                ctx.arrays.get(entity, 0, old_len).to_vec();
+            let old_data: Vec<PsObject> = ctx.arrays.get(entity, 0, old_len).to_vec();
             let new_entity = ctx.arrays.allocate(new_len as usize);
             let new_slice = ctx.arrays.get_mut(new_entity, 0, new_len);
             new_slice[..old_len as usize].copy_from_slice(&old_data);
@@ -1339,9 +1413,9 @@ mod tests {
     }
 
     #[test]
-    fn test_loadsystemfont_returns_false() {
+    fn test_loadsystemfont_nonexistent() {
         let mut ctx = test_ctx();
-        let name_id = ctx.names.intern(b"Helvetica");
+        let name_id = ctx.names.intern(b"NoSuchFontXYZ12345");
         ctx.o_stack.push(PsObject::name_lit(name_id)).unwrap();
         op_loadsystemfont(&mut ctx).unwrap();
         let result = ctx.o_stack.pop().unwrap();

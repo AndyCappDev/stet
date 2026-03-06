@@ -244,9 +244,7 @@ fn run_viewer_mode(dpi_override: Option<f64>, file_args: Vec<String>) {
         ctx.display_list_sender = Some(dl_sender);
 
         // NullDevice: no-op rendering — display list capture is the output
-        ctx.device_factory = Some(Box::new(|w, h| {
-            Box::new(NullDevice::new(w, h))
-        }));
+        ctx.device_factory = Some(Box::new(|w, h| Box::new(NullDevice::new(w, h))));
 
         // DPI comes from viewer.ps HWResolution by default, --dpi overrides
         run_file_jobs_viewer(&mut ctx, dpi_override, &file_args, advance_rx);
@@ -327,7 +325,6 @@ fn create_context() -> Context {
     ctx
 }
 
-
 /// Run file jobs in viewer mode with per-job save/restore isolation.
 #[cfg(feature = "viewer")]
 fn run_file_jobs_viewer(
@@ -336,7 +333,14 @@ fn run_file_jobs_viewer(
     file_args: &[String],
     advance_rx: std::sync::mpsc::Receiver<()>,
 ) {
-    run_file_jobs(ctx, dpi_override, file_args, "viewer", None, Some(&advance_rx));
+    run_file_jobs(
+        ctx,
+        dpi_override,
+        file_args,
+        "viewer",
+        None,
+        Some(&advance_rx),
+    );
 }
 
 /// Run PostScript file jobs with per-job save/restore isolation.
@@ -414,8 +418,7 @@ fn run_file_jobs(
         let wait_after = viewer_wait
             .map(|w| w.load(std::sync::atomic::Ordering::Relaxed))
             .unwrap_or(0);
-        let viewer_wait_dur =
-            std::time::Duration::from_nanos(wait_after - wait_before);
+        let viewer_wait_dur = std::time::Duration::from_nanos(wait_after - wait_before);
         let job_duration = job_start.elapsed() - viewer_wait_dur;
 
         match exec_result {

@@ -143,9 +143,7 @@ impl ViewerApp {
                 return; // try again next frame
             };
 
-            let ppp = ctx.input(|i| {
-                i.viewport().native_pixels_per_point.unwrap_or(1.0)
-            }) as f64;
+            let ppp = ctx.input(|i| i.viewport().native_pixels_per_point.unwrap_or(1.0)) as f64;
             let available_h = monitor.y as f64 * ppp * 0.85;
             ScreenInfo::AvailableHeight(available_h)
         };
@@ -389,12 +387,7 @@ impl ViewerApp {
     }
 
     /// Render the visible viewport of the current page and return/update the texture.
-    fn render_viewport(
-        &mut self,
-        ctx: &egui::Context,
-        available: Vec2,
-        ppp: f32,
-    ) {
+    fn render_viewport(&mut self, ctx: &egui::Context, available: Vec2, ppp: f32) {
         if self.pages.is_empty() {
             return;
         }
@@ -466,10 +459,7 @@ impl ViewerApp {
             page.dpi,
         );
 
-        let image = ColorImage::from_rgba_unmultiplied(
-            [pixel_w as usize, pixel_h as usize],
-            &rgba,
-        );
+        let image = ColorImage::from_rgba_unmultiplied([pixel_w as usize, pixel_h as usize], &rgba);
         let texture = ctx.load_texture(
             format!("viewport_p{}", page.page_num),
             image,
@@ -529,10 +519,7 @@ impl ViewerApp {
             page.dpi,
         );
 
-        let image = ColorImage::from_rgba_unmultiplied(
-            [mm_w as usize, mm_h as usize],
-            &rgba,
-        );
+        let image = ColorImage::from_rgba_unmultiplied([mm_w as usize, mm_h as usize], &rgba);
         let texture = ctx.load_texture(
             format!("minimap_p{}", page.page_num),
             image,
@@ -580,10 +567,7 @@ impl ViewerApp {
         let panel_rect = ui.min_rect();
         let mm_x = panel_rect.max.x - mm_w - MINIMAP_MARGIN;
         let mm_y = panel_rect.max.y - mm_h - MINIMAP_MARGIN;
-        let mm_rect = egui::Rect::from_min_size(
-            egui::pos2(mm_x, mm_y),
-            egui::vec2(mm_w, mm_h),
-        );
+        let mm_rect = egui::Rect::from_min_size(egui::pos2(mm_x, mm_y), egui::vec2(mm_w, mm_h));
 
         let painter = ui.painter();
 
@@ -627,11 +611,7 @@ impl ViewerApp {
             egui::Stroke::new(1.5, egui::Color32::from_rgb(60, 140, 255)),
             egui::StrokeKind::Outside,
         );
-        painter.rect_filled(
-            vp_rect,
-            0.0,
-            egui::Color32::from_white_alpha(40),
-        );
+        painter.rect_filled(vp_rect, 0.0, egui::Color32::from_white_alpha(40));
 
         // Handle minimap interaction (click/drag to pan)
         let minimap_response = ui.interact(
@@ -679,35 +659,41 @@ impl eframe::App for ViewerApp {
         egui::TopBottomPanel::bottom("status")
             .min_height(32.0)
             .show(ctx, |ui| {
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                if self.pages.is_empty() {
-                    ui.label(egui::RichText::new("Waiting for page...").font(status_font.clone()));
-                } else {
-                    let total = if self.interpreter_done {
-                        format!("{}", self.pages.len())
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    if self.pages.is_empty() {
+                        ui.label(
+                            egui::RichText::new("Waiting for page...").font(status_font.clone()),
+                        );
                     } else {
-                        format!("{}+", self.pages.len())
-                    };
-                    let page = &self.pages[self.current_page];
-                    let eff_dpi = self.dpi_preset
-                        .unwrap_or_else(|| self.effective_dpi(self.central_available, page));
-                    let fit = self.fit_scale(self.central_available, page);
-                    let zoom_pct = fit * self.zoom * 100.0;
-                    ui.label(egui::RichText::new(format!(
-                        "Page {} of {} | {:.0} DPI | Zoom: {:.0}%",
-                        self.current_page + 1,
-                        total,
-                        eff_dpi,
-                        zoom_pct,
-                    )).font(status_font.clone()));
-                    ui.separator();
-                    ui.label(egui::RichText::new(
+                        let total = if self.interpreter_done {
+                            format!("{}", self.pages.len())
+                        } else {
+                            format!("{}+", self.pages.len())
+                        };
+                        let page = &self.pages[self.current_page];
+                        let eff_dpi = self
+                            .dpi_preset
+                            .unwrap_or_else(|| self.effective_dpi(self.central_available, page));
+                        let fit = self.fit_scale(self.central_available, page);
+                        let zoom_pct = fit * self.zoom * 100.0;
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "Page {} of {} | {:.0} DPI | Zoom: {:.0}%",
+                                self.current_page + 1,
+                                total,
+                                eff_dpi,
+                                zoom_pct,
+                            ))
+                            .font(status_font.clone()),
+                        );
+                        ui.separator();
+                        ui.label(egui::RichText::new(
                         "Space/Right: next | Left: prev | +/-: zoom | 0: fit | 1-7: DPI | Q: quit"
                     ).font(status_font));
-                }
+                    }
+                });
             });
-        });
 
         // Send screen info to interpreter
         self.send_screen_info(ctx);
@@ -859,84 +845,79 @@ impl eframe::App for ViewerApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(ctx.style().visuals.panel_fill))
             .show(ctx, |ui| {
-            if self.pages.is_empty() {
-                ui.centered_and_justified(|ui| {
-                    ui.label("Waiting for first page to render...");
-                });
-                return;
-            }
+                if self.pages.is_empty() {
+                    ui.centered_and_justified(|ui| {
+                        ui.label("Waiting for first page to render...");
+                    });
+                    return;
+                }
 
-            let available = ui.available_size();
-            self.central_available = available;
-            let page_idx = self.current_page;
+                let available = ui.available_size();
+                self.central_available = available;
+                let page_idx = self.current_page;
 
-            // Detect window resize — re-render if available area changed
-            if (available - self.last_available).length_sq() > 1.0 {
-                self.render_dirty = true;
-                self.last_available = available;
-            }
+                // Detect window resize — re-render if available area changed
+                if (available - self.last_available).length_sq() > 1.0 {
+                    self.render_dirty = true;
+                    self.last_available = available;
+                }
 
-            // Render viewport if dirty
-            if self.render_dirty {
-                self.render_viewport(ctx, available, ppp);
-            }
+                // Render viewport if dirty
+                if self.render_dirty {
+                    self.render_viewport(ctx, available, ppp);
+                }
 
-            // Draw the rendered viewport
-            let page = &self.pages[page_idx];
-            let fit = self.fit_scale(available, page);
-            let effective_scale = fit * self.zoom;
-            let img_w = page.width as f32 * effective_scale;
-            let img_h = page.height as f32 * effective_scale;
+                // Draw the rendered viewport
+                let page = &self.pages[page_idx];
+                let fit = self.fit_scale(available, page);
+                let effective_scale = fit * self.zoom;
+                let img_w = page.width as f32 * effective_scale;
+                let img_h = page.height as f32 * effective_scale;
 
-            if let Some(ref cached) = page.cached_render {
-                // Center the full image area in the available space
-                let center_x = ((available.x - img_w) / 2.0).max(0.0);
-                let center_y = ((available.y - img_h) / 2.0).max(0.0);
+                if let Some(ref cached) = page.cached_render {
+                    // Center the full image area in the available space
+                    let center_x = ((available.x - img_w) / 2.0).max(0.0);
+                    let center_y = ((available.y - img_h) / 2.0).max(0.0);
 
-                // Map cached viewport (in device coords) back to current screen
-                // coords using the current effective_scale. This stays correct
-                // even if the window resized since the render was cached.
-                let tex_x = cached.vp_x as f32 * effective_scale;
-                let tex_y = cached.vp_y as f32 * effective_scale;
-                let tex_w = cached.vp_w as f32 * effective_scale;
-                let tex_h = cached.vp_h as f32 * effective_scale;
+                    // Map cached viewport (in device coords) back to current screen
+                    // coords using the current effective_scale. This stays correct
+                    // even if the window resized since the render was cached.
+                    let tex_x = cached.vp_x as f32 * effective_scale;
+                    let tex_y = cached.vp_y as f32 * effective_scale;
+                    let tex_w = cached.vp_w as f32 * effective_scale;
+                    let tex_h = cached.vp_h as f32 * effective_scale;
 
-                let origin = ui.min_rect().min;
-                let img_origin = origin + egui::vec2(
-                    center_x + self.pan_offset.x,
-                    center_y + self.pan_offset.y,
-                );
+                    let origin = ui.min_rect().min;
+                    let img_origin = origin
+                        + egui::vec2(center_x + self.pan_offset.x, center_y + self.pan_offset.y);
 
-                // Checkerboard background for the full image area
-                let full_rect = egui::Rect::from_min_size(
-                    img_origin,
-                    egui::vec2(img_w, img_h),
-                );
-                ui.painter()
-                    .rect_filled(full_rect, 0.0, egui::Color32::from_gray(200));
+                    // Checkerboard background for the full image area
+                    let full_rect = egui::Rect::from_min_size(img_origin, egui::vec2(img_w, img_h));
+                    ui.painter()
+                        .rect_filled(full_rect, 0.0, egui::Color32::from_gray(200));
 
-                // Draw the viewport texture, sized by the viewport's device
-                // coords mapped to screen space (egui scales the texture to fit)
-                let tex_rect = egui::Rect::from_min_size(
-                    img_origin + egui::vec2(tex_x, tex_y),
-                    egui::vec2(tex_w, tex_h),
-                );
-                ui.painter().image(
-                    cached.texture.id(),
-                    tex_rect,
-                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                    egui::Color32::WHITE,
-                );
-            }
+                    // Draw the viewport texture, sized by the viewport's device
+                    // coords mapped to screen space (egui scales the texture to fit)
+                    let tex_rect = egui::Rect::from_min_size(
+                        img_origin + egui::vec2(tex_x, tex_y),
+                        egui::vec2(tex_w, tex_h),
+                    );
+                    ui.painter().image(
+                        cached.texture.id(),
+                        tex_rect,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        egui::Color32::WHITE,
+                    );
+                }
 
-            // Minimap overlay (when zoomed in)
-            self.ensure_minimap(ctx);
-            let (pw, ph, pdpi) = {
-                let p = &self.pages[page_idx];
-                (p.width, p.height, p.dpi)
-            };
-            self.draw_minimap(ui, available, pw, ph, pdpi);
-        });
+                // Minimap overlay (when zoomed in)
+                self.ensure_minimap(ctx);
+                let (pw, ph, pdpi) = {
+                    let p = &self.pages[page_idx];
+                    (p.width, p.height, p.dpi)
+                };
+                self.draw_minimap(ui, available, pw, ph, pdpi);
+            });
 
         // Request periodic repaints to check for new pages
         if !self.interpreter_done {

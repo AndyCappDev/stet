@@ -30,9 +30,9 @@ pub mod relational_ops;
 pub mod resource_ops;
 pub mod shading_ops;
 pub mod show_ops;
-pub mod strokepath_algorithm;
 pub mod stack_ops;
 pub mod string_ops;
+pub mod strokepath_algorithm;
 pub mod type_ops;
 pub mod userpath_ops;
 pub mod vm_ops;
@@ -390,7 +390,12 @@ pub fn build_system_dict(ctx: &mut Context) {
     register(ctx, sd, "grestore", graphics_state_ops::op_grestore);
     register(ctx, sd, "grestoreall", graphics_state_ops::op_grestoreall);
     register(ctx, sd, "gstate", graphics_state_ops::op_gstate);
-    register(ctx, sd, "currentgstate", graphics_state_ops::op_currentgstate);
+    register(
+        ctx,
+        sd,
+        "currentgstate",
+        graphics_state_ops::op_currentgstate,
+    );
     register(ctx, sd, "setgstate", graphics_state_ops::op_setgstate);
     register(ctx, sd, "setlinewidth", graphics_state_ops::op_setlinewidth);
     register(

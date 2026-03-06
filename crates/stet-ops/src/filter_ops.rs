@@ -339,7 +339,10 @@ struct DctEncodeParams {
 }
 
 /// Extract and validate DCTEncode parameters from a dict.
-fn extract_dct_encode_params(ctx: &Context, dict_entity: EntityId) -> Result<DctEncodeParams, PsError> {
+fn extract_dct_encode_params(
+    ctx: &Context,
+    dict_entity: EntityId,
+) -> Result<DctEncodeParams, PsError> {
     let lookup_obj = |name: &[u8]| -> Option<PsObject> {
         let id = ctx.names.find(name)?;
         ctx.dicts.get(dict_entity, &DictKey::Name(id))
@@ -438,7 +441,10 @@ fn validate_sample_array(ctx: &Context, obj: PsObject, colors: u32) -> Result<()
 }
 
 /// Validate DCTDecode ColorTransform parameter from a dict.
-fn validate_dct_decode_params(ctx: &Context, dict_entity: EntityId) -> Result<Option<bool>, PsError> {
+fn validate_dct_decode_params(
+    ctx: &Context,
+    dict_entity: EntityId,
+) -> Result<Option<bool>, PsError> {
     let id = match ctx.names.find(b"ColorTransform") {
         Some(id) => id,
         None => return Ok(None),
@@ -576,9 +582,10 @@ fn create_filter_by_name(
         b"RunLengthEncode" => Ok(ctx
             .files
             .create_encode_filter(source, FilterKind::run_length_encode())),
-        b"FlateEncode" => Ok(ctx
-            .files
-            .create_encode_filter(source, FilterKind::flate_encode(predictor, columns, colors, bpc))),
+        b"FlateEncode" => Ok(ctx.files.create_encode_filter(
+            source,
+            FilterKind::flate_encode(predictor, columns, colors, bpc),
+        )),
         b"LZWEncode" => Ok(ctx
             .files
             .create_encode_filter(source, FilterKind::lzw_encode(early_change != 0))),

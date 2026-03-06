@@ -28,6 +28,8 @@ pub mod object;
 pub mod save_stack;
 pub mod stack;
 pub mod string_store;
+pub mod system_font_loader;
+pub mod system_fonts;
 pub mod tokenizer;
 pub mod truetype;
 pub mod type1_parser;

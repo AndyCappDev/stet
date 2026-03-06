@@ -937,7 +937,12 @@ fn prescale_image(
             let new_sx = transform.sx * w as f32 / dw as f32;
             let new_sy = transform.sy * h as f32 / dh as f32;
             let adjusted = Transform::from_row(
-                new_sx, transform.ky, transform.kx, new_sy, transform.tx, transform.ty,
+                new_sx,
+                transform.ky,
+                transform.kx,
+                new_sy,
+                transform.tx,
+                transform.ty,
             );
             return Some((resampled, dw, dh, adjusted));
         }
@@ -981,8 +986,12 @@ fn prescale_image(
     }
     let f = factor as f32;
     let adjusted = Transform::from_row(
-        transform.sx * f, transform.ky * f, transform.kx * f, transform.sy * f,
-        transform.tx, transform.ty,
+        transform.sx * f,
+        transform.ky * f,
+        transform.kx * f,
+        transform.sy * f,
+        transform.tx,
+        transform.ty,
     );
     Some((out, nw, nh, adjusted))
 }
@@ -1006,7 +1015,11 @@ fn hairline_min_width(ctm: &Matrix, dpi: f64) -> f64 {
     let diff = ((a * a + b * b - c * c - d * d).powi(2) + 4.0 * (a * c + b * d).powi(2)).sqrt();
     let s_max = (0.5 * (sum_sq + diff)).max(0.0).sqrt();
     let min_px = if dpi <= 150.0 { 0.5 } else { 1.0 };
-    if s_max > 1e-10 { min_px / s_max } else { min_px }
+    if s_max > 1e-10 {
+        min_px / s_max
+    } else {
+        min_px
+    }
 }
 
 /// Build a stroke with minimum line-width enforcement (shared by trait impl and band rendering).
@@ -1225,10 +1238,20 @@ fn stroke_adjust_path_viewport(
                 }
             }
             PathSegment::CurveTo {
-                x1, y1, x2, y2, x3, y3,
+                x1,
+                y1,
+                x2,
+                y2,
+                x3,
+                y3,
             } => {
                 result.segments.push(PathSegment::CurveTo {
-                    x1, y1, x2, y2, x3, y3,
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    x3,
+                    y3,
                 });
                 prev_x = x3;
                 prev_y = y3;
@@ -1272,12 +1295,13 @@ fn render_element_to_band(
             let stroke = build_stroke(params, dpi);
             // Apply stroke adjustment for thin strokes when enabled
             let adjusted;
-            let draw_path = if (params.stroke_adjust || params.line_width == 0.0) && stroke.width <= 2.0 {
-                adjusted = stroke_adjust_path(path, stroke.width as f64);
-                &adjusted
-            } else {
-                path
-            };
+            let draw_path =
+                if (params.stroke_adjust || params.line_width == 0.0) && stroke.width <= 2.0 {
+                    adjusted = stroke_adjust_path(path, stroke.width as f64);
+                    &adjusted
+                } else {
+                    path
+                };
             let Some(skia_path) = build_skia_path(draw_path) else {
                 return;
             };
@@ -1328,8 +1352,7 @@ fn render_element_to_band(
                 None => (rgba_data.as_slice(), iw, ih, raw_transform),
             };
 
-            let Some(img_pixmap) = tiny_skia::PixmapRef::from_bytes(img_data, img_w, img_h)
-            else {
+            let Some(img_pixmap) = tiny_skia::PixmapRef::from_bytes(img_data, img_w, img_h) else {
                 return;
             };
             #[allow(unused_assignments)]
@@ -1361,14 +1384,7 @@ fn render_element_to_band(
                 quality,
                 ..tiny_skia::PixmapPaint::default()
             };
-            pixmap.draw_pixmap(
-                0,
-                0,
-                img_pixmap,
-                &img_paint,
-                transform,
-                mask_ref,
-            );
+            pixmap.draw_pixmap(0, 0, img_pixmap, &img_paint, transform, mask_ref);
         }
         DisplayElement::AxialShading { params } => {
             let mut temp_mask = None;
@@ -1464,8 +1480,8 @@ fn render_pattern_fill_to_band(
                         let paint = to_paint(&fp.color);
                         let t = to_transform(&fp.ctm);
                         // Scale from pattern space to tile space
-                        let tile_transform = Transform::from_scale(sx as f32, sy as f32)
-                            .post_concat(t);
+                        let tile_transform =
+                            Transform::from_scale(sx as f32, sy as f32).post_concat(t);
                         let fill_rule = to_fill_rule(&fp.fill_rule);
                         tile_pixmap.fill_path(&sp, &paint, fill_rule, tile_transform, None);
                     }
@@ -1475,12 +1491,15 @@ fn render_pattern_fill_to_band(
                         let stroke = build_stroke(sp, dpi);
                         let paint = to_paint(&sp.color);
                         let t = to_transform(&sp.ctm);
-                        let tile_transform = Transform::from_scale(sx as f32, sy as f32)
-                            .post_concat(t);
+                        let tile_transform =
+                            Transform::from_scale(sx as f32, sy as f32).post_concat(t);
                         tile_pixmap.stroke_path(&skp, &paint, &stroke, tile_transform, None);
                     }
                 }
-                DisplayElement::Image { rgba_data, params: ip } => {
+                DisplayElement::Image {
+                    rgba_data,
+                    params: ip,
+                } => {
                     let iw = ip.width;
                     let ih = ip.height;
                     let expected = (iw * ih * 4) as usize;
@@ -1488,8 +1507,8 @@ fn render_pattern_fill_to_band(
                         if let Some(image_inv) = ip.image_matrix.invert() {
                             let combined = ip.ctm.concat(&image_inv);
                             let t = to_transform(&combined);
-                            let tile_transform = Transform::from_scale(sx as f32, sy as f32)
-                                .post_concat(t);
+                            let tile_transform =
+                                Transform::from_scale(sx as f32, sy as f32).post_concat(t);
                             if let Some(img_pixmap) =
                                 tiny_skia::PixmapRef::from_bytes(rgba_data, iw, ih)
                             {
@@ -1526,8 +1545,7 @@ fn render_pattern_fill_to_band(
                 if let Some(sp) = build_skia_path(path) {
                     let paint = to_paint(&color);
                     let t = to_transform(&fp.ctm);
-                    let tile_transform =
-                        Transform::from_scale(sx as f32, sy as f32).post_concat(t);
+                    let tile_transform = Transform::from_scale(sx as f32, sy as f32).post_concat(t);
                     let fill_rule = to_fill_rule(&fp.fill_rule);
                     tile_pixmap.fill_path(&sp, &paint, fill_rule, tile_transform, None);
                 }
@@ -1565,10 +1583,7 @@ fn render_pattern_fill_to_band(
 
     // The path is in device space. We render with identity transform (offset for band).
     // The shader needs to be offset so tiles align with pattern_matrix origin.
-    let shader_transform = Transform::from_translate(
-        pattern_origin_x,
-        pattern_origin_y - y_off,
-    );
+    let shader_transform = Transform::from_translate(pattern_origin_x, pattern_origin_y - y_off);
 
     // Recreate pattern with proper transform
     let pattern = tiny_skia::Pattern::new(
@@ -1580,7 +1595,13 @@ fn render_pattern_fill_to_band(
     );
     paint.shader = pattern;
 
-    pixmap.fill_path(&skia_path, &paint, fill_rule, Transform::identity(), mask_ref);
+    pixmap.fill_path(
+        &skia_path,
+        &paint,
+        fill_rule,
+        Transform::identity(),
+        mask_ref,
+    );
 }
 
 /// Clip path handling for band rendering. Same logic as SkiaDevice::clip_path
@@ -1706,7 +1727,8 @@ impl OutputDevice for SkiaDevice {
         self.ensure_full_pixmap();
         let stroke = build_stroke(params, self.dpi);
         let adjusted;
-        let draw_path = if (params.stroke_adjust || params.line_width == 0.0) && stroke.width <= 2.0 {
+        let draw_path = if (params.stroke_adjust || params.line_width == 0.0) && stroke.width <= 2.0
+        {
             adjusted = stroke_adjust_path(path, stroke.width as f64);
             &adjusted
         } else {
@@ -1881,14 +1903,8 @@ impl OutputDevice for SkiaDevice {
             quality,
             ..tiny_skia::PixmapPaint::default()
         };
-        self.pixmap.draw_pixmap(
-            0,
-            0,
-            img_pixmap,
-            &paint,
-            transform,
-            mask_ref,
-        );
+        self.pixmap
+            .draw_pixmap(0, 0, img_pixmap, &paint, transform, mask_ref);
     }
 
     fn paint_axial_shading(&mut self, params: &AxialShadingParams) {
@@ -1986,8 +2002,7 @@ impl OutputDevice for SkiaDevice {
             // creation overhead and keeps work on the warmed-up pool.
             let (tx, rx) = std::sync::mpsc::sync_channel(1);
             rayon::spawn(move || {
-                let result =
-                    render_banded_to_sink(page_w, page_h, band_h, dpi, &list, &mut *sink);
+                let result = render_banded_to_sink(page_w, page_h, band_h, dpi, &list, &mut *sink);
                 let _ = tx.send(result);
             });
             self.pending_render = Some(rx);
@@ -2074,8 +2089,7 @@ fn render_banded_to_sink(
         let render_y_end_f = ((y_start + actual_h + BAND_OVERLAP).min(page_h)) as f64;
         let band_offset = y_start - render_y_start;
 
-        let mut band_pixmap =
-            Pixmap::new(page_w, render_h).expect("Failed to create band pixmap");
+        let mut band_pixmap = Pixmap::new(page_w, render_h).expect("Failed to create band pixmap");
         band_pixmap.as_mut().data_mut().fill(0xFF);
 
         let mut band_state = BandState {
@@ -2091,8 +2105,7 @@ fn render_banded_to_sink(
             if !epoch.has_erase_page {
                 match epoch.paint_bbox {
                     Some(ref pb)
-                        if pb.y_max <= render_y_start as f64
-                            || pb.y_min >= render_y_end_f =>
+                        if pb.y_max <= render_y_start as f64 || pb.y_min >= render_y_end_f =>
                     {
                         continue;
                     }
@@ -2181,8 +2194,7 @@ fn precompute_full_bboxes(list: &DisplayList, dpi: f64) -> Vec<Option<BBox2D>> {
             DisplayElement::Stroke { path, params } => {
                 path_full_bbox(path).map(|mut bbox| {
                     // Use effective line width: actual width or hairline minimum
-                    let effective_lw =
-                        params.line_width.max(hairline_min_width(&params.ctm, dpi));
+                    let effective_lw = params.line_width.max(hairline_min_width(&params.ctm, dpi));
                     let expand = effective_lw * params.miter_limit * 0.5;
                     let m = &params.ctm;
                     let is_identity = m.a == 1.0
@@ -2209,36 +2221,44 @@ fn precompute_full_bboxes(list: &DisplayList, dpi: f64) -> Vec<Option<BBox2D>> {
                         bbox.y_max += expand_y;
                         // Transform all 4 corners to device space
                         let corners = [
-                            (m.a * bbox.x_min + m.c * bbox.y_min + m.tx,
-                             m.b * bbox.x_min + m.d * bbox.y_min + m.ty),
-                            (m.a * bbox.x_max + m.c * bbox.y_min + m.tx,
-                             m.b * bbox.x_max + m.d * bbox.y_min + m.ty),
-                            (m.a * bbox.x_min + m.c * bbox.y_max + m.tx,
-                             m.b * bbox.x_min + m.d * bbox.y_max + m.ty),
-                            (m.a * bbox.x_max + m.c * bbox.y_max + m.tx,
-                             m.b * bbox.x_max + m.d * bbox.y_max + m.ty),
+                            (
+                                m.a * bbox.x_min + m.c * bbox.y_min + m.tx,
+                                m.b * bbox.x_min + m.d * bbox.y_min + m.ty,
+                            ),
+                            (
+                                m.a * bbox.x_max + m.c * bbox.y_min + m.tx,
+                                m.b * bbox.x_max + m.d * bbox.y_min + m.ty,
+                            ),
+                            (
+                                m.a * bbox.x_min + m.c * bbox.y_max + m.tx,
+                                m.b * bbox.x_min + m.d * bbox.y_max + m.ty,
+                            ),
+                            (
+                                m.a * bbox.x_max + m.c * bbox.y_max + m.tx,
+                                m.b * bbox.x_max + m.d * bbox.y_max + m.ty,
+                            ),
                         ];
                         bbox.x_min = corners.iter().map(|c| c.0).fold(f64::INFINITY, f64::min);
-                        bbox.x_max = corners.iter().map(|c| c.0).fold(f64::NEG_INFINITY, f64::max);
+                        bbox.x_max = corners
+                            .iter()
+                            .map(|c| c.0)
+                            .fold(f64::NEG_INFINITY, f64::max);
                         bbox.y_min = corners.iter().map(|c| c.1).fold(f64::INFINITY, f64::min);
-                        bbox.y_max = corners.iter().map(|c| c.1).fold(f64::NEG_INFINITY, f64::max);
+                        bbox.y_max = corners
+                            .iter()
+                            .map(|c| c.1)
+                            .fold(f64::NEG_INFINITY, f64::max);
                     }
                     bbox
                 })
             }
             DisplayElement::Image { params, .. } => image_full_bbox(params),
-            DisplayElement::AxialShading { params } => {
-                shading_full_bbox(&params.bbox, &params.ctm)
-            }
+            DisplayElement::AxialShading { params } => shading_full_bbox(&params.bbox, &params.ctm),
             DisplayElement::RadialShading { params } => {
                 shading_full_bbox(&params.bbox, &params.ctm)
             }
-            DisplayElement::MeshShading { params } => {
-                shading_full_bbox(&params.bbox, &params.ctm)
-            }
-            DisplayElement::PatchShading { params } => {
-                shading_full_bbox(&params.bbox, &params.ctm)
-            }
+            DisplayElement::MeshShading { params } => shading_full_bbox(&params.bbox, &params.ctm),
+            DisplayElement::PatchShading { params } => shading_full_bbox(&params.bbox, &params.ctm),
             DisplayElement::PatternFill { params } => path_full_bbox(&params.path),
             _ => None, // Clip, InitClip, ErasePage: always process
         })
@@ -2260,7 +2280,12 @@ fn path_full_bbox(path: &PsPath) -> Option<BBox2D> {
                 y_max = y_max.max(*y);
             }
             PathSegment::CurveTo {
-                x1, y1, x2, y2, x3, y3,
+                x1,
+                y1,
+                x2,
+                y2,
+                x3,
+                y3,
             } => {
                 x_min = x_min.min(*x1).min(*x2).min(*x3);
                 x_max = x_max.max(*x1).max(*x2).max(*x3);
@@ -2271,7 +2296,12 @@ fn path_full_bbox(path: &PsPath) -> Option<BBox2D> {
         }
     }
     if x_min <= x_max {
-        Some(BBox2D { x_min, y_min, x_max, y_max })
+        Some(BBox2D {
+            x_min,
+            y_min,
+            x_max,
+            y_max,
+        })
     } else {
         None
     }
@@ -2304,7 +2334,12 @@ fn image_full_bbox(params: &ImageParams) -> Option<BBox2D> {
         y_min = y_min.min(*y);
         y_max = y_max.max(*y);
     }
-    Some(BBox2D { x_min, y_min, x_max, y_max })
+    Some(BBox2D {
+        x_min,
+        y_min,
+        x_max,
+        y_max,
+    })
 }
 
 /// Compute full 2D bounds for a shading element from its BBox.
@@ -2326,7 +2361,12 @@ fn shading_full_bbox(bbox: &Option<[f64; 4]>, ctm: &Matrix) -> Option<BBox2D> {
             y_min = y_min.min(*y);
             y_max = y_max.max(*y);
         }
-        Some(BBox2D { x_min, y_min, x_max, y_max })
+        Some(BBox2D {
+            x_min,
+            y_min,
+            x_max,
+            y_max,
+        })
     } else {
         Some(BBox2D {
             x_min: 0.0,
@@ -2354,7 +2394,12 @@ fn build_viewport_epochs(list: &DisplayList, bboxes: &[Option<BBox2D>]) -> Vec<V
                 start_idx: epoch_start,
                 end_idx: i,
                 paint_bbox: if x_min <= x_max {
-                    Some(BBox2D { x_min, y_min, x_max, y_max })
+                    Some(BBox2D {
+                        x_min,
+                        y_min,
+                        x_max,
+                        y_max,
+                    })
                 } else {
                     None
                 },
@@ -2382,7 +2427,12 @@ fn build_viewport_epochs(list: &DisplayList, bboxes: &[Option<BBox2D>]) -> Vec<V
             start_idx: epoch_start,
             end_idx: elements.len(),
             paint_bbox: if x_min <= x_max {
-                Some(BBox2D { x_min, y_min, x_max, y_max })
+                Some(BBox2D {
+                    x_min,
+                    y_min,
+                    x_max,
+                    y_max,
+                })
             } else {
                 None
             },
@@ -2637,12 +2687,14 @@ fn render_element_to_viewport(
                 return;
             };
             let paint = to_paint(&params.color);
-            let transform = viewport_transform(to_transform(&params.ctm), vp_x, vp_y, scale_x, scale_y);
+            let transform =
+                viewport_transform(to_transform(&params.ctm), vp_x, vp_y, scale_x, scale_y);
             let fill_rule = to_fill_rule(&params.fill_rule);
             pixmap.fill_path(&skia_path, &paint, fill_rule, transform, mask_ref);
         }
         DisplayElement::Stroke { path, params } => {
-            let transform = viewport_transform(to_transform(&params.ctm), vp_x, vp_y, scale_x, scale_y);
+            let transform =
+                viewport_transform(to_transform(&params.ctm), vp_x, vp_y, scale_x, scale_y);
             // For viewport rendering, build the stroke using the composited
             // transform (original CTM × viewport transform) so hairline width
             // calculations account for the actual output resolution.
@@ -2663,16 +2715,23 @@ fn render_element_to_viewport(
             // Path coords are in reference-DPI device space, so we scale
             // the snap grid to match the viewport transform.
             let adjusted;
-            let draw_path = if (params.stroke_adjust || params.line_width == 0.0) && stroke.width <= 2.0 {
-                // Snap in output pixel space: transform coords, snap, inverse-transform.
-                // For identity CTM (isotropic strokes in device space), we can snap
-                // directly using the viewport scale factors.
-                adjusted = stroke_adjust_path_viewport(path, stroke.width as f64,
-                    scale_x as f64, scale_y as f64, vp_x as f64, vp_y as f64);
-                &adjusted
-            } else {
-                path
-            };
+            let draw_path =
+                if (params.stroke_adjust || params.line_width == 0.0) && stroke.width <= 2.0 {
+                    // Snap in output pixel space: transform coords, snap, inverse-transform.
+                    // For identity CTM (isotropic strokes in device space), we can snap
+                    // directly using the viewport scale factors.
+                    adjusted = stroke_adjust_path_viewport(
+                        path,
+                        stroke.width as f64,
+                        scale_x as f64,
+                        scale_y as f64,
+                        vp_x as f64,
+                        vp_y as f64,
+                    );
+                    &adjusted
+                } else {
+                    path
+                };
             let Some(skia_path) = build_skia_path(draw_path) else {
                 return;
             };
@@ -2686,7 +2745,9 @@ fn render_element_to_viewport(
             pixmap.stroke_path(&skia_path, &paint, &stroke, transform, mask_ref);
         }
         DisplayElement::Clip { path, params } => {
-            clip_path_viewport(state, path, params, vp_x, vp_y, scale_x, scale_y, out_w, out_h);
+            clip_path_viewport(
+                state, path, params, vp_x, vp_y, scale_x, scale_y, out_w, out_h,
+            );
         }
         DisplayElement::InitClip => {
             if let Some(ClipRegion::Mask(mask)) = state.clip_region.take() {
@@ -2712,7 +2773,8 @@ fn render_element_to_viewport(
                 return;
             };
             let combined = params.ctm.concat(&image_inv);
-            let raw_transform = viewport_transform(to_transform(&combined), vp_x, vp_y, scale_x, scale_y);
+            let raw_transform =
+                viewport_transform(to_transform(&combined), vp_x, vp_y, scale_x, scale_y);
 
             let prescaled = prescale_image(rgba_data, iw, ih, raw_transform);
             let (img_data, img_w, img_h, transform) = match &prescaled {
@@ -2720,8 +2782,7 @@ fn render_element_to_viewport(
                 None => (rgba_data.as_slice(), iw, ih, raw_transform),
             };
 
-            let Some(img_pixmap) = tiny_skia::PixmapRef::from_bytes(img_data, img_w, img_h)
-            else {
+            let Some(img_pixmap) = tiny_skia::PixmapRef::from_bytes(img_data, img_w, img_h) else {
                 return;
             };
             #[allow(unused_assignments)]
@@ -2919,8 +2980,14 @@ fn render_axial_shading_to_pixmap(
         ];
         let x_min_f = corners.iter().map(|c| c.0).fold(f64::INFINITY, f64::min);
         let y_min_f = corners.iter().map(|c| c.1).fold(f64::INFINITY, f64::min);
-        let x_max_f = corners.iter().map(|c| c.0).fold(f64::NEG_INFINITY, f64::max);
-        let y_max_f = corners.iter().map(|c| c.1).fold(f64::NEG_INFINITY, f64::max);
+        let x_max_f = corners
+            .iter()
+            .map(|c| c.0)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let y_max_f = corners
+            .iter()
+            .map(|c| c.1)
+            .fold(f64::NEG_INFINITY, f64::max);
         (
             x_min_f.max(0.0),
             (y_min_f - y_start as f64).max(0.0),
@@ -3031,8 +3098,14 @@ fn render_radial_shading_to_pixmap(
         ];
         let x_min_f = corners.iter().map(|c| c.0).fold(f64::INFINITY, f64::min);
         let y_min_f = corners.iter().map(|c| c.1).fold(f64::INFINITY, f64::min);
-        let x_max_f = corners.iter().map(|c| c.0).fold(f64::NEG_INFINITY, f64::max);
-        let y_max_f = corners.iter().map(|c| c.1).fold(f64::NEG_INFINITY, f64::max);
+        let x_max_f = corners
+            .iter()
+            .map(|c| c.0)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let y_max_f = corners
+            .iter()
+            .map(|c| c.1)
+            .fold(f64::NEG_INFINITY, f64::max);
         let x_min = x_min_f.max(0.0) as u32;
         let y_min_dev = y_min_f.max(0.0);
         let x_max = (x_max_f.ceil() as u32).min(pw);
@@ -3491,14 +3564,10 @@ fn render_axial_shading_viewport(
         return;
     }
 
-    let start = tiny_skia::Point::from_xy(
-        (dx0 as f32 - vp_x) * scale_x,
-        (dy0 as f32 - vp_y) * scale_y,
-    );
-    let end = tiny_skia::Point::from_xy(
-        (dx1 as f32 - vp_x) * scale_x,
-        (dy1 as f32 - vp_y) * scale_y,
-    );
+    let start =
+        tiny_skia::Point::from_xy((dx0 as f32 - vp_x) * scale_x, (dy0 as f32 - vp_y) * scale_y);
+    let end =
+        tiny_skia::Point::from_xy((dx1 as f32 - vp_x) * scale_x, (dy1 as f32 - vp_y) * scale_y);
 
     let Some(gradient) = tiny_skia::LinearGradient::new(
         start,
@@ -3526,8 +3595,14 @@ fn render_axial_shading_viewport(
         ];
         let x_min = corners.iter().map(|c| c.0).fold(f64::INFINITY, f64::min);
         let y_min = corners.iter().map(|c| c.1).fold(f64::INFINITY, f64::min);
-        let x_max = corners.iter().map(|c| c.0).fold(f64::NEG_INFINITY, f64::max);
-        let y_max = corners.iter().map(|c| c.1).fold(f64::NEG_INFINITY, f64::max);
+        let x_max = corners
+            .iter()
+            .map(|c| c.0)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let y_max = corners
+            .iter()
+            .map(|c| c.1)
+            .fold(f64::NEG_INFINITY, f64::max);
         (
             ((x_min as f32 - vp_x) * scale_x).max(0.0),
             ((y_min as f32 - vp_y) * scale_y).max(0.0),
@@ -3542,8 +3617,8 @@ fn render_axial_shading_viewport(
         return;
     }
 
-    let rect =
-        tiny_skia::Rect::from_ltrb(rx_min, ry_min, rx_max, ry_max).unwrap_or(tiny_skia::Rect::from_xywh(0.0, 0.0, 1.0, 1.0).unwrap());
+    let rect = tiny_skia::Rect::from_ltrb(rx_min, ry_min, rx_max, ry_max)
+        .unwrap_or(tiny_skia::Rect::from_xywh(0.0, 0.0, 1.0, 1.0).unwrap());
     pixmap.fill_rect(rect, &paint, Transform::identity(), clip_mask);
 }
 
@@ -3574,10 +3649,22 @@ fn render_radial_shading_viewport(
             params.ctm.transform_point(bbox[0], bbox[3]),
             params.ctm.transform_point(bbox[2], bbox[3]),
         ];
-        let x_min = corners.iter().map(|c| c.0 as f32).fold(f32::INFINITY, f32::min);
-        let y_min = corners.iter().map(|c| c.1 as f32).fold(f32::INFINITY, f32::min);
-        let x_max = corners.iter().map(|c| c.0 as f32).fold(f32::NEG_INFINITY, f32::max);
-        let y_max = corners.iter().map(|c| c.1 as f32).fold(f32::NEG_INFINITY, f32::max);
+        let x_min = corners
+            .iter()
+            .map(|c| c.0 as f32)
+            .fold(f32::INFINITY, f32::min);
+        let y_min = corners
+            .iter()
+            .map(|c| c.1 as f32)
+            .fold(f32::INFINITY, f32::min);
+        let x_max = corners
+            .iter()
+            .map(|c| c.0 as f32)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let y_max = corners
+            .iter()
+            .map(|c| c.1 as f32)
+            .fold(f32::NEG_INFINITY, f32::max);
         (
             ((x_min - vp_x) * scale_x).max(0.0) as u32,
             ((y_min - vp_y) * scale_y).max(0.0) as u32,
@@ -3740,7 +3827,15 @@ fn render_patch_shading_viewport(
             ctm: params.ctm,
             bbox: params.bbox,
         };
-        render_mesh_shading_viewport(pixmap, &mesh_params, vp_x, vp_y, scale_x, scale_y, clip_mask);
+        render_mesh_shading_viewport(
+            pixmap,
+            &mesh_params,
+            vp_x,
+            vp_y,
+            scale_x,
+            scale_y,
+            clip_mask,
+        );
     }
 }
 

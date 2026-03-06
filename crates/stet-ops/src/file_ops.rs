@@ -820,7 +820,9 @@ pub fn op_filenameforall(ctx: &mut Context) -> Result<(), PsError> {
     for name in &matches {
         let name_bytes = name.as_bytes();
         let copy_len = name_bytes.len().min(scratch_len as usize);
-        let scratch_slice = ctx.strings.get_mut(scratch_entity, scratch_start, scratch_len);
+        let scratch_slice = ctx
+            .strings
+            .get_mut(scratch_entity, scratch_start, scratch_len);
         scratch_slice[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
 
         let str_obj = PsObject {

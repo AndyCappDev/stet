@@ -168,13 +168,19 @@ impl EntityId {
 
     /// Create a local VM entity ID.
     pub fn local(index: u32) -> Self {
-        debug_assert!(index & Self::GLOBAL_BIT == 0, "index overflows into tag bit");
+        debug_assert!(
+            index & Self::GLOBAL_BIT == 0,
+            "index overflows into tag bit"
+        );
         EntityId(index)
     }
 
     /// Create a global VM entity ID.
     pub fn global(index: u32) -> Self {
-        debug_assert!(index & Self::GLOBAL_BIT == 0, "index overflows into tag bit");
+        debug_assert!(
+            index & Self::GLOBAL_BIT == 0,
+            "index overflows into tag bit"
+        );
         EntityId(index | Self::GLOBAL_BIT)
     }
 

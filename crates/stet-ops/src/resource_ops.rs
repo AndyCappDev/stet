@@ -446,9 +446,7 @@ pub fn op_resourceforall(ctx: &mut Context) -> Result<(), PsError> {
         return Err(PsError::TypeCheck);
     }
     let template_bytes = match template_obj.value {
-        PsValue::String { entity, start, len } => {
-            ctx.strings.get(entity, start, len).to_vec()
-        }
+        PsValue::String { entity, start, len } => ctx.strings.get(entity, start, len).to_vec(),
         _ => return Err(PsError::TypeCheck),
     };
 
@@ -527,7 +525,9 @@ pub fn op_resourceforall(ctx: &mut Context) -> Result<(), PsError> {
     // Write name into scratch string and push substring onto o_stack.
     for (_nid, name_bytes) in &matching_names {
         let copy_len = name_bytes.len().min(scratch_len as usize);
-        let scratch_slice = ctx.strings.get_mut(scratch_entity, scratch_start, scratch_len);
+        let scratch_slice = ctx
+            .strings
+            .get_mut(scratch_entity, scratch_start, scratch_len);
         scratch_slice[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
 
         // Push a substring view of the scratch string (just the written portion)

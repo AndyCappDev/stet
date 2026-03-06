@@ -220,7 +220,9 @@ fn eval_one(ctx: &mut Context, obj: PsObject) -> Result<(), PsError> {
             let bytes = ctx.strings.get(entity, start, len);
             let (ptr, byte_len) = (bytes.as_ptr(), bytes.len());
             let bytes = unsafe { std::slice::from_raw_parts(ptr, byte_len) };
-            if let Some((tok_obj, consumed, is_immediate, auto_exec)) = scan_token_from_bytes(ctx, bytes)? {
+            if let Some((tok_obj, consumed, is_immediate, auto_exec)) =
+                scan_token_from_bytes(ctx, bytes)?
+            {
                 let newlines = count_newlines(&bytes[..consumed]);
                 ctx.current_source_line += newlines;
 
@@ -484,7 +486,8 @@ fn eval_one(ctx: &mut Context, obj: PsObject) -> Result<(), PsError> {
                     ctx.files.add_pending_newlines(file_entity, newlines);
                     let is_immediate = matches!(token, Token::ImmediateName(_));
                     let (tok_obj, auto_exec) = if let Token::BinaryTokenByte(tag) = token {
-                        let result = stet_core::binary_token::parse_from_stream(ctx, tag, file_entity)?;
+                        let result =
+                            stet_core::binary_token::parse_from_stream(ctx, tag, file_entity)?;
                         match result {
                             stet_core::binary_token::BinaryTokenResult::Single(o) => (o, false),
                             stet_core::binary_token::BinaryTokenResult::Sequence(o) => (o, true),
@@ -1046,11 +1049,7 @@ pub fn parse_and_exec(ctx: &mut Context, source: &[u8]) -> Result<(), PsError> {
 /// Like `parse_and_exec`, but records the file path on the StringSource
 /// entity so that `resolve_filename` can find the file's parent directory
 /// when resolving relative paths in nested `run`/`file` calls.
-pub fn parse_and_exec_file(
-    ctx: &mut Context,
-    source: &[u8],
-    path: &str,
-) -> Result<(), PsError> {
+pub fn parse_and_exec_file(ctx: &mut Context, source: &[u8], path: &str) -> Result<(), PsError> {
     let file_entity = ctx.files.create_string_source(source.to_vec());
     // Record the canonical path so resolve_filename can extract its directory.
     let canonical = std::path::Path::new(path)

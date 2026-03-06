@@ -409,7 +409,9 @@ pub fn op_composefont(ctx: &mut Context) -> Result<(), PsError> {
 
     // Encoding: identity [0, 1, 2, ...]
     let enc_len = resolved_fonts.len();
-    let enc_entity = ctx.arrays.allocate_with(enc_len, save_level, global, created);
+    let enc_entity = ctx
+        .arrays
+        .allocate_with(enc_len, save_level, global, created);
     let enc_data = ctx.arrays.get_mut(enc_entity, 0, enc_len as u32);
     for (i, slot) in enc_data.iter_mut().enumerate() {
         *slot = PsObject::int(i as i32);
@@ -422,9 +424,9 @@ pub fn op_composefont(ctx: &mut Context) -> Result<(), PsError> {
     );
 
     // FDepVector: the resolved fonts
-    let fdep_entity_new = ctx
-        .arrays
-        .allocate_with(resolved_fonts.len(), save_level, global, created);
+    let fdep_entity_new =
+        ctx.arrays
+            .allocate_with(resolved_fonts.len(), save_level, global, created);
     let fdep_data = ctx
         .arrays
         .get_mut(fdep_entity_new, 0, resolved_fonts.len() as u32);

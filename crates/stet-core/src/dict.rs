@@ -212,7 +212,10 @@ impl DictStore {
         // Backup points to original index
         let backup_id = self.entities.allocate(
             idx as u32, // original dict index
-            0, save_level, is_global, created_after_save,
+            0,
+            save_level,
+            is_global,
+            created_after_save,
         );
 
         // Original entity now points to new copy

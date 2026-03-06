@@ -209,13 +209,9 @@ pub fn op_setpagedevice(ctx: &mut Context) -> Result<(), PsError> {
     // (PostForge's page device dict is a Python dict not subject to PS VM save/restore.)
     // If the dict is local, copy it to a new global dict.
     let base_pd = if !base_pd.is_global() {
-        let new_pd = ctx.dicts.allocate_with(
-            ctx.dicts.max_length(base_pd),
-            b"pagedevice",
-            0,
-            true,
-            0,
-        );
+        let new_pd =
+            ctx.dicts
+                .allocate_with(ctx.dicts.max_length(base_pd), b"pagedevice", 0, true, 0);
         copy_dict(ctx, base_pd, new_pd);
         new_pd
     } else {

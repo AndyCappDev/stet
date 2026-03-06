@@ -14,7 +14,7 @@ use crate::dual_dict_store::DualDictStore;
 use crate::dual_string_store::DualStringStore;
 use crate::error::PsError;
 use crate::file_store::FileStore;
-use crate::graphics_state::{GraphicsState, Matrix, PatternData, PathSegment};
+use crate::graphics_state::{GraphicsState, Matrix, PathSegment, PatternData};
 use crate::name::NameTable;
 use crate::object::{EntityId, NameId, ObjFlags, PsObject, PsValue, SaveLevel};
 use crate::save_stack::{SaveRecord, SaveStack, StoreType};
@@ -175,8 +175,7 @@ pub struct Context {
     /// When `Some`, each showpage sends a clone of the display list through this channel.
     /// Used by the CLI viewer for incremental display list delivery.
     /// Tuple: (DisplayList, dpi, page_width, page_height).
-    pub display_list_sender:
-        Option<std::sync::mpsc::Sender<(DisplayList, f64, u32, u32)>>,
+    pub display_list_sender: Option<std::sync::mpsc::Sender<(DisplayList, f64, u32, u32)>>,
     pub page_width: u32,
     pub page_height: u32,
     pub output_path: Option<String>,
@@ -903,7 +902,9 @@ impl Context {
                 let save_level = self.save_stack.current_level();
                 let global = self.vm_alloc_mode;
                 let created = self.save_stack.last_save_id();
-                let entity = self.strings.allocate_with(bytes.len(), save_level, global, created);
+                let entity = self
+                    .strings
+                    .allocate_with(bytes.len(), save_level, global, created);
                 self.strings
                     .get_mut(entity, 0, bytes.len() as u32)
                     .copy_from_slice(&bytes);

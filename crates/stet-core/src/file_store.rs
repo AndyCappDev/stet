@@ -264,9 +264,7 @@ impl FileStore {
             return Some(*data);
         }
         // Normalize: strip leading "/" and collapse "//" → "/"
-        let normalized = path
-            .trim_start_matches('/')
-            .replace("//", "/");
+        let normalized = path.trim_start_matches('/').replace("//", "/");
         if normalized != path {
             return self.embedded_files.get(normalized.as_str()).copied();
         }
@@ -332,7 +330,9 @@ impl FileStore {
         }
 
         // Check embedded files for read access
-        if mode == "r" && let Some(data) = self.embedded_files.get(name) {
+        if mode == "r"
+            && let Some(data) = self.embedded_files.get(name)
+        {
             let id = EntityId(self.files.len() as u32);
             self.files.push(FileEntry {
                 handle: FileHandle::StringSource {
@@ -1306,8 +1306,7 @@ impl FileStore {
                 if !*decoded {
                     let source = state.source;
                     let ccitt_data = self.read_all(source)?;
-                    let decoded_bytes =
-                        Self::decode_ccittfax(&ccitt_data, &mut state.kind)?;
+                    let decoded_bytes = Self::decode_ccittfax(&ccitt_data, &mut state.kind)?;
                     state.output_buf = decoded_bytes;
                     state.output_pos = 0;
                     // Mark as decoded (re-borrow after decode_ccittfax)
@@ -1817,10 +1816,7 @@ impl FileStore {
             }
 
             // Convert transitions to pixels and pack into bytes
-            let line = fax::decoder::Line {
-                transitions,
-                width,
-            };
+            let line = fax::decoder::Line { transitions, width };
             let mut row = vec![0u8; row_bytes];
             for (i, color) in line.pels().enumerate() {
                 if i >= width as usize {
@@ -1855,12 +1851,9 @@ impl FileStore {
             } else {
                 None
             };
-            fax::decoder::decode_g4(
-                data.iter().copied(),
-                width,
-                height,
-                |transitions| process_line(transitions),
-            );
+            fax::decoder::decode_g4(data.iter().copied(), width, height, |transitions| {
+                process_line(transitions)
+            });
         } else {
             // Group 3 (K=0: 1-D only, K>0: mixed 1-D/2-D)
             fax::decoder::decode_g3(data.iter().copied(), |transitions| {
@@ -2068,11 +2061,7 @@ fn flate_compress_data(
         let before_in = compressor.total_in() as usize;
         let before_out = compressor.total_out() as usize;
         let status = compressor
-            .compress(
-                &data[input_pos..],
-                &mut out,
-                flate2::FlushCompress::None,
-            )
+            .compress(&data[input_pos..], &mut out, flate2::FlushCompress::None)
             .map_err(|e| io::Error::other(e.to_string()))?;
         let consumed = compressor.total_in() as usize - before_in;
         let produced = compressor.total_out() as usize - before_out;
@@ -2250,7 +2239,13 @@ impl FilterKind {
     }
 
     /// Create a new DCTEncode filter.
-    pub fn dct_encode(columns: u32, rows: u32, colors: u32, quality: u8, color_transform: bool) -> Self {
+    pub fn dct_encode(
+        columns: u32,
+        rows: u32,
+        colors: u32,
+        quality: u8,
+        color_transform: bool,
+    ) -> Self {
         Self::DCTEncode {
             buf: Vec::new(),
             columns,
@@ -2377,7 +2372,11 @@ impl FilterKind {
 
 impl FileStore {
     /// Create a lazy DCTDecode filter (decodes on first read).
-    pub fn create_dct_filter(&mut self, source: EntityId, color_transform: Option<bool>) -> EntityId {
+    pub fn create_dct_filter(
+        &mut self,
+        source: EntityId,
+        color_transform: Option<bool>,
+    ) -> EntityId {
         self.create_filter(source, FilterKind::dct_decode(color_transform))
     }
 
@@ -2753,8 +2752,7 @@ mod tests {
         // LZW-compressed data for "TOBEORNOTTOBEORTOBEORNOT"
         // Encode with early-change (tiff_size_switch) to match default PS behavior
         let original = b"TOBEORNOTTOBEORTOBEORNOT";
-        let mut encoder =
-            weezl::encode::Encoder::with_tiff_size_switch(weezl::BitOrder::Msb, 8);
+        let mut encoder = weezl::encode::Encoder::with_tiff_size_switch(weezl::BitOrder::Msb, 8);
         let compressed = encoder.encode(original).unwrap();
 
         let mut store = FileStore::new();
