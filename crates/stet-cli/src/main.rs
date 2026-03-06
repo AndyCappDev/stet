@@ -253,8 +253,55 @@ fn run_viewer_mode(dpi_override: Option<f64>, file_args: Vec<String>) {
         // ctx drops here → display_list_sender drops → relay thread ends
     });
 
-    // Main thread: run viewer
-    stet_viewer::run_viewer(viewer_end, dpi_override, first_file.as_deref(), first_page_size);
+    // Wait for the first page before creating the viewer window.
+    // If the interpreter finishes without producing any pages (e.g. unit tests,
+    // nulldevice), skip the viewer entirely — no window flash.
+    let page_rx = viewer_end.page_receiver;
+    let screen_info_sender = viewer_end.screen_info_sender;
+    let advance_sender = viewer_end.advance_sender;
+
+    // Block until the first real page or disconnect
+    let mut first_page = None;
+    loop {
+        match page_rx.recv() {
+            Ok(msg @ stet_viewer::ViewerMsg::Page(_)) => {
+                first_page = Some(msg);
+                break;
+            }
+            Ok(_) => {
+                // NewJob/JobDone control messages — keep waiting for a real page
+                continue;
+            }
+            Err(_) => {
+                // Interpreter done without producing any pages — no viewer needed
+                break;
+            }
+        }
+    }
+
+    if let Some(first) = first_page {
+        // Forward first page + remaining messages through a new channel
+        let (fwd_tx, fwd_rx) = std::sync::mpsc::channel();
+        fwd_tx.send(first).ok();
+        std::thread::spawn(move || {
+            for msg in page_rx {
+                if fwd_tx.send(msg).is_err() {
+                    break;
+                }
+            }
+        });
+        let new_viewer_end = stet_viewer::ViewerEnd {
+            page_receiver: fwd_rx,
+            screen_info_sender,
+            advance_sender,
+        };
+        stet_viewer::run_viewer(
+            new_viewer_end,
+            dpi_override,
+            first_file.as_deref(),
+            first_page_size,
+        );
+    }
     std::process::exit(0);
 }
 
