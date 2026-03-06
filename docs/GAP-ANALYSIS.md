@@ -190,7 +190,7 @@ The "Test" resources in PF are used by the test suite. The Default ColorSpace re
 | Type 0 Composite | Full | Full | None |
 | CMap decoding | Full | Full | None |
 | Glyph caching | Yes | **No** | Performance only |
-| System font discovery | Yes | **No** | See 3.6 |
+| System font discovery | Yes | Yes | See 3.6 |
 | `composefont` | Yes | Yes | None |
 
 Font support is at feature parity for correctness. System font discovery is implemented. Remaining gap is performance (glyph caching).
@@ -294,7 +294,7 @@ All 7 shading types are implemented in both interpreters. **No gaps.**
 
 ### P2 — Medium (Feature completeness)
 ~~11. **CCITTFax filters** — RESOLVED (2026-03-06): CCITTFaxDecode implemented via fax crate; CCITTFaxEncode deferred~~
-12. **System font discovery** — find system-installed fonts
+~~12. **System font discovery** — RESOLVED (2026-03-06): Platform font dir scanning, JSON cache, TTF/OTF loading~~
 13. **Missing misc operators** (flushpage, runlibfile, loopname, help, printostack, breaki, createresourcecategory)
 14. **Default ColorSpace resources** (DefaultGray, DefaultRGB, DefaultCMYK)
 15. **Glyph caching** — performance improvement
