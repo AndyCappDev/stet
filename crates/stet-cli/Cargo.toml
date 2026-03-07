@@ -15,6 +15,7 @@ stet-core.workspace = true
 stet-engine.workspace = true
 stet-ops.workspace = true
 stet-render.workspace = true
+stet-pdf.workspace = true
 rayon.workspace = true
 stet-viewer = { workspace = true, optional = true }
 

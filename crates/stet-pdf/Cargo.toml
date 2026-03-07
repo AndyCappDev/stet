@@ -1,0 +1,11 @@
+[package]
+name = "stet-pdf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "PDF output device for stet PostScript interpreter"
+
+[dependencies]
+stet-core.workspace = true
+flate2 = "1"

@@ -11,6 +11,7 @@ use stet_core::context::Context;
 use stet_core::eps::{content_is_epsf, read_eps_bounding_box, strip_dos_eps_header};
 use stet_engine::eval::{parse_and_exec, parse_and_exec_file};
 use stet_ops::build_system_dict;
+use stet_pdf::PdfDevice;
 use stet_render::SkiaDevice;
 
 /// A `Write` implementation that writes to a shared `Vec<u8>` behind a mutex.
@@ -118,6 +119,9 @@ fn main() {
         "png" => {
             run_png_mode(dpi, file_args, no_icc);
         }
+        "pdf" => {
+            run_pdf_mode(dpi, file_args, no_icc);
+        }
         "null" => {
             run_null_mode(dpi, file_args, no_icc);
         }
@@ -130,7 +134,7 @@ fn main() {
         }
         other => {
             eprintln!("Error: unknown device '{}'", other);
-            eprintln!("Available devices: png, null, viewer");
+            eprintln!("Available devices: png, pdf, null, viewer");
             std::process::exit(1);
         }
     }
@@ -147,6 +151,23 @@ fn run_png_mode(dpi_override: Option<f64>, file_args: Vec<String>, no_icc: bool)
         run_file_jobs(&mut ctx, dpi_override, &file_args, "png", None, None);
     } else {
         run_repl(&mut ctx);
+    }
+}
+
+/// Run in PDF output mode — vector PDF output.
+fn run_pdf_mode(dpi_override: Option<f64>, file_args: Vec<String>, no_icc: bool) {
+    let mut ctx = create_context(no_icc);
+    let dpi_val = dpi_override.unwrap_or(300.0);
+
+    ctx.device_factory = Some(Box::new(move |w, h| {
+        Box::new(PdfDevice::new(w, h, dpi_val))
+    }));
+
+    if !file_args.is_empty() {
+        run_file_jobs(&mut ctx, dpi_override, &file_args, "pdf", None, None);
+    } else {
+        eprintln!("Error: PDF device requires input files");
+        std::process::exit(1);
     }
 }
 
@@ -394,7 +415,8 @@ fn run_file_jobs(
             .or_else(|| filename.strip_suffix(".epsf"))
             .or_else(|| filename.strip_suffix(".EPSF"))
             .unwrap_or(filename);
-        ctx.output_path = Some(format!("{}.png", output_base));
+        let ext = if device == "pdf" { "pdf" } else { "png" };
+        ctx.output_path = Some(format!("{}.{}", output_base, ext));
 
         let source = match std::fs::read(filename) {
             Ok(s) => s,
@@ -718,6 +740,7 @@ fn install_device(ctx: &mut Context, dpi_override: Option<f64>, device: &str) {
     }
     let resource_name = match device {
         "viewer" => "viewer",
+        "pdf" => "pdf",
         _ => "png",
     };
     // Copy the resource dict before modifying HWResolution — the original is
@@ -779,6 +802,7 @@ fn install_device_with_size(
     }
     let resource_name = match device {
         "viewer" => "viewer",
+        "pdf" => "pdf",
         _ => "png",
     };
     // Copy the resource dict before modifying PageSize — the original is in
