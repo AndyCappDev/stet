@@ -1438,9 +1438,6 @@ fn render_pattern_fill_to_band(
     band_h: u32,
     dpi: f64,
 ) {
-    let Some(skia_path) = build_skia_path(&params.path) else {
-        return;
-    };
     let mut temp_mask = None;
     let Some(mask_ref) = resolve_clip_mask(&band_state.clip_region, &mut temp_mask, band_w, band_h)
     else {
@@ -1448,159 +1445,145 @@ fn render_pattern_fill_to_band(
     };
 
     let pm = &params.pattern_matrix;
+    let y_off = y_start as f64;
 
-    // Compute tile size in device pixels
-    let tile_w = (params.xstep * pm.a).abs() + (params.xstep * pm.b).abs();
-    let tile_h = (params.ystep * pm.c).abs() + (params.ystep * pm.d).abs();
+    // Tile step in device pixels (fractional — exact, no rounding)
+    let step_x = (params.xstep * pm.a).abs() + (params.xstep * pm.b).abs();
+    let step_y = (params.ystep * pm.c).abs() + (params.ystep * pm.d).abs();
+    if step_x < 0.01 || step_y < 0.01 {
+        return;
+    }
 
-    // Clamp tile size
-    let tile_w_px = (tile_w.ceil() as u32).clamp(1, 2048);
-    let tile_h_px = (tile_h.ceil() as u32).clamp(1, 2048);
+    // Pattern origin in device space
+    let origin_x = pm.tx;
+    let origin_y = pm.ty;
 
-    // Render one tile to an offscreen pixmap
-    let Some(mut tile_pixmap) = Pixmap::new(tile_w_px, tile_h_px) else {
+    // Scale from pattern space to device space
+    let sx = step_x / params.xstep.abs();
+    let sy = step_y / params.ystep.abs();
+
+    // Compute the fill path bounding box to determine tile range
+    let (mut min_x, mut min_y, mut max_x, mut max_y) =
+        (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+    for seg in &params.path.segments {
+        let (x, y) = match seg {
+            PathSegment::MoveTo(x, y) | PathSegment::LineTo(x, y) => (*x, *y),
+            PathSegment::CurveTo { x3, y3, .. } => (*x3, *y3),
+            PathSegment::ClosePath => continue,
+        };
+        min_x = min_x.min(x);
+        min_y = min_y.min(y);
+        max_x = max_x.max(x);
+        max_y = max_y.max(y);
+    }
+
+    // Clamp to band Y range
+    let band_min_y = y_off;
+    let band_max_y = y_off + band_h as f64;
+    min_y = min_y.max(band_min_y);
+    max_y = max_y.min(band_max_y);
+    if min_y >= max_y {
+        return;
+    }
+
+    // Compute tile index range
+    let tile_x_start = ((min_x - origin_x) / step_x).floor() as i32 - 1;
+    let tile_x_end = ((max_x - origin_x) / step_x).ceil() as i32 + 1;
+    let tile_y_start = ((min_y - origin_y) / step_y).floor() as i32 - 1;
+    let tile_y_end = ((max_y - origin_y) / step_y).ceil() as i32 + 1;
+
+    // Safety limit on tile count
+    let tile_count = (tile_x_end - tile_x_start) as i64 * (tile_y_end - tile_y_start) as i64;
+    if tile_count > 10000 {
+        return;
+    }
+
+    // Render tiled pattern into a temporary pixmap, then composite through
+    // the fill path onto the main pixmap. This gives exact fractional tile
+    // positioning with no rounding artifacts from Pattern shader repeat.
+    let Some(mut tile_buf) = Pixmap::new(band_w, band_h) else {
         return;
     };
 
-    // For colored patterns (PaintType 1), render the tile's display list
-    // Transform from pattern space to tile-pixmap space
-    if params.paint_type == 1 {
-        // Build transform: pattern_space → device tile pixels
-        // Scale pattern coords (0..xstep, 0..ystep) to (0..tile_w_px, 0..tile_h_px)
-        let sx = tile_w_px as f64 / params.xstep.abs();
-        let sy = tile_h_px as f64 / params.ystep.abs();
+    for ty in tile_y_start..tile_y_end {
+        let tile_dev_y = origin_y + ty as f64 * step_y;
+        if tile_dev_y + step_y < band_min_y || tile_dev_y > band_max_y {
+            continue;
+        }
+        for tx in tile_x_start..tile_x_end {
+            let tile_dev_x = origin_x + tx as f64 * step_x;
+            // Transform: scale pattern→device, translate to tile position, offset for band
+            let tile_transform = Transform::from_row(
+                sx as f32,
+                0.0,
+                0.0,
+                sy as f32,
+                tile_dev_x as f32,
+                (tile_dev_y - y_off) as f32,
+            );
 
-        // Create a temporary SkiaDevice-like rendering: replay tile display list
-        // We build a simple device for the tile
-        let tile_elements = params.tile.elements();
-        for elem in tile_elements {
-            match elem {
-                DisplayElement::Fill { path, params: fp } => {
-                    if let Some(sp) = build_skia_path(path) {
-                        let paint = to_paint(&fp.color);
-                        let t = to_transform(&fp.ctm);
-                        // Scale from pattern space to tile space
-                        let tile_transform =
-                            Transform::from_scale(sx as f32, sy as f32).post_concat(t);
-                        let fill_rule = to_fill_rule(&fp.fill_rule);
-                        tile_pixmap.fill_path(&sp, &paint, fill_rule, tile_transform, None);
-                    }
-                }
-                DisplayElement::Stroke { path, params: sp } => {
-                    if let Some(skp) = build_skia_path(path) {
-                        let stroke = build_stroke(sp, dpi);
-                        let paint = to_paint(&sp.color);
-                        let t = to_transform(&sp.ctm);
-                        let tile_transform =
-                            Transform::from_scale(sx as f32, sy as f32).post_concat(t);
-                        tile_pixmap.stroke_path(&skp, &paint, &stroke, tile_transform, None);
-                    }
-                }
-                DisplayElement::Image {
-                    rgba_data,
-                    params: ip,
-                } => {
-                    let iw = ip.width;
-                    let ih = ip.height;
-                    let expected = (iw * ih * 4) as usize;
-                    if rgba_data.len() >= expected && iw > 0 && ih > 0 {
-                        if let Some(image_inv) = ip.image_matrix.invert() {
-                            let combined = ip.ctm.concat(&image_inv);
-                            let t = to_transform(&combined);
-                            let tile_transform =
-                                Transform::from_scale(sx as f32, sy as f32).post_concat(t);
-                            if let Some(img_pixmap) =
-                                tiny_skia::PixmapRef::from_bytes(rgba_data, iw, ih)
-                            {
-                                let paint = tiny_skia::PixmapPaint::default();
-                                tile_pixmap.draw_pixmap(
-                                    0,
-                                    0,
-                                    img_pixmap,
-                                    &paint,
-                                    tile_transform,
-                                    None,
-                                );
-                            }
+            for elem in params.tile.elements() {
+                match elem {
+                    DisplayElement::Fill { path, params: fp } => {
+                        if let Some(sp) = build_skia_path(path) {
+                            let paint = if params.paint_type == 1 {
+                                to_paint(&fp.color)
+                            } else {
+                                to_paint(
+                                    params
+                                        .underlying_color
+                                        .as_ref()
+                                        .unwrap_or(&DeviceColor::black()),
+                                )
+                            };
+                            let t = to_transform(&fp.ctm);
+                            let combined = tile_transform.post_concat(t);
+                            let fr = to_fill_rule(&fp.fill_rule);
+                            tile_buf.fill_path(&sp, &paint, fr, combined, None);
                         }
                     }
-                }
-                _ => {} // Skip clip/initclip/erasepage in pattern tiles
-            }
-        }
-    } else {
-        // PaintType 2 (uncolored): render tile as alpha, then colorize
-        // For now, just render with underlying color
-        let color = params
-            .underlying_color
-            .as_ref()
-            .cloned()
-            .unwrap_or_else(DeviceColor::black);
-
-        let sx = tile_w_px as f64 / params.xstep.abs();
-        let sy = tile_h_px as f64 / params.ystep.abs();
-
-        for elem in params.tile.elements() {
-            if let DisplayElement::Fill { path, params: fp } = elem {
-                if let Some(sp) = build_skia_path(path) {
-                    let paint = to_paint(&color);
-                    let t = to_transform(&fp.ctm);
-                    let tile_transform = Transform::from_scale(sx as f32, sy as f32).post_concat(t);
-                    let fill_rule = to_fill_rule(&fp.fill_rule);
-                    tile_pixmap.fill_path(&sp, &paint, fill_rule, tile_transform, None);
+                    DisplayElement::Stroke { path, params: sp } => {
+                        if let Some(skp) = build_skia_path(path) {
+                            let stroke = build_stroke(sp, dpi);
+                            let paint = to_paint(&sp.color);
+                            let t = to_transform(&sp.ctm);
+                            let combined = tile_transform.post_concat(t);
+                            tile_buf.stroke_path(&skp, &paint, &stroke, combined, None);
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
     }
 
-    // Create a tiny-skia Pattern shader from the tile
-    let tile_ref = tile_pixmap.as_ref();
-    let pattern = tiny_skia::Pattern::new(
-        tile_ref,
-        tiny_skia::SpreadMode::Repeat,
-        tiny_skia::FilterQuality::Bilinear,
-        1.0, // opacity
-        Transform::identity(),
-    );
-
-    // Build paint with the pattern shader
-    let mut paint = Paint::default();
-    paint.shader = pattern;
-    paint.anti_alias = true;
-
-    // Build the transform: we need to map from the fill path's device space
-    // to pattern-tile-space so the repeat shader tiles correctly.
-    // The fill path is already in device space, so we need identity for the
-    // path transform, but the pattern needs to be positioned via the pattern matrix.
-    let y_off = y_start as f32;
+    // Composite tile_buf onto main pixmap through the fill path.
+    // Create a mask from the fill path, intersect with clip mask, then draw.
+    let Some(fill_skia_path) = build_skia_path(&params.path) else {
+        return;
+    };
     let fill_rule = to_fill_rule(&params.fill_rule);
-
-    // The pattern shader repeats in tile_pixmap coordinates. We need to apply
-    // the pattern origin offset. Pattern matrix gives us where tile (0,0) is
-    // in device space.
-    let pattern_origin_x = pm.tx as f32;
-    let pattern_origin_y = pm.ty as f32;
-
-    // The path is in device space. We render with identity transform (offset for band).
-    // The shader needs to be offset so tiles align with pattern_matrix origin.
-    let shader_transform = Transform::from_translate(pattern_origin_x, pattern_origin_y - y_off);
-
-    // Recreate pattern with proper transform
-    let pattern = tiny_skia::Pattern::new(
-        tile_pixmap.as_ref(),
-        tiny_skia::SpreadMode::Repeat,
-        tiny_skia::FilterQuality::Bilinear,
-        1.0,
-        shader_transform,
-    );
-    paint.shader = pattern;
-
-    pixmap.fill_path(
-        &skia_path,
-        &paint,
+    let mut fill_mask = Mask::new(band_w, band_h).expect("mask");
+    fill_mask.fill_path(
+        &fill_skia_path,
         fill_rule,
+        true, // anti-alias
+        Transform::from_translate(0.0, -(y_off as f32)),
+    );
+
+    // Intersect fill mask with clip mask
+    if let Some(clip_mask) = mask_ref {
+        intersect_masks(&mut fill_mask, clip_mask);
+    }
+
+    let img_paint = tiny_skia::PixmapPaint::default();
+    pixmap.draw_pixmap(
+        0,
+        0,
+        tile_buf.as_ref(),
+        &img_paint,
         Transform::identity(),
-        mask_ref,
+        Some(&fill_mask),
     );
 }
 
@@ -2851,20 +2834,128 @@ fn render_element_to_viewport(
             render_patch_shading_viewport(pixmap, params, vp_x, vp_y, scale_x, scale_y, mask_ref);
         }
         DisplayElement::PatternFill { params } => {
-            // For viewport rendering, delegate to band renderer with y_start=0
-            // and the viewport dimensions. This is a simplification that works
-            // because the path is already in device space.
-            let mut band_state = BandState {
-                clip_region: state.clip_region.take(),
-                spare_mask: None,
-                clip_mask_cache: HashMap::new(),
-                clip_mask_seen: HashSet::new(),
-                mask_pool: Vec::new(),
-            };
-            render_pattern_fill_to_band(pixmap, &mut band_state, params, 0, out_w, out_h, 72.0);
-            state.clip_region = band_state.clip_region.take();
+            render_pattern_fill_viewport(
+                pixmap, state, params, vp_x, vp_y, scale_x, scale_y, out_w, out_h,
+            );
         }
     }
+}
+
+/// Pattern fill for viewport rendering. Applies viewport transform to both
+/// the fill path and the pattern shader.
+#[allow(clippy::too_many_arguments)]
+fn render_pattern_fill_viewport(
+    pixmap: &mut Pixmap,
+    state: &mut BandState,
+    params: &stet_core::device::PatternFillParams,
+    vp_x: f32,
+    vp_y: f32,
+    scale_x: f32,
+    scale_y: f32,
+    out_w: u32,
+    out_h: u32,
+) {
+    let Some(skia_path) = build_skia_path(&params.path) else {
+        return;
+    };
+    let mut temp_mask = None;
+    let Some(mask_ref) = resolve_clip_mask(&state.clip_region, &mut temp_mask, out_w, out_h)
+    else {
+        return;
+    };
+
+    let pm = &params.pattern_matrix;
+
+    // Compute tile size in device pixels (same as banded path)
+    let tile_w = (params.xstep * pm.a).abs() + (params.xstep * pm.b).abs();
+    let tile_h = (params.ystep * pm.c).abs() + (params.ystep * pm.d).abs();
+    let tile_w_px = (tile_w.round() as u32).clamp(1, 2048);
+    let tile_h_px = (tile_h.round() as u32).clamp(1, 2048);
+
+    let Some(mut tile_pixmap) = Pixmap::new(tile_w_px, tile_h_px) else {
+        return;
+    };
+
+    // Render tile content (same as banded path)
+    if params.paint_type == 1 {
+        let sx = tile_w_px as f64 / params.xstep.abs();
+        let sy = tile_h_px as f64 / params.ystep.abs();
+        for elem in params.tile.elements() {
+            match elem {
+                DisplayElement::Fill { path, params: fp } => {
+                    if let Some(sp) = build_skia_path(path) {
+                        let paint = to_paint(&fp.color);
+                        let t = to_transform(&fp.ctm);
+                        let tile_transform =
+                            Transform::from_scale(sx as f32, sy as f32).post_concat(t);
+                        let fill_rule = to_fill_rule(&fp.fill_rule);
+                        tile_pixmap.fill_path(&sp, &paint, fill_rule, tile_transform, None);
+                    }
+                }
+                DisplayElement::Stroke { path, params: sp } => {
+                    if let Some(skp) = build_skia_path(path) {
+                        let stroke = build_stroke(sp, 72.0);
+                        let paint = to_paint(&sp.color);
+                        let t = to_transform(&sp.ctm);
+                        let tile_transform =
+                            Transform::from_scale(sx as f32, sy as f32).post_concat(t);
+                        tile_pixmap.stroke_path(&skp, &paint, &stroke, tile_transform, None);
+                    }
+                }
+                _ => {}
+            }
+        }
+    } else {
+        let color = params
+            .underlying_color
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(DeviceColor::black);
+        let sx = tile_w_px as f64 / params.xstep.abs();
+        let sy = tile_h_px as f64 / params.ystep.abs();
+        for elem in params.tile.elements() {
+            if let DisplayElement::Fill { path, params: fp } = elem {
+                if let Some(sp) = build_skia_path(path) {
+                    let paint = to_paint(&color);
+                    let t = to_transform(&fp.ctm);
+                    let tile_transform =
+                        Transform::from_scale(sx as f32, sy as f32).post_concat(t);
+                    let fill_rule = to_fill_rule(&fp.fill_rule);
+                    tile_pixmap.fill_path(&sp, &paint, fill_rule, tile_transform, None);
+                }
+            }
+        }
+    }
+
+    // Scale correction for non-integer tile size
+    let tile_scale_x = (tile_w as f32) / (tile_w_px as f32);
+    let tile_scale_y = (tile_h as f32) / (tile_h_px as f32);
+
+    // Pattern origin in device space, mapped through viewport transform
+    let origin_x = pm.tx as f32;
+    let origin_y = pm.ty as f32;
+    let vp_origin_x = (origin_x - vp_x) * scale_x;
+    let vp_origin_y = (origin_y - vp_y) * scale_y;
+
+    // Shader transform: scale tile to correct device size, then scale for viewport,
+    // then translate to viewport-space origin
+    let shader_transform = Transform::from_scale(tile_scale_x * scale_x, tile_scale_y * scale_y)
+        .post_concat(Transform::from_translate(vp_origin_x, vp_origin_y));
+
+    let pattern = tiny_skia::Pattern::new(
+        tile_pixmap.as_ref(),
+        tiny_skia::SpreadMode::Repeat,
+        tiny_skia::FilterQuality::Bilinear,
+        1.0,
+        shader_transform,
+    );
+    let mut paint = Paint::default();
+    paint.shader = pattern;
+    paint.anti_alias = true;
+
+    let fill_rule = to_fill_rule(&params.fill_rule);
+    let path_transform = viewport_transform(Transform::identity(), vp_x, vp_y, scale_x, scale_y);
+    pixmap.fill_path(&skia_path, &paint, fill_rule, path_transform, mask_ref);
 }
 
 /// Clip path handling for viewport rendering.

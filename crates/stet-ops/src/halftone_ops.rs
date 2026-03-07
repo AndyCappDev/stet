@@ -590,8 +590,15 @@ pub fn op_makepattern(ctx: &mut Context) -> Result<(), PsError> {
     let cached_display_list = if pattern_type == 1 {
         let pp = paint_proc.unwrap();
 
-        // Save display list, gsave, set CTM to identity
+        // Save display list and CTM, set CTM to identity so PaintProc
+        // captures paths in pattern space (not device space)
         let saved_dl = std::mem::take(&mut ctx.display_list);
+        let saved_ctm = ctx.gstate.ctm;
+        ctx.gstate.ctm = Matrix::identity();
+
+        // Clear path for PaintProc
+        ctx.gstate.path.clear();
+        ctx.gstate.current_point = None;
 
         // Push pattern dict on o_stack for PaintProc to consume
         ctx.o_stack.push(PsObject::dict(new_dict))?;
@@ -599,7 +606,8 @@ pub fn op_makepattern(ctx: &mut Context) -> Result<(), PsError> {
         // Execute PaintProc
         let result = ctx.exec_sync(pp);
 
-        // Capture resulting display list regardless of error
+        // Restore CTM and display list
+        ctx.gstate.ctm = saved_ctm;
         let captured = std::mem::replace(&mut ctx.display_list, saved_dl);
 
         result?;

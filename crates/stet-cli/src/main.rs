@@ -725,7 +725,13 @@ fn install_device(ctx: &mut Context, dpi_override: Option<f64>, device: &str) {
             resource_name
         )
     };
-    if let Err(e) = parse_and_exec(ctx, setup.as_bytes()) {
+    // Temporarily allow HWResolution changes so the CLI's own DPI override
+    // isn't blocked by the PS-program filter in merge_request_dict.
+    let saved = ctx.allow_ps_resolution;
+    ctx.allow_ps_resolution = true;
+    let result = parse_and_exec(ctx, setup.as_bytes());
+    ctx.allow_ps_resolution = saved;
+    if let Err(e) = result {
         eprintln!(
             "Warning: setpagedevice via resource failed ({}), using fallback",
             e
@@ -782,7 +788,13 @@ fn install_device_with_size(
             resource_name, width, height
         )
     };
-    if let Err(e) = parse_and_exec(ctx, setup.as_bytes()) {
+    // Temporarily allow HWResolution changes so the CLI's own DPI override
+    // isn't blocked by the PS-program filter in merge_request_dict.
+    let saved = ctx.allow_ps_resolution;
+    ctx.allow_ps_resolution = true;
+    let result = parse_and_exec(ctx, setup.as_bytes());
+    ctx.allow_ps_resolution = saved;
+    if let Err(e) = result {
         eprintln!(
             "Warning: setpagedevice with size failed ({}), using fallback",
             e

@@ -26,6 +26,7 @@ pub fn op_setgray(ctx: &mut Context) -> Result<(), PsError> {
     ctx.o_stack.pop()?;
     ctx.gstate.color = DeviceColor::from_gray(gray.clamp(0.0, 1.0));
     ctx.gstate.color_space = ColorSpace::DeviceGray;
+    ctx.gstate.current_pattern = None;
     // UseCIEColor remapping (PLRM 6.2.5)
     if is_use_cie_color(ctx) {
         if let Some(cs) = lookup_default_colorspace(ctx, b"DeviceGray") {
@@ -59,6 +60,7 @@ pub fn op_setrgbcolor(ctx: &mut Context) -> Result<(), PsError> {
     ctx.gstate.color =
         DeviceColor::from_rgb(r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0));
     ctx.gstate.color_space = ColorSpace::DeviceRGB;
+    ctx.gstate.current_pattern = None;
     // UseCIEColor remapping (PLRM 6.2.5)
     if is_use_cie_color(ctx) {
         if let Some(cs) = lookup_default_colorspace(ctx, b"DeviceRGB") {
@@ -100,6 +102,7 @@ pub fn op_setcmykcolor(ctx: &mut Context) -> Result<(), PsError> {
         k.clamp(0.0, 1.0),
     );
     ctx.gstate.color_space = ColorSpace::DeviceCMYK;
+    ctx.gstate.current_pattern = None;
     // UseCIEColor remapping (PLRM 6.2.5)
     if is_use_cie_color(ctx) {
         if let Some(cs) = lookup_default_colorspace(ctx, b"DeviceCMYK") {
@@ -136,6 +139,7 @@ pub fn op_sethsbcolor(ctx: &mut Context) -> Result<(), PsError> {
     ctx.gstate.color =
         DeviceColor::from_hsb(h.clamp(0.0, 1.0), s.clamp(0.0, 1.0), b.clamp(0.0, 1.0));
     ctx.gstate.color_space = ColorSpace::DeviceRGB;
+    ctx.gstate.current_pattern = None;
     Ok(())
 }
 
@@ -180,6 +184,7 @@ pub fn op_setcolorspace(ctx: &mut Context) -> Result<(), PsError> {
             }
             ctx.gstate.color = default_color_for_space(&cs, ctx);
             ctx.gstate.color_space = cs;
+            ctx.gstate.current_pattern = None;
             Ok(())
         }
         // Also accept array form [/DeviceGray] or [/Indexed base hival lookup]
@@ -227,6 +232,7 @@ pub fn op_setcolorspace(ctx: &mut Context) -> Result<(), PsError> {
                 ctx.o_stack.pop()?;
                 ctx.gstate.color = default_color_for_space(&cs, ctx);
                 ctx.gstate.color_space = cs;
+                ctx.gstate.current_pattern = None;
                 Ok(())
             } else {
                 Err(PsError::TypeCheck)
@@ -420,6 +426,7 @@ fn set_color_from_tint_result(ctx: &mut Context, n: u32) -> Result<(), PsError> 
         4 => DeviceColor::from_cmyk(components[0], components[1], components[2], components[3]),
         _ => DeviceColor::from_gray(0.0),
     };
+    ctx.gstate.current_pattern = None;
     Ok(())
 }
 
@@ -604,6 +611,7 @@ fn set_indexed_color(ctx: &mut Context) -> Result<(), PsError> {
 
     ctx.o_stack.pop()?;
     ctx.gstate.color = color;
+    ctx.gstate.current_pattern = None;
     Ok(())
 }
 
@@ -1204,6 +1212,7 @@ fn set_cie_abc_color(ctx: &mut Context, params: &Arc<CieAbcParams>) -> Result<()
     ctx.o_stack.pop()?;
     ctx.o_stack.pop()?;
     ctx.gstate.color = DeviceColor::from_cie_abc(a, b, c, params);
+    ctx.gstate.current_pattern = None;
     Ok(())
 }
 
@@ -1217,6 +1226,7 @@ fn set_cie_a_color(ctx: &mut Context, params: &Arc<CieAParams>) -> Result<(), Ps
 
     ctx.o_stack.pop()?;
     ctx.gstate.color = DeviceColor::from_cie_a(a, params);
+    ctx.gstate.current_pattern = None;
     Ok(())
 }
 
@@ -1236,6 +1246,7 @@ fn set_cie_def_color(ctx: &mut Context, params: &Arc<CieDefParams>) -> Result<()
     ctx.o_stack.pop()?;
     ctx.o_stack.pop()?;
     ctx.gstate.color = DeviceColor::from_cie_def(d, e, f, params);
+    ctx.gstate.current_pattern = None;
     Ok(())
 }
 
@@ -1258,6 +1269,7 @@ fn set_cie_defg_color(ctx: &mut Context, params: &Arc<CieDefgParams>) -> Result<
     ctx.o_stack.pop()?;
     ctx.o_stack.pop()?;
     ctx.gstate.color = DeviceColor::from_cie_defg(d, e, f, g, params);
+    ctx.gstate.current_pattern = None;
     Ok(())
 }
 
