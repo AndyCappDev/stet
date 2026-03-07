@@ -21,6 +21,7 @@ pub mod eps;
 pub mod error;
 pub mod file_store;
 pub mod font_loader;
+pub mod glyph_cache;
 pub mod graphics_state;
 pub mod icc;
 pub mod mesh_shading;

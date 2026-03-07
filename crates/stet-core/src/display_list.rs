@@ -73,6 +73,16 @@ impl DisplayList {
     pub fn is_empty(&self) -> bool {
         self.elements.is_empty()
     }
+
+    /// Returns the number of elements.
+    pub fn len(&self) -> usize {
+        self.elements.len()
+    }
+
+    /// Returns a slice of elements starting from the given index.
+    pub fn elements_from(&self, start: usize) -> &[DisplayElement] {
+        &self.elements[start..]
+    }
 }
 
 impl Default for DisplayList {

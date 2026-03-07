@@ -215,6 +215,11 @@ pub struct Context {
     // Mode 1 metrics from setcachedevice2: ((w1x, w1y), (vx, vy))
     pub char_width_mode1: Option<((f64, f64), (f64, f64))>,
 
+    // Glyph path cache: per-font charstring interpretation results
+    pub glyph_caches: rustc_hash::FxHashMap<EntityId, crate::glyph_cache::GlyphCache>,
+    // Type 3 cache mode: set by setcachedevice/setcharwidth during BuildChar
+    pub char_cache_mode: Option<crate::glyph_cache::Type3CacheMode>,
+
     // CID passed from cshow to nested show call for Type 0 composite fonts
     pub cshow_pending_cid: Option<i32>,
 
@@ -558,6 +563,8 @@ impl Context {
             exec_sync_fn: None,
             char_width: None,
             char_width_mode1: None,
+            glyph_caches: rustc_hash::FxHashMap::default(),
+            char_cache_mode: None,
             cshow_pending_cid: None,
             pattern_store: Vec::new(),
             form_cache: rustc_hash::FxHashMap::default(),

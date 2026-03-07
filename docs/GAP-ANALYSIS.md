@@ -14,7 +14,7 @@ stet has strong foundations across core interpreter mechanics, graphics, fonts, 
 - ~~**CCITTFax filters** not implemented~~ — **CCITTFaxDecode RESOLVED** (2026-03-06); CCITTFaxEncode deferred
 - ~~**Binary Object Sequences (BOS)** not implemented~~ — **RESOLVED** (2026-03-08)
 - **Output devices**: stet has PNG + viewer; PF also has PDF, SVG, TIFF
-- **Glyph caching** not implemented (plan exists)
+- ~~**Glyph caching** not implemented~~ — **RESOLVED** (2026-03-07)
 - **No test suite failures** — all 47 suites pass
 
 ### Test Suite Status (stet unit_tests)
@@ -77,11 +77,9 @@ CCITTFaxDecode implemented using the `fax` Rust crate (MIT, from pdf-rs). Suppor
 
 Full binary token and BOS parser implemented in `binary_token.rs` (580 lines). Supports all token types 128-149: integers (132-136), fixed-point (137), reals (138-140), booleans (141), strings (142-144), system names (145-146), homogeneous number arrays (149), and binary object sequences (128-131). Includes 481-entry system name table per PLRM Appendix F. Both slice-based (fast path) and streaming parsing paths. BOS auto-execution at top level. Also fixed `putback_bytes` for real files (was silently discarding) and real serialization bug in `writeobject`. All 55 binary_token_tests.ps and 11 file_tests.ps BOS failures resolved.
 
-### 3.2 Glyph Caching (NOT IMPLEMENTED)
+### 3.2 Glyph Caching (IMPLEMENTED)
 
-PostForge has a glyph cache system (glyph_cache.py, system_font_cache.py — ~463 lines). stet has no implementation.
-
-**Impact**: Performance only — no correctness impact. Every glyph is re-rendered from outlines on every use.
+Glyph path cache implemented in `glyph_cache.rs`. Caches charstring interpretation results in charstring coordinates (pre-FontMatrix, pre-CTM) — one cache entry per glyph per font, regardless of size/orientation. Covers all font types: Type 1 (by glyph name), Type 2/CFF (by glyph name), TrueType/Type 42 (by glyph ID), CIDFont Type 0 (by CID), CIDFont Type 2 (by CID), and Type 3 (by char code, display list caching for `setcachedevice` glyphs with PLRM-correct recoloring at replay time). Cache keyed by font EntityId — font redefinition creates separate cache. Invalidated on `restore` for entities created after the save point. All render, measure, charpath, displaced show, and glyphshow paths use the cache.
 
 ### 3.3 ICC Color Profile Support (IMPLEMENTED)
 
@@ -187,11 +185,11 @@ The "Test" resources in PF are used by the test suite. The Default ColorSpace re
 | CIDFont Type 2 (TT) | Full | Full | None |
 | Type 0 Composite | Full | Full | None |
 | CMap decoding | Full | Full | None |
-| Glyph caching | Yes | **No** | Performance only |
+| Glyph caching | Yes | Yes | None |
 | System font discovery | Yes | Yes | See 3.6 |
 | `composefont` | Yes | Yes | None |
 
-Font support is at feature parity for correctness. System font discovery is implemented. Remaining gap is performance (glyph caching).
+Font support is at full feature parity including glyph caching.
 
 ---
 
@@ -295,7 +293,7 @@ All 7 shading types are implemented in both interpreters. **No gaps.**
 ~~12. **System font discovery** — RESOLVED (2026-03-06): Platform font dir scanning, JSON cache, TTF/OTF loading~~
 ~~13. **Missing misc operators** — RESOLVED (2026-03-06): flushpage (native), runlibfile (PS alias for run), createresourcecategory (already in resourcecategories.ps). loopname/help/printostack/breaki not needed~~
 ~~14. **Default ColorSpace resources** — RESOLVED (2026-03-06): DefaultGray/RGB/CMYK resource files + UseCIEColor remapping in setgray/setrgbcolor/setcmykcolor/setcolorspace~~
-15. **Glyph caching** — performance improvement
+~~15. **Glyph caching** — RESOLVED (2026-03-07): Per-font path cache for all font types (Type 1/2/3/42, CIDFont, composite), Type 3 display list caching with PLRM-correct recoloring~~
 
 ### P3 — Low (Nice-to-have)
 12. **PDF output device** — major feature but separate from PS interpretation

@@ -5,13 +5,16 @@
 //! Text show operators: show, ashow, widthshow, awidthshow, kshow,
 //! stringwidth, charpath, setcachedevice, setcharwidth.
 
+use std::sync::Arc;
+
 use stet_core::charstring;
 use stet_core::context::Context;
 use stet_core::device::{FillParams, StrokeParams};
 use stet_core::dict::DictKey;
 use stet_core::display_list::DisplayElement;
 use stet_core::error::PsError;
-use stet_core::graphics_state::{DashPattern, FillRule, LineCap, LineJoin, Matrix, PathSegment, PsPath};
+use stet_core::glyph_cache::{CachedGlyph, CachedType3Glyph, Type3CacheMode};
+use stet_core::graphics_state::{DashPattern, DeviceColor, FillRule, LineCap, LineJoin, Matrix, PathSegment, PsPath};
 use stet_core::object::{EntityId, PsObject, PsValue};
 use stet_core::truetype;
 use stet_core::type2_charstring;
@@ -678,6 +681,7 @@ pub fn op_setcachedevice(ctx: &mut Context) -> Result<(), PsError> {
         ctx.o_stack.pop()?;
     }
     ctx.char_width = Some((wx, wy));
+    ctx.char_cache_mode = Some(Type3CacheMode::Cache);
     Ok(())
 }
 
@@ -707,6 +711,7 @@ pub fn op_setcachedevice2(ctx: &mut Context) -> Result<(), PsError> {
     }
     ctx.char_width = Some((w0x, w0y));
     ctx.char_width_mode1 = Some(((w1x, w1y), (vx, vy)));
+    ctx.char_cache_mode = Some(Type3CacheMode::Cache);
     Ok(())
 }
 
@@ -723,6 +728,7 @@ pub fn op_setcharwidth(ctx: &mut Context) -> Result<(), PsError> {
     ctx.o_stack.pop()?;
     ctx.o_stack.pop()?;
     ctx.char_width = Some((wx, wy));
+    ctx.char_cache_mode = Some(Type3CacheMode::NoCache);
     Ok(())
 }
 
@@ -790,7 +796,16 @@ pub fn op_glyphshow(ctx: &mut Context) -> Result<(), PsError> {
     let ctm = ctx.gstate.ctm;
     let (paint_type, stroke_width_dev) = get_paint_info(ctx, font_entity, &font_matrix, &ctm);
 
-    if font_type == 2 {
+    // Check glyph cache
+    let cached = ctx
+        .glyph_caches
+        .get(&font_entity)
+        .and_then(|gc| gc.by_name.get(&glyph_name_id))
+        .cloned();
+
+    let (segments, width_x, width_y) = if let Some(cg) = cached {
+        (cg.segments, cg.width_x, cg.width_y)
+    } else if font_type == 2 {
         // Type 2 (CFF) charstring
         let info = get_type2_info(ctx, font_entity)?;
         let result = type2_charstring::execute_type2_charstring(
@@ -803,15 +818,20 @@ pub fn op_glyphshow(ctx: &mut Context) -> Result<(), PsError> {
         )
         .map_err(|_| PsError::InvalidFont)?;
 
-        if !result.path.is_empty() {
-            let user_path = transform_path(&result.path, &font_matrix, cur_x, cur_y);
-            let device_path = ctm_transform_path(&user_path, &ctm);
-            push_glyph_element(ctx, device_path, paint_type, stroke_width_dev);
-        }
-
-        let (wx, wy) = font_matrix.transform_delta(result.width_x, result.width_y);
-        let (dev_x, dev_y) = ctm.transform_point(cur_x + wx, cur_y + wy);
-        ctx.gstate.current_point = Some((dev_x, dev_y));
+        let segments = Arc::new(result.path.segments);
+        let cache = ctx
+            .glyph_caches
+            .entry(font_entity)
+            .or_insert_with(stet_core::glyph_cache::GlyphCache::new);
+        cache.by_name.insert(
+            glyph_name_id,
+            CachedGlyph {
+                segments: Arc::clone(&segments),
+                width_x: result.width_x,
+                width_y: result.width_y,
+            },
+        );
+        (segments, result.width_x, result.width_y)
     } else {
         // Type 1 charstring
         let info = get_font_info(ctx)?;
@@ -819,16 +839,31 @@ pub fn op_glyphshow(ctx: &mut Context) -> Result<(), PsError> {
         let result = charstring::execute_charstring(&cs_bytes, &subrs, info.len_iv, false)
             .map_err(|_| PsError::InvalidFont)?;
 
-        if !result.path.is_empty() {
-            let user_path = transform_path(&result.path, &font_matrix, cur_x, cur_y);
-            let device_path = ctm_transform_path(&user_path, &ctm);
-            push_glyph_element(ctx, device_path, paint_type, stroke_width_dev);
-        }
+        let segments = Arc::new(result.path.segments);
+        let cache = ctx
+            .glyph_caches
+            .entry(font_entity)
+            .or_insert_with(stet_core::glyph_cache::GlyphCache::new);
+        cache.by_name.insert(
+            glyph_name_id,
+            CachedGlyph {
+                segments: Arc::clone(&segments),
+                width_x: result.width_x,
+                width_y: result.width_y,
+            },
+        );
+        (segments, result.width_x, result.width_y)
+    };
 
-        let (wx, wy) = font_matrix.transform_delta(result.width_x, result.width_y);
-        let (dev_x, dev_y) = ctm.transform_point(cur_x + wx, cur_y + wy);
-        ctx.gstate.current_point = Some((dev_x, dev_y));
+    if !segments.is_empty() {
+        let user_path = transform_segments(&segments, &font_matrix, cur_x, cur_y);
+        let device_path = ctm_transform_path(&user_path, &ctm);
+        push_glyph_element(ctx, device_path, paint_type, stroke_width_dev);
     }
+
+    let (wx, wy) = font_matrix.transform_delta(width_x, width_y);
+    let (dev_x, dev_y) = ctm.transform_point(cur_x + wx, cur_y + wy);
+    ctx.gstate.current_point = Some((dev_x, dev_y));
 
     Ok(())
 }
@@ -1186,6 +1221,8 @@ fn render_show(
     let ctm = ctx.gstate.ctm;
     let (paint_type, stroke_width_dev) = get_paint_info(ctx, info.font_entity, &info.font_matrix, &ctm);
 
+    let font_entity_for_cache = info.font_entity;
+
     for &byte in bytes {
         // Look up glyph name from encoding
         let glyph_name_obj = ctx.arrays.get_element(info.encoding_entity, byte as u32);
@@ -1194,33 +1231,60 @@ fn render_show(
             _ => continue,
         };
 
-        // Look up charstring (works for both .notdef and regular glyphs)
-        let cs_key = DictKey::Name(glyph_name_id);
-        let cs_obj = match ctx.dicts.get(info.charstrings_entity, &cs_key) {
-            Some(obj) => obj,
-            None => continue, // glyph not in font
+        // Check glyph cache first
+        let cached = ctx
+            .glyph_caches
+            .get(&font_entity_for_cache)
+            .and_then(|gc| gc.by_name.get(&glyph_name_id))
+            .cloned();
+
+        let (segments, width_x, width_y) = if let Some(cg) = cached {
+            (cg.segments, cg.width_x, cg.width_y)
+        } else {
+            // Look up charstring (works for both .notdef and regular glyphs)
+            let cs_key = DictKey::Name(glyph_name_id);
+            let cs_obj = match ctx.dicts.get(info.charstrings_entity, &cs_key) {
+                Some(obj) => obj,
+                None => continue, // glyph not in font
+            };
+
+            let (cs_entity, cs_start, cs_len) = match cs_obj.value {
+                PsValue::String { entity, start, len } => (entity, start, len),
+                _ => continue,
+            };
+
+            let cs_bytes = ctx.strings.get(cs_entity, cs_start, cs_len).to_vec();
+
+            // Execute charstring with seac support
+            let result = charstring::execute_charstring_ex(
+                &cs_bytes,
+                &subrs,
+                info.len_iv,
+                false,
+                Some(&cs_lookup as &charstring::CharstringLookup<'_>),
+            )
+            .map_err(|_| PsError::InvalidFont)?;
+
+            let segments = Arc::new(result.path.segments);
+            // Store in cache
+            let cache = ctx
+                .glyph_caches
+                .entry(font_entity_for_cache)
+                .or_insert_with(stet_core::glyph_cache::GlyphCache::new);
+            cache.by_name.insert(
+                glyph_name_id,
+                CachedGlyph {
+                    segments: Arc::clone(&segments),
+                    width_x: result.width_x,
+                    width_y: result.width_y,
+                },
+            );
+            (segments, result.width_x, result.width_y)
         };
-
-        let (cs_entity, cs_start, cs_len) = match cs_obj.value {
-            PsValue::String { entity, start, len } => (entity, start, len),
-            _ => continue,
-        };
-
-        let cs_bytes = ctx.strings.get(cs_entity, cs_start, cs_len).to_vec();
-
-        // Execute charstring with seac support
-        let result = charstring::execute_charstring_ex(
-            &cs_bytes,
-            &subrs,
-            info.len_iv,
-            false,
-            Some(&cs_lookup as &charstring::CharstringLookup<'_>),
-        )
-        .map_err(|_| PsError::InvalidFont)?;
 
         // Transform glyph path: glyph space → user space (FontMatrix), then → device space (CTM)
-        if !result.path.is_empty() {
-            let user_path = transform_path(&result.path, &info.font_matrix, cur_x, cur_y);
+        if !segments.is_empty() {
+            let user_path = transform_segments(&segments, &info.font_matrix, cur_x, cur_y);
             let device_path = ctm_transform_path(&user_path, &ctm);
             push_glyph_element(ctx, device_path, paint_type, stroke_width_dev);
         }
@@ -1232,7 +1296,7 @@ fn render_show(
             info.font_matrix.transform_delta(metrics_wx, 0.0)
         } else {
             info.font_matrix
-                .transform_delta(result.width_x, result.width_y)
+                .transform_delta(width_x, width_y)
         };
         cur_x += wx + extra_ax;
         cur_y += wy + extra_ay;
@@ -1412,34 +1476,60 @@ fn render_show_type2(
             _ => continue,
         };
 
-        // Look up charstring
-        let cs_key = DictKey::Name(glyph_name_id);
-        let cs_obj = match ctx.dicts.get(info.charstrings_entity, &cs_key) {
-            Some(obj) => obj,
-            None => continue,
+        // Check glyph cache
+        let cached = ctx
+            .glyph_caches
+            .get(&font_entity)
+            .and_then(|gc| gc.by_name.get(&glyph_name_id))
+            .cloned();
+
+        let (segments, width_x, width_y) = if let Some(cg) = cached {
+            (cg.segments, cg.width_x, cg.width_y)
+        } else {
+            // Look up charstring
+            let cs_key = DictKey::Name(glyph_name_id);
+            let cs_obj = match ctx.dicts.get(info.charstrings_entity, &cs_key) {
+                Some(obj) => obj,
+                None => continue,
+            };
+
+            let (cs_entity, cs_start, cs_len) = match cs_obj.value {
+                PsValue::String { entity, start, len } => (entity, start, len),
+                _ => continue,
+            };
+
+            let cs_bytes = ctx.strings.get(cs_entity, cs_start, cs_len).to_vec();
+
+            // Execute Type 2 charstring
+            let result = type2_charstring::execute_type2_charstring(
+                &cs_bytes,
+                &info.local_subrs,
+                &info.global_subrs,
+                info.default_width_x,
+                info.nominal_width_x,
+                false,
+            )
+            .map_err(|_| PsError::InvalidFont)?;
+
+            let segments = Arc::new(result.path.segments);
+            let cache = ctx
+                .glyph_caches
+                .entry(font_entity)
+                .or_insert_with(stet_core::glyph_cache::GlyphCache::new);
+            cache.by_name.insert(
+                glyph_name_id,
+                CachedGlyph {
+                    segments: Arc::clone(&segments),
+                    width_x: result.width_x,
+                    width_y: result.width_y,
+                },
+            );
+            (segments, result.width_x, result.width_y)
         };
-
-        let (cs_entity, cs_start, cs_len) = match cs_obj.value {
-            PsValue::String { entity, start, len } => (entity, start, len),
-            _ => continue,
-        };
-
-        let cs_bytes = ctx.strings.get(cs_entity, cs_start, cs_len).to_vec();
-
-        // Execute Type 2 charstring
-        let result = type2_charstring::execute_type2_charstring(
-            &cs_bytes,
-            &info.local_subrs,
-            &info.global_subrs,
-            info.default_width_x,
-            info.nominal_width_x,
-            false,
-        )
-        .map_err(|_| PsError::InvalidFont)?;
 
         // Transform glyph path
-        if !result.path.is_empty() {
-            let user_path = transform_path(&result.path, &info.font_matrix, cur_x, cur_y);
+        if !segments.is_empty() {
+            let user_path = transform_segments(&segments, &info.font_matrix, cur_x, cur_y);
             let device_path = ctm_transform_path(&user_path, &ctm);
             push_glyph_element(ctx, device_path, paint_type, stroke_width_dev);
         }
@@ -1450,11 +1540,11 @@ fn render_show_type2(
                 info.font_matrix.transform_delta(mw, 0.0)
             } else {
                 info.font_matrix
-                    .transform_delta(result.width_x, result.width_y)
+                    .transform_delta(width_x, width_y)
             }
         } else {
             info.font_matrix
-                .transform_delta(result.width_x, result.width_y)
+                .transform_delta(width_x, width_y)
         };
         cur_x += wx + extra_ax;
         cur_y += wy + extra_ay;
@@ -1488,39 +1578,64 @@ fn measure_string_width_type2(
             _ => continue,
         };
 
-        let cs_key = DictKey::Name(glyph_name_id);
-        let cs_obj = match ctx.dicts.get(info.charstrings_entity, &cs_key) {
-            Some(obj) => obj,
-            None => continue,
+        // Check glyph cache for width
+        let cached_width = ctx
+            .glyph_caches
+            .get(&font_entity)
+            .and_then(|gc| gc.by_name.get(&glyph_name_id))
+            .map(|cg| (cg.width_x, cg.width_y));
+
+        let (width_x, width_y) = if let Some(w) = cached_width {
+            w
+        } else {
+            let cs_key = DictKey::Name(glyph_name_id);
+            let cs_obj = match ctx.dicts.get(info.charstrings_entity, &cs_key) {
+                Some(obj) => obj,
+                None => continue,
+            };
+
+            let (cs_entity, cs_start, cs_len) = match cs_obj.value {
+                PsValue::String { entity, start, len } => (entity, start, len),
+                _ => continue,
+            };
+
+            let cs_bytes = ctx.strings.get(cs_entity, cs_start, cs_len).to_vec();
+
+            // Execute with width_only=false to cache full path for later use
+            let result = type2_charstring::execute_type2_charstring(
+                &cs_bytes,
+                &info.local_subrs,
+                &info.global_subrs,
+                info.default_width_x,
+                info.nominal_width_x,
+                false,
+            )
+            .map_err(|_| PsError::InvalidFont)?;
+
+            let cache = ctx
+                .glyph_caches
+                .entry(font_entity)
+                .or_insert_with(stet_core::glyph_cache::GlyphCache::new);
+            cache.by_name.entry(glyph_name_id).or_insert_with(|| {
+                CachedGlyph {
+                    segments: Arc::new(result.path.segments),
+                    width_x: result.width_x,
+                    width_y: result.width_y,
+                }
+            });
+            (result.width_x, result.width_y)
         };
-
-        let (cs_entity, cs_start, cs_len) = match cs_obj.value {
-            PsValue::String { entity, start, len } => (entity, start, len),
-            _ => continue,
-        };
-
-        let cs_bytes = ctx.strings.get(cs_entity, cs_start, cs_len).to_vec();
-
-        let result = type2_charstring::execute_type2_charstring(
-            &cs_bytes,
-            &info.local_subrs,
-            &info.global_subrs,
-            info.default_width_x,
-            info.nominal_width_x,
-            true, // width_only
-        )
-        .map_err(|_| PsError::InvalidFont)?;
 
         let (wx, wy) = if let Some(metrics_entity) = info.metrics_entity {
             if let Some(mw) = get_metrics_width_type2(ctx, metrics_entity, glyph_name_id, byte) {
                 info.font_matrix.transform_delta(mw, 0.0)
             } else {
                 info.font_matrix
-                    .transform_delta(result.width_x, result.width_y)
+                    .transform_delta(width_x, width_y)
             }
         } else {
             info.font_matrix
-                .transform_delta(result.width_x, result.width_y)
+                .transform_delta(width_x, width_y)
         };
         total_wx += wx;
         total_wy += wy;
@@ -1549,32 +1664,58 @@ fn render_charpath_type2(
             _ => continue,
         };
 
-        let cs_key = DictKey::Name(glyph_name_id);
-        let cs_obj = match ctx.dicts.get(info.charstrings_entity, &cs_key) {
-            Some(obj) => obj,
-            None => continue,
+        // Check glyph cache
+        let cached = ctx
+            .glyph_caches
+            .get(&font_entity)
+            .and_then(|gc| gc.by_name.get(&glyph_name_id))
+            .cloned();
+
+        let (segments, width_x, width_y) = if let Some(cg) = cached {
+            (cg.segments, cg.width_x, cg.width_y)
+        } else {
+            let cs_key = DictKey::Name(glyph_name_id);
+            let cs_obj = match ctx.dicts.get(info.charstrings_entity, &cs_key) {
+                Some(obj) => obj,
+                None => continue,
+            };
+
+            let (cs_entity, cs_start, cs_len) = match cs_obj.value {
+                PsValue::String { entity, start, len } => (entity, start, len),
+                _ => continue,
+            };
+
+            let cs_bytes = ctx.strings.get(cs_entity, cs_start, cs_len).to_vec();
+
+            let result = type2_charstring::execute_type2_charstring(
+                &cs_bytes,
+                &info.local_subrs,
+                &info.global_subrs,
+                info.default_width_x,
+                info.nominal_width_x,
+                false,
+            )
+            .map_err(|_| PsError::InvalidFont)?;
+
+            let segments = Arc::new(result.path.segments);
+            let cache = ctx
+                .glyph_caches
+                .entry(font_entity)
+                .or_insert_with(stet_core::glyph_cache::GlyphCache::new);
+            cache.by_name.insert(
+                glyph_name_id,
+                CachedGlyph {
+                    segments: Arc::clone(&segments),
+                    width_x: result.width_x,
+                    width_y: result.width_y,
+                },
+            );
+            (segments, result.width_x, result.width_y)
         };
-
-        let (cs_entity, cs_start, cs_len) = match cs_obj.value {
-            PsValue::String { entity, start, len } => (entity, start, len),
-            _ => continue,
-        };
-
-        let cs_bytes = ctx.strings.get(cs_entity, cs_start, cs_len).to_vec();
-
-        let result = type2_charstring::execute_type2_charstring(
-            &cs_bytes,
-            &info.local_subrs,
-            &info.global_subrs,
-            info.default_width_x,
-            info.nominal_width_x,
-            false,
-        )
-        .map_err(|_| PsError::InvalidFont)?;
 
         // Append device-space glyph path to current path
-        if !result.path.is_empty() {
-            let user_path = transform_path(&result.path, &info.font_matrix, cur_x, cur_y);
+        if !segments.is_empty() {
+            let user_path = transform_segments(&segments, &info.font_matrix, cur_x, cur_y);
             let device_path = ctm_transform_path(&user_path, &ctm);
 
             let mut segs_iter = device_path.segments.into_iter();
@@ -1590,7 +1731,7 @@ fn render_charpath_type2(
 
         let (wx, wy) = info
             .font_matrix
-            .transform_delta(result.width_x, result.width_y);
+            .transform_delta(width_x, width_y);
         cur_x += wx;
         cur_y += wy;
     }
@@ -1871,6 +2012,25 @@ fn render_show_composite(
                     if let Some(gid_obj) = ctx.dicts.get(cs_ent, &cs_key) {
                         let gid = gid_obj.as_i32().unwrap_or(0) as u16;
 
+                        // Check glyph cache by GID
+                        let cached = ctx
+                            .glyph_caches
+                            .get(&font_entity)
+                            .and_then(|gc| gc.by_gid.get(&gid))
+                            .cloned();
+
+                        if let Some(cg) = cached {
+                            if !cg.segments.is_empty() {
+                                let user_path =
+                                    transform_segments(&cg.segments, &combined_fm, cur_x, cur_y);
+                                let device_path = ctm_transform_path(&user_path, &ctm);
+                                push_glyph_element(ctx, device_path, paint_type, stroke_width_dev);
+                            }
+                            rendered = true;
+                            let (wx, wy) = combined_fm.transform_delta(cg.width_x, 0.0);
+                            cur_x += wx + extra_ax;
+                            cur_y += wy + extra_ay;
+                        } else {
                         // Get glyf data: try GlyphDirectory first, then sfnts
                         let glyf_bytes = if let Some(gd_entity) = glyph_dir_entity {
                             ctx.dicts
@@ -1911,12 +2071,30 @@ fn render_show_composite(
                                     truetype::parse_glyf_to_path(glyf_bytes, &resolver)
                                 };
 
-                                if !glyf_path.is_empty() {
+                                let segments = Arc::new(glyf_path.segments);
+                                if !segments.is_empty() {
                                     let user_path =
-                                        transform_path(&glyf_path, &combined_fm, cur_x, cur_y);
+                                        transform_segments(&segments, &combined_fm, cur_x, cur_y);
                                     let device_path = ctm_transform_path(&user_path, &ctm);
                                     push_glyph_element(ctx, device_path, paint_type, stroke_width_dev);
                                 }
+                                // Cache with advance width
+                                let advance = font_data
+                                    .as_ref()
+                                    .and_then(|fd| truetype::get_advance_width(fd, gid))
+                                    .unwrap_or(500);
+                                let cache = ctx
+                                    .glyph_caches
+                                    .entry(font_entity)
+                                    .or_insert_with(stet_core::glyph_cache::GlyphCache::new);
+                                cache.by_gid.insert(
+                                    gid,
+                                    CachedGlyph {
+                                        segments,
+                                        width_x: advance as f64,
+                                        width_y: 0.0,
+                                    },
+                                );
                             }
 
                             rendered = true;
@@ -1930,6 +2108,7 @@ fn render_show_composite(
                             cur_x += wx + extra_ax;
                             cur_y += wy + extra_ay;
                         }
+                        } // close else (cache miss)
                     }
                 }
             }
@@ -1992,47 +2171,80 @@ fn render_composite_truetype_cids(
     let (paint_type, stroke_width_dev) = get_paint_info(ctx, cidfont_entity, &combined_fm, ctm);
 
     for &cid in cids {
-        let glyf_bytes = if let Some(gd_entity) = glyph_dir_entity {
-            ctx.dicts
-                .get(gd_entity, &DictKey::Int(cid))
-                .and_then(|obj| match obj.value {
-                    PsValue::String { entity, start, len } => {
-                        Some(ctx.strings.get(entity, start, len).to_vec())
-                    }
-                    _ => None,
-                })
-        } else {
-            font_data
-                .as_ref()
-                .and_then(|fd| truetype::get_glyf_data(fd, cid as u16))
-        };
+        // Check glyph cache by CID
+        let cached = ctx
+            .glyph_caches
+            .get(&cidfont_entity)
+            .and_then(|gc| gc.by_cid.get(&cid))
+            .cloned();
 
-        if let Some(ref glyf_bytes) = glyf_bytes
-            && glyf_bytes.len() >= 10
-        {
-            let glyf_path = {
-                let dicts = &ctx.dicts;
-                let strings = &ctx.strings;
-                let gd = glyph_dir_entity;
-                let fd_ref = font_data.as_deref();
-                let resolver = |gid: u16| -> Option<Vec<u8>> {
-                    if let Some(gd_entity) = gd {
-                        let key = DictKey::Int(gid as i32);
-                        if let Some(obj) = dicts.get(gd_entity, &key)
-                            && let PsValue::String { entity, start, len } = obj.value
-                        {
-                            return Some(strings.get(entity, start, len).to_vec());
-                        }
-                    }
-                    fd_ref.and_then(|fd| truetype::get_glyf_data(fd, gid))
-                };
-                truetype::parse_glyf_to_path(glyf_bytes, &resolver)
-            };
-
-            if !glyf_path.is_empty() {
-                let user_path = transform_path(&glyf_path, &combined_fm, *cur_x, *cur_y);
+        if let Some(cg) = cached {
+            if !cg.segments.is_empty() {
+                let user_path = transform_segments(&cg.segments, &combined_fm, *cur_x, *cur_y);
                 let device_path = ctm_transform_path(&user_path, ctm);
                 push_glyph_element(ctx, device_path, paint_type, stroke_width_dev);
+            }
+        } else {
+            let glyf_bytes = if let Some(gd_entity) = glyph_dir_entity {
+                ctx.dicts
+                    .get(gd_entity, &DictKey::Int(cid))
+                    .and_then(|obj| match obj.value {
+                        PsValue::String { entity, start, len } => {
+                            Some(ctx.strings.get(entity, start, len).to_vec())
+                        }
+                        _ => None,
+                    })
+            } else {
+                font_data
+                    .as_ref()
+                    .and_then(|fd| truetype::get_glyf_data(fd, cid as u16))
+            };
+
+            if let Some(ref glyf_bytes) = glyf_bytes
+                && glyf_bytes.len() >= 10
+            {
+                let glyf_path = {
+                    let dicts = &ctx.dicts;
+                    let strings = &ctx.strings;
+                    let gd = glyph_dir_entity;
+                    let fd_ref = font_data.as_deref();
+                    let resolver = |gid: u16| -> Option<Vec<u8>> {
+                        if let Some(gd_entity) = gd {
+                            let key = DictKey::Int(gid as i32);
+                            if let Some(obj) = dicts.get(gd_entity, &key)
+                                && let PsValue::String { entity, start, len } = obj.value
+                            {
+                                return Some(strings.get(entity, start, len).to_vec());
+                            }
+                        }
+                        fd_ref.and_then(|fd| truetype::get_glyf_data(fd, gid))
+                    };
+                    truetype::parse_glyf_to_path(glyf_bytes, &resolver)
+                };
+
+                let segments = Arc::new(glyf_path.segments);
+                if !segments.is_empty() {
+                    let user_path = transform_segments(&segments, &combined_fm, *cur_x, *cur_y);
+                    let device_path = ctm_transform_path(&user_path, ctm);
+                    push_glyph_element(ctx, device_path, paint_type, stroke_width_dev);
+                }
+                // Cache with advance width
+                let advance = font_data
+                    .as_ref()
+                    .and_then(|fd| truetype::get_advance_width(fd, cid as u16))
+                    .unwrap_or(500);
+                let cache = ctx
+                    .glyph_caches
+                    .entry(cidfont_entity)
+                    .or_insert_with(stet_core::glyph_cache::GlyphCache::new);
+                cache.by_cid.insert(
+                    cid,
+                    CachedGlyph {
+                        segments,
+                        width_x: advance as f64,
+                        width_y: 0.0,
+                    },
+                );
             }
         }
 
@@ -2274,52 +2486,80 @@ fn render_composite_cff_cids(
         .unwrap_or(1000);
 
     for &cid in cids {
-        // Look up charstring by int CID
-        let cs_obj = match ctx.dicts.get(cs_entity, &DictKey::Int(cid)) {
-            Some(obj) => obj,
-            None => {
-                // No charstring for this CID — advance by default width
-                if wmode == 1 {
-                    let (_vy_offset, v_advance) =
-                        get_dw2(ctx, cidfont_entity).unwrap_or((880.0, -1000.0));
-                    let (_, wy) = combined_fm.transform_delta(0.0, v_advance);
-                    *cur_x += extra_ax;
-                    *cur_y += wy + extra_ay;
-                } else {
-                    let (wx, wy) = combined_fm.transform_delta(dw as f64, 0.0);
-                    *cur_x += wx + extra_ax;
-                    *cur_y += wy + extra_ay;
+        // Check glyph cache by CID
+        let cached = ctx
+            .glyph_caches
+            .get(&cidfont_entity)
+            .and_then(|gc| gc.by_cid.get(&cid))
+            .cloned();
+
+        let (segments, width_x, width_y) = if let Some(cg) = cached {
+            (cg.segments, cg.width_x, cg.width_y)
+        } else {
+            // Look up charstring by int CID
+            let cs_obj = match ctx.dicts.get(cs_entity, &DictKey::Int(cid)) {
+                Some(obj) => obj,
+                None => {
+                    // No charstring for this CID — advance by default width
+                    if wmode == 1 {
+                        let (_vy_offset, v_advance) =
+                            get_dw2(ctx, cidfont_entity).unwrap_or((880.0, -1000.0));
+                        let (_, wy) = combined_fm.transform_delta(0.0, v_advance);
+                        *cur_x += extra_ax;
+                        *cur_y += wy + extra_ay;
+                    } else {
+                        let (wx, wy) = combined_fm.transform_delta(dw as f64, 0.0);
+                        *cur_x += wx + extra_ax;
+                        *cur_y += wy + extra_ay;
+                    }
+                    if cid == width_char {
+                        *cur_x += cx;
+                        *cur_y += cy;
+                    }
+                    continue;
                 }
-                if cid == width_char {
-                    *cur_x += cx;
-                    *cur_y += cy;
+            };
+
+            let cs_bytes = match cs_obj.value {
+                PsValue::String { entity, start, len } => {
+                    ctx.strings.get(entity, start, len).to_vec()
                 }
-                continue;
-            }
+                _ => continue,
+            };
+
+            // Get FD info (defaultWidthX, nominalWidthX, local subrs)
+            let fd_info = get_cid_fd_info(ctx, cidfont_entity, cid);
+
+            // Execute Type 2 charstring
+            let result = type2_charstring::execute_type2_charstring(
+                &cs_bytes,
+                &fd_info.local_subrs,
+                &global_subrs,
+                fd_info.default_width_x,
+                fd_info.nominal_width_x,
+                false,
+            )
+            .map_err(|_| PsError::InvalidFont)?;
+
+            let segments = Arc::new(result.path.segments);
+            let cache = ctx
+                .glyph_caches
+                .entry(cidfont_entity)
+                .or_insert_with(stet_core::glyph_cache::GlyphCache::new);
+            cache.by_cid.insert(
+                cid,
+                CachedGlyph {
+                    segments: Arc::clone(&segments),
+                    width_x: result.width_x,
+                    width_y: result.width_y,
+                },
+            );
+            (segments, result.width_x, result.width_y)
         };
-
-        let cs_bytes = match cs_obj.value {
-            PsValue::String { entity, start, len } => ctx.strings.get(entity, start, len).to_vec(),
-            _ => continue,
-        };
-
-        // Get FD info (defaultWidthX, nominalWidthX, local subrs)
-        let fd_info = get_cid_fd_info(ctx, cidfont_entity, cid);
-
-        // Execute Type 2 charstring
-        let result = type2_charstring::execute_type2_charstring(
-            &cs_bytes,
-            &fd_info.local_subrs,
-            &global_subrs,
-            fd_info.default_width_x,
-            fd_info.nominal_width_x,
-            false,
-        )
-        .map_err(|_| PsError::InvalidFont)?;
 
         // Paint glyph path
-        if !result.path.is_empty() {
-            let user_path = transform_path(&result.path, &combined_fm, *cur_x, *cur_y);
+        if !segments.is_empty() {
+            let user_path = transform_segments(&segments, &combined_fm, *cur_x, *cur_y);
             let device_path = ctm_transform_path(&user_path, ctm);
             push_glyph_element(ctx, device_path, paint_type, stroke_width_dev);
         }
@@ -2332,7 +2572,7 @@ fn render_composite_cff_cids(
             *cur_x += extra_ax;
             *cur_y += wy + extra_ay;
         } else {
-            let (wx, wy) = combined_fm.transform_delta(result.width_x, result.width_y);
+            let (wx, wy) = combined_fm.transform_delta(width_x, width_y);
             *cur_x += wx + extra_ax;
             *cur_y += wy + extra_ay;
         }
@@ -2398,43 +2638,96 @@ fn render_show_type3(
     let ictm = ctx.gstate.ctm.invert().ok_or(PsError::UndefinedResult)?;
     let (mut cur_x, mut cur_y) = ictm.transform_point(dev_cpx, dev_cpy);
 
+    let ctm = ctx.gstate.ctm;
+
     // Render each character synchronously
     for &byte in bytes {
-        ctx.char_width = None;
-        ctx.char_width_mode1 = None;
+        // Check Type 3 glyph cache
+        let cached = ctx
+            .glyph_caches
+            .get(&font_entity)
+            .and_then(|gc| gc.by_charcode.get(&byte))
+            .cloned();
 
-        // gsave, translate to current position, concat FontMatrix
-        crate::graphics_state_ops::op_gsave(ctx)?;
+        if let Some(cg) = cached {
+            // Replay cached display list elements, translated to current device position
+            // and recolored with the current color (setcachedevice = stencil cache per PLRM)
+            let (dev_x, dev_y) = ctm.transform_point(cur_x, cur_y);
+            let dx = dev_x - cg.origin_dev_x;
+            let dy = dev_y - cg.origin_dev_y;
+            let color = &ctx.gstate.color;
+            for elem in &cg.elements {
+                ctx.display_list
+                    .push(recolor_and_translate_element(elem, dx, dy, color));
+            }
+            let (wx, wy) = font_matrix.transform_delta(cg.width.0, cg.width.1);
+            cur_x += wx + extra_ax;
+            cur_y += wy + extra_ay;
+        } else {
+            ctx.char_width = None;
+            ctx.char_width_mode1 = None;
+            ctx.char_cache_mode = None;
 
-        ctx.o_stack.push(PsObject::real(cur_x))?;
-        ctx.o_stack.push(PsObject::real(cur_y))?;
-        crate::matrix_ops::op_translate(ctx)?;
+            // Record display list position before BuildChar
+            let dl_start = ctx.display_list.len();
+            // Record device-space origin for cache
+            let (origin_dev_x, origin_dev_y) = ctm.transform_point(cur_x, cur_y);
 
-        // Re-read FontMatrix from dict (in case BuildChar modified it)
-        let fm_obj = ctx
-            .dicts
-            .get(font_entity, &DictKey::Name(ctx.name_cache.n_font_matrix))
-            .ok_or(PsError::InvalidFont)?;
-        ctx.o_stack.push(fm_obj)?;
-        crate::matrix_ops::op_concat(ctx)?;
+            // gsave, translate to current position, concat FontMatrix
+            crate::graphics_state_ops::op_gsave(ctx)?;
 
-        // Push font dict and char code for BuildChar
-        ctx.o_stack.push(font_obj)?;
-        ctx.o_stack.push(PsObject::int(byte as i32))?;
+            ctx.o_stack.push(PsObject::real(cur_x))?;
+            ctx.o_stack.push(PsObject::real(cur_y))?;
+            crate::matrix_ops::op_translate(ctx)?;
 
-        // Execute BuildChar synchronously
-        ctx.exec_sync(build_char)?;
+            // Re-read FontMatrix from dict (in case BuildChar modified it)
+            let fm_obj = ctx
+                .dicts
+                .get(font_entity, &DictKey::Name(ctx.name_cache.n_font_matrix))
+                .ok_or(PsError::InvalidFont)?;
+            ctx.o_stack.push(fm_obj)?;
+            crate::matrix_ops::op_concat(ctx)?;
 
-        // grestore to undo the gsave+translate+concat
-        crate::graphics_state_ops::op_grestore(ctx)?;
+            // Push font dict and char code for BuildChar
+            ctx.o_stack.push(font_obj)?;
+            ctx.o_stack.push(PsObject::int(byte as i32))?;
 
-        // Get char width set by setcachedevice/setcharwidth during BuildChar
-        let char_width = ctx.char_width.take().unwrap_or((0.0, 0.0));
-        let (wx, wy) = font_matrix.transform_delta(char_width.0, char_width.1);
+            // Execute BuildChar synchronously
+            ctx.exec_sync(build_char)?;
 
-        // Advance current position in user space
-        cur_x += wx + extra_ax;
-        cur_y += wy + extra_ay;
+            // grestore to undo the gsave+translate+concat
+            crate::graphics_state_ops::op_grestore(ctx)?;
+
+            // Get char width set by setcachedevice/setcharwidth during BuildChar
+            let char_width = ctx.char_width.take().unwrap_or((0.0, 0.0));
+
+            // Cache if setcachedevice was called (not setcharwidth)
+            if ctx.char_cache_mode == Some(Type3CacheMode::Cache) {
+                let elements: Vec<DisplayElement> = ctx
+                    .display_list
+                    .elements_from(dl_start)
+                    .to_vec();
+                let cache = ctx
+                    .glyph_caches
+                    .entry(font_entity)
+                    .or_insert_with(stet_core::glyph_cache::GlyphCache::new);
+                cache.by_charcode.insert(
+                    byte,
+                    CachedType3Glyph {
+                        elements,
+                        origin_dev_x,
+                        origin_dev_y,
+                        width: char_width,
+                    },
+                );
+            }
+
+            let (wx, wy) = font_matrix.transform_delta(char_width.0, char_width.1);
+
+            // Advance current position in user space
+            cur_x += wx + extra_ax;
+            cur_y += wy + extra_ay;
+        }
 
         if byte as i32 == width_char {
             cur_x += cx;
@@ -2443,7 +2736,6 @@ fn render_show_type3(
     }
 
     // Update device-space current_point
-    let ctm = ctx.gstate.ctm;
     let (dev_x, dev_y) = ctm.transform_point(cur_x, cur_y);
     ctx.gstate.current_point = Some((dev_x, dev_y));
 
@@ -2471,6 +2763,7 @@ fn measure_string_width(ctx: &mut Context, bytes: &[u8]) -> Result<(f64, f64), P
 
     let info = get_font_info(ctx)?;
     let subrs = get_subrs(ctx, &info);
+    let font_entity_for_cache = info.font_entity;
 
     let mut total_wx = 0.0;
     let mut total_wy = 0.0;
@@ -2482,28 +2775,54 @@ fn measure_string_width(ctx: &mut Context, bytes: &[u8]) -> Result<(f64, f64), P
             _ => continue,
         };
 
-        let cs_key = DictKey::Name(glyph_name_id);
-        let cs_obj = match ctx.dicts.get(info.charstrings_entity, &cs_key) {
-            Some(obj) => obj,
-            None => continue,
+        // Check glyph cache for width
+        let cached_width = ctx
+            .glyph_caches
+            .get(&font_entity_for_cache)
+            .and_then(|gc| gc.by_name.get(&glyph_name_id))
+            .map(|cg| (cg.width_x, cg.width_y));
+
+        let (width_x, width_y) = if let Some(w) = cached_width {
+            w
+        } else {
+            let cs_key = DictKey::Name(glyph_name_id);
+            let cs_obj = match ctx.dicts.get(info.charstrings_entity, &cs_key) {
+                Some(obj) => obj,
+                None => continue,
+            };
+
+            let (cs_entity, cs_start, cs_len) = match cs_obj.value {
+                PsValue::String { entity, start, len } => (entity, start, len),
+                _ => continue,
+            };
+
+            let cs_bytes = ctx.strings.get(cs_entity, cs_start, cs_len).to_vec();
+
+            // Execute with width_only=false so we cache the full path
+            // (stringwidth often precedes charpath/show on the same glyphs)
+            let result = charstring::execute_charstring(&cs_bytes, &subrs, info.len_iv, false)
+                .map_err(|_| PsError::InvalidFont)?;
+
+            let cache = ctx
+                .glyph_caches
+                .entry(font_entity_for_cache)
+                .or_insert_with(stet_core::glyph_cache::GlyphCache::new);
+            cache.by_name.entry(glyph_name_id).or_insert_with(|| {
+                CachedGlyph {
+                    segments: Arc::new(result.path.segments),
+                    width_x: result.width_x,
+                    width_y: result.width_y,
+                }
+            });
+            (result.width_x, result.width_y)
         };
-
-        let (cs_entity, cs_start, cs_len) = match cs_obj.value {
-            PsValue::String { entity, start, len } => (entity, start, len),
-            _ => continue,
-        };
-
-        let cs_bytes = ctx.strings.get(cs_entity, cs_start, cs_len).to_vec();
-
-        let result = charstring::execute_charstring(&cs_bytes, &subrs, info.len_iv, true)
-            .map_err(|_| PsError::InvalidFont)?;
 
         let (wx, wy) = if let Some(metrics_wx) = get_metrics_width(ctx, &info, glyph_name_id, byte)
         {
             info.font_matrix.transform_delta(metrics_wx, 0.0)
         } else {
             info.font_matrix
-                .transform_delta(result.width_x, result.width_y)
+                .transform_delta(width_x, width_y)
         };
         total_wx += wx;
         total_wy += wy;
@@ -2536,6 +2855,7 @@ fn render_charpath(ctx: &mut Context, bytes: &[u8]) -> Result<(), PsError> {
 
     let info = get_font_info(ctx)?;
     let subrs = get_subrs(ctx, &info);
+    let font_entity_for_cache = info.font_entity;
 
     // Inverse-transform device-space current_point to user space
     let (dev_cpx, dev_cpy) = ctx.gstate.current_point.ok_or(PsError::NoCurrentPoint)?;
@@ -2551,25 +2871,51 @@ fn render_charpath(ctx: &mut Context, bytes: &[u8]) -> Result<(), PsError> {
             _ => continue,
         };
 
-        let cs_key = DictKey::Name(glyph_name_id);
-        let cs_obj = match ctx.dicts.get(info.charstrings_entity, &cs_key) {
-            Some(obj) => obj,
-            None => continue,
+        // Check glyph cache
+        let cached = ctx
+            .glyph_caches
+            .get(&font_entity_for_cache)
+            .and_then(|gc| gc.by_name.get(&glyph_name_id))
+            .cloned();
+
+        let (segments, width_x, width_y) = if let Some(cg) = cached {
+            (cg.segments, cg.width_x, cg.width_y)
+        } else {
+            let cs_key = DictKey::Name(glyph_name_id);
+            let cs_obj = match ctx.dicts.get(info.charstrings_entity, &cs_key) {
+                Some(obj) => obj,
+                None => continue,
+            };
+
+            let (cs_entity, cs_start, cs_len) = match cs_obj.value {
+                PsValue::String { entity, start, len } => (entity, start, len),
+                _ => continue,
+            };
+
+            let cs_bytes = ctx.strings.get(cs_entity, cs_start, cs_len).to_vec();
+
+            let result = charstring::execute_charstring(&cs_bytes, &subrs, info.len_iv, false)
+                .map_err(|_| PsError::InvalidFont)?;
+
+            let segments = Arc::new(result.path.segments);
+            let cache = ctx
+                .glyph_caches
+                .entry(font_entity_for_cache)
+                .or_insert_with(stet_core::glyph_cache::GlyphCache::new);
+            cache.by_name.insert(
+                glyph_name_id,
+                CachedGlyph {
+                    segments: Arc::clone(&segments),
+                    width_x: result.width_x,
+                    width_y: result.width_y,
+                },
+            );
+            (segments, result.width_x, result.width_y)
         };
-
-        let (cs_entity, cs_start, cs_len) = match cs_obj.value {
-            PsValue::String { entity, start, len } => (entity, start, len),
-            _ => continue,
-        };
-
-        let cs_bytes = ctx.strings.get(cs_entity, cs_start, cs_len).to_vec();
-
-        let result = charstring::execute_charstring(&cs_bytes, &subrs, info.len_iv, false)
-            .map_err(|_| PsError::InvalidFont)?;
 
         // Append device-space glyph path to current path
-        if !result.path.is_empty() {
-            let user_path = transform_path(&result.path, &info.font_matrix, cur_x, cur_y);
+        if !segments.is_empty() {
+            let user_path = transform_segments(&segments, &info.font_matrix, cur_x, cur_y);
             let device_path = ctm_transform_path(&user_path, &ctm);
             // Per PLRM: consecutive movetos replace the previous one.
             // If the glyph path starts with MoveTo and the current path's last
@@ -2587,7 +2933,7 @@ fn render_charpath(ctx: &mut Context, bytes: &[u8]) -> Result<(), PsError> {
 
         let (wx, wy) = info
             .font_matrix
-            .transform_delta(result.width_x, result.width_y);
+            .transform_delta(width_x, width_y);
         cur_x += wx;
         cur_y += wy;
     }
@@ -3103,6 +3449,7 @@ fn render_show_displaced(
 
     let info = get_font_info(ctx)?;
     let subrs = get_subrs(ctx, &info);
+    let font_entity_for_cache = info.font_entity;
 
     let (dev_cpx, dev_cpy) = ctx.gstate.current_point.ok_or(PsError::NoCurrentPoint)?;
     let ictm = ctx.gstate.ctm.invert().ok_or(PsError::UndefinedResult)?;
@@ -3117,30 +3464,57 @@ fn render_show_displaced(
         let glyph_name_id = match glyph_name_obj.value {
             PsValue::Name(id) => id,
             _ => {
-                // Still advance by displacement even if glyph not found
                 advance_by_displacement(&mut cur_x, &mut cur_y, displacements, i, &mode);
                 continue;
             }
         };
 
-        // Render glyph
+        // Render glyph (check cache first)
         {
-            let cs_key = DictKey::Name(glyph_name_id);
-            if let Some(cs_obj) = ctx.dicts.get(info.charstrings_entity, &cs_key)
-                && let PsValue::String {
-                    entity: cs_entity,
-                    start: cs_start,
-                    len: cs_len,
-                } = cs_obj.value
-            {
-                let cs_bytes = ctx.strings.get(cs_entity, cs_start, cs_len).to_vec();
-                if let Ok(result) =
-                    charstring::execute_charstring(&cs_bytes, &subrs, info.len_iv, false)
-                    && !result.path.is_empty()
-                {
-                    let user_path = transform_path(&result.path, &info.font_matrix, cur_x, cur_y);
+            let cached = ctx
+                .glyph_caches
+                .get(&font_entity_for_cache)
+                .and_then(|gc| gc.by_name.get(&glyph_name_id))
+                .cloned();
+
+            if let Some(cg) = cached {
+                if !cg.segments.is_empty() {
+                    let user_path = transform_segments(&cg.segments, &info.font_matrix, cur_x, cur_y);
                     let device_path = ctm_transform_path(&user_path, &ctm);
                     push_glyph_element(ctx, device_path, paint_type, stroke_width_dev);
+                }
+            } else {
+                let cs_key = DictKey::Name(glyph_name_id);
+                if let Some(cs_obj) = ctx.dicts.get(info.charstrings_entity, &cs_key)
+                    && let PsValue::String {
+                        entity: cs_entity,
+                        start: cs_start,
+                        len: cs_len,
+                    } = cs_obj.value
+                {
+                    let cs_bytes = ctx.strings.get(cs_entity, cs_start, cs_len).to_vec();
+                    if let Ok(result) =
+                        charstring::execute_charstring(&cs_bytes, &subrs, info.len_iv, false)
+                    {
+                        let segments = Arc::new(result.path.segments);
+                        if !segments.is_empty() {
+                            let user_path = transform_segments(&segments, &info.font_matrix, cur_x, cur_y);
+                            let device_path = ctm_transform_path(&user_path, &ctm);
+                            push_glyph_element(ctx, device_path, paint_type, stroke_width_dev);
+                        }
+                        let cache = ctx
+                            .glyph_caches
+                            .entry(font_entity_for_cache)
+                            .or_insert_with(stet_core::glyph_cache::GlyphCache::new);
+                        cache.by_name.insert(
+                            glyph_name_id,
+                            CachedGlyph {
+                                segments,
+                                width_x: result.width_x,
+                                width_y: result.width_y,
+                            },
+                        );
+                    }
                 }
             }
         }
@@ -3180,29 +3554,57 @@ fn render_show_displaced_type2(
             }
         };
 
-        // Render glyph
+        // Render glyph (check cache first)
         {
-            let cs_key = DictKey::Name(glyph_name_id);
-            if let Some(cs_obj) = ctx.dicts.get(info.charstrings_entity, &cs_key)
-                && let PsValue::String {
-                    entity: cs_entity,
-                    start: cs_start,
-                    len: cs_len,
-                } = cs_obj.value
-            {
-                let cs_bytes = ctx.strings.get(cs_entity, cs_start, cs_len).to_vec();
-                if let Ok(result) = type2_charstring::execute_type2_charstring(
-                    &cs_bytes,
-                    &info.local_subrs,
-                    &info.global_subrs,
-                    info.default_width_x,
-                    info.nominal_width_x,
-                    false,
-                ) && !result.path.is_empty()
-                {
-                    let user_path = transform_path(&result.path, &info.font_matrix, cur_x, cur_y);
+            let cached = ctx
+                .glyph_caches
+                .get(&font_entity)
+                .and_then(|gc| gc.by_name.get(&glyph_name_id))
+                .cloned();
+
+            if let Some(cg) = cached {
+                if !cg.segments.is_empty() {
+                    let user_path = transform_segments(&cg.segments, &info.font_matrix, cur_x, cur_y);
                     let device_path = ctm_transform_path(&user_path, &ctm);
                     push_glyph_element(ctx, device_path, paint_type, stroke_width_dev);
+                }
+            } else {
+                let cs_key = DictKey::Name(glyph_name_id);
+                if let Some(cs_obj) = ctx.dicts.get(info.charstrings_entity, &cs_key)
+                    && let PsValue::String {
+                        entity: cs_entity,
+                        start: cs_start,
+                        len: cs_len,
+                    } = cs_obj.value
+                {
+                    let cs_bytes = ctx.strings.get(cs_entity, cs_start, cs_len).to_vec();
+                    if let Ok(result) = type2_charstring::execute_type2_charstring(
+                        &cs_bytes,
+                        &info.local_subrs,
+                        &info.global_subrs,
+                        info.default_width_x,
+                        info.nominal_width_x,
+                        false,
+                    ) {
+                        let segments = Arc::new(result.path.segments);
+                        if !segments.is_empty() {
+                            let user_path = transform_segments(&segments, &info.font_matrix, cur_x, cur_y);
+                            let device_path = ctm_transform_path(&user_path, &ctm);
+                            push_glyph_element(ctx, device_path, paint_type, stroke_width_dev);
+                        }
+                        let cache = ctx
+                            .glyph_caches
+                            .entry(font_entity)
+                            .or_insert_with(stet_core::glyph_cache::GlyphCache::new);
+                        cache.by_name.insert(
+                            glyph_name_id,
+                            CachedGlyph {
+                                segments,
+                                width_x: result.width_x,
+                                width_y: result.width_y,
+                            },
+                        );
+                    }
                 }
             }
         }
@@ -3826,8 +4228,13 @@ fn get_paint_info(ctx: &Context, font_dict: EntityId, font_matrix: &Matrix, ctm:
 
 /// Transform all points in a path through a matrix (e.g., CTM for user→device conversion).
 fn ctm_transform_path(path: &PsPath, ctm: &Matrix) -> PsPath {
+    ctm_transform_segments(&path.segments, ctm)
+}
+
+/// Transform path segments through a matrix, returning a new PsPath.
+fn ctm_transform_segments(segments: &[PathSegment], ctm: &Matrix) -> PsPath {
     let mut result = PsPath::new();
-    for seg in &path.segments {
+    for seg in segments {
         match *seg {
             PathSegment::MoveTo(x, y) => {
                 let (tx, ty) = ctm.transform_point(x, y);
@@ -3868,8 +4275,13 @@ fn ctm_transform_path(path: &PsPath, ctm: &Matrix) -> PsPath {
 /// Transform a path from glyph space to user space.
 /// Applies the font matrix and translates by the current point.
 fn transform_path(path: &PsPath, font_matrix: &Matrix, origin_x: f64, origin_y: f64) -> PsPath {
+    transform_segments(&path.segments, font_matrix, origin_x, origin_y)
+}
+
+/// Transform path segments from glyph space to user space.
+fn transform_segments(segments: &[PathSegment], font_matrix: &Matrix, origin_x: f64, origin_y: f64) -> PsPath {
     let mut result = PsPath::new();
-    for seg in &path.segments {
+    for seg in segments {
         match *seg {
             PathSegment::MoveTo(x, y) => {
                 let (tx, ty) = font_matrix.transform_point(x, y);
@@ -3907,6 +4319,93 @@ fn transform_path(path: &PsPath, font_matrix: &Matrix, origin_x: f64, origin_y: 
                 result.segments.push(PathSegment::ClosePath);
             }
         }
+    }
+    result
+}
+
+/// Translate and recolor a display element for Type 3 glyph cache replay.
+/// Per PLRM, setcachedevice glyphs are stencils — painted with the current color at show time.
+fn recolor_and_translate_element(
+    elem: &DisplayElement,
+    dx: f64,
+    dy: f64,
+    color: &DeviceColor,
+) -> DisplayElement {
+    match elem {
+        DisplayElement::Fill { path, params } => {
+            let mut params = params.clone();
+            params.color = color.clone();
+            DisplayElement::Fill {
+                path: translate_path(path, dx, dy),
+                params,
+            }
+        }
+        DisplayElement::Stroke { path, params } => {
+            let mut params = params.clone();
+            params.color = color.clone();
+            DisplayElement::Stroke {
+                path: translate_path(path, dx, dy),
+                params,
+            }
+        }
+        DisplayElement::Image { rgba_data, params } => {
+            let mut params = params.clone();
+            params.ctm.tx += dx;
+            params.ctm.ty += dy;
+            if params.is_mask {
+                // Recolor imagemask pixels with the current color
+                let recolored = recolor_mask_rgba(rgba_data, color);
+                DisplayElement::Image {
+                    rgba_data: recolored,
+                    params,
+                }
+            } else {
+                DisplayElement::Image {
+                    rgba_data: rgba_data.clone(),
+                    params,
+                }
+            }
+        }
+        // Other elements shouldn't appear in Type 3 BuildChar output
+        other => other.clone(),
+    }
+}
+
+/// Recolor imagemask RGBA data: replace RGB of all non-transparent pixels with the given color.
+fn recolor_mask_rgba(rgba: &[u8], color: &DeviceColor) -> Vec<u8> {
+    let r = (color.r * 255.0 + 0.5) as u8;
+    let g = (color.g * 255.0 + 0.5) as u8;
+    let b = (color.b * 255.0 + 0.5) as u8;
+    let mut result = rgba.to_vec();
+    for pixel in result.chunks_exact_mut(4) {
+        if pixel[3] > 0 {
+            pixel[0] = r;
+            pixel[1] = g;
+            pixel[2] = b;
+        }
+    }
+    result
+}
+
+/// Translate all coordinates in a path by (dx, dy).
+fn translate_path(path: &PsPath, dx: f64, dy: f64) -> PsPath {
+    let mut result = PsPath::new();
+    for seg in &path.segments {
+        result.segments.push(match *seg {
+            PathSegment::MoveTo(x, y) => PathSegment::MoveTo(x + dx, y + dy),
+            PathSegment::LineTo(x, y) => PathSegment::LineTo(x + dx, y + dy),
+            PathSegment::CurveTo {
+                x1, y1, x2, y2, x3, y3,
+            } => PathSegment::CurveTo {
+                x1: x1 + dx,
+                y1: y1 + dy,
+                x2: x2 + dx,
+                y2: y2 + dy,
+                x3: x3 + dx,
+                y3: y3 + dy,
+            },
+            PathSegment::ClosePath => PathSegment::ClosePath,
+        });
     }
     result
 }
