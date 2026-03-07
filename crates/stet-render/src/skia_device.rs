@@ -1296,7 +1296,7 @@ fn render_element_to_band(
             // Apply stroke adjustment for thin strokes when enabled
             let adjusted;
             let draw_path =
-                if (params.stroke_adjust || params.line_width == 0.0) && stroke.width <= 2.0 {
+                if params.stroke_adjust && stroke.width <= 2.0 {
                     adjusted = stroke_adjust_path(path, stroke.width as f64);
                     &adjusted
                 } else {
@@ -1710,8 +1710,7 @@ impl OutputDevice for SkiaDevice {
         self.ensure_full_pixmap();
         let stroke = build_stroke(params, self.dpi);
         let adjusted;
-        let draw_path = if (params.stroke_adjust || params.line_width == 0.0) && stroke.width <= 2.0
-        {
+        let draw_path = if params.stroke_adjust && stroke.width <= 2.0 {
             adjusted = stroke_adjust_path(path, stroke.width as f64);
             &adjusted
         } else {
@@ -2699,7 +2698,7 @@ fn render_element_to_viewport(
             // the snap grid to match the viewport transform.
             let adjusted;
             let draw_path =
-                if (params.stroke_adjust || params.line_width == 0.0) && stroke.width <= 2.0 {
+                if params.stroke_adjust && stroke.width <= 2.0 {
                     // Snap in output pixel space: transform coords, snap, inverse-transform.
                     // For identity CTM (isotropic strokes in device space), we can snap
                     // directly using the viewport scale factors.

@@ -154,6 +154,8 @@ pub struct FilterState {
     pub output_pos: usize,
     pub putback: Vec<u8>,
     pub eof: bool,
+    /// Total bytes consumed by the caller (for fileposition).
+    pub bytes_read: u64,
 }
 
 /// The underlying handle for a file.
@@ -383,6 +385,7 @@ impl FileStore {
                 output_pos: 0,
                 putback: Vec::new(),
                 eof: false,
+                bytes_read: 0,
             })),
             name: "%filter".to_string(),
             mode: "r".to_string(),
@@ -408,6 +411,7 @@ impl FileStore {
                 output_pos: 0,
                 putback: Vec::new(),
                 eof: false,
+                bytes_read: 0,
             })),
             name: "%filter".to_string(),
             mode: "r".to_string(),
@@ -428,6 +432,7 @@ impl FileStore {
                 output_pos: 0,
                 putback: Vec::new(),
                 eof: false,
+                bytes_read: 0,
             })),
             name: "%filter".to_string(),
             mode: "w".to_string(),
@@ -565,6 +570,7 @@ impl FileStore {
 
         // 1. Return from putback buffer if non-empty
         if let Some(b) = state.putback.pop() {
+            state.bytes_read += 1;
             self.files[entity.0 as usize].handle = FileHandle::Filter(state);
             return Ok(Some(b));
         }
@@ -573,6 +579,7 @@ impl FileStore {
         if state.output_pos < state.output_buf.len() {
             let b = state.output_buf[state.output_pos];
             state.output_pos += 1;
+            state.bytes_read += 1;
             self.files[entity.0 as usize].handle = FileHandle::Filter(state);
             return Ok(Some(b));
         }
@@ -589,6 +596,7 @@ impl FileStore {
         let result = if state.output_pos < state.output_buf.len() {
             let b = state.output_buf[state.output_pos];
             state.output_pos += 1;
+            state.bytes_read += 1;
             Ok(Some(b))
         } else {
             Ok(None)
@@ -1041,6 +1049,7 @@ impl FileStore {
         match &mut entry.handle {
             FileHandle::Real(f) => f.stream_position(),
             FileHandle::StringSource { pos, .. } => Ok(*pos as u64),
+            FileHandle::Filter(state) => Ok(state.bytes_read),
             _ => Err(io::Error::other("not seekable")),
         }
     }

@@ -228,7 +228,7 @@ fn image_dict_form(ctx: &mut Context) -> Result<(), PsError> {
     // ImageType 4: apply MaskColor transparency
     if image_type == 4 {
         if let Some(mask_color) = dict_get_mask_color(ctx, dict_entity, ncomp) {
-            apply_mask_color(&mut rgba, &samples, width, height, ncomp, &mask_color);
+            apply_mask_color(&mut rgba, &samples, width, height, ncomp, &mask_color, bps);
         }
     }
 
@@ -282,7 +282,8 @@ fn image_type3_form(
     let mask_decode = dict_get_decode(ctx, mask_dict).unwrap_or_else(|| vec![0.0, 1.0]);
     let mask_data_source = dict_get_obj(ctx, mask_dict, b"DataSource");
 
-    // Mask polarity from Decode: [0 1] means 1=paint, [1 0] means 0=paint
+    // Mask polarity from Decode (PLRM: decoded value 0 = paint, 1 = mask out):
+    // [0 1] → raw 0 paints (polarity=true), [1 0] → raw 1 paints (polarity=false)
     let mask_polarity = mask_decode.first().copied().unwrap_or(0.0) < 0.5;
 
     // Determine ncomp from image Decode array or color space
@@ -576,7 +577,7 @@ fn apply_stencil_mask(
     mask_w: u32,
     mask_h: u32,
     mask_bps: u32,
-    polarity: bool, // true: nonzero=paint, false: zero=paint
+    polarity: bool, // true: zero=paint (Decode [0,1]), false: nonzero=paint (Decode [1,0])
 ) {
     let mask_samples_per_row = mask_w as usize;
     let mask_bits_per_row = mask_samples_per_row * mask_bps as usize;
@@ -616,13 +617,18 @@ fn apply_stencil_mask(
                 ) as u8
             };
 
-            // Determine if this pixel should paint
-            let paint = if polarity { sample != 0 } else { sample == 0 };
+            // Determine if this pixel should paint (PLRM: decoded 0 = paint)
+            // polarity=true (Decode [0,1]): raw 0 paints; polarity=false (Decode [1,0]): raw 1 paints
+            let paint = if polarity { sample == 0 } else { sample != 0 };
 
             if !paint {
                 let pi = (y * img_w as usize + x) * 4;
                 if pi + 3 < rgba.len() {
-                    rgba[pi + 3] = 0; // Set alpha to 0 (transparent)
+                    // Zero all channels for valid premultiplied alpha
+                    rgba[pi] = 0;
+                    rgba[pi + 1] = 0;
+                    rgba[pi + 2] = 0;
+                    rgba[pi + 3] = 0;
                 }
             }
         }
@@ -1538,10 +1544,122 @@ fn interleave_components(
         }
         result
     } else {
-        // For sub-byte, just concatenate (simplified)
-        let mut result = Vec::new();
-        for comp in comp_data {
-            result.extend_from_slice(comp);
+        // Sub-byte or 12-bit: unpack each component's samples, interleave, repack
+        let pixel_count = width as usize * height as usize;
+
+        // Unpack each component to individual sample values
+        let unpacked: Vec<Vec<u16>> = comp_data
+            .iter()
+            .map(|data| unpack_raw_samples(data, width, height, bps))
+            .collect();
+
+        // Interleave: pixel0_comp0, pixel0_comp1, ..., pixel1_comp0, ...
+        let interleaved_samples = ncomp as usize * pixel_count;
+        let mut interleaved = Vec::with_capacity(interleaved_samples);
+        for i in 0..pixel_count {
+            for comp in &unpacked {
+                interleaved.push(comp.get(i).copied().unwrap_or(0));
+            }
+        }
+
+        // Repack into bytes
+        repack_samples(&interleaved, width, height, bps, ncomp)
+    }
+}
+
+/// Unpack raw sample values (without scaling to 8-bit) from packed bytes.
+fn unpack_raw_samples(raw: &[u8], width: u32, height: u32, bps: u32) -> Vec<u16> {
+    let samples_per_row = width as usize;
+    let total_samples = samples_per_row * height as usize;
+    let mut result = Vec::with_capacity(total_samples);
+
+    if bps == 12 {
+        let bits_per_row = samples_per_row * 12;
+        let bytes_per_row = bits_per_row.div_ceil(8);
+        for row in 0..height as usize {
+            let row_start = row * bytes_per_row;
+            let mut bit_pos = 0usize;
+            for _ in 0..samples_per_row {
+                let byte_idx = row_start + bit_pos / 8;
+                let bit_offset = bit_pos % 8;
+                let sample = if byte_idx + 1 >= raw.len() {
+                    0
+                } else if bit_offset == 0 {
+                    ((raw[byte_idx] as u16) << 4) | ((raw[byte_idx + 1] as u16) >> 4)
+                } else {
+                    ((raw[byte_idx] as u16 & 0x0F) << 8)
+                        | raw.get(byte_idx + 1).copied().unwrap_or(0) as u16
+                };
+                result.push(sample);
+                bit_pos += 12;
+            }
+        }
+    } else {
+        let mask = ((1u16 << bps) - 1) as u8;
+        let samples_per_byte = 8 / bps as usize;
+        let bytes_per_row = (samples_per_row * bps as usize).div_ceil(8);
+        for row in 0..height as usize {
+            let row_start = row * bytes_per_row;
+            for s in 0..samples_per_row {
+                let byte_idx = row_start + s / samples_per_byte;
+                let bit_offset = (samples_per_byte - 1 - (s % samples_per_byte)) * bps as usize;
+                let byte_val = raw.get(byte_idx).copied().unwrap_or(0);
+                result.push(((byte_val >> bit_offset) & mask) as u16);
+            }
+        }
+    }
+    result
+}
+
+/// Repack interleaved sample values into packed bytes.
+fn repack_samples(samples: &[u16], width: u32, height: u32, bps: u32, ncomp: u32) -> Vec<u8> {
+    let samples_per_row = width as usize * ncomp as usize;
+
+    if bps == 12 {
+        let bits_per_row = samples_per_row * 12;
+        let bytes_per_row = bits_per_row.div_ceil(8);
+        let mut result = vec![0u8; bytes_per_row * height as usize];
+        for row in 0..height as usize {
+            let row_start = row * bytes_per_row;
+            let mut bit_pos = 0usize;
+            for s in 0..samples_per_row {
+                let sample_idx = row * samples_per_row + s;
+                let val = samples.get(sample_idx).copied().unwrap_or(0) & 0xFFF;
+                let byte_idx = row_start + bit_pos / 8;
+                let bit_offset = bit_pos % 8;
+                if byte_idx < result.len() {
+                    if bit_offset == 0 {
+                        result[byte_idx] = (val >> 4) as u8;
+                        if byte_idx + 1 < result.len() {
+                            result[byte_idx + 1] = ((val & 0x0F) << 4) as u8;
+                        }
+                    } else {
+                        result[byte_idx] |= (val >> 8) as u8;
+                        if byte_idx + 1 < result.len() {
+                            result[byte_idx + 1] = (val & 0xFF) as u8;
+                        }
+                    }
+                }
+                bit_pos += 12;
+            }
+        }
+        result
+    } else {
+        let samples_per_byte = 8 / bps as usize;
+        let bytes_per_row = (samples_per_row * bps as usize).div_ceil(8);
+        let mut result = vec![0u8; bytes_per_row * height as usize];
+        let mask = ((1u16 << bps) - 1) as u8;
+        for row in 0..height as usize {
+            let row_start = row * bytes_per_row;
+            for s in 0..samples_per_row {
+                let sample_idx = row * samples_per_row + s;
+                let val = samples.get(sample_idx).copied().unwrap_or(0) as u8 & mask;
+                let byte_idx = row_start + s / samples_per_byte;
+                let bit_offset = (samples_per_byte - 1 - (s % samples_per_byte)) * bps as usize;
+                if byte_idx < result.len() {
+                    result[byte_idx] |= val << bit_offset;
+                }
+            }
         }
         result
     }
@@ -1692,6 +1810,8 @@ fn dict_get_mask_color(
 
 /// Apply ImageType 4 MaskColor: set alpha=0 for pixels matching the mask color.
 /// MaskColor is either ncomp values (exact match) or 2*ncomp values (range match).
+/// MaskColor values are in the raw BPC range; samples have been scaled to 8-bit.
+/// We scale MaskColor values to 8-bit to match.
 fn apply_mask_color(
     rgba: &mut [u8],
     samples: &[u8],
@@ -1699,9 +1819,16 @@ fn apply_mask_color(
     height: u32,
     ncomp: u32,
     mask_color: &[i32],
+    bps: u32,
 ) {
+    // Scale MaskColor values from raw BPC range to 8-bit to match samples
+    let scaled_mask: Vec<i32> = mask_color
+        .iter()
+        .map(|&v| scale_mask_value(v, bps))
+        .collect();
+
     let pixel_count = width as usize * height as usize;
-    let is_range = mask_color.len() == 2 * ncomp as usize;
+    let is_range = scaled_mask.len() == 2 * ncomp as usize;
 
     for i in 0..pixel_count {
         let si = i * ncomp as usize;
@@ -1709,15 +1836,15 @@ fn apply_mask_color(
             // Range match: sample[c] in [min_c, max_c] for ALL components
             (0..ncomp as usize).all(|c| {
                 let sample = samples.get(si + c).copied().unwrap_or(0) as i32;
-                let min_val = mask_color[c * 2];
-                let max_val = mask_color[c * 2 + 1];
+                let min_val = scaled_mask[c * 2];
+                let max_val = scaled_mask[c * 2 + 1];
                 sample >= min_val && sample <= max_val
             })
         } else {
             // Exact match: sample[c] == mask_color[c] for ALL components
             (0..ncomp as usize).all(|c| {
                 let sample = samples.get(si + c).copied().unwrap_or(0) as i32;
-                let target = mask_color.get(c).copied().unwrap_or(0);
+                let target = scaled_mask.get(c).copied().unwrap_or(0);
                 sample == target
             })
         };
@@ -1725,9 +1852,27 @@ fn apply_mask_color(
         if matched {
             let pi = i * 4;
             if pi + 3 < rgba.len() {
-                rgba[pi + 3] = 0; // Transparent
+                // Zero all channels for valid premultiplied alpha
+                rgba[pi] = 0;
+                rgba[pi + 1] = 0;
+                rgba[pi + 2] = 0;
+                rgba[pi + 3] = 0;
             }
         }
+    }
+}
+
+/// Scale a MaskColor value from the raw BPC range to 8-bit,
+/// matching the scaling done by `unpack_samples`.
+fn scale_mask_value(val: i32, bps: u32) -> i32 {
+    match bps {
+        8 => val,
+        12 => val >> 4,
+        1 | 2 | 4 => {
+            let max_val = ((1i32 << bps) - 1) as f64;
+            (val as f64 / max_val * 255.0).round() as i32
+        }
+        _ => val,
     }
 }
 
