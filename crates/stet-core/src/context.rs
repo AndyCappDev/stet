@@ -61,6 +61,9 @@ pub struct NameCache {
     // Type 3 font names
     pub n_build_char: NameId,
     pub n_build_glyph: NameId,
+    // PaintType 2 / WMode support
+    pub n_stroke_width: NameId,
+    pub n_wmode: NameId,
 }
 
 /// Loop state for `for`, `repeat`, `loop`, and `forall`.
@@ -209,6 +212,8 @@ pub struct Context {
 
     // Character width set by setcachedevice/setcharwidth during BuildChar execution
     pub char_width: Option<(f64, f64)>,
+    // Mode 1 metrics from setcachedevice2: ((w1x, w1y), (vx, vy))
+    pub char_width_mode1: Option<((f64, f64), (f64, f64))>,
 
     // CID passed from cshow to nested show call for Type 0 composite fonts
     pub cshow_pending_cid: Option<i32>,
@@ -274,6 +279,8 @@ impl Context {
             n_resource_ext: names.intern(b"ResourceExtension"),
             n_build_char: names.intern(b"BuildChar"),
             n_build_glyph: names.intern(b"BuildGlyph"),
+            n_stroke_width: names.intern(b"StrokeWidth"),
+            n_wmode: names.intern(b"WMode"),
         };
 
         let mut strings = DualStringStore::new();
@@ -550,6 +557,7 @@ impl Context {
             icc_cache: crate::icc::IccCache::new(),
             exec_sync_fn: None,
             char_width: None,
+            char_width_mode1: None,
             cshow_pending_cid: None,
             pattern_store: Vec::new(),
             form_cache: rustc_hash::FxHashMap::default(),

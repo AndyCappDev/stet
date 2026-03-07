@@ -7,11 +7,11 @@
 
 use stet_core::charstring;
 use stet_core::context::Context;
-use stet_core::device::FillParams;
+use stet_core::device::{FillParams, StrokeParams};
 use stet_core::dict::DictKey;
 use stet_core::display_list::DisplayElement;
 use stet_core::error::PsError;
-use stet_core::graphics_state::{FillRule, Matrix, PathSegment, PsPath};
+use stet_core::graphics_state::{DashPattern, FillRule, LineCap, LineJoin, Matrix, PathSegment, PsPath};
 use stet_core::object::{EntityId, PsObject, PsValue};
 use stet_core::truetype;
 use stet_core::type2_charstring;
@@ -684,8 +684,8 @@ pub fn op_setcachedevice(ctx: &mut Context) -> Result<(), PsError> {
 /// `setcachedevice2`: w0x w0y llx lly urx ury w1x w1y vx vy → —
 ///
 /// Set cache device parameters for dual writing mode metrics.
-/// Records the mode 0 character width (w0x, w0y) for Type 3 font
-/// BuildChar procedures. Mode 1 metrics are validated but not stored.
+/// Records the mode 0 character width (w0x, w0y) and mode 1 metrics
+/// (w1x, w1y, vx, vy) for Type 3 font BuildChar procedures.
 pub fn op_setcachedevice2(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.o_stack.len() < 10 {
         return Err(PsError::StackUnderflow);
@@ -694,13 +694,19 @@ pub fn op_setcachedevice2(ctx: &mut Context) -> Result<(), PsError> {
     for i in 0..10 {
         ctx.o_stack.peek(i)?.as_f64().ok_or(PsError::TypeCheck)?;
     }
-    // Read w0x, w0y (mode 0 width) before popping
+    // Read all 10 parameters before popping
     let w0x = ctx.o_stack.peek(9)?.as_f64().unwrap();
     let w0y = ctx.o_stack.peek(8)?.as_f64().unwrap();
+    // llx, lly, urx, ury at peek(7..4) — bounding box, not stored
+    let w1x = ctx.o_stack.peek(3)?.as_f64().unwrap();
+    let w1y = ctx.o_stack.peek(2)?.as_f64().unwrap();
+    let vx = ctx.o_stack.peek(1)?.as_f64().unwrap();
+    let vy = ctx.o_stack.peek(0)?.as_f64().unwrap();
     for _ in 0..10 {
         ctx.o_stack.pop()?;
     }
     ctx.char_width = Some((w0x, w0y));
+    ctx.char_width_mode1 = Some(((w1x, w1y), (vx, vy)));
     Ok(())
 }
 
@@ -782,6 +788,7 @@ pub fn op_glyphshow(ctx: &mut Context) -> Result<(), PsError> {
     let ictm = ctx.gstate.ctm.invert().ok_or(PsError::UndefinedResult)?;
     let (cur_x, cur_y) = ictm.transform_point(dev_cpx, dev_cpy);
     let ctm = ctx.gstate.ctm;
+    let (paint_type, stroke_width_dev) = get_paint_info(ctx, font_entity, &font_matrix, &ctm);
 
     if font_type == 2 {
         // Type 2 (CFF) charstring
@@ -799,15 +806,7 @@ pub fn op_glyphshow(ctx: &mut Context) -> Result<(), PsError> {
         if !result.path.is_empty() {
             let user_path = transform_path(&result.path, &font_matrix, cur_x, cur_y);
             let device_path = ctm_transform_path(&user_path, &ctm);
-            let params = FillParams {
-                color: ctx.gstate.color.clone(),
-                ctm: Matrix::identity(),
-                fill_rule: FillRule::NonZeroWinding,
-            };
-            ctx.display_list.push(DisplayElement::Fill {
-                path: device_path,
-                params,
-            });
+            push_glyph_element(ctx, device_path, paint_type, stroke_width_dev);
         }
 
         let (wx, wy) = font_matrix.transform_delta(result.width_x, result.width_y);
@@ -823,15 +822,7 @@ pub fn op_glyphshow(ctx: &mut Context) -> Result<(), PsError> {
         if !result.path.is_empty() {
             let user_path = transform_path(&result.path, &font_matrix, cur_x, cur_y);
             let device_path = ctm_transform_path(&user_path, &ctm);
-            let params = FillParams {
-                color: ctx.gstate.color.clone(),
-                ctm: Matrix::identity(),
-                fill_rule: FillRule::NonZeroWinding,
-            };
-            ctx.display_list.push(DisplayElement::Fill {
-                path: device_path,
-                params,
-            });
+            push_glyph_element(ctx, device_path, paint_type, stroke_width_dev);
         }
 
         let (wx, wy) = font_matrix.transform_delta(result.width_x, result.width_y);
@@ -1193,6 +1184,7 @@ fn render_show(
     let (mut cur_x, mut cur_y) = ictm.transform_point(dev_cpx, dev_cpy);
 
     let ctm = ctx.gstate.ctm;
+    let (paint_type, stroke_width_dev) = get_paint_info(ctx, info.font_entity, &info.font_matrix, &ctm);
 
     for &byte in bytes {
         // Look up glyph name from encoding
@@ -1230,17 +1222,7 @@ fn render_show(
         if !result.path.is_empty() {
             let user_path = transform_path(&result.path, &info.font_matrix, cur_x, cur_y);
             let device_path = ctm_transform_path(&user_path, &ctm);
-
-            // Fill the glyph (path is already device-space)
-            let params = FillParams {
-                color: ctx.gstate.color.clone(),
-                ctm: Matrix::identity(),
-                fill_rule: FillRule::NonZeroWinding,
-            };
-            ctx.display_list.push(DisplayElement::Fill {
-                path: device_path,
-                params,
-            });
+            push_glyph_element(ctx, device_path, paint_type, stroke_width_dev);
         }
 
         // Advance currentpoint: use Metrics override if present, else charstring width
@@ -1420,6 +1402,7 @@ fn render_show_type2(
     let ictm = ctx.gstate.ctm.invert().ok_or(PsError::UndefinedResult)?;
     let (mut cur_x, mut cur_y) = ictm.transform_point(dev_cpx, dev_cpy);
     let ctm = ctx.gstate.ctm;
+    let (paint_type, stroke_width_dev) = get_paint_info(ctx, font_entity, &info.font_matrix, &ctm);
 
     for &byte in bytes {
         // Look up glyph name from encoding
@@ -1454,20 +1437,11 @@ fn render_show_type2(
         )
         .map_err(|_| PsError::InvalidFont)?;
 
-        // Transform glyph path and fill
+        // Transform glyph path
         if !result.path.is_empty() {
             let user_path = transform_path(&result.path, &info.font_matrix, cur_x, cur_y);
             let device_path = ctm_transform_path(&user_path, &ctm);
-
-            let params = FillParams {
-                color: ctx.gstate.color.clone(),
-                ctm: Matrix::identity(),
-                fill_rule: FillRule::NonZeroWinding,
-            };
-            ctx.display_list.push(DisplayElement::Fill {
-                path: device_path,
-                params,
-            });
+            push_glyph_element(ctx, device_path, paint_type, stroke_width_dev);
         }
 
         // Advance currentpoint
@@ -1742,6 +1716,13 @@ fn render_show_composite(
     if font_type == 0 {
         // --- Type 0 composite font ---
 
+        // Read WMode from root Type 0 font (default 0 = horizontal)
+        let wmode = ctx
+            .dicts
+            .get(font_entity, &DictKey::Name(ctx.name_cache.n_wmode))
+            .and_then(|o| o.as_i32())
+            .unwrap_or(0);
+
         // Check if this is a CMap-based or FMapType-based font
         let has_cmap = ctx
             .names
@@ -1817,6 +1798,7 @@ fn render_show_composite(
                 cx,
                 cy,
                 &ctm,
+                wmode,
             )?;
         } else {
             // --- CIDFont Type 0 (CFF) path ---
@@ -1834,6 +1816,7 @@ fn render_show_composite(
                 cx,
                 cy,
                 &ctm,
+                wmode,
             )?;
         }
     } else {
@@ -1846,6 +1829,7 @@ fn render_show_composite(
 
         let em_scale = Matrix::scale(1.0 / upm, 1.0 / upm);
         let combined_fm = type0_fm.multiply(&em_scale);
+        let (paint_type, stroke_width_dev) = get_paint_info(ctx, font_entity, &combined_fm, &ctm);
 
         // Get GlyphDirectory dict (PScript5.dll stores per-glyph data here
         // instead of in the sfnts glyf table)
@@ -1931,16 +1915,7 @@ fn render_show_composite(
                                     let user_path =
                                         transform_path(&glyf_path, &combined_fm, cur_x, cur_y);
                                     let device_path = ctm_transform_path(&user_path, &ctm);
-
-                                    let params = FillParams {
-                                        color: ctx.gstate.color.clone(),
-                                        ctm: Matrix::identity(),
-                                        fill_rule: FillRule::NonZeroWinding,
-                                    };
-                                    ctx.display_list.push(DisplayElement::Fill {
-                                        path: device_path,
-                                        params,
-                                    });
+                                    push_glyph_element(ctx, device_path, paint_type, stroke_width_dev);
                                 }
                             }
 
@@ -1994,6 +1969,7 @@ fn render_composite_truetype_cids(
     cx: f64,
     cy: f64,
     ctm: &Matrix,
+    wmode: i32,
 ) -> Result<(), PsError> {
     // Get GlyphDirectory dict (optional)
     let gd_name = ctx.names.intern(b"GlyphDirectory");
@@ -2013,6 +1989,7 @@ fn render_composite_truetype_cids(
 
     let em_scale = Matrix::scale(1.0 / upm, 1.0 / upm);
     let combined_fm = type0_fm.multiply(cidfont_fm).multiply(&em_scale);
+    let (paint_type, stroke_width_dev) = get_paint_info(ctx, cidfont_entity, &combined_fm, ctm);
 
     for &cid in cids {
         let glyf_bytes = if let Some(gd_entity) = glyph_dir_entity {
@@ -2055,26 +2032,28 @@ fn render_composite_truetype_cids(
             if !glyf_path.is_empty() {
                 let user_path = transform_path(&glyf_path, &combined_fm, *cur_x, *cur_y);
                 let device_path = ctm_transform_path(&user_path, ctm);
-
-                let params = FillParams {
-                    color: ctx.gstate.color.clone(),
-                    ctm: Matrix::identity(),
-                    fill_rule: FillRule::NonZeroWinding,
-                };
-                ctx.display_list.push(DisplayElement::Fill {
-                    path: device_path,
-                    params,
-                });
+                push_glyph_element(ctx, device_path, paint_type, stroke_width_dev);
             }
         }
 
-        let advance = font_data
-            .as_ref()
-            .and_then(|fd| truetype::get_advance_width(fd, cid as u16))
-            .unwrap_or(500);
-        let (wx, wy) = combined_fm.transform_delta(advance as f64, 0.0);
-        *cur_x += wx + extra_ax;
-        *cur_y += wy + extra_ay;
+        if wmode == 1 {
+            // Vertical writing: advance downward
+            // DW2 default per PLRM: [880 -1000] (vy_offset, v_advance in glyph units)
+            let (_vy_offset, v_advance) =
+                get_dw2(ctx, cidfont_entity).unwrap_or((880.0, -1000.0));
+            let (_, wy) = combined_fm.transform_delta(0.0, v_advance);
+            *cur_x += extra_ax;
+            *cur_y += wy + extra_ay;
+        } else {
+            // Horizontal writing (default)
+            let advance = font_data
+                .as_ref()
+                .and_then(|fd| truetype::get_advance_width(fd, cid as u16))
+                .unwrap_or(500);
+            let (wx, wy) = combined_fm.transform_delta(advance as f64, 0.0);
+            *cur_x += wx + extra_ax;
+            *cur_y += wy + extra_ay;
+        }
 
         if cid == width_char {
             *cur_x += cx;
@@ -2082,6 +2061,22 @@ fn render_composite_truetype_cids(
         }
     }
     Ok(())
+}
+
+/// Get DW2 (default vertical metrics) from a CIDFont dict.
+/// Returns (vy_offset, v_advance) in glyph coordinate units.
+/// PLRM default: [880, -1000].
+fn get_dw2(ctx: &Context, cidfont_entity: EntityId) -> Option<(f64, f64)> {
+    let dw2_name = ctx.names.find(b"DW2")?;
+    let dw2_obj = ctx.dicts.get(cidfont_entity, &DictKey::Name(dw2_name))?;
+    match dw2_obj.value {
+        PsValue::Array { entity, start, len } if len >= 2 => {
+            let vy = ctx.arrays.get_element(entity, start).as_f64()?;
+            let w1y = ctx.arrays.get_element(entity, start + 1).as_f64()?;
+            Some((vy, w1y))
+        }
+        _ => None,
+    }
 }
 
 /// Extract Type 2 charstring rendering info from a CIDFont's FD array for a given CID.
@@ -2248,6 +2243,7 @@ fn render_composite_cff_cids(
     cx: f64,
     cy: f64,
     ctm: &Matrix,
+    wmode: i32,
 ) -> Result<(), PsError> {
     // Get CharStrings dict (int-keyed by CID)
     let cs_entity = ctx
@@ -2264,6 +2260,7 @@ fn render_composite_cff_cids(
 
     // CFF FontMatrix already handles scaling — no em_scale needed
     let combined_fm = type0_fm.multiply(cidfont_fm);
+    let (paint_type, stroke_width_dev) = get_paint_info(ctx, cidfont_entity, &combined_fm, ctm);
 
     // Get global subrs
     let global_subrs = get_global_subrs(ctx, cidfont_entity);
@@ -2282,9 +2279,17 @@ fn render_composite_cff_cids(
             Some(obj) => obj,
             None => {
                 // No charstring for this CID — advance by default width
-                let (wx, wy) = combined_fm.transform_delta(dw as f64, 0.0);
-                *cur_x += wx + extra_ax;
-                *cur_y += wy + extra_ay;
+                if wmode == 1 {
+                    let (_vy_offset, v_advance) =
+                        get_dw2(ctx, cidfont_entity).unwrap_or((880.0, -1000.0));
+                    let (_, wy) = combined_fm.transform_delta(0.0, v_advance);
+                    *cur_x += extra_ax;
+                    *cur_y += wy + extra_ay;
+                } else {
+                    let (wx, wy) = combined_fm.transform_delta(dw as f64, 0.0);
+                    *cur_x += wx + extra_ax;
+                    *cur_y += wy + extra_ay;
+                }
                 if cid == width_char {
                     *cur_x += cx;
                     *cur_y += cy;
@@ -2312,26 +2317,25 @@ fn render_composite_cff_cids(
         )
         .map_err(|_| PsError::InvalidFont)?;
 
-        // Fill glyph path
+        // Paint glyph path
         if !result.path.is_empty() {
             let user_path = transform_path(&result.path, &combined_fm, *cur_x, *cur_y);
             let device_path = ctm_transform_path(&user_path, ctm);
-
-            let params = FillParams {
-                color: ctx.gstate.color.clone(),
-                ctm: Matrix::identity(),
-                fill_rule: FillRule::NonZeroWinding,
-            };
-            ctx.display_list.push(DisplayElement::Fill {
-                path: device_path,
-                params,
-            });
+            push_glyph_element(ctx, device_path, paint_type, stroke_width_dev);
         }
 
-        // Advance by charstring width through combined FontMatrix
-        let (wx, wy) = combined_fm.transform_delta(result.width_x, result.width_y);
-        *cur_x += wx + extra_ax;
-        *cur_y += wy + extra_ay;
+        // Advance: WMode 1 = vertical, WMode 0 = horizontal
+        if wmode == 1 {
+            let (_vy_offset, v_advance) =
+                get_dw2(ctx, cidfont_entity).unwrap_or((880.0, -1000.0));
+            let (_, wy) = combined_fm.transform_delta(0.0, v_advance);
+            *cur_x += extra_ax;
+            *cur_y += wy + extra_ay;
+        } else {
+            let (wx, wy) = combined_fm.transform_delta(result.width_x, result.width_y);
+            *cur_x += wx + extra_ax;
+            *cur_y += wy + extra_ay;
+        }
 
         if cid == width_char {
             *cur_x += cx;
@@ -2397,6 +2401,7 @@ fn render_show_type3(
     // Render each character synchronously
     for &byte in bytes {
         ctx.char_width = None;
+        ctx.char_width_mode1 = None;
 
         // gsave, translate to current position, concat FontMatrix
         crate::graphics_state_ops::op_gsave(ctx)?;
@@ -2608,7 +2613,13 @@ fn measure_string_width_composite(
     let type0_fm = read_font_matrix(ctx, font_entity_id);
 
     if font_type == 0 {
-        // Type 0 composite: get CIDFont from FDepVector
+        // Type 0 composite: get WMode and CIDFont from FDepVector
+        let wmode = ctx
+            .dicts
+            .get(font_entity_id, &DictKey::Name(ctx.name_cache.n_wmode))
+            .and_then(|o| o.as_i32())
+            .unwrap_or(0);
+
         let fdep_name = ctx.names.intern(b"FDepVector");
         let fdep_obj = ctx
             .dicts
@@ -2647,13 +2658,21 @@ fn measure_string_width_composite(
             let combined_fm = type0_fm.multiply(&cidfont_fm).multiply(&em_scale);
 
             for (cid, _) in &cids {
-                let advance = font_data
-                    .as_ref()
-                    .and_then(|fd| truetype::get_advance_width(fd, *cid as u16))
-                    .unwrap_or(500);
-                let (wx, wy) = combined_fm.transform_delta(advance as f64, 0.0);
-                total_wx += wx;
-                total_wy += wy;
+                if wmode == 1 {
+                    let (_vy_offset, v_advance) =
+                        get_dw2(ctx, cidfont_entity).unwrap_or((880.0, -1000.0));
+                    let (wx, wy) = combined_fm.transform_delta(0.0, v_advance);
+                    total_wx += wx;
+                    total_wy += wy;
+                } else {
+                    let advance = font_data
+                        .as_ref()
+                        .and_then(|fd| truetype::get_advance_width(fd, *cid as u16))
+                        .unwrap_or(500);
+                    let (wx, wy) = combined_fm.transform_delta(advance as f64, 0.0);
+                    total_wx += wx;
+                    total_wy += wy;
+                }
             }
         } else {
             // CFF CIDFont
@@ -2704,9 +2723,17 @@ fn measure_string_width_composite(
                 } else {
                     dw as f64
                 };
-                let (wx, wy) = combined_fm.transform_delta(width, 0.0);
-                total_wx += wx;
-                total_wy += wy;
+                if wmode == 1 {
+                    let (_vy_offset, v_advance) =
+                        get_dw2(ctx, cidfont_entity).unwrap_or((880.0, -1000.0));
+                    let (wx, wy) = combined_fm.transform_delta(0.0, v_advance);
+                    total_wx += wx;
+                    total_wy += wy;
+                } else {
+                    let (wx, wy) = combined_fm.transform_delta(width, 0.0);
+                    total_wx += wx;
+                    total_wy += wy;
+                }
             }
         }
         Ok((total_wx, total_wy))
@@ -3082,6 +3109,7 @@ fn render_show_displaced(
     let (mut cur_x, mut cur_y) = ictm.transform_point(dev_cpx, dev_cpy);
 
     let ctm = ctx.gstate.ctm;
+    let (paint_type, stroke_width_dev) = get_paint_info(ctx, info.font_entity, &info.font_matrix, &ctm);
 
     for (i, &byte) in bytes.iter().enumerate() {
         // Look up glyph name from encoding
@@ -3112,15 +3140,7 @@ fn render_show_displaced(
                 {
                     let user_path = transform_path(&result.path, &info.font_matrix, cur_x, cur_y);
                     let device_path = ctm_transform_path(&user_path, &ctm);
-                    let params = FillParams {
-                        color: ctx.gstate.color.clone(),
-                        ctm: Matrix::identity(),
-                        fill_rule: FillRule::NonZeroWinding,
-                    };
-                    ctx.display_list.push(DisplayElement::Fill {
-                        path: device_path,
-                        params,
-                    });
+                    push_glyph_element(ctx, device_path, paint_type, stroke_width_dev);
                 }
             }
         }
@@ -3148,6 +3168,7 @@ fn render_show_displaced_type2(
     let ictm = ctx.gstate.ctm.invert().ok_or(PsError::UndefinedResult)?;
     let (mut cur_x, mut cur_y) = ictm.transform_point(dev_cpx, dev_cpy);
     let ctm = ctx.gstate.ctm;
+    let (paint_type, stroke_width_dev) = get_paint_info(ctx, font_entity, &info.font_matrix, &ctm);
 
     for (i, &byte) in bytes.iter().enumerate() {
         let glyph_name_obj = ctx.arrays.get_element(info.encoding_entity, byte as u32);
@@ -3181,15 +3202,7 @@ fn render_show_displaced_type2(
                 {
                     let user_path = transform_path(&result.path, &info.font_matrix, cur_x, cur_y);
                     let device_path = ctm_transform_path(&user_path, &ctm);
-                    let params = FillParams {
-                        color: ctx.gstate.color.clone(),
-                        ctm: Matrix::identity(),
-                        fill_rule: FillRule::NonZeroWinding,
-                    };
-                    ctx.display_list.push(DisplayElement::Fill {
-                        path: device_path,
-                        params,
-                    });
+                    push_glyph_element(ctx, device_path, paint_type, stroke_width_dev);
                 }
             }
         }
@@ -3248,6 +3261,7 @@ fn render_fmap_type0(
 
         // Compose descendant FontMatrix × Type 0 FontMatrix
         let composed_fm = info.font_matrix.multiply(type0_fm);
+        let (paint_type, stroke_width_dev) = get_paint_info(ctx, desc_entity, &composed_fm, ctm);
 
         // Look up glyph name from descendant's encoding
         let glyph_name_obj = ctx.arrays.get_element(info.encoding_entity, *char_code as u32);
@@ -3277,15 +3291,7 @@ fn render_fmap_type0(
                 if !result.path.is_empty() {
                     let user_path = transform_path(&result.path, &composed_fm, *cur_x, *cur_y);
                     let device_path = ctm_transform_path(&user_path, ctm);
-                    let params = FillParams {
-                        color: ctx.gstate.color.clone(),
-                        ctm: Matrix::identity(),
-                        fill_rule: FillRule::NonZeroWinding,
-                    };
-                    ctx.display_list.push(DisplayElement::Fill {
-                        path: device_path,
-                        params,
-                    });
+                    push_glyph_element(ctx, device_path, paint_type, stroke_width_dev);
                 }
 
                 // Advance by glyph width through composed FontMatrix
@@ -3357,6 +3363,7 @@ fn render_fmap_type0_displaced(
 
         // Compose descendant FontMatrix × Type 0 FontMatrix
         let composed_fm = info.font_matrix.multiply(type0_fm);
+        let (paint_type, stroke_width_dev) = get_paint_info(ctx, desc_entity, &composed_fm, ctm);
 
         // Look up glyph name from descendant's encoding
         let glyph_name_obj = ctx.arrays.get_element(info.encoding_entity, *char_code as u32);
@@ -3384,15 +3391,7 @@ fn render_fmap_type0_displaced(
             {
                 let user_path = transform_path(&result.path, &composed_fm, *cur_x, *cur_y);
                 let device_path = ctm_transform_path(&user_path, ctm);
-                let params = FillParams {
-                    color: ctx.gstate.color.clone(),
-                    ctm: Matrix::identity(),
-                    fill_rule: FillRule::NonZeroWinding,
-                };
-                ctx.display_list.push(DisplayElement::Fill {
-                    path: device_path,
-                    params,
-                });
+                push_glyph_element(ctx, device_path, paint_type, stroke_width_dev);
             }
         }
 
@@ -3476,6 +3475,7 @@ fn render_show_displaced_composite(
                 .unwrap_or(1000.0);
             let em_scale = Matrix::scale(1.0 / upm, 1.0 / upm);
             let combined_fm = type0_fm.multiply(&cidfont_fm).multiply(&em_scale);
+            let (paint_type, stroke_width_dev) = get_paint_info(ctx, cidfont_entity, &combined_fm, &ctm);
             let gd_name = ctx.names.intern(b"GlyphDirectory");
             let glyph_dir_entity = ctx
                 .dicts
@@ -3526,15 +3526,7 @@ fn render_show_displaced_composite(
                     if !glyf_path.is_empty() {
                         let user_path = transform_path(&glyf_path, &combined_fm, cur_x, cur_y);
                         let device_path = ctm_transform_path(&user_path, &ctm);
-                        let params = FillParams {
-                            color: ctx.gstate.color.clone(),
-                            ctm: Matrix::identity(),
-                            fill_rule: FillRule::NonZeroWinding,
-                        };
-                        ctx.display_list.push(DisplayElement::Fill {
-                            path: device_path,
-                            params,
-                        });
+                        push_glyph_element(ctx, device_path, paint_type, stroke_width_dev);
                     }
                 }
 
@@ -3553,6 +3545,7 @@ fn render_show_displaced_composite(
                     _ => None,
                 });
             let combined_fm = type0_fm.multiply(&cidfont_fm);
+            let (paint_type, stroke_width_dev) = get_paint_info(ctx, cidfont_entity, &combined_fm, &ctm);
             let global_subrs = get_global_subrs(ctx, cidfont_entity);
 
             for (i, (cid, _)) in cids.iter().enumerate() {
@@ -3573,15 +3566,7 @@ fn render_show_displaced_composite(
                     {
                         let user_path = transform_path(&result.path, &combined_fm, cur_x, cur_y);
                         let device_path = ctm_transform_path(&user_path, &ctm);
-                        let params = FillParams {
-                            color: ctx.gstate.color.clone(),
-                            ctm: Matrix::identity(),
-                            fill_rule: FillRule::NonZeroWinding,
-                        };
-                        ctx.display_list.push(DisplayElement::Fill {
-                            path: device_path,
-                            params,
-                        });
+                        push_glyph_element(ctx, device_path, paint_type, stroke_width_dev);
                     }
                 }
                 advance_by_displacement(&mut cur_x, &mut cur_y, displacements, i, &mode);
@@ -3596,6 +3581,7 @@ fn render_show_displaced_composite(
             .unwrap_or(1000.0);
         let em_scale = Matrix::scale(1.0 / upm, 1.0 / upm);
         let combined_fm = type0_fm.multiply(&em_scale);
+        let (paint_type, stroke_width_dev) = get_paint_info(ctx, font_entity, &combined_fm, &ctm);
 
         // Get GlyphDirectory dict (PScript5.dll stores per-glyph data here
         // instead of in the sfnts glyf table)
@@ -3671,15 +3657,7 @@ fn render_show_displaced_composite(
                         if !glyf_path.is_empty() {
                             let user_path = transform_path(&glyf_path, &combined_fm, cur_x, cur_y);
                             let device_path = ctm_transform_path(&user_path, &ctm);
-                            let params = FillParams {
-                                color: ctx.gstate.color.clone(),
-                                ctm: Matrix::identity(),
-                                fill_rule: FillRule::NonZeroWinding,
-                            };
-                            ctx.display_list.push(DisplayElement::Fill {
-                                path: device_path,
-                                params,
-                            });
+                            push_glyph_element(ctx, device_path, paint_type, stroke_width_dev);
                         }
                     }
                 }
@@ -3783,6 +3761,67 @@ fn advance_by_displacement(
             }
         }
     }
+}
+
+/// Push a glyph path to the display list as either Fill (PaintType 0) or Stroke (PaintType 2).
+fn push_glyph_element(
+    ctx: &mut Context,
+    device_path: PsPath,
+    paint_type: i32,
+    stroke_width_device: f64,
+) {
+    if paint_type == 2 {
+        let params = StrokeParams {
+            color: ctx.gstate.color.clone(),
+            line_width: stroke_width_device,
+            line_cap: LineCap::Butt,
+            line_join: LineJoin::Round,
+            miter_limit: 10.0,
+            dash_pattern: DashPattern {
+                array: Vec::new(),
+                offset: 0.0,
+            },
+            ctm: Matrix::identity(),
+            stroke_adjust: false,
+        };
+        ctx.display_list.push(DisplayElement::Stroke {
+            path: device_path,
+            params,
+        });
+    } else {
+        let params = FillParams {
+            color: ctx.gstate.color.clone(),
+            ctm: Matrix::identity(),
+            fill_rule: FillRule::NonZeroWinding,
+        };
+        ctx.display_list.push(DisplayElement::Fill {
+            path: device_path,
+            params,
+        });
+    }
+}
+
+/// Read PaintType and StrokeWidth from a font dict, returning (paint_type, device_stroke_width).
+/// StrokeWidth is transformed from glyph space through font_matrix and CTM to device space.
+fn get_paint_info(ctx: &Context, font_dict: EntityId, font_matrix: &Matrix, ctm: &Matrix) -> (i32, f64) {
+    let paint_type = ctx
+        .dicts
+        .get(font_dict, &DictKey::Name(ctx.name_cache.n_paint_type))
+        .and_then(|o| o.as_i32())
+        .unwrap_or(0);
+    if paint_type != 2 {
+        return (0, 0.0);
+    }
+    let stroke_width = ctx
+        .dicts
+        .get(font_dict, &DictKey::Name(ctx.name_cache.n_stroke_width))
+        .and_then(|o| o.as_f64())
+        .unwrap_or(0.0);
+    // Transform StrokeWidth from glyph space → user space → device space
+    let (sw_user, _) = font_matrix.transform_delta(stroke_width, 0.0);
+    let ctm_scale = (ctm.a * ctm.a + ctm.b * ctm.b).sqrt();
+    let sw_device = (sw_user * ctm_scale).abs();
+    (2, sw_device)
 }
 
 /// Transform all points in a path through a matrix (e.g., CTM for user→device conversion).
