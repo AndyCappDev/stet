@@ -460,26 +460,93 @@ fn cmap_lookup_cid(ctx: &Context, cmap_entity: EntityId, char_code: i32) -> i32 
 
 /// Decode bytes through CMap and return (CID, font_index) pairs.
 fn decode_cmap_bytes(ctx: &Context, font_entity: EntityId, bytes: &[u8]) -> Vec<(i32, usize)> {
-    let (cmap_entity, byte_width, font_num) = match decode_cmap_characters(ctx, font_entity) {
-        Some(v) => v,
-        None => {
-            // No CMap — treat each byte as a CID (identity)
-            return bytes.iter().map(|&b| (b as i32, 0)).collect();
+    if let Some((cmap_entity, byte_width, font_num)) =
+        decode_cmap_characters(ctx, font_entity)
+    {
+        // CMap-based decoding
+        let mut result = Vec::new();
+        let mut pos = 0;
+        while pos + byte_width <= bytes.len() {
+            let mut char_code: i32 = 0;
+            for i in 0..byte_width {
+                char_code = (char_code << 8) | (bytes[pos + i] as i32);
+            }
+            let cid = cmap_lookup_cid(ctx, cmap_entity, char_code);
+            result.push((cid, font_num));
+            pos += byte_width;
         }
-    };
-
-    let mut result = Vec::new();
-    let mut pos = 0;
-    while pos + byte_width <= bytes.len() {
-        let mut char_code: i32 = 0;
-        for i in 0..byte_width {
-            char_code = (char_code << 8) | (bytes[pos + i] as i32);
-        }
-        let cid = cmap_lookup_cid(ctx, cmap_entity, char_code);
-        result.push((cid, font_num));
-        pos += byte_width;
+        return result;
     }
-    result
+
+    // Check FMapType for non-CMap composite fonts
+    let fmap_name = ctx.names.find(b"FMapType");
+    let fmap_type = fmap_name
+        .and_then(|id| ctx.dicts.get(font_entity, &DictKey::Name(id)))
+        .and_then(|obj| obj.as_i32());
+
+    match fmap_type {
+        Some(2) | Some(5) => {
+            // FMapType 2/5: 2-byte encoding (high byte = sub-font index, low byte = char code)
+            let mut result = Vec::new();
+            let mut pos = 0;
+            while pos + 2 <= bytes.len() {
+                let font_idx = bytes[pos] as usize;
+                let char_code = bytes[pos + 1] as i32;
+                result.push((char_code, font_idx));
+                pos += 2;
+            }
+            result
+        }
+        _ => {
+            // No CMap, no FMapType — treat each byte as a CID (identity)
+            bytes.iter().map(|&b| (b as i32, 0)).collect()
+        }
+    }
+}
+
+/// Get the character count for a string with the current font.
+/// For Type 0 composite fonts, characters may be multi-byte (via CMap or FMapType).
+/// For all other font types, character count equals byte count.
+fn get_char_count(ctx: &Context, bytes: &[u8]) -> usize {
+    let font_obj = match ctx.gstate.current_font {
+        Some(f) => f,
+        None => return bytes.len(),
+    };
+    let font_entity = match font_obj.value {
+        PsValue::Dict(e) => e,
+        _ => return bytes.len(),
+    };
+    let font_type = ctx
+        .dicts
+        .get(font_entity, &DictKey::Name(ctx.name_cache.n_font_type))
+        .and_then(|obj| obj.as_i32())
+        .unwrap_or(1);
+    if font_type == 0 {
+        get_type0_byte_width(ctx, font_entity)
+            .map(|bw| bytes.len() / bw)
+            .unwrap_or(bytes.len())
+    } else {
+        bytes.len()
+    }
+}
+
+/// Get the byte width per character for a Type 0 composite font.
+/// Checks CMap CodeSpaceRange first, then FMapType (2 = 2-byte).
+fn get_type0_byte_width(ctx: &Context, font_entity: EntityId) -> Option<usize> {
+    // Try CMap-based byte width first
+    if let Some((_, byte_width, _)) = decode_cmap_characters(ctx, font_entity) {
+        return Some(byte_width);
+    }
+    // FMapType 2 = 2-byte encoding (high byte = sub-font index, low byte = char code)
+    let fmap_name = ctx.names.find(b"FMapType")?;
+    let fmap_type = ctx
+        .dicts
+        .get(font_entity, &DictKey::Name(fmap_name))?
+        .as_i32()?;
+    match fmap_type {
+        2 | 5 => Some(2), // FMapType 2 (8/8 mapping) and 5 (escape mapping) use 2 bytes
+        _ => None,
+    }
 }
 
 /// `xshow`: string numarray → —
@@ -505,12 +572,13 @@ pub fn op_xshow(ctx: &mut Context) -> Result<(), PsError> {
         return Err(PsError::NoCurrentPoint);
     }
 
+    let bytes = ctx.strings.get(str_entity, str_start, str_len).to_vec();
+    let char_count = get_char_count(ctx, &bytes);
+
     // xshow needs one displacement per character
-    if displacements.len() < str_len as usize {
+    if displacements.len() < char_count {
         return Err(PsError::RangeCheck);
     }
-
-    let bytes = ctx.strings.get(str_entity, str_start, str_len).to_vec();
 
     ctx.o_stack.pop()?;
     ctx.o_stack.pop()?;
@@ -542,12 +610,13 @@ pub fn op_yshow(ctx: &mut Context) -> Result<(), PsError> {
         return Err(PsError::NoCurrentPoint);
     }
 
+    let bytes = ctx.strings.get(str_entity, str_start, str_len).to_vec();
+    let char_count = get_char_count(ctx, &bytes);
+
     // yshow needs one displacement per character
-    if displacements.len() < str_len as usize {
+    if displacements.len() < char_count {
         return Err(PsError::RangeCheck);
     }
-
-    let bytes = ctx.strings.get(str_entity, str_start, str_len).to_vec();
 
     ctx.o_stack.pop()?;
     ctx.o_stack.pop()?;
@@ -579,12 +648,13 @@ pub fn op_xyshow(ctx: &mut Context) -> Result<(), PsError> {
         return Err(PsError::NoCurrentPoint);
     }
 
+    let bytes = ctx.strings.get(str_entity, str_start, str_len).to_vec();
+    let char_count = get_char_count(ctx, &bytes);
+
     // xyshow needs two displacements (x,y) per character
-    if displacements.len() < (str_len as usize) * 2 {
+    if displacements.len() < char_count * 2 {
         return Err(PsError::RangeCheck);
     }
-
-    let bytes = ctx.strings.get(str_entity, str_start, str_len).to_vec();
 
     ctx.o_stack.pop()?;
     ctx.o_stack.pop()?;
@@ -863,6 +933,88 @@ fn get_font_info(ctx: &Context) -> Result<FontInfo, PsError> {
         .unwrap_or(4) as usize;
 
     // Metrics dict (optional, used by dvips for width overrides)
+    let metrics_entity = ctx
+        .dicts
+        .get(font_entity, &DictKey::Name(ctx.name_cache.n_metrics))
+        .and_then(|obj| match obj.value {
+            PsValue::Dict(e) => Some(e),
+            _ => None,
+        });
+
+    Ok(FontInfo {
+        font_entity,
+        font_matrix,
+        encoding_entity,
+        charstrings_entity,
+        subrs_entity,
+        subrs_len,
+        len_iv,
+        metrics_entity,
+    })
+}
+
+/// Extract font info from an explicit font entity (for composite font descendants).
+fn get_font_info_for(ctx: &Context, font_entity: EntityId) -> Result<FontInfo, PsError> {
+    let fm_obj = ctx
+        .dicts
+        .get(font_entity, &DictKey::Name(ctx.name_cache.n_font_matrix))
+        .ok_or(PsError::InvalidFont)?;
+    let (fm_e, fm_s, fm_l) = match fm_obj.value {
+        PsValue::Array { entity, start, len } => (entity, start, len),
+        _ => return Err(PsError::InvalidFont),
+    };
+    let fm_elems = ctx.arrays.get(fm_e, fm_s, fm_l);
+    let font_matrix = Matrix::new(
+        fm_elems[0].as_f64().ok_or(PsError::InvalidFont)?,
+        fm_elems[1].as_f64().ok_or(PsError::InvalidFont)?,
+        fm_elems[2].as_f64().ok_or(PsError::InvalidFont)?,
+        fm_elems[3].as_f64().ok_or(PsError::InvalidFont)?,
+        fm_elems[4].as_f64().ok_or(PsError::InvalidFont)?,
+        fm_elems[5].as_f64().ok_or(PsError::InvalidFont)?,
+    );
+
+    let enc_obj = ctx
+        .dicts
+        .get(font_entity, &DictKey::Name(ctx.name_cache.n_encoding))
+        .ok_or(PsError::InvalidFont)?;
+    let encoding_entity = match enc_obj.value {
+        PsValue::Array { entity, .. } => entity,
+        _ => return Err(PsError::InvalidFont),
+    };
+
+    let cs_obj = ctx
+        .dicts
+        .get(font_entity, &DictKey::Name(ctx.name_cache.n_char_strings))
+        .ok_or(PsError::InvalidFont)?;
+    let charstrings_entity = match cs_obj.value {
+        PsValue::Dict(e) => e,
+        _ => return Err(PsError::InvalidFont),
+    };
+
+    let private_entity = ctx
+        .dicts
+        .get(font_entity, &DictKey::Name(ctx.name_cache.n_private))
+        .and_then(|obj| match obj.value {
+            PsValue::Dict(e) => Some(e),
+            _ => None,
+        });
+
+    let (subrs_entity, subrs_len) = private_entity
+        .and_then(|pe| ctx.dicts.get(pe, &DictKey::Name(ctx.name_cache.n_subrs)))
+        .and_then(|obj| match obj.value {
+            PsValue::Array { entity, len, .. } => Some((entity, len)),
+            _ => None,
+        })
+        .unwrap_or((EntityId(0), 0));
+
+    let len_iv = private_entity
+        .and_then(|pe| {
+            ctx.dicts
+                .get(pe, &DictKey::Name(ctx.name_cache.n_len_iv))
+                .and_then(|v| v.as_i32())
+        })
+        .unwrap_or(4) as usize;
+
     let metrics_entity = ctx
         .dicts
         .get(font_entity, &DictKey::Name(ctx.name_cache.n_metrics))
@@ -1588,9 +1740,34 @@ fn render_show_composite(
     let ctm = ctx.gstate.ctm;
 
     if font_type == 0 {
-        // --- Type 0 composite font with CIDFont descendant ---
+        // --- Type 0 composite font ---
 
-        // Get CIDFont from FDepVector[0]
+        // Check if this is a CMap-based or FMapType-based font
+        let has_cmap = ctx
+            .names
+            .find(b"CMap")
+            .and_then(|id| ctx.dicts.get(font_entity, &DictKey::Name(id)))
+            .is_some();
+
+        if !has_cmap {
+            // FMapType-based Type 0 font (legacy, Type 1 descendants)
+            return render_fmap_type0(
+                ctx,
+                font_entity,
+                bytes,
+                &type0_fm,
+                &mut cur_x,
+                &mut cur_y,
+                extra_ax,
+                extra_ay,
+                width_char,
+                cx,
+                cy,
+                &ctm,
+            );
+        }
+
+        // CMap-based Type 0 font (CIDFont descendants)
         let fdep_name = ctx.names.intern(b"FDepVector");
         let fdep_obj = ctx
             .dicts
@@ -3025,6 +3202,209 @@ fn render_show_displaced_type2(
     Ok(())
 }
 
+/// Render an FMapType-based Type 0 composite font (non-displaced).
+/// Descendant fonts are regular Type 1 fonts, not CIDFonts.
+#[allow(clippy::too_many_arguments)]
+fn render_fmap_type0(
+    ctx: &mut Context,
+    font_entity: EntityId,
+    bytes: &[u8],
+    type0_fm: &Matrix,
+    cur_x: &mut f64,
+    cur_y: &mut f64,
+    extra_ax: f64,
+    extra_ay: f64,
+    width_char: i32,
+    cx: f64,
+    cy: f64,
+    ctm: &Matrix,
+) -> Result<(), PsError> {
+    let fdep_name = ctx.names.intern(b"FDepVector");
+    let fdep_obj = ctx
+        .dicts
+        .get(font_entity, &DictKey::Name(fdep_name))
+        .ok_or(PsError::InvalidFont)?;
+    let (fdep_entity, fdep_start, fdep_len) = match fdep_obj.value {
+        PsValue::Array { entity, start, len } => (entity, start, len),
+        _ => return Err(PsError::InvalidFont),
+    };
+
+    let chars = decode_cmap_bytes(ctx, font_entity, bytes);
+
+    for (char_code, font_idx) in &chars {
+        // Get descendant font from FDepVector
+        let idx = fdep_start + (*font_idx as u32).min(fdep_len.saturating_sub(1));
+        let desc_obj = ctx.arrays.get_element(fdep_entity, idx);
+        let desc_entity = match desc_obj.value {
+            PsValue::Dict(e) => e,
+            _ => continue,
+        };
+
+        let info = match get_font_info_for(ctx, desc_entity) {
+            Ok(i) => i,
+            Err(_) => continue,
+        };
+        let subrs = get_subrs(ctx, &info);
+
+        // Compose descendant FontMatrix × Type 0 FontMatrix
+        let composed_fm = info.font_matrix.multiply(type0_fm);
+
+        // Look up glyph name from descendant's encoding
+        let glyph_name_obj = ctx.arrays.get_element(info.encoding_entity, *char_code as u32);
+        let glyph_name_id = match glyph_name_obj.value {
+            PsValue::Name(id) => id,
+            _ => {
+                // No glyph — advance by extra displacements only
+                *cur_x += extra_ax;
+                *cur_y += extra_ay;
+                continue;
+            }
+        };
+
+        // Render glyph
+        let cs_key = DictKey::Name(glyph_name_id);
+        if let Some(cs_obj) = ctx.dicts.get(info.charstrings_entity, &cs_key)
+            && let PsValue::String {
+                entity: cs_entity,
+                start: cs_start,
+                len: cs_len,
+            } = cs_obj.value
+        {
+            let cs_bytes = ctx.strings.get(cs_entity, cs_start, cs_len).to_vec();
+            if let Ok(result) =
+                charstring::execute_charstring(&cs_bytes, &subrs, info.len_iv, false)
+            {
+                if !result.path.is_empty() {
+                    let user_path = transform_path(&result.path, &composed_fm, *cur_x, *cur_y);
+                    let device_path = ctm_transform_path(&user_path, ctm);
+                    let params = FillParams {
+                        color: ctx.gstate.color.clone(),
+                        ctm: Matrix::identity(),
+                        fill_rule: FillRule::NonZeroWinding,
+                    };
+                    ctx.display_list.push(DisplayElement::Fill {
+                        path: device_path,
+                        params,
+                    });
+                }
+
+                // Advance by glyph width through composed FontMatrix
+                let (wx, wy) = composed_fm.transform_delta(result.width_x, result.width_y);
+
+                // Apply width_char extra displacement
+                let (mut ax, mut ay) = (extra_ax, extra_ay);
+                if *char_code == width_char {
+                    ax += cx;
+                    ay += cy;
+                }
+
+                *cur_x += wx + ax;
+                *cur_y += wy + ay;
+            }
+        }
+    }
+
+    let (dev_x, dev_y) = ctm.transform_point(*cur_x, *cur_y);
+    ctx.gstate.current_point = Some((dev_x, dev_y));
+    Ok(())
+}
+
+/// Render an FMapType-based Type 0 composite font with per-character displacements.
+#[allow(clippy::too_many_arguments)]
+fn render_fmap_type0_displaced(
+    ctx: &mut Context,
+    font_entity: EntityId,
+    bytes: &[u8],
+    displacements: &[f64],
+    mode: DisplacementMode,
+    type0_fm: &Matrix,
+    cur_x: &mut f64,
+    cur_y: &mut f64,
+    ctm: &Matrix,
+) -> Result<(), PsError> {
+    let fdep_name = ctx.names.intern(b"FDepVector");
+    let fdep_obj = ctx
+        .dicts
+        .get(font_entity, &DictKey::Name(fdep_name))
+        .ok_or(PsError::InvalidFont)?;
+    let (fdep_entity, fdep_start, fdep_len) = match fdep_obj.value {
+        PsValue::Array { entity, start, len } => (entity, start, len),
+        _ => return Err(PsError::InvalidFont),
+    };
+
+    let chars = decode_cmap_bytes(ctx, font_entity, bytes);
+
+    for (i, (char_code, font_idx)) in chars.iter().enumerate() {
+        // Get descendant font from FDepVector
+        let idx = fdep_start + (*font_idx as u32).min(fdep_len.saturating_sub(1));
+        let desc_obj = ctx.arrays.get_element(fdep_entity, idx);
+        let desc_entity = match desc_obj.value {
+            PsValue::Dict(e) => e,
+            _ => {
+                advance_by_displacement(cur_x, cur_y, displacements, i, &mode);
+                continue;
+            }
+        };
+
+        let info = match get_font_info_for(ctx, desc_entity) {
+            Ok(i) => i,
+            Err(_) => {
+                advance_by_displacement(cur_x, cur_y, displacements, i, &mode);
+                continue;
+            }
+        };
+        let subrs = get_subrs(ctx, &info);
+
+        // Compose descendant FontMatrix × Type 0 FontMatrix
+        let composed_fm = info.font_matrix.multiply(type0_fm);
+
+        // Look up glyph name from descendant's encoding
+        let glyph_name_obj = ctx.arrays.get_element(info.encoding_entity, *char_code as u32);
+        let glyph_name_id = match glyph_name_obj.value {
+            PsValue::Name(id) => id,
+            _ => {
+                advance_by_displacement(cur_x, cur_y, displacements, i, &mode);
+                continue;
+            }
+        };
+
+        // Render glyph
+        let cs_key = DictKey::Name(glyph_name_id);
+        if let Some(cs_obj) = ctx.dicts.get(info.charstrings_entity, &cs_key)
+            && let PsValue::String {
+                entity: cs_entity,
+                start: cs_start,
+                len: cs_len,
+            } = cs_obj.value
+        {
+            let cs_bytes = ctx.strings.get(cs_entity, cs_start, cs_len).to_vec();
+            if let Ok(result) =
+                charstring::execute_charstring(&cs_bytes, &subrs, info.len_iv, false)
+                && !result.path.is_empty()
+            {
+                let user_path = transform_path(&result.path, &composed_fm, *cur_x, *cur_y);
+                let device_path = ctm_transform_path(&user_path, ctm);
+                let params = FillParams {
+                    color: ctx.gstate.color.clone(),
+                    ctm: Matrix::identity(),
+                    fill_rule: FillRule::NonZeroWinding,
+                };
+                ctx.display_list.push(DisplayElement::Fill {
+                    path: device_path,
+                    params,
+                });
+            }
+        }
+
+        // Advance by custom displacement (overrides glyph width)
+        advance_by_displacement(cur_x, cur_y, displacements, i, &mode);
+    }
+
+    let (dev_x, dev_y) = ctm.transform_point(*cur_x, *cur_y);
+    ctx.gstate.current_point = Some((dev_x, dev_y));
+    Ok(())
+}
+
 /// Like `render_show_displaced`, but for Type 0 (composite) and Type 42 (TrueType) fonts.
 fn render_show_displaced_composite(
     ctx: &mut Context,
@@ -3047,7 +3427,22 @@ fn render_show_displaced_composite(
     let ctm = ctx.gstate.ctm;
 
     if font_type == 0 {
-        // Type 0 composite: decode CIDs and render each
+        // Check if this is a CMap-based or FMapType-based font
+        let has_cmap = ctx
+            .names
+            .find(b"CMap")
+            .and_then(|id| ctx.dicts.get(font_entity, &DictKey::Name(id)))
+            .is_some();
+
+        if !has_cmap {
+            // FMapType-based Type 0 font (legacy, Type 1 descendants)
+            return render_fmap_type0_displaced(
+                ctx, font_entity, bytes, displacements, mode, &type0_fm,
+                &mut cur_x, &mut cur_y, &ctm,
+            );
+        }
+
+        // CMap-based Type 0 font (CIDFont descendants)
         let fdep_name = ctx.names.intern(b"FDepVector");
         let fdep_obj = ctx
             .dicts

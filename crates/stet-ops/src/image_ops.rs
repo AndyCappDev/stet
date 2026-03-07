@@ -1336,6 +1336,84 @@ fn samples_to_rgba(
         }
     }
 
+    // CIE-based image conversion: run each pixel through CIE pipeline
+    let cie_color_space = ctx.gstate.color_space.clone();
+    match &cie_color_space {
+        ColorSpace::CIEBasedABC { params, .. } => {
+            let params = params.clone();
+            for i in 0..pixel_count {
+                let si = i * 3;
+                let pi = i * 4;
+                let mut comp = [0.0f64; 3];
+                for c in 0..3 {
+                    let raw = samples.get(si + c).copied().unwrap_or(0) as f64 / 255.0;
+                    let d_min = decode.get(c * 2).copied().unwrap_or(0.0);
+                    let d_max = decode.get(c * 2 + 1).copied().unwrap_or(1.0);
+                    comp[c] = (d_min + raw * (d_max - d_min)).clamp(0.0, 1.0);
+                }
+                let color = DeviceColor::from_cie_abc(comp[0], comp[1], comp[2], &params);
+                rgba[pi] = (color.r * 255.0).round().clamp(0.0, 255.0) as u8;
+                rgba[pi + 1] = (color.g * 255.0).round().clamp(0.0, 255.0) as u8;
+                rgba[pi + 2] = (color.b * 255.0).round().clamp(0.0, 255.0) as u8;
+            }
+            return rgba;
+        }
+        ColorSpace::CIEBasedA { params, .. } => {
+            let params = params.clone();
+            for i in 0..pixel_count {
+                let pi = i * 4;
+                let raw = samples.get(i).copied().unwrap_or(0) as f64 / 255.0;
+                let d_min = decode.first().copied().unwrap_or(0.0);
+                let d_max = decode.get(1).copied().unwrap_or(1.0);
+                let val = (d_min + raw * (d_max - d_min)).clamp(0.0, 1.0);
+                let color = DeviceColor::from_cie_a(val, &params);
+                rgba[pi] = (color.r * 255.0).round().clamp(0.0, 255.0) as u8;
+                rgba[pi + 1] = (color.g * 255.0).round().clamp(0.0, 255.0) as u8;
+                rgba[pi + 2] = (color.b * 255.0).round().clamp(0.0, 255.0) as u8;
+            }
+            return rgba;
+        }
+        ColorSpace::CIEBasedDEF { params, .. } => {
+            let params = params.clone();
+            for i in 0..pixel_count {
+                let si = i * 3;
+                let pi = i * 4;
+                let mut comp = [0.0f64; 3];
+                for c in 0..3 {
+                    let raw = samples.get(si + c).copied().unwrap_or(0) as f64 / 255.0;
+                    let d_min = decode.get(c * 2).copied().unwrap_or(0.0);
+                    let d_max = decode.get(c * 2 + 1).copied().unwrap_or(1.0);
+                    comp[c] = (d_min + raw * (d_max - d_min)).clamp(0.0, 1.0);
+                }
+                let color = DeviceColor::from_cie_def(comp[0], comp[1], comp[2], &params);
+                rgba[pi] = (color.r * 255.0).round().clamp(0.0, 255.0) as u8;
+                rgba[pi + 1] = (color.g * 255.0).round().clamp(0.0, 255.0) as u8;
+                rgba[pi + 2] = (color.b * 255.0).round().clamp(0.0, 255.0) as u8;
+            }
+            return rgba;
+        }
+        ColorSpace::CIEBasedDEFG { params, .. } => {
+            let params = params.clone();
+            for i in 0..pixel_count {
+                let si = i * 4;
+                let pi = i * 4;
+                let mut comp = [0.0f64; 4];
+                for c in 0..4 {
+                    let raw = samples.get(si + c).copied().unwrap_or(0) as f64 / 255.0;
+                    let d_min = decode.get(c * 2).copied().unwrap_or(0.0);
+                    let d_max = decode.get(c * 2 + 1).copied().unwrap_or(1.0);
+                    comp[c] = (d_min + raw * (d_max - d_min)).clamp(0.0, 1.0);
+                }
+                let color = DeviceColor::from_cie_defg(comp[0], comp[1], comp[2], comp[3], &params);
+                rgba[pi] = (color.r * 255.0).round().clamp(0.0, 255.0) as u8;
+                rgba[pi + 1] = (color.g * 255.0).round().clamp(0.0, 255.0) as u8;
+                rgba[pi + 2] = (color.b * 255.0).round().clamp(0.0, 255.0) as u8;
+            }
+            return rgba;
+        }
+        _ => {}
+    }
+
     for i in 0..pixel_count {
         let si = i * ncomp as usize;
         let pi = i * 4;

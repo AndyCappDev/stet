@@ -1471,22 +1471,26 @@ pub fn precompute_cie_decode_tables(
         } => {
             let mut p = (*params).clone();
 
-            // Pre-evaluate DecodeABC
+            // Pre-evaluate DecodeABC over the RangeABC range
             if let Some(decode_abc_procs) = get_cie_decode_procs(ctx, dict_entity, b"DecodeABC", 3)
             {
                 let mut tables: [Vec<f64>; 3] = [Vec::new(), Vec::new(), Vec::new()];
                 for (ch, proc) in decode_abc_procs.iter().enumerate() {
-                    tables[ch] = eval_decode_table(ctx, *proc, 256)?;
+                    let lo = p.range_abc[ch * 2];
+                    let hi = p.range_abc[ch * 2 + 1];
+                    tables[ch] = eval_decode_table_range(ctx, *proc, 256, lo, hi)?;
                 }
                 p.decode_abc = Some(tables);
             }
 
-            // Pre-evaluate DecodeLMN
+            // Pre-evaluate DecodeLMN over the RangeLMN range
             if let Some(decode_lmn_procs) = get_cie_decode_procs(ctx, dict_entity, b"DecodeLMN", 3)
             {
                 let mut tables: [Vec<f64>; 3] = [Vec::new(), Vec::new(), Vec::new()];
                 for (ch, proc) in decode_lmn_procs.iter().enumerate() {
-                    tables[ch] = eval_decode_table(ctx, *proc, 256)?;
+                    let lo = p.range_lmn[ch * 2];
+                    let hi = p.range_lmn[ch * 2 + 1];
+                    tables[ch] = eval_decode_table_range(ctx, *proc, 256, lo, hi)?;
                 }
                 p.decode_lmn = Some(tables);
             }
@@ -1502,17 +1506,21 @@ pub fn precompute_cie_decode_tables(
         } => {
             let mut p = (*params).clone();
 
-            // Pre-evaluate DecodeA (single procedure, not array)
+            // Pre-evaluate DecodeA over RangeA
             if let Some(decode_a_proc) = get_cie_decode_proc_single(ctx, dict_entity, b"DecodeA") {
-                p.decode_a = Some(eval_decode_table(ctx, decode_a_proc, 256)?);
+                p.decode_a = Some(eval_decode_table_range(
+                    ctx, decode_a_proc, 256, p.range_a[0], p.range_a[1],
+                )?);
             }
 
-            // Pre-evaluate DecodeLMN
+            // Pre-evaluate DecodeLMN over RangeLMN
             if let Some(decode_lmn_procs) = get_cie_decode_procs(ctx, dict_entity, b"DecodeLMN", 3)
             {
                 let mut tables: [Vec<f64>; 3] = [Vec::new(), Vec::new(), Vec::new()];
                 for (ch, proc) in decode_lmn_procs.iter().enumerate() {
-                    tables[ch] = eval_decode_table(ctx, *proc, 256)?;
+                    let lo = p.range_lmn[ch * 2];
+                    let hi = p.range_lmn[ch * 2 + 1];
+                    tables[ch] = eval_decode_table_range(ctx, *proc, 256, lo, hi)?;
                 }
                 p.decode_lmn = Some(tables);
             }
@@ -1588,10 +1596,18 @@ fn get_cie_decode_proc_single(
 }
 
 /// Evaluate a decode procedure at N evenly-spaced sample points in [0,1].
-fn eval_decode_table(ctx: &mut Context, proc: PsObject, n: usize) -> Result<Vec<f64>, PsError> {
+/// Evaluate a PostScript decode procedure at `n` evenly spaced points spanning `[lo, hi]`.
+fn eval_decode_table_range(
+    ctx: &mut Context,
+    proc: PsObject,
+    n: usize,
+    lo: f64,
+    hi: f64,
+) -> Result<Vec<f64>, PsError> {
     let mut table = Vec::with_capacity(n);
     for i in 0..n {
-        let input = i as f64 / (n - 1) as f64;
+        let t = i as f64 / (n - 1) as f64;
+        let input = lo + t * (hi - lo);
         ctx.o_stack.push(PsObject::real(input))?;
         ctx.exec_sync(proc)?;
         let result = if !ctx.o_stack.is_empty() {
@@ -1658,19 +1674,23 @@ fn precompute_cie_def_table(
 
     // Build CIE ABC params for conversion (with decode tables)
     let abc_params = extract_cie_abc_params(ctx, dict_entity);
-    // Pre-evaluate DecodeABC and DecodeLMN if present
+    // Pre-evaluate DecodeABC and DecodeLMN over their respective ranges
     let mut abc_params = abc_params;
     if let Some(procs) = get_cie_decode_procs(ctx, dict_entity, b"DecodeABC", 3) {
         let mut tables: [Vec<f64>; 3] = [Vec::new(), Vec::new(), Vec::new()];
         for (ch, proc) in procs.iter().enumerate() {
-            tables[ch] = eval_decode_table(ctx, *proc, 256)?;
+            let lo = abc_params.range_abc[ch * 2];
+            let hi = abc_params.range_abc[ch * 2 + 1];
+            tables[ch] = eval_decode_table_range(ctx, *proc, 256, lo, hi)?;
         }
         abc_params.decode_abc = Some(tables);
     }
     if let Some(procs) = get_cie_decode_procs(ctx, dict_entity, b"DecodeLMN", 3) {
         let mut tables: [Vec<f64>; 3] = [Vec::new(), Vec::new(), Vec::new()];
         for (ch, proc) in procs.iter().enumerate() {
-            tables[ch] = eval_decode_table(ctx, *proc, 256)?;
+            let lo = abc_params.range_lmn[ch * 2];
+            let hi = abc_params.range_lmn[ch * 2 + 1];
+            tables[ch] = eval_decode_table_range(ctx, *proc, 256, lo, hi)?;
         }
         abc_params.decode_lmn = Some(tables);
     }
@@ -1794,14 +1814,18 @@ fn precompute_cie_defg_table(
     if let Some(procs) = get_cie_decode_procs(ctx, dict_entity, b"DecodeABC", 3) {
         let mut tables: [Vec<f64>; 3] = [Vec::new(), Vec::new(), Vec::new()];
         for (ch, proc) in procs.iter().enumerate() {
-            tables[ch] = eval_decode_table(ctx, *proc, 256)?;
+            let lo = abc_params.range_abc[ch * 2];
+            let hi = abc_params.range_abc[ch * 2 + 1];
+            tables[ch] = eval_decode_table_range(ctx, *proc, 256, lo, hi)?;
         }
         abc_params.decode_abc = Some(tables);
     }
     if let Some(procs) = get_cie_decode_procs(ctx, dict_entity, b"DecodeLMN", 3) {
         let mut tables: [Vec<f64>; 3] = [Vec::new(), Vec::new(), Vec::new()];
         for (ch, proc) in procs.iter().enumerate() {
-            tables[ch] = eval_decode_table(ctx, *proc, 256)?;
+            let lo = abc_params.range_lmn[ch * 2];
+            let hi = abc_params.range_lmn[ch * 2 + 1];
+            tables[ch] = eval_decode_table_range(ctx, *proc, 256, lo, hi)?;
         }
         abc_params.decode_lmn = Some(tables);
     }
