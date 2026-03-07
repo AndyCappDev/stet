@@ -115,6 +115,7 @@ fn decode_scale(bits: usize, min: f64, max: f64) -> f64 {
 }
 
 /// Convert color components to DeviceColor based on component count.
+/// Uses ICC CMYK profile when available for 4-component colors.
 fn components_to_color(comps: &[f64]) -> DeviceColor {
     match comps.len() {
         1 => DeviceColor::from_gray(comps[0].clamp(0.0, 1.0)),

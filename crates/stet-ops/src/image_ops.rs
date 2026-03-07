@@ -1204,7 +1204,7 @@ fn unpack_samples(
 
 /// Convert 8-bit samples to RGBA, applying decode array and color space conversion.
 fn samples_to_rgba(
-    ctx: &Context,
+    ctx: &mut Context,
     samples: &[u8],
     width: u32,
     height: u32,
@@ -1249,7 +1249,7 @@ fn samples_to_rgba(
                     let m = lookup.get(offset + 1).copied().unwrap_or(0) as f64 / 255.0;
                     let y = lookup.get(offset + 2).copied().unwrap_or(0) as f64 / 255.0;
                     let k = lookup.get(offset + 3).copied().unwrap_or(0) as f64 / 255.0;
-                    DeviceColor::from_cmyk(c, m, y, k)
+                    DeviceColor::from_cmyk_icc(c, m, y, k, &mut ctx.icc_cache)
                 }
                 _ => DeviceColor::from_gray(0.0),
             };
@@ -1259,6 +1259,81 @@ fn samples_to_rgba(
             rgba[pi + 2] = (color.b * 255.0).round().clamp(0.0, 255.0) as u8;
         }
         return rgba;
+    }
+
+    // ICC-based bulk image conversion
+    if let ColorSpace::ICCBased {
+        profile_hash: Some(ref hash),
+        ..
+    } = ctx.gstate.color_space
+    {
+        let hash = *hash;
+        // Apply decode to get 8-bit samples, then bulk-convert
+        let decoded_samples = if is_identity_decode(decode, ncomp) {
+            // Fast path: decode is identity [0 1 0 1 ...], use raw samples
+            None
+        } else {
+            // Apply decode mapping
+            let mut decoded = vec![0u8; pixel_count * ncomp as usize];
+            for i in 0..pixel_count {
+                for c in 0..ncomp as usize {
+                    let raw = samples.get(i * ncomp as usize + c).copied().unwrap_or(0) as f64
+                        / 255.0;
+                    let d_min = decode.get(c * 2).copied().unwrap_or(0.0);
+                    let d_max = decode.get(c * 2 + 1).copied().unwrap_or(1.0);
+                    let val = d_min + raw * (d_max - d_min);
+                    decoded[i * ncomp as usize + c] =
+                        (val.clamp(0.0, 1.0) * 255.0).round() as u8;
+                }
+            }
+            Some(decoded)
+        };
+        let src = decoded_samples.as_deref().unwrap_or(samples);
+        if let Some(rgb_data) = ctx.icc_cache.convert_image_8bit(&hash, src, pixel_count) {
+            // Convert RGB to RGBA
+            for i in 0..pixel_count {
+                let pi = i * 4;
+                let ri = i * 3;
+                rgba[pi] = rgb_data[ri];
+                rgba[pi + 1] = rgb_data[ri + 1];
+                rgba[pi + 2] = rgb_data[ri + 2];
+                // alpha stays 255
+            }
+            return rgba;
+        }
+    }
+
+    // System CMYK profile bulk conversion for DeviceCMYK images
+    if matches!(ctx.gstate.color_space, ColorSpace::DeviceCMYK) && ncomp == 4 {
+        if let Some(hash) = ctx.icc_cache.default_cmyk_hash().copied() {
+            let decoded_samples = if is_identity_decode(decode, ncomp) {
+                None
+            } else {
+                let mut decoded = vec![0u8; pixel_count * 4];
+                for i in 0..pixel_count {
+                    for c in 0..4usize {
+                        let raw =
+                            samples.get(i * 4 + c).copied().unwrap_or(0) as f64 / 255.0;
+                        let d_min = decode.get(c * 2).copied().unwrap_or(0.0);
+                        let d_max = decode.get(c * 2 + 1).copied().unwrap_or(1.0);
+                        let val = d_min + raw * (d_max - d_min);
+                        decoded[i * 4 + c] = (val.clamp(0.0, 1.0) * 255.0).round() as u8;
+                    }
+                }
+                Some(decoded)
+            };
+            let src = decoded_samples.as_deref().unwrap_or(samples);
+            if let Some(rgb_data) = ctx.icc_cache.convert_image_8bit(&hash, src, pixel_count) {
+                for i in 0..pixel_count {
+                    let pi = i * 4;
+                    let ri = i * 3;
+                    rgba[pi] = rgb_data[ri];
+                    rgba[pi + 1] = rgb_data[ri + 1];
+                    rgba[pi + 2] = rgb_data[ri + 2];
+                }
+                return rgba;
+            }
+        }
     }
 
     for i in 0..pixel_count {
@@ -1296,7 +1371,7 @@ fn samples_to_rgba(
                     let d_max = decode.get(c * 2 + 1).copied().unwrap_or(1.0);
                     *val = (d_min + raw * (d_max - d_min)).clamp(0.0, 1.0);
                 }
-                let color = DeviceColor::from_cmyk(cmyk[0], cmyk[1], cmyk[2], cmyk[3]);
+                let color = DeviceColor::from_cmyk_icc(cmyk[0], cmyk[1], cmyk[2], cmyk[3], &mut ctx.icc_cache);
                 rgba[pi] = (color.r * 255.0).round().clamp(0.0, 255.0) as u8;
                 rgba[pi + 1] = (color.g * 255.0).round().clamp(0.0, 255.0) as u8;
                 rgba[pi + 2] = (color.b * 255.0).round().clamp(0.0, 255.0) as u8;
@@ -1306,6 +1381,21 @@ fn samples_to_rgba(
     }
 
     rgba
+}
+
+/// Check if a decode array is the identity mapping [0 1 0 1 ...].
+fn is_identity_decode(decode: &[f64], ncomp: u32) -> bool {
+    if decode.len() != (ncomp as usize * 2) {
+        return decode.is_empty();
+    }
+    for c in 0..ncomp as usize {
+        if (decode[c * 2] - 0.0).abs() > f64::EPSILON
+            || (decode[c * 2 + 1] - 1.0).abs() > f64::EPSILON
+        {
+            return false;
+        }
+    }
+    true
 }
 
 /// Convert a 1-bit mask to RGBA using the current color.
@@ -1624,10 +1714,10 @@ mod tests {
 
     #[test]
     fn test_samples_to_rgba_gray() {
-        let ctx = stet_core::context::Context::new();
+        let mut ctx = stet_core::context::Context::new();
         let samples = vec![0, 128, 255];
         let decode = vec![0.0, 1.0];
-        let rgba = samples_to_rgba(&ctx, &samples, 3, 1, 1, &decode);
+        let rgba = samples_to_rgba(&mut ctx, &samples, 3, 1, 1, &decode);
         assert_eq!(rgba[0], 0); // R of pixel 0
         assert_eq!(rgba[4], 128); // R of pixel 1
         assert_eq!(rgba[8], 255); // R of pixel 2
@@ -1636,10 +1726,10 @@ mod tests {
 
     #[test]
     fn test_samples_to_rgba_rgb() {
-        let ctx = stet_core::context::Context::new();
+        let mut ctx = stet_core::context::Context::new();
         let samples = vec![255, 0, 0, 0, 255, 0]; // red, green
         let decode = vec![0.0, 1.0, 0.0, 1.0, 0.0, 1.0];
-        let rgba = samples_to_rgba(&ctx, &samples, 2, 1, 3, &decode);
+        let rgba = samples_to_rgba(&mut ctx, &samples, 2, 1, 3, &decode);
         assert_eq!(rgba[0], 255); // R
         assert_eq!(rgba[1], 0); // G
         assert_eq!(rgba[2], 0); // B

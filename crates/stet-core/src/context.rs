@@ -201,6 +201,9 @@ pub struct Context {
     // Internal dict (lazily created for `internaldict` operator)
     pub internaldict: Option<EntityId>,
 
+    // ICC color profile cache
+    pub icc_cache: crate::icc::IccCache,
+
     // Synchronous procedure execution (set by engine crate)
     pub exec_sync_fn: Option<ExecSyncFn>,
 
@@ -544,6 +547,7 @@ impl Context {
             user_params,
             system_params,
             internaldict: None,
+            icc_cache: crate::icc::IccCache::new(),
             exec_sync_fn: None,
             char_width: None,
             cshow_pending_cid: None,

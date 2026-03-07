@@ -34,6 +34,7 @@ fn main() {
     let mut dpi: Option<f64> = None;
     let mut threads: Option<usize> = None;
     let mut device_name: Option<String> = None;
+    let mut no_icc = false;
     let mut file_args: Vec<String> = Vec::new();
     let mut i = 1;
     while i < args.len() {
@@ -79,6 +80,11 @@ fn main() {
                     std::process::exit(1);
                 }
             }
+            "--no-icc" => {
+                no_icc = true;
+                i += 1;
+                continue;
+            }
             _ => {}
         }
         file_args.push(args[i].clone());
@@ -110,13 +116,13 @@ fn main() {
 
     match device.as_str() {
         "png" => {
-            run_png_mode(dpi, file_args);
+            run_png_mode(dpi, file_args, no_icc);
         }
         "null" => {
-            run_null_mode(dpi, file_args);
+            run_null_mode(dpi, file_args, no_icc);
         }
         #[cfg(feature = "viewer")]
-        "viewer" => run_viewer_mode(dpi, file_args),
+        "viewer" => run_viewer_mode(dpi, file_args, no_icc),
         #[cfg(not(feature = "viewer"))]
         "viewer" => {
             eprintln!("Error: viewer not available (built without 'viewer' feature)");
@@ -131,8 +137,8 @@ fn main() {
 }
 
 /// Run in PNG output mode (existing behavior).
-fn run_png_mode(dpi_override: Option<f64>, file_args: Vec<String>) {
-    let mut ctx = create_context();
+fn run_png_mode(dpi_override: Option<f64>, file_args: Vec<String>, no_icc: bool) {
+    let mut ctx = create_context(no_icc);
 
     // Register device factory (before setpagedevice)
     ctx.device_factory = Some(Box::new(|w, h| Box::new(SkiaDevice::new(w, h))));
@@ -147,10 +153,10 @@ fn run_png_mode(dpi_override: Option<f64>, file_args: Vec<String>) {
 /// Run in null device mode — no rendering output, no user interaction.
 ///
 /// Useful for running test suites and scripts that don't produce pages.
-fn run_null_mode(dpi_override: Option<f64>, file_args: Vec<String>) {
+fn run_null_mode(dpi_override: Option<f64>, file_args: Vec<String>, no_icc: bool) {
     use stet_core::device::NullDevice;
 
-    let mut ctx = create_context();
+    let mut ctx = create_context(no_icc);
     ctx.device_factory = Some(Box::new(|w, h| Box::new(NullDevice::new(w, h))));
 
     if !file_args.is_empty() {
@@ -166,12 +172,12 @@ fn run_null_mode(dpi_override: Option<f64>, file_args: Vec<String>) {
 /// the viewer via channels. The viewer renders visible viewport regions on
 /// demand using `render_region()`.
 #[cfg(feature = "viewer")]
-fn run_viewer_mode(dpi_override: Option<f64>, file_args: Vec<String>) {
+fn run_viewer_mode(dpi_override: Option<f64>, file_args: Vec<String>, no_icc: bool) {
     use stet_core::device::NullDevice;
 
     if file_args.is_empty() {
         // REPL mode — no viewer, just run interactively
-        let mut ctx = create_context();
+        let mut ctx = create_context(no_icc);
         ctx.device_factory = Some(Box::new(|w, h| Box::new(SkiaDevice::new(w, h))));
         run_repl(&mut ctx);
         return;
@@ -238,7 +244,7 @@ fn run_viewer_mode(dpi_override: Option<f64>, file_args: Vec<String>) {
     // Spawn interpreter thread
     let _screen_info_receiver = interp_end.screen_info_receiver;
     std::thread::spawn(move || {
-        let mut ctx = create_context();
+        let mut ctx = create_context(no_icc);
 
         // Set display_list_sender for incremental delivery at each showpage
         ctx.display_list_sender = Some(dl_sender);
@@ -304,8 +310,11 @@ fn run_viewer_mode(dpi_override: Option<f64>, file_args: Vec<String>) {
 }
 
 /// Create and initialize a Context with the resource system.
-fn create_context() -> Context {
+fn create_context(no_icc: bool) -> Context {
     let mut ctx = Context::new();
+    if !no_icc {
+        ctx.icc_cache.search_system_cmyk_profile();
+    }
     ctx.exec_sync_fn = Some(stet_engine::eval::exec_sync);
     build_system_dict(&mut ctx);
 

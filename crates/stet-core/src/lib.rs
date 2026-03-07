@@ -22,6 +22,7 @@ pub mod error;
 pub mod file_store;
 pub mod font_loader;
 pub mod graphics_state;
+pub mod icc;
 pub mod mesh_shading;
 pub mod name;
 pub mod object;

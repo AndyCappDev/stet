@@ -286,6 +286,27 @@ impl DeviceColor {
         }
     }
 
+    /// Create from CMYK, converting through ICC profile if available.
+    /// Falls back to PLRM formula when ICC is unavailable.
+    pub fn from_cmyk_icc(
+        c: f64,
+        m: f64,
+        y: f64,
+        k: f64,
+        icc: &mut crate::icc::IccCache,
+    ) -> Self {
+        if let Some((r, g, b)) = icc.convert_cmyk(c, m, y, k) {
+            Self {
+                r,
+                g,
+                b,
+                native_cmyk: Some((c, m, y, k)),
+            }
+        } else {
+            Self::from_cmyk(c, m, y, k)
+        }
+    }
+
     pub fn from_hsb(h: f64, s: f64, b: f64) -> Self {
         if s == 0.0 {
             return Self::from_gray(b);
@@ -722,10 +743,12 @@ pub enum ColorSpace {
         dict_entity: crate::object::EntityId,
     },
     /// ICC-based color space: `[/ICCBased dict]` where dict has /N components.
+    /// When `profile_hash` is Some, colors are converted through the ICC profile.
     /// Falls back to device space based on N (1=Gray, 3=RGB, 4=CMYK).
     ICCBased {
         dict_entity: crate::object::EntityId,
         n: u32,
+        profile_hash: Option<crate::icc::ProfileHash>,
     },
     /// Separation color space: `[/Separation name alternativeSpace tintTransform]`.
     /// Single tint component mapped to alternative space via tint transform procedure.
@@ -799,10 +822,12 @@ impl PartialEq for ColorSpace {
                 ICCBased {
                     dict_entity: d1,
                     n: n1,
+                    ..
                 },
                 ICCBased {
                     dict_entity: d2,
                     n: n2,
+                    ..
                 },
             ) => d1 == d2 && n1 == n2,
             (

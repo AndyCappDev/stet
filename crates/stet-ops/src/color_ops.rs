@@ -95,11 +95,12 @@ pub fn op_setcmykcolor(ctx: &mut Context) -> Result<(), PsError> {
     ctx.o_stack.pop()?;
     ctx.o_stack.pop()?;
     ctx.o_stack.pop()?;
-    ctx.gstate.color = DeviceColor::from_cmyk(
+    ctx.gstate.color = DeviceColor::from_cmyk_icc(
         c.clamp(0.0, 1.0),
         m.clamp(0.0, 1.0),
         y.clamp(0.0, 1.0),
         k.clamp(0.0, 1.0),
+        &mut ctx.icc_cache,
     );
     ctx.gstate.color_space = ColorSpace::DeviceCMYK;
     ctx.gstate.current_pattern = None;
@@ -363,12 +364,20 @@ pub fn op_setcolor(ctx: &mut Context) -> Result<(), PsError> {
         ColorSpace::CIEBasedA { params, .. } => set_cie_a_color(ctx, &params),
         ColorSpace::CIEBasedDEF { params, .. } => set_cie_def_color(ctx, &params),
         ColorSpace::CIEBasedDEFG { params, .. } => set_cie_defg_color(ctx, &params),
-        ColorSpace::ICCBased { n, .. } => match n {
-            1 => op_setgray(ctx),
-            3 => op_setrgbcolor(ctx),
-            4 => op_setcmykcolor(ctx),
-            _ => Err(PsError::RangeCheck),
-        },
+        ColorSpace::ICCBased {
+            n, profile_hash, ..
+        } => {
+            if let Some(hash) = profile_hash {
+                set_icc_color(ctx, n, &hash)
+            } else {
+                match n {
+                    1 => op_setgray(ctx),
+                    3 => op_setrgbcolor(ctx),
+                    4 => op_setcmykcolor(ctx),
+                    _ => Err(PsError::RangeCheck),
+                }
+            }
+        }
         ColorSpace::Separation {
             tint_transform,
             num_alt_components,
@@ -423,7 +432,7 @@ fn set_color_from_tint_result(ctx: &mut Context, n: u32) -> Result<(), PsError> 
     ctx.gstate.color = match n {
         1 => DeviceColor::from_gray(components[0]),
         3 => DeviceColor::from_rgb(components[0], components[1], components[2]),
-        4 => DeviceColor::from_cmyk(components[0], components[1], components[2], components[3]),
+        4 => DeviceColor::from_cmyk_icc(components[0], components[1], components[2], components[3], &mut ctx.icc_cache),
         _ => DeviceColor::from_gray(0.0),
     };
     ctx.gstate.current_pattern = None;
@@ -550,6 +559,59 @@ pub fn op_currentcolor(ctx: &mut Context) -> Result<(), PsError> {
 /// Set color in an Indexed color space: index → —
 ///
 /// Looks up the index in the palette and sets the resolved base-space color.
+/// Set color from ICCBased color space with an actual ICC profile.
+/// Pops N components, converts through ICC profile, stores as DeviceColor.
+fn set_icc_color(
+    ctx: &mut Context,
+    n: u32,
+    hash: &[u8; 32],
+) -> Result<(), PsError> {
+    if (ctx.o_stack.len() as u32) < n {
+        return Err(PsError::StackUnderflow);
+    }
+    // Validate types before popping
+    for i in 0..n {
+        let obj = ctx.o_stack.peek(i as usize)?;
+        match obj.value {
+            PsValue::Int(_) | PsValue::Real(_) => {}
+            _ => return Err(PsError::TypeCheck),
+        }
+    }
+    // Pop components (top of stack = last component)
+    let mut comps = vec![0.0f64; n as usize];
+    for i in (0..n as usize).rev() {
+        let obj = ctx.o_stack.pop()?;
+        comps[i] = match obj.value {
+            PsValue::Int(v) => v as f64,
+            PsValue::Real(v) => v,
+            _ => 0.0,
+        };
+    }
+    // Convert through ICC
+    if let Some((r, g, b)) = ctx.icc_cache.convert_color(hash, &comps) {
+        ctx.gstate.color = DeviceColor::from_rgb(r, g, b);
+    } else {
+        // Fallback to device-based conversion
+        ctx.gstate.color = match n {
+            1 => DeviceColor::from_gray(comps[0].clamp(0.0, 1.0)),
+            3 => DeviceColor::from_rgb(
+                comps[0].clamp(0.0, 1.0),
+                comps[1].clamp(0.0, 1.0),
+                comps[2].clamp(0.0, 1.0),
+            ),
+            4 => DeviceColor::from_cmyk_icc(
+                comps[0].clamp(0.0, 1.0),
+                comps[1].clamp(0.0, 1.0),
+                comps[2].clamp(0.0, 1.0),
+                comps[3].clamp(0.0, 1.0),
+                &mut ctx.icc_cache,
+            ),
+            _ => DeviceColor::black(),
+        };
+    }
+    Ok(())
+}
+
 fn set_indexed_color(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.o_stack.is_empty() {
         return Err(PsError::StackUnderflow);
@@ -604,7 +666,7 @@ fn set_indexed_color(ctx: &mut Context) -> Result<(), PsError> {
             let m = lookup[offset + 1] as f64 / 255.0;
             let y = lookup[offset + 2] as f64 / 255.0;
             let k = lookup[offset + 3] as f64 / 255.0;
-            DeviceColor::from_cmyk(c, m, y, k)
+            DeviceColor::from_cmyk_icc(c, m, y, k, &mut ctx.icc_cache)
         }
         _ => DeviceColor::from_gray(0.0),
     };
@@ -616,23 +678,38 @@ fn set_indexed_color(ctx: &mut Context) -> Result<(), PsError> {
 }
 
 /// Return the default (initial) color for a color space per PLRM.
-fn default_color_for_space(cs: &ColorSpace, _ctx: &Context) -> DeviceColor {
+fn default_color_for_space(cs: &ColorSpace, ctx: &mut Context) -> DeviceColor {
     match cs {
         ColorSpace::DeviceGray => DeviceColor::from_gray(0.0),
         ColorSpace::DeviceRGB => DeviceColor::from_rgb(0.0, 0.0, 0.0),
-        ColorSpace::DeviceCMYK => DeviceColor::from_cmyk(0.0, 0.0, 0.0, 1.0),
+        ColorSpace::DeviceCMYK => DeviceColor::from_cmyk_icc(0.0, 0.0, 0.0, 1.0, &mut ctx.icc_cache),
         ColorSpace::CIEBasedABC { params, .. } => DeviceColor::from_cie_abc(0.0, 0.0, 0.0, params),
         ColorSpace::CIEBasedA { params, .. } => DeviceColor::from_cie_a(0.0, params),
         ColorSpace::CIEBasedDEF { params, .. } => DeviceColor::from_cie_def(0.0, 0.0, 0.0, params),
         ColorSpace::CIEBasedDEFG { params, .. } => {
             DeviceColor::from_cie_defg(0.0, 0.0, 0.0, 0.0, params)
         }
-        ColorSpace::ICCBased { n, .. } => match n {
-            1 => DeviceColor::from_gray(0.0),
-            3 => DeviceColor::from_rgb(0.0, 0.0, 0.0),
-            4 => DeviceColor::from_cmyk(0.0, 0.0, 0.0, 1.0),
-            _ => DeviceColor::black(),
-        },
+        ColorSpace::ICCBased {
+            n, profile_hash, ..
+        } => {
+            let default_comps: &[f64] = match n {
+                1 => &[0.0],
+                3 => &[0.0, 0.0, 0.0],
+                4 => &[0.0, 0.0, 0.0, 1.0],
+                _ => return DeviceColor::black(),
+            };
+            if let Some(hash) = profile_hash {
+                if let Some((r, g, b)) = ctx.icc_cache.convert_color(hash, default_comps) {
+                    return DeviceColor::from_rgb(r, g, b);
+                }
+            }
+            match n {
+                1 => DeviceColor::from_gray(0.0),
+                3 => DeviceColor::from_rgb(0.0, 0.0, 0.0),
+                4 => DeviceColor::from_cmyk_icc(0.0, 0.0, 0.0, 1.0, &mut ctx.icc_cache),
+                _ => DeviceColor::black(),
+            }
+        }
         ColorSpace::Indexed { base, lookup, .. } => {
             // Default is index 0 resolved through the palette
             let components_per_color = match base.as_ref() {
@@ -649,11 +726,12 @@ fn default_color_for_space(cs: &ColorSpace, _ctx: &Context) -> DeviceColor {
                         lookup[1] as f64 / 255.0,
                         lookup[2] as f64 / 255.0,
                     ),
-                    ColorSpace::DeviceCMYK => DeviceColor::from_cmyk(
+                    ColorSpace::DeviceCMYK => DeviceColor::from_cmyk_icc(
                         lookup[0] as f64 / 255.0,
                         lookup[1] as f64 / 255.0,
                         lookup[2] as f64 / 255.0,
                         lookup[3] as f64 / 255.0,
+                        &mut ctx.icc_cache,
                     ),
                     _ => DeviceColor::from_gray(0.0),
                 }
@@ -671,7 +749,7 @@ fn default_color_for_space(cs: &ColorSpace, _ctx: &Context) -> DeviceColor {
 /// Resolve a color space from a PsObject (name or array).
 /// Returns the ColorSpace and its number of components.
 pub fn resolve_color_space_from_obj(
-    ctx: &Context,
+    ctx: &mut Context,
     obj: &PsObject,
 ) -> Result<(ColorSpace, usize), PsError> {
     match obj.value {
@@ -1020,8 +1098,9 @@ fn parse_cie_defg_colorspace(
 }
 
 /// Parse `[/ICCBased dict]` from an array.
+/// Extracts and registers the embedded ICC profile if a DataSource is available.
 fn parse_iccbased_colorspace(
-    ctx: &Context,
+    ctx: &mut Context,
     entity: EntityId,
     start: u32,
     len: u32,
@@ -1047,7 +1126,46 @@ fn parse_iccbased_colorspace(
     if n != 1 && n != 3 && n != 4 {
         return Err(PsError::RangeCheck);
     }
-    Ok(ColorSpace::ICCBased { dict_entity, n })
+
+    // Try to extract ICC profile bytes from DataSource or the stream itself
+    let profile_hash = extract_icc_profile(ctx, dict_entity);
+
+    Ok(ColorSpace::ICCBased {
+        dict_entity,
+        n,
+        profile_hash,
+    })
+}
+
+/// Extract ICC profile bytes from a dict's DataSource and register with the ICC cache.
+fn extract_icc_profile(ctx: &mut Context, dict_entity: EntityId) -> Option<stet_core::icc::ProfileHash> {
+    // Look for a string-based DataSource in the dict
+    let ds_key = ctx.names.find(b"DataSource")?;
+    let ds_obj = ctx.dicts.get(dict_entity, &DictKey::Name(ds_key))?;
+
+    let bytes = match ds_obj.value {
+        PsValue::String { entity, start, len } => {
+            ctx.strings.get(entity, start, len).to_vec()
+        }
+        PsValue::File(file_entity) => {
+            // Read all bytes from file/filter
+            let mut buf = Vec::new();
+            loop {
+                match ctx.files.read_byte(file_entity) {
+                    Ok(Some(b)) => buf.push(b),
+                    Ok(None) => break,
+                    Err(_) => break,
+                }
+            }
+            if buf.is_empty() {
+                return None;
+            }
+            buf
+        }
+        _ => return None,
+    };
+
+    ctx.icc_cache.register_profile(&bytes)
 }
 
 /// Parse `[/Separation name alternativeSpace tintTransform]` from an array.

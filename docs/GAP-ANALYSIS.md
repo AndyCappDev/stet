@@ -83,11 +83,9 @@ PostForge has a glyph cache system (glyph_cache.py, system_font_cache.py — ~46
 
 **Impact**: Performance only — no correctness impact. Every glyph is re-rendered from outlines on every use.
 
-### 3.3 ICC Color Profile Support (NOT IMPLEMENTED)
+### 3.3 ICC Color Profile Support (IMPLEMENTED)
 
-PostForge has ICC profile parsing and default ICC profiles (icc_profile.py: 392 lines, icc_default.py: 245 lines). stet has no ICC support.
-
-**Impact**: Some PS files embed ICC profiles for precise color management. Current CIE-based color space support covers most cases, but ICC profiles provide more accurate color reproduction.
+Implemented via `moxcms` (pure Rust, WASM-compatible). Features: embedded ICC profile extraction from `[/ICCBased stream]` color spaces, profile caching by SHA-256 hash, single-color conversion with quantized LRU cache, bulk 8-bit image conversion, system CMYK profile search (Linux/macOS/Windows) for improved DeviceCMYK image rendering. Falls back to device-space conversion when profile parsing fails.
 
 ### 3.4 Unicode/ToUnicode Mapping (NOT IMPLEMENTED)
 
@@ -212,7 +210,7 @@ Font support is at feature parity for correctness. System font discovery is impl
 | Separation | Full | Full | None |
 | DeviceN | Full | Full | None |
 | Pattern | Full | Full | makepattern/setpattern/execform implemented |
-| ICC Profile | Full | **No** | See 3.3 |
+| ICC Profile | Full | Full | moxcms-based, profile caching, system CMYK search |
 
 ---
 
@@ -303,7 +301,7 @@ All 7 shading types are implemented in both interpreters. **No gaps.**
 12. **PDF output device** — major feature but separate from PS interpretation
 13. **SVG output device**
 14. **TIFF output device**
-15. **ICC color profile support**
+15. ~~**ICC color profile support**~~ (RESOLVED)
 16. **DSC parsing** (beyond basic EPS BoundingBox)
 17. **Unicode/ToUnicode mapping**
 

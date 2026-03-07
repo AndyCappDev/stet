@@ -238,12 +238,12 @@ fn build_type1_shading(
                         if needs_tint_conversion(color_space) {
                             match convert_tint_color(ctx, &results, color_space) {
                                 Ok(alt) => {
-                                    components_to_device_color(&alt, get_alt_space(color_space))
+                                    components_to_device_color(&alt, get_alt_space(color_space), &mut ctx.icc_cache)
                                 }
                                 Err(_) => continue,
                             }
                         } else {
-                            components_to_device_color(&results, color_space)
+                            components_to_device_color(&results, color_space, &mut ctx.icc_cache)
                         }
                     }
                     Err(_) => continue,
@@ -260,7 +260,7 @@ fn build_type1_shading(
                         comps[i] = ctx.o_stack.pop()?.as_f64().unwrap_or(0.0);
                     }
                     match convert_tint_color(ctx, &comps, color_space) {
-                        Ok(alt) => components_to_device_color(&alt, get_alt_space(color_space)),
+                        Ok(alt) => components_to_device_color(&alt, get_alt_space(color_space), &mut ctx.icc_cache),
                         Err(_) => continue,
                     }
                 } else {
@@ -691,9 +691,9 @@ fn sample_shading_function(
             let results = evaluate_ps_function(ctx, func_entity, &[t_domain])?;
             if needs_tint_conversion(color_space) {
                 let alt = convert_tint_color(ctx, &results, color_space)?;
-                components_to_device_color(&alt, get_alt_space(color_space))
+                components_to_device_color(&alt, get_alt_space(color_space), &mut ctx.icc_cache)
             } else {
-                components_to_device_color(&results, color_space)
+                components_to_device_color(&results, color_space, &mut ctx.icc_cache)
             }
         } else {
             ctx.o_stack.push(PsObject::real(t_domain))?;
@@ -704,7 +704,7 @@ fn sample_shading_function(
                     comps[i] = ctx.o_stack.pop()?.as_f64().unwrap_or(0.0);
                 }
                 let alt = convert_tint_color(ctx, &comps, color_space)?;
-                components_to_device_color(&alt, get_alt_space(color_space))
+                components_to_device_color(&alt, get_alt_space(color_space), &mut ctx.icc_cache)
             } else {
                 pop_color_components(ctx, n_comps, color_space)
             }
@@ -720,7 +720,11 @@ fn sample_shading_function(
 }
 
 /// Convert component values to DeviceColor based on color space.
-fn components_to_device_color(comps: &[f64], color_space: &ColorSpace) -> DeviceColor {
+fn components_to_device_color(
+    comps: &[f64],
+    color_space: &ColorSpace,
+    icc_cache: &mut stet_core::icc::IccCache,
+) -> DeviceColor {
     match color_space {
         ColorSpace::DeviceGray => {
             DeviceColor::from_gray(comps.first().copied().unwrap_or(0.0).clamp(0.0, 1.0))
@@ -730,11 +734,12 @@ fn components_to_device_color(comps: &[f64], color_space: &ColorSpace) -> Device
             comps[1].clamp(0.0, 1.0),
             comps[2].clamp(0.0, 1.0),
         ),
-        ColorSpace::DeviceCMYK if comps.len() >= 4 => DeviceColor::from_cmyk(
+        ColorSpace::DeviceCMYK if comps.len() >= 4 => DeviceColor::from_cmyk_icc(
             comps[0].clamp(0.0, 1.0),
             comps[1].clamp(0.0, 1.0),
             comps[2].clamp(0.0, 1.0),
             comps[3].clamp(0.0, 1.0),
+            icc_cache,
         ),
         ColorSpace::CIEBasedABC { params, .. } if comps.len() >= 3 => {
             DeviceColor::from_cie_abc(comps[0], comps[1], comps[2], params)
@@ -748,29 +753,42 @@ fn components_to_device_color(comps: &[f64], color_space: &ColorSpace) -> Device
         ColorSpace::CIEBasedDEFG { params, .. } if comps.len() >= 4 => {
             DeviceColor::from_cie_defg(comps[0], comps[1], comps[2], comps[3], params)
         }
-        ColorSpace::ICCBased { n, .. } => match n {
-            1 => DeviceColor::from_gray(comps.first().copied().unwrap_or(0.0).clamp(0.0, 1.0)),
-            3 if comps.len() >= 3 => DeviceColor::from_rgb(
-                comps[0].clamp(0.0, 1.0),
-                comps[1].clamp(0.0, 1.0),
-                comps[2].clamp(0.0, 1.0),
-            ),
-            4 if comps.len() >= 4 => DeviceColor::from_cmyk(
-                comps[0].clamp(0.0, 1.0),
-                comps[1].clamp(0.0, 1.0),
-                comps[2].clamp(0.0, 1.0),
-                comps[3].clamp(0.0, 1.0),
-            ),
-            _ => DeviceColor::from_gray(0.0),
-        },
-        _ => {
-            // Fallback: heuristic based on count
-            if comps.len() >= 4 {
-                DeviceColor::from_cmyk(
+        ColorSpace::ICCBased {
+            n, profile_hash, ..
+        } => {
+            if let Some(hash) = profile_hash {
+                if let Some((r, g, b)) = icc_cache.convert_color(hash, comps) {
+                    return DeviceColor::from_rgb(r, g, b);
+                }
+            }
+            match n {
+                1 => {
+                    DeviceColor::from_gray(comps.first().copied().unwrap_or(0.0).clamp(0.0, 1.0))
+                }
+                3 if comps.len() >= 3 => DeviceColor::from_rgb(
+                    comps[0].clamp(0.0, 1.0),
+                    comps[1].clamp(0.0, 1.0),
+                    comps[2].clamp(0.0, 1.0),
+                ),
+                4 if comps.len() >= 4 => DeviceColor::from_cmyk_icc(
                     comps[0].clamp(0.0, 1.0),
                     comps[1].clamp(0.0, 1.0),
                     comps[2].clamp(0.0, 1.0),
                     comps[3].clamp(0.0, 1.0),
+                    icc_cache,
+                ),
+                _ => DeviceColor::from_gray(0.0),
+            }
+        }
+        _ => {
+            // Fallback: heuristic based on count
+            if comps.len() >= 4 {
+                DeviceColor::from_cmyk_icc(
+                    comps[0].clamp(0.0, 1.0),
+                    comps[1].clamp(0.0, 1.0),
+                    comps[2].clamp(0.0, 1.0),
+                    comps[3].clamp(0.0, 1.0),
+                    icc_cache,
                 )
             } else if comps.len() >= 3 {
                 DeviceColor::from_rgb(
@@ -1158,11 +1176,12 @@ fn pop_color_components(
         }
         ColorSpace::DeviceCMYK => {
             if comps.len() >= 4 {
-                DeviceColor::from_cmyk(
+                DeviceColor::from_cmyk_icc(
                     comps[0].clamp(0.0, 1.0),
                     comps[1].clamp(0.0, 1.0),
                     comps[2].clamp(0.0, 1.0),
                     comps[3].clamp(0.0, 1.0),
+                    &mut ctx.icc_cache,
                 )
             } else {
                 DeviceColor::from_gray(0.0)
@@ -1192,29 +1211,42 @@ fn pop_color_components(
                 DeviceColor::from_gray(0.0)
             }
         }
-        ColorSpace::ICCBased { n, .. } => match n {
-            1 => DeviceColor::from_gray(comps.first().copied().unwrap_or(0.0).clamp(0.0, 1.0)),
-            3 if comps.len() >= 3 => DeviceColor::from_rgb(
-                comps[0].clamp(0.0, 1.0),
-                comps[1].clamp(0.0, 1.0),
-                comps[2].clamp(0.0, 1.0),
-            ),
-            4 if comps.len() >= 4 => DeviceColor::from_cmyk(
-                comps[0].clamp(0.0, 1.0),
-                comps[1].clamp(0.0, 1.0),
-                comps[2].clamp(0.0, 1.0),
-                comps[3].clamp(0.0, 1.0),
-            ),
-            _ => DeviceColor::from_gray(0.0),
-        },
-        _ => {
-            // Separation/DeviceN/Indexed: use component count heuristic
-            if comps.len() >= 4 {
-                DeviceColor::from_cmyk(
+        ColorSpace::ICCBased {
+            n, profile_hash, ..
+        } => {
+            if let Some(hash) = profile_hash {
+                if let Some((r, g, b)) = ctx.icc_cache.convert_color(hash, &comps) {
+                    return DeviceColor::from_rgb(r, g, b);
+                }
+            }
+            match n {
+                1 => {
+                    DeviceColor::from_gray(comps.first().copied().unwrap_or(0.0).clamp(0.0, 1.0))
+                }
+                3 if comps.len() >= 3 => DeviceColor::from_rgb(
+                    comps[0].clamp(0.0, 1.0),
+                    comps[1].clamp(0.0, 1.0),
+                    comps[2].clamp(0.0, 1.0),
+                ),
+                4 if comps.len() >= 4 => DeviceColor::from_cmyk_icc(
                     comps[0].clamp(0.0, 1.0),
                     comps[1].clamp(0.0, 1.0),
                     comps[2].clamp(0.0, 1.0),
                     comps[3].clamp(0.0, 1.0),
+                    &mut ctx.icc_cache,
+                ),
+                _ => DeviceColor::from_gray(0.0),
+            }
+        }
+        _ => {
+            // Separation/DeviceN/Indexed: use component count heuristic
+            if comps.len() >= 4 {
+                DeviceColor::from_cmyk_icc(
+                    comps[0].clamp(0.0, 1.0),
+                    comps[1].clamp(0.0, 1.0),
+                    comps[2].clamp(0.0, 1.0),
+                    comps[3].clamp(0.0, 1.0),
+                    &mut ctx.icc_cache,
                 )
             } else if comps.len() >= 3 {
                 DeviceColor::from_rgb(
