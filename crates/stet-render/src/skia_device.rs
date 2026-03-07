@@ -1425,6 +1425,7 @@ fn render_element_to_band(
         DisplayElement::PatternFill { params } => {
             render_pattern_fill_to_band(pixmap, band_state, params, y_start, band_w, band_h, dpi);
         }
+        DisplayElement::Text { .. } => {} // PDF-only, ignored by rasterizer
     }
 }
 
@@ -2838,6 +2839,7 @@ fn render_element_to_viewport(
                 effective_dpi,
             );
         }
+        DisplayElement::Text { .. } => {} // PDF-only, ignored by rasterizer
     }
 }
 
@@ -4006,6 +4008,7 @@ mod tests {
             color: DeviceColor::from_rgb(1.0, 0.0, 0.0),
             fill_rule: FillRule::NonZeroWinding,
             ctm: Matrix::identity(),
+            is_text_glyph: false,
         };
         dev.fill_path(&path, &params);
 
@@ -4032,6 +4035,7 @@ mod tests {
             dash_pattern: DashPattern::solid(),
             ctm: Matrix::identity(),
             stroke_adjust: false,
+            is_text_glyph: false,
         };
         dev.stroke_path(&path, &params);
 
@@ -4070,6 +4074,7 @@ mod tests {
             color: DeviceColor::from_rgb(1.0, 0.0, 0.0),
             fill_rule: FillRule::NonZeroWinding,
             ctm: Matrix::identity(),
+            is_text_glyph: false,
         };
         dev.fill_path(&fill_path, &fill_params);
 
@@ -4097,6 +4102,7 @@ mod tests {
             color: DeviceColor::from_rgb(1.0, 0.0, 0.0),
             fill_rule: FillRule::NonZeroWinding,
             ctm: Matrix::identity(),
+            is_text_glyph: false,
         };
         dev.fill_path(&path, &params);
 
@@ -4133,6 +4139,7 @@ mod tests {
             color: DeviceColor::from_rgb(0.0, 1.0, 0.0),
             fill_rule: FillRule::NonZeroWinding,
             ctm: Matrix::translate(100.0, 100.0),
+            is_text_glyph: false,
         };
         dev.fill_path(&path, &params);
 

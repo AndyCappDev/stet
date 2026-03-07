@@ -8,6 +8,7 @@ use crate::display_list::DisplayList;
 use crate::graphics_state::{
     DashPattern, DeviceColor, FillRule, LineCap, LineJoin, Matrix, PsPath,
 };
+use crate::object::EntityId;
 
 /// Parameters for filling a path.
 #[derive(Clone, Debug)]
@@ -15,6 +16,37 @@ pub struct FillParams {
     pub color: DeviceColor,
     pub fill_rule: FillRule,
     pub ctm: Matrix,
+    /// True when this fill is a text glyph from a show operator.
+    /// PDF device skips these (uses Text elements instead).
+    pub is_text_glyph: bool,
+}
+
+/// Parameters for a text element emitted by show operators.
+///
+/// The PDF device uses these for BT/ET/Tf/Tj text operators.
+/// The raster device ignores them (uses Fill elements for glyph paths).
+#[derive(Clone, Debug)]
+pub struct TextParams {
+    /// Character bytes (or 2-byte CID values for Type 0).
+    pub text: Vec<u8>,
+    /// Device-space X position at start of string.
+    pub start_x: f64,
+    /// Device-space Y position at start of string.
+    pub start_y: f64,
+    /// Font dict entity ID.
+    pub font_entity: EntityId,
+    /// FontName bytes (e.g., b"Times-Roman").
+    pub font_name: Vec<u8>,
+    /// FontType (0, 1, 2, 3, 42).
+    pub font_type: i32,
+    /// Effective device-space font size.
+    pub font_size: f64,
+    /// Fill color at render time.
+    pub color: DeviceColor,
+    /// CTM at render time.
+    pub ctm: [f64; 6],
+    /// User-space font matrix (scaled to point units).
+    pub font_matrix: [f64; 6],
 }
 
 /// Parameters for stroking a path.
@@ -30,6 +62,9 @@ pub struct StrokeParams {
     /// When true, snap thin stroke coordinates to device pixel centers
     /// for consistent line weight (PostScript `setstrokeadjust`).
     pub stroke_adjust: bool,
+    /// True when this stroke is a text glyph from a show operator (PaintType 2).
+    /// PDF device skips these (uses Text elements instead).
+    pub is_text_glyph: bool,
 }
 
 /// Parameters for clipping.
@@ -233,6 +268,7 @@ pub trait OutputDevice {
                 DisplayElement::MeshShading { params } => self.paint_mesh_shading(params),
                 DisplayElement::PatchShading { params } => self.paint_patch_shading(params),
                 DisplayElement::PatternFill { params } => self.paint_pattern_fill(params),
+                DisplayElement::Text { .. } => {} // PDF-only, ignored by rasterizer
             }
         }
         self.show_page(output_path)

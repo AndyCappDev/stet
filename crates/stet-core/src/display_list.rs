@@ -6,7 +6,7 @@
 
 use crate::device::{
     AxialShadingParams, ClipParams, FillParams, ImageParams, MeshShadingParams, OutputDevice,
-    PatchShadingParams, PatternFillParams, RadialShadingParams, StrokeParams,
+    PatchShadingParams, PatternFillParams, RadialShadingParams, StrokeParams, TextParams,
 };
 use crate::graphics_state::PsPath;
 
@@ -38,6 +38,8 @@ pub enum DisplayElement {
     PatchShading { params: PatchShadingParams },
     /// Tiled pattern fill.
     PatternFill { params: PatternFillParams },
+    /// Text element from show operators (used by PDF device, ignored by rasterizer).
+    Text { params: TextParams },
 }
 
 /// An ordered list of drawing operations for a single page.
@@ -127,6 +129,10 @@ pub fn replay_to_device(list: &DisplayList, device: &mut dyn OutputDevice) {
             }
             DisplayElement::PatternFill { params } => {
                 device.paint_pattern_fill(params);
+            }
+            DisplayElement::Text { .. } => {
+                // Text elements are only used by the PDF device.
+                // The rasterizer ignores them (glyph paths are in Fill elements).
             }
         }
     }

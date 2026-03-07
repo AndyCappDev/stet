@@ -134,6 +134,7 @@ fn push_fill_element(ctx: &mut Context, path: PsPath, fill_rule: FillRule) {
         color: ctx.gstate.color.clone(),
         fill_rule,
         ctm: Matrix::identity(),
+        is_text_glyph: false,
     };
     ctx.display_list.push(DisplayElement::Fill { path, params });
 }
@@ -204,6 +205,7 @@ fn stroke_native(ctx: &mut Context) -> Result<(), PsError> {
                 dash_pattern: ctx.gstate.dash_pattern.clone(),
                 ctm: ctx.gstate.ctm,
                 stroke_adjust: ctx.gstate.stroke_adjust,
+                is_text_glyph: false,
             };
             ctx.display_list.push(DisplayElement::Stroke {
                 path: user_path,
@@ -230,6 +232,7 @@ fn stroke_native(ctx: &mut Context) -> Result<(), PsError> {
             },
             ctm: Matrix::identity(),
             stroke_adjust: ctx.gstate.stroke_adjust,
+            is_text_glyph: false,
         };
         ctx.display_list.push(DisplayElement::Stroke {
             path: ctx.gstate.path.clone(),
@@ -345,6 +348,7 @@ pub fn op_rectfill(ctx: &mut Context) -> Result<(), PsError> {
         color: ctx.gstate.color.clone(),
         fill_rule: FillRule::NonZeroWinding,
         ctm: Matrix::identity(),
+        is_text_glyph: false,
     };
     ctx.display_list.push(DisplayElement::Fill { path, params });
     Ok(())
@@ -368,6 +372,7 @@ pub fn op_rectstroke(ctx: &mut Context) -> Result<(), PsError> {
             dash_pattern: ctx.gstate.dash_pattern.clone(),
             ctm: ctx.gstate.ctm,
             stroke_adjust: ctx.gstate.stroke_adjust,
+            is_text_glyph: false,
         };
         ctx.display_list
             .push(DisplayElement::Stroke { path, params });
@@ -392,6 +397,7 @@ pub fn op_rectstroke(ctx: &mut Context) -> Result<(), PsError> {
             },
             ctm: Matrix::identity(),
             stroke_adjust: ctx.gstate.stroke_adjust,
+            is_text_glyph: false,
         };
         ctx.display_list
             .push(DisplayElement::Stroke { path, params });

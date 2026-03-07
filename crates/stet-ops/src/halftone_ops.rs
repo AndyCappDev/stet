@@ -749,6 +749,7 @@ fn replay_form_elements(
                     color: params.color.clone(),
                     fill_rule: params.fill_rule,
                     ctm: Matrix::identity(),
+                    is_text_glyph: params.is_text_glyph,
                 };
                 target.push(DisplayElement::Fill {
                     path: new_path,
@@ -768,6 +769,7 @@ fn replay_form_elements(
                     dash_pattern: params.dash_pattern.clone(),
                     ctm: Matrix::identity(),
                     stroke_adjust: params.stroke_adjust,
+                    is_text_glyph: params.is_text_glyph,
                 };
                 target.push(DisplayElement::Stroke {
                     path: new_path,
@@ -826,6 +828,11 @@ fn replay_form_elements(
                 let mut new_params = params.clone();
                 new_params.path = new_path;
                 target.push(DisplayElement::PatternFill { params: new_params });
+            }
+            DisplayElement::Text { params } => {
+                // Pass through text elements unchanged (no CTM composition needed
+                // since they already store device-space coordinates)
+                target.push(DisplayElement::Text { params: params.clone() });
             }
         }
     }

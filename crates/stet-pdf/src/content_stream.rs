@@ -13,7 +13,9 @@ use stet_core::device::{
 use stet_core::display_list::{DisplayElement, DisplayList};
 use stet_core::graphics_state::{DeviceColor, FillRule, LineCap, LineJoin, Matrix, PsPath};
 
+use crate::font_tracker::FontTracker;
 use crate::image_ops::{self, ImageXObject};
+use crate::text_ops;
 
 /// Result of generating a content stream from a display list.
 pub struct ContentStreamResult {
@@ -24,6 +26,8 @@ pub struct ContentStreamResult {
     /// Indices into the display list for shading elements, paired with
     /// the shading resource name index used in the content stream.
     pub shading_refs: Vec<ShadingRef>,
+    /// Font tracker with all fonts used on this page.
+    pub font_tracker: FontTracker,
 }
 
 /// Reference to a shading element that needs a PDF shading resource.
@@ -101,6 +105,14 @@ pub fn build_content_stream(
     let mut shading_refs: Vec<ShadingRef> = Vec::new();
     let mut clip_depth: u32 = 0;
     let mut gs = GState::new();
+    let mut font_tracker = FontTracker::new();
+
+    // First pass: scan Text elements to register fonts
+    for element in list.elements() {
+        if let DisplayElement::Text { params } = element {
+            font_tracker.track(params);
+        }
+    }
 
     // Initial CTM: device space (Y-down, pixels) → PDF space (Y-up, points)
     fmt_num(&mut buf, scale);
@@ -130,6 +142,10 @@ pub fn build_content_stream(
                 gs.fill_color = Some(PdfColor::Gray(10000));
             }
             DisplayElement::Fill { path, params } => {
+                // Skip glyph fills when we have Text elements for them
+                if params.is_text_glyph {
+                    continue;
+                }
                 emit_fill_color(&mut buf, &params.color, &mut gs);
                 emit_path(&mut buf, path);
                 if params.fill_rule == FillRule::EvenOdd {
@@ -139,6 +155,10 @@ pub fn build_content_stream(
                 }
             }
             DisplayElement::Stroke { path, params } => {
+                // Skip text glyph strokes (PaintType 2) when Text elements cover them
+                if params.is_text_glyph {
+                    continue;
+                }
                 let has_ctm = !is_identity(&params.ctm);
                 if has_ctm {
                     // Anisotropic stroke: path is in user space, CTM transforms
@@ -243,6 +263,11 @@ pub fn build_content_stream(
             DisplayElement::PatternFill { params } => {
                 emit_pattern_fill_placeholder(&mut buf, params, &mut gs);
             }
+            DisplayElement::Text { params } => {
+                text_ops::emit_text_element(&mut buf, params, &font_tracker);
+                // Reset fill color cache since BT/ET may change it
+                gs.fill_color = None;
+            }
         }
     }
 
@@ -255,6 +280,7 @@ pub fn build_content_stream(
         content: buf,
         images,
         shading_refs,
+        font_tracker,
     }
 }
 
@@ -503,7 +529,7 @@ fn emit_pattern_fill_placeholder(buf: &mut Vec<u8>, params: &PatternFillParams, 
 }
 
 /// Format a number compactly for PDF content streams.
-fn fmt_num(buf: &mut Vec<u8>, v: f64) {
+pub(crate) fn fmt_num(buf: &mut Vec<u8>, v: f64) {
     if v == 0.0 {
         buf.push(b'0');
     } else if v == v.round() && v.abs() < 2_147_483_647.0 {

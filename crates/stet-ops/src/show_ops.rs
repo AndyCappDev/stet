@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use stet_core::charstring;
 use stet_core::context::Context;
-use stet_core::device::{FillParams, StrokeParams};
+use stet_core::device::{FillParams, StrokeParams, TextParams};
 use stet_core::dict::DictKey;
 use stet_core::display_list::DisplayElement;
 use stet_core::error::PsError;
@@ -1206,6 +1206,9 @@ fn render_show(
         );
     }
 
+    // Emit Text element for PDF device (before glyph rendering)
+    emit_text_element(ctx, bytes.to_vec(), font_entity, font_type);
+
     let info = get_font_info(ctx)?;
     let subrs = get_subrs(ctx, &info);
 
@@ -1460,6 +1463,9 @@ fn render_show_type2(
     cx: f64,
     cy: f64,
 ) -> Result<(), PsError> {
+    // Emit Text element for PDF device
+    emit_text_element(ctx, bytes.to_vec(), font_entity, 2);
+
     let info = get_type2_info(ctx, font_entity)?;
 
     let (dev_cpx, dev_cpy) = ctx.gstate.current_point.ok_or(PsError::NoCurrentPoint)?;
@@ -1845,6 +1851,9 @@ fn render_show_composite(
         .get(font_entity, &DictKey::Name(ctx.name_cache.n_font_type))
         .and_then(|obj| obj.as_i32())
         .unwrap_or(1);
+
+    // Emit Text element for PDF device
+    emit_text_element(ctx, bytes.to_vec(), font_entity, font_type);
 
     let type0_fm = read_font_matrix(ctx, font_entity);
 
@@ -3437,6 +3446,11 @@ fn render_show_displaced(
         .and_then(|obj| obj.as_i32())
         .unwrap_or(1);
 
+    // Emit Text element for PDF device (skip Type 3 which can't be embedded)
+    if font_type != 3 {
+        emit_text_element(ctx, bytes.to_vec(), font_entity_check, font_type);
+    }
+
     if font_type == 2 {
         return render_show_displaced_type2(ctx, font_entity_check, bytes, displacements, mode);
     }
@@ -4166,6 +4180,69 @@ fn advance_by_displacement(
 }
 
 /// Push a glyph path to the display list as either Fill (PaintType 0) or Stroke (PaintType 2).
+/// Emit a Text display element for a show operation.
+///
+/// The PDF device uses these for BT/ET/Tf/Tj operators; the rasterizer ignores them.
+/// Called for Type 1, Type 2 (CFF), Type 0 (composite), and Type 42 fonts.
+/// NOT called for Type 3 fonts (which can't be embedded in PDF).
+fn emit_text_element(
+    ctx: &mut Context,
+    text: Vec<u8>,
+    font_entity: EntityId,
+    font_type: i32,
+) {
+    // Extract FontName
+    let font_name = ctx
+        .dicts
+        .get(font_entity, &DictKey::Name(ctx.name_cache.n_font_name))
+        .and_then(|obj| match obj.value {
+            PsValue::Name(id) => Some(ctx.names.get_bytes(id).to_vec()),
+            _ => None,
+        })
+        .unwrap_or_else(|| b"Unknown".to_vec());
+
+    // Read FontMatrix
+    let fm = read_font_matrix(ctx, font_entity);
+
+    // Compute font_matrix scaled to point units
+    // Type 0/42: use as-is (1-unit design space)
+    // Type 1/2: multiply by 1000 (1000-unit design space → points)
+    let fm_scale = if font_type == 0 || font_type == 42 { 1.0 } else { 1000.0 };
+    let font_matrix = [
+        fm.a * fm_scale, fm.b * fm_scale, fm.c * fm_scale,
+        fm.d * fm_scale, fm.tx * fm_scale, fm.ty * fm_scale,
+    ];
+
+    // Compute effective device-space font size
+    // PostForge: point_size × sqrt(scale_x × scale_y)
+    let point_size = if font_type == 0 || font_type == 42 {
+        fm.a // already in point units
+    } else {
+        fm.a * 1000.0
+    };
+    let ctm = ctx.gstate.ctm;
+    let scale_x = (ctm.a * ctm.a + ctm.b * ctm.b).sqrt();
+    let scale_y = (ctm.c * ctm.c + ctm.d * ctm.d).sqrt();
+    let font_size = point_size * (scale_x * scale_y).sqrt();
+
+    // Current position (already device space)
+    let (start_x, start_y) = ctx.gstate.current_point.unwrap_or((0.0, 0.0));
+
+    let params = TextParams {
+        text,
+        start_x,
+        start_y,
+        font_entity,
+        font_name,
+        font_type,
+        font_size,
+        color: ctx.gstate.color.clone(),
+        ctm: [ctm.a, ctm.b, ctm.c, ctm.d, ctm.tx, ctm.ty],
+        font_matrix,
+    };
+    ctx.display_list.push(DisplayElement::Text { params });
+}
+
 fn push_glyph_element(
     ctx: &mut Context,
     device_path: PsPath,
@@ -4185,6 +4262,7 @@ fn push_glyph_element(
             },
             ctm: Matrix::identity(),
             stroke_adjust: false,
+            is_text_glyph: true,
         };
         ctx.display_list.push(DisplayElement::Stroke {
             path: device_path,
@@ -4195,6 +4273,7 @@ fn push_glyph_element(
             color: ctx.gstate.color.clone(),
             ctm: Matrix::identity(),
             fill_rule: FillRule::NonZeroWinding,
+            is_text_glyph: true,
         };
         ctx.display_list.push(DisplayElement::Fill {
             path: device_path,

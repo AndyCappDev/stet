@@ -9,6 +9,7 @@ use stet_core::display_list::DisplayList;
 use stet_core::graphics_state::PsPath;
 
 use crate::content_stream::{self, ContentStreamResult, ShadingRef};
+use crate::font_tracker::FontTracker;
 use crate::image_ops::ImageXObject;
 use crate::pdf_objects::PdfObj;
 use crate::pdf_writer::PdfWriter;
@@ -21,6 +22,7 @@ struct PageData {
     height_pts: f64,
     images: Vec<ImageXObject>,
     shading_refs: Vec<ShadingRef>,
+    font_tracker: FontTracker,
 }
 
 /// PDF output device. Accumulates display lists per page and generates
@@ -121,8 +123,18 @@ impl PdfDevice {
             shading_entries.push((format!("Sh{}", i).into_bytes(), PdfObj::Ref(sh_obj)));
         }
 
+        // Build font resources
+        let mut font_entries: Vec<(Vec<u8>, PdfObj)> = Vec::new();
+        for usage in page.font_tracker.fonts() {
+            let font_ref = self.build_font_reference(writer, usage);
+            font_entries.push((usage.pdf_name.clone().into_bytes(), PdfObj::Ref(font_ref)));
+        }
+
         // Resources dict
         let mut resources: Vec<(Vec<u8>, PdfObj)> = Vec::new();
+        if !font_entries.is_empty() {
+            resources.push((b"Font".to_vec(), PdfObj::Dict(font_entries)));
+        }
         if !xobject_entries.is_empty() {
             resources.push((b"XObject".to_vec(), PdfObj::Dict(xobject_entries)));
         }
@@ -151,6 +163,76 @@ impl PdfDevice {
         ]));
 
         Ok(page_ref)
+    }
+
+    /// Build a PDF font reference for a tracked font.
+    ///
+    /// For Standard 14 fonts, creates a simple Type1 font dict.
+    /// For other fonts, also creates a simple Type1 dict (no embedding yet).
+    /// Both include a ToUnicode CMap for searchability.
+    fn build_font_reference(
+        &self,
+        writer: &mut PdfWriter,
+        usage: &crate::font_tracker::FontUsage,
+    ) -> u32 {
+        // Build ToUnicode CMap
+        let tounicode_ref = self.build_tounicode_cmap(writer, usage);
+
+        let mut entries: Vec<(Vec<u8>, PdfObj)> = vec![
+            (b"Type".to_vec(), PdfObj::name("Font")),
+            (b"Subtype".to_vec(), PdfObj::name("Type1")),
+            (
+                b"BaseFont".to_vec(),
+                PdfObj::Name(usage.font_name.clone()),
+            ),
+        ];
+
+        if !usage.is_standard_14 {
+            // For non-standard fonts, add Encoding
+            entries.push((
+                b"Encoding".to_vec(),
+                PdfObj::name("WinAnsiEncoding"),
+            ));
+        }
+
+        if let Some(tu_ref) = tounicode_ref {
+            entries.push((b"ToUnicode".to_vec(), PdfObj::Ref(tu_ref)));
+        }
+
+        writer.add_object(&PdfObj::Dict(entries))
+    }
+
+    /// Build a ToUnicode CMap for a font.
+    ///
+    /// Maps character codes to Unicode based on common Adobe glyph naming.
+    /// For printable ASCII codes, maps code→Unicode directly (works for most
+    /// Latin text fonts). The full glyph-name-based mapping requires encoding
+    /// array access (deferred to font embedding phase).
+    fn build_tounicode_cmap(
+        &self,
+        writer: &mut PdfWriter,
+        usage: &crate::font_tracker::FontUsage,
+    ) -> Option<u32> {
+        use std::collections::HashMap;
+
+        let mut map: HashMap<u16, u16> = HashMap::new();
+
+        for &code in &usage.used_codes {
+            if code <= 255 {
+                // For ASCII range, assume code = Unicode (works for standard encodings)
+                if (0x20..=0x7E).contains(&code) {
+                    map.insert(code, code);
+                }
+            }
+        }
+
+        if map.is_empty() {
+            return None;
+        }
+
+        let font_name = String::from_utf8_lossy(&usage.font_name);
+        let cmap_data = generate_tounicode_cmap(&map, &font_name);
+        Some(writer.add_stream(Vec::new(), &cmap_data, true))
     }
 
     /// Build a PDF image XObject from prepared image data. Returns the object number.
@@ -187,6 +269,47 @@ impl PdfDevice {
 
         writer.add_stream(entries, &img.rgb_data, true)
     }
+}
+
+/// Generate a ToUnicode CMap stream.
+fn generate_tounicode_cmap(
+    map: &std::collections::HashMap<u16, u16>,
+    font_name: &str,
+) -> Vec<u8> {
+    use std::io::Write;
+    let mut buf = Vec::new();
+
+    writeln!(buf, "/CIDInit /ProcSet findresource begin").unwrap();
+    writeln!(buf, "12 dict begin").unwrap();
+    writeln!(buf, "begincmap").unwrap();
+    writeln!(buf, "/CIDSystemInfo <<").unwrap();
+    writeln!(buf, "  /Registry (Adobe)").unwrap();
+    writeln!(buf, "  /Ordering (UCS)").unwrap();
+    writeln!(buf, "  /Supplement 0").unwrap();
+    writeln!(buf, ">> def").unwrap();
+    writeln!(buf, "/CMapName /{}-UCS def", font_name).unwrap();
+    writeln!(buf, "/CMapType 2 def").unwrap();
+    writeln!(buf, "1 begincodespacerange").unwrap();
+    writeln!(buf, "<00> <FF>").unwrap();
+    writeln!(buf, "endcodespacerange").unwrap();
+
+    let mut sorted: Vec<_> = map.iter().collect();
+    sorted.sort_by_key(|&(&code, _)| code);
+
+    for chunk in sorted.chunks(100) {
+        writeln!(buf, "{} beginbfchar", chunk.len()).unwrap();
+        for &(&code, &unicode) in chunk {
+            writeln!(buf, "<{:02X}> <{:04X}>", code, unicode).unwrap();
+        }
+        writeln!(buf, "endbfchar").unwrap();
+    }
+
+    writeln!(buf, "endcmap").unwrap();
+    writeln!(buf, "CMapName currentdict /CMap defineresource pop").unwrap();
+    writeln!(buf, "end").unwrap();
+    writeln!(buf, "end").unwrap();
+
+    buf
 }
 
 impl OutputDevice for PdfDevice {
@@ -234,6 +357,7 @@ impl OutputDevice for PdfDevice {
             content,
             images,
             shading_refs,
+            font_tracker,
         } = content_stream::build_content_stream(&list, self.page_w, self.page_h, self.dpi);
 
         self.pages.push(PageData {
@@ -242,6 +366,7 @@ impl OutputDevice for PdfDevice {
             height_pts: self.page_h as f64 * scale,
             images,
             shading_refs,
+            font_tracker,
         });
 
         Ok(())
