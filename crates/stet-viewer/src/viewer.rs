@@ -8,6 +8,7 @@ use std::sync::mpsc::{Receiver, SyncSender, TryRecvError};
 
 use egui::{ColorImage, TextureHandle, TextureOptions, Vec2};
 use stet_core::display_list::DisplayList;
+use stet_render::PreparedDisplayList;
 
 use crate::{ScreenInfo, ViewerEnd, ViewerMsg};
 
@@ -58,6 +59,8 @@ pub struct ViewerApp {
 /// A page stored as a resolution-independent display list.
 struct StoredPage {
     display_list: DisplayList,
+    /// Precomputed bboxes/epochs for fast viewport rendering.
+    prepared: PreparedDisplayList,
     /// Device pixel dimensions at reference DPI.
     width: u32,
     height: u32,
@@ -240,8 +243,10 @@ impl ViewerApp {
         loop {
             match receiver.try_recv() {
                 Ok(ViewerMsg::Page(page)) => {
+                    let prepared = stet_render::prepare_display_list(&page.display_list);
                     self.pages.push(StoredPage {
                         display_list: page.display_list,
+                        prepared,
                         width: page.width,
                         height: page.height,
                         dpi: page.dpi,
@@ -447,9 +452,10 @@ impl ViewerApp {
             return; // cache hit
         }
 
-        // Render the viewport region
-        let rgba = stet_render::render_region(
+        // Render the viewport region using precomputed metadata
+        let rgba = stet_render::render_region_prepared(
             &page.display_list,
+            &page.prepared,
             vp_x,
             vp_y,
             vp_w,
@@ -508,8 +514,9 @@ impl ViewerApp {
             return;
         }
 
-        let rgba = stet_render::render_region(
+        let rgba = stet_render::render_region_prepared(
             &page.display_list,
+            &page.prepared,
             0.0,
             0.0,
             pw as f64,
