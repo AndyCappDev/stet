@@ -49,17 +49,49 @@ pub fn emit_text_element(
     // Set text matrix (positions the text in device space)
     // Tm = [a b c d tx ty]
     //
-    // The content stream's base cm transform already maps device coords
-    // (Y-down pixels) to PDF coords (Y-up points). So we work in device
-    // space here — just position the text with identity scaling (font_size
-    // is already in Tf).
+    // The content stream's base cm maps device (Y-down pixels) to PDF
+    // (Y-up points). We work in device space, so the Tm must encode:
+    // 1. Non-uniform scaling (narrow/wide text) relative to font_size
+    // 2. Rotation from the CTM
+    // 3. Y-flip (d < 0) so glyphs render right-side-up
+    //
+    // font_size = point_size * sqrt(scale_x * scale_y) (geometric mean)
+    // Tm encodes the CTM direction normalized by that mean.
     let tx = params.start_x;
     let ty = params.start_y;
+    let ctm = params.ctm;
 
-    // The base cm maps device (Y-down) to PDF (Y-up). But PDF text
-    // rendering draws glyphs upward from baseline. In our Y-down device
-    // coordinate system, we need d=-1 to flip glyphs right-side-up.
-    buf.extend(b"1 0 0 -1 ");
+    let scale_x = (ctm[0] * ctm[0] + ctm[1] * ctm[1]).sqrt();
+    let scale_y = (ctm[2] * ctm[2] + ctm[3] * ctm[3]).sqrt();
+    let effective_scale = (scale_x * scale_y).sqrt();
+
+    let (tm_a, tm_b, tm_c, tm_d) = if effective_scale > 1e-10 {
+        // Normalize CTM by the effective scale (geometric mean), so
+        // font_size × Tm reproduces the original per-axis scaling ratios.
+        //
+        // The content stream's base cm already flips Y (device→PDF), so
+        // we're working in a Y-down coordinate system. PDF text always
+        // renders glyphs upward, so we need d < 0. Some PS programs
+        // (e.g., dvips) use a CTM with d > 0 after their own coordinate
+        // setup. We preserve the X-axis direction from the CTM but always
+        // force Y to flip by using the absolute Y scale with negation.
+        let norm_a = ctm[0] / effective_scale;
+        let norm_b = ctm[1] / effective_scale;
+        // Y axis: use scale ratio but always flip (negate)
+        let y_ratio = scale_y / effective_scale;
+        (norm_a, norm_b, 0.0, -y_ratio)
+    } else {
+        (1.0, 0.0, 0.0, -1.0)
+    };
+
+    fmt_num(buf, tm_a);
+    buf.push(b' ');
+    fmt_num(buf, tm_b);
+    buf.push(b' ');
+    fmt_num(buf, tm_c);
+    buf.push(b' ');
+    fmt_num(buf, tm_d);
+    buf.push(b' ');
     fmt_num(buf, tx);
     buf.push(b' ');
     fmt_num(buf, ty);

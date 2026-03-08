@@ -37,8 +37,9 @@ Tracks progress on PDF text support after the initial BT/ET/Tf/Tm/Tj implementat
 - [ ] TJ array batching: merge consecutive same-font per-char Text elements into TJ arrays with kern values (optimization, not correctness)
 
 ### 7. Non-uniform text scaling
-- [ ] Encode CTM scaling/rotation into Tm matrix (currently hardcoded `1 0 0 -1 tx ty`)
-- Needed for narrow/stretched/rotated text (e.g., clipping.ps "Narrow Text")
+- [x] Encode CTM scaling/rotation into Tm matrix (was hardcoded `1 0 0 -1 tx ty`)
+- [x] Always force Y-flip (d < 0) regardless of PS CTM sign convention (dvips uses d > 0)
+- Handles narrow/stretched/rotated text (e.g., clipping.ps "Narrow Text")
 
 ### 8. Type 1 font embedding
 - [ ] Reconstruct Type 1 font binary (cleartext + eexec encrypted private dict + charstrings)
