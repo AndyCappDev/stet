@@ -47,7 +47,9 @@ Tracks progress on PDF text support after the initial BT/ET/Tf/Tm/Tj implementat
 - [x] Emit as `/FontFile` stream in font descriptor with `/Length1`, `/Length2`, `/Length3`
 - [x] Charstring encryption for re-encrypted subrs
 - [x] Private dict hint values (BlueValues, StdHW, etc.) preserved in embedded font
-- eexec encryption code exists in `font_embedder.rs`
+- [x] PFB format wrapping (segment markers `\x80\x01`/`\x02`/`\x03`)
+- [x] Always use standard FontMatrix `[0.001 0 0 0.001 0 0]` (font_entity may be scaled copy)
+- [x] Standard 14 fonts skip embedding
 
 ### 9. CFF font embedding
 - [ ] Store raw CFF binary during parsing (`cff_ops.rs` / `system_font_loader.rs`)
