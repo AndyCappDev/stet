@@ -216,10 +216,12 @@ fn image_dict_form(ctx: &mut Context) -> Result<(), PsError> {
         None
     };
 
-    // ImageType 4: apply mask against raw samples before decode, then push
-    // as PreconvertedRGBA. MaskColor comparison must use raw (un-decoded)
-    // sample values per PLRM spec.
-    if mask_color_param.is_some() {
+    let needs_decode = !indexed && !is_identity_decode(&decode, ncomp);
+
+    // ImageType 4 with non-identity decode: must compare MaskColor against raw
+    // (un-decoded) samples per PLRM spec. Pre-apply mask and push as RGBA since
+    // the render-time comparison would use decoded samples.
+    if mask_color_param.is_some() && needs_decode {
         let mut rgba = samples_to_rgba(ctx, &samples, width, height, ncomp, &decode);
         if let Some(ref mc) = mask_color_param {
             apply_mask_color_raw(&mut rgba, &samples, width, height, ncomp, mc);
@@ -235,7 +237,7 @@ fn image_dict_form(ctx: &mut Context) -> Result<(), PsError> {
         );
     } else if let Some(img_cs) = capture_image_color_space(ctx) {
         // Apply decode to samples if non-identity (for non-indexed spaces)
-        let final_samples = if !indexed && !is_identity_decode(&decode, ncomp) {
+        let final_samples = if needs_decode {
             apply_decode(&samples, ncomp, &decode)
         } else {
             samples
@@ -247,21 +249,34 @@ fn image_dict_form(ctx: &mut Context) -> Result<(), PsError> {
             height,
             img_cs,
             &image_matrix,
-            None,
+            mask_color_param,
         );
     } else {
         // CIE DEF/DEFG, Separation, DeviceN: convert to RGB at op time
-        let rgba = samples_to_rgba(ctx, &samples, width, height, ncomp, &decode);
-        let rgb = rgba_to_rgb(&rgba);
-        draw_image_to_device(
-            ctx,
-            rgb,
-            width,
-            height,
-            ImageColorSpace::DeviceRGB,
-            &image_matrix,
-            None,
-        );
+        let mut rgba = samples_to_rgba(ctx, &samples, width, height, ncomp, &decode);
+        if let Some(ref mc) = mask_color_param {
+            apply_mask_color_raw(&mut rgba, &samples, width, height, ncomp, mc);
+            draw_image_to_device(
+                ctx,
+                rgba,
+                width,
+                height,
+                ImageColorSpace::PreconvertedRGBA,
+                &image_matrix,
+                None,
+            );
+        } else {
+            let rgb = rgba_to_rgb(&rgba);
+            draw_image_to_device(
+                ctx,
+                rgb,
+                width,
+                height,
+                ImageColorSpace::DeviceRGB,
+                &image_matrix,
+                None,
+            );
+        }
     }
     Ok(())
 }

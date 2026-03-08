@@ -49,6 +49,19 @@ pub enum PdfColorSpace {
     },
 }
 
+impl PdfColorSpace {
+    /// Number of color components in this color space.
+    pub fn num_components(&self) -> usize {
+        match self {
+            PdfColorSpace::DeviceGray => 1,
+            PdfColorSpace::DeviceRGB => 3,
+            PdfColorSpace::DeviceCMYK => 4,
+            PdfColorSpace::ICCBased { n } => *n as usize,
+            PdfColorSpace::Indexed { .. } => 1,
+        }
+    }
+}
+
 /// ICC profile data for embedding.
 #[derive(Clone)]
 pub struct IccProfileData {

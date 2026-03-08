@@ -346,6 +346,23 @@ impl PdfDevice {
             entries.push((b"SMask".to_vec(), PdfObj::Ref(smask)));
         }
 
+        // Color key masking (ImageType 4): /Mask array of 2×n integers
+        if let Some(ref ckm) = img.color_key_mask {
+            let ncomp = img.pdf_color_space.num_components();
+            let mask_ints: Vec<PdfObj> = if ckm.len() == ncomp {
+                // Exact match: expand each value v to [v, v] range pair
+                ckm.iter()
+                    .flat_map(|&v| {
+                        [PdfObj::Int(v as i64), PdfObj::Int(v as i64)]
+                    })
+                    .collect()
+            } else {
+                // Range match: already in [min0, max0, min1, max1, ...] form
+                ckm.iter().map(|&v| PdfObj::Int(v as i64)).collect()
+            };
+            entries.push((b"Mask".to_vec(), PdfObj::Array(mask_ints)));
+        }
+
         writer.add_stream(entries, &img.sample_data, true)
     }
 }

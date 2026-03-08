@@ -1,0 +1,291 @@
+# PDF Output Roadmap — Print-Ready & Round-Trip Testable
+
+## Context
+
+stet's PDF output device (`stet-pdf`) produces valid PDF 1.7 files with correct paths,
+text, images, gradients, and clipping. However, several PostScript features are
+dropped or simplified during PDF emission. This matters for two reasons:
+
+1. **Round-trip testing**: When stet adds PDF input (see `PDF-ROADMAP.md`), the test
+   loop is PS → PDF → pixels vs PS → pixels. Any feature the PDF output drops will
+   cause pixel diffs that are PDF output bugs, not PDF input bugs.
+
+2. **Print production**: Commercial print workflows require Separation/DeviceN
+   color spaces, overprint control, trim/bleed boxes, and PDF/X conformance.
+
+This roadmap tracks what's missing and prioritizes by impact on round-trip fidelity.
+
+---
+
+## Current State
+
+### Working
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| DeviceGray/RGB/CMYK colors | ✓ | CMYK preserved via `native_cmyk` on DeviceColor |
+| ICCBased images | ✓ | Profile bytes embedded as ICC stream |
+| Indexed images | ✓ | Base space + lookup table |
+| Imagemasks | ✓ | 1-bit stencil with fill color |
+| SMask (alpha) | ✓ | PreconvertedRGBA → RGB + SMask |
+| Font embedding | ✓ | Type 1 (subset), CFF/Type 2, TrueType (glyf subset) |
+| Standard 14 fonts | ✓ | Not embedded, referenced by name |
+| Text batching + kerning | ✓ | TJ arrays with computed kern values |
+| Paths (fill/stroke/clip) | ✓ | All segment types, fill rules, stroke params |
+| Axial/Radial shadings | ✓ | Type 2/3 with Extend flags, sampled function |
+| Mesh/Patch shadings | ✓ | Types 4/6/7 with encoded vertex data |
+| Flate compression | ✓ | All streams deflated |
+| Multi-page output | ✓ | Pages tree with per-page resources |
+
+### Not Working / Missing
+
+| Feature | Current Behavior | Impact |
+|---------|-----------------|--------|
+| Separation/DeviceN colors | Pre-converted to RGB at op time | **HIGH** — round-trip + print |
+| Separation/DeviceN images | Pre-converted to RGB at op time | **HIGH** — round-trip + print |
+| Color key mask (Type 4) | ✓ `/Mask` array emitted | — |
+| Pattern fills | Gray placeholder (0.7) | **HIGH** — round-trip |
+| CMYK shadings | Hardcoded to DeviceRGB | **MEDIUM** — color fidelity |
+| CIE-based shadings | Pre-converted to RGB | **LOW** — visually close |
+| Overprint settings | Stored in gstate, not emitted | **MEDIUM** — print separations |
+| Transfer functions | Stored in gstate, not emitted | **LOW** — press calibration |
+| Halftone screens | Stored in gstate, not emitted | **LOW** — screening |
+| Black generation / UCR | Stored in gstate, not emitted | **LOW** — CMYK separation |
+| ExtGState dict | Not emitted | Needed for overprint, opacity |
+| TrimBox / BleedBox | Only MediaBox | **MEDIUM** — print finishing |
+| Document metadata | No Info dict | **LOW** — compliance |
+| PDF/X conformance | No OutputIntent | **LOW** — certification |
+| ToUnicode CMap | ASCII 0x20–0x7E only | **LOW** — searchability |
+| CID font CMap | Not embedded | **LOW** — CJK text extraction |
+
+---
+
+## Phase 1: Round-Trip Critical (Visible Pixel Diffs)
+
+These features, when missing from PDF output, will cause pixel differences in the
+PS → PDF → pixels round-trip test. Fix these before PDF input validation.
+
+### 1.1 Color Key Masking in PDF XObjects ✅
+- [x] Write `/Mask` array in image XObject dict from `color_key_mask` field
+- [x] Handle both exact-match (ncomp values → expanded to range pairs) and range (2×ncomp values) forms
+- [x] Added `num_components()` to `PdfColorSpace`
+- [x] Identity-decode Type 4 images preserve native color space + mask_color for PDF
+- [x] Non-identity-decode Type 4 images use PreconvertedRGBA fallback (mask applied at op time)
+- **Files**: `crates/stet-pdf/src/pdf_device.rs`, `crates/stet-pdf/src/image_ops.rs`, `crates/stet-ops/src/image_ops.rs`
+
+### 1.2 Separation/DeviceN in Display List
+- [ ] Add `ImageColorSpace::Separation` variant with name, alt space, tint transform samples
+- [ ] Add `ImageColorSpace::DeviceN` variant with names, alt space, tint transform samples
+- [ ] In `capture_image_color_space()`: capture Separation/DeviceN instead of returning None
+- [ ] Pre-sample tint transform to lookup table (avoid carrying PsObject across threads)
+- **Files**: `crates/stet-core/src/device.rs`, `crates/stet-ops/src/image_ops.rs`
+- **Effort**: Medium — need to design VM-free representation of tint transform
+
+### 1.3 Separation/DeviceN in PDF Output
+- [ ] Add `PdfColorSpace::Separation` and `PdfColorSpace::DeviceN` variants
+- [ ] Emit `/Separation` color space array: `[/Separation /Name /AlternateSpace tintTransform]`
+- [ ] Emit `/DeviceN` color space array with colorant names + tint transform
+- [ ] Tint transform as Type 0 (sampled) PDF function — avoids PS procedure dependency
+- [ ] Emit Separation/DeviceN for fill/stroke colors (not just images)
+- **Files**: `crates/stet-pdf/src/image_ops.rs`, `crates/stet-pdf/src/content_stream.rs`,
+  `crates/stet-pdf/src/pdf_device.rs`
+- **Effort**: Large — touches color pipeline end-to-end
+
+### 1.4 Separation/DeviceN in Raster Rendering
+- [ ] `samples_to_rgba` in skia_device.rs: handle Separation/DeviceN via sampled tint transform
+- [ ] Apply tint transform lookup table → alternate space → RGB/CMYK → RGBA
+- **Files**: `crates/stet-render/src/skia_device.rs`
+- **Effort**: Medium — lookup table interpolation, similar to Indexed handling
+
+### 1.5 Pattern Fills
+- [ ] Emit tiling patterns as PDF Pattern XObjects (Type 1)
+- [ ] Pattern has own content stream (from pattern's cached display list)
+- [ ] Add `/Pattern` to page Resources dict
+- [ ] Emit `cs /Pattern cs` + `scn /P0 scn` in content stream
+- [ ] Render pattern fills in raster device (tile pattern display list across fill area)
+- **Files**: `crates/stet-pdf/src/pdf_device.rs`, `crates/stet-pdf/src/content_stream.rs`,
+  `crates/stet-render/src/skia_device.rs`, `crates/stet-core/src/device.rs`
+- **Effort**: Large — pattern rendering is architecturally complex
+
+### 1.6 CMYK Shadings
+- [ ] Carry original color space info in shading params (not just DeviceColor)
+- [ ] When source is DeviceCMYK, emit shading with `/DeviceCMYK` and 4-component samples
+- [ ] When source is Separation/DeviceN, emit with appropriate color space
+- [ ] Raster renderer: convert shading colors through proper color pipeline
+- **Files**: `crates/stet-core/src/device.rs` (shading params), `crates/stet-ops/src/shading_ops.rs`,
+  `crates/stet-pdf/src/shading_ops.rs`, `crates/stet-render/src/skia_device.rs`
+- **Effort**: Medium — plumb color space through shading pipeline
+
+---
+
+## Phase 2: Print Production Quality
+
+These improve PDF output for real print workflows. Not strictly needed for round-trip
+pixel testing (since stet's raster renderer also ignores most of these), but important
+for producing usable PDF files.
+
+### 2.1 ExtGState Support
+- [ ] Build `/ExtGState` resource dict on page
+- [ ] Emit `gs` operator in content stream to apply graphics state changes
+- [ ] Track current ExtGState to avoid redundant emissions
+- **Files**: `crates/stet-pdf/src/pdf_device.rs`, `crates/stet-pdf/src/content_stream.rs`
+- **Effort**: Medium — framework for all ExtGState features below
+
+### 2.2 Overprint Settings
+- [ ] Capture `overprint` flag from GraphicsState into display list elements
+- [ ] Emit `/OP true` / `/op true` and `/OPM 1` in ExtGState dict
+- [ ] Requires ExtGState support (2.1)
+- **Files**: `crates/stet-core/src/device.rs`, `crates/stet-pdf/src/pdf_device.rs`
+- **Effort**: Small (once ExtGState exists)
+
+### 2.3 TrimBox / BleedBox
+- [ ] Parse `%%BoundingBox` / `%%HiResBoundingBox` for EPS files
+- [ ] Accept trim/bleed dimensions from pagedevice or CLI
+- [ ] Emit `/TrimBox` and `/BleedBox` in page dict alongside `/MediaBox`
+- **Files**: `crates/stet-pdf/src/pdf_device.rs`
+- **Effort**: Small
+
+### 2.4 Document Metadata
+- [ ] Emit Info dict with `/Producer (stet)`, `/CreationDate`, `/Title` (from filename)
+- [ ] Optionally accept metadata from DSC comments (`%%Title`, `%%Creator`)
+- **Files**: `crates/stet-pdf/src/pdf_device.rs`
+- **Effort**: Small
+
+---
+
+## Phase 3: Compliance & Polish
+
+### 3.1 PDF/X-3 OutputIntent
+- [ ] Embed ICC output profile (sRGB or system CMYK) as OutputIntent stream
+- [ ] Add `/OutputIntents` array to catalog
+- [ ] Set `/GTS_PDFX_Version` in Info dict
+- **Effort**: Medium
+
+### 3.2 Full ToUnicode CMap
+- [ ] Map glyph names → Unicode via Adobe Glyph List
+- [ ] Emit proper `bfchar` / `bfrange` entries for all used glyphs
+- [ ] Handle CID fonts with CID→Unicode mapping
+- **Effort**: Medium
+
+### 3.3 Color Rendering Intent
+- [ ] Capture rendering intent from `setrenderingintent`
+- [ ] Emit `/ri` operator in content stream
+- **Effort**: Small
+
+---
+
+## Phase 4: Do When Needed
+
+These features are stored in the graphics state but don't affect rendering in stet
+or most PDF viewers. They only matter for specific print customers or press
+calibration workflows. Implement on demand rather than speculatively.
+
+### 4.1 Transfer Functions
+- [ ] Sample transfer function procedures to lookup tables at capture time
+- [ ] Emit as Type 0 (sampled) PDF functions in ExtGState `/TR` or `/TR2`
+- [ ] Requires ExtGState support (2.1)
+- **Files**: `crates/stet-core/src/device.rs`, `crates/stet-pdf/src/pdf_device.rs`
+- **Effort**: Medium
+
+### 4.2 Halftone Screens
+- [ ] Capture halftone parameters (frequency, angle, spot function)
+- [ ] Emit `/HT` dict in ExtGState (Type 1 halftone with spot function)
+- [ ] Spot function as Type 4 (PostScript calculator) PDF function
+- [ ] Requires ExtGState support (2.1)
+- **Files**: `crates/stet-core/src/device.rs`, `crates/stet-pdf/src/pdf_device.rs`
+- **Effort**: Medium
+
+### 4.3 Black Generation / UCR
+- [ ] Sample BG/UCR procedures to lookup tables
+- [ ] Emit as PDF functions in ExtGState `/BG2` and `/UCR2`
+- **Effort**: Small (once ExtGState exists)
+
+---
+
+## Implementation Order
+
+Work these sequentially, top to bottom. Quick wins first, then the big
+Separation/DeviceN block, then patterns last (most architecturally complex).
+Phase 4 items are deferred — implement only when a specific need arises.
+
+```
+ #   Item                                 Effort    Notes
+───  ─────────────────────────────────────  ────────  ──────────────────────────────
+ ✅  1.1  Color key mask emission          done
+ 2.  2.4  Document metadata                small     Info dict + dates
+ 3.  2.3  TrimBox / BleedBox               small     page dict entries
+ 4.  1.6  CMYK shadings                    medium    plumb color space through shadings
+ 5.  2.1  ExtGState framework              medium    unlocks overprint + future items
+ 6.  2.2  Overprint settings               small     needs ExtGState (#5)
+ 7.  1.2  Separation/DeviceN display list  medium    VM-free tint transform design
+ 8.  1.3  Separation/DeviceN PDF output    large     end-to-end color pipeline
+ 9.  1.4  Separation/DeviceN raster        medium    lookup table interpolation
+10.  1.5  Pattern fills                    large     most complex, do last in Phase 1
+11.  3.1  PDF/X-3 OutputIntent             medium    when print compliance needed
+12.  3.2  Full ToUnicode CMap              medium    when text extraction needed
+13.  3.3  Color rendering intent           small     when needed
+
+Phase 4 (on demand only):
+ -   4.1  Transfer functions               medium    press calibration
+ -   4.2  Halftone screens                 medium    offset litho screening
+ -   4.3  Black generation / UCR           small     CMYK separation control
+```
+
+---
+
+## Key Files Reference
+
+| File | Role |
+|------|------|
+| `crates/stet-core/src/device.rs` | ImageColorSpace, DisplayElement, shading param structs |
+| `crates/stet-core/src/display_list.rs` | DisplayList structure |
+| `crates/stet-core/src/graphics_state.rs` | GraphicsState fields (overprint, transfer, halftone, pattern) |
+| `crates/stet-ops/src/image_ops.rs` | Image capture, decode, color space conversion |
+| `crates/stet-ops/src/shading_ops.rs` | shfill operator, color sampling |
+| `crates/stet-ops/src/halftone_ops.rs` | Halftone/transfer/pattern operators |
+| `crates/stet-ops/src/color_ops.rs` | Separation/DeviceN parsing, tint transforms |
+| `crates/stet-render/src/skia_device.rs` | Raster rendering, samples_to_rgba |
+| `crates/stet-pdf/src/pdf_device.rs` | PDF page structure, Resources dict, XObject emission |
+| `crates/stet-pdf/src/content_stream.rs` | PDF operators, color emission |
+| `crates/stet-pdf/src/image_ops.rs` | Image XObject creation |
+| `crates/stet-pdf/src/shading_ops.rs` | PDF shading dict generation |
+| `crates/stet-pdf/src/font_embedder.rs` | Font subsetting and embedding |
+
+---
+
+## Validation
+
+### Round-trip pixel test
+```bash
+# Render PS directly to PNG
+stet --device png --dpi 300 sample.ps        # → sample-0001.png
+
+# Render PS to PDF, then PDF to PNG (once PDF input exists)
+stet --device pdf sample.ps                  # → sample.pdf
+stet --device png --dpi 300 sample.pdf       # → sample-0001.png
+
+# Compare
+magick compare -metric RMSE direct.png roundtrip.png null: 2>&1
+```
+
+### Print validation
+```bash
+# Preflight check (requires external tool)
+pdfcpu validate sample.pdf
+
+# Check color spaces
+mutool info sample.pdf           # lists fonts, images, color spaces
+
+# Visual proof
+gs -dBATCH -dNOPAUSE -sDEVICE=png16m -r300 -o gs_%03d.png sample.pdf
+```
+
+### Test files for specific features
+| Feature | Test file |
+|---------|-----------|
+| Separation/DeviceN | `samples/hospital.eps` (CMYK), DeviceN test files |
+| Color key mask | `samples/image-qa.ps` (Type 4 images) |
+| Patterns | Pattern test files from PostForge |
+| CMYK shadings | Shading test with CMYK color space |
+| Overprint | AGM EPS files with overprint flags |
+| Transfer functions | Files with `settransfer` / `setcolortransfer` |
