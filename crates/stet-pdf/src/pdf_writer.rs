@@ -107,7 +107,12 @@ impl PdfWriter {
     }
 
     /// Write the complete PDF to a writer.
-    pub fn write_pdf<W: Write>(&self, w: &mut W, catalog_ref: u32) -> std::io::Result<()> {
+    pub fn write_pdf<W: Write>(
+        &self,
+        w: &mut W,
+        catalog_ref: u32,
+        info_ref: Option<u32>,
+    ) -> std::io::Result<()> {
         let mut offset: usize = 0;
         let mut offsets: Vec<(u32, usize)> = Vec::new();
 
@@ -157,11 +162,16 @@ impl PdfWriter {
         }
 
         // Trailer
+        let info_entry = match info_ref {
+            Some(r) => format!(" /Info {} 0 R", r),
+            None => String::new(),
+        };
         write!(
             w,
-            "trailer\n<</Size {} /Root {} 0 R>>\nstartxref\n{}\n%%EOF\n",
+            "trailer\n<</Size {} /Root {} 0 R{}>>\nstartxref\n{}\n%%EOF\n",
             max_obj + 1,
             catalog_ref,
+            info_entry,
             xref_offset
         )?;
 

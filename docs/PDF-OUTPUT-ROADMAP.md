@@ -53,7 +53,7 @@ This roadmap tracks what's missing and prioritizes by impact on round-trip fidel
 | Black generation / UCR | Stored in gstate, not emitted | **LOW** — CMYK separation |
 | ExtGState dict | Not emitted | Needed for overprint, opacity |
 | TrimBox / BleedBox | Only MediaBox | **MEDIUM** — print finishing |
-| Document metadata | No Info dict | **LOW** — compliance |
+| Document metadata | ✓ Info dict (Producer, Title, CreationDate) | — |
 | PDF/X conformance | No OutputIntent | **LOW** — certification |
 | ToUnicode CMap | ASCII 0x20–0x7E only | **LOW** — searchability |
 | CID font CMap | Not embedded | **LOW** — CJK text extraction |
@@ -145,11 +145,11 @@ for producing usable PDF files.
 - **Files**: `crates/stet-pdf/src/pdf_device.rs`
 - **Effort**: Small
 
-### 2.4 Document Metadata
-- [ ] Emit Info dict with `/Producer (stet)`, `/CreationDate`, `/Title` (from filename)
-- [ ] Optionally accept metadata from DSC comments (`%%Title`, `%%Creator`)
-- **Files**: `crates/stet-pdf/src/pdf_device.rs`
-- **Effort**: Small
+### 2.4 Document Metadata ✅
+- [x] Emit Info dict with `/Producer (stet)`, `/CreationDate` (UTC), `/Title` (from filename)
+- [x] Info dict referenced from trailer via `/Info` entry
+- [ ] Optionally accept metadata from DSC comments (`%%Title`, `%%Creator`) — future
+- **Files**: `crates/stet-pdf/src/pdf_device.rs`, `crates/stet-pdf/src/pdf_writer.rs`
 
 ---
 
@@ -212,7 +212,7 @@ Phase 4 items are deferred — implement only when a specific need arises.
  #   Item                                 Effort    Notes
 ───  ─────────────────────────────────────  ────────  ──────────────────────────────
  ✅  1.1  Color key mask emission          done
- 2.  2.4  Document metadata                small     Info dict + dates
+ ✅  2.4  Document metadata                done
  3.  2.3  TrimBox / BleedBox               small     page dict entries
  4.  1.6  CMYK shadings                    medium    plumb color space through shadings
  5.  2.1  ExtGState framework              medium    unlocks overprint + future items

@@ -112,11 +112,53 @@ impl PdfDevice {
             ]),
         );
 
+        // Info dictionary
+        let info_ref = writer.alloc_obj();
+        let mut info_entries = vec![
+            (b"Producer".to_vec(), PdfObj::LitString(b"stet".to_vec())),
+        ];
+        // Title from output filename
+        if let Some(title) = std::path::Path::new(path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+        {
+            info_entries.push((
+                b"Title".to_vec(),
+                PdfObj::LitString(title.as_bytes().to_vec()),
+            ));
+        }
+        // CreationDate in PDF date format: D:YYYYMMDDHHmmSS
+        {
+            use std::time::SystemTime;
+            let now = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            // Convert to broken-down time via simple arithmetic (UTC)
+            let secs_per_day = 86400u64;
+            let days = now / secs_per_day;
+            let time_of_day = now % secs_per_day;
+            let hours = time_of_day / 3600;
+            let minutes = (time_of_day % 3600) / 60;
+            let seconds = time_of_day % 60;
+            // Days since 1970-01-01 to Y/M/D
+            let (year, month, day) = days_to_ymd(days);
+            let date_str = format!(
+                "D:{:04}{:02}{:02}{:02}{:02}{:02}Z",
+                year, month, day, hours, minutes, seconds
+            );
+            info_entries.push((
+                b"CreationDate".to_vec(),
+                PdfObj::LitString(date_str.into_bytes()),
+            ));
+        }
+        writer.set_object(info_ref, &PdfObj::Dict(info_entries));
+
         // Write to file
         let file = std::fs::File::create(path).map_err(|e| format!("create {}: {}", path, e))?;
         let mut bw = std::io::BufWriter::new(file);
         writer
-            .write_pdf(&mut bw, catalog_ref)
+            .write_pdf(&mut bw, catalog_ref, Some(info_ref))
             .map_err(|e| format!("write {}: {}", path, e))?;
 
         eprintln!("PDF written: {} ({} pages)", path, self.pages.len());
@@ -508,4 +550,20 @@ impl OutputDevice for PdfDevice {
         }
         self.write_pdf(Some(ctx))
     }
+}
+
+/// Convert days since 1970-01-01 to (year, month, day).
+fn days_to_ymd(days: u64) -> (u64, u64, u64) {
+    // Civil calendar algorithm from Howard Hinnant
+    let z = days + 719468;
+    let era = z / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
 }
