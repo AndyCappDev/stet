@@ -9,8 +9,11 @@ use stet_core::device::{ClipParams, FillParams, ImageParams, OutputDevice, Strok
 use stet_core::display_list::DisplayList;
 use stet_core::graphics_state::PsPath;
 
+use std::collections::HashMap;
+
 use crate::content_stream::{self, ContentStreamResult, ShadingRef};
 use crate::font_embedder;
+use crate::font_tracker::FontTracker;
 use crate::image_ops::ImageXObject;
 use crate::pdf_objects::PdfObj;
 use crate::pdf_writer::PdfWriter;
@@ -59,10 +62,31 @@ impl PdfDevice {
         let catalog_ref = writer.alloc_obj();
         let pages_ref = writer.alloc_obj();
 
-        let mut page_refs = Vec::new();
+        // Document-level font tracker — shared across all pages
+        let mut font_tracker = FontTracker::new();
 
+        // First pass: build content streams and register fonts
+        let mut page_results: Vec<(ContentStreamResult, &PageData)> = Vec::new();
         for page in &self.pages {
-            let page_ref = self.build_page(&mut writer, page, pages_ref, ctx)?;
+            let result = content_stream::build_content_stream(
+                &page.display_list,
+                page.page_w,
+                page.page_h,
+                page.dpi,
+                ctx,
+                &mut font_tracker,
+            );
+            page_results.push((result, page));
+        }
+
+        // Embed each unique font once at document level
+        let font_obj_map: HashMap<String, u32> =
+            self.embed_all_fonts(&mut writer, &font_tracker, ctx);
+
+        // Second pass: build page objects referencing shared font objects
+        let mut page_refs = Vec::new();
+        for (result, page) in &page_results {
+            let page_ref = self.build_page(&mut writer, page, pages_ref, result, &font_obj_map)?;
             page_refs.push(page_ref);
         }
 
@@ -99,32 +123,42 @@ impl PdfDevice {
         Ok(())
     }
 
+    /// Embed all tracked fonts once at document level.
+    /// Returns a map from PDF font name (e.g. "F0") to the PDF object number.
+    fn embed_all_fonts(
+        &self,
+        writer: &mut PdfWriter,
+        font_tracker: &FontTracker,
+        ctx: Option<&Context>,
+    ) -> HashMap<String, u32> {
+        let mut map = HashMap::new();
+        for usage in font_tracker.fonts() {
+            let font_ref = if let Some(c) = ctx {
+                font_embedder::build_font_resource(writer, usage, c)
+                    .unwrap_or_else(|| self.build_font_reference(writer, usage))
+            } else {
+                self.build_font_reference(writer, usage)
+            };
+            map.insert(usage.pdf_name.clone(), font_ref);
+        }
+        map
+    }
+
     /// Build PDF objects for a single page. Returns the page object number.
     fn build_page(
         &self,
         writer: &mut PdfWriter,
         page: &PageData,
         pages_ref: u32,
-        ctx: Option<&Context>,
+        result: &ContentStreamResult,
+        font_obj_map: &HashMap<String, u32>,
     ) -> Result<u32, String> {
-        // Generate content stream from display list.
-        // When Context is available, pre-compute font widths for TJ kern values.
         let ContentStreamResult {
             content,
             images,
             shading_refs,
-            font_tracker,
-        } = content_stream::build_content_stream(
-            &page.display_list,
-            page.page_w,
-            page.page_h,
-            page.dpi,
-            ctx,
-        );
-
-        // Populate font widths from Context (for TJ kern computation in content stream)
-        // This is done after font tracking but the content stream already uses the widths
-        // since we pass ctx to build_content_stream.
+            used_font_names,
+        } = result;
 
         // Build image XObjects
         let mut xobject_entries: Vec<(Vec<u8>, PdfObj)> = Vec::new();
@@ -145,16 +179,12 @@ impl PdfDevice {
             shading_entries.push((format!("Sh{}", i).into_bytes(), PdfObj::Ref(sh_obj)));
         }
 
-        // Build font resources
+        // Build per-page font resource references (pointing to shared document-level objects)
         let mut font_entries: Vec<(Vec<u8>, PdfObj)> = Vec::new();
-        for usage in font_tracker.fonts() {
-            let font_ref = if let Some(c) = ctx {
-                font_embedder::build_font_resource(writer, usage, c)
-                    .unwrap_or_else(|| self.build_font_reference(writer, usage))
-            } else {
-                self.build_font_reference(writer, usage)
-            };
-            font_entries.push((usage.pdf_name.clone().into_bytes(), PdfObj::Ref(font_ref)));
+        for name in used_font_names {
+            if let Some(&obj_ref) = font_obj_map.get(name) {
+                font_entries.push((name.clone().into_bytes(), PdfObj::Ref(obj_ref)));
+            }
         }
 
         // Resources dict

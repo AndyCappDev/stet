@@ -4,6 +4,7 @@
 
 //! Convert a DisplayList into PDF content stream bytes.
 
+use std::collections::HashSet;
 use std::io::Write as IoWrite;
 
 use stet_core::context::Context;
@@ -29,8 +30,8 @@ pub struct ContentStreamResult {
     /// Indices into the display list for shading elements, paired with
     /// the shading resource name index used in the content stream.
     pub shading_refs: Vec<ShadingRef>,
-    /// Font tracker with all fonts used on this page.
-    pub font_tracker: FontTracker,
+    /// PDF font names used on this page (e.g., ["F0", "F2"]).
+    pub used_font_names: Vec<String>,
 }
 
 /// Reference to a shading element that needs a PDF shading resource.
@@ -95,6 +96,7 @@ fn color_to_pdf(c: &DeviceColor) -> PdfColor {
 
 /// Generate PDF content stream bytes from a display list.
 ///
+/// Uses a shared document-level `FontTracker` to register fonts across pages.
 /// When `ctx` is available, pre-computes font widths for TJ kern values
 /// and batches consecutive same-font text elements into single BT/ET blocks.
 pub fn build_content_stream(
@@ -103,6 +105,7 @@ pub fn build_content_stream(
     page_h: u32,
     dpi: f64,
     ctx: Option<&Context>,
+    font_tracker: &mut FontTracker,
 ) -> ContentStreamResult {
     let scale = 72.0 / dpi;
     let page_h_pts = page_h as f64 * scale;
@@ -112,19 +115,24 @@ pub fn build_content_stream(
     let mut shading_refs: Vec<ShadingRef> = Vec::new();
     let mut clip_depth: u32 = 0;
     let mut gs = GState::new();
-    let mut font_tracker = FontTracker::new();
+
+    // Track which fonts this page uses (for per-page Resources/Font dict)
+    let mut page_font_names: HashSet<String> = HashSet::new();
 
     // First pass: scan Text elements to register fonts
     for element in list.elements() {
         if let DisplayElement::Text { params } = element {
-            font_tracker.track(params);
+            let name = font_tracker.track(params).to_string();
+            page_font_names.insert(name);
         }
     }
 
     // Pre-compute glyph widths for TJ kern values when Context is available
     if let Some(c) = ctx {
         for usage in font_tracker.fonts_mut() {
-            usage.widths = font_embedder::extract_widths(usage, c);
+            if usage.widths.is_empty() {
+                usage.widths = font_embedder::extract_widths(usage, c);
+            }
         }
     }
 
@@ -321,7 +329,7 @@ pub fn build_content_stream(
         content: buf,
         images,
         shading_refs,
-        font_tracker,
+        used_font_names: page_font_names.into_iter().collect(),
     }
 }
 

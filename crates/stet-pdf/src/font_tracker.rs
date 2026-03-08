@@ -49,10 +49,17 @@ pub struct FontUsage {
     pub widths: HashMap<u16, i32>,
 }
 
+/// Font deduplication key: (font_name, font_type).
+/// Fonts with the same name and type produce the same embedded font program
+/// regardless of which page or scalefont/makefont created the font dict.
+type FontKey = (Vec<u8>, i32);
+
 /// Tracks font usage across all pages in a PDF job.
 pub struct FontTracker {
-    /// Map from font entity → font usage.
-    fonts: HashMap<EntityId, FontUsage>,
+    /// Map from font key → font usage (document-level dedup).
+    fonts: HashMap<FontKey, FontUsage>,
+    /// Map from font entity → PDF name (for fast lookup by entity during content stream gen).
+    entity_to_name: HashMap<EntityId, String>,
     /// Next font index for naming.
     next_idx: usize,
 }
@@ -61,6 +68,7 @@ impl FontTracker {
     pub fn new() -> Self {
         Self {
             fonts: HashMap::new(),
+            entity_to_name: HashMap::new(),
             next_idx: 0,
         }
     }
@@ -68,8 +76,10 @@ impl FontTracker {
     /// Register a Text element's font and record character usage.
     /// Returns the PDF resource name for this font.
     pub fn track(&mut self, params: &TextParams) -> &str {
+        let key = (params.font_name.clone(), params.font_type);
         let entity = params.font_entity;
-        let usage = self.fonts.entry(entity).or_insert_with(|| {
+
+        let usage = self.fonts.entry(key).or_insert_with(|| {
             let idx = self.next_idx;
             self.next_idx += 1;
             let is_std14 = STANDARD_14
@@ -102,12 +112,16 @@ impl FontTracker {
             }
         }
 
+        // Cache entity→name mapping for fast lookup
+        let name = usage.pdf_name.clone();
+        self.entity_to_name.insert(entity, name);
+
         &usage.pdf_name
     }
 
     /// Look up the PDF resource name for a font entity.
     pub fn get_pdf_name(&self, entity: EntityId) -> Option<&str> {
-        self.fonts.get(&entity).map(|u| u.pdf_name.as_str())
+        self.entity_to_name.get(&entity).map(|s| s.as_str())
     }
 
     /// Iterate over all tracked fonts.
@@ -123,8 +137,10 @@ impl FontTracker {
     /// Look up a glyph width for a font entity and character code.
     /// Returns width in 1000ths of a unit, or None if unavailable.
     pub fn get_glyph_width(&self, font_entity: EntityId, code: u16) -> Option<i32> {
+        let pdf_name = self.entity_to_name.get(&font_entity)?;
         self.fonts
-            .get(&font_entity)
+            .values()
+            .find(|u| u.pdf_name == *pdf_name)
             .and_then(|u| u.widths.get(&code).copied())
     }
 }
