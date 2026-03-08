@@ -1338,6 +1338,152 @@ fn build_font_descriptor(
 }
 
 // ============================================================
+// TrueType font subsetting
+// ============================================================
+
+/// Extract component GIDs from a composite glyf entry.
+///
+/// Walks the component records in a composite glyph (numberOfContours < 0),
+/// collecting referenced glyph indices. Only extracts direct references —
+/// use `compute_used_gids` for transitive closure.
+fn find_composite_glyph_deps(glyf_data: &[u8]) -> Vec<u16> {
+    let mut deps = Vec::new();
+    if glyf_data.len() < 10 {
+        return deps;
+    }
+    let num_contours = truetype::read_i16(glyf_data, 0);
+    if num_contours >= 0 {
+        return deps; // simple glyph, no deps
+    }
+    let mut offset = 10; // skip header
+    loop {
+        if offset + 4 > glyf_data.len() {
+            break;
+        }
+        let flags = truetype::read_u16(glyf_data, offset);
+        let glyph_index = truetype::read_u16(glyf_data, offset + 2);
+        deps.push(glyph_index);
+        offset += 4;
+
+        // Skip arguments
+        if flags & 0x0001 != 0 {
+            offset += 4; // ARG_1_AND_2_ARE_WORDS
+        } else {
+            offset += 2;
+        }
+        // Skip transform
+        if flags & 0x0008 != 0 {
+            offset += 2; // WE_HAVE_A_SCALE
+        } else if flags & 0x0040 != 0 {
+            offset += 4; // WE_HAVE_AN_X_AND_Y_SCALE
+        } else if flags & 0x0080 != 0 {
+            offset += 8; // WE_HAVE_A_TWO_BY_TWO
+        }
+        if flags & 0x0020 == 0 {
+            break; // MORE_COMPONENTS flag not set
+        }
+    }
+    deps
+}
+
+/// Compute the full set of used GIDs including transitive composite dependencies.
+///
+/// Takes a seed set of directly-used GIDs, adds GID 0 (.notdef), and transitively
+/// resolves all composite glyph component references.
+fn compute_used_gids(font_data: &[u8], seed_gids: &HashSet<u16>) -> HashSet<u16> {
+    let mut used = seed_gids.clone();
+    used.insert(0); // always include .notdef
+    let mut worklist: Vec<u16> = used.iter().copied().collect();
+
+    while let Some(gid) = worklist.pop() {
+        if let Some(glyf_bytes) = truetype::get_glyf_data(font_data, gid) {
+            for dep_gid in find_composite_glyph_deps(&glyf_bytes) {
+                if used.insert(dep_gid) {
+                    worklist.push(dep_gid);
+                }
+            }
+        }
+    }
+    used
+}
+
+/// Subset a TrueType font by zeroing out unused glyf entries.
+///
+/// Preserves GID numbering — unused glyphs become zero-length entries in loca.
+/// All other tables (cmap, hmtx, head, hhea, maxp, etc.) are kept unchanged
+/// except head.indexToLocFormat which is set to 1 (long format).
+fn subset_truetype(font_data: &[u8], used_gids: &HashSet<u16>) -> Option<Vec<u8>> {
+    // Get numGlyphs from maxp
+    let (maxp_off, _) = truetype::find_table(font_data, b"maxp")?;
+    if maxp_off + 6 > font_data.len() {
+        return None;
+    }
+    let num_glyphs = truetype::read_u16(font_data, maxp_off + 4) as usize;
+    let has_glyf = truetype::find_table(font_data, b"glyf").is_some();
+    let has_loca = truetype::find_table(font_data, b"loca").is_some();
+    if !has_glyf || !has_loca {
+        return None; // no glyf/loca tables — can't subset
+    }
+
+    // Build new glyf and loca tables
+    let mut new_glyf: Vec<u8> = Vec::new();
+    let mut loca_offsets: Vec<u32> = Vec::with_capacity(num_glyphs + 1);
+    for gid in 0..num_glyphs {
+        loca_offsets.push(new_glyf.len() as u32);
+        if used_gids.contains(&(gid as u16)) {
+            if let Some(glyf_bytes) = truetype::get_glyf_data(font_data, gid as u16) {
+                new_glyf.extend_from_slice(&glyf_bytes);
+                // Pad to 2-byte alignment
+                if new_glyf.len() % 2 != 0 {
+                    new_glyf.push(0);
+                }
+            }
+        }
+        // Unused glyphs: no data written, loca[gid] == loca[gid+1] → zero-length
+    }
+    loca_offsets.push(new_glyf.len() as u32);
+
+    // Build loca table (long format)
+    let mut loca_data = Vec::with_capacity(loca_offsets.len() * 4);
+    for &off in &loca_offsets {
+        loca_data.extend_from_slice(&off.to_be_bytes());
+    }
+
+    // Reassemble font: copy all tables except glyf/loca, replace those
+    let num_tables = truetype::read_u16(font_data, 4) as usize;
+    let mut keep_tables: Vec<(&[u8], Vec<u8>)> = Vec::new();
+
+    for i in 0..num_tables {
+        let entry_off = 12 + i * 16;
+        if entry_off + 16 > font_data.len() {
+            break;
+        }
+        let tag = &font_data[entry_off..entry_off + 4];
+        let tbl_offset = truetype::read_u32(font_data, entry_off + 8) as usize;
+        let tbl_length = truetype::read_u32(font_data, entry_off + 12) as usize;
+
+        if tag == b"glyf" || tag == b"loca" {
+            continue; // replaced below
+        }
+        if tbl_offset + tbl_length <= font_data.len() {
+            let mut data = font_data[tbl_offset..tbl_offset + tbl_length].to_vec();
+            // Update head.indexToLocFormat to long (1)
+            if tag == b"head" && data.len() >= 52 {
+                data[50] = 0;
+                data[51] = 1;
+            }
+            keep_tables.push((tag, data));
+        }
+    }
+
+    keep_tables.push((b"glyf", new_glyf));
+    keep_tables.push((b"loca", loca_data));
+    keep_tables.sort_by_key(|(tag, _)| *tag);
+
+    Some(assemble_truetype(&keep_tables))
+}
+
+// ============================================================
 // CID / TrueType font embedding (Type 0, Type 42)
 // ============================================================
 
@@ -1587,6 +1733,15 @@ fn build_cid_font(writer: &mut PdfWriter, usage: &FontUsage, ctx: &Context) -> O
         let cid_to_gid_data = build_cid_to_gid_stream(&cid_to_gid, max_cid);
         PdfObj::Ref(writer.add_stream(Vec::new(), &cid_to_gid_data, true))
     };
+
+    // Subset TrueType font: zero out unused glyf entries to reduce size
+    let seed_gids: HashSet<u16> = usage
+        .used_codes
+        .iter()
+        .filter_map(|&cid| cid_to_gid.get(&cid).copied())
+        .collect();
+    let used_gids = compute_used_gids(&font_data, &seed_gids);
+    let font_data = subset_truetype(&font_data, &used_gids).unwrap_or(font_data);
 
     // Embed TrueType binary as FontFile2
     let font_file_entries = vec![(b"Length1".to_vec(), PdfObj::Int(font_data.len() as i64))];
@@ -2106,6 +2261,34 @@ fn build_type42_font(writer: &mut PdfWriter, usage: &FontUsage, ctx: &Context) -
         Some(writer.add_stream(Vec::new(), &cmap_data, true))
     } else {
         None
+    };
+
+    // Subset TrueType font: collect used GIDs via Encoding → CharStrings mapping
+    let font_data = if let (Some(enc_entity), Some(cs_entity)) =
+        (encoding_entity, charstrings_entity)
+    {
+        let mut seed_gids: HashSet<u16> = HashSet::new();
+        for &code in &usage.used_codes {
+            if code > 255 {
+                continue;
+            }
+            let glyph_name_obj = ctx.arrays.get_element(enc_entity, code as u32);
+            if let PsValue::Name(name_id) = glyph_name_obj.value {
+                if let Some(cs_obj) = ctx.dicts.get(cs_entity, &DictKey::Name(name_id)) {
+                    if let Some(gid) = cs_obj.as_i32() {
+                        seed_gids.insert(gid as u16);
+                    }
+                }
+            }
+        }
+        if seed_gids.is_empty() {
+            font_data // can't determine used GIDs, embed whole
+        } else {
+            let used_gids = compute_used_gids(&font_data, &seed_gids);
+            subset_truetype(&font_data, &used_gids).unwrap_or(font_data)
+        }
+    } else {
+        font_data // no Encoding/CharStrings, embed whole
     };
 
     // Embed TrueType binary as FontFile2
