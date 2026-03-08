@@ -18,7 +18,7 @@ Tracks progress on PDF text support after the initial BT/ET/Tf/Tm/Tj implementat
 - [x] Emit `/Widths`, `/FirstChar`, `/LastChar` in PDF font dicts
 - [x] Extract glyph widths from Type 1 charstrings (hsbw/sbw opcodes)
 - [x] Extract widths for full FirstChar..LastChar range (not just used chars)
-- [ ] Extract widths from Type 2 (CFF) charstrings
+- [x] Extract widths from Type 2 (CFF) charstrings via `build_type2_font`
 
 ### 3. Font descriptor
 - [x] Emit `/FontDescriptor` with `/FontBBox`, `/Ascent`, `/Descent`, `/StemV`, `/Flags`

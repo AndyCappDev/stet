@@ -17,6 +17,7 @@ use std::collections::{HashMap, HashSet};
 use stet_core::context::Context;
 use stet_core::dict::DictKey;
 use stet_core::object::{EntityId, PsValue};
+use stet_core::type2_charstring;
 
 use crate::font_tracker::FontUsage;
 use crate::pdf_objects::PdfObj;
@@ -155,7 +156,7 @@ pub fn build_font_resource(
 ) -> Option<u32> {
     match usage.font_type {
         1 => build_type1_font(writer, usage, ctx),
-        2 => build_type1_font(writer, usage, ctx), // CFF treated same as Type 1 for PDF
+        2 => build_type2_font(writer, usage, ctx),
         3 => None, // Type 3 can't be embedded
         0 | 42 => build_type1_font(writer, usage, ctx), // Simplified for now
         _ => None,
@@ -274,6 +275,188 @@ fn build_type1_font(
 
     // Build Encoding with Differences array from PS font's actual encoding
     let encoding_obj = build_encoding_differences(ctx, encoding_entity, first_char, last_char);
+
+    // Build Font dict
+    let mut font_entries: Vec<(Vec<u8>, PdfObj)> = vec![
+        (b"Type".to_vec(), PdfObj::name("Font")),
+        (b"Subtype".to_vec(), PdfObj::name("Type1")),
+        (
+            b"BaseFont".to_vec(),
+            PdfObj::Name(usage.font_name.clone()),
+        ),
+        (b"FirstChar".to_vec(), PdfObj::Int(first_char as i64)),
+        (b"LastChar".to_vec(), PdfObj::Int(last_char as i64)),
+        (b"Widths".to_vec(), PdfObj::Array(widths_array)),
+        (b"FontDescriptor".to_vec(), PdfObj::Ref(descriptor_ref)),
+    ];
+
+    if let Some(enc) = encoding_obj {
+        font_entries.push((b"Encoding".to_vec(), enc));
+    }
+
+    if let Some(tu_ref) = tounicode_ref {
+        font_entries.push((b"ToUnicode".to_vec(), PdfObj::Ref(tu_ref)));
+    }
+
+    Some(writer.add_object(&PdfObj::Dict(font_entries)))
+}
+
+/// Build a Type 2 (CFF) font resource with widths extracted from Type 2 charstrings.
+fn build_type2_font(
+    writer: &mut PdfWriter,
+    usage: &FontUsage,
+    ctx: &Context,
+) -> Option<u32> {
+    let font_entity = usage.font_entity;
+    let font_name_str = String::from_utf8_lossy(&usage.font_name);
+
+    // Get encoding array
+    let encoding_entity = ctx
+        .dicts
+        .get(font_entity, &DictKey::Name(ctx.name_cache.n_encoding))
+        .and_then(|obj| match obj.value {
+            PsValue::Array { entity, .. } => Some(entity),
+            _ => None,
+        });
+
+    // Get CharStrings dict
+    let charstrings_entity = ctx
+        .dicts
+        .get(font_entity, &DictKey::Name(ctx.name_cache.n_char_strings))
+        .and_then(|obj| match obj.value {
+            PsValue::Dict(e) => Some(e),
+            _ => None,
+        });
+
+    // Get Private dict → defaultWidthX, nominalWidthX, local Subrs
+    let private_entity = ctx
+        .dicts
+        .get(font_entity, &DictKey::Name(ctx.name_cache.n_private))
+        .and_then(|obj| match obj.value {
+            PsValue::Dict(e) => Some(e),
+            _ => None,
+        });
+
+    let mut default_width_x = 0.0;
+    let mut nominal_width_x = 0.0;
+    let mut local_subrs: Vec<Vec<u8>> = Vec::new();
+
+    if let Some(pe) = private_entity {
+        if let Some(name_id) = ctx.names.find(b"defaultWidthX")
+            && let Some(obj) = ctx.dicts.get(pe, &DictKey::Name(name_id))
+            && let Some(v) = obj.as_f64()
+        {
+            default_width_x = v;
+        }
+        if let Some(name_id) = ctx.names.find(b"nominalWidthX")
+            && let Some(obj) = ctx.dicts.get(pe, &DictKey::Name(name_id))
+            && let Some(v) = obj.as_f64()
+        {
+            nominal_width_x = v;
+        }
+        if let Some(obj) = ctx.dicts.get(pe, &DictKey::Name(ctx.name_cache.n_subrs))
+            && let PsValue::Array { entity, start, len } = obj.value
+        {
+            let elems = ctx.arrays.get(entity, start, len);
+            local_subrs = elems
+                .iter()
+                .map(|o| match o.value {
+                    PsValue::String { entity, start, len } => {
+                        ctx.strings.get(entity, start, len).to_vec()
+                    }
+                    _ => Vec::new(),
+                })
+                .collect();
+        }
+    }
+
+    // Global subrs
+    let mut global_subrs: Vec<Vec<u8>> = Vec::new();
+    if let Some(name_id) = ctx.names.find(b"_cff_global_subrs")
+        && let Some(obj) = ctx.dicts.get(font_entity, &DictKey::Name(name_id))
+        && let PsValue::Array { entity, start, len } = obj.value
+    {
+        let elems = ctx.arrays.get(entity, start, len);
+        global_subrs = elems
+            .iter()
+            .map(|o| match o.value {
+                PsValue::String { entity, start, len } => {
+                    ctx.strings.get(entity, start, len).to_vec()
+                }
+                _ => Vec::new(),
+            })
+            .collect();
+    }
+
+    // Determine FirstChar/LastChar from used codes
+    let mut first_char: u16 = 255;
+    let mut last_char: u16 = 0;
+    for &code in &usage.used_codes {
+        if code <= 255 {
+            first_char = first_char.min(code);
+            last_char = last_char.max(code);
+        }
+    }
+    if first_char > last_char {
+        first_char = 0;
+        last_char = 0;
+    }
+
+    // Extract widths for all characters in range using Type 2 charstring interpreter
+    let mut widths: HashMap<u16, i32> = HashMap::new();
+    if let (Some(enc_entity), Some(cs_entity)) = (encoding_entity, charstrings_entity) {
+        for code in first_char..=last_char {
+            let glyph_name_obj = ctx.arrays.get_element(enc_entity, code as u32);
+            let glyph_name_id = match glyph_name_obj.value {
+                PsValue::Name(id) => id,
+                _ => continue,
+            };
+
+            let cs_obj = match ctx.dicts.get(cs_entity, &DictKey::Name(glyph_name_id)) {
+                Some(obj) => obj,
+                None => continue,
+            };
+
+            let (cs_ent, cs_start, cs_len) = match cs_obj.value {
+                PsValue::String { entity, start, len } => (entity, start, len),
+                _ => continue,
+            };
+
+            let cs_bytes = ctx.strings.get(cs_ent, cs_start, cs_len).to_vec();
+            if let Ok(result) = type2_charstring::execute_type2_charstring(
+                &cs_bytes,
+                &local_subrs,
+                &global_subrs,
+                default_width_x,
+                nominal_width_x,
+                false,
+            ) {
+                widths.insert(code, result.width_x as i32);
+            }
+        }
+    }
+
+    // Build Widths array
+    let widths_array: Vec<PdfObj> = (first_char..=last_char)
+        .map(|code| PdfObj::Int(*widths.get(&code).unwrap_or(&0) as i64))
+        .collect();
+
+    // Build ToUnicode CMap
+    let tounicode_map = build_tounicode_map(ctx, encoding_entity, &usage.used_codes);
+    let tounicode_ref = if !tounicode_map.is_empty() {
+        let cmap_data = generate_tounicode_cmap(&tounicode_map, &font_name_str);
+        Some(writer.add_stream(Vec::new(), &cmap_data, true))
+    } else {
+        None
+    };
+
+    // Build Encoding with Differences
+    let encoding_obj = build_encoding_differences(ctx, encoding_entity, first_char, last_char);
+
+    // Build FontDescriptor
+    let bbox = get_font_bbox(ctx, font_entity);
+    let flags = compute_font_flags(ctx, font_entity);
+    let descriptor_ref = build_font_descriptor(writer, &usage.font_name, &bbox, flags);
 
     // Build Font dict
     let mut font_entries: Vec<(Vec<u8>, PdfObj)> = vec![
