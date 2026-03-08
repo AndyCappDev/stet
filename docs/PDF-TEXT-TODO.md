@@ -42,9 +42,11 @@ Tracks progress on PDF text support after the initial BT/ET/Tf/Tm/Tj implementat
 - Handles narrow/stretched/rotated text (e.g., clipping.ps "Narrow Text")
 
 ### 8. Type 1 font embedding
-- [ ] Reconstruct Type 1 font binary (cleartext + eexec encrypted private dict + charstrings)
-- [ ] Subset to used glyphs + .notdef + seac dependencies
-- [ ] Emit as `/FontFile` stream in font descriptor
+- [x] Reconstruct Type 1 font binary (cleartext + eexec encrypted private dict + charstrings)
+- [x] Subset to used glyphs + .notdef + seac dependencies
+- [x] Emit as `/FontFile` stream in font descriptor with `/Length1`, `/Length2`, `/Length3`
+- [x] Charstring encryption for re-encrypted subrs
+- [x] Private dict hint values (BlueValues, StdHW, etc.) preserved in embedded font
 - eexec encryption code exists in `font_embedder.rs`
 
 ### 9. CFF font embedding
