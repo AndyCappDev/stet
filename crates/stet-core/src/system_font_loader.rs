@@ -51,9 +51,15 @@ pub fn load_otf_cff(ctx: &mut Context, path: &Path) -> bool {
     let saved_vm_mode = ctx.vm_alloc_mode;
     ctx.vm_alloc_mode = true;
 
+    // Store raw CFF binary for PDF embedding
+    let sl = ctx.save_stack.current_level();
+    let cs = ctx.save_stack.last_save_id();
+    let cff_str_entity = ctx.strings.allocate_from_with(cff_data, sl, true, cs);
+    let cff_data_len = cff_data.len() as u32;
+
     let mut success = true;
     for cff_font in &cff_fonts {
-        if register_cff_font(ctx, cff_font).is_err() {
+        if register_cff_font(ctx, cff_font, cff_str_entity, cff_data_len).is_err() {
             success = false;
             break;
         }
@@ -334,6 +340,8 @@ fn get_font_bbox(font_data: &[u8]) -> (i16, i16, i16, i16) {
 fn register_cff_font(
     ctx: &mut Context,
     cff_font: &cff_parser::CffFont,
+    cff_str_entity: crate::object::EntityId,
+    cff_data_len: u32,
 ) -> Result<(), crate::error::PsError> {
     let sl = ctx.save_stack.current_level();
     let cs = ctx.save_stack.last_save_id();
@@ -489,6 +497,14 @@ fn register_cff_font(
             },
         );
     }
+
+    // Store raw CFF binary for PDF embedding
+    let cff_data_key = DictKey::Name(ctx.names.intern(b"_CFFData"));
+    ctx.dicts.put(
+        font_entity,
+        cff_data_key,
+        PsObject::string(cff_str_entity, cff_data_len),
+    );
 
     // FID
     let fid = ctx.next_fid;

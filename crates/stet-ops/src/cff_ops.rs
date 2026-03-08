@@ -70,8 +70,12 @@ pub fn op_cff_startdata(ctx: &mut Context) -> Result<(), PsError> {
     let saved_vm_mode = ctx.vm_alloc_mode;
     ctx.vm_alloc_mode = true;
 
+    // Store raw CFF binary as a PS string for PDF embedding
+    let cff_str_entity = ctx.strings.allocate_from(&cff_data);
+    let cff_data_len = cff_data.len() as u32;
+
     for cff_font in &cff_fonts {
-        register_cff_font(ctx, cff_font)?;
+        register_cff_font(ctx, cff_font, cff_str_entity, cff_data_len)?;
     }
 
     ctx.vm_alloc_mode = saved_vm_mode;
@@ -79,7 +83,12 @@ pub fn op_cff_startdata(ctx: &mut Context) -> Result<(), PsError> {
 }
 
 /// Build a PostScript font dictionary from a parsed CffFont and register it.
-fn register_cff_font(ctx: &mut Context, cff_font: &CffFont) -> Result<(), PsError> {
+fn register_cff_font(
+    ctx: &mut Context,
+    cff_font: &CffFont,
+    cff_str_entity: stet_core::object::EntityId,
+    cff_data_len: u32,
+) -> Result<(), PsError> {
     // Create font dictionary
     let font_entity = ctx.dicts.allocate(16, b"CFF");
 
@@ -302,6 +311,21 @@ fn register_cff_font(ctx: &mut Context, cff_font: &CffFont) -> Result<(), PsErro
             },
         );
     }
+
+    // Store raw CFF binary for PDF embedding (keyed as _CFFData on font dict)
+    let cff_data_key = DictKey::Name(ctx.names.intern(b"_CFFData"));
+    ctx.dicts.put(
+        font_entity,
+        cff_data_key,
+        PsObject {
+            value: PsValue::String {
+                entity: cff_str_entity,
+                start: 0,
+                len: cff_data_len,
+            },
+            flags: ObjFlags::literal_composite(),
+        },
+    );
 
     // CID-specific data
     if cff_font.is_cid {

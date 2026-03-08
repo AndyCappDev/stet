@@ -589,7 +589,7 @@ pub fn build_font_resource(
         1 => build_type1_font(writer, usage, ctx),
         2 => build_type2_font(writer, usage, ctx),
         3 => None, // Type 3 can't be embedded
-        0 | 42 => build_type1_font(writer, usage, ctx), // Simplified for now
+        0 | 42 => None, // CID/TrueType embedding not yet implemented
         _ => None,
     }
 }
@@ -913,11 +913,25 @@ fn build_type2_font(
     // Build Encoding with Differences
     let encoding_obj = build_encoding_differences(ctx, encoding_entity, first_char, last_char);
 
+    // Embed raw CFF binary as FontFile3 with Subtype Type1C
+    let font_file3_ref = ctx
+        .names
+        .find(b"_CFFData")
+        .and_then(|name_id| ctx.dicts.get(font_entity, &DictKey::Name(name_id)))
+        .and_then(|obj| match obj.value {
+            PsValue::String { entity, start, len } => {
+                let cff_bytes = ctx.strings.get(entity, start, len).to_vec();
+                let entries = vec![(b"Subtype".to_vec(), PdfObj::name("Type1C"))];
+                Some(writer.add_stream(entries, &cff_bytes, true))
+            }
+            _ => None,
+        });
+
     // Build FontDescriptor
     let bbox = get_font_bbox(ctx, font_entity);
     let flags = compute_font_flags(ctx, font_entity);
     let descriptor_ref =
-        build_font_descriptor(writer, &usage.font_name, &bbox, flags, None, None);
+        build_font_descriptor(writer, &usage.font_name, &bbox, flags, None, font_file3_ref);
 
     // Build Font dict
     let mut font_entries: Vec<(Vec<u8>, PdfObj)> = vec![

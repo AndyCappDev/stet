@@ -52,10 +52,10 @@ Tracks progress on PDF text support after the initial BT/ET/Tf/Tm/Tj implementat
 - [x] Standard 14 fonts skip embedding
 
 ### 9. CFF font embedding
-- [ ] Store raw CFF binary during parsing (`cff_ops.rs` / `system_font_loader.rs`)
-- [ ] Embed as `/FontFile3` with `/Subtype /Type1C`
-- [ ] Extract widths from Type 2 charstrings
-- Subsetting deferred (embed full CFF initially)
+- [x] Store raw CFF binary during parsing (`cff_ops.rs` / `system_font_loader.rs`) as `_CFFData` key
+- [x] Embed as `/FontFile3` with `/Subtype /Type1C`
+- [x] Extract widths from Type 2 charstrings (done in item 2)
+- Subsetting deferred (embeds full CFF initially)
 
 ### 10. CID/TrueType font embedding
 - [ ] Create `cid_embedder.rs`
