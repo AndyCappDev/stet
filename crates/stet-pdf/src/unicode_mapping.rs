@@ -9,7 +9,6 @@
 //! Used by the font embedder for encoding-based ToUnicode mapping.
 //! Will be wired up when Context-aware font embedding is added.
 
-#![allow(dead_code)]
 
 use std::collections::HashMap;
 use std::sync::LazyLock;

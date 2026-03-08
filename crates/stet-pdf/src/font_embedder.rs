@@ -11,7 +11,6 @@
 //! Currently unused because the PDF device doesn't have Context access.
 //! Will be wired up when we add Context-aware font embedding.
 
-#![allow(dead_code)]
 
 use std::collections::{HashMap, HashSet};
 
@@ -211,15 +210,25 @@ fn build_type1_font(
     let subrs = get_decrypted_subrs(ctx, private_entity, len_iv);
 
     // Compute widths for used character codes
-    let mut widths: HashMap<u16, i32> = HashMap::new();
+    // Determine FirstChar/LastChar from used codes
     let mut first_char: u16 = 255;
     let mut last_char: u16 = 0;
+    for &code in &usage.used_codes {
+        if code <= 255 {
+            first_char = first_char.min(code);
+            last_char = last_char.max(code);
+        }
+    }
+    if first_char > last_char {
+        first_char = 0;
+        last_char = 0;
+    }
 
+    // Extract widths for ALL characters in FirstChar..LastChar range
+    // (PDF viewers need correct widths for the entire range, not just used chars)
+    let mut widths: HashMap<u16, i32> = HashMap::new();
     if let (Some(enc_entity), Some(cs_entity)) = (encoding_entity, charstrings_entity) {
-        for &code in &usage.used_codes {
-            if code > 255 {
-                continue;
-            }
+        for code in first_char..=last_char {
             let glyph_name_obj = ctx.arrays.get_element(enc_entity, code as u32);
             let glyph_name_id = match glyph_name_obj.value {
                 PsValue::Name(id) => id,
@@ -240,15 +249,8 @@ fn build_type1_font(
             let decrypted = decrypt_charstring(cs_bytes, len_iv);
             if let Some(w) = extract_charstring_width(&decrypted, &subrs) {
                 widths.insert(code, w as i32);
-                first_char = first_char.min(code);
-                last_char = last_char.max(code);
             }
         }
-    }
-
-    if widths.is_empty() {
-        first_char = 0;
-        last_char = 0;
     }
 
     // Build Widths array
@@ -270,6 +272,9 @@ fn build_type1_font(
     let flags = compute_font_flags(ctx, font_entity);
     let descriptor_ref = build_font_descriptor(writer, &usage.font_name, &bbox, flags);
 
+    // Build Encoding with Differences array from PS font's actual encoding
+    let encoding_obj = build_encoding_differences(ctx, encoding_entity, first_char, last_char);
+
     // Build Font dict
     let mut font_entries: Vec<(Vec<u8>, PdfObj)> = vec![
         (b"Type".to_vec(), PdfObj::name("Font")),
@@ -283,6 +288,10 @@ fn build_type1_font(
         (b"Widths".to_vec(), PdfObj::Array(widths_array)),
         (b"FontDescriptor".to_vec(), PdfObj::Ref(descriptor_ref)),
     ];
+
+    if let Some(enc) = encoding_obj {
+        font_entries.push((b"Encoding".to_vec(), enc));
+    }
 
     if let Some(tu_ref) = tounicode_ref {
         font_entries.push((b"ToUnicode".to_vec(), PdfObj::Ref(tu_ref)));
@@ -390,6 +399,57 @@ fn generate_tounicode_cmap(map: &HashMap<u16, u16>, font_name: &str) -> Vec<u8> 
     lines.push(b"end".to_vec());
 
     lines.join(&b'\n')
+}
+
+/// Build a PDF Encoding dict with /Differences from the PS font's encoding array.
+///
+/// The Differences array tells the PDF viewer which glyph name maps to each
+/// character code, overriding the base encoding. This is essential for fonts
+/// with custom encodings (e.g., bullet at code 170 instead of ª).
+fn build_encoding_differences(
+    ctx: &Context,
+    encoding_entity: Option<EntityId>,
+    first_char: u16,
+    last_char: u16,
+) -> Option<PdfObj> {
+    let enc_entity = encoding_entity?;
+
+    // Build Differences array: [code1 /name1 /name2 ... codeN /nameN ...]
+    // Consecutive glyph names after a code number increment the code automatically.
+    let mut differences: Vec<PdfObj> = Vec::new();
+    let mut need_code = true; // whether we need to emit the next code number
+
+    for code in first_char..=last_char {
+        let glyph_obj = ctx.arrays.get_element(enc_entity, code as u32);
+        let name_id = match glyph_obj.value {
+            PsValue::Name(id) => id,
+            _ => {
+                need_code = true;
+                continue;
+            }
+        };
+
+        let name_bytes = ctx.names.get_bytes(name_id);
+        if name_bytes == b".notdef" {
+            need_code = true;
+            continue;
+        }
+
+        if need_code {
+            differences.push(PdfObj::Int(code as i64));
+            need_code = false;
+        }
+        differences.push(PdfObj::Name(name_bytes.to_vec()));
+    }
+
+    if differences.is_empty() {
+        return None;
+    }
+
+    Some(PdfObj::Dict(vec![
+        (b"Type".to_vec(), PdfObj::name("Encoding")),
+        (b"Differences".to_vec(), PdfObj::Array(differences)),
+    ]))
 }
 
 /// Read FontBBox from font dict.

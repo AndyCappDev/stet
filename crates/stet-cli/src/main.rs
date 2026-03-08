@@ -613,10 +613,11 @@ fn execjob(
     // --- Job cleanup (always runs, like PostForge's _cleanup_job finally) ---
 
     // 1. Flush device BEFORE restore (restore reverts gstate.page_device)
-    if let Some(ref mut dev) = ctx.device
-        && let Err(e) = dev.finish()
-    {
-        eprintln!("render error: {}", e);
+    if let Some(mut dev) = ctx.device.take() {
+        if let Err(e) = dev.finish_with_context(&ctx) {
+            eprintln!("render error: {}", e);
+        }
+        ctx.device = Some(dev);
     }
 
     // 2. Clear execution state

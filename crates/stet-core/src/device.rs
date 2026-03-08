@@ -281,6 +281,14 @@ pub trait OutputDevice {
     fn finish(&mut self) -> Result<(), String> {
         Ok(())
     }
+
+    /// Called after interpretation finishes, with access to the interpreter context.
+    ///
+    /// PDF device uses this to read font dicts for embedding (charstrings,
+    /// encoding, metrics). Default delegates to `finish()`.
+    fn finish_with_context(&mut self, _ctx: &crate::context::Context) -> Result<(), String> {
+        self.finish()
+    }
 }
 
 /// A null rendering device that discards all output.

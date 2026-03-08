@@ -1206,8 +1206,14 @@ fn render_show(
         );
     }
 
-    // Emit Text element for PDF device (before glyph rendering)
-    emit_text_element(ctx, bytes.to_vec(), font_entity, font_type);
+    // Determine if this is a spacing-adjusted show (ashow/widthshow/awidthshow)
+    let is_adjusted = extra_ax != 0.0 || extra_ay != 0.0 || width_char >= 0;
+
+    // For plain show: emit one Text for the whole string (Widths handle spacing)
+    // For adjusted show: emit per-character Text inside the loop
+    if !is_adjusted {
+        emit_text_element(ctx, bytes.to_vec(), font_entity, font_type, None);
+    }
 
     let info = get_font_info(ctx)?;
     let subrs = get_subrs(ctx, &info);
@@ -1227,6 +1233,11 @@ fn render_show(
     let font_entity_for_cache = info.font_entity;
 
     for &byte in bytes {
+        // For adjusted shows: emit per-character Text with exact device position
+        if is_adjusted {
+            let (dev_x, dev_y) = ctm.transform_point(cur_x, cur_y);
+            emit_text_element(ctx, vec![byte], font_entity, font_type, Some((dev_x, dev_y)));
+        }
         // Look up glyph name from encoding
         let glyph_name_obj = ctx.arrays.get_element(info.encoding_entity, byte as u32);
         let glyph_name_id = match glyph_name_obj.value {
@@ -1463,8 +1474,11 @@ fn render_show_type2(
     cx: f64,
     cy: f64,
 ) -> Result<(), PsError> {
-    // Emit Text element for PDF device
-    emit_text_element(ctx, bytes.to_vec(), font_entity, 2);
+    let is_adjusted = extra_ax != 0.0 || extra_ay != 0.0 || width_char >= 0;
+
+    if !is_adjusted {
+        emit_text_element(ctx, bytes.to_vec(), font_entity, 2, None);
+    }
 
     let info = get_type2_info(ctx, font_entity)?;
 
@@ -1475,6 +1489,10 @@ fn render_show_type2(
     let (paint_type, stroke_width_dev) = get_paint_info(ctx, font_entity, &info.font_matrix, &ctm);
 
     for &byte in bytes {
+        if is_adjusted {
+            let (dev_x, dev_y) = ctm.transform_point(cur_x, cur_y);
+            emit_text_element(ctx, vec![byte], font_entity, 2, Some((dev_x, dev_y)));
+        }
         // Look up glyph name from encoding
         let glyph_name_obj = ctx.arrays.get_element(info.encoding_entity, byte as u32);
         let glyph_name_id = match glyph_name_obj.value {
@@ -1852,8 +1870,8 @@ fn render_show_composite(
         .and_then(|obj| obj.as_i32())
         .unwrap_or(1);
 
-    // Emit Text element for PDF device
-    emit_text_element(ctx, bytes.to_vec(), font_entity, font_type);
+    // TODO: per-character Text emission for composite fonts with adjusted spacing
+    emit_text_element(ctx, bytes.to_vec(), font_entity, font_type, None);
 
     let type0_fm = read_font_matrix(ctx, font_entity);
 
@@ -3446,10 +3464,7 @@ fn render_show_displaced(
         .and_then(|obj| obj.as_i32())
         .unwrap_or(1);
 
-    // Emit Text element for PDF device (skip Type 3 which can't be embedded)
-    if font_type != 3 {
-        emit_text_element(ctx, bytes.to_vec(), font_entity_check, font_type);
-    }
+    // Per-character Text emission happens inside each handler's character loop
 
     if font_type == 2 {
         return render_show_displaced_type2(ctx, font_entity_check, bytes, displacements, mode);
@@ -3473,6 +3488,10 @@ fn render_show_displaced(
     let (paint_type, stroke_width_dev) = get_paint_info(ctx, info.font_entity, &info.font_matrix, &ctm);
 
     for (i, &byte) in bytes.iter().enumerate() {
+        // Emit per-character Text element for PDF (exact device-space position)
+        let (dev_x, dev_y) = ctm.transform_point(cur_x, cur_y);
+        emit_text_element(ctx, vec![byte], font_entity_check, font_type, Some((dev_x, dev_y)));
+
         // Look up glyph name from encoding
         let glyph_name_obj = ctx.arrays.get_element(info.encoding_entity, byte as u32);
         let glyph_name_id = match glyph_name_obj.value {
@@ -4185,11 +4204,15 @@ fn advance_by_displacement(
 /// The PDF device uses these for BT/ET/Tf/Tj operators; the rasterizer ignores them.
 /// Called for Type 1, Type 2 (CFF), Type 0 (composite), and Type 42 fonts.
 /// NOT called for Type 3 fonts (which can't be embedded in PDF).
+/// Emit a Text display element for the PDF device.
+///
+/// `device_pos`: explicit device-space position. If None, uses ctx.gstate.current_point.
 fn emit_text_element(
     ctx: &mut Context,
     text: Vec<u8>,
     font_entity: EntityId,
     font_type: i32,
+    device_pos: Option<(f64, f64)>,
 ) {
     // Extract FontName
     let font_name = ctx
@@ -4225,8 +4248,9 @@ fn emit_text_element(
     let scale_y = (ctm.c * ctm.c + ctm.d * ctm.d).sqrt();
     let font_size = point_size * (scale_x * scale_y).sqrt();
 
-    // Current position (already device space)
-    let (start_x, start_y) = ctx.gstate.current_point.unwrap_or((0.0, 0.0));
+    // Device-space position: explicit or from current_point
+    let (start_x, start_y) = device_pos
+        .unwrap_or_else(|| ctx.gstate.current_point.unwrap_or((0.0, 0.0)));
 
     let params = TextParams {
         text,

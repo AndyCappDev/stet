@@ -432,8 +432,9 @@ fn install_device_via_setpagedevice(
 
 /// Call finish() on the device to flush any pending renders.
 fn finish_device(ctx: &mut Context) {
-    if let Some(ref mut device) = ctx.device {
-        let _ = device.finish();
+    if let Some(mut dev) = ctx.device.take() {
+        let _ = dev.finish_with_context(ctx);
+        ctx.device = Some(dev);
     }
 }
 

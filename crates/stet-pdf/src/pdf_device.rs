@@ -4,11 +4,13 @@
 
 //! PDF output device — accumulates pages and writes a PDF file on finish().
 
+use stet_core::context::Context;
 use stet_core::device::{ClipParams, FillParams, ImageParams, OutputDevice, StrokeParams};
 use stet_core::display_list::DisplayList;
 use stet_core::graphics_state::PsPath;
 
 use crate::content_stream::{self, ContentStreamResult, ShadingRef};
+use crate::font_embedder;
 use crate::font_tracker::FontTracker;
 use crate::image_ops::ImageXObject;
 use crate::pdf_objects::PdfObj;
@@ -48,7 +50,7 @@ impl PdfDevice {
     }
 
     /// Assemble all accumulated pages into a PDF and write to the output file.
-    fn write_pdf(&self) -> Result<(), String> {
+    fn write_pdf(&self, ctx: Option<&Context>) -> Result<(), String> {
         let path = self.output_path.as_deref().ok_or("no output path set")?;
 
         let mut writer = PdfWriter::new();
@@ -60,7 +62,7 @@ impl PdfDevice {
         let mut page_refs = Vec::new();
 
         for page in &self.pages {
-            let page_ref = self.build_page(&mut writer, page, pages_ref)?;
+            let page_ref = self.build_page(&mut writer, page, pages_ref, ctx)?;
             page_refs.push(page_ref);
         }
 
@@ -103,6 +105,7 @@ impl PdfDevice {
         writer: &mut PdfWriter,
         page: &PageData,
         pages_ref: u32,
+        ctx: Option<&Context>,
     ) -> Result<u32, String> {
         // Build image XObjects
         let mut xobject_entries: Vec<(Vec<u8>, PdfObj)> = Vec::new();
@@ -126,7 +129,13 @@ impl PdfDevice {
         // Build font resources
         let mut font_entries: Vec<(Vec<u8>, PdfObj)> = Vec::new();
         for usage in page.font_tracker.fonts() {
-            let font_ref = self.build_font_reference(writer, usage);
+            // Try Context-aware font embedding first (proper Widths, ToUnicode, descriptor)
+            let font_ref = if let Some(c) = ctx {
+                font_embedder::build_font_resource(writer, usage, c)
+                    .unwrap_or_else(|| self.build_font_reference(writer, usage))
+            } else {
+                self.build_font_reference(writer, usage)
+            };
             font_entries.push((usage.pdf_name.clone().into_bytes(), PdfObj::Ref(font_ref)));
         }
 
@@ -376,6 +385,13 @@ impl OutputDevice for PdfDevice {
         if self.pages.is_empty() {
             return Ok(());
         }
-        self.write_pdf()
+        self.write_pdf(None)
+    }
+
+    fn finish_with_context(&mut self, ctx: &Context) -> Result<(), String> {
+        if self.pages.is_empty() {
+            return Ok(());
+        }
+        self.write_pdf(Some(ctx))
     }
 }
