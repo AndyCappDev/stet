@@ -237,9 +237,11 @@ fn build_type1_shading(
                     Ok(results) => {
                         if needs_tint_conversion(color_space) {
                             match convert_tint_color(ctx, &results, color_space) {
-                                Ok(alt) => {
-                                    components_to_device_color(&alt, get_alt_space(color_space), &mut ctx.icc_cache)
-                                }
+                                Ok(alt) => components_to_device_color(
+                                    &alt,
+                                    get_alt_space(color_space),
+                                    &mut ctx.icc_cache,
+                                ),
                                 Err(_) => continue,
                             }
                         } else {
@@ -260,7 +262,11 @@ fn build_type1_shading(
                         comps[i] = ctx.o_stack.pop()?.as_f64().unwrap_or(0.0);
                     }
                     match convert_tint_color(ctx, &comps, color_space) {
-                        Ok(alt) => components_to_device_color(&alt, get_alt_space(color_space), &mut ctx.icc_cache),
+                        Ok(alt) => components_to_device_color(
+                            &alt,
+                            get_alt_space(color_space),
+                            &mut ctx.icc_cache,
+                        ),
                         Err(_) => continue,
                     }
                 } else {
@@ -762,9 +768,7 @@ fn components_to_device_color(
                 }
             }
             match n {
-                1 => {
-                    DeviceColor::from_gray(comps.first().copied().unwrap_or(0.0).clamp(0.0, 1.0))
-                }
+                1 => DeviceColor::from_gray(comps.first().copied().unwrap_or(0.0).clamp(0.0, 1.0)),
                 3 if comps.len() >= 3 => DeviceColor::from_rgb(
                     comps[0].clamp(0.0, 1.0),
                     comps[1].clamp(0.0, 1.0),
@@ -1220,9 +1224,7 @@ fn pop_color_components(
                 }
             }
             match n {
-                1 => {
-                    DeviceColor::from_gray(comps.first().copied().unwrap_or(0.0).clamp(0.0, 1.0))
-                }
+                1 => DeviceColor::from_gray(comps.first().copied().unwrap_or(0.0).clamp(0.0, 1.0)),
                 3 if comps.len() >= 3 => DeviceColor::from_rgb(
                     comps[0].clamp(0.0, 1.0),
                     comps[1].clamp(0.0, 1.0),

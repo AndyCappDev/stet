@@ -839,12 +839,22 @@ fn replay_form_elements(
                 new_params.start_y = dev_y;
                 // Compose the stored CTM (identity during form capture) with real CTM
                 let form_ctm = Matrix {
-                    a: params.ctm[0], b: params.ctm[1],
-                    c: params.ctm[2], d: params.ctm[3],
-                    tx: params.ctm[4], ty: params.ctm[5],
+                    a: params.ctm[0],
+                    b: params.ctm[1],
+                    c: params.ctm[2],
+                    d: params.ctm[3],
+                    tx: params.ctm[4],
+                    ty: params.ctm[5],
                 };
                 let composed = ctm.concat(&form_ctm);
-                new_params.ctm = [composed.a, composed.b, composed.c, composed.d, composed.tx, composed.ty];
+                new_params.ctm = [
+                    composed.a,
+                    composed.b,
+                    composed.c,
+                    composed.d,
+                    composed.tx,
+                    composed.ty,
+                ];
                 target.push(DisplayElement::Text { params: new_params });
             }
         }

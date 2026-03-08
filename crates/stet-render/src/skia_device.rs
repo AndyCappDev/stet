@@ -1295,13 +1295,12 @@ fn render_element_to_band(
             let stroke = build_stroke(params, dpi);
             // Apply stroke adjustment for thin strokes when enabled
             let adjusted;
-            let draw_path =
-                if params.stroke_adjust && stroke.width <= 2.0 {
-                    adjusted = stroke_adjust_path(path, stroke.width as f64);
-                    &adjusted
-                } else {
-                    path
-                };
+            let draw_path = if params.stroke_adjust && stroke.width <= 2.0 {
+                adjusted = stroke_adjust_path(path, stroke.width as f64);
+                &adjusted
+            } else {
+                path
+            };
             let Some(skia_path) = build_skia_path(draw_path) else {
                 return;
             };
@@ -1464,8 +1463,7 @@ fn render_pattern_fill_to_band(
     let sy = step_y / params.ystep.abs();
 
     // Compute the fill path bounding box to determine tile range
-    let (mut min_x, mut min_y, mut max_x, mut max_y) =
-        (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+    let (mut min_x, mut min_y, mut max_x, mut max_y) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
     for seg in &params.path.segments {
         let (x, y) = match seg {
             PathSegment::MoveTo(x, y) | PathSegment::LineTo(x, y) => (*x, *y),
@@ -2698,23 +2696,22 @@ fn render_element_to_viewport(
             // Path coords are in reference-DPI device space, so we scale
             // the snap grid to match the viewport transform.
             let adjusted;
-            let draw_path =
-                if params.stroke_adjust && stroke.width <= 2.0 {
-                    // Snap in output pixel space: transform coords, snap, inverse-transform.
-                    // For identity CTM (isotropic strokes in device space), we can snap
-                    // directly using the viewport scale factors.
-                    adjusted = stroke_adjust_path_viewport(
-                        path,
-                        stroke.width as f64,
-                        scale_x as f64,
-                        scale_y as f64,
-                        vp_x as f64,
-                        vp_y as f64,
-                    );
-                    &adjusted
-                } else {
-                    path
-                };
+            let draw_path = if params.stroke_adjust && stroke.width <= 2.0 {
+                // Snap in output pixel space: transform coords, snap, inverse-transform.
+                // For identity CTM (isotropic strokes in device space), we can snap
+                // directly using the viewport scale factors.
+                adjusted = stroke_adjust_path_viewport(
+                    path,
+                    stroke.width as f64,
+                    scale_x as f64,
+                    scale_y as f64,
+                    vp_x as f64,
+                    vp_y as f64,
+                );
+                &adjusted
+            } else {
+                path
+            };
             let Some(skia_path) = build_skia_path(draw_path) else {
                 return;
             };
@@ -2835,7 +2832,15 @@ fn render_element_to_viewport(
         }
         DisplayElement::PatternFill { params } => {
             render_pattern_fill_viewport(
-                pixmap, state, params, vp_x, vp_y, scale_x, scale_y, out_w, out_h,
+                pixmap,
+                state,
+                params,
+                vp_x,
+                vp_y,
+                scale_x,
+                scale_y,
+                out_w,
+                out_h,
                 effective_dpi,
             );
         }
@@ -2859,8 +2864,7 @@ fn render_pattern_fill_viewport(
     effective_dpi: f64,
 ) {
     let mut temp_mask = None;
-    let Some(mask_ref) = resolve_clip_mask(&state.clip_region, &mut temp_mask, out_w, out_h)
-    else {
+    let Some(mask_ref) = resolve_clip_mask(&state.clip_region, &mut temp_mask, out_w, out_h) else {
         return;
     };
 

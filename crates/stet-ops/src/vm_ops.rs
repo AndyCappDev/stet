@@ -46,8 +46,7 @@ pub fn op_restore(ctx: &mut Context) -> Result<(), PsError> {
     // Clear glyph caches for entities created after the save point
     ctx.glyph_caches.retain(|entity, _| {
         // Keep caches for entities that existed before this save
-        entity.is_global()
-            || ctx.dicts.entity_meta(*entity).created_after_save < save_id
+        entity.is_global() || ctx.dicts.entity_meta(*entity).created_after_save < save_id
     });
 
     // Restore device clip in the display list (vm_restore restores the gstate

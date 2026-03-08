@@ -1283,13 +1283,12 @@ fn samples_to_rgba(
             let mut decoded = vec![0u8; pixel_count * ncomp as usize];
             for i in 0..pixel_count {
                 for c in 0..ncomp as usize {
-                    let raw = samples.get(i * ncomp as usize + c).copied().unwrap_or(0) as f64
-                        / 255.0;
+                    let raw =
+                        samples.get(i * ncomp as usize + c).copied().unwrap_or(0) as f64 / 255.0;
                     let d_min = decode.get(c * 2).copied().unwrap_or(0.0);
                     let d_max = decode.get(c * 2 + 1).copied().unwrap_or(1.0);
                     let val = d_min + raw * (d_max - d_min);
-                    decoded[i * ncomp as usize + c] =
-                        (val.clamp(0.0, 1.0) * 255.0).round() as u8;
+                    decoded[i * ncomp as usize + c] = (val.clamp(0.0, 1.0) * 255.0).round() as u8;
                 }
             }
             Some(decoded)
@@ -1318,8 +1317,7 @@ fn samples_to_rgba(
                 let mut decoded = vec![0u8; pixel_count * 4];
                 for i in 0..pixel_count {
                     for c in 0..4usize {
-                        let raw =
-                            samples.get(i * 4 + c).copied().unwrap_or(0) as f64 / 255.0;
+                        let raw = samples.get(i * 4 + c).copied().unwrap_or(0) as f64 / 255.0;
                         let d_min = decode.get(c * 2).copied().unwrap_or(0.0);
                         let d_max = decode.get(c * 2 + 1).copied().unwrap_or(1.0);
                         let val = d_min + raw * (d_max - d_min);
@@ -1455,7 +1453,13 @@ fn samples_to_rgba(
                     let d_max = decode.get(c * 2 + 1).copied().unwrap_or(1.0);
                     *val = (d_min + raw * (d_max - d_min)).clamp(0.0, 1.0);
                 }
-                let color = DeviceColor::from_cmyk_icc(cmyk[0], cmyk[1], cmyk[2], cmyk[3], &mut ctx.icc_cache);
+                let color = DeviceColor::from_cmyk_icc(
+                    cmyk[0],
+                    cmyk[1],
+                    cmyk[2],
+                    cmyk[3],
+                    &mut ctx.icc_cache,
+                );
                 rgba[pi] = (color.r * 255.0).round().clamp(0.0, 255.0) as u8;
                 rgba[pi + 1] = (color.g * 255.0).round().clamp(0.0, 255.0) as u8;
                 rgba[pi + 2] = (color.b * 255.0).round().clamp(0.0, 255.0) as u8;

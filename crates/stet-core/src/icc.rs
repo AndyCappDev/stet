@@ -8,9 +8,7 @@
 //! converts colors to sRGB. Also searches for system CMYK profiles to improve
 //! DeviceCMYK → RGB conversion beyond the naive PLRM formula.
 
-use moxcms::{
-    ColorProfile, DataColorSpace, Layout, TransformExecutor, TransformOptions,
-};
+use moxcms::{ColorProfile, DataColorSpace, Layout, TransformExecutor, TransformOptions};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -302,8 +300,7 @@ fn find_system_cmyk_profile() -> Option<Vec<u8>> {
     #[cfg(target_os = "windows")]
     {
         if let Some(sysroot) = std::env::var_os("SYSTEMROOT") {
-            let dir =
-                std::path::PathBuf::from(sysroot).join("System32/spool/drivers/color");
+            let dir = std::path::PathBuf::from(sysroot).join("System32/spool/drivers/color");
             if let Some(bytes) = scan_dir_for_cmyk_icc(&dir) {
                 return Some(bytes);
             }

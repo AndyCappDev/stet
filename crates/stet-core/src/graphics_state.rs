@@ -288,13 +288,7 @@ impl DeviceColor {
 
     /// Create from CMYK, converting through ICC profile if available.
     /// Falls back to PLRM formula when ICC is unavailable.
-    pub fn from_cmyk_icc(
-        c: f64,
-        m: f64,
-        y: f64,
-        k: f64,
-        icc: &mut crate::icc::IccCache,
-    ) -> Self {
+    pub fn from_cmyk_icc(c: f64, m: f64, y: f64, k: f64, icc: &mut crate::icc::IccCache) -> Self {
         if let Some((r, g, b)) = icc.convert_cmyk(c, m, y, k) {
             Self {
                 r,

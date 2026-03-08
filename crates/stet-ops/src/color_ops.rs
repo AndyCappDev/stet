@@ -432,7 +432,13 @@ fn set_color_from_tint_result(ctx: &mut Context, n: u32) -> Result<(), PsError> 
     ctx.gstate.color = match n {
         1 => DeviceColor::from_gray(components[0]),
         3 => DeviceColor::from_rgb(components[0], components[1], components[2]),
-        4 => DeviceColor::from_cmyk_icc(components[0], components[1], components[2], components[3], &mut ctx.icc_cache),
+        4 => DeviceColor::from_cmyk_icc(
+            components[0],
+            components[1],
+            components[2],
+            components[3],
+            &mut ctx.icc_cache,
+        ),
         _ => DeviceColor::from_gray(0.0),
     };
     ctx.gstate.current_pattern = None;
@@ -561,11 +567,7 @@ pub fn op_currentcolor(ctx: &mut Context) -> Result<(), PsError> {
 /// Looks up the index in the palette and sets the resolved base-space color.
 /// Set color from ICCBased color space with an actual ICC profile.
 /// Pops N components, converts through ICC profile, stores as DeviceColor.
-fn set_icc_color(
-    ctx: &mut Context,
-    n: u32,
-    hash: &[u8; 32],
-) -> Result<(), PsError> {
+fn set_icc_color(ctx: &mut Context, n: u32, hash: &[u8; 32]) -> Result<(), PsError> {
     if (ctx.o_stack.len() as u32) < n {
         return Err(PsError::StackUnderflow);
     }
@@ -682,7 +684,9 @@ fn default_color_for_space(cs: &ColorSpace, ctx: &mut Context) -> DeviceColor {
     match cs {
         ColorSpace::DeviceGray => DeviceColor::from_gray(0.0),
         ColorSpace::DeviceRGB => DeviceColor::from_rgb(0.0, 0.0, 0.0),
-        ColorSpace::DeviceCMYK => DeviceColor::from_cmyk_icc(0.0, 0.0, 0.0, 1.0, &mut ctx.icc_cache),
+        ColorSpace::DeviceCMYK => {
+            DeviceColor::from_cmyk_icc(0.0, 0.0, 0.0, 1.0, &mut ctx.icc_cache)
+        }
         ColorSpace::CIEBasedABC { params, .. } => DeviceColor::from_cie_abc(0.0, 0.0, 0.0, params),
         ColorSpace::CIEBasedA { params, .. } => DeviceColor::from_cie_a(0.0, params),
         ColorSpace::CIEBasedDEF { params, .. } => DeviceColor::from_cie_def(0.0, 0.0, 0.0, params),
@@ -1138,15 +1142,16 @@ fn parse_iccbased_colorspace(
 }
 
 /// Extract ICC profile bytes from a dict's DataSource and register with the ICC cache.
-fn extract_icc_profile(ctx: &mut Context, dict_entity: EntityId) -> Option<stet_core::icc::ProfileHash> {
+fn extract_icc_profile(
+    ctx: &mut Context,
+    dict_entity: EntityId,
+) -> Option<stet_core::icc::ProfileHash> {
     // Look for a string-based DataSource in the dict
     let ds_key = ctx.names.find(b"DataSource")?;
     let ds_obj = ctx.dicts.get(dict_entity, &DictKey::Name(ds_key))?;
 
     let bytes = match ds_obj.value {
-        PsValue::String { entity, start, len } => {
-            ctx.strings.get(entity, start, len).to_vec()
-        }
+        PsValue::String { entity, start, len } => ctx.strings.get(entity, start, len).to_vec(),
         PsValue::File(file_entity) => {
             // Read all bytes from file/filter
             let mut buf = Vec::new();
@@ -1509,7 +1514,11 @@ pub fn precompute_cie_decode_tables(
             // Pre-evaluate DecodeA over RangeA
             if let Some(decode_a_proc) = get_cie_decode_proc_single(ctx, dict_entity, b"DecodeA") {
                 p.decode_a = Some(eval_decode_table_range(
-                    ctx, decode_a_proc, 256, p.range_a[0], p.range_a[1],
+                    ctx,
+                    decode_a_proc,
+                    256,
+                    p.range_a[0],
+                    p.range_a[1],
                 )?);
             }
 

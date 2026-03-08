@@ -14,7 +14,9 @@ use stet_core::dict::DictKey;
 use stet_core::display_list::DisplayElement;
 use stet_core::error::PsError;
 use stet_core::glyph_cache::{CachedGlyph, CachedType3Glyph, Type3CacheMode};
-use stet_core::graphics_state::{DashPattern, DeviceColor, FillRule, LineCap, LineJoin, Matrix, PathSegment, PsPath};
+use stet_core::graphics_state::{
+    DashPattern, DeviceColor, FillRule, LineCap, LineJoin, Matrix, PathSegment, PsPath,
+};
 use stet_core::object::{EntityId, PsObject, PsValue};
 use stet_core::truetype;
 use stet_core::type2_charstring;
@@ -463,9 +465,7 @@ fn cmap_lookup_cid(ctx: &Context, cmap_entity: EntityId, char_code: i32) -> i32 
 
 /// Decode bytes through CMap and return (CID, font_index) pairs.
 fn decode_cmap_bytes(ctx: &Context, font_entity: EntityId, bytes: &[u8]) -> Vec<(i32, usize)> {
-    if let Some((cmap_entity, byte_width, font_num)) =
-        decode_cmap_characters(ctx, font_entity)
-    {
+    if let Some((cmap_entity, byte_width, font_num)) = decode_cmap_characters(ctx, font_entity) {
         // CMap-based decoding
         let mut result = Vec::new();
         let mut pos = 0;
@@ -1228,7 +1228,8 @@ fn render_show(
     let (mut cur_x, mut cur_y) = ictm.transform_point(dev_cpx, dev_cpy);
 
     let ctm = ctx.gstate.ctm;
-    let (paint_type, stroke_width_dev) = get_paint_info(ctx, info.font_entity, &info.font_matrix, &ctm);
+    let (paint_type, stroke_width_dev) =
+        get_paint_info(ctx, info.font_entity, &info.font_matrix, &ctm);
 
     let font_entity_for_cache = info.font_entity;
 
@@ -1236,7 +1237,13 @@ fn render_show(
         // For adjusted shows: emit per-character Text with exact device position
         if is_adjusted {
             let (dev_x, dev_y) = ctm.transform_point(cur_x, cur_y);
-            emit_text_element(ctx, vec![byte], font_entity, font_type, Some((dev_x, dev_y)));
+            emit_text_element(
+                ctx,
+                vec![byte],
+                font_entity,
+                font_type,
+                Some((dev_x, dev_y)),
+            );
         }
         // Look up glyph name from encoding
         let glyph_name_obj = ctx.arrays.get_element(info.encoding_entity, byte as u32);
@@ -1309,8 +1316,7 @@ fn render_show(
             // Metrics widths are in character space — transform through FontMatrix
             info.font_matrix.transform_delta(metrics_wx, 0.0)
         } else {
-            info.font_matrix
-                .transform_delta(width_x, width_y)
+            info.font_matrix.transform_delta(width_x, width_y)
         };
         cur_x += wx + extra_ax;
         cur_y += wy + extra_ay;
@@ -1563,12 +1569,10 @@ fn render_show_type2(
             if let Some(mw) = get_metrics_width_type2(ctx, metrics_entity, glyph_name_id, byte) {
                 info.font_matrix.transform_delta(mw, 0.0)
             } else {
-                info.font_matrix
-                    .transform_delta(width_x, width_y)
+                info.font_matrix.transform_delta(width_x, width_y)
             }
         } else {
-            info.font_matrix
-                .transform_delta(width_x, width_y)
+            info.font_matrix.transform_delta(width_x, width_y)
         };
         cur_x += wx + extra_ax;
         cur_y += wy + extra_ay;
@@ -1640,13 +1644,14 @@ fn measure_string_width_type2(
                 .glyph_caches
                 .entry(font_entity)
                 .or_insert_with(stet_core::glyph_cache::GlyphCache::new);
-            cache.by_name.entry(glyph_name_id).or_insert_with(|| {
-                CachedGlyph {
+            cache
+                .by_name
+                .entry(glyph_name_id)
+                .or_insert_with(|| CachedGlyph {
                     segments: Arc::new(result.path.segments),
                     width_x: result.width_x,
                     width_y: result.width_y,
-                }
-            });
+                });
             (result.width_x, result.width_y)
         };
 
@@ -1654,12 +1659,10 @@ fn measure_string_width_type2(
             if let Some(mw) = get_metrics_width_type2(ctx, metrics_entity, glyph_name_id, byte) {
                 info.font_matrix.transform_delta(mw, 0.0)
             } else {
-                info.font_matrix
-                    .transform_delta(width_x, width_y)
+                info.font_matrix.transform_delta(width_x, width_y)
             }
         } else {
-            info.font_matrix
-                .transform_delta(width_x, width_y)
+            info.font_matrix.transform_delta(width_x, width_y)
         };
         total_wx += wx;
         total_wy += wy;
@@ -1753,9 +1756,7 @@ fn render_charpath_type2(
             }
         }
 
-        let (wx, wy) = info
-            .font_matrix
-            .transform_delta(width_x, width_y);
+        let (wx, wy) = info.font_matrix.transform_delta(width_x, width_y);
         cur_x += wx;
         cur_y += wy;
     }
@@ -2070,83 +2071,92 @@ fn render_show_composite(
                             cur_x += wx + extra_ax;
                             cur_y += wy + extra_ay;
                         } else {
-                        // Get glyf data: try GlyphDirectory first, then sfnts
-                        let glyf_bytes = if let Some(gd_entity) = glyph_dir_entity {
-                            ctx.dicts
-                                .get(gd_entity, &DictKey::Int(gid as i32))
-                                .and_then(|obj| match obj.value {
-                                    PsValue::String { entity, start, len } => {
-                                        Some(ctx.strings.get(entity, start, len).to_vec())
-                                    }
-                                    _ => None,
-                                })
-                        } else {
-                            font_data
-                                .as_ref()
-                                .and_then(|fd| truetype::get_glyf_data(fd, gid))
-                        };
-
-                        if let Some(ref glyf_bytes) = glyf_bytes {
-                            if glyf_bytes.len() >= 10 {
-                                let glyf_path = {
-                                    let dicts = &ctx.dicts;
-                                    let strings = &ctx.strings;
-                                    let gd = glyph_dir_entity;
-                                    let fd_ref = font_data.as_deref();
-                                    let resolver = |gid: u16| -> Option<Vec<u8>> {
-                                        if let Some(gd_entity) = gd {
-                                            let key = DictKey::Int(gid as i32);
-                                            if let Some(obj) = dicts.get(gd_entity, &key)
-                                                && let PsValue::String { entity, start, len } =
-                                                    obj.value
-                                            {
-                                                return Some(
-                                                    strings.get(entity, start, len).to_vec(),
-                                                );
-                                            }
+                            // Get glyf data: try GlyphDirectory first, then sfnts
+                            let glyf_bytes = if let Some(gd_entity) = glyph_dir_entity {
+                                ctx.dicts
+                                    .get(gd_entity, &DictKey::Int(gid as i32))
+                                    .and_then(|obj| match obj.value {
+                                        PsValue::String { entity, start, len } => {
+                                            Some(ctx.strings.get(entity, start, len).to_vec())
                                         }
-                                        fd_ref.and_then(|fd| truetype::get_glyf_data(fd, gid))
-                                    };
-                                    truetype::parse_glyf_to_path(glyf_bytes, &resolver)
-                                };
-
-                                let segments = Arc::new(glyf_path.segments);
-                                if !segments.is_empty() {
-                                    let user_path =
-                                        transform_segments(&segments, &combined_fm, cur_x, cur_y);
-                                    let device_path = ctm_transform_path(&user_path, &ctm);
-                                    push_glyph_element(ctx, device_path, paint_type, stroke_width_dev);
-                                }
-                                // Cache with advance width
-                                let advance = font_data
+                                        _ => None,
+                                    })
+                            } else {
+                                font_data
                                     .as_ref()
-                                    .and_then(|fd| truetype::get_advance_width(fd, gid))
-                                    .unwrap_or(500);
-                                let cache = ctx
-                                    .glyph_caches
-                                    .entry(font_entity)
-                                    .or_insert_with(stet_core::glyph_cache::GlyphCache::new);
-                                cache.by_gid.insert(
-                                    gid,
-                                    CachedGlyph {
-                                        segments,
-                                        width_x: advance as f64,
-                                        width_y: 0.0,
-                                    },
-                                );
-                            }
-                        }
+                                    .and_then(|fd| truetype::get_glyf_data(fd, gid))
+                            };
 
-                        // Advance by actual hmtx width (even if glyf data was
-                        // missing or too short — e.g. space has no outlines)
-                        rendered = true;
-                        let advance = font_data
-                            .as_ref()
-                            .and_then(|fd| truetype::get_advance_width(fd, gid))
-                            .unwrap_or(500);
-                        let (wx, wy) = combined_fm.transform_delta(advance as f64, 0.0);
-                        cur_x += wx + extra_ax;
-                        cur_y += wy + extra_ay;
+                            if let Some(ref glyf_bytes) = glyf_bytes {
+                                if glyf_bytes.len() >= 10 {
+                                    let glyf_path = {
+                                        let dicts = &ctx.dicts;
+                                        let strings = &ctx.strings;
+                                        let gd = glyph_dir_entity;
+                                        let fd_ref = font_data.as_deref();
+                                        let resolver = |gid: u16| -> Option<Vec<u8>> {
+                                            if let Some(gd_entity) = gd {
+                                                let key = DictKey::Int(gid as i32);
+                                                if let Some(obj) = dicts.get(gd_entity, &key)
+                                                    && let PsValue::String { entity, start, len } =
+                                                        obj.value
+                                                {
+                                                    return Some(
+                                                        strings.get(entity, start, len).to_vec(),
+                                                    );
+                                                }
+                                            }
+                                            fd_ref.and_then(|fd| truetype::get_glyf_data(fd, gid))
+                                        };
+                                        truetype::parse_glyf_to_path(glyf_bytes, &resolver)
+                                    };
+
+                                    let segments = Arc::new(glyf_path.segments);
+                                    if !segments.is_empty() {
+                                        let user_path = transform_segments(
+                                            &segments,
+                                            &combined_fm,
+                                            cur_x,
+                                            cur_y,
+                                        );
+                                        let device_path = ctm_transform_path(&user_path, &ctm);
+                                        push_glyph_element(
+                                            ctx,
+                                            device_path,
+                                            paint_type,
+                                            stroke_width_dev,
+                                        );
+                                    }
+                                    // Cache with advance width
+                                    let advance = font_data
+                                        .as_ref()
+                                        .and_then(|fd| truetype::get_advance_width(fd, gid))
+                                        .unwrap_or(500);
+                                    let cache = ctx
+                                        .glyph_caches
+                                        .entry(font_entity)
+                                        .or_insert_with(stet_core::glyph_cache::GlyphCache::new);
+                                    cache.by_gid.insert(
+                                        gid,
+                                        CachedGlyph {
+                                            segments,
+                                            width_x: advance as f64,
+                                            width_y: 0.0,
+                                        },
+                                    );
+                                }
+                            }
+
+                            // Advance by actual hmtx width (even if glyf data was
+                            // missing or too short — e.g. space has no outlines)
+                            rendered = true;
+                            let advance = font_data
+                                .as_ref()
+                                .and_then(|fd| truetype::get_advance_width(fd, gid))
+                                .unwrap_or(500);
+                            let (wx, wy) = combined_fm.transform_delta(advance as f64, 0.0);
+                            cur_x += wx + extra_ax;
+                            cur_y += wy + extra_ay;
                         } // close else (cache miss)
                     }
                 }
@@ -2290,8 +2300,7 @@ fn render_composite_truetype_cids(
         if wmode == 1 {
             // Vertical writing: advance downward
             // DW2 default per PLRM: [880 -1000] (vy_offset, v_advance in glyph units)
-            let (_vy_offset, v_advance) =
-                get_dw2(ctx, cidfont_entity).unwrap_or((880.0, -1000.0));
+            let (_vy_offset, v_advance) = get_dw2(ctx, cidfont_entity).unwrap_or((880.0, -1000.0));
             let (_, wy) = combined_fm.transform_delta(0.0, v_advance);
             *cur_x += extra_ax;
             *cur_y += wy + extra_ay;
@@ -2605,8 +2614,7 @@ fn render_composite_cff_cids(
 
         // Advance: WMode 1 = vertical, WMode 0 = horizontal
         if wmode == 1 {
-            let (_vy_offset, v_advance) =
-                get_dw2(ctx, cidfont_entity).unwrap_or((880.0, -1000.0));
+            let (_vy_offset, v_advance) = get_dw2(ctx, cidfont_entity).unwrap_or((880.0, -1000.0));
             let (_, wy) = combined_fm.transform_delta(0.0, v_advance);
             *cur_x += extra_ax;
             *cur_y += wy + extra_ay;
@@ -2742,10 +2750,8 @@ fn render_show_type3(
 
             // Cache if setcachedevice was called (not setcharwidth)
             if ctx.char_cache_mode == Some(Type3CacheMode::Cache) {
-                let elements: Vec<DisplayElement> = ctx
-                    .display_list
-                    .elements_from(dl_start)
-                    .to_vec();
+                let elements: Vec<DisplayElement> =
+                    ctx.display_list.elements_from(dl_start).to_vec();
                 let cache = ctx
                     .glyph_caches
                     .entry(font_entity)
@@ -2846,13 +2852,14 @@ fn measure_string_width(ctx: &mut Context, bytes: &[u8]) -> Result<(f64, f64), P
                 .glyph_caches
                 .entry(font_entity_for_cache)
                 .or_insert_with(stet_core::glyph_cache::GlyphCache::new);
-            cache.by_name.entry(glyph_name_id).or_insert_with(|| {
-                CachedGlyph {
+            cache
+                .by_name
+                .entry(glyph_name_id)
+                .or_insert_with(|| CachedGlyph {
                     segments: Arc::new(result.path.segments),
                     width_x: result.width_x,
                     width_y: result.width_y,
-                }
-            });
+                });
             (result.width_x, result.width_y)
         };
 
@@ -2860,8 +2867,7 @@ fn measure_string_width(ctx: &mut Context, bytes: &[u8]) -> Result<(f64, f64), P
         {
             info.font_matrix.transform_delta(metrics_wx, 0.0)
         } else {
-            info.font_matrix
-                .transform_delta(width_x, width_y)
+            info.font_matrix.transform_delta(width_x, width_y)
         };
         total_wx += wx;
         total_wy += wy;
@@ -2970,9 +2976,7 @@ fn render_charpath(ctx: &mut Context, bytes: &[u8]) -> Result<(), PsError> {
             }
         }
 
-        let (wx, wy) = info
-            .font_matrix
-            .transform_delta(width_x, width_y);
+        let (wx, wy) = info.font_matrix.transform_delta(width_x, width_y);
         cur_x += wx;
         cur_y += wy;
     }
@@ -3497,12 +3501,19 @@ fn render_show_displaced(
     let (mut cur_x, mut cur_y) = ictm.transform_point(dev_cpx, dev_cpy);
 
     let ctm = ctx.gstate.ctm;
-    let (paint_type, stroke_width_dev) = get_paint_info(ctx, info.font_entity, &info.font_matrix, &ctm);
+    let (paint_type, stroke_width_dev) =
+        get_paint_info(ctx, info.font_entity, &info.font_matrix, &ctm);
 
     for (i, &byte) in bytes.iter().enumerate() {
         // Emit per-character Text element for PDF (exact device-space position)
         let (dev_x, dev_y) = ctm.transform_point(cur_x, cur_y);
-        emit_text_element(ctx, vec![byte], font_entity_check, font_type, Some((dev_x, dev_y)));
+        emit_text_element(
+            ctx,
+            vec![byte],
+            font_entity_check,
+            font_type,
+            Some((dev_x, dev_y)),
+        );
 
         // Look up glyph name from encoding
         let glyph_name_obj = ctx.arrays.get_element(info.encoding_entity, byte as u32);
@@ -3524,7 +3535,8 @@ fn render_show_displaced(
 
             if let Some(cg) = cached {
                 if !cg.segments.is_empty() {
-                    let user_path = transform_segments(&cg.segments, &info.font_matrix, cur_x, cur_y);
+                    let user_path =
+                        transform_segments(&cg.segments, &info.font_matrix, cur_x, cur_y);
                     let device_path = ctm_transform_path(&user_path, &ctm);
                     push_glyph_element(ctx, device_path, paint_type, stroke_width_dev);
                 }
@@ -3543,7 +3555,8 @@ fn render_show_displaced(
                     {
                         let segments = Arc::new(result.path.segments);
                         if !segments.is_empty() {
-                            let user_path = transform_segments(&segments, &info.font_matrix, cur_x, cur_y);
+                            let user_path =
+                                transform_segments(&segments, &info.font_matrix, cur_x, cur_y);
                             let device_path = ctm_transform_path(&user_path, &ctm);
                             push_glyph_element(ctx, device_path, paint_type, stroke_width_dev);
                         }
@@ -3609,7 +3622,8 @@ fn render_show_displaced_type2(
 
             if let Some(cg) = cached {
                 if !cg.segments.is_empty() {
-                    let user_path = transform_segments(&cg.segments, &info.font_matrix, cur_x, cur_y);
+                    let user_path =
+                        transform_segments(&cg.segments, &info.font_matrix, cur_x, cur_y);
                     let device_path = ctm_transform_path(&user_path, &ctm);
                     push_glyph_element(ctx, device_path, paint_type, stroke_width_dev);
                 }
@@ -3633,7 +3647,8 @@ fn render_show_displaced_type2(
                     ) {
                         let segments = Arc::new(result.path.segments);
                         if !segments.is_empty() {
-                            let user_path = transform_segments(&segments, &info.font_matrix, cur_x, cur_y);
+                            let user_path =
+                                transform_segments(&segments, &info.font_matrix, cur_x, cur_y);
                             let device_path = ctm_transform_path(&user_path, &ctm);
                             push_glyph_element(ctx, device_path, paint_type, stroke_width_dev);
                         }
@@ -3706,7 +3721,14 @@ fn render_fmap_type0(
         let composed_fm = desc_fm.multiply(type0_fm);
         let (dev_x, dev_y) = ctm.transform_point(*cur_x, *cur_y);
         let text_bytes = vec![*char_code as u8];
-        emit_text_element_with_fm(ctx, text_bytes, desc_entity, 1, Some((dev_x, dev_y)), Some(composed_fm));
+        emit_text_element_with_fm(
+            ctx,
+            text_bytes,
+            desc_entity,
+            1,
+            Some((dev_x, dev_y)),
+            Some(composed_fm),
+        );
 
         let info = match get_font_info_for(ctx, desc_entity) {
             Ok(i) => i,
@@ -3719,7 +3741,9 @@ fn render_fmap_type0(
         let (paint_type, stroke_width_dev) = get_paint_info(ctx, desc_entity, &composed_fm, ctm);
 
         // Look up glyph name from descendant's encoding
-        let glyph_name_obj = ctx.arrays.get_element(info.encoding_entity, *char_code as u32);
+        let glyph_name_obj = ctx
+            .arrays
+            .get_element(info.encoding_entity, *char_code as u32);
         let glyph_name_id = match glyph_name_obj.value {
             PsValue::Name(id) => id,
             _ => {
@@ -3813,7 +3837,14 @@ fn render_fmap_type0_displaced(
         let composed_fm = desc_fm.multiply(type0_fm);
         let (dev_x, dev_y) = ctm.transform_point(*cur_x, *cur_y);
         let text_bytes = vec![*char_code as u8];
-        emit_text_element_with_fm(ctx, text_bytes, desc_entity, 1, Some((dev_x, dev_y)), Some(composed_fm));
+        emit_text_element_with_fm(
+            ctx,
+            text_bytes,
+            desc_entity,
+            1,
+            Some((dev_x, dev_y)),
+            Some(composed_fm),
+        );
 
         let info = match get_font_info_for(ctx, desc_entity) {
             Ok(i) => i,
@@ -3829,7 +3860,9 @@ fn render_fmap_type0_displaced(
         let (paint_type, stroke_width_dev) = get_paint_info(ctx, desc_entity, &composed_fm, ctm);
 
         // Look up glyph name from descendant's encoding
-        let glyph_name_obj = ctx.arrays.get_element(info.encoding_entity, *char_code as u32);
+        let glyph_name_obj = ctx
+            .arrays
+            .get_element(info.encoding_entity, *char_code as u32);
         let glyph_name_id = match glyph_name_obj.value {
             PsValue::Name(id) => id,
             _ => {
@@ -3899,8 +3932,15 @@ fn render_show_displaced_composite(
         if !has_cmap {
             // FMapType-based Type 0 font (legacy, Type 1 descendants)
             return render_fmap_type0_displaced(
-                ctx, font_entity, bytes, displacements, mode, &type0_fm,
-                &mut cur_x, &mut cur_y, &ctm,
+                ctx,
+                font_entity,
+                bytes,
+                displacements,
+                mode,
+                &type0_fm,
+                &mut cur_x,
+                &mut cur_y,
+                &ctm,
             );
         }
 
@@ -3938,7 +3978,8 @@ fn render_show_displaced_composite(
                 .unwrap_or(1000.0);
             let em_scale = Matrix::scale(1.0 / upm, 1.0 / upm);
             let combined_fm = type0_fm.multiply(&cidfont_fm).multiply(&em_scale);
-            let (paint_type, stroke_width_dev) = get_paint_info(ctx, cidfont_entity, &combined_fm, &ctm);
+            let (paint_type, stroke_width_dev) =
+                get_paint_info(ctx, cidfont_entity, &combined_fm, &ctm);
             let gd_name = ctx.names.intern(b"GlyphDirectory");
             let glyph_dir_entity = ctx
                 .dicts
@@ -4013,7 +4054,8 @@ fn render_show_displaced_composite(
                     _ => None,
                 });
             let combined_fm = type0_fm.multiply(&cidfont_fm);
-            let (paint_type, stroke_width_dev) = get_paint_info(ctx, cidfont_entity, &combined_fm, &ctm);
+            let (paint_type, stroke_width_dev) =
+                get_paint_info(ctx, cidfont_entity, &combined_fm, &ctm);
             let global_subrs = get_global_subrs(ctx, cidfont_entity);
 
             for (i, (cid, _)) in cids.iter().enumerate() {
@@ -4085,7 +4127,13 @@ fn render_show_displaced_composite(
         for (i, &byte) in bytes.iter().enumerate() {
             // Emit per-character Text element with device-space position
             let (dev_x, dev_y) = ctm.transform_point(cur_x, cur_y);
-            emit_text_element(ctx, vec![byte], font_entity, font_type, Some((dev_x, dev_y)));
+            emit_text_element(
+                ctx,
+                vec![byte],
+                font_entity,
+                font_type,
+                Some((dev_x, dev_y)),
+            );
 
             if let (Some(enc_ent), Some(cs_ent)) = (enc_entity, cs_entity) {
                 let glyph_name_obj = ctx.arrays.get_element(enc_ent, byte as u32);
@@ -4275,7 +4323,9 @@ fn get_font_name_for_text(ctx: &Context, font_entity: EntityId, font_type: i32) 
                 {
                     return ctx.names.get_bytes(id).to_vec();
                 }
-                if let Some(obj) = ctx.dicts.get(cid_entity, &DictKey::Name(ctx.name_cache.n_font_name))
+                if let Some(obj) = ctx
+                    .dicts
+                    .get(cid_entity, &DictKey::Name(ctx.name_cache.n_font_name))
                     && let PsValue::Name(id) = obj.value
                 {
                     return ctx.names.get_bytes(id).to_vec();
@@ -4322,10 +4372,18 @@ fn emit_text_element_with_fm(
     // Compute font_matrix scaled to point units.
     // Type 1/2: FontMatrix is [0.001 ...] → multiply by 1000 to get point-scale
     // Type 42/0: FontMatrix is [1 ...] identity → multiply by 1 (already in points after scalefont)
-    let fm_scale = if font_type == 0 || font_type == 42 { 1.0 } else { 1000.0 };
+    let fm_scale = if font_type == 0 || font_type == 42 {
+        1.0
+    } else {
+        1000.0
+    };
     let font_matrix = [
-        fm.a * fm_scale, fm.b * fm_scale, fm.c * fm_scale,
-        fm.d * fm_scale, fm.tx * fm_scale, fm.ty * fm_scale,
+        fm.a * fm_scale,
+        fm.b * fm_scale,
+        fm.c * fm_scale,
+        fm.d * fm_scale,
+        fm.tx * fm_scale,
+        fm.ty * fm_scale,
     ];
 
     // Compute effective device-space font size
@@ -4337,8 +4395,8 @@ fn emit_text_element_with_fm(
     let font_size = point_size * (scale_x * scale_y).sqrt();
 
     // Device-space position: explicit or from current_point
-    let (start_x, start_y) = device_pos
-        .unwrap_or_else(|| ctx.gstate.current_point.unwrap_or((0.0, 0.0)));
+    let (start_x, start_y) =
+        device_pos.unwrap_or_else(|| ctx.gstate.current_point.unwrap_or((0.0, 0.0)));
 
     // Get PaintType and stroke width for PaintType 2 (stroked) fonts
     let (paint_type, stroke_width) = get_paint_info(ctx, font_entity, &fm, &ctm);
@@ -4401,7 +4459,12 @@ fn push_glyph_element(
 
 /// Read PaintType and StrokeWidth from a font dict, returning (paint_type, device_stroke_width).
 /// StrokeWidth is transformed from glyph space through font_matrix and CTM to device space.
-fn get_paint_info(ctx: &Context, font_dict: EntityId, font_matrix: &Matrix, ctm: &Matrix) -> (i32, f64) {
+fn get_paint_info(
+    ctx: &Context,
+    font_dict: EntityId,
+    font_matrix: &Matrix,
+    ctm: &Matrix,
+) -> (i32, f64) {
     let paint_type = ctx
         .dicts
         .get(font_dict, &DictKey::Name(ctx.name_cache.n_paint_type))
@@ -4475,7 +4538,12 @@ fn transform_path(path: &PsPath, font_matrix: &Matrix, origin_x: f64, origin_y: 
 }
 
 /// Transform path segments from glyph space to user space.
-fn transform_segments(segments: &[PathSegment], font_matrix: &Matrix, origin_x: f64, origin_y: f64) -> PsPath {
+fn transform_segments(
+    segments: &[PathSegment],
+    font_matrix: &Matrix,
+    origin_x: f64,
+    origin_y: f64,
+) -> PsPath {
     let mut result = PsPath::new();
     for seg in segments {
         match *seg {
@@ -4591,7 +4659,12 @@ fn translate_path(path: &PsPath, dx: f64, dy: f64) -> PsPath {
             PathSegment::MoveTo(x, y) => PathSegment::MoveTo(x + dx, y + dy),
             PathSegment::LineTo(x, y) => PathSegment::LineTo(x + dx, y + dy),
             PathSegment::CurveTo {
-                x1, y1, x2, y2, x3, y3,
+                x1,
+                y1,
+                x2,
+                y2,
+                x3,
+                y3,
             } => PathSegment::CurveTo {
                 x1: x1 + dx,
                 y1: y1 + dy,
