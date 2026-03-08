@@ -1005,18 +1005,26 @@ fn samples_to_rgba(data: &[u8], params: &ImageParams, icc: Option<&IccCache>) ->
             rgba
         }
         ImageColorSpace::DeviceCMYK => {
-            // Try ICC-based CMYK→RGB conversion via system CMYK profile
+            // Try ICC-based CMYK→RGB conversion via system CMYK profile.
+            // Convert as many complete pixels as the data allows; PLRM-fallback
+            // for any remaining pixels with insufficient data.
             if let Some(cache) = icc {
                 if let Some(cmyk_hash) = cache.default_cmyk_hash() {
-                    if let Some(rgb) = cache.convert_image_8bit(cmyk_hash, data, npixels) {
-                        // Expand RGB (3 bytes/pixel) to RGBA (4 bytes/pixel)
-                        let mut rgba = vec![255u8; npixels * 4];
-                        for i in 0..npixels {
-                            rgba[i * 4] = rgb[i * 3];
-                            rgba[i * 4 + 1] = rgb[i * 3 + 1];
-                            rgba[i * 4 + 2] = rgb[i * 3 + 2];
+                    let avail_pixels = data.len() / 4;
+                    let icc_pixels = avail_pixels.min(npixels);
+                    if icc_pixels > 0 {
+                        if let Some(rgb) =
+                            cache.convert_image_8bit(cmyk_hash, data, icc_pixels)
+                        {
+                            let mut rgba = vec![255u8; npixels * 4];
+                            for i in 0..icc_pixels {
+                                rgba[i * 4] = rgb[i * 3];
+                                rgba[i * 4 + 1] = rgb[i * 3 + 1];
+                                rgba[i * 4 + 2] = rgb[i * 3 + 2];
+                            }
+                            // Remaining pixels (if data was short) stay white (0xFF)
+                            return rgba;
                         }
-                        return rgba;
                     }
                 }
             }
