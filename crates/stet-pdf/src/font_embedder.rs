@@ -11,7 +11,6 @@
 //! Currently unused because the PDF device doesn't have Context access.
 //! Will be wired up when we add Context-aware font embedding.
 
-
 use std::collections::{HashMap, HashSet};
 use std::io::Write as IoWrite;
 
@@ -272,9 +271,7 @@ fn build_type1_font_file(
 
     // CharStrings dict (subset)
     // "2 index" brings the font dict to the stack for the later put operations
-    lines.push(
-        format!("2 index /CharStrings {} dict dup begin", glyph_set.len()).into_bytes(),
-    );
+    lines.push(format!("2 index /CharStrings {} dict dup begin", glyph_set.len()).into_bytes());
 
     // Always emit .notdef first (required for reliable binary eexec parsing)
     if let Some(cs_bytes) = get_charstring_bytes(ctx, charstrings_entity, ".notdef") {
@@ -376,7 +373,9 @@ fn get_raw_charstring_bytes(
     let name_id = ctx.names.find(glyph_name.as_bytes())?;
     let cs_obj = ctx.dicts.get(charstrings_entity, &DictKey::Name(name_id))?;
     match cs_obj.value {
-        PsValue::String { entity, start, len } => Some(ctx.strings.get(entity, start, len).to_vec()),
+        PsValue::String { entity, start, len } => {
+            Some(ctx.strings.get(entity, start, len).to_vec())
+        }
         _ => None,
     }
 }
@@ -497,7 +496,10 @@ fn format_float(v: f64) -> String {
     if v == v.floor() && v.abs() < 1e9 {
         format!("{}", v as i64)
     } else {
-        format!("{:.6}", v).trim_end_matches('0').trim_end_matches('.').to_string()
+        format!("{:.6}", v)
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_string()
     }
 }
 
@@ -605,19 +607,19 @@ pub fn build_font_resource(
         _ => None,
     };
     if result.is_none() {
-        eprintln!("[font_embedder] FAILED type={} name={} entity={:?} codes={}",
-            usage.font_type, String::from_utf8_lossy(&usage.font_name),
-            usage.font_entity, usage.used_codes.len());
+        eprintln!(
+            "[font_embedder] FAILED type={} name={} entity={:?} codes={}",
+            usage.font_type,
+            String::from_utf8_lossy(&usage.font_name),
+            usage.font_entity,
+            usage.used_codes.len()
+        );
     }
     result
 }
 
 /// Build a Type 1 font resource.
-fn build_type1_font(
-    writer: &mut PdfWriter,
-    usage: &FontUsage,
-    ctx: &Context,
-) -> Option<u32> {
+fn build_type1_font(writer: &mut PdfWriter, usage: &FontUsage, ctx: &Context) -> Option<u32> {
     let font_entity = usage.font_entity;
     let font_name_str = String::from_utf8_lossy(&usage.font_name);
 
@@ -758,10 +760,7 @@ fn build_type1_font(
     let mut font_entries: Vec<(Vec<u8>, PdfObj)> = vec![
         (b"Type".to_vec(), PdfObj::name("Font")),
         (b"Subtype".to_vec(), PdfObj::name("Type1")),
-        (
-            b"BaseFont".to_vec(),
-            PdfObj::Name(usage.font_name.clone()),
-        ),
+        (b"BaseFont".to_vec(), PdfObj::Name(usage.font_name.clone())),
         (b"FirstChar".to_vec(), PdfObj::Int(first_char as i64)),
         (b"LastChar".to_vec(), PdfObj::Int(last_char as i64)),
         (b"Widths".to_vec(), PdfObj::Array(widths_array)),
@@ -780,11 +779,7 @@ fn build_type1_font(
 }
 
 /// Build a Type 2 (CFF) font resource with widths extracted from Type 2 charstrings.
-fn build_type2_font(
-    writer: &mut PdfWriter,
-    usage: &FontUsage,
-    ctx: &Context,
-) -> Option<u32> {
+fn build_type2_font(writer: &mut PdfWriter, usage: &FontUsage, ctx: &Context) -> Option<u32> {
     let font_entity = usage.font_entity;
     let font_name_str = String::from_utf8_lossy(&usage.font_name);
 
@@ -955,10 +950,7 @@ fn build_type2_font(
     let mut font_entries: Vec<(Vec<u8>, PdfObj)> = vec![
         (b"Type".to_vec(), PdfObj::name("Font")),
         (b"Subtype".to_vec(), PdfObj::name("Type1")),
-        (
-            b"BaseFont".to_vec(),
-            PdfObj::Name(usage.font_name.clone()),
-        ),
+        (b"BaseFont".to_vec(), PdfObj::Name(usage.font_name.clone())),
         (b"FirstChar".to_vec(), PdfObj::Int(first_char as i64)),
         (b"LastChar".to_vec(), PdfObj::Int(last_char as i64)),
         (b"Widths".to_vec(), PdfObj::Array(widths_array)),
@@ -1379,11 +1371,7 @@ fn calc_table_checksum(data: &[u8]) -> u32 {
 ///
 /// Creates the PDF Type 0 → CIDFontType2 → FontFile2 hierarchy
 /// with Identity-H encoding and a ToUnicode CMap.
-fn build_cid_font(
-    writer: &mut PdfWriter,
-    usage: &FontUsage,
-    ctx: &Context,
-) -> Option<u32> {
+fn build_cid_font(writer: &mut PdfWriter, usage: &FontUsage, ctx: &Context) -> Option<u32> {
     let font_entity = usage.font_entity;
 
     // Navigate to CIDFont descendant: FDepVector[0]
@@ -1447,10 +1435,7 @@ fn build_cid_font(
     };
 
     // Embed TrueType binary as FontFile2
-    let font_file_entries = vec![(
-        b"Length1".to_vec(),
-        PdfObj::Int(font_data.len() as i64),
-    )];
+    let font_file_entries = vec![(b"Length1".to_vec(), PdfObj::Int(font_data.len() as i64))];
     let font_file2_ref = writer.add_stream(font_file_entries, &font_data, true);
 
     // Font metrics from TrueType tables
@@ -1461,10 +1446,7 @@ fn build_cid_font(
     let descriptor_ref = {
         let mut entries = vec![
             (b"Type".to_vec(), PdfObj::name("FontDescriptor")),
-            (
-                b"FontName".to_vec(),
-                PdfObj::Name(usage.font_name.clone()),
-            ),
+            (b"FontName".to_vec(), PdfObj::Name(usage.font_name.clone())),
             (b"Flags".to_vec(), PdfObj::Int(0x0004)), // Symbolic
             (
                 b"FontBBox".to_vec(),
@@ -1485,10 +1467,7 @@ fn build_cid_font(
 
     // CIDSystemInfo
     let cid_system_info = PdfObj::Dict(vec![
-        (
-            b"Registry".to_vec(),
-            PdfObj::LitString(b"Adobe".to_vec()),
-        ),
+        (b"Registry".to_vec(), PdfObj::LitString(b"Adobe".to_vec())),
         (
             b"Ordering".to_vec(),
             PdfObj::LitString(b"Identity".to_vec()),
@@ -1500,10 +1479,7 @@ fn build_cid_font(
     let mut cid_font_entries: Vec<(Vec<u8>, PdfObj)> = vec![
         (b"Type".to_vec(), PdfObj::name("Font")),
         (b"Subtype".to_vec(), PdfObj::name("CIDFontType2")),
-        (
-            b"BaseFont".to_vec(),
-            PdfObj::Name(usage.font_name.clone()),
-        ),
+        (b"BaseFont".to_vec(), PdfObj::Name(usage.font_name.clone())),
         (b"CIDSystemInfo".to_vec(), cid_system_info),
         (b"FontDescriptor".to_vec(), PdfObj::Ref(descriptor_ref)),
         (b"DW".to_vec(), PdfObj::Int(default_width)),
@@ -1528,10 +1504,7 @@ fn build_cid_font(
     let mut type0_entries: Vec<(Vec<u8>, PdfObj)> = vec![
         (b"Type".to_vec(), PdfObj::name("Font")),
         (b"Subtype".to_vec(), PdfObj::name("Type0")),
-        (
-            b"BaseFont".to_vec(),
-            PdfObj::Name(usage.font_name.clone()),
-        ),
+        (b"BaseFont".to_vec(), PdfObj::Name(usage.font_name.clone())),
         (b"Encoding".to_vec(), PdfObj::name("Identity-H")),
         (
             b"DescendantFonts".to_vec(),
@@ -1609,8 +1582,8 @@ fn build_cid_to_gid_from_cmap(font_data: &[u8]) -> HashMap<u16, u16> {
         let subtable_offset = truetype::read_u32(font_data, rec_off + 4) as usize;
 
         // We want Unicode subtables: (0, *) or (3, 1) or (3, 10)
-        let is_unicode = platform_id == 0
-            || (platform_id == 3 && (encoding_id == 1 || encoding_id == 10));
+        let is_unicode =
+            platform_id == 0 || (platform_id == 3 && (encoding_id == 1 || encoding_id == 10));
         if !is_unicode {
             continue;
         }
@@ -1899,11 +1872,7 @@ fn get_truetype_ascent_descent(font_data: &[u8], scale: f64) -> (f64, f64) {
 /// Type 42 fonts have sfnts directly on the font dict (not wrapped in Type 0).
 /// They use single-byte encoding with CharStrings mapping glyph names to GIDs.
 /// In PDF, these become `/Subtype /TrueType` with `/FontFile2`.
-fn build_type42_font(
-    writer: &mut PdfWriter,
-    usage: &FontUsage,
-    ctx: &Context,
-) -> Option<u32> {
+fn build_type42_font(writer: &mut PdfWriter, usage: &FontUsage, ctx: &Context) -> Option<u32> {
     let font_entity = usage.font_entity;
     let font_name_str = String::from_utf8_lossy(&usage.font_name);
 
@@ -1986,10 +1955,7 @@ fn build_type42_font(
     };
 
     // Embed TrueType binary as FontFile2
-    let font_file_entries = vec![(
-        b"Length1".to_vec(),
-        PdfObj::Int(font_data.len() as i64),
-    )];
+    let font_file_entries = vec![(b"Length1".to_vec(), PdfObj::Int(font_data.len() as i64))];
     let font_file2_ref = writer.add_stream(font_file_entries, &font_data, true);
 
     // Font metrics
@@ -2000,10 +1966,7 @@ fn build_type42_font(
     let descriptor_ref = {
         let entries = vec![
             (b"Type".to_vec(), PdfObj::name("FontDescriptor")),
-            (
-                b"FontName".to_vec(),
-                PdfObj::Name(usage.font_name.clone()),
-            ),
+            (b"FontName".to_vec(), PdfObj::Name(usage.font_name.clone())),
             (b"Flags".to_vec(), PdfObj::Int(0x0020)), // Nonsymbolic
             (
                 b"FontBBox".to_vec(),
@@ -2026,10 +1989,7 @@ fn build_type42_font(
     let mut font_entries: Vec<(Vec<u8>, PdfObj)> = vec![
         (b"Type".to_vec(), PdfObj::name("Font")),
         (b"Subtype".to_vec(), PdfObj::name("TrueType")),
-        (
-            b"BaseFont".to_vec(),
-            PdfObj::Name(usage.font_name.clone()),
-        ),
+        (b"BaseFont".to_vec(), PdfObj::Name(usage.font_name.clone())),
         (b"FirstChar".to_vec(), PdfObj::Int(first_char as i64)),
         (b"LastChar".to_vec(), PdfObj::Int(last_char as i64)),
         (b"Widths".to_vec(), PdfObj::Array(widths_array)),
@@ -2044,4 +2004,282 @@ fn build_type42_font(
     }
 
     Some(writer.add_object(&PdfObj::Dict(font_entries)))
+}
+
+/// Extract glyph widths for a font (in 1000ths of a unit) without building PDF objects.
+///
+/// Used to populate FontUsage::widths for TJ kern value computation.
+/// Returns a map from character code (or CID) to width in 1000ths of text space.
+pub fn extract_widths(usage: &FontUsage, ctx: &Context) -> HashMap<u16, i32> {
+    match usage.font_type {
+        1 => extract_type1_widths(usage, ctx),
+        2 => extract_type2_widths(usage, ctx),
+        0 | 42 => extract_cid_widths(usage, ctx),
+        _ => HashMap::new(),
+    }
+}
+
+/// Extract widths from a Type 1 font via CharString interpretation.
+fn extract_type1_widths(usage: &FontUsage, ctx: &Context) -> HashMap<u16, i32> {
+    let font_entity = usage.font_entity;
+
+    let encoding_entity = ctx
+        .dicts
+        .get(font_entity, &DictKey::Name(ctx.name_cache.n_encoding))
+        .and_then(|obj| match obj.value {
+            PsValue::Array { entity, .. } => Some(entity),
+            _ => None,
+        });
+
+    let charstrings_entity = ctx
+        .dicts
+        .get(font_entity, &DictKey::Name(ctx.name_cache.n_char_strings))
+        .and_then(|obj| match obj.value {
+            PsValue::Dict(e) => Some(e),
+            _ => None,
+        });
+
+    let private_entity = ctx
+        .dicts
+        .get(font_entity, &DictKey::Name(ctx.name_cache.n_private))
+        .and_then(|obj| match obj.value {
+            PsValue::Dict(e) => Some(e),
+            _ => None,
+        });
+
+    let len_iv = private_entity
+        .and_then(|pe| {
+            ctx.dicts
+                .get(pe, &DictKey::Name(ctx.name_cache.n_len_iv))
+                .and_then(|v| v.as_i32())
+        })
+        .unwrap_or(4) as usize;
+
+    let subrs = get_decrypted_subrs(ctx, private_entity, len_iv);
+
+    let mut widths: HashMap<u16, i32> = HashMap::new();
+    if let (Some(enc_entity), Some(cs_entity)) = (encoding_entity, charstrings_entity) {
+        for &code in &usage.used_codes {
+            if code > 255 {
+                continue;
+            }
+            let glyph_name_obj = ctx.arrays.get_element(enc_entity, code as u32);
+            let glyph_name_id = match glyph_name_obj.value {
+                PsValue::Name(id) => id,
+                _ => continue,
+            };
+
+            let cs_obj = match ctx.dicts.get(cs_entity, &DictKey::Name(glyph_name_id)) {
+                Some(obj) => obj,
+                None => continue,
+            };
+
+            let (cs_ent, cs_start, cs_len) = match cs_obj.value {
+                PsValue::String { entity, start, len } => (entity, start, len),
+                _ => continue,
+            };
+
+            let cs_bytes = ctx.strings.get(cs_ent, cs_start, cs_len);
+            let decrypted = decrypt_charstring(cs_bytes, len_iv);
+            if let Some(w) = extract_charstring_width(&decrypted, &subrs) {
+                widths.insert(code, w as i32);
+            }
+        }
+    }
+    widths
+}
+
+/// Extract widths from a Type 2 (CFF) font via Type 2 charstring interpreter.
+fn extract_type2_widths(usage: &FontUsage, ctx: &Context) -> HashMap<u16, i32> {
+    let font_entity = usage.font_entity;
+
+    let encoding_entity = ctx
+        .dicts
+        .get(font_entity, &DictKey::Name(ctx.name_cache.n_encoding))
+        .and_then(|obj| match obj.value {
+            PsValue::Array { entity, .. } => Some(entity),
+            _ => None,
+        });
+
+    let charstrings_entity = ctx
+        .dicts
+        .get(font_entity, &DictKey::Name(ctx.name_cache.n_char_strings))
+        .and_then(|obj| match obj.value {
+            PsValue::Dict(e) => Some(e),
+            _ => None,
+        });
+
+    let private_entity = ctx
+        .dicts
+        .get(font_entity, &DictKey::Name(ctx.name_cache.n_private))
+        .and_then(|obj| match obj.value {
+            PsValue::Dict(e) => Some(e),
+            _ => None,
+        });
+
+    let mut default_width_x = 0.0;
+    let mut nominal_width_x = 0.0;
+    if let Some(pe) = private_entity {
+        if let Some(name_id) = ctx.names.find(b"defaultWidthX")
+            && let Some(obj) = ctx.dicts.get(pe, &DictKey::Name(name_id))
+            && let Some(v) = obj.as_f64()
+        {
+            default_width_x = v;
+        }
+        if let Some(name_id) = ctx.names.find(b"nominalWidthX")
+            && let Some(obj) = ctx.dicts.get(pe, &DictKey::Name(name_id))
+            && let Some(v) = obj.as_f64()
+        {
+            nominal_width_x = v;
+        }
+    }
+
+    let mut local_subrs: Vec<Vec<u8>> = Vec::new();
+    if let Some(pe) = private_entity
+        && let Some(name_id) = ctx.names.find(b"Subrs")
+        && let Some(obj) = ctx.dicts.get(pe, &DictKey::Name(name_id))
+        && let PsValue::Array { entity, start, len } = obj.value
+    {
+        let elems = ctx.arrays.get(entity, start, len);
+        local_subrs = elems
+            .iter()
+            .map(|o| match o.value {
+                PsValue::String { entity, start, len } => {
+                    ctx.strings.get(entity, start, len).to_vec()
+                }
+                _ => Vec::new(),
+            })
+            .collect();
+    }
+
+    let mut global_subrs: Vec<Vec<u8>> = Vec::new();
+    if let Some(name_id) = ctx.names.find(b"_cff_global_subrs")
+        && let Some(obj) = ctx.dicts.get(font_entity, &DictKey::Name(name_id))
+        && let PsValue::Array { entity, start, len } = obj.value
+    {
+        let elems = ctx.arrays.get(entity, start, len);
+        global_subrs = elems
+            .iter()
+            .map(|o| match o.value {
+                PsValue::String { entity, start, len } => {
+                    ctx.strings.get(entity, start, len).to_vec()
+                }
+                _ => Vec::new(),
+            })
+            .collect();
+    }
+
+    let mut widths: HashMap<u16, i32> = HashMap::new();
+    if let (Some(enc_entity), Some(cs_entity)) = (encoding_entity, charstrings_entity) {
+        for &code in &usage.used_codes {
+            if code > 255 {
+                continue;
+            }
+            let glyph_name_obj = ctx.arrays.get_element(enc_entity, code as u32);
+            let glyph_name_id = match glyph_name_obj.value {
+                PsValue::Name(id) => id,
+                _ => continue,
+            };
+
+            let cs_obj = match ctx.dicts.get(cs_entity, &DictKey::Name(glyph_name_id)) {
+                Some(obj) => obj,
+                None => continue,
+            };
+
+            let (cs_ent, cs_start, cs_len) = match cs_obj.value {
+                PsValue::String { entity, start, len } => (entity, start, len),
+                _ => continue,
+            };
+
+            let cs_bytes = ctx.strings.get(cs_ent, cs_start, cs_len).to_vec();
+            if let Ok(result) = type2_charstring::execute_type2_charstring(
+                &cs_bytes,
+                &local_subrs,
+                &global_subrs,
+                default_width_x,
+                nominal_width_x,
+                false,
+            ) {
+                widths.insert(code, result.width_x as i32);
+            }
+        }
+    }
+    widths
+}
+
+/// Extract widths from a CID/Type 42 font via TrueType hmtx table.
+fn extract_cid_widths(usage: &FontUsage, ctx: &Context) -> HashMap<u16, i32> {
+    let font_entity = usage.font_entity;
+
+    // For Type 0, find CIDFont descendant
+    let cid_entity = if usage.font_type == 0 {
+        get_cidfont_descendant(ctx, font_entity).unwrap_or(font_entity)
+    } else {
+        font_entity
+    };
+
+    let font_data = match concatenate_sfnts(ctx, cid_entity) {
+        Some(d) => d,
+        None => return HashMap::new(),
+    };
+
+    if font_data.len() < 20 {
+        return HashMap::new();
+    }
+
+    let upm = truetype::get_units_per_em(&font_data);
+    let scale = 1000.0 / upm as f64;
+
+    let mut cid_to_gid: HashMap<u16, u16> = HashMap::new();
+
+    if usage.font_type == 0 {
+        cid_to_gid = build_cid_to_gid_from_cmap(&font_data);
+    }
+
+    if usage.font_type == 42 {
+        let encoding_entity = ctx
+            .dicts
+            .get(font_entity, &DictKey::Name(ctx.name_cache.n_encoding))
+            .and_then(|obj| match obj.value {
+                PsValue::Array { entity, .. } => Some(entity),
+                _ => None,
+            });
+
+        let charstrings_entity = ctx
+            .dicts
+            .get(font_entity, &DictKey::Name(ctx.name_cache.n_char_strings))
+            .and_then(|obj| match obj.value {
+                PsValue::Dict(e) => Some(e),
+                _ => None,
+            });
+
+        if let (Some(enc_entity), Some(cs_entity)) = (encoding_entity, charstrings_entity) {
+            for &code in &usage.used_codes {
+                if code > 255 {
+                    continue;
+                }
+                let glyph_name_obj = ctx.arrays.get_element(enc_entity, code as u32);
+                let glyph_name_id = match glyph_name_obj.value {
+                    PsValue::Name(id) => id,
+                    _ => continue,
+                };
+                let cs_obj = match ctx.dicts.get(cs_entity, &DictKey::Name(glyph_name_id)) {
+                    Some(obj) => obj,
+                    None => continue,
+                };
+                if let Some(gid) = cs_obj.as_i32() {
+                    cid_to_gid.insert(code, gid as u16);
+                }
+            }
+        }
+    }
+
+    let mut widths: HashMap<u16, i32> = HashMap::new();
+    for &code in &usage.used_codes {
+        let gid = cid_to_gid.get(&code).copied().unwrap_or(code);
+        if let Some(aw) = truetype::get_advance_width(&font_data, gid) {
+            widths.insert(code, (aw as f64 * scale).round() as i32);
+        }
+    }
+    widths
 }

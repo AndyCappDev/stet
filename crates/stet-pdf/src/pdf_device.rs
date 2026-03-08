@@ -11,20 +11,20 @@ use stet_core::graphics_state::PsPath;
 
 use crate::content_stream::{self, ContentStreamResult, ShadingRef};
 use crate::font_embedder;
-use crate::font_tracker::FontTracker;
 use crate::image_ops::ImageXObject;
 use crate::pdf_objects::PdfObj;
 use crate::pdf_writer::PdfWriter;
 use crate::shading_ops;
 
-/// A single page's data, ready for PDF assembly.
+/// A single page's data. Display list is stored and content stream generated
+/// at finalize time when Context is available for font width extraction.
 struct PageData {
-    content: Vec<u8>,
+    display_list: DisplayList,
     width_pts: f64,
     height_pts: f64,
-    images: Vec<ImageXObject>,
-    shading_refs: Vec<ShadingRef>,
-    font_tracker: FontTracker,
+    page_w: u32,
+    page_h: u32,
+    dpi: f64,
 }
 
 /// PDF output device. Accumulates display lists per page and generates
@@ -107,16 +107,35 @@ impl PdfDevice {
         pages_ref: u32,
         ctx: Option<&Context>,
     ) -> Result<u32, String> {
+        // Generate content stream from display list.
+        // When Context is available, pre-compute font widths for TJ kern values.
+        let ContentStreamResult {
+            content,
+            images,
+            shading_refs,
+            font_tracker,
+        } = content_stream::build_content_stream(
+            &page.display_list,
+            page.page_w,
+            page.page_h,
+            page.dpi,
+            ctx,
+        );
+
+        // Populate font widths from Context (for TJ kern computation in content stream)
+        // This is done after font tracking but the content stream already uses the widths
+        // since we pass ctx to build_content_stream.
+
         // Build image XObjects
         let mut xobject_entries: Vec<(Vec<u8>, PdfObj)> = Vec::new();
-        for (i, img) in page.images.iter().enumerate() {
+        for (i, img) in images.iter().enumerate() {
             let img_ref = self.build_image_xobject(writer, img);
             xobject_entries.push((format!("Im{}", i).into_bytes(), PdfObj::Ref(img_ref)));
         }
 
         // Build shading objects
         let mut shading_entries: Vec<(Vec<u8>, PdfObj)> = Vec::new();
-        for (i, sh_ref) in page.shading_refs.iter().enumerate() {
+        for (i, sh_ref) in shading_refs.iter().enumerate() {
             let sh_obj = match sh_ref {
                 ShadingRef::Axial(p) => shading_ops::build_axial_shading(writer, p),
                 ShadingRef::Radial(p) => shading_ops::build_radial_shading(writer, p),
@@ -128,8 +147,7 @@ impl PdfDevice {
 
         // Build font resources
         let mut font_entries: Vec<(Vec<u8>, PdfObj)> = Vec::new();
-        for usage in page.font_tracker.fonts() {
-            // Try Context-aware font embedding first (proper Widths, ToUnicode, descriptor)
+        for usage in font_tracker.fonts() {
             let font_ref = if let Some(c) = ctx {
                 font_embedder::build_font_resource(writer, usage, c)
                     .unwrap_or_else(|| self.build_font_reference(writer, usage))
@@ -152,7 +170,7 @@ impl PdfDevice {
         }
 
         // Content stream
-        let content_ref = writer.add_stream(Vec::new(), &page.content, true);
+        let content_ref = writer.add_stream(Vec::new(), &content, true);
 
         // Page object
         let page_ref = writer.add_object(&PdfObj::Dict(vec![
@@ -190,18 +208,12 @@ impl PdfDevice {
         let mut entries: Vec<(Vec<u8>, PdfObj)> = vec![
             (b"Type".to_vec(), PdfObj::name("Font")),
             (b"Subtype".to_vec(), PdfObj::name("Type1")),
-            (
-                b"BaseFont".to_vec(),
-                PdfObj::Name(usage.font_name.clone()),
-            ),
+            (b"BaseFont".to_vec(), PdfObj::Name(usage.font_name.clone())),
         ];
 
         if !usage.is_standard_14 {
             // For non-standard fonts, add Encoding
-            entries.push((
-                b"Encoding".to_vec(),
-                PdfObj::name("WinAnsiEncoding"),
-            ));
+            entries.push((b"Encoding".to_vec(), PdfObj::name("WinAnsiEncoding")));
         }
 
         if let Some(tu_ref) = tounicode_ref {
@@ -256,6 +268,7 @@ impl PdfDevice {
                     (b"Height".to_vec(), PdfObj::Int(img.height as i64)),
                     (b"ColorSpace".to_vec(), PdfObj::name("DeviceGray")),
                     (b"BitsPerComponent".to_vec(), PdfObj::Int(8)),
+                    (b"Interpolate".to_vec(), PdfObj::Bool(false)),
                 ],
                 smask_data,
                 true,
@@ -270,6 +283,7 @@ impl PdfDevice {
             (b"Height".to_vec(), PdfObj::Int(img.height as i64)),
             (b"ColorSpace".to_vec(), PdfObj::name("DeviceRGB")),
             (b"BitsPerComponent".to_vec(), PdfObj::Int(8)),
+            (b"Interpolate".to_vec(), PdfObj::Bool(false)),
         ];
 
         if let Some(smask) = smask_ref {
@@ -281,10 +295,7 @@ impl PdfDevice {
 }
 
 /// Generate a ToUnicode CMap stream.
-fn generate_tounicode_cmap(
-    map: &std::collections::HashMap<u16, u16>,
-    font_name: &str,
-) -> Vec<u8> {
+fn generate_tounicode_cmap(map: &std::collections::HashMap<u16, u16>, font_name: &str) -> Vec<u8> {
     use std::io::Write;
     let mut buf = Vec::new();
 
@@ -362,20 +373,14 @@ impl OutputDevice for PdfDevice {
         }
 
         let scale = 72.0 / self.dpi;
-        let ContentStreamResult {
-            content,
-            images,
-            shading_refs,
-            font_tracker,
-        } = content_stream::build_content_stream(&list, self.page_w, self.page_h, self.dpi);
 
         self.pages.push(PageData {
-            content,
+            display_list: list,
             width_pts: self.page_w as f64 * scale,
             height_pts: self.page_h as f64 * scale,
-            images,
-            shading_refs,
-            font_tracker,
+            page_w: self.page_w,
+            page_h: self.page_h,
+            dpi: self.dpi,
         });
 
         Ok(())

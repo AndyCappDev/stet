@@ -6,13 +6,16 @@
 
 use std::io::Write as IoWrite;
 
+use stet_core::context::Context;
 use stet_core::device::{
     AxialShadingParams, MeshShadingParams, PatchShadingParams, PatternFillParams,
-    RadialShadingParams, StrokeParams,
+    RadialShadingParams, StrokeParams, TextParams,
 };
 use stet_core::display_list::{DisplayElement, DisplayList};
 use stet_core::graphics_state::{DeviceColor, FillRule, LineCap, LineJoin, Matrix, PsPath};
+use stet_core::object::EntityId;
 
+use crate::font_embedder;
 use crate::font_tracker::FontTracker;
 use crate::image_ops::{self, ImageXObject};
 use crate::text_ops;
@@ -91,11 +94,15 @@ fn color_to_pdf(c: &DeviceColor) -> PdfColor {
 }
 
 /// Generate PDF content stream bytes from a display list.
+///
+/// When `ctx` is available, pre-computes font widths for TJ kern values
+/// and batches consecutive same-font text elements into single BT/ET blocks.
 pub fn build_content_stream(
     list: &DisplayList,
     page_w: u32,
     page_h: u32,
     dpi: f64,
+    ctx: Option<&Context>,
 ) -> ContentStreamResult {
     let scale = 72.0 / dpi;
     let page_h_pts = page_h as f64 * scale;
@@ -111,6 +118,13 @@ pub fn build_content_stream(
     for element in list.elements() {
         if let DisplayElement::Text { params } = element {
             font_tracker.track(params);
+        }
+    }
+
+    // Pre-compute glyph widths for TJ kern values when Context is available
+    if let Some(c) = ctx {
+        for usage in font_tracker.fonts_mut() {
+            usage.widths = font_embedder::extract_widths(usage, c);
         }
     }
 
@@ -130,7 +144,35 @@ pub fn build_content_stream(
     fmt_num(&mut buf, page_h as f64);
     buf.extend(b" re W n\n");
 
+    // Text batch accumulator: consecutive same-font text elements
+    let mut text_batch: Vec<&TextParams> = Vec::new();
+    let mut batch_font: Option<EntityId> = None;
+
     for element in list.elements() {
+        match element {
+            DisplayElement::Text { params } => {
+                if batch_font == Some(params.font_entity) {
+                    text_batch.push(params);
+                } else {
+                    flush_text_batch(&text_batch, &font_tracker, &mut buf, &mut gs);
+                    text_batch.clear();
+                    text_batch.push(params);
+                    batch_font = Some(params.font_entity);
+                }
+                continue;
+            }
+            // Skip glyph fills/strokes without flushing the text batch —
+            // these are interleaved with Text elements in the display list
+            DisplayElement::Fill { params, .. } if params.is_text_glyph => continue,
+            DisplayElement::Stroke { params, .. } if params.is_text_glyph => continue,
+            _ => {
+                // Flush any pending text batch before non-text element
+                flush_text_batch(&text_batch, &font_tracker, &mut buf, &mut gs);
+                text_batch.clear();
+                batch_font = None;
+            }
+        }
+
         match element {
             DisplayElement::ErasePage => {
                 // Fill entire page with white (device coordinates)
@@ -263,13 +305,12 @@ pub fn build_content_stream(
             DisplayElement::PatternFill { params } => {
                 emit_pattern_fill_placeholder(&mut buf, params, &mut gs);
             }
-            DisplayElement::Text { params } => {
-                text_ops::emit_text_element(&mut buf, params, &font_tracker);
-                // Reset fill color cache since BT/ET may change it
-                gs.fill_color = None;
-            }
+            DisplayElement::Text { .. } => unreachable!(), // handled above
         }
     }
+
+    // Flush any remaining text batch
+    flush_text_batch(&text_batch, &font_tracker, &mut buf, &mut gs);
 
     // Close remaining clips
     for _ in 0..clip_depth {
@@ -282,6 +323,21 @@ pub fn build_content_stream(
         shading_refs,
         font_tracker,
     }
+}
+
+/// Flush accumulated text batch as optimized BT/ET blocks.
+fn flush_text_batch(
+    batch: &[&TextParams],
+    font_tracker: &FontTracker,
+    buf: &mut Vec<u8>,
+    gs: &mut GState,
+) {
+    if batch.is_empty() {
+        return;
+    }
+    text_ops::emit_text_batch(buf, batch, font_tracker);
+    // Reset fill color cache since BT/ET text blocks set their own colors
+    gs.fill_color = None;
 }
 
 /// Emit a non-stroking (fill) color command.

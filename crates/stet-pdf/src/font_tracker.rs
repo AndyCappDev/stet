@@ -44,6 +44,9 @@ pub struct FontUsage {
     pub is_standard_14: bool,
     /// First TextParams seen (used for font_size, ctm, font_matrix).
     pub sample_params: TextParams,
+    /// Glyph widths in 1000ths of a unit (char_code → width).
+    /// Populated by font_embedder::extract_widths() before content stream generation.
+    pub widths: HashMap<u16, i32>,
 }
 
 /// Tracks font usage across all pages in a PDF job.
@@ -69,7 +72,9 @@ impl FontTracker {
         let usage = self.fonts.entry(entity).or_insert_with(|| {
             let idx = self.next_idx;
             self.next_idx += 1;
-            let is_std14 = STANDARD_14.iter().any(|n| *n == params.font_name.as_slice());
+            let is_std14 = STANDARD_14
+                .iter()
+                .any(|n| *n == params.font_name.as_slice());
             FontUsage {
                 pdf_name: format!("F{}", idx),
                 font_name: params.font_name.clone(),
@@ -78,6 +83,7 @@ impl FontTracker {
                 used_codes: HashSet::new(),
                 is_standard_14: is_std14,
                 sample_params: params.clone(),
+                widths: HashMap::new(),
             }
         });
 
@@ -107,5 +113,18 @@ impl FontTracker {
     /// Iterate over all tracked fonts.
     pub fn fonts(&self) -> impl Iterator<Item = &FontUsage> {
         self.fonts.values()
+    }
+
+    /// Iterate over all tracked fonts mutably.
+    pub fn fonts_mut(&mut self) -> impl Iterator<Item = &mut FontUsage> {
+        self.fonts.values_mut()
+    }
+
+    /// Look up a glyph width for a font entity and character code.
+    /// Returns width in 1000ths of a unit, or None if unavailable.
+    pub fn get_glyph_width(&self, font_entity: EntityId, code: u16) -> Option<i32> {
+        self.fonts
+            .get(&font_entity)
+            .and_then(|u| u.widths.get(&code).copied())
     }
 }
