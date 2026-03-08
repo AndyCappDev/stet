@@ -21,9 +21,9 @@ pub enum DisplayElement {
     Clip { path: PsPath, params: ClipParams },
     /// Reset clipping to the full page.
     InitClip,
-    /// Draw an RGBA image.
+    /// Draw an image (raw sample data in native color space).
     Image {
-        rgba_data: Vec<u8>,
+        sample_data: Vec<u8>,
         params: ImageParams,
     },
     /// Erase the page (fill with white).
@@ -109,8 +109,11 @@ pub fn replay_to_device(list: &DisplayList, device: &mut dyn OutputDevice) {
             DisplayElement::InitClip => {
                 device.init_clip();
             }
-            DisplayElement::Image { rgba_data, params } => {
-                device.draw_image(rgba_data, params);
+            DisplayElement::Image {
+                sample_data,
+                params,
+            } => {
+                device.draw_image(sample_data, params);
             }
             DisplayElement::ErasePage => {
                 device.erase_page();

@@ -54,6 +54,8 @@ pub struct ViewerApp {
     minimap: Option<MinimapState>,
     /// Whether the user is dragging the minimap viewport rectangle.
     minimap_dragging: bool,
+    /// System CMYK ICC profile bytes (for ICC-aware rendering).
+    system_cmyk_bytes: Option<std::sync::Arc<Vec<u8>>>,
 }
 
 /// A page stored as a resolution-independent display list.
@@ -69,6 +71,8 @@ struct StoredPage {
     page_num: u32,
     /// Cached viewport render (reused if viewport unchanged).
     cached_render: Option<CachedRender>,
+    /// ICC cache built from this page's display list profiles.
+    icc_cache: stet_core::icc::IccCache,
 }
 
 /// Cached result of a viewport render.
@@ -105,7 +109,11 @@ const MINIMAP_MAX_H: f32 = 200.0;
 const MINIMAP_MARGIN: f32 = 12.0;
 
 impl ViewerApp {
-    pub fn new(viewer_end: ViewerEnd, dpi_override: Option<f64>) -> Self {
+    pub fn new(
+        viewer_end: ViewerEnd,
+        dpi_override: Option<f64>,
+        system_cmyk_bytes: Option<std::sync::Arc<Vec<u8>>>,
+    ) -> Self {
         Self {
             page_receiver: Some(viewer_end.page_receiver),
             screen_info_sender: Some(viewer_end.screen_info_sender),
@@ -129,6 +137,7 @@ impl ViewerApp {
             central_available: Vec2::ZERO,
             minimap: None,
             minimap_dragging: false,
+            system_cmyk_bytes,
         }
     }
 
@@ -244,6 +253,10 @@ impl ViewerApp {
             match receiver.try_recv() {
                 Ok(ViewerMsg::Page(page)) => {
                     let prepared = stet_render::prepare_display_list(&page.display_list);
+                    let icc_cache = stet_render::build_icc_cache_for_list(
+                        &page.display_list,
+                        self.system_cmyk_bytes.as_ref(),
+                    );
                     self.pages.push(StoredPage {
                         display_list: page.display_list,
                         prepared,
@@ -252,6 +265,7 @@ impl ViewerApp {
                         dpi: page.dpi,
                         page_num: page.page_num,
                         cached_render: None,
+                        icc_cache,
                     });
                 }
                 Ok(ViewerMsg::NewJob) => {
@@ -463,6 +477,7 @@ impl ViewerApp {
             pixel_w,
             pixel_h,
             page.dpi,
+            Some(&page.icc_cache),
         );
 
         let image = ColorImage::from_rgba_unmultiplied([pixel_w as usize, pixel_h as usize], &rgba);
@@ -524,6 +539,7 @@ impl ViewerApp {
             mm_w,
             mm_h,
             page.dpi,
+            Some(&page.icc_cache),
         );
 
         let image = ColorImage::from_rgba_unmultiplied([mm_w as usize, mm_h as usize], &rgba);

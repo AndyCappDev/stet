@@ -121,8 +121,9 @@ pub fn run_viewer(
     dpi_override: Option<f64>,
     filename: Option<&str>,
     page_size: Option<(f64, f64)>,
+    system_cmyk_bytes: Option<std::sync::Arc<Vec<u8>>>,
 ) {
-    let app = viewer::ViewerApp::new(viewer_end, dpi_override);
+    let app = viewer::ViewerApp::new(viewer_end, dpi_override, system_cmyk_bytes);
 
     let title = match filename {
         Some(name) => {

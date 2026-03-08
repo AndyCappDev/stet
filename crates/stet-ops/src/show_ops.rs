@@ -4612,43 +4612,31 @@ fn recolor_and_translate_element(
                 params,
             }
         }
-        DisplayElement::Image { rgba_data, params } => {
+        DisplayElement::Image {
+            sample_data,
+            params,
+        } => {
             let mut params = params.clone();
             params.ctm.tx += dx;
             params.ctm.ty += dy;
-            if params.is_mask {
-                // Recolor imagemask pixels with the current color
-                let recolored = recolor_mask_rgba(rgba_data, color);
-                DisplayElement::Image {
-                    rgba_data: recolored,
-                    params,
-                }
-            } else {
-                DisplayElement::Image {
-                    rgba_data: rgba_data.clone(),
-                    params,
-                }
+            if let stet_core::device::ImageColorSpace::Mask { .. } = &params.color_space {
+                // Update mask color to current color (raw 1-bit data stays unchanged)
+                params.color_space = stet_core::device::ImageColorSpace::Mask {
+                    color: color.clone(),
+                    polarity: match &params.color_space {
+                        stet_core::device::ImageColorSpace::Mask { polarity, .. } => *polarity,
+                        _ => true,
+                    },
+                };
+            }
+            DisplayElement::Image {
+                sample_data: sample_data.clone(),
+                params,
             }
         }
         // Other elements shouldn't appear in Type 3 BuildChar output
         other => other.clone(),
     }
-}
-
-/// Recolor imagemask RGBA data: replace RGB of all non-transparent pixels with the given color.
-fn recolor_mask_rgba(rgba: &[u8], color: &DeviceColor) -> Vec<u8> {
-    let r = (color.r * 255.0 + 0.5) as u8;
-    let g = (color.g * 255.0 + 0.5) as u8;
-    let b = (color.b * 255.0 + 0.5) as u8;
-    let mut result = rgba.to_vec();
-    for pixel in result.chunks_exact_mut(4) {
-        if pixel[3] > 0 {
-            pixel[0] = r;
-            pixel[1] = g;
-            pixel[2] = b;
-        }
-    }
-    result
 }
 
 /// Translate all coordinates in a path by (dx, dy).

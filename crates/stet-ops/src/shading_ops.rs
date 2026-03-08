@@ -224,8 +224,8 @@ fn build_type1_shading(
         _ => None,
     };
 
-    // Pre-rasterize to RGBA pixel buffer
-    let mut rgba_data = vec![255u8; size * size * 4]; // white + opaque
+    // Pre-rasterize to RGB pixel buffer (3 components, no alpha for shadings)
+    let mut rgb_data = vec![255u8; size * size * 3];
 
     for row in 0..size {
         let y_val = y_min + (row as f64 + 0.5) * dy;
@@ -274,11 +274,10 @@ fn build_type1_shading(
                 }
             };
 
-            let offset = (row * size + col) * 4;
-            rgba_data[offset] = (color.r * 255.0).round().clamp(0.0, 255.0) as u8;
-            rgba_data[offset + 1] = (color.g * 255.0).round().clamp(0.0, 255.0) as u8;
-            rgba_data[offset + 2] = (color.b * 255.0).round().clamp(0.0, 255.0) as u8;
-            rgba_data[offset + 3] = 255;
+            let offset = (row * size + col) * 3;
+            rgb_data[offset] = (color.r * 255.0).round().clamp(0.0, 255.0) as u8;
+            rgb_data[offset + 1] = (color.g * 255.0).round().clamp(0.0, 255.0) as u8;
+            rgb_data[offset + 2] = (color.b * 255.0).round().clamp(0.0, 255.0) as u8;
         }
     }
 
@@ -311,13 +310,15 @@ fn build_type1_shading(
     let _ = bbox;
 
     ctx.display_list.push(DisplayElement::Image {
-        rgba_data,
+        sample_data: rgb_data,
         params: ImageParams {
             width: size as u32,
             height: size as u32,
-            is_mask: false,
+            color_space: stet_core::device::ImageColorSpace::DeviceRGB,
             ctm,
             image_matrix,
+            interpolate: false,
+            mask_color: None,
         },
     });
 

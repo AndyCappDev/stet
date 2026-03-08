@@ -10,6 +10,7 @@ mod skia_device;
 pub use png_sink::PngSinkFactory;
 pub use skia_device::PreparedDisplayList;
 pub use skia_device::SkiaDevice;
+pub use skia_device::build_icc_cache_for_list;
 pub use skia_device::prepare_display_list;
 pub use skia_device::render_region;
 pub use skia_device::render_region_prepared;

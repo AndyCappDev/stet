@@ -15,12 +15,13 @@ use tiny_skia::{
 };
 
 use stet_core::device::{
-    AxialShadingParams, ClipParams, FillParams, ImageParams, MeshShadingParams, OutputDevice,
-    PageSinkFactory, PatchShadingParams, RadialShadingParams, StrokeParams,
+    AxialShadingParams, ClipParams, FillParams, ImageColorSpace, ImageParams, MeshShadingParams,
+    OutputDevice, PageSinkFactory, PatchShadingParams, RadialShadingParams, StrokeParams,
 };
 use stet_core::graphics_state::{
     DeviceColor, FillRule, LineCap, LineJoin, Matrix, PathSegment, PsPath,
 };
+use stet_core::icc::IccCache;
 
 /// Axis-aligned rectangle in device pixel coordinates.
 #[derive(Clone, Copy)]
@@ -95,6 +96,10 @@ pub struct SkiaDevice {
     pending_render: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
     /// Factory for creating page sinks (PNG, viewer, etc.).
     sink_factory: Box<dyn PageSinkFactory>,
+    /// Raw bytes of the system CMYK ICC profile (for building render-thread IccCaches).
+    system_cmyk_bytes: Option<std::sync::Arc<Vec<u8>>>,
+    /// Transient IccCache used during non-banded replay_to_device rendering.
+    render_icc_cache: Option<IccCache>,
 }
 
 impl SkiaDevice {
@@ -132,6 +137,8 @@ impl SkiaDevice {
             spare_mask: None,
             pending_render: None,
             sink_factory,
+            system_cmyk_bytes: None,
+            render_icc_cache: None,
         }
     }
 
@@ -148,6 +155,11 @@ impl SkiaDevice {
     /// Get the underlying pixmap (for testing).
     pub fn pixmap(&self) -> &Pixmap {
         &self.pixmap
+    }
+
+    /// Set the system CMYK ICC profile bytes for ICC-aware rendering.
+    pub fn set_system_cmyk_bytes(&mut self, bytes: std::sync::Arc<Vec<u8>>) {
+        self.system_cmyk_bytes = Some(bytes);
     }
 }
 
@@ -905,6 +917,276 @@ fn lanczos3_resample(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> 
 /// For axis-aligned transforms: Lanczos3 resample to the exact target dimensions
 /// (matching Cairo's FILTER_BEST quality).
 ///
+/// Build an `IccCache` from ICC profiles found in a display list.
+///
+/// Registers all unique ICCBased profiles and optionally the system CMYK profile.
+pub fn build_icc_cache_for_list(
+    list: &DisplayList,
+    system_cmyk_bytes: Option<&std::sync::Arc<Vec<u8>>>,
+) -> IccCache {
+    let mut cache = IccCache::new();
+    let mut seen = HashSet::new();
+
+    // Register system CMYK profile first
+    if let Some(cmyk_bytes) = system_cmyk_bytes {
+        if let Some(hash) = cache.register_profile(cmyk_bytes) {
+            seen.insert(hash);
+            // Set the default CMYK hash so convert_image_8bit works for DeviceCMYK
+            cache.set_default_cmyk_hash(hash);
+        }
+    }
+
+    // Scan display list for ICCBased images
+    for element in list.elements() {
+        let cs = match element {
+            DisplayElement::Image { params, .. } => Some(&params.color_space),
+            _ => None,
+        };
+        if let Some(ImageColorSpace::ICCBased {
+            profile_hash,
+            profile_data,
+            ..
+        }) = cs
+        {
+            if seen.insert(*profile_hash) {
+                cache.register_profile(profile_data);
+            }
+        }
+        // Also check Indexed with ICCBased base
+        if let Some(ImageColorSpace::Indexed { base, .. }) = cs {
+            if let ImageColorSpace::ICCBased {
+                profile_hash,
+                profile_data,
+                ..
+            } = base.as_ref()
+            {
+                if seen.insert(*profile_hash) {
+                    cache.register_profile(profile_data);
+                }
+            }
+        }
+    }
+
+    cache
+}
+
+/// Convert raw image samples to RGBA for rasterization.
+///
+/// Handles all `ImageColorSpace` variants, producing width×height×4 RGBA bytes.
+fn samples_to_rgba(data: &[u8], params: &ImageParams, icc: Option<&IccCache>) -> Vec<u8> {
+    let w = params.width as usize;
+    let h = params.height as usize;
+    let npixels = w * h;
+    match &params.color_space {
+        ImageColorSpace::PreconvertedRGBA => {
+            // Already RGBA — just return as-is
+            data.to_vec()
+        }
+        ImageColorSpace::DeviceGray => {
+            let mut rgba = vec![255u8; npixels * 4];
+            for i in 0..npixels {
+                let g = data.get(i).copied().unwrap_or(0);
+                let pi = i * 4;
+                rgba[pi] = g;
+                rgba[pi + 1] = g;
+                rgba[pi + 2] = g;
+            }
+            rgba
+        }
+        ImageColorSpace::DeviceRGB => {
+            let mut rgba = vec![255u8; npixels * 4];
+            for i in 0..npixels {
+                let si = i * 3;
+                let pi = i * 4;
+                rgba[pi] = data.get(si).copied().unwrap_or(0);
+                rgba[pi + 1] = data.get(si + 1).copied().unwrap_or(0);
+                rgba[pi + 2] = data.get(si + 2).copied().unwrap_or(0);
+            }
+            rgba
+        }
+        ImageColorSpace::DeviceCMYK => {
+            // Try ICC-based CMYK→RGB conversion via system CMYK profile
+            if let Some(cache) = icc {
+                if let Some(cmyk_hash) = cache.default_cmyk_hash() {
+                    if let Some(rgb) = cache.convert_image_8bit(cmyk_hash, data, npixels) {
+                        // Expand RGB (3 bytes/pixel) to RGBA (4 bytes/pixel)
+                        let mut rgba = vec![255u8; npixels * 4];
+                        for i in 0..npixels {
+                            rgba[i * 4] = rgb[i * 3];
+                            rgba[i * 4 + 1] = rgb[i * 3 + 1];
+                            rgba[i * 4 + 2] = rgb[i * 3 + 2];
+                        }
+                        return rgba;
+                    }
+                }
+            }
+            // Fallback: PLRM CMYK→RGB formula
+            let mut rgba = vec![255u8; npixels * 4];
+            for i in 0..npixels {
+                let si = i * 4;
+                let c = data.get(si).copied().unwrap_or(0) as f64 / 255.0;
+                let m = data.get(si + 1).copied().unwrap_or(0) as f64 / 255.0;
+                let y = data.get(si + 2).copied().unwrap_or(0) as f64 / 255.0;
+                let k = data.get(si + 3).copied().unwrap_or(0) as f64 / 255.0;
+                let r = (1.0 - c.min(1.0)) * (1.0 - k.min(1.0));
+                let g = (1.0 - m.min(1.0)) * (1.0 - k.min(1.0));
+                let b = (1.0 - y.min(1.0)) * (1.0 - k.min(1.0));
+                let pi = i * 4;
+                rgba[pi] = (r * 255.0).round().clamp(0.0, 255.0) as u8;
+                rgba[pi + 1] = (g * 255.0).round().clamp(0.0, 255.0) as u8;
+                rgba[pi + 2] = (b * 255.0).round().clamp(0.0, 255.0) as u8;
+            }
+            rgba
+        }
+        ImageColorSpace::ICCBased {
+            n,
+            profile_hash,
+            profile_data,
+        } => {
+            // Try ICC-based conversion if cache is available
+            if let Some(cache) = icc {
+                if cache.has_profile(profile_hash) {
+                    if let Some(rgb) = cache.convert_image_8bit(profile_hash, data, npixels) {
+                        let mut rgba = vec![255u8; npixels * 4];
+                        for i in 0..npixels {
+                            rgba[i * 4] = rgb[i * 3];
+                            rgba[i * 4 + 1] = rgb[i * 3 + 1];
+                            rgba[i * 4 + 2] = rgb[i * 3 + 2];
+                        }
+                        return rgba;
+                    }
+                }
+            }
+            // Fallback to device equivalent based on component count
+            let _ = (profile_hash, profile_data);
+            let fallback = match n {
+                1 => ImageColorSpace::DeviceGray,
+                4 => ImageColorSpace::DeviceCMYK,
+                _ => ImageColorSpace::DeviceRGB,
+            };
+            let p = ImageParams {
+                color_space: fallback,
+                ..params.clone()
+            };
+            samples_to_rgba(data, &p, icc)
+        }
+        ImageColorSpace::Indexed {
+            base,
+            hival,
+            lookup,
+        } => {
+            let base_ncomp = base.num_components() as usize;
+            // Expand indexed samples to base color space, then convert
+            let mut expanded = Vec::with_capacity(npixels * base_ncomp);
+            for i in 0..npixels {
+                let idx = data.get(i).copied().unwrap_or(0) as usize;
+                let idx = idx.min(*hival as usize);
+                let offset = idx * base_ncomp;
+                for c in 0..base_ncomp {
+                    expanded.push(lookup.get(offset + c).copied().unwrap_or(0));
+                }
+            }
+            let p = ImageParams {
+                color_space: *base.clone(),
+                ..params.clone()
+            };
+            samples_to_rgba(&expanded, &p, icc)
+        }
+        ImageColorSpace::CIEBasedABC { params: cie_params } => {
+            let mut rgba = vec![255u8; npixels * 4];
+            for i in 0..npixels {
+                let si = i * 3;
+                let a = data.get(si).copied().unwrap_or(0) as f64 / 255.0;
+                let b = data.get(si + 1).copied().unwrap_or(0) as f64 / 255.0;
+                let c = data.get(si + 2).copied().unwrap_or(0) as f64 / 255.0;
+                let color = DeviceColor::from_cie_abc(a, b, c, cie_params);
+                let pi = i * 4;
+                rgba[pi] = (color.r * 255.0).round().clamp(0.0, 255.0) as u8;
+                rgba[pi + 1] = (color.g * 255.0).round().clamp(0.0, 255.0) as u8;
+                rgba[pi + 2] = (color.b * 255.0).round().clamp(0.0, 255.0) as u8;
+            }
+            rgba
+        }
+        ImageColorSpace::CIEBasedA { params: cie_params } => {
+            let mut rgba = vec![255u8; npixels * 4];
+            for i in 0..npixels {
+                let val = data.get(i).copied().unwrap_or(0) as f64 / 255.0;
+                let color = DeviceColor::from_cie_a(val, cie_params);
+                let pi = i * 4;
+                rgba[pi] = (color.r * 255.0).round().clamp(0.0, 255.0) as u8;
+                rgba[pi + 1] = (color.g * 255.0).round().clamp(0.0, 255.0) as u8;
+                rgba[pi + 2] = (color.b * 255.0).round().clamp(0.0, 255.0) as u8;
+            }
+            rgba
+        }
+        ImageColorSpace::Mask { color, polarity } => {
+            let mut rgba = vec![0u8; npixels * 4];
+            let r = (color.r * 255.0).round().clamp(0.0, 255.0) as u8;
+            let g = (color.g * 255.0).round().clamp(0.0, 255.0) as u8;
+            let b = (color.b * 255.0).round().clamp(0.0, 255.0) as u8;
+            let bytes_per_row = (w).div_ceil(8);
+            for row in 0..h {
+                for col in 0..w {
+                    let byte_idx = row * bytes_per_row + col / 8;
+                    let bit_offset = 7 - (col % 8);
+                    let bit = if byte_idx < data.len() {
+                        (data[byte_idx] >> bit_offset) & 1
+                    } else {
+                        0
+                    };
+                    let paint = if *polarity { bit == 1 } else { bit == 0 };
+                    if paint {
+                        let pi = (row * w + col) * 4;
+                        rgba[pi] = r;
+                        rgba[pi + 1] = g;
+                        rgba[pi + 2] = b;
+                        rgba[pi + 3] = 255;
+                    }
+                }
+            }
+            rgba
+        }
+    }
+}
+
+/// Apply ImageType 4 mask color transparency to RGBA data.
+fn apply_mask_color_rgba(rgba: &mut [u8], sample_data: &[u8], params: &ImageParams) {
+    let mask_color = match &params.mask_color {
+        Some(mc) => mc,
+        None => return,
+    };
+    let ncomp = params.color_space.num_components() as usize;
+    let npixels = params.width as usize * params.height as usize;
+    let is_range = mask_color.len() == 2 * ncomp;
+
+    for i in 0..npixels {
+        let si = i * ncomp;
+        let matched = if is_range {
+            (0..ncomp).all(|c| {
+                let sample = sample_data.get(si + c).copied().unwrap_or(0);
+                let min_val = mask_color.get(c * 2).copied().unwrap_or(0);
+                let max_val = mask_color.get(c * 2 + 1).copied().unwrap_or(0);
+                sample >= min_val && sample <= max_val
+            })
+        } else {
+            (0..ncomp).all(|c| {
+                let sample = sample_data.get(si + c).copied().unwrap_or(0);
+                let target = mask_color.get(c).copied().unwrap_or(0);
+                sample == target
+            })
+        };
+        if matched {
+            let pi = i * 4;
+            if pi + 3 < rgba.len() {
+                rgba[pi] = 0;
+                rgba[pi + 1] = 0;
+                rgba[pi + 2] = 0;
+                rgba[pi + 3] = 0;
+            }
+        }
+    }
+}
+
 /// For rotated/sheared transforms: integer box-filter pre-downsample, leaving
 /// the fractional remainder to tiny-skia's bilinear.
 ///
@@ -1273,6 +1555,7 @@ fn render_element_to_band(
     band_w: u32,
     band_h: u32,
     dpi: f64,
+    icc: Option<&IccCache>,
 ) {
     let y_off = y_start as f32;
     match element {
@@ -1330,11 +1613,21 @@ fn render_element_to_band(
             }
             band_state.clip_region = None;
         }
-        DisplayElement::Image { rgba_data, params } => {
+        DisplayElement::Image {
+            sample_data,
+            params,
+        } => {
             let iw = params.width;
             let ih = params.height;
+            if iw == 0 || ih == 0 {
+                return;
+            }
+            let mut rgba_data = samples_to_rgba(sample_data, params, icc);
+            if params.mask_color.is_some() {
+                apply_mask_color_rgba(&mut rgba_data, sample_data, params);
+            }
             let expected = (iw * ih * 4) as usize;
-            if rgba_data.len() < expected || iw == 0 || ih == 0 {
+            if rgba_data.len() < expected {
                 return;
             }
             let Some(image_inv) = params.image_matrix.invert() else {
@@ -1343,9 +1636,7 @@ fn render_element_to_band(
             let combined = params.ctm.concat(&image_inv);
             let raw_transform = offset_transform(to_transform(&combined), y_off);
 
-            // Pre-downsample if significantly downscaling (box filter for proper
-            // area-averaging that tiny-skia's bilinear filter can't provide).
-            let prescaled = prescale_image(rgba_data, iw, ih, raw_transform);
+            let prescaled = prescale_image(&rgba_data, iw, ih, raw_transform);
             let (img_data, img_w, img_h, transform) = match &prescaled {
                 Some((data, w, h, t)) => (data.as_slice(), *w, *h, *t),
                 None => (rgba_data.as_slice(), iw, ih, raw_transform),
@@ -1370,8 +1661,6 @@ fn render_element_to_band(
                     }
                 }
             };
-            // Use Nearest for upscaling (keeps bitmap/pixel-art crisp),
-            // Bilinear for downscaling (avoids aliasing).
             let eff_sx = (transform.sx * transform.sx + transform.ky * transform.ky).sqrt();
             let eff_sy = (transform.kx * transform.kx + transform.sy * transform.sy).sqrt();
             let quality = if eff_sx >= 0.9 && eff_sy >= 0.9 {
@@ -1839,28 +2128,32 @@ impl OutputDevice for SkiaDevice {
         sink.end_page()
     }
 
-    fn draw_image(&mut self, rgba_data: &[u8], params: &ImageParams) {
+    fn draw_image(&mut self, sample_data: &[u8], params: &ImageParams) {
         self.ensure_full_pixmap();
         let w = params.width;
         let h = params.height;
+        if w == 0 || h == 0 {
+            return;
+        }
+        let mut rgba_data = samples_to_rgba(sample_data, params, self.render_icc_cache.as_ref());
+        if params.mask_color.is_some() {
+            apply_mask_color_rgba(&mut rgba_data, sample_data, params);
+        }
         let expected = (w * h * 4) as usize;
-        if rgba_data.len() < expected || w == 0 || h == 0 {
+        if rgba_data.len() < expected {
             return;
         }
 
-        // PostScript image_matrix maps image space → user space.
-        // We need: image space → device space = CTM × inv(image_matrix)
         let Some(image_inv) = params.image_matrix.invert() else {
             return;
         };
         let combined = params.ctm.concat(&image_inv);
         let raw_transform = to_transform(&combined);
 
-        // Pre-downsample if significantly downscaling.
-        let prescaled = prescale_image(rgba_data, w, h, raw_transform);
+        let prescaled = prescale_image(&rgba_data, w, h, raw_transform);
         let (img_data, img_w, img_h, transform) = match &prescaled {
             Some((data, pw, ph, t)) => (data.as_slice(), *pw, *ph, *t),
-            None => (rgba_data, w, h, raw_transform),
+            None => (rgba_data.as_slice(), w, h, raw_transform),
         };
 
         let Some(img_pixmap) = tiny_skia::PixmapRef::from_bytes(img_data, img_w, img_h) else {
@@ -1870,7 +2163,7 @@ impl OutputDevice for SkiaDevice {
         let (pw, ph) = (self.pixmap.width(), self.pixmap.height());
         let mut temp_mask = None;
         let Some(mask_ref) = resolve_clip_mask(&self.clip_region, &mut temp_mask, pw, ph) else {
-            return; // empty clip
+            return;
         };
 
         let eff_sx = (transform.sx * transform.sx + transform.ky * transform.ky).sqrt();
@@ -1957,11 +2250,16 @@ impl OutputDevice for SkiaDevice {
         let (page_w, page_h) = self.page_size();
         let band_h = select_band_height(page_w, page_h);
 
+        // Build ICC cache for this page's display list
+        let icc_cache = build_icc_cache_for_list(&list, self.system_cmyk_bytes.as_ref());
+
         // If banding not worthwhile, fall back to normal replay + show_page.
         // Lazily allocate the full-page pixmap since it's needed for this path.
         if band_h >= page_h {
             self.ensure_full_pixmap();
+            self.render_icc_cache = Some(icc_cache);
             stet_core::display_list::replay_to_device(&list, self);
+            self.render_icc_cache = None;
             return self.show_page(output_path);
         }
 
@@ -1983,14 +2281,16 @@ impl OutputDevice for SkiaDevice {
             // creation overhead and keeps work on the warmed-up pool.
             let (tx, rx) = std::sync::mpsc::sync_channel(1);
             rayon::spawn(move || {
-                let result = render_banded_to_sink(page_w, page_h, band_h, dpi, &list, &mut *sink);
+                let result = render_banded_to_sink(
+                    page_w, page_h, band_h, dpi, &list, &mut *sink, &icc_cache,
+                );
                 let _ = tx.send(result);
             });
             self.pending_render = Some(rx);
         }
         #[cfg(not(feature = "parallel"))]
         {
-            render_banded_to_sink(page_w, page_h, band_h, dpi, &list, &mut *sink)?;
+            render_banded_to_sink(page_w, page_h, band_h, dpi, &list, &mut *sink, &icc_cache)?;
         }
 
         Ok(())
@@ -2035,6 +2335,7 @@ fn render_banded_to_sink(
     dpi: f64,
     list: &DisplayList,
     sink: &mut dyn stet_core::device::PageSink,
+    icc_cache: &IccCache,
 ) -> Result<(), String> {
     // Precompute Y bounding boxes for culling
     let bboxes = precompute_bboxes(list, dpi);
@@ -2060,6 +2361,7 @@ fn render_banded_to_sink(
     let num_bands = page_h.div_ceil(band_h);
     let elements = list.elements();
     let row_bytes = page_w as usize * 4;
+    let icc_ref = Some(icc_cache);
 
     // Closure that renders a single band and returns its RGBA pixels.
     let render_band = |band_idx: u32| -> Vec<u8> {
@@ -2109,6 +2411,7 @@ fn render_banded_to_sink(
                     page_w,
                     render_h,
                     dpi,
+                    icc_ref,
                 );
             }
         }
@@ -2473,6 +2776,7 @@ pub fn render_region_prepared(
     pixel_w: u32,
     pixel_h: u32,
     dpi: f64,
+    icc: Option<&IccCache>,
 ) -> Vec<u8> {
     if pixel_w == 0 || pixel_h == 0 || vp_w <= 0.0 || vp_h <= 0.0 {
         return vec![0xFF; pixel_w as usize * pixel_h as usize * 4];
@@ -2538,6 +2842,7 @@ pub fn render_region_prepared(
                 pixel_w,
                 pixel_h,
                 effective_dpi,
+                icc,
             );
         }
     }
@@ -2563,6 +2868,7 @@ pub fn render_region(
     pixel_w: u32,
     pixel_h: u32,
     dpi: f64,
+    icc: Option<&IccCache>,
 ) -> Vec<u8> {
     if pixel_w == 0 || pixel_h == 0 || vp_w <= 0.0 || vp_h <= 0.0 {
         return vec![0xFF; pixel_w as usize * pixel_h as usize * 4];
@@ -2635,6 +2941,7 @@ pub fn render_region(
                 pixel_w,
                 pixel_h,
                 effective_dpi,
+                icc,
             );
         }
     }
@@ -2655,6 +2962,7 @@ fn render_element_to_viewport(
     out_w: u32,
     out_h: u32,
     effective_dpi: f64,
+    icc: Option<&IccCache>,
 ) {
     match element {
         DisplayElement::Fill { path, params } => {
@@ -2742,11 +3050,21 @@ fn render_element_to_viewport(
             }
             state.clip_region = None;
         }
-        DisplayElement::Image { rgba_data, params } => {
+        DisplayElement::Image {
+            sample_data,
+            params,
+        } => {
             let iw = params.width;
             let ih = params.height;
+            if iw == 0 || ih == 0 {
+                return;
+            }
+            let mut rgba_data = samples_to_rgba(sample_data, params, icc);
+            if params.mask_color.is_some() {
+                apply_mask_color_rgba(&mut rgba_data, sample_data, params);
+            }
             let expected = (iw * ih * 4) as usize;
-            if rgba_data.len() < expected || iw == 0 || ih == 0 {
+            if rgba_data.len() < expected {
                 return;
             }
             let Some(image_inv) = params.image_matrix.invert() else {
@@ -2756,7 +3074,7 @@ fn render_element_to_viewport(
             let raw_transform =
                 viewport_transform(to_transform(&combined), vp_x, vp_y, scale_x, scale_y);
 
-            let prescaled = prescale_image(rgba_data, iw, ih, raw_transform);
+            let prescaled = prescale_image(&rgba_data, iw, ih, raw_transform);
             let (img_data, img_w, img_h, transform) = match &prescaled {
                 Some((data, w, h, t)) => (data.as_slice(), *w, *h, *t),
                 None => (rgba_data.as_slice(), iw, ih, raw_transform),

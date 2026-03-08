@@ -377,6 +377,7 @@ pub fn render_viewport(
             pixel_w,
             pixel_h,
             page_dpi,
+            None,
         )
     } else {
         stet_render::render_region(
@@ -388,6 +389,7 @@ pub fn render_viewport(
             pixel_w,
             pixel_h,
             page_dpi,
+            None,
         )
     };
 

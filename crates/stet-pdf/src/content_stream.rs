@@ -244,14 +244,12 @@ pub fn build_content_stream(
                 clip_depth = 0;
                 gs.reset();
             }
-            DisplayElement::Image { rgba_data, params } => {
+            DisplayElement::Image {
+                sample_data,
+                params,
+            } => {
                 let img_idx = images.len();
-                let xobj = image_ops::convert_image(
-                    rgba_data,
-                    params.width,
-                    params.height,
-                    params.is_mask,
-                );
+                let xobj = image_ops::convert_image(sample_data, params);
 
                 // Compute placement matrix: unit square → device space
                 let m = compute_image_matrix(params);

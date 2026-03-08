@@ -6,9 +6,11 @@
 
 use crate::display_list::DisplayList;
 use crate::graphics_state::{
-    DashPattern, DeviceColor, FillRule, LineCap, LineJoin, Matrix, PsPath,
+    CieAParams, CieAbcParams, DashPattern, DeviceColor, FillRule, LineCap, LineJoin, Matrix, PsPath,
 };
+use crate::icc::ProfileHash;
 use crate::object::EntityId;
+use std::sync::Arc;
 
 /// Parameters for filling a path.
 #[derive(Clone, Debug)]
@@ -78,6 +80,58 @@ pub struct ClipParams {
     pub ctm: Matrix,
 }
 
+/// VM-free color space enum for images stored in the display list.
+///
+/// Unlike `ColorSpace` (which holds EntityId references into VM stores),
+/// this enum is self-contained and safe to store outside the interpreter context.
+#[derive(Clone, Debug)]
+pub enum ImageColorSpace {
+    /// 1-component grayscale.
+    DeviceGray,
+    /// 3-component RGB.
+    DeviceRGB,
+    /// 4-component CMYK.
+    DeviceCMYK,
+    /// ICC profile-based color space.
+    ICCBased {
+        n: u32,
+        profile_hash: ProfileHash,
+        profile_data: Arc<Vec<u8>>,
+    },
+    /// Indexed (palette) color space.
+    Indexed {
+        base: Box<ImageColorSpace>,
+        hival: u32,
+        lookup: Vec<u8>,
+    },
+    /// CIE-based ABC (3-component).
+    CIEBasedABC { params: Arc<CieAbcParams> },
+    /// CIE-based A (1-component).
+    CIEBasedA { params: Arc<CieAParams> },
+    /// 1-bit imagemask with fill color and polarity.
+    Mask { color: DeviceColor, polarity: bool },
+    /// Pre-converted RGBA data (4 bytes/pixel). Used for Type 3 masked images
+    /// where stencil alpha has been pre-applied at operator time.
+    PreconvertedRGBA,
+}
+
+impl ImageColorSpace {
+    /// Number of components per sample.
+    pub fn num_components(&self) -> u32 {
+        match self {
+            ImageColorSpace::DeviceGray => 1,
+            ImageColorSpace::DeviceRGB => 3,
+            ImageColorSpace::DeviceCMYK => 4,
+            ImageColorSpace::ICCBased { n, .. } => *n,
+            ImageColorSpace::Indexed { .. } => 1,
+            ImageColorSpace::CIEBasedABC { .. } => 3,
+            ImageColorSpace::CIEBasedA { .. } => 1,
+            ImageColorSpace::Mask { .. } => 1,
+            ImageColorSpace::PreconvertedRGBA => 4,
+        }
+    }
+}
+
 /// Parameters for drawing an image.
 #[derive(Clone, Debug)]
 pub struct ImageParams {
@@ -85,12 +139,16 @@ pub struct ImageParams {
     pub width: u32,
     /// Image height in pixels.
     pub height: u32,
-    /// True if this is a 1-bit mask (imagemask).
-    pub is_mask: bool,
+    /// Color space and sample format.
+    pub color_space: ImageColorSpace,
     /// Current transformation matrix.
     pub ctm: Matrix,
     /// Image-to-user-space matrix from the PostScript image operator.
     pub image_matrix: Matrix,
+    /// Whether to interpolate when scaling.
+    pub interpolate: bool,
+    /// ImageType 4 color key mask (raw sample values for transparency).
+    pub mask_color: Option<Vec<u8>>,
 }
 
 /// A single color stop in a gradient.
@@ -219,12 +277,12 @@ pub trait OutputDevice {
     /// Output the current page (e.g., save PNG) and return Ok/Err.
     fn show_page(&mut self, output_path: &str) -> Result<(), String>;
 
-    /// Draw an RGBA image.
+    /// Draw an image from raw sample data.
     ///
-    /// `rgba_data` is width×height×4 bytes (R, G, B, A per pixel, row-major).
+    /// `sample_data` contains raw samples in the format described by `params.color_space`.
     /// The image matrix maps from image space to user space; the CTM then maps
     /// to device space.
-    fn draw_image(&mut self, rgba_data: &[u8], params: &ImageParams);
+    fn draw_image(&mut self, sample_data: &[u8], params: &ImageParams);
 
     /// Paint an axial (linear) gradient shading.
     fn paint_axial_shading(&mut self, _params: &AxialShadingParams) {}
@@ -265,7 +323,10 @@ pub trait OutputDevice {
                 DisplayElement::Stroke { path, params } => self.stroke_path(path, params),
                 DisplayElement::Clip { path, params } => self.clip_path(path, params),
                 DisplayElement::InitClip => self.init_clip(),
-                DisplayElement::Image { rgba_data, params } => self.draw_image(rgba_data, params),
+                DisplayElement::Image {
+                    sample_data,
+                    params,
+                } => self.draw_image(sample_data, params),
                 DisplayElement::ErasePage => self.erase_page(),
                 DisplayElement::AxialShading { params } => self.paint_axial_shading(params),
                 DisplayElement::RadialShading { params } => self.paint_radial_shading(params),
@@ -320,7 +381,7 @@ impl OutputDevice for NullDevice {
     fn show_page(&mut self, _output_path: &str) -> Result<(), String> {
         Ok(())
     }
-    fn draw_image(&mut self, _rgba_data: &[u8], _params: &ImageParams) {}
+    fn draw_image(&mut self, _sample_data: &[u8], _params: &ImageParams) {}
     fn page_size(&self) -> (u32, u32) {
         (self.width, self.height)
     }

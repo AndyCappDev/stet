@@ -145,7 +145,14 @@ fn run_png_mode(dpi_override: Option<f64>, file_args: Vec<String>, no_icc: bool)
     let mut ctx = create_context(no_icc);
 
     // Register device factory (before setpagedevice)
-    ctx.device_factory = Some(Box::new(|w, h| Box::new(SkiaDevice::new(w, h))));
+    let cmyk_bytes = ctx.icc_cache.system_cmyk_bytes().cloned();
+    ctx.device_factory = Some(Box::new(move |w, h| {
+        let mut dev = SkiaDevice::new(w, h);
+        if let Some(ref bytes) = cmyk_bytes {
+            dev.set_system_cmyk_bytes(bytes.clone());
+        }
+        Box::new(dev)
+    }));
 
     if !file_args.is_empty() {
         run_file_jobs(&mut ctx, dpi_override, &file_args, "png", None, None);
@@ -206,6 +213,15 @@ fn run_viewer_mode(dpi_override: Option<f64>, file_args: Vec<String>, no_icc: bo
 
     let (interp_end, viewer_end, dl_sender, advance_rx) = stet_viewer::create_channels();
     let first_file = file_args.first().cloned();
+
+    // Get system CMYK profile bytes for ICC-aware viewer rendering.
+    // We search once here rather than in create_context to avoid a duplicate search;
+    // the interpreter thread's create_context will find the same profile.
+    let system_cmyk_bytes = if !no_icc {
+        stet_core::icc::find_system_cmyk_profile_bytes()
+    } else {
+        None
+    };
 
     // Determine page size for the first file so the window is created at the
     // correct aspect ratio. On Wayland the compositor centers the window at
@@ -325,6 +341,7 @@ fn run_viewer_mode(dpi_override: Option<f64>, file_args: Vec<String>, no_icc: bo
             dpi_override,
             first_file.as_deref(),
             first_page_size,
+            system_cmyk_bytes,
         );
     }
     std::process::exit(0);

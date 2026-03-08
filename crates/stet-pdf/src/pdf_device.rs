@@ -305,22 +305,84 @@ impl PdfDevice {
             )
         });
 
+        // Build ICC profile stream if needed
+        let icc_ref = img.icc_profile.as_ref().map(|icc| {
+            writer.add_stream(
+                vec![(b"N".to_vec(), PdfObj::Int(icc.n as i64))],
+                &icc.data,
+                true,
+            )
+        });
+
+        // Build PDF ColorSpace value
+        let cs_obj = build_pdf_colorspace(&img.pdf_color_space, icc_ref, writer);
+
         // Main image XObject
         let mut entries = vec![
             (b"Type".to_vec(), PdfObj::name("XObject")),
             (b"Subtype".to_vec(), PdfObj::name("Image")),
             (b"Width".to_vec(), PdfObj::Int(img.width as i64)),
             (b"Height".to_vec(), PdfObj::Int(img.height as i64)),
-            (b"ColorSpace".to_vec(), PdfObj::name("DeviceRGB")),
-            (b"BitsPerComponent".to_vec(), PdfObj::Int(8)),
-            (b"Interpolate".to_vec(), PdfObj::Bool(false)),
         ];
+
+        if img.is_imagemask {
+            entries.push((b"ImageMask".to_vec(), PdfObj::Bool(true)));
+            // Imagemasks don't have ColorSpace or BitsPerComponent in the XObject
+            entries.push((
+                b"Decode".to_vec(),
+                PdfObj::Array(vec![PdfObj::Int(1), PdfObj::Int(0)]),
+            ));
+        } else {
+            entries.push((b"ColorSpace".to_vec(), cs_obj));
+            entries.push((
+                b"BitsPerComponent".to_vec(),
+                PdfObj::Int(img.bits_per_component as i64),
+            ));
+        }
+
+        entries.push((b"Interpolate".to_vec(), PdfObj::Bool(false)));
 
         if let Some(smask) = smask_ref {
             entries.push((b"SMask".to_vec(), PdfObj::Ref(smask)));
         }
 
-        writer.add_stream(entries, &img.rgb_data, true)
+        writer.add_stream(entries, &img.sample_data, true)
+    }
+}
+
+/// Build a PDF color space object from our enum.
+fn build_pdf_colorspace(
+    cs: &crate::image_ops::PdfColorSpace,
+    icc_ref: Option<u32>,
+    writer: &mut PdfWriter,
+) -> PdfObj {
+    use crate::image_ops::PdfColorSpace;
+    match cs {
+        PdfColorSpace::DeviceGray => PdfObj::name("DeviceGray"),
+        PdfColorSpace::DeviceRGB => PdfObj::name("DeviceRGB"),
+        PdfColorSpace::DeviceCMYK => PdfObj::name("DeviceCMYK"),
+        PdfColorSpace::ICCBased { .. } => {
+            if let Some(ref_num) = icc_ref {
+                PdfObj::Array(vec![PdfObj::name("ICCBased"), PdfObj::Ref(ref_num)])
+            } else {
+                PdfObj::name("DeviceRGB") // fallback
+            }
+        }
+        PdfColorSpace::Indexed {
+            base,
+            hival,
+            lookup,
+        } => {
+            let base_obj = build_pdf_colorspace(base, None, writer);
+            // Embed lookup table as a hex string stream
+            let lookup_ref = writer.add_stream(Vec::new(), lookup, true);
+            PdfObj::Array(vec![
+                PdfObj::name("Indexed"),
+                base_obj,
+                PdfObj::Int(*hival as i64),
+                PdfObj::Ref(lookup_ref),
+            ])
+        }
     }
 }
 
@@ -373,7 +435,7 @@ impl OutputDevice for PdfDevice {
         Ok(())
     }
 
-    fn draw_image(&mut self, _rgba_data: &[u8], _params: &ImageParams) {}
+    fn draw_image(&mut self, _sample_data: &[u8], _params: &ImageParams) {}
 
     fn page_size(&self) -> (u32, u32) {
         (self.page_w, self.page_h)

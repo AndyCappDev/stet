@@ -787,16 +787,14 @@ fn replay_form_elements(
                     params: new_params,
                 });
             }
-            DisplayElement::Image { rgba_data, params } => {
-                let new_params = stet_core::device::ImageParams {
-                    width: params.width,
-                    height: params.height,
-                    is_mask: params.is_mask,
-                    ctm: ctm.concat(&params.ctm),
-                    image_matrix: params.image_matrix,
-                };
+            DisplayElement::Image {
+                sample_data,
+                params,
+            } => {
+                let mut new_params = params.clone();
+                new_params.ctm = ctm.concat(&params.ctm);
                 target.push(DisplayElement::Image {
-                    rgba_data: rgba_data.clone(),
+                    sample_data: sample_data.clone(),
                     params: new_params,
                 });
             }

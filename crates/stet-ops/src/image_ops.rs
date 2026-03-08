@@ -4,8 +4,10 @@
 
 //! Image operators: image, imagemask, colorimage.
 
+use std::sync::Arc;
+
 use stet_core::context::Context;
-use stet_core::device::ImageParams;
+use stet_core::device::{ImageColorSpace, ImageParams};
 use stet_core::dict::DictKey;
 use stet_core::display_list::DisplayElement;
 use stet_core::error::PsError;
@@ -50,17 +52,16 @@ pub fn op_image(ctx: &mut Context) -> Result<(), PsError> {
     // Per PLRM: the 5-operand form of `image` always renders grayscale
     // (1 component per sample), regardless of the current color space.
     // Multi-component images use the dict form or `colorimage`.
-    let ncomp = 1;
+    let ncomp = 1u32;
 
     // Calculate bytes needed
-    let bits_per_row = width as usize * ncomp * bps as usize;
+    let bits_per_row = width as usize * ncomp as usize * bps as usize;
     let bytes_per_row = bits_per_row.div_ceil(8);
     let total_bytes = bytes_per_row * height as usize;
 
     // Check if data source is a procedure
     if is_procedure(&src_obj) {
         let procedure = src_obj;
-        let decode: Vec<f64> = (0..ncomp).flat_map(|_| [0.0, 1.0]).collect();
 
         // Pop all 5 operands
         ctx.o_stack.pop()?; // src
@@ -70,23 +71,16 @@ pub fn op_image(ctx: &mut Context) -> Result<(), PsError> {
         ctx.o_stack.pop()?; // width
 
         let data = collect_proc_data(ctx, procedure, total_bytes)?;
-        let samples = unpack_samples(
-            &data,
-            width as u32,
-            height as u32,
-            bps as u32,
-            ncomp as u32,
-            false,
-        );
-        let rgba = samples_to_rgba(
+        let samples = unpack_samples(&data, width as u32, height as u32, bps as u32, ncomp, false);
+        draw_image_to_device(
             ctx,
-            &samples,
+            samples,
             width as u32,
             height as u32,
-            ncomp as u32,
-            &decode,
+            ImageColorSpace::DeviceGray,
+            &image_matrix,
+            None,
         );
-        draw_image_to_device(ctx, rgba, width as u32, height as u32, false, &image_matrix);
         return Ok(());
     }
 
@@ -100,29 +94,19 @@ pub fn op_image(ctx: &mut Context) -> Result<(), PsError> {
     // Read data from source
     let data = read_image_data(ctx, src_obj, total_bytes)?;
 
-    // Default decode: [0 1] per component
-    let decode: Vec<f64> = (0..ncomp).flat_map(|_| [0.0, 1.0]).collect();
+    // Unpack to 8-bit
+    let samples = unpack_samples(&data, width as u32, height as u32, bps as u32, ncomp, false);
 
-    // Unpack samples, convert to RGBA
-    let samples = unpack_samples(
-        &data,
-        width as u32,
-        height as u32,
-        bps as u32,
-        ncomp as u32,
-        false,
-    );
-    let rgba = samples_to_rgba(
+    // Draw with DeviceGray (5-operand form is always grayscale)
+    draw_image_to_device(
         ctx,
-        &samples,
+        samples,
         width as u32,
         height as u32,
-        ncomp as u32,
-        &decode,
+        ImageColorSpace::DeviceGray,
+        &image_matrix,
+        None,
     );
-
-    // Draw
-    draw_image_to_device(ctx, rgba, width as u32, height as u32, false, &image_matrix);
     Ok(())
 }
 
@@ -220,19 +204,50 @@ fn image_dict_form(ctx: &mut Context) -> Result<(), PsError> {
         read_image_data(ctx, data_source, total_bytes)?
     };
 
-    // Unpack and convert
+    // Unpack samples to 8-bit
     let indexed = matches!(ctx.gstate.color_space, ColorSpace::Indexed { .. });
     let samples = unpack_samples(&data, width, height, bps, ncomp, indexed);
-    let mut rgba = samples_to_rgba(ctx, &samples, width, height, ncomp, &decode);
 
-    // ImageType 4: apply MaskColor transparency
-    if image_type == 4 {
-        if let Some(mask_color) = dict_get_mask_color(ctx, dict_entity, ncomp) {
-            apply_mask_color(&mut rgba, &samples, width, height, ncomp, &mask_color, bps);
-        }
+    // ImageType 4: extract mask color (raw BPC values scaled to 8-bit)
+    let mask_color_param = if image_type == 4 {
+        dict_get_mask_color(ctx, dict_entity, ncomp)
+            .map(|mc| mc.iter().map(|&v| scale_mask_value(v, bps) as u8).collect())
+    } else {
+        None
+    };
+
+    // Try to capture color space as VM-free enum
+    if let Some(img_cs) = capture_image_color_space(ctx) {
+        // Apply decode to samples if non-identity (for non-indexed spaces)
+        let final_samples = if indexed || is_identity_decode(&decode, ncomp) {
+            samples
+        } else {
+            apply_decode(&samples, ncomp, &decode)
+        };
+        draw_image_to_device(
+            ctx,
+            final_samples,
+            width,
+            height,
+            img_cs,
+            &image_matrix,
+            mask_color_param,
+        );
+    } else {
+        // CIE DEF/DEFG, Separation, DeviceN: convert to RGB at op time
+        let rgba = samples_to_rgba(ctx, &samples, width, height, ncomp, &decode);
+        // Strip alpha to get RGB
+        let rgb = rgba_to_rgb(&rgba);
+        draw_image_to_device(
+            ctx,
+            rgb,
+            width,
+            height,
+            ImageColorSpace::DeviceRGB,
+            &image_matrix,
+            mask_color_param,
+        );
     }
-
-    draw_image_to_device(ctx, rgba, width, height, false, &image_matrix);
     Ok(())
 }
 
@@ -352,7 +367,8 @@ fn image_type3_form(
         _ => unreachable!(),
     };
 
-    // Convert image data to RGBA
+    // Type 3 masked images: convert to RGBA at op time (stencil mask
+    // needs alpha compositing, and these images are relatively rare)
     let indexed = matches!(ctx.gstate.color_space, ColorSpace::Indexed { .. });
     let samples = unpack_samples(&img_data, img_w, img_h, img_bps, ncomp, indexed);
     let mut rgba = samples_to_rgba(ctx, &samples, img_w, img_h, ncomp, &img_decode);
@@ -369,7 +385,15 @@ fn image_type3_form(
         mask_polarity,
     );
 
-    draw_image_to_device(ctx, rgba, img_w, img_h, false, &img_matrix);
+    draw_image_to_device(
+        ctx,
+        rgba,
+        img_w,
+        img_h,
+        ImageColorSpace::PreconvertedRGBA,
+        &img_matrix,
+        None,
+    );
     Ok(())
 }
 
@@ -740,8 +764,16 @@ pub fn op_imagemask(ctx: &mut Context) -> Result<(), PsError> {
         ctx.o_stack.pop()?; // width
 
         let data = collect_proc_data(ctx, procedure, total_bytes)?;
-        let rgba = mask_to_rgba(&data, width as u32, height as u32, polarity, &color);
-        draw_image_to_device(ctx, rgba, width as u32, height as u32, true, &image_matrix);
+        let cs = ImageColorSpace::Mask { color, polarity };
+        draw_image_to_device(
+            ctx,
+            data,
+            width as u32,
+            height as u32,
+            cs,
+            &image_matrix,
+            None,
+        );
         return Ok(());
     }
 
@@ -753,11 +785,17 @@ pub fn op_imagemask(ctx: &mut Context) -> Result<(), PsError> {
     ctx.o_stack.pop()?; // height
     ctx.o_stack.pop()?; // width
 
-    // Convert mask to RGBA using current color
     let color = ctx.gstate.color.clone();
-    let rgba = mask_to_rgba(&data, width as u32, height as u32, polarity, &color);
-
-    draw_image_to_device(ctx, rgba, width as u32, height as u32, true, &image_matrix);
+    let cs = ImageColorSpace::Mask { color, polarity };
+    draw_image_to_device(
+        ctx,
+        data,
+        width as u32,
+        height as u32,
+        cs,
+        &image_matrix,
+        None,
+    );
     Ok(())
 }
 
@@ -788,9 +826,8 @@ fn imagemask_dict_form(ctx: &mut Context) -> Result<(), PsError> {
     ctx.o_stack.pop()?; // dict
 
     let color = ctx.gstate.color.clone();
-    let rgba = mask_to_rgba(&data, width, height, polarity, &color);
-
-    draw_image_to_device(ctx, rgba, width, height, true, &image_matrix);
+    let cs = ImageColorSpace::Mask { color, polarity };
+    draw_image_to_device(ctx, data, width, height, cs, &image_matrix, None);
     Ok(())
 }
 
@@ -901,7 +938,6 @@ pub fn op_colorimage(ctx: &mut Context) -> Result<(), PsError> {
                 ncomp as u32,
             );
 
-            let decode: Vec<f64> = (0..ncomp).flat_map(|_| [0.0, 1.0]).collect();
             let samples = unpack_samples(
                 &data,
                 width as u32,
@@ -910,15 +946,16 @@ pub fn op_colorimage(ctx: &mut Context) -> Result<(), PsError> {
                 ncomp as u32,
                 false,
             );
-            let rgba = samples_to_rgba(
+            let cs = colorimage_color_space(ncomp);
+            draw_image_to_device(
                 ctx,
-                &samples,
+                samples,
                 width as u32,
                 height as u32,
-                ncomp as u32,
-                &decode,
+                cs,
+                &image_matrix,
+                None,
             );
-            draw_image_to_device(ctx, rgba, width as u32, height as u32, false, &image_matrix);
             return Ok(());
         }
 
@@ -950,7 +987,6 @@ pub fn op_colorimage(ctx: &mut Context) -> Result<(), PsError> {
                 ctx.o_stack.pop()?;
             }
             let data = collect_proc_data(ctx, procedure, total_bytes)?;
-            let decode: Vec<f64> = (0..ncomp).flat_map(|_| [0.0, 1.0]).collect();
             let samples = unpack_samples(
                 &data,
                 width as u32,
@@ -959,15 +995,16 @@ pub fn op_colorimage(ctx: &mut Context) -> Result<(), PsError> {
                 ncomp as u32,
                 false,
             );
-            let rgba = samples_to_rgba(
+            let cs = colorimage_color_space(ncomp);
+            draw_image_to_device(
                 ctx,
-                &samples,
+                samples,
                 width as u32,
                 height as u32,
-                ncomp as u32,
-                &decode,
+                cs,
+                &image_matrix,
+                None,
             );
-            draw_image_to_device(ctx, rgba, width as u32, height as u32, false, &image_matrix);
             return Ok(());
         }
         read_image_data(ctx, src_obj, total_bytes)?
@@ -978,9 +1015,6 @@ pub fn op_colorimage(ctx: &mut Context) -> Result<(), PsError> {
         ctx.o_stack.pop()?;
     }
 
-    // Default decode
-    let decode: Vec<f64> = (0..ncomp).flat_map(|_| [0.0, 1.0]).collect();
-
     let samples = unpack_samples(
         &data,
         width as u32,
@@ -989,17 +1023,27 @@ pub fn op_colorimage(ctx: &mut Context) -> Result<(), PsError> {
         ncomp as u32,
         false,
     );
-    let rgba = samples_to_rgba(
+    let cs = colorimage_color_space(ncomp);
+    draw_image_to_device(
         ctx,
-        &samples,
+        samples,
         width as u32,
         height as u32,
-        ncomp as u32,
-        &decode,
+        cs,
+        &image_matrix,
+        None,
     );
-
-    draw_image_to_device(ctx, rgba, width as u32, height as u32, false, &image_matrix);
     Ok(())
+}
+
+/// Map colorimage ncomp to ImageColorSpace.
+fn colorimage_color_space(ncomp: i32) -> ImageColorSpace {
+    match ncomp {
+        1 => ImageColorSpace::DeviceGray,
+        3 => ImageColorSpace::DeviceRGB,
+        4 => ImageColorSpace::DeviceCMYK,
+        _ => ImageColorSpace::DeviceRGB,
+    }
 }
 
 // ---------- Helper functions ----------
@@ -1471,6 +1515,32 @@ fn samples_to_rgba(
     rgba
 }
 
+/// Apply decode array to 8-bit samples, returning decoded 8-bit samples.
+fn apply_decode(samples: &[u8], ncomp: u32, decode: &[f64]) -> Vec<u8> {
+    let mut result = vec![0u8; samples.len()];
+    let nc = ncomp as usize;
+    for (i, &raw) in samples.iter().enumerate() {
+        let c = i % nc;
+        let d_min = decode.get(c * 2).copied().unwrap_or(0.0);
+        let d_max = decode.get(c * 2 + 1).copied().unwrap_or(1.0);
+        let val = d_min + (raw as f64 / 255.0) * (d_max - d_min);
+        result[i] = (val.clamp(0.0, 1.0) * 255.0).round() as u8;
+    }
+    result
+}
+
+/// Convert RGBA data to RGB (strip alpha channel).
+fn rgba_to_rgb(rgba: &[u8]) -> Vec<u8> {
+    let npixels = rgba.len() / 4;
+    let mut rgb = Vec::with_capacity(npixels * 3);
+    for px in rgba.chunks_exact(4) {
+        rgb.push(px[0]);
+        rgb.push(px[1]);
+        rgb.push(px[2]);
+    }
+    rgb
+}
+
 /// Check if a decode array is the identity mapping [0 1 0 1 ...].
 fn is_identity_decode(decode: &[f64], ncomp: u32) -> bool {
     if decode.len() != (ncomp as usize * 2) {
@@ -1484,49 +1554,6 @@ fn is_identity_decode(decode: &[f64], ncomp: u32) -> bool {
         }
     }
     true
-}
-
-/// Convert a 1-bit mask to RGBA using the current color.
-fn mask_to_rgba(
-    raw: &[u8],
-    width: u32,
-    height: u32,
-    polarity: bool,
-    color: &DeviceColor,
-) -> Vec<u8> {
-    let pixel_count = width as usize * height as usize;
-    let mut rgba = vec![0u8; pixel_count * 4];
-    let bytes_per_row = (width as usize).div_ceil(8);
-
-    let r = (color.r * 255.0).round().clamp(0.0, 255.0) as u8;
-    let g = (color.g * 255.0).round().clamp(0.0, 255.0) as u8;
-    let b = (color.b * 255.0).round().clamp(0.0, 255.0) as u8;
-
-    for row in 0..height as usize {
-        for col in 0..width as usize {
-            let byte_idx = row * bytes_per_row + col / 8;
-            let bit_offset = 7 - (col % 8);
-            let bit = if byte_idx < raw.len() {
-                (raw[byte_idx] >> bit_offset) & 1
-            } else {
-                0
-            };
-
-            // polarity=true: bit=1 → paint (alpha=255), bit=0 → transparent
-            // polarity=false: bit=0 → paint, bit=1 → transparent
-            let paint = if polarity { bit == 1 } else { bit == 0 };
-            let pi = (row * width as usize + col) * 4;
-            if paint {
-                rgba[pi] = r;
-                rgba[pi + 1] = g;
-                rgba[pi + 2] = b;
-                rgba[pi + 3] = 255;
-            }
-            // else leave as 0,0,0,0 (transparent)
-        }
-    }
-
-    rgba
 }
 
 /// Interleave separate component data into a single buffer.
@@ -1669,26 +1696,102 @@ fn repack_samples(samples: &[u16], width: u32, height: u32, bps: u32, ncomp: u32
     }
 }
 
-/// Record an image draw to the display list.
+/// Record an image draw to the display list with raw sample data.
 fn draw_image_to_device(
     ctx: &mut Context,
-    rgba: Vec<u8>,
+    sample_data: Vec<u8>,
     width: u32,
     height: u32,
-    is_mask: bool,
+    color_space: ImageColorSpace,
     image_matrix: &Matrix,
+    mask_color: Option<Vec<u8>>,
 ) {
     let params = ImageParams {
         width,
         height,
-        is_mask,
+        color_space,
         ctm: ctx.gstate.ctm,
         image_matrix: *image_matrix,
+        interpolate: false,
+        mask_color,
     };
     ctx.display_list.push(DisplayElement::Image {
-        rgba_data: rgba,
+        sample_data,
         params,
     });
+}
+
+/// Capture the current color space as a VM-free `ImageColorSpace`.
+///
+/// For device spaces (Gray/RGB/CMYK), returns the direct variant.
+/// For ICCBased, extracts profile bytes from the VM.
+/// For Indexed, copies lookup table and recurses on base.
+/// For CIE ABC/A, clones Arc params.
+/// For CIE DEF/DEFG and Separation/DeviceN, returns None (caller pre-converts).
+fn capture_image_color_space(ctx: &Context) -> Option<ImageColorSpace> {
+    match &ctx.gstate.color_space {
+        ColorSpace::DeviceGray => Some(ImageColorSpace::DeviceGray),
+        ColorSpace::DeviceRGB => Some(ImageColorSpace::DeviceRGB),
+        ColorSpace::DeviceCMYK => Some(ImageColorSpace::DeviceCMYK),
+        ColorSpace::ICCBased {
+            dict_entity,
+            n,
+            profile_hash,
+        } => {
+            if let Some(hash) = profile_hash {
+                // Extract profile bytes from dict DataSource
+                let ds_key = ctx.names.find(b"DataSource")?;
+                let ds_obj = ctx
+                    .dicts
+                    .get(*dict_entity, &stet_core::dict::DictKey::Name(ds_key))?;
+                let bytes = match ds_obj.value {
+                    PsValue::String { entity, start, len } => {
+                        ctx.strings.get(entity, start, len).to_vec()
+                    }
+                    _ => return None, // File sources already consumed
+                };
+                Some(ImageColorSpace::ICCBased {
+                    n: *n,
+                    profile_hash: *hash,
+                    profile_data: Arc::new(bytes),
+                })
+            } else {
+                // No profile — fall back to device equivalent
+                match n {
+                    1 => Some(ImageColorSpace::DeviceGray),
+                    3 => Some(ImageColorSpace::DeviceRGB),
+                    4 => Some(ImageColorSpace::DeviceCMYK),
+                    _ => Some(ImageColorSpace::DeviceRGB),
+                }
+            }
+        }
+        ColorSpace::Indexed {
+            base,
+            hival,
+            lookup,
+            ..
+        } => {
+            let base_cs = match base.as_ref() {
+                ColorSpace::DeviceGray => ImageColorSpace::DeviceGray,
+                ColorSpace::DeviceRGB => ImageColorSpace::DeviceRGB,
+                ColorSpace::DeviceCMYK => ImageColorSpace::DeviceCMYK,
+                _ => ImageColorSpace::DeviceRGB, // fallback
+            };
+            Some(ImageColorSpace::Indexed {
+                base: Box::new(base_cs),
+                hival: *hival as u32,
+                lookup: lookup.clone(),
+            })
+        }
+        ColorSpace::CIEBasedABC { params, .. } => Some(ImageColorSpace::CIEBasedABC {
+            params: params.clone(),
+        }),
+        ColorSpace::CIEBasedA { params, .. } => Some(ImageColorSpace::CIEBasedA {
+            params: params.clone(),
+        }),
+        // CIE DEF/DEFG, Separation, DeviceN: pre-convert at op time
+        _ => None,
+    }
 }
 
 // ---------- Procedure data source support ----------
@@ -1812,60 +1915,6 @@ fn dict_get_mask_color(
     }
 }
 
-/// Apply ImageType 4 MaskColor: set alpha=0 for pixels matching the mask color.
-/// MaskColor is either ncomp values (exact match) or 2*ncomp values (range match).
-/// MaskColor values are in the raw BPC range; samples have been scaled to 8-bit.
-/// We scale MaskColor values to 8-bit to match.
-fn apply_mask_color(
-    rgba: &mut [u8],
-    samples: &[u8],
-    width: u32,
-    height: u32,
-    ncomp: u32,
-    mask_color: &[i32],
-    bps: u32,
-) {
-    // Scale MaskColor values from raw BPC range to 8-bit to match samples
-    let scaled_mask: Vec<i32> = mask_color
-        .iter()
-        .map(|&v| scale_mask_value(v, bps))
-        .collect();
-
-    let pixel_count = width as usize * height as usize;
-    let is_range = scaled_mask.len() == 2 * ncomp as usize;
-
-    for i in 0..pixel_count {
-        let si = i * ncomp as usize;
-        let matched = if is_range {
-            // Range match: sample[c] in [min_c, max_c] for ALL components
-            (0..ncomp as usize).all(|c| {
-                let sample = samples.get(si + c).copied().unwrap_or(0) as i32;
-                let min_val = scaled_mask[c * 2];
-                let max_val = scaled_mask[c * 2 + 1];
-                sample >= min_val && sample <= max_val
-            })
-        } else {
-            // Exact match: sample[c] == mask_color[c] for ALL components
-            (0..ncomp as usize).all(|c| {
-                let sample = samples.get(si + c).copied().unwrap_or(0) as i32;
-                let target = scaled_mask.get(c).copied().unwrap_or(0);
-                sample == target
-            })
-        };
-
-        if matched {
-            let pi = i * 4;
-            if pi + 3 < rgba.len() {
-                // Zero all channels for valid premultiplied alpha
-                rgba[pi] = 0;
-                rgba[pi + 1] = 0;
-                rgba[pi + 2] = 0;
-                rgba[pi + 3] = 0;
-            }
-        }
-    }
-}
-
 /// Scale a MaskColor value from the raw BPC range to 8-bit,
 /// matching the scaling done by `unpack_samples`.
 fn scale_mask_value(val: i32, bps: u32) -> i32 {
@@ -1911,32 +1960,6 @@ mod tests {
         // 10/15 * 255 = 170, 12/15 * 255 = 204
         assert_eq!(result[0], 170);
         assert_eq!(result[1], 204);
-    }
-
-    #[test]
-    fn test_mask_to_rgba_polarity_true() {
-        // 1 bit mask: 0b10000000 = 0x80
-        let data = vec![0x80];
-        let color = DeviceColor::from_rgb(1.0, 0.0, 0.0);
-        let rgba = mask_to_rgba(&data, 2, 1, true, &color);
-        // Pixel 0: bit=1, polarity=true → paint (red, alpha=255)
-        assert_eq!(rgba[0], 255); // R
-        assert_eq!(rgba[3], 255); // A
-        // Pixel 1: bit=0, polarity=true → transparent
-        assert_eq!(rgba[4], 0); // R
-        assert_eq!(rgba[7], 0); // A
-    }
-
-    #[test]
-    fn test_mask_to_rgba_polarity_false() {
-        let data = vec![0x80];
-        let color = DeviceColor::from_rgb(0.0, 1.0, 0.0);
-        let rgba = mask_to_rgba(&data, 2, 1, false, &color);
-        // Pixel 0: bit=1, polarity=false → transparent
-        assert_eq!(rgba[3], 0);
-        // Pixel 1: bit=0, polarity=false → paint (green, alpha=255)
-        assert_eq!(rgba[5], 255); // G
-        assert_eq!(rgba[7], 255); // A
     }
 
     #[test]

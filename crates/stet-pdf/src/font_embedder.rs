@@ -93,11 +93,7 @@ fn charstring_encrypt(plaintext: &[u8], len_iv: usize) -> Vec<u8> {
 /// the stack across `callsubr` boundaries so that dynamically-determined indices
 /// (e.g. hint-replacement wrappers: `<N> 4 callsubr` where Subr 4 does
 /// `1 3 callothersubr pop callsubr`) are correctly detected.
-fn find_subr_refs_deep(
-    decrypted: &[u8],
-    subrs: &[Vec<u8>],
-    found: &mut HashSet<usize>,
-) {
+fn find_subr_refs_deep(decrypted: &[u8], subrs: &[Vec<u8>], found: &mut HashSet<usize>) {
     let mut stack: Vec<f64> = Vec::new();
     let mut ps_stack: Vec<f64> = Vec::new();
     scan_charstring(decrypted, subrs, found, &mut stack, &mut ps_stack, 0);
@@ -162,8 +158,8 @@ fn scan_charstring(
                     }
                 }
             }
-            11 => return, // return from Subr
-            14 => return, // endchar
+            11 => return,        // return from Subr
+            14 => return,        // endchar
             13 => stack.clear(), // hsbw
             10 => {
                 // callsubr: pop index, record it, then inline the Subr to
@@ -174,9 +170,7 @@ fn scan_charstring(
                         let idx = idx as usize;
                         if idx < subrs.len() {
                             found.insert(idx);
-                            scan_charstring(
-                                &subrs[idx], subrs, found, stack, ps_stack, depth + 1,
-                            );
+                            scan_charstring(&subrs[idx], subrs, found, stack, ps_stack, depth + 1);
                         }
                     }
                 }
@@ -199,12 +193,7 @@ fn scan_charstring(
             }
             255 => {
                 if i + 3 < data.len() {
-                    let val = i32::from_be_bytes([
-                        data[i],
-                        data[i + 1],
-                        data[i + 2],
-                        data[i + 3],
-                    ]);
+                    let val = i32::from_be_bytes([data[i], data[i + 1], data[i + 2], data[i + 3]]);
                     i += 4;
                     stack.push(val as f64);
                 }
@@ -2264,32 +2253,31 @@ fn build_type42_font(writer: &mut PdfWriter, usage: &FontUsage, ctx: &Context) -
     };
 
     // Subset TrueType font: collect used GIDs via Encoding → CharStrings mapping
-    let font_data = if let (Some(enc_entity), Some(cs_entity)) =
-        (encoding_entity, charstrings_entity)
-    {
-        let mut seed_gids: HashSet<u16> = HashSet::new();
-        for &code in &usage.used_codes {
-            if code > 255 {
-                continue;
-            }
-            let glyph_name_obj = ctx.arrays.get_element(enc_entity, code as u32);
-            if let PsValue::Name(name_id) = glyph_name_obj.value {
-                if let Some(cs_obj) = ctx.dicts.get(cs_entity, &DictKey::Name(name_id)) {
-                    if let Some(gid) = cs_obj.as_i32() {
-                        seed_gids.insert(gid as u16);
+    let font_data =
+        if let (Some(enc_entity), Some(cs_entity)) = (encoding_entity, charstrings_entity) {
+            let mut seed_gids: HashSet<u16> = HashSet::new();
+            for &code in &usage.used_codes {
+                if code > 255 {
+                    continue;
+                }
+                let glyph_name_obj = ctx.arrays.get_element(enc_entity, code as u32);
+                if let PsValue::Name(name_id) = glyph_name_obj.value {
+                    if let Some(cs_obj) = ctx.dicts.get(cs_entity, &DictKey::Name(name_id)) {
+                        if let Some(gid) = cs_obj.as_i32() {
+                            seed_gids.insert(gid as u16);
+                        }
                     }
                 }
             }
-        }
-        if seed_gids.is_empty() {
-            font_data // can't determine used GIDs, embed whole
+            if seed_gids.is_empty() {
+                font_data // can't determine used GIDs, embed whole
+            } else {
+                let used_gids = compute_used_gids(&font_data, &seed_gids);
+                subset_truetype(&font_data, &used_gids).unwrap_or(font_data)
+            }
         } else {
-            let used_gids = compute_used_gids(&font_data, &seed_gids);
-            subset_truetype(&font_data, &used_gids).unwrap_or(font_data)
-        }
-    } else {
-        font_data // no Encoding/CharStrings, embed whole
-    };
+            font_data // no Encoding/CharStrings, embed whole
+        };
 
     // Embed TrueType binary as FontFile2
     let font_file_entries = vec![(b"Length1".to_vec(), PdfObj::Int(font_data.len() as i64))];

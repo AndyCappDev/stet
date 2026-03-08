@@ -36,6 +36,8 @@ pub struct IccCache {
     color_cache: HashMap<(u64, [u16; 4]), (f64, f64, f64)>,
     /// Default system CMYK profile hash (if found at startup).
     default_cmyk_hash: Option<ProfileHash>,
+    /// Raw bytes of the system CMYK profile (for re-registration in render threads).
+    system_cmyk_bytes: Option<Arc<Vec<u8>>>,
     /// sRGB output profile (created once).
     srgb_profile: ColorProfile,
 }
@@ -54,6 +56,7 @@ impl IccCache {
             transforms: HashMap::new(),
             color_cache: HashMap::new(),
             default_cmyk_hash: None,
+            system_cmyk_bytes: None,
             srgb_profile: ColorProfile::new_srgb(),
         }
     }
@@ -222,6 +225,7 @@ impl IccCache {
             && let Some(hash) = self.register_profile(&bytes)
         {
             eprintln!("[ICC] Loaded system CMYK profile");
+            self.system_cmyk_bytes = Some(Arc::new(bytes));
             self.default_cmyk_hash = Some(hash);
         }
     }
@@ -234,6 +238,16 @@ impl IccCache {
     /// Check if a profile hash has been registered.
     pub fn has_profile(&self, hash: &ProfileHash) -> bool {
         self.transforms.contains_key(hash)
+    }
+
+    /// Get the raw bytes of the system CMYK profile (for re-registration in render threads).
+    pub fn system_cmyk_bytes(&self) -> Option<&Arc<Vec<u8>>> {
+        self.system_cmyk_bytes.as_ref()
+    }
+
+    /// Set the default CMYK profile hash (used when building render-thread caches).
+    pub fn set_default_cmyk_hash(&mut self, hash: ProfileHash) {
+        self.default_cmyk_hash = Some(hash);
     }
 
     /// Convert CMYK to (r, g, b) using the default system CMYK profile.
@@ -251,7 +265,15 @@ impl IccCache {
         self.transforms.clear();
         self.color_cache.clear();
         self.default_cmyk_hash = None;
+        self.system_cmyk_bytes = None;
     }
+}
+
+/// Search system paths for CMYK ICC profile bytes without parsing or logging.
+///
+/// Returns the raw bytes suitable for passing to the viewer for ICC-aware rendering.
+pub fn find_system_cmyk_profile_bytes() -> Option<Arc<Vec<u8>>> {
+    find_system_cmyk_profile().map(Arc::new)
 }
 
 /// Search common system paths for a CMYK ICC profile.
