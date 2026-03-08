@@ -89,6 +89,142 @@ fn charstring_encrypt(plaintext: &[u8], len_iv: usize) -> Vec<u8> {
     result
 }
 
+/// Find all Subr indices transitively referenced by a charstring, simulating
+/// the stack across `callsubr` boundaries so that dynamically-determined indices
+/// (e.g. hint-replacement wrappers: `<N> 4 callsubr` where Subr 4 does
+/// `1 3 callothersubr pop callsubr`) are correctly detected.
+fn find_subr_refs_deep(
+    decrypted: &[u8],
+    subrs: &[Vec<u8>],
+    found: &mut HashSet<usize>,
+) {
+    let mut stack: Vec<f64> = Vec::new();
+    let mut ps_stack: Vec<f64> = Vec::new();
+    scan_charstring(decrypted, subrs, found, &mut stack, &mut ps_stack, 0);
+}
+
+/// Recursive charstring scanner with stack simulation. `depth` limits recursion
+/// to prevent infinite loops in mutually-recursive Subrs.
+///
+/// Always re-enters a Subr even if already found, because the caller's stack
+/// may provide different dynamically-determined Subr indices each time (e.g.
+/// hint-replacement wrapper called as `<N> 4 callsubr`).
+fn scan_charstring(
+    data: &[u8],
+    subrs: &[Vec<u8>],
+    found: &mut HashSet<usize>,
+    stack: &mut Vec<f64>,
+    ps_stack: &mut Vec<f64>,
+    depth: u32,
+) {
+    if depth > 10 {
+        return;
+    }
+    let mut i = 0;
+    while i < data.len() {
+        let b = data[i];
+        i += 1;
+        match b {
+            12 => {
+                if i < data.len() {
+                    let b2 = data[i];
+                    i += 1;
+                    match b2 {
+                        12 => {
+                            // div: pop 2, push quotient
+                            if stack.len() >= 2 {
+                                let divisor = stack.pop().unwrap();
+                                let dividend = stack.pop().unwrap();
+                                if divisor != 0.0 {
+                                    stack.push(dividend / divisor);
+                                }
+                            }
+                        }
+                        16 => {
+                            // callothersubr: pop subr_num, pop n_args, pop n_args values
+                            // Args are pushed to PS stack for retrieval by pop (12,17)
+                            if stack.len() >= 2 {
+                                let _subr_num = stack.pop().unwrap();
+                                let n = stack.pop().unwrap() as usize;
+                                let n = n.min(stack.len());
+                                for _ in 0..n {
+                                    ps_stack.push(stack.pop().unwrap());
+                                }
+                            }
+                        }
+                        17 => {
+                            // pop: retrieve value from PS stack
+                            if let Some(v) = ps_stack.pop() {
+                                stack.push(v);
+                            }
+                        }
+                        _ => stack.clear(),
+                    }
+                }
+            }
+            11 => return, // return from Subr
+            14 => return, // endchar
+            13 => stack.clear(), // hsbw
+            10 => {
+                // callsubr: pop index, record it, then inline the Subr to
+                // discover any stack-dependent callsubr references within it.
+                if let Some(idx) = stack.pop() {
+                    let idx = idx as i64;
+                    if idx >= 0 {
+                        let idx = idx as usize;
+                        if idx < subrs.len() {
+                            found.insert(idx);
+                            scan_charstring(
+                                &subrs[idx], subrs, found, stack, ps_stack, depth + 1,
+                            );
+                        }
+                    }
+                }
+            }
+            // Number encoding
+            32..=246 => stack.push((b as i32 - 139) as f64),
+            247..=250 => {
+                if i < data.len() {
+                    let b2 = data[i] as i32;
+                    i += 1;
+                    stack.push(((b as i32 - 247) * 256 + b2 + 108) as f64);
+                }
+            }
+            251..=254 => {
+                if i < data.len() {
+                    let b2 = data[i] as i32;
+                    i += 1;
+                    stack.push((-(b as i32 - 251) * 256 - b2 - 108) as f64);
+                }
+            }
+            255 => {
+                if i + 3 < data.len() {
+                    let val = i32::from_be_bytes([
+                        data[i],
+                        data[i + 1],
+                        data[i + 2],
+                        data[i + 3],
+                    ]);
+                    i += 4;
+                    stack.push(val as f64);
+                }
+            }
+            _ => stack.clear(),
+        }
+    }
+}
+
+/// Compute the set of Subr indices transitively referenced by the given charstrings.
+/// Uses stack simulation across `callsubr` boundaries to detect dynamically-determined
+/// Subr indices (e.g. hint-replacement wrappers).
+fn compute_used_subrs(glyph_charstrings: &[Vec<u8>], subrs: &[Vec<u8>]) -> HashSet<usize> {
+    let mut needed: HashSet<usize> = HashSet::new();
+    for cs in glyph_charstrings {
+        find_subr_refs_deep(cs, subrs, &mut needed);
+    }
+    needed
+}
+
 /// Find seac dependencies in a decrypted charstring.
 /// Returns glyph names (from StandardEncoding) referenced by seac opcodes.
 fn find_seac_deps(decrypted: &[u8]) -> Vec<String> {
@@ -255,18 +391,36 @@ fn build_type1_font_file(
         emit_private_hint_lines(&mut lines, ctx, pe);
     }
 
-    // Subrs array (include all — not subsetted)
-    // Format: "dup {i} {len} RD <space><binary>NP" per line
+    // Subrs array (subsetted: unused Subrs replaced with `return` stubs)
     if !subrs.is_empty() {
-        lines.push(format!("/Subrs {} array", subrs.len()).into_bytes());
-        for (i, subr) in subrs.iter().enumerate() {
-            let encrypted = charstring_encrypt(subr, len_iv);
-            let mut entry = format!("dup {} {} RD ", i, encrypted.len()).into_bytes();
-            entry.extend_from_slice(&encrypted);
-            entry.extend_from_slice(b"NP");
-            lines.push(entry);
+        // Collect decrypted charstrings for included glyphs to find Subr references
+        let mut glyph_charstrings: Vec<Vec<u8>> = Vec::new();
+        for glyph_name in &glyph_set {
+            if let Some(cs_bytes) = get_raw_charstring_bytes(ctx, charstrings_entity, glyph_name) {
+                glyph_charstrings.push(decrypt_charstring(&cs_bytes, len_iv));
+            }
         }
-        lines.push(b"ND".to_vec());
+        let used_subrs = compute_used_subrs(&glyph_charstrings, subrs);
+
+        // Trim array to max referenced index + 1
+        let trimmed_len = used_subrs.iter().copied().max().map(|m| m + 1).unwrap_or(0);
+
+        if trimmed_len > 0 {
+            let return_stub = charstring_encrypt(&[11], len_iv);
+            lines.push(format!("/Subrs {} array", trimmed_len).into_bytes());
+            for i in 0..trimmed_len {
+                let encrypted = if used_subrs.contains(&i) {
+                    charstring_encrypt(&subrs[i], len_iv)
+                } else {
+                    return_stub.clone()
+                };
+                let mut entry = format!("dup {} {} RD ", i, encrypted.len()).into_bytes();
+                entry.extend_from_slice(&encrypted);
+                entry.extend_from_slice(b"NP");
+                lines.push(entry);
+            }
+            lines.push(b"ND".to_vec());
+        }
     }
 
     // CharStrings dict (subset)
