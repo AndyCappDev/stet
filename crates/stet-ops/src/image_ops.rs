@@ -211,18 +211,34 @@ fn image_dict_form(ctx: &mut Context) -> Result<(), PsError> {
     // ImageType 4: extract mask color (raw BPC values scaled to 8-bit)
     let mask_color_param = if image_type == 4 {
         dict_get_mask_color(ctx, dict_entity, ncomp)
-            .map(|mc| mc.iter().map(|&v| scale_mask_value(v, bps) as u8).collect())
+            .map(|mc| mc.iter().map(|&v| scale_mask_value(v, bps) as u8).collect::<Vec<u8>>())
     } else {
         None
     };
 
-    // Try to capture color space as VM-free enum
-    if let Some(img_cs) = capture_image_color_space(ctx) {
+    // ImageType 4: apply mask against raw samples before decode, then push
+    // as PreconvertedRGBA. MaskColor comparison must use raw (un-decoded)
+    // sample values per PLRM spec.
+    if mask_color_param.is_some() {
+        let mut rgba = samples_to_rgba(ctx, &samples, width, height, ncomp, &decode);
+        if let Some(ref mc) = mask_color_param {
+            apply_mask_color_raw(&mut rgba, &samples, width, height, ncomp, mc);
+        }
+        draw_image_to_device(
+            ctx,
+            rgba,
+            width,
+            height,
+            ImageColorSpace::PreconvertedRGBA,
+            &image_matrix,
+            None,
+        );
+    } else if let Some(img_cs) = capture_image_color_space(ctx) {
         // Apply decode to samples if non-identity (for non-indexed spaces)
-        let final_samples = if indexed || is_identity_decode(&decode, ncomp) {
-            samples
-        } else {
+        let final_samples = if !indexed && !is_identity_decode(&decode, ncomp) {
             apply_decode(&samples, ncomp, &decode)
+        } else {
+            samples
         };
         draw_image_to_device(
             ctx,
@@ -231,12 +247,11 @@ fn image_dict_form(ctx: &mut Context) -> Result<(), PsError> {
             height,
             img_cs,
             &image_matrix,
-            mask_color_param,
+            None,
         );
     } else {
         // CIE DEF/DEFG, Separation, DeviceN: convert to RGB at op time
         let rgba = samples_to_rgba(ctx, &samples, width, height, ncomp, &decode);
-        // Strip alpha to get RGB
         let rgb = rgba_to_rgb(&rgba);
         draw_image_to_device(
             ctx,
@@ -245,7 +260,7 @@ fn image_dict_form(ctx: &mut Context) -> Result<(), PsError> {
             height,
             ImageColorSpace::DeviceRGB,
             &image_matrix,
-            mask_color_param,
+            None,
         );
     }
     Ok(())
@@ -1513,6 +1528,48 @@ fn samples_to_rgba(
     }
 
     rgba
+}
+
+/// Apply ImageType 4 MaskColor against raw (un-decoded) samples, setting
+/// alpha=0 in RGBA output for matching pixels.
+fn apply_mask_color_raw(
+    rgba: &mut [u8],
+    raw_samples: &[u8],
+    width: u32,
+    height: u32,
+    ncomp: u32,
+    mask_color: &[u8],
+) {
+    let pixel_count = width as usize * height as usize;
+    let nc = ncomp as usize;
+    let is_range = mask_color.len() == 2 * nc;
+
+    for i in 0..pixel_count {
+        let si = i * nc;
+        let matched = if is_range {
+            (0..nc).all(|c| {
+                let sample = raw_samples.get(si + c).copied().unwrap_or(0);
+                let min_val = mask_color.get(c * 2).copied().unwrap_or(0);
+                let max_val = mask_color.get(c * 2 + 1).copied().unwrap_or(0);
+                sample >= min_val && sample <= max_val
+            })
+        } else {
+            (0..nc).all(|c| {
+                let sample = raw_samples.get(si + c).copied().unwrap_or(0);
+                let target = mask_color.get(c).copied().unwrap_or(0);
+                sample == target
+            })
+        };
+        if matched {
+            let pi = i * 4;
+            if pi + 3 < rgba.len() {
+                rgba[pi] = 0;
+                rgba[pi + 1] = 0;
+                rgba[pi + 2] = 0;
+                rgba[pi + 3] = 0;
+            }
+        }
+    }
 }
 
 /// Apply decode array to 8-bit samples, returning decoded 8-bit samples.
