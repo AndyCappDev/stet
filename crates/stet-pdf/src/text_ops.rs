@@ -38,8 +38,18 @@ pub fn emit_text_element(
     // Start text block
     buf.extend(b"BT\n");
 
-    // Set fill color
-    emit_text_color(buf, params);
+    // Set color and text rendering mode based on PaintType
+    if params.paint_type == 2 {
+        // PaintType 2: stroked glyphs — use text rendering mode 1 (stroke)
+        // Set stroke color and line width
+        emit_stroke_color(buf, params);
+        fmt_num(buf, params.stroke_width);
+        buf.extend(b" w\n");
+        buf.extend(b"1 Tr\n");
+    } else {
+        // PaintType 0: filled glyphs (default)
+        emit_text_color(buf, params);
+    }
 
     // Set font — size is 1 because scaling is in the text matrix
     write!(buf, "/{} 1 Tf\n", pdf_font_name).unwrap();
@@ -101,7 +111,7 @@ pub fn emit_text_element(
     buf.extend(b"ET\n");
 }
 
-/// Emit a fill color for text.
+/// Emit a fill color for text (lowercase operators: g, rg, k).
 fn emit_text_color(buf: &mut Vec<u8>, params: &TextParams) {
     let c = &params.color;
     if let Some((c_val, m, y, k)) = c.native_cmyk {
@@ -123,6 +133,31 @@ fn emit_text_color(buf: &mut Vec<u8>, params: &TextParams) {
         buf.push(b' ');
         fmt_num(buf, c.b);
         buf.extend(b" rg\n");
+    }
+}
+
+/// Emit a stroke color for text (uppercase operators: G, RG, K).
+fn emit_stroke_color(buf: &mut Vec<u8>, params: &TextParams) {
+    let c = &params.color;
+    if let Some((c_val, m, y, k)) = c.native_cmyk {
+        fmt_num(buf, c_val);
+        buf.push(b' ');
+        fmt_num(buf, m);
+        buf.push(b' ');
+        fmt_num(buf, y);
+        buf.push(b' ');
+        fmt_num(buf, k);
+        buf.extend(b" K\n");
+    } else if c.r == c.g && c.g == c.b {
+        fmt_num(buf, c.r);
+        buf.extend(b" G\n");
+    } else {
+        fmt_num(buf, c.r);
+        buf.push(b' ');
+        fmt_num(buf, c.g);
+        buf.push(b' ');
+        fmt_num(buf, c.b);
+        buf.extend(b" RG\n");
     }
 }
 

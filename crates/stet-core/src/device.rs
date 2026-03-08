@@ -47,6 +47,10 @@ pub struct TextParams {
     pub ctm: [f64; 6],
     /// User-space font matrix (scaled to point units).
     pub font_matrix: [f64; 6],
+    /// PaintType: 0 = fill (default), 2 = stroke (outlined glyphs).
+    pub paint_type: i32,
+    /// Device-space stroke width for PaintType 2 fonts.
+    pub stroke_width: f64,
 }
 
 /// Parameters for stroking a path.

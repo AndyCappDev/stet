@@ -4340,6 +4340,9 @@ fn emit_text_element_with_fm(
     let (start_x, start_y) = device_pos
         .unwrap_or_else(|| ctx.gstate.current_point.unwrap_or((0.0, 0.0)));
 
+    // Get PaintType and stroke width for PaintType 2 (stroked) fonts
+    let (paint_type, stroke_width) = get_paint_info(ctx, font_entity, &fm, &ctm);
+
     let params = TextParams {
         text,
         start_x,
@@ -4351,6 +4354,8 @@ fn emit_text_element_with_fm(
         color: ctx.gstate.color.clone(),
         ctm: [ctm.a, ctm.b, ctm.c, ctm.d, ctm.tx, ctm.ty],
         font_matrix,
+        paint_type,
+        stroke_width,
     };
     ctx.display_list.push(DisplayElement::Text { params });
 }
