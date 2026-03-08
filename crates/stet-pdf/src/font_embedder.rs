@@ -19,6 +19,7 @@ use stet_core::context::Context;
 use stet_core::dict::DictKey;
 use stet_core::encoding::STANDARD_ENCODING;
 use stet_core::object::{EntityId, PsValue};
+use stet_core::truetype;
 use stet_core::type2_charstring;
 
 use crate::font_tracker::FontUsage;
@@ -517,11 +518,22 @@ fn extract_charstring_width(decrypted: &[u8], subrs: &[Vec<u8>]) -> Option<f64> 
                 if i < decrypted.len() {
                     let b2 = decrypted[i];
                     i += 1;
-                    if b2 == 7 {
-                        // sbw: sbx sby wx wy → width is stack[-2]
-                        if stack.len() >= 2 {
-                            return Some(stack[stack.len() - 2]);
+                    match b2 {
+                        7 => {
+                            // sbw: sbx sby wx wy → width is stack[-2]
+                            if stack.len() >= 2 {
+                                return Some(stack[stack.len() - 2]);
+                            }
                         }
+                        12 => {
+                            // div: num1 num2 → num1/num2
+                            if stack.len() >= 2 {
+                                let b_val = stack.pop().unwrap();
+                                let a_val = stack.pop().unwrap();
+                                stack.push(if b_val != 0.0 { a_val / b_val } else { 0.0 });
+                            }
+                        }
+                        _ => {} // Other escape ops — don't clear stack
                     }
                 }
             }
@@ -569,8 +581,8 @@ fn extract_charstring_width(decrypted: &[u8], subrs: &[Vec<u8>]) -> Option<f64> 
                 }
             }
             _ => {
-                // Other opcodes — clear stack
-                stack.clear();
+                // Other opcodes before hsbw/sbw — ignore (don't clear stack,
+                // as CM fonts use div and other ops to compute width arguments)
             }
         }
     }
@@ -585,13 +597,19 @@ pub fn build_font_resource(
     usage: &FontUsage,
     ctx: &Context,
 ) -> Option<u32> {
-    match usage.font_type {
+    let result = match usage.font_type {
         1 => build_type1_font(writer, usage, ctx),
         2 => build_type2_font(writer, usage, ctx),
         3 => None, // Type 3 can't be embedded
-        0 | 42 => None, // CID/TrueType embedding not yet implemented
+        0 | 42 => build_cid_font(writer, usage, ctx),
         _ => None,
+    };
+    if result.is_none() {
+        eprintln!("[font_embedder] FAILED type={} name={} entity={:?} codes={}",
+            usage.font_type, String::from_utf8_lossy(&usage.font_name),
+            usage.font_entity, usage.used_codes.len());
     }
+    result
 }
 
 /// Build a Type 1 font resource.
@@ -1171,4 +1189,859 @@ fn build_font_descriptor(
     }
 
     writer.add_object(&PdfObj::Dict(entries))
+}
+
+// ============================================================
+// CID / TrueType font embedding (Type 0, Type 42)
+// ============================================================
+
+/// Reconstruct a valid TrueType font by adding glyf/loca tables
+/// built from the PostScript GlyphDirectory.
+///
+/// CUPS-style CIDFont Type 2 fonts store glyph outlines in PostScript
+/// GlyphDirectory dict (keyed by CID=GID via identity CIDMap). The sfnts
+/// only contains header/metric tables but no glyf/loca.
+fn reconstruct_truetype(
+    raw_sfnts: &[u8],
+    ctx: &Context,
+    cidfont_entity: EntityId,
+) -> Option<Vec<u8>> {
+    // Get GlyphDirectory dict from the CIDFont
+    let gd_name = ctx.names.find(b"GlyphDirectory")?;
+    let gd_obj = ctx.dicts.get(cidfont_entity, &DictKey::Name(gd_name))?;
+    let gd_entity = match gd_obj.value {
+        PsValue::Dict(e) => e,
+        _ => return None,
+    };
+
+    // Get numGlyphs from maxp table
+    let (maxp_off, _) = truetype::find_table(raw_sfnts, b"maxp")?;
+    if maxp_off + 6 > raw_sfnts.len() {
+        return None;
+    }
+    let num_glyphs = truetype::read_u16(raw_sfnts, maxp_off + 4) as usize;
+    if num_glyphs == 0 {
+        return None;
+    }
+
+    // Build glyf table from GlyphDirectory entries
+    let mut glyf_data: Vec<u8> = Vec::new();
+    let mut loca_offsets: Vec<u32> = Vec::with_capacity(num_glyphs + 1);
+
+    for gid in 0..num_glyphs {
+        loca_offsets.push(glyf_data.len() as u32);
+        if let Some(entry_obj) = ctx.dicts.get(gd_entity, &DictKey::Int(gid as i32)) {
+            if let PsValue::String { entity, start, len } = entry_obj.value {
+                let glyph_bytes = ctx.strings.get(entity, start, len);
+                if !glyph_bytes.is_empty() {
+                    glyf_data.extend_from_slice(glyph_bytes);
+                    // Pad to 2-byte alignment
+                    if glyf_data.len() % 2 != 0 {
+                        glyf_data.push(0);
+                    }
+                }
+            }
+        }
+        // Empty glyphs get same offset as next → zero-length
+    }
+    // Final loca entry = total glyf size
+    loca_offsets.push(glyf_data.len() as u32);
+
+    // Build loca table (long format, uint32 entries)
+    let mut loca_data = Vec::with_capacity(loca_offsets.len() * 4);
+    for &offset in &loca_offsets {
+        loca_data.extend_from_slice(&offset.to_be_bytes());
+    }
+
+    // Parse existing table directory to collect table data
+    let num_tables_raw = if raw_sfnts.len() >= 6 {
+        truetype::read_u16(raw_sfnts, 4) as usize
+    } else {
+        return None;
+    };
+
+    let mut keep_tables: Vec<(&[u8], Vec<u8>)> = Vec::new();
+    for i in 0..num_tables_raw {
+        let entry_off = 12 + i * 16;
+        if entry_off + 16 > raw_sfnts.len() {
+            break;
+        }
+        let tag = &raw_sfnts[entry_off..entry_off + 4];
+        let tbl_offset = truetype::read_u32(raw_sfnts, entry_off + 8) as usize;
+        let tbl_length = truetype::read_u32(raw_sfnts, entry_off + 12) as usize;
+
+        // Skip gdir (non-standard) and any existing glyf/loca
+        if tag == b"gdir" || tag == b"glyf" || tag == b"loca" {
+            continue;
+        }
+
+        if tbl_offset + tbl_length <= raw_sfnts.len() {
+            let mut data = raw_sfnts[tbl_offset..tbl_offset + tbl_length].to_vec();
+            // Update head table: set indexToLocFormat = 1 (long format)
+            if tag == b"head" && data.len() >= 52 {
+                data[50] = 0;
+                data[51] = 1; // indexToLocFormat = 1 (long)
+            }
+            keep_tables.push((tag, data));
+        }
+    }
+
+    // Add new glyf and loca tables
+    keep_tables.push((b"glyf", glyf_data));
+    keep_tables.push((b"loca", loca_data));
+
+    // Sort by tag
+    keep_tables.sort_by_key(|(tag, _)| *tag);
+
+    Some(assemble_truetype(&keep_tables))
+}
+
+/// Assemble a TrueType font binary from a list of (tag, data) pairs.
+///
+/// Builds the offset table, table directory, and concatenated table data
+/// with proper alignment and TrueType checksums.
+fn assemble_truetype(tables: &[(&[u8], Vec<u8>)]) -> Vec<u8> {
+    let num_tables = tables.len();
+    let entry_selector = if num_tables > 0 {
+        (num_tables as f64).log2().floor() as u16
+    } else {
+        0
+    };
+    let search_range = (1u16 << entry_selector) * 16;
+    let range_shift = (num_tables as u16) * 16 - search_range;
+
+    let header_size = 12 + num_tables * 16;
+    let mut current_offset = header_size;
+
+    // Plan table layout with 4-byte padding
+    let mut table_entries: Vec<(&[u8], &[u8], usize, usize)> = Vec::new();
+    for (tag, data) in tables {
+        let padded_len = (data.len() + 3) & !3;
+        table_entries.push((tag, data.as_slice(), current_offset, padded_len));
+        current_offset += padded_len;
+    }
+
+    let mut result = Vec::with_capacity(current_offset);
+
+    // Offset table (sfVersion 1.0)
+    result.extend_from_slice(&0x00010000u32.to_be_bytes());
+    result.extend_from_slice(&(num_tables as u16).to_be_bytes());
+    result.extend_from_slice(&search_range.to_be_bytes());
+    result.extend_from_slice(&entry_selector.to_be_bytes());
+    result.extend_from_slice(&range_shift.to_be_bytes());
+
+    // Table directory entries
+    for &(tag, data, offset, _padded_len) in &table_entries {
+        let checksum = calc_table_checksum(data);
+        result.extend_from_slice(tag);
+        result.extend_from_slice(&checksum.to_be_bytes());
+        result.extend_from_slice(&(offset as u32).to_be_bytes());
+        result.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    }
+
+    // Table data with 4-byte padding
+    for &(_tag, data, _offset, padded_len) in &table_entries {
+        result.extend_from_slice(data);
+        let padding = padded_len - data.len();
+        for _ in 0..padding {
+            result.push(0);
+        }
+    }
+
+    result
+}
+
+/// Calculate TrueType table checksum (sum of uint32 values).
+fn calc_table_checksum(data: &[u8]) -> u32 {
+    let mut total: u32 = 0;
+    let mut i = 0;
+    while i + 4 <= data.len() {
+        total = total.wrapping_add(u32::from_be_bytes([
+            data[i],
+            data[i + 1],
+            data[i + 2],
+            data[i + 3],
+        ]));
+        i += 4;
+    }
+    // Handle remaining bytes (pad with zeros)
+    if i < data.len() {
+        let mut last = [0u8; 4];
+        for (j, &b) in data[i..].iter().enumerate() {
+            last[j] = b;
+        }
+        total = total.wrapping_add(u32::from_be_bytes(last));
+    }
+    total
+}
+
+/// Build a CID (Type 0 / Type 42) font resource for PDF.
+///
+/// Creates the PDF Type 0 → CIDFontType2 → FontFile2 hierarchy
+/// with Identity-H encoding and a ToUnicode CMap.
+fn build_cid_font(
+    writer: &mut PdfWriter,
+    usage: &FontUsage,
+    ctx: &Context,
+) -> Option<u32> {
+    let font_entity = usage.font_entity;
+
+    // Navigate to CIDFont descendant: FDepVector[0]
+    let cidfont_entity = match get_cidfont_descendant(ctx, font_entity) {
+        Some(e) => e,
+        None => {
+            // Type 42 fonts have sfnts directly on the font dict (not Type 0 wrapper)
+            return build_type42_font(writer, usage, ctx);
+        }
+    };
+
+    // Extract TrueType binary from sfnts array
+    let raw_font_data = concatenate_sfnts(ctx, cidfont_entity)?;
+
+    // Check if glyf/loca tables exist — CUPS-style fonts store glyph data
+    // in PostScript GlyphDirectory instead of TrueType tables
+    let needs_reconstruction = truetype::find_table(&raw_font_data, b"glyf").is_none()
+        || truetype::find_table(&raw_font_data, b"loca").is_none();
+    let font_data = if needs_reconstruction {
+        match reconstruct_truetype(&raw_font_data, ctx, cidfont_entity) {
+            Some(reconstructed) => reconstructed,
+            None => raw_font_data,
+        }
+    } else {
+        raw_font_data
+    };
+
+    let units_per_em = truetype::get_units_per_em(&font_data);
+    let scale = 1000.0 / units_per_em as f64;
+
+    // Build CID → GID mapping
+    // For reconstructed fonts (glyf built from GlyphDirectory with CID=GID),
+    // use identity mapping. For normal fonts, parse cmap table.
+    let cid_to_gid = if needs_reconstruction {
+        // Identity: CID = GID, just map used codes to themselves
+        usage
+            .used_codes
+            .iter()
+            .map(|&cid| (cid, cid))
+            .collect::<HashMap<u16, u16>>()
+    } else {
+        build_cid_to_gid_from_cmap(&font_data)
+    };
+    let max_cid = usage.used_codes.iter().copied().max().unwrap_or(0);
+
+    // Build /W array (compact widths)
+    let w_array = build_w_array(&font_data, &usage.used_codes, &cid_to_gid, scale);
+
+    // Default width (CID 0 / GID 0)
+    let default_width = truetype::get_advance_width(&font_data, 0)
+        .map(|w| (w as f64 * scale).round() as i64)
+        .unwrap_or(1000);
+
+    // CIDToGIDMap: for reconstructed fonts use /Identity name (CID=GID),
+    // for normal fonts build a binary stream mapping CID→GID via cmap.
+    let cid_to_gid_value = if needs_reconstruction {
+        PdfObj::name("Identity")
+    } else {
+        let cid_to_gid_data = build_cid_to_gid_stream(&cid_to_gid, max_cid);
+        PdfObj::Ref(writer.add_stream(Vec::new(), &cid_to_gid_data, true))
+    };
+
+    // Embed TrueType binary as FontFile2
+    let font_file_entries = vec![(
+        b"Length1".to_vec(),
+        PdfObj::Int(font_data.len() as i64),
+    )];
+    let font_file2_ref = writer.add_stream(font_file_entries, &font_data, true);
+
+    // Font metrics from TrueType tables
+    let bbox = get_truetype_bbox(&font_data, scale);
+    let (ascent, descent) = get_truetype_ascent_descent(&font_data, scale);
+
+    // Build FontDescriptor with FontFile2
+    let descriptor_ref = {
+        let mut entries = vec![
+            (b"Type".to_vec(), PdfObj::name("FontDescriptor")),
+            (
+                b"FontName".to_vec(),
+                PdfObj::Name(usage.font_name.clone()),
+            ),
+            (b"Flags".to_vec(), PdfObj::Int(0x0004)), // Symbolic
+            (
+                b"FontBBox".to_vec(),
+                PdfObj::Array(bbox.iter().map(|&v| PdfObj::Real(v)).collect()),
+            ),
+            (b"Ascent".to_vec(), PdfObj::Real(ascent)),
+            (b"Descent".to_vec(), PdfObj::Real(descent)),
+            (b"StemV".to_vec(), PdfObj::Int(80)),
+            (b"ItalicAngle".to_vec(), PdfObj::Int(0)),
+            (b"CapHeight".to_vec(), PdfObj::Int(700)),
+            (b"FontFile2".to_vec(), PdfObj::Ref(font_file2_ref)),
+        ];
+        // CIDFontType2 fonts with CIDToGIDMap need Symbolic flag
+        // (not Nonsymbolic) per PDF spec
+        let _ = &mut entries;
+        writer.add_object(&PdfObj::Dict(entries))
+    };
+
+    // CIDSystemInfo
+    let cid_system_info = PdfObj::Dict(vec![
+        (
+            b"Registry".to_vec(),
+            PdfObj::LitString(b"Adobe".to_vec()),
+        ),
+        (
+            b"Ordering".to_vec(),
+            PdfObj::LitString(b"Identity".to_vec()),
+        ),
+        (b"Supplement".to_vec(), PdfObj::Int(0)),
+    ]);
+
+    // Build CIDFont dict (the descendant)
+    let mut cid_font_entries: Vec<(Vec<u8>, PdfObj)> = vec![
+        (b"Type".to_vec(), PdfObj::name("Font")),
+        (b"Subtype".to_vec(), PdfObj::name("CIDFontType2")),
+        (
+            b"BaseFont".to_vec(),
+            PdfObj::Name(usage.font_name.clone()),
+        ),
+        (b"CIDSystemInfo".to_vec(), cid_system_info),
+        (b"FontDescriptor".to_vec(), PdfObj::Ref(descriptor_ref)),
+        (b"DW".to_vec(), PdfObj::Int(default_width)),
+        (b"CIDToGIDMap".to_vec(), cid_to_gid_value),
+    ];
+    if !w_array.is_empty() {
+        cid_font_entries.push((b"W".to_vec(), PdfObj::Array(w_array)));
+    }
+    let cid_font_ref = writer.add_object(&PdfObj::Dict(cid_font_entries));
+
+    // Build ToUnicode CMap for 2-byte CID codes
+    let tounicode_map = build_cid_tounicode(&font_data, &usage.used_codes, &cid_to_gid);
+    let tounicode_ref = if !tounicode_map.is_empty() {
+        let font_name_str = String::from_utf8_lossy(&usage.font_name);
+        let cmap_data = generate_cid_tounicode_cmap(&tounicode_map, &font_name_str);
+        Some(writer.add_stream(Vec::new(), &cmap_data, true))
+    } else {
+        None
+    };
+
+    // Build Type 0 wrapper font
+    let mut type0_entries: Vec<(Vec<u8>, PdfObj)> = vec![
+        (b"Type".to_vec(), PdfObj::name("Font")),
+        (b"Subtype".to_vec(), PdfObj::name("Type0")),
+        (
+            b"BaseFont".to_vec(),
+            PdfObj::Name(usage.font_name.clone()),
+        ),
+        (b"Encoding".to_vec(), PdfObj::name("Identity-H")),
+        (
+            b"DescendantFonts".to_vec(),
+            PdfObj::Array(vec![PdfObj::Ref(cid_font_ref)]),
+        ),
+    ];
+    if let Some(tu_ref) = tounicode_ref {
+        type0_entries.push((b"ToUnicode".to_vec(), PdfObj::Ref(tu_ref)));
+    }
+
+    Some(writer.add_object(&PdfObj::Dict(type0_entries)))
+}
+
+/// Navigate from a Type 0 font dict to its CIDFont descendant (FDepVector[0]).
+fn get_cidfont_descendant(ctx: &Context, font_entity: EntityId) -> Option<EntityId> {
+    let fdep_name = ctx.names.find(b"FDepVector")?;
+    let fdep_obj = ctx.dicts.get(font_entity, &DictKey::Name(fdep_name))?;
+    let (arr_entity, arr_start, _) = match fdep_obj.value {
+        PsValue::Array { entity, start, len } => (entity, start, len),
+        _ => return None,
+    };
+    let cidfont_obj = ctx.arrays.get_element(arr_entity, arr_start);
+    match cidfont_obj.value {
+        PsValue::Dict(e) => Some(e),
+        _ => None,
+    }
+}
+
+/// Concatenate sfnts array from a CIDFont/Type42 dict into raw TrueType data.
+fn concatenate_sfnts(ctx: &Context, dict_entity: EntityId) -> Option<Vec<u8>> {
+    let sfnts_name = ctx.names.find(b"sfnts")?;
+    let sfnts_obj = ctx.dicts.get(dict_entity, &DictKey::Name(sfnts_name))?;
+    let (arr_entity, arr_start, arr_len) = match sfnts_obj.value {
+        PsValue::Array { entity, start, len } => (entity, start, len),
+        _ => return None,
+    };
+
+    let mut strings: Vec<&[u8]> = Vec::new();
+    for i in 0..arr_len {
+        let elem = ctx.arrays.get_element(arr_entity, arr_start + i);
+        if let PsValue::String { entity, start, len } = elem.value {
+            strings.push(ctx.strings.get(entity, start, len));
+        }
+    }
+
+    if strings.is_empty() {
+        return None;
+    }
+    Some(truetype::concatenate_sfnts(&strings))
+}
+
+/// Build CID → GID mapping from TrueType cmap table.
+///
+/// Parses cmap format 4 (BMP) and format 12 (full Unicode) subtables
+/// to build a reverse mapping from Unicode code point (used as CID) to GID.
+fn build_cid_to_gid_from_cmap(font_data: &[u8]) -> HashMap<u16, u16> {
+    let mut map = HashMap::new();
+
+    let Some((cmap_off, _cmap_len)) = truetype::find_table(font_data, b"cmap") else {
+        return map;
+    };
+
+    if cmap_off + 4 > font_data.len() {
+        return map;
+    }
+    let num_subtables = truetype::read_u16(font_data, cmap_off + 2) as usize;
+
+    for i in 0..num_subtables {
+        let rec_off = cmap_off + 4 + i * 8;
+        if rec_off + 8 > font_data.len() {
+            break;
+        }
+        let platform_id = truetype::read_u16(font_data, rec_off);
+        let encoding_id = truetype::read_u16(font_data, rec_off + 2);
+        let subtable_offset = truetype::read_u32(font_data, rec_off + 4) as usize;
+
+        // We want Unicode subtables: (0, *) or (3, 1) or (3, 10)
+        let is_unicode = platform_id == 0
+            || (platform_id == 3 && (encoding_id == 1 || encoding_id == 10));
+        if !is_unicode {
+            continue;
+        }
+
+        let st_off = cmap_off + subtable_offset;
+        if st_off + 2 > font_data.len() {
+            continue;
+        }
+        let format = truetype::read_u16(font_data, st_off);
+
+        match format {
+            4 => parse_cmap_format4(font_data, st_off, &mut map),
+            12 => parse_cmap_format12(font_data, st_off, &mut map),
+            _ => {}
+        }
+    }
+
+    map
+}
+
+/// Parse cmap format 4 (segment mapping to delta values).
+fn parse_cmap_format4(font_data: &[u8], offset: usize, map: &mut HashMap<u16, u16>) {
+    if offset + 14 > font_data.len() {
+        return;
+    }
+    let seg_count = truetype::read_u16(font_data, offset + 6) as usize / 2;
+    let end_codes_off = offset + 14;
+    let start_codes_off = end_codes_off + seg_count * 2 + 2; // +2 for reservedPad
+    let id_delta_off = start_codes_off + seg_count * 2;
+    let id_range_off = id_delta_off + seg_count * 2;
+
+    for seg in 0..seg_count {
+        if end_codes_off + seg * 2 + 2 > font_data.len()
+            || start_codes_off + seg * 2 + 2 > font_data.len()
+            || id_delta_off + seg * 2 + 2 > font_data.len()
+            || id_range_off + seg * 2 + 2 > font_data.len()
+        {
+            break;
+        }
+        let end_code = truetype::read_u16(font_data, end_codes_off + seg * 2);
+        let start_code = truetype::read_u16(font_data, start_codes_off + seg * 2);
+        let id_delta = truetype::read_i16(font_data, id_delta_off + seg * 2) as i32;
+        let id_range_offset = truetype::read_u16(font_data, id_range_off + seg * 2) as usize;
+
+        if start_code == 0xFFFF {
+            break;
+        }
+
+        for code in start_code..=end_code {
+            let gid = if id_range_offset == 0 {
+                ((code as i32 + id_delta) & 0xFFFF) as u16
+            } else {
+                let glyph_idx_off = id_range_off
+                    + seg * 2
+                    + id_range_offset
+                    + (code as usize - start_code as usize) * 2;
+                if glyph_idx_off + 2 <= font_data.len() {
+                    let gid_raw = truetype::read_u16(font_data, glyph_idx_off);
+                    if gid_raw != 0 {
+                        ((gid_raw as i32 + id_delta) & 0xFFFF) as u16
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                }
+            };
+            if gid != 0 {
+                map.insert(code, gid);
+            }
+        }
+    }
+}
+
+/// Parse cmap format 12 (segmented coverage, 32-bit).
+fn parse_cmap_format12(font_data: &[u8], offset: usize, map: &mut HashMap<u16, u16>) {
+    if offset + 16 > font_data.len() {
+        return;
+    }
+    let n_groups = truetype::read_u32(font_data, offset + 12) as usize;
+    let groups_off = offset + 16;
+
+    for i in 0..n_groups {
+        let g_off = groups_off + i * 12;
+        if g_off + 12 > font_data.len() {
+            break;
+        }
+        let start_char = truetype::read_u32(font_data, g_off);
+        let end_char = truetype::read_u32(font_data, g_off + 4);
+        let start_gid = truetype::read_u32(font_data, g_off + 8);
+
+        for code in start_char..=end_char.min(0xFFFF) {
+            let gid = start_gid + (code - start_char);
+            if gid != 0 && gid <= 0xFFFF {
+                map.insert(code as u16, gid as u16);
+            }
+        }
+    }
+}
+
+/// Build the PDF /W array for CID font widths.
+///
+/// Format: [cid1 [w1 w2 w3 ...] cid2 [w4 w5 ...] ...]
+/// Groups consecutive CIDs that have widths different from the default.
+fn build_w_array(
+    font_data: &[u8],
+    used_codes: &HashSet<u16>,
+    cid_to_gid: &HashMap<u16, u16>,
+    scale: f64,
+) -> Vec<PdfObj> {
+    // Collect (cid, width) pairs, sorted by CID
+    let mut cid_widths: Vec<(u16, i64)> = Vec::new();
+    for &cid in used_codes {
+        let gid = cid_to_gid.get(&cid).copied().unwrap_or(cid);
+        if let Some(aw) = truetype::get_advance_width(font_data, gid) {
+            let w = (aw as f64 * scale).round() as i64;
+            cid_widths.push((cid, w));
+        }
+    }
+    cid_widths.sort_by_key(|&(cid, _)| cid);
+
+    // Group into consecutive runs
+    let mut result: Vec<PdfObj> = Vec::new();
+    let mut i = 0;
+    while i < cid_widths.len() {
+        let start_cid = cid_widths[i].0;
+        let mut widths = vec![PdfObj::Int(cid_widths[i].1)];
+        let mut j = i + 1;
+        while j < cid_widths.len() && cid_widths[j].0 == cid_widths[j - 1].0 + 1 {
+            widths.push(PdfObj::Int(cid_widths[j].1));
+            j += 1;
+        }
+        result.push(PdfObj::Int(start_cid as i64));
+        result.push(PdfObj::Array(widths));
+        i = j;
+    }
+
+    result
+}
+
+/// Build CIDToGIDMap binary stream.
+/// 2 bytes (big-endian) per CID, mapping CID → GID.
+fn build_cid_to_gid_stream(cid_to_gid: &HashMap<u16, u16>, max_cid: u16) -> Vec<u8> {
+    let len = (max_cid as usize + 1) * 2;
+    let mut data = vec![0u8; len];
+    for (&cid, &gid) in cid_to_gid {
+        if (cid as usize) <= max_cid as usize {
+            let off = cid as usize * 2;
+            data[off] = (gid >> 8) as u8;
+            data[off + 1] = (gid & 0xFF) as u8;
+        }
+    }
+    data
+}
+
+/// Build CID → Unicode mapping for ToUnicode CMap.
+///
+/// For TrueType CID fonts where CID ≈ Unicode code point (via cmap table),
+/// we can reverse the cmap to get CID → Unicode.
+fn build_cid_tounicode(
+    font_data: &[u8],
+    used_codes: &HashSet<u16>,
+    cid_to_gid: &HashMap<u16, u16>,
+) -> HashMap<u16, u16> {
+    // Build reverse map: GID → Unicode from cmap
+    let mut gid_to_unicode: HashMap<u16, u16> = HashMap::new();
+
+    if let Some((cmap_off, _)) = truetype::find_table(font_data, b"cmap") {
+        if cmap_off + 4 <= font_data.len() {
+            let num_subtables = truetype::read_u16(font_data, cmap_off + 2) as usize;
+            for i in 0..num_subtables {
+                let rec_off = cmap_off + 4 + i * 8;
+                if rec_off + 8 > font_data.len() {
+                    break;
+                }
+                let platform_id = truetype::read_u16(font_data, rec_off);
+                let encoding_id = truetype::read_u16(font_data, rec_off + 2);
+                let st_offset = truetype::read_u32(font_data, rec_off + 4) as usize;
+
+                let is_unicode = platform_id == 0
+                    || (platform_id == 3 && (encoding_id == 1 || encoding_id == 10));
+                if !is_unicode {
+                    continue;
+                }
+
+                let st_off = cmap_off + st_offset;
+                if st_off + 2 > font_data.len() {
+                    continue;
+                }
+                // Parse the cmap subtable to build unicode→gid, then reverse it
+                let mut unicode_to_gid = HashMap::new();
+                let format = truetype::read_u16(font_data, st_off);
+                match format {
+                    4 => parse_cmap_format4(font_data, st_off, &mut unicode_to_gid),
+                    12 => parse_cmap_format12(font_data, st_off, &mut unicode_to_gid),
+                    _ => {}
+                }
+                for (unicode, gid) in unicode_to_gid {
+                    gid_to_unicode.entry(gid).or_insert(unicode);
+                }
+                break; // Use first Unicode subtable
+            }
+        }
+    }
+
+    // For each used CID, find Unicode via CID → GID → Unicode
+    let mut map = HashMap::new();
+    for &cid in used_codes {
+        let gid = cid_to_gid.get(&cid).copied().unwrap_or(cid);
+        if let Some(&unicode) = gid_to_unicode.get(&gid) {
+            map.insert(cid, unicode);
+        } else if cid > 0 && cid < 0xFFFE {
+            // Fallback: assume CID = Unicode (common for Identity-H CMaps)
+            map.insert(cid, cid);
+        }
+    }
+    map
+}
+
+/// Generate a ToUnicode CMap for CID fonts (2-byte codespace).
+fn generate_cid_tounicode_cmap(map: &HashMap<u16, u16>, font_name: &str) -> Vec<u8> {
+    let mut lines: Vec<Vec<u8>> = Vec::new();
+
+    lines.push(b"/CIDInit /ProcSet findresource begin".to_vec());
+    lines.push(b"12 dict begin".to_vec());
+    lines.push(b"begincmap".to_vec());
+    lines.push(b"/CIDSystemInfo <<".to_vec());
+    lines.push(b"  /Registry (Adobe)".to_vec());
+    lines.push(b"  /Ordering (UCS)".to_vec());
+    lines.push(b"  /Supplement 0".to_vec());
+    lines.push(b">> def".to_vec());
+    lines.push(format!("/CMapName /{}-UCS def", font_name).into_bytes());
+    lines.push(b"/CMapType 2 def".to_vec());
+    lines.push(b"1 begincodespacerange".to_vec());
+    lines.push(b"<0000> <FFFF>".to_vec());
+    lines.push(b"endcodespacerange".to_vec());
+
+    let mut sorted: Vec<_> = map.iter().collect();
+    sorted.sort_by_key(|&(&code, _)| code);
+
+    for chunk in sorted.chunks(100) {
+        lines.push(format!("{} beginbfchar", chunk.len()).into_bytes());
+        for &(&cid, &unicode) in chunk {
+            lines.push(format!("<{:04X}> <{:04X}>", cid, unicode).into_bytes());
+        }
+        lines.push(b"endbfchar".to_vec());
+    }
+
+    lines.push(b"endcmap".to_vec());
+    lines.push(b"CMapName currentdict /CMap defineresource pop".to_vec());
+    lines.push(b"end".to_vec());
+    lines.push(b"end".to_vec());
+
+    lines.join(&b'\n')
+}
+
+/// Get font bounding box from TrueType head table, scaled to 1000-unit space.
+fn get_truetype_bbox(font_data: &[u8], scale: f64) -> [f64; 4] {
+    if let Some((head_off, _)) = truetype::find_table(font_data, b"head") {
+        if head_off + 44 <= font_data.len() {
+            let x_min = truetype::read_i16(font_data, head_off + 36) as f64 * scale;
+            let y_min = truetype::read_i16(font_data, head_off + 38) as f64 * scale;
+            let x_max = truetype::read_i16(font_data, head_off + 40) as f64 * scale;
+            let y_max = truetype::read_i16(font_data, head_off + 42) as f64 * scale;
+            return [x_min, y_min, x_max, y_max];
+        }
+    }
+    [0.0, -200.0, 1000.0, 800.0]
+}
+
+/// Get ascent and descent from TrueType hhea or OS/2 table, scaled to 1000-unit space.
+fn get_truetype_ascent_descent(font_data: &[u8], scale: f64) -> (f64, f64) {
+    // Try hhea table first
+    if let Some((hhea_off, _)) = truetype::find_table(font_data, b"hhea") {
+        if hhea_off + 8 <= font_data.len() {
+            let ascent = truetype::read_i16(font_data, hhea_off + 4) as f64 * scale;
+            let descent = truetype::read_i16(font_data, hhea_off + 6) as f64 * scale;
+            return (ascent, descent);
+        }
+    }
+    (800.0, -200.0)
+}
+
+/// Build a standalone Type 42 (TrueType) font resource for PDF.
+///
+/// Type 42 fonts have sfnts directly on the font dict (not wrapped in Type 0).
+/// They use single-byte encoding with CharStrings mapping glyph names to GIDs.
+/// In PDF, these become `/Subtype /TrueType` with `/FontFile2`.
+fn build_type42_font(
+    writer: &mut PdfWriter,
+    usage: &FontUsage,
+    ctx: &Context,
+) -> Option<u32> {
+    let font_entity = usage.font_entity;
+    let font_name_str = String::from_utf8_lossy(&usage.font_name);
+
+    // Extract TrueType binary from sfnts array on the font dict itself
+    let font_data = concatenate_sfnts(ctx, font_entity)?;
+    let units_per_em = truetype::get_units_per_em(&font_data);
+    let scale = 1000.0 / units_per_em as f64;
+
+    // Get encoding array
+    let encoding_entity = ctx
+        .dicts
+        .get(font_entity, &DictKey::Name(ctx.name_cache.n_encoding))
+        .and_then(|obj| match obj.value {
+            PsValue::Array { entity, .. } => Some(entity),
+            _ => None,
+        });
+
+    // Get CharStrings dict (maps glyph names → GID integers for Type 42)
+    let charstrings_entity = ctx
+        .dicts
+        .get(font_entity, &DictKey::Name(ctx.name_cache.n_char_strings))
+        .and_then(|obj| match obj.value {
+            PsValue::Dict(e) => Some(e),
+            _ => None,
+        });
+
+    // Determine FirstChar/LastChar
+    let mut first_char: u16 = 255;
+    let mut last_char: u16 = 0;
+    for &code in &usage.used_codes {
+        if code <= 255 {
+            first_char = first_char.min(code);
+            last_char = last_char.max(code);
+        }
+    }
+    if first_char > last_char {
+        first_char = 0;
+        last_char = 0;
+    }
+
+    // Extract widths via Encoding → CharStrings(glyph_name → GID) → hmtx
+    let mut widths: HashMap<u16, i32> = HashMap::new();
+    if let (Some(enc_entity), Some(cs_entity)) = (encoding_entity, charstrings_entity) {
+        for code in first_char..=last_char {
+            let glyph_name_obj = ctx.arrays.get_element(enc_entity, code as u32);
+            let glyph_name_id = match glyph_name_obj.value {
+                PsValue::Name(id) => id,
+                _ => continue,
+            };
+
+            // CharStrings maps glyph name → GID (integer) for Type 42
+            let cs_obj = match ctx.dicts.get(cs_entity, &DictKey::Name(glyph_name_id)) {
+                Some(obj) => obj,
+                None => continue,
+            };
+
+            let gid = match cs_obj.as_i32() {
+                Some(g) => g as u16,
+                None => continue,
+            };
+
+            if let Some(aw) = truetype::get_advance_width(&font_data, gid) {
+                widths.insert(code, (aw as f64 * scale).round() as i32);
+            }
+        }
+    }
+
+    // Build Widths array
+    let widths_array: Vec<PdfObj> = (first_char..=last_char)
+        .map(|code| PdfObj::Int(*widths.get(&code).unwrap_or(&0) as i64))
+        .collect();
+
+    // Build ToUnicode CMap
+    let tounicode_map = build_tounicode_map(ctx, encoding_entity, &usage.used_codes);
+    let tounicode_ref = if !tounicode_map.is_empty() {
+        let cmap_data = generate_tounicode_cmap(&tounicode_map, &font_name_str);
+        Some(writer.add_stream(Vec::new(), &cmap_data, true))
+    } else {
+        None
+    };
+
+    // Embed TrueType binary as FontFile2
+    let font_file_entries = vec![(
+        b"Length1".to_vec(),
+        PdfObj::Int(font_data.len() as i64),
+    )];
+    let font_file2_ref = writer.add_stream(font_file_entries, &font_data, true);
+
+    // Font metrics
+    let bbox = get_truetype_bbox(&font_data, scale);
+    let (ascent, descent) = get_truetype_ascent_descent(&font_data, scale);
+
+    // Build FontDescriptor with FontFile2
+    let descriptor_ref = {
+        let entries = vec![
+            (b"Type".to_vec(), PdfObj::name("FontDescriptor")),
+            (
+                b"FontName".to_vec(),
+                PdfObj::Name(usage.font_name.clone()),
+            ),
+            (b"Flags".to_vec(), PdfObj::Int(0x0020)), // Nonsymbolic
+            (
+                b"FontBBox".to_vec(),
+                PdfObj::Array(bbox.iter().map(|&v| PdfObj::Real(v)).collect()),
+            ),
+            (b"Ascent".to_vec(), PdfObj::Real(ascent)),
+            (b"Descent".to_vec(), PdfObj::Real(descent)),
+            (b"StemV".to_vec(), PdfObj::Int(80)),
+            (b"ItalicAngle".to_vec(), PdfObj::Int(0)),
+            (b"CapHeight".to_vec(), PdfObj::Int(700)),
+            (b"FontFile2".to_vec(), PdfObj::Ref(font_file2_ref)),
+        ];
+        writer.add_object(&PdfObj::Dict(entries))
+    };
+
+    // Build Encoding with Differences
+    let encoding_obj = build_encoding_differences(ctx, encoding_entity, first_char, last_char);
+
+    // Build Font dict with TrueType subtype
+    let mut font_entries: Vec<(Vec<u8>, PdfObj)> = vec![
+        (b"Type".to_vec(), PdfObj::name("Font")),
+        (b"Subtype".to_vec(), PdfObj::name("TrueType")),
+        (
+            b"BaseFont".to_vec(),
+            PdfObj::Name(usage.font_name.clone()),
+        ),
+        (b"FirstChar".to_vec(), PdfObj::Int(first_char as i64)),
+        (b"LastChar".to_vec(), PdfObj::Int(last_char as i64)),
+        (b"Widths".to_vec(), PdfObj::Array(widths_array)),
+        (b"FontDescriptor".to_vec(), PdfObj::Ref(descriptor_ref)),
+    ];
+
+    if let Some(enc) = encoding_obj {
+        font_entries.push((b"Encoding".to_vec(), enc));
+    }
+    if let Some(tu_ref) = tounicode_ref {
+        font_entries.push((b"ToUnicode".to_vec(), PdfObj::Ref(tu_ref)));
+    }
+
+    Some(writer.add_object(&PdfObj::Dict(font_entries)))
 }

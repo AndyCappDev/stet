@@ -55,8 +55,11 @@ if [ "$DEVICE" = "pdf" ]; then
         esac
     done
 
-    # Collect sample files
-    SAMPLE_FILES=($(ls "$SCRIPT_DIR/samples/"*.ps "$SCRIPT_DIR/samples/"*.eps 2>/dev/null | sort))
+    # Collect sample files (use globbing to handle spaces in filenames)
+    SAMPLE_FILES=()
+    while IFS= read -r -d '' f; do
+        SAMPLE_FILES+=("$f")
+    done < <(find "$SCRIPT_DIR/samples" -maxdepth 1 \( -name '*.ps' -o -name '*.eps' \) -print0 | sort -z)
     echo "Rendering ${#SAMPLE_FILES[@]} samples to PDF in $OUTDIR..."
 
     OKAY=0

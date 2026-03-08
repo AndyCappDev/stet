@@ -1870,9 +1870,6 @@ fn render_show_composite(
         .and_then(|obj| obj.as_i32())
         .unwrap_or(1);
 
-    // TODO: per-character Text emission for composite fonts with adjusted spacing
-    emit_text_element(ctx, bytes.to_vec(), font_entity, font_type, None);
-
     let type0_fm = read_font_matrix(ctx, font_entity);
 
     // Inverse-transform device-space current_point to user space
@@ -1882,6 +1879,8 @@ fn render_show_composite(
     let ctm = ctx.gstate.ctm;
 
     if font_type == 0 {
+        // For Type 0, CMap-decode bytes to CIDs first for proper Text emission.
+        // Text elements are emitted per-character inside the CID loop below.
         // --- Type 0 composite font ---
 
         // Read WMode from root Type 0 font (default 0 = horizontal)
@@ -1943,6 +1942,16 @@ fn render_show_composite(
         };
         let cids: Vec<i32> = cid_pairs.iter().map(|&(cid, _)| cid).collect();
 
+        // Emit Text element with CID-encoded bytes (2-byte big-endian per CID)
+        {
+            let mut cid_text: Vec<u8> = Vec::with_capacity(cids.len() * 2);
+            for &cid in &cids {
+                cid_text.push((cid >> 8) as u8);
+                cid_text.push((cid & 0xFF) as u8);
+            }
+            emit_text_element(ctx, cid_text, font_entity, font_type, None);
+        }
+
         // Detect CIDFont type: sfnts → TrueType, CharStrings → CFF
         let has_sfnts = ctx
             .names
@@ -1989,6 +1998,9 @@ fn render_show_composite(
         }
     } else {
         // Type 42 simple TrueType font (non-composite)
+        // Emit Text element with raw bytes (single-byte encoding)
+        emit_text_element(ctx, bytes.to_vec(), font_entity, font_type, None);
+
         let font_data = concatenate_sfnts_array(ctx, font_entity);
         let upm = font_data
             .as_ref()
@@ -2123,18 +2135,18 @@ fn render_show_composite(
                                     },
                                 );
                             }
-
-                            rendered = true;
-
-                            // Use actual advance width from hmtx
-                            let advance = font_data
-                                .as_ref()
-                                .and_then(|fd| truetype::get_advance_width(fd, gid))
-                                .unwrap_or(500);
-                            let (wx, wy) = combined_fm.transform_delta(advance as f64, 0.0);
-                            cur_x += wx + extra_ax;
-                            cur_y += wy + extra_ay;
                         }
+
+                        // Advance by actual hmtx width (even if glyf data was
+                        // missing or too short — e.g. space has no outlines)
+                        rendered = true;
+                        let advance = font_data
+                            .as_ref()
+                            .and_then(|fd| truetype::get_advance_width(fd, gid))
+                            .unwrap_or(500);
+                        let (wx, wy) = combined_fm.transform_delta(advance as f64, 0.0);
+                        cur_x += wx + extra_ax;
+                        cur_y += wy + extra_ay;
                         } // close else (cache miss)
                     }
                 }
@@ -3688,6 +3700,14 @@ fn render_fmap_type0(
             _ => continue,
         };
 
+        // Emit per-character Text element using the descendant Type 1 entity
+        // with composed font matrix (descendant FM × Type 0 FM)
+        let desc_fm = read_font_matrix(ctx, desc_entity);
+        let composed_fm = desc_fm.multiply(type0_fm);
+        let (dev_x, dev_y) = ctm.transform_point(*cur_x, *cur_y);
+        let text_bytes = vec![*char_code as u8];
+        emit_text_element_with_fm(ctx, text_bytes, desc_entity, 1, Some((dev_x, dev_y)), Some(composed_fm));
+
         let info = match get_font_info_for(ctx, desc_entity) {
             Ok(i) => i,
             Err(_) => continue,
@@ -3786,6 +3806,14 @@ fn render_fmap_type0_displaced(
                 continue;
             }
         };
+
+        // Emit per-character Text element using the descendant Type 1 entity
+        // with composed font matrix (descendant FM × Type 0 FM)
+        let desc_fm = read_font_matrix(ctx, desc_entity);
+        let composed_fm = desc_fm.multiply(type0_fm);
+        let (dev_x, dev_y) = ctm.transform_point(*cur_x, *cur_y);
+        let text_bytes = vec![*char_code as u8];
+        emit_text_element_with_fm(ctx, text_bytes, desc_entity, 1, Some((dev_x, dev_y)), Some(composed_fm));
 
         let info = match get_font_info_for(ctx, desc_entity) {
             Ok(i) => i,
@@ -3921,6 +3949,11 @@ fn render_show_displaced_composite(
                 });
 
             for (i, (cid, _)) in cids.iter().enumerate() {
+                // Emit per-character Text element with device-space position
+                let (dev_x, dev_y) = ctm.transform_point(cur_x, cur_y);
+                let cid_bytes = vec![(*cid >> 8) as u8, (*cid & 0xFF) as u8];
+                emit_text_element(ctx, cid_bytes, font_entity, font_type, Some((dev_x, dev_y)));
+
                 let glyf_bytes = if let Some(gd_entity) = glyph_dir_entity {
                     ctx.dicts
                         .get(gd_entity, &DictKey::Int(*cid))
@@ -3984,6 +4017,11 @@ fn render_show_displaced_composite(
             let global_subrs = get_global_subrs(ctx, cidfont_entity);
 
             for (i, (cid, _)) in cids.iter().enumerate() {
+                // Emit per-character Text element with device-space position
+                let (dev_x, dev_y) = ctm.transform_point(cur_x, cur_y);
+                let cid_bytes = vec![(*cid >> 8) as u8, (*cid & 0xFF) as u8];
+                emit_text_element(ctx, cid_bytes, font_entity, font_type, Some((dev_x, dev_y)));
+
                 if let Some(cs_e) = cs_entity
                     && let Some(cs_obj) = ctx.dicts.get(cs_e, &DictKey::Int(*cid))
                     && let PsValue::String { entity, start, len } = cs_obj.value
@@ -4045,6 +4083,10 @@ fn render_show_displaced_composite(
             });
 
         for (i, &byte) in bytes.iter().enumerate() {
+            // Emit per-character Text element with device-space position
+            let (dev_x, dev_y) = ctm.transform_point(cur_x, cur_y);
+            emit_text_element(ctx, vec![byte], font_entity, font_type, Some((dev_x, dev_y)));
+
             if let (Some(enc_ent), Some(cs_ent)) = (enc_entity, cs_entity) {
                 let glyph_name_obj = ctx.arrays.get_element(enc_ent, byte as u32);
                 if let PsValue::Name(glyph_name_id) = glyph_name_obj.value
@@ -4204,6 +4246,47 @@ fn advance_by_displacement(
 /// The PDF device uses these for BT/ET/Tf/Tj operators; the rasterizer ignores them.
 /// Called for Type 1, Type 2 (CFF), Type 0 (composite), and Type 42 fonts.
 /// NOT called for Type 3 fonts (which can't be embedded in PDF).
+/// Extract the best font name for a Text display element.
+///
+/// For Type 0 fonts, navigates to FDepVector[0] to get the CIDFont name.
+/// For other font types, reads FontName directly from the font dict.
+fn get_font_name_for_text(ctx: &Context, font_entity: EntityId, font_type: i32) -> Vec<u8> {
+    // Try FontName on the font dict itself first
+    let direct_name = ctx
+        .dicts
+        .get(font_entity, &DictKey::Name(ctx.name_cache.n_font_name))
+        .and_then(|obj| match obj.value {
+            PsValue::Name(id) => Some(ctx.names.get_bytes(id).to_vec()),
+            _ => None,
+        });
+
+    if font_type == 0 {
+        // For Type 0, try to get a better name from the CIDFont descendant
+        if let Some(fdep_name) = ctx.names.find(b"FDepVector")
+            && let Some(fdep_obj) = ctx.dicts.get(font_entity, &DictKey::Name(fdep_name))
+            && let PsValue::Array { entity, start, .. } = fdep_obj.value
+        {
+            let cidfont_obj = ctx.arrays.get_element(entity, start);
+            if let PsValue::Dict(cid_entity) = cidfont_obj.value {
+                // Try CIDFontName first, then FontName
+                if let Some(cid_fn_name) = ctx.names.find(b"CIDFontName")
+                    && let Some(obj) = ctx.dicts.get(cid_entity, &DictKey::Name(cid_fn_name))
+                    && let PsValue::Name(id) = obj.value
+                {
+                    return ctx.names.get_bytes(id).to_vec();
+                }
+                if let Some(obj) = ctx.dicts.get(cid_entity, &DictKey::Name(ctx.name_cache.n_font_name))
+                    && let PsValue::Name(id) = obj.value
+                {
+                    return ctx.names.get_bytes(id).to_vec();
+                }
+            }
+        }
+    }
+
+    direct_name.unwrap_or_else(|| b"Unknown".to_vec())
+}
+
 /// Emit a Text display element for the PDF device.
 ///
 /// `device_pos`: explicit device-space position. If None, uses ctx.gstate.current_point.
@@ -4214,22 +4297,31 @@ fn emit_text_element(
     font_type: i32,
     device_pos: Option<(f64, f64)>,
 ) {
-    // Extract FontName
-    let font_name = ctx
-        .dicts
-        .get(font_entity, &DictKey::Name(ctx.name_cache.n_font_name))
-        .and_then(|obj| match obj.value {
-            PsValue::Name(id) => Some(ctx.names.get_bytes(id).to_vec()),
-            _ => None,
-        })
-        .unwrap_or_else(|| b"Unknown".to_vec());
+    emit_text_element_with_fm(ctx, text, font_entity, font_type, device_pos, None);
+}
 
-    // Read FontMatrix
-    let fm = read_font_matrix(ctx, font_entity);
+/// Emit a Text display element with an optional pre-composed font matrix override.
+///
+/// When `override_fm` is Some, it is used instead of reading FontMatrix from the font dict.
+/// This is needed for FMapType composite fonts where the effective matrix is
+/// descendant_FM × type0_FM but we track via the descendant entity.
+fn emit_text_element_with_fm(
+    ctx: &mut Context,
+    text: Vec<u8>,
+    font_entity: EntityId,
+    font_type: i32,
+    device_pos: Option<(f64, f64)>,
+    override_fm: Option<Matrix>,
+) {
+    // Extract FontName — for Type 0, try CIDFont descendant's name
+    let font_name = get_font_name_for_text(ctx, font_entity, font_type);
 
-    // Compute font_matrix scaled to point units
-    // Type 0/42: use as-is (1-unit design space)
-    // Type 1/2: multiply by 1000 (1000-unit design space → points)
+    // Read FontMatrix (or use override)
+    let fm = override_fm.unwrap_or_else(|| read_font_matrix(ctx, font_entity));
+
+    // Compute font_matrix scaled to point units.
+    // Type 1/2: FontMatrix is [0.001 ...] → multiply by 1000 to get point-scale
+    // Type 42/0: FontMatrix is [1 ...] identity → multiply by 1 (already in points after scalefont)
     let fm_scale = if font_type == 0 || font_type == 42 { 1.0 } else { 1000.0 };
     let font_matrix = [
         fm.a * fm_scale, fm.b * fm_scale, fm.c * fm_scale,
@@ -4238,11 +4330,7 @@ fn emit_text_element(
 
     // Compute effective device-space font size
     // PostForge: point_size × sqrt(scale_x × scale_y)
-    let point_size = if font_type == 0 || font_type == 42 {
-        fm.a // already in point units
-    } else {
-        fm.a * 1000.0
-    };
+    let point_size = fm.a * fm_scale;
     let ctm = ctx.gstate.ctm;
     let scale_x = (ctm.a * ctm.a + ctm.b * ctm.b).sqrt();
     let scale_y = (ctm.c * ctm.c + ctm.d * ctm.d).sqrt();

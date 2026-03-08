@@ -830,9 +830,22 @@ fn replay_form_elements(
                 target.push(DisplayElement::PatternFill { params: new_params });
             }
             DisplayElement::Text { params } => {
-                // Pass through text elements unchanged (no CTM composition needed
-                // since they already store device-space coordinates)
-                target.push(DisplayElement::Text { params: params.clone() });
+                // Transform text from form space to device space:
+                // - Position: transform through real CTM
+                // - CTM: compose form-space CTM with real CTM
+                let mut new_params = params.clone();
+                let (dev_x, dev_y) = ctm.transform_point(params.start_x, params.start_y);
+                new_params.start_x = dev_x;
+                new_params.start_y = dev_y;
+                // Compose the stored CTM (identity during form capture) with real CTM
+                let form_ctm = Matrix {
+                    a: params.ctm[0], b: params.ctm[1],
+                    c: params.ctm[2], d: params.ctm[3],
+                    tx: params.ctm[4], ty: params.ctm[5],
+                };
+                let composed = ctm.concat(&form_ctm);
+                new_params.ctm = [composed.a, composed.b, composed.c, composed.d, composed.tx, composed.ty];
+                target.push(DisplayElement::Text { params: new_params });
             }
         }
     }

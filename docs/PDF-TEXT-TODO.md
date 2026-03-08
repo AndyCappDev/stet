@@ -58,12 +58,14 @@ Tracks progress on PDF text support after the initial BT/ET/Tf/Tm/Tj implementat
 - Subsetting deferred (embeds full CFF initially)
 
 ### 10. CID/TrueType font embedding
-- [ ] Create `cid_embedder.rs`
-- [ ] Extract TrueType data from sfnts array
-- [ ] Embed as `/FontFile2`
-- [ ] Build `/W` array from hmtx table
-- [ ] Identity-H CMap encoding
-- [ ] ToUnicode CMap for CID -> Unicode
+- [x] Extract TrueType data from sfnts array (reuses `truetype::concatenate_sfnts`)
+- [x] Embed as `/FontFile2` with `/Length1`
+- [x] Build `/W` array from hmtx table (scaled by 1000/unitsPerEm)
+- [x] Identity-H CMap encoding
+- [x] ToUnicode CMap for CID -> Unicode (2-byte codespace, cmap table reverse mapping)
+- [x] CIDToGIDMap stream (cmap format 4 + format 12 parsing)
+- [x] Type0 → CIDFontType2 → FontDescriptor → FontFile2 hierarchy
+- [x] Implemented in `font_embedder.rs` (no separate cid_embedder.rs needed)
 
 ### 11. Standard 14 custom encoding check
 - [ ] Detect Standard 14 fonts with custom Encoding arrays (must be embedded, not just referenced)
