@@ -54,8 +54,8 @@ This roadmap tracks what's missing and prioritizes by impact on round-trip fidel
 | Halftone screens | Stored in gstate, not emitted | **LOW** — screening |
 | Black generation / UCR | Stored in gstate, not emitted | **LOW** — CMYK separation |
 | TrimBox / BleedBox | Only MediaBox | **MEDIUM** — print finishing |
-| Document metadata | ✓ Info dict (Producer, Title, CreationDate) | — |
-| PDF/X conformance | No OutputIntent | **LOW** — certification |
+| Document metadata | ✓ Info dict (Producer, Title, CreationDate, GTS_PDFXVersion) | — |
+| PDF/X-3 OutputIntent | ✓ `--output-profile` embeds ICC + OutputIntent | — |
 | ToUnicode CMap | ASCII 0x20–0x7E only | **LOW** — searchability |
 | CID font CMap | Not embedded | **LOW** — CJK text extraction |
 
@@ -198,11 +198,18 @@ for producing usable PDF files.
 
 ## Phase 3: Compliance & Polish
 
-### 3.1 PDF/X-3 OutputIntent
-- [ ] Embed ICC output profile (sRGB or system CMYK) as OutputIntent stream
-- [ ] Add `/OutputIntents` array to catalog
-- [ ] Set `/GTS_PDFX_Version` in Info dict
-- **Effort**: Medium
+### 3.1 PDF/X-3 OutputIntent + Output Profile Override ✅
+- [x] `--output-profile <path>` CLI flag specifies ICC output profile
+- [x] User profile substitutes system CMYK for all DeviceCMYK color conversion (viewer, PNG, PDF)
+- [x] ICC profile embedded as flate-compressed stream with `/N` component count
+- [x] OutputIntent dict: `/Type /OutputIntent`, `/S /GTS_PDFX`, `/OutputConditionIdentifier`, `/Info`, `/DestOutputProfile`
+- [x] `/OutputIntents` array added to catalog
+- [x] `/GTS_PDFXVersion (PDF/X-3:2003)` added to Info dict
+- [x] ICC header parsing: color space signature → N, `desc`/`mluc` tag → description string
+- [x] `set_system_cmyk()` on IccCache for explicit profile override
+- [x] `--no-icc` suppresses both ICC conversion and OutputIntent (wins if both specified)
+- [x] No flag = auto-detect system CMYK profile (current behavior), no OutputIntent
+- **Files**: `crates/stet-core/src/icc.rs`, `crates/stet-pdf/src/pdf_device.rs`, `crates/stet-cli/src/main.rs`
 
 ### 3.2 Full ToUnicode CMap
 - [ ] Map glyph names → Unicode via Adobe Glyph List
@@ -274,7 +281,7 @@ Phase 4 items are deferred — implement only when a specific need arises.
  ✅  1.4  Separation/DeviceN raster        done      lookup_1d/lookup_nd interpolation
  ✅  1.3  Separation/DeviceN PDF output    done      Type 0 functions, cs/scn operators, ColorSpace resources
  ✅  1.5  Pattern fills                    done      Type 1 tiling patterns, colored + uncolored, full affine transform
-11.  3.1  PDF/X-3 OutputIntent             medium    when print compliance needed
+ ✅  3.1  PDF/X-3 OutputIntent             done      --output-profile embeds ICC + OutputIntent + GTS_PDFXVersion
 12.  3.2  Full ToUnicode CMap              medium    when text extraction needed
 13.  3.3  Color rendering intent           small     when needed
 
@@ -341,4 +348,5 @@ gs -dBATCH -dNOPAUSE -sDEVICE=png16m -r300 -o gs_%03d.png sample.pdf
 | Patterns | `samples/pattern_test.ps` (12 pattern tests), `samples/javaplatform.ps`, `samples/cf-route.ps` |
 | Native shading CS | `samples/hospital.eps` (CMYK→DeviceCMYK), `samples/10-ch8.ps` (DeviceN→RGB), `samples/16-ch14.ps` (DeviceN→RGB) |
 | Overprint | AGM EPS files with overprint flags |
+| PDF/X-3 OutputIntent | `stet --device pdf --output-profile /usr/share/color/icc/colord/FOGRA39L_coated.icc samples/hospital.eps` |
 | Transfer functions | Files with `settransfer` / `setcolortransfer` |

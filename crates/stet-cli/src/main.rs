@@ -36,6 +36,7 @@ fn main() {
     let mut threads: Option<usize> = None;
     let mut device_name: Option<String> = None;
     let mut no_icc = false;
+    let mut output_profile_path: Option<String> = None;
     let mut file_args: Vec<String> = Vec::new();
     let mut i = 1;
     while i < args.len() {
@@ -86,6 +87,16 @@ fn main() {
                 i += 1;
                 continue;
             }
+            "--output-profile" => {
+                if i + 1 < args.len() {
+                    output_profile_path = Some(args[i + 1].clone());
+                    i += 2;
+                    continue;
+                } else {
+                    eprintln!("Error: --output-profile requires a path");
+                    std::process::exit(1);
+                }
+            }
             _ => {}
         }
         file_args.push(args[i].clone());
@@ -117,16 +128,16 @@ fn main() {
 
     match device.as_str() {
         "png" => {
-            run_png_mode(dpi, file_args, no_icc);
+            run_png_mode(dpi, file_args, no_icc, output_profile_path);
         }
         "pdf" => {
-            run_pdf_mode(dpi, file_args, no_icc);
+            run_pdf_mode(dpi, file_args, no_icc, output_profile_path);
         }
         "null" => {
-            run_null_mode(dpi, file_args, no_icc);
+            run_null_mode(dpi, file_args, no_icc, output_profile_path);
         }
         #[cfg(feature = "viewer")]
-        "viewer" => run_viewer_mode(dpi, file_args, no_icc),
+        "viewer" => run_viewer_mode(dpi, file_args, no_icc, output_profile_path),
         #[cfg(not(feature = "viewer"))]
         "viewer" => {
             eprintln!("Error: viewer not available (built without 'viewer' feature)");
@@ -141,8 +152,13 @@ fn main() {
 }
 
 /// Run in PNG output mode (existing behavior).
-fn run_png_mode(dpi_override: Option<f64>, file_args: Vec<String>, no_icc: bool) {
-    let mut ctx = create_context(no_icc);
+fn run_png_mode(
+    dpi_override: Option<f64>,
+    file_args: Vec<String>,
+    no_icc: bool,
+    output_profile_path: Option<String>,
+) {
+    let mut ctx = create_context(no_icc, output_profile_path.as_deref());
 
     // Register device factory (before setpagedevice)
     let cmyk_bytes = ctx.icc_cache.system_cmyk_bytes().cloned();
@@ -162,12 +178,28 @@ fn run_png_mode(dpi_override: Option<f64>, file_args: Vec<String>, no_icc: bool)
 }
 
 /// Run in PDF output mode — vector PDF output.
-fn run_pdf_mode(dpi_override: Option<f64>, file_args: Vec<String>, no_icc: bool) {
-    let mut ctx = create_context(no_icc);
+fn run_pdf_mode(
+    dpi_override: Option<f64>,
+    file_args: Vec<String>,
+    no_icc: bool,
+    output_profile_path: Option<String>,
+) {
+    // Read profile bytes for PDF embedding (create_context already validated the path)
+    let output_profile_bytes: Option<Vec<u8>> = if !no_icc {
+        output_profile_path.as_ref().and_then(|p| std::fs::read(p).ok())
+    } else {
+        None
+    };
+
+    let mut ctx = create_context(no_icc, output_profile_path.as_deref());
     let dpi_val = dpi_override.unwrap_or(300.0);
 
     ctx.device_factory = Some(Box::new(move |w, h| {
-        Box::new(PdfDevice::new(w, h, dpi_val))
+        let mut dev = PdfDevice::new(w, h, dpi_val);
+        if let Some(ref bytes) = output_profile_bytes {
+            dev.set_output_profile(bytes.clone());
+        }
+        Box::new(dev)
     }));
 
     if !file_args.is_empty() {
@@ -181,10 +213,15 @@ fn run_pdf_mode(dpi_override: Option<f64>, file_args: Vec<String>, no_icc: bool)
 /// Run in null device mode — no rendering output, no user interaction.
 ///
 /// Useful for running test suites and scripts that don't produce pages.
-fn run_null_mode(dpi_override: Option<f64>, file_args: Vec<String>, no_icc: bool) {
+fn run_null_mode(
+    dpi_override: Option<f64>,
+    file_args: Vec<String>,
+    no_icc: bool,
+    output_profile_path: Option<String>,
+) {
     use stet_core::device::NullDevice;
 
-    let mut ctx = create_context(no_icc);
+    let mut ctx = create_context(no_icc, output_profile_path.as_deref());
     ctx.device_factory = Some(Box::new(|w, h| Box::new(NullDevice::new(w, h))));
 
     if !file_args.is_empty() {
@@ -200,12 +237,17 @@ fn run_null_mode(dpi_override: Option<f64>, file_args: Vec<String>, no_icc: bool
 /// the viewer via channels. The viewer renders visible viewport regions on
 /// demand using `render_region()`.
 #[cfg(feature = "viewer")]
-fn run_viewer_mode(dpi_override: Option<f64>, file_args: Vec<String>, no_icc: bool) {
+fn run_viewer_mode(
+    dpi_override: Option<f64>,
+    file_args: Vec<String>,
+    no_icc: bool,
+    output_profile_path: Option<String>,
+) {
     use stet_core::device::NullDevice;
 
     if file_args.is_empty() {
         // REPL mode — no viewer, just run interactively
-        let mut ctx = create_context(no_icc);
+        let mut ctx = create_context(no_icc, output_profile_path.as_deref());
         ctx.device_factory = Some(Box::new(|w, h| Box::new(SkiaDevice::new(w, h))));
         run_repl(&mut ctx);
         return;
@@ -214,11 +256,14 @@ fn run_viewer_mode(dpi_override: Option<f64>, file_args: Vec<String>, no_icc: bo
     let (interp_end, viewer_end, dl_sender, advance_rx) = stet_viewer::create_channels();
     let first_file = file_args.first().cloned();
 
-    // Get system CMYK profile bytes for ICC-aware viewer rendering.
-    // We search once here rather than in create_context to avoid a duplicate search;
-    // the interpreter thread's create_context will find the same profile.
+    // Get CMYK profile bytes for ICC-aware viewer rendering.
+    // If --output-profile is specified, use that; otherwise search for system profile.
     let system_cmyk_bytes = if !no_icc {
-        stet_core::icc::find_system_cmyk_profile_bytes()
+        if let Some(ref path) = output_profile_path {
+            std::fs::read(path).ok().map(std::sync::Arc::new)
+        } else {
+            stet_core::icc::find_system_cmyk_profile_bytes()
+        }
     } else {
         None
     };
@@ -281,7 +326,7 @@ fn run_viewer_mode(dpi_override: Option<f64>, file_args: Vec<String>, no_icc: bo
     // Spawn interpreter thread
     let _screen_info_receiver = interp_end.screen_info_receiver;
     std::thread::spawn(move || {
-        let mut ctx = create_context(no_icc);
+        let mut ctx = create_context(no_icc, output_profile_path.as_deref());
 
         // Set display_list_sender for incremental delivery at each showpage
         ctx.display_list_sender = Some(dl_sender);
@@ -348,10 +393,29 @@ fn run_viewer_mode(dpi_override: Option<f64>, file_args: Vec<String>, no_icc: bo
 }
 
 /// Create and initialize a Context with the resource system.
-fn create_context(no_icc: bool) -> Context {
+fn create_context(no_icc: bool, output_profile_path: Option<&str>) -> Context {
     let mut ctx = Context::new();
     if !no_icc {
-        ctx.icc_cache.search_system_cmyk_profile();
+        if let Some(path) = output_profile_path {
+            // User-specified profile replaces system CMYK
+            let bytes = std::fs::read(path).unwrap_or_else(|e| {
+                eprintln!("Error: cannot read output profile '{}': {}", path, e);
+                std::process::exit(1);
+            });
+            if bytes.len() < 40 || &bytes[36..40] != b"acsp" {
+                eprintln!("Error: '{}' is not a valid ICC profile", path);
+                std::process::exit(1);
+            }
+            if let Some(hash) = ctx.icc_cache.register_profile(&bytes) {
+                eprintln!("[ICC] Loaded output profile: {}", path);
+                ctx.icc_cache.set_system_cmyk(&bytes, hash);
+            } else {
+                eprintln!("Error: failed to parse ICC profile '{}'", path);
+                std::process::exit(1);
+            }
+        } else {
+            ctx.icc_cache.search_system_cmyk_profile();
+        }
     }
     ctx.exec_sync_fn = Some(stet_engine::eval::exec_sync);
     build_system_dict(&mut ctx);

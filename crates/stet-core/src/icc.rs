@@ -258,6 +258,15 @@ impl IccCache {
         self.system_cmyk_bytes.as_ref()
     }
 
+    /// Set the system CMYK profile from pre-loaded bytes and hash.
+    ///
+    /// Used by `--output-profile` to substitute the auto-detected system CMYK
+    /// profile with a user-specified one.
+    pub fn set_system_cmyk(&mut self, bytes: &[u8], hash: ProfileHash) {
+        self.system_cmyk_bytes = Some(Arc::new(bytes.to_vec()));
+        self.default_cmyk_hash = Some(hash);
+    }
+
     /// Set the default CMYK profile hash (used when building render-thread caches).
     pub fn set_default_cmyk_hash(&mut self, hash: ProfileHash) {
         self.default_cmyk_hash = Some(hash);

@@ -40,6 +40,8 @@ pub struct PdfDevice {
     dpi: f64,
     output_path: Option<String>,
     pending_trim_box: Option<(f64, f64, f64, f64)>,
+    /// ICC output profile for PDF/X-3 OutputIntent embedding.
+    output_profile: Option<Vec<u8>>,
 }
 
 impl PdfDevice {
@@ -52,12 +54,18 @@ impl PdfDevice {
             dpi,
             output_path: None,
             pending_trim_box: None,
+            output_profile: None,
         }
     }
 
     /// Set the trim box for the next page (in PDF points, lower-left origin).
     pub fn set_trim_box(&mut self, llx: f64, lly: f64, urx: f64, ury: f64) {
         self.pending_trim_box = Some((llx, lly, urx, ury));
+    }
+
+    /// Set an ICC output profile for PDF/X-3 OutputIntent embedding.
+    pub fn set_output_profile(&mut self, bytes: Vec<u8>) {
+        self.output_profile = Some(bytes);
     }
 
     /// Assemble all accumulated pages into a PDF and write to the output file.
@@ -112,13 +120,40 @@ impl PdfDevice {
         );
 
         // Catalog
-        writer.set_object(
-            catalog_ref,
-            &PdfObj::Dict(vec![
-                (b"Type".to_vec(), PdfObj::name("Catalog")),
-                (b"Pages".to_vec(), PdfObj::Ref(pages_ref)),
-            ]),
-        );
+        let mut catalog_entries = vec![
+            (b"Type".to_vec(), PdfObj::name("Catalog")),
+            (b"Pages".to_vec(), PdfObj::Ref(pages_ref)),
+        ];
+
+        // OutputIntent for PDF/X-3 (when output profile is provided)
+        if let Some(ref profile_bytes) = self.output_profile {
+            let (n, description) = parse_icc_header(profile_bytes);
+            let icc_stream_ref = writer.add_stream(
+                vec![(b"N".to_vec(), PdfObj::Int(n as i64))],
+                profile_bytes,
+                true,
+            );
+            let output_intent = PdfObj::Dict(vec![
+                (b"Type".to_vec(), PdfObj::name("OutputIntent")),
+                (b"S".to_vec(), PdfObj::name("GTS_PDFX")),
+                (
+                    b"OutputConditionIdentifier".to_vec(),
+                    PdfObj::LitString(description.as_bytes().to_vec()),
+                ),
+                (
+                    b"Info".to_vec(),
+                    PdfObj::LitString(description.as_bytes().to_vec()),
+                ),
+                (b"DestOutputProfile".to_vec(), PdfObj::Ref(icc_stream_ref)),
+            ]);
+            let intent_ref = writer.add_object(&output_intent);
+            catalog_entries.push((
+                b"OutputIntents".to_vec(),
+                PdfObj::Array(vec![PdfObj::Ref(intent_ref)]),
+            ));
+        }
+
+        writer.set_object(catalog_ref, &PdfObj::Dict(catalog_entries));
 
         // Info dictionary
         let info_ref = writer.alloc_obj();
@@ -158,6 +193,12 @@ impl PdfDevice {
             info_entries.push((
                 b"CreationDate".to_vec(),
                 PdfObj::LitString(date_str.into_bytes()),
+            ));
+        }
+        if self.output_profile.is_some() {
+            info_entries.push((
+                b"GTS_PDFXVersion".to_vec(),
+                PdfObj::LitString(b"PDF/X-3:2003".to_vec()),
             ));
         }
         writer.set_object(info_ref, &PdfObj::Dict(info_entries));
@@ -920,6 +961,105 @@ impl OutputDevice for PdfDevice {
         }
         self.write_pdf(Some(ctx))
     }
+}
+
+/// Parse an ICC profile header to extract the number of components and description.
+///
+/// Returns (N, description) where N is derived from the color space signature
+/// at bytes 16–19 and description is extracted from the `desc` or `mluc` tag.
+fn parse_icc_header(data: &[u8]) -> (u32, String) {
+    let n = if data.len() >= 20 {
+        match &data[16..20] {
+            b"CMYK" => 4,
+            b"RGB " => 3,
+            b"GRAY" => 1,
+            b"Lab " => 3,
+            _ => 4, // assume CMYK for unknown
+        }
+    } else {
+        4
+    };
+    let desc = extract_icc_description(data).unwrap_or_else(|| "Custom".to_string());
+    (n, desc)
+}
+
+/// Extract the profile description from an ICC profile's tag table.
+///
+/// Looks for the `desc` tag (v2, type 'desc') or `mluc` tag (v4, type 'mluc').
+fn extract_icc_description(data: &[u8]) -> Option<String> {
+    if data.len() < 132 {
+        return None;
+    }
+    let tag_count = u32::from_be_bytes(data[128..132].try_into().ok()?) as usize;
+    let tag_table_start = 132;
+
+    for i in 0..tag_count {
+        let offset = tag_table_start + i * 12;
+        if offset + 12 > data.len() {
+            break;
+        }
+        let tag_sig = &data[offset..offset + 4];
+        let tag_offset = u32::from_be_bytes(data[offset + 4..offset + 8].try_into().ok()?) as usize;
+        let tag_size = u32::from_be_bytes(data[offset + 8..offset + 12].try_into().ok()?) as usize;
+
+        if tag_sig != b"desc" {
+            continue;
+        }
+        if tag_offset + tag_size > data.len() || tag_size < 12 {
+            return None;
+        }
+
+        let type_sig = &data[tag_offset..tag_offset + 4];
+        if type_sig == b"desc" {
+            // ICC v2 'desc' type: u32 count at offset+8, ASCII string at offset+12
+            let count =
+                u32::from_be_bytes(data[tag_offset + 8..tag_offset + 12].try_into().ok()?)
+                    as usize;
+            if count == 0 {
+                return None;
+            }
+            let str_end = (tag_offset + 12 + count).min(tag_offset + tag_size);
+            let s = &data[tag_offset + 12..str_end];
+            // Trim trailing null bytes
+            let s = s.split(|&b| b == 0).next().unwrap_or(s);
+            return Some(String::from_utf8_lossy(s).to_string());
+        } else if type_sig == b"mluc" {
+            // ICC v4 'mluc' type: multi-localized Unicode
+            if tag_size < 20 {
+                return None;
+            }
+            let record_count =
+                u32::from_be_bytes(data[tag_offset + 8..tag_offset + 12].try_into().ok()?)
+                    as usize;
+            if record_count == 0 {
+                return None;
+            }
+            // First record: language(2) + country(2) + length(4) + offset(4)
+            let rec_base = tag_offset + 16;
+            if rec_base + 12 > data.len() {
+                return None;
+            }
+            let str_len = u32::from_be_bytes(
+                data[rec_base + 4..rec_base + 8].try_into().ok()?,
+            ) as usize;
+            let str_off = u32::from_be_bytes(
+                data[rec_base + 8..rec_base + 12].try_into().ok()?,
+            ) as usize;
+            let abs_off = tag_offset + str_off;
+            if abs_off + str_len > data.len() || str_len < 2 {
+                return None;
+            }
+            // UTF-16BE → String
+            let utf16: Vec<u16> = data[abs_off..abs_off + str_len]
+                .chunks_exact(2)
+                .map(|c| u16::from_be_bytes([c[0], c[1]]))
+                .collect();
+            return Some(String::from_utf16_lossy(&utf16).trim_end_matches('\0').to_string());
+        }
+
+        break;
+    }
+    None
 }
 
 /// Convert days since 1970-01-01 to (year, month, day).
