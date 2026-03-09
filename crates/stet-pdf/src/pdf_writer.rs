@@ -152,12 +152,13 @@ impl PdfWriter {
         }
 
         // Entry for object 0 (free)
-        w.write_all(b"0000000000 65535 f \r\n")?;
+        // Each xref entry must be exactly 20 bytes: 10+SP+5+SP+f/n+CR+LF
+        w.write_all(b"0000000000 65535 f\r\n")?;
         for i in 1..=max_obj {
             if let Some(off) = offset_map[i as usize] {
-                write!(w, "{:010} {:05} n \r\n", off, 0)?;
+                write!(w, "{:010} {:05} n\r\n", off, 0)?;
             } else {
-                w.write_all(b"0000000000 00000 f \r\n")?;
+                w.write_all(b"0000000000 00000 f\r\n")?;
             }
         }
 
