@@ -138,12 +138,13 @@ for producing usable PDF files.
 - **Files**: `crates/stet-core/src/device.rs`, `crates/stet-pdf/src/pdf_device.rs`
 - **Effort**: Small (once ExtGState exists)
 
-### 2.3 TrimBox / BleedBox
-- [ ] Parse `%%BoundingBox` / `%%HiResBoundingBox` for EPS files
-- [ ] Accept trim/bleed dimensions from pagedevice or CLI
-- [ ] Emit `/TrimBox` and `/BleedBox` in page dict alongside `/MediaBox`
-- **Files**: `crates/stet-pdf/src/pdf_device.rs`
-- **Effort**: Small
+### 2.3 TrimBox / BleedBox ✅
+- [x] `set_trim_box()` method on `OutputDevice` trait (default no-op) and `PdfDevice`
+- [x] EPS `%%BoundingBox` automatically sets trim box on PDF device
+- [x] Emit `/TrimBox` array in page dict alongside `/MediaBox`
+- [ ] Accept trim/bleed dimensions from pagedevice or CLI — future
+- [ ] BleedBox support — future
+- **Files**: `crates/stet-core/src/device.rs`, `crates/stet-pdf/src/pdf_device.rs`, `crates/stet-cli/src/main.rs`
 
 ### 2.4 Document Metadata ✅
 - [x] Emit Info dict with `/Producer (stet)`, `/CreationDate` (UTC), `/Title` (from filename)
@@ -213,7 +214,7 @@ Phase 4 items are deferred — implement only when a specific need arises.
 ───  ─────────────────────────────────────  ────────  ──────────────────────────────
  ✅  1.1  Color key mask emission          done
  ✅  2.4  Document metadata                done
- 3.  2.3  TrimBox / BleedBox               small     page dict entries
+ ✅  2.3  TrimBox / BleedBox               done
  4.  1.6  CMYK shadings                    medium    plumb color space through shadings
  5.  2.1  ExtGState framework              medium    unlocks overprint + future items
  6.  2.2  Overprint settings               small     needs ExtGState (#5)

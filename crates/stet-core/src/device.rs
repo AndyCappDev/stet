@@ -299,6 +299,10 @@ pub trait OutputDevice {
     /// Paint a tiled pattern fill.
     fn paint_pattern_fill(&mut self, _params: &PatternFillParams) {}
 
+    /// Set the trim box for the next page (PDF points, lower-left origin).
+    /// Only meaningful for PDF output; other devices ignore this.
+    fn set_trim_box(&mut self, _llx: f64, _lly: f64, _urx: f64, _ury: f64) {}
+
     /// Page dimensions in device pixels.
     fn page_size(&self) -> (u32, u32);
 

@@ -586,6 +586,10 @@ fn execjob(
             let h = ury - lly;
             if w > 0.0 && h > 0.0 {
                 install_device_with_size(ctx, dpi_override, w, h, device_name);
+                // Set trim box for PDF output (BoundingBox defines the artwork area)
+                if let Some(ref mut dev) = ctx.device {
+                    dev.set_trim_box(0.0, 0.0, w, h);
+                }
             } else {
                 install_device(ctx, dpi_override, device_name);
             }

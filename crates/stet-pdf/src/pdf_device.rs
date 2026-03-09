@@ -28,6 +28,7 @@ struct PageData {
     page_w: u32,
     page_h: u32,
     dpi: f64,
+    trim_box: Option<(f64, f64, f64, f64)>,
 }
 
 /// PDF output device. Accumulates display lists per page and generates
@@ -38,6 +39,7 @@ pub struct PdfDevice {
     page_h: u32,
     dpi: f64,
     output_path: Option<String>,
+    pending_trim_box: Option<(f64, f64, f64, f64)>,
 }
 
 impl PdfDevice {
@@ -49,7 +51,13 @@ impl PdfDevice {
             page_h: height,
             dpi,
             output_path: None,
+            pending_trim_box: None,
         }
+    }
+
+    /// Set the trim box for the next page (in PDF points, lower-left origin).
+    pub fn set_trim_box(&mut self, llx: f64, lly: f64, urx: f64, ury: f64) {
+        self.pending_trim_box = Some((llx, lly, urx, ury));
     }
 
     /// Assemble all accumulated pages into a PDF and write to the output file.
@@ -245,7 +253,7 @@ impl PdfDevice {
         let content_ref = writer.add_stream(Vec::new(), &content, true);
 
         // Page object
-        let page_ref = writer.add_object(&PdfObj::Dict(vec![
+        let mut page_entries = vec![
             (b"Type".to_vec(), PdfObj::name("Page")),
             (b"Parent".to_vec(), PdfObj::Ref(pages_ref)),
             (
@@ -259,7 +267,19 @@ impl PdfDevice {
             ),
             (b"Contents".to_vec(), PdfObj::Ref(content_ref)),
             (b"Resources".to_vec(), PdfObj::Dict(resources)),
-        ]));
+        ];
+        if let Some((llx, lly, urx, ury)) = page.trim_box {
+            page_entries.push((
+                b"TrimBox".to_vec(),
+                PdfObj::Array(vec![
+                    PdfObj::Real(llx),
+                    PdfObj::Real(lly),
+                    PdfObj::Real(urx),
+                    PdfObj::Real(ury),
+                ]),
+            ));
+        }
+        let page_ref = writer.add_object(&PdfObj::Dict(page_entries));
 
         Ok(page_ref)
     }
@@ -490,6 +510,10 @@ impl OutputDevice for PdfDevice {
     fn init_clip(&mut self) {}
     fn erase_page(&mut self) {}
 
+    fn set_trim_box(&mut self, llx: f64, lly: f64, urx: f64, ury: f64) {
+        self.pending_trim_box = Some((llx, lly, urx, ury));
+    }
+
     fn show_page(&mut self, _output_path: &str) -> Result<(), String> {
         Ok(())
     }
@@ -532,6 +556,7 @@ impl OutputDevice for PdfDevice {
             page_w: self.page_w,
             page_h: self.page_h,
             dpi: self.dpi,
+            trim_box: self.pending_trim_box.take(),
         });
 
         Ok(())
