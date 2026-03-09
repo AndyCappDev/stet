@@ -211,11 +211,13 @@ for producing usable PDF files.
 - [x] No flag = auto-detect system CMYK profile (current behavior), no OutputIntent
 - **Files**: `crates/stet-core/src/icc.rs`, `crates/stet-pdf/src/pdf_device.rs`, `crates/stet-cli/src/main.rs`
 
-### 3.2 Full ToUnicode CMap
-- [ ] Map glyph names → Unicode via Adobe Glyph List
-- [ ] Emit proper `bfchar` / `bfrange` entries for all used glyphs
-- [ ] Handle CID fonts with CID→Unicode mapping
-- **Effort**: Medium
+### 3.2 Full ToUnicode CMap ✅
+- [x] Map glyph names → Unicode via Adobe Glyph List (encoding-aware Path A in font_embedder.rs)
+- [x] Emit proper `bfchar` entries for all used glyphs
+- [x] Handle CID fonts with CID→Unicode mapping (build_cid_tounicode in font_embedder.rs)
+- [x] Fallback path: `build_tounicode_for_fallback()` extracts encoding from font dict when full embedding fails
+- [x] AGL table expanded with Greek letters (α–ω, Α–Ω) and math symbols (∞, ≠, ≤, ≥, ≈, ∑, ∏, √, ∂, ∫)
+- **Files**: `crates/stet-pdf/src/unicode_mapping.rs`, `crates/stet-pdf/src/font_embedder.rs`, `crates/stet-pdf/src/pdf_device.rs`
 
 ### 3.3 Color Rendering Intent
 - [ ] Capture rendering intent from `setrenderingintent`
@@ -282,7 +284,7 @@ Phase 4 items are deferred — implement only when a specific need arises.
  ✅  1.3  Separation/DeviceN PDF output    done      Type 0 functions, cs/scn operators, ColorSpace resources
  ✅  1.5  Pattern fills                    done      Type 1 tiling patterns, colored + uncolored, full affine transform
  ✅  3.1  PDF/X-3 OutputIntent             done      --output-profile embeds ICC + OutputIntent + GTS_PDFXVersion
-12.  3.2  Full ToUnicode CMap              medium    when text extraction needed
+ ✅  3.2  Full ToUnicode CMap              done      encoding-aware fallback + Greek/math AGL entries
 13.  3.3  Color rendering intent           small     when needed
 
 Phase 4 (on demand only):

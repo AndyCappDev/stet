@@ -225,10 +225,12 @@ impl PdfDevice {
         let mut map = HashMap::new();
         for usage in font_tracker.fonts() {
             let font_ref = if let Some(c) = ctx {
-                font_embedder::build_font_resource(writer, usage, c)
-                    .unwrap_or_else(|| self.build_font_reference(writer, usage))
+                font_embedder::build_font_resource(writer, usage, c).unwrap_or_else(|| {
+                    let tu = font_embedder::build_tounicode_for_fallback(writer, usage, c);
+                    self.build_font_reference(writer, usage, tu)
+                })
             } else {
-                self.build_font_reference(writer, usage)
+                self.build_font_reference(writer, usage, None)
             };
             map.insert(usage.pdf_name.clone(), font_ref);
         }
@@ -525,9 +527,10 @@ impl PdfDevice {
         &self,
         writer: &mut PdfWriter,
         usage: &crate::font_tracker::FontUsage,
+        tounicode_override: Option<u32>,
     ) -> u32 {
-        // Build ToUnicode CMap
-        let tounicode_ref = self.build_tounicode_cmap(writer, usage);
+        // Build ToUnicode CMap — use override if provided, otherwise fall back to naive mapping
+        let tounicode_ref = tounicode_override.or_else(|| self.build_tounicode_cmap(writer, usage));
 
         let mut entries: Vec<(Vec<u8>, PdfObj)> = vec![
             (b"Type".to_vec(), PdfObj::name("Font")),

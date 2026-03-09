@@ -1145,7 +1145,7 @@ fn get_decrypted_subrs(
 }
 
 /// Build the ToUnicode map: char_code → Unicode string.
-fn build_tounicode_map(
+pub fn build_tounicode_map(
     ctx: &Context,
     encoding_entity: Option<EntityId>,
     used_codes: &HashSet<u16>,
@@ -1174,7 +1174,7 @@ fn build_tounicode_map(
 }
 
 /// Generate a ToUnicode CMap stream.
-fn generate_tounicode_cmap(map: &HashMap<u16, u16>, font_name: &str) -> Vec<u8> {
+pub fn generate_tounicode_cmap(map: &HashMap<u16, u16>, font_name: &str) -> Vec<u8> {
     let mut lines: Vec<Vec<u8>> = Vec::new();
 
     lines.push(b"/CIDInit /ProcSet findresource begin".to_vec());
@@ -1209,6 +1209,33 @@ fn generate_tounicode_cmap(map: &HashMap<u16, u16>, font_name: &str) -> Vec<u8> 
     lines.push(b"end".to_vec());
 
     lines.join(&b'\n')
+}
+
+/// Build an encoding-aware ToUnicode CMap for a font that failed full embedding.
+///
+/// Extracts the font's `/Encoding` array, maps glyph names → Unicode via AGL,
+/// and generates a proper ToUnicode CMap stream. This provides correct text
+/// extraction for non-ASCII characters even when font embedding fails.
+pub fn build_tounicode_for_fallback(
+    writer: &mut PdfWriter,
+    usage: &FontUsage,
+    ctx: &Context,
+) -> Option<u32> {
+    let font_entity = usage.font_entity;
+    let encoding_entity = ctx
+        .dicts
+        .get(font_entity, &DictKey::Name(ctx.name_cache.n_encoding))
+        .and_then(|obj| match obj.value {
+            PsValue::Array { entity, .. } => Some(entity),
+            _ => None,
+        });
+    let tounicode_map = build_tounicode_map(ctx, encoding_entity, &usage.used_codes);
+    if tounicode_map.is_empty() {
+        return None;
+    }
+    let font_name_str = String::from_utf8_lossy(&usage.font_name);
+    let cmap_data = generate_tounicode_cmap(&tounicode_map, &font_name_str);
+    Some(writer.add_stream(Vec::new(), &cmap_data, true))
 }
 
 /// Build a PDF Encoding dict with /Differences from the PS font's encoding array.

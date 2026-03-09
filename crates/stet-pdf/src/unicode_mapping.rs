@@ -212,6 +212,70 @@ pub static GLYPH_TO_UNICODE: LazyLock<HashMap<&'static str, u16>> = LazyLock::ne
     m.insert("ogonek", 0x02DB);
     m.insert("hungarumlaut", 0x02DD);
 
+    // Greek uppercase
+    m.insert("Alpha", 0x0391);
+    m.insert("Beta", 0x0392);
+    m.insert("Gamma", 0x0393);
+    m.insert("Delta", 0x0394);
+    m.insert("Epsilon", 0x0395);
+    m.insert("Zeta", 0x0396);
+    m.insert("Eta", 0x0397);
+    m.insert("Theta", 0x0398);
+    m.insert("Iota", 0x0399);
+    m.insert("Kappa", 0x039A);
+    m.insert("Lambda", 0x039B);
+    m.insert("Mu", 0x039C);
+    m.insert("Nu", 0x039D);
+    m.insert("Xi", 0x039E);
+    m.insert("Omicron", 0x039F);
+    m.insert("Pi", 0x03A0);
+    m.insert("Rho", 0x03A1);
+    m.insert("Sigma", 0x03A3);
+    m.insert("Tau", 0x03A4);
+    m.insert("Upsilon", 0x03A5);
+    m.insert("Phi", 0x03A6);
+    m.insert("Chi", 0x03A7);
+    m.insert("Psi", 0x03A8);
+    m.insert("Omega", 0x03A9);
+
+    // Greek lowercase
+    m.insert("alpha", 0x03B1);
+    m.insert("beta", 0x03B2);
+    m.insert("gamma", 0x03B3);
+    m.insert("delta", 0x03B4);
+    m.insert("epsilon", 0x03B5);
+    m.insert("zeta", 0x03B6);
+    m.insert("eta", 0x03B7);
+    m.insert("theta", 0x03B8);
+    m.insert("iota", 0x03B9);
+    m.insert("kappa", 0x03BA);
+    m.insert("lambda", 0x03BB);
+    // mu already mapped as 0x00B5 (micro sign)
+    m.insert("nu", 0x03BD);
+    m.insert("xi", 0x03BE);
+    m.insert("omicron", 0x03BF);
+    m.insert("pi", 0x03C0);
+    m.insert("rho", 0x03C1);
+    m.insert("sigma", 0x03C3);
+    m.insert("tau", 0x03C4);
+    m.insert("upsilon", 0x03C5);
+    m.insert("phi", 0x03C6);
+    m.insert("chi", 0x03C7);
+    m.insert("psi", 0x03C8);
+    m.insert("omega", 0x03C9);
+
+    // Math symbols
+    m.insert("partialdiff", 0x2202);
+    m.insert("summation", 0x2211);
+    m.insert("product", 0x220F);
+    m.insert("radical", 0x221A);
+    m.insert("infinity", 0x221E);
+    m.insert("integral", 0x222B);
+    m.insert("approxequal", 0x2248);
+    m.insert("notequal", 0x2260);
+    m.insert("lessequal", 0x2264);
+    m.insert("greaterequal", 0x2265);
+
     // Miscellaneous
     m.insert("dotlessi", 0x0131);
     m.insert("florin", 0x0192);
