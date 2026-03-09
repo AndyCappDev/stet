@@ -4458,7 +4458,7 @@ fn render_patch_shading_viewport(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use stet_core::device::{HalftoneState, TransferState};
+    use stet_core::device::{BgUcrState, HalftoneState, TransferState};
     use stet_core::graphics_state::DashPattern;
 
     #[test]
@@ -4487,6 +4487,7 @@ mod tests {
             rendering_intent: 0,
             transfer: TransferState::default(),
             halftone: HalftoneState::default(),
+            bg_ucr: BgUcrState::default(),
         };
         dev.fill_path(&path, &params);
 
@@ -4519,6 +4520,7 @@ mod tests {
             rendering_intent: 0,
             transfer: TransferState::default(),
             halftone: HalftoneState::default(),
+            bg_ucr: BgUcrState::default(),
         };
         dev.stroke_path(&path, &params);
 
@@ -4563,6 +4565,7 @@ mod tests {
             rendering_intent: 0,
             transfer: TransferState::default(),
             halftone: HalftoneState::default(),
+            bg_ucr: BgUcrState::default(),
         };
         dev.fill_path(&fill_path, &fill_params);
 
@@ -4596,6 +4599,7 @@ mod tests {
             rendering_intent: 0,
             transfer: TransferState::default(),
             halftone: HalftoneState::default(),
+            bg_ucr: BgUcrState::default(),
         };
         dev.fill_path(&path, &params);
 
@@ -4638,6 +4642,7 @@ mod tests {
             rendering_intent: 0,
             transfer: TransferState::default(),
             halftone: HalftoneState::default(),
+            bg_ucr: BgUcrState::default(),
         };
         dev.fill_path(&path, &params);
 

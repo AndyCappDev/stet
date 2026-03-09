@@ -258,6 +258,7 @@ impl PdfDevice {
             pattern_cs_entries,
             transfer_refs,
             halftone_refs,
+            bg_ucr_refs,
         } = result;
 
         // Build image XObjects
@@ -328,6 +329,18 @@ impl PdfDevice {
                 if let Some(hr) = halftone_refs.iter().find(|r| r.ext_gstate_idx == i) {
                     let ht_value = build_halftone_ht(writer, &hr.state);
                     entries.push((b"HT".to_vec(), ht_value));
+                }
+
+                // Check if this ExtGState has BG/UCR references
+                if let Some(br) = bg_ucr_refs.iter().find(|r| r.ext_gstate_idx == i) {
+                    if let Some(ref bg) = br.state.bg {
+                        let func_ref = build_type0_function(writer, bg);
+                        entries.push((b"BG2".to_vec(), PdfObj::Ref(func_ref)));
+                    }
+                    if let Some(ref ucr) = br.state.ucr {
+                        let func_ref = build_type0_function_signed(writer, ucr);
+                        entries.push((b"UCR2".to_vec(), PdfObj::Ref(func_ref)));
+                    }
                 }
 
                 let gs_ref = writer.add_object(&PdfObj::Dict(entries));
@@ -442,6 +455,16 @@ impl PdfDevice {
                         if let Some(hr) = tile_result.halftone_refs.iter().find(|r| r.ext_gstate_idx == j) {
                             let ht_value = build_halftone_ht(writer, &hr.state);
                             entries.push((b"HT".to_vec(), ht_value));
+                        }
+                        if let Some(br) = tile_result.bg_ucr_refs.iter().find(|r| r.ext_gstate_idx == j) {
+                            if let Some(ref bg) = br.state.bg {
+                                let func_ref = build_type0_function(writer, bg);
+                                entries.push((b"BG2".to_vec(), PdfObj::Ref(func_ref)));
+                            }
+                            if let Some(ref ucr) = br.state.ucr {
+                                let func_ref = build_type0_function_signed(writer, ucr);
+                                entries.push((b"UCR2".to_vec(), PdfObj::Ref(func_ref)));
+                            }
                         }
                         let gs_ref = writer.add_object(&PdfObj::Dict(entries));
                         tile_gs
@@ -1145,6 +1168,33 @@ fn build_transfer_tr2(
     } else {
         PdfObj::name("Identity")
     }
+}
+
+/// Build a PDF Type 0 (sampled) function stream from a 256-entry table with signed range [-1,1].
+/// Used for undercolor removal (UCR) functions.
+fn build_type0_function_signed(writer: &mut PdfWriter, table: &[f64]) -> u32 {
+    let dict_entries = vec![
+        (b"FunctionType".to_vec(), PdfObj::Int(0)),
+        (
+            b"Domain".to_vec(),
+            PdfObj::Array(vec![PdfObj::Int(0), PdfObj::Int(1)]),
+        ),
+        (
+            b"Range".to_vec(),
+            PdfObj::Array(vec![PdfObj::Int(-1), PdfObj::Int(1)]),
+        ),
+        (
+            b"Size".to_vec(),
+            PdfObj::Array(vec![PdfObj::Int(table.len() as i64)]),
+        ),
+        (b"BitsPerSample".to_vec(), PdfObj::Int(8)),
+    ];
+    // Encode [-1,1] → [0,255]: byte = (v + 1) / 2 * 255
+    let data: Vec<u8> = table
+        .iter()
+        .map(|&v| ((v.clamp(-1.0, 1.0) + 1.0) / 2.0 * 255.0).round() as u8)
+        .collect();
+    writer.add_stream(dict_entries, &data, false)
 }
 
 /// Build a PDF Type 4 (PostScript calculator) function from token bytes.

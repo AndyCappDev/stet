@@ -39,6 +39,15 @@ pub struct HalftoneScreen {
     pub sampled_2d: Option<Arc<Vec<f64>>>,
 }
 
+/// Pre-sampled black generation / undercolor removal state for PDF output.
+#[derive(Clone, Debug, Default)]
+pub struct BgUcrState {
+    /// Black generation function (256 samples, domain [0,1] → range [0,1]).
+    pub bg: Option<Arc<Vec<f64>>>,
+    /// Undercolor removal function (256 samples, domain [0,1] → range [-1,1]).
+    pub ucr: Option<Arc<Vec<f64>>>,
+}
+
 /// Pre-computed halftone state captured at paint time.
 #[derive(Clone, Debug, Default)]
 pub struct HalftoneState {
@@ -99,6 +108,8 @@ pub struct FillParams {
     pub transfer: TransferState,
     /// Pre-computed halftone screen state for PDF output.
     pub halftone: HalftoneState,
+    /// Pre-sampled black generation / undercolor removal for PDF output.
+    pub bg_ucr: BgUcrState,
 }
 
 /// Parameters for a text element emitted by show operators.
@@ -139,6 +150,8 @@ pub struct TextParams {
     pub transfer: TransferState,
     /// Pre-computed halftone screen state for PDF output.
     pub halftone: HalftoneState,
+    /// Pre-sampled black generation / undercolor removal for PDF output.
+    pub bg_ucr: BgUcrState,
 }
 
 /// Parameters for stroking a path.
@@ -167,6 +180,8 @@ pub struct StrokeParams {
     pub transfer: TransferState,
     /// Pre-computed halftone screen state for PDF output.
     pub halftone: HalftoneState,
+    /// Pre-sampled black generation / undercolor removal for PDF output.
+    pub bg_ucr: BgUcrState,
 }
 
 /// Parameters for clipping.

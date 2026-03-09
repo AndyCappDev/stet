@@ -9,8 +9,9 @@ use std::io::Write as IoWrite;
 
 use stet_core::context::Context;
 use stet_core::device::{
-    AxialShadingParams, HalftoneState, MeshShadingParams, PatchShadingParams, PatternFillParams,
-    RadialShadingParams, SpotColor, SpotColorSpace, StrokeParams, TextParams, TransferState,
+    AxialShadingParams, BgUcrState, HalftoneState, MeshShadingParams, PatchShadingParams,
+    PatternFillParams, RadialShadingParams, SpotColor, SpotColorSpace, StrokeParams, TextParams,
+    TransferState,
 };
 use stet_core::display_list::{DisplayElement, DisplayList};
 use stet_core::graphics_state::{DeviceColor, FillRule, LineCap, LineJoin, Matrix, PsPath};
@@ -46,6 +47,8 @@ pub struct ContentStreamResult {
     pub transfer_refs: Vec<TransferFunctionRef>,
     /// Halftone references to emit as PDF halftone objects.
     pub halftone_refs: Vec<HalftoneRef>,
+    /// Black generation / undercolor removal references for PDF output.
+    pub bg_ucr_refs: Vec<BgUcrRef>,
 }
 
 /// Reference from an ExtGState to pre-sampled transfer function tables.
@@ -65,6 +68,14 @@ pub struct HalftoneRef {
     pub ext_gstate_idx: usize,
     /// Halftone state captured at paint time.
     pub state: HalftoneState,
+}
+
+/// Reference from an ExtGState to pre-sampled black generation / UCR tables.
+pub struct BgUcrRef {
+    /// Index into ext_gstate_dicts.
+    pub ext_gstate_idx: usize,
+    /// BG/UCR state captured at paint time.
+    pub state: BgUcrState,
 }
 
 /// Reference to a tiling pattern that needs a PDF Pattern XObject.
@@ -118,6 +129,8 @@ struct GState {
     transfer_key: Vec<u8>,
     /// Dedup key for current halftone state.
     halftone_key: Vec<u8>,
+    /// Dedup key for current BG/UCR state.
+    bg_ucr_key: Vec<u8>,
 }
 
 impl GState {
@@ -137,6 +150,7 @@ impl GState {
             rendering_intent: 0,
             transfer_key: Vec::new(),
             halftone_key: Vec::new(),
+            bg_ucr_key: Vec::new(),
         }
     }
 
@@ -197,6 +211,7 @@ pub fn build_content_stream(
     let mut pattern_cs_set: HashSet<String> = HashSet::new();
     let mut transfer_refs: Vec<TransferFunctionRef> = Vec::new();
     let mut halftone_refs: Vec<HalftoneRef> = Vec::new();
+    let mut bg_ucr_refs: Vec<BgUcrRef> = Vec::new();
 
     // Track which fonts this page uses (for per-page Resources/Font dict)
     let mut page_font_names: HashSet<String> = HashSet::new();
@@ -280,6 +295,7 @@ pub fn build_content_stream(
                 }
                 emit_transfer(&mut buf, &params.transfer, &mut gs, &mut ext_gstates, &mut ext_gstate_map, &mut transfer_refs);
                 emit_halftone(&mut buf, &params.halftone, &mut gs, &mut ext_gstates, &mut ext_gstate_map, &mut halftone_refs);
+                emit_bg_ucr(&mut buf, &params.bg_ucr, &mut gs, &mut ext_gstates, &mut ext_gstate_map, &mut bg_ucr_refs);
                 emit_rendering_intent(&mut buf, params.rendering_intent, &mut gs);
                 emit_overprint(&mut buf, params.overprint, &mut gs, &mut ext_gstates, &mut ext_gstate_map);
                 if let Some(spot) = &params.spot_color {
@@ -310,6 +326,7 @@ pub fn build_content_stream(
                 }
                 emit_transfer(&mut buf, &params.transfer, &mut gs, &mut ext_gstates, &mut ext_gstate_map, &mut transfer_refs);
                 emit_halftone(&mut buf, &params.halftone, &mut gs, &mut ext_gstates, &mut ext_gstate_map, &mut halftone_refs);
+                emit_bg_ucr(&mut buf, &params.bg_ucr, &mut gs, &mut ext_gstates, &mut ext_gstate_map, &mut bg_ucr_refs);
                 emit_rendering_intent(&mut buf, params.rendering_intent, &mut gs);
                 emit_overprint(&mut buf, params.overprint, &mut gs, &mut ext_gstates, &mut ext_gstate_map);
                 if let Some(spot) = &params.spot_color {
@@ -456,6 +473,7 @@ pub fn build_content_stream(
         pattern_cs_entries,
         transfer_refs,
         halftone_refs,
+        bg_ucr_refs,
     }
 }
 
@@ -482,6 +500,7 @@ pub fn build_tile_content_stream(
     let mut pattern_cs_set: HashSet<String> = HashSet::new();
     let mut transfer_refs: Vec<TransferFunctionRef> = Vec::new();
     let mut halftone_refs: Vec<HalftoneRef> = Vec::new();
+    let mut bg_ucr_refs: Vec<BgUcrRef> = Vec::new();
     let mut page_font_names: HashSet<String> = HashSet::new();
 
     // Register fonts used in tile
@@ -503,6 +522,7 @@ pub fn build_tile_content_stream(
                 }
                 emit_transfer(&mut buf, &params.transfer, &mut gs, &mut ext_gstates, &mut ext_gstate_map, &mut transfer_refs);
                 emit_halftone(&mut buf, &params.halftone, &mut gs, &mut ext_gstates, &mut ext_gstate_map, &mut halftone_refs);
+                emit_bg_ucr(&mut buf, &params.bg_ucr, &mut gs, &mut ext_gstates, &mut ext_gstate_map, &mut bg_ucr_refs);
                 emit_rendering_intent(&mut buf, params.rendering_intent, &mut gs);
                 emit_overprint(
                     &mut buf,
@@ -544,6 +564,7 @@ pub fn build_tile_content_stream(
                 }
                 emit_transfer(&mut buf, &params.transfer, &mut gs, &mut ext_gstates, &mut ext_gstate_map, &mut transfer_refs);
                 emit_halftone(&mut buf, &params.halftone, &mut gs, &mut ext_gstates, &mut ext_gstate_map, &mut halftone_refs);
+                emit_bg_ucr(&mut buf, &params.bg_ucr, &mut gs, &mut ext_gstates, &mut ext_gstate_map, &mut bg_ucr_refs);
                 emit_rendering_intent(&mut buf, params.rendering_intent, &mut gs);
                 emit_overprint(
                     &mut buf,
@@ -687,6 +708,7 @@ pub fn build_tile_content_stream(
         pattern_cs_entries: pattern_cs_names,
         transfer_refs,
         halftone_refs,
+        bg_ucr_refs,
     }
 }
 
@@ -1106,6 +1128,62 @@ fn emit_halftone(
     halftone_refs.push(HalftoneRef {
         ext_gstate_idx: idx,
         state: halftone.clone(),
+    });
+    writeln!(buf, "/GS{} gs", idx).unwrap();
+}
+
+/// Build a dedup key from a BgUcrState based on Arc pointer identity.
+fn build_bg_ucr_key(state: &BgUcrState) -> Vec<u8> {
+    use std::sync::Arc;
+    let mut key = Vec::new();
+    if let Some(ref bg) = state.bg {
+        key.extend(b"B");
+        let ptr = Arc::as_ptr(bg) as usize;
+        key.extend(ptr.to_le_bytes());
+    }
+    if let Some(ref ucr) = state.ucr {
+        key.extend(b"U");
+        let ptr = Arc::as_ptr(ucr) as usize;
+        key.extend(ptr.to_le_bytes());
+    }
+    key
+}
+
+/// Emit a `gs` operator to set BG/UCR when it changes.
+fn emit_bg_ucr(
+    buf: &mut Vec<u8>,
+    state: &BgUcrState,
+    gs: &mut GState,
+    ext_gstates: &mut Vec<ExtGStateDict>,
+    ext_gstate_map: &mut HashMap<Vec<u8>, usize>,
+    bg_ucr_refs: &mut Vec<BgUcrRef>,
+) {
+    let key = build_bg_ucr_key(state);
+    if key == gs.bg_ucr_key {
+        return;
+    }
+    gs.bg_ucr_key = key.clone();
+
+    if key.is_empty() {
+        return;
+    }
+
+    let mut map_key = b"BU:".to_vec();
+    map_key.extend(&key);
+
+    if let Some(&idx) = ext_gstate_map.get(&map_key) {
+        writeln!(buf, "/GS{} gs", idx).unwrap();
+        return;
+    }
+
+    let idx = ext_gstates.len();
+    let entries = vec![(b"Type".to_vec(), PdfObj::name("ExtGState"))];
+    ext_gstates.push(ExtGStateDict { entries });
+    ext_gstate_map.insert(map_key, idx);
+
+    bg_ucr_refs.push(BgUcrRef {
+        ext_gstate_idx: idx,
+        state: state.clone(),
     });
     writeln!(buf, "/GS{} gs", idx).unwrap();
 }

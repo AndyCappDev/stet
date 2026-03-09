@@ -447,6 +447,35 @@ pub fn op_currentcolortransfer(ctx: &mut Context) -> Result<(), PsError> {
 
 // ---------- Black generation / undercolor removal ----------
 
+/// Sample a PS UCR procedure at 256 points via exec_sync.
+/// Like sample_transfer() but range is [-1,1] instead of [0,1].
+fn sample_ucr(ctx: &mut Context, proc: PsObject) -> Result<Option<Arc<Vec<f64>>>, PsError> {
+    if let PsValue::Array { len, .. } | PsValue::PackedArray { len, .. } = proc.value {
+        if len == 0 {
+            return Ok(None);
+        }
+    }
+    let mut table = Vec::with_capacity(256);
+    for i in 0..256 {
+        let input = i as f64 / 255.0;
+        ctx.o_stack.push(PsObject::real(input))?;
+        ctx.exec_sync(proc)?;
+        let result = if !ctx.o_stack.is_empty() {
+            ctx.o_stack.pop()?.as_f64().unwrap_or(0.0).clamp(-1.0, 1.0)
+        } else {
+            0.0
+        };
+        table.push(result);
+    }
+    // Identity check (UCR identity = all zeros)
+    let is_identity = table.iter().all(|&v| v.abs() < 1e-6);
+    if is_identity {
+        Ok(None)
+    } else {
+        Ok(Some(Arc::new(table)))
+    }
+}
+
 /// `setblackgeneration`: proc → —
 pub fn op_setblackgeneration(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.o_stack.is_empty() {
@@ -458,6 +487,7 @@ pub fn op_setblackgeneration(ctx: &mut Context) -> Result<(), PsError> {
     }
     let proc_obj = ctx.o_stack.pop()?;
     ctx.gstate.black_generation = Some(proc_obj);
+    ctx.gstate.sampled_black_generation = sample_transfer(ctx, proc_obj)?;
     Ok(())
 }
 
@@ -484,6 +514,7 @@ pub fn op_setundercolorremoval(ctx: &mut Context) -> Result<(), PsError> {
     }
     let proc_obj = ctx.o_stack.pop()?;
     ctx.gstate.undercolor_removal = Some(proc_obj);
+    ctx.gstate.sampled_ucr = sample_ucr(ctx, proc_obj)?;
     Ok(())
 }
 
@@ -1045,6 +1076,7 @@ fn replay_form_elements(
                     rendering_intent: params.rendering_intent,
                     transfer: params.transfer.clone(),
                     halftone: params.halftone.clone(),
+                    bg_ucr: params.bg_ucr.clone(),
                 };
                 target.push(DisplayElement::Fill {
                     path: new_path,
@@ -1070,6 +1102,7 @@ fn replay_form_elements(
                     rendering_intent: params.rendering_intent,
                     transfer: params.transfer.clone(),
                     halftone: params.halftone.clone(),
+                    bg_ucr: params.bg_ucr.clone(),
                 };
                 target.push(DisplayElement::Stroke {
                     path: new_path,

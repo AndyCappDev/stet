@@ -1052,6 +1052,10 @@ pub struct GraphicsState {
     // Black generation / undercolor removal
     pub black_generation: Option<crate::object::PsObject>,
     pub undercolor_removal: Option<crate::object::PsObject>,
+    /// Pre-sampled black generation function (256 entries, domain [0,1] → range [0,1]).
+    pub sampled_black_generation: Option<Arc<Vec<f64>>>,
+    /// Pre-sampled undercolor removal function (256 entries, domain [0,1] → range [-1,1]).
+    pub sampled_ucr: Option<Arc<Vec<f64>>>,
 
     // Color rendering dictionary
     pub color_rendering: Option<crate::object::PsObject>,
@@ -1116,6 +1120,8 @@ impl GraphicsState {
             precomputed_color_halftone: None,
             black_generation: None,
             undercolor_removal: None,
+            sampled_black_generation: None,
+            sampled_ucr: None,
             color_rendering: None,
             rendering_intent: 0, // RelativeColorimetric
             current_pattern: None,

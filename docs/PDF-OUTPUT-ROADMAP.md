@@ -260,9 +260,11 @@ calibration workflows. Implement on demand rather than speculatively.
 - **Files**: `crates/stet-core/src/device.rs`, `crates/stet-core/src/graphics_state.rs`, `crates/stet-ops/src/halftone_ops.rs`, `crates/stet-ops/src/paint_ops.rs`, `crates/stet-ops/src/show_ops.rs`, `crates/stet-pdf/src/content_stream.rs`, `crates/stet-pdf/src/pdf_device.rs`
 - **Effort**: Medium
 
-### 4.3 Black Generation / UCR
-- [ ] Sample BG/UCR procedures to lookup tables
-- [ ] Emit as PDF functions in ExtGState `/BG2` and `/UCR2`
+### 4.3 Black Generation / UCR ✅
+- [x] Sample BG/UCR procedures to 256-entry lookup tables via exec_sync
+- [x] Emit as PDF Type 0 functions in ExtGState `/BG2` and `/UCR2`
+- [x] UCR uses signed range [-1,1] with proper encoding
+- **Files**: `crates/stet-core/src/device.rs`, `crates/stet-core/src/graphics_state.rs`, `crates/stet-ops/src/halftone_ops.rs`, `crates/stet-ops/src/paint_ops.rs`, `crates/stet-ops/src/show_ops.rs`, `crates/stet-pdf/src/content_stream.rs`, `crates/stet-pdf/src/pdf_device.rs`
 - **Effort**: Small (once ExtGState exists)
 
 ---
@@ -293,7 +295,7 @@ Phase 4 items are deferred — implement only when a specific need arises.
 Phase 4 (on demand only):
  ✅  4.1  Transfer functions               done      settransfer/setcolortransfer → /TR2 Type 0 functions
  ✅  4.2  Halftone screens                 done      setscreen/setcolorscreen/sethalftone → /HT Type 1/5
- -   4.3  Black generation / UCR           small     CMYK separation control
+ ✅  4.3  Black generation / UCR           done      setblackgeneration/setundercolorremoval → /BG2 /UCR2
 ```
 
 ---
