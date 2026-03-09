@@ -9,6 +9,7 @@
 
 use std::sync::Arc;
 use stet_core::device::{ImageColorSpace, ImageParams, TintLookupTable};
+use stet_core::graphics_state::DeviceColor;
 
 /// A prepared image XObject ready for inclusion in a PDF.
 pub struct ImageXObject {
@@ -217,20 +218,49 @@ pub fn convert_image(sample_data: &[u8], params: &ImageParams) -> ImageXObject {
                 icc_profile: None,
             }
         }
-        // CIE-based spaces were pre-converted to DeviceRGB at op time
-        ImageColorSpace::CIEBasedABC { .. } | ImageColorSpace::CIEBasedA { .. } => {
-            let ncomp = params.color_space.num_components();
-            let pdf_cs = if ncomp == 1 {
-                PdfColorSpace::DeviceGray
-            } else {
-                PdfColorSpace::DeviceRGB
-            };
+        // CIE-based spaces: convert through CIE pipeline to sRGB
+        ImageColorSpace::CIEBasedABC { params: cie_params } => {
+            let npixels = (params.width * params.height) as usize;
+            let mut rgb = Vec::with_capacity(npixels * 3);
+            for i in 0..npixels {
+                let si = i * 3;
+                let a = sample_data.get(si).copied().unwrap_or(0) as f64 / 255.0;
+                let b = sample_data.get(si + 1).copied().unwrap_or(0) as f64 / 255.0;
+                let c = sample_data.get(si + 2).copied().unwrap_or(0) as f64 / 255.0;
+                let color = DeviceColor::from_cie_abc(a, b, c, cie_params);
+                rgb.push((color.r * 255.0).round().clamp(0.0, 255.0) as u8);
+                rgb.push((color.g * 255.0).round().clamp(0.0, 255.0) as u8);
+                rgb.push((color.b * 255.0).round().clamp(0.0, 255.0) as u8);
+            }
             ImageXObject {
-                sample_data: sample_data.to_vec(),
+                sample_data: rgb,
                 smask_data: None,
                 width: params.width,
                 height: params.height,
-                pdf_color_space: pdf_cs,
+                pdf_color_space: PdfColorSpace::DeviceRGB,
+                bits_per_component: 8,
+                is_imagemask: false,
+                mask_color: None,
+                color_key_mask: params.mask_color.clone(),
+                icc_profile: None,
+            }
+        }
+        ImageColorSpace::CIEBasedA { params: cie_params } => {
+            let npixels = (params.width * params.height) as usize;
+            let mut rgb = Vec::with_capacity(npixels * 3);
+            for i in 0..npixels {
+                let val = sample_data.get(i).copied().unwrap_or(0) as f64 / 255.0;
+                let color = DeviceColor::from_cie_a(val, cie_params);
+                rgb.push((color.r * 255.0).round().clamp(0.0, 255.0) as u8);
+                rgb.push((color.g * 255.0).round().clamp(0.0, 255.0) as u8);
+                rgb.push((color.b * 255.0).round().clamp(0.0, 255.0) as u8);
+            }
+            ImageXObject {
+                sample_data: rgb,
+                smask_data: None,
+                width: params.width,
+                height: params.height,
+                pdf_color_space: PdfColorSpace::DeviceRGB,
                 bits_per_component: 8,
                 is_imagemask: false,
                 mask_color: None,
