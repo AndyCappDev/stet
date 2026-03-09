@@ -296,8 +296,8 @@ fn build_type1_font_file(
     ctx: &Context,
     font_entity: EntityId,
     usage: &FontUsage,
-    charstrings_entity: EntityId,
-    encoding_entity: Option<EntityId>,
+    charstrings_entities: &[EntityId],
+    encoding_entities: &[Option<EntityId>],
     private_entity: Option<EntityId>,
     len_iv: usize,
     subrs: &[Vec<u8>],
@@ -312,17 +312,17 @@ fn build_type1_font_file(
     // Get FontBBox
     let bbox = get_font_bbox(ctx, font_entity);
 
-    // Determine which glyphs to include (subset)
-    let glyph_set = compute_glyph_subset(
+    // Determine which glyphs to include (subset) — merge from all encoding entities
+    let glyph_set = compute_glyph_subset_multi(
         ctx,
-        charstrings_entity,
-        encoding_entity,
+        charstrings_entities,
+        encoding_entities,
         &usage.used_codes,
         len_iv,
     );
 
-    // Build encoding array (256 entries)
-    let encoding = build_encoding_array(ctx, encoding_entity);
+    // Build encoding array (256 entries) — merge from all encoding entities
+    let encoding = build_encoding_array_multi(ctx, encoding_entities);
 
     // === Section 1: Cleartext ===
     let mut cleartext = Vec::new();
@@ -385,7 +385,8 @@ fn build_type1_font_file(
         // Collect decrypted charstrings for included glyphs to find Subr references
         let mut glyph_charstrings: Vec<Vec<u8>> = Vec::new();
         for glyph_name in &glyph_set {
-            if let Some(cs_bytes) = get_raw_charstring_bytes(ctx, charstrings_entity, glyph_name) {
+            if let Some(cs_bytes) = get_raw_charstring_bytes(ctx, charstrings_entities, glyph_name)
+            {
                 glyph_charstrings.push(decrypt_charstring(&cs_bytes, len_iv));
             }
         }
@@ -417,7 +418,7 @@ fn build_type1_font_file(
     lines.push(format!("2 index /CharStrings {} dict dup begin", glyph_set.len()).into_bytes());
 
     // Always emit .notdef first (required for reliable binary eexec parsing)
-    if let Some(cs_bytes) = get_charstring_bytes(ctx, charstrings_entity, ".notdef") {
+    if let Some(cs_bytes) = get_charstring_bytes(ctx, charstrings_entities, ".notdef") {
         let mut entry = format!("/.notdef {} RD ", cs_bytes.len()).into_bytes();
         entry.extend_from_slice(&cs_bytes);
         entry.extend_from_slice(b"ND");
@@ -428,7 +429,7 @@ fn build_type1_font_file(
         if glyph_name == ".notdef" {
             continue;
         }
-        if let Some(cs_bytes) = get_charstring_bytes(ctx, charstrings_entity, glyph_name) {
+        if let Some(cs_bytes) = get_charstring_bytes(ctx, charstrings_entities, glyph_name) {
             let mut entry = format!("/{} {} RD ", glyph_name, cs_bytes.len()).into_bytes();
             entry.extend_from_slice(&cs_bytes);
             entry.extend_from_slice(b"ND");
@@ -455,31 +456,54 @@ fn build_type1_font_file(
     footer.extend_from_slice(b"\ncleartomark\n");
     let length3 = footer.len();
 
-    // Wrap in PFB format (binary segment markers), matching PostForge's _to_pfb.
-    // PDF viewers expect PFB-wrapped Type 1 fonts in /FontFile streams.
-    let result = build_pfb(&cleartext, &encrypted, &footer);
+    // Wrap in PFB format (binary segment markers).
+    // PDF /FontFile streams accept both PFA and PFB; PFB is more reliable
+    // with PDF viewers (matches PostForge's approach).
+    let mut result = Vec::with_capacity(cleartext.len() + encrypted.len() + footer.len() + 20);
+    // Segment 1: ASCII header
+    result.push(0x80);
+    result.push(0x01);
+    result.extend_from_slice(&(cleartext.len() as u32).to_le_bytes());
+    result.extend_from_slice(&cleartext);
+    // Segment 2: Binary eexec
+    result.push(0x80);
+    result.push(0x02);
+    result.extend_from_slice(&(encrypted.len() as u32).to_le_bytes());
+    result.extend_from_slice(&encrypted);
+    // Segment 3: ASCII trailer
+    if !footer.is_empty() {
+        result.push(0x80);
+        result.push(0x01);
+        result.extend_from_slice(&(footer.len() as u32).to_le_bytes());
+        result.extend_from_slice(&footer);
+    }
+    // EOF marker
+    result.push(0x80);
+    result.push(0x03);
 
     Some((result, length1, length2, length3))
 }
 
 /// Compute the subset of glyphs needed: used glyphs + .notdef + seac dependencies.
-fn compute_glyph_subset(
+/// Compute glyph subset merging from multiple encoding entities.
+fn compute_glyph_subset_multi(
     ctx: &Context,
-    charstrings_entity: EntityId,
-    encoding_entity: Option<EntityId>,
+    charstrings_entities: &[EntityId],
+    encoding_entities: &[Option<EntityId>],
     used_codes: &HashSet<u16>,
     len_iv: usize,
 ) -> Vec<String> {
     let mut needed: HashSet<String> = HashSet::new();
     needed.insert(".notdef".to_string());
 
-    // Map used codes to glyph names via encoding
-    if let Some(enc_entity) = encoding_entity {
+    // Map used codes to glyph names via all encoding entities
+    for enc in encoding_entities {
+        let Some(enc_entity) = enc else { continue };
         for &code in used_codes {
             if code > 255 {
                 continue;
             }
-            let glyph_obj = ctx.arrays.get_element(enc_entity, code as u32);
+            let glyph_obj = ctx.arrays.get_element(*enc_entity, code as u32);
             if let PsValue::Name(id) = glyph_obj.value {
                 let name = String::from_utf8_lossy(ctx.names.get_bytes(id)).to_string();
                 if name != ".notdef" {
@@ -492,7 +516,9 @@ fn compute_glyph_subset(
     // Find seac dependencies (iterate until stable)
     let mut pending: Vec<String> = needed.iter().cloned().collect();
     while let Some(glyph_name) = pending.pop() {
-        if let Some(cs_bytes) = get_raw_charstring_bytes(ctx, charstrings_entity, &glyph_name) {
+        if let Some(cs_bytes) =
+            get_raw_charstring_bytes(ctx, charstrings_entities, &glyph_name)
+        {
             let decrypted = decrypt_charstring(&cs_bytes, len_iv);
             for dep in find_seac_deps(&decrypted) {
                 if needed.insert(dep.clone()) {
@@ -508,39 +534,54 @@ fn compute_glyph_subset(
 }
 
 /// Get raw (encrypted) charstring bytes for a glyph by name.
+/// Searches multiple CharStrings dicts (dvips creates re-encoded subsets).
 fn get_raw_charstring_bytes(
     ctx: &Context,
-    charstrings_entity: EntityId,
+    charstrings_entities: &[EntityId],
     glyph_name: &str,
 ) -> Option<Vec<u8>> {
     let name_id = ctx.names.find(glyph_name.as_bytes())?;
-    let cs_obj = ctx.dicts.get(charstrings_entity, &DictKey::Name(name_id))?;
-    match cs_obj.value {
-        PsValue::String { entity, start, len } => {
-            Some(ctx.strings.get(entity, start, len).to_vec())
+    for &cs_entity in charstrings_entities {
+        if let Some(cs_obj) = ctx.dicts.get(cs_entity, &DictKey::Name(name_id)) {
+            match cs_obj.value {
+                PsValue::String { entity, start, len } => {
+                    return Some(ctx.strings.get(entity, start, len).to_vec());
+                }
+                _ => {}
+            }
         }
-        _ => None,
     }
+    None
 }
 
 /// Get charstring bytes for embedding (already encrypted from the PS font).
 fn get_charstring_bytes(
     ctx: &Context,
-    charstrings_entity: EntityId,
+    charstrings_entities: &[EntityId],
     glyph_name: &str,
 ) -> Option<Vec<u8>> {
-    get_raw_charstring_bytes(ctx, charstrings_entity, glyph_name)
+    get_raw_charstring_bytes(ctx, charstrings_entities, glyph_name)
 }
 
 /// Build encoding array from PS font's encoding entity.
-fn build_encoding_array(ctx: &Context, encoding_entity: Option<EntityId>) -> Vec<String> {
+/// Build a merged encoding array from multiple encoding entities.
+fn build_encoding_array_multi(
+    ctx: &Context,
+    encoding_entities: &[Option<EntityId>],
+) -> Vec<String> {
     let mut encoding = vec![".notdef".to_string(); 256];
-    if let Some(enc_entity) = encoding_entity {
+    for enc in encoding_entities {
+        let Some(enc_entity) = enc else { continue };
         for code in 0..256u32 {
-            let obj = ctx.arrays.get_element(enc_entity, code);
+            if encoding[code as usize] != ".notdef" {
+                continue; // already filled from a previous entity
+            }
+            let obj = ctx.arrays.get_element(*enc_entity, code);
             if let PsValue::Name(id) = obj.value {
                 let name = String::from_utf8_lossy(ctx.names.get_bytes(id)).to_string();
-                encoding[code as usize] = name;
+                if name != ".notdef" {
+                    encoding[code as usize] = name;
+                }
             }
         }
     }
@@ -602,37 +643,7 @@ fn emit_private_hint_lines(lines: &mut Vec<Vec<u8>>, ctx: &Context, pe: EntityId
     }
 }
 
-/// Build PFB (Printer Font Binary) format from three Type 1 font sections.
-///
-/// PFB wraps each section with a marker byte and length:
-/// - `\x80\x01` + LE32 length = ASCII segment (cleartext, footer)
-/// - `\x80\x02` + LE32 length = Binary segment (eexec encrypted)
-/// - `\x80\x03` = EOF marker
-fn build_pfb(cleartext: &[u8], encrypted: &[u8], footer: &[u8]) -> Vec<u8> {
-    let mut pfb = Vec::with_capacity(cleartext.len() + encrypted.len() + footer.len() + 20);
 
-    // ASCII header segment
-    pfb.extend_from_slice(&[0x80, 0x01]);
-    pfb.extend_from_slice(&(cleartext.len() as u32).to_le_bytes());
-    pfb.extend_from_slice(cleartext);
-
-    // Binary eexec segment
-    pfb.extend_from_slice(&[0x80, 0x02]);
-    pfb.extend_from_slice(&(encrypted.len() as u32).to_le_bytes());
-    pfb.extend_from_slice(encrypted);
-
-    // ASCII trailer segment
-    if !footer.is_empty() {
-        pfb.extend_from_slice(&[0x80, 0x01]);
-        pfb.extend_from_slice(&(footer.len() as u32).to_le_bytes());
-        pfb.extend_from_slice(footer);
-    }
-
-    // EOF marker
-    pfb.extend_from_slice(&[0x80, 0x03]);
-
-    pfb
-}
 
 /// Format a float value concisely.
 fn format_float(v: f64) -> String {
@@ -766,32 +777,34 @@ fn build_type1_font(writer: &mut PdfWriter, usage: &FontUsage, ctx: &Context) ->
     let font_entity = usage.font_entity;
     let font_name_str = String::from_utf8_lossy(&usage.font_name);
 
-    // Get encoding array
-    let encoding_entity = ctx
-        .dicts
-        .get(font_entity, &DictKey::Name(ctx.name_cache.n_encoding))
-        .and_then(|obj| match obj.value {
-            PsValue::Array { entity, .. } => Some(entity),
-            _ => None,
-        });
+    // Collect all CharStrings dicts from all entities. dvips re-encoded instances
+    // each have a subset of CharStrings — we need to search all of them.
+    let mut charstrings_entities: Vec<EntityId> = Vec::new();
+    for &ent in &usage.all_entities {
+        if let Some(obj) = ctx.dicts.get(ent, &DictKey::Name(ctx.name_cache.n_char_strings)) {
+            if let PsValue::Dict(e) = obj.value {
+                if !charstrings_entities.contains(&e) {
+                    charstrings_entities.push(e);
+                }
+            }
+        }
+    }
+    // Sort by entry count descending so the most complete dict is searched first
+    charstrings_entities.sort_by(|a, b| {
+        let a_count = ctx.dicts.entry(*a).entries.len();
+        let b_count = ctx.dicts.entry(*b).entries.len();
+        b_count.cmp(&a_count)
+    });
 
-    // Get CharStrings dict
-    let charstrings_entity = ctx
-        .dicts
-        .get(font_entity, &DictKey::Name(ctx.name_cache.n_char_strings))
-        .and_then(|obj| match obj.value {
-            PsValue::Dict(e) => Some(e),
-            _ => None,
-        });
-
-    // Get Private dict for lenIV and Subrs
-    let private_entity = ctx
-        .dicts
-        .get(font_entity, &DictKey::Name(ctx.name_cache.n_private))
-        .and_then(|obj| match obj.value {
-            PsValue::Dict(e) => Some(e),
-            _ => None,
-        });
+    let mut private_entity = None;
+    for &ent in &usage.all_entities {
+        if let Some(obj) = ctx.dicts.get(ent, &DictKey::Name(ctx.name_cache.n_private)) {
+            if let PsValue::Dict(e) = obj.value {
+                private_entity = Some(e);
+                break;
+            }
+        }
+    }
 
     let len_iv = private_entity
         .and_then(|pe| {
@@ -821,29 +834,52 @@ fn build_type1_font(writer: &mut PdfWriter, usage: &FontUsage, ctx: &Context) ->
 
     // Extract widths for ALL characters in FirstChar..LastChar range
     // (PDF viewers need correct widths for the entire range, not just used chars)
+    // Merge from all encoding entities (dvips re-encoded instances)
     let mut widths: HashMap<u16, i32> = HashMap::new();
-    if let (Some(enc_entity), Some(cs_entity)) = (encoding_entity, charstrings_entity) {
-        for code in first_char..=last_char {
-            let glyph_name_obj = ctx.arrays.get_element(enc_entity, code as u32);
-            let glyph_name_id = match glyph_name_obj.value {
-                PsValue::Name(id) => id,
-                _ => continue,
-            };
+    if !charstrings_entities.is_empty() {
+        for &ent in &usage.all_entities {
+            let enc = ctx
+                .dicts
+                .get(ent, &DictKey::Name(ctx.name_cache.n_encoding))
+                .and_then(|obj| match obj.value {
+                    PsValue::Array { entity, .. } => Some(entity),
+                    _ => None,
+                });
+            let Some(enc_entity) = enc else { continue };
+            for code in first_char..=last_char {
+                if widths.contains_key(&code) {
+                    continue;
+                }
+                let glyph_name_obj = ctx.arrays.get_element(enc_entity, code as u32);
+                let glyph_name_id = match glyph_name_obj.value {
+                    PsValue::Name(id) => id,
+                    _ => continue,
+                };
+                // Skip .notdef — a later entity may have the real glyph at this code
+                let glyph_name_bytes = ctx.names.get_bytes(glyph_name_id);
+                if glyph_name_bytes == b".notdef" {
+                    continue;
+                }
 
-            let cs_obj = match ctx.dicts.get(cs_entity, &DictKey::Name(glyph_name_id)) {
-                Some(obj) => obj,
-                None => continue,
-            };
+                // Search all CharStrings dicts for this glyph
+                let mut found = None;
+                for &cs_entity in &charstrings_entities {
+                    if let Some(obj) = ctx.dicts.get(cs_entity, &DictKey::Name(glyph_name_id)) {
+                        if let PsValue::String { entity, start, len } = obj.value {
+                            found = Some((entity, start, len));
+                            break;
+                        }
+                    }
+                }
+                let Some((cs_ent, cs_start, cs_len)) = found else {
+                    continue;
+                };
 
-            let (cs_ent, cs_start, cs_len) = match cs_obj.value {
-                PsValue::String { entity, start, len } => (entity, start, len),
-                _ => continue,
-            };
-
-            let cs_bytes = ctx.strings.get(cs_ent, cs_start, cs_len);
-            let decrypted = decrypt_charstring(cs_bytes, len_iv);
-            if let Some(w) = extract_charstring_width(&decrypted, &subrs) {
-                widths.insert(code, w as i32);
+                let cs_bytes = ctx.strings.get(cs_ent, cs_start, cs_len);
+                let decrypted = decrypt_charstring(cs_bytes, len_iv);
+                if let Some(w) = extract_charstring_width(&decrypted, &subrs) {
+                    widths.insert(code, w as i32);
+                }
             }
         }
     }
@@ -853,8 +889,22 @@ fn build_type1_font(writer: &mut PdfWriter, usage: &FontUsage, ctx: &Context) ->
         .map(|code| PdfObj::Int(*widths.get(&code).unwrap_or(&0) as i64))
         .collect();
 
-    // Build ToUnicode CMap
-    let tounicode_map = build_tounicode_map(ctx, encoding_entity, &usage.used_codes);
+    // Build ToUnicode CMap — merge encoding arrays from all font instances
+    // (dvips creates multiple re-encoded instances of the same base font)
+    let all_enc_entities: Vec<Option<EntityId>> = usage
+        .all_entities
+        .iter()
+        .map(|&ent| {
+            ctx.dicts
+                .get(ent, &DictKey::Name(ctx.name_cache.n_encoding))
+                .and_then(|obj| match obj.value {
+                    PsValue::Array { entity, .. } => Some(entity),
+                    _ => None,
+                })
+        })
+        .collect();
+    let tounicode_map =
+        build_tounicode_map_multi(ctx, &all_enc_entities, &usage.used_codes);
     let tounicode_ref = if !tounicode_map.is_empty() {
         let cmap_data = generate_tounicode_cmap(&tounicode_map, &font_name_str);
         Some(writer.add_stream(Vec::new(), &cmap_data, true))
@@ -864,13 +914,13 @@ fn build_type1_font(writer: &mut PdfWriter, usage: &FontUsage, ctx: &Context) ->
 
     // Build Type 1 font file (embedded font program)
     let font_file_ref = if !usage.is_standard_14 {
-        if let Some(cs_entity) = charstrings_entity {
+        if !charstrings_entities.is_empty() {
             build_type1_font_file(
                 ctx,
                 font_entity,
                 usage,
-                cs_entity,
-                encoding_entity,
+                &charstrings_entities,
+                &all_enc_entities,
                 private_entity,
                 len_iv,
                 &subrs,
@@ -896,8 +946,9 @@ fn build_type1_font(writer: &mut PdfWriter, usage: &FontUsage, ctx: &Context) ->
     let descriptor_ref =
         build_font_descriptor(writer, &usage.font_name, &bbox, flags, font_file_ref, None);
 
-    // Build Encoding with Differences array from PS font's actual encoding
-    let encoding_obj = build_encoding_differences(ctx, encoding_entity, first_char, last_char);
+    // Build Encoding with Differences array merged from all font instances
+    let encoding_obj =
+        build_encoding_differences_multi(ctx, &all_enc_entities, first_char, last_char);
 
     // Build Font dict
     let mut font_entries: Vec<(Vec<u8>, PdfObj)> = vec![
@@ -1173,6 +1224,38 @@ pub fn build_tounicode_map(
     map
 }
 
+/// Build a merged ToUnicode map from multiple encoding entities.
+///
+/// dvips creates multiple re-encoded font instances from the same base font,
+/// each with a different encoding subset. This merges glyph name→Unicode
+/// mappings from all encoding arrays to produce a complete ToUnicode map.
+pub fn build_tounicode_map_multi(
+    ctx: &Context,
+    encoding_entities: &[Option<EntityId>],
+    used_codes: &HashSet<u16>,
+) -> HashMap<u16, u16> {
+    let mut map = HashMap::new();
+    for enc in encoding_entities {
+        let Some(enc_entity) = enc else { continue };
+        for &code in used_codes {
+            if code > 255 || map.contains_key(&code) {
+                continue;
+            }
+            let glyph_name_obj = ctx.arrays.get_element(*enc_entity, code as u32);
+            if let PsValue::Name(id) = glyph_name_obj.value {
+                let name_bytes = ctx.names.get_bytes(id);
+                if let Ok(name_str) = std::str::from_utf8(name_bytes)
+                    && name_str != ".notdef"
+                    && let Some(unicode) = unicode_mapping::glyph_name_to_unicode(name_str)
+                {
+                    map.insert(code, unicode);
+                }
+            }
+        }
+    }
+    map
+}
+
 /// Generate a ToUnicode CMap stream.
 pub fn generate_tounicode_cmap(map: &HashMap<u16, u16>, font_name: &str) -> Vec<u8> {
     let mut lines: Vec<Vec<u8>> = Vec::new();
@@ -1221,15 +1304,20 @@ pub fn build_tounicode_for_fallback(
     usage: &FontUsage,
     ctx: &Context,
 ) -> Option<u32> {
-    let font_entity = usage.font_entity;
-    let encoding_entity = ctx
-        .dicts
-        .get(font_entity, &DictKey::Name(ctx.name_cache.n_encoding))
-        .and_then(|obj| match obj.value {
-            PsValue::Array { entity, .. } => Some(entity),
-            _ => None,
-        });
-    let tounicode_map = build_tounicode_map(ctx, encoding_entity, &usage.used_codes);
+    let all_enc_entities: Vec<Option<EntityId>> = usage
+        .all_entities
+        .iter()
+        .map(|&ent| {
+            ctx.dicts
+                .get(ent, &DictKey::Name(ctx.name_cache.n_encoding))
+                .and_then(|obj| match obj.value {
+                    PsValue::Array { entity, .. } => Some(entity),
+                    _ => None,
+                })
+        })
+        .collect();
+    let tounicode_map =
+        build_tounicode_map_multi(ctx, &all_enc_entities, &usage.used_codes);
     if tounicode_map.is_empty() {
         return None;
     }
@@ -1249,34 +1337,50 @@ fn build_encoding_differences(
     first_char: u16,
     last_char: u16,
 ) -> Option<PdfObj> {
-    let enc_entity = encoding_entity?;
+    build_encoding_differences_multi(ctx, &[encoding_entity], first_char, last_char)
+}
 
+/// Build a PDF Encoding dict merging glyph names from multiple encoding entities.
+///
+/// dvips creates multiple re-encoded font instances from the same base font,
+/// each with only the glyphs needed for that instance. We merge all encoding
+/// arrays so the PDF Differences contains all glyph names used across all instances.
+fn build_encoding_differences_multi(
+    ctx: &Context,
+    encoding_entities: &[Option<EntityId>],
+    first_char: u16,
+    last_char: u16,
+) -> Option<PdfObj> {
     // Build Differences array: [code1 /name1 /name2 ... codeN /nameN ...]
     // Consecutive glyph names after a code number increment the code automatically.
     let mut differences: Vec<PdfObj> = Vec::new();
     let mut need_code = true; // whether we need to emit the next code number
 
     for code in first_char..=last_char {
-        let glyph_obj = ctx.arrays.get_element(enc_entity, code as u32);
-        let name_id = match glyph_obj.value {
-            PsValue::Name(id) => id,
-            _ => {
-                need_code = true;
-                continue;
+        // Find a non-.notdef glyph name from any encoding entity
+        let mut found_name: Option<Vec<u8>> = None;
+        for enc in encoding_entities {
+            let Some(enc_entity) = enc else { continue };
+            let glyph_obj = ctx.arrays.get_element(*enc_entity, code as u32);
+            if let PsValue::Name(id) = glyph_obj.value {
+                let name_bytes = ctx.names.get_bytes(id);
+                if name_bytes != b".notdef" {
+                    found_name = Some(name_bytes.to_vec());
+                    break;
+                }
             }
-        };
+        }
 
-        let name_bytes = ctx.names.get_bytes(name_id);
-        if name_bytes == b".notdef" {
+        let Some(name_bytes) = found_name else {
             need_code = true;
             continue;
-        }
+        };
 
         if need_code {
             differences.push(PdfObj::Int(code as i64));
             need_code = false;
         }
-        differences.push(PdfObj::Name(name_bytes.to_vec()));
+        differences.push(PdfObj::Name(name_bytes));
     }
 
     if differences.is_empty() {

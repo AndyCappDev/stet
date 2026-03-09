@@ -36,8 +36,13 @@ pub struct FontUsage {
     pub font_name: Vec<u8>,
     /// FontType.
     pub font_type: i32,
-    /// Font dict entity ID.
+    /// Font dict entity ID (first instance seen — used for CharStrings/Private).
     pub font_entity: EntityId,
+    /// All unique font dict entity IDs seen for this font name.
+    /// dvips creates multiple re-encoded instances of the same base font,
+    /// each with a different encoding subset. We need all of them to build
+    /// a complete ToUnicode map.
+    pub all_entities: Vec<EntityId>,
     /// Set of character codes (or CIDs) used.
     pub used_codes: HashSet<u16>,
     /// Whether this is a Standard 14 font (skip embedding).
@@ -90,12 +95,18 @@ impl FontTracker {
                 font_name: params.font_name.clone(),
                 font_type: params.font_type,
                 font_entity: entity,
+                all_entities: vec![entity],
                 used_codes: HashSet::new(),
                 is_standard_14: is_std14,
                 sample_params: params.clone(),
                 widths: HashMap::new(),
             }
         });
+
+        // Track all unique font entities (dvips creates multiple re-encoded instances)
+        if !usage.all_entities.contains(&entity) {
+            usage.all_entities.push(entity);
+        }
 
         // Record used character codes
         if params.font_type == 0 {
