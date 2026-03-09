@@ -376,6 +376,52 @@ pub fn op_currentcolorrendering(ctx: &mut Context) -> Result<(), PsError> {
     Ok(())
 }
 
+// ---------- Rendering Intent ----------
+
+/// Intent name → u8 encoding.
+fn intent_from_name(name: &[u8]) -> Option<u8> {
+    match name {
+        b"RelativeColorimetric" => Some(0),
+        b"AbsoluteColorimetric" => Some(1),
+        b"Perceptual" => Some(2),
+        b"Saturation" => Some(3),
+        _ => None,
+    }
+}
+
+/// u8 encoding → intent name bytes.
+fn intent_name(intent: u8) -> &'static [u8] {
+    match intent {
+        0 => b"RelativeColorimetric",
+        1 => b"AbsoluteColorimetric",
+        2 => b"Perceptual",
+        3 => b"Saturation",
+        _ => b"RelativeColorimetric",
+    }
+}
+
+/// `setrenderingintent`: name → —
+pub fn op_setrenderingintent(ctx: &mut Context) -> Result<(), PsError> {
+    if ctx.o_stack.is_empty() {
+        return Err(PsError::StackUnderflow);
+    }
+    let name_bytes = match ctx.o_stack.peek(0)?.value {
+        PsValue::Name(id) => ctx.names.get_bytes(id).to_vec(),
+        _ => return Err(PsError::TypeCheck),
+    };
+    let intent = intent_from_name(&name_bytes).ok_or(PsError::RangeCheck)?;
+    ctx.o_stack.pop()?;
+    ctx.gstate.rendering_intent = intent;
+    Ok(())
+}
+
+/// `currentrenderingintent`: — → name
+pub fn op_currentrenderingintent(ctx: &mut Context) -> Result<(), PsError> {
+    let name_id = ctx.names.intern(intent_name(ctx.gstate.rendering_intent));
+    ctx.o_stack.push(PsObject::name_lit(name_id))?;
+    Ok(())
+}
+
 // ---------- Smoothness ----------
 
 /// `setsmoothness`: num → —
@@ -752,6 +798,7 @@ fn replay_form_elements(
                     is_text_glyph: params.is_text_glyph,
                     overprint: params.overprint,
                     spot_color: params.spot_color.clone(),
+                    rendering_intent: params.rendering_intent,
                 };
                 target.push(DisplayElement::Fill {
                     path: new_path,
@@ -774,6 +821,7 @@ fn replay_form_elements(
                     is_text_glyph: params.is_text_glyph,
                     overprint: params.overprint,
                     spot_color: params.spot_color.clone(),
+                    rendering_intent: params.rendering_intent,
                 };
                 target.push(DisplayElement::Stroke {
                     path: new_path,

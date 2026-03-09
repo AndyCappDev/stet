@@ -4415,6 +4415,7 @@ fn emit_text_element_with_fm(
         paint_type,
         stroke_width,
         spot_color: crate::paint_ops::capture_spot_color(ctx),
+        rendering_intent: ctx.gstate.rendering_intent,
     };
     ctx.display_list.push(DisplayElement::Text { params });
 }
@@ -4442,6 +4443,7 @@ fn push_glyph_element(
             is_text_glyph: true,
             overprint: ctx.gstate.overprint,
             spot_color: spot,
+            rendering_intent: ctx.gstate.rendering_intent,
         };
         ctx.display_list.push(DisplayElement::Stroke {
             path: device_path,
@@ -4455,6 +4457,7 @@ fn push_glyph_element(
             is_text_glyph: true,
             overprint: ctx.gstate.overprint,
             spot_color: spot,
+            rendering_intent: ctx.gstate.rendering_intent,
         };
         ctx.display_list.push(DisplayElement::Fill {
             path: device_path,

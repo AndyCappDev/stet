@@ -57,6 +57,8 @@ pub struct FillParams {
     pub overprint: bool,
     /// Separation/DeviceN color for PDF output. None for device color spaces.
     pub spot_color: Option<SpotColor>,
+    /// Rendering intent (0=RelativeColorimetric, 1=Absolute, 2=Perceptual, 3=Saturation).
+    pub rendering_intent: u8,
 }
 
 /// Parameters for a text element emitted by show operators.
@@ -91,6 +93,8 @@ pub struct TextParams {
     pub stroke_width: f64,
     /// Separation/DeviceN color for PDF output. None for device color spaces.
     pub spot_color: Option<SpotColor>,
+    /// Rendering intent (0=RelativeColorimetric, 1=Absolute, 2=Perceptual, 3=Saturation).
+    pub rendering_intent: u8,
 }
 
 /// Parameters for stroking a path.
@@ -113,6 +117,8 @@ pub struct StrokeParams {
     pub overprint: bool,
     /// Separation/DeviceN color for PDF output. None for device color spaces.
     pub spot_color: Option<SpotColor>,
+    /// Rendering intent (0=RelativeColorimetric, 1=Absolute, 2=Perceptual, 3=Saturation).
+    pub rendering_intent: u8,
 }
 
 /// Parameters for clipping.

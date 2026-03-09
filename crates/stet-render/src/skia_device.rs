@@ -4483,6 +4483,7 @@ mod tests {
             is_text_glyph: false,
             overprint: false,
             spot_color: None,
+            rendering_intent: 0,
         };
         dev.fill_path(&path, &params);
 
@@ -4512,6 +4513,7 @@ mod tests {
             is_text_glyph: false,
             overprint: false,
             spot_color: None,
+            rendering_intent: 0,
         };
         dev.stroke_path(&path, &params);
 
@@ -4553,6 +4555,7 @@ mod tests {
             is_text_glyph: false,
             overprint: false,
             spot_color: None,
+            rendering_intent: 0,
         };
         dev.fill_path(&fill_path, &fill_params);
 
@@ -4583,6 +4586,7 @@ mod tests {
             is_text_glyph: false,
             overprint: false,
             spot_color: None,
+            rendering_intent: 0,
         };
         dev.fill_path(&path, &params);
 
@@ -4622,6 +4626,7 @@ mod tests {
             is_text_glyph: false,
             overprint: false,
             spot_color: None,
+            rendering_intent: 0,
         };
         dev.fill_path(&path, &params);
 

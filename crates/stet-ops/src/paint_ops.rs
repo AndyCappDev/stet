@@ -179,6 +179,7 @@ fn push_fill_element(ctx: &mut Context, path: PsPath, fill_rule: FillRule) {
         is_text_glyph: false,
         overprint: ctx.gstate.overprint,
         spot_color: capture_spot_color(ctx),
+        rendering_intent: ctx.gstate.rendering_intent,
     };
     ctx.display_list.push(DisplayElement::Fill { path, params });
 }
@@ -253,6 +254,7 @@ fn stroke_native(ctx: &mut Context) -> Result<(), PsError> {
                 is_text_glyph: false,
                 overprint: ctx.gstate.overprint,
                 spot_color: spot,
+                rendering_intent: ctx.gstate.rendering_intent,
             };
             ctx.display_list.push(DisplayElement::Stroke {
                 path: user_path,
@@ -282,6 +284,7 @@ fn stroke_native(ctx: &mut Context) -> Result<(), PsError> {
             is_text_glyph: false,
             overprint: ctx.gstate.overprint,
             spot_color: spot,
+            rendering_intent: ctx.gstate.rendering_intent,
         };
         ctx.display_list.push(DisplayElement::Stroke {
             path: ctx.gstate.path.clone(),
@@ -419,6 +422,7 @@ pub fn op_rectstroke(ctx: &mut Context) -> Result<(), PsError> {
             is_text_glyph: false,
             overprint: ctx.gstate.overprint,
             spot_color: spot,
+            rendering_intent: ctx.gstate.rendering_intent,
         };
         ctx.display_list
             .push(DisplayElement::Stroke { path, params });
@@ -446,6 +450,7 @@ pub fn op_rectstroke(ctx: &mut Context) -> Result<(), PsError> {
             is_text_glyph: false,
             overprint: ctx.gstate.overprint,
             spot_color: spot,
+            rendering_intent: ctx.gstate.rendering_intent,
         };
         ctx.display_list
             .push(DisplayElement::Stroke { path, params });

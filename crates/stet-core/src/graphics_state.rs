@@ -1048,6 +1048,10 @@ pub struct GraphicsState {
     // Color rendering dictionary
     pub color_rendering: Option<crate::object::PsObject>,
 
+    /// Rendering intent: 0=RelativeColorimetric, 1=AbsoluteColorimetric,
+    /// 2=Perceptual, 3=Saturation. Default is RelativeColorimetric.
+    pub rendering_intent: u8,
+
     // Pattern state (set by setpattern, consumed by fill/eofill)
     /// Index into `Context.pattern_store` for the active tiling pattern.
     pub current_pattern: Option<u32>,
@@ -1101,6 +1105,7 @@ impl GraphicsState {
             black_generation: None,
             undercolor_removal: None,
             color_rendering: None,
+            rendering_intent: 0, // RelativeColorimetric
             current_pattern: None,
             pattern_underlying_color: None,
             bbox: None,

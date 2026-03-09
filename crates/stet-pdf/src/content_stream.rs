@@ -89,6 +89,8 @@ struct GState {
     fill_cs_name: Option<String>,
     /// Current stroke color space resource name.
     stroke_cs_name: Option<String>,
+    /// Rendering intent (0=RelativeColorimetric, 1=Absolute, 2=Perceptual, 3=Saturation).
+    rendering_intent: u8,
 }
 
 impl GState {
@@ -105,6 +107,7 @@ impl GState {
             overprint: false,
             fill_cs_name: None,
             stroke_cs_name: None,
+            rendering_intent: 0,
         }
     }
 
@@ -244,6 +247,7 @@ pub fn build_content_stream(
                 if params.is_text_glyph {
                     continue;
                 }
+                emit_rendering_intent(&mut buf, params.rendering_intent, &mut gs);
                 emit_overprint(&mut buf, params.overprint, &mut gs, &mut ext_gstates, &mut ext_gstate_map);
                 if let Some(spot) = &params.spot_color {
                     emit_fill_color_spot(&mut buf, spot, &mut gs, &mut cs_name_map, &mut color_spaces);
@@ -271,6 +275,7 @@ pub fn build_content_stream(
                     buf.extend(b"q\n");
                     emit_cm(&mut buf, &params.ctm);
                 }
+                emit_rendering_intent(&mut buf, params.rendering_intent, &mut gs);
                 emit_overprint(&mut buf, params.overprint, &mut gs, &mut ext_gstates, &mut ext_gstate_map);
                 if let Some(spot) = &params.spot_color {
                     emit_stroke_color_spot(&mut buf, spot, &mut gs, &mut cs_name_map, &mut color_spaces);
@@ -457,6 +462,7 @@ pub fn build_tile_content_stream(
                 if params.is_text_glyph {
                     continue;
                 }
+                emit_rendering_intent(&mut buf, params.rendering_intent, &mut gs);
                 emit_overprint(
                     &mut buf,
                     params.overprint,
@@ -495,6 +501,7 @@ pub fn build_tile_content_stream(
                     buf.extend(b"q\n");
                     emit_cm(&mut buf, &params.ctm);
                 }
+                emit_rendering_intent(&mut buf, params.rendering_intent, &mut gs);
                 emit_overprint(
                     &mut buf,
                     params.overprint,
@@ -901,6 +908,24 @@ fn emit_overprint(
     };
 
     writeln!(buf, "/GS{} gs", idx).unwrap();
+}
+
+/// Emit rendering intent operator if it changed.
+fn emit_rendering_intent(buf: &mut Vec<u8>, intent: u8, gs: &mut GState) {
+    if gs.rendering_intent == intent {
+        return;
+    }
+    gs.rendering_intent = intent;
+    let name = match intent {
+        0 => b"RelativeColorimetric" as &[u8],
+        1 => b"AbsoluteColorimetric",
+        2 => b"Perceptual",
+        3 => b"Saturation",
+        _ => return,
+    };
+    buf.push(b'/');
+    buf.extend_from_slice(name);
+    buf.extend(b" ri\n");
 }
 
 /// Emit path segments as PDF path operators.

@@ -219,10 +219,11 @@ for producing usable PDF files.
 - [x] AGL table expanded with Greek letters (α–ω, Α–Ω) and math symbols (∞, ≠, ≤, ≥, ≈, ∑, ∏, √, ∂, ∫)
 - **Files**: `crates/stet-pdf/src/unicode_mapping.rs`, `crates/stet-pdf/src/font_embedder.rs`, `crates/stet-pdf/src/pdf_device.rs`
 
-### 3.3 Color Rendering Intent
-- [ ] Capture rendering intent from `setrenderingintent`
-- [ ] Emit `/ri` operator in content stream
-- **Effort**: Small
+### 3.3 Color Rendering Intent ✅
+- [x] `setrenderingintent` / `currentrenderingintent` operators
+- [x] Rendering intent propagated through display list (FillParams, StrokeParams, TextParams)
+- [x] Emit `/ri` operator in PDF content stream when intent changes
+- **Files**: `graphics_state.rs`, `device.rs`, `halftone_ops.rs`, `paint_ops.rs`, `show_ops.rs`, `content_stream.rs`
 
 ### 3.4 CIE → ICC Profile Construction
 - [ ] Build ICC profile binary from CIEBasedABC/A params with complex decode tables
@@ -285,7 +286,7 @@ Phase 4 items are deferred — implement only when a specific need arises.
  ✅  1.5  Pattern fills                    done      Type 1 tiling patterns, colored + uncolored, full affine transform
  ✅  3.1  PDF/X-3 OutputIntent             done      --output-profile embeds ICC + OutputIntent + GTS_PDFXVersion
  ✅  3.2  Full ToUnicode CMap              done      encoding-aware fallback + Greek/math AGL entries
-13.  3.3  Color rendering intent           small     when needed
+ ✅  3.3  Color rendering intent           done      setrenderingintent + /ri in content stream
 
 Phase 4 (on demand only):
  -   4.1  Transfer functions               medium    press calibration

@@ -593,6 +593,20 @@ pub fn build_system_dict(ctx: &mut Context) {
         halftone_ops::op_currentcolorrendering,
     );
 
+    // --- Rendering Intent ---
+    register(
+        ctx,
+        sd,
+        "setrenderingintent",
+        halftone_ops::op_setrenderingintent,
+    );
+    register(
+        ctx,
+        sd,
+        "currentrenderingintent",
+        halftone_ops::op_currentrenderingintent,
+    );
+
     // --- Smoothness ---
     register(ctx, sd, "setsmoothness", halftone_ops::op_setsmoothness);
     register(
