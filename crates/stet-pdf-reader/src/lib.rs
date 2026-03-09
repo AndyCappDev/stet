@@ -1,0 +1,185 @@
+// stet-pdf-reader
+// Copyright (c) 2026 Scott Bowman
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+//! PDF parser and page navigator.
+//!
+//! Phase A: structural parsing — open a PDF, navigate its object graph,
+//! find pages, and extract raw content streams.
+
+pub mod error;
+pub mod filters;
+pub mod lexer;
+pub mod objects;
+pub mod page_tree;
+pub mod resolver;
+pub mod xref;
+
+pub use error::PdfError;
+pub use objects::{PdfDict, PdfObj};
+pub use page_tree::PageInfo;
+
+use resolver::Resolver;
+
+/// A parsed PDF document.
+pub struct PdfDocument<'a> {
+    resolver: Resolver<'a>,
+    pages: Vec<PageInfo>,
+}
+
+impl<'a> PdfDocument<'a> {
+    /// Parse a PDF from bytes.
+    pub fn from_bytes(data: &'a [u8]) -> Result<Self, PdfError> {
+        // Validate header
+        if !data.starts_with(b"%PDF-") {
+            return Err(PdfError::NotAPdf);
+        }
+
+        // Check for encryption (we'll detect it after parsing the trailer)
+        let xref = xref::parse_xref(data)?;
+
+        // Check for encryption
+        if xref.trailer.get(b"Encrypt").is_some() {
+            return Err(PdfError::Encrypted);
+        }
+
+        let resolver = Resolver::new(data, xref);
+        let pages = page_tree::collect_pages(&resolver)?;
+
+        Ok(Self { resolver, pages })
+    }
+
+    /// Number of pages in the document.
+    pub fn page_count(&self) -> usize {
+        self.pages.len()
+    }
+
+    /// Page dimensions in points (width, height), accounting for rotation.
+    pub fn page_size(&self, page: usize) -> Result<(f64, f64), PdfError> {
+        let info = self
+            .pages
+            .get(page)
+            .ok_or(PdfError::PageOutOfRange(page, self.pages.len()))?;
+        let [llx, lly, urx, ury] = info.crop_box;
+        let (w, h) = ((urx - llx).abs(), (ury - lly).abs());
+        match info.rotate.rem_euclid(360) {
+            90 | 270 => Ok((h, w)),
+            _ => Ok((w, h)),
+        }
+    }
+
+    /// Get page info (MediaBox, CropBox, rotation, resources).
+    pub fn page_info(&self, page: usize) -> Result<&PageInfo, PdfError> {
+        self.pages
+            .get(page)
+            .ok_or(PdfError::PageOutOfRange(page, self.pages.len()))
+    }
+
+    /// Get the decompressed content stream bytes for a page.
+    /// If the page has multiple content streams, they are concatenated
+    /// with a newline separator.
+    pub fn page_contents(&self, page: usize) -> Result<Vec<u8>, PdfError> {
+        let info = self
+            .pages
+            .get(page)
+            .ok_or(PdfError::PageOutOfRange(page, self.pages.len()))?;
+
+        if info.contents.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut result = Vec::new();
+        for (i, &(obj_num, gen_num)) in info.contents.iter().enumerate() {
+            if i > 0 {
+                result.push(b'\n');
+            }
+            let data = self.resolver.stream_data(obj_num, gen_num)?;
+            result.extend_from_slice(&data);
+        }
+
+        Ok(result)
+    }
+
+    /// Access the resolver for arbitrary object lookups.
+    pub fn resolver(&self) -> &Resolver<'a> {
+        &self.resolver
+    }
+
+    /// Access page info list.
+    pub fn pages(&self) -> &[PageInfo] {
+        &self.pages
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn not_a_pdf() {
+        let result = PdfDocument::from_bytes(b"not a pdf");
+        assert!(matches!(result, Err(PdfError::NotAPdf)));
+    }
+
+    #[test]
+    fn parse_minimal_pdf() {
+        let pdf = build_minimal_pdf();
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+        assert_eq!(doc.page_count(), 1);
+
+        let (w, h) = doc.page_size(0).unwrap();
+        assert_eq!(w, 612.0);
+        assert_eq!(h, 792.0);
+    }
+
+    #[test]
+    fn page_out_of_range() {
+        let pdf = build_minimal_pdf();
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+        assert!(matches!(
+            doc.page_size(5),
+            Err(PdfError::PageOutOfRange(5, 1))
+        ));
+    }
+
+    #[test]
+    fn page_contents_empty() {
+        let pdf = build_minimal_pdf();
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+        let contents = doc.page_contents(0).unwrap();
+        // Our minimal PDF has no content stream
+        assert!(contents.is_empty());
+    }
+
+    /// Build a minimal valid PDF for testing.
+    fn build_minimal_pdf() -> Vec<u8> {
+        let mut pdf = Vec::new();
+        pdf.extend(b"%PDF-1.4\n");
+
+        // Object 1: Catalog
+        let obj1_offset = pdf.len();
+        pdf.extend(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+
+        // Object 2: Pages
+        let obj2_offset = pdf.len();
+        pdf.extend(b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+
+        // Object 3: Page
+        let obj3_offset = pdf.len();
+        pdf.extend(
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>\nendobj\n",
+        );
+
+        // Xref
+        let xref_offset = pdf.len();
+        pdf.extend(b"xref\n0 4\n");
+        pdf.extend(b"0000000000 65535 f\r\n");
+        pdf.extend(format!("{:010} 00000 n\r\n", obj1_offset).as_bytes());
+        pdf.extend(format!("{:010} 00000 n\r\n", obj2_offset).as_bytes());
+        pdf.extend(format!("{:010} 00000 n\r\n", obj3_offset).as_bytes());
+        pdf.extend(b"trailer\n<< /Size 4 /Root 1 0 R >>\n");
+        pdf.extend(format!("startxref\n{xref_offset}\n%%EOF\n").as_bytes());
+
+        pdf
+    }
+}

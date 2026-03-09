@@ -22,3 +22,4 @@ stet-engine = { path = "crates/stet-engine" }
 stet-render = { path = "crates/stet-render" }
 stet-pdf = { path = "crates/stet-pdf" }
 stet-viewer = { path = "crates/stet-viewer" }
+stet-pdf-reader = { path = "crates/stet-pdf-reader" }
