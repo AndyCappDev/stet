@@ -429,6 +429,8 @@ pub struct PatternFillParams {
     pub paint_type: i32,
     /// For uncolored patterns, the fill color.
     pub underlying_color: Option<DeviceColor>,
+    /// Unique pattern ID from pattern_store (for dedup in PDF output).
+    pub pattern_id: u32,
 }
 
 /// Trait for raster rendering devices.

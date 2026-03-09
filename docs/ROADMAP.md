@@ -456,34 +456,41 @@ Systematically run all ~76 PostForge sample files (`~/Projects/postforge/samples
 
 ---
 
-## Phase 7: Output Devices (Size: XL)
+## Phase 7: Output Devices (Size: XL) — IN PROGRESS
 
 **Goal**: All production output formats — PDF (native), SVG, TIFF, interactive display.
 
 **Done when**: Can produce identical output to PostForge for all sample files across all devices.
 
-### Key Components
-- **PDF device** (largest effort — 8,500+ lines in PostForge):
-  - Native PDF generation (no Cairo dependency for PDF)
-  - Content stream generation (paths, text, images, shadings)
-  - Type 1 font reconstruction + subsetting
-  - CID/TrueType font embedding
-  - CFF font embedding
-  - ToUnicode CMap generation (searchable text)
-  - CMYK/Gray color space preservation
-  - Image XObject construction
-- **SVG device**: Vector output with selectable text, `--text-as-paths` option
-- **TIFF device**: Raster + image encoding, multi-page, CMYK support
-- **Interactive display**: GUI window with zoom/pan (egui, winit, or similar Rust GUI)
+### 7a: Interactive Display — COMPLETE
+
+**Status**: Complete. egui-based viewer with zoom/pan/page navigation, pipelined rendering via `ViewerSinkFactory`.
+
+### 7b: PDF Device — IN PROGRESS
+
+**Status**: Native PDF generation (stet-pdf crate) with custom PDF writer (no external PDF library dependency).
+
+#### Implemented
+- **Content stream generation**: paths (fill/stroke), clipping, graphics state
+- **Text output**: Font embedding (Type 1, TrueType/Type 42, CFF/Type 2), ToUnicode CMap generation (searchable text)
+- **Images**: Image XObject construction with Flate compression, DCT passthrough, ICC-based color
+- **Color spaces**: DeviceRGB, DeviceGray, DeviceCMYK, Separation/DeviceN (spot colors), ICCBased profiles, CIE→sRGB conversion
+- **Shadings**: Axial (Type 2), Radial (Type 3), Mesh (Types 4-5), Patch (Types 6-7) as Shading XObjects
+- **Tiling patterns**: Type 1 pattern XObjects with full coordinate transform support (rotation, scale, shear), pattern dedup by ID, PaintType 1 (colored) and PaintType 2 (uncolored)
+- **ExtGState**: Overprint flags (OP/op/OPM) emitted as ExtGState resources
+- **Multi-page output**: Each page gets independent Resources dict
+
+#### Not Yet Implemented
+- CID font embedding (CJK text)
+- Font subsetting (currently embeds full fonts)
+- SVG device
+- TIFF device
 
 ### New Rust Dependencies
 ```toml
-# PDF generation (consider building native, or:)
-lopdf = "0.34"           # Low-level PDF manipulation
 image = "0.25"           # Image encoding (TIFF, etc.)
 tiff = "0.9"             # TIFF encoding
 resvg = "0.44"           # SVG (alternative to cairo SVG surface)
-# OR continue using cairo-rs for SVG/TIFF and build PDF natively
 ```
 
 ### Test Strategy

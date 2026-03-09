@@ -38,6 +38,26 @@ pub struct ContentStreamResult {
     /// Color space definitions used in the content stream (Separation/DeviceN).
     /// Vec of (resource_name, SpotColorSpace) pairs.
     pub color_spaces: Vec<(String, SpotColorSpace)>,
+    /// Tiling pattern references used in the content stream.
+    pub pattern_refs: Vec<PatternRef>,
+    /// Color space entries for uncolored patterns (e.g., [/Pattern /DeviceRGB]).
+    pub pattern_cs_entries: Vec<(String, PdfObj)>,
+}
+
+/// Reference to a tiling pattern that needs a PDF Pattern XObject.
+pub struct PatternRef {
+    /// Pre-rendered display list for a single tile.
+    pub tile: DisplayList,
+    /// Pattern matrix (pattern space → device space).
+    pub pattern_matrix: Matrix,
+    /// Bounding box of one tile in pattern space [llx, lly, urx, ury].
+    pub bbox: [f64; 4],
+    /// Horizontal step between tile origins.
+    pub xstep: f64,
+    /// Vertical step between tile origins.
+    pub ystep: f64,
+    /// Paint type: 1 = colored, 2 = uncolored.
+    pub paint_type: i32,
 }
 
 /// An ExtGState resource used in the content stream.
@@ -139,6 +159,10 @@ pub fn build_content_stream(
     let mut ext_gstate_map: HashMap<Vec<u8>, usize> = HashMap::new();
     let mut color_spaces: Vec<(String, SpotColorSpace)> = Vec::new();
     let mut cs_name_map: HashMap<Vec<u8>, String> = HashMap::new();
+    let mut pattern_refs: Vec<PatternRef> = Vec::new();
+    let mut pattern_map: HashMap<u32, usize> = HashMap::new();
+    let mut pattern_cs_names: Vec<(String, PdfObj)> = Vec::new();
+    let mut pattern_cs_set: HashSet<String> = HashSet::new();
 
     // Track which fonts this page uses (for per-page Resources/Font dict)
     let mut page_font_names: HashSet<String> = HashSet::new();
@@ -348,7 +372,15 @@ pub fn build_content_stream(
                 shading_refs.push(ShadingRef::Patch(params.clone()));
             }
             DisplayElement::PatternFill { params } => {
-                emit_pattern_fill_placeholder(&mut buf, params, &mut gs);
+                emit_pattern_fill(
+                    &mut buf,
+                    params,
+                    &mut gs,
+                    &mut pattern_refs,
+                    &mut pattern_map,
+                    &mut pattern_cs_names,
+                    &mut pattern_cs_set,
+                );
             }
             DisplayElement::Text { .. } => unreachable!(), // handled above
         }
@@ -362,6 +394,17 @@ pub fn build_content_stream(
         buf.extend(b"Q\n");
     }
 
+    // Transform pattern matrices from device pixel space → PDF initial coordinate space.
+    // The content stream's initial `cm` maps device pixels → PDF points. The PDF spec
+    // says Pattern /Matrix maps pattern space → the initial (pre-cm) coordinate system.
+    // So: pdf_matrix = pattern_matrix × initial_cm (row-vector convention).
+    let initial_cm = Matrix::new(scale, 0.0, 0.0, -scale, 0.0, page_h_pts);
+    for pat_ref in &mut pattern_refs {
+        pat_ref.pattern_matrix = initial_cm.concat(&pat_ref.pattern_matrix);
+    }
+
+    let pattern_cs_entries = pattern_cs_names;
+
     ContentStreamResult {
         content: buf,
         images,
@@ -369,6 +412,229 @@ pub fn build_content_stream(
         used_font_names: page_font_names.into_iter().collect(),
         ext_gstate_dicts: ext_gstates,
         color_spaces,
+        pattern_refs,
+        pattern_cs_entries,
+    }
+}
+
+/// Generate PDF content stream bytes from a tile display list (for Pattern XObjects).
+///
+/// Unlike `build_content_stream`, this emits no initial CTM or page clip —
+/// tile coordinates are already in pattern space.
+pub fn build_tile_content_stream(
+    list: &DisplayList,
+    font_tracker: &mut FontTracker,
+) -> ContentStreamResult {
+    let mut buf = Vec::with_capacity(1024);
+    let mut images: Vec<ImageXObject> = Vec::new();
+    let mut shading_refs: Vec<ShadingRef> = Vec::new();
+    let mut clip_depth: u32 = 0;
+    let mut gs = GState::new();
+    let mut ext_gstates: Vec<ExtGStateDict> = Vec::new();
+    let mut ext_gstate_map: HashMap<Vec<u8>, usize> = HashMap::new();
+    let mut color_spaces: Vec<(String, SpotColorSpace)> = Vec::new();
+    let mut cs_name_map: HashMap<Vec<u8>, String> = HashMap::new();
+    let mut pattern_refs: Vec<PatternRef> = Vec::new();
+    let mut pattern_map: HashMap<u32, usize> = HashMap::new();
+    let mut pattern_cs_names: Vec<(String, PdfObj)> = Vec::new();
+    let mut pattern_cs_set: HashSet<String> = HashSet::new();
+    let mut page_font_names: HashSet<String> = HashSet::new();
+
+    // Register fonts used in tile
+    for element in list.elements() {
+        if let DisplayElement::Text { params } = element {
+            let name = font_tracker.track(params).to_string();
+            page_font_names.insert(name);
+        }
+    }
+
+    // No initial CTM, no page clip — tile paths are in pattern space
+
+    for element in list.elements() {
+        match element {
+            DisplayElement::ErasePage => {} // skip in tile context
+            DisplayElement::Fill { path, params } => {
+                if params.is_text_glyph {
+                    continue;
+                }
+                emit_overprint(
+                    &mut buf,
+                    params.overprint,
+                    &mut gs,
+                    &mut ext_gstates,
+                    &mut ext_gstate_map,
+                );
+                if let Some(spot) = &params.spot_color {
+                    emit_fill_color_spot(
+                        &mut buf,
+                        spot,
+                        &mut gs,
+                        &mut cs_name_map,
+                        &mut color_spaces,
+                    );
+                } else {
+                    if gs.fill_cs_name.is_some() {
+                        gs.fill_cs_name = None;
+                        gs.fill_color = None;
+                    }
+                    emit_fill_color(&mut buf, &params.color, &mut gs);
+                }
+                emit_path(&mut buf, path);
+                if params.fill_rule == FillRule::EvenOdd {
+                    buf.extend(b"f*\n");
+                } else {
+                    buf.extend(b"f\n");
+                }
+            }
+            DisplayElement::Stroke { path, params } => {
+                if params.is_text_glyph {
+                    continue;
+                }
+                let has_ctm = !is_identity(&params.ctm);
+                if has_ctm {
+                    buf.extend(b"q\n");
+                    emit_cm(&mut buf, &params.ctm);
+                }
+                emit_overprint(
+                    &mut buf,
+                    params.overprint,
+                    &mut gs,
+                    &mut ext_gstates,
+                    &mut ext_gstate_map,
+                );
+                if let Some(spot) = &params.spot_color {
+                    emit_stroke_color_spot(
+                        &mut buf,
+                        spot,
+                        &mut gs,
+                        &mut cs_name_map,
+                        &mut color_spaces,
+                    );
+                } else {
+                    if gs.stroke_cs_name.is_some() {
+                        gs.stroke_cs_name = None;
+                        gs.stroke_color = None;
+                    }
+                    emit_stroke_color(&mut buf, &params.color, &mut gs);
+                }
+                emit_line_state(&mut buf, params, &mut gs);
+                emit_path(&mut buf, path);
+                buf.extend(b"S\n");
+                if has_ctm {
+                    buf.extend(b"Q\n");
+                    gs = GState::new();
+                }
+            }
+            DisplayElement::Clip { path, params } => {
+                buf.extend(b"q\n");
+                emit_path(&mut buf, path);
+                if params.fill_rule == FillRule::EvenOdd {
+                    buf.extend(b"W* n\n");
+                } else {
+                    buf.extend(b"W n\n");
+                }
+                clip_depth += 1;
+            }
+            DisplayElement::InitClip => {
+                for _ in 0..clip_depth {
+                    buf.extend(b"Q\n");
+                }
+                clip_depth = 0;
+                gs.reset();
+            }
+            DisplayElement::Image {
+                sample_data,
+                params,
+            } => {
+                let img_idx = images.len();
+                let xobj = image_ops::convert_image(sample_data, params);
+                let m = compute_image_matrix(params);
+                buf.extend(b"q ");
+                emit_matrix(&mut buf, &m);
+                buf.extend(b" cm ");
+                if xobj.is_imagemask {
+                    if let Some((r, g, b)) = xobj.mask_color {
+                        emit_fill_color_rgb(&mut buf, r, g, b);
+                    }
+                }
+                writeln!(buf, "/Im{} Do Q", img_idx).unwrap();
+                images.push(xobj);
+            }
+            DisplayElement::AxialShading { params } => {
+                let sh_idx = shading_refs.len();
+                buf.extend(b"q ");
+                if !is_identity(&params.ctm) {
+                    emit_matrix(&mut buf, &params.ctm);
+                    buf.extend(b" cm ");
+                }
+                writeln!(buf, "/Sh{} sh Q", sh_idx).unwrap();
+                shading_refs.push(ShadingRef::Axial(params.clone()));
+            }
+            DisplayElement::RadialShading { params } => {
+                let sh_idx = shading_refs.len();
+                buf.extend(b"q ");
+                if !is_identity(&params.ctm) {
+                    emit_matrix(&mut buf, &params.ctm);
+                    buf.extend(b" cm ");
+                }
+                writeln!(buf, "/Sh{} sh Q", sh_idx).unwrap();
+                shading_refs.push(ShadingRef::Radial(params.clone()));
+            }
+            DisplayElement::MeshShading { params } => {
+                let sh_idx = shading_refs.len();
+                buf.extend(b"q ");
+                if !is_identity(&params.ctm) {
+                    emit_matrix(&mut buf, &params.ctm);
+                    buf.extend(b" cm ");
+                }
+                writeln!(buf, "/Sh{} sh Q", sh_idx).unwrap();
+                shading_refs.push(ShadingRef::Mesh(params.clone()));
+            }
+            DisplayElement::PatchShading { params } => {
+                let sh_idx = shading_refs.len();
+                buf.extend(b"q ");
+                if !is_identity(&params.ctm) {
+                    emit_matrix(&mut buf, &params.ctm);
+                    buf.extend(b" cm ");
+                }
+                writeln!(buf, "/Sh{} sh Q", sh_idx).unwrap();
+                shading_refs.push(ShadingRef::Patch(params.clone()));
+            }
+            DisplayElement::PatternFill { params } => {
+                emit_pattern_fill(
+                    &mut buf,
+                    params,
+                    &mut gs,
+                    &mut pattern_refs,
+                    &mut pattern_map,
+                    &mut pattern_cs_names,
+                    &mut pattern_cs_set,
+                );
+            }
+            DisplayElement::Text { params } => {
+                let name = font_tracker.track(params).to_string();
+                page_font_names.insert(name);
+                // Simple single-element text emission for tiles
+                text_ops::emit_text_batch(&mut buf, &[params], font_tracker);
+                gs.fill_color = None;
+            }
+        }
+    }
+
+    // Close remaining clips
+    for _ in 0..clip_depth {
+        buf.extend(b"Q\n");
+    }
+
+    ContentStreamResult {
+        content: buf,
+        images,
+        shading_refs,
+        used_font_names: page_font_names.into_iter().collect(),
+        ext_gstate_dicts: ext_gstates,
+        color_spaces,
+        pattern_refs,
+        pattern_cs_entries: pattern_cs_names,
     }
 }
 
@@ -383,8 +649,12 @@ fn flush_text_batch(
         return;
     }
     text_ops::emit_text_batch(buf, batch, font_tracker);
-    // Reset fill color cache since BT/ET text blocks set their own colors
+    // Text blocks emit color operators (g/rg/k) that change the PDF's current
+    // color space. Reset all color tracking to force re-emission.
     gs.fill_color = None;
+    gs.fill_cs_name = None;
+    gs.stroke_color = None;
+    gs.stroke_cs_name = None;
 }
 
 /// Emit a non-stroking (fill) color command.
@@ -738,10 +1008,89 @@ fn is_identity(m: &Matrix) -> bool {
         && m.ty.abs() < 1e-10
 }
 
-/// Placeholder for pattern fills — fills the path with a solid mid-gray.
-fn emit_pattern_fill_placeholder(buf: &mut Vec<u8>, params: &PatternFillParams, gs: &mut GState) {
-    let gray = DeviceColor::from_gray(0.7);
-    emit_fill_color(buf, &gray, gs);
+/// Emit a tiling pattern fill: set pattern color space, select pattern, emit path + fill.
+fn emit_pattern_fill(
+    buf: &mut Vec<u8>,
+    params: &PatternFillParams,
+    gs: &mut GState,
+    pattern_refs: &mut Vec<PatternRef>,
+    pattern_map: &mut HashMap<u32, usize>,
+    pattern_cs_names: &mut Vec<(String, PdfObj)>,
+    pattern_cs_set: &mut HashSet<String>,
+) {
+    // Dedup by pattern_id — each makepattern call gets a unique ID,
+    // so same-pattern reuses share one Pattern XObject.
+    let pat_idx = if let Some(&idx) = pattern_map.get(&params.pattern_id) {
+        idx
+    } else {
+        let idx = pattern_refs.len();
+        pattern_refs.push(PatternRef {
+            tile: params.tile.clone(),
+            pattern_matrix: params.pattern_matrix,
+            bbox: params.bbox,
+            xstep: params.xstep,
+            ystep: params.ystep,
+            paint_type: params.paint_type,
+        });
+        pattern_map.insert(params.pattern_id, idx);
+        idx
+    };
+
+    let pat_name = format!("P{}", pat_idx);
+
+    if params.paint_type == 2 {
+        // Uncolored pattern: need [/Pattern /DeviceXxx] color space
+        let base_cs = match &params.underlying_color {
+            Some(c) if c.native_cmyk.is_some() => "DeviceCMYK",
+            Some(c) if c.r == c.g && c.g == c.b => "DeviceGray",
+            _ => "DeviceRGB",
+        };
+        let cs_name = format!("CSP{}", pat_idx);
+        if !pattern_cs_set.contains(&cs_name) {
+            pattern_cs_names.push((
+                cs_name.clone(),
+                PdfObj::Array(vec![PdfObj::name("Pattern"), PdfObj::name(base_cs)]),
+            ));
+            pattern_cs_set.insert(cs_name.clone());
+        }
+        // Set color space
+        if gs.fill_cs_name.as_deref() != Some(&cs_name) {
+            writeln!(buf, "/{} cs", cs_name).unwrap();
+            gs.fill_cs_name = Some(cs_name);
+            gs.fill_color = None;
+        }
+        // Emit underlying color components + pattern name
+        if let Some(color) = &params.underlying_color {
+            if let Some((c, m, y, k)) = color.native_cmyk {
+                fmt_num(buf, c);
+                buf.push(b' ');
+                fmt_num(buf, m);
+                buf.push(b' ');
+                fmt_num(buf, y);
+                buf.push(b' ');
+                fmt_num(buf, k);
+            } else if color.r == color.g && color.g == color.b {
+                fmt_num(buf, color.r);
+            } else {
+                fmt_num(buf, color.r);
+                buf.push(b' ');
+                fmt_num(buf, color.g);
+                buf.push(b' ');
+                fmt_num(buf, color.b);
+            }
+            buf.push(b' ');
+        }
+        writeln!(buf, "/{} scn", pat_name).unwrap();
+    } else {
+        // Colored pattern (PaintType 1)
+        if gs.fill_cs_name.as_deref() != Some("Pattern") {
+            buf.extend(b"/Pattern cs\n");
+            gs.fill_cs_name = Some("Pattern".to_string());
+            gs.fill_color = None;
+        }
+        writeln!(buf, "/{} scn", pat_name).unwrap();
+    }
+
     emit_path(buf, &params.path);
     if params.fill_rule == FillRule::EvenOdd {
         buf.extend(b"f*\n");

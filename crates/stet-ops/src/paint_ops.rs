@@ -166,6 +166,7 @@ fn push_fill_element(ctx: &mut Context, path: PsPath, fill_rule: FillRule) {
             ystep: pat.ystep,
             paint_type: pat.paint_type,
             underlying_color: ctx.gstate.pattern_underlying_color.clone(),
+            pattern_id,
         };
         ctx.display_list
             .push(DisplayElement::PatternFill { params });
@@ -392,15 +393,7 @@ fn build_rect_path_user(rects: &[(f64, f64, f64, f64)]) -> PsPath {
 pub fn op_rectfill(ctx: &mut Context) -> Result<(), PsError> {
     let rects = extract_rects(ctx)?;
     let path = build_rect_path_device(&ctx.gstate.ctm, &rects);
-    let params = FillParams {
-        color: ctx.gstate.color.clone(),
-        fill_rule: FillRule::NonZeroWinding,
-        ctm: Matrix::identity(),
-        is_text_glyph: false,
-        overprint: ctx.gstate.overprint,
-        spot_color: capture_spot_color(ctx),
-    };
-    ctx.display_list.push(DisplayElement::Fill { path, params });
+    push_fill_element(ctx, path, FillRule::NonZeroWinding);
     Ok(())
 }
 

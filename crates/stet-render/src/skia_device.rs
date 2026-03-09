@@ -1815,20 +1815,20 @@ fn render_pattern_fill_to_band(
     let pm = &params.pattern_matrix;
     let y_off = y_start as f64;
 
-    // Tile step in device pixels (fractional — exact, no rounding)
-    let step_x = (params.xstep * pm.a).abs() + (params.xstep * pm.b).abs();
-    let step_y = (params.ystep * pm.c).abs() + (params.ystep * pm.d).abs();
-    if step_x < 0.01 || step_y < 0.01 {
+    // Tile step vectors in device space (handles rotation/shear)
+    let (step_ux, step_uy) = pm.transform_delta(params.xstep, 0.0);
+    let (step_vx, step_vy) = pm.transform_delta(0.0, params.ystep);
+
+    // Check for degenerate steps
+    let step_u_len = (step_ux * step_ux + step_uy * step_uy).sqrt();
+    let step_v_len = (step_vx * step_vx + step_vy * step_vy).sqrt();
+    if step_u_len < 0.01 || step_v_len < 0.01 {
         return;
     }
 
     // Pattern origin in device space
     let origin_x = pm.tx;
     let origin_y = pm.ty;
-
-    // Scale from pattern space to device space
-    let sx = step_x / params.xstep.abs();
-    let sy = step_y / params.ystep.abs();
 
     // Compute the fill path bounding box to determine tile range
     let (mut min_x, mut min_y, mut max_x, mut max_y) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
@@ -1853,11 +1853,40 @@ fn render_pattern_fill_to_band(
         return;
     }
 
-    // Compute tile index range
-    let tile_x_start = ((min_x - origin_x) / step_x).floor() as i32 - 1;
-    let tile_x_end = ((max_x - origin_x) / step_x).ceil() as i32 + 1;
-    let tile_y_start = ((min_y - origin_y) / step_y).floor() as i32 - 1;
-    let tile_y_end = ((max_y - origin_y) / step_y).ceil() as i32 + 1;
+    // Compute tile index range by projecting fill bbox into tile coordinates.
+    // For rotated/sheared patterns, we need to find the range of (tu, tv) indices
+    // such that origin + tu*step_u + tv*step_v covers the fill bbox.
+    // Project each corner of the fill bbox onto the step vectors.
+    let det = step_ux * step_vy - step_uy * step_vx;
+    if det.abs() < 1e-10 {
+        return; // degenerate (parallel step vectors)
+    }
+    let inv_det = 1.0 / det;
+
+    let mut tu_min = f64::MAX;
+    let mut tu_max = f64::MIN;
+    let mut tv_min = f64::MAX;
+    let mut tv_max = f64::MIN;
+    for &(cx, cy) in &[
+        (min_x, min_y),
+        (max_x, min_y),
+        (min_x, max_y),
+        (max_x, max_y),
+    ] {
+        let dx = cx - origin_x;
+        let dy = cy - origin_y;
+        let tu = (dx * step_vy - dy * step_vx) * inv_det;
+        let tv = (-dx * step_uy + dy * step_ux) * inv_det;
+        tu_min = tu_min.min(tu);
+        tu_max = tu_max.max(tu);
+        tv_min = tv_min.min(tv);
+        tv_max = tv_max.max(tv);
+    }
+
+    let tile_x_start = tu_min.floor() as i32 - 1;
+    let tile_x_end = tu_max.ceil() as i32 + 1;
+    let tile_y_start = tv_min.floor() as i32 - 1;
+    let tile_y_end = tv_max.ceil() as i32 + 1;
 
     // Safety limit on tile count
     let tile_count = (tile_x_end - tile_x_start) as i64 * (tile_y_end - tile_y_start) as i64;
@@ -1872,28 +1901,34 @@ fn render_pattern_fill_to_band(
         return;
     };
 
-    for ty in tile_y_start..tile_y_end {
-        let tile_dev_y = origin_y + ty as f64 * step_y;
-        if tile_dev_y + step_y < band_min_y || tile_dev_y > band_max_y {
-            continue;
-        }
-        for tx in tile_x_start..tile_x_end {
-            let tile_dev_x = origin_x + tx as f64 * step_x;
-            // Transform: scale pattern→device, translate to tile position, offset for band
+    for tv in tile_y_start..tile_y_end {
+        for tu in tile_x_start..tile_x_end {
+            // Quick Y cull using tile center
+            let tile_dev_y = origin_y + tu as f64 * step_uy + tv as f64 * step_vy;
+            let tile_extent = step_u_len + step_v_len; // conservative radius
+            if tile_dev_y + tile_extent < band_min_y || tile_dev_y - tile_extent > band_max_y {
+                continue;
+            }
+
+            // Tile transform: translate by (tu*xstep, tv*ystep) in pattern space,
+            // then apply the full pattern matrix. This is equivalent to
+            // base_transform pre-translated by the pattern-space offset.
+            let pat_offset_x = tu as f64 * params.xstep;
+            let pat_offset_y = tv as f64 * params.ystep;
             let tile_transform = Transform::from_row(
-                sx as f32,
-                0.0,
-                0.0,
-                sy as f32,
-                tile_dev_x as f32,
-                (tile_dev_y - y_off) as f32,
+                pm.a as f32,
+                pm.b as f32,
+                pm.c as f32,
+                pm.d as f32,
+                (pm.a * pat_offset_x + pm.c * pat_offset_y + pm.tx) as f32,
+                (pm.b * pat_offset_x + pm.d * pat_offset_y + pm.ty - y_off) as f32,
             );
 
             for elem in params.tile.elements() {
                 match elem {
                     DisplayElement::Fill { path, params: fp } => {
                         if let Some(sp) = build_skia_path(path) {
-                            let paint = if params.paint_type == 1 {
+                            let mut paint = if params.paint_type == 1 {
                                 to_paint(&fp.color)
                             } else {
                                 to_paint(
@@ -1903,6 +1938,9 @@ fn render_pattern_fill_to_band(
                                         .unwrap_or(&DeviceColor::black()),
                                 )
                             };
+                            // Disable anti-aliasing for tile fills so adjacent
+                            // tiles abut perfectly with no seam artifacts.
+                            paint.anti_alias = false;
                             let t = to_transform(&fp.ctm);
                             let combined = tile_transform.post_concat(t);
                             let fr = to_fill_rule(&fp.fill_rule);
@@ -3267,20 +3305,20 @@ fn render_pattern_fill_viewport(
 
     let pm = &params.pattern_matrix;
 
-    // Tile step in device pixels (fractional — exact, no rounding)
-    let step_x = (params.xstep * pm.a).abs() + (params.xstep * pm.b).abs();
-    let step_y = (params.ystep * pm.c).abs() + (params.ystep * pm.d).abs();
-    if step_x < 0.01 || step_y < 0.01 {
+    // Tile step vectors in device space (handles rotation/shear)
+    let (step_ux, step_uy) = pm.transform_delta(params.xstep, 0.0);
+    let (step_vx, step_vy) = pm.transform_delta(0.0, params.ystep);
+
+    // Check for degenerate steps
+    let step_u_len = (step_ux * step_ux + step_uy * step_uy).sqrt();
+    let step_v_len = (step_vx * step_vx + step_vy * step_vy).sqrt();
+    if step_u_len < 0.01 || step_v_len < 0.01 {
         return;
     }
 
     // Pattern origin in device space
     let origin_x = pm.tx;
     let origin_y = pm.ty;
-
-    // Scale from pattern space to device space
-    let sx = step_x / params.xstep.abs();
-    let sy = step_y / params.ystep.abs();
 
     // Viewport bounds in device space
     let dev_vp_x = vp_x as f64;
@@ -3311,11 +3349,37 @@ fn render_pattern_fill_viewport(
         return;
     }
 
-    // Compute tile index range
-    let tile_x_start = ((min_x - origin_x) / step_x).floor() as i32 - 1;
-    let tile_x_end = ((max_x - origin_x) / step_x).ceil() as i32 + 1;
-    let tile_y_start = ((min_y - origin_y) / step_y).floor() as i32 - 1;
-    let tile_y_end = ((max_y - origin_y) / step_y).ceil() as i32 + 1;
+    // Project fill bbox corners onto tile coordinate system
+    let det = step_ux * step_vy - step_uy * step_vx;
+    if det.abs() < 1e-10 {
+        return;
+    }
+    let inv_det = 1.0 / det;
+
+    let mut tu_min = f64::MAX;
+    let mut tu_max = f64::MIN;
+    let mut tv_min = f64::MAX;
+    let mut tv_max = f64::MIN;
+    for &(cx, cy) in &[
+        (min_x, min_y),
+        (max_x, min_y),
+        (min_x, max_y),
+        (max_x, max_y),
+    ] {
+        let dx = cx - origin_x;
+        let dy = cy - origin_y;
+        let tu = (dx * step_vy - dy * step_vx) * inv_det;
+        let tv = (-dx * step_uy + dy * step_ux) * inv_det;
+        tu_min = tu_min.min(tu);
+        tu_max = tu_max.max(tu);
+        tv_min = tv_min.min(tv);
+        tv_max = tv_max.max(tv);
+    }
+
+    let tile_x_start = tu_min.floor() as i32 - 1;
+    let tile_x_end = tu_max.ceil() as i32 + 1;
+    let tile_y_start = tv_min.floor() as i32 - 1;
+    let tile_y_end = tv_max.ceil() as i32 + 1;
 
     // Safety limit on tile count
     let tile_count = (tile_x_end - tile_x_start) as i64 * (tile_y_end - tile_y_start) as i64;
@@ -3332,31 +3396,27 @@ fn render_pattern_fill_viewport(
     let sx_f = scale_x as f64;
     let sy_f = scale_y as f64;
 
-    for ty in tile_y_start..tile_y_end {
-        let tile_dev_y = origin_y + ty as f64 * step_y;
-        if tile_dev_y + step_y < dev_vp_y || tile_dev_y > dev_vp_y + dev_vp_h {
-            continue;
-        }
-        for tx in tile_x_start..tile_x_end {
-            let tile_dev_x = origin_x + tx as f64 * step_x;
-            // Transform: scale pattern→device, translate to tile position,
-            // then apply viewport transform (offset by vp origin, scale to output)
-            let vp_tile_x = (tile_dev_x - dev_vp_x) * sx_f;
-            let vp_tile_y = (tile_dev_y - dev_vp_y) * sy_f;
+    for tv in tile_y_start..tile_y_end {
+        for tu in tile_x_start..tile_x_end {
+            // Tile offset in pattern space
+            let pat_offset_x = tu as f64 * params.xstep;
+            let pat_offset_y = tv as f64 * params.ystep;
+
+            // Apply full pattern matrix then viewport transform
             let tile_transform = Transform::from_row(
-                (sx * sx_f) as f32,
-                0.0,
-                0.0,
-                (sy * sy_f) as f32,
-                vp_tile_x as f32,
-                vp_tile_y as f32,
+                (pm.a * sx_f) as f32,
+                (pm.b * sy_f) as f32,
+                (pm.c * sx_f) as f32,
+                (pm.d * sy_f) as f32,
+                ((pm.a * pat_offset_x + pm.c * pat_offset_y + pm.tx - dev_vp_x) * sx_f) as f32,
+                ((pm.b * pat_offset_x + pm.d * pat_offset_y + pm.ty - dev_vp_y) * sy_f) as f32,
             );
 
             for elem in params.tile.elements() {
                 match elem {
                     DisplayElement::Fill { path, params: fp } => {
                         if let Some(sp) = build_skia_path(path) {
-                            let paint = if params.paint_type == 1 {
+                            let mut paint = if params.paint_type == 1 {
                                 to_paint(&fp.color)
                             } else {
                                 to_paint(
@@ -3366,6 +3426,9 @@ fn render_pattern_fill_viewport(
                                         .unwrap_or(&DeviceColor::black()),
                                 )
                             };
+                            // Disable anti-aliasing for tile fills so adjacent
+                            // tiles abut perfectly with no seam artifacts.
+                            paint.anti_alias = false;
                             let t = to_transform(&fp.ctm);
                             let combined = tile_transform.post_concat(t);
                             let fr = to_fill_rule(&fp.fill_rule);

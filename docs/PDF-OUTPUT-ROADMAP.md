@@ -37,6 +37,7 @@ This roadmap tracks what's missing and prioritizes by impact on round-trip fidel
 | Native shading color spaces | ✓ | DeviceGray/RGB/CMYK, ICCBased, CalRGB/CalGray preserved |
 | Flate compression | ✓ | All streams deflated |
 | Multi-page output | ✓ | Pages tree with per-page resources |
+| Tiling patterns | ✓ | Type 1 Pattern XObjects, colored + uncolored, affine transforms |
 
 ### Not Working / Missing
 
@@ -45,7 +46,7 @@ This roadmap tracks what's missing and prioritizes by impact on round-trip fidel
 | Separation/DeviceN colors | ✓ Native spot colors in PDF | — |
 | Separation/DeviceN images | ✓ Native samples + tint functions in PDF | — |
 | Color key mask (Type 4) | ✓ `/Mask` array emitted | — |
-| Pattern fills | Gray placeholder (0.7) | **HIGH** — round-trip |
+| Pattern fills | ✓ Type 1 tiling patterns as PDF Pattern XObjects | — |
 | CIE shadings (complex decode) | Falls back to DeviceRGB | **LOW** — needs ICC profile construction (3.4) |
 | Overprint settings | ✓ ExtGState with OP/op/OPM | — |
 | ExtGState dict | ✓ Deduplicated, emitted per page | — |
@@ -116,15 +117,24 @@ PS → PDF → pixels round-trip test. Fix these before PDF input validation.
 - [x] DeviceN: N-D multilinear interpolation per pixel
 - **Files**: `crates/stet-render/src/skia_device.rs`
 
-### 1.5 Pattern Fills
-- [ ] Emit tiling patterns as PDF Pattern XObjects (Type 1)
-- [ ] Pattern has own content stream (from pattern's cached display list)
-- [ ] Add `/Pattern` to page Resources dict
-- [ ] Emit `cs /Pattern cs` + `scn /P0 scn` in content stream
-- [ ] Render pattern fills in raster device (tile pattern display list across fill area)
+### 1.5 Pattern Fills ✅
+- [x] Emit tiling patterns as PDF Pattern XObjects (Type 1) with `/PatternType 1`
+- [x] Pattern has own content stream generated from tile's cached display list (`build_tile_content_stream`)
+- [x] Add `/Pattern` to page Resources dict with per-pattern entries (`/P0`, `/P1`, ...)
+- [x] Emit `/Pattern cs /Pn scn` for colored patterns (PaintType 1)
+- [x] Emit `/CSPn cs <components> /Pn scn` for uncolored patterns (PaintType 2) with `[/Pattern /DeviceXxx]` color space
+- [x] Pattern matrix composition: `initial_cm.concat(pattern_matrix)` maps pattern space → PDF page coordinates
+- [x] Pattern dedup by `pattern_id` (unique per `makepattern` call) — same pattern reused shares one XObject
+- [x] Tile resources: images, shadings, fonts, ExtGState, color spaces embedded in pattern's `/Resources` dict
+- [x] BBox expanded by 0.5 units to eliminate hairline seam artifacts in PDF viewers
+- [x] Raster renderer: full affine transform support (rotation, scale, shear) via 2D step vectors
+- [x] Raster renderer: non-anti-aliased tile fills eliminate seam artifacts between adjacent tiles
+- [x] `op_rectfill` routed through `push_fill_element` for pattern fill support
+- [x] Text batch color state reset after `flush_text_batch` prevents stale color space tracking
+- [x] Test file: `samples/pattern_test.ps` — 12 tests covering colored, crosshatch, circles, scaled, rotated, eofill, rectfill, multiple patterns, complex PaintProc, dedup, gsave/grestore, clipped
 - **Files**: `crates/stet-pdf/src/pdf_device.rs`, `crates/stet-pdf/src/content_stream.rs`,
-  `crates/stet-render/src/skia_device.rs`, `crates/stet-core/src/device.rs`
-- **Effort**: Large — pattern rendering is architecturally complex
+  `crates/stet-render/src/skia_device.rs`, `crates/stet-core/src/device.rs`,
+  `crates/stet-ops/src/paint_ops.rs`
 
 ### 1.6 Native Color Space Shadings ✅
 - [x] `ShadingColorSpace` enum: DeviceGray/RGB/CMYK, ICCBased, CalRGB, CalGray
@@ -263,7 +273,7 @@ Phase 4 items are deferred — implement only when a specific need arises.
  ✅  1.2  Separation/DeviceN display list  done      TintLookupTable, ncomp fix, colorant names
  ✅  1.4  Separation/DeviceN raster        done      lookup_1d/lookup_nd interpolation
  ✅  1.3  Separation/DeviceN PDF output    done      Type 0 functions, cs/scn operators, ColorSpace resources
- 9.  1.5  Pattern fills                    large     most complex, do last in Phase 1
+ ✅  1.5  Pattern fills                    done      Type 1 tiling patterns, colored + uncolored, full affine transform
 11.  3.1  PDF/X-3 OutputIntent             medium    when print compliance needed
 12.  3.2  Full ToUnicode CMap              medium    when text extraction needed
 13.  3.3  Color rendering intent           small     when needed
@@ -328,7 +338,7 @@ gs -dBATCH -dNOPAUSE -sDEVICE=png16m -r300 -o gs_%03d.png sample.pdf
 |---------|-----------|
 | Separation/DeviceN | `samples/hospital.eps` (CMYK images), `samples/10-ch8.ps` (DeviceN fill/stroke) |
 | Color key mask | `samples/image-qa.ps` (Type 4 images) |
-| Patterns | Pattern test files from PostForge |
+| Patterns | `samples/pattern_test.ps` (12 pattern tests), `samples/javaplatform.ps`, `samples/cf-route.ps` |
 | Native shading CS | `samples/hospital.eps` (CMYK→DeviceCMYK), `samples/10-ch8.ps` (DeviceN→RGB), `samples/16-ch14.ps` (DeviceN→RGB) |
 | Overprint | AGM EPS files with overprint flags |
 | Transfer functions | Files with `settransfer` / `setcolortransfer` |

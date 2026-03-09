@@ -94,7 +94,7 @@ impl PdfDevice {
         // Second pass: build page objects referencing shared font objects
         let mut page_refs = Vec::new();
         for (result, page) in &page_results {
-            let page_ref = self.build_page(&mut writer, page, pages_ref, result, &font_obj_map)?;
+            let page_ref = self.build_page(&mut writer, page, pages_ref, result, &font_obj_map, &mut font_tracker)?;
             page_refs.push(page_ref);
         }
 
@@ -202,6 +202,7 @@ impl PdfDevice {
         pages_ref: u32,
         result: &ContentStreamResult,
         font_obj_map: &HashMap<String, u32>,
+        font_tracker: &mut FontTracker,
     ) -> Result<u32, String> {
         let ContentStreamResult {
             content,
@@ -210,6 +211,8 @@ impl PdfDevice {
             used_font_names,
             ext_gstate_dicts,
             color_spaces,
+            pattern_refs,
+            pattern_cs_entries,
         } = result;
 
         // Build image XObjects
@@ -276,13 +279,165 @@ impl PdfDevice {
         }
 
         // Build ColorSpace resources (for Separation/DeviceN fill/stroke colors)
-        if !color_spaces.is_empty() {
-            let mut cs_entries: Vec<(Vec<u8>, PdfObj)> = Vec::new();
-            for (name, spot_cs) in color_spaces {
-                let cs_obj = build_spot_colorspace(spot_cs, writer);
-                cs_entries.push((name.clone().into_bytes(), cs_obj));
-            }
+        let mut cs_entries: Vec<(Vec<u8>, PdfObj)> = Vec::new();
+        for (name, spot_cs) in color_spaces {
+            let cs_obj = build_spot_colorspace(spot_cs, writer);
+            cs_entries.push((name.clone().into_bytes(), cs_obj));
+        }
+        // Add uncolored pattern color space entries (e.g., [/Pattern /DeviceRGB])
+        for (name, cs_obj) in pattern_cs_entries {
+            // Reconstruct PdfObj since it doesn't derive Clone
+            let obj = match cs_obj {
+                PdfObj::Array(items) => {
+                    let cloned: Vec<PdfObj> = items
+                        .iter()
+                        .map(|item| match item {
+                            PdfObj::Name(n) => PdfObj::Name(n.clone()),
+                            PdfObj::Int(n) => PdfObj::Int(*n),
+                            PdfObj::Real(n) => PdfObj::Real(*n),
+                            PdfObj::Ref(r) => PdfObj::Ref(*r),
+                            _ => PdfObj::Null,
+                        })
+                        .collect();
+                    PdfObj::Array(cloned)
+                }
+                _ => PdfObj::Null,
+            };
+            cs_entries.push((name.clone().into_bytes(), obj));
+        }
+        if !cs_entries.is_empty() {
             resources.push((b"ColorSpace".to_vec(), PdfObj::Dict(cs_entries)));
+        }
+
+        // Build Pattern XObject resources
+        if !pattern_refs.is_empty() {
+            let mut pattern_entries: Vec<(Vec<u8>, PdfObj)> = Vec::new();
+            for (i, pat_ref) in pattern_refs.iter().enumerate() {
+                let tile_result =
+                    content_stream::build_tile_content_stream(&pat_ref.tile, font_tracker);
+
+                // Build tile resources
+                let mut tile_resources: Vec<(Vec<u8>, PdfObj)> = Vec::new();
+
+                // Tile images
+                if !tile_result.images.is_empty() {
+                    let mut tile_xobj: Vec<(Vec<u8>, PdfObj)> = Vec::new();
+                    for (j, img) in tile_result.images.iter().enumerate() {
+                        let img_ref = self.build_image_xobject(writer, img);
+                        tile_xobj
+                            .push((format!("Im{}", j).into_bytes(), PdfObj::Ref(img_ref)));
+                    }
+                    tile_resources.push((b"XObject".to_vec(), PdfObj::Dict(tile_xobj)));
+                }
+
+                // Tile shadings
+                if !tile_result.shading_refs.is_empty() {
+                    let mut tile_sh: Vec<(Vec<u8>, PdfObj)> = Vec::new();
+                    for (j, sh_ref) in tile_result.shading_refs.iter().enumerate() {
+                        let sh_obj = match sh_ref {
+                            ShadingRef::Axial(p) => shading_ops::build_axial_shading(writer, p),
+                            ShadingRef::Radial(p) => shading_ops::build_radial_shading(writer, p),
+                            ShadingRef::Mesh(p) => shading_ops::build_mesh_shading(writer, p),
+                            ShadingRef::Patch(p) => shading_ops::build_patch_shading(writer, p),
+                        };
+                        tile_sh
+                            .push((format!("Sh{}", j).into_bytes(), PdfObj::Ref(sh_obj)));
+                    }
+                    tile_resources.push((b"Shading".to_vec(), PdfObj::Dict(tile_sh)));
+                }
+
+                // Tile fonts
+                if !tile_result.used_font_names.is_empty() {
+                    let mut tile_fonts: Vec<(Vec<u8>, PdfObj)> = Vec::new();
+                    for name in &tile_result.used_font_names {
+                        if let Some(&obj_ref) = font_obj_map.get(name) {
+                            tile_fonts
+                                .push((name.clone().into_bytes(), PdfObj::Ref(obj_ref)));
+                        }
+                    }
+                    if !tile_fonts.is_empty() {
+                        tile_resources.push((b"Font".to_vec(), PdfObj::Dict(tile_fonts)));
+                    }
+                }
+
+                // Tile ExtGState
+                if !tile_result.ext_gstate_dicts.is_empty() {
+                    let mut tile_gs: Vec<(Vec<u8>, PdfObj)> = Vec::new();
+                    for (j, gs_dict) in tile_result.ext_gstate_dicts.iter().enumerate() {
+                        let entries: Vec<(Vec<u8>, PdfObj)> = gs_dict
+                            .entries
+                            .iter()
+                            .map(|(k, v)| {
+                                let obj = match v {
+                                    PdfObj::Bool(b) => PdfObj::Bool(*b),
+                                    PdfObj::Int(n) => PdfObj::Int(*n),
+                                    PdfObj::Name(n) => PdfObj::Name(n.clone()),
+                                    _ => PdfObj::Null,
+                                };
+                                (k.clone(), obj)
+                            })
+                            .collect();
+                        let gs_ref = writer.add_object(&PdfObj::Dict(entries));
+                        tile_gs
+                            .push((format!("GS{}", j).into_bytes(), PdfObj::Ref(gs_ref)));
+                    }
+                    tile_resources.push((b"ExtGState".to_vec(), PdfObj::Dict(tile_gs)));
+                }
+
+                // Tile color spaces
+                if !tile_result.color_spaces.is_empty() {
+                    let mut tile_cs: Vec<(Vec<u8>, PdfObj)> = Vec::new();
+                    for (name, spot_cs) in &tile_result.color_spaces {
+                        let cs_obj = build_spot_colorspace(spot_cs, writer);
+                        tile_cs.push((name.clone().into_bytes(), cs_obj));
+                    }
+                    tile_resources.push((b"ColorSpace".to_vec(), PdfObj::Dict(tile_cs)));
+                }
+
+                // Build Pattern stream object
+                let m = &pat_ref.pattern_matrix;
+                let pat_dict = vec![
+                    (b"Type".to_vec(), PdfObj::name("Pattern")),
+                    (b"PatternType".to_vec(), PdfObj::Int(1)),
+                    (
+                        b"PaintType".to_vec(),
+                        PdfObj::Int(pat_ref.paint_type as i64),
+                    ),
+                    (b"TilingType".to_vec(), PdfObj::Int(1)),
+                    (
+                        b"BBox".to_vec(),
+                        // Expand BBox slightly beyond XStep/YStep so adjacent tiles
+                        // overlap, eliminating hairline seam artifacts in PDF viewers.
+                        PdfObj::Array(vec![
+                            PdfObj::Real(pat_ref.bbox[0] - 0.5),
+                            PdfObj::Real(pat_ref.bbox[1] - 0.5),
+                            PdfObj::Real(pat_ref.bbox[2] + 0.5),
+                            PdfObj::Real(pat_ref.bbox[3] + 0.5),
+                        ]),
+                    ),
+                    (b"XStep".to_vec(), PdfObj::Real(pat_ref.xstep)),
+                    (b"YStep".to_vec(), PdfObj::Real(pat_ref.ystep)),
+                    (
+                        b"Matrix".to_vec(),
+                        PdfObj::Array(vec![
+                            PdfObj::Real(m.a),
+                            PdfObj::Real(m.b),
+                            PdfObj::Real(m.c),
+                            PdfObj::Real(m.d),
+                            PdfObj::Real(m.tx),
+                            PdfObj::Real(m.ty),
+                        ]),
+                    ),
+                    (b"Resources".to_vec(), PdfObj::Dict(tile_resources)),
+                ];
+
+                let pat_obj =
+                    writer.add_stream(pat_dict, &tile_result.content, true);
+                pattern_entries
+                    .push((format!("P{}", i).into_bytes(), PdfObj::Ref(pat_obj)));
+            }
+
+            resources.push((b"Pattern".to_vec(), PdfObj::Dict(pattern_entries)));
         }
 
         // Content stream
