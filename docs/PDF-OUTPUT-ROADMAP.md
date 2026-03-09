@@ -32,8 +32,9 @@ This roadmap tracks what's missing and prioritizes by impact on round-trip fidel
 | Standard 14 fonts | ✓ | Not embedded, referenced by name |
 | Text batching + kerning | ✓ | TJ arrays with computed kern values |
 | Paths (fill/stroke/clip) | ✓ | All segment types, fill rules, stroke params |
-| Axial/Radial shadings | ✓ | Type 2/3 with Extend flags, sampled function |
-| Mesh/Patch shadings | ✓ | Types 4/6/7 with encoded vertex data |
+| Axial/Radial shadings | ✓ | Type 2/3 with Extend flags, sampled function, native color spaces |
+| Mesh/Patch shadings | ✓ | Types 4/6/7 with encoded vertex data, native color spaces |
+| Native shading color spaces | ✓ | DeviceGray/RGB/CMYK, ICCBased, CalRGB/CalGray preserved |
 | Flate compression | ✓ | All streams deflated |
 | Multi-page output | ✓ | Pages tree with per-page resources |
 
@@ -45,8 +46,7 @@ This roadmap tracks what's missing and prioritizes by impact on round-trip fidel
 | Separation/DeviceN images | Pre-converted to RGB at op time | **HIGH** — round-trip + print |
 | Color key mask (Type 4) | ✓ `/Mask` array emitted | — |
 | Pattern fills | Gray placeholder (0.7) | **HIGH** — round-trip |
-| CMYK shadings | Hardcoded to DeviceRGB | **MEDIUM** — color fidelity |
-| CIE-based shadings | Pre-converted to RGB | **LOW** — visually close |
+| CIE shadings (complex decode) | Falls back to DeviceRGB | **LOW** — needs ICC profile construction (3.4) |
 | Overprint settings | Stored in gstate, not emitted | **MEDIUM** — print separations |
 | Transfer functions | Stored in gstate, not emitted | **LOW** — press calibration |
 | Halftone screens | Stored in gstate, not emitted | **LOW** — screening |
@@ -107,14 +107,22 @@ PS → PDF → pixels round-trip test. Fix these before PDF input validation.
   `crates/stet-render/src/skia_device.rs`, `crates/stet-core/src/device.rs`
 - **Effort**: Large — pattern rendering is architecturally complex
 
-### 1.6 CMYK Shadings
-- [ ] Carry original color space info in shading params (not just DeviceColor)
-- [ ] When source is DeviceCMYK, emit shading with `/DeviceCMYK` and 4-component samples
-- [ ] When source is Separation/DeviceN, emit with appropriate color space
-- [ ] Raster renderer: convert shading colors through proper color pipeline
-- **Files**: `crates/stet-core/src/device.rs` (shading params), `crates/stet-ops/src/shading_ops.rs`,
-  `crates/stet-pdf/src/shading_ops.rs`, `crates/stet-render/src/skia_device.rs`
-- **Effort**: Medium — plumb color space through shading pipeline
+### 1.6 Native Color Space Shadings ✅
+- [x] `ShadingColorSpace` enum: DeviceGray/RGB/CMYK, ICCBased, CalRGB, CalGray
+- [x] Raw component values carried through display list on ColorStop, ShadingVertex, ShadingPatch
+- [x] `color_space: ShadingColorSpace` on all 4 shading param structs
+- [x] WhitePoint stored in CieAbcParams/CieAParams for CalRGB/CalGray emission
+- [x] Raw ICC profile bytes stored in IccCache for PDF embedding
+- [x] `capture_shading_color_space()` maps PS ColorSpace → ShadingColorSpace at shfill time
+- [x] `detect_gamma()` identifies power-curve decode tables for CalRGB/CalGray (complex → DeviceRGB fallback)
+- [x] Separation/DeviceN shadings resolve to alt space (after tint conversion)
+- [x] PDF emitter: `shading_color_space_to_pdf()` emits native CS dicts + N-component samples
+- [x] Raster renderer: unchanged (uses DeviceColor.r/g/b)
+- **Verified**: hospital.eps CMYK shadings → DeviceCMYK in PDF; 10-ch8.ps/16-ch14.ps DeviceN→RGB correct
+- **Files**: `crates/stet-core/src/device.rs`, `crates/stet-core/src/graphics_state.rs`,
+  `crates/stet-core/src/icc.rs`, `crates/stet-core/src/mesh_shading.rs`,
+  `crates/stet-ops/src/shading_ops.rs`, `crates/stet-ops/src/color_ops.rs`,
+  `crates/stet-pdf/src/shading_ops.rs`
 
 ---
 
@@ -173,6 +181,16 @@ for producing usable PDF files.
 - [ ] Emit `/ri` operator in content stream
 - **Effort**: Small
 
+### 3.4 CIE → ICC Profile Construction
+- [ ] Build ICC profile binary from CIEBasedABC/A params with complex decode tables
+- [ ] Currently falls back to DeviceRGB when decode tables don't match simple gamma
+- **Effort**: Large — ICC binary format construction
+
+### 3.5 Type 1 Shading Native Color Rasterization
+- [ ] Rasterize function-based shadings to N-component pixel data instead of RGB
+- [ ] Currently pre-rasterized to 256×256 RGB image — visual quality loss is minimal
+- **Effort**: Medium — requires N-component pixel buffer
+
 ---
 
 ## Phase 4: Do When Needed
@@ -215,7 +233,7 @@ Phase 4 items are deferred — implement only when a specific need arises.
  ✅  1.1  Color key mask emission          done
  ✅  2.4  Document metadata                done
  ✅  2.3  TrimBox / BleedBox               done
- 4.  1.6  CMYK shadings                    medium    plumb color space through shadings
+ ✅  1.6  Native color space shadings      done      Gray/RGB/CMYK/ICCBased/CalRGB/CalGray
  5.  2.1  ExtGState framework              medium    unlocks overprint + future items
  6.  2.2  Overprint settings               small     needs ExtGState (#5)
  7.  1.2  Separation/DeviceN display list  medium    VM-free tint transform design
@@ -287,6 +305,6 @@ gs -dBATCH -dNOPAUSE -sDEVICE=png16m -r300 -o gs_%03d.png sample.pdf
 | Separation/DeviceN | `samples/hospital.eps` (CMYK), DeviceN test files |
 | Color key mask | `samples/image-qa.ps` (Type 4 images) |
 | Patterns | Pattern test files from PostForge |
-| CMYK shadings | Shading test with CMYK color space |
+| Native shading CS | `samples/hospital.eps` (CMYK→DeviceCMYK), `samples/10-ch8.ps` (DeviceN→RGB), `samples/16-ch14.ps` (DeviceN→RGB) |
 | Overprint | AGM EPS files with overprint flags |
 | Transfer functions | Files with `settransfer` / `setcolortransfer` |

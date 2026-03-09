@@ -864,6 +864,7 @@ pub struct CieAbcParams {
     pub range_lmn: [f64; 6], // [min_l, max_l, min_m, max_m, min_n, max_n]
     pub decode_lmn: Option<[Vec<f64>; 3]>, // 256-point pre-evaluated tables
     pub matrix_lmn: [f64; 9], // Column-major 3×3 (default identity)
+    pub white_point: [f64; 3], // CIE WhitePoint [Xw, Yw, Zw] (default D65)
 }
 
 impl Default for CieAbcParams {
@@ -875,6 +876,7 @@ impl Default for CieAbcParams {
             range_lmn: [0.0, 1.0, 0.0, 1.0, 0.0, 1.0],
             decode_lmn: None,
             matrix_lmn: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            white_point: [0.9505, 1.0, 1.089], // D65
         }
     }
 }
@@ -888,6 +890,7 @@ pub struct CieAParams {
     pub range_lmn: [f64; 6],               // [min_l, max_l, min_m, max_m, min_n, max_n]
     pub decode_lmn: Option<[Vec<f64>; 3]>, // 256-point pre-evaluated tables
     pub matrix_lmn: [f64; 9],              // Column-major 3×3 (default identity)
+    pub white_point: [f64; 3],             // CIE WhitePoint [Xw, Yw, Zw] (default D65)
 }
 
 impl Default for CieAParams {
@@ -899,6 +902,7 @@ impl Default for CieAParams {
             range_lmn: [0.0, 1.0, 0.0, 1.0, 0.0, 1.0],
             decode_lmn: None,
             matrix_lmn: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            white_point: [0.9505, 1.0, 1.089], // D65
         }
     }
 }

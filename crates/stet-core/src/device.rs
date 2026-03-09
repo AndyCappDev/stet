@@ -151,13 +151,53 @@ pub struct ImageParams {
     pub mask_color: Option<Vec<u8>>,
 }
 
+/// Color space carried through the display list for native shading output.
+///
+/// This allows output devices (PDF, future TIFF) to emit shadings in their
+/// native color space rather than pre-converting everything to RGB.
+/// The raster renderer ignores this and uses `DeviceColor.r/g/b`.
+#[derive(Clone, Debug)]
+pub enum ShadingColorSpace {
+    DeviceGray,
+    DeviceRGB,
+    DeviceCMYK,
+    ICCBased {
+        n: u32,
+        profile_hash: ProfileHash,
+        profile_data: Arc<Vec<u8>>,
+    },
+    CalRGB {
+        white_point: [f64; 3],
+        matrix: Option<[f64; 9]>,
+        gamma: Option<[f64; 3]>,
+    },
+    CalGray {
+        white_point: [f64; 3],
+        gamma: Option<f64>,
+    },
+}
+
+impl ShadingColorSpace {
+    /// Number of color components in this color space.
+    pub fn num_components(&self) -> usize {
+        match self {
+            ShadingColorSpace::DeviceGray | ShadingColorSpace::CalGray { .. } => 1,
+            ShadingColorSpace::DeviceRGB | ShadingColorSpace::CalRGB { .. } => 3,
+            ShadingColorSpace::DeviceCMYK => 4,
+            ShadingColorSpace::ICCBased { n, .. } => *n as usize,
+        }
+    }
+}
+
 /// A single color stop in a gradient.
 #[derive(Clone, Debug)]
 pub struct ColorStop {
     /// Position along the gradient, normalized to 0.0..=1.0.
     pub position: f64,
-    /// Color at this position.
+    /// Color at this position (RGB for raster rendering).
     pub color: DeviceColor,
+    /// Raw component values in the native color space (for PDF/TIFF output).
+    pub raw_components: Vec<f64>,
 }
 
 /// Parameters for axial (linear) gradient shading (Type 2).
@@ -172,6 +212,7 @@ pub struct AxialShadingParams {
     pub extend_end: bool,
     pub ctm: Matrix,
     pub bbox: Option<[f64; 4]>,
+    pub color_space: ShadingColorSpace,
 }
 
 /// Parameters for radial gradient shading (Type 3).
@@ -188,6 +229,7 @@ pub struct RadialShadingParams {
     pub extend_end: bool,
     pub ctm: Matrix,
     pub bbox: Option<[f64; 4]>,
+    pub color_space: ShadingColorSpace,
 }
 
 /// A vertex in a shading triangle mesh.
@@ -196,6 +238,8 @@ pub struct ShadingVertex {
     pub x: f64,
     pub y: f64,
     pub color: DeviceColor,
+    /// Raw component values in the native color space (for PDF/TIFF output).
+    pub raw_components: Vec<f64>,
 }
 
 /// A triangle in a shading mesh.
@@ -212,6 +256,7 @@ pub struct MeshShadingParams {
     pub triangles: Vec<ShadingTriangle>,
     pub ctm: Matrix,
     pub bbox: Option<[f64; 4]>,
+    pub color_space: ShadingColorSpace,
 }
 
 /// A patch in a Coons or tensor-product patch mesh.
@@ -219,8 +264,10 @@ pub struct MeshShadingParams {
 pub struct ShadingPatch {
     /// Control points: 12 for Coons (Type 6), 16 for tensor (Type 7).
     pub points: Vec<(f64, f64)>,
-    /// Colors at the 4 corners.
+    /// Colors at the 4 corners (RGB for raster rendering).
     pub colors: [DeviceColor; 4],
+    /// Raw component values for the 4 corners in the native color space.
+    pub raw_colors: [Vec<f64>; 4],
 }
 
 /// Parameters for Coons/tensor-product patch mesh shading (Types 6 & 7).
@@ -229,6 +276,7 @@ pub struct PatchShadingParams {
     pub patches: Vec<ShadingPatch>,
     pub ctm: Matrix,
     pub bbox: Option<[f64; 4]>,
+    pub color_space: ShadingColorSpace,
 }
 
 /// Parameters for a tiled pattern fill.

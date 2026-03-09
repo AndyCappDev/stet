@@ -38,6 +38,8 @@ pub struct IccCache {
     default_cmyk_hash: Option<ProfileHash>,
     /// Raw bytes of the system CMYK profile (for re-registration in render threads).
     system_cmyk_bytes: Option<Arc<Vec<u8>>>,
+    /// Raw profile bytes for each registered profile (for PDF embedding).
+    raw_bytes: HashMap<ProfileHash, Arc<Vec<u8>>>,
     /// sRGB output profile (created once).
     srgb_profile: ColorProfile,
 }
@@ -57,6 +59,7 @@ impl IccCache {
             color_cache: HashMap::new(),
             default_cmyk_hash: None,
             system_cmyk_bytes: None,
+            raw_bytes: HashMap::new(),
             srgb_profile: ColorProfile::new_srgb(),
         }
     }
@@ -70,6 +73,11 @@ impl IccCache {
         if self.transforms.contains_key(&hash) {
             return Some(hash);
         }
+
+        // Store raw bytes for PDF embedding
+        self.raw_bytes
+            .entry(hash)
+            .or_insert_with(|| Arc::new(bytes.to_vec()));
 
         let profile = match ColorProfile::new_from_slice(bytes) {
             Ok(p) => p,
@@ -240,6 +248,11 @@ impl IccCache {
         self.transforms.contains_key(hash)
     }
 
+    /// Get the raw bytes of a registered ICC profile (for PDF embedding).
+    pub fn get_profile_bytes(&self, hash: &ProfileHash) -> Option<Arc<Vec<u8>>> {
+        self.raw_bytes.get(hash).cloned()
+    }
+
     /// Get the raw bytes of the system CMYK profile (for re-registration in render threads).
     pub fn system_cmyk_bytes(&self) -> Option<&Arc<Vec<u8>>> {
         self.system_cmyk_bytes.as_ref()
@@ -264,6 +277,7 @@ impl IccCache {
         self.profiles.clear();
         self.transforms.clear();
         self.color_cache.clear();
+        self.raw_bytes.clear();
         self.default_cmyk_hash = None;
         self.system_cmyk_bytes = None;
     }

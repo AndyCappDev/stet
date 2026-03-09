@@ -10,7 +10,7 @@
 use stet_core::context::Context;
 use stet_core::device::{
     AxialShadingParams, ColorStop, ImageParams, MeshShadingParams, PatchShadingParams,
-    RadialShadingParams,
+    RadialShadingParams, ShadingColorSpace,
 };
 use stet_core::dict::DictKey;
 use stet_core::display_list::DisplayElement;
@@ -58,15 +58,18 @@ pub fn op_shfill(ctx: &mut Context) -> Result<(), PsError> {
     // CTM snapshot
     let ctm = ctx.gstate.ctm;
 
+    // Capture the shading color space for native output (PDF, TIFF)
+    let shading_cs = capture_shading_color_space(ctx, &color_space);
+
     // Dispatch to type-specific builders
     match shading_type {
         1 => build_type1_shading(ctx, dict_entity, &color_space, n_comps, ctm, bbox)?,
-        2 => build_type2_shading(ctx, dict_entity, &color_space, n_comps, ctm, bbox)?,
-        3 => build_type3_shading(ctx, dict_entity, &color_space, n_comps, ctm, bbox)?,
-        4 => build_type4_shading(ctx, dict_entity, &color_space, n_comps, ctm, bbox)?,
-        5 => build_type5_shading(ctx, dict_entity, &color_space, n_comps, ctm, bbox)?,
-        6 => build_type6_shading(ctx, dict_entity, &color_space, n_comps, ctm, bbox)?,
-        7 => build_type7_shading(ctx, dict_entity, &color_space, n_comps, ctm, bbox)?,
+        2 => build_type2_shading(ctx, dict_entity, &color_space, n_comps, ctm, bbox, shading_cs)?,
+        3 => build_type3_shading(ctx, dict_entity, &color_space, n_comps, ctm, bbox, shading_cs)?,
+        4 => build_type4_shading(ctx, dict_entity, &color_space, n_comps, ctm, bbox, shading_cs)?,
+        5 => build_type5_shading(ctx, dict_entity, &color_space, n_comps, ctm, bbox, shading_cs)?,
+        6 => build_type6_shading(ctx, dict_entity, &color_space, n_comps, ctm, bbox, shading_cs)?,
+        7 => build_type7_shading(ctx, dict_entity, &color_space, n_comps, ctm, bbox, shading_cs)?,
         _ => {} // Already validated above
     }
 
@@ -83,6 +86,7 @@ fn build_type2_shading(
     n_comps: usize,
     ctm: Matrix,
     bbox: Option<[f64; 4]>,
+    shading_cs: ShadingColorSpace,
 ) -> Result<(), PsError> {
     // Coords [x0 y0 x1 y1] (required)
     let coords = get_dict_float_vec(ctx, dict, b"Coords").ok_or(PsError::Undefined)?;
@@ -124,6 +128,7 @@ fn build_type2_shading(
             extend_end,
             ctm,
             bbox,
+            color_space: shading_cs,
         },
     });
 
@@ -139,6 +144,7 @@ fn build_type3_shading(
     n_comps: usize,
     ctm: Matrix,
     bbox: Option<[f64; 4]>,
+    shading_cs: ShadingColorSpace,
 ) -> Result<(), PsError> {
     // Coords [x0 y0 r0 x1 y1 r1] (required)
     let coords = get_dict_float_vec(ctx, dict, b"Coords").ok_or(PsError::Undefined)?;
@@ -181,6 +187,7 @@ fn build_type3_shading(
             extend_end,
             ctm,
             bbox,
+            color_space: shading_cs,
         },
     });
 
@@ -334,6 +341,7 @@ fn build_type4_shading(
     n_comps: usize,
     ctm: Matrix,
     bbox: Option<[f64; 4]>,
+    shading_cs: ShadingColorSpace,
 ) -> Result<(), PsError> {
     let ds_obj = get_dict_obj(ctx, dict, b"DataSource").ok_or(PsError::Undefined)?;
 
@@ -364,6 +372,7 @@ fn build_type4_shading(
                 triangles,
                 ctm,
                 bbox,
+                color_space: shading_cs,
             },
         });
     }
@@ -378,6 +387,7 @@ fn build_type5_shading(
     n_comps: usize,
     ctm: Matrix,
     bbox: Option<[f64; 4]>,
+    shading_cs: ShadingColorSpace,
 ) -> Result<(), PsError> {
     let verts_per_row =
         get_dict_int(ctx, dict, b"VerticesPerRow").ok_or(PsError::Undefined)? as usize;
@@ -408,6 +418,7 @@ fn build_type5_shading(
                 triangles,
                 ctm,
                 bbox,
+                color_space: shading_cs,
             },
         });
     }
@@ -424,6 +435,7 @@ fn build_type6_shading(
     n_comps: usize,
     ctm: Matrix,
     bbox: Option<[f64; 4]>,
+    shading_cs: ShadingColorSpace,
 ) -> Result<(), PsError> {
     let ds_obj = get_dict_obj(ctx, dict, b"DataSource").ok_or(PsError::Undefined)?;
 
@@ -448,7 +460,12 @@ fn build_type6_shading(
 
     if !patches.is_empty() {
         ctx.display_list.push(DisplayElement::PatchShading {
-            params: PatchShadingParams { patches, ctm, bbox },
+            params: PatchShadingParams {
+                patches,
+                ctm,
+                bbox,
+                color_space: shading_cs,
+            },
         });
     }
 
@@ -462,6 +479,7 @@ fn build_type7_shading(
     n_comps: usize,
     ctm: Matrix,
     bbox: Option<[f64; 4]>,
+    shading_cs: ShadingColorSpace,
 ) -> Result<(), PsError> {
     let ds_obj = get_dict_obj(ctx, dict, b"DataSource").ok_or(PsError::Undefined)?;
 
@@ -486,7 +504,12 @@ fn build_type7_shading(
 
     if !patches.is_empty() {
         ctx.display_list.push(DisplayElement::PatchShading {
-            params: PatchShadingParams { patches, ctm, bbox },
+            params: PatchShadingParams {
+                patches,
+                ctm,
+                bbox,
+                color_space: shading_cs,
+            },
         });
     }
 
@@ -694,13 +717,20 @@ fn sample_shading_function(
         let t_norm = i as f64 / num_samples as f64;
         let t_domain = d_min + t_norm * d_range;
 
-        let color = if let Some(func_entity) = func_dict {
+        let (color, raw_components) = if let Some(func_entity) = func_dict {
             let results = evaluate_ps_function(ctx, func_entity, &[t_domain])?;
             if needs_tint_conversion(color_space) {
                 let alt = convert_tint_color(ctx, &results, color_space)?;
-                components_to_device_color(&alt, get_alt_space(color_space), &mut ctx.icc_cache)
+                let color = components_to_device_color(
+                    &alt,
+                    get_alt_space(color_space),
+                    &mut ctx.icc_cache,
+                );
+                (color, alt)
             } else {
-                components_to_device_color(&results, color_space, &mut ctx.icc_cache)
+                let color =
+                    components_to_device_color(&results, color_space, &mut ctx.icc_cache);
+                (color, results)
             }
         } else {
             ctx.o_stack.push(PsObject::real(t_domain))?;
@@ -711,19 +741,184 @@ fn sample_shading_function(
                     comps[i] = ctx.o_stack.pop()?.as_f64().unwrap_or(0.0);
                 }
                 let alt = convert_tint_color(ctx, &comps, color_space)?;
-                components_to_device_color(&alt, get_alt_space(color_space), &mut ctx.icc_cache)
+                let color = components_to_device_color(
+                    &alt,
+                    get_alt_space(color_space),
+                    &mut ctx.icc_cache,
+                );
+                (color, alt)
             } else {
-                pop_color_components(ctx, n_comps, color_space)
+                let mut comps = vec![0.0; n_comps];
+                for j in (0..n_comps).rev() {
+                    comps[j] = ctx
+                        .o_stack
+                        .pop()
+                        .ok()
+                        .and_then(|o| o.as_f64())
+                        .unwrap_or(0.0);
+                }
+                let color =
+                    components_to_device_color(&comps, color_space, &mut ctx.icc_cache);
+                (color, comps)
             }
         };
 
         stops.push(ColorStop {
             position: t_norm,
             color,
+            raw_components,
         });
     }
 
     Ok(stops)
+}
+
+/// Detect if a 256-sample decode table matches `f(x) = x^γ` within tolerance.
+/// Returns `Some(gamma)` if the table is a power curve, `None` otherwise.
+fn detect_gamma(table: &[f64]) -> Option<f64> {
+    if table.len() < 2 {
+        return None;
+    }
+    // Check table starts at ~0 and ends at ~1 (expected for decode tables)
+    if table[0].abs() > 0.01 || (table[table.len() - 1] - 1.0).abs() > 0.01 {
+        return None;
+    }
+    // Use a sample point near the middle to estimate gamma
+    let mid_idx = table.len() / 2;
+    let x = mid_idx as f64 / (table.len() - 1) as f64;
+    let y = table[mid_idx];
+    if y <= 0.001 || x <= 0.001 {
+        return None;
+    }
+    let gamma = y.ln() / x.ln();
+    if !(0.1..=10.0).contains(&gamma) {
+        return None;
+    }
+    // Verify the gamma fits the whole table within tolerance
+    let n = table.len() - 1;
+    for (i, &val) in table.iter().enumerate() {
+        let t = i as f64 / n as f64;
+        let expected = t.powf(gamma);
+        if (val - expected).abs() > 0.005 {
+            return None;
+        }
+    }
+    Some(gamma)
+}
+
+/// Map a PostScript ColorSpace to a ShadingColorSpace for the display list.
+fn capture_shading_color_space(
+    ctx: &Context,
+    color_space: &ColorSpace,
+) -> ShadingColorSpace {
+    match color_space {
+        ColorSpace::DeviceGray => ShadingColorSpace::DeviceGray,
+        ColorSpace::DeviceRGB => ShadingColorSpace::DeviceRGB,
+        ColorSpace::DeviceCMYK => ShadingColorSpace::DeviceCMYK,
+        ColorSpace::ICCBased {
+            n, profile_hash, ..
+        } => {
+            if let Some(hash) = profile_hash
+                && let Some(bytes) = ctx.icc_cache.get_profile_bytes(hash)
+            {
+                return ShadingColorSpace::ICCBased {
+                    n: *n,
+                    profile_hash: *hash,
+                    profile_data: bytes,
+                };
+            }
+            // Fallback by component count
+            match n {
+                1 => ShadingColorSpace::DeviceGray,
+                3 => ShadingColorSpace::DeviceRGB,
+                4 => ShadingColorSpace::DeviceCMYK,
+                _ => ShadingColorSpace::DeviceRGB,
+            }
+        }
+        ColorSpace::CIEBasedABC { params, .. } => {
+            // Check if decode tables are simple gamma curves
+            let gamma = if let Some(ref tables) = params.decode_abc {
+                let g0 = detect_gamma(&tables[0]);
+                let g1 = detect_gamma(&tables[1]);
+                let g2 = detect_gamma(&tables[2]);
+                match (g0, g1, g2) {
+                    (Some(a), Some(b), Some(c)) => Some([a, b, c]),
+                    _ => None,
+                }
+            } else {
+                // No decode tables = identity (gamma 1.0)
+                Some([1.0, 1.0, 1.0])
+            };
+            // Check if DecodeLMN is also simple (identity or gamma)
+            let lmn_simple = params.decode_lmn.as_ref().is_none_or(|tables| {
+                detect_gamma(&tables[0]).is_some()
+                    && detect_gamma(&tables[1]).is_some()
+                    && detect_gamma(&tables[2]).is_some()
+            });
+            if let Some(g) = gamma
+                && lmn_simple
+            {
+                // Check if matrix_abc is identity
+                let identity_mat = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+                let mat = if params.matrix_abc == identity_mat {
+                    // Use matrix_lmn if matrix_abc is identity
+                    if params.matrix_lmn == identity_mat {
+                        None
+                    } else {
+                        Some(params.matrix_lmn)
+                    }
+                } else {
+                    Some(params.matrix_abc)
+                };
+                let gamma_opt = if g == [1.0, 1.0, 1.0] {
+                    None
+                } else {
+                    Some(g)
+                };
+                return ShadingColorSpace::CalRGB {
+                    white_point: params.white_point,
+                    matrix: mat,
+                    gamma: gamma_opt,
+                };
+            }
+            // Complex decode tables — fallback to DeviceRGB
+            ShadingColorSpace::DeviceRGB
+        }
+        ColorSpace::CIEBasedA { params, .. } => {
+            let gamma = if let Some(ref table) = params.decode_a {
+                detect_gamma(table)
+            } else {
+                Some(1.0)
+            };
+            let lmn_simple = params.decode_lmn.is_none();
+            if let Some(g) = gamma
+                && lmn_simple
+            {
+                let gamma_opt = if (g - 1.0).abs() < 0.001 {
+                    None
+                } else {
+                    Some(g)
+                };
+                return ShadingColorSpace::CalGray {
+                    white_point: params.white_point,
+                    gamma: gamma_opt,
+                };
+            }
+            ShadingColorSpace::DeviceGray
+        }
+        ColorSpace::CIEBasedDEF { .. } | ColorSpace::CIEBasedDEFG { .. } => {
+            // No PDF equivalent — values already converted to sRGB in DeviceColor
+            ShadingColorSpace::DeviceRGB
+        }
+        ColorSpace::Separation { alt_space, .. } | ColorSpace::DeviceN { alt_space, .. } => {
+            // After tint conversion, use the alt space
+            capture_shading_color_space(ctx, alt_space)
+        }
+        ColorSpace::Indexed { base, .. } => {
+            // Shouldn't appear in shadings, but handle gracefully
+            capture_shading_color_space(ctx, base)
+        }
+    }
 }
 
 /// Convert component values to DeviceColor based on color space.

@@ -1289,6 +1289,11 @@ fn extract_cie_abc_params(ctx: &Context, dict_entity: EntityId) -> CieAbcParams 
         params.matrix_lmn.copy_from_slice(&mat_lmn[..9]);
     }
 
+    let wp = get_cie_float_array(ctx, dict_entity, b"WhitePoint", &params.white_point);
+    if wp.len() >= 3 {
+        params.white_point.copy_from_slice(&wp[..3]);
+    }
+
     params
 }
 
@@ -1314,6 +1319,11 @@ fn extract_cie_a_params(ctx: &Context, dict_entity: EntityId) -> CieAParams {
     let mat_lmn = get_cie_float_array(ctx, dict_entity, b"MatrixLMN", &params.matrix_lmn);
     if mat_lmn.len() >= 9 {
         params.matrix_lmn.copy_from_slice(&mat_lmn[..9]);
+    }
+
+    let wp = get_cie_float_array(ctx, dict_entity, b"WhitePoint", &params.white_point);
+    if wp.len() >= 3 {
+        params.white_point.copy_from_slice(&wp[..3]);
     }
 
     params

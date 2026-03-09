@@ -116,8 +116,9 @@ fn decode_scale(bits: usize, min: f64, max: f64) -> f64 {
 
 /// Convert color components to DeviceColor based on component count.
 /// Uses ICC CMYK profile when available for 4-component colors.
-fn components_to_color(comps: &[f64]) -> DeviceColor {
-    match comps.len() {
+fn components_to_color(comps: &[f64]) -> (DeviceColor, Vec<f64>) {
+    let raw = comps.to_vec();
+    let color = match comps.len() {
         1 => DeviceColor::from_gray(comps[0].clamp(0.0, 1.0)),
         3 => DeviceColor::from_rgb(
             comps[0].clamp(0.0, 1.0),
@@ -131,7 +132,6 @@ fn components_to_color(comps: &[f64]) -> DeviceColor {
             comps[3].clamp(0.0, 1.0),
         ),
         _ => {
-            // Fallback: treat first 3 as RGB if available
             if comps.len() >= 3 {
                 DeviceColor::from_rgb(
                     comps[0].clamp(0.0, 1.0),
@@ -142,7 +142,8 @@ fn components_to_color(comps: &[f64]) -> DeviceColor {
                 DeviceColor::from_gray(0.0)
             }
         }
-    }
+    };
+    (color, raw)
 }
 
 /// Parse a Type 4 free-form Gouraud-shaded triangle mesh from binary data.
@@ -189,8 +190,8 @@ pub fn parse_type4_mesh(
             let raw = reader.read(bpco)?;
             *comp = decode_value(raw, color_params[i].1, color_params[i].0);
         }
-        let color = components_to_color(&comps);
-        Some((flag, ShadingVertex { x, y, color }))
+        let (color, raw_components) = components_to_color(&comps);
+        Some((flag, ShadingVertex { x, y, color, raw_components }))
     };
 
     // Running list of vertices for edge connectivity
@@ -304,10 +305,12 @@ pub fn parse_type5_mesh(
         if !ok {
             break;
         }
+        let (color, raw_components) = components_to_color(&comps);
         all_vertices.push(ShadingVertex {
             x,
             y,
-            color: components_to_color(&comps),
+            color,
+            raw_components,
         });
     }
 
@@ -381,7 +384,7 @@ pub fn parse_type6_patches(
         ))
     };
 
-    let read_color = |reader: &mut BitReader| -> Option<DeviceColor> {
+    let read_color = |reader: &mut BitReader| -> Option<(DeviceColor, Vec<f64>)> {
         let mut comps = vec![0.0f64; n_comps];
         for (i, comp) in comps.iter_mut().enumerate() {
             let raw = reader.read(bpco)?;
@@ -400,6 +403,7 @@ pub fn parse_type6_patches(
                 // Independent patch: 12 points + 4 colors
                 let mut points = Vec::with_capacity(12);
                 let mut colors = Vec::with_capacity(4);
+                let mut raw_colors_vec = Vec::with_capacity(4);
                 let mut ok = true;
                 for _ in 0..12 {
                     if let Some(pt) = read_point(&mut reader) {
@@ -411,8 +415,9 @@ pub fn parse_type6_patches(
                 }
                 if ok {
                     for _ in 0..4 {
-                        if let Some(c) = read_color(&mut reader) {
+                        if let Some((c, rc)) = read_color(&mut reader) {
                             colors.push(c);
+                            raw_colors_vec.push(rc);
                         } else {
                             ok = false;
                             break;
@@ -428,6 +433,12 @@ pub fn parse_type6_patches(
                             colors[2].clone(),
                             colors[3].clone(),
                         ],
+                        raw_colors: [
+                            raw_colors_vec[0].clone(),
+                            raw_colors_vec[1].clone(),
+                            raw_colors_vec[2].clone(),
+                            raw_colors_vec[3].clone(),
+                        ],
                     });
                 }
             }
@@ -438,28 +449,22 @@ pub fn parse_type6_patches(
                 }
                 let prev = patches.last().unwrap().clone();
 
-                let (inherited_pts, inherited_colors) = match flag {
-                    1 => {
-                        // Inherit side 1: points[3..6], colors[1..3]
-                        (
-                            prev.points[3..6].to_vec(),
-                            [prev.colors[1].clone(), prev.colors[2].clone()],
-                        )
-                    }
-                    2 => {
-                        // Inherit side 2: points[6..9], colors[2..4]
-                        (
-                            prev.points[6..9].to_vec(),
-                            [prev.colors[2].clone(), prev.colors[3].clone()],
-                        )
-                    }
-                    3 => {
-                        // Inherit side 3: points[9..12], colors[3,0]
-                        (
-                            prev.points[9..12].to_vec(),
-                            [prev.colors[3].clone(), prev.colors[0].clone()],
-                        )
-                    }
+                let (inherited_pts, inherited_colors, inherited_raw) = match flag {
+                    1 => (
+                        prev.points[3..6].to_vec(),
+                        [prev.colors[1].clone(), prev.colors[2].clone()],
+                        [prev.raw_colors[1].clone(), prev.raw_colors[2].clone()],
+                    ),
+                    2 => (
+                        prev.points[6..9].to_vec(),
+                        [prev.colors[2].clone(), prev.colors[3].clone()],
+                        [prev.raw_colors[2].clone(), prev.raw_colors[3].clone()],
+                    ),
+                    3 => (
+                        prev.points[9..12].to_vec(),
+                        [prev.colors[3].clone(), prev.colors[0].clone()],
+                        [prev.raw_colors[3].clone(), prev.raw_colors[0].clone()],
+                    ),
                     _ => unreachable!(),
                 };
 
@@ -475,10 +480,12 @@ pub fn parse_type6_patches(
                     }
                 }
                 let mut colors = vec![inherited_colors[0].clone(), inherited_colors[1].clone()];
+                let mut raw_colors_vec = vec![inherited_raw[0].clone(), inherited_raw[1].clone()];
                 if ok {
                     for _ in 0..2 {
-                        if let Some(c) = read_color(&mut reader) {
+                        if let Some((c, rc)) = read_color(&mut reader) {
                             colors.push(c);
+                            raw_colors_vec.push(rc);
                         } else {
                             ok = false;
                             break;
@@ -493,6 +500,12 @@ pub fn parse_type6_patches(
                             colors[1].clone(),
                             colors[2].clone(),
                             colors[3].clone(),
+                        ],
+                        raw_colors: [
+                            raw_colors_vec[0].clone(),
+                            raw_colors_vec[1].clone(),
+                            raw_colors_vec[2].clone(),
+                            raw_colors_vec[3].clone(),
                         ],
                     });
                 }
@@ -537,7 +550,7 @@ pub fn parse_type7_patches(
         ))
     };
 
-    let read_color = |reader: &mut BitReader| -> Option<DeviceColor> {
+    let read_color = |reader: &mut BitReader| -> Option<(DeviceColor, Vec<f64>)> {
         let mut comps = vec![0.0f64; n_comps];
         for (i, comp) in comps.iter_mut().enumerate() {
             let raw = reader.read(bpco)?;
@@ -553,6 +566,7 @@ pub fn parse_type7_patches(
         // Simplified: read all patches as independent (16 points + 4 colors)
         let mut points = Vec::with_capacity(16);
         let mut colors = Vec::with_capacity(4);
+        let mut raw_colors_vec = Vec::with_capacity(4);
         let mut ok = true;
         for _ in 0..16 {
             if let Some(pt) = read_point(&mut reader) {
@@ -564,8 +578,9 @@ pub fn parse_type7_patches(
         }
         if ok {
             for _ in 0..4 {
-                if let Some(c) = read_color(&mut reader) {
+                if let Some((c, rc)) = read_color(&mut reader) {
                     colors.push(c);
+                    raw_colors_vec.push(rc);
                 } else {
                     ok = false;
                     break;
@@ -580,6 +595,12 @@ pub fn parse_type7_patches(
                     colors[1].clone(),
                     colors[2].clone(),
                     colors[3].clone(),
+                ],
+                raw_colors: [
+                    raw_colors_vec[0].clone(),
+                    raw_colors_vec[1].clone(),
+                    raw_colors_vec[2].clone(),
+                    raw_colors_vec[3].clone(),
                 ],
             });
         }
@@ -601,8 +622,8 @@ pub fn build_type4_from_array(values: &[f64], n_comps: usize) -> Vec<ShadingTria
         let x = values[pos + 1];
         let y = values[pos + 2];
         let comps: Vec<f64> = values[pos + 3..pos + 3 + n_comps].to_vec();
-        let color = components_to_color(&comps);
-        let vertex = ShadingVertex { x, y, color };
+        let (color, raw_components) = components_to_color(&comps);
+        let vertex = ShadingVertex { x, y, color, raw_components };
         pos += stride;
 
         match flag {
@@ -616,10 +637,12 @@ pub fn build_type4_from_array(values: &[f64], n_comps: usize) -> Vec<ShadingTria
                     let x2 = values[pos + 1];
                     let y2 = values[pos + 2];
                     let comps2: Vec<f64> = values[pos + 3..pos + 3 + n_comps].to_vec();
+                    let (color2, raw2) = components_to_color(&comps2);
                     vertices.push(ShadingVertex {
                         x: x2,
                         y: y2,
-                        color: components_to_color(&comps2),
+                        color: color2,
+                        raw_components: raw2,
                     });
                     pos += stride;
                 }
@@ -673,10 +696,12 @@ pub fn build_type5_from_array(
         let x = values[pos];
         let y = values[pos + 1];
         let comps: Vec<f64> = values[pos + 2..pos + 2 + n_comps].to_vec();
+        let (color, raw_components) = components_to_color(&comps);
         all_vertices.push(ShadingVertex {
             x,
             y,
-            color: components_to_color(&comps),
+            color,
+            raw_components,
         });
         pos += stride;
     }
@@ -740,9 +765,12 @@ pub fn build_type6_from_array(values: &[f64], n_comps: usize) -> Vec<ShadingPatc
                 }
                 pos += 24;
                 let mut colors = Vec::with_capacity(4);
+                let mut raw_colors_vec = Vec::with_capacity(4);
                 for _ in 0..4 {
                     let comps: Vec<f64> = values[pos..pos + n_comps].to_vec();
-                    colors.push(components_to_color(&comps));
+                    let (c, rc) = components_to_color(&comps);
+                    colors.push(c);
+                    raw_colors_vec.push(rc);
                     pos += n_comps;
                 }
                 let _ = full_stride; // used for documentation
@@ -754,6 +782,12 @@ pub fn build_type6_from_array(values: &[f64], n_comps: usize) -> Vec<ShadingPatc
                         colors[2].clone(),
                         colors[3].clone(),
                     ],
+                    raw_colors: [
+                        raw_colors_vec[0].clone(),
+                        raw_colors_vec[1].clone(),
+                        raw_colors_vec[2].clone(),
+                        raw_colors_vec[3].clone(),
+                    ],
                 });
             }
             1..=3 => {
@@ -761,18 +795,21 @@ pub fn build_type6_from_array(values: &[f64], n_comps: usize) -> Vec<ShadingPatc
                     break;
                 }
                 let prev = patches.last().unwrap().clone();
-                let (inherited_pts, inherited_colors) = match flag {
+                let (inherited_pts, inherited_colors, inherited_raw) = match flag {
                     1 => (
                         prev.points[3..6].to_vec(),
                         [prev.colors[1].clone(), prev.colors[2].clone()],
+                        [prev.raw_colors[1].clone(), prev.raw_colors[2].clone()],
                     ),
                     2 => (
                         prev.points[6..9].to_vec(),
                         [prev.colors[2].clone(), prev.colors[3].clone()],
+                        [prev.raw_colors[2].clone(), prev.raw_colors[3].clone()],
                     ),
                     3 => (
                         prev.points[9..12].to_vec(),
                         [prev.colors[3].clone(), prev.colors[0].clone()],
+                        [prev.raw_colors[3].clone(), prev.raw_colors[0].clone()],
                     ),
                     _ => unreachable!(),
                 };
@@ -786,9 +823,12 @@ pub fn build_type6_from_array(values: &[f64], n_comps: usize) -> Vec<ShadingPatc
                 }
                 pos += 18;
                 let mut colors = vec![inherited_colors[0].clone(), inherited_colors[1].clone()];
+                let mut raw_colors_vec = vec![inherited_raw[0].clone(), inherited_raw[1].clone()];
                 for _ in 0..2 {
                     let comps: Vec<f64> = values[pos..pos + n_comps].to_vec();
-                    colors.push(components_to_color(&comps));
+                    let (c, rc) = components_to_color(&comps);
+                    colors.push(c);
+                    raw_colors_vec.push(rc);
                     pos += n_comps;
                 }
                 let _ = cont_stride;
@@ -799,6 +839,12 @@ pub fn build_type6_from_array(values: &[f64], n_comps: usize) -> Vec<ShadingPatc
                         colors[1].clone(),
                         colors[2].clone(),
                         colors[3].clone(),
+                    ],
+                    raw_colors: [
+                        raw_colors_vec[0].clone(),
+                        raw_colors_vec[1].clone(),
+                        raw_colors_vec[2].clone(),
+                        raw_colors_vec[3].clone(),
                     ],
                 });
             }
@@ -825,9 +871,12 @@ pub fn build_type7_from_array(values: &[f64], n_comps: usize) -> Vec<ShadingPatc
         }
         pos += 32;
         let mut colors = Vec::with_capacity(4);
+        let mut raw_colors_vec = Vec::with_capacity(4);
         for _ in 0..4 {
             let comps: Vec<f64> = values[pos..pos + n_comps].to_vec();
-            colors.push(components_to_color(&comps));
+            let (c, rc) = components_to_color(&comps);
+            colors.push(c);
+            raw_colors_vec.push(rc);
             pos += n_comps;
         }
         patches.push(ShadingPatch {
@@ -837,6 +886,12 @@ pub fn build_type7_from_array(values: &[f64], n_comps: usize) -> Vec<ShadingPatc
                 colors[1].clone(),
                 colors[2].clone(),
                 colors[3].clone(),
+            ],
+            raw_colors: [
+                raw_colors_vec[0].clone(),
+                raw_colors_vec[1].clone(),
+                raw_colors_vec[2].clone(),
+                raw_colors_vec[3].clone(),
             ],
         });
     }

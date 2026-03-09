@@ -3804,6 +3804,7 @@ fn render_patch_shading_to_pixmap(
             triangles,
             ctm: params.ctm,
             bbox: params.bbox,
+            color_space: params.color_space.clone(),
         };
         render_mesh_shading_to_pixmap(pixmap, &mesh_params, y_start, clip_mask);
     }
@@ -3851,16 +3852,19 @@ fn subdivide_patch_to_triangles(
                     x: *x00,
                     y: *y00,
                     color: c00.clone(),
+                    raw_components: vec![],
                 },
                 v1: ShadingVertex {
                     x: *x10,
                     y: *y10,
                     color: c10.clone(),
+                    raw_components: vec![],
                 },
                 v2: ShadingVertex {
                     x: *x01,
                     y: *y01,
                     color: c01.clone(),
+                    raw_components: vec![],
                 },
             });
             triangles.push(stet_core::device::ShadingTriangle {
@@ -3868,16 +3872,19 @@ fn subdivide_patch_to_triangles(
                     x: *x10,
                     y: *y10,
                     color: c10.clone(),
+                    raw_components: vec![],
                 },
                 v1: ShadingVertex {
                     x: *x11,
                     y: *y11,
                     color: c11.clone(),
+                    raw_components: vec![],
                 },
                 v2: ShadingVertex {
                     x: *x01,
                     y: *y01,
                     color: c01.clone(),
+                    raw_components: vec![],
                 },
             });
         }
@@ -4300,6 +4307,7 @@ fn render_patch_shading_viewport(
             triangles,
             ctm: params.ctm,
             bbox: params.bbox,
+            color_space: params.color_space.clone(),
         };
         render_mesh_shading_viewport(
             pixmap,
