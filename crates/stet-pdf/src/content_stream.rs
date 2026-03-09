@@ -10,7 +10,7 @@ use std::io::Write as IoWrite;
 use stet_core::context::Context;
 use stet_core::device::{
     AxialShadingParams, MeshShadingParams, PatchShadingParams, PatternFillParams,
-    RadialShadingParams, SpotColor, SpotColorSpace, StrokeParams, TextParams,
+    RadialShadingParams, SpotColor, SpotColorSpace, StrokeParams, TextParams, TransferState,
 };
 use stet_core::display_list::{DisplayElement, DisplayList};
 use stet_core::graphics_state::{DeviceColor, FillRule, LineCap, LineJoin, Matrix, PsPath};
@@ -42,6 +42,19 @@ pub struct ContentStreamResult {
     pub pattern_refs: Vec<PatternRef>,
     /// Color space entries for uncolored patterns (e.g., [/Pattern /DeviceRGB]).
     pub pattern_cs_entries: Vec<(String, PdfObj)>,
+    /// Transfer function references to emit as PDF Type 0 function objects.
+    pub transfer_refs: Vec<TransferFunctionRef>,
+}
+
+/// Reference from an ExtGState to pre-sampled transfer function tables.
+pub struct TransferFunctionRef {
+    /// Index into ext_gstate_dicts.
+    pub ext_gstate_idx: usize,
+    /// For single transfer: Some(table) in index 0, rest None.
+    /// For 4-component: [R, G, B, Gray], each Some or None (identity).
+    pub tables: Vec<Option<std::sync::Arc<Vec<f64>>>>,
+    /// True if this is a 4-component (color) transfer.
+    pub is_color: bool,
 }
 
 /// Reference to a tiling pattern that needs a PDF Pattern XObject.
@@ -91,6 +104,8 @@ struct GState {
     stroke_cs_name: Option<String>,
     /// Rendering intent (0=RelativeColorimetric, 1=Absolute, 2=Perceptual, 3=Saturation).
     rendering_intent: u8,
+    /// Dedup key for current transfer state.
+    transfer_key: Vec<u8>,
 }
 
 impl GState {
@@ -108,6 +123,7 @@ impl GState {
             fill_cs_name: None,
             stroke_cs_name: None,
             rendering_intent: 0,
+            transfer_key: Vec::new(),
         }
     }
 
@@ -166,6 +182,7 @@ pub fn build_content_stream(
     let mut pattern_map: HashMap<u32, usize> = HashMap::new();
     let mut pattern_cs_names: Vec<(String, PdfObj)> = Vec::new();
     let mut pattern_cs_set: HashSet<String> = HashSet::new();
+    let mut transfer_refs: Vec<TransferFunctionRef> = Vec::new();
 
     // Track which fonts this page uses (for per-page Resources/Font dict)
     let mut page_font_names: HashSet<String> = HashSet::new();
@@ -247,6 +264,7 @@ pub fn build_content_stream(
                 if params.is_text_glyph {
                     continue;
                 }
+                emit_transfer(&mut buf, &params.transfer, &mut gs, &mut ext_gstates, &mut ext_gstate_map, &mut transfer_refs);
                 emit_rendering_intent(&mut buf, params.rendering_intent, &mut gs);
                 emit_overprint(&mut buf, params.overprint, &mut gs, &mut ext_gstates, &mut ext_gstate_map);
                 if let Some(spot) = &params.spot_color {
@@ -275,6 +293,7 @@ pub fn build_content_stream(
                     buf.extend(b"q\n");
                     emit_cm(&mut buf, &params.ctm);
                 }
+                emit_transfer(&mut buf, &params.transfer, &mut gs, &mut ext_gstates, &mut ext_gstate_map, &mut transfer_refs);
                 emit_rendering_intent(&mut buf, params.rendering_intent, &mut gs);
                 emit_overprint(&mut buf, params.overprint, &mut gs, &mut ext_gstates, &mut ext_gstate_map);
                 if let Some(spot) = &params.spot_color {
@@ -419,6 +438,7 @@ pub fn build_content_stream(
         color_spaces,
         pattern_refs,
         pattern_cs_entries,
+        transfer_refs,
     }
 }
 
@@ -443,6 +463,7 @@ pub fn build_tile_content_stream(
     let mut pattern_map: HashMap<u32, usize> = HashMap::new();
     let mut pattern_cs_names: Vec<(String, PdfObj)> = Vec::new();
     let mut pattern_cs_set: HashSet<String> = HashSet::new();
+    let mut transfer_refs: Vec<TransferFunctionRef> = Vec::new();
     let mut page_font_names: HashSet<String> = HashSet::new();
 
     // Register fonts used in tile
@@ -462,6 +483,7 @@ pub fn build_tile_content_stream(
                 if params.is_text_glyph {
                     continue;
                 }
+                emit_transfer(&mut buf, &params.transfer, &mut gs, &mut ext_gstates, &mut ext_gstate_map, &mut transfer_refs);
                 emit_rendering_intent(&mut buf, params.rendering_intent, &mut gs);
                 emit_overprint(
                     &mut buf,
@@ -501,6 +523,7 @@ pub fn build_tile_content_stream(
                     buf.extend(b"q\n");
                     emit_cm(&mut buf, &params.ctm);
                 }
+                emit_transfer(&mut buf, &params.transfer, &mut gs, &mut ext_gstates, &mut ext_gstate_map, &mut transfer_refs);
                 emit_rendering_intent(&mut buf, params.rendering_intent, &mut gs);
                 emit_overprint(
                     &mut buf,
@@ -642,6 +665,7 @@ pub fn build_tile_content_stream(
         color_spaces,
         pattern_refs,
         pattern_cs_entries: pattern_cs_names,
+        transfer_refs,
     }
 }
 
@@ -926,6 +950,79 @@ fn emit_rendering_intent(buf: &mut Vec<u8>, intent: u8, gs: &mut GState) {
     buf.push(b'/');
     buf.extend_from_slice(name);
     buf.extend(b" ri\n");
+}
+
+/// Build a dedup key from a TransferState based on Arc pointer identity.
+fn build_transfer_key(transfer: &TransferState) -> Vec<u8> {
+    use std::sync::Arc;
+    let mut key = Vec::new();
+    if let Some(ref color) = transfer.color {
+        key.extend(b"C");
+        for table in color {
+            if let Some(t) = table {
+                let ptr = Arc::as_ptr(t) as usize;
+                key.extend(ptr.to_le_bytes());
+            } else {
+                key.extend(b"I"); // identity
+            }
+        }
+    } else if let Some(ref gray) = transfer.gray {
+        key.extend(b"G");
+        let ptr = Arc::as_ptr(gray) as usize;
+        key.extend(ptr.to_le_bytes());
+    }
+    // Empty key = identity (no transfer)
+    key
+}
+
+/// Emit a `gs` operator to set transfer function when it changes.
+fn emit_transfer(
+    buf: &mut Vec<u8>,
+    transfer: &TransferState,
+    gs: &mut GState,
+    ext_gstates: &mut Vec<ExtGStateDict>,
+    ext_gstate_map: &mut HashMap<Vec<u8>, usize>,
+    transfer_refs: &mut Vec<TransferFunctionRef>,
+) {
+    let key = build_transfer_key(transfer);
+    if key == gs.transfer_key {
+        return;
+    }
+    gs.transfer_key = key.clone();
+
+    // Identity transfer — no ExtGState needed
+    if key.is_empty() {
+        return;
+    }
+
+    if let Some(&idx) = ext_gstate_map.get(&key) {
+        writeln!(buf, "/GS{} gs", idx).unwrap();
+        return;
+    }
+
+    let idx = ext_gstates.len();
+    // Placeholder entries — actual /TR2 value set by pdf_device when building function objects
+    let entries = vec![
+        (b"Type".to_vec(), PdfObj::name("ExtGState")),
+    ];
+    ext_gstates.push(ExtGStateDict { entries });
+    ext_gstate_map.insert(key, idx);
+
+    // Collect the actual sample data
+    let (tables, is_color) = if let Some(ref color) = transfer.color {
+        (color.iter().map(|t| t.clone()).collect(), true)
+    } else if let Some(ref gray) = transfer.gray {
+        (vec![Some(gray.clone())], false)
+    } else {
+        (vec![], false)
+    };
+
+    transfer_refs.push(TransferFunctionRef {
+        ext_gstate_idx: idx,
+        tables,
+        is_color,
+    });
+    writeln!(buf, "/GS{} gs", idx).unwrap();
 }
 
 /// Emit path segments as PDF path operators.

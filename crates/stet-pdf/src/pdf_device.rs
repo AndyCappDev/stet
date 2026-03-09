@@ -256,6 +256,7 @@ impl PdfDevice {
             color_spaces,
             pattern_refs,
             pattern_cs_entries,
+            transfer_refs,
         } = result;
 
         // Build image XObjects
@@ -302,7 +303,7 @@ impl PdfDevice {
             let mut gs_entries: Vec<(Vec<u8>, PdfObj)> = Vec::new();
             for (i, gs_dict) in ext_gstate_dicts.iter().enumerate() {
                 // Rebuild entries (PdfObj doesn't derive Clone)
-                let entries: Vec<(Vec<u8>, PdfObj)> = gs_dict
+                let mut entries: Vec<(Vec<u8>, PdfObj)> = gs_dict
                     .entries
                     .iter()
                     .map(|(k, v)| {
@@ -315,6 +316,13 @@ impl PdfDevice {
                         (k.clone(), obj)
                     })
                     .collect();
+
+                // Check if this ExtGState has a transfer function reference
+                if let Some(tr) = transfer_refs.iter().find(|r| r.ext_gstate_idx == i) {
+                    let tr2_value = build_transfer_tr2(writer, &tr.tables, tr.is_color);
+                    entries.push((b"TR2".to_vec(), tr2_value));
+                }
+
                 let gs_ref = writer.add_object(&PdfObj::Dict(entries));
                 gs_entries.push((format!("GS{}", i).into_bytes(), PdfObj::Ref(gs_ref)));
             }
@@ -407,7 +415,7 @@ impl PdfDevice {
                 if !tile_result.ext_gstate_dicts.is_empty() {
                     let mut tile_gs: Vec<(Vec<u8>, PdfObj)> = Vec::new();
                     for (j, gs_dict) in tile_result.ext_gstate_dicts.iter().enumerate() {
-                        let entries: Vec<(Vec<u8>, PdfObj)> = gs_dict
+                        let mut entries: Vec<(Vec<u8>, PdfObj)> = gs_dict
                             .entries
                             .iter()
                             .map(|(k, v)| {
@@ -420,6 +428,10 @@ impl PdfDevice {
                                 (k.clone(), obj)
                             })
                             .collect();
+                        if let Some(tr) = tile_result.transfer_refs.iter().find(|r| r.ext_gstate_idx == j) {
+                            let tr2_value = build_transfer_tr2(writer, &tr.tables, tr.is_color);
+                            entries.push((b"TR2".to_vec(), tr2_value));
+                        }
                         let gs_ref = writer.add_object(&PdfObj::Dict(entries));
                         tile_gs
                             .push((format!("GS{}", j).into_bytes(), PdfObj::Ref(gs_ref)));
@@ -1063,6 +1075,65 @@ fn extract_icc_description(data: &[u8]) -> Option<String> {
         break;
     }
     None
+}
+
+/// Build a PDF Type 0 (sampled) function stream from a 256-entry transfer table.
+/// Returns the object number of the function stream.
+fn build_type0_function(writer: &mut PdfWriter, table: &[f64]) -> u32 {
+    let dict_entries = vec![
+        (b"FunctionType".to_vec(), PdfObj::Int(0)),
+        (
+            b"Domain".to_vec(),
+            PdfObj::Array(vec![PdfObj::Int(0), PdfObj::Int(1)]),
+        ),
+        (
+            b"Range".to_vec(),
+            PdfObj::Array(vec![PdfObj::Int(0), PdfObj::Int(1)]),
+        ),
+        (
+            b"Size".to_vec(),
+            PdfObj::Array(vec![PdfObj::Int(table.len() as i64)]),
+        ),
+        (b"BitsPerSample".to_vec(), PdfObj::Int(8)),
+    ];
+    let data: Vec<u8> = table
+        .iter()
+        .map(|&v| (v.clamp(0.0, 1.0) * 255.0).round() as u8)
+        .collect();
+    writer.add_stream(dict_entries, &data, false)
+}
+
+/// Build the /TR2 value for an ExtGState dict from transfer function tables.
+/// Returns a PdfObj (Ref for single function, Array for 4-component, or Name for identity).
+fn build_transfer_tr2(
+    writer: &mut PdfWriter,
+    tables: &[Option<std::sync::Arc<Vec<f64>>>],
+    is_color: bool,
+) -> PdfObj {
+    if is_color && tables.len() == 4 {
+        // 4-component: [R, G, B, Gray], use /Identity for None entries
+        let refs: Vec<PdfObj> = tables
+            .iter()
+            .map(|t| {
+                if let Some(table) = t {
+                    let func_ref = build_type0_function(writer, table);
+                    PdfObj::Ref(func_ref)
+                } else {
+                    PdfObj::name("Identity")
+                }
+            })
+            .collect();
+        PdfObj::Array(refs)
+    } else if !is_color && tables.len() == 1 {
+        if let Some(ref table) = tables[0] {
+            let func_ref = build_type0_function(writer, table);
+            PdfObj::Ref(func_ref)
+        } else {
+            PdfObj::name("Identity")
+        }
+    } else {
+        PdfObj::name("Identity")
+    }
 }
 
 /// Convert days since 1970-01-01 to (year, month, day).

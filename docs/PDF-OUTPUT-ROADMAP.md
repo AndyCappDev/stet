@@ -243,11 +243,11 @@ These features are stored in the graphics state but don't affect rendering in st
 or most PDF viewers. They only matter for specific print customers or press
 calibration workflows. Implement on demand rather than speculatively.
 
-### 4.1 Transfer Functions
-- [ ] Sample transfer function procedures to lookup tables at capture time
-- [ ] Emit as Type 0 (sampled) PDF functions in ExtGState `/TR` or `/TR2`
-- [ ] Requires ExtGState support (2.1)
-- **Files**: `crates/stet-core/src/device.rs`, `crates/stet-pdf/src/pdf_device.rs`
+### 4.1 Transfer Functions ✅
+- [x] Sample transfer function procedures to lookup tables at capture time
+- [x] Emit as Type 0 (sampled) PDF functions in ExtGState `/TR2`
+- [x] Requires ExtGState support (2.1)
+- **Files**: `crates/stet-core/src/device.rs`, `crates/stet-core/src/graphics_state.rs`, `crates/stet-ops/src/halftone_ops.rs`, `crates/stet-ops/src/paint_ops.rs`, `crates/stet-ops/src/show_ops.rs`, `crates/stet-pdf/src/content_stream.rs`, `crates/stet-pdf/src/pdf_device.rs`
 - **Effort**: Medium
 
 ### 4.2 Halftone Screens
@@ -289,7 +289,7 @@ Phase 4 items are deferred — implement only when a specific need arises.
  ✅  3.3  Color rendering intent           done      setrenderingintent + /ri in content stream
 
 Phase 4 (on demand only):
- -   4.1  Transfer functions               medium    press calibration
+ ✅  4.1  Transfer functions               done      settransfer/setcolortransfer → /TR2 Type 0 functions
  -   4.2  Halftone screens                 medium    offset litho screening
  -   4.3  Black generation / UCR           small     CMYK separation control
 ```

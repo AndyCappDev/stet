@@ -1040,6 +1040,10 @@ pub struct GraphicsState {
     pub transfer_function: Option<crate::object::PsObject>,
     /// Per-component transfer: [red, green, blue, gray]
     pub color_transfer: Option<[crate::object::PsObject; 4]>,
+    /// Pre-sampled transfer function (256 entries). None = identity.
+    pub sampled_transfer: Option<Arc<Vec<f64>>>,
+    /// Pre-sampled per-component transfer \[R, G, B, Gray\].
+    pub sampled_color_transfer: Option<[Option<Arc<Vec<f64>>>; 4]>,
 
     // Black generation / undercolor removal
     pub black_generation: Option<crate::object::PsObject>,
@@ -1102,6 +1106,8 @@ impl GraphicsState {
             halftone: None,
             transfer_function: None,
             color_transfer: None,
+            sampled_transfer: None,
+            sampled_color_transfer: None,
             black_generation: None,
             undercolor_removal: None,
             color_rendering: None,

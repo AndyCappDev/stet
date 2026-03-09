@@ -4458,6 +4458,7 @@ fn render_patch_shading_viewport(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use stet_core::device::TransferState;
     use stet_core::graphics_state::DashPattern;
 
     #[test]
@@ -4484,6 +4485,7 @@ mod tests {
             overprint: false,
             spot_color: None,
             rendering_intent: 0,
+            transfer: TransferState::default(),
         };
         dev.fill_path(&path, &params);
 
@@ -4514,6 +4516,7 @@ mod tests {
             overprint: false,
             spot_color: None,
             rendering_intent: 0,
+            transfer: TransferState::default(),
         };
         dev.stroke_path(&path, &params);
 
@@ -4556,6 +4559,7 @@ mod tests {
             overprint: false,
             spot_color: None,
             rendering_intent: 0,
+            transfer: TransferState::default(),
         };
         dev.fill_path(&fill_path, &fill_params);
 
@@ -4587,6 +4591,7 @@ mod tests {
             overprint: false,
             spot_color: None,
             rendering_intent: 0,
+            transfer: TransferState::default(),
         };
         dev.fill_path(&path, &params);
 
@@ -4627,6 +4632,7 @@ mod tests {
             overprint: false,
             spot_color: None,
             rendering_intent: 0,
+            transfer: TransferState::default(),
         };
         dev.fill_path(&path, &params);
 

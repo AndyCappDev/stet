@@ -10,6 +10,8 @@
 //! not used during rendering, but they must be preserved for PS programs
 //! that query them.
 
+use std::sync::Arc;
+
 use stet_core::context::Context;
 use stet_core::dict::DictKey;
 use stet_core::display_list::DisplayList;
@@ -150,6 +152,39 @@ pub fn op_currentcolorscreen(ctx: &mut Context) -> Result<(), PsError> {
 
 // ---------- Transfer function operators ----------
 
+/// Sample a PS transfer procedure at 256 points via exec_sync.
+/// Returns None if the procedure is identity (or empty).
+fn sample_transfer(ctx: &mut Context, proc: PsObject) -> Result<Option<Arc<Vec<f64>>>, PsError> {
+    // Empty procedure = identity
+    if let PsValue::Array { len, .. } | PsValue::PackedArray { len, .. } = proc.value {
+        if len == 0 {
+            return Ok(None);
+        }
+    }
+    let mut table = Vec::with_capacity(256);
+    for i in 0..256 {
+        let input = i as f64 / 255.0;
+        ctx.o_stack.push(PsObject::real(input))?;
+        ctx.exec_sync(proc)?;
+        let result = if !ctx.o_stack.is_empty() {
+            ctx.o_stack.pop()?.as_f64().unwrap_or(input).clamp(0.0, 1.0)
+        } else {
+            input
+        };
+        table.push(result);
+    }
+    // Identity check
+    let is_identity = table
+        .iter()
+        .enumerate()
+        .all(|(i, &v)| (v - i as f64 / 255.0).abs() < 1e-6);
+    if is_identity {
+        Ok(None)
+    } else {
+        Ok(Some(Arc::new(table)))
+    }
+}
+
 /// `settransfer`: proc → —
 pub fn op_settransfer(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.o_stack.is_empty() {
@@ -161,6 +196,8 @@ pub fn op_settransfer(ctx: &mut Context) -> Result<(), PsError> {
     }
     let proc_obj = ctx.o_stack.pop()?;
     ctx.gstate.transfer_function = Some(proc_obj);
+    ctx.gstate.sampled_transfer = sample_transfer(ctx, proc_obj)?;
+    ctx.gstate.sampled_color_transfer = None; // settransfer clears color transfer
     Ok(())
 }
 
@@ -195,6 +232,14 @@ pub fn op_setcolortransfer(ctx: &mut Context) -> Result<(), PsError> {
     ctx.gstate.color_transfer = Some([red, green, blue, gray]);
     // Gray component also becomes the transfer function
     ctx.gstate.transfer_function = Some(gray);
+    // Sample all 4 transfer functions
+    ctx.gstate.sampled_color_transfer = Some([
+        sample_transfer(ctx, red)?,
+        sample_transfer(ctx, green)?,
+        sample_transfer(ctx, blue)?,
+        sample_transfer(ctx, gray)?,
+    ]);
+    ctx.gstate.sampled_transfer = sample_transfer(ctx, gray)?;
     Ok(())
 }
 
@@ -799,6 +844,7 @@ fn replay_form_elements(
                     overprint: params.overprint,
                     spot_color: params.spot_color.clone(),
                     rendering_intent: params.rendering_intent,
+                    transfer: params.transfer.clone(),
                 };
                 target.push(DisplayElement::Fill {
                     path: new_path,
@@ -822,6 +868,7 @@ fn replay_form_elements(
                     overprint: params.overprint,
                     spot_color: params.spot_color.clone(),
                     rendering_intent: params.rendering_intent,
+                    transfer: params.transfer.clone(),
                 };
                 target.push(DisplayElement::Stroke {
                     path: new_path,

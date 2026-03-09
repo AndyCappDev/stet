@@ -12,6 +12,20 @@ use crate::icc::ProfileHash;
 use crate::object::EntityId;
 use std::sync::Arc;
 
+/// Pre-sampled transfer function (256 samples, domain [0,1] → range [0,1]).
+/// Arc for cheap clone across display list elements.
+pub type TransferTable = Arc<Vec<f64>>;
+
+/// Transfer function state captured at paint time.
+#[derive(Clone, Debug, Default)]
+pub struct TransferState {
+    /// Single-component transfer (from settransfer). None = identity.
+    pub gray: Option<TransferTable>,
+    /// Per-component color transfer \[R, G, B, Gray\] (from setcolortransfer).
+    /// When set, overrides `gray`.
+    pub color: Option<[Option<TransferTable>; 4]>,
+}
+
 /// Native Separation/DeviceN color info for PDF output.
 #[derive(Clone, Debug)]
 pub struct SpotColor {
@@ -59,6 +73,8 @@ pub struct FillParams {
     pub spot_color: Option<SpotColor>,
     /// Rendering intent (0=RelativeColorimetric, 1=Absolute, 2=Perceptual, 3=Saturation).
     pub rendering_intent: u8,
+    /// Pre-sampled transfer function state for PDF output.
+    pub transfer: TransferState,
 }
 
 /// Parameters for a text element emitted by show operators.
@@ -95,6 +111,8 @@ pub struct TextParams {
     pub spot_color: Option<SpotColor>,
     /// Rendering intent (0=RelativeColorimetric, 1=Absolute, 2=Perceptual, 3=Saturation).
     pub rendering_intent: u8,
+    /// Pre-sampled transfer function state for PDF output.
+    pub transfer: TransferState,
 }
 
 /// Parameters for stroking a path.
@@ -119,6 +137,8 @@ pub struct StrokeParams {
     pub spot_color: Option<SpotColor>,
     /// Rendering intent (0=RelativeColorimetric, 1=Absolute, 2=Perceptual, 3=Saturation).
     pub rendering_intent: u8,
+    /// Pre-sampled transfer function state for PDF output.
+    pub transfer: TransferState,
 }
 
 /// Parameters for clipping.
