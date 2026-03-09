@@ -209,6 +209,7 @@ impl PdfDevice {
             shading_refs,
             used_font_names,
             ext_gstate_dicts,
+            color_spaces,
         } = result;
 
         // Build image XObjects
@@ -272,6 +273,16 @@ impl PdfDevice {
                 gs_entries.push((format!("GS{}", i).into_bytes(), PdfObj::Ref(gs_ref)));
             }
             resources.push((b"ExtGState".to_vec(), PdfObj::Dict(gs_entries)));
+        }
+
+        // Build ColorSpace resources (for Separation/DeviceN fill/stroke colors)
+        if !color_spaces.is_empty() {
+            let mut cs_entries: Vec<(Vec<u8>, PdfObj)> = Vec::new();
+            for (name, spot_cs) in color_spaces {
+                let cs_obj = build_spot_colorspace(spot_cs, writer);
+                cs_entries.push((name.clone().into_bytes(), cs_obj));
+            }
+            resources.push((b"ColorSpace".to_vec(), PdfObj::Dict(cs_entries)));
         }
 
         // Content stream
@@ -487,10 +498,160 @@ fn build_pdf_colorspace(
                 PdfObj::Ref(lookup_ref),
             ])
         }
-        // Separation/DeviceN: for now, fall back to alt space name.
-        // Full Separation/DeviceN PDF emission with sampled function objects is item 1.3.
-        PdfColorSpace::Separation { alt, .. } => build_pdf_colorspace(alt, None, writer),
-        PdfColorSpace::DeviceN { alt, .. } => build_pdf_colorspace(alt, None, writer),
+            PdfColorSpace::Separation {
+            name,
+            alt,
+            tint_table,
+        } => {
+            let alt_obj = build_pdf_colorspace(alt, None, writer);
+            let func_ref = build_tint_function(tint_table, writer);
+            PdfObj::Array(vec![
+                PdfObj::name("Separation"),
+                PdfObj::Name(name.clone()),
+                alt_obj,
+                PdfObj::Ref(func_ref),
+            ])
+        }
+        PdfColorSpace::DeviceN {
+            names,
+            alt,
+            tint_table,
+        } => {
+            let alt_obj = build_pdf_colorspace(alt, None, writer);
+            let func_ref = build_tint_function(tint_table, writer);
+            let names_arr =
+                PdfObj::Array(names.iter().map(|n| PdfObj::Name(n.clone())).collect());
+            PdfObj::Array(vec![
+                PdfObj::name("DeviceN"),
+                names_arr,
+                alt_obj,
+                PdfObj::Ref(func_ref),
+            ])
+        }
+    }
+}
+
+/// Build a PDF Type 0 (sampled) function stream from a TintLookupTable.
+/// Returns the object number of the function stream.
+fn build_tint_function(
+    table: &stet_core::device::TintLookupTable,
+    writer: &mut PdfWriter,
+) -> u32 {
+    let ni = table.num_inputs as usize;
+    let no = table.num_outputs as usize;
+
+    // Convert f32 data (0.0–1.0) to u8 samples (0–255).
+    // Our TintLookupTable stores data in row-major order (last dimension varies fastest),
+    // but PDF Type 0 functions require the first dimension to vary fastest.
+    // For 1D, the order is the same. For ND, we must transpose.
+    let spd = table.samples_per_dim as usize;
+    let total_entries = spd.pow(ni as u32);
+    let samples: Vec<u8> = if ni <= 1 {
+        table
+            .data
+            .iter()
+            .map(|&v| (v.clamp(0.0, 1.0) * 255.0) as u8)
+            .collect()
+    } else {
+        // Reorder: iterate in PDF order (dim0 fastest) and look up in our order (dim0 slowest)
+        let mut out = Vec::with_capacity(total_entries * no);
+        for pdf_idx in 0..total_entries {
+            // Decompose pdf_idx with dim0 varying fastest
+            let mut coords = vec![0usize; ni];
+            let mut rem = pdf_idx;
+            for d in 0..ni {
+                coords[d] = rem % spd;
+                rem /= spd;
+            }
+            // Convert to our row-major index (dim0 slowest, last dim fastest)
+            let mut our_idx = 0;
+            for d in 0..ni {
+                our_idx = our_idx * spd + coords[d];
+            }
+            let base = our_idx * no;
+            for c in 0..no {
+                out.push((table.data[base + c].clamp(0.0, 1.0) * 255.0) as u8);
+            }
+        }
+        out
+    };
+
+    // Domain: [0 1] repeated for each input
+    let mut domain = Vec::with_capacity(ni * 2);
+    for _ in 0..ni {
+        domain.push(PdfObj::Int(0));
+        domain.push(PdfObj::Int(1));
+    }
+
+    // Range: [0 1] repeated for each output
+    let mut range = Vec::with_capacity(no * 2);
+    for _ in 0..no {
+        range.push(PdfObj::Int(0));
+        range.push(PdfObj::Int(1));
+    }
+
+    // Size: samples_per_dim repeated for each input dimension
+    let size: Vec<PdfObj> = (0..ni)
+        .map(|_| PdfObj::Int(table.samples_per_dim as i64))
+        .collect();
+
+    let dict_entries = vec![
+        (b"FunctionType".to_vec(), PdfObj::Int(0)),
+        (b"Domain".to_vec(), PdfObj::Array(domain)),
+        (b"Range".to_vec(), PdfObj::Array(range)),
+        (b"Size".to_vec(), PdfObj::Array(size)),
+        (b"BitsPerSample".to_vec(), PdfObj::Int(8)),
+    ];
+
+    writer.add_stream(dict_entries, &samples, true)
+}
+
+/// Build a PDF Separation or DeviceN color space array from a SpotColorSpace.
+/// Returns a PdfObj (array) suitable for inclusion in the Resources/ColorSpace dict.
+fn build_spot_colorspace(
+    spot_cs: &stet_core::device::SpotColorSpace,
+    writer: &mut PdfWriter,
+) -> PdfObj {
+    use stet_core::device::{SimpleColorSpace, SpotColorSpace};
+    match spot_cs {
+        SpotColorSpace::Separation {
+            name,
+            alt,
+            tint_table,
+        } => {
+            let alt_obj = match alt {
+                SimpleColorSpace::DeviceGray => PdfObj::name("DeviceGray"),
+                SimpleColorSpace::DeviceRGB => PdfObj::name("DeviceRGB"),
+                SimpleColorSpace::DeviceCMYK => PdfObj::name("DeviceCMYK"),
+            };
+            let func_ref = build_tint_function(tint_table, writer);
+            PdfObj::Array(vec![
+                PdfObj::name("Separation"),
+                PdfObj::Name(name.clone()),
+                alt_obj,
+                PdfObj::Ref(func_ref),
+            ])
+        }
+        SpotColorSpace::DeviceN {
+            names,
+            alt,
+            tint_table,
+        } => {
+            let alt_obj = match alt {
+                SimpleColorSpace::DeviceGray => PdfObj::name("DeviceGray"),
+                SimpleColorSpace::DeviceRGB => PdfObj::name("DeviceRGB"),
+                SimpleColorSpace::DeviceCMYK => PdfObj::name("DeviceCMYK"),
+            };
+            let func_ref = build_tint_function(tint_table, writer);
+            let names_arr =
+                PdfObj::Array(names.iter().map(|n| PdfObj::Name(n.clone())).collect());
+            PdfObj::Array(vec![
+                PdfObj::name("DeviceN"),
+                names_arr,
+                alt_obj,
+                PdfObj::Ref(func_ref),
+            ])
+        }
     }
 }
 

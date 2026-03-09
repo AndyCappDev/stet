@@ -10,7 +10,7 @@ use std::io::Write as IoWrite;
 use stet_core::context::Context;
 use stet_core::device::{
     AxialShadingParams, MeshShadingParams, PatchShadingParams, PatternFillParams,
-    RadialShadingParams, StrokeParams, TextParams,
+    RadialShadingParams, SpotColor, SpotColorSpace, StrokeParams, TextParams,
 };
 use stet_core::display_list::{DisplayElement, DisplayList};
 use stet_core::graphics_state::{DeviceColor, FillRule, LineCap, LineJoin, Matrix, PsPath};
@@ -35,6 +35,9 @@ pub struct ContentStreamResult {
     pub used_font_names: Vec<String>,
     /// ExtGState resource dicts used in the content stream.
     pub ext_gstate_dicts: Vec<ExtGStateDict>,
+    /// Color space definitions used in the content stream (Separation/DeviceN).
+    /// Vec of (resource_name, SpotColorSpace) pairs.
+    pub color_spaces: Vec<(String, SpotColorSpace)>,
 }
 
 /// An ExtGState resource used in the content stream.
@@ -62,6 +65,10 @@ struct GState {
     dash_array: Vec<f64>,
     dash_offset: f64,
     overprint: bool,
+    /// Current fill color space resource name (e.g., "CS0") for Separation/DeviceN.
+    fill_cs_name: Option<String>,
+    /// Current stroke color space resource name.
+    stroke_cs_name: Option<String>,
 }
 
 impl GState {
@@ -76,6 +83,8 @@ impl GState {
             dash_array: Vec::new(),
             dash_offset: -1.0,
             overprint: false,
+            fill_cs_name: None,
+            stroke_cs_name: None,
         }
     }
 
@@ -128,6 +137,8 @@ pub fn build_content_stream(
     let mut gs = GState::new();
     let mut ext_gstates: Vec<ExtGStateDict> = Vec::new();
     let mut ext_gstate_map: HashMap<Vec<u8>, usize> = HashMap::new();
+    let mut color_spaces: Vec<(String, SpotColorSpace)> = Vec::new();
+    let mut cs_name_map: HashMap<Vec<u8>, String> = HashMap::new();
 
     // Track which fonts this page uses (for per-page Resources/Font dict)
     let mut page_font_names: HashSet<String> = HashSet::new();
@@ -210,7 +221,15 @@ pub fn build_content_stream(
                     continue;
                 }
                 emit_overprint(&mut buf, params.overprint, &mut gs, &mut ext_gstates, &mut ext_gstate_map);
-                emit_fill_color(&mut buf, &params.color, &mut gs);
+                if let Some(spot) = &params.spot_color {
+                    emit_fill_color_spot(&mut buf, spot, &mut gs, &mut cs_name_map, &mut color_spaces);
+                } else {
+                    if gs.fill_cs_name.is_some() {
+                        gs.fill_cs_name = None;
+                        gs.fill_color = None;
+                    }
+                    emit_fill_color(&mut buf, &params.color, &mut gs);
+                }
                 emit_path(&mut buf, path);
                 if params.fill_rule == FillRule::EvenOdd {
                     buf.extend(b"f*\n");
@@ -225,19 +244,24 @@ pub fn build_content_stream(
                 }
                 let has_ctm = !is_identity(&params.ctm);
                 if has_ctm {
-                    // Anisotropic stroke: path is in user space, CTM transforms
-                    // user→device. Wrap in q/Q and apply CTM via cm operator.
                     buf.extend(b"q\n");
                     emit_cm(&mut buf, &params.ctm);
                 }
                 emit_overprint(&mut buf, params.overprint, &mut gs, &mut ext_gstates, &mut ext_gstate_map);
-                emit_stroke_color(&mut buf, &params.color, &mut gs);
+                if let Some(spot) = &params.spot_color {
+                    emit_stroke_color_spot(&mut buf, spot, &mut gs, &mut cs_name_map, &mut color_spaces);
+                } else {
+                    if gs.stroke_cs_name.is_some() {
+                        gs.stroke_cs_name = None;
+                        gs.stroke_color = None;
+                    }
+                    emit_stroke_color(&mut buf, &params.color, &mut gs);
+                }
                 emit_line_state(&mut buf, params, &mut gs);
                 emit_path(&mut buf, path);
                 buf.extend(b"S\n");
                 if has_ctm {
                     buf.extend(b"Q\n");
-                    // Reset cached state since Q restores previous graphics state
                     gs = GState::new();
                 }
             }
@@ -344,6 +368,7 @@ pub fn build_content_stream(
         shading_refs,
         used_font_names: page_font_names.into_iter().collect(),
         ext_gstate_dicts: ext_gstates,
+        color_spaces,
     }
 }
 
@@ -436,6 +461,87 @@ fn emit_stroke_color(buf: &mut Vec<u8>, color: &DeviceColor, gs: &mut GState) {
         }
     }
     gs.stroke_color = Some(pc);
+}
+
+/// Compute a dedup key for a SpotColorSpace.
+fn spot_cs_key(spot: &SpotColor) -> Vec<u8> {
+    match &spot.color_space {
+        SpotColorSpace::Separation { name, .. } => {
+            let mut key = b"Sep:".to_vec();
+            key.extend(name);
+            key
+        }
+        SpotColorSpace::DeviceN { names, .. } => {
+            let mut key = b"DN:".to_vec();
+            let mut sorted: Vec<&Vec<u8>> = names.iter().collect();
+            sorted.sort();
+            for (i, n) in sorted.iter().enumerate() {
+                if i > 0 {
+                    key.push(b',');
+                }
+                key.extend(*n);
+            }
+            key
+        }
+    }
+}
+
+/// Get or create a color space resource name for a spot color.
+fn get_or_create_cs_name(
+    spot: &SpotColor,
+    cs_map: &mut HashMap<Vec<u8>, String>,
+    color_spaces: &mut Vec<(String, SpotColorSpace)>,
+) -> String {
+    let key = spot_cs_key(spot);
+    if let Some(name) = cs_map.get(&key) {
+        return name.clone();
+    }
+    let name = format!("CS{}", color_spaces.len());
+    cs_map.insert(key, name.clone());
+    color_spaces.push((name.clone(), spot.color_space.clone()));
+    name
+}
+
+/// Emit a non-stroking Separation/DeviceN color: `/CSn cs` + `tint scn`.
+fn emit_fill_color_spot(
+    buf: &mut Vec<u8>,
+    spot: &SpotColor,
+    gs: &mut GState,
+    cs_map: &mut HashMap<Vec<u8>, String>,
+    color_spaces: &mut Vec<(String, SpotColorSpace)>,
+) {
+    let cs_name = get_or_create_cs_name(spot, cs_map, color_spaces);
+    if gs.fill_cs_name.as_deref() != Some(&cs_name) {
+        write!(buf, "/{} cs\n", cs_name).unwrap();
+        gs.fill_cs_name = Some(cs_name);
+        gs.fill_color = None; // force re-emit tint values
+    }
+    for v in &spot.tint_values {
+        fmt_num(buf, *v);
+        buf.push(b' ');
+    }
+    buf.extend(b"scn\n");
+}
+
+/// Emit a stroking Separation/DeviceN color: `/CSn CS` + `tint SCN`.
+fn emit_stroke_color_spot(
+    buf: &mut Vec<u8>,
+    spot: &SpotColor,
+    gs: &mut GState,
+    cs_map: &mut HashMap<Vec<u8>, String>,
+    color_spaces: &mut Vec<(String, SpotColorSpace)>,
+) {
+    let cs_name = get_or_create_cs_name(spot, cs_map, color_spaces);
+    if gs.stroke_cs_name.as_deref() != Some(&cs_name) {
+        write!(buf, "/{} CS\n", cs_name).unwrap();
+        gs.stroke_cs_name = Some(cs_name);
+        gs.stroke_color = None;
+    }
+    for v in &spot.tint_values {
+        fmt_num(buf, *v);
+        buf.push(b' ');
+    }
+    buf.extend(b"SCN\n");
 }
 
 /// Emit line state commands (width, cap, join, miter limit, dash).

@@ -12,6 +12,38 @@ use crate::icc::ProfileHash;
 use crate::object::EntityId;
 use std::sync::Arc;
 
+/// Native Separation/DeviceN color info for PDF output.
+#[derive(Clone, Debug)]
+pub struct SpotColor {
+    /// Tint values from the most recent setcolor (1 for Separation, N for DeviceN).
+    pub tint_values: Vec<f64>,
+    /// Color space definition for this spot color.
+    pub color_space: SpotColorSpace,
+}
+
+/// Separation or DeviceN color space with pre-sampled tint function.
+#[derive(Clone, Debug)]
+pub enum SpotColorSpace {
+    Separation {
+        name: Vec<u8>,
+        alt: SimpleColorSpace,
+        tint_table: Arc<TintLookupTable>,
+    },
+    DeviceN {
+        names: Vec<Vec<u8>>,
+        alt: SimpleColorSpace,
+        tint_table: Arc<TintLookupTable>,
+    },
+}
+
+/// Simple device color space for alt-space references.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum SimpleColorSpace {
+    DeviceGray,
+    DeviceRGB,
+    DeviceCMYK,
+}
+
 /// Parameters for filling a path.
 #[derive(Clone, Debug)]
 pub struct FillParams {
@@ -23,6 +55,8 @@ pub struct FillParams {
     pub is_text_glyph: bool,
     /// Overprint flag from graphics state (used by PDF output).
     pub overprint: bool,
+    /// Separation/DeviceN color for PDF output. None for device color spaces.
+    pub spot_color: Option<SpotColor>,
 }
 
 /// Parameters for a text element emitted by show operators.
@@ -55,6 +89,8 @@ pub struct TextParams {
     pub paint_type: i32,
     /// Device-space stroke width for PaintType 2 fonts.
     pub stroke_width: f64,
+    /// Separation/DeviceN color for PDF output. None for device color spaces.
+    pub spot_color: Option<SpotColor>,
 }
 
 /// Parameters for stroking a path.
@@ -75,6 +111,8 @@ pub struct StrokeParams {
     pub is_text_glyph: bool,
     /// Overprint flag from graphics state (used by PDF output).
     pub overprint: bool,
+    /// Separation/DeviceN color for PDF output. None for device color spaces.
+    pub spot_color: Option<SpotColor>,
 }
 
 /// Parameters for clipping.

@@ -234,6 +234,7 @@ pub fn op_setcolorspace(ctx: &mut Context) -> Result<(), PsError> {
                 ctx.gstate.color = default_color_for_space(&cs, ctx);
                 ctx.gstate.color_space = cs;
                 ctx.gstate.current_pattern = None;
+                cache_tint_table(ctx);
                 Ok(())
             } else {
                 Err(PsError::TypeCheck)
@@ -241,6 +242,39 @@ pub fn op_setcolorspace(ctx: &mut Context) -> Result<(), PsError> {
         }
         _ => Err(PsError::TypeCheck),
     }
+}
+
+/// Sample and cache the tint transform for Separation/DeviceN color spaces.
+/// Called after setcolorspace installs a new color space.
+fn cache_tint_table(ctx: &mut Context) {
+    match &ctx.gstate.color_space {
+        ColorSpace::Separation {
+            tint_transform,
+            num_alt_components,
+            ..
+        } => {
+            let tt = *tint_transform;
+            let nac = *num_alt_components;
+            ctx.gstate.cached_tint_table =
+                crate::image_ops::sample_tint_transform(ctx, tt, 1, nac).map(Arc::new);
+        }
+        ColorSpace::DeviceN {
+            num_colorants,
+            tint_transform,
+            num_alt_components,
+            ..
+        } => {
+            let tt = *tint_transform;
+            let nc = *num_colorants;
+            let nac = *num_alt_components;
+            ctx.gstate.cached_tint_table =
+                crate::image_ops::sample_tint_transform(ctx, tt, nc, nac).map(Arc::new);
+        }
+        _ => {
+            ctx.gstate.cached_tint_table = None;
+        }
+    }
+    ctx.gstate.tint_values = None;
 }
 
 /// `currentcolorspace`: — → array
@@ -355,6 +389,8 @@ pub fn op_currentcolorspace(ctx: &mut Context) -> Result<(), PsError> {
 
 /// `setcolor`: comp1 ... compn → — (set color using current color space)
 pub fn op_setcolor(ctx: &mut Context) -> Result<(), PsError> {
+    // Clear tint values by default; Separation/DeviceN arms re-set them.
+    ctx.gstate.tint_values = None;
     match ctx.gstate.color_space.clone() {
         ColorSpace::DeviceGray => op_setgray(ctx),
         ColorSpace::DeviceRGB => op_setrgbcolor(ctx),
@@ -388,7 +424,9 @@ pub fn op_setcolor(ctx: &mut Context) -> Result<(), PsError> {
             }
             let tint = ctx.o_stack.peek(0)?.as_f64().ok_or(PsError::TypeCheck)?;
             ctx.o_stack.pop()?;
-            ctx.o_stack.push(PsObject::real(tint.clamp(0.0, 1.0)))?;
+            let tint_clamped = tint.clamp(0.0, 1.0);
+            ctx.gstate.tint_values = Some(vec![tint_clamped]);
+            ctx.o_stack.push(PsObject::real(tint_clamped))?;
             ctx.exec_sync(tint_transform)?;
             set_color_from_tint_result(ctx, num_alt_components)
         }
@@ -406,6 +444,7 @@ pub fn op_setcolor(ctx: &mut Context) -> Result<(), PsError> {
                 let v = ctx.o_stack.peek(i)?.as_f64().ok_or(PsError::TypeCheck)?;
                 tints.push(v.clamp(0.0, 1.0));
             }
+            ctx.gstate.tint_values = Some(tints.clone());
             for _ in 0..num_colorants {
                 ctx.o_stack.pop()?;
             }

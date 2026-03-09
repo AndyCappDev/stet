@@ -751,6 +751,7 @@ fn replay_form_elements(
                     ctm: Matrix::identity(),
                     is_text_glyph: params.is_text_glyph,
                     overprint: params.overprint,
+                    spot_color: params.spot_color.clone(),
                 };
                 target.push(DisplayElement::Fill {
                     path: new_path,
@@ -772,6 +773,7 @@ fn replay_form_elements(
                     stroke_adjust: params.stroke_adjust,
                     is_text_glyph: params.is_text_glyph,
                     overprint: params.overprint,
+                    spot_color: params.spot_color.clone(),
                 };
                 target.push(DisplayElement::Stroke {
                     path: new_path,

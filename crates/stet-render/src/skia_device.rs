@@ -4419,6 +4419,7 @@ mod tests {
             ctm: Matrix::identity(),
             is_text_glyph: false,
             overprint: false,
+            spot_color: None,
         };
         dev.fill_path(&path, &params);
 
@@ -4447,6 +4448,7 @@ mod tests {
             stroke_adjust: false,
             is_text_glyph: false,
             overprint: false,
+            spot_color: None,
         };
         dev.stroke_path(&path, &params);
 
@@ -4487,6 +4489,7 @@ mod tests {
             ctm: Matrix::identity(),
             is_text_glyph: false,
             overprint: false,
+            spot_color: None,
         };
         dev.fill_path(&fill_path, &fill_params);
 
@@ -4516,6 +4519,7 @@ mod tests {
             ctm: Matrix::identity(),
             is_text_glyph: false,
             overprint: false,
+            spot_color: None,
         };
         dev.fill_path(&path, &params);
 
@@ -4554,6 +4558,7 @@ mod tests {
             ctm: Matrix::translate(100.0, 100.0),
             is_text_glyph: false,
             overprint: false,
+            spot_color: None,
         };
         dev.fill_path(&path, &params);
 

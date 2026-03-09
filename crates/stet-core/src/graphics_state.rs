@@ -1056,6 +1056,14 @@ pub struct GraphicsState {
 
     // Userpath bounding box (set by setbbox, cleared by newpath)
     pub bbox: Option<[f64; 4]>,
+
+    /// Tint values from the most recent setcolor (for Separation/DeviceN).
+    /// 1 value for Separation, N values for DeviceN. None for device color spaces.
+    pub tint_values: Option<Vec<f64>>,
+
+    /// Cached pre-sampled tint lookup table for the current Separation/DeviceN color space.
+    /// Set when setcolorspace installs a Separation/DeviceN space.
+    pub cached_tint_table: Option<Arc<crate::device::TintLookupTable>>,
 }
 
 impl GraphicsState {
@@ -1096,6 +1104,8 @@ impl GraphicsState {
             current_pattern: None,
             pattern_underlying_color: None,
             bbox: None,
+            tint_values: None,
+            cached_tint_table: None,
         }
     }
 }

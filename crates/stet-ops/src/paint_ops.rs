@@ -5,11 +5,52 @@
 //! Painting operators: fill, eofill, stroke, rectfill, rectstroke, erasepage, showpage.
 
 use stet_core::context::Context;
-use stet_core::device::{FillParams, PatternFillParams, StrokeParams};
+use stet_core::device::{
+    FillParams, PatternFillParams, SimpleColorSpace, SpotColor, SpotColorSpace, StrokeParams,
+};
 use stet_core::display_list::DisplayElement;
 use stet_core::error::PsError;
-use stet_core::graphics_state::{DashPattern, FillRule, Matrix, PathSegment, PsPath};
+use stet_core::graphics_state::{
+    ColorSpace, DashPattern, FillRule, Matrix, PathSegment, PsPath,
+};
 use stet_core::object::{PsObject, PsValue};
+
+/// Capture the current SpotColor from graphics state if in Separation/DeviceN mode.
+pub(crate) fn capture_spot_color(ctx: &Context) -> Option<SpotColor> {
+    let tints = ctx.gstate.tint_values.as_ref()?;
+    let table = ctx.gstate.cached_tint_table.as_ref()?;
+    let cs = match &ctx.gstate.color_space {
+        ColorSpace::Separation {
+            name, alt_space, ..
+        } => SpotColorSpace::Separation {
+            name: name.clone(),
+            alt: alt_space_to_simple(alt_space),
+            tint_table: table.clone(),
+        },
+        ColorSpace::DeviceN {
+            names, alt_space, ..
+        } => SpotColorSpace::DeviceN {
+            names: names.clone(),
+            alt: alt_space_to_simple(alt_space),
+            tint_table: table.clone(),
+        },
+        _ => return None,
+    };
+    Some(SpotColor {
+        tint_values: tints.clone(),
+        color_space: cs,
+    })
+}
+
+/// Map a ColorSpace alt_space to SimpleColorSpace.
+fn alt_space_to_simple(cs: &ColorSpace) -> SimpleColorSpace {
+    match cs {
+        ColorSpace::DeviceGray => SimpleColorSpace::DeviceGray,
+        ColorSpace::DeviceRGB => SimpleColorSpace::DeviceRGB,
+        ColorSpace::DeviceCMYK => SimpleColorSpace::DeviceCMYK,
+        _ => SimpleColorSpace::DeviceCMYK, // fallback
+    }
+}
 
 /// Compute the scale factor of a CTM for converting user-space line widths to device space.
 /// Uses the length of the first column vector (X-axis scale factor).
@@ -136,6 +177,7 @@ fn push_fill_element(ctx: &mut Context, path: PsPath, fill_rule: FillRule) {
         ctm: Matrix::identity(),
         is_text_glyph: false,
         overprint: ctx.gstate.overprint,
+        spot_color: capture_spot_color(ctx),
     };
     ctx.display_list.push(DisplayElement::Fill { path, params });
 }
@@ -194,6 +236,7 @@ fn use_native_stroke(ctx: &Context) -> bool {
 
 /// Native stroke: emit DisplayElement::Stroke for tiny-skia to render.
 fn stroke_native(ctx: &mut Context) -> Result<(), PsError> {
+    let spot = capture_spot_color(ctx);
     if is_anisotropic(&ctx.gstate.ctm) {
         if let Some(inv_ctm) = ctx.gstate.ctm.invert() {
             let user_path = inverse_transform_path(&ctx.gstate.path, &inv_ctm);
@@ -208,6 +251,7 @@ fn stroke_native(ctx: &mut Context) -> Result<(), PsError> {
                 stroke_adjust: ctx.gstate.stroke_adjust,
                 is_text_glyph: false,
                 overprint: ctx.gstate.overprint,
+                spot_color: spot,
             };
             ctx.display_list.push(DisplayElement::Stroke {
                 path: user_path,
@@ -236,6 +280,7 @@ fn stroke_native(ctx: &mut Context) -> Result<(), PsError> {
             stroke_adjust: ctx.gstate.stroke_adjust,
             is_text_glyph: false,
             overprint: ctx.gstate.overprint,
+            spot_color: spot,
         };
         ctx.display_list.push(DisplayElement::Stroke {
             path: ctx.gstate.path.clone(),
@@ -353,6 +398,7 @@ pub fn op_rectfill(ctx: &mut Context) -> Result<(), PsError> {
         ctm: Matrix::identity(),
         is_text_glyph: false,
         overprint: ctx.gstate.overprint,
+        spot_color: capture_spot_color(ctx),
     };
     ctx.display_list.push(DisplayElement::Fill { path, params });
     Ok(())
@@ -365,6 +411,7 @@ pub fn op_rectfill(ctx: &mut Context) -> Result<(), PsError> {
 pub fn op_rectstroke(ctx: &mut Context) -> Result<(), PsError> {
     let rects = extract_rects(ctx)?;
 
+    let spot = capture_spot_color(ctx);
     if is_anisotropic(&ctx.gstate.ctm) {
         let path = build_rect_path_user(&rects);
         let params = StrokeParams {
@@ -378,6 +425,7 @@ pub fn op_rectstroke(ctx: &mut Context) -> Result<(), PsError> {
             stroke_adjust: ctx.gstate.stroke_adjust,
             is_text_glyph: false,
             overprint: ctx.gstate.overprint,
+            spot_color: spot,
         };
         ctx.display_list
             .push(DisplayElement::Stroke { path, params });
@@ -404,6 +452,7 @@ pub fn op_rectstroke(ctx: &mut Context) -> Result<(), PsError> {
             stroke_adjust: ctx.gstate.stroke_adjust,
             is_text_glyph: false,
             overprint: ctx.gstate.overprint,
+            spot_color: spot,
         };
         ctx.display_list
             .push(DisplayElement::Stroke { path, params });

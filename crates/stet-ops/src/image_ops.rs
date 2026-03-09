@@ -1907,7 +1907,7 @@ fn alt_space_to_image_cs(cs: &ColorSpace) -> ImageColorSpace {
 }
 
 /// Sample a tint transform into a lookup table by evaluating it at grid points.
-fn sample_tint_transform(
+pub(crate) fn sample_tint_transform(
     ctx: &mut Context,
     tint_transform: PsObject,
     num_inputs: u32,

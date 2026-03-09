@@ -4414,6 +4414,7 @@ fn emit_text_element_with_fm(
         font_matrix,
         paint_type,
         stroke_width,
+        spot_color: crate::paint_ops::capture_spot_color(ctx),
     };
     ctx.display_list.push(DisplayElement::Text { params });
 }
@@ -4424,6 +4425,7 @@ fn push_glyph_element(
     paint_type: i32,
     stroke_width_device: f64,
 ) {
+    let spot = crate::paint_ops::capture_spot_color(ctx);
     if paint_type == 2 {
         let params = StrokeParams {
             color: ctx.gstate.color.clone(),
@@ -4439,6 +4441,7 @@ fn push_glyph_element(
             stroke_adjust: false,
             is_text_glyph: true,
             overprint: ctx.gstate.overprint,
+            spot_color: spot,
         };
         ctx.display_list.push(DisplayElement::Stroke {
             path: device_path,
@@ -4451,6 +4454,7 @@ fn push_glyph_element(
             fill_rule: FillRule::NonZeroWinding,
             is_text_glyph: true,
             overprint: ctx.gstate.overprint,
+            spot_color: spot,
         };
         ctx.display_list.push(DisplayElement::Fill {
             path: device_path,

@@ -42,8 +42,8 @@ This roadmap tracks what's missing and prioritizes by impact on round-trip fidel
 
 | Feature | Current Behavior | Impact |
 |---------|-----------------|--------|
-| Separation/DeviceN colors | Pre-converted to RGB at op time | **HIGH** — round-trip + print |
-| Separation/DeviceN images | ✓ Native samples in display list | Raster ✓, PDF falls back to alt space (1.3) |
+| Separation/DeviceN colors | ✓ Native spot colors in PDF | — |
+| Separation/DeviceN images | ✓ Native samples + tint functions in PDF | — |
 | Color key mask (Type 4) | ✓ `/Mask` array emitted | — |
 | Pattern fills | Gray placeholder (0.7) | **HIGH** — round-trip |
 | CIE shadings (complex decode) | Falls back to DeviceRGB | **LOW** — needs ICC profile construction (3.4) |
@@ -86,17 +86,28 @@ PS → PDF → pixels round-trip test. Fix these before PDF input validation.
 - **Files**: `crates/stet-core/src/device.rs`, `crates/stet-core/src/graphics_state.rs`,
   `crates/stet-ops/src/image_ops.rs`, `crates/stet-ops/src/color_ops.rs`
 
-### 1.3 Separation/DeviceN in PDF Output
+### 1.3 Separation/DeviceN in PDF Output ✅
 - [x] `PdfColorSpace::Separation` and `PdfColorSpace::DeviceN` variants (with tint table + names)
 - [x] Raw native samples pass through to PDF (1 byte/pixel Separation, N bytes/pixel DeviceN)
-- [ ] Emit `/Separation` color space array: `[/Separation /Name /AlternateSpace tintTransform]`
-- [ ] Emit `/DeviceN` color space array with colorant names + tint transform
-- [ ] Tint transform as Type 0 (sampled) PDF function — avoids PS procedure dependency
-- [ ] Emit Separation/DeviceN for fill/stroke colors (not just images)
-- [ ] Currently falls back to alt space name (e.g., DeviceCMYK) in `build_pdf_colorspace()`
-- **Files**: `crates/stet-pdf/src/image_ops.rs`, `crates/stet-pdf/src/content_stream.rs`,
-  `crates/stet-pdf/src/pdf_device.rs`
-- **Effort**: Medium — data structures in place, need PDF function object emission
+- [x] Emit `/Separation` color space array: `[/Separation /Name /AlternateSpace tintTransform]`
+- [x] Emit `/DeviceN` color space array with colorant names + tint transform
+- [x] Tint transform as Type 0 (sampled) PDF function — avoids PS procedure dependency
+- [x] Emit Separation/DeviceN for fill/stroke colors (not just images)
+- [x] `build_tint_function()` — converts TintLookupTable to PDF Type 0 function stream
+- [x] `build_spot_colorspace()` — builds Separation/DeviceN arrays from SpotColorSpace
+- [x] `build_pdf_colorspace()` emits proper Separation/DeviceN arrays (was falling back to alt space)
+- [x] `SpotColor`/`SpotColorSpace` structs on FillParams/StrokeParams/TextParams
+- [x] `tint_values` + `cached_tint_table` on GraphicsState, captured at setcolor/setcolorspace time
+- [x] `capture_spot_color()` helper at all paint sites (paint_ops, show_ops, halftone_ops)
+- [x] Content stream: `cs`/`CS` + `scn`/`SCN` operators for spot color fill/stroke
+- [x] ColorSpace resource dict on page for Separation/DeviceN resources
+- [x] Color space deduplication by colorant name(s) — same spot color shares one resource
+- [x] Fixed Type 0 function sample ordering: PDF requires dim0-fastest, our table stores dim0-slowest
+- **Files**: `crates/stet-core/src/device.rs`, `crates/stet-core/src/graphics_state.rs`,
+  `crates/stet-ops/src/color_ops.rs`, `crates/stet-ops/src/paint_ops.rs`,
+  `crates/stet-ops/src/show_ops.rs`, `crates/stet-ops/src/halftone_ops.rs`,
+  `crates/stet-ops/src/image_ops.rs`, `crates/stet-pdf/src/pdf_device.rs`,
+  `crates/stet-pdf/src/content_stream.rs`
 
 ### 1.4 Separation/DeviceN in Raster Rendering ✅
 - [x] `samples_to_rgba` in skia_device.rs handles Separation/DeviceN via `TintLookupTable`
@@ -251,7 +262,7 @@ Phase 4 items are deferred — implement only when a specific need arises.
  ✅  2.2  Overprint settings               done      OP/op/OPM in ExtGState, captured at all paint sites
  ✅  1.2  Separation/DeviceN display list  done      TintLookupTable, ncomp fix, colorant names
  ✅  1.4  Separation/DeviceN raster        done      lookup_1d/lookup_nd interpolation
- 8.  1.3  Separation/DeviceN PDF output    medium    Type 0 sampled function emission remaining
+ ✅  1.3  Separation/DeviceN PDF output    done      Type 0 functions, cs/scn operators, ColorSpace resources
  9.  1.5  Pattern fills                    large     most complex, do last in Phase 1
 11.  3.1  PDF/X-3 OutputIntent             medium    when print compliance needed
 12.  3.2  Full ToUnicode CMap              medium    when text extraction needed
@@ -315,7 +326,7 @@ gs -dBATCH -dNOPAUSE -sDEVICE=png16m -r300 -o gs_%03d.png sample.pdf
 ### Test files for specific features
 | Feature | Test file |
 |---------|-----------|
-| Separation/DeviceN | `samples/hospital.eps` (CMYK), DeviceN test files |
+| Separation/DeviceN | `samples/hospital.eps` (CMYK images), `samples/10-ch8.ps` (DeviceN fill/stroke) |
 | Color key mask | `samples/image-qa.ps` (Type 4 images) |
 | Patterns | Pattern test files from PostForge |
 | Native shading CS | `samples/hospital.eps` (CMYK→DeviceCMYK), `samples/10-ch8.ps` (DeviceN→RGB), `samples/16-ch14.ps` (DeviceN→RGB) |
