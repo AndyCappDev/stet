@@ -4,7 +4,7 @@
 
 //! Convert a DisplayList into PDF content stream bytes.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::Write as IoWrite;
 
 use stet_core::context::Context;
@@ -19,6 +19,7 @@ use stet_core::object::EntityId;
 use crate::font_embedder;
 use crate::font_tracker::FontTracker;
 use crate::image_ops::{self, ImageXObject};
+use crate::pdf_objects::PdfObj;
 use crate::text_ops;
 
 /// Result of generating a content stream from a display list.
@@ -32,6 +33,14 @@ pub struct ContentStreamResult {
     pub shading_refs: Vec<ShadingRef>,
     /// PDF font names used on this page (e.g., ["F0", "F2"]).
     pub used_font_names: Vec<String>,
+    /// ExtGState resource dicts used in the content stream.
+    pub ext_gstate_dicts: Vec<ExtGStateDict>,
+}
+
+/// An ExtGState resource used in the content stream.
+pub struct ExtGStateDict {
+    /// PDF dict entries (key-value pairs for the ExtGState resource).
+    pub entries: Vec<(Vec<u8>, PdfObj)>,
 }
 
 /// Reference to a shading element that needs a PDF shading resource.
@@ -52,6 +61,7 @@ struct GState {
     miter_limit: f64,
     dash_array: Vec<f64>,
     dash_offset: f64,
+    overprint: bool,
 }
 
 impl GState {
@@ -65,6 +75,7 @@ impl GState {
             miter_limit: -1.0,
             dash_array: Vec::new(),
             dash_offset: -1.0,
+            overprint: false,
         }
     }
 
@@ -115,6 +126,8 @@ pub fn build_content_stream(
     let mut shading_refs: Vec<ShadingRef> = Vec::new();
     let mut clip_depth: u32 = 0;
     let mut gs = GState::new();
+    let mut ext_gstates: Vec<ExtGStateDict> = Vec::new();
+    let mut ext_gstate_map: HashMap<Vec<u8>, usize> = HashMap::new();
 
     // Track which fonts this page uses (for per-page Resources/Font dict)
     let mut page_font_names: HashSet<String> = HashSet::new();
@@ -196,6 +209,7 @@ pub fn build_content_stream(
                 if params.is_text_glyph {
                     continue;
                 }
+                emit_overprint(&mut buf, params.overprint, &mut gs, &mut ext_gstates, &mut ext_gstate_map);
                 emit_fill_color(&mut buf, &params.color, &mut gs);
                 emit_path(&mut buf, path);
                 if params.fill_rule == FillRule::EvenOdd {
@@ -216,6 +230,7 @@ pub fn build_content_stream(
                     buf.extend(b"q\n");
                     emit_cm(&mut buf, &params.ctm);
                 }
+                emit_overprint(&mut buf, params.overprint, &mut gs, &mut ext_gstates, &mut ext_gstate_map);
                 emit_stroke_color(&mut buf, &params.color, &mut gs);
                 emit_line_state(&mut buf, params, &mut gs);
                 emit_path(&mut buf, path);
@@ -328,6 +343,7 @@ pub fn build_content_stream(
         images,
         shading_refs,
         used_font_names: page_font_names.into_iter().collect(),
+        ext_gstate_dicts: ext_gstates,
     }
 }
 
@@ -471,6 +487,44 @@ fn emit_line_state(buf: &mut Vec<u8>, params: &StrokeParams, gs: &mut GState) {
         gs.dash_array.clone_from(&dash.array);
         gs.dash_offset = dash.offset;
     }
+}
+
+/// Emit a `gs` operator to set overprint mode when it changes.
+///
+/// Deduplicates ExtGState dicts — identical overprint settings share one resource.
+fn emit_overprint(
+    buf: &mut Vec<u8>,
+    overprint: bool,
+    gs: &mut GState,
+    ext_gstates: &mut Vec<ExtGStateDict>,
+    ext_gstate_map: &mut HashMap<Vec<u8>, usize>,
+) {
+    if gs.overprint == overprint {
+        return;
+    }
+    gs.overprint = overprint;
+
+    // Build dedup key
+    let key = format!("OP{}", overprint as u8).into_bytes();
+
+    let idx = if let Some(&idx) = ext_gstate_map.get(&key) {
+        idx
+    } else {
+        let idx = ext_gstates.len();
+        let mut entries = vec![
+            (b"Type".to_vec(), PdfObj::name("ExtGState")),
+            (b"OP".to_vec(), PdfObj::Bool(overprint)),
+            (b"op".to_vec(), PdfObj::Bool(overprint)),
+        ];
+        if overprint {
+            entries.push((b"OPM".to_vec(), PdfObj::Int(1)));
+        }
+        ext_gstates.push(ExtGStateDict { entries });
+        ext_gstate_map.insert(key, idx);
+        idx
+    };
+
+    writeln!(buf, "/GS{} gs", idx).unwrap();
 }
 
 /// Emit path segments as PDF path operators.

@@ -208,6 +208,7 @@ impl PdfDevice {
             images,
             shading_refs,
             used_font_names,
+            ext_gstate_dicts,
         } = result;
 
         // Build image XObjects
@@ -247,6 +248,30 @@ impl PdfDevice {
         }
         if !shading_entries.is_empty() {
             resources.push((b"Shading".to_vec(), PdfObj::Dict(shading_entries)));
+        }
+
+        // Build ExtGState resources
+        if !ext_gstate_dicts.is_empty() {
+            let mut gs_entries: Vec<(Vec<u8>, PdfObj)> = Vec::new();
+            for (i, gs_dict) in ext_gstate_dicts.iter().enumerate() {
+                // Rebuild entries (PdfObj doesn't derive Clone)
+                let entries: Vec<(Vec<u8>, PdfObj)> = gs_dict
+                    .entries
+                    .iter()
+                    .map(|(k, v)| {
+                        let obj = match v {
+                            PdfObj::Bool(b) => PdfObj::Bool(*b),
+                            PdfObj::Int(n) => PdfObj::Int(*n),
+                            PdfObj::Name(n) => PdfObj::Name(n.clone()),
+                            _ => PdfObj::Null,
+                        };
+                        (k.clone(), obj)
+                    })
+                    .collect();
+                let gs_ref = writer.add_object(&PdfObj::Dict(entries));
+                gs_entries.push((format!("GS{}", i).into_bytes(), PdfObj::Ref(gs_ref)));
+            }
+            resources.push((b"ExtGState".to_vec(), PdfObj::Dict(gs_entries)));
         }
 
         // Content stream

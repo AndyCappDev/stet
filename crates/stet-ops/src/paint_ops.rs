@@ -135,6 +135,7 @@ fn push_fill_element(ctx: &mut Context, path: PsPath, fill_rule: FillRule) {
         fill_rule,
         ctm: Matrix::identity(),
         is_text_glyph: false,
+        overprint: ctx.gstate.overprint,
     };
     ctx.display_list.push(DisplayElement::Fill { path, params });
 }
@@ -206,6 +207,7 @@ fn stroke_native(ctx: &mut Context) -> Result<(), PsError> {
                 ctm: ctx.gstate.ctm,
                 stroke_adjust: ctx.gstate.stroke_adjust,
                 is_text_glyph: false,
+                overprint: ctx.gstate.overprint,
             };
             ctx.display_list.push(DisplayElement::Stroke {
                 path: user_path,
@@ -233,6 +235,7 @@ fn stroke_native(ctx: &mut Context) -> Result<(), PsError> {
             ctm: Matrix::identity(),
             stroke_adjust: ctx.gstate.stroke_adjust,
             is_text_glyph: false,
+            overprint: ctx.gstate.overprint,
         };
         ctx.display_list.push(DisplayElement::Stroke {
             path: ctx.gstate.path.clone(),
@@ -349,6 +352,7 @@ pub fn op_rectfill(ctx: &mut Context) -> Result<(), PsError> {
         fill_rule: FillRule::NonZeroWinding,
         ctm: Matrix::identity(),
         is_text_glyph: false,
+        overprint: ctx.gstate.overprint,
     };
     ctx.display_list.push(DisplayElement::Fill { path, params });
     Ok(())
@@ -373,6 +377,7 @@ pub fn op_rectstroke(ctx: &mut Context) -> Result<(), PsError> {
             ctm: ctx.gstate.ctm,
             stroke_adjust: ctx.gstate.stroke_adjust,
             is_text_glyph: false,
+            overprint: ctx.gstate.overprint,
         };
         ctx.display_list
             .push(DisplayElement::Stroke { path, params });
@@ -398,6 +403,7 @@ pub fn op_rectstroke(ctx: &mut Context) -> Result<(), PsError> {
             ctm: Matrix::identity(),
             stroke_adjust: ctx.gstate.stroke_adjust,
             is_text_glyph: false,
+            overprint: ctx.gstate.overprint,
         };
         ctx.display_list
             .push(DisplayElement::Stroke { path, params });

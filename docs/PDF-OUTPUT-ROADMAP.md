@@ -47,11 +47,11 @@ This roadmap tracks what's missing and prioritizes by impact on round-trip fidel
 | Color key mask (Type 4) | ✓ `/Mask` array emitted | — |
 | Pattern fills | Gray placeholder (0.7) | **HIGH** — round-trip |
 | CIE shadings (complex decode) | Falls back to DeviceRGB | **LOW** — needs ICC profile construction (3.4) |
-| Overprint settings | Stored in gstate, not emitted | **MEDIUM** — print separations |
+| Overprint settings | ✓ ExtGState with OP/op/OPM | — |
+| ExtGState dict | ✓ Deduplicated, emitted per page | — |
 | Transfer functions | Stored in gstate, not emitted | **LOW** — press calibration |
 | Halftone screens | Stored in gstate, not emitted | **LOW** — screening |
 | Black generation / UCR | Stored in gstate, not emitted | **LOW** — CMYK separation |
-| ExtGState dict | Not emitted | Needed for overprint, opacity |
 | TrimBox / BleedBox | Only MediaBox | **MEDIUM** — print finishing |
 | Document metadata | ✓ Info dict (Producer, Title, CreationDate) | — |
 | PDF/X conformance | No OutputIntent | **LOW** — certification |
@@ -132,19 +132,24 @@ These improve PDF output for real print workflows. Not strictly needed for round
 pixel testing (since stet's raster renderer also ignores most of these), but important
 for producing usable PDF files.
 
-### 2.1 ExtGState Support
-- [ ] Build `/ExtGState` resource dict on page
-- [ ] Emit `gs` operator in content stream to apply graphics state changes
-- [ ] Track current ExtGState to avoid redundant emissions
-- **Files**: `crates/stet-pdf/src/pdf_device.rs`, `crates/stet-pdf/src/content_stream.rs`
-- **Effort**: Medium — framework for all ExtGState features below
+### 2.1 ExtGState Support ✅
+- [x] `ExtGStateDict` struct in content_stream.rs with arbitrary key-value entries
+- [x] Deduplicated ExtGState dicts — identical parameter combinations share one resource
+- [x] `emit_overprint()` emits `/GSn gs` operator when overprint state changes
+- [x] GState tracks current `overprint` to suppress redundant emissions
+- [x] Build `/ExtGState` resource dict on page referencing per-page ExtGState objects
+- [x] Q/q restore resets overprint tracking (re-emits `gs` as needed)
+- **Files**: `crates/stet-pdf/src/content_stream.rs`, `crates/stet-pdf/src/pdf_device.rs`
 
-### 2.2 Overprint Settings
-- [ ] Capture `overprint` flag from GraphicsState into display list elements
-- [ ] Emit `/OP true` / `/op true` and `/OPM 1` in ExtGState dict
-- [ ] Requires ExtGState support (2.1)
-- **Files**: `crates/stet-core/src/device.rs`, `crates/stet-pdf/src/pdf_device.rs`
-- **Effort**: Small (once ExtGState exists)
+### 2.2 Overprint Settings ✅
+- [x] Added `overprint: bool` field to `FillParams` and `StrokeParams`
+- [x] Captured `ctx.gstate.overprint` at all FillParams/StrokeParams construction sites
+  (paint_ops.rs ~6 sites, show_ops.rs ~2 sites, halftone_ops.rs ~2 sites)
+- [x] Emit `/OP true` (stroke) + `/op true` (fill) + `/OPM 1` (nonzero overprint mode) in ExtGState dict
+- [x] Overprint-off emits `/OP false` + `/op false` (no OPM entry)
+- **Files**: `crates/stet-core/src/device.rs`, `crates/stet-ops/src/paint_ops.rs`,
+  `crates/stet-ops/src/show_ops.rs`, `crates/stet-ops/src/halftone_ops.rs`,
+  `crates/stet-pdf/src/content_stream.rs`, `crates/stet-pdf/src/pdf_device.rs`
 
 ### 2.3 TrimBox / BleedBox ✅
 - [x] `set_trim_box()` method on `OutputDevice` trait (default no-op) and `PdfDevice`
@@ -234,8 +239,8 @@ Phase 4 items are deferred — implement only when a specific need arises.
  ✅  2.4  Document metadata                done
  ✅  2.3  TrimBox / BleedBox               done
  ✅  1.6  Native color space shadings      done      Gray/RGB/CMYK/ICCBased/CalRGB/CalGray
- 5.  2.1  ExtGState framework              medium    unlocks overprint + future items
- 6.  2.2  Overprint settings               small     needs ExtGState (#5)
+ ✅  2.1  ExtGState framework              done      dedup'd dicts, gs operator, overprint tracking
+ ✅  2.2  Overprint settings               done      OP/op/OPM in ExtGState, captured at all paint sites
  7.  1.2  Separation/DeviceN display list  medium    VM-free tint transform design
  8.  1.3  Separation/DeviceN PDF output    large     end-to-end color pipeline
  9.  1.4  Separation/DeviceN raster        medium    lookup table interpolation

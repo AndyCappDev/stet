@@ -4438,6 +4438,7 @@ fn push_glyph_element(
             ctm: Matrix::identity(),
             stroke_adjust: false,
             is_text_glyph: true,
+            overprint: ctx.gstate.overprint,
         };
         ctx.display_list.push(DisplayElement::Stroke {
             path: device_path,
@@ -4449,6 +4450,7 @@ fn push_glyph_element(
             ctm: Matrix::identity(),
             fill_rule: FillRule::NonZeroWinding,
             is_text_glyph: true,
+            overprint: ctx.gstate.overprint,
         };
         ctx.display_list.push(DisplayElement::Fill {
             path: device_path,

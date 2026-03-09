@@ -21,6 +21,8 @@ pub struct FillParams {
     /// True when this fill is a text glyph from a show operator.
     /// PDF device skips these (uses Text elements instead).
     pub is_text_glyph: bool,
+    /// Overprint flag from graphics state (used by PDF output).
+    pub overprint: bool,
 }
 
 /// Parameters for a text element emitted by show operators.
@@ -71,6 +73,8 @@ pub struct StrokeParams {
     /// True when this stroke is a text glyph from a show operator (PaintType 2).
     /// PDF device skips these (uses Text elements instead).
     pub is_text_glyph: bool,
+    /// Overprint flag from graphics state (used by PDF output).
+    pub overprint: bool,
 }
 
 /// Parameters for clipping.

@@ -4347,6 +4347,7 @@ mod tests {
             fill_rule: FillRule::NonZeroWinding,
             ctm: Matrix::identity(),
             is_text_glyph: false,
+            overprint: false,
         };
         dev.fill_path(&path, &params);
 
@@ -4374,6 +4375,7 @@ mod tests {
             ctm: Matrix::identity(),
             stroke_adjust: false,
             is_text_glyph: false,
+            overprint: false,
         };
         dev.stroke_path(&path, &params);
 
@@ -4413,6 +4415,7 @@ mod tests {
             fill_rule: FillRule::NonZeroWinding,
             ctm: Matrix::identity(),
             is_text_glyph: false,
+            overprint: false,
         };
         dev.fill_path(&fill_path, &fill_params);
 
@@ -4441,6 +4444,7 @@ mod tests {
             fill_rule: FillRule::NonZeroWinding,
             ctm: Matrix::identity(),
             is_text_glyph: false,
+            overprint: false,
         };
         dev.fill_path(&path, &params);
 
@@ -4478,6 +4482,7 @@ mod tests {
             fill_rule: FillRule::NonZeroWinding,
             ctm: Matrix::translate(100.0, 100.0),
             is_text_glyph: false,
+            overprint: false,
         };
         dev.fill_path(&path, &params);
 
