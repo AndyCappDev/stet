@@ -182,6 +182,8 @@ pub struct Context {
     pub page_width: u32,
     pub page_height: u32,
     pub output_path: Option<String>,
+    /// Page filter: if set, only render pages in this set (1-based).
+    pub page_filter: Option<std::collections::HashSet<i32>>,
     /// Factory closure for creating raster devices (registered by CLI).
     #[allow(clippy::type_complexity)]
     pub device_factory: Option<Box<dyn Fn(u32, u32) -> Box<dyn OutputDevice>>>,
@@ -548,6 +550,7 @@ impl Context {
             page_width: 612,
             page_height: 792,
             output_path: None,
+            page_filter: None,
             device_factory: None,
             font_directory,
             font_resource_path: None,

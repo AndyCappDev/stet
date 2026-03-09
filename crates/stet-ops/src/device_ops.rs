@@ -448,11 +448,17 @@ pub fn op_showpage_continue(ctx: &mut Context) -> Result<(), PsError> {
         _ => true, // default to rendering if EndPage returned non-bool
     };
 
-    if should_render {
-        // Increment PageCount
-        let page_count = get_pd_int(ctx, b"PageCount").unwrap_or(0) + 1;
-        set_pd_int(ctx, b"PageCount", page_count);
+    // Increment PageCount (always, even if filtered — tracks logical page number)
+    let page_count = get_pd_int(ctx, b"PageCount").unwrap_or(0) + 1;
+    set_pd_int(ctx, b"PageCount", page_count);
 
+    // Check page filter — skip rendering if page not in the selected set
+    let in_filter = ctx
+        .page_filter
+        .as_ref()
+        .map_or(true, |f| f.contains(&page_count));
+
+    if should_render && in_filter {
         // Replay display list and render
         let list = ctx.take_display_list();
         if let Some(ref mut device) = ctx.device {
@@ -529,10 +535,15 @@ pub fn op_copypage_continue(ctx: &mut Context) -> Result<(), PsError> {
         PsValue::Bool(b) => b,
         _ => true,
     };
-    if should_render {
-        let page_count = get_pd_int(ctx, b"PageCount").unwrap_or(0) + 1;
-        set_pd_int(ctx, b"PageCount", page_count);
+    let page_count = get_pd_int(ctx, b"PageCount").unwrap_or(0) + 1;
+    set_pd_int(ctx, b"PageCount", page_count);
 
+    let in_filter = ctx
+        .page_filter
+        .as_ref()
+        .map_or(true, |f| f.contains(&page_count));
+
+    if should_render && in_filter {
         // Replay display list (copypage preserves page content, but we must
         // transfer ownership for pipelined rendering)
         let list = ctx.take_display_list();

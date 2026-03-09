@@ -37,6 +37,7 @@ fn main() {
     let mut device_name: Option<String> = None;
     let mut no_icc = false;
     let mut output_profile_path: Option<String> = None;
+    let mut pages_spec: Option<String> = None;
     let mut file_args: Vec<String> = Vec::new();
     let mut i = 1;
     while i < args.len() {
@@ -97,6 +98,16 @@ fn main() {
                     std::process::exit(1);
                 }
             }
+            "--pages" => {
+                if i + 1 < args.len() {
+                    pages_spec = Some(args[i + 1].clone());
+                    i += 2;
+                    continue;
+                } else {
+                    eprintln!("Error: --pages requires a value (e.g., 1-5, 3, 1-3,7,10-12)");
+                    std::process::exit(1);
+                }
+            }
             _ => {}
         }
         file_args.push(args[i].clone());
@@ -126,18 +137,27 @@ fn main() {
             std::process::exit(1);
         });
 
+    // Parse --pages spec into a filter set
+    let page_filter = pages_spec.map(|spec| {
+        parse_page_ranges(&spec).unwrap_or_else(|e| {
+            eprintln!("Error: {}", e);
+            eprintln!("Expected format: 1-5, 3, 1-3,7,10-12");
+            std::process::exit(1);
+        })
+    });
+
     match device.as_str() {
         "png" => {
-            run_png_mode(dpi, file_args, no_icc, output_profile_path);
+            run_png_mode(dpi, file_args, no_icc, output_profile_path, page_filter);
         }
         "pdf" => {
-            run_pdf_mode(dpi, file_args, no_icc, output_profile_path);
+            run_pdf_mode(dpi, file_args, no_icc, output_profile_path, page_filter);
         }
         "null" => {
-            run_null_mode(dpi, file_args, no_icc, output_profile_path);
+            run_null_mode(dpi, file_args, no_icc, output_profile_path, page_filter);
         }
         #[cfg(feature = "viewer")]
-        "viewer" => run_viewer_mode(dpi, file_args, no_icc, output_profile_path),
+        "viewer" => run_viewer_mode(dpi, file_args, no_icc, output_profile_path, page_filter),
         #[cfg(not(feature = "viewer"))]
         "viewer" => {
             eprintln!("Error: viewer not available (built without 'viewer' feature)");
@@ -157,8 +177,10 @@ fn run_png_mode(
     file_args: Vec<String>,
     no_icc: bool,
     output_profile_path: Option<String>,
+    page_filter: Option<std::collections::HashSet<i32>>,
 ) {
     let mut ctx = create_context(no_icc, output_profile_path.as_deref());
+    ctx.page_filter = page_filter;
 
     // Register device factory (before setpagedevice)
     let cmyk_bytes = ctx.icc_cache.system_cmyk_bytes().cloned();
@@ -183,6 +205,7 @@ fn run_pdf_mode(
     file_args: Vec<String>,
     no_icc: bool,
     output_profile_path: Option<String>,
+    page_filter: Option<std::collections::HashSet<i32>>,
 ) {
     // Read profile bytes for PDF embedding (create_context already validated the path)
     let output_profile_bytes: Option<Vec<u8>> = if !no_icc {
@@ -192,6 +215,7 @@ fn run_pdf_mode(
     };
 
     let mut ctx = create_context(no_icc, output_profile_path.as_deref());
+    ctx.page_filter = page_filter;
     let dpi_val = dpi_override.unwrap_or(300.0);
 
     ctx.device_factory = Some(Box::new(move |w, h| {
@@ -218,10 +242,12 @@ fn run_null_mode(
     file_args: Vec<String>,
     no_icc: bool,
     output_profile_path: Option<String>,
+    page_filter: Option<std::collections::HashSet<i32>>,
 ) {
     use stet_core::device::NullDevice;
 
     let mut ctx = create_context(no_icc, output_profile_path.as_deref());
+    ctx.page_filter = page_filter;
     ctx.device_factory = Some(Box::new(|w, h| Box::new(NullDevice::new(w, h))));
 
     if !file_args.is_empty() {
@@ -242,6 +268,7 @@ fn run_viewer_mode(
     file_args: Vec<String>,
     no_icc: bool,
     output_profile_path: Option<String>,
+    page_filter: Option<std::collections::HashSet<i32>>,
 ) {
     use stet_core::device::NullDevice;
 
@@ -327,6 +354,7 @@ fn run_viewer_mode(
     let _screen_info_receiver = interp_end.screen_info_receiver;
     std::thread::spawn(move || {
         let mut ctx = create_context(no_icc, output_profile_path.as_deref());
+        ctx.page_filter = page_filter;
 
         // Set display_list_sender for incremental delivery at each showpage
         ctx.display_list_sender = Some(dl_sender);
@@ -390,6 +418,49 @@ fn run_viewer_mode(
         );
     }
     std::process::exit(0);
+}
+
+/// Parse a page range specification into a set of page numbers (1-based).
+///
+/// Supports single pages (`3`), ranges (`1-5`), and comma-separated
+/// combinations (`1-3,7,10-12`).
+fn parse_page_ranges(spec: &str) -> Result<std::collections::HashSet<i32>, String> {
+    let mut pages = std::collections::HashSet::new();
+    for part in spec.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        if let Some((start_s, end_s)) = part.split_once('-') {
+            let start: i32 = start_s
+                .trim()
+                .parse()
+                .map_err(|_| format!("Invalid page range: '{}'", part))?;
+            let end: i32 = end_s
+                .trim()
+                .parse()
+                .map_err(|_| format!("Invalid page range: '{}'", part))?;
+            if start < 1 || end < 1 {
+                return Err(format!("Page numbers must be positive: '{}'", part));
+            }
+            if start > end {
+                return Err(format!("Invalid page range (start > end): '{}'", part));
+            }
+            pages.extend(start..=end);
+        } else {
+            let num: i32 = part
+                .parse()
+                .map_err(|_| format!("Invalid page number: '{}'", part))?;
+            if num < 1 {
+                return Err(format!("Page numbers must be positive: '{}'", part));
+            }
+            pages.insert(num);
+        }
+    }
+    if pages.is_empty() {
+        return Err("Empty page range specification".to_string());
+    }
+    Ok(pages)
 }
 
 /// Create and initialize a Context with the resource system.
