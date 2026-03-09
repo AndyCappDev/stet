@@ -26,6 +26,28 @@ pub struct TransferState {
     pub color: Option<[Option<TransferTable>; 4]>,
 }
 
+/// A pre-computed halftone screen for PDF output.
+#[derive(Clone, Debug)]
+pub struct HalftoneScreen {
+    pub frequency: f64,
+    pub angle: f64,
+    /// Spot function as PDF Type 4 calculator bytes (e.g., b"{ dup mul exch dup mul add 1 exch sub }").
+    /// None if conversion failed (falls back to sampled_2d).
+    pub type4_tokens: Option<Arc<Vec<u8>>>,
+    /// Spot function sampled on a 64×64 grid (4096 f64 values, domain [-1,1]², range [0,1]).
+    /// Used when Type 4 decompilation fails.
+    pub sampled_2d: Option<Arc<Vec<f64>>>,
+}
+
+/// Pre-computed halftone state captured at paint time.
+#[derive(Clone, Debug, Default)]
+pub struct HalftoneState {
+    /// Single-component halftone (from setscreen). None = default (suppress).
+    pub gray: Option<Arc<HalftoneScreen>>,
+    /// Per-component \[R, G, B, Gray\] (from setcolorscreen). Emits Type 5 composite.
+    pub color: Option<[Option<Arc<HalftoneScreen>>; 4]>,
+}
+
 /// Native Separation/DeviceN color info for PDF output.
 #[derive(Clone, Debug)]
 pub struct SpotColor {
@@ -75,6 +97,8 @@ pub struct FillParams {
     pub rendering_intent: u8,
     /// Pre-sampled transfer function state for PDF output.
     pub transfer: TransferState,
+    /// Pre-computed halftone screen state for PDF output.
+    pub halftone: HalftoneState,
 }
 
 /// Parameters for a text element emitted by show operators.
@@ -113,6 +137,8 @@ pub struct TextParams {
     pub rendering_intent: u8,
     /// Pre-sampled transfer function state for PDF output.
     pub transfer: TransferState,
+    /// Pre-computed halftone screen state for PDF output.
+    pub halftone: HalftoneState,
 }
 
 /// Parameters for stroking a path.
@@ -139,6 +165,8 @@ pub struct StrokeParams {
     pub rendering_intent: u8,
     /// Pre-sampled transfer function state for PDF output.
     pub transfer: TransferState,
+    /// Pre-computed halftone screen state for PDF output.
+    pub halftone: HalftoneState,
 }
 
 /// Parameters for clipping.

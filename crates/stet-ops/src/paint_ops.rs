@@ -6,8 +6,8 @@
 
 use stet_core::context::Context;
 use stet_core::device::{
-    FillParams, PatternFillParams, SimpleColorSpace, SpotColor, SpotColorSpace, StrokeParams,
-    TransferState,
+    FillParams, HalftoneState, PatternFillParams, SimpleColorSpace, SpotColor, SpotColorSpace,
+    StrokeParams, TransferState,
 };
 use stet_core::display_list::DisplayElement;
 use stet_core::error::PsError;
@@ -48,6 +48,14 @@ pub(crate) fn capture_transfer_state(ctx: &Context) -> TransferState {
     TransferState {
         gray: ctx.gstate.sampled_transfer.clone(),
         color: ctx.gstate.sampled_color_transfer.clone(),
+    }
+}
+
+/// Build HalftoneState from current graphics state pre-computed halftone screens.
+pub(crate) fn capture_halftone_state(ctx: &Context) -> HalftoneState {
+    HalftoneState {
+        gray: ctx.gstate.precomputed_halftone.clone(),
+        color: ctx.gstate.precomputed_color_halftone.clone(),
     }
 }
 
@@ -190,6 +198,7 @@ fn push_fill_element(ctx: &mut Context, path: PsPath, fill_rule: FillRule) {
         spot_color: capture_spot_color(ctx),
         rendering_intent: ctx.gstate.rendering_intent,
         transfer: capture_transfer_state(ctx),
+        halftone: capture_halftone_state(ctx),
     };
     ctx.display_list.push(DisplayElement::Fill { path, params });
 }
@@ -250,6 +259,7 @@ fn use_native_stroke(ctx: &Context) -> bool {
 fn stroke_native(ctx: &mut Context) -> Result<(), PsError> {
     let spot = capture_spot_color(ctx);
     let transfer = capture_transfer_state(ctx);
+    let halftone = capture_halftone_state(ctx);
     if is_anisotropic(&ctx.gstate.ctm) {
         if let Some(inv_ctm) = ctx.gstate.ctm.invert() {
             let user_path = inverse_transform_path(&ctx.gstate.path, &inv_ctm);
@@ -267,6 +277,7 @@ fn stroke_native(ctx: &mut Context) -> Result<(), PsError> {
                 spot_color: spot,
                 rendering_intent: ctx.gstate.rendering_intent,
                 transfer,
+                halftone: halftone.clone(),
             };
             ctx.display_list.push(DisplayElement::Stroke {
                 path: user_path,
@@ -298,6 +309,7 @@ fn stroke_native(ctx: &mut Context) -> Result<(), PsError> {
             spot_color: spot,
             rendering_intent: ctx.gstate.rendering_intent,
             transfer,
+            halftone,
         };
         ctx.display_list.push(DisplayElement::Stroke {
             path: ctx.gstate.path.clone(),
@@ -422,6 +434,7 @@ pub fn op_rectstroke(ctx: &mut Context) -> Result<(), PsError> {
 
     let spot = capture_spot_color(ctx);
     let transfer = capture_transfer_state(ctx);
+    let halftone = capture_halftone_state(ctx);
     if is_anisotropic(&ctx.gstate.ctm) {
         let path = build_rect_path_user(&rects);
         let params = StrokeParams {
@@ -438,6 +451,7 @@ pub fn op_rectstroke(ctx: &mut Context) -> Result<(), PsError> {
             spot_color: spot,
             rendering_intent: ctx.gstate.rendering_intent,
             transfer,
+            halftone: halftone.clone(),
         };
         ctx.display_list
             .push(DisplayElement::Stroke { path, params });
@@ -467,6 +481,7 @@ pub fn op_rectstroke(ctx: &mut Context) -> Result<(), PsError> {
             spot_color: spot,
             rendering_intent: ctx.gstate.rendering_intent,
             transfer,
+            halftone,
         };
         ctx.display_list
             .push(DisplayElement::Stroke { path, params });

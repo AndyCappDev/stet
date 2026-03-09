@@ -1044,6 +1044,10 @@ pub struct GraphicsState {
     pub sampled_transfer: Option<Arc<Vec<f64>>>,
     /// Pre-sampled per-component transfer \[R, G, B, Gray\].
     pub sampled_color_transfer: Option<[Option<Arc<Vec<f64>>>; 4]>,
+    /// Pre-computed halftone screen for PDF output. None = default (suppressed).
+    pub precomputed_halftone: Option<Arc<crate::device::HalftoneScreen>>,
+    /// Pre-computed per-component halftone \[R, G, B, Gray\] (from setcolorscreen).
+    pub precomputed_color_halftone: Option<[Option<Arc<crate::device::HalftoneScreen>>; 4]>,
 
     // Black generation / undercolor removal
     pub black_generation: Option<crate::object::PsObject>,
@@ -1108,6 +1112,8 @@ impl GraphicsState {
             color_transfer: None,
             sampled_transfer: None,
             sampled_color_transfer: None,
+            precomputed_halftone: None,
+            precomputed_color_halftone: None,
             black_generation: None,
             undercolor_removal: None,
             color_rendering: None,

@@ -250,12 +250,14 @@ calibration workflows. Implement on demand rather than speculatively.
 - **Files**: `crates/stet-core/src/device.rs`, `crates/stet-core/src/graphics_state.rs`, `crates/stet-ops/src/halftone_ops.rs`, `crates/stet-ops/src/paint_ops.rs`, `crates/stet-ops/src/show_ops.rs`, `crates/stet-pdf/src/content_stream.rs`, `crates/stet-pdf/src/pdf_device.rs`
 - **Effort**: Medium
 
-### 4.2 Halftone Screens
-- [ ] Capture halftone parameters (frequency, angle, spot function)
-- [ ] Emit `/HT` dict in ExtGState (Type 1 halftone with spot function)
-- [ ] Spot function as Type 4 (PostScript calculator) PDF function
-- [ ] Requires ExtGState support (2.1)
-- **Files**: `crates/stet-core/src/device.rs`, `crates/stet-pdf/src/pdf_device.rs`
+### 4.2 Halftone Screens ✅
+- [x] Capture halftone parameters (frequency, angle, spot function)
+- [x] Emit `/HT` dict in ExtGState (Type 1 halftone with spot function)
+- [x] Spot function as Type 4 (PostScript calculator) PDF function
+- [x] Type 0 sampled 2D fallback when Type 4 decompilation fails
+- [x] Type 5 composite halftone for setcolorscreen (R/G/B/Default)
+- [x] sethalftone Type 1 dict support
+- **Files**: `crates/stet-core/src/device.rs`, `crates/stet-core/src/graphics_state.rs`, `crates/stet-ops/src/halftone_ops.rs`, `crates/stet-ops/src/paint_ops.rs`, `crates/stet-ops/src/show_ops.rs`, `crates/stet-pdf/src/content_stream.rs`, `crates/stet-pdf/src/pdf_device.rs`
 - **Effort**: Medium
 
 ### 4.3 Black Generation / UCR
@@ -290,7 +292,7 @@ Phase 4 items are deferred — implement only when a specific need arises.
 
 Phase 4 (on demand only):
  ✅  4.1  Transfer functions               done      settransfer/setcolortransfer → /TR2 Type 0 functions
- -   4.2  Halftone screens                 medium    offset litho screening
+ ✅  4.2  Halftone screens                 done      setscreen/setcolorscreen/sethalftone → /HT Type 1/5
  -   4.3  Black generation / UCR           small     CMYK separation control
 ```
 

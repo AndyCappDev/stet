@@ -4417,6 +4417,7 @@ fn emit_text_element_with_fm(
         spot_color: crate::paint_ops::capture_spot_color(ctx),
         rendering_intent: ctx.gstate.rendering_intent,
         transfer: crate::paint_ops::capture_transfer_state(ctx),
+        halftone: crate::paint_ops::capture_halftone_state(ctx),
     };
     ctx.display_list.push(DisplayElement::Text { params });
 }
@@ -4429,6 +4430,7 @@ fn push_glyph_element(
 ) {
     let spot = crate::paint_ops::capture_spot_color(ctx);
     let transfer = crate::paint_ops::capture_transfer_state(ctx);
+    let halftone = crate::paint_ops::capture_halftone_state(ctx);
     if paint_type == 2 {
         let params = StrokeParams {
             color: ctx.gstate.color.clone(),
@@ -4447,6 +4449,7 @@ fn push_glyph_element(
             spot_color: spot,
             rendering_intent: ctx.gstate.rendering_intent,
             transfer,
+            halftone: halftone.clone(),
         };
         ctx.display_list.push(DisplayElement::Stroke {
             path: device_path,
@@ -4462,6 +4465,7 @@ fn push_glyph_element(
             spot_color: spot,
             rendering_intent: ctx.gstate.rendering_intent,
             transfer,
+            halftone,
         };
         ctx.display_list.push(DisplayElement::Fill {
             path: device_path,

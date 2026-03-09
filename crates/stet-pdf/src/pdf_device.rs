@@ -257,6 +257,7 @@ impl PdfDevice {
             pattern_refs,
             pattern_cs_entries,
             transfer_refs,
+            halftone_refs,
         } = result;
 
         // Build image XObjects
@@ -321,6 +322,12 @@ impl PdfDevice {
                 if let Some(tr) = transfer_refs.iter().find(|r| r.ext_gstate_idx == i) {
                     let tr2_value = build_transfer_tr2(writer, &tr.tables, tr.is_color);
                     entries.push((b"TR2".to_vec(), tr2_value));
+                }
+
+                // Check if this ExtGState has a halftone reference
+                if let Some(hr) = halftone_refs.iter().find(|r| r.ext_gstate_idx == i) {
+                    let ht_value = build_halftone_ht(writer, &hr.state);
+                    entries.push((b"HT".to_vec(), ht_value));
                 }
 
                 let gs_ref = writer.add_object(&PdfObj::Dict(entries));
@@ -431,6 +438,10 @@ impl PdfDevice {
                         if let Some(tr) = tile_result.transfer_refs.iter().find(|r| r.ext_gstate_idx == j) {
                             let tr2_value = build_transfer_tr2(writer, &tr.tables, tr.is_color);
                             entries.push((b"TR2".to_vec(), tr2_value));
+                        }
+                        if let Some(hr) = tile_result.halftone_refs.iter().find(|r| r.ext_gstate_idx == j) {
+                            let ht_value = build_halftone_ht(writer, &hr.state);
+                            entries.push((b"HT".to_vec(), ht_value));
                         }
                         let gs_ref = writer.add_object(&PdfObj::Dict(entries));
                         tile_gs
@@ -1133,6 +1144,113 @@ fn build_transfer_tr2(
         }
     } else {
         PdfObj::name("Identity")
+    }
+}
+
+/// Build a PDF Type 4 (PostScript calculator) function from token bytes.
+/// Domain is 2D [-1,1]×[-1,1], Range [0,1].
+fn build_type4_function(writer: &mut PdfWriter, tokens: &[u8]) -> u32 {
+    let dict_entries = vec![
+        (b"FunctionType".to_vec(), PdfObj::Int(4)),
+        (
+            b"Domain".to_vec(),
+            PdfObj::Array(vec![
+                PdfObj::Int(-1),
+                PdfObj::Int(1),
+                PdfObj::Int(-1),
+                PdfObj::Int(1),
+            ]),
+        ),
+        (
+            b"Range".to_vec(),
+            PdfObj::Array(vec![PdfObj::Int(0), PdfObj::Int(1)]),
+        ),
+    ];
+    writer.add_stream(dict_entries, tokens, false)
+}
+
+/// Build a PDF Type 0 (sampled) 2D function from a 64×64 sample table.
+/// Domain is [-1,1]×[-1,1], Range [0,1].
+fn build_type0_function_2d(writer: &mut PdfWriter, table: &[f64]) -> u32 {
+    let dict_entries = vec![
+        (b"FunctionType".to_vec(), PdfObj::Int(0)),
+        (
+            b"Domain".to_vec(),
+            PdfObj::Array(vec![
+                PdfObj::Int(-1),
+                PdfObj::Int(1),
+                PdfObj::Int(-1),
+                PdfObj::Int(1),
+            ]),
+        ),
+        (
+            b"Range".to_vec(),
+            PdfObj::Array(vec![PdfObj::Int(0), PdfObj::Int(1)]),
+        ),
+        (
+            b"Size".to_vec(),
+            PdfObj::Array(vec![PdfObj::Int(64), PdfObj::Int(64)]),
+        ),
+        (b"BitsPerSample".to_vec(), PdfObj::Int(8)),
+    ];
+    let data: Vec<u8> = table
+        .iter()
+        .map(|&v| (v.clamp(0.0, 1.0) * 255.0).round() as u8)
+        .collect();
+    writer.add_stream(dict_entries, &data, false)
+}
+
+/// Build a PDF halftone screen object (Type 1 halftone dict) from a HalftoneScreen.
+/// Returns a PdfObj (either inline Dict or Ref to indirect object).
+fn build_halftone_screen(
+    writer: &mut PdfWriter,
+    screen: &stet_core::device::HalftoneScreen,
+) -> PdfObj {
+    let spot_func = if let Some(ref tokens) = screen.type4_tokens {
+        let func_ref = build_type4_function(writer, tokens);
+        PdfObj::Ref(func_ref)
+    } else if let Some(ref table) = screen.sampled_2d {
+        let func_ref = build_type0_function_2d(writer, table);
+        PdfObj::Ref(func_ref)
+    } else {
+        PdfObj::name("Default")
+    };
+
+    let entries = vec![
+        (b"Type".to_vec(), PdfObj::name("Halftone")),
+        (b"HalftoneType".to_vec(), PdfObj::Int(1)),
+        (b"Frequency".to_vec(), PdfObj::Real(screen.frequency)),
+        (b"Angle".to_vec(), PdfObj::Real(screen.angle)),
+        (b"SpotFunction".to_vec(), spot_func),
+    ];
+    let obj_ref = writer.add_object(&PdfObj::Dict(entries));
+    PdfObj::Ref(obj_ref)
+}
+
+/// Build the /HT value for an ExtGState dict from a HalftoneState.
+fn build_halftone_ht(
+    writer: &mut PdfWriter,
+    state: &stet_core::device::HalftoneState,
+) -> PdfObj {
+    if let Some(ref color) = state.color {
+        // Type 5 composite halftone
+        let mut entries = vec![
+            (b"Type".to_vec(), PdfObj::name("Halftone")),
+            (b"HalftoneType".to_vec(), PdfObj::Int(5)),
+        ];
+        let component_names: [&[u8]; 4] = [b"Red", b"Green", b"Blue", b"Default"];
+        for (i, screen_opt) in color.iter().enumerate() {
+            if let Some(screen) = screen_opt {
+                let ht_obj = build_halftone_screen(writer, screen);
+                entries.push((component_names[i].to_vec(), ht_obj));
+            }
+        }
+        let obj_ref = writer.add_object(&PdfObj::Dict(entries));
+        PdfObj::Ref(obj_ref)
+    } else if let Some(ref gray) = state.gray {
+        build_halftone_screen(writer, gray)
+    } else {
+        PdfObj::name("Default")
     }
 }
 

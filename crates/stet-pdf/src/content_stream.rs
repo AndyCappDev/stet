@@ -9,7 +9,7 @@ use std::io::Write as IoWrite;
 
 use stet_core::context::Context;
 use stet_core::device::{
-    AxialShadingParams, MeshShadingParams, PatchShadingParams, PatternFillParams,
+    AxialShadingParams, HalftoneState, MeshShadingParams, PatchShadingParams, PatternFillParams,
     RadialShadingParams, SpotColor, SpotColorSpace, StrokeParams, TextParams, TransferState,
 };
 use stet_core::display_list::{DisplayElement, DisplayList};
@@ -44,6 +44,8 @@ pub struct ContentStreamResult {
     pub pattern_cs_entries: Vec<(String, PdfObj)>,
     /// Transfer function references to emit as PDF Type 0 function objects.
     pub transfer_refs: Vec<TransferFunctionRef>,
+    /// Halftone references to emit as PDF halftone objects.
+    pub halftone_refs: Vec<HalftoneRef>,
 }
 
 /// Reference from an ExtGState to pre-sampled transfer function tables.
@@ -55,6 +57,14 @@ pub struct TransferFunctionRef {
     pub tables: Vec<Option<std::sync::Arc<Vec<f64>>>>,
     /// True if this is a 4-component (color) transfer.
     pub is_color: bool,
+}
+
+/// Reference from an ExtGState to pre-computed halftone screen data.
+pub struct HalftoneRef {
+    /// Index into ext_gstate_dicts.
+    pub ext_gstate_idx: usize,
+    /// Halftone state captured at paint time.
+    pub state: HalftoneState,
 }
 
 /// Reference to a tiling pattern that needs a PDF Pattern XObject.
@@ -106,6 +116,8 @@ struct GState {
     rendering_intent: u8,
     /// Dedup key for current transfer state.
     transfer_key: Vec<u8>,
+    /// Dedup key for current halftone state.
+    halftone_key: Vec<u8>,
 }
 
 impl GState {
@@ -124,6 +136,7 @@ impl GState {
             stroke_cs_name: None,
             rendering_intent: 0,
             transfer_key: Vec::new(),
+            halftone_key: Vec::new(),
         }
     }
 
@@ -183,6 +196,7 @@ pub fn build_content_stream(
     let mut pattern_cs_names: Vec<(String, PdfObj)> = Vec::new();
     let mut pattern_cs_set: HashSet<String> = HashSet::new();
     let mut transfer_refs: Vec<TransferFunctionRef> = Vec::new();
+    let mut halftone_refs: Vec<HalftoneRef> = Vec::new();
 
     // Track which fonts this page uses (for per-page Resources/Font dict)
     let mut page_font_names: HashSet<String> = HashSet::new();
@@ -265,6 +279,7 @@ pub fn build_content_stream(
                     continue;
                 }
                 emit_transfer(&mut buf, &params.transfer, &mut gs, &mut ext_gstates, &mut ext_gstate_map, &mut transfer_refs);
+                emit_halftone(&mut buf, &params.halftone, &mut gs, &mut ext_gstates, &mut ext_gstate_map, &mut halftone_refs);
                 emit_rendering_intent(&mut buf, params.rendering_intent, &mut gs);
                 emit_overprint(&mut buf, params.overprint, &mut gs, &mut ext_gstates, &mut ext_gstate_map);
                 if let Some(spot) = &params.spot_color {
@@ -294,6 +309,7 @@ pub fn build_content_stream(
                     emit_cm(&mut buf, &params.ctm);
                 }
                 emit_transfer(&mut buf, &params.transfer, &mut gs, &mut ext_gstates, &mut ext_gstate_map, &mut transfer_refs);
+                emit_halftone(&mut buf, &params.halftone, &mut gs, &mut ext_gstates, &mut ext_gstate_map, &mut halftone_refs);
                 emit_rendering_intent(&mut buf, params.rendering_intent, &mut gs);
                 emit_overprint(&mut buf, params.overprint, &mut gs, &mut ext_gstates, &mut ext_gstate_map);
                 if let Some(spot) = &params.spot_color {
@@ -439,6 +455,7 @@ pub fn build_content_stream(
         pattern_refs,
         pattern_cs_entries,
         transfer_refs,
+        halftone_refs,
     }
 }
 
@@ -464,6 +481,7 @@ pub fn build_tile_content_stream(
     let mut pattern_cs_names: Vec<(String, PdfObj)> = Vec::new();
     let mut pattern_cs_set: HashSet<String> = HashSet::new();
     let mut transfer_refs: Vec<TransferFunctionRef> = Vec::new();
+    let mut halftone_refs: Vec<HalftoneRef> = Vec::new();
     let mut page_font_names: HashSet<String> = HashSet::new();
 
     // Register fonts used in tile
@@ -484,6 +502,7 @@ pub fn build_tile_content_stream(
                     continue;
                 }
                 emit_transfer(&mut buf, &params.transfer, &mut gs, &mut ext_gstates, &mut ext_gstate_map, &mut transfer_refs);
+                emit_halftone(&mut buf, &params.halftone, &mut gs, &mut ext_gstates, &mut ext_gstate_map, &mut halftone_refs);
                 emit_rendering_intent(&mut buf, params.rendering_intent, &mut gs);
                 emit_overprint(
                     &mut buf,
@@ -524,6 +543,7 @@ pub fn build_tile_content_stream(
                     emit_cm(&mut buf, &params.ctm);
                 }
                 emit_transfer(&mut buf, &params.transfer, &mut gs, &mut ext_gstates, &mut ext_gstate_map, &mut transfer_refs);
+                emit_halftone(&mut buf, &params.halftone, &mut gs, &mut ext_gstates, &mut ext_gstate_map, &mut halftone_refs);
                 emit_rendering_intent(&mut buf, params.rendering_intent, &mut gs);
                 emit_overprint(
                     &mut buf,
@@ -666,6 +686,7 @@ pub fn build_tile_content_stream(
         pattern_refs,
         pattern_cs_entries: pattern_cs_names,
         transfer_refs,
+        halftone_refs,
     }
 }
 
@@ -1021,6 +1042,70 @@ fn emit_transfer(
         ext_gstate_idx: idx,
         tables,
         is_color,
+    });
+    writeln!(buf, "/GS{} gs", idx).unwrap();
+}
+
+/// Build a dedup key from a HalftoneState based on Arc pointer identity.
+fn build_halftone_key(halftone: &HalftoneState) -> Vec<u8> {
+    use std::sync::Arc;
+    let mut key = Vec::new();
+    if let Some(ref color) = halftone.color {
+        key.extend(b"C");
+        for screen in color {
+            if let Some(s) = screen {
+                let ptr = Arc::as_ptr(s) as usize;
+                key.extend(ptr.to_le_bytes());
+            } else {
+                key.extend(b"D"); // default
+            }
+        }
+    } else if let Some(ref gray) = halftone.gray {
+        key.extend(b"G");
+        let ptr = Arc::as_ptr(gray) as usize;
+        key.extend(ptr.to_le_bytes());
+    }
+    // Empty key = default (no halftone)
+    key
+}
+
+/// Emit a `gs` operator to set halftone when it changes.
+fn emit_halftone(
+    buf: &mut Vec<u8>,
+    halftone: &HalftoneState,
+    gs: &mut GState,
+    ext_gstates: &mut Vec<ExtGStateDict>,
+    ext_gstate_map: &mut HashMap<Vec<u8>, usize>,
+    halftone_refs: &mut Vec<HalftoneRef>,
+) {
+    let key = build_halftone_key(halftone);
+    if key == gs.halftone_key {
+        return;
+    }
+    gs.halftone_key = key.clone();
+
+    // Default halftone — no ExtGState needed
+    if key.is_empty() {
+        return;
+    }
+
+    // Prefix key for dedup namespace separation from transfer keys
+    let mut map_key = b"HT:".to_vec();
+    map_key.extend(&key);
+
+    if let Some(&idx) = ext_gstate_map.get(&map_key) {
+        writeln!(buf, "/GS{} gs", idx).unwrap();
+        return;
+    }
+
+    let idx = ext_gstates.len();
+    let entries = vec![(b"Type".to_vec(), PdfObj::name("ExtGState"))];
+    ext_gstates.push(ExtGStateDict { entries });
+    ext_gstate_map.insert(map_key, idx);
+
+    halftone_refs.push(HalftoneRef {
+        ext_gstate_idx: idx,
+        state: halftone.clone(),
     });
     writeln!(buf, "/GS{} gs", idx).unwrap();
 }

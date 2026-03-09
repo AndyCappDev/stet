@@ -13,11 +13,175 @@
 use std::sync::Arc;
 
 use stet_core::context::Context;
+use stet_core::device::HalftoneScreen;
 use stet_core::dict::DictKey;
 use stet_core::display_list::DisplayList;
 use stet_core::error::PsError;
 use stet_core::graphics_state::{Matrix, PatternData};
 use stet_core::object::{PsObject, PsValue};
+
+// ---------- Halftone pre-computation for PDF output ----------
+
+/// PDF Type 4 calculator function allowed operators.
+const TYPE4_ALLOWED: &[&[u8]] = &[
+    b"abs", b"add", b"atan", b"ceiling", b"cos", b"cvi", b"cvr", b"div", b"exp",
+    b"floor", b"idiv", b"ln", b"log", b"mod", b"mul", b"neg", b"round", b"sin",
+    b"sqrt", b"sub", b"truncate", b"eq", b"ne", b"gt", b"ge", b"lt", b"le",
+    b"and", b"or", b"xor", b"not", b"bitshift", b"if", b"ifelse",
+    b"copy", b"dup", b"exch", b"index", b"pop", b"roll", b"true", b"false",
+];
+
+/// Try to decompile a PS spot function procedure to PDF Type 4 calculator bytes.
+fn decompile_spot_to_type4(ctx: &Context, proc: PsObject) -> Option<Vec<u8>> {
+    let (entity, start, len) = match proc.value {
+        PsValue::Array { entity, start, len } | PsValue::PackedArray { entity, start, len } => {
+            (entity, start, len)
+        }
+        _ => return None,
+    };
+    if len == 0 {
+        return None;
+    }
+    let mut result = Vec::new();
+    result.extend(b"{ ");
+    if !decompile_elements(ctx, entity, start, len, &mut result) {
+        return None;
+    }
+    result.extend(b"}");
+    Some(result)
+}
+
+/// Recursively decompile array elements to Type 4 tokens. Returns false on failure.
+fn decompile_elements(
+    ctx: &Context,
+    entity: stet_core::object::EntityId,
+    start: u32,
+    len: u32,
+    result: &mut Vec<u8>,
+) -> bool {
+    for i in 0..len {
+        let obj = ctx.arrays.get_element(entity, start + i);
+        match obj.value {
+            PsValue::Int(n) => {
+                use std::io::Write;
+                write!(result, "{} ", n).unwrap();
+            }
+            PsValue::Real(f) => {
+                use std::io::Write;
+                write!(result, "{} ", f).unwrap();
+            }
+            PsValue::Bool(b) => {
+                if b {
+                    result.extend(b"true ");
+                } else {
+                    result.extend(b"false ");
+                }
+            }
+            PsValue::Operator(opcode) => {
+                let name_id = ctx.operators[opcode.0 as usize].name;
+                let name_bytes = ctx.names.get_bytes(name_id);
+                if !TYPE4_ALLOWED.iter().any(|&a| a == name_bytes) {
+                    return false;
+                }
+                result.extend(name_bytes);
+                result.push(b' ');
+            }
+            PsValue::Name(name_id) if obj.flags.is_executable() => {
+                let name_bytes = ctx.names.get_bytes(name_id);
+                if !TYPE4_ALLOWED.iter().any(|&a| a == name_bytes) {
+                    return false;
+                }
+                result.extend(name_bytes);
+                result.push(b' ');
+            }
+            PsValue::Array {
+                entity: e,
+                start: s,
+                len: l,
+            }
+            | PsValue::PackedArray {
+                entity: e,
+                start: s,
+                len: l,
+            } if obj.flags.is_executable() => {
+                result.extend(b"{ ");
+                if !decompile_elements(ctx, e, s, l, result) {
+                    return false;
+                }
+                result.extend(b"} ");
+            }
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// Sample a spot function on a 64×64 grid (domain [-1,1]², range [0,1]).
+fn sample_spot_function_2d(
+    ctx: &mut Context,
+    proc: PsObject,
+) -> Result<Option<Arc<Vec<f64>>>, PsError> {
+    // Empty procedure = default
+    if let PsValue::Array { len, .. } | PsValue::PackedArray { len, .. } = proc.value {
+        if len == 0 {
+            return Ok(None);
+        }
+    }
+    let mut table = Vec::with_capacity(64 * 64);
+    for iy in 0..64 {
+        let y = -1.0 + iy as f64 * 2.0 / 63.0;
+        for ix in 0..64 {
+            let x = -1.0 + ix as f64 * 2.0 / 63.0;
+            ctx.o_stack.push(PsObject::real(x))?;
+            ctx.o_stack.push(PsObject::real(y))?;
+            ctx.exec_sync(proc)?;
+            let result = if !ctx.o_stack.is_empty() {
+                ctx.o_stack.pop()?.as_f64().unwrap_or(0.5).clamp(0.0, 1.0)
+            } else {
+                0.5
+            };
+            table.push(result);
+        }
+    }
+    Ok(Some(Arc::new(table)))
+}
+
+/// Pre-compute a HalftoneScreen from frequency, angle, and spot function proc.
+fn precompute_halftone_screen(
+    ctx: &mut Context,
+    freq: f64,
+    angle: f64,
+    proc: PsObject,
+) -> Result<HalftoneScreen, PsError> {
+    // Empty proc → no precomputation needed
+    if let PsValue::Array { len, .. } | PsValue::PackedArray { len, .. } = proc.value {
+        if len == 0 {
+            return Ok(HalftoneScreen {
+                frequency: freq,
+                angle,
+                type4_tokens: None,
+                sampled_2d: None,
+            });
+        }
+    }
+
+    // Try Type 4 decompilation first
+    let type4_tokens = decompile_spot_to_type4(ctx, proc).map(|v| Arc::new(v));
+
+    // Fall back to 2D sampling if decompilation failed
+    let sampled_2d = if type4_tokens.is_none() {
+        sample_spot_function_2d(ctx, proc)?
+    } else {
+        None
+    };
+
+    Ok(HalftoneScreen {
+        frequency: freq,
+        angle,
+        type4_tokens,
+        sampled_2d,
+    })
+}
 
 // ---------- Halftone screen operators ----------
 
@@ -42,6 +206,10 @@ pub fn op_setscreen(ctx: &mut Context) -> Result<(), PsError> {
     ctx.gstate.screen_proc = Some(proc_obj);
     // setscreen supersedes any halftone dictionary
     ctx.gstate.halftone = None;
+    // Pre-compute halftone for PDF output
+    let screen = precompute_halftone_screen(ctx, freq, angle, proc_obj)?;
+    ctx.gstate.precomputed_halftone = Some(Arc::new(screen));
+    ctx.gstate.precomputed_color_halftone = None;
     Ok(())
 }
 
@@ -119,6 +287,18 @@ pub fn op_setcolorscreen(ctx: &mut Context) -> Result<(), PsError> {
     ctx.gstate.color_screen = Some(components);
     // setcolorscreen supersedes any halftone dictionary
     ctx.gstate.halftone = None;
+    // Pre-compute per-component halftones for PDF output
+    let red = Arc::new(precompute_halftone_screen(ctx, components[0].0, components[0].1, components[0].2)?);
+    let green = Arc::new(precompute_halftone_screen(ctx, components[1].0, components[1].1, components[1].2)?);
+    let blue = Arc::new(precompute_halftone_screen(ctx, components[2].0, components[2].1, components[2].2)?);
+    let gray = Arc::new(precompute_halftone_screen(ctx, components[3].0, components[3].1, components[3].2)?);
+    ctx.gstate.precomputed_halftone = Some(gray.clone());
+    ctx.gstate.precomputed_color_halftone = Some([
+        Some(red),
+        Some(green),
+        Some(blue),
+        Some(gray),
+    ]);
     Ok(())
 }
 
@@ -341,6 +521,25 @@ pub fn op_sethalftone(ctx: &mut Context) -> Result<(), PsError> {
                 if let Some(a) = angle_obj.as_f64() {
                     ctx.gstate.screen_angle = a;
                 }
+            }
+            // Pre-compute halftone for Type 1 dicts with SpotFunction
+            let ht_type_key = DictKey::Name(ctx.names.intern(b"HalftoneType"));
+            let spot_key = DictKey::Name(ctx.names.intern(b"SpotFunction"));
+            let ht_type = ctx.dicts.get(entity, &ht_type_key).and_then(|o| o.as_i32());
+            if ht_type == Some(1) {
+                if let (Some(freq), Some(angle), Some(spot_proc)) = (
+                    ctx.dicts.get(entity, &freq_key).and_then(|o| o.as_f64()),
+                    ctx.dicts.get(entity, &angle_key).and_then(|o| o.as_f64()),
+                    ctx.dicts.get(entity, &spot_key),
+                ) {
+                    let screen = precompute_halftone_screen(ctx, freq, angle, spot_proc)?;
+                    ctx.gstate.precomputed_halftone = Some(Arc::new(screen));
+                    ctx.gstate.precomputed_color_halftone = None;
+                }
+            } else {
+                // Non-Type 1 halftones: suppress (leave as None)
+                ctx.gstate.precomputed_halftone = None;
+                ctx.gstate.precomputed_color_halftone = None;
             }
             let obj = ctx.o_stack.pop()?;
             ctx.gstate.halftone = Some(obj);
@@ -845,6 +1044,7 @@ fn replay_form_elements(
                     spot_color: params.spot_color.clone(),
                     rendering_intent: params.rendering_intent,
                     transfer: params.transfer.clone(),
+                    halftone: params.halftone.clone(),
                 };
                 target.push(DisplayElement::Fill {
                     path: new_path,
@@ -869,6 +1069,7 @@ fn replay_form_elements(
                     spot_color: params.spot_color.clone(),
                     rendering_intent: params.rendering_intent,
                     transfer: params.transfer.clone(),
+                    halftone: params.halftone.clone(),
                 };
                 target.push(DisplayElement::Stroke {
                     path: new_path,
