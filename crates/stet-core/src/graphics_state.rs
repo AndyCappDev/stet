@@ -747,6 +747,7 @@ pub enum ColorSpace {
     /// Separation color space: `[/Separation name alternativeSpace tintTransform]`.
     /// Single tint component mapped to alternative space via tint transform procedure.
     Separation {
+        name: Vec<u8>,
         alt_space: Box<ColorSpace>,
         tint_transform: crate::object::PsObject,
         num_alt_components: u32,
@@ -754,6 +755,7 @@ pub enum ColorSpace {
     /// DeviceN color space: `[/DeviceN names alternativeSpace tintTransform]`.
     /// N tint components mapped to alternative space via tint transform procedure.
     DeviceN {
+        names: Vec<Vec<u8>>,
         num_colorants: u32,
         alt_space: Box<ColorSpace>,
         tint_transform: crate::object::PsObject,
@@ -826,30 +828,34 @@ impl PartialEq for ColorSpace {
             ) => d1 == d2 && n1 == n2,
             (
                 Separation {
+                    name: name1,
                     alt_space: a1,
                     tint_transform: t1,
                     num_alt_components: n1,
                 },
                 Separation {
+                    name: name2,
                     alt_space: a2,
                     tint_transform: t2,
                     num_alt_components: n2,
                 },
-            ) => a1 == a2 && t1 == t2 && n1 == n2,
+            ) => name1 == name2 && a1 == a2 && t1 == t2 && n1 == n2,
             (
                 DeviceN {
+                    names: names1,
                     num_colorants: nc1,
                     alt_space: a1,
                     tint_transform: t1,
                     num_alt_components: n1,
                 },
                 DeviceN {
+                    names: names2,
                     num_colorants: nc2,
                     alt_space: a2,
                     tint_transform: t2,
                     num_alt_components: n2,
                 },
-            ) => nc1 == nc2 && a1 == a2 && t1 == t2 && n1 == n2,
+            ) => names1 == names2 && nc1 == nc2 && a1 == a2 && t1 == t2 && n1 == n2,
             _ => false,
         }
     }

@@ -7,7 +7,8 @@
 //! Preserves native color spaces (DeviceGray, DeviceRGB, DeviceCMYK, ICCBased,
 //! Indexed) for PDF fidelity. Imagemasks are stored as 1-bit stencils.
 
-use stet_core::device::{ImageColorSpace, ImageParams};
+use std::sync::Arc;
+use stet_core::device::{ImageColorSpace, ImageParams, TintLookupTable};
 
 /// A prepared image XObject ready for inclusion in a PDF.
 pub struct ImageXObject {
@@ -47,6 +48,18 @@ pub enum PdfColorSpace {
         hival: u32,
         lookup: Vec<u8>,
     },
+    /// Separation — name + alt space + tint lookup table (full emission in item 1.3).
+    Separation {
+        name: Vec<u8>,
+        alt: Box<PdfColorSpace>,
+        tint_table: Arc<TintLookupTable>,
+    },
+    /// DeviceN — names + alt space + tint lookup table (full emission in item 1.3).
+    DeviceN {
+        names: Vec<Vec<u8>>,
+        alt: Box<PdfColorSpace>,
+        tint_table: Arc<TintLookupTable>,
+    },
 }
 
 impl PdfColorSpace {
@@ -58,6 +71,8 @@ impl PdfColorSpace {
             PdfColorSpace::DeviceCMYK => 4,
             PdfColorSpace::ICCBased { n } => *n as usize,
             PdfColorSpace::Indexed { .. } => 1,
+            PdfColorSpace::Separation { .. } => 1,
+            PdfColorSpace::DeviceN { tint_table, .. } => tint_table.num_inputs as usize,
         }
     }
 }
@@ -156,6 +171,52 @@ pub fn convert_image(sample_data: &[u8], params: &ImageParams) -> ImageXObject {
                 icc_profile: None,
             }
         }
+        ImageColorSpace::Separation {
+            name,
+            alt_space,
+            tint_table,
+        } => {
+            let pdf_alt = image_cs_to_pdf_cs(alt_space);
+            ImageXObject {
+                sample_data: sample_data.to_vec(),
+                smask_data: None,
+                width: params.width,
+                height: params.height,
+                pdf_color_space: PdfColorSpace::Separation {
+                    name: name.clone(),
+                    alt: Box::new(pdf_alt),
+                    tint_table: tint_table.clone(),
+                },
+                bits_per_component: 8,
+                is_imagemask: false,
+                mask_color: None,
+                color_key_mask: params.mask_color.clone(),
+                icc_profile: None,
+            }
+        }
+        ImageColorSpace::DeviceN {
+            names,
+            alt_space,
+            tint_table,
+        } => {
+            let pdf_alt = image_cs_to_pdf_cs(alt_space);
+            ImageXObject {
+                sample_data: sample_data.to_vec(),
+                smask_data: None,
+                width: params.width,
+                height: params.height,
+                pdf_color_space: PdfColorSpace::DeviceN {
+                    names: names.clone(),
+                    alt: Box::new(pdf_alt),
+                    tint_table: tint_table.clone(),
+                },
+                bits_per_component: 8,
+                is_imagemask: false,
+                mask_color: None,
+                color_key_mask: params.mask_color.clone(),
+                icc_profile: None,
+            }
+        }
         // CIE-based spaces were pre-converted to DeviceRGB at op time
         ImageColorSpace::CIEBasedABC { .. } | ImageColorSpace::CIEBasedA { .. } => {
             let ncomp = params.color_space.num_components();
@@ -210,6 +271,16 @@ fn convert_imagemask(
         mask_color: Some((color.r, color.g, color.b)),
         color_key_mask: None,
         icc_profile: None,
+    }
+}
+
+/// Map an ImageColorSpace to the corresponding PdfColorSpace (for alt-space usage).
+fn image_cs_to_pdf_cs(cs: &ImageColorSpace) -> PdfColorSpace {
+    match cs {
+        ImageColorSpace::DeviceGray => PdfColorSpace::DeviceGray,
+        ImageColorSpace::DeviceRGB => PdfColorSpace::DeviceRGB,
+        ImageColorSpace::DeviceCMYK => PdfColorSpace::DeviceCMYK,
+        _ => PdfColorSpace::DeviceRGB, // fallback
     }
 }
 

@@ -162,12 +162,10 @@ fn image_dict_form(ctx: &mut Context) -> Result<(), PsError> {
             | ColorSpace::CIEBasedDEF { .. } => 3,
             ColorSpace::DeviceCMYK | ColorSpace::CIEBasedDEFG { .. } => 4,
             ColorSpace::ICCBased { n, .. } => n,
-            ColorSpace::Separation {
-                num_alt_components, ..
-            }
-            | ColorSpace::DeviceN {
-                num_alt_components, ..
-            } => num_alt_components,
+            ColorSpace::Separation { .. } => 1,
+            ColorSpace::DeviceN {
+                num_colorants, ..
+            } => num_colorants,
         }
     };
 
@@ -342,12 +340,10 @@ fn image_type3_form(
             | ColorSpace::CIEBasedDEF { .. } => 3,
             ColorSpace::DeviceCMYK | ColorSpace::CIEBasedDEFG { .. } => 4,
             ColorSpace::ICCBased { n, .. } => n,
-            ColorSpace::Separation {
-                num_alt_components, ..
-            }
-            | ColorSpace::DeviceN {
-                num_alt_components, ..
-            } => num_alt_components,
+            ColorSpace::Separation { .. } => 1,
+            ColorSpace::DeviceN {
+                num_colorants, ..
+            } => num_colorants,
         }
     };
 
@@ -1800,8 +1796,8 @@ fn draw_image_to_device(
 /// For Indexed, copies lookup table and recurses on base.
 /// For CIE ABC/A, clones Arc params.
 /// For CIE DEF/DEFG and Separation/DeviceN, returns None (caller pre-converts).
-fn capture_image_color_space(ctx: &Context) -> Option<ImageColorSpace> {
-    match &ctx.gstate.color_space {
+fn capture_image_color_space(ctx: &mut Context) -> Option<ImageColorSpace> {
+    match ctx.gstate.color_space.clone() {
         ColorSpace::DeviceGray => Some(ImageColorSpace::DeviceGray),
         ColorSpace::DeviceRGB => Some(ImageColorSpace::DeviceRGB),
         ColorSpace::DeviceCMYK => Some(ImageColorSpace::DeviceCMYK),
@@ -1815,7 +1811,7 @@ fn capture_image_color_space(ctx: &Context) -> Option<ImageColorSpace> {
                 let ds_key = ctx.names.find(b"DataSource")?;
                 let ds_obj = ctx
                     .dicts
-                    .get(*dict_entity, &stet_core::dict::DictKey::Name(ds_key))?;
+                    .get(dict_entity, &stet_core::dict::DictKey::Name(ds_key))?;
                 let bytes = match ds_obj.value {
                     PsValue::String { entity, start, len } => {
                         ctx.strings.get(entity, start, len).to_vec()
@@ -1823,8 +1819,8 @@ fn capture_image_color_space(ctx: &Context) -> Option<ImageColorSpace> {
                     _ => return None, // File sources already consumed
                 };
                 Some(ImageColorSpace::ICCBased {
-                    n: *n,
-                    profile_hash: *hash,
+                    n,
+                    profile_hash: hash,
                     profile_data: Arc::new(bytes),
                 })
             } else {
@@ -1851,7 +1847,7 @@ fn capture_image_color_space(ctx: &Context) -> Option<ImageColorSpace> {
             };
             Some(ImageColorSpace::Indexed {
                 base: Box::new(base_cs),
-                hival: *hival as u32,
+                hival: hival as u32,
                 lookup: lookup.clone(),
             })
         }
@@ -1861,9 +1857,110 @@ fn capture_image_color_space(ctx: &Context) -> Option<ImageColorSpace> {
         ColorSpace::CIEBasedA { params, .. } => Some(ImageColorSpace::CIEBasedA {
             params: params.clone(),
         }),
-        // CIE DEF/DEFG, Separation, DeviceN: pre-convert at op time
+        ColorSpace::Separation {
+            name,
+            alt_space,
+            tint_transform,
+            num_alt_components,
+        } => {
+            let alt_ics = alt_space_to_image_cs(&alt_space);
+            let table = sample_tint_transform(ctx, tint_transform, 1, num_alt_components)?;
+            Some(ImageColorSpace::Separation {
+                name,
+                alt_space: Box::new(alt_ics),
+                tint_table: Arc::new(table),
+            })
+        }
+        ColorSpace::DeviceN {
+            names,
+            num_colorants,
+            alt_space,
+            tint_transform,
+            num_alt_components,
+        } => {
+            // Cap at 8 colorants for sampling; fall back for more
+            if num_colorants > 8 {
+                return None;
+            }
+            let alt_ics = alt_space_to_image_cs(&alt_space);
+            let table =
+                sample_tint_transform(ctx, tint_transform, num_colorants, num_alt_components)?;
+            Some(ImageColorSpace::DeviceN {
+                names,
+                alt_space: Box::new(alt_ics),
+                tint_table: Arc::new(table),
+            })
+        }
+        // CIE DEF/DEFG: pre-convert at op time
         _ => None,
     }
+}
+
+/// Map a ColorSpace to the corresponding ImageColorSpace for alt-space usage.
+fn alt_space_to_image_cs(cs: &ColorSpace) -> ImageColorSpace {
+    match cs {
+        ColorSpace::DeviceGray => ImageColorSpace::DeviceGray,
+        ColorSpace::DeviceRGB => ImageColorSpace::DeviceRGB,
+        ColorSpace::DeviceCMYK => ImageColorSpace::DeviceCMYK,
+        _ => ImageColorSpace::DeviceRGB, // fallback
+    }
+}
+
+/// Sample a tint transform into a lookup table by evaluating it at grid points.
+fn sample_tint_transform(
+    ctx: &mut Context,
+    tint_transform: PsObject,
+    num_inputs: u32,
+    num_outputs: u32,
+) -> Option<stet_core::device::TintLookupTable> {
+    let samples_per_dim = if num_inputs == 1 {
+        256u32
+    } else {
+        match num_inputs {
+            2 => 33,
+            3 => 17,
+            4 => 17,
+            _ => 9,
+        }
+    };
+    let total_entries = (samples_per_dim as usize).pow(num_inputs);
+    let mut data = Vec::with_capacity(total_entries * num_outputs as usize);
+
+    for idx in 0..total_entries {
+        // Convert linear index to per-dimension coordinates (row-major: dim 0 varies slowest)
+        let mut coords = vec![0usize; num_inputs as usize];
+        let mut rem = idx;
+        for d in (0..num_inputs as usize).rev() {
+            coords[d] = rem % samples_per_dim as usize;
+            rem /= samples_per_dim as usize;
+        }
+        // Push input values in order (dim 0 first = bottom of stack)
+        for &coord in &coords {
+            let val = coord as f64 / (samples_per_dim - 1) as f64;
+            if ctx.o_stack.push(PsObject::real(val)).is_err() {
+                return None;
+            }
+        }
+
+        // Execute the tint transform
+        if ctx.exec_sync(tint_transform).is_err() {
+            return None;
+        }
+
+        // Pop output values
+        let mut outputs = vec![0.0f32; num_outputs as usize];
+        for i in (0..num_outputs as usize).rev() {
+            outputs[i] = ctx.o_stack.pop().ok()?.as_f64().unwrap_or(0.0) as f32;
+        }
+        data.extend_from_slice(&outputs);
+    }
+
+    Some(stet_core::device::TintLookupTable {
+        num_inputs,
+        num_outputs,
+        samples_per_dim,
+        data,
+    })
 }
 
 // ---------- Procedure data source support ----------

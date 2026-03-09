@@ -1179,6 +1179,13 @@ fn parse_separation_colorspace(
     entity: EntityId,
     start: u32,
 ) -> Result<ColorSpace, PsError> {
+    // Element 1: colorant name
+    let name_obj = ctx.arrays.get_element(entity, start + 1);
+    let name = match name_obj.value {
+        PsValue::Name(id) => ctx.names.get_bytes(id).to_vec(),
+        _ => Vec::new(),
+    };
+
     // Element 2: alternative color space (name)
     let alt_obj = ctx.arrays.get_element(entity, start + 2);
     let (alt_space, num_alt) = parse_alt_space_name(ctx, &alt_obj)?;
@@ -1187,6 +1194,7 @@ fn parse_separation_colorspace(
     let tint_transform = ctx.arrays.get_element(entity, start + 3);
 
     Ok(ColorSpace::Separation {
+        name,
         alt_space: Box::new(alt_space),
         tint_transform,
         num_alt_components: num_alt,
@@ -1201,8 +1209,23 @@ fn parse_devicen_colorspace(
 ) -> Result<ColorSpace, PsError> {
     // Element 1: array of colorant names
     let names_obj = ctx.arrays.get_element(entity, start + 1);
-    let num_colorants = match names_obj.value {
-        PsValue::Array { len, .. } => len,
+    let (num_colorants, names) = match names_obj.value {
+        PsValue::Array {
+            entity: name_ent,
+            start: name_start,
+            len,
+        } => {
+            let mut names = Vec::with_capacity(len as usize);
+            for i in 0..len {
+                let elem = ctx.arrays.get_element(name_ent, name_start + i);
+                let name_bytes = match elem.value {
+                    PsValue::Name(id) => ctx.names.get_bytes(id).to_vec(),
+                    _ => Vec::new(),
+                };
+                names.push(name_bytes);
+            }
+            (len, names)
+        }
         _ => return Err(PsError::TypeCheck),
     };
 
@@ -1214,6 +1237,7 @@ fn parse_devicen_colorspace(
     let tint_transform = ctx.arrays.get_element(entity, start + 3);
 
     Ok(ColorSpace::DeviceN {
+        names,
         num_colorants,
         alt_space: Box::new(alt_space),
         tint_transform,

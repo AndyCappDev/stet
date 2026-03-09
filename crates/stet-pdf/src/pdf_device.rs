@@ -487,6 +487,10 @@ fn build_pdf_colorspace(
                 PdfObj::Ref(lookup_ref),
             ])
         }
+        // Separation/DeviceN: for now, fall back to alt space name.
+        // Full Separation/DeviceN PDF emission with sampled function objects is item 1.3.
+        PdfColorSpace::Separation { alt, .. } => build_pdf_colorspace(alt, None, writer),
+        PdfColorSpace::DeviceN { alt, .. } => build_pdf_colorspace(alt, None, writer),
     }
 }
 

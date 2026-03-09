@@ -1127,6 +1127,50 @@ fn samples_to_rgba(data: &[u8], params: &ImageParams, icc: Option<&IccCache>) ->
             }
             rgba
         }
+        ImageColorSpace::Separation {
+            alt_space,
+            tint_table,
+            ..
+        } => {
+            // 1 byte per pixel → lookup in tint table → convert alt space to RGB
+            let mut rgba = vec![255u8; npixels * 4];
+            let no = tint_table.num_outputs as usize;
+            let mut alt_comps = vec![0.0f32; no];
+            for i in 0..npixels {
+                let tint = data.get(i).copied().unwrap_or(0) as f32 / 255.0;
+                tint_table.lookup_1d(tint, &mut alt_comps);
+                let (r, g, b) = alt_comps_to_rgb(&alt_comps, alt_space);
+                let pi = i * 4;
+                rgba[pi] = r;
+                rgba[pi + 1] = g;
+                rgba[pi + 2] = b;
+            }
+            rgba
+        }
+        ImageColorSpace::DeviceN {
+            alt_space,
+            tint_table,
+            ..
+        } => {
+            let ni = tint_table.num_inputs as usize;
+            let no = tint_table.num_outputs as usize;
+            let mut rgba = vec![255u8; npixels * 4];
+            let mut inputs = vec![0.0f32; ni];
+            let mut alt_comps = vec![0.0f32; no];
+            for i in 0..npixels {
+                let si = i * ni;
+                for (c, inp) in inputs.iter_mut().enumerate() {
+                    *inp = data.get(si + c).copied().unwrap_or(0) as f32 / 255.0;
+                }
+                tint_table.lookup_nd(&inputs, &mut alt_comps);
+                let (r, g, b) = alt_comps_to_rgb(&alt_comps, alt_space);
+                let pi = i * 4;
+                rgba[pi] = r;
+                rgba[pi + 1] = g;
+                rgba[pi + 2] = b;
+            }
+            rgba
+        }
         ImageColorSpace::Mask { color, polarity } => {
             let mut rgba = vec![0u8; npixels * 4];
             let r = (color.r * 255.0).round().clamp(0.0, 255.0) as u8;
@@ -1154,6 +1198,33 @@ fn samples_to_rgba(data: &[u8], params: &ImageParams, icc: Option<&IccCache>) ->
             }
             rgba
         }
+    }
+}
+
+/// Convert alt-space f32 component values to RGB bytes.
+fn alt_comps_to_rgb(comps: &[f32], alt_space: &ImageColorSpace) -> (u8, u8, u8) {
+    match alt_space {
+        ImageColorSpace::DeviceGray => {
+            let g = (comps.first().copied().unwrap_or(0.0).clamp(0.0, 1.0) * 255.0).round() as u8;
+            (g, g, g)
+        }
+        ImageColorSpace::DeviceRGB => {
+            let r = (comps.first().copied().unwrap_or(0.0).clamp(0.0, 1.0) * 255.0).round() as u8;
+            let g = (comps.get(1).copied().unwrap_or(0.0).clamp(0.0, 1.0) * 255.0).round() as u8;
+            let b = (comps.get(2).copied().unwrap_or(0.0).clamp(0.0, 1.0) * 255.0).round() as u8;
+            (r, g, b)
+        }
+        ImageColorSpace::DeviceCMYK => {
+            let c = comps.first().copied().unwrap_or(0.0).clamp(0.0, 1.0);
+            let m = comps.get(1).copied().unwrap_or(0.0).clamp(0.0, 1.0);
+            let y = comps.get(2).copied().unwrap_or(0.0).clamp(0.0, 1.0);
+            let k = comps.get(3).copied().unwrap_or(0.0).clamp(0.0, 1.0);
+            let r = ((1.0 - (c + k).min(1.0)) * 255.0).round() as u8;
+            let g = ((1.0 - (m + k).min(1.0)) * 255.0).round() as u8;
+            let b = ((1.0 - (y + k).min(1.0)) * 255.0).round() as u8;
+            (r, g, b)
+        }
+        _ => (0, 0, 0),
     }
 }
 

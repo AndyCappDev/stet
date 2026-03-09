@@ -84,6 +84,79 @@ pub struct ClipParams {
     pub ctm: Matrix,
 }
 
+/// Pre-sampled tint transform: maps input tint values to alt-space components.
+///
+/// For Separation (1D): 256 entries × num_outputs f32 values.
+/// For DeviceN (N-D): samples_per_dim^N entries × num_outputs f32 values.
+/// Multilinear interpolation used for lookup.
+#[derive(Clone, Debug)]
+pub struct TintLookupTable {
+    /// Number of input components (1 for Separation, N for DeviceN).
+    pub num_inputs: u32,
+    /// Number of output components (matches alternative space: 1/3/4).
+    pub num_outputs: u32,
+    /// Number of samples per dimension.
+    pub samples_per_dim: u32,
+    /// Flattened f32 data, row-major order. Length = samples_per_dim^num_inputs × num_outputs.
+    pub data: Vec<f32>,
+}
+
+impl TintLookupTable {
+    /// Linear interpolation lookup for 1D (Separation) tint transforms.
+    /// Returns a slice view into a temporary buffer — caller provides output slice.
+    #[inline]
+    pub fn lookup_1d(&self, tint: f32, out: &mut [f32]) {
+        let n = self.samples_per_dim as usize;
+        let no = self.num_outputs as usize;
+        let idx = tint * (n - 1) as f32;
+        let i0 = (idx as usize).min(n - 2);
+        let frac = idx - i0 as f32;
+        let base0 = i0 * no;
+        let base1 = (i0 + 1) * no;
+        for (c, out_val) in out[..no].iter_mut().enumerate() {
+            *out_val = self.data[base0 + c] * (1.0 - frac) + self.data[base1 + c] * frac;
+        }
+    }
+
+    /// Multilinear interpolation lookup for N-D (DeviceN) tint transforms.
+    pub fn lookup_nd(&self, inputs: &[f32], out: &mut [f32]) {
+        let ni = self.num_inputs as usize;
+        let no = self.num_outputs as usize;
+        let n = self.samples_per_dim as usize;
+
+        // Compute fractional indices for each dimension
+        let mut idx = [0usize; 8];
+        let mut frac = [0.0f32; 8];
+        for d in 0..ni {
+            let fi = inputs[d] * (n - 1) as f32;
+            idx[d] = (fi as usize).min(n - 2);
+            frac[d] = fi - idx[d] as f32;
+        }
+
+        // Iterate over 2^ni corners of the interpolation hypercube
+        let corners = 1usize << ni;
+        for out_val in out[..no].iter_mut() {
+            *out_val = 0.0;
+        }
+        for corner in 0..corners {
+            let mut weight = 1.0f32;
+            let mut linear_idx = 0usize;
+            for d in 0..ni {
+                let bit = (corner >> d) & 1;
+                let dim_idx = idx[d] + bit;
+                weight *= if bit == 1 { frac[d] } else { 1.0 - frac[d] };
+                // Row-major: earlier dimensions are higher-order strides
+                let stride = n.pow((ni - 1 - d) as u32);
+                linear_idx += dim_idx * stride;
+            }
+            let base = linear_idx * no;
+            for (c, out_val) in out[..no].iter_mut().enumerate() {
+                *out_val += weight * self.data.get(base + c).copied().unwrap_or(0.0);
+            }
+        }
+    }
+}
+
 /// VM-free color space enum for images stored in the display list.
 ///
 /// Unlike `ColorSpace` (which holds EntityId references into VM stores),
@@ -112,6 +185,18 @@ pub enum ImageColorSpace {
     CIEBasedABC { params: Arc<CieAbcParams> },
     /// CIE-based A (1-component).
     CIEBasedA { params: Arc<CieAParams> },
+    /// Separation color space with pre-sampled tint transform.
+    Separation {
+        name: Vec<u8>,
+        alt_space: Box<ImageColorSpace>,
+        tint_table: Arc<TintLookupTable>,
+    },
+    /// DeviceN color space with pre-sampled tint transform.
+    DeviceN {
+        names: Vec<Vec<u8>>,
+        alt_space: Box<ImageColorSpace>,
+        tint_table: Arc<TintLookupTable>,
+    },
     /// 1-bit imagemask with fill color and polarity.
     Mask { color: DeviceColor, polarity: bool },
     /// Pre-converted RGBA data (4 bytes/pixel). Used for Type 3 masked images
@@ -130,6 +215,8 @@ impl ImageColorSpace {
             ImageColorSpace::Indexed { .. } => 1,
             ImageColorSpace::CIEBasedABC { .. } => 3,
             ImageColorSpace::CIEBasedA { .. } => 1,
+            ImageColorSpace::Separation { .. } => 1,
+            ImageColorSpace::DeviceN { tint_table, .. } => tint_table.num_inputs,
             ImageColorSpace::Mask { .. } => 1,
             ImageColorSpace::PreconvertedRGBA => 4,
         }

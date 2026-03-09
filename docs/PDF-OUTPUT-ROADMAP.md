@@ -43,7 +43,7 @@ This roadmap tracks what's missing and prioritizes by impact on round-trip fidel
 | Feature | Current Behavior | Impact |
 |---------|-----------------|--------|
 | Separation/DeviceN colors | Pre-converted to RGB at op time | **HIGH** — round-trip + print |
-| Separation/DeviceN images | Pre-converted to RGB at op time | **HIGH** — round-trip + print |
+| Separation/DeviceN images | ✓ Native samples in display list | Raster ✓, PDF falls back to alt space (1.3) |
 | Color key mask (Type 4) | ✓ `/Mask` array emitted | — |
 | Pattern fills | Gray placeholder (0.7) | **HIGH** — round-trip |
 | CIE shadings (complex decode) | Falls back to DeviceRGB | **LOW** — needs ICC profile construction (3.4) |
@@ -73,29 +73,37 @@ PS → PDF → pixels round-trip test. Fix these before PDF input validation.
 - [x] Non-identity-decode Type 4 images use PreconvertedRGBA fallback (mask applied at op time)
 - **Files**: `crates/stet-pdf/src/pdf_device.rs`, `crates/stet-pdf/src/image_ops.rs`, `crates/stet-ops/src/image_ops.rs`
 
-### 1.2 Separation/DeviceN in Display List
-- [ ] Add `ImageColorSpace::Separation` variant with name, alt space, tint transform samples
-- [ ] Add `ImageColorSpace::DeviceN` variant with names, alt space, tint transform samples
-- [ ] In `capture_image_color_space()`: capture Separation/DeviceN instead of returning None
-- [ ] Pre-sample tint transform to lookup table (avoid carrying PsObject across threads)
-- **Files**: `crates/stet-core/src/device.rs`, `crates/stet-ops/src/image_ops.rs`
-- **Effort**: Medium — need to design VM-free representation of tint transform
+### 1.2 Separation/DeviceN in Display List ✅
+- [x] `TintLookupTable` struct: pre-sampled tint transform (256 for 1D, 17-33 for N-D)
+- [x] `ImageColorSpace::Separation` variant with name, alt space, `Arc<TintLookupTable>`
+- [x] `ImageColorSpace::DeviceN` variant with names, alt space, `Arc<TintLookupTable>`
+- [x] `capture_image_color_space()` samples tint transforms via `exec_sync` at capture time
+- [x] `TintLookupTable::lookup_1d()` (linear interpolation) and `lookup_nd()` (multilinear)
+- [x] Fixed ncomp bug: Separation images use 1 sample/pixel, DeviceN uses `num_colorants` (was incorrectly using `num_alt_components`)
+- [x] Added `name: Vec<u8>` to `ColorSpace::Separation`, `names: Vec<Vec<u8>>` to `ColorSpace::DeviceN`
+- [x] Colorant names extracted during `setcolorspace` parsing
+- [x] DeviceN capped at 8 colorants for sampling; >8 falls back to pre-conversion
+- **Files**: `crates/stet-core/src/device.rs`, `crates/stet-core/src/graphics_state.rs`,
+  `crates/stet-ops/src/image_ops.rs`, `crates/stet-ops/src/color_ops.rs`
 
 ### 1.3 Separation/DeviceN in PDF Output
-- [ ] Add `PdfColorSpace::Separation` and `PdfColorSpace::DeviceN` variants
+- [x] `PdfColorSpace::Separation` and `PdfColorSpace::DeviceN` variants (with tint table + names)
+- [x] Raw native samples pass through to PDF (1 byte/pixel Separation, N bytes/pixel DeviceN)
 - [ ] Emit `/Separation` color space array: `[/Separation /Name /AlternateSpace tintTransform]`
 - [ ] Emit `/DeviceN` color space array with colorant names + tint transform
 - [ ] Tint transform as Type 0 (sampled) PDF function — avoids PS procedure dependency
 - [ ] Emit Separation/DeviceN for fill/stroke colors (not just images)
+- [ ] Currently falls back to alt space name (e.g., DeviceCMYK) in `build_pdf_colorspace()`
 - **Files**: `crates/stet-pdf/src/image_ops.rs`, `crates/stet-pdf/src/content_stream.rs`,
   `crates/stet-pdf/src/pdf_device.rs`
-- **Effort**: Large — touches color pipeline end-to-end
+- **Effort**: Medium — data structures in place, need PDF function object emission
 
-### 1.4 Separation/DeviceN in Raster Rendering
-- [ ] `samples_to_rgba` in skia_device.rs: handle Separation/DeviceN via sampled tint transform
-- [ ] Apply tint transform lookup table → alternate space → RGB/CMYK → RGBA
+### 1.4 Separation/DeviceN in Raster Rendering ✅
+- [x] `samples_to_rgba` in skia_device.rs handles Separation/DeviceN via `TintLookupTable`
+- [x] `alt_comps_to_rgb()` helper converts alt-space f32 values (Gray/RGB/CMYK) to RGB bytes
+- [x] Separation: 1D linear interpolation per pixel
+- [x] DeviceN: N-D multilinear interpolation per pixel
 - **Files**: `crates/stet-render/src/skia_device.rs`
-- **Effort**: Medium — lookup table interpolation, similar to Indexed handling
 
 ### 1.5 Pattern Fills
 - [ ] Emit tiling patterns as PDF Pattern XObjects (Type 1)
@@ -241,10 +249,10 @@ Phase 4 items are deferred — implement only when a specific need arises.
  ✅  1.6  Native color space shadings      done      Gray/RGB/CMYK/ICCBased/CalRGB/CalGray
  ✅  2.1  ExtGState framework              done      dedup'd dicts, gs operator, overprint tracking
  ✅  2.2  Overprint settings               done      OP/op/OPM in ExtGState, captured at all paint sites
- 7.  1.2  Separation/DeviceN display list  medium    VM-free tint transform design
- 8.  1.3  Separation/DeviceN PDF output    large     end-to-end color pipeline
- 9.  1.4  Separation/DeviceN raster        medium    lookup table interpolation
-10.  1.5  Pattern fills                    large     most complex, do last in Phase 1
+ ✅  1.2  Separation/DeviceN display list  done      TintLookupTable, ncomp fix, colorant names
+ ✅  1.4  Separation/DeviceN raster        done      lookup_1d/lookup_nd interpolation
+ 8.  1.3  Separation/DeviceN PDF output    medium    Type 0 sampled function emission remaining
+ 9.  1.5  Pattern fills                    large     most complex, do last in Phase 1
 11.  3.1  PDF/X-3 OutputIntent             medium    when print compliance needed
 12.  3.2  Full ToUnicode CMap              medium    when text extraction needed
 13.  3.3  Color rendering intent           small     when needed
