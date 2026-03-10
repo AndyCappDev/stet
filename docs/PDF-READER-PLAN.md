@@ -226,13 +226,23 @@ impl PdfDocument {
 
 ### Phase E: Transparency & Remaining Features
 
-- Transparency group rendering to offscreen buffers
-- Isolated and knockout group semantics
-- All 12 blend modes (pixel-level compositing in tiny-skia)
-- Luminosity soft masks (alpha SMask on images already implemented in D8)
-- Nested transparency groups
-- Color space conversion within groups
-- Performance optimization (avoid offscreen buffer when group is trivial)
+- **E1: Blend modes** ✓
+  - `u8_to_blend_mode()` maps 0–15 to tiny-skia `BlendMode` enum (all 16 PDF modes) ✓
+  - `to_paint_alpha()` applies blend mode to fill/stroke Paint ✓
+  - `ImageParams` gains `alpha`/`blend_mode` fields; PixmapPaint uses them ✓
+  - `blend_mode_from_name()` extended with Hue/Saturation/Color/Luminosity ✓
+  - Test PDF: `pdf_samples/blend_modes.pdf` ✓
+- **E2: Transparency groups** ✓
+  - `GroupParams` struct + `DisplayElement::Group` variant in display list ✓
+  - Form XObject `/Group` dict parsing: `/S /Transparency`, `/I` (isolated) flag ✓
+  - Isolated groups: render to transparent offscreen, composite with blend mode + alpha ✓
+  - Non-isolated groups: copy parent backdrop into offscreen, render elements against it ✓
+  - Non-isolated compositing: contribution extraction (changed pixels) + blend mode composite ✓
+  - Alpha reset inside groups (fill_alpha/stroke_alpha → 1.0) to prevent double-application ✓
+  - Transparent page backdrop with `composite_onto_white()` at end of rendering ✓
+  - Both banded and viewport rendering paths ✓
+- **E3: Soft masks on graphics state** — luminosity/alpha masks from ExtGState SMask
+- **E4: Knockout groups, nested transparency, optimization**
 - Annotations (Link, Widget appearance streams)
 - Optional content (layers) — basic visibility toggling
 

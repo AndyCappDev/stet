@@ -852,6 +852,60 @@ fn composite_onto_white(data: &mut [u8]) {
     }
 }
 
+/// Extract the contribution of a non-isolated transparency group and composite
+/// it onto the parent using the group's blend mode and alpha.
+///
+/// The offscreen buffer started as a copy of the parent (backdrop) and group
+/// elements were rendered on top. We extract pixels that changed (the group's
+/// contribution) into a new pixmap, then composite that with the group's
+/// blend mode and alpha via tiny-skia's draw_pixmap.
+fn composite_non_isolated_group(
+    pixmap: &mut Pixmap,
+    offscreen: &Pixmap,
+    backdrop: &[u8],
+    params: &stet_core::display_list::GroupParams,
+    clip_mask: Option<&tiny_skia::Mask>,
+) {
+    // Build a contribution pixmap: pixels that changed get the offscreen color,
+    // unchanged pixels get alpha=0 (transparent) so they don't affect compositing.
+    let w = pixmap.width();
+    let h = pixmap.height();
+    let Some(mut contribution) = Pixmap::new(w, h) else {
+        return;
+    };
+    let off_data = offscreen.data();
+    let contrib_data = contribution.data_mut();
+
+    for (i, chunk) in contrib_data.chunks_exact_mut(4).enumerate() {
+        let off = i * 4;
+        // Compare offscreen pixel to original backdrop
+        if off_data[off] != backdrop[off]
+            || off_data[off + 1] != backdrop[off + 1]
+            || off_data[off + 2] != backdrop[off + 2]
+            || off_data[off + 3] != backdrop[off + 3]
+        {
+            // Group painted here — use the offscreen pixel as the contribution
+            chunk.copy_from_slice(&off_data[off..off + 4]);
+        }
+        // else: unchanged pixel → stays transparent (alpha=0)
+    }
+
+    // Composite the contribution onto the parent with the group's blend mode + alpha
+    let paint = tiny_skia::PixmapPaint {
+        opacity: params.alpha as f32,
+        blend_mode: u8_to_blend_mode(params.blend_mode),
+        quality: tiny_skia::FilterQuality::Nearest,
+    };
+    pixmap.draw_pixmap(
+        0,
+        0,
+        contribution.as_ref(),
+        &paint,
+        Transform::identity(),
+        clip_mask,
+    );
+}
+
 /// Apply a combined offset + scale to a tiny-skia Transform for viewport rendering.
 /// Maps device-space coordinates into viewport-local pixel coordinates:
 ///   output_x = (device_x - vp_x) * scale_x
@@ -1869,9 +1923,20 @@ fn render_group_to_band(
     dpi: f64,
     icc: Option<&IccCache>,
 ) {
-    // Create band-sized offscreen pixmap (starts transparent for isolated groups)
+    // Create band-sized offscreen pixmap
     let Some(mut offscreen) = Pixmap::new(band_w, band_h) else {
         return;
+    };
+
+    // For non-isolated groups, copy the parent backdrop into the offscreen buffer
+    // so group elements composite against the actual backdrop content.
+    // Also save a copy of the backdrop for contribution extraction later.
+    let backdrop = if !params.isolated {
+        let data = pixmap.data().to_vec();
+        offscreen.data_mut().copy_from_slice(pixmap.data());
+        Some(data)
+    } else {
+        None
     };
 
     // Fresh BandState for group (clean clip, empty caches)
@@ -1905,12 +1970,18 @@ fn render_group_to_band(
         Some(m) => m,
     };
 
-    let paint = tiny_skia::PixmapPaint {
-        opacity: params.alpha as f32,
-        blend_mode: u8_to_blend_mode(params.blend_mode),
-        quality: tiny_skia::FilterQuality::Nearest,
-    };
-    pixmap.draw_pixmap(0, 0, offscreen.as_ref(), &paint, Transform::identity(), mask_ref);
+    if let Some(backdrop) = &backdrop {
+        // Non-isolated: extract contribution (changed pixels) and composite
+        // with group blend mode + alpha.
+        composite_non_isolated_group(pixmap, &offscreen, backdrop, params, mask_ref);
+    } else {
+        let paint = tiny_skia::PixmapPaint {
+            opacity: params.alpha as f32,
+            blend_mode: u8_to_blend_mode(params.blend_mode),
+            quality: tiny_skia::FilterQuality::Nearest,
+        };
+        pixmap.draw_pixmap(0, 0, offscreen.as_ref(), &paint, Transform::identity(), mask_ref);
+    }
 }
 
 /// Render a tiled pattern fill into a band.
@@ -3443,6 +3514,16 @@ fn render_group_to_viewport(
     let Some(mut offscreen) = Pixmap::new(out_w, out_h) else {
         return;
     };
+
+    // For non-isolated groups, copy the parent backdrop and save original.
+    let backdrop = if !params.isolated {
+        let data = pixmap.data().to_vec();
+        offscreen.data_mut().copy_from_slice(pixmap.data());
+        Some(data)
+    } else {
+        None
+    };
+
     let mut group_state = BandState {
         clip_region: None,
         spare_mask: None,
@@ -3474,12 +3555,16 @@ fn render_group_to_viewport(
         Some(m) => m,
     };
 
-    let paint = tiny_skia::PixmapPaint {
-        opacity: params.alpha as f32,
-        blend_mode: u8_to_blend_mode(params.blend_mode),
-        quality: tiny_skia::FilterQuality::Nearest,
-    };
-    pixmap.draw_pixmap(0, 0, offscreen.as_ref(), &paint, Transform::identity(), mask_ref);
+    if let Some(backdrop) = &backdrop {
+        composite_non_isolated_group(pixmap, &offscreen, backdrop, params, mask_ref);
+    } else {
+        let paint = tiny_skia::PixmapPaint {
+            opacity: params.alpha as f32,
+            blend_mode: u8_to_blend_mode(params.blend_mode),
+            quality: tiny_skia::FilterQuality::Nearest,
+        };
+        pixmap.draw_pixmap(0, 0, offscreen.as_ref(), &paint, Transform::identity(), mask_ref);
+    }
 }
 
 /// Pattern fill for viewport rendering. Applies viewport transform to both
