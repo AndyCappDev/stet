@@ -203,42 +203,36 @@ impl PdfDocument {
   - Blend mode parsing from BM in ExtGState ✓
   - Alpha/opacity (ca/CA) propagation to FillParams/StrokeParams ✓
   - tiny-skia Paint opacity application ✓
+  - Image SMask (alpha soft mask): DeviceGray mask → per-pixel alpha channel ✓
 - **D9: Encryption** ✓
   - Standard security handler (empty password auto-open) ✓
   - RC4 (V=1,2), AES-128-CBC (V=4), AES-256-CBC (V=5) ✓
   - Per-object key derivation, string/stream decryption in resolver ✓
 
-**Known limitations**:
-- ICCBased: profile data is parsed but ignored — falls back to device space by component count
-  (1→DeviceGray, 3→DeviceRGB, 4→DeviceCMYK). The PS interpreter has full ICC support via
-  `stet-core::icc` + `moxcms`; wire it into the PDF reader's color pipeline in Phase E.
-- CalGray/CalRGB: CIE parameters are parsed but rendering uses approximate identity conversion
-  (no actual CIE→sRGB transform applied). The PS interpreter handles CIE properly via
-  `CieAParams`/`CieAbcParams`.
+- **D10: ICCBased color management** ✓
+  - ICC profile bytes extracted from PDF streams and registered with IccCache ✓
+  - Fill/stroke colors converted through ICC profile via `convert_color()` ✓
+  - Image data bulk-converted via `convert_image_8bit()` ✓
+  - Falls back to device space when profile parsing fails ✓
+- **D11: CalGray/CalRGB accurate CIE rendering** ✓
+  - CalGray: gamma + white point → CieAParams → `from_cie_a()` pipeline ✓
+  - CalRGB: gamma + matrix + white point → CieAbcParams → `from_cie_abc()` pipeline ✓
+  - Pre-computed 256-sample decode tables from Gamma values ✓
 
 **Not done (moved to Phase E)**:
-- ICCBased color management (extract profile data, apply transforms via IccCache)
-- CalGray/CalRGB accurate CIE rendering
-- Transparency groups (isolated/knockout), soft masks (D8 Part 2)
+- Transparency groups (isolated/knockout), luminosity soft masks (D8 Part 2)
 - Annotations (Link, Widget)
 - Optional content (layers) — basic visibility toggling
-- Cross-reference streams (PDF 1.5+)
 
 ### Phase E: Transparency & Remaining Features
 
-- **ICCBased color management**: Extract embedded ICC profile data from ICCBased color space
-  dicts, register with `IccCache`, apply profile transforms for fill/stroke colors and images.
-  Reuse `stet-core::icc` + `moxcms` (already working in the PS interpreter).
-- **CalGray/CalRGB accurate rendering**: Apply CIE gamma/matrix/white point transforms instead
-  of passing colors through as-is. Reuse `CieAParams`/`CieAbcParams` pipelines from stet-core.
 - Transparency group rendering to offscreen buffers
 - Isolated and knockout group semantics
 - All 12 blend modes (pixel-level compositing in tiny-skia)
-- Soft mask (alpha and luminosity) application
+- Luminosity soft masks (alpha SMask on images already implemented in D8)
 - Nested transparency groups
 - Color space conversion within groups
 - Performance optimization (avoid offscreen buffer when group is trivial)
-- Cross-reference streams (PDF 1.5+)
 - Annotations (Link, Widget appearance streams)
 - Optional content (layers) — basic visibility toggling
 

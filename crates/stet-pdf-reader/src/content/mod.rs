@@ -17,8 +17,8 @@ use crate::objects::{PdfDict, PdfObj};
 use crate::resolver::Resolver;
 
 use self::color_space::{
-    ResolvedColorSpace, components_to_device_color, resolve_color_space, resolve_color_space_obj,
-    to_image_color_space,
+    ResolvedColorSpace, components_to_device_color_icc, convert_icc_image_data,
+    resolve_color_space, resolve_color_space_obj, to_image_color_space,
 };
 use self::graphics_state::{ColorSpaceRef, PdfGraphicsState};
 
@@ -27,6 +27,7 @@ use std::sync::Arc;
 use self::font::{FontCache, PdfFont};
 use self::graphics_state::TilingPattern;
 use stet_core::device::{ClipParams, ImageColorSpace, ImageParams, PatternFillParams};
+use stet_core::icc::IccCache;
 use stet_core::display_list::{DisplayElement, DisplayList};
 use stet_core::graphics_state::{
     DashPattern, DeviceColor, FillRule, LineCap, LineJoin, Matrix, PathSegment, PsPath,
@@ -91,6 +92,8 @@ pub struct ContentInterpreter<'a> {
     /// PDF pattern Matrix maps to the default user space, so we need
     /// the initial CTM (not current CTM) for pattern matrix computation.
     initial_ctm: Matrix,
+    /// ICC color profile cache for ICCBased color space conversions.
+    icc_cache: IccCache,
 }
 
 impl<'a> ContentInterpreter<'a> {
@@ -111,6 +114,7 @@ impl<'a> ContentInterpreter<'a> {
             depth: 0,
             font_cache: FontCache::new(),
             current_font: None,
+            icc_cache: IccCache::new(),
         }
     }
 
@@ -815,7 +819,8 @@ impl<'a> ContentInterpreter<'a> {
             return Ok(());
         }
         let nums = self.get_numbers(n)?;
-        self.gstate.stroke_color = components_to_device_color(&cs, &nums);
+        self.gstate.stroke_color =
+            components_to_device_color_icc(&cs, &nums, Some(&mut self.icc_cache));
         Ok(())
     }
 
@@ -834,7 +839,8 @@ impl<'a> ContentInterpreter<'a> {
             return Ok(());
         }
         let nums = self.get_numbers(n)?;
-        self.gstate.fill_color = components_to_device_color(&cs, &nums);
+        self.gstate.fill_color =
+            components_to_device_color_icc(&cs, &nums, Some(&mut self.icc_cache));
         self.gstate.fill_pattern = None;
         Ok(())
     }
@@ -1221,6 +1227,14 @@ impl<'a> ContentInterpreter<'a> {
         };
 
         // Resolve color space
+        let resolved_cs = if is_image_mask {
+            None
+        } else if let Some(cs_obj) = dict.get(b"ColorSpace") {
+            Some(resolve_color_space_obj(cs_obj, self.resolver)?)
+        } else {
+            Some(ResolvedColorSpace::DeviceRGB)
+        };
+
         let color_space = if is_image_mask {
             // Image mask polarity from /Decode array:
             // [1 0] → polarity=true (raw bit 1 paints)
@@ -1235,11 +1249,8 @@ impl<'a> ContentInterpreter<'a> {
                 color: self.gstate.fill_color.clone(),
                 polarity,
             }
-        } else if let Some(cs_obj) = dict.get(b"ColorSpace") {
-            let resolved = resolve_color_space_obj(cs_obj, self.resolver)?;
-            to_image_color_space(&resolved)
         } else {
-            ImageColorSpace::DeviceRGB
+            to_image_color_space(resolved_cs.as_ref().unwrap())
         };
 
         // Decode the stream data
@@ -1275,6 +1286,23 @@ impl<'a> ContentInterpreter<'a> {
                 height,
                 color_space.num_components(),
             )
+        };
+
+        // Convert ICCBased image data through ICC profile if available
+        let (sample_data, color_space) = if !is_image_mask {
+            if let Some(ref rcs) = resolved_cs {
+                if let Some((rgb_data, rgb_cs)) =
+                    convert_icc_image_data(rcs, &sample_data, width, height, &mut self.icc_cache)
+                {
+                    (rgb_data, rgb_cs)
+                } else {
+                    (sample_data, color_space)
+                }
+            } else {
+                (sample_data, color_space)
+            }
+        } else {
+            (sample_data, color_space)
         };
 
         // Handle SMask (soft mask / alpha channel)

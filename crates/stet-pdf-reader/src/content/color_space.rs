@@ -14,6 +14,7 @@ use crate::resources::function::PdfFunction;
 use super::graphics_state::ColorSpaceRef;
 use stet_core::device::{ImageColorSpace, TintLookupTable};
 use stet_core::graphics_state::{CieAParams, CieAbcParams, DeviceColor};
+use stet_core::icc::{IccCache, ProfileHash};
 
 /// Resolved color space with enough info to convert color values.
 #[derive(Clone, Debug)]
@@ -23,6 +24,8 @@ pub enum ResolvedColorSpace {
     DeviceCMYK,
     ICCBased {
         n: u32,
+        /// Raw ICC profile bytes (None if extraction failed).
+        profile_data: Option<Arc<Vec<u8>>>,
     },
     Indexed {
         base: Box<ResolvedColorSpace>,
@@ -59,7 +62,7 @@ impl ResolvedColorSpace {
             Self::DeviceGray => 1,
             Self::DeviceRGB => 3,
             Self::DeviceCMYK => 4,
-            Self::ICCBased { n } => *n as usize,
+            Self::ICCBased { n, .. } => *n as usize,
             Self::Indexed { .. } => 1,
             Self::Separation { .. } => 1,
             Self::DeviceN { names, .. } => names.len(),
@@ -168,7 +171,15 @@ fn resolve_icc_based(args: &[PdfObj], resolver: &Resolver) -> Result<ResolvedCol
     let n = dict
         .get_int(b"N")
         .ok_or(PdfError::Other("ICCBased missing /N".into()))? as u32;
-    Ok(ResolvedColorSpace::ICCBased { n })
+
+    // Extract ICC profile bytes from the stream
+    let profile_data = resolver
+        .stream_data_from_obj(&stream_obj)
+        .ok()
+        .filter(|d| !d.is_empty())
+        .map(Arc::new);
+
+    Ok(ResolvedColorSpace::ICCBased { n, profile_data })
 }
 
 fn resolve_indexed(args: &[PdfObj], resolver: &Resolver) -> Result<ResolvedColorSpace, PdfError> {
@@ -376,6 +387,15 @@ fn parse_triple(dict: Option<&PdfDict>, key: &[u8]) -> Option<[f64; 3]> {
 
 /// Convert color components to DeviceColor based on resolved color space.
 pub fn components_to_device_color(cs: &ResolvedColorSpace, components: &[f64]) -> DeviceColor {
+    components_to_device_color_icc(cs, components, None)
+}
+
+/// Convert color components to DeviceColor, with optional ICC profile support.
+pub fn components_to_device_color_icc(
+    cs: &ResolvedColorSpace,
+    components: &[f64],
+    icc_cache: Option<&mut IccCache>,
+) -> DeviceColor {
     match cs {
         ResolvedColorSpace::DeviceGray => {
             let g = components.first().copied().unwrap_or(0.0);
@@ -394,7 +414,17 @@ pub fn components_to_device_color(cs: &ResolvedColorSpace, components: &[f64]) -
             let k = components.get(3).copied().unwrap_or(0.0);
             DeviceColor::from_cmyk(c, m, y, k)
         }
-        ResolvedColorSpace::ICCBased { n } => {
+        ResolvedColorSpace::ICCBased { n, profile_data } => {
+            // Try ICC profile conversion first
+            if let Some(cache) = icc_cache {
+                if let Some(data) = profile_data {
+                    if let Some(hash) = cache.register_profile(data) {
+                        if let Some((r, g, b)) = cache.convert_color(&hash, components) {
+                            return DeviceColor::from_rgb(r, g, b);
+                        }
+                    }
+                }
+            }
             // Fall back to device space based on component count
             match n {
                 1 => {
@@ -482,7 +512,7 @@ pub fn to_image_color_space(cs: &ResolvedColorSpace) -> ImageColorSpace {
         ResolvedColorSpace::DeviceGray => ImageColorSpace::DeviceGray,
         ResolvedColorSpace::DeviceRGB => ImageColorSpace::DeviceRGB,
         ResolvedColorSpace::DeviceCMYK => ImageColorSpace::DeviceCMYK,
-        ResolvedColorSpace::ICCBased { n } => match n {
+        ResolvedColorSpace::ICCBased { n, .. } => match n {
             1 => ImageColorSpace::DeviceGray,
             3 => ImageColorSpace::DeviceRGB,
             4 => ImageColorSpace::DeviceCMYK,
@@ -521,6 +551,39 @@ pub fn to_image_color_space(cs: &ResolvedColorSpace) -> ImageColorSpace {
         ResolvedColorSpace::CalRGB { .. } => ImageColorSpace::DeviceRGB,
         ResolvedColorSpace::Lab { .. } => ImageColorSpace::DeviceRGB,
         ResolvedColorSpace::Pattern => ImageColorSpace::DeviceRGB,
+    }
+}
+
+/// Try to convert ICCBased image data through the ICC profile.
+/// Returns (converted_data, ImageColorSpace::DeviceRGB) on success, or None to fall back.
+pub fn convert_icc_image_data(
+    cs: &ResolvedColorSpace,
+    data: &[u8],
+    width: u32,
+    height: u32,
+    icc_cache: &mut IccCache,
+) -> Option<(Vec<u8>, ImageColorSpace)> {
+    let (_n, profile_data) = match cs {
+        ResolvedColorSpace::ICCBased { n, profile_data } => (*n, profile_data.as_ref()?),
+        _ => return None,
+    };
+    let hash = icc_cache.register_profile(profile_data)?;
+    let pixel_count = (width * height) as usize;
+    let rgb_data = icc_cache.convert_image_8bit(&hash, data, pixel_count)?;
+    Some((rgb_data, ImageColorSpace::DeviceRGB))
+}
+
+/// Register an ICC profile and return its hash (for use in color conversions).
+pub fn register_icc_profile(
+    cs: &ResolvedColorSpace,
+    icc_cache: &mut IccCache,
+) -> Option<ProfileHash> {
+    match cs {
+        ResolvedColorSpace::ICCBased { profile_data, .. } => {
+            let data = profile_data.as_ref()?;
+            icc_cache.register_profile(data)
+        }
+        _ => None,
     }
 }
 
