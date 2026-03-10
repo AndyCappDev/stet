@@ -10,6 +10,7 @@
 pub mod color_space;
 pub mod font;
 pub mod graphics_state;
+mod standard_fonts;
 
 use crate::error::PdfError;
 use crate::lexer::{Lexer, Token};
@@ -28,7 +29,7 @@ use self::font::{FontCache, PdfFont};
 use self::graphics_state::TilingPattern;
 use stet_core::device::{ClipParams, ImageColorSpace, ImageParams, PatternFillParams};
 use stet_core::icc::IccCache;
-use stet_core::display_list::{DisplayElement, DisplayList};
+use stet_core::display_list::{DisplayElement, DisplayList, GroupParams};
 use stet_core::graphics_state::{
     DashPattern, DeviceColor, FillRule, LineCap, LineJoin, Matrix, PathSegment, PsPath,
 };
@@ -1432,6 +1433,9 @@ impl<'a> ContentInterpreter<'a> {
             None
         };
 
+        // Check for transparency group
+        let is_transparency_group = self.is_transparency_group(dict);
+
         // Decompress form content stream
         let form_data = self.resolver.stream_data_from_obj(obj)?;
 
@@ -1442,41 +1446,58 @@ impl<'a> ContentInterpreter<'a> {
         // Apply form matrix
         self.gstate.ctm = self.gstate.ctm.concat(&form_matrix);
 
-        // Clip to BBox
-        if let Some((x0, y0, x1, y1)) = bbox {
-            let p0 = self.gstate.ctm.transform_point(x0, y0);
-            let p1 = self.gstate.ctm.transform_point(x1, y0);
-            let p2 = self.gstate.ctm.transform_point(x1, y1);
-            let p3 = self.gstate.ctm.transform_point(x0, y1);
-            let mut clip_path = PsPath::new();
-            clip_path.segments.push(PathSegment::MoveTo(p0.0, p0.1));
-            clip_path.segments.push(PathSegment::LineTo(p1.0, p1.1));
-            clip_path.segments.push(PathSegment::LineTo(p2.0, p2.1));
-            clip_path.segments.push(PathSegment::LineTo(p3.0, p3.1));
-            clip_path.segments.push(PathSegment::ClosePath);
-            self.display_list.push(DisplayElement::Clip {
-                path: clip_path.clone(),
-                params: ClipParams {
-                    fill_rule: FillRule::NonZeroWinding,
-                    ctm: Matrix::identity(),
+        if is_transparency_group {
+            // Render group contents into a separate sub-DisplayList
+            let mut group_list = DisplayList::new();
+            std::mem::swap(&mut self.display_list, &mut group_list);
+
+            // Clip to BBox inside the group's display list
+            if let Some((x0, y0, x1, y1)) = bbox {
+                self.push_bbox_clip(x0, y0, x1, y1);
+            }
+
+            // Interpret form content into group_list (now in self.display_list)
+            self.depth += 1;
+            self.interpret_stream(&form_data)?;
+            self.depth -= 1;
+
+            // Swap back — group_list now contains the group's elements
+            std::mem::swap(&mut self.display_list, &mut group_list);
+
+            // Compute device-space bbox from form BBox + CTM
+            let device_bbox = self.compute_device_bbox(bbox);
+
+            // Extract isolated flag from Group dict
+            let isolated = self.get_group_isolated(dict);
+
+            // Push Group element to parent display list
+            self.display_list.push(DisplayElement::Group {
+                elements: group_list,
+                params: GroupParams {
+                    bbox: device_bbox,
+                    isolated,
+                    blend_mode: self.gstate.blend_mode,
+                    alpha: self.gstate.fill_alpha,
                 },
             });
-            self.gstate.clip_path = Some(clip_path);
-            self.gstate.clip_path_version += 1;
-        }
+        } else {
+            // Non-transparency-group Form XObject: render inline (existing behavior)
+            if let Some((x0, y0, x1, y1)) = bbox {
+                self.push_bbox_clip(x0, y0, x1, y1);
+            }
 
-        // Interpret form content
-        self.depth += 1;
-        self.interpret_stream(&form_data)?;
-        self.depth -= 1;
+            self.depth += 1;
+            self.interpret_stream(&form_data)?;
+            self.depth -= 1;
+        }
 
         // Restore state — check if clip needs resetting
         self.resources = saved_resources;
         if let Some(saved) = self.gstate_stack.pop() {
             let old_clip_version = self.gstate.clip_path_version;
             self.gstate = saved;
-            // Restore clip if it changed during the form
-            if self.gstate.clip_path_version != old_clip_version {
+            // For non-group forms, restore clip if it changed
+            if !is_transparency_group && self.gstate.clip_path_version != old_clip_version {
                 self.display_list.push(DisplayElement::InitClip);
                 if let Some(ref clip) = self.gstate.clip_path {
                     self.display_list.push(DisplayElement::Clip {
@@ -1491,6 +1512,81 @@ impl<'a> ContentInterpreter<'a> {
         }
 
         Ok(())
+    }
+
+    /// Check if a Form XObject dict has a /Group dict with /S /Transparency.
+    fn is_transparency_group(&self, dict: &PdfDict) -> bool {
+        let Some(group_obj) = dict.get(b"Group") else {
+            return false;
+        };
+        let group_dict = match self.resolver.deref(group_obj) {
+            Ok(PdfObj::Dict(d)) => d,
+            _ => return false,
+        };
+        group_dict.get_name(b"S") == Some(b"Transparency")
+    }
+
+    /// Extract the /I (isolated) flag from a Form XObject's /Group dict.
+    fn get_group_isolated(&self, dict: &PdfDict) -> bool {
+        let Some(group_obj) = dict.get(b"Group") else {
+            return false;
+        };
+        let group_dict = match self.resolver.deref(group_obj) {
+            Ok(PdfObj::Dict(d)) => d,
+            _ => return false,
+        };
+        match group_dict.get(b"I") {
+            Some(PdfObj::Bool(b)) => *b,
+            _ => false,
+        }
+    }
+
+    /// Push a BBox clip path to the current display list.
+    fn push_bbox_clip(&mut self, x0: f64, y0: f64, x1: f64, y1: f64) {
+        let p0 = self.gstate.ctm.transform_point(x0, y0);
+        let p1 = self.gstate.ctm.transform_point(x1, y0);
+        let p2 = self.gstate.ctm.transform_point(x1, y1);
+        let p3 = self.gstate.ctm.transform_point(x0, y1);
+        let mut clip_path = PsPath::new();
+        clip_path.segments.push(PathSegment::MoveTo(p0.0, p0.1));
+        clip_path.segments.push(PathSegment::LineTo(p1.0, p1.1));
+        clip_path.segments.push(PathSegment::LineTo(p2.0, p2.1));
+        clip_path.segments.push(PathSegment::LineTo(p3.0, p3.1));
+        clip_path.segments.push(PathSegment::ClosePath);
+        self.display_list.push(DisplayElement::Clip {
+            path: clip_path.clone(),
+            params: ClipParams {
+                fill_rule: FillRule::NonZeroWinding,
+                ctm: Matrix::identity(),
+            },
+        });
+        self.gstate.clip_path = Some(clip_path);
+        self.gstate.clip_path_version += 1;
+    }
+
+    /// Compute device-space bounding box from form BBox + current CTM.
+    fn compute_device_bbox(&self, bbox: Option<(f64, f64, f64, f64)>) -> [f64; 4] {
+        let Some((x0, y0, x1, y1)) = bbox else {
+            // No BBox — use large sentinel
+            return [0.0, 0.0, 1e9, 1e9];
+        };
+        let corners = [
+            self.gstate.ctm.transform_point(x0, y0),
+            self.gstate.ctm.transform_point(x1, y0),
+            self.gstate.ctm.transform_point(x0, y1),
+            self.gstate.ctm.transform_point(x1, y1),
+        ];
+        let mut min_x = f64::INFINITY;
+        let mut min_y = f64::INFINITY;
+        let mut max_x = f64::NEG_INFINITY;
+        let mut max_y = f64::NEG_INFINITY;
+        for (cx, cy) in &corners {
+            min_x = min_x.min(*cx);
+            min_y = min_y.min(*cy);
+            max_x = max_x.max(*cx);
+            max_y = max_y.max(*cy);
+        }
+        [min_x, min_y, max_x, max_y]
     }
 
     /// Handle inline image (BI ... ID ... EI).

@@ -104,6 +104,11 @@ impl<'a> Lexer<'a> {
                 Ok(Token::ArrayEnd)
             }
             b'+' | b'-' | b'.' | b'0'..=b'9' => self.read_number(),
+            b'\'' | b'"' => {
+                // PDF text operators: ' (move to next line and show) and " (set spacing and show)
+                self.pos += 1;
+                Ok(Token::Keyword(vec![b]))
+            }
             _ if b.is_ascii_alphabetic() => self.read_keyword(),
             _ => {
                 let ch = b as char;

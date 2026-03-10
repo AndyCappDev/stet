@@ -58,19 +58,32 @@ pub fn parse_xref(data: &[u8]) -> Result<XrefTable, PdfError> {
     let mut offset = startxref;
     let mut visited = std::collections::HashSet::new();
 
+    let mut xref_failed = false;
+
     loop {
         if !visited.insert(offset) {
             break; // Circular /Prev chain
         }
 
-        let (entries, trailer) = parse_xref_section(data, offset)?;
-        let prev = trailer.get_int(b"Prev").map(|v| v as usize);
-        sections.push((entries, trailer));
-
-        match prev {
-            Some(p) => offset = p,
-            None => break,
+        match parse_xref_section(data, offset) {
+            Ok((entries, trailer)) => {
+                let prev = trailer.get_int(b"Prev").map(|v| v as usize);
+                sections.push((entries, trailer));
+                match prev {
+                    Some(p) => offset = p,
+                    None => break,
+                }
+            }
+            Err(_) => {
+                xref_failed = true;
+                break;
+            }
         }
+    }
+
+    // If xref parsing failed completely, fall back to scanning the file for objects
+    if xref_failed && sections.is_empty() {
+        return rebuild_xref_from_scan(data);
     }
 
     // Build the combined table: oldest entries first, newest override
@@ -93,6 +106,161 @@ pub fn parse_xref(data: &[u8]) -> Result<XrefTable, PdfError> {
         entries: combined_entries,
         trailer: final_trailer,
     })
+}
+
+/// Rebuild the xref table by scanning the entire file for `N G obj` patterns.
+/// Used as a fallback when the xref table/stream is damaged or missing.
+fn rebuild_xref_from_scan(data: &[u8]) -> Result<XrefTable, PdfError> {
+    let mut entries: Vec<Option<XrefEntry>> = Vec::new();
+
+    // Scan for "N G obj" patterns at the start of lines
+    let mut pos = 0;
+    while pos < data.len() {
+        // Skip to something that looks like a digit at start-of-line or start-of-file
+        if pos > 0 && data[pos - 1] != b'\n' && data[pos - 1] != b'\r' {
+            // Advance to next line
+            while pos < data.len() && data[pos] != b'\n' {
+                pos += 1;
+            }
+            if pos < data.len() {
+                pos += 1; // skip \n
+            }
+            continue;
+        }
+
+        // Try to parse: <obj_num> <gen_num> obj
+        if pos < data.len() && data[pos].is_ascii_digit() {
+            if let Some((obj_num, generation, obj_offset)) = try_parse_obj_header(data, pos) {
+                let idx = obj_num as usize;
+                if idx < 100_000 {
+                    // sanity limit
+                    if idx >= entries.len() {
+                        entries.resize(idx + 1, None);
+                    }
+                    entries[idx] = Some(XrefEntry::InFile {
+                        offset: obj_offset,
+                        generation,
+                    });
+                }
+            }
+        }
+
+        // Advance to next line
+        while pos < data.len() && data[pos] != b'\n' {
+            pos += 1;
+        }
+        if pos < data.len() {
+            pos += 1;
+        }
+    }
+
+    // Parse the trailer dict (search for "trailer" keyword)
+    let trailer = find_trailer_dict(data).unwrap_or_else(|| PdfDict::new());
+
+    // If no trailer has /Root, scan objects for /Type /Catalog
+    let trailer = if trailer.get(b"Root").is_none() {
+        let mut t = trailer;
+        if let Some(root_num) = find_catalog_obj(data, &entries) {
+            t.insert(
+                b"Root".to_vec(),
+                crate::objects::PdfObj::Ref(root_num, 0),
+            );
+        }
+        t
+    } else {
+        trailer
+    };
+
+    Ok(XrefTable { entries, trailer })
+}
+
+/// Try to parse an object header "N G obj" at the given position.
+/// Returns (obj_num, generation, offset) if successful.
+fn try_parse_obj_header(data: &[u8], pos: usize) -> Option<(u32, u16, usize)> {
+    let mut p = pos;
+
+    // Parse object number
+    let num_start = p;
+    while p < data.len() && data[p].is_ascii_digit() {
+        p += 1;
+    }
+    if p == num_start || p >= data.len() {
+        return None;
+    }
+    let obj_num: u32 = std::str::from_utf8(&data[num_start..p]).ok()?.parse().ok()?;
+
+    // Skip spaces
+    while p < data.len() && data[p] == b' ' {
+        p += 1;
+    }
+
+    // Parse generation number
+    let gen_start = p;
+    while p < data.len() && data[p].is_ascii_digit() {
+        p += 1;
+    }
+    if p == gen_start || p >= data.len() {
+        return None;
+    }
+    let generation: u16 = std::str::from_utf8(&data[gen_start..p]).ok()?.parse().ok()?;
+
+    // Skip spaces
+    while p < data.len() && data[p] == b' ' {
+        p += 1;
+    }
+
+    // Check for "obj" keyword
+    if p + 3 > data.len() || &data[p..p + 3] != b"obj" {
+        return None;
+    }
+    // "obj" must be followed by whitespace or << (not part of a longer word)
+    let after_obj = p + 3;
+    if after_obj < data.len()
+        && !is_whitespace(data[after_obj])
+        && data[after_obj] != b'<'
+    {
+        return None;
+    }
+
+    Some((obj_num, generation, pos))
+}
+
+/// Search for a `trailer << ... >>` dict in the file.
+fn find_trailer_dict(data: &[u8]) -> Option<PdfDict> {
+    // Search backwards from end for "trailer"
+    let needle = b"trailer";
+    let mut pos = data.len().saturating_sub(needle.len());
+    while pos > 0 {
+        if &data[pos..pos + needle.len()] == needle {
+            let dict_start = pos + needle.len();
+            let mut lexer = Lexer::at(data, dict_start);
+            if let Ok(Token::DictBegin) = lexer.next_token() {
+                if let Ok(dict) = parse_dict_body(&mut lexer) {
+                    return Some(dict);
+                }
+            }
+        }
+        pos -= 1;
+    }
+    None
+}
+
+/// Scan resolved objects for one with /Type /Catalog and return its object number.
+fn find_catalog_obj(data: &[u8], entries: &[Option<XrefEntry>]) -> Option<u32> {
+    for (num, entry) in entries.iter().enumerate() {
+        if let Some(XrefEntry::InFile { offset, .. }) = entry {
+            // Quick byte-level check before full parsing
+            let search_end = (*offset + 512).min(data.len());
+            let slice = &data[*offset..search_end];
+            if let Some(idx) = slice.windows(8).position(|w| w == b"/Catalog") {
+                // Verify /Type precedes it
+                if idx > 5 && slice[..idx].windows(5).any(|w| w == b"/Type") {
+                    return Some(num as u32);
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Parse one xref section (classic table or xref stream) at the given offset.

@@ -593,6 +593,10 @@ fn precompute_bboxes(list: &DisplayList, dpi: f64) -> Vec<Option<YBBox>> {
                 shading_y_bbox_from_bbox(&params.bbox, &params.ctm)
             }
             DisplayElement::PatternFill { params } => path_y_bbox(&params.path),
+            DisplayElement::Group { params, .. } => Some(YBBox {
+                y_min: params.bbox[1],
+                y_max: params.bbox[3],
+            }),
             _ => None, // Clip, InitClip, ErasePage: always process
         })
         .collect()
@@ -830,6 +834,22 @@ fn build_clip_epochs(list: &DisplayList, bboxes: &[Option<YBBox>]) -> Vec<ClipEp
 /// map to pixmap rows [0, band_h).
 fn offset_transform(t: Transform, y_offset: f32) -> Transform {
     Transform::from_row(t.sx, t.ky, t.kx, t.sy, t.tx, t.ty - y_offset)
+}
+
+/// Composite premultiplied-alpha RGBA pixels onto a white background.
+/// After this, all pixels are fully opaque (alpha=255).
+fn composite_onto_white(data: &mut [u8]) {
+    for pixel in data.chunks_exact_mut(4) {
+        let a = pixel[3] as u16;
+        if a == 255 {
+            continue; // fully opaque — no compositing needed
+        }
+        let inv_a = 255 - a;
+        pixel[0] = (pixel[0] as u16 + inv_a).min(255) as u8;
+        pixel[1] = (pixel[1] as u16 + inv_a).min(255) as u8;
+        pixel[2] = (pixel[2] as u16 + inv_a).min(255) as u8;
+        pixel[3] = 255;
+    }
 }
 
 /// Apply a combined offset + scale to a tiny-skia Transform for viewport rendering.
@@ -1713,7 +1733,11 @@ fn render_element_to_band(
             band_state.clip_region = None;
         }
         DisplayElement::ErasePage => {
-            pixmap.fill(Color::WHITE);
+            // Fill transparent — the page is an implicit transparency group.
+            // Blend modes should composite against transparent (not white) so
+            // that painting onto unpainted areas uses the source color directly.
+            // White background is composited underneath after all content renders.
+            pixmap.fill(Color::TRANSPARENT);
             if let Some(ClipRegion::Mask(mask)) = band_state.clip_region.take() {
                 band_state.recycle_mask(mask);
             }
@@ -1820,8 +1844,73 @@ fn render_element_to_band(
         DisplayElement::PatternFill { params } => {
             render_pattern_fill_to_band(pixmap, band_state, params, y_start, band_w, band_h, dpi);
         }
+        DisplayElement::Group { elements, params } => {
+            render_group_to_band(
+                pixmap, band_state, elements, params, y_start, band_w, band_h, dpi, icc,
+            );
+        }
         DisplayElement::Text { .. } => {} // PDF-only, ignored by rasterizer
     }
+}
+
+/// Render a transparency group into a band-sized pixmap.
+///
+/// Creates an offscreen pixmap, renders the group's child elements into it,
+/// then composites back onto the parent with the group's blend mode and alpha.
+#[allow(clippy::too_many_arguments)]
+fn render_group_to_band(
+    pixmap: &mut Pixmap,
+    band_state: &mut BandState,
+    elements: &DisplayList,
+    params: &stet_core::display_list::GroupParams,
+    y_start: u32,
+    band_w: u32,
+    band_h: u32,
+    dpi: f64,
+    icc: Option<&IccCache>,
+) {
+    // Create band-sized offscreen pixmap (starts transparent for isolated groups)
+    let Some(mut offscreen) = Pixmap::new(band_w, band_h) else {
+        return;
+    };
+
+    // Fresh BandState for group (clean clip, empty caches)
+    let mut group_band = BandState {
+        clip_region: None,
+        spare_mask: None,
+        clip_mask_cache: HashMap::new(),
+        clip_mask_seen: HashSet::new(),
+        mask_pool: Vec::new(),
+    };
+
+    // Render group elements into offscreen
+    for elem in elements.elements() {
+        render_element_to_band(
+            &mut offscreen,
+            &mut group_band,
+            elem,
+            y_start,
+            band_w,
+            band_h,
+            dpi,
+            icc,
+        );
+    }
+
+    // Composite offscreen onto parent with clip, blend mode, alpha
+    let mut temp_mask = None;
+    let mask_ref = resolve_clip_mask(&band_state.clip_region, &mut temp_mask, band_w, band_h);
+    let mask_ref = match mask_ref {
+        None => return, // empty clip — skip painting
+        Some(m) => m,
+    };
+
+    let paint = tiny_skia::PixmapPaint {
+        opacity: params.alpha as f32,
+        blend_mode: u8_to_blend_mode(params.blend_mode),
+        quality: tiny_skia::FilterQuality::Nearest,
+    };
+    pixmap.draw_pixmap(0, 0, offscreen.as_ref(), &paint, Transform::identity(), mask_ref);
 }
 
 /// Render a tiled pattern fill into a band.
@@ -2267,6 +2356,8 @@ impl OutputDevice for SkiaDevice {
     fn show_page(&mut self, output_path: &str) -> Result<(), String> {
         let w = self.pixmap.width();
         let h = self.pixmap.height();
+        // Composite onto white background before output
+        composite_onto_white(self.pixmap.data_mut());
         let mut sink = self.sink_factory.create_sink(output_path)?;
         sink.begin_page(w, h)?;
         sink.write_rows(self.pixmap.data(), h)?;
@@ -2519,7 +2610,8 @@ fn render_banded_to_sink(
         let band_offset = y_start - render_y_start;
 
         let mut band_pixmap = Pixmap::new(page_w, render_h).expect("Failed to create band pixmap");
-        band_pixmap.as_mut().data_mut().fill(0xFF);
+        // Start transparent — white background composited after content rendering
+        band_pixmap.as_mut().data_mut().fill(0x00);
 
         let mut band_state = BandState {
             clip_region: None,
@@ -2561,6 +2653,9 @@ fn render_banded_to_sink(
                 );
             }
         }
+
+        // Composite content onto white background (premultiplied alpha)
+        composite_onto_white(band_pixmap.data_mut());
 
         // Extract only the actual band rows (skip overlap)
         let start_byte = band_offset as usize * row_bytes;
@@ -2690,6 +2785,12 @@ fn precompute_full_bboxes(list: &DisplayList, dpi: f64) -> Vec<Option<BBox2D>> {
             DisplayElement::MeshShading { params } => shading_full_bbox(&params.bbox, &params.ctm),
             DisplayElement::PatchShading { params } => shading_full_bbox(&params.bbox, &params.ctm),
             DisplayElement::PatternFill { params } => path_full_bbox(&params.path),
+            DisplayElement::Group { params, .. } => Some(BBox2D {
+                x_min: params.bbox[0],
+                y_min: params.bbox[1],
+                x_max: params.bbox[2],
+                y_max: params.bbox[3],
+            }),
             _ => None, // Clip, InitClip, ErasePage: always process
         })
         .collect()
@@ -2933,7 +3034,8 @@ pub fn render_region_prepared(
     let effective_dpi = dpi * scale_x;
 
     let mut pixmap = Pixmap::new(pixel_w, pixel_h).expect("Failed to create viewport pixmap");
-    pixmap.fill(Color::WHITE);
+    // Start transparent — white background composited after content rendering
+    pixmap.fill(Color::TRANSPARENT);
 
     let mut state = BandState {
         clip_region: None,
@@ -2993,6 +3095,8 @@ pub fn render_region_prepared(
         }
     }
 
+    // Composite onto white background
+    composite_onto_white(pixmap.data_mut());
     pixmap.data().to_vec()
 }
 
@@ -3030,7 +3134,7 @@ pub fn render_region(
     let clip_seen = precompute_clip_seen(list);
 
     let mut pixmap = Pixmap::new(pixel_w, pixel_h).expect("Failed to create viewport pixmap");
-    pixmap.fill(Color::WHITE);
+    pixmap.fill(Color::TRANSPARENT);
 
     let mut state = BandState {
         clip_region: None,
@@ -3092,6 +3196,7 @@ pub fn render_region(
         }
     }
 
+    composite_onto_white(pixmap.data_mut());
     pixmap.data().to_vec()
 }
 
@@ -3190,7 +3295,7 @@ fn render_element_to_viewport(
             state.clip_region = None;
         }
         DisplayElement::ErasePage => {
-            pixmap.fill(Color::WHITE);
+            pixmap.fill(Color::TRANSPARENT);
             if let Some(ClipRegion::Mask(mask)) = state.clip_region.take() {
                 state.recycle_mask(mask);
             }
@@ -3309,8 +3414,72 @@ fn render_element_to_viewport(
                 effective_dpi,
             );
         }
+        DisplayElement::Group { elements, params } => {
+            render_group_to_viewport(
+                pixmap, state, elements, params, vp_x, vp_y, scale_x, scale_y, out_w, out_h,
+                effective_dpi, icc,
+            );
+        }
         DisplayElement::Text { .. } => {} // PDF-only, ignored by rasterizer
     }
+}
+
+/// Render a transparency group for viewport rendering.
+#[allow(clippy::too_many_arguments)]
+fn render_group_to_viewport(
+    pixmap: &mut Pixmap,
+    state: &mut BandState,
+    elements: &DisplayList,
+    params: &stet_core::display_list::GroupParams,
+    vp_x: f32,
+    vp_y: f32,
+    scale_x: f32,
+    scale_y: f32,
+    out_w: u32,
+    out_h: u32,
+    effective_dpi: f64,
+    icc: Option<&IccCache>,
+) {
+    let Some(mut offscreen) = Pixmap::new(out_w, out_h) else {
+        return;
+    };
+    let mut group_state = BandState {
+        clip_region: None,
+        spare_mask: None,
+        clip_mask_cache: HashMap::new(),
+        clip_mask_seen: HashSet::new(),
+        mask_pool: Vec::new(),
+    };
+
+    for elem in elements.elements() {
+        render_element_to_viewport(
+            &mut offscreen,
+            &mut group_state,
+            elem,
+            vp_x,
+            vp_y,
+            scale_x,
+            scale_y,
+            out_w,
+            out_h,
+            effective_dpi,
+            icc,
+        );
+    }
+
+    let mut temp_mask = None;
+    let mask_ref = resolve_clip_mask(&state.clip_region, &mut temp_mask, out_w, out_h);
+    let mask_ref = match mask_ref {
+        None => return, // empty clip — skip painting
+        Some(m) => m,
+    };
+
+    let paint = tiny_skia::PixmapPaint {
+        opacity: params.alpha as f32,
+        blend_mode: u8_to_blend_mode(params.blend_mode),
+        quality: tiny_skia::FilterQuality::Nearest,
+    };
+    pixmap.draw_pixmap(0, 0, offscreen.as_ref(), &paint, Transform::identity(), mask_ref);
 }
 
 /// Pattern fill for viewport rendering. Applies viewport transform to both

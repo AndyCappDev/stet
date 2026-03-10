@@ -506,6 +506,7 @@ pub fn build_content_stream(
                 );
             }
             DisplayElement::Text { .. } => unreachable!(), // handled above
+            DisplayElement::Group { .. } => {} // TODO: transparency group PDF output
         }
     }
 
@@ -797,6 +798,7 @@ pub fn build_tile_content_stream(
                 text_ops::emit_text_batch(&mut buf, &[params], font_tracker);
                 gs.fill_color = None;
             }
+            DisplayElement::Group { .. } => {} // TODO: transparency group PDF output
         }
     }
 

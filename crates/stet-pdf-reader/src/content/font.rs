@@ -113,7 +113,7 @@ pub fn resolve_font(resolver: &Resolver, font_ref: &PdfObj) -> Result<PdfFont, P
     let first_char = font_dict.get_int(b"FirstChar").unwrap_or(0) as usize;
     let _last_char = font_dict.get_int(b"LastChar").unwrap_or(255) as usize;
 
-    // Parse widths array from font dict
+    // Parse widths array from font dict, or fall back to standard 14 font metrics
     let mut widths = [0.0f64; 256];
     if let Some(w_arr) = font_dict.get_array(b"Widths") {
         for (i, obj) in w_arr.iter().enumerate() {
@@ -121,6 +121,10 @@ pub fn resolve_font(resolver: &Resolver, font_ref: &PdfObj) -> Result<PdfFont, P
             if code < 256 {
                 widths[code] = obj.as_f64().unwrap_or(0.0) / 1000.0;
             }
+        }
+    } else if let Some(base_font) = font_dict.get_name(b"BaseFont") {
+        if let Some(std_widths) = super::standard_fonts::standard_font_widths(base_font) {
+            widths = std_widths;
         }
     }
 

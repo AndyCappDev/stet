@@ -254,8 +254,23 @@ impl<'a> Resolver<'a> {
                     data_start += 1;
                 }
 
-                // Get length (may be an indirect reference)
-                let length = self.resolve_stream_length(&dict)?;
+                // Get length (may be an indirect reference, or missing).
+                // If /Length is present but wrong (doesn't end at endstream),
+                // recover by scanning for endstream.
+                let length = match self.resolve_stream_length(&dict) {
+                    Ok(len) => {
+                        // Validate: endstream should follow at data_start + len
+                        let expected_end = data_start + len;
+                        let valid = self.check_endstream_at(expected_end);
+                        if valid {
+                            len
+                        } else {
+                            // /Length is wrong — recover from endstream
+                            self.recover_stream_length(data_start).unwrap_or(len)
+                        }
+                    }
+                    Err(_) => self.recover_stream_length(data_start)?,
+                };
                 let data_end = std::cmp::min(data_start + length, self.data.len());
 
                 return Ok(PdfObj::Stream {
@@ -295,6 +310,43 @@ impl<'a> Resolver<'a> {
             Token::Keyword(ref kw) if kw == b"obj" => Some(offset),
             _ => None,
         }
+    }
+
+    /// Check if `endstream` keyword appears at or near the given offset.
+    fn check_endstream_at(&self, offset: usize) -> bool {
+        let needle = b"endstream";
+        // Allow up to 2 bytes of whitespace between stream data and endstream
+        for skip in 0..=2 {
+            let pos = offset + skip;
+            if pos + needle.len() <= self.data.len()
+                && &self.data[pos..pos + needle.len()] == needle
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Recover stream length by scanning for `endstream` keyword.
+    /// Used when /Length is missing from the stream dict.
+    fn recover_stream_length(&self, data_start: usize) -> Result<usize, PdfError> {
+        let needle = b"endstream";
+        let search_end = self.data.len().saturating_sub(needle.len());
+        let mut pos = data_start;
+        while pos <= search_end {
+            if &self.data[pos..pos + needle.len()] == needle {
+                // Strip trailing whitespace before endstream
+                let mut end = pos;
+                while end > data_start
+                    && matches!(self.data[end - 1], b' ' | b'\r' | b'\n')
+                {
+                    end -= 1;
+                }
+                return Ok(end - data_start);
+            }
+            pos += 1;
+        }
+        Err(PdfError::StreamMissingLength)
     }
 
     /// Resolve the /Length of a stream dict (may be an indirect reference).

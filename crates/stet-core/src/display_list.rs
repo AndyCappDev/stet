@@ -10,6 +10,19 @@ use crate::device::{
 };
 use crate::graphics_state::PsPath;
 
+/// Parameters for a transparency group compositing operation.
+#[derive(Clone)]
+pub struct GroupParams {
+    /// Device-space bounding box [x_min, y_min, x_max, y_max].
+    pub bbox: [f64; 4],
+    /// Whether the group is isolated (renders against transparent backdrop).
+    pub isolated: bool,
+    /// Blend mode for compositing the group result onto the parent.
+    pub blend_mode: u8,
+    /// Opacity for compositing the group result (0.0–1.0).
+    pub alpha: f64,
+}
+
 /// A single recorded drawing operation.
 #[derive(Clone)]
 pub enum DisplayElement {
@@ -40,6 +53,11 @@ pub enum DisplayElement {
     PatternFill { params: PatternFillParams },
     /// Text element from show operators (used by PDF device, ignored by rasterizer).
     Text { params: TextParams },
+    /// Transparency group: render children offscreen, composite with blend mode + alpha.
+    Group {
+        elements: DisplayList,
+        params: GroupParams,
+    },
 }
 
 /// An ordered list of drawing operations for a single page.
@@ -141,6 +159,11 @@ pub fn replay_to_device(list: &DisplayList, device: &mut dyn OutputDevice) {
             DisplayElement::Text { .. } => {
                 // Text elements are only used by the PDF device.
                 // The rasterizer ignores them (glyph paths are in Fill elements).
+            }
+            DisplayElement::Group { elements, .. } => {
+                // Pass-through: recursively replay group children.
+                // Actual offscreen compositing is handled by the renderer.
+                replay_to_device(elements, device);
             }
         }
     }
