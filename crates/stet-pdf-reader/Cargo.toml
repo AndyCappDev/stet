@@ -10,6 +10,7 @@ description = "PDF parser and renderer"
 thiserror.workspace = true
 flate2 = "1"
 weezl = "0.1"
+md5 = "0.7"
 stet-core.workspace = true
 stet-render.workspace = true
 

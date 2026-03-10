@@ -49,10 +49,7 @@ fn shading_color_space_to_pdf(writer: &mut PdfWriter, cs: &ShadingColorSpace) ->
             }
             PdfObj::Array(vec![PdfObj::name("CalRGB"), PdfObj::Dict(dict_entries)])
         }
-        ShadingColorSpace::CalGray {
-            white_point,
-            gamma,
-        } => {
+        ShadingColorSpace::CalGray { white_point, gamma } => {
             let mut dict_entries = vec![(
                 b"WhitePoint".to_vec(),
                 PdfObj::Array(white_point.iter().map(|&v| PdfObj::Real(v)).collect()),

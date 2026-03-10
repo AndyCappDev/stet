@@ -24,6 +24,7 @@ pub enum XrefEntry {
 }
 
 /// Parsed cross-reference data + trailer.
+#[derive(Clone)]
 pub struct XrefTable {
     /// Map from object number to entry. Index = object number.
     entries: Vec<Option<XrefEntry>>,

@@ -293,13 +293,46 @@ pub fn build_content_stream(
                 if params.is_text_glyph {
                     continue;
                 }
-                emit_transfer(&mut buf, &params.transfer, &mut gs, &mut ext_gstates, &mut ext_gstate_map, &mut transfer_refs);
-                emit_halftone(&mut buf, &params.halftone, &mut gs, &mut ext_gstates, &mut ext_gstate_map, &mut halftone_refs);
-                emit_bg_ucr(&mut buf, &params.bg_ucr, &mut gs, &mut ext_gstates, &mut ext_gstate_map, &mut bg_ucr_refs);
+                emit_transfer(
+                    &mut buf,
+                    &params.transfer,
+                    &mut gs,
+                    &mut ext_gstates,
+                    &mut ext_gstate_map,
+                    &mut transfer_refs,
+                );
+                emit_halftone(
+                    &mut buf,
+                    &params.halftone,
+                    &mut gs,
+                    &mut ext_gstates,
+                    &mut ext_gstate_map,
+                    &mut halftone_refs,
+                );
+                emit_bg_ucr(
+                    &mut buf,
+                    &params.bg_ucr,
+                    &mut gs,
+                    &mut ext_gstates,
+                    &mut ext_gstate_map,
+                    &mut bg_ucr_refs,
+                );
                 emit_rendering_intent(&mut buf, params.rendering_intent, &mut gs);
-                emit_overprint(&mut buf, params.overprint, &mut gs, &mut ext_gstates, &mut ext_gstate_map);
+                emit_overprint(
+                    &mut buf,
+                    params.overprint,
+                    &mut gs,
+                    &mut ext_gstates,
+                    &mut ext_gstate_map,
+                );
                 if let Some(spot) = &params.spot_color {
-                    emit_fill_color_spot(&mut buf, spot, &mut gs, &mut cs_name_map, &mut color_spaces);
+                    emit_fill_color_spot(
+                        &mut buf,
+                        spot,
+                        &mut gs,
+                        &mut cs_name_map,
+                        &mut color_spaces,
+                    );
                 } else {
                     if gs.fill_cs_name.is_some() {
                         gs.fill_cs_name = None;
@@ -324,13 +357,46 @@ pub fn build_content_stream(
                     buf.extend(b"q\n");
                     emit_cm(&mut buf, &params.ctm);
                 }
-                emit_transfer(&mut buf, &params.transfer, &mut gs, &mut ext_gstates, &mut ext_gstate_map, &mut transfer_refs);
-                emit_halftone(&mut buf, &params.halftone, &mut gs, &mut ext_gstates, &mut ext_gstate_map, &mut halftone_refs);
-                emit_bg_ucr(&mut buf, &params.bg_ucr, &mut gs, &mut ext_gstates, &mut ext_gstate_map, &mut bg_ucr_refs);
+                emit_transfer(
+                    &mut buf,
+                    &params.transfer,
+                    &mut gs,
+                    &mut ext_gstates,
+                    &mut ext_gstate_map,
+                    &mut transfer_refs,
+                );
+                emit_halftone(
+                    &mut buf,
+                    &params.halftone,
+                    &mut gs,
+                    &mut ext_gstates,
+                    &mut ext_gstate_map,
+                    &mut halftone_refs,
+                );
+                emit_bg_ucr(
+                    &mut buf,
+                    &params.bg_ucr,
+                    &mut gs,
+                    &mut ext_gstates,
+                    &mut ext_gstate_map,
+                    &mut bg_ucr_refs,
+                );
                 emit_rendering_intent(&mut buf, params.rendering_intent, &mut gs);
-                emit_overprint(&mut buf, params.overprint, &mut gs, &mut ext_gstates, &mut ext_gstate_map);
+                emit_overprint(
+                    &mut buf,
+                    params.overprint,
+                    &mut gs,
+                    &mut ext_gstates,
+                    &mut ext_gstate_map,
+                );
                 if let Some(spot) = &params.spot_color {
-                    emit_stroke_color_spot(&mut buf, spot, &mut gs, &mut cs_name_map, &mut color_spaces);
+                    emit_stroke_color_spot(
+                        &mut buf,
+                        spot,
+                        &mut gs,
+                        &mut cs_name_map,
+                        &mut color_spaces,
+                    );
                 } else {
                     if gs.stroke_cs_name.is_some() {
                         gs.stroke_cs_name = None;
@@ -520,9 +586,30 @@ pub fn build_tile_content_stream(
                 if params.is_text_glyph {
                     continue;
                 }
-                emit_transfer(&mut buf, &params.transfer, &mut gs, &mut ext_gstates, &mut ext_gstate_map, &mut transfer_refs);
-                emit_halftone(&mut buf, &params.halftone, &mut gs, &mut ext_gstates, &mut ext_gstate_map, &mut halftone_refs);
-                emit_bg_ucr(&mut buf, &params.bg_ucr, &mut gs, &mut ext_gstates, &mut ext_gstate_map, &mut bg_ucr_refs);
+                emit_transfer(
+                    &mut buf,
+                    &params.transfer,
+                    &mut gs,
+                    &mut ext_gstates,
+                    &mut ext_gstate_map,
+                    &mut transfer_refs,
+                );
+                emit_halftone(
+                    &mut buf,
+                    &params.halftone,
+                    &mut gs,
+                    &mut ext_gstates,
+                    &mut ext_gstate_map,
+                    &mut halftone_refs,
+                );
+                emit_bg_ucr(
+                    &mut buf,
+                    &params.bg_ucr,
+                    &mut gs,
+                    &mut ext_gstates,
+                    &mut ext_gstate_map,
+                    &mut bg_ucr_refs,
+                );
                 emit_rendering_intent(&mut buf, params.rendering_intent, &mut gs);
                 emit_overprint(
                     &mut buf,
@@ -562,9 +649,30 @@ pub fn build_tile_content_stream(
                     buf.extend(b"q\n");
                     emit_cm(&mut buf, &params.ctm);
                 }
-                emit_transfer(&mut buf, &params.transfer, &mut gs, &mut ext_gstates, &mut ext_gstate_map, &mut transfer_refs);
-                emit_halftone(&mut buf, &params.halftone, &mut gs, &mut ext_gstates, &mut ext_gstate_map, &mut halftone_refs);
-                emit_bg_ucr(&mut buf, &params.bg_ucr, &mut gs, &mut ext_gstates, &mut ext_gstate_map, &mut bg_ucr_refs);
+                emit_transfer(
+                    &mut buf,
+                    &params.transfer,
+                    &mut gs,
+                    &mut ext_gstates,
+                    &mut ext_gstate_map,
+                    &mut transfer_refs,
+                );
+                emit_halftone(
+                    &mut buf,
+                    &params.halftone,
+                    &mut gs,
+                    &mut ext_gstates,
+                    &mut ext_gstate_map,
+                    &mut halftone_refs,
+                );
+                emit_bg_ucr(
+                    &mut buf,
+                    &params.bg_ucr,
+                    &mut gs,
+                    &mut ext_gstates,
+                    &mut ext_gstate_map,
+                    &mut bg_ucr_refs,
+                );
                 emit_rendering_intent(&mut buf, params.rendering_intent, &mut gs);
                 emit_overprint(
                     &mut buf,
@@ -1045,9 +1153,7 @@ fn emit_transfer(
 
     let idx = ext_gstates.len();
     // Placeholder entries — actual /TR2 value set by pdf_device when building function objects
-    let entries = vec![
-        (b"Type".to_vec(), PdfObj::name("ExtGState")),
-    ];
+    let entries = vec![(b"Type".to_vec(), PdfObj::name("ExtGState"))];
     ext_gstates.push(ExtGStateDict { entries });
     ext_gstate_map.insert(key, idx);
 

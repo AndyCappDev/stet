@@ -516,9 +516,7 @@ fn compute_glyph_subset_multi(
     // Find seac dependencies (iterate until stable)
     let mut pending: Vec<String> = needed.iter().cloned().collect();
     while let Some(glyph_name) = pending.pop() {
-        if let Some(cs_bytes) =
-            get_raw_charstring_bytes(ctx, charstrings_entities, &glyph_name)
-        {
+        if let Some(cs_bytes) = get_raw_charstring_bytes(ctx, charstrings_entities, &glyph_name) {
             let decrypted = decrypt_charstring(&cs_bytes, len_iv);
             for dep in find_seac_deps(&decrypted) {
                 if needed.insert(dep.clone()) {
@@ -642,8 +640,6 @@ fn emit_private_hint_lines(lines: &mut Vec<Vec<u8>>, ctx: &Context, pe: EntityId
         }
     }
 }
-
-
 
 /// Format a float value concisely.
 fn format_float(v: f64) -> String {
@@ -781,7 +777,10 @@ fn build_type1_font(writer: &mut PdfWriter, usage: &FontUsage, ctx: &Context) ->
     // each have a subset of CharStrings — we need to search all of them.
     let mut charstrings_entities: Vec<EntityId> = Vec::new();
     for &ent in &usage.all_entities {
-        if let Some(obj) = ctx.dicts.get(ent, &DictKey::Name(ctx.name_cache.n_char_strings)) {
+        if let Some(obj) = ctx
+            .dicts
+            .get(ent, &DictKey::Name(ctx.name_cache.n_char_strings))
+        {
             if let PsValue::Dict(e) = obj.value {
                 if !charstrings_entities.contains(&e) {
                     charstrings_entities.push(e);
@@ -903,8 +902,7 @@ fn build_type1_font(writer: &mut PdfWriter, usage: &FontUsage, ctx: &Context) ->
                 })
         })
         .collect();
-    let tounicode_map =
-        build_tounicode_map_multi(ctx, &all_enc_entities, &usage.used_codes);
+    let tounicode_map = build_tounicode_map_multi(ctx, &all_enc_entities, &usage.used_codes);
     let tounicode_ref = if !tounicode_map.is_empty() {
         let cmap_data = generate_tounicode_cmap(&tounicode_map, &font_name_str);
         Some(writer.add_stream(Vec::new(), &cmap_data, true))
@@ -1316,8 +1314,7 @@ pub fn build_tounicode_for_fallback(
                 })
         })
         .collect();
-    let tounicode_map =
-        build_tounicode_map_multi(ctx, &all_enc_entities, &usage.used_codes);
+    let tounicode_map = build_tounicode_map_multi(ctx, &all_enc_entities, &usage.used_codes);
     if tounicode_map.is_empty() {
         return None;
     }

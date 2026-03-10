@@ -102,7 +102,14 @@ impl PdfDevice {
         // Second pass: build page objects referencing shared font objects
         let mut page_refs = Vec::new();
         for (result, page) in &page_results {
-            let page_ref = self.build_page(&mut writer, page, pages_ref, result, &font_obj_map, &mut font_tracker)?;
+            let page_ref = self.build_page(
+                &mut writer,
+                page,
+                pages_ref,
+                result,
+                &font_obj_map,
+                &mut font_tracker,
+            )?;
             page_refs.push(page_ref);
         }
 
@@ -157,9 +164,7 @@ impl PdfDevice {
 
         // Info dictionary
         let info_ref = writer.alloc_obj();
-        let mut info_entries = vec![
-            (b"Producer".to_vec(), PdfObj::LitString(b"stet".to_vec())),
-        ];
+        let mut info_entries = vec![(b"Producer".to_vec(), PdfObj::LitString(b"stet".to_vec()))];
         // Title from output filename
         if let Some(title) = std::path::Path::new(path)
             .file_stem()
@@ -395,8 +400,7 @@ impl PdfDevice {
                     let mut tile_xobj: Vec<(Vec<u8>, PdfObj)> = Vec::new();
                     for (j, img) in tile_result.images.iter().enumerate() {
                         let img_ref = self.build_image_xobject(writer, img);
-                        tile_xobj
-                            .push((format!("Im{}", j).into_bytes(), PdfObj::Ref(img_ref)));
+                        tile_xobj.push((format!("Im{}", j).into_bytes(), PdfObj::Ref(img_ref)));
                     }
                     tile_resources.push((b"XObject".to_vec(), PdfObj::Dict(tile_xobj)));
                 }
@@ -411,8 +415,7 @@ impl PdfDevice {
                             ShadingRef::Mesh(p) => shading_ops::build_mesh_shading(writer, p),
                             ShadingRef::Patch(p) => shading_ops::build_patch_shading(writer, p),
                         };
-                        tile_sh
-                            .push((format!("Sh{}", j).into_bytes(), PdfObj::Ref(sh_obj)));
+                        tile_sh.push((format!("Sh{}", j).into_bytes(), PdfObj::Ref(sh_obj)));
                     }
                     tile_resources.push((b"Shading".to_vec(), PdfObj::Dict(tile_sh)));
                 }
@@ -422,8 +425,7 @@ impl PdfDevice {
                     let mut tile_fonts: Vec<(Vec<u8>, PdfObj)> = Vec::new();
                     for name in &tile_result.used_font_names {
                         if let Some(&obj_ref) = font_obj_map.get(name) {
-                            tile_fonts
-                                .push((name.clone().into_bytes(), PdfObj::Ref(obj_ref)));
+                            tile_fonts.push((name.clone().into_bytes(), PdfObj::Ref(obj_ref)));
                         }
                     }
                     if !tile_fonts.is_empty() {
@@ -448,15 +450,27 @@ impl PdfDevice {
                                 (k.clone(), obj)
                             })
                             .collect();
-                        if let Some(tr) = tile_result.transfer_refs.iter().find(|r| r.ext_gstate_idx == j) {
+                        if let Some(tr) = tile_result
+                            .transfer_refs
+                            .iter()
+                            .find(|r| r.ext_gstate_idx == j)
+                        {
                             let tr2_value = build_transfer_tr2(writer, &tr.tables, tr.is_color);
                             entries.push((b"TR2".to_vec(), tr2_value));
                         }
-                        if let Some(hr) = tile_result.halftone_refs.iter().find(|r| r.ext_gstate_idx == j) {
+                        if let Some(hr) = tile_result
+                            .halftone_refs
+                            .iter()
+                            .find(|r| r.ext_gstate_idx == j)
+                        {
                             let ht_value = build_halftone_ht(writer, &hr.state);
                             entries.push((b"HT".to_vec(), ht_value));
                         }
-                        if let Some(br) = tile_result.bg_ucr_refs.iter().find(|r| r.ext_gstate_idx == j) {
+                        if let Some(br) = tile_result
+                            .bg_ucr_refs
+                            .iter()
+                            .find(|r| r.ext_gstate_idx == j)
+                        {
                             if let Some(ref bg) = br.state.bg {
                                 let func_ref = build_type0_function(writer, bg);
                                 entries.push((b"BG2".to_vec(), PdfObj::Ref(func_ref)));
@@ -467,8 +481,7 @@ impl PdfDevice {
                             }
                         }
                         let gs_ref = writer.add_object(&PdfObj::Dict(entries));
-                        tile_gs
-                            .push((format!("GS{}", j).into_bytes(), PdfObj::Ref(gs_ref)));
+                        tile_gs.push((format!("GS{}", j).into_bytes(), PdfObj::Ref(gs_ref)));
                     }
                     tile_resources.push((b"ExtGState".to_vec(), PdfObj::Dict(tile_gs)));
                 }
@@ -520,10 +533,8 @@ impl PdfDevice {
                     (b"Resources".to_vec(), PdfObj::Dict(tile_resources)),
                 ];
 
-                let pat_obj =
-                    writer.add_stream(pat_dict, &tile_result.content, true);
-                pattern_entries
-                    .push((format!("P{}", i).into_bytes(), PdfObj::Ref(pat_obj)));
+                let pat_obj = writer.add_stream(pat_dict, &tile_result.content, true);
+                pattern_entries.push((format!("P{}", i).into_bytes(), PdfObj::Ref(pat_obj)));
             }
 
             resources.push((b"Pattern".to_vec(), PdfObj::Dict(pattern_entries)));
@@ -695,9 +706,7 @@ impl PdfDevice {
             let mask_ints: Vec<PdfObj> = if ckm.len() == ncomp {
                 // Exact match: expand each value v to [v, v] range pair
                 ckm.iter()
-                    .flat_map(|&v| {
-                        [PdfObj::Int(v as i64), PdfObj::Int(v as i64)]
-                    })
+                    .flat_map(|&v| [PdfObj::Int(v as i64), PdfObj::Int(v as i64)])
                     .collect()
             } else {
                 // Range match: already in [min0, max0, min1, max1, ...] form
@@ -743,7 +752,7 @@ fn build_pdf_colorspace(
                 PdfObj::Ref(lookup_ref),
             ])
         }
-            PdfColorSpace::Separation {
+        PdfColorSpace::Separation {
             name,
             alt,
             tint_table,
@@ -764,8 +773,7 @@ fn build_pdf_colorspace(
         } => {
             let alt_obj = build_pdf_colorspace(alt, None, writer);
             let func_ref = build_tint_function(tint_table, writer);
-            let names_arr =
-                PdfObj::Array(names.iter().map(|n| PdfObj::Name(n.clone())).collect());
+            let names_arr = PdfObj::Array(names.iter().map(|n| PdfObj::Name(n.clone())).collect());
             PdfObj::Array(vec![
                 PdfObj::name("DeviceN"),
                 names_arr,
@@ -778,10 +786,7 @@ fn build_pdf_colorspace(
 
 /// Build a PDF Type 0 (sampled) function stream from a TintLookupTable.
 /// Returns the object number of the function stream.
-fn build_tint_function(
-    table: &stet_core::device::TintLookupTable,
-    writer: &mut PdfWriter,
-) -> u32 {
+fn build_tint_function(table: &stet_core::device::TintLookupTable, writer: &mut PdfWriter) -> u32 {
     let ni = table.num_inputs as usize;
     let no = table.num_outputs as usize;
 
@@ -888,8 +893,7 @@ fn build_spot_colorspace(
                 SimpleColorSpace::DeviceCMYK => PdfObj::name("DeviceCMYK"),
             };
             let func_ref = build_tint_function(tint_table, writer);
-            let names_arr =
-                PdfObj::Array(names.iter().map(|n| PdfObj::Name(n.clone())).collect());
+            let names_arr = PdfObj::Array(names.iter().map(|n| PdfObj::Name(n.clone())).collect());
             PdfObj::Array(vec![
                 PdfObj::name("DeviceN"),
                 names_arr,
@@ -1062,8 +1066,7 @@ fn extract_icc_description(data: &[u8]) -> Option<String> {
         if type_sig == b"desc" {
             // ICC v2 'desc' type: u32 count at offset+8, ASCII string at offset+12
             let count =
-                u32::from_be_bytes(data[tag_offset + 8..tag_offset + 12].try_into().ok()?)
-                    as usize;
+                u32::from_be_bytes(data[tag_offset + 8..tag_offset + 12].try_into().ok()?) as usize;
             if count == 0 {
                 return None;
             }
@@ -1078,8 +1081,7 @@ fn extract_icc_description(data: &[u8]) -> Option<String> {
                 return None;
             }
             let record_count =
-                u32::from_be_bytes(data[tag_offset + 8..tag_offset + 12].try_into().ok()?)
-                    as usize;
+                u32::from_be_bytes(data[tag_offset + 8..tag_offset + 12].try_into().ok()?) as usize;
             if record_count == 0 {
                 return None;
             }
@@ -1088,12 +1090,10 @@ fn extract_icc_description(data: &[u8]) -> Option<String> {
             if rec_base + 12 > data.len() {
                 return None;
             }
-            let str_len = u32::from_be_bytes(
-                data[rec_base + 4..rec_base + 8].try_into().ok()?,
-            ) as usize;
-            let str_off = u32::from_be_bytes(
-                data[rec_base + 8..rec_base + 12].try_into().ok()?,
-            ) as usize;
+            let str_len =
+                u32::from_be_bytes(data[rec_base + 4..rec_base + 8].try_into().ok()?) as usize;
+            let str_off =
+                u32::from_be_bytes(data[rec_base + 8..rec_base + 12].try_into().ok()?) as usize;
             let abs_off = tag_offset + str_off;
             if abs_off + str_len > data.len() || str_len < 2 {
                 return None;
@@ -1103,7 +1103,11 @@ fn extract_icc_description(data: &[u8]) -> Option<String> {
                 .chunks_exact(2)
                 .map(|c| u16::from_be_bytes([c[0], c[1]]))
                 .collect();
-            return Some(String::from_utf16_lossy(&utf16).trim_end_matches('\0').to_string());
+            return Some(
+                String::from_utf16_lossy(&utf16)
+                    .trim_end_matches('\0')
+                    .to_string(),
+            );
         }
 
         break;
@@ -1278,10 +1282,7 @@ fn build_halftone_screen(
 }
 
 /// Build the /HT value for an ExtGState dict from a HalftoneState.
-fn build_halftone_ht(
-    writer: &mut PdfWriter,
-    state: &stet_core::device::HalftoneState,
-) -> PdfObj {
+fn build_halftone_ht(writer: &mut PdfWriter, state: &stet_core::device::HalftoneState) -> PdfObj {
     if let Some(ref color) = state.color {
         // Type 5 composite halftone
         let mut entries = vec![

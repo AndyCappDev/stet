@@ -5,9 +5,41 @@
 //! PDF graphics state for content stream interpretation.
 
 use stet_core::device::{BgUcrState, FillParams, HalftoneState, StrokeParams, TransferState};
+use stet_core::display_list::DisplayList;
 use stet_core::graphics_state::{
     DashPattern, DeviceColor, FillRule, LineCap, LineJoin, Matrix, PsPath,
 };
+
+/// A resolved tiling pattern ready to be applied at fill/stroke time.
+#[derive(Clone)]
+pub struct TilingPattern {
+    /// Pre-rendered display list for a single tile.
+    pub tile: DisplayList,
+    /// Bounding box of one tile in pattern space.
+    pub bbox: [f64; 4],
+    /// Horizontal step between tile origins.
+    pub x_step: f64,
+    /// Vertical step between tile origins.
+    pub y_step: f64,
+    /// Combined pattern matrix (CTM x pattern_matrix at scn time).
+    pub pattern_matrix: Matrix,
+    /// Paint type: 1 = colored, 2 = uncolored.
+    pub paint_type: i32,
+    /// Unique pattern ID for dedup.
+    pub pattern_id: u32,
+}
+
+impl std::fmt::Debug for TilingPattern {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TilingPattern")
+            .field("bbox", &self.bbox)
+            .field("x_step", &self.x_step)
+            .field("y_step", &self.y_step)
+            .field("paint_type", &self.paint_type)
+            .field("pattern_id", &self.pattern_id)
+            .finish()
+    }
+}
 
 /// Reference to a color space (resolved lazily from resources).
 #[derive(Clone, Debug)]
@@ -57,6 +89,8 @@ pub struct PdfGraphicsState {
     pub clip_path_version: u32,
     pub fill_alpha: f64,
     pub stroke_alpha: f64,
+    /// Blend mode (0=Normal, 1=Multiply, ..., 11=Exclusion).
+    pub blend_mode: u8,
     // Text state
     pub text_matrix: Matrix,
     pub text_line_matrix: Matrix,
@@ -67,6 +101,12 @@ pub struct PdfGraphicsState {
     pub text_rise: f64,
     pub text_rendering_mode: i32,
     pub text_font_name: Vec<u8>,
+    /// Active tiling pattern for fill (set by scn with Pattern color space).
+    pub fill_pattern: Option<TilingPattern>,
+    /// Active tiling pattern for stroke (set by SCN with Pattern color space).
+    pub stroke_pattern: Option<TilingPattern>,
+    /// Counter for unique pattern IDs.
+    pub next_pattern_id: u32,
 }
 
 impl PdfGraphicsState {
@@ -93,6 +133,7 @@ impl PdfGraphicsState {
             clip_path_version: 0,
             fill_alpha: 1.0,
             stroke_alpha: 1.0,
+            blend_mode: 0,
             text_matrix: Matrix::identity(),
             text_line_matrix: Matrix::identity(),
             font_size: 0.0,
@@ -102,6 +143,9 @@ impl PdfGraphicsState {
             text_rise: 0.0,
             text_rendering_mode: 0,
             text_font_name: Vec::new(),
+            fill_pattern: None,
+            stroke_pattern: None,
+            next_pattern_id: 0,
         }
     }
 
@@ -118,6 +162,8 @@ impl PdfGraphicsState {
             transfer: TransferState::default(),
             halftone: HalftoneState::default(),
             bg_ucr: BgUcrState::default(),
+            alpha: self.fill_alpha,
+            blend_mode: self.blend_mode,
         }
     }
 
@@ -144,10 +190,12 @@ impl PdfGraphicsState {
             transfer: TransferState::default(),
             halftone: HalftoneState::default(),
             bg_ucr: BgUcrState::default(),
+            alpha: self.stroke_alpha,
+            blend_mode: self.blend_mode,
         }
     }
 
-    /// CTM scale factor: sqrt(a² + b²).
+    /// CTM scale factor: sqrt(a^2 + b^2).
     pub fn ctm_scale_factor(&self) -> f64 {
         (self.ctm.a * self.ctm.a + self.ctm.b * self.ctm.b).sqrt()
     }

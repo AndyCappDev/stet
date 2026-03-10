@@ -177,12 +177,18 @@ fn to_transform(m: &Matrix) -> Transform {
 
 /// Convert a `DeviceColor` to tiny-skia `Paint`.
 fn to_paint(color: &DeviceColor) -> Paint<'static> {
+    to_paint_alpha(color, 1.0)
+}
+
+/// Convert a `DeviceColor` to tiny-skia `Paint` with the given opacity (0.0–1.0).
+fn to_paint_alpha(color: &DeviceColor, alpha: f64) -> Paint<'static> {
     let mut paint = Paint::default();
+    let a = (alpha * 255.0).round().clamp(0.0, 255.0) as u8;
     paint.set_color_rgba8(
         (color.r * 255.0).round().clamp(0.0, 255.0) as u8,
         (color.g * 255.0).round().clamp(0.0, 255.0) as u8,
         (color.b * 255.0).round().clamp(0.0, 255.0) as u8,
-        255,
+        a,
     );
     paint.anti_alias = true;
     paint
@@ -1013,9 +1019,7 @@ fn samples_to_rgba(data: &[u8], params: &ImageParams, icc: Option<&IccCache>) ->
                     let avail_pixels = data.len() / 4;
                     let icc_pixels = avail_pixels.min(npixels);
                     if icc_pixels > 0 {
-                        if let Some(rgb) =
-                            cache.convert_image_8bit(cmyk_hash, data, icc_pixels)
-                        {
+                        if let Some(rgb) = cache.convert_image_8bit(cmyk_hash, data, icc_pixels) {
                             let mut rgba = vec![255u8; npixels * 4];
                             for i in 0..icc_pixels {
                                 rgba[i * 4] = rgb[i * 3];
@@ -1648,7 +1652,7 @@ fn render_element_to_band(
             else {
                 return;
             };
-            let paint = to_paint(&params.color);
+            let paint = to_paint_alpha(&params.color, params.alpha);
             let transform = offset_transform(to_transform(&params.ctm), y_off);
             let fill_rule = to_fill_rule(&params.fill_rule);
             pixmap.fill_path(&skia_path, &paint, fill_rule, transform, mask_ref);
@@ -1672,7 +1676,7 @@ fn render_element_to_band(
             else {
                 return;
             };
-            let paint = to_paint(&params.color);
+            let paint = to_paint_alpha(&params.color, params.alpha);
             let transform = offset_transform(to_transform(&params.ctm), y_off);
             pixmap.stroke_path(&skia_path, &paint, &stroke, transform, mask_ref);
         }
@@ -2103,7 +2107,7 @@ impl OutputDevice for SkiaDevice {
             return; // empty clip
         };
 
-        let paint = to_paint(&params.color);
+        let paint = to_paint_alpha(&params.color, params.alpha);
         let transform = to_transform(&params.ctm);
         let fill_rule = to_fill_rule(&params.fill_rule);
 
@@ -2124,7 +2128,7 @@ impl OutputDevice for SkiaDevice {
         let Some(skia_path) = build_skia_path(draw_path) else {
             return;
         };
-        let paint = to_paint(&params.color);
+        let paint = to_paint_alpha(&params.color, params.alpha);
         let transform = to_transform(&params.ctm);
 
         let (w, h) = (self.pixmap.width(), self.pixmap.height());
@@ -3092,7 +3096,7 @@ fn render_element_to_viewport(
             else {
                 return;
             };
-            let paint = to_paint(&params.color);
+            let paint = to_paint_alpha(&params.color, params.alpha);
             let transform =
                 viewport_transform(to_transform(&params.ctm), vp_x, vp_y, scale_x, scale_y);
             let fill_rule = to_fill_rule(&params.fill_rule);
@@ -3146,7 +3150,7 @@ fn render_element_to_viewport(
             else {
                 return;
             };
-            let paint = to_paint(&params.color);
+            let paint = to_paint_alpha(&params.color, params.alpha);
             pixmap.stroke_path(&skia_path, &paint, &stroke, transform, mask_ref);
         }
         DisplayElement::Clip { path, params } => {
@@ -4488,6 +4492,8 @@ mod tests {
             transfer: TransferState::default(),
             halftone: HalftoneState::default(),
             bg_ucr: BgUcrState::default(),
+            alpha: 1.0,
+            blend_mode: 0,
         };
         dev.fill_path(&path, &params);
 
@@ -4521,6 +4527,8 @@ mod tests {
             transfer: TransferState::default(),
             halftone: HalftoneState::default(),
             bg_ucr: BgUcrState::default(),
+            alpha: 1.0,
+            blend_mode: 0,
         };
         dev.stroke_path(&path, &params);
 
@@ -4566,6 +4574,8 @@ mod tests {
             transfer: TransferState::default(),
             halftone: HalftoneState::default(),
             bg_ucr: BgUcrState::default(),
+            alpha: 1.0,
+            blend_mode: 0,
         };
         dev.fill_path(&fill_path, &fill_params);
 
@@ -4600,6 +4610,8 @@ mod tests {
             transfer: TransferState::default(),
             halftone: HalftoneState::default(),
             bg_ucr: BgUcrState::default(),
+            alpha: 1.0,
+            blend_mode: 0,
         };
         dev.fill_path(&path, &params);
 
@@ -4643,6 +4655,8 @@ mod tests {
             transfer: TransferState::default(),
             halftone: HalftoneState::default(),
             bg_ucr: BgUcrState::default(),
+            alpha: 1.0,
+            blend_mode: 0,
         };
         dev.fill_path(&path, &params);
 

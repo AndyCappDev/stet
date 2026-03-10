@@ -217,7 +217,9 @@ fn run_pdf_mode(
 ) {
     // Read profile bytes for PDF embedding (create_context already validated the path)
     let output_profile_bytes: Option<Vec<u8>> = if !no_icc {
-        output_profile_path.as_ref().and_then(|p| std::fs::read(p).ok())
+        output_profile_path
+            .as_ref()
+            .and_then(|p| std::fs::read(p).ok())
     } else {
         None
     };
@@ -1075,10 +1077,7 @@ fn run_pdf_input_png(
 
         let start = std::time::Instant::now();
         let page_count = doc.page_count();
-        eprintln!(
-            "\n{}",
-            "=".repeat(60)
-        );
+        eprintln!("\n{}", "=".repeat(60));
         eprintln!("Processing PDF: {} ({} pages)", filename, page_count);
         eprintln!("{}", "=".repeat(60));
 
@@ -1182,12 +1181,7 @@ fn run_pdf_input_viewer(
         for (job_idx, filename) in file_args_owned.iter().enumerate() {
             if job_idx > 0 {
                 // Signal new job
-                let _ = dl_sender.send((
-                    stet_core::display_list::DisplayList::new(),
-                    0.0,
-                    0,
-                    0,
-                ));
+                let _ = dl_sender.send((stet_core::display_list::DisplayList::new(), 0.0, 0, 0));
             }
 
             let data = match std::fs::read(filename) {
@@ -1233,12 +1227,7 @@ fn run_pdf_input_viewer(
 
             // Signal job done and wait for advance between jobs
             if job_idx + 1 < file_args_owned.len() {
-                let _ = dl_sender.send((
-                    stet_core::display_list::DisplayList::new(),
-                    -1.0,
-                    0,
-                    0,
-                ));
+                let _ = dl_sender.send((stet_core::display_list::DisplayList::new(), -1.0, 0, 0));
                 let _ = advance_rx.recv();
             }
         }

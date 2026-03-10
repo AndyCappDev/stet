@@ -11,9 +11,7 @@ use stet_core::device::{
 };
 use stet_core::display_list::DisplayElement;
 use stet_core::error::PsError;
-use stet_core::graphics_state::{
-    ColorSpace, DashPattern, FillRule, Matrix, PathSegment, PsPath,
-};
+use stet_core::graphics_state::{ColorSpace, DashPattern, FillRule, Matrix, PathSegment, PsPath};
 use stet_core::object::{PsObject, PsValue};
 
 /// Capture the current SpotColor from graphics state if in Separation/DeviceN mode.
@@ -208,6 +206,8 @@ fn push_fill_element(ctx: &mut Context, path: PsPath, fill_rule: FillRule) {
         transfer: capture_transfer_state(ctx),
         halftone: capture_halftone_state(ctx),
         bg_ucr: capture_bg_ucr_state(ctx),
+        alpha: 1.0,
+        blend_mode: 0,
     };
     ctx.display_list.push(DisplayElement::Fill { path, params });
 }
@@ -289,6 +289,8 @@ fn stroke_native(ctx: &mut Context) -> Result<(), PsError> {
                 transfer,
                 halftone: halftone.clone(),
                 bg_ucr: bg_ucr.clone(),
+                alpha: 1.0,
+                blend_mode: 0,
             };
             ctx.display_list.push(DisplayElement::Stroke {
                 path: user_path,
@@ -322,6 +324,8 @@ fn stroke_native(ctx: &mut Context) -> Result<(), PsError> {
             transfer,
             halftone,
             bg_ucr,
+            alpha: 1.0,
+            blend_mode: 0,
         };
         ctx.display_list.push(DisplayElement::Stroke {
             path: ctx.gstate.path.clone(),
@@ -466,6 +470,8 @@ pub fn op_rectstroke(ctx: &mut Context) -> Result<(), PsError> {
             transfer,
             halftone: halftone.clone(),
             bg_ucr: bg_ucr.clone(),
+            alpha: 1.0,
+            blend_mode: 0,
         };
         ctx.display_list
             .push(DisplayElement::Stroke { path, params });
@@ -497,6 +503,8 @@ pub fn op_rectstroke(ctx: &mut Context) -> Result<(), PsError> {
             transfer,
             halftone,
             bg_ucr,
+            alpha: 1.0,
+            blend_mode: 0,
         };
         ctx.display_list
             .push(DisplayElement::Stroke { path, params });

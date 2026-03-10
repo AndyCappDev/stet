@@ -92,7 +92,17 @@ pub fn resolve_font(resolver: &Resolver, font_ref: &PdfObj) -> Result<PdfFont, P
             return resolve_type1(resolver, &descriptor, encoding, widths);
         }
     }
-    // No embedded font program — fall through based on subtype
+    // No embedded font program — try font substitution
+    let base_font = font_dict
+        .get_name(b"BaseFont")
+        .map(|n| String::from_utf8_lossy(n).to_string())
+        .unwrap_or_default();
+
+    if let Some(font) = substitute_font(&base_font, encoding.clone(), widths) {
+        return Ok(font);
+    }
+
+    // Final fallback based on subtype (will likely fail)
     match subtype {
         b"TrueType" => resolve_truetype(resolver, &descriptor, encoding, widths),
         _ => resolve_type1(resolver, &descriptor, encoding, widths),
@@ -183,6 +193,45 @@ fn encoding_table_by_name(name: &[u8]) -> &'static [&'static str; 256] {
         b"StandardEncoding" => &STANDARD_ENCODING,
         _ => &STANDARD_ENCODING,
     }
+}
+
+/// Try to load a substitute font for a non-embedded font.
+fn substitute_font(
+    base_font: &str,
+    encoding: [Option<String>; 256],
+    widths: [f64; 256],
+) -> Option<PdfFont> {
+    use stet_core::font_loader::FONT_SUBSTITUTIONS;
+
+    // Strip subset prefix (e.g. "ABCDEF+Times-Roman" → "Times-Roman")
+    let clean_name = if base_font.len() > 7 && base_font.as_bytes().get(6) == Some(&b'+') {
+        &base_font[7..]
+    } else {
+        base_font
+    };
+
+    // Look up substitution
+    let urw_name = FONT_SUBSTITUTIONS
+        .iter()
+        .find(|&&(ps, _)| ps == clean_name)
+        .map(|&(_, urw)| urw);
+
+    let font_file_name = urw_name.unwrap_or(clean_name);
+
+    // Try to load from resources/Font/
+    let font_path = format!("resources/Font/{}.t1", font_file_name);
+    let font_data = std::fs::read(&font_path).ok()?;
+
+    let font = parse_type1(&font_data).ok()?;
+    let fm = font.font_matrix;
+    let font_matrix = Matrix::new(fm[0], fm[1], fm[2], fm[3], fm[4], fm[5]);
+
+    Some(PdfFont::Type1(Type1PdfFont {
+        font,
+        encoding,
+        widths,
+        font_matrix,
+    }))
 }
 
 /// Resolve a Type 1 font from its FontDescriptor.

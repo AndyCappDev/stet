@@ -4,13 +4,16 @@
 
 //! Color space resolution from PDF page resources.
 
+use std::sync::Arc;
+
 use crate::error::PdfError;
 use crate::objects::{PdfDict, PdfObj};
 use crate::resolver::Resolver;
+use crate::resources::function::PdfFunction;
 
 use super::graphics_state::ColorSpaceRef;
-use stet_core::device::ImageColorSpace;
-use stet_core::graphics_state::DeviceColor;
+use stet_core::device::{ImageColorSpace, TintLookupTable};
+use stet_core::graphics_state::{CieAParams, CieAbcParams, DeviceColor};
 
 /// Resolved color space with enough info to convert color values.
 #[derive(Clone, Debug)]
@@ -29,6 +32,22 @@ pub enum ResolvedColorSpace {
     Separation {
         name: Vec<u8>,
         alt: Box<ResolvedColorSpace>,
+        tint_fn: Option<PdfFunction>,
+    },
+    DeviceN {
+        names: Vec<Vec<u8>>,
+        alt: Box<ResolvedColorSpace>,
+        tint_fn: Option<PdfFunction>,
+    },
+    CalGray {
+        params: CieAParams,
+    },
+    CalRGB {
+        params: CieAbcParams,
+    },
+    Lab {
+        white_point: [f64; 3],
+        range: [f64; 4], // [a_min, a_max, b_min, b_max]
     },
     Pattern,
 }
@@ -43,6 +62,10 @@ impl ResolvedColorSpace {
             Self::ICCBased { n } => *n as usize,
             Self::Indexed { .. } => 1,
             Self::Separation { .. } => 1,
+            Self::DeviceN { names, .. } => names.len(),
+            Self::CalGray { .. } => 1,
+            Self::CalRGB { .. } => 3,
+            Self::Lab { .. } => 3,
             Self::Pattern => 0,
         }
     }
@@ -117,9 +140,10 @@ pub fn resolve_color_space_obj(
                 b"ICCBased" => resolve_icc_based(&arr[1..], resolver),
                 b"Indexed" | b"I" => resolve_indexed(&arr[1..], resolver),
                 b"Separation" => resolve_separation(&arr[1..], resolver),
-                b"CalGray" => Ok(ResolvedColorSpace::DeviceGray),
-                b"CalRGB" => Ok(ResolvedColorSpace::DeviceRGB),
-                b"Lab" => Ok(ResolvedColorSpace::DeviceRGB),
+                b"DeviceN" => resolve_devicen(&arr[1..], resolver),
+                b"CalGray" => resolve_cal_gray(&arr[1..], resolver),
+                b"CalRGB" => resolve_cal_rgb(&arr[1..], resolver),
+                b"Lab" => resolve_lab(&arr[1..], resolver),
                 b"Pattern" => Ok(ResolvedColorSpace::Pattern),
                 _ => Err(PdfError::Other(format!(
                     "unsupported color space: /{}",
@@ -186,9 +210,167 @@ fn resolve_separation(
         .ok_or(PdfError::Other("Separation name not a name".into()))?
         .to_vec();
     let alt = resolve_color_space_obj(&args[1], resolver)?;
+    let tint_fn = if args.len() >= 3 {
+        PdfFunction::parse(&args[2], resolver).ok()
+    } else {
+        None
+    };
     Ok(ResolvedColorSpace::Separation {
         name,
         alt: Box::new(alt),
+        tint_fn,
+    })
+}
+
+fn resolve_devicen(
+    args: &[PdfObj],
+    resolver: &Resolver,
+) -> Result<ResolvedColorSpace, PdfError> {
+    // DeviceN array: [names alternateSpace tintTransform]
+    if args.len() < 2 {
+        return Err(PdfError::Other("DeviceN needs at least 2 args".into()));
+    }
+    let names_obj = resolver.deref(&args[0])?;
+    let names = match &names_obj {
+        PdfObj::Array(arr) => arr
+            .iter()
+            .filter_map(|o| o.as_name().map(|n| n.to_vec()))
+            .collect(),
+        _ => return Err(PdfError::Other("DeviceN names not an array".into())),
+    };
+    let alt = resolve_color_space_obj(&args[1], resolver)?;
+    let tint_fn = if args.len() >= 3 {
+        PdfFunction::parse(&args[2], resolver).ok()
+    } else {
+        None
+    };
+    Ok(ResolvedColorSpace::DeviceN {
+        names,
+        alt: Box::new(alt),
+        tint_fn,
+    })
+}
+
+fn resolve_cal_gray(
+    args: &[PdfObj],
+    resolver: &Resolver,
+) -> Result<ResolvedColorSpace, PdfError> {
+    let dict = if !args.is_empty() {
+        let obj = resolver.deref(&args[0])?;
+        obj.as_dict().cloned()
+    } else {
+        None
+    };
+    let dict = dict.as_ref();
+
+    let white_point = parse_triple(dict, b"WhitePoint").unwrap_or([0.9505, 1.0, 1.089]);
+    let gamma = dict
+        .and_then(|d| d.get_f64(b"Gamma"))
+        .unwrap_or(1.0);
+
+    // CalGray maps to CIEBasedA:
+    // DecodeA = x^gamma, MatrixA = WhitePoint (so gray=1 → white point XYZ)
+    let decode_a = if (gamma - 1.0).abs() > 1e-6 {
+        Some((0..256).map(|i| (i as f64 / 255.0).powf(gamma)).collect())
+    } else {
+        None
+    };
+
+    let params = CieAParams {
+        white_point,
+        matrix_a: white_point, // full intensity = white point
+        decode_a,
+        ..Default::default()
+    };
+
+    Ok(ResolvedColorSpace::CalGray { params })
+}
+
+fn resolve_cal_rgb(
+    args: &[PdfObj],
+    resolver: &Resolver,
+) -> Result<ResolvedColorSpace, PdfError> {
+    let dict = if !args.is_empty() {
+        let obj = resolver.deref(&args[0])?;
+        obj.as_dict().cloned()
+    } else {
+        None
+    };
+    let dict = dict.as_ref();
+
+    let white_point = parse_triple(dict, b"WhitePoint").unwrap_or([0.9505, 1.0, 1.089]);
+    let gamma = parse_triple(dict, b"Gamma").unwrap_or([1.0, 1.0, 1.0]);
+
+    // Matrix is a 9-element array [Xa Ya Za Xb Yb Zb Xc Yc Zc]
+    // PDF spec: column i is [Xi Yi Zi] — same as CIEBasedABC column-major convention
+    let matrix = dict
+        .and_then(|d| d.get_array(b"Matrix"))
+        .map(|arr| {
+            let v: Vec<f64> = arr.iter().filter_map(|o| o.as_f64()).collect();
+            if v.len() >= 9 {
+                [v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8]]
+            } else {
+                [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+            }
+        })
+        .unwrap_or([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]);
+
+    let decode_abc = if gamma.iter().any(|&g| (g - 1.0).abs() > 1e-6) {
+        Some([
+            (0..256).map(|i| (i as f64 / 255.0).powf(gamma[0])).collect(),
+            (0..256).map(|i| (i as f64 / 255.0).powf(gamma[1])).collect(),
+            (0..256).map(|i| (i as f64 / 255.0).powf(gamma[2])).collect(),
+        ])
+    } else {
+        None
+    };
+
+    let params = CieAbcParams {
+        white_point,
+        matrix_abc: matrix,
+        decode_abc,
+        ..Default::default()
+    };
+
+    Ok(ResolvedColorSpace::CalRGB { params })
+}
+
+fn resolve_lab(
+    args: &[PdfObj],
+    resolver: &Resolver,
+) -> Result<ResolvedColorSpace, PdfError> {
+    let dict = if !args.is_empty() {
+        let obj = resolver.deref(&args[0])?;
+        obj.as_dict().cloned()
+    } else {
+        None
+    };
+    let dict = dict.as_ref();
+
+    let white_point = parse_triple(dict, b"WhitePoint").unwrap_or([0.9505, 1.0, 1.089]);
+    let range = dict
+        .and_then(|d| d.get_array(b"Range"))
+        .map(|arr| {
+            let v: Vec<f64> = arr.iter().filter_map(|o| o.as_f64()).collect();
+            if v.len() >= 4 {
+                [v[0], v[1], v[2], v[3]]
+            } else {
+                [-100.0, 100.0, -100.0, 100.0]
+            }
+        })
+        .unwrap_or([-100.0, 100.0, -100.0, 100.0]);
+
+    Ok(ResolvedColorSpace::Lab { white_point, range })
+}
+
+fn parse_triple(dict: Option<&PdfDict>, key: &[u8]) -> Option<[f64; 3]> {
+    dict?.get_array(key).and_then(|arr| {
+        let v: Vec<f64> = arr.iter().filter_map(|o| o.as_f64()).collect();
+        if v.len() >= 3 {
+            Some([v[0], v[1], v[2]])
+        } else {
+            None
+        }
     })
 }
 
@@ -251,15 +433,44 @@ pub fn components_to_device_color(cs: &ResolvedColorSpace, components: &[f64]) -
             }
             components_to_device_color(base, &base_components)
         }
-        ResolvedColorSpace::Separation { alt, .. } => {
-            // Without the tint transform function, map tint to alternate space
-            // Tint 0.0 = no ink, 1.0 = full ink. Simple fallback: use gray.
+        ResolvedColorSpace::Separation { alt, tint_fn, .. } => {
             let tint = components.first().copied().unwrap_or(0.0);
-            match alt.as_ref() {
-                ResolvedColorSpace::DeviceGray => DeviceColor::from_gray(1.0 - tint),
-                ResolvedColorSpace::DeviceCMYK => DeviceColor::from_cmyk(0.0, 0.0, 0.0, tint),
-                _ => DeviceColor::from_gray(1.0 - tint),
+            if let Some(func) = tint_fn {
+                let alt_components = func.evaluate(&[tint]);
+                components_to_device_color(alt, &alt_components)
+            } else {
+                // Fallback without tint function
+                match alt.as_ref() {
+                    ResolvedColorSpace::DeviceGray => DeviceColor::from_gray(1.0 - tint),
+                    ResolvedColorSpace::DeviceCMYK => {
+                        DeviceColor::from_cmyk(0.0, 0.0, 0.0, tint)
+                    }
+                    _ => DeviceColor::from_gray(1.0 - tint),
+                }
             }
+        }
+        ResolvedColorSpace::DeviceN { alt, tint_fn, .. } => {
+            if let Some(func) = tint_fn {
+                let alt_components = func.evaluate(components);
+                components_to_device_color(alt, &alt_components)
+            } else {
+                // Fallback: use first component as gray
+                let v = components.first().copied().unwrap_or(0.0);
+                DeviceColor::from_gray(1.0 - v)
+            }
+        }
+        ResolvedColorSpace::CalGray { params } => {
+            let a = components.first().copied().unwrap_or(0.0);
+            DeviceColor::from_cie_a(a, params)
+        }
+        ResolvedColorSpace::CalRGB { params } => {
+            let a = components.first().copied().unwrap_or(0.0);
+            let b = components.get(1).copied().unwrap_or(0.0);
+            let c = components.get(2).copied().unwrap_or(0.0);
+            DeviceColor::from_cie_abc(a, b, c, params)
+        }
+        ResolvedColorSpace::Lab { white_point, range } => {
+            lab_to_device_color(components, white_point, range)
         }
         ResolvedColorSpace::Pattern => DeviceColor::black(),
     }
@@ -286,7 +497,160 @@ pub fn to_image_color_space(cs: &ResolvedColorSpace) -> ImageColorSpace {
             hival: *hival,
             lookup: lookup.clone(),
         },
-        ResolvedColorSpace::Separation { .. } => ImageColorSpace::DeviceGray,
+        ResolvedColorSpace::Separation { alt, tint_fn, .. } => {
+            if let Some(func) = tint_fn {
+                build_1d_tint_image_cs(func, alt)
+            } else {
+                ImageColorSpace::DeviceGray
+            }
+        }
+        ResolvedColorSpace::DeviceN {
+            names,
+            alt,
+            tint_fn,
+        } => {
+            if let Some(func) = tint_fn {
+                build_nd_tint_image_cs(func, alt, names.len())
+            } else {
+                ImageColorSpace::DeviceGray
+            }
+        }
+        // CIE color spaces in images: use PreconvertedRGBA pipeline.
+        // For simplicity in image decode, fall back to device equivalent.
+        ResolvedColorSpace::CalGray { .. } => ImageColorSpace::DeviceGray,
+        ResolvedColorSpace::CalRGB { .. } => ImageColorSpace::DeviceRGB,
+        ResolvedColorSpace::Lab { .. } => ImageColorSpace::DeviceRGB,
         ResolvedColorSpace::Pattern => ImageColorSpace::DeviceRGB,
+    }
+}
+
+/// Convert L*a*b* to DeviceColor (sRGB) via XYZ.
+fn lab_to_device_color(
+    components: &[f64],
+    white_point: &[f64; 3],
+    range: &[f64; 4],
+) -> DeviceColor {
+    let l_star = components.first().copied().unwrap_or(0.0).clamp(0.0, 100.0);
+    let a_star = components
+        .get(1)
+        .copied()
+        .unwrap_or(0.0)
+        .clamp(range[0], range[1]);
+    let b_star = components
+        .get(2)
+        .copied()
+        .unwrap_or(0.0)
+        .clamp(range[2], range[3]);
+
+    // L*a*b* → XYZ (CIE standard formulas)
+    let fy = (l_star + 16.0) / 116.0;
+    let fx = a_star / 500.0 + fy;
+    let fz = fy - b_star / 200.0;
+
+    let x = white_point[0] * lab_f_inv(fx);
+    let y = white_point[1] * lab_f_inv(fy);
+    let z = white_point[2] * lab_f_inv(fz);
+
+    xyz_to_device_color(x, y, z)
+}
+
+/// XYZ → sRGB → DeviceColor (matches stet-core DeviceColor::from_xyz).
+fn xyz_to_device_color(x: f64, y: f64, z: f64) -> DeviceColor {
+    // IEC 61966-2-1 sRGB D65 XYZ → linear RGB matrix
+    let lr = 3.2404542 * x - 1.5371385 * y - 0.4985314 * z;
+    let lg = -0.9692660 * x + 1.8760108 * y + 0.0415560 * z;
+    let lb = 0.0556434 * x - 0.2040259 * y + 1.0572252 * z;
+
+    let r = srgb_gamma(lr.max(0.0)).clamp(0.0, 1.0);
+    let g = srgb_gamma(lg.max(0.0)).clamp(0.0, 1.0);
+    let b = srgb_gamma(lb.max(0.0)).clamp(0.0, 1.0);
+
+    DeviceColor::from_rgb(r, g, b)
+}
+
+/// sRGB gamma companding (linear → sRGB).
+fn srgb_gamma(c: f64) -> f64 {
+    if c <= 0.0031308 {
+        12.92 * c
+    } else {
+        1.055 * c.powf(1.0 / 2.4) - 0.055
+    }
+}
+
+/// Inverse of the CIE Lab f function.
+fn lab_f_inv(t: f64) -> f64 {
+    if t > 6.0 / 29.0 {
+        t * t * t
+    } else {
+        3.0 * (6.0 / 29.0) * (6.0 / 29.0) * (t - 4.0 / 29.0)
+    }
+}
+
+/// Build a 1D TintLookupTable for Separation image color space.
+fn build_1d_tint_image_cs(func: &PdfFunction, alt: &ResolvedColorSpace) -> ImageColorSpace {
+    let alt_cs = to_image_color_space(alt);
+    let n_out = alt.num_components();
+    let samples = 256u32;
+    let mut data = Vec::with_capacity(samples as usize * n_out);
+    for i in 0..samples {
+        let t = i as f64 / 255.0;
+        let out = func.evaluate(&[t]);
+        for j in 0..n_out {
+            data.push(out.get(j).copied().unwrap_or(0.0) as f32);
+        }
+    }
+    let table = TintLookupTable {
+        num_inputs: 1,
+        num_outputs: n_out as u32,
+        samples_per_dim: samples,
+        data,
+    };
+    ImageColorSpace::Separation {
+        name: Vec::new(),
+        alt_space: Box::new(alt_cs),
+        tint_table: Arc::new(table),
+    }
+}
+
+/// Build an N-D TintLookupTable for DeviceN image color space.
+fn build_nd_tint_image_cs(
+    func: &PdfFunction,
+    alt: &ResolvedColorSpace,
+    n_inputs: usize,
+) -> ImageColorSpace {
+    let alt_cs = to_image_color_space(alt);
+    let n_out = alt.num_components();
+    // Use fewer samples per dimension for higher-dimensional spaces
+    let spd = match n_inputs {
+        1 => 256u32,
+        2 => 64,
+        3 => 16,
+        _ => 8,
+    };
+    let total: usize = (spd as usize).pow(n_inputs as u32);
+    let mut data = Vec::with_capacity(total * n_out);
+    let mut inputs = vec![0.0f64; n_inputs];
+    for idx in 0..total {
+        // Convert linear index to multi-dimensional coordinates
+        let mut rem = idx;
+        for d in (0..n_inputs).rev() {
+            inputs[d] = (rem % spd as usize) as f64 / (spd - 1) as f64;
+            rem /= spd as usize;
+        }
+        let out = func.evaluate(&inputs);
+        for j in 0..n_out {
+            data.push(out.get(j).copied().unwrap_or(0.0) as f32);
+        }
+    }
+    let table = TintLookupTable {
+        num_inputs: n_inputs as u32,
+        num_outputs: n_out as u32,
+        samples_per_dim: spd,
+        data,
+    };
+    ImageColorSpace::DeviceN {
+        names: Vec::new(),
+        alt_space: Box::new(alt_cs),
+        tint_table: Arc::new(table),
     }
 }

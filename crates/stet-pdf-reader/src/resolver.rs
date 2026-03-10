@@ -21,15 +21,35 @@ pub struct Resolver<'a> {
     cache: RefCell<HashMap<u32, PdfObj>>,
     /// Guard against circular references.
     resolving: RefCell<HashSet<u32>>,
+    /// Encryption state, if the PDF is encrypted.
+    encryption: Option<crate::crypto::EncryptionState>,
 }
 
 impl<'a> Resolver<'a> {
-    pub fn new(data: &'a [u8], xref: XrefTable) -> Self {
+    /// Create a temporary resolver without encryption (for resolving the
+    /// Encrypt dict before encryption state is known).
+    pub(crate) fn new(data: &'a [u8], xref: &XrefTable) -> Self {
+        Self {
+            data,
+            xref: xref.clone(),
+            cache: RefCell::new(HashMap::new()),
+            resolving: RefCell::new(HashSet::new()),
+            encryption: None,
+        }
+    }
+
+    /// Create a resolver with optional encryption state.
+    pub fn with_encryption(
+        data: &'a [u8],
+        xref: XrefTable,
+        encryption: Option<crate::crypto::EncryptionState>,
+    ) -> Self {
         Self {
             data,
             xref,
             cache: RefCell::new(HashMap::new()),
             resolving: RefCell::new(HashSet::new()),
+            encryption,
         }
     }
 
@@ -60,14 +80,20 @@ impl<'a> Resolver<'a> {
             .get(obj_num)
             .ok_or(PdfError::ObjectNotFound { obj_num, gen_num })?;
 
-        match *entry {
-            XrefEntry::InFile { offset, .. } => self.parse_object_at(offset),
+        let obj = match *entry {
+            XrefEntry::InFile { offset, .. } => self.parse_object_at(offset)?,
             XrefEntry::InStream {
                 stream_obj_num,
                 index_within,
-            } => self.parse_object_from_stream(stream_obj_num, index_within),
-            XrefEntry::Free => Err(PdfError::ObjectNotFound { obj_num, gen_num }),
-        }
+            } => {
+                // Objects in object streams are not individually encrypted
+                return self.parse_object_from_stream(stream_obj_num, index_within);
+            }
+            XrefEntry::Free => return Err(PdfError::ObjectNotFound { obj_num, gen_num }),
+        };
+
+        // Decrypt strings in the parsed object (stream data is decrypted separately)
+        Ok(self.decrypt_object(obj, obj_num, gen_num))
     }
 
     /// If obj is a Ref, resolve it. Otherwise return as-is.
@@ -87,12 +113,18 @@ impl<'a> Resolver<'a> {
                 data_offset,
                 data_len,
             } => {
-                let raw = &self.data[data_offset..data_offset + data_len];
+                let raw_slice = &self.data[data_offset..data_offset + data_len];
+                // Decrypt stream data if encrypted
+                let raw = if let Some(ref enc) = self.encryption {
+                    enc.decrypt_stream(raw_slice, obj_num, gen_num)
+                } else {
+                    raw_slice.to_vec()
+                };
                 let (filter_list, parms) = filters::parse_filters(&dict)?;
                 if filter_list.is_empty() {
-                    Ok(raw.to_vec())
+                    Ok(raw)
                 } else {
-                    filters::decode_stream(raw, &filter_list, &parms)
+                    filters::decode_stream(&raw, &filter_list, &parms)
                 }
             }
             _ => Err(PdfError::Other(format!(
@@ -103,6 +135,10 @@ impl<'a> Resolver<'a> {
 
     /// Resolve an object and return decompressed stream data, accepting a PdfObj directly.
     pub fn stream_data_from_obj(&self, obj: &PdfObj) -> Result<Vec<u8>, PdfError> {
+        // If it's a Ref, use stream_data() which handles encryption with obj_num/gen_num.
+        if let PdfObj::Ref(n, g) = obj {
+            return self.stream_data(*n, *g);
+        }
         let obj = self.deref(obj)?;
         match obj {
             PdfObj::Stream {
@@ -110,6 +146,7 @@ impl<'a> Resolver<'a> {
                 data_offset,
                 data_len,
             } => {
+                // No encryption for inline stream objects (no obj_num to derive key from)
                 let raw = &self.data[data_offset..data_offset + data_len];
                 let (filter_list, parms) = filters::parse_filters(&dict)?;
                 if filter_list.is_empty() {
@@ -130,6 +167,49 @@ impl<'a> Resolver<'a> {
     /// Access the raw file data.
     pub fn data(&self) -> &'a [u8] {
         self.data
+    }
+
+    /// Decrypt all strings within a parsed object tree.
+    /// Stream data is NOT decrypted here (handled in stream_data()).
+    fn decrypt_object(&self, obj: PdfObj, obj_num: u32, gen_num: u16) -> PdfObj {
+        let enc = match &self.encryption {
+            Some(e) => e,
+            None => return obj,
+        };
+        match obj {
+            PdfObj::Str(s) => PdfObj::Str(enc.decrypt_string(&s, obj_num, gen_num)),
+            PdfObj::Array(arr) => PdfObj::Array(
+                arr.into_iter()
+                    .map(|o| self.decrypt_object(o, obj_num, gen_num))
+                    .collect(),
+            ),
+            PdfObj::Dict(dict) => {
+                let entries: Vec<_> = dict
+                    .into_entries()
+                    .into_iter()
+                    .map(|(k, v)| (k, self.decrypt_object(v, obj_num, gen_num)))
+                    .collect();
+                PdfObj::Dict(PdfDict::from_entries(entries))
+            }
+            PdfObj::Stream {
+                dict,
+                data_offset,
+                data_len,
+            } => {
+                // Decrypt dict entries but NOT stream data (done in stream_data())
+                let entries: Vec<_> = dict
+                    .into_entries()
+                    .into_iter()
+                    .map(|(k, v)| (k, self.decrypt_object(v, obj_num, gen_num)))
+                    .collect();
+                PdfObj::Stream {
+                    dict: PdfDict::from_entries(entries),
+                    data_offset,
+                    data_len,
+                }
+            }
+            other => other,
+        }
     }
 
     /// Parse an indirect object at a file offset.
@@ -227,13 +307,19 @@ impl<'a> Resolver<'a> {
             }
         };
 
-        // Decompress the stream
-        let raw = &self.data[data_offset..data_offset + data_len];
+        // Decompress the stream (already decrypted by resolve → stream_data path
+        // if this were called via stream_data; but here we handle it directly)
+        let raw_slice = &self.data[data_offset..data_offset + data_len];
+        let raw = if let Some(ref enc) = self.encryption {
+            enc.decrypt_stream(raw_slice, stream_obj_num, 0)
+        } else {
+            raw_slice.to_vec()
+        };
         let (filter_list, parms) = filters::parse_filters(&dict)?;
         let stream_data = if filter_list.is_empty() {
-            raw.to_vec()
+            raw
         } else {
-            filters::decode_stream(raw, &filter_list, &parms)?
+            filters::decode_stream(&raw, &filter_list, &parms)?
         };
 
         // Parse the header
@@ -333,7 +419,7 @@ mod tests {
     fn resolve_simple_objects() {
         let data = minimal_pdf();
         let xref = crate::xref::parse_xref(&data).unwrap();
-        let resolver = Resolver::new(&data, xref);
+        let resolver = Resolver::with_encryption(&data, xref, None);
 
         let obj1 = resolver.resolve(1, 0).unwrap();
         let dict = obj1.as_dict().unwrap();
@@ -348,7 +434,7 @@ mod tests {
     fn deref_passes_through_non_ref() {
         let data = minimal_pdf();
         let xref = crate::xref::parse_xref(&data).unwrap();
-        let resolver = Resolver::new(&data, xref);
+        let resolver = Resolver::with_encryption(&data, xref, None);
 
         let obj = PdfObj::Int(42);
         let result = resolver.deref(&obj).unwrap();
@@ -359,7 +445,7 @@ mod tests {
     fn deref_resolves_ref() {
         let data = minimal_pdf();
         let xref = crate::xref::parse_xref(&data).unwrap();
-        let resolver = Resolver::new(&data, xref);
+        let resolver = Resolver::with_encryption(&data, xref, None);
 
         let obj = PdfObj::Ref(1, 0);
         let result = resolver.deref(&obj).unwrap();
@@ -370,7 +456,7 @@ mod tests {
     fn object_not_found() {
         let data = minimal_pdf();
         let xref = crate::xref::parse_xref(&data).unwrap();
-        let resolver = Resolver::new(&data, xref);
+        let resolver = Resolver::with_encryption(&data, xref, None);
 
         let result = resolver.resolve(999, 0);
         assert!(result.is_err());

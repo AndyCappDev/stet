@@ -24,11 +24,48 @@ use stet_core::object::{PsObject, PsValue};
 
 /// PDF Type 4 calculator function allowed operators.
 const TYPE4_ALLOWED: &[&[u8]] = &[
-    b"abs", b"add", b"atan", b"ceiling", b"cos", b"cvi", b"cvr", b"div", b"exp",
-    b"floor", b"idiv", b"ln", b"log", b"mod", b"mul", b"neg", b"round", b"sin",
-    b"sqrt", b"sub", b"truncate", b"eq", b"ne", b"gt", b"ge", b"lt", b"le",
-    b"and", b"or", b"xor", b"not", b"bitshift", b"if", b"ifelse",
-    b"copy", b"dup", b"exch", b"index", b"pop", b"roll", b"true", b"false",
+    b"abs",
+    b"add",
+    b"atan",
+    b"ceiling",
+    b"cos",
+    b"cvi",
+    b"cvr",
+    b"div",
+    b"exp",
+    b"floor",
+    b"idiv",
+    b"ln",
+    b"log",
+    b"mod",
+    b"mul",
+    b"neg",
+    b"round",
+    b"sin",
+    b"sqrt",
+    b"sub",
+    b"truncate",
+    b"eq",
+    b"ne",
+    b"gt",
+    b"ge",
+    b"lt",
+    b"le",
+    b"and",
+    b"or",
+    b"xor",
+    b"not",
+    b"bitshift",
+    b"if",
+    b"ifelse",
+    b"copy",
+    b"dup",
+    b"exch",
+    b"index",
+    b"pop",
+    b"roll",
+    b"true",
+    b"false",
 ];
 
 /// Try to decompile a PS spot function procedure to PDF Type 4 calculator bytes.
@@ -288,17 +325,32 @@ pub fn op_setcolorscreen(ctx: &mut Context) -> Result<(), PsError> {
     // setcolorscreen supersedes any halftone dictionary
     ctx.gstate.halftone = None;
     // Pre-compute per-component halftones for PDF output
-    let red = Arc::new(precompute_halftone_screen(ctx, components[0].0, components[0].1, components[0].2)?);
-    let green = Arc::new(precompute_halftone_screen(ctx, components[1].0, components[1].1, components[1].2)?);
-    let blue = Arc::new(precompute_halftone_screen(ctx, components[2].0, components[2].1, components[2].2)?);
-    let gray = Arc::new(precompute_halftone_screen(ctx, components[3].0, components[3].1, components[3].2)?);
+    let red = Arc::new(precompute_halftone_screen(
+        ctx,
+        components[0].0,
+        components[0].1,
+        components[0].2,
+    )?);
+    let green = Arc::new(precompute_halftone_screen(
+        ctx,
+        components[1].0,
+        components[1].1,
+        components[1].2,
+    )?);
+    let blue = Arc::new(precompute_halftone_screen(
+        ctx,
+        components[2].0,
+        components[2].1,
+        components[2].2,
+    )?);
+    let gray = Arc::new(precompute_halftone_screen(
+        ctx,
+        components[3].0,
+        components[3].1,
+        components[3].2,
+    )?);
     ctx.gstate.precomputed_halftone = Some(gray.clone());
-    ctx.gstate.precomputed_color_halftone = Some([
-        Some(red),
-        Some(green),
-        Some(blue),
-        Some(gray),
-    ]);
+    ctx.gstate.precomputed_color_halftone = Some([Some(red), Some(green), Some(blue), Some(gray)]);
     Ok(())
 }
 
@@ -1077,6 +1129,8 @@ fn replay_form_elements(
                     transfer: params.transfer.clone(),
                     halftone: params.halftone.clone(),
                     bg_ucr: params.bg_ucr.clone(),
+                    alpha: params.alpha,
+                    blend_mode: params.blend_mode,
                 };
                 target.push(DisplayElement::Fill {
                     path: new_path,
@@ -1103,6 +1157,8 @@ fn replay_form_elements(
                     transfer: params.transfer.clone(),
                     halftone: params.halftone.clone(),
                     bg_ucr: params.bg_ucr.clone(),
+                    alpha: params.alpha,
+                    blend_mode: params.blend_mode,
                 };
                 target.push(DisplayElement::Stroke {
                     path: new_path,

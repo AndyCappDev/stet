@@ -762,6 +762,9 @@ impl<'a> ContentInterpreter<'a> {
             &self.resources,
             self.resolver,
         )?;
+        if matches!(cs, ResolvedColorSpace::Pattern) {
+            return self.handle_pattern_stroke();
+        }
         let n = cs.num_components();
         if n == 0 {
             return Ok(());
@@ -778,6 +781,9 @@ impl<'a> ContentInterpreter<'a> {
             &self.resources,
             self.resolver,
         )?;
+        if matches!(cs, ResolvedColorSpace::Pattern) {
+            return self.handle_pattern_fill();
+        }
         let n = cs.num_components();
         if n == 0 {
             return Ok(());
@@ -832,11 +838,7 @@ impl<'a> ContentInterpreter<'a> {
                 self.current_font = Some(arc);
             }
             Err(e) => {
-                eprintln!(
-                    "warning: font /{}: {}",
-                    String::from_utf8_lossy(name),
-                    e
-                );
+                eprintln!("warning: font /{}: {}", String::from_utf8_lossy(name), e);
                 self.current_font = None;
             }
         }
@@ -1338,6 +1340,28 @@ impl<'a> ContentInterpreter<'a> {
             self.gstate.fill_alpha = ca;
         }
 
+        // Blend mode
+        if let Some(bm) = gs_dict.get(b"BM") {
+            let bm = self.resolver.deref(bm).unwrap_or_else(|_| bm.clone());
+            match &bm {
+                PdfObj::Name(name) => {
+                    self.gstate.blend_mode = blend_mode_from_name(name);
+                }
+                PdfObj::Array(arr) => {
+                    for obj in arr {
+                        if let PdfObj::Name(name) = obj {
+                            let mode = blend_mode_from_name(name);
+                            if mode != 0 || name.as_slice() == b"Normal" {
+                                self.gstate.blend_mode = mode;
+                                break;
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
         // Dash pattern
         if let Some(d_arr) = gs_dict.get_array(b"D")
             && d_arr.len() == 2
@@ -1384,11 +1408,183 @@ impl<'a> ContentInterpreter<'a> {
             .ok_or(PdfError::Other("Shading is not a dict".into()))?;
 
         crate::resources::shading::handle_shading(
+            &sh_obj,
             sh_dict,
             &self.gstate,
             self.resolver,
             &mut self.display_list,
         )
+    }
+
+    // === Pattern operators ===
+
+    fn handle_pattern_fill(&mut self) -> Result<(), PdfError> {
+        let name = self
+            .operand_stack
+            .last()
+            .and_then(|o| o.as_name())
+            .ok_or(PdfError::Other("pattern: expected name".into()))?
+            .to_vec();
+        self.resolve_and_emit_pattern(&name, true)
+    }
+
+    fn handle_pattern_stroke(&mut self) -> Result<(), PdfError> {
+        let name = self
+            .operand_stack
+            .last()
+            .and_then(|o| o.as_name())
+            .ok_or(PdfError::Other("pattern: expected name".into()))?
+            .to_vec();
+        self.resolve_and_emit_pattern(&name, false)
+    }
+
+    fn resolve_and_emit_pattern(&mut self, name: &[u8], _is_fill: bool) -> Result<(), PdfError> {
+        let pattern_dict = self
+            .resources
+            .get_dict(b"Pattern")
+            .ok_or(PdfError::Other("no Pattern resources".into()))?;
+        let pat_ref = pattern_dict.get(name).ok_or_else(|| {
+            PdfError::Other(format!(
+                "Pattern /{} not found",
+                String::from_utf8_lossy(name)
+            ))
+        })?;
+        let pat_obj = self.resolver.deref(pat_ref)?;
+        let pat_dict = pat_obj
+            .as_dict()
+            .ok_or(PdfError::Other("Pattern is not a dict".into()))?;
+
+        let pattern_type = pat_dict.get_int(b"PatternType").unwrap_or(1) as i32;
+
+        match pattern_type {
+            1 => self.handle_tiling_pattern(&pat_obj, pat_dict),
+            2 => self.handle_shading_pattern(pat_dict),
+            _ => Ok(()),
+        }
+    }
+
+    fn handle_tiling_pattern(
+        &mut self,
+        pat_obj: &PdfObj,
+        pat_dict: &PdfDict,
+    ) -> Result<(), PdfError> {
+        if self.depth >= 20 {
+            return Ok(());
+        }
+        let paint_type = pat_dict.get_int(b"PaintType").unwrap_or(1) as i32;
+
+        let bbox = pat_dict
+            .get_array(b"BBox")
+            .map(|a| {
+                let v: Vec<f64> = a.iter().filter_map(|o| o.as_f64()).collect();
+                if v.len() >= 4 {
+                    [v[0], v[1], v[2], v[3]]
+                } else {
+                    [0.0, 0.0, 1.0, 1.0]
+                }
+            })
+            .unwrap_or([0.0, 0.0, 1.0, 1.0]);
+
+        let x_step = pat_dict.get_f64(b"XStep").unwrap_or(bbox[2] - bbox[0]);
+        let y_step = pat_dict.get_f64(b"YStep").unwrap_or(bbox[3] - bbox[1]);
+
+        let pattern_matrix = pat_dict
+            .get_array(b"Matrix")
+            .map(|a| {
+                let v: Vec<f64> = a.iter().filter_map(|o| o.as_f64()).collect();
+                if v.len() >= 6 {
+                    Matrix::new(v[0], v[1], v[2], v[3], v[4], v[5])
+                } else {
+                    Matrix::identity()
+                }
+            })
+            .unwrap_or_else(Matrix::identity);
+
+        let pattern_resources = if let Some(res_ref) = pat_dict.get(b"Resources") {
+            match self.resolver.deref(res_ref)? {
+                PdfObj::Dict(d) => d,
+                _ => self.resources.clone(),
+            }
+        } else {
+            self.resources.clone()
+        };
+
+        let pattern_data = self.resolver.stream_data_from_obj(pat_obj)?;
+
+        // Interpret pattern content stream into a sub-display-list
+        self.gstate_stack.push(self.gstate.clone());
+        let saved_resources = std::mem::replace(&mut self.resources, pattern_resources);
+        let saved_display_list = std::mem::take(&mut self.display_list);
+
+        self.gstate.ctm = self.gstate.ctm.concat(&pattern_matrix);
+
+        self.depth += 1;
+        let _ = self.interpret_stream(&pattern_data);
+        self.depth -= 1;
+
+        let tile_display_list = std::mem::replace(&mut self.display_list, saved_display_list);
+        self.resources = saved_resources;
+        if let Some(saved) = self.gstate_stack.pop() {
+            self.gstate = saved;
+        }
+
+        use stet_core::device::PatternFillParams;
+        self.display_list.push(DisplayElement::PatternFill {
+            params: PatternFillParams {
+                path: PsPath::new(),
+                fill_rule: FillRule::NonZeroWinding,
+                tile: tile_display_list,
+                pattern_matrix: self.gstate.ctm.concat(&pattern_matrix),
+                bbox,
+                xstep: x_step,
+                ystep: y_step,
+                paint_type,
+                underlying_color: if paint_type == 2 {
+                    Some(self.gstate.fill_color.clone())
+                } else {
+                    None
+                },
+                pattern_id: 0,
+            },
+        });
+
+        Ok(())
+    }
+
+    fn handle_shading_pattern(&mut self, pat_dict: &PdfDict) -> Result<(), PdfError> {
+        let sh_ref = pat_dict
+            .get(b"Shading")
+            .ok_or(PdfError::Other("shading pattern missing /Shading".into()))?;
+        let sh_obj = self.resolver.deref(sh_ref)?;
+        let sh_dict = sh_obj
+            .as_dict()
+            .ok_or(PdfError::Other("Shading is not a dict".into()))?;
+
+        let pattern_matrix = pat_dict
+            .get_array(b"Matrix")
+            .map(|a| {
+                let v: Vec<f64> = a.iter().filter_map(|o| o.as_f64()).collect();
+                if v.len() >= 6 {
+                    Matrix::new(v[0], v[1], v[2], v[3], v[4], v[5])
+                } else {
+                    Matrix::identity()
+                }
+            })
+            .unwrap_or_else(Matrix::identity);
+
+        let saved_ctm = self.gstate.ctm;
+        self.gstate.ctm = self.gstate.ctm.concat(&pattern_matrix);
+
+        let result = crate::resources::shading::handle_shading(
+            &sh_obj,
+            sh_dict,
+            &self.gstate,
+            self.resolver,
+            &mut self.display_list,
+        );
+
+        self.gstate.ctm = saved_ctm;
+        result
     }
 }
 
@@ -1487,6 +1683,25 @@ fn expand_bits_to_bytes(
     }
 
     result
+}
+
+/// Convert a PDF blend mode name to a numeric code.
+fn blend_mode_from_name(name: &[u8]) -> u8 {
+    match name {
+        b"Normal" | b"Compatible" => 0,
+        b"Multiply" => 1,
+        b"Screen" => 2,
+        b"Overlay" => 3,
+        b"Darken" => 4,
+        b"Lighten" => 5,
+        b"ColorDodge" => 6,
+        b"ColorBurn" => 7,
+        b"HardLight" => 8,
+        b"SoftLight" => 9,
+        b"Difference" => 10,
+        b"Exclusion" => 11,
+        _ => 0,
+    }
 }
 
 fn is_whitespace_byte(b: u8) -> bool {

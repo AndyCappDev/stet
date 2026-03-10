@@ -177,6 +177,16 @@ impl PdfDict {
         &self.0
     }
 
+    /// Consume the dict and return owned entries.
+    pub fn into_entries(self) -> Vec<(Vec<u8>, PdfObj)> {
+        self.0
+    }
+
+    /// Create a dict from owned entries.
+    pub fn from_entries(entries: Vec<(Vec<u8>, PdfObj)>) -> Self {
+        PdfDict(entries)
+    }
+
     /// Number of entries.
     pub fn len(&self) -> usize {
         self.0.len()

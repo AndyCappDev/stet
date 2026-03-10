@@ -64,12 +64,60 @@ pub fn op_shfill(ctx: &mut Context) -> Result<(), PsError> {
     // Dispatch to type-specific builders
     match shading_type {
         1 => build_type1_shading(ctx, dict_entity, &color_space, n_comps, ctm, bbox)?,
-        2 => build_type2_shading(ctx, dict_entity, &color_space, n_comps, ctm, bbox, shading_cs)?,
-        3 => build_type3_shading(ctx, dict_entity, &color_space, n_comps, ctm, bbox, shading_cs)?,
-        4 => build_type4_shading(ctx, dict_entity, &color_space, n_comps, ctm, bbox, shading_cs)?,
-        5 => build_type5_shading(ctx, dict_entity, &color_space, n_comps, ctm, bbox, shading_cs)?,
-        6 => build_type6_shading(ctx, dict_entity, &color_space, n_comps, ctm, bbox, shading_cs)?,
-        7 => build_type7_shading(ctx, dict_entity, &color_space, n_comps, ctm, bbox, shading_cs)?,
+        2 => build_type2_shading(
+            ctx,
+            dict_entity,
+            &color_space,
+            n_comps,
+            ctm,
+            bbox,
+            shading_cs,
+        )?,
+        3 => build_type3_shading(
+            ctx,
+            dict_entity,
+            &color_space,
+            n_comps,
+            ctm,
+            bbox,
+            shading_cs,
+        )?,
+        4 => build_type4_shading(
+            ctx,
+            dict_entity,
+            &color_space,
+            n_comps,
+            ctm,
+            bbox,
+            shading_cs,
+        )?,
+        5 => build_type5_shading(
+            ctx,
+            dict_entity,
+            &color_space,
+            n_comps,
+            ctm,
+            bbox,
+            shading_cs,
+        )?,
+        6 => build_type6_shading(
+            ctx,
+            dict_entity,
+            &color_space,
+            n_comps,
+            ctm,
+            bbox,
+            shading_cs,
+        )?,
+        7 => build_type7_shading(
+            ctx,
+            dict_entity,
+            &color_space,
+            n_comps,
+            ctm,
+            bbox,
+            shading_cs,
+        )?,
         _ => {} // Already validated above
     }
 
@@ -728,8 +776,7 @@ fn sample_shading_function(
                 );
                 (color, alt)
             } else {
-                let color =
-                    components_to_device_color(&results, color_space, &mut ctx.icc_cache);
+                let color = components_to_device_color(&results, color_space, &mut ctx.icc_cache);
                 (color, results)
             }
         } else {
@@ -757,8 +804,7 @@ fn sample_shading_function(
                         .and_then(|o| o.as_f64())
                         .unwrap_or(0.0);
                 }
-                let color =
-                    components_to_device_color(&comps, color_space, &mut ctx.icc_cache);
+                let color = components_to_device_color(&comps, color_space, &mut ctx.icc_cache);
                 (color, comps)
             }
         };
@@ -807,10 +853,7 @@ fn detect_gamma(table: &[f64]) -> Option<f64> {
 }
 
 /// Map a PostScript ColorSpace to a ShadingColorSpace for the display list.
-fn capture_shading_color_space(
-    ctx: &Context,
-    color_space: &ColorSpace,
-) -> ShadingColorSpace {
+fn capture_shading_color_space(ctx: &Context, color_space: &ColorSpace) -> ShadingColorSpace {
     match color_space {
         ColorSpace::DeviceGray => ShadingColorSpace::DeviceGray,
         ColorSpace::DeviceRGB => ShadingColorSpace::DeviceRGB,
@@ -870,11 +913,7 @@ fn capture_shading_color_space(
                 } else {
                     Some(params.matrix_abc)
                 };
-                let gamma_opt = if g == [1.0, 1.0, 1.0] {
-                    None
-                } else {
-                    Some(g)
-                };
+                let gamma_opt = if g == [1.0, 1.0, 1.0] { None } else { Some(g) };
                 return ShadingColorSpace::CalRGB {
                     white_point: params.white_point,
                     matrix: mat,

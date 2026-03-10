@@ -110,6 +110,10 @@ pub struct FillParams {
     pub halftone: HalftoneState,
     /// Pre-sampled black generation / undercolor removal for PDF output.
     pub bg_ucr: BgUcrState,
+    /// Fill opacity (0.0–1.0, default 1.0). Used by PDF transparency.
+    pub alpha: f64,
+    /// Blend mode (0=Normal, 1=Multiply, ..., 11=Exclusion). Default 0.
+    pub blend_mode: u8,
 }
 
 /// Parameters for a text element emitted by show operators.
@@ -182,6 +186,10 @@ pub struct StrokeParams {
     pub halftone: HalftoneState,
     /// Pre-sampled black generation / undercolor removal for PDF output.
     pub bg_ucr: BgUcrState,
+    /// Stroke opacity (0.0–1.0, default 1.0). Used by PDF transparency.
+    pub alpha: f64,
+    /// Blend mode (0=Normal, 1=Multiply, ..., 11=Exclusion). Default 0.
+    pub blend_mode: u8,
 }
 
 /// Parameters for clipping.

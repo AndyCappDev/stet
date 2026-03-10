@@ -10,35 +10,26 @@
 
 ```
 crates/stet-pdf-reader/src/
-├── lib.rs              # Public API: PdfDocument, render_page()
-├── parser/
-│   ├── mod.rs
-│   ├── xref.rs         # Cross-reference table/stream parsing
-│   ├── objects.rs      # PDF object model (bool, int, real, string, name, array, dict, stream)
-│   ├── lexer.rs        # PDF tokenizer (simpler than PS — no procedures)
-│   └── encrypt.rs      # RC4 / AES decryption (standard security handler)
+├── lib.rs              # Public API: PdfDocument, render_page(), render_page_to_rgba()
+├── error.rs            # PdfError enum
+├── lexer.rs            # PDF tokenizer (simpler than PS — no procedures)
+├── objects.rs          # PDF object model (PdfObj enum, PdfDict, indirect references)
+├── xref.rs             # Cross-reference table parsing
+├── resolver.rs         # Indirect reference resolution, stream decompression, decryption
+├── page_tree.rs        # Page tree traversal, MediaBox/CropBox/Rotate inheritance
+├── crypto.rs           # RC4 / AES-128 / AES-256 decryption (standard security handler)
+├── filters.rs          # Stream decompression (Flate, LZW, ASCII85, ASCIIHex, RunLength, DCT)
 ├── content/
-│   ├── mod.rs
-│   ├── interpreter.rs  # Content stream → DisplayList (~60 operators)
-│   └── operators.rs    # Operator dispatch table
-├── resources/
-│   ├── mod.rs
-│   ├── color_space.rs  # DeviceRGB/CMYK/Gray, CalRGB/Gray, ICCBased, Lab, Indexed, Separation, DeviceN
-│   ├── image.rs        # Inline/XObject images, decode filters, SMask
-│   ├── pattern.rs      # Tiling (Type 1) and shading (Type 2) patterns
-│   ├── shading.rs      # Types 1-7, reuse shading_ops sampling logic
-│   ├── ext_gstate.rs   # ExtGState dict → graphics state updates
-│   └── function.rs     # Type 0/2/3/4 PDF functions (eval without PS interpreter)
-├── font/
-│   ├── mod.rs
-│   ├── type1.rs        # Type 1 fonts (reuse stet-core parser)
-│   ├── truetype.rs     # TrueType/OpenType (reuse stet-core parser)
-│   ├── cff.rs          # CFF/CIDFont Type 0 (reuse stet-core parser)
-│   ├── type3.rs        # Type 3 fonts (content stream per glyph)
-│   ├── encoding.rs     # Encoding/ToUnicode/CMap resolution
-│   └── metrics.rs      # Widths, font descriptors, missing glyph fallback
-├── transparency.rs     # Transparency groups, SMask, blend modes
-└── page_tree.rs        # Page tree traversal, MediaBox/CropBox inheritance
+│   ├── mod.rs          # ContentInterpreter: content stream → DisplayList (~60 operators)
+│   ├── color_space.rs  # All color spaces: Device*, Cal*, Lab, ICCBased, Indexed, Separation, DeviceN
+│   ├── font.rs         # Font resolution: Type1, TrueType, CFF, Type0 (CID), Type3, substitution
+│   ├── cmap.rs         # CMap parser for composite font CID decoding
+│   └── graphics_state.rs # PdfGraphicsState (CTM, color, text state, blend mode, opacity)
+└── resources/
+    ├── mod.rs          # Resource dict resolution
+    ├── function.rs     # PDF functions (Type 0 sampled, Type 2 exponential, Type 3 stitching, Type 4 calculator)
+    ├── image.rs        # XObject/inline images: decode, color convert → DisplayElement::Image
+    └── shading.rs      # All 7 shading types → DisplayList elements
 ```
 
 ## Reuse from Existing Crates
@@ -158,10 +149,8 @@ impl PdfDocument {
 - PDF Function evaluator (Types 0/2/3/4) ✓
 - Page CTM: scale(dpi/72) + Y-flip + CropBox offset + rotation ✓
 
-**Not done (moved to Phase D)**:
-- Tiling patterns (tile content → sub-DisplayList)
-- Shading Types 1, 4-7 (function-based, triangle mesh, Coons/tensor patches)
-- CalRGB, CalGray, Lab, DeviceN color spaces
+**Deferred to Phase D** (now complete):
+- Tiling patterns, Shading Types 1/4-7, CalRGB/CalGray/Lab/DeviceN color spaces
 
 ### Phase C: Text (Text Display) — COMPLETE
 
@@ -176,38 +165,67 @@ impl PdfDocument {
 - Font cache per ContentInterpreter (keyed by resource name) ✓
 - Rendering mode 0 (fill) only ✓
 
-**Not done (moved to Phase D)**:
-- Font substitution for non-embedded fonts (fallback to system/bundled fonts)
-- Composite fonts (Type 0) with CIDFont descendants + CMap decoding
-- Type 3 fonts (content stream per glyph)
-- Text rendering modes 1-7 (stroke, clip variants)
-- ToUnicode CMap parsing (text extraction, not rendering)
+**Deferred to Phase D** (now complete):
+- Font substitution, composite fonts (Type 0/CID), Type 3 fonts, text rendering modes 1-7
+- ToUnicode CMap parsing (text extraction, not rendering) — still TODO
 
-### Phase D: Advanced Features (Completeness)
+### Phase D: Advanced Features (Completeness) — COMPLETE
 
-- **Font substitution** for non-embedded fonts (javaplatform.pdf has 3+ non-embedded Type 1 fonts)
-- **Composite fonts** (Type 0) with CIDFont descendants + CMap-based CID decoding
-- **Type 3 fonts** (content stream per glyph — recursive interpreter call)
-- Text rendering modes 1-7 (stroke, clip, invisible, etc.)
-- Encryption (standard security handler, RC4/AES)
-- ExtGState: blend mode, opacity (ca/CA), soft mask
-- Tiling patterns (tile content → sub-DisplayList)
-- Shading Types 1, 4-7 (function-based, triangle mesh, Coons/tensor patches)
-- Cross-reference streams (PDF 1.5+)
-- Lab/CalGray/CalRGB color spaces
-- DeviceN color space with tint functions
-- Annotations (at minimum: Link, Widget for form fields)
+- **D1: Separation/DeviceN tint functions + CIE color spaces** ✓
+  - Separation: tint function evaluation via PdfFunction, conversion through alternate space ✓
+  - DeviceN: names + alt space + tint function (same pattern as Separation) ✓
+  - CalGray: gamma + white point → CieAParams → from_cie_a() pipeline ✓
+  - CalRGB: gamma + matrix + white point → CieAbcParams → from_cie_abc() pipeline ✓
+  - Lab: L*a*b* → XYZ → sRGB (CIE standard formulas) ✓
+  - Separation/DeviceN images: TintLookupTable for image decode pipeline ✓
+- **D2: Font substitution** for non-embedded fonts ✓
+  - Adobe→URW name mapping via FONT_SUBSTITUTIONS table ✓
+  - Loads bundled .t1 fonts from resources/Font/ ✓
+  - Preserves PDF /Widths for layout correctness ✓
+- **D3: Text rendering modes 1-7** ✓
+  - Mode 0: fill, Mode 1: stroke, Mode 2: fill+stroke, Mode 3: invisible ✓
+  - Modes 4-7: same as 0-3 but accumulate glyph clip path, applied at ET ✓
+- **D4: Shading types 1, 4-7** ✓
+  - Type 1 (function-based): 256×256 RGBA rasterization → Image ✓
+  - Types 4-5 (mesh): BitReader + stet_core::mesh_shading parsers → MeshShading ✓
+  - Types 6-7 (patches): stet_core::mesh_shading parsers → PatchShading ✓
+- **D5: Composite fonts** (Type 0 + CIDFont + CMap) ✓
+  - CMap parser (codespacerange, cidchar, cidrange, bfchar, bfrange) ✓
+  - CIDFont Type 0 (CFF) and Type 2 (TrueType) with CIDToGIDMap ✓
+  - Multi-byte text decoding in show_text ✓
+- **D6: Type 3 fonts** ✓
+  - CharProcs content stream per glyph, recursive interpreter call ✓
+  - d0/d1 operators ✓
+- **D7: Tiling patterns** ✓
+  - Tiling pattern content stream → sub-DisplayList → PatternFill ✓
+  - Shading patterns (Type 2): embedded shading emission ✓
+- **D8: Transparency (Part 1)** ✓
+  - Blend mode parsing from BM in ExtGState ✓
+  - Alpha/opacity (ca/CA) propagation to FillParams/StrokeParams ✓
+  - tiny-skia Paint opacity application ✓
+- **D9: Encryption** ✓
+  - Standard security handler (empty password auto-open) ✓
+  - RC4 (V=1,2), AES-128-CBC (V=4), AES-256-CBC (V=5) ✓
+  - Per-object key derivation, string/stream decryption in resolver ✓
+
+**Not done (moved to Phase E)**:
+- Transparency groups (isolated/knockout), soft masks (D8 Part 2)
+- Annotations (Link, Widget)
 - Optional content (layers) — basic visibility toggling
+- Cross-reference streams (PDF 1.5+)
 
-### Phase E: Transparency (Differentiator)
+### Phase E: Transparency & Remaining Features
 
 - Transparency group rendering to offscreen buffers
 - Isolated and knockout group semantics
-- All 12 blend modes (pixel-level compositing)
+- All 12 blend modes (pixel-level compositing in tiny-skia)
 - Soft mask (alpha and luminosity) application
 - Nested transparency groups
 - Color space conversion within groups
 - Performance optimization (avoid offscreen buffer when group is trivial)
+- Cross-reference streams (PDF 1.5+)
+- Annotations (Link, Widget appearance streams)
+- Optional content (layers) — basic visibility toggling
 
 ## Licensing Split
 

@@ -11,6 +11,7 @@
 //! DisplayList elements for rendering through the SkiaDevice pipeline.
 
 pub mod content;
+pub mod crypto;
 pub mod error;
 pub mod filters;
 pub mod lexer;
@@ -46,12 +47,32 @@ impl<'a> PdfDocument<'a> {
         // Check for encryption (we'll detect it after parsing the trailer)
         let xref = xref::parse_xref(data)?;
 
-        // Check for encryption
-        if xref.trailer.get(b"Encrypt").is_some() {
-            return Err(PdfError::Encrypted);
-        }
+        // Handle encryption: try to open with empty password
+        let encryption = if let Some(encrypt_ref) = xref.trailer.get(b"Encrypt") {
+            // Use a temporary resolver (without encryption) to dereference the Encrypt dict
+            let temp_resolver = Resolver::new(data, &xref);
+            let encrypt_obj = temp_resolver.deref(encrypt_ref)?;
+            let encrypt_dict = encrypt_obj
+                .as_dict()
+                .ok_or(PdfError::Other("Encrypt is not a dict".into()))?;
 
-        let resolver = Resolver::new(data, xref);
+            // Get file ID from trailer
+            let file_id = xref
+                .trailer
+                .get_array(b"ID")
+                .and_then(|arr| arr.first()?.as_str().map(|s| s.to_vec()))
+                .unwrap_or_default();
+
+            Some(crypto::EncryptionState::try_open(
+                encrypt_dict,
+                &xref.trailer,
+                &file_id,
+            )?)
+        } else {
+            None
+        };
+
+        let resolver = Resolver::with_encryption(data, xref, encryption);
         let pages = page_tree::collect_pages(&resolver)?;
 
         Ok(Self { resolver, pages })

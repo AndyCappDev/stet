@@ -4453,6 +4453,8 @@ fn push_glyph_element(
             transfer,
             halftone: halftone.clone(),
             bg_ucr: bg_ucr.clone(),
+            alpha: 1.0,
+            blend_mode: 0,
         };
         ctx.display_list.push(DisplayElement::Stroke {
             path: device_path,
@@ -4470,6 +4472,8 @@ fn push_glyph_element(
             transfer,
             halftone,
             bg_ucr,
+            alpha: 1.0,
+            blend_mode: 0,
         };
         ctx.display_list.push(DisplayElement::Fill {
             path: device_path,

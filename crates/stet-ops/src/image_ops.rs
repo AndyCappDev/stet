@@ -163,9 +163,7 @@ fn image_dict_form(ctx: &mut Context) -> Result<(), PsError> {
             ColorSpace::DeviceCMYK | ColorSpace::CIEBasedDEFG { .. } => 4,
             ColorSpace::ICCBased { n, .. } => n,
             ColorSpace::Separation { .. } => 1,
-            ColorSpace::DeviceN {
-                num_colorants, ..
-            } => num_colorants,
+            ColorSpace::DeviceN { num_colorants, .. } => num_colorants,
         }
     };
 
@@ -208,8 +206,11 @@ fn image_dict_form(ctx: &mut Context) -> Result<(), PsError> {
 
     // ImageType 4: extract mask color (raw BPC values scaled to 8-bit)
     let mask_color_param = if image_type == 4 {
-        dict_get_mask_color(ctx, dict_entity, ncomp)
-            .map(|mc| mc.iter().map(|&v| scale_mask_value(v, bps) as u8).collect::<Vec<u8>>())
+        dict_get_mask_color(ctx, dict_entity, ncomp).map(|mc| {
+            mc.iter()
+                .map(|&v| scale_mask_value(v, bps) as u8)
+                .collect::<Vec<u8>>()
+        })
     } else {
         None
     };
@@ -341,9 +342,7 @@ fn image_type3_form(
             ColorSpace::DeviceCMYK | ColorSpace::CIEBasedDEFG { .. } => 4,
             ColorSpace::ICCBased { n, .. } => n,
             ColorSpace::Separation { .. } => 1,
-            ColorSpace::DeviceN {
-                num_colorants, ..
-            } => num_colorants,
+            ColorSpace::DeviceN { num_colorants, .. } => num_colorants,
         }
     };
 
