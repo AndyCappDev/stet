@@ -944,6 +944,7 @@ impl<'a> ContentInterpreter<'a> {
         let word_spacing = self.gstate.word_spacing;
         let text_rise = self.gstate.text_rise;
         let font_matrix = font.font_matrix();
+        let render_mode = self.gstate.text_rendering_mode;
 
         if font.is_composite() {
             // Composite (CID) font: 2-byte character codes
@@ -963,12 +964,7 @@ impl<'a> ContentInterpreter<'a> {
                         .concat(&font_matrix);
                     let device_path = glyph_path.transform(&trm);
                     if !device_path.is_empty() {
-                        let mut params = self.gstate.fill_params(FillRule::NonZeroWinding);
-                        params.is_text_glyph = true;
-                        self.display_list.push(DisplayElement::Fill {
-                            path: device_path,
-                            params,
-                        });
+                        self.emit_text_glyph(device_path, render_mode);
                     }
                 }
 
@@ -991,12 +987,7 @@ impl<'a> ContentInterpreter<'a> {
                         .concat(&font_matrix);
                     let device_path = glyph_path.transform(&trm);
                     if !device_path.is_empty() {
-                        let mut params = self.gstate.fill_params(FillRule::NonZeroWinding);
-                        params.is_text_glyph = true;
-                        self.display_list.push(DisplayElement::Fill {
-                            path: device_path,
-                            params,
-                        });
+                        self.emit_text_glyph(device_path, render_mode);
                     }
                 }
 
@@ -1008,6 +999,50 @@ impl<'a> ContentInterpreter<'a> {
                 let advance = Matrix::translate(tx, 0.0);
                 self.gstate.text_matrix = self.gstate.text_matrix.concat(&advance);
             }
+        }
+    }
+
+    /// Emit a text glyph to the display list based on the text rendering mode.
+    ///
+    /// Modes: 0=fill, 1=stroke, 2=fill+stroke, 3=invisible,
+    ///        4-7=same as 0-3 but add to clipping path (clipping not yet implemented).
+    fn emit_text_glyph(&mut self, device_path: PsPath, render_mode: i32) {
+        let mode = render_mode & 3; // strip clip bit
+        match mode {
+            0 => {
+                // Fill only
+                let mut params = self.gstate.fill_params(FillRule::NonZeroWinding);
+                params.is_text_glyph = true;
+                self.display_list.push(DisplayElement::Fill {
+                    path: device_path,
+                    params,
+                });
+            }
+            1 => {
+                // Stroke only
+                let mut params = self.gstate.stroke_params();
+                params.is_text_glyph = true;
+                self.display_list.push(DisplayElement::Stroke {
+                    path: device_path,
+                    params,
+                });
+            }
+            2 => {
+                // Fill then stroke
+                let mut fill_params = self.gstate.fill_params(FillRule::NonZeroWinding);
+                fill_params.is_text_glyph = true;
+                self.display_list.push(DisplayElement::Fill {
+                    path: device_path.clone(),
+                    params: fill_params,
+                });
+                let mut stroke_params = self.gstate.stroke_params();
+                stroke_params.is_text_glyph = true;
+                self.display_list.push(DisplayElement::Stroke {
+                    path: device_path,
+                    params: stroke_params,
+                });
+            }
+            _ => {} // mode 3 = invisible
         }
     }
 
