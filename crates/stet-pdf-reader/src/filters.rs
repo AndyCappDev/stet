@@ -15,6 +15,7 @@ pub enum Filter {
     ASCIIHexDecode,
     ASCII85Decode,
     RunLengthDecode,
+    DCTDecode,
 }
 
 /// Parse the /Filter and /DecodeParms entries from a stream dict.
@@ -64,6 +65,7 @@ fn filter_from_name(name: &[u8]) -> Result<Filter, PdfError> {
         b"ASCIIHexDecode" | b"AHx" => Ok(Filter::ASCIIHexDecode),
         b"ASCII85Decode" | b"A85" => Ok(Filter::ASCII85Decode),
         b"RunLengthDecode" | b"RL" => Ok(Filter::RunLengthDecode),
+        b"DCTDecode" | b"DCT" => Ok(Filter::DCTDecode),
         // Tolerate truncated filter names from malformed PDFs
         _ if name.starts_with(b"Flate") => Ok(Filter::FlateDecode),
         _ if name.starts_with(b"LZW") => Ok(Filter::LZWDecode),
@@ -92,6 +94,7 @@ pub fn decode_stream(
             Filter::ASCIIHexDecode => decode_ascii_hex(&data)?,
             Filter::ASCII85Decode => decode_ascii85(&data)?,
             Filter::RunLengthDecode => decode_run_length(&data)?,
+            Filter::DCTDecode => decode_dct(&data)?,
         };
     }
 
@@ -328,6 +331,22 @@ fn decode_run_length(data: &[u8]) -> Result<Vec<u8>, PdfError> {
     }
 
     Ok(result)
+}
+
+/// DCTDecode (JPEG).
+/// For PDF image streams, DCTDecode returns raw pixel data.
+/// However, when used as a filter in a filter chain, the JPEG data
+/// is typically the final representation — return the raw JPEG bytes
+/// since the image decoder will handle them. For standalone streams,
+/// decode the JPEG to raw pixels.
+fn decode_dct(data: &[u8]) -> Result<Vec<u8>, PdfError> {
+    use jpeg_decoder::Decoder;
+
+    let mut decoder = Decoder::new(data);
+    let pixels = decoder
+        .decode()
+        .map_err(|e| PdfError::DecompressionError(format!("DCTDecode: {e}")))?;
+    Ok(pixels)
 }
 
 /// Apply PNG or TIFF predictor to decoded data.

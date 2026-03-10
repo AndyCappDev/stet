@@ -137,10 +137,11 @@ impl<'a> ContentInterpreter<'a> {
 
     /// Interpret a content stream and return the display list.
     pub fn interpret(mut self, data: &[u8]) -> Result<DisplayList, PdfError> {
-        // Even if the stream has errors, return the partial display list
-        // (everything rendered before the error). This handles malformed PDFs
+        if let Err(e) = self.interpret_stream(data) {
+            eprintln!("warning: content stream error: {}", e);
+        }
+        // Return partial display list even on error — handles malformed PDFs
         // where flate decompression produces truncated content streams.
-        let _ = self.interpret_stream(data);
         Ok(self.display_list)
     }
 
@@ -1452,12 +1453,14 @@ impl<'a> ContentInterpreter<'a> {
             clip_path.segments.push(PathSegment::LineTo(p3.0, p3.1));
             clip_path.segments.push(PathSegment::ClosePath);
             self.display_list.push(DisplayElement::Clip {
-                path: clip_path,
+                path: clip_path.clone(),
                 params: ClipParams {
                     fill_rule: FillRule::NonZeroWinding,
                     ctm: Matrix::identity(),
                 },
             });
+            self.gstate.clip_path = Some(clip_path);
+            self.gstate.clip_path_version += 1;
         }
 
         // Interpret form content
@@ -1465,10 +1468,24 @@ impl<'a> ContentInterpreter<'a> {
         self.interpret_stream(&form_data)?;
         self.depth -= 1;
 
-        // Restore state
+        // Restore state — check if clip needs resetting
         self.resources = saved_resources;
         if let Some(saved) = self.gstate_stack.pop() {
+            let old_clip_version = self.gstate.clip_path_version;
             self.gstate = saved;
+            // Restore clip if it changed during the form
+            if self.gstate.clip_path_version != old_clip_version {
+                self.display_list.push(DisplayElement::InitClip);
+                if let Some(ref clip) = self.gstate.clip_path {
+                    self.display_list.push(DisplayElement::Clip {
+                        path: clip.clone(),
+                        params: ClipParams {
+                            fill_rule: FillRule::NonZeroWinding,
+                            ctm: Matrix::identity(),
+                        },
+                    });
+                }
+            }
         }
 
         Ok(())

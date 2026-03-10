@@ -565,9 +565,10 @@ pub fn parse_cmap(font_data: &[u8]) -> std::collections::HashMap<u32, u16> {
         let encoding = read_u16(font_data, entry + 2);
         let offset = read_u32(font_data, entry + 4) as usize;
         let priority = match (platform, encoding) {
-            (3, 1) => 3, // Windows Unicode BMP
-            (0, _) => 2, // Unicode
-            (1, 0) => 1, // Mac Roman
+            (3, 10) => 4, // Windows Unicode Full (format 12)
+            (3, 1) => 3,  // Windows Unicode BMP
+            (0, _) => 2,  // Unicode
+            (1, 0) => 1,  // Mac Roman
             _ => 0,
         };
         if priority > best_priority {
@@ -662,6 +663,29 @@ pub fn parse_cmap(font_data: &[u8]) -> std::collections::HashMap<u32, u16> {
                 let gid = read_u16(font_data, entries_off + i * 2);
                 if gid != 0 {
                     map.insert(first_code + i as u32, gid);
+                }
+            }
+        }
+        12 => {
+            // Format 12: segmented coverage (full 32-bit Unicode)
+            if subtable_off + 16 > font_data.len() {
+                return map;
+            }
+            let n_groups = read_u32(font_data, subtable_off + 12) as usize;
+            let groups_off = subtable_off + 16;
+            if groups_off + n_groups * 12 > font_data.len() {
+                return map;
+            }
+            for i in 0..n_groups {
+                let g = groups_off + i * 12;
+                let start_char = read_u32(font_data, g);
+                let end_char = read_u32(font_data, g + 4);
+                let start_gid = read_u32(font_data, g + 8);
+                for code in start_char..=end_char {
+                    let gid = start_gid + (code - start_char);
+                    if gid != 0 && gid <= 0xFFFF {
+                        map.insert(code, gid as u16);
+                    }
                 }
             }
         }
