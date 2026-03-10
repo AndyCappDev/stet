@@ -151,7 +151,8 @@ impl<'a> Lexer<'a> {
         let mut has_dot = false;
 
         // Optional sign
-        if self.pos < self.data.len() && (self.data[self.pos] == b'+' || self.data[self.pos] == b'-')
+        if self.pos < self.data.len()
+            && (self.data[self.pos] == b'+' || self.data[self.pos] == b'-')
         {
             self.pos += 1;
         }
@@ -176,13 +177,15 @@ impl<'a> Lexer<'a> {
         }
 
         if has_dot {
-            let s_str = std::str::from_utf8(s).map_err(|_| PdfError::Other("invalid number".into()))?;
+            let s_str =
+                std::str::from_utf8(s).map_err(|_| PdfError::Other("invalid number".into()))?;
             let f: f64 = s_str
                 .parse()
                 .map_err(|_| PdfError::Other(format!("invalid real: {s_str}")))?;
             Ok(Token::Real(f))
         } else {
-            let s_str = std::str::from_utf8(s).map_err(|_| PdfError::Other("invalid number".into()))?;
+            let s_str =
+                std::str::from_utf8(s).map_err(|_| PdfError::Other("invalid number".into()))?;
             let n: i64 = s_str
                 .parse()
                 .map_err(|_| PdfError::Other(format!("invalid integer: {s_str}")))?;
@@ -393,9 +396,7 @@ pub fn parse_object_from_token(lexer: &mut Lexer, tok: Token) -> Result<PdfObj, 
             let saved = lexer.pos();
             match lexer.next_token() {
                 Ok(Token::Int(g)) => match lexer.next_token() {
-                    Ok(Token::Keyword(ref kw)) if kw == b"R" => {
-                        Ok(PdfObj::Ref(n as u32, g as u16))
-                    }
+                    Ok(Token::Keyword(ref kw)) if kw == b"R" => Ok(PdfObj::Ref(n as u32, g as u16)),
                     _ => {
                         lexer.set_pos(saved);
                         Ok(PdfObj::Int(n))
@@ -512,10 +513,7 @@ mod tests {
     fn names() {
         assert_eq!(tokenize(b"/Type"), vec![Token::Name(b"Type".to_vec())]);
         assert_eq!(tokenize(b"/"), vec![Token::Name(b"".to_vec())]); // empty name
-        assert_eq!(
-            tokenize(b"/A#20B"),
-            vec![Token::Name(b"A B".to_vec())]
-        ); // hex escape
+        assert_eq!(tokenize(b"/A#20B"), vec![Token::Name(b"A B".to_vec())]); // hex escape
     }
 
     #[test]

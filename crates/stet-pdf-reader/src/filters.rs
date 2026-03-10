@@ -26,10 +26,7 @@ pub fn parse_filters(dict: &PdfDict) -> Result<(Vec<Filter>, Vec<Option<PdfDict>
 
     let filter_names: Vec<&[u8]> = match filter_obj {
         crate::objects::PdfObj::Name(n) => vec![n.as_slice()],
-        crate::objects::PdfObj::Array(arr) => arr
-            .iter()
-            .filter_map(|o| o.as_name())
-            .collect(),
+        crate::objects::PdfObj::Array(arr) => arr.iter().filter_map(|o| o.as_name()).collect(),
         _ => return Ok((Vec::new(), Vec::new())),
     };
 
@@ -143,9 +140,7 @@ fn decode_flate(data: &[u8], parms: Option<&PdfDict>) -> Result<Vec<u8>, PdfErro
 
 /// LZWDecode.
 fn decode_lzw(data: &[u8], parms: Option<&PdfDict>) -> Result<Vec<u8>, PdfError> {
-    let early_change = parms
-        .and_then(|p| p.get_int(b"EarlyChange"))
-        .unwrap_or(1);
+    let early_change = parms.and_then(|p| p.get_int(b"EarlyChange")).unwrap_or(1);
 
     let mut decoder = if early_change == 0 {
         weezl::decode::Decoder::with_tiff_size_switch(weezl::BitOrder::Msb, 8)
@@ -180,9 +175,8 @@ fn decode_ascii_hex(data: &[u8]) -> Result<Vec<u8>, PdfError> {
         if b.is_ascii_whitespace() {
             continue;
         }
-        let nibble = hex_digit(b).ok_or_else(|| {
-            PdfError::DecompressionError(format!("invalid hex digit: 0x{b:02x}"))
-        })?;
+        let nibble = hex_digit(b)
+            .ok_or_else(|| PdfError::DecompressionError(format!("invalid hex digit: 0x{b:02x}")))?;
         match high {
             None => high = Some(nibble),
             Some(h) => {

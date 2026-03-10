@@ -49,9 +49,9 @@ pub fn collect_pages(resolver: &Resolver) -> Result<Vec<PageInfo>, PdfError> {
         .get(b"Pages")
         .ok_or(PdfError::MissingKey("Pages"))?;
     let pages_obj = resolver.deref(pages_obj)?;
-    let pages_dict = pages_obj.as_dict().ok_or(PdfError::Other(
-        "catalog /Pages is not a dictionary".into(),
-    ))?;
+    let pages_dict = pages_obj
+        .as_dict()
+        .ok_or(PdfError::Other("catalog /Pages is not a dictionary".into()))?;
 
     let mut pages = Vec::new();
     let inherited = Inherited::default();
@@ -85,12 +85,11 @@ fn collect_pages_recursive(
     // Determine node type
     let type_name = node_dict.get_name(b"Type");
 
-    if matches!(type_name, Some(b"Page")) || (type_name.is_none() && node_dict.get(b"Kids").is_none())
+    if matches!(type_name, Some(b"Page"))
+        || (type_name.is_none() && node_dict.get(b"Kids").is_none())
     {
         // Leaf page node
-        let media_box = inherited
-            .media_box
-            .unwrap_or([0.0, 0.0, 612.0, 792.0]); // Default US Letter
+        let media_box = inherited.media_box.unwrap_or([0.0, 0.0, 612.0, 792.0]); // Default US Letter
         let crop_box = inherited.crop_box.unwrap_or(media_box);
         let rotate = inherited.rotate.unwrap_or(0);
         let resources = inherited.resources.clone().unwrap_or_default();
@@ -114,21 +113,13 @@ fn collect_pages_recursive(
                     PdfObj::Ref(n, g) => {
                         let child = resolver.resolve(*n, *g)?;
                         if let Some(child_dict) = child.as_dict() {
-                            collect_pages_recursive(
-                                resolver,
-                                child_dict,
-                                *n,
-                                &inherited,
-                                pages,
-                            )?;
+                            collect_pages_recursive(resolver, child_dict, *n, &inherited, pages)?;
                         }
                     }
                     _ => {
                         // Inline dict (unusual but possible)
                         if let Some(child_dict) = kid.as_dict() {
-                            collect_pages_recursive(
-                                resolver, child_dict, 0, &inherited, pages,
-                            )?;
+                            collect_pages_recursive(resolver, child_dict, 0, &inherited, pages)?;
                         }
                     }
                 }

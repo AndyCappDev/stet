@@ -2,24 +2,32 @@
 // Copyright (c) 2026 Scott Bowman
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! PDF parser and page navigator.
+//! PDF parser, page navigator, and content stream interpreter.
 //!
 //! Phase A: structural parsing — open a PDF, navigate its object graph,
 //! find pages, and extract raw content streams.
+//!
+//! Phase B: content stream interpretation — convert PDF page content into
+//! DisplayList elements for rendering through the SkiaDevice pipeline.
 
+pub mod content;
 pub mod error;
 pub mod filters;
 pub mod lexer;
 pub mod objects;
 pub mod page_tree;
 pub mod resolver;
+pub mod resources;
 pub mod xref;
 
 pub use error::PdfError;
 pub use objects::{PdfDict, PdfObj};
 pub use page_tree::PageInfo;
 
+use content::ContentInterpreter;
 use resolver::Resolver;
+use stet_core::display_list::DisplayList;
+use stet_core::graphics_state::Matrix;
 
 /// A parsed PDF document.
 pub struct PdfDocument<'a> {
@@ -100,6 +108,84 @@ impl<'a> PdfDocument<'a> {
         Ok(result)
     }
 
+    /// Render a page to a DisplayList at the given DPI.
+    ///
+    /// The display list uses device-space coordinates (paths pre-transformed
+    /// through the initial CTM). The initial CTM applies DPI scaling, Y-flip,
+    /// and CropBox offset.
+    pub fn render_page(&self, page: usize, dpi: f64) -> Result<DisplayList, PdfError> {
+        let info = self
+            .pages
+            .get(page)
+            .ok_or(PdfError::PageOutOfRange(page, self.pages.len()))?;
+
+        let [llx, lly, urx, ury] = info.crop_box;
+        let (page_w, page_h) = ((urx - llx).abs(), (ury - lly).abs());
+
+        // Build initial CTM: scale by dpi/72, Y-flip (PDF Y-up → device Y-down),
+        // and offset by CropBox origin.
+        let scale = dpi / 72.0;
+        let ctm = match info.rotate.rem_euclid(360) {
+            90 => {
+                // Rotate 90° CW: (x,y) → (y, page_w - x)
+                Matrix::new(0.0, -scale, -scale, 0.0, page_h * scale, page_w * scale)
+                    .concat(&Matrix::translate(-llx, -lly))
+            }
+            180 => {
+                // Rotate 180° + Y-flip = just X-flip
+                Matrix::new(-scale, 0.0, 0.0, scale, page_w * scale, 0.0)
+                    .concat(&Matrix::translate(-llx, -lly))
+            }
+            270 => {
+                // Rotate 270° CW + Y-flip
+                Matrix::new(0.0, scale, scale, 0.0, 0.0, 0.0)
+                    .concat(&Matrix::translate(-llx, -lly))
+            }
+            _ => {
+                // No rotation: scale + Y-flip + CropBox offset
+                // PDF (0,0) at bottom-left → device (0, page_h*scale) at top-left
+                Matrix::new(scale, 0.0, 0.0, -scale, -llx * scale, ury * scale)
+            }
+        };
+
+        // Get page content stream
+        let content_data = self.page_contents(page)?;
+
+        // Interpret content stream
+        let interpreter = ContentInterpreter::new(&self.resolver, info.resources.clone(), ctm);
+        interpreter.interpret(&content_data)
+    }
+
+    /// Render a page to RGBA pixel data at the given DPI.
+    ///
+    /// Returns (pixel_data, width, height). Pixel data is RGBA, 4 bytes per pixel.
+    pub fn render_page_to_rgba(
+        &self,
+        page: usize,
+        dpi: f64,
+    ) -> Result<(Vec<u8>, u32, u32), PdfError> {
+        let (page_w, page_h) = self.page_size(page)?;
+        let scale = dpi / 72.0;
+        let pixel_w = (page_w * scale).round() as u32;
+        let pixel_h = (page_h * scale).round() as u32;
+
+        let display_list = self.render_page(page, dpi)?;
+
+        let rgba = stet_render::render_region(
+            &display_list,
+            0.0,
+            0.0,
+            pixel_w as f64,
+            pixel_h as f64,
+            pixel_w,
+            pixel_h,
+            dpi,
+            None,
+        );
+
+        Ok((rgba, pixel_w, pixel_h))
+    }
+
     /// Access the resolver for arbitrary object lookups.
     pub fn resolver(&self) -> &Resolver<'a> {
         &self.resolver
@@ -166,9 +252,7 @@ mod tests {
 
         // Object 3: Page
         let obj3_offset = pdf.len();
-        pdf.extend(
-            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>\nendobj\n",
-        );
+        pdf.extend(b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>\nendobj\n");
 
         // Xref
         let xref_offset = pdf.len();

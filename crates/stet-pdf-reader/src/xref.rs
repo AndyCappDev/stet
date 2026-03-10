@@ -34,9 +34,7 @@ pub struct XrefTable {
 impl XrefTable {
     /// Look up an object's location by number.
     pub fn get(&self, obj_num: u32) -> Option<&XrefEntry> {
-        self.entries
-            .get(obj_num as usize)
-            .and_then(|e| e.as_ref())
+        self.entries.get(obj_num as usize).and_then(|e| e.as_ref())
     }
 
     /// Total number of entry slots (including None gaps).
@@ -176,7 +174,10 @@ fn parse_classic_xref(
             let obj_num = first_obj as u32 + i;
 
             let entry = match type_byte {
-                b'n' => XrefEntry::InFile { offset: off, generation },
+                b'n' => XrefEntry::InFile {
+                    offset: off,
+                    generation,
+                },
                 b'f' => XrefEntry::Free,
                 _ => XrefEntry::Free,
             };
@@ -184,7 +185,9 @@ fn parse_classic_xref(
 
             // Advance past entry: skip to next line
             pos += 18;
-            while pos < data.len() && (data[pos] == b' ' || data[pos] == b'\r' || data[pos] == b'\n') {
+            while pos < data.len()
+                && (data[pos] == b' ' || data[pos] == b'\r' || data[pos] == b'\n')
+            {
                 pos += 1;
             }
         }
@@ -294,11 +297,11 @@ fn parse_xref_stream(
     };
 
     // Parse xref stream entries
-    let w = dict
-        .get_array(b"W")
-        .ok_or(PdfError::MissingKey("W"))?;
+    let w = dict.get_array(b"W").ok_or(PdfError::MissingKey("W"))?;
     if w.len() != 3 {
-        return Err(PdfError::Other("xref stream /W must have 3 elements".into()));
+        return Err(PdfError::Other(
+            "xref stream /W must have 3 elements".into(),
+        ));
     }
     let w1 = w[0].as_int().unwrap_or(0) as usize;
     let w2 = w[1].as_int().unwrap_or(0) as usize;
@@ -310,9 +313,7 @@ fn parse_xref_stream(
     }
 
     // Parse /Index array (defaults to [0 Size])
-    let size = dict
-        .get_int(b"Size")
-        .ok_or(PdfError::MissingKey("Size"))? as u32;
+    let size = dict.get_int(b"Size").ok_or(PdfError::MissingKey("Size"))? as u32;
 
     let index_pairs: Vec<(u32, u32)> = if let Some(index_arr) = dict.get_array(b"Index") {
         index_arr

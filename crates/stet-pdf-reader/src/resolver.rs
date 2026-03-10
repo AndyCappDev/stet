@@ -237,9 +237,7 @@ impl<'a> Resolver<'a> {
         };
 
         // Parse the header
-        let n = dict
-            .get_int(b"N")
-            .ok_or(PdfError::MissingKey("N"))? as usize;
+        let n = dict.get_int(b"N").ok_or(PdfError::MissingKey("N"))? as usize;
         let first = dict
             .get_int(b"First")
             .ok_or(PdfError::MissingKey("First"))? as usize;

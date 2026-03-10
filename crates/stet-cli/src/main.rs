@@ -12,6 +12,7 @@ use stet_core::eps::{content_is_epsf, read_eps_bounding_box, strip_dos_eps_heade
 use stet_engine::eval::{parse_and_exec, parse_and_exec_file};
 use stet_ops::build_system_dict;
 use stet_pdf::PdfDevice;
+use stet_pdf_reader::PdfDocument;
 use stet_render::SkiaDevice;
 
 /// A `Write` implementation that writes to a shared `Vec<u8>` behind a mutex.
@@ -179,6 +180,13 @@ fn run_png_mode(
     output_profile_path: Option<String>,
     page_filter: Option<std::collections::HashSet<i32>>,
 ) {
+    // Check if all files are PDFs — use fast path (no PS interpreter needed)
+    if !file_args.is_empty() && file_args.iter().all(|f| is_pdf_file(f)) {
+        let dpi = dpi_override.unwrap_or(300.0);
+        run_pdf_input_png(dpi, &file_args, &page_filter);
+        return;
+    }
+
     let mut ctx = create_context(no_icc, output_profile_path.as_deref());
     ctx.page_filter = page_filter;
 
@@ -280,11 +288,7 @@ fn run_viewer_mode(
         return;
     }
 
-    let (interp_end, viewer_end, dl_sender, advance_rx) = stet_viewer::create_channels();
-    let first_file = file_args.first().cloned();
-
     // Get CMYK profile bytes for ICC-aware viewer rendering.
-    // If --output-profile is specified, use that; otherwise search for system profile.
     let system_cmyk_bytes = if !no_icc {
         if let Some(ref path) = output_profile_path {
             std::fs::read(path).ok().map(std::sync::Arc::new)
@@ -294,6 +298,15 @@ fn run_viewer_mode(
     } else {
         None
     };
+
+    // PDF files: use fast path (no PS interpreter needed)
+    if file_args.iter().all(|f| is_pdf_file(f)) {
+        run_pdf_input_viewer(dpi_override, &file_args, &page_filter, system_cmyk_bytes);
+        return;
+    }
+
+    let (interp_end, viewer_end, dl_sender, advance_rx) = stet_viewer::create_channels();
+    let first_file = file_args.first().cloned();
 
     // Determine page size for the first file so the window is created at the
     // correct aspect ratio. On Wayland the compositor centers the window at
@@ -1031,6 +1044,248 @@ fn print_exec_stack(ctx: &Context) {
     buf.push(b']');
     std::io::stderr().write_all(&buf).ok();
     eprintln!();
+}
+
+/// Check if a filename has a PDF extension.
+fn is_pdf_file(filename: &str) -> bool {
+    filename.to_ascii_lowercase().ends_with(".pdf")
+}
+
+/// Render PDF files to PNG output.
+fn run_pdf_input_png(
+    dpi: f64,
+    file_args: &[String],
+    page_filter: &Option<std::collections::HashSet<i32>>,
+) {
+    for filename in file_args {
+        let data = std::fs::read(filename).unwrap_or_else(|e| {
+            eprintln!("Error: cannot read '{}': {}", filename, e);
+            std::process::exit(1);
+        });
+
+        let doc = PdfDocument::from_bytes(&data).unwrap_or_else(|e| {
+            eprintln!("Error: cannot parse '{}': {}", filename, e);
+            std::process::exit(1);
+        });
+
+        let output_base = filename
+            .strip_suffix(".pdf")
+            .or_else(|| filename.strip_suffix(".PDF"))
+            .unwrap_or(filename);
+
+        let start = std::time::Instant::now();
+        let page_count = doc.page_count();
+        eprintln!(
+            "\n{}",
+            "=".repeat(60)
+        );
+        eprintln!("Processing PDF: {} ({} pages)", filename, page_count);
+        eprintln!("{}", "=".repeat(60));
+
+        for page in 0..page_count {
+            let page_1based = page as i32 + 1;
+            if let Some(filter) = page_filter
+                && !filter.contains(&page_1based)
+            {
+                continue;
+            }
+
+            match doc.render_page_to_rgba(page, dpi) {
+                Ok((rgba, w, h)) => {
+                    let out_path = if page_count == 1 {
+                        format!("{}.png", output_base)
+                    } else {
+                        format!("{}-{:03}.png", output_base, page_1based)
+                    };
+                    write_png_file(&out_path, &rgba, w, h);
+                    eprintln!("  Page {}: {}x{} → {}", page_1based, w, h, out_path);
+                }
+                Err(e) => {
+                    eprintln!("  Page {}: render error: {}", page_1based, e);
+                }
+            }
+        }
+
+        eprintln!(
+            "PDF render time: {:.3} seconds",
+            start.elapsed().as_secs_f64()
+        );
+    }
+}
+
+/// Write RGBA data to a PNG file.
+fn write_png_file(path: &str, rgba: &[u8], width: u32, height: u32) {
+    let file = std::fs::File::create(path).unwrap_or_else(|e| {
+        eprintln!("Error: cannot create '{}': {}", path, e);
+        std::process::exit(1);
+    });
+    let w = std::io::BufWriter::new(file);
+    let mut encoder = png::Encoder::new(w, width, height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header().unwrap();
+    writer.write_image_data(rgba).unwrap();
+}
+
+/// Render PDF files to the viewer.
+#[cfg(feature = "viewer")]
+fn run_pdf_input_viewer(
+    dpi_override: Option<f64>,
+    file_args: &[String],
+    page_filter: &Option<std::collections::HashSet<i32>>,
+    system_cmyk_bytes: Option<std::sync::Arc<Vec<u8>>>,
+) {
+    let (interp_end, viewer_end, dl_sender, advance_rx) = stet_viewer::create_channels();
+
+    let first_file = file_args.first().cloned();
+
+    // Try to get first page size for proper window sizing
+    let first_page_size = first_file.as_deref().and_then(|path| {
+        let data = std::fs::read(path).ok()?;
+        let doc = PdfDocument::from_bytes(&data).ok()?;
+        doc.page_size(0).ok()
+    });
+
+    // Relay thread: convert display list tuples to ViewerMsg
+    let page_sender = interp_end.page_sender;
+    let dl_receiver = interp_end.dl_receiver;
+    std::thread::spawn(move || {
+        let mut page_num = 1u32;
+        while let Ok((dl, dpi, w, h)) = dl_receiver.recv() {
+            if w == 0 && h == 0 {
+                if dpi < 0.0 {
+                    let _ = page_sender.send(stet_viewer::ViewerMsg::JobDone);
+                } else {
+                    let _ = page_sender.send(stet_viewer::ViewerMsg::NewJob);
+                    page_num = 1;
+                }
+                continue;
+            }
+            let _ = page_sender.send(stet_viewer::ViewerMsg::Page(stet_viewer::PageReady {
+                display_list: dl,
+                width: w,
+                height: h,
+                dpi,
+                page_num,
+            }));
+            page_num += 1;
+        }
+    });
+
+    // PDF rendering thread
+    let file_args_owned: Vec<String> = file_args.to_vec();
+    let page_filter_owned = page_filter.clone();
+    let dpi_override_copy = dpi_override;
+    std::thread::spawn(move || {
+        let dpi = dpi_override_copy.unwrap_or(150.0);
+
+        for (job_idx, filename) in file_args_owned.iter().enumerate() {
+            if job_idx > 0 {
+                // Signal new job
+                let _ = dl_sender.send((
+                    stet_core::display_list::DisplayList::new(),
+                    0.0,
+                    0,
+                    0,
+                ));
+            }
+
+            let data = match std::fs::read(filename) {
+                Ok(d) => d,
+                Err(e) => {
+                    eprintln!("Error: cannot read '{}': {}", filename, e);
+                    continue;
+                }
+            };
+
+            let doc = match PdfDocument::from_bytes(&data) {
+                Ok(d) => d,
+                Err(e) => {
+                    eprintln!("Error: cannot parse '{}': {}", filename, e);
+                    continue;
+                }
+            };
+
+            let page_count = doc.page_count();
+            eprintln!("PDF: {} ({} pages)", filename, page_count);
+
+            for page in 0..page_count {
+                let page_1based = page as i32 + 1;
+                if let Some(ref filter) = page_filter_owned
+                    && !filter.contains(&page_1based)
+                {
+                    continue;
+                }
+
+                match doc.render_page(page, dpi) {
+                    Ok(display_list) => {
+                        let (w, h) = doc.page_size(page).unwrap_or((612.0, 792.0));
+                        let scale = dpi / 72.0;
+                        let pixel_w = (w * scale).round() as u32;
+                        let pixel_h = (h * scale).round() as u32;
+                        let _ = dl_sender.send((display_list, dpi, pixel_w, pixel_h));
+                    }
+                    Err(e) => {
+                        eprintln!("  Page {}: render error: {}", page_1based, e);
+                    }
+                }
+            }
+
+            // Signal job done and wait for advance between jobs
+            if job_idx + 1 < file_args_owned.len() {
+                let _ = dl_sender.send((
+                    stet_core::display_list::DisplayList::new(),
+                    -1.0,
+                    0,
+                    0,
+                ));
+                let _ = advance_rx.recv();
+            }
+        }
+        // dl_sender drops → relay thread ends → page_sender drops → viewer sees disconnect
+    });
+
+    // Wait for first page before creating viewer window
+    let page_rx = viewer_end.page_receiver;
+    let screen_info_sender = viewer_end.screen_info_sender;
+    let advance_sender = viewer_end.advance_sender;
+
+    let mut first_page = None;
+    loop {
+        match page_rx.recv() {
+            Ok(msg @ stet_viewer::ViewerMsg::Page(_)) => {
+                first_page = Some(msg);
+                break;
+            }
+            Ok(_) => continue,
+            Err(_) => break,
+        }
+    }
+
+    if let Some(first) = first_page {
+        let (fwd_tx, fwd_rx) = std::sync::mpsc::channel();
+        fwd_tx.send(first).ok();
+        std::thread::spawn(move || {
+            for msg in page_rx {
+                if fwd_tx.send(msg).is_err() {
+                    break;
+                }
+            }
+        });
+        let new_viewer_end = stet_viewer::ViewerEnd {
+            page_receiver: fwd_rx,
+            screen_info_sender,
+            advance_sender,
+        };
+        stet_viewer::run_viewer(
+            new_viewer_end,
+            dpi_override,
+            first_file.as_deref(),
+            first_page_size,
+            system_cmyk_bytes,
+        );
+    }
+    std::process::exit(0);
 }
 
 /// Locate the `resources/` directory relative to the executable.
