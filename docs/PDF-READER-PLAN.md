@@ -134,28 +134,34 @@ impl PdfDocument {
 
 ## Implementation Phases
 
-### Phase A: Parser (Foundation)
+### Phase A: Parser (Foundation) — COMPLETE
 
-- PDF lexer (tokenizer for PDF syntax)
-- PDF object model (`PdfObj` enum with indirect references)
-- Xref table and xref stream parsing
-- Object and object stream resolution
-- Page tree traversal with inherited attributes (MediaBox, CropBox, Rotate, Resources)
-- Stream decompression (reuse existing filter decoders)
-- Basic validation and error recovery
+- PDF lexer (tokenizer for PDF syntax) ✓
+- PDF object model (`PdfObj` enum with indirect references) ✓
+- Xref table and xref stream parsing ✓
+- Object and object stream resolution ✓
+- Page tree traversal with inherited attributes (MediaBox, CropBox, Rotate, Resources) ✓
+- Stream decompression (reuse existing filter decoders) ✓
+- Basic validation and error recovery ✓
 
-### Phase B: Graphics (Core Rendering)
+### Phase B: Graphics (Core Rendering) — COMPLETE
 
-- Content stream interpreter framework (operator dispatch)
-- Graphics state stack (`q`/`Q`)
-- Path construction and painting operators → DisplayList
-- Clipping paths
-- Color spaces: DeviceRGB, DeviceCMYK, DeviceGray, CalRGB, CalGray, ICCBased, Indexed, Separation, DeviceN, Lab
-- Images (XObject and inline): decode, color convert, emit as DisplayElement::Image
-- Patterns: tiling (Type 1) and shading (Type 2)
-- Shadings: Types 1–7 (reuse existing sampling/mesh code)
-- Form XObjects (recursive content stream interpretation)
-- ExtGState: line width, dash, join, cap, overprint, rendering intent
+- Content stream interpreter framework (operator dispatch) ✓
+- Graphics state stack (`q`/`Q`) with clip restore ✓
+- Path construction and painting operators → DisplayList ✓
+- Clipping paths ✓
+- Color spaces: DeviceRGB, DeviceCMYK, DeviceGray, ICCBased, Indexed, Separation ✓
+- Images (XObject and inline): decode, color convert, emit as DisplayElement::Image ✓
+- Shadings: Types 2/3 (axial/radial) ✓
+- Form XObjects (recursive content stream interpretation, depth limit 20) ✓
+- ExtGState: line width, dash, join, cap, overprint, rendering intent, opacity ✓
+- PDF Function evaluator (Types 0/2/3/4) ✓
+- Page CTM: scale(dpi/72) + Y-flip + CropBox offset + rotation ✓
+
+**Not done (moved to Phase D)**:
+- Tiling patterns (tile content → sub-DisplayList)
+- Shading Types 1, 4-7 (function-based, triangle mesh, Coons/tensor patches)
+- CalRGB, CalGray, Lab, DeviceN color spaces
 
 ### Phase C: Text (Text Display) — COMPLETE
 
