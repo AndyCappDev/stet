@@ -26,6 +26,8 @@ pub enum PdfFont {
     Cff(CffPdfFont),
     /// Type 0 composite font (CIDFontType2 with TrueType outlines)
     CidTrueType(CidTrueTypePdfFont),
+    /// Type 3 font: glyphs defined as content streams.
+    Type3(Type3PdfFont),
 }
 
 pub struct Type1PdfFont {
@@ -63,6 +65,17 @@ pub struct CidTrueTypePdfFont {
     pub identity_cid_to_gid: bool,
 }
 
+/// Type 3 font: glyphs defined as content streams (CharProcs).
+pub struct Type3PdfFont {
+    /// Char code → decoded content stream bytes for the glyph.
+    pub char_procs: HashMap<u8, Vec<u8>>,
+    /// Char code → resources dict for the glyph stream (from font dict).
+    pub resources: PdfDict,
+    pub widths: [f64; 256],
+    pub font_matrix: Matrix,
+    pub font_bbox: [f64; 4],
+}
+
 /// Font cache: font resource name → resolved font.
 pub type FontCache = HashMap<Vec<u8>, Arc<PdfFont>>;
 
@@ -78,6 +91,11 @@ pub fn resolve_font(resolver: &Resolver, font_ref: &PdfObj) -> Result<PdfFont, P
     // Handle Type 0 composite fonts (CID fonts)
     if subtype == b"Type0" {
         return resolve_type0(resolver, font_dict);
+    }
+
+    // Handle Type 3 fonts (glyph content streams)
+    if subtype == b"Type3" {
+        return resolve_type3(resolver, font_dict);
     }
 
     let first_char = font_dict.get_int(b"FirstChar").unwrap_or(0) as usize;
@@ -270,6 +288,87 @@ fn substitute_font(
 }
 
 /// Resolve a Type 1 font from its FontDescriptor.
+/// Resolve a Type 3 font: glyphs defined as content streams.
+fn resolve_type3(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, PdfError> {
+    let first_char = font_dict.get_int(b"FirstChar").unwrap_or(0) as usize;
+
+    // Parse widths array (already in glyph space — Type 3 FontMatrix maps to text space)
+    let mut widths = [0.0f64; 256];
+    if let Some(w_arr) = font_dict.get_array(b"Widths") {
+        for (i, obj) in w_arr.iter().enumerate() {
+            let code = first_char + i;
+            if code < 256 {
+                widths[code] = obj.as_f64().unwrap_or(0.0);
+            }
+        }
+    }
+
+    // FontMatrix (typically something like [0.01 0 0 0.01 0 0] for 100-unit glyph space)
+    let font_matrix = font_dict
+        .get_array(b"FontMatrix")
+        .map(|a| {
+            let v: Vec<f64> = a.iter().filter_map(|o| o.as_f64()).collect();
+            if v.len() >= 6 {
+                Matrix::new(v[0], v[1], v[2], v[3], v[4], v[5])
+            } else {
+                Matrix::new(0.001, 0.0, 0.0, 0.001, 0.0, 0.0)
+            }
+        })
+        .unwrap_or_else(|| Matrix::new(0.001, 0.0, 0.0, 0.001, 0.0, 0.0));
+
+    let font_bbox = font_dict
+        .get_array(b"FontBBox")
+        .map(|a| {
+            let v: Vec<f64> = a.iter().filter_map(|o| o.as_f64()).collect();
+            if v.len() >= 4 {
+                [v[0], v[1], v[2], v[3]]
+            } else {
+                [0.0, 0.0, 1.0, 1.0]
+            }
+        })
+        .unwrap_or([0.0, 0.0, 1.0, 1.0]);
+
+    // Resolve encoding: maps char codes → glyph names in CharProcs
+    let encoding = resolve_encoding(font_dict, resolver)?;
+
+    // Get CharProcs dict: maps glyph names → content streams
+    let char_procs_dict = font_dict
+        .get_dict(b"CharProcs")
+        .ok_or(PdfError::Other("Type3 font missing CharProcs".into()))?;
+
+    // Resources for interpreting CharProc streams
+    let resources = if let Some(res_ref) = font_dict.get(b"Resources") {
+        match resolver.deref(res_ref)? {
+            PdfObj::Dict(d) => d,
+            _ => PdfDict::new(),
+        }
+    } else {
+        PdfDict::new()
+    };
+
+    // Pre-decode all CharProc streams: encoding[code] → stream bytes
+    let mut char_procs = HashMap::new();
+    for code in 0..256u16 {
+        if let Some(glyph_name) = &encoding[code as usize] {
+            if let Some(proc_ref) = char_procs_dict.get(glyph_name.as_bytes()) {
+                if let Ok(proc_obj) = resolver.deref(proc_ref) {
+                    if let Ok(data) = resolver.stream_data_from_obj(&proc_obj) {
+                        char_procs.insert(code as u8, data);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(PdfFont::Type3(Type3PdfFont {
+        char_procs,
+        resources,
+        widths,
+        font_matrix,
+        font_bbox,
+    }))
+}
+
 fn resolve_type1(
     resolver: &Resolver,
     descriptor: &Option<PdfDict>,
@@ -515,12 +614,14 @@ fn strip_pfb(data: &[u8]) -> Vec<u8> {
 
 impl PdfFont {
     /// Get glyph outline path for a character code (single-byte fonts).
+    /// Returns None for Type 3 fonts (they use content streams, not outlines).
     pub fn glyph_path(&self, char_code: u8) -> Option<PsPath> {
         match self {
             PdfFont::Type1(f) => f.glyph_path(char_code),
             PdfFont::TrueType(f) => f.glyph_path(char_code),
             PdfFont::Cff(f) => f.glyph_path(char_code),
             PdfFont::CidTrueType(f) => f.glyph_path_cid(char_code as u16),
+            PdfFont::Type3(_) => None,
         }
     }
 
@@ -539,6 +640,7 @@ impl PdfFont {
             PdfFont::TrueType(f) => f.widths[char_code as usize],
             PdfFont::Cff(f) => f.widths[char_code as usize],
             PdfFont::CidTrueType(f) => f.glyph_width_cid(char_code as u16),
+            PdfFont::Type3(f) => f.widths[char_code as usize],
         }
     }
 
@@ -556,12 +658,34 @@ impl PdfFont {
             PdfFont::Type1(f) => f.font_matrix,
             PdfFont::TrueType(_) | PdfFont::CidTrueType(_) => Matrix::identity(),
             PdfFont::Cff(f) => f.font_matrix,
+            PdfFont::Type3(f) => f.font_matrix,
         }
     }
 
     /// Whether this is a composite (CID) font that uses 2-byte character codes.
     pub fn is_composite(&self) -> bool {
         matches!(self, PdfFont::CidTrueType(_))
+    }
+
+    /// Whether this is a Type 3 font (glyphs are content streams).
+    pub fn is_type3(&self) -> bool {
+        matches!(self, PdfFont::Type3(_))
+    }
+
+    /// Get the Type 3 glyph stream data for a character code.
+    pub fn type3_char_proc(&self, char_code: u8) -> Option<&[u8]> {
+        match self {
+            PdfFont::Type3(f) => f.char_procs.get(&char_code).map(|v| v.as_slice()),
+            _ => None,
+        }
+    }
+
+    /// Get the Type 3 font resources dict.
+    pub fn type3_resources(&self) -> Option<&PdfDict> {
+        match self {
+            PdfFont::Type3(f) => Some(&f.resources),
+            _ => None,
+        }
     }
 }
 

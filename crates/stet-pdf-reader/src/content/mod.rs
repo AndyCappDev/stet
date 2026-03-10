@@ -305,6 +305,9 @@ impl<'a> ContentInterpreter<'a> {
             // Marked content (no-op)
             b"BMC" | b"BDC" | b"EMC" | b"MP" | b"DP" => Ok(()),
 
+            // Type 3 glyph operators (width/cache — we use Widths array instead)
+            b"d0" | b"d1" => Ok(()),
+
             // Compatibility (no-op)
             b"BX" | b"EX" => Ok(()),
 
@@ -1000,6 +1003,19 @@ impl<'a> ContentInterpreter<'a> {
                 let advance = Matrix::translate(tx, 0.0);
                 self.gstate.text_matrix = self.gstate.text_matrix.concat(&advance);
             }
+        } else if font.is_type3() {
+            // Type 3 font: each glyph is a content stream
+            for &byte in text {
+                self.show_type3_glyph(&font, byte);
+
+                let w0 = font.glyph_width(byte);
+                let mut tx = w0 * font_size + char_spacing;
+                if byte == b' ' {
+                    tx += word_spacing;
+                }
+                let advance = Matrix::translate(tx, 0.0);
+                self.gstate.text_matrix = self.gstate.text_matrix.concat(&advance);
+            }
         } else {
             // Simple font: 1-byte character codes
             for &byte in text {
@@ -1026,6 +1042,62 @@ impl<'a> ContentInterpreter<'a> {
                 let advance = Matrix::translate(tx, 0.0);
                 self.gstate.text_matrix = self.gstate.text_matrix.concat(&advance);
             }
+        }
+    }
+
+    /// Render a single Type 3 glyph by interpreting its CharProc content stream.
+    fn show_type3_glyph(&mut self, font: &PdfFont, char_code: u8) {
+        let proc_data = match font.type3_char_proc(char_code) {
+            Some(data) => data.to_vec(),
+            None => return,
+        };
+        let resources = match font.type3_resources() {
+            Some(r) => r.clone(),
+            None => return,
+        };
+
+        let font_size = self.gstate.font_size;
+        let text_rise = self.gstate.text_rise;
+        let font_matrix = font.font_matrix();
+
+        // Build the text rendering matrix: CTM × Tm × [fontSize 0 0 fontSize 0 rise] × FontMatrix
+        let text_state_matrix =
+            Matrix::new(font_size, 0.0, 0.0, font_size, 0.0, text_rise);
+        let trm = self
+            .gstate
+            .ctm
+            .concat(&self.gstate.text_matrix)
+            .concat(&text_state_matrix)
+            .concat(&font_matrix);
+
+        // Interpret the CharProc stream with TRM as the CTM.
+        // Save current state and swap in a fresh display list.
+        self.gstate_stack.push(self.gstate.clone());
+        let saved_resources = std::mem::replace(&mut self.resources, resources);
+        let saved_display_list = std::mem::take(&mut self.display_list);
+        let saved_path = std::mem::take(&mut self.current_path);
+        let saved_point = self.current_point.take();
+        let saved_subpath = self.subpath_start.take();
+
+        self.gstate.ctm = trm;
+
+        self.depth += 1;
+        let _ = self.interpret_stream(&proc_data);
+        self.depth -= 1;
+
+        // Collect glyph display elements and append to main display list
+        let glyph_elements = std::mem::replace(&mut self.display_list, saved_display_list);
+        self.resources = saved_resources;
+        self.current_path = saved_path;
+        self.current_point = saved_point;
+        self.subpath_start = saved_subpath;
+        if let Some(saved) = self.gstate_stack.pop() {
+            self.gstate = saved;
+        }
+
+        // Append all glyph elements to the main display list
+        for elem in glyph_elements.into_elements() {
+            self.display_list.push(elem);
         }
     }
 
@@ -1116,10 +1188,38 @@ impl<'a> ContentInterpreter<'a> {
         let height = dict
             .get_int(b"Height")
             .ok_or(PdfError::Other("image missing Height".into()))? as u32;
-        let bpc = dict.get_int(b"BitsPerComponent").unwrap_or(8) as u32;
+
+        // Check for image mask (1-bit stencil painted with current fill color)
+        let is_image_mask = dict
+            .get(b"ImageMask")
+            .and_then(|o| match o {
+                PdfObj::Bool(b) => Some(*b),
+                _ => None,
+            })
+            .unwrap_or(false);
+
+        let bpc = if is_image_mask {
+            1
+        } else {
+            dict.get_int(b"BitsPerComponent").unwrap_or(8) as u32
+        };
 
         // Resolve color space
-        let color_space = if let Some(cs_obj) = dict.get(b"ColorSpace") {
+        let color_space = if is_image_mask {
+            // Image mask polarity from /Decode array:
+            // [1 0] → polarity=true (raw bit 1 paints)
+            // [0 1] → polarity=false (raw bit 0 paints) — this is the default
+            let polarity = if let Some(arr) = dict.get_array(b"Decode") {
+                let vals: Vec<f64> = arr.iter().filter_map(|o| o.as_f64()).collect();
+                vals.len() >= 2 && vals[0] > 0.5
+            } else {
+                false
+            };
+            ImageColorSpace::Mask {
+                color: self.gstate.fill_color.clone(),
+                polarity,
+            }
+        } else if let Some(cs_obj) = dict.get(b"ColorSpace") {
             let resolved = resolve_color_space_obj(cs_obj, self.resolver)?;
             to_image_color_space(&resolved)
         } else {
@@ -1148,8 +1248,8 @@ impl<'a> ContentInterpreter<'a> {
                 .collect()
         });
 
-        // Convert data if BPC != 8
-        let sample_data = if bpc == 8 || bpc == 0 {
+        // Convert data if BPC != 8 (but NOT for image masks — keep raw 1-bit data)
+        let sample_data = if is_image_mask || bpc == 8 || bpc == 0 {
             sample_data
         } else {
             expand_bits_to_bytes(

@@ -85,6 +85,11 @@ impl DisplayList {
     pub fn elements_from(&self, start: usize) -> &[DisplayElement] {
         &self.elements[start..]
     }
+
+    /// Consume the display list and return the elements.
+    pub fn into_elements(self) -> Vec<DisplayElement> {
+        self.elements
+    }
 }
 
 impl Default for DisplayList {
