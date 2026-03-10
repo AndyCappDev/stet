@@ -8,6 +8,7 @@
 //! the existing SkiaDevice pipeline.
 
 pub mod color_space;
+pub mod font;
 pub mod graphics_state;
 
 use crate::error::PdfError;
@@ -21,6 +22,9 @@ use self::color_space::{
 };
 use self::graphics_state::{ColorSpaceRef, PdfGraphicsState};
 
+use std::sync::Arc;
+
+use self::font::{FontCache, PdfFont};
 use stet_core::device::{ClipParams, ImageColorSpace, ImageParams};
 use stet_core::display_list::{DisplayElement, DisplayList};
 use stet_core::graphics_state::{
@@ -80,6 +84,8 @@ pub struct ContentInterpreter<'a> {
     display_list: DisplayList,
     in_text: bool,
     depth: u32,
+    font_cache: FontCache,
+    current_font: Option<Arc<PdfFont>>,
 }
 
 impl<'a> ContentInterpreter<'a> {
@@ -97,6 +103,8 @@ impl<'a> ContentInterpreter<'a> {
             display_list: DisplayList::new(),
             in_text: false,
             depth: 0,
+            font_cache: FontCache::new(),
+            current_font: None,
         }
     }
 
@@ -241,9 +249,11 @@ impl<'a> ContentInterpreter<'a> {
             b"SC" | b"SCN" => self.op_sc_stroke(),
             b"sc" | b"scn" => self.op_sc_fill(),
 
-            // Text (stub for Phase C)
+            // Text operators
             b"BT" => {
                 self.in_text = true;
+                self.gstate.text_matrix = Matrix::identity();
+                self.gstate.text_line_matrix = Matrix::identity();
                 Ok(())
             }
             b"ET" => {
@@ -275,8 +285,10 @@ impl<'a> ContentInterpreter<'a> {
             b"TD" => self.op_big_td(),
             b"Tm" => self.op_tm(),
             b"T*" => self.op_t_star(),
-            b"Tj" | b"TJ" => Ok(()), // Skip text rendering for now
-            b"'" | b"\"" => Ok(()),  // Skip text rendering for now
+            b"Tj" => self.op_tj(),
+            b"TJ" => self.op_big_tj(),
+            b"'" => self.op_quote(),
+            b"\"" => self.op_dblquote(),
 
             // XObject
             b"Do" => self.op_do(),
@@ -785,9 +797,49 @@ impl<'a> ContentInterpreter<'a> {
         }
         self.gstate.font_size = self.operand_stack[len - 1].as_f64().unwrap_or(12.0);
         if let Some(name) = self.operand_stack[len - 2].as_name() {
-            self.gstate.text_font_name = name.to_vec();
+            let name = name.to_vec();
+            self.gstate.text_font_name = name.clone();
+            self.resolve_current_font(&name);
         }
         Ok(())
+    }
+
+    /// Resolve the current font by name from the font cache or resources.
+    fn resolve_current_font(&mut self, name: &[u8]) {
+        // Check cache first
+        if let Some(cached) = self.font_cache.get(name) {
+            self.current_font = Some(Arc::clone(cached));
+            return;
+        }
+
+        // Look up in resources /Font dict
+        let font_ref = self
+            .resources
+            .get_dict(b"Font")
+            .and_then(|fd| fd.get(name).cloned());
+        let font_ref = match font_ref {
+            Some(r) => r,
+            None => {
+                self.current_font = None;
+                return;
+            }
+        };
+
+        match font::resolve_font(self.resolver, &font_ref) {
+            Ok(font) => {
+                let arc = Arc::new(font);
+                self.font_cache.insert(name.to_vec(), Arc::clone(&arc));
+                self.current_font = Some(arc);
+            }
+            Err(e) => {
+                eprintln!(
+                    "warning: font /{}: {}",
+                    String::from_utf8_lossy(name),
+                    e
+                );
+                self.current_font = None;
+            }
+        }
     }
 
     fn op_td(&mut self) -> Result<(), PdfError> {
@@ -821,6 +873,111 @@ impl<'a> ContentInterpreter<'a> {
         self.gstate.text_line_matrix = self.gstate.text_line_matrix.concat(&m);
         self.gstate.text_matrix = self.gstate.text_line_matrix;
         Ok(())
+    }
+
+    // === Text rendering operators ===
+
+    fn op_tj(&mut self) -> Result<(), PdfError> {
+        let text = match self.operand_stack.last() {
+            Some(Operand::Str(s)) => s.clone(),
+            _ => return Ok(()),
+        };
+        self.show_text(&text);
+        Ok(())
+    }
+
+    fn op_big_tj(&mut self) -> Result<(), PdfError> {
+        let arr = match self.operand_stack.last() {
+            Some(Operand::Array(a)) => a.clone(),
+            _ => return Ok(()),
+        };
+        for elem in &arr {
+            match elem {
+                PdfObj::Str(s) => self.show_text(s),
+                PdfObj::Int(n) => {
+                    // Negative number → shift right, positive → shift left
+                    let shift = -*n as f64 / 1000.0 * self.gstate.font_size;
+                    let m = Matrix::translate(shift, 0.0);
+                    self.gstate.text_matrix = self.gstate.text_matrix.concat(&m);
+                }
+                PdfObj::Real(f) => {
+                    let shift = -f / 1000.0 * self.gstate.font_size;
+                    let m = Matrix::translate(shift, 0.0);
+                    self.gstate.text_matrix = self.gstate.text_matrix.concat(&m);
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn op_quote(&mut self) -> Result<(), PdfError> {
+        // ': T* then Tj
+        self.op_t_star()?;
+        self.op_tj()
+    }
+
+    fn op_dblquote(&mut self) -> Result<(), PdfError> {
+        // ": set word_spacing, char_spacing, then T* + Tj
+        let len = self.operand_stack.len();
+        if len < 3 {
+            return Ok(());
+        }
+        self.gstate.word_spacing = self.operand_stack[len - 3].as_f64().unwrap_or(0.0);
+        self.gstate.char_spacing = self.operand_stack[len - 2].as_f64().unwrap_or(0.0);
+        // The string is at len-1, which op_tj reads from last()
+        self.op_t_star()?;
+        self.op_tj()
+    }
+
+    /// Render a text string by emitting glyph paths as Fill display elements.
+    fn show_text(&mut self, text: &[u8]) {
+        let font = match &self.current_font {
+            Some(f) => Arc::clone(f),
+            None => return,
+        };
+
+        let font_size = self.gstate.font_size;
+        let char_spacing = self.gstate.char_spacing;
+        let word_spacing = self.gstate.word_spacing;
+        let text_rise = self.gstate.text_rise;
+        let font_matrix = font.font_matrix();
+
+        for &byte in text {
+            if let Some(glyph_path) = font.glyph_path(byte) {
+                // Text rendering matrix (PDF spec §9.4.4):
+                // row-vector: font_matrix × [Tfs 0 0 Tfs 0 Trise] × Tm × CTM
+                // column-vector: CTM × Tm × [Tfs...] × font_matrix
+                let text_state_matrix = Matrix::new(font_size, 0.0, 0.0, font_size, 0.0, text_rise);
+                let trm = self
+                    .gstate
+                    .ctm
+                    .concat(&self.gstate.text_matrix)
+                    .concat(&text_state_matrix)
+                    .concat(&font_matrix);
+
+                // Transform glyph path to device space
+                let device_path = glyph_path.transform(&trm);
+
+                if !device_path.is_empty() {
+                    let mut params = self.gstate.fill_params(FillRule::NonZeroWinding);
+                    params.is_text_glyph = true;
+                    self.display_list.push(DisplayElement::Fill {
+                        path: device_path,
+                        params,
+                    });
+                }
+            }
+
+            // Advance text position
+            let w0 = font.glyph_width(byte);
+            let mut tx = w0 * font_size + char_spacing;
+            if byte == b' ' {
+                tx += word_spacing;
+            }
+            let advance = Matrix::translate(tx, 0.0);
+            self.gstate.text_matrix = self.gstate.text_matrix.concat(&advance);
+        }
     }
 
     // === XObject operator ===

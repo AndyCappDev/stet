@@ -157,23 +157,39 @@ impl PdfDocument {
 - Form XObjects (recursive content stream interpretation)
 - ExtGState: line width, dash, join, cap, overprint, rendering intent
 
-### Phase C: Text (Text Display)
+### Phase C: Text (Text Display) — COMPLETE
 
-- Font resource resolution (font descriptor, widths, encoding)
-- Type 1 font loading (reuse stet-core parser, extract glyphs → paths)
-- TrueType font loading (reuse stet-core parser, cmap → glyph mapping)
-- CFF/OpenType font loading (reuse stet-core parser)
-- Text positioning operators (Tm, Td, TD, T*)
-- String rendering (Tj, TJ) with character/word spacing
-- ToUnicode CMap parsing (for text extraction, not rendering)
-- Composite fonts (Type 0) with CIDFont descendants
-- CMap-based CID decoding
+- Font resource resolution (font descriptor, widths, encoding) ✓
+- Type 1 font loading (reuse stet-core parser, PFB stripping) ✓
+- TrueType font loading (reuse stet-core parser, cmap Format 0/4/6) ✓
+- CFF/OpenType font loading (reuse stet-core parser) ✓
+- Font routing by FontFile3/FontFile2/FontFile presence (not /Subtype) ✓
+- Encoding resolution: WinAnsi, MacRoman, Standard, /Differences overlay ✓
+- Text positioning operators (BT/ET, Tm, Td, TD, T*) ✓
+- String rendering (Tj, TJ, ', ") with character/word spacing ✓
+- Font cache per ContentInterpreter (keyed by resource name) ✓
+- Rendering mode 0 (fill) only ✓
+
+**Not done (moved to Phase D)**:
+- Font substitution for non-embedded fonts (fallback to system/bundled fonts)
+- Composite fonts (Type 0) with CIDFont descendants + CMap decoding
+- Type 3 fonts (content stream per glyph)
+- Text rendering modes 1-7 (stroke, clip variants)
+- ToUnicode CMap parsing (text extraction, not rendering)
 
 ### Phase D: Advanced Features (Completeness)
 
-- Type 3 fonts (content stream per glyph — recursive interpreter call)
+- **Font substitution** for non-embedded fonts (javaplatform.pdf has 3+ non-embedded Type 1 fonts)
+- **Composite fonts** (Type 0) with CIDFont descendants + CMap-based CID decoding
+- **Type 3 fonts** (content stream per glyph — recursive interpreter call)
+- Text rendering modes 1-7 (stroke, clip, invisible, etc.)
 - Encryption (standard security handler, RC4/AES)
 - ExtGState: blend mode, opacity (ca/CA), soft mask
+- Tiling patterns (tile content → sub-DisplayList)
+- Shading Types 1, 4-7 (function-based, triangle mesh, Coons/tensor patches)
+- Cross-reference streams (PDF 1.5+)
+- Lab/CalGray/CalRGB color spaces
+- DeviceN color space with tint functions
 - Annotations (at minimum: Link, Widget for form fields)
 - Optional content (layers) — basic visibility toggling
 

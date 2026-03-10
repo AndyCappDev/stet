@@ -191,7 +191,15 @@ pub fn parse_type4_mesh(
             *comp = decode_value(raw, color_params[i].1, color_params[i].0);
         }
         let (color, raw_components) = components_to_color(&comps);
-        Some((flag, ShadingVertex { x, y, color, raw_components }))
+        Some((
+            flag,
+            ShadingVertex {
+                x,
+                y,
+                color,
+                raw_components,
+            },
+        ))
     };
 
     // Running list of vertices for edge connectivity
@@ -623,7 +631,12 @@ pub fn build_type4_from_array(values: &[f64], n_comps: usize) -> Vec<ShadingTria
         let y = values[pos + 2];
         let comps: Vec<f64> = values[pos + 3..pos + 3 + n_comps].to_vec();
         let (color, raw_components) = components_to_color(&comps);
-        let vertex = ShadingVertex { x, y, color, raw_components };
+        let vertex = ShadingVertex {
+            x,
+            y,
+            color,
+            raw_components,
+        };
         pos += stride;
 
         match flag {

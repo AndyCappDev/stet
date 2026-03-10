@@ -138,8 +138,7 @@ impl<'a> PdfDocument<'a> {
             }
             270 => {
                 // Rotate 270° CW + Y-flip
-                Matrix::new(0.0, scale, scale, 0.0, 0.0, 0.0)
-                    .concat(&Matrix::translate(-llx, -lly))
+                Matrix::new(0.0, scale, scale, 0.0, 0.0, 0.0).concat(&Matrix::translate(-llx, -lly))
             }
             _ => {
                 // No rotation: scale + Y-flip + CropBox offset

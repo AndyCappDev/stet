@@ -532,6 +532,138 @@ pub fn parse_glyf_to_path(glyf_data: &[u8], resolver: &dyn Fn(u16) -> Option<Vec
     contours_to_path(contours)
 }
 
+/// Parse TrueType cmap table, returning a mapping from character code to glyph index.
+///
+/// Supports Format 0 (byte encoding), Format 4 (segment mapping), and Format 6 (trimmed table).
+pub fn parse_cmap(font_data: &[u8]) -> std::collections::HashMap<u32, u16> {
+    let mut map = std::collections::HashMap::new();
+    let (cmap_off, _cmap_len) = match find_table(font_data, b"cmap") {
+        Some(v) => v,
+        None => return map,
+    };
+    if cmap_off + 4 > font_data.len() {
+        return map;
+    }
+    let num_subtables = read_u16(font_data, cmap_off + 2) as usize;
+
+    // Find best subtable: prefer (3,1) Windows Unicode, then (1,0) Mac Roman
+    let mut best_offset = None;
+    let mut best_priority = 0u8;
+    for i in 0..num_subtables {
+        let entry = cmap_off + 4 + i * 8;
+        if entry + 8 > font_data.len() {
+            break;
+        }
+        let platform = read_u16(font_data, entry);
+        let encoding = read_u16(font_data, entry + 2);
+        let offset = read_u32(font_data, entry + 4) as usize;
+        let priority = match (platform, encoding) {
+            (3, 1) => 3, // Windows Unicode BMP
+            (0, _) => 2, // Unicode
+            (1, 0) => 1, // Mac Roman
+            _ => 0,
+        };
+        if priority > best_priority {
+            best_priority = priority;
+            best_offset = Some(cmap_off + offset);
+        }
+    }
+
+    let subtable_off = match best_offset {
+        Some(v) => v,
+        None => return map,
+    };
+    if subtable_off + 2 > font_data.len() {
+        return map;
+    }
+    let format = read_u16(font_data, subtable_off);
+
+    match format {
+        0 => {
+            // Format 0: byte encoding table
+            if subtable_off + 6 + 256 > font_data.len() {
+                return map;
+            }
+            for code in 0u32..256 {
+                let gid = font_data[subtable_off + 6 + code as usize] as u16;
+                if gid != 0 {
+                    map.insert(code, gid);
+                }
+            }
+        }
+        4 => {
+            // Format 4: segment mapping to delta values
+            if subtable_off + 14 > font_data.len() {
+                return map;
+            }
+            let seg_count = read_u16(font_data, subtable_off + 6) as usize / 2;
+            let end_codes_off = subtable_off + 14;
+            let start_codes_off = end_codes_off + seg_count * 2 + 2; // +2 for reservedPad
+            let deltas_off = start_codes_off + seg_count * 2;
+            let range_offsets_off = deltas_off + seg_count * 2;
+
+            if range_offsets_off + seg_count * 2 > font_data.len() {
+                return map;
+            }
+
+            for seg in 0..seg_count {
+                let end_code = read_u16(font_data, end_codes_off + seg * 2) as u32;
+                let start_code = read_u16(font_data, start_codes_off + seg * 2) as u32;
+                let delta = read_i16(font_data, deltas_off + seg * 2) as i32;
+                let range_offset_pos = range_offsets_off + seg * 2;
+                let range_offset = read_u16(font_data, range_offset_pos) as usize;
+
+                if start_code == 0xFFFF {
+                    break;
+                }
+
+                for code in start_code..=end_code {
+                    let gid = if range_offset == 0 {
+                        ((code as i32 + delta) & 0xFFFF) as u16
+                    } else {
+                        let idx =
+                            range_offset_pos + range_offset + (code - start_code) as usize * 2;
+                        if idx + 2 > font_data.len() {
+                            0
+                        } else {
+                            let gid = read_u16(font_data, idx);
+                            if gid != 0 {
+                                ((gid as i32 + delta) & 0xFFFF) as u16
+                            } else {
+                                0
+                            }
+                        }
+                    };
+                    if gid != 0 {
+                        map.insert(code, gid);
+                    }
+                }
+            }
+        }
+        6 => {
+            // Format 6: trimmed table mapping
+            if subtable_off + 10 > font_data.len() {
+                return map;
+            }
+            let first_code = read_u16(font_data, subtable_off + 6) as u32;
+            let entry_count = read_u16(font_data, subtable_off + 8) as usize;
+            let entries_off = subtable_off + 10;
+            if entries_off + entry_count * 2 > font_data.len() {
+                return map;
+            }
+            for i in 0..entry_count {
+                let gid = read_u16(font_data, entries_off + i * 2);
+                if gid != 0 {
+                    map.insert(first_code + i as u32, gid);
+                }
+            }
+        }
+        _ => {} // Unsupported format
+    }
+
+    map
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

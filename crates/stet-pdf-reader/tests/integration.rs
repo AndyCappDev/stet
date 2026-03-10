@@ -188,11 +188,22 @@ fn diagnose_coordinate_system() {
     // Compute expected CTM for 72 DPI, no rotation
     let [llx, lly, urx, ury] = info.crop_box;
     let scale = 72.0 / 72.0; // = 1.0
-    eprintln!("  Expected CTM: [{scale}, 0, 0, {}, {}, {}]",
-              -scale, -llx * scale, ury * scale);
-    eprintln!("  => PDF point (0, 0) maps to device ({}, {})", -llx * scale, ury * scale);
-    eprintln!("  => PDF point ({urx}, {ury}) maps to device ({}, {})",
-              urx * scale - llx * scale, ury * scale - ury * scale);
+    eprintln!(
+        "  Expected CTM: [{scale}, 0, 0, {}, {}, {}]",
+        -scale,
+        -llx * scale,
+        ury * scale
+    );
+    eprintln!(
+        "  => PDF point (0, 0) maps to device ({}, {})",
+        -llx * scale,
+        ury * scale
+    );
+    eprintln!(
+        "  => PDF point ({urx}, {ury}) maps to device ({}, {})",
+        urx * scale - llx * scale,
+        ury * scale - ury * scale
+    );
     let pixel_w = ((urx - llx).abs() * scale).round() as u32;
     let pixel_h = ((ury - lly).abs() * scale).round() as u32;
     eprintln!("  Pixel dimensions: {pixel_w} x {pixel_h}");
@@ -201,18 +212,24 @@ fn diagnose_coordinate_system() {
     // Dump bounding boxes of first 20 fill/stroke elements
     let mut count = 0;
     for (i, elem) in display_list.elements().iter().enumerate() {
-        if count >= 20 { break; }
+        if count >= 20 {
+            break;
+        }
         match elem {
             DisplayElement::Fill { path, params } => {
                 let (min_x, min_y, max_x, max_y) = path_bbox(&path.segments);
-                eprintln!("  [{i}] FILL color={:?} bbox=({min_x:.1}, {min_y:.1}) - ({max_x:.1}, {max_y:.1})",
-                         params.color);
+                eprintln!(
+                    "  [{i}] FILL color={:?} bbox=({min_x:.1}, {min_y:.1}) - ({max_x:.1}, {max_y:.1})",
+                    params.color
+                );
                 count += 1;
             }
             DisplayElement::Stroke { path, params } => {
                 let (min_x, min_y, max_x, max_y) = path_bbox(&path.segments);
-                eprintln!("  [{i}] STROKE color={:?} lw={:.2} bbox=({min_x:.1}, {min_y:.1}) - ({max_x:.1}, {max_y:.1})",
-                         params.color, params.line_width);
+                eprintln!(
+                    "  [{i}] STROKE color={:?} lw={:.2} bbox=({min_x:.1}, {min_y:.1}) - ({max_x:.1}, {max_y:.1})",
+                    params.color, params.line_width
+                );
                 count += 1;
             }
             DisplayElement::Clip { path, .. } => {
@@ -221,10 +238,17 @@ fn diagnose_coordinate_system() {
                 count += 1;
             }
             DisplayElement::Image { params, .. } => {
-                eprintln!("  [{i}] IMAGE {}x{} ctm=[{:.1},{:.1},{:.1},{:.1},{:.1},{:.1}]",
-                         params.width, params.height,
-                         params.ctm.a, params.ctm.b, params.ctm.c, params.ctm.d,
-                         params.ctm.tx, params.ctm.ty);
+                eprintln!(
+                    "  [{i}] IMAGE {}x{} ctm=[{:.1},{:.1},{:.1},{:.1},{:.1},{:.1}]",
+                    params.width,
+                    params.height,
+                    params.ctm.a,
+                    params.ctm.b,
+                    params.ctm.c,
+                    params.ctm.d,
+                    params.ctm.tx,
+                    params.ctm.ty
+                );
                 count += 1;
             }
             DisplayElement::InitClip => {
@@ -258,18 +282,24 @@ fn diagnose_coordinate_system() {
 
     let mut count2 = 0;
     for (i, elem) in display_list2.elements().iter().enumerate() {
-        if count2 >= 20 { break; }
+        if count2 >= 20 {
+            break;
+        }
         match elem {
             DisplayElement::Fill { path, params } => {
                 let (min_x, min_y, max_x, max_y) = path_bbox(&path.segments);
-                eprintln!("  [{i}] FILL color={:?} bbox=({min_x:.1}, {min_y:.1}) - ({max_x:.1}, {max_y:.1})",
-                         params.color);
+                eprintln!(
+                    "  [{i}] FILL color={:?} bbox=({min_x:.1}, {min_y:.1}) - ({max_x:.1}, {max_y:.1})",
+                    params.color
+                );
                 count2 += 1;
             }
             DisplayElement::Stroke { path, params } => {
                 let (min_x, min_y, max_x, max_y) = path_bbox(&path.segments);
-                eprintln!("  [{i}] STROKE color={:?} lw={:.2} bbox=({min_x:.1}, {min_y:.1}) - ({max_x:.1}, {max_y:.1})",
-                         params.color, params.line_width);
+                eprintln!(
+                    "  [{i}] STROKE color={:?} lw={:.2} bbox=({min_x:.1}, {min_y:.1}) - ({max_x:.1}, {max_y:.1})",
+                    params.color, params.line_width
+                );
                 count2 += 1;
             }
             DisplayElement::Clip { path, .. } => {
@@ -278,10 +308,17 @@ fn diagnose_coordinate_system() {
                 count2 += 1;
             }
             DisplayElement::Image { params, .. } => {
-                eprintln!("  [{i}] IMAGE {}x{} ctm=[{:.1},{:.1},{:.1},{:.1},{:.1},{:.1}]",
-                         params.width, params.height,
-                         params.ctm.a, params.ctm.b, params.ctm.c, params.ctm.d,
-                         params.ctm.tx, params.ctm.ty);
+                eprintln!(
+                    "  [{i}] IMAGE {}x{} ctm=[{:.1},{:.1},{:.1},{:.1},{:.1},{:.1}]",
+                    params.width,
+                    params.height,
+                    params.ctm.a,
+                    params.ctm.b,
+                    params.ctm.c,
+                    params.ctm.d,
+                    params.ctm.tx,
+                    params.ctm.ty
+                );
                 count2 += 1;
             }
             _ => {}
@@ -298,7 +335,14 @@ fn path_bbox(segments: &[stet_core::graphics_state::PathSegment]) -> (f64, f64, 
     for seg in segments {
         let points: Vec<(f64, f64)> = match seg {
             PathSegment::MoveTo(x, y) | PathSegment::LineTo(x, y) => vec![(*x, *y)],
-            PathSegment::CurveTo { x1, y1, x2, y2, x3, y3 } => {
+            PathSegment::CurveTo {
+                x1,
+                y1,
+                x2,
+                y2,
+                x3,
+                y3,
+            } => {
                 vec![(*x1, *y1), (*x2, *y2), (*x3, *y3)]
             }
             PathSegment::ClosePath => vec![],
@@ -339,7 +383,8 @@ fn dump_display_list_stats() {
         match elem {
             DisplayElement::Fill { path, params } => {
                 fills += 1;
-                let is_white = params.color.r > 0.99 && params.color.g > 0.99 && params.color.b > 0.99;
+                let is_white =
+                    params.color.r > 0.99 && params.color.g > 0.99 && params.color.b > 0.99;
                 if is_white {
                     white_fills += 1;
                 } else {
@@ -349,7 +394,9 @@ fn dump_display_list_stats() {
                     y_max_all = y_max_all.max(mxy);
                     let cy = (mny + mxy) / 2.0;
                     let bucket = (cy / 100.0) as usize;
-                    if bucket < 7 { y_buckets[bucket] += 1; }
+                    if bucket < 7 {
+                        y_buckets[bucket] += 1;
+                    }
                 }
             }
             DisplayElement::Stroke { path, params } => {
@@ -376,21 +423,40 @@ fn dump_display_list_stats() {
     eprintln!("  Non-white Y range: [{y_min_all:.1}, {y_max_all:.1}]");
     eprintln!("  Non-white fills by Y bucket:");
     for (i, &count) in y_buckets.iter().enumerate() {
-        eprintln!("    y={:>3}-{:>3}: {count}", i*100, (i+1)*100);
+        eprintln!("    y={:>3}-{:>3}: {count}", i * 100, (i + 1) * 100);
     }
 
     // Show first 10 images
     eprintln!("\n  First 10 images:");
     let mut shown = 0;
     for (i, elem) in dl.elements().iter().enumerate() {
-        if shown >= 10 { break; }
-        if let DisplayElement::Image { params, sample_data } = elem {
-            eprintln!("    [{i}] {}x{} cs={:?} data_len={} ctm=[{:.2},{:.2},{:.2},{:.2},{:.2},{:.2}] im=[{:.0},{:.0},{:.0},{:.0},{:.0},{:.0}]",
-                params.width, params.height, params.color_space, sample_data.len(),
-                params.ctm.a, params.ctm.b, params.ctm.c, params.ctm.d,
-                params.ctm.tx, params.ctm.ty,
-                params.image_matrix.a, params.image_matrix.b, params.image_matrix.c, params.image_matrix.d,
-                params.image_matrix.tx, params.image_matrix.ty);
+        if shown >= 10 {
+            break;
+        }
+        if let DisplayElement::Image {
+            params,
+            sample_data,
+        } = elem
+        {
+            eprintln!(
+                "    [{i}] {}x{} cs={:?} data_len={} ctm=[{:.2},{:.2},{:.2},{:.2},{:.2},{:.2}] im=[{:.0},{:.0},{:.0},{:.0},{:.0},{:.0}]",
+                params.width,
+                params.height,
+                params.color_space,
+                sample_data.len(),
+                params.ctm.a,
+                params.ctm.b,
+                params.ctm.c,
+                params.ctm.d,
+                params.ctm.tx,
+                params.ctm.ty,
+                params.image_matrix.a,
+                params.image_matrix.b,
+                params.image_matrix.c,
+                params.image_matrix.d,
+                params.image_matrix.tx,
+                params.image_matrix.ty
+            );
             shown += 1;
         }
     }
@@ -399,11 +465,15 @@ fn dump_display_list_stats() {
     eprintln!("\n  First 10 clips:");
     let mut shown2 = 0;
     for (i, elem) in dl.elements().iter().enumerate() {
-        if shown2 >= 10 { break; }
+        if shown2 >= 10 {
+            break;
+        }
         if let DisplayElement::Clip { path, .. } = elem {
             let (mnx, mny, mxx, mxy) = path_bbox(&path.segments);
-            eprintln!("    [{i}] bbox=({mnx:.1},{mny:.1})-({mxx:.1},{mxy:.1}) segs={}",
-                path.segments.len());
+            eprintln!(
+                "    [{i}] bbox=({mnx:.1},{mny:.1})-({mxx:.1},{mxy:.1}) segs={}",
+                path.segments.len()
+            );
             shown2 += 1;
         }
     }

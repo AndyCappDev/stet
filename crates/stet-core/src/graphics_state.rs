@@ -195,6 +195,46 @@ impl PsPath {
     pub fn clear(&mut self) {
         self.segments.clear();
     }
+
+    /// Apply a matrix transform to all coordinates in the path.
+    pub fn transform(&self, m: &Matrix) -> PsPath {
+        let segments = self
+            .segments
+            .iter()
+            .map(|seg| match *seg {
+                PathSegment::MoveTo(x, y) => {
+                    let (tx, ty) = m.transform_point(x, y);
+                    PathSegment::MoveTo(tx, ty)
+                }
+                PathSegment::LineTo(x, y) => {
+                    let (tx, ty) = m.transform_point(x, y);
+                    PathSegment::LineTo(tx, ty)
+                }
+                PathSegment::CurveTo {
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    x3,
+                    y3,
+                } => {
+                    let (tx1, ty1) = m.transform_point(x1, y1);
+                    let (tx2, ty2) = m.transform_point(x2, y2);
+                    let (tx3, ty3) = m.transform_point(x3, y3);
+                    PathSegment::CurveTo {
+                        x1: tx1,
+                        y1: ty1,
+                        x2: tx2,
+                        y2: ty2,
+                        x3: tx3,
+                        y3: ty3,
+                    }
+                }
+                PathSegment::ClosePath => PathSegment::ClosePath,
+            })
+            .collect();
+        PsPath { segments }
+    }
 }
 
 impl Default for PsPath {
