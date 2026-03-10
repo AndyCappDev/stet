@@ -374,6 +374,8 @@ fn build_type1_shading(
             image_matrix,
             interpolate: false,
             mask_color: None,
+            alpha: 1.0,
+            blend_mode: 0,
         },
     });
 

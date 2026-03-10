@@ -156,6 +156,8 @@ fn handle_function_based(
             image_matrix,
             interpolate: true,
             mask_color: None,
+            alpha: 1.0,
+            blend_mode: 0,
         },
     });
     Ok(())

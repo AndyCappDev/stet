@@ -355,6 +355,10 @@ pub struct ImageParams {
     pub interpolate: bool,
     /// ImageType 4 color key mask (raw sample values for transparency).
     pub mask_color: Option<Vec<u8>>,
+    /// Fill alpha from graphics state (0.0–1.0).
+    pub alpha: f64,
+    /// Blend mode from graphics state (0 = Normal/SourceOver).
+    pub blend_mode: u8,
 }
 
 /// Color space carried through the display list for native shading output.

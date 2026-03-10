@@ -1346,6 +1346,8 @@ impl<'a> ContentInterpreter<'a> {
                 image_matrix,
                 interpolate,
                 mask_color,
+                alpha: self.gstate.fill_alpha,
+                blend_mode: self.gstate.blend_mode,
             },
         });
         Ok(())
@@ -1600,6 +1602,8 @@ impl<'a> ContentInterpreter<'a> {
                 image_matrix,
                 interpolate: false,
                 mask_color: None,
+                alpha: self.gstate.fill_alpha,
+                blend_mode: self.gstate.blend_mode,
             },
         });
 
@@ -2131,6 +2135,10 @@ fn blend_mode_from_name(name: &[u8]) -> u8 {
         b"SoftLight" => 9,
         b"Difference" => 10,
         b"Exclusion" => 11,
+        b"Hue" => 12,
+        b"Saturation" => 13,
+        b"Color" => 14,
+        b"Luminosity" => 15,
         _ => 0,
     }
 }

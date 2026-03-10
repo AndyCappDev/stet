@@ -1781,6 +1781,8 @@ fn draw_image_to_device(
         image_matrix: *image_matrix,
         interpolate: false,
         mask_color,
+        alpha: 1.0,
+        blend_mode: 0,
     };
     ctx.display_list.push(DisplayElement::Image {
         sample_data,
