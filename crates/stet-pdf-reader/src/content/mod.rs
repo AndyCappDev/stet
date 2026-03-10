@@ -580,10 +580,7 @@ impl<'a> ContentInterpreter<'a> {
         // S: stroke
         let path = self.take_path();
         if !path.is_empty() {
-            self.display_list.push(DisplayElement::Stroke {
-                path,
-                params: self.gstate.stroke_params(),
-            });
+            self.emit_stroke(path);
         }
         self.apply_pending_clip();
         Ok(())
@@ -620,10 +617,7 @@ impl<'a> ContentInterpreter<'a> {
         let path = self.take_path();
         if !path.is_empty() {
             self.emit_fill(path.clone(), FillRule::NonZeroWinding);
-            self.display_list.push(DisplayElement::Stroke {
-                path,
-                params: self.gstate.stroke_params(),
-            });
+            self.emit_stroke(path);
         }
         self.apply_pending_clip();
         Ok(())
@@ -634,10 +628,7 @@ impl<'a> ContentInterpreter<'a> {
         let path = self.take_path();
         if !path.is_empty() {
             self.emit_fill(path.clone(), FillRule::EvenOdd);
-            self.display_list.push(DisplayElement::Stroke {
-                path,
-                params: self.gstate.stroke_params(),
-            });
+            self.emit_stroke(path);
         }
         self.apply_pending_clip();
         Ok(())
@@ -682,6 +673,31 @@ impl<'a> ContentInterpreter<'a> {
                 params: self.gstate.fill_params(fill_rule),
             });
         }
+    }
+
+    /// Emit a stroke with proper CTM-aware line width.
+    ///
+    /// Paths are stored in device space, but strokes need to be applied in user
+    /// space for correct anisotropic scaling (non-uniform CTMs make circles into
+    /// ellipses, and the stroke width should follow that transformation).
+    /// We inverse-transform the path back to user space and pass the CTM to the
+    /// renderer so it can apply the stroke correctly.
+    fn emit_stroke(&mut self, path: PsPath) {
+        let ctm = self.gstate.ctm;
+        // Inverse-transform path from device space back to user space
+        let user_path = if let Some(inv) = ctm.invert() {
+            path.transform(&inv)
+        } else {
+            // Degenerate CTM — fall back to device-space stroke
+            path
+        };
+
+        let mut params = self.gstate.stroke_params_with_ctm();
+        params.ctm = ctm;
+        self.display_list.push(DisplayElement::Stroke {
+            path: user_path,
+            params,
+        });
     }
 
     fn op_n(&mut self) -> Result<(), PdfError> {

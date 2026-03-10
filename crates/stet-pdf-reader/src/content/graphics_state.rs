@@ -198,6 +198,30 @@ impl PdfGraphicsState {
         }
     }
 
+    /// Build StrokeParams with the CTM applied by the renderer (not pre-scaled).
+    /// Used for correct anisotropic strokes where the CTM has non-uniform scaling.
+    pub fn stroke_params_with_ctm(&self) -> StrokeParams {
+        StrokeParams {
+            color: self.stroke_color.clone(),
+            line_width: self.line_width,
+            line_cap: self.line_cap,
+            line_join: self.line_join,
+            miter_limit: self.miter_limit,
+            dash_pattern: self.dash_pattern.clone(),
+            ctm: Matrix::identity(), // caller sets this
+            stroke_adjust: self.stroke_adjust,
+            is_text_glyph: false,
+            overprint: self.overprint_stroke,
+            spot_color: None,
+            rendering_intent: self.rendering_intent,
+            transfer: self.transfer.clone(),
+            halftone: HalftoneState::default(),
+            bg_ucr: BgUcrState::default(),
+            alpha: self.stroke_alpha,
+            blend_mode: self.blend_mode,
+        }
+    }
+
     /// CTM scale factor: sqrt(a^2 + b^2).
     pub fn ctm_scale_factor(&self) -> f64 {
         (self.ctm.a * self.ctm.a + self.ctm.b * self.ctm.b).sqrt()
