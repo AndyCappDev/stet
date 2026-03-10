@@ -10,6 +10,26 @@ use crate::device::{
 };
 use crate::graphics_state::PsPath;
 
+/// Subtype for soft mask extraction.
+#[derive(Clone, Debug)]
+pub enum SoftMaskSubtype {
+    /// Use the alpha channel of the rendered mask directly.
+    Alpha,
+    /// Convert rendered mask to luminosity (grayscale).
+    Luminosity,
+}
+
+/// Parameters for a soft mask compositing operation.
+#[derive(Clone)]
+pub struct SoftMaskParams {
+    /// How to extract the mask from the rendered form.
+    pub subtype: SoftMaskSubtype,
+    /// Device-space bounding box [x_min, y_min, x_max, y_max].
+    pub bbox: [f64; 4],
+    /// Backdrop color for luminosity masks (RGB, 0.0–1.0). None = black.
+    pub backdrop_color: Option<[f64; 3]>,
+}
+
 /// Parameters for a transparency group compositing operation.
 #[derive(Clone)]
 pub struct GroupParams {
@@ -58,6 +78,12 @@ pub enum DisplayElement {
         elements: DisplayList,
         params: GroupParams,
     },
+    /// Soft-masked content: render mask form to grayscale, multiply with content alpha.
+    SoftMasked {
+        mask: DisplayList,
+        content: DisplayList,
+        params: SoftMaskParams,
+    },
 }
 
 /// An ordered list of drawing operations for a single page.
@@ -102,6 +128,12 @@ impl DisplayList {
     /// Returns a slice of elements starting from the given index.
     pub fn elements_from(&self, start: usize) -> &[DisplayElement] {
         &self.elements[start..]
+    }
+
+    /// Drain elements from `start..` into a new DisplayList, truncating self.
+    pub fn split_off(&mut self, start: usize) -> DisplayList {
+        let drained: Vec<DisplayElement> = self.elements.drain(start..).collect();
+        DisplayList { elements: drained }
     }
 
     /// Consume the display list and return the elements.
@@ -164,6 +196,11 @@ pub fn replay_to_device(list: &DisplayList, device: &mut dyn OutputDevice) {
                 // Pass-through: recursively replay group children.
                 // Actual offscreen compositing is handled by the renderer.
                 replay_to_device(elements, device);
+            }
+            DisplayElement::SoftMasked { content, .. } => {
+                // Pass-through: recursively replay content children.
+                // Actual mask compositing is handled by the renderer.
+                replay_to_device(content, device);
             }
         }
     }

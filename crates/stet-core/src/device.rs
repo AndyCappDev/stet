@@ -598,10 +598,10 @@ pub trait OutputDevice {
                 DisplayElement::PatchShading { params } => self.paint_patch_shading(params),
                 DisplayElement::PatternFill { params } => self.paint_pattern_fill(params),
                 DisplayElement::Text { .. } => {} // PDF-only, ignored by rasterizer
-                DisplayElement::Group { .. } => {
-                    // Groups are handled by the banded renderer (SkiaDevice).
+                DisplayElement::Group { .. } | DisplayElement::SoftMasked { .. } => {
+                    // Groups/SoftMasked are handled by the banded renderer (SkiaDevice).
                     // The default replay_and_show path only sees PS display lists,
-                    // which never contain Group elements.
+                    // which never contain these elements.
                 }
             }
         }

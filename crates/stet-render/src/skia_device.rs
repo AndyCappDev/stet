@@ -597,6 +597,10 @@ fn precompute_bboxes(list: &DisplayList, dpi: f64) -> Vec<Option<YBBox>> {
                 y_min: params.bbox[1],
                 y_max: params.bbox[3],
             }),
+            DisplayElement::SoftMasked { params, .. } => Some(YBBox {
+                y_min: params.bbox[1],
+                y_max: params.bbox[3],
+            }),
             _ => None, // Clip, InitClip, ErasePage: always process
         })
         .collect()
@@ -1903,6 +1907,15 @@ fn render_element_to_band(
                 pixmap, band_state, elements, params, y_start, band_w, band_h, dpi, icc,
             );
         }
+        DisplayElement::SoftMasked {
+            mask,
+            content,
+            params,
+        } => {
+            render_soft_masked_band(
+                pixmap, band_state, mask, content, params, y_start, band_w, band_h, dpi, icc,
+            );
+        }
         DisplayElement::Text { .. } => {} // PDF-only, ignored by rasterizer
     }
 }
@@ -1981,6 +1994,157 @@ fn render_group_to_band(
             quality: tiny_skia::FilterQuality::Nearest,
         };
         pixmap.draw_pixmap(0, 0, offscreen.as_ref(), &paint, Transform::identity(), mask_ref);
+    }
+}
+
+/// Render soft-masked content into a band.
+///
+/// 1. Renders the mask display list to an offscreen pixmap.
+/// 2. Extracts a grayscale mask (luminosity or alpha).
+/// 3. Renders content into another offscreen pixmap.
+/// 4. Multiplies content alpha by the mask values.
+/// 5. Composites the masked content onto the parent.
+#[allow(clippy::too_many_arguments)]
+fn render_soft_masked_band(
+    pixmap: &mut Pixmap,
+    band_state: &mut BandState,
+    mask_list: &DisplayList,
+    content_list: &DisplayList,
+    params: &stet_core::display_list::SoftMaskParams,
+    y_start: u32,
+    band_w: u32,
+    band_h: u32,
+    dpi: f64,
+    icc: Option<&IccCache>,
+) {
+    // 1. Render mask form into offscreen
+    let Some(mut mask_pixmap) = Pixmap::new(band_w, band_h) else {
+        return;
+    };
+    let mut mask_band = BandState {
+        clip_region: None,
+        spare_mask: None,
+        clip_mask_cache: HashMap::new(),
+        clip_mask_seen: HashSet::new(),
+        mask_pool: Vec::new(),
+    };
+    for elem in mask_list.elements() {
+        render_element_to_band(
+            &mut mask_pixmap,
+            &mut mask_band,
+            elem,
+            y_start,
+            band_w,
+            band_h,
+            dpi,
+            icc,
+        );
+    }
+
+    // 2. Extract grayscale mask values
+    let mask_data = mask_pixmap.data();
+    let pixel_count = (band_w * band_h) as usize;
+    let mut mask_values = vec![0u8; pixel_count];
+    extract_soft_mask_values(mask_data, &mut mask_values, params);
+
+    // 3. Render content into another offscreen
+    let Some(mut content_pixmap) = Pixmap::new(band_w, band_h) else {
+        return;
+    };
+    let mut content_band = BandState {
+        clip_region: None,
+        spare_mask: None,
+        clip_mask_cache: HashMap::new(),
+        clip_mask_seen: HashSet::new(),
+        mask_pool: Vec::new(),
+    };
+    for elem in content_list.elements() {
+        render_element_to_band(
+            &mut content_pixmap,
+            &mut content_band,
+            elem,
+            y_start,
+            band_w,
+            band_h,
+            dpi,
+            icc,
+        );
+    }
+
+    // 4. Multiply content RGBA by mask values (premultiplied alpha)
+    let content_data = content_pixmap.data_mut();
+    for i in 0..pixel_count {
+        let m = mask_values[i] as u16;
+        let off = i * 4;
+        content_data[off] = ((content_data[off] as u16 * m + 128) / 255) as u8;
+        content_data[off + 1] = ((content_data[off + 1] as u16 * m + 128) / 255) as u8;
+        content_data[off + 2] = ((content_data[off + 2] as u16 * m + 128) / 255) as u8;
+        content_data[off + 3] = ((content_data[off + 3] as u16 * m + 128) / 255) as u8;
+    }
+
+    // 5. Composite masked content onto parent with clip
+    let mut temp_mask = None;
+    let mask_ref = resolve_clip_mask(&band_state.clip_region, &mut temp_mask, band_w, band_h);
+    let mask_ref = match mask_ref {
+        None => return,
+        Some(m) => m,
+    };
+
+    let paint = tiny_skia::PixmapPaint {
+        opacity: 1.0,
+        blend_mode: tiny_skia::BlendMode::SourceOver,
+        quality: tiny_skia::FilterQuality::Nearest,
+    };
+    pixmap.draw_pixmap(
+        0,
+        0,
+        content_pixmap.as_ref(),
+        &paint,
+        Transform::identity(),
+        mask_ref,
+    );
+}
+
+/// Extract grayscale mask values from rendered RGBA pixels.
+fn extract_soft_mask_values(
+    rgba: &[u8],
+    out: &mut [u8],
+    params: &stet_core::display_list::SoftMaskParams,
+) {
+    use stet_core::display_list::SoftMaskSubtype;
+    let pixel_count = out.len();
+
+    match params.subtype {
+        SoftMaskSubtype::Alpha => {
+            for i in 0..pixel_count {
+                out[i] = rgba[i * 4 + 3]; // alpha channel
+            }
+        }
+        SoftMaskSubtype::Luminosity => {
+            // Backdrop luminosity for transparent pixels
+            let backdrop_lum = if let Some(bc) = &params.backdrop_color {
+                (0.2126 * bc[0] + 0.7152 * bc[1] + 0.0722 * bc[2]).clamp(0.0, 1.0)
+            } else {
+                0.0 // black backdrop
+            };
+            let backdrop_byte = (backdrop_lum * 255.0 + 0.5) as u8;
+
+            for i in 0..pixel_count {
+                let off = i * 4;
+                let a = rgba[off + 3];
+                if a == 0 {
+                    out[i] = backdrop_byte;
+                } else {
+                    // Un-premultiply to get linear RGB, then compute luminosity
+                    let inv_a = 255.0 / a as f64;
+                    let r = (rgba[off] as f64 * inv_a).min(255.0);
+                    let g = (rgba[off + 1] as f64 * inv_a).min(255.0);
+                    let b = (rgba[off + 2] as f64 * inv_a).min(255.0);
+                    let lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+                    out[i] = (lum + 0.5).clamp(0.0, 255.0) as u8;
+                }
+            }
+        }
     }
 }
 
@@ -2862,6 +3026,12 @@ fn precompute_full_bboxes(list: &DisplayList, dpi: f64) -> Vec<Option<BBox2D>> {
                 x_max: params.bbox[2],
                 y_max: params.bbox[3],
             }),
+            DisplayElement::SoftMasked { params, .. } => Some(BBox2D {
+                x_min: params.bbox[0],
+                y_min: params.bbox[1],
+                x_max: params.bbox[2],
+                y_max: params.bbox[3],
+            }),
             _ => None, // Clip, InitClip, ErasePage: always process
         })
         .collect()
@@ -3491,6 +3661,16 @@ fn render_element_to_viewport(
                 effective_dpi, icc,
             );
         }
+        DisplayElement::SoftMasked {
+            mask,
+            content,
+            params,
+        } => {
+            render_soft_masked_viewport(
+                pixmap, state, mask, content, params, vp_x, vp_y, scale_x, scale_y, out_w, out_h,
+                effective_dpi, icc,
+            );
+        }
         DisplayElement::Text { .. } => {} // PDF-only, ignored by rasterizer
     }
 }
@@ -3565,6 +3745,115 @@ fn render_group_to_viewport(
         };
         pixmap.draw_pixmap(0, 0, offscreen.as_ref(), &paint, Transform::identity(), mask_ref);
     }
+}
+
+/// Render soft-masked content for viewport rendering.
+#[allow(clippy::too_many_arguments)]
+fn render_soft_masked_viewport(
+    pixmap: &mut Pixmap,
+    state: &mut BandState,
+    mask_list: &DisplayList,
+    content_list: &DisplayList,
+    params: &stet_core::display_list::SoftMaskParams,
+    vp_x: f32,
+    vp_y: f32,
+    scale_x: f32,
+    scale_y: f32,
+    out_w: u32,
+    out_h: u32,
+    effective_dpi: f64,
+    icc: Option<&IccCache>,
+) {
+    // 1. Render mask form
+    let Some(mut mask_pixmap) = Pixmap::new(out_w, out_h) else {
+        return;
+    };
+    let mut mask_state = BandState {
+        clip_region: None,
+        spare_mask: None,
+        clip_mask_cache: HashMap::new(),
+        clip_mask_seen: HashSet::new(),
+        mask_pool: Vec::new(),
+    };
+    for elem in mask_list.elements() {
+        render_element_to_viewport(
+            &mut mask_pixmap,
+            &mut mask_state,
+            elem,
+            vp_x,
+            vp_y,
+            scale_x,
+            scale_y,
+            out_w,
+            out_h,
+            effective_dpi,
+            icc,
+        );
+    }
+
+    // 2. Extract mask values
+    let pixel_count = (out_w * out_h) as usize;
+    let mut mask_values = vec![0u8; pixel_count];
+    extract_soft_mask_values(mask_pixmap.data(), &mut mask_values, params);
+
+    // 3. Render content
+    let Some(mut content_pixmap) = Pixmap::new(out_w, out_h) else {
+        return;
+    };
+    let mut content_state = BandState {
+        clip_region: None,
+        spare_mask: None,
+        clip_mask_cache: HashMap::new(),
+        clip_mask_seen: HashSet::new(),
+        mask_pool: Vec::new(),
+    };
+    for elem in content_list.elements() {
+        render_element_to_viewport(
+            &mut content_pixmap,
+            &mut content_state,
+            elem,
+            vp_x,
+            vp_y,
+            scale_x,
+            scale_y,
+            out_w,
+            out_h,
+            effective_dpi,
+            icc,
+        );
+    }
+
+    // 4. Multiply content by mask
+    let content_data = content_pixmap.data_mut();
+    for i in 0..pixel_count {
+        let m = mask_values[i] as u16;
+        let off = i * 4;
+        content_data[off] = ((content_data[off] as u16 * m + 128) / 255) as u8;
+        content_data[off + 1] = ((content_data[off + 1] as u16 * m + 128) / 255) as u8;
+        content_data[off + 2] = ((content_data[off + 2] as u16 * m + 128) / 255) as u8;
+        content_data[off + 3] = ((content_data[off + 3] as u16 * m + 128) / 255) as u8;
+    }
+
+    // 5. Composite onto parent
+    let mut temp_mask = None;
+    let mask_ref = resolve_clip_mask(&state.clip_region, &mut temp_mask, out_w, out_h);
+    let mask_ref = match mask_ref {
+        None => return,
+        Some(m) => m,
+    };
+    let paint = tiny_skia::PixmapPaint {
+        opacity: 1.0,
+        blend_mode: tiny_skia::BlendMode::SourceOver,
+        quality: tiny_skia::FilterQuality::Nearest,
+    };
+    pixmap.draw_pixmap(
+        0,
+        0,
+        content_pixmap.as_ref(),
+        &paint,
+        Transform::identity(),
+        mask_ref,
+    );
 }
 
 /// Pattern fill for viewport rendering. Applies viewport transform to both
@@ -4083,7 +4372,7 @@ fn solve_radial_t(
     let a = cdx * cdx + cdy * cdy - dr * dr;
     let dpx = px - x0;
     let dpy = py - y0;
-    let b = 2.0 * (dpx * cdx + dpy * cdy - r0 * dr);
+    let b = -2.0 * (dpx * cdx + dpy * cdy + r0 * dr);
     let c = dpx * dpx + dpy * dpy - r0 * r0;
 
     if a.abs() < 1e-10 {

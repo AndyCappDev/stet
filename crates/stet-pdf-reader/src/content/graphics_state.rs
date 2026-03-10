@@ -5,7 +5,7 @@
 //! PDF graphics state for content stream interpretation.
 
 use stet_core::device::{BgUcrState, FillParams, HalftoneState, StrokeParams, TransferState};
-use stet_core::display_list::DisplayList;
+use stet_core::display_list::{DisplayList, SoftMaskSubtype};
 use stet_core::graphics_state::{
     DashPattern, DeviceColor, FillRule, LineCap, LineJoin, Matrix, PsPath,
 };
@@ -37,6 +37,28 @@ impl std::fmt::Debug for TilingPattern {
             .field("y_step", &self.y_step)
             .field("paint_type", &self.paint_type)
             .field("pattern_id", &self.pattern_id)
+            .finish()
+    }
+}
+
+/// A resolved soft mask from ExtGState /SMask.
+#[derive(Clone)]
+pub struct SoftMask {
+    /// Pre-rendered mask form display list.
+    pub mask_list: DisplayList,
+    /// How to extract the mask (alpha or luminosity).
+    pub subtype: SoftMaskSubtype,
+    /// Device-space bounding box.
+    pub bbox: [f64; 4],
+    /// Backdrop color for luminosity masks (RGB, 0.0–1.0).
+    pub backdrop_color: Option<[f64; 3]>,
+}
+
+impl std::fmt::Debug for SoftMask {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SoftMask")
+            .field("subtype", &self.subtype)
+            .field("bbox", &self.bbox)
             .finish()
     }
 }
@@ -109,6 +131,8 @@ pub struct PdfGraphicsState {
     pub next_pattern_id: u32,
     /// Transfer function state.
     pub transfer: TransferState,
+    /// Active soft mask from ExtGState /SMask.
+    pub soft_mask: Option<SoftMask>,
 }
 
 impl PdfGraphicsState {
@@ -149,6 +173,7 @@ impl PdfGraphicsState {
             stroke_pattern: None,
             next_pattern_id: 0,
             transfer: TransferState::default(),
+            soft_mask: None,
         }
     }
 

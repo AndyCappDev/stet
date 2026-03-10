@@ -198,8 +198,8 @@ PostScript has no transparency model. PDF 1.4 (2001) added:
 - Validate against simple PDFs rendered by GS
 
 ### Phase D: Transparency
-- Blend modes (per-pixel math)
-- Constant alpha
+- Blend modes — all 16 PDF modes wired to tiny-skia ✓
+- Constant alpha ✓
 - Transparency groups (offscreen rendering)
 - Soft masks
 - Validate against GS and Poppler with transparency-heavy PDFs

@@ -228,28 +228,25 @@ fn handle_radial(
     let function = parse_shading_function(dict, resolver)?;
     let color_stops = sample_function_to_stops_icc(&function, 64, resolved_cs, icc_cache);
 
-    let (x0, y0) = gstate.ctm.transform_point(vals[0], vals[1]);
-    let (x1, y1) = gstate.ctm.transform_point(vals[3], vals[4]);
-    let scale = gstate.ctm_scale_factor();
-    let r0 = vals[2] * scale;
-    let r1 = vals[5] * scale;
-
+    // Keep coordinates in user space; pass the CTM to the renderer so it can
+    // inverse-transform device pixels back to user space where circles are circular.
+    // This correctly handles non-uniform scaling and shear (circles → ellipses).
+    // BBox stays in user space too — the renderer transforms it via the CTM.
     let cs = resolved_cs_to_shading_cs(resolved_cs);
-    let device_bbox = transform_bbox(&bbox, &gstate.ctm);
 
     display_list.push(DisplayElement::RadialShading {
         params: RadialShadingParams {
-            x0,
-            y0,
-            r0,
-            x1,
-            y1,
-            r1,
+            x0: vals[0],
+            y0: vals[1],
+            r0: vals[2],
+            x1: vals[3],
+            y1: vals[4],
+            r1: vals[5],
             color_stops,
             extend_start: extend.0,
             extend_end: extend.1,
-            ctm: Matrix::identity(),
-            bbox: device_bbox,
+            ctm: gstate.ctm,
+            bbox,
             color_space: cs,
         },
     });

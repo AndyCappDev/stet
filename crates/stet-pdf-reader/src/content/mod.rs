@@ -29,7 +29,9 @@ use self::font::{FontCache, PdfFont};
 use self::graphics_state::TilingPattern;
 use stet_core::device::{ClipParams, ImageColorSpace, ImageParams, PatternFillParams};
 use stet_core::icc::IccCache;
-use stet_core::display_list::{DisplayElement, DisplayList, GroupParams};
+use stet_core::display_list::{
+    DisplayElement, DisplayList, GroupParams, SoftMaskParams, SoftMaskSubtype,
+};
 use stet_core::graphics_state::{
     DashPattern, DeviceColor, FillRule, LineCap, LineJoin, Matrix, PathSegment, PsPath,
 };
@@ -74,6 +76,14 @@ impl Operand {
     }
 }
 
+/// Tracks the scope of an active soft mask in the display list.
+struct SoftMaskScope {
+    /// Index in display_list where the mask scope began.
+    start_index: usize,
+    /// The resolved soft mask (mask display list + params).
+    mask: graphics_state::SoftMask,
+}
+
 /// PDF content stream interpreter.
 pub struct ContentInterpreter<'a> {
     resolver: &'a Resolver<'a>,
@@ -95,6 +105,8 @@ pub struct ContentInterpreter<'a> {
     initial_ctm: Matrix,
     /// ICC color profile cache for ICCBased color space conversions.
     icc_cache: IccCache,
+    /// Active soft mask scope: tracks which display list elements fall under the current SMask.
+    soft_mask_scope: Option<SoftMaskScope>,
 }
 
 impl<'a> ContentInterpreter<'a> {
@@ -120,6 +132,7 @@ impl<'a> ContentInterpreter<'a> {
                 cache.search_system_cmyk_profile();
                 cache
             },
+            soft_mask_scope: None,
         }
     }
 
@@ -141,6 +154,8 @@ impl<'a> ContentInterpreter<'a> {
         if let Err(e) = self.interpret_stream(data) {
             eprintln!("warning: content stream error: {}", e);
         }
+        // Flush any active soft mask scope
+        self.flush_soft_mask();
         // Return partial display list even on error — handles malformed PDFs
         // where flate decompression produces truncated content streams.
         Ok(self.display_list)
@@ -409,6 +424,14 @@ impl<'a> ContentInterpreter<'a> {
 
     fn op_big_q(&mut self) -> Result<(), PdfError> {
         if let Some(saved) = self.gstate_stack.pop() {
+            // Flush soft mask scope before restoring state — the restored
+            // state may have a different (or no) soft mask.
+            let restored_has_smask = saved.soft_mask.is_some();
+            let current_has_smask = self.gstate.soft_mask.is_some();
+            if current_has_smask && !restored_has_smask {
+                self.flush_soft_mask();
+            }
+
             let old_clip_version = self.gstate.clip_path_version;
             self.gstate = saved;
             // If clip changed during the q/Q block, restore it
@@ -1462,6 +1485,9 @@ impl<'a> ContentInterpreter<'a> {
             let mut group_list = DisplayList::new();
             std::mem::swap(&mut self.display_list, &mut group_list);
 
+            // Save and clear soft mask scope — it belongs to the parent display list
+            let saved_scope = self.soft_mask_scope.take();
+
             // Clip to BBox inside the group's display list
             if let Some((x0, y0, x1, y1)) = bbox {
                 self.push_bbox_clip(x0, y0, x1, y1);
@@ -1472,8 +1498,14 @@ impl<'a> ContentInterpreter<'a> {
             self.interpret_stream(&form_data)?;
             self.depth -= 1;
 
+            // Flush any soft mask scope opened inside the group
+            self.flush_soft_mask();
+
             // Swap back — group_list now contains the group's elements
             std::mem::swap(&mut self.display_list, &mut group_list);
+
+            // Restore parent's soft mask scope
+            self.soft_mask_scope = saved_scope;
 
             // Compute device-space bbox from form BBox + CTM
             let device_bbox = self.compute_device_bbox(bbox);
@@ -1815,7 +1847,169 @@ impl<'a> ContentInterpreter<'a> {
             self.gstate.transfer = self.parse_transfer_function(tr_obj)?;
         }
 
+        // Soft mask
+        if let Some(smask_obj) = gs_dict.get(b"SMask") {
+            let smask_obj = self.resolver.deref(smask_obj)?;
+            match &smask_obj {
+                PdfObj::Name(n) if n.as_slice() == b"None" => {
+                    self.flush_soft_mask();
+                    self.gstate.soft_mask = None;
+                }
+                PdfObj::Dict(d) => {
+                    self.flush_soft_mask();
+                    match self.resolve_soft_mask(d) {
+                        Ok(sm) => {
+                            let start_index = self.display_list.len();
+                            self.gstate.soft_mask = Some(sm.clone());
+                            self.soft_mask_scope = Some(SoftMaskScope {
+                                start_index,
+                                mask: sm,
+                            });
+                        }
+                        Err(e) => {
+                            eprintln!("warning: SMask resolve error: {}", e);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
         Ok(())
+    }
+
+    /// Flush the current soft mask scope: wrap accumulated elements in SoftMasked.
+    fn flush_soft_mask(&mut self) {
+        if let Some(scope) = self.soft_mask_scope.take() {
+            if self.display_list.len() > scope.start_index {
+                let content = self.display_list.split_off(scope.start_index);
+                self.display_list.push(DisplayElement::SoftMasked {
+                    mask: scope.mask.mask_list,
+                    content,
+                    params: SoftMaskParams {
+                        subtype: scope.mask.subtype,
+                        bbox: scope.mask.bbox,
+                        backdrop_color: scope.mask.backdrop_color,
+                    },
+                });
+            }
+        }
+    }
+
+    /// Resolve a soft mask dictionary into a SoftMask.
+    fn resolve_soft_mask(
+        &mut self,
+        dict: &PdfDict,
+    ) -> Result<graphics_state::SoftMask, PdfError> {
+        // Parse /S (subtype): Alpha or Luminosity (default Luminosity)
+        let subtype = match dict.get_name(b"S") {
+            Some(b"Alpha") => SoftMaskSubtype::Alpha,
+            _ => SoftMaskSubtype::Luminosity,
+        };
+
+        // Parse /G (Form XObject) — required
+        let g_ref = dict
+            .get(b"G")
+            .ok_or_else(|| PdfError::Other("SMask missing /G".into()))?;
+        let g_obj = self.resolver.deref(g_ref)?;
+        let g_dict = g_obj
+            .as_dict()
+            .ok_or_else(|| PdfError::Other("SMask /G is not a dict".into()))?;
+
+        // Get form BBox
+        let bbox_tuple = if let Some(arr) = g_dict.get_array(b"BBox") {
+            let vals: Vec<f64> = arr.iter().filter_map(|o| o.as_f64()).collect();
+            if vals.len() == 4 {
+                Some((vals[0], vals[1], vals[2], vals[3]))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Form matrix
+        let form_matrix = if let Some(arr) = g_dict.get_array(b"Matrix") {
+            let vals: Vec<f64> = arr.iter().filter_map(|o| o.as_f64()).collect();
+            if vals.len() == 6 {
+                Matrix::new(vals[0], vals[1], vals[2], vals[3], vals[4], vals[5])
+            } else {
+                Matrix::identity()
+            }
+        } else {
+            Matrix::identity()
+        };
+
+        // Get form resources
+        let form_resources = if let Some(res_obj) = g_dict.get(b"Resources") {
+            match self.resolver.deref(res_obj)? {
+                PdfObj::Dict(d) => d,
+                _ => self.resources.clone(),
+            }
+        } else {
+            self.resources.clone()
+        };
+
+        // Render the form into a display list
+        let form_data = self.resolver.stream_data_from_obj(&g_obj)?;
+
+        // Save state and render
+        self.gstate_stack.push(self.gstate.clone());
+        let saved_resources = std::mem::replace(&mut self.resources, form_resources);
+        let saved_display_list = std::mem::replace(&mut self.display_list, DisplayList::new());
+        let saved_scope = self.soft_mask_scope.take();
+
+        // Apply form matrix to CTM
+        self.gstate.ctm = self.gstate.ctm.concat(&form_matrix);
+
+        // Clip to BBox
+        if let Some((x0, y0, x1, y1)) = bbox_tuple {
+            self.push_bbox_clip(x0, y0, x1, y1);
+        }
+
+        self.depth += 1;
+        let _ = self.interpret_stream(&form_data);
+        self.depth -= 1;
+
+        // Flush any soft mask scope opened inside the mask form
+        self.flush_soft_mask();
+
+        let mask_list = std::mem::replace(&mut self.display_list, saved_display_list);
+        self.soft_mask_scope = saved_scope;
+        self.resources = saved_resources;
+        if let Some(saved) = self.gstate_stack.pop() {
+            self.gstate = saved;
+        }
+
+        // Compute device-space bbox
+        let device_bbox = self.compute_device_bbox(bbox_tuple);
+
+        // Parse /BC (backdrop color)
+        let backdrop_color = if let Some(bc_arr) = dict.get_array(b"BC") {
+            let vals: Vec<f64> = bc_arr.iter().filter_map(|o| o.as_f64()).collect();
+            if vals.len() >= 3 {
+                Some([vals[0], vals[1], vals[2]])
+            } else if vals.len() == 1 {
+                // Gray backdrop → replicate to RGB
+                Some([vals[0], vals[0], vals[0]])
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Log warning for /TR (transfer function) — deferred to Phase E5
+        if dict.get(b"TR").is_some() {
+            eprintln!("warning: SMask /TR (transfer function) not implemented, ignoring");
+        }
+
+        Ok(graphics_state::SoftMask {
+            mask_list,
+            subtype,
+            bbox: device_bbox,
+            backdrop_color,
+        })
     }
 
     /// Parse a TR/TR2 value into a TransferState.

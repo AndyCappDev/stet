@@ -241,8 +241,20 @@ impl PdfDocument {
   - Alpha reset inside groups (fill_alpha/stroke_alpha → 1.0) to prevent double-application ✓
   - Transparent page backdrop with `composite_onto_white()` at end of rendering ✓
   - Both banded and viewport rendering paths ✓
-- **E3: Soft masks on graphics state** — luminosity/alpha masks from ExtGState SMask
+- **E3: Soft masks on graphics state** ✓
+  - `SoftMaskSubtype` (Alpha/Luminosity) + `SoftMaskParams` + `DisplayElement::SoftMasked` ✓
+  - `SoftMask` struct on `PdfGraphicsState` with pre-rendered mask DisplayList ✓
+  - SMask parsing in `apply_ext_gstate`: `/S`, `/G` (Form XObject), `/BC` (backdrop color) ✓
+  - Scope tracking via `SoftMaskScope`: wraps paint ops in `SoftMasked` on flush ✓
+  - `flush_soft_mask()` on Q/SMask-change/end-of-page + save/restore around form XObjects ✓
+  - `render_soft_masked_band()` + `render_soft_masked_viewport()`: offscreen mask→content multiply ✓
+  - Luminosity extraction: Y = 0.2126R + 0.7152G + 0.0722B with backdrop color for transparent pixels ✓
+  - Test PDFs: SoftMask.pdf, SoftMask-Clipped.pdf, SoftMask-Interaction.pdf ✓
 - **E4: Knockout groups, nested transparency, optimization**
+- **E5: Deferred SMask features**
+  - SMask `/TR` (transfer function) on soft mask
+  - Mask group `/CS` color space (render mask form in specific color space)
+  - `/Matte` pre-blending for pre-multiplied mask images
 - Annotations (Link, Widget appearance streams)
 - Optional content (layers) — basic visibility toggling
 

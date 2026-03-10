@@ -1244,8 +1244,8 @@ fn replay_form_elements(
                 ];
                 target.push(DisplayElement::Text { params: new_params });
             }
-            DisplayElement::Group { .. } => {
-                // Groups are PDF-only; PS display lists don't contain them
+            DisplayElement::Group { .. } | DisplayElement::SoftMasked { .. } => {
+                // Groups/SoftMasked are PDF-only; PS display lists don't contain them
             }
         }
     }
