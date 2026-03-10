@@ -153,6 +153,8 @@ fn handle_axial(
 
     let cs = resolve_shading_color_space(dict, resolver);
 
+    let device_bbox = transform_bbox(&bbox, &gstate.ctm);
+
     display_list.push(DisplayElement::AxialShading {
         params: AxialShadingParams {
             x0,
@@ -163,7 +165,7 @@ fn handle_axial(
             extend_start: extend.0,
             extend_end: extend.1,
             ctm: Matrix::identity(),
-            bbox,
+            bbox: device_bbox,
             color_space: cs,
         },
     });
@@ -196,6 +198,7 @@ fn handle_radial(
     let r1 = vals[5] * scale;
 
     let cs = resolve_shading_color_space(dict, resolver);
+    let device_bbox = transform_bbox(&bbox, &gstate.ctm);
 
     display_list.push(DisplayElement::RadialShading {
         params: RadialShadingParams {
@@ -209,7 +212,7 @@ fn handle_radial(
             extend_start: extend.0,
             extend_end: extend.1,
             ctm: Matrix::identity(),
-            bbox,
+            bbox: device_bbox,
             color_space: cs,
         },
     });
@@ -261,12 +264,13 @@ fn handle_mesh(
     }
 
     let bbox = parse_bbox(dict);
+    let device_bbox = transform_bbox(&bbox, &gstate.ctm);
 
     display_list.push(DisplayElement::MeshShading {
         params: MeshShadingParams {
             triangles,
             ctm: Matrix::identity(),
-            bbox,
+            bbox: device_bbox,
             color_space: cs,
         },
     });
@@ -311,12 +315,13 @@ fn handle_patches(
     }
 
     let bbox = parse_bbox(dict);
+    let device_bbox = transform_bbox(&bbox, &gstate.ctm);
 
     display_list.push(DisplayElement::PatchShading {
         params: PatchShadingParams {
             patches,
             ctm: Matrix::identity(),
-            bbox,
+            bbox: device_bbox,
             color_space: cs,
         },
     });
@@ -380,6 +385,29 @@ fn sample_function_to_stops(function: &PdfFunction, n_samples: usize) -> Vec<Col
         });
     }
     stops
+}
+
+/// Transform a user-space BBox to device space via CTM.
+fn transform_bbox(bbox: &Option<[f64; 4]>, ctm: &Matrix) -> Option<[f64; 4]> {
+    bbox.map(|b| {
+        let corners = [
+            ctm.transform_point(b[0], b[1]),
+            ctm.transform_point(b[2], b[1]),
+            ctm.transform_point(b[0], b[3]),
+            ctm.transform_point(b[2], b[3]),
+        ];
+        let x_min = corners.iter().map(|c| c.0).fold(f64::INFINITY, f64::min);
+        let y_min = corners.iter().map(|c| c.1).fold(f64::INFINITY, f64::min);
+        let x_max = corners
+            .iter()
+            .map(|c| c.0)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let y_max = corners
+            .iter()
+            .map(|c| c.1)
+            .fold(f64::NEG_INFINITY, f64::max);
+        [x_min, y_min, x_max, y_max]
+    })
 }
 
 fn parse_bbox(dict: &PdfDict) -> Option<[f64; 4]> {

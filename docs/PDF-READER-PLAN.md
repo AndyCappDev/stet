@@ -208,7 +208,17 @@ impl PdfDocument {
   - RC4 (V=1,2), AES-128-CBC (V=4), AES-256-CBC (V=5) ✓
   - Per-object key derivation, string/stream decryption in resolver ✓
 
+**Known limitations**:
+- ICCBased: profile data is parsed but ignored — falls back to device space by component count
+  (1→DeviceGray, 3→DeviceRGB, 4→DeviceCMYK). The PS interpreter has full ICC support via
+  `stet-core::icc` + `moxcms`; wire it into the PDF reader's color pipeline in Phase E.
+- CalGray/CalRGB: CIE parameters are parsed but rendering uses approximate identity conversion
+  (no actual CIE→sRGB transform applied). The PS interpreter handles CIE properly via
+  `CieAParams`/`CieAbcParams`.
+
 **Not done (moved to Phase E)**:
+- ICCBased color management (extract profile data, apply transforms via IccCache)
+- CalGray/CalRGB accurate CIE rendering
 - Transparency groups (isolated/knockout), soft masks (D8 Part 2)
 - Annotations (Link, Widget)
 - Optional content (layers) — basic visibility toggling
@@ -216,6 +226,11 @@ impl PdfDocument {
 
 ### Phase E: Transparency & Remaining Features
 
+- **ICCBased color management**: Extract embedded ICC profile data from ICCBased color space
+  dicts, register with `IccCache`, apply profile transforms for fill/stroke colors and images.
+  Reuse `stet-core::icc` + `moxcms` (already working in the PS interpreter).
+- **CalGray/CalRGB accurate rendering**: Apply CIE gamma/matrix/white point transforms instead
+  of passing colors through as-is. Reuse `CieAParams`/`CieAbcParams` pipelines from stet-core.
 - Transparency group rendering to offscreen buffers
 - Isolated and knockout group semantics
 - All 12 blend modes (pixel-level compositing in tiny-skia)
