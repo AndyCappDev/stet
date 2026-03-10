@@ -25,7 +25,8 @@ use self::graphics_state::{ColorSpaceRef, PdfGraphicsState};
 use std::sync::Arc;
 
 use self::font::{FontCache, PdfFont};
-use stet_core::device::{ClipParams, ImageColorSpace, ImageParams};
+use self::graphics_state::TilingPattern;
+use stet_core::device::{ClipParams, ImageColorSpace, ImageParams, PatternFillParams};
 use stet_core::display_list::{DisplayElement, DisplayList};
 use stet_core::graphics_state::{
     DashPattern, DeviceColor, FillRule, LineCap, LineJoin, Matrix, PathSegment, PsPath,
@@ -86,6 +87,10 @@ pub struct ContentInterpreter<'a> {
     depth: u32,
     font_cache: FontCache,
     current_font: Option<Arc<PdfFont>>,
+    /// Initial CTM (before any content stream `cm` operators).
+    /// PDF pattern Matrix maps to the default user space, so we need
+    /// the initial CTM (not current CTM) for pattern matrix computation.
+    initial_ctm: Matrix,
 }
 
 impl<'a> ContentInterpreter<'a> {
@@ -101,6 +106,7 @@ impl<'a> ContentInterpreter<'a> {
             subpath_start: None,
             operand_stack: Vec::new(),
             display_list: DisplayList::new(),
+            initial_ctm,
             in_text: false,
             depth: 0,
             font_cache: FontCache::new(),
@@ -590,10 +596,7 @@ impl<'a> ContentInterpreter<'a> {
         // f/F: fill (non-zero winding)
         let path = self.take_path();
         if !path.is_empty() {
-            self.display_list.push(DisplayElement::Fill {
-                path,
-                params: self.gstate.fill_params(FillRule::NonZeroWinding),
-            });
+            self.emit_fill(path, FillRule::NonZeroWinding);
         }
         self.apply_pending_clip();
         Ok(())
@@ -603,10 +606,7 @@ impl<'a> ContentInterpreter<'a> {
         // f*: fill (even-odd)
         let path = self.take_path();
         if !path.is_empty() {
-            self.display_list.push(DisplayElement::Fill {
-                path,
-                params: self.gstate.fill_params(FillRule::EvenOdd),
-            });
+            self.emit_fill(path, FillRule::EvenOdd);
         }
         self.apply_pending_clip();
         Ok(())
@@ -616,10 +616,7 @@ impl<'a> ContentInterpreter<'a> {
         // B: fill (non-zero) + stroke
         let path = self.take_path();
         if !path.is_empty() {
-            self.display_list.push(DisplayElement::Fill {
-                path: path.clone(),
-                params: self.gstate.fill_params(FillRule::NonZeroWinding),
-            });
+            self.emit_fill(path.clone(), FillRule::NonZeroWinding);
             self.display_list.push(DisplayElement::Stroke {
                 path,
                 params: self.gstate.stroke_params(),
@@ -633,10 +630,7 @@ impl<'a> ContentInterpreter<'a> {
         // B*: fill (even-odd) + stroke
         let path = self.take_path();
         if !path.is_empty() {
-            self.display_list.push(DisplayElement::Fill {
-                path: path.clone(),
-                params: self.gstate.fill_params(FillRule::EvenOdd),
-            });
+            self.emit_fill(path.clone(), FillRule::EvenOdd);
             self.display_list.push(DisplayElement::Stroke {
                 path,
                 params: self.gstate.stroke_params(),
@@ -656,6 +650,35 @@ impl<'a> ContentInterpreter<'a> {
         // b*: close, fill (even-odd), stroke
         self.op_h()?;
         self.op_big_b_star()
+    }
+
+    /// Emit a fill — either a pattern fill or a regular solid fill.
+    fn emit_fill(&mut self, path: PsPath, fill_rule: FillRule) {
+        if let Some(pattern) = self.gstate.fill_pattern.clone() {
+            self.display_list.push(DisplayElement::PatternFill {
+                params: PatternFillParams {
+                    path,
+                    fill_rule,
+                    tile: pattern.tile,
+                    pattern_matrix: pattern.pattern_matrix,
+                    bbox: pattern.bbox,
+                    xstep: pattern.x_step,
+                    ystep: pattern.y_step,
+                    paint_type: pattern.paint_type,
+                    underlying_color: if pattern.paint_type == 2 {
+                        Some(self.gstate.fill_color.clone())
+                    } else {
+                        None
+                    },
+                    pattern_id: pattern.pattern_id,
+                },
+            });
+        } else {
+            self.display_list.push(DisplayElement::Fill {
+                path,
+                params: self.gstate.fill_params(fill_rule),
+            });
+        }
     }
 
     fn op_n(&mut self) -> Result<(), PdfError> {
@@ -694,6 +717,7 @@ impl<'a> ContentInterpreter<'a> {
         let g = self.pop_number()?;
         self.gstate.fill_color = DeviceColor::from_gray(g);
         self.gstate.fill_color_space = ColorSpaceRef::DeviceGray;
+        self.gstate.fill_pattern = None;
         Ok(())
     }
 
@@ -710,6 +734,7 @@ impl<'a> ContentInterpreter<'a> {
         let n = self.get_numbers(3)?;
         self.gstate.fill_color = DeviceColor::from_rgb(n[0], n[1], n[2]);
         self.gstate.fill_color_space = ColorSpaceRef::DeviceRGB;
+        self.gstate.fill_pattern = None;
         Ok(())
     }
 
@@ -726,6 +751,7 @@ impl<'a> ContentInterpreter<'a> {
         let n = self.get_numbers(4)?;
         self.gstate.fill_color = DeviceColor::from_cmyk(n[0], n[1], n[2], n[3]);
         self.gstate.fill_color_space = ColorSpaceRef::DeviceCMYK;
+        self.gstate.fill_pattern = None;
         Ok(())
     }
 
@@ -790,6 +816,7 @@ impl<'a> ContentInterpreter<'a> {
         }
         let nums = self.get_numbers(n)?;
         self.gstate.fill_color = components_to_device_color(&cs, &nums);
+        self.gstate.fill_pattern = None;
         Ok(())
     }
 
@@ -1548,7 +1575,9 @@ impl<'a> ContentInterpreter<'a> {
             .and_then(|o| o.as_name())
             .ok_or(PdfError::Other("pattern: expected name".into()))?
             .to_vec();
-        self.resolve_and_emit_pattern(&name, true)
+        let pattern = self.resolve_pattern(&name)?;
+        self.gstate.fill_pattern = Some(pattern);
+        Ok(())
     }
 
     fn handle_pattern_stroke(&mut self) -> Result<(), PdfError> {
@@ -1558,10 +1587,12 @@ impl<'a> ContentInterpreter<'a> {
             .and_then(|o| o.as_name())
             .ok_or(PdfError::Other("pattern: expected name".into()))?
             .to_vec();
-        self.resolve_and_emit_pattern(&name, false)
+        let pattern = self.resolve_pattern(&name)?;
+        self.gstate.stroke_pattern = Some(pattern);
+        Ok(())
     }
 
-    fn resolve_and_emit_pattern(&mut self, name: &[u8], _is_fill: bool) -> Result<(), PdfError> {
+    fn resolve_pattern(&mut self, name: &[u8]) -> Result<TilingPattern, PdfError> {
         let pattern_dict = self
             .resources
             .get_dict(b"Pattern")
@@ -1580,19 +1611,20 @@ impl<'a> ContentInterpreter<'a> {
         let pattern_type = pat_dict.get_int(b"PatternType").unwrap_or(1) as i32;
 
         match pattern_type {
-            1 => self.handle_tiling_pattern(&pat_obj, pat_dict),
-            2 => self.handle_shading_pattern(pat_dict),
-            _ => Ok(()),
+            1 => self.resolve_tiling_pattern(&pat_obj, pat_dict),
+            _ => Err(PdfError::Other(format!(
+                "Unsupported PatternType {pattern_type}"
+            ))),
         }
     }
 
-    fn handle_tiling_pattern(
+    fn resolve_tiling_pattern(
         &mut self,
         pat_obj: &PdfObj,
         pat_dict: &PdfDict,
-    ) -> Result<(), PdfError> {
+    ) -> Result<TilingPattern, PdfError> {
         if self.depth >= 20 {
-            return Ok(());
+            return Err(PdfError::Other("pattern recursion limit".into()));
         }
         let paint_type = pat_dict.get_int(b"PaintType").unwrap_or(1) as i32;
 
@@ -1634,12 +1666,20 @@ impl<'a> ContentInterpreter<'a> {
 
         let pattern_data = self.resolver.stream_data_from_obj(pat_obj)?;
 
-        // Interpret pattern content stream into a sub-display-list
+        // Compute the combined pattern matrix (pattern space → device space).
+        // PDF pattern Matrix maps pattern space → default user space (before any
+        // `cm` operators), so use initial_ctm, not the current gstate.ctm.
+        let combined_matrix = self.initial_ctm.concat(&pattern_matrix);
+
+        // Interpret pattern content stream into a sub-display-list.
+        // Use identity CTM so tile paths stay in pattern space (like PostScript's
+        // makepattern). The renderer applies pattern_matrix to transform them
+        // into device space at render time.
         self.gstate_stack.push(self.gstate.clone());
         let saved_resources = std::mem::replace(&mut self.resources, pattern_resources);
         let saved_display_list = std::mem::take(&mut self.display_list);
 
-        self.gstate.ctm = self.gstate.ctm.concat(&pattern_matrix);
+        self.gstate.ctm = Matrix::identity();
 
         self.depth += 1;
         let _ = self.interpret_stream(&pattern_data);
@@ -1651,29 +1691,18 @@ impl<'a> ContentInterpreter<'a> {
             self.gstate = saved;
         }
 
-        use stet_core::device::PatternFillParams;
-        self.display_list.push(DisplayElement::PatternFill {
-            params: PatternFillParams {
-                path: PsPath::new(),
-                fill_rule: FillRule::NonZeroWinding,
-                tile: tile_display_list,
-                pattern_matrix: self.gstate.ctm.concat(&pattern_matrix),
-                bbox,
-                xstep: x_step,
-                ystep: y_step,
-                paint_type,
-                underlying_color: if paint_type == 2 {
-                    Some(self.gstate.fill_color.clone())
-                } else {
-                    None
-                },
-                pattern_id: 0,
-            },
-        });
-
-        Ok(())
+        Ok(TilingPattern {
+            tile: tile_display_list,
+            bbox,
+            x_step,
+            y_step,
+            pattern_matrix: combined_matrix,
+            paint_type,
+            pattern_id: 0,
+        })
     }
 
+    #[allow(dead_code)]
     fn handle_shading_pattern(&mut self, pat_dict: &PdfDict) -> Result<(), PdfError> {
         let sh_ref = pat_dict
             .get(b"Shading")
