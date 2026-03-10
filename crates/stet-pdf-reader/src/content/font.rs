@@ -24,6 +24,8 @@ pub enum PdfFont {
     Type1(Type1PdfFont),
     TrueType(TrueTypePdfFont),
     Cff(CffPdfFont),
+    /// Type 0 composite font (CIDFontType2 with TrueType outlines)
+    CidTrueType(CidTrueTypePdfFont),
 }
 
 pub struct Type1PdfFont {
@@ -48,6 +50,19 @@ pub struct CffPdfFont {
     pub font_matrix: Matrix,
 }
 
+/// CIDFontType2: TrueType outlines accessed by CID (2-byte char codes).
+pub struct CidTrueTypePdfFont {
+    pub data: Vec<u8>,
+    /// Default glyph width (from /DW, in text space ÷1000).
+    pub default_width: f64,
+    /// CID → width mapping (from /W array, in text space ÷1000).
+    pub cid_widths: HashMap<u16, f64>,
+    pub cmap: HashMap<u32, u16>,
+    pub units_per_em: f64,
+    /// If true, CID maps directly to GID (Identity CIDToGIDMap).
+    pub identity_cid_to_gid: bool,
+}
+
 /// Font cache: font resource name → resolved font.
 pub type FontCache = HashMap<Vec<u8>, Arc<PdfFont>>;
 
@@ -59,6 +74,12 @@ pub fn resolve_font(resolver: &Resolver, font_ref: &PdfObj) -> Result<PdfFont, P
         .ok_or(PdfError::Other("Font is not a dict".into()))?;
 
     let subtype = font_dict.get_name(b"Subtype").unwrap_or(b"Type1");
+
+    // Handle Type 0 composite fonts (CID fonts)
+    if subtype == b"Type0" {
+        return resolve_type0(resolver, font_dict);
+    }
+
     let first_char = font_dict.get_int(b"FirstChar").unwrap_or(0) as usize;
     let _last_char = font_dict.get_int(b"LastChar").unwrap_or(255) as usize;
 
@@ -355,6 +376,115 @@ fn resolve_cff(
     }))
 }
 
+/// Resolve a Type 0 composite font (CIDFontType2 descendant with TrueType outlines).
+fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, PdfError> {
+    // Get DescendantFonts array (must have exactly one entry)
+    let descendants = font_dict
+        .get_array(b"DescendantFonts")
+        .ok_or(PdfError::Other("Type0 font missing DescendantFonts".into()))?;
+    let cid_font_ref = descendants
+        .first()
+        .ok_or(PdfError::Other("DescendantFonts is empty".into()))?;
+    let cid_font_obj = resolver.deref(cid_font_ref)?;
+    let cid_font_dict = cid_font_obj
+        .as_dict()
+        .ok_or(PdfError::Other("CIDFont is not a dict".into()))?;
+
+    let cid_subtype = cid_font_dict.get_name(b"Subtype").unwrap_or(b"");
+    if cid_subtype != b"CIDFontType2" {
+        return Err(PdfError::Other(format!(
+            "Unsupported CIDFont subtype: {}",
+            String::from_utf8_lossy(cid_subtype)
+        )));
+    }
+
+    // Get FontDescriptor from the CIDFont
+    let descriptor = get_font_descriptor(cid_font_dict, resolver)?;
+    let desc = descriptor
+        .as_ref()
+        .ok_or(PdfError::Other("CIDFont missing FontDescriptor".into()))?;
+    let ff_ref = desc
+        .get(b"FontFile2")
+        .ok_or(PdfError::Other("CIDFontType2 missing FontFile2".into()))?;
+    let data = resolver.stream_data_from_obj(&resolver.deref(ff_ref)?)?;
+
+    let units_per_em = get_units_per_em(&data) as f64;
+    let cmap = parse_cmap(&data);
+
+    // Parse /DW (default width)
+    let default_width = cid_font_dict.get_int(b"DW").unwrap_or(1000) as f64 / 1000.0;
+
+    // Parse /W array (CID-specific widths)
+    let cid_widths = parse_cid_widths(cid_font_dict, resolver);
+
+    // Check CIDToGIDMap
+    let identity_cid_to_gid = cid_font_dict
+        .get_name(b"CIDToGIDMap")
+        .map(|n| n == b"Identity")
+        .unwrap_or(true); // Default is Identity
+
+    Ok(PdfFont::CidTrueType(CidTrueTypePdfFont {
+        data,
+        default_width,
+        cid_widths,
+        cmap,
+        units_per_em,
+        identity_cid_to_gid,
+    }))
+}
+
+/// Parse /W array from CIDFont dict into CID → width map.
+///
+/// Format: `[ cid_first [w1 w2 ...] cid_first cid_last w ... ]`
+fn parse_cid_widths(cid_font_dict: &PdfDict, resolver: &Resolver) -> HashMap<u16, f64> {
+    let mut widths = HashMap::new();
+    let w_arr = match cid_font_dict.get_array(b"W") {
+        Some(arr) => arr,
+        None => return widths,
+    };
+    let mut i = 0;
+    while i < w_arr.len() {
+        let first_cid = match &w_arr[i] {
+            PdfObj::Int(n) => *n as u16,
+            _ => break,
+        };
+        i += 1;
+        if i >= w_arr.len() {
+            break;
+        }
+        // Next element: array (individual widths) or int (range end)
+        let next = resolver.deref(&w_arr[i]).unwrap_or(w_arr[i].clone());
+        match &next {
+            PdfObj::Array(arr) => {
+                // [ cid_first [w1 w2 w3 ...] ] — consecutive CID widths
+                for (j, w_obj) in arr.iter().enumerate() {
+                    let w = w_obj.as_f64().unwrap_or(0.0) / 1000.0;
+                    widths.insert(first_cid + j as u16, w);
+                }
+                i += 1;
+            }
+            _ => {
+                // [ cid_first cid_last w ] — range with uniform width
+                let last_cid = match &next {
+                    PdfObj::Int(n) => *n as u16,
+                    _ => first_cid,
+                };
+                i += 1;
+                let w = if i < w_arr.len() {
+                    w_arr[i].as_f64().unwrap_or(0.0) / 1000.0
+                } else {
+                    0.0
+                };
+                i += 1;
+                for cid in first_cid..=last_cid {
+                    widths.insert(cid, w);
+                }
+            }
+        }
+    }
+    widths
+}
+
 /// Strip PFB (Printer Font Binary) headers from Type 1 font data.
 ///
 /// PFB format wraps ASCII and binary segments with 6-byte headers:
@@ -384,12 +514,21 @@ fn strip_pfb(data: &[u8]) -> Vec<u8> {
 // === Glyph rendering ===
 
 impl PdfFont {
-    /// Get glyph outline path for a character code.
+    /// Get glyph outline path for a character code (single-byte fonts).
     pub fn glyph_path(&self, char_code: u8) -> Option<PsPath> {
         match self {
             PdfFont::Type1(f) => f.glyph_path(char_code),
             PdfFont::TrueType(f) => f.glyph_path(char_code),
             PdfFont::Cff(f) => f.glyph_path(char_code),
+            PdfFont::CidTrueType(f) => f.glyph_path_cid(char_code as u16),
+        }
+    }
+
+    /// Get glyph outline path for a CID (2-byte composite fonts).
+    pub fn glyph_path_cid(&self, cid: u16) -> Option<PsPath> {
+        match self {
+            PdfFont::CidTrueType(f) => f.glyph_path_cid(cid),
+            _ => self.glyph_path(cid as u8),
         }
     }
 
@@ -399,6 +538,15 @@ impl PdfFont {
             PdfFont::Type1(f) => f.widths[char_code as usize],
             PdfFont::TrueType(f) => f.widths[char_code as usize],
             PdfFont::Cff(f) => f.widths[char_code as usize],
+            PdfFont::CidTrueType(f) => f.glyph_width_cid(char_code as u16),
+        }
+    }
+
+    /// Get width for a CID (2-byte composite fonts).
+    pub fn glyph_width_cid(&self, cid: u16) -> f64 {
+        match self {
+            PdfFont::CidTrueType(f) => f.glyph_width_cid(cid),
+            _ => self.glyph_width(cid as u8),
         }
     }
 
@@ -406,9 +554,14 @@ impl PdfFont {
     pub fn font_matrix(&self) -> Matrix {
         match self {
             PdfFont::Type1(f) => f.font_matrix,
-            PdfFont::TrueType(_) => Matrix::identity(), // TrueType uses 1/upm scaling
+            PdfFont::TrueType(_) | PdfFont::CidTrueType(_) => Matrix::identity(),
             PdfFont::Cff(f) => f.font_matrix,
         }
+    }
+
+    /// Whether this is a composite (CID) font that uses 2-byte character codes.
+    pub fn is_composite(&self) -> bool {
+        matches!(self, PdfFont::CidTrueType(_))
     }
 }
 
@@ -458,6 +611,35 @@ impl TrueTypePdfFont {
             // No cmap table: use char code as GID directly (PDF subset identity mapping)
             Some(char_code as u16)
         }
+    }
+}
+
+impl CidTrueTypePdfFont {
+    fn glyph_path_cid(&self, cid: u16) -> Option<PsPath> {
+        let gid = if self.identity_cid_to_gid {
+            cid
+        } else {
+            // Non-identity CIDToGIDMap would be parsed from stream data
+            cid
+        };
+        let glyf_data = get_glyf_data(&self.data, gid)?;
+        let data_clone = self.data.clone();
+        let path = parse_glyf_to_path(&glyf_data, &|component_gid| {
+            get_glyf_data(&data_clone, component_gid)
+        });
+        if path.is_empty() {
+            return None;
+        }
+        let scale = 1.0 / self.units_per_em;
+        let m = Matrix::scale(scale, scale);
+        Some(path.transform(&m))
+    }
+
+    fn glyph_width_cid(&self, cid: u16) -> f64 {
+        self.cid_widths
+            .get(&cid)
+            .copied()
+            .unwrap_or(self.default_width)
     }
 }
 

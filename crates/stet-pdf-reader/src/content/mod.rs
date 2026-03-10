@@ -945,40 +945,69 @@ impl<'a> ContentInterpreter<'a> {
         let text_rise = self.gstate.text_rise;
         let font_matrix = font.font_matrix();
 
-        for &byte in text {
-            if let Some(glyph_path) = font.glyph_path(byte) {
-                // Text rendering matrix (PDF spec §9.4.4):
-                // row-vector: font_matrix × [Tfs 0 0 Tfs 0 Trise] × Tm × CTM
-                // column-vector: CTM × Tm × [Tfs...] × font_matrix
-                let text_state_matrix = Matrix::new(font_size, 0.0, 0.0, font_size, 0.0, text_rise);
-                let trm = self
-                    .gstate
-                    .ctm
-                    .concat(&self.gstate.text_matrix)
-                    .concat(&text_state_matrix)
-                    .concat(&font_matrix);
+        if font.is_composite() {
+            // Composite (CID) font: 2-byte character codes
+            let mut i = 0;
+            while i + 1 < text.len() {
+                let cid = ((text[i] as u16) << 8) | (text[i + 1] as u16);
+                i += 2;
 
-                // Transform glyph path to device space
-                let device_path = glyph_path.transform(&trm);
-
-                if !device_path.is_empty() {
-                    let mut params = self.gstate.fill_params(FillRule::NonZeroWinding);
-                    params.is_text_glyph = true;
-                    self.display_list.push(DisplayElement::Fill {
-                        path: device_path,
-                        params,
-                    });
+                if let Some(glyph_path) = font.glyph_path_cid(cid) {
+                    let text_state_matrix =
+                        Matrix::new(font_size, 0.0, 0.0, font_size, 0.0, text_rise);
+                    let trm = self
+                        .gstate
+                        .ctm
+                        .concat(&self.gstate.text_matrix)
+                        .concat(&text_state_matrix)
+                        .concat(&font_matrix);
+                    let device_path = glyph_path.transform(&trm);
+                    if !device_path.is_empty() {
+                        let mut params = self.gstate.fill_params(FillRule::NonZeroWinding);
+                        params.is_text_glyph = true;
+                        self.display_list.push(DisplayElement::Fill {
+                            path: device_path,
+                            params,
+                        });
+                    }
                 }
-            }
 
-            // Advance text position
-            let w0 = font.glyph_width(byte);
-            let mut tx = w0 * font_size + char_spacing;
-            if byte == b' ' {
-                tx += word_spacing;
+                let w0 = font.glyph_width_cid(cid);
+                let tx = w0 * font_size + char_spacing;
+                let advance = Matrix::translate(tx, 0.0);
+                self.gstate.text_matrix = self.gstate.text_matrix.concat(&advance);
             }
-            let advance = Matrix::translate(tx, 0.0);
-            self.gstate.text_matrix = self.gstate.text_matrix.concat(&advance);
+        } else {
+            // Simple font: 1-byte character codes
+            for &byte in text {
+                if let Some(glyph_path) = font.glyph_path(byte) {
+                    let text_state_matrix =
+                        Matrix::new(font_size, 0.0, 0.0, font_size, 0.0, text_rise);
+                    let trm = self
+                        .gstate
+                        .ctm
+                        .concat(&self.gstate.text_matrix)
+                        .concat(&text_state_matrix)
+                        .concat(&font_matrix);
+                    let device_path = glyph_path.transform(&trm);
+                    if !device_path.is_empty() {
+                        let mut params = self.gstate.fill_params(FillRule::NonZeroWinding);
+                        params.is_text_glyph = true;
+                        self.display_list.push(DisplayElement::Fill {
+                            path: device_path,
+                            params,
+                        });
+                    }
+                }
+
+                let w0 = font.glyph_width(byte);
+                let mut tx = w0 * font_size + char_spacing;
+                if byte == b' ' {
+                    tx += word_spacing;
+                }
+                let advance = Matrix::translate(tx, 0.0);
+                self.gstate.text_matrix = self.gstate.text_matrix.concat(&advance);
+            }
         }
     }
 
