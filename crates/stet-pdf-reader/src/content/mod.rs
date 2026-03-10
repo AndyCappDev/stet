@@ -1277,6 +1277,18 @@ impl<'a> ContentInterpreter<'a> {
             )
         };
 
+        // Handle SMask (soft mask / alpha channel)
+        let (sample_data, color_space) = if !is_image_mask {
+            if let Some(smask_data) = self.resolve_smask(dict, width, height)? {
+                let rgba = merge_rgb_with_smask(&sample_data, &smask_data, &color_space, width, height);
+                (rgba, ImageColorSpace::PreconvertedRGBA)
+            } else {
+                (sample_data, color_space)
+            }
+        } else {
+            (sample_data, color_space)
+        };
+
         self.display_list.push(DisplayElement::Image {
             sample_data,
             params: ImageParams {
@@ -1290,6 +1302,45 @@ impl<'a> ContentInterpreter<'a> {
             },
         });
         Ok(())
+    }
+
+    /// Resolve an SMask (soft mask) from an image dict, returning the alpha data.
+    fn resolve_smask(
+        &self,
+        dict: &PdfDict,
+        image_w: u32,
+        image_h: u32,
+    ) -> Result<Option<Vec<u8>>, PdfError> {
+        let smask_obj = match dict.get(b"SMask") {
+            Some(obj) => self.resolver.deref(obj)?,
+            None => return Ok(None),
+        };
+        let smask_dict = match smask_obj.as_dict() {
+            Some(d) => d,
+            None => return Ok(None),
+        };
+        let sw = smask_dict.get_int(b"Width").unwrap_or(0) as u32;
+        let sh = smask_dict.get_int(b"Height").unwrap_or(0) as u32;
+        if sw == 0 || sh == 0 {
+            return Ok(None);
+        }
+        let data = self.resolver.stream_data_from_obj(&smask_obj)?;
+        // SMask is always DeviceGray, 8bpc — resample if size differs
+        if sw == image_w && sh == image_h {
+            Ok(Some(data))
+        } else {
+            // Nearest-neighbor resample to match image dimensions
+            let mut resampled = vec![0u8; (image_w * image_h) as usize];
+            for y in 0..image_h {
+                let sy = (y as u64 * sh as u64 / image_h as u64) as u32;
+                for x in 0..image_w {
+                    let sx = (x as u64 * sw as u64 / image_w as u64) as u32;
+                    resampled[(y * image_w + x) as usize] =
+                        data[(sy * sw + sx) as usize];
+                }
+            }
+            Ok(Some(resampled))
+        }
     }
 
     /// Handle a Form XObject (recursive content stream).
@@ -1901,6 +1952,56 @@ fn expand_inline_value(name: &[u8]) -> Vec<u8> {
 }
 
 /// Expand image sample data from arbitrary BPC to 8-bit.
+/// Merge image sample data with an SMask alpha channel into RGBA.
+fn merge_rgb_with_smask(
+    image_data: &[u8],
+    smask_data: &[u8],
+    color_space: &ImageColorSpace,
+    width: u32,
+    height: u32,
+) -> Vec<u8> {
+    let n_pixels = (width * height) as usize;
+    let mut rgba = vec![255u8; n_pixels * 4];
+    let n_comps = color_space.num_components();
+
+    for i in 0..n_pixels {
+        let alpha = smask_data.get(i).copied().unwrap_or(255);
+        let dst = i * 4;
+        match n_comps {
+            3 => {
+                // RGB
+                let src = i * 3;
+                rgba[dst] = image_data.get(src).copied().unwrap_or(0);
+                rgba[dst + 1] = image_data.get(src + 1).copied().unwrap_or(0);
+                rgba[dst + 2] = image_data.get(src + 2).copied().unwrap_or(0);
+            }
+            1 => {
+                // Gray
+                let g = image_data.get(i).copied().unwrap_or(0);
+                rgba[dst] = g;
+                rgba[dst + 1] = g;
+                rgba[dst + 2] = g;
+            }
+            4 => {
+                // CMYK → RGB
+                let src = i * 4;
+                let c = image_data.get(src).copied().unwrap_or(0) as f64 / 255.0;
+                let m = image_data.get(src + 1).copied().unwrap_or(0) as f64 / 255.0;
+                let y = image_data.get(src + 2).copied().unwrap_or(0) as f64 / 255.0;
+                let k = image_data.get(src + 3).copied().unwrap_or(0) as f64 / 255.0;
+                rgba[dst] = ((1.0 - c) * (1.0 - k) * 255.0 + 0.5) as u8;
+                rgba[dst + 1] = ((1.0 - m) * (1.0 - k) * 255.0 + 0.5) as u8;
+                rgba[dst + 2] = ((1.0 - y) * (1.0 - k) * 255.0 + 0.5) as u8;
+            }
+            _ => {
+                // Unknown — treat as black
+            }
+        }
+        rgba[dst + 3] = alpha;
+    }
+    rgba
+}
+
 fn expand_bits_to_bytes(
     data: &[u8],
     bpc: u32,
