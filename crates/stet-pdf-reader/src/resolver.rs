@@ -213,26 +213,29 @@ impl<'a> Resolver<'a> {
     }
 
     /// Parse an indirect object at a file offset.
+    /// Handles xref offsets that are off by a few bytes (common in some PDF generators)
+    /// by scanning backward up to 20 bytes to find the `N G obj` header.
     fn parse_object_at(&self, offset: usize) -> Result<PdfObj, PdfError> {
         if offset >= self.data.len() {
             return Err(PdfError::InvalidObject(offset));
         }
 
-        let mut lexer = Lexer::at(self.data, offset);
+        // Try the exact offset first, then scan backward if it fails
+        let actual_offset = self
+            .try_parse_obj_header(offset)
+            .or_else(|| {
+                // Scan backward up to 20 bytes for the object header
+                let start = offset.saturating_sub(20);
+                (start..offset).rev().find_map(|off| self.try_parse_obj_header(off))
+            })
+            .ok_or(PdfError::InvalidObject(offset))?;
 
-        // Expect: <obj_num> <gen_num> obj
-        let tok1 = lexer.next_token()?;
-        if !matches!(tok1, Token::Int(_)) {
-            return Err(PdfError::InvalidObject(offset));
-        }
-        let tok2 = lexer.next_token()?;
-        if !matches!(tok2, Token::Int(_)) {
-            return Err(PdfError::InvalidObject(offset));
-        }
-        match lexer.next_token()? {
-            Token::Keyword(ref kw) if kw == b"obj" => {}
-            _ => return Err(PdfError::InvalidObject(offset)),
-        }
+        let mut lexer = Lexer::at(self.data, actual_offset);
+
+        // Skip past the "N G obj" header
+        let _obj_num = lexer.next_token()?; // Int
+        let _gen_num = lexer.next_token()?; // Int
+        let _obj_kw = lexer.next_token()?; // Keyword("obj")
 
         // Parse the object value
         let obj = parse_object(&mut lexer)?;
@@ -268,6 +271,29 @@ impl<'a> Resolver<'a> {
         } else {
             // endobj follows — we don't strictly require it
             Ok(obj)
+        }
+    }
+
+    /// Check if `offset` starts with `Int Int Keyword("obj")` at a word boundary.
+    /// Returns `Some(offset)` on success, `None` on failure.
+    fn try_parse_obj_header(&self, offset: usize) -> Option<usize> {
+        if offset >= self.data.len() {
+            return None;
+        }
+        // Must be at a word boundary (start of file, or preceded by whitespace/newline)
+        if offset > 0 && !matches!(self.data[offset - 1], b' ' | b'\t' | b'\r' | b'\n') {
+            return None;
+        }
+        let mut lexer = Lexer::at(self.data, offset);
+        if !matches!(lexer.next_token().ok()?, Token::Int(_)) {
+            return None;
+        }
+        if !matches!(lexer.next_token().ok()?, Token::Int(_)) {
+            return None;
+        }
+        match lexer.next_token().ok()? {
+            Token::Keyword(ref kw) if kw == b"obj" => Some(offset),
+            _ => None,
         }
     }
 

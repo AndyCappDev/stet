@@ -100,7 +100,9 @@ fn parse_xref_section(
     data: &[u8],
     offset: usize,
 ) -> Result<(Vec<(u32, XrefEntry)>, PdfDict), PdfError> {
-    // Peek at the data to determine if this is a classic xref or xref stream
+    // Peek at the data to determine if this is a classic xref or xref stream.
+    // Some PDF generators have startxref offsets that are slightly off,
+    // so scan forward (skipping whitespace) and backward to find "xref".
     let mut pos = offset;
     while pos < data.len() && is_whitespace(data[pos]) {
         pos += 1;
@@ -109,8 +111,17 @@ fn parse_xref_section(
     if pos + 4 <= data.len() && &data[pos..pos + 4] == b"xref" {
         parse_classic_xref(data, pos)
     } else {
-        // Xref stream: an indirect object with /Type /XRef
-        parse_xref_stream(data, offset)
+        // Scan backward up to 20 bytes for "xref" (handles off-by-N offsets)
+        let scan_start = offset.saturating_sub(20);
+        let found = (scan_start..offset).rev().find(|&off| {
+            off + 4 <= data.len() && &data[off..off + 4] == b"xref"
+        });
+        if let Some(xref_pos) = found {
+            parse_classic_xref(data, xref_pos)
+        } else {
+            // Xref stream: an indirect object with /Type /XRef
+            parse_xref_stream(data, offset)
+        }
     }
 }
 

@@ -122,9 +122,25 @@ impl<'a> ContentInterpreter<'a> {
         }
     }
 
+    /// Look up a sub-dictionary in the resources, resolving indirect references.
+    /// e.g., `resolve_resource_subdict(b"Font")` returns the /Font dict.
+    fn resolve_resource_subdict(&self, key: &[u8]) -> Option<PdfDict> {
+        let obj = self.resources.get(key)?;
+        // If it's already a dict, return it
+        if let Some(d) = obj.as_dict() {
+            return Some(d.clone());
+        }
+        // Otherwise try to resolve the reference
+        let resolved = self.resolver.deref(obj).ok()?;
+        resolved.as_dict().cloned()
+    }
+
     /// Interpret a content stream and return the display list.
     pub fn interpret(mut self, data: &[u8]) -> Result<DisplayList, PdfError> {
-        self.interpret_stream(data)?;
+        // Even if the stream has errors, return the partial display list
+        // (everything rendered before the error). This handles malformed PDFs
+        // where flate decompression produces truncated content streams.
+        let _ = self.interpret_stream(data);
         Ok(self.display_list)
     }
 
@@ -874,10 +890,9 @@ impl<'a> ContentInterpreter<'a> {
             return;
         }
 
-        // Look up in resources /Font dict
+        // Look up in resources /Font dict (may be an indirect reference)
         let font_ref = self
-            .resources
-            .get_dict(b"Font")
+            .resolve_resource_subdict(b"Font")
             .and_then(|fd| fd.get(name).cloned());
         let font_ref = match font_ref {
             Some(r) => r,
@@ -1181,10 +1196,9 @@ impl<'a> ContentInterpreter<'a> {
             .ok_or(PdfError::Other("Do: expected name".into()))?
             .to_vec();
 
-        // Look up XObject in resources
+        // Look up XObject in resources (may be an indirect reference)
         let xobj_dict = self
-            .resources
-            .get_dict(b"XObject")
+            .resolve_resource_subdict(b"XObject")
             .ok_or(PdfError::Other("no XObject resources".into()))?;
         let xobj_ref = xobj_dict.get(&name).ok_or_else(|| {
             PdfError::Other(format!(
@@ -1578,8 +1592,7 @@ impl<'a> ContentInterpreter<'a> {
     /// Apply ExtGState dictionary entries.
     fn apply_ext_gstate(&mut self, name: &[u8]) -> Result<(), PdfError> {
         let ext_dict = self
-            .resources
-            .get_dict(b"ExtGState")
+            .resolve_resource_subdict(b"ExtGState")
             .ok_or(PdfError::Other("no ExtGState resources".into()))?;
         let gs_ref = ext_dict.get(name).ok_or_else(|| {
             PdfError::Other(format!(
@@ -1742,8 +1755,7 @@ impl<'a> ContentInterpreter<'a> {
             .to_vec();
 
         let shading_dict = self
-            .resources
-            .get_dict(b"Shading")
+            .resolve_resource_subdict(b"Shading")
             .ok_or(PdfError::Other("no Shading resources".into()))?;
         let sh_ref = shading_dict.get(&name).ok_or_else(|| {
             PdfError::Other(format!(
@@ -1794,8 +1806,7 @@ impl<'a> ContentInterpreter<'a> {
 
     fn resolve_pattern(&mut self, name: &[u8]) -> Result<TilingPattern, PdfError> {
         let pattern_dict = self
-            .resources
-            .get_dict(b"Pattern")
+            .resolve_resource_subdict(b"Pattern")
             .ok_or(PdfError::Other("no Pattern resources".into()))?;
         let pat_ref = pattern_dict.get(name).ok_or_else(|| {
             PdfError::Other(format!(

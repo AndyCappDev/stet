@@ -103,9 +103,15 @@ fn resolve_named_color_space(
         _ => {}
     }
 
-    // Look up in resources ColorSpace dict
-    let cs_dict = resources.get_dict(b"ColorSpace");
-    let cs_obj = cs_dict.and_then(|d| d.get(name)).ok_or_else(|| {
+    // Look up in resources ColorSpace dict (may be an indirect reference)
+    let cs_dict = resources
+        .get(b"ColorSpace")
+        .and_then(|obj| match obj {
+            PdfObj::Dict(_) => Some(obj.as_dict().unwrap().clone()),
+            PdfObj::Ref(n, g) => resolver.resolve(*n, *g).ok()?.as_dict().cloned(),
+            _ => None,
+        });
+    let cs_obj = cs_dict.as_ref().and_then(|d| d.get(name)).ok_or_else(|| {
         PdfError::Other(format!(
             "color space /{} not found in resources",
             String::from_utf8_lossy(name)

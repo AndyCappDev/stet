@@ -68,6 +68,21 @@ pub const FONT_SUBSTITUTIONS: &[(&str, &str)] = &[
     ("AvantGarde-BookOblique", "URWGothic-BookOblique"),
     ("AvantGarde-Demi", "URWGothic-Demi"),
     ("AvantGarde-DemiOblique", "URWGothic-DemiOblique"),
+    // TimesNewRoman variants (common in Windows-generated PDFs)
+    ("TimesNewRoman", "NimbusRoman-Regular"),
+    ("TimesNewRomanPS", "NimbusRoman-Regular"),
+    ("TimesNewRomanPSMT", "NimbusRoman-Regular"),
+    ("TimesNewRoman-Bold", "NimbusRoman-Bold"),
+    ("TimesNewRoman,Bold", "NimbusRoman-Bold"),
+    ("TimesNewRomanPS-Bold", "NimbusRoman-Bold"),
+    ("TimesNewRomanPS-BoldMT", "NimbusRoman-Bold"),
+    ("TimesNewRoman-Italic", "NimbusRoman-Italic"),
+    ("TimesNewRoman,Italic", "NimbusRoman-Italic"),
+    ("TimesNewRomanPS-Italic", "NimbusRoman-Italic"),
+    ("TimesNewRomanPS-ItalicMT", "NimbusRoman-Italic"),
+    ("TimesNewRoman-BoldItalic", "NimbusRoman-BoldItalic"),
+    ("TimesNewRomanPS-BoldItalic", "NimbusRoman-BoldItalic"),
+    ("TimesNewRomanPS-BoldItalicMT", "NimbusRoman-BoldItalic"),
     // ZapfChancery
     ("ZapfChancery-MediumItalic", "Z003-MediumItalic"),
 ];

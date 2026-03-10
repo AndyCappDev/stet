@@ -64,6 +64,12 @@ fn filter_from_name(name: &[u8]) -> Result<Filter, PdfError> {
         b"ASCIIHexDecode" | b"AHx" => Ok(Filter::ASCIIHexDecode),
         b"ASCII85Decode" | b"A85" => Ok(Filter::ASCII85Decode),
         b"RunLengthDecode" | b"RL" => Ok(Filter::RunLengthDecode),
+        // Tolerate truncated filter names from malformed PDFs
+        _ if name.starts_with(b"Flate") => Ok(Filter::FlateDecode),
+        _ if name.starts_with(b"LZW") => Ok(Filter::LZWDecode),
+        _ if name.starts_with(b"ASCIIHex") => Ok(Filter::ASCIIHexDecode),
+        _ if name.starts_with(b"ASCII85") => Ok(Filter::ASCII85Decode),
+        _ if name.starts_with(b"RunLength") => Ok(Filter::RunLengthDecode),
         _ => Err(PdfError::UnsupportedFilter(
             String::from_utf8_lossy(name).into(),
         )),
@@ -94,9 +100,46 @@ pub fn decode_stream(
 
 /// FlateDecode (zlib/deflate).
 fn decode_flate(data: &[u8], parms: Option<&PdfDict>) -> Result<Vec<u8>, PdfError> {
+    // Try zlib first. If it ends with an error (truncated output),
+    // also try raw deflate (skip 2-byte zlib header) and pick the longer result.
+    let (zlib_output, zlib_clean) = decode_flate_inner(data, true);
+    let output = if zlib_clean {
+        zlib_output?
+    } else {
+        // Zlib hit an error (corrupt checksum, etc). Use whatever it produced.
+        // Don't try raw deflate — it may push past the corruption boundary
+        // and decode garbage that renders as visual artifacts.
+        let zlib_data = zlib_output.unwrap_or_default();
+        if !zlib_data.is_empty() {
+            zlib_data
+        } else if data.len() > 2 {
+            // Zlib produced nothing — try raw deflate as last resort
+            let (raw_output, _) = decode_flate_inner(&data[2..], false);
+            raw_output.map_err(|_| {
+                PdfError::DecompressionError("flate: decompression failed".into())
+            })?
+        } else {
+            return Err(PdfError::DecompressionError("flate: decompression failed".into()));
+        }
+    };
+
+    // Apply predictor if specified
+    if let Some(parms) = parms {
+        let predictor = parms.get_int(b"Predictor").unwrap_or(1);
+        if predictor > 1 {
+            return Ok(apply_predictor(&output, parms, predictor)?);
+        }
+    }
+
+    Ok(output)
+}
+
+/// Inner flate decompression. `zlib` = true uses zlib wrapper, false uses raw deflate.
+/// Returns (Result<data>, clean) where clean=true means StreamEnd was reached normally.
+fn decode_flate_inner(data: &[u8], zlib: bool) -> (Result<Vec<u8>, PdfError>, bool) {
     use flate2::Decompress;
 
-    let mut decompressor = Decompress::new(true); // zlib wrapper
+    let mut decompressor = Decompress::new(zlib);
     let mut output = Vec::with_capacity(data.len() * 3);
     let mut buf = [0u8; 8192];
     let mut input_offset = 0;
@@ -104,38 +147,35 @@ fn decode_flate(data: &[u8], parms: Option<&PdfDict>) -> Result<Vec<u8>, PdfErro
     loop {
         let before_in = decompressor.total_in() as usize;
         let before_out = decompressor.total_out() as usize;
-        let status = decompressor
-            .decompress(
-                &data[input_offset..],
-                &mut buf,
-                flate2::FlushDecompress::None,
-            )
-            .map_err(|e| PdfError::DecompressionError(format!("flate: {e}")))?;
+        let result = decompressor.decompress(
+            &data[input_offset..],
+            &mut buf,
+            flate2::FlushDecompress::None,
+        );
 
         let consumed = decompressor.total_in() as usize - before_in;
         let produced = decompressor.total_out() as usize - before_out;
         input_offset += consumed;
         output.extend_from_slice(&buf[..produced]);
 
-        match status {
-            flate2::Status::StreamEnd => break,
-            flate2::Status::Ok | flate2::Status::BufError => {
-                if consumed == 0 && produced == 0 {
-                    break;
+        match result {
+            Ok(status) => match status {
+                flate2::Status::StreamEnd => return (Ok(output), true),
+                flate2::Status::Ok | flate2::Status::BufError => {
+                    if consumed == 0 && produced == 0 {
+                        return (Ok(output), true);
+                    }
                 }
+            },
+            Err(_) if !output.is_empty() => {
+                // Partial output — checksum/trailing data error.
+                return (Ok(output), false);
+            }
+            Err(e) => {
+                return (Err(PdfError::DecompressionError(format!("flate: {e}"))), false);
             }
         }
     }
-
-    // Apply predictor if specified
-    if let Some(parms) = parms {
-        let predictor = parms.get_int(b"Predictor").unwrap_or(1);
-        if predictor > 1 {
-            output = apply_predictor(&output, parms, predictor)?;
-        }
-    }
-
-    Ok(output)
 }
 
 /// LZWDecode.
@@ -148,9 +188,26 @@ fn decode_lzw(data: &[u8], parms: Option<&PdfDict>) -> Result<Vec<u8>, PdfError>
         weezl::decode::Decoder::new(weezl::BitOrder::Msb, 8)
     };
 
-    let output = decoder
-        .decode(data)
-        .map_err(|e| PdfError::DecompressionError(format!("lzw: {e}")))?;
+    let output = match decoder.decode(data) {
+        Ok(out) => out,
+        Err(e) => {
+            // Try streaming decode to recover partial data on error
+            let mut dec = if early_change == 0 {
+                weezl::decode::Decoder::with_tiff_size_switch(weezl::BitOrder::Msb, 8)
+            } else {
+                weezl::decode::Decoder::new(weezl::BitOrder::Msb, 8)
+            };
+            let mut out = vec![0u8; data.len() * 4];
+            let result = dec.decode_bytes(data, &mut out);
+            let produced = result.consumed_out;
+            if produced > 0 {
+                out.truncate(produced);
+                out
+            } else {
+                return Err(PdfError::DecompressionError(format!("lzw: {e}")));
+            }
+        }
+    };
 
     // Apply predictor if specified
     if let Some(parms) = parms {

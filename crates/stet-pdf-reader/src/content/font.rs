@@ -127,7 +127,17 @@ pub fn resolve_font(resolver: &Resolver, font_ref: &PdfObj) -> Result<PdfFont, P
     // not just the /Subtype (which says "Type1" even for CFF-embedded fonts).
     if let Some(ref desc) = descriptor {
         if desc.get(b"FontFile3").is_some() {
-            return resolve_cff(resolver, &descriptor, encoding, widths);
+            // Try embedded CFF; fall back to substitution if decompression/parsing fails
+            match resolve_cff(resolver, &descriptor, encoding.clone(), widths) {
+                Ok(font) => return Ok(font),
+                Err(_) => {
+                    if let Some(font) =
+                        substitute_font(&base_font_name, encoding.clone(), widths)
+                    {
+                        return Ok(font);
+                    }
+                }
+            }
         }
         if desc.get(b"FontFile2").is_some() {
             // Try embedded TrueType; fall back to substitution if font data is unusable
@@ -144,7 +154,16 @@ pub fn resolve_font(resolver: &Resolver, font_ref: &PdfObj) -> Result<PdfFont, P
             }
         }
         if desc.get(b"FontFile").is_some() {
-            return resolve_type1(resolver, &descriptor, encoding, widths);
+            match resolve_type1(resolver, &descriptor, encoding.clone(), widths) {
+                Ok(font) => return Ok(font),
+                Err(_) => {
+                    if let Some(font) =
+                        substitute_font(&base_font_name, encoding.clone(), widths)
+                    {
+                        return Ok(font);
+                    }
+                }
+            }
         }
     }
     // No embedded font program — try font substitution
@@ -263,11 +282,12 @@ fn substitute_font(
         clean_name = &clean_name[..star_pos];
     }
 
-    // Look up substitution
+    // Look up substitution (exact match first, then fuzzy family match)
     let urw_name = FONT_SUBSTITUTIONS
         .iter()
         .find(|&&(ps, _)| ps == clean_name)
-        .map(|&(_, urw)| urw);
+        .map(|&(_, urw)| urw)
+        .or_else(|| fuzzy_font_match(clean_name));
 
     let font_file_name = urw_name.unwrap_or(clean_name);
 
@@ -287,7 +307,40 @@ fn substitute_font(
     }))
 }
 
-/// Resolve a Type 1 font from its FontDescriptor.
+/// Fuzzy font family matching for names not in the substitution table.
+/// Detects common family name patterns and maps to URW equivalents.
+fn fuzzy_font_match(name: &str) -> Option<&'static str> {
+    let lower = name.to_ascii_lowercase();
+    let is_bold = lower.contains("bold") || lower.contains("demi");
+    let is_italic = lower.contains("italic") || lower.contains("oblique");
+
+    if lower.contains("times") || lower.contains("roman") || lower.contains("serif") {
+        return Some(match (is_bold, is_italic) {
+            (true, true) => "NimbusRoman-BoldItalic",
+            (true, false) => "NimbusRoman-Bold",
+            (false, true) => "NimbusRoman-Italic",
+            (false, false) => "NimbusRoman-Regular",
+        });
+    }
+    if lower.contains("helvetica") || lower.contains("arial") || lower.contains("sans") {
+        return Some(match (is_bold, is_italic) {
+            (true, true) => "NimbusSans-BoldItalic",
+            (true, false) => "NimbusSans-Bold",
+            (false, true) => "NimbusSans-Italic",
+            (false, false) => "NimbusSans-Regular",
+        });
+    }
+    if lower.contains("courier") || lower.contains("mono") {
+        return Some(match (is_bold, is_italic) {
+            (true, true) => "NimbusMonoPS-BoldItalic",
+            (true, false) => "NimbusMonoPS-Bold",
+            (false, true) => "NimbusMonoPS-Italic",
+            (false, false) => "NimbusMonoPS-Regular",
+        });
+    }
+    None
+}
+
 /// Resolve a Type 3 font: glyphs defined as content streams.
 fn resolve_type3(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, PdfError> {
     let first_char = font_dict.get_int(b"FirstChar").unwrap_or(0) as usize;
