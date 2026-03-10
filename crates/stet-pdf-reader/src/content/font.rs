@@ -79,6 +79,11 @@ pub fn resolve_font(resolver: &Resolver, font_ref: &PdfObj) -> Result<PdfFont, P
     // Get FontDescriptor
     let descriptor = get_font_descriptor(font_dict, resolver)?;
 
+    let base_font_name = font_dict
+        .get_name(b"BaseFont")
+        .map(|n| String::from_utf8_lossy(n).to_string())
+        .unwrap_or_default();
+
     // Route based on what font program is actually available in FontDescriptor,
     // not just the /Subtype (which says "Type1" even for CFF-embedded fonts).
     if let Some(ref desc) = descriptor {
@@ -86,19 +91,25 @@ pub fn resolve_font(resolver: &Resolver, font_ref: &PdfObj) -> Result<PdfFont, P
             return resolve_cff(resolver, &descriptor, encoding, widths);
         }
         if desc.get(b"FontFile2").is_some() {
-            return resolve_truetype(resolver, &descriptor, encoding, widths);
+            // Try embedded TrueType; fall back to substitution if font data is unusable
+            // (some PDFs embed only table metadata without actual glyph outlines)
+            match resolve_truetype(resolver, &descriptor, encoding.clone(), widths) {
+                Ok(font) => return Ok(font),
+                Err(_) => {
+                    if let Some(font) =
+                        substitute_font(&base_font_name, encoding.clone(), widths)
+                    {
+                        return Ok(font);
+                    }
+                }
+            }
         }
         if desc.get(b"FontFile").is_some() {
             return resolve_type1(resolver, &descriptor, encoding, widths);
         }
     }
     // No embedded font program — try font substitution
-    let base_font = font_dict
-        .get_name(b"BaseFont")
-        .map(|n| String::from_utf8_lossy(n).to_string())
-        .unwrap_or_default();
-
-    if let Some(font) = substitute_font(&base_font, encoding.clone(), widths) {
+    if let Some(font) = substitute_font(&base_font_name, encoding.clone(), widths) {
         return Ok(font);
     }
 
@@ -204,11 +215,14 @@ fn substitute_font(
     use stet_core::font_loader::FONT_SUBSTITUTIONS;
 
     // Strip subset prefix (e.g. "ABCDEF+Times-Roman" → "Times-Roman")
-    let clean_name = if base_font.len() > 7 && base_font.as_bytes().get(6) == Some(&b'+') {
-        &base_font[7..]
-    } else {
-        base_font
-    };
+    let mut clean_name: &str = base_font;
+    if clean_name.len() > 7 && clean_name.as_bytes().get(6) == Some(&b'+') {
+        clean_name = &clean_name[7..];
+    }
+    // Strip trailing "*N" suffix (e.g. "ArialMT*1" → "ArialMT")
+    if let Some(star_pos) = clean_name.rfind('*') {
+        clean_name = &clean_name[..star_pos];
+    }
 
     // Look up substitution
     let urw_name = FONT_SUBSTITUTIONS
@@ -281,6 +295,20 @@ fn resolve_truetype(
         .get(b"FontFile2")
         .ok_or(PdfError::Other("TrueType font missing FontFile2".into()))?;
     let data = resolver.stream_data_from_obj(&resolver.deref(ff_ref)?)?;
+
+    // Validate that glyph outline data is actually present
+    use stet_core::truetype::find_table;
+    let has_glyf = find_table(&data, b"glyf").is_some();
+    let has_usable_glyx = if let Some((off, len)) = find_table(&data, b"glyx") {
+        off + len <= data.len()
+    } else {
+        false
+    };
+    if !has_glyf && !has_usable_glyx {
+        return Err(PdfError::Other(
+            "TrueType font has no usable glyph outline data".into(),
+        ));
+    }
 
     let units_per_em = get_units_per_em(&data) as f64;
     let cmap = parse_cmap(&data);
@@ -412,18 +440,24 @@ impl TrueTypePdfFont {
     }
 
     fn char_code_to_gid(&self, char_code: u8) -> Option<u16> {
-        // Try cmap lookup first
-        if let Some(&gid) = self.cmap.get(&(char_code as u32)) {
-            return Some(gid);
+        // Try encoding → glyph name → Unicode → cmap
+        if !self.cmap.is_empty() {
+            if let Some(glyph_name) = &self.encoding[char_code as usize] {
+                if let Some(unicode) = stet_core::agl::glyph_name_to_unicode(glyph_name) {
+                    if let Some(&gid) = self.cmap.get(&(unicode as u32)) {
+                        return Some(gid);
+                    }
+                }
+            }
+            // Fallback: direct cmap lookup
+            if let Some(&gid) = self.cmap.get(&(char_code as u32)) {
+                return Some(gid);
+            }
+            None
+        } else {
+            // No cmap table: use char code as GID directly (PDF subset identity mapping)
+            Some(char_code as u16)
         }
-        // Try encoding → glyph name → cmap via Unicode mapping
-        // For simple TrueType fonts, char code often maps directly
-        if let Some(&gid) = self.cmap.get(&(char_code as u32)) {
-            return Some(gid);
-        }
-        // Fallback: use char code as glyph index directly
-        // (some PDFs use identity mapping)
-        Some(char_code as u16)
     }
 }
 

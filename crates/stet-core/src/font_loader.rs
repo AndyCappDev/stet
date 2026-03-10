@@ -36,6 +36,15 @@ pub const FONT_SUBSTITUTIONS: &[(&str, &str)] = &[
     ("Courier-Bold", "NimbusMonoPS-Bold"),
     ("Courier-Oblique", "NimbusMonoPS-Italic"),
     ("Courier-BoldOblique", "NimbusMonoPS-BoldItalic"),
+    // Arial family → Nimbus Sans (metric-compatible)
+    ("ArialMT", "NimbusSans-Regular"),
+    ("Arial-BoldMT", "NimbusSans-Bold"),
+    ("Arial-ItalicMT", "NimbusSans-Italic"),
+    ("Arial-BoldItalicMT", "NimbusSans-BoldItalic"),
+    ("Arial", "NimbusSans-Regular"),
+    ("Arial-Bold", "NimbusSans-Bold"),
+    ("Arial-Italic", "NimbusSans-Italic"),
+    ("Arial-BoldItalic", "NimbusSans-BoldItalic"),
     // Symbol fonts
     ("Symbol", "StandardSymbolsPS"),
     ("ZapfDingbats", "D050000L"),
