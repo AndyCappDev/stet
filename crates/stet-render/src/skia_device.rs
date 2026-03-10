@@ -3894,7 +3894,12 @@ fn render_mesh_shading_to_pixmap(
                 let w1 = ((y2b - y0b) * (pxf - x2) + (x0 - x2) * (pyf - y2b)) * inv_denom;
                 let w2 = 1.0 - w0 - w1;
 
-                if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
+                // Conservative rasterization: use small negative epsilon to
+                // slightly expand triangles, preventing sub-pixel gaps between
+                // adjacent triangles whose shared-edge vertices don't match exactly
+                // (e.g. PDF mesh shadings with per-object Decode arrays).
+                const BARY_EPSILON: f64 = -0.01;
+                if w0 < BARY_EPSILON || w1 < BARY_EPSILON || w2 < BARY_EPSILON {
                     continue;
                 }
 
@@ -3906,10 +3911,18 @@ fn render_mesh_shading_to_pixmap(
                     }
                 }
 
-                // Interpolate color
-                let r = w0 * tri.v0.color.r + w1 * tri.v1.color.r + w2 * tri.v2.color.r;
-                let g = w0 * tri.v0.color.g + w1 * tri.v1.color.g + w2 * tri.v2.color.g;
-                let b = w0 * tri.v0.color.b + w1 * tri.v1.color.b + w2 * tri.v2.color.b;
+                // Interpolate color — clamp weights to avoid negative contribution
+                // from pixels in the epsilon expansion zone
+                let w0c = w0.max(0.0);
+                let w1c = w1.max(0.0);
+                let w2c = w2.max(0.0);
+                let wsum = w0c + w1c + w2c;
+                let w0n = w0c / wsum;
+                let w1n = w1c / wsum;
+                let w2n = w2c / wsum;
+                let r = w0n * tri.v0.color.r + w1n * tri.v1.color.r + w2n * tri.v2.color.r;
+                let g = w0n * tri.v0.color.g + w1n * tri.v1.color.g + w2n * tri.v2.color.g;
+                let b = w0n * tri.v0.color.b + w1n * tri.v1.color.b + w2n * tri.v2.color.b;
 
                 let offset = py * stride + px * 4;
                 data[offset] = (r * 255.0).round().clamp(0.0, 255.0) as u8;
@@ -4399,7 +4412,8 @@ fn render_mesh_shading_viewport(
                 let w1 = ((y2 - y0) * (pxf - x2) + (x0 - x2) * (pyf - y2)) * inv_denom;
                 let w2 = 1.0 - w0 - w1;
 
-                if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
+                const BARY_EPSILON: f64 = -0.01;
+                if w0 < BARY_EPSILON || w1 < BARY_EPSILON || w2 < BARY_EPSILON {
                     continue;
                 }
 
@@ -4410,9 +4424,16 @@ fn render_mesh_shading_viewport(
                     }
                 }
 
-                let r = w0 * tri.v0.color.r + w1 * tri.v1.color.r + w2 * tri.v2.color.r;
-                let g = w0 * tri.v0.color.g + w1 * tri.v1.color.g + w2 * tri.v2.color.g;
-                let b = w0 * tri.v0.color.b + w1 * tri.v1.color.b + w2 * tri.v2.color.b;
+                let w0c = w0.max(0.0);
+                let w1c = w1.max(0.0);
+                let w2c = w2.max(0.0);
+                let wsum = w0c + w1c + w2c;
+                let w0n = w0c / wsum;
+                let w1n = w1c / wsum;
+                let w2n = w2c / wsum;
+                let r = w0n * tri.v0.color.r + w1n * tri.v1.color.r + w2n * tri.v2.color.r;
+                let g = w0n * tri.v0.color.g + w1n * tri.v1.color.g + w2n * tri.v2.color.g;
+                let b = w0n * tri.v0.color.b + w1n * tri.v1.color.b + w2n * tri.v2.color.b;
 
                 let offset = py * stride + px * 4;
                 data[offset] = (r * 255.0).round().clamp(0.0, 255.0) as u8;
