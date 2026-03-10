@@ -107,6 +107,8 @@ pub struct PdfGraphicsState {
     pub stroke_pattern: Option<TilingPattern>,
     /// Counter for unique pattern IDs.
     pub next_pattern_id: u32,
+    /// Transfer function state.
+    pub transfer: TransferState,
 }
 
 impl PdfGraphicsState {
@@ -146,6 +148,7 @@ impl PdfGraphicsState {
             fill_pattern: None,
             stroke_pattern: None,
             next_pattern_id: 0,
+            transfer: TransferState::default(),
         }
     }
 
@@ -159,7 +162,7 @@ impl PdfGraphicsState {
             overprint: self.overprint,
             spot_color: None,
             rendering_intent: self.rendering_intent,
-            transfer: TransferState::default(),
+            transfer: self.transfer.clone(),
             halftone: HalftoneState::default(),
             bg_ucr: BgUcrState::default(),
             alpha: self.fill_alpha,
@@ -187,7 +190,7 @@ impl PdfGraphicsState {
             overprint: self.overprint_stroke,
             spot_color: None,
             rendering_intent: self.rendering_intent,
-            transfer: TransferState::default(),
+            transfer: self.transfer.clone(),
             halftone: HalftoneState::default(),
             bg_ucr: BgUcrState::default(),
             alpha: self.stroke_alpha,

@@ -1379,7 +1379,66 @@ impl<'a> ContentInterpreter<'a> {
             self.gstate.font_size = size;
         }
 
+        // Transfer function: TR2 takes priority over TR
+        if let Some(tr_obj) = gs_dict.get(b"TR2").or_else(|| gs_dict.get(b"TR")) {
+            self.gstate.transfer = self.parse_transfer_function(tr_obj)?;
+        }
+
         Ok(())
+    }
+
+    /// Parse a TR/TR2 value into a TransferState.
+    ///
+    /// PDF spec: TR/TR2 can be a single function (applied to all channels),
+    /// an array of 4 functions [R, G, B, Gray], or /Identity.
+    fn parse_transfer_function(
+        &self,
+        obj: &PdfObj,
+    ) -> Result<stet_core::device::TransferState, PdfError> {
+        use crate::resources::function::PdfFunction;
+        use stet_core::device::TransferState;
+
+        let obj = self.resolver.deref(obj)?;
+
+        // /Identity or /Default → no transfer
+        if let Some(name) = obj.as_name()
+            && (name == b"Identity" || name == b"Default")
+        {
+            return Ok(TransferState::default());
+        }
+
+        // Array of 4 functions [R, G, B, Gray]
+        if let PdfObj::Array(arr) = &obj
+            && arr.len() == 4
+        {
+            let mut tables: [Option<Arc<Vec<f64>>>; 4] = Default::default();
+            for (i, fn_obj) in arr.iter().enumerate() {
+                let fn_obj = self.resolver.deref(fn_obj)?;
+                if let Some(name) = fn_obj.as_name()
+                    && (name == b"Identity" || name == b"Default")
+                {
+                    continue; // None = identity
+                }
+                if let Ok(func) = PdfFunction::parse(&fn_obj, self.resolver) {
+                    tables[i] = Some(Arc::new(sample_transfer_function(&func)));
+                }
+            }
+            return Ok(TransferState {
+                gray: None,
+                color: Some(tables),
+            });
+        }
+
+        // Single function → apply to all channels via gray
+        if let Ok(func) = PdfFunction::parse(&obj, self.resolver) {
+            let table = Arc::new(sample_transfer_function(&func));
+            return Ok(TransferState {
+                gray: Some(table),
+                color: None,
+            });
+        }
+
+        Ok(TransferState::default())
     }
 
     // === Shading operator ===
@@ -1714,4 +1773,15 @@ fn is_delimiter_or_ws(b: u8) -> bool {
             b,
             b'(' | b')' | b'<' | b'>' | b'[' | b']' | b'{' | b'}' | b'/' | b'%'
         )
+}
+
+/// Evaluate a PDF function at 256 evenly-spaced points in [0,1] to build a transfer table.
+fn sample_transfer_function(func: &crate::resources::function::PdfFunction) -> Vec<f64> {
+    (0..256)
+        .map(|i| {
+            let t = i as f64 / 255.0;
+            let result = func.evaluate(&[t]);
+            result.first().copied().unwrap_or(t).clamp(0.0, 1.0)
+        })
+        .collect()
 }

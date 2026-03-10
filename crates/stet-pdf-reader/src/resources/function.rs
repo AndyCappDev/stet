@@ -414,28 +414,57 @@ fn evaluate_sampled(
         return result;
     }
 
-    // Multi-dimensional: nearest neighbor fallback
-    let mut index = 0usize;
-    let mut stride = n_outputs;
-    for i in (0..n_inputs.min(encoded.len())).rev() {
-        index += (encoded[i].round() as usize).min(size[i] as usize - 1) * stride;
-        stride *= size[i] as usize;
+    // Multi-dimensional: multilinear interpolation
+    // For N inputs, interpolate across 2^N corners of the hypercube
+    let n = n_inputs.min(encoded.len());
+
+    // Compute floor indices and fractional parts for each dimension
+    let mut i0s = Vec::with_capacity(n);
+    let mut fracs = Vec::with_capacity(n);
+    for dim in 0..n {
+        let e = encoded[dim];
+        let lo = e.floor() as usize;
+        let lo = lo.min(size[dim] as usize - 2); // ensure lo+1 is valid
+        i0s.push(lo);
+        fracs.push(e - lo as f64);
     }
 
-    let mut result = Vec::with_capacity(n_outputs);
+    // Compute strides for each dimension.
+    // PDF spec: first input varies fastest, so dim 0 has the smallest stride.
+    let mut strides = vec![0usize; n];
+    strides[0] = n_outputs;
+    for dim in 1..n {
+        strides[dim] = strides[dim - 1] * size[dim - 1] as usize;
+    }
+
+    // Iterate over 2^n corners and accumulate weighted contributions
+    let n_corners = 1usize << n;
+    let mut result = vec![0.0f64; n_outputs];
+    for corner in 0..n_corners {
+        let mut weight = 1.0f64;
+        let mut index = 0usize;
+        for dim in 0..n {
+            if corner & (1 << dim) != 0 {
+                weight *= fracs[dim];
+                index += (i0s[dim] + 1) * strides[dim];
+            } else {
+                weight *= 1.0 - fracs[dim];
+                index += i0s[dim] * strides[dim];
+            }
+        }
+        for (j, r) in result.iter_mut().enumerate() {
+            *r += weight * samples.get(index + j).copied().unwrap_or(0.0);
+        }
+    }
+
+    // Decode and clamp
     for j in 0..n_outputs {
-        let val = samples.get(index + j).copied().unwrap_or(0.0);
-        let decoded = if j < decode.len() {
-            interpolate(val, 0.0, 1.0, decode[j][0], decode[j][1])
-        } else {
-            val
-        };
-        let clamped = if j < range.len() {
-            clamp(decoded, range[j][0], range[j][1])
-        } else {
-            decoded
-        };
-        result.push(clamped);
+        if j < decode.len() {
+            result[j] = interpolate(result[j], 0.0, 1.0, decode[j][0], decode[j][1]);
+        }
+        if j < range.len() {
+            result[j] = clamp(result[j], range[j][0], range[j][1]);
+        }
     }
     result
 }
