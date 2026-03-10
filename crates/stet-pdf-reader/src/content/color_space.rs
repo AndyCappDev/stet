@@ -412,7 +412,11 @@ pub fn components_to_device_color_icc(
             let m = components.get(1).copied().unwrap_or(0.0);
             let y = components.get(2).copied().unwrap_or(0.0);
             let k = components.get(3).copied().unwrap_or(0.0);
-            DeviceColor::from_cmyk(c, m, y, k)
+            if let Some(cache) = icc_cache {
+                DeviceColor::from_cmyk_icc(c, m, y, k, cache)
+            } else {
+                DeviceColor::from_cmyk(c, m, y, k)
+            }
         }
         ResolvedColorSpace::ICCBased { n, profile_data } => {
             // Try ICC profile conversion first

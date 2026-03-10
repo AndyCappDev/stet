@@ -4,7 +4,9 @@
 
 //! Shading (sh operator) → DisplayElement conversion.
 
-use crate::content::color_space::resolve_color_space_obj;
+use crate::content::color_space::{
+    components_to_device_color_icc, resolve_color_space_obj, ResolvedColorSpace,
+};
 use crate::content::graphics_state::PdfGraphicsState;
 use crate::error::PdfError;
 use crate::objects::{PdfDict, PdfObj};
@@ -16,7 +18,8 @@ use stet_core::device::{
     PatchShadingParams, RadialShadingParams, ShadingColorSpace,
 };
 use stet_core::display_list::{DisplayElement, DisplayList};
-use stet_core::graphics_state::{DeviceColor, Matrix};
+use stet_core::graphics_state::Matrix;
+use stet_core::icc::IccCache;
 
 /// Handle the `sh` operator: parse shading dict and emit display element.
 ///
@@ -27,6 +30,7 @@ pub fn handle_shading(
     gstate: &PdfGraphicsState,
     resolver: &Resolver,
     display_list: &mut DisplayList,
+    icc_cache: &mut IccCache,
 ) -> Result<(), PdfError> {
     let shading_type =
         dict.get_int(b"ShadingType")
@@ -35,10 +39,31 @@ pub fn handle_shading(
     let bbox = parse_bbox(dict);
     let extend = parse_extend(dict);
 
+    // Resolve the color space once, used by all shading types
+    let resolved_cs = resolve_shading_resolved_cs(dict, resolver);
+
     match shading_type {
-        1 => handle_function_based(dict, gstate, resolver, display_list),
-        2 => handle_axial(dict, gstate, resolver, display_list, bbox, extend),
-        3 => handle_radial(dict, gstate, resolver, display_list, bbox, extend),
+        1 => handle_function_based(dict, gstate, resolver, display_list, &resolved_cs, icc_cache),
+        2 => handle_axial(
+            dict,
+            gstate,
+            resolver,
+            display_list,
+            bbox,
+            extend,
+            &resolved_cs,
+            icc_cache,
+        ),
+        3 => handle_radial(
+            dict,
+            gstate,
+            resolver,
+            display_list,
+            bbox,
+            extend,
+            &resolved_cs,
+            icc_cache,
+        ),
         4 | 5 => handle_mesh(
             shading_obj,
             dict,
@@ -46,6 +71,8 @@ pub fn handle_shading(
             resolver,
             display_list,
             shading_type,
+            &resolved_cs,
+            icc_cache,
         ),
         6 | 7 => handle_patches(
             shading_obj,
@@ -54,6 +81,8 @@ pub fn handle_shading(
             resolver,
             display_list,
             shading_type,
+            &resolved_cs,
+            icc_cache,
         ),
         _ => Ok(()),
     }
@@ -64,6 +93,8 @@ fn handle_function_based(
     gstate: &PdfGraphicsState,
     resolver: &Resolver,
     display_list: &mut DisplayList,
+    resolved_cs: &ResolvedColorSpace,
+    icc_cache: &mut IccCache,
 ) -> Result<(), PdfError> {
     let function = parse_shading_function(dict, resolver)?;
 
@@ -100,11 +131,12 @@ fn handle_function_based(
             let x = domain[0] + (col as f64 + 0.5) / width as f64 * (domain[1] - domain[0]);
             let y = domain[2] + (row as f64 + 0.5) / height as f64 * (domain[3] - domain[2]);
             let components = function.evaluate(&[x, y]);
-            let (r, g, b) = components_to_rgb(&components);
+            let color =
+                components_to_device_color_icc(resolved_cs, &components, Some(icc_cache));
             let idx = ((row * width + col) * 4) as usize;
-            rgba[idx] = (r * 255.0 + 0.5) as u8;
-            rgba[idx + 1] = (g * 255.0 + 0.5) as u8;
-            rgba[idx + 2] = (b * 255.0 + 0.5) as u8;
+            rgba[idx] = (color.r * 255.0 + 0.5) as u8;
+            rgba[idx + 1] = (color.g * 255.0 + 0.5) as u8;
+            rgba[idx + 2] = (color.b * 255.0 + 0.5) as u8;
         }
     }
 
@@ -136,6 +168,8 @@ fn handle_axial(
     display_list: &mut DisplayList,
     bbox: Option<[f64; 4]>,
     extend: (bool, bool),
+    resolved_cs: &ResolvedColorSpace,
+    icc_cache: &mut IccCache,
 ) -> Result<(), PdfError> {
     let coords = dict
         .get_array(b"Coords")
@@ -146,13 +180,12 @@ fn handle_axial(
     }
 
     let function = parse_shading_function(dict, resolver)?;
-    let color_stops = sample_function_to_stops(&function, 64);
+    let color_stops = sample_function_to_stops_icc(&function, 64, resolved_cs, icc_cache);
 
     let (x0, y0) = gstate.ctm.transform_point(vals[0], vals[1]);
     let (x1, y1) = gstate.ctm.transform_point(vals[2], vals[3]);
 
-    let cs = resolve_shading_color_space(dict, resolver);
-
+    let cs = resolved_cs_to_shading_cs(resolved_cs);
     let device_bbox = transform_bbox(&bbox, &gstate.ctm);
 
     display_list.push(DisplayElement::AxialShading {
@@ -179,6 +212,8 @@ fn handle_radial(
     display_list: &mut DisplayList,
     bbox: Option<[f64; 4]>,
     extend: (bool, bool),
+    resolved_cs: &ResolvedColorSpace,
+    icc_cache: &mut IccCache,
 ) -> Result<(), PdfError> {
     let coords = dict
         .get_array(b"Coords")
@@ -189,7 +224,7 @@ fn handle_radial(
     }
 
     let function = parse_shading_function(dict, resolver)?;
-    let color_stops = sample_function_to_stops(&function, 64);
+    let color_stops = sample_function_to_stops_icc(&function, 64, resolved_cs, icc_cache);
 
     let (x0, y0) = gstate.ctm.transform_point(vals[0], vals[1]);
     let (x1, y1) = gstate.ctm.transform_point(vals[3], vals[4]);
@@ -197,7 +232,7 @@ fn handle_radial(
     let r0 = vals[2] * scale;
     let r1 = vals[5] * scale;
 
-    let cs = resolve_shading_color_space(dict, resolver);
+    let cs = resolved_cs_to_shading_cs(resolved_cs);
     let device_bbox = transform_bbox(&bbox, &gstate.ctm);
 
     display_list.push(DisplayElement::RadialShading {
@@ -226,6 +261,8 @@ fn handle_mesh(
     resolver: &Resolver,
     display_list: &mut DisplayList,
     shading_type: i32,
+    resolved_cs: &ResolvedColorSpace,
+    _icc_cache: &mut IccCache,
 ) -> Result<(), PdfError> {
     let bpc = dict.get_int(b"BitsPerCoordinate").unwrap_or(8) as usize;
     let bpco = dict.get_int(b"BitsPerComponent").unwrap_or(8) as usize;
@@ -236,7 +273,7 @@ fn handle_mesh(
         .map(|a| a.iter().filter_map(|o| o.as_f64()).collect::<Vec<_>>())
         .unwrap_or_default();
 
-    let cs = resolve_shading_color_space(dict, resolver);
+    let cs = resolved_cs_to_shading_cs(resolved_cs);
     let n_comps = shading_cs_num_components(&cs);
 
     let data = resolver.stream_data_from_obj(shading_obj)?;
@@ -284,6 +321,8 @@ fn handle_patches(
     resolver: &Resolver,
     display_list: &mut DisplayList,
     shading_type: i32,
+    resolved_cs: &ResolvedColorSpace,
+    _icc_cache: &mut IccCache,
 ) -> Result<(), PdfError> {
     let bpc = dict.get_int(b"BitsPerCoordinate").unwrap_or(8) as usize;
     let bpco = dict.get_int(b"BitsPerComponent").unwrap_or(8) as usize;
@@ -294,7 +333,7 @@ fn handle_patches(
         .map(|a| a.iter().filter_map(|o| o.as_f64()).collect::<Vec<_>>())
         .unwrap_or_default();
 
-    let cs = resolve_shading_color_space(dict, resolver);
+    let cs = resolved_cs_to_shading_cs(resolved_cs);
     let n_comps = shading_cs_num_components(&cs);
 
     let data = resolver.stream_data_from_obj(shading_obj)?;
@@ -337,20 +376,6 @@ fn shading_cs_num_components(cs: &ShadingColorSpace) -> usize {
     }
 }
 
-fn components_to_rgb(components: &[f64]) -> (f64, f64, f64) {
-    match components.len() {
-        1 => (components[0], components[0], components[0]),
-        3 => (components[0], components[1], components[2]),
-        4 => {
-            let r = (1.0 - components[0]) * (1.0 - components[3]);
-            let g = (1.0 - components[1]) * (1.0 - components[3]);
-            let b = (1.0 - components[2]) * (1.0 - components[3]);
-            (r, g, b)
-        }
-        _ => (0.0, 0.0, 0.0),
-    }
-}
-
 fn parse_shading_function(dict: &PdfDict, resolver: &Resolver) -> Result<PdfFunction, PdfError> {
     let fn_obj = dict
         .get(b"Function")
@@ -367,17 +392,18 @@ fn parse_shading_function(dict: &PdfDict, resolver: &Resolver) -> Result<PdfFunc
     PdfFunction::parse(&fn_obj, resolver)
 }
 
-fn sample_function_to_stops(function: &PdfFunction, n_samples: usize) -> Vec<ColorStop> {
+fn sample_function_to_stops_icc(
+    function: &PdfFunction,
+    n_samples: usize,
+    resolved_cs: &ResolvedColorSpace,
+    icc_cache: &mut IccCache,
+) -> Vec<ColorStop> {
     let mut stops = Vec::with_capacity(n_samples);
     for i in 0..n_samples {
         let t = i as f64 / (n_samples - 1) as f64;
         let components = function.evaluate(&[t]);
-        let color = match components.len() {
-            1 => DeviceColor::from_gray(components[0]),
-            3 => DeviceColor::from_rgb(components[0], components[1], components[2]),
-            4 => DeviceColor::from_cmyk(components[0], components[1], components[2], components[3]),
-            _ => DeviceColor::from_gray(0.0),
-        };
+        let color =
+            components_to_device_color_icc(resolved_cs, &components, Some(icc_cache));
         stops.push(ColorStop {
             position: t,
             color,
@@ -435,22 +461,30 @@ fn parse_extend(dict: &PdfDict) -> (bool, bool) {
         .unwrap_or((false, false))
 }
 
-fn resolve_shading_color_space(dict: &PdfDict, resolver: &Resolver) -> ShadingColorSpace {
-    if let Some(cs_obj) = dict.get(b"ColorSpace")
-        && let Ok(resolved) = resolve_color_space_obj(cs_obj, resolver)
-    {
-        return match resolved {
-            crate::content::color_space::ResolvedColorSpace::DeviceGray => {
-                ShadingColorSpace::DeviceGray
-            }
-            crate::content::color_space::ResolvedColorSpace::DeviceRGB => {
-                ShadingColorSpace::DeviceRGB
-            }
-            crate::content::color_space::ResolvedColorSpace::DeviceCMYK => {
-                ShadingColorSpace::DeviceCMYK
-            }
-            _ => ShadingColorSpace::DeviceRGB,
-        };
+/// Resolve the shading's /ColorSpace to a ResolvedColorSpace.
+fn resolve_shading_resolved_cs(dict: &PdfDict, resolver: &Resolver) -> ResolvedColorSpace {
+    if let Some(cs_obj) = dict.get(b"ColorSpace") {
+        if let Ok(resolved) = resolve_color_space_obj(cs_obj, resolver) {
+            return resolved;
+        }
     }
-    ShadingColorSpace::DeviceRGB
+    ResolvedColorSpace::DeviceRGB
+}
+
+/// Convert ResolvedColorSpace to ShadingColorSpace for the display list.
+/// ICCBased colors are already converted through the profile at stop/pixel level,
+/// so we map them to the equivalent device space for the renderer.
+fn resolved_cs_to_shading_cs(cs: &ResolvedColorSpace) -> ShadingColorSpace {
+    match cs {
+        ResolvedColorSpace::DeviceGray => ShadingColorSpace::DeviceGray,
+        ResolvedColorSpace::DeviceRGB => ShadingColorSpace::DeviceRGB,
+        ResolvedColorSpace::DeviceCMYK => ShadingColorSpace::DeviceCMYK,
+        // ICCBased colors are converted to sRGB at sample time
+        ResolvedColorSpace::ICCBased { n, .. } => match n {
+            1 => ShadingColorSpace::DeviceGray,
+            4 => ShadingColorSpace::DeviceCMYK,
+            _ => ShadingColorSpace::DeviceRGB,
+        },
+        _ => ShadingColorSpace::DeviceRGB,
+    }
 }

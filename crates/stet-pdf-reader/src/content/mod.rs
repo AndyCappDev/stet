@@ -114,7 +114,11 @@ impl<'a> ContentInterpreter<'a> {
             depth: 0,
             font_cache: FontCache::new(),
             current_font: None,
-            icc_cache: IccCache::new(),
+            icc_cache: {
+                let mut cache = IccCache::new();
+                cache.search_system_cmyk_profile();
+                cache
+            },
         }
     }
 
@@ -1758,6 +1762,7 @@ impl<'a> ContentInterpreter<'a> {
             &self.gstate,
             self.resolver,
             &mut self.display_list,
+            &mut self.icc_cache,
         )
     }
 
@@ -1928,6 +1933,7 @@ impl<'a> ContentInterpreter<'a> {
             &self.gstate,
             self.resolver,
             &mut self.display_list,
+            &mut self.icc_cache,
         );
 
         self.gstate.ctm = saved_ctm;
