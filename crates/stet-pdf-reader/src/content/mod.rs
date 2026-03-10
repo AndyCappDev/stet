@@ -1447,6 +1447,17 @@ impl<'a> ContentInterpreter<'a> {
         self.gstate.ctm = self.gstate.ctm.concat(&form_matrix);
 
         if is_transparency_group {
+            // Capture compositing parameters from the current state BEFORE
+            // resetting alpha for the group's internal rendering.
+            let group_blend_mode = self.gstate.blend_mode;
+            let group_alpha = self.gstate.fill_alpha;
+
+            // Reset alpha inside the group: elements render at full opacity.
+            // The inherited alpha is applied when compositing the group as a
+            // whole, avoiding double-application of alpha.
+            self.gstate.fill_alpha = 1.0;
+            self.gstate.stroke_alpha = 1.0;
+
             // Render group contents into a separate sub-DisplayList
             let mut group_list = DisplayList::new();
             std::mem::swap(&mut self.display_list, &mut group_list);
@@ -1476,8 +1487,8 @@ impl<'a> ContentInterpreter<'a> {
                 params: GroupParams {
                     bbox: device_bbox,
                     isolated,
-                    blend_mode: self.gstate.blend_mode,
-                    alpha: self.gstate.fill_alpha,
+                    blend_mode: group_blend_mode,
+                    alpha: group_alpha,
                 },
             });
         } else {
