@@ -240,6 +240,14 @@ impl IccCache {
         }
     }
 
+    /// Load a CMYK ICC profile from raw bytes (for environments without filesystem access).
+    pub fn load_cmyk_profile_bytes(&mut self, bytes: &[u8]) {
+        if let Some(hash) = self.register_profile(bytes) {
+            self.system_cmyk_bytes = Some(Arc::new(bytes.to_vec()));
+            self.default_cmyk_hash = Some(hash);
+        }
+    }
+
     /// Get the default CMYK profile hash, if a system CMYK profile was found.
     pub fn default_cmyk_hash(&self) -> Option<&ProfileHash> {
         self.default_cmyk_hash.as_ref()

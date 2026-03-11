@@ -3515,6 +3515,50 @@ pub fn prepare_display_list(list: &DisplayList) -> PreparedDisplayList {
     }
 }
 
+/// Pre-converted RGBA image data cache, indexed by display list element index.
+///
+/// Built once per page after display list capture. Reused across all viewport
+/// renders so that ICC color conversion (especially CMYK→sRGB) is not repeated
+/// on every pan/zoom.
+pub struct ImageCache {
+    /// RGBA data per element index. `None` for non-image elements.
+    entries: Vec<Option<Vec<u8>>>,
+}
+
+impl ImageCache {
+    /// Build cache by pre-converting all images in the display list.
+    pub fn build(list: &DisplayList, icc: Option<&IccCache>) -> Self {
+        let entries = list
+            .elements()
+            .iter()
+            .map(|elem| {
+                if let DisplayElement::Image {
+                    sample_data,
+                    params,
+                } = elem
+                {
+                    if params.width == 0 || params.height == 0 {
+                        return None;
+                    }
+                    let mut rgba = samples_to_rgba(sample_data, params, icc);
+                    if params.mask_color.is_some() {
+                        apply_mask_color_rgba(&mut rgba, sample_data, params);
+                    }
+                    Some(rgba)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        Self { entries }
+    }
+
+    /// Get pre-converted RGBA for the element at the given index.
+    pub fn get(&self, index: usize) -> Option<&[u8]> {
+        self.entries.get(index).and_then(|e| e.as_deref())
+    }
+}
+
 /// Render a rectangular viewport region using precomputed metadata.
 ///
 /// Like [`render_region()`] but skips the three precomputation passes,
@@ -3532,6 +3576,7 @@ pub fn render_region_prepared(
     pixel_h: u32,
     dpi: f64,
     icc: Option<&IccCache>,
+    image_cache: Option<&ImageCache>,
 ) -> Vec<u8> {
     if pixel_w == 0 || pixel_h == 0 || vp_w <= 0.0 || vp_h <= 0.0 {
         return vec![0xFF; pixel_w as usize * pixel_h as usize * 4];
@@ -3591,6 +3636,7 @@ pub fn render_region_prepared(
                 &mut pixmap,
                 &mut state,
                 &elements[i],
+                i,
                 vp_x_f,
                 vp_y_f,
                 sx,
@@ -3599,6 +3645,7 @@ pub fn render_region_prepared(
                 pixel_h,
                 effective_dpi,
                 icc,
+                image_cache,
             );
         }
     }
@@ -3645,6 +3692,7 @@ pub fn render_region_single_band(
     num_bands: u32,
     dpi: f64,
     icc: Option<&IccCache>,
+    image_cache: Option<&ImageCache>,
 ) -> Vec<u8> {
     if pixel_w == 0 || pixel_h == 0 || vp_w <= 0.0 || vp_h <= 0.0 {
         let actual_h = if band_idx < num_bands - 1 {
@@ -3730,6 +3778,7 @@ pub fn render_region_single_band(
                 &mut pixmap,
                 &mut state,
                 &elements[i],
+                i,
                 vp_x_f,
                 band_vp_y_f,
                 sx,
@@ -3738,6 +3787,7 @@ pub fn render_region_single_band(
                 render_h,
                 effective_dpi,
                 icc,
+                image_cache,
             );
         }
     }
@@ -3772,12 +3822,13 @@ pub fn render_region_prepared_parallel(
     pixel_h: u32,
     dpi: f64,
     icc: Option<&IccCache>,
+    image_cache: Option<&ImageCache>,
 ) -> Vec<u8> {
     let (num_bands, band_h) = viewport_band_count(pixel_w, pixel_h);
 
     if num_bands <= 1 {
         // Single band — no parallelism needed
-        return render_region_prepared(list, prepared, vp_x, vp_y, vp_w, vp_h, pixel_w, pixel_h, dpi, icc);
+        return render_region_prepared(list, prepared, vp_x, vp_y, vp_w, vp_h, pixel_w, pixel_h, dpi, icc, image_cache);
     }
 
     let render_band = |band_idx: u32| -> Vec<u8> {
@@ -3786,7 +3837,7 @@ pub fn render_region_prepared_parallel(
             vp_x, vp_y, vp_w, vp_h,
             pixel_w, pixel_h,
             band_idx, band_h, num_bands,
-            dpi, icc,
+            dpi, icc, image_cache,
         )
     };
 
@@ -3907,6 +3958,7 @@ pub fn render_region(
     pixel_h: u32,
     dpi: f64,
     icc: Option<&IccCache>,
+    image_cache: Option<&ImageCache>,
 ) -> Vec<u8> {
     if pixel_w == 0 || pixel_h == 0 || vp_w <= 0.0 || vp_h <= 0.0 {
         return vec![0xFF; pixel_w as usize * pixel_h as usize * 4];
@@ -3972,6 +4024,7 @@ pub fn render_region(
                 &mut pixmap,
                 &mut state,
                 &elements[i],
+                i,
                 vp_x_f,
                 vp_y_f,
                 sx,
@@ -3980,6 +4033,7 @@ pub fn render_region(
                 pixel_h,
                 effective_dpi,
                 icc,
+                image_cache,
             );
         }
     }
@@ -3994,6 +4048,7 @@ fn render_element_to_viewport(
     pixmap: &mut Pixmap,
     state: &mut BandState,
     element: &DisplayElement,
+    elem_idx: usize,
     vp_x: f32,
     vp_y: f32,
     scale_x: f32,
@@ -4002,6 +4057,7 @@ fn render_element_to_viewport(
     out_h: u32,
     effective_dpi: f64,
     icc: Option<&IccCache>,
+    image_cache: Option<&ImageCache>,
 ) {
     match element {
         DisplayElement::Fill { path, params } => {
@@ -4098,10 +4154,20 @@ fn render_element_to_viewport(
             if iw == 0 || ih == 0 {
                 return;
             }
-            let mut rgba_data = samples_to_rgba(sample_data, params, icc);
-            if params.mask_color.is_some() {
-                apply_mask_color_rgba(&mut rgba_data, sample_data, params);
-            }
+            // Use pre-converted RGBA from image cache when available
+            let owned_rgba;
+            let rgba_data: &[u8] = if let Some(cached) = image_cache.and_then(|c| c.get(elem_idx)) {
+                cached
+            } else {
+                owned_rgba = {
+                    let mut rgba = samples_to_rgba(sample_data, params, icc);
+                    if params.mask_color.is_some() {
+                        apply_mask_color_rgba(&mut rgba, sample_data, params);
+                    }
+                    rgba
+                };
+                &owned_rgba
+            };
             let expected = (iw * ih * 4) as usize;
             if rgba_data.len() < expected {
                 return;
@@ -4113,10 +4179,10 @@ fn render_element_to_viewport(
             let raw_transform =
                 viewport_transform(to_transform(&combined), vp_x, vp_y, scale_x, scale_y);
 
-            let prescaled = prescale_image(&rgba_data, iw, ih, raw_transform);
+            let prescaled = prescale_image(rgba_data, iw, ih, raw_transform);
             let (img_data, img_w, img_h, transform) = match &prescaled {
                 Some((data, w, h, t)) => (data.as_slice(), *w, *h, *t),
-                None => (rgba_data.as_slice(), iw, ih, raw_transform),
+                None => (rgba_data, iw, ih, raw_transform),
             };
 
             let Some(img_pixmap) = tiny_skia::PixmapRef::from_bytes(img_data, img_w, img_h) else {
@@ -4352,11 +4418,12 @@ fn render_group_to_viewport(
         mask_pool: Vec::new(),
     };
 
-    for elem in elements.elements() {
+    for (idx, elem) in elements.elements().iter().enumerate() {
         render_element_to_viewport(
             &mut offscreen,
             &mut group_state,
             elem,
+            idx,
             eff_vp_x,
             eff_vp_y,
             scale_x,
@@ -4365,6 +4432,7 @@ fn render_group_to_viewport(
             eff_h,
             effective_dpi,
             icc,
+            None,
         );
     }
 
@@ -4463,8 +4531,8 @@ fn render_knockout_group_to_viewport(
         };
 
         render_element_to_viewport(
-            &mut offscreen, &mut elem_state, elem, eff_vp_x, eff_vp_y, scale_x, scale_y,
-            eff_w, eff_h, effective_dpi, icc,
+            &mut offscreen, &mut elem_state, elem, 0, eff_vp_x, eff_vp_y, scale_x, scale_y,
+            eff_w, eff_h, effective_dpi, icc, None,
         );
 
         // Replace accumulated pixels wherever this element painted
@@ -4527,11 +4595,12 @@ fn render_soft_masked_viewport(
         clip_mask_seen: HashSet::new(),
         mask_pool: Vec::new(),
     };
-    for elem in mask_list.elements() {
+    for (idx, elem) in mask_list.elements().iter().enumerate() {
         render_element_to_viewport(
             &mut mask_pixmap,
             &mut mask_state,
             elem,
+            idx,
             eff_vp_x,
             eff_vp_y,
             scale_x,
@@ -4540,6 +4609,7 @@ fn render_soft_masked_viewport(
             eff_h,
             effective_dpi,
             icc,
+            None,
         );
     }
 
@@ -4559,11 +4629,12 @@ fn render_soft_masked_viewport(
         clip_mask_seen: HashSet::new(),
         mask_pool: Vec::new(),
     };
-    for elem in content_list.elements() {
+    for (idx, elem) in content_list.elements().iter().enumerate() {
         render_element_to_viewport(
             &mut content_pixmap,
             &mut content_state,
             elem,
+            idx,
             eff_vp_x,
             eff_vp_y,
             scale_x,
@@ -4572,6 +4643,7 @@ fn render_soft_masked_viewport(
             eff_h,
             effective_dpi,
             icc,
+            None,
         );
     }
 

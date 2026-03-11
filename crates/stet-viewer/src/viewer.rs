@@ -489,6 +489,7 @@ impl ViewerApp {
             pixel_h,
             page.dpi,
             Some(&page.icc_cache),
+            None,
         );
 
         let image = ColorImage::from_rgba_unmultiplied([pixel_w as usize, pixel_h as usize], &rgba);
@@ -551,6 +552,7 @@ impl ViewerApp {
             mm_h,
             page.dpi,
             Some(&page.icc_cache),
+            None,
         );
 
         let image = ColorImage::from_rgba_unmultiplied([mm_w as usize, mm_h as usize], &rgba);

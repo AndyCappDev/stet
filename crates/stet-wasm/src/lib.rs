@@ -20,9 +20,12 @@ use stet_core::display_list::DisplayList;
 use stet_core::eps::{content_is_epsf, read_eps_bounding_box};
 use stet_core::error::PsError;
 use stet_engine::eval::parse_and_exec;
-use stet_render::{PreparedDisplayList, SkiaDevice};
+use stet_render::{ImageCache, PreparedDisplayList, SkiaDevice};
 
 use memory_sink::{MemorySinkFactory, PageData, set_sink_callback};
+
+/// Embedded GhostScript default CMYK ICC profile for CMYK→sRGB conversion.
+const DEFAULT_CMYK_ICC: &[u8] = include_bytes!("default_cmyk.icc");
 
 /// Page metadata stored alongside display lists for viewport rendering.
 struct PageInfo {
@@ -47,10 +50,14 @@ pub struct Interpreter {
     /// Pre-computed metadata for each display list (bboxes, epochs, clip_seen).
     /// Avoids recomputing on every viewport render.
     page_prepared: Vec<PreparedDisplayList>,
+    /// Per-page pre-converted RGBA image cache (ICC conversion done once at capture).
+    page_image_cache: Vec<ImageCache>,
     /// Per-page dimensions at the reference DPI.
     page_info: Vec<PageInfo>,
     /// The DPI used during interpretation (reference DPI for display list coordinates).
     reference_dpi: f64,
+    /// Embedded CMYK ICC profile bytes for ICC-aware viewport rendering.
+    system_cmyk_bytes: Arc<Vec<u8>>,
 }
 
 /// A single rendered page with dimensions and RGBA pixel data.
@@ -120,8 +127,15 @@ pub fn create_interpreter() -> Interpreter {
     ctx.font_resource_path = Some("Font".to_string());
     ctx.stdout = Box::new(NullWriter);
 
-    ctx.device_factory = Some(Box::new(|w, h| {
-        Box::new(SkiaDevice::new(w, h)) as Box<dyn OutputDevice>
+    log("stet: loading embedded CMYK ICC profile...");
+    ctx.icc_cache.load_cmyk_profile_bytes(DEFAULT_CMYK_ICC);
+    let cmyk_bytes: Arc<Vec<u8>> = Arc::new(DEFAULT_CMYK_ICC.to_vec());
+
+    let cmyk_for_factory = cmyk_bytes.clone();
+    ctx.device_factory = Some(Box::new(move |w, h| {
+        let mut dev = SkiaDevice::new(w, h);
+        dev.set_system_cmyk_bytes(cmyk_for_factory.clone());
+        Box::new(dev) as Box<dyn OutputDevice>
     }));
 
     log("stet: running init scripts...");
@@ -132,8 +146,10 @@ pub fn create_interpreter() -> Interpreter {
         ctx,
         page_display_lists: Vec::new(),
         page_prepared: Vec::new(),
+        page_image_cache: Vec::new(),
         page_info: Vec::new(),
         reference_dpi: 150.0,
+        system_cmyk_bytes: cmyk_bytes,
     }
 }
 
@@ -183,6 +199,7 @@ pub fn render(interp: &mut Interpreter, ps_data: &[u8], dpi: f64, filename: &str
     // Clear previous display lists
     interp.page_display_lists.clear();
     interp.page_prepared.clear();
+    interp.page_image_cache.clear();
     interp.page_info.clear();
     interp.reference_dpi = dpi;
 
@@ -215,10 +232,12 @@ pub fn render(interp: &mut Interpreter, ps_data: &[u8], dpi: f64, filename: &str
 
         // Set up device_factory with MemorySinkFactory, then use setpagedevice
         let pages_for_factory = pages_ref.clone();
+        let cmyk_for_factory = interp.system_cmyk_bytes.clone();
         interp.ctx.device_factory = Some(Box::new(move |w, h| {
             let factory = MemorySinkFactory::from_shared(pages_for_factory.clone());
-            Box::new(SkiaDevice::with_sink_factory(w, h, Box::new(factory)))
-                as Box<dyn OutputDevice>
+            let mut dev = SkiaDevice::with_sink_factory(w, h, Box::new(factory));
+            dev.set_system_cmyk_bytes(cmyk_for_factory.clone());
+            Box::new(dev) as Box<dyn OutputDevice>
         }));
 
         install_device_via_setpagedevice(&mut interp.ctx, dpi, w, h)
@@ -257,9 +276,12 @@ pub fn render(interp: &mut Interpreter, ps_data: &[u8], dpi: f64, filename: &str
 
     // Non-EPS or no valid bounding box: standard page rendering
     let pages_for_factory = pages_ref.clone();
+    let cmyk_for_factory = interp.system_cmyk_bytes.clone();
     interp.ctx.device_factory = Some(Box::new(move |w, h| {
         let factory = MemorySinkFactory::from_shared(pages_for_factory.clone());
-        Box::new(SkiaDevice::with_sink_factory(w, h, Box::new(factory))) as Box<dyn OutputDevice>
+        let mut dev = SkiaDevice::with_sink_factory(w, h, Box::new(factory));
+        dev.set_system_cmyk_bytes(cmyk_for_factory.clone());
+        Box::new(dev) as Box<dyn OutputDevice>
     }));
 
     install_device_via_setpagedevice(&mut interp.ctx, dpi, 612.0, 792.0)
@@ -317,10 +339,12 @@ pub fn render_pdf(interp: &mut Interpreter, pdf_data: &[u8], dpi: f64) -> Result
     // Clear previous state
     interp.page_display_lists.clear();
     interp.page_prepared.clear();
+    interp.page_image_cache.clear();
     interp.page_info.clear();
     interp.reference_dpi = dpi;
 
-    let icc_cache = stet_core::icc::IccCache::new();
+    let mut icc_cache = stet_core::icc::IccCache::new();
+    icc_cache.load_cmyk_profile_bytes(DEFAULT_CMYK_ICC);
     let mut doc = stet_pdf_reader::PdfDocument::from_bytes_with_icc(pdf_data, icc_cache)
         .map_err(|e| JsValue::from_str(&format!("PDF parse error: {}", e)))?;
     doc.set_font_provider(embedded_resources::build_font_provider());
@@ -339,8 +363,11 @@ pub fn render_pdf(interp: &mut Interpreter, pdf_data: &[u8], dpi: f64) -> Result
                 log(&format!("stet: page {} — {} display elements, {}x{} px",
                     page_idx, dl.elements().len(), pixel_w, pixel_h));
                 let prepared = stet_render::prepare_display_list(&dl);
+                let icc = stet_render::build_icc_cache_for_list(&dl, Some(&interp.system_cmyk_bytes));
+                let image_cache = ImageCache::build(&dl, Some(&icc));
                 interp.page_display_lists.push(dl);
                 interp.page_prepared.push(prepared);
+                interp.page_image_cache.push(image_cache);
                 interp.page_info.push(PageInfo {
                     width: pixel_w,
                     height: pixel_h,
@@ -418,6 +445,7 @@ pub fn render_viewport(
 
     let list = &interp.page_display_lists[i];
     let page_dpi = interp.page_info[i].dpi;
+    let image_cache = interp.page_image_cache.get(i);
     let rgba = if i < interp.page_prepared.len() {
         stet_render::render_region_prepared(
             list,
@@ -430,6 +458,7 @@ pub fn render_viewport(
             pixel_h,
             page_dpi,
             None,
+            image_cache,
         )
     } else {
         stet_render::render_region(
@@ -441,6 +470,7 @@ pub fn render_viewport(
             pixel_w,
             pixel_h,
             page_dpi,
+            None,
             None,
         )
     };
@@ -499,6 +529,7 @@ pub fn render_viewport_band(
         return Err(JsValue::from_str("No prepared display list for this page"));
     }
 
+    let image_cache = interp.page_image_cache.get(i);
     let rgba = stet_render::render_region_single_band(
         list,
         &interp.page_prepared[i],
@@ -513,6 +544,7 @@ pub fn render_viewport_band(
         num_bands,
         page_dpi,
         None,
+        image_cache,
     );
 
     let actual_h = if band_idx < num_bands - 1 {
@@ -581,8 +613,11 @@ fn collect_display_lists(interp: &mut Interpreter, pages: &[PageData]) {
     let captured = interp.ctx.capture_display_lists.take().unwrap_or_default();
     for (i, (dl, dpi)) in captured.into_iter().enumerate() {
         let prepared = stet_render::prepare_display_list(&dl);
+        let icc = stet_render::build_icc_cache_for_list(&dl, Some(&interp.system_cmyk_bytes));
+        let image_cache = ImageCache::build(&dl, Some(&icc));
         interp.page_display_lists.push(dl);
         interp.page_prepared.push(prepared);
+        interp.page_image_cache.push(image_cache);
         if i < pages.len() {
             interp.page_info.push(PageInfo {
                 width: pages[i].width,
