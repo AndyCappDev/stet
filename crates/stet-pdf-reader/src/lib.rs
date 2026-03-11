@@ -30,12 +30,19 @@ use resolver::Resolver;
 use stet_core::display_list::DisplayList;
 use stet_core::graphics_state::Matrix;
 use stet_core::icc::IccCache;
+use std::sync::Arc;
+
+/// Font data provider: maps a font file name (e.g. "NimbusSans-Regular") to raw .t1 bytes.
+///
+/// Used for environments without filesystem access (WASM) where fonts are embedded.
+pub type FontProvider = Arc<dyn Fn(&str) -> Option<Vec<u8>> + Send + Sync>;
 
 /// A parsed PDF document.
 pub struct PdfDocument<'a> {
     resolver: Resolver<'a>,
     pages: Vec<PageInfo>,
     icc_cache: IccCache,
+    font_provider: Option<FontProvider>,
 }
 
 impl<'a> PdfDocument<'a> {
@@ -84,6 +91,7 @@ impl<'a> PdfDocument<'a> {
             resolver,
             pages,
             icc_cache,
+            font_provider: None,
         })
     }
 
@@ -127,7 +135,13 @@ impl<'a> PdfDocument<'a> {
             resolver,
             pages,
             icc_cache,
+            font_provider: None,
         })
+    }
+
+    /// Set a font data provider for environments without filesystem access.
+    pub fn set_font_provider(&mut self, provider: FontProvider) {
+        self.font_provider = Some(provider);
     }
 
     /// Number of pages in the document.
@@ -224,14 +238,20 @@ impl<'a> PdfDocument<'a> {
         let content_data = self.page_contents(page)?;
 
         // Interpret content stream
-        let interpreter =
-            ContentInterpreter::new(&self.resolver, info.resources.clone(), ctm, &self.icc_cache);
+        let interpreter = ContentInterpreter::new(
+            &self.resolver,
+            info.resources.clone(),
+            ctm,
+            &self.icc_cache,
+            self.font_provider.clone(),
+        );
         interpreter.interpret(&content_data)
     }
 
     /// Render a page to RGBA pixel data at the given DPI.
     ///
     /// Returns (pixel_data, width, height). Pixel data is RGBA, 4 bytes per pixel.
+    #[cfg(feature = "render")]
     pub fn render_page_to_rgba(
         &self,
         page: usize,

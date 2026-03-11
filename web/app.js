@@ -1,4 +1,4 @@
-console.log('stet-web v9 — precomputed display list metadata');
+console.log('stet-web v10 — PDF support');
 
 // --- State ---
 let workerReady = false;
@@ -52,7 +52,7 @@ worker.onmessage = function(e) {
 
     if (msg.type === 'ready') {
         workerReady = true;
-        statusEl.textContent = 'Ready \u2014 drop a PostScript or EPS file';
+        statusEl.textContent = 'Ready \u2014 drop a PostScript, EPS, or PDF file';
 
     } else if (msg.type === 'interpreted') {
         // PS interpretation complete — display lists captured
@@ -165,17 +165,18 @@ function handleFile(file) {
     const reader = new FileReader();
     reader.onload = e => {
         currentPsData = new Uint8Array(e.target.result);
-        renderPS(currentPsData);
+        renderFile(currentPsData);
     };
     reader.readAsArrayBuffer(file);
 }
 
-function renderPS(data) {
+function renderFile(data) {
     loading.classList.remove('hidden');
     dropZone.classList.add('hidden');
     canvasContainer.classList.add('hidden');
     pageNav.classList.add('hidden');
-    statusEl.textContent = 'Interpreting...';
+    const isPdf = currentFileName.toLowerCase().endsWith('.pdf');
+    statusEl.textContent = isPdf ? 'Parsing PDF...' : 'Interpreting...';
 
     // Reset state
     pageCount = 0;

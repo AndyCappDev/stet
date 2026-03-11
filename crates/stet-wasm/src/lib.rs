@@ -306,6 +306,58 @@ pub fn render(interp: &mut Interpreter, ps_data: &[u8], dpi: f64, filename: &str
     Ok(JsValue::from(page_count))
 }
 
+/// Render a PDF file — parse it, build display lists for each page, and store
+/// them for viewport re-rendering via `render_viewport()`.
+///
+/// Returns the number of pages, or throws on parse error.
+#[wasm_bindgen]
+pub fn render_pdf(interp: &mut Interpreter, pdf_data: &[u8], dpi: f64) -> Result<JsValue, JsValue> {
+    log(&format!("stet: render_pdf() called — {} bytes, dpi={}", pdf_data.len(), dpi));
+
+    // Clear previous state
+    interp.page_display_lists.clear();
+    interp.page_prepared.clear();
+    interp.page_info.clear();
+    interp.reference_dpi = dpi;
+
+    let icc_cache = stet_core::icc::IccCache::new();
+    let mut doc = stet_pdf_reader::PdfDocument::from_bytes_with_icc(pdf_data, icc_cache)
+        .map_err(|e| JsValue::from_str(&format!("PDF parse error: {}", e)))?;
+    doc.set_font_provider(embedded_resources::build_font_provider());
+
+    let scale = dpi / 72.0;
+
+    for page_idx in 0..doc.page_count() {
+        let (page_w, page_h) = doc.page_size(page_idx)
+            .map_err(|e| JsValue::from_str(&format!("PDF page {} error: {}", page_idx, e)))?;
+
+        let pixel_w = (page_w * scale).round() as u32;
+        let pixel_h = (page_h * scale).round() as u32;
+
+        match doc.render_page(page_idx, dpi) {
+            Ok(dl) => {
+                log(&format!("stet: page {} — {} display elements, {}x{} px",
+                    page_idx, dl.elements().len(), pixel_w, pixel_h));
+                let prepared = stet_render::prepare_display_list(&dl);
+                interp.page_display_lists.push(dl);
+                interp.page_prepared.push(prepared);
+                interp.page_info.push(PageInfo {
+                    width: pixel_w,
+                    height: pixel_h,
+                    dpi,
+                });
+            }
+            Err(e) => {
+                log(&format!("stet: PDF page {} render error: {}", page_idx, e));
+            }
+        }
+    }
+
+    let num_pages = interp.page_display_lists.len() as u32;
+    log(&format!("stet: render_pdf complete — {} pages", num_pages));
+    Ok(JsValue::from(num_pages))
+}
+
 /// Get the number of pages available for viewport rendering.
 #[wasm_bindgen]
 pub fn page_count(interp: &Interpreter) -> u32 {

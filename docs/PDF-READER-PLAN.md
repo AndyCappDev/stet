@@ -255,18 +255,27 @@ impl PdfDocument {
   - Luminosity extraction: Y = 0.2126R + 0.7152G + 0.0722B with backdrop color for transparent pixels ✓
   - Pixel-accurate output matching GhostScript (±1 rounding) on all test PDFs ✓
   - Test PDFs: SoftMask.pdf, SoftMask-Clipped.pdf, SoftMask-Interaction.pdf ✓
-- **E4: Knockout groups** — DONE
+- **E4: Knockout groups** ✓
   - Parse /K flag from transparency group dicts ✓
   - Per-element knockout compositing: each element renders against initial backdrop, replaces (not blends) in accumulated buffer ✓
   - Both banded and viewport rendering paths ✓
   - All 4 combinations tested: isolated±knockout × non-isolated±knockout ✓
-  - Test PDF: knockout_test.pdf (pixel-accurate match with GhostScript) ✓
+  - Image SMask `/Decode` array support (inverted alpha via `[1 0]`) ✓
+  - Premultiplied alpha for image SMask compositing (tiny-skia requirement) ✓
+  - ICC cache shared across pages (created once per document, not per page) ✓
+  - Test PDFs: knockout_test.pdf, Fosdem_RGW_knockout.pdf, gondwana_knockout.pdf ✓
 - **E5: Deferred SMask features** — TODO
   - SMask `/TR` (transfer function) on soft mask
   - Mask group `/CS` color space (render mask form in specific color space)
   - `/Matte` pre-blending for pre-multiplied mask images
+- **Linearized PDF support** ✓
+  - Xref stream /Prev chain traversal handles linearized + main xref ✓
+  - Indirect /Contents array refs (content array in object stream) ✓
+  - Indirect /Resources refs in page tree (inherited resources as indirect refs) ✓
 - Annotations (Link, Widget appearance streams) — TODO
 - Optional content (layers) — basic visibility toggling — TODO
+- JPXDecode (JPEG 2000) filter — TODO
+- CCITTFaxDecode (fax/TIFF) filter — TODO
 
 ## Licensing Split
 

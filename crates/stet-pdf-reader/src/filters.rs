@@ -102,7 +102,12 @@ pub fn decode_stream(
             Filter::RunLengthDecode => decode_run_length(&data)?,
             Filter::DCTDecode => decode_dct(&data)?,
             Filter::CCITTFaxDecode => decode_ccittfax(&data, parms)?,
+            #[cfg(feature = "jpx")]
             Filter::JPXDecode => decode_jpx(&data)?,
+            #[cfg(not(feature = "jpx"))]
+            Filter::JPXDecode => {
+                return Err(PdfError::UnsupportedFilter("JPXDecode (disabled)".into()));
+            }
         };
     }
 
@@ -431,6 +436,7 @@ fn decode_ccittfax(data: &[u8], parms: Option<&PdfDict>) -> Result<Vec<u8>, PdfE
 /// JPXDecode (JPEG 2000).
 ///
 /// Uses openjp2 to decode JP2 or raw J2K codestreams into interleaved pixel data.
+#[cfg(feature = "jpx")]
 fn decode_jpx(data: &[u8]) -> Result<Vec<u8>, PdfError> {
     use openjp2::openjpeg::{
         opj_stream_default_create, opj_stream_destroy, opj_stream_set_read_function,
@@ -561,12 +567,14 @@ fn decode_jpx(data: &[u8]) -> Result<Vec<u8>, PdfError> {
 }
 
 /// User data for JPX stream callbacks — holds a pointer into the input buffer.
+#[cfg(feature = "jpx")]
 struct JpxBuffer {
     data: *const u8,
     len: usize,
     pos: usize,
 }
 
+#[cfg(feature = "jpx")]
 unsafe extern "C" fn jpx_stream_read(
     buffer: *mut core::ffi::c_void,
     nb_bytes: usize,
@@ -585,6 +593,7 @@ unsafe extern "C" fn jpx_stream_read(
     }
 }
 
+#[cfg(feature = "jpx")]
 unsafe extern "C" fn jpx_stream_skip(
     nb_bytes: i64,
     user_data: *mut core::ffi::c_void,
@@ -600,6 +609,7 @@ unsafe extern "C" fn jpx_stream_skip(
     }
 }
 
+#[cfg(feature = "jpx")]
 unsafe extern "C" fn jpx_stream_seek(
     nb_bytes: i64,
     user_data: *mut core::ffi::c_void,
@@ -615,6 +625,7 @@ unsafe extern "C" fn jpx_stream_seek(
     }
 }
 
+#[cfg(feature = "jpx")]
 unsafe extern "C" fn jpx_stream_free(user_data: *mut core::ffi::c_void) {
     unsafe {
         let _ = Box::from_raw(user_data as *mut JpxBuffer);

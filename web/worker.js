@@ -1,6 +1,7 @@
 import init, {
     create_interpreter,
     render,
+    render_pdf,
     render_viewport,
     page_count,
     page_dimensions,
@@ -31,9 +32,12 @@ self.onmessage = async function(e) {
             const data = new Uint8Array(e.data.buffer);
             const start = performance.now();
 
-            // Interpret at reference DPI (300) — captures display lists for viewport rendering
+            // Detect PDF vs PostScript and use appropriate renderer
             const dpi = 300;
-            const numPages = render(interpreter, data, dpi, filename);
+            const isPdf = filename.toLowerCase().endsWith('.pdf');
+            const numPages = isPdf
+                ? render_pdf(interpreter, data, dpi)
+                : render(interpreter, data, dpi, filename);
             const elapsed = performance.now() - start;
 
             // Collect page dimensions and per-page DPI

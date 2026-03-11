@@ -27,6 +27,7 @@ use std::sync::Arc;
 
 use self::font::{FontCache, PdfFont};
 use self::graphics_state::TilingPattern;
+use crate::FontProvider;
 use stet_core::device::{ClipParams, ImageColorSpace, ImageParams, PatternFillParams};
 use stet_core::icc::IccCache;
 use stet_core::display_list::{
@@ -107,6 +108,8 @@ pub struct ContentInterpreter<'a> {
     icc_cache: IccCache,
     /// Active soft mask scope: tracks which display list elements fall under the current SMask.
     soft_mask_scope: Option<SoftMaskScope>,
+    /// Optional font data provider for environments without filesystem access.
+    font_provider: Option<FontProvider>,
 }
 
 impl<'a> ContentInterpreter<'a> {
@@ -116,6 +119,7 @@ impl<'a> ContentInterpreter<'a> {
         resources: PdfDict,
         initial_ctm: Matrix,
         icc_cache: &IccCache,
+        font_provider: Option<FontProvider>,
     ) -> Self {
         Self {
             resolver,
@@ -134,6 +138,7 @@ impl<'a> ContentInterpreter<'a> {
             current_font: None,
             icc_cache: icc_cache.clone(),
             soft_mask_scope: None,
+            font_provider,
         }
     }
 
@@ -926,7 +931,7 @@ impl<'a> ContentInterpreter<'a> {
             Some(r) => r,
             None => {
                 // Font resource missing — try loading a default substitution font
-                if let Some(fallback) = font::fallback_font() {
+                if let Some(fallback) = font::fallback_font(self.font_provider.as_ref()) {
                     let arc = Arc::new(fallback);
                     self.font_cache.insert(name.to_vec(), Arc::clone(&arc));
                     self.current_font = Some(arc);
@@ -937,7 +942,7 @@ impl<'a> ContentInterpreter<'a> {
             }
         };
 
-        match font::resolve_font(self.resolver, &font_ref) {
+        match font::resolve_font(self.resolver, &font_ref, self.font_provider.as_ref()) {
             Ok(font) => {
                 let arc = Arc::new(font);
                 self.font_cache.insert(name.to_vec(), Arc::clone(&arc));
@@ -946,7 +951,7 @@ impl<'a> ContentInterpreter<'a> {
             Err(e) => {
                 eprintln!("warning: font /{}: {}", String::from_utf8_lossy(name), e);
                 // Try fallback font on resolution failure too
-                if let Some(fallback) = font::fallback_font() {
+                if let Some(fallback) = font::fallback_font(self.font_provider.as_ref()) {
                     let arc = Arc::new(fallback);
                     self.font_cache.insert(name.to_vec(), Arc::clone(&arc));
                     self.current_font = Some(arc);

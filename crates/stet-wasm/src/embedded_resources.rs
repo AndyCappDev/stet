@@ -8,7 +8,11 @@
 //! into the WASM binary via `include_bytes!()`, eliminating the need for
 //! filesystem access.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use stet_core::file_store::FileStore;
+use stet_pdf_reader::FontProvider;
 
 // Init scripts
 const SYSDICT_PS: &[u8] = include_bytes!("../../../resources/Init/sysdict.ps");
@@ -174,4 +178,52 @@ pub fn register_embedded_resources(files: &mut FileStore) {
         let full_path = format!("resources/{}", path);
         files.add_embedded_file(&full_path, data);
     }
+}
+
+/// Build a font provider for the PDF reader from embedded font data.
+///
+/// Maps URW font file names (e.g. "NimbusSans-Regular") to raw .t1 bytes.
+pub fn build_font_provider() -> FontProvider {
+    let font_entries: &[(&str, &[u8])] = &[
+        ("NimbusRoman-Regular", NIMBUS_ROMAN_REGULAR),
+        ("NimbusRoman-Bold", NIMBUS_ROMAN_BOLD),
+        ("NimbusRoman-Italic", NIMBUS_ROMAN_ITALIC),
+        ("NimbusRoman-BoldItalic", NIMBUS_ROMAN_BOLD_ITALIC),
+        ("NimbusSans-Regular", NIMBUS_SANS_REGULAR),
+        ("NimbusSans-Bold", NIMBUS_SANS_BOLD),
+        ("NimbusSans-Italic", NIMBUS_SANS_ITALIC),
+        ("NimbusSans-BoldItalic", NIMBUS_SANS_BOLD_ITALIC),
+        ("NimbusMonoPS-Regular", NIMBUS_MONO_REGULAR),
+        ("NimbusMonoPS-Bold", NIMBUS_MONO_BOLD),
+        ("NimbusMonoPS-Italic", NIMBUS_MONO_ITALIC),
+        ("NimbusMonoPS-BoldItalic", NIMBUS_MONO_BOLD_ITALIC),
+        ("StandardSymbolsPS", STANDARD_SYMBOLS),
+        ("D050000L", DINGBATS),
+        ("NimbusSansNarrow-Regular", NIMBUS_SANS_NARROW_REGULAR),
+        ("NimbusSansNarrow-Bold", NIMBUS_SANS_NARROW_BOLD),
+        ("NimbusSansNarrow-Oblique", NIMBUS_SANS_NARROW_OBLIQUE),
+        ("NimbusSansNarrow-BoldOblique", NIMBUS_SANS_NARROW_BOLD_OBLIQUE),
+        ("P052-Roman", P052_ROMAN),
+        ("P052-Bold", P052_BOLD),
+        ("P052-Italic", P052_ITALIC),
+        ("P052-BoldItalic", P052_BOLD_ITALIC),
+        ("C059-Roman", C059_ROMAN),
+        ("C059-Bold", C059_BOLD),
+        ("C059-Italic", C059_ITALIC),
+        ("C059-BdIta", C059_BD_ITA),
+        ("URWBookman-Light", URW_BOOKMAN_LIGHT),
+        ("URWBookman-Demi", URW_BOOKMAN_DEMI),
+        ("URWBookman-LightItalic", URW_BOOKMAN_LIGHT_ITALIC),
+        ("URWBookman-DemiItalic", URW_BOOKMAN_DEMI_ITALIC),
+        ("URWGothic-Book", URW_GOTHIC_BOOK),
+        ("URWGothic-Demi", URW_GOTHIC_DEMI),
+        ("URWGothic-BookOblique", URW_GOTHIC_BOOK_OBLIQUE),
+        ("URWGothic-DemiOblique", URW_GOTHIC_DEMI_OBLIQUE),
+        ("Z003-MediumItalic", Z003_MEDIUM_ITALIC),
+    ];
+    let map: HashMap<String, &'static [u8]> = font_entries
+        .iter()
+        .map(|&(name, data)| (name.to_string(), data))
+        .collect();
+    Arc::new(move |name: &str| map.get(name).map(|data| data.to_vec()))
 }

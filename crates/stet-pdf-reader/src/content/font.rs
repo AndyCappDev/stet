@@ -18,6 +18,7 @@ use stet_core::type2_charstring::execute_type2_charstring;
 use crate::error::PdfError;
 use crate::objects::{PdfDict, PdfObj};
 use crate::resolver::Resolver;
+use crate::FontProvider;
 
 /// Resolved PDF font, ready for glyph rendering.
 pub enum PdfFont {
@@ -92,7 +93,11 @@ pub struct Type3PdfFont {
 pub type FontCache = HashMap<Vec<u8>, Arc<PdfFont>>;
 
 /// Resolve a PDF font dict into a PdfFont ready for rendering.
-pub fn resolve_font(resolver: &Resolver, font_ref: &PdfObj) -> Result<PdfFont, PdfError> {
+pub fn resolve_font(
+    resolver: &Resolver,
+    font_ref: &PdfObj,
+    font_provider: Option<&FontProvider>,
+) -> Result<PdfFont, PdfError> {
     let font_obj = resolver.deref(font_ref)?;
     let font_dict = font_obj
         .as_dict()
@@ -148,7 +153,7 @@ pub fn resolve_font(resolver: &Resolver, font_ref: &PdfObj) -> Result<PdfFont, P
                 Ok(font) => return Ok(font),
                 Err(_) => {
                     if let Some(font) =
-                        substitute_font(&base_font_name, encoding.clone(), widths)
+                        substitute_font(&base_font_name, encoding.clone(), widths, font_provider)
                     {
                         return Ok(font);
                     }
@@ -162,7 +167,7 @@ pub fn resolve_font(resolver: &Resolver, font_ref: &PdfObj) -> Result<PdfFont, P
                 Ok(font) => return Ok(font),
                 Err(_) => {
                     if let Some(font) =
-                        substitute_font(&base_font_name, encoding.clone(), widths)
+                        substitute_font(&base_font_name, encoding.clone(), widths, font_provider)
                     {
                         return Ok(font);
                     }
@@ -174,7 +179,7 @@ pub fn resolve_font(resolver: &Resolver, font_ref: &PdfObj) -> Result<PdfFont, P
                 Ok(font) => return Ok(font),
                 Err(_) => {
                     if let Some(font) =
-                        substitute_font(&base_font_name, encoding.clone(), widths)
+                        substitute_font(&base_font_name, encoding.clone(), widths, font_provider)
                     {
                         return Ok(font);
                     }
@@ -183,7 +188,7 @@ pub fn resolve_font(resolver: &Resolver, font_ref: &PdfObj) -> Result<PdfFont, P
         }
     }
     // No embedded font program — try font substitution
-    if let Some(font) = substitute_font(&base_font_name, encoding.clone(), widths) {
+    if let Some(font) = substitute_font(&base_font_name, encoding.clone(), widths, font_provider) {
         return Ok(font);
     }
 
@@ -281,7 +286,7 @@ fn encoding_table_by_name(name: &[u8]) -> &'static [&'static str; 256] {
 }
 
 /// Load a fallback font (Helvetica/NimbusSans) for when no font resource exists.
-pub fn fallback_font() -> Option<PdfFont> {
+pub fn fallback_font(font_provider: Option<&FontProvider>) -> Option<PdfFont> {
     let encoding: [Option<String>; 256] = std::array::from_fn(|i| {
         WINANSI_ENCODING.get(i).and_then(|&s| {
             if s.is_empty() { None } else { Some(s.to_string()) }
@@ -289,7 +294,7 @@ pub fn fallback_font() -> Option<PdfFont> {
     });
     let widths = super::standard_fonts::standard_font_widths(b"Helvetica")
         .unwrap_or([0.0f64; 256]);
-    substitute_font("Helvetica", encoding, widths)
+    substitute_font("Helvetica", encoding, widths, font_provider)
 }
 
 /// Try to load a substitute font for a non-embedded font.
@@ -297,6 +302,7 @@ fn substitute_font(
     base_font: &str,
     encoding: [Option<String>; 256],
     widths: [f64; 256],
+    font_provider: Option<&FontProvider>,
 ) -> Option<PdfFont> {
     use stet_core::font_loader::FONT_SUBSTITUTIONS;
 
@@ -319,9 +325,18 @@ fn substitute_font(
 
     let font_file_name = urw_name.unwrap_or(clean_name);
 
-    // Try to load from resources/Font/
-    let font_path = format!("resources/Font/{}.t1", font_file_name);
-    let font_data = std::fs::read(&font_path).ok()?;
+    // Try the font provider first (for WASM and other non-filesystem environments)
+    let font_data = if let Some(provider) = font_provider {
+        provider(font_file_name)
+    } else {
+        None
+    };
+
+    // Fall back to filesystem
+    let font_data = font_data.or_else(|| {
+        let font_path = format!("resources/Font/{}.t1", font_file_name);
+        std::fs::read(&font_path).ok()
+    })?;
 
     let font = parse_type1(&font_data).ok()?;
     let fm = font.font_matrix;
