@@ -840,6 +840,10 @@ fn offset_transform(t: Transform, y_offset: f32) -> Transform {
     Transform::from_row(t.sx, t.ky, t.kx, t.sy, t.tx, t.ty - y_offset)
 }
 
+fn offset_transform_xy(t: Transform, x_offset: f32, y_offset: f32) -> Transform {
+    Transform::from_row(t.sx, t.ky, t.kx, t.sy, t.tx - x_offset, t.ty - y_offset)
+}
+
 /// Composite premultiplied-alpha RGBA pixels onto a white background.
 /// After this, all pixels are fully opaque (alpha=255).
 fn composite_onto_white(data: &mut [u8]) {
@@ -859,23 +863,52 @@ fn composite_onto_white(data: &mut [u8]) {
 /// Extract the contribution of a non-isolated transparency group and composite
 /// it onto the parent using the group's blend mode and alpha.
 ///
-/// The offscreen buffer started as a copy of the parent (backdrop) and group
-/// elements were rendered on top. We extract pixels that changed (the group's
-/// contribution) into a new pixmap, then composite that with the group's
-/// blend mode and alpha via tiny-skia's draw_pixmap.
-fn composite_non_isolated_group(
-    pixmap: &mut Pixmap,
-    offscreen: &Pixmap,
+/// Composite a (possibly cropped) non-isolated group offscreen onto the parent pixmap.
+///
+/// Like `extract_and_composite_contribution`, but the offscreen and backdrop
+/// are crop-sized (only covering the group's bounding box region), positioned
+/// at `(crop_x, crop_y)` in the parent's coordinate system.
+fn composite_non_isolated_group_cropped(
+    target: &mut Pixmap,
+    source: &Pixmap,
     backdrop: &[u8],
     params: &stet_core::display_list::GroupParams,
     clip_mask: Option<&tiny_skia::Mask>,
+    crop_x: i32,
+    crop_y: i32,
 ) {
-    extract_and_composite_contribution(
-        pixmap,
-        offscreen,
-        backdrop,
-        u8_to_blend_mode(params.blend_mode),
-        params.alpha as f32,
+    let cw = source.width();
+    let ch = source.height();
+
+    // Build a contribution pixmap: pixels that changed vs backdrop
+    let Some(mut contribution) = Pixmap::new(cw, ch) else {
+        return;
+    };
+    let src_data = source.data();
+    let contrib_data = contribution.data_mut();
+
+    for (i, chunk) in contrib_data.chunks_exact_mut(4).enumerate() {
+        let off = i * 4;
+        if src_data[off] != backdrop[off]
+            || src_data[off + 1] != backdrop[off + 1]
+            || src_data[off + 2] != backdrop[off + 2]
+            || src_data[off + 3] != backdrop[off + 3]
+        {
+            chunk.copy_from_slice(&src_data[off..off + 4]);
+        }
+    }
+
+    let paint = tiny_skia::PixmapPaint {
+        opacity: params.alpha as f32,
+        blend_mode: u8_to_blend_mode(params.blend_mode),
+        quality: tiny_skia::FilterQuality::Nearest,
+    };
+    target.draw_pixmap(
+        crop_x,
+        crop_y,
+        contribution.as_ref(),
+        &paint,
+        Transform::identity(),
         clip_mask,
     );
 }
@@ -1711,6 +1744,23 @@ fn render_element_to_band(
     dpi: f64,
     icc: Option<&IccCache>,
 ) {
+    render_element_to_band_offset(pixmap, band_state, element, 0, y_start, band_w, band_h, dpi, icc);
+}
+
+/// Render a display element into a band with optional X offset (for cropped groups).
+#[allow(clippy::too_many_arguments)]
+fn render_element_to_band_offset(
+    pixmap: &mut Pixmap,
+    band_state: &mut BandState,
+    element: &DisplayElement,
+    x_start: u32,
+    y_start: u32,
+    band_w: u32,
+    band_h: u32,
+    dpi: f64,
+    icc: Option<&IccCache>,
+) {
+    let x_off = x_start as f32;
     let y_off = y_start as f32;
     match element {
         DisplayElement::Fill { path, params } => {
@@ -1724,7 +1774,7 @@ fn render_element_to_band(
                 return;
             };
             let paint = to_paint_alpha(&params.color, params.alpha, params.blend_mode);
-            let transform = offset_transform(to_transform(&params.ctm), y_off);
+            let transform = offset_transform_xy(to_transform(&params.ctm), x_off, y_off);
             let fill_rule = to_fill_rule(&params.fill_rule);
             pixmap.fill_path(&skia_path, &paint, fill_rule, transform, mask_ref);
         }
@@ -1748,11 +1798,11 @@ fn render_element_to_band(
                 return;
             };
             let paint = to_paint_alpha(&params.color, params.alpha, params.blend_mode);
-            let transform = offset_transform(to_transform(&params.ctm), y_off);
+            let transform = offset_transform_xy(to_transform(&params.ctm), x_off, y_off);
             pixmap.stroke_path(&skia_path, &paint, &stroke, transform, mask_ref);
         }
         DisplayElement::Clip { path, params } => {
-            clip_path_band(band_state, path, params, y_start, band_w, band_h);
+            clip_path_band_offset(band_state, path, params, x_start, y_start, band_w, band_h);
         }
         DisplayElement::InitClip => {
             if let Some(ClipRegion::Mask(mask)) = band_state.clip_region.take() {
@@ -1792,7 +1842,7 @@ fn render_element_to_band(
                 return;
             };
             let combined = params.ctm.concat(&image_inv);
-            let raw_transform = offset_transform(to_transform(&combined), y_off);
+            let raw_transform = offset_transform_xy(to_transform(&combined), x_off, y_off);
 
             let prescaled = prescale_image(&rgba_data, iw, ih, raw_transform);
             let (img_data, img_w, img_h, transform) = match &prescaled {
@@ -1840,7 +1890,7 @@ fn render_element_to_band(
             else {
                 return;
             };
-            render_axial_shading_to_pixmap(pixmap, params, y_start, mask_ref);
+            render_axial_shading_to_pixmap(pixmap, params, x_start, y_start, mask_ref);
         }
         DisplayElement::RadialShading { params } => {
             let mut temp_mask = None;
@@ -1849,7 +1899,7 @@ fn render_element_to_band(
             else {
                 return;
             };
-            render_radial_shading_to_pixmap(pixmap, params, y_start, mask_ref);
+            render_radial_shading_to_pixmap(pixmap, params, x_start, y_start, mask_ref);
         }
         DisplayElement::MeshShading { params } => {
             let mut temp_mask = None;
@@ -1858,7 +1908,7 @@ fn render_element_to_band(
             else {
                 return;
             };
-            render_mesh_shading_to_pixmap(pixmap, params, y_start, mask_ref);
+            render_mesh_shading_to_pixmap(pixmap, params, x_start, y_start, mask_ref);
         }
         DisplayElement::PatchShading { params } => {
             let mut temp_mask = None;
@@ -1867,14 +1917,14 @@ fn render_element_to_band(
             else {
                 return;
             };
-            render_patch_shading_to_pixmap(pixmap, params, y_start, mask_ref);
+            render_patch_shading_to_pixmap(pixmap, params, x_start, y_start, mask_ref);
         }
         DisplayElement::PatternFill { params } => {
-            render_pattern_fill_to_band(pixmap, band_state, params, y_start, band_w, band_h, dpi);
+            render_pattern_fill_to_band(pixmap, band_state, params, x_start, y_start, band_w, band_h, dpi);
         }
         DisplayElement::Group { elements, params } => {
             render_group_to_band(
-                pixmap, band_state, elements, params, y_start, band_w, band_h, dpi, icc,
+                pixmap, band_state, elements, params, x_start, y_start, band_w, band_h, dpi, icc,
             );
         }
         DisplayElement::SoftMasked {
@@ -1883,7 +1933,7 @@ fn render_element_to_band(
             params,
         } => {
             render_soft_masked_band(
-                pixmap, band_state, mask, content, params, y_start, band_w, band_h, dpi, icc,
+                pixmap, band_state, mask, content, params, x_start, y_start, band_w, band_h, dpi, icc,
             );
         }
         DisplayElement::Text { .. } => {} // PDF-only, ignored by rasterizer
@@ -1895,11 +1945,51 @@ fn render_element_to_band(
 /// Creates an offscreen pixmap, renders the group's child elements into it,
 /// then composites back onto the parent with the group's blend mode and alpha.
 #[allow(clippy::too_many_arguments)]
+/// Compute the cropped region for a group's device-space bounding box within a band.
+///
+/// Returns `(crop_x, crop_y, crop_w, crop_h)` in band-local pixels, or `None` if
+/// the group covers most of the band (not worth cropping) or is entirely outside.
+fn compute_band_group_crop(
+    bbox: &[f64; 4],
+    y_start: u32,
+    band_w: u32,
+    band_h: u32,
+) -> Option<(i32, i32, u32, u32)> {
+    // bbox is in device-space pixels (same coordinate system as bands)
+    let px_min = bbox[0].floor() as i32;
+    let py_min = (bbox[1].floor() as i32) - y_start as i32;
+    let px_max = bbox[2].ceil() as i32;
+    let py_max = (bbox[3].ceil() as i32) - y_start as i32;
+
+    // Clip to band bounds
+    let x0 = px_min.max(0);
+    let y0 = py_min.max(0);
+    let x1 = px_max.min(band_w as i32);
+    let y1 = py_max.min(band_h as i32);
+
+    if x0 >= x1 || y0 >= y1 {
+        return None;
+    }
+
+    let crop_w = (x1 - x0) as u32;
+    let crop_h = (y1 - y0) as u32;
+
+    // Only crop if it saves at least 25% of pixels
+    let crop_pixels = crop_w as u64 * crop_h as u64;
+    let full_pixels = band_w as u64 * band_h as u64;
+    if crop_pixels * 4 >= full_pixels * 3 {
+        return None;
+    }
+
+    Some((x0, y0, crop_w, crop_h))
+}
+
 fn render_group_to_band(
     pixmap: &mut Pixmap,
     band_state: &mut BandState,
     elements: &DisplayList,
     params: &stet_core::display_list::GroupParams,
+    x_start: u32,
     y_start: u32,
     band_w: u32,
     band_h: u32,
@@ -1908,13 +1998,27 @@ fn render_group_to_band(
 ) {
     if params.knockout {
         render_knockout_group_to_band(
-            pixmap, band_state, elements, params, y_start, band_w, band_h, dpi, icc,
+            pixmap, band_state, elements, params, x_start, y_start, band_w, band_h, dpi, icc,
         );
         return;
     }
 
-    // Create band-sized offscreen pixmap
-    let Some(mut offscreen) = Pixmap::new(band_w, band_h) else {
+    // Try to use a cropped offscreen based on the group's bounding box.
+    // The bbox is in absolute device space; adjust for the parent's x_start.
+    let adjusted_bbox = [
+        params.bbox[0] - x_start as f64,
+        params.bbox[1],
+        params.bbox[2] - x_start as f64,
+        params.bbox[3],
+    ];
+    let crop = compute_band_group_crop(&adjusted_bbox, y_start, band_w, band_h);
+
+    let (eff_w, eff_h, crop_x, crop_y, eff_x_start, eff_y_start) = match crop {
+        Some((cx, cy, cw, ch)) => (cw, ch, cx, cy, x_start + cx as u32, y_start + cy as u32),
+        None => (band_w, band_h, 0, 0, x_start, y_start),
+    };
+
+    let Some(mut offscreen) = Pixmap::new(eff_w, eff_h) else {
         return;
     };
 
@@ -1922,8 +2026,12 @@ fn render_group_to_band(
     // so group elements composite against the actual backdrop content.
     // Also save a copy of the backdrop for contribution extraction later.
     let backdrop = if !params.isolated {
-        let data = pixmap.data().to_vec();
-        offscreen.data_mut().copy_from_slice(pixmap.data());
+        let data = if crop.is_some() {
+            copy_backdrop_crop(pixmap, crop_x, crop_y, eff_w, eff_h)
+        } else {
+            pixmap.data().to_vec()
+        };
+        offscreen.data_mut().copy_from_slice(&data);
         Some(data)
     } else {
         None
@@ -1940,13 +2048,14 @@ fn render_group_to_band(
 
     // Render group elements into offscreen
     for elem in elements.elements() {
-        render_element_to_band(
+        render_element_to_band_offset(
             &mut offscreen,
             &mut group_band,
             elem,
-            y_start,
-            band_w,
-            band_h,
+            eff_x_start,
+            eff_y_start,
+            eff_w,
+            eff_h,
             dpi,
             icc,
         );
@@ -1961,16 +2070,23 @@ fn render_group_to_band(
     };
 
     if let Some(backdrop) = &backdrop {
-        // Non-isolated: extract contribution (changed pixels) and composite
-        // with group blend mode + alpha.
-        composite_non_isolated_group(pixmap, &offscreen, backdrop, params, mask_ref);
+        composite_non_isolated_group_cropped(
+            pixmap, &offscreen, &backdrop, params, mask_ref, crop_x, crop_y,
+        );
     } else {
         let paint = tiny_skia::PixmapPaint {
             opacity: params.alpha as f32,
             blend_mode: u8_to_blend_mode(params.blend_mode),
             quality: tiny_skia::FilterQuality::Nearest,
         };
-        pixmap.draw_pixmap(0, 0, offscreen.as_ref(), &paint, Transform::identity(), mask_ref);
+        pixmap.draw_pixmap(
+            crop_x,
+            crop_y,
+            offscreen.as_ref(),
+            &paint,
+            Transform::identity(),
+            mask_ref,
+        );
     }
 }
 
@@ -1985,25 +2101,43 @@ fn render_knockout_group_to_band(
     band_state: &mut BandState,
     elements: &DisplayList,
     params: &stet_core::display_list::GroupParams,
+    x_start: u32,
     y_start: u32,
     band_w: u32,
     band_h: u32,
     dpi: f64,
     icc: Option<&IccCache>,
 ) {
-    let Some(mut offscreen) = Pixmap::new(band_w, band_h) else {
+    let adjusted_bbox = [
+        params.bbox[0] - x_start as f64,
+        params.bbox[1],
+        params.bbox[2] - x_start as f64,
+        params.bbox[3],
+    ];
+    let crop = compute_band_group_crop(&adjusted_bbox, y_start, band_w, band_h);
+
+    let (eff_w, eff_h, crop_x, crop_y, eff_x_start, eff_y_start) = match crop {
+        Some((cx, cy, cw, ch)) => (cw, ch, cx, cy, x_start + cx as u32, y_start + cy as u32),
+        None => (band_w, band_h, 0, 0, x_start, y_start),
+    };
+
+    let Some(mut offscreen) = Pixmap::new(eff_w, eff_h) else {
         return;
     };
 
     // Initial backdrop: parent pixels for non-isolated, transparent for isolated
     let initial_backdrop = if !params.isolated {
-        pixmap.data().to_vec()
+        if crop.is_some() {
+            copy_backdrop_crop(pixmap, crop_x, crop_y, eff_w, eff_h)
+        } else {
+            pixmap.data().to_vec()
+        }
     } else {
-        vec![0u8; (band_w * band_h * 4) as usize]
+        vec![0u8; (eff_w * eff_h * 4) as usize]
     };
 
     // Accumulated result starts as the initial backdrop
-    let Some(mut accumulated) = Pixmap::new(band_w, band_h) else {
+    let Some(mut accumulated) = Pixmap::new(eff_w, eff_h) else {
         return;
     };
     accumulated
@@ -2011,9 +2145,7 @@ fn render_knockout_group_to_band(
         .copy_from_slice(&initial_backdrop);
 
     // Render each element independently against the initial backdrop.
-    // Knockout semantics: each element replaces (not blends with) previous elements.
     for elem in elements.elements() {
-        // Reset offscreen to initial backdrop
         offscreen.data_mut().copy_from_slice(&initial_backdrop);
 
         let mut elem_band = BandState {
@@ -2024,16 +2156,14 @@ fn render_knockout_group_to_band(
             mask_pool: Vec::new(),
         };
 
-        // Render single element into offscreen
-        render_element_to_band(
-            &mut offscreen, &mut elem_band, elem, y_start, band_w, band_h, dpi, icc,
+        render_element_to_band_offset(
+            &mut offscreen, &mut elem_band, elem, eff_x_start, eff_y_start,
+            eff_w, eff_h, dpi, icc,
         );
 
-        // Replace accumulated pixels wherever this element painted
         replace_changed_pixels(accumulated.data_mut(), offscreen.data(), &initial_backdrop);
     }
 
-    // Composite the accumulated result onto the parent
     let mut temp_mask = None;
     let mask_ref = resolve_clip_mask(&band_state.clip_region, &mut temp_mask, band_w, band_h);
     let mask_ref = match mask_ref {
@@ -2041,13 +2171,8 @@ fn render_knockout_group_to_band(
         Some(m) => m,
     };
 
-    extract_and_composite_contribution(
-        pixmap,
-        &accumulated,
-        &initial_backdrop,
-        u8_to_blend_mode(params.blend_mode),
-        params.alpha as f32,
-        mask_ref,
+    composite_non_isolated_group_cropped(
+        pixmap, &accumulated, &initial_backdrop, params, mask_ref, crop_x, crop_y,
     );
 }
 
@@ -2066,50 +2191,6 @@ fn replace_changed_pixels(target: &mut [u8], source: &[u8], backdrop: &[u8]) {
     }
 }
 
-/// Extract pixels that changed relative to a backdrop and composite them
-/// onto a target pixmap with the given blend mode and opacity.
-fn extract_and_composite_contribution(
-    target: &mut Pixmap,
-    source: &Pixmap,
-    backdrop: &[u8],
-    blend_mode: tiny_skia::BlendMode,
-    opacity: f32,
-    clip_mask: Option<&tiny_skia::Mask>,
-) {
-    let w = target.width();
-    let h = target.height();
-    let Some(mut contribution) = Pixmap::new(w, h) else {
-        return;
-    };
-    let src_data = source.data();
-    let contrib_data = contribution.data_mut();
-
-    for (i, chunk) in contrib_data.chunks_exact_mut(4).enumerate() {
-        let off = i * 4;
-        if src_data[off] != backdrop[off]
-            || src_data[off + 1] != backdrop[off + 1]
-            || src_data[off + 2] != backdrop[off + 2]
-            || src_data[off + 3] != backdrop[off + 3]
-        {
-            chunk.copy_from_slice(&src_data[off..off + 4]);
-        }
-    }
-
-    let paint = tiny_skia::PixmapPaint {
-        opacity,
-        blend_mode,
-        quality: tiny_skia::FilterQuality::Nearest,
-    };
-    target.draw_pixmap(
-        0,
-        0,
-        contribution.as_ref(),
-        &paint,
-        Transform::identity(),
-        clip_mask,
-    );
-}
-
 /// Render soft-masked content into a band.
 ///
 /// 1. Renders the mask display list to an offscreen pixmap.
@@ -2124,14 +2205,28 @@ fn render_soft_masked_band(
     mask_list: &DisplayList,
     content_list: &DisplayList,
     params: &stet_core::display_list::SoftMaskParams,
+    x_start: u32,
     y_start: u32,
     band_w: u32,
     band_h: u32,
     dpi: f64,
     icc: Option<&IccCache>,
 ) {
+    let adjusted_bbox = [
+        params.bbox[0] - x_start as f64,
+        params.bbox[1],
+        params.bbox[2] - x_start as f64,
+        params.bbox[3],
+    ];
+    let crop = compute_band_group_crop(&adjusted_bbox, y_start, band_w, band_h);
+
+    let (eff_w, eff_h, crop_x, crop_y, eff_x_start, eff_y_start) = match crop {
+        Some((cx, cy, cw, ch)) => (cw, ch, cx, cy, x_start + cx as u32, y_start + cy as u32),
+        None => (band_w, band_h, 0, 0, x_start, y_start),
+    };
+
     // 1. Render mask form into offscreen
-    let Some(mut mask_pixmap) = Pixmap::new(band_w, band_h) else {
+    let Some(mut mask_pixmap) = Pixmap::new(eff_w, eff_h) else {
         return;
     };
     let mut mask_band = BandState {
@@ -2142,26 +2237,26 @@ fn render_soft_masked_band(
         mask_pool: Vec::new(),
     };
     for elem in mask_list.elements() {
-        render_element_to_band(
+        render_element_to_band_offset(
             &mut mask_pixmap,
             &mut mask_band,
             elem,
-            y_start,
-            band_w,
-            band_h,
+            eff_x_start,
+            eff_y_start,
+            eff_w,
+            eff_h,
             dpi,
             icc,
         );
     }
 
     // 2. Extract grayscale mask values
-    let mask_data = mask_pixmap.data();
-    let pixel_count = (band_w * band_h) as usize;
+    let pixel_count = (eff_w * eff_h) as usize;
     let mut mask_values = vec![0u8; pixel_count];
-    extract_soft_mask_values(mask_data, &mut mask_values, params);
+    extract_soft_mask_values(mask_pixmap.data(), &mut mask_values, params);
 
     // 3. Render content into another offscreen
-    let Some(mut content_pixmap) = Pixmap::new(band_w, band_h) else {
+    let Some(mut content_pixmap) = Pixmap::new(eff_w, eff_h) else {
         return;
     };
     let mut content_band = BandState {
@@ -2172,13 +2267,14 @@ fn render_soft_masked_band(
         mask_pool: Vec::new(),
     };
     for elem in content_list.elements() {
-        render_element_to_band(
+        render_element_to_band_offset(
             &mut content_pixmap,
             &mut content_band,
             elem,
-            y_start,
-            band_w,
-            band_h,
+            eff_x_start,
+            eff_y_start,
+            eff_w,
+            eff_h,
             dpi,
             icc,
         );
@@ -2209,8 +2305,8 @@ fn render_soft_masked_band(
         quality: tiny_skia::FilterQuality::Nearest,
     };
     pixmap.draw_pixmap(
-        0,
-        0,
+        crop_x,
+        crop_y,
         content_pixmap.as_ref(),
         &paint,
         Transform::identity(),
@@ -2266,6 +2362,7 @@ fn render_pattern_fill_to_band(
     pixmap: &mut Pixmap,
     band_state: &mut BandState,
     params: &stet_core::device::PatternFillParams,
+    x_start: u32,
     y_start: u32,
     band_w: u32,
     band_h: u32,
@@ -2278,6 +2375,7 @@ fn render_pattern_fill_to_band(
     };
 
     let pm = &params.pattern_matrix;
+    let x_off = x_start as f64;
     let y_off = y_start as f64;
 
     // Tile step vectors in device space (handles rotation/shear)
@@ -2385,7 +2483,7 @@ fn render_pattern_fill_to_band(
                 pm.b as f32,
                 pm.c as f32,
                 pm.d as f32,
-                (pm.a * pat_offset_x + pm.c * pat_offset_y + pm.tx) as f32,
+                (pm.a * pat_offset_x + pm.c * pat_offset_y + pm.tx - x_off) as f32,
                 (pm.b * pat_offset_x + pm.d * pat_offset_y + pm.ty - y_off) as f32,
             );
 
@@ -2438,7 +2536,7 @@ fn render_pattern_fill_to_band(
         &fill_skia_path,
         fill_rule,
         true, // anti-alias
-        Transform::from_translate(0.0, -(y_off as f32)),
+        Transform::from_translate(-(x_off as f32), -(y_off as f32)),
     );
 
     // Intersect fill mask with clip mask
@@ -2551,6 +2649,62 @@ fn clip_path_band(
         Some(ClipRegion::Mask(mut existing)) => {
             intersect_masks(&mut existing, &path_mask);
             band_state.recycle_mask(path_mask);
+            band_state.clip_region = Some(ClipRegion::Mask(existing));
+        }
+    }
+}
+
+/// Clip path handling for band rendering with both X and Y offset.
+///
+/// When `x_start == 0`, behaves identically to `clip_path_band`.
+fn clip_path_band_offset(
+    band_state: &mut BandState,
+    path: &PsPath,
+    params: &ClipParams,
+    x_start: u32,
+    y_start: u32,
+    band_w: u32,
+    band_h: u32,
+) {
+    if x_start == 0 {
+        clip_path_band(band_state, path, params, y_start, band_w, band_h);
+        return;
+    }
+
+    // With X offset: can't use the rect fast-path or Y-only bbox check trivially.
+    // Use the slow path with combined XY offset transform.
+    let fill_rule = to_fill_rule(&params.fill_rule);
+    let prev_region = band_state.clip_region.take();
+    let mut mask = band_state.take_mask(band_w, band_h);
+
+    let Some(skia_path) = build_skia_path(path) else {
+        band_state.recycle_mask(mask);
+        band_state.clip_region = prev_region;
+        return;
+    };
+    let transform = offset_transform_xy(
+        to_transform(&params.ctm),
+        x_start as f32,
+        y_start as f32,
+    );
+    mask.data_mut().fill(0);
+    mask.fill_path(&skia_path, fill_rule, false, transform);
+
+    match prev_region {
+        None => {
+            band_state.clip_region = Some(ClipRegion::Mask(mask));
+        }
+        Some(ClipRegion::Rect(rect)) => {
+            if rect.is_empty() {
+                band_state.recycle_mask(mask);
+            } else {
+                intersect_mask_with_rect(&mut mask, &rect, band_w, band_h);
+                band_state.clip_region = Some(ClipRegion::Mask(mask));
+            }
+        }
+        Some(ClipRegion::Mask(mut existing)) => {
+            intersect_masks(&mut existing, &mask);
+            band_state.recycle_mask(mask);
             band_state.clip_region = Some(ClipRegion::Mask(existing));
         }
     }
@@ -2773,7 +2927,7 @@ impl OutputDevice for SkiaDevice {
         let Some(mask_ref) = resolve_clip_mask(&self.clip_region, &mut temp_mask, w, h) else {
             return;
         };
-        render_axial_shading_to_pixmap(&mut self.pixmap, params, 0, mask_ref);
+        render_axial_shading_to_pixmap(&mut self.pixmap, params, 0, 0, mask_ref);
     }
 
     fn paint_radial_shading(&mut self, params: &RadialShadingParams) {
@@ -2783,7 +2937,7 @@ impl OutputDevice for SkiaDevice {
         let Some(mask_ref) = resolve_clip_mask(&self.clip_region, &mut temp_mask, w, h) else {
             return;
         };
-        render_radial_shading_to_pixmap(&mut self.pixmap, params, 0, mask_ref);
+        render_radial_shading_to_pixmap(&mut self.pixmap, params, 0, 0, mask_ref);
     }
 
     fn paint_mesh_shading(&mut self, params: &MeshShadingParams) {
@@ -2793,7 +2947,7 @@ impl OutputDevice for SkiaDevice {
         let Some(mask_ref) = resolve_clip_mask(&self.clip_region, &mut temp_mask, w, h) else {
             return;
         };
-        render_mesh_shading_to_pixmap(&mut self.pixmap, params, 0, mask_ref);
+        render_mesh_shading_to_pixmap(&mut self.pixmap, params, 0, 0, mask_ref);
     }
 
     fn paint_patch_shading(&mut self, params: &PatchShadingParams) {
@@ -2803,7 +2957,7 @@ impl OutputDevice for SkiaDevice {
         let Some(mask_ref) = resolve_clip_mask(&self.clip_region, &mut temp_mask, w, h) else {
             return;
         };
-        render_patch_shading_to_pixmap(&mut self.pixmap, params, 0, mask_ref);
+        render_patch_shading_to_pixmap(&mut self.pixmap, params, 0, 0, mask_ref);
     }
 
     fn paint_pattern_fill(&mut self, params: &stet_core::device::PatternFillParams) {
@@ -2817,7 +2971,7 @@ impl OutputDevice for SkiaDevice {
             clip_mask_seen: HashSet::new(),
             mask_pool: Vec::new(),
         };
-        render_pattern_fill_to_band(&mut self.pixmap, &mut band_state, params, 0, w, h, self.dpi);
+        render_pattern_fill_to_band(&mut self.pixmap, &mut band_state, params, 0, 0, w, h, self.dpi);
         self.clip_region = band_state.clip_region.take();
         if let Some(mask) = band_state.spare_mask.take() {
             self.spare_mask = Some(mask);
@@ -3788,6 +3942,72 @@ fn render_element_to_viewport(
     }
 }
 
+/// Compute the cropped output-pixel region for a group's device-space bounding box.
+///
+/// Returns `(crop_x, crop_y, crop_w, crop_h)` in output pixels, or `None` if
+/// the group is entirely outside the viewport.
+fn compute_group_crop(
+    bbox: &[f64; 4],
+    vp_x: f32,
+    vp_y: f32,
+    scale_x: f32,
+    scale_y: f32,
+    out_w: u32,
+    out_h: u32,
+) -> Option<(i32, i32, u32, u32)> {
+    // Transform device-space bbox to output pixel coords
+    let px_min = ((bbox[0] as f32 - vp_x) * scale_x).floor() as i32;
+    let py_min = ((bbox[1] as f32 - vp_y) * scale_y).floor() as i32;
+    let px_max = ((bbox[2] as f32 - vp_x) * scale_x).ceil() as i32;
+    let py_max = ((bbox[3] as f32 - vp_y) * scale_y).ceil() as i32;
+
+    // Clip to output bounds
+    let x0 = px_min.max(0);
+    let y0 = py_min.max(0);
+    let x1 = px_max.min(out_w as i32);
+    let y1 = py_max.min(out_h as i32);
+
+    if x0 >= x1 || y0 >= y1 {
+        return None;
+    }
+
+    let crop_w = (x1 - x0) as u32;
+    let crop_h = (y1 - y0) as u32;
+
+    // Only crop if it saves at least 25% of pixels — otherwise the overhead
+    // of offset math isn't worth it.
+    let crop_pixels = crop_w as u64 * crop_h as u64;
+    let full_pixels = out_w as u64 * out_h as u64;
+    if crop_pixels * 4 >= full_pixels * 3 {
+        return None; // Not enough savings
+    }
+
+    Some((x0, y0, crop_w, crop_h))
+}
+
+/// Copy a rectangular region from parent pixmap into a smaller crop pixmap.
+fn copy_backdrop_crop(
+    parent: &Pixmap,
+    crop_x: i32,
+    crop_y: i32,
+    crop_w: u32,
+    crop_h: u32,
+) -> Vec<u8> {
+    let pw = parent.width() as usize;
+    let src = parent.data();
+    let cw = crop_w as usize;
+    let ch = crop_h as usize;
+    let cx = crop_x as usize;
+    let cy = crop_y as usize;
+    let mut backdrop = vec![0u8; cw * ch * 4];
+    for row in 0..ch {
+        let src_off = ((cy + row) * pw + cx) * 4;
+        let dst_off = row * cw * 4;
+        backdrop[dst_off..dst_off + cw * 4].copy_from_slice(&src[src_off..src_off + cw * 4]);
+    }
+    backdrop
+}
+
 /// Render a transparency group for viewport rendering.
 #[allow(clippy::too_many_arguments)]
 fn render_group_to_viewport(
@@ -3812,14 +4032,33 @@ fn render_group_to_viewport(
         return;
     }
 
-    let Some(mut offscreen) = Pixmap::new(out_w, out_h) else {
+    // Try to use a cropped offscreen based on the group's bounding box.
+    let crop = compute_group_crop(&params.bbox, vp_x, vp_y, scale_x, scale_y, out_w, out_h);
+
+    let (eff_w, eff_h, crop_x, crop_y, eff_vp_x, eff_vp_y) = match crop {
+        Some((cx, cy, cw, ch)) => (
+            cw,
+            ch,
+            cx,
+            cy,
+            vp_x + cx as f32 / scale_x,
+            vp_y + cy as f32 / scale_y,
+        ),
+        None => (out_w, out_h, 0, 0, vp_x, vp_y),
+    };
+
+    let Some(mut offscreen) = Pixmap::new(eff_w, eff_h) else {
         return;
     };
 
     // For non-isolated groups, copy the parent backdrop and save original.
     let backdrop = if !params.isolated {
-        let data = pixmap.data().to_vec();
-        offscreen.data_mut().copy_from_slice(pixmap.data());
+        let data = if crop.is_some() {
+            copy_backdrop_crop(pixmap, crop_x, crop_y, eff_w, eff_h)
+        } else {
+            pixmap.data().to_vec()
+        };
+        offscreen.data_mut().copy_from_slice(&data);
         Some(data)
     } else {
         None
@@ -3838,12 +4077,12 @@ fn render_group_to_viewport(
             &mut offscreen,
             &mut group_state,
             elem,
-            vp_x,
-            vp_y,
+            eff_vp_x,
+            eff_vp_y,
             scale_x,
             scale_y,
-            out_w,
-            out_h,
+            eff_w,
+            eff_h,
             effective_dpi,
             icc,
         );
@@ -3857,14 +4096,23 @@ fn render_group_to_viewport(
     };
 
     if let Some(backdrop) = &backdrop {
-        composite_non_isolated_group(pixmap, &offscreen, backdrop, params, mask_ref);
+        composite_non_isolated_group_cropped(
+            pixmap, &offscreen, &backdrop, params, mask_ref, crop_x, crop_y,
+        );
     } else {
         let paint = tiny_skia::PixmapPaint {
             opacity: params.alpha as f32,
             blend_mode: u8_to_blend_mode(params.blend_mode),
             quality: tiny_skia::FilterQuality::Nearest,
         };
-        pixmap.draw_pixmap(0, 0, offscreen.as_ref(), &paint, Transform::identity(), mask_ref);
+        pixmap.draw_pixmap(
+            crop_x,
+            crop_y,
+            offscreen.as_ref(),
+            &paint,
+            Transform::identity(),
+            mask_ref,
+        );
     }
 }
 
@@ -3884,18 +4132,37 @@ fn render_knockout_group_to_viewport(
     effective_dpi: f64,
     icc: Option<&IccCache>,
 ) {
-    let Some(mut offscreen) = Pixmap::new(out_w, out_h) else {
+    // Try to use a cropped offscreen based on the group's bounding box.
+    let crop = compute_group_crop(&params.bbox, vp_x, vp_y, scale_x, scale_y, out_w, out_h);
+
+    let (eff_w, eff_h, crop_x, crop_y, eff_vp_x, eff_vp_y) = match crop {
+        Some((cx, cy, cw, ch)) => (
+            cw,
+            ch,
+            cx,
+            cy,
+            vp_x + cx as f32 / scale_x,
+            vp_y + cy as f32 / scale_y,
+        ),
+        None => (out_w, out_h, 0, 0, vp_x, vp_y),
+    };
+
+    let Some(mut offscreen) = Pixmap::new(eff_w, eff_h) else {
         return;
     };
 
     // Initial backdrop: parent pixels for non-isolated, transparent for isolated
     let initial_backdrop = if !params.isolated {
-        pixmap.data().to_vec()
+        if crop.is_some() {
+            copy_backdrop_crop(pixmap, crop_x, crop_y, eff_w, eff_h)
+        } else {
+            pixmap.data().to_vec()
+        }
     } else {
-        vec![0u8; (out_w * out_h * 4) as usize]
+        vec![0u8; (eff_w * eff_h * 4) as usize]
     };
 
-    let Some(mut accumulated) = Pixmap::new(out_w, out_h) else {
+    let Some(mut accumulated) = Pixmap::new(eff_w, eff_h) else {
         return;
     };
     accumulated
@@ -3916,8 +4183,8 @@ fn render_knockout_group_to_viewport(
         };
 
         render_element_to_viewport(
-            &mut offscreen, &mut elem_state, elem, vp_x, vp_y, scale_x, scale_y, out_w, out_h,
-            effective_dpi, icc,
+            &mut offscreen, &mut elem_state, elem, eff_vp_x, eff_vp_y, scale_x, scale_y,
+            eff_w, eff_h, effective_dpi, icc,
         );
 
         // Replace accumulated pixels wherever this element painted
@@ -3932,13 +4199,8 @@ fn render_knockout_group_to_viewport(
         Some(m) => m,
     };
 
-    extract_and_composite_contribution(
-        pixmap,
-        &accumulated,
-        &initial_backdrop,
-        u8_to_blend_mode(params.blend_mode),
-        params.alpha as f32,
-        mask_ref,
+    composite_non_isolated_group_cropped(
+        pixmap, &accumulated, &initial_backdrop, params, mask_ref, crop_x, crop_y,
     );
 }
 
@@ -3959,8 +4221,23 @@ fn render_soft_masked_viewport(
     effective_dpi: f64,
     icc: Option<&IccCache>,
 ) {
+    // Try to use a cropped offscreen based on the soft mask's bounding box.
+    let crop = compute_group_crop(&params.bbox, vp_x, vp_y, scale_x, scale_y, out_w, out_h);
+
+    let (eff_w, eff_h, crop_x, crop_y, eff_vp_x, eff_vp_y) = match crop {
+        Some((cx, cy, cw, ch)) => (
+            cw,
+            ch,
+            cx,
+            cy,
+            vp_x + cx as f32 / scale_x,
+            vp_y + cy as f32 / scale_y,
+        ),
+        None => (out_w, out_h, 0, 0, vp_x, vp_y),
+    };
+
     // 1. Render mask form
-    let Some(mut mask_pixmap) = Pixmap::new(out_w, out_h) else {
+    let Some(mut mask_pixmap) = Pixmap::new(eff_w, eff_h) else {
         return;
     };
     let mut mask_state = BandState {
@@ -3975,24 +4252,24 @@ fn render_soft_masked_viewport(
             &mut mask_pixmap,
             &mut mask_state,
             elem,
-            vp_x,
-            vp_y,
+            eff_vp_x,
+            eff_vp_y,
             scale_x,
             scale_y,
-            out_w,
-            out_h,
+            eff_w,
+            eff_h,
             effective_dpi,
             icc,
         );
     }
 
     // 2. Extract mask values
-    let pixel_count = (out_w * out_h) as usize;
+    let pixel_count = (eff_w * eff_h) as usize;
     let mut mask_values = vec![0u8; pixel_count];
     extract_soft_mask_values(mask_pixmap.data(), &mut mask_values, params);
 
     // 3. Render content
-    let Some(mut content_pixmap) = Pixmap::new(out_w, out_h) else {
+    let Some(mut content_pixmap) = Pixmap::new(eff_w, eff_h) else {
         return;
     };
     let mut content_state = BandState {
@@ -4007,12 +4284,12 @@ fn render_soft_masked_viewport(
             &mut content_pixmap,
             &mut content_state,
             elem,
-            vp_x,
-            vp_y,
+            eff_vp_x,
+            eff_vp_y,
             scale_x,
             scale_y,
-            out_w,
-            out_h,
+            eff_w,
+            eff_h,
             effective_dpi,
             icc,
         );
@@ -4042,8 +4319,8 @@ fn render_soft_masked_viewport(
         quality: tiny_skia::FilterQuality::Nearest,
     };
     pixmap.draw_pixmap(
-        0,
-        0,
+        crop_x,
+        crop_y,
         content_pixmap.as_ref(),
         &paint,
         Transform::identity(),
@@ -4307,6 +4584,7 @@ fn clip_path_viewport(
 fn render_axial_shading_to_pixmap(
     pixmap: &mut Pixmap,
     params: &AxialShadingParams,
+    x_start: u32,
     y_start: u32,
     clip_mask: Option<&Mask>,
 ) {
@@ -4326,8 +4604,14 @@ fn render_axial_shading_to_pixmap(
         return;
     }
 
-    let start = tiny_skia::Point::from_xy(dx0 as f32, (dy0 - y_start as f64) as f32);
-    let end = tiny_skia::Point::from_xy(dx1 as f32, (dy1 - y_start as f64) as f32);
+    let start = tiny_skia::Point::from_xy(
+        (dx0 - x_start as f64) as f32,
+        (dy0 - y_start as f64) as f32,
+    );
+    let end = tiny_skia::Point::from_xy(
+        (dx1 - x_start as f64) as f32,
+        (dy1 - y_start as f64) as f32,
+    );
 
     let Some(gradient) = tiny_skia::LinearGradient::new(
         start,
@@ -4365,9 +4649,9 @@ fn render_axial_shading_to_pixmap(
             .map(|c| c.1)
             .fold(f64::NEG_INFINITY, f64::max);
         (
-            x_min_f.max(0.0),
+            (x_min_f - x_start as f64).max(0.0),
             (y_min_f - y_start as f64).max(0.0),
-            x_max_f.min(pw as f64),
+            (x_max_f - x_start as f64).min(pw as f64),
             (y_max_f - y_start as f64).min(ph as f64),
         )
     } else {
@@ -4381,21 +4665,23 @@ fn render_axial_shading_to_pixmap(
         let axis_y = dy1 - dy0;
         let gy0 = dy0 - y_start as f64;
         let gy1 = dy1 - y_start as f64;
+        let gx0 = dx0 - x_start as f64;
+        let gx1 = dx1 - x_start as f64;
 
         if axis_x.abs() >= axis_y.abs() {
             // Primarily horizontal gradient — clip x bounds
             if !params.extend_start {
                 if axis_x >= 0.0 {
-                    rx_min = rx_min.max(dx0);
+                    rx_min = rx_min.max(gx0);
                 } else {
-                    rx_max = rx_max.min(dx0);
+                    rx_max = rx_max.min(gx0);
                 }
             }
             if !params.extend_end {
                 if axis_x >= 0.0 {
-                    rx_max = rx_max.min(dx1);
+                    rx_max = rx_max.min(gx1);
                 } else {
-                    rx_min = rx_min.max(dx1);
+                    rx_min = rx_min.max(gx1);
                 }
             }
         } else {
@@ -4448,6 +4734,7 @@ fn render_axial_shading_to_pixmap(
 fn render_radial_shading_to_pixmap(
     pixmap: &mut Pixmap,
     params: &RadialShadingParams,
+    x_start: u32,
     y_start: u32,
     clip_mask: Option<&Mask>,
 ) {
@@ -4464,8 +4751,6 @@ fn render_radial_shading_to_pixmap(
 
     // Compute pixel bounds (default: full pixmap, clipped by BBox if present)
     let (px_min, py_min, px_max, py_max) = if let Some(bbox) = &params.bbox {
-        // Transform all 4 BBox corners to get correct device-space bounds
-        // (2 corners is wrong when CTM has rotation/shear)
         let corners = [
             params.ctm.transform_point(bbox[0], bbox[1]),
             params.ctm.transform_point(bbox[2], bbox[1]),
@@ -4482,10 +4767,16 @@ fn render_radial_shading_to_pixmap(
             .iter()
             .map(|c| c.1)
             .fold(f64::NEG_INFINITY, f64::max);
-        let x_min = x_min_f.max(0.0) as u32;
+        let x_min_dev = x_min_f.max(0.0);
         let y_min_dev = y_min_f.max(0.0);
-        let x_max = (x_max_f.ceil() as u32).min(pw);
+        let x_max_dev = x_max_f.ceil();
         let y_max_dev = y_max_f.ceil();
+        let x_min = if x_min_dev > x_start as f64 {
+            (x_min_dev - x_start as f64) as u32
+        } else {
+            0
+        };
+        let x_max = ((x_max_dev - x_start as f64).ceil() as u32).min(pw);
         let y_min = if y_min_dev > y_start as f64 {
             (y_min_dev - y_start as f64) as u32
         } else {
@@ -4504,7 +4795,7 @@ fn render_radial_shading_to_pixmap(
     for py in py_min..py_max {
         let dev_y = py as f64 + y_start as f64;
         for px in px_min..px_max {
-            let dev_x = px as f64;
+            let dev_x = px as f64 + x_start as f64;
 
             // Inverse-transform device pixel to user space
             let (ux, uy) = inv_ctm.transform_point(dev_x, dev_y);
@@ -4609,6 +4900,7 @@ fn solve_radial_t(
 fn render_mesh_shading_to_pixmap(
     pixmap: &mut Pixmap,
     params: &MeshShadingParams,
+    x_start: u32,
     y_start: u32,
     clip_mask: Option<&Mask>,
 ) {
@@ -4626,14 +4918,17 @@ fn render_mesh_shading_to_pixmap(
         let (x1, y1) = params.ctm.transform_point(tri.v1.x, tri.v1.y);
         let (x2, y2) = params.ctm.transform_point(tri.v2.x, tri.v2.y);
 
-        // Offset for banding
+        // Offset for banding/cropping
+        let x0b = x0 - x_start as f64;
+        let x1b = x1 - x_start as f64;
+        let x2b = x2 - x_start as f64;
         let y0b = y0 - y_start as f64;
         let y1b = y1 - y_start as f64;
         let y2b = y2 - y_start as f64;
 
         // Bounding box (clamp to pixmap)
-        let min_x = x0.min(x1).min(x2).floor().max(0.0) as usize;
-        let max_x = (x0.max(x1).max(x2).ceil() as usize).min(pw);
+        let min_x = x0b.min(x1b).min(x2b).floor().max(0.0) as usize;
+        let max_x = (x0b.max(x1b).max(x2b).ceil() as usize).min(pw);
         let min_y = y0b.min(y1b).min(y2b).floor().max(0.0) as usize;
         let max_y = (y0b.max(y1b).max(y2b).ceil() as usize).min(ph);
 
@@ -4642,7 +4937,7 @@ fn render_mesh_shading_to_pixmap(
         }
 
         // Precompute barycentric denominator
-        let denom = (y1b - y2b) * (x0 - x2) + (x2 - x1) * (y0b - y2b);
+        let denom = (y1b - y2b) * (x0b - x2b) + (x2b - x1b) * (y0b - y2b);
         if denom.abs() < 1e-10 {
             continue; // degenerate triangle
         }
@@ -4654,8 +4949,8 @@ fn render_mesh_shading_to_pixmap(
                 let pyf = py as f64 + 0.5;
 
                 // Barycentric coordinates
-                let w0 = ((y1b - y2b) * (pxf - x2) + (x2 - x1) * (pyf - y2b)) * inv_denom;
-                let w1 = ((y2b - y0b) * (pxf - x2) + (x0 - x2) * (pyf - y2b)) * inv_denom;
+                let w0 = ((y1b - y2b) * (pxf - x2b) + (x2b - x1b) * (pyf - y2b)) * inv_denom;
+                let w1 = ((y2b - y0b) * (pxf - x2b) + (x0b - x2b) * (pyf - y2b)) * inv_denom;
                 let w2 = 1.0 - w0 - w1;
 
                 // Conservative rasterization: use small negative epsilon to
@@ -4702,6 +4997,7 @@ fn render_mesh_shading_to_pixmap(
 fn render_patch_shading_to_pixmap(
     pixmap: &mut Pixmap,
     params: &PatchShadingParams,
+    x_start: u32,
     y_start: u32,
     clip_mask: Option<&Mask>,
 ) {
@@ -4721,7 +5017,7 @@ fn render_patch_shading_to_pixmap(
             bbox: params.bbox,
             color_space: params.color_space.clone(),
         };
-        render_mesh_shading_to_pixmap(pixmap, &mesh_params, y_start, clip_mask);
+        render_mesh_shading_to_pixmap(pixmap, &mesh_params, x_start, y_start, clip_mask);
     }
 }
 

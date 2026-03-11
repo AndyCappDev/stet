@@ -16,6 +16,7 @@ fax = "0.2"
 stet-core.workspace = true
 stet-render.workspace = true
 openjp2 = { version = "0.6", default-features = false, features = ["std"] }
+hayro-jbig2 = "0.1"
 
 [dev-dependencies]
 png.workspace = true
