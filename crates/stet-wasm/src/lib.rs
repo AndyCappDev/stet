@@ -452,6 +452,82 @@ pub fn render_viewport(
     })
 }
 
+/// Compute the number of bands and band height for viewport banding.
+///
+/// Returns a JS array `[num_bands, band_height]`.
+#[wasm_bindgen]
+pub fn viewport_band_params(pixel_w: u32, pixel_h: u32) -> js_sys::Array {
+    let (num_bands, band_h) = stet_render::viewport_band_count(pixel_w, pixel_h);
+    let arr = js_sys::Array::new();
+    arr.push(&JsValue::from(num_bands));
+    arr.push(&JsValue::from(band_h));
+    arr
+}
+
+/// Render a single horizontal band of a viewport region.
+///
+/// This is the per-band counterpart to `render_viewport()`. The JS worker
+/// loops over `band_idx` in `0..num_bands`, collecting RGBA strips.
+#[wasm_bindgen]
+#[allow(clippy::too_many_arguments)]
+pub fn render_viewport_band(
+    interp: &Interpreter,
+    page_index: u32,
+    vp_x: f64,
+    vp_y: f64,
+    vp_w: f64,
+    vp_h: f64,
+    pixel_w: u32,
+    pixel_h: u32,
+    band_idx: u32,
+    band_h: u32,
+    num_bands: u32,
+) -> Result<Page, JsValue> {
+    let i = page_index as usize;
+    if i >= interp.page_display_lists.len() {
+        return Err(JsValue::from_str(&format!(
+            "Page index {} out of range (have {} pages)",
+            page_index,
+            interp.page_display_lists.len()
+        )));
+    }
+
+    let list = &interp.page_display_lists[i];
+    let page_dpi = interp.page_info[i].dpi;
+
+    if i >= interp.page_prepared.len() {
+        return Err(JsValue::from_str("No prepared display list for this page"));
+    }
+
+    let rgba = stet_render::render_region_single_band(
+        list,
+        &interp.page_prepared[i],
+        vp_x,
+        vp_y,
+        vp_w,
+        vp_h,
+        pixel_w,
+        pixel_h,
+        band_idx,
+        band_h,
+        num_bands,
+        page_dpi,
+        None,
+    );
+
+    let actual_h = if band_idx < num_bands - 1 {
+        band_h
+    } else {
+        pixel_h - band_idx * band_h
+    };
+
+    Ok(Page {
+        width: pixel_w,
+        height: actual_h,
+        rgba,
+    })
+}
+
 /// Install a rendering device via setpagedevice (matching CLI behavior).
 ///
 /// This creates a proper page device with EndPage/BeginPage procedures,

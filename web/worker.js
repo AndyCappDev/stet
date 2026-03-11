@@ -3,12 +3,18 @@ import init, {
     render,
     render_pdf,
     render_viewport,
+    viewport_band_params,
+    render_viewport_band,
     page_count,
     page_dimensions,
     reference_dpi,
 } from './pkg/stet_wasm.js';
 
 let interpreter = null;
+
+// Queue for incoming viewport requests so we can cancel mid-render.
+// Between bands, we check if a newer request has arrived.
+let pendingViewport = null;
 
 self.onmessage = async function(e) {
     const { type } = e.data;
@@ -59,33 +65,97 @@ self.onmessage = async function(e) {
         }
 
     } else if (type === 'viewport') {
-        if (!interpreter) {
-            self.postMessage({ type: 'error', message: 'Interpreter not ready' });
-            return;
-        }
-        try {
-            const { pageIndex, vpX, vpY, vpW, vpH, pixelW, pixelH, requestId } = e.data;
-            const page = render_viewport(
-                interpreter, pageIndex,
-                vpX, vpY, vpW, vpH,
-                pixelW, pixelH
-            );
-            const rgba = page.rgba;
-            const width = page.width;
-            const height = page.height;
-            page.free();
+        // Store the latest request; processViewport will pick it up
+        pendingViewport = e.data;
+        // If we're not currently inside a banded render, process immediately
+        processViewport();
+    }
+};
 
-            // Transfer the buffer for zero-copy
-            self.postMessage(
-                { type: 'viewport', requestId, width, height, rgba: rgba.buffer },
-                [rgba.buffer]
-            );
+let rendering = false;
+
+async function processViewport() {
+    if (rendering) return;  // band loop will pick up pendingViewport
+    if (!interpreter) {
+        self.postMessage({ type: 'error', message: 'Interpreter not ready' });
+        return;
+    }
+
+    while (pendingViewport) {
+        const req = pendingViewport;
+        pendingViewport = null;
+        rendering = true;
+
+        try {
+            const { pageIndex, vpX, vpY, vpW, vpH, pixelW, pixelH, requestId } = req;
+            const params = viewport_band_params(pixelW, pixelH);
+            const numBands = params[0];
+            const bandH = params[1];
+
+            if (numBands <= 1) {
+                // Small render — single pass (no progress needed)
+                const page = render_viewport(
+                    interpreter, pageIndex,
+                    vpX, vpY, vpW, vpH,
+                    pixelW, pixelH
+                );
+                const rgba = page.rgba;
+                const width = page.width;
+                const height = page.height;
+                page.free();
+
+                self.postMessage(
+                    { type: 'viewport', requestId, width, height, rgba: rgba.buffer },
+                    [rgba.buffer]
+                );
+            } else {
+                // Banded render with progress and cancel support
+                const fullRgba = new Uint8Array(pixelW * pixelH * 4);
+                let cancelled = false;
+
+                for (let b = 0; b < numBands; b++) {
+                    // Check for a newer request between bands
+                    // Yield to the event loop so queued messages can be delivered
+                    await new Promise(r => setTimeout(r, 0));
+                    if (pendingViewport) {
+                        cancelled = true;
+                        break;
+                    }
+
+                    const band = render_viewport_band(
+                        interpreter, pageIndex,
+                        vpX, vpY, vpW, vpH,
+                        pixelW, pixelH,
+                        b, bandH, numBands
+                    );
+                    const bandRgba = band.rgba;
+                    fullRgba.set(bandRgba, b * bandH * pixelW * 4);
+                    band.free();
+
+                    self.postMessage({
+                        type: 'render_progress',
+                        requestId,
+                        percent: (b + 1) / numBands,
+                    });
+                }
+
+                if (!cancelled) {
+                    self.postMessage(
+                        { type: 'viewport', requestId, width: pixelW, height: pixelH,
+                          rgba: fullRgba.buffer },
+                        [fullRgba.buffer]
+                    );
+                }
+            }
         } catch (err) {
             self.postMessage({
                 type: 'viewport_error',
-                requestId: e.data.requestId,
+                requestId: req.requestId,
                 message: '' + err,
             });
         }
+
+        rendering = false;
+        // Loop back to check if a newer request arrived during rendering
     }
-};
+}

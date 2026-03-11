@@ -299,6 +299,24 @@ footer {
     cursor: grabbing;
 }
 
+/* Progress bar for banded viewport rendering */
+.progress-container {
+    position: fixed;
+    bottom: 28px;  /* just above footer */
+    left: 0;
+    right: 0;
+    height: 3px;
+    background: rgba(255, 255, 255, 0.1);
+    z-index: 20;
+}
+
+.progress-bar {
+    height: 100%;
+    width: 0%;
+    background: #6cf;
+    transition: width 0.1s ease-out;
+}
+
 /* Drag-over overlay for the whole page when a file is being dragged */
 body.dragging .drop-zone {
     border-color: var(--accent);

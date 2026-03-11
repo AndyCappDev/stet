@@ -14,4 +14,6 @@ pub use skia_device::build_icc_cache_for_list;
 pub use skia_device::prepare_display_list;
 pub use skia_device::render_region;
 pub use skia_device::render_region_prepared;
+pub use skia_device::render_region_single_band;
 pub use skia_device::render_to_rgba;
+pub use skia_device::viewport_band_count;

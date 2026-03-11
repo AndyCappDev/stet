@@ -42,6 +42,8 @@ const zoomLevelEl = $('zoom-level');
 const minimap = $('minimap');
 const minimapCanvas = $('minimap-canvas');
 const minimapViewport = $('minimap-viewport');
+const progressContainer = $('progress-container');
+const progressBar = $('progress-bar');
 
 // --- Web Worker setup ---
 
@@ -74,6 +76,9 @@ worker.onmessage = function(e) {
 
         canvasContainer.classList.remove('hidden');
         canvasContainer.classList.remove('zoomed');
+        canvasContainer.scrollLeft = 0;
+        canvasContainer.scrollTop = 0;
+        minimap.classList.add('hidden');
 
         if (pageCount > 1) {
             pageNav.classList.remove('hidden');
@@ -93,6 +98,12 @@ worker.onmessage = function(e) {
 
         // Render the first page at fit-to-viewport resolution
         requestViewportRender();
+
+    } else if (msg.type === 'render_progress') {
+        if (msg.requestId === pendingRequestId) {
+            progressContainer.classList.remove('hidden');
+            progressBar.style.width = (msg.percent * 100) + '%';
+        }
 
     } else if (msg.type === 'viewport') {
         if (msg.requestId === pendingThumbnailId) {
@@ -115,6 +126,7 @@ worker.onmessage = function(e) {
         // Viewport render complete — only apply if it matches current request
         if (msg.requestId !== pendingRequestId) return;
         pendingRequestId = null;
+        progressContainer.classList.add('hidden');
 
         const rgba = new Uint8Array(msg.rgba);
         canvas.width = msg.width;
@@ -137,6 +149,7 @@ worker.onmessage = function(e) {
     } else if (msg.type === 'viewport_error') {
         if (msg.requestId === pendingRequestId) {
             pendingRequestId = null;
+            progressContainer.classList.add('hidden');
             console.error('Viewport render error:', msg.message);
         }
 
@@ -235,6 +248,10 @@ function requestViewportRender() {
 
     const requestId = nextRequestId++;
     pendingRequestId = requestId;
+
+    // Show progress bar (reset to 0%)
+    progressBar.style.width = '0%';
+    progressContainer.classList.remove('hidden');
 
     worker.postMessage({
         type: 'viewport',

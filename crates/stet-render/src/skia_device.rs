@@ -3608,6 +3608,150 @@ pub fn render_region_prepared(
     pixmap.data().to_vec()
 }
 
+/// Compute the number of bands and band height for viewport banding.
+///
+/// Returns `(num_bands, band_height)` using the same L2-cache-budget logic
+/// as the full-page banded renderer.
+pub fn viewport_band_count(pixel_w: u32, pixel_h: u32) -> (u32, u32) {
+    let band_h = select_band_height(pixel_w, pixel_h);
+    let num_bands = if band_h >= pixel_h {
+        1
+    } else {
+        pixel_h.div_ceil(band_h)
+    };
+    (num_bands, band_h)
+}
+
+/// Render a single horizontal band of a viewport region.
+///
+/// This is the per-band counterpart to [`render_region_prepared()`]. The caller
+/// loops over `band_idx` in `0..num_bands`, collecting RGBA strips that tile
+/// vertically to form the full viewport image.
+///
+/// Returns RGBA pixel data for `actual_h` rows (may be less than `band_h` for
+/// the last band).
+#[allow(clippy::too_many_arguments)]
+pub fn render_region_single_band(
+    list: &DisplayList,
+    prepared: &PreparedDisplayList,
+    vp_x: f64,
+    vp_y: f64,
+    vp_w: f64,
+    vp_h: f64,
+    pixel_w: u32,
+    pixel_h: u32,
+    band_idx: u32,
+    band_h: u32,
+    num_bands: u32,
+    dpi: f64,
+    icc: Option<&IccCache>,
+) -> Vec<u8> {
+    if pixel_w == 0 || pixel_h == 0 || vp_w <= 0.0 || vp_h <= 0.0 {
+        let actual_h = if band_idx < num_bands - 1 {
+            band_h
+        } else {
+            pixel_h - band_idx * band_h
+        };
+        return vec![0xFF; pixel_w as usize * actual_h as usize * 4];
+    }
+
+    let scale_x = pixel_w as f64 / vp_w;
+    let scale_y = pixel_h as f64 / vp_h;
+    let effective_dpi = dpi * scale_x;
+
+    // Output Y range for this band
+    let out_y_start = band_idx * band_h;
+    let actual_h = if band_idx < num_bands - 1 {
+        band_h
+    } else {
+        pixel_h - out_y_start
+    };
+
+    // Add overlap above/below for anti-aliasing at seams
+    const OVERLAP: u32 = 6;
+    let render_y_start = out_y_start.saturating_sub(OVERLAP);
+    let render_y_end = (out_y_start + actual_h + OVERLAP).min(pixel_h);
+    let render_h = render_y_end - render_y_start;
+    let overlap_top = out_y_start - render_y_start;
+
+    // Source-space Y range for culling
+    let src_y_min = vp_y + render_y_start as f64 / scale_y;
+    let src_y_max = vp_y + render_y_end as f64 / scale_y;
+
+    // Adjusted viewport offset for this band's pixmap
+    let band_vp_y = vp_y + render_y_start as f64 / scale_y;
+
+    let mut pixmap =
+        Pixmap::new(pixel_w, render_h).expect("Failed to create band pixmap");
+    pixmap.fill(Color::TRANSPARENT);
+
+    let mut state = BandState {
+        clip_region: None,
+        spare_mask: None,
+        clip_mask_cache: HashMap::new(),
+        clip_mask_seen: prepared.clip_seen.clone(),
+        mask_pool: Vec::new(),
+    };
+
+    let elements = list.elements();
+    let vp_x_f = vp_x as f32;
+    let band_vp_y_f = band_vp_y as f32;
+    let sx = scale_x as f32;
+    let sy = scale_y as f32;
+    let vp_x_max = vp_x + vp_w;
+
+    for epoch in &prepared.epochs {
+        if !epoch.has_erase_page {
+            match epoch.paint_bbox {
+                Some(ref pb)
+                    if pb.x_max <= vp_x
+                        || pb.x_min >= vp_x_max
+                        || pb.y_max <= src_y_min
+                        || pb.y_min >= src_y_max =>
+                {
+                    continue;
+                }
+                None => continue,
+                _ => {}
+            }
+        }
+
+        for i in epoch.start_idx..epoch.end_idx {
+            if let Some(ref bbox) = prepared.bboxes[i] {
+                if bbox.x_max <= vp_x
+                    || bbox.x_min >= vp_x_max
+                    || bbox.y_max <= src_y_min
+                    || bbox.y_min >= src_y_max
+                {
+                    continue;
+                }
+            }
+            render_element_to_viewport(
+                &mut pixmap,
+                &mut state,
+                &elements[i],
+                vp_x_f,
+                band_vp_y_f,
+                sx,
+                sy,
+                pixel_w,
+                render_h,
+                effective_dpi,
+                icc,
+            );
+        }
+    }
+
+    // Composite onto white background
+    composite_onto_white(pixmap.data_mut());
+
+    // Extract only the non-overlap rows
+    let row_bytes = pixel_w as usize * 4;
+    let start = overlap_top as usize * row_bytes;
+    let end = start + actual_h as usize * row_bytes;
+    pixmap.data()[start..end].to_vec()
+}
+
 /// Render a full-page display list to RGBA pixels using the banded parallel renderer.
 ///
 /// This is the preferred way to render a complete page — it uses rayon parallelism
