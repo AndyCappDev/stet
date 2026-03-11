@@ -15,6 +15,7 @@ jpeg-decoder = "0.3"
 fax = "0.2"
 stet-core.workspace = true
 stet-render.workspace = true
+openjp2 = { version = "0.6", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 png.workspace = true

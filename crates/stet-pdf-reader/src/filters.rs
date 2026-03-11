@@ -17,6 +17,7 @@ pub enum Filter {
     RunLengthDecode,
     DCTDecode,
     CCITTFaxDecode,
+    JPXDecode,
 }
 
 /// Parse the /Filter and /DecodeParms entries from a stream dict.
@@ -68,6 +69,7 @@ fn filter_from_name(name: &[u8]) -> Result<Filter, PdfError> {
         b"RunLengthDecode" | b"RL" => Ok(Filter::RunLengthDecode),
         b"DCTDecode" | b"DCT" => Ok(Filter::DCTDecode),
         b"CCITTFaxDecode" | b"CCF" => Ok(Filter::CCITTFaxDecode),
+        b"JPXDecode" | b"JPX" => Ok(Filter::JPXDecode),
         // Tolerate truncated filter names from malformed PDFs
         _ if name.starts_with(b"Flate") => Ok(Filter::FlateDecode),
         _ if name.starts_with(b"LZW") => Ok(Filter::LZWDecode),
@@ -75,6 +77,7 @@ fn filter_from_name(name: &[u8]) -> Result<Filter, PdfError> {
         _ if name.starts_with(b"ASCII85") => Ok(Filter::ASCII85Decode),
         _ if name.starts_with(b"RunLength") => Ok(Filter::RunLengthDecode),
         _ if name.starts_with(b"CCITT") => Ok(Filter::CCITTFaxDecode),
+        _ if name.starts_with(b"JPX") => Ok(Filter::JPXDecode),
         _ => Err(PdfError::UnsupportedFilter(
             String::from_utf8_lossy(name).into(),
         )),
@@ -99,6 +102,7 @@ pub fn decode_stream(
             Filter::RunLengthDecode => decode_run_length(&data)?,
             Filter::DCTDecode => decode_dct(&data)?,
             Filter::CCITTFaxDecode => decode_ccittfax(&data, parms)?,
+            Filter::JPXDecode => decode_jpx(&data)?,
         };
     }
 
@@ -422,6 +426,199 @@ fn decode_ccittfax(data: &[u8], parms: Option<&PdfDict>) -> Result<Vec<u8>, PdfE
     }
 
     Ok(output)
+}
+
+/// JPXDecode (JPEG 2000).
+///
+/// Uses openjp2 to decode JP2 or raw J2K codestreams into interleaved pixel data.
+fn decode_jpx(data: &[u8]) -> Result<Vec<u8>, PdfError> {
+    use openjp2::openjpeg::{
+        opj_stream_default_create, opj_stream_destroy, opj_stream_set_read_function,
+        opj_stream_set_seek_function, opj_stream_set_skip_function, opj_stream_set_user_data,
+        opj_stream_set_user_data_length,
+    };
+
+    if data.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Detect format from magic bytes
+    let format = openjp2::detect_format(data)
+        .map_err(|e| PdfError::DecompressionError(format!("JPXDecode: {e}")))?;
+    let codec_format = match format {
+        openjp2::J2KFormat::JP2 => openjp2::OPJ_CODEC_JP2,
+        openjp2::J2KFormat::J2K | openjp2::J2KFormat::JPT => openjp2::OPJ_CODEC_J2K,
+    };
+
+    // Create decoder
+    let mut codec = openjp2::Codec::new_decoder(codec_format)
+        .ok_or_else(|| PdfError::DecompressionError("JPXDecode: create decoder failed".into()))?;
+    let mut params = openjp2::opj_dparameters_t::default();
+    codec.setup_decoder(&mut params);
+
+    // Create stream with C-style callbacks (safe API doesn't expose memory-backed streams)
+    let user_data = Box::new(JpxBuffer {
+        data: data.as_ptr(),
+        len: data.len(),
+        pos: 0,
+    });
+
+    let raw_stream = unsafe { opj_stream_default_create(1) };
+    if raw_stream.is_null() {
+        return Err(PdfError::DecompressionError(
+            "JPXDecode: create stream failed".into(),
+        ));
+    }
+
+    unsafe {
+        opj_stream_set_read_function(raw_stream, Some(jpx_stream_read));
+        opj_stream_set_skip_function(raw_stream, Some(jpx_stream_skip));
+        opj_stream_set_seek_function(raw_stream, Some(jpx_stream_seek));
+        opj_stream_set_user_data(
+            raw_stream,
+            Box::into_raw(user_data) as *mut core::ffi::c_void,
+            Some(jpx_stream_free),
+        );
+        opj_stream_set_user_data_length(raw_stream, data.len() as u64);
+    }
+
+    // Safety: raw_stream points to a valid Stream allocated by opj_stream_default_create.
+    // We destroy it before returning. The JpxBuffer holds a pointer into `data` which
+    // outlives this entire function call.
+    let stream: &mut openjp2::Stream =
+        unsafe { &mut *(raw_stream as *mut openjp2::Stream) };
+
+    // Read header
+    let mut image = match codec.read_header(stream) {
+        Some(img) => img,
+        None => {
+            unsafe { opj_stream_destroy(raw_stream) };
+            return Err(PdfError::DecompressionError(
+                "JPXDecode: read header failed".into(),
+            ));
+        }
+    };
+
+    // Decode
+    if codec.decode(stream, &mut image) == 0 {
+        unsafe { opj_stream_destroy(raw_stream) };
+        return Err(PdfError::DecompressionError(
+            "JPXDecode: decode failed".into(),
+        ));
+    }
+
+    codec.end_decompress(stream);
+    unsafe { opj_stream_destroy(raw_stream) };
+
+    // Extract interleaved pixel data from planar components
+    let comps = image
+        .comps()
+        .ok_or_else(|| PdfError::DecompressionError("JPXDecode: no components".into()))?;
+
+    if comps.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let num_comps = comps.len();
+    let w = comps[0].w as usize;
+    let h = comps[0].h as usize;
+    let mut output = vec![0u8; w * h * num_comps];
+
+    for (c, comp) in comps.iter().enumerate() {
+        let comp_data = match comp.data() {
+            Some(d) => d,
+            None => continue,
+        };
+        let prec = comp.prec;
+        let max = ((1u32 << prec) - 1) as i32;
+        let adjust = if comp.sgnd != 0 {
+            1i32 << (prec - 1)
+        } else {
+            0
+        };
+        let comp_w = comp.w as usize;
+        let dx = (comp.dx as usize).max(1);
+        let dy = (comp.dy as usize).max(1);
+
+        for y in 0..h {
+            for x in 0..w {
+                let src_x = x / dx;
+                let src_y = y / dy;
+                let src_idx = src_y * comp_w + src_x;
+                if src_idx < comp_data.len() {
+                    let sample = (comp_data[src_idx] + adjust).clamp(0, max);
+                    output[(y * w + x) * num_comps + c] = if max > 0 {
+                        (sample * 255 / max) as u8
+                    } else {
+                        0
+                    };
+                }
+            }
+        }
+    }
+
+    Ok(output)
+}
+
+/// User data for JPX stream callbacks — holds a pointer into the input buffer.
+struct JpxBuffer {
+    data: *const u8,
+    len: usize,
+    pos: usize,
+}
+
+unsafe extern "C" fn jpx_stream_read(
+    buffer: *mut core::ffi::c_void,
+    nb_bytes: usize,
+    user_data: *mut core::ffi::c_void,
+) -> usize {
+    unsafe {
+        let buf = &mut *(user_data as *mut JpxBuffer);
+        let remaining = buf.len - buf.pos;
+        if remaining == 0 {
+            return usize::MAX; // Signal EOF
+        }
+        let to_read = nb_bytes.min(remaining);
+        core::ptr::copy_nonoverlapping(buf.data.add(buf.pos), buffer as *mut u8, to_read);
+        buf.pos += to_read;
+        to_read
+    }
+}
+
+unsafe extern "C" fn jpx_stream_skip(
+    nb_bytes: i64,
+    user_data: *mut core::ffi::c_void,
+) -> i64 {
+    unsafe {
+        let buf = &mut *(user_data as *mut JpxBuffer);
+        let new_pos = (buf.pos as i64 + nb_bytes).max(0) as usize;
+        if new_pos > buf.len {
+            return -1;
+        }
+        buf.pos = new_pos;
+        nb_bytes
+    }
+}
+
+unsafe extern "C" fn jpx_stream_seek(
+    nb_bytes: i64,
+    user_data: *mut core::ffi::c_void,
+) -> i32 {
+    unsafe {
+        let buf = &mut *(user_data as *mut JpxBuffer);
+        let new_pos = nb_bytes as usize;
+        if new_pos > buf.len {
+            return 0; // Failure
+        }
+        buf.pos = new_pos;
+        1 // Success
+    }
+}
+
+unsafe extern "C" fn jpx_stream_free(user_data: *mut core::ffi::c_void) {
+    unsafe {
+        let _ = Box::from_raw(user_data as *mut JpxBuffer);
+    }
 }
 
 /// Apply PNG or TIFF predictor to decoded data.
