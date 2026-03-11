@@ -200,8 +200,9 @@ PostScript has no transparency model. PDF 1.4 (2001) added:
 ### Phase D: Transparency
 - Blend modes — all 16 PDF modes wired to tiny-skia ✓
 - Constant alpha ✓
-- Transparency groups (offscreen rendering)
-- Soft masks
+- Transparency groups (isolated + non-isolated, offscreen rendering) ✓
+- Soft masks (luminosity + alpha, ExtGState /SMask, backdrop color) ✓
+- Pixel-accurate output matching GhostScript on VDP Tech transparency test suite ✓
 - Validate against GS and Poppler with transparency-heavy PDFs
 
 ### Phase E: Real-world hardening

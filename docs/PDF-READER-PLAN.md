@@ -142,8 +142,11 @@ impl PdfDocument {
 - Path construction and painting operators → DisplayList ✓
 - Clipping paths ✓
 - Color spaces: DeviceRGB, DeviceCMYK, DeviceGray, ICCBased, Indexed, Separation ✓
+- DeviceCMYK k/K operators use ICC CMYK profile for accurate color rendering ✓
 - Images (XObject and inline): decode, color convert, emit as DisplayElement::Image ✓
 - Shadings: Types 2/3 (axial/radial) ✓
+  - Radial shadings pass user-space coords + CTM to renderer (correct under shear/non-uniform scale) ✓
+  - `solve_radial_t` quadratic solver for non-concentric two-circle gradients ✓
 - Form XObjects (recursive content stream interpretation, depth limit 20) ✓
 - ExtGState: line width, dash, join, cap, overprint, rendering intent, opacity ✓
 - PDF Function evaluator (Types 0/2/3/4) ✓
@@ -163,6 +166,7 @@ impl PdfDocument {
 - Text positioning operators (BT/ET, Tm, Td, TD, T*) ✓
 - String rendering (Tj, TJ, ', ") with character/word spacing ✓
 - Font cache per ContentInterpreter (keyed by resource name) ✓
+- Fallback font (Helvetica/NimbusSans) for PDFs with missing font resources ✓
 - Rendering mode 0 (fill) only ✓
 
 **Deferred to Phase D** (now complete):
@@ -249,14 +253,18 @@ impl PdfDocument {
   - `flush_soft_mask()` on Q/SMask-change/end-of-page + save/restore around form XObjects ✓
   - `render_soft_masked_band()` + `render_soft_masked_viewport()`: offscreen mask→content multiply ✓
   - Luminosity extraction: Y = 0.2126R + 0.7152G + 0.0722B with backdrop color for transparent pixels ✓
+  - Pixel-accurate output matching GhostScript (±1 rounding) on all test PDFs ✓
   - Test PDFs: SoftMask.pdf, SoftMask-Clipped.pdf, SoftMask-Interaction.pdf ✓
-- **E4: Knockout groups, nested transparency, optimization**
-- **E5: Deferred SMask features**
+- **E4: Knockout groups, nested transparency, optimization** — TODO
+  - Knockout group semantics (each element composites against group backdrop)
+  - Deeply nested transparency group correctness
+  - Performance optimization for complex transparency stacks
+- **E5: Deferred SMask features** — TODO
   - SMask `/TR` (transfer function) on soft mask
   - Mask group `/CS` color space (render mask form in specific color space)
   - `/Matte` pre-blending for pre-multiplied mask images
-- Annotations (Link, Widget appearance streams)
-- Optional content (layers) — basic visibility toggling
+- Annotations (Link, Widget appearance streams) — TODO
+- Optional content (layers) — basic visibility toggling — TODO
 
 ## Licensing Split
 
