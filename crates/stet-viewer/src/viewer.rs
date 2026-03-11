@@ -8,7 +8,7 @@ use std::sync::mpsc::{Receiver, SyncSender, TryRecvError};
 
 use egui::{ColorImage, TextureHandle, TextureOptions, Vec2};
 use stet_core::display_list::DisplayList;
-use stet_render::PreparedDisplayList;
+use stet_render::{ImageCache, PreparedDisplayList};
 
 use crate::{ScreenInfo, ViewerEnd, ViewerMsg};
 
@@ -73,6 +73,8 @@ struct StoredPage {
     cached_render: Option<CachedRender>,
     /// ICC cache built from this page's display list profiles.
     icc_cache: stet_core::icc::IccCache,
+    /// Pre-converted RGBA image cache for fast viewport rendering.
+    image_cache: ImageCache,
 }
 
 /// Cached result of a viewport render.
@@ -267,6 +269,7 @@ impl ViewerApp {
                         &page.display_list,
                         self.system_cmyk_bytes.as_ref(),
                     );
+                    let image_cache = ImageCache::build(&page.display_list, Some(&icc_cache));
                     self.pages.push(StoredPage {
                         display_list: page.display_list,
                         prepared,
@@ -276,6 +279,7 @@ impl ViewerApp {
                         page_num: page.page_num,
                         cached_render: None,
                         icc_cache,
+                        image_cache,
                     });
                     pages_this_frame += 1;
                 }
@@ -489,7 +493,7 @@ impl ViewerApp {
             pixel_h,
             page.dpi,
             Some(&page.icc_cache),
-            None,
+            Some(&page.image_cache),
         );
 
         let image = ColorImage::from_rgba_unmultiplied([pixel_w as usize, pixel_h as usize], &rgba);
@@ -552,7 +556,7 @@ impl ViewerApp {
             mm_h,
             page.dpi,
             Some(&page.icc_cache),
-            None,
+            Some(&page.image_cache),
         );
 
         let image = ColorImage::from_rgba_unmultiplied([mm_w as usize, mm_h as usize], &rgba);
