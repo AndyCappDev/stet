@@ -119,10 +119,14 @@ impl PageSink for MemorySink {
 }
 
 /// Factory that creates `MemorySink` instances sharing a page collection.
+///
+/// Used when streaming rendered bands to JS via `set_page_callback()`.
+#[allow(dead_code)]
 pub struct MemorySinkFactory {
     pages: Arc<Mutex<Vec<PageData>>>,
 }
 
+#[allow(dead_code)]
 impl MemorySinkFactory {
     pub fn new() -> (Self, Arc<Mutex<Vec<PageData>>>) {
         let pages = Arc::new(Mutex::new(Vec::new()));
@@ -148,6 +152,76 @@ impl PageSinkFactory for MemorySinkFactory {
             current_height: 0,
             current_page: Vec::new(),
             streaming: false,
+        }))
+    }
+}
+
+/// Lightweight sink that records page dimensions but discards all pixel data.
+///
+/// Used during PostScript interpretation in the WASM viewport workflow where
+/// only display lists and page dimensions are needed — the actual rendering
+/// happens on demand via `render_viewport()`. This avoids accumulating ~33 MB
+/// of RGBA data per page, which would OOM on large documents (e.g. 139 pages
+/// at 300 DPI = ~4.6 GB).
+pub struct NullSink {
+    pages: Arc<Mutex<Vec<PageData>>>,
+    current_width: u32,
+    current_height: u32,
+}
+
+impl PageSink for NullSink {
+    fn begin_page(&mut self, width: u32, height: u32) -> Result<(), String> {
+        self.current_width = width;
+        self.current_height = height;
+        Ok(())
+    }
+
+    fn write_rows(&mut self, _rgba_rows: &[u8], _num_rows: u32) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn end_page(&mut self) -> Result<(), String> {
+        let page = PageData {
+            width: self.current_width,
+            height: self.current_height,
+            rgba: Vec::new(),
+        };
+        self.pages
+            .lock()
+            .map_err(|e| e.to_string())?
+            .push(page);
+        Ok(())
+    }
+}
+
+/// Factory that creates `NullSink` instances sharing a page collection.
+pub struct NullSinkFactory {
+    pages: Arc<Mutex<Vec<PageData>>>,
+}
+
+impl NullSinkFactory {
+    pub fn new() -> (Self, Arc<Mutex<Vec<PageData>>>) {
+        let pages = Arc::new(Mutex::new(Vec::new()));
+        (
+            Self {
+                pages: Arc::clone(&pages),
+            },
+            pages,
+        )
+    }
+
+    /// Create a factory that shares the same page collection as an existing one.
+    pub fn from_shared(pages: Arc<Mutex<Vec<PageData>>>) -> Self {
+        Self { pages }
+    }
+}
+
+impl PageSinkFactory for NullSinkFactory {
+    fn create_sink(&self, _output_path: &str) -> Result<Box<dyn PageSink>, String> {
+        Ok(Box::new(NullSink {
+            pages: Arc::clone(&self.pages),
+            current_width: 0,
+            current_height: 0,
         }))
     }
 }

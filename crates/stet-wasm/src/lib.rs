@@ -19,10 +19,11 @@ use stet_core::device::OutputDevice;
 use stet_core::display_list::DisplayList;
 use stet_core::eps::{content_is_epsf, read_eps_bounding_box};
 use stet_core::error::PsError;
+use stet_core::icc::IccCache;
 use stet_engine::eval::parse_and_exec;
 use stet_render::{ImageCache, PreparedDisplayList, SkiaDevice};
 
-use memory_sink::{MemorySinkFactory, PageData, set_sink_callback};
+use memory_sink::{NullSinkFactory, PageData, set_sink_callback};
 
 /// Embedded GhostScript default CMYK ICC profile for CMYK→sRGB conversion.
 const DEFAULT_CMYK_ICC: &[u8] = include_bytes!("default_cmyk.icc");
@@ -47,11 +48,13 @@ pub struct Interpreter {
     /// Display lists captured during rendering, one per page.
     /// Retained for viewport re-rendering at arbitrary zoom levels.
     page_display_lists: Vec<DisplayList>,
-    /// Pre-computed metadata for each display list (bboxes, epochs, clip_seen).
-    /// Avoids recomputing on every viewport render.
-    page_prepared: Vec<PreparedDisplayList>,
-    /// Per-page pre-converted RGBA image cache (ICC conversion done once at capture).
-    page_image_cache: Vec<ImageCache>,
+    /// Pre-computed metadata for each display list, built lazily on first viewport render.
+    page_prepared: Vec<Option<PreparedDisplayList>>,
+    /// Per-page ICC cache, built lazily on first viewport render.
+    page_icc: Vec<Option<IccCache>>,
+    /// Per-page pre-converted RGBA image cache, built lazily on first viewport render.
+    /// Only the viewed page has its cache populated to avoid OOM on large documents.
+    page_image_cache: Vec<Option<ImageCache>>,
     /// Per-page dimensions at the reference DPI.
     page_info: Vec<PageInfo>,
     /// The DPI used during interpretation (reference DPI for display list coordinates).
@@ -146,6 +149,7 @@ pub fn create_interpreter() -> Interpreter {
         ctx,
         page_display_lists: Vec::new(),
         page_prepared: Vec::new(),
+        page_icc: Vec::new(),
         page_image_cache: Vec::new(),
         page_info: Vec::new(),
         reference_dpi: 150.0,
@@ -199,6 +203,7 @@ pub fn render(interp: &mut Interpreter, ps_data: &[u8], dpi: f64, filename: &str
     // Clear previous display lists
     interp.page_display_lists.clear();
     interp.page_prepared.clear();
+    interp.page_icc.clear();
     interp.page_image_cache.clear();
     interp.page_info.clear();
     interp.reference_dpi = dpi;
@@ -206,8 +211,9 @@ pub fn render(interp: &mut Interpreter, ps_data: &[u8], dpi: f64, filename: &str
     // Enable display list capture
     interp.ctx.capture_display_lists = Some(Vec::new());
 
-    // Set up shared page collection for the memory sink
-    let (_sink_factory, pages_ref) = MemorySinkFactory::new();
+    // Set up shared page collection — NullSinkFactory records dimensions only,
+    // discarding rendered pixels since viewport rendering is done on demand.
+    let (_sink_factory, pages_ref) = NullSinkFactory::new();
 
     // Strip DOS EPS header and check for EPS bounding box
     let ps_data = stet_core::eps::strip_dos_eps_header(ps_data);
@@ -230,11 +236,11 @@ pub fn render(interp: &mut Interpreter, ps_data: &[u8], dpi: f64, filename: &str
             llx, lly, urx, ury, w, h, dpi
         ));
 
-        // Set up device_factory with MemorySinkFactory, then use setpagedevice
+        // Set up device_factory with NullSinkFactory — pixels are discarded
         let pages_for_factory = pages_ref.clone();
         let cmyk_for_factory = interp.system_cmyk_bytes.clone();
         interp.ctx.device_factory = Some(Box::new(move |w, h| {
-            let factory = MemorySinkFactory::from_shared(pages_for_factory.clone());
+            let factory = NullSinkFactory::from_shared(pages_for_factory.clone());
             let mut dev = SkiaDevice::with_sink_factory(w, h, Box::new(factory));
             dev.set_system_cmyk_bytes(cmyk_for_factory.clone());
             Box::new(dev) as Box<dyn OutputDevice>
@@ -278,7 +284,7 @@ pub fn render(interp: &mut Interpreter, ps_data: &[u8], dpi: f64, filename: &str
     let pages_for_factory = pages_ref.clone();
     let cmyk_for_factory = interp.system_cmyk_bytes.clone();
     interp.ctx.device_factory = Some(Box::new(move |w, h| {
-        let factory = MemorySinkFactory::from_shared(pages_for_factory.clone());
+        let factory = NullSinkFactory::from_shared(pages_for_factory.clone());
         let mut dev = SkiaDevice::with_sink_factory(w, h, Box::new(factory));
         dev.set_system_cmyk_bytes(cmyk_for_factory.clone());
         Box::new(dev) as Box<dyn OutputDevice>
@@ -339,6 +345,7 @@ pub fn render_pdf(interp: &mut Interpreter, pdf_data: &[u8], dpi: f64) -> Result
     // Clear previous state
     interp.page_display_lists.clear();
     interp.page_prepared.clear();
+    interp.page_icc.clear();
     interp.page_image_cache.clear();
     interp.page_info.clear();
     interp.reference_dpi = dpi;
@@ -362,12 +369,10 @@ pub fn render_pdf(interp: &mut Interpreter, pdf_data: &[u8], dpi: f64) -> Result
             Ok(dl) => {
                 log(&format!("stet: page {} — {} display elements, {}x{} px",
                     page_idx, dl.elements().len(), pixel_w, pixel_h));
-                let prepared = stet_render::prepare_display_list(&dl);
-                let icc = stet_render::build_icc_cache_for_list(&dl, Some(&interp.system_cmyk_bytes));
-                let image_cache = ImageCache::build(&dl, Some(&icc));
                 interp.page_display_lists.push(dl);
-                interp.page_prepared.push(prepared);
-                interp.page_image_cache.push(image_cache);
+                interp.page_prepared.push(None);
+                interp.page_icc.push(None);
+                interp.page_image_cache.push(None);
                 interp.page_info.push(PageInfo {
                     width: pixel_w,
                     height: pixel_h,
@@ -414,6 +419,46 @@ pub fn reference_dpi(interp: &Interpreter) -> f64 {
     interp.reference_dpi
 }
 
+/// Ensure the image cache for a given page is built, evicting all others to save memory.
+///
+/// Only one page's image cache is kept at a time — WASM memory is precious.
+/// Uses explicit field access (not `&mut self`) to satisfy the borrow checker.
+/// Ensure per-page caches (prepared, ICC, image) are built for the given page,
+/// evicting all other pages' caches to keep WASM memory usage bounded.
+macro_rules! ensure_page_caches {
+    ($interp:expr, $page_idx:expr) => {
+        if $interp.page_prepared[$page_idx].is_none()
+            || $interp.page_image_cache[$page_idx].is_none()
+        {
+            // Evict all other pages' caches to reclaim memory
+            for j in 0..$interp.page_image_cache.len() {
+                if j != $page_idx {
+                    $interp.page_prepared[j] = None;
+                    $interp.page_icc[j] = None;
+                    $interp.page_image_cache[j] = None;
+                }
+            }
+            if $interp.page_prepared[$page_idx].is_none() {
+                $interp.page_prepared[$page_idx] = Some(stet_render::prepare_display_list(
+                    &$interp.page_display_lists[$page_idx],
+                ));
+            }
+            if $interp.page_icc[$page_idx].is_none() {
+                $interp.page_icc[$page_idx] = Some(stet_render::build_icc_cache_for_list(
+                    &$interp.page_display_lists[$page_idx],
+                    Some(&$interp.system_cmyk_bytes),
+                ));
+            }
+            if $interp.page_image_cache[$page_idx].is_none() {
+                $interp.page_image_cache[$page_idx] = Some(ImageCache::build(
+                    &$interp.page_display_lists[$page_idx],
+                    $interp.page_icc[$page_idx].as_ref(),
+                ));
+            }
+        }
+    };
+}
+
 /// Render a rectangular viewport region of a stored display list.
 ///
 /// Arguments:
@@ -425,7 +470,7 @@ pub fn reference_dpi(interp: &Interpreter) -> f64 {
 /// Returns a `Page` with the rendered RGBA data.
 #[wasm_bindgen]
 pub fn render_viewport(
-    interp: &Interpreter,
+    interp: &mut Interpreter,
     page_index: u32,
     vp_x: f64,
     vp_y: f64,
@@ -443,37 +488,25 @@ pub fn render_viewport(
         )));
     }
 
+    ensure_page_caches!(interp, i);
+
     let list = &interp.page_display_lists[i];
     let page_dpi = interp.page_info[i].dpi;
-    let image_cache = interp.page_image_cache.get(i);
-    let rgba = if i < interp.page_prepared.len() {
-        stet_render::render_region_prepared(
-            list,
-            &interp.page_prepared[i],
-            vp_x,
-            vp_y,
-            vp_w,
-            vp_h,
-            pixel_w,
-            pixel_h,
-            page_dpi,
-            None,
-            image_cache,
-        )
-    } else {
-        stet_render::render_region(
-            list,
-            vp_x,
-            vp_y,
-            vp_w,
-            vp_h,
-            pixel_w,
-            pixel_h,
-            page_dpi,
-            None,
-            None,
-        )
-    };
+    let prepared = interp.page_prepared[i].as_ref().unwrap();
+    let image_cache = interp.page_image_cache[i].as_ref();
+    let rgba = stet_render::render_region_prepared(
+        list,
+        prepared,
+        vp_x,
+        vp_y,
+        vp_w,
+        vp_h,
+        pixel_w,
+        pixel_h,
+        page_dpi,
+        None,
+        image_cache,
+    );
 
     Ok(Page {
         width: pixel_w,
@@ -501,7 +534,7 @@ pub fn viewport_band_params(pixel_w: u32, pixel_h: u32) -> js_sys::Array {
 #[wasm_bindgen]
 #[allow(clippy::too_many_arguments)]
 pub fn render_viewport_band(
-    interp: &Interpreter,
+    interp: &mut Interpreter,
     page_index: u32,
     vp_x: f64,
     vp_y: f64,
@@ -522,17 +555,15 @@ pub fn render_viewport_band(
         )));
     }
 
+    ensure_page_caches!(interp, i);
+
     let list = &interp.page_display_lists[i];
     let page_dpi = interp.page_info[i].dpi;
-
-    if i >= interp.page_prepared.len() {
-        return Err(JsValue::from_str("No prepared display list for this page"));
-    }
-
-    let image_cache = interp.page_image_cache.get(i);
+    let prepared = interp.page_prepared[i].as_ref().unwrap();
+    let image_cache = interp.page_image_cache[i].as_ref();
     let rgba = stet_render::render_region_single_band(
         list,
-        &interp.page_prepared[i],
+        prepared,
         vp_x,
         vp_y,
         vp_w,
@@ -612,12 +643,10 @@ fn extract_pages(pages_ref: &Arc<Mutex<Vec<PageData>>>) -> Vec<PageData> {
 fn collect_display_lists(interp: &mut Interpreter, pages: &[PageData]) {
     let captured = interp.ctx.capture_display_lists.take().unwrap_or_default();
     for (i, (dl, dpi)) in captured.into_iter().enumerate() {
-        let prepared = stet_render::prepare_display_list(&dl);
-        let icc = stet_render::build_icc_cache_for_list(&dl, Some(&interp.system_cmyk_bytes));
-        let image_cache = ImageCache::build(&dl, Some(&icc));
         interp.page_display_lists.push(dl);
-        interp.page_prepared.push(prepared);
-        interp.page_image_cache.push(image_cache);
+        interp.page_prepared.push(None);
+        interp.page_icc.push(None);
+        interp.page_image_cache.push(None);
         if i < pages.len() {
             interp.page_info.push(PageInfo {
                 width: pages[i].width,
