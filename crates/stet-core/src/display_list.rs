@@ -37,6 +37,9 @@ pub struct GroupParams {
     pub bbox: [f64; 4],
     /// Whether the group is isolated (renders against transparent backdrop).
     pub isolated: bool,
+    /// Whether the group uses knockout semantics (elements composite against
+    /// the initial backdrop, not against accumulated siblings).
+    pub knockout: bool,
     /// Blend mode for compositing the group result onto the parent.
     pub blend_mode: u8,
     /// Opacity for compositing the group result (0.0–1.0).

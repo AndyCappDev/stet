@@ -870,42 +870,12 @@ fn composite_non_isolated_group(
     params: &stet_core::display_list::GroupParams,
     clip_mask: Option<&tiny_skia::Mask>,
 ) {
-    // Build a contribution pixmap: pixels that changed get the offscreen color,
-    // unchanged pixels get alpha=0 (transparent) so they don't affect compositing.
-    let w = pixmap.width();
-    let h = pixmap.height();
-    let Some(mut contribution) = Pixmap::new(w, h) else {
-        return;
-    };
-    let off_data = offscreen.data();
-    let contrib_data = contribution.data_mut();
-
-    for (i, chunk) in contrib_data.chunks_exact_mut(4).enumerate() {
-        let off = i * 4;
-        // Compare offscreen pixel to original backdrop
-        if off_data[off] != backdrop[off]
-            || off_data[off + 1] != backdrop[off + 1]
-            || off_data[off + 2] != backdrop[off + 2]
-            || off_data[off + 3] != backdrop[off + 3]
-        {
-            // Group painted here — use the offscreen pixel as the contribution
-            chunk.copy_from_slice(&off_data[off..off + 4]);
-        }
-        // else: unchanged pixel → stays transparent (alpha=0)
-    }
-
-    // Composite the contribution onto the parent with the group's blend mode + alpha
-    let paint = tiny_skia::PixmapPaint {
-        opacity: params.alpha as f32,
-        blend_mode: u8_to_blend_mode(params.blend_mode),
-        quality: tiny_skia::FilterQuality::Nearest,
-    };
-    pixmap.draw_pixmap(
-        0,
-        0,
-        contribution.as_ref(),
-        &paint,
-        Transform::identity(),
+    extract_and_composite_contribution(
+        pixmap,
+        offscreen,
+        backdrop,
+        u8_to_blend_mode(params.blend_mode),
+        params.alpha as f32,
         clip_mask,
     );
 }
@@ -1936,6 +1906,13 @@ fn render_group_to_band(
     dpi: f64,
     icc: Option<&IccCache>,
 ) {
+    if params.knockout {
+        render_knockout_group_to_band(
+            pixmap, band_state, elements, params, y_start, band_w, band_h, dpi, icc,
+        );
+        return;
+    }
+
     // Create band-sized offscreen pixmap
     let Some(mut offscreen) = Pixmap::new(band_w, band_h) else {
         return;
@@ -1995,6 +1972,142 @@ fn render_group_to_band(
         };
         pixmap.draw_pixmap(0, 0, offscreen.as_ref(), &paint, Transform::identity(), mask_ref);
     }
+}
+
+/// Render a knockout transparency group into a band-sized pixmap.
+///
+/// In a knockout group, each element composites against the group's initial
+/// backdrop (not the accumulated result of previous elements). This means
+/// overlapping elements within the group don't blend with each other.
+#[allow(clippy::too_many_arguments)]
+fn render_knockout_group_to_band(
+    pixmap: &mut Pixmap,
+    band_state: &mut BandState,
+    elements: &DisplayList,
+    params: &stet_core::display_list::GroupParams,
+    y_start: u32,
+    band_w: u32,
+    band_h: u32,
+    dpi: f64,
+    icc: Option<&IccCache>,
+) {
+    let Some(mut offscreen) = Pixmap::new(band_w, band_h) else {
+        return;
+    };
+
+    // Initial backdrop: parent pixels for non-isolated, transparent for isolated
+    let initial_backdrop = if !params.isolated {
+        pixmap.data().to_vec()
+    } else {
+        vec![0u8; (band_w * band_h * 4) as usize]
+    };
+
+    // Accumulated result starts as the initial backdrop
+    let Some(mut accumulated) = Pixmap::new(band_w, band_h) else {
+        return;
+    };
+    accumulated
+        .data_mut()
+        .copy_from_slice(&initial_backdrop);
+
+    // Render each element independently against the initial backdrop.
+    // Knockout semantics: each element replaces (not blends with) previous elements.
+    for elem in elements.elements() {
+        // Reset offscreen to initial backdrop
+        offscreen.data_mut().copy_from_slice(&initial_backdrop);
+
+        let mut elem_band = BandState {
+            clip_region: None,
+            spare_mask: None,
+            clip_mask_cache: HashMap::new(),
+            clip_mask_seen: HashSet::new(),
+            mask_pool: Vec::new(),
+        };
+
+        // Render single element into offscreen
+        render_element_to_band(
+            &mut offscreen, &mut elem_band, elem, y_start, band_w, band_h, dpi, icc,
+        );
+
+        // Replace accumulated pixels wherever this element painted
+        replace_changed_pixels(accumulated.data_mut(), offscreen.data(), &initial_backdrop);
+    }
+
+    // Composite the accumulated result onto the parent
+    let mut temp_mask = None;
+    let mask_ref = resolve_clip_mask(&band_state.clip_region, &mut temp_mask, band_w, band_h);
+    let mask_ref = match mask_ref {
+        None => return,
+        Some(m) => m,
+    };
+
+    extract_and_composite_contribution(
+        pixmap,
+        &accumulated,
+        &initial_backdrop,
+        u8_to_blend_mode(params.blend_mode),
+        params.alpha as f32,
+        mask_ref,
+    );
+}
+
+/// Replace pixels in `target` with pixels from `source` wherever `source`
+/// differs from `backdrop`. Used for knockout group per-element compositing
+/// where each element replaces (not blends with) previous elements.
+fn replace_changed_pixels(target: &mut [u8], source: &[u8], backdrop: &[u8]) {
+    for i in (0..target.len()).step_by(4) {
+        if source[i] != backdrop[i]
+            || source[i + 1] != backdrop[i + 1]
+            || source[i + 2] != backdrop[i + 2]
+            || source[i + 3] != backdrop[i + 3]
+        {
+            target[i..i + 4].copy_from_slice(&source[i..i + 4]);
+        }
+    }
+}
+
+/// Extract pixels that changed relative to a backdrop and composite them
+/// onto a target pixmap with the given blend mode and opacity.
+fn extract_and_composite_contribution(
+    target: &mut Pixmap,
+    source: &Pixmap,
+    backdrop: &[u8],
+    blend_mode: tiny_skia::BlendMode,
+    opacity: f32,
+    clip_mask: Option<&tiny_skia::Mask>,
+) {
+    let w = target.width();
+    let h = target.height();
+    let Some(mut contribution) = Pixmap::new(w, h) else {
+        return;
+    };
+    let src_data = source.data();
+    let contrib_data = contribution.data_mut();
+
+    for (i, chunk) in contrib_data.chunks_exact_mut(4).enumerate() {
+        let off = i * 4;
+        if src_data[off] != backdrop[off]
+            || src_data[off + 1] != backdrop[off + 1]
+            || src_data[off + 2] != backdrop[off + 2]
+            || src_data[off + 3] != backdrop[off + 3]
+        {
+            chunk.copy_from_slice(&src_data[off..off + 4]);
+        }
+    }
+
+    let paint = tiny_skia::PixmapPaint {
+        opacity,
+        blend_mode,
+        quality: tiny_skia::FilterQuality::Nearest,
+    };
+    target.draw_pixmap(
+        0,
+        0,
+        contribution.as_ref(),
+        &paint,
+        Transform::identity(),
+        clip_mask,
+    );
 }
 
 /// Render soft-masked content into a band.
@@ -3691,6 +3804,14 @@ fn render_group_to_viewport(
     effective_dpi: f64,
     icc: Option<&IccCache>,
 ) {
+    if params.knockout {
+        render_knockout_group_to_viewport(
+            pixmap, state, elements, params, vp_x, vp_y, scale_x, scale_y, out_w, out_h,
+            effective_dpi, icc,
+        );
+        return;
+    }
+
     let Some(mut offscreen) = Pixmap::new(out_w, out_h) else {
         return;
     };
@@ -3745,6 +3866,80 @@ fn render_group_to_viewport(
         };
         pixmap.draw_pixmap(0, 0, offscreen.as_ref(), &paint, Transform::identity(), mask_ref);
     }
+}
+
+/// Render a knockout transparency group for viewport rendering.
+#[allow(clippy::too_many_arguments)]
+fn render_knockout_group_to_viewport(
+    pixmap: &mut Pixmap,
+    state: &mut BandState,
+    elements: &DisplayList,
+    params: &stet_core::display_list::GroupParams,
+    vp_x: f32,
+    vp_y: f32,
+    scale_x: f32,
+    scale_y: f32,
+    out_w: u32,
+    out_h: u32,
+    effective_dpi: f64,
+    icc: Option<&IccCache>,
+) {
+    let Some(mut offscreen) = Pixmap::new(out_w, out_h) else {
+        return;
+    };
+
+    // Initial backdrop: parent pixels for non-isolated, transparent for isolated
+    let initial_backdrop = if !params.isolated {
+        pixmap.data().to_vec()
+    } else {
+        vec![0u8; (out_w * out_h * 4) as usize]
+    };
+
+    let Some(mut accumulated) = Pixmap::new(out_w, out_h) else {
+        return;
+    };
+    accumulated
+        .data_mut()
+        .copy_from_slice(&initial_backdrop);
+
+    // Render each element independently against the initial backdrop.
+    // Knockout semantics: each element replaces (not blends with) previous elements.
+    for elem in elements.elements() {
+        offscreen.data_mut().copy_from_slice(&initial_backdrop);
+
+        let mut elem_state = BandState {
+            clip_region: None,
+            spare_mask: None,
+            clip_mask_cache: HashMap::new(),
+            clip_mask_seen: HashSet::new(),
+            mask_pool: Vec::new(),
+        };
+
+        render_element_to_viewport(
+            &mut offscreen, &mut elem_state, elem, vp_x, vp_y, scale_x, scale_y, out_w, out_h,
+            effective_dpi, icc,
+        );
+
+        // Replace accumulated pixels wherever this element painted
+        replace_changed_pixels(accumulated.data_mut(), offscreen.data(), &initial_backdrop);
+    }
+
+    // Composite the accumulated result onto the parent
+    let mut temp_mask = None;
+    let mask_ref = resolve_clip_mask(&state.clip_region, &mut temp_mask, out_w, out_h);
+    let mask_ref = match mask_ref {
+        None => return,
+        Some(m) => m,
+    };
+
+    extract_and_composite_contribution(
+        pixmap,
+        &accumulated,
+        &initial_backdrop,
+        u8_to_blend_mode(params.blend_mode),
+        params.alpha as f32,
+        mask_ref,
+    );
 }
 
 /// Render soft-masked content for viewport rendering.

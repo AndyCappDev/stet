@@ -80,6 +80,13 @@ fn collect_pages_recursive(
     }
     if let Some(res) = node_dict.get_dict(b"Resources") {
         inherited.resources = Some(res.clone());
+    } else if let Some(PdfObj::Ref(n, g)) = node_dict.get(b"Resources") {
+        // /Resources may be an indirect reference — dereference it
+        if let Ok(resolved) = resolver.resolve(*n, *g) {
+            if let Some(d) = resolved.as_dict() {
+                inherited.resources = Some(d.clone());
+            }
+        }
     }
 
     // Determine node type

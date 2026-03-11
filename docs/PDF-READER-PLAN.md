@@ -255,10 +255,12 @@ impl PdfDocument {
   - Luminosity extraction: Y = 0.2126R + 0.7152G + 0.0722B with backdrop color for transparent pixels ✓
   - Pixel-accurate output matching GhostScript (±1 rounding) on all test PDFs ✓
   - Test PDFs: SoftMask.pdf, SoftMask-Clipped.pdf, SoftMask-Interaction.pdf ✓
-- **E4: Knockout groups, nested transparency, optimization** — TODO
-  - Knockout group semantics (each element composites against group backdrop)
-  - Deeply nested transparency group correctness
-  - Performance optimization for complex transparency stacks
+- **E4: Knockout groups** — DONE
+  - Parse /K flag from transparency group dicts ✓
+  - Per-element knockout compositing: each element renders against initial backdrop, replaces (not blends) in accumulated buffer ✓
+  - Both banded and viewport rendering paths ✓
+  - All 4 combinations tested: isolated±knockout × non-isolated±knockout ✓
+  - Test PDF: knockout_test.pdf (pixel-accurate match with GhostScript) ✓
 - **E5: Deferred SMask features** — TODO
   - SMask `/TR` (transfer function) on soft mask
   - Mask group `/CS` color space (render mask form in specific color space)

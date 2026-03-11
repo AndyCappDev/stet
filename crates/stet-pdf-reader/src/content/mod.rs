@@ -1413,7 +1413,28 @@ impl<'a> ContentInterpreter<'a> {
         if sw == 0 || sh == 0 {
             return Ok(None);
         }
-        let data = self.resolver.stream_data_from_obj(&smask_obj)?;
+        let mut data = self.resolver.stream_data_from_obj(&smask_obj)?;
+
+        // Apply /Decode array if present (e.g. [1 0] inverts the mask)
+        if let Some(decode) = smask_dict.get_array(b"Decode") {
+            if decode.len() >= 2 {
+                let d0 = decode[0].as_f64().unwrap_or(0.0);
+                let d1 = decode[1].as_f64().unwrap_or(1.0);
+                if (d0 - 1.0).abs() < 1e-6 && d1.abs() < 1e-6 {
+                    // /Decode [1 0] — invert all bytes
+                    for b in data.iter_mut() {
+                        *b = 255 - *b;
+                    }
+                } else if (d0).abs() > 1e-6 || (d1 - 1.0).abs() > 1e-6 {
+                    // General linear mapping: output = d0 + (d1-d0) * input/255
+                    for b in data.iter_mut() {
+                        let v = d0 + (d1 - d0) * (*b as f64 / 255.0);
+                        *b = (v * 255.0).round().clamp(0.0, 255.0) as u8;
+                    }
+                }
+            }
+        }
+
         // SMask is always DeviceGray, 8bpc — resample if size differs
         if sw == image_w && sh == image_h {
             Ok(Some(data))
@@ -1526,8 +1547,9 @@ impl<'a> ContentInterpreter<'a> {
             // Compute device-space bbox from form BBox + CTM
             let device_bbox = self.compute_device_bbox(bbox);
 
-            // Extract isolated flag from Group dict
+            // Extract isolated and knockout flags from Group dict
             let isolated = self.get_group_isolated(dict);
+            let knockout = self.get_group_knockout(dict);
 
             // Push Group element to parent display list
             self.display_list.push(DisplayElement::Group {
@@ -1535,6 +1557,7 @@ impl<'a> ContentInterpreter<'a> {
                 params: GroupParams {
                     bbox: device_bbox,
                     isolated,
+                    knockout,
                     blend_mode: group_blend_mode,
                     alpha: group_alpha,
                 },
@@ -1595,6 +1618,21 @@ impl<'a> ContentInterpreter<'a> {
             _ => return false,
         };
         match group_dict.get(b"I") {
+            Some(PdfObj::Bool(b)) => *b,
+            _ => false,
+        }
+    }
+
+    /// Extract the /K (knockout) flag from a Form XObject's /Group dict.
+    fn get_group_knockout(&self, dict: &PdfDict) -> bool {
+        let Some(group_obj) = dict.get(b"Group") else {
+            return false;
+        };
+        let group_dict = match self.resolver.deref(group_obj) {
+            Ok(PdfObj::Dict(d)) => d,
+            _ => return false,
+        };
+        match group_dict.get(b"K") {
             Some(PdfObj::Bool(b)) => *b,
             _ => false,
         }
@@ -2380,7 +2418,21 @@ fn merge_rgb_with_smask(
                 // Unknown — treat as black
             }
         }
-        rgba[dst + 3] = alpha;
+        // Premultiply alpha (tiny-skia expects premultiplied RGBA)
+        if alpha == 255 {
+            rgba[dst + 3] = 255;
+        } else if alpha == 0 {
+            rgba[dst] = 0;
+            rgba[dst + 1] = 0;
+            rgba[dst + 2] = 0;
+            rgba[dst + 3] = 0;
+        } else {
+            let a = alpha as u16;
+            rgba[dst] = ((rgba[dst] as u16 * a + 127) / 255) as u8;
+            rgba[dst + 1] = ((rgba[dst + 1] as u16 * a + 127) / 255) as u8;
+            rgba[dst + 2] = ((rgba[dst + 2] as u16 * a + 127) / 255) as u8;
+            rgba[dst + 3] = alpha;
+        }
     }
     rgba
 }
