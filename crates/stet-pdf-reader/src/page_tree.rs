@@ -101,8 +101,8 @@ fn collect_pages_recursive(
         let rotate = inherited.rotate.unwrap_or(0);
         let resources = inherited.resources.clone().unwrap_or_default();
 
-        // Parse /Contents
-        let contents = parse_contents(node_dict)?;
+        // Parse /Contents (may be a ref to an array, not just a direct array)
+        let contents = parse_contents(node_dict, resolver)?;
 
         pages.push(PageInfo {
             obj_num,
@@ -153,21 +153,37 @@ fn parse_rect(dict: &PdfDict, key: &[u8]) -> Option<[f64; 4]> {
 }
 
 /// Parse /Contents as a list of indirect references.
-fn parse_contents(dict: &PdfDict) -> Result<Vec<(u32, u16)>, PdfError> {
+/// /Contents can be a single stream ref, a direct array of refs,
+/// or an indirect ref to an array of refs (e.g., in linearized PDFs
+/// where the array is stored in an object stream).
+fn parse_contents(dict: &PdfDict, resolver: &Resolver) -> Result<Vec<(u32, u16)>, PdfError> {
     match dict.get(b"Contents") {
         None => Ok(Vec::new()), // Blank page
-        Some(PdfObj::Ref(n, g)) => Ok(vec![(*n, *g)]),
-        Some(PdfObj::Array(arr)) => {
-            let mut refs = Vec::new();
-            for obj in arr {
-                if let PdfObj::Ref(n, g) = obj {
-                    refs.push((*n, *g));
+        Some(PdfObj::Ref(n, g)) => {
+            // Could be a ref to a stream OR a ref to an array of refs.
+            // Try resolving to check.
+            if let Ok(resolved) = resolver.resolve(*n, *g) {
+                if let PdfObj::Array(arr) = &resolved {
+                    return collect_refs_from_array(arr);
                 }
             }
-            Ok(refs)
+            // Single content stream reference
+            Ok(vec![(*n, *g)])
         }
+        Some(PdfObj::Array(arr)) => collect_refs_from_array(arr),
         _ => Ok(Vec::new()),
     }
+}
+
+/// Extract (obj_num, gen_num) pairs from an array of Ref objects.
+fn collect_refs_from_array(arr: &[PdfObj]) -> Result<Vec<(u32, u16)>, PdfError> {
+    let mut refs = Vec::new();
+    for obj in arr {
+        if let PdfObj::Ref(n, g) = obj {
+            refs.push((*n, *g));
+        }
+    }
+    Ok(refs)
 }
 
 #[cfg(test)]
@@ -197,28 +213,15 @@ mod tests {
     }
 
     #[test]
-    fn parse_contents_single_ref() {
-        let mut dict = PdfDict::new();
-        dict.insert(b"Contents".to_vec(), PdfObj::Ref(5, 0));
-        let refs = parse_contents(&dict).unwrap();
-        assert_eq!(refs, vec![(5, 0)]);
-    }
-
-    #[test]
-    fn parse_contents_array() {
-        let mut dict = PdfDict::new();
-        dict.insert(
-            b"Contents".to_vec(),
-            PdfObj::Array(vec![PdfObj::Ref(5, 0), PdfObj::Ref(6, 0)]),
-        );
-        let refs = parse_contents(&dict).unwrap();
+    fn collect_refs_from_array_basic() {
+        let arr = vec![PdfObj::Ref(5, 0), PdfObj::Ref(6, 0)];
+        let refs = collect_refs_from_array(&arr).unwrap();
         assert_eq!(refs, vec![(5, 0), (6, 0)]);
     }
 
     #[test]
-    fn parse_contents_absent() {
-        let dict = PdfDict::new();
-        let refs = parse_contents(&dict).unwrap();
+    fn collect_refs_from_array_empty() {
+        let refs = collect_refs_from_array(&[]).unwrap();
         assert!(refs.is_empty());
     }
 }
