@@ -3608,6 +3608,66 @@ pub fn render_region_prepared(
     pixmap.data().to_vec()
 }
 
+/// Render a full-page display list to RGBA pixels using the banded parallel renderer.
+///
+/// This is the preferred way to render a complete page — it uses rayon parallelism
+/// (when the `parallel` feature is enabled) and L2-cache-friendly band sizing.
+/// For sub-region / zoomed viewport rendering, use `render_region` instead.
+///
+/// Returns RGBA pixel data of size `pixel_w × pixel_h × 4`, composited onto white.
+pub fn render_to_rgba(
+    list: &DisplayList,
+    pixel_w: u32,
+    pixel_h: u32,
+    dpi: f64,
+    icc: Option<&IccCache>,
+) -> Vec<u8> {
+    if pixel_w == 0 || pixel_h == 0 {
+        return vec![0xFF; pixel_w as usize * pixel_h as usize * 4];
+    }
+
+    let icc_cache = match icc {
+        Some(c) => c.clone(),
+        None => IccCache::new(),
+    };
+
+    let mut sink = MemorySink {
+        data: Vec::new(),
+        width: 0,
+    };
+
+    let band_h = select_band_height(pixel_w, pixel_h);
+    if let Err(e) = render_banded_to_sink(pixel_w, pixel_h, band_h, dpi, list, &mut sink, &icc_cache) {
+        eprintln!("render_to_rgba: banded render failed: {e}");
+        return vec![0xFF; pixel_w as usize * pixel_h as usize * 4];
+    }
+
+    sink.data
+}
+
+/// In-memory page sink that collects RGBA rows into a Vec.
+struct MemorySink {
+    data: Vec<u8>,
+    width: u32,
+}
+
+impl stet_core::device::PageSink for MemorySink {
+    fn begin_page(&mut self, width: u32, height: u32) -> Result<(), String> {
+        self.width = width;
+        self.data.reserve(width as usize * height as usize * 4);
+        Ok(())
+    }
+
+    fn write_rows(&mut self, rgba_rows: &[u8], _num_rows: u32) -> Result<(), String> {
+        self.data.extend_from_slice(rgba_rows);
+        Ok(())
+    }
+
+    fn end_page(&mut self) -> Result<(), String> {
+        Ok(())
+    }
+}
+
 /// Render a rectangular viewport region of a display list to RGBA pixels.
 ///
 /// - `list`: The display list to render (in device-space coordinates at the reference DPI)

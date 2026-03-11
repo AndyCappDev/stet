@@ -1126,6 +1126,8 @@ fn write_png_file(path: &str, rgba: &[u8], width: u32, height: u32) {
     let mut encoder = png::Encoder::new(w, width, height);
     encoder.set_color(png::ColorType::Rgba);
     encoder.set_depth(png::BitDepth::Eight);
+    encoder.set_compression(png::Compression::Default);
+    encoder.set_adaptive_filter(png::AdaptiveFilterType::Adaptive);
     let mut writer = encoder.write_header().unwrap();
     writer.write_image_data(rgba).unwrap();
 }

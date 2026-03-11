@@ -244,16 +244,12 @@ impl<'a> PdfDocument<'a> {
 
         let display_list = self.render_page(page, dpi)?;
 
-        let rgba = stet_render::render_region(
+        let rgba = stet_render::render_to_rgba(
             &display_list,
-            0.0,
-            0.0,
-            pixel_w as f64,
-            pixel_h as f64,
             pixel_w,
             pixel_h,
             dpi,
-            None,
+            Some(&self.icc_cache),
         );
 
         Ok((rgba, pixel_w, pixel_h))
