@@ -280,6 +280,18 @@ fn encoding_table_by_name(name: &[u8]) -> &'static [&'static str; 256] {
     }
 }
 
+/// Load a fallback font (Helvetica/NimbusSans) for when no font resource exists.
+pub fn fallback_font() -> Option<PdfFont> {
+    let encoding: [Option<String>; 256] = std::array::from_fn(|i| {
+        WINANSI_ENCODING.get(i).and_then(|&s| {
+            if s.is_empty() { None } else { Some(s.to_string()) }
+        })
+    });
+    let widths = super::standard_fonts::standard_font_widths(b"Helvetica")
+        .unwrap_or([0.0f64; 256]);
+    substitute_font("Helvetica", encoding, widths)
+}
+
 /// Try to load a substitute font for a non-embedded font.
 fn substitute_font(
     base_font: &str,

@@ -809,7 +809,8 @@ impl<'a> ContentInterpreter<'a> {
     fn op_big_k(&mut self) -> Result<(), PdfError> {
         // K c m y k: set stroke color to CMYK
         let n = self.get_numbers(4)?;
-        self.gstate.stroke_color = DeviceColor::from_cmyk(n[0], n[1], n[2], n[3]);
+        self.gstate.stroke_color =
+            DeviceColor::from_cmyk_icc(n[0], n[1], n[2], n[3], &mut self.icc_cache);
         self.gstate.stroke_color_space = ColorSpaceRef::DeviceCMYK;
         Ok(())
     }
@@ -817,7 +818,8 @@ impl<'a> ContentInterpreter<'a> {
     fn op_small_k(&mut self) -> Result<(), PdfError> {
         // k c m y k: set fill color to CMYK
         let n = self.get_numbers(4)?;
-        self.gstate.fill_color = DeviceColor::from_cmyk(n[0], n[1], n[2], n[3]);
+        self.gstate.fill_color =
+            DeviceColor::from_cmyk_icc(n[0], n[1], n[2], n[3], &mut self.icc_cache);
         self.gstate.fill_color_space = ColorSpaceRef::DeviceCMYK;
         self.gstate.fill_pattern = None;
         Ok(())
@@ -922,7 +924,14 @@ impl<'a> ContentInterpreter<'a> {
         let font_ref = match font_ref {
             Some(r) => r,
             None => {
-                self.current_font = None;
+                // Font resource missing — try loading a default substitution font
+                if let Some(fallback) = font::fallback_font() {
+                    let arc = Arc::new(fallback);
+                    self.font_cache.insert(name.to_vec(), Arc::clone(&arc));
+                    self.current_font = Some(arc);
+                } else {
+                    self.current_font = None;
+                }
                 return;
             }
         };
@@ -935,7 +944,14 @@ impl<'a> ContentInterpreter<'a> {
             }
             Err(e) => {
                 eprintln!("warning: font /{}: {}", String::from_utf8_lossy(name), e);
-                self.current_font = None;
+                // Try fallback font on resolution failure too
+                if let Some(fallback) = font::fallback_font() {
+                    let arc = Arc::new(fallback);
+                    self.font_cache.insert(name.to_vec(), Arc::clone(&arc));
+                    self.current_font = Some(arc);
+                } else {
+                    self.current_font = None;
+                }
             }
         }
     }
