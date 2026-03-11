@@ -16,6 +16,7 @@ pub enum Filter {
     ASCII85Decode,
     RunLengthDecode,
     DCTDecode,
+    CCITTFaxDecode,
 }
 
 /// Parse the /Filter and /DecodeParms entries from a stream dict.
@@ -66,12 +67,14 @@ fn filter_from_name(name: &[u8]) -> Result<Filter, PdfError> {
         b"ASCII85Decode" | b"A85" => Ok(Filter::ASCII85Decode),
         b"RunLengthDecode" | b"RL" => Ok(Filter::RunLengthDecode),
         b"DCTDecode" | b"DCT" => Ok(Filter::DCTDecode),
+        b"CCITTFaxDecode" | b"CCF" => Ok(Filter::CCITTFaxDecode),
         // Tolerate truncated filter names from malformed PDFs
         _ if name.starts_with(b"Flate") => Ok(Filter::FlateDecode),
         _ if name.starts_with(b"LZW") => Ok(Filter::LZWDecode),
         _ if name.starts_with(b"ASCIIHex") => Ok(Filter::ASCIIHexDecode),
         _ if name.starts_with(b"ASCII85") => Ok(Filter::ASCII85Decode),
         _ if name.starts_with(b"RunLength") => Ok(Filter::RunLengthDecode),
+        _ if name.starts_with(b"CCITT") => Ok(Filter::CCITTFaxDecode),
         _ => Err(PdfError::UnsupportedFilter(
             String::from_utf8_lossy(name).into(),
         )),
@@ -95,6 +98,7 @@ pub fn decode_stream(
             Filter::ASCII85Decode => decode_ascii85(&data)?,
             Filter::RunLengthDecode => decode_run_length(&data)?,
             Filter::DCTDecode => decode_dct(&data)?,
+            Filter::CCITTFaxDecode => decode_ccittfax(&data, parms)?,
         };
     }
 
@@ -347,6 +351,77 @@ fn decode_dct(data: &[u8]) -> Result<Vec<u8>, PdfError> {
         .decode()
         .map_err(|e| PdfError::DecompressionError(format!("DCTDecode: {e}")))?;
     Ok(pixels)
+}
+
+/// CCITTFaxDecode (Group 3 / Group 4 fax compression).
+fn decode_ccittfax(data: &[u8], parms: Option<&PdfDict>) -> Result<Vec<u8>, PdfError> {
+    use crate::objects::PdfObj;
+
+    let k = parms.and_then(|p| p.get_int(b"K")).unwrap_or(0) as i32;
+    let columns = parms.and_then(|p| p.get_int(b"Columns")).unwrap_or(1728) as u16;
+    let rows_limit = parms.and_then(|p| p.get_int(b"Rows")).unwrap_or(0) as u32;
+    let end_of_block = parms
+        .and_then(|p| match p.get(b"EndOfBlock") {
+            Some(PdfObj::Bool(b)) => Some(*b),
+            _ => None,
+        })
+        .unwrap_or(true);
+    let black_is1 = parms
+        .and_then(|p| match p.get(b"BlackIs1") {
+            Some(PdfObj::Bool(b)) => Some(*b),
+            _ => None,
+        })
+        .unwrap_or(false);
+
+    let row_bytes = (columns as usize + 7) / 8;
+    let mut output = Vec::new();
+    let mut line_count: u32 = 0;
+
+    let mut process_line = |transitions: &[u16]| {
+        if !end_of_block && rows_limit > 0 && line_count >= rows_limit {
+            return;
+        }
+
+        let line = fax::decoder::Line {
+            transitions,
+            width: columns,
+        };
+        let mut row = vec![0u8; row_bytes];
+        for (i, color) in line.pels().enumerate() {
+            if i >= columns as usize {
+                break;
+            }
+            if matches!(color, fax::Color::Black) {
+                row[i / 8] |= 0x80 >> (i % 8);
+            }
+        }
+
+        if !black_is1 {
+            for byte in &mut row {
+                *byte = !*byte;
+            }
+        }
+
+        output.extend_from_slice(&row);
+        line_count += 1;
+    };
+
+    if k < 0 {
+        let height = if rows_limit > 0 {
+            Some(rows_limit as u16)
+        } else {
+            None
+        };
+        fax::decoder::decode_g4(data.iter().copied(), columns, height, |transitions| {
+            process_line(transitions);
+        });
+    } else {
+        fax::decoder::decode_g3(data.iter().copied(), |transitions| {
+            process_line(transitions);
+        });
+    }
+
+    Ok(output)
 }
 
 /// Apply PNG or TIFF predictor to decoded data.

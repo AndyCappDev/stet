@@ -12,6 +12,7 @@ flate2 = "1"
 weezl = "0.1"
 md5 = "0.7"
 jpeg-decoder = "0.3"
+fax = "0.2"
 stet-core.workspace = true
 stet-render.workspace = true
 
