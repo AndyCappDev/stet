@@ -16,6 +16,7 @@ use std::sync::Arc;
 pub type ProfileHash = [u8; 32];
 
 /// Cached ICC transform to sRGB (specific to source layout).
+#[derive(Clone)]
 struct CachedTransform {
     /// 8-bit transform for image data.
     transform_8bit: Arc<dyn TransformExecutor<u8> + Send + Sync>,
@@ -26,6 +27,7 @@ struct CachedTransform {
 }
 
 /// ICC color profile cache and transform manager.
+#[derive(Clone)]
 pub struct IccCache {
     /// SHA-256 hash → parsed ColorProfile.
     profiles: HashMap<ProfileHash, Arc<ColorProfile>>,

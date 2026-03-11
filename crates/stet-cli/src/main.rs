@@ -1059,16 +1059,20 @@ fn run_pdf_input_png(
     file_args: &[String],
     page_filter: &Option<std::collections::HashSet<i32>>,
 ) {
+    let mut icc_cache = stet_core::icc::IccCache::new();
+    icc_cache.search_system_cmyk_profile();
+
     for filename in file_args {
         let data = std::fs::read(filename).unwrap_or_else(|e| {
             eprintln!("Error: cannot read '{}': {}", filename, e);
             std::process::exit(1);
         });
 
-        let doc = PdfDocument::from_bytes(&data).unwrap_or_else(|e| {
-            eprintln!("Error: cannot parse '{}': {}", filename, e);
-            std::process::exit(1);
-        });
+        let doc =
+            PdfDocument::from_bytes_with_icc(&data, icc_cache.clone()).unwrap_or_else(|e| {
+                eprintln!("Error: cannot parse '{}': {}", filename, e);
+                std::process::exit(1);
+            });
 
         let output_base = filename
             .strip_suffix(".pdf")
@@ -1136,12 +1140,15 @@ fn run_pdf_input_viewer(
 ) {
     let (interp_end, viewer_end, dl_sender, advance_rx) = stet_viewer::create_channels();
 
+    let mut icc_cache = stet_core::icc::IccCache::new();
+    icc_cache.search_system_cmyk_profile();
+
     let first_file = file_args.first().cloned();
 
     // Try to get first page size for proper window sizing
     let first_page_size = first_file.as_deref().and_then(|path| {
         let data = std::fs::read(path).ok()?;
-        let doc = PdfDocument::from_bytes(&data).ok()?;
+        let doc = PdfDocument::from_bytes_with_icc(&data, icc_cache.clone()).ok()?;
         doc.page_size(0).ok()
     });
 
@@ -1192,7 +1199,7 @@ fn run_pdf_input_viewer(
                 }
             };
 
-            let doc = match PdfDocument::from_bytes(&data) {
+            let doc = match PdfDocument::from_bytes_with_icc(&data, icc_cache.clone()) {
                 Ok(d) => d,
                 Err(e) => {
                     eprintln!("Error: cannot parse '{}': {}", filename, e);

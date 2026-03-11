@@ -243,13 +243,23 @@ impl ViewerApp {
     }
 
     /// Check for newly arrived pages (non-blocking).
+    /// Limits intake to a few pages per frame so the first frame renders quickly.
     fn poll_pages(&mut self, ctx: &egui::Context) {
         let had_pages = !self.pages.is_empty();
         let mut pages_cleared = false;
         let Some(receiver) = &self.page_receiver else {
             return;
         };
+        // Accept at most a few pages per frame to avoid blocking the first paint.
+        // Control messages (NewJob, JobDone) don't count toward the limit.
+        let mut pages_this_frame = 0;
+        const MAX_PAGES_PER_FRAME: usize = 4;
         loop {
+            if pages_this_frame >= MAX_PAGES_PER_FRAME {
+                // More pages may be waiting — request another repaint to drain them.
+                ctx.request_repaint();
+                break;
+            }
             match receiver.try_recv() {
                 Ok(ViewerMsg::Page(page)) => {
                     let prepared = stet_render::prepare_display_list(&page.display_list);
@@ -267,6 +277,7 @@ impl ViewerApp {
                         cached_render: None,
                         icc_cache,
                     });
+                    pages_this_frame += 1;
                 }
                 Ok(ViewerMsg::NewJob) => {
                     // New job starting — clear accumulated pages

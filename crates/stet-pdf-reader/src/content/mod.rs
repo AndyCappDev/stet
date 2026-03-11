@@ -111,7 +111,12 @@ pub struct ContentInterpreter<'a> {
 
 impl<'a> ContentInterpreter<'a> {
     /// Create a new interpreter.
-    pub fn new(resolver: &'a Resolver<'a>, resources: PdfDict, initial_ctm: Matrix) -> Self {
+    pub fn new(
+        resolver: &'a Resolver<'a>,
+        resources: PdfDict,
+        initial_ctm: Matrix,
+        icc_cache: &IccCache,
+    ) -> Self {
         Self {
             resolver,
             resources,
@@ -127,11 +132,7 @@ impl<'a> ContentInterpreter<'a> {
             depth: 0,
             font_cache: FontCache::new(),
             current_font: None,
-            icc_cache: {
-                let mut cache = IccCache::new();
-                cache.search_system_cmyk_profile();
-                cache
-            },
+            icc_cache: icc_cache.clone(),
             soft_mask_scope: None,
         }
     }

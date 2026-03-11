@@ -29,11 +29,13 @@ use content::ContentInterpreter;
 use resolver::Resolver;
 use stet_core::display_list::DisplayList;
 use stet_core::graphics_state::Matrix;
+use stet_core::icc::IccCache;
 
 /// A parsed PDF document.
 pub struct PdfDocument<'a> {
     resolver: Resolver<'a>,
     pages: Vec<PageInfo>,
+    icc_cache: IccCache,
 }
 
 impl<'a> PdfDocument<'a> {
@@ -75,7 +77,57 @@ impl<'a> PdfDocument<'a> {
         let resolver = Resolver::with_encryption(data, xref, encryption);
         let pages = page_tree::collect_pages(&resolver)?;
 
-        Ok(Self { resolver, pages })
+        let mut icc_cache = IccCache::new();
+        icc_cache.search_system_cmyk_profile();
+
+        Ok(Self {
+            resolver,
+            pages,
+            icc_cache,
+        })
+    }
+
+    /// Parse a PDF from bytes, using a pre-loaded ICC cache.
+    ///
+    /// Use this when the caller already has an `IccCache` with the system
+    /// CMYK profile loaded (e.g., from the PostScript interpreter context).
+    pub fn from_bytes_with_icc(data: &'a [u8], icc_cache: IccCache) -> Result<Self, PdfError> {
+        if !data.starts_with(b"%PDF-") {
+            return Err(PdfError::NotAPdf);
+        }
+
+        let xref = xref::parse_xref(data)?;
+
+        let encryption = if let Some(encrypt_ref) = xref.trailer.get(b"Encrypt") {
+            let temp_resolver = Resolver::new(data, &xref);
+            let encrypt_obj = temp_resolver.deref(encrypt_ref)?;
+            let encrypt_dict = encrypt_obj
+                .as_dict()
+                .ok_or(PdfError::Other("Encrypt is not a dict".into()))?;
+
+            let file_id = xref
+                .trailer
+                .get_array(b"ID")
+                .and_then(|arr| arr.first()?.as_str().map(|s| s.to_vec()))
+                .unwrap_or_default();
+
+            Some(crypto::EncryptionState::try_open(
+                encrypt_dict,
+                &xref.trailer,
+                &file_id,
+            )?)
+        } else {
+            None
+        };
+
+        let resolver = Resolver::with_encryption(data, xref, encryption);
+        let pages = page_tree::collect_pages(&resolver)?;
+
+        Ok(Self {
+            resolver,
+            pages,
+            icc_cache,
+        })
     }
 
     /// Number of pages in the document.
@@ -172,7 +224,8 @@ impl<'a> PdfDocument<'a> {
         let content_data = self.page_contents(page)?;
 
         // Interpret content stream
-        let interpreter = ContentInterpreter::new(&self.resolver, info.resources.clone(), ctm);
+        let interpreter =
+            ContentInterpreter::new(&self.resolver, info.resources.clone(), ctm, &self.icc_cache);
         interpreter.interpret(&content_data)
     }
 
