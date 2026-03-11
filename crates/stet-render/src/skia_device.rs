@@ -3752,6 +3752,82 @@ pub fn render_region_single_band(
     pixmap.data()[start..end].to_vec()
 }
 
+/// Render a viewport region using parallel banded rendering via rayon.
+///
+/// This is the WASM counterpart to the parallel path in `render_banded_to_sink`.
+/// All bands are rendered in parallel using `par_iter`, then assembled into the
+/// final RGBA buffer in order.
+///
+/// Requires the `parallel` feature (rayon). Falls back to sequential rendering
+/// if `parallel` is not enabled.
+#[allow(clippy::too_many_arguments)]
+pub fn render_region_prepared_parallel(
+    list: &DisplayList,
+    prepared: &PreparedDisplayList,
+    vp_x: f64,
+    vp_y: f64,
+    vp_w: f64,
+    vp_h: f64,
+    pixel_w: u32,
+    pixel_h: u32,
+    dpi: f64,
+    icc: Option<&IccCache>,
+) -> Vec<u8> {
+    let (num_bands, band_h) = viewport_band_count(pixel_w, pixel_h);
+
+    if num_bands <= 1 {
+        // Single band — no parallelism needed
+        return render_region_prepared(list, prepared, vp_x, vp_y, vp_w, vp_h, pixel_w, pixel_h, dpi, icc);
+    }
+
+    let render_band = |band_idx: u32| -> Vec<u8> {
+        render_region_single_band(
+            list, prepared,
+            vp_x, vp_y, vp_w, vp_h,
+            pixel_w, pixel_h,
+            band_idx, band_h, num_bands,
+            dpi, icc,
+        )
+    };
+
+    let row_bytes = pixel_w as usize * 4;
+    let mut result = vec![0u8; pixel_w as usize * pixel_h as usize * 4];
+
+    #[cfg(feature = "parallel")]
+    {
+        let chunk_size = rayon::current_num_threads().clamp(1, 8);
+
+        for chunk_start in (0..num_bands).step_by(chunk_size) {
+            let chunk_end = (chunk_start + chunk_size as u32).min(num_bands);
+
+            let rendered: Vec<Vec<u8>> = (chunk_start..chunk_end)
+                .into_par_iter()
+                .map(&render_band)
+                .collect();
+
+            for (i, band_data) in rendered.iter().enumerate() {
+                let band_idx = chunk_start + i as u32;
+                let y_start = (band_idx * band_h) as usize;
+                let dest_start = y_start * row_bytes;
+                let len = band_data.len();
+                result[dest_start..dest_start + len].copy_from_slice(band_data);
+            }
+        }
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        for band_idx in 0..num_bands {
+            let band_data = render_band(band_idx);
+            let y_start = (band_idx * band_h) as usize;
+            let dest_start = y_start * row_bytes;
+            let len = band_data.len();
+            result[dest_start..dest_start + len].copy_from_slice(&band_data);
+        }
+    }
+
+    result
+}
+
 /// Render a full-page display list to RGBA pixels using the banded parallel renderer.
 ///
 /// This is the preferred way to render a complete page — it uses rayon parallelism

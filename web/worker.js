@@ -88,6 +88,7 @@ async function processViewport() {
 
         try {
             const { pageIndex, vpX, vpY, vpW, vpH, pixelW, pixelH, requestId } = req;
+
             const params = viewport_band_params(pixelW, pixelH);
             const numBands = params[0];
             const bandH = params[1];

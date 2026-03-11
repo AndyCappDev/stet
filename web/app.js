@@ -1,4 +1,4 @@
-console.log('stet-web v11 — full-page render for smooth panning');
+console.log('stet-web v12');
 
 // --- State ---
 let workerReady = false;
@@ -249,7 +249,6 @@ function requestViewportRender() {
     const requestId = nextRequestId++;
     pendingRequestId = requestId;
 
-    // Show progress bar (reset to 0%)
     progressBar.style.width = '0%';
     progressContainer.classList.remove('hidden');
 
@@ -348,7 +347,7 @@ function goToPage(index) {
 
 // Zoom steps as DPI values: 150, 300, 600, 1200, 2400, 4800, 9600
 // Stored as scale factors relative to reference DPI (300)
-const ZOOM_STEPS = [0.5, 1, 2, 4, 8, 16, 32];
+const ZOOM_STEPS = [0.5, 1, 2, 4];
 
 // Get the device-space point at the center of the visible area
 function getViewCenter() {
