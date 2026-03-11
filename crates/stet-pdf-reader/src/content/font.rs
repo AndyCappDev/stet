@@ -413,9 +413,15 @@ fn resolve_type3(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
     let encoding = resolve_encoding(font_dict, resolver)?;
 
     // Get CharProcs dict: maps glyph names → content streams
-    let char_procs_dict = font_dict
-        .get_dict(b"CharProcs")
-        .ok_or(PdfError::Other("Type3 font missing CharProcs".into()))?;
+    // May be a direct dict or an indirect reference
+    let char_procs_dict = if let Some(obj) = font_dict.get(b"CharProcs") {
+        match resolver.deref(obj)? {
+            PdfObj::Dict(d) => d,
+            _ => return Err(PdfError::Other("Type3 CharProcs is not a dict".into())),
+        }
+    } else {
+        return Err(PdfError::Other("Type3 font missing CharProcs".into()));
+    };
 
     // Resources for interpreting CharProc streams
     let resources = if let Some(res_ref) = font_dict.get(b"Resources") {
