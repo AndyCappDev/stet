@@ -387,6 +387,71 @@ fn fuzzy_font_match(name: &str) -> Option<&'static str> {
     None
 }
 
+/// Known CID font substitutions for fonts commonly missing on Linux.
+const CID_FONT_SUBSTITUTIONS: &[(&str, &str)] = &[
+    ("ArialUnicodeMS", "DejaVuSans"),
+    ("Arial-BoldMT", "LiberationSans-Bold"),
+    ("Arial-BoldItalicMT", "LiberationSans-BoldItalic"),
+    ("Arial-ItalicMT", "LiberationSans-Italic"),
+    ("ArialMT", "LiberationSans"),
+    ("TimesNewRomanPS-BoldMT", "LiberationSerif-Bold"),
+    ("TimesNewRomanPS-BoldItalicMT", "LiberationSerif-BoldItalic"),
+    ("TimesNewRomanPS-ItalicMT", "LiberationSerif-Italic"),
+    ("TimesNewRomanPSMT", "LiberationSerif"),
+];
+
+/// Try to load a TrueType font from the system font cache.
+///
+/// Used when a CIDFontType2 font is not embedded in the PDF (missing FontFile2).
+/// Falls back to substitution table and fuzzy name matching.
+fn load_system_truetype_font(base_font: &str) -> Result<Vec<u8>, PdfError> {
+    use stet_core::system_fonts::get_system_font_cache;
+
+    let cache = get_system_font_cache();
+
+    // Try exact match first
+    if let Some(path) = cache.get_font_path(base_font) {
+        if let Ok(data) = std::fs::read(path) {
+            return Ok(data);
+        }
+    }
+
+    // Try known substitutions
+    for &(from, to) in CID_FONT_SUBSTITUTIONS {
+        if from == base_font {
+            if let Some(path) = cache.get_font_path(to) {
+                if let Ok(data) = std::fs::read(path) {
+                    return Ok(data);
+                }
+            }
+        }
+    }
+
+    // Fuzzy family match
+    let lower = base_font.to_ascii_lowercase();
+    let is_bold = lower.contains("bold") || lower.contains("demi");
+    let is_italic = lower.contains("italic") || lower.contains("oblique");
+
+    for (ps_name, path) in cache.iter() {
+        let ps_lower = ps_name.to_ascii_lowercase();
+        let family = lower.split('-').next().unwrap_or(&lower);
+        if ps_lower.contains(family) || family.contains(&ps_lower.split('-').next().unwrap_or("")) {
+            let name_bold = ps_lower.contains("bold") || ps_lower.contains("demi");
+            let name_italic = ps_lower.contains("italic") || ps_lower.contains("oblique");
+            if name_bold == is_bold && name_italic == is_italic {
+                if let Ok(data) = std::fs::read(path) {
+                    return Ok(data);
+                }
+            }
+        }
+    }
+
+    Err(PdfError::Other(format!(
+        "CIDFontType2 font '{}' not found on system",
+        base_font
+    )))
+}
+
 /// Resolve a Type 3 font: glyphs defined as content streams.
 fn resolve_type3(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, PdfError> {
     let first_char = font_dict.get_int(b"FirstChar").unwrap_or(0) as usize;
@@ -464,7 +529,6 @@ fn resolve_type3(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
             }
         }
     }
-
     Ok(PdfFont::Type3(Type3PdfFont {
         char_procs,
         resources,
@@ -483,6 +547,42 @@ fn resolve_type1(
     let desc = descriptor
         .as_ref()
         .ok_or(PdfError::Other("Type1 font missing FontDescriptor".into()))?;
+    // Check FontFile first (traditional Type 1), then FontFile3 (CFF or Type1C)
+    if let Some(ff3_ref) = desc.get(b"FontFile3") {
+        // FontFile3 may contain CFF (Type1C) data — handle via CFF parser
+        let ff3_obj = resolver.deref(ff3_ref)?;
+        let ff3_dict = ff3_obj.as_dict();
+        let subtype = ff3_dict.and_then(|d| d.get_name(b"Subtype")).unwrap_or(b"");
+        if subtype == b"Type1C" || subtype == b"CIDFontType0C" || subtype == b"OpenType" {
+            let raw_data = resolver.stream_data_from_obj(&ff3_obj)?;
+            // If data starts with "OTTO" it's an OpenType container — extract CFF table
+            let font_data = if raw_data.starts_with(b"OTTO") {
+                use stet_core::truetype::find_table;
+                let (offset, length) = find_table(&raw_data, b"CFF ")
+                    .ok_or(PdfError::Other("OpenType font has no CFF table".into()))?;
+                raw_data[offset..offset + length].to_vec()
+            } else {
+                raw_data
+            };
+            let fonts = parse_cff(&font_data)
+                .map_err(|e| PdfError::Other(format!("CFF parse error: {e}")))?;
+            let font = fonts
+                .into_iter()
+                .next()
+                .ok_or(PdfError::Other("CFF contains no fonts".into()))?;
+
+            let fm = font.font_matrix;
+            let font_matrix = Matrix::new(fm[0], fm[1], fm[2], fm[3], fm[4], fm[5]);
+
+            return Ok(PdfFont::Cff(CffPdfFont {
+                font,
+                encoding,
+                widths,
+                font_matrix,
+            }));
+        }
+    }
+
     let ff_ref = desc
         .get(b"FontFile")
         .or_else(|| desc.get(b"FontFile3"))
@@ -626,10 +726,24 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
 
     match cid_subtype {
         b"CIDFontType2" => {
-            let ff_ref = desc
-                .get(b"FontFile2")
-                .ok_or(PdfError::Other("CIDFontType2 missing FontFile2".into()))?;
-            let data = resolver.stream_data_from_obj(&resolver.deref(ff_ref)?)?;
+            let data = if let Some(ff_ref) = desc.get(b"FontFile2") {
+                resolver.stream_data_from_obj(&resolver.deref(ff_ref)?)?
+            } else {
+                // Font not embedded — try system font lookup
+                let base_font = cid_font_dict
+                    .get_name(b"BaseFont")
+                    .map(|n| {
+                        let s = String::from_utf8_lossy(n);
+                        // Strip subset prefix (e.g. "ABCDEF+PalatinoLinotype-BoldItalic")
+                        if s.len() > 7 && s.as_bytes().get(6) == Some(&b'+') {
+                            s[7..].to_string()
+                        } else {
+                            s.to_string()
+                        }
+                    })
+                    .unwrap_or_default();
+                load_system_truetype_font(&base_font)?
+            };
 
             let units_per_em = get_units_per_em(&data) as f64;
             let cmap = parse_cmap(&data);

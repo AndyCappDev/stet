@@ -1092,11 +1092,14 @@ impl<'a> ContentInterpreter<'a> {
                 self.gstate.text_matrix = self.gstate.text_matrix.concat(&advance);
             }
         } else if font.is_type3() {
-            // Type 3 font: each glyph is a content stream
+            // Type 3 font: each glyph is a content stream.
+            // Widths are in glyph space — scale by font matrix to get text space.
+            let fm = font.font_matrix();
             for &byte in text {
                 self.show_type3_glyph(&font, byte);
 
-                let w0 = font.glyph_width(byte);
+                let w0_glyph = font.glyph_width(byte);
+                let w0 = w0_glyph * fm.a;
                 let mut tx = w0 * font_size + char_spacing;
                 if byte == b' ' {
                     tx += word_spacing;

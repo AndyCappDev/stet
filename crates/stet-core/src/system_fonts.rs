@@ -43,6 +43,11 @@ impl SystemFontCache {
         self.fonts.get(ps_name).map(|p| p.as_path())
     }
 
+    /// Iterate over all cached fonts (PostScript name, file path).
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &Path)> {
+        self.fonts.iter().map(|(k, v)| (k.as_str(), v.as_path()))
+    }
+
     fn cache_path() -> Option<PathBuf> {
         dirs_cache().map(|d| d.join("stet").join("system_fonts.json"))
     }
