@@ -19,7 +19,7 @@ use crate::resolver::Resolver;
 
 use self::color_space::{
     ResolvedColorSpace, components_to_device_color_icc, convert_icc_image_data,
-    resolve_color_space, resolve_color_space_obj, to_image_color_space,
+    painted_channels_for_cs, resolve_color_space, resolve_color_space_obj, to_image_color_space,
 };
 use self::graphics_state::{ColorSpaceRef, PdfGraphicsState};
 
@@ -783,6 +783,7 @@ impl<'a> ContentInterpreter<'a> {
         let g = self.pop_number()?;
         self.gstate.stroke_color = DeviceColor::from_gray(g);
         self.gstate.stroke_color_space = ColorSpaceRef::DeviceGray;
+        self.gstate.stroke_painted_channels = 0;
         Ok(())
     }
 
@@ -791,6 +792,7 @@ impl<'a> ContentInterpreter<'a> {
         let g = self.pop_number()?;
         self.gstate.fill_color = DeviceColor::from_gray(g);
         self.gstate.fill_color_space = ColorSpaceRef::DeviceGray;
+        self.gstate.fill_painted_channels = 0;
         self.gstate.fill_pattern = None;
         Ok(())
     }
@@ -800,6 +802,7 @@ impl<'a> ContentInterpreter<'a> {
         let n = self.get_numbers(3)?;
         self.gstate.stroke_color = DeviceColor::from_rgb(n[0], n[1], n[2]);
         self.gstate.stroke_color_space = ColorSpaceRef::DeviceRGB;
+        self.gstate.stroke_painted_channels = 0;
         Ok(())
     }
 
@@ -808,6 +811,7 @@ impl<'a> ContentInterpreter<'a> {
         let n = self.get_numbers(3)?;
         self.gstate.fill_color = DeviceColor::from_rgb(n[0], n[1], n[2]);
         self.gstate.fill_color_space = ColorSpaceRef::DeviceRGB;
+        self.gstate.fill_painted_channels = 0;
         self.gstate.fill_pattern = None;
         Ok(())
     }
@@ -818,6 +822,7 @@ impl<'a> ContentInterpreter<'a> {
         self.gstate.stroke_color =
             DeviceColor::from_cmyk_icc(n[0], n[1], n[2], n[3], &mut self.icc_cache);
         self.gstate.stroke_color_space = ColorSpaceRef::DeviceCMYK;
+        self.gstate.stroke_painted_channels = stet_core::device::CMYK_ALL;
         Ok(())
     }
 
@@ -827,6 +832,7 @@ impl<'a> ContentInterpreter<'a> {
         self.gstate.fill_color =
             DeviceColor::from_cmyk_icc(n[0], n[1], n[2], n[3], &mut self.icc_cache);
         self.gstate.fill_color_space = ColorSpaceRef::DeviceCMYK;
+        self.gstate.fill_painted_channels = stet_core::device::CMYK_ALL;
         self.gstate.fill_pattern = None;
         Ok(())
     }
@@ -872,6 +878,7 @@ impl<'a> ContentInterpreter<'a> {
             return Ok(());
         }
         let nums = self.get_numbers(n)?;
+        self.gstate.stroke_painted_channels = painted_channels_for_cs(&cs);
         self.gstate.stroke_color =
             components_to_device_color_icc(&cs, &nums, Some(&mut self.icc_cache));
         Ok(())
@@ -892,6 +899,7 @@ impl<'a> ContentInterpreter<'a> {
             return Ok(());
         }
         let nums = self.get_numbers(n)?;
+        self.gstate.fill_painted_channels = painted_channels_for_cs(&cs);
         self.gstate.fill_color =
             components_to_device_color_icc(&cs, &nums, Some(&mut self.icc_cache));
         self.gstate.fill_pattern = None;
@@ -1902,6 +1910,9 @@ impl<'a> ContentInterpreter<'a> {
         }
         if let Some(PdfObj::Bool(op)) = gs_dict.get(b"op") {
             self.gstate.overprint = *op;
+        }
+        if let Some(opm) = gs_dict.get_int(b"OPM") {
+            self.gstate.overprint_mode = opm as i32;
         }
         if let Some(ca) = gs_dict.get_f64(b"CA") {
             self.gstate.stroke_alpha = ca;

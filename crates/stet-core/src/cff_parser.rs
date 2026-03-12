@@ -46,6 +46,9 @@ pub struct CffFont {
     pub fd_select: Vec<u8>,
     /// Registry-Ordering-Supplement (CID only).
     pub ros: Option<(String, String, i32)>,
+    /// CID → GID mapping for CID-keyed fonts.
+    /// In CID fonts, the charset encodes GID → CID; this is the reverse map.
+    pub cid_to_gid: Vec<u16>,
 }
 
 /// Per-FD entry for CID fonts (from FDArray).
@@ -104,6 +107,7 @@ pub fn parse_cff(data: &[u8]) -> Result<Vec<CffFont>, String> {
             fd_array: Vec::new(),
             fd_select: Vec::new(),
             ros: None,
+            cid_to_gid: Vec::new(),
         };
 
         // Parse Top DICT
@@ -163,6 +167,13 @@ pub fn parse_cff(data: &[u8]) -> Result<Vec<CffFont>, String> {
             font.charset = get_predefined_charset(charset_val, n_glyphs, &string_index);
         } else {
             font.charset = parse_charset(data, charset_val as usize, n_glyphs, &string_index)?;
+        }
+
+        // Build CID→GID reverse mapping for CID-keyed fonts.
+        // In CID fonts, charset values are CID values (not SIDs).
+        if font.is_cid && charset_val > 2 {
+            font.cid_to_gid =
+                build_cid_to_gid(data, charset_val as usize, n_glyphs)?;
         }
 
         // Encoding (only for name-keyed fonts, op 16)
@@ -584,6 +595,75 @@ fn parse_charset(
     }
 
     Ok(names)
+}
+
+/// Build a CID→GID reverse mapping from a CID-keyed CFF charset.
+/// In CID fonts, charset values are CID values. GID 0 always maps to CID 0.
+/// Returns a Vec where index = CID and value = GID.
+fn build_cid_to_gid(data: &[u8], offset: usize, n_glyphs: usize) -> Result<Vec<u16>, String> {
+    // Parse charset to get GID→CID pairs
+    let mut gid_to_cid: Vec<u16> = vec![0]; // GID 0 → CID 0
+    if n_glyphs <= 1 || offset >= data.len() {
+        return Ok(Vec::new());
+    }
+    let fmt = data[offset];
+    let mut pos = offset + 1;
+    match fmt {
+        0 => {
+            for _ in 0..n_glyphs - 1 {
+                if pos + 1 >= data.len() {
+                    break;
+                }
+                let cid = u16::from_be_bytes([data[pos], data[pos + 1]]);
+                pos += 2;
+                gid_to_cid.push(cid);
+            }
+        }
+        1 => {
+            while gid_to_cid.len() < n_glyphs {
+                if pos + 2 >= data.len() {
+                    break;
+                }
+                let first = u16::from_be_bytes([data[pos], data[pos + 1]]);
+                let n_left = data[pos + 2] as u16;
+                pos += 3;
+                for cid in first..=first + n_left {
+                    if gid_to_cid.len() >= n_glyphs {
+                        break;
+                    }
+                    gid_to_cid.push(cid);
+                }
+            }
+        }
+        2 => {
+            while gid_to_cid.len() < n_glyphs {
+                if pos + 3 >= data.len() {
+                    break;
+                }
+                let first = u16::from_be_bytes([data[pos], data[pos + 1]]);
+                let n_left = u16::from_be_bytes([data[pos + 2], data[pos + 3]]);
+                pos += 4;
+                for cid in first..=first + n_left {
+                    if gid_to_cid.len() >= n_glyphs {
+                        break;
+                    }
+                    gid_to_cid.push(cid);
+                }
+            }
+        }
+        _ => return Err(format!("Unknown charset format: {fmt}")),
+    }
+
+    // Find max CID to size the reverse map
+    let max_cid = gid_to_cid.iter().copied().max().unwrap_or(0) as usize;
+    let mut cid_to_gid = vec![0xFFFF_u16; max_cid + 1];
+    for (gid, &cid) in gid_to_cid.iter().enumerate() {
+        let cid_idx = cid as usize;
+        if cid_idx < cid_to_gid.len() {
+            cid_to_gid[cid_idx] = gid as u16;
+        }
+    }
+    Ok(cid_to_gid)
 }
 
 /// Return glyph names for a predefined charset ID.

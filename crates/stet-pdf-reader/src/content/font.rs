@@ -1235,8 +1235,17 @@ impl CidTrueTypePdfFont {
 
 impl CidCffPdfFont {
     fn glyph_path_cid(&self, cid: u16) -> Option<PsPath> {
-        // In CID-keyed CFF, CID maps directly to GID (charstring index)
-        let gid = cid as usize;
+        // In CID-keyed CFF, use cid_to_gid mapping if available,
+        // otherwise fall back to CID = GID (identity mapping).
+        let gid = if !self.font.cid_to_gid.is_empty() {
+            let g = *self.font.cid_to_gid.get(cid as usize)?;
+            if g == 0xFFFF {
+                return None; // unmapped CID
+            }
+            g as usize
+        } else {
+            cid as usize
+        };
         if gid >= self.font.char_strings.len() {
             return None;
         }

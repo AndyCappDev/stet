@@ -250,6 +250,50 @@ fn build_skia_path(path: &PsPath) -> Option<tiny_skia::Path> {
     pb.finish()
 }
 
+/// Convert a tiny-skia Path back to a PsPath.
+/// Used for overprint stroke handling where we convert a stroked outline to a fill.
+fn skia_path_to_ps_path(path: &tiny_skia::Path) -> PsPath {
+    let mut segments = Vec::new();
+    for seg in path.segments() {
+        match seg {
+            tiny_skia::PathSegment::MoveTo(p) => {
+                segments.push(PathSegment::MoveTo(p.x as f64, p.y as f64));
+            }
+            tiny_skia::PathSegment::LineTo(p) => {
+                segments.push(PathSegment::LineTo(p.x as f64, p.y as f64));
+            }
+            tiny_skia::PathSegment::QuadTo(p1, p2) => {
+                // Convert quadratic to cubic: control points at 2/3 along quad controls
+                let last = segments.last().map(|s| match s {
+                    PathSegment::MoveTo(x, y) | PathSegment::LineTo(x, y) => (*x, *y),
+                    PathSegment::CurveTo { x3, y3, .. } => (*x3, *y3),
+                    PathSegment::ClosePath => (0.0, 0.0),
+                }).unwrap_or((0.0, 0.0));
+                let (x0, y0) = last;
+                let cx1 = x0 + 2.0 / 3.0 * (p1.x as f64 - x0);
+                let cy1 = y0 + 2.0 / 3.0 * (p1.y as f64 - y0);
+                let cx2 = p2.x as f64 + 2.0 / 3.0 * (p1.x as f64 - p2.x as f64);
+                let cy2 = p2.y as f64 + 2.0 / 3.0 * (p1.y as f64 - p2.y as f64);
+                segments.push(PathSegment::CurveTo {
+                    x1: cx1, y1: cy1, x2: cx2, y2: cy2,
+                    x3: p2.x as f64, y3: p2.y as f64,
+                });
+            }
+            tiny_skia::PathSegment::CubicTo(p1, p2, p3) => {
+                segments.push(PathSegment::CurveTo {
+                    x1: p1.x as f64, y1: p1.y as f64,
+                    x2: p2.x as f64, y2: p2.y as f64,
+                    x3: p3.x as f64, y3: p3.y as f64,
+                });
+            }
+            tiny_skia::PathSegment::Close => {
+                segments.push(PathSegment::ClosePath);
+            }
+        }
+    }
+    PsPath { segments }
+}
+
 /// Convert PostScript FillRule to tiny-skia FillRule.
 fn to_fill_rule(rule: &FillRule) -> SkiaFillRule {
     match rule {
@@ -478,6 +522,10 @@ struct BandState {
     clip_mask_seen: HashSet<u64>,
     /// Pool of recycled masks to avoid alloc/dealloc (mmap/munmap) per band.
     mask_pool: Vec<Mask>,
+    /// Per-pixel CMYK tracking buffer for overprint simulation.
+    /// Only allocated when the display list contains overprint elements.
+    /// Layout: [C, M, Y, K] as f32 per pixel, band_w * band_h * 4 entries.
+    cmyk_buffer: Option<Vec<f32>>,
 }
 
 /// Maximum masks to keep in the recycling pool. Enough to avoid alloc churn
@@ -1764,19 +1812,55 @@ fn render_element_to_band_offset(
     let y_off = y_start as f32;
     match element {
         DisplayElement::Fill { path, params } => {
-            let Some(skia_path) = build_skia_path(path) else {
-                return;
-            };
-            let mut temp_mask = None;
-            let Some(mask_ref) =
-                resolve_clip_mask(&band_state.clip_region, &mut temp_mask, band_w, band_h)
-            else {
-                return;
-            };
-            let paint = to_paint_alpha(&params.color, params.alpha, params.blend_mode);
-            let transform = offset_transform_xy(to_transform(&params.ctm), x_off, y_off);
-            let fill_rule = to_fill_rule(&params.fill_rule);
-            pixmap.fill_path(&skia_path, &paint, fill_rule, transform, mask_ref);
+            // Check if this is an overprint fill needing CMYK simulation
+            let needs_overprint = params.overprint
+                && params.painted_channels != 0
+                && band_state.cmyk_buffer.is_some();
+
+            if needs_overprint {
+                let mut cmyk_buf = band_state.cmyk_buffer.take().unwrap();
+                render_overprint_fill(
+                    pixmap,
+                    &mut cmyk_buf,
+                    band_state,
+                    path,
+                    params,
+                    x_off,
+                    y_off,
+                    band_w,
+                    band_h,
+                    icc,
+                );
+                band_state.cmyk_buffer = Some(cmyk_buf);
+            } else {
+                let Some(skia_path) = build_skia_path(path) else {
+                    return;
+                };
+                let mut temp_mask = None;
+                let Some(mask_ref) =
+                    resolve_clip_mask(&band_state.clip_region, &mut temp_mask, band_w, band_h)
+                else {
+                    return;
+                };
+                let paint = to_paint_alpha(&params.color, params.alpha, params.blend_mode);
+                let transform = offset_transform_xy(to_transform(&params.ctm), x_off, y_off);
+                let fill_rule = to_fill_rule(&params.fill_rule);
+                pixmap.fill_path(&skia_path, &paint, fill_rule, transform, mask_ref);
+
+                // Update CMYK tracking buffer for non-overprint fills
+                if let Some(ref mut cmyk_buf) = band_state.cmyk_buffer {
+                    update_cmyk_buffer_for_fill(
+                        cmyk_buf,
+                        path,
+                        params,
+                        x_off,
+                        y_off,
+                        band_w,
+                        band_h,
+                        &band_state.clip_region,
+                    );
+                }
+            }
         }
         DisplayElement::Stroke { path, params } => {
             let stroke = build_stroke(params, dpi);
@@ -1788,18 +1872,66 @@ fn render_element_to_band_offset(
             } else {
                 path
             };
-            let Some(skia_path) = build_skia_path(draw_path) else {
-                return;
-            };
-            let mut temp_mask = None;
-            let Some(mask_ref) =
-                resolve_clip_mask(&band_state.clip_region, &mut temp_mask, band_w, band_h)
-            else {
-                return;
-            };
-            let paint = to_paint_alpha(&params.color, params.alpha, params.blend_mode);
-            let transform = offset_transform_xy(to_transform(&params.ctm), x_off, y_off);
-            pixmap.stroke_path(&skia_path, &paint, &stroke, transform, mask_ref);
+
+            // Check for overprint stroke needing CMYK simulation
+            let needs_overprint = params.overprint
+                && params.painted_channels != 0
+                && band_state.cmyk_buffer.is_some();
+
+            if needs_overprint {
+                // Convert stroke to fill path and use overprint fill logic
+                let Some(skia_path) = build_skia_path(draw_path) else {
+                    return;
+                };
+                let transform = offset_transform_xy(to_transform(&params.ctm), x_off, y_off);
+                let resolution_scale = (transform.sx * transform.sx + transform.sy * transform.sy).sqrt().max(1.0);
+                if let Some(transformed) = skia_path.clone().transform(transform) {
+                    if let Some(stroked) = transformed.stroke(&stroke, resolution_scale) {
+                        let fill_params = FillParams {
+                            color: params.color.clone(),
+                            fill_rule: FillRule::NonZeroWinding,
+                            ctm: Matrix::identity(),
+                            is_text_glyph: false,
+                            overprint: params.overprint,
+                            overprint_mode: params.overprint_mode,
+                            painted_channels: params.painted_channels,
+                            spot_color: params.spot_color.clone(),
+                            rendering_intent: params.rendering_intent,
+                            transfer: params.transfer.clone(),
+                            halftone: params.halftone.clone(),
+                            bg_ucr: params.bg_ucr.clone(),
+                            alpha: params.alpha,
+                            blend_mode: params.blend_mode,
+                        };
+                        let stroked_path = skia_path_to_ps_path(&stroked);
+                        let mut cmyk_buf = band_state.cmyk_buffer.take().unwrap();
+                        render_overprint_fill(
+                            pixmap,
+                            &mut cmyk_buf,
+                            band_state,
+                            &stroked_path,
+                            &fill_params,
+                            0.0, 0.0, // transform already applied
+                            band_w, band_h,
+                            icc,
+                        );
+                        band_state.cmyk_buffer = Some(cmyk_buf);
+                    }
+                }
+            } else {
+                let Some(skia_path) = build_skia_path(draw_path) else {
+                    return;
+                };
+                let mut temp_mask = None;
+                let Some(mask_ref) =
+                    resolve_clip_mask(&band_state.clip_region, &mut temp_mask, band_w, band_h)
+                else {
+                    return;
+                };
+                let paint = to_paint_alpha(&params.color, params.alpha, params.blend_mode);
+                let transform = offset_transform_xy(to_transform(&params.ctm), x_off, y_off);
+                pixmap.stroke_path(&skia_path, &paint, &stroke, transform, mask_ref);
+            }
         }
         DisplayElement::Clip { path, params } => {
             clip_path_band_offset(band_state, path, params, x_start, y_start, band_w, band_h);
@@ -2037,6 +2169,34 @@ fn render_group_to_band(
         None
     };
 
+    // Allocate CMYK buffer for the group if overprint tracking is needed.
+    // Two cases: (1) group contains overprint elements, or (2) parent has a
+    // cmyk_buffer (meaning we're inside an overprint-tracking context and need
+    // to track fills so sibling groups can read correct backdrop values).
+    let group_cmyk = if has_overprint_elements(elements) || band_state.cmyk_buffer.is_some() {
+        let buf_size = eff_w as usize * eff_h as usize * 4;
+        let mut buf = vec![0.0f32; buf_size];
+        // Copy parent CMYK buffer into group so overprint fills and non-overprint
+        // fill tracking both see the correct backdrop channel values.
+        if let Some(ref parent_cmyk) = band_state.cmyk_buffer {
+            let parent_stride = band_w as usize * 4;
+            let group_stride = eff_w as usize * 4;
+            for gy in 0..eff_h as usize {
+                let py = crop_y as usize + gy;
+                if py < band_h as usize {
+                    let p_start = py * parent_stride + crop_x as usize * 4;
+                    let g_start = gy * group_stride;
+                    let copy_len = group_stride.min(parent_stride - crop_x as usize * 4);
+                    buf[g_start..g_start + copy_len]
+                        .copy_from_slice(&parent_cmyk[p_start..p_start + copy_len]);
+                }
+            }
+        }
+        Some(buf)
+    } else {
+        None
+    };
+
     // Fresh BandState for group (clean clip, empty caches)
     let mut group_band = BandState {
         clip_region: None,
@@ -2044,6 +2204,7 @@ fn render_group_to_band(
         clip_mask_cache: HashMap::new(),
         clip_mask_seen: HashSet::new(),
         mask_pool: Vec::new(),
+        cmyk_buffer: group_cmyk,
     };
 
     // Render group elements into offscreen
@@ -2086,6 +2247,24 @@ fn render_group_to_band(
             &paint,
             Transform::identity(),
             mask_ref,
+        );
+    }
+
+    // Write group CMYK buffer back to parent so subsequent sibling groups
+    // and overprint fills see the correct backdrop values.
+    if let (Some(group_cmyk), Some(parent_cmyk)) =
+        (&group_band.cmyk_buffer, &mut band_state.cmyk_buffer)
+    {
+        copy_cmyk_buffer_to_parent(
+            parent_cmyk,
+            group_cmyk,
+            offscreen.data(),
+            crop_x as usize,
+            crop_y as usize,
+            eff_w as usize,
+            eff_h as usize,
+            band_w as usize,
+            band_h as usize,
         );
     }
 }
@@ -2144,9 +2323,39 @@ fn render_knockout_group_to_band(
         .data_mut()
         .copy_from_slice(&initial_backdrop);
 
+    // Initial CMYK values for the knockout group (copied from parent or zeros)
+    let needs_cmyk = has_overprint_elements(elements) || band_state.cmyk_buffer.is_some();
+    let initial_cmyk = if needs_cmyk {
+        let buf_size = eff_w as usize * eff_h as usize * 4;
+        let mut buf = vec![0.0f32; buf_size];
+        if let Some(ref parent_cmyk) = band_state.cmyk_buffer {
+            let parent_stride = band_w as usize * 4;
+            let group_stride = eff_w as usize * 4;
+            for gy in 0..eff_h as usize {
+                let py = crop_y as usize + gy;
+                if py < band_h as usize {
+                    let p_start = py * parent_stride + crop_x as usize * 4;
+                    let g_start = gy * group_stride;
+                    let copy_len = group_stride.min(parent_stride - crop_x as usize * 4);
+                    buf[g_start..g_start + copy_len]
+                        .copy_from_slice(&parent_cmyk[p_start..p_start + copy_len]);
+                }
+            }
+        }
+        Some(buf)
+    } else {
+        None
+    };
+
+    // Track accumulated CMYK values across knockout elements
+    let mut accumulated_cmyk = initial_cmyk.clone();
+
     // Render each element independently against the initial backdrop.
     for elem in elements.elements() {
         offscreen.data_mut().copy_from_slice(&initial_backdrop);
+
+        // Each knockout element starts with the initial backdrop CMYK
+        let ko_cmyk = initial_cmyk.clone();
 
         let mut elem_band = BandState {
             clip_region: None,
@@ -2154,12 +2363,20 @@ fn render_knockout_group_to_band(
             clip_mask_cache: HashMap::new(),
             clip_mask_seen: HashSet::new(),
             mask_pool: Vec::new(),
+            cmyk_buffer: ko_cmyk,
         };
 
         render_element_to_band_offset(
             &mut offscreen, &mut elem_band, elem, eff_x_start, eff_y_start,
             eff_w, eff_h, dpi, icc,
         );
+
+        // For changed pixels, also update accumulated CMYK
+        if let (Some(elem_cmyk), Some(acc_cmyk)) =
+            (&elem_band.cmyk_buffer, &mut accumulated_cmyk)
+        {
+            replace_changed_cmyk(acc_cmyk, elem_cmyk, offscreen.data(), &initial_backdrop);
+        }
 
         replace_changed_pixels(accumulated.data_mut(), offscreen.data(), &initial_backdrop);
     }
@@ -2174,6 +2391,23 @@ fn render_knockout_group_to_band(
     composite_non_isolated_group_cropped(
         pixmap, &accumulated, &initial_backdrop, params, mask_ref, crop_x, crop_y,
     );
+
+    // Write accumulated CMYK back to parent
+    if let (Some(acc_cmyk), Some(parent_cmyk)) =
+        (&accumulated_cmyk, &mut band_state.cmyk_buffer)
+    {
+        copy_cmyk_buffer_to_parent(
+            parent_cmyk,
+            acc_cmyk,
+            accumulated.data(),
+            crop_x as usize,
+            crop_y as usize,
+            eff_w as usize,
+            eff_h as usize,
+            band_w as usize,
+            band_h as usize,
+        );
+    }
 }
 
 /// Replace pixels in `target` with pixels from `source` wherever `source`
@@ -2187,6 +2421,74 @@ fn replace_changed_pixels(target: &mut [u8], source: &[u8], backdrop: &[u8]) {
             || source[i + 3] != backdrop[i + 3]
         {
             target[i..i + 4].copy_from_slice(&source[i..i + 4]);
+        }
+    }
+}
+
+/// Copy a group's CMYK buffer back to the parent's CMYK buffer after compositing.
+/// Only copies values for pixels where the group offscreen has non-zero alpha,
+/// indicating the group actually painted something at that position.
+#[allow(clippy::too_many_arguments)]
+fn copy_cmyk_buffer_to_parent(
+    parent_cmyk: &mut [f32],
+    group_cmyk: &[f32],
+    group_pixels: &[u8],
+    crop_x: usize,
+    crop_y: usize,
+    group_w: usize,
+    group_h: usize,
+    parent_w: usize,
+    parent_h: usize,
+) {
+    let parent_stride = parent_w * 4;
+    let group_stride = group_w * 4;
+    for gy in 0..group_h {
+        let py = crop_y + gy;
+        if py >= parent_h {
+            break;
+        }
+        for gx in 0..group_w {
+            let px = crop_x + gx;
+            if px >= parent_w {
+                break;
+            }
+            // Only copy if the group pixel has non-zero alpha AND
+            // the group's cmyk at that pixel is non-zero.
+            // Zero cmyk means "not tracked by a CMYK fill in this group"
+            // — writing it back would erase the parent's tracked values.
+            let g_pixel_idx = (gy * group_w + gx) * 4;
+            let g_cmyk_idx = gy * group_stride + gx * 4;
+            if group_pixels[g_pixel_idx + 3] > 0
+                && (group_cmyk[g_cmyk_idx] != 0.0
+                    || group_cmyk[g_cmyk_idx + 1] != 0.0
+                    || group_cmyk[g_cmyk_idx + 2] != 0.0
+                    || group_cmyk[g_cmyk_idx + 3] != 0.0)
+            {
+                let p_cmyk_idx = py * parent_stride + px * 4;
+                parent_cmyk[p_cmyk_idx..p_cmyk_idx + 4]
+                    .copy_from_slice(&group_cmyk[g_cmyk_idx..g_cmyk_idx + 4]);
+            }
+        }
+    }
+}
+
+/// Copy CMYK values for pixels that changed in a knockout element.
+/// Used alongside replace_changed_pixels to keep CMYK in sync with RGB.
+fn replace_changed_cmyk(
+    target_cmyk: &mut [f32],
+    source_cmyk: &[f32],
+    source_pixels: &[u8],
+    backdrop_pixels: &[u8],
+) {
+    let pixel_count = target_cmyk.len() / 4;
+    for i in 0..pixel_count {
+        let pi = i * 4;
+        if source_pixels[pi] != backdrop_pixels[pi]
+            || source_pixels[pi + 1] != backdrop_pixels[pi + 1]
+            || source_pixels[pi + 2] != backdrop_pixels[pi + 2]
+            || source_pixels[pi + 3] != backdrop_pixels[pi + 3]
+        {
+            target_cmyk[pi..pi + 4].copy_from_slice(&source_cmyk[pi..pi + 4]);
         }
     }
 }
@@ -2235,6 +2537,7 @@ fn render_soft_masked_band(
         clip_mask_cache: HashMap::new(),
         clip_mask_seen: HashSet::new(),
         mask_pool: Vec::new(),
+        cmyk_buffer: None,
     };
     for elem in mask_list.elements() {
         render_element_to_band_offset(
@@ -2259,12 +2562,34 @@ fn render_soft_masked_band(
     let Some(mut content_pixmap) = Pixmap::new(eff_w, eff_h) else {
         return;
     };
+    let content_cmyk = if has_overprint_elements(content_list) || band_state.cmyk_buffer.is_some() {
+        let buf_size = eff_w as usize * eff_h as usize * 4;
+        let mut buf = vec![0.0f32; buf_size];
+        if let Some(ref parent_cmyk) = band_state.cmyk_buffer {
+            let parent_stride = band_w as usize * 4;
+            let group_stride = eff_w as usize * 4;
+            for gy in 0..eff_h as usize {
+                let py = crop_y as usize + gy;
+                if py < band_h as usize {
+                    let p_start = py * parent_stride + crop_x as usize * 4;
+                    let g_start = gy * group_stride;
+                    let copy_len = group_stride.min(parent_stride - crop_x as usize * 4);
+                    buf[g_start..g_start + copy_len]
+                        .copy_from_slice(&parent_cmyk[p_start..p_start + copy_len]);
+                }
+            }
+        }
+        Some(buf)
+    } else {
+        None
+    };
     let mut content_band = BandState {
         clip_region: None,
         spare_mask: None,
         clip_mask_cache: HashMap::new(),
         clip_mask_seen: HashSet::new(),
         mask_pool: Vec::new(),
+        cmyk_buffer: content_cmyk,
     };
     for elem in content_list.elements() {
         render_element_to_band_offset(
@@ -2312,6 +2637,23 @@ fn render_soft_masked_band(
         Transform::identity(),
         mask_ref,
     );
+
+    // Write content CMYK buffer back to parent
+    if let (Some(content_cmyk), Some(parent_cmyk)) =
+        (&content_band.cmyk_buffer, &mut band_state.cmyk_buffer)
+    {
+        copy_cmyk_buffer_to_parent(
+            parent_cmyk,
+            content_cmyk,
+            content_pixmap.data(),
+            crop_x as usize,
+            crop_y as usize,
+            eff_w as usize,
+            eff_h as usize,
+            band_w as usize,
+            band_h as usize,
+        );
+    }
 }
 
 /// Extract grayscale mask values from rendered RGBA pixels.
@@ -2970,6 +3312,7 @@ impl OutputDevice for SkiaDevice {
             clip_mask_cache: HashMap::new(),
             clip_mask_seen: HashSet::new(),
             mask_pool: Vec::new(),
+            cmyk_buffer: None,
         };
         render_pattern_fill_to_band(&mut self.pixmap, &mut band_state, params, 0, 0, w, h, self.dpi);
         self.clip_region = band_state.clip_region.take();
@@ -3062,6 +3405,338 @@ impl SkiaDevice {
     }
 }
 
+/// Scan a display list for any overprint fill/stroke elements that need CMYK simulation.
+fn has_overprint_elements(list: &DisplayList) -> bool {
+    for elem in list.elements() {
+        match elem {
+            DisplayElement::Fill { params, .. } => {
+                if params.overprint && params.painted_channels != 0 {
+                    return true;
+                }
+            }
+            DisplayElement::Stroke { params, .. } => {
+                if params.overprint && params.painted_channels != 0 {
+                    return true;
+                }
+            }
+            DisplayElement::Group { elements, .. } => {
+                if has_overprint_elements(elements) {
+                    return true;
+                }
+            }
+            DisplayElement::SoftMasked {
+                content, mask, ..
+            } => {
+                if has_overprint_elements(content) || has_overprint_elements(mask) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Render an overprint fill: rasterize path to coverage mask, then composite
+/// at the CMYK level, converting the result to RGB for the pixmap.
+///
+/// For overprint fills, only the channels in `painted_channels` are updated;
+/// other channels retain their backdrop values from the CMYK buffer.
+/// For OPM 1 with DeviceCMYK, zero-valued channels are additionally excluded.
+fn render_overprint_fill(
+    pixmap: &mut Pixmap,
+    cmyk_buf: &mut [f32],
+    band_state: &mut BandState,
+    path: &PsPath,
+    params: &FillParams,
+    x_off: f32,
+    y_off: f32,
+    band_w: u32,
+    band_h: u32,
+    icc: Option<&IccCache>,
+) {
+    let Some(skia_path) = build_skia_path(path) else {
+        return;
+    };
+    let fill_rule = to_fill_rule(&params.fill_rule);
+
+    // Rasterize the fill path to a coverage mask (with anti-aliasing to match
+    // the original fill's edge pixels). Any non-zero coverage triggers full
+    // CMYK channel replacement — the merged result should match the backdrop
+    // color, making the shape invisible at overprint boundaries.
+    let mut coverage_mask = match Mask::new(band_w, band_h) {
+        Some(m) => m,
+        None => return,
+    };
+    let transform = offset_transform_xy(to_transform(&params.ctm), x_off, y_off);
+    coverage_mask.fill_path(&skia_path, fill_rule, true, transform);
+
+    // Intersect with clip mask
+    let clip_coverage: Option<&[u8]> = match &band_state.clip_region {
+        None => None,
+        Some(ClipRegion::Rect(r)) => {
+            // Zero out coverage outside clip rect
+            let data = coverage_mask.data_mut();
+            let stride = band_w as usize;
+            for y in 0..band_h {
+                let row_start = y as usize * stride;
+                for x in 0..band_w {
+                    if y < r.y0 || y >= r.y1 || x < r.x0 || x >= r.x1 {
+                        data[row_start + x as usize] = 0;
+                    }
+                }
+            }
+            None
+        }
+        Some(ClipRegion::Mask(clip_mask)) => Some(clip_mask.data()),
+    };
+
+    // Get the fill's CMYK values
+    let (src_c, src_m, src_y, src_k) = params.color.native_cmyk.unwrap_or_else(|| {
+        // Fallback: reverse-convert from RGB using PLRM formula
+        let r = params.color.r;
+        let g = params.color.g;
+        let b = params.color.b;
+        (1.0 - r, 1.0 - g, 1.0 - b, 0.0)
+    });
+
+    // Determine effective painted channels
+    let mut channels = params.painted_channels;
+    if params.overprint_mode == 1 && channels == stet_core::device::CMYK_ALL {
+        // OPM 1 with DeviceCMYK: only paint non-zero channels
+        channels = 0;
+        if src_c != 0.0 {
+            channels |= stet_core::device::CMYK_C;
+        }
+        if src_m != 0.0 {
+            channels |= stet_core::device::CMYK_M;
+        }
+        if src_y != 0.0 {
+            channels |= stet_core::device::CMYK_Y;
+        }
+        if src_k != 0.0 {
+            channels |= stet_core::device::CMYK_K;
+        }
+    }
+
+    // If all channels painted, this is equivalent to a normal fill
+    if channels == stet_core::device::CMYK_ALL {
+        // Fast path: just update CMYK buffer and do normal RGB fill
+        let cov_data = coverage_mask.data();
+        let stride = band_w as usize;
+        for y in 0..band_h as usize {
+            for x in 0..band_w as usize {
+                let mi = y * stride + x;
+                let mut cov = cov_data[mi] as f32 / 255.0;
+                if let Some(clip) = clip_coverage {
+                    cov *= clip[mi] as f32 / 255.0;
+                }
+                if cov > 0.0 {
+                    let ci = (y * stride + x) * 4;
+                    cmyk_buf[ci] = src_c as f32;
+                    cmyk_buf[ci + 1] = src_m as f32;
+                    cmyk_buf[ci + 2] = src_y as f32;
+                    cmyk_buf[ci + 3] = src_k as f32;
+                }
+            }
+        }
+        // Do normal RGB fill via tiny-skia
+        let mut temp_mask = None;
+        let Some(mask_ref) =
+            resolve_clip_mask(&band_state.clip_region, &mut temp_mask, band_w, band_h)
+        else {
+            return;
+        };
+        let paint = to_paint_alpha(&params.color, params.alpha, params.blend_mode);
+        pixmap.fill_path(&skia_path, &paint, fill_rule, transform, mask_ref);
+        return;
+    }
+
+    // Selective channel overprint: per-pixel CMYK merge + ICC conversion + direct
+    // pixel write. We must avoid tiny-skia's source-over compositing because the
+    // non-linear ICC transform means merged_rgb may differ by ±1/255 from the
+    // existing pixmap value (due to 8-bit quantization), creating visible edge
+    // artifacts at AA boundaries. By merging in CMYK space and writing RGB directly,
+    // edge pixels where the overprint is a no-op produce exactly the right color.
+    let cov_data = coverage_mask.data();
+    let stride = band_w as usize;
+    let px_data = pixmap.data_mut();
+    let px_stride = band_w as usize * 4;
+
+    for y in 0..band_h as usize {
+        for x in 0..band_w as usize {
+            let mi = y * stride + x;
+            let mut cov = cov_data[mi] as f32 / 255.0;
+            if let Some(clip) = clip_coverage {
+                cov *= clip[mi] as f32 / 255.0;
+            }
+            if cov <= 0.0 {
+                continue;
+            }
+
+            let ci = mi * 4;
+            let pi = y * px_stride + x * 4;
+            // Read current pixel CMYK — if buffer is all zeros but pixel is
+            // visible, recover approximate CMYK from RGB as fallback.
+            let (cur_c, cur_m, cur_y, cur_k) = {
+                let c = cmyk_buf[ci] as f64;
+                let m = cmyk_buf[ci + 1] as f64;
+                let y_val = cmyk_buf[ci + 2] as f64;
+                let k = cmyk_buf[ci + 3] as f64;
+                if c == 0.0 && m == 0.0 && y_val == 0.0 && k == 0.0 && px_data[pi + 3] > 0 {
+                    // Reverse PLRM: recover CMYK from sRGB pixel values
+                    let r = px_data[pi] as f64 / 255.0;
+                    let g = px_data[pi + 1] as f64 / 255.0;
+                    let b = px_data[pi + 2] as f64 / 255.0;
+                    let rk = 1.0 - r.max(g).max(b);
+                    if rk >= 1.0 {
+                        (0.0, 0.0, 0.0, 1.0)
+                    } else {
+                        let inv = 1.0 / (1.0 - rk);
+                        ((1.0 - r - rk) * inv, (1.0 - g - rk) * inv, (1.0 - b - rk) * inv, rk)
+                    }
+                } else {
+                    (c, m, y_val, k)
+                }
+            };
+
+            // Merge: for painted channels, replace with source value.
+            // For non-painted channels, leave unchanged from backdrop.
+            // No coverage weighting — we use a >0.5 threshold above so each
+            // pixel is either fully merged or fully skipped, matching the
+            // snap-to-source approach used for CMYK tracking.
+            let new_c = if channels & stet_core::device::CMYK_C != 0 {
+                src_c
+            } else {
+                cur_c
+            };
+            let new_m = if channels & stet_core::device::CMYK_M != 0 {
+                src_m
+            } else {
+                cur_m
+            };
+            let new_y = if channels & stet_core::device::CMYK_Y != 0 {
+                src_y
+            } else {
+                cur_y
+            };
+            let new_k = if channels & stet_core::device::CMYK_K != 0 {
+                src_k
+            } else {
+                cur_k
+            };
+
+            // If the merged CMYK is identical to the existing backdrop CMYK,
+            // skip the pixel entirely — avoids ICC profile mismatch artifacts
+            // where the document profile and system profile produce different RGB
+            // for the same CMYK values.
+            if (new_c as f32 - cmyk_buf[ci]).abs() < 1e-6
+                && (new_m as f32 - cmyk_buf[ci + 1]).abs() < 1e-6
+                && (new_y as f32 - cmyk_buf[ci + 2]).abs() < 1e-6
+                && (new_k as f32 - cmyk_buf[ci + 3]).abs() < 1e-6
+            {
+                continue;
+            }
+
+            // Update CMYK buffer
+            cmyk_buf[ci] = new_c as f32;
+            cmyk_buf[ci + 1] = new_m as f32;
+            cmyk_buf[ci + 2] = new_y as f32;
+            cmyk_buf[ci + 3] = new_k as f32;
+
+            // Convert merged CMYK to RGB and write directly to pixmap
+            let (r, g, b) = if let Some(icc_cache) = icc {
+                icc_cache
+                    .convert_cmyk_readonly(new_c, new_m, new_y, new_k)
+                    .unwrap_or_else(|| cmyk_to_rgb_plrm(new_c, new_m, new_y, new_k))
+            } else {
+                cmyk_to_rgb_plrm(new_c, new_m, new_y, new_k)
+            };
+
+            px_data[pi] = (r * 255.0).round() as u8;
+            px_data[pi + 1] = (g * 255.0).round() as u8;
+            px_data[pi + 2] = (b * 255.0).round() as u8;
+            // Leave alpha unchanged (should be 255 for opaque backdrop)
+        }
+    }
+}
+
+/// PLRM CMYK-to-RGB formula fallback.
+fn cmyk_to_rgb_plrm(c: f64, m: f64, y: f64, k: f64) -> (f64, f64, f64) {
+    (
+        1.0 - (c + k).min(1.0),
+        1.0 - (m + k).min(1.0),
+        1.0 - (y + k).min(1.0),
+    )
+}
+
+/// Update the CMYK buffer for a non-overprint fill (to track backdrop for future overprints).
+fn update_cmyk_buffer_for_fill(
+    cmyk_buf: &mut [f32],
+    path: &PsPath,
+    params: &FillParams,
+    x_off: f32,
+    y_off: f32,
+    band_w: u32,
+    band_h: u32,
+    clip_region: &Option<ClipRegion>,
+) {
+    // Only track CMYK for colors that have native CMYK
+    let Some((src_c, src_m, src_y, src_k)) = params.color.native_cmyk else {
+        return;
+    };
+    let Some(skia_path) = build_skia_path(path) else {
+        return;
+    };
+
+    // Rasterize to coverage mask
+    let mut coverage_mask = match Mask::new(band_w, band_h) {
+        Some(m) => m,
+        None => return,
+    };
+    let transform = offset_transform_xy(to_transform(&params.ctm), x_off, y_off);
+    let fill_rule = to_fill_rule(&params.fill_rule);
+    coverage_mask.fill_path(&skia_path, fill_rule, true, transform);
+
+    let cov_data = coverage_mask.data();
+    let clip_data: Option<&[u8]> = match clip_region {
+        Some(ClipRegion::Mask(m)) => Some(m.data()),
+        _ => None,
+    };
+    let clip_rect = match clip_region {
+        Some(ClipRegion::Rect(r)) => Some(*r),
+        _ => None,
+    };
+
+    let stride = band_w as usize;
+    for y in 0..band_h as usize {
+        for x in 0..band_w as usize {
+            let mi = y * stride + x;
+            let mut cov = cov_data[mi] as f32 / 255.0;
+            if let Some(clip) = clip_data {
+                cov *= clip[mi] as f32 / 255.0;
+            }
+            if let Some(r) = clip_rect {
+                if (y as u32) < r.y0 || (y as u32) >= r.y1 || (x as u32) < r.x0 || (x as u32) >= r.x1 {
+                    cov = 0.0;
+                }
+            }
+            if cov > 0.0 {
+                // Snap to source: write the fill's CMYK without coverage blending.
+                // tiny-skia blends in RGB space (non-linear through ICC), so blending
+                // in CMYK space would produce inconsistent values. By snapping, the
+                // cmyk_buf tracks "what color was painted here" — which is what
+                // overprint simulation needs for correct channel-level merging.
+                let ci = mi * 4;
+                cmyk_buf[ci] = src_c as f32;
+                cmyk_buf[ci + 1] = src_m as f32;
+                cmyk_buf[ci + 2] = src_y as f32;
+                cmyk_buf[ci + 3] = src_k as f32;
+            }
+        }
+    }
+}
+
 /// Banded rendering as a free function — runs on a background thread.
 ///
 /// Renders the display list in horizontal bands and streams the output
@@ -3086,6 +3761,9 @@ fn render_banded_to_sink(
 
     // Pre-populate clip_mask_seen so repeated clip paths get cached from first band
     let clip_seen = precompute_clip_seen(list);
+
+    // Check if CMYK overprint simulation is needed
+    let needs_cmyk_buffer = has_overprint_elements(list);
 
     // Extra rows rendered above and below each band to provide anti-aliasing
     // context at band seams. Without this, tiny-skia clips geometry at the
@@ -3115,12 +3793,20 @@ fn render_banded_to_sink(
         // Start transparent — white background composited after content rendering
         band_pixmap.as_mut().data_mut().fill(0x00);
 
+        let cmyk_buf = if needs_cmyk_buffer {
+            // CMYK buffer for the render region (including overlap)
+            Some(vec![0.0f32; page_w as usize * render_h as usize * 4])
+        } else {
+            None
+        };
+
         let mut band_state = BandState {
             clip_region: None,
             spare_mask: None,
             clip_mask_cache: HashMap::new(),
             clip_mask_seen: clip_seen.clone(),
             mask_pool: Vec::new(),
+            cmyk_buffer: cmyk_buf,
         };
 
         // Epoch-based replay
@@ -3596,6 +4282,7 @@ pub fn render_region_prepared(
         clip_mask_cache: HashMap::new(),
         clip_mask_seen: prepared.clip_seen.clone(),
         mask_pool: Vec::new(),
+        cmyk_buffer: None,
     };
 
     let elements = list.elements();
@@ -3739,6 +4426,7 @@ pub fn render_region_single_band(
         clip_mask_cache: HashMap::new(),
         clip_mask_seen: prepared.clip_seen.clone(),
         mask_pool: Vec::new(),
+        cmyk_buffer: None,
     };
 
     let elements = list.elements();
@@ -3982,6 +4670,7 @@ pub fn render_region(
         clip_mask_cache: HashMap::new(),
         clip_mask_seen: clip_seen,
         mask_pool: Vec::new(),
+        cmyk_buffer: None,
     };
 
     let elements = list.elements();
@@ -4416,6 +5105,7 @@ fn render_group_to_viewport(
         clip_mask_cache: HashMap::new(),
         clip_mask_seen: HashSet::new(),
         mask_pool: Vec::new(),
+        cmyk_buffer: None,
     };
 
     for (idx, elem) in elements.elements().iter().enumerate() {
@@ -4528,6 +5218,7 @@ fn render_knockout_group_to_viewport(
             clip_mask_cache: HashMap::new(),
             clip_mask_seen: HashSet::new(),
             mask_pool: Vec::new(),
+            cmyk_buffer: None,
         };
 
         render_element_to_viewport(
@@ -4594,6 +5285,7 @@ fn render_soft_masked_viewport(
         clip_mask_cache: HashMap::new(),
         clip_mask_seen: HashSet::new(),
         mask_pool: Vec::new(),
+        cmyk_buffer: None,
     };
     for (idx, elem) in mask_list.elements().iter().enumerate() {
         render_element_to_viewport(
@@ -4628,6 +5320,7 @@ fn render_soft_masked_viewport(
         clip_mask_cache: HashMap::new(),
         clip_mask_seen: HashSet::new(),
         mask_pool: Vec::new(),
+        cmyk_buffer: None,
     };
     for (idx, elem) in content_list.elements().iter().enumerate() {
         render_element_to_viewport(
@@ -5920,6 +6613,8 @@ mod tests {
             ctm: Matrix::identity(),
             is_text_glyph: false,
             overprint: false,
+            overprint_mode: 0,
+            painted_channels: 0,
             spot_color: None,
             rendering_intent: 0,
             transfer: TransferState::default(),
@@ -5955,6 +6650,8 @@ mod tests {
             stroke_adjust: false,
             is_text_glyph: false,
             overprint: false,
+            overprint_mode: 0,
+            painted_channels: 0,
             spot_color: None,
             rendering_intent: 0,
             transfer: TransferState::default(),
@@ -6002,6 +6699,8 @@ mod tests {
             ctm: Matrix::identity(),
             is_text_glyph: false,
             overprint: false,
+            overprint_mode: 0,
+            painted_channels: 0,
             spot_color: None,
             rendering_intent: 0,
             transfer: TransferState::default(),
@@ -6038,6 +6737,8 @@ mod tests {
             ctm: Matrix::identity(),
             is_text_glyph: false,
             overprint: false,
+            overprint_mode: 0,
+            painted_channels: 0,
             spot_color: None,
             rendering_intent: 0,
             transfer: TransferState::default(),
@@ -6083,6 +6784,8 @@ mod tests {
             ctm: Matrix::translate(100.0, 100.0),
             is_text_glyph: false,
             overprint: false,
+            overprint_mode: 0,
+            painted_channels: 0,
             spot_color: None,
             rendering_intent: 0,
             transfer: TransferState::default(),

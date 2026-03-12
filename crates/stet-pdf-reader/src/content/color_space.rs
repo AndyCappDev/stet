@@ -74,6 +74,28 @@ impl ResolvedColorSpace {
     }
 }
 
+/// Compute the CMYK painted_channels bitmask for overprint simulation.
+///
+/// Returns which CMYK process color channels are affected by painting in this color space:
+/// - DeviceCMYK: all 4 channels (OPM filtering happens at render time)
+/// - Separation: the single named channel (Cyan/Magenta/Yellow/Black/All/None)
+/// - DeviceN: union of named channels
+/// - ICCBased with 4 components: treated as DeviceCMYK
+/// - Other (Gray/RGB/CalGray/CalRGB/Lab/Pattern): 0 (no CMYK overprint)
+pub fn painted_channels_for_cs(cs: &ResolvedColorSpace) -> u8 {
+    use stet_core::device::{cmyk_channel_for_name, CMYK_ALL};
+    match cs {
+        ResolvedColorSpace::DeviceCMYK => CMYK_ALL,
+        ResolvedColorSpace::ICCBased { n: 4, .. } => CMYK_ALL,
+        ResolvedColorSpace::Separation { name, .. } => cmyk_channel_for_name(name),
+        ResolvedColorSpace::DeviceN { names, .. } => {
+            names.iter().fold(0u8, |acc, n| acc | cmyk_channel_for_name(n))
+        }
+        ResolvedColorSpace::Indexed { base, .. } => painted_channels_for_cs(base),
+        _ => 0,
+    }
+}
+
 /// Resolve a color space name or array from resources.
 pub fn resolve_color_space(
     cs_ref: &ColorSpaceRef,
@@ -430,6 +452,20 @@ pub fn components_to_device_color_icc(
                 if let Some(data) = profile_data {
                     if let Some(hash) = cache.register_profile(data) {
                         if let Some((r, g, b)) = cache.convert_color(&hash, components) {
+                            // For 4-component (CMYK) ICC profiles, preserve the
+                            // source CMYK values in native_cmyk for overprint simulation.
+                            if *n == 4 {
+                                let c = components.first().copied().unwrap_or(0.0);
+                                let m = components.get(1).copied().unwrap_or(0.0);
+                                let y = components.get(2).copied().unwrap_or(0.0);
+                                let k = components.get(3).copied().unwrap_or(0.0);
+                                return DeviceColor {
+                                    r,
+                                    g,
+                                    b,
+                                    native_cmyk: Some((c, m, y, k)),
+                                };
+                            }
                             return DeviceColor::from_rgb(r, g, b);
                         }
                     }

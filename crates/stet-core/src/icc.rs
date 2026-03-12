@@ -290,6 +290,23 @@ impl IccCache {
         self.convert_color(&hash, &[c, m, y, k])
     }
 
+    /// Convert CMYK to (r, g, b) using the default system CMYK profile (read-only, no caching).
+    /// Used by band renderers that only have `&self` access.
+    pub fn convert_cmyk_readonly(&self, c: f64, m: f64, y: f64, k: f64) -> Option<(f64, f64, f64)> {
+        let hash = self.default_cmyk_hash.as_ref()?;
+        let cached = self.transforms.get(hash)?;
+        let src = [c.clamp(0.0, 1.0), m.clamp(0.0, 1.0), y.clamp(0.0, 1.0), k.clamp(0.0, 1.0)];
+        let mut dst = [0.0f64; 3];
+        if cached.transform_f64.transform(&src, &mut dst).is_err() {
+            return None;
+        }
+        Some((
+            dst[0].clamp(0.0, 1.0),
+            dst[1].clamp(0.0, 1.0),
+            dst[2].clamp(0.0, 1.0),
+        ))
+    }
+
     /// Disable all ICC color management (equivalent to PostForge's `--no-icc`).
     /// Clears all profiles, transforms, and caches.
     pub fn disable(&mut self) {

@@ -89,6 +89,27 @@ pub enum SimpleColorSpace {
     DeviceCMYK,
 }
 
+/// Bitmask of CMYK channels painted by an overprint operation.
+/// Bits: 0=Cyan, 1=Magenta, 2=Yellow, 3=Black.
+pub const CMYK_C: u8 = 1 << 0;
+pub const CMYK_M: u8 = 1 << 1;
+pub const CMYK_Y: u8 = 1 << 2;
+pub const CMYK_K: u8 = 1 << 3;
+pub const CMYK_ALL: u8 = CMYK_C | CMYK_M | CMYK_Y | CMYK_K;
+
+/// Map a CMYK process color name to its channel bit.
+pub fn cmyk_channel_for_name(name: &[u8]) -> u8 {
+    match name {
+        b"Cyan" => CMYK_C,
+        b"Magenta" => CMYK_M,
+        b"Yellow" => CMYK_Y,
+        b"Black" => CMYK_K,
+        b"All" => CMYK_ALL,
+        b"None" => 0,
+        _ => 0, // custom spot color — no CMYK channel
+    }
+}
+
 /// Parameters for filling a path.
 #[derive(Clone, Debug)]
 pub struct FillParams {
@@ -100,6 +121,11 @@ pub struct FillParams {
     pub is_text_glyph: bool,
     /// Overprint flag from graphics state (used by PDF output).
     pub overprint: bool,
+    /// Overprint mode (0 or 1). With OPM 1 + DeviceCMYK, only non-zero channels are painted.
+    pub overprint_mode: i32,
+    /// Which CMYK channels this fill paints (bitmask of CMYK_C/M/Y/K).
+    /// Only meaningful when `overprint` is true. 0 = no CMYK channel info (e.g. RGB fill).
+    pub painted_channels: u8,
     /// Separation/DeviceN color for PDF output. None for device color spaces.
     pub spot_color: Option<SpotColor>,
     /// Rendering intent (0=RelativeColorimetric, 1=Absolute, 2=Perceptual, 3=Saturation).
@@ -176,6 +202,10 @@ pub struct StrokeParams {
     pub is_text_glyph: bool,
     /// Overprint flag from graphics state (used by PDF output).
     pub overprint: bool,
+    /// Overprint mode (0 or 1).
+    pub overprint_mode: i32,
+    /// Which CMYK channels this stroke paints (bitmask of CMYK_C/M/Y/K).
+    pub painted_channels: u8,
     /// Separation/DeviceN color for PDF output. None for device color spaces.
     pub spot_color: Option<SpotColor>,
     /// Rendering intent (0=RelativeColorimetric, 1=Absolute, 2=Perceptual, 3=Saturation).
