@@ -1356,6 +1356,47 @@ impl<'a> ContentInterpreter<'a> {
             )
         };
 
+        // Apply /Decode array if present (maps sample values to color component values).
+        // Default for most color spaces is [0 1 0 1 ...] (identity).
+        // CMYK images may use [1 0 1 0 1 0 1 0] to invert values.
+        let sample_data = if !is_image_mask {
+            if let Some(decode) = dict.get_array(b"Decode") {
+                let n_comps = color_space.num_components() as usize;
+                let decode_vals: Vec<f64> =
+                    decode.iter().filter_map(|o| o.as_f64()).collect();
+                if decode_vals.len() >= n_comps * 2 {
+                    // Check if it's non-default (not all [0,1] pairs)
+                    let is_default = decode_vals.chunks(2).all(|pair| {
+                        pair.len() == 2
+                            && (pair[0] - 0.0).abs() < 1e-6
+                            && (pair[1] - 1.0).abs() < 1e-6
+                    });
+                    if !is_default {
+                        // After expand_bits_to_bytes, all data is in 0-255 range
+                        let max_val = 255.0f64;
+                        // Apply decode: output = D_min + (sample / max_val) * (D_max - D_min)
+                        let mut result = Vec::with_capacity(sample_data.len());
+                        for (i, &sample) in sample_data.iter().enumerate() {
+                            let comp = i % n_comps;
+                            let d_min = decode_vals[comp * 2];
+                            let d_max = decode_vals[comp * 2 + 1];
+                            let val = d_min + (sample as f64 / max_val) * (d_max - d_min);
+                            result.push((val.clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
+                        }
+                        result
+                    } else {
+                        sample_data
+                    }
+                } else {
+                    sample_data
+                }
+            } else {
+                sample_data
+            }
+        } else {
+            sample_data
+        };
+
         // Convert ICCBased image data through ICC profile if available
         let (sample_data, color_space) = if !is_image_mask {
             if let Some(ref rcs) = resolved_cs {

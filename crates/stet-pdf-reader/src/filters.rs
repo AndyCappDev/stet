@@ -359,6 +359,22 @@ fn decode_dct(data: &[u8]) -> Result<Vec<u8>, PdfError> {
     let pixels = decoder
         .decode()
         .map_err(|e| PdfError::DecompressionError(format!("DCTDecode: {e}")))?;
+
+    // For 4-component (CMYK) JPEG, the jpeg_decoder applies a CMYK color
+    // transform that inverts all channels (255-x). However, for PDF streams the
+    // raw JPEG data is already in the correct byte order for the PDF /Decode
+    // array to process. Undo the decoder's inversion so the PDF renderer gets
+    // the original sample values.
+    if let Some(info) = decoder.info() {
+        if info.pixel_format == jpeg_decoder::PixelFormat::CMYK32 {
+            let mut result = pixels;
+            for b in result.iter_mut() {
+                *b = 255 - *b;
+            }
+            return Ok(result);
+        }
+    }
+
     Ok(pixels)
 }
 
