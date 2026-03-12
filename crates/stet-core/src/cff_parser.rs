@@ -810,7 +810,7 @@ fn parse_fd_select(data: &[u8], offset: usize, n_glyphs: usize) -> Result<Vec<u8
 // ---------------------------------------------------------------------------
 
 #[rustfmt::skip]
-const STANDARD_STRINGS: [&str; 392] = [
+const STANDARD_STRINGS: [&str; 391] = [
     // SID 0-9
     ".notdef", "space", "exclam", "quotedbl", "numbersign",
     "dollar", "percent", "ampersand", "quoteright", "parenleft",
@@ -932,7 +932,6 @@ const STANDARD_STRINGS: [&str; 392] = [
     // SID 380-390
     "001.002", "001.003", "Black", "Bold", "Book",
     "Light", "Medium", "Regular", "Roman", "Semibold",
-    "001.004",
 ];
 
 // ---------------------------------------------------------------------------
@@ -1063,7 +1062,7 @@ mod tests {
         let string_index = vec![b"CustomGlyph".to_vec()];
         assert_eq!(get_sid_string(0, &string_index), ".notdef");
         assert_eq!(get_sid_string(34, &string_index), "A");
-        assert_eq!(get_sid_string(392, &string_index), "CustomGlyph");
+        assert_eq!(get_sid_string(391, &string_index), "CustomGlyph");
         assert_eq!(get_sid_string(999, &string_index), ".sid999");
     }
 

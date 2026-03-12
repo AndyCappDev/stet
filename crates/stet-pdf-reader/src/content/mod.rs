@@ -1505,9 +1505,11 @@ impl<'a> ContentInterpreter<'a> {
         // Decompress form content stream
         let form_data = self.resolver.stream_data_from_obj(obj)?;
 
-        // Save state
+        // Save state (including font cache — form XObjects may have different
+        // font resources with different encodings for the same resource name)
         self.gstate_stack.push(self.gstate.clone());
         let saved_resources = std::mem::replace(&mut self.resources, form_resources);
+        let saved_font_cache = std::mem::take(&mut self.font_cache);
 
         // Apply form matrix
         self.gstate.ctm = self.gstate.ctm.concat(&form_matrix);
@@ -1581,6 +1583,7 @@ impl<'a> ContentInterpreter<'a> {
 
         // Restore state — check if clip needs resetting
         self.resources = saved_resources;
+        self.font_cache = saved_font_cache;
         if let Some(saved) = self.gstate_stack.pop() {
             let old_clip_version = self.gstate.clip_path_version;
             self.gstate = saved;

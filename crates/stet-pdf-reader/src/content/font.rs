@@ -45,6 +45,9 @@ pub struct TrueTypePdfFont {
     pub encoding: [Option<String>; 256],
     pub widths: [f64; 256],
     pub cmap: HashMap<u32, u16>,
+    /// Glyph name → GID mapping from the `post` table (for ligatures and
+    /// other glyphs not reachable via Unicode cmap lookup).
+    pub post_name_to_gid: HashMap<String, u16>,
     pub units_per_em: f64,
 }
 
@@ -535,11 +538,22 @@ fn resolve_truetype(
     let units_per_em = get_units_per_em(&data) as f64;
     let cmap = parse_cmap(&data);
 
+    // Parse post table (GID → name) and invert to name → GID for fallback lookup
+    let post_name_to_gid = stet_core::system_fonts::parse_post_table(&data)
+        .map(|gid_to_name| {
+            gid_to_name
+                .into_iter()
+                .map(|(gid, name)| (name, gid))
+                .collect()
+        })
+        .unwrap_or_default();
+
     Ok(PdfFont::TrueType(TrueTypePdfFont {
         data,
         encoding,
         widths,
         cmap,
+        post_name_to_gid,
         units_per_em,
     }))
 }
@@ -830,7 +844,8 @@ impl PdfFont {
 impl Type1PdfFont {
     fn glyph_path(&self, char_code: u8) -> Option<PsPath> {
         let glyph_name = self.encoding[char_code as usize].as_deref()?;
-        let charstring = self.font.charstrings.get(glyph_name)?;
+        let charstring = self.font.charstrings.get(glyph_name);
+        let charstring = charstring?;
         let result =
             execute_charstring(charstring, &self.font.subrs, self.font.len_iv, false).ok()?;
         Some(result.path)
@@ -863,8 +878,14 @@ impl TrueTypePdfFont {
                         return Some(gid);
                     }
                 }
+                // Fallback: look up glyph name directly in post table
+                // (handles ligatures like fl/fi that may not be in the cmap)
+                if let Some(&gid) = self.post_name_to_gid.get(glyph_name.as_str()) {
+                    return Some(gid);
+                }
             }
-            // Fallback: direct cmap lookup
+            // Fallback: direct cmap lookup by char code
+            // (handles PDF subset fonts where encoding byte maps directly to GID via cmap)
             if let Some(&gid) = self.cmap.get(&(char_code as u32)) {
                 return Some(gid);
             }
@@ -959,7 +980,7 @@ impl CidCffPdfFont {
 impl CffPdfFont {
     fn glyph_path(&self, char_code: u8) -> Option<PsPath> {
         let glyph_name = self.encoding[char_code as usize].as_deref()?;
-        // Find glyph index from charset
+        // Find glyph index from charset (charset[0]=.notdef, charset[i]=GID i)
         let gid = self
             .font
             .charset
