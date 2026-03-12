@@ -69,6 +69,15 @@ pub struct CidTrueTypePdfFont {
     pub units_per_em: f64,
     /// If true, CID maps directly to GID (Identity CIDToGIDMap).
     pub identity_cid_to_gid: bool,
+    /// If true, font data was loaded from the system (not embedded in PDF).
+    /// For substituted fonts, CIDs are treated as Unicode and mapped via cmap.
+    pub substituted: bool,
+    /// Explicit CID-to-GID mapping from a CIDToGIDMap stream.
+    /// Index = CID, value = GID. Takes priority over identity mapping.
+    pub cid_to_gid_map: Option<Vec<u16>>,
+    /// CID → Unicode mapping from the Type 0 font's /ToUnicode CMap.
+    /// Used for substituted fonts to convert CID → Unicode → GID via cmap.
+    pub to_unicode: HashMap<u16, u32>,
 }
 
 /// CIDFontType0: CFF outlines accessed by CID (2-byte char codes).
@@ -724,12 +733,26 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
     // Parse /W array (CID-specific widths)
     let cid_widths = parse_cid_widths(cid_font_dict, resolver);
 
+    // Parse /ToUnicode CMap from the parent Type 0 font dict
+    let to_unicode = if let Some(tu_obj) = font_dict.get(b"ToUnicode") {
+        let tu_obj = resolver.deref(tu_obj)?;
+        match resolver.stream_data_from_obj(&tu_obj) {
+            Ok(data) => parse_to_unicode(&data),
+            Err(_) => HashMap::new(),
+        }
+    } else {
+        HashMap::new()
+    };
+
     match cid_subtype {
         b"CIDFontType2" => {
+            let substituted;
             let data = if let Some(ff_ref) = desc.get(b"FontFile2") {
+                substituted = false;
                 resolver.stream_data_from_obj(&resolver.deref(ff_ref)?)?
             } else {
                 // Font not embedded — try system font lookup
+                substituted = true;
                 let base_font = cid_font_dict
                     .get_name(b"BaseFont")
                     .map(|n| {
@@ -748,10 +771,31 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
             let units_per_em = get_units_per_em(&data) as f64;
             let cmap = parse_cmap(&data);
 
-            let identity_cid_to_gid = cid_font_dict
-                .get_name(b"CIDToGIDMap")
-                .map(|n| n == b"Identity")
-                .unwrap_or(true);
+            // Parse CIDToGIDMap: either /Identity name or a stream of big-endian u16 pairs
+            let (identity_cid_to_gid, cid_to_gid_map) =
+                if let Some(name) = cid_font_dict.get_name(b"CIDToGIDMap") {
+                    (name == b"Identity", None)
+                } else if let Some(map_obj) = cid_font_dict.get(b"CIDToGIDMap") {
+                    // CIDToGIDMap is a reference to a stream — parse the mapping
+                    let map_obj = if let Some((num, g)) = map_obj.as_ref() {
+                        resolver.resolve(num, g)?
+                    } else {
+                        map_obj.clone()
+                    };
+                    match resolver.stream_data_from_obj(&map_obj) {
+                        Ok(stream_data) => {
+                            let mut gid_map =
+                                Vec::with_capacity(stream_data.len() / 2);
+                            for pair in stream_data.chunks_exact(2) {
+                                gid_map.push(u16::from_be_bytes([pair[0], pair[1]]));
+                            }
+                            (false, Some(gid_map))
+                        }
+                        Err(_) => (true, None), // fallback to identity
+                    }
+                } else {
+                    (true, None) // no CIDToGIDMap → default to identity
+                };
 
             Ok(PdfFont::CidTrueType(CidTrueTypePdfFont {
                 data,
@@ -760,6 +804,9 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                 cmap,
                 units_per_em,
                 identity_cid_to_gid,
+                substituted,
+                cid_to_gid_map,
+                to_unicode,
             }))
         }
         b"CIDFontType0" => {
@@ -796,6 +843,142 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
 /// Parse /W array from CIDFont dict into CID → width map.
 ///
 /// Format: `[ cid_first [w1 w2 ...] cid_first cid_last w ... ]`
+/// Extract `<hex>` tokens from a string, returning raw hex strings.
+fn extract_hex_tokens(s: &str) -> Vec<&str> {
+    let mut tokens = Vec::new();
+    let mut rest = s;
+    while let Some(start) = rest.find('<') {
+        rest = &rest[start + 1..];
+        if let Some(end) = rest.find('>') {
+            let hex = rest[..end].trim();
+            if !hex.is_empty() {
+                tokens.push(hex);
+            }
+            rest = &rest[end + 1..];
+        } else {
+            break;
+        }
+    }
+    tokens
+}
+
+/// Parse a hex string as a Unicode codepoint.
+/// For multi-byte destinations (>4 hex digits), extract just the first codepoint (first 4 digits).
+fn hex_to_unicode(hex: &str) -> Option<u32> {
+    if hex.len() <= 4 {
+        u32::from_str_radix(hex, 16).ok()
+    } else {
+        // Multi-byte: two or more 16-bit codepoints packed together.
+        // Check for common ligature sequences and map to Unicode ligature codepoints.
+        match hex {
+            "00660066" => Some(0xFB00),             // ff
+            "00660069" => Some(0xFB01),             // fi
+            "0066006C" => Some(0xFB02),             // fl
+            "006600660069" => Some(0xFB03),         // ffi
+            "00660066006C" => Some(0xFB04),         // ffl
+            "017F0074" => Some(0xFB05),             // ſt (long s + t)
+            "00730074" => Some(0xFB06),             // st
+            _ => {
+                // Unknown sequence — use first 16-bit codepoint
+                u32::from_str_radix(&hex[..hex.len().min(4)], 16).ok()
+            }
+        }
+    }
+}
+
+/// Parse a ToUnicode CMap stream into a CID → Unicode mapping.
+///
+/// Handles `beginbfchar` and `beginbfrange` sections with hex-encoded values.
+/// Multi-byte destination values (ligatures etc.) are mapped to their first codepoint.
+fn parse_to_unicode(data: &[u8]) -> HashMap<u16, u32> {
+    let mut map = HashMap::new();
+    let text = String::from_utf8_lossy(data);
+
+    // Parse bfchar entries: <src_cid> <dst_unicode>
+    // Process line-by-line to avoid pairing issues with multi-byte destinations
+    let mut in_bfchar = false;
+    let mut in_bfrange = false;
+    let mut range_tokens: Vec<&str> = Vec::new();
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.ends_with("beginbfchar") {
+            in_bfchar = true;
+            continue;
+        }
+        if trimmed == "endbfchar" {
+            in_bfchar = false;
+            continue;
+        }
+        if trimmed.ends_with("beginbfrange") {
+            in_bfrange = true;
+            range_tokens.clear();
+            continue;
+        }
+        if trimmed == "endbfrange" {
+            in_bfrange = false;
+            range_tokens.clear();
+            continue;
+        }
+
+        if in_bfchar {
+            let tokens = extract_hex_tokens(trimmed);
+            if tokens.len() >= 2 {
+                if let Some(cid) = u32::from_str_radix(tokens[0], 16).ok() {
+                    if let Some(unicode) = hex_to_unicode(tokens[1]) {
+                        map.insert(cid as u16, unicode);
+                    }
+                }
+            }
+        }
+
+        if in_bfrange {
+            let line_tokens = extract_hex_tokens(trimmed);
+            // Check for array syntax: <start> <end> [<u1> <u2> ...]
+            if trimmed.contains('[') {
+                // Collect start/end from previous tokens or this line
+                let all_before_bracket: Vec<&str> = {
+                    let before = trimmed.split('[').next().unwrap_or("");
+                    extract_hex_tokens(before)
+                };
+                let in_bracket = {
+                    let after_open = trimmed.split('[').nth(1).unwrap_or("");
+                    let before_close = after_open.split(']').next().unwrap_or(after_open);
+                    extract_hex_tokens(before_close)
+                };
+                if all_before_bracket.len() >= 2 {
+                    if let (Some(start), Some(end)) = (
+                        u32::from_str_radix(all_before_bracket[0], 16).ok(),
+                        u32::from_str_radix(all_before_bracket[1], 16).ok(),
+                    ) {
+                        for (j, cid) in (start..=end).enumerate() {
+                            if j < in_bracket.len() {
+                                if let Some(u) = hex_to_unicode(in_bracket[j]) {
+                                    map.insert(cid as u16, u);
+                                }
+                            }
+                        }
+                    }
+                }
+            } else if line_tokens.len() >= 3 {
+                // <start> <end> <dst_start>
+                if let (Some(start), Some(end), Some(mut dst)) = (
+                    u32::from_str_radix(line_tokens[0], 16).ok(),
+                    u32::from_str_radix(line_tokens[1], 16).ok(),
+                    hex_to_unicode(line_tokens[2]),
+                ) {
+                    for cid in start..=end {
+                        map.insert(cid as u16, dst);
+                        dst += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    map
+}
+
 fn parse_cid_widths(cid_font_dict: &PdfDict, resolver: &Resolver) -> HashMap<u16, f64> {
     let mut widths = HashMap::new();
     let w_arr = match cid_font_dict.get_array(b"W") {
@@ -1013,11 +1196,19 @@ impl TrueTypePdfFont {
 
 impl CidTrueTypePdfFont {
     fn glyph_path_cid(&self, cid: u16) -> Option<PsPath> {
-        // For subset fonts with cmap, use cmap lookup (CID = Unicode code point → GID)
-        let gid = if !self.cmap.is_empty() {
-            *self.cmap.get(&(cid as u32))?
-        } else if self.identity_cid_to_gid {
+        let gid = if let Some(ref map) = self.cid_to_gid_map {
+            // Explicit CIDToGIDMap stream: look up CID → GID
+            *map.get(cid as usize).unwrap_or(&0)
+        } else if self.substituted && !self.to_unicode.is_empty() {
+            // Substituted font: CID → Unicode (via ToUnicode) → GID (via cmap)
+            let unicode = *self.to_unicode.get(&cid)?;
+            *self.cmap.get(&unicode)?
+        } else if self.identity_cid_to_gid && !self.substituted {
+            // Embedded font with Identity CIDToGIDMap: CID = GID directly
             cid
+        } else if !self.cmap.is_empty() {
+            // Non-Identity mapping: CID is Unicode, use cmap
+            *self.cmap.get(&(cid as u32))?
         } else {
             cid
         };
