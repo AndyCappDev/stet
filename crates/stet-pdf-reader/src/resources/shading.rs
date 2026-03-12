@@ -261,7 +261,7 @@ fn handle_mesh(
     display_list: &mut DisplayList,
     shading_type: i32,
     resolved_cs: &ResolvedColorSpace,
-    _icc_cache: &mut IccCache,
+    icc_cache: &mut IccCache,
 ) -> Result<(), PdfError> {
     let bpc = dict.get_int(b"BitsPerCoordinate").unwrap_or(8) as usize;
     let bpco = dict.get_int(b"BitsPerComponent").unwrap_or(8) as usize;
@@ -285,6 +285,13 @@ fn handle_mesh(
         }
         _ => return Ok(()),
     };
+
+    // Convert vertex colors through ICC profile
+    for t in &mut triangles {
+        t.v0.color = components_to_device_color_icc(resolved_cs, &t.v0.raw_components, Some(icc_cache));
+        t.v1.color = components_to_device_color_icc(resolved_cs, &t.v1.raw_components, Some(icc_cache));
+        t.v2.color = components_to_device_color_icc(resolved_cs, &t.v2.raw_components, Some(icc_cache));
+    }
 
     // Transform vertices through CTM
     for t in &mut triangles {
@@ -321,7 +328,7 @@ fn handle_patches(
     display_list: &mut DisplayList,
     shading_type: i32,
     resolved_cs: &ResolvedColorSpace,
-    _icc_cache: &mut IccCache,
+    icc_cache: &mut IccCache,
 ) -> Result<(), PdfError> {
     let bpc = dict.get_int(b"BitsPerCoordinate").unwrap_or(8) as usize;
     let bpco = dict.get_int(b"BitsPerComponent").unwrap_or(8) as usize;
@@ -342,6 +349,13 @@ fn handle_patches(
         7 => stet_core::mesh_shading::parse_type7_patches(&data, bpc, bpco, bpfl, &decode, n_comps),
         _ => return Ok(()),
     };
+
+    // Convert patch corner colors through ICC profile
+    for p in &mut patches {
+        for i in 0..4 {
+            p.colors[i] = components_to_device_color_icc(resolved_cs, &p.raw_colors[i], Some(icc_cache));
+        }
+    }
 
     // Transform patch control points through CTM
     for p in &mut patches {

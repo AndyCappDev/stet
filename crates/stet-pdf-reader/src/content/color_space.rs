@@ -471,13 +471,13 @@ pub fn components_to_device_color_icc(
                 let byte = lookup.get(offset + i).copied().unwrap_or(0);
                 base_components.push(byte as f64 / 255.0);
             }
-            components_to_device_color(base, &base_components)
+            components_to_device_color_icc(base, &base_components, icc_cache)
         }
         ResolvedColorSpace::Separation { alt, tint_fn, .. } => {
             let tint = components.first().copied().unwrap_or(0.0);
             if let Some(func) = tint_fn {
                 let alt_components = func.evaluate(&[tint]);
-                components_to_device_color(alt, &alt_components)
+                components_to_device_color_icc(alt, &alt_components, icc_cache)
             } else {
                 // Fallback without tint function
                 match alt.as_ref() {
@@ -492,7 +492,7 @@ pub fn components_to_device_color_icc(
         ResolvedColorSpace::DeviceN { alt, tint_fn, .. } => {
             if let Some(func) = tint_fn {
                 let alt_components = func.evaluate(components);
-                components_to_device_color(alt, &alt_components)
+                components_to_device_color_icc(alt, &alt_components, icc_cache)
             } else {
                 // Fallback: use first component as gray
                 let v = components.first().copied().unwrap_or(0.0);
