@@ -482,7 +482,7 @@ impl ViewerApp {
         }
 
         // Render the viewport region using precomputed metadata
-        let rgba = stet_render::render_region_prepared(
+        let rgba = stet_render::render_region_prepared_parallel(
             &page.display_list,
             &page.prepared,
             vp_x,
@@ -545,7 +545,7 @@ impl ViewerApp {
             return;
         }
 
-        let rgba = stet_render::render_region_prepared(
+        let rgba = stet_render::render_region_prepared_parallel(
             &page.display_list,
             &page.prepared,
             0.0,

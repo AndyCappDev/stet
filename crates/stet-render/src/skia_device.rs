@@ -560,6 +560,41 @@ impl BandState {
     }
 }
 
+/// Unified rendering context that parameterizes both band and viewport rendering.
+///
+/// Band rendering is viewport rendering with `scale_x = scale_y = 1.0`.
+/// `viewport_transform(t, vp_x, vp_y, 1.0, 1.0)` == `offset_transform_xy(t, vp_x, vp_y)`.
+struct RenderContext<'a> {
+    /// Viewport/band origin X in device space.
+    vp_x: f32,
+    /// Viewport/band origin Y in device space.
+    vp_y: f32,
+    /// Horizontal scale (1.0 for band rendering, zoom for viewport).
+    scale_x: f32,
+    /// Vertical scale (1.0 for band rendering, zoom for viewport).
+    scale_y: f32,
+    /// Output pixmap width in pixels.
+    out_w: u32,
+    /// Output pixmap height in pixels.
+    out_h: u32,
+    /// Effective DPI at output scale.
+    effective_dpi: f64,
+    /// ICC color profile cache (for CMYK conversions).
+    icc: Option<&'a IccCache>,
+    /// Pre-converted image data cache (for viewport rendering).
+    image_cache: Option<&'a ImageCache>,
+    /// Element index in parent display list (for image cache lookup).
+    elem_idx: usize,
+}
+
+impl RenderContext<'_> {
+    /// Apply viewport transform to a PostScript matrix.
+    fn transform(&self, m: &Matrix) -> Transform {
+        viewport_transform(to_transform(m), self.vp_x, self.vp_y, self.scale_x, self.scale_y)
+    }
+
+}
+
 /// Y-axis bounding box in device pixels.
 struct YBBox {
     y_min: f64,
@@ -884,14 +919,6 @@ fn build_clip_epochs(list: &DisplayList, bboxes: &[Option<YBBox>]) -> Vec<ClipEp
 /// The original transform maps from path space to full-page device space;
 /// we subtract `y_offset` from `ty` so band rows [y_start, y_start+band_h)
 /// map to pixmap rows [0, band_h).
-fn offset_transform(t: Transform, y_offset: f32) -> Transform {
-    Transform::from_row(t.sx, t.ky, t.kx, t.sy, t.tx, t.ty - y_offset)
-}
-
-fn offset_transform_xy(t: Transform, x_offset: f32, y_offset: f32) -> Transform {
-    Transform::from_row(t.sx, t.ky, t.kx, t.sy, t.tx - x_offset, t.ty - y_offset)
-}
-
 /// Composite premultiplied-alpha RGBA pixels onto a white background.
 /// After this, all pixels are fully opaque (alpha=255).
 fn composite_onto_white(data: &mut [u8]) {
@@ -1581,96 +1608,6 @@ fn build_stroke(params: &StrokeParams, dpi: f64) -> Stroke {
 ///
 /// Only axis-aligned segments (horizontal/vertical lines) are snapped.
 /// Diagonal/curved segments are left as-is since snapping would distort them.
-fn stroke_adjust_path(path: &PsPath, device_width: f64) -> PsPath {
-    // Determine snap mode: half-pixel for hairlines/odd widths, whole-pixel for even
-    let use_half_pixel = device_width < 1.5 || (device_width.round() as i32) % 2 == 1;
-
-    let snap = |v: f64| -> f64 {
-        if use_half_pixel {
-            v.floor() + 0.5
-        } else {
-            v.round()
-        }
-    };
-
-    let mut result = PsPath::new();
-    let mut prev_x = 0.0_f64;
-    let mut prev_y = 0.0_f64;
-
-    for seg in &path.segments {
-        match *seg {
-            PathSegment::MoveTo(x, y) => {
-                prev_x = x;
-                prev_y = y;
-                result.segments.push(PathSegment::MoveTo(x, y));
-            }
-            PathSegment::LineTo(x, y) => {
-                let is_horizontal = (y - prev_y).abs() < 1e-6;
-                let is_vertical = (x - prev_x).abs() < 1e-6;
-
-                if is_horizontal {
-                    // Snap Y coordinate to pixel center, adjust previous MoveTo/LineTo too
-                    let snapped_y = snap(y);
-                    // Also fix the previous segment's Y if it was the start of this H-line
-                    if let Some(last) = result.segments.last_mut() {
-                        match last {
-                            PathSegment::MoveTo(_, ly) | PathSegment::LineTo(_, ly) => {
-                                *ly = snapped_y;
-                            }
-                            _ => {}
-                        }
-                    }
-                    result.segments.push(PathSegment::LineTo(x, snapped_y));
-                    prev_x = x;
-                    prev_y = snapped_y;
-                } else if is_vertical {
-                    // Snap X coordinate to pixel center
-                    let snapped_x = snap(x);
-                    if let Some(last) = result.segments.last_mut() {
-                        match last {
-                            PathSegment::MoveTo(lx, _) | PathSegment::LineTo(lx, _) => {
-                                *lx = snapped_x;
-                            }
-                            _ => {}
-                        }
-                    }
-                    result.segments.push(PathSegment::LineTo(snapped_x, y));
-                    prev_x = snapped_x;
-                    prev_y = y;
-                } else {
-                    // Diagonal — leave as-is
-                    result.segments.push(PathSegment::LineTo(x, y));
-                    prev_x = x;
-                    prev_y = y;
-                }
-            }
-            PathSegment::CurveTo {
-                x1,
-                y1,
-                x2,
-                y2,
-                x3,
-                y3,
-            } => {
-                // Curves: leave as-is
-                result.segments.push(PathSegment::CurveTo {
-                    x1,
-                    y1,
-                    x2,
-                    y2,
-                    x3,
-                    y3,
-                });
-                prev_x = x3;
-                prev_y = y3;
-            }
-            PathSegment::ClosePath => {
-                result.segments.push(PathSegment::ClosePath);
-            }
-        }
-    }
-    result
-}
 
 /// Apply stroke adjustment for viewport rendering.
 ///
@@ -1781,35 +1718,17 @@ fn stroke_adjust_path_viewport(
     result
 }
 
-/// Process a single display list element into a band-sized pixmap.
-fn render_element_to_band(
+/// Process a single display list element into a pixmap using the given render context.
+///
+/// This unified function handles both band rendering (scale=1.0) and viewport
+/// rendering (arbitrary scale). Band rendering is viewport rendering with
+/// `scale_x = scale_y = 1.0`.
+fn render_element(
     pixmap: &mut Pixmap,
     band_state: &mut BandState,
     element: &DisplayElement,
-    y_start: u32,
-    band_w: u32,
-    band_h: u32,
-    dpi: f64,
-    icc: Option<&IccCache>,
+    ctx: &RenderContext<'_>,
 ) {
-    render_element_to_band_offset(pixmap, band_state, element, 0, y_start, band_w, band_h, dpi, icc);
-}
-
-/// Render a display element into a band with optional X offset (for cropped groups).
-#[allow(clippy::too_many_arguments)]
-fn render_element_to_band_offset(
-    pixmap: &mut Pixmap,
-    band_state: &mut BandState,
-    element: &DisplayElement,
-    x_start: u32,
-    y_start: u32,
-    band_w: u32,
-    band_h: u32,
-    dpi: f64,
-    icc: Option<&IccCache>,
-) {
-    let x_off = x_start as f32;
-    let y_off = y_start as f32;
     match element {
         DisplayElement::Fill { path, params } => {
             // Check if this is an overprint fill needing CMYK simulation
@@ -1825,11 +1744,13 @@ fn render_element_to_band_offset(
                     band_state,
                     path,
                     params,
-                    x_off,
-                    y_off,
-                    band_w,
-                    band_h,
-                    icc,
+                    ctx.vp_x,
+                    ctx.vp_y,
+                    ctx.scale_x,
+                    ctx.scale_y,
+                    ctx.out_w,
+                    ctx.out_h,
+                    ctx.icc,
                 );
                 band_state.cmyk_buffer = Some(cmyk_buf);
             } else {
@@ -1838,12 +1759,12 @@ fn render_element_to_band_offset(
                 };
                 let mut temp_mask = None;
                 let Some(mask_ref) =
-                    resolve_clip_mask(&band_state.clip_region, &mut temp_mask, band_w, band_h)
+                    resolve_clip_mask(&band_state.clip_region, &mut temp_mask, ctx.out_w, ctx.out_h)
                 else {
                     return;
                 };
                 let paint = to_paint_alpha(&params.color, params.alpha, params.blend_mode);
-                let transform = offset_transform_xy(to_transform(&params.ctm), x_off, y_off);
+                let transform = ctx.transform(&params.ctm);
                 let fill_rule = to_fill_rule(&params.fill_rule);
                 pixmap.fill_path(&skia_path, &paint, fill_rule, transform, mask_ref);
 
@@ -1853,21 +1774,46 @@ fn render_element_to_band_offset(
                         cmyk_buf,
                         path,
                         params,
-                        x_off,
-                        y_off,
-                        band_w,
-                        band_h,
+                        ctx.vp_x,
+                        ctx.vp_y,
+                        ctx.scale_x,
+                        ctx.scale_y,
+                        ctx.out_w,
+                        ctx.out_h,
                         &band_state.clip_region,
                     );
                 }
             }
         }
         DisplayElement::Stroke { path, params } => {
-            let stroke = build_stroke(params, dpi);
-            // Apply stroke adjustment for thin strokes when enabled
+            let transform = ctx.transform(&params.ctm);
+            // Build stroke using the composited transform so hairline width
+            // calculations account for the actual output resolution.
+            let vp_ctm = Matrix {
+                a: transform.sx as f64,
+                b: transform.ky as f64,
+                c: transform.kx as f64,
+                d: transform.sy as f64,
+                tx: 0.0,
+                ty: 0.0,
+            };
+            let vp_params = StrokeParams {
+                ctm: vp_ctm,
+                ..params.clone()
+            };
+            let stroke = build_stroke(&vp_params, ctx.effective_dpi);
+
+            // Apply stroke adjustment — snap in output device space
             let adjusted;
             let draw_path = if params.stroke_adjust && stroke.width <= 2.0 {
-                adjusted = stroke_adjust_path(path, stroke.width as f64);
+                adjusted = stroke_adjust_path_viewport(
+                    path,
+                    stroke.width as f64,
+                    ctx.scale_x as f64,
+                    ctx.scale_y as f64,
+                    ctx.vp_x as f64,
+                    ctx.vp_y as f64,
+                );
                 &adjusted
             } else {
                 path
@@ -1883,7 +1829,6 @@ fn render_element_to_band_offset(
                 let Some(skia_path) = build_skia_path(draw_path) else {
                     return;
                 };
-                let transform = offset_transform_xy(to_transform(&params.ctm), x_off, y_off);
                 let resolution_scale = (transform.sx * transform.sx + transform.sy * transform.sy).sqrt().max(1.0);
                 if let Some(transformed) = skia_path.clone().transform(transform) {
                     if let Some(stroked) = transformed.stroke(&stroke, resolution_scale) {
@@ -1905,15 +1850,32 @@ fn render_element_to_band_offset(
                         };
                         let stroked_path = skia_path_to_ps_path(&stroked);
                         let mut cmyk_buf = band_state.cmyk_buffer.take().unwrap();
+                        // Transform already applied to the stroked path, use identity context
+                        let identity_ctx = RenderContext {
+                            vp_x: 0.0,
+                            vp_y: 0.0,
+                            scale_x: 1.0,
+                            scale_y: 1.0,
+                            out_w: ctx.out_w,
+                            out_h: ctx.out_h,
+                            effective_dpi: ctx.effective_dpi,
+                            icc: ctx.icc,
+                            image_cache: ctx.image_cache,
+                            elem_idx: ctx.elem_idx,
+                        };
                         render_overprint_fill(
                             pixmap,
                             &mut cmyk_buf,
                             band_state,
                             &stroked_path,
                             &fill_params,
-                            0.0, 0.0, // transform already applied
-                            band_w, band_h,
-                            icc,
+                            identity_ctx.vp_x,
+                            identity_ctx.vp_y,
+                            identity_ctx.scale_x,
+                            identity_ctx.scale_y,
+                            identity_ctx.out_w,
+                            identity_ctx.out_h,
+                            identity_ctx.icc,
                         );
                         band_state.cmyk_buffer = Some(cmyk_buf);
                     }
@@ -1924,17 +1886,16 @@ fn render_element_to_band_offset(
                 };
                 let mut temp_mask = None;
                 let Some(mask_ref) =
-                    resolve_clip_mask(&band_state.clip_region, &mut temp_mask, band_w, band_h)
+                    resolve_clip_mask(&band_state.clip_region, &mut temp_mask, ctx.out_w, ctx.out_h)
                 else {
                     return;
                 };
                 let paint = to_paint_alpha(&params.color, params.alpha, params.blend_mode);
-                let transform = offset_transform_xy(to_transform(&params.ctm), x_off, y_off);
                 pixmap.stroke_path(&skia_path, &paint, &stroke, transform, mask_ref);
             }
         }
         DisplayElement::Clip { path, params } => {
-            clip_path_band_offset(band_state, path, params, x_start, y_start, band_w, band_h);
+            clip_path_unified(band_state, path, params, ctx);
         }
         DisplayElement::InitClip => {
             if let Some(ClipRegion::Mask(mask)) = band_state.clip_region.take() {
@@ -1943,10 +1904,6 @@ fn render_element_to_band_offset(
             band_state.clip_region = None;
         }
         DisplayElement::ErasePage => {
-            // Fill transparent — the page is an implicit transparency group.
-            // Blend modes should composite against transparent (not white) so
-            // that painting onto unpainted areas uses the source color directly.
-            // White background is composited underneath after all content renders.
             pixmap.fill(Color::TRANSPARENT);
             if let Some(ClipRegion::Mask(mask)) = band_state.clip_region.take() {
                 band_state.recycle_mask(mask);
@@ -1976,18 +1933,30 @@ fn render_element_to_band_offset(
                     band_state,
                     sample_data,
                     params,
-                    x_off,
-                    y_off,
-                    band_w,
-                    band_h,
-                    icc,
+                    ctx.vp_x,
+                    ctx.vp_y,
+                    ctx.scale_x,
+                    ctx.scale_y,
+                    ctx.out_w,
+                    ctx.out_h,
+                    ctx.icc,
                 );
                 band_state.cmyk_buffer = Some(cmyk_buf);
             } else {
-                let mut rgba_data = samples_to_rgba(sample_data, params, icc);
-                if params.mask_color.is_some() {
-                    apply_mask_color_rgba(&mut rgba_data, sample_data, params);
-                }
+                // Use pre-converted RGBA from image cache when available
+                let owned_rgba;
+                let rgba_data: &[u8] = if let Some(cached) = ctx.image_cache.and_then(|c| c.get(ctx.elem_idx)) {
+                    cached
+                } else {
+                    owned_rgba = {
+                        let mut rgba = samples_to_rgba(sample_data, params, ctx.icc);
+                        if params.mask_color.is_some() {
+                            apply_mask_color_rgba(&mut rgba, sample_data, params);
+                        }
+                        rgba
+                    };
+                    &owned_rgba
+                };
                 let expected = (iw * ih * 4) as usize;
                 if rgba_data.len() < expected {
                     return;
@@ -1996,12 +1965,12 @@ fn render_element_to_band_offset(
                     return;
                 };
                 let combined = params.ctm.concat(&image_inv);
-                let raw_transform = offset_transform_xy(to_transform(&combined), x_off, y_off);
+                let raw_transform = ctx.transform(&combined);
 
-                let prescaled = prescale_image(&rgba_data, iw, ih, raw_transform);
+                let prescaled = prescale_image(rgba_data, iw, ih, raw_transform);
                 let (img_data, img_w, img_h, transform) = match &prescaled {
                     Some((data, w, h, t)) => (data.as_slice(), *w, *h, *t),
-                    None => (rgba_data.as_slice(), iw, ih, raw_transform),
+                    None => (rgba_data, iw, ih, raw_transform),
                 };
 
                 let Some(img_pixmap) = tiny_skia::PixmapRef::from_bytes(img_data, img_w, img_h)
@@ -2016,10 +1985,10 @@ fn render_element_to_band_offset(
                     Some(ClipRegion::Rect(rect)) => {
                         if rect.is_empty() {
                             return;
-                        } else if rect.is_full_page(band_w, band_h) {
+                        } else if rect.is_full_page(ctx.out_w, ctx.out_h) {
                             None
                         } else {
-                            temp_mask = rect.make_mask(band_w, band_h);
+                            temp_mask = rect.make_mask(ctx.out_w, ctx.out_h);
                             temp_mask.as_ref()
                         }
                     }
@@ -2046,10 +2015,12 @@ fn render_element_to_band_offset(
                         cmyk_buf,
                         sample_data,
                         params,
-                        x_off,
-                        y_off,
-                        band_w,
-                        band_h,
+                        ctx.vp_x,
+                        ctx.vp_y,
+                        ctx.scale_x,
+                        ctx.scale_y,
+                        ctx.out_w,
+                        ctx.out_h,
                         &band_state.clip_region,
                     );
                 }
@@ -2058,86 +2029,75 @@ fn render_element_to_band_offset(
         DisplayElement::AxialShading { params } => {
             let mut temp_mask = None;
             let Some(mask_ref) =
-                resolve_clip_mask(&band_state.clip_region, &mut temp_mask, band_w, band_h)
+                resolve_clip_mask(&band_state.clip_region, &mut temp_mask, ctx.out_w, ctx.out_h)
             else {
                 return;
             };
-            render_axial_shading_to_pixmap(pixmap, params, x_start, y_start, mask_ref);
+            render_axial_shading(pixmap, params, ctx.vp_x, ctx.vp_y, ctx.scale_x, ctx.scale_y, mask_ref);
         }
         DisplayElement::RadialShading { params } => {
             let mut temp_mask = None;
             let Some(mask_ref) =
-                resolve_clip_mask(&band_state.clip_region, &mut temp_mask, band_w, band_h)
+                resolve_clip_mask(&band_state.clip_region, &mut temp_mask, ctx.out_w, ctx.out_h)
             else {
                 return;
             };
-            render_radial_shading_to_pixmap(pixmap, params, x_start, y_start, mask_ref);
+            render_radial_shading(pixmap, params, ctx.vp_x, ctx.vp_y, ctx.scale_x, ctx.scale_y, mask_ref);
         }
         DisplayElement::MeshShading { params } => {
             let mut temp_mask = None;
             let Some(mask_ref) =
-                resolve_clip_mask(&band_state.clip_region, &mut temp_mask, band_w, band_h)
+                resolve_clip_mask(&band_state.clip_region, &mut temp_mask, ctx.out_w, ctx.out_h)
             else {
                 return;
             };
-            render_mesh_shading_to_pixmap(pixmap, params, x_start, y_start, mask_ref);
+            render_mesh_shading(pixmap, params, ctx.vp_x, ctx.vp_y, ctx.scale_x, ctx.scale_y, mask_ref);
         }
         DisplayElement::PatchShading { params } => {
             let mut temp_mask = None;
             let Some(mask_ref) =
-                resolve_clip_mask(&band_state.clip_region, &mut temp_mask, band_w, band_h)
+                resolve_clip_mask(&band_state.clip_region, &mut temp_mask, ctx.out_w, ctx.out_h)
             else {
                 return;
             };
-            render_patch_shading_to_pixmap(pixmap, params, x_start, y_start, mask_ref);
+            render_patch_shading(pixmap, params, ctx.vp_x, ctx.vp_y, ctx.scale_x, ctx.scale_y, mask_ref);
         }
         DisplayElement::PatternFill { params } => {
-            render_pattern_fill_to_band(pixmap, band_state, params, x_start, y_start, band_w, band_h, dpi);
+            render_pattern_fill(pixmap, band_state, params, ctx);
         }
         DisplayElement::Group { elements, params } => {
-            render_group_to_band(
-                pixmap, band_state, elements, params, x_start, y_start, band_w, band_h, dpi, icc,
-            );
+            render_group(pixmap, band_state, elements, params, ctx);
         }
         DisplayElement::SoftMasked {
             mask,
             content,
             params,
         } => {
-            render_soft_masked_band(
-                pixmap, band_state, mask, content, params, x_start, y_start, band_w, band_h, dpi, icc,
-            );
+            render_soft_masked(pixmap, band_state, mask, content, params, ctx);
         }
         DisplayElement::Text { .. } => {} // PDF-only, ignored by rasterizer
     }
 }
 
-/// Render a transparency group into a band-sized pixmap.
+/// Compute the cropped output-pixel region for a group's device-space bounding box.
 ///
-/// Creates an offscreen pixmap, renders the group's child elements into it,
-/// then composites back onto the parent with the group's blend mode and alpha.
-#[allow(clippy::too_many_arguments)]
-/// Compute the cropped region for a group's device-space bounding box within a band.
-///
-/// Returns `(crop_x, crop_y, crop_w, crop_h)` in band-local pixels, or `None` if
-/// the group covers most of the band (not worth cropping) or is entirely outside.
-fn compute_band_group_crop(
+/// Returns `(crop_x, crop_y, crop_w, crop_h)` in output pixels, or `None` if
+/// the group is entirely outside the viewport or cropping isn't worthwhile.
+fn compute_group_crop(
     bbox: &[f64; 4],
-    y_start: u32,
-    band_w: u32,
-    band_h: u32,
+    ctx: &RenderContext<'_>,
 ) -> Option<(i32, i32, u32, u32)> {
-    // bbox is in device-space pixels (same coordinate system as bands)
-    let px_min = bbox[0].floor() as i32;
-    let py_min = (bbox[1].floor() as i32) - y_start as i32;
-    let px_max = bbox[2].ceil() as i32;
-    let py_max = (bbox[3].ceil() as i32) - y_start as i32;
+    // Transform device-space bbox to output pixel coords
+    let px_min = ((bbox[0] as f32 - ctx.vp_x) * ctx.scale_x).floor() as i32;
+    let py_min = ((bbox[1] as f32 - ctx.vp_y) * ctx.scale_y).floor() as i32;
+    let px_max = ((bbox[2] as f32 - ctx.vp_x) * ctx.scale_x).ceil() as i32;
+    let py_max = ((bbox[3] as f32 - ctx.vp_y) * ctx.scale_y).ceil() as i32;
 
-    // Clip to band bounds
+    // Clip to output bounds
     let x0 = px_min.max(0);
     let y0 = py_min.max(0);
-    let x1 = px_max.min(band_w as i32);
-    let y1 = py_max.min(band_h as i32);
+    let x1 = px_max.min(ctx.out_w as i32);
+    let y1 = py_max.min(ctx.out_h as i32);
 
     if x0 >= x1 || y0 >= y1 {
         return None;
@@ -2148,7 +2108,7 @@ fn compute_band_group_crop(
 
     // Only crop if it saves at least 25% of pixels
     let crop_pixels = crop_w as u64 * crop_h as u64;
-    let full_pixels = band_w as u64 * band_h as u64;
+    let full_pixels = ctx.out_w as u64 * ctx.out_h as u64;
     if crop_pixels * 4 >= full_pixels * 3 {
         return None;
     }
@@ -2156,38 +2116,34 @@ fn compute_band_group_crop(
     Some((x0, y0, crop_w, crop_h))
 }
 
-fn render_group_to_band(
+/// Render a transparency group into a pixmap.
+///
+/// Creates an offscreen pixmap, renders the group's child elements into it,
+/// then composites back onto the parent with the group's blend mode and alpha.
+fn render_group(
     pixmap: &mut Pixmap,
     band_state: &mut BandState,
     elements: &DisplayList,
     params: &stet_core::display_list::GroupParams,
-    x_start: u32,
-    y_start: u32,
-    band_w: u32,
-    band_h: u32,
-    dpi: f64,
-    icc: Option<&IccCache>,
+    ctx: &RenderContext<'_>,
 ) {
     if params.knockout {
-        render_knockout_group_to_band(
-            pixmap, band_state, elements, params, x_start, y_start, band_w, band_h, dpi, icc,
-        );
+        render_knockout_group(pixmap, band_state, elements, params, ctx);
         return;
     }
 
-    // Try to use a cropped offscreen based on the group's bounding box.
-    // The bbox is in absolute device space; adjust for the parent's x_start.
-    let adjusted_bbox = [
-        params.bbox[0] - x_start as f64,
-        params.bbox[1],
-        params.bbox[2] - x_start as f64,
-        params.bbox[3],
-    ];
-    let crop = compute_band_group_crop(&adjusted_bbox, y_start, band_w, band_h);
+    let crop = compute_group_crop(&params.bbox, ctx);
 
-    let (eff_w, eff_h, crop_x, crop_y, eff_x_start, eff_y_start) = match crop {
-        Some((cx, cy, cw, ch)) => (cw, ch, cx, cy, x_start + cx as u32, y_start + cy as u32),
-        None => (band_w, band_h, 0, 0, x_start, y_start),
+    let (eff_w, eff_h, crop_x, crop_y, eff_vp_x, eff_vp_y) = match crop {
+        Some((cx, cy, cw, ch)) => (
+            cw,
+            ch,
+            cx,
+            cy,
+            ctx.vp_x + cx as f32 / ctx.scale_x * ctx.scale_x,
+            ctx.vp_y + cy as f32 / ctx.scale_y * ctx.scale_y,
+        ),
+        None => (ctx.out_w, ctx.out_h, 0, 0, ctx.vp_x, ctx.vp_y),
     };
 
     let Some(mut offscreen) = Pixmap::new(eff_w, eff_h) else {
@@ -2195,8 +2151,6 @@ fn render_group_to_band(
     };
 
     // For non-isolated groups, copy the parent backdrop into the offscreen buffer
-    // so group elements composite against the actual backdrop content.
-    // Also save a copy of the backdrop for contribution extraction later.
     let backdrop = if !params.isolated {
         let data = if crop.is_some() {
             copy_backdrop_crop(pixmap, crop_x, crop_y, eff_w, eff_h)
@@ -2209,21 +2163,16 @@ fn render_group_to_band(
         None
     };
 
-    // Allocate CMYK buffer for the group if overprint tracking is needed.
-    // Two cases: (1) group contains overprint elements, or (2) parent has a
-    // cmyk_buffer (meaning we're inside an overprint-tracking context and need
-    // to track fills so sibling groups can read correct backdrop values).
+    // Allocate CMYK buffer for the group if overprint tracking is needed
     let group_cmyk = if has_overprint_elements(elements) || band_state.cmyk_buffer.is_some() {
         let buf_size = eff_w as usize * eff_h as usize * 4;
         let mut buf = vec![0.0f32; buf_size];
-        // Copy parent CMYK buffer into group so overprint fills and non-overprint
-        // fill tracking both see the correct backdrop channel values.
         if let Some(ref parent_cmyk) = band_state.cmyk_buffer {
-            let parent_stride = band_w as usize * 4;
+            let parent_stride = ctx.out_w as usize * 4;
             let group_stride = eff_w as usize * 4;
             for gy in 0..eff_h as usize {
                 let py = crop_y as usize + gy;
-                if py < band_h as usize {
+                if py < ctx.out_h as usize {
                     let p_start = py * parent_stride + crop_x as usize * 4;
                     let g_start = gy * group_stride;
                     let copy_len = group_stride.min(parent_stride - crop_x as usize * 4);
@@ -2237,7 +2186,6 @@ fn render_group_to_band(
         None
     };
 
-    // Fresh BandState for group (clean clip, empty caches)
     let mut group_band = BandState {
         clip_region: None,
         spare_mask: None,
@@ -2247,32 +2195,37 @@ fn render_group_to_band(
         cmyk_buffer: group_cmyk,
     };
 
-    // Render group elements into offscreen
-    for elem in elements.elements() {
-        render_element_to_band_offset(
-            &mut offscreen,
-            &mut group_band,
-            elem,
-            eff_x_start,
-            eff_y_start,
-            eff_w,
-            eff_h,
-            dpi,
-            icc,
-        );
+    let group_ctx = RenderContext {
+        vp_x: eff_vp_x,
+        vp_y: eff_vp_y,
+        scale_x: ctx.scale_x,
+        scale_y: ctx.scale_y,
+        out_w: eff_w,
+        out_h: eff_h,
+        effective_dpi: ctx.effective_dpi,
+        icc: ctx.icc,
+        image_cache: None, // Group elements don't use parent image cache
+        elem_idx: 0,
+    };
+
+    for (idx, elem) in elements.elements().iter().enumerate() {
+        let elem_ctx = RenderContext {
+            elem_idx: idx,
+            ..group_ctx
+        };
+        render_element(&mut offscreen, &mut group_band, elem, &elem_ctx);
     }
 
-    // Composite offscreen onto parent with clip, blend mode, alpha
     let mut temp_mask = None;
-    let mask_ref = resolve_clip_mask(&band_state.clip_region, &mut temp_mask, band_w, band_h);
+    let mask_ref = resolve_clip_mask(&band_state.clip_region, &mut temp_mask, ctx.out_w, ctx.out_h);
     let mask_ref = match mask_ref {
-        None => return, // empty clip — skip painting
+        None => return,
         Some(m) => m,
     };
 
     if let Some(backdrop) = &backdrop {
         composite_non_isolated_group_cropped(
-            pixmap, &offscreen, &backdrop, params, mask_ref, crop_x, crop_y,
+            pixmap, &offscreen, backdrop, params, mask_ref, crop_x, crop_y,
         );
     } else {
         let paint = tiny_skia::PixmapPaint {
@@ -2290,8 +2243,7 @@ fn render_group_to_band(
         );
     }
 
-    // Write group CMYK buffer back to parent so subsequent sibling groups
-    // and overprint fills see the correct backdrop values.
+    // Write group CMYK buffer back to parent
     if let (Some(group_cmyk), Some(parent_cmyk)) =
         (&group_band.cmyk_buffer, &mut band_state.cmyk_buffer)
     {
@@ -2303,48 +2255,41 @@ fn render_group_to_band(
             crop_y as usize,
             eff_w as usize,
             eff_h as usize,
-            band_w as usize,
-            band_h as usize,
+            ctx.out_w as usize,
+            ctx.out_h as usize,
         );
     }
 }
 
-/// Render a knockout transparency group into a band-sized pixmap.
+/// Render a knockout transparency group into a pixmap.
 ///
 /// In a knockout group, each element composites against the group's initial
-/// backdrop (not the accumulated result of previous elements). This means
-/// overlapping elements within the group don't blend with each other.
-#[allow(clippy::too_many_arguments)]
-fn render_knockout_group_to_band(
+/// backdrop (not the accumulated result of previous elements).
+fn render_knockout_group(
     pixmap: &mut Pixmap,
     band_state: &mut BandState,
     elements: &DisplayList,
     params: &stet_core::display_list::GroupParams,
-    x_start: u32,
-    y_start: u32,
-    band_w: u32,
-    band_h: u32,
-    dpi: f64,
-    icc: Option<&IccCache>,
+    ctx: &RenderContext<'_>,
 ) {
-    let adjusted_bbox = [
-        params.bbox[0] - x_start as f64,
-        params.bbox[1],
-        params.bbox[2] - x_start as f64,
-        params.bbox[3],
-    ];
-    let crop = compute_band_group_crop(&adjusted_bbox, y_start, band_w, band_h);
+    let crop = compute_group_crop(&params.bbox, ctx);
 
-    let (eff_w, eff_h, crop_x, crop_y, eff_x_start, eff_y_start) = match crop {
-        Some((cx, cy, cw, ch)) => (cw, ch, cx, cy, x_start + cx as u32, y_start + cy as u32),
-        None => (band_w, band_h, 0, 0, x_start, y_start),
+    let (eff_w, eff_h, crop_x, crop_y, eff_vp_x, eff_vp_y) = match crop {
+        Some((cx, cy, cw, ch)) => (
+            cw,
+            ch,
+            cx,
+            cy,
+            ctx.vp_x + cx as f32 / ctx.scale_x * ctx.scale_x,
+            ctx.vp_y + cy as f32 / ctx.scale_y * ctx.scale_y,
+        ),
+        None => (ctx.out_w, ctx.out_h, 0, 0, ctx.vp_x, ctx.vp_y),
     };
 
     let Some(mut offscreen) = Pixmap::new(eff_w, eff_h) else {
         return;
     };
 
-    // Initial backdrop: parent pixels for non-isolated, transparent for isolated
     let initial_backdrop = if !params.isolated {
         if crop.is_some() {
             copy_backdrop_crop(pixmap, crop_x, crop_y, eff_w, eff_h)
@@ -2355,25 +2300,22 @@ fn render_knockout_group_to_band(
         vec![0u8; (eff_w * eff_h * 4) as usize]
     };
 
-    // Accumulated result starts as the initial backdrop
     let Some(mut accumulated) = Pixmap::new(eff_w, eff_h) else {
         return;
     };
-    accumulated
-        .data_mut()
-        .copy_from_slice(&initial_backdrop);
+    accumulated.data_mut().copy_from_slice(&initial_backdrop);
 
-    // Initial CMYK values for the knockout group (copied from parent or zeros)
+    // Initial CMYK values for the knockout group
     let needs_cmyk = has_overprint_elements(elements) || band_state.cmyk_buffer.is_some();
     let initial_cmyk = if needs_cmyk {
         let buf_size = eff_w as usize * eff_h as usize * 4;
         let mut buf = vec![0.0f32; buf_size];
         if let Some(ref parent_cmyk) = band_state.cmyk_buffer {
-            let parent_stride = band_w as usize * 4;
+            let parent_stride = ctx.out_w as usize * 4;
             let group_stride = eff_w as usize * 4;
             for gy in 0..eff_h as usize {
                 let py = crop_y as usize + gy;
-                if py < band_h as usize {
+                if py < ctx.out_h as usize {
                     let p_start = py * parent_stride + crop_x as usize * 4;
                     let g_start = gy * group_stride;
                     let copy_len = group_stride.min(parent_stride - crop_x as usize * 4);
@@ -2387,16 +2329,25 @@ fn render_knockout_group_to_band(
         None
     };
 
-    // Track accumulated CMYK values across knockout elements
     let mut accumulated_cmyk = initial_cmyk.clone();
 
-    // Render each element independently against the initial backdrop.
+    let group_ctx = RenderContext {
+        vp_x: eff_vp_x,
+        vp_y: eff_vp_y,
+        scale_x: ctx.scale_x,
+        scale_y: ctx.scale_y,
+        out_w: eff_w,
+        out_h: eff_h,
+        effective_dpi: ctx.effective_dpi,
+        icc: ctx.icc,
+        image_cache: None,
+        elem_idx: 0,
+    };
+
     for elem in elements.elements() {
         offscreen.data_mut().copy_from_slice(&initial_backdrop);
 
-        // Each knockout element starts with the initial backdrop CMYK
         let ko_cmyk = initial_cmyk.clone();
-
         let mut elem_band = BandState {
             clip_region: None,
             spare_mask: None,
@@ -2406,12 +2357,8 @@ fn render_knockout_group_to_band(
             cmyk_buffer: ko_cmyk,
         };
 
-        render_element_to_band_offset(
-            &mut offscreen, &mut elem_band, elem, eff_x_start, eff_y_start,
-            eff_w, eff_h, dpi, icc,
-        );
+        render_element(&mut offscreen, &mut elem_band, elem, &group_ctx);
 
-        // For changed pixels, also update accumulated CMYK
         if let (Some(elem_cmyk), Some(acc_cmyk)) =
             (&elem_band.cmyk_buffer, &mut accumulated_cmyk)
         {
@@ -2422,7 +2369,7 @@ fn render_knockout_group_to_band(
     }
 
     let mut temp_mask = None;
-    let mask_ref = resolve_clip_mask(&band_state.clip_region, &mut temp_mask, band_w, band_h);
+    let mask_ref = resolve_clip_mask(&band_state.clip_region, &mut temp_mask, ctx.out_w, ctx.out_h);
     let mask_ref = match mask_ref {
         None => return,
         Some(m) => m,
@@ -2432,7 +2379,6 @@ fn render_knockout_group_to_band(
         pixmap, &accumulated, &initial_backdrop, params, mask_ref, crop_x, crop_y,
     );
 
-    // Write accumulated CMYK back to parent
     if let (Some(acc_cmyk), Some(parent_cmyk)) =
         (&accumulated_cmyk, &mut band_state.cmyk_buffer)
     {
@@ -2444,12 +2390,11 @@ fn render_knockout_group_to_band(
             crop_y as usize,
             eff_w as usize,
             eff_h as usize,
-            band_w as usize,
-            band_h as usize,
+            ctx.out_w as usize,
+            ctx.out_h as usize,
         );
     }
 }
-
 /// Replace pixels in `target` with pixels from `source` wherever `source`
 /// differs from `backdrop`. Used for knockout group per-element compositing
 /// where each element replaces (not blends with) previous elements.
@@ -2533,38 +2478,46 @@ fn replace_changed_cmyk(
     }
 }
 
-/// Render soft-masked content into a band.
+/// Render soft-masked content.
 ///
 /// 1. Renders the mask display list to an offscreen pixmap.
 /// 2. Extracts a grayscale mask (luminosity or alpha).
 /// 3. Renders content into another offscreen pixmap.
 /// 4. Multiplies content alpha by the mask values.
 /// 5. Composites the masked content onto the parent.
-#[allow(clippy::too_many_arguments)]
-fn render_soft_masked_band(
+fn render_soft_masked(
     pixmap: &mut Pixmap,
     band_state: &mut BandState,
     mask_list: &DisplayList,
     content_list: &DisplayList,
     params: &stet_core::display_list::SoftMaskParams,
-    x_start: u32,
-    y_start: u32,
-    band_w: u32,
-    band_h: u32,
-    dpi: f64,
-    icc: Option<&IccCache>,
+    ctx: &RenderContext<'_>,
 ) {
-    let adjusted_bbox = [
-        params.bbox[0] - x_start as f64,
-        params.bbox[1],
-        params.bbox[2] - x_start as f64,
-        params.bbox[3],
-    ];
-    let crop = compute_band_group_crop(&adjusted_bbox, y_start, band_w, band_h);
+    let crop = compute_group_crop(&params.bbox, ctx);
 
-    let (eff_w, eff_h, crop_x, crop_y, eff_x_start, eff_y_start) = match crop {
-        Some((cx, cy, cw, ch)) => (cw, ch, cx, cy, x_start + cx as u32, y_start + cy as u32),
-        None => (band_w, band_h, 0, 0, x_start, y_start),
+    let (eff_w, eff_h, crop_x, crop_y, eff_vp_x, eff_vp_y) = match crop {
+        Some((cx, cy, cw, ch)) => (
+            cw,
+            ch,
+            cx,
+            cy,
+            ctx.vp_x + cx as f32 / ctx.scale_x * ctx.scale_x,
+            ctx.vp_y + cy as f32 / ctx.scale_y * ctx.scale_y,
+        ),
+        None => (ctx.out_w, ctx.out_h, 0, 0, ctx.vp_x, ctx.vp_y),
+    };
+
+    let sub_ctx = RenderContext {
+        vp_x: eff_vp_x,
+        vp_y: eff_vp_y,
+        scale_x: ctx.scale_x,
+        scale_y: ctx.scale_y,
+        out_w: eff_w,
+        out_h: eff_h,
+        effective_dpi: ctx.effective_dpi,
+        icc: ctx.icc,
+        image_cache: None,
+        elem_idx: 0,
     };
 
     // 1. Render mask form into offscreen
@@ -2579,18 +2532,9 @@ fn render_soft_masked_band(
         mask_pool: Vec::new(),
         cmyk_buffer: None,
     };
-    for elem in mask_list.elements() {
-        render_element_to_band_offset(
-            &mut mask_pixmap,
-            &mut mask_band,
-            elem,
-            eff_x_start,
-            eff_y_start,
-            eff_w,
-            eff_h,
-            dpi,
-            icc,
-        );
+    for (idx, elem) in mask_list.elements().iter().enumerate() {
+        let elem_ctx = RenderContext { elem_idx: idx, ..sub_ctx };
+        render_element(&mut mask_pixmap, &mut mask_band, elem, &elem_ctx);
     }
 
     // 2. Extract grayscale mask values
@@ -2606,11 +2550,11 @@ fn render_soft_masked_band(
         let buf_size = eff_w as usize * eff_h as usize * 4;
         let mut buf = vec![0.0f32; buf_size];
         if let Some(ref parent_cmyk) = band_state.cmyk_buffer {
-            let parent_stride = band_w as usize * 4;
+            let parent_stride = ctx.out_w as usize * 4;
             let group_stride = eff_w as usize * 4;
             for gy in 0..eff_h as usize {
                 let py = crop_y as usize + gy;
-                if py < band_h as usize {
+                if py < ctx.out_h as usize {
                     let p_start = py * parent_stride + crop_x as usize * 4;
                     let g_start = gy * group_stride;
                     let copy_len = group_stride.min(parent_stride - crop_x as usize * 4);
@@ -2631,21 +2575,12 @@ fn render_soft_masked_band(
         mask_pool: Vec::new(),
         cmyk_buffer: content_cmyk,
     };
-    for elem in content_list.elements() {
-        render_element_to_band_offset(
-            &mut content_pixmap,
-            &mut content_band,
-            elem,
-            eff_x_start,
-            eff_y_start,
-            eff_w,
-            eff_h,
-            dpi,
-            icc,
-        );
+    for (idx, elem) in content_list.elements().iter().enumerate() {
+        let elem_ctx = RenderContext { elem_idx: idx, ..sub_ctx };
+        render_element(&mut content_pixmap, &mut content_band, elem, &elem_ctx);
     }
 
-    // 4. Multiply content RGBA by mask values (premultiplied alpha)
+    // 4. Multiply content RGBA by mask values
     let content_data = content_pixmap.data_mut();
     for i in 0..pixel_count {
         let m = mask_values[i] as u16;
@@ -2658,7 +2593,7 @@ fn render_soft_masked_band(
 
     // 5. Composite masked content onto parent with clip
     let mut temp_mask = None;
-    let mask_ref = resolve_clip_mask(&band_state.clip_region, &mut temp_mask, band_w, band_h);
+    let mask_ref = resolve_clip_mask(&band_state.clip_region, &mut temp_mask, ctx.out_w, ctx.out_h);
     let mask_ref = match mask_ref {
         None => return,
         Some(m) => m,
@@ -2690,12 +2625,11 @@ fn render_soft_masked_band(
             crop_y as usize,
             eff_w as usize,
             eff_h as usize,
-            band_w as usize,
-            band_h as usize,
+            ctx.out_w as usize,
+            ctx.out_h as usize,
         );
     }
 }
-
 /// Extract grayscale mask values from rendered RGBA pixels.
 fn extract_soft_mask_values(
     rgba: &[u8],
@@ -2739,43 +2673,40 @@ fn extract_soft_mask_values(
     }
 }
 
-/// Render a tiled pattern fill into a band.
-fn render_pattern_fill_to_band(
+/// Render a tiled pattern fill.
+fn render_pattern_fill(
     pixmap: &mut Pixmap,
     band_state: &mut BandState,
     params: &stet_core::device::PatternFillParams,
-    x_start: u32,
-    y_start: u32,
-    band_w: u32,
-    band_h: u32,
-    dpi: f64,
+    ctx: &RenderContext<'_>,
 ) {
     let mut temp_mask = None;
-    let Some(mask_ref) = resolve_clip_mask(&band_state.clip_region, &mut temp_mask, band_w, band_h)
+    let Some(mask_ref) = resolve_clip_mask(&band_state.clip_region, &mut temp_mask, ctx.out_w, ctx.out_h)
     else {
         return;
     };
 
     let pm = &params.pattern_matrix;
-    let x_off = x_start as f64;
-    let y_off = y_start as f64;
 
     // Tile step vectors in device space (handles rotation/shear)
     let (step_ux, step_uy) = pm.transform_delta(params.xstep, 0.0);
     let (step_vx, step_vy) = pm.transform_delta(0.0, params.ystep);
 
-    // Check for degenerate steps
     let step_u_len = (step_ux * step_ux + step_uy * step_uy).sqrt();
     let step_v_len = (step_vx * step_vx + step_vy * step_vy).sqrt();
     if step_u_len < 0.01 || step_v_len < 0.01 {
         return;
     }
 
-    // Pattern origin in device space
     let origin_x = pm.tx;
     let origin_y = pm.ty;
 
-    // Compute the fill path bounding box to determine tile range
+    // Viewport bounds in device space
+    let dev_vp_x = ctx.vp_x as f64;
+    let dev_vp_y = ctx.vp_y as f64;
+    let dev_vp_w = ctx.out_w as f64 / ctx.scale_x as f64;
+    let dev_vp_h = ctx.out_h as f64 / ctx.scale_y as f64;
+
     let (mut min_x, mut min_y, mut max_x, mut max_y) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
     for seg in &params.path.segments {
         let (x, y) = match seg {
@@ -2789,22 +2720,18 @@ fn render_pattern_fill_to_band(
         max_y = max_y.max(y);
     }
 
-    // Clamp to band Y range
-    let band_min_y = y_off;
-    let band_max_y = y_off + band_h as f64;
-    min_y = min_y.max(band_min_y);
-    max_y = max_y.min(band_max_y);
-    if min_y >= max_y {
+    // Clamp to viewport bounds in device space
+    min_x = min_x.max(dev_vp_x);
+    min_y = min_y.max(dev_vp_y);
+    max_x = max_x.min(dev_vp_x + dev_vp_w);
+    max_y = max_y.min(dev_vp_y + dev_vp_h);
+    if min_x >= max_x || min_y >= max_y {
         return;
     }
 
-    // Compute tile index range by projecting fill bbox into tile coordinates.
-    // For rotated/sheared patterns, we need to find the range of (tu, tv) indices
-    // such that origin + tu*step_u + tv*step_v covers the fill bbox.
-    // Project each corner of the fill bbox onto the step vectors.
     let det = step_ux * step_vy - step_uy * step_vx;
     if det.abs() < 1e-10 {
-        return; // degenerate (parallel step vectors)
+        return;
     }
     let inv_det = 1.0 / det;
 
@@ -2833,40 +2760,30 @@ fn render_pattern_fill_to_band(
     let tile_y_start = tv_min.floor() as i32 - 1;
     let tile_y_end = tv_max.ceil() as i32 + 1;
 
-    // Safety limit on tile count
     let tile_count = (tile_x_end - tile_x_start) as i64 * (tile_y_end - tile_y_start) as i64;
     if tile_count > 10000 {
         return;
     }
 
-    // Render tiled pattern into a temporary pixmap, then composite through
-    // the fill path onto the main pixmap. This gives exact fractional tile
-    // positioning with no rounding artifacts from Pattern shader repeat.
-    let Some(mut tile_buf) = Pixmap::new(band_w, band_h) else {
+    let Some(mut tile_buf) = Pixmap::new(ctx.out_w, ctx.out_h) else {
         return;
     };
 
+    let sx_f = ctx.scale_x as f64;
+    let sy_f = ctx.scale_y as f64;
+
     for tv in tile_y_start..tile_y_end {
         for tu in tile_x_start..tile_x_end {
-            // Quick Y cull using tile center
-            let tile_dev_y = origin_y + tu as f64 * step_uy + tv as f64 * step_vy;
-            let tile_extent = step_u_len + step_v_len; // conservative radius
-            if tile_dev_y + tile_extent < band_min_y || tile_dev_y - tile_extent > band_max_y {
-                continue;
-            }
-
-            // Tile transform: translate by (tu*xstep, tv*ystep) in pattern space,
-            // then apply the full pattern matrix. This is equivalent to
-            // base_transform pre-translated by the pattern-space offset.
             let pat_offset_x = tu as f64 * params.xstep;
             let pat_offset_y = tv as f64 * params.ystep;
+
             let tile_transform = Transform::from_row(
-                pm.a as f32,
-                pm.b as f32,
-                pm.c as f32,
-                pm.d as f32,
-                (pm.a * pat_offset_x + pm.c * pat_offset_y + pm.tx - x_off) as f32,
-                (pm.b * pat_offset_x + pm.d * pat_offset_y + pm.ty - y_off) as f32,
+                (pm.a * sx_f) as f32,
+                (pm.b * sy_f) as f32,
+                (pm.c * sx_f) as f32,
+                (pm.d * sy_f) as f32,
+                ((pm.a * pat_offset_x + pm.c * pat_offset_y + pm.tx - dev_vp_x) * sx_f) as f32,
+                ((pm.b * pat_offset_x + pm.d * pat_offset_y + pm.ty - dev_vp_y) * sy_f) as f32,
             );
 
             for elem in params.tile.elements() {
@@ -2883,8 +2800,6 @@ fn render_pattern_fill_to_band(
                                         .unwrap_or(&DeviceColor::black()),
                                 )
                             };
-                            // Disable anti-aliasing for tile fills so adjacent
-                            // tiles abut perfectly with no seam artifacts.
                             paint.anti_alias = false;
                             let t = to_transform(&fp.ctm);
                             let combined = tile_transform.post_concat(t);
@@ -2894,7 +2809,7 @@ fn render_pattern_fill_to_band(
                     }
                     DisplayElement::Stroke { path, params: sp } => {
                         if let Some(skp) = build_skia_path(path) {
-                            let stroke = build_stroke(sp, dpi);
+                            let stroke = build_stroke(sp, ctx.effective_dpi);
                             let paint = to_paint(&sp.color);
                             let t = to_transform(&sp.ctm);
                             let combined = tile_transform.post_concat(t);
@@ -2907,21 +2822,21 @@ fn render_pattern_fill_to_band(
         }
     }
 
-    // Composite tile_buf onto main pixmap through the fill path.
-    // Create a mask from the fill path, intersect with clip mask, then draw.
+    // Composite tile_buf onto main pixmap through the fill path
     let Some(fill_skia_path) = build_skia_path(&params.path) else {
         return;
     };
     let fill_rule = to_fill_rule(&params.fill_rule);
-    let mut fill_mask = Mask::new(band_w, band_h).expect("mask");
-    fill_mask.fill_path(
-        &fill_skia_path,
-        fill_rule,
-        true, // anti-alias
-        Transform::from_translate(-(x_off as f32), -(y_off as f32)),
+    let mut fill_mask = Mask::new(ctx.out_w, ctx.out_h).expect("mask");
+    let path_transform = viewport_transform(
+        Transform::identity(),
+        ctx.vp_x,
+        ctx.vp_y,
+        ctx.scale_x,
+        ctx.scale_y,
     );
+    fill_mask.fill_path(&fill_skia_path, fill_rule, true, path_transform);
 
-    // Intersect fill mask with clip mask
     if let Some(clip_mask) = mask_ref {
         intersect_masks(&mut fill_mask, clip_mask);
     }
@@ -2937,63 +2852,67 @@ fn render_pattern_fill_to_band(
     );
 }
 
-/// Clip path handling for band rendering. Same logic as SkiaDevice::clip_path
-/// but operates on band-local coordinates and band-sized masks.
-fn clip_path_band(
+/// Unified clip path handling for both band and viewport rendering.
+///
+/// For band rendering (scale=1.0), includes rect fast-path and Y-bbox early exit.
+/// For viewport rendering (scale!=1.0), uses the general mask path.
+fn clip_path_unified(
     band_state: &mut BandState,
     path: &PsPath,
     params: &ClipParams,
-    y_start: u32,
-    band_w: u32,
-    band_h: u32,
+    ctx: &RenderContext<'_>,
 ) {
-    // Early out: if clip path's Y extent doesn't overlap this band, the clip
-    // contributes zero coverage → clip region becomes empty. This avoids
-    // expensive rasterization for clips on distant bands.
-    if let Some(bbox) = path_y_bbox(path)
-        && (bbox.y_max <= y_start as f64 || bbox.y_min >= (y_start + band_h) as f64)
-    {
-        if let Some(ClipRegion::Mask(mask)) = band_state.clip_region.take() {
-            band_state.recycle_mask(mask);
-        }
-        band_state.clip_region = Some(ClipRegion::Rect(ClipRect {
-            x0: 0,
-            y0: 0,
-            x1: 0,
-            y1: 0,
-        }));
-        return;
-    }
+    let is_unit_scale = ctx.scale_x == 1.0 && ctx.scale_y == 1.0;
 
-    // Fast path: detect axis-aligned rectangle (in full device space), translate to band-local
-    // Pass large page_h to avoid clamping Y to band height during detection
-    if let Some(dev_rect) = detect_rect(path, band_w, u32::MAX) {
-        let new_rect = translate_clip_rect(&dev_rect, y_start, band_h);
-        match band_state.clip_region.take() {
-            None => {
-                band_state.clip_region = Some(ClipRegion::Rect(new_rect));
-            }
-            Some(ClipRegion::Rect(existing)) => {
-                band_state.clip_region = Some(ClipRegion::Rect(existing.intersect(&new_rect)));
-            }
-            Some(ClipRegion::Mask(mut mask)) => {
-                intersect_mask_with_rect(&mut mask, &new_rect, band_w, band_h);
-                band_state.clip_region = Some(ClipRegion::Mask(mask));
+    // Band-mode optimizations (scale=1.0): Y-bbox early exit and rect fast-path
+    if is_unit_scale {
+        let y_start = ctx.vp_y as u32;
+        let x_start = ctx.vp_x as u32;
+
+        // Y-bbox early exit: if clip path doesn't overlap this band, set empty clip
+        if x_start == 0 {
+            if let Some(bbox) = path_y_bbox(path)
+                && (bbox.y_max <= y_start as f64 || bbox.y_min >= (y_start + ctx.out_h) as f64)
+            {
+                if let Some(ClipRegion::Mask(mask)) = band_state.clip_region.take() {
+                    band_state.recycle_mask(mask);
+                }
+                band_state.clip_region = Some(ClipRegion::Rect(ClipRect {
+                    x0: 0, y0: 0, x1: 0, y1: 0,
+                }));
+                return;
             }
         }
-        return;
+
+        // Rect fast-path (only when x_start==0 for simplicity)
+        if x_start == 0 {
+            if let Some(dev_rect) = detect_rect(path, ctx.out_w, u32::MAX) {
+                let new_rect = translate_clip_rect(&dev_rect, y_start, ctx.out_h);
+                match band_state.clip_region.take() {
+                    None => {
+                        band_state.clip_region = Some(ClipRegion::Rect(new_rect));
+                    }
+                    Some(ClipRegion::Rect(existing)) => {
+                        band_state.clip_region = Some(ClipRegion::Rect(existing.intersect(&new_rect)));
+                    }
+                    Some(ClipRegion::Mask(mut mask)) => {
+                        intersect_mask_with_rect(&mut mask, &new_rect, ctx.out_w, ctx.out_h);
+                        band_state.clip_region = Some(ClipRegion::Mask(mask));
+                    }
+                }
+                return;
+            }
+        }
     }
 
-    // Slow path: non-rectangular clip
+    // General path: non-rectangular clip with cache + mask reuse
     let fill_rule = to_fill_rule(&params.fill_rule);
     let path_hash = hash_clip_path(path, &params.fill_rule);
     let prev_region = band_state.clip_region.take();
 
-    // Take a reusable mask first to avoid borrow conflict with cache lookup
-    let mut mask = band_state.take_mask(band_w, band_h);
+    let mut mask = band_state.take_mask(ctx.out_w, ctx.out_h);
 
     let path_mask = if let Some(cached) = band_state.clip_mask_cache.get(&path_hash) {
-        // Cache hit: memcpy cached data into recycled mask
         mask.data_mut().copy_from_slice(cached.data());
         mask
     } else {
@@ -3002,13 +2921,9 @@ fn clip_path_band(
             band_state.clip_region = prev_region;
             return;
         };
-        // Rasterize with Y-offset into band-sized mask.
-        // Anti-alias disabled: AA clip edges cause visible seams between
-        // adjacent clipped regions (e.g. AGM EPS tiled fills).
-        let transform = offset_transform(to_transform(&params.ctm), y_start as f32);
+        let transform = ctx.transform(&params.ctm);
         mask.data_mut().fill(0);
         mask.fill_path(&skia_path, fill_rule, false, transform);
-        // Cache on second sight
         if !band_state.clip_mask_seen.insert(path_hash) {
             band_state.clip_mask_cache.insert(path_hash, mask.clone());
         }
@@ -3024,7 +2939,7 @@ fn clip_path_band(
                 band_state.recycle_mask(path_mask);
             } else {
                 let mut mask = path_mask;
-                intersect_mask_with_rect(&mut mask, &rect, band_w, band_h);
+                intersect_mask_with_rect(&mut mask, &rect, ctx.out_w, ctx.out_h);
                 band_state.clip_region = Some(ClipRegion::Mask(mask));
             }
         }
@@ -3035,63 +2950,6 @@ fn clip_path_band(
         }
     }
 }
-
-/// Clip path handling for band rendering with both X and Y offset.
-///
-/// When `x_start == 0`, behaves identically to `clip_path_band`.
-fn clip_path_band_offset(
-    band_state: &mut BandState,
-    path: &PsPath,
-    params: &ClipParams,
-    x_start: u32,
-    y_start: u32,
-    band_w: u32,
-    band_h: u32,
-) {
-    if x_start == 0 {
-        clip_path_band(band_state, path, params, y_start, band_w, band_h);
-        return;
-    }
-
-    // With X offset: can't use the rect fast-path or Y-only bbox check trivially.
-    // Use the slow path with combined XY offset transform.
-    let fill_rule = to_fill_rule(&params.fill_rule);
-    let prev_region = band_state.clip_region.take();
-    let mut mask = band_state.take_mask(band_w, band_h);
-
-    let Some(skia_path) = build_skia_path(path) else {
-        band_state.recycle_mask(mask);
-        band_state.clip_region = prev_region;
-        return;
-    };
-    let transform = offset_transform_xy(
-        to_transform(&params.ctm),
-        x_start as f32,
-        y_start as f32,
-    );
-    mask.data_mut().fill(0);
-    mask.fill_path(&skia_path, fill_rule, false, transform);
-
-    match prev_region {
-        None => {
-            band_state.clip_region = Some(ClipRegion::Mask(mask));
-        }
-        Some(ClipRegion::Rect(rect)) => {
-            if rect.is_empty() {
-                band_state.recycle_mask(mask);
-            } else {
-                intersect_mask_with_rect(&mut mask, &rect, band_w, band_h);
-                band_state.clip_region = Some(ClipRegion::Mask(mask));
-            }
-        }
-        Some(ClipRegion::Mask(mut existing)) => {
-            intersect_masks(&mut existing, &mask);
-            band_state.recycle_mask(mask);
-            band_state.clip_region = Some(ClipRegion::Mask(existing));
-        }
-    }
-}
-
 impl OutputDevice for SkiaDevice {
     fn fill_path(&mut self, path: &PsPath, params: &FillParams) {
         self.ensure_full_pixmap();
@@ -3117,7 +2975,7 @@ impl OutputDevice for SkiaDevice {
         let stroke = build_stroke(params, self.dpi);
         let adjusted;
         let draw_path = if params.stroke_adjust && stroke.width <= 2.0 {
-            adjusted = stroke_adjust_path(path, stroke.width as f64);
+            adjusted = stroke_adjust_path_viewport(path, stroke.width as f64, 1.0, 1.0, 0.0, 0.0);
             &adjusted
         } else {
             path
@@ -3309,7 +3167,7 @@ impl OutputDevice for SkiaDevice {
         let Some(mask_ref) = resolve_clip_mask(&self.clip_region, &mut temp_mask, w, h) else {
             return;
         };
-        render_axial_shading_to_pixmap(&mut self.pixmap, params, 0, 0, mask_ref);
+        render_axial_shading(&mut self.pixmap, params, 0.0, 0.0, 1.0, 1.0, mask_ref);
     }
 
     fn paint_radial_shading(&mut self, params: &RadialShadingParams) {
@@ -3319,7 +3177,7 @@ impl OutputDevice for SkiaDevice {
         let Some(mask_ref) = resolve_clip_mask(&self.clip_region, &mut temp_mask, w, h) else {
             return;
         };
-        render_radial_shading_to_pixmap(&mut self.pixmap, params, 0, 0, mask_ref);
+        render_radial_shading(&mut self.pixmap, params, 0.0, 0.0, 1.0, 1.0, mask_ref);
     }
 
     fn paint_mesh_shading(&mut self, params: &MeshShadingParams) {
@@ -3329,7 +3187,7 @@ impl OutputDevice for SkiaDevice {
         let Some(mask_ref) = resolve_clip_mask(&self.clip_region, &mut temp_mask, w, h) else {
             return;
         };
-        render_mesh_shading_to_pixmap(&mut self.pixmap, params, 0, 0, mask_ref);
+        render_mesh_shading(&mut self.pixmap, params, 0.0, 0.0, 1.0, 1.0, mask_ref);
     }
 
     fn paint_patch_shading(&mut self, params: &PatchShadingParams) {
@@ -3339,7 +3197,7 @@ impl OutputDevice for SkiaDevice {
         let Some(mask_ref) = resolve_clip_mask(&self.clip_region, &mut temp_mask, w, h) else {
             return;
         };
-        render_patch_shading_to_pixmap(&mut self.pixmap, params, 0, 0, mask_ref);
+        render_patch_shading(&mut self.pixmap, params, 0.0, 0.0, 1.0, 1.0, mask_ref);
     }
 
     fn paint_pattern_fill(&mut self, params: &stet_core::device::PatternFillParams) {
@@ -3354,7 +3212,21 @@ impl OutputDevice for SkiaDevice {
             mask_pool: Vec::new(),
             cmyk_buffer: None,
         };
-        render_pattern_fill_to_band(&mut self.pixmap, &mut band_state, params, 0, 0, w, h, self.dpi);
+        {
+            let ctx = RenderContext {
+                vp_x: 0.0,
+                vp_y: 0.0,
+                scale_x: 1.0,
+                scale_y: 1.0,
+                out_w: w,
+                out_h: h,
+                effective_dpi: self.dpi,
+                icc: None,
+                image_cache: None,
+                elem_idx: 0,
+            };
+            render_pattern_fill(&mut self.pixmap, &mut band_state, params, &ctx);
+        }
         self.clip_region = band_state.clip_region.take();
         if let Some(mask) = band_state.spare_mask.take() {
             self.spare_mask = Some(mask);
@@ -3482,22 +3354,22 @@ fn has_overprint_elements(list: &DisplayList) -> bool {
     false
 }
 
+
 /// Render an overprint fill: rasterize path to coverage mask, then composite
 /// at the CMYK level, converting the result to RGB for the pixmap.
-///
-/// For overprint fills, only the channels in `painted_channels` are updated;
-/// other channels retain their backdrop values from the CMYK buffer.
-/// For OPM 1 with DeviceCMYK, zero-valued channels are additionally excluded.
+#[allow(clippy::too_many_arguments)]
 fn render_overprint_fill(
     pixmap: &mut Pixmap,
     cmyk_buf: &mut [f32],
     band_state: &mut BandState,
     path: &PsPath,
     params: &FillParams,
-    x_off: f32,
-    y_off: f32,
-    band_w: u32,
-    band_h: u32,
+    vp_x: f32,
+    vp_y: f32,
+    scale_x: f32,
+    scale_y: f32,
+    out_w: u32,
+    out_h: u32,
     icc: Option<&IccCache>,
 ) {
     let Some(skia_path) = build_skia_path(path) else {
@@ -3505,27 +3377,22 @@ fn render_overprint_fill(
     };
     let fill_rule = to_fill_rule(&params.fill_rule);
 
-    // Rasterize the fill path to a coverage mask (with anti-aliasing to match
-    // the original fill's edge pixels). Any non-zero coverage triggers full
-    // CMYK channel replacement — the merged result should match the backdrop
-    // color, making the shape invisible at overprint boundaries.
-    let mut coverage_mask = match Mask::new(band_w, band_h) {
+    let mut coverage_mask = match Mask::new(out_w, out_h) {
         Some(m) => m,
         None => return,
     };
-    let transform = offset_transform_xy(to_transform(&params.ctm), x_off, y_off);
+    let transform = viewport_transform(to_transform(&params.ctm), vp_x, vp_y, scale_x, scale_y);
     coverage_mask.fill_path(&skia_path, fill_rule, true, transform);
 
     // Intersect with clip mask
     let clip_coverage: Option<&[u8]> = match &band_state.clip_region {
         None => None,
         Some(ClipRegion::Rect(r)) => {
-            // Zero out coverage outside clip rect
             let data = coverage_mask.data_mut();
-            let stride = band_w as usize;
-            for y in 0..band_h {
+            let stride = out_w as usize;
+            for y in 0..out_h {
                 let row_start = y as usize * stride;
-                for x in 0..band_w {
+                for x in 0..out_w {
                     if y < r.y0 || y >= r.y1 || x < r.x0 || x >= r.x1 {
                         data[row_start + x as usize] = 0;
                     }
@@ -3536,41 +3403,27 @@ fn render_overprint_fill(
         Some(ClipRegion::Mask(clip_mask)) => Some(clip_mask.data()),
     };
 
-    // Get the fill's CMYK values
     let (src_c, src_m, src_y, src_k) = params.color.native_cmyk.unwrap_or_else(|| {
-        // Fallback: reverse-convert from RGB using PLRM formula
         let r = params.color.r;
         let g = params.color.g;
         let b = params.color.b;
         (1.0 - r, 1.0 - g, 1.0 - b, 0.0)
     });
 
-    // Determine effective painted channels
     let mut channels = params.painted_channels;
     if params.overprint_mode == 1 && channels == stet_core::device::CMYK_ALL {
-        // OPM 1 with DeviceCMYK: only paint non-zero channels
         channels = 0;
-        if src_c != 0.0 {
-            channels |= stet_core::device::CMYK_C;
-        }
-        if src_m != 0.0 {
-            channels |= stet_core::device::CMYK_M;
-        }
-        if src_y != 0.0 {
-            channels |= stet_core::device::CMYK_Y;
-        }
-        if src_k != 0.0 {
-            channels |= stet_core::device::CMYK_K;
-        }
+        if src_c != 0.0 { channels |= stet_core::device::CMYK_C; }
+        if src_m != 0.0 { channels |= stet_core::device::CMYK_M; }
+        if src_y != 0.0 { channels |= stet_core::device::CMYK_Y; }
+        if src_k != 0.0 { channels |= stet_core::device::CMYK_K; }
     }
 
-    // If all channels painted, this is equivalent to a normal fill
     if channels == stet_core::device::CMYK_ALL {
-        // Fast path: just update CMYK buffer and do normal RGB fill
         let cov_data = coverage_mask.data();
-        let stride = band_w as usize;
-        for y in 0..band_h as usize {
-            for x in 0..band_w as usize {
+        let stride = out_w as usize;
+        for y in 0..out_h as usize {
+            for x in 0..out_w as usize {
                 let mi = y * stride + x;
                 let mut cov = cov_data[mi] as f32 / 255.0;
                 if let Some(clip) = clip_coverage {
@@ -3585,10 +3438,9 @@ fn render_overprint_fill(
                 }
             }
         }
-        // Do normal RGB fill via tiny-skia
         let mut temp_mask = None;
         let Some(mask_ref) =
-            resolve_clip_mask(&band_state.clip_region, &mut temp_mask, band_w, band_h)
+            resolve_clip_mask(&band_state.clip_region, &mut temp_mask, out_w, out_h)
         else {
             return;
         };
@@ -3597,19 +3449,13 @@ fn render_overprint_fill(
         return;
     }
 
-    // Selective channel overprint: per-pixel CMYK merge + ICC conversion + direct
-    // pixel write. We must avoid tiny-skia's source-over compositing because the
-    // non-linear ICC transform means merged_rgb may differ by ±1/255 from the
-    // existing pixmap value (due to 8-bit quantization), creating visible edge
-    // artifacts at AA boundaries. By merging in CMYK space and writing RGB directly,
-    // edge pixels where the overprint is a no-op produce exactly the right color.
     let cov_data = coverage_mask.data();
-    let stride = band_w as usize;
+    let stride = out_w as usize;
     let px_data = pixmap.data_mut();
-    let px_stride = band_w as usize * 4;
+    let px_stride = out_w as usize * 4;
 
-    for y in 0..band_h as usize {
-        for x in 0..band_w as usize {
+    for y in 0..out_h as usize {
+        for x in 0..out_w as usize {
             let mi = y * stride + x;
             let mut cov = cov_data[mi] as f32 / 255.0;
             if let Some(clip) = clip_coverage {
@@ -3621,15 +3467,12 @@ fn render_overprint_fill(
 
             let ci = mi * 4;
             let pi = y * px_stride + x * 4;
-            // Read current pixel CMYK — if buffer is all zeros but pixel is
-            // visible, recover approximate CMYK from RGB as fallback.
             let (cur_c, cur_m, cur_y, cur_k) = {
                 let c = cmyk_buf[ci] as f64;
                 let m = cmyk_buf[ci + 1] as f64;
                 let y_val = cmyk_buf[ci + 2] as f64;
                 let k = cmyk_buf[ci + 3] as f64;
                 if c == 0.0 && m == 0.0 && y_val == 0.0 && k == 0.0 && px_data[pi + 3] > 0 {
-                    // Reverse PLRM: recover CMYK from sRGB pixel values
                     let r = px_data[pi] as f64 / 255.0;
                     let g = px_data[pi + 1] as f64 / 255.0;
                     let b = px_data[pi + 2] as f64 / 255.0;
@@ -3645,36 +3488,11 @@ fn render_overprint_fill(
                 }
             };
 
-            // Merge: for painted channels, replace with source value.
-            // For non-painted channels, leave unchanged from backdrop.
-            // No coverage weighting — we use a >0.5 threshold above so each
-            // pixel is either fully merged or fully skipped, matching the
-            // snap-to-source approach used for CMYK tracking.
-            let new_c = if channels & stet_core::device::CMYK_C != 0 {
-                src_c
-            } else {
-                cur_c
-            };
-            let new_m = if channels & stet_core::device::CMYK_M != 0 {
-                src_m
-            } else {
-                cur_m
-            };
-            let new_y = if channels & stet_core::device::CMYK_Y != 0 {
-                src_y
-            } else {
-                cur_y
-            };
-            let new_k = if channels & stet_core::device::CMYK_K != 0 {
-                src_k
-            } else {
-                cur_k
-            };
+            let new_c = if channels & stet_core::device::CMYK_C != 0 { src_c } else { cur_c };
+            let new_m = if channels & stet_core::device::CMYK_M != 0 { src_m } else { cur_m };
+            let new_y = if channels & stet_core::device::CMYK_Y != 0 { src_y } else { cur_y };
+            let new_k = if channels & stet_core::device::CMYK_K != 0 { src_k } else { cur_k };
 
-            // If the merged CMYK is identical to the existing backdrop CMYK,
-            // skip the pixel entirely — avoids ICC profile mismatch artifacts
-            // where the document profile and system profile produce different RGB
-            // for the same CMYK values.
             if (new_c as f32 - cmyk_buf[ci]).abs() < 1e-6
                 && (new_m as f32 - cmyk_buf[ci + 1]).abs() < 1e-6
                 && (new_y as f32 - cmyk_buf[ci + 2]).abs() < 1e-6
@@ -3683,13 +3501,11 @@ fn render_overprint_fill(
                 continue;
             }
 
-            // Update CMYK buffer
             cmyk_buf[ci] = new_c as f32;
             cmyk_buf[ci + 1] = new_m as f32;
             cmyk_buf[ci + 2] = new_y as f32;
             cmyk_buf[ci + 3] = new_k as f32;
 
-            // Convert merged CMYK to RGB and write directly to pixmap
             let (r, g, b) = if let Some(icc_cache) = icc {
                 icc_cache
                     .convert_cmyk_readonly(new_c, new_m, new_y, new_k)
@@ -3701,11 +3517,9 @@ fn render_overprint_fill(
             px_data[pi] = (r * 255.0).round() as u8;
             px_data[pi + 1] = (g * 255.0).round() as u8;
             px_data[pi + 2] = (b * 255.0).round() as u8;
-            // Leave alpha unchanged (should be 255 for opaque backdrop)
         }
     }
 }
-
 /// PLRM CMYK-to-RGB formula fallback.
 fn cmyk_to_rgb_plrm(c: f64, m: f64, y: f64, k: f64) -> (f64, f64, f64) {
     (
@@ -3716,17 +3530,19 @@ fn cmyk_to_rgb_plrm(c: f64, m: f64, y: f64, k: f64) -> (f64, f64, f64) {
 }
 
 /// Update the CMYK buffer for a non-overprint fill (to track backdrop for future overprints).
+#[allow(clippy::too_many_arguments)]
 fn update_cmyk_buffer_for_fill(
     cmyk_buf: &mut [f32],
     path: &PsPath,
     params: &FillParams,
-    x_off: f32,
-    y_off: f32,
-    band_w: u32,
-    band_h: u32,
+    vp_x: f32,
+    vp_y: f32,
+    scale_x: f32,
+    scale_y: f32,
+    out_w: u32,
+    out_h: u32,
     clip_region: &Option<ClipRegion>,
 ) {
-    // Only track CMYK for colors that have native CMYK
     let Some((src_c, src_m, src_y, src_k)) = params.color.native_cmyk else {
         return;
     };
@@ -3734,12 +3550,11 @@ fn update_cmyk_buffer_for_fill(
         return;
     };
 
-    // Rasterize to coverage mask
-    let mut coverage_mask = match Mask::new(band_w, band_h) {
+    let mut coverage_mask = match Mask::new(out_w, out_h) {
         Some(m) => m,
         None => return,
     };
-    let transform = offset_transform_xy(to_transform(&params.ctm), x_off, y_off);
+    let transform = viewport_transform(to_transform(&params.ctm), vp_x, vp_y, scale_x, scale_y);
     let fill_rule = to_fill_rule(&params.fill_rule);
     coverage_mask.fill_path(&skia_path, fill_rule, true, transform);
 
@@ -3753,9 +3568,9 @@ fn update_cmyk_buffer_for_fill(
         _ => None,
     };
 
-    let stride = band_w as usize;
-    for y in 0..band_h as usize {
-        for x in 0..band_w as usize {
+    let stride = out_w as usize;
+    for y in 0..out_h as usize {
+        for x in 0..out_w as usize {
             let mi = y * stride + x;
             let mut cov = cov_data[mi] as f32 / 255.0;
             if let Some(clip) = clip_data {
@@ -3767,11 +3582,6 @@ fn update_cmyk_buffer_for_fill(
                 }
             }
             if cov > 0.0 {
-                // Snap to source: write the fill's CMYK without coverage blending.
-                // tiny-skia blends in RGB space (non-linear through ICC), so blending
-                // in CMYK space would produce inconsistent values. By snapping, the
-                // cmyk_buf tracks "what color was painted here" — which is what
-                // overprint simulation needs for correct channel-level merging.
                 let ci = mi * 4;
                 cmyk_buf[ci] = src_c as f32;
                 cmyk_buf[ci + 1] = src_m as f32;
@@ -3782,11 +3592,7 @@ fn update_cmyk_buffer_for_fill(
     }
 }
 
-/// Render an overprint image: for each image pixel that maps to a device pixel,
-/// do CMYK channel merge against the cmyk_buf backdrop.
-///
-/// Supports both image masks (1-bit coverage, single fill color) and regular
-/// CMYK images (per-pixel CMYK values from sample data).
+/// Render an overprint image with viewport params.
 #[allow(clippy::too_many_arguments)]
 fn render_overprint_image(
     pixmap: &mut Pixmap,
@@ -3794,10 +3600,12 @@ fn render_overprint_image(
     band_state: &mut BandState,
     sample_data: &[u8],
     params: &ImageParams,
-    x_off: f32,
-    y_off: f32,
-    band_w: u32,
-    band_h: u32,
+    vp_x: f32,
+    vp_y: f32,
+    scale_x: f32,
+    scale_y: f32,
+    out_w: u32,
+    out_h: u32,
     icc: Option<&IccCache>,
 ) {
     let iw = params.width as usize;
@@ -3811,9 +3619,10 @@ fn render_overprint_image(
     };
 
     let px_data = pixmap.data_mut();
-    let stride = band_w as usize;
+    let stride = out_w as usize;
+    let inv_sx = 1.0 / scale_x as f64;
+    let inv_sy = 1.0 / scale_y as f64;
 
-    // Clip coverage
     let clip_data: Option<&[u8]> = match &band_state.clip_region {
         Some(ClipRegion::Mask(m)) => Some(m.data()),
         _ => None,
@@ -3823,7 +3632,6 @@ fn render_overprint_image(
         _ => None,
     };
 
-    // For image masks: single fill color for all painted pixels
     let mask_info = if let ImageColorSpace::Mask { color, polarity } = &params.color_space {
         let (src_c, src_m, src_y, src_k) = color.native_cmyk.unwrap_or_else(|| {
             let r = color.r;
@@ -3836,14 +3644,11 @@ fn render_overprint_image(
         None
     };
 
-    for by in 0..band_h as usize {
-        for bx in 0..band_w as usize {
-            // Check clip
+    for by in 0..out_h as usize {
+        for bx in 0..out_w as usize {
             if let Some(ref r) = clip_rect {
-                if (by as u32) < r.y0
-                    || (by as u32) >= r.y1
-                    || (bx as u32) < r.x0
-                    || (bx as u32) >= r.x1
+                if (by as u32) < r.y0 || (by as u32) >= r.y1
+                    || (bx as u32) < r.x0 || (bx as u32) >= r.x1
                 {
                     continue;
                 }
@@ -3851,10 +3656,7 @@ fn render_overprint_image(
             if let Some(clip) = clip_data {
                 let ci_clip = by * stride + bx;
                 if clip[ci_clip] == 0 {
-                    // Dilate clip by 1 pixel (8-connected): include edge pixels
-                    // adjacent to the clip boundary. Covers anti-aliased edges
-                    // from path fills that extend beyond the binary clip mask.
-                    let bh = band_h as usize;
+                    let bh = out_h as usize;
                     let has_neighbor = (bx > 0 && clip[ci_clip - 1] != 0)
                         || (bx + 1 < stride && clip[ci_clip + 1] != 0)
                         || (by > 0 && clip[ci_clip - stride] != 0)
@@ -3869,9 +3671,9 @@ fn render_overprint_image(
                 }
             }
 
-            // Map device pixel to image space
-            let dx = bx as f64 + x_off as f64 + 0.5;
-            let dy = by as f64 + y_off as f64 + 0.5;
+            // Map output pixel to device space, then to image space
+            let dx = (bx as f64 + 0.5) * inv_sx + vp_x as f64;
+            let dy = (by as f64 + 0.5) * inv_sy + vp_y as f64;
             let ix = inv_combined.a * dx + inv_combined.c * dy + inv_combined.tx;
             let iy = inv_combined.b * dx + inv_combined.d * dy + inv_combined.ty;
 
@@ -3883,10 +3685,8 @@ fn render_overprint_image(
             let col = col as usize;
             let row = row as usize;
 
-            // Get source CMYK for this pixel
             let (src_c, src_m, src_y, src_k) =
                 if let Some((mc, mm, my, mk, polarity, bytes_per_row)) = mask_info {
-                    // Image mask: check bit, use fill color
                     let byte_idx = row * bytes_per_row + col / 8;
                     let bit_offset = 7 - (col % 8);
                     let bit = if byte_idx < sample_data.len() {
@@ -3895,9 +3695,7 @@ fn render_overprint_image(
                         0
                     };
                     let paint = if polarity { bit == 1 } else { bit == 0 };
-                    if !paint {
-                        continue;
-                    }
+                    if !paint { continue; }
                     (mc, mm, my, mk)
                 } else if let Some(cmyk) =
                     sample_pixel_cmyk(sample_data, &params.color_space, iw, row, col)
@@ -3907,12 +3705,6 @@ fn render_overprint_image(
                     continue;
                 };
 
-            // Determine effective painted channels (per-pixel for OPM 1).
-            // Per PDF spec, OPM 1 per-channel exclusion only applies when the color
-            // space IS DeviceCMYK (or Separation/DeviceN). For Indexed/DeviceCMYK,
-            // the "current color space" is Indexed, so OPM 1 has no effect — all
-            // channels are always replaced. Image masks use the fill color's space,
-            // which IS DeviceCMYK directly, so OPM 1 applies to them.
             let mut channels = params.painted_channels;
             let is_direct_cmyk = matches!(
                 &params.color_space,
@@ -3925,21 +3717,12 @@ fn render_overprint_image(
                 && is_direct_cmyk
             {
                 channels = 0;
-                if src_c != 0.0 {
-                    channels |= stet_core::device::CMYK_C;
-                }
-                if src_m != 0.0 {
-                    channels |= stet_core::device::CMYK_M;
-                }
-                if src_y != 0.0 {
-                    channels |= stet_core::device::CMYK_Y;
-                }
-                if src_k != 0.0 {
-                    channels |= stet_core::device::CMYK_K;
-                }
+                if src_c != 0.0 { channels |= stet_core::device::CMYK_C; }
+                if src_m != 0.0 { channels |= stet_core::device::CMYK_M; }
+                if src_y != 0.0 { channels |= stet_core::device::CMYK_Y; }
+                if src_k != 0.0 { channels |= stet_core::device::CMYK_K; }
             }
 
-            // CMYK merge at this pixel
             let mi = by * stride + bx;
             let ci = mi * 4;
             let pi = mi * 4;
@@ -3954,42 +3737,18 @@ fn render_overprint_image(
                     let g = px_data[pi + 1] as f64 / 255.0;
                     let b = px_data[pi + 2] as f64 / 255.0;
                     let rk = 1.0 - r.max(g).max(b);
-                    if rk >= 1.0 {
-                        (0.0, 0.0, 0.0, 1.0)
-                    } else {
+                    if rk >= 1.0 { (0.0, 0.0, 0.0, 1.0) }
+                    else {
                         let inv = 1.0 / (1.0 - rk);
-                        (
-                            (1.0 - r - rk) * inv,
-                            (1.0 - g - rk) * inv,
-                            (1.0 - b - rk) * inv,
-                            rk,
-                        )
+                        ((1.0 - r - rk) * inv, (1.0 - g - rk) * inv, (1.0 - b - rk) * inv, rk)
                     }
-                } else {
-                    (c, m, y_val, k)
-                }
+                } else { (c, m, y_val, k) }
             };
 
-            let new_c = if channels & stet_core::device::CMYK_C != 0 {
-                src_c
-            } else {
-                cur_c
-            };
-            let new_m = if channels & stet_core::device::CMYK_M != 0 {
-                src_m
-            } else {
-                cur_m
-            };
-            let new_y = if channels & stet_core::device::CMYK_Y != 0 {
-                src_y
-            } else {
-                cur_y
-            };
-            let new_k = if channels & stet_core::device::CMYK_K != 0 {
-                src_k
-            } else {
-                cur_k
-            };
+            let new_c = if channels & stet_core::device::CMYK_C != 0 { src_c } else { cur_c };
+            let new_m = if channels & stet_core::device::CMYK_M != 0 { src_m } else { cur_m };
+            let new_y = if channels & stet_core::device::CMYK_Y != 0 { src_y } else { cur_y };
+            let new_k = if channels & stet_core::device::CMYK_K != 0 { src_k } else { cur_k };
 
             cmyk_buf[ci] = new_c as f32;
             cmyk_buf[ci + 1] = new_m as f32;
@@ -4012,38 +3771,33 @@ fn render_overprint_image(
     }
 }
 
-/// Update CMYK buffer for a non-overprint image (track backdrop for future overprints).
-/// Handles both image masks (single fill color) and CMYK images (per-pixel values).
+/// Update CMYK buffer for a non-overprint image.
 #[allow(clippy::too_many_arguments)]
 fn update_cmyk_buffer_for_image(
     cmyk_buf: &mut [f32],
     sample_data: &[u8],
     params: &ImageParams,
-    x_off: f32,
-    y_off: f32,
-    band_w: u32,
-    band_h: u32,
+    vp_x: f32,
+    vp_y: f32,
+    scale_x: f32,
+    scale_y: f32,
+    out_w: u32,
+    out_h: u32,
     clip_region: &Option<ClipRegion>,
 ) {
     let iw = params.width as usize;
     let ih = params.height as usize;
-    let Some(image_inv) = params.image_matrix.invert() else {
-        return;
-    };
+    let Some(image_inv) = params.image_matrix.invert() else { return; };
     let combined = params.ctm.concat(&image_inv);
-    let Some(inv_combined) = combined.invert() else {
-        return;
-    };
-    let stride = band_w as usize;
+    let Some(inv_combined) = combined.invert() else { return; };
+    let stride = out_w as usize;
+    let inv_sx = 1.0 / scale_x as f64;
+    let inv_sy = 1.0 / scale_y as f64;
 
-    // For image masks: single fill color
     let mask_info = if let ImageColorSpace::Mask { color, polarity } = &params.color_space {
-        let Some((c, m, y, k)) = color.native_cmyk else {
-            return;
-        };
+        let Some((c, m, y, k)) = color.native_cmyk else { return; };
         Some((c as f32, m as f32, y as f32, k as f32, *polarity, iw.div_ceil(8)))
     } else if !is_cmyk_color_space(&params.color_space) {
-        // Non-CMYK, non-mask: nothing to track
         return;
     } else {
         None
@@ -4058,46 +3812,34 @@ fn update_cmyk_buffer_for_image(
         _ => None,
     };
 
-    for by in 0..band_h as usize {
-        for bx in 0..band_w as usize {
+    for by in 0..out_h as usize {
+        for bx in 0..out_w as usize {
             if let Some(ref r) = clip_rect {
-                if (by as u32) < r.y0
-                    || (by as u32) >= r.y1
-                    || (bx as u32) < r.x0
-                    || (bx as u32) >= r.x1
-                {
-                    continue;
-                }
+                if (by as u32) < r.y0 || (by as u32) >= r.y1
+                    || (bx as u32) < r.x0 || (bx as u32) >= r.x1 { continue; }
             }
             if let Some(clip) = clip_data {
-                if clip[by * stride + bx] == 0 {
-                    continue;
-                }
+                if clip[by * stride + bx] == 0 { continue; }
             }
 
-            let dx = bx as f64 + x_off as f64 + 0.5;
-            let dy = by as f64 + y_off as f64 + 0.5;
+            let dx = (bx as f64 + 0.5) * inv_sx + vp_x as f64;
+            let dy = (by as f64 + 0.5) * inv_sy + vp_y as f64;
             let ix = inv_combined.a * dx + inv_combined.c * dy + inv_combined.tx;
             let iy = inv_combined.b * dx + inv_combined.d * dy + inv_combined.ty;
 
             let col = ix.floor() as i64;
             let row = iy.floor() as i64;
-            if col < 0 || col >= iw as i64 || row < 0 || row >= ih as i64 {
-                continue;
-            }
+            if col < 0 || col >= iw as i64 || row < 0 || row >= ih as i64 { continue; }
             let col = col as usize;
             let row = row as usize;
 
             let ci = (by * stride + bx) * 4;
             if let Some((sc, sm, sy, sk, polarity, bytes_per_row)) = mask_info {
-                // Image mask: check bit, write fill color
                 let byte_idx = row * bytes_per_row + col / 8;
                 let bit_offset = 7 - (col % 8);
                 let bit = if byte_idx < sample_data.len() {
                     (sample_data[byte_idx] >> bit_offset) & 1
-                } else {
-                    0
-                };
+                } else { 0 };
                 let paint = if polarity { bit == 1 } else { bit == 0 };
                 if paint {
                     cmyk_buf[ci] = sc;
@@ -4116,7 +3858,6 @@ fn update_cmyk_buffer_for_image(
         }
     }
 }
-
 /// Check if an image color space is CMYK-based (DeviceCMYK, ICCBased 4-component, or Indexed over CMYK).
 fn is_cmyk_color_space(cs: &ImageColorSpace) -> bool {
     match cs {
@@ -4176,7 +3917,6 @@ fn sample_pixel_cmyk(
         _ => None,
     }
 }
-
 /// Banded rendering as a free function — runs on a background thread.
 ///
 /// Renders the display list in horizontal bands and streams the output
@@ -4269,15 +4009,23 @@ fn render_banded_to_sink(
                 {
                     continue;
                 }
-                render_element_to_band(
+                let ctx = RenderContext {
+                    vp_x: 0.0,
+                    vp_y: render_y_start as f32,
+                    scale_x: 1.0,
+                    scale_y: 1.0,
+                    out_w: page_w,
+                    out_h: render_h,
+                    effective_dpi: dpi,
+                    icc: icc_ref,
+                    image_cache: None,
+                    elem_idx: i,
+                };
+                render_element(
                     &mut band_pixmap,
                     &mut band_state,
                     &elements[i],
-                    render_y_start,
-                    page_w,
-                    render_h,
-                    dpi,
-                    icc_ref,
+                    &ctx,
                 );
             }
         }
@@ -4716,13 +4464,19 @@ pub fn render_region_prepared(
     // Start transparent — white background composited after content rendering
     pixmap.fill(Color::TRANSPARENT);
 
+    let cmyk_buf = if has_overprint_elements(list) {
+        Some(vec![0.0f32; pixel_w as usize * pixel_h as usize * 4])
+    } else {
+        None
+    };
+
     let mut state = BandState {
         clip_region: None,
         spare_mask: None,
         clip_mask_cache: HashMap::new(),
         clip_mask_seen: prepared.clip_seen.clone(),
         mask_pool: Vec::new(),
-        cmyk_buffer: None,
+        cmyk_buffer: cmyk_buf,
     };
 
     let elements = list.elements();
@@ -4759,21 +4513,19 @@ pub fn render_region_prepared(
                     continue;
                 }
             }
-            render_element_to_viewport(
-                &mut pixmap,
-                &mut state,
-                &elements[i],
-                i,
-                vp_x_f,
-                vp_y_f,
-                sx,
-                sy,
-                pixel_w,
-                pixel_h,
+            let ctx = RenderContext {
+                vp_x: vp_x_f,
+                vp_y: vp_y_f,
+                scale_x: sx,
+                scale_y: sy,
+                out_w: pixel_w,
+                out_h: pixel_h,
                 effective_dpi,
                 icc,
                 image_cache,
-            );
+                elem_idx: i,
+            };
+            render_element(&mut pixmap, &mut state, &elements[i], &ctx);
         }
     }
 
@@ -4860,13 +4612,19 @@ pub fn render_region_single_band(
         Pixmap::new(pixel_w, render_h).expect("Failed to create band pixmap");
     pixmap.fill(Color::TRANSPARENT);
 
+    let cmyk_buf = if has_overprint_elements(list) {
+        Some(vec![0.0f32; pixel_w as usize * render_h as usize * 4])
+    } else {
+        None
+    };
+
     let mut state = BandState {
         clip_region: None,
         spare_mask: None,
         clip_mask_cache: HashMap::new(),
         clip_mask_seen: prepared.clip_seen.clone(),
         mask_pool: Vec::new(),
-        cmyk_buffer: None,
+        cmyk_buffer: cmyk_buf,
     };
 
     let elements = list.elements();
@@ -4902,21 +4660,19 @@ pub fn render_region_single_band(
                     continue;
                 }
             }
-            render_element_to_viewport(
-                &mut pixmap,
-                &mut state,
-                &elements[i],
-                i,
-                vp_x_f,
-                band_vp_y_f,
-                sx,
-                sy,
-                pixel_w,
-                render_h,
+            let ctx = RenderContext {
+                vp_x: vp_x_f,
+                vp_y: band_vp_y_f,
+                scale_x: sx,
+                scale_y: sy,
+                out_w: pixel_w,
+                out_h: render_h,
                 effective_dpi,
                 icc,
                 image_cache,
-            );
+                elem_idx: i,
+            };
+            render_element(&mut pixmap, &mut state, &elements[i], &ctx);
         }
     }
 
@@ -5104,13 +4860,19 @@ pub fn render_region(
     let mut pixmap = Pixmap::new(pixel_w, pixel_h).expect("Failed to create viewport pixmap");
     pixmap.fill(Color::TRANSPARENT);
 
+    let cmyk_buf = if has_overprint_elements(list) {
+        Some(vec![0.0f32; pixel_w as usize * pixel_h as usize * 4])
+    } else {
+        None
+    };
+
     let mut state = BandState {
         clip_region: None,
         spare_mask: None,
         clip_mask_cache: HashMap::new(),
         clip_mask_seen: clip_seen,
         mask_pool: Vec::new(),
-        cmyk_buffer: None,
+        cmyk_buffer: cmyk_buf,
     };
 
     let elements = list.elements();
@@ -5149,317 +4911,25 @@ pub fn render_region(
                     continue;
                 }
             }
-            render_element_to_viewport(
-                &mut pixmap,
-                &mut state,
-                &elements[i],
-                i,
-                vp_x_f,
-                vp_y_f,
-                sx,
-                sy,
-                pixel_w,
-                pixel_h,
+            let ctx = RenderContext {
+                vp_x: vp_x_f,
+                vp_y: vp_y_f,
+                scale_x: sx,
+                scale_y: sy,
+                out_w: pixel_w,
+                out_h: pixel_h,
                 effective_dpi,
                 icc,
                 image_cache,
-            );
+                elem_idx: i,
+            };
+            render_element(&mut pixmap, &mut state, &elements[i], &ctx);
         }
     }
 
     composite_onto_white(pixmap.data_mut());
     pixmap.data().to_vec()
 }
-
-/// Render a single display element into a viewport-local pixmap.
-#[allow(clippy::too_many_arguments)]
-fn render_element_to_viewport(
-    pixmap: &mut Pixmap,
-    state: &mut BandState,
-    element: &DisplayElement,
-    elem_idx: usize,
-    vp_x: f32,
-    vp_y: f32,
-    scale_x: f32,
-    scale_y: f32,
-    out_w: u32,
-    out_h: u32,
-    effective_dpi: f64,
-    icc: Option<&IccCache>,
-    image_cache: Option<&ImageCache>,
-) {
-    match element {
-        DisplayElement::Fill { path, params } => {
-            let Some(skia_path) = build_skia_path(path) else {
-                return;
-            };
-            let mut temp_mask = None;
-            let Some(mask_ref) =
-                resolve_clip_mask(&state.clip_region, &mut temp_mask, out_w, out_h)
-            else {
-                return;
-            };
-            let paint = to_paint_alpha(&params.color, params.alpha, params.blend_mode);
-            let transform =
-                viewport_transform(to_transform(&params.ctm), vp_x, vp_y, scale_x, scale_y);
-            let fill_rule = to_fill_rule(&params.fill_rule);
-            pixmap.fill_path(&skia_path, &paint, fill_rule, transform, mask_ref);
-        }
-        DisplayElement::Stroke { path, params } => {
-            let transform =
-                viewport_transform(to_transform(&params.ctm), vp_x, vp_y, scale_x, scale_y);
-            // For viewport rendering, build the stroke using the composited
-            // transform (original CTM × viewport transform) so hairline width
-            // calculations account for the actual output resolution.
-            let vp_ctm = Matrix {
-                a: transform.sx as f64,
-                b: transform.ky as f64,
-                c: transform.kx as f64,
-                d: transform.sy as f64,
-                tx: 0.0,
-                ty: 0.0,
-            };
-            let vp_params = StrokeParams {
-                ctm: vp_ctm,
-                ..params.clone()
-            };
-            let stroke = build_stroke(&vp_params, effective_dpi);
-            // Apply stroke adjustment — snap in output device space.
-            // Path coords are in reference-DPI device space, so we scale
-            // the snap grid to match the viewport transform.
-            let adjusted;
-            let draw_path = if params.stroke_adjust && stroke.width <= 2.0 {
-                // Snap in output pixel space: transform coords, snap, inverse-transform.
-                // For identity CTM (isotropic strokes in device space), we can snap
-                // directly using the viewport scale factors.
-                adjusted = stroke_adjust_path_viewport(
-                    path,
-                    stroke.width as f64,
-                    scale_x as f64,
-                    scale_y as f64,
-                    vp_x as f64,
-                    vp_y as f64,
-                );
-                &adjusted
-            } else {
-                path
-            };
-            let Some(skia_path) = build_skia_path(draw_path) else {
-                return;
-            };
-            let mut temp_mask = None;
-            let Some(mask_ref) =
-                resolve_clip_mask(&state.clip_region, &mut temp_mask, out_w, out_h)
-            else {
-                return;
-            };
-            let paint = to_paint_alpha(&params.color, params.alpha, params.blend_mode);
-            pixmap.stroke_path(&skia_path, &paint, &stroke, transform, mask_ref);
-        }
-        DisplayElement::Clip { path, params } => {
-            clip_path_viewport(
-                state, path, params, vp_x, vp_y, scale_x, scale_y, out_w, out_h,
-            );
-        }
-        DisplayElement::InitClip => {
-            if let Some(ClipRegion::Mask(mask)) = state.clip_region.take() {
-                state.recycle_mask(mask);
-            }
-            state.clip_region = None;
-        }
-        DisplayElement::ErasePage => {
-            pixmap.fill(Color::TRANSPARENT);
-            if let Some(ClipRegion::Mask(mask)) = state.clip_region.take() {
-                state.recycle_mask(mask);
-            }
-            state.clip_region = None;
-        }
-        DisplayElement::Image {
-            sample_data,
-            params,
-        } => {
-            let iw = params.width;
-            let ih = params.height;
-            if iw == 0 || ih == 0 {
-                return;
-            }
-            // Use pre-converted RGBA from image cache when available
-            let owned_rgba;
-            let rgba_data: &[u8] = if let Some(cached) = image_cache.and_then(|c| c.get(elem_idx)) {
-                cached
-            } else {
-                owned_rgba = {
-                    let mut rgba = samples_to_rgba(sample_data, params, icc);
-                    if params.mask_color.is_some() {
-                        apply_mask_color_rgba(&mut rgba, sample_data, params);
-                    }
-                    rgba
-                };
-                &owned_rgba
-            };
-            let expected = (iw * ih * 4) as usize;
-            if rgba_data.len() < expected {
-                return;
-            }
-            let Some(image_inv) = params.image_matrix.invert() else {
-                return;
-            };
-            let combined = params.ctm.concat(&image_inv);
-            let raw_transform =
-                viewport_transform(to_transform(&combined), vp_x, vp_y, scale_x, scale_y);
-
-            let prescaled = prescale_image(rgba_data, iw, ih, raw_transform);
-            let (img_data, img_w, img_h, transform) = match &prescaled {
-                Some((data, w, h, t)) => (data.as_slice(), *w, *h, *t),
-                None => (rgba_data, iw, ih, raw_transform),
-            };
-
-            let Some(img_pixmap) = tiny_skia::PixmapRef::from_bytes(img_data, img_w, img_h) else {
-                return;
-            };
-            #[allow(unused_assignments)]
-            let mut temp_mask = None;
-            let mask_ref = match &state.clip_region {
-                None => None,
-                Some(ClipRegion::Mask(m)) => Some(m as &Mask),
-                Some(ClipRegion::Rect(rect)) => {
-                    if rect.is_empty() {
-                        return;
-                    } else if rect.is_full_page(out_w, out_h) {
-                        None
-                    } else {
-                        temp_mask = rect.make_mask(out_w, out_h);
-                        temp_mask.as_ref()
-                    }
-                }
-            };
-            let eff_sx = (transform.sx * transform.sx + transform.ky * transform.ky).sqrt();
-            let eff_sy = (transform.kx * transform.kx + transform.sy * transform.sy).sqrt();
-            let quality = if eff_sx >= 0.9 && eff_sy >= 0.9 {
-                tiny_skia::FilterQuality::Nearest
-            } else {
-                tiny_skia::FilterQuality::Bilinear
-            };
-            let img_paint = tiny_skia::PixmapPaint {
-                quality,
-                opacity: params.alpha as f32,
-                blend_mode: u8_to_blend_mode(params.blend_mode),
-            };
-            pixmap.draw_pixmap(0, 0, img_pixmap, &img_paint, transform, mask_ref);
-        }
-        DisplayElement::AxialShading { params } => {
-            let mut temp_mask = None;
-            let Some(mask_ref) =
-                resolve_clip_mask(&state.clip_region, &mut temp_mask, out_w, out_h)
-            else {
-                return;
-            };
-            render_axial_shading_viewport(pixmap, params, vp_x, vp_y, scale_x, scale_y, mask_ref);
-        }
-        DisplayElement::RadialShading { params } => {
-            let mut temp_mask = None;
-            let Some(mask_ref) =
-                resolve_clip_mask(&state.clip_region, &mut temp_mask, out_w, out_h)
-            else {
-                return;
-            };
-            render_radial_shading_viewport(pixmap, params, vp_x, vp_y, scale_x, scale_y, mask_ref);
-        }
-        DisplayElement::MeshShading { params } => {
-            let mut temp_mask = None;
-            let Some(mask_ref) =
-                resolve_clip_mask(&state.clip_region, &mut temp_mask, out_w, out_h)
-            else {
-                return;
-            };
-            render_mesh_shading_viewport(pixmap, params, vp_x, vp_y, scale_x, scale_y, mask_ref);
-        }
-        DisplayElement::PatchShading { params } => {
-            let mut temp_mask = None;
-            let Some(mask_ref) =
-                resolve_clip_mask(&state.clip_region, &mut temp_mask, out_w, out_h)
-            else {
-                return;
-            };
-            render_patch_shading_viewport(pixmap, params, vp_x, vp_y, scale_x, scale_y, mask_ref);
-        }
-        DisplayElement::PatternFill { params } => {
-            render_pattern_fill_viewport(
-                pixmap,
-                state,
-                params,
-                vp_x,
-                vp_y,
-                scale_x,
-                scale_y,
-                out_w,
-                out_h,
-                effective_dpi,
-            );
-        }
-        DisplayElement::Group { elements, params } => {
-            render_group_to_viewport(
-                pixmap, state, elements, params, vp_x, vp_y, scale_x, scale_y, out_w, out_h,
-                effective_dpi, icc,
-            );
-        }
-        DisplayElement::SoftMasked {
-            mask,
-            content,
-            params,
-        } => {
-            render_soft_masked_viewport(
-                pixmap, state, mask, content, params, vp_x, vp_y, scale_x, scale_y, out_w, out_h,
-                effective_dpi, icc,
-            );
-        }
-        DisplayElement::Text { .. } => {} // PDF-only, ignored by rasterizer
-    }
-}
-
-/// Compute the cropped output-pixel region for a group's device-space bounding box.
-///
-/// Returns `(crop_x, crop_y, crop_w, crop_h)` in output pixels, or `None` if
-/// the group is entirely outside the viewport.
-fn compute_group_crop(
-    bbox: &[f64; 4],
-    vp_x: f32,
-    vp_y: f32,
-    scale_x: f32,
-    scale_y: f32,
-    out_w: u32,
-    out_h: u32,
-) -> Option<(i32, i32, u32, u32)> {
-    // Transform device-space bbox to output pixel coords
-    let px_min = ((bbox[0] as f32 - vp_x) * scale_x).floor() as i32;
-    let py_min = ((bbox[1] as f32 - vp_y) * scale_y).floor() as i32;
-    let px_max = ((bbox[2] as f32 - vp_x) * scale_x).ceil() as i32;
-    let py_max = ((bbox[3] as f32 - vp_y) * scale_y).ceil() as i32;
-
-    // Clip to output bounds
-    let x0 = px_min.max(0);
-    let y0 = py_min.max(0);
-    let x1 = px_max.min(out_w as i32);
-    let y1 = py_max.min(out_h as i32);
-
-    if x0 >= x1 || y0 >= y1 {
-        return None;
-    }
-
-    let crop_w = (x1 - x0) as u32;
-    let crop_h = (y1 - y0) as u32;
-
-    // Only crop if it saves at least 25% of pixels — otherwise the overhead
-    // of offset math isn't worth it.
-    let crop_pixels = crop_w as u64 * crop_h as u64;
-    let full_pixels = out_w as u64 * out_h as u64;
-    if crop_pixels * 4 >= full_pixels * 3 {
-        return None; // Not enough savings
-    }
-
-    Some((x0, y0, crop_w, crop_h))
-}
-
 /// Copy a rectangular region from parent pixmap into a smaller crop pixmap.
 fn copy_backdrop_crop(
     parent: &Pixmap,
@@ -5482,595 +4952,17 @@ fn copy_backdrop_crop(
     }
     backdrop
 }
-
-/// Render a transparency group for viewport rendering.
-#[allow(clippy::too_many_arguments)]
-fn render_group_to_viewport(
-    pixmap: &mut Pixmap,
-    state: &mut BandState,
-    elements: &DisplayList,
-    params: &stet_core::display_list::GroupParams,
-    vp_x: f32,
-    vp_y: f32,
-    scale_x: f32,
-    scale_y: f32,
-    out_w: u32,
-    out_h: u32,
-    effective_dpi: f64,
-    icc: Option<&IccCache>,
-) {
-    if params.knockout {
-        render_knockout_group_to_viewport(
-            pixmap, state, elements, params, vp_x, vp_y, scale_x, scale_y, out_w, out_h,
-            effective_dpi, icc,
-        );
-        return;
-    }
-
-    // Try to use a cropped offscreen based on the group's bounding box.
-    let crop = compute_group_crop(&params.bbox, vp_x, vp_y, scale_x, scale_y, out_w, out_h);
-
-    let (eff_w, eff_h, crop_x, crop_y, eff_vp_x, eff_vp_y) = match crop {
-        Some((cx, cy, cw, ch)) => (
-            cw,
-            ch,
-            cx,
-            cy,
-            vp_x + cx as f32 / scale_x,
-            vp_y + cy as f32 / scale_y,
-        ),
-        None => (out_w, out_h, 0, 0, vp_x, vp_y),
-    };
-
-    let Some(mut offscreen) = Pixmap::new(eff_w, eff_h) else {
-        return;
-    };
-
-    // For non-isolated groups, copy the parent backdrop and save original.
-    let backdrop = if !params.isolated {
-        let data = if crop.is_some() {
-            copy_backdrop_crop(pixmap, crop_x, crop_y, eff_w, eff_h)
-        } else {
-            pixmap.data().to_vec()
-        };
-        offscreen.data_mut().copy_from_slice(&data);
-        Some(data)
-    } else {
-        None
-    };
-
-    let mut group_state = BandState {
-        clip_region: None,
-        spare_mask: None,
-        clip_mask_cache: HashMap::new(),
-        clip_mask_seen: HashSet::new(),
-        mask_pool: Vec::new(),
-        cmyk_buffer: None,
-    };
-
-    for (idx, elem) in elements.elements().iter().enumerate() {
-        render_element_to_viewport(
-            &mut offscreen,
-            &mut group_state,
-            elem,
-            idx,
-            eff_vp_x,
-            eff_vp_y,
-            scale_x,
-            scale_y,
-            eff_w,
-            eff_h,
-            effective_dpi,
-            icc,
-            None,
-        );
-    }
-
-    let mut temp_mask = None;
-    let mask_ref = resolve_clip_mask(&state.clip_region, &mut temp_mask, out_w, out_h);
-    let mask_ref = match mask_ref {
-        None => return, // empty clip — skip painting
-        Some(m) => m,
-    };
-
-    if let Some(backdrop) = &backdrop {
-        composite_non_isolated_group_cropped(
-            pixmap, &offscreen, &backdrop, params, mask_ref, crop_x, crop_y,
-        );
-    } else {
-        let paint = tiny_skia::PixmapPaint {
-            opacity: params.alpha as f32,
-            blend_mode: u8_to_blend_mode(params.blend_mode),
-            quality: tiny_skia::FilterQuality::Nearest,
-        };
-        pixmap.draw_pixmap(
-            crop_x,
-            crop_y,
-            offscreen.as_ref(),
-            &paint,
-            Transform::identity(),
-            mask_ref,
-        );
-    }
-}
-
-/// Render a knockout transparency group for viewport rendering.
-#[allow(clippy::too_many_arguments)]
-fn render_knockout_group_to_viewport(
-    pixmap: &mut Pixmap,
-    state: &mut BandState,
-    elements: &DisplayList,
-    params: &stet_core::display_list::GroupParams,
-    vp_x: f32,
-    vp_y: f32,
-    scale_x: f32,
-    scale_y: f32,
-    out_w: u32,
-    out_h: u32,
-    effective_dpi: f64,
-    icc: Option<&IccCache>,
-) {
-    // Try to use a cropped offscreen based on the group's bounding box.
-    let crop = compute_group_crop(&params.bbox, vp_x, vp_y, scale_x, scale_y, out_w, out_h);
-
-    let (eff_w, eff_h, crop_x, crop_y, eff_vp_x, eff_vp_y) = match crop {
-        Some((cx, cy, cw, ch)) => (
-            cw,
-            ch,
-            cx,
-            cy,
-            vp_x + cx as f32 / scale_x,
-            vp_y + cy as f32 / scale_y,
-        ),
-        None => (out_w, out_h, 0, 0, vp_x, vp_y),
-    };
-
-    let Some(mut offscreen) = Pixmap::new(eff_w, eff_h) else {
-        return;
-    };
-
-    // Initial backdrop: parent pixels for non-isolated, transparent for isolated
-    let initial_backdrop = if !params.isolated {
-        if crop.is_some() {
-            copy_backdrop_crop(pixmap, crop_x, crop_y, eff_w, eff_h)
-        } else {
-            pixmap.data().to_vec()
-        }
-    } else {
-        vec![0u8; (eff_w * eff_h * 4) as usize]
-    };
-
-    let Some(mut accumulated) = Pixmap::new(eff_w, eff_h) else {
-        return;
-    };
-    accumulated
-        .data_mut()
-        .copy_from_slice(&initial_backdrop);
-
-    // Render each element independently against the initial backdrop.
-    // Knockout semantics: each element replaces (not blends with) previous elements.
-    for elem in elements.elements() {
-        offscreen.data_mut().copy_from_slice(&initial_backdrop);
-
-        let mut elem_state = BandState {
-            clip_region: None,
-            spare_mask: None,
-            clip_mask_cache: HashMap::new(),
-            clip_mask_seen: HashSet::new(),
-            mask_pool: Vec::new(),
-            cmyk_buffer: None,
-        };
-
-        render_element_to_viewport(
-            &mut offscreen, &mut elem_state, elem, 0, eff_vp_x, eff_vp_y, scale_x, scale_y,
-            eff_w, eff_h, effective_dpi, icc, None,
-        );
-
-        // Replace accumulated pixels wherever this element painted
-        replace_changed_pixels(accumulated.data_mut(), offscreen.data(), &initial_backdrop);
-    }
-
-    // Composite the accumulated result onto the parent
-    let mut temp_mask = None;
-    let mask_ref = resolve_clip_mask(&state.clip_region, &mut temp_mask, out_w, out_h);
-    let mask_ref = match mask_ref {
-        None => return,
-        Some(m) => m,
-    };
-
-    composite_non_isolated_group_cropped(
-        pixmap, &accumulated, &initial_backdrop, params, mask_ref, crop_x, crop_y,
-    );
-}
-
-/// Render soft-masked content for viewport rendering.
-#[allow(clippy::too_many_arguments)]
-fn render_soft_masked_viewport(
-    pixmap: &mut Pixmap,
-    state: &mut BandState,
-    mask_list: &DisplayList,
-    content_list: &DisplayList,
-    params: &stet_core::display_list::SoftMaskParams,
-    vp_x: f32,
-    vp_y: f32,
-    scale_x: f32,
-    scale_y: f32,
-    out_w: u32,
-    out_h: u32,
-    effective_dpi: f64,
-    icc: Option<&IccCache>,
-) {
-    // Try to use a cropped offscreen based on the soft mask's bounding box.
-    let crop = compute_group_crop(&params.bbox, vp_x, vp_y, scale_x, scale_y, out_w, out_h);
-
-    let (eff_w, eff_h, crop_x, crop_y, eff_vp_x, eff_vp_y) = match crop {
-        Some((cx, cy, cw, ch)) => (
-            cw,
-            ch,
-            cx,
-            cy,
-            vp_x + cx as f32 / scale_x,
-            vp_y + cy as f32 / scale_y,
-        ),
-        None => (out_w, out_h, 0, 0, vp_x, vp_y),
-    };
-
-    // 1. Render mask form
-    let Some(mut mask_pixmap) = Pixmap::new(eff_w, eff_h) else {
-        return;
-    };
-    let mut mask_state = BandState {
-        clip_region: None,
-        spare_mask: None,
-        clip_mask_cache: HashMap::new(),
-        clip_mask_seen: HashSet::new(),
-        mask_pool: Vec::new(),
-        cmyk_buffer: None,
-    };
-    for (idx, elem) in mask_list.elements().iter().enumerate() {
-        render_element_to_viewport(
-            &mut mask_pixmap,
-            &mut mask_state,
-            elem,
-            idx,
-            eff_vp_x,
-            eff_vp_y,
-            scale_x,
-            scale_y,
-            eff_w,
-            eff_h,
-            effective_dpi,
-            icc,
-            None,
-        );
-    }
-
-    // 2. Extract mask values
-    let pixel_count = (eff_w * eff_h) as usize;
-    let mut mask_values = vec![0u8; pixel_count];
-    extract_soft_mask_values(mask_pixmap.data(), &mut mask_values, params);
-
-    // 3. Render content
-    let Some(mut content_pixmap) = Pixmap::new(eff_w, eff_h) else {
-        return;
-    };
-    let mut content_state = BandState {
-        clip_region: None,
-        spare_mask: None,
-        clip_mask_cache: HashMap::new(),
-        clip_mask_seen: HashSet::new(),
-        mask_pool: Vec::new(),
-        cmyk_buffer: None,
-    };
-    for (idx, elem) in content_list.elements().iter().enumerate() {
-        render_element_to_viewport(
-            &mut content_pixmap,
-            &mut content_state,
-            elem,
-            idx,
-            eff_vp_x,
-            eff_vp_y,
-            scale_x,
-            scale_y,
-            eff_w,
-            eff_h,
-            effective_dpi,
-            icc,
-            None,
-        );
-    }
-
-    // 4. Multiply content by mask
-    let content_data = content_pixmap.data_mut();
-    for i in 0..pixel_count {
-        let m = mask_values[i] as u16;
-        let off = i * 4;
-        content_data[off] = ((content_data[off] as u16 * m + 128) / 255) as u8;
-        content_data[off + 1] = ((content_data[off + 1] as u16 * m + 128) / 255) as u8;
-        content_data[off + 2] = ((content_data[off + 2] as u16 * m + 128) / 255) as u8;
-        content_data[off + 3] = ((content_data[off + 3] as u16 * m + 128) / 255) as u8;
-    }
-
-    // 5. Composite onto parent
-    let mut temp_mask = None;
-    let mask_ref = resolve_clip_mask(&state.clip_region, &mut temp_mask, out_w, out_h);
-    let mask_ref = match mask_ref {
-        None => return,
-        Some(m) => m,
-    };
-    let paint = tiny_skia::PixmapPaint {
-        opacity: 1.0,
-        blend_mode: tiny_skia::BlendMode::SourceOver,
-        quality: tiny_skia::FilterQuality::Nearest,
-    };
-    pixmap.draw_pixmap(
-        crop_x,
-        crop_y,
-        content_pixmap.as_ref(),
-        &paint,
-        Transform::identity(),
-        mask_ref,
-    );
-}
-
-/// Pattern fill for viewport rendering. Applies viewport transform to both
-/// the fill path and the pattern shader.
-#[allow(clippy::too_many_arguments)]
-fn render_pattern_fill_viewport(
-    pixmap: &mut Pixmap,
-    state: &mut BandState,
-    params: &stet_core::device::PatternFillParams,
-    vp_x: f32,
-    vp_y: f32,
-    scale_x: f32,
-    scale_y: f32,
-    out_w: u32,
-    out_h: u32,
-    effective_dpi: f64,
-) {
-    let mut temp_mask = None;
-    let Some(mask_ref) = resolve_clip_mask(&state.clip_region, &mut temp_mask, out_w, out_h) else {
-        return;
-    };
-
-    let pm = &params.pattern_matrix;
-
-    // Tile step vectors in device space (handles rotation/shear)
-    let (step_ux, step_uy) = pm.transform_delta(params.xstep, 0.0);
-    let (step_vx, step_vy) = pm.transform_delta(0.0, params.ystep);
-
-    // Check for degenerate steps
-    let step_u_len = (step_ux * step_ux + step_uy * step_uy).sqrt();
-    let step_v_len = (step_vx * step_vx + step_vy * step_vy).sqrt();
-    if step_u_len < 0.01 || step_v_len < 0.01 {
-        return;
-    }
-
-    // Pattern origin in device space
-    let origin_x = pm.tx;
-    let origin_y = pm.ty;
-
-    // Viewport bounds in device space
-    let dev_vp_x = vp_x as f64;
-    let dev_vp_y = vp_y as f64;
-    let dev_vp_w = out_w as f64 / scale_x as f64;
-    let dev_vp_h = out_h as f64 / scale_y as f64;
-
-    // Compute the fill path bounding box to determine tile range
-    let (mut min_x, mut min_y, mut max_x, mut max_y) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
-    for seg in &params.path.segments {
-        let (x, y) = match seg {
-            PathSegment::MoveTo(x, y) | PathSegment::LineTo(x, y) => (*x, *y),
-            PathSegment::CurveTo { x3, y3, .. } => (*x3, *y3),
-            PathSegment::ClosePath => continue,
-        };
-        min_x = min_x.min(x);
-        min_y = min_y.min(y);
-        max_x = max_x.max(x);
-        max_y = max_y.max(y);
-    }
-
-    // Clamp to viewport bounds in device space
-    min_x = min_x.max(dev_vp_x);
-    min_y = min_y.max(dev_vp_y);
-    max_x = max_x.min(dev_vp_x + dev_vp_w);
-    max_y = max_y.min(dev_vp_y + dev_vp_h);
-    if min_x >= max_x || min_y >= max_y {
-        return;
-    }
-
-    // Project fill bbox corners onto tile coordinate system
-    let det = step_ux * step_vy - step_uy * step_vx;
-    if det.abs() < 1e-10 {
-        return;
-    }
-    let inv_det = 1.0 / det;
-
-    let mut tu_min = f64::MAX;
-    let mut tu_max = f64::MIN;
-    let mut tv_min = f64::MAX;
-    let mut tv_max = f64::MIN;
-    for &(cx, cy) in &[
-        (min_x, min_y),
-        (max_x, min_y),
-        (min_x, max_y),
-        (max_x, max_y),
-    ] {
-        let dx = cx - origin_x;
-        let dy = cy - origin_y;
-        let tu = (dx * step_vy - dy * step_vx) * inv_det;
-        let tv = (-dx * step_uy + dy * step_ux) * inv_det;
-        tu_min = tu_min.min(tu);
-        tu_max = tu_max.max(tu);
-        tv_min = tv_min.min(tv);
-        tv_max = tv_max.max(tv);
-    }
-
-    let tile_x_start = tu_min.floor() as i32 - 1;
-    let tile_x_end = tu_max.ceil() as i32 + 1;
-    let tile_y_start = tv_min.floor() as i32 - 1;
-    let tile_y_end = tv_max.ceil() as i32 + 1;
-
-    // Safety limit on tile count
-    let tile_count = (tile_x_end - tile_x_start) as i64 * (tile_y_end - tile_y_start) as i64;
-    if tile_count > 10000 {
-        return;
-    }
-
-    // Render tiled pattern into a temporary pixmap, then composite through
-    // the fill path onto the main pixmap.
-    let Some(mut tile_buf) = Pixmap::new(out_w, out_h) else {
-        return;
-    };
-
-    let sx_f = scale_x as f64;
-    let sy_f = scale_y as f64;
-
-    for tv in tile_y_start..tile_y_end {
-        for tu in tile_x_start..tile_x_end {
-            // Tile offset in pattern space
-            let pat_offset_x = tu as f64 * params.xstep;
-            let pat_offset_y = tv as f64 * params.ystep;
-
-            // Apply full pattern matrix then viewport transform
-            let tile_transform = Transform::from_row(
-                (pm.a * sx_f) as f32,
-                (pm.b * sy_f) as f32,
-                (pm.c * sx_f) as f32,
-                (pm.d * sy_f) as f32,
-                ((pm.a * pat_offset_x + pm.c * pat_offset_y + pm.tx - dev_vp_x) * sx_f) as f32,
-                ((pm.b * pat_offset_x + pm.d * pat_offset_y + pm.ty - dev_vp_y) * sy_f) as f32,
-            );
-
-            for elem in params.tile.elements() {
-                match elem {
-                    DisplayElement::Fill { path, params: fp } => {
-                        if let Some(sp) = build_skia_path(path) {
-                            let mut paint = if params.paint_type == 1 {
-                                to_paint(&fp.color)
-                            } else {
-                                to_paint(
-                                    params
-                                        .underlying_color
-                                        .as_ref()
-                                        .unwrap_or(&DeviceColor::black()),
-                                )
-                            };
-                            // Disable anti-aliasing for tile fills so adjacent
-                            // tiles abut perfectly with no seam artifacts.
-                            paint.anti_alias = false;
-                            let t = to_transform(&fp.ctm);
-                            let combined = tile_transform.post_concat(t);
-                            let fr = to_fill_rule(&fp.fill_rule);
-                            tile_buf.fill_path(&sp, &paint, fr, combined, None);
-                        }
-                    }
-                    DisplayElement::Stroke { path, params: sp } => {
-                        if let Some(skp) = build_skia_path(path) {
-                            let stroke = build_stroke(sp, effective_dpi);
-                            let paint = to_paint(&sp.color);
-                            let t = to_transform(&sp.ctm);
-                            let combined = tile_transform.post_concat(t);
-                            tile_buf.stroke_path(&skp, &paint, &stroke, combined, None);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    // Composite tile_buf onto main pixmap through the fill path.
-    let Some(fill_skia_path) = build_skia_path(&params.path) else {
-        return;
-    };
-    let fill_rule = to_fill_rule(&params.fill_rule);
-    let mut fill_mask = Mask::new(out_w, out_h).expect("mask");
-    let path_transform = viewport_transform(Transform::identity(), vp_x, vp_y, scale_x, scale_y);
-    fill_mask.fill_path(&fill_skia_path, fill_rule, true, path_transform);
-
-    // Intersect fill mask with clip mask
-    if let Some(clip_mask) = mask_ref {
-        intersect_masks(&mut fill_mask, clip_mask);
-    }
-
-    let img_paint = tiny_skia::PixmapPaint::default();
-    pixmap.draw_pixmap(
-        0,
-        0,
-        tile_buf.as_ref(),
-        &img_paint,
-        Transform::identity(),
-        Some(&fill_mask),
-    );
-}
-
-/// Clip path handling for viewport rendering.
-#[allow(clippy::too_many_arguments)]
-fn clip_path_viewport(
-    state: &mut BandState,
-    path: &PsPath,
-    params: &ClipParams,
-    vp_x: f32,
-    vp_y: f32,
-    scale_x: f32,
-    scale_y: f32,
-    out_w: u32,
-    out_h: u32,
-) {
-    let fill_rule = to_fill_rule(&params.fill_rule);
-    let path_hash = hash_clip_path(path, &params.fill_rule);
-    let prev_region = state.clip_region.take();
-
-    let mut mask = state.take_mask(out_w, out_h);
-
-    let path_mask = if let Some(cached) = state.clip_mask_cache.get(&path_hash) {
-        mask.data_mut().copy_from_slice(cached.data());
-        mask
-    } else {
-        let Some(skia_path) = build_skia_path(path) else {
-            state.recycle_mask(mask);
-            state.clip_region = prev_region;
-            return;
-        };
-        let transform = viewport_transform(to_transform(&params.ctm), vp_x, vp_y, scale_x, scale_y);
-        mask.data_mut().fill(0);
-        mask.fill_path(&skia_path, fill_rule, false, transform);
-        if !state.clip_mask_seen.insert(path_hash) {
-            state.clip_mask_cache.insert(path_hash, mask.clone());
-        }
-        mask
-    };
-
-    match prev_region {
-        None => {
-            state.clip_region = Some(ClipRegion::Mask(path_mask));
-        }
-        Some(ClipRegion::Rect(rect)) => {
-            if rect.is_empty() {
-                state.recycle_mask(path_mask);
-            } else {
-                let mut mask = path_mask;
-                intersect_mask_with_rect(&mut mask, &rect, out_w, out_h);
-                state.clip_region = Some(ClipRegion::Mask(mask));
-            }
-        }
-        Some(ClipRegion::Mask(mut existing)) => {
-            intersect_masks(&mut existing, &path_mask);
-            state.recycle_mask(path_mask);
-            state.clip_region = Some(ClipRegion::Mask(existing));
-        }
-    }
-}
-
 // ---- Shading rendering ----
 
-/// Render an axial (linear) gradient shading to a pixmap.
-fn render_axial_shading_to_pixmap(
+
+/// Render an axial (linear) gradient shading.
+fn render_axial_shading(
     pixmap: &mut Pixmap,
     params: &AxialShadingParams,
-    x_start: u32,
-    y_start: u32,
+    vp_x: f32,
+    vp_y: f32,
+    scale_x: f32,
+    scale_y: f32,
     clip_mask: Option<&Mask>,
 ) {
     let pw = pixmap.width();
@@ -6079,23 +4971,21 @@ fn render_axial_shading_to_pixmap(
         return;
     }
 
-    // Transform gradient endpoints from user space to device space via CTM
     let (dx0, dy0) = params.ctm.transform_point(params.x0, params.y0);
     let (dx1, dy1) = params.ctm.transform_point(params.x1, params.y1);
 
-    // Build gradient stops for tiny-skia
     let stops = build_gradient_stops(&params.color_stops);
     if stops.is_empty() {
         return;
     }
 
     let start = tiny_skia::Point::from_xy(
-        (dx0 - x_start as f64) as f32,
-        (dy0 - y_start as f64) as f32,
+        (dx0 as f32 - vp_x) * scale_x,
+        (dy0 as f32 - vp_y) * scale_y,
     );
     let end = tiny_skia::Point::from_xy(
-        (dx1 - x_start as f64) as f32,
-        (dy1 - y_start as f64) as f32,
+        (dx1 as f32 - vp_x) * scale_x,
+        (dy1 as f32 - vp_y) * scale_y,
     );
 
     let Some(gradient) = tiny_skia::LinearGradient::new(
@@ -6114,113 +5004,74 @@ fn render_axial_shading_to_pixmap(
         ..Paint::default()
     };
 
-    // Build the fill rect: start with BBox (or full page), then clip based on extend flags.
     let (mut rx_min, mut ry_min, mut rx_max, mut ry_max) = if let Some(bbox) = &params.bbox {
-        // Transform all 4 BBox corners for correct bounds under rotation/shear
         let corners = [
             params.ctm.transform_point(bbox[0], bbox[1]),
             params.ctm.transform_point(bbox[2], bbox[1]),
             params.ctm.transform_point(bbox[0], bbox[3]),
             params.ctm.transform_point(bbox[2], bbox[3]),
         ];
-        let x_min_f = corners.iter().map(|c| c.0).fold(f64::INFINITY, f64::min);
-        let y_min_f = corners.iter().map(|c| c.1).fold(f64::INFINITY, f64::min);
-        let x_max_f = corners
-            .iter()
-            .map(|c| c.0)
-            .fold(f64::NEG_INFINITY, f64::max);
-        let y_max_f = corners
-            .iter()
-            .map(|c| c.1)
-            .fold(f64::NEG_INFINITY, f64::max);
+        let x_min = corners.iter().map(|c| c.0).fold(f64::INFINITY, f64::min);
+        let y_min = corners.iter().map(|c| c.1).fold(f64::INFINITY, f64::min);
+        let x_max = corners.iter().map(|c| c.0).fold(f64::NEG_INFINITY, f64::max);
+        let y_max = corners.iter().map(|c| c.1).fold(f64::NEG_INFINITY, f64::max);
         (
-            (x_min_f - x_start as f64).max(0.0),
-            (y_min_f - y_start as f64).max(0.0),
-            (x_max_f - x_start as f64).min(pw as f64),
-            (y_max_f - y_start as f64).min(ph as f64),
+            ((x_min as f32 - vp_x) * scale_x).max(0.0),
+            ((y_min as f32 - vp_y) * scale_y).max(0.0),
+            ((x_max as f32 - vp_x) * scale_x).min(pw as f32),
+            ((y_max as f32 - vp_y) * scale_y).min(ph as f32),
         )
     } else {
-        (0.0, 0.0, pw as f64, ph as f64)
+        (0.0, 0.0, pw as f32, ph as f32)
     };
 
-    // When extend is false on one side, clip the fill rect so the gradient
-    // doesn't paint beyond the endpoint in the gradient axis direction.
+    // When extend is false on one side, clip the fill rect
     if !params.extend_start || !params.extend_end {
         let axis_x = dx1 - dx0;
         let axis_y = dy1 - dy0;
-        let gy0 = dy0 - y_start as f64;
-        let gy1 = dy1 - y_start as f64;
-        let gx0 = dx0 - x_start as f64;
-        let gx1 = dx1 - x_start as f64;
+        let gx0 = (dx0 as f32 - vp_x) * scale_x;
+        let gy0 = (dy0 as f32 - vp_y) * scale_y;
+        let gx1 = (dx1 as f32 - vp_x) * scale_x;
+        let gy1 = (dy1 as f32 - vp_y) * scale_y;
 
         if axis_x.abs() >= axis_y.abs() {
-            // Primarily horizontal gradient — clip x bounds
             if !params.extend_start {
-                if axis_x >= 0.0 {
-                    rx_min = rx_min.max(gx0);
-                } else {
-                    rx_max = rx_max.min(gx0);
-                }
+                if axis_x >= 0.0 { rx_min = rx_min.max(gx0); }
+                else { rx_max = rx_max.min(gx0); }
             }
             if !params.extend_end {
-                if axis_x >= 0.0 {
-                    rx_max = rx_max.min(gx1);
-                } else {
-                    rx_min = rx_min.max(gx1);
-                }
+                if axis_x >= 0.0 { rx_max = rx_max.min(gx1); }
+                else { rx_min = rx_min.max(gx1); }
             }
         } else {
-            // Primarily vertical gradient — clip y bounds
             if !params.extend_start {
-                if axis_y >= 0.0 {
-                    ry_min = ry_min.max(gy0);
-                } else {
-                    ry_max = ry_max.min(gy0);
-                }
+                if axis_y >= 0.0 { ry_min = ry_min.max(gy0); }
+                else { ry_max = ry_max.min(gy0); }
             }
             if !params.extend_end {
-                if axis_y >= 0.0 {
-                    ry_max = ry_max.min(gy1);
-                } else {
-                    ry_min = ry_min.max(gy1);
-                }
+                if axis_y >= 0.0 { ry_max = ry_max.min(gy1); }
+                else { ry_min = ry_min.max(gy1); }
             }
         }
     }
 
-    let rw = (rx_max - rx_min) as f32;
-    let rh = (ry_max - ry_min) as f32;
-    let (rx, ry) = (rx_min as f32, ry_min as f32);
-
-    let Some(rect) = tiny_skia::Rect::from_xywh(rx, ry, rw.max(1.0), rh.max(1.0)) else {
+    if rx_max <= rx_min || ry_max <= ry_min {
         return;
-    };
-    let mut pb = PathBuilder::new();
-    pb.push_rect(rect);
-    let Some(path) = pb.finish() else {
-        return;
-    };
+    }
 
-    pixmap.fill_path(
-        &path,
-        &paint,
-        SkiaFillRule::Winding,
-        Transform::identity(),
-        clip_mask,
-    );
+    let rect = tiny_skia::Rect::from_ltrb(rx_min, ry_min, rx_max, ry_max)
+        .unwrap_or(tiny_skia::Rect::from_xywh(0.0, 0.0, 1.0, 1.0).unwrap());
+    pixmap.fill_rect(rect, &paint, Transform::identity(), clip_mask);
 }
 
-/// Render a radial gradient shading to a pixmap.
-///
-/// Solves the two-circle radial gradient equation in **user space** for each
-/// device pixel by inverse-transforming through the CTM. This correctly handles
-/// arbitrary CTMs (rotation, shear, non-uniform scaling, X-flip) where circles
-/// in user space become ellipses in device space.
-fn render_radial_shading_to_pixmap(
+/// Render a radial gradient shading.
+fn render_radial_shading(
     pixmap: &mut Pixmap,
     params: &RadialShadingParams,
-    x_start: u32,
-    y_start: u32,
+    vp_x: f32,
+    vp_y: f32,
+    scale_x: f32,
+    scale_y: f32,
     clip_mask: Option<&Mask>,
 ) {
     let pw = pixmap.width();
@@ -6229,12 +5080,10 @@ fn render_radial_shading_to_pixmap(
         return;
     }
 
-    // Inverse CTM: device space → user space (where circles are circular)
     let Some(inv_ctm) = params.ctm.invert() else {
-        return; // Degenerate CTM
+        return;
     };
 
-    // Compute pixel bounds (default: full pixmap, clipped by BBox if present)
     let (px_min, py_min, px_max, py_max) = if let Some(bbox) = &params.bbox {
         let corners = [
             params.ctm.transform_point(bbox[0], bbox[1]),
@@ -6242,85 +5091,54 @@ fn render_radial_shading_to_pixmap(
             params.ctm.transform_point(bbox[0], bbox[3]),
             params.ctm.transform_point(bbox[2], bbox[3]),
         ];
-        let x_min_f = corners.iter().map(|c| c.0).fold(f64::INFINITY, f64::min);
-        let y_min_f = corners.iter().map(|c| c.1).fold(f64::INFINITY, f64::min);
-        let x_max_f = corners
-            .iter()
-            .map(|c| c.0)
-            .fold(f64::NEG_INFINITY, f64::max);
-        let y_max_f = corners
-            .iter()
-            .map(|c| c.1)
-            .fold(f64::NEG_INFINITY, f64::max);
-        let x_min_dev = x_min_f.max(0.0);
-        let y_min_dev = y_min_f.max(0.0);
-        let x_max_dev = x_max_f.ceil();
-        let y_max_dev = y_max_f.ceil();
-        let x_min = if x_min_dev > x_start as f64 {
-            (x_min_dev - x_start as f64) as u32
-        } else {
-            0
-        };
-        let x_max = ((x_max_dev - x_start as f64).ceil() as u32).min(pw);
-        let y_min = if y_min_dev > y_start as f64 {
-            (y_min_dev - y_start as f64) as u32
-        } else {
-            0
-        };
-        let y_max = ((y_max_dev - y_start as f64).ceil() as u32).min(ph);
-        (x_min, y_min, x_max, y_max)
+        let x_min = corners.iter().map(|c| c.0 as f32).fold(f32::INFINITY, f32::min);
+        let y_min = corners.iter().map(|c| c.1 as f32).fold(f32::INFINITY, f32::min);
+        let x_max = corners.iter().map(|c| c.0 as f32).fold(f32::NEG_INFINITY, f32::max);
+        let y_max = corners.iter().map(|c| c.1 as f32).fold(f32::NEG_INFINITY, f32::max);
+        (
+            ((x_min - vp_x) * scale_x).max(0.0) as u32,
+            ((y_min - vp_y) * scale_y).max(0.0) as u32,
+            (((x_max - vp_x) * scale_x).ceil() as u32).min(pw),
+            (((y_max - vp_y) * scale_y).ceil() as u32).min(ph),
+        )
     } else {
         (0, 0, pw, ph)
     };
 
-    // Software rasterize the radial gradient
+    let inv_sx = 1.0 / scale_x as f64;
+    let inv_sy = 1.0 / scale_y as f64;
+
     let data = pixmap.data_mut();
     let stride = pw as usize * 4;
 
     for py in py_min..py_max {
-        let dev_y = py as f64 + y_start as f64;
+        let dev_y = py as f64 * inv_sy + vp_y as f64;
         for px in px_min..px_max {
-            let dev_x = px as f64 + x_start as f64;
-
-            // Inverse-transform device pixel to user space
+            let dev_x = px as f64 * inv_sx + vp_x as f64;
             let (ux, uy) = inv_ctm.transform_point(dev_x, dev_y);
-
-            // Solve for t in user space where circles are circular
             let t = solve_radial_t(
                 ux, uy, params.x0, params.y0, params.r0, params.x1, params.y1, params.r1,
             );
             if let Some(t) = t {
-                // Check extend
-                if t < 0.0 && !params.extend_start {
-                    continue;
-                }
-                if t > 1.0 && !params.extend_end {
-                    continue;
-                }
+                if t < 0.0 && !params.extend_start { continue; }
+                if t > 1.0 && !params.extend_end { continue; }
                 let clamped = t.clamp(0.0, 1.0);
                 let color = interpolate_color_stops(&params.color_stops, clamped);
-                let offset = py as usize * stride + px as usize * 4;
-                let r = (color.r * 255.0).round().clamp(0.0, 255.0) as u8;
-                let g = (color.g * 255.0).round().clamp(0.0, 255.0) as u8;
-                let b = (color.b * 255.0).round().clamp(0.0, 255.0) as u8;
 
-                // Apply clip mask
                 if let Some(mask) = clip_mask {
                     let mask_val = mask.data()[py as usize * pw as usize + px as usize];
-                    if mask_val == 0 {
-                        continue;
-                    }
+                    if mask_val == 0 { continue; }
                 }
 
-                data[offset] = r;
-                data[offset + 1] = g;
-                data[offset + 2] = b;
+                let offset = py as usize * stride + px as usize * 4;
+                data[offset] = (color.r * 255.0).round().clamp(0.0, 255.0) as u8;
+                data[offset + 1] = (color.g * 255.0).round().clamp(0.0, 255.0) as u8;
+                data[offset + 2] = (color.b * 255.0).round().clamp(0.0, 255.0) as u8;
                 data[offset + 3] = 255;
             }
         }
     }
 }
-
 /// Solve for the parameter t of a two-circle radial gradient at point (px, py).
 /// Returns the largest valid t, or None if no solution exists.
 #[allow(clippy::too_many_arguments)]
@@ -6381,12 +5199,14 @@ fn solve_radial_t(
     best
 }
 
-/// Render a Gouraud-shaded triangle mesh to a pixmap.
-fn render_mesh_shading_to_pixmap(
+/// Render a Gouraud-shaded triangle mesh.
+fn render_mesh_shading(
     pixmap: &mut Pixmap,
     params: &MeshShadingParams,
-    x_start: u32,
-    y_start: u32,
+    vp_x: f32,
+    vp_y: f32,
+    scale_x: f32,
+    scale_y: f32,
     clip_mask: Option<&Mask>,
 ) {
     let pw = pixmap.width() as usize;
@@ -6398,33 +5218,35 @@ fn render_mesh_shading_to_pixmap(
     let stride = pw * 4;
 
     for tri in &params.triangles {
-        // Transform vertices to device space
-        let (x0, y0) = params.ctm.transform_point(tri.v0.x, tri.v0.y);
-        let (x1, y1) = params.ctm.transform_point(tri.v1.x, tri.v1.y);
-        let (x2, y2) = params.ctm.transform_point(tri.v2.x, tri.v2.y);
+        let (dx0, dy0) = params.ctm.transform_point(tri.v0.x, tri.v0.y);
+        let (dx1, dy1) = params.ctm.transform_point(tri.v1.x, tri.v1.y);
+        let (dx2, dy2) = params.ctm.transform_point(tri.v2.x, tri.v2.y);
 
-        // Offset for banding/cropping
-        let x0b = x0 - x_start as f64;
-        let x1b = x1 - x_start as f64;
-        let x2b = x2 - x_start as f64;
-        let y0b = y0 - y_start as f64;
-        let y1b = y1 - y_start as f64;
-        let y2b = y2 - y_start as f64;
+        let x0 = (dx0 as f32 - vp_x) * scale_x;
+        let y0 = (dy0 as f32 - vp_y) * scale_y;
+        let x1 = (dx1 as f32 - vp_x) * scale_x;
+        let y1 = (dy1 as f32 - vp_y) * scale_y;
+        let x2 = (dx2 as f32 - vp_x) * scale_x;
+        let y2 = (dy2 as f32 - vp_y) * scale_y;
 
-        // Bounding box (clamp to pixmap)
-        let min_x = x0b.min(x1b).min(x2b).floor().max(0.0) as usize;
-        let max_x = (x0b.max(x1b).max(x2b).ceil() as usize).min(pw);
-        let min_y = y0b.min(y1b).min(y2b).floor().max(0.0) as usize;
-        let max_y = (y0b.max(y1b).max(y2b).ceil() as usize).min(ph);
+        let min_x = (x0.min(x1).min(x2).floor().max(0.0)) as usize;
+        let max_x = (x0.max(x1).max(x2).ceil() as usize).min(pw);
+        let min_y = (y0.min(y1).min(y2).floor().max(0.0)) as usize;
+        let max_y = (y0.max(y1).max(y2).ceil() as usize).min(ph);
 
         if min_x >= max_x || min_y >= max_y {
             continue;
         }
 
-        // Precompute barycentric denominator
-        let denom = (y1b - y2b) * (x0b - x2b) + (x2b - x1b) * (y0b - y2b);
+        let x0 = x0 as f64;
+        let y0 = y0 as f64;
+        let x1 = x1 as f64;
+        let y1 = y1 as f64;
+        let x2 = x2 as f64;
+        let y2 = y2 as f64;
+        let denom = (y1 - y2) * (x0 - x2) + (x2 - x1) * (y0 - y2);
         if denom.abs() < 1e-10 {
-            continue; // degenerate triangle
+            continue;
         }
         let inv_denom = 1.0 / denom;
 
@@ -6433,30 +5255,20 @@ fn render_mesh_shading_to_pixmap(
                 let pxf = px as f64 + 0.5;
                 let pyf = py as f64 + 0.5;
 
-                // Barycentric coordinates
-                let w0 = ((y1b - y2b) * (pxf - x2b) + (x2b - x1b) * (pyf - y2b)) * inv_denom;
-                let w1 = ((y2b - y0b) * (pxf - x2b) + (x0b - x2b) * (pyf - y2b)) * inv_denom;
+                let w0 = ((y1 - y2) * (pxf - x2) + (x2 - x1) * (pyf - y2)) * inv_denom;
+                let w1 = ((y2 - y0) * (pxf - x2) + (x0 - x2) * (pyf - y2)) * inv_denom;
                 let w2 = 1.0 - w0 - w1;
 
-                // Conservative rasterization: use small negative epsilon to
-                // slightly expand triangles, preventing sub-pixel gaps between
-                // adjacent triangles whose shared-edge vertices don't match exactly
-                // (e.g. PDF mesh shadings with per-object Decode arrays).
                 const BARY_EPSILON: f64 = -0.01;
                 if w0 < BARY_EPSILON || w1 < BARY_EPSILON || w2 < BARY_EPSILON {
                     continue;
                 }
 
-                // Apply clip mask
                 if let Some(mask) = clip_mask {
                     let mask_val = mask.data()[py * pw + px];
-                    if mask_val == 0 {
-                        continue;
-                    }
+                    if mask_val == 0 { continue; }
                 }
 
-                // Interpolate color — clamp weights to avoid negative contribution
-                // from pixels in the epsilon expansion zone
                 let w0c = w0.max(0.0);
                 let w1c = w1.max(0.0);
                 let w2c = w2.max(0.0);
@@ -6479,22 +5291,21 @@ fn render_mesh_shading_to_pixmap(
 }
 
 /// Render a Coons/tensor-product patch mesh by subdividing into triangles.
-fn render_patch_shading_to_pixmap(
+fn render_patch_shading(
     pixmap: &mut Pixmap,
     params: &PatchShadingParams,
-    x_start: u32,
-    y_start: u32,
+    vp_x: f32,
+    vp_y: f32,
+    scale_x: f32,
+    scale_y: f32,
     clip_mask: Option<&Mask>,
 ) {
-    // Subdivide each patch into triangles, then render as mesh
     let mut triangles = Vec::new();
-
     for patch in &params.patches {
         if patch.points.len() >= 12 {
             subdivide_patch_to_triangles(patch, &mut triangles);
         }
     }
-
     if !triangles.is_empty() {
         let mesh_params = MeshShadingParams {
             triangles,
@@ -6502,10 +5313,9 @@ fn render_patch_shading_to_pixmap(
             bbox: params.bbox,
             color_space: params.color_space.clone(),
         };
-        render_mesh_shading_to_pixmap(pixmap, &mesh_params, x_start, y_start, clip_mask);
+        render_mesh_shading(pixmap, &mesh_params, vp_x, vp_y, scale_x, scale_y, clip_mask);
     }
 }
-
 /// Subdivide a Coons/tensor patch into triangles via recursive de Casteljau.
 /// Uses a simple grid subdivision approach: evaluate the patch at NxN points
 /// and triangulate the resulting grid.
@@ -6712,319 +5522,6 @@ fn interpolate_color_stops(stops: &[stet_core::device::ColorStop], position: f64
 
     stops.last().unwrap().color.clone()
 }
-
-// ---- Viewport shading renderers ----
-// These map device-space coordinates into viewport-local pixel coordinates
-// using the viewport transform: output = (device - vp) * scale
-
-/// Render an axial shading into viewport-local coordinates.
-fn render_axial_shading_viewport(
-    pixmap: &mut Pixmap,
-    params: &AxialShadingParams,
-    vp_x: f32,
-    vp_y: f32,
-    scale_x: f32,
-    scale_y: f32,
-    clip_mask: Option<&Mask>,
-) {
-    let pw = pixmap.width();
-    let ph = pixmap.height();
-    if params.color_stops.is_empty() || pw == 0 || ph == 0 {
-        return;
-    }
-
-    let (dx0, dy0) = params.ctm.transform_point(params.x0, params.y0);
-    let (dx1, dy1) = params.ctm.transform_point(params.x1, params.y1);
-
-    let stops = build_gradient_stops(&params.color_stops);
-    if stops.is_empty() {
-        return;
-    }
-
-    let start =
-        tiny_skia::Point::from_xy((dx0 as f32 - vp_x) * scale_x, (dy0 as f32 - vp_y) * scale_y);
-    let end =
-        tiny_skia::Point::from_xy((dx1 as f32 - vp_x) * scale_x, (dy1 as f32 - vp_y) * scale_y);
-
-    let Some(gradient) = tiny_skia::LinearGradient::new(
-        start,
-        end,
-        stops,
-        tiny_skia::SpreadMode::Pad,
-        Transform::identity(),
-    ) else {
-        return;
-    };
-
-    let paint = Paint {
-        shader: gradient,
-        anti_alias: true,
-        ..Paint::default()
-    };
-
-    // Build fill rect from BBox (transformed to viewport coords) or full pixmap
-    let (rx_min, ry_min, rx_max, ry_max) = if let Some(bbox) = &params.bbox {
-        let corners = [
-            params.ctm.transform_point(bbox[0], bbox[1]),
-            params.ctm.transform_point(bbox[2], bbox[1]),
-            params.ctm.transform_point(bbox[0], bbox[3]),
-            params.ctm.transform_point(bbox[2], bbox[3]),
-        ];
-        let x_min = corners.iter().map(|c| c.0).fold(f64::INFINITY, f64::min);
-        let y_min = corners.iter().map(|c| c.1).fold(f64::INFINITY, f64::min);
-        let x_max = corners
-            .iter()
-            .map(|c| c.0)
-            .fold(f64::NEG_INFINITY, f64::max);
-        let y_max = corners
-            .iter()
-            .map(|c| c.1)
-            .fold(f64::NEG_INFINITY, f64::max);
-        (
-            ((x_min as f32 - vp_x) * scale_x).max(0.0),
-            ((y_min as f32 - vp_y) * scale_y).max(0.0),
-            ((x_max as f32 - vp_x) * scale_x).min(pw as f32),
-            ((y_max as f32 - vp_y) * scale_y).min(ph as f32),
-        )
-    } else {
-        (0.0, 0.0, pw as f32, ph as f32)
-    };
-
-    if rx_max <= rx_min || ry_max <= ry_min {
-        return;
-    }
-
-    let rect = tiny_skia::Rect::from_ltrb(rx_min, ry_min, rx_max, ry_max)
-        .unwrap_or(tiny_skia::Rect::from_xywh(0.0, 0.0, 1.0, 1.0).unwrap());
-    pixmap.fill_rect(rect, &paint, Transform::identity(), clip_mask);
-}
-
-/// Render a radial shading into viewport-local coordinates.
-fn render_radial_shading_viewport(
-    pixmap: &mut Pixmap,
-    params: &RadialShadingParams,
-    vp_x: f32,
-    vp_y: f32,
-    scale_x: f32,
-    scale_y: f32,
-    clip_mask: Option<&Mask>,
-) {
-    let pw = pixmap.width();
-    let ph = pixmap.height();
-    if params.color_stops.is_empty() || pw == 0 || ph == 0 {
-        return;
-    }
-
-    let Some(inv_ctm) = params.ctm.invert() else {
-        return;
-    };
-
-    let (px_min, py_min, px_max, py_max) = if let Some(bbox) = &params.bbox {
-        let corners = [
-            params.ctm.transform_point(bbox[0], bbox[1]),
-            params.ctm.transform_point(bbox[2], bbox[1]),
-            params.ctm.transform_point(bbox[0], bbox[3]),
-            params.ctm.transform_point(bbox[2], bbox[3]),
-        ];
-        let x_min = corners
-            .iter()
-            .map(|c| c.0 as f32)
-            .fold(f32::INFINITY, f32::min);
-        let y_min = corners
-            .iter()
-            .map(|c| c.1 as f32)
-            .fold(f32::INFINITY, f32::min);
-        let x_max = corners
-            .iter()
-            .map(|c| c.0 as f32)
-            .fold(f32::NEG_INFINITY, f32::max);
-        let y_max = corners
-            .iter()
-            .map(|c| c.1 as f32)
-            .fold(f32::NEG_INFINITY, f32::max);
-        (
-            ((x_min - vp_x) * scale_x).max(0.0) as u32,
-            ((y_min - vp_y) * scale_y).max(0.0) as u32,
-            (((x_max - vp_x) * scale_x).ceil() as u32).min(pw),
-            (((y_max - vp_y) * scale_y).ceil() as u32).min(ph),
-        )
-    } else {
-        (0, 0, pw, ph)
-    };
-
-    let inv_sx = 1.0 / scale_x as f64;
-    let inv_sy = 1.0 / scale_y as f64;
-
-    let data = pixmap.data_mut();
-    let stride = pw as usize * 4;
-
-    for py in py_min..py_max {
-        // Map viewport pixel back to device space
-        let dev_y = py as f64 * inv_sy + vp_y as f64;
-        for px in px_min..px_max {
-            let dev_x = px as f64 * inv_sx + vp_x as f64;
-
-            let (ux, uy) = inv_ctm.transform_point(dev_x, dev_y);
-
-            let t = solve_radial_t(
-                ux, uy, params.x0, params.y0, params.r0, params.x1, params.y1, params.r1,
-            );
-            if let Some(t) = t {
-                if t < 0.0 && !params.extend_start {
-                    continue;
-                }
-                if t > 1.0 && !params.extend_end {
-                    continue;
-                }
-                let clamped = t.clamp(0.0, 1.0);
-                let color = interpolate_color_stops(&params.color_stops, clamped);
-
-                if let Some(mask) = clip_mask {
-                    let mask_val = mask.data()[py as usize * pw as usize + px as usize];
-                    if mask_val == 0 {
-                        continue;
-                    }
-                }
-
-                let offset = py as usize * stride + px as usize * 4;
-                data[offset] = (color.r * 255.0).round().clamp(0.0, 255.0) as u8;
-                data[offset + 1] = (color.g * 255.0).round().clamp(0.0, 255.0) as u8;
-                data[offset + 2] = (color.b * 255.0).round().clamp(0.0, 255.0) as u8;
-                data[offset + 3] = 255;
-            }
-        }
-    }
-}
-
-/// Render a Gouraud-shaded triangle mesh into viewport-local coordinates.
-fn render_mesh_shading_viewport(
-    pixmap: &mut Pixmap,
-    params: &MeshShadingParams,
-    vp_x: f32,
-    vp_y: f32,
-    scale_x: f32,
-    scale_y: f32,
-    clip_mask: Option<&Mask>,
-) {
-    let pw = pixmap.width() as usize;
-    let ph = pixmap.height() as usize;
-    if pw == 0 || ph == 0 {
-        return;
-    }
-    let data = pixmap.data_mut();
-    let stride = pw * 4;
-
-    for tri in &params.triangles {
-        let (dx0, dy0) = params.ctm.transform_point(tri.v0.x, tri.v0.y);
-        let (dx1, dy1) = params.ctm.transform_point(tri.v1.x, tri.v1.y);
-        let (dx2, dy2) = params.ctm.transform_point(tri.v2.x, tri.v2.y);
-
-        // Map to viewport pixels
-        let x0 = (dx0 as f32 - vp_x) * scale_x;
-        let y0 = (dy0 as f32 - vp_y) * scale_y;
-        let x1 = (dx1 as f32 - vp_x) * scale_x;
-        let y1 = (dy1 as f32 - vp_y) * scale_y;
-        let x2 = (dx2 as f32 - vp_x) * scale_x;
-        let y2 = (dy2 as f32 - vp_y) * scale_y;
-
-        let min_x = (x0.min(x1).min(x2).floor().max(0.0)) as usize;
-        let max_x = (x0.max(x1).max(x2).ceil() as usize).min(pw);
-        let min_y = (y0.min(y1).min(y2).floor().max(0.0)) as usize;
-        let max_y = (y0.max(y1).max(y2).ceil() as usize).min(ph);
-
-        if min_x >= max_x || min_y >= max_y {
-            continue;
-        }
-
-        let x0 = x0 as f64;
-        let y0 = y0 as f64;
-        let x1 = x1 as f64;
-        let y1 = y1 as f64;
-        let x2 = x2 as f64;
-        let y2 = y2 as f64;
-        let denom = (y1 - y2) * (x0 - x2) + (x2 - x1) * (y0 - y2);
-        if denom.abs() < 1e-10 {
-            continue;
-        }
-        let inv_denom = 1.0 / denom;
-
-        for py in min_y..max_y {
-            for px in min_x..max_x {
-                let pxf = px as f64 + 0.5;
-                let pyf = py as f64 + 0.5;
-
-                let w0 = ((y1 - y2) * (pxf - x2) + (x2 - x1) * (pyf - y2)) * inv_denom;
-                let w1 = ((y2 - y0) * (pxf - x2) + (x0 - x2) * (pyf - y2)) * inv_denom;
-                let w2 = 1.0 - w0 - w1;
-
-                const BARY_EPSILON: f64 = -0.01;
-                if w0 < BARY_EPSILON || w1 < BARY_EPSILON || w2 < BARY_EPSILON {
-                    continue;
-                }
-
-                if let Some(mask) = clip_mask {
-                    let mask_val = mask.data()[py * pw + px];
-                    if mask_val == 0 {
-                        continue;
-                    }
-                }
-
-                let w0c = w0.max(0.0);
-                let w1c = w1.max(0.0);
-                let w2c = w2.max(0.0);
-                let wsum = w0c + w1c + w2c;
-                let w0n = w0c / wsum;
-                let w1n = w1c / wsum;
-                let w2n = w2c / wsum;
-                let r = w0n * tri.v0.color.r + w1n * tri.v1.color.r + w2n * tri.v2.color.r;
-                let g = w0n * tri.v0.color.g + w1n * tri.v1.color.g + w2n * tri.v2.color.g;
-                let b = w0n * tri.v0.color.b + w1n * tri.v1.color.b + w2n * tri.v2.color.b;
-
-                let offset = py * stride + px * 4;
-                data[offset] = (r * 255.0).round().clamp(0.0, 255.0) as u8;
-                data[offset + 1] = (g * 255.0).round().clamp(0.0, 255.0) as u8;
-                data[offset + 2] = (b * 255.0).round().clamp(0.0, 255.0) as u8;
-                data[offset + 3] = 255;
-            }
-        }
-    }
-}
-
-/// Render a patch mesh into viewport-local coordinates.
-fn render_patch_shading_viewport(
-    pixmap: &mut Pixmap,
-    params: &PatchShadingParams,
-    vp_x: f32,
-    vp_y: f32,
-    scale_x: f32,
-    scale_y: f32,
-    clip_mask: Option<&Mask>,
-) {
-    let mut triangles = Vec::new();
-    for patch in &params.patches {
-        if patch.points.len() >= 12 {
-            subdivide_patch_to_triangles(patch, &mut triangles);
-        }
-    }
-    if !triangles.is_empty() {
-        let mesh_params = MeshShadingParams {
-            triangles,
-            ctm: params.ctm,
-            bbox: params.bbox,
-            color_space: params.color_space.clone(),
-        };
-        render_mesh_shading_viewport(
-            pixmap,
-            &mesh_params,
-            vp_x,
-            vp_y,
-            scale_x,
-            scale_y,
-            clip_mask,
-        );
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
