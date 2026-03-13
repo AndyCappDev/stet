@@ -3997,7 +3997,8 @@ fn is_cmyk_color_space(cs: &ImageColorSpace) -> bool {
 }
 
 /// Sample a single pixel's CMYK values from image data, handling DeviceCMYK,
-/// ICCBased(4), and Indexed color spaces. Returns None for non-CMYK images.
+/// ICCBased(4), Separation/DeviceN with CMYK alt, and Indexed color spaces.
+/// Returns None for non-CMYK images.
 fn sample_pixel_cmyk(
     sample_data: &[u8],
     cs: &ImageColorSpace,
@@ -4019,6 +4020,28 @@ fn sample_pixel_cmyk(
                 None
             }
         }
+        ImageColorSpace::Separation { alt_space, tint_table, .. } => {
+            if !matches!(alt_space.as_ref(), ImageColorSpace::DeviceCMYK) { return None; }
+            let si = row * iw + col;
+            if si >= sample_data.len() { return None; }
+            let tint = sample_data[si] as f32 / 255.0;
+            let mut alt = [0.0f32; 4];
+            tint_table.lookup_1d(tint, &mut alt);
+            Some((alt[0] as f64, alt[1] as f64, alt[2] as f64, alt[3] as f64))
+        }
+        ImageColorSpace::DeviceN { alt_space, tint_table, .. } => {
+            if !matches!(alt_space.as_ref(), ImageColorSpace::DeviceCMYK) { return None; }
+            let ni = tint_table.num_inputs as usize;
+            let si = (row * iw + col) * ni;
+            if si + ni > sample_data.len() { return None; }
+            let mut inputs = vec![0.0f32; ni];
+            for (c, inp) in inputs.iter_mut().enumerate() {
+                *inp = sample_data[si + c] as f32 / 255.0;
+            }
+            let mut alt = [0.0f32; 4];
+            tint_table.lookup_nd(&inputs, &mut alt);
+            Some((alt[0] as f64, alt[1] as f64, alt[2] as f64, alt[3] as f64))
+        }
         ImageColorSpace::Indexed { base, hival, lookup } => {
             let pi = row * iw + col;
             if pi >= sample_data.len() {
@@ -4028,19 +4051,44 @@ fn sample_pixel_cmyk(
             let idx = idx.min(*hival as usize);
             let base_ncomp = base.num_components() as usize;
             let li = idx * base_ncomp;
-            if !is_cmyk_color_space(base) || base_ncomp != 4 {
-                return None;
-            }
-            if li + 3 < lookup.len() {
-                Some((
+            // For direct CMYK base (4 components): read CMYK from lookup table
+            if is_cmyk_color_space(base) && base_ncomp == 4 && li + 3 < lookup.len() {
+                return Some((
                     lookup[li] as f64 / 255.0,
                     lookup[li + 1] as f64 / 255.0,
                     lookup[li + 2] as f64 / 255.0,
                     lookup[li + 3] as f64 / 255.0,
-                ))
-            } else {
-                None
+                ));
             }
+            // For Separation/DeviceN base: extract base components from lookup, then tint
+            if li + base_ncomp <= lookup.len() {
+                match base.as_ref() {
+                    ImageColorSpace::Separation { alt_space, tint_table, .. }
+                        if matches!(alt_space.as_ref(), ImageColorSpace::DeviceCMYK) =>
+                    {
+                        let tint = lookup[li] as f32 / 255.0;
+                        let mut alt = [0.0f32; 4];
+                        tint_table.lookup_1d(tint, &mut alt);
+                        return Some((alt[0] as f64, alt[1] as f64, alt[2] as f64, alt[3] as f64));
+                    }
+                    ImageColorSpace::DeviceN { alt_space, tint_table, .. }
+                        if matches!(alt_space.as_ref(), ImageColorSpace::DeviceCMYK) =>
+                    {
+                        let ni = tint_table.num_inputs as usize;
+                        let mut inputs = vec![0.0f32; ni];
+                        for (c, inp) in inputs.iter_mut().enumerate() {
+                            if c < base_ncomp {
+                                *inp = lookup[li + c] as f32 / 255.0;
+                            }
+                        }
+                        let mut alt = [0.0f32; 4];
+                        tint_table.lookup_nd(&inputs, &mut alt);
+                        return Some((alt[0] as f64, alt[1] as f64, alt[2] as f64, alt[3] as f64));
+                    }
+                    _ => {}
+                }
+            }
+            None
         }
         _ => None,
     }
