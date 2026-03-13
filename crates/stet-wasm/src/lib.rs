@@ -506,6 +506,7 @@ pub fn render_viewport(
         page_dpi,
         None,
         image_cache,
+        false,
     );
 
     Ok(Page {
@@ -576,6 +577,7 @@ pub fn render_viewport_band(
         page_dpi,
         None,
         image_cache,
+        false,
     );
 
     let actual_h = if band_idx < num_bands - 1 {

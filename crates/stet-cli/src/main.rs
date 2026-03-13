@@ -37,6 +37,7 @@ fn main() {
     let mut threads: Option<usize> = None;
     let mut device_name: Option<String> = None;
     let mut no_icc = false;
+    let mut no_aa = false;
     let mut output_profile_path: Option<String> = None;
     let mut pages_spec: Option<String> = None;
     let mut file_args: Vec<String> = Vec::new();
@@ -86,6 +87,11 @@ fn main() {
             }
             "--no-icc" => {
                 no_icc = true;
+                i += 1;
+                continue;
+            }
+            "--no-aa" => {
+                no_aa = true;
                 i += 1;
                 continue;
             }
@@ -149,16 +155,16 @@ fn main() {
 
     match device.as_str() {
         "png" => {
-            run_png_mode(dpi, file_args, no_icc, output_profile_path, page_filter);
+            run_png_mode(dpi, file_args, no_icc, no_aa, output_profile_path, page_filter);
         }
         "pdf" => {
-            run_pdf_mode(dpi, file_args, no_icc, output_profile_path, page_filter);
+            run_pdf_mode(dpi, file_args, no_icc, no_aa, output_profile_path, page_filter);
         }
         "null" => {
-            run_null_mode(dpi, file_args, no_icc, output_profile_path, page_filter);
+            run_null_mode(dpi, file_args, no_icc, no_aa, output_profile_path, page_filter);
         }
         #[cfg(feature = "viewer")]
-        "viewer" => run_viewer_mode(dpi, file_args, no_icc, output_profile_path, page_filter),
+        "viewer" => run_viewer_mode(dpi, file_args, no_icc, no_aa, output_profile_path, page_filter),
         #[cfg(not(feature = "viewer"))]
         "viewer" => {
             eprintln!("Error: viewer not available (built without 'viewer' feature)");
@@ -177,13 +183,14 @@ fn run_png_mode(
     dpi_override: Option<f64>,
     file_args: Vec<String>,
     no_icc: bool,
+    no_aa: bool,
     output_profile_path: Option<String>,
     page_filter: Option<std::collections::HashSet<i32>>,
 ) {
     // Check if all files are PDFs — use fast path (no PS interpreter needed)
     if !file_args.is_empty() && file_args.iter().all(|f| is_pdf_file(f)) {
         let dpi = dpi_override.unwrap_or(300.0);
-        run_pdf_input_png(dpi, &file_args, &page_filter);
+        run_pdf_input_png(dpi, &file_args, &page_filter, no_aa);
         return;
     }
 
@@ -197,6 +204,7 @@ fn run_png_mode(
         if let Some(ref bytes) = cmyk_bytes {
             dev.set_system_cmyk_bytes(bytes.clone());
         }
+        dev.set_no_aa(no_aa);
         Box::new(dev)
     }));
 
@@ -212,6 +220,7 @@ fn run_pdf_mode(
     dpi_override: Option<f64>,
     file_args: Vec<String>,
     no_icc: bool,
+    _no_aa: bool,
     output_profile_path: Option<String>,
     page_filter: Option<std::collections::HashSet<i32>>,
 ) {
@@ -251,6 +260,7 @@ fn run_null_mode(
     dpi_override: Option<f64>,
     file_args: Vec<String>,
     no_icc: bool,
+    _no_aa: bool,
     output_profile_path: Option<String>,
     page_filter: Option<std::collections::HashSet<i32>>,
 ) {
@@ -277,6 +287,7 @@ fn run_viewer_mode(
     dpi_override: Option<f64>,
     file_args: Vec<String>,
     no_icc: bool,
+    no_aa: bool,
     output_profile_path: Option<String>,
     page_filter: Option<std::collections::HashSet<i32>>,
 ) {
@@ -303,7 +314,7 @@ fn run_viewer_mode(
 
     // PDF files: use fast path (no PS interpreter needed)
     if file_args.iter().all(|f| is_pdf_file(f)) {
-        run_pdf_input_viewer(dpi_override, &file_args, &page_filter, system_cmyk_bytes);
+        run_pdf_input_viewer(dpi_override, &file_args, &page_filter, system_cmyk_bytes, no_aa);
         return;
     }
 
@@ -430,6 +441,7 @@ fn run_viewer_mode(
             first_file.as_deref(),
             first_page_size,
             system_cmyk_bytes,
+            no_aa,
         );
     }
     std::process::exit(0);
@@ -1054,10 +1066,27 @@ fn is_pdf_file(filename: &str) -> bool {
 }
 
 /// Render PDF files to PNG output.
+/// Render a single PDF page to RGBA with configurable anti-aliasing.
+fn render_pdf_page_to_rgba(
+    doc: &PdfDocument,
+    page: usize,
+    dpi: f64,
+    no_aa: bool,
+) -> Result<(Vec<u8>, u32, u32), stet_pdf_reader::PdfError> {
+    let (page_w, page_h) = doc.page_size(page)?;
+    let scale = dpi / 72.0;
+    let pixel_w = (page_w * scale).round() as u32;
+    let pixel_h = (page_h * scale).round() as u32;
+    let display_list = doc.render_page(page, dpi)?;
+    let rgba = stet_render::render_to_rgba(&display_list, pixel_w, pixel_h, dpi, Some(doc.icc_cache()), no_aa);
+    Ok((rgba, pixel_w, pixel_h))
+}
+
 fn run_pdf_input_png(
     dpi: f64,
     file_args: &[String],
     page_filter: &Option<std::collections::HashSet<i32>>,
+    no_aa: bool,
 ) {
     let mut icc_cache = stet_core::icc::IccCache::new();
     icc_cache.search_system_cmyk_profile();
@@ -1093,7 +1122,7 @@ fn run_pdf_input_png(
                 continue;
             }
 
-            match doc.render_page_to_rgba(page, dpi) {
+            match render_pdf_page_to_rgba(&doc, page, dpi, no_aa) {
                 Ok((rgba, w, h)) => {
                     let out_path = if page_count == 1 {
                         format!("{}.png", output_base)
@@ -1139,6 +1168,7 @@ fn run_pdf_input_viewer(
     file_args: &[String],
     page_filter: &Option<std::collections::HashSet<i32>>,
     system_cmyk_bytes: Option<std::sync::Arc<Vec<u8>>>,
+    no_aa: bool,
 ) {
     let (interp_end, viewer_end, dl_sender, advance_rx) = stet_viewer::create_channels();
 
@@ -1281,6 +1311,7 @@ fn run_pdf_input_viewer(
             first_file.as_deref(),
             first_page_size,
             system_cmyk_bytes,
+            no_aa,
         );
     }
     std::process::exit(0);

@@ -100,6 +100,8 @@ pub struct SkiaDevice {
     system_cmyk_bytes: Option<std::sync::Arc<Vec<u8>>>,
     /// Transient IccCache used during non-banded replay_to_device rendering.
     render_icc_cache: Option<IccCache>,
+    /// Disable anti-aliasing for all fill/stroke operations (matches GhostScript).
+    no_aa: bool,
 }
 
 impl SkiaDevice {
@@ -139,6 +141,7 @@ impl SkiaDevice {
             sink_factory,
             system_cmyk_bytes: None,
             render_icc_cache: None,
+            no_aa: false,
         }
     }
 
@@ -161,6 +164,11 @@ impl SkiaDevice {
     pub fn set_system_cmyk_bytes(&mut self, bytes: std::sync::Arc<Vec<u8>>) {
         self.system_cmyk_bytes = Some(bytes);
     }
+
+    /// Disable anti-aliasing for all fill/stroke operations.
+    pub fn set_no_aa(&mut self, no_aa: bool) {
+        self.no_aa = no_aa;
+    }
 }
 
 /// Convert a PostScript `Matrix` to tiny-skia `Transform` (f32).
@@ -177,11 +185,11 @@ fn to_transform(m: &Matrix) -> Transform {
 
 /// Convert a `DeviceColor` to tiny-skia `Paint`.
 fn to_paint(color: &DeviceColor) -> Paint<'static> {
-    to_paint_alpha(color, 1.0, 0)
+    to_paint_alpha(color, 1.0, 0, false)
 }
 
 /// Convert a `DeviceColor` to tiny-skia `Paint` with the given opacity and blend mode.
-fn to_paint_alpha(color: &DeviceColor, alpha: f64, blend_mode: u8) -> Paint<'static> {
+fn to_paint_alpha(color: &DeviceColor, alpha: f64, blend_mode: u8, no_aa: bool) -> Paint<'static> {
     let mut paint = Paint::default();
     let a = (alpha * 255.0).round().clamp(0.0, 255.0) as u8;
     paint.set_color_rgba8(
@@ -190,7 +198,7 @@ fn to_paint_alpha(color: &DeviceColor, alpha: f64, blend_mode: u8) -> Paint<'sta
         (color.b * 255.0).round().clamp(0.0, 255.0) as u8,
         a,
     );
-    paint.anti_alias = true;
+    paint.anti_alias = !no_aa;
     paint.blend_mode = u8_to_blend_mode(blend_mode);
     paint
 }
@@ -585,6 +593,8 @@ struct RenderContext<'a> {
     image_cache: Option<&'a ImageCache>,
     /// Element index in parent display list (for image cache lookup).
     elem_idx: usize,
+    /// Disable anti-aliasing for all fill/stroke operations.
+    no_aa: bool,
 }
 
 impl RenderContext<'_> {
@@ -1731,7 +1741,6 @@ fn render_element(
 ) {
     match element {
         DisplayElement::Fill { path, params } => {
-            // Check if this is an overprint fill needing CMYK simulation
             let needs_overprint = params.overprint
                 && params.painted_channels != 0
                 && band_state.cmyk_buffer.is_some();
@@ -1751,6 +1760,7 @@ fn render_element(
                     ctx.out_w,
                     ctx.out_h,
                     ctx.icc,
+                    ctx.no_aa,
                 );
                 band_state.cmyk_buffer = Some(cmyk_buf);
             } else {
@@ -1763,7 +1773,7 @@ fn render_element(
                 else {
                     return;
                 };
-                let paint = to_paint_alpha(&params.color, params.alpha, params.blend_mode);
+                let paint = to_paint_alpha(&params.color, params.alpha, params.blend_mode, ctx.no_aa);
                 let transform = ctx.transform(&params.ctm);
                 let fill_rule = to_fill_rule(&params.fill_rule);
                 pixmap.fill_path(&skia_path, &paint, fill_rule, transform, mask_ref);
@@ -1781,6 +1791,7 @@ fn render_element(
                         ctx.out_w,
                         ctx.out_h,
                         &band_state.clip_region,
+                        ctx.no_aa,
                     );
                 }
             }
@@ -1862,6 +1873,7 @@ fn render_element(
                             icc: ctx.icc,
                             image_cache: ctx.image_cache,
                             elem_idx: ctx.elem_idx,
+                            no_aa: ctx.no_aa,
                         };
                         render_overprint_fill(
                             pixmap,
@@ -1876,6 +1888,7 @@ fn render_element(
                             identity_ctx.out_w,
                             identity_ctx.out_h,
                             identity_ctx.icc,
+                            identity_ctx.no_aa,
                         );
                         band_state.cmyk_buffer = Some(cmyk_buf);
                     }
@@ -1890,7 +1903,7 @@ fn render_element(
                 else {
                     return;
                 };
-                let paint = to_paint_alpha(&params.color, params.alpha, params.blend_mode);
+                let paint = to_paint_alpha(&params.color, params.alpha, params.blend_mode, ctx.no_aa);
                 pixmap.stroke_path(&skia_path, &paint, &stroke, transform, mask_ref);
             }
         }
@@ -1920,7 +1933,6 @@ fn render_element(
                 return;
             }
 
-            // Check if this is an overprint image needing CMYK simulation
             let needs_overprint = params.overprint
                 && params.painted_channels != 0
                 && band_state.cmyk_buffer.is_some();
@@ -2033,7 +2045,7 @@ fn render_element(
             else {
                 return;
             };
-            render_axial_shading(pixmap, params, ctx.vp_x, ctx.vp_y, ctx.scale_x, ctx.scale_y, mask_ref);
+            render_axial_shading(pixmap, params, ctx.vp_x, ctx.vp_y, ctx.scale_x, ctx.scale_y, mask_ref, ctx.no_aa);
         }
         DisplayElement::RadialShading { params } => {
             let mut temp_mask = None;
@@ -2042,7 +2054,7 @@ fn render_element(
             else {
                 return;
             };
-            render_radial_shading(pixmap, params, ctx.vp_x, ctx.vp_y, ctx.scale_x, ctx.scale_y, mask_ref);
+            render_radial_shading(pixmap, params, ctx.vp_x, ctx.vp_y, ctx.scale_x, ctx.scale_y, mask_ref, ctx.no_aa);
         }
         DisplayElement::MeshShading { params } => {
             let mut temp_mask = None;
@@ -2140,8 +2152,8 @@ fn render_group(
             ch,
             cx,
             cy,
-            ctx.vp_x + cx as f32 / ctx.scale_x * ctx.scale_x,
-            ctx.vp_y + cy as f32 / ctx.scale_y * ctx.scale_y,
+            ctx.vp_x + cx as f32 / ctx.scale_x,
+            ctx.vp_y + cy as f32 / ctx.scale_y,
         ),
         None => (ctx.out_w, ctx.out_h, 0, 0, ctx.vp_x, ctx.vp_y),
     };
@@ -2206,6 +2218,7 @@ fn render_group(
         icc: ctx.icc,
         image_cache: None, // Group elements don't use parent image cache
         elem_idx: 0,
+        no_aa: ctx.no_aa,
     };
 
     for (idx, elem) in elements.elements().iter().enumerate() {
@@ -2280,8 +2293,8 @@ fn render_knockout_group(
             ch,
             cx,
             cy,
-            ctx.vp_x + cx as f32 / ctx.scale_x * ctx.scale_x,
-            ctx.vp_y + cy as f32 / ctx.scale_y * ctx.scale_y,
+            ctx.vp_x + cx as f32 / ctx.scale_x,
+            ctx.vp_y + cy as f32 / ctx.scale_y,
         ),
         None => (ctx.out_w, ctx.out_h, 0, 0, ctx.vp_x, ctx.vp_y),
     };
@@ -2342,6 +2355,7 @@ fn render_knockout_group(
         icc: ctx.icc,
         image_cache: None,
         elem_idx: 0,
+        no_aa: ctx.no_aa,
     };
 
     for elem in elements.elements() {
@@ -2501,8 +2515,8 @@ fn render_soft_masked(
             ch,
             cx,
             cy,
-            ctx.vp_x + cx as f32 / ctx.scale_x * ctx.scale_x,
-            ctx.vp_y + cy as f32 / ctx.scale_y * ctx.scale_y,
+            ctx.vp_x + cx as f32 / ctx.scale_x,
+            ctx.vp_y + cy as f32 / ctx.scale_y,
         ),
         None => (ctx.out_w, ctx.out_h, 0, 0, ctx.vp_x, ctx.vp_y),
     };
@@ -2518,6 +2532,7 @@ fn render_soft_masked(
         icc: ctx.icc,
         image_cache: None,
         elem_idx: 0,
+        no_aa: ctx.no_aa,
     };
 
     // 1. Render mask form into offscreen
@@ -2835,7 +2850,7 @@ fn render_pattern_fill(
         ctx.scale_x,
         ctx.scale_y,
     );
-    fill_mask.fill_path(&fill_skia_path, fill_rule, true, path_transform);
+    fill_mask.fill_path(&fill_skia_path, fill_rule, !ctx.no_aa, path_transform);
 
     if let Some(clip_mask) = mask_ref {
         intersect_masks(&mut fill_mask, clip_mask);
@@ -2962,7 +2977,7 @@ impl OutputDevice for SkiaDevice {
             return; // empty clip
         };
 
-        let paint = to_paint_alpha(&params.color, params.alpha, params.blend_mode);
+        let paint = to_paint_alpha(&params.color, params.alpha, params.blend_mode, self.no_aa);
         let transform = to_transform(&params.ctm);
         let fill_rule = to_fill_rule(&params.fill_rule);
 
@@ -2983,7 +2998,7 @@ impl OutputDevice for SkiaDevice {
         let Some(skia_path) = build_skia_path(draw_path) else {
             return;
         };
-        let paint = to_paint_alpha(&params.color, params.alpha, params.blend_mode);
+        let paint = to_paint_alpha(&params.color, params.alpha, params.blend_mode, self.no_aa);
         let transform = to_transform(&params.ctm);
 
         let (w, h) = (self.pixmap.width(), self.pixmap.height());
@@ -3167,7 +3182,7 @@ impl OutputDevice for SkiaDevice {
         let Some(mask_ref) = resolve_clip_mask(&self.clip_region, &mut temp_mask, w, h) else {
             return;
         };
-        render_axial_shading(&mut self.pixmap, params, 0.0, 0.0, 1.0, 1.0, mask_ref);
+        render_axial_shading(&mut self.pixmap, params, 0.0, 0.0, 1.0, 1.0, mask_ref, self.no_aa);
     }
 
     fn paint_radial_shading(&mut self, params: &RadialShadingParams) {
@@ -3177,7 +3192,7 @@ impl OutputDevice for SkiaDevice {
         let Some(mask_ref) = resolve_clip_mask(&self.clip_region, &mut temp_mask, w, h) else {
             return;
         };
-        render_radial_shading(&mut self.pixmap, params, 0.0, 0.0, 1.0, 1.0, mask_ref);
+        render_radial_shading(&mut self.pixmap, params, 0.0, 0.0, 1.0, 1.0, mask_ref, self.no_aa);
     }
 
     fn paint_mesh_shading(&mut self, params: &MeshShadingParams) {
@@ -3224,6 +3239,7 @@ impl OutputDevice for SkiaDevice {
                 icc: None,
                 image_cache: None,
                 elem_idx: 0,
+                no_aa: self.no_aa,
             };
             render_pattern_fill(&mut self.pixmap, &mut band_state, params, &ctx);
         }
@@ -3273,10 +3289,11 @@ impl OutputDevice for SkiaDevice {
             // Spawn banded rendering on rayon's thread pool, overlapping with
             // interpretation of the next page. Using rayon::spawn avoids OS thread
             // creation overhead and keeps work on the warmed-up pool.
+            let no_aa = self.no_aa;
             let (tx, rx) = std::sync::mpsc::sync_channel(1);
             rayon::spawn(move || {
                 let result = render_banded_to_sink(
-                    page_w, page_h, band_h, dpi, &list, &mut *sink, &icc_cache,
+                    page_w, page_h, band_h, dpi, &list, &mut *sink, &icc_cache, no_aa,
                 );
                 let _ = tx.send(result);
             });
@@ -3284,7 +3301,7 @@ impl OutputDevice for SkiaDevice {
         }
         #[cfg(not(feature = "parallel"))]
         {
-            render_banded_to_sink(page_w, page_h, band_h, dpi, &list, &mut *sink, &icc_cache)?;
+            render_banded_to_sink(page_w, page_h, band_h, dpi, &list, &mut *sink, &icc_cache, self.no_aa)?;
         }
 
         Ok(())
@@ -3371,6 +3388,7 @@ fn render_overprint_fill(
     out_w: u32,
     out_h: u32,
     icc: Option<&IccCache>,
+    no_aa: bool,
 ) {
     let Some(skia_path) = build_skia_path(path) else {
         return;
@@ -3382,7 +3400,7 @@ fn render_overprint_fill(
         None => return,
     };
     let transform = viewport_transform(to_transform(&params.ctm), vp_x, vp_y, scale_x, scale_y);
-    coverage_mask.fill_path(&skia_path, fill_rule, true, transform);
+    coverage_mask.fill_path(&skia_path, fill_rule, !no_aa, transform);
 
     // Intersect with clip mask
     let clip_coverage: Option<&[u8]> = match &band_state.clip_region {
@@ -3444,7 +3462,7 @@ fn render_overprint_fill(
         else {
             return;
         };
-        let paint = to_paint_alpha(&params.color, params.alpha, params.blend_mode);
+        let paint = to_paint_alpha(&params.color, params.alpha, params.blend_mode, no_aa);
         pixmap.fill_path(&skia_path, &paint, fill_rule, transform, mask_ref);
         return;
     }
@@ -3542,6 +3560,7 @@ fn update_cmyk_buffer_for_fill(
     out_w: u32,
     out_h: u32,
     clip_region: &Option<ClipRegion>,
+    no_aa: bool,
 ) {
     let Some((src_c, src_m, src_y, src_k)) = params.color.native_cmyk else {
         return;
@@ -3556,7 +3575,7 @@ fn update_cmyk_buffer_for_fill(
     };
     let transform = viewport_transform(to_transform(&params.ctm), vp_x, vp_y, scale_x, scale_y);
     let fill_rule = to_fill_rule(&params.fill_rule);
-    coverage_mask.fill_path(&skia_path, fill_rule, true, transform);
+    coverage_mask.fill_path(&skia_path, fill_rule, !no_aa, transform);
 
     let cov_data = coverage_mask.data();
     let clip_data: Option<&[u8]> = match clip_region {
@@ -3930,6 +3949,7 @@ fn render_banded_to_sink(
     list: &DisplayList,
     sink: &mut dyn stet_core::device::PageSink,
     icc_cache: &IccCache,
+    no_aa: bool,
 ) -> Result<(), String> {
     // Precompute Y bounding boxes for culling
     let bboxes = precompute_bboxes(list, dpi);
@@ -4020,6 +4040,7 @@ fn render_banded_to_sink(
                     icc: icc_ref,
                     image_cache: None,
                     elem_idx: i,
+                    no_aa,
                 };
                 render_element(
                     &mut band_pixmap,
@@ -4451,6 +4472,7 @@ pub fn render_region_prepared(
     dpi: f64,
     icc: Option<&IccCache>,
     image_cache: Option<&ImageCache>,
+    no_aa: bool,
 ) -> Vec<u8> {
     if pixel_w == 0 || pixel_h == 0 || vp_w <= 0.0 || vp_h <= 0.0 {
         return vec![0xFF; pixel_w as usize * pixel_h as usize * 4];
@@ -4524,6 +4546,7 @@ pub fn render_region_prepared(
                 icc,
                 image_cache,
                 elem_idx: i,
+                no_aa,
             };
             render_element(&mut pixmap, &mut state, &elements[i], &ctx);
         }
@@ -4572,6 +4595,7 @@ pub fn render_region_single_band(
     dpi: f64,
     icc: Option<&IccCache>,
     image_cache: Option<&ImageCache>,
+    no_aa: bool,
 ) -> Vec<u8> {
     if pixel_w == 0 || pixel_h == 0 || vp_w <= 0.0 || vp_h <= 0.0 {
         let actual_h = if band_idx < num_bands - 1 {
@@ -4671,6 +4695,7 @@ pub fn render_region_single_band(
                 icc,
                 image_cache,
                 elem_idx: i,
+                no_aa,
             };
             render_element(&mut pixmap, &mut state, &elements[i], &ctx);
         }
@@ -4707,12 +4732,13 @@ pub fn render_region_prepared_parallel(
     dpi: f64,
     icc: Option<&IccCache>,
     image_cache: Option<&ImageCache>,
+    no_aa: bool,
 ) -> Vec<u8> {
     let (num_bands, band_h) = viewport_band_count(pixel_w, pixel_h);
 
     if num_bands <= 1 {
         // Single band — no parallelism needed
-        return render_region_prepared(list, prepared, vp_x, vp_y, vp_w, vp_h, pixel_w, pixel_h, dpi, icc, image_cache);
+        return render_region_prepared(list, prepared, vp_x, vp_y, vp_w, vp_h, pixel_w, pixel_h, dpi, icc, image_cache, no_aa);
     }
 
     let render_band = |band_idx: u32| -> Vec<u8> {
@@ -4721,7 +4747,7 @@ pub fn render_region_prepared_parallel(
             vp_x, vp_y, vp_w, vp_h,
             pixel_w, pixel_h,
             band_idx, band_h, num_bands,
-            dpi, icc, image_cache,
+            dpi, icc, image_cache, no_aa,
         )
     };
 
@@ -4776,6 +4802,7 @@ pub fn render_to_rgba(
     pixel_h: u32,
     dpi: f64,
     icc: Option<&IccCache>,
+    no_aa: bool,
 ) -> Vec<u8> {
     if pixel_w == 0 || pixel_h == 0 {
         return vec![0xFF; pixel_w as usize * pixel_h as usize * 4];
@@ -4792,7 +4819,7 @@ pub fn render_to_rgba(
     };
 
     let band_h = select_band_height(pixel_w, pixel_h);
-    if let Err(e) = render_banded_to_sink(pixel_w, pixel_h, band_h, dpi, list, &mut sink, &icc_cache) {
+    if let Err(e) = render_banded_to_sink(pixel_w, pixel_h, band_h, dpi, list, &mut sink, &icc_cache, no_aa) {
         eprintln!("render_to_rgba: banded render failed: {e}");
         return vec![0xFF; pixel_w as usize * pixel_h as usize * 4];
     }
@@ -4843,6 +4870,7 @@ pub fn render_region(
     dpi: f64,
     icc: Option<&IccCache>,
     image_cache: Option<&ImageCache>,
+    no_aa: bool,
 ) -> Vec<u8> {
     if pixel_w == 0 || pixel_h == 0 || vp_w <= 0.0 || vp_h <= 0.0 {
         return vec![0xFF; pixel_w as usize * pixel_h as usize * 4];
@@ -4922,6 +4950,7 @@ pub fn render_region(
                 icc,
                 image_cache,
                 elem_idx: i,
+                no_aa,
             };
             render_element(&mut pixmap, &mut state, &elements[i], &ctx);
         }
@@ -4964,6 +4993,7 @@ fn render_axial_shading(
     scale_x: f32,
     scale_y: f32,
     clip_mask: Option<&Mask>,
+    no_aa: bool,
 ) {
     let pw = pixmap.width();
     let ph = pixmap.height();
@@ -5000,7 +5030,7 @@ fn render_axial_shading(
 
     let paint = Paint {
         shader: gradient,
-        anti_alias: true,
+        anti_alias: !no_aa,
         ..Paint::default()
     };
 
@@ -5073,6 +5103,7 @@ fn render_radial_shading(
     scale_x: f32,
     scale_y: f32,
     clip_mask: Option<&Mask>,
+    _no_aa: bool,
 ) {
     let pw = pixmap.width();
     let ph = pixmap.height();

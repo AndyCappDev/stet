@@ -56,6 +56,8 @@ pub struct ViewerApp {
     minimap_dragging: bool,
     /// System CMYK ICC profile bytes (for ICC-aware rendering).
     system_cmyk_bytes: Option<std::sync::Arc<Vec<u8>>>,
+    /// Disable anti-aliasing for all rendering.
+    no_aa: bool,
 }
 
 /// A page stored as a resolution-independent display list.
@@ -115,6 +117,7 @@ impl ViewerApp {
         viewer_end: ViewerEnd,
         dpi_override: Option<f64>,
         system_cmyk_bytes: Option<std::sync::Arc<Vec<u8>>>,
+        no_aa: bool,
     ) -> Self {
         Self {
             page_receiver: Some(viewer_end.page_receiver),
@@ -140,6 +143,7 @@ impl ViewerApp {
             minimap: None,
             minimap_dragging: false,
             system_cmyk_bytes,
+            no_aa,
         }
     }
 
@@ -494,6 +498,7 @@ impl ViewerApp {
             page.dpi,
             Some(&page.icc_cache),
             Some(&page.image_cache),
+            self.no_aa,
         );
 
         let image = ColorImage::from_rgba_unmultiplied([pixel_w as usize, pixel_h as usize], &rgba);
@@ -557,6 +562,7 @@ impl ViewerApp {
             page.dpi,
             Some(&page.icc_cache),
             Some(&page.image_cache),
+            self.no_aa,
         );
 
         let image = ColorImage::from_rgba_unmultiplied([mm_w as usize, mm_h as usize], &rgba);

@@ -270,9 +270,15 @@ impl<'a> PdfDocument<'a> {
             pixel_h,
             dpi,
             Some(&self.icc_cache),
+            false,
         );
 
         Ok((rgba, pixel_w, pixel_h))
+    }
+
+    /// Access the ICC color profile cache.
+    pub fn icc_cache(&self) -> &IccCache {
+        &self.icc_cache
     }
 
     /// Access the resolver for arbitrary object lookups.

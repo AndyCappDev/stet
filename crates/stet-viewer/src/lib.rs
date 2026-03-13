@@ -122,8 +122,9 @@ pub fn run_viewer(
     filename: Option<&str>,
     page_size: Option<(f64, f64)>,
     system_cmyk_bytes: Option<std::sync::Arc<Vec<u8>>>,
+    no_aa: bool,
 ) {
-    let app = viewer::ViewerApp::new(viewer_end, dpi_override, system_cmyk_bytes);
+    let app = viewer::ViewerApp::new(viewer_end, dpi_override, system_cmyk_bytes, no_aa);
 
     let title = match filename {
         Some(name) => {
