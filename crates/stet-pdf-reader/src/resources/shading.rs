@@ -158,6 +158,9 @@ fn handle_function_based(
             mask_color: None,
             alpha: 1.0,
             blend_mode: 0,
+            overprint: false,
+            overprint_mode: 0,
+            painted_channels: 0,
         },
     });
     Ok(())

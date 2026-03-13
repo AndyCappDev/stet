@@ -389,6 +389,12 @@ pub struct ImageParams {
     pub alpha: f64,
     /// Blend mode from graphics state (0 = Normal/SourceOver).
     pub blend_mode: u8,
+    /// Overprint flag from graphics state.
+    pub overprint: bool,
+    /// Overprint mode (0 or 1).
+    pub overprint_mode: i32,
+    /// Which CMYK channels this image paints (bitmask).
+    pub painted_channels: u8,
 }
 
 /// Color space carried through the display list for native shading output.

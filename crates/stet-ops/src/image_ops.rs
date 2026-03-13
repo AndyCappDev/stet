@@ -1783,6 +1783,9 @@ fn draw_image_to_device(
         mask_color,
         alpha: 1.0,
         blend_mode: 0,
+        overprint: false,
+        overprint_mode: 0,
+        painted_channels: 0,
     };
     ctx.display_list.push(DisplayElement::Image {
         sample_data,

@@ -1962,58 +1962,98 @@ fn render_element_to_band_offset(
             if iw == 0 || ih == 0 {
                 return;
             }
-            let mut rgba_data = samples_to_rgba(sample_data, params, icc);
-            if params.mask_color.is_some() {
-                apply_mask_color_rgba(&mut rgba_data, sample_data, params);
-            }
-            let expected = (iw * ih * 4) as usize;
-            if rgba_data.len() < expected {
-                return;
-            }
-            let Some(image_inv) = params.image_matrix.invert() else {
-                return;
-            };
-            let combined = params.ctm.concat(&image_inv);
-            let raw_transform = offset_transform_xy(to_transform(&combined), x_off, y_off);
 
-            let prescaled = prescale_image(&rgba_data, iw, ih, raw_transform);
-            let (img_data, img_w, img_h, transform) = match &prescaled {
-                Some((data, w, h, t)) => (data.as_slice(), *w, *h, *t),
-                None => (rgba_data.as_slice(), iw, ih, raw_transform),
-            };
+            // Check if this is an overprint image needing CMYK simulation
+            let needs_overprint = params.overprint
+                && params.painted_channels != 0
+                && band_state.cmyk_buffer.is_some();
 
-            let Some(img_pixmap) = tiny_skia::PixmapRef::from_bytes(img_data, img_w, img_h) else {
-                return;
-            };
-            #[allow(unused_assignments)]
-            let mut temp_mask = None;
-            let mask_ref = match &band_state.clip_region {
-                None => None,
-                Some(ClipRegion::Mask(m)) => Some(m as &Mask),
-                Some(ClipRegion::Rect(rect)) => {
-                    if rect.is_empty() {
-                        return;
-                    } else if rect.is_full_page(band_w, band_h) {
-                        None
-                    } else {
-                        temp_mask = rect.make_mask(band_w, band_h);
-                        temp_mask.as_ref()
-                    }
-                }
-            };
-            let eff_sx = (transform.sx * transform.sx + transform.ky * transform.ky).sqrt();
-            let eff_sy = (transform.kx * transform.kx + transform.sy * transform.sy).sqrt();
-            let quality = if eff_sx >= 0.9 && eff_sy >= 0.9 {
-                tiny_skia::FilterQuality::Nearest
+            if needs_overprint {
+                let mut cmyk_buf = band_state.cmyk_buffer.take().unwrap();
+                render_overprint_image(
+                    pixmap,
+                    &mut cmyk_buf,
+                    band_state,
+                    sample_data,
+                    params,
+                    x_off,
+                    y_off,
+                    band_w,
+                    band_h,
+                    icc,
+                );
+                band_state.cmyk_buffer = Some(cmyk_buf);
             } else {
-                tiny_skia::FilterQuality::Bilinear
-            };
-            let img_paint = tiny_skia::PixmapPaint {
-                quality,
-                opacity: params.alpha as f32,
-                blend_mode: u8_to_blend_mode(params.blend_mode),
-            };
-            pixmap.draw_pixmap(0, 0, img_pixmap, &img_paint, transform, mask_ref);
+                let mut rgba_data = samples_to_rgba(sample_data, params, icc);
+                if params.mask_color.is_some() {
+                    apply_mask_color_rgba(&mut rgba_data, sample_data, params);
+                }
+                let expected = (iw * ih * 4) as usize;
+                if rgba_data.len() < expected {
+                    return;
+                }
+                let Some(image_inv) = params.image_matrix.invert() else {
+                    return;
+                };
+                let combined = params.ctm.concat(&image_inv);
+                let raw_transform = offset_transform_xy(to_transform(&combined), x_off, y_off);
+
+                let prescaled = prescale_image(&rgba_data, iw, ih, raw_transform);
+                let (img_data, img_w, img_h, transform) = match &prescaled {
+                    Some((data, w, h, t)) => (data.as_slice(), *w, *h, *t),
+                    None => (rgba_data.as_slice(), iw, ih, raw_transform),
+                };
+
+                let Some(img_pixmap) = tiny_skia::PixmapRef::from_bytes(img_data, img_w, img_h)
+                else {
+                    return;
+                };
+                #[allow(unused_assignments)]
+                let mut temp_mask = None;
+                let mask_ref = match &band_state.clip_region {
+                    None => None,
+                    Some(ClipRegion::Mask(m)) => Some(m as &Mask),
+                    Some(ClipRegion::Rect(rect)) => {
+                        if rect.is_empty() {
+                            return;
+                        } else if rect.is_full_page(band_w, band_h) {
+                            None
+                        } else {
+                            temp_mask = rect.make_mask(band_w, band_h);
+                            temp_mask.as_ref()
+                        }
+                    }
+                };
+                let eff_sx =
+                    (transform.sx * transform.sx + transform.ky * transform.ky).sqrt();
+                let eff_sy =
+                    (transform.kx * transform.kx + transform.sy * transform.sy).sqrt();
+                let quality = if eff_sx >= 0.9 && eff_sy >= 0.9 {
+                    tiny_skia::FilterQuality::Nearest
+                } else {
+                    tiny_skia::FilterQuality::Bilinear
+                };
+                let img_paint = tiny_skia::PixmapPaint {
+                    quality,
+                    opacity: params.alpha as f32,
+                    blend_mode: u8_to_blend_mode(params.blend_mode),
+                };
+                pixmap.draw_pixmap(0, 0, img_pixmap, &img_paint, transform, mask_ref);
+
+                // Update CMYK tracking buffer for non-overprint images
+                if let Some(ref mut cmyk_buf) = band_state.cmyk_buffer {
+                    update_cmyk_buffer_for_image(
+                        cmyk_buf,
+                        sample_data,
+                        params,
+                        x_off,
+                        y_off,
+                        band_w,
+                        band_h,
+                        &band_state.clip_region,
+                    );
+                }
+            }
         }
         DisplayElement::AxialShading { params } => {
             let mut temp_mask = None;
@@ -3419,6 +3459,11 @@ fn has_overprint_elements(list: &DisplayList) -> bool {
                     return true;
                 }
             }
+            DisplayElement::Image { params, .. } => {
+                if params.overprint && params.painted_channels != 0 {
+                    return true;
+                }
+            }
             DisplayElement::Group { elements, .. } => {
                 if has_overprint_elements(elements) {
                     return true;
@@ -3734,6 +3779,401 @@ fn update_cmyk_buffer_for_fill(
                 cmyk_buf[ci + 3] = src_k as f32;
             }
         }
+    }
+}
+
+/// Render an overprint image: for each image pixel that maps to a device pixel,
+/// do CMYK channel merge against the cmyk_buf backdrop.
+///
+/// Supports both image masks (1-bit coverage, single fill color) and regular
+/// CMYK images (per-pixel CMYK values from sample data).
+#[allow(clippy::too_many_arguments)]
+fn render_overprint_image(
+    pixmap: &mut Pixmap,
+    cmyk_buf: &mut [f32],
+    band_state: &mut BandState,
+    sample_data: &[u8],
+    params: &ImageParams,
+    x_off: f32,
+    y_off: f32,
+    band_w: u32,
+    band_h: u32,
+    icc: Option<&IccCache>,
+) {
+    let iw = params.width as usize;
+    let ih = params.height as usize;
+    let Some(image_inv) = params.image_matrix.invert() else {
+        return;
+    };
+    let combined = params.ctm.concat(&image_inv);
+    let Some(inv_combined) = combined.invert() else {
+        return;
+    };
+
+    let px_data = pixmap.data_mut();
+    let stride = band_w as usize;
+
+    // Clip coverage
+    let clip_data: Option<&[u8]> = match &band_state.clip_region {
+        Some(ClipRegion::Mask(m)) => Some(m.data()),
+        _ => None,
+    };
+    let clip_rect = match &band_state.clip_region {
+        Some(ClipRegion::Rect(r)) => Some(*r),
+        _ => None,
+    };
+
+    // For image masks: single fill color for all painted pixels
+    let mask_info = if let ImageColorSpace::Mask { color, polarity } = &params.color_space {
+        let (src_c, src_m, src_y, src_k) = color.native_cmyk.unwrap_or_else(|| {
+            let r = color.r;
+            let g = color.g;
+            let b = color.b;
+            (1.0 - r, 1.0 - g, 1.0 - b, 0.0)
+        });
+        Some((src_c, src_m, src_y, src_k, *polarity, iw.div_ceil(8)))
+    } else {
+        None
+    };
+
+    for by in 0..band_h as usize {
+        for bx in 0..band_w as usize {
+            // Check clip
+            if let Some(ref r) = clip_rect {
+                if (by as u32) < r.y0
+                    || (by as u32) >= r.y1
+                    || (bx as u32) < r.x0
+                    || (bx as u32) >= r.x1
+                {
+                    continue;
+                }
+            }
+            if let Some(clip) = clip_data {
+                let ci_clip = by * stride + bx;
+                if clip[ci_clip] == 0 {
+                    // Dilate clip by 1 pixel (8-connected): include edge pixels
+                    // adjacent to the clip boundary. Covers anti-aliased edges
+                    // from path fills that extend beyond the binary clip mask.
+                    let bh = band_h as usize;
+                    let has_neighbor = (bx > 0 && clip[ci_clip - 1] != 0)
+                        || (bx + 1 < stride && clip[ci_clip + 1] != 0)
+                        || (by > 0 && clip[ci_clip - stride] != 0)
+                        || (by + 1 < bh && clip[ci_clip + stride] != 0)
+                        || (bx > 0 && by > 0 && clip[ci_clip - stride - 1] != 0)
+                        || (bx + 1 < stride && by > 0 && clip[ci_clip - stride + 1] != 0)
+                        || (bx > 0 && by + 1 < bh && clip[ci_clip + stride - 1] != 0)
+                        || (bx + 1 < stride && by + 1 < bh && clip[ci_clip + stride + 1] != 0);
+                    if !has_neighbor {
+                        continue;
+                    }
+                }
+            }
+
+            // Map device pixel to image space
+            let dx = bx as f64 + x_off as f64 + 0.5;
+            let dy = by as f64 + y_off as f64 + 0.5;
+            let ix = inv_combined.a * dx + inv_combined.c * dy + inv_combined.tx;
+            let iy = inv_combined.b * dx + inv_combined.d * dy + inv_combined.ty;
+
+            let col = ix.floor() as i64;
+            let row = iy.floor() as i64;
+            if col < 0 || col >= iw as i64 || row < 0 || row >= ih as i64 {
+                continue;
+            }
+            let col = col as usize;
+            let row = row as usize;
+
+            // Get source CMYK for this pixel
+            let (src_c, src_m, src_y, src_k) =
+                if let Some((mc, mm, my, mk, polarity, bytes_per_row)) = mask_info {
+                    // Image mask: check bit, use fill color
+                    let byte_idx = row * bytes_per_row + col / 8;
+                    let bit_offset = 7 - (col % 8);
+                    let bit = if byte_idx < sample_data.len() {
+                        (sample_data[byte_idx] >> bit_offset) & 1
+                    } else {
+                        0
+                    };
+                    let paint = if polarity { bit == 1 } else { bit == 0 };
+                    if !paint {
+                        continue;
+                    }
+                    (mc, mm, my, mk)
+                } else if let Some(cmyk) =
+                    sample_pixel_cmyk(sample_data, &params.color_space, iw, row, col)
+                {
+                    cmyk
+                } else {
+                    continue;
+                };
+
+            // Determine effective painted channels (per-pixel for OPM 1).
+            // Per PDF spec, OPM 1 per-channel exclusion only applies when the color
+            // space IS DeviceCMYK (or Separation/DeviceN). For Indexed/DeviceCMYK,
+            // the "current color space" is Indexed, so OPM 1 has no effect — all
+            // channels are always replaced. Image masks use the fill color's space,
+            // which IS DeviceCMYK directly, so OPM 1 applies to them.
+            let mut channels = params.painted_channels;
+            let is_direct_cmyk = matches!(
+                &params.color_space,
+                ImageColorSpace::DeviceCMYK
+                    | ImageColorSpace::ICCBased { n: 4, .. }
+                    | ImageColorSpace::Mask { .. }
+            );
+            if params.overprint_mode == 1
+                && channels == stet_core::device::CMYK_ALL
+                && is_direct_cmyk
+            {
+                channels = 0;
+                if src_c != 0.0 {
+                    channels |= stet_core::device::CMYK_C;
+                }
+                if src_m != 0.0 {
+                    channels |= stet_core::device::CMYK_M;
+                }
+                if src_y != 0.0 {
+                    channels |= stet_core::device::CMYK_Y;
+                }
+                if src_k != 0.0 {
+                    channels |= stet_core::device::CMYK_K;
+                }
+            }
+
+            // CMYK merge at this pixel
+            let mi = by * stride + bx;
+            let ci = mi * 4;
+            let pi = mi * 4;
+
+            let (cur_c, cur_m, cur_y, cur_k) = {
+                let c = cmyk_buf[ci] as f64;
+                let m = cmyk_buf[ci + 1] as f64;
+                let y_val = cmyk_buf[ci + 2] as f64;
+                let k = cmyk_buf[ci + 3] as f64;
+                if c == 0.0 && m == 0.0 && y_val == 0.0 && k == 0.0 && px_data[pi + 3] > 0 {
+                    let r = px_data[pi] as f64 / 255.0;
+                    let g = px_data[pi + 1] as f64 / 255.0;
+                    let b = px_data[pi + 2] as f64 / 255.0;
+                    let rk = 1.0 - r.max(g).max(b);
+                    if rk >= 1.0 {
+                        (0.0, 0.0, 0.0, 1.0)
+                    } else {
+                        let inv = 1.0 / (1.0 - rk);
+                        (
+                            (1.0 - r - rk) * inv,
+                            (1.0 - g - rk) * inv,
+                            (1.0 - b - rk) * inv,
+                            rk,
+                        )
+                    }
+                } else {
+                    (c, m, y_val, k)
+                }
+            };
+
+            let new_c = if channels & stet_core::device::CMYK_C != 0 {
+                src_c
+            } else {
+                cur_c
+            };
+            let new_m = if channels & stet_core::device::CMYK_M != 0 {
+                src_m
+            } else {
+                cur_m
+            };
+            let new_y = if channels & stet_core::device::CMYK_Y != 0 {
+                src_y
+            } else {
+                cur_y
+            };
+            let new_k = if channels & stet_core::device::CMYK_K != 0 {
+                src_k
+            } else {
+                cur_k
+            };
+
+            cmyk_buf[ci] = new_c as f32;
+            cmyk_buf[ci + 1] = new_m as f32;
+            cmyk_buf[ci + 2] = new_y as f32;
+            cmyk_buf[ci + 3] = new_k as f32;
+
+            let (r, g, b) = if let Some(icc_cache) = icc {
+                icc_cache
+                    .convert_cmyk_readonly(new_c, new_m, new_y, new_k)
+                    .unwrap_or_else(|| cmyk_to_rgb_plrm(new_c, new_m, new_y, new_k))
+            } else {
+                cmyk_to_rgb_plrm(new_c, new_m, new_y, new_k)
+            };
+
+            px_data[pi] = (r * 255.0).round() as u8;
+            px_data[pi + 1] = (g * 255.0).round() as u8;
+            px_data[pi + 2] = (b * 255.0).round() as u8;
+            px_data[pi + 3] = 255;
+        }
+    }
+}
+
+/// Update CMYK buffer for a non-overprint image (track backdrop for future overprints).
+/// Handles both image masks (single fill color) and CMYK images (per-pixel values).
+#[allow(clippy::too_many_arguments)]
+fn update_cmyk_buffer_for_image(
+    cmyk_buf: &mut [f32],
+    sample_data: &[u8],
+    params: &ImageParams,
+    x_off: f32,
+    y_off: f32,
+    band_w: u32,
+    band_h: u32,
+    clip_region: &Option<ClipRegion>,
+) {
+    let iw = params.width as usize;
+    let ih = params.height as usize;
+    let Some(image_inv) = params.image_matrix.invert() else {
+        return;
+    };
+    let combined = params.ctm.concat(&image_inv);
+    let Some(inv_combined) = combined.invert() else {
+        return;
+    };
+    let stride = band_w as usize;
+
+    // For image masks: single fill color
+    let mask_info = if let ImageColorSpace::Mask { color, polarity } = &params.color_space {
+        let Some((c, m, y, k)) = color.native_cmyk else {
+            return;
+        };
+        Some((c as f32, m as f32, y as f32, k as f32, *polarity, iw.div_ceil(8)))
+    } else if !is_cmyk_color_space(&params.color_space) {
+        // Non-CMYK, non-mask: nothing to track
+        return;
+    } else {
+        None
+    };
+
+    let clip_data: Option<&[u8]> = match clip_region {
+        Some(ClipRegion::Mask(m)) => Some(m.data()),
+        _ => None,
+    };
+    let clip_rect = match clip_region {
+        Some(ClipRegion::Rect(r)) => Some(*r),
+        _ => None,
+    };
+
+    for by in 0..band_h as usize {
+        for bx in 0..band_w as usize {
+            if let Some(ref r) = clip_rect {
+                if (by as u32) < r.y0
+                    || (by as u32) >= r.y1
+                    || (bx as u32) < r.x0
+                    || (bx as u32) >= r.x1
+                {
+                    continue;
+                }
+            }
+            if let Some(clip) = clip_data {
+                if clip[by * stride + bx] == 0 {
+                    continue;
+                }
+            }
+
+            let dx = bx as f64 + x_off as f64 + 0.5;
+            let dy = by as f64 + y_off as f64 + 0.5;
+            let ix = inv_combined.a * dx + inv_combined.c * dy + inv_combined.tx;
+            let iy = inv_combined.b * dx + inv_combined.d * dy + inv_combined.ty;
+
+            let col = ix.floor() as i64;
+            let row = iy.floor() as i64;
+            if col < 0 || col >= iw as i64 || row < 0 || row >= ih as i64 {
+                continue;
+            }
+            let col = col as usize;
+            let row = row as usize;
+
+            let ci = (by * stride + bx) * 4;
+            if let Some((sc, sm, sy, sk, polarity, bytes_per_row)) = mask_info {
+                // Image mask: check bit, write fill color
+                let byte_idx = row * bytes_per_row + col / 8;
+                let bit_offset = 7 - (col % 8);
+                let bit = if byte_idx < sample_data.len() {
+                    (sample_data[byte_idx] >> bit_offset) & 1
+                } else {
+                    0
+                };
+                let paint = if polarity { bit == 1 } else { bit == 0 };
+                if paint {
+                    cmyk_buf[ci] = sc;
+                    cmyk_buf[ci + 1] = sm;
+                    cmyk_buf[ci + 2] = sy;
+                    cmyk_buf[ci + 3] = sk;
+                }
+            } else if let Some((sc, sm, sy, sk)) =
+                sample_pixel_cmyk(sample_data, &params.color_space, iw, row, col)
+            {
+                cmyk_buf[ci] = sc as f32;
+                cmyk_buf[ci + 1] = sm as f32;
+                cmyk_buf[ci + 2] = sy as f32;
+                cmyk_buf[ci + 3] = sk as f32;
+            }
+        }
+    }
+}
+
+/// Check if an image color space is CMYK-based (DeviceCMYK, ICCBased 4-component, or Indexed over CMYK).
+fn is_cmyk_color_space(cs: &ImageColorSpace) -> bool {
+    match cs {
+        ImageColorSpace::DeviceCMYK => true,
+        ImageColorSpace::ICCBased { n: 4, .. } => true,
+        ImageColorSpace::Indexed { base, .. } => is_cmyk_color_space(base),
+        _ => false,
+    }
+}
+
+/// Sample a single pixel's CMYK values from image data, handling DeviceCMYK,
+/// ICCBased(4), and Indexed color spaces. Returns None for non-CMYK images.
+fn sample_pixel_cmyk(
+    sample_data: &[u8],
+    cs: &ImageColorSpace,
+    iw: usize,
+    row: usize,
+    col: usize,
+) -> Option<(f64, f64, f64, f64)> {
+    match cs {
+        ImageColorSpace::DeviceCMYK | ImageColorSpace::ICCBased { n: 4, .. } => {
+            let si = (row * iw + col) * 4;
+            if si + 3 < sample_data.len() {
+                Some((
+                    sample_data[si] as f64 / 255.0,
+                    sample_data[si + 1] as f64 / 255.0,
+                    sample_data[si + 2] as f64 / 255.0,
+                    sample_data[si + 3] as f64 / 255.0,
+                ))
+            } else {
+                None
+            }
+        }
+        ImageColorSpace::Indexed { base, hival, lookup } => {
+            let pi = row * iw + col;
+            if pi >= sample_data.len() {
+                return None;
+            }
+            let idx = sample_data[pi] as usize;
+            let idx = idx.min(*hival as usize);
+            let base_ncomp = base.num_components() as usize;
+            let li = idx * base_ncomp;
+            if !is_cmyk_color_space(base) || base_ncomp != 4 {
+                return None;
+            }
+            if li + 3 < lookup.len() {
+                Some((
+                    lookup[li] as f64 / 255.0,
+                    lookup[li + 1] as f64 / 255.0,
+                    lookup[li + 2] as f64 / 255.0,
+                    lookup[li + 3] as f64 / 255.0,
+                ))
+            } else {
+                None
+            }
+        }
+        _ => None,
     }
 }
 

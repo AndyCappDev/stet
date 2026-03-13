@@ -1446,6 +1446,9 @@ impl<'a> ContentInterpreter<'a> {
                 mask_color,
                 alpha: self.gstate.fill_alpha,
                 blend_mode: self.gstate.blend_mode,
+                overprint: self.gstate.overprint,
+                overprint_mode: self.gstate.overprint_mode,
+                painted_channels: self.gstate.fill_painted_channels,
             },
         });
         Ok(())
@@ -1858,6 +1861,9 @@ impl<'a> ContentInterpreter<'a> {
                 mask_color: None,
                 alpha: self.gstate.fill_alpha,
                 blend_mode: self.gstate.blend_mode,
+                overprint: self.gstate.overprint,
+                overprint_mode: self.gstate.overprint_mode,
+                painted_channels: self.gstate.fill_painted_channels,
             },
         });
 
