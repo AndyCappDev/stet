@@ -126,6 +126,9 @@ pub struct FillParams {
     /// Which CMYK channels this fill paints (bitmask of CMYK_C/M/Y/K).
     /// Only meaningful when `overprint` is true. 0 = no CMYK channel info (e.g. RGB fill).
     pub painted_channels: u8,
+    /// True when color space is DeviceCMYK or ICCBased(4). OPM 1 zero-filtering
+    /// only applies to these direct CMYK spaces, not to DeviceN/Separation.
+    pub is_device_cmyk: bool,
     /// Separation/DeviceN color for PDF output. None for device color spaces.
     pub spot_color: Option<SpotColor>,
     /// Rendering intent (0=RelativeColorimetric, 1=Absolute, 2=Perceptual, 3=Saturation).

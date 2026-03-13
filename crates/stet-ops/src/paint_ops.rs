@@ -203,6 +203,7 @@ fn push_fill_element(ctx: &mut Context, path: PsPath, fill_rule: FillRule) {
         overprint: ctx.gstate.overprint,
         overprint_mode: 0,
         painted_channels: 0,
+        is_device_cmyk: false,
         spot_color: capture_spot_color(ctx),
         rendering_intent: ctx.gstate.rendering_intent,
         transfer: capture_transfer_state(ctx),

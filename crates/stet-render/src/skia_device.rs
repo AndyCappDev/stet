@@ -1936,6 +1936,7 @@ fn render_element(
                             overprint: params.overprint,
                             overprint_mode: params.overprint_mode,
                             painted_channels: params.painted_channels,
+                            is_device_cmyk: false,
                             spot_color: params.spot_color.clone(),
                             rendering_intent: params.rendering_intent,
                             transfer: params.transfer.clone(),
@@ -3538,7 +3539,11 @@ fn render_overprint_fill(
     });
 
     let mut channels = params.painted_channels;
-    if params.overprint_mode == 1 && channels == stet_core::device::CMYK_ALL {
+    // OPM 1 per-pixel zero filtering only applies to DeviceCMYK, not DeviceN/Separation
+    if params.overprint_mode == 1
+        && channels == stet_core::device::CMYK_ALL
+        && params.is_device_cmyk
+    {
         channels = 0;
         if src_c != 0.0 { channels |= stet_core::device::CMYK_C; }
         if src_m != 0.0 { channels |= stet_core::device::CMYK_M; }
@@ -6100,6 +6105,7 @@ mod tests {
             overprint: false,
             overprint_mode: 0,
             painted_channels: 0,
+            is_device_cmyk: false,
             spot_color: None,
             rendering_intent: 0,
             transfer: TransferState::default(),
@@ -6186,6 +6192,7 @@ mod tests {
             overprint: false,
             overprint_mode: 0,
             painted_channels: 0,
+            is_device_cmyk: false,
             spot_color: None,
             rendering_intent: 0,
             transfer: TransferState::default(),
@@ -6224,6 +6231,7 @@ mod tests {
             overprint: false,
             overprint_mode: 0,
             painted_channels: 0,
+            is_device_cmyk: false,
             spot_color: None,
             rendering_intent: 0,
             transfer: TransferState::default(),
@@ -6271,6 +6279,7 @@ mod tests {
             overprint: false,
             overprint_mode: 0,
             painted_channels: 0,
+            is_device_cmyk: false,
             spot_color: None,
             rendering_intent: 0,
             transfer: TransferState::default(),

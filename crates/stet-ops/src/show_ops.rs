@@ -4471,6 +4471,7 @@ fn push_glyph_element(
             overprint: ctx.gstate.overprint,
             overprint_mode: 0,
             painted_channels: 0,
+            is_device_cmyk: false,
             spot_color: spot,
             rendering_intent: ctx.gstate.rendering_intent,
             transfer,
