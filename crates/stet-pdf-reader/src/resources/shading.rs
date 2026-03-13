@@ -5,7 +5,8 @@
 //! Shading (sh operator) → DisplayElement conversion.
 
 use crate::content::color_space::{
-    components_to_device_color_icc, resolve_color_space_obj, ResolvedColorSpace,
+    components_to_device_color_icc, painted_channels_for_cs, resolve_color_space_obj,
+    ResolvedColorSpace,
 };
 use crate::content::graphics_state::PdfGraphicsState;
 use crate::error::PdfError;
@@ -205,6 +206,8 @@ fn handle_axial(
             ctm: Matrix::identity(),
             bbox: device_bbox,
             color_space: cs,
+            overprint: gstate.overprint,
+            painted_channels: painted_channels_for_cs(resolved_cs),
         },
     });
     Ok(())
@@ -251,6 +254,8 @@ fn handle_radial(
             ctm: gstate.ctm,
             bbox,
             color_space: cs,
+            overprint: gstate.overprint,
+            painted_channels: painted_channels_for_cs(resolved_cs),
         },
     });
     Ok(())
@@ -318,6 +323,8 @@ fn handle_mesh(
             ctm: Matrix::identity(),
             bbox: device_bbox,
             color_space: cs,
+            overprint: gstate.overprint,
+            painted_channels: painted_channels_for_cs(resolved_cs),
         },
     });
     Ok(())
@@ -378,6 +385,8 @@ fn handle_patches(
             ctm: Matrix::identity(),
             bbox: device_bbox,
             color_space: cs,
+            overprint: gstate.overprint,
+            painted_channels: painted_channels_for_cs(resolved_cs),
         },
     });
     Ok(())
@@ -414,16 +423,44 @@ fn sample_function_to_stops_icc(
     resolved_cs: &ResolvedColorSpace,
     icc_cache: &mut IccCache,
 ) -> Vec<ColorStop> {
+    // For Separation/DeviceN with DeviceCMYK alternate, extract the tint function
+    // so we can store tint-transformed CMYK values in raw_components (needed for
+    // overprint CMYK buffer tracking).
+    let cmyk_tint_fn = match resolved_cs {
+        ResolvedColorSpace::Separation { alt, tint_fn, .. }
+        | ResolvedColorSpace::DeviceN { alt, tint_fn, .. }
+            if matches!(**alt, ResolvedColorSpace::DeviceCMYK) =>
+        {
+            tint_fn.as_ref()
+        }
+        _ => None,
+    };
+
     let mut stops = Vec::with_capacity(n_samples);
     for i in 0..n_samples {
         let t = i as f64 / (n_samples - 1) as f64;
         let components = function.evaluate(&[t]);
         let color =
             components_to_device_color_icc(resolved_cs, &components, Some(icc_cache));
+
+        // For DeviceN/Separation with CMYK alternate, store the tint-transformed
+        // 4-component CMYK values so the renderer can populate the CMYK tracking buffer.
+        let raw_components = if let Some(tint) = cmyk_tint_fn {
+            let cmyk = tint.evaluate(&components);
+            // Ensure we have exactly 4 CMYK components
+            if cmyk.len() >= 4 {
+                cmyk[..4].to_vec()
+            } else {
+                components
+            }
+        } else {
+            components
+        };
+
         stops.push(ColorStop {
             position: t,
             color,
-            raw_components: components,
+            raw_components,
         });
     }
     stops
@@ -501,6 +538,12 @@ fn resolved_cs_to_shading_cs(cs: &ResolvedColorSpace) -> ShadingColorSpace {
             4 => ShadingColorSpace::DeviceCMYK,
             _ => ShadingColorSpace::DeviceRGB,
         },
+        // Separation/DeviceN with DeviceCMYK alternate: treat as CMYK for overprint
+        ResolvedColorSpace::Separation { alt, .. } | ResolvedColorSpace::DeviceN { alt, .. }
+            if matches!(**alt, ResolvedColorSpace::DeviceCMYK) =>
+        {
+            ShadingColorSpace::DeviceCMYK
+        }
         _ => ShadingColorSpace::DeviceRGB,
     }
 }

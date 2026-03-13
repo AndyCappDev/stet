@@ -16,8 +16,8 @@ use tiny_skia::{
 
 use stet_core::device::{
     AxialShadingParams, ClipParams, FillParams, ImageColorSpace, ImageParams, MeshShadingParams,
-    OutputDevice, PageSinkFactory, PatchShadingParams, RadialShadingParams, StrokeParams,
-    TintLookupTable,
+    OutputDevice, PageSinkFactory, PatchShadingParams, RadialShadingParams, ShadingColorSpace,
+    ShadingVertex, StrokeParams, TintLookupTable,
 };
 use stet_core::graphics_state::{
     DeviceColor, FillRule, LineCap, LineJoin, Matrix, PathSegment, PsPath,
@@ -945,6 +945,7 @@ fn composite_onto_white(data: &mut [u8]) {
         pixel[3] = 255;
     }
 }
+
 
 /// Extract the contribution of a non-isolated transparency group and composite
 /// it onto the parent using the group's blend mode and alpha.
@@ -2129,7 +2130,8 @@ fn render_element(
             else {
                 return;
             };
-            render_axial_shading(pixmap, params, ctx.vp_x, ctx.vp_y, ctx.scale_x, ctx.scale_y, mask_ref, ctx.no_aa);
+            render_axial_shading(pixmap, params, ctx.vp_x, ctx.vp_y, ctx.scale_x, ctx.scale_y, mask_ref, ctx.no_aa,
+                band_state.cmyk_buffer.as_deref_mut(), ctx.icc);
         }
         DisplayElement::RadialShading { params } => {
             let mut temp_mask = None;
@@ -2138,7 +2140,8 @@ fn render_element(
             else {
                 return;
             };
-            render_radial_shading(pixmap, params, ctx.vp_x, ctx.vp_y, ctx.scale_x, ctx.scale_y, mask_ref, ctx.no_aa);
+            render_radial_shading(pixmap, params, ctx.vp_x, ctx.vp_y, ctx.scale_x, ctx.scale_y, mask_ref, ctx.no_aa,
+                band_state.cmyk_buffer.as_deref_mut(), ctx.icc);
         }
         DisplayElement::MeshShading { params } => {
             let mut temp_mask = None;
@@ -2147,7 +2150,8 @@ fn render_element(
             else {
                 return;
             };
-            render_mesh_shading(pixmap, params, ctx.vp_x, ctx.vp_y, ctx.scale_x, ctx.scale_y, mask_ref);
+            render_mesh_shading(pixmap, params, ctx.vp_x, ctx.vp_y, ctx.scale_x, ctx.scale_y, mask_ref,
+                band_state.cmyk_buffer.as_deref_mut(), ctx.icc);
         }
         DisplayElement::PatchShading { params } => {
             let mut temp_mask = None;
@@ -2156,7 +2160,8 @@ fn render_element(
             else {
                 return;
             };
-            render_patch_shading(pixmap, params, ctx.vp_x, ctx.vp_y, ctx.scale_x, ctx.scale_y, mask_ref);
+            render_patch_shading(pixmap, params, ctx.vp_x, ctx.vp_y, ctx.scale_x, ctx.scale_y, mask_ref,
+                band_state.cmyk_buffer.as_deref_mut(), ctx.icc);
         }
         DisplayElement::PatternFill { params } => {
             render_pattern_fill(pixmap, band_state, params, ctx);
@@ -3266,7 +3271,7 @@ impl OutputDevice for SkiaDevice {
         let Some(mask_ref) = resolve_clip_mask(&self.clip_region, &mut temp_mask, w, h) else {
             return;
         };
-        render_axial_shading(&mut self.pixmap, params, 0.0, 0.0, 1.0, 1.0, mask_ref, self.no_aa);
+        render_axial_shading(&mut self.pixmap, params, 0.0, 0.0, 1.0, 1.0, mask_ref, self.no_aa, None, None);
     }
 
     fn paint_radial_shading(&mut self, params: &RadialShadingParams) {
@@ -3276,7 +3281,7 @@ impl OutputDevice for SkiaDevice {
         let Some(mask_ref) = resolve_clip_mask(&self.clip_region, &mut temp_mask, w, h) else {
             return;
         };
-        render_radial_shading(&mut self.pixmap, params, 0.0, 0.0, 1.0, 1.0, mask_ref, self.no_aa);
+        render_radial_shading(&mut self.pixmap, params, 0.0, 0.0, 1.0, 1.0, mask_ref, self.no_aa, None, None);
     }
 
     fn paint_mesh_shading(&mut self, params: &MeshShadingParams) {
@@ -3286,7 +3291,7 @@ impl OutputDevice for SkiaDevice {
         let Some(mask_ref) = resolve_clip_mask(&self.clip_region, &mut temp_mask, w, h) else {
             return;
         };
-        render_mesh_shading(&mut self.pixmap, params, 0.0, 0.0, 1.0, 1.0, mask_ref);
+        render_mesh_shading(&mut self.pixmap, params, 0.0, 0.0, 1.0, 1.0, mask_ref, None, None);
     }
 
     fn paint_patch_shading(&mut self, params: &PatchShadingParams) {
@@ -3296,7 +3301,7 @@ impl OutputDevice for SkiaDevice {
         let Some(mask_ref) = resolve_clip_mask(&self.clip_region, &mut temp_mask, w, h) else {
             return;
         };
-        render_patch_shading(&mut self.pixmap, params, 0.0, 0.0, 1.0, 1.0, mask_ref);
+        render_patch_shading(&mut self.pixmap, params, 0.0, 0.0, 1.0, 1.0, mask_ref, None, None);
     }
 
     fn paint_pattern_fill(&mut self, params: &stet_core::device::PatternFillParams) {
@@ -3433,6 +3438,26 @@ fn has_overprint_elements(list: &DisplayList) -> bool {
                 }
             }
             DisplayElement::Image { params, .. } => {
+                if params.overprint && params.painted_channels != 0 {
+                    return true;
+                }
+            }
+            DisplayElement::AxialShading { params } => {
+                if params.overprint && params.painted_channels != 0 {
+                    return true;
+                }
+            }
+            DisplayElement::RadialShading { params } => {
+                if params.overprint && params.painted_channels != 0 {
+                    return true;
+                }
+            }
+            DisplayElement::MeshShading { params } => {
+                if params.overprint && params.painted_channels != 0 {
+                    return true;
+                }
+            }
+            DisplayElement::PatchShading { params } => {
                 if params.overprint && params.painted_channels != 0 {
                     return true;
                 }
@@ -5069,6 +5094,7 @@ fn copy_backdrop_crop(
 
 
 /// Render an axial (linear) gradient shading.
+#[allow(clippy::too_many_arguments)]
 fn render_axial_shading(
     pixmap: &mut Pixmap,
     params: &AxialShadingParams,
@@ -5078,6 +5104,8 @@ fn render_axial_shading(
     scale_y: f32,
     clip_mask: Option<&Mask>,
     no_aa: bool,
+    mut cmyk_buf: Option<&mut [f32]>,
+    icc: Option<&IccCache>,
 ) {
     let pw = pixmap.width();
     let ph = pixmap.height();
@@ -5176,9 +5204,124 @@ fn render_axial_shading(
     let rect = tiny_skia::Rect::from_ltrb(rx_min, ry_min, rx_max, ry_max)
         .unwrap_or(tiny_skia::Rect::from_xywh(0.0, 0.0, 1.0, 1.0).unwrap());
     pixmap.fill_rect(rect, &paint, Transform::identity(), clip_mask);
+
+    // Update CMYK tracking buffer for axial shading
+    if let Some(buf) = cmyk_buf.as_deref_mut() {
+        let pw = pixmap.width();
+        let inv_sx = 1.0 / scale_x as f64;
+        let inv_sy = 1.0 / scale_y as f64;
+        let axis_x = params.x1 - params.x0;
+        let axis_y = params.y1 - params.y0;
+        let axis_len_sq = axis_x * axis_x + axis_y * axis_y;
+        let Some(inv_ctm) = params.ctm.invert() else {
+            return;
+        };
+
+        let iy_min = ry_min.floor() as u32;
+        let iy_max = ry_max.ceil().min(pixmap.height() as f32) as u32;
+        let ix_min = rx_min.floor() as u32;
+        let ix_max = rx_max.ceil().min(pw as f32) as u32;
+
+        for py in iy_min..iy_max {
+            let dev_y = py as f64 * inv_sy + vp_y as f64;
+            for px in ix_min..ix_max {
+                let dev_x = px as f64 * inv_sx + vp_x as f64;
+                let (ux, uy) = inv_ctm.transform_point(dev_x, dev_y);
+                let t = if axis_len_sq > 1e-10 {
+                    ((ux - params.x0) * axis_x + (uy - params.y0) * axis_y) / axis_len_sq
+                } else {
+                    0.0
+                };
+                if t < 0.0 && !params.extend_start {
+                    continue;
+                }
+                if t > 1.0 && !params.extend_end {
+                    continue;
+                }
+                let clamped = t.clamp(0.0, 1.0);
+
+                if let Some(mask) = clip_mask {
+                    let mi = py as usize * pw as usize + px as usize;
+                    if mask.data()[mi] == 0 { continue; }
+                }
+
+                let color = interpolate_color_stops(&params.color_stops, clamped);
+                let cmyk = interpolate_cmyk_from_stops(
+                    &params.color_stops,
+                    &params.color_space,
+                    clamped,
+                    &color,
+                );
+                let ci = (py as usize * pw as usize + px as usize) * 4;
+                if ci + 3 < buf.len() {
+                    if params.overprint
+                        && params.painted_channels != stet_core::device::CMYK_ALL
+                    {
+                        if params.painted_channels & stet_core::device::CMYK_C != 0 {
+                            buf[ci] = cmyk.0 as f32;
+                        }
+                        if params.painted_channels & stet_core::device::CMYK_M != 0 {
+                            buf[ci + 1] = cmyk.1 as f32;
+                        }
+                        if params.painted_channels & stet_core::device::CMYK_Y != 0 {
+                            buf[ci + 2] = cmyk.2 as f32;
+                        }
+                        if params.painted_channels & stet_core::device::CMYK_K != 0 {
+                            buf[ci + 3] = cmyk.3 as f32;
+                        }
+                        // Recomposite RGB from merged CMYK via ICC
+                        let c = buf[ci] as f64;
+                        let m = buf[ci + 1] as f64;
+                        let y = buf[ci + 2] as f64;
+                        let k = buf[ci + 3] as f64;
+                        let (rv, gv, bv) = if let Some(icc_cache) = icc {
+                            icc_cache
+                                .convert_cmyk_readonly(c, m, y, k)
+                                .unwrap_or_else(|| cmyk_to_rgb_plrm(c, m, y, k))
+                        } else {
+                            cmyk_to_rgb_plrm(c, m, y, k)
+                        };
+                        let stride = pixmap.data().len() / pixmap.height() as usize;
+                        let offset = py as usize * stride + px as usize * 4;
+                        let data = pixmap.data_mut();
+                        data[offset] = (rv * 255.0).round().clamp(0.0, 255.0) as u8;
+                        data[offset + 1] = (gv * 255.0).round().clamp(0.0, 255.0) as u8;
+                        data[offset + 2] = (bv * 255.0).round().clamp(0.0, 255.0) as u8;
+                    } else {
+                        buf[ci] = cmyk.0 as f32;
+                        buf[ci + 1] = cmyk.1 as f32;
+                        buf[ci + 2] = cmyk.2 as f32;
+                        buf[ci + 3] = cmyk.3 as f32;
+                        // Recomposite RGB from CMYK via ICC
+                        if let Some(icc_cache) = icc {
+                            let c = buf[ci] as f64;
+                            let m = buf[ci + 1] as f64;
+                            let y = buf[ci + 2] as f64;
+                            let k = buf[ci + 3] as f64;
+                            if let Some((rv, gv, bv)) =
+                                icc_cache.convert_cmyk_readonly(c, m, y, k)
+                            {
+                                let stride =
+                                    pixmap.data().len() / pixmap.height() as usize;
+                                let offset = py as usize * stride + px as usize * 4;
+                                let data = pixmap.data_mut();
+                                data[offset] =
+                                    (rv * 255.0).round().clamp(0.0, 255.0) as u8;
+                                data[offset + 1] =
+                                    (gv * 255.0).round().clamp(0.0, 255.0) as u8;
+                                data[offset + 2] =
+                                    (bv * 255.0).round().clamp(0.0, 255.0) as u8;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Render a radial gradient shading.
+#[allow(clippy::too_many_arguments)]
 fn render_radial_shading(
     pixmap: &mut Pixmap,
     params: &RadialShadingParams,
@@ -5188,6 +5331,8 @@ fn render_radial_shading(
     scale_y: f32,
     clip_mask: Option<&Mask>,
     _no_aa: bool,
+    mut cmyk_buf: Option<&mut [f32]>,
+    icc: Option<&IccCache>,
 ) {
     let pw = pixmap.width();
     let ph = pixmap.height();
@@ -5240,9 +5385,46 @@ fn render_radial_shading(
                 let clamped = t.clamp(0.0, 1.0);
                 let color = interpolate_color_stops(&params.color_stops, clamped);
 
-                if let Some(mask) = clip_mask {
-                    let mask_val = mask.data()[py as usize * pw as usize + px as usize];
-                    if mask_val == 0 { continue; }
+                let clipped = clip_mask.map_or(false, |mask| {
+                    mask.data()[py as usize * pw as usize + px as usize] == 0
+                });
+
+                if clipped {
+                    continue;
+                }
+
+                // Write CMYK buffer at non-clipped pixels
+                if let Some(ref mut buf) = cmyk_buf {
+                    let ci = (py as usize * pw as usize + px as usize) * 4;
+                    if ci + 3 < buf.len() {
+                        let cmyk = interpolate_cmyk_from_stops(
+                            &params.color_stops,
+                            &params.color_space,
+                            clamped,
+                            &color,
+                        );
+                        if params.overprint
+                            && params.painted_channels != stet_core::device::CMYK_ALL
+                        {
+                            if params.painted_channels & stet_core::device::CMYK_C != 0 {
+                                buf[ci] = cmyk.0 as f32;
+                            }
+                            if params.painted_channels & stet_core::device::CMYK_M != 0 {
+                                buf[ci + 1] = cmyk.1 as f32;
+                            }
+                            if params.painted_channels & stet_core::device::CMYK_Y != 0 {
+                                buf[ci + 2] = cmyk.2 as f32;
+                            }
+                            if params.painted_channels & stet_core::device::CMYK_K != 0 {
+                                buf[ci + 3] = cmyk.3 as f32;
+                            }
+                        } else {
+                            buf[ci] = cmyk.0 as f32;
+                            buf[ci + 1] = cmyk.1 as f32;
+                            buf[ci + 2] = cmyk.2 as f32;
+                            buf[ci + 3] = cmyk.3 as f32;
+                        }
+                    }
                 }
 
                 let offset = py as usize * stride + px as usize * 4;
@@ -5250,6 +5432,29 @@ fn render_radial_shading(
                 data[offset + 1] = (color.g * 255.0).round().clamp(0.0, 255.0) as u8;
                 data[offset + 2] = (color.b * 255.0).round().clamp(0.0, 255.0) as u8;
                 data[offset + 3] = 255;
+
+                // Recomposite RGB from CMYK buffer via ICC
+                if let Some(ref mut buf) = cmyk_buf {
+                    let ci = (py as usize * pw as usize + px as usize) * 4;
+                    if ci + 3 < buf.len() {
+                        if let Some(icc_cache) = icc {
+                            let c = buf[ci] as f64;
+                            let m = buf[ci + 1] as f64;
+                            let y = buf[ci + 2] as f64;
+                            let k = buf[ci + 3] as f64;
+                            if let Some((r, g, b)) =
+                                icc_cache.convert_cmyk_readonly(c, m, y, k)
+                            {
+                                data[offset] =
+                                    (r * 255.0).round().clamp(0.0, 255.0) as u8;
+                                data[offset + 1] =
+                                    (g * 255.0).round().clamp(0.0, 255.0) as u8;
+                                data[offset + 2] =
+                                    (b * 255.0).round().clamp(0.0, 255.0) as u8;
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -5315,6 +5520,7 @@ fn solve_radial_t(
 }
 
 /// Render a Gouraud-shaded triangle mesh.
+#[allow(clippy::too_many_arguments)]
 fn render_mesh_shading(
     pixmap: &mut Pixmap,
     params: &MeshShadingParams,
@@ -5323,6 +5529,8 @@ fn render_mesh_shading(
     scale_x: f32,
     scale_y: f32,
     clip_mask: Option<&Mask>,
+    mut cmyk_buf: Option<&mut [f32]>,
+    icc: Option<&IccCache>,
 ) {
     let pw = pixmap.width() as usize;
     let ph = pixmap.height() as usize;
@@ -5379,10 +5587,9 @@ fn render_mesh_shading(
                     continue;
                 }
 
-                if let Some(mask) = clip_mask {
-                    let mask_val = mask.data()[py * pw + px];
-                    if mask_val == 0 { continue; }
-                }
+                let clipped = clip_mask.map_or(false, |mask| {
+                    mask.data()[py * pw + px] == 0
+                });
 
                 let w0c = w0.max(0.0);
                 let w1c = w1.max(0.0);
@@ -5395,17 +5602,79 @@ fn render_mesh_shading(
                 let g = w0n * tri.v0.color.g + w1n * tri.v1.color.g + w2n * tri.v2.color.g;
                 let b = w0n * tri.v0.color.b + w1n * tri.v1.color.b + w2n * tri.v2.color.b;
 
+                // Write CMYK buffer
+                if let Some(ref mut buf) = cmyk_buf {
+                    let ci = (py * pw + px) * 4;
+                    if ci + 3 < buf.len() {
+                        let cmyk = interpolate_cmyk_from_vertices(
+                            &tri.v0, &tri.v1, &tri.v2, w0n, w1n, w2n,
+                            &params.color_space, r, g, b,
+                        );
+                        if params.overprint
+                            && params.painted_channels != stet_core::device::CMYK_ALL
+                        {
+                            if !clipped {
+                                if params.painted_channels & stet_core::device::CMYK_C != 0 {
+                                    buf[ci] = cmyk.0 as f32;
+                                }
+                                if params.painted_channels & stet_core::device::CMYK_M != 0 {
+                                    buf[ci + 1] = cmyk.1 as f32;
+                                }
+                                if params.painted_channels & stet_core::device::CMYK_Y != 0 {
+                                    buf[ci + 2] = cmyk.2 as f32;
+                                }
+                                if params.painted_channels & stet_core::device::CMYK_K != 0 {
+                                    buf[ci + 3] = cmyk.3 as f32;
+                                }
+                            }
+                        } else {
+                            buf[ci] = cmyk.0 as f32;
+                            buf[ci + 1] = cmyk.1 as f32;
+                            buf[ci + 2] = cmyk.2 as f32;
+                            buf[ci + 3] = cmyk.3 as f32;
+                        }
+                    }
+                }
+
+                if clipped {
+                    continue;
+                }
+
                 let offset = py * stride + px * 4;
                 data[offset] = (r * 255.0).round().clamp(0.0, 255.0) as u8;
                 data[offset + 1] = (g * 255.0).round().clamp(0.0, 255.0) as u8;
                 data[offset + 2] = (b * 255.0).round().clamp(0.0, 255.0) as u8;
                 data[offset + 3] = 255;
+
+                // Recomposite RGB from CMYK buffer via ICC
+                if let Some(ref mut buf) = cmyk_buf {
+                    let ci = (py * pw + px) * 4;
+                    if ci + 3 < buf.len() {
+                        if let Some(icc_cache) = icc {
+                            let c = buf[ci] as f64;
+                            let m = buf[ci + 1] as f64;
+                            let y = buf[ci + 2] as f64;
+                            let k = buf[ci + 3] as f64;
+                            if let Some((rv, gv, bv)) =
+                                icc_cache.convert_cmyk_readonly(c, m, y, k)
+                            {
+                                data[offset] =
+                                    (rv * 255.0).round().clamp(0.0, 255.0) as u8;
+                                data[offset + 1] =
+                                    (gv * 255.0).round().clamp(0.0, 255.0) as u8;
+                                data[offset + 2] =
+                                    (bv * 255.0).round().clamp(0.0, 255.0) as u8;
+                            }
+                        }
+                    }
+                }
             }
         }
     }
 }
 
 /// Render a Coons/tensor-product patch mesh by subdividing into triangles.
+#[allow(clippy::too_many_arguments)]
 fn render_patch_shading(
     pixmap: &mut Pixmap,
     params: &PatchShadingParams,
@@ -5414,6 +5683,8 @@ fn render_patch_shading(
     scale_x: f32,
     scale_y: f32,
     clip_mask: Option<&Mask>,
+    cmyk_buf: Option<&mut [f32]>,
+    icc: Option<&IccCache>,
 ) {
     let mut triangles = Vec::new();
     for patch in &params.patches {
@@ -5427,8 +5698,20 @@ fn render_patch_shading(
             ctm: params.ctm,
             bbox: params.bbox,
             color_space: params.color_space.clone(),
+            overprint: params.overprint,
+            painted_channels: params.painted_channels,
         };
-        render_mesh_shading(pixmap, &mesh_params, vp_x, vp_y, scale_x, scale_y, clip_mask);
+        render_mesh_shading(
+            pixmap,
+            &mesh_params,
+            vp_x,
+            vp_y,
+            scale_x,
+            scale_y,
+            clip_mask,
+            cmyk_buf,
+            icc,
+        );
     }
 }
 /// Subdivide a Coons/tensor patch into triangles via recursive de Casteljau.
@@ -5637,6 +5920,108 @@ fn interpolate_color_stops(stops: &[stet_core::device::ColorStop], position: f64
 
     stops.last().unwrap().color.clone()
 }
+
+/// Derive CMYK values from color stops at parameter t.
+/// Uses raw_components when the shading is in DeviceCMYK, otherwise
+/// reverse-engineers from the interpolated RGB.
+fn interpolate_cmyk_from_stops(
+    stops: &[stet_core::device::ColorStop],
+    cs: &ShadingColorSpace,
+    t: f64,
+    color: &DeviceColor,
+) -> (f64, f64, f64, f64) {
+    match cs {
+        ShadingColorSpace::DeviceCMYK => {
+            // Interpolate raw CMYK components from stops
+            if stops.len() == 1 {
+                let rc = &stops[0].raw_components;
+                if rc.len() >= 4 {
+                    return (rc[0], rc[1], rc[2], rc[3]);
+                }
+            }
+            // Find surrounding stops and interpolate
+            let mut lo = &stops[0];
+            let mut hi = stops.last().unwrap();
+            for i in 0..stops.len() - 1 {
+                if stops[i + 1].position >= t {
+                    lo = &stops[i];
+                    hi = &stops[i + 1];
+                    break;
+                }
+            }
+            let span = hi.position - lo.position;
+            let frac = if span > 1e-10 {
+                (t - lo.position) / span
+            } else {
+                0.0
+            };
+            let frac = frac.clamp(0.0, 1.0);
+            if lo.raw_components.len() >= 4 && hi.raw_components.len() >= 4 {
+                (
+                    lo.raw_components[0] + frac * (hi.raw_components[0] - lo.raw_components[0]),
+                    lo.raw_components[1] + frac * (hi.raw_components[1] - lo.raw_components[1]),
+                    lo.raw_components[2] + frac * (hi.raw_components[2] - lo.raw_components[2]),
+                    lo.raw_components[3] + frac * (hi.raw_components[3] - lo.raw_components[3]),
+                )
+            } else {
+                // Fallback: reverse from RGB
+                let r = color.r;
+                let g = color.g;
+                let b = color.b;
+                (1.0 - r, 1.0 - g, 1.0 - b, 0.0)
+            }
+        }
+        _ => {
+            // Non-CMYK color space: reverse-engineer from RGB
+            let r = color.r;
+            let g = color.g;
+            let b = color.b;
+            (1.0 - r, 1.0 - g, 1.0 - b, 0.0)
+        }
+    }
+}
+
+/// Derive CMYK values from triangle mesh vertices using barycentric weights.
+fn interpolate_cmyk_from_vertices(
+    v0: &ShadingVertex,
+    v1: &ShadingVertex,
+    v2: &ShadingVertex,
+    w0: f64,
+    w1: f64,
+    w2: f64,
+    cs: &ShadingColorSpace,
+    r: f64,
+    g: f64,
+    b: f64,
+) -> (f64, f64, f64, f64) {
+    match cs {
+        ShadingColorSpace::DeviceCMYK => {
+            if v0.raw_components.len() >= 4
+                && v1.raw_components.len() >= 4
+                && v2.raw_components.len() >= 4
+            {
+                (
+                    w0 * v0.raw_components[0]
+                        + w1 * v1.raw_components[0]
+                        + w2 * v2.raw_components[0],
+                    w0 * v0.raw_components[1]
+                        + w1 * v1.raw_components[1]
+                        + w2 * v2.raw_components[1],
+                    w0 * v0.raw_components[2]
+                        + w1 * v1.raw_components[2]
+                        + w2 * v2.raw_components[2],
+                    w0 * v0.raw_components[3]
+                        + w1 * v1.raw_components[3]
+                        + w2 * v2.raw_components[3],
+                )
+            } else {
+                (1.0 - r, 1.0 - g, 1.0 - b, 0.0)
+            }
+        }
+        _ => (1.0 - r, 1.0 - g, 1.0 - b, 0.0),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

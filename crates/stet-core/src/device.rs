@@ -459,6 +459,10 @@ pub struct AxialShadingParams {
     pub ctm: Matrix,
     pub bbox: Option<[f64; 4]>,
     pub color_space: ShadingColorSpace,
+    /// Overprint flag from graphics state.
+    pub overprint: bool,
+    /// Which CMYK channels this shading paints (bitmask of CMYK_C/M/Y/K).
+    pub painted_channels: u8,
 }
 
 /// Parameters for radial gradient shading (Type 3).
@@ -476,6 +480,10 @@ pub struct RadialShadingParams {
     pub ctm: Matrix,
     pub bbox: Option<[f64; 4]>,
     pub color_space: ShadingColorSpace,
+    /// Overprint flag from graphics state.
+    pub overprint: bool,
+    /// Which CMYK channels this shading paints (bitmask of CMYK_C/M/Y/K).
+    pub painted_channels: u8,
 }
 
 /// A vertex in a shading triangle mesh.
@@ -503,6 +511,10 @@ pub struct MeshShadingParams {
     pub ctm: Matrix,
     pub bbox: Option<[f64; 4]>,
     pub color_space: ShadingColorSpace,
+    /// Overprint flag from graphics state.
+    pub overprint: bool,
+    /// Which CMYK channels this shading paints (bitmask of CMYK_C/M/Y/K).
+    pub painted_channels: u8,
 }
 
 /// A patch in a Coons or tensor-product patch mesh.
@@ -523,6 +535,10 @@ pub struct PatchShadingParams {
     pub ctm: Matrix,
     pub bbox: Option<[f64; 4]>,
     pub color_space: ShadingColorSpace,
+    /// Overprint flag from graphics state.
+    pub overprint: bool,
+    /// Which CMYK channels this shading paints (bitmask of CMYK_C/M/Y/K).
+    pub painted_channels: u8,
 }
 
 /// Parameters for a tiled pattern fill.

@@ -177,6 +177,8 @@ fn build_type2_shading(
             ctm,
             bbox,
             color_space: shading_cs,
+            overprint: false,
+            painted_channels: 0,
         },
     });
 
@@ -236,6 +238,8 @@ fn build_type3_shading(
             ctm,
             bbox,
             color_space: shading_cs,
+            overprint: false,
+            painted_channels: 0,
         },
     });
 
@@ -426,6 +430,8 @@ fn build_type4_shading(
                 ctm,
                 bbox,
                 color_space: shading_cs,
+                overprint: false,
+                painted_channels: 0,
             },
         });
     }
@@ -472,6 +478,8 @@ fn build_type5_shading(
                 ctm,
                 bbox,
                 color_space: shading_cs,
+                overprint: false,
+                painted_channels: 0,
             },
         });
     }
@@ -518,6 +526,8 @@ fn build_type6_shading(
                 ctm,
                 bbox,
                 color_space: shading_cs,
+                overprint: false,
+                painted_channels: 0,
             },
         });
     }
@@ -562,6 +572,8 @@ fn build_type7_shading(
                 ctm,
                 bbox,
                 color_space: shading_cs,
+                overprint: false,
+                painted_channels: 0,
             },
         });
     }
