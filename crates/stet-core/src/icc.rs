@@ -8,7 +8,9 @@
 //! converts colors to sRGB. Also searches for system CMYK profiles to improve
 //! DeviceCMYK → RGB conversion beyond the naive PLRM formula.
 
-use moxcms::{ColorProfile, DataColorSpace, Layout, TransformExecutor, TransformOptions};
+use moxcms::{
+    ColorProfile, DataColorSpace, Layout, RenderingIntent, TransformExecutor, TransformOptions,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -110,7 +112,11 @@ impl IccCache {
             _ => return None,
         };
 
-        let options = TransformOptions::default();
+        let options = TransformOptions {
+            rendering_intent: RenderingIntent::RelativeColorimetric,
+            ..TransformOptions::default()
+        };
+
 
         let dst_layout_8 = Layout::Rgb;
         let dst_layout_f64 = Layout::Rgb;

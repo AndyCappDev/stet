@@ -17,6 +17,7 @@ use tiny_skia::{
 use stet_core::device::{
     AxialShadingParams, ClipParams, FillParams, ImageColorSpace, ImageParams, MeshShadingParams,
     OutputDevice, PageSinkFactory, PatchShadingParams, RadialShadingParams, StrokeParams,
+    TintLookupTable,
 };
 use stet_core::graphics_state::{
     DeviceColor, FillRule, LineCap, LineJoin, Matrix, PathSegment, PsPath,
@@ -1326,6 +1327,14 @@ fn samples_to_rgba(data: &[u8], params: &ImageParams, icc: Option<&IccCache>) ->
             ..
         } => {
             // 1 byte per pixel → lookup in tint table → convert alt space to RGB
+            // For CMYK alt space with ICC, build bulk CMYK data and convert via ICC
+            if matches!(alt_space.as_ref(), ImageColorSpace::DeviceCMYK) {
+                if let Some(rgba) =
+                    tint_separation_via_icc(data, npixels, tint_table, icc)
+                {
+                    return rgba;
+                }
+            }
             let mut rgba = vec![255u8; npixels * 4];
             let no = tint_table.num_outputs as usize;
             let mut alt_comps = vec![0.0f32; no];
@@ -1347,6 +1356,14 @@ fn samples_to_rgba(data: &[u8], params: &ImageParams, icc: Option<&IccCache>) ->
         } => {
             let ni = tint_table.num_inputs as usize;
             let no = tint_table.num_outputs as usize;
+            // For CMYK alt space with ICC, build bulk CMYK data and convert via ICC
+            if matches!(alt_space.as_ref(), ImageColorSpace::DeviceCMYK) {
+                if let Some(rgba) =
+                    tint_devicen_via_icc(data, npixels, ni, tint_table, icc)
+                {
+                    return rgba;
+                }
+            }
             let mut rgba = vec![255u8; npixels * 4];
             let mut inputs = vec![0.0f32; ni];
             let mut alt_comps = vec![0.0f32; no];
@@ -1392,6 +1409,73 @@ fn samples_to_rgba(data: &[u8], params: &ImageParams, icc: Option<&IccCache>) ->
             rgba
         }
     }
+}
+
+/// Convert Separation (1-input) tint table output through ICC CMYK profile.
+/// Builds 4-byte CMYK data from tint table, then bulk-converts via ICC 8-bit transform.
+fn tint_separation_via_icc(
+    data: &[u8],
+    npixels: usize,
+    tint_table: &TintLookupTable,
+    icc: Option<&IccCache>,
+) -> Option<Vec<u8>> {
+    let cache = icc?;
+    let cmyk_hash = cache.default_cmyk_hash()?;
+    // Build CMYK byte buffer from tint table
+    let mut cmyk_data = vec![0u8; npixels * 4];
+    let mut alt_comps = [0.0f32; 4];
+    for i in 0..npixels {
+        let tint = data.get(i).copied().unwrap_or(0) as f32 / 255.0;
+        tint_table.lookup_1d(tint, &mut alt_comps);
+        let si = i * 4;
+        cmyk_data[si] = (alt_comps[0].clamp(0.0, 1.0) * 255.0).round() as u8;
+        cmyk_data[si + 1] = (alt_comps[1].clamp(0.0, 1.0) * 255.0).round() as u8;
+        cmyk_data[si + 2] = (alt_comps[2].clamp(0.0, 1.0) * 255.0).round() as u8;
+        cmyk_data[si + 3] = (alt_comps[3].clamp(0.0, 1.0) * 255.0).round() as u8;
+    }
+    let rgb = cache.convert_image_8bit(cmyk_hash, &cmyk_data, npixels)?;
+    let mut rgba = vec![255u8; npixels * 4];
+    for i in 0..npixels {
+        rgba[i * 4] = rgb[i * 3];
+        rgba[i * 4 + 1] = rgb[i * 3 + 1];
+        rgba[i * 4 + 2] = rgb[i * 3 + 2];
+    }
+    Some(rgba)
+}
+
+/// Convert DeviceN (N-input) tint table output through ICC CMYK profile.
+fn tint_devicen_via_icc(
+    data: &[u8],
+    npixels: usize,
+    ni: usize,
+    tint_table: &TintLookupTable,
+    icc: Option<&IccCache>,
+) -> Option<Vec<u8>> {
+    let cache = icc?;
+    let cmyk_hash = cache.default_cmyk_hash()?;
+    let mut cmyk_data = vec![0u8; npixels * 4];
+    let mut inputs = vec![0.0f32; ni];
+    let mut alt_comps = [0.0f32; 4];
+    for i in 0..npixels {
+        let si = i * ni;
+        for (c, inp) in inputs.iter_mut().enumerate() {
+            *inp = data.get(si + c).copied().unwrap_or(0) as f32 / 255.0;
+        }
+        tint_table.lookup_nd(&inputs, &mut alt_comps);
+        let di = i * 4;
+        cmyk_data[di] = (alt_comps[0].clamp(0.0, 1.0) * 255.0).round() as u8;
+        cmyk_data[di + 1] = (alt_comps[1].clamp(0.0, 1.0) * 255.0).round() as u8;
+        cmyk_data[di + 2] = (alt_comps[2].clamp(0.0, 1.0) * 255.0).round() as u8;
+        cmyk_data[di + 3] = (alt_comps[3].clamp(0.0, 1.0) * 255.0).round() as u8;
+    }
+    let rgb = cache.convert_image_8bit(cmyk_hash, &cmyk_data, npixels)?;
+    let mut rgba = vec![255u8; npixels * 4];
+    for i in 0..npixels {
+        rgba[i * 4] = rgb[i * 3];
+        rgba[i * 4 + 1] = rgb[i * 3 + 1];
+        rgba[i * 4 + 2] = rgb[i * 3 + 2];
+    }
+    Some(rgba)
 }
 
 /// Convert alt-space f32 component values to RGB bytes.
