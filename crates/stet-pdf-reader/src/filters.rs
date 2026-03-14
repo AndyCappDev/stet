@@ -499,8 +499,11 @@ fn decode_ccitt_hayro(
 ) -> Result<Vec<u8>, PdfError> {
     let mut decoder = CcittByteDecoder::new(black_is1);
     if let Err(e) = hayro_ccitt::decode(data, &mut decoder, settings) {
-        // Continue with partial data on error — many PDFs have slightly malformed CCITT
-        eprintln!("[CCITT] decode warning: {} (using partial data)", e);
+        // UnexpectedEof is normal for inline images and streams without EOFB markers.
+        // Only warn about genuine decoding errors (InvalidCode, LineLengthMismatch, etc.)
+        if e != hayro_ccitt::DecodeError::UnexpectedEof {
+            eprintln!("[CCITT] decode warning: {} (using partial data)", e);
+        }
     }
     Ok(decoder.output)
 }

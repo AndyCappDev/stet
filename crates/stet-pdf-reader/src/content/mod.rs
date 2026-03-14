@@ -1829,6 +1829,11 @@ impl<'a> ContentInterpreter<'a> {
                             let arr = Self::parse_inline_array(lexer)?;
                             PdfObj::Array(arr)
                         }
+                        Token::DictBegin => {
+                            crate::lexer::parse_dict_body(lexer)
+                                .map(PdfObj::Dict)
+                                .unwrap_or(PdfObj::Null)
+                        }
                         _ => PdfObj::Null,
                     };
                     dict.insert(expanded_key, val);
@@ -1847,27 +1852,41 @@ impl<'a> ContentInterpreter<'a> {
         // Read image data until EI
         let width = dict.get_int(b"Width").unwrap_or(0) as u32;
         let height = dict.get_int(b"Height").unwrap_or(0) as u32;
-        let bpc = dict.get_int(b"BitsPerComponent").unwrap_or(8) as u32;
+        let is_image_mask = matches!(dict.get(b"ImageMask"), Some(PdfObj::Bool(true)));
+        let bpc = if is_image_mask {
+            1
+        } else {
+            dict.get_int(b"BitsPerComponent").unwrap_or(8) as u32
+        };
 
-        let color_space = if let Some(cs_obj) = dict.get(b"ColorSpace") {
+        let has_filter = dict.get(b"Filter").is_some() || dict.get(b"F").is_some();
+
+        let resolved_cs = if is_image_mask {
+            None
+        } else if let Some(cs_obj) = dict.get(b"ColorSpace") {
             match resolve_color_space_obj(cs_obj, self.resolver) {
-                Ok(resolved) => resolved,
-                Err(_) => ResolvedColorSpace::DeviceGray,
+                Ok(resolved) => Some(resolved),
+                Err(_) => Some(ResolvedColorSpace::DeviceGray),
             }
         } else {
-            ResolvedColorSpace::DeviceGray
+            Some(ResolvedColorSpace::DeviceGray)
         };
-        let n_components = color_space.num_components() as u32;
+        let n_components = resolved_cs
+            .as_ref()
+            .map(|cs| cs.num_components() as u32)
+            .unwrap_or(1);
 
-        // Calculate expected data length
+        // Calculate expected uncompressed data length (for EI boundary search)
         let row_bits = width * n_components.max(1) * bpc;
         let row_bytes = row_bits.div_ceil(8);
         let expected_len = (row_bytes * height) as usize;
 
-        // Find EI boundary — look for whitespace + "EI" + delimiter/EOF
+        // Find EI boundary — look for whitespace + "EI" + delimiter/EOF.
+        // For compressed data (CCITT, Flate, etc.), the compressed data is smaller
+        // than the uncompressed size, so we must search from the start of data.
         let start = pos;
-        let mut end = start + expected_len;
-        // Search for EI after the expected data
+        let search_from = if has_filter { start } else { start + expected_len };
+        let mut end = search_from;
         while end + 2 < data.len() {
             if is_whitespace_byte(data[end])
                 && data[end + 1] == b'E'
@@ -1883,8 +1902,7 @@ impl<'a> ContentInterpreter<'a> {
         lexer.set_pos((end + 3).min(data.len()));
 
         // Apply filters if present
-        let sample_data = if dict.get(b"Filter").is_some() || dict.get(b"F").is_some() {
-            // Try to decompress
+        let sample_data = if has_filter {
             match crate::filters::parse_filters(&dict) {
                 Ok((filters, parms)) if !filters.is_empty() => {
                     crate::filters::decode_stream(&sample_data, &filters, &parms)
@@ -1896,8 +1914,24 @@ impl<'a> ContentInterpreter<'a> {
             sample_data
         };
 
-        // Expand bits if needed
-        let sample_data = if bpc != 8 && bpc != 0 {
+        // Build color space for display list
+        let color_space = if is_image_mask {
+            let polarity = if let Some(arr) = dict.get_array(b"Decode") {
+                let vals: Vec<f64> = arr.iter().filter_map(|o| o.as_f64()).collect();
+                vals.len() >= 2 && vals[0] > 0.5
+            } else {
+                false
+            };
+            ImageColorSpace::Mask {
+                color: self.gstate.fill_color.clone(),
+                polarity,
+            }
+        } else {
+            to_image_color_space(resolved_cs.as_ref().unwrap())
+        };
+
+        // Expand bits if needed (but NOT for image masks — keep raw 1-bit packed data)
+        let sample_data = if !is_image_mask && bpc != 8 && bpc != 0 {
             expand_bits_to_bytes(&sample_data, bpc, width, height, n_components)
         } else {
             sample_data
@@ -1911,7 +1945,7 @@ impl<'a> ContentInterpreter<'a> {
             params: ImageParams {
                 width,
                 height,
-                color_space: to_image_color_space(&color_space),
+                color_space,
                 ctm: self.gstate.ctm,
                 image_matrix,
                 interpolate: false,
