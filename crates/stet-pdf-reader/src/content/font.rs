@@ -78,6 +78,8 @@ pub struct CidTrueTypePdfFont {
     /// CID → Unicode mapping from the Type 0 font's /ToUnicode CMap.
     /// Used for substituted fonts to convert CID → Unicode → GID via cmap.
     pub to_unicode: HashMap<u16, u32>,
+    /// CIDSystemInfo /Ordering (e.g. b"Japan1", b"GB1") for CID→Unicode fallback.
+    pub ordering: Vec<u8>,
 }
 
 /// CIDFontType0: CFF outlines accessed by CID (2-byte char codes).
@@ -474,6 +476,27 @@ const CID_FONT_SUBSTITUTIONS: &[(&str, &str)] = &[
     ("TimesNewRomanPS-BoldItalicMT", "LiberationSerif-BoldItalic"),
     ("TimesNewRomanPS-ItalicMT", "LiberationSerif-Italic"),
     ("TimesNewRomanPSMT", "LiberationSerif"),
+    // Japanese CJK fonts → DroidSansFallback (matches GhostScript's CIDFSubst)
+    ("MS-Gothic", "DroidSansFallback"),
+    ("MS-PGothic", "DroidSansFallback"),
+    ("MS-Mincho", "DroidSansFallback"),
+    ("MS-PMincho", "DroidSansFallback"),
+    ("MSGothic", "DroidSansFallback"),
+    ("MSPGothic", "DroidSansFallback"),
+    ("MSMincho", "DroidSansFallback"),
+    ("MSPMincho", "DroidSansFallback"),
+    // Korean CJK fonts
+    ("Batang", "DroidSansFallback"),
+    ("BatangChe", "DroidSansFallback"),
+    ("Dotum", "DroidSansFallback"),
+    ("DotumChe", "DroidSansFallback"),
+    ("Gulim", "DroidSansFallback"),
+    ("GulimChe", "DroidSansFallback"),
+    // Chinese CJK fonts
+    ("SimSun", "DroidSansFallback"),
+    ("SimHei", "DroidSansFallback"),
+    ("MingLiU", "DroidSansFallback"),
+    ("PMingLiU", "DroidSansFallback"),
 ];
 
 /// Try to load a TrueType font from the system font cache.
@@ -814,6 +837,29 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
         HashMap::new()
     };
 
+    // Extract CIDSystemInfo /Ordering for CID→Unicode fallback lookup.
+    // /Ordering is a string (parenthesized), not a name.
+    let ordering = {
+        let si_dict = cid_font_dict
+            .get_dict(b"CIDSystemInfo")
+            .cloned()
+            .or_else(|| {
+                cid_font_dict
+                    .get(b"CIDSystemInfo")
+                    .and_then(|obj| resolver.deref(obj).ok())
+                    .and_then(|obj| obj.as_dict().cloned())
+            });
+        si_dict
+            .and_then(|d| {
+                d.get(b"Ordering").and_then(|v| match v {
+                    PdfObj::Str(s) => Some(s.clone()),
+                    PdfObj::Name(n) => Some(n.clone()),
+                    _ => None,
+                })
+            })
+            .unwrap_or_default()
+    };
+
     match cid_subtype {
         b"CIDFontType2" => {
             let substituted;
@@ -871,6 +917,7 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                 substituted,
                 cid_to_gid_map,
                 to_unicode,
+                ordering: ordering.clone(),
             }))
         }
         b"CIDFontType0" => {
@@ -1266,6 +1313,10 @@ impl CidTrueTypePdfFont {
         } else if self.substituted && !self.to_unicode.is_empty() {
             // Substituted font: CID → Unicode (via ToUnicode) → GID (via cmap)
             let unicode = *self.to_unicode.get(&cid)?;
+            *self.cmap.get(&unicode)?
+        } else if self.substituted && !self.ordering.is_empty() {
+            // Substituted font with Adobe CID registry: use CID→Unicode table
+            let unicode = super::cid_unicode::cid_to_unicode(&self.ordering, cid)?;
             *self.cmap.get(&unicode)?
         } else if self.identity_cid_to_gid && !self.substituted {
             // Embedded font with Identity CIDToGIDMap: CID = GID directly
