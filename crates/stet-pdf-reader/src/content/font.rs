@@ -130,9 +130,17 @@ pub fn resolve_font(
     let first_char = font_dict.get_int(b"FirstChar").unwrap_or(0) as usize;
     let _last_char = font_dict.get_int(b"LastChar").unwrap_or(255) as usize;
 
-    // Parse widths array from font dict, or fall back to standard 14 font metrics
+    // Parse widths array from font dict, or fall back to standard 14 font metrics.
+    // /Widths may be a direct array or an indirect reference — resolve if needed.
     let mut widths = [0.0f64; 256];
-    if let Some(w_arr) = font_dict.get_array(b"Widths") {
+    let widths_obj = font_dict.get(b"Widths").and_then(|obj| {
+        if obj.as_array().is_some() {
+            Some(obj.clone())
+        } else {
+            resolver.deref(obj).ok()
+        }
+    });
+    if let Some(PdfObj::Array(w_arr)) = &widths_obj {
         for (i, obj) in w_arr.iter().enumerate() {
             let code = first_char + i;
             if code < 256 {
@@ -202,6 +210,30 @@ pub fn resolve_font(
     // No embedded font program — try font substitution
     if let Some(font) = substitute_font(&base_font_name, encoding.clone(), widths, font_provider) {
         return Ok(font);
+    }
+
+    // For TrueType fonts, try loading from system fonts before giving up
+    if subtype == b"TrueType" {
+        if let Ok(data) = load_system_truetype_font(&base_font_name) {
+            let units_per_em = get_units_per_em(&data) as f64;
+            let cmap = parse_cmap(&data);
+            let post_name_to_gid = stet_core::system_fonts::parse_post_table(&data)
+                .map(|gid_to_name| {
+                    gid_to_name
+                        .into_iter()
+                        .map(|(gid, name)| (name, gid))
+                        .collect()
+                })
+                .unwrap_or_default();
+            return Ok(PdfFont::TrueType(TrueTypePdfFont {
+                data,
+                encoding,
+                widths,
+                cmap,
+                post_name_to_gid,
+                units_per_em,
+            }));
+        }
     }
 
     // Final fallback based on subtype (will likely fail)
@@ -354,6 +386,24 @@ fn substitute_font(
     let fm = font.font_matrix;
     let font_matrix = Matrix::new(fm[0], fm[1], fm[2], fm[3], fm[4], fm[5]);
 
+    // If the PDF didn't provide widths, derive them from the substitute font
+    let widths = if widths.iter().all(|&w| w == 0.0) {
+        let mut derived = [0.0f64; 256];
+        for code in 0..256usize {
+            if let Some(glyph_name) = &encoding[code] {
+                if let Some(cs) = font.charstrings.get(glyph_name.as_str()) {
+                    if let Ok(result) = execute_charstring(cs, &font.subrs, font.len_iv, false) {
+                        // Width is in glyph space; scale by font matrix to get text space
+                        derived[code] = result.width_x * fm[0];
+                    }
+                }
+            }
+        }
+        derived
+    } else {
+        widths
+    };
+
     Some(PdfFont::Type1(Type1PdfFont {
         font,
         encoding,
@@ -377,7 +427,9 @@ fn fuzzy_font_match(name: &str) -> Option<&'static str> {
             (false, false) => "NimbusRoman-Regular",
         });
     }
-    if lower.contains("helvetica") || lower.contains("arial") || lower.contains("sans") {
+    if lower.contains("helvetica") || lower.contains("arial") || lower.contains("sans")
+        || lower.contains("calibri")
+    {
         return Some(match (is_bold, is_italic) {
             (true, true) => "NimbusSans-BoldItalic",
             (true, false) => "NimbusSans-Bold",
@@ -403,6 +455,10 @@ const CID_FONT_SUBSTITUTIONS: &[(&str, &str)] = &[
     ("Arial-BoldItalicMT", "LiberationSans-BoldItalic"),
     ("Arial-ItalicMT", "LiberationSans-Italic"),
     ("ArialMT", "LiberationSans"),
+    ("Calibri", "LiberationSans"),
+    ("Calibri,Bold", "LiberationSans-Bold"),
+    ("Calibri,BoldItalic", "LiberationSans-BoldItalic"),
+    ("Calibri,Italic", "LiberationSans-Italic"),
     ("TimesNewRomanPS-BoldMT", "LiberationSerif-Bold"),
     ("TimesNewRomanPS-BoldItalicMT", "LiberationSerif-BoldItalic"),
     ("TimesNewRomanPS-ItalicMT", "LiberationSerif-Italic"),
@@ -418,8 +474,14 @@ fn load_system_truetype_font(base_font: &str) -> Result<Vec<u8>, PdfError> {
 
     let cache = get_system_font_cache();
 
+    // Strip subset prefix (e.g. "ABCDEF+Calibri,Bold" → "Calibri,Bold")
+    let mut clean_name = base_font;
+    if clean_name.len() > 7 && clean_name.as_bytes().get(6) == Some(&b'+') {
+        clean_name = &clean_name[7..];
+    }
+
     // Try exact match first
-    if let Some(path) = cache.get_font_path(base_font) {
+    if let Some(path) = cache.get_font_path(clean_name) {
         if let Ok(data) = std::fs::read(path) {
             return Ok(data);
         }
@@ -427,7 +489,7 @@ fn load_system_truetype_font(base_font: &str) -> Result<Vec<u8>, PdfError> {
 
     // Try known substitutions
     for &(from, to) in CID_FONT_SUBSTITUTIONS {
-        if from == base_font {
+        if from == clean_name {
             if let Some(path) = cache.get_font_path(to) {
                 if let Ok(data) = std::fs::read(path) {
                     return Ok(data);
@@ -436,14 +498,14 @@ fn load_system_truetype_font(base_font: &str) -> Result<Vec<u8>, PdfError> {
         }
     }
 
-    // Fuzzy family match
-    let lower = base_font.to_ascii_lowercase();
+    // Fuzzy family match — split on '-' or ',' to extract family name
+    let lower = clean_name.to_ascii_lowercase();
     let is_bold = lower.contains("bold") || lower.contains("demi");
     let is_italic = lower.contains("italic") || lower.contains("oblique");
 
     for (ps_name, path) in cache.iter() {
         let ps_lower = ps_name.to_ascii_lowercase();
-        let family = lower.split('-').next().unwrap_or(&lower);
+        let family = lower.split(&['-', ','][..]).next().unwrap_or(&lower);
         if ps_lower.contains(family) || family.contains(&ps_lower.split('-').next().unwrap_or("")) {
             let name_bold = ps_lower.contains("bold") || ps_lower.contains("demi");
             let name_italic = ps_lower.contains("italic") || ps_lower.contains("oblique");
@@ -456,8 +518,8 @@ fn load_system_truetype_font(base_font: &str) -> Result<Vec<u8>, PdfError> {
     }
 
     Err(PdfError::Other(format!(
-        "CIDFontType2 font '{}' not found on system",
-        base_font
+        "font '{}' not found on system",
+        clean_name
     )))
 }
 
