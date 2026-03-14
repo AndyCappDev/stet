@@ -16,6 +16,7 @@ stet-core.workspace = true
 stet-render = { workspace = true, optional = true }
 openjp2 = { version = "0.6", default-features = false, features = ["std"], optional = true }
 hayro-ccitt = "0.2.0"
+hayro-jbig2 = "0.1.0"
 
 [features]
 default = ["jpx", "render"]

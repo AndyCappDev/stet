@@ -18,6 +18,7 @@ pub enum Filter {
     DCTDecode,
     CCITTFaxDecode,
     JPXDecode,
+    JBIG2Decode,
 }
 
 /// Parse the /Filter and /DecodeParms entries from a stream dict.
@@ -70,6 +71,7 @@ fn filter_from_name(name: &[u8]) -> Result<Filter, PdfError> {
         b"DCTDecode" | b"DCT" => Ok(Filter::DCTDecode),
         b"CCITTFaxDecode" | b"CCF" => Ok(Filter::CCITTFaxDecode),
         b"JPXDecode" | b"JPX" => Ok(Filter::JPXDecode),
+        b"JBIG2Decode" | b"JBIG2" => Ok(Filter::JBIG2Decode),
         // Tolerate truncated filter names from malformed PDFs
         _ if name.starts_with(b"Flate") => Ok(Filter::FlateDecode),
         _ if name.starts_with(b"LZW") => Ok(Filter::LZWDecode),
@@ -78,6 +80,7 @@ fn filter_from_name(name: &[u8]) -> Result<Filter, PdfError> {
         _ if name.starts_with(b"RunLength") => Ok(Filter::RunLengthDecode),
         _ if name.starts_with(b"CCITT") => Ok(Filter::CCITTFaxDecode),
         _ if name.starts_with(b"JPX") => Ok(Filter::JPXDecode),
+        _ if name.starts_with(b"JBIG2") => Ok(Filter::JBIG2Decode),
         _ => Err(PdfError::UnsupportedFilter(
             String::from_utf8_lossy(name).into(),
         )),
@@ -89,6 +92,7 @@ pub fn decode_stream(
     raw_data: &[u8],
     filters: &[Filter],
     decode_parms: &[Option<PdfDict>],
+    jbig2_globals: Option<&[u8]>,
 ) -> Result<Vec<u8>, PdfError> {
     let mut data = raw_data.to_vec();
 
@@ -108,6 +112,7 @@ pub fn decode_stream(
             Filter::JPXDecode => {
                 return Err(PdfError::UnsupportedFilter("JPXDecode (disabled)".into()));
             }
+            Filter::JBIG2Decode => decode_jbig2(&data, jbig2_globals)?,
         };
     }
 
@@ -506,6 +511,26 @@ fn decode_ccitt_hayro(
         }
     }
     Ok(decoder.output)
+}
+
+/// JBIG2Decode.
+fn decode_jbig2(data: &[u8], globals: Option<&[u8]>) -> Result<Vec<u8>, PdfError> {
+    let image = hayro_jbig2::decode_embedded(data, globals)
+        .map_err(|e| PdfError::DecompressionError(format!("JBIG2: {e}")))?;
+    // Convert Vec<bool> to packed bytes (8 pixels/byte, MSB first)
+    // JBIG2: true = black, false = white
+    // PDF DeviceGray: 0 = black, 1 = white
+    // So: start all-white (0xFF), clear bits for black pixels
+    let row_bytes = (image.width as usize + 7) / 8;
+    let mut packed = vec![0xFFu8; row_bytes * image.height as usize];
+    for y in 0..image.height as usize {
+        for x in 0..image.width as usize {
+            if image.data[y * image.width as usize + x] {
+                packed[y * row_bytes + x / 8] &= !(0x80 >> (x % 8));
+            }
+        }
+    }
+    Ok(packed)
 }
 
 /// JPXDecode (JPEG 2000).
@@ -973,7 +998,7 @@ mod tests {
 
         let filters = vec![Filter::ASCIIHexDecode, Filter::FlateDecode];
         let parms = vec![None, None];
-        let decoded = decode_stream(hex.as_bytes(), &filters, &parms).unwrap();
+        let decoded = decode_stream(hex.as_bytes(), &filters, &parms, None).unwrap();
         assert_eq!(&decoded, original);
     }
 }

@@ -2081,7 +2081,7 @@ impl<'a> ContentInterpreter<'a> {
         let sample_data = if has_filter {
             match crate::filters::parse_filters(&dict) {
                 Ok((filters, parms)) if !filters.is_empty() => {
-                    crate::filters::decode_stream(&sample_data, &filters, &parms)
+                    crate::filters::decode_stream(&sample_data, &filters, &parms, None)
                         .unwrap_or(sample_data)
                 }
                 _ => sample_data,

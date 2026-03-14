@@ -124,7 +124,13 @@ impl<'a> Resolver<'a> {
                 if filter_list.is_empty() {
                     Ok(raw)
                 } else {
-                    filters::decode_stream(&raw, &filter_list, &parms)
+                    let jbig2_globals = self.resolve_jbig2_globals(&filter_list, &parms)?;
+                    filters::decode_stream(
+                        &raw,
+                        &filter_list,
+                        &parms,
+                        jbig2_globals.as_deref(),
+                    )
                 }
             }
             _ => Err(PdfError::Other(format!(
@@ -152,7 +158,13 @@ impl<'a> Resolver<'a> {
                 if filter_list.is_empty() {
                     Ok(raw.to_vec())
                 } else {
-                    filters::decode_stream(raw, &filter_list, &parms)
+                    let jbig2_globals = self.resolve_jbig2_globals(&filter_list, &parms)?;
+                    filters::decode_stream(
+                        raw,
+                        &filter_list,
+                        &parms,
+                        jbig2_globals.as_deref(),
+                    )
                 }
             }
             _ => Err(PdfError::Other("expected a stream object".into())),
@@ -210,6 +222,25 @@ impl<'a> Resolver<'a> {
             }
             other => other,
         }
+    }
+
+    /// If the filter chain contains JBIG2Decode, resolve the /JBIG2Globals stream
+    /// from the corresponding DecodeParms entry.
+    fn resolve_jbig2_globals(
+        &self,
+        filters: &[filters::Filter],
+        parms: &[Option<PdfDict>],
+    ) -> Result<Option<Vec<u8>>, PdfError> {
+        for (i, f) in filters.iter().enumerate() {
+            if *f == filters::Filter::JBIG2Decode {
+                if let Some(Some(dp)) = parms.get(i) {
+                    if let Some(globals_ref) = dp.get(b"JBIG2Globals") {
+                        return self.stream_data_from_obj(globals_ref).map(Some);
+                    }
+                }
+            }
+        }
+        Ok(None)
     }
 
     /// Parse an indirect object at a file offset.
@@ -408,7 +439,7 @@ impl<'a> Resolver<'a> {
         let stream_data = if filter_list.is_empty() {
             raw
         } else {
-            filters::decode_stream(&raw, &filter_list, &parms)?
+            filters::decode_stream(&raw, &filter_list, &parms, None)?
         };
 
         // Parse the header

@@ -473,7 +473,7 @@ fn parse_xref_stream(
     let stream_data = if filter_list.is_empty() {
         raw_data.to_vec()
     } else {
-        filters::decode_stream(raw_data, &filter_list, &parms)?
+        filters::decode_stream(raw_data, &filter_list, &parms, None)?
     };
 
     // Parse xref stream entries
