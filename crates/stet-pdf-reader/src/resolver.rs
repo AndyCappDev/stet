@@ -220,9 +220,11 @@ impl<'a> Resolver<'a> {
             return Err(PdfError::InvalidObject(offset));
         }
 
-        // Try the exact offset first, then scan backward if it fails
+        // Try the exact offset first (no word-boundary check — some PDFs omit
+        // whitespace between `endobj` and the next object header), then scan
+        // backward with stricter matching if that fails.
         let actual_offset = self
-            .try_parse_obj_header(offset)
+            .try_parse_obj_header_relaxed(offset)
             .or_else(|| {
                 // Scan backward up to 20 bytes for the object header
                 let start = offset.saturating_sub(20);
@@ -291,12 +293,10 @@ impl<'a> Resolver<'a> {
 
     /// Check if `offset` starts with `Int Int Keyword("obj")` at a word boundary.
     /// Returns `Some(offset)` on success, `None` on failure.
-    fn try_parse_obj_header(&self, offset: usize) -> Option<usize> {
+    /// Check for `N G obj` header without requiring whitespace before the offset.
+    /// Used for the exact xref offset, where some PDFs omit whitespace after `endobj`.
+    fn try_parse_obj_header_relaxed(&self, offset: usize) -> Option<usize> {
         if offset >= self.data.len() {
-            return None;
-        }
-        // Must be at a word boundary (start of file, or preceded by whitespace/newline)
-        if offset > 0 && !matches!(self.data[offset - 1], b' ' | b'\t' | b'\r' | b'\n') {
             return None;
         }
         let mut lexer = Lexer::at(self.data, offset);
@@ -310,6 +310,17 @@ impl<'a> Resolver<'a> {
             Token::Keyword(ref kw) if kw == b"obj" => Some(offset),
             _ => None,
         }
+    }
+
+    fn try_parse_obj_header(&self, offset: usize) -> Option<usize> {
+        if offset >= self.data.len() {
+            return None;
+        }
+        // Must be at a word boundary (start of file, or preceded by whitespace/newline)
+        if offset > 0 && !matches!(self.data[offset - 1], b' ' | b'\t' | b'\r' | b'\n') {
+            return None;
+        }
+        self.try_parse_obj_header_relaxed(offset)
     }
 
     /// Check if `endstream` keyword appears at or near the given offset.
