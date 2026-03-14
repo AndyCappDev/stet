@@ -319,12 +319,15 @@ impl<'a> ContentInterpreter<'a> {
                 if let Some(clip_path) = self.text_clip_path.take() {
                     if !clip_path.is_empty() {
                         self.display_list.push(DisplayElement::Clip {
-                            path: clip_path,
+                            path: clip_path.clone(),
                             params: ClipParams {
                                 fill_rule: FillRule::NonZeroWinding,
                                 ctm: Matrix::identity(),
                             },
                         });
+                        // Track in graphics state so Q/grestore can undo it
+                        self.gstate.clip_path = Some(clip_path);
+                        self.gstate.clip_path_version += 1;
                     }
                 }
                 Ok(())
