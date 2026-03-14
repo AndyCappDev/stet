@@ -103,8 +103,8 @@ pub enum CalcToken {
 impl PdfFunction {
     /// Parse a PDF function from a dict/stream object.
     pub fn parse(obj: &PdfObj, resolver: &Resolver) -> Result<Self, PdfError> {
-        let obj = resolver.deref(obj)?;
-        let dict = obj
+        let resolved = resolver.deref(obj)?;
+        let dict = resolved
             .as_dict()
             .ok_or(PdfError::Other("function is not a dict/stream".into()))?;
 
@@ -116,10 +116,10 @@ impl PdfFunction {
         let range = parse_domain_range(dict, b"Range").unwrap_or_default();
 
         match fn_type {
-            0 => Self::parse_sampled(dict, &obj, domain, range, resolver),
+            0 => Self::parse_sampled(dict, obj, domain, range, resolver),
             2 => Self::parse_exponential(dict, domain, range),
             3 => Self::parse_stitching(dict, domain, range, resolver),
-            4 => Self::parse_calculator(&obj, domain, range, resolver),
+            4 => Self::parse_calculator(obj, domain, range, resolver),
             _ => Err(PdfError::Other(format!(
                 "unsupported function type {fn_type}"
             ))),

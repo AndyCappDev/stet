@@ -1271,6 +1271,8 @@ impl<'a> ContentInterpreter<'a> {
                 String::from_utf8_lossy(&name)
             ))
         })?;
+        // Keep the original ref for stream_data_from_obj (needed for encryption)
+        let xobj_ref_clone = xobj_ref.clone();
         let xobj = self.resolver.deref(xobj_ref)?;
         let dict = xobj
             .as_dict()
@@ -1278,8 +1280,8 @@ impl<'a> ContentInterpreter<'a> {
 
         let subtype = dict.get_name(b"Subtype").unwrap_or(b"");
         match subtype {
-            b"Image" => self.handle_image_xobject(&xobj, dict)?,
-            b"Form" => self.handle_form_xobject(&xobj, dict)?,
+            b"Image" => self.handle_image_xobject(&xobj_ref_clone, dict)?,
+            b"Form" => self.handle_form_xobject(&xobj_ref_clone, dict)?,
             _ => {} // Ignore unknown subtypes
         }
         Ok(())
@@ -1468,10 +1470,11 @@ impl<'a> ContentInterpreter<'a> {
         image_w: u32,
         image_h: u32,
     ) -> Result<Option<Vec<u8>>, PdfError> {
-        let smask_obj = match dict.get(b"SMask") {
-            Some(obj) => self.resolver.deref(obj)?,
+        let smask_ref = match dict.get(b"SMask") {
+            Some(obj) => obj.clone(),
             None => return Ok(None),
         };
+        let smask_obj = self.resolver.deref(&smask_ref)?;
         let smask_dict = match smask_obj.as_dict() {
             Some(d) => d,
             None => return Ok(None),
@@ -1481,7 +1484,7 @@ impl<'a> ContentInterpreter<'a> {
         if sw == 0 || sh == 0 {
             return Ok(None);
         }
-        let mut data = self.resolver.stream_data_from_obj(&smask_obj)?;
+        let mut data = self.resolver.stream_data_from_obj(&smask_ref)?;
 
         // Apply /Decode array if present (e.g. [1 0] inverts the mask)
         if let Some(decode) = smask_dict.get_array(b"Decode") {
@@ -2082,7 +2085,7 @@ impl<'a> ContentInterpreter<'a> {
         };
 
         // Render the form into a display list
-        let form_data = self.resolver.stream_data_from_obj(&g_obj)?;
+        let form_data = self.resolver.stream_data_from_obj(g_ref)?;
 
         // Save state and render
         self.gstate_stack.push(self.gstate.clone());
@@ -2216,13 +2219,14 @@ impl<'a> ContentInterpreter<'a> {
                 String::from_utf8_lossy(&name)
             ))
         })?;
+        let sh_ref_clone = sh_ref.clone();
         let sh_obj = self.resolver.deref(sh_ref)?;
         let sh_dict = sh_obj
             .as_dict()
             .ok_or(PdfError::Other("Shading is not a dict".into()))?;
 
         crate::resources::shading::handle_shading(
-            &sh_obj,
+            &sh_ref_clone,
             sh_dict,
             &self.gstate,
             self.resolver,
@@ -2267,6 +2271,7 @@ impl<'a> ContentInterpreter<'a> {
                 String::from_utf8_lossy(name)
             ))
         })?;
+        let pat_ref_clone = pat_ref.clone();
         let pat_obj = self.resolver.deref(pat_ref)?;
         let pat_dict = pat_obj
             .as_dict()
@@ -2275,7 +2280,7 @@ impl<'a> ContentInterpreter<'a> {
         let pattern_type = pat_dict.get_int(b"PatternType").unwrap_or(1) as i32;
 
         match pattern_type {
-            1 => self.resolve_tiling_pattern(&pat_obj, pat_dict),
+            1 => self.resolve_tiling_pattern(&pat_ref_clone, pat_dict),
             _ => Err(PdfError::Other(format!(
                 "Unsupported PatternType {pattern_type}"
             ))),
@@ -2371,6 +2376,7 @@ impl<'a> ContentInterpreter<'a> {
         let sh_ref = pat_dict
             .get(b"Shading")
             .ok_or(PdfError::Other("shading pattern missing /Shading".into()))?;
+        let sh_ref_clone = sh_ref.clone();
         let sh_obj = self.resolver.deref(sh_ref)?;
         let sh_dict = sh_obj
             .as_dict()
@@ -2392,7 +2398,7 @@ impl<'a> ContentInterpreter<'a> {
         self.gstate.ctm = self.gstate.ctm.concat(&pattern_matrix);
 
         let result = crate::resources::shading::handle_shading(
-            &sh_obj,
+            &sh_ref_clone,
             sh_dict,
             &self.gstate,
             self.resolver,

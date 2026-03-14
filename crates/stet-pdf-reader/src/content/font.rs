@@ -530,10 +530,8 @@ fn resolve_type3(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
     for code in 0..256u16 {
         if let Some(glyph_name) = &encoding[code as usize] {
             if let Some(proc_ref) = char_procs_dict.get(glyph_name.as_bytes()) {
-                if let Ok(proc_obj) = resolver.deref(proc_ref) {
-                    if let Ok(data) = resolver.stream_data_from_obj(&proc_obj) {
-                        char_procs.insert(code as u8, data);
-                    }
+                if let Ok(data) = resolver.stream_data_from_obj(proc_ref) {
+                    char_procs.insert(code as u8, data);
                 }
             }
         }
@@ -563,7 +561,7 @@ fn resolve_type1(
         let ff3_dict = ff3_obj.as_dict();
         let subtype = ff3_dict.and_then(|d| d.get_name(b"Subtype")).unwrap_or(b"");
         if subtype == b"Type1C" || subtype == b"CIDFontType0C" || subtype == b"OpenType" {
-            let raw_data = resolver.stream_data_from_obj(&ff3_obj)?;
+            let raw_data = resolver.stream_data_from_obj(ff3_ref)?;
             // If data starts with "OTTO" it's an OpenType container — extract CFF table
             let font_data = if raw_data.starts_with(b"OTTO") {
                 use stet_core::truetype::find_table;
@@ -596,7 +594,7 @@ fn resolve_type1(
         .get(b"FontFile")
         .or_else(|| desc.get(b"FontFile3"))
         .ok_or(PdfError::Other("Type1 font missing FontFile".into()))?;
-    let font_data = resolver.stream_data_from_obj(&resolver.deref(ff_ref)?)?;
+    let font_data = resolver.stream_data_from_obj(ff_ref)?;
 
     // Strip PFB (Printer Font Binary) headers if present
     let font_data = strip_pfb(&font_data);
@@ -628,7 +626,7 @@ fn resolve_truetype(
     let ff_ref = desc
         .get(b"FontFile2")
         .ok_or(PdfError::Other("TrueType font missing FontFile2".into()))?;
-    let data = resolver.stream_data_from_obj(&resolver.deref(ff_ref)?)?;
+    let data = resolver.stream_data_from_obj(ff_ref)?;
 
     // Validate that glyph outline data is actually present
     use stet_core::truetype::find_table;
@@ -680,7 +678,7 @@ fn resolve_cff(
     let ff_ref = desc
         .get(b"FontFile3")
         .ok_or(PdfError::Other("CFF font missing FontFile3".into()))?;
-    let font_data = resolver.stream_data_from_obj(&resolver.deref(ff_ref)?)?;
+    let font_data = resolver.stream_data_from_obj(ff_ref)?;
 
     let fonts =
         parse_cff(&font_data).map_err(|e| PdfError::Other(format!("CFF parse error: {e}")))?;
@@ -735,8 +733,7 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
 
     // Parse /ToUnicode CMap from the parent Type 0 font dict
     let to_unicode = if let Some(tu_obj) = font_dict.get(b"ToUnicode") {
-        let tu_obj = resolver.deref(tu_obj)?;
-        match resolver.stream_data_from_obj(&tu_obj) {
+        match resolver.stream_data_from_obj(tu_obj) {
             Ok(data) => parse_to_unicode(&data),
             Err(_) => HashMap::new(),
         }
@@ -749,7 +746,7 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
             let substituted;
             let data = if let Some(ff_ref) = desc.get(b"FontFile2") {
                 substituted = false;
-                resolver.stream_data_from_obj(&resolver.deref(ff_ref)?)?
+                resolver.stream_data_from_obj(ff_ref)?
             } else {
                 // Font not embedded — try system font lookup
                 substituted = true;
@@ -776,13 +773,7 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                 if let Some(name) = cid_font_dict.get_name(b"CIDToGIDMap") {
                     (name == b"Identity", None)
                 } else if let Some(map_obj) = cid_font_dict.get(b"CIDToGIDMap") {
-                    // CIDToGIDMap is a reference to a stream — parse the mapping
-                    let map_obj = if let Some((num, g)) = map_obj.as_ref() {
-                        resolver.resolve(num, g)?
-                    } else {
-                        map_obj.clone()
-                    };
-                    match resolver.stream_data_from_obj(&map_obj) {
+                    match resolver.stream_data_from_obj(map_obj) {
                         Ok(stream_data) => {
                             let mut gid_map =
                                 Vec::with_capacity(stream_data.len() / 2);
@@ -814,7 +805,7 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
             let ff_ref = desc
                 .get(b"FontFile3")
                 .ok_or(PdfError::Other("CIDFontType0 missing FontFile3".into()))?;
-            let font_data = resolver.stream_data_from_obj(&resolver.deref(ff_ref)?)?;
+            let font_data = resolver.stream_data_from_obj(ff_ref)?;
 
             let fonts = parse_cff(&font_data)
                 .map_err(|e| PdfError::Other(format!("CFF parse error: {e}")))?;

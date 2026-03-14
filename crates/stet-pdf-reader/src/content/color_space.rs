@@ -200,9 +200,9 @@ fn resolve_icc_based(args: &[PdfObj], resolver: &Resolver) -> Result<ResolvedCol
         .get_int(b"N")
         .ok_or(PdfError::Other("ICCBased missing /N".into()))? as u32;
 
-    // Extract ICC profile bytes from the stream
+    // Extract ICC profile bytes from the stream (use original ref for encryption)
     let profile_data = resolver
-        .stream_data_from_obj(&stream_obj)
+        .stream_data_from_obj(&args[0])
         .ok()
         .filter(|d| !d.is_empty())
         .map(Arc::new);
@@ -222,7 +222,7 @@ fn resolve_indexed(args: &[PdfObj], resolver: &Resolver) -> Result<ResolvedColor
     let lookup_obj = resolver.deref(&args[2])?;
     let lookup = match &lookup_obj {
         PdfObj::Str(s) => s.clone(),
-        PdfObj::Stream { .. } => resolver.stream_data_from_obj(&lookup_obj)?,
+        PdfObj::Stream { .. } => resolver.stream_data_from_obj(&args[2])?,
         _ => {
             return Err(PdfError::Other(
                 "Indexed lookup not string or stream".into(),
