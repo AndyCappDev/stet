@@ -153,7 +153,9 @@ pub fn resolve_font(
         has_pdf_widths = true;
     }
 
-    // Resolve encoding
+    // Resolve encoding.  Track whether the PDF dict had an explicit /Encoding —
+    // embedded CFF fonts that lack one should use the CFF's built-in encoding.
+    let has_explicit_encoding = font_dict.get(b"Encoding").is_some();
     let encoding = resolve_encoding(font_dict, resolver)?;
 
     // Get FontDescriptor
@@ -169,7 +171,7 @@ pub fn resolve_font(
     if let Some(ref desc) = descriptor {
         if desc.get(b"FontFile3").is_some() {
             // Try embedded CFF; fall back to substitution if decompression/parsing fails
-            match resolve_cff(resolver, &descriptor, encoding.clone(), widths) {
+            match resolve_cff(resolver, &descriptor, encoding.clone(), widths, has_explicit_encoding) {
                 Ok(font) => return Ok(font),
                 Err(_) => {
                     if let Some(font) =
@@ -767,6 +769,7 @@ fn resolve_cff(
     descriptor: &Option<PdfDict>,
     encoding: [Option<String>; 256],
     widths: [f64; 256],
+    has_explicit_encoding: bool,
 ) -> Result<PdfFont, PdfError> {
     let desc = descriptor
         .as_ref()
@@ -782,6 +785,21 @@ fn resolve_cff(
         .into_iter()
         .next()
         .ok_or(PdfError::Other("CFF contains no fonts".into()))?;
+
+    // When the PDF font dict has no explicit /Encoding, use the CFF font's
+    // built-in encoding (code → GID → charset name) instead of StandardEncoding.
+    let encoding = if has_explicit_encoding {
+        encoding
+    } else {
+        let mut enc: [Option<String>; 256] = std::array::from_fn(|_| None);
+        for code in 0..256 {
+            let gid = font.encoding[code] as usize;
+            if gid > 0 && gid < font.charset.len() && font.charset[gid] != ".notdef" {
+                enc[code] = Some(font.charset[gid].clone());
+            }
+        }
+        enc
+    };
 
     let fm = font.font_matrix;
     let font_matrix = Matrix::new(fm[0], fm[1], fm[2], fm[3], fm[4], fm[5]);
