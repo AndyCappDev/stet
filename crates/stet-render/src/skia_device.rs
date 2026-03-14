@@ -2057,7 +2057,13 @@ fn render_element(
                 let combined = params.ctm.concat(&image_inv);
                 let raw_transform = ctx.transform(&combined);
 
-                let prescaled = prescale_image(rgba_data, iw, ih, raw_transform);
+                // Skip expensive Lanczos prescaling for non-interpolated images
+                // (e.g. 1-bit scanned documents) — nearest-neighbor is more appropriate.
+                let prescaled = if params.interpolate {
+                    prescale_image(rgba_data, iw, ih, raw_transform)
+                } else {
+                    None
+                };
                 let (img_data, img_w, img_h, transform) = match &prescaled {
                     Some((data, w, h, t)) => (data.as_slice(), *w, *h, *t),
                     None => (rgba_data, iw, ih, raw_transform),
