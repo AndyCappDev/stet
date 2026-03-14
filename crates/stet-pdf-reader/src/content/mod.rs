@@ -1149,7 +1149,16 @@ impl<'a> ContentInterpreter<'a> {
                 self.current_font = Some(arc);
             }
             Err(e) => {
-                eprintln!("warning: font /{}: {}", String::from_utf8_lossy(name), e);
+                // Deduplicate warnings across pages (same font fails on every page)
+                use std::sync::Mutex;
+                static WARNED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+                let msg = format!("font /{}: {}", String::from_utf8_lossy(name), e);
+                if let Ok(mut set) = WARNED.lock() {
+                    if !set.iter().any(|s| *s == msg) {
+                        eprintln!("warning: {msg}");
+                        set.push(msg);
+                    }
+                }
                 // Try fallback font on resolution failure too
                 if let Some(fallback) = font::fallback_font(self.font_provider.as_ref()) {
                     let arc = Arc::new(fallback);
