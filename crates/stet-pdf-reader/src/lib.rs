@@ -214,8 +214,8 @@ impl<'a> PdfDocument<'a> {
         let scale = dpi / 72.0;
         let ctm = match info.rotate.rem_euclid(360) {
             90 => {
-                // Rotate 90° CW: (x,y) → (y, page_w - x)
-                Matrix::new(0.0, -scale, -scale, 0.0, page_h * scale, page_w * scale)
+                // Rotate 90° CW + Y-flip: (x,y) → (y*s, x*s)
+                Matrix::new(0.0, scale, scale, 0.0, 0.0, 0.0)
                     .concat(&Matrix::translate(-llx, -lly))
             }
             180 => {
@@ -224,8 +224,9 @@ impl<'a> PdfDocument<'a> {
                     .concat(&Matrix::translate(-llx, -lly))
             }
             270 => {
-                // Rotate 270° CW + Y-flip
-                Matrix::new(0.0, scale, scale, 0.0, 0.0, 0.0).concat(&Matrix::translate(-llx, -lly))
+                // Rotate 270° CW + Y-flip: (x,y) → ((page_h-y)*s, (page_w-x)*s)
+                Matrix::new(0.0, -scale, -scale, 0.0, page_h * scale, page_w * scale)
+                    .concat(&Matrix::translate(-llx, -lly))
             }
             _ => {
                 // No rotation: scale + Y-flip + CropBox offset
