@@ -1827,6 +1827,7 @@ fn render_element(
     match element {
         DisplayElement::Fill { path, params } => {
             let needs_overprint = params.overprint
+                && params.is_device_cmyk
                 && band_state.cmyk_buffer.is_some();
 
             if needs_overprint {
