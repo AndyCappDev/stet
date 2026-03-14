@@ -50,7 +50,7 @@ fn parse_javaplatform_pdf() {
 #[test]
 fn parse_other_sample_pdfs() {
     // Test the other sample PDFs we have
-    for name in &["10-ch8.pdf", "14-ch12.pdf", "16-ch14.pdf"] {
+    for name in &["10-ch8.pdf", "ppst32.pdf"] {
         let data = load_pdf(name);
         let doc = PdfDocument::from_bytes(&data).unwrap_or_else(|e| {
             panic!("failed to parse {name}: {e}");
