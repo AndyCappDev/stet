@@ -171,6 +171,152 @@ impl<'a> ContentInterpreter<'a> {
         Ok(self.display_list)
     }
 
+    /// Interpret a content stream, keeping the interpreter alive for further use.
+    pub fn interpret_stream_public(&mut self, data: &[u8]) -> Result<(), PdfError> {
+        self.interpret_stream(data)
+    }
+
+    /// Consume the interpreter and return the display list.
+    pub fn into_display_list(mut self) -> DisplayList {
+        self.flush_soft_mask();
+        self.display_list
+    }
+
+    /// Reset clip state before rendering annotations.
+    /// This ensures annotations aren't affected by clip regions from the page content.
+    pub fn reset_clip_for_annotations(&mut self) {
+        self.display_list.push(DisplayElement::InitClip);
+        self.gstate.clip_path = None;
+        self.gstate.clip_path_version += 1;
+    }
+
+    /// Render an annotation's normal appearance stream (/AP /N).
+    pub fn render_annotation(&mut self, obj_num: u32, gen_num: u16) -> Result<(), PdfError> {
+        let annot_obj = self.resolver.resolve(obj_num, gen_num)?;
+        let annot_dict = annot_obj
+            .as_dict()
+            .ok_or(PdfError::Other("annotation not a dict".into()))?;
+
+        // Get /Rect [llx, lly, urx, ury]
+        let rect = annot_dict
+            .get_array(b"Rect")
+            .and_then(|a| {
+                if a.len() >= 4 {
+                    Some([
+                        a[0].as_f64()?,
+                        a[1].as_f64()?,
+                        a[2].as_f64()?,
+                        a[3].as_f64()?,
+                    ])
+                } else {
+                    None
+                }
+            })
+            .ok_or(PdfError::Other("annotation missing Rect".into()))?;
+
+        // Get /AP dict → /N (normal appearance)
+        let ap_obj = annot_dict
+            .get(b"AP")
+            .ok_or(PdfError::Other("no AP".into()))?;
+        let ap_dict = match self.resolver.deref(ap_obj)? {
+            PdfObj::Dict(d) => d,
+            _ => return Err(PdfError::Other("AP not a dict".into())),
+        };
+
+        let n_ref = ap_dict
+            .get(b"N")
+            .ok_or(PdfError::Other("no AP/N".into()))?;
+
+        // Resolve to get the Form XObject dict + stream
+        let n_obj = self.resolver.deref(n_ref)?;
+        let form_dict = n_obj
+            .as_dict()
+            .ok_or(PdfError::Other("AP/N not a stream".into()))?;
+
+        // The appearance stream is a Form XObject. Its BBox defines the
+        // coordinate space, and we need to map it to the annotation Rect.
+        let bbox = form_dict
+            .get_array(b"BBox")
+            .and_then(|a| {
+                if a.len() >= 4 {
+                    Some([
+                        a[0].as_f64()?,
+                        a[1].as_f64()?,
+                        a[2].as_f64()?,
+                        a[3].as_f64()?,
+                    ])
+                } else {
+                    None
+                }
+            })
+            .unwrap_or([rect[0], rect[1], rect[2], rect[3]]);
+
+        // Build transform: map BBox → Rect
+        let bbox_w = (bbox[2] - bbox[0]).abs().max(0.001);
+        let bbox_h = (bbox[3] - bbox[1]).abs().max(0.001);
+        let rect_w = (rect[2] - rect[0]).abs();
+        let rect_h = (rect[3] - rect[1]).abs();
+        let sx = rect_w / bbox_w;
+        let sy = rect_h / bbox_h;
+        let tx = rect[0] - bbox[0] * sx;
+        let ty = rect[1] - bbox[1] * sy;
+        let bbox_to_rect = Matrix::new(sx, 0.0, 0.0, sy, tx, ty);
+
+        // Apply form's own matrix if present
+        let form_matrix = form_dict
+            .get_array(b"Matrix")
+            .and_then(|a| {
+                let v: Vec<f64> = a.iter().filter_map(|o| o.as_f64()).collect();
+                if v.len() == 6 {
+                    Some(Matrix::new(v[0], v[1], v[2], v[3], v[4], v[5]))
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(Matrix::identity);
+
+        // Render as a Form XObject with the computed transform
+        self.gstate_stack.push(self.gstate.clone());
+        let saved_resources = self.resources.clone();
+        // Set up resources from the form
+        if let Some(res_obj) = form_dict.get(b"Resources") {
+            if let Ok(PdfObj::Dict(d)) = self.resolver.deref(res_obj) {
+                self.resources = d;
+            }
+        }
+
+        // Apply CTM: page CTM → bbox_to_rect → form_matrix
+        self.gstate.ctm = self.gstate.ctm.concat(&bbox_to_rect).concat(&form_matrix);
+
+        // Note: no BBox clip here — appearance streams do their own internal clipping.
+
+        // Interpret the form content
+        let form_data = self.resolver.stream_data_from_obj(n_ref)?;
+        self.depth += 1;
+        let _ = self.interpret_stream(&form_data);
+        self.depth -= 1;
+
+        // Restore state
+        self.resources = saved_resources;
+        if let Some(gs) = self.gstate_stack.pop() {
+            self.gstate = gs;
+        }
+
+        // Restore clip in display list (annotation may have modified clip state)
+        self.display_list.push(DisplayElement::InitClip);
+        if let Some(ref clip) = self.gstate.clip_path {
+            self.display_list.push(DisplayElement::Clip {
+                path: clip.clone(),
+                params: ClipParams {
+                    fill_rule: FillRule::NonZeroWinding,
+                    ctm: Matrix::identity(),
+                },
+            });
+        }
+
+        Ok(())
+    }
+
     /// Interpret content stream bytes (can be called recursively for Form XObjects).
     fn interpret_stream(&mut self, data: &[u8]) -> Result<(), PdfError> {
         let mut lexer = Lexer::new(data);

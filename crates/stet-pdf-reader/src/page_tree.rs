@@ -23,6 +23,8 @@ pub struct PageInfo {
     pub resources: PdfDict,
     /// Content stream references.
     pub contents: Vec<(u32, u16)>,
+    /// Annotation references (obj_num, gen_num).
+    pub annots: Vec<(u32, u16)>,
 }
 
 /// Inherited attributes propagated down the page tree.
@@ -104,6 +106,9 @@ fn collect_pages_recursive(
         // Parse /Contents (may be a ref to an array, not just a direct array)
         let contents = parse_contents(node_dict, resolver)?;
 
+        // Parse /Annots (annotation references)
+        let annots = parse_annots(node_dict, resolver);
+
         pages.push(PageInfo {
             obj_num,
             media_box,
@@ -111,6 +116,7 @@ fn collect_pages_recursive(
             rotate,
             resources,
             contents,
+            annots,
         });
     } else {
         // Intermediate /Pages node — recurse into /Kids
@@ -173,6 +179,34 @@ fn parse_contents(dict: &PdfDict, resolver: &Resolver) -> Result<Vec<(u32, u16)>
         Some(PdfObj::Array(arr)) => collect_refs_from_array(arr),
         _ => Ok(Vec::new()),
     }
+}
+
+/// Parse /Annots as a list of indirect references.
+fn parse_annots(dict: &PdfDict, resolver: &Resolver) -> Vec<(u32, u16)> {
+    let annot_arr = match dict.get(b"Annots") {
+        Some(PdfObj::Array(arr)) => arr.clone(),
+        Some(PdfObj::Ref(n, g)) => {
+            // Indirect ref to array
+            if let Ok(resolved) = resolver.resolve(*n, *g) {
+                if let PdfObj::Array(arr) = resolved {
+                    arr
+                } else {
+                    return Vec::new();
+                }
+            } else {
+                return Vec::new();
+            }
+        }
+        _ => return Vec::new(),
+    };
+
+    let mut refs = Vec::new();
+    for obj in &annot_arr {
+        if let PdfObj::Ref(n, g) = obj {
+            refs.push((*n, *g));
+        }
+    }
+    refs
 }
 
 /// Extract (obj_num, gen_num) pairs from an array of Ref objects.

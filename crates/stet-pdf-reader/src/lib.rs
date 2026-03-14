@@ -238,14 +238,28 @@ impl<'a> PdfDocument<'a> {
         let content_data = self.page_contents(page)?;
 
         // Interpret content stream
-        let interpreter = ContentInterpreter::new(
+        let mut interpreter = ContentInterpreter::new(
             &self.resolver,
             info.resources.clone(),
             ctm,
             &self.icc_cache,
             self.font_provider.clone(),
         );
-        interpreter.interpret(&content_data)
+
+        // Render page content
+        if let Err(e) = interpreter.interpret_stream_public(&content_data) {
+            eprintln!("warning: content stream error: {}", e);
+        }
+
+        // Render annotation appearance streams (form field values, stamps, etc.)
+        if !info.annots.is_empty() {
+            interpreter.reset_clip_for_annotations();
+            for &(n, g) in &info.annots {
+                let _ = interpreter.render_annotation(n, g);
+            }
+        }
+
+        Ok(interpreter.into_display_list())
     }
 
     /// Render a page to RGBA pixel data at the given DPI.
