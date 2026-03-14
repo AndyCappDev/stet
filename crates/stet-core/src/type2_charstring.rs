@@ -58,6 +58,7 @@ pub fn execute_type2_charstring(
         transient: [0.0; 32],
         width_only,
         has_path: false,
+        seac: None,
     };
 
     execute_bytes(&mut state, data, local_subrs, global_subrs, 0)?;
@@ -68,6 +69,7 @@ pub fn execute_type2_charstring(
         width_y: 0.0,
         lsb_x: 0.0,
         lsb_y: 0.0,
+        seac: state.seac,
     })
 }
 
@@ -87,6 +89,8 @@ struct T2State {
     width_only: bool,
     /// Whether we have emitted any path segments (for implicit close).
     has_path: bool,
+    /// Deprecated seac from endchar with 4 args: (adx, ady, bchar, achar).
+    seac: Option<(f64, f64, u8, u8)>,
 }
 
 /// Execute a charstring byte stream (recursive for subroutine calls).
@@ -569,12 +573,32 @@ fn op_rlinecurve(state: &mut T2State) {
 // ---------------------------------------------------------------------------
 
 fn op_endchar(state: &mut T2State) {
-    if state.stack.len() >= 4 && !state.width_parsed {
-        check_width(state, 4);
-    } else if !state.width_parsed {
-        check_width(state, 0);
-    }
+    // Deprecated seac: endchar with 4+ args = [width] adx ady bchar achar endchar
+    // With width: 5 args. Without width: 4 args.
+    let seac_args = if state.stack.len() >= 4 {
+        // Extract seac args from the END of the stack first
+        let n = state.stack.len();
+        let adx = state.stack[n - 4];
+        let ady = state.stack[n - 3];
+        let bchar = state.stack[n - 2] as u8;
+        let achar = state.stack[n - 1] as u8;
+        // If 5+ args, first arg is width
+        if n >= 5 && !state.width_parsed {
+            state.width_parsed = true;
+            state.advance_width = state.stack[0] + state.nominal_width_x;
+        } else if !state.width_parsed {
+            state.width_parsed = true;
+            state.advance_width = state.default_width_x;
+        }
+        Some((adx, ady, bchar, achar))
+    } else {
+        if !state.width_parsed {
+            check_width(state, 0);
+        }
+        None
+    };
     state.stack.clear();
+    state.seac = seac_args;
 
     if state.width_only {
         return;

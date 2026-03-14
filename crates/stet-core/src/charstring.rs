@@ -17,6 +17,9 @@ pub struct CharstringResult {
     pub width_y: f64,
     pub lsb_x: f64,
     pub lsb_y: f64,
+    /// Deprecated seac (Standard Encoding Accented Character) from endchar with 4 args.
+    /// Contains (adx, ady, bchar, achar) — Standard Encoding codes for base and accent.
+    pub seac: Option<(f64, f64, u8, u8)>,
 }
 
 /// Decrypt a charstring using the Type 1 charstring cipher (R=4330).
@@ -70,6 +73,7 @@ pub fn execute_charstring_ex(
         width_y: interp.width_y,
         lsb_x: interp.lsb_x,
         lsb_y: interp.lsb_y,
+        seac: None,
     })
 }
 
@@ -92,6 +96,7 @@ pub fn execute_charstring_with_offset(
         width_y: interp.width_y,
         lsb_x: interp.lsb_x,
         lsb_y: interp.lsb_y,
+        seac: None,
     })
 }
 

@@ -1365,6 +1365,51 @@ impl CffPdfFont {
             false,
         )
         .ok()?;
+
+        // Handle deprecated seac (accented character composition)
+        if let Some((adx, ady, bchar, achar)) = result.seac {
+            return self.compose_seac(adx, ady, bchar, achar);
+        }
+
         Some(result.path)
+    }
+
+    /// Compose a seac (Standard Encoding Accented Character) glyph from
+    /// base and accent glyphs. bchar/achar are Standard Encoding codes.
+    fn compose_seac(&self, adx: f64, ady: f64, bchar: u8, achar: u8) -> Option<PsPath> {
+        use stet_core::encoding::STANDARD_ENCODING;
+
+        let base_name = STANDARD_ENCODING.get(bchar as usize).copied().unwrap_or("");
+        let accent_name = STANDARD_ENCODING.get(achar as usize).copied().unwrap_or("");
+
+        let base_gid = self.font.charset.iter().position(|n| n == base_name)?;
+        let accent_gid = self.font.charset.iter().position(|n| n == accent_name)?;
+
+        let base_result = execute_type2_charstring(
+            &self.font.char_strings[base_gid],
+            &self.font.local_subrs,
+            &self.font.global_subrs,
+            self.font.default_width_x,
+            self.font.nominal_width_x,
+            false,
+        )
+        .ok()?;
+
+        let accent_result = execute_type2_charstring(
+            &self.font.char_strings[accent_gid],
+            &self.font.local_subrs,
+            &self.font.global_subrs,
+            self.font.default_width_x,
+            self.font.nominal_width_x,
+            false,
+        )
+        .ok()?;
+
+        // Combine: base path + accent path offset by (adx, ady)
+        let mut combined = base_result.path;
+        let offset = Matrix::translate(adx, ady);
+        let shifted_accent = accent_result.path.transform(&offset);
+        combined.segments.extend_from_slice(&shifted_accent.segments);
+        Some(combined)
     }
 }
