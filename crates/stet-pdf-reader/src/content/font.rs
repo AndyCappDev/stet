@@ -130,9 +130,10 @@ pub fn resolve_font(
     let first_char = font_dict.get_int(b"FirstChar").unwrap_or(0) as usize;
     let _last_char = font_dict.get_int(b"LastChar").unwrap_or(255) as usize;
 
-    // Parse widths array from font dict, or fall back to standard 14 font metrics.
+    // Parse widths array from font dict.
     // /Widths may be a direct array or an indirect reference — resolve if needed.
     let mut widths = [0.0f64; 256];
+    let mut has_pdf_widths = false;
     let widths_obj = font_dict.get(b"Widths").and_then(|obj| {
         if obj.as_array().is_some() {
             Some(obj.clone())
@@ -147,10 +148,7 @@ pub fn resolve_font(
                 widths[code] = obj.as_f64().unwrap_or(0.0) / 1000.0;
             }
         }
-    } else if let Some(base_font) = font_dict.get_name(b"BaseFont") {
-        if let Some(std_widths) = super::standard_fonts::standard_font_widths(base_font) {
-            widths = std_widths;
-        }
+        has_pdf_widths = true;
     }
 
     // Resolve encoding
@@ -173,7 +171,7 @@ pub fn resolve_font(
                 Ok(font) => return Ok(font),
                 Err(_) => {
                     if let Some(font) =
-                        substitute_font(&base_font_name, encoding.clone(), widths, font_provider)
+                        substitute_font(&base_font_name, encoding.clone(), widths, has_pdf_widths, font_provider)
                     {
                         return Ok(font);
                     }
@@ -187,7 +185,7 @@ pub fn resolve_font(
                 Ok(font) => return Ok(font),
                 Err(_) => {
                     if let Some(font) =
-                        substitute_font(&base_font_name, encoding.clone(), widths, font_provider)
+                        substitute_font(&base_font_name, encoding.clone(), widths, has_pdf_widths, font_provider)
                     {
                         return Ok(font);
                     }
@@ -199,7 +197,7 @@ pub fn resolve_font(
                 Ok(font) => return Ok(font),
                 Err(_) => {
                     if let Some(font) =
-                        substitute_font(&base_font_name, encoding.clone(), widths, font_provider)
+                        substitute_font(&base_font_name, encoding.clone(), widths, has_pdf_widths, font_provider)
                     {
                         return Ok(font);
                     }
@@ -208,7 +206,7 @@ pub fn resolve_font(
         }
     }
     // No embedded font program — try font substitution
-    if let Some(font) = substitute_font(&base_font_name, encoding.clone(), widths, font_provider) {
+    if let Some(font) = substitute_font(&base_font_name, encoding.clone(), widths, has_pdf_widths, font_provider) {
         return Ok(font);
     }
 
@@ -338,7 +336,7 @@ pub fn fallback_font(font_provider: Option<&FontProvider>) -> Option<PdfFont> {
     });
     let widths = super::standard_fonts::standard_font_widths(b"Helvetica")
         .unwrap_or([0.0f64; 256]);
-    substitute_font("Helvetica", encoding, widths, font_provider)
+    substitute_font("Helvetica", encoding, widths, false, font_provider)
 }
 
 /// Try to load a substitute font for a non-embedded font.
@@ -346,6 +344,7 @@ fn substitute_font(
     base_font: &str,
     encoding: [Option<String>; 256],
     widths: [f64; 256],
+    has_pdf_widths: bool,
     font_provider: Option<&FontProvider>,
 ) -> Option<PdfFont> {
     use stet_core::font_loader::FONT_SUBSTITUTIONS;
@@ -386,17 +385,29 @@ fn substitute_font(
     let fm = font.font_matrix;
     let font_matrix = Matrix::new(fm[0], fm[1], fm[2], fm[3], fm[4], fm[5]);
 
-    // If the PDF didn't provide widths, derive them from the substitute font
-    let widths = if widths.iter().all(|&w| w == 0.0) {
+    // If the PDF didn't provide an explicit /Widths array, derive widths from
+    // the substitute font's charstrings. Standard 14 font fallback tables are
+    // indexed by StandardEncoding and give wrong widths for other encodings
+    // (WinAnsiEncoding, MacRomanEncoding, or custom /Differences).
+    let widths = if !has_pdf_widths {
         let mut derived = [0.0f64; 256];
+        // Get .notdef width as fallback for unmapped codes
+        let notdef_width = font
+            .charstrings
+            .get(".notdef")
+            .and_then(|cs| execute_charstring(cs, &font.subrs, font.len_iv, false).ok())
+            .map(|r| r.width_x * fm[0])
+            .unwrap_or(0.0);
         for code in 0..256usize {
-            if let Some(glyph_name) = &encoding[code] {
-                if let Some(cs) = font.charstrings.get(glyph_name.as_str()) {
-                    if let Ok(result) = execute_charstring(cs, &font.subrs, font.len_iv, false) {
-                        // Width is in glyph space; scale by font matrix to get text space
-                        derived[code] = result.width_x * fm[0];
-                    }
+            let glyph_name = encoding[code].as_deref().unwrap_or(".notdef");
+            if let Some(cs) = font.charstrings.get(glyph_name) {
+                if let Ok(result) = execute_charstring(cs, &font.subrs, font.len_iv, false) {
+                    // Width is in glyph space; scale by font matrix to get text space
+                    derived[code] = result.width_x * fm[0];
                 }
+            } else {
+                // Glyph not found — use .notdef width
+                derived[code] = notdef_width;
             }
         }
         derived
