@@ -1827,7 +1827,6 @@ fn render_element(
     match element {
         DisplayElement::Fill { path, params } => {
             let needs_overprint = params.overprint
-                && params.painted_channels != 0
                 && band_state.cmyk_buffer.is_some();
 
             if needs_overprint {
@@ -1917,7 +1916,6 @@ fn render_element(
 
             // Check for overprint stroke needing CMYK simulation
             let needs_overprint = params.overprint
-                && params.painted_channels != 0
                 && band_state.cmyk_buffer.is_some();
 
             if needs_overprint {
@@ -2020,7 +2018,6 @@ fn render_element(
             }
 
             let needs_overprint = params.overprint
-                && params.painted_channels != 0
                 && band_state.cmyk_buffer.is_some();
 
             if needs_overprint {
@@ -3429,37 +3426,37 @@ fn has_overprint_elements(list: &DisplayList) -> bool {
     for elem in list.elements() {
         match elem {
             DisplayElement::Fill { params, .. } => {
-                if params.overprint && params.painted_channels != 0 {
+                if params.overprint {
                     return true;
                 }
             }
             DisplayElement::Stroke { params, .. } => {
-                if params.overprint && params.painted_channels != 0 {
+                if params.overprint {
                     return true;
                 }
             }
             DisplayElement::Image { params, .. } => {
-                if params.overprint && params.painted_channels != 0 {
+                if params.overprint {
                     return true;
                 }
             }
             DisplayElement::AxialShading { params } => {
-                if params.overprint && params.painted_channels != 0 {
+                if params.overprint {
                     return true;
                 }
             }
             DisplayElement::RadialShading { params } => {
-                if params.overprint && params.painted_channels != 0 {
+                if params.overprint {
                     return true;
                 }
             }
             DisplayElement::MeshShading { params } => {
-                if params.overprint && params.painted_channels != 0 {
+                if params.overprint {
                     return true;
                 }
             }
             DisplayElement::PatchShading { params } => {
-                if params.overprint && params.painted_channels != 0 {
+                if params.overprint {
                     return true;
                 }
             }
@@ -3539,6 +3536,11 @@ fn render_overprint_fill(
     });
 
     let mut channels = params.painted_channels;
+    // Non-CMYK fills (painted_channels=0, e.g. Separation spot colors, RGB, Gray)
+    // replace all color at each pixel — update all CMYK channels to keep buffer in sync.
+    if channels == 0 {
+        channels = stet_core::device::CMYK_ALL;
+    }
     // OPM 1 per-pixel zero filtering only applies to DeviceCMYK, not DeviceN/Separation
     if params.overprint_mode == 1
         && channels == stet_core::device::CMYK_ALL
@@ -3839,6 +3841,11 @@ fn render_overprint_image(
                 };
 
             let mut channels = params.painted_channels;
+            // Non-CMYK images (painted_channels=0, e.g. Separation/DeviceN spot colors)
+            // replace all CMYK channels with the tinted equivalent.
+            if channels == 0 {
+                channels = stet_core::device::CMYK_ALL;
+            }
             let is_direct_cmyk = matches!(
                 &params.color_space,
                 ImageColorSpace::DeviceCMYK
@@ -4026,7 +4033,7 @@ fn sample_pixel_cmyk(
             }
         }
         ImageColorSpace::Separation { alt_space, tint_table, .. } => {
-            if !matches!(alt_space.as_ref(), ImageColorSpace::DeviceCMYK) { return None; }
+            if !matches!(alt_space.as_ref(), ImageColorSpace::DeviceCMYK | ImageColorSpace::ICCBased { n: 4, .. }) { return None; }
             let si = row * iw + col;
             if si >= sample_data.len() { return None; }
             let tint = sample_data[si] as f32 / 255.0;
@@ -4035,7 +4042,7 @@ fn sample_pixel_cmyk(
             Some((alt[0] as f64, alt[1] as f64, alt[2] as f64, alt[3] as f64))
         }
         ImageColorSpace::DeviceN { alt_space, tint_table, .. } => {
-            if !matches!(alt_space.as_ref(), ImageColorSpace::DeviceCMYK) { return None; }
+            if !matches!(alt_space.as_ref(), ImageColorSpace::DeviceCMYK | ImageColorSpace::ICCBased { n: 4, .. }) { return None; }
             let ni = tint_table.num_inputs as usize;
             let si = (row * iw + col) * ni;
             if si + ni > sample_data.len() { return None; }
@@ -4069,7 +4076,7 @@ fn sample_pixel_cmyk(
             if li + base_ncomp <= lookup.len() {
                 match base.as_ref() {
                     ImageColorSpace::Separation { alt_space, tint_table, .. }
-                        if matches!(alt_space.as_ref(), ImageColorSpace::DeviceCMYK) =>
+                        if matches!(alt_space.as_ref(), ImageColorSpace::DeviceCMYK | ImageColorSpace::ICCBased { n: 4, .. }) =>
                     {
                         let tint = lookup[li] as f32 / 255.0;
                         let mut alt = [0.0f32; 4];
@@ -4077,7 +4084,7 @@ fn sample_pixel_cmyk(
                         return Some((alt[0] as f64, alt[1] as f64, alt[2] as f64, alt[3] as f64));
                     }
                     ImageColorSpace::DeviceN { alt_space, tint_table, .. }
-                        if matches!(alt_space.as_ref(), ImageColorSpace::DeviceCMYK) =>
+                        if matches!(alt_space.as_ref(), ImageColorSpace::DeviceCMYK | ImageColorSpace::ICCBased { n: 4, .. }) =>
                     {
                         let ni = tint_table.num_inputs as usize;
                         let mut inputs = vec![0.0f32; ni];
