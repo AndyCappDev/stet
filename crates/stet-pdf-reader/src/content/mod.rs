@@ -27,7 +27,7 @@ use self::graphics_state::{ColorSpaceRef, PdfGraphicsState};
 use std::sync::Arc;
 
 use self::font::{FontCache, PdfFont};
-use self::graphics_state::TilingPattern;
+use self::graphics_state::{ShadingPatternDL, TilingPattern};
 use crate::FontProvider;
 use stet_core::device::{ClipParams, ImageColorSpace, ImageParams, PatternFillParams};
 use stet_core::icc::IccCache;
@@ -869,7 +869,22 @@ impl<'a> ContentInterpreter<'a> {
 
     /// Emit a fill — either a pattern fill or a regular solid fill.
     fn emit_fill(&mut self, path: PsPath, fill_rule: FillRule) {
-        if let Some(pattern) = self.gstate.fill_pattern.clone() {
+        if let Some(shading_box) = self.gstate.fill_shading_pattern.clone() {
+            // PatternType 2 (shading pattern): clip to fill path, then emit shading.
+            // The surrounding q/Q scope restores the clip when the content block ends.
+            self.display_list.push(DisplayElement::Clip {
+                path,
+                params: ClipParams {
+                    fill_rule,
+                    ctm: Matrix::identity(),
+                },
+            });
+            // Update clip tracking so Q knows to restore
+            self.gstate.clip_path_version += 1;
+            for elem in shading_box.0.elements() {
+                self.display_list.push(elem.clone());
+            }
+        } else if let Some(pattern) = self.gstate.fill_pattern.clone() {
             self.display_list.push(DisplayElement::PatternFill {
                 params: PatternFillParams {
                     path,
@@ -961,6 +976,7 @@ impl<'a> ContentInterpreter<'a> {
         self.gstate.fill_painted_channels = 0;
         self.gstate.fill_is_device_cmyk = false;
         self.gstate.fill_pattern = None;
+        self.gstate.fill_shading_pattern = None;
         Ok(())
     }
 
@@ -981,6 +997,7 @@ impl<'a> ContentInterpreter<'a> {
         self.gstate.fill_painted_channels = 0;
         self.gstate.fill_is_device_cmyk = false;
         self.gstate.fill_pattern = None;
+        self.gstate.fill_shading_pattern = None;
         Ok(())
     }
 
@@ -1003,6 +1020,7 @@ impl<'a> ContentInterpreter<'a> {
         self.gstate.fill_painted_channels = stet_core::device::CMYK_ALL;
         self.gstate.fill_is_device_cmyk = true;
         self.gstate.fill_pattern = None;
+        self.gstate.fill_shading_pattern = None;
         Ok(())
     }
 
@@ -1076,6 +1094,7 @@ impl<'a> ContentInterpreter<'a> {
         self.gstate.fill_color =
             components_to_device_color_icc(&cs, &nums, Some(&mut self.icc_cache));
         self.gstate.fill_pattern = None;
+        self.gstate.fill_shading_pattern = None;
         Ok(())
     }
 
@@ -2472,8 +2491,31 @@ impl<'a> ContentInterpreter<'a> {
             .and_then(|o| o.as_name())
             .ok_or(PdfError::Other("pattern: expected name".into()))?
             .to_vec();
-        let pattern = self.resolve_pattern(&name)?;
-        self.gstate.fill_pattern = Some(pattern);
+
+        // Check PatternType before resolving — Type 2 (shading) needs different handling
+        let pattern_dict = self
+            .resolve_resource_subdict(b"Pattern")
+            .ok_or(PdfError::Other("no Pattern resources".into()))?;
+        let pat_ref = pattern_dict.get(&name).ok_or_else(|| {
+            PdfError::Other(format!("Pattern /{} not found", String::from_utf8_lossy(&name)))
+        })?;
+        let pat_obj = self.resolver.deref(pat_ref)?;
+        let pat_dict = pat_obj
+            .as_dict()
+            .ok_or(PdfError::Other("Pattern is not a dict".into()))?;
+        let pattern_type = pat_dict.get_int(b"PatternType").unwrap_or(1) as i32;
+
+        if pattern_type == 2 {
+            let shading_dl = self.resolve_shading_pattern(pat_dict)?;
+            self.gstate.fill_pattern = None;
+            self.gstate.fill_shading_pattern = Some(Box::new(
+                ShadingPatternDL(shading_dl),
+            ));
+        } else {
+            let pattern = self.resolve_pattern(&name)?;
+            self.gstate.fill_shading_pattern = None;
+            self.gstate.fill_pattern = Some(pattern);
+        }
         Ok(())
     }
 
@@ -2599,8 +2641,13 @@ impl<'a> ContentInterpreter<'a> {
         })
     }
 
-    #[allow(dead_code)]
-    fn handle_shading_pattern(&mut self, pat_dict: &PdfDict) -> Result<(), PdfError> {
+    /// Resolve a PatternType 2 (shading pattern) by rendering the shading into
+    /// a display list. The caller stores this and emits it at fill time,
+    /// clipped to the fill path.
+    fn resolve_shading_pattern(
+        &mut self,
+        pat_dict: &PdfDict,
+    ) -> Result<DisplayList, PdfError> {
         let sh_ref = pat_dict
             .get(b"Shading")
             .ok_or(PdfError::Other("shading pattern missing /Shading".into()))?;
@@ -2622,20 +2669,24 @@ impl<'a> ContentInterpreter<'a> {
             })
             .unwrap_or_else(Matrix::identity);
 
+        // Render the shading into a temporary display list with pattern matrix
+        // applied to the CTM so coordinates are in device space.
+        let combined_matrix = self.initial_ctm.concat(&pattern_matrix);
         let saved_ctm = self.gstate.ctm;
-        self.gstate.ctm = self.gstate.ctm.concat(&pattern_matrix);
+        self.gstate.ctm = combined_matrix;
 
+        let mut shading_dl = DisplayList::new();
         let result = crate::resources::shading::handle_shading(
             &sh_ref_clone,
             sh_dict,
             &self.gstate,
             self.resolver,
-            &mut self.display_list,
+            &mut shading_dl,
             &mut self.icc_cache,
         );
-
         self.gstate.ctm = saved_ctm;
-        result
+        result?;
+        Ok(shading_dl)
     }
 }
 

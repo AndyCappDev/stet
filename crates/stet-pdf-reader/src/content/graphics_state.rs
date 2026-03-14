@@ -10,6 +10,18 @@ use stet_core::graphics_state::{
     DashPattern, DeviceColor, FillRule, LineCap, LineJoin, Matrix, PsPath,
 };
 
+/// Wrapper for a shading pattern's display list (Debug-friendly).
+#[derive(Clone)]
+pub struct ShadingPatternDL(pub DisplayList);
+
+impl std::fmt::Debug for ShadingPatternDL {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ShadingPatternDL")
+            .field("elements", &self.0.len())
+            .finish()
+    }
+}
+
 /// A resolved tiling pattern ready to be applied at fill/stroke time.
 #[derive(Clone)]
 pub struct TilingPattern {
@@ -133,6 +145,10 @@ pub struct PdfGraphicsState {
     pub text_font_name: Vec<u8>,
     /// Active tiling pattern for fill (set by scn with Pattern color space).
     pub fill_pattern: Option<TilingPattern>,
+    /// Active shading pattern for fill (PatternType 2).
+    /// Stored as `Option<Box<DisplayList>>` so PdfGraphicsState can derive Debug
+    /// (DisplayList doesn't implement Debug).
+    pub fill_shading_pattern: Option<Box<ShadingPatternDL>>,
     /// Active tiling pattern for stroke (set by SCN with Pattern color space).
     pub stroke_pattern: Option<TilingPattern>,
     /// Counter for unique pattern IDs.
@@ -182,6 +198,7 @@ impl PdfGraphicsState {
             text_rendering_mode: 0,
             text_font_name: Vec::new(),
             fill_pattern: None,
+            fill_shading_pattern: None,
             stroke_pattern: None,
             next_pattern_id: 0,
             transfer: TransferState::default(),

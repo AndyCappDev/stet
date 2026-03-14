@@ -5650,8 +5650,7 @@ fn render_mesh_shading(
                 let w1 = ((y2 - y0) * (pxf - x2) + (x0 - x2) * (pyf - y2)) * inv_denom;
                 let w2 = 1.0 - w0 - w1;
 
-                const BARY_EPSILON: f64 = -0.01;
-                if w0 < BARY_EPSILON || w1 < BARY_EPSILON || w2 < BARY_EPSILON {
+                if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
                     continue;
                 }
 

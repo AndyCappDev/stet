@@ -202,8 +202,11 @@ pub fn parse_type4_mesh(
         ))
     };
 
-    // Running list of vertices for edge connectivity
-    let mut vertices: Vec<ShadingVertex> = Vec::new();
+    // Track the previous triangle's A, B, C vertices for edge connectivity.
+    // Flag 1 reuses edge BC; flag 2 reuses edge AC.
+    let mut prev_a: Option<ShadingVertex> = None;
+    let mut prev_b: Option<ShadingVertex> = None;
+    let mut prev_c: Option<ShadingVertex> = None;
 
     while !reader.exhausted() {
         let Some((flag, vertex)) = read_vertex(&mut reader) else {
@@ -213,42 +216,48 @@ pub fn parse_type4_mesh(
         match flag {
             0 => {
                 // New independent triangle: need 2 more vertices
-                vertices.clear();
-                vertices.push(vertex);
-                for _ in 0..2 {
-                    let Some((_, v)) = read_vertex(&mut reader) else {
-                        break;
-                    };
-                    vertices.push(v);
-                }
-                if vertices.len() == 3 {
-                    triangles.push(ShadingTriangle {
-                        v0: vertices[0].clone(),
-                        v1: vertices[1].clone(),
-                        v2: vertices[2].clone(),
-                    });
-                }
+                let a = vertex;
+                let Some((_, b)) = read_vertex(&mut reader) else {
+                    break;
+                };
+                let Some((_, c)) = read_vertex(&mut reader) else {
+                    break;
+                };
+                triangles.push(ShadingTriangle {
+                    v0: a.clone(),
+                    v1: b.clone(),
+                    v2: c.clone(),
+                });
+                prev_a = Some(a);
+                prev_b = Some(b);
+                prev_c = Some(c);
             }
             1 => {
-                // Share edge BC of previous triangle
-                if vertices.len() >= 2 {
-                    let len = vertices.len();
-                    let v0 = vertices[len - 2].clone();
-                    let v1 = vertices[len - 1].clone();
-                    vertices.push(vertex);
-                    let v2 = vertices.last().unwrap().clone();
-                    triangles.push(ShadingTriangle { v0, v1, v2 });
+                // Share edge BC of previous triangle ABC → new triangle BCD
+                if let (Some(b), Some(c)) = (&prev_b, &prev_c) {
+                    let d = vertex;
+                    triangles.push(ShadingTriangle {
+                        v0: b.clone(),
+                        v1: c.clone(),
+                        v2: d.clone(),
+                    });
+                    prev_a = Some(b.clone());
+                    prev_b = Some(c.clone());
+                    prev_c = Some(d);
                 }
             }
             2 => {
-                // Share edge AC of previous triangle
-                if vertices.len() >= 3 {
-                    let len = vertices.len();
-                    let v0 = vertices[len - 3].clone();
-                    let v1 = vertices[len - 1].clone();
-                    vertices.push(vertex);
-                    let v2 = vertices.last().unwrap().clone();
-                    triangles.push(ShadingTriangle { v0, v1, v2 });
+                // Share edge AC of previous triangle ABC → new triangle ACD
+                if let (Some(a), Some(c)) = (&prev_a, &prev_c) {
+                    let d = vertex;
+                    triangles.push(ShadingTriangle {
+                        v0: a.clone(),
+                        v1: c.clone(),
+                        v2: d.clone(),
+                    });
+                    prev_a = Some(a.clone());
+                    prev_b = Some(c.clone());
+                    prev_c = Some(d);
                 }
             }
             _ => {}
