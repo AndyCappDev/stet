@@ -428,7 +428,7 @@ fn fuzzy_font_match(name: &str) -> Option<&'static str> {
         });
     }
     if lower.contains("helvetica") || lower.contains("arial") || lower.contains("sans")
-        || lower.contains("calibri")
+        || lower.contains("calibri") || lower.contains("verdana") || lower.contains("tahoma")
     {
         return Some(match (is_bold, is_italic) {
             (true, true) => "NimbusSans-BoldItalic",

@@ -478,7 +478,7 @@ fn decode_jpx(data: &[u8]) -> Result<Vec<u8>, PdfError> {
     let mut params = openjp2::opj_dparameters_t::default();
     codec.setup_decoder(&mut params);
 
-    // Create stream with C-style callbacks (safe API doesn't expose memory-backed streams)
+    // Create stream with C-style callbacks for in-memory data
     let user_data = Box::new(JpxBuffer {
         data: data.as_ptr(),
         len: data.len(),
