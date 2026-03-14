@@ -1826,8 +1826,12 @@ fn render_element(
 ) {
     match element {
         DisplayElement::Fill { path, params } => {
+            // Only use overprint path for CMYK fills with partial channels.
+            // When all channels are painted (CMYK_ALL) or for non-CMYK fills,
+            // overprint has no visual effect — use the normal rendering path.
             let needs_overprint = params.overprint
                 && params.is_device_cmyk
+                && params.painted_channels != stet_core::device::CMYK_ALL
                 && band_state.cmyk_buffer.is_some();
 
             if needs_overprint {
@@ -1915,70 +1919,59 @@ fn render_element(
                 path
             };
 
-            // Check for overprint stroke needing CMYK simulation
             let needs_overprint = params.overprint
+                && params.painted_channels != 0
                 && band_state.cmyk_buffer.is_some();
 
+            // For overprint strokes, try converting stroke outline to a fill
+            // for per-channel CMYK simulation. If the stroke-to-fill conversion
+            // fails (e.g., hairline strokes too thin for outline conversion),
+            // fall through to the normal stroke path so the stroke still renders.
+            let mut overprint_handled = false;
             if needs_overprint {
-                // Convert stroke to fill path and use overprint fill logic
-                let Some(skia_path) = build_skia_path(draw_path) else {
-                    return;
-                };
-                let resolution_scale = (transform.sx * transform.sx + transform.sy * transform.sy).sqrt().max(1.0);
-                if let Some(transformed) = skia_path.clone().transform(transform) {
-                    if let Some(stroked) = transformed.stroke(&stroke, resolution_scale) {
-                        let fill_params = FillParams {
-                            color: params.color.clone(),
-                            fill_rule: FillRule::NonZeroWinding,
-                            ctm: Matrix::identity(),
-                            is_text_glyph: false,
-                            overprint: params.overprint,
-                            overprint_mode: params.overprint_mode,
-                            painted_channels: params.painted_channels,
-                            is_device_cmyk: false,
-                            spot_color: params.spot_color.clone(),
-                            rendering_intent: params.rendering_intent,
-                            transfer: params.transfer.clone(),
-                            halftone: params.halftone.clone(),
-                            bg_ucr: params.bg_ucr.clone(),
-                            alpha: params.alpha,
-                            blend_mode: params.blend_mode,
-                        };
-                        let stroked_path = skia_path_to_ps_path(&stroked);
-                        let mut cmyk_buf = band_state.cmyk_buffer.take().unwrap();
-                        // Transform already applied to the stroked path, use identity context
-                        let identity_ctx = RenderContext {
-                            vp_x: 0.0,
-                            vp_y: 0.0,
-                            scale_x: 1.0,
-                            scale_y: 1.0,
-                            out_w: ctx.out_w,
-                            out_h: ctx.out_h,
-                            effective_dpi: ctx.effective_dpi,
-                            icc: ctx.icc,
-                            image_cache: ctx.image_cache,
-                            elem_idx: ctx.elem_idx,
-                            no_aa: ctx.no_aa,
-                        };
-                        render_overprint_fill(
-                            pixmap,
-                            &mut cmyk_buf,
-                            band_state,
-                            &stroked_path,
-                            &fill_params,
-                            identity_ctx.vp_x,
-                            identity_ctx.vp_y,
-                            identity_ctx.scale_x,
-                            identity_ctx.scale_y,
-                            identity_ctx.out_w,
-                            identity_ctx.out_h,
-                            identity_ctx.icc,
-                            identity_ctx.no_aa,
-                        );
-                        band_state.cmyk_buffer = Some(cmyk_buf);
+                let skia_path_op = build_skia_path(draw_path);
+                if let Some(skia_path) = skia_path_op {
+                    let resolution_scale = (transform.sx * transform.sx + transform.sy * transform.sy).sqrt().max(1.0);
+                    if let Some(transformed) = skia_path.clone().transform(transform) {
+                        if let Some(stroked) = transformed.stroke(&stroke, resolution_scale) {
+                            overprint_handled = true;
+                            let fill_params = FillParams {
+                                color: params.color.clone(),
+                                fill_rule: FillRule::NonZeroWinding,
+                                ctm: Matrix::identity(),
+                                is_text_glyph: false,
+                                overprint: params.overprint,
+                                overprint_mode: params.overprint_mode,
+                                painted_channels: params.painted_channels,
+                                is_device_cmyk: false,
+                                spot_color: params.spot_color.clone(),
+                                rendering_intent: params.rendering_intent,
+                                transfer: params.transfer.clone(),
+                                halftone: params.halftone.clone(),
+                                bg_ucr: params.bg_ucr.clone(),
+                                alpha: params.alpha,
+                                blend_mode: params.blend_mode,
+                            };
+                            let stroked_path = skia_path_to_ps_path(&stroked);
+                            let mut cmyk_buf = band_state.cmyk_buffer.take().unwrap();
+                            render_overprint_fill(
+                                pixmap,
+                                &mut cmyk_buf,
+                                band_state,
+                                &stroked_path,
+                                &fill_params,
+                                0.0, 0.0, 1.0, 1.0,
+                                ctx.out_w,
+                                ctx.out_h,
+                                ctx.icc,
+                                ctx.no_aa,
+                            );
+                            band_state.cmyk_buffer = Some(cmyk_buf);
+                        }
                     }
                 }
-            } else {
+            }
+            if !overprint_handled {
                 let Some(skia_path) = build_skia_path(draw_path) else {
                     return;
                 };
