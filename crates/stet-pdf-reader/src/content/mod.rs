@@ -110,6 +110,9 @@ pub struct ContentInterpreter<'a> {
     soft_mask_scope: Option<SoftMaskScope>,
     /// Optional font data provider for environments without filesystem access.
     font_provider: Option<FontProvider>,
+    /// Accumulated text clip path (for text rendering modes 4-7).
+    /// Built up during BT..ET, applied as clip at ET.
+    text_clip_path: Option<PsPath>,
 }
 
 impl<'a> ContentInterpreter<'a> {
@@ -139,6 +142,7 @@ impl<'a> ContentInterpreter<'a> {
             icc_cache: icc_cache.clone(),
             soft_mask_scope: None,
             font_provider,
+            text_clip_path: None,
         }
     }
 
@@ -311,6 +315,18 @@ impl<'a> ContentInterpreter<'a> {
             }
             b"ET" => {
                 self.in_text = false;
+                // Apply accumulated text clip path (from rendering modes 4-7)
+                if let Some(clip_path) = self.text_clip_path.take() {
+                    if !clip_path.is_empty() {
+                        self.display_list.push(DisplayElement::Clip {
+                            path: clip_path,
+                            params: ClipParams {
+                                fill_rule: FillRule::NonZeroWinding,
+                                ctm: Matrix::identity(),
+                            },
+                        });
+                    }
+                }
                 Ok(())
             }
             b"Tf" => self.op_tf(),
@@ -1213,13 +1229,15 @@ impl<'a> ContentInterpreter<'a> {
     ///        4-7=same as 0-3 but add to clipping path (clipping not yet implemented).
     fn emit_text_glyph(&mut self, device_path: PsPath, render_mode: i32) {
         let mode = render_mode & 3; // strip clip bit
+        let clip = render_mode & 4 != 0; // bit 2 = add to text clip
+
         match mode {
             0 => {
                 // Fill only
                 let mut params = self.gstate.fill_params(FillRule::NonZeroWinding);
                 params.is_text_glyph = true;
                 self.display_list.push(DisplayElement::Fill {
-                    path: device_path,
+                    path: device_path.clone(),
                     params,
                 });
             }
@@ -1228,7 +1246,7 @@ impl<'a> ContentInterpreter<'a> {
                 let mut params = self.gstate.stroke_params();
                 params.is_text_glyph = true;
                 self.display_list.push(DisplayElement::Stroke {
-                    path: device_path,
+                    path: device_path.clone(),
                     params,
                 });
             }
@@ -1243,11 +1261,17 @@ impl<'a> ContentInterpreter<'a> {
                 let mut stroke_params = self.gstate.stroke_params();
                 stroke_params.is_text_glyph = true;
                 self.display_list.push(DisplayElement::Stroke {
-                    path: device_path,
+                    path: device_path.clone(),
                     params: stroke_params,
                 });
             }
             _ => {} // mode 3 = invisible
+        }
+
+        // Modes 4-7: accumulate glyph path into text clip
+        if clip {
+            let tcp = self.text_clip_path.get_or_insert_with(PsPath::new);
+            tcp.segments.extend_from_slice(&device_path.segments);
         }
     }
 

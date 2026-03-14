@@ -3553,6 +3553,7 @@ fn render_overprint_fill(
         if src_k != 0.0 { channels |= stet_core::device::CMYK_K; }
     }
 
+
     if channels == stet_core::device::CMYK_ALL {
         let cov_data = coverage_mask.data();
         let stride = out_w as usize;
@@ -3648,9 +3649,16 @@ fn render_overprint_fill(
                 cmyk_to_rgb_plrm(new_c, new_m, new_y, new_k)
             };
 
-            px_data[pi] = (r * 255.0).round() as u8;
-            px_data[pi + 1] = (g * 255.0).round() as u8;
-            px_data[pi + 2] = (b * 255.0).round() as u8;
+            let a = (cov * params.alpha as f32).min(1.0);
+            let dst_a = px_data[pi + 3] as f32 / 255.0;
+            let out_a = a + dst_a * (1.0 - a);
+            if out_a > 0.0 {
+                let inv = 1.0 / out_a;
+                px_data[pi] = ((r as f32 * a + px_data[pi] as f32 / 255.0 * dst_a * (1.0 - a)) * inv * 255.0).round() as u8;
+                px_data[pi + 1] = ((g as f32 * a + px_data[pi + 1] as f32 / 255.0 * dst_a * (1.0 - a)) * inv * 255.0).round() as u8;
+                px_data[pi + 2] = ((b as f32 * a + px_data[pi + 2] as f32 / 255.0 * dst_a * (1.0 - a)) * inv * 255.0).round() as u8;
+                px_data[pi + 3] = (out_a * 255.0).round() as u8;
+            }
         }
     }
 }
