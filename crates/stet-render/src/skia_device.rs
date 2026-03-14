@@ -2012,7 +2012,8 @@ fn render_element(
             }
 
             let needs_overprint = params.overprint
-                && band_state.cmyk_buffer.is_some();
+                && band_state.cmyk_buffer.is_some()
+                && image_supports_overprint(&params.color_space);
 
             if needs_overprint {
                 let mut cmyk_buf = band_state.cmyk_buffer.take().unwrap();
@@ -4000,6 +4001,21 @@ fn update_cmyk_buffer_for_image(
         }
     }
 }
+/// Check if an image color space can be rendered through the overprint path.
+/// Image masks always work (they use the fill color's native CMYK).
+/// Other color spaces must be CMYK-resolvable via `sample_pixel_cmyk`.
+fn image_supports_overprint(cs: &ImageColorSpace) -> bool {
+    match cs {
+        ImageColorSpace::Mask { .. } => true,
+        ImageColorSpace::DeviceCMYK | ImageColorSpace::ICCBased { n: 4, .. } => true,
+        ImageColorSpace::Separation { alt_space, .. } | ImageColorSpace::DeviceN { alt_space, .. } => {
+            matches!(alt_space.as_ref(), ImageColorSpace::DeviceCMYK | ImageColorSpace::ICCBased { n: 4, .. })
+        }
+        ImageColorSpace::Indexed { base, .. } => image_supports_overprint(base),
+        _ => false,
+    }
+}
+
 /// Check if an image color space is CMYK-based (DeviceCMYK, ICCBased 4-component, or Indexed over CMYK).
 fn is_cmyk_color_space(cs: &ImageColorSpace) -> bool {
     match cs {

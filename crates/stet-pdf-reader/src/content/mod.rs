@@ -1554,6 +1554,7 @@ impl<'a> ContentInterpreter<'a> {
         });
 
         // Convert data if BPC != 8 (but NOT for image masks — keep raw 1-bit data)
+        let is_indexed = matches!(&color_space, ImageColorSpace::Indexed { .. });
         let sample_data = if is_image_mask || bpc == 8 || bpc == 0 {
             sample_data
         } else {
@@ -1563,6 +1564,7 @@ impl<'a> ContentInterpreter<'a> {
                 width,
                 height,
                 color_space.num_components(),
+                is_indexed,
             )
         };
 
@@ -1570,7 +1572,6 @@ impl<'a> ContentInterpreter<'a> {
         // Default for most color spaces is [0 1 0 1 ...] (identity).
         // For Indexed color spaces, default is [0 2^bpc-1] and values are indices.
         // CMYK images may use [1 0 1 0 1 0 1 0] to invert values.
-        let is_indexed = matches!(&color_space, ImageColorSpace::Indexed { .. });
         let sample_data = if !is_image_mask {
             if let Some(decode) = dict.get_array(b"Decode") {
                 let n_comps = color_space.num_components() as usize;
@@ -2097,8 +2098,9 @@ impl<'a> ContentInterpreter<'a> {
         };
 
         // Expand bits if needed (but NOT for image masks — keep raw 1-bit packed data)
+        let is_indexed = matches!(&color_space, ImageColorSpace::Indexed { .. });
         let sample_data = if !is_image_mask && bpc != 8 && bpc != 0 {
-            expand_bits_to_bytes(&sample_data, bpc, width, height, n_components)
+            expand_bits_to_bytes(&sample_data, bpc, width, height, n_components, is_indexed)
         } else {
             sample_data
         };
@@ -2805,6 +2807,7 @@ fn expand_bits_to_bytes(
     width: u32,
     height: u32,
     components: u32,
+    is_indexed: bool,
 ) -> Vec<u8> {
     if bpc == 0 || bpc == 8 {
         return data.to_vec();
@@ -2843,8 +2846,13 @@ fn expand_bits_to_bytes(
                 cur_byte += 1;
             }
 
-            // Scale to 0-255
-            result.push((val as f64 / max_val * 255.0 + 0.5) as u8);
+            // For Indexed color spaces, values are palette indices — keep raw.
+            // For other color spaces, scale to 0-255.
+            if is_indexed {
+                result.push(val as u8);
+            } else {
+                result.push((val as f64 / max_val * 255.0 + 0.5) as u8);
+            }
         }
     }
 
