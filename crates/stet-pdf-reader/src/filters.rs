@@ -398,55 +398,111 @@ fn decode_ccittfax(data: &[u8], parms: Option<&PdfDict>) -> Result<Vec<u8>, PdfE
         })
         .unwrap_or(false);
 
-    let row_bytes = (columns as usize + 7) / 8;
-    let mut output = Vec::new();
-    let mut line_count: u32 = 0;
+    let encoded_byte_align = parms
+        .and_then(|p| match p.get(b"EncodedByteAlign") {
+            Some(PdfObj::Bool(b)) => Some(*b),
+            _ => None,
+        })
+        .unwrap_or(false);
 
-    let mut process_line = |transitions: &[u16]| {
-        if !end_of_block && rows_limit > 0 && line_count >= rows_limit {
-            return;
-        }
-
-        let line = fax::decoder::Line {
-            transitions,
-            width: columns,
-        };
-        let mut row = vec![0u8; row_bytes];
-        for (i, color) in line.pels().enumerate() {
-            if i >= columns as usize {
-                break;
-            }
-            if matches!(color, fax::Color::Black) {
-                row[i / 8] |= 0x80 >> (i % 8);
-            }
-        }
-
-        if !black_is1 {
-            for byte in &mut row {
-                *byte = !*byte;
-            }
-        }
-
-        output.extend_from_slice(&row);
-        line_count += 1;
+    let encoding = if k < 0 {
+        hayro_ccitt::EncodingMode::Group4
+    } else if k == 0 {
+        hayro_ccitt::EncodingMode::Group3_1D
+    } else {
+        hayro_ccitt::EncodingMode::Group3_2D { k: k as u32 }
     };
 
-    if k < 0 {
-        let height = if rows_limit > 0 {
-            Some(rows_limit as u16)
-        } else {
-            None
-        };
-        fax::decoder::decode_g4(data.iter().copied(), columns, height, |transitions| {
-            process_line(transitions);
-        });
-    } else {
-        fax::decoder::decode_g3(data.iter().copied(), |transitions| {
-            process_line(transitions);
-        });
+    let settings = hayro_ccitt::DecodeSettings {
+        columns: columns as u32,
+        rows: if rows_limit > 0 { rows_limit } else { u32::MAX },
+        end_of_block,
+        end_of_line: false,
+        rows_are_byte_aligned: encoded_byte_align,
+        encoding,
+        invert_black: false,
+    };
+
+    decode_ccitt_hayro(data, &settings, black_is1)
+}
+
+/// A byte-oriented CCITT pixel decoder used by hayro-ccitt.
+/// Packs decoded pixels into bytes (MSB first), with `black_is1` polarity control.
+struct CcittByteDecoder {
+    output: Vec<u8>,
+    current_byte: u8,
+    bit_pos: u8,
+    black_is1: bool,
+}
+
+impl CcittByteDecoder {
+    fn new(black_is1: bool) -> Self {
+        Self {
+            output: Vec::new(),
+            current_byte: 0,
+            bit_pos: 0,
+            black_is1,
+        }
     }
 
-    Ok(output)
+    fn flush_byte(&mut self) {
+        if self.bit_pos > 0 {
+            // Shift remaining bits to MSB position and pad
+            let remaining = 8 - self.bit_pos;
+            self.current_byte <<= remaining;
+            if !self.black_is1 {
+                // Pad unfilled bits as white (1)
+                self.current_byte |= (1u8 << remaining) - 1;
+            }
+            self.output.push(self.current_byte);
+            self.current_byte = 0;
+            self.bit_pos = 0;
+        }
+    }
+}
+
+impl hayro_ccitt::Decoder for CcittByteDecoder {
+    fn push_pixel(&mut self, white: bool) {
+        // black_is1=true: black=1, white=0
+        // black_is1=false: black=0, white=1
+        let bit = if self.black_is1 { !white } else { white };
+        self.current_byte = (self.current_byte << 1) | (bit as u8);
+        self.bit_pos += 1;
+        if self.bit_pos == 8 {
+            self.output.push(self.current_byte);
+            self.current_byte = 0;
+            self.bit_pos = 0;
+        }
+    }
+
+    fn push_pixel_chunk(&mut self, white: bool, chunk_count: u32) {
+        let byte = if (self.black_is1 && !white) || (!self.black_is1 && white) {
+            0xFF
+        } else {
+            0x00
+        };
+        for _ in 0..chunk_count {
+            self.output.push(byte);
+        }
+    }
+
+    fn next_line(&mut self) {
+        self.flush_byte();
+    }
+}
+
+/// Decode CCITT data using hayro-ccitt (supports Group 3 and Group 4).
+fn decode_ccitt_hayro(
+    data: &[u8],
+    settings: &hayro_ccitt::DecodeSettings,
+    black_is1: bool,
+) -> Result<Vec<u8>, PdfError> {
+    let mut decoder = CcittByteDecoder::new(black_is1);
+    if let Err(e) = hayro_ccitt::decode(data, &mut decoder, settings) {
+        // Continue with partial data on error — many PDFs have slightly malformed CCITT
+        eprintln!("[CCITT] decode warning: {} (using partial data)", e);
+    }
+    Ok(decoder.output)
 }
 
 /// JPXDecode (JPEG 2000).
