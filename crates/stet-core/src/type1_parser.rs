@@ -19,6 +19,8 @@ pub struct Type1Font {
     pub charstrings: HashMap<String, Vec<u8>>, // glyph name → encrypted bytes
     pub subrs: Vec<Vec<u8>>,                   // subroutine charstrings (encrypted)
     pub len_iv: usize,                         // default 4
+    /// Multiple Master weight vector (for blend interpolation).
+    pub weight_vector: Option<Vec<f64>>,
 }
 
 /// Decrypt data using the Type 1 cipher.
@@ -133,6 +135,10 @@ pub fn parse_type1(data: &[u8]) -> Result<Type1Font, String> {
     let charstrings = parse_charstrings(&decrypted);
     let subrs = parse_subrs(&decrypted);
 
+    // Parse /WeightVector from header (Multiple Master fonts)
+    let weight_vector = parse_weight_vector(header)
+        .or_else(|| parse_weight_vector(&decrypted));
+
     Ok(Type1Font {
         font_name,
         font_matrix,
@@ -142,6 +148,7 @@ pub fn parse_type1(data: &[u8]) -> Result<Type1Font, String> {
         charstrings,
         subrs,
         len_iv,
+        weight_vector,
     })
 }
 
@@ -165,6 +172,21 @@ fn parse_font_name(header: &[u8]) -> Result<String, String> {
         }
     }
     Err("Missing /FontName in font header".to_string())
+}
+
+/// Parse /WeightVector from font data (Multiple Master fonts).
+fn parse_weight_vector(data: &[u8]) -> Option<Vec<f64>> {
+    let text = String::from_utf8_lossy(data);
+    let idx = text.find("/WeightVector")?;
+    let after = &text[idx + "/WeightVector".len()..];
+    let bracket_idx = after.find('[')?;
+    let end_idx = after[bracket_idx..].find(']')?;
+    let inner = &after[bracket_idx + 1..bracket_idx + end_idx];
+    let vals: Vec<f64> = inner
+        .split_whitespace()
+        .filter_map(|s| s.parse().ok())
+        .collect();
+    if vals.is_empty() { None } else { Some(vals) }
 }
 
 /// Parse /FontMatrix [a b c d tx ty] from ASCII header.

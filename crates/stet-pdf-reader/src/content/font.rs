@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use stet_core::cff_parser::{CffFont, parse_cff};
-use stet_core::charstring::execute_charstring;
+use stet_core::charstring::{execute_charstring, execute_charstring_mm};
 use stet_core::encoding::{MACROMAN_ENCODING, STANDARD_ENCODING, WINANSI_ENCODING};
 use stet_core::graphics_state::{Matrix, PsPath};
 use stet_core::truetype::{get_glyf_data, get_units_per_em, parse_cmap, parse_glyf_to_path};
@@ -38,6 +38,8 @@ pub struct Type1PdfFont {
     pub encoding: [Option<String>; 256],
     pub widths: [f64; 256],
     pub font_matrix: Matrix,
+    /// Multiple Master weight vector (for blend OtherSubrs 14-17).
+    pub weight_vector: Option<Vec<f64>>,
 }
 
 pub struct TrueTypePdfFont {
@@ -130,7 +132,7 @@ pub fn resolve_font(
     }
 
     let first_char = font_dict.get_int(b"FirstChar").unwrap_or(0) as usize;
-    let _last_char = font_dict.get_int(b"LastChar").unwrap_or(255) as usize;
+    let last_char = font_dict.get_int(b"LastChar").unwrap_or(255) as usize;
 
     // Parse widths array from font dict.
     // /Widths may be a direct array or an indirect reference — resolve if needed.
@@ -151,6 +153,20 @@ pub fn resolve_font(
             }
         }
         has_pdf_widths = true;
+
+        // Apply /MissingWidth from FontDescriptor to charcodes outside [FirstChar, LastChar].
+        // Per PDF spec, charcodes not covered by /Widths use /MissingWidth (default 0).
+        let descriptor = get_font_descriptor(font_dict, resolver)?;
+        if let Some(ref desc) = descriptor {
+            let missing_w = desc.get_f64(b"MissingWidth").unwrap_or(0.0) / 1000.0;
+            if missing_w != 0.0 {
+                for code in 0..256 {
+                    if code < first_char || code > last_char {
+                        widths[code] = missing_w;
+                    }
+                }
+            }
+        }
     }
 
     // Resolve encoding.  Track whether the PDF dict had an explicit /Encoding —
@@ -419,11 +435,15 @@ fn substitute_font(
         widths
     };
 
+    // Substitute fonts don't use Multiple Master blending
+    let weight_vector = font.weight_vector.clone();
+
     Some(PdfFont::Type1(Type1PdfFont {
         font,
         encoding,
         widths,
         font_matrix,
+        weight_vector,
     }))
 }
 
@@ -703,11 +723,13 @@ fn resolve_type1(
     let fm = font.font_matrix;
     let font_matrix = Matrix::new(fm[0], fm[1], fm[2], fm[3], fm[4], fm[5]);
 
+    let weight_vector = font.weight_vector.clone();
     Ok(PdfFont::Type1(Type1PdfFont {
         font,
         encoding,
         widths,
         font_matrix,
+        weight_vector,
     }))
 }
 
@@ -1270,10 +1292,20 @@ impl PdfFont {
 impl Type1PdfFont {
     fn glyph_path(&self, char_code: u8) -> Option<PsPath> {
         let glyph_name = self.encoding[char_code as usize].as_deref()?;
-        let charstring = self.font.charstrings.get(glyph_name);
-        let charstring = charstring?;
-        let result =
-            execute_charstring(charstring, &self.font.subrs, self.font.len_iv, false).ok()?;
+        let charstring = self.font.charstrings.get(glyph_name)?;
+        // Provide charstring lookup for seac (accented character composition)
+        let cs_lookup = |name: &str| -> Option<Vec<u8>> {
+            self.font.charstrings.get(name).cloned()
+        };
+        let result = execute_charstring_mm(
+            charstring,
+            &self.font.subrs,
+            self.font.len_iv,
+            false,
+            Some(&cs_lookup),
+            self.weight_vector.as_deref(),
+        )
+        .ok()?;
         Some(result.path)
     }
 }

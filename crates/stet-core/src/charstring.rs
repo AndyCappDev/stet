@@ -64,8 +64,21 @@ pub fn execute_charstring_ex(
     width_only: bool,
     cs_lookup: Option<&CharstringLookup<'_>>,
 ) -> Result<CharstringResult, String> {
+    execute_charstring_mm(charstring, subrs, len_iv, width_only, cs_lookup, None)
+}
+
+/// Execute a Type 1 charstring with Multiple Master weight vector support.
+pub fn execute_charstring_mm(
+    charstring: &[u8],
+    subrs: &[Vec<u8>],
+    len_iv: usize,
+    width_only: bool,
+    cs_lookup: Option<&CharstringLookup<'_>>,
+    weight_vector: Option<&[f64]>,
+) -> Result<CharstringResult, String> {
     let decrypted = decrypt_charstring(charstring, len_iv);
     let mut interp = CharstringInterp::new(subrs, len_iv, width_only, cs_lookup);
+    interp.weight_vector = weight_vector.map(|wv| wv.to_vec());
     interp.execute(&decrypted)?;
     Ok(CharstringResult {
         path: interp.path,
@@ -85,10 +98,23 @@ pub fn execute_charstring_with_offset(
     offset_x: f64,
     offset_y: f64,
 ) -> Result<CharstringResult, String> {
+    execute_charstring_with_offset_mm(charstring, subrs, len_iv, offset_x, offset_y, None)
+}
+
+/// Execute a charstring for seac with MM weight vector support.
+pub fn execute_charstring_with_offset_mm(
+    charstring: &[u8],
+    subrs: &[Vec<u8>],
+    len_iv: usize,
+    offset_x: f64,
+    offset_y: f64,
+    weight_vector: Option<&[f64]>,
+) -> Result<CharstringResult, String> {
     let decrypted = decrypt_charstring(charstring, len_iv);
     let mut interp = CharstringInterp::new(subrs, len_iv, false, None);
     interp.x = offset_x;
     interp.y = offset_y;
+    interp.weight_vector = weight_vector.map(|wv| wv.to_vec());
     interp.execute(&decrypted)?;
     Ok(CharstringResult {
         path: interp.path,
@@ -121,6 +147,8 @@ struct CharstringInterp<'a> {
     ps_stack: Vec<f64>,
     // Charstring lookup for seac composite character support
     cs_lookup: Option<&'a CharstringLookup<'a>>,
+    // Multiple Master weight vector for blend OtherSubrs (14-17)
+    weight_vector: Option<Vec<f64>>,
 }
 
 impl<'a> CharstringInterp<'a> {
@@ -147,6 +175,7 @@ impl<'a> CharstringInterp<'a> {
             flex_points: Vec::new(),
             ps_stack: Vec::new(),
             cs_lookup,
+            weight_vector: None,
         }
     }
 
@@ -626,6 +655,51 @@ impl<'a> CharstringInterp<'a> {
                     3 => {
                         // Hint replacement — push 3 onto ps_stack for pop
                         self.ps_stack.push(3.0);
+                    }
+                    14..=18 => {
+                        // Multiple Master blend OtherSubrs:
+                        // OtherSubr 14 = blend 1 value, 15 = 2, 16 = 3, 17 = 4, 18 = 6
+                        let num_results = match subr_num {
+                            14 => 1,
+                            15 => 2,
+                            16 => 3,
+                            17 => 4,
+                            18 => 6,
+                            _ => unreachable!(),
+                        };
+                        if let Some(ref wv) = self.weight_vector {
+                            let nm = wv.len(); // number of masters
+                            let nd = nm - 1; // number of deltas per result
+                            // Layout after pop+reverse:
+                            //   [base0, base1, ..., baseN-1,
+                            //    d0_w1, d0_w2, ..., d0_wN-1,
+                            //    d1_w1, d1_w2, ..., d1_wN-1, ...]
+                            // result[r] = base[r] + w[1]*d[r][0] + w[2]*d[r][1] + ... + w[nm-1]*d[r][nd-1]
+                            //
+                            // Push results in REVERSE order so pop retrieves result0
+                            // first (matching the PS OtherSubr code's stack layout).
+                            let mut results = Vec::with_capacity(num_results);
+                            for r in 0..num_results {
+                                let base_val = if r < args.len() { args[r] } else { 0.0 };
+                                let mut blended = base_val;
+                                for j in 0..nd {
+                                    let delta_idx = num_results + r * nd + j;
+                                    let weight_idx = j + 1;
+                                    if delta_idx < args.len() && weight_idx < wv.len() {
+                                        blended += wv[weight_idx] * args[delta_idx];
+                                    }
+                                }
+                                results.push(blended);
+                            }
+                            for r in results.into_iter().rev() {
+                                self.ps_stack.push(r);
+                            }
+                        } else {
+                            // No weight vector — use base values only
+                            for r in 0..num_results {
+                                self.ps_stack.push(if r < args.len() { args[r] } else { 0.0 });
+                            }
+                        }
                     }
                     _ => {
                         // Unknown OtherSubr — push args onto ps_stack
