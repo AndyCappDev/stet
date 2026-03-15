@@ -609,11 +609,16 @@ pub fn convert_icc_image_data(
     height: u32,
     icc_cache: &mut IccCache,
 ) -> Option<(Vec<u8>, ImageColorSpace)> {
-    let (_n, profile_data) = match cs {
-        ResolvedColorSpace::ICCBased { n, profile_data } => (*n, profile_data.as_ref()?),
+    let hash = match cs {
+        ResolvedColorSpace::ICCBased { profile_data, .. } => {
+            icc_cache.register_profile(profile_data.as_ref()?)?
+        }
+        ResolvedColorSpace::DeviceCMYK => {
+            // Use the system CMYK profile for DeviceCMYK images
+            icc_cache.default_cmyk_hash()?.clone()
+        }
         _ => return None,
     };
-    let hash = icc_cache.register_profile(profile_data)?;
     let pixel_count = (width * height) as usize;
     let rgb_data = icc_cache.convert_image_8bit(&hash, data, pixel_count)?;
     Some((rgb_data, ImageColorSpace::DeviceRGB))
