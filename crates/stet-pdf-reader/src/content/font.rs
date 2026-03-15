@@ -403,7 +403,7 @@ fn substitute_font(
 
     let font = parse_type1(&font_data).ok()?;
     let fm = font.font_matrix;
-    let font_matrix = Matrix::new(fm[0], fm[1], fm[2], fm[3], fm[4], fm[5]);
+    let mut font_matrix = Matrix::new(fm[0], fm[1], fm[2], fm[3], fm[4], fm[5]);
 
     // If the PDF didn't provide an explicit /Widths array, derive widths from
     // the substitute font's charstrings. Standard 14 font fallback tables are
@@ -432,6 +432,50 @@ fn substitute_font(
         }
         derived
     } else {
+        // When the PDF font name indicates a narrow/condensed variant but the
+        // substitute is a regular-width font, scale glyph outlines horizontally
+        // to match the PDF's expected character widths.
+        let lower_name = clean_name.to_ascii_lowercase();
+        let is_narrow = lower_name.contains("narrow")
+            || lower_name.contains("condensed")
+            || lower_name.contains("compressed");
+        if is_narrow {
+            let mut pdf_sum = 0.0;
+            let mut sub_sum = 0.0;
+            let mut count = 0;
+            for code in 0..256usize {
+                let pdf_w = widths[code];
+                if pdf_w <= 0.0 {
+                    continue;
+                }
+                let glyph_name = match encoding[code].as_deref() {
+                    Some(n) if n != ".notdef" && n != "space" => n,
+                    _ => continue,
+                };
+                if let Some(cs) = font.charstrings.get(glyph_name) {
+                    if let Ok(result) =
+                        execute_charstring(cs, &font.subrs, font.len_iv, false)
+                    {
+                        let sub_w = result.width_x * fm[0];
+                        if sub_w > 0.0 {
+                            let ratio = pdf_w / sub_w;
+                            // Skip mismatched entries (likely unused encoding slots)
+                            if ratio > 0.5 && ratio < 2.0 {
+                                pdf_sum += pdf_w;
+                                sub_sum += sub_w;
+                                count += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            if count > 5 && sub_sum > 0.0 {
+                let ratio = pdf_sum / sub_sum;
+                if (ratio - 1.0).abs() > 0.03 {
+                    font_matrix.a *= ratio;
+                }
+            }
+        }
         widths
     };
 

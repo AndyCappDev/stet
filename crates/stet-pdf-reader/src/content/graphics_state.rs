@@ -143,6 +143,8 @@ pub struct PdfGraphicsState {
     pub word_spacing: f64,
     pub text_leading: f64,
     pub text_rise: f64,
+    /// Horizontal scaling factor (Tz / 100). Default 1.0 = 100%.
+    pub horizontal_scaling: f64,
     pub text_rendering_mode: i32,
     pub text_font_name: Vec<u8>,
     /// Active tiling pattern for fill (set by scn with Pattern color space).
@@ -199,6 +201,7 @@ impl PdfGraphicsState {
             word_spacing: 0.0,
             text_leading: 0.0,
             text_rise: 0.0,
+            horizontal_scaling: 1.0,
             text_rendering_mode: 0,
             text_font_name: Vec::new(),
             fill_pattern: None,

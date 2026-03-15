@@ -501,6 +501,10 @@ impl<'a> ContentInterpreter<'a> {
                 self.gstate.text_rise = self.pop_number()?;
                 Ok(())
             }
+            b"Tz" => {
+                self.gstate.horizontal_scaling = self.pop_number()? / 100.0;
+                Ok(())
+            }
             b"Td" => self.op_td(),
             b"TD" => self.op_big_td(),
             b"Tm" => self.op_tm(),
@@ -1252,12 +1256,14 @@ impl<'a> ContentInterpreter<'a> {
                 PdfObj::Str(s) => self.show_text(s),
                 PdfObj::Int(n) => {
                     // Negative number → shift right, positive → shift left
-                    let shift = -*n as f64 / 1000.0 * self.gstate.font_size;
+                    let th = self.gstate.horizontal_scaling;
+                    let shift = -*n as f64 / 1000.0 * self.gstate.font_size * th;
                     let m = Matrix::translate(shift, 0.0);
                     self.gstate.text_matrix = self.gstate.text_matrix.concat(&m);
                 }
                 PdfObj::Real(f) => {
-                    let shift = -f / 1000.0 * self.gstate.font_size;
+                    let th = self.gstate.horizontal_scaling;
+                    let shift = -f / 1000.0 * self.gstate.font_size * th;
                     let m = Matrix::translate(shift, 0.0);
                     self.gstate.text_matrix = self.gstate.text_matrix.concat(&m);
                 }
@@ -1297,6 +1303,7 @@ impl<'a> ContentInterpreter<'a> {
         let char_spacing = self.gstate.char_spacing;
         let word_spacing = self.gstate.word_spacing;
         let text_rise = self.gstate.text_rise;
+        let th = self.gstate.horizontal_scaling;
         let font_matrix = font.font_matrix();
         let render_mode = self.gstate.text_rendering_mode;
 
@@ -1309,7 +1316,7 @@ impl<'a> ContentInterpreter<'a> {
 
                 if let Some(glyph_path) = font.glyph_path_cid(cid) {
                     let text_state_matrix =
-                        Matrix::new(font_size, 0.0, 0.0, font_size, 0.0, text_rise);
+                        Matrix::new(font_size * th, 0.0, 0.0, font_size, 0.0, text_rise);
                     let trm = self
                         .gstate
                         .ctm
@@ -1323,7 +1330,7 @@ impl<'a> ContentInterpreter<'a> {
                 }
 
                 let w0 = font.glyph_width_cid(cid);
-                let tx = w0 * font_size + char_spacing;
+                let tx = (w0 * font_size + char_spacing) * th;
                 let advance = Matrix::translate(tx, 0.0);
                 self.gstate.text_matrix = self.gstate.text_matrix.concat(&advance);
             }
@@ -1340,6 +1347,7 @@ impl<'a> ContentInterpreter<'a> {
                 if byte == b' ' {
                     tx += word_spacing;
                 }
+                tx *= th;
                 let advance = Matrix::translate(tx, 0.0);
                 self.gstate.text_matrix = self.gstate.text_matrix.concat(&advance);
             }
@@ -1348,7 +1356,7 @@ impl<'a> ContentInterpreter<'a> {
             for &byte in text {
                 if let Some(glyph_path) = font.glyph_path(byte) {
                     let text_state_matrix =
-                        Matrix::new(font_size, 0.0, 0.0, font_size, 0.0, text_rise);
+                        Matrix::new(font_size * th, 0.0, 0.0, font_size, 0.0, text_rise);
                     let trm = self
                         .gstate
                         .ctm
@@ -1366,6 +1374,7 @@ impl<'a> ContentInterpreter<'a> {
                 if byte == b' ' {
                     tx += word_spacing;
                 }
+                tx *= th;
                 let advance = Matrix::translate(tx, 0.0);
                 self.gstate.text_matrix = self.gstate.text_matrix.concat(&advance);
             }
