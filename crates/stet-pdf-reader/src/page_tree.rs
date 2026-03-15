@@ -99,7 +99,12 @@ fn collect_pages_recursive(
     {
         // Leaf page node
         let media_box = inherited.media_box.unwrap_or([0.0, 0.0, 612.0, 792.0]); // Default US Letter
-        let crop_box = inherited.crop_box.unwrap_or(media_box);
+        // CropBox defaults to MediaBox; clamp to MediaBox if it extends beyond
+        // (per PDF spec: "should be equal to or smaller than the media box").
+        let crop_box = clamp_box_to_media(
+            &inherited.crop_box.unwrap_or(media_box),
+            &media_box,
+        );
         let rotate = inherited.rotate.unwrap_or(0);
         let resources = inherited.resources.clone().unwrap_or_default();
 
@@ -152,6 +157,21 @@ fn collect_pages_recursive(
     }
 
     Ok(())
+}
+
+/// Clamp a box to fit within the media box (intersection).
+fn clamp_box_to_media(crop: &[f64; 4], media: &[f64; 4]) -> [f64; 4] {
+    // Normalize both boxes so [0]<[2] and [1]<[3]
+    let (c_llx, c_urx) = (crop[0].min(crop[2]), crop[0].max(crop[2]));
+    let (c_lly, c_ury) = (crop[1].min(crop[3]), crop[1].max(crop[3]));
+    let (m_llx, m_urx) = (media[0].min(media[2]), media[0].max(media[2]));
+    let (m_lly, m_ury) = (media[1].min(media[3]), media[1].max(media[3]));
+    [
+        c_llx.max(m_llx),
+        c_lly.max(m_lly),
+        c_urx.min(m_urx),
+        c_ury.min(m_ury),
+    ]
 }
 
 /// Parse a rectangle array [llx, lly, urx, ury] from a dict key.
