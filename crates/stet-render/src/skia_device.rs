@@ -2622,9 +2622,6 @@ fn render_soft_masked(
     let eff_vp_x = ctx.vp_x + crop_x as f32 / ctx.scale_x;
     let eff_vp_y = ctx.vp_y + crop_y as f32 / ctx.scale_y;
 
-    eprintln!("  [SMASK] bbox={:?} vp=({:.0},{:.0}) out={}x{} eff={}x{} crop=({},{}) backdrop={:?}",
-        bbox, ctx.vp_x, ctx.vp_y, ctx.out_w, ctx.out_h, eff_w, eff_h, crop_x, crop_y, params.backdrop_color);
-
     let sub_ctx = RenderContext {
         vp_x: eff_vp_x,
         vp_y: eff_vp_y,
@@ -2776,8 +2773,8 @@ fn extract_soft_mask_values(
             for i in 0..pixel_count {
                 let off = i * 4;
                 let a = rgba[off + 3];
-                if a == 0 {
-                    out[i] = backdrop_byte;
+                let lum_byte = if a == 0 {
+                    backdrop_byte
                 } else {
                     // Un-premultiply to get linear RGB, then compute luminosity
                     let inv_a = 255.0 / a as f64;
@@ -2785,8 +2782,10 @@ fn extract_soft_mask_values(
                     let g = (rgba[off + 1] as f64 * inv_a).min(255.0);
                     let b = (rgba[off + 2] as f64 * inv_a).min(255.0);
                     let lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-                    out[i] = (lum + 0.5).clamp(0.0, 255.0) as u8;
-                }
+                    (lum + 0.5).clamp(0.0, 255.0) as u8
+                };
+                // Apply transfer function inversion: {1 exch sub} → 255 - value
+                out[i] = if params.transfer_invert { 255 - lum_byte } else { lum_byte };
             }
         }
     }

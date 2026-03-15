@@ -2364,6 +2364,7 @@ impl<'a> ContentInterpreter<'a> {
                         subtype: scope.mask.subtype,
                         bbox: scope.mask.bbox,
                         backdrop_color: scope.mask.backdrop_color,
+                        transfer_invert: scope.mask.transfer_invert,
                     },
                 });
             }
@@ -2495,16 +2496,30 @@ impl<'a> ContentInterpreter<'a> {
             None
         };
 
-        // Log warning for /TR (transfer function) — deferred to Phase E5
-        if dict.get(b"TR").is_some() {
-            eprintln!("warning: SMask /TR (transfer function) not implemented, ignoring");
-        }
+        // Check for /TR (transfer function). The common case is {1 exch sub}
+        // which inverts the mask values. Detect this and set a flag.
+        // Check for /TR (transfer function). The common case is {1 exch sub}
+        // which inverts the mask values. Detect this by reading the stream content.
+        let transfer_invert = if let Some(tr_obj) = dict.get(b"TR") {
+            if let Ok(tr_data) = self.resolver.stream_data_from_obj(tr_obj) {
+                let trimmed: Vec<u8> = tr_data.iter().copied()
+                    .filter(|b| !b.is_ascii_whitespace())
+                    .collect();
+                let s = String::from_utf8_lossy(&trimmed);
+                s.contains("exchsub")
+            } else {
+                false
+            }
+        } else {
+            false
+        };
 
         Ok(graphics_state::SoftMask {
             mask_list,
             subtype,
             bbox: device_bbox,
             backdrop_color,
+            transfer_invert,
         })
     }
 

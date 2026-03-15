@@ -64,6 +64,8 @@ pub struct SoftMask {
     pub bbox: [f64; 4],
     /// Backdrop color for luminosity masks (RGB, 0.0–1.0).
     pub backdrop_color: Option<[f64; 3]>,
+    /// Whether the mask values should be inverted (from /TR `{1 exch sub}`).
+    pub transfer_invert: bool,
 }
 
 impl std::fmt::Debug for SoftMask {
