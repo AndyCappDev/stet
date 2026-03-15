@@ -199,35 +199,44 @@ fn decode_flate_inner(data: &[u8], zlib: bool) -> (Result<Vec<u8>, PdfError>, bo
     }
 }
 
-/// LZWDecode.
-fn decode_lzw(data: &[u8], parms: Option<&PdfDict>) -> Result<Vec<u8>, PdfError> {
-    let early_change = parms.and_then(|p| p.get_int(b"EarlyChange")).unwrap_or(1);
-
+/// Try LZW decode with a specific EarlyChange setting.
+fn decode_lzw_try(data: &[u8], early_change: i64) -> Result<Vec<u8>, weezl::LzwError> {
     let mut decoder = if early_change == 0 {
         weezl::decode::Decoder::with_tiff_size_switch(weezl::BitOrder::Msb, 8)
     } else {
         weezl::decode::Decoder::new(weezl::BitOrder::Msb, 8)
     };
+    decoder.decode(data)
+}
 
-    let output = match decoder.decode(data) {
+/// LZWDecode.
+fn decode_lzw(data: &[u8], parms: Option<&PdfDict>) -> Result<Vec<u8>, PdfError> {
+    let early_change = parms.and_then(|p| p.get_int(b"EarlyChange")).unwrap_or(1);
+
+    // Try the requested EarlyChange setting first; if it fails, try the opposite.
+    // Some PDFs omit the EarlyChange parameter but use non-default encoding.
+    let output = match decode_lzw_try(data, early_change) {
         Ok(out) => out,
-        Err(e) => {
-            // Try streaming decode to recover partial data on error
-            let mut dec = if early_change == 0 {
-                weezl::decode::Decoder::with_tiff_size_switch(weezl::BitOrder::Msb, 8)
-            } else {
-                weezl::decode::Decoder::new(weezl::BitOrder::Msb, 8)
-            };
-            let mut out = vec![0u8; data.len() * 4];
-            let result = dec.decode_bytes(data, &mut out);
-            let produced = result.consumed_out;
-            if produced > 0 {
-                out.truncate(produced);
-                out
-            } else {
-                return Err(PdfError::DecompressionError(format!("lzw: {e}")));
+        Err(_) => match decode_lzw_try(data, 1 - early_change) {
+            Ok(out) => out,
+            Err(e) => {
+                // Both failed — try streaming decode to recover partial data
+                let mut dec = if early_change == 0 {
+                    weezl::decode::Decoder::with_tiff_size_switch(weezl::BitOrder::Msb, 8)
+                } else {
+                    weezl::decode::Decoder::new(weezl::BitOrder::Msb, 8)
+                };
+                let mut out = vec![0u8; data.len() * 4];
+                let result = dec.decode_bytes(data, &mut out);
+                let produced = result.consumed_out;
+                if produced > 0 {
+                    out.truncate(produced);
+                    out
+                } else {
+                    return Err(PdfError::DecompressionError(format!("lzw: {e}")));
+                }
             }
-        }
+        },
     };
 
     // Apply predictor if specified
