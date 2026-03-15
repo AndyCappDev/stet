@@ -58,8 +58,23 @@ impl EncryptionState {
         }
 
         // Standard handler: compute encryption key from empty password
+        let encrypt_metadata = encrypt_dict
+            .get(b"EncryptMetadata")
+            .and_then(|o| match o {
+                crate::objects::PdfObj::Bool(b) => Some(*b),
+                _ => None,
+            })
+            .unwrap_or(true);
         let password = b"";
-        let key = compute_encryption_key(password, &o_value, p_value, file_id, key_length, r);
+        let key = compute_encryption_key(
+            password,
+            &o_value,
+            p_value,
+            file_id,
+            key_length,
+            r,
+            encrypt_metadata,
+        );
 
         // Verify against /U value
         if !verify_user_password(&key, &u_value, file_id, r) {
@@ -191,6 +206,7 @@ fn compute_encryption_key(
     file_id: &[u8],
     key_length: usize,
     revision: i32,
+    encrypt_metadata: bool,
 ) -> Vec<u8> {
     // Pad password to 32 bytes
     let padded = pad_password(password);
@@ -200,6 +216,11 @@ fn compute_encryption_key(
     digest.consume(o_value);
     digest.consume(p.to_le_bytes());
     digest.consume(file_id);
+
+    // Step (f): if metadata is not encrypted (R >= 4), include 0xFFFFFFFF
+    if revision >= 4 && !encrypt_metadata {
+        digest.consume([0xFFu8; 4]);
+    }
 
     let mut hash = digest.compute().0;
 

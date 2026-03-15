@@ -151,6 +151,8 @@ pub struct PdfGraphicsState {
     pub fill_shading_pattern: Option<Box<ShadingPatternDL>>,
     /// Active tiling pattern for stroke (set by SCN with Pattern color space).
     pub stroke_pattern: Option<TilingPattern>,
+    /// Active shading pattern for stroke (PatternType 2).
+    pub stroke_shading_pattern: Option<Box<ShadingPatternDL>>,
     /// Counter for unique pattern IDs.
     pub next_pattern_id: u32,
     /// Transfer function state.
@@ -200,6 +202,7 @@ impl PdfGraphicsState {
             fill_pattern: None,
             fill_shading_pattern: None,
             stroke_pattern: None,
+            stroke_shading_pattern: None,
             next_pattern_id: 0,
             transfer: TransferState::default(),
             soft_mask: None,

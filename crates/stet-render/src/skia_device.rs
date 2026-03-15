@@ -2595,19 +2595,35 @@ fn render_soft_masked(
     params: &stet_core::display_list::SoftMaskParams,
     ctx: &RenderContext<'_>,
 ) {
-    let crop = compute_group_crop(&params.bbox, ctx);
+    // The SoftMask's display list elements are in absolute device space (page coords).
+    // When rendered inside a Group, the parent's viewport may be offset from the
+    // SoftMask's bbox. We use the SoftMask's own bbox as the viewport for its
+    // offscreen buffers, then composite back at the correct offset in the parent.
+    let bbox = &params.bbox;
+    let smask_px_x0 = ((bbox[0] as f32 - ctx.vp_x) * ctx.scale_x).floor() as i32;
+    let smask_px_y0 = ((bbox[1] as f32 - ctx.vp_y) * ctx.scale_y).floor() as i32;
+    let smask_px_x1 = ((bbox[2] as f32 - ctx.vp_x) * ctx.scale_x).ceil() as i32;
+    let smask_px_y1 = ((bbox[3] as f32 - ctx.vp_y) * ctx.scale_y).ceil() as i32;
 
-    let (eff_w, eff_h, crop_x, crop_y, eff_vp_x, eff_vp_y) = match crop {
-        Some((cx, cy, cw, ch)) => (
-            cw,
-            ch,
-            cx,
-            cy,
-            ctx.vp_x + cx as f32 / ctx.scale_x,
-            ctx.vp_y + cy as f32 / ctx.scale_y,
-        ),
-        None => (ctx.out_w, ctx.out_h, 0, 0, ctx.vp_x, ctx.vp_y),
-    };
+    // Clip to parent output bounds
+    let crop_x = smask_px_x0.max(0);
+    let crop_y = smask_px_y0.max(0);
+    let crop_x1 = smask_px_x1.min(ctx.out_w as i32);
+    let crop_y1 = smask_px_y1.min(ctx.out_h as i32);
+    if crop_x >= crop_x1 || crop_y >= crop_y1 {
+        return;
+    }
+    let eff_w = (crop_x1 - crop_x) as u32;
+    let eff_h = (crop_y1 - crop_y) as u32;
+
+    // Viewport for the offscreen buffers: derived from the SoftMask's bbox position
+    // relative to the parent's viewport. This ensures the mask/content display list
+    // elements (which are in page device space) render at the correct positions.
+    let eff_vp_x = ctx.vp_x + crop_x as f32 / ctx.scale_x;
+    let eff_vp_y = ctx.vp_y + crop_y as f32 / ctx.scale_y;
+
+    eprintln!("  [SMASK] bbox={:?} vp=({:.0},{:.0}) out={}x{} eff={}x{} crop=({},{}) backdrop={:?}",
+        bbox, ctx.vp_x, ctx.vp_y, ctx.out_w, ctx.out_h, eff_w, eff_h, crop_x, crop_y, params.backdrop_color);
 
     let sub_ctx = RenderContext {
         vp_x: eff_vp_x,

@@ -919,6 +919,13 @@ impl<'a> ContentInterpreter<'a> {
     /// We inverse-transform the path back to user space and pass the CTM to the
     /// renderer so it can apply the stroke correctly.
     fn emit_stroke(&mut self, path: PsPath) {
+        if self.gstate.stroke_shading_pattern.is_some() {
+            // PatternType 2 shading stroke: would need stroke-to-fill conversion
+            // for proper clipping. Skip for now — fill-based shading patterns
+            // (the common case) are fully supported.
+            return;
+        }
+
         let ctm = self.gstate.ctm;
         // Inverse-transform path from device space back to user space
         let user_path = if let Some(inv) = ctm.invert() {
@@ -2154,6 +2161,7 @@ impl<'a> ContentInterpreter<'a> {
             .as_dict()
             .ok_or(PdfError::Other("ExtGState is not a dict".into()))?;
 
+
         // Apply known keys
         if let Some(lw) = gs_dict.get_f64(b"LW") {
             self.gstate.line_width = lw;
@@ -2366,6 +2374,11 @@ impl<'a> ContentInterpreter<'a> {
         // Flush any soft mask scope opened inside the mask form
         self.flush_soft_mask();
 
+        // Compute device-space bbox BEFORE restoring state — the mask form's
+        // display list elements were built with the current CTM (which includes
+        // the form matrix), so the bbox must use the same CTM.
+        let device_bbox = self.compute_device_bbox(bbox_tuple);
+
         let mask_list = std::mem::replace(&mut self.display_list, saved_display_list);
         self.soft_mask_scope = saved_scope;
         self.resources = saved_resources;
@@ -2373,17 +2386,34 @@ impl<'a> ContentInterpreter<'a> {
             self.gstate = saved;
         }
 
-        // Compute device-space bbox
-        let device_bbox = self.compute_device_bbox(bbox_tuple);
-
-        // Parse /BC (backdrop color)
-        let backdrop_color = if let Some(bc_arr) = dict.get_array(b"BC") {
-            let vals: Vec<f64> = bc_arr.iter().filter_map(|o| o.as_f64()).collect();
-            if vals.len() >= 3 {
-                Some([vals[0], vals[1], vals[2]])
-            } else if vals.len() == 1 {
-                // Gray backdrop → replicate to RGB
-                Some([vals[0], vals[0], vals[0]])
+        // Parse /BC (backdrop color) — may be inline array or indirect reference
+        let backdrop_color = if let Some(bc_obj) = dict.get(b"BC") {
+            let bc_resolved = self.resolver.deref(bc_obj).ok();
+            let bc_arr = bc_resolved
+                .as_ref()
+                .and_then(|o| o.as_array())
+                .or_else(|| bc_obj.as_array());
+            if let Some(arr) = bc_arr {
+                let vals: Vec<f64> = arr.iter().filter_map(|o| o.as_f64()).collect();
+                if vals.len() >= 4 {
+                    // CMYK backdrop → convert to RGB via simple formula
+                    let c = vals[0];
+                    let m = vals[1];
+                    let y = vals[2];
+                    let k = vals[3];
+                    Some([
+                        (1.0 - c) * (1.0 - k),
+                        (1.0 - m) * (1.0 - k),
+                        (1.0 - y) * (1.0 - k),
+                    ])
+                } else if vals.len() >= 3 {
+                    Some([vals[0], vals[1], vals[2]])
+                } else if vals.len() == 1 {
+                    // Gray backdrop → replicate to RGB
+                    Some([vals[0], vals[0], vals[0]])
+                } else {
+                    None
+                }
             } else {
                 None
             }
@@ -2537,8 +2567,34 @@ impl<'a> ContentInterpreter<'a> {
             .and_then(|o| o.as_name())
             .ok_or(PdfError::Other("pattern: expected name".into()))?
             .to_vec();
-        let pattern = self.resolve_pattern(&name)?;
-        self.gstate.stroke_pattern = Some(pattern);
+
+        // Check PatternType before resolving — Type 2 (shading) needs different handling
+        let pattern_dict = self
+            .resolve_resource_subdict(b"Pattern")
+            .ok_or(PdfError::Other("no Pattern resources".into()))?;
+        let pat_ref = pattern_dict.get(&name).ok_or_else(|| {
+            PdfError::Other(format!(
+                "Pattern /{} not found",
+                String::from_utf8_lossy(&name)
+            ))
+        })?;
+        let pat_obj = self.resolver.deref(pat_ref)?;
+        let pat_dict = pat_obj
+            .as_dict()
+            .ok_or(PdfError::Other("Pattern is not a dict".into()))?;
+        let pattern_type = pat_dict.get_int(b"PatternType").unwrap_or(1) as i32;
+
+        if pattern_type == 2 {
+            let shading_dl = self.resolve_shading_pattern(pat_dict)?;
+            self.gstate.stroke_pattern = None;
+            self.gstate.stroke_shading_pattern = Some(Box::new(
+                ShadingPatternDL(shading_dl),
+            ));
+        } else {
+            let pattern = self.resolve_pattern(&name)?;
+            self.gstate.stroke_shading_pattern = None;
+            self.gstate.stroke_pattern = Some(pattern);
+        }
         Ok(())
     }
 
