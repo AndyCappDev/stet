@@ -2250,8 +2250,14 @@ fn render_group(
         return;
     };
 
-    // For non-isolated groups, copy the parent backdrop into the offscreen buffer
-    let backdrop = if !params.isolated {
+    // For non-isolated groups, copy the parent backdrop into the offscreen buffer.
+    // Exception: for non-Normal blend modes, render as isolated to avoid
+    // anti-aliased clip edges at BBox boundaries creating visible artifacts.
+    // The contribution-extraction approach (comparing source vs backdrop byte-by-byte)
+    // mishandles partially-blended edge pixels, causing them to be Screen/Multiply/etc.
+    // blended incorrectly. Rendering as isolated uses proper alpha coverage instead.
+    let treat_as_isolated = params.blend_mode != 0;
+    let backdrop = if !params.isolated && !treat_as_isolated {
         let data = if crop.is_some() {
             copy_backdrop_crop(pixmap, crop_x, crop_y, eff_w, eff_h)
         } else {

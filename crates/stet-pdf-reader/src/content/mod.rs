@@ -2946,6 +2946,27 @@ fn merge_rgb_with_smask(
     width: u32,
     height: u32,
 ) -> Vec<u8> {
+    // For Indexed images, expand palette indices to RGB first
+    if let ImageColorSpace::Indexed {
+        base,
+        hival,
+        lookup,
+    } = color_space
+    {
+        let n_base = base.num_components() as usize;
+        let n_pixels = (width * height) as usize;
+        let mut expanded = vec![0u8; n_pixels * n_base];
+        for i in 0..n_pixels {
+            let idx = image_data.get(i).copied().unwrap_or(0) as usize;
+            let idx = idx.min(*hival as usize);
+            let offset = idx * n_base;
+            for c in 0..n_base {
+                expanded[i * n_base + c] = lookup.get(offset + c).copied().unwrap_or(0);
+            }
+        }
+        return merge_rgb_with_smask(&expanded, smask_data, base, width, height);
+    }
+
     let n_pixels = (width * height) as usize;
     let mut rgba = vec![255u8; n_pixels * 4];
     let n_comps = color_space.num_components();
