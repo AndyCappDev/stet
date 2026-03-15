@@ -2485,9 +2485,11 @@ impl<'a> ContentInterpreter<'a> {
         // Render the form into a display list
         let form_data = self.resolver.stream_data_from_obj(g_ref)?;
 
-        // Save state and render
+        // Save state and render (clear font cache — the mask form may have
+        // different font resources with the same resource names as the parent)
         self.gstate_stack.push(self.gstate.clone());
         let saved_resources = std::mem::replace(&mut self.resources, form_resources);
+        let saved_font_cache = std::mem::take(&mut self.font_cache);
         let saved_display_list = std::mem::replace(&mut self.display_list, DisplayList::new());
         let saved_scope = self.soft_mask_scope.take();
 
@@ -2514,6 +2516,7 @@ impl<'a> ContentInterpreter<'a> {
         let mask_list = std::mem::replace(&mut self.display_list, saved_display_list);
         self.soft_mask_scope = saved_scope;
         self.resources = saved_resources;
+        self.font_cache = saved_font_cache;
         if let Some(saved) = self.gstate_stack.pop() {
             self.gstate = saved;
         }
