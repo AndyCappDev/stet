@@ -174,8 +174,9 @@ pub fn parse_type4_mesh(
 
     let mut color_params: Vec<(f64, f64)> = Vec::with_capacity(n_comps);
     for i in 0..n_comps {
-        let c_min = decode[4 + i * 2];
-        let c_max = decode[4 + i * 2 + 1];
+        let idx = 4 + i * 2;
+        let c_min = decode.get(idx).copied().unwrap_or(0.0);
+        let c_max = decode.get(idx + 1).copied().unwrap_or(1.0);
         color_params.push((c_min, decode_scale(bpco, c_min, c_max)));
     }
 
@@ -295,8 +296,9 @@ pub fn parse_type5_mesh(
 
     let mut color_params: Vec<(f64, f64)> = Vec::with_capacity(n_comps);
     for i in 0..n_comps {
-        let c_min = decode[4 + i * 2];
-        let c_max = decode[4 + i * 2 + 1];
+        let idx = 4 + i * 2;
+        let c_min = decode.get(idx).copied().unwrap_or(0.0);
+        let c_max = decode.get(idx + 1).copied().unwrap_or(1.0);
         color_params.push((c_min, decode_scale(bpco, c_min, c_max)));
     }
 
@@ -387,8 +389,9 @@ pub fn parse_type6_patches(
 
     let mut color_params: Vec<(f64, f64)> = Vec::with_capacity(n_comps);
     for i in 0..n_comps {
-        let c_min = decode[4 + i * 2];
-        let c_max = decode[4 + i * 2 + 1];
+        let idx = 4 + i * 2;
+        let c_min = decode.get(idx).copied().unwrap_or(0.0);
+        let c_max = decode.get(idx + 1).copied().unwrap_or(1.0);
         color_params.push((c_min, decode_scale(bpco, c_min, c_max)));
     }
 
@@ -553,8 +556,9 @@ pub fn parse_type7_patches(
 
     let mut color_params: Vec<(f64, f64)> = Vec::with_capacity(n_comps);
     for i in 0..n_comps {
-        let c_min = decode[4 + i * 2];
-        let c_max = decode[4 + i * 2 + 1];
+        let idx = 4 + i * 2;
+        let c_min = decode.get(idx).copied().unwrap_or(0.0);
+        let c_max = decode.get(idx + 1).copied().unwrap_or(1.0);
         color_params.push((c_min, decode_scale(bpco, c_min, c_max)));
     }
 

@@ -281,7 +281,24 @@ fn handle_mesh(
         .unwrap_or_default();
 
     let cs = resolved_cs_to_shading_cs(resolved_cs);
-    let n_comps = shading_cs_num_components(&cs);
+    let cs_comps = shading_cs_num_components(&cs);
+
+    // When a Function is present, vertex data has fewer color components per vertex —
+    // the function's input dimension, not the color space dimension. Parse with the
+    // function input count, then apply the function to expand to full color values.
+    let function = if dict.get(b"Function").is_some() {
+        parse_shading_function(dict, resolver).ok()
+    } else {
+        None
+    };
+    let n_comps = if function.is_some() {
+        // Function input dimension: inferred from Decode array (entries beyond the 4
+        // coordinate entries, each pair is one component)
+        let color_entries = decode.len().saturating_sub(4);
+        (color_entries / 2).max(1)
+    } else {
+        cs_comps
+    };
 
     let data = resolver.stream_data_from_obj(shading_obj)?;
 
@@ -293,6 +310,15 @@ fn handle_mesh(
         }
         _ => return Ok(()),
     };
+
+    // Apply shading function to expand vertex colors (e.g. 1 component → 4 CMYK)
+    if let Some(ref func) = function {
+        for t in &mut triangles {
+            t.v0.raw_components = func.evaluate(&t.v0.raw_components);
+            t.v1.raw_components = func.evaluate(&t.v1.raw_components);
+            t.v2.raw_components = func.evaluate(&t.v2.raw_components);
+        }
+    }
 
     // Convert vertex colors through ICC profile
     for t in &mut triangles {
@@ -350,7 +376,19 @@ fn handle_patches(
         .unwrap_or_default();
 
     let cs = resolved_cs_to_shading_cs(resolved_cs);
-    let n_comps = shading_cs_num_components(&cs);
+    let cs_comps = shading_cs_num_components(&cs);
+
+    let function = if dict.get(b"Function").is_some() {
+        parse_shading_function(dict, resolver).ok()
+    } else {
+        None
+    };
+    let n_comps = if function.is_some() {
+        let color_entries = decode.len().saturating_sub(4);
+        (color_entries / 2).max(1)
+    } else {
+        cs_comps
+    };
 
     let data = resolver.stream_data_from_obj(shading_obj)?;
 
@@ -359,6 +397,15 @@ fn handle_patches(
         7 => stet_core::mesh_shading::parse_type7_patches(&data, bpc, bpco, bpfl, &decode, n_comps),
         _ => return Ok(()),
     };
+
+    // Apply shading function to expand corner colors
+    if let Some(ref func) = function {
+        for p in &mut patches {
+            for i in 0..4 {
+                p.raw_colors[i] = func.evaluate(&p.raw_colors[i]);
+            }
+        }
+    }
 
     // Convert patch corner colors through ICC profile
     for p in &mut patches {
