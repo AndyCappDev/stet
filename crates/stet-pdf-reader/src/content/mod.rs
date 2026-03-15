@@ -1419,12 +1419,7 @@ impl<'a> ContentInterpreter<'a> {
         match mode {
             0 => {
                 // Fill only
-                let mut params = self.gstate.fill_params(FillRule::NonZeroWinding);
-                params.is_text_glyph = true;
-                self.display_list.push(DisplayElement::Fill {
-                    path: device_path.clone(),
-                    params,
-                });
+                self.emit_text_fill(device_path.clone());
             }
             1 => {
                 // Stroke only
@@ -1437,12 +1432,7 @@ impl<'a> ContentInterpreter<'a> {
             }
             2 => {
                 // Fill then stroke
-                let mut fill_params = self.gstate.fill_params(FillRule::NonZeroWinding);
-                fill_params.is_text_glyph = true;
-                self.display_list.push(DisplayElement::Fill {
-                    path: device_path.clone(),
-                    params: fill_params,
-                });
+                self.emit_text_fill(device_path.clone());
                 let mut stroke_params = self.gstate.stroke_params();
                 stroke_params.is_text_glyph = true;
                 self.display_list.push(DisplayElement::Stroke {
@@ -1457,6 +1447,60 @@ impl<'a> ContentInterpreter<'a> {
         if clip {
             let tcp = self.text_clip_path.get_or_insert_with(PsPath::new);
             tcp.segments.extend_from_slice(&device_path.segments);
+        }
+    }
+
+    /// Emit a text glyph fill, handling shading patterns, tiling patterns,
+    /// or solid color fills.
+    fn emit_text_fill(&mut self, path: PsPath) {
+        if let Some(shading_box) = self.gstate.fill_shading_pattern.clone() {
+            // PatternType 2 (shading pattern): clip to glyph path, emit shading,
+            // then restore the previous clip state so subsequent glyphs aren't
+            // intersected with this one's clip.
+            self.display_list.push(DisplayElement::Clip {
+                path,
+                params: ClipParams {
+                    fill_rule: FillRule::NonZeroWinding,
+                    ctm: Matrix::identity(),
+                },
+            });
+            for elem in shading_box.0.elements() {
+                self.display_list.push(elem.clone());
+            }
+            // Restore clip for next glyph
+            self.display_list.push(DisplayElement::InitClip);
+            if let Some(ref clip) = self.gstate.clip_path {
+                self.display_list.push(DisplayElement::Clip {
+                    path: clip.clone(),
+                    params: ClipParams {
+                        fill_rule: FillRule::NonZeroWinding,
+                        ctm: Matrix::identity(),
+                    },
+                });
+            }
+        } else if let Some(pattern) = self.gstate.fill_pattern.clone() {
+            self.display_list.push(DisplayElement::PatternFill {
+                params: PatternFillParams {
+                    path,
+                    fill_rule: FillRule::NonZeroWinding,
+                    tile: pattern.tile,
+                    pattern_matrix: pattern.pattern_matrix,
+                    bbox: pattern.bbox,
+                    xstep: pattern.x_step,
+                    ystep: pattern.y_step,
+                    paint_type: pattern.paint_type,
+                    underlying_color: if pattern.paint_type == 2 {
+                        Some(self.gstate.fill_color.clone())
+                    } else {
+                        None
+                    },
+                    pattern_id: pattern.pattern_id,
+                },
+            });
+        } else {
+            let mut params = self.gstate.fill_params(FillRule::NonZeroWinding);
+            params.is_text_glyph = true;
+            self.display_list.push(DisplayElement::Fill { path, params });
         }
     }
 
