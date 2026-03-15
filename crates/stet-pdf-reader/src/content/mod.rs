@@ -1602,6 +1602,27 @@ impl<'a> ContentInterpreter<'a> {
         // Decode the stream data
         let sample_data = self.resolver.stream_data_from_obj(obj)?;
 
+        // JPXDecode with internal palette (pclr): openjp2 applies the JP2 palette
+        // and returns expanded data (e.g. 3-component RGB for a 1-component codestream).
+        // Per PDF spec 7.4.9, the JP2 palette is applied before the PDF color space.
+        // When the PDF says Indexed but the JP2 already expanded the palette,
+        // switch to the base color space since the data is already depalettized.
+        let color_space = if !is_image_mask {
+            if let ImageColorSpace::Indexed { base, .. } = &color_space {
+                let expected_1comp = (width * height) as usize;
+                let base_n = base.num_components() as usize;
+                if sample_data.len() == expected_1comp * base_n && base_n > 1 {
+                    *base.clone()
+                } else {
+                    color_space
+                }
+            } else {
+                color_space
+            }
+        } else {
+            color_space
+        };
+
         // Image matrix: [width 0 0 -height 0 height] maps unit square to image
         let image_matrix =
             Matrix::new(width as f64, 0.0, 0.0, -(height as f64), 0.0, height as f64);
