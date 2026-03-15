@@ -1396,18 +1396,19 @@ impl<'a> ContentInterpreter<'a> {
         let text_rise = self.gstate.text_rise;
         let font_matrix = font.font_matrix();
 
-        // Build the text rendering matrix: CTM × Tm × [fontSize 0 0 fontSize 0 rise] × FontMatrix
+        // Build the text rendering matrix: CTM × Tm × [fontSize*Th 0 0 fontSize 0 rise] × FontMatrix
+        let th = self.gstate.horizontal_scaling;
         let text_state_matrix =
-            Matrix::new(font_size, 0.0, 0.0, font_size, 0.0, text_rise);
+            Matrix::new(font_size * th, 0.0, 0.0, font_size, 0.0, text_rise);
         let trm = self
             .gstate
             .ctm
             .concat(&self.gstate.text_matrix)
             .concat(&text_state_matrix)
             .concat(&font_matrix);
-
         // Interpret the CharProc stream with TRM as the CTM.
         // Save current state and swap in a fresh display list.
+        let stack_depth_before = self.gstate_stack.len();
         self.gstate_stack.push(self.gstate.clone());
         let saved_resources = std::mem::replace(&mut self.resources, resources);
         let saved_display_list = std::mem::take(&mut self.display_list);
@@ -1420,13 +1421,15 @@ impl<'a> ContentInterpreter<'a> {
         self.depth += 1;
         let _ = self.interpret_stream(&proc_data);
         self.depth -= 1;
-
         // Collect glyph display elements and append to main display list
         let glyph_elements = std::mem::replace(&mut self.display_list, saved_display_list);
         self.resources = saved_resources;
         self.current_path = saved_path;
         self.current_point = saved_point;
         self.subpath_start = saved_subpath;
+        // Restore state: truncate any extra gstate_stack entries left by
+        // unmatched q/Q inside the CharProc (e.g., if the EI parser consumed Q).
+        self.gstate_stack.truncate(stack_depth_before + 1);
         if let Some(saved) = self.gstate_stack.pop() {
             self.gstate = saved;
         }
@@ -2169,20 +2172,48 @@ impl<'a> ContentInterpreter<'a> {
         // than the uncompressed size, so we must search from the start of data.
         let start = pos;
         let search_from = if has_filter { start } else { start + expected_len };
+        // First try: check for "EI" at/near the expected position (some PDFs omit
+        // the whitespace before EI that the spec requires).
         let mut end = search_from;
-        while end + 2 < data.len() {
-            if is_whitespace_byte(data[end])
-                && data[end + 1] == b'E'
-                && data[end + 2] == b'I'
-                && (end + 3 >= data.len() || is_delimiter_or_ws(data[end + 3]))
-            {
-                break;
+        if !has_filter && end >= 2 {
+            // Check at expected_len-2 and expected_len-1 for "EI" without leading ws
+            for offset in [expected_len.saturating_sub(2), expected_len.saturating_sub(1), expected_len] {
+                let p = start + offset;
+                if p + 1 < data.len()
+                    && data[p] == b'E'
+                    && data[p + 1] == b'I'
+                    && (p + 2 >= data.len() || is_delimiter_or_ws(data[p + 2]))
+                {
+                    end = p;
+                    break;
+                }
             }
-            end += 1;
+        }
+        // Fallback: scan for whitespace + "EI" + delimiter
+        let found_no_ws = end != search_from;
+        if !found_no_ws {
+            while end + 2 < data.len() {
+                if is_whitespace_byte(data[end])
+                    && data[end + 1] == b'E'
+                    && data[end + 2] == b'I'
+                    && (end + 3 >= data.len() || is_delimiter_or_ws(data[end + 3]))
+                {
+                    break;
+                }
+                end += 1;
+            }
         }
 
         let sample_data = data[start..end.min(data.len())].to_vec();
-        lexer.set_pos((end + 3).min(data.len()));
+        // Skip past EI: "EI" is 2 bytes, plus trailing whitespace/delimiter
+        let skip_past = if found_no_ws {
+            // EI at `end`, skip "EI" + 1 trailing byte
+            (end + 3).min(data.len())
+        } else {
+            // ws+EI at `end`, skip ws+"EI" + 1 trailing byte
+            (end + 4).min(data.len())
+        };
+        lexer.set_pos(skip_past);
 
         // Apply filters if present
         let sample_data = if has_filter {
