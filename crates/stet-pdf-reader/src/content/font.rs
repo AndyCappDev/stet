@@ -1132,7 +1132,15 @@ fn parse_to_unicode(data: &[u8]) -> HashMap<u16, u32> {
 
 fn parse_cid_widths(cid_font_dict: &PdfDict, resolver: &Resolver) -> HashMap<u16, f64> {
     let mut widths = HashMap::new();
-    let w_arr = match cid_font_dict.get_array(b"W") {
+    // /W may be an indirect reference — resolve it before accessing as array
+    let w_obj = match cid_font_dict.get(b"W") {
+        Some(obj) => match resolver.deref(obj) {
+            Ok(resolved) => resolved,
+            Err(_) => return widths,
+        },
+        None => return widths,
+    };
+    let w_arr = match w_obj.as_array() {
         Some(arr) => arr,
         None => return widths,
     };
