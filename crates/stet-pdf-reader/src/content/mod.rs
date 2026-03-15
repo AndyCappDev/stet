@@ -101,10 +101,11 @@ pub struct ContentInterpreter<'a> {
     depth: u32,
     font_cache: FontCache,
     current_font: Option<Arc<PdfFont>>,
-    /// Initial CTM (before any content stream `cm` operators).
-    /// PDF pattern Matrix maps to the default user space, so we need
-    /// the initial CTM (not current CTM) for pattern matrix computation.
-    initial_ctm: Matrix,
+    /// CTM at the start of the current content stream (page or form).
+    /// PDF pattern Matrix maps to the "default (initial) coordinate system
+    /// of the parent content stream" — for patterns inside Form XObjects,
+    /// this includes the form's matrix transform, not just the page CTM.
+    content_stream_ctm: Matrix,
     /// ICC color profile cache for ICCBased color space conversions.
     icc_cache: IccCache,
     /// Active soft mask scope: tracks which display list elements fall under the current SMask.
@@ -135,7 +136,7 @@ impl<'a> ContentInterpreter<'a> {
             subpath_start: None,
             operand_stack: Vec::new(),
             display_list: DisplayList::new(),
-            initial_ctm,
+            content_stream_ctm: initial_ctm,
             in_text: false,
             depth: 0,
             font_cache: FontCache::new(),
@@ -871,19 +872,30 @@ impl<'a> ContentInterpreter<'a> {
     fn emit_fill(&mut self, path: PsPath, fill_rule: FillRule) {
         if let Some(shading_box) = self.gstate.fill_shading_pattern.clone() {
             // PatternType 2 (shading pattern): clip to fill path, then emit shading.
-            // The surrounding q/Q scope restores the clip when the content block ends.
-            self.display_list.push(DisplayElement::Clip {
+            // Wrap in a Group to scope the clip — otherwise each shading fill would
+            // permanently narrow the clip region, hiding subsequent fills.
+            let bbox = path_device_bbox(&path);
+            let mut group_dl = DisplayList::new();
+            group_dl.push(DisplayElement::Clip {
                 path,
                 params: ClipParams {
                     fill_rule,
                     ctm: Matrix::identity(),
                 },
             });
-            // Update clip tracking so Q knows to restore
-            self.gstate.clip_path_version += 1;
             for elem in shading_box.0.elements() {
-                self.display_list.push(elem.clone());
+                group_dl.push(elem.clone());
             }
+            self.display_list.push(DisplayElement::Group {
+                elements: group_dl,
+                params: GroupParams {
+                    bbox,
+                    isolated: true,
+                    knockout: false,
+                    blend_mode: self.gstate.blend_mode,
+                    alpha: self.gstate.fill_alpha,
+                },
+            });
         } else if let Some(pattern) = self.gstate.fill_pattern.clone() {
             self.display_list.push(DisplayElement::PatternFill {
                 params: PatternFillParams {
@@ -1462,31 +1474,30 @@ impl<'a> ContentInterpreter<'a> {
     /// or solid color fills.
     fn emit_text_fill(&mut self, path: PsPath) {
         if let Some(shading_box) = self.gstate.fill_shading_pattern.clone() {
-            // PatternType 2 (shading pattern): clip to glyph path, emit shading,
-            // then restore the previous clip state so subsequent glyphs aren't
-            // intersected with this one's clip.
-            self.display_list.push(DisplayElement::Clip {
-                path: path.clone(),
+            // PatternType 2 (shading pattern): clip to glyph path, emit shading.
+            // Wrap in a Group to scope the clip.
+            let bbox = path_device_bbox(&path);
+            let mut group_dl = DisplayList::new();
+            group_dl.push(DisplayElement::Clip {
+                path,
                 params: ClipParams {
                     fill_rule: FillRule::NonZeroWinding,
                     ctm: Matrix::identity(),
                 },
             });
-            self.gstate.clip_path_version += 1;
             for elem in shading_box.0.elements() {
-                self.display_list.push(elem.clone());
+                group_dl.push(elem.clone());
             }
-            // Restore clip for next glyph
-            self.display_list.push(DisplayElement::InitClip);
-            if let Some(ref clip) = self.gstate.clip_path {
-                self.display_list.push(DisplayElement::Clip {
-                    path: clip.clone(),
-                    params: ClipParams {
-                        fill_rule: FillRule::NonZeroWinding,
-                        ctm: Matrix::identity(),
-                    },
-                });
-            }
+            self.display_list.push(DisplayElement::Group {
+                elements: group_dl,
+                params: GroupParams {
+                    bbox,
+                    isolated: true,
+                    knockout: false,
+                    blend_mode: self.gstate.blend_mode,
+                    alpha: self.gstate.fill_alpha,
+                },
+            });
         } else if let Some(pattern) = self.gstate.fill_pattern.clone() {
             self.display_list.push(DisplayElement::PatternFill {
                 params: PatternFillParams {
@@ -1879,9 +1890,14 @@ impl<'a> ContentInterpreter<'a> {
         self.gstate_stack.push(self.gstate.clone());
         let saved_resources = std::mem::replace(&mut self.resources, form_resources);
         let saved_font_cache = std::mem::take(&mut self.font_cache);
+        let saved_content_stream_ctm = self.content_stream_ctm;
 
         // Apply form matrix
         self.gstate.ctm = self.gstate.ctm.concat(&form_matrix);
+
+        // Update content stream CTM — patterns inside this form map to
+        // the form's initial coordinate system (CTM after form matrix).
+        self.content_stream_ctm = self.gstate.ctm;
 
         if is_transparency_group {
             // Capture compositing parameters from the current state BEFORE
@@ -1953,6 +1969,7 @@ impl<'a> ContentInterpreter<'a> {
         // Restore state — check if clip needs resetting
         self.resources = saved_resources;
         self.font_cache = saved_font_cache;
+        self.content_stream_ctm = saved_content_stream_ctm;
         if let Some(saved) = self.gstate_stack.pop() {
             let old_clip_version = self.gstate.clip_path_version;
             self.gstate = saved;
@@ -2762,9 +2779,10 @@ impl<'a> ContentInterpreter<'a> {
         let pattern_data = self.resolver.stream_data_from_obj(pat_obj)?;
 
         // Compute the combined pattern matrix (pattern space → device space).
-        // PDF pattern Matrix maps pattern space → default user space (before any
-        // `cm` operators), so use initial_ctm, not the current gstate.ctm.
-        let combined_matrix = self.initial_ctm.concat(&pattern_matrix);
+        // PDF pattern Matrix maps pattern space → the default coordinate system
+        // of the parent content stream. Use content_stream_ctm so patterns inside
+        // Form XObjects include the form's coordinate transform.
+        let combined_matrix = self.content_stream_ctm.concat(&pattern_matrix);
 
         // Interpret pattern content stream into a sub-display-list.
         // Use identity CTM so tile paths stay in pattern space (like PostScript's
@@ -2827,7 +2845,9 @@ impl<'a> ContentInterpreter<'a> {
 
         // Render the shading into a temporary display list with pattern matrix
         // applied to the CTM so coordinates are in device space.
-        let combined_matrix = self.initial_ctm.concat(&pattern_matrix);
+        // Use content_stream_ctm (not initial_ctm) so that patterns inside
+        // Form XObjects include the form's coordinate transform.
+        let combined_matrix = self.content_stream_ctm.concat(&pattern_matrix);
         let saved_ctm = self.gstate.ctm;
         self.gstate.ctm = combined_matrix;
 
@@ -2844,6 +2864,33 @@ impl<'a> ContentInterpreter<'a> {
         result?;
         Ok(shading_dl)
     }
+}
+
+/// Compute the device-space bounding box of a path (already in device coords).
+fn path_device_bbox(path: &PsPath) -> [f64; 4] {
+    let mut x_min = f64::INFINITY;
+    let mut y_min = f64::INFINITY;
+    let mut x_max = f64::NEG_INFINITY;
+    let mut y_max = f64::NEG_INFINITY;
+    let mut update = |x: f64, y: f64| {
+        x_min = x_min.min(x);
+        y_min = y_min.min(y);
+        x_max = x_max.max(x);
+        y_max = y_max.max(y);
+    };
+    for seg in &path.segments {
+        match seg {
+            PathSegment::MoveTo(x, y)
+            | PathSegment::LineTo(x, y) => update(*x, *y),
+            PathSegment::CurveTo { x1, y1, x2, y2, x3, y3 } => {
+                update(*x1, *y1);
+                update(*x2, *y2);
+                update(*x3, *y3);
+            }
+            PathSegment::ClosePath => {}
+        }
+    }
+    [x_min, y_min, x_max, y_max]
 }
 
 /// Convert a color space name to a ColorSpaceRef.
