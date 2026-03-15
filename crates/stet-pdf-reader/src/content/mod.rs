@@ -972,6 +972,8 @@ impl<'a> ContentInterpreter<'a> {
         self.gstate.stroke_color = DeviceColor::from_gray(g);
         self.gstate.stroke_color_space = ColorSpaceRef::DeviceGray;
         self.gstate.stroke_painted_channels = 0;
+        self.gstate.stroke_pattern = None;
+        self.gstate.stroke_shading_pattern = None;
         Ok(())
     }
 
@@ -993,6 +995,8 @@ impl<'a> ContentInterpreter<'a> {
         self.gstate.stroke_color = DeviceColor::from_rgb(n[0], n[1], n[2]);
         self.gstate.stroke_color_space = ColorSpaceRef::DeviceRGB;
         self.gstate.stroke_painted_channels = 0;
+        self.gstate.stroke_pattern = None;
+        self.gstate.stroke_shading_pattern = None;
         Ok(())
     }
 
@@ -1015,6 +1019,8 @@ impl<'a> ContentInterpreter<'a> {
             DeviceColor::from_cmyk_icc(n[0], n[1], n[2], n[3], &mut self.icc_cache);
         self.gstate.stroke_color_space = ColorSpaceRef::DeviceCMYK;
         self.gstate.stroke_painted_channels = stet_core::device::CMYK_ALL;
+        self.gstate.stroke_pattern = None;
+        self.gstate.stroke_shading_pattern = None;
         Ok(())
     }
 
@@ -1075,6 +1081,8 @@ impl<'a> ContentInterpreter<'a> {
         self.gstate.stroke_painted_channels = painted_channels_for_cs(&cs);
         self.gstate.stroke_color =
             components_to_device_color_icc(&cs, &nums, Some(&mut self.icc_cache));
+        self.gstate.stroke_pattern = None;
+        self.gstate.stroke_shading_pattern = None;
         Ok(())
     }
 
