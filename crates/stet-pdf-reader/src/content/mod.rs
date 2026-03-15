@@ -2907,6 +2907,50 @@ impl<'a> ContentInterpreter<'a> {
 }
 
 /// Compute the device-space bounding box of a path (already in device coords).
+/// Fallback glyph lookup for ASCII characters not found in CJK substitute fonts.
+/// Uses the bundled NimbusSans-Regular Type1 font for basic Latin glyphs.
+fn ascii_fallback_glyph(char_code: u8) -> Option<PsPath> {
+    use std::sync::OnceLock;
+    use stet_core::charstring::execute_charstring;
+    use stet_core::type1_parser::parse_type1;
+
+    struct FallbackFont {
+        charstrings: std::collections::HashMap<String, Vec<u8>>,
+        subrs: Vec<Vec<u8>>,
+        len_iv: usize,
+        font_matrix_a: f64,
+    }
+
+    static FALLBACK: OnceLock<Option<FallbackFont>> = OnceLock::new();
+
+    let fb = FALLBACK.get_or_init(|| {
+        let data = std::fs::read("resources/Font/NimbusSans-Regular.t1").ok()?;
+        let font = parse_type1(&data).ok()?;
+        let fm_a = font.font_matrix[0];
+        Some(FallbackFont {
+            charstrings: font.charstrings.into_iter().collect(),
+            subrs: font.subrs,
+            len_iv: font.len_iv,
+            font_matrix_a: fm_a,
+        })
+    });
+
+    let fb = fb.as_ref()?;
+
+    // Map char code to glyph name via WinAnsi encoding
+    let glyph_name = stet_core::encoding::WINANSI_ENCODING.get(char_code as usize)
+        .and_then(|n| if *n != ".notdef" { Some(*n) } else { None })?;
+    let cs = fb.charstrings.get(glyph_name)?;
+    let result = execute_charstring(cs, &fb.subrs, fb.len_iv, false).ok()?;
+    if result.path.is_empty() {
+        return None;
+    }
+    // Scale by font matrix (typically 0.001)
+    let scale = fb.font_matrix_a;
+    let m = Matrix::scale(scale, scale);
+    Some(result.path.transform(&m))
+}
+
 fn path_device_bbox(path: &PsPath) -> [f64; 4] {
     let mut x_min = f64::INFINITY;
     let mut y_min = f64::INFINITY;

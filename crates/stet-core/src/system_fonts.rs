@@ -214,6 +214,24 @@ fn scan_directory(dir: &Path, fonts: &mut HashMap<String, PathBuf>) {
                     fonts.entry(name).or_insert_with(|| path.clone());
                 }
             }
+            Some("ttc") => {
+                // TrueType Collection: index each sub-font
+                if let Ok(data) = fs::read(&path) {
+                    if data.len() > 12 && &data[0..4] == b"ttcf" {
+                        let num = read_u32(&data, 8) as usize;
+                        for i in 0..num {
+                            let off_pos = 12 + i * 4;
+                            if off_pos + 4 > data.len() {
+                                break;
+                            }
+                            let font_off = read_u32(&data, off_pos) as usize;
+                            if let Some(name) = extract_ps_name_at_ttc_offset(&data, font_off) {
+                                fonts.entry(name).or_insert_with(|| path.clone());
+                            }
+                        }
+                    }
+                }
+            }
             Some("pfa" | "t1") => {
                 if let Some(name) = extract_ps_name_from_pfa(&path) {
                     fonts.entry(name).or_insert_with(|| path.clone());
@@ -290,6 +308,128 @@ fn extract_ps_name_from_pfb(path: &Path) -> Option<String> {
 }
 
 /// Extract PostScript name from OTF/TTF using the `name` table (nameID 6).
+/// Extract PostScript name from a sub-font within a TTC at a given offset.
+fn extract_ps_name_at_ttc_offset(data: &[u8], font_offset: usize) -> Option<String> {
+    if font_offset + 12 > data.len() {
+        return None;
+    }
+    // Check for OTTO (CFF) or regular TrueType
+    let is_otto = &data[font_offset..font_offset + 4] == b"OTTO";
+
+    // Find the 'name' table in this sub-font's table directory
+    let num_tables = read_u16(data, font_offset + 4) as usize;
+    for i in 0..num_tables {
+        let entry = font_offset + 12 + i * 16;
+        if entry + 16 > data.len() {
+            break;
+        }
+        let tag = &data[entry..entry + 4];
+        if tag == b"name" {
+            let tbl_off = read_u32(data, entry + 8) as usize;
+            let tbl_len = read_u32(data, entry + 12) as usize;
+            if tbl_off + tbl_len <= data.len() {
+                return extract_ps_name_from_name_table_data(&data[tbl_off..tbl_off + tbl_len]);
+            }
+        }
+        // For CFF fonts, also try the CFF Name INDEX
+        if is_otto && tag == b"CFF " {
+            let cff_off = read_u32(data, entry + 8) as usize;
+            let cff_len = read_u32(data, entry + 12) as usize;
+            if cff_off + cff_len <= data.len() {
+                if let Some(name) = extract_cff_name_from_data(&data[cff_off..cff_off + cff_len]) {
+                    return Some(name);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Extract PostScript name from raw 'name' table data.
+fn extract_ps_name_from_name_table_data(name_data: &[u8]) -> Option<String> {
+    if name_data.len() < 6 {
+        return None;
+    }
+    let count = read_u16(name_data, 2) as usize;
+    let string_offset = read_u16(name_data, 4) as usize;
+    for i in 0..count {
+        let rec = 6 + i * 12;
+        if rec + 12 > name_data.len() {
+            break;
+        }
+        let platform_id = read_u16(name_data, rec);
+        let name_id = read_u16(name_data, rec + 6);
+        let length = read_u16(name_data, rec + 8) as usize;
+        let str_off = read_u16(name_data, rec + 10) as usize;
+        if name_id == 6 {
+            let start = string_offset + str_off;
+            if start + length <= name_data.len() {
+                let raw = &name_data[start..start + length];
+                if platform_id == 3 || platform_id == 0 {
+                    // UTF-16BE
+                    let s: String = raw.chunks(2)
+                        .filter_map(|c| {
+                            if c.len() == 2 {
+                                char::from_u32(u16::from_be_bytes([c[0], c[1]]) as u32)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    if !s.is_empty() {
+                        return Some(s);
+                    }
+                } else {
+                    let s = String::from_utf8_lossy(raw).to_string();
+                    if !s.is_empty() {
+                        return Some(s);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Extract font name from raw CFF data's Name INDEX.
+fn extract_cff_name_from_data(cff: &[u8]) -> Option<String> {
+    if cff.len() < 4 {
+        return None;
+    }
+    let hdr_size = cff[2] as usize;
+    if hdr_size + 3 > cff.len() {
+        return None;
+    }
+    let count = u16::from_be_bytes([cff[hdr_size], cff[hdr_size + 1]]) as usize;
+    if count == 0 {
+        return None;
+    }
+    let off_size = cff[hdr_size + 2] as usize;
+    if off_size == 0 || off_size > 4 {
+        return None;
+    }
+    let offsets_start = hdr_size + 3;
+    let read_off = |idx: usize| -> usize {
+        let pos = offsets_start + idx * off_size;
+        let mut val = 0u32;
+        for j in 0..off_size {
+            if pos + j < cff.len() {
+                val = (val << 8) | cff[pos + j] as u32;
+            }
+        }
+        val as usize
+    };
+    let data_start = offsets_start + (count + 1) * off_size;
+    let off1 = read_off(0);
+    let off2 = read_off(1);
+    let start = data_start + off1 - 1;
+    let end = data_start + off2 - 1;
+    if start < cff.len() && end <= cff.len() && end > start {
+        return Some(String::from_utf8_lossy(&cff[start..end]).to_string());
+    }
+    None
+}
+
 fn extract_ps_name_from_sfnt(path: &Path) -> Option<String> {
     let data = fs::read(path).ok()?;
     if data.len() < 12 {
