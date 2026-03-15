@@ -583,13 +583,17 @@ fn load_system_truetype_font(base_font: &str) -> Result<Vec<u8>, PdfError> {
 fn resolve_type3(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, PdfError> {
     let first_char = font_dict.get_int(b"FirstChar").unwrap_or(0) as usize;
 
-    // Parse widths array (already in glyph space — Type 3 FontMatrix maps to text space)
+    // Parse widths array (already in glyph space — Type 3 FontMatrix maps to text space).
+    // /Widths may be an indirect reference — resolve before accessing.
     let mut widths = [0.0f64; 256];
-    if let Some(w_arr) = font_dict.get_array(b"Widths") {
-        for (i, obj) in w_arr.iter().enumerate() {
-            let code = first_char + i;
-            if code < 256 {
-                widths[code] = obj.as_f64().unwrap_or(0.0);
+    let widths_resolved = font_dict.get(b"Widths").and_then(|obj| resolver.deref(obj).ok());
+    if let Some(ref w_obj) = widths_resolved {
+        if let Some(w_arr) = w_obj.as_array() {
+            for (i, obj) in w_arr.iter().enumerate() {
+                let code = first_char + i;
+                if code < 256 {
+                    widths[code] = obj.as_f64().unwrap_or(0.0);
+                }
             }
         }
     }
