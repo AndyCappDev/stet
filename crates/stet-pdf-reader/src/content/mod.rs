@@ -1466,12 +1466,13 @@ impl<'a> ContentInterpreter<'a> {
             // then restore the previous clip state so subsequent glyphs aren't
             // intersected with this one's clip.
             self.display_list.push(DisplayElement::Clip {
-                path,
+                path: path.clone(),
                 params: ClipParams {
                     fill_rule: FillRule::NonZeroWinding,
                     ctm: Matrix::identity(),
                 },
             });
+            self.gstate.clip_path_version += 1;
             for elem in shading_box.0.elements() {
                 self.display_list.push(elem.clone());
             }

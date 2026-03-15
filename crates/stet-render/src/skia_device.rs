@@ -5533,24 +5533,26 @@ fn render_radial_shading(
                 data[offset + 2] = (color.b * 255.0).round().clamp(0.0, 255.0) as u8;
                 data[offset + 3] = 255;
 
-                // Recomposite RGB from CMYK buffer via ICC
-                if let Some(ref mut buf) = cmyk_buf {
-                    let ci = (py as usize * pw as usize + px as usize) * 4;
-                    if ci + 3 < buf.len() {
-                        if let Some(icc_cache) = icc {
-                            let c = buf[ci] as f64;
-                            let m = buf[ci + 1] as f64;
-                            let y = buf[ci + 2] as f64;
-                            let k = buf[ci + 3] as f64;
-                            if let Some((r, g, b)) =
-                                icc_cache.convert_cmyk_readonly(c, m, y, k)
-                            {
-                                data[offset] =
-                                    (r * 255.0).round().clamp(0.0, 255.0) as u8;
-                                data[offset + 1] =
-                                    (g * 255.0).round().clamp(0.0, 255.0) as u8;
-                                data[offset + 2] =
-                                    (b * 255.0).round().clamp(0.0, 255.0) as u8;
+                // Recomposite RGB from CMYK buffer via ICC (only for CMYK shadings)
+                if matches!(params.color_space, ShadingColorSpace::DeviceCMYK) {
+                    if let Some(ref mut buf) = cmyk_buf {
+                        let ci = (py as usize * pw as usize + px as usize) * 4;
+                        if ci + 3 < buf.len() {
+                            if let Some(icc_cache) = icc {
+                                let c = buf[ci] as f64;
+                                let m = buf[ci + 1] as f64;
+                                let y = buf[ci + 2] as f64;
+                                let k = buf[ci + 3] as f64;
+                                if let Some((r, g, b)) =
+                                    icc_cache.convert_cmyk_readonly(c, m, y, k)
+                                {
+                                    data[offset] =
+                                        (r * 255.0).round().clamp(0.0, 255.0) as u8;
+                                    data[offset + 1] =
+                                        (g * 255.0).round().clamp(0.0, 255.0) as u8;
+                                    data[offset + 2] =
+                                        (b * 255.0).round().clamp(0.0, 255.0) as u8;
+                                }
                             }
                         }
                     }
