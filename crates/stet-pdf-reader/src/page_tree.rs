@@ -119,21 +119,32 @@ fn collect_pages_recursive(
             annots,
         });
     } else {
-        // Intermediate /Pages node — recurse into /Kids
-        if let Some(kids) = node_dict.get_array(b"Kids") {
-            for kid in kids {
-                match kid {
-                    PdfObj::Ref(n, g) => {
-                        let child = resolver.resolve(*n, *g)?;
-                        if let Some(child_dict) = child.as_dict() {
-                            collect_pages_recursive(resolver, child_dict, *n, &inherited, pages)?;
-                        }
+        // Intermediate /Pages node — recurse into /Kids.
+        // /Kids may be a direct array or an indirect reference to one.
+        let kids_owned;
+        let kids: &[PdfObj] = if let Some(arr) = node_dict.get_array(b"Kids") {
+            arr
+        } else if let Some(PdfObj::Ref(n, g)) = node_dict.get(b"Kids") {
+            kids_owned = match resolver.resolve(*n, *g) {
+                Ok(PdfObj::Array(arr)) => arr,
+                _ => Vec::new(),
+            };
+            &kids_owned
+        } else {
+            &[]
+        };
+        for kid in kids {
+            match kid {
+                PdfObj::Ref(n, g) => {
+                    let child = resolver.resolve(*n, *g)?;
+                    if let Some(child_dict) = child.as_dict() {
+                        collect_pages_recursive(resolver, child_dict, *n, &inherited, pages)?;
                     }
-                    _ => {
-                        // Inline dict (unusual but possible)
-                        if let Some(child_dict) = kid.as_dict() {
-                            collect_pages_recursive(resolver, child_dict, 0, &inherited, pages)?;
-                        }
+                }
+                _ => {
+                    // Inline dict (unusual but possible)
+                    if let Some(child_dict) = kid.as_dict() {
+                        collect_pages_recursive(resolver, child_dict, 0, &inherited, pages)?;
                     }
                 }
             }
