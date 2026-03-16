@@ -520,8 +520,10 @@ impl<'a> ContentInterpreter<'a> {
             // Shading
             b"sh" => self.op_sh(),
 
-            // Marked content (no-op)
-            b"BMC" | b"BDC" | b"EMC" | b"MP" | b"DP" => Ok(()),
+            // Marked content (consume operands, otherwise no-op)
+            b"BMC" | b"MP" => { self.operand_stack.pop(); Ok(()) }
+            b"BDC" | b"DP" => { self.operand_stack.pop(); self.operand_stack.pop(); Ok(()) }
+            b"EMC" => Ok(()),
 
             // Type 3 glyph operators (width/cache — we use Widths array instead)
             b"d0" | b"d1" => Ok(()),
