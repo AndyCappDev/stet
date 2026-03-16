@@ -15,14 +15,14 @@ jpeg-decoder = "0.3"
 stet-fonts.workspace = true
 stet-graphics.workspace = true
 stet-render = { workspace = true, optional = true }
-openjp2 = { version = "0.6", default-features = false, features = ["std"], optional = true }
+hayro-jpeg2000 = { version = "0.3", optional = true }
 hayro-ccitt = "0.2.0"
 hayro-jbig2 = "0.1.0"
 
 [features]
 default = ["jpx", "render"]
 render = ["dep:stet-render"]
-jpx = ["dep:openjp2"]
+jpx = ["dep:hayro-jpeg2000"]
 
 [dev-dependencies]
 png.workspace = true

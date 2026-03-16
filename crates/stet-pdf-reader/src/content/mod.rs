@@ -1700,7 +1700,7 @@ impl<'a> ContentInterpreter<'a> {
             to_image_color_space(resolved_cs.as_ref().unwrap())
         };
 
-        // JPXDecode with internal palette (pclr): openjp2 applies the JP2 palette
+        // JPXDecode with internal palette (pclr): hayro-jpeg2000 applies the JP2 palette
         // and returns expanded data (e.g. 3-component RGB for a 1-component codestream).
         // Per PDF spec 7.4.9, the JP2 palette is applied before the PDF color space.
         // When the PDF says Indexed but the JP2 already expanded the palette,
