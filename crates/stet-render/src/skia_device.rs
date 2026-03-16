@@ -5197,6 +5197,37 @@ fn copy_backdrop_crop(
 }
 // ---- Shading rendering ----
 
+/// Sutherland-Hodgman polygon clipping against a half-plane.
+/// Keeps the side where `nx*(x-px) + ny*(y-py) >= 0`.
+fn clip_polygon_halfplane(
+    poly: &[(f32, f32)],
+    nx: f32,
+    ny: f32,
+    px: f32,
+    py: f32,
+) -> Vec<(f32, f32)> {
+    if poly.is_empty() {
+        return vec![];
+    }
+    let dot = |x: f32, y: f32| nx * (x - px) + ny * (y - py);
+    let mut out = Vec::with_capacity(poly.len() + 1);
+    let n = poly.len();
+    for i in 0..n {
+        let (ax, ay) = poly[i];
+        let (bx, by) = poly[(i + 1) % n];
+        let da = dot(ax, ay);
+        let db = dot(bx, by);
+        if da >= 0.0 {
+            out.push((ax, ay));
+        }
+        if (da >= 0.0) != (db >= 0.0) {
+            // Edge crosses the clipping line — compute intersection
+            let t = da / (da - db);
+            out.push((ax + t * (bx - ax), ay + t * (by - ay)));
+        }
+    }
+    out
+}
 
 /// Render an axial (linear) gradient shading.
 #[allow(clippy::too_many_arguments)]
@@ -5272,43 +5303,100 @@ fn render_axial_shading(
         (0.0, 0.0, pw as f32, ph as f32)
     };
 
-    // When extend is false on one side, clip the fill rect
-    if !params.extend_start || !params.extend_end {
-        let axis_x = dx1 - dx0;
-        let axis_y = dy1 - dy0;
-        let gx0 = (dx0 as f32 - vp_x) * scale_x;
-        let gy0 = (dy0 as f32 - vp_y) * scale_y;
-        let gx1 = (dx1 as f32 - vp_x) * scale_x;
-        let gy1 = (dy1 as f32 - vp_y) * scale_y;
-
-        if axis_x.abs() >= axis_y.abs() {
-            if !params.extend_start {
-                if axis_x >= 0.0 { rx_min = rx_min.max(gx0); }
-                else { rx_max = rx_max.min(gx0); }
-            }
-            if !params.extend_end {
-                if axis_x >= 0.0 { rx_max = rx_max.min(gx1); }
-                else { rx_min = rx_min.max(gx1); }
-            }
-        } else {
-            if !params.extend_start {
-                if axis_y >= 0.0 { ry_min = ry_min.max(gy0); }
-                else { ry_max = ry_max.min(gy0); }
-            }
-            if !params.extend_end {
-                if axis_y >= 0.0 { ry_max = ry_max.min(gy1); }
-                else { ry_min = ry_min.max(gy1); }
-            }
-        }
-    }
-
     if rx_max <= rx_min || ry_max <= ry_min {
         return;
     }
 
-    let rect = tiny_skia::Rect::from_ltrb(rx_min, ry_min, rx_max, ry_max)
-        .unwrap_or(tiny_skia::Rect::from_xywh(0.0, 0.0, 1.0, 1.0).unwrap());
-    pixmap.fill_rect(rect, &paint, Transform::identity(), clip_mask);
+    // When extend is false on a side, clip the fill area along a line
+    // perpendicular to the gradient axis through that endpoint. For diagonal
+    // gradients this produces a diagonal cutoff (not axis-aligned).
+    let needs_perpendicular_clip = (!params.extend_start || !params.extend_end) && {
+        let axis_x = dx1 - dx0;
+        let axis_y = dy1 - dy0;
+        // Only needed for diagonal gradients — axis-aligned ones get correct
+        // results from simple rect clipping
+        axis_x.abs() > 1e-6 && axis_y.abs() > 1e-6
+    };
+
+    if needs_perpendicular_clip {
+        // Clip the bbox rectangle against perpendicular half-planes using
+        // Sutherland-Hodgman polygon clipping.
+        let mut poly: Vec<(f32, f32)> = vec![
+            (rx_min, ry_min),
+            (rx_max, ry_min),
+            (rx_max, ry_max),
+            (rx_min, ry_max),
+        ];
+
+        let ax = (dx1 - dx0) as f32 * scale_x;
+        let ay = (dy1 - dy0) as f32 * scale_y;
+
+        // Clip against perpendicular at start (keep side toward end)
+        if !params.extend_start {
+            let px = (dx0 as f32 - vp_x) * scale_x;
+            let py = (dy0 as f32 - vp_y) * scale_y;
+            // Normal pointing toward end: (ax, ay)
+            // Keep points where ax*(x-px) + ay*(y-py) >= 0
+            poly = clip_polygon_halfplane(&poly, ax, ay, px, py);
+        }
+
+        // Clip against perpendicular at end (keep side toward start)
+        if !params.extend_end {
+            let px = (dx1 as f32 - vp_x) * scale_x;
+            let py = (dy1 as f32 - vp_y) * scale_y;
+            // Normal pointing toward start: (-ax, -ay)
+            // Keep points where -ax*(x-px) - ay*(y-py) >= 0
+            poly = clip_polygon_halfplane(&poly, -ax, -ay, px, py);
+        }
+
+        if poly.len() >= 3 {
+            let mut pb = PathBuilder::new();
+            pb.move_to(poly[0].0, poly[0].1);
+            for &(x, y) in &poly[1..] {
+                pb.line_to(x, y);
+            }
+            pb.close();
+            if let Some(path) = pb.finish() {
+                pixmap.fill_path(&path, &paint, SkiaFillRule::Winding, Transform::identity(), clip_mask);
+            }
+        }
+    } else {
+        // Axis-aligned gradient or both sides extended: simple rect fill
+        if !params.extend_start || !params.extend_end {
+            let axis_x = dx1 - dx0;
+            let axis_y = dy1 - dy0;
+            let gx0 = (dx0 as f32 - vp_x) * scale_x;
+            let gy0 = (dy0 as f32 - vp_y) * scale_y;
+            let gx1 = (dx1 as f32 - vp_x) * scale_x;
+            let gy1 = (dy1 as f32 - vp_y) * scale_y;
+
+            if axis_x.abs() >= axis_y.abs() {
+                if !params.extend_start {
+                    if axis_x >= 0.0 { rx_min = rx_min.max(gx0); }
+                    else { rx_max = rx_max.min(gx0); }
+                }
+                if !params.extend_end {
+                    if axis_x >= 0.0 { rx_max = rx_max.min(gx1); }
+                    else { rx_min = rx_min.max(gx1); }
+                }
+            } else {
+                if !params.extend_start {
+                    if axis_y >= 0.0 { ry_min = ry_min.max(gy0); }
+                    else { ry_max = ry_max.min(gy0); }
+                }
+                if !params.extend_end {
+                    if axis_y >= 0.0 { ry_max = ry_max.min(gy1); }
+                    else { ry_min = ry_min.max(gy1); }
+                }
+            }
+            if rx_max <= rx_min || ry_max <= ry_min {
+                return;
+            }
+        }
+        let rect = tiny_skia::Rect::from_ltrb(rx_min, ry_min, rx_max, ry_max)
+            .unwrap_or(tiny_skia::Rect::from_xywh(0.0, 0.0, 1.0, 1.0).unwrap());
+        pixmap.fill_rect(rect, &paint, Transform::identity(), clip_mask);
+    }
 
     // Update CMYK tracking buffer for axial shading
     if let Some(buf) = cmyk_buf.as_deref_mut() {
