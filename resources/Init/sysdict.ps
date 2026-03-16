@@ -56,7 +56,7 @@ false setglobal
 
 //systemdict begin
     true setglobal
-    /product (AGPL stet) def
+    /product (stet) def
     /version (3010) def
     /revision 1 def
     /revisionstring (0.1.0) def
@@ -682,7 +682,7 @@ systemdict begin
             execdepth 1 eq {
                 product print ( ) print (Version ) print revisionstring print ( \() print revisiondate print (\)\n) print
                 (Copyright \(C\) ) print revisiondate 0 4 getinterval print ( Scott Bowman, All rights reserved.\n) print
-                (This software is licensed under the GNU AGPL v3.0 or later.\n) print
+                (This software is licensed under Apache-2.0 OR MIT.\n) print
             } if
             { %loop
                 /quitflag false def
