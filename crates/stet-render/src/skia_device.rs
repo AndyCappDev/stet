@@ -5571,10 +5571,9 @@ fn render_radial_shading(
             let (ux, uy) = inv_ctm.transform_point(dev_x, dev_y);
             let t = solve_radial_t(
                 ux, uy, params.x0, params.y0, params.r0, params.x1, params.y1, params.r1,
+                params.extend_start, params.extend_end,
             );
             if let Some(t) = t {
-                if t < 0.0 && !params.extend_start { continue; }
-                if t > 1.0 && !params.extend_end { continue; }
                 let clamped = t.clamp(0.0, 1.0);
                 let color = interpolate_color_stops(&params.color_stops, clamped);
 
@@ -5655,7 +5654,9 @@ fn render_radial_shading(
     }
 }
 /// Solve for the parameter t of a two-circle radial gradient at point (px, py).
-/// Returns the largest valid t, or None if no solution exists.
+///
+/// Returns the largest root of the circle equation that falls within the valid
+/// domain and has R(t) >= 0. The valid domain is [0,1], extended by extend flags.
 #[allow(clippy::too_many_arguments)]
 fn solve_radial_t(
     px: f64,
@@ -5666,6 +5667,8 @@ fn solve_radial_t(
     x1: f64,
     y1: f64,
     r1: f64,
+    extend_start: bool,
+    extend_end: bool,
 ) -> Option<f64> {
     // Parametric: C(t) = (1-t)*C0 + t*C1, R(t) = (1-t)*r0 + t*r1
     // Solve: (px - Cx(t))^2 + (py - Cy(t))^2 = R(t)^2
@@ -5679,6 +5682,13 @@ fn solve_radial_t(
     let b = -2.0 * (dpx * cdx + dpy * cdy + r0 * dr);
     let c = dpx * dpx + dpy * dpy - r0 * r0;
 
+    // Helper: check if a root is in the valid domain
+    let in_domain = |t: f64| -> bool {
+        (t >= 0.0 && t <= 1.0)
+            || (t < 0.0 && extend_start)
+            || (t > 1.0 && extend_end)
+    };
+
     if a.abs() < 1e-10 {
         // Linear case
         if b.abs() < 1e-10 {
@@ -5686,7 +5696,7 @@ fn solve_radial_t(
         }
         let t = -c / b;
         let radius = r0 + t * dr;
-        if radius >= 0.0 {
+        if radius >= 0.0 && in_domain(t) {
             return Some(t);
         }
         return None;
@@ -5700,11 +5710,11 @@ fn solve_radial_t(
     let t1 = (-b + sqrt_d) / (2.0 * a);
     let t2 = (-b - sqrt_d) / (2.0 * a);
 
-    // Pick the largest t where radius >= 0
+    // Pick the largest root that is in the valid domain and has R(t) >= 0
     let mut best: Option<f64> = None;
     for t in [t1, t2] {
         let radius = r0 + t * dr;
-        if radius >= 0.0 {
+        if radius >= 0.0 && in_domain(t) {
             best = Some(match best {
                 Some(prev) => prev.max(t),
                 None => t,
