@@ -11,6 +11,8 @@ name = "stet"
 path = "src/main.rs"
 
 [dependencies]
+stet-fonts.workspace = true
+stet-graphics.workspace = true
 stet-core.workspace = true
 stet-engine.workspace = true
 stet-ops.workspace = true

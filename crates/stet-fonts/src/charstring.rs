@@ -1,6 +1,6 @@
 // stet - A PostScript Interpreter
 // Copyright (c) 2026 Scott Bowman
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Type 1 charstring interpreter.
 //!
@@ -8,7 +8,7 @@
 //! and glyph width information.
 
 use crate::encoding::STANDARD_ENCODING;
-use crate::graphics_state::{PathSegment, PsPath};
+use crate::geometry::{PathSegment, PsPath};
 
 /// Result of executing a charstring: the glyph path and advance width.
 pub struct CharstringResult {

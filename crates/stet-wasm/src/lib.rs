@@ -1,6 +1,6 @@
 // stet - A PostScript Interpreter
 // Copyright (c) 2026 Scott Bowman
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! WebAssembly bindings for the stet PostScript interpreter.
 //!
@@ -16,10 +16,10 @@ use wasm_bindgen::prelude::*;
 
 use stet_core::context::Context;
 use stet_core::device::OutputDevice;
-use stet_core::display_list::DisplayList;
 use stet_core::eps::{content_is_epsf, read_eps_bounding_box};
 use stet_core::error::PsError;
-use stet_core::icc::IccCache;
+use stet_graphics::display_list::DisplayList;
+use stet_graphics::icc::IccCache;
 use stet_engine::eval::parse_and_exec;
 use stet_render::{ImageCache, PreparedDisplayList, SkiaDevice};
 
@@ -350,7 +350,7 @@ pub fn render_pdf(interp: &mut Interpreter, pdf_data: &[u8], dpi: f64) -> Result
     interp.page_info.clear();
     interp.reference_dpi = dpi;
 
-    let mut icc_cache = stet_core::icc::IccCache::new();
+    let mut icc_cache = stet_graphics::icc::IccCache::new();
     icc_cache.load_cmyk_profile_bytes(DEFAULT_CMYK_ICC);
     let mut doc = stet_pdf_reader::PdfDocument::from_bytes_with_icc(pdf_data, icc_cache)
         .map_err(|e| JsValue::from_str(&format!("PDF parse error: {}", e)))?;

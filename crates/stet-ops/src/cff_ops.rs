@@ -1,6 +1,6 @@
 // stet - A PostScript Interpreter
 // Copyright (c) 2026 Scott Bowman
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! CFF font operators.
 //!
@@ -8,7 +8,7 @@
 //! ProcSet's `StartData` procedure. Reads binary CFF data from the current file,
 //! parses it with `cff_parser`, and registers each font via `definefont`.
 
-use stet_core::cff_parser::{self, CffFont};
+use stet_fonts::cff_parser::{self, CffFont};
 use stet_core::context::Context;
 use stet_core::dict::DictKey;
 use stet_core::error::PsError;

@@ -1,6 +1,6 @@
 // stet - A PostScript Interpreter
 // Copyright (c) 2026 Scott Bowman
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Interactive egui viewer for the stet PostScript interpreter.
 //!
@@ -12,7 +12,7 @@ mod viewer;
 
 use std::sync::mpsc;
 
-use stet_core::display_list::DisplayList;
+use stet_graphics::display_list::DisplayList;
 
 /// Raw display list tuple sent by Context at each showpage:
 /// (DisplayList, dpi, page_width, page_height).

@@ -28,7 +28,9 @@ Always consult these manuals for operator behavior, error conditions, and langua
 
 stet uses a **Cargo workspace** with four crates:
 
-- **`stet-core`** — Type system, arena allocator, VM, tokenizer, context, errors
+- **`stet-fonts`** — Font parsing and geometry types (Matrix, PsPath, Type 1/CFF/TrueType parsers, encoding tables, AGL)
+- **`stet-graphics`** — Graphics types, display list, ICC color, mesh shading (DeviceColor, FillParams, DisplayList, IccCache)
+- **`stet-core`** — PS interpreter infrastructure: type system, arena allocator, VM, tokenizer, context, errors. Depends on and re-exports stet-fonts/stet-graphics
 - **`stet-ops`** — All PostScript operator implementations
 - **`stet-engine`** — Execution engine (the core eval loop)
 - **`stet-cli`** — Binary entry point (file input and interactive REPL)
@@ -78,7 +80,7 @@ All new Rust source files must include:
 ```rust
 // stet - A PostScript Interpreter
 // Copyright (c) 2026 Scott Bowman
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 ```
 
 ### Git Configuration

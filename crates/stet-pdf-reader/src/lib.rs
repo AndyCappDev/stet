@@ -27,9 +27,9 @@ pub use page_tree::PageInfo;
 
 use content::ContentInterpreter;
 use resolver::Resolver;
-use stet_core::display_list::DisplayList;
-use stet_core::graphics_state::Matrix;
-use stet_core::icc::IccCache;
+use stet_graphics::display_list::DisplayList;
+use stet_fonts::geometry::Matrix;
+use stet_graphics::icc::IccCache;
 use std::sync::Arc;
 
 /// Font data provider: maps a font file name (e.g. "NimbusSans-Regular") to raw .t1 bytes.
@@ -252,6 +252,7 @@ impl<'a> PdfDocument<'a> {
             eprintln!("warning: content stream error: {}", e);
         }
 
+
         // Render annotation appearance streams (form field values, stamps, etc.)
         if !info.annots.is_empty() {
             interpreter.reset_clip_for_annotations();
@@ -350,11 +351,11 @@ mod tests {
     #[test]
     #[ignore]
     fn dump_display_list() {
-        use stet_core::display_list::{DisplayElement, DisplayList};
-        use stet_core::graphics_state::PsPath;
+        use stet_graphics::display_list::{DisplayElement, DisplayList};
+        use stet_fonts::geometry::PsPath;
 
         fn path_bbox(path: &PsPath) -> String {
-            use stet_core::graphics_state::PathSegment;
+            use stet_fonts::geometry::PathSegment;
             let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
             for seg in &path.segments {
                 let pts: Vec<(f64, f64)> = match seg {

@@ -1,6 +1,6 @@
 // stet - A PostScript Interpreter
 // Copyright (c) 2026 Scott Bowman
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Integration tests for Phase 3 graphics rendering.
 //!
@@ -8,7 +8,7 @@
 //! then inspects the resulting PNG output to verify correct rendering.
 
 use stet_core::context::Context;
-use stet_core::graphics_state::Matrix;
+use stet_core::geometry::Matrix;
 use stet_render::SkiaDevice;
 
 /// Create a rendering context with a SkiaDevice and default CTM.

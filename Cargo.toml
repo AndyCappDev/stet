@@ -6,7 +6,7 @@ resolver = "2"
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-license = "AGPL-3.0-or-later"
+license = "Apache-2.0 OR MIT"
 authors = ["Scott Bowman <scott@bowmans.org>"]
 
 [workspace.dependencies]
@@ -16,6 +16,8 @@ rayon = "1"
 tiny-skia = { path = "crates/tiny-skia" }
 eframe = "0.31"
 egui = "0.31"
+stet-fonts = { path = "crates/stet-fonts" }
+stet-graphics = { path = "crates/stet-graphics" }
 stet-core = { path = "crates/stet-core" }
 stet-ops = { path = "crates/stet-ops" }
 stet-engine = { path = "crates/stet-engine" }

@@ -1,13 +1,14 @@
 // stet - A PostScript Interpreter
 // Copyright (c) 2026 Scott Bowman
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! PDF output device — accumulates pages and writes a PDF file on finish().
 
 use stet_core::context::Context;
-use stet_core::device::{ClipParams, FillParams, ImageParams, OutputDevice, StrokeParams};
-use stet_core::display_list::DisplayList;
-use stet_core::graphics_state::PsPath;
+use stet_core::device::OutputDevice;
+use stet_fonts::geometry::PsPath;
+use stet_graphics::device::{ClipParams, FillParams, ImageParams, StrokeParams};
+use stet_graphics::display_list::DisplayList;
 
 use std::collections::HashMap;
 
@@ -786,7 +787,7 @@ fn build_pdf_colorspace(
 
 /// Build a PDF Type 0 (sampled) function stream from a TintLookupTable.
 /// Returns the object number of the function stream.
-fn build_tint_function(table: &stet_core::device::TintLookupTable, writer: &mut PdfWriter) -> u32 {
+fn build_tint_function(table: &stet_graphics::device::TintLookupTable, writer: &mut PdfWriter) -> u32 {
     let ni = table.num_inputs as usize;
     let no = table.num_outputs as usize;
 
@@ -859,10 +860,10 @@ fn build_tint_function(table: &stet_core::device::TintLookupTable, writer: &mut 
 /// Build a PDF Separation or DeviceN color space array from a SpotColorSpace.
 /// Returns a PdfObj (array) suitable for inclusion in the Resources/ColorSpace dict.
 fn build_spot_colorspace(
-    spot_cs: &stet_core::device::SpotColorSpace,
+    spot_cs: &stet_graphics::device::SpotColorSpace,
     writer: &mut PdfWriter,
 ) -> PdfObj {
-    use stet_core::device::{SimpleColorSpace, SpotColorSpace};
+    use stet_graphics::device::{SimpleColorSpace, SpotColorSpace};
     match spot_cs {
         SpotColorSpace::Separation {
             name,
@@ -1258,7 +1259,7 @@ fn build_type0_function_2d(writer: &mut PdfWriter, table: &[f64]) -> u32 {
 /// Returns a PdfObj (either inline Dict or Ref to indirect object).
 fn build_halftone_screen(
     writer: &mut PdfWriter,
-    screen: &stet_core::device::HalftoneScreen,
+    screen: &stet_graphics::device::HalftoneScreen,
 ) -> PdfObj {
     let spot_func = if let Some(ref tokens) = screen.type4_tokens {
         let func_ref = build_type4_function(writer, tokens);
@@ -1282,7 +1283,7 @@ fn build_halftone_screen(
 }
 
 /// Build the /HT value for an ExtGState dict from a HalftoneState.
-fn build_halftone_ht(writer: &mut PdfWriter, state: &stet_core::device::HalftoneState) -> PdfObj {
+fn build_halftone_ht(writer: &mut PdfWriter, state: &stet_graphics::device::HalftoneState) -> PdfObj {
     if let Some(ref color) = state.color {
         // Type 5 composite halftone
         let mut entries = vec![

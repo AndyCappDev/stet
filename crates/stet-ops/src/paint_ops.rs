@@ -1,17 +1,19 @@
 // stet - A PostScript Interpreter
 // Copyright (c) 2026 Scott Bowman
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Painting operators: fill, eofill, stroke, rectfill, rectstroke, erasepage, showpage.
 
 use stet_core::context::Context;
-use stet_core::device::{
+use stet_core::error::PsError;
+use stet_core::graphics_state::ColorSpace;
+use stet_fonts::geometry::{Matrix, PathSegment, PsPath};
+use stet_graphics::color::{DashPattern, FillRule};
+use stet_graphics::device::{
     BgUcrState, FillParams, HalftoneState, PatternFillParams, SimpleColorSpace, SpotColor,
     SpotColorSpace, StrokeParams, TransferState,
 };
-use stet_core::display_list::DisplayElement;
-use stet_core::error::PsError;
-use stet_core::graphics_state::{ColorSpace, DashPattern, FillRule, Matrix, PathSegment, PsPath};
+use stet_graphics::display_list::DisplayElement;
 use stet_core::object::{PsObject, PsValue};
 
 /// Capture the current SpotColor from graphics state if in Separation/DeviceN mode.
@@ -574,7 +576,7 @@ pub fn op_showpage(ctx: &mut Context) -> Result<(), PsError> {
             }
         } else {
             let device = ctx.device.as_mut().unwrap();
-            stet_core::display_list::replay_to_device(&ctx.display_list, device.as_mut());
+            stet_core::device::replay_to_device(&ctx.display_list, device.as_mut());
             ctx.display_list.clear();
         }
         ctx.device.as_mut().unwrap().erase_page();

@@ -1,17 +1,19 @@
 // stet - A PostScript Interpreter
 // Copyright (c) 2026 Scott Bowman
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Image operators: image, imagemask, colorimage.
 
 use std::sync::Arc;
 
 use stet_core::context::Context;
-use stet_core::device::{ImageColorSpace, ImageParams};
 use stet_core::dict::DictKey;
-use stet_core::display_list::DisplayElement;
 use stet_core::error::PsError;
-use stet_core::graphics_state::{ColorSpace, DeviceColor, Matrix};
+use stet_core::graphics_state::ColorSpace;
+use stet_fonts::geometry::Matrix;
+use stet_graphics::color::DeviceColor;
+use stet_graphics::device::{ImageColorSpace, ImageParams};
+use stet_graphics::display_list::DisplayElement;
 use stet_core::object::{PsObject, PsValue};
 
 // ---------- image operator ----------
@@ -1916,7 +1918,7 @@ pub(crate) fn sample_tint_transform(
     tint_transform: PsObject,
     num_inputs: u32,
     num_outputs: u32,
-) -> Option<stet_core::device::TintLookupTable> {
+) -> Option<stet_graphics::device::TintLookupTable> {
     let samples_per_dim = if num_inputs == 1 {
         256u32
     } else {
@@ -1959,7 +1961,7 @@ pub(crate) fn sample_tint_transform(
         data.extend_from_slice(&outputs);
     }
 
-    Some(stet_core::device::TintLookupTable {
+    Some(stet_graphics::device::TintLookupTable {
         num_inputs,
         num_outputs,
         samples_per_dim,

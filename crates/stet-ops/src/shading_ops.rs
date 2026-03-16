@@ -1,6 +1,6 @@
 // stet - A PostScript Interpreter
 // Copyright (c) 2026 Scott Bowman
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! `shfill` operator — smooth shading fill for all 7 PLRM shading types.
 //!
@@ -8,15 +8,17 @@
 //! function where needed, and pushes display list elements for rendering.
 
 use stet_core::context::Context;
-use stet_core::device::{
+use stet_core::dict::DictKey;
+use stet_core::error::PsError;
+use stet_core::graphics_state::ColorSpace;
+use stet_fonts::geometry::Matrix;
+use stet_graphics::color::DeviceColor;
+use stet_graphics::device::{
     AxialShadingParams, ColorStop, ImageParams, MeshShadingParams, PatchShadingParams,
     RadialShadingParams, ShadingColorSpace,
 };
-use stet_core::dict::DictKey;
-use stet_core::display_list::DisplayElement;
-use stet_core::error::PsError;
-use stet_core::graphics_state::{ColorSpace, DeviceColor, Matrix};
-use stet_core::mesh_shading;
+use stet_graphics::display_list::DisplayElement;
+use stet_graphics::mesh_shading;
 use stet_core::object::{EntityId, PsObject, PsValue};
 
 use crate::color_ops::{precompute_cie_decode_tables, resolve_color_space_from_obj};
@@ -373,7 +375,7 @@ fn build_type1_shading(
         params: ImageParams {
             width: size as u32,
             height: size as u32,
-            color_space: stet_core::device::ImageColorSpace::DeviceRGB,
+            color_space: stet_graphics::device::ImageColorSpace::DeviceRGB,
             ctm,
             image_matrix,
             interpolate: false,
@@ -981,7 +983,7 @@ fn capture_shading_color_space(ctx: &Context, color_space: &ColorSpace) -> Shadi
 fn components_to_device_color(
     comps: &[f64],
     color_space: &ColorSpace,
-    icc_cache: &mut stet_core::icc::IccCache,
+    icc_cache: &mut stet_graphics::icc::IccCache,
 ) -> DeviceColor {
     match color_space {
         ColorSpace::DeviceGray => {

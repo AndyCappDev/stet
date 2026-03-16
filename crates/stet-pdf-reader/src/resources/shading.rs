@@ -14,13 +14,13 @@ use crate::objects::{PdfDict, PdfObj};
 use crate::resolver::Resolver;
 use crate::resources::function::PdfFunction;
 
-use stet_core::device::{
+use stet_graphics::device::{
     AxialShadingParams, ColorStop, ImageColorSpace, ImageParams, MeshShadingParams,
     PatchShadingParams, RadialShadingParams, ShadingColorSpace,
 };
-use stet_core::display_list::{DisplayElement, DisplayList};
-use stet_core::graphics_state::Matrix;
-use stet_core::icc::IccCache;
+use stet_graphics::display_list::{DisplayElement, DisplayList};
+use stet_fonts::geometry::Matrix;
+use stet_graphics::icc::IccCache;
 
 /// Handle the `sh` operator: parse shading dict and emit display element.
 ///
@@ -303,10 +303,10 @@ fn handle_mesh(
     let data = resolver.stream_data_from_obj(shading_obj)?;
 
     let mut triangles = match shading_type {
-        4 => stet_core::mesh_shading::parse_type4_mesh(&data, bpc, bpco, bpfl, &decode, n_comps),
+        4 => stet_graphics::mesh_shading::parse_type4_mesh(&data, bpc, bpco, bpfl, &decode, n_comps),
         5 => {
             let vpr = dict.get_int(b"VerticesPerRow").unwrap_or(2) as usize;
-            stet_core::mesh_shading::parse_type5_mesh(&data, bpc, bpco, &decode, n_comps, vpr)
+            stet_graphics::mesh_shading::parse_type5_mesh(&data, bpc, bpco, &decode, n_comps, vpr)
         }
         _ => return Ok(()),
     };
@@ -393,8 +393,8 @@ fn handle_patches(
     let data = resolver.stream_data_from_obj(shading_obj)?;
 
     let mut patches = match shading_type {
-        6 => stet_core::mesh_shading::parse_type6_patches(&data, bpc, bpco, bpfl, &decode, n_comps),
-        7 => stet_core::mesh_shading::parse_type7_patches(&data, bpc, bpco, bpfl, &decode, n_comps),
+        6 => stet_graphics::mesh_shading::parse_type6_patches(&data, bpc, bpco, bpfl, &decode, n_comps),
+        7 => stet_graphics::mesh_shading::parse_type7_patches(&data, bpc, bpco, bpfl, &decode, n_comps),
         _ => return Ok(()),
     };
 

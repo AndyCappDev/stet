@@ -1,13 +1,13 @@
 // stet - A PostScript Interpreter
 // Copyright (c) 2026 Scott Bowman
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! egui viewer application — renders PostScript pages on demand from display lists.
 
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError};
 
 use egui::{ColorImage, TextureHandle, TextureOptions, Vec2};
-use stet_core::display_list::DisplayList;
+use stet_graphics::display_list::DisplayList;
 use stet_render::{ImageCache, PreparedDisplayList};
 
 use crate::{ScreenInfo, ViewerEnd, ViewerMsg};
@@ -74,7 +74,7 @@ struct StoredPage {
     /// Cached viewport render (reused if viewport unchanged).
     cached_render: Option<CachedRender>,
     /// ICC cache built from this page's display list profiles.
-    icc_cache: stet_core::icc::IccCache,
+    icc_cache: stet_graphics::icc::IccCache,
     /// Pre-converted RGBA image cache for fast viewport rendering.
     image_cache: ImageCache,
 }

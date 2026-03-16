@@ -1,6 +1,6 @@
 // stet - A PostScript Interpreter
 // Copyright (c) 2026 Scott Bowman
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Matrix operators: matrix, identmatrix, currentmatrix, setmatrix, defaultmatrix,
 //! initmatrix, translate, scale, rotate, concat, concatmatrix, invertmatrix,
@@ -8,7 +8,7 @@
 
 use stet_core::context::Context;
 use stet_core::error::PsError;
-use stet_core::graphics_state::Matrix;
+use stet_fonts::geometry::Matrix;
 use stet_core::object::{EntityId, PsObject, PsValue};
 
 /// Read a 6-element Matrix from a PS array object on the stack.

@@ -1,6 +1,6 @@
 // stet - A PostScript Interpreter
 // Copyright (c) 2026 Scott Bowman
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! In-memory page sink for WASM builds.
 //!
@@ -11,7 +11,7 @@
 use std::cell::RefCell;
 use std::sync::{Arc, Mutex};
 
-use stet_core::device::{PageSink, PageSinkFactory};
+use stet_graphics::device::{PageSink, PageSinkFactory};
 
 /// Streaming callback events:
 ///   event=0 (begin): index, width, height, data=empty

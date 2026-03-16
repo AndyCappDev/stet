@@ -1,6 +1,6 @@
 // stet - A PostScript Interpreter
 // Copyright (c) 2026 Scott Bowman
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! tiny-skia implementation of the `OutputDevice` trait.
 
@@ -14,15 +14,15 @@ use tiny_skia::{
     Mask, Paint, PathBuilder, Pixmap, Stroke, StrokeDash, Transform,
 };
 
-use stet_core::device::{
+use stet_core::device::OutputDevice;
+use stet_fonts::geometry::{Matrix, PathSegment, PsPath};
+use stet_graphics::color::{DeviceColor, FillRule, LineCap, LineJoin};
+use stet_graphics::device::{
     AxialShadingParams, ClipParams, FillParams, ImageColorSpace, ImageParams, MeshShadingParams,
-    OutputDevice, PageSinkFactory, PatchShadingParams, RadialShadingParams, ShadingColorSpace,
-    ShadingVertex, StrokeParams, TintLookupTable,
+    PageSinkFactory, PatchShadingParams, RadialShadingParams, ShadingColorSpace, ShadingVertex,
+    StrokeParams, TintLookupTable,
 };
-use stet_core::graphics_state::{
-    DeviceColor, FillRule, LineCap, LineJoin, Matrix, PathSegment, PsPath,
-};
-use stet_core::icc::IccCache;
+use stet_graphics::icc::IccCache;
 
 /// Axis-aligned rectangle in device pixel coordinates.
 #[derive(Clone, Copy)]
@@ -519,7 +519,7 @@ fn intersect_masks(dst: &mut Mask, src: &Mask) {
 
 // ---- Banded rendering support ----
 
-use stet_core::display_list::{DisplayElement, DisplayList};
+use stet_graphics::display_list::{DisplayElement, DisplayList};
 
 /// Band-local clip state, rebuilt for each band.
 struct BandState {
@@ -959,7 +959,7 @@ fn composite_non_isolated_group_cropped(
     target: &mut Pixmap,
     source: &Pixmap,
     backdrop: &[u8],
-    params: &stet_core::display_list::GroupParams,
+    params: &stet_graphics::display_list::GroupParams,
     clip_mask: Option<&tiny_skia::Mask>,
     crop_x: i32,
     crop_y: i32,
@@ -1831,7 +1831,7 @@ fn render_element(
             // overprint has no visual effect — use the normal rendering path.
             let needs_overprint = params.overprint
                 && params.is_device_cmyk
-                && params.painted_channels != stet_core::device::CMYK_ALL
+                && params.painted_channels != stet_graphics::device::CMYK_ALL
                 && band_state.cmyk_buffer.is_some();
 
             if needs_overprint {
@@ -2224,7 +2224,7 @@ fn render_group(
     pixmap: &mut Pixmap,
     band_state: &mut BandState,
     elements: &DisplayList,
-    params: &stet_core::display_list::GroupParams,
+    params: &stet_graphics::display_list::GroupParams,
     ctx: &RenderContext<'_>,
 ) {
     if params.knockout {
@@ -2376,7 +2376,7 @@ fn render_knockout_group(
     pixmap: &mut Pixmap,
     band_state: &mut BandState,
     elements: &DisplayList,
-    params: &stet_core::display_list::GroupParams,
+    params: &stet_graphics::display_list::GroupParams,
     ctx: &RenderContext<'_>,
 ) {
     let crop = compute_group_crop(&params.bbox, ctx);
@@ -2598,7 +2598,7 @@ fn render_soft_masked(
     band_state: &mut BandState,
     mask_list: &DisplayList,
     content_list: &DisplayList,
-    params: &stet_core::display_list::SoftMaskParams,
+    params: &stet_graphics::display_list::SoftMaskParams,
     ctx: &RenderContext<'_>,
 ) {
     // The SoftMask's display list elements are in absolute device space (page coords).
@@ -2757,9 +2757,9 @@ fn render_soft_masked(
 fn extract_soft_mask_values(
     rgba: &[u8],
     out: &mut [u8],
-    params: &stet_core::display_list::SoftMaskParams,
+    params: &stet_graphics::display_list::SoftMaskParams,
 ) {
-    use stet_core::display_list::SoftMaskSubtype;
+    use stet_graphics::display_list::SoftMaskSubtype;
     let pixel_count = out.len();
 
     match params.subtype {
@@ -2802,7 +2802,7 @@ fn extract_soft_mask_values(
 fn render_pattern_fill(
     pixmap: &mut Pixmap,
     band_state: &mut BandState,
-    params: &stet_core::device::PatternFillParams,
+    params: &stet_graphics::device::PatternFillParams,
     ctx: &RenderContext<'_>,
 ) {
     let mut temp_mask = None;
@@ -3325,7 +3325,7 @@ impl OutputDevice for SkiaDevice {
         render_patch_shading(&mut self.pixmap, params, 0.0, 0.0, 1.0, 1.0, mask_ref, None, None);
     }
 
-    fn paint_pattern_fill(&mut self, params: &stet_core::device::PatternFillParams) {
+    fn paint_pattern_fill(&mut self, params: &stet_graphics::device::PatternFillParams) {
         self.ensure_full_pixmap();
         let w = self.pixmap.width();
         let h = self.pixmap.height();
@@ -3585,22 +3585,22 @@ fn render_overprint_fill(
     // Non-CMYK fills (painted_channels=0, e.g. Separation spot colors, RGB, Gray)
     // replace all color at each pixel — update all CMYK channels to keep buffer in sync.
     if channels == 0 {
-        channels = stet_core::device::CMYK_ALL;
+        channels = stet_graphics::device::CMYK_ALL;
     }
     // OPM 1 per-pixel zero filtering only applies to DeviceCMYK, not DeviceN/Separation
     if params.overprint_mode == 1
-        && channels == stet_core::device::CMYK_ALL
+        && channels == stet_graphics::device::CMYK_ALL
         && params.is_device_cmyk
     {
         channels = 0;
-        if src_c != 0.0 { channels |= stet_core::device::CMYK_C; }
-        if src_m != 0.0 { channels |= stet_core::device::CMYK_M; }
-        if src_y != 0.0 { channels |= stet_core::device::CMYK_Y; }
-        if src_k != 0.0 { channels |= stet_core::device::CMYK_K; }
+        if src_c != 0.0 { channels |= stet_graphics::device::CMYK_C; }
+        if src_m != 0.0 { channels |= stet_graphics::device::CMYK_M; }
+        if src_y != 0.0 { channels |= stet_graphics::device::CMYK_Y; }
+        if src_k != 0.0 { channels |= stet_graphics::device::CMYK_K; }
     }
 
 
-    if channels == stet_core::device::CMYK_ALL {
+    if channels == stet_graphics::device::CMYK_ALL {
         let cov_data = coverage_mask.data();
         let stride = out_w as usize;
         for y in 0..out_h as usize {
@@ -3669,10 +3669,10 @@ fn render_overprint_fill(
                 }
             };
 
-            let new_c = if channels & stet_core::device::CMYK_C != 0 { src_c } else { cur_c };
-            let new_m = if channels & stet_core::device::CMYK_M != 0 { src_m } else { cur_m };
-            let new_y = if channels & stet_core::device::CMYK_Y != 0 { src_y } else { cur_y };
-            let new_k = if channels & stet_core::device::CMYK_K != 0 { src_k } else { cur_k };
+            let new_c = if channels & stet_graphics::device::CMYK_C != 0 { src_c } else { cur_c };
+            let new_m = if channels & stet_graphics::device::CMYK_M != 0 { src_m } else { cur_m };
+            let new_y = if channels & stet_graphics::device::CMYK_Y != 0 { src_y } else { cur_y };
+            let new_k = if channels & stet_graphics::device::CMYK_K != 0 { src_k } else { cur_k };
 
             if (new_c as f32 - cmyk_buf[ci]).abs() < 1e-6
                 && (new_m as f32 - cmyk_buf[ci + 1]).abs() < 1e-6
@@ -3898,7 +3898,7 @@ fn render_overprint_image(
             // Non-CMYK images (painted_channels=0, e.g. Separation/DeviceN spot colors)
             // replace all CMYK channels with the tinted equivalent.
             if channels == 0 {
-                channels = stet_core::device::CMYK_ALL;
+                channels = stet_graphics::device::CMYK_ALL;
             }
             let is_direct_cmyk = matches!(
                 &params.color_space,
@@ -3907,14 +3907,14 @@ fn render_overprint_image(
                     | ImageColorSpace::Mask { .. }
             );
             if params.overprint_mode == 1
-                && channels == stet_core::device::CMYK_ALL
+                && channels == stet_graphics::device::CMYK_ALL
                 && is_direct_cmyk
             {
                 channels = 0;
-                if src_c != 0.0 { channels |= stet_core::device::CMYK_C; }
-                if src_m != 0.0 { channels |= stet_core::device::CMYK_M; }
-                if src_y != 0.0 { channels |= stet_core::device::CMYK_Y; }
-                if src_k != 0.0 { channels |= stet_core::device::CMYK_K; }
+                if src_c != 0.0 { channels |= stet_graphics::device::CMYK_C; }
+                if src_m != 0.0 { channels |= stet_graphics::device::CMYK_M; }
+                if src_y != 0.0 { channels |= stet_graphics::device::CMYK_Y; }
+                if src_k != 0.0 { channels |= stet_graphics::device::CMYK_K; }
             }
 
             let mi = by * stride + bx;
@@ -3939,10 +3939,10 @@ fn render_overprint_image(
                 } else { (c, m, y_val, k) }
             };
 
-            let new_c = if channels & stet_core::device::CMYK_C != 0 { src_c } else { cur_c };
-            let new_m = if channels & stet_core::device::CMYK_M != 0 { src_m } else { cur_m };
-            let new_y = if channels & stet_core::device::CMYK_Y != 0 { src_y } else { cur_y };
-            let new_k = if channels & stet_core::device::CMYK_K != 0 { src_k } else { cur_k };
+            let new_c = if channels & stet_graphics::device::CMYK_C != 0 { src_c } else { cur_c };
+            let new_m = if channels & stet_graphics::device::CMYK_M != 0 { src_m } else { cur_m };
+            let new_y = if channels & stet_graphics::device::CMYK_Y != 0 { src_y } else { cur_y };
+            let new_k = if channels & stet_graphics::device::CMYK_K != 0 { src_k } else { cur_k };
 
             cmyk_buf[ci] = new_c as f32;
             cmyk_buf[ci + 1] = new_m as f32;
@@ -4185,7 +4185,7 @@ fn render_banded_to_sink(
     band_h: u32,
     dpi: f64,
     list: &DisplayList,
-    sink: &mut dyn stet_core::device::PageSink,
+    sink: &mut dyn stet_graphics::device::PageSink,
     icc_cache: &IccCache,
     no_aa: bool,
 ) -> Result<(), String> {
@@ -5071,7 +5071,7 @@ struct MemorySink {
     width: u32,
 }
 
-impl stet_core::device::PageSink for MemorySink {
+impl stet_graphics::device::PageSink for MemorySink {
     fn begin_page(&mut self, width: u32, height: u32) -> Result<(), String> {
         self.width = width;
         self.data.reserve(width as usize * height as usize * 4);
@@ -5472,18 +5472,18 @@ fn render_axial_shading(
                 let ci = (py as usize * pw as usize + px as usize) * 4;
                 if ci + 3 < buf.len() {
                     if params.overprint
-                        && params.painted_channels != stet_core::device::CMYK_ALL
+                        && params.painted_channels != stet_graphics::device::CMYK_ALL
                     {
-                        if params.painted_channels & stet_core::device::CMYK_C != 0 {
+                        if params.painted_channels & stet_graphics::device::CMYK_C != 0 {
                             buf[ci] = cmyk.0 as f32;
                         }
-                        if params.painted_channels & stet_core::device::CMYK_M != 0 {
+                        if params.painted_channels & stet_graphics::device::CMYK_M != 0 {
                             buf[ci + 1] = cmyk.1 as f32;
                         }
-                        if params.painted_channels & stet_core::device::CMYK_Y != 0 {
+                        if params.painted_channels & stet_graphics::device::CMYK_Y != 0 {
                             buf[ci + 2] = cmyk.2 as f32;
                         }
-                        if params.painted_channels & stet_core::device::CMYK_K != 0 {
+                        if params.painted_channels & stet_graphics::device::CMYK_K != 0 {
                             buf[ci + 3] = cmyk.3 as f32;
                         }
                         // Recomposite RGB from merged CMYK via ICC
@@ -5620,18 +5620,18 @@ fn render_radial_shading(
                             &color,
                         );
                         if params.overprint
-                            && params.painted_channels != stet_core::device::CMYK_ALL
+                            && params.painted_channels != stet_graphics::device::CMYK_ALL
                         {
-                            if params.painted_channels & stet_core::device::CMYK_C != 0 {
+                            if params.painted_channels & stet_graphics::device::CMYK_C != 0 {
                                 buf[ci] = cmyk.0 as f32;
                             }
-                            if params.painted_channels & stet_core::device::CMYK_M != 0 {
+                            if params.painted_channels & stet_graphics::device::CMYK_M != 0 {
                                 buf[ci + 1] = cmyk.1 as f32;
                             }
-                            if params.painted_channels & stet_core::device::CMYK_Y != 0 {
+                            if params.painted_channels & stet_graphics::device::CMYK_Y != 0 {
                                 buf[ci + 2] = cmyk.2 as f32;
                             }
-                            if params.painted_channels & stet_core::device::CMYK_K != 0 {
+                            if params.painted_channels & stet_graphics::device::CMYK_K != 0 {
                                 buf[ci + 3] = cmyk.3 as f32;
                             }
                         } else {
@@ -5839,19 +5839,19 @@ fn render_mesh_shading(
                             &params.color_space, r, g, b,
                         );
                         if params.overprint
-                            && params.painted_channels != stet_core::device::CMYK_ALL
+                            && params.painted_channels != stet_graphics::device::CMYK_ALL
                         {
                             if !clipped {
-                                if params.painted_channels & stet_core::device::CMYK_C != 0 {
+                                if params.painted_channels & stet_graphics::device::CMYK_C != 0 {
                                     buf[ci] = cmyk.0 as f32;
                                 }
-                                if params.painted_channels & stet_core::device::CMYK_M != 0 {
+                                if params.painted_channels & stet_graphics::device::CMYK_M != 0 {
                                     buf[ci + 1] = cmyk.1 as f32;
                                 }
-                                if params.painted_channels & stet_core::device::CMYK_Y != 0 {
+                                if params.painted_channels & stet_graphics::device::CMYK_Y != 0 {
                                     buf[ci + 2] = cmyk.2 as f32;
                                 }
-                                if params.painted_channels & stet_core::device::CMYK_K != 0 {
+                                if params.painted_channels & stet_graphics::device::CMYK_K != 0 {
                                     buf[ci + 3] = cmyk.3 as f32;
                                 }
                             }
@@ -5962,8 +5962,8 @@ fn render_patch_shading(
 /// Uses a simple grid subdivision approach: evaluate the patch at NxN points
 /// and triangulate the resulting grid.
 fn subdivide_patch_to_triangles(
-    patch: &stet_core::device::ShadingPatch,
-    triangles: &mut Vec<stet_core::device::ShadingTriangle>,
+    patch: &stet_graphics::device::ShadingPatch,
+    triangles: &mut Vec<stet_graphics::device::ShadingTriangle>,
     n: usize,
 ) {
 
@@ -5994,8 +5994,8 @@ fn subdivide_patch_to_triangles(
             let (x01, y01, c01) = &grid[i01];
             let (x11, y11, c11) = &grid[i11];
 
-            use stet_core::device::ShadingVertex;
-            triangles.push(stet_core::device::ShadingTriangle {
+            use stet_graphics::device::ShadingVertex;
+            triangles.push(stet_graphics::device::ShadingTriangle {
                 v0: ShadingVertex {
                     x: *x00,
                     y: *y00,
@@ -6015,7 +6015,7 @@ fn subdivide_patch_to_triangles(
                     raw_components: vec![],
                 },
             });
-            triangles.push(stet_core::device::ShadingTriangle {
+            triangles.push(stet_graphics::device::ShadingTriangle {
                 v0: ShadingVertex {
                     x: *x10,
                     y: *y10,
@@ -6041,7 +6041,7 @@ fn subdivide_patch_to_triangles(
 
 /// Evaluate a Coons patch at parameter (u, v).
 /// The 12 control points define 4 cubic Bezier boundary curves.
-fn eval_coons_patch(patch: &stet_core::device::ShadingPatch, u: f64, v: f64) -> (f64, f64) {
+fn eval_coons_patch(patch: &stet_graphics::device::ShadingPatch, u: f64, v: f64) -> (f64, f64) {
     let pts = &patch.points;
     if pts.len() < 12 {
         return (0.0, 0.0);
@@ -6116,7 +6116,7 @@ fn bilinear_color(colors: &[DeviceColor; 4], u: f64, v: f64) -> DeviceColor {
 }
 
 /// Build tiny-skia gradient stops from color stops.
-fn build_gradient_stops(stops: &[stet_core::device::ColorStop]) -> Vec<tiny_skia::GradientStop> {
+fn build_gradient_stops(stops: &[stet_graphics::device::ColorStop]) -> Vec<tiny_skia::GradientStop> {
     let mut result = Vec::with_capacity(stops.len());
     for stop in stops {
         let r = (stop.color.r * 255.0).round().clamp(0.0, 255.0) as u8;
@@ -6131,7 +6131,7 @@ fn build_gradient_stops(stops: &[stet_core::device::ColorStop]) -> Vec<tiny_skia
 }
 
 /// Interpolate between color stops at a given position (0.0..=1.0).
-fn interpolate_color_stops(stops: &[stet_core::device::ColorStop], position: f64) -> DeviceColor {
+fn interpolate_color_stops(stops: &[stet_graphics::device::ColorStop], position: f64) -> DeviceColor {
     if stops.is_empty() {
         return DeviceColor::from_gray(0.0);
     }
@@ -6169,7 +6169,7 @@ fn interpolate_color_stops(stops: &[stet_core::device::ColorStop], position: f64
 /// Uses raw_components when the shading is in DeviceCMYK, otherwise
 /// reverse-engineers from the interpolated RGB.
 fn interpolate_cmyk_from_stops(
-    stops: &[stet_core::device::ColorStop],
+    stops: &[stet_graphics::device::ColorStop],
     cs: &ShadingColorSpace,
     t: f64,
     color: &DeviceColor,
@@ -6269,8 +6269,8 @@ fn interpolate_cmyk_from_vertices(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use stet_core::device::{BgUcrState, HalftoneState, TransferState};
-    use stet_core::graphics_state::DashPattern;
+    use stet_graphics::device::{BgUcrState, HalftoneState, TransferState};
+    use stet_graphics::color::DashPattern;
 
     #[test]
     fn test_create_device() {

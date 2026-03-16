@@ -2,7 +2,7 @@
 name = "stet-wasm"
 version = "0.1.0"
 edition = "2024"
-license = "AGPL-3.0-or-later"
+license = "Apache-2.0 OR MIT"
 authors = ["Scott Bowman <scott@bowmans.org>"]
 description = "WebAssembly bindings for stet PostScript interpreter"
 
@@ -10,6 +10,8 @@ description = "WebAssembly bindings for stet PostScript interpreter"
 crate-type = ["cdylib"]
 
 [dependencies]
+stet-fonts = { path = "../stet-fonts" }
+stet-graphics = { path = "../stet-graphics" }
 stet-core = { path = "../stet-core" }
 stet-ops = { path = "../stet-ops" }
 stet-engine = { path = "../stet-engine" }

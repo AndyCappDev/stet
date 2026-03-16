@@ -1,6 +1,6 @@
 // stet - A PostScript Interpreter
 // Copyright (c) 2026 Scott Bowman
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Insideness testing operators: infill, ineofill, instroke.
 //!
@@ -9,7 +9,7 @@
 
 use stet_core::context::Context;
 use stet_core::error::PsError;
-use stet_core::graphics_state::{PathSegment, PsPath};
+use stet_fonts::geometry::{PathSegment, PsPath};
 use stet_core::object::PsObject;
 
 /// `infill`: x y → bool — test point against fill (nonzero winding rule)

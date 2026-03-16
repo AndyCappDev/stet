@@ -1,14 +1,14 @@
 // stet - A PostScript Interpreter
 // Copyright (c) 2026 Scott Bowman
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Display list — records drawing operations for deferred replay to a device.
 
 use crate::device::{
-    AxialShadingParams, ClipParams, FillParams, ImageParams, MeshShadingParams, OutputDevice,
+    AxialShadingParams, ClipParams, FillParams, ImageParams, MeshShadingParams,
     PatchShadingParams, PatternFillParams, RadialShadingParams, StrokeParams, TextParams,
 };
-use crate::graphics_state::PsPath;
+use stet_fonts::geometry::PsPath;
 
 /// Subtype for soft mask extraction.
 #[derive(Clone, Debug)]
@@ -153,60 +153,3 @@ impl Default for DisplayList {
     }
 }
 
-/// Replay a display list to any raster device.
-pub fn replay_to_device(list: &DisplayList, device: &mut dyn OutputDevice) {
-    for element in &list.elements {
-        match element {
-            DisplayElement::Fill { path, params } => {
-                device.fill_path(path, params);
-            }
-            DisplayElement::Stroke { path, params } => {
-                device.stroke_path(path, params);
-            }
-            DisplayElement::Clip { path, params } => {
-                device.clip_path(path, params);
-            }
-            DisplayElement::InitClip => {
-                device.init_clip();
-            }
-            DisplayElement::Image {
-                sample_data,
-                params,
-            } => {
-                device.draw_image(sample_data, params);
-            }
-            DisplayElement::ErasePage => {
-                device.erase_page();
-            }
-            DisplayElement::AxialShading { params } => {
-                device.paint_axial_shading(params);
-            }
-            DisplayElement::RadialShading { params } => {
-                device.paint_radial_shading(params);
-            }
-            DisplayElement::MeshShading { params } => {
-                device.paint_mesh_shading(params);
-            }
-            DisplayElement::PatchShading { params } => {
-                device.paint_patch_shading(params);
-            }
-            DisplayElement::PatternFill { params } => {
-                device.paint_pattern_fill(params);
-            }
-            DisplayElement::Text { .. } => {
-                // Text elements are only used by the PDF device.
-                // The rasterizer ignores them (glyph paths are in Fill elements).
-            }
-            DisplayElement::Group { elements, .. } => {
-                // Pass-through: recursively replay group children.
-                // Actual offscreen compositing is handled by the renderer.
-                replay_to_device(elements, device);
-            }
-            DisplayElement::SoftMasked { content, .. } => {
-                // Pass-through: recursively replay content children.
-                // Actual mask compositing is handled by the renderer.
-                replay_to_device(content, device);
-            }
-        }
-    }
-}

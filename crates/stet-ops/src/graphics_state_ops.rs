@@ -1,6 +1,6 @@
 // stet - A PostScript Interpreter
 // Copyright (c) 2026 Scott Bowman
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Graphics state operators: gsave, grestore, grestoreall, setlinewidth,
 //! currentlinewidth, setlinecap, currentlinecap, setlinejoin, currentlinejoin,
@@ -8,11 +8,10 @@
 //! setstrokeadjust, currentstrokeadjust, initgraphics.
 
 use stet_core::context::Context;
-use stet_core::display_list::DisplayElement;
 use stet_core::error::PsError;
-use stet_core::graphics_state::{
-    DashPattern, FillRule, GraphicsState, GstateEntry, LineCap, LineJoin,
-};
+use stet_core::graphics_state::{GraphicsState, GstateEntry};
+use stet_graphics::color::{DashPattern, FillRule, LineCap, LineJoin};
+use stet_graphics::display_list::DisplayElement;
 use stet_core::object::{PsObject, PsValue};
 
 /// `gsave`: — → — (push graphics state)
@@ -88,9 +87,9 @@ pub fn restore_device_clip(ctx: &mut Context, old_version: u32) {
     }
     ctx.display_list.push(DisplayElement::InitClip);
     if let Some(ref clip) = ctx.gstate.clip_path {
-        let params = stet_core::device::ClipParams {
+        let params = stet_graphics::device::ClipParams {
             fill_rule: FillRule::NonZeroWinding,
-            ctm: stet_core::graphics_state::Matrix::identity(),
+            ctm: stet_fonts::geometry::Matrix::identity(),
         };
         ctx.display_list.push(DisplayElement::Clip {
             path: clip.clone(),
@@ -352,7 +351,7 @@ pub fn op_initgraphics(ctx: &mut Context) -> Result<(), PsError> {
 mod tests {
     use super::*;
     use stet_core::context::Context;
-    use stet_core::graphics_state::Matrix;
+    use stet_fonts::geometry::Matrix;
 
     fn setup() -> Context {
         let mut ctx = Context::new();

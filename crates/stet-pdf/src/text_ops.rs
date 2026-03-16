@@ -1,6 +1,6 @@
 // stet - A PostScript Interpreter
 // Copyright (c) 2026 Scott Bowman
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! PDF text operators — emit BT/ET/Tf/Tj/TJ for Text display elements.
 //!
@@ -9,7 +9,8 @@
 
 use std::io::Write as IoWrite;
 
-use stet_core::device::TextParams;
+use stet_core::object::EntityId;
+use stet_graphics::device::TextParams;
 
 use crate::content_stream::fmt_num;
 use crate::font_tracker::FontTracker;
@@ -24,7 +25,7 @@ pub fn emit_text_batch(buf: &mut Vec<u8>, batch: &[&TextParams], font_tracker: &
     }
 
     let first = batch[0];
-    let Some(pdf_font_name) = font_tracker.get_pdf_name(first.font_entity) else {
+    let Some(pdf_font_name) = font_tracker.get_pdf_name(EntityId(first.font_entity)) else {
         return;
     };
 
@@ -35,7 +36,7 @@ pub fn emit_text_batch(buf: &mut Vec<u8>, batch: &[&TextParams], font_tracker: &
     // Check if widths are available for this font
     let has_widths = !font_tracker
         .fonts()
-        .find(|u| u.font_entity == first.font_entity)
+        .find(|u| u.font_entity == EntityId(first.font_entity))
         .is_none_or(|u| u.widths.is_empty());
 
     // Single BT/Tf block for the entire batch — Tf is the same for all
@@ -96,7 +97,7 @@ pub fn emit_text_batch(buf: &mut Vec<u8>, batch: &[&TextParams], font_tracker: &
                     let mut prev_text_width = 0.0;
                     for &byte_val in &prev.text {
                         if let Some(w) =
-                            font_tracker.get_glyph_width(prev.font_entity, byte_val as u16)
+                            font_tracker.get_glyph_width(EntityId(prev.font_entity), byte_val as u16)
                         {
                             prev_text_width += w as f64;
                         }
@@ -170,7 +171,7 @@ pub fn emit_text_batch(buf: &mut Vec<u8>, batch: &[&TextParams], font_tracker: &
                         let mut all_widths_found = true;
                         for &b in &prev.text {
                             if let Some(w) =
-                                font_tracker.get_glyph_width(prev.font_entity, b as u16)
+                                font_tracker.get_glyph_width(EntityId(prev.font_entity), b as u16)
                             {
                                 prev_total_width += w as f64;
                             } else {
@@ -265,7 +266,7 @@ fn quantize_color(v: f64) -> u16 {
     (v.clamp(0.0, 1.0) * 10000.0) as u16
 }
 
-fn color_key(c: &stet_core::graphics_state::DeviceColor, paint_type: i32) -> ColorKey {
+fn color_key(c: &stet_graphics::color::DeviceColor, paint_type: i32) -> ColorKey {
     ColorKey {
         r: quantize_color(c.r),
         g: quantize_color(c.g),

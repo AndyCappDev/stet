@@ -1,25 +1,24 @@
 // stet - A PostScript Interpreter
 // Copyright (c) 2026 Scott Bowman
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Text show operators: show, ashow, widthshow, awidthshow, kshow,
 //! stringwidth, charpath, setcachedevice, setcharwidth.
 
 use std::sync::Arc;
 
-use stet_core::charstring;
 use stet_core::context::Context;
-use stet_core::device::{FillParams, StrokeParams, TextParams};
 use stet_core::dict::DictKey;
-use stet_core::display_list::DisplayElement;
 use stet_core::error::PsError;
 use stet_core::glyph_cache::{CachedGlyph, CachedType3Glyph, Type3CacheMode};
-use stet_core::graphics_state::{
-    DashPattern, DeviceColor, FillRule, LineCap, LineJoin, Matrix, PathSegment, PsPath,
-};
 use stet_core::object::{EntityId, PsObject, PsValue};
-use stet_core::truetype;
-use stet_core::type2_charstring;
+use stet_fonts::charstring;
+use stet_fonts::geometry::{Matrix, PathSegment, PsPath};
+use stet_fonts::truetype;
+use stet_fonts::type2_charstring;
+use stet_graphics::color::{DashPattern, DeviceColor, FillRule, LineCap, LineJoin};
+use stet_graphics::device::{FillParams, StrokeParams, TextParams};
+use stet_graphics::display_list::DisplayElement;
 
 /// `show`: string → —
 ///
@@ -1079,7 +1078,7 @@ fn get_subrs(ctx: &Context, info: &FontInfo) -> Vec<Vec<u8>> {
 /// Build a lookup table mapping StandardEncoding glyph names to encrypted charstring bytes.
 /// Used by the charstring interpreter for seac (composite character) support.
 fn build_seac_map(ctx: &Context, info: &FontInfo) -> std::collections::HashMap<String, Vec<u8>> {
-    use stet_core::encoding::STANDARD_ENCODING;
+    use stet_fonts::encoding::STANDARD_ENCODING;
     let mut map = std::collections::HashMap::new();
     for &name in STANDARD_ENCODING.iter() {
         if name == ".notdef" {
@@ -4405,7 +4404,7 @@ fn emit_text_element_with_fm(
         text,
         start_x,
         start_y,
-        font_entity,
+        font_entity: font_entity.0,
         font_name,
         font_type,
         font_size,
@@ -4649,12 +4648,12 @@ fn recolor_and_translate_element(
             let mut params = params.clone();
             params.ctm.tx += dx;
             params.ctm.ty += dy;
-            if let stet_core::device::ImageColorSpace::Mask { .. } = &params.color_space {
+            if let stet_graphics::device::ImageColorSpace::Mask { .. } = &params.color_space {
                 // Update mask color to current color (raw 1-bit data stays unchanged)
-                params.color_space = stet_core::device::ImageColorSpace::Mask {
+                params.color_space = stet_graphics::device::ImageColorSpace::Mask {
                     color: color.clone(),
                     polarity: match &params.color_space {
-                        stet_core::device::ImageColorSpace::Mask { polarity, .. } => *polarity,
+                        stet_graphics::device::ImageColorSpace::Mask { polarity, .. } => *polarity,
                         _ => true,
                     },
                 };

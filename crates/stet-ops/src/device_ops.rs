@@ -1,6 +1,6 @@
 // stet - A PostScript Interpreter
 // Copyright (c) 2026 Scott Bowman
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Page device operators: setpagedevice, currentpagedevice, nulldevice,
 //! and internal continuation operators for showpage/copypage protocol.
@@ -9,7 +9,8 @@ use stet_core::context::Context;
 use stet_core::device::NullDevice;
 use stet_core::dict::DictKey;
 use stet_core::error::PsError;
-use stet_core::graphics_state::{GraphicsState, Matrix, PathSegment};
+use stet_core::graphics_state::GraphicsState;
+use stet_fonts::geometry::{Matrix, PathSegment};
 use stet_core::object::{EntityId, ObjFlags, PsObject, PsValue};
 
 // ---------- Page device dict helpers ----------
@@ -342,7 +343,7 @@ pub fn op_nulldevice(ctx: &mut Context) -> Result<(), PsError> {
 
     // Set clipping to degenerate path (single MoveTo)
     ctx.gstate.clip_path = Some({
-        let mut p = stet_core::graphics_state::PsPath::new();
+        let mut p = stet_fonts::geometry::PsPath::new();
         p.segments.push(PathSegment::MoveTo(0.0, 0.0));
         p
     });
@@ -381,7 +382,7 @@ pub fn op_flushpage(ctx: &mut Context) -> Result<(), PsError> {
 
     // Non-viewer mode: replay directly to device without consuming the list
     if let Some(ref mut device) = ctx.device {
-        stet_core::display_list::replay_to_device(&ctx.display_list, device.as_mut());
+        stet_core::device::replay_to_device(&ctx.display_list, device.as_mut());
     }
 
     Ok(())
@@ -425,7 +426,7 @@ pub fn op_copypage(ctx: &mut Context) -> Result<(), PsError> {
             }
         } else {
             let device = ctx.device.as_mut().unwrap();
-            stet_core::display_list::replay_to_device(&ctx.display_list, device.as_mut());
+            stet_core::device::replay_to_device(&ctx.display_list, device.as_mut());
         }
     }
     Ok(())

@@ -1,12 +1,12 @@
 // stet - A PostScript Interpreter
 // Copyright (c) 2026 Scott Bowman
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Path query operators: pathbbox, flattenpath, reversepath, strokepath, pathforall.
 
 use stet_core::context::Context;
 use stet_core::error::PsError;
-use stet_core::graphics_state::{PathSegment, PsPath};
+use stet_fonts::geometry::{PathSegment, PsPath};
 use stet_core::object::{EntityId, PsObject};
 
 /// `pathbbox`: — → llx lly urx ury (bounding box of current path in user space)

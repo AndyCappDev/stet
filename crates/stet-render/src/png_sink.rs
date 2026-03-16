@@ -1,12 +1,12 @@
 // stet - A PostScript Interpreter
 // Copyright (c) 2026 Scott Bowman
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! PNG output sink — streams rendered RGBA rows to a PNG file.
 
 use std::io::Write;
 
-use stet_core::device::{PageSink, PageSinkFactory};
+use stet_graphics::device::{PageSink, PageSinkFactory};
 
 /// Factory that creates `PngSink` instances for each page.
 pub struct PngSinkFactory;

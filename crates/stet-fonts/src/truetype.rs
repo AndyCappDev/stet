@@ -1,13 +1,13 @@
 // stet - A PostScript Interpreter
 // Copyright (c) 2026 Scott Bowman
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! TrueType (Type 42) glyph parser and path converter.
 //!
 //! Parses TrueType `glyf` table data, converts quadratic B-spline contours
 //! to cubic Bezier paths for rendering through the existing paint pipeline.
 
-use crate::graphics_state::{PathSegment, PsPath};
+use crate::geometry::{PathSegment, PsPath};
 
 /// Read a big-endian u16 from a byte slice at the given offset.
 #[inline]

@@ -1,6 +1,6 @@
 // stet - A PostScript Interpreter
 // Copyright (c) 2026 Scott Bowman
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Type and conversion operators: type, cvx, cvlit, cvn, cvs, cvrs, cvi, cvr,
 //! xcheck, executeonly, noaccess, readonly, rcheck, wcheck.

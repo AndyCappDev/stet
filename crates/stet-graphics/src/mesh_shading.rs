@@ -1,6 +1,6 @@
 // stet - A PostScript Interpreter
 // Copyright (c) 2026 Scott Bowman
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Binary mesh and patch parsers for shading Types 4-7.
 //!
@@ -9,7 +9,7 @@
 //! (Type 5), Coons patch meshes (Type 6), and tensor-product patch meshes (Type 7).
 
 use crate::device::{ShadingPatch, ShadingTriangle, ShadingVertex};
-use crate::graphics_state::DeviceColor;
+use crate::color::DeviceColor;
 
 /// Reads arbitrary bit-width unsigned integers from a byte buffer.
 pub struct BitReader<'a> {

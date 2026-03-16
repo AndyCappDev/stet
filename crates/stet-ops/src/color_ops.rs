@@ -1,6 +1,6 @@
 // stet - A PostScript Interpreter
 // Copyright (c) 2026 Scott Bowman
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Color operators: setgray, currentgray, setrgbcolor, currentrgbcolor,
 //! setcmykcolor, currentcmykcolor, sethsbcolor, currenthsbcolor,
@@ -11,9 +11,8 @@ use std::sync::Arc;
 use stet_core::context::Context;
 use stet_core::dict::DictKey;
 use stet_core::error::PsError;
-use stet_core::graphics_state::{
-    CieAParams, CieAbcParams, CieDefParams, CieDefgParams, ColorSpace, DeviceColor,
-};
+use stet_core::graphics_state::ColorSpace;
+use stet_graphics::color::{CieAParams, CieAbcParams, CieDefParams, CieDefgParams, DeviceColor};
 use stet_core::object::{EntityId, PsObject, PsValue};
 
 /// `setgray`: num → —
@@ -1184,7 +1183,7 @@ fn parse_iccbased_colorspace(
 fn extract_icc_profile(
     ctx: &mut Context,
     dict_entity: EntityId,
-) -> Option<stet_core::icc::ProfileHash> {
+) -> Option<stet_graphics::icc::ProfileHash> {
     // Look for a string-based DataSource in the dict
     let ds_key = ctx.names.find(b"DataSource")?;
     let ds_obj = ctx.dicts.get(dict_entity, &DictKey::Name(ds_key))?;

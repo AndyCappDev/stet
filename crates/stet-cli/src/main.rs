@@ -1,6 +1,6 @@
 // stet - A PostScript Interpreter
 // Copyright (c) 2026 Scott Bowman
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! CLI entry point: file input or interactive REPL.
 
@@ -306,7 +306,7 @@ fn run_viewer_mode(
         if let Some(ref path) = output_profile_path {
             std::fs::read(path).ok().map(std::sync::Arc::new)
         } else {
-            stet_core::icc::find_system_cmyk_profile_bytes()
+            stet_graphics::icc::find_system_cmyk_profile_bytes()
         }
     } else {
         None
@@ -564,7 +564,7 @@ fn run_file_jobs(
     viewer_wait: Option<&std::sync::Arc<std::sync::atomic::AtomicU64>>,
     advance_receiver: Option<&std::sync::mpsc::Receiver<()>>,
 ) {
-    use stet_core::display_list::DisplayList;
+    use stet_graphics::display_list::DisplayList;
 
     let num_jobs = file_args.len();
 
@@ -958,7 +958,7 @@ fn install_device(ctx: &mut Context, dpi_override: Option<f64>, device: &str) {
 
 /// Fallback device setup when the resource system isn't available.
 fn install_device_fallback(ctx: &mut Context, dpi: f64) {
-    use stet_core::graphics_state::Matrix;
+    use stet_fonts::geometry::Matrix;
 
     let scale = dpi / 72.0;
     let dev_width = (612.0 * scale).round() as u32;
@@ -1088,7 +1088,7 @@ fn run_pdf_input_png(
     page_filter: &Option<std::collections::HashSet<i32>>,
     no_aa: bool,
 ) {
-    let mut icc_cache = stet_core::icc::IccCache::new();
+    let mut icc_cache = stet_graphics::icc::IccCache::new();
     icc_cache.search_system_cmyk_profile();
 
     for filename in file_args {
@@ -1172,7 +1172,7 @@ fn run_pdf_input_viewer(
 ) {
     let (interp_end, viewer_end, dl_sender, advance_rx) = stet_viewer::create_channels();
 
-    let mut icc_cache = stet_core::icc::IccCache::new();
+    let mut icc_cache = stet_graphics::icc::IccCache::new();
     icc_cache.search_system_cmyk_profile();
 
     let first_file = file_args.first().cloned();
@@ -1220,7 +1220,7 @@ fn run_pdf_input_viewer(
         for (job_idx, filename) in file_args_owned.iter().enumerate() {
             if job_idx > 0 {
                 // Signal new job
-                let _ = dl_sender.send((stet_core::display_list::DisplayList::new(), 0.0, 0, 0));
+                let _ = dl_sender.send((stet_graphics::display_list::DisplayList::new(), 0.0, 0, 0));
             }
 
             let data = match std::fs::read(filename) {
@@ -1266,7 +1266,7 @@ fn run_pdf_input_viewer(
 
             // Signal job done and wait for advance between jobs
             if job_idx + 1 < file_args_owned.len() {
-                let _ = dl_sender.send((stet_core::display_list::DisplayList::new(), -1.0, 0, 0));
+                let _ = dl_sender.send((stet_graphics::display_list::DisplayList::new(), -1.0, 0, 0));
                 let _ = advance_rx.recv();
             }
         }

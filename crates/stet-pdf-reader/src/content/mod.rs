@@ -29,14 +29,13 @@ use std::sync::Arc;
 use self::font::{FontCache, PdfFont};
 use self::graphics_state::{ShadingPatternDL, TilingPattern};
 use crate::FontProvider;
-use stet_core::device::{ClipParams, ImageColorSpace, ImageParams, PatternFillParams};
-use stet_core::icc::IccCache;
-use stet_core::display_list::{
+use stet_graphics::device::{ClipParams, ImageColorSpace, ImageParams, PatternFillParams};
+use stet_graphics::icc::IccCache;
+use stet_graphics::display_list::{
     DisplayElement, DisplayList, GroupParams, SoftMaskParams, SoftMaskSubtype,
 };
-use stet_core::graphics_state::{
-    DashPattern, DeviceColor, FillRule, LineCap, LineJoin, Matrix, PathSegment, PsPath,
-};
+use stet_fonts::geometry::{Matrix, PathSegment, PsPath};
+use stet_graphics::color::{DashPattern, DeviceColor, FillRule, LineCap, LineJoin};
 
 /// An operand on the content stream operand stack.
 #[derive(Clone, Debug)]
@@ -1036,7 +1035,7 @@ impl<'a> ContentInterpreter<'a> {
         self.gstate.stroke_color =
             DeviceColor::from_cmyk_icc(n[0], n[1], n[2], n[3], &mut self.icc_cache);
         self.gstate.stroke_color_space = ColorSpaceRef::DeviceCMYK;
-        self.gstate.stroke_painted_channels = stet_core::device::CMYK_ALL;
+        self.gstate.stroke_painted_channels = stet_graphics::device::CMYK_ALL;
         self.gstate.stroke_pattern = None;
         self.gstate.stroke_shading_pattern = None;
         Ok(())
@@ -1048,7 +1047,7 @@ impl<'a> ContentInterpreter<'a> {
         self.gstate.fill_color =
             DeviceColor::from_cmyk_icc(n[0], n[1], n[2], n[3], &mut self.icc_cache);
         self.gstate.fill_color_space = ColorSpaceRef::DeviceCMYK;
-        self.gstate.fill_painted_channels = stet_core::device::CMYK_ALL;
+        self.gstate.fill_painted_channels = stet_graphics::device::CMYK_ALL;
         self.gstate.fill_is_device_cmyk = true;
         self.gstate.fill_pattern = None;
         self.gstate.fill_shading_pattern = None;
@@ -2849,9 +2848,9 @@ impl<'a> ContentInterpreter<'a> {
     fn parse_transfer_function(
         &self,
         obj: &PdfObj,
-    ) -> Result<stet_core::device::TransferState, PdfError> {
+    ) -> Result<stet_graphics::device::TransferState, PdfError> {
         use crate::resources::function::PdfFunction;
-        use stet_core::device::TransferState;
+        use stet_graphics::device::TransferState;
 
         let obj = self.resolver.deref(obj)?;
 

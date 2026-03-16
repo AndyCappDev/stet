@@ -1,6 +1,6 @@
 // stet - A PostScript Interpreter
 // Copyright (c) 2026 Scott Bowman
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Path construction operators: newpath, currentpoint, moveto, rmoveto, lineto,
 //! rlineto, curveto, rcurveto, closepath, arc, arcn, arcto, arct.
@@ -9,7 +9,7 @@ use std::f64::consts::PI;
 
 use stet_core::context::Context;
 use stet_core::error::PsError;
-use stet_core::graphics_state::{Matrix, PathSegment, PsPath};
+use stet_fonts::geometry::{Matrix, PathSegment, PsPath};
 use stet_core::object::PsObject;
 
 /// `newpath`: — → — (clear current path)

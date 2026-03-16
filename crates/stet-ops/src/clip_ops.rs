@@ -1,14 +1,15 @@
 // stet - A PostScript Interpreter
 // Copyright (c) 2026 Scott Bowman
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Clipping operators: clip, eoclip, clippath, initclip, rectclip, clipsave, cliprestore.
 
 use stet_core::context::Context;
-use stet_core::device::ClipParams;
-use stet_core::display_list::DisplayElement;
 use stet_core::error::PsError;
-use stet_core::graphics_state::{FillRule, Matrix, PathSegment, PsPath};
+use stet_fonts::geometry::{Matrix, PathSegment, PsPath};
+use stet_graphics::color::FillRule;
+use stet_graphics::device::ClipParams;
+use stet_graphics::display_list::DisplayElement;
 use stet_core::object::PsValue;
 
 /// Close all open subpaths in a path (PLRM: clip/eoclip implicitly close subpaths).
@@ -152,7 +153,7 @@ pub fn op_clippath(ctx: &mut Context) -> Result<(), PsError> {
 pub fn op_initclip(ctx: &mut Context) -> Result<(), PsError> {
     if crate::device_ops::is_null_device(ctx) {
         // Null device: degenerate clip
-        let mut p = stet_core::graphics_state::PsPath::new();
+        let mut p = stet_fonts::geometry::PsPath::new();
         p.segments.push(PathSegment::MoveTo(0.0, 0.0));
         ctx.gstate.clip_path = Some(p);
         return Ok(());

@@ -1,6 +1,6 @@
 // stet - A PostScript Interpreter
 // Copyright (c) 2026 Scott Bowman
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Type 1 font embedding for PDF output.
 //!
@@ -16,10 +16,10 @@ use std::io::Write as IoWrite;
 
 use stet_core::context::Context;
 use stet_core::dict::DictKey;
-use stet_core::encoding::STANDARD_ENCODING;
 use stet_core::object::{EntityId, PsValue};
-use stet_core::truetype;
-use stet_core::type2_charstring;
+use stet_fonts::encoding::STANDARD_ENCODING;
+use stet_fonts::truetype;
+use stet_fonts::type2_charstring;
 
 use crate::font_tracker::FontUsage;
 use crate::pdf_objects::PdfObj;

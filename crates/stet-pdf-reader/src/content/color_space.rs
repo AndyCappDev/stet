@@ -12,9 +12,9 @@ use crate::resolver::Resolver;
 use crate::resources::function::PdfFunction;
 
 use super::graphics_state::ColorSpaceRef;
-use stet_core::device::{ImageColorSpace, TintLookupTable};
-use stet_core::graphics_state::{CieAParams, CieAbcParams, DeviceColor};
-use stet_core::icc::{IccCache, ProfileHash};
+use stet_graphics::device::{ImageColorSpace, TintLookupTable};
+use stet_graphics::color::{CieAParams, CieAbcParams, DeviceColor};
+use stet_graphics::icc::{IccCache, ProfileHash};
 
 /// Resolved color space with enough info to convert color values.
 #[derive(Clone, Debug)]
@@ -83,7 +83,7 @@ impl ResolvedColorSpace {
 /// - ICCBased with 4 components: treated as DeviceCMYK
 /// - Other (Gray/RGB/CalGray/CalRGB/Lab/Pattern): 0 (no CMYK overprint)
 pub fn painted_channels_for_cs(cs: &ResolvedColorSpace) -> u8 {
-    use stet_core::device::{cmyk_channel_for_name, CMYK_ALL};
+    use stet_graphics::device::{cmyk_channel_for_name, CMYK_ALL};
     match cs {
         ResolvedColorSpace::DeviceCMYK => CMYK_ALL,
         ResolvedColorSpace::ICCBased { n: 4, .. } => CMYK_ALL,

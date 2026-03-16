@@ -11,6 +11,8 @@ default = ["parallel"]
 parallel = ["rayon"]
 
 [dependencies]
+stet-fonts.workspace = true
+stet-graphics.workspace = true
 stet-core.workspace = true
 tiny-skia.workspace = true
 png.workspace = true

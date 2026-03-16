@@ -1,6 +1,6 @@
 // stet - A PostScript Interpreter
 // Copyright (c) 2026 Scott Bowman
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Miscellaneous operators: bind, run, handleerror, join, and internal stubs.
 
@@ -293,7 +293,7 @@ pub fn op_loadsystemfont(ctx: &mut Context) -> Result<(), PsError> {
 
     ctx.o_stack.pop()?;
 
-    let cache = stet_core::system_fonts::get_system_font_cache();
+    let cache = stet_fonts::system_fonts::get_system_font_cache();
     let name_str = String::from_utf8_lossy(&name_bytes);
 
     if let Some(path) = cache.get_font_path(&name_str) {
@@ -339,7 +339,7 @@ pub fn op_loadbinarysystemfont(ctx: &mut Context) -> Result<(), PsError> {
 
     ctx.o_stack.pop()?;
 
-    let cache = stet_core::system_fonts::get_system_font_cache();
+    let cache = stet_fonts::system_fonts::get_system_font_cache();
     let name_str = String::from_utf8_lossy(&name_bytes);
 
     if let Some(path) = cache.get_font_path(&name_str) {

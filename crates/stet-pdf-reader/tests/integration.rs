@@ -49,9 +49,16 @@ fn parse_javaplatform_pdf() {
 
 #[test]
 fn parse_other_sample_pdfs() {
-    // Test the other sample PDFs we have
+    // Test the other sample PDFs we have (skip if not present)
     for name in &["10-ch8.pdf", "ppst32.pdf"] {
-        let data = load_pdf(name);
+        let path = format!(
+            "{}/samples/{name}",
+            env!("CARGO_MANIFEST_DIR").replace("/crates/stet-pdf-reader", "")
+        );
+        let Some(data) = load_pdf_abs(&path) else {
+            eprintln!("Skipping {name} — not found");
+            continue;
+        };
         let doc = PdfDocument::from_bytes(&data).unwrap_or_else(|e| {
             panic!("failed to parse {name}: {e}");
         });
@@ -149,7 +156,7 @@ fn write_png(path: &str, rgba: &[u8], width: u32, height: u32) {
 
 #[test]
 fn diagnose_coordinate_system() {
-    use stet_core::display_list::DisplayElement;
+    use stet_graphics::display_list::DisplayElement;
 
     // DIAGNOSIS: The initial CTM in render_page() Y-flips [scale, 0, 0, -scale, 0, ury*scale].
     // But hospital.pdf and javaplatform.pdf content streams both start with a cm that
@@ -326,8 +333,8 @@ fn diagnose_coordinate_system() {
     }
 }
 
-fn path_bbox(segments: &[stet_core::graphics_state::PathSegment]) -> (f64, f64, f64, f64) {
-    use stet_core::graphics_state::PathSegment;
+fn path_bbox(segments: &[stet_fonts::geometry::PathSegment]) -> (f64, f64, f64, f64) {
+    use stet_fonts::geometry::PathSegment;
     let mut min_x = f64::INFINITY;
     let mut min_y = f64::INFINITY;
     let mut max_x = f64::NEG_INFINITY;
@@ -359,7 +366,7 @@ fn path_bbox(segments: &[stet_core::graphics_state::PathSegment]) -> (f64, f64, 
 
 #[test]
 fn dump_display_list_stats() {
-    use stet_core::display_list::DisplayElement;
+    use stet_graphics::display_list::DisplayElement;
 
     let data = load_pdf("hospital.pdf");
     let doc = PdfDocument::from_bytes(&data).unwrap();

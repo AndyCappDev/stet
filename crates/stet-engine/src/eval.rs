@@ -1,6 +1,6 @@
 // stet - A PostScript Interpreter
 // Copyright (c) 2026 Scott Bowman
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Core execution engine — the eval loop that drives PostScript execution.
 
@@ -833,7 +833,7 @@ fn advance_forall(
 
 /// Advance a pathforall iteration: process one path segment per call.
 fn advance_pathforall(ctx: &mut Context, loop_entity: EntityId) -> Result<(), PsError> {
-    use stet_core::graphics_state::PathSegment;
+    use stet_core::geometry::PathSegment;
 
     let index = ctx.get_loop(loop_entity).index as usize;
 

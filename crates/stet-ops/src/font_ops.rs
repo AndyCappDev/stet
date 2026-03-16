@@ -1,6 +1,6 @@
 // stet - A PostScript Interpreter
 // Copyright (c) 2026 Scott Bowman
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Font dictionary operators: definefont, undefinefont, findfont,
 //! scalefont, makefont, setfont, currentfont.
@@ -8,7 +8,7 @@
 use stet_core::context::Context;
 use stet_core::dict::DictKey;
 use stet_core::error::PsError;
-use stet_core::graphics_state::Matrix;
+use stet_fonts::geometry::Matrix;
 use stet_core::object::{ObjFlags, PsObject, PsValue};
 
 /// `definefont`: key font → font

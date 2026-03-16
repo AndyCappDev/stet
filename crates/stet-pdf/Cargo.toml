@@ -7,5 +7,7 @@ authors.workspace = true
 description = "PDF output device for stet PostScript interpreter"
 
 [dependencies]
+stet-fonts.workspace = true
+stet-graphics.workspace = true
 stet-core.workspace = true
 flate2 = "1"

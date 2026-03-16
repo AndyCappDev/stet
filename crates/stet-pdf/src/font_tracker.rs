@@ -1,13 +1,13 @@
 // stet - A PostScript Interpreter
 // Copyright (c) 2026 Scott Bowman
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Font usage tracking for PDF text output.
 
 use std::collections::{HashMap, HashSet};
 
-use stet_core::device::TextParams;
 use stet_core::object::EntityId;
+use stet_graphics::device::TextParams;
 
 /// Standard 14 PDF font names that don't require embedding.
 const STANDARD_14: &[&[u8]] = &[
@@ -82,7 +82,7 @@ impl FontTracker {
     /// Returns the PDF resource name for this font.
     pub fn track(&mut self, params: &TextParams) -> &str {
         let key = (params.font_name.clone(), params.font_type);
-        let entity = params.font_entity;
+        let entity = EntityId(params.font_entity);
 
         let usage = self.fonts.entry(key).or_insert_with(|| {
             let idx = self.next_idx;

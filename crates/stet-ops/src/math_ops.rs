@@ -1,6 +1,6 @@
 // stet - A PostScript Interpreter
 // Copyright (c) 2026 Scott Bowman
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Arithmetic operators: add, sub, mul, div, idiv, mod, abs, neg,
 //! ceiling, floor, round, truncate, sqrt, exp, ln, log, sin, cos, atan,

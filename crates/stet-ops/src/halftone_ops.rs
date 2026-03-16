@@ -1,6 +1,6 @@
 // stet - A PostScript Interpreter
 // Copyright (c) 2026 Scott Bowman
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Halftone, transfer, pattern, and device operators.
 //!
@@ -13,11 +13,12 @@
 use std::sync::Arc;
 
 use stet_core::context::Context;
-use stet_core::device::HalftoneScreen;
 use stet_core::dict::DictKey;
-use stet_core::display_list::DisplayList;
 use stet_core::error::PsError;
-use stet_core::graphics_state::{Matrix, PatternData};
+use stet_core::graphics_state::PatternData;
+use stet_fonts::geometry::Matrix;
+use stet_graphics::device::HalftoneScreen;
+use stet_graphics::display_list::DisplayList;
 use stet_core::object::{PsObject, PsValue};
 
 // ---------- Halftone pre-computation for PDF output ----------
@@ -1053,7 +1054,7 @@ pub fn op_setpattern(ctx: &mut Context) -> Result<(), PsError> {
         let color_val = ctx.o_stack.peek(0)?.as_f64().ok_or(PsError::TypeCheck)?;
         ctx.o_stack.pop()?;
         ctx.gstate.pattern_underlying_color =
-            Some(stet_core::graphics_state::DeviceColor::from_gray(color_val));
+            Some(stet_graphics::color::DeviceColor::from_gray(color_val));
     }
 
     ctx.gstate.current_pattern = Some(pattern_id);
@@ -1065,16 +1066,16 @@ pub fn op_setpattern(ctx: &mut Context) -> Result<(), PsError> {
 /// (form space); path points are transformed directly, while elements with
 /// their own CTM (Stroke, Image) get their CTM composed with the real CTM.
 fn replay_form_elements(
-    cached: &stet_core::display_list::DisplayList,
+    cached: &stet_graphics::display_list::DisplayList,
     ctm: &Matrix,
-    target: &mut stet_core::display_list::DisplayList,
+    target: &mut stet_graphics::display_list::DisplayList,
 ) {
-    use stet_core::display_list::DisplayElement;
-    use stet_core::graphics_state::PathSegment;
+    use stet_graphics::display_list::DisplayElement;
+    use stet_fonts::geometry::PathSegment;
 
     let transform_path =
-        |path: &stet_core::graphics_state::PsPath| -> stet_core::graphics_state::PsPath {
-            let mut result = stet_core::graphics_state::PsPath::new();
+        |path: &stet_fonts::geometry::PsPath| -> stet_fonts::geometry::PsPath {
+            let mut result = stet_fonts::geometry::PsPath::new();
             for seg in &path.segments {
                 match seg {
                     PathSegment::MoveTo(x, y) => {
@@ -1118,7 +1119,7 @@ fn replay_form_elements(
             DisplayElement::Fill { path, params } => {
                 let new_path = transform_path(path);
                 // Path points already transformed to device space; use identity CTM
-                let new_params = stet_core::device::FillParams {
+                let new_params = stet_graphics::device::FillParams {
                     color: params.color.clone(),
                     fill_rule: params.fill_rule,
                     ctm: Matrix::identity(),
@@ -1144,7 +1145,7 @@ fn replay_form_elements(
                 let new_path = transform_path(path);
                 // Scale line width by CTM scale factor (form space → device space)
                 let scale = (ctm.a * ctm.a + ctm.b * ctm.b).sqrt();
-                let new_params = stet_core::device::StrokeParams {
+                let new_params = stet_graphics::device::StrokeParams {
                     color: params.color.clone(),
                     line_width: params.line_width * scale,
                     line_cap: params.line_cap,
@@ -1172,7 +1173,7 @@ fn replay_form_elements(
             }
             DisplayElement::Clip { path, params } => {
                 let new_path = transform_path(path);
-                let new_params = stet_core::device::ClipParams {
+                let new_params = stet_graphics::device::ClipParams {
                     fill_rule: params.fill_rule,
                     ctm: Matrix::identity(),
                 };

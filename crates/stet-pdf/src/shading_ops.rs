@@ -1,10 +1,10 @@
 // stet - A PostScript Interpreter
 // Copyright (c) 2026 Scott Bowman
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Convert display list shading parameters to PDF shading dictionaries.
 
-use stet_core::device::{
+use stet_graphics::device::{
     AxialShadingParams, ColorStop, MeshShadingParams, PatchShadingParams, RadialShadingParams,
     ShadingColorSpace,
 };
@@ -390,7 +390,7 @@ fn get_stop_components(stop: &ColorStop, n_comps: usize) -> Vec<f64> {
 /// Uses raw_components if available, falls back to DeviceColor.
 fn encode_color_components(
     raw: &[f64],
-    color: &stet_core::graphics_state::DeviceColor,
+    color: &stet_graphics::color::DeviceColor,
     n_comps: usize,
     data: &mut Vec<u8>,
 ) {

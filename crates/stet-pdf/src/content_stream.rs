@@ -1,6 +1,6 @@
 // stet - A PostScript Interpreter
 // Copyright (c) 2026 Scott Bowman
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Convert a DisplayList into PDF content stream bytes.
 
@@ -8,15 +8,14 @@ use std::collections::{HashMap, HashSet};
 use std::io::Write as IoWrite;
 
 use stet_core::context::Context;
-use stet_core::device::{
+use stet_fonts::geometry::{Matrix, PsPath};
+use stet_graphics::color::{DeviceColor, FillRule, LineCap, LineJoin};
+use stet_graphics::device::{
     AxialShadingParams, BgUcrState, HalftoneState, MeshShadingParams, PatchShadingParams,
     PatternFillParams, RadialShadingParams, SpotColor, SpotColorSpace, StrokeParams, TextParams,
     TransferState,
 };
-use stet_core::display_list::{DisplayElement, DisplayList};
-use stet_core::graphics_state::{DeviceColor, FillRule, LineCap, LineJoin, Matrix, PsPath};
-use stet_core::object::EntityId;
-
+use stet_graphics::display_list::{DisplayElement, DisplayList};
 use crate::font_embedder;
 use crate::font_tracker::FontTracker;
 use crate::image_ops::{self, ImageXObject};
@@ -251,7 +250,7 @@ pub fn build_content_stream(
 
     // Text batch accumulator: consecutive same-font text elements
     let mut text_batch: Vec<&TextParams> = Vec::new();
-    let mut batch_font: Option<EntityId> = None;
+    let mut batch_font: Option<u32> = None;
 
     for element in list.elements() {
         match element {
@@ -1298,7 +1297,7 @@ fn emit_bg_ucr(
 
 /// Emit path segments as PDF path operators.
 fn emit_path(buf: &mut Vec<u8>, path: &PsPath) {
-    use stet_core::graphics_state::PathSegment;
+    use stet_fonts::geometry::PathSegment;
     for seg in &path.segments {
         match seg {
             PathSegment::MoveTo(x, y) => {
@@ -1345,7 +1344,7 @@ fn emit_path(buf: &mut Vec<u8>, path: &PsPath) {
 ///
 /// Maps the unit square (0,0)-(1,0)-(0,1) to the image rectangle in device space.
 /// The content stream's base CTM then maps device space to PDF space.
-fn compute_image_matrix(params: &stet_core::device::ImageParams) -> Matrix {
+fn compute_image_matrix(params: &stet_graphics::device::ImageParams) -> Matrix {
     // image_matrix maps user space → image pixel space (PostScript convention)
     // Its inverse maps image pixels → user space
     // CTM maps user space → device space

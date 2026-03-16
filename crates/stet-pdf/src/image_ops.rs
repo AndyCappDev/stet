@@ -1,6 +1,6 @@
 // stet - A PostScript Interpreter
 // Copyright (c) 2026 Scott Bowman
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Convert display list images to PDF image XObjects.
 //!
@@ -8,8 +8,8 @@
 //! Indexed) for PDF fidelity. Imagemasks are stored as 1-bit stencils.
 
 use std::sync::Arc;
-use stet_core::device::{ImageColorSpace, ImageParams, TintLookupTable};
-use stet_core::graphics_state::DeviceColor;
+use stet_graphics::color::DeviceColor;
+use stet_graphics::device::{ImageColorSpace, ImageParams, TintLookupTable};
 
 /// A prepared image XObject ready for inclusion in a PDF.
 pub struct ImageXObject {
@@ -275,7 +275,7 @@ pub fn convert_image(sample_data: &[u8], params: &ImageParams) -> ImageXObject {
 fn convert_imagemask(
     raw_bits: &[u8],
     params: &ImageParams,
-    color: &stet_core::graphics_state::DeviceColor,
+    color: &DeviceColor,
     polarity: bool,
 ) -> ImageXObject {
     // PDF imagemask Decode: [1 0] means bit=1 paints (our polarity=true).

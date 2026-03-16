@@ -1,13 +1,13 @@
 // stet - A PostScript Interpreter
 // Copyright (c) 2026 Scott Bowman
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Userpath operators: setbbox, ucache, uappend, upath, ufill, ueofill,
 //! ustroke, ustrokepath, inufill, inueofill, inustroke.
 
 use stet_core::context::Context;
 use stet_core::error::PsError;
-use stet_core::graphics_state::{Matrix, PathSegment};
+use stet_fonts::geometry::{Matrix, PathSegment};
 use stet_core::object::{EntityId, PsObject, PsValue};
 
 use crate::graphics_state_ops::{op_grestore, op_gsave};

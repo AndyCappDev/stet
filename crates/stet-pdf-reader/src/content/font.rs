@@ -7,13 +7,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use stet_core::cff_parser::{CffFont, parse_cff};
-use stet_core::charstring::{execute_charstring, execute_charstring_mm};
-use stet_core::encoding::{MACROMAN_ENCODING, STANDARD_ENCODING, WINANSI_ENCODING};
-use stet_core::graphics_state::{Matrix, PsPath};
-use stet_core::truetype::{get_glyf_data, get_units_per_em, parse_cmap, parse_glyf_to_path};
-use stet_core::type1_parser::parse_type1;
-use stet_core::type2_charstring::execute_type2_charstring;
+use stet_fonts::cff_parser::{CffFont, parse_cff};
+use stet_fonts::charstring::{execute_charstring, execute_charstring_mm};
+use stet_fonts::encoding::{MACROMAN_ENCODING, STANDARD_ENCODING, WINANSI_ENCODING};
+use stet_fonts::geometry::{Matrix, PsPath};
+use stet_fonts::truetype::{get_glyf_data, get_units_per_em, parse_cmap, parse_glyf_to_path};
+use stet_fonts::type1_parser::parse_type1;
+use stet_fonts::type2_charstring::execute_type2_charstring;
 
 use crate::error::PdfError;
 use crate::objects::{PdfDict, PdfObj};
@@ -34,7 +34,7 @@ pub enum PdfFont {
 }
 
 pub struct Type1PdfFont {
-    pub font: stet_core::type1_parser::Type1Font,
+    pub font: stet_fonts::type1_parser::Type1Font,
     pub encoding: [Option<String>; 256],
     pub widths: [f64; 256],
     pub font_matrix: Matrix,
@@ -243,7 +243,7 @@ pub fn resolve_font(
         if let Ok(data) = load_system_truetype_font(&base_font_name) {
             let units_per_em = get_units_per_em(&data) as f64;
             let cmap = parse_cmap(&data);
-            let post_name_to_gid = stet_core::system_fonts::parse_post_table(&data)
+            let post_name_to_gid = stet_fonts::system_fonts::parse_post_table(&data)
                 .map(|gid_to_name| {
                     gid_to_name
                         .into_iter()
@@ -375,7 +375,7 @@ fn substitute_font(
     has_pdf_widths: bool,
     font_provider: Option<&FontProvider>,
 ) -> Option<PdfFont> {
-    use stet_core::font_loader::FONT_SUBSTITUTIONS;
+    use stet_fonts::FONT_SUBSTITUTIONS;
 
     // Strip subset prefix (e.g. "ABCDEF+Times-Roman" → "Times-Roman")
     let mut clean_name: &str = base_font;
@@ -585,7 +585,7 @@ fn create_cid_cff_from_otf(
     cid_widths: HashMap<u16, f64>,
     ordering: &[u8],
 ) -> Result<PdfFont, PdfError> {
-    use stet_core::truetype::find_table;
+    use stet_fonts::truetype::find_table;
 
     // Extract CFF table from OpenType font
     let (cff_off, cff_len) = find_table(otf_data, b"CFF ")
@@ -619,7 +619,7 @@ fn create_cid_cff_from_otf(
 /// Used when a CIDFontType2 font is not embedded in the PDF (missing FontFile2).
 /// Falls back to substitution table and fuzzy name matching.
 fn load_system_truetype_font(base_font: &str) -> Result<Vec<u8>, PdfError> {
-    use stet_core::system_fonts::get_system_font_cache;
+    use stet_fonts::system_fonts::get_system_font_cache;
 
     let cache = get_system_font_cache();
 
@@ -710,7 +710,7 @@ fn read_font_file(path: &std::path::Path, ps_name: &str) -> std::io::Result<Vec<
 
 /// Extract the PostScript name from a font at a given offset within TTC data.
 fn extract_ps_name_at_offset(data: &[u8], offset: usize) -> Option<String> {
-    use stet_core::truetype::read_u16;
+    use stet_fonts::truetype::read_u16;
     // Manually find the 'name' table from the sub-font's table directory
     if offset + 12 > data.len() {
         return None;
@@ -767,7 +767,7 @@ fn extract_ps_name_at_offset(data: &[u8], offset: usize) -> Option<String> {
 /// offsets that are absolute within the TTC. We copy the header + directory
 /// and then append all referenced table data, adjusting offsets accordingly.
 fn extract_ttf_from_ttc(ttc_data: &[u8], font_offset: usize) -> std::io::Result<Vec<u8>> {
-    use stet_core::truetype::{read_u16, read_u32};
+    use stet_fonts::truetype::{read_u16, read_u32};
 
     if font_offset + 12 > ttc_data.len() {
         return Err(std::io::Error::other("TTC font offset out of range"));
@@ -933,7 +933,7 @@ fn resolve_type1(
             let raw_data = resolver.stream_data_from_obj(ff3_ref)?;
             // If data starts with "OTTO" it's an OpenType container — extract CFF table
             let font_data = if raw_data.starts_with(b"OTTO") {
-                use stet_core::truetype::find_table;
+                use stet_fonts::truetype::find_table;
                 let (offset, length) = find_table(&raw_data, b"CFF ")
                     .ok_or(PdfError::Other("OpenType font has no CFF table".into()))?;
                 raw_data[offset..offset + length].to_vec()
@@ -1000,7 +1000,7 @@ fn resolve_truetype(
     let data = resolver.stream_data_from_obj(ff_ref)?;
 
     // Validate that glyph outline data is actually present
-    use stet_core::truetype::find_table;
+    use stet_fonts::truetype::find_table;
     let has_glyf = find_table(&data, b"glyf").is_some();
     let has_usable_glyx = if let Some((off, len)) = find_table(&data, b"glyx") {
         off + len <= data.len()
@@ -1017,7 +1017,7 @@ fn resolve_truetype(
     let cmap = parse_cmap(&data);
 
     // Parse post table (GID → name) and invert to name → GID for fallback lookup
-    let post_name_to_gid = stet_core::system_fonts::parse_post_table(&data)
+    let post_name_to_gid = stet_fonts::system_fonts::parse_post_table(&data)
         .map(|gid_to_name| {
             gid_to_name
                 .into_iter()
@@ -1628,7 +1628,7 @@ impl TrueTypePdfFont {
         // Try encoding → glyph name → Unicode → cmap
         if !self.cmap.is_empty() {
             if let Some(glyph_name) = &self.encoding[char_code as usize] {
-                if let Some(unicode) = stet_core::agl::glyph_name_to_unicode(glyph_name) {
+                if let Some(unicode) = stet_fonts::agl::glyph_name_to_unicode(glyph_name) {
                     if let Some(&gid) = self.cmap.get(&(unicode as u32)) {
                         return Some(gid);
                     }
@@ -1843,7 +1843,7 @@ impl CffPdfFont {
     /// Compose a seac (Standard Encoding Accented Character) glyph from
     /// base and accent glyphs. bchar/achar are Standard Encoding codes.
     fn compose_seac(&self, adx: f64, ady: f64, bchar: u8, achar: u8) -> Option<PsPath> {
-        use stet_core::encoding::STANDARD_ENCODING;
+        use stet_fonts::encoding::STANDARD_ENCODING;
 
         let base_name = STANDARD_ENCODING.get(bchar as usize).copied().unwrap_or("");
         let accent_name = STANDARD_ENCODING.get(achar as usize).copied().unwrap_or("");

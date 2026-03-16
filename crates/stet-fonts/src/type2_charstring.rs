@@ -1,6 +1,6 @@
 // stet - A PostScript Interpreter
 // Copyright (c) 2026 Scott Bowman
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Type 2 charstring interpreter for CFF fonts.
 //!
@@ -18,7 +18,7 @@
 //! - Transient array (32 entries) for arithmetic ops
 
 use crate::charstring::CharstringResult;
-use crate::graphics_state::{PathSegment, PsPath};
+use crate::geometry::{PathSegment, PsPath};
 
 /// Calculate subroutine bias per Type 2 spec.
 fn subr_bias(n_subrs: usize) -> i32 {
