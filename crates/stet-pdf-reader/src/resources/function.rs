@@ -625,7 +625,10 @@ fn execute_calc_tokens(stack: &mut Vec<f64>, tokens: &[CalcToken]) {
             CalcToken::Log => un_op(stack, |a| a.log10()),
             CalcToken::Sin => un_op(stack, |a| a.to_radians().sin()),
             CalcToken::Cos => un_op(stack, |a| a.to_radians().cos()),
-            CalcToken::Atan => bin_op(stack, |a, b| a.atan2(b).to_degrees()),
+            CalcToken::Atan => bin_op(stack, |a, b| {
+                let deg = a.atan2(b).to_degrees();
+                if deg < 0.0 { deg + 360.0 } else { deg }
+            }),
 
             // Relational
             CalcToken::Eq => bin_op(stack, |a, b| if (a - b).abs() < 1e-10 { 1.0 } else { 0.0 }),

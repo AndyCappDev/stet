@@ -130,7 +130,7 @@ fn handle_function_based(
     for row in 0..height {
         for col in 0..width {
             let x = domain[0] + (col as f64 + 0.5) / width as f64 * (domain[1] - domain[0]);
-            let y = domain[2] + (row as f64 + 0.5) / height as f64 * (domain[3] - domain[2]);
+            let y = domain[3] - (row as f64 + 0.5) / height as f64 * (domain[3] - domain[2]);
             let components = function.evaluate(&[x, y]);
             let color =
                 components_to_device_color_icc(resolved_cs, &components, Some(icc_cache));
