@@ -1605,16 +1605,92 @@ impl<'a> ContentInterpreter<'a> {
             Some(ResolvedColorSpace::DeviceRGB)
         };
 
-        let color_space = if is_image_mask {
-            // Image mask polarity from /Decode array:
-            // [1 0] → polarity=true (raw bit 1 paints)
-            // [0 1] → polarity=false (raw bit 0 paints) — this is the default
-            let polarity = if let Some(arr) = dict.get_array(b"Decode") {
+        let polarity = if is_image_mask {
+            if let Some(arr) = dict.get_array(b"Decode") {
                 let vals: Vec<f64> = arr.iter().filter_map(|o| o.as_f64()).collect();
                 vals.len() >= 2 && vals[0] > 0.5
             } else {
                 false
-            };
+            }
+        } else {
+            false
+        };
+
+        // Decode the stream data
+        let sample_data = self.resolver.stream_data_from_obj(obj)?;
+
+        // Image matrix: [width 0 0 -height 0 height] maps unit square to image
+        let image_matrix =
+            Matrix::new(width as f64, 0.0, 0.0, -(height as f64), 0.0, height as f64);
+
+        // Imagemask with shading pattern fill: use SoftMasked to clip shading to mask shape
+        if is_image_mask && self.gstate.fill_shading_pattern.is_some() {
+            let shading_box = self.gstate.fill_shading_pattern.clone().unwrap();
+            let row_bytes = width.div_ceil(8);
+            let mut gray = vec![0u8; (width * height) as usize];
+            for y in 0..height {
+                for x in 0..width {
+                    let byte_idx = (y * row_bytes + x / 8) as usize;
+                    let bit_idx = 7 - (x % 8);
+                    let bit = if byte_idx < sample_data.len() {
+                        (sample_data[byte_idx] >> bit_idx) & 1
+                    } else {
+                        0
+                    };
+                    let painted = if polarity { bit == 1 } else { bit == 0 };
+                    gray[(y * width + x) as usize] = if painted { 255 } else { 0 };
+                }
+            }
+
+            let mut mask_dl = DisplayList::new();
+            mask_dl.push(DisplayElement::Image {
+                sample_data: gray,
+                params: ImageParams {
+                    width,
+                    height,
+                    color_space: ImageColorSpace::DeviceGray,
+                    ctm: self.gstate.ctm,
+                    image_matrix,
+                    interpolate: false,
+                    mask_color: None,
+                    alpha: 1.0,
+                    blend_mode: 0,
+                    overprint: false,
+                    overprint_mode: 0,
+                    painted_channels: 0,
+                },
+            });
+
+            let mut content_dl = DisplayList::new();
+            for elem in shading_box.0.elements() {
+                content_dl.push(elem.clone());
+            }
+
+            let corners = [
+                self.gstate.ctm.transform_point(0.0, 0.0),
+                self.gstate.ctm.transform_point(width as f64, 0.0),
+                self.gstate.ctm.transform_point(0.0, height as f64),
+                self.gstate.ctm.transform_point(width as f64, height as f64),
+            ];
+            let x_min = corners.iter().map(|c| c.0).fold(f64::INFINITY, f64::min);
+            let y_min = corners.iter().map(|c| c.1).fold(f64::INFINITY, f64::min);
+            let x_max = corners.iter().map(|c| c.0).fold(f64::NEG_INFINITY, f64::max);
+            let y_max = corners.iter().map(|c| c.1).fold(f64::NEG_INFINITY, f64::max);
+
+            self.display_list.push(DisplayElement::SoftMasked {
+                mask: mask_dl,
+                content: content_dl,
+                params: SoftMaskParams {
+                    subtype: SoftMaskSubtype::Luminosity,
+                    bbox: [x_min, y_min, x_max, y_max],
+                    backdrop_color: None,
+                    transfer_invert: false,
+                },
+            });
+            return Ok(());
+        }
+
+        let color_space = if is_image_mask {
             ImageColorSpace::Mask {
                 color: self.gstate.fill_color.clone(),
                 polarity,
@@ -1622,9 +1698,6 @@ impl<'a> ContentInterpreter<'a> {
         } else {
             to_image_color_space(resolved_cs.as_ref().unwrap())
         };
-
-        // Decode the stream data
-        let sample_data = self.resolver.stream_data_from_obj(obj)?;
 
         // JPXDecode with internal palette (pclr): openjp2 applies the JP2 palette
         // and returns expanded data (e.g. 3-component RGB for a 1-component codestream).
@@ -1646,10 +1719,6 @@ impl<'a> ContentInterpreter<'a> {
         } else {
             color_space
         };
-
-        // Image matrix: [width 0 0 -height 0 height] maps unit square to image
-        let image_matrix =
-            Matrix::new(width as f64, 0.0, 0.0, -(height as f64), 0.0, height as f64);
 
         let interpolate = dict
             .get(b"Interpolate")
@@ -2322,13 +2391,96 @@ impl<'a> ContentInterpreter<'a> {
         };
 
         // Build color space for display list
-        let color_space = if is_image_mask {
-            let polarity = if let Some(arr) = dict.get_array(b"Decode") {
+        let polarity = if is_image_mask {
+            if let Some(arr) = dict.get_array(b"Decode") {
                 let vals: Vec<f64> = arr.iter().filter_map(|o| o.as_f64()).collect();
                 vals.len() >= 2 && vals[0] > 0.5
             } else {
                 false
-            };
+            }
+        } else {
+            false
+        };
+
+        let image_matrix =
+            Matrix::new(width as f64, 0.0, 0.0, -(height as f64), 0.0, height as f64);
+
+        // Imagemask with shading pattern fill: use SoftMasked to clip shading to mask shape
+        if is_image_mask && self.gstate.fill_shading_pattern.is_some() {
+            let shading_box = self.gstate.fill_shading_pattern.clone().unwrap();
+
+            // Convert 1-bit imagemask to 8-bit grayscale for luminosity soft mask
+            // (white=opaque where painted, black=transparent)
+            let row_bytes = width.div_ceil(8);
+            let mut gray = vec![0u8; (width * height) as usize];
+            for y in 0..height {
+                for x in 0..width {
+                    let byte_idx = (y * row_bytes + x / 8) as usize;
+                    let bit_idx = 7 - (x % 8);
+                    let bit = if byte_idx < sample_data.len() {
+                        (sample_data[byte_idx] >> bit_idx) & 1
+                    } else {
+                        0
+                    };
+                    // Default Decode [0 1]: bit=0 → painted (opaque=255)
+                    // Inverted [1 0]:      bit=1 → painted (opaque=255)
+                    let painted = if polarity { bit == 1 } else { bit == 0 };
+                    gray[(y * width + x) as usize] = if painted { 255 } else { 0 };
+                }
+            }
+
+            // Mask display list: the imagemask as a grayscale image
+            let mut mask_dl = DisplayList::new();
+            mask_dl.push(DisplayElement::Image {
+                sample_data: gray,
+                params: ImageParams {
+                    width,
+                    height,
+                    color_space: ImageColorSpace::DeviceGray,
+                    ctm: self.gstate.ctm,
+                    image_matrix,
+                    interpolate: false,
+                    mask_color: None,
+                    alpha: 1.0,
+                    blend_mode: 0,
+                    overprint: false,
+                    overprint_mode: 0,
+                    painted_channels: 0,
+                },
+            });
+
+            // Content display list: the shading pattern
+            let mut content_dl = DisplayList::new();
+            for elem in shading_box.0.elements() {
+                content_dl.push(elem.clone());
+            }
+
+            // Compute device-space bbox of the image
+            let corners = [
+                self.gstate.ctm.transform_point(0.0, 0.0),
+                self.gstate.ctm.transform_point(width as f64, 0.0),
+                self.gstate.ctm.transform_point(0.0, height as f64),
+                self.gstate.ctm.transform_point(width as f64, height as f64),
+            ];
+            let x_min = corners.iter().map(|c| c.0).fold(f64::INFINITY, f64::min);
+            let y_min = corners.iter().map(|c| c.1).fold(f64::INFINITY, f64::min);
+            let x_max = corners.iter().map(|c| c.0).fold(f64::NEG_INFINITY, f64::max);
+            let y_max = corners.iter().map(|c| c.1).fold(f64::NEG_INFINITY, f64::max);
+
+            self.display_list.push(DisplayElement::SoftMasked {
+                mask: mask_dl,
+                content: content_dl,
+                params: SoftMaskParams {
+                    subtype: SoftMaskSubtype::Luminosity,
+                    bbox: [x_min, y_min, x_max, y_max],
+                    backdrop_color: None,
+                    transfer_invert: false,
+                },
+            });
+            return Ok(());
+        }
+
+        let color_space = if is_image_mask {
             ImageColorSpace::Mask {
                 color: self.gstate.fill_color.clone(),
                 polarity,
@@ -2344,9 +2496,6 @@ impl<'a> ContentInterpreter<'a> {
         } else {
             sample_data
         };
-
-        let image_matrix =
-            Matrix::new(width as f64, 0.0, 0.0, -(height as f64), 0.0, height as f64);
 
         self.display_list.push(DisplayElement::Image {
             sample_data,
