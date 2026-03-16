@@ -1569,7 +1569,7 @@ impl<'a> ContentInterpreter<'a> {
         match subtype {
             b"Image" => self.handle_image_xobject(&xobj_ref_clone, dict)?,
             b"Form" => self.handle_form_xobject(&xobj_ref_clone, dict)?,
-            _ => {} // Ignore unknown subtypes
+            _ => {}
         }
         Ok(())
     }
@@ -2765,7 +2765,20 @@ impl<'a> ContentInterpreter<'a> {
             self.gstate = saved;
         }
 
-        // Parse /BC (backdrop color) — may be inline array or indirect reference
+        // Parse /BC (backdrop color) — may be inline array or indirect reference.
+        // BC is in the group's color space, so we check /G's /Group/CS to know
+        // how many components to use (rather than guessing from array length).
+        let group_n_comps = g_dict
+            .get_dict(b"Group")
+            .and_then(|grp| grp.get_name(b"CS"))
+            .map(|cs| match cs {
+                b"DeviceGray" => 1,
+                b"DeviceRGB" => 3,
+                b"DeviceCMYK" => 4,
+                _ => 0, // unknown — will use heuristic
+            })
+            .unwrap_or(0);
+
         let backdrop_color = if let Some(bc_obj) = dict.get(b"BC") {
             let bc_resolved = self.resolver.deref(bc_obj).ok();
             let bc_arr = bc_resolved
@@ -2774,8 +2787,11 @@ impl<'a> ContentInterpreter<'a> {
                 .or_else(|| bc_obj.as_array());
             if let Some(arr) = bc_arr {
                 let vals: Vec<f64> = arr.iter().filter_map(|o| o.as_f64()).collect();
-                if vals.len() >= 4 {
-                    // CMYK backdrop → convert to RGB via simple formula
+                if group_n_comps == 1 && !vals.is_empty() {
+                    // DeviceGray: first value is gray level
+                    Some([vals[0], vals[0], vals[0]])
+                } else if group_n_comps == 4 && vals.len() >= 4 {
+                    // DeviceCMYK
                     let c = vals[0];
                     let m = vals[1];
                     let y = vals[2];
@@ -2788,7 +2804,6 @@ impl<'a> ContentInterpreter<'a> {
                 } else if vals.len() >= 3 {
                     Some([vals[0], vals[1], vals[2]])
                 } else if vals.len() == 1 {
-                    // Gray backdrop → replicate to RGB
                     Some([vals[0], vals[0], vals[0]])
                 } else {
                     None
