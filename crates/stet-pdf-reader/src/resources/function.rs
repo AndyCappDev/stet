@@ -163,6 +163,17 @@ impl PdfFunction {
         }
     }
 
+    /// Get the first input dimension's domain [min, max].
+    pub fn domain_0(&self) -> [f64; 2] {
+        let d = match self {
+            Self::Sampled { domain, .. }
+            | Self::Exponential { domain, .. }
+            | Self::Stitching { domain, .. }
+            | Self::Calculator { domain, .. } => domain,
+        };
+        d.first().copied().unwrap_or([0.0, 1.0])
+    }
+
     /// Number of output values.
     pub fn n_outputs(&self) -> usize {
         match self {

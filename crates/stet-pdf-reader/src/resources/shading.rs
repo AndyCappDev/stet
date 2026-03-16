@@ -483,10 +483,12 @@ fn sample_function_to_stops_icc(
         _ => None,
     };
 
+    let [d_min, d_max] = function.domain_0();
     let mut stops = Vec::with_capacity(n_samples);
     for i in 0..n_samples {
         let t = i as f64 / (n_samples - 1) as f64;
-        let components = function.evaluate(&[t]);
+        let input = d_min + t * (d_max - d_min);
+        let components = function.evaluate(&[input]);
         let color =
             components_to_device_color_icc(resolved_cs, &components, Some(icc_cache));
 

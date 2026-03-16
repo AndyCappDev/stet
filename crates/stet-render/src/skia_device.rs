@@ -2702,6 +2702,7 @@ fn render_soft_masked(
         render_element(&mut content_pixmap, &mut content_band, elem, &elem_ctx);
     }
 
+
     // 4. Multiply content RGBA by mask values
     let content_data = content_pixmap.data_mut();
     for i in 0..pixel_count {
@@ -3372,13 +3373,36 @@ impl OutputDevice for SkiaDevice {
         // Build ICC cache for this page's display list
         let icc_cache = build_icc_cache_for_list(&list, self.system_cmyk_bytes.as_ref());
 
-        // If banding not worthwhile, fall back to normal replay + show_page.
-        // Lazily allocate the full-page pixmap since it's needed for this path.
+        // If banding not worthwhile, render the full page as a single band.
+        // This still uses render_element (same as banded path) so that Group
+        // and SoftMasked elements get proper offscreen compositing.
         if band_h >= page_h {
             self.ensure_full_pixmap();
-            self.render_icc_cache = Some(icc_cache);
-            stet_core::display_list::replay_to_device(&list, self);
-            self.render_icc_cache = None;
+            let ctx = RenderContext {
+                vp_x: 0.0,
+                vp_y: 0.0,
+                scale_x: 1.0,
+                scale_y: 1.0,
+                out_w: page_w,
+                out_h: page_h,
+                effective_dpi: self.dpi,
+                icc: Some(&icc_cache),
+                image_cache: None,
+                elem_idx: 0,
+                no_aa: self.no_aa,
+            };
+            let mut band_state = BandState {
+                clip_region: None,
+                spare_mask: None,
+                clip_mask_cache: HashMap::new(),
+                clip_mask_seen: HashSet::new(),
+                mask_pool: Vec::new(),
+                cmyk_buffer: None,
+            };
+            for (idx, elem) in list.elements().iter().enumerate() {
+                let elem_ctx = RenderContext { elem_idx: idx, ..ctx };
+                render_element(&mut self.pixmap, &mut band_state, elem, &elem_ctx);
+            }
             return self.show_page(output_path);
         }
 
