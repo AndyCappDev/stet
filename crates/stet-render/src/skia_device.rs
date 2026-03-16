@@ -5793,9 +5793,25 @@ fn render_patch_shading(
     icc: Option<&IccCache>,
 ) {
     let mut triangles = Vec::new();
+    let scale = scale_x.max(scale_y) as f64;
     for patch in &params.patches {
         if patch.points.len() >= 12 {
-            subdivide_patch_to_triangles(patch, &mut triangles);
+            // Compute device-space extent to choose subdivision level
+            let mut x_min = f64::INFINITY;
+            let mut y_min = f64::INFINITY;
+            let mut x_max = f64::NEG_INFINITY;
+            let mut y_max = f64::NEG_INFINITY;
+            for &(px, py) in &patch.points {
+                let (dx, dy) = params.ctm.transform_point(px, py);
+                x_min = x_min.min(dx);
+                y_min = y_min.min(dy);
+                x_max = x_max.max(dx);
+                y_max = y_max.max(dy);
+            }
+            let extent = (x_max - x_min).max(y_max - y_min).abs() * scale;
+            // Target ~2 device pixels per boundary segment
+            let n = (extent / 2.0).ceil().clamp(8.0, 64.0) as usize;
+            subdivide_patch_to_triangles(patch, &mut triangles, n);
         }
     }
     if !triangles.is_empty() {
@@ -5826,8 +5842,8 @@ fn render_patch_shading(
 fn subdivide_patch_to_triangles(
     patch: &stet_core::device::ShadingPatch,
     triangles: &mut Vec<stet_core::device::ShadingTriangle>,
+    n: usize,
 ) {
-    let n = 8; // Subdivision level (8x8 grid = 128 triangles per patch)
 
     // Evaluate patch at grid points
     let mut grid: Vec<(f64, f64, DeviceColor)> = Vec::with_capacity((n + 1) * (n + 1));
