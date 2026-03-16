@@ -1659,12 +1659,24 @@ impl<'a> ContentInterpreter<'a> {
             })
             .unwrap_or(false);
 
-        // Mask color (for color-key masking)
-        let mask_color = dict.get_array(b"Mask").map(|arr| {
-            arr.iter()
-                .filter_map(|o| o.as_int().map(|n| n as u8))
-                .collect()
-        });
+        // Mask color (for color-key masking) or explicit stencil mask (stream ref)
+        let (mask_color, explicit_mask_data) = match dict.get(b"Mask") {
+            Some(PdfObj::Array(arr)) => {
+                // Color-key mask: array of component ranges
+                let mc: Vec<u8> = arr
+                    .iter()
+                    .filter_map(|o| o.as_int().map(|n| n as u8))
+                    .collect();
+                (Some(mc), None)
+            }
+            Some(_mask_obj) => {
+                // Explicit stencil mask: indirect reference to 1-bit ImageMask stream
+                let mask_alpha =
+                    self.resolve_explicit_mask(dict, width, height).unwrap_or(None);
+                (None, mask_alpha)
+            }
+            None => (None, None),
+        };
 
         // Convert data if BPC != 8 (but NOT for image masks — keep raw 1-bit data)
         let is_indexed = matches!(&color_space, ImageColorSpace::Indexed { .. });
@@ -1770,6 +1782,15 @@ impl<'a> ContentInterpreter<'a> {
             (sample_data, color_space)
         };
 
+        // Handle explicit stencil mask (/Mask pointing to 1-bit ImageMask stream)
+        let (sample_data, color_space) = if let Some(mask_alpha) = explicit_mask_data {
+            let rgba =
+                merge_rgb_with_smask(&sample_data, &mask_alpha, &color_space, width, height);
+            (rgba, ImageColorSpace::PreconvertedRGBA)
+        } else {
+            (sample_data, color_space)
+        };
+
         self.display_list.push(DisplayElement::Image {
             sample_data,
             params: ImageParams {
@@ -1845,6 +1866,78 @@ impl<'a> ContentInterpreter<'a> {
                     let sx = (x as u64 * sw as u64 / image_w as u64) as u32;
                     resampled[(y * image_w + x) as usize] =
                         data[(sy * sw + sx) as usize];
+                }
+            }
+            Ok(Some(resampled))
+        }
+    }
+
+    /// Resolve an explicit stencil mask (/Mask stream ref) from an image dict.
+    /// Returns 8-bit alpha data (255 = opaque, 0 = transparent).
+    fn resolve_explicit_mask(
+        &self,
+        dict: &PdfDict,
+        image_w: u32,
+        image_h: u32,
+    ) -> Result<Option<Vec<u8>>, PdfError> {
+        let mask_ref = match dict.get(b"Mask") {
+            Some(obj) => obj.clone(),
+            None => return Ok(None),
+        };
+        let mask_obj = self.resolver.deref(&mask_ref)?;
+        let mask_dict = match mask_obj.as_dict() {
+            Some(d) => d,
+            None => return Ok(None),
+        };
+        let mw = mask_dict.get_int(b"Width").unwrap_or(0) as u32;
+        let mh = mask_dict.get_int(b"Height").unwrap_or(0) as u32;
+        if mw == 0 || mh == 0 {
+            return Ok(None);
+        }
+        let mask_data = self.resolver.stream_data_from_obj(&mask_ref)?;
+
+        // Determine mask polarity from /Decode (default [0 1]: 0=painted=opaque)
+        let invert = if let Some(decode) = mask_dict.get_array(b"Decode") {
+            if decode.len() >= 2 {
+                let d0 = decode[0].as_f64().unwrap_or(0.0);
+                // [1 0] means 1=painted (invert normal polarity)
+                d0 > 0.5
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        // Expand 1-bit mask data to 8-bit alpha
+        let row_bytes = (mw + 7) / 8;
+        let mut alpha = vec![0u8; (mw * mh) as usize];
+        for y in 0..mh {
+            for x in 0..mw {
+                let byte_idx = (y * row_bytes + x / 8) as usize;
+                let bit_idx = 7 - (x % 8);
+                let bit = if byte_idx < mask_data.len() {
+                    (mask_data[byte_idx] >> bit_idx) & 1
+                } else {
+                    0
+                };
+                // In PDF, /ImageMask true with default Decode [0 1]:
+                // bit=0 → painted (opaque), bit=1 → not painted (transparent)
+                let opaque = if invert { bit == 1 } else { bit == 0 };
+                alpha[(y * mw + x) as usize] = if opaque { 255 } else { 0 };
+            }
+        }
+
+        // Resample if mask dimensions differ from image dimensions
+        if mw == image_w && mh == image_h {
+            Ok(Some(alpha))
+        } else {
+            let mut resampled = vec![0u8; (image_w * image_h) as usize];
+            for y in 0..image_h {
+                let sy = (y as u64 * mh as u64 / image_h as u64) as u32;
+                for x in 0..image_w {
+                    let sx = (x as u64 * mw as u64 / image_w as u64) as u32;
+                    resampled[(y * image_w + x) as usize] = alpha[(sy * mw + sx) as usize];
                 }
             }
             Ok(Some(resampled))
