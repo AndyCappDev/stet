@@ -237,6 +237,7 @@ pub fn resolve_font(
     if let Some(font) = substitute_font(&base_font_name, encoding.clone(), widths, has_pdf_widths, font_provider) {
         return Ok(font);
     }
+    eprintln!("[WARN] Font substitution failed for: {}", base_font_name);
 
     // For TrueType fonts, try loading from system fonts before giving up
     if subtype == b"TrueType"
@@ -285,14 +286,23 @@ fn get_font_descriptor(
 /// Resolve encoding from font dict.
 ///
 /// Priority: /Encoding dict with /Differences overlay > /Encoding name > StandardEncoding.
+/// For symbolic fonts (ZapfDingbats, Symbol) with no explicit /BaseEncoding,
+/// the font's built-in encoding is used instead of StandardEncoding.
 fn resolve_encoding(
     font_dict: &PdfDict,
     resolver: &Resolver,
 ) -> Result<[Option<String>; 256], PdfError> {
     let mut encoding: [Option<String>; 256] = std::array::from_fn(|_| None);
 
-    // Start with a base encoding
-    let mut base_table = &STANDARD_ENCODING[..];
+    // Start with a base encoding — use the font's built-in encoding for
+    // symbolic fonts (PDF spec 9.6.6.1: when no BaseEncoding, symbolic fonts
+    // use their built-in encoding, not StandardEncoding).
+    let base_font = font_dict.get_name(b"BaseFont").unwrap_or(b"");
+    let mut base_table: &[&str; 256] = if base_font == b"ZapfDingbats" {
+        &stet_fonts::encoding::ZAPFDINGBATS_ENCODING
+    } else {
+        &STANDARD_ENCODING
+    };
 
     if let Some(enc_obj) = font_dict.get(b"Encoding") {
         let enc_resolved = resolver.deref(enc_obj)?;
