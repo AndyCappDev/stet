@@ -2343,8 +2343,9 @@ impl<'a> ContentInterpreter<'a> {
         // First try: check for "EI" at/near the expected position (some PDFs omit
         // the whitespace before EI that the spec requires).
         let mut end = search_from;
-        if !has_filter && end >= 2 {
-            // Check at expected_len-2 and expected_len-1 for "EI" without leading ws
+        let mut found_no_ws = false;
+        if !has_filter {
+            // Check at expected_len-2, expected_len-1, and expected_len for "EI" without leading ws
             for offset in [expected_len.saturating_sub(2), expected_len.saturating_sub(1), expected_len] {
                 let p = start + offset;
                 if p + 1 < data.len()
@@ -2353,12 +2354,11 @@ impl<'a> ContentInterpreter<'a> {
                     && (p + 2 >= data.len() || is_delimiter_or_ws(data[p + 2]))
                 {
                     end = p;
+                    found_no_ws = true;
                     break;
                 }
             }
         }
-        // Fallback: scan for whitespace + "EI" + delimiter
-        let found_no_ws = end != search_from;
         if !found_no_ws {
             while end + 2 < data.len() {
                 if is_whitespace_byte(data[end])
