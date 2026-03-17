@@ -9,7 +9,7 @@ use std::hash::{Hash, Hasher};
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
-use tiny_skia::{
+use stet_tiny_skia::{
     BlendMode, Color, FillRule as SkiaFillRule, LineCap as SkiaLineCap, LineJoin as SkiaLineJoin,
     Mask, Paint, PathBuilder, Pixmap, Stroke, StrokeDash, Transform,
 };
@@ -227,7 +227,7 @@ fn u8_to_blend_mode(mode: u8) -> BlendMode {
 }
 
 /// Convert a `PsPath` to tiny-skia `Path`.
-fn build_skia_path(path: &PsPath) -> Option<tiny_skia::Path> {
+fn build_skia_path(path: &PsPath) -> Option<stet_tiny_skia::Path> {
     let mut pb = PathBuilder::new();
 
     for seg in &path.segments {
@@ -261,17 +261,17 @@ fn build_skia_path(path: &PsPath) -> Option<tiny_skia::Path> {
 
 /// Convert a tiny-skia Path back to a PsPath.
 /// Used for overprint stroke handling where we convert a stroked outline to a fill.
-fn skia_path_to_ps_path(path: &tiny_skia::Path) -> PsPath {
+fn skia_path_to_ps_path(path: &stet_tiny_skia::Path) -> PsPath {
     let mut segments = Vec::new();
     for seg in path.segments() {
         match seg {
-            tiny_skia::PathSegment::MoveTo(p) => {
+            stet_tiny_skia::PathSegment::MoveTo(p) => {
                 segments.push(PathSegment::MoveTo(p.x as f64, p.y as f64));
             }
-            tiny_skia::PathSegment::LineTo(p) => {
+            stet_tiny_skia::PathSegment::LineTo(p) => {
                 segments.push(PathSegment::LineTo(p.x as f64, p.y as f64));
             }
-            tiny_skia::PathSegment::QuadTo(p1, p2) => {
+            stet_tiny_skia::PathSegment::QuadTo(p1, p2) => {
                 // Convert quadratic to cubic: control points at 2/3 along quad controls
                 let last = segments.last().map(|s| match s {
                     PathSegment::MoveTo(x, y) | PathSegment::LineTo(x, y) => (*x, *y),
@@ -288,14 +288,14 @@ fn skia_path_to_ps_path(path: &tiny_skia::Path) -> PsPath {
                     x3: p2.x as f64, y3: p2.y as f64,
                 });
             }
-            tiny_skia::PathSegment::CubicTo(p1, p2, p3) => {
+            stet_tiny_skia::PathSegment::CubicTo(p1, p2, p3) => {
                 segments.push(PathSegment::CurveTo {
                     x1: p1.x as f64, y1: p1.y as f64,
                     x2: p2.x as f64, y2: p2.y as f64,
                     x3: p3.x as f64, y3: p3.y as f64,
                 });
             }
-            tiny_skia::PathSegment::Close => {
+            stet_tiny_skia::PathSegment::Close => {
                 segments.push(PathSegment::ClosePath);
             }
         }
@@ -960,7 +960,7 @@ fn composite_non_isolated_group_cropped(
     source: &Pixmap,
     backdrop: &[u8],
     params: &stet_graphics::display_list::GroupParams,
-    clip_mask: Option<&tiny_skia::Mask>,
+    clip_mask: Option<&stet_tiny_skia::Mask>,
     crop_x: i32,
     crop_y: i32,
 ) {
@@ -985,10 +985,10 @@ fn composite_non_isolated_group_cropped(
         }
     }
 
-    let paint = tiny_skia::PixmapPaint {
+    let paint = stet_tiny_skia::PixmapPaint {
         opacity: params.alpha as f32,
         blend_mode: u8_to_blend_mode(params.blend_mode),
-        quality: tiny_skia::FilterQuality::Nearest,
+        quality: stet_tiny_skia::FilterQuality::Nearest,
     };
     target.draw_pixmap(
         crop_x,
@@ -2051,7 +2051,7 @@ fn render_element(
                     None => (rgba_data, iw, ih, raw_transform),
                 };
 
-                let Some(img_pixmap) = tiny_skia::PixmapRef::from_bytes(img_data, img_w, img_h)
+                let Some(img_pixmap) = stet_tiny_skia::PixmapRef::from_bytes(img_data, img_w, img_h)
                 else {
                     return;
                 };
@@ -2076,11 +2076,11 @@ fn render_element(
                 let eff_sy =
                     (transform.kx * transform.kx + transform.sy * transform.sy).sqrt();
                 let quality = if eff_sx >= 0.9 && eff_sy >= 0.9 {
-                    tiny_skia::FilterQuality::Nearest
+                    stet_tiny_skia::FilterQuality::Nearest
                 } else {
-                    tiny_skia::FilterQuality::Bilinear
+                    stet_tiny_skia::FilterQuality::Bilinear
                 };
-                let img_paint = tiny_skia::PixmapPaint {
+                let img_paint = stet_tiny_skia::PixmapPaint {
                     quality,
                     opacity: params.alpha as f32,
                     blend_mode: u8_to_blend_mode(params.blend_mode),
@@ -2317,10 +2317,10 @@ fn render_group(
             pixmap, &offscreen, backdrop, params, mask_ref, crop_x, crop_y,
         );
     } else {
-        let paint = tiny_skia::PixmapPaint {
+        let paint = stet_tiny_skia::PixmapPaint {
             opacity: params.alpha as f32,
             blend_mode: u8_to_blend_mode(params.blend_mode),
-            quality: tiny_skia::FilterQuality::Nearest,
+            quality: stet_tiny_skia::FilterQuality::Nearest,
         };
         pixmap.draw_pixmap(
             crop_x,
@@ -2704,10 +2704,10 @@ fn render_soft_masked(
         Some(m) => m,
     };
 
-    let paint = tiny_skia::PixmapPaint {
+    let paint = stet_tiny_skia::PixmapPaint {
         opacity: 1.0,
-        blend_mode: tiny_skia::BlendMode::SourceOver,
-        quality: tiny_skia::FilterQuality::Nearest,
+        blend_mode: stet_tiny_skia::BlendMode::SourceOver,
+        quality: stet_tiny_skia::FilterQuality::Nearest,
     };
     pixmap.draw_pixmap(
         crop_x,
@@ -2948,7 +2948,7 @@ fn render_pattern_fill(
         intersect_masks(&mut fill_mask, clip_mask);
     }
 
-    let img_paint = tiny_skia::PixmapPaint::default();
+    let img_paint = stet_tiny_skia::PixmapPaint::default();
     pixmap.draw_pixmap(
         0,
         0,
@@ -3241,7 +3241,7 @@ impl OutputDevice for SkiaDevice {
             None => (rgba_data.as_slice(), w, h, raw_transform),
         };
 
-        let Some(img_pixmap) = tiny_skia::PixmapRef::from_bytes(img_data, img_w, img_h) else {
+        let Some(img_pixmap) = stet_tiny_skia::PixmapRef::from_bytes(img_data, img_w, img_h) else {
             return;
         };
 
@@ -3254,11 +3254,11 @@ impl OutputDevice for SkiaDevice {
         let eff_sx = (transform.sx * transform.sx + transform.ky * transform.ky).sqrt();
         let eff_sy = (transform.kx * transform.kx + transform.sy * transform.sy).sqrt();
         let quality = if eff_sx >= 0.9 && eff_sy >= 0.9 {
-            tiny_skia::FilterQuality::Nearest
+            stet_tiny_skia::FilterQuality::Nearest
         } else {
-            tiny_skia::FilterQuality::Bilinear
+            stet_tiny_skia::FilterQuality::Bilinear
         };
-        let paint = tiny_skia::PixmapPaint {
+        let paint = stet_tiny_skia::PixmapPaint {
             quality,
             opacity: params.alpha as f32,
             blend_mode: u8_to_blend_mode(params.blend_mode),
@@ -5263,20 +5263,20 @@ fn render_axial_shading(
         return;
     }
 
-    let start = tiny_skia::Point::from_xy(
+    let start = stet_tiny_skia::Point::from_xy(
         (dx0 as f32 - vp_x) * scale_x,
         (dy0 as f32 - vp_y) * scale_y,
     );
-    let end = tiny_skia::Point::from_xy(
+    let end = stet_tiny_skia::Point::from_xy(
         (dx1 as f32 - vp_x) * scale_x,
         (dy1 as f32 - vp_y) * scale_y,
     );
 
-    let Some(gradient) = tiny_skia::LinearGradient::new(
+    let Some(gradient) = stet_tiny_skia::LinearGradient::new(
         start,
         end,
         stops,
-        tiny_skia::SpreadMode::Pad,
+        stet_tiny_skia::SpreadMode::Pad,
         Transform::identity(),
     ) else {
         return;
@@ -5399,8 +5399,8 @@ fn render_axial_shading(
                 return;
             }
         }
-        let rect = tiny_skia::Rect::from_ltrb(rx_min, ry_min, rx_max, ry_max)
-            .unwrap_or(tiny_skia::Rect::from_xywh(0.0, 0.0, 1.0, 1.0).unwrap());
+        let rect = stet_tiny_skia::Rect::from_ltrb(rx_min, ry_min, rx_max, ry_max)
+            .unwrap_or(stet_tiny_skia::Rect::from_xywh(0.0, 0.0, 1.0, 1.0).unwrap());
         pixmap.fill_rect(rect, &paint, Transform::identity(), clip_mask);
     }
 
@@ -6098,13 +6098,13 @@ fn bilinear_color(colors: &[DeviceColor; 4], u: f64, v: f64) -> DeviceColor {
 }
 
 /// Build tiny-skia gradient stops from color stops.
-fn build_gradient_stops(stops: &[stet_graphics::device::ColorStop]) -> Vec<tiny_skia::GradientStop> {
+fn build_gradient_stops(stops: &[stet_graphics::device::ColorStop]) -> Vec<stet_tiny_skia::GradientStop> {
     let mut result = Vec::with_capacity(stops.len());
     for stop in stops {
         let r = (stop.color.r * 255.0).round().clamp(0.0, 255.0) as u8;
         let g = (stop.color.g * 255.0).round().clamp(0.0, 255.0) as u8;
         let b = (stop.color.b * 255.0).round().clamp(0.0, 255.0) as u8;
-        result.push(tiny_skia::GradientStop::new(
+        result.push(stet_tiny_skia::GradientStop::new(
             stop.position as f32,
             Color::from_rgba8(r, g, b, 255),
         ));

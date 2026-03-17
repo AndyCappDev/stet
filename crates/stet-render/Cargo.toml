@@ -14,6 +14,6 @@ parallel = ["rayon"]
 stet-fonts.workspace = true
 stet-graphics.workspace = true
 stet-core.workspace = true
-tiny-skia.workspace = true
+stet-tiny-skia.workspace = true
 png.workspace = true
 rayon = { workspace = true, optional = true }
