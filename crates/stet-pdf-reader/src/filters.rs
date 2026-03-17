@@ -556,8 +556,9 @@ fn has_adobe_rgb_marker(data: &[u8]) -> bool {
             break;
         }
         // APP14 (Adobe) marker: check ColorTransform
-        if marker == 0xEE && len >= 12 {
-            let color_transform = data[i + 2 + 11];
+        // Segment layout: length(2) + "Adobe"(5) + version(2) + flags0(2) + flags1(2) + CT(1) = 14
+        if marker == 0xEE && len >= 14 {
+            let color_transform = data[i + 2 + 13];
             has_ct0 = color_transform == 0;
         }
         // SOF0/SOF2: check sampling factors
