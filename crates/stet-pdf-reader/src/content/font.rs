@@ -237,8 +237,6 @@ pub fn resolve_font(
     if let Some(font) = substitute_font(&base_font_name, encoding.clone(), widths, has_pdf_widths, font_provider) {
         return Ok(font);
     }
-    eprintln!("[WARN] Font substitution failed for: {}", base_font_name);
-
     // For TrueType fonts, try loading from system fonts before giving up
     if subtype == b"TrueType"
         && let Ok(data) = load_system_truetype_font(&base_font_name) {

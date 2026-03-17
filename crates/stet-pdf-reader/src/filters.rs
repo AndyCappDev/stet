@@ -489,6 +489,14 @@ impl hayro_ccitt::Decoder for CcittByteDecoder {
     }
 
     fn push_pixel_chunk(&mut self, white: bool, chunk_count: u32) {
+        // If there are partial bits pending, we can't directly push bytes —
+        // the bit boundary wouldn't align. Fall back to pixel-by-pixel.
+        if self.bit_pos != 0 {
+            for _ in 0..chunk_count * 8 {
+                self.push_pixel(white);
+            }
+            return;
+        }
         let byte = if (self.black_is1 && !white) || (!self.black_is1 && white) {
             0xFF
         } else {
