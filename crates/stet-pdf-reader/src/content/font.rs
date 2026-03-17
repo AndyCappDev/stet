@@ -582,6 +582,10 @@ fn fuzzy_font_match(name: &str) -> Option<&'static str> {
 /// Known CID font substitutions for fonts commonly missing on Linux.
 const CID_FONT_SUBSTITUTIONS: &[(&str, &str)] = &[
     ("ArialUnicodeMS", "DejaVuSans"),
+    ("Arial", "LiberationSans"),
+    ("Arial,Bold", "LiberationSans-Bold"),
+    ("Arial,BoldItalic", "LiberationSans-BoldItalic"),
+    ("Arial,Italic", "LiberationSans-Italic"),
     ("Arial-BoldMT", "LiberationSans-Bold"),
     ("Arial-BoldItalicMT", "LiberationSans-BoldItalic"),
     ("Arial-ItalicMT", "LiberationSans-Italic"),
@@ -590,6 +594,10 @@ const CID_FONT_SUBSTITUTIONS: &[(&str, &str)] = &[
     ("Calibri,Bold", "LiberationSans-Bold"),
     ("Calibri,BoldItalic", "LiberationSans-BoldItalic"),
     ("Calibri,Italic", "LiberationSans-Italic"),
+    ("TimesNewRoman", "LiberationSerif"),
+    ("TimesNewRoman,Bold", "LiberationSerif-Bold"),
+    ("TimesNewRoman,BoldItalic", "LiberationSerif-BoldItalic"),
+    ("TimesNewRoman,Italic", "LiberationSerif-Italic"),
     ("TimesNewRomanPS-BoldMT", "LiberationSerif-Bold"),
     ("TimesNewRomanPS-BoldItalicMT", "LiberationSerif-BoldItalic"),
     ("TimesNewRomanPS-ItalicMT", "LiberationSerif-Italic"),
