@@ -542,7 +542,7 @@ impl PdfDevice {
         }
 
         // Content stream
-        let content_ref = writer.add_stream(Vec::new(), &content, true);
+        let content_ref = writer.add_stream(Vec::new(), content, true);
 
         // Page object
         let mut page_entries = vec![
@@ -810,14 +810,14 @@ fn build_tint_function(table: &stet_graphics::device::TintLookupTable, writer: &
             // Decompose pdf_idx with dim0 varying fastest
             let mut coords = vec![0usize; ni];
             let mut rem = pdf_idx;
-            for d in 0..ni {
-                coords[d] = rem % spd;
+            for coord in coords.iter_mut() {
+                *coord = rem % spd;
                 rem /= spd;
             }
             // Convert to our row-major index (dim0 slowest, last dim fastest)
             let mut our_idx = 0;
-            for d in 0..ni {
-                our_idx = our_idx * spd + coords[d];
+            for coord in coords.iter() {
+                our_idx = our_idx * spd + coord;
             }
             let base = our_idx * no;
             for c in 0..no {

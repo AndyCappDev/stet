@@ -797,7 +797,7 @@ fn execjob(
 
     // 1. Flush device BEFORE restore (restore reverts gstate.page_device)
     if let Some(mut dev) = ctx.device.take() {
-        if let Err(e) = dev.finish_with_context(&ctx) {
+        if let Err(e) = dev.finish_with_context(ctx) {
             eprintln!("render error: {}", e);
         }
         ctx.device = Some(dev);

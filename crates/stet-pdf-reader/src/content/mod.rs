@@ -280,11 +280,10 @@ impl<'a> ContentInterpreter<'a> {
         self.gstate_stack.push(self.gstate.clone());
         let saved_resources = self.resources.clone();
         // Set up resources from the form
-        if let Some(res_obj) = form_dict.get(b"Resources") {
-            if let Ok(PdfObj::Dict(d)) = self.resolver.deref(res_obj) {
+        if let Some(res_obj) = form_dict.get(b"Resources")
+            && let Ok(PdfObj::Dict(d)) = self.resolver.deref(res_obj) {
                 self.resources = d;
             }
-        }
 
         // Apply CTM: page CTM → bbox_to_rect → form_matrix
         self.gstate.ctm = self.gstate.ctm.concat(&bbox_to_rect).concat(&form_matrix);
@@ -463,8 +462,8 @@ impl<'a> ContentInterpreter<'a> {
             b"ET" => {
                 self.in_text = false;
                 // Apply accumulated text clip path (from rendering modes 4-7)
-                if let Some(clip_path) = self.text_clip_path.take() {
-                    if !clip_path.is_empty() {
+                if let Some(clip_path) = self.text_clip_path.take()
+                    && !clip_path.is_empty() {
                         self.display_list.push(DisplayElement::Clip {
                             path: clip_path.clone(),
                             params: ClipParams {
@@ -476,7 +475,6 @@ impl<'a> ContentInterpreter<'a> {
                         self.gstate.clip_path = Some(clip_path);
                         self.gstate.clip_path_version += 1;
                     }
-                }
                 Ok(())
             }
             b"Tf" => self.op_tf(),
@@ -1185,12 +1183,11 @@ impl<'a> ContentInterpreter<'a> {
                 use std::sync::Mutex;
                 static WARNED: Mutex<Vec<String>> = Mutex::new(Vec::new());
                 let msg = format!("font /{}: {}", String::from_utf8_lossy(name), e);
-                if let Ok(mut set) = WARNED.lock() {
-                    if !set.iter().any(|s| *s == msg) {
+                if let Ok(mut set) = WARNED.lock()
+                    && !set.contains(&msg) {
                         eprintln!("warning: {msg}");
                         set.push(msg);
                     }
-                }
                 // Try fallback font on resolution failure too
                 if let Some(fallback) = font::fallback_font(self.font_provider.as_ref()) {
                     let arc = Arc::new(fallback);
@@ -1905,8 +1902,8 @@ impl<'a> ContentInterpreter<'a> {
         let mut data = self.resolver.stream_data_from_obj(&smask_ref)?;
 
         // Apply /Decode array if present (e.g. [1 0] inverts the mask)
-        if let Some(decode) = smask_dict.get_array(b"Decode") {
-            if decode.len() >= 2 {
+        if let Some(decode) = smask_dict.get_array(b"Decode")
+            && decode.len() >= 2 {
                 let d0 = decode[0].as_f64().unwrap_or(0.0);
                 let d1 = decode[1].as_f64().unwrap_or(1.0);
                 if (d0 - 1.0).abs() < 1e-6 && d1.abs() < 1e-6 {
@@ -1922,7 +1919,6 @@ impl<'a> ContentInterpreter<'a> {
                     }
                 }
             }
-        }
 
         // SMask is always DeviceGray, 8bpc — resample if size differs
         if sw == image_w && sh == image_h {
@@ -1980,7 +1976,7 @@ impl<'a> ContentInterpreter<'a> {
         };
 
         // Expand 1-bit mask data to 8-bit alpha
-        let row_bytes = (mw + 7) / 8;
+        let row_bytes = mw.div_ceil(8);
         let mut alpha = vec![0u8; (mw * mh) as usize];
         for y in 0..mh {
             for x in 0..mw {
@@ -2654,8 +2650,8 @@ impl<'a> ContentInterpreter<'a> {
 
     /// Flush the current soft mask scope: wrap accumulated elements in SoftMasked.
     fn flush_soft_mask(&mut self) {
-        if let Some(scope) = self.soft_mask_scope.take() {
-            if self.display_list.len() > scope.start_index {
+        if let Some(scope) = self.soft_mask_scope.take()
+            && self.display_list.len() > scope.start_index {
                 let content = self.display_list.split_off(scope.start_index);
                 self.display_list.push(DisplayElement::SoftMasked {
                     mask: scope.mask.mask_list,
@@ -2668,7 +2664,6 @@ impl<'a> ContentInterpreter<'a> {
                     },
                 });
             }
-        }
     }
 
     /// Resolve a soft mask dictionary into a SoftMask.

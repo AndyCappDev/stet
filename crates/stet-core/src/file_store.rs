@@ -920,7 +920,7 @@ impl FileStore {
                     let bp = *bpp;
                     // Pad partial row to row_width with zeros
                     encode_buf.resize(rw, 0);
-                    let row: Vec<u8> = encode_buf.drain(..).collect();
+                    let row: Vec<u8> = std::mem::take(encode_buf);
                     let encoded = if pred >= 10 {
                         encode_png_row(&row, bp)
                     } else {
@@ -973,18 +973,12 @@ impl FileStore {
                 let h = *rows as u16;
                 let nc = *colors as u8;
                 let q = *quality;
-                let ct = *color_transform;
+                let _ct = *color_transform;
 
                 // Determine color type for jpeg-encoder
                 let color_type = match nc {
                     1 => jpeg_encoder::ColorType::Luma,
-                    3 => {
-                        if ct {
-                            jpeg_encoder::ColorType::Rgb
-                        } else {
-                            jpeg_encoder::ColorType::Rgb
-                        }
-                    }
+                    3 => jpeg_encoder::ColorType::Rgb,
                     4 => jpeg_encoder::ColorType::Cmyk,
                     _ => jpeg_encoder::ColorType::Rgb,
                 };
@@ -1813,7 +1807,7 @@ impl FileStore {
         let black_is1 = *black_is1;
 
         // Bytes per scan line (1 bit per pixel, padded to byte boundary)
-        let row_bytes = ((width as usize) + 7) / 8;
+        let row_bytes = (width as usize).div_ceil(8);
         let mut output = Vec::new();
         let mut line_count: u32 = 0;
 
@@ -2334,8 +2328,8 @@ impl FilterKind {
 
     /// Create a new FlateEncode filter with optional predictor parameters.
     pub fn flate_encode(predictor: u8, columns: u32, colors: u32, bpc: u32) -> Self {
-        let row_width = (columns as usize * colors as usize * bpc as usize + 7) / 8;
-        let bpp = (colors as usize * bpc as usize + 7) / 8;
+        let row_width = (columns as usize * colors as usize * bpc as usize).div_ceil(8);
+        let bpp = (colors as usize * bpc as usize).div_ceil(8);
         Self::FlateEncode {
             compressor: flate2::Compress::new(flate2::Compression::default(), true),
             predictor,

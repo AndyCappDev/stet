@@ -168,9 +168,9 @@ pub fn resolve_font(
         if let Some(ref desc) = descriptor {
             let missing_w = desc.get_f64(b"MissingWidth").unwrap_or(0.0) / 1000.0;
             if missing_w != 0.0 {
-                for code in 0..256 {
+                for (code, width) in widths.iter_mut().enumerate() {
                     if code < first_char || code > last_char {
-                        widths[code] = missing_w;
+                        *width = missing_w;
                     }
                 }
             }
@@ -239,8 +239,8 @@ pub fn resolve_font(
     }
 
     // For TrueType fonts, try loading from system fonts before giving up
-    if subtype == b"TrueType" {
-        if let Ok(data) = load_system_truetype_font(&base_font_name) {
+    if subtype == b"TrueType"
+        && let Ok(data) = load_system_truetype_font(&base_font_name) {
             let units_per_em = get_units_per_em(&data) as f64;
             let cmap = parse_cmap(&data);
             let post_name_to_gid = stet_fonts::system_fonts::parse_post_table(&data)
@@ -260,7 +260,6 @@ pub fn resolve_font(
                 units_per_em,
             }));
         }
-    }
 
     // Final fallback based on subtype (will likely fail)
     match subtype {
@@ -460,8 +459,8 @@ fn substitute_font(
                     Some(n) if n != ".notdef" && n != "space" => n,
                     _ => continue,
                 };
-                if let Some(cs) = font.charstrings.get(glyph_name) {
-                    if let Ok(result) =
+                if let Some(cs) = font.charstrings.get(glyph_name)
+                    && let Ok(result) =
                         execute_charstring(cs, &font.subrs, font.len_iv, false)
                     {
                         let sub_w = result.width_x * fm[0];
@@ -475,7 +474,6 @@ fn substitute_font(
                             }
                         }
                     }
-                }
             }
             if count > 5 && sub_sum > 0.0 {
                 let ratio = pdf_sum / sub_sum;
@@ -630,21 +628,18 @@ fn load_system_truetype_font(base_font: &str) -> Result<Vec<u8>, PdfError> {
     }
 
     // Try exact match first
-    if let Some(path) = cache.get_font_path(clean_name) {
-        if let Ok(data) = read_font_file(path, clean_name) {
+    if let Some(path) = cache.get_font_path(clean_name)
+        && let Ok(data) = read_font_file(path, clean_name) {
             return Ok(data);
         }
-    }
 
     // Try known substitutions
     for &(from, to) in CID_FONT_SUBSTITUTIONS {
-        if from == clean_name {
-            if let Some(path) = cache.get_font_path(to) {
-                if let Ok(data) = read_font_file(path, to) {
+        if from == clean_name
+            && let Some(path) = cache.get_font_path(to)
+                && let Ok(data) = read_font_file(path, to) {
                     return Ok(data);
                 }
-            }
-        }
     }
 
     // Fuzzy family match — split on '-' or ',' to extract family name
@@ -655,14 +650,13 @@ fn load_system_truetype_font(base_font: &str) -> Result<Vec<u8>, PdfError> {
     for (ps_name, path) in cache.iter() {
         let ps_lower = ps_name.to_ascii_lowercase();
         let family = lower.split(&['-', ','][..]).next().unwrap_or(&lower);
-        if ps_lower.contains(family) || family.contains(&ps_lower.split('-').next().unwrap_or("")) {
+        if ps_lower.contains(family) || family.contains(ps_lower.split('-').next().unwrap_or("")) {
             let name_bold = ps_lower.contains("bold") || ps_lower.contains("demi");
             let name_italic = ps_lower.contains("italic") || ps_lower.contains("oblique");
-            if name_bold == is_bold && name_italic == is_italic {
-                if let Ok(data) = read_font_file(path, ps_name) {
+            if name_bold == is_bold && name_italic == is_italic
+                && let Ok(data) = read_font_file(path, ps_name) {
                     return Ok(data);
                 }
-            }
         }
     }
 
@@ -693,12 +687,11 @@ fn read_font_file(path: &std::path::Path, ps_name: &str) -> std::io::Result<Vec<
             let font_offset =
                 u32::from_be_bytes([data[off_pos], data[off_pos+1], data[off_pos+2], data[off_pos+3]]) as usize;
             // Check PostScript name in the name table of this sub-font
-            if let Some(name) = extract_ps_name_at_offset(&data, font_offset) {
-                if name == ps_name {
+            if let Some(name) = extract_ps_name_at_offset(&data, font_offset)
+                && name == ps_name {
                     best_offset = font_offset;
                     break;
                 }
-            }
         }
         // Build a standalone TTF by rewriting the header to point to tables
         // at their absolute offsets within the TTC
@@ -819,7 +812,7 @@ fn extract_ttf_from_ttc(ttc_data: &[u8], font_offset: usize) -> std::io::Result<
             result.extend_from_slice(&ttc_data[*ttc_offset..end]);
             // Pad to 4-byte alignment
             let pad = (4 - (length % 4)) % 4;
-            result.extend(std::iter::repeat(0u8).take(pad));
+            result.extend(std::iter::repeat_n(0u8, pad));
         }
     }
 
@@ -834,8 +827,8 @@ fn resolve_type3(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
     // /Widths may be an indirect reference — resolve before accessing.
     let mut widths = [0.0f64; 256];
     let widths_resolved = font_dict.get(b"Widths").and_then(|obj| resolver.deref(obj).ok());
-    if let Some(ref w_obj) = widths_resolved {
-        if let Some(w_arr) = w_obj.as_array() {
+    if let Some(ref w_obj) = widths_resolved
+        && let Some(w_arr) = w_obj.as_array() {
             for (i, obj) in w_arr.iter().enumerate() {
                 let code = first_char + i;
                 if code < 256 {
@@ -843,7 +836,6 @@ fn resolve_type3(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                 }
             }
         }
-    }
 
     // FontMatrix (typically something like [0.01 0 0 0.01 0 0] for 100-unit glyph space)
     let font_matrix = font_dict
@@ -897,13 +889,11 @@ fn resolve_type3(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
     // Pre-decode all CharProc streams: encoding[code] → stream bytes
     let mut char_procs = HashMap::new();
     for code in 0..256u16 {
-        if let Some(glyph_name) = &encoding[code as usize] {
-            if let Some(proc_ref) = char_procs_dict.get(glyph_name.as_bytes()) {
-                if let Ok(data) = resolver.stream_data_from_obj(proc_ref) {
+        if let Some(glyph_name) = &encoding[code as usize]
+            && let Some(proc_ref) = char_procs_dict.get(glyph_name.as_bytes())
+                && let Ok(data) = resolver.stream_data_from_obj(proc_ref) {
                     char_procs.insert(code as u8, data);
                 }
-            }
-        }
     }
     Ok(PdfFont::Type3(Type3PdfFont {
         char_procs,
@@ -1065,6 +1055,7 @@ fn resolve_cff(
         encoding
     } else {
         let mut enc: [Option<String>; 256] = std::array::from_fn(|_| None);
+        #[allow(clippy::needless_range_loop)]
         for code in 0..256 {
             let gid = font.encoding[code] as usize;
             if gid > 0 && gid < font.charset.len() && font.charset[gid] != ".notdef" {
@@ -1363,13 +1354,11 @@ fn parse_to_unicode(data: &[u8]) -> HashMap<u16, u32> {
 
         if in_bfchar {
             let tokens = extract_hex_tokens(trimmed);
-            if tokens.len() >= 2 {
-                if let Some(cid) = u32::from_str_radix(tokens[0], 16).ok() {
-                    if let Some(unicode) = hex_to_unicode(tokens[1]) {
+            if tokens.len() >= 2
+                && let Ok(cid) = u32::from_str_radix(tokens[0], 16)
+                    && let Some(unicode) = hex_to_unicode(tokens[1]) {
                         map.insert(cid as u16, unicode);
                     }
-                }
-            }
         }
 
         if in_bfrange {
@@ -1386,20 +1375,18 @@ fn parse_to_unicode(data: &[u8]) -> HashMap<u16, u32> {
                     let before_close = after_open.split(']').next().unwrap_or(after_open);
                     extract_hex_tokens(before_close)
                 };
-                if all_before_bracket.len() >= 2 {
-                    if let (Some(start), Some(end)) = (
+                if all_before_bracket.len() >= 2
+                    && let (Some(start), Some(end)) = (
                         u32::from_str_radix(all_before_bracket[0], 16).ok(),
                         u32::from_str_radix(all_before_bracket[1], 16).ok(),
                     ) {
                         for (j, cid) in (start..=end).enumerate() {
-                            if j < in_bracket.len() {
-                                if let Some(u) = hex_to_unicode(in_bracket[j]) {
+                            if j < in_bracket.len()
+                                && let Some(u) = hex_to_unicode(in_bracket[j]) {
                                     map.insert(cid as u16, u);
                                 }
-                            }
                         }
                     }
-                }
             } else if line_tokens.len() >= 3 {
                 // <start> <end> <dst_start>
                 if let (Some(start), Some(end), Some(mut dst)) = (
@@ -1628,11 +1615,10 @@ impl TrueTypePdfFont {
         // Try encoding → glyph name → Unicode → cmap
         if !self.cmap.is_empty() {
             if let Some(glyph_name) = &self.encoding[char_code as usize] {
-                if let Some(unicode) = stet_fonts::agl::glyph_name_to_unicode(glyph_name) {
-                    if let Some(&gid) = self.cmap.get(&(unicode as u32)) {
+                if let Some(unicode) = stet_fonts::agl::glyph_name_to_unicode(glyph_name)
+                    && let Some(&gid) = self.cmap.get(&(unicode as u32)) {
                         return Some(gid);
                     }
-                }
                 // Fallback: look up glyph name directly in post table
                 // (handles ligatures like fl/fi that may not be in the cmap)
                 if let Some(&gid) = self.post_name_to_gid.get(glyph_name.as_str()) {

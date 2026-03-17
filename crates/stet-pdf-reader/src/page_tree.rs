@@ -84,11 +84,10 @@ fn collect_pages_recursive(
         inherited.resources = Some(res.clone());
     } else if let Some(PdfObj::Ref(n, g)) = node_dict.get(b"Resources") {
         // /Resources may be an indirect reference — dereference it
-        if let Ok(resolved) = resolver.resolve(*n, *g) {
-            if let Some(d) = resolved.as_dict() {
+        if let Ok(resolved) = resolver.resolve(*n, *g)
+            && let Some(d) = resolved.as_dict() {
                 inherited.resources = Some(d.clone());
             }
-        }
     }
 
     // Determine node type
@@ -199,11 +198,10 @@ fn parse_contents(dict: &PdfDict, resolver: &Resolver) -> Result<Vec<(u32, u16)>
         Some(PdfObj::Ref(n, g)) => {
             // Could be a ref to a stream OR a ref to an array of refs.
             // Try resolving to check.
-            if let Ok(resolved) = resolver.resolve(*n, *g) {
-                if let PdfObj::Array(arr) = &resolved {
+            if let Ok(resolved) = resolver.resolve(*n, *g)
+                && let PdfObj::Array(arr) = &resolved {
                     return collect_refs_from_array(arr);
                 }
-            }
             // Single content stream reference
             Ok(vec![(*n, *g)])
         }
@@ -218,12 +216,8 @@ fn parse_annots(dict: &PdfDict, resolver: &Resolver) -> Vec<(u32, u16)> {
         Some(PdfObj::Array(arr)) => arr.clone(),
         Some(PdfObj::Ref(n, g)) => {
             // Indirect ref to array
-            if let Ok(resolved) = resolver.resolve(*n, *g) {
-                if let PdfObj::Array(arr) = resolved {
-                    arr
-                } else {
-                    return Vec::new();
-                }
+            if let Ok(PdfObj::Array(arr)) = resolver.resolve(*n, *g) {
+                arr
             } else {
                 return Vec::new();
             }

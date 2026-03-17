@@ -290,7 +290,7 @@ fn image_type3_form(
     // Extract outer dict keys
     let interleave_type =
         dict_get_int(ctx, outer_dict, b"InterleaveType").ok_or(PsError::TypeCheck)?;
-    if !matches!(interleave_type, 1 | 2 | 3) {
+    if !matches!(interleave_type, 1..=3) {
         return Err(PsError::RangeCheck);
     }
 
@@ -520,6 +520,7 @@ fn read_type3_interleave1(
 /// InterleaveType 2: data interleaved by row blocks.
 /// Block structure: [mask rows][image rows] repeated.
 /// Mask is always 1 BPS.
+#[allow(clippy::too_many_arguments)]
 fn read_type3_interleave2(
     ctx: &mut Context,
     data_source: PsObject,
@@ -579,6 +580,7 @@ fn read_type3_interleave2(
 }
 
 /// InterleaveType 3: separate data sources for image and mask.
+#[allow(clippy::too_many_arguments)]
 fn read_type3_interleave3(
     ctx: &mut Context,
     img_data_source: PsObject,
@@ -620,6 +622,7 @@ fn read_type3_interleave3(
 }
 
 /// Apply a stencil mask to RGBA data, setting alpha=0 where mask says "don't paint".
+#[allow(clippy::too_many_arguments)]
 fn apply_stencil_mask(
     rgba: &mut [u8],
     img_w: u32,
@@ -1380,8 +1383,8 @@ fn samples_to_rgba(
     }
 
     // System CMYK profile bulk conversion for DeviceCMYK images
-    if matches!(ctx.gstate.color_space, ColorSpace::DeviceCMYK) && ncomp == 4 {
-        if let Some(hash) = ctx.icc_cache.default_cmyk_hash().copied() {
+    if matches!(ctx.gstate.color_space, ColorSpace::DeviceCMYK) && ncomp == 4
+        && let Some(hash) = ctx.icc_cache.default_cmyk_hash().copied() {
             let decoded_samples = if is_identity_decode(decode, ncomp) {
                 None
             } else {
@@ -1409,7 +1412,6 @@ fn samples_to_rgba(
                 return rgba;
             }
         }
-    }
 
     // CIE-based image conversion: run each pixel through CIE pipeline
     let cie_color_space = ctx.gstate.color_space.clone();
@@ -1420,11 +1422,11 @@ fn samples_to_rgba(
                 let si = i * 3;
                 let pi = i * 4;
                 let mut comp = [0.0f64; 3];
-                for c in 0..3 {
+                for (c, comp_val) in comp.iter_mut().enumerate() {
                     let raw = samples.get(si + c).copied().unwrap_or(0) as f64 / 255.0;
                     let d_min = decode.get(c * 2).copied().unwrap_or(0.0);
                     let d_max = decode.get(c * 2 + 1).copied().unwrap_or(1.0);
-                    comp[c] = (d_min + raw * (d_max - d_min)).clamp(0.0, 1.0);
+                    *comp_val = (d_min + raw * (d_max - d_min)).clamp(0.0, 1.0);
                 }
                 let color = DeviceColor::from_cie_abc(comp[0], comp[1], comp[2], &params);
                 rgba[pi] = (color.r * 255.0).round().clamp(0.0, 255.0) as u8;
@@ -1454,11 +1456,11 @@ fn samples_to_rgba(
                 let si = i * 3;
                 let pi = i * 4;
                 let mut comp = [0.0f64; 3];
-                for c in 0..3 {
+                for (c, comp_val) in comp.iter_mut().enumerate() {
                     let raw = samples.get(si + c).copied().unwrap_or(0) as f64 / 255.0;
                     let d_min = decode.get(c * 2).copied().unwrap_or(0.0);
                     let d_max = decode.get(c * 2 + 1).copied().unwrap_or(1.0);
-                    comp[c] = (d_min + raw * (d_max - d_min)).clamp(0.0, 1.0);
+                    *comp_val = (d_min + raw * (d_max - d_min)).clamp(0.0, 1.0);
                 }
                 let color = DeviceColor::from_cie_def(comp[0], comp[1], comp[2], &params);
                 rgba[pi] = (color.r * 255.0).round().clamp(0.0, 255.0) as u8;
@@ -1473,11 +1475,11 @@ fn samples_to_rgba(
                 let si = i * 4;
                 let pi = i * 4;
                 let mut comp = [0.0f64; 4];
-                for c in 0..4 {
+                for (c, comp_val) in comp.iter_mut().enumerate() {
                     let raw = samples.get(si + c).copied().unwrap_or(0) as f64 / 255.0;
                     let d_min = decode.get(c * 2).copied().unwrap_or(0.0);
                     let d_max = decode.get(c * 2 + 1).copied().unwrap_or(1.0);
-                    comp[c] = (d_min + raw * (d_max - d_min)).clamp(0.0, 1.0);
+                    *comp_val = (d_min + raw * (d_max - d_min)).clamp(0.0, 1.0);
                 }
                 let color = DeviceColor::from_cie_defg(comp[0], comp[1], comp[2], comp[3], &params);
                 rgba[pi] = (color.r * 255.0).round().clamp(0.0, 255.0) as u8;
@@ -1853,7 +1855,7 @@ fn capture_image_color_space(ctx: &mut Context) -> Option<ImageColorSpace> {
             };
             Some(ImageColorSpace::Indexed {
                 base: Box::new(base_cs),
-                hival: hival as u32,
+                hival,
                 lookup: lookup.clone(),
             })
         }

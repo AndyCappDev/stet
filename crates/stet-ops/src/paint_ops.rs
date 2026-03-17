@@ -261,11 +261,9 @@ fn use_native_stroke(ctx: &Context) -> bool {
     if let Some(pd) = ctx.gstate.page_device
         && let Some(name_id) = ctx.names.find(b"StrokeMethod")
         && let Some(obj) = ctx.dicts.get(pd, &DictKey::Name(name_id))
-    {
-        if let PsValue::Name(nid) = obj.value {
+        && let PsValue::Name(nid) = obj.value {
             return ctx.names.get_bytes(nid) == b"NativeStroke";
         }
-    }
     false // default: StrokePathFill
 }
 

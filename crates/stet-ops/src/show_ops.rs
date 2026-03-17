@@ -821,7 +821,7 @@ pub fn op_glyphshow(ctx: &mut Context) -> Result<(), PsError> {
         let cache = ctx
             .glyph_caches
             .entry(font_entity)
-            .or_insert_with(stet_core::glyph_cache::GlyphCache::new);
+            .or_default();
         cache.by_name.insert(
             glyph_name_id,
             CachedGlyph {
@@ -842,7 +842,7 @@ pub fn op_glyphshow(ctx: &mut Context) -> Result<(), PsError> {
         let cache = ctx
             .glyph_caches
             .entry(font_entity)
-            .or_insert_with(stet_core::glyph_cache::GlyphCache::new);
+            .or_default();
         cache.by_name.insert(
             glyph_name_id,
             CachedGlyph {
@@ -1290,7 +1290,7 @@ fn render_show(
             let cache = ctx
                 .glyph_caches
                 .entry(font_entity_for_cache)
-                .or_insert_with(stet_core::glyph_cache::GlyphCache::new);
+                .or_default();
             cache.by_name.insert(
                 glyph_name_id,
                 CachedGlyph {
@@ -1544,7 +1544,7 @@ fn render_show_type2(
             let cache = ctx
                 .glyph_caches
                 .entry(font_entity)
-                .or_insert_with(stet_core::glyph_cache::GlyphCache::new);
+                .or_default();
             cache.by_name.insert(
                 glyph_name_id,
                 CachedGlyph {
@@ -1642,7 +1642,7 @@ fn measure_string_width_type2(
             let cache = ctx
                 .glyph_caches
                 .entry(font_entity)
-                .or_insert_with(stet_core::glyph_cache::GlyphCache::new);
+                .or_default();
             cache
                 .by_name
                 .entry(glyph_name_id)
@@ -1727,7 +1727,7 @@ fn render_charpath_type2(
             let cache = ctx
                 .glyph_caches
                 .entry(font_entity)
-                .or_insert_with(stet_core::glyph_cache::GlyphCache::new);
+                .or_default();
             cache.by_name.insert(
                 glyph_name_id,
                 CachedGlyph {
@@ -2086,8 +2086,8 @@ fn render_show_composite(
                                     .and_then(|fd| truetype::get_glyf_data(fd, gid))
                             };
 
-                            if let Some(ref glyf_bytes) = glyf_bytes {
-                                if glyf_bytes.len() >= 10 {
+                            if let Some(ref glyf_bytes) = glyf_bytes
+                                && glyf_bytes.len() >= 10 {
                                     let glyf_path = {
                                         let dicts = &ctx.dicts;
                                         let strings = &ctx.strings;
@@ -2134,7 +2134,7 @@ fn render_show_composite(
                                     let cache = ctx
                                         .glyph_caches
                                         .entry(font_entity)
-                                        .or_insert_with(stet_core::glyph_cache::GlyphCache::new);
+                                        .or_default();
                                     cache.by_gid.insert(
                                         gid,
                                         CachedGlyph {
@@ -2144,7 +2144,6 @@ fn render_show_composite(
                                         },
                                     );
                                 }
-                            }
 
                             // Advance by actual hmtx width (even if glyf data was
                             // missing or too short — e.g. space has no outlines)
@@ -2284,7 +2283,7 @@ fn render_composite_truetype_cids(
                 let cache = ctx
                     .glyph_caches
                     .entry(cidfont_entity)
-                    .or_insert_with(stet_core::glyph_cache::GlyphCache::new);
+                    .or_default();
                 cache.by_cid.insert(
                     cid,
                     CachedGlyph {
@@ -2592,7 +2591,7 @@ fn render_composite_cff_cids(
             let cache = ctx
                 .glyph_caches
                 .entry(cidfont_entity)
-                .or_insert_with(stet_core::glyph_cache::GlyphCache::new);
+                .or_default();
             cache.by_cid.insert(
                 cid,
                 CachedGlyph {
@@ -2754,7 +2753,7 @@ fn render_show_type3(
                 let cache = ctx
                     .glyph_caches
                     .entry(font_entity)
-                    .or_insert_with(stet_core::glyph_cache::GlyphCache::new);
+                    .or_default();
                 cache.by_charcode.insert(
                     byte,
                     CachedType3Glyph {
@@ -2850,7 +2849,7 @@ fn measure_string_width(ctx: &mut Context, bytes: &[u8]) -> Result<(f64, f64), P
             let cache = ctx
                 .glyph_caches
                 .entry(font_entity_for_cache)
-                .or_insert_with(stet_core::glyph_cache::GlyphCache::new);
+                .or_default();
             cache
                 .by_name
                 .entry(glyph_name_id)
@@ -2945,7 +2944,7 @@ fn render_charpath(ctx: &mut Context, bytes: &[u8]) -> Result<(), PsError> {
             let cache = ctx
                 .glyph_caches
                 .entry(font_entity_for_cache)
-                .or_insert_with(stet_core::glyph_cache::GlyphCache::new);
+                .or_default();
             cache.by_name.insert(
                 glyph_name_id,
                 CachedGlyph {
@@ -3562,7 +3561,7 @@ fn render_show_displaced(
                         let cache = ctx
                             .glyph_caches
                             .entry(font_entity_for_cache)
-                            .or_insert_with(stet_core::glyph_cache::GlyphCache::new);
+                            .or_default();
                         cache.by_name.insert(
                             glyph_name_id,
                             CachedGlyph {
@@ -3654,7 +3653,7 @@ fn render_show_displaced_type2(
                         let cache = ctx
                             .glyph_caches
                             .entry(font_entity)
-                            .or_insert_with(stet_core::glyph_cache::GlyphCache::new);
+                            .or_default();
                         cache.by_name.insert(
                             glyph_name_id,
                             CachedGlyph {

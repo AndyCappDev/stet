@@ -118,7 +118,7 @@ fn decompile_elements(
             PsValue::Operator(opcode) => {
                 let name_id = ctx.operators[opcode.0 as usize].name;
                 let name_bytes = ctx.names.get_bytes(name_id);
-                if !TYPE4_ALLOWED.iter().any(|&a| a == name_bytes) {
+                if !TYPE4_ALLOWED.contains(&name_bytes) {
                     return false;
                 }
                 result.extend(name_bytes);
@@ -126,7 +126,7 @@ fn decompile_elements(
             }
             PsValue::Name(name_id) if obj.flags.is_executable() => {
                 let name_bytes = ctx.names.get_bytes(name_id);
-                if !TYPE4_ALLOWED.iter().any(|&a| a == name_bytes) {
+                if !TYPE4_ALLOWED.contains(&name_bytes) {
                     return false;
                 }
                 result.extend(name_bytes);
@@ -160,11 +160,10 @@ fn sample_spot_function_2d(
     proc: PsObject,
 ) -> Result<Option<Arc<Vec<f64>>>, PsError> {
     // Empty procedure = default
-    if let PsValue::Array { len, .. } | PsValue::PackedArray { len, .. } = proc.value {
-        if len == 0 {
+    if let PsValue::Array { len, .. } | PsValue::PackedArray { len, .. } = proc.value
+        && len == 0 {
             return Ok(None);
         }
-    }
     let mut table = Vec::with_capacity(64 * 64);
     for iy in 0..64 {
         let y = -1.0 + iy as f64 * 2.0 / 63.0;
@@ -192,8 +191,8 @@ fn precompute_halftone_screen(
     proc: PsObject,
 ) -> Result<HalftoneScreen, PsError> {
     // Empty proc → no precomputation needed
-    if let PsValue::Array { len, .. } | PsValue::PackedArray { len, .. } = proc.value {
-        if len == 0 {
+    if let PsValue::Array { len, .. } | PsValue::PackedArray { len, .. } = proc.value
+        && len == 0 {
             return Ok(HalftoneScreen {
                 frequency: freq,
                 angle,
@@ -201,10 +200,9 @@ fn precompute_halftone_screen(
                 sampled_2d: None,
             });
         }
-    }
 
     // Try Type 4 decompilation first
-    let type4_tokens = decompile_spot_to_type4(ctx, proc).map(|v| Arc::new(v));
+    let type4_tokens = decompile_spot_to_type4(ctx, proc).map(Arc::new);
 
     // Fall back to 2D sampling if decompilation failed
     let sampled_2d = if type4_tokens.is_none() {
@@ -254,8 +252,8 @@ pub fn op_setscreen(ctx: &mut Context) -> Result<(), PsError> {
 /// `currentscreen`: — → freq angle proc
 pub fn op_currentscreen(ctx: &mut Context) -> Result<(), PsError> {
     // If a halftone dict was set, return its Frequency/Angle/dict
-    if let Some(ht_obj) = ctx.gstate.halftone {
-        if let PsValue::Dict(entity) = ht_obj.value {
+    if let Some(ht_obj) = ctx.gstate.halftone
+        && let PsValue::Dict(entity) = ht_obj.value {
             let freq_key = DictKey::Name(ctx.names.intern(b"Frequency"));
             let angle_key = DictKey::Name(ctx.names.intern(b"Angle"));
             let freq = ctx
@@ -273,7 +271,6 @@ pub fn op_currentscreen(ctx: &mut Context) -> Result<(), PsError> {
             ctx.o_stack.push(ht_obj)?;
             return Ok(());
         }
-    }
     ctx.o_stack.push(PsObject::real(ctx.gstate.screen_freq))?;
     ctx.o_stack.push(PsObject::real(ctx.gstate.screen_angle))?;
     match ctx.gstate.screen_proc {
@@ -389,11 +386,10 @@ pub fn op_currentcolorscreen(ctx: &mut Context) -> Result<(), PsError> {
 /// Returns None if the procedure is identity (or empty).
 fn sample_transfer(ctx: &mut Context, proc: PsObject) -> Result<Option<Arc<Vec<f64>>>, PsError> {
     // Empty procedure = identity
-    if let PsValue::Array { len, .. } | PsValue::PackedArray { len, .. } = proc.value {
-        if len == 0 {
+    if let PsValue::Array { len, .. } | PsValue::PackedArray { len, .. } = proc.value
+        && len == 0 {
             return Ok(None);
         }
-    }
     let mut table = Vec::with_capacity(256);
     for i in 0..256 {
         let input = i as f64 / 255.0;
@@ -503,11 +499,10 @@ pub fn op_currentcolortransfer(ctx: &mut Context) -> Result<(), PsError> {
 /// Sample a PS UCR procedure at 256 points via exec_sync.
 /// Like sample_transfer() but range is [-1,1] instead of [0,1].
 fn sample_ucr(ctx: &mut Context, proc: PsObject) -> Result<Option<Arc<Vec<f64>>>, PsError> {
-    if let PsValue::Array { len, .. } | PsValue::PackedArray { len, .. } = proc.value {
-        if len == 0 {
+    if let PsValue::Array { len, .. } | PsValue::PackedArray { len, .. } = proc.value
+        && len == 0 {
             return Ok(None);
         }
-    }
     let mut table = Vec::with_capacity(256);
     for i in 0..256 {
         let input = i as f64 / 255.0;
@@ -596,16 +591,14 @@ pub fn op_sethalftone(ctx: &mut Context) -> Result<(), PsError> {
             // Extract Frequency/Angle from dict to update screen params
             let freq_key = DictKey::Name(ctx.names.intern(b"Frequency"));
             let angle_key = DictKey::Name(ctx.names.intern(b"Angle"));
-            if let Some(freq_obj) = ctx.dicts.get(entity, &freq_key) {
-                if let Some(f) = freq_obj.as_f64() {
+            if let Some(freq_obj) = ctx.dicts.get(entity, &freq_key)
+                && let Some(f) = freq_obj.as_f64() {
                     ctx.gstate.screen_freq = f;
                 }
-            }
-            if let Some(angle_obj) = ctx.dicts.get(entity, &angle_key) {
-                if let Some(a) = angle_obj.as_f64() {
+            if let Some(angle_obj) = ctx.dicts.get(entity, &angle_key)
+                && let Some(a) = angle_obj.as_f64() {
                     ctx.gstate.screen_angle = a;
                 }
-            }
             // Pre-compute halftone for Type 1 dicts with SpotFunction
             let ht_type_key = DictKey::Name(ctx.names.intern(b"HalftoneType"));
             let spot_key = DictKey::Name(ctx.names.intern(b"SpotFunction"));

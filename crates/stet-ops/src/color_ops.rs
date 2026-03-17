@@ -27,11 +27,10 @@ pub fn op_setgray(ctx: &mut Context) -> Result<(), PsError> {
     ctx.gstate.color_space = ColorSpace::DeviceGray;
     ctx.gstate.current_pattern = None;
     // UseCIEColor remapping (PLRM 6.2.5)
-    if is_use_cie_color(ctx) {
-        if let Some(cs) = lookup_default_colorspace(ctx, b"DeviceGray") {
+    if is_use_cie_color(ctx)
+        && let Some(cs) = lookup_default_colorspace(ctx, b"DeviceGray") {
             ctx.gstate.color_space = cs;
         }
-    }
     Ok(())
 }
 
@@ -61,11 +60,10 @@ pub fn op_setrgbcolor(ctx: &mut Context) -> Result<(), PsError> {
     ctx.gstate.color_space = ColorSpace::DeviceRGB;
     ctx.gstate.current_pattern = None;
     // UseCIEColor remapping (PLRM 6.2.5)
-    if is_use_cie_color(ctx) {
-        if let Some(cs) = lookup_default_colorspace(ctx, b"DeviceRGB") {
+    if is_use_cie_color(ctx)
+        && let Some(cs) = lookup_default_colorspace(ctx, b"DeviceRGB") {
             ctx.gstate.color_space = cs;
         }
-    }
     Ok(())
 }
 
@@ -104,11 +102,10 @@ pub fn op_setcmykcolor(ctx: &mut Context) -> Result<(), PsError> {
     ctx.gstate.color_space = ColorSpace::DeviceCMYK;
     ctx.gstate.current_pattern = None;
     // UseCIEColor remapping (PLRM 6.2.5)
-    if is_use_cie_color(ctx) {
-        if let Some(cs) = lookup_default_colorspace(ctx, b"DeviceCMYK") {
+    if is_use_cie_color(ctx)
+        && let Some(cs) = lookup_default_colorspace(ctx, b"DeviceCMYK") {
             ctx.gstate.color_space = cs;
         }
-    }
     Ok(())
 }
 
@@ -740,11 +737,10 @@ fn default_color_for_space(cs: &ColorSpace, ctx: &mut Context) -> DeviceColor {
                 4 => &[0.0, 0.0, 0.0, 1.0],
                 _ => return DeviceColor::black(),
             };
-            if let Some(hash) = profile_hash {
-                if let Some((r, g, b)) = ctx.icc_cache.convert_color(hash, default_comps) {
+            if let Some(hash) = profile_hash
+                && let Some((r, g, b)) = ctx.icc_cache.convert_color(hash, default_comps) {
                     return DeviceColor::from_rgb(r, g, b);
                 }
-            }
             match n {
                 1 => DeviceColor::from_gray(0.0),
                 3 => DeviceColor::from_rgb(0.0, 0.0, 0.0),
@@ -1498,8 +1494,7 @@ fn resolve_indexed_proc_lookup(ctx: &mut Context, cs: ColorSpace) -> Result<Colo
         ref lookup_proc,
         ..
     } = cs
-    {
-        if let Some(proc_obj) = *lookup_proc {
+        && let Some(proc_obj) = *lookup_proc {
             let ncomp = match base.as_ref() {
                 ColorSpace::DeviceGray => 1,
                 ColorSpace::DeviceRGB => 3,
@@ -1530,7 +1525,6 @@ fn resolve_indexed_proc_lookup(ctx: &mut Context, cs: ColorSpace) -> Result<Colo
                 lookup_proc: None,
             });
         }
-    }
     Ok(cs)
 }
 

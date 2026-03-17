@@ -1016,11 +1016,10 @@ fn components_to_device_color(
         ColorSpace::ICCBased {
             n, profile_hash, ..
         } => {
-            if let Some(hash) = profile_hash {
-                if let Some((r, g, b)) = icc_cache.convert_color(hash, comps) {
+            if let Some(hash) = profile_hash
+                && let Some((r, g, b)) = icc_cache.convert_color(hash, comps) {
                     return DeviceColor::from_rgb(r, g, b);
                 }
-            }
             match n {
                 1 => DeviceColor::from_gray(comps.first().copied().unwrap_or(0.0).clamp(0.0, 1.0)),
                 3 if comps.len() >= 3 => DeviceColor::from_rgb(
@@ -1472,11 +1471,10 @@ fn pop_color_components(
         ColorSpace::ICCBased {
             n, profile_hash, ..
         } => {
-            if let Some(hash) = profile_hash {
-                if let Some((r, g, b)) = ctx.icc_cache.convert_color(hash, &comps) {
+            if let Some(hash) = profile_hash
+                && let Some((r, g, b)) = ctx.icc_cache.convert_color(hash, &comps) {
                     return DeviceColor::from_rgb(r, g, b);
                 }
-            }
             match n {
                 1 => DeviceColor::from_gray(comps.first().copied().unwrap_or(0.0).clamp(0.0, 1.0)),
                 3 if comps.len() >= 3 => DeviceColor::from_rgb(

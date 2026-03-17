@@ -129,8 +129,8 @@ fn rebuild_xref_from_scan(data: &[u8]) -> Result<XrefTable, PdfError> {
         }
 
         // Try to parse: <obj_num> <gen_num> obj
-        if pos < data.len() && data[pos].is_ascii_digit() {
-            if let Some((obj_num, generation, obj_offset)) = try_parse_obj_header(data, pos) {
+        if pos < data.len() && data[pos].is_ascii_digit()
+            && let Some((obj_num, generation, obj_offset)) = try_parse_obj_header(data, pos) {
                 let idx = obj_num as usize;
                 if idx < 100_000 {
                     // sanity limit
@@ -143,7 +143,6 @@ fn rebuild_xref_from_scan(data: &[u8]) -> Result<XrefTable, PdfError> {
                     });
                 }
             }
-        }
 
         // Advance to next line
         while pos < data.len() && data[pos] != b'\n' {
@@ -155,7 +154,7 @@ fn rebuild_xref_from_scan(data: &[u8]) -> Result<XrefTable, PdfError> {
     }
 
     // Parse the trailer dict (search for "trailer" keyword)
-    let trailer = find_trailer_dict(data).unwrap_or_else(|| PdfDict::new());
+    let trailer = find_trailer_dict(data).unwrap_or_default();
 
     // If no trailer has /Root, scan objects for /Type /Catalog
     let trailer = if trailer.get(b"Root").is_none() {
@@ -234,11 +233,10 @@ fn find_trailer_dict(data: &[u8]) -> Option<PdfDict> {
         if &data[pos..pos + needle.len()] == needle {
             let dict_start = pos + needle.len();
             let mut lexer = Lexer::at(data, dict_start);
-            if let Ok(Token::DictBegin) = lexer.next_token() {
-                if let Ok(dict) = parse_dict_body(&mut lexer) {
+            if let Ok(Token::DictBegin) = lexer.next_token()
+                && let Ok(dict) = parse_dict_body(&mut lexer) {
                     return Some(dict);
                 }
-            }
         }
         pos -= 1;
     }

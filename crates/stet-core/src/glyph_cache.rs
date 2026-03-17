@@ -70,5 +70,5 @@ pub fn get_or_create_cache(
     caches: &mut FxHashMap<EntityId, GlyphCache>,
     font_entity: EntityId,
 ) -> &mut GlyphCache {
-    caches.entry(font_entity).or_insert_with(GlyphCache::new)
+    caches.entry(font_entity).or_default()
 }

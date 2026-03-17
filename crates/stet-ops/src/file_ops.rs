@@ -808,10 +808,8 @@ pub fn op_filenameforall(ctx: &mut Context) -> Result<(), PsError> {
     // Use glob to expand the template pattern
     let mut matches: Vec<String> = Vec::new();
     if let Ok(paths) = glob::glob(&template) {
-        for entry in paths {
-            if let Ok(path) = entry {
-                matches.push(path.to_string_lossy().into_owned());
-            }
+        for path in paths.flatten() {
+            matches.push(path.to_string_lossy().into_owned());
         }
     }
     matches.sort();

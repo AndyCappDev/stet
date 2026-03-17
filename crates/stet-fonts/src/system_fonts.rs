@@ -216,8 +216,8 @@ fn scan_directory(dir: &Path, fonts: &mut HashMap<String, PathBuf>) {
             }
             Some("ttc") => {
                 // TrueType Collection: index each sub-font
-                if let Ok(data) = fs::read(&path) {
-                    if data.len() > 12 && &data[0..4] == b"ttcf" {
+                if let Ok(data) = fs::read(&path)
+                    && data.len() > 12 && &data[0..4] == b"ttcf" {
                         let num = read_u32(&data, 8) as usize;
                         for i in 0..num {
                             let off_pos = 12 + i * 4;
@@ -230,7 +230,6 @@ fn scan_directory(dir: &Path, fonts: &mut HashMap<String, PathBuf>) {
                             }
                         }
                     }
-                }
             }
             Some("pfa" | "t1") => {
                 if let Some(name) = extract_ps_name_from_pfa(&path) {
@@ -335,11 +334,10 @@ fn extract_ps_name_at_ttc_offset(data: &[u8], font_offset: usize) -> Option<Stri
         if is_otto && tag == b"CFF " {
             let cff_off = read_u32(data, entry + 8) as usize;
             let cff_len = read_u32(data, entry + 12) as usize;
-            if cff_off + cff_len <= data.len() {
-                if let Some(name) = extract_cff_name_from_data(&data[cff_off..cff_off + cff_len]) {
+            if cff_off + cff_len <= data.len()
+                && let Some(name) = extract_cff_name_from_data(&data[cff_off..cff_off + cff_len]) {
                     return Some(name);
                 }
-            }
         }
     }
     None

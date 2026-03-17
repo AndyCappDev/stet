@@ -87,9 +87,7 @@ impl FontTracker {
         let usage = self.fonts.entry(key).or_insert_with(|| {
             let idx = self.next_idx;
             self.next_idx += 1;
-            let is_std14 = STANDARD_14
-                .iter()
-                .any(|n| *n == params.font_name.as_slice());
+            let is_std14 = STANDARD_14.contains(&params.font_name.as_slice());
             FontUsage {
                 pdf_name: format!("F{}", idx),
                 font_name: params.font_name.clone(),

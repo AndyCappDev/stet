@@ -167,6 +167,7 @@ fn handle_function_based(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_axial(
     dict: &PdfDict,
     gstate: &PdfGraphicsState,
@@ -213,6 +214,7 @@ fn handle_axial(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_radial(
     dict: &PdfDict,
     gstate: &PdfGraphicsState,
@@ -261,6 +263,7 @@ fn handle_radial(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_mesh(
     shading_obj: &PdfObj,
     dict: &PdfDict,
@@ -356,6 +359,7 @@ fn handle_mesh(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_patches(
     shading_obj: &PdfObj,
     dict: &PdfDict,
@@ -565,11 +569,10 @@ fn parse_extend(dict: &PdfDict) -> (bool, bool) {
 
 /// Resolve the shading's /ColorSpace to a ResolvedColorSpace.
 fn resolve_shading_resolved_cs(dict: &PdfDict, resolver: &Resolver) -> ResolvedColorSpace {
-    if let Some(cs_obj) = dict.get(b"ColorSpace") {
-        if let Ok(resolved) = resolve_color_space_obj(cs_obj, resolver) {
+    if let Some(cs_obj) = dict.get(b"ColorSpace")
+        && let Ok(resolved) = resolve_color_space_obj(cs_obj, resolver) {
             return resolved;
         }
-    }
     ResolvedColorSpace::DeviceRGB
 }
 

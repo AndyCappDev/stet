@@ -448,10 +448,10 @@ pub fn components_to_device_color_icc(
         }
         ResolvedColorSpace::ICCBased { n, profile_data } => {
             // Try ICC profile conversion first
-            if let Some(cache) = icc_cache {
-                if let Some(data) = profile_data {
-                    if let Some(hash) = cache.register_profile(data) {
-                        if let Some((r, g, b)) = cache.convert_color(&hash, components) {
+            if let Some(cache) = icc_cache
+                && let Some(data) = profile_data
+                    && let Some(hash) = cache.register_profile(data)
+                        && let Some((r, g, b)) = cache.convert_color(&hash, components) {
                             // For 4-component (CMYK) ICC profiles, preserve the
                             // source CMYK values in native_cmyk for overprint simulation.
                             if *n == 4 {
@@ -468,9 +468,6 @@ pub fn components_to_device_color_icc(
                             }
                             return DeviceColor::from_rgb(r, g, b);
                         }
-                    }
-                }
-            }
             // Fall back to device space based on component count
             match n {
                 1 => {
@@ -615,7 +612,7 @@ pub fn convert_icc_image_data(
         }
         ResolvedColorSpace::DeviceCMYK => {
             // Use the system CMYK profile for DeviceCMYK images
-            icc_cache.default_cmyk_hash()?.clone()
+            *icc_cache.default_cmyk_hash()?
         }
         _ => return None,
     };

@@ -124,7 +124,7 @@ pub fn op_setpagedevice(ctx: &mut Context) -> Result<(), PsError> {
     let od_name = ctx.names.intern(b"OutputDevice");
 
     // Check if current page device has .IsPageDevice
-    let cur_has_is_page = ctx.gstate.page_device.map_or(false, |pd| {
+    let cur_has_is_page = ctx.gstate.page_device.is_some_and(|pd| {
         ctx.dicts.get(pd, &DictKey::Name(is_page_name)).is_some()
     });
 
@@ -137,11 +137,10 @@ pub fn op_setpagedevice(ctx: &mut Context) -> Result<(), PsError> {
             .gstate
             .page_device
             .and_then(|pd| ctx.dicts.get(pd, &DictKey::Name(od_name)));
-        if let (Some(req), Some(cur)) = (req_od, cur_od) {
-            if req.value != cur.value {
+        if let (Some(req), Some(cur)) = (req_od, cur_od)
+            && req.value != cur.value {
                 need_full_reload = true;
             }
-        }
     }
 
     let base_pd = if need_full_reload {
@@ -457,7 +456,7 @@ pub fn op_showpage_continue(ctx: &mut Context) -> Result<(), PsError> {
     let in_filter = ctx
         .page_filter
         .as_ref()
-        .map_or(true, |f| f.contains(&page_count));
+        .is_none_or(|f| f.contains(&page_count));
 
     if should_render && in_filter {
         // Replay display list and render
@@ -542,7 +541,7 @@ pub fn op_copypage_continue(ctx: &mut Context) -> Result<(), PsError> {
     let in_filter = ctx
         .page_filter
         .as_ref()
-        .map_or(true, |f| f.contains(&page_count));
+        .is_none_or(|f| f.contains(&page_count));
 
     if should_render && in_filter {
         // Replay display list (copypage preserves page content, but we must

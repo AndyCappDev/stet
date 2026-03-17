@@ -258,7 +258,7 @@ pub fn build_content_stream(
                 if batch_font == Some(params.font_entity) {
                     text_batch.push(params);
                 } else {
-                    flush_text_batch(&text_batch, &font_tracker, &mut buf, &mut gs);
+                    flush_text_batch(&text_batch, font_tracker, &mut buf, &mut gs);
                     text_batch.clear();
                     text_batch.push(params);
                     batch_font = Some(params.font_entity);
@@ -271,7 +271,7 @@ pub fn build_content_stream(
             DisplayElement::Stroke { params, .. } if params.is_text_glyph => continue,
             _ => {
                 // Flush any pending text batch before non-text element
-                flush_text_batch(&text_batch, &font_tracker, &mut buf, &mut gs);
+                flush_text_batch(&text_batch, font_tracker, &mut buf, &mut gs);
                 text_batch.clear();
                 batch_font = None;
             }
@@ -510,7 +510,7 @@ pub fn build_content_stream(
     }
 
     // Flush any remaining text batch
-    flush_text_batch(&text_batch, &font_tracker, &mut buf, &mut gs);
+    flush_text_batch(&text_batch, font_tracker, &mut buf, &mut gs);
 
     // Close remaining clips
     for _ in 0..clip_depth {
@@ -731,11 +731,10 @@ pub fn build_tile_content_stream(
                 buf.extend(b"q ");
                 emit_matrix(&mut buf, &m);
                 buf.extend(b" cm ");
-                if xobj.is_imagemask {
-                    if let Some((r, g, b)) = xobj.mask_color {
+                if xobj.is_imagemask
+                    && let Some((r, g, b)) = xobj.mask_color {
                         emit_fill_color_rgb(&mut buf, r, g, b);
                     }
-                }
                 writeln!(buf, "/Im{} Do Q", img_idx).unwrap();
                 images.push(xobj);
             }
@@ -965,7 +964,7 @@ fn emit_fill_color_spot(
 ) {
     let cs_name = get_or_create_cs_name(spot, cs_map, color_spaces);
     if gs.fill_cs_name.as_deref() != Some(&cs_name) {
-        write!(buf, "/{} cs\n", cs_name).unwrap();
+        writeln!(buf, "/{} cs", cs_name).unwrap();
         gs.fill_cs_name = Some(cs_name);
         gs.fill_color = None; // force re-emit tint values
     }
@@ -986,7 +985,7 @@ fn emit_stroke_color_spot(
 ) {
     let cs_name = get_or_create_cs_name(spot, cs_map, color_spaces);
     if gs.stroke_cs_name.as_deref() != Some(&cs_name) {
-        write!(buf, "/{} CS\n", cs_name).unwrap();
+        writeln!(buf, "/{} CS", cs_name).unwrap();
         gs.stroke_cs_name = Some(cs_name);
         gs.stroke_color = None;
     }
@@ -1160,7 +1159,7 @@ fn emit_transfer(
 
     // Collect the actual sample data
     let (tables, is_color) = if let Some(ref color) = transfer.color {
-        (color.iter().map(|t| t.clone()).collect(), true)
+        (color.to_vec(), true)
     } else if let Some(ref gray) = transfer.gray {
         (vec![Some(gray.clone())], false)
     } else {

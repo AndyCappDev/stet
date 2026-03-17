@@ -148,7 +148,7 @@ fn decode_flate(data: &[u8], parms: Option<&PdfDict>) -> Result<Vec<u8>, PdfErro
     if let Some(parms) = parms {
         let predictor = parms.get_int(b"Predictor").unwrap_or(1);
         if predictor > 1 {
-            return Ok(apply_predictor(&output, parms, predictor)?);
+            return apply_predictor(&output, parms, predictor);
         }
     }
 
@@ -379,15 +379,14 @@ fn decode_dct(data: &[u8]) -> Result<Vec<u8>, PdfError> {
     // raw JPEG data is already in the correct byte order for the PDF /Decode
     // array to process. Undo the decoder's inversion so the PDF renderer gets
     // the original sample values.
-    if let Some(info) = decoder.info() {
-        if info.pixel_format == jpeg_decoder::PixelFormat::CMYK32 {
+    if let Some(info) = decoder.info()
+        && info.pixel_format == jpeg_decoder::PixelFormat::CMYK32 {
             let mut result = pixels;
             for b in result.iter_mut() {
                 *b = 255 - *b;
             }
             return Ok(result);
         }
-    }
 
     Ok(pixels)
 }
@@ -530,7 +529,7 @@ fn decode_jbig2(data: &[u8], globals: Option<&[u8]>) -> Result<Vec<u8>, PdfError
     // JBIG2: true = black, false = white
     // PDF DeviceGray: 0 = black, 1 = white
     // So: start all-white (0xFF), clear bits for black pixels
-    let row_bytes = (image.width as usize + 7) / 8;
+    let row_bytes = (image.width as usize).div_ceil(8);
     let mut packed = vec![0xFFu8; row_bytes * image.height as usize];
     for y in 0..image.height as usize {
         for x in 0..image.width as usize {

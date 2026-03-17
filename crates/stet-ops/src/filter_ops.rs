@@ -75,11 +75,10 @@ pub fn op_filter(ctx: &mut Context) -> Result<(), PsError> {
         let de = dict_entity.ok_or(PsError::RangeCheck)?;
         // This will return error if params are invalid, before any pops
         extract_dct_encode_params(ctx, de)?;
-    } else if filter_name == b"DCTDecode" {
-        if let Some(de) = dict_entity {
+    } else if filter_name == b"DCTDecode"
+        && let Some(de) = dict_entity {
             validate_dct_decode_params(ctx, de)?;
         }
-    }
 
     // Validate filter name is known BEFORE popping operands
     if !is_known_filter_name(&filter_name) {
@@ -387,7 +386,7 @@ fn extract_dct_encode_params(
         },
         None => 1.0,
     };
-    let quality = (50.0 / qfactor).round().max(1.0).min(100.0) as u8;
+    let quality = (50.0 / qfactor).round().clamp(1.0, 100.0) as u8;
 
     // Optional: ColorTransform (int, 0 or 1)
     let color_transform = match lookup_obj(b"ColorTransform") {
@@ -423,7 +422,7 @@ fn extract_dct_encode_params(
 fn validate_sample_array(ctx: &Context, obj: PsObject, colors: u32) -> Result<(), PsError> {
     match obj.value {
         PsValue::Array { entity, start, len } => {
-            if len as u32 != colors {
+            if len != colors {
                 return Err(PsError::RangeCheck);
             }
             for i in 0..len {
@@ -461,6 +460,7 @@ fn validate_dct_decode_params(
 }
 
 /// Extract CCITTFaxDecode parameters from a dict, with PLRM defaults.
+#[allow(clippy::type_complexity)]
 fn extract_ccitt_params(
     ctx: &Context,
     dict_entity: EntityId,
@@ -513,6 +513,7 @@ fn extract_ccitt_params(
 }
 
 /// Create a filter by name, returning the filter EntityId.
+#[allow(clippy::too_many_arguments)]
 fn create_filter_by_name(
     ctx: &mut Context,
     name: &[u8],

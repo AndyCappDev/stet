@@ -1107,13 +1107,12 @@ pub fn build_icc_cache_for_list(
     let mut seen = HashSet::new();
 
     // Register system CMYK profile first
-    if let Some(cmyk_bytes) = system_cmyk_bytes {
-        if let Some(hash) = cache.register_profile(cmyk_bytes) {
+    if let Some(cmyk_bytes) = system_cmyk_bytes
+        && let Some(hash) = cache.register_profile(cmyk_bytes) {
             seen.insert(hash);
             // Set the default CMYK hash so convert_image_8bit works for DeviceCMYK
             cache.set_default_cmyk_hash(hash);
         }
-    }
 
     // Scan display list for ICCBased images
     for element in list.elements() {
@@ -1126,24 +1125,19 @@ pub fn build_icc_cache_for_list(
             profile_data,
             ..
         }) = cs
-        {
-            if seen.insert(*profile_hash) {
+            && seen.insert(*profile_hash) {
                 cache.register_profile(profile_data);
             }
-        }
         // Also check Indexed with ICCBased base
-        if let Some(ImageColorSpace::Indexed { base, .. }) = cs {
-            if let ImageColorSpace::ICCBased {
+        if let Some(ImageColorSpace::Indexed { base, .. }) = cs
+            && let ImageColorSpace::ICCBased {
                 profile_hash,
                 profile_data,
                 ..
             } = base.as_ref()
-            {
-                if seen.insert(*profile_hash) {
+                && seen.insert(*profile_hash) {
                     cache.register_profile(profile_data);
                 }
-            }
-        }
     }
 
     cache
@@ -1187,12 +1181,12 @@ fn samples_to_rgba(data: &[u8], params: &ImageParams, icc: Option<&IccCache>) ->
             // Try ICC-based CMYK→RGB conversion via system CMYK profile.
             // Convert as many complete pixels as the data allows; PLRM-fallback
             // for any remaining pixels with insufficient data.
-            if let Some(cache) = icc {
-                if let Some(cmyk_hash) = cache.default_cmyk_hash() {
+            if let Some(cache) = icc
+                && let Some(cmyk_hash) = cache.default_cmyk_hash() {
                     let avail_pixels = data.len() / 4;
                     let icc_pixels = avail_pixels.min(npixels);
-                    if icc_pixels > 0 {
-                        if let Some(rgb) = cache.convert_image_8bit(cmyk_hash, data, icc_pixels) {
+                    if icc_pixels > 0
+                        && let Some(rgb) = cache.convert_image_8bit(cmyk_hash, data, icc_pixels) {
                             let mut rgba = vec![255u8; npixels * 4];
                             for i in 0..icc_pixels {
                                 rgba[i * 4] = rgb[i * 3];
@@ -1202,9 +1196,7 @@ fn samples_to_rgba(data: &[u8], params: &ImageParams, icc: Option<&IccCache>) ->
                             // Remaining pixels (if data was short) stay white (0xFF)
                             return rgba;
                         }
-                    }
                 }
-            }
             // Fallback: PLRM CMYK→RGB formula
             let mut rgba = vec![255u8; npixels * 4];
             for i in 0..npixels {
@@ -1229,9 +1221,9 @@ fn samples_to_rgba(data: &[u8], params: &ImageParams, icc: Option<&IccCache>) ->
             profile_data,
         } => {
             // Try ICC-based conversion if cache is available
-            if let Some(cache) = icc {
-                if cache.has_profile(profile_hash) {
-                    if let Some(rgb) = cache.convert_image_8bit(profile_hash, data, npixels) {
+            if let Some(cache) = icc
+                && cache.has_profile(profile_hash)
+                    && let Some(rgb) = cache.convert_image_8bit(profile_hash, data, npixels) {
                         let mut rgba = vec![255u8; npixels * 4];
                         for i in 0..npixels {
                             rgba[i * 4] = rgb[i * 3];
@@ -1240,8 +1232,6 @@ fn samples_to_rgba(data: &[u8], params: &ImageParams, icc: Option<&IccCache>) ->
                         }
                         return rgba;
                     }
-                }
-            }
             // Fallback to device equivalent based on component count
             let _ = (profile_hash, profile_data);
             let fallback = match n {
@@ -1311,13 +1301,12 @@ fn samples_to_rgba(data: &[u8], params: &ImageParams, icc: Option<&IccCache>) ->
         } => {
             // 1 byte per pixel → lookup in tint table → convert alt space to RGB
             // For CMYK alt space with ICC, build bulk CMYK data and convert via ICC
-            if matches!(alt_space.as_ref(), ImageColorSpace::DeviceCMYK) {
-                if let Some(rgba) =
+            if matches!(alt_space.as_ref(), ImageColorSpace::DeviceCMYK)
+                && let Some(rgba) =
                     tint_separation_via_icc(data, npixels, tint_table, icc)
                 {
                     return rgba;
                 }
-            }
             let mut rgba = vec![255u8; npixels * 4];
             let no = tint_table.num_outputs as usize;
             let mut alt_comps = vec![0.0f32; no];
@@ -1340,13 +1329,12 @@ fn samples_to_rgba(data: &[u8], params: &ImageParams, icc: Option<&IccCache>) ->
             let ni = tint_table.num_inputs as usize;
             let no = tint_table.num_outputs as usize;
             // For CMYK alt space with ICC, build bulk CMYK data and convert via ICC
-            if matches!(alt_space.as_ref(), ImageColorSpace::DeviceCMYK) {
-                if let Some(rgba) =
+            if matches!(alt_space.as_ref(), ImageColorSpace::DeviceCMYK)
+                && let Some(rgba) =
                     tint_devicen_via_icc(data, npixels, ni, tint_table, icc)
                 {
                     return rgba;
                 }
-            }
             let mut rgba = vec![255u8; npixels * 4];
             let mut inputs = vec![0.0f32; ni];
             let mut alt_comps = vec![0.0f32; no];
@@ -1581,7 +1569,7 @@ fn prescale_image(
     if nw == 0 || nh == 0 {
         return None;
     }
-    let area = (factor * factor) as u32;
+    let area = factor * factor;
     let half = area / 2;
     let stride = w as usize * 4;
     let mut out = vec![0u8; (nw * nh * 4) as usize];
@@ -1687,7 +1675,7 @@ fn build_stroke(params: &StrokeParams, dpi: f64) -> Stroke {
 ///
 /// Only axis-aligned segments (horizontal/vertical lines) are snapped.
 /// Diagonal/curved segments are left as-is since snapping would distort them.
-
+///
 /// Apply stroke adjustment for viewport rendering.
 ///
 /// Path coordinates are in reference-DPI device space. The viewport transform
@@ -1740,26 +1728,16 @@ fn stroke_adjust_path_viewport(
 
                 if is_horizontal {
                     let snapped_y = snap_y(y);
-                    if let Some(last) = result.segments.last_mut() {
-                        match last {
-                            PathSegment::MoveTo(_, ly) | PathSegment::LineTo(_, ly) => {
-                                *ly = snapped_y;
-                            }
-                            _ => {}
-                        }
+                    if let Some(PathSegment::MoveTo(_, ly) | PathSegment::LineTo(_, ly)) = result.segments.last_mut() {
+                        *ly = snapped_y;
                     }
                     result.segments.push(PathSegment::LineTo(x, snapped_y));
                     prev_x = x;
                     prev_y = snapped_y;
                 } else if is_vertical {
                     let snapped_x = snap_x(x);
-                    if let Some(last) = result.segments.last_mut() {
-                        match last {
-                            PathSegment::MoveTo(lx, _) | PathSegment::LineTo(lx, _) => {
-                                *lx = snapped_x;
-                            }
-                            _ => {}
-                        }
+                    if let Some(PathSegment::MoveTo(lx, _) | PathSegment::LineTo(lx, _)) = result.segments.last_mut() {
+                        *lx = snapped_x;
                     }
                     result.segments.push(PathSegment::LineTo(snapped_x, y));
                     prev_x = snapped_x;
@@ -1916,8 +1894,8 @@ fn render_element(
                 let skia_path_op = build_skia_path(draw_path);
                 if let Some(skia_path) = skia_path_op {
                     let resolution_scale = (transform.sx * transform.sx + transform.sy * transform.sy).sqrt().max(1.0);
-                    if let Some(transformed) = skia_path.clone().transform(transform) {
-                        if let Some(stroked) = transformed.stroke(&stroke, resolution_scale) {
+                    if let Some(transformed) = skia_path.clone().transform(transform)
+                        && let Some(stroked) = transformed.stroke(&stroke, resolution_scale) {
                             overprint_handled = true;
                             let fill_params = FillParams {
                                 color: params.color.clone(),
@@ -1952,7 +1930,6 @@ fn render_element(
                             );
                             band_state.cmyk_buffer = Some(cmyk_buf);
                         }
-                    }
                 }
             }
             if !overprint_handled {
@@ -2687,6 +2664,7 @@ fn render_soft_masked(
 
     // 4. Multiply content RGBA by mask values
     let content_data = content_pixmap.data_mut();
+    #[allow(clippy::needless_range_loop)]
     for i in 0..pixel_count {
         let m = mask_values[i] as u16;
         let off = i * 4;
@@ -2759,6 +2737,7 @@ fn extract_soft_mask_values(
             };
             let backdrop_byte = (backdrop_lum * 255.0 + 0.5) as u8;
 
+            #[allow(clippy::needless_range_loop)]
             for i in 0..pixel_count {
                 let off = i * 4;
                 let a = rgba[off + 3];
@@ -2977,8 +2956,8 @@ fn clip_path_unified(
         let x_start = ctx.vp_x as u32;
 
         // Y-bbox early exit: if clip path doesn't overlap this band, set empty clip
-        if x_start == 0 {
-            if let Some(bbox) = path_y_bbox(path)
+        if x_start == 0
+            && let Some(bbox) = path_y_bbox(path)
                 && (bbox.y_max <= y_start as f64 || bbox.y_min >= (y_start + ctx.out_h) as f64)
             {
                 if let Some(ClipRegion::Mask(mask)) = band_state.clip_region.take() {
@@ -2989,11 +2968,10 @@ fn clip_path_unified(
                 }));
                 return;
             }
-        }
 
         // Rect fast-path (only when x_start==0 for simplicity)
-        if x_start == 0 {
-            if let Some(dev_rect) = detect_rect(path, ctx.out_w, u32::MAX) {
+        if x_start == 0
+            && let Some(dev_rect) = detect_rect(path, ctx.out_w, u32::MAX) {
                 let new_rect = translate_clip_rect(&dev_rect, y_start, ctx.out_h);
                 match band_state.clip_region.take() {
                     None => {
@@ -3009,7 +2987,6 @@ fn clip_path_unified(
                 }
                 return;
             }
-        }
     }
 
     // General path: non-rectangular clip with cache + mask reuse
@@ -3747,11 +3724,10 @@ fn update_cmyk_buffer_for_fill(
             if let Some(clip) = clip_data {
                 cov *= clip[mi] as f32 / 255.0;
             }
-            if let Some(r) = clip_rect {
-                if (y as u32) < r.y0 || (y as u32) >= r.y1 || (x as u32) < r.x0 || (x as u32) >= r.x1 {
+            if let Some(r) = clip_rect
+                && ((y as u32) < r.y0 || (y as u32) >= r.y1 || (x as u32) < r.x0 || (x as u32) >= r.x1) {
                     cov = 0.0;
                 }
-            }
             if cov > 0.0 {
                 let ci = mi * 4;
                 cmyk_buf[ci] = src_c as f32;
@@ -3817,13 +3793,12 @@ fn render_overprint_image(
 
     for by in 0..out_h as usize {
         for bx in 0..out_w as usize {
-            if let Some(ref r) = clip_rect {
-                if (by as u32) < r.y0 || (by as u32) >= r.y1
-                    || (bx as u32) < r.x0 || (bx as u32) >= r.x1
+            if let Some(ref r) = clip_rect
+                && ((by as u32) < r.y0 || (by as u32) >= r.y1
+                    || (bx as u32) < r.x0 || (bx as u32) >= r.x1)
                 {
                     continue;
                 }
-            }
             if let Some(clip) = clip_data {
                 let ci_clip = by * stride + bx;
                 if clip[ci_clip] == 0 {
@@ -3990,13 +3965,11 @@ fn update_cmyk_buffer_for_image(
 
     for by in 0..out_h as usize {
         for bx in 0..out_w as usize {
-            if let Some(ref r) = clip_rect {
-                if (by as u32) < r.y0 || (by as u32) >= r.y1
-                    || (bx as u32) < r.x0 || (bx as u32) >= r.x1 { continue; }
-            }
-            if let Some(clip) = clip_data {
-                if clip[by * stride + bx] == 0 { continue; }
-            }
+            if let Some(ref r) = clip_rect
+                && ((by as u32) < r.y0 || (by as u32) >= r.y1
+                    || (bx as u32) < r.x0 || (bx as u32) >= r.x1) { continue; }
+            if let Some(clip) = clip_data
+                && clip[by * stride + bx] == 0 { continue; }
 
             let dx = (bx as f64 + 0.5) * inv_sx + vp_x as f64;
             let dy = (by as f64 + 0.5) * inv_sy + vp_y as f64;
@@ -4161,6 +4134,7 @@ fn sample_pixel_cmyk(
 /// Renders the display list in horizontal bands and streams the output
 /// to a `PageSink`. This function is self-contained: it creates its own
 /// band pixmaps, clip state, and streams rows to the sink.
+#[allow(clippy::too_many_arguments)]
 fn render_banded_to_sink(
     page_w: u32,
     page_h: u32,
@@ -4465,9 +4439,7 @@ fn path_full_bbox(path: &PsPath) -> Option<BBox2D> {
 fn image_full_bbox(params: &ImageParams) -> Option<BBox2D> {
     let m = &params.ctm;
     let im = &params.image_matrix;
-    let Some(im_inv) = im.invert() else {
-        return None;
-    };
+    let im_inv = im.invert()?;
     let combined = m.concat(&im_inv);
     // Image occupies [0, width] × [0, height] in image space
     let w = params.width as f64;
@@ -4745,16 +4717,16 @@ pub fn render_region_prepared(
             }
         }
 
+        #[allow(clippy::needless_range_loop)]
         for i in epoch.start_idx..epoch.end_idx {
-            if let Some(ref bbox) = prepared.bboxes[i] {
-                if bbox.x_max <= vp_x
+            if let Some(ref bbox) = prepared.bboxes[i]
+                && (bbox.x_max <= vp_x
                     || bbox.x_min >= vp_x_max
                     || bbox.y_max <= vp_y
-                    || bbox.y_min >= vp_y_max
+                    || bbox.y_min >= vp_y_max)
                 {
                     continue;
                 }
-            }
             let ctx = RenderContext {
                 vp_x: vp_x_f,
                 vp_y: vp_y_f,
@@ -4894,16 +4866,16 @@ pub fn render_region_single_band(
             }
         }
 
+        #[allow(clippy::needless_range_loop)]
         for i in epoch.start_idx..epoch.end_idx {
-            if let Some(ref bbox) = prepared.bboxes[i] {
-                if bbox.x_max <= vp_x
+            if let Some(ref bbox) = prepared.bboxes[i]
+                && (bbox.x_max <= vp_x
                     || bbox.x_min >= vp_x_max
                     || bbox.y_max <= src_y_min
-                    || bbox.y_min >= src_y_max
+                    || bbox.y_min >= src_y_max)
                 {
                     continue;
                 }
-            }
             let ctx = RenderContext {
                 vp_x: vp_x_f,
                 vp_y: band_vp_y_f,
@@ -5150,15 +5122,14 @@ pub fn render_region(
 
         for i in epoch.start_idx..epoch.end_idx {
             // Element-level culling
-            if let Some(ref bbox) = bboxes[i] {
-                if bbox.x_max <= vp_x
+            if let Some(ref bbox) = bboxes[i]
+                && (bbox.x_max <= vp_x
                     || bbox.x_min >= vp_x_max
                     || bbox.y_max <= vp_y
-                    || bbox.y_min >= vp_y_max
+                    || bbox.y_min >= vp_y_max)
                 {
                     continue;
                 }
-            }
             let ctx = RenderContext {
                 vp_x: vp_x_f,
                 vp_y: vp_y_f,
@@ -5246,7 +5217,7 @@ fn render_axial_shading(
     scale_y: f32,
     clip_mask: Option<&Mask>,
     no_aa: bool,
-    mut cmyk_buf: Option<&mut [f32]>,
+    cmyk_buf: Option<&mut [f32]>,
     icc: Option<&IccCache>,
 ) {
     let pw = pixmap.width();
@@ -5405,7 +5376,7 @@ fn render_axial_shading(
     }
 
     // Update CMYK tracking buffer for axial shading
-    if let Some(buf) = cmyk_buf.as_deref_mut() {
+    if let Some(buf) = cmyk_buf {
         let pw = pixmap.width();
         let inv_sx = 1.0 / scale_x as f64;
         let inv_sy = 1.0 / scale_y as f64;
@@ -5583,7 +5554,7 @@ fn render_radial_shading(
                 let clamped = t.clamp(0.0, 1.0);
                 let color = interpolate_color_stops(&params.color_stops, clamped);
 
-                let clipped = clip_mask.map_or(false, |mask| {
+                let clipped = clip_mask.is_some_and(|mask| {
                     mask.data()[py as usize * pw as usize + px as usize] == 0
                 });
 
@@ -5632,11 +5603,11 @@ fn render_radial_shading(
                 data[offset + 3] = 255;
 
                 // Recomposite RGB from CMYK buffer via ICC (only for CMYK shadings)
-                if matches!(params.color_space, ShadingColorSpace::DeviceCMYK) {
-                    if let Some(ref mut buf) = cmyk_buf {
+                if matches!(params.color_space, ShadingColorSpace::DeviceCMYK)
+                    && let Some(ref mut buf) = cmyk_buf {
                         let ci = (py as usize * pw as usize + px as usize) * 4;
-                        if ci + 3 < buf.len() {
-                            if let Some(icc_cache) = icc {
+                        if ci + 3 < buf.len()
+                            && let Some(icc_cache) = icc {
                                 let c = buf[ci] as f64;
                                 let m = buf[ci + 1] as f64;
                                 let y = buf[ci + 2] as f64;
@@ -5652,9 +5623,7 @@ fn render_radial_shading(
                                         (b * 255.0).round().clamp(0.0, 255.0) as u8;
                                 }
                             }
-                        }
                     }
-                }
             }
         }
     }
@@ -5690,7 +5659,7 @@ fn solve_radial_t(
 
     // Helper: check if a root is in the valid domain
     let in_domain = |t: f64| -> bool {
-        (t >= 0.0 && t <= 1.0)
+        (0.0..=1.0).contains(&t)
             || (t < 0.0 && extend_start)
             || (t > 1.0 && extend_end)
     };
@@ -5797,7 +5766,7 @@ fn render_mesh_shading(
                     continue;
                 }
 
-                let clipped = clip_mask.map_or(false, |mask| {
+                let clipped = clip_mask.is_some_and(|mask| {
                     mask.data()[py * pw + px] == 0
                 });
 
@@ -5859,8 +5828,8 @@ fn render_mesh_shading(
                 // Recomposite RGB from CMYK buffer via ICC
                 if let Some(ref mut buf) = cmyk_buf {
                     let ci = (py * pw + px) * 4;
-                    if ci + 3 < buf.len() {
-                        if let Some(icc_cache) = icc {
+                    if ci + 3 < buf.len()
+                        && let Some(icc_cache) = icc {
                             let c = buf[ci] as f64;
                             let m = buf[ci + 1] as f64;
                             let y = buf[ci + 2] as f64;
@@ -5876,7 +5845,6 @@ fn render_mesh_shading(
                                     (bv * 255.0).round().clamp(0.0, 255.0) as u8;
                             }
                         }
-                    }
                 }
             }
         }
@@ -6208,6 +6176,7 @@ fn interpolate_cmyk_from_stops(
 }
 
 /// Derive CMYK values from triangle mesh vertices using barycentric weights.
+#[allow(clippy::too_many_arguments)]
 fn interpolate_cmyk_from_vertices(
     v0: &ShadingVertex,
     v1: &ShadingVertex,

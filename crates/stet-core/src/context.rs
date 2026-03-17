@@ -730,10 +730,10 @@ impl Context {
     /// Read the current page DPI from the pagedevice HWResolution, defaulting to 72.
     pub fn current_page_dpi(&self) -> f64 {
         use crate::dict::DictKey;
-        if let Some(pd) = self.gstate.page_device {
-            if let Some(name_id) = self.names.find(b"HWResolution") {
-                if let Some(obj) = self.dicts.get(pd, &DictKey::Name(name_id)) {
-                    if let PsValue::Array { entity, .. } = obj.value {
+        if let Some(pd) = self.gstate.page_device
+            && let Some(name_id) = self.names.find(b"HWResolution")
+                && let Some(obj) = self.dicts.get(pd, &DictKey::Name(name_id))
+                    && let PsValue::Array { entity, .. } = obj.value {
                         let first = self.arrays.get_element(entity, 0);
                         return match first.value {
                             PsValue::Real(r) => r,
@@ -741,9 +741,6 @@ impl Context {
                             _ => 72.0,
                         };
                     }
-                }
-            }
-        }
         72.0
     }
 

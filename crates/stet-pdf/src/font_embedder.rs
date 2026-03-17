@@ -398,6 +398,7 @@ fn build_type1_font_file(
         if trimmed_len > 0 {
             let return_stub = charstring_encrypt(&[11], len_iv);
             lines.push(format!("/Subrs {} array", trimmed_len).into_bytes());
+            #[allow(clippy::needless_range_loop)]
             for i in 0..trimmed_len {
                 let encrypted = if used_subrs.contains(&i) {
                     charstring_encrypt(&subrs[i], len_iv)
@@ -540,13 +541,10 @@ fn get_raw_charstring_bytes(
 ) -> Option<Vec<u8>> {
     let name_id = ctx.names.find(glyph_name.as_bytes())?;
     for &cs_entity in charstrings_entities {
-        if let Some(cs_obj) = ctx.dicts.get(cs_entity, &DictKey::Name(name_id)) {
-            match cs_obj.value {
-                PsValue::String { entity, start, len } => {
-                    return Some(ctx.strings.get(entity, start, len).to_vec());
-                }
-                _ => {}
-            }
+        if let Some(cs_obj) = ctx.dicts.get(cs_entity, &DictKey::Name(name_id))
+            && let PsValue::String { entity, start, len } = cs_obj.value
+        {
+            return Some(ctx.strings.get(entity, start, len).to_vec());
         }
     }
     None
@@ -780,13 +778,10 @@ fn build_type1_font(writer: &mut PdfWriter, usage: &FontUsage, ctx: &Context) ->
         if let Some(obj) = ctx
             .dicts
             .get(ent, &DictKey::Name(ctx.name_cache.n_char_strings))
-        {
-            if let PsValue::Dict(e) = obj.value {
-                if !charstrings_entities.contains(&e) {
+            && let PsValue::Dict(e) = obj.value
+                && !charstrings_entities.contains(&e) {
                     charstrings_entities.push(e);
                 }
-            }
-        }
     }
     // Sort by entry count descending so the most complete dict is searched first
     charstrings_entities.sort_by(|a, b| {
@@ -797,12 +792,11 @@ fn build_type1_font(writer: &mut PdfWriter, usage: &FontUsage, ctx: &Context) ->
 
     let mut private_entity = None;
     for &ent in &usage.all_entities {
-        if let Some(obj) = ctx.dicts.get(ent, &DictKey::Name(ctx.name_cache.n_private)) {
-            if let PsValue::Dict(e) = obj.value {
+        if let Some(obj) = ctx.dicts.get(ent, &DictKey::Name(ctx.name_cache.n_private))
+            && let PsValue::Dict(e) = obj.value {
                 private_entity = Some(e);
                 break;
             }
-        }
     }
 
     let len_iv = private_entity
@@ -863,12 +857,11 @@ fn build_type1_font(writer: &mut PdfWriter, usage: &FontUsage, ctx: &Context) ->
                 // Search all CharStrings dicts for this glyph
                 let mut found = None;
                 for &cs_entity in &charstrings_entities {
-                    if let Some(obj) = ctx.dicts.get(cs_entity, &DictKey::Name(glyph_name_id)) {
-                        if let PsValue::String { entity, start, len } = obj.value {
+                    if let Some(obj) = ctx.dicts.get(cs_entity, &DictKey::Name(glyph_name_id))
+                        && let PsValue::String { entity, start, len } = obj.value {
                             found = Some((entity, start, len));
                             break;
                         }
-                    }
                 }
                 let Some((cs_ent, cs_start, cs_len)) = found else {
                     continue;
@@ -1547,15 +1540,14 @@ fn subset_truetype(font_data: &[u8], used_gids: &HashSet<u16>) -> Option<Vec<u8>
     let mut loca_offsets: Vec<u32> = Vec::with_capacity(num_glyphs + 1);
     for gid in 0..num_glyphs {
         loca_offsets.push(new_glyf.len() as u32);
-        if used_gids.contains(&(gid as u16)) {
-            if let Some(glyf_bytes) = truetype::get_glyf_data(font_data, gid as u16) {
+        if used_gids.contains(&(gid as u16))
+            && let Some(glyf_bytes) = truetype::get_glyf_data(font_data, gid as u16) {
                 new_glyf.extend_from_slice(&glyf_bytes);
                 // Pad to 2-byte alignment
-                if new_glyf.len() % 2 != 0 {
+                if !new_glyf.len().is_multiple_of(2) {
                     new_glyf.push(0);
                 }
             }
-        }
         // Unused glyphs: no data written, loca[gid] == loca[gid+1] → zero-length
     }
     loca_offsets.push(new_glyf.len() as u32);
@@ -1639,18 +1631,17 @@ fn reconstruct_truetype(
 
     for gid in 0..num_glyphs {
         loca_offsets.push(glyf_data.len() as u32);
-        if let Some(entry_obj) = ctx.dicts.get(gd_entity, &DictKey::Int(gid as i32)) {
-            if let PsValue::String { entity, start, len } = entry_obj.value {
+        if let Some(entry_obj) = ctx.dicts.get(gd_entity, &DictKey::Int(gid as i32))
+            && let PsValue::String { entity, start, len } = entry_obj.value {
                 let glyph_bytes = ctx.strings.get(entity, start, len);
                 if !glyph_bytes.is_empty() {
                     glyf_data.extend_from_slice(glyph_bytes);
                     // Pad to 2-byte alignment
-                    if glyf_data.len() % 2 != 0 {
+                    if !glyf_data.len().is_multiple_of(2) {
                         glyf_data.push(0);
                     }
                 }
             }
-        }
         // Empty glyphs get same offset as next → zero-length
     }
     // Final loca entry = total glyf size
@@ -1752,9 +1743,7 @@ fn assemble_truetype(tables: &[(&[u8], Vec<u8>)]) -> Vec<u8> {
     for &(_tag, data, _offset, padded_len) in &table_entries {
         result.extend_from_slice(data);
         let padding = padded_len - data.len();
-        for _ in 0..padding {
-            result.push(0);
-        }
+        result.extend(std::iter::repeat_n(0u8, padding));
     }
 
     result
@@ -2177,8 +2166,8 @@ fn build_cid_tounicode(
     // Build reverse map: GID → Unicode from cmap
     let mut gid_to_unicode: HashMap<u16, u16> = HashMap::new();
 
-    if let Some((cmap_off, _)) = truetype::find_table(font_data, b"cmap") {
-        if cmap_off + 4 <= font_data.len() {
+    if let Some((cmap_off, _)) = truetype::find_table(font_data, b"cmap")
+        && cmap_off + 4 <= font_data.len() {
             let num_subtables = truetype::read_u16(font_data, cmap_off + 2) as usize;
             for i in 0..num_subtables {
                 let rec_off = cmap_off + 4 + i * 8;
@@ -2213,7 +2202,6 @@ fn build_cid_tounicode(
                 break; // Use first Unicode subtable
             }
         }
-    }
 
     // For each used CID, find Unicode via CID → GID → Unicode
     let mut map = HashMap::new();
@@ -2268,28 +2256,26 @@ fn generate_cid_tounicode_cmap(map: &HashMap<u16, u16>, font_name: &str) -> Vec<
 
 /// Get font bounding box from TrueType head table, scaled to 1000-unit space.
 fn get_truetype_bbox(font_data: &[u8], scale: f64) -> [f64; 4] {
-    if let Some((head_off, _)) = truetype::find_table(font_data, b"head") {
-        if head_off + 44 <= font_data.len() {
+    if let Some((head_off, _)) = truetype::find_table(font_data, b"head")
+        && head_off + 44 <= font_data.len() {
             let x_min = truetype::read_i16(font_data, head_off + 36) as f64 * scale;
             let y_min = truetype::read_i16(font_data, head_off + 38) as f64 * scale;
             let x_max = truetype::read_i16(font_data, head_off + 40) as f64 * scale;
             let y_max = truetype::read_i16(font_data, head_off + 42) as f64 * scale;
             return [x_min, y_min, x_max, y_max];
         }
-    }
     [0.0, -200.0, 1000.0, 800.0]
 }
 
 /// Get ascent and descent from TrueType hhea or OS/2 table, scaled to 1000-unit space.
 fn get_truetype_ascent_descent(font_data: &[u8], scale: f64) -> (f64, f64) {
     // Try hhea table first
-    if let Some((hhea_off, _)) = truetype::find_table(font_data, b"hhea") {
-        if hhea_off + 8 <= font_data.len() {
+    if let Some((hhea_off, _)) = truetype::find_table(font_data, b"hhea")
+        && hhea_off + 8 <= font_data.len() {
             let ascent = truetype::read_i16(font_data, hhea_off + 4) as f64 * scale;
             let descent = truetype::read_i16(font_data, hhea_off + 6) as f64 * scale;
             return (ascent, descent);
         }
-    }
     (800.0, -200.0)
 }
 
@@ -2389,13 +2375,11 @@ fn build_type42_font(writer: &mut PdfWriter, usage: &FontUsage, ctx: &Context) -
                     continue;
                 }
                 let glyph_name_obj = ctx.arrays.get_element(enc_entity, code as u32);
-                if let PsValue::Name(name_id) = glyph_name_obj.value {
-                    if let Some(cs_obj) = ctx.dicts.get(cs_entity, &DictKey::Name(name_id)) {
-                        if let Some(gid) = cs_obj.as_i32() {
+                if let PsValue::Name(name_id) = glyph_name_obj.value
+                    && let Some(cs_obj) = ctx.dicts.get(cs_entity, &DictKey::Name(name_id))
+                        && let Some(gid) = cs_obj.as_i32() {
                             seed_gids.insert(gid as u16);
                         }
-                    }
-                }
             }
             if seed_gids.is_empty() {
                 font_data // can't determine used GIDs, embed whole

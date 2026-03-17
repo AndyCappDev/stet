@@ -232,13 +232,11 @@ impl<'a> Resolver<'a> {
         parms: &[Option<PdfDict>],
     ) -> Result<Option<Vec<u8>>, PdfError> {
         for (i, f) in filters.iter().enumerate() {
-            if *f == filters::Filter::JBIG2Decode {
-                if let Some(Some(dp)) = parms.get(i) {
-                    if let Some(globals_ref) = dp.get(b"JBIG2Globals") {
+            if *f == filters::Filter::JBIG2Decode
+                && let Some(Some(dp)) = parms.get(i)
+                    && let Some(globals_ref) = dp.get(b"JBIG2Globals") {
                         return self.stream_data_from_obj(globals_ref).map(Some);
                     }
-                }
-            }
         }
         Ok(None)
     }

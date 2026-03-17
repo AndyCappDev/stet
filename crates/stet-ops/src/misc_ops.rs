@@ -523,7 +523,7 @@ pub fn op_exitserver(ctx: &mut Context) -> Result<(), PsError> {
 /// 1. Current execution context supports job encapsulation
 /// 2. Password matches StartJobPassword system parameter
 /// 3. Save nesting not deeper than job start level
-/// On failure, returns false.
+///    On failure, returns false.
 pub fn op_startjob(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.o_stack.len() < 2 {
         return Err(PsError::StackUnderflow);
@@ -1147,6 +1147,7 @@ pub fn op_writeobject(ctx: &mut Context) -> Result<(), PsError> {
 }
 
 /// Serialize a PostScript object as a Binary Object Sequence (PLRM 3.14.2).
+#[allow(clippy::only_used_in_recursion)]
 fn serialize_binary_object(ctx: &Context, obj: PsObject, tag: u8) -> Result<Vec<u8>, PsError> {
     let format = ctx.object_format;
     let big_endian = format == 1 || format == 3;

@@ -286,7 +286,7 @@ pub fn apply_dash_pattern(subpaths: &Path, dash_array: &[f64], dash_offset: f64)
             dash_idx += 1;
         }
 
-        let mut drawing = dash_idx % 2 == 0;
+        let mut drawing = dash_idx.is_multiple_of(2);
         let starts_drawing = drawing;
         let mut dash_remaining = dash_array[dash_idx % dash_array.len()] - remaining_offset;
 
@@ -434,7 +434,7 @@ pub fn apply_dash_pattern(subpaths: &Path, dash_array: &[f64], dash_offset: f64)
                 }
 
                 dash_idx += 1;
-                drawing = dash_idx % 2 == 0;
+                drawing = dash_idx.is_multiple_of(2);
                 dash_remaining = dash_array[dash_idx % dash_array.len()];
             }
         }
@@ -849,6 +849,7 @@ fn compute_inner_join_point(
     Some(pt)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn make_join(
     prev_end: Point,
     prev_tangent: Point,
@@ -1098,9 +1099,7 @@ fn filter_uturn_segments(
         let ut1 = is_uturn(end_tang_prev, start_tang_cur);
         let ut2 = is_uturn(end_tang_cur, start_tang_next);
 
-        if ut1 && ut2 {
-            to_remove.insert(i);
-        } else if (ut1 || ut2) && seg_len < half_width * 0.25 {
+        if (ut1 && ut2) || ((ut1 || ut2) && seg_len < half_width * 0.25) {
             to_remove.insert(i);
         }
     }
@@ -1125,6 +1124,7 @@ fn filter_uturn_segments(
 }
 
 /// Convert a stroked path to filled outline path(s), returned as groups.
+#[allow(clippy::too_many_arguments)]
 pub fn strokepath_grouped(
     path: &Path,
     line_width: f64,
@@ -1501,8 +1501,8 @@ fn assemble_open_outline(
         if cross0.abs() < 1e-6 && dot0 < 0.0 {
             is_outside0 = true;
         }
-        if !is_outside0 {
-            if let Some(trim_pt0) =
+        if !is_outside0
+            && let Some(trim_pt0) =
                 compute_inner_join_point(end0, prev_tang0, next_start0, next_tang0, half_width)
             {
                 let fwd_dir = Point::new(
@@ -1518,7 +1518,6 @@ fn assemble_open_outline(
                     degenerate_first_trim_pt = Some(trim_pt0);
                 }
             }
-        }
     }
 
     // --- Left side (forward direction) ---
@@ -1576,8 +1575,8 @@ fn assemble_open_outline(
                     } else {
                         0.0
                     };
-                    if t_param > 1.0 {
-                        if line_cap == 1 {
+                    if t_param > 1.0
+                        && line_cap == 1 {
                             trim_outline_end(&mut outline, tp);
                             skip_left_indices.insert(i + 1);
                             if i + 1 == left_offsets.len() - 1 {
@@ -1586,7 +1585,6 @@ fn assemble_open_outline(
                             }
                             continue;
                         }
-                    }
                     trim_outline_end(&mut outline, tp);
                     continue;
                 } else {
@@ -1632,8 +1630,8 @@ fn assemble_open_outline(
         if cross.abs() < 1e-6 && dot_r < 0.0 {
             is_outside = true;
         }
-        if !is_outside {
-            if let Some(tp) = compute_inner_join_point(
+        if !is_outside
+            && let Some(tp) = compute_inner_join_point(
                 prev_right_start,
                 prev_tangent_r,
                 next_right_end,
@@ -1653,7 +1651,6 @@ fn assemble_open_outline(
                     degenerate_trim_pt = Some(tp);
                 }
             }
-        }
     }
 
     if degenerate_last_left && line_cap == 1 {
@@ -1779,8 +1776,8 @@ fn assemble_open_outline(
             if cross.abs() < 1e-6 && dot_chk < 0.0 {
                 is_outside = true;
             }
-            if !is_outside {
-                if let Some(tp) = compute_inner_join_point(
+            if !is_outside
+                && let Some(tp) = compute_inner_join_point(
                     prev_right_start,
                     prev_tangent_chk,
                     next_right_end,
@@ -1797,7 +1794,6 @@ fn assemble_open_outline(
                         skip_reversed = true;
                     }
                 }
-            }
         }
 
         if !skip_reversed {
@@ -1964,8 +1960,8 @@ pub fn snap_path_to_pixels(algo_path: &mut Path, half_width: f64) {
     for sp in algo_path.iter_mut() {
         let mut i = 0;
         while i < sp.len() {
-            if let PathElement::LineTo(lx, ly) = sp[i] {
-                if i > 0 {
+            if let PathElement::LineTo(lx, ly) = sp[i]
+                && i > 0 {
                     let (px, py) = match &sp[i - 1] {
                         PathElement::MoveTo(x, y) | PathElement::LineTo(x, y) => (*x, *y),
                         _ => {
@@ -1999,7 +1995,6 @@ pub fn snap_path_to_pixels(algo_path: &mut Path, half_width: f64) {
                         sp[i] = PathElement::LineTo(snapped_x, ly);
                     }
                 }
-            }
             i += 1;
         }
     }
