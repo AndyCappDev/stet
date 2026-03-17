@@ -112,37 +112,67 @@ impl IccCache {
             _ => return None,
         };
 
-        let options = TransformOptions {
-            rendering_intent: RenderingIntent::RelativeColorimetric,
-            ..TransformOptions::default()
-        };
-
-
         let dst_layout_8 = Layout::Rgb;
         let dst_layout_f64 = Layout::Rgb;
 
-        let transform_8bit = match profile.create_transform_8bit(
-            src_layout_8,
-            &self.srgb_profile,
-            dst_layout_8,
-            options,
-        ) {
-            Ok(t) => t,
-            Err(e) => {
-                eprintln!("[ICC] Failed to create 8-bit transform: {e}");
+        // Try multiple rendering intents — ICC v4 profiles may only have A2B0 (Perceptual)
+        let intents = [
+            RenderingIntent::RelativeColorimetric,
+            RenderingIntent::Perceptual,
+            RenderingIntent::AbsoluteColorimetric,
+            RenderingIntent::Saturation,
+        ];
+
+        let mut transform_8bit = None;
+        for &intent in &intents {
+            let options = TransformOptions {
+                rendering_intent: intent,
+                ..TransformOptions::default()
+            };
+            match profile.create_transform_8bit(
+                src_layout_8,
+                &self.srgb_profile,
+                dst_layout_8,
+                options,
+            ) {
+                Ok(t) => {
+                    transform_8bit = Some(t);
+                    break;
+                }
+                Err(_) => continue,
+            }
+        }
+        let transform_8bit = match transform_8bit {
+            Some(t) => t,
+            None => {
+                eprintln!("[ICC] Failed to create 8-bit transform for any rendering intent");
                 return None;
             }
         };
 
-        let transform_f64 = match profile.create_transform_f64(
-            src_layout_f64,
-            &self.srgb_profile,
-            dst_layout_f64,
-            options,
-        ) {
-            Ok(t) => t,
-            Err(e) => {
-                eprintln!("[ICC] Failed to create f64 transform: {e}");
+        let mut transform_f64 = None;
+        for &intent in &intents {
+            let options = TransformOptions {
+                rendering_intent: intent,
+                ..TransformOptions::default()
+            };
+            match profile.create_transform_f64(
+                src_layout_f64,
+                &self.srgb_profile,
+                dst_layout_f64,
+                options,
+            ) {
+                Ok(t) => {
+                    transform_f64 = Some(t);
+                    break;
+                }
+                Err(_) => continue,
+            }
+        }
+        let transform_f64 = match transform_f64 {
+            Some(t) => t,
+            None => {
+                eprintln!("[ICC] Failed to create f64 transform for any rendering intent");
                 return None;
             }
         };

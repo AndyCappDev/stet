@@ -26,6 +26,8 @@ pub enum ResolvedColorSpace {
         n: u32,
         /// Raw ICC profile bytes (None if extraction failed).
         profile_data: Option<Arc<Vec<u8>>>,
+        /// Alternate color space from stream dict (used when ICC transform fails).
+        alternate: Option<Box<ResolvedColorSpace>>,
     },
     Indexed {
         base: Box<ResolvedColorSpace>,
@@ -207,7 +209,35 @@ fn resolve_icc_based(args: &[PdfObj], resolver: &Resolver) -> Result<ResolvedCol
         .filter(|d| !d.is_empty())
         .map(Arc::new);
 
-    Ok(ResolvedColorSpace::ICCBased { n, profile_data })
+    // Parse /Alternate color space (used as fallback when ICC transform fails)
+    let alternate = dict
+        .get(b"Alternate")
+        .and_then(|obj| resolve_color_space_obj(obj, resolver).ok())
+        .or_else(|| icc_alternate_from_header(profile_data.as_deref(), n))
+        .map(Box::new);
+
+    Ok(ResolvedColorSpace::ICCBased {
+        n,
+        profile_data,
+        alternate,
+    })
+}
+
+/// Infer an alternate color space from the ICC profile header when /Alternate is absent.
+/// Reads the data color space signature at offset 16-19 in the ICC header.
+fn icc_alternate_from_header(data: Option<&Vec<u8>>, _n: u32) -> Option<ResolvedColorSpace> {
+    let data = data?;
+    if data.len() < 20 {
+        return None;
+    }
+    match &data[16..20] {
+        b"Lab " => Some(ResolvedColorSpace::Lab {
+            // Default D50 white point, full a*/b* range
+            white_point: [0.9505, 1.0, 1.089],
+            range: [-128.0, 127.0, -128.0, 127.0],
+        }),
+        _ => None, // RGB/CMYK/Gray already handled correctly by n-based fallback
+    }
 }
 
 fn resolve_indexed(args: &[PdfObj], resolver: &Resolver) -> Result<ResolvedColorSpace, PdfError> {
@@ -422,7 +452,7 @@ pub fn components_to_device_color(cs: &ResolvedColorSpace, components: &[f64]) -
 pub fn components_to_device_color_icc(
     cs: &ResolvedColorSpace,
     components: &[f64],
-    icc_cache: Option<&mut IccCache>,
+    mut icc_cache: Option<&mut IccCache>,
 ) -> DeviceColor {
     match cs {
         ResolvedColorSpace::DeviceGray => {
@@ -446,9 +476,13 @@ pub fn components_to_device_color_icc(
                 DeviceColor::from_cmyk(c, m, y, k)
             }
         }
-        ResolvedColorSpace::ICCBased { n, profile_data } => {
+        ResolvedColorSpace::ICCBased {
+            n,
+            profile_data,
+            alternate,
+        } => {
             // Try ICC profile conversion first
-            if let Some(cache) = icc_cache
+            if let Some(cache) = icc_cache.as_deref_mut()
                 && let Some(data) = profile_data
                     && let Some(hash) = cache.register_profile(data)
                         && let Some((r, g, b)) = cache.convert_color(&hash, components) {
@@ -468,7 +502,11 @@ pub fn components_to_device_color_icc(
                             }
                             return DeviceColor::from_rgb(r, g, b);
                         }
-            // Fall back to device space based on component count
+            // Fall back to alternate color space if available (handles Lab, XYZ, etc.)
+            if let Some(alt) = alternate {
+                return components_to_device_color_icc(alt, components, icc_cache);
+            }
+            // Last resort: device space based on component count
             match n {
                 1 => {
                     let g = components.first().copied().unwrap_or(0.0);
@@ -555,12 +593,23 @@ pub fn to_image_color_space(cs: &ResolvedColorSpace) -> ImageColorSpace {
         ResolvedColorSpace::DeviceGray => ImageColorSpace::DeviceGray,
         ResolvedColorSpace::DeviceRGB => ImageColorSpace::DeviceRGB,
         ResolvedColorSpace::DeviceCMYK => ImageColorSpace::DeviceCMYK,
-        ResolvedColorSpace::ICCBased { n, .. } => match n {
-            1 => ImageColorSpace::DeviceGray,
-            3 => ImageColorSpace::DeviceRGB,
-            4 => ImageColorSpace::DeviceCMYK,
-            _ => ImageColorSpace::DeviceRGB,
-        },
+        ResolvedColorSpace::ICCBased { n, alternate, .. } => {
+            // If we have an alternate that's Lab/CalRGB/CalGray, use its image color space
+            if let Some(alt) = alternate {
+                match alt.as_ref() {
+                    ResolvedColorSpace::Lab { .. }
+                    | ResolvedColorSpace::CalRGB { .. }
+                    | ResolvedColorSpace::CalGray { .. } => return to_image_color_space(alt),
+                    _ => {}
+                }
+            }
+            match n {
+                1 => ImageColorSpace::DeviceGray,
+                3 => ImageColorSpace::DeviceRGB,
+                4 => ImageColorSpace::DeviceCMYK,
+                _ => ImageColorSpace::DeviceRGB,
+            }
+        }
         ResolvedColorSpace::Indexed {
             base,
             hival,
@@ -606,19 +655,71 @@ pub fn convert_icc_image_data(
     height: u32,
     icc_cache: &mut IccCache,
 ) -> Option<(Vec<u8>, ImageColorSpace)> {
-    let hash = match cs {
-        ResolvedColorSpace::ICCBased { profile_data, .. } => {
-            icc_cache.register_profile(profile_data.as_ref()?)?
+    let (hash_result, alternate) = match cs {
+        ResolvedColorSpace::ICCBased {
+            profile_data,
+            alternate,
+            ..
+        } => {
+            let hash = profile_data
+                .as_ref()
+                .and_then(|d| icc_cache.register_profile(d));
+            (hash, alternate.as_ref())
         }
         ResolvedColorSpace::DeviceCMYK => {
-            // Use the system CMYK profile for DeviceCMYK images
-            *icc_cache.default_cmyk_hash()?
+            let hash = icc_cache.default_cmyk_hash().copied();
+            (hash, None)
         }
         _ => return None,
     };
+
+    if let Some(hash) = hash_result {
+        let pixel_count = (width * height) as usize;
+        if let Some(rgb_data) = icc_cache.convert_image_8bit(&hash, data, pixel_count) {
+            return Some((rgb_data, ImageColorSpace::DeviceRGB));
+        }
+    }
+
+    // ICC failed — try software Lab→RGB conversion for Lab alternate
+    if let Some(alt) = alternate {
+        if let ResolvedColorSpace::Lab { white_point, range } = alt.as_ref() {
+            return Some((
+                convert_lab_image_to_rgb(data, width, height, white_point, range),
+                ImageColorSpace::DeviceRGB,
+            ));
+        }
+    }
+
+    None
+}
+
+/// Convert 8-bit Lab image data to RGB.
+/// Default Decode for 3-component ICCBased: L=[0,100], a=[-128,127], b=[-128,127].
+fn convert_lab_image_to_rgb(
+    data: &[u8],
+    width: u32,
+    height: u32,
+    white_point: &[f64; 3],
+    range: &[f64; 4],
+) -> Vec<u8> {
     let pixel_count = (width * height) as usize;
-    let rgb_data = icc_cache.convert_image_8bit(&hash, data, pixel_count)?;
-    Some((rgb_data, ImageColorSpace::DeviceRGB))
+    let mut rgb = Vec::with_capacity(pixel_count * 3);
+    for i in 0..pixel_count {
+        let offset = i * 3;
+        if offset + 2 < data.len() {
+            // Decode 8-bit to Lab ranges: L=[0,100], a/b from Range
+            let l = data[offset] as f64 / 255.0 * 100.0;
+            let a = data[offset + 1] as f64 / 255.0 * (range[1] - range[0]) + range[0];
+            let b = data[offset + 2] as f64 / 255.0 * (range[3] - range[2]) + range[2];
+            let color = lab_to_device_color(&[l, a, b], white_point, range);
+            rgb.push((color.r.clamp(0.0, 1.0) * 255.0) as u8);
+            rgb.push((color.g.clamp(0.0, 1.0) * 255.0) as u8);
+            rgb.push((color.b.clamp(0.0, 1.0) * 255.0) as u8);
+        } else {
+            rgb.extend_from_slice(&[0, 0, 0]);
+        }
+    }
+    rgb
 }
 
 /// Register an ICC profile and return its hash (for use in color conversions).
