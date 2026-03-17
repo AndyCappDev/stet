@@ -3,6 +3,7 @@ Cargo.lock
 **/*.rs.bk
 *.pdb
 *.png
+!crates/tiny-skia/tests/images/**/*.png
 visual_tests_*
 tests/pixeldiff/
 web/pkg/
