@@ -106,17 +106,27 @@ pub fn parse_type1(data: &[u8]) -> Result<Type1Font, String> {
     let paint_type = parse_paint_type(header).unwrap_or(0);
     let encoding = parse_encoding(header);
 
-    // Extract binary portion after the eexec marker
+    // Extract binary portion after the eexec marker.
+    // Skip exactly one newline sequence after the marker — any bytes beyond
+    // that are encrypted data, even if they look like whitespace (e.g. 0x0D).
     let after_marker = eexec_pos + eexec_marker.len();
-    // Skip whitespace/newline after marker
     let mut binary_start = after_marker;
+    // Skip spaces/tabs
     while binary_start < data.len()
-        && (data[binary_start] == b' '
-            || data[binary_start] == b'\n'
-            || data[binary_start] == b'\r'
-            || data[binary_start] == b'\t')
+        && (data[binary_start] == b' ' || data[binary_start] == b'\t')
     {
         binary_start += 1;
+    }
+    // Skip one newline: \r\n, \r, or \n
+    if binary_start < data.len() {
+        if data[binary_start] == b'\r' {
+            binary_start += 1;
+            if binary_start < data.len() && data[binary_start] == b'\n' {
+                binary_start += 1;
+            }
+        } else if data[binary_start] == b'\n' {
+            binary_start += 1;
+        }
     }
 
     let binary_data = &data[binary_start..];
