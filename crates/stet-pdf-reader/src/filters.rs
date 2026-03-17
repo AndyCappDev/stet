@@ -535,9 +535,13 @@ fn decode_dct(data: &[u8]) -> Result<Vec<u8>, PdfError> {
     Ok(pixels)
 }
 
-/// Check if a JPEG has an Adobe APP14 marker with ColorTransform=0 (raw RGB).
-/// This indicates the 3-component data is already RGB, not YCbCr.
+/// Check if a JPEG has Adobe APP14 ColorTransform=0 AND uniform sampling factors,
+/// confirming the data is truly raw RGB (not YCbCr mislabeled with ColorTransform=0).
+/// YCbCr JPEGs use chroma subsampling (e.g., Y=2×2, Cb/Cr=1×1) while RGB JPEGs
+/// use uniform sampling (all components 1×1).
 fn has_adobe_rgb_marker(data: &[u8]) -> bool {
+    let mut has_ct0 = false;
+    let mut uniform_sampling = false;
     let mut i = 2; // skip SOI
     while i + 4 < data.len() {
         if data[i] != 0xFF {
@@ -548,16 +552,27 @@ fn has_adobe_rgb_marker(data: &[u8]) -> bool {
             break; // SOS — done with headers
         }
         let len = u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
-        // APP14 (Adobe) marker: 0xFFEE, contains "Adobe" at offset 4
-        if marker == 0xEE && len >= 12 && i + 2 + len <= data.len() {
+        if i + 2 + len > data.len() {
+            break;
+        }
+        // APP14 (Adobe) marker: check ColorTransform
+        if marker == 0xEE && len >= 12 {
             let color_transform = data[i + 2 + 11];
-            if color_transform == 0 {
-                return true;
+            has_ct0 = color_transform == 0;
+        }
+        // SOF0/SOF2: check sampling factors
+        if (marker == 0xC0 || marker == 0xC2) && i + 9 < data.len() {
+            let ncomp = data[i + 9] as usize;
+            if ncomp == 3 && i + 10 + ncomp * 3 <= data.len() {
+                let s0 = data[i + 11]; // component 0 sampling
+                let s1 = data[i + 14]; // component 1 sampling
+                let s2 = data[i + 17]; // component 2 sampling
+                uniform_sampling = s0 == s1 && s1 == s2;
             }
         }
         i += 2 + len;
     }
-    false
+    has_ct0 && uniform_sampling
 }
 
 /// CCITTFaxDecode (Group 3 / Group 4 fax compression).
