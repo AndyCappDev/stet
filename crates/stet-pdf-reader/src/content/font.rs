@@ -590,6 +590,14 @@ const CID_FONT_SUBSTITUTIONS: &[(&str, &str)] = &[
     ("Arial-BoldItalicMT", "LiberationSans-BoldItalic"),
     ("Arial-ItalicMT", "LiberationSans-Italic"),
     ("ArialMT", "LiberationSans"),
+    ("CourierNew", "LiberationMono"),
+    ("CourierNew,Bold", "LiberationMono-Bold"),
+    ("CourierNew,BoldItalic", "LiberationMono-BoldItalic"),
+    ("CourierNew,Italic", "LiberationMono-Italic"),
+    ("CourierNewPS-BoldMT", "LiberationMono-Bold"),
+    ("CourierNewPS-BoldItalicMT", "LiberationMono-BoldItalic"),
+    ("CourierNewPS-ItalicMT", "LiberationMono-Italic"),
+    ("CourierNewPSMT", "LiberationMono"),
     ("Calibri", "LiberationSans"),
     ("Calibri,Bold", "LiberationSans-Bold"),
     ("Calibri,BoldItalic", "LiberationSans-BoldItalic"),
@@ -1748,12 +1756,14 @@ impl CidTrueTypePdfFont {
             // Substituted font: CID → Unicode (via ToUnicode) → GID (via cmap)
             let unicode = *self.to_unicode.get(&cid)?;
             *self.cmap.get(&unicode)?
-        } else if self.substituted && !self.ordering.is_empty() {
-            // Substituted font with Adobe CID registry: use CID→Unicode table
+        } else if self.substituted && !self.ordering.is_empty() && self.ordering != b"Identity" {
+            // Substituted font with Adobe CID registry (CJK): use CID→Unicode table
             let unicode = super::cid_unicode::cid_to_unicode(&self.ordering, cid)?;
             *self.cmap.get(&unicode)?
-        } else if self.identity_cid_to_gid && !self.substituted {
-            // Embedded font with Identity CIDToGIDMap: CID = GID directly
+        } else if self.identity_cid_to_gid {
+            // Identity CIDToGIDMap: CID = GID directly.
+            // For substituted fonts without ToUnicode, the substitute (e.g.
+            // Liberation Mono for Courier New) has compatible glyph ordering.
             cid
         } else if !self.cmap.is_empty() {
             // Non-Identity mapping: CID is Unicode, use cmap
