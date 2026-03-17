@@ -190,6 +190,11 @@ pub fn resolve_font(
         .map(|n| String::from_utf8_lossy(n).to_string())
         .unwrap_or_default();
 
+    // Extract font descriptor Flags for serif/sans-serif fallback selection
+    let desc_flags = descriptor.as_ref()
+        .and_then(|d| d.get_int(b"Flags"))
+        .unwrap_or(0) as u32;
+
     // Route based on what font program is actually available in FontDescriptor,
     // not just the /Subtype (which says "Type1" even for CFF-embedded fonts).
     if let Some(ref desc) = descriptor {
@@ -199,7 +204,7 @@ pub fn resolve_font(
                 Ok(font) => return Ok(font),
                 Err(_) => {
                     if let Some(font) =
-                        substitute_font(&base_font_name, encoding.clone(), widths, has_pdf_widths, font_provider)
+                        substitute_font(&base_font_name, encoding.clone(), widths, has_pdf_widths, font_provider, desc_flags)
                     {
                         return Ok(font);
                     }
@@ -213,7 +218,7 @@ pub fn resolve_font(
                 Ok(font) => return Ok(font),
                 Err(_) => {
                     if let Some(font) =
-                        substitute_font(&base_font_name, encoding.clone(), widths, has_pdf_widths, font_provider)
+                        substitute_font(&base_font_name, encoding.clone(), widths, has_pdf_widths, font_provider, desc_flags)
                     {
                         return Ok(font);
                     }
@@ -225,7 +230,7 @@ pub fn resolve_font(
                 Ok(font) => return Ok(font),
                 Err(_) => {
                     if let Some(font) =
-                        substitute_font(&base_font_name, encoding.clone(), widths, has_pdf_widths, font_provider)
+                        substitute_font(&base_font_name, encoding.clone(), widths, has_pdf_widths, font_provider, desc_flags)
                     {
                         return Ok(font);
                     }
@@ -234,7 +239,7 @@ pub fn resolve_font(
         }
     }
     // No embedded font program — try font substitution
-    if let Some(font) = substitute_font(&base_font_name, encoding.clone(), widths, has_pdf_widths, font_provider) {
+    if let Some(font) = substitute_font(&base_font_name, encoding.clone(), widths, has_pdf_widths, font_provider, desc_flags) {
         return Ok(font);
     }
     // For TrueType fonts, try loading from system fonts before giving up
@@ -371,7 +376,7 @@ pub fn fallback_font(font_provider: Option<&FontProvider>) -> Option<PdfFont> {
     });
     let widths = super::standard_fonts::standard_font_widths(b"Helvetica")
         .unwrap_or([0.0f64; 256]);
-    substitute_font("Helvetica", encoding, widths, false, font_provider)
+    substitute_font("Helvetica", encoding, widths, false, font_provider, 0)
 }
 
 /// Try to load a substitute font for a non-embedded font.
@@ -381,6 +386,7 @@ fn substitute_font(
     widths: [f64; 256],
     has_pdf_widths: bool,
     font_provider: Option<&FontProvider>,
+    descriptor_flags: u32,
 ) -> Option<PdfFont> {
     use stet_fonts::FONT_SUBSTITUTIONS;
 
@@ -414,6 +420,38 @@ fn substitute_font(
     let font_data = font_data.or_else(|| {
         let font_path = format!("resources/Font/{}.t1", font_file_name);
         std::fs::read(&font_path).ok()
+    });
+
+    // If the named font wasn't found, use a default substitute based on the
+    // font descriptor Flags (serif bit) and weight/style from the font name.
+    let font_data = font_data.or_else(|| {
+        let lower = clean_name.to_ascii_lowercase();
+        let is_bold = lower.contains("bold") || lower.contains("demi")
+            || lower.contains("black") || lower.contains("heavy");
+        let is_italic = lower.contains("italic") || lower.contains("oblique");
+        let is_serif = descriptor_flags & 2 != 0; // PDF flag bit 2 = Serif
+        let default_name = if is_serif {
+            match (is_bold, is_italic) {
+                (true, true) => "NimbusRoman-BoldItalic",
+                (true, false) => "NimbusRoman-Bold",
+                (false, true) => "NimbusRoman-Italic",
+                (false, false) => "NimbusRoman-Regular",
+            }
+        } else {
+            match (is_bold, is_italic) {
+                (true, true) => "NimbusSans-BoldItalic",
+                (true, false) => "NimbusSans-Bold",
+                (false, true) => "NimbusSans-Italic",
+                (false, false) => "NimbusSans-Regular",
+            }
+        };
+        if let Some(provider) = font_provider {
+            if let Some(data) = provider(default_name) {
+                return Some(data);
+            }
+        }
+        let path = format!("resources/Font/{}.t1", default_name);
+        std::fs::read(&path).ok()
     })?;
 
     let font = parse_type1(&font_data).ok()?;
