@@ -189,23 +189,22 @@ fn handle_axial(
     let function = parse_shading_function(dict, resolver)?;
     let color_stops = sample_function_to_stops_icc(&function, 64, resolved_cs, icc_cache);
 
-    let (x0, y0) = gstate.ctm.transform_point(vals[0], vals[1]);
-    let (x1, y1) = gstate.ctm.transform_point(vals[2], vals[3]);
-
+    // Keep coordinates in shading/user space, pass the CTM to the renderer.
+    // The renderer inverse-transforms device pixels to evaluate the gradient,
+    // correctly handling non-uniform scaling, rotation, and Y-flips.
     let cs = resolved_cs_to_shading_cs(resolved_cs);
-    let device_bbox = transform_bbox(&bbox, &gstate.ctm);
 
     display_list.push(DisplayElement::AxialShading {
         params: AxialShadingParams {
-            x0,
-            y0,
-            x1,
-            y1,
+            x0: vals[0],
+            y0: vals[1],
+            x1: vals[2],
+            y1: vals[3],
             color_stops,
             extend_start: extend.0,
             extend_end: extend.1,
-            ctm: Matrix::identity(),
-            bbox: device_bbox,
+            ctm: gstate.ctm,
+            bbox,
             color_space: cs,
             overprint: gstate.overprint,
             painted_channels: painted_channels_for_cs(resolved_cs),

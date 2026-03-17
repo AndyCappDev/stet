@@ -5261,21 +5261,23 @@ fn render_axial_shading(
         return;
     }
 
-    let (dx0, dy0) = params.ctm.transform_point(params.x0, params.y0);
-    let (dx1, dy1) = params.ctm.transform_point(params.x1, params.y1);
-
     let stops = build_gradient_stops(&params.color_stops);
     if stops.is_empty() {
         return;
     }
 
-    let start = stet_tiny_skia::Point::from_xy(
-        (dx0 as f32 - vp_x) * scale_x,
-        (dy0 as f32 - vp_y) * scale_y,
-    );
-    let end = stet_tiny_skia::Point::from_xy(
-        (dx1 as f32 - vp_x) * scale_x,
-        (dy1 as f32 - vp_y) * scale_y,
+    // Keep gradient endpoints in shading/user space and pass the CTM as the
+    // gradient transform. This correctly handles Y-flips, non-uniform scaling,
+    // and rotation — the LinearGradient evaluates through the combined transform.
+    let start = stet_tiny_skia::Point::from_xy(params.x0 as f32, params.y0 as f32);
+    let end = stet_tiny_skia::Point::from_xy(params.x1 as f32, params.y1 as f32);
+
+    let gradient_transform = viewport_transform(
+        to_transform(&params.ctm),
+        vp_x,
+        vp_y,
+        scale_x,
+        scale_y,
     );
 
     let Some(gradient) = stet_tiny_skia::LinearGradient::new(
@@ -5283,7 +5285,7 @@ fn render_axial_shading(
         end,
         stops,
         stet_tiny_skia::SpreadMode::Pad,
-        Transform::identity(),
+        gradient_transform,
     ) else {
         return;
     };
@@ -5318,6 +5320,10 @@ fn render_axial_shading(
     if rx_max <= rx_min || ry_max <= ry_min {
         return;
     }
+
+    // Transform endpoints to device space for perpendicular clipping
+    let (dx0, dy0) = params.ctm.transform_point(params.x0, params.y0);
+    let (dx1, dy1) = params.ctm.transform_point(params.x1, params.y1);
 
     // When extend is false on a side, clip the fill area along a line
     // perpendicular to the gradient axis through that endpoint. For diagonal

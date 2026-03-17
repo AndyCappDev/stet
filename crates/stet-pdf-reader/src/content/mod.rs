@@ -3149,8 +3149,8 @@ impl<'a> ContentInterpreter<'a> {
 
         // Render the shading into a temporary display list with pattern matrix
         // applied to the CTM so coordinates are in device space.
-        // Use content_stream_ctm (not initial_ctm) so that patterns inside
-        // Form XObjects include the form's coordinate transform.
+        // Use content_stream_ctm so that patterns inside Form XObjects include
+        // the form's coordinate transform.
         let combined_matrix = self.content_stream_ctm.concat(&pattern_matrix);
         let saved_ctm = self.gstate.ctm;
         self.gstate.ctm = combined_matrix;
