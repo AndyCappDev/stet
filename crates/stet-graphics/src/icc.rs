@@ -26,6 +26,8 @@ struct CachedTransform {
     transform_f64: Arc<dyn TransformExecutor<f64> + Send + Sync>,
     /// Number of source components.
     n: u32,
+    /// Whether the source profile is Lab (needs value normalization).
+    is_lab: bool,
 }
 
 /// ICC color profile cache and transform manager.
@@ -177,6 +179,7 @@ impl IccCache {
             }
         };
 
+        let is_lab = profile.color_space == DataColorSpace::Lab;
         self.profiles.insert(hash, Arc::new(profile));
         self.transforms.insert(
             hash,
@@ -184,6 +187,7 @@ impl IccCache {
                 transform_8bit,
                 transform_f64,
                 n,
+                is_lab,
             },
         );
 
@@ -197,25 +201,36 @@ impl IccCache {
         hash: &ProfileHash,
         components: &[f64],
     ) -> Option<(f64, f64, f64)> {
-        // Quantize to 16-bit for cache key
+        let cached = self.transforms.get(hash)?;
+        let n = cached.n as usize;
+        let is_lab = cached.is_lab;
+
+        // Normalize input values to [0,1] range.
+        // Lab profiles need special mapping: L/100, (a+128)/255, (b+128)/255.
+        let mut src = vec![0.0f64; n];
+        for (i, s) in src.iter_mut().enumerate() {
+            let v = components.get(i).copied().unwrap_or(0.0);
+            *s = if is_lab {
+                match i {
+                    0 => (v / 100.0).clamp(0.0, 1.0),
+                    _ => ((v + 128.0) / 255.0).clamp(0.0, 1.0),
+                }
+            } else {
+                v.clamp(0.0, 1.0)
+            };
+        }
+
+        // Quantize normalized values for cache key
         let hash_prefix = u64::from_le_bytes(hash[..8].try_into().ok()?);
         let mut quantized = [0u16; 4];
-        for (i, &c) in components.iter().take(4).enumerate() {
-            quantized[i] = (c.clamp(0.0, 1.0) * 65535.0).round() as u16;
+        for (i, &c) in src.iter().take(4).enumerate() {
+            quantized[i] = (c * 65535.0).round() as u16;
         }
 
         // Check cache
         let cache_key = (hash_prefix, quantized);
         if let Some(&cached) = self.color_cache.get(&cache_key) {
             return Some(cached);
-        }
-
-        let cached = self.transforms.get(hash)?;
-        let n = cached.n as usize;
-
-        let mut src = vec![0.0f64; n];
-        for (i, s) in src.iter_mut().enumerate() {
-            *s = components.get(i).copied().unwrap_or(0.0).clamp(0.0, 1.0);
         }
 
         let mut dst = [0.0f64; 3];
