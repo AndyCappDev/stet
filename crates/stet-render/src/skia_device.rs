@@ -2888,7 +2888,7 @@ fn render_pattern_fill(
                             };
                             paint.anti_alias = false;
                             let t = to_transform(&fp.ctm);
-                            let combined = tile_transform.post_concat(t);
+                            let combined = t.post_concat(tile_transform);
                             let fr = to_fill_rule(&fp.fill_rule);
                             tile_buf.fill_path(&sp, &paint, fr, combined, None);
                         }
@@ -2898,8 +2898,43 @@ fn render_pattern_fill(
                             let stroke = build_stroke(sp, ctx.effective_dpi);
                             let paint = to_paint(&sp.color);
                             let t = to_transform(&sp.ctm);
-                            let combined = tile_transform.post_concat(t);
+                            let combined = t.post_concat(tile_transform);
                             tile_buf.stroke_path(&skp, &paint, &stroke, combined, None);
+                        }
+                    }
+                    DisplayElement::Image {
+                        sample_data,
+                        params: ip,
+                    } => {
+                        let iw = ip.width;
+                        let ih = ip.height;
+                        if iw > 0 && ih > 0 {
+                            let rgba = samples_to_rgba(sample_data, ip, ctx.icc);
+                            let expected = (iw * ih * 4) as usize;
+                            if rgba.len() >= expected {
+                                if let Some(inv) = ip.image_matrix.invert() {
+                                    let combined_mat = ip.ctm.concat(&inv);
+                                    let t = to_transform(&combined_mat);
+                                    let combined = t.post_concat(tile_transform);
+                                    if let Some(img_ref) =
+                                        stet_tiny_skia::PixmapRef::from_bytes(&rgba, iw, ih)
+                                    {
+                                        let paint = stet_tiny_skia::PixmapPaint {
+                                            opacity: 1.0,
+                                            blend_mode: BlendMode::SourceOver,
+                                            quality: stet_tiny_skia::FilterQuality::Nearest,
+                                        };
+                                        tile_buf.draw_pixmap(
+                                            0,
+                                            0,
+                                            img_ref,
+                                            &paint,
+                                            combined,
+                                            None,
+                                        );
+                                    }
+                                }
+                            }
                         }
                     }
                     _ => {}
