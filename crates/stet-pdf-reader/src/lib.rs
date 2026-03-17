@@ -56,27 +56,32 @@ impl<'a> PdfDocument<'a> {
         // Check for encryption (we'll detect it after parsing the trailer)
         let xref = xref::parse_xref(data)?;
 
-        // Handle encryption: try to open with empty password
+        // Handle encryption: try to open with empty password.
+        // /Encrypt null means no encryption (some generators emit this).
         let encryption = if let Some(encrypt_ref) = xref.trailer.get(b"Encrypt") {
-            // Use a temporary resolver (without encryption) to dereference the Encrypt dict
-            let temp_resolver = Resolver::new(data, &xref);
-            let encrypt_obj = temp_resolver.deref(encrypt_ref)?;
-            let encrypt_dict = encrypt_obj
-                .as_dict()
-                .ok_or(PdfError::Other("Encrypt is not a dict".into()))?;
+            if matches!(encrypt_ref, crate::objects::PdfObj::Null) {
+                None
+            } else {
+                // Use a temporary resolver (without encryption) to dereference the Encrypt dict
+                let temp_resolver = Resolver::new(data, &xref);
+                let encrypt_obj = temp_resolver.deref(encrypt_ref)?;
+                let encrypt_dict = encrypt_obj
+                    .as_dict()
+                    .ok_or(PdfError::Other("Encrypt is not a dict".into()))?;
 
-            // Get file ID from trailer
-            let file_id = xref
-                .trailer
-                .get_array(b"ID")
-                .and_then(|arr| arr.first()?.as_str().map(|s| s.to_vec()))
-                .unwrap_or_default();
+                // Get file ID from trailer
+                let file_id = xref
+                    .trailer
+                    .get_array(b"ID")
+                    .and_then(|arr| arr.first()?.as_str().map(|s| s.to_vec()))
+                    .unwrap_or_default();
 
-            Some(crypto::EncryptionState::try_open(
-                encrypt_dict,
-                &xref.trailer,
-                &file_id,
-            )?)
+                Some(crypto::EncryptionState::try_open(
+                    encrypt_dict,
+                    &xref.trailer,
+                    &file_id,
+                )?)
+            }
         } else {
             None
         };
@@ -107,23 +112,27 @@ impl<'a> PdfDocument<'a> {
         let xref = xref::parse_xref(data)?;
 
         let encryption = if let Some(encrypt_ref) = xref.trailer.get(b"Encrypt") {
-            let temp_resolver = Resolver::new(data, &xref);
-            let encrypt_obj = temp_resolver.deref(encrypt_ref)?;
-            let encrypt_dict = encrypt_obj
-                .as_dict()
-                .ok_or(PdfError::Other("Encrypt is not a dict".into()))?;
+            if matches!(encrypt_ref, crate::objects::PdfObj::Null) {
+                None
+            } else {
+                let temp_resolver = Resolver::new(data, &xref);
+                let encrypt_obj = temp_resolver.deref(encrypt_ref)?;
+                let encrypt_dict = encrypt_obj
+                    .as_dict()
+                    .ok_or(PdfError::Other("Encrypt is not a dict".into()))?;
 
-            let file_id = xref
-                .trailer
-                .get_array(b"ID")
-                .and_then(|arr| arr.first()?.as_str().map(|s| s.to_vec()))
-                .unwrap_or_default();
+                let file_id = xref
+                    .trailer
+                    .get_array(b"ID")
+                    .and_then(|arr| arr.first()?.as_str().map(|s| s.to_vec()))
+                    .unwrap_or_default();
 
-            Some(crypto::EncryptionState::try_open(
-                encrypt_dict,
-                &xref.trailer,
-                &file_id,
-            )?)
+                Some(crypto::EncryptionState::try_open(
+                    encrypt_dict,
+                    &xref.trailer,
+                    &file_id,
+                )?)
+            }
         } else {
             None
         };

@@ -504,6 +504,16 @@ fn decode_dct(data: &[u8]) -> Result<Vec<u8>, PdfError> {
     use jpeg_decoder::Decoder;
 
     let mut decoder = Decoder::new(data);
+
+    // Work around jpeg_decoder bug: it checks component IDs (1,2,3) → YCbCr
+    // before checking Adobe APP14 ColorTransform. When ColorTransform=0 (raw
+    // RGB) is present but component IDs are (1,2,3), the decoder incorrectly
+    // applies YCbCr→RGB conversion to already-RGB data. Detect this case and
+    // override with ColorTransform::RGB.
+    if has_adobe_rgb_marker(data) {
+        decoder.set_color_transform(jpeg_decoder::ColorTransform::RGB);
+    }
+
     let pixels = decoder
         .decode()
         .map_err(|e| PdfError::DecompressionError(format!("DCTDecode: {e}")))?;
@@ -523,6 +533,31 @@ fn decode_dct(data: &[u8]) -> Result<Vec<u8>, PdfError> {
         }
 
     Ok(pixels)
+}
+
+/// Check if a JPEG has an Adobe APP14 marker with ColorTransform=0 (raw RGB).
+/// This indicates the 3-component data is already RGB, not YCbCr.
+fn has_adobe_rgb_marker(data: &[u8]) -> bool {
+    let mut i = 2; // skip SOI
+    while i + 4 < data.len() {
+        if data[i] != 0xFF {
+            break;
+        }
+        let marker = data[i + 1];
+        if marker == 0xDA {
+            break; // SOS — done with headers
+        }
+        let len = u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
+        // APP14 (Adobe) marker: 0xFFEE, contains "Adobe" at offset 4
+        if marker == 0xEE && len >= 12 && i + 2 + len <= data.len() {
+            let color_transform = data[i + 2 + 11];
+            if color_transform == 0 {
+                return true;
+            }
+        }
+        i += 2 + len;
+    }
+    false
 }
 
 /// CCITTFaxDecode (Group 3 / Group 4 fax compression).
