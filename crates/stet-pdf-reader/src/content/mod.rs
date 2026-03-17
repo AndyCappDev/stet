@@ -288,6 +288,11 @@ impl<'a> ContentInterpreter<'a> {
         // Apply CTM: page CTM → bbox_to_rect → form_matrix
         self.gstate.ctm = self.gstate.ctm.concat(&bbox_to_rect).concat(&form_matrix);
 
+        // Update content_stream_ctm so shading patterns inside the annotation
+        // use the annotation's coordinate system (not the page's).
+        let saved_content_stream_ctm = self.content_stream_ctm;
+        self.content_stream_ctm = self.gstate.ctm;
+
         // Note: no BBox clip here — appearance streams do their own internal clipping.
 
         // Interpret the form content
@@ -297,6 +302,7 @@ impl<'a> ContentInterpreter<'a> {
         self.depth -= 1;
 
         // Restore state
+        self.content_stream_ctm = saved_content_stream_ctm;
         self.resources = saved_resources;
         if let Some(gs) = self.gstate_stack.pop() {
             self.gstate = gs;
@@ -2934,7 +2940,6 @@ impl<'a> ContentInterpreter<'a> {
             .and_then(|o| o.as_name())
             .ok_or(PdfError::Other("pattern: expected name".into()))?
             .to_vec();
-
         // Check PatternType before resolving — Type 2 (shading) needs different handling
         let pattern_dict = self
             .resolve_resource_subdict(b"Pattern")
