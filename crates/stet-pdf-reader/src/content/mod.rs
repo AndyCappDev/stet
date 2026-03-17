@@ -1849,7 +1849,7 @@ impl<'a> ContentInterpreter<'a> {
         // Handle SMask (soft mask / alpha channel)
         let (sample_data, color_space) = if !is_image_mask {
             if let Some(smask_data) = self.resolve_smask(dict, width, height)? {
-                let rgba = merge_rgb_with_smask(&sample_data, &smask_data, &color_space, width, height);
+                let rgba = merge_rgb_with_smask(&sample_data, &smask_data, &color_space, width, height, Some(&self.icc_cache));
                 (rgba, ImageColorSpace::PreconvertedRGBA)
             } else {
                 (sample_data, color_space)
@@ -1861,7 +1861,7 @@ impl<'a> ContentInterpreter<'a> {
         // Handle explicit stencil mask (/Mask pointing to 1-bit ImageMask stream)
         let (sample_data, color_space) = if let Some(mask_alpha) = explicit_mask_data {
             let rgba =
-                merge_rgb_with_smask(&sample_data, &mask_alpha, &color_space, width, height);
+                merge_rgb_with_smask(&sample_data, &mask_alpha, &color_space, width, height, Some(&self.icc_cache));
             (rgba, ImageColorSpace::PreconvertedRGBA)
         } else {
             (sample_data, color_space)
@@ -3248,6 +3248,7 @@ fn merge_rgb_with_smask(
     color_space: &ImageColorSpace,
     width: u32,
     height: u32,
+    icc: Option<&stet_graphics::icc::IccCache>,
 ) -> Vec<u8> {
     // For Indexed images, expand palette indices to RGB first
     if let ImageColorSpace::Indexed {
@@ -3267,12 +3268,86 @@ fn merge_rgb_with_smask(
                 expanded[i * n_base + c] = lookup.get(offset + c).copied().unwrap_or(0);
             }
         }
-        return merge_rgb_with_smask(&expanded, smask_data, base, width, height);
+        return merge_rgb_with_smask(&expanded, smask_data, base, width, height, icc);
+    }
+
+    // For Separation/DeviceN, convert through tint table to alternate space first
+    if let ImageColorSpace::Separation { alt_space, tint_table, .. } = color_space {
+        let n_pixels = (width * height) as usize;
+        let no = tint_table.num_outputs as usize;
+        let mut expanded = vec![0u8; n_pixels * no];
+        let mut alt_comps = vec![0.0f32; no];
+        for i in 0..n_pixels {
+            let tint = image_data.get(i).copied().unwrap_or(0) as f32 / 255.0;
+            tint_table.lookup_1d(tint, &mut alt_comps);
+            for c in 0..no {
+                expanded[i * no + c] = (alt_comps[c].clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+            }
+        }
+        return merge_rgb_with_smask(&expanded, smask_data, alt_space, width, height, icc);
+    }
+    if let ImageColorSpace::DeviceN { alt_space, tint_table, .. } = color_space {
+        let ni = tint_table.num_inputs as usize;
+        let no = tint_table.num_outputs as usize;
+        let n_pixels = (width * height) as usize;
+        let mut expanded = vec![0u8; n_pixels * no];
+        let mut inputs = vec![0.0f32; ni];
+        let mut alt_comps = vec![0.0f32; no];
+        for i in 0..n_pixels {
+            let si = i * ni;
+            for (c, inp) in inputs.iter_mut().enumerate() {
+                *inp = image_data.get(si + c).copied().unwrap_or(0) as f32 / 255.0;
+            }
+            tint_table.lookup_nd(&inputs, &mut alt_comps);
+            for c in 0..no {
+                expanded[i * no + c] = (alt_comps[c].clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+            }
+        }
+        return merge_rgb_with_smask(&expanded, smask_data, alt_space, width, height, icc);
     }
 
     let n_pixels = (width * height) as usize;
     let mut rgba = vec![255u8; n_pixels * 4];
     let n_comps = color_space.num_components();
+
+    // For CMYK data, try ICC bulk conversion first (matches samples_to_rgba quality)
+    if n_comps == 4 {
+        if let Some(cache) = icc {
+            if let Some(cmyk_hash) = cache.default_cmyk_hash() {
+                let cmyk_data = if image_data.len() >= n_pixels * 4 {
+                    &image_data[..n_pixels * 4]
+                } else {
+                    image_data
+                };
+                if let Some(rgb) = cache.convert_image_8bit(cmyk_hash, cmyk_data, n_pixels) {
+                    for i in 0..n_pixels {
+                        let alpha = smask_data.get(i).copied().unwrap_or(255);
+                        let dst = i * 4;
+                        let (r, g, b) = (rgb[i * 3], rgb[i * 3 + 1], rgb[i * 3 + 2]);
+                        if alpha == 255 {
+                            rgba[dst] = r;
+                            rgba[dst + 1] = g;
+                            rgba[dst + 2] = b;
+                            rgba[dst + 3] = 255;
+                        } else if alpha == 0 {
+                            // rgba already zeroed by default 255, need to zero
+                            rgba[dst] = 0;
+                            rgba[dst + 1] = 0;
+                            rgba[dst + 2] = 0;
+                            rgba[dst + 3] = 0;
+                        } else {
+                            let a = alpha as u16;
+                            rgba[dst] = ((r as u16 * a + 127) / 255) as u8;
+                            rgba[dst + 1] = ((g as u16 * a + 127) / 255) as u8;
+                            rgba[dst + 2] = ((b as u16 * a + 127) / 255) as u8;
+                            rgba[dst + 3] = alpha;
+                        }
+                    }
+                    return rgba;
+                }
+            }
+        }
+    }
 
     for i in 0..n_pixels {
         let alpha = smask_data.get(i).copied().unwrap_or(255);
@@ -3293,7 +3368,7 @@ fn merge_rgb_with_smask(
                 rgba[dst + 2] = g;
             }
             4 => {
-                // CMYK → RGB
+                // CMYK → RGB (PLRM fallback when ICC not available)
                 let src = i * 4;
                 let c = image_data.get(src).copied().unwrap_or(0) as f64 / 255.0;
                 let m = image_data.get(src + 1).copied().unwrap_or(0) as f64 / 255.0;
