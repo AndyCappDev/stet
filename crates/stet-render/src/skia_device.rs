@@ -1894,8 +1894,12 @@ fn render_element(
                 let skia_path_op = build_skia_path(draw_path);
                 if let Some(skia_path) = skia_path_op {
                     let resolution_scale = (transform.sx * transform.sx + transform.sy * transform.sy).sqrt().max(1.0);
-                    if let Some(transformed) = skia_path.clone().transform(transform)
-                        && let Some(stroked) = transformed.stroke(&stroke, resolution_scale) {
+                    // Stroke in user space first, then transform to device space.
+                    // The old code transformed the path first, then stroked — which
+                    // applied the stroke width in device pixels instead of user units,
+                    // producing strokes that were too thick when CTM had small scale.
+                    if let Some(stroked_user) = skia_path.stroke(&stroke, resolution_scale)
+                        && let Some(stroked) = stroked_user.transform(transform) {
                             overprint_handled = true;
                             let fill_params = FillParams {
                                 color: params.color.clone(),
