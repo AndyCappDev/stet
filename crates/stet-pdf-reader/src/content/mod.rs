@@ -114,6 +114,9 @@ pub struct ContentInterpreter<'a> {
     /// Accumulated text clip path (for text rendering modes 4-7).
     /// Built up during BT..ET, applied as clip at ET.
     text_clip_path: Option<PsPath>,
+    /// When true, DeviceRGB colors are round-tripped through the system CMYK
+    /// profile (RGB→CMYK→RGB) to match compositing in a DeviceCMYK page group.
+    page_group_is_cmyk: bool,
 }
 
 impl<'a> ContentInterpreter<'a> {
@@ -144,7 +147,15 @@ impl<'a> ContentInterpreter<'a> {
             soft_mask_scope: None,
             font_provider,
             text_clip_path: None,
+            page_group_is_cmyk: false,
         }
+    }
+
+    /// Mark this page as having a DeviceCMYK transparency group.
+    /// DeviceRGB colors will be round-tripped through the ICC CMYK profile
+    /// to match compositing in CMYK space (produces more muted, accurate colors).
+    pub fn set_page_group_cmyk(&mut self) {
+        self.page_group_is_cmyk = true;
     }
 
     /// Look up a sub-dictionary in the resources, resolving indirect references.
@@ -1013,7 +1024,8 @@ impl<'a> ContentInterpreter<'a> {
     fn op_big_rg(&mut self) -> Result<(), PdfError> {
         // RG r g b: set stroke color to RGB
         let n = self.get_numbers(3)?;
-        self.gstate.stroke_color = DeviceColor::from_rgb(n[0], n[1], n[2]);
+        let (r, g, b) = self.cmyk_group_rgb(n[0], n[1], n[2]);
+        self.gstate.stroke_color = DeviceColor::from_rgb(r, g, b);
         self.gstate.stroke_color_space = ColorSpaceRef::DeviceRGB;
         self.gstate.stroke_painted_channels = 0;
         self.gstate.stroke_pattern = None;
@@ -1024,13 +1036,25 @@ impl<'a> ContentInterpreter<'a> {
     fn op_small_rg(&mut self) -> Result<(), PdfError> {
         // rg r g b: set fill color to RGB
         let n = self.get_numbers(3)?;
-        self.gstate.fill_color = DeviceColor::from_rgb(n[0], n[1], n[2]);
+        let (r, g, b) = self.cmyk_group_rgb(n[0], n[1], n[2]);
+        self.gstate.fill_color = DeviceColor::from_rgb(r, g, b);
         self.gstate.fill_color_space = ColorSpaceRef::DeviceRGB;
         self.gstate.fill_painted_channels = 0;
         self.gstate.fill_is_device_cmyk = false;
         self.gstate.fill_pattern = None;
         self.gstate.fill_shading_pattern = None;
         Ok(())
+    }
+
+    /// When the page group is DeviceCMYK, round-trip RGB through the CMYK
+    /// profile to simulate compositing in CMYK space.
+    fn cmyk_group_rgb(&mut self, r: f64, g: f64, b: f64) -> (f64, f64, f64) {
+        if self.page_group_is_cmyk {
+            if let Some(result) = self.icc_cache.round_trip_rgb_via_cmyk(r, g, b) {
+                return result;
+            }
+        }
+        (r, g, b)
     }
 
     fn op_big_k(&mut self) -> Result<(), PdfError> {
@@ -2748,9 +2772,18 @@ impl<'a> ContentInterpreter<'a> {
             self.push_bbox_clip(x0, y0, x1, y1);
         }
 
+        // Disable ICC CMYK conversion inside soft mask forms. ICC profiles
+        // map 100% K to non-zero RGB (e.g. (44,41,42)), giving non-zero
+        // luminosity where the mask should be opaque black. PLRM formulas
+        // produce exact (0,0,0) for CMYK (0,0,0,1), yielding correct
+        // luminosity = 0 for the mask.
+        let saved_cmyk_hash = self.icc_cache.suspend_default_cmyk();
+
         self.depth += 1;
         let _ = self.interpret_stream(&form_data);
         self.depth -= 1;
+
+        self.icc_cache.restore_default_cmyk(saved_cmyk_hash);
 
         // Flush any soft mask scope opened inside the mask form
         self.flush_soft_mask();

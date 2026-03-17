@@ -256,6 +256,19 @@ impl<'a> PdfDocument<'a> {
             self.font_provider.clone(),
         );
 
+        // Check if the page has a DeviceCMYK transparency group — if so,
+        // RGB colors need round-tripping through CMYK to match compositing
+        // in CMYK space (mutes saturated out-of-gamut RGB colors).
+        if let Ok(page_obj) = self.resolver.resolve(info.obj_num, 0)
+            && let Some(page_dict) = page_obj.as_dict()
+            && let Some(group_obj) = page_dict.get(b"Group")
+            && let Ok(group_resolved) = self.resolver.deref(group_obj)
+            && let Some(group_dict) = group_resolved.as_dict()
+            && group_dict.get_name(b"CS") == Some(b"DeviceCMYK")
+        {
+            interpreter.set_page_group_cmyk();
+        }
+
         // Render page content
         if let Err(e) = interpreter.interpret_stream_public(&content_data) {
             eprintln!("warning: content stream error: {}", e);

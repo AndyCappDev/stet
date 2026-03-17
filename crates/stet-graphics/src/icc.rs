@@ -48,6 +48,8 @@ pub struct IccCache {
     raw_bytes: HashMap<ProfileHash, Arc<Vec<u8>>>,
     /// sRGB output profile (created once).
     srgb_profile: ColorProfile,
+    /// Cached sRGB→CMYK reverse transform (for RGB round-trip through CMYK page groups).
+    reverse_cmyk_f64: Option<Arc<dyn TransformExecutor<f64> + Send + Sync>>,
 }
 
 impl Default for IccCache {
@@ -67,6 +69,7 @@ impl IccCache {
             system_cmyk_bytes: None,
             raw_bytes: HashMap::new(),
             srgb_profile: ColorProfile::new_srgb(),
+            reverse_cmyk_f64: None,
         }
     }
 
@@ -333,6 +336,19 @@ impl IccCache {
         self.default_cmyk_hash = Some(hash);
     }
 
+    /// Temporarily remove the default CMYK hash, returning the old value.
+    /// Used to disable ICC CMYK conversion inside soft mask form rendering,
+    /// where PLRM formulas produce correct luminosity values (ICC profiles
+    /// map 100% K to non-zero RGB, breaking luminosity soft masks).
+    pub fn suspend_default_cmyk(&mut self) -> Option<ProfileHash> {
+        self.default_cmyk_hash.take()
+    }
+
+    /// Restore a previously suspended default CMYK hash.
+    pub fn restore_default_cmyk(&mut self, hash: Option<ProfileHash>) {
+        self.default_cmyk_hash = hash;
+    }
+
     /// Convert CMYK to (r, g, b) using the default system CMYK profile.
     /// Returns None if no system CMYK profile is loaded.
     #[inline]
@@ -358,6 +374,58 @@ impl IccCache {
         ))
     }
 
+    /// Round-trip an RGB color through the system CMYK profile: sRGB→CMYK→sRGB.
+    /// Used when compositing in a DeviceCMYK page group — saturated RGB colors
+    /// become more muted after passing through the CMYK gamut.
+    /// Returns None if no CMYK profile is loaded.
+    pub fn round_trip_rgb_via_cmyk(&mut self, r: f64, g: f64, b: f64) -> Option<(f64, f64, f64)> {
+        let hash = *self.default_cmyk_hash.as_ref()?;
+
+        // Build reverse (sRGB→CMYK) transform lazily
+        if self.reverse_cmyk_f64.is_none() {
+            let cmyk_profile = self.profiles.get(&hash)?.clone();
+            let intents = [
+                RenderingIntent::RelativeColorimetric,
+                RenderingIntent::Perceptual,
+                RenderingIntent::AbsoluteColorimetric,
+                RenderingIntent::Saturation,
+            ];
+            for &intent in &intents {
+                let options = TransformOptions {
+                    rendering_intent: intent,
+                    ..TransformOptions::default()
+                };
+                if let Ok(t) = self.srgb_profile.create_transform_f64(
+                    Layout::Rgb,
+                    &cmyk_profile,
+                    Layout::Rgba,
+                    options,
+                ) {
+                    self.reverse_cmyk_f64 = Some(t);
+                    break;
+                }
+            }
+        }
+
+        let reverse = self.reverse_cmyk_f64.as_ref()?;
+
+        // sRGB → CMYK
+        let src_rgb = [r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0)];
+        let mut cmyk = [0.0f64; 4];
+        reverse.transform(&src_rgb, &mut cmyk).ok()?;
+
+        // CMYK → sRGB (via existing forward transform)
+        let forward = self.transforms.get(&hash)?;
+        let mut dst = [0.0f64; 3];
+        forward.transform_f64.transform(&cmyk, &mut dst).ok()?;
+
+        Some((
+            dst[0].clamp(0.0, 1.0),
+            dst[1].clamp(0.0, 1.0),
+            dst[2].clamp(0.0, 1.0),
+        ))
+    }
+
     /// Disable all ICC color management (equivalent to PostForge's `--no-icc`).
     /// Clears all profiles, transforms, and caches.
     pub fn disable(&mut self) {
@@ -367,6 +435,7 @@ impl IccCache {
         self.raw_bytes.clear();
         self.default_cmyk_hash = None;
         self.system_cmyk_bytes = None;
+        self.reverse_cmyk_f64 = None;
     }
 }
 
