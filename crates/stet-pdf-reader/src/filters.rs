@@ -199,45 +199,15 @@ fn decode_flate_inner(data: &[u8], zlib: bool) -> (Result<Vec<u8>, PdfError>, bo
     }
 }
 
-/// Try LZW decode with a specific EarlyChange setting.
-fn decode_lzw_try(data: &[u8], early_change: i64) -> Result<Vec<u8>, weezl::LzwError> {
-    let mut decoder = if early_change == 0 {
-        weezl::decode::Decoder::with_tiff_size_switch(weezl::BitOrder::Msb, 8)
-    } else {
-        weezl::decode::Decoder::new(weezl::BitOrder::Msb, 8)
-    };
-    decoder.decode(data)
-}
-
-/// LZWDecode.
+/// LZWDecode — native PDF-compatible LZW decoder.
+///
+/// Handles EarlyChange correctly and tolerates premature EOF (missing EOD code),
+/// which is common in real-world PDFs.
 fn decode_lzw(data: &[u8], parms: Option<&PdfDict>) -> Result<Vec<u8>, PdfError> {
-    let early_change = parms.and_then(|p| p.get_int(b"EarlyChange")).unwrap_or(1);
+    let early_change = parms.and_then(|p| p.get_int(b"EarlyChange")).unwrap_or(1) != 0;
 
-    // Try the requested EarlyChange setting first; if it fails, try the opposite.
-    // Some PDFs omit the EarlyChange parameter but use non-default encoding.
-    let output = match decode_lzw_try(data, early_change) {
-        Ok(out) => out,
-        Err(_) => match decode_lzw_try(data, 1 - early_change) {
-            Ok(out) => out,
-            Err(e) => {
-                // Both failed — try streaming decode to recover partial data
-                let mut dec = if early_change == 0 {
-                    weezl::decode::Decoder::with_tiff_size_switch(weezl::BitOrder::Msb, 8)
-                } else {
-                    weezl::decode::Decoder::new(weezl::BitOrder::Msb, 8)
-                };
-                let mut out = vec![0u8; data.len() * 4];
-                let result = dec.decode_bytes(data, &mut out);
-                let produced = result.consumed_out;
-                if produced > 0 {
-                    out.truncate(produced);
-                    out
-                } else {
-                    return Err(PdfError::DecompressionError(format!("lzw: {e}")));
-                }
-            }
-        },
-    };
+    let output = lzw_decode(data, early_change)
+        .ok_or_else(|| PdfError::DecompressionError("lzw: decode failed".into()))?;
 
     // Apply predictor if specified
     if let Some(parms) = parms {
@@ -248,6 +218,170 @@ fn decode_lzw(data: &[u8], parms: Option<&PdfDict>) -> Result<Vec<u8>, PdfError>
     }
 
     Ok(output)
+}
+
+// --- Native PDF LZW decoder ---
+
+const LZW_CLEAR_TABLE: usize = 256;
+const LZW_EOD: usize = 257;
+const LZW_MAX_ENTRIES: usize = 4096;
+const LZW_INITIAL_SIZE: usize = 258;
+
+/// Decode an LZW-compressed byte stream per the PDF spec.
+fn lzw_decode(data: &[u8], early_change: bool) -> Option<Vec<u8>> {
+    let mut table = LzwTable::new(early_change);
+    let mut bit_size = table.code_length();
+    let mut reader = LzwBitReader::new(data);
+    let mut decoded = Vec::new();
+    let mut prev: Option<usize> = None;
+
+    loop {
+        let next = match reader.read(bit_size) {
+            Some(code) => code as usize,
+            None => {
+                // Premature EOF — missing EOD code. Return what we have.
+                return Some(decoded);
+            }
+        };
+
+        match next {
+            LZW_CLEAR_TABLE => {
+                table.clear();
+                prev = None;
+                bit_size = table.code_length();
+            }
+            LZW_EOD => return Some(decoded),
+            new => {
+                if new > table.size() {
+                    // Invalid code — return partial data if we have any
+                    if decoded.is_empty() {
+                        return None;
+                    }
+                    return Some(decoded);
+                }
+
+                if new < table.size() {
+                    let entry = table.get(new)?;
+                    let first_byte = entry[0];
+                    decoded.extend_from_slice(entry);
+
+                    if let Some(prev_code) = prev {
+                        table.register(prev_code, first_byte);
+                    }
+                } else if new == table.size() && prev.is_some() {
+                    // KwKwK case: code references the entry about to be created
+                    let prev_code = prev.unwrap();
+                    let prev_entry = table.get(prev_code)?;
+                    let first_byte = prev_entry[0];
+
+                    let new_entry = table.register(prev_code, first_byte)?;
+                    decoded.extend_from_slice(new_entry);
+                } else {
+                    if decoded.is_empty() {
+                        return None;
+                    }
+                    return Some(decoded);
+                }
+
+                bit_size = table.code_length();
+                prev = Some(new);
+            }
+        }
+    }
+}
+
+/// LZW string table.
+struct LzwTable {
+    early_change: bool,
+    entries: Vec<Option<Vec<u8>>>,
+}
+
+impl LzwTable {
+    fn new(early_change: bool) -> Self {
+        let mut entries: Vec<_> = (0..=255u8).map(|b| Some(vec![b])).collect();
+        entries.push(None); // 256 = CLEAR_TABLE
+        entries.push(None); // 257 = EOD
+        Self {
+            early_change,
+            entries,
+        }
+    }
+
+    fn push(&mut self, entry: Vec<u8>) -> Option<&[u8]> {
+        if self.entries.len() >= LZW_MAX_ENTRIES {
+            None
+        } else {
+            self.entries.push(Some(entry));
+            self.entries.last()?.as_deref()
+        }
+    }
+
+    fn register(&mut self, prev: usize, new_byte: u8) -> Option<&[u8]> {
+        let prev_entry = self.get(prev)?;
+        let mut new_entry = Vec::with_capacity(prev_entry.len() + 1);
+        new_entry.extend(prev_entry);
+        new_entry.push(new_byte);
+        self.push(new_entry)
+    }
+
+    fn get(&self, index: usize) -> Option<&[u8]> {
+        self.entries.get(index)?.as_deref()
+    }
+
+    fn clear(&mut self) {
+        self.entries.truncate(LZW_INITIAL_SIZE);
+    }
+
+    fn size(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn code_length(&self) -> u8 {
+        let adjusted = self.entries.len() + if self.early_change { 1 } else { 0 };
+        if adjusted >= 2048 {
+            12
+        } else if adjusted >= 1024 {
+            11
+        } else if adjusted >= 512 {
+            10
+        } else {
+            9
+        }
+    }
+}
+
+/// MSB-first bit reader for LZW.
+struct LzwBitReader<'a> {
+    data: &'a [u8],
+    bit_pos: usize,
+}
+
+impl<'a> LzwBitReader<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Self { data, bit_pos: 0 }
+    }
+
+    fn read(&mut self, bit_size: u8) -> Option<u32> {
+        let byte_pos = self.bit_pos / 8;
+        if byte_pos >= self.data.len() {
+            return None;
+        }
+        let bit_offset = self.bit_pos % 8;
+        let end_byte = (self.bit_pos + bit_size as usize - 1) / 8;
+
+        // Read up to 8 bytes into a u64 for extraction
+        let mut buf = [0u8; 8];
+        for (i, b) in buf.iter_mut().enumerate().take(end_byte - byte_pos + 1) {
+            *b = *self.data.get(byte_pos + i)?;
+        }
+        let bits = u64::from_be_bytes(buf);
+        let shift = 64 - bit_offset - bit_size as usize;
+        let mask = (1u64 << bit_size) - 1;
+        let value = ((bits >> shift) & mask) as u32;
+
+        self.bit_pos += bit_size as usize;
+        Some(value)
+    }
 }
 
 /// ASCIIHexDecode.

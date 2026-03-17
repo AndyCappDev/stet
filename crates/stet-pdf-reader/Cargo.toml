@@ -9,7 +9,6 @@ description = "PDF parser and renderer"
 [dependencies]
 thiserror.workspace = true
 flate2 = "1"
-weezl = "0.1"
 md5 = "0.7"
 jpeg-decoder = "0.3"
 stet-fonts.workspace = true
