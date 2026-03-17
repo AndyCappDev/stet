@@ -226,7 +226,7 @@ pub fn resolve_font(
             }
         }
         if desc.get(b"FontFile").is_some() {
-            match resolve_type1(resolver, &descriptor, encoding.clone(), widths) {
+            match resolve_type1(resolver, &descriptor, encoding.clone(), widths, has_explicit_encoding) {
                 Ok(font) => return Ok(font),
                 Err(_) => {
                     if let Some(font) =
@@ -268,7 +268,7 @@ pub fn resolve_font(
     // Final fallback based on subtype (will likely fail)
     match subtype {
         b"TrueType" => resolve_truetype(resolver, &descriptor, encoding, widths),
-        _ => resolve_type1(resolver, &descriptor, encoding, widths),
+        _ => resolve_type1(resolver, &descriptor, encoding, widths, has_explicit_encoding),
     }
 }
 
@@ -955,6 +955,7 @@ fn resolve_type1(
     descriptor: &Option<PdfDict>,
     encoding: [Option<String>; 256],
     widths: [f64; 256],
+    has_explicit_encoding: bool,
 ) -> Result<PdfFont, PdfError> {
     let desc = descriptor
         .as_ref()
@@ -1006,6 +1007,26 @@ fn resolve_type1(
 
     let font =
         parse_type1(&font_data).map_err(|e| PdfError::Other(format!("Type1 parse error: {e}")))?;
+
+    // PDF spec 9.6.6.1: For symbolic fonts without an explicit /Encoding,
+    // use the font's built-in encoding from the font program.
+    let encoding = if !has_explicit_encoding {
+        let flags = desc.get_int(b"Flags").unwrap_or(0) as u32;
+        let is_symbolic = flags & 4 != 0;
+        if is_symbolic && font.encoding.len() == 256 {
+            let mut builtin: [Option<String>; 256] = std::array::from_fn(|_| None);
+            for (i, name) in font.encoding.iter().enumerate() {
+                if name != ".notdef" {
+                    builtin[i] = Some(name.clone());
+                }
+            }
+            builtin
+        } else {
+            encoding
+        }
+    } else {
+        encoding
+    };
 
     let fm = font.font_matrix;
     let font_matrix = Matrix::new(fm[0], fm[1], fm[2], fm[3], fm[4], fm[5]);
