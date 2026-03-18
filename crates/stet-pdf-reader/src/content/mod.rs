@@ -1657,11 +1657,13 @@ impl<'a> ContentInterpreter<'a> {
         };
 
         // Resolve color space
+        let has_explicit_cs = dict.get(b"ColorSpace").is_some();
         let resolved_cs = if is_image_mask {
             None
         } else if let Some(cs_obj) = dict.get(b"ColorSpace") {
             Some(resolve_color_space_obj(cs_obj, self.resolver)?)
         } else {
+            // No ColorSpace in dict — will be inferred from JPX data below
             Some(ResolvedColorSpace::DeviceRGB)
         };
 
@@ -1678,6 +1680,25 @@ impl<'a> ContentInterpreter<'a> {
 
         // Decode the stream data
         let sample_data = self.resolver.stream_data_from_obj(obj)?;
+
+        // For JPXDecode without explicit ColorSpace, infer from decoded data length.
+        // JP2 embeds its own color space info; the decoder returns interleaved pixel data
+        // whose length = width × height × num_components.
+        let resolved_cs = if !is_image_mask && !has_explicit_cs {
+            let pixels = width as usize * height as usize;
+            if pixels > 0 {
+                let n_comps = sample_data.len() / pixels;
+                Some(match n_comps {
+                    1 => ResolvedColorSpace::DeviceGray,
+                    4 => ResolvedColorSpace::DeviceCMYK,
+                    _ => ResolvedColorSpace::DeviceRGB, // 3 or 2 (gray+alpha treated as RGB)
+                })
+            } else {
+                resolved_cs
+            }
+        } else {
+            resolved_cs
+        };
 
         // Image matrix: [width 0 0 -height 0 height] maps unit square to image
         let image_matrix =
