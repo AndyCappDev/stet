@@ -5481,41 +5481,6 @@ fn render_axial_shading(
         return;
     }
 
-    let stops = build_gradient_stops(&params.color_stops);
-    if stops.is_empty() {
-        return;
-    }
-
-    // Keep gradient endpoints in shading/user space and pass the CTM as the
-    // gradient transform. This correctly handles Y-flips, non-uniform scaling,
-    // and rotation — the LinearGradient evaluates through the combined transform.
-    let start = stet_tiny_skia::Point::from_xy(params.x0 as f32, params.y0 as f32);
-    let end = stet_tiny_skia::Point::from_xy(params.x1 as f32, params.y1 as f32);
-
-    let gradient_transform = viewport_transform(
-        to_transform(&params.ctm),
-        vp_x,
-        vp_y,
-        scale_x,
-        scale_y,
-    );
-
-    let Some(gradient) = stet_tiny_skia::LinearGradient::new(
-        start,
-        end,
-        stops,
-        stet_tiny_skia::SpreadMode::Pad,
-        gradient_transform,
-    ) else {
-        return;
-    };
-
-    let paint = Paint {
-        shader: gradient,
-        anti_alias: !no_aa,
-        ..Paint::default()
-    };
-
     let (mut rx_min, mut ry_min, mut rx_max, mut ry_max) = if let Some(bbox) = &params.bbox {
         let corners = [
             params.ctm.transform_point(bbox[0], bbox[1]),
@@ -5551,42 +5516,51 @@ fn render_axial_shading(
     let needs_perpendicular_clip = (!params.extend_start || !params.extend_end) && {
         let axis_x = dx1 - dx0;
         let axis_y = dy1 - dy0;
-        // Only needed for diagonal gradients — axis-aligned ones get correct
-        // results from simple rect clipping
         axis_x.abs() > 1e-6 && axis_y.abs() > 1e-6
     };
 
     if needs_perpendicular_clip {
-        // Clip the bbox rectangle against perpendicular half-planes using
-        // Sutherland-Hodgman polygon clipping.
+        // Diagonal gradient with non-extended side — fall back to tiny-skia
+        // for Sutherland-Hodgman polygon clipping.
+        let stops = build_gradient_stops(&params.color_stops);
+        if stops.is_empty() {
+            return;
+        }
+        let start = stet_tiny_skia::Point::from_xy(params.x0 as f32, params.y0 as f32);
+        let end = stet_tiny_skia::Point::from_xy(params.x1 as f32, params.y1 as f32);
+        let gradient_transform = viewport_transform(
+            to_transform(&params.ctm),
+            vp_x, vp_y, scale_x, scale_y,
+        );
+        let Some(gradient) = stet_tiny_skia::LinearGradient::new(
+            start, end, stops, stet_tiny_skia::SpreadMode::Pad, gradient_transform,
+        ) else {
+            return;
+        };
+        let paint = Paint {
+            shader: gradient,
+            anti_alias: !no_aa,
+            ..Paint::default()
+        };
+
         let mut poly: Vec<(f32, f32)> = vec![
             (rx_min, ry_min),
             (rx_max, ry_min),
             (rx_max, ry_max),
             (rx_min, ry_max),
         ];
-
         let ax = (dx1 - dx0) as f32 * scale_x;
         let ay = (dy1 - dy0) as f32 * scale_y;
-
-        // Clip against perpendicular at start (keep side toward end)
         if !params.extend_start {
             let px = (dx0 as f32 - vp_x) * scale_x;
             let py = (dy0 as f32 - vp_y) * scale_y;
-            // Normal pointing toward end: (ax, ay)
-            // Keep points where ax*(x-px) + ay*(y-py) >= 0
             poly = clip_polygon_halfplane(&poly, ax, ay, px, py);
         }
-
-        // Clip against perpendicular at end (keep side toward start)
         if !params.extend_end {
             let px = (dx1 as f32 - vp_x) * scale_x;
             let py = (dy1 as f32 - vp_y) * scale_y;
-            // Normal pointing toward start: (-ax, -ay)
-            // Keep points where -ax*(x-px) - ay*(y-py) >= 0
             poly = clip_polygon_halfplane(&poly, -ax, -ay, px, py);
         }
-
         if poly.len() >= 3 {
             let mut pb = PathBuilder::new();
             pb.move_to(poly[0].0, poly[0].1);
@@ -5599,7 +5573,8 @@ fn render_axial_shading(
             }
         }
     } else {
-        // Axis-aligned gradient or both sides extended: simple rect fill
+        // Common case: axis-aligned or both sides extended — direct rasterization.
+        // Clip fill rect to gradient extent when sides aren't extended.
         if !params.extend_start || !params.extend_end {
             let axis_x = dx1 - dx0;
             let axis_y = dy1 - dy0;
@@ -5631,9 +5606,67 @@ fn render_axial_shading(
                 return;
             }
         }
-        let rect = stet_tiny_skia::Rect::from_ltrb(rx_min, ry_min, rx_max, ry_max)
-            .unwrap_or(stet_tiny_skia::Rect::from_xywh(0.0, 0.0, 1.0, 1.0).unwrap());
-        pixmap.fill_rect(rect, &paint, Transform::identity(), clip_mask);
+
+        // Build a 256-entry RGBA LUT from color stops.
+        let lut = build_gradient_lut(&params.color_stops);
+
+        // Compute gradient t as a linear function of pixel coordinates.
+        // In device space: t = dot(P - P0, axis) / dot(axis, axis)
+        // With viewport transform: dev = pixel / scale + vp_offset
+        // So: t(px, py) = t_base + dt_dx * px + dt_dy * py
+        let axis_x = dx1 - dx0;
+        let axis_y = dy1 - dy0;
+        let axis_len_sq = axis_x * axis_x + axis_y * axis_y;
+        if axis_len_sq < 1e-10 {
+            return;
+        }
+        let inv_len_sq = 1.0 / axis_len_sq;
+
+        // Device-space origin contribution (pixel 0,0 maps to vp_x/scale_x in dev space)
+        let dev_origin_x = vp_x as f64;
+        let dev_origin_y = vp_y as f64;
+        let inv_sx = 1.0 / scale_x as f64;
+        let inv_sy = 1.0 / scale_y as f64;
+
+        // t at device-space origin
+        let t_origin = ((dev_origin_x - dx0) * axis_x + (dev_origin_y - dy0) * axis_y) * inv_len_sq;
+        // dt per pixel step
+        let dt_dx = inv_sx * axis_x * inv_len_sq;
+        let dt_dy = inv_sy * axis_y * inv_len_sq;
+
+        let ix_min = rx_min.floor() as u32;
+        let ix_max = rx_max.ceil().min(pw as f32) as u32;
+        let iy_min = ry_min.floor() as u32;
+        let iy_max = ry_max.ceil().min(ph as f32) as u32;
+
+        let stride = pw as usize * 4;
+        let data = pixmap.data_mut();
+        let mask_data = clip_mask.map(|m| m.data());
+
+        for py in iy_min..iy_max {
+            let t_row = t_origin + dt_dy * py as f64;
+            let row_offset = py as usize * stride;
+            for px in ix_min..ix_max {
+                // Check clip mask
+                if let Some(md) = mask_data {
+                    if md[py as usize * pw as usize + px as usize] == 0 {
+                        continue;
+                    }
+                }
+
+                let t = t_row + dt_dx * px as f64;
+                let t_clamped = t.clamp(0.0, 1.0);
+                let lut_idx = (t_clamped * 255.0) as usize;
+                let [r, g, b, _a] = lut[lut_idx];
+
+                let offset = row_offset + px as usize * 4;
+                // Opaque write — gradients are always fully opaque (alpha=255)
+                data[offset] = r;
+                data[offset + 1] = g;
+                data[offset + 2] = b;
+                data[offset + 3] = 255;
+            }
+        }
     }
 
     // Update CMYK tracking buffer for axial shading
@@ -6351,6 +6384,55 @@ fn bilinear_color(colors: &[DeviceColor; 4], u: f64, v: f64) -> DeviceColor {
         + (1.0 - u) * v * colors[3].b
         + u * v * colors[2].b;
     DeviceColor::from_rgb(r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0))
+}
+
+/// Pre-rasterize color stops into a 256-entry RGBA lookup table.
+///
+/// Each entry is linearly interpolated from the color stops. Used by the
+/// direct-rasterization axial shading path to replace per-pixel stop search
+/// with a single array lookup.
+fn build_gradient_lut(stops: &[stet_graphics::device::ColorStop]) -> [[u8; 4]; 256] {
+    let mut lut = [[0u8; 4]; 256];
+    if stops.is_empty() {
+        return lut;
+    }
+    let mut si = 0usize; // current stop index
+    for i in 0..256 {
+        let t = i as f64 / 255.0;
+        // Advance stop index
+        while si + 1 < stops.len() && stops[si + 1].position < t {
+            si += 1;
+        }
+        let (r, g, b) = if si + 1 >= stops.len() {
+            let c = &stops[stops.len() - 1].color;
+            (c.r, c.g, c.b)
+        } else if t <= stops[si].position {
+            let c = &stops[si].color;
+            (c.r, c.g, c.b)
+        } else {
+            let t0 = stops[si].position;
+            let t1 = stops[si + 1].position;
+            let frac = if (t1 - t0).abs() < 1e-10 {
+                0.0
+            } else {
+                (t - t0) / (t1 - t0)
+            };
+            let c0 = &stops[si].color;
+            let c1 = &stops[si + 1].color;
+            (
+                c0.r + frac * (c1.r - c0.r),
+                c0.g + frac * (c1.g - c0.g),
+                c0.b + frac * (c1.b - c0.b),
+            )
+        };
+        lut[i] = [
+            (r * 255.0).round().clamp(0.0, 255.0) as u8,
+            (g * 255.0).round().clamp(0.0, 255.0) as u8,
+            (b * 255.0).round().clamp(0.0, 255.0) as u8,
+            255,
+        ];
+    }
+    lut
 }
 
 /// Build tiny-skia gradient stops from color stops.
