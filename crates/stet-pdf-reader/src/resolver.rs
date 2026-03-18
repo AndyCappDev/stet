@@ -81,7 +81,15 @@ impl<'a> Resolver<'a> {
             .ok_or(PdfError::ObjectNotFound { obj_num, gen_num })?;
 
         let obj = match *entry {
-            XrefEntry::InFile { offset, .. } => self.parse_object_at(offset)?,
+            XrefEntry::InFile { offset, .. } => {
+                // Try the xref offset first; if it's corrupt (e.g. from a
+                // broken incremental update), fall back to scanning the file
+                // for the real "N G obj" header.
+                match self.parse_object_at(offset) {
+                    Ok(obj) => obj,
+                    Err(_) => self.scan_for_object(obj_num)?,
+                }
+            }
             XrefEntry::InStream {
                 stream_obj_num,
                 index_within,
@@ -239,6 +247,43 @@ impl<'a> Resolver<'a> {
                     }
         }
         Ok(None)
+    }
+
+    /// Scan the entire file for `obj_num G obj` and parse the last occurrence.
+    /// Uses the last match because incremental updates append newer versions
+    /// of objects later in the file; the latest definition should win.
+    fn scan_for_object(&self, obj_num: u32) -> Result<PdfObj, PdfError> {
+        let needle = format!("{} 0 obj", obj_num);
+        let needle_bytes = needle.as_bytes();
+        let mut last_match = None;
+        let mut pos = 0;
+        while pos + needle_bytes.len() < self.data.len() {
+            if self.data[pos..].starts_with(needle_bytes) {
+                // Verify it's at a line boundary (start of file or after whitespace)
+                if pos == 0
+                    || self.data[pos - 1] == b'\n'
+                    || self.data[pos - 1] == b'\r'
+                    || self.data[pos - 1] == b' '
+                {
+                    // Verify the char after "obj" is whitespace or '<'
+                    let after = pos + needle_bytes.len();
+                    if after < self.data.len()
+                        && (self.data[after].is_ascii_whitespace()
+                            || self.data[after] == b'<')
+                    {
+                        last_match = Some(pos);
+                    }
+                }
+            }
+            pos += 1;
+        }
+        match last_match {
+            Some(offset) => self.parse_object_at(offset),
+            None => Err(PdfError::ObjectNotFound {
+                obj_num,
+                gen_num: 0,
+            }),
+        }
     }
 
     /// Parse an indirect object at a file offset.

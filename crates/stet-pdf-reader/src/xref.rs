@@ -86,6 +86,12 @@ pub fn parse_xref(data: &[u8]) -> Result<XrefTable, PdfError> {
         return rebuild_xref_from_scan(data);
     }
 
+    // Scan all trailer dicts and startxref values in the file for xref
+    // sections not reached by the /Prev chain. This handles PDFs with broken
+    // incremental updates where the chain dead-ends (missing trailer, circular
+    // /Prev, or self-referencing /Prev) before reaching the original xref.
+    discover_orphaned_xref_sections(data, &mut sections, &mut visited);
+
     // Build the combined table: oldest entries first, newest override
     sections.reverse();
     let mut combined_entries: Vec<Option<XrefEntry>> = Vec::new();
@@ -106,6 +112,74 @@ pub fn parse_xref(data: &[u8]) -> Result<XrefTable, PdfError> {
         entries: combined_entries,
         trailer: final_trailer,
     })
+}
+
+/// Scan all trailer dictionaries and startxref values in the file for xref
+/// sections not yet visited. Handles broken incremental updates where the
+/// /Prev chain dead-ends before reaching the original xref.
+fn discover_orphaned_xref_sections(
+    data: &[u8],
+    sections: &mut Vec<(Vec<(u32, XrefEntry)>, PdfDict)>,
+    visited: &mut std::collections::HashSet<usize>,
+) {
+    let mut candidates = Vec::new();
+
+    // Collect /Prev offsets from all trailers in the file
+    let mut pos = 0;
+    while pos + 7 < data.len() {
+        if &data[pos..pos + 7] == b"trailer" {
+            let end = (pos + 500).min(data.len());
+            if let Some(prev_off) = find_int_after_key(&data[pos..end], b"/Prev") {
+                candidates.push(prev_off);
+            }
+        }
+        // Also collect startxref values (point to xref sections from older revisions)
+        if pos + 9 < data.len() && &data[pos..pos + 9] == b"startxref" {
+            let end = (pos + 50).min(data.len());
+            if let Some(sx_off) = find_int_after_key(&data[pos..end], b"startxref") {
+                if sx_off > 0 {
+                    candidates.push(sx_off);
+                }
+            }
+        }
+        pos += 1;
+    }
+
+    // Try each candidate xref offset we haven't visited yet
+    for candidate in candidates {
+        let mut offset = candidate;
+        loop {
+            if !visited.insert(offset) {
+                break;
+            }
+            match parse_xref_section(data, offset) {
+                Ok((entries, trailer)) => {
+                    let prev = trailer.get_int(b"Prev").map(|v| v as usize);
+                    sections.push((entries, trailer));
+                    match prev {
+                        Some(p) => offset = p,
+                        None => break,
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    }
+}
+
+/// Find an integer value after a keyword in a byte region.
+/// Works for both `/Prev 12345` and `startxref\n12345`.
+fn find_int_after_key(data: &[u8], key: &[u8]) -> Option<usize> {
+    let s = std::str::from_utf8(data).ok()?;
+    let key_str = std::str::from_utf8(key).ok()?;
+    let idx = s.find(key_str)?;
+    let after = &s[idx + key_str.len()..];
+    let after = after.trim_start();
+    let end = after.find(|c: char| !c.is_ascii_digit()).unwrap_or(after.len());
+    if end == 0 {
+        return None;
+    }
+    after[..end].parse().ok()
 }
 
 /// Rebuild the xref table by scanning the entire file for `N G obj` patterns.
@@ -305,21 +379,29 @@ fn parse_classic_xref(
 
     let mut entries = Vec::new();
 
-    // Parse subsections until we hit "trailer"
+    // Parse subsections until we hit "trailer" (or data that isn't a valid
+    // subsection header — some broken PDFs omit the trailer entirely).
+    let mut has_trailer = false;
     loop {
         // Check for "trailer" keyword
         if pos + 7 <= data.len() && &data[pos..pos + 7] == b"trailer" {
             pos += 7;
+            has_trailer = true;
             break;
         }
 
         // Parse subsection header: <first_obj_num> <count>
-        let (first_obj, new_pos) = parse_int_at(data, pos)?;
+        // If this fails, the entries may have ended without a trailer.
+        let Ok((first_obj, new_pos)) = parse_int_at(data, pos) else {
+            break;
+        };
         pos = new_pos;
         while pos < data.len() && (data[pos] == b' ' || data[pos] == b'\t') {
             pos += 1;
         }
-        let (count, new_pos) = parse_int_at(data, pos)?;
+        let Ok((count, new_pos)) = parse_int_at(data, pos) else {
+            break;
+        };
         pos = new_pos;
 
         // Skip to start of entries
@@ -327,26 +409,33 @@ fn parse_classic_xref(
             pos += 1;
         }
 
-        // Parse entries: spec says 20 bytes each, but tolerate 21 (extra space before EOL)
+        // Parse entries: spec says 20 bytes each, but tolerate 21 (extra space before EOL).
+        // If an entry is malformed (e.g. we've run into binary stream data after
+        // a trailer-less xref), stop parsing gracefully with what we have.
+        let mut entry_error = false;
         for i in 0..count as u32 {
             if pos + 18 > data.len() {
                 break;
             }
 
             // Parse: OOOOOOOOOO GGGGG f/n + EOL (variable length)
-            let off_str = std::str::from_utf8(&data[pos..pos + 10])
-                .map_err(|_| PdfError::MalformedXref(offset))?;
-            let off: usize = off_str
-                .trim()
-                .parse()
-                .map_err(|_| PdfError::MalformedXref(offset))?;
+            let Ok(off_str) = std::str::from_utf8(&data[pos..pos + 10]) else {
+                entry_error = true;
+                break;
+            };
+            let Ok(off) = off_str.trim().parse::<usize>() else {
+                entry_error = true;
+                break;
+            };
 
-            let gen_str = std::str::from_utf8(&data[pos + 11..pos + 16])
-                .map_err(|_| PdfError::MalformedXref(offset))?;
-            let generation: u16 = gen_str
-                .trim()
-                .parse()
-                .map_err(|_| PdfError::MalformedXref(offset))?;
+            let Ok(gen_str) = std::str::from_utf8(&data[pos + 11..pos + 16]) else {
+                entry_error = true;
+                break;
+            };
+            let Ok(generation) = gen_str.trim().parse::<u16>() else {
+                entry_error = true;
+                break;
+            };
 
             let type_byte = data[pos + 17];
             let obj_num = first_obj as u32 + i;
@@ -370,21 +459,31 @@ fn parse_classic_xref(
             }
         }
 
+        // If an entry was malformed, stop parsing this xref section
+        if entry_error {
+            break;
+        }
+
         // Skip any remaining whitespace
         while pos < data.len() && is_whitespace(data[pos]) {
             pos += 1;
         }
     }
 
-    // Parse trailer dict
-    let mut lexer = Lexer::at(data, pos);
-    lexer.next_token()?; // skip DictBegin (<<)
-    // Back up — we need to check if there's a << or if we're already at dict content
-    lexer.set_pos(pos);
-    let tok = lexer.next_token()?;
-    let trailer = match tok {
-        Token::DictBegin => parse_dict_body(&mut lexer)?,
-        _ => return Err(PdfError::MalformedTrailer),
+    // Parse trailer dict (or return empty if the trailer is missing —
+    // some broken incremental updates omit it entirely).
+    let trailer = if has_trailer {
+        let mut lexer = Lexer::at(data, pos);
+        lexer.set_pos(pos);
+        let tok = lexer.next_token()?;
+        match tok {
+            Token::DictBegin => parse_dict_body(&mut lexer)?,
+            _ => return Err(PdfError::MalformedTrailer),
+        }
+    } else if entries.is_empty() {
+        return Err(PdfError::MalformedXref(offset));
+    } else {
+        PdfDict::new()
     };
 
     Ok((entries, trailer))
