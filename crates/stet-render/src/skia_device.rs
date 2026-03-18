@@ -2287,9 +2287,8 @@ fn render_group(
     }
 
     let mut temp_mask = None;
-    let mask_ref = resolve_clip_mask(&band_state.clip_region, &mut temp_mask, ctx.out_w, ctx.out_h);
-    let mask_ref = match mask_ref {
-        None => return,
+    let mask_ref = match resolve_clip_mask(&band_state.clip_region, &mut temp_mask, ctx.out_w, ctx.out_h) {
+        None => return, // empty clip → nothing visible
         Some(m) => m,
     };
 

@@ -2718,17 +2718,69 @@ impl<'a> ContentInterpreter<'a> {
         if let Some(scope) = self.soft_mask_scope.take()
             && self.display_list.len() > scope.start_index {
                 let content = self.display_list.split_off(scope.start_index);
-                self.display_list.push(DisplayElement::SoftMasked {
-                    mask: scope.mask.mask_list,
-                    content,
-                    params: SoftMaskParams {
-                        subtype: scope.mask.subtype,
-                        bbox: scope.mask.bbox,
-                        backdrop_color: scope.mask.backdrop_color,
-                        transfer_invert: scope.mask.transfer_invert,
-                    },
-                });
+
+                // Skip the soft mask if the mask display list is empty, OR if
+                // the mask form's BBox doesn't overlap with the content's clip
+                // region. When BC=[0,0,0], a non-overlapping mask produces zero
+                // luminosity everywhere in the content area, making it invisible.
+                let skip = scope.mask.mask_list.is_empty()
+                    || (scope.mask.backdrop_color == Some([0.0, 0.0, 0.0])
+                        && !self.mask_overlaps_clip(&scope.mask.bbox));
+                if skip {
+                    for elem in content.into_elements() {
+                        self.display_list.push(elem);
+                    }
+                } else {
+                    self.display_list.push(DisplayElement::SoftMasked {
+                        mask: scope.mask.mask_list,
+                        content,
+                        params: SoftMaskParams {
+                            subtype: scope.mask.subtype,
+                            bbox: scope.mask.bbox,
+                            backdrop_color: scope.mask.backdrop_color,
+                            transfer_invert: scope.mask.transfer_invert,
+                        },
+                    });
+                }
             }
+    }
+
+    /// Check if a mask bbox (in device space) overlaps with the current clip region.
+    fn mask_overlaps_clip(&self, bbox: &[f64; 4]) -> bool {
+        // If no clip is set, the entire page is the clip — check page bounds
+        let page_h = self.gstate.ctm.ty.abs().max(1.0);
+        let page_w = page_h; // rough estimate
+        let (cx0, cy0, cx1, cy1) = if let Some(ref clip) = self.gstate.clip_path {
+            // Use the clip path's bounding box
+            let segs = &clip.segments;
+            let mut min_x = f64::INFINITY;
+            let mut min_y = f64::INFINITY;
+            let mut max_x = f64::NEG_INFINITY;
+            let mut max_y = f64::NEG_INFINITY;
+            for seg in segs {
+                let (x, y) = match seg {
+                    PathSegment::MoveTo(x, y) | PathSegment::LineTo(x, y) => (*x, *y),
+                    PathSegment::CurveTo { x3, y3, .. } => (*x3, *y3),
+                    PathSegment::ClosePath => continue,
+                };
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
+            }
+            (min_x, min_y, max_x, max_y)
+        } else {
+            (0.0, 0.0, page_w * 2.0, page_h * 2.0) // generous page bounds
+        };
+
+        let (mx0, my0, mx1, my1) = (
+            bbox[0].min(bbox[2]),
+            bbox[1].min(bbox[3]),
+            bbox[0].max(bbox[2]),
+            bbox[1].max(bbox[3]),
+        );
+
+        mx0 < cx1 && mx1 > cx0 && my0 < cy1 && my1 > cy0
     }
 
     /// Resolve a soft mask dictionary into a SoftMask.
