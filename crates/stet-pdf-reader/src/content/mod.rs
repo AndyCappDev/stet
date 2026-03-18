@@ -1939,13 +1939,22 @@ impl<'a> ContentInterpreter<'a> {
             (sample_data, color_space)
         };
 
-        // Handle explicit stencil mask (/Mask pointing to 1-bit ImageMask stream)
-        let (sample_data, color_space) = if let Some(mask_alpha) = explicit_mask_data {
+        // Handle explicit stencil mask (/Mask pointing to 1-bit ImageMask stream).
+        // When the mask is larger than the image (MRC scanned PDFs), upscale the
+        // image to the mask dimensions so the high-res edge detail is preserved.
+        let (sample_data, color_space, width, height) = if let Some((mask_alpha, mw, mh)) = explicit_mask_data {
+            let (img_data, img_w, img_h) = if mw > width || mh > height {
+                // Upscale image to mask dimensions using bilinear interpolation
+                let upscaled = bilinear_upsample_image(&sample_data, width, height, mw, mh, &color_space);
+                (upscaled, mw, mh)
+            } else {
+                (sample_data, width, height)
+            };
             let rgba =
-                merge_rgb_with_smask(&sample_data, &mask_alpha, &color_space, width, height, Some(&self.icc_cache));
-            (rgba, ImageColorSpace::PreconvertedRGBA)
+                merge_rgb_with_smask(&img_data, &mask_alpha, &color_space, img_w, img_h, Some(&self.icc_cache));
+            (rgba, ImageColorSpace::PreconvertedRGBA, img_w, img_h)
         } else {
-            (sample_data, color_space)
+            (sample_data, color_space, width, height)
         };
 
         // Apply transfer functions to image pixel data (colorizes grayscale charts etc.)
@@ -1962,6 +1971,9 @@ impl<'a> ContentInterpreter<'a> {
             sample_data
         };
 
+        // Recompute image_matrix if dimensions changed (e.g. upscaled to match mask)
+        let image_matrix =
+            Matrix::new(width as f64, 0.0, 0.0, -(height as f64), 0.0, height as f64);
         self.display_list.push(DisplayElement::Image {
             sample_data,
             params: ImageParams {
@@ -2043,13 +2055,16 @@ impl<'a> ContentInterpreter<'a> {
     }
 
     /// Resolve an explicit stencil mask (/Mask stream ref) from an image dict.
-    /// Returns 8-bit alpha data (255 = opaque, 0 = transparent).
+    /// Returns (alpha_data, mask_width, mask_height).
+    /// When the mask is larger than the image, returns the mask at its native
+    /// resolution so the caller can upscale the image to match (preserving the
+    /// high-resolution edge detail from MRC scanned PDFs).
     fn resolve_explicit_mask(
         &self,
         dict: &PdfDict,
         image_w: u32,
         image_h: u32,
-    ) -> Result<Option<Vec<u8>>, PdfError> {
+    ) -> Result<Option<(Vec<u8>, u32, u32)>, PdfError> {
         let mask_ref = match dict.get(b"Mask") {
             Some(obj) => obj.clone(),
             None => return Ok(None),
@@ -2098,19 +2113,50 @@ impl<'a> ContentInterpreter<'a> {
             }
         }
 
-        // Resample if mask dimensions differ from image dimensions
+        // When mask is larger than the image, return it at native resolution.
+        // The caller will upscale the image to match, preserving the mask's
+        // high-resolution edge detail (critical for MRC scanned PDFs).
+        // When mask is smaller, area-average downsample to image dimensions.
         if mw == image_w && mh == image_h {
-            Ok(Some(alpha))
+            Ok(Some((alpha, mw, mh)))
+        } else if mw >= image_w && mh >= image_h {
+            // Mask is larger — return at native resolution
+            Ok(Some((alpha, mw, mh)))
         } else {
+            // Mask is smaller — area-average resample to image dimensions
             let mut resampled = vec![0u8; (image_w * image_h) as usize];
+            let ratio_x = mw as f32 / image_w as f32;
+            let ratio_y = mh as f32 / image_h as f32;
             for y in 0..image_h {
-                let sy = (y as u64 * mh as u64 / image_h as u64) as u32;
+                let top_f = y as f32 * ratio_y;
+                let bottom_f = (y + 1) as f32 * ratio_y;
+                let top = (top_f as u32).min(mh - 1);
+                let bottom = (bottom_f.ceil() as u32).min(mh);
                 for x in 0..image_w {
-                    let sx = (x as u64 * mw as u64 / image_w as u64) as u32;
-                    resampled[(y * image_w + x) as usize] = alpha[(sy * mw + sx) as usize];
+                    let left_f = x as f32 * ratio_x;
+                    let right_f = (x + 1) as f32 * ratio_x;
+                    let left = (left_f as u32).min(mw - 1);
+                    let right = (right_f.ceil() as u32).min(mw);
+                    let mut sum = 0.0f32;
+                    let mut weight = 0.0f32;
+                    for sy in top..bottom {
+                        let py_top = sy as f32;
+                        let py_bot = (sy + 1) as f32;
+                        let wy = py_bot.min(bottom_f) - py_top.max(top_f);
+                        for sx in left..right {
+                            let px_left = sx as f32;
+                            let px_right = (sx + 1) as f32;
+                            let wx = px_right.min(right_f) - px_left.max(left_f);
+                            let w = wx * wy;
+                            sum += alpha[(sy * mw + sx) as usize] as f32 * w;
+                            weight += w;
+                        }
+                    }
+                    resampled[(y * image_w + x) as usize] =
+                        if weight > 0.0 { (sum / weight + 0.5).min(255.0) as u8 } else { 0 };
                 }
             }
-            Ok(Some(resampled))
+            Ok(Some((resampled, image_w, image_h)))
         }
     }
 
@@ -3406,6 +3452,59 @@ fn expand_inline_value(name: &[u8]) -> Vec<u8> {
         b"DCT" => b"DCTDecode".to_vec(),
         _ => name.to_vec(),
     }
+}
+
+/// Bilinear upsample of image data to target dimensions.
+/// Used when an explicit mask is higher resolution than the image (MRC PDFs).
+fn bilinear_upsample_image(
+    data: &[u8],
+    sw: u32,
+    sh: u32,
+    dw: u32,
+    dh: u32,
+    cs: &ImageColorSpace,
+) -> Vec<u8> {
+    let n = cs.num_components() as usize;
+    if n == 0 || sw == 0 || sh == 0 || dw == 0 || dh == 0 {
+        return data.to_vec();
+    }
+    let src_stride = sw as usize * n;
+    let dst_stride = dw as usize * n;
+    let mut out = vec![0u8; dst_stride * dh as usize];
+
+    for dy in 0..dh as usize {
+        let sy = (dy as f32 + 0.5) * sh as f32 / dh as f32 - 0.5;
+        let sy0 = (sy.floor() as i32).clamp(0, sh as i32 - 1) as usize;
+        let sy1 = (sy0 + 1).min(sh as usize - 1);
+        let fy = sy - sy0 as f32;
+
+        for dx in 0..dw as usize {
+            let sx = (dx as f32 + 0.5) * sw as f32 / dw as f32 - 0.5;
+            let sx0 = (sx.floor() as i32).clamp(0, sw as i32 - 1) as usize;
+            let sx1 = (sx0 + 1).min(sw as usize - 1);
+            let fx = sx - sx0 as f32;
+
+            let w00 = (1.0 - fx) * (1.0 - fy);
+            let w10 = fx * (1.0 - fy);
+            let w01 = (1.0 - fx) * fy;
+            let w11 = fx * fy;
+
+            let i00 = sy0 * src_stride + sx0 * n;
+            let i10 = sy0 * src_stride + sx1 * n;
+            let i01 = sy1 * src_stride + sx0 * n;
+            let i11 = sy1 * src_stride + sx1 * n;
+
+            let di = dy * dst_stride + dx * n;
+            for c in 0..n {
+                let v = data[i00 + c] as f32 * w00
+                    + data[i10 + c] as f32 * w10
+                    + data[i01 + c] as f32 * w01
+                    + data[i11 + c] as f32 * w11;
+                out[di + c] = (v + 0.5).clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+    out
 }
 
 /// Expand image sample data from arbitrary BPC to 8-bit.

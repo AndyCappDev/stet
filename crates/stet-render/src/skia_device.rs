@@ -1026,66 +1026,181 @@ fn box_resample(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
     if dw == 0 || dh == 0 {
         return Vec::new();
     }
-    // Pass 1: horizontal (sw → dw) using column prefix sums per row.
-    let ratio_x = sw as f64 / dw as f64;
-    let mut tmp = vec![0u32; dw as usize * sh as usize * 4];
-    let tmp_stride = dw as usize * 4;
+    let (sw, sh, dw, dh) = (sw as usize, sh as usize, dw as usize, dh as usize);
 
-    for y in 0..sh as usize {
-        let row_off = y * sw as usize * 4;
-        // Build prefix sums for this row (one extra element at index 0 = 0).
-        // To avoid a separate allocation per row, compute on the fly.
-        for dx in 0..dw as usize {
-            let left_f = dx as f64 * ratio_x;
-            let right_f = (dx + 1) as f64 * ratio_x;
-            let left = left_f as usize;
-            let right = (right_f as usize).min(sw as usize);
-            let count = (right - left).max(1) as u32;
-            let (mut r, mut g, mut b, mut a) = (0u32, 0u32, 0u32, 0u32);
+    // Pass 1: horizontal (sw → dw) with fractional edge weights.
+    // Each output pixel covers [left_f, right_f] in source space. Edge source
+    // pixels get proportional weight; interior pixels get weight 1.0.
+    let ratio_x = sw as f32 / dw as f32;
+    let mut tmp = vec![0.0f32; dw * sh * 4];
+    let tmp_stride = dw * 4;
+
+    for y in 0..sh {
+        let row_off = y * sw * 4;
+        let dst_row = y * tmp_stride;
+        for dx in 0..dw {
+            let left_f = dx as f32 * ratio_x;
+            let right_f = (dx + 1) as f32 * ratio_x;
+            let left = (left_f as usize).min(sw - 1);
+            let right = (right_f.ceil() as usize).min(sw);
+            let inv_area = 1.0 / (right_f - left_f);
+            let (mut r, mut g, mut b, mut a) = (0.0f32, 0.0, 0.0, 0.0);
             for sx in left..right {
+                // Weight: fraction of this source pixel covered by the output pixel
+                let pixel_left = sx as f32;
+                let pixel_right = (sx + 1) as f32;
+                let w = pixel_right.min(right_f) - pixel_left.max(left_f);
                 let i = row_off + sx * 4;
-                r += src[i] as u32;
-                g += src[i + 1] as u32;
-                b += src[i + 2] as u32;
-                a += src[i + 3] as u32;
+                r += src[i] as f32 * w;
+                g += src[i + 1] as f32 * w;
+                b += src[i + 2] as f32 * w;
+                a += src[i + 3] as f32 * w;
             }
-            let di = y * tmp_stride + dx * 4;
-            tmp[di] = (r + count / 2) / count;
-            tmp[di + 1] = (g + count / 2) / count;
-            tmp[di + 2] = (b + count / 2) / count;
-            tmp[di + 3] = (a + count / 2) / count;
+            let di = dst_row + dx * 4;
+            tmp[di] = r * inv_area;
+            tmp[di + 1] = g * inv_area;
+            tmp[di + 2] = b * inv_area;
+            tmp[di + 3] = a * inv_area;
         }
     }
 
-    // Pass 2: vertical (sh → dh) on the horizontally-resampled tmp.
-    let ratio_y = sh as f64 / dh as f64;
-    let mut out = vec![0u8; dw as usize * dh as usize * 4];
-    let out_stride = dw as usize * 4;
+    // Pass 2: vertical (sh → dh) with fractional edge weights, row-major order.
+    let ratio_y = sh as f32 / dh as f32;
+    let mut out = vec![0u8; dw * dh * 4];
+    let out_stride = dw * 4;
 
-    for x in 0..dw as usize {
-        for dy in 0..dh as usize {
-            let top_f = dy as f64 * ratio_y;
-            let bottom_f = (dy + 1) as f64 * ratio_y;
-            let top = top_f as usize;
-            let bottom = (bottom_f as usize).min(sh as usize);
-            let count = (bottom - top).max(1) as u32;
-            let (mut r, mut g, mut b, mut a) = (0u32, 0u32, 0u32, 0u32);
-            for sy in top..bottom {
-                let i = sy * tmp_stride + x * 4;
-                r += tmp[i];
-                g += tmp[i + 1];
-                b += tmp[i + 2];
-                a += tmp[i + 3];
+    for dy in 0..dh {
+        let top_f = dy as f32 * ratio_y;
+        let bottom_f = (dy + 1) as f32 * ratio_y;
+        let top = (top_f as usize).min(sh - 1);
+        let bottom = (bottom_f.ceil() as usize).min(sh);
+        let inv_area = 1.0 / (bottom_f - top_f);
+
+        // Pre-compute row weights
+        let mut row_weights: [(usize, f32); 8] = [(0, 0.0); 8];
+        let n_rows = bottom - top;
+        for (i, sy) in (top..bottom).enumerate() {
+            let pixel_top = sy as f32;
+            let pixel_bottom = (sy + 1) as f32;
+            let w = pixel_bottom.min(bottom_f) - pixel_top.max(top_f);
+            if i < 8 {
+                row_weights[i] = (sy, w);
             }
-            let di = dy * out_stride + x * 4;
-            out[di] = ((r + count / 2) / count) as u8;
-            out[di + 1] = ((g + count / 2) / count) as u8;
-            out[di + 2] = ((b + count / 2) / count) as u8;
-            out[di + 3] = ((a + count / 2) / count) as u8;
+        }
+
+        let dst_row = dy * out_stride;
+        for dx in 0..dw {
+            let col = dx * 4;
+            let (mut r, mut g, mut b, mut a) = (0.0f32, 0.0, 0.0, 0.0);
+            for &(sy, w) in &row_weights[..n_rows.min(8)] {
+                let i = sy * tmp_stride + col;
+                r += tmp[i] * w;
+                g += tmp[i + 1] * w;
+                b += tmp[i + 2] * w;
+                a += tmp[i + 3] * w;
+            }
+            let di = dst_row + col;
+            out[di] = (r * inv_area + 0.5).clamp(0.0, 255.0) as u8;
+            out[di + 1] = (g * inv_area + 0.5).clamp(0.0, 255.0) as u8;
+            out[di + 2] = (b * inv_area + 0.5).clamp(0.0, 255.0) as u8;
+            out[di + 3] = (a * inv_area + 0.5).clamp(0.0, 255.0) as u8;
         }
     }
 
     out
+}
+
+/// Bicubic (Catmull-Rom) resample for upscaling — two-pass separable.
+///
+/// Pass 1: horizontal resample (sw → dw) at f32 precision.
+/// Pass 2: vertical resample (sh → dh) and quantize to u8.
+///
+/// Separable approach: O(dw×sh + dw×dh) × 4 taps instead of O(dw×dh) × 16 taps.
+fn bicubic_resample(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
+    if dw == 0 || dh == 0 {
+        return Vec::new();
+    }
+
+    let (sw, sh, dw, dh) = (sw as usize, sh as usize, dw as usize, dh as usize);
+    let ratio_x = sw as f32 / dw as f32;
+    let ratio_y = sh as f32 / dh as f32;
+
+    // Pass 1: horizontal (sw → dw), keep sh rows, store as f32.
+    let mut tmp = vec![0.0f32; dw * sh * 4];
+    for y in 0..sh {
+        let src_row = y * sw * 4;
+        let dst_row = y * dw * 4;
+        for dx in 0..dw {
+            let sx = (dx as f32 + 0.5) * ratio_x - 0.5;
+            let sx_floor = sx.floor() as i32;
+            let fx = sx - sx_floor as f32;
+            let w0 = catmull_rom(fx + 1.0);
+            let w1 = catmull_rom(fx);
+            let w2 = catmull_rom(1.0 - fx);
+            let w3 = catmull_rom(2.0 - fx);
+            let (mut r, mut g, mut b, mut a) = (0.0f32, 0.0, 0.0, 0.0);
+            for (k, w) in [(sx_floor - 1, w0), (sx_floor, w1), (sx_floor + 1, w2), (sx_floor + 2, w3)] {
+                let px = k.clamp(0, sw as i32 - 1) as usize;
+                let i = src_row + px * 4;
+                r += src[i] as f32 * w;
+                g += src[i + 1] as f32 * w;
+                b += src[i + 2] as f32 * w;
+                a += src[i + 3] as f32 * w;
+            }
+            let di = dst_row + dx * 4;
+            tmp[di] = r;
+            tmp[di + 1] = g;
+            tmp[di + 2] = b;
+            tmp[di + 3] = a;
+        }
+    }
+
+    // Pass 2: vertical (sh → dh) on the dw-wide tmp, quantize to u8.
+    // Row-major order for cache-friendly access.
+    let mut out = vec![0u8; dw * dh * 4];
+    let tmp_stride = dw * 4;
+    let out_stride = dw * 4;
+    for dy in 0..dh {
+        let sy = (dy as f32 + 0.5) * ratio_y - 0.5;
+        let sy_floor = sy.floor() as i32;
+        let fy = sy - sy_floor as f32;
+        let w0 = catmull_rom(fy + 1.0);
+        let w1 = catmull_rom(fy);
+        let w2 = catmull_rom(1.0 - fy);
+        let w3 = catmull_rom(2.0 - fy);
+        let py0 = (sy_floor - 1).clamp(0, sh as i32 - 1) as usize * tmp_stride;
+        let py1 = sy_floor.clamp(0, sh as i32 - 1) as usize * tmp_stride;
+        let py2 = (sy_floor + 1).clamp(0, sh as i32 - 1) as usize * tmp_stride;
+        let py3 = (sy_floor + 2).clamp(0, sh as i32 - 1) as usize * tmp_stride;
+        let dst_row = dy * out_stride;
+        for dx in 0..dw {
+            let col = dx * 4;
+            let r = tmp[py0 + col] * w0 + tmp[py1 + col] * w1 + tmp[py2 + col] * w2 + tmp[py3 + col] * w3;
+            let g = tmp[py0 + col + 1] * w0 + tmp[py1 + col + 1] * w1 + tmp[py2 + col + 1] * w2 + tmp[py3 + col + 1] * w3;
+            let b = tmp[py0 + col + 2] * w0 + tmp[py1 + col + 2] * w1 + tmp[py2 + col + 2] * w2 + tmp[py3 + col + 2] * w3;
+            let a = tmp[py0 + col + 3] * w0 + tmp[py1 + col + 3] * w1 + tmp[py2 + col + 3] * w2 + tmp[py3 + col + 3] * w3;
+            let di = dst_row + col;
+            out[di] = r.round().clamp(0.0, 255.0) as u8;
+            out[di + 1] = g.round().clamp(0.0, 255.0) as u8;
+            out[di + 2] = b.round().clamp(0.0, 255.0) as u8;
+            out[di + 3] = a.round().clamp(0.0, 255.0) as u8;
+        }
+    }
+
+    out
+}
+
+/// Catmull-Rom spline weight (a = -0.5).
+#[inline]
+fn catmull_rom(t: f32) -> f32 {
+    let t = t.abs();
+    if t < 1.0 {
+        (1.5 * t - 2.5) * t * t + 1.0
+    } else if t < 2.0 {
+        ((-0.5 * t + 2.5) * t - 4.0) * t + 2.0
+    } else {
+        0.0
+    }
 }
 
 /// Pre-downsample an image when the transform indicates significant downscaling.
@@ -1514,6 +1629,22 @@ fn apply_mask_color_rgba(rgba: &mut [u8], sample_data: &[u8], params: &ImagePara
     }
 }
 
+/// Choose filter quality for image drawing.
+///
+/// Use Nearest only for exact 1:1 pixel mapping (no scaling). For any scaling
+/// (up or down), Bilinear produces much better results — especially for scanned
+/// document bitmaps and low-DPI images.
+fn image_filter_quality(transform: Transform) -> stet_tiny_skia::FilterQuality {
+    let eff_sx = (transform.sx * transform.sx + transform.ky * transform.ky).sqrt();
+    let eff_sy = (transform.kx * transform.kx + transform.sy * transform.sy).sqrt();
+    // Near-exact 1:1: Nearest is pixel-perfect and faster
+    if (eff_sx - 1.0).abs() < 0.01 && (eff_sy - 1.0).abs() < 0.01 {
+        stet_tiny_skia::FilterQuality::Nearest
+    } else {
+        stet_tiny_skia::FilterQuality::Bilinear
+    }
+}
+
 /// For rotated/sheared transforms: integer box-filter pre-downsample, leaving
 /// the fractional remainder to tiny-skia's bilinear.
 ///
@@ -1529,9 +1660,34 @@ fn prescale_image(
     let scale_y = (transform.kx * transform.kx + transform.sy * transform.sy).sqrt();
     let min_scale = scale_x.min(scale_y);
 
-    // Pre-scale any image that's being downscaled. Lanczos3 produces much
-    // better results than tiny-skia's bilinear for text, bitmap fonts, and
-    // detailed images — especially at fit-to-screen zoom levels.
+    // Upscaling: use bicubic resampling for axis-aligned images.
+    // tiny-skia's bilinear produces soft, noisy results when upscaling scanned
+    // document images (e.g. 150 DPI source at 300 DPI output). Bicubic (Catmull-Rom)
+    // is much sharper — matching GhostScript / Firefox quality.
+    if min_scale > 1.05 {
+        let is_axis_aligned = transform.kx.abs() < 1e-4 && transform.ky.abs() < 1e-4;
+        if is_axis_aligned && w >= 2 && h >= 2 {
+            let dw = (w as f32 * transform.sx.abs()).round().max(1.0) as u32;
+            let dh = (h as f32 * transform.sy.abs()).round().max(1.0) as u32;
+            if dw > w || dh > h {
+                let resampled = bicubic_resample(rgba_data, w, h, dw, dh);
+                let new_sx = transform.sx * w as f32 / dw as f32;
+                let new_sy = transform.sy * h as f32 / dh as f32;
+                let adjusted = Transform::from_row(
+                    new_sx,
+                    transform.ky,
+                    transform.kx,
+                    new_sy,
+                    transform.tx,
+                    transform.ty,
+                );
+                return Some((resampled, dw, dh, adjusted));
+            }
+        }
+        return None;
+    }
+
+    // Near 1:1 — no prescaling needed.
     if min_scale >= 0.95 {
         return None;
     }
@@ -2052,17 +2208,8 @@ fn render_element(
                         }
                     }
                 };
-                let eff_sx =
-                    (transform.sx * transform.sx + transform.ky * transform.ky).sqrt();
-                let eff_sy =
-                    (transform.kx * transform.kx + transform.sy * transform.sy).sqrt();
-                let quality = if eff_sx >= 0.9 && eff_sy >= 0.9 {
-                    stet_tiny_skia::FilterQuality::Nearest
-                } else {
-                    stet_tiny_skia::FilterQuality::Bilinear
-                };
                 let img_paint = stet_tiny_skia::PixmapPaint {
-                    quality,
+                    quality: image_filter_quality(transform),
                     opacity: params.alpha as f32,
                     blend_mode: u8_to_blend_mode(params.blend_mode),
                 };
@@ -3311,15 +3458,8 @@ impl OutputDevice for SkiaDevice {
             return;
         };
 
-        let eff_sx = (transform.sx * transform.sx + transform.ky * transform.ky).sqrt();
-        let eff_sy = (transform.kx * transform.kx + transform.sy * transform.sy).sqrt();
-        let quality = if eff_sx >= 0.9 && eff_sy >= 0.9 {
-            stet_tiny_skia::FilterQuality::Nearest
-        } else {
-            stet_tiny_skia::FilterQuality::Bilinear
-        };
         let paint = stet_tiny_skia::PixmapPaint {
-            quality,
+            quality: image_filter_quality(transform),
             opacity: params.alpha as f32,
             blend_mode: u8_to_blend_mode(params.blend_mode),
         };

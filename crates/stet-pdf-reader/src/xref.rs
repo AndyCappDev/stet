@@ -559,13 +559,48 @@ fn read_field(data: &[u8], width: usize) -> u64 {
 }
 
 /// Find the `startxref` offset near the end of the file.
+///
+/// Some PDFs have trailing garbage after `%%EOF` (e.g. embedded attachments or
+/// corrupted downloads), so we first locate the last `%%EOF` and search backwards
+/// from there. Falls back to searching the last 1024 bytes if no `%%EOF` is found.
 fn find_startxref(data: &[u8]) -> Result<usize, PdfError> {
-    // Search the last 1024 bytes for "startxref"
+    let needle = b"startxref";
+
+    // Strategy 1: Find the last %%EOF, then search backwards from it for startxref.
+    // This handles PDFs with trailing garbage after the final %%EOF.
+    let eof_marker = b"%%EOF";
+    let mut eof_pos = None;
+    for i in (0..data.len().saturating_sub(eof_marker.len())).rev() {
+        if &data[i..i + eof_marker.len()] == eof_marker {
+            eof_pos = Some(i);
+            break;
+        }
+    }
+
+    if let Some(eof) = eof_pos {
+        // Search the 1024 bytes before %%EOF for the last "startxref"
+        let search_start = eof.saturating_sub(1024);
+        let region = &data[search_start..eof];
+        let mut found = None;
+        for i in 0..region.len().saturating_sub(needle.len()) {
+            if &region[i..i + needle.len()] == needle {
+                found = Some(search_start + i);
+            }
+        }
+        if let Some(pos) = found {
+            let mut p = pos + needle.len();
+            while p < data.len() && is_whitespace(data[p]) {
+                p += 1;
+            }
+            let (offset, _) = parse_int_at(data, p)?;
+            return Ok(offset as usize);
+        }
+    }
+
+    // Strategy 2: Fall back to searching the last 1024 bytes (no %%EOF found,
+    // or startxref wasn't near the %%EOF).
     let search_start = data.len().saturating_sub(1024);
     let tail = &data[search_start..];
-
-    // Find last occurrence of "startxref"
-    let needle = b"startxref";
     let mut found = None;
     for i in 0..tail.len().saturating_sub(needle.len()) {
         if &tail[i..i + needle.len()] == needle {
@@ -574,13 +609,10 @@ fn find_startxref(data: &[u8]) -> Result<usize, PdfError> {
     }
 
     let pos = found.ok_or(PdfError::NoStartXref)?;
-
-    // Skip "startxref" + whitespace, read the offset number
     let mut p = pos + needle.len();
     while p < data.len() && is_whitespace(data[p]) {
         p += 1;
     }
-
     let (offset, _) = parse_int_at(data, p)?;
     Ok(offset as usize)
 }
@@ -623,6 +655,16 @@ mod tests {
         let data = b"%PDF-1.4\nstartxref\n1234\n%%EOF\n";
         let offset = find_startxref(data).unwrap();
         assert_eq!(offset, 1234);
+    }
+
+    #[test]
+    fn find_startxref_trailing_garbage() {
+        // Simulate a PDF with garbage data appended after %%EOF
+        let mut data = b"%PDF-1.4\nstartxref\n5678\n%%EOF\n".to_vec();
+        // Append 2000 bytes of garbage (more than the 1024-byte tail search)
+        data.extend_from_slice(&[0xFFu8; 2000]);
+        let offset = find_startxref(&data).unwrap();
+        assert_eq!(offset, 5678);
     }
 
     #[test]
