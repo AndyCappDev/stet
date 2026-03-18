@@ -128,8 +128,12 @@ pub struct PdfGraphicsState {
     pub stroke_color_space: ColorSpaceRef,
     /// Pending clip: set by W/W*, applied after next paint op.
     pub pending_clip: Option<(PsPath, FillRule)>,
-    /// Current clip path (for restoring on Q).
+    /// Current clip path (most recent, for bbox estimation).
     pub clip_path: Option<PsPath>,
+    /// Full stack of active clip paths for accurate restoration on Q.
+    /// Each entry is a (path, fill_rule) pair pushed by W/W*/push_bbox_clip.
+    /// When Q detects a clip change, it pushes InitClip + replays all saved clips.
+    pub clip_stack: Vec<(PsPath, FillRule)>,
     /// Clip version counter — incremented on each W/W* application.
     pub clip_path_version: u32,
     pub fill_alpha: f64,
@@ -191,6 +195,7 @@ impl PdfGraphicsState {
             stroke_color_space: ColorSpaceRef::DeviceGray,
             pending_clip: None,
             clip_path: None,
+            clip_stack: Vec::new(),
             clip_path_version: 0,
             fill_alpha: 1.0,
             stroke_alpha: 1.0,

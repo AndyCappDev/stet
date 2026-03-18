@@ -199,6 +199,7 @@ impl<'a> ContentInterpreter<'a> {
     pub fn reset_clip_for_annotations(&mut self) {
         self.display_list.push(DisplayElement::InitClip);
         self.gstate.clip_path = None;
+        self.gstate.clip_stack.clear();
         self.gstate.clip_path_version += 1;
     }
 
@@ -514,6 +515,7 @@ impl<'a> ContentInterpreter<'a> {
                             },
                         });
                         // Track in graphics state so Q/grestore can undo it
+                        self.gstate.clip_stack.push((clip_path.clone(), FillRule::NonZeroWinding));
                         self.gstate.clip_path = Some(clip_path);
                         self.gstate.clip_path_version += 1;
                     }
@@ -628,6 +630,7 @@ impl<'a> ContentInterpreter<'a> {
                 },
             });
             // Track the clip for restoring on Q
+            self.gstate.clip_stack.push((path.clone(), fill_rule));
             self.gstate.clip_path = Some(path);
             self.gstate.clip_path_version += 1;
         }
@@ -652,21 +655,27 @@ impl<'a> ContentInterpreter<'a> {
 
             let old_clip_version = self.gstate.clip_path_version;
             self.gstate = saved;
-            // If clip changed during the q/Q block, restore it
+            // If clip changed during the q/Q block, restore it by
+            // replaying the full clip stack (not just the last clip).
             if self.gstate.clip_path_version != old_clip_version {
-                self.display_list.push(DisplayElement::InitClip);
-                if let Some(ref clip) = self.gstate.clip_path {
-                    self.display_list.push(DisplayElement::Clip {
-                        path: clip.clone(),
-                        params: ClipParams {
-                            fill_rule: FillRule::NonZeroWinding,
-                            ctm: Matrix::identity(),
-                        },
-                    });
-                }
+                self.restore_clip_from_stack();
             }
         }
         Ok(())
+    }
+
+    /// Restore the clip state by pushing InitClip + replaying all clips from clip_stack.
+    fn restore_clip_from_stack(&mut self) {
+        self.display_list.push(DisplayElement::InitClip);
+        for (clip, fill_rule) in &self.gstate.clip_stack {
+            self.display_list.push(DisplayElement::Clip {
+                path: clip.clone(),
+                params: ClipParams {
+                    fill_rule: *fill_rule,
+                    ctm: Matrix::identity(),
+                },
+            });
+        }
     }
 
     fn op_cm(&mut self) -> Result<(), PdfError> {
@@ -2296,16 +2305,7 @@ impl<'a> ContentInterpreter<'a> {
             self.gstate = saved;
             // For non-group forms, restore clip if it changed
             if !is_transparency_group && self.gstate.clip_path_version != old_clip_version {
-                self.display_list.push(DisplayElement::InitClip);
-                if let Some(ref clip) = self.gstate.clip_path {
-                    self.display_list.push(DisplayElement::Clip {
-                        path: clip.clone(),
-                        params: ClipParams {
-                            fill_rule: FillRule::NonZeroWinding,
-                            ctm: Matrix::identity(),
-                        },
-                    });
-                }
+                self.restore_clip_from_stack();
             }
         }
 
@@ -2373,6 +2373,9 @@ impl<'a> ContentInterpreter<'a> {
                 ctm: Matrix::identity(),
             },
         });
+        self.gstate
+            .clip_stack
+            .push((clip_path.clone(), FillRule::NonZeroWinding));
         self.gstate.clip_path = Some(clip_path);
         self.gstate.clip_path_version += 1;
     }
