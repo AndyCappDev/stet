@@ -1116,6 +1116,50 @@ pub static MACROMAN_ENCODING: [&str; 256] = [
 
 /// ZapfDingbats built-in encoding (from the URW D050000L font).
 /// Used as the base encoding for symbolic ZapfDingbats fonts when no /BaseEncoding is specified.
+/// Symbol font encoding (maps character codes to Greek/mathematical symbol glyph names).
+pub static SYMBOL_ENCODING: [&str; 256] = [
+    // 0x00-0x1F: .notdef
+    ".notdef", ".notdef", ".notdef", ".notdef", ".notdef", ".notdef", ".notdef", ".notdef",
+    ".notdef", ".notdef", ".notdef", ".notdef", ".notdef", ".notdef", ".notdef", ".notdef",
+    ".notdef", ".notdef", ".notdef", ".notdef", ".notdef", ".notdef", ".notdef", ".notdef",
+    ".notdef", ".notdef", ".notdef", ".notdef", ".notdef", ".notdef", ".notdef", ".notdef",
+    // 0x20-0x3F
+    "space", "exclam", "universal", "numbersign", "existential", "percent", "ampersand", "suchthat",
+    "parenleft", "parenright", "asteriskmath", "plus", "comma", "minus", "period", "slash",
+    "zero", "one", "two", "three", "four", "five", "six", "seven",
+    "eight", "nine", "colon", "semicolon", "less", "equal", "greater", "question",
+    // 0x40-0x5F
+    "congruent", "Alpha", "Beta", "Chi", "Delta", "Epsilon", "Phi", "Gamma",
+    "Eta", "Iota", "theta1", "Kappa", "Lambda", "Mu", "Nu", "Omicron",
+    "Pi", "Theta", "Rho", "Sigma", "Tau", "Upsilon", "sigma1", "Omega",
+    "Xi", "Psi", "Zeta", "bracketleft", "therefore", "bracketright", "perpendicular", "underscore",
+    // 0x60-0x7F
+    "radicalex", "alpha", "beta", "chi", "delta", "epsilon", "phi", "gamma",
+    "eta", "iota", "phi1", "kappa", "lambda", "mu", "nu", "omicron",
+    "pi", "theta", "rho", "sigma", "tau", "upsilon", "omega1", "omega",
+    "xi", "psi", "zeta", "braceleft", "bar", "braceright", "similar", ".notdef",
+    // 0x80-0x9F: .notdef
+    ".notdef", ".notdef", ".notdef", ".notdef", ".notdef", ".notdef", ".notdef", ".notdef",
+    ".notdef", ".notdef", ".notdef", ".notdef", ".notdef", ".notdef", ".notdef", ".notdef",
+    ".notdef", ".notdef", ".notdef", ".notdef", ".notdef", ".notdef", ".notdef", ".notdef",
+    ".notdef", ".notdef", ".notdef", ".notdef", ".notdef", ".notdef", ".notdef", ".notdef",
+    // 0xA0-0xBF
+    "Euro", "Upsilon1", "minute", "lessequal", "fraction", "infinity", "florin", "club",
+    "diamond", "heart", "spade", "arrowboth", "arrowleft", "arrowup", "arrowright", "arrowdown",
+    "degree", "plusminus", "second", "greaterequal", "multiply", "proportional", "partialdiff", "bullet",
+    "divide", "notequal", "equivalence", "approxequal", "ellipsis", "arrowvertex", "arrowhorizex", "carriagereturn",
+    // 0xC0-0xDF
+    "aleph", "Ifraktur", "Rfraktur", "weierstrass", "circlemultiply", "circleplus", "emptyset", "intersection",
+    "union", "propersuperset", "reflexsuperset", "notsubset", "propersubset", "reflexsubset", "element", "notelement",
+    "angle", "gradient", "registerserif", "copyrightserif", "trademarkserif", "product", "radical", "dotmath",
+    "logicalnot", "logicaland", "logicalor", "arrowdblboth", "arrowdblleft", "arrowdblup", "arrowdblright", "arrowdbldown",
+    // 0xE0-0xFF
+    "lozenge", "angleleft", "registersans", "copyrightsans", "trademarksans", "summation", "parenlefttp", "parenleftex",
+    "parenleftbt", "bracketlefttp", "bracketleftex", "bracketleftbt", "bracelefttp", "braceleftmid", "braceleftbt", "braceex",
+    ".notdef", "angleright", "integral", "integraltp", "integralex", "integralbt", "parenrighttp", "parenrightex",
+    "parenrightbt", "bracketrighttp", "bracketrightex", "bracketrightbt", "bracerighttp", "bracerightmid", "bracerightbt", ".notdef",
+];
+
 pub static ZAPFDINGBATS_ENCODING: [&str; 256] = [
     ".notdef", ".notdef", ".notdef", ".notdef", ".notdef", ".notdef", ".notdef", ".notdef",
     ".notdef", ".notdef", ".notdef", ".notdef", ".notdef", ".notdef", ".notdef", ".notdef",

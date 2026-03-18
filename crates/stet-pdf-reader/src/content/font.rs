@@ -308,6 +308,8 @@ fn resolve_encoding(
     let base_font = font_dict.get_name(b"BaseFont").unwrap_or(b"");
     let mut base_table: &[&str; 256] = if base_font == b"ZapfDingbats" {
         &stet_fonts::encoding::ZAPFDINGBATS_ENCODING
+    } else if base_font == b"Symbol" {
+        &stet_fonts::encoding::SYMBOL_ENCODING
     } else {
         &STANDARD_ENCODING
     };
