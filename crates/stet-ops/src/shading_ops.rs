@@ -434,6 +434,7 @@ fn build_type4_shading(
                 color_space: shading_cs,
                 overprint: false,
                 painted_channels: 0,
+                color_lut: None,
             },
         });
     }
@@ -482,6 +483,7 @@ fn build_type5_shading(
                 color_space: shading_cs,
                 overprint: false,
                 painted_channels: 0,
+                color_lut: None,
             },
         });
     }

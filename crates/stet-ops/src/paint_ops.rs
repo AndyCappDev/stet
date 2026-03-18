@@ -192,6 +192,8 @@ fn push_fill_element(ctx: &mut Context, path: PsPath, fill_rule: FillRule) {
             paint_type: pat.paint_type,
             underlying_color: ctx.gstate.pattern_underlying_color.clone(),
             pattern_id,
+            device_space_tile: false,
+            flip_tile_y: false,
         };
         ctx.display_list
             .push(DisplayElement::PatternFill { params });

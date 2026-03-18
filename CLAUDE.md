@@ -54,6 +54,17 @@ cargo clippy                   # Lint
 cargo fmt                      # Format
 ```
 
+### Rendering PDFs for Debugging
+
+When rendering PDF pages for visual comparison, always use `--device png` and `--pages` to limit output:
+
+```bash
+cargo run -- --device png --pages 1 file.pdf       # Render page 1 only
+cargo run -- --device png --pages 1-3 file.pdf     # Render pages 1-3
+```
+
+Output goes to `out_page1.png`, `out_page2.png`, etc. in the current directory.
+
 ## Development Conventions
 
 ### Code Style

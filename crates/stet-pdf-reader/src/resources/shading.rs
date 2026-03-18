@@ -313,20 +313,77 @@ fn handle_mesh(
         _ => return Ok(()),
     };
 
-    // Apply shading function to expand vertex colors (e.g. 1 component → 4 CMYK)
+    // Build per-pixel color LUT for single-input function-based meshes.
+    // PDF spec says vertex colors are linearly interpolated, but for non-linear
+    // functions (e.g., stitching with thresholds), interpolating raw function
+    // inputs per-pixel then applying the function produces correct results.
+    let color_lut = if let Some(ref func) = function {
+        if n_comps == 1 {
+            // Get the color decode range (the last pair in the Decode array)
+            let d_min = decode.get(4).copied().unwrap_or(0.0);
+            let d_max = decode.get(5).copied().unwrap_or(1.0);
+            let d_range = (d_max - d_min).abs().max(1e-10);
+
+            // Sample the function at 256 evenly-spaced points
+            let lut_size = 256;
+            let mut lut = Vec::with_capacity(lut_size);
+            for i in 0..lut_size {
+                let t = i as f64 / (lut_size - 1) as f64;
+                let input = d_min + t * (d_max - d_min);
+                let components = func.evaluate(&[input]);
+                let color = components_to_device_color_icc(resolved_cs, &components, Some(icc_cache));
+                lut.push(color);
+            }
+
+            // Normalize vertex raw values to [0, 1] for LUT indexing
+            for t in &mut triangles {
+                for v in [&mut t.v0, &mut t.v1, &mut t.v2] {
+                    let raw = v.raw_components[0];
+                    let normalized = ((raw - d_min) / d_range).clamp(0.0, 1.0);
+                    v.raw_components = vec![normalized];
+                }
+            }
+
+            Some(std::sync::Arc::new(lut))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Apply shading function to expand vertex colors (for vertex DeviceColor
+    // and for renderers that don't use the LUT path)
     if let Some(ref func) = function {
-        for t in &mut triangles {
-            t.v0.raw_components = func.evaluate(&t.v0.raw_components);
-            t.v1.raw_components = func.evaluate(&t.v1.raw_components);
-            t.v2.raw_components = func.evaluate(&t.v2.raw_components);
+        if color_lut.is_some() {
+            // LUT path: evaluate function at each vertex's normalized raw value
+            // to populate vertex colors (needed by PDF output device)
+            let d_min = decode.get(4).copied().unwrap_or(0.0);
+            let d_max = decode.get(5).copied().unwrap_or(1.0);
+            for t in &mut triangles {
+                for v in [&mut t.v0, &mut t.v1, &mut t.v2] {
+                    let input = d_min + v.raw_components[0] * (d_max - d_min);
+                    let expanded = func.evaluate(&[input]);
+                    let color = components_to_device_color_icc(resolved_cs, &expanded, Some(icc_cache));
+                    v.color = color;
+                }
+            }
+        } else {
+            for t in &mut triangles {
+                t.v0.raw_components = func.evaluate(&t.v0.raw_components);
+                t.v1.raw_components = func.evaluate(&t.v1.raw_components);
+                t.v2.raw_components = func.evaluate(&t.v2.raw_components);
+            }
         }
     }
 
-    // Convert vertex colors through ICC profile
-    for t in &mut triangles {
-        t.v0.color = components_to_device_color_icc(resolved_cs, &t.v0.raw_components, Some(icc_cache));
-        t.v1.color = components_to_device_color_icc(resolved_cs, &t.v1.raw_components, Some(icc_cache));
-        t.v2.color = components_to_device_color_icc(resolved_cs, &t.v2.raw_components, Some(icc_cache));
+    if color_lut.is_none() {
+        // Convert vertex colors through ICC profile (non-LUT path)
+        for t in &mut triangles {
+            t.v0.color = components_to_device_color_icc(resolved_cs, &t.v0.raw_components, Some(icc_cache));
+            t.v1.color = components_to_device_color_icc(resolved_cs, &t.v1.raw_components, Some(icc_cache));
+            t.v2.color = components_to_device_color_icc(resolved_cs, &t.v2.raw_components, Some(icc_cache));
+        }
     }
 
     // Transform vertices through CTM
@@ -353,6 +410,7 @@ fn handle_mesh(
             color_space: cs,
             overprint: gstate.overprint,
             painted_channels: painted_channels_for_cs(resolved_cs),
+            color_lut,
         },
     });
     Ok(())

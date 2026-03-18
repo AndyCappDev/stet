@@ -2861,86 +2861,131 @@ fn render_pattern_fill(
     let sx_f = ctx.scale_x as f64;
     let sy_f = ctx.scale_y as f64;
 
-    for tv in tile_y_start..tile_y_end {
-        for tu in tile_x_start..tile_x_end {
-            let pat_offset_x = tu as f64 * params.xstep;
-            let pat_offset_y = tv as f64 * params.ystep;
+    if params.device_space_tile {
+        // Device-space tile path: tile elements have CTMs in device space
+        // (pattern matrix baked in). Use the full render_element pipeline
+        // which handles all element types (clips, soft masks, shadings,
+        // groups). For each tile position, shift the viewport origin by the
+        // tile offset in device space.
+        for tv in tile_y_start..tile_y_end {
+            for tu in tile_x_start..tile_x_end {
+                let offset_x = tu as f64 * step_ux + tv as f64 * step_vx;
+                let offset_y = tu as f64 * step_uy + tv as f64 * step_vy;
 
-            let tile_transform = Transform::from_row(
-                (pm.a * sx_f) as f32,
-                (pm.b * sy_f) as f32,
-                (pm.c * sx_f) as f32,
-                (pm.d * sy_f) as f32,
-                ((pm.a * pat_offset_x + pm.c * pat_offset_y + pm.tx - dev_vp_x) * sx_f) as f32,
-                ((pm.b * pat_offset_x + pm.d * pat_offset_y + pm.ty - dev_vp_y) * sy_f) as f32,
-            );
+                let tile_ctx = RenderContext {
+                    vp_x: ctx.vp_x - offset_x as f32,
+                    vp_y: ctx.vp_y - offset_y as f32,
+                    scale_x: ctx.scale_x,
+                    scale_y: ctx.scale_y,
+                    out_w: ctx.out_w,
+                    out_h: ctx.out_h,
+                    effective_dpi: ctx.effective_dpi,
+                    icc: ctx.icc,
+                    image_cache: None,
+                    elem_idx: 0,
+                    no_aa: ctx.no_aa,
+                };
 
-            for elem in params.tile.elements() {
-                match elem {
-                    DisplayElement::Fill { path, params: fp } => {
-                        if let Some(sp) = build_skia_path(path) {
-                            let mut paint = if params.paint_type == 1 {
-                                to_paint(&fp.color)
-                            } else {
-                                to_paint(
-                                    params
-                                        .underlying_color
-                                        .as_ref()
-                                        .unwrap_or(&DeviceColor::black()),
-                                )
-                            };
-                            paint.anti_alias = false;
-                            let t = to_transform(&fp.ctm);
-                            let combined = t.post_concat(tile_transform);
-                            let fr = to_fill_rule(&fp.fill_rule);
-                            tile_buf.fill_path(&sp, &paint, fr, combined, None);
+                let mut tile_band = BandState {
+                    clip_region: None,
+                    spare_mask: None,
+                    clip_mask_cache: HashMap::new(),
+                    clip_mask_seen: HashSet::new(),
+                    mask_pool: Vec::new(),
+                    cmyk_buffer: None,
+                };
+
+                for (idx, elem) in params.tile.elements().iter().enumerate() {
+                    let elem_ctx = RenderContext { elem_idx: idx, ..tile_ctx };
+                    render_element(&mut tile_buf, &mut tile_band, elem, &elem_ctx);
+                }
+            }
+        }
+    } else {
+        // Pattern-space tile path: tile elements have identity CTMs.
+        // Manually apply the pattern matrix + tile offset for each element.
+        // Only handles Fill, Stroke, and Image (the common PostScript cases).
+        for tv in tile_y_start..tile_y_end {
+            for tu in tile_x_start..tile_x_end {
+                let pat_offset_x = tu as f64 * params.xstep;
+                let pat_offset_y = tv as f64 * params.ystep;
+
+                let tile_transform = Transform::from_row(
+                    (pm.a * sx_f) as f32,
+                    (pm.b * sy_f) as f32,
+                    (pm.c * sx_f) as f32,
+                    (pm.d * sy_f) as f32,
+                    ((pm.a * pat_offset_x + pm.c * pat_offset_y + pm.tx - dev_vp_x) * sx_f) as f32,
+                    ((pm.b * pat_offset_x + pm.d * pat_offset_y + pm.ty - dev_vp_y) * sy_f) as f32,
+                );
+
+                for elem in params.tile.elements() {
+                    match elem {
+                        DisplayElement::Fill { path, params: fp } => {
+                            if let Some(sp) = build_skia_path(path) {
+                                let mut paint = if params.paint_type == 1 {
+                                    to_paint(&fp.color)
+                                } else {
+                                    to_paint(
+                                        params
+                                            .underlying_color
+                                            .as_ref()
+                                            .unwrap_or(&DeviceColor::black()),
+                                    )
+                                };
+                                paint.anti_alias = false;
+                                let t = to_transform(&fp.ctm);
+                                let combined = t.post_concat(tile_transform);
+                                let fr = to_fill_rule(&fp.fill_rule);
+                                tile_buf.fill_path(&sp, &paint, fr, combined, None);
+                            }
                         }
-                    }
-                    DisplayElement::Stroke { path, params: sp } => {
-                        if let Some(skp) = build_skia_path(path) {
-                            let stroke = build_stroke(sp, ctx.effective_dpi);
-                            let paint = to_paint(&sp.color);
-                            let t = to_transform(&sp.ctm);
-                            let combined = t.post_concat(tile_transform);
-                            tile_buf.stroke_path(&skp, &paint, &stroke, combined, None);
+                        DisplayElement::Stroke { path, params: sp } => {
+                            if let Some(skp) = build_skia_path(path) {
+                                let stroke = build_stroke(sp, ctx.effective_dpi);
+                                let paint = to_paint(&sp.color);
+                                let t = to_transform(&sp.ctm);
+                                let combined = t.post_concat(tile_transform);
+                                tile_buf.stroke_path(&skp, &paint, &stroke, combined, None);
+                            }
                         }
-                    }
-                    DisplayElement::Image {
-                        sample_data,
-                        params: ip,
-                    } => {
-                        let iw = ip.width;
-                        let ih = ip.height;
-                        if iw > 0 && ih > 0 {
-                            let rgba = samples_to_rgba(sample_data, ip, ctx.icc);
-                            let expected = (iw * ih * 4) as usize;
-                            if rgba.len() >= expected {
-                                if let Some(inv) = ip.image_matrix.invert() {
-                                    let combined_mat = ip.ctm.concat(&inv);
-                                    let t = to_transform(&combined_mat);
-                                    let combined = t.post_concat(tile_transform);
-                                    if let Some(img_ref) =
-                                        stet_tiny_skia::PixmapRef::from_bytes(&rgba, iw, ih)
-                                    {
-                                        let paint = stet_tiny_skia::PixmapPaint {
-                                            opacity: 1.0,
-                                            blend_mode: BlendMode::SourceOver,
-                                            quality: stet_tiny_skia::FilterQuality::Nearest,
-                                        };
-                                        tile_buf.draw_pixmap(
-                                            0,
-                                            0,
-                                            img_ref,
-                                            &paint,
-                                            combined,
-                                            None,
-                                        );
+                        DisplayElement::Image {
+                            sample_data,
+                            params: ip,
+                        } => {
+                            let iw = ip.width;
+                            let ih = ip.height;
+                            if iw > 0 && ih > 0 {
+                                let rgba = samples_to_rgba(sample_data, ip, ctx.icc);
+                                let expected = (iw * ih * 4) as usize;
+                                if rgba.len() >= expected {
+                                    if let Some(inv) = ip.image_matrix.invert() {
+                                        let combined_mat = ip.ctm.concat(&inv);
+                                        let t = to_transform(&combined_mat);
+                                        let combined = t.post_concat(tile_transform);
+                                        if let Some(img_ref) =
+                                            stet_tiny_skia::PixmapRef::from_bytes(&rgba, iw, ih)
+                                        {
+                                            let paint = stet_tiny_skia::PixmapPaint {
+                                                opacity: 1.0,
+                                                blend_mode: BlendMode::SourceOver,
+                                                quality: stet_tiny_skia::FilterQuality::Nearest,
+                                            };
+                                            tile_buf.draw_pixmap(
+                                                0,
+                                                0,
+                                                img_ref,
+                                                &paint,
+                                                combined,
+                                                None,
+                                            );
+                                        }
                                     }
                                 }
                             }
                         }
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
         }
@@ -5764,6 +5809,8 @@ fn render_mesh_shading(
     let data = pixmap.data_mut();
     let stride = pw * 4;
 
+    let lut = params.color_lut.as_deref();
+
     for tri in &params.triangles {
         let (dx0, dy0) = params.ctm.transform_point(tri.v0.x, tri.v0.y);
         let (dx1, dy1) = params.ctm.transform_point(tri.v1.x, tri.v1.y);
@@ -5821,9 +5868,33 @@ fn render_mesh_shading(
                 let w0n = w0c / wsum;
                 let w1n = w1c / wsum;
                 let w2n = w2c / wsum;
-                let r = w0n * tri.v0.color.r + w1n * tri.v1.color.r + w2n * tri.v2.color.r;
-                let g = w0n * tri.v0.color.g + w1n * tri.v1.color.g + w2n * tri.v2.color.g;
-                let b = w0n * tri.v0.color.b + w1n * tri.v1.color.b + w2n * tri.v2.color.b;
+
+                // Per-pixel color: either LUT lookup (for function-based meshes)
+                // or direct Gouraud interpolation of vertex DeviceColors.
+                let (r, g, b) = if let Some(lut) = lut {
+                    // Interpolate raw function input values per-pixel
+                    let raw = w0n * tri.v0.raw_components[0]
+                        + w1n * tri.v1.raw_components[0]
+                        + w2n * tri.v2.raw_components[0];
+                    let raw = raw.clamp(0.0, 1.0);
+                    // Linear interpolation in the LUT
+                    let fi = raw * (lut.len() - 1) as f64;
+                    let i0 = (fi as usize).min(lut.len().saturating_sub(2));
+                    let frac = fi - i0 as f64;
+                    let c0 = &lut[i0];
+                    let c1 = &lut[i0 + 1];
+                    (
+                        c0.r + frac * (c1.r - c0.r),
+                        c0.g + frac * (c1.g - c0.g),
+                        c0.b + frac * (c1.b - c0.b),
+                    )
+                } else {
+                    (
+                        w0n * tri.v0.color.r + w1n * tri.v1.color.r + w2n * tri.v2.color.r,
+                        w0n * tri.v0.color.g + w1n * tri.v1.color.g + w2n * tri.v2.color.g,
+                        w0n * tri.v0.color.b + w1n * tri.v1.color.b + w2n * tri.v2.color.b,
+                    )
+                };
 
                 // Write CMYK buffer
                 if let Some(ref mut buf) = cmyk_buf {
@@ -5938,6 +6009,7 @@ fn render_patch_shading(
             color_space: params.color_space.clone(),
             overprint: params.overprint,
             painted_channels: params.painted_channels,
+            color_lut: None,
         };
         render_mesh_shading(
             pixmap,

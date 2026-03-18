@@ -958,6 +958,8 @@ impl<'a> ContentInterpreter<'a> {
                         None
                     },
                     pattern_id: pattern.pattern_id,
+                    device_space_tile: true,
+                    flip_tile_y: pattern.flip_tile_y,
                 },
             });
         } else {
@@ -1587,6 +1589,8 @@ impl<'a> ContentInterpreter<'a> {
                         None
                     },
                     pattern_id: pattern.pattern_id,
+                    device_space_tile: true,
+                    flip_tile_y: pattern.flip_tile_y,
                 },
             });
         } else {
@@ -3240,25 +3244,36 @@ impl<'a> ContentInterpreter<'a> {
         // Form XObjects include the form's coordinate transform.
         let combined_matrix = self.content_stream_ctm.concat(&pattern_matrix);
 
-        // Interpret pattern content stream into a sub-display-list.
-        // Use identity CTM so tile paths stay in pattern space (like PostScript's
-        // makepattern). The renderer applies pattern_matrix to transform them
-        // into device space at render time.
+        // Interpret pattern content stream with the combined pattern matrix
+        // as CTM, so all elements are in device space.
         self.gstate_stack.push(self.gstate.clone());
         let saved_resources = std::mem::replace(&mut self.resources, pattern_resources);
         let saved_display_list = std::mem::take(&mut self.display_list);
+        let saved_content_stream_ctm = self.content_stream_ctm;
 
-        self.gstate.ctm = Matrix::identity();
+        self.gstate.ctm = combined_matrix;
+        self.content_stream_ctm = combined_matrix;
 
         self.depth += 1;
         let _ = self.interpret_stream(&pattern_data);
         self.depth -= 1;
 
+        // Flush any pending soft mask scope from the pattern stream
+        self.flush_soft_mask();
+
         let tile_display_list = std::mem::replace(&mut self.display_list, saved_display_list);
+        self.content_stream_ctm = saved_content_stream_ctm;
         self.resources = saved_resources;
         if let Some(saved) = self.gstate_stack.pop() {
             self.gstate = saved;
         }
+
+        // Detect Y-flip from the PDF pattern matrix (before combining with
+        // page CTM). When the pattern matrix flips Y (negative d), the tile
+        // content is designed for flipped Y. Since we interpret with identity
+        // CTM, the renderer must flip the tile vertically.
+        let flip_y = pattern_matrix.d < 0.0
+            || (pattern_matrix.d == 0.0 && pattern_matrix.b < 0.0);
 
         Ok(TilingPattern {
             tile: tile_display_list,
@@ -3268,6 +3283,7 @@ impl<'a> ContentInterpreter<'a> {
             pattern_matrix: combined_matrix,
             paint_type,
             pattern_id: 0,
+            flip_tile_y: flip_y,
         })
     }
 

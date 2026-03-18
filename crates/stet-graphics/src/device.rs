@@ -483,6 +483,11 @@ pub struct MeshShadingParams {
     pub color_space: ShadingColorSpace,
     pub overprint: bool,
     pub painted_channels: u8,
+    /// Pre-sampled color LUT for function-based mesh shadings.
+    /// When present, vertex `raw_components[0]` holds a normalized [0,1]
+    /// function input. The renderer interpolates this per-pixel, then
+    /// indexes the LUT instead of Gouraud-interpolating DeviceColor.
+    pub color_lut: Option<Arc<Vec<DeviceColor>>>,
 }
 
 /// A patch in a Coons or tensor-product patch mesh.
@@ -527,6 +532,15 @@ pub struct PatternFillParams {
     pub underlying_color: Option<DeviceColor>,
     /// Unique pattern ID from pattern_store (for dedup in PDF output).
     pub pattern_id: u32,
+    /// When true, tile display list elements have CTMs in device space
+    /// (the pattern matrix is already baked into element transforms).
+    /// When false, elements are in pattern space and the renderer applies
+    /// the pattern_matrix during rendering.
+    pub device_space_tile: bool,
+    /// When true, the tile content was designed for a Y-flipped coordinate
+    /// system (pattern matrix had negative d). The pre-rendered tile must
+    /// be vertically flipped before stamping.
+    pub flip_tile_y: bool,
 }
 
 /// Trait for consuming rendered page pixel data.
