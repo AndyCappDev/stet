@@ -12,6 +12,8 @@ use stet_fonts::charstring::{execute_charstring, execute_charstring_mm};
 use stet_fonts::encoding::{MACROMAN_ENCODING, STANDARD_ENCODING, WINANSI_ENCODING};
 use stet_fonts::geometry::{Matrix, PsPath};
 use stet_fonts::truetype::{get_glyf_data, get_units_per_em, parse_cmap, parse_glyf_to_path};
+use stet_fonts::geometry::PathSegment;
+use skrifa::MetadataProvider;
 use stet_fonts::type1_parser::parse_type1;
 use stet_fonts::type2_charstring::execute_type2_charstring;
 
@@ -1709,15 +1711,13 @@ impl Type1PdfFont {
 impl TrueTypePdfFont {
     fn glyph_path(&self, char_code: u8) -> Option<PsPath> {
         let gid = self.char_code_to_gid(char_code)?;
-        let glyf_data = get_glyf_data(&self.data, gid)?;
-        let data_clone = self.data.clone();
-        let path = parse_glyf_to_path(&glyf_data, &|component_gid| {
-            get_glyf_data(&data_clone, component_gid)
-        });
-        if path.is_empty() {
-            return None;
-        }
-        // Scale from font units to text space (÷ unitsPerEm)
+        let path = skrifa_glyph_path(&self.data, gid, self.units_per_em).or_else(|| {
+            // Fallback for locx/glyx PDF-subset fonts that skrifa can't parse
+            let glyf_data = get_glyf_data(&self.data, gid)?;
+            let data_ref = &self.data;
+            let p = parse_glyf_to_path(&glyf_data, &|cid| get_glyf_data(data_ref, cid));
+            if p.is_empty() { None } else { Some(p) }
+        })?;
         let scale = 1.0 / self.units_per_em;
         let m = Matrix::scale(scale, scale);
         Some(path.transform(&m))
@@ -1800,14 +1800,12 @@ impl CidTrueTypePdfFont {
         } else {
             cid
         };
-        let glyf_data = get_glyf_data(&self.data, gid)?;
-        let data_clone = self.data.clone();
-        let path = parse_glyf_to_path(&glyf_data, &|component_gid| {
-            get_glyf_data(&data_clone, component_gid)
-        });
-        if path.is_empty() {
-            return None;
-        }
+        let path = skrifa_glyph_path(&self.data, gid, self.units_per_em).or_else(|| {
+            let glyf_data = get_glyf_data(&self.data, gid)?;
+            let data_ref = &self.data;
+            let p = parse_glyf_to_path(&glyf_data, &|cid| get_glyf_data(data_ref, cid));
+            if p.is_empty() { None } else { Some(p) }
+        })?;
         let scale = 1.0 / self.units_per_em;
         let m = Matrix::scale(scale, scale);
         Some(path.transform(&m))
@@ -1981,5 +1979,103 @@ impl CffPdfFont {
         let shifted_accent = accent_result.path.transform(&offset);
         combined.segments.extend_from_slice(&shifted_accent.segments);
         Some(combined)
+    }
+}
+
+/// Pen adapter that converts skrifa outline callbacks into a `PsPath`.
+struct PsPathPen {
+    path: PsPath,
+    cur_x: f64,
+    cur_y: f64,
+}
+
+impl skrifa::outline::OutlinePen for PsPathPen {
+    fn move_to(&mut self, x: f32, y: f32) {
+        self.cur_x = x as f64;
+        self.cur_y = y as f64;
+        self.path.segments.push(PathSegment::MoveTo(self.cur_x, self.cur_y));
+    }
+    fn line_to(&mut self, x: f32, y: f32) {
+        self.cur_x = x as f64;
+        self.cur_y = y as f64;
+        self.path.segments.push(PathSegment::LineTo(self.cur_x, self.cur_y));
+    }
+    fn quad_to(&mut self, cx: f32, cy: f32, x: f32, y: f32) {
+        let cx = cx as f64;
+        let cy = cy as f64;
+        let ex = x as f64;
+        let ey = y as f64;
+        // Quadratic → cubic degree elevation
+        let cp1x = self.cur_x + 2.0 / 3.0 * (cx - self.cur_x);
+        let cp1y = self.cur_y + 2.0 / 3.0 * (cy - self.cur_y);
+        let cp2x = ex + 2.0 / 3.0 * (cx - ex);
+        let cp2y = ey + 2.0 / 3.0 * (cy - ey);
+        self.cur_x = ex;
+        self.cur_y = ey;
+        self.path.segments.push(PathSegment::CurveTo {
+            x1: cp1x, y1: cp1y, x2: cp2x, y2: cp2y, x3: ex, y3: ey,
+        });
+    }
+    fn curve_to(&mut self, cx0: f32, cy0: f32, cx1: f32, cy1: f32, x: f32, y: f32) {
+        self.cur_x = x as f64;
+        self.cur_y = y as f64;
+        self.path.segments.push(PathSegment::CurveTo {
+            x1: cx0 as f64, y1: cy0 as f64,
+            x2: cx1 as f64, y2: cy1 as f64,
+            x3: self.cur_x, y3: self.cur_y,
+        });
+    }
+    fn close(&mut self) {
+        self.path.segments.push(PathSegment::ClosePath);
+    }
+}
+
+/// Extract a TrueType glyph outline using skrifa with hinting enabled.
+///
+/// Hinting is needed for correct composite glyph assembly — some fonts have
+/// TrueType instructions that adjust component positions. Falls back to the
+/// hand-written parser for fonts skrifa can't handle (e.g., locx/glyx subsets).
+fn skrifa_glyph_path(font_data: &[u8], gid: u16, units_per_em: f64) -> Option<PsPath> {
+    let font_ref = skrifa::FontRef::new(font_data).ok()?;
+    let outlines = font_ref.outline_glyphs();
+    let glyph = outlines.get(skrifa::GlyphId::new(gid as u32))?;
+
+    // Use TrueType bytecode interpreter with mono hinting for correct composite
+    // glyph assembly. Some fonts have TT instructions that adjust component positions;
+    // the auto-hinter doesn't handle these correctly.
+    let hinting = skrifa::outline::HintingInstance::new(
+        &outlines,
+        skrifa::prelude::Size::new(units_per_em as f32),
+        skrifa::instance::LocationRef::default(),
+        skrifa::outline::HintingOptions {
+            engine: skrifa::outline::Engine::Interpreter,
+            target: skrifa::outline::Target::Mono,
+        },
+    )
+    .ok();
+
+    let mut pen = PsPathPen {
+        path: PsPath::new(),
+        cur_x: 0.0,
+        cur_y: 0.0,
+    };
+
+    let result = if let Some(ref instance) = hinting {
+        glyph.draw(instance, &mut pen)
+    } else {
+        glyph.draw(
+            skrifa::outline::DrawSettings::unhinted(
+                skrifa::prelude::Size::new(units_per_em as f32),
+                skrifa::instance::LocationRef::default(),
+            ),
+            &mut pen,
+        )
+    };
+
+    result.ok()?;
+    if pen.path.is_empty() {
+        None
+    } else {
+        Some(pen.path)
     }
 }

@@ -17,6 +17,7 @@ stet-render = { workspace = true, optional = true }
 hayro-jpeg2000 = { version = "0.3.4", optional = true }
 hayro-ccitt = "0.2.0"
 hayro-jbig2 = "0.1.0"
+skrifa = "0.40"
 
 [features]
 default = ["jpx", "render"]
