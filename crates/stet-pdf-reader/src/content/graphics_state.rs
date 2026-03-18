@@ -213,10 +213,15 @@ impl PdfGraphicsState {
         }
     }
 
-    /// Build FillParams from current state.
+    /// Build FillParams from current state, applying transfer functions to color.
     pub fn fill_params(&self, fill_rule: FillRule) -> FillParams {
+        let color = if self.transfer.has_functions() {
+            super::apply_transfer_to_color(&self.fill_color, &self.transfer)
+        } else {
+            self.fill_color.clone()
+        };
         FillParams {
-            color: self.fill_color.clone(),
+            color,
             fill_rule,
             ctm: Matrix::identity(),
             is_text_glyph: false,
@@ -234,15 +239,20 @@ impl PdfGraphicsState {
         }
     }
 
-    /// Build StrokeParams from current state with CTM scale applied.
+    /// Build StrokeParams from current state with CTM scale applied, applying transfer to color.
     pub fn stroke_params(&self) -> StrokeParams {
         let scale = self.ctm_scale_factor();
         let scaled_dash = DashPattern {
             array: self.dash_pattern.array.iter().map(|d| d * scale).collect(),
             offset: self.dash_pattern.offset * scale,
         };
+        let color = if self.transfer.has_functions() {
+            super::apply_transfer_to_color(&self.stroke_color, &self.transfer)
+        } else {
+            self.stroke_color.clone()
+        };
         StrokeParams {
-            color: self.stroke_color.clone(),
+            color,
             line_width: self.line_width * scale,
             line_cap: self.line_cap,
             line_join: self.line_join,
@@ -267,8 +277,13 @@ impl PdfGraphicsState {
     /// Build StrokeParams with the CTM applied by the renderer (not pre-scaled).
     /// Used for correct anisotropic strokes where the CTM has non-uniform scaling.
     pub fn stroke_params_with_ctm(&self) -> StrokeParams {
+        let color = if self.transfer.has_functions() {
+            super::apply_transfer_to_color(&self.stroke_color, &self.transfer)
+        } else {
+            self.stroke_color.clone()
+        };
         StrokeParams {
-            color: self.stroke_color.clone(),
+            color,
             line_width: self.line_width,
             line_cap: self.line_cap,
             line_join: self.line_join,

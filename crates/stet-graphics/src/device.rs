@@ -24,6 +24,19 @@ pub struct TransferState {
     pub color: Option<[Option<TransferTable>; 4]>,
 }
 
+impl TransferState {
+    /// Returns true if any non-identity transfer function is set.
+    pub fn has_functions(&self) -> bool {
+        if self.gray.is_some() {
+            return true;
+        }
+        if let Some(ref color) = self.color {
+            return color.iter().any(|t| t.is_some());
+        }
+        false
+    }
+}
+
 /// A pre-computed halftone screen for PDF output.
 #[derive(Clone, Debug)]
 pub struct HalftoneScreen {

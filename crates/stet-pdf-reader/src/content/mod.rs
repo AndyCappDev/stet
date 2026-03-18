@@ -1923,6 +1923,20 @@ impl<'a> ContentInterpreter<'a> {
             (sample_data, color_space)
         };
 
+        // Apply transfer functions to image pixel data (colorizes grayscale charts etc.)
+        let sample_data = if !is_image_mask && self.gstate.transfer.has_functions() {
+            let n_comps = color_space.num_components() as usize;
+            if n_comps >= 3 {
+                let mut data = sample_data;
+                apply_transfer_to_image(&mut data, &self.gstate.transfer, n_comps);
+                data
+            } else {
+                sample_data
+            }
+        } else {
+            sample_data
+        };
+
         self.display_list.push(DisplayElement::Image {
             sample_data,
             params: ImageParams {
@@ -3620,4 +3634,95 @@ fn sample_transfer_function(func: &crate::resources::function::PdfFunction) -> V
             result.first().copied().unwrap_or(t).clamp(0.0, 1.0)
         })
         .collect()
+}
+
+/// Apply transfer functions to RGB image pixel data (in-place).
+///
+/// `data` is interleaved RGB (3 bytes per pixel) or RGBA (4 bytes per pixel).
+/// Transfer tables are 256-sample [0,1]→[0,1] lookup tables.
+fn apply_transfer_to_image(
+    data: &mut [u8],
+    transfer: &stet_graphics::device::TransferState,
+    components: usize,
+) {
+    // Build 256-entry u8 lookup tables for each RGB channel
+    let (r_table, g_table, b_table) = if let Some(ref color) = transfer.color {
+        // Per-component transfer: [R, G, B, Gray]
+        let r = build_u8_lut(color[0].as_ref().map(|v| &v[..]));
+        let g = build_u8_lut(color[1].as_ref().map(|v| &v[..]));
+        let b = build_u8_lut(color[2].as_ref().map(|v| &v[..]));
+        (r, g, b)
+    } else if let Some(ref gray) = transfer.gray {
+        // Single function applied to all channels
+        let lut = build_u8_lut(Some(&gray[..]));
+        (lut, lut, lut)
+    } else {
+        return; // Identity — nothing to do
+    };
+
+    // Apply LUT per channel
+    let stride = components;
+    for pixel in data.chunks_exact_mut(stride) {
+        if pixel.len() >= 3 {
+            pixel[0] = r_table[pixel[0] as usize];
+            pixel[1] = g_table[pixel[1] as usize];
+            pixel[2] = b_table[pixel[2] as usize];
+        }
+    }
+}
+
+/// Apply transfer functions to a DeviceColor (fill/stroke).
+fn apply_transfer_to_color(
+    color: &DeviceColor,
+    transfer: &stet_graphics::device::TransferState,
+) -> DeviceColor {
+    if let Some(ref color_tables) = transfer.color {
+        // Per-component transfer: [R, G, B, Gray]
+        let r = apply_transfer_component(color.r, color_tables[0].as_ref().map(|v| &v[..]));
+        let g = apply_transfer_component(color.g, color_tables[1].as_ref().map(|v| &v[..]));
+        let b = apply_transfer_component(color.b, color_tables[2].as_ref().map(|v| &v[..]));
+        DeviceColor::from_rgb(r, g, b)
+    } else if let Some(ref gray) = transfer.gray {
+        let r = apply_transfer_component(color.r, Some(&gray[..]));
+        let g = apply_transfer_component(color.g, Some(&gray[..]));
+        let b = apply_transfer_component(color.b, Some(&gray[..]));
+        DeviceColor::from_rgb(r, g, b)
+    } else {
+        color.clone()
+    }
+}
+
+/// Look up a single f64 component [0,1] through a transfer table.
+fn apply_transfer_component(value: f64, table: Option<&[f64]>) -> f64 {
+    match table {
+        None => value,
+        Some(t) if t.len() != 256 => value,
+        Some(t) => {
+            let idx = (value * 255.0).clamp(0.0, 255.0);
+            let lo = idx.floor() as usize;
+            let hi = (lo + 1).min(255);
+            let frac = idx - lo as f64;
+            let v0 = t[lo];
+            let v1 = t[hi];
+            (v0 + frac * (v1 - v0)).clamp(0.0, 1.0)
+        }
+    }
+}
+
+/// Build a 256-entry u8 lookup table from a transfer table.
+fn build_u8_lut(table: Option<&[f64]>) -> [u8; 256] {
+    let mut lut = [0u8; 256];
+    match table {
+        Some(t) if t.len() == 256 => {
+            for (i, v) in lut.iter_mut().enumerate() {
+                *v = (t[i].clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+            }
+        }
+        _ => {
+            for (i, v) in lut.iter_mut().enumerate() {
+                *v = i as u8;
+            }
+        }
+    }
+    lut
 }
