@@ -762,13 +762,64 @@ fn apply_predictor(data: &[u8], parms: &PdfDict, predictor: i64) -> Result<Vec<u
 
     if predictor == 2 {
         // TIFF horizontal differencing
-        apply_tiff_predictor(data, row_bytes, bytes_per_pixel)
+        if bpc < 8 {
+            // Sub-byte samples: operate at sample level, not byte level
+            apply_tiff_predictor_subbyte(data, columns, colors, bpc, row_bytes)
+        } else {
+            apply_tiff_predictor(data, row_bytes, bytes_per_pixel)
+        }
     } else if predictor >= 10 {
         // PNG predictors
         apply_png_predictor(data, row_bytes, bytes_per_pixel)
     } else {
         Ok(data.to_vec())
     }
+}
+
+/// TIFF predictor 2 for sub-byte samples (BPC = 1, 2, or 4).
+/// Operates at the individual sample level within packed bytes.
+fn apply_tiff_predictor_subbyte(
+    data: &[u8],
+    columns: usize,
+    colors: usize,
+    bpc: usize,
+    row_bytes: usize,
+) -> Result<Vec<u8>, PdfError> {
+    let samples_per_row = columns * colors;
+    let mask = (1u8 << bpc) - 1; // e.g., 1 for bpc=1, 3 for bpc=2, 15 for bpc=4
+    let mut result = Vec::with_capacity(data.len());
+
+    for row in data.chunks(row_bytes) {
+        let mut out_row = vec![0u8; row.len()];
+        // Copy the raw bytes first, then undo differencing at sample level
+        out_row[..row.len()].copy_from_slice(row);
+
+        // Extract all samples, undo differencing, re-pack
+        let mut prev = vec![0u8; colors];
+        for col in 0..columns {
+            for c in 0..colors {
+                let sample_idx = col * colors + c;
+                if sample_idx >= samples_per_row {
+                    break;
+                }
+                let bit_offset = sample_idx * bpc;
+                let byte_idx = bit_offset / 8;
+                let bit_pos = 8 - bpc - (bit_offset % 8); // MSB-first packing
+                if byte_idx >= row.len() {
+                    break;
+                }
+                let encoded = (row[byte_idx] >> bit_pos) & mask;
+                let decoded = (encoded.wrapping_add(prev[c])) & mask;
+                prev[c] = decoded;
+                // Write back
+                out_row[byte_idx] = (out_row[byte_idx] & !(mask << bit_pos))
+                    | (decoded << bit_pos);
+            }
+        }
+        result.extend_from_slice(&out_row);
+    }
+
+    Ok(result)
 }
 
 /// TIFF predictor 2: horizontal differencing.
