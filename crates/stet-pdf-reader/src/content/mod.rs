@@ -1463,7 +1463,14 @@ impl<'a> ContentInterpreter<'a> {
         // Save current state and swap in a fresh display list.
         let stack_depth_before = self.gstate_stack.len();
         self.gstate_stack.push(self.gstate.clone());
-        let saved_resources = std::mem::replace(&mut self.resources, resources);
+        // Use the Type 3 font's resources if it has a /Font sub-dict;
+        // otherwise keep the current (page) resources so that CharProcs
+        // can reference fonts from the enclosing context.
+        let saved_resources = if resources.get(b"Font").is_some() {
+            std::mem::replace(&mut self.resources, resources)
+        } else {
+            self.resources.clone()
+        };
         let saved_display_list = std::mem::take(&mut self.display_list);
         let saved_path = std::mem::take(&mut self.current_path);
         let saved_point = self.current_point.take();
