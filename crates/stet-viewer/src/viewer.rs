@@ -74,6 +74,8 @@ pub struct ViewerApp {
     fullpage_receiver: Option<std::sync::mpsc::Receiver<FullPageRenderResult>>,
     /// Scale of in-flight full-page render (to detect stale results on zoom).
     fullpage_inflight_scale: Option<(f32, f32)>,
+    /// When the full-page render was spawned (for delayed indicator).
+    fullpage_started: Option<Instant>,
 }
 
 /// Result from a full-page background render.
@@ -212,6 +214,7 @@ impl ViewerApp {
             inflight_params: None,
             fullpage_receiver: None,
             fullpage_inflight_scale: None,
+            fullpage_started: None,
         }
     }
 
@@ -707,6 +710,7 @@ impl ViewerApp {
         let (tx, rx) = std::sync::mpsc::channel();
         self.fullpage_receiver = Some(rx);
         self.fullpage_inflight_scale = Some((effective_scale, ppp));
+        self.fullpage_started = Some(Instant::now());
 
         let egui_ctx = ctx.clone();
         // Use std::thread (not rayon) so it doesn't compete with viewport renders
@@ -744,6 +748,7 @@ impl ViewerApp {
                     }
                     self.fullpage_receiver = None;
                     self.fullpage_inflight_scale = None;
+                    self.fullpage_started = None;
                 }
                 Err(TryRecvError::Empty) => {
                     ctx.request_repaint();
@@ -751,6 +756,7 @@ impl ViewerApp {
                 Err(TryRecvError::Disconnected) => {
                     self.fullpage_receiver = None;
                     self.fullpage_inflight_scale = None;
+                    self.fullpage_started = None;
                 }
             }
         }
@@ -1363,6 +1369,28 @@ impl eframe::App for ViewerApp {
                         egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                         egui::Color32::WHITE,
                     );
+                }
+
+                // Pulsing indicator while full-page buffer renders in background
+                // (only shown after 1 second to avoid flashing on fast pages)
+                if self.fullpage_receiver.is_some()
+                    && self.fullpage_started.is_some_and(|t| t.elapsed() >= Duration::from_secs(1))
+                {
+                    let t = ctx.input(|i| i.time) as f32;
+                    let on = (t % 1.0) < 0.5;
+                    let alpha = if on { 255u8 } else { 0u8 };
+                    let bar_h = 6.0;
+                    let origin = ui.min_rect().min;
+                    let bar_rect = egui::Rect::from_min_size(
+                        egui::pos2(origin.x, origin.y + available.y - bar_h),
+                        egui::vec2(available.x, bar_h),
+                    );
+                    ui.painter().rect_filled(
+                        bar_rect,
+                        0.0,
+                        egui::Color32::from_rgba_unmultiplied(255, 50, 50, alpha),
+                    );
+                    ctx.request_repaint_after(Duration::from_millis(50));
                 }
 
                 // Minimap overlay (when zoomed in)

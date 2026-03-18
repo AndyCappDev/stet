@@ -5595,6 +5595,84 @@ pub fn render_region_prepared_parallel(
     result
 }
 
+/// Like [`render_region_prepared_parallel()`] but with an atomic progress counter.
+///
+/// The counter is incremented after each chunk of bands completes. The total
+/// number of bands is returned alongside the counter via [`viewport_band_count()`].
+#[allow(clippy::too_many_arguments)]
+pub fn render_region_prepared_parallel_with_progress(
+    list: &DisplayList,
+    prepared: &PreparedDisplayList,
+    vp_x: f64,
+    vp_y: f64,
+    vp_w: f64,
+    vp_h: f64,
+    pixel_w: u32,
+    pixel_h: u32,
+    dpi: f64,
+    icc: Option<&IccCache>,
+    image_cache: Option<&ImageCache>,
+    no_aa: bool,
+    progress: &std::sync::atomic::AtomicU32,
+) -> Vec<u8> {
+    let (num_bands, band_h) = viewport_band_count(pixel_w, pixel_h);
+
+    if num_bands <= 1 {
+        let result = render_region_prepared(
+            list, prepared, vp_x, vp_y, vp_w, vp_h, pixel_w, pixel_h, dpi, icc, image_cache,
+            no_aa,
+        );
+        progress.store(1, std::sync::atomic::Ordering::Relaxed);
+        return result;
+    }
+
+    let render_band = |band_idx: u32| -> Vec<u8> {
+        render_region_single_band(
+            list, prepared, vp_x, vp_y, vp_w, vp_h, pixel_w, pixel_h, band_idx, band_h,
+            num_bands, dpi, icc, image_cache, no_aa,
+        )
+    };
+
+    let row_bytes = pixel_w as usize * 4;
+    let mut result = vec![0u8; pixel_w as usize * pixel_h as usize * 4];
+
+    #[cfg(feature = "parallel")]
+    {
+        let chunk_size = rayon::current_num_threads().clamp(1, 8);
+
+        for chunk_start in (0..num_bands).step_by(chunk_size) {
+            let chunk_end = (chunk_start + chunk_size as u32).min(num_bands);
+
+            let rendered: Vec<Vec<u8>> = (chunk_start..chunk_end)
+                .into_par_iter()
+                .map(&render_band)
+                .collect();
+
+            for (i, band_data) in rendered.iter().enumerate() {
+                let band_idx = chunk_start + i as u32;
+                let y_start = (band_idx * band_h) as usize;
+                let dest_start = y_start * row_bytes;
+                let len = band_data.len();
+                result[dest_start..dest_start + len].copy_from_slice(band_data);
+            }
+            progress.store(chunk_end, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        for band_idx in 0..num_bands {
+            let band_data = render_band(band_idx);
+            let y_start = (band_idx * band_h) as usize;
+            let dest_start = y_start * row_bytes;
+            let len = band_data.len();
+            result[dest_start..dest_start + len].copy_from_slice(&band_data);
+            progress.store(band_idx + 1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    result
+}
+
 /// Render a full-page display list to RGBA pixels using the banded parallel renderer.
 ///
 /// This is the preferred way to render a complete page — it uses rayon parallelism
