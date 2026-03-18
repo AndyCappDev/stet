@@ -139,9 +139,18 @@ fn main() {
         }
     });
 
-    // Configure rayon thread pool — default cap at 8 (sequential PNG writing
-    // bottleneck means additional cores yield no speedup), override with --threads.
-    let pool_size = threads.unwrap_or(8);
+    // Configure rayon thread pool. Viewer uses 75% of cores (no PNG bottleneck);
+    // other modes cap at 8 (sequential PNG writing limits additional core benefit).
+    // --threads overrides either default.
+    let default_pool_size = if device == "viewer" {
+        let cpus = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(8);
+        (cpus * 3 / 4).max(1)
+    } else {
+        8
+    };
+    let pool_size = threads.unwrap_or(default_pool_size);
     rayon::ThreadPoolBuilder::new()
         .num_threads(pool_size)
         .build_global()

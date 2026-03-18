@@ -4853,7 +4853,7 @@ fn render_banded_to_sink(
         // (each rendered band is ~band_h * page_w * 4 bytes).
         // Cap at 8 threads — sequential sink writing bottleneck means
         // additional cores yield no speedup (benchmarked: 8→7.8s plateau).
-        let chunk_size = rayon::current_num_threads().clamp(1, 8);
+        let chunk_size = rayon::current_num_threads().max(1);
 
         for chunk_start in (0..num_bands).step_by(chunk_size) {
             let chunk_end = (chunk_start + chunk_size as u32).min(num_bands);
@@ -5562,7 +5562,7 @@ pub fn render_region_prepared_parallel(
 
     #[cfg(feature = "parallel")]
     {
-        let chunk_size = rayon::current_num_threads().clamp(1, 8);
+        let chunk_size = rayon::current_num_threads().max(1);
 
         for chunk_start in (0..num_bands).step_by(chunk_size) {
             let chunk_end = (chunk_start + chunk_size as u32).min(num_bands);
@@ -5638,7 +5638,7 @@ pub fn render_region_prepared_parallel_with_progress(
 
     #[cfg(feature = "parallel")]
     {
-        let chunk_size = rayon::current_num_threads().clamp(1, 8);
+        let chunk_size = rayon::current_num_threads().max(1);
 
         for chunk_start in (0..num_bands).step_by(chunk_size) {
             let chunk_end = (chunk_start + chunk_size as u32).min(num_bands);
