@@ -3737,17 +3737,24 @@ fn render_overprint_fill(
     let transform = viewport_transform(to_transform(&params.ctm), vp_x, vp_y, scale_x, scale_y);
     coverage_mask.fill_path(&skia_path, fill_rule, !no_aa, transform);
 
+    // Compute path bbox for constrained iteration
+    let (bbox_x0, bbox_y0, bbox_x1, bbox_y1) =
+        path_device_bbox(&skia_path, transform, out_w, out_h);
+
     // Intersect with clip mask
     let clip_coverage: Option<&[u8]> = match &band_state.clip_region {
         None => None,
         Some(ClipRegion::Rect(r)) => {
+            // Only zero coverage within the path bbox (not the full page)
             let data = coverage_mask.data_mut();
             let stride = out_w as usize;
-            for y in 0..out_h {
-                let row_start = y as usize * stride;
-                for x in 0..out_w {
-                    if y < r.y0 || y >= r.y1 || x < r.x0 || x >= r.x1 {
-                        data[row_start + x as usize] = 0;
+            for y in bbox_y0..bbox_y1 {
+                let row_start = y * stride;
+                for x in bbox_x0..bbox_x1 {
+                    let yu = y as u32;
+                    let xu = x as u32;
+                    if yu < r.y0 || yu >= r.y1 || xu < r.x0 || xu >= r.x1 {
+                        data[row_start + x] = 0;
                     }
                 }
             }
@@ -3785,15 +3792,15 @@ fn render_overprint_fill(
     if channels == stet_graphics::device::CMYK_ALL {
         let cov_data = coverage_mask.data();
         let stride = out_w as usize;
-        for y in 0..out_h as usize {
-            for x in 0..out_w as usize {
+        for y in bbox_y0..bbox_y1 {
+            for x in bbox_x0..bbox_x1 {
                 let mi = y * stride + x;
                 let mut cov = cov_data[mi] as f32 / 255.0;
                 if let Some(clip) = clip_coverage {
                     cov *= clip[mi] as f32 / 255.0;
                 }
                 if cov > 0.0 {
-                    let ci = (y * stride + x) * 4;
+                    let ci = mi * 4;
                     cmyk_buf[ci] = src_c as f32;
                     cmyk_buf[ci + 1] = src_m as f32;
                     cmyk_buf[ci + 2] = src_y as f32;
@@ -3817,8 +3824,8 @@ fn render_overprint_fill(
     let px_data = pixmap.data_mut();
     let px_stride = out_w as usize * 4;
 
-    for y in 0..out_h as usize {
-        for x in 0..out_w as usize {
+    for y in bbox_y0..bbox_y1 {
+        for x in bbox_x0..bbox_x1 {
             let mi = y * stride + x;
             let mut cov = cov_data[mi] as f32 / 255.0;
             if let Some(clip) = clip_coverage {
@@ -3901,6 +3908,29 @@ fn cmyk_to_rgb_plrm(c: f64, m: f64, y: f64, k: f64) -> (f64, f64, f64) {
 
 /// Update the CMYK buffer for a non-overprint fill (to track backdrop for future overprints).
 #[allow(clippy::too_many_arguments)]
+/// Compute the device-space bounding box of a tiny-skia path after transform,
+/// clamped to `(0, 0, w, h)`. Returns `(x0, y0, x1, y1)` as pixel indices.
+fn path_device_bbox(skia_path: &stet_tiny_skia::Path, transform: Transform, w: u32, h: u32) -> (usize, usize, usize, usize) {
+    let b = skia_path.bounds();
+    let mut corners = [
+        stet_tiny_skia::Point { x: b.left(), y: b.top() },
+        stet_tiny_skia::Point { x: b.right(), y: b.top() },
+        stet_tiny_skia::Point { x: b.right(), y: b.bottom() },
+        stet_tiny_skia::Point { x: b.left(), y: b.bottom() },
+    ];
+    transform.map_points(&mut corners);
+    let min_x = corners.iter().map(|p| p.x).fold(f32::INFINITY, f32::min);
+    let min_y = corners.iter().map(|p| p.y).fold(f32::INFINITY, f32::min);
+    let max_x = corners.iter().map(|p| p.x).fold(f32::NEG_INFINITY, f32::max);
+    let max_y = corners.iter().map(|p| p.y).fold(f32::NEG_INFINITY, f32::max);
+    // Floor/ceil + clamp to output dimensions (with 1px margin for AA)
+    let x0 = (min_x.floor() as i32 - 1).max(0) as usize;
+    let y0 = (min_y.floor() as i32 - 1).max(0) as usize;
+    let x1 = (max_x.ceil() as i32 + 1).clamp(0, w as i32) as usize;
+    let y1 = (max_y.ceil() as i32 + 1).clamp(0, h as i32) as usize;
+    (x0, y0, x1, y1)
+}
+
 fn update_cmyk_buffer_for_fill(
     cmyk_buf: &mut [f32],
     path: &PsPath,
@@ -3934,23 +3964,25 @@ fn update_cmyk_buffer_for_fill(
         Some(ClipRegion::Mask(m)) => Some(m.data()),
         _ => None,
     };
-    let clip_rect = match clip_region {
-        Some(ClipRegion::Rect(r)) => Some(*r),
-        _ => None,
-    };
+
+    // Constrain iteration to the path's device-space bounding box
+    let (mut bx0, mut by0, mut bx1, mut by1) =
+        path_device_bbox(&skia_path, transform, out_w, out_h);
+    if let Some(ClipRegion::Rect(r)) = clip_region {
+        bx0 = bx0.max(r.x0 as usize);
+        by0 = by0.max(r.y0 as usize);
+        bx1 = bx1.min(r.x1 as usize);
+        by1 = by1.min(r.y1 as usize);
+    }
 
     let stride = out_w as usize;
-    for y in 0..out_h as usize {
-        for x in 0..out_w as usize {
+    for y in by0..by1 {
+        for x in bx0..bx1 {
             let mi = y * stride + x;
             let mut cov = cov_data[mi] as f32 / 255.0;
             if let Some(clip) = clip_data {
                 cov *= clip[mi] as f32 / 255.0;
             }
-            if let Some(r) = clip_rect
-                && ((y as u32) < r.y0 || (y as u32) >= r.y1 || (x as u32) < r.x0 || (x as u32) >= r.x1) {
-                    cov = 0.0;
-                }
             if cov > 0.0 {
                 let ci = mi * 4;
                 cmyk_buf[ci] = src_c as f32;
