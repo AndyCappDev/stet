@@ -273,26 +273,36 @@ fn skia_path_to_ps_path(path: &stet_tiny_skia::Path) -> PsPath {
             }
             stet_tiny_skia::PathSegment::QuadTo(p1, p2) => {
                 // Convert quadratic to cubic: control points at 2/3 along quad controls
-                let last = segments.last().map(|s| match s {
-                    PathSegment::MoveTo(x, y) | PathSegment::LineTo(x, y) => (*x, *y),
-                    PathSegment::CurveTo { x3, y3, .. } => (*x3, *y3),
-                    PathSegment::ClosePath => (0.0, 0.0),
-                }).unwrap_or((0.0, 0.0));
+                let last = segments
+                    .last()
+                    .map(|s| match s {
+                        PathSegment::MoveTo(x, y) | PathSegment::LineTo(x, y) => (*x, *y),
+                        PathSegment::CurveTo { x3, y3, .. } => (*x3, *y3),
+                        PathSegment::ClosePath => (0.0, 0.0),
+                    })
+                    .unwrap_or((0.0, 0.0));
                 let (x0, y0) = last;
                 let cx1 = x0 + 2.0 / 3.0 * (p1.x as f64 - x0);
                 let cy1 = y0 + 2.0 / 3.0 * (p1.y as f64 - y0);
                 let cx2 = p2.x as f64 + 2.0 / 3.0 * (p1.x as f64 - p2.x as f64);
                 let cy2 = p2.y as f64 + 2.0 / 3.0 * (p1.y as f64 - p2.y as f64);
                 segments.push(PathSegment::CurveTo {
-                    x1: cx1, y1: cy1, x2: cx2, y2: cy2,
-                    x3: p2.x as f64, y3: p2.y as f64,
+                    x1: cx1,
+                    y1: cy1,
+                    x2: cx2,
+                    y2: cy2,
+                    x3: p2.x as f64,
+                    y3: p2.y as f64,
                 });
             }
             stet_tiny_skia::PathSegment::CubicTo(p1, p2, p3) => {
                 segments.push(PathSegment::CurveTo {
-                    x1: p1.x as f64, y1: p1.y as f64,
-                    x2: p2.x as f64, y2: p2.y as f64,
-                    x3: p3.x as f64, y3: p3.y as f64,
+                    x1: p1.x as f64,
+                    y1: p1.y as f64,
+                    x2: p2.x as f64,
+                    y2: p2.y as f64,
+                    x3: p3.x as f64,
+                    y3: p3.y as f64,
                 });
             }
             stet_tiny_skia::PathSegment::Close => {
@@ -601,9 +611,14 @@ struct RenderContext<'a> {
 impl RenderContext<'_> {
     /// Apply viewport transform to a PostScript matrix.
     fn transform(&self, m: &Matrix) -> Transform {
-        viewport_transform(to_transform(m), self.vp_x, self.vp_y, self.scale_x, self.scale_y)
+        viewport_transform(
+            to_transform(m),
+            self.vp_x,
+            self.vp_y,
+            self.scale_x,
+            self.scale_y,
+        )
     }
-
 }
 
 /// Y-axis bounding box in device pixels.
@@ -946,7 +961,6 @@ fn composite_onto_white(data: &mut [u8]) {
     }
 }
 
-
 /// Extract the contribution of a non-isolated transparency group and composite
 /// it onto the parent using the group's blend mode and alpha.
 ///
@@ -1139,7 +1153,12 @@ fn bicubic_resample(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
             let w2 = catmull_rom(1.0 - fx);
             let w3 = catmull_rom(2.0 - fx);
             let (mut r, mut g, mut b, mut a) = (0.0f32, 0.0, 0.0, 0.0);
-            for (k, w) in [(sx_floor - 1, w0), (sx_floor, w1), (sx_floor + 1, w2), (sx_floor + 2, w3)] {
+            for (k, w) in [
+                (sx_floor - 1, w0),
+                (sx_floor, w1),
+                (sx_floor + 1, w2),
+                (sx_floor + 2, w3),
+            ] {
                 let px = k.clamp(0, sw as i32 - 1) as usize;
                 let i = src_row + px * 4;
                 r += src[i] as f32 * w;
@@ -1175,10 +1194,22 @@ fn bicubic_resample(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
         let dst_row = dy * out_stride;
         for dx in 0..dw {
             let col = dx * 4;
-            let r = tmp[py0 + col] * w0 + tmp[py1 + col] * w1 + tmp[py2 + col] * w2 + tmp[py3 + col] * w3;
-            let g = tmp[py0 + col + 1] * w0 + tmp[py1 + col + 1] * w1 + tmp[py2 + col + 1] * w2 + tmp[py3 + col + 1] * w3;
-            let b = tmp[py0 + col + 2] * w0 + tmp[py1 + col + 2] * w1 + tmp[py2 + col + 2] * w2 + tmp[py3 + col + 2] * w3;
-            let a = tmp[py0 + col + 3] * w0 + tmp[py1 + col + 3] * w1 + tmp[py2 + col + 3] * w2 + tmp[py3 + col + 3] * w3;
+            let r = tmp[py0 + col] * w0
+                + tmp[py1 + col] * w1
+                + tmp[py2 + col] * w2
+                + tmp[py3 + col] * w3;
+            let g = tmp[py0 + col + 1] * w0
+                + tmp[py1 + col + 1] * w1
+                + tmp[py2 + col + 1] * w2
+                + tmp[py3 + col + 1] * w3;
+            let b = tmp[py0 + col + 2] * w0
+                + tmp[py1 + col + 2] * w1
+                + tmp[py2 + col + 2] * w2
+                + tmp[py3 + col + 2] * w3;
+            let a = tmp[py0 + col + 3] * w0
+                + tmp[py1 + col + 3] * w1
+                + tmp[py2 + col + 3] * w2
+                + tmp[py3 + col + 3] * w3;
             let di = dst_row + col;
             out[di] = r.round().clamp(0.0, 255.0) as u8;
             out[di + 1] = g.round().clamp(0.0, 255.0) as u8;
@@ -1223,11 +1254,12 @@ pub fn build_icc_cache_for_list(
 
     // Register system CMYK profile first
     if let Some(cmyk_bytes) = system_cmyk_bytes
-        && let Some(hash) = cache.register_profile(cmyk_bytes) {
-            seen.insert(hash);
-            // Set the default CMYK hash so convert_image_8bit works for DeviceCMYK
-            cache.set_default_cmyk_hash(hash);
-        }
+        && let Some(hash) = cache.register_profile(cmyk_bytes)
+    {
+        seen.insert(hash);
+        // Set the default CMYK hash so convert_image_8bit works for DeviceCMYK
+        cache.set_default_cmyk_hash(hash);
+    }
 
     // Scan display list for ICCBased images
     for element in list.elements() {
@@ -1240,9 +1272,10 @@ pub fn build_icc_cache_for_list(
             profile_data,
             ..
         }) = cs
-            && seen.insert(*profile_hash) {
-                cache.register_profile(profile_data);
-            }
+            && seen.insert(*profile_hash)
+        {
+            cache.register_profile(profile_data);
+        }
         // Also check Indexed with ICCBased base
         if let Some(ImageColorSpace::Indexed { base, .. }) = cs
             && let ImageColorSpace::ICCBased {
@@ -1250,9 +1283,10 @@ pub fn build_icc_cache_for_list(
                 profile_data,
                 ..
             } = base.as_ref()
-                && seen.insert(*profile_hash) {
-                    cache.register_profile(profile_data);
-                }
+            && seen.insert(*profile_hash)
+        {
+            cache.register_profile(profile_data);
+        }
     }
 
     cache
@@ -1297,21 +1331,23 @@ fn samples_to_rgba(data: &[u8], params: &ImageParams, icc: Option<&IccCache>) ->
             // Convert as many complete pixels as the data allows; PLRM-fallback
             // for any remaining pixels with insufficient data.
             if let Some(cache) = icc
-                && let Some(cmyk_hash) = cache.default_cmyk_hash() {
-                    let avail_pixels = data.len() / 4;
-                    let icc_pixels = avail_pixels.min(npixels);
-                    if icc_pixels > 0
-                        && let Some(rgb) = cache.convert_image_8bit(cmyk_hash, data, icc_pixels) {
-                            let mut rgba = vec![255u8; npixels * 4];
-                            for i in 0..icc_pixels {
-                                rgba[i * 4] = rgb[i * 3];
-                                rgba[i * 4 + 1] = rgb[i * 3 + 1];
-                                rgba[i * 4 + 2] = rgb[i * 3 + 2];
-                            }
-                            // Remaining pixels (if data was short) stay white (0xFF)
-                            return rgba;
-                        }
+                && let Some(cmyk_hash) = cache.default_cmyk_hash()
+            {
+                let avail_pixels = data.len() / 4;
+                let icc_pixels = avail_pixels.min(npixels);
+                if icc_pixels > 0
+                    && let Some(rgb) = cache.convert_image_8bit(cmyk_hash, data, icc_pixels)
+                {
+                    let mut rgba = vec![255u8; npixels * 4];
+                    for i in 0..icc_pixels {
+                        rgba[i * 4] = rgb[i * 3];
+                        rgba[i * 4 + 1] = rgb[i * 3 + 1];
+                        rgba[i * 4 + 2] = rgb[i * 3 + 2];
+                    }
+                    // Remaining pixels (if data was short) stay white (0xFF)
+                    return rgba;
                 }
+            }
             // Fallback: PLRM CMYK→RGB formula
             let mut rgba = vec![255u8; npixels * 4];
             for i in 0..npixels {
@@ -1338,15 +1374,16 @@ fn samples_to_rgba(data: &[u8], params: &ImageParams, icc: Option<&IccCache>) ->
             // Try ICC-based conversion if cache is available
             if let Some(cache) = icc
                 && cache.has_profile(profile_hash)
-                    && let Some(rgb) = cache.convert_image_8bit(profile_hash, data, npixels) {
-                        let mut rgba = vec![255u8; npixels * 4];
-                        for i in 0..npixels {
-                            rgba[i * 4] = rgb[i * 3];
-                            rgba[i * 4 + 1] = rgb[i * 3 + 1];
-                            rgba[i * 4 + 2] = rgb[i * 3 + 2];
-                        }
-                        return rgba;
-                    }
+                && let Some(rgb) = cache.convert_image_8bit(profile_hash, data, npixels)
+            {
+                let mut rgba = vec![255u8; npixels * 4];
+                for i in 0..npixels {
+                    rgba[i * 4] = rgb[i * 3];
+                    rgba[i * 4 + 1] = rgb[i * 3 + 1];
+                    rgba[i * 4 + 2] = rgb[i * 3 + 2];
+                }
+                return rgba;
+            }
             // Fallback to device equivalent based on component count
             let _ = (profile_hash, profile_data);
             let fallback = match n {
@@ -1417,11 +1454,10 @@ fn samples_to_rgba(data: &[u8], params: &ImageParams, icc: Option<&IccCache>) ->
             // 1 byte per pixel → lookup in tint table → convert alt space to RGB
             // For CMYK alt space with ICC, build bulk CMYK data and convert via ICC
             if matches!(alt_space.as_ref(), ImageColorSpace::DeviceCMYK)
-                && let Some(rgba) =
-                    tint_separation_via_icc(data, npixels, tint_table, icc)
-                {
-                    return rgba;
-                }
+                && let Some(rgba) = tint_separation_via_icc(data, npixels, tint_table, icc)
+            {
+                return rgba;
+            }
             let mut rgba = vec![255u8; npixels * 4];
             let no = tint_table.num_outputs as usize;
             let mut alt_comps = vec![0.0f32; no];
@@ -1445,11 +1481,10 @@ fn samples_to_rgba(data: &[u8], params: &ImageParams, icc: Option<&IccCache>) ->
             let no = tint_table.num_outputs as usize;
             // For CMYK alt space with ICC, build bulk CMYK data and convert via ICC
             if matches!(alt_space.as_ref(), ImageColorSpace::DeviceCMYK)
-                && let Some(rgba) =
-                    tint_devicen_via_icc(data, npixels, ni, tint_table, icc)
-                {
-                    return rgba;
-                }
+                && let Some(rgba) = tint_devicen_via_icc(data, npixels, ni, tint_table, icc)
+            {
+                return rgba;
+            }
             let mut rgba = vec![255u8; npixels * 4];
             let mut inputs = vec![0.0f32; ni];
             let mut alt_comps = vec![0.0f32; no];
@@ -1884,7 +1919,9 @@ fn stroke_adjust_path_viewport(
 
                 if is_horizontal {
                     let snapped_y = snap_y(y);
-                    if let Some(PathSegment::MoveTo(_, ly) | PathSegment::LineTo(_, ly)) = result.segments.last_mut() {
+                    if let Some(PathSegment::MoveTo(_, ly) | PathSegment::LineTo(_, ly)) =
+                        result.segments.last_mut()
+                    {
                         *ly = snapped_y;
                     }
                     result.segments.push(PathSegment::LineTo(x, snapped_y));
@@ -1892,7 +1929,9 @@ fn stroke_adjust_path_viewport(
                     prev_y = snapped_y;
                 } else if is_vertical {
                     let snapped_x = snap_x(x);
-                    if let Some(PathSegment::MoveTo(lx, _) | PathSegment::LineTo(lx, _)) = result.segments.last_mut() {
+                    if let Some(PathSegment::MoveTo(lx, _) | PathSegment::LineTo(lx, _)) =
+                        result.segments.last_mut()
+                    {
                         *lx = snapped_x;
                     }
                     result.segments.push(PathSegment::LineTo(snapped_x, y));
@@ -1975,12 +2014,16 @@ fn render_element(
                     return;
                 };
                 let mut temp_mask = None;
-                let Some(mask_ref) =
-                    resolve_clip_mask(&band_state.clip_region, &mut temp_mask, ctx.out_w, ctx.out_h)
-                else {
+                let Some(mask_ref) = resolve_clip_mask(
+                    &band_state.clip_region,
+                    &mut temp_mask,
+                    ctx.out_w,
+                    ctx.out_h,
+                ) else {
                     return;
                 };
-                let paint = to_paint_alpha(&params.color, params.alpha, params.blend_mode, ctx.no_aa);
+                let paint =
+                    to_paint_alpha(&params.color, params.alpha, params.blend_mode, ctx.no_aa);
                 let transform = ctx.transform(&params.ctm);
                 let fill_rule = to_fill_rule(&params.fill_rule);
                 pixmap.fill_path(&skia_path, &paint, fill_rule, transform, mask_ref);
@@ -2049,47 +2092,54 @@ fn render_element(
             if needs_overprint {
                 let skia_path_op = build_skia_path(draw_path);
                 if let Some(skia_path) = skia_path_op {
-                    let resolution_scale = (transform.sx * transform.sx + transform.sy * transform.sy).sqrt().max(1.0);
+                    let resolution_scale = (transform.sx * transform.sx
+                        + transform.sy * transform.sy)
+                        .sqrt()
+                        .max(1.0);
                     // Stroke in user space first, then transform to device space.
                     // The old code transformed the path first, then stroked — which
                     // applied the stroke width in device pixels instead of user units,
                     // producing strokes that were too thick when CTM had small scale.
                     if let Some(stroked_user) = skia_path.stroke(&stroke, resolution_scale)
-                        && let Some(stroked) = stroked_user.transform(transform) {
-                            overprint_handled = true;
-                            let fill_params = FillParams {
-                                color: params.color.clone(),
-                                fill_rule: FillRule::NonZeroWinding,
-                                ctm: Matrix::identity(),
-                                is_text_glyph: false,
-                                overprint: params.overprint,
-                                overprint_mode: params.overprint_mode,
-                                painted_channels: params.painted_channels,
-                                is_device_cmyk: false,
-                                spot_color: params.spot_color.clone(),
-                                rendering_intent: params.rendering_intent,
-                                transfer: params.transfer.clone(),
-                                halftone: params.halftone.clone(),
-                                bg_ucr: params.bg_ucr.clone(),
-                                alpha: params.alpha,
-                                blend_mode: params.blend_mode,
-                            };
-                            let stroked_path = skia_path_to_ps_path(&stroked);
-                            let mut cmyk_buf = band_state.cmyk_buffer.take().unwrap();
-                            render_overprint_fill(
-                                pixmap,
-                                &mut cmyk_buf,
-                                band_state,
-                                &stroked_path,
-                                &fill_params,
-                                0.0, 0.0, 1.0, 1.0,
-                                ctx.out_w,
-                                ctx.out_h,
-                                ctx.icc,
-                                ctx.no_aa,
-                            );
-                            band_state.cmyk_buffer = Some(cmyk_buf);
-                        }
+                        && let Some(stroked) = stroked_user.transform(transform)
+                    {
+                        overprint_handled = true;
+                        let fill_params = FillParams {
+                            color: params.color.clone(),
+                            fill_rule: FillRule::NonZeroWinding,
+                            ctm: Matrix::identity(),
+                            is_text_glyph: false,
+                            overprint: params.overprint,
+                            overprint_mode: params.overprint_mode,
+                            painted_channels: params.painted_channels,
+                            is_device_cmyk: false,
+                            spot_color: params.spot_color.clone(),
+                            rendering_intent: params.rendering_intent,
+                            transfer: params.transfer.clone(),
+                            halftone: params.halftone.clone(),
+                            bg_ucr: params.bg_ucr.clone(),
+                            alpha: params.alpha,
+                            blend_mode: params.blend_mode,
+                        };
+                        let stroked_path = skia_path_to_ps_path(&stroked);
+                        let mut cmyk_buf = band_state.cmyk_buffer.take().unwrap();
+                        render_overprint_fill(
+                            pixmap,
+                            &mut cmyk_buf,
+                            band_state,
+                            &stroked_path,
+                            &fill_params,
+                            0.0,
+                            0.0,
+                            1.0,
+                            1.0,
+                            ctx.out_w,
+                            ctx.out_h,
+                            ctx.icc,
+                            ctx.no_aa,
+                        );
+                        band_state.cmyk_buffer = Some(cmyk_buf);
+                    }
                 }
             }
             if !overprint_handled {
@@ -2097,12 +2147,16 @@ fn render_element(
                     return;
                 };
                 let mut temp_mask = None;
-                let Some(mask_ref) =
-                    resolve_clip_mask(&band_state.clip_region, &mut temp_mask, ctx.out_w, ctx.out_h)
-                else {
+                let Some(mask_ref) = resolve_clip_mask(
+                    &band_state.clip_region,
+                    &mut temp_mask,
+                    ctx.out_w,
+                    ctx.out_h,
+                ) else {
                     return;
                 };
-                let paint = to_paint_alpha(&params.color, params.alpha, params.blend_mode, ctx.no_aa);
+                let paint =
+                    to_paint_alpha(&params.color, params.alpha, params.blend_mode, ctx.no_aa);
                 pixmap.stroke_path(&skia_path, &paint, &stroke, transform, mask_ref);
             }
         }
@@ -2156,18 +2210,19 @@ fn render_element(
             } else {
                 // Use pre-converted RGBA from image cache when available
                 let owned_rgba;
-                let rgba_data: &[u8] = if let Some(cached) = ctx.image_cache.and_then(|c| c.get(ctx.elem_idx)) {
-                    cached
-                } else {
-                    owned_rgba = {
-                        let mut rgba = samples_to_rgba(sample_data, params, ctx.icc);
-                        if params.mask_color.is_some() {
-                            apply_mask_color_rgba(&mut rgba, sample_data, params);
-                        }
-                        rgba
+                let rgba_data: &[u8] =
+                    if let Some(cached) = ctx.image_cache.and_then(|c| c.get(ctx.elem_idx)) {
+                        cached
+                    } else {
+                        owned_rgba = {
+                            let mut rgba = samples_to_rgba(sample_data, params, ctx.icc);
+                            if params.mask_color.is_some() {
+                                apply_mask_color_rgba(&mut rgba, sample_data, params);
+                            }
+                            rgba
+                        };
+                        &owned_rgba
                     };
-                    &owned_rgba
-                };
                 let expected = (iw * ih * 4) as usize;
                 if rgba_data.len() < expected {
                     return;
@@ -2188,7 +2243,8 @@ fn render_element(
                     None => (rgba_data, iw, ih, raw_transform),
                 };
 
-                let Some(img_pixmap) = stet_tiny_skia::PixmapRef::from_bytes(img_data, img_w, img_h)
+                let Some(img_pixmap) =
+                    stet_tiny_skia::PixmapRef::from_bytes(img_data, img_w, img_h)
                 else {
                     return;
                 };
@@ -2234,43 +2290,93 @@ fn render_element(
         }
         DisplayElement::AxialShading { params } => {
             let mut temp_mask = None;
-            let Some(mask_ref) =
-                resolve_clip_mask(&band_state.clip_region, &mut temp_mask, ctx.out_w, ctx.out_h)
-            else {
+            let Some(mask_ref) = resolve_clip_mask(
+                &band_state.clip_region,
+                &mut temp_mask,
+                ctx.out_w,
+                ctx.out_h,
+            ) else {
                 return;
             };
-            render_axial_shading(pixmap, params, ctx.vp_x, ctx.vp_y, ctx.scale_x, ctx.scale_y, mask_ref, ctx.no_aa,
-                band_state.cmyk_buffer.as_deref_mut(), ctx.icc);
+            render_axial_shading(
+                pixmap,
+                params,
+                ctx.vp_x,
+                ctx.vp_y,
+                ctx.scale_x,
+                ctx.scale_y,
+                mask_ref,
+                ctx.no_aa,
+                band_state.cmyk_buffer.as_deref_mut(),
+                ctx.icc,
+            );
         }
         DisplayElement::RadialShading { params } => {
             let mut temp_mask = None;
-            let Some(mask_ref) =
-                resolve_clip_mask(&band_state.clip_region, &mut temp_mask, ctx.out_w, ctx.out_h)
-            else {
+            let Some(mask_ref) = resolve_clip_mask(
+                &band_state.clip_region,
+                &mut temp_mask,
+                ctx.out_w,
+                ctx.out_h,
+            ) else {
                 return;
             };
-            render_radial_shading(pixmap, params, ctx.vp_x, ctx.vp_y, ctx.scale_x, ctx.scale_y, mask_ref, ctx.no_aa,
-                band_state.cmyk_buffer.as_deref_mut(), ctx.icc);
+            render_radial_shading(
+                pixmap,
+                params,
+                ctx.vp_x,
+                ctx.vp_y,
+                ctx.scale_x,
+                ctx.scale_y,
+                mask_ref,
+                ctx.no_aa,
+                band_state.cmyk_buffer.as_deref_mut(),
+                ctx.icc,
+            );
         }
         DisplayElement::MeshShading { params } => {
             let mut temp_mask = None;
-            let Some(mask_ref) =
-                resolve_clip_mask(&band_state.clip_region, &mut temp_mask, ctx.out_w, ctx.out_h)
-            else {
+            let Some(mask_ref) = resolve_clip_mask(
+                &band_state.clip_region,
+                &mut temp_mask,
+                ctx.out_w,
+                ctx.out_h,
+            ) else {
                 return;
             };
-            render_mesh_shading(pixmap, params, ctx.vp_x, ctx.vp_y, ctx.scale_x, ctx.scale_y, mask_ref,
-                band_state.cmyk_buffer.as_deref_mut(), ctx.icc);
+            render_mesh_shading(
+                pixmap,
+                params,
+                ctx.vp_x,
+                ctx.vp_y,
+                ctx.scale_x,
+                ctx.scale_y,
+                mask_ref,
+                band_state.cmyk_buffer.as_deref_mut(),
+                ctx.icc,
+            );
         }
         DisplayElement::PatchShading { params } => {
             let mut temp_mask = None;
-            let Some(mask_ref) =
-                resolve_clip_mask(&band_state.clip_region, &mut temp_mask, ctx.out_w, ctx.out_h)
-            else {
+            let Some(mask_ref) = resolve_clip_mask(
+                &band_state.clip_region,
+                &mut temp_mask,
+                ctx.out_w,
+                ctx.out_h,
+            ) else {
                 return;
             };
-            render_patch_shading(pixmap, params, ctx.vp_x, ctx.vp_y, ctx.scale_x, ctx.scale_y, mask_ref,
-                band_state.cmyk_buffer.as_deref_mut(), ctx.icc);
+            render_patch_shading(
+                pixmap,
+                params,
+                ctx.vp_x,
+                ctx.vp_y,
+                ctx.scale_x,
+                ctx.scale_y,
+                mask_ref,
+                band_state.cmyk_buffer.as_deref_mut(),
+                ctx.icc,
+            );
         }
         DisplayElement::PatternFill { params } => {
             render_pattern_fill(pixmap, band_state, params, ctx);
@@ -2293,10 +2399,7 @@ fn render_element(
 ///
 /// Returns `(crop_x, crop_y, crop_w, crop_h)` in output pixels, or `None` if
 /// the group is entirely outside the viewport or cropping isn't worthwhile.
-fn compute_group_crop(
-    bbox: &[f64; 4],
-    ctx: &RenderContext<'_>,
-) -> Option<(i32, i32, u32, u32)> {
+fn compute_group_crop(bbox: &[f64; 4], ctx: &RenderContext<'_>) -> Option<(i32, i32, u32, u32)> {
     // Transform device-space bbox to output pixel coords
     let px_min = ((bbox[0] as f32 - ctx.vp_x) * ctx.scale_x).floor() as i32;
     let py_min = ((bbox[1] as f32 - ctx.vp_y) * ctx.scale_y).floor() as i32;
@@ -2434,7 +2537,12 @@ fn render_group(
     }
 
     let mut temp_mask = None;
-    let mask_ref = match resolve_clip_mask(&band_state.clip_region, &mut temp_mask, ctx.out_w, ctx.out_h) {
+    let mask_ref = match resolve_clip_mask(
+        &band_state.clip_region,
+        &mut temp_mask,
+        ctx.out_w,
+        ctx.out_h,
+    ) {
         None => return, // empty clip → nothing visible
         Some(m) => m,
     };
@@ -2576,9 +2684,7 @@ fn render_knockout_group(
 
         render_element(&mut offscreen, &mut elem_band, elem, &group_ctx);
 
-        if let (Some(elem_cmyk), Some(acc_cmyk)) =
-            (&elem_band.cmyk_buffer, &mut accumulated_cmyk)
-        {
+        if let (Some(elem_cmyk), Some(acc_cmyk)) = (&elem_band.cmyk_buffer, &mut accumulated_cmyk) {
             replace_changed_cmyk(acc_cmyk, elem_cmyk, offscreen.data(), &initial_backdrop);
         }
 
@@ -2586,19 +2692,28 @@ fn render_knockout_group(
     }
 
     let mut temp_mask = None;
-    let mask_ref = resolve_clip_mask(&band_state.clip_region, &mut temp_mask, ctx.out_w, ctx.out_h);
+    let mask_ref = resolve_clip_mask(
+        &band_state.clip_region,
+        &mut temp_mask,
+        ctx.out_w,
+        ctx.out_h,
+    );
     let mask_ref = match mask_ref {
         None => return,
         Some(m) => m,
     };
 
     composite_non_isolated_group_cropped(
-        pixmap, &accumulated, &initial_backdrop, params, mask_ref, crop_x, crop_y,
+        pixmap,
+        &accumulated,
+        &initial_backdrop,
+        params,
+        mask_ref,
+        crop_x,
+        crop_y,
     );
 
-    if let (Some(acc_cmyk), Some(parent_cmyk)) =
-        (&accumulated_cmyk, &mut band_state.cmyk_buffer)
-    {
+    if let (Some(acc_cmyk), Some(parent_cmyk)) = (&accumulated_cmyk, &mut band_state.cmyk_buffer) {
         copy_cmyk_buffer_to_parent(
             parent_cmyk,
             acc_cmyk,
@@ -2764,7 +2879,10 @@ fn render_soft_masked(
         cmyk_buffer: None,
     };
     for (idx, elem) in mask_list.elements().iter().enumerate() {
-        let elem_ctx = RenderContext { elem_idx: idx, ..sub_ctx };
+        let elem_ctx = RenderContext {
+            elem_idx: idx,
+            ..sub_ctx
+        };
         render_element(&mut mask_pixmap, &mut mask_band, elem, &elem_ctx);
     }
 
@@ -2807,10 +2925,12 @@ fn render_soft_masked(
         cmyk_buffer: content_cmyk,
     };
     for (idx, elem) in content_list.elements().iter().enumerate() {
-        let elem_ctx = RenderContext { elem_idx: idx, ..sub_ctx };
+        let elem_ctx = RenderContext {
+            elem_idx: idx,
+            ..sub_ctx
+        };
         render_element(&mut content_pixmap, &mut content_band, elem, &elem_ctx);
     }
-
 
     // 4. Multiply content RGBA by mask values
     let content_data = content_pixmap.data_mut();
@@ -2826,7 +2946,12 @@ fn render_soft_masked(
 
     // 5. Composite masked content onto parent with clip
     let mut temp_mask = None;
-    let mask_ref = resolve_clip_mask(&band_state.clip_region, &mut temp_mask, ctx.out_w, ctx.out_h);
+    let mask_ref = resolve_clip_mask(
+        &band_state.clip_region,
+        &mut temp_mask,
+        ctx.out_w,
+        ctx.out_h,
+    );
     let mask_ref = match mask_ref {
         None => return,
         Some(m) => m,
@@ -2903,7 +3028,11 @@ fn extract_soft_mask_values(
                     (lum + 0.5).clamp(0.0, 255.0) as u8
                 };
                 // Apply transfer function inversion: {1 exch sub} → 255 - value
-                out[i] = if params.transfer_invert { 255 - lum_byte } else { lum_byte };
+                out[i] = if params.transfer_invert {
+                    255 - lum_byte
+                } else {
+                    lum_byte
+                };
             }
         }
     }
@@ -2917,8 +3046,12 @@ fn render_pattern_fill(
     ctx: &RenderContext<'_>,
 ) {
     let mut temp_mask = None;
-    let Some(mask_ref) = resolve_clip_mask(&band_state.clip_region, &mut temp_mask, ctx.out_w, ctx.out_h)
-    else {
+    let Some(mask_ref) = resolve_clip_mask(
+        &band_state.clip_region,
+        &mut temp_mask,
+        ctx.out_w,
+        ctx.out_h,
+    ) else {
         return;
     };
 
@@ -3043,7 +3176,10 @@ fn render_pattern_fill(
                 };
 
                 for (idx, elem) in params.tile.elements().iter().enumerate() {
-                    let elem_ctx = RenderContext { elem_idx: idx, ..tile_ctx };
+                    let elem_ctx = RenderContext {
+                        elem_idx: idx,
+                        ..tile_ctx
+                    };
                     render_element(&mut tile_buf, &mut tile_band, elem, &elem_ctx);
                 }
             }
@@ -3118,14 +3254,8 @@ fn render_pattern_fill(
                                                 blend_mode: BlendMode::SourceOver,
                                                 quality: stet_tiny_skia::FilterQuality::Nearest,
                                             };
-                                            tile_buf.draw_pixmap(
-                                                0,
-                                                0,
-                                                img_ref,
-                                                &paint,
-                                                combined,
-                                                None,
-                                            );
+                                            tile_buf
+                                                .draw_pixmap(0, 0, img_ref, &paint, combined, None);
                                         }
                                     }
                                 }
@@ -3188,35 +3318,39 @@ fn clip_path_unified(
         // Y-bbox early exit: if clip path doesn't overlap this band, set empty clip
         if x_start == 0
             && let Some(bbox) = path_y_bbox(path)
-                && (bbox.y_max <= y_start as f64 || bbox.y_min >= (y_start + ctx.out_h) as f64)
-            {
-                if let Some(ClipRegion::Mask(mask)) = band_state.clip_region.take() {
-                    band_state.recycle_mask(mask);
-                }
-                band_state.clip_region = Some(ClipRegion::Rect(ClipRect {
-                    x0: 0, y0: 0, x1: 0, y1: 0,
-                }));
-                return;
+            && (bbox.y_max <= y_start as f64 || bbox.y_min >= (y_start + ctx.out_h) as f64)
+        {
+            if let Some(ClipRegion::Mask(mask)) = band_state.clip_region.take() {
+                band_state.recycle_mask(mask);
             }
+            band_state.clip_region = Some(ClipRegion::Rect(ClipRect {
+                x0: 0,
+                y0: 0,
+                x1: 0,
+                y1: 0,
+            }));
+            return;
+        }
 
         // Rect fast-path (only when x_start==0 for simplicity)
         if x_start == 0
-            && let Some(dev_rect) = detect_rect(path, ctx.out_w, u32::MAX) {
-                let new_rect = translate_clip_rect(&dev_rect, y_start, ctx.out_h);
-                match band_state.clip_region.take() {
-                    None => {
-                        band_state.clip_region = Some(ClipRegion::Rect(new_rect));
-                    }
-                    Some(ClipRegion::Rect(existing)) => {
-                        band_state.clip_region = Some(ClipRegion::Rect(existing.intersect(&new_rect)));
-                    }
-                    Some(ClipRegion::Mask(mut mask)) => {
-                        intersect_mask_with_rect(&mut mask, &new_rect, ctx.out_w, ctx.out_h);
-                        band_state.clip_region = Some(ClipRegion::Mask(mask));
-                    }
+            && let Some(dev_rect) = detect_rect(path, ctx.out_w, u32::MAX)
+        {
+            let new_rect = translate_clip_rect(&dev_rect, y_start, ctx.out_h);
+            match band_state.clip_region.take() {
+                None => {
+                    band_state.clip_region = Some(ClipRegion::Rect(new_rect));
                 }
-                return;
+                Some(ClipRegion::Rect(existing)) => {
+                    band_state.clip_region = Some(ClipRegion::Rect(existing.intersect(&new_rect)));
+                }
+                Some(ClipRegion::Mask(mut mask)) => {
+                    intersect_mask_with_rect(&mut mask, &new_rect, ctx.out_w, ctx.out_h);
+                    band_state.clip_region = Some(ClipRegion::Mask(mask));
+                }
             }
+            return;
+        }
     }
 
     // General path: non-rectangular clip with cache + mask reuse
@@ -3474,7 +3608,18 @@ impl OutputDevice for SkiaDevice {
         let Some(mask_ref) = resolve_clip_mask(&self.clip_region, &mut temp_mask, w, h) else {
             return;
         };
-        render_axial_shading(&mut self.pixmap, params, 0.0, 0.0, 1.0, 1.0, mask_ref, self.no_aa, None, None);
+        render_axial_shading(
+            &mut self.pixmap,
+            params,
+            0.0,
+            0.0,
+            1.0,
+            1.0,
+            mask_ref,
+            self.no_aa,
+            None,
+            None,
+        );
     }
 
     fn paint_radial_shading(&mut self, params: &RadialShadingParams) {
@@ -3484,7 +3629,18 @@ impl OutputDevice for SkiaDevice {
         let Some(mask_ref) = resolve_clip_mask(&self.clip_region, &mut temp_mask, w, h) else {
             return;
         };
-        render_radial_shading(&mut self.pixmap, params, 0.0, 0.0, 1.0, 1.0, mask_ref, self.no_aa, None, None);
+        render_radial_shading(
+            &mut self.pixmap,
+            params,
+            0.0,
+            0.0,
+            1.0,
+            1.0,
+            mask_ref,
+            self.no_aa,
+            None,
+            None,
+        );
     }
 
     fn paint_mesh_shading(&mut self, params: &MeshShadingParams) {
@@ -3494,7 +3650,17 @@ impl OutputDevice for SkiaDevice {
         let Some(mask_ref) = resolve_clip_mask(&self.clip_region, &mut temp_mask, w, h) else {
             return;
         };
-        render_mesh_shading(&mut self.pixmap, params, 0.0, 0.0, 1.0, 1.0, mask_ref, None, None);
+        render_mesh_shading(
+            &mut self.pixmap,
+            params,
+            0.0,
+            0.0,
+            1.0,
+            1.0,
+            mask_ref,
+            None,
+            None,
+        );
     }
 
     fn paint_patch_shading(&mut self, params: &PatchShadingParams) {
@@ -3504,7 +3670,17 @@ impl OutputDevice for SkiaDevice {
         let Some(mask_ref) = resolve_clip_mask(&self.clip_region, &mut temp_mask, w, h) else {
             return;
         };
-        render_patch_shading(&mut self.pixmap, params, 0.0, 0.0, 1.0, 1.0, mask_ref, None, None);
+        render_patch_shading(
+            &mut self.pixmap,
+            params,
+            0.0,
+            0.0,
+            1.0,
+            1.0,
+            mask_ref,
+            None,
+            None,
+        );
     }
 
     fn paint_pattern_fill(&mut self, params: &stet_graphics::device::PatternFillParams) {
@@ -3582,7 +3758,10 @@ impl OutputDevice for SkiaDevice {
                 cmyk_buffer: None,
             };
             for (idx, elem) in list.elements().iter().enumerate() {
-                let elem_ctx = RenderContext { elem_idx: idx, ..ctx };
+                let elem_ctx = RenderContext {
+                    elem_idx: idx,
+                    ..ctx
+                };
                 render_element(&mut self.pixmap, &mut band_state, elem, &elem_ctx);
             }
             return self.show_page(output_path);
@@ -3616,7 +3795,9 @@ impl OutputDevice for SkiaDevice {
         }
         #[cfg(not(feature = "parallel"))]
         {
-            render_banded_to_sink(page_w, page_h, band_h, dpi, &list, &mut *sink, &icc_cache, self.no_aa)?;
+            render_banded_to_sink(
+                page_w, page_h, band_h, dpi, &list, &mut *sink, &icc_cache, self.no_aa,
+            )?;
         }
 
         Ok(())
@@ -3693,9 +3874,7 @@ fn has_overprint_elements(list: &DisplayList) -> bool {
                     return true;
                 }
             }
-            DisplayElement::SoftMasked {
-                content, mask, ..
-            } => {
+            DisplayElement::SoftMasked { content, mask, .. } => {
                 if has_overprint_elements(content) || has_overprint_elements(mask) {
                     return true;
                 }
@@ -3705,7 +3884,6 @@ fn has_overprint_elements(list: &DisplayList) -> bool {
     }
     false
 }
-
 
 /// Render an overprint fill: rasterize path to coverage mask, then composite
 /// at the CMYK level, converting the result to RGB for the pixmap.
@@ -3782,12 +3960,19 @@ fn render_overprint_fill(
         && params.is_device_cmyk
     {
         channels = 0;
-        if src_c != 0.0 { channels |= stet_graphics::device::CMYK_C; }
-        if src_m != 0.0 { channels |= stet_graphics::device::CMYK_M; }
-        if src_y != 0.0 { channels |= stet_graphics::device::CMYK_Y; }
-        if src_k != 0.0 { channels |= stet_graphics::device::CMYK_K; }
+        if src_c != 0.0 {
+            channels |= stet_graphics::device::CMYK_C;
+        }
+        if src_m != 0.0 {
+            channels |= stet_graphics::device::CMYK_M;
+        }
+        if src_y != 0.0 {
+            channels |= stet_graphics::device::CMYK_Y;
+        }
+        if src_k != 0.0 {
+            channels |= stet_graphics::device::CMYK_K;
+        }
     }
-
 
     if channels == stet_graphics::device::CMYK_ALL {
         let cov_data = coverage_mask.data();
@@ -3851,17 +4036,38 @@ fn render_overprint_fill(
                         (0.0, 0.0, 0.0, 1.0)
                     } else {
                         let inv = 1.0 / (1.0 - rk);
-                        ((1.0 - r - rk) * inv, (1.0 - g - rk) * inv, (1.0 - b - rk) * inv, rk)
+                        (
+                            (1.0 - r - rk) * inv,
+                            (1.0 - g - rk) * inv,
+                            (1.0 - b - rk) * inv,
+                            rk,
+                        )
                     }
                 } else {
                     (c, m, y_val, k)
                 }
             };
 
-            let new_c = if channels & stet_graphics::device::CMYK_C != 0 { src_c } else { cur_c };
-            let new_m = if channels & stet_graphics::device::CMYK_M != 0 { src_m } else { cur_m };
-            let new_y = if channels & stet_graphics::device::CMYK_Y != 0 { src_y } else { cur_y };
-            let new_k = if channels & stet_graphics::device::CMYK_K != 0 { src_k } else { cur_k };
+            let new_c = if channels & stet_graphics::device::CMYK_C != 0 {
+                src_c
+            } else {
+                cur_c
+            };
+            let new_m = if channels & stet_graphics::device::CMYK_M != 0 {
+                src_m
+            } else {
+                cur_m
+            };
+            let new_y = if channels & stet_graphics::device::CMYK_Y != 0 {
+                src_y
+            } else {
+                cur_y
+            };
+            let new_k = if channels & stet_graphics::device::CMYK_K != 0 {
+                src_k
+            } else {
+                cur_k
+            };
 
             if (new_c as f32 - cmyk_buf[ci]).abs() < 1e-6
                 && (new_m as f32 - cmyk_buf[ci + 1]).abs() < 1e-6
@@ -3889,9 +4095,19 @@ fn render_overprint_fill(
             let out_a = a + dst_a * (1.0 - a);
             if out_a > 0.0 {
                 let inv = 1.0 / out_a;
-                px_data[pi] = ((r as f32 * a + px_data[pi] as f32 / 255.0 * dst_a * (1.0 - a)) * inv * 255.0).round() as u8;
-                px_data[pi + 1] = ((g as f32 * a + px_data[pi + 1] as f32 / 255.0 * dst_a * (1.0 - a)) * inv * 255.0).round() as u8;
-                px_data[pi + 2] = ((b as f32 * a + px_data[pi + 2] as f32 / 255.0 * dst_a * (1.0 - a)) * inv * 255.0).round() as u8;
+                px_data[pi] =
+                    ((r as f32 * a + px_data[pi] as f32 / 255.0 * dst_a * (1.0 - a)) * inv * 255.0)
+                        .round() as u8;
+                px_data[pi + 1] = ((g as f32 * a
+                    + px_data[pi + 1] as f32 / 255.0 * dst_a * (1.0 - a))
+                    * inv
+                    * 255.0)
+                    .round() as u8;
+                px_data[pi + 2] = ((b as f32 * a
+                    + px_data[pi + 2] as f32 / 255.0 * dst_a * (1.0 - a))
+                    * inv
+                    * 255.0)
+                    .round() as u8;
                 px_data[pi + 3] = (out_a * 255.0).round() as u8;
             }
         }
@@ -3910,19 +4126,42 @@ fn cmyk_to_rgb_plrm(c: f64, m: f64, y: f64, k: f64) -> (f64, f64, f64) {
 #[allow(clippy::too_many_arguments)]
 /// Compute the device-space bounding box of a tiny-skia path after transform,
 /// clamped to `(0, 0, w, h)`. Returns `(x0, y0, x1, y1)` as pixel indices.
-fn path_device_bbox(skia_path: &stet_tiny_skia::Path, transform: Transform, w: u32, h: u32) -> (usize, usize, usize, usize) {
+fn path_device_bbox(
+    skia_path: &stet_tiny_skia::Path,
+    transform: Transform,
+    w: u32,
+    h: u32,
+) -> (usize, usize, usize, usize) {
     let b = skia_path.bounds();
     let mut corners = [
-        stet_tiny_skia::Point { x: b.left(), y: b.top() },
-        stet_tiny_skia::Point { x: b.right(), y: b.top() },
-        stet_tiny_skia::Point { x: b.right(), y: b.bottom() },
-        stet_tiny_skia::Point { x: b.left(), y: b.bottom() },
+        stet_tiny_skia::Point {
+            x: b.left(),
+            y: b.top(),
+        },
+        stet_tiny_skia::Point {
+            x: b.right(),
+            y: b.top(),
+        },
+        stet_tiny_skia::Point {
+            x: b.right(),
+            y: b.bottom(),
+        },
+        stet_tiny_skia::Point {
+            x: b.left(),
+            y: b.bottom(),
+        },
     ];
     transform.map_points(&mut corners);
     let min_x = corners.iter().map(|p| p.x).fold(f32::INFINITY, f32::min);
     let min_y = corners.iter().map(|p| p.y).fold(f32::INFINITY, f32::min);
-    let max_x = corners.iter().map(|p| p.x).fold(f32::NEG_INFINITY, f32::max);
-    let max_y = corners.iter().map(|p| p.y).fold(f32::NEG_INFINITY, f32::max);
+    let max_x = corners
+        .iter()
+        .map(|p| p.x)
+        .fold(f32::NEG_INFINITY, f32::max);
+    let max_y = corners
+        .iter()
+        .map(|p| p.y)
+        .fold(f32::NEG_INFINITY, f32::max);
     // Floor/ceil + clamp to output dimensions (with 1px margin for AA)
     let x0 = (min_x.floor() as i32 - 1).max(0) as usize;
     let y0 = (min_y.floor() as i32 - 1).max(0) as usize;
@@ -4049,11 +4288,13 @@ fn render_overprint_image(
     for by in 0..out_h as usize {
         for bx in 0..out_w as usize {
             if let Some(ref r) = clip_rect
-                && ((by as u32) < r.y0 || (by as u32) >= r.y1
-                    || (bx as u32) < r.x0 || (bx as u32) >= r.x1)
-                {
-                    continue;
-                }
+                && ((by as u32) < r.y0
+                    || (by as u32) >= r.y1
+                    || (bx as u32) < r.x0
+                    || (bx as u32) >= r.x1)
+            {
+                continue;
+            }
             if let Some(clip) = clip_data {
                 let ci_clip = by * stride + bx;
                 if clip[ci_clip] == 0 {
@@ -4096,7 +4337,9 @@ fn render_overprint_image(
                         0
                     };
                     let paint = if polarity { bit == 1 } else { bit == 0 };
-                    if !paint { continue; }
+                    if !paint {
+                        continue;
+                    }
                     (mc, mm, my, mk)
                 } else if let Some(cmyk) =
                     sample_pixel_cmyk(sample_data, &params.color_space, iw, row, col)
@@ -4123,10 +4366,18 @@ fn render_overprint_image(
                 && is_direct_cmyk
             {
                 channels = 0;
-                if src_c != 0.0 { channels |= stet_graphics::device::CMYK_C; }
-                if src_m != 0.0 { channels |= stet_graphics::device::CMYK_M; }
-                if src_y != 0.0 { channels |= stet_graphics::device::CMYK_Y; }
-                if src_k != 0.0 { channels |= stet_graphics::device::CMYK_K; }
+                if src_c != 0.0 {
+                    channels |= stet_graphics::device::CMYK_C;
+                }
+                if src_m != 0.0 {
+                    channels |= stet_graphics::device::CMYK_M;
+                }
+                if src_y != 0.0 {
+                    channels |= stet_graphics::device::CMYK_Y;
+                }
+                if src_k != 0.0 {
+                    channels |= stet_graphics::device::CMYK_K;
+                }
             }
 
             let mi = by * stride + bx;
@@ -4143,18 +4394,42 @@ fn render_overprint_image(
                     let g = px_data[pi + 1] as f64 / 255.0;
                     let b = px_data[pi + 2] as f64 / 255.0;
                     let rk = 1.0 - r.max(g).max(b);
-                    if rk >= 1.0 { (0.0, 0.0, 0.0, 1.0) }
-                    else {
+                    if rk >= 1.0 {
+                        (0.0, 0.0, 0.0, 1.0)
+                    } else {
                         let inv = 1.0 / (1.0 - rk);
-                        ((1.0 - r - rk) * inv, (1.0 - g - rk) * inv, (1.0 - b - rk) * inv, rk)
+                        (
+                            (1.0 - r - rk) * inv,
+                            (1.0 - g - rk) * inv,
+                            (1.0 - b - rk) * inv,
+                            rk,
+                        )
                     }
-                } else { (c, m, y_val, k) }
+                } else {
+                    (c, m, y_val, k)
+                }
             };
 
-            let new_c = if channels & stet_graphics::device::CMYK_C != 0 { src_c } else { cur_c };
-            let new_m = if channels & stet_graphics::device::CMYK_M != 0 { src_m } else { cur_m };
-            let new_y = if channels & stet_graphics::device::CMYK_Y != 0 { src_y } else { cur_y };
-            let new_k = if channels & stet_graphics::device::CMYK_K != 0 { src_k } else { cur_k };
+            let new_c = if channels & stet_graphics::device::CMYK_C != 0 {
+                src_c
+            } else {
+                cur_c
+            };
+            let new_m = if channels & stet_graphics::device::CMYK_M != 0 {
+                src_m
+            } else {
+                cur_m
+            };
+            let new_y = if channels & stet_graphics::device::CMYK_Y != 0 {
+                src_y
+            } else {
+                cur_y
+            };
+            let new_k = if channels & stet_graphics::device::CMYK_K != 0 {
+                src_k
+            } else {
+                cur_k
+            };
 
             cmyk_buf[ci] = new_c as f32;
             cmyk_buf[ci + 1] = new_m as f32;
@@ -4193,16 +4468,29 @@ fn update_cmyk_buffer_for_image(
 ) {
     let iw = params.width as usize;
     let ih = params.height as usize;
-    let Some(image_inv) = params.image_matrix.invert() else { return; };
+    let Some(image_inv) = params.image_matrix.invert() else {
+        return;
+    };
     let combined = params.ctm.concat(&image_inv);
-    let Some(inv_combined) = combined.invert() else { return; };
+    let Some(inv_combined) = combined.invert() else {
+        return;
+    };
     let stride = out_w as usize;
     let inv_sx = 1.0 / scale_x as f64;
     let inv_sy = 1.0 / scale_y as f64;
 
     let mask_info = if let ImageColorSpace::Mask { color, polarity } = &params.color_space {
-        let Some((c, m, y, k)) = color.native_cmyk else { return; };
-        Some((c as f32, m as f32, y as f32, k as f32, *polarity, iw.div_ceil(8)))
+        let Some((c, m, y, k)) = color.native_cmyk else {
+            return;
+        };
+        Some((
+            c as f32,
+            m as f32,
+            y as f32,
+            k as f32,
+            *polarity,
+            iw.div_ceil(8),
+        ))
     } else if !is_cmyk_color_space(&params.color_space) {
         return;
     } else {
@@ -4221,10 +4509,18 @@ fn update_cmyk_buffer_for_image(
     for by in 0..out_h as usize {
         for bx in 0..out_w as usize {
             if let Some(ref r) = clip_rect
-                && ((by as u32) < r.y0 || (by as u32) >= r.y1
-                    || (bx as u32) < r.x0 || (bx as u32) >= r.x1) { continue; }
+                && ((by as u32) < r.y0
+                    || (by as u32) >= r.y1
+                    || (bx as u32) < r.x0
+                    || (bx as u32) >= r.x1)
+            {
+                continue;
+            }
             if let Some(clip) = clip_data
-                && clip[by * stride + bx] == 0 { continue; }
+                && clip[by * stride + bx] == 0
+            {
+                continue;
+            }
 
             let dx = (bx as f64 + 0.5) * inv_sx + vp_x as f64;
             let dy = (by as f64 + 0.5) * inv_sy + vp_y as f64;
@@ -4233,7 +4529,9 @@ fn update_cmyk_buffer_for_image(
 
             let col = ix.floor() as i64;
             let row = iy.floor() as i64;
-            if col < 0 || col >= iw as i64 || row < 0 || row >= ih as i64 { continue; }
+            if col < 0 || col >= iw as i64 || row < 0 || row >= ih as i64 {
+                continue;
+            }
             let col = col as usize;
             let row = row as usize;
 
@@ -4243,7 +4541,9 @@ fn update_cmyk_buffer_for_image(
                 let bit_offset = 7 - (col % 8);
                 let bit = if byte_idx < sample_data.len() {
                     (sample_data[byte_idx] >> bit_offset) & 1
-                } else { 0 };
+                } else {
+                    0
+                };
                 let paint = if polarity { bit == 1 } else { bit == 0 };
                 if paint {
                     cmyk_buf[ci] = sc;
@@ -4269,8 +4569,12 @@ fn image_supports_overprint(cs: &ImageColorSpace) -> bool {
     match cs {
         ImageColorSpace::Mask { .. } => true,
         ImageColorSpace::DeviceCMYK | ImageColorSpace::ICCBased { n: 4, .. } => true,
-        ImageColorSpace::Separation { alt_space, .. } | ImageColorSpace::DeviceN { alt_space, .. } => {
-            matches!(alt_space.as_ref(), ImageColorSpace::DeviceCMYK | ImageColorSpace::ICCBased { n: 4, .. })
+        ImageColorSpace::Separation { alt_space, .. }
+        | ImageColorSpace::DeviceN { alt_space, .. } => {
+            matches!(
+                alt_space.as_ref(),
+                ImageColorSpace::DeviceCMYK | ImageColorSpace::ICCBased { n: 4, .. }
+            )
         }
         ImageColorSpace::Indexed { base, .. } => image_supports_overprint(base),
         _ => false,
@@ -4311,20 +4615,42 @@ fn sample_pixel_cmyk(
                 None
             }
         }
-        ImageColorSpace::Separation { alt_space, tint_table, .. } => {
-            if !matches!(alt_space.as_ref(), ImageColorSpace::DeviceCMYK | ImageColorSpace::ICCBased { n: 4, .. }) { return None; }
+        ImageColorSpace::Separation {
+            alt_space,
+            tint_table,
+            ..
+        } => {
+            if !matches!(
+                alt_space.as_ref(),
+                ImageColorSpace::DeviceCMYK | ImageColorSpace::ICCBased { n: 4, .. }
+            ) {
+                return None;
+            }
             let si = row * iw + col;
-            if si >= sample_data.len() { return None; }
+            if si >= sample_data.len() {
+                return None;
+            }
             let tint = sample_data[si] as f32 / 255.0;
             let mut alt = [0.0f32; 4];
             tint_table.lookup_1d(tint, &mut alt);
             Some((alt[0] as f64, alt[1] as f64, alt[2] as f64, alt[3] as f64))
         }
-        ImageColorSpace::DeviceN { alt_space, tint_table, .. } => {
-            if !matches!(alt_space.as_ref(), ImageColorSpace::DeviceCMYK | ImageColorSpace::ICCBased { n: 4, .. }) { return None; }
+        ImageColorSpace::DeviceN {
+            alt_space,
+            tint_table,
+            ..
+        } => {
+            if !matches!(
+                alt_space.as_ref(),
+                ImageColorSpace::DeviceCMYK | ImageColorSpace::ICCBased { n: 4, .. }
+            ) {
+                return None;
+            }
             let ni = tint_table.num_inputs as usize;
             let si = (row * iw + col) * ni;
-            if si + ni > sample_data.len() { return None; }
+            if si + ni > sample_data.len() {
+                return None;
+            }
             let mut inputs = vec![0.0f32; ni];
             for (c, inp) in inputs.iter_mut().enumerate() {
                 *inp = sample_data[si + c] as f32 / 255.0;
@@ -4333,7 +4659,11 @@ fn sample_pixel_cmyk(
             tint_table.lookup_nd(&inputs, &mut alt);
             Some((alt[0] as f64, alt[1] as f64, alt[2] as f64, alt[3] as f64))
         }
-        ImageColorSpace::Indexed { base, hival, lookup } => {
+        ImageColorSpace::Indexed {
+            base,
+            hival,
+            lookup,
+        } => {
             let pi = row * iw + col;
             if pi >= sample_data.len() {
                 return None;
@@ -4354,16 +4684,28 @@ fn sample_pixel_cmyk(
             // For Separation/DeviceN base: extract base components from lookup, then tint
             if li + base_ncomp <= lookup.len() {
                 match base.as_ref() {
-                    ImageColorSpace::Separation { alt_space, tint_table, .. }
-                        if matches!(alt_space.as_ref(), ImageColorSpace::DeviceCMYK | ImageColorSpace::ICCBased { n: 4, .. }) =>
+                    ImageColorSpace::Separation {
+                        alt_space,
+                        tint_table,
+                        ..
+                    } if matches!(
+                        alt_space.as_ref(),
+                        ImageColorSpace::DeviceCMYK | ImageColorSpace::ICCBased { n: 4, .. }
+                    ) =>
                     {
                         let tint = lookup[li] as f32 / 255.0;
                         let mut alt = [0.0f32; 4];
                         tint_table.lookup_1d(tint, &mut alt);
                         return Some((alt[0] as f64, alt[1] as f64, alt[2] as f64, alt[3] as f64));
                     }
-                    ImageColorSpace::DeviceN { alt_space, tint_table, .. }
-                        if matches!(alt_space.as_ref(), ImageColorSpace::DeviceCMYK | ImageColorSpace::ICCBased { n: 4, .. }) =>
+                    ImageColorSpace::DeviceN {
+                        alt_space,
+                        tint_table,
+                        ..
+                    } if matches!(
+                        alt_space.as_ref(),
+                        ImageColorSpace::DeviceCMYK | ImageColorSpace::ICCBased { n: 4, .. }
+                    ) =>
                     {
                         let ni = tint_table.num_inputs as usize;
                         let mut inputs = vec![0.0f32; ni];
@@ -4491,12 +4833,7 @@ fn render_banded_to_sink(
                     elem_idx: i,
                     no_aa,
                 };
-                render_element(
-                    &mut band_pixmap,
-                    &mut band_state,
-                    &elements[i],
-                    &ctx,
-                );
+                render_element(&mut band_pixmap, &mut band_state, &elements[i], &ctx);
             }
         }
 
@@ -4979,9 +5316,9 @@ pub fn render_region_prepared(
                     || bbox.x_min >= vp_x_max
                     || bbox.y_max <= vp_y
                     || bbox.y_min >= vp_y_max)
-                {
-                    continue;
-                }
+            {
+                continue;
+            }
             let ctx = RenderContext {
                 vp_x: vp_x_f,
                 vp_y: vp_y_f,
@@ -5079,8 +5416,7 @@ pub fn render_region_single_band(
     // Adjusted viewport offset for this band's pixmap
     let band_vp_y = vp_y + render_y_start as f64 / scale_y;
 
-    let mut pixmap =
-        Pixmap::new(pixel_w, render_h).expect("Failed to create band pixmap");
+    let mut pixmap = Pixmap::new(pixel_w, render_h).expect("Failed to create band pixmap");
     pixmap.fill(Color::TRANSPARENT);
 
     let cmyk_buf = if has_overprint_elements(list) {
@@ -5128,9 +5464,9 @@ pub fn render_region_single_band(
                     || bbox.x_min >= vp_x_max
                     || bbox.y_max <= src_y_min
                     || bbox.y_min >= src_y_max)
-                {
-                    continue;
-                }
+            {
+                continue;
+            }
             let ctx = RenderContext {
                 vp_x: vp_x_f,
                 vp_y: band_vp_y_f,
@@ -5185,16 +5521,39 @@ pub fn render_region_prepared_parallel(
 
     if num_bands <= 1 {
         // Single band — no parallelism needed
-        return render_region_prepared(list, prepared, vp_x, vp_y, vp_w, vp_h, pixel_w, pixel_h, dpi, icc, image_cache, no_aa);
+        return render_region_prepared(
+            list,
+            prepared,
+            vp_x,
+            vp_y,
+            vp_w,
+            vp_h,
+            pixel_w,
+            pixel_h,
+            dpi,
+            icc,
+            image_cache,
+            no_aa,
+        );
     }
 
     let render_band = |band_idx: u32| -> Vec<u8> {
         render_region_single_band(
-            list, prepared,
-            vp_x, vp_y, vp_w, vp_h,
-            pixel_w, pixel_h,
-            band_idx, band_h, num_bands,
-            dpi, icc, image_cache, no_aa,
+            list,
+            prepared,
+            vp_x,
+            vp_y,
+            vp_w,
+            vp_h,
+            pixel_w,
+            pixel_h,
+            band_idx,
+            band_h,
+            num_bands,
+            dpi,
+            icc,
+            image_cache,
+            no_aa,
         )
     };
 
@@ -5266,7 +5625,9 @@ pub fn render_to_rgba(
     };
 
     let band_h = select_band_height(pixel_w, pixel_h);
-    if let Err(e) = render_banded_to_sink(pixel_w, pixel_h, band_h, dpi, list, &mut sink, &icc_cache, no_aa) {
+    if let Err(e) = render_banded_to_sink(
+        pixel_w, pixel_h, band_h, dpi, list, &mut sink, &icc_cache, no_aa,
+    ) {
         eprintln!("render_to_rgba: banded render failed: {e}");
         return vec![0xFF; pixel_w as usize * pixel_h as usize * 4];
     }
@@ -5382,9 +5743,9 @@ pub fn render_region(
                     || bbox.x_min >= vp_x_max
                     || bbox.y_max <= vp_y
                     || bbox.y_min >= vp_y_max)
-                {
-                    continue;
-                }
+            {
+                continue;
+            }
             let ctx = RenderContext {
                 vp_x: vp_x_f,
                 vp_y: vp_y_f,
@@ -5490,8 +5851,14 @@ fn render_axial_shading(
         ];
         let x_min = corners.iter().map(|c| c.0).fold(f64::INFINITY, f64::min);
         let y_min = corners.iter().map(|c| c.1).fold(f64::INFINITY, f64::min);
-        let x_max = corners.iter().map(|c| c.0).fold(f64::NEG_INFINITY, f64::max);
-        let y_max = corners.iter().map(|c| c.1).fold(f64::NEG_INFINITY, f64::max);
+        let x_max = corners
+            .iter()
+            .map(|c| c.0)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let y_max = corners
+            .iter()
+            .map(|c| c.1)
+            .fold(f64::NEG_INFINITY, f64::max);
         (
             ((x_min as f32 - vp_x) * scale_x).max(0.0),
             ((y_min as f32 - vp_y) * scale_y).max(0.0),
@@ -5528,12 +5895,14 @@ fn render_axial_shading(
         }
         let start = stet_tiny_skia::Point::from_xy(params.x0 as f32, params.y0 as f32);
         let end = stet_tiny_skia::Point::from_xy(params.x1 as f32, params.y1 as f32);
-        let gradient_transform = viewport_transform(
-            to_transform(&params.ctm),
-            vp_x, vp_y, scale_x, scale_y,
-        );
+        let gradient_transform =
+            viewport_transform(to_transform(&params.ctm), vp_x, vp_y, scale_x, scale_y);
         let Some(gradient) = stet_tiny_skia::LinearGradient::new(
-            start, end, stops, stet_tiny_skia::SpreadMode::Pad, gradient_transform,
+            start,
+            end,
+            stops,
+            stet_tiny_skia::SpreadMode::Pad,
+            gradient_transform,
         ) else {
             return;
         };
@@ -5569,7 +5938,13 @@ fn render_axial_shading(
             }
             pb.close();
             if let Some(path) = pb.finish() {
-                pixmap.fill_path(&path, &paint, SkiaFillRule::Winding, Transform::identity(), clip_mask);
+                pixmap.fill_path(
+                    &path,
+                    &paint,
+                    SkiaFillRule::Winding,
+                    Transform::identity(),
+                    clip_mask,
+                );
             }
         }
     } else {
@@ -5585,21 +5960,33 @@ fn render_axial_shading(
 
             if axis_x.abs() >= axis_y.abs() {
                 if !params.extend_start {
-                    if axis_x >= 0.0 { rx_min = rx_min.max(gx0); }
-                    else { rx_max = rx_max.min(gx0); }
+                    if axis_x >= 0.0 {
+                        rx_min = rx_min.max(gx0);
+                    } else {
+                        rx_max = rx_max.min(gx0);
+                    }
                 }
                 if !params.extend_end {
-                    if axis_x >= 0.0 { rx_max = rx_max.min(gx1); }
-                    else { rx_min = rx_min.max(gx1); }
+                    if axis_x >= 0.0 {
+                        rx_max = rx_max.min(gx1);
+                    } else {
+                        rx_min = rx_min.max(gx1);
+                    }
                 }
             } else {
                 if !params.extend_start {
-                    if axis_y >= 0.0 { ry_min = ry_min.max(gy0); }
-                    else { ry_max = ry_max.min(gy0); }
+                    if axis_y >= 0.0 {
+                        ry_min = ry_min.max(gy0);
+                    } else {
+                        ry_max = ry_max.min(gy0);
+                    }
                 }
                 if !params.extend_end {
-                    if axis_y >= 0.0 { ry_max = ry_max.min(gy1); }
-                    else { ry_min = ry_min.max(gy1); }
+                    if axis_y >= 0.0 {
+                        ry_max = ry_max.min(gy1);
+                    } else {
+                        ry_min = ry_min.max(gy1);
+                    }
                 }
             }
             if rx_max <= rx_min || ry_max <= ry_min {
@@ -5706,7 +6093,9 @@ fn render_axial_shading(
 
                 if let Some(mask) = clip_mask {
                     let mi = py as usize * pw as usize + px as usize;
-                    if mask.data()[mi] == 0 { continue; }
+                    if mask.data()[mi] == 0 {
+                        continue;
+                    }
                 }
 
                 let color = interpolate_color_stops(&params.color_stops, clamped);
@@ -5762,19 +6151,14 @@ fn render_axial_shading(
                             let m = buf[ci + 1] as f64;
                             let y = buf[ci + 2] as f64;
                             let k = buf[ci + 3] as f64;
-                            if let Some((rv, gv, bv)) =
-                                icc_cache.convert_cmyk_readonly(c, m, y, k)
+                            if let Some((rv, gv, bv)) = icc_cache.convert_cmyk_readonly(c, m, y, k)
                             {
-                                let stride =
-                                    pixmap.data().len() / pixmap.height() as usize;
+                                let stride = pixmap.data().len() / pixmap.height() as usize;
                                 let offset = py as usize * stride + px as usize * 4;
                                 let data = pixmap.data_mut();
-                                data[offset] =
-                                    (rv * 255.0).round().clamp(0.0, 255.0) as u8;
-                                data[offset + 1] =
-                                    (gv * 255.0).round().clamp(0.0, 255.0) as u8;
-                                data[offset + 2] =
-                                    (bv * 255.0).round().clamp(0.0, 255.0) as u8;
+                                data[offset] = (rv * 255.0).round().clamp(0.0, 255.0) as u8;
+                                data[offset + 1] = (gv * 255.0).round().clamp(0.0, 255.0) as u8;
+                                data[offset + 2] = (bv * 255.0).round().clamp(0.0, 255.0) as u8;
                             }
                         }
                     }
@@ -5815,10 +6199,22 @@ fn render_radial_shading(
             params.ctm.transform_point(bbox[0], bbox[3]),
             params.ctm.transform_point(bbox[2], bbox[3]),
         ];
-        let x_min = corners.iter().map(|c| c.0 as f32).fold(f32::INFINITY, f32::min);
-        let y_min = corners.iter().map(|c| c.1 as f32).fold(f32::INFINITY, f32::min);
-        let x_max = corners.iter().map(|c| c.0 as f32).fold(f32::NEG_INFINITY, f32::max);
-        let y_max = corners.iter().map(|c| c.1 as f32).fold(f32::NEG_INFINITY, f32::max);
+        let x_min = corners
+            .iter()
+            .map(|c| c.0 as f32)
+            .fold(f32::INFINITY, f32::min);
+        let y_min = corners
+            .iter()
+            .map(|c| c.1 as f32)
+            .fold(f32::INFINITY, f32::min);
+        let x_max = corners
+            .iter()
+            .map(|c| c.0 as f32)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let y_max = corners
+            .iter()
+            .map(|c| c.1 as f32)
+            .fold(f32::NEG_INFINITY, f32::max);
         (
             ((x_min - vp_x) * scale_x).max(0.0) as u32,
             ((y_min - vp_y) * scale_y).max(0.0) as u32,
@@ -5841,16 +6237,23 @@ fn render_radial_shading(
             let dev_x = px as f64 * inv_sx + vp_x as f64;
             let (ux, uy) = inv_ctm.transform_point(dev_x, dev_y);
             let t = solve_radial_t(
-                ux, uy, params.x0, params.y0, params.r0, params.x1, params.y1, params.r1,
-                params.extend_start, params.extend_end,
+                ux,
+                uy,
+                params.x0,
+                params.y0,
+                params.r0,
+                params.x1,
+                params.y1,
+                params.r1,
+                params.extend_start,
+                params.extend_end,
             );
             if let Some(t) = t {
                 let clamped = t.clamp(0.0, 1.0);
                 let color = interpolate_color_stops(&params.color_stops, clamped);
 
-                let clipped = clip_mask.is_some_and(|mask| {
-                    mask.data()[py as usize * pw as usize + px as usize] == 0
-                });
+                let clipped = clip_mask
+                    .is_some_and(|mask| mask.data()[py as usize * pw as usize + px as usize] == 0);
 
                 if clipped {
                     continue;
@@ -5898,26 +6301,23 @@ fn render_radial_shading(
 
                 // Recomposite RGB from CMYK buffer via ICC (only for CMYK shadings)
                 if matches!(params.color_space, ShadingColorSpace::DeviceCMYK)
-                    && let Some(ref mut buf) = cmyk_buf {
-                        let ci = (py as usize * pw as usize + px as usize) * 4;
-                        if ci + 3 < buf.len()
-                            && let Some(icc_cache) = icc {
-                                let c = buf[ci] as f64;
-                                let m = buf[ci + 1] as f64;
-                                let y = buf[ci + 2] as f64;
-                                let k = buf[ci + 3] as f64;
-                                if let Some((r, g, b)) =
-                                    icc_cache.convert_cmyk_readonly(c, m, y, k)
-                                {
-                                    data[offset] =
-                                        (r * 255.0).round().clamp(0.0, 255.0) as u8;
-                                    data[offset + 1] =
-                                        (g * 255.0).round().clamp(0.0, 255.0) as u8;
-                                    data[offset + 2] =
-                                        (b * 255.0).round().clamp(0.0, 255.0) as u8;
-                                }
-                            }
+                    && let Some(ref mut buf) = cmyk_buf
+                {
+                    let ci = (py as usize * pw as usize + px as usize) * 4;
+                    if ci + 3 < buf.len()
+                        && let Some(icc_cache) = icc
+                    {
+                        let c = buf[ci] as f64;
+                        let m = buf[ci + 1] as f64;
+                        let y = buf[ci + 2] as f64;
+                        let k = buf[ci + 3] as f64;
+                        if let Some((r, g, b)) = icc_cache.convert_cmyk_readonly(c, m, y, k) {
+                            data[offset] = (r * 255.0).round().clamp(0.0, 255.0) as u8;
+                            data[offset + 1] = (g * 255.0).round().clamp(0.0, 255.0) as u8;
+                            data[offset + 2] = (b * 255.0).round().clamp(0.0, 255.0) as u8;
+                        }
                     }
+                }
             }
         }
     }
@@ -5953,9 +6353,7 @@ fn solve_radial_t(
 
     // Helper: check if a root is in the valid domain
     let in_domain = |t: f64| -> bool {
-        (0.0..=1.0).contains(&t)
-            || (t < 0.0 && extend_start)
-            || (t > 1.0 && extend_end)
+        (0.0..=1.0).contains(&t) || (t < 0.0 && extend_start) || (t > 1.0 && extend_end)
     };
 
     if a.abs() < 1e-10 {
@@ -6062,9 +6460,7 @@ fn render_mesh_shading(
                     continue;
                 }
 
-                let clipped = clip_mask.is_some_and(|mask| {
-                    mask.data()[py * pw + px] == 0
-                });
+                let clipped = clip_mask.is_some_and(|mask| mask.data()[py * pw + px] == 0);
 
                 let w0c = w0.max(0.0);
                 let w1c = w1.max(0.0);
@@ -6106,8 +6502,16 @@ fn render_mesh_shading(
                     let ci = (py * pw + px) * 4;
                     if ci + 3 < buf.len() {
                         let cmyk = interpolate_cmyk_from_vertices(
-                            &tri.v0, &tri.v1, &tri.v2, w0n, w1n, w2n,
-                            &params.color_space, r, g, b,
+                            &tri.v0,
+                            &tri.v1,
+                            &tri.v2,
+                            w0n,
+                            w1n,
+                            w2n,
+                            &params.color_space,
+                            r,
+                            g,
+                            b,
                         );
                         if params.overprint
                             && params.painted_channels != stet_graphics::device::CMYK_ALL
@@ -6149,22 +6553,18 @@ fn render_mesh_shading(
                 if let Some(ref mut buf) = cmyk_buf {
                     let ci = (py * pw + px) * 4;
                     if ci + 3 < buf.len()
-                        && let Some(icc_cache) = icc {
-                            let c = buf[ci] as f64;
-                            let m = buf[ci + 1] as f64;
-                            let y = buf[ci + 2] as f64;
-                            let k = buf[ci + 3] as f64;
-                            if let Some((rv, gv, bv)) =
-                                icc_cache.convert_cmyk_readonly(c, m, y, k)
-                            {
-                                data[offset] =
-                                    (rv * 255.0).round().clamp(0.0, 255.0) as u8;
-                                data[offset + 1] =
-                                    (gv * 255.0).round().clamp(0.0, 255.0) as u8;
-                                data[offset + 2] =
-                                    (bv * 255.0).round().clamp(0.0, 255.0) as u8;
-                            }
+                        && let Some(icc_cache) = icc
+                    {
+                        let c = buf[ci] as f64;
+                        let m = buf[ci + 1] as f64;
+                        let y = buf[ci + 2] as f64;
+                        let k = buf[ci + 3] as f64;
+                        if let Some((rv, gv, bv)) = icc_cache.convert_cmyk_readonly(c, m, y, k) {
+                            data[offset] = (rv * 255.0).round().clamp(0.0, 255.0) as u8;
+                            data[offset + 1] = (gv * 255.0).round().clamp(0.0, 255.0) as u8;
+                            data[offset + 2] = (bv * 255.0).round().clamp(0.0, 255.0) as u8;
                         }
+                    }
                 }
             }
         }
@@ -6237,7 +6637,6 @@ fn subdivide_patch_to_triangles(
     triangles: &mut Vec<stet_graphics::device::ShadingTriangle>,
     n: usize,
 ) {
-
     // Evaluate patch at grid points
     let mut grid: Vec<(f64, f64, DeviceColor)> = Vec::with_capacity((n + 1) * (n + 1));
 
@@ -6436,7 +6835,9 @@ fn build_gradient_lut(stops: &[stet_graphics::device::ColorStop]) -> [[u8; 4]; 2
 }
 
 /// Build tiny-skia gradient stops from color stops.
-fn build_gradient_stops(stops: &[stet_graphics::device::ColorStop]) -> Vec<stet_tiny_skia::GradientStop> {
+fn build_gradient_stops(
+    stops: &[stet_graphics::device::ColorStop],
+) -> Vec<stet_tiny_skia::GradientStop> {
     let mut result = Vec::with_capacity(stops.len());
     for stop in stops {
         let r = (stop.color.r * 255.0).round().clamp(0.0, 255.0) as u8;
@@ -6451,7 +6852,10 @@ fn build_gradient_stops(stops: &[stet_graphics::device::ColorStop]) -> Vec<stet_
 }
 
 /// Interpolate between color stops at a given position (0.0..=1.0).
-fn interpolate_color_stops(stops: &[stet_graphics::device::ColorStop], position: f64) -> DeviceColor {
+fn interpolate_color_stops(
+    stops: &[stet_graphics::device::ColorStop],
+    position: f64,
+) -> DeviceColor {
     if stops.is_empty() {
         return DeviceColor::from_gray(0.0);
     }
@@ -6590,8 +6994,8 @@ fn interpolate_cmyk_from_vertices(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use stet_graphics::device::{BgUcrState, HalftoneState, TransferState};
     use stet_graphics::color::DashPattern;
+    use stet_graphics::device::{BgUcrState, HalftoneState, TransferState};
 
     #[test]
     fn test_create_device() {

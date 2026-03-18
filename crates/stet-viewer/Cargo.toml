@@ -12,3 +12,4 @@ stet-core.workspace = true
 stet-render.workspace = true
 eframe.workspace = true
 egui.workspace = true
+rayon.workspace = true

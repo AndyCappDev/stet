@@ -140,16 +140,23 @@ pub fn run_viewer(
     // Compute initial window size from the first page's dimensions.
     // This ensures the compositor (especially Wayland) centers the window
     // at the correct aspect ratio — we cannot reposition after creation.
+    // Estimate status bar at ~32 logical pixels; content area fills 85% of
+    // monitor height minus that overhead.
     let (page_w, page_h) = page_size.unwrap_or((DEFAULT_PAGE_W, DEFAULT_PAGE_H));
     let aspect = page_w / page_h;
-    let est_win_h = 1440.0_f32 * 0.85;
-    let mut init_h = est_win_h;
-    let mut init_w = init_h * aspect as f32;
-    let est_win_w = 2560.0_f32 * 0.85;
-    if init_w > est_win_w {
-        init_w = est_win_w;
-        init_h = init_w / aspect as f32;
+    let status_bar_est = 32.0_f32;
+    let est_mon_h = 1440.0_f32;
+    let est_mon_w = 2560.0_f32;
+    let max_content_h = est_mon_h * 0.85 - status_bar_est;
+    let max_content_w = est_mon_w * 0.85;
+    let mut content_h = max_content_h;
+    let mut content_w = content_h * aspect as f32;
+    if content_w > max_content_w {
+        content_w = max_content_w;
+        content_h = content_w / aspect as f32;
     }
+    let init_w = content_w;
+    let init_h = content_h + status_bar_est;
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

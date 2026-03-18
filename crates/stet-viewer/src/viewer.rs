@@ -4,7 +4,9 @@
 
 //! egui viewer application — renders PostScript pages on demand from display lists.
 
+use std::sync::Arc;
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError};
+use std::time::{Duration, Instant};
 
 use egui::{ColorImage, TextureHandle, TextureOptions, Vec2};
 use stet_graphics::display_list::DisplayList;
@@ -37,6 +39,8 @@ pub struct ViewerApp {
     screen_info_sent: bool,
     /// Whether the window has been resized to match the first page.
     window_sized: bool,
+    /// Whether the window needs resizing for the current page.
+    needs_resize: bool,
     /// Deferred window position after resize (computed from old center point).
     pending_position: Option<egui::Pos2>,
     /// Set by Q/Escape handler; processed at the top of next update().
@@ -58,13 +62,56 @@ pub struct ViewerApp {
     system_cmyk_bytes: Option<std::sync::Arc<Vec<u8>>>,
     /// Disable anti-aliasing for all rendering.
     no_aa: bool,
+    /// Previous page's texture, shown during page transitions to avoid black flash.
+    transition_texture: Option<TextureHandle>,
+    /// Timestamp of most recent viewport change (for debouncing).
+    render_requested_at: Option<Instant>,
+    /// Receiver for async viewport render results.
+    render_receiver: Option<std::sync::mpsc::Receiver<AsyncRenderResult>>,
+    /// Viewport params of the in-flight async render (to detect stale results).
+    inflight_params: Option<ViewportParams>,
+    /// Receiver for full-page background render.
+    fullpage_receiver: Option<std::sync::mpsc::Receiver<FullPageRenderResult>>,
+    /// Scale of in-flight full-page render (to detect stale results on zoom).
+    fullpage_inflight_scale: Option<(f32, f32)>,
+}
+
+/// Result from a full-page background render.
+struct FullPageRenderResult {
+    rgba: Vec<u8>,
+    pixel_w: u32,
+    pixel_h: u32,
+    effective_scale: f32,
+    ppp: f32,
+    page_idx: usize,
+}
+
+/// Debounce delay before spawning a viewport render.
+const RENDER_DEBOUNCE: Duration = Duration::from_millis(30);
+
+/// Parameters identifying a viewport render (for cache/stale checks).
+#[derive(Clone, PartialEq)]
+struct ViewportParams {
+    page_idx: usize,
+    vp_x: f64,
+    vp_y: f64,
+    vp_w: f64,
+    vp_h: f64,
+    pixel_w: u32,
+    pixel_h: u32,
+}
+
+/// Result from an async viewport render.
+struct AsyncRenderResult {
+    rgba: Vec<u8>,
+    params: ViewportParams,
 }
 
 /// A page stored as a resolution-independent display list.
 struct StoredPage {
-    display_list: DisplayList,
+    display_list: Arc<DisplayList>,
     /// Precomputed bboxes/epochs for fast viewport rendering.
-    prepared: PreparedDisplayList,
+    prepared: Arc<PreparedDisplayList>,
     /// Device pixel dimensions at reference DPI.
     width: u32,
     height: u32,
@@ -74,9 +121,23 @@ struct StoredPage {
     /// Cached viewport render (reused if viewport unchanged).
     cached_render: Option<CachedRender>,
     /// ICC cache built from this page's display list profiles.
-    icc_cache: stet_graphics::icc::IccCache,
+    icc_cache: Arc<stet_graphics::icc::IccCache>,
     /// Pre-converted RGBA image cache for fast viewport rendering.
-    image_cache: ImageCache,
+    image_cache: Arc<ImageCache>,
+    /// Full-page RGBA buffer at screen resolution for instant panning.
+    full_page: Option<FullPageBuffer>,
+}
+
+/// Pre-rendered full-page buffer at a specific zoom level.
+/// Panning blits from this buffer instead of re-rendering.
+struct FullPageBuffer {
+    rgba: Vec<u8>,
+    pixel_w: u32,
+    pixel_h: u32,
+    /// The effective_scale (fit * zoom) this was rendered at.
+    effective_scale: f32,
+    /// Pixels per point (HiDPI factor) this was rendered at.
+    ppp: f32,
 }
 
 /// Cached result of a viewport render.
@@ -134,6 +195,7 @@ impl ViewerApp {
             job_done: false,
             screen_info_sent: false,
             window_sized: false,
+            needs_resize: false,
             pending_position: None,
             dpi_preset: None,
             quit_requested: false,
@@ -144,6 +206,12 @@ impl ViewerApp {
             minimap_dragging: false,
             system_cmyk_bytes,
             no_aa,
+            transition_texture: None,
+            render_requested_at: None,
+            render_receiver: None,
+            inflight_params: None,
+            fullpage_receiver: None,
+            fullpage_inflight_scale: None,
         }
     }
 
@@ -181,39 +249,31 @@ impl ViewerApp {
     /// (X11/Mac/Windows) so we can re-center. On Wayland, `outer_rect` is
     /// unavailable and repositioning is impossible, so we skip the resize and
     /// let zoom-to-fit handle the content.
+    /// Resize the window to fit the current page's aspect ratio.
+    ///
+    /// Content area fills 85% of the monitor's limiting dimension
+    /// (height or width, whichever constrains the page's aspect ratio),
+    /// with the window width matching the content width exactly.
     fn size_window_to_page(&mut self, ctx: &egui::Context) {
-        if self.window_sized || self.pages.is_empty() {
+        if self.pages.is_empty() {
             return;
         }
 
-        let page = &self.pages[0];
+        let page = &self.pages[self.current_page];
         if page.width == 0 || page.height == 0 || page.dpi <= 0.0 {
-            self.window_sized = true;
             return;
         }
-
-        // Check if we can reposition (X11/Mac/Windows provide outer_rect;
-        // Wayland does not). On the very first call outer_rect may be None
-        // even on X11 (window just created), which is fine — the initial
-        // window size was already set correctly by run_viewer.
-        let outer = ctx.input(|i| i.viewport().outer_rect);
-        let is_first_sizing = !self.window_sized;
-        if !is_first_sizing && outer.is_none() {
-            // Subsequent job on Wayland — can't reposition, skip resize
-            self.window_sized = true;
-            return;
-        }
-        self.window_sized = true;
 
         // Recover page dimensions in PostScript points from device pixels + DPI
         let page_pts_w = page.width as f32 * 72.0 / page.dpi as f32;
         let page_pts_h = page.height as f32 * 72.0 / page.dpi as f32;
         let aspect = page_pts_w / page_pts_h;
 
-        // Status bar overhead so the central panel fits the image.
-        let panel_overhead = ctx.screen_rect().height() - ctx.available_rect().height();
+        // Panel overhead so the central panel fits the image exactly.
+        let panel_overhead_h = ctx.screen_rect().height() - ctx.available_rect().height();
+        let panel_overhead_w = ctx.screen_rect().width() - ctx.available_rect().width();
 
-        // Target: 85% of monitor height for the content area
+        // Target: 85% of monitor size for the window
         let (max_w, max_h) = ctx.input(|i| {
             if let Some(monitor) = i.viewport().monitor_size {
                 (monitor.x * 0.85, monitor.y * 0.85)
@@ -222,26 +282,24 @@ impl ViewerApp {
             }
         });
 
-        // Size to fill 85% of screen height, then cap width
-        let mut win_h = max_h;
-        let mut win_w = win_h * aspect;
-        if win_w > max_w {
-            win_w = max_w;
-            win_h = win_w / aspect;
+        // Size content to fill 85% of screen, respecting aspect ratio
+        let max_content_h = max_h - panel_overhead_h;
+        let max_content_w = max_w - panel_overhead_w;
+        let mut content_w = max_content_h * aspect;
+        let mut content_h = max_content_h;
+        if content_w > max_content_w {
+            content_w = max_content_w;
+            content_h = content_w / aspect;
         }
-        win_h += panel_overhead;
+        let win_w = (content_w + panel_overhead_w).max(400.0);
+        let win_h = (content_h + panel_overhead_h).max(300.0);
 
-        let win_w = win_w.max(400.0);
-        let win_h = win_h.max(300.0);
-
-        // On X11/Mac/Windows: compute new position to keep window's center
-        // point fixed on the same monitor after resize.
-        if let Some(outer) = outer {
-            let cx = outer.min.x + outer.width() / 2.0;
-            let cy = outer.min.y + outer.height() / 2.0;
+        // Center window on the monitor.
+        let monitor = ctx.input(|i| i.viewport().monitor_size);
+        if let Some(mon) = monitor {
             self.pending_position = Some(egui::pos2(
-                (cx - win_w / 2.0).max(0.0),
-                (cy - win_h / 2.0).max(0.0),
+                ((mon.x - win_w) / 2.0).max(0.0),
+                ((mon.y - win_h) / 2.0).max(0.0),
             ));
         }
 
@@ -253,7 +311,7 @@ impl ViewerApp {
     fn poll_pages(&mut self, ctx: &egui::Context) {
         let had_pages = !self.pages.is_empty();
         let mut pages_cleared = false;
-        let Some(receiver) = &self.page_receiver else {
+        let Some(receiver) = self.page_receiver.take() else {
             return;
         };
         // Accept at most a few pages per frame to avoid blocking the first paint.
@@ -275,15 +333,16 @@ impl ViewerApp {
                     );
                     let image_cache = ImageCache::build(&page.display_list, Some(&icc_cache));
                     self.pages.push(StoredPage {
-                        display_list: page.display_list,
-                        prepared,
+                        display_list: Arc::new(page.display_list),
+                        prepared: Arc::new(prepared),
                         width: page.width,
                         height: page.height,
                         dpi: page.dpi,
                         page_num: page.page_num,
                         cached_render: None,
-                        icc_cache,
-                        image_cache,
+                        icc_cache: Arc::new(icc_cache),
+                        image_cache: Arc::new(image_cache),
+                        full_page: None,
                     });
                     pages_this_frame += 1;
                 }
@@ -293,6 +352,7 @@ impl ViewerApp {
                     self.current_page = 0;
                     self.job_done = false;
                     self.render_dirty = true;
+                    self.request_render();
                     self.minimap = None;
                     self.window_sized = false;
                     pages_cleared = true;
@@ -326,6 +386,18 @@ impl ViewerApp {
         if self.interpreter_done && self.pages.is_empty() {
             self.quit_requested = true;
         }
+
+        // Put receiver back
+        self.page_receiver = Some(receiver);
+    }
+
+    /// Save the current page's texture for transition display.
+    fn save_transition_texture(&mut self) {
+        if let Some(page) = self.pages.get(self.current_page) {
+            if let Some(ref cached) = page.cached_render {
+                self.transition_texture = Some(cached.texture.clone());
+            }
+        }
     }
 
     /// Reset zoom and pan to defaults.
@@ -334,13 +406,16 @@ impl ViewerApp {
         self.pan_offset = Vec2::ZERO;
         self.dpi_preset = None;
         self.render_dirty = true;
+        self.request_render();
         self.minimap = None;
     }
 
     /// Advance to the next page.
     fn next_page(&mut self) {
         if self.current_page + 1 < self.pages.len() {
+            self.save_transition_texture();
             self.current_page += 1;
+            self.needs_resize = true;
             self.reset_view();
         } else if self.job_done && !self.interpreter_done {
             // Last page of current job, more jobs pending — advance
@@ -357,7 +432,9 @@ impl ViewerApp {
     /// Go to the previous page.
     fn prev_page(&mut self) {
         if self.current_page > 0 {
+            self.save_transition_texture();
             self.current_page -= 1;
+            self.needs_resize = true;
             self.reset_view();
         }
     }
@@ -425,9 +502,10 @@ impl ViewerApp {
     }
 
     /// Render the visible viewport of the current page and return/update the texture.
-    fn render_viewport(&mut self, ctx: &egui::Context, available: Vec2, ppp: f32) {
+    /// Compute the current viewport parameters for the active page.
+    fn compute_viewport_params(&self, available: Vec2, ppp: f32) -> Option<(ViewportParams, f64)> {
         if self.pages.is_empty() {
-            return;
+            return None;
         }
         let page_idx = self.current_page;
         let page = &self.pages[page_idx];
@@ -435,90 +513,390 @@ impl ViewerApp {
         let fit = self.fit_scale(available, page);
         let effective_scale = fit * self.zoom;
 
-        // Image dimensions in screen pixels at current zoom
         let img_w = page.width as f32 * effective_scale;
         let img_h = page.height as f32 * effective_scale;
 
-        // Center offset
         let center_x = ((available.x - img_w) / 2.0).max(0.0);
         let center_y = ((available.y - img_h) / 2.0).max(0.0);
 
-        // Viewport in screen coordinates (what's visible in the window)
         let screen_vp_x = -(center_x + self.pan_offset.x);
         let screen_vp_y = -(center_y + self.pan_offset.y);
         let screen_vp_w = available.x;
         let screen_vp_h = available.y;
 
-        // Clamp viewport to image bounds
         let clamp_x = screen_vp_x.max(0.0).min((img_w - screen_vp_w).max(0.0));
         let clamp_y = screen_vp_y.max(0.0).min((img_h - screen_vp_h).max(0.0));
         let clamp_w = screen_vp_w.min(img_w - clamp_x).min(img_w);
         let clamp_h = screen_vp_h.min(img_h - clamp_y).min(img_h);
 
         if clamp_w <= 0.0 || clamp_h <= 0.0 {
-            return;
+            return None;
         }
 
-        // Convert screen viewport to reference-DPI device coordinates
         let vp_x = (clamp_x / effective_scale) as f64;
         let vp_y = (clamp_y / effective_scale) as f64;
         let vp_w = (clamp_w / effective_scale) as f64;
         let vp_h = (clamp_h / effective_scale) as f64;
 
-        // Output pixel dimensions (physical pixels)
         let pixel_w = (clamp_w * ppp).round() as u32;
         let pixel_h = (clamp_h * ppp).round() as u32;
 
         if pixel_w == 0 || pixel_h == 0 {
-            return;
+            return None;
         }
 
-        // Check if cached render is still valid
-        if let Some(ref cached) = self.pages[page_idx].cached_render
-            && (cached.vp_x - vp_x).abs() < 0.01
-            && (cached.vp_y - vp_y).abs() < 0.01
-            && (cached.vp_w - vp_w).abs() < 0.01
-            && (cached.vp_h - vp_h).abs() < 0.01
-            && cached.pixel_w == pixel_w
-            && cached.pixel_h == pixel_h
-        {
-            return; // cache hit
-        }
-
-        // Render the viewport region using precomputed metadata
-        let rgba = stet_render::render_region_prepared_parallel(
-            &page.display_list,
-            &page.prepared,
-            vp_x,
-            vp_y,
-            vp_w,
-            vp_h,
-            pixel_w,
-            pixel_h,
+        Some((
+            ViewportParams {
+                page_idx,
+                vp_x,
+                vp_y,
+                vp_w,
+                vp_h,
+                pixel_w,
+                pixel_h,
+            },
             page.dpi,
-            Some(&page.icc_cache),
-            Some(&page.image_cache),
-            self.no_aa,
-        );
+        ))
+    }
 
-        let image = ColorImage::from_rgba_unmultiplied([pixel_w as usize, pixel_h as usize], &rgba);
+    /// Check if the cached render matches the given viewport params.
+    fn cache_matches(&self, vp: &ViewportParams) -> bool {
+        if let Some(ref cached) = self.pages[vp.page_idx].cached_render {
+            (cached.vp_x - vp.vp_x).abs() < 0.01
+                && (cached.vp_y - vp.vp_y).abs() < 0.01
+                && (cached.vp_w - vp.vp_w).abs() < 0.01
+                && (cached.vp_h - vp.vp_h).abs() < 0.01
+                && cached.pixel_w == vp.pixel_w
+                && cached.pixel_h == vp.pixel_h
+        } else {
+            false
+        }
+    }
+
+    /// Request an async viewport render. Debounces rapid changes.
+    fn request_render(&mut self) {
+        self.render_requested_at = Some(Instant::now());
+    }
+
+    /// Try to blit the current viewport from the full-page buffer.
+    /// Returns true if successful (no rendering needed).
+    fn try_blit_from_fullpage(
+        &mut self,
+        ctx: &egui::Context,
+        vp: &ViewportParams,
+        available: Vec2,
+        ppp: f32,
+    ) -> bool {
+        let page = &self.pages[vp.page_idx];
+        let fit = self.fit_scale(available, page);
+        let effective_scale = fit * self.zoom;
+
+        let Some(ref fp) = page.full_page else {
+            return false;
+        };
+        // Check that the full-page buffer matches current zoom/DPI
+        if (fp.effective_scale - effective_scale).abs() > 0.001 || (fp.ppp - ppp).abs() > 0.001 {
+            return false;
+        }
+
+        // Compute source rect in the full-page buffer
+        let src_x = (vp.vp_x * fp.pixel_w as f64 / page.width as f64).round() as i32;
+        let src_y = (vp.vp_y * fp.pixel_h as f64 / page.height as f64).round() as i32;
+        let src_w = vp.pixel_w as i32;
+        let src_h = vp.pixel_h as i32;
+
+        // Clamp to buffer bounds
+        let x0 = src_x.max(0) as u32;
+        let y0 = src_y.max(0) as u32;
+        let x1 = (src_x + src_w).min(fp.pixel_w as i32).max(0) as u32;
+        let y1 = (src_y + src_h).min(fp.pixel_h as i32).max(0) as u32;
+        let copy_w = x1.saturating_sub(x0);
+        let copy_h = y1.saturating_sub(y0);
+
+        if copy_w == 0 || copy_h == 0 {
+            return false;
+        }
+
+        // Blit rows from the full-page buffer
+        let mut rgba = vec![255u8; vp.pixel_w as usize * vp.pixel_h as usize * 4];
+        let dst_x_off = (x0 as i32 - src_x) as usize;
+        let dst_y_off = (y0 as i32 - src_y) as usize;
+        let dst_stride = vp.pixel_w as usize * 4;
+        let src_stride = fp.pixel_w as usize * 4;
+
+        for row in 0..copy_h as usize {
+            let src_start = (y0 as usize + row) * src_stride + x0 as usize * 4;
+            let dst_start = (dst_y_off + row) * dst_stride + dst_x_off * 4;
+            let len = copy_w as usize * 4;
+            if src_start + len <= fp.rgba.len() && dst_start + len <= rgba.len() {
+                rgba[dst_start..dst_start + len]
+                    .copy_from_slice(&fp.rgba[src_start..src_start + len]);
+            }
+        }
+
+        let image = ColorImage::from_rgba_unmultiplied(
+            [vp.pixel_w as usize, vp.pixel_h as usize],
+            &rgba,
+        );
         let texture = ctx.load_texture(
             format!("viewport_p{}", page.page_num),
             image,
             TextureOptions::LINEAR,
         );
-
-        self.pages[page_idx].cached_render = Some(CachedRender {
+        self.pages[vp.page_idx].cached_render = Some(CachedRender {
             texture,
-            vp_x,
-            vp_y,
-            vp_w,
-            vp_h,
-            pixel_w,
-            pixel_h,
+            vp_x: vp.vp_x,
+            vp_y: vp.vp_y,
+            vp_w: vp.vp_w,
+            vp_h: vp.vp_h,
+            pixel_w: vp.pixel_w,
+            pixel_h: vp.pixel_h,
+        });
+        self.render_dirty = false;
+        self.render_requested_at = None;
+        true
+    }
+
+    /// Spawn a full-page background render if one isn't already in flight.
+    /// Only spawns when the viewport is stable (not dirty, no render in-flight).
+    fn spawn_fullpage_render(&mut self, ctx: &egui::Context, available: Vec2, ppp: f32) {
+        if self.pages.is_empty()
+            || self.fullpage_receiver.is_some()
+            || self.render_dirty
+            || self.render_receiver.is_some()
+        {
+            return;
+        }
+        let page_idx = self.current_page;
+        let page = &self.pages[page_idx];
+        let fit = self.fit_scale(available, page);
+        let effective_scale = fit * self.zoom;
+
+        // Already have a valid buffer?
+        if let Some(ref fp) = page.full_page {
+            if (fp.effective_scale - effective_scale).abs() < 0.001
+                && (fp.ppp - ppp).abs() < 0.001
+            {
+                return;
+            }
+        }
+
+        // Already rendering at this scale?
+        if let Some((s, p)) = self.fullpage_inflight_scale {
+            if (s - effective_scale).abs() < 0.001 && (p - ppp).abs() < 0.001 {
+                return;
+            }
+        }
+
+        // Full-page pixel dimensions at screen resolution
+        let fp_pixel_w = (page.width as f32 * effective_scale * ppp).round() as u32;
+        let fp_pixel_h = (page.height as f32 * effective_scale * ppp).round() as u32;
+        if fp_pixel_w == 0 || fp_pixel_h == 0 {
+            return;
+        }
+
+        let dl = Arc::clone(&page.display_list);
+        let prep = Arc::clone(&page.prepared);
+        let icc = Arc::clone(&page.icc_cache);
+        let img_cache = Arc::clone(&page.image_cache);
+        let dpi = page.dpi;
+        let dev_w = page.width as f64;
+        let dev_h = page.height as f64;
+        let no_aa = self.no_aa;
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.fullpage_receiver = Some(rx);
+        self.fullpage_inflight_scale = Some((effective_scale, ppp));
+
+        let egui_ctx = ctx.clone();
+        // Use std::thread (not rayon) so it doesn't compete with viewport renders
+        std::thread::spawn(move || {
+            let rgba = stet_render::render_region_prepared_parallel(
+                &dl, &prep, 0.0, 0.0, dev_w, dev_h, fp_pixel_w, fp_pixel_h, dpi,
+                Some(&icc), Some(&img_cache), no_aa,
+            );
+            let _ = tx.send(FullPageRenderResult {
+                rgba,
+                pixel_w: fp_pixel_w,
+                pixel_h: fp_pixel_h,
+                effective_scale,
+                ppp,
+                page_idx,
+            });
+            egui_ctx.request_repaint();
+        });
+    }
+
+    /// Poll for async render results, blit from full-page buffer, or spawn renders.
+    fn process_async_render(&mut self, ctx: &egui::Context, available: Vec2, ppp: f32) {
+        // 1. Poll completed full-page background render
+        if let Some(ref rx) = self.fullpage_receiver {
+            match rx.try_recv() {
+                Ok(result) => {
+                    if result.page_idx < self.pages.len() {
+                        self.pages[result.page_idx].full_page = Some(FullPageBuffer {
+                            rgba: result.rgba,
+                            pixel_w: result.pixel_w,
+                            pixel_h: result.pixel_h,
+                            effective_scale: result.effective_scale,
+                            ppp: result.ppp,
+                        });
+                    }
+                    self.fullpage_receiver = None;
+                    self.fullpage_inflight_scale = None;
+                }
+                Err(TryRecvError::Empty) => {
+                    ctx.request_repaint();
+                }
+                Err(TryRecvError::Disconnected) => {
+                    self.fullpage_receiver = None;
+                    self.fullpage_inflight_scale = None;
+                }
+            }
+        }
+
+        // 2. Poll completed viewport render
+        if let Some(ref rx) = self.render_receiver {
+            match rx.try_recv() {
+                Ok(result) => {
+                    let page_idx = result.params.page_idx;
+                    if page_idx < self.pages.len() {
+                        let image = ColorImage::from_rgba_unmultiplied(
+                            [
+                                result.params.pixel_w as usize,
+                                result.params.pixel_h as usize,
+                            ],
+                            &result.rgba,
+                        );
+                        let texture = ctx.load_texture(
+                            format!("viewport_p{}", self.pages[page_idx].page_num),
+                            image,
+                            TextureOptions::LINEAR,
+                        );
+                        self.pages[page_idx].cached_render = Some(CachedRender {
+                            texture,
+                            vp_x: result.params.vp_x,
+                            vp_y: result.params.vp_y,
+                            vp_w: result.params.vp_w,
+                            vp_h: result.params.vp_h,
+                            pixel_w: result.params.pixel_w,
+                            pixel_h: result.params.pixel_h,
+                        });
+                    }
+                    self.render_receiver = None;
+                    self.inflight_params = None;
+                    // Viewport render done — spawn full-page render in background
+                    self.spawn_fullpage_render(ctx, available, ppp);
+                    // If viewport moved since we spawned, handle it
+                    if let Some((vp, _)) = self.compute_viewport_params(available, ppp) {
+                        if !self.cache_matches(&vp) {
+                            self.render_dirty = true;
+                            self.request_render();
+                        } else {
+                            self.render_dirty = false;
+                        }
+                    }
+                }
+                Err(TryRecvError::Empty) => {
+                    ctx.request_repaint();
+                }
+                Err(TryRecvError::Disconnected) => {
+                    self.render_receiver = None;
+                    self.inflight_params = None;
+                }
+            }
+        }
+
+        // 3. Handle dirty viewport
+        if !self.render_dirty {
+            // Not dirty, but maybe we need a full-page render
+            self.spawn_fullpage_render(ctx, available, ppp);
+            return;
+        }
+
+        // Ensure we have a debounce timestamp — if render_dirty is set but
+        // render_requested_at was cleared (e.g. by a prior spawn), reset it.
+        if self.render_requested_at.is_none() {
+            self.render_requested_at = Some(Instant::now());
+        }
+        let requested_at = self.render_requested_at.unwrap();
+
+        let Some((vp, dpi)) = self.compute_viewport_params(available, ppp) else {
+            return;
+        };
+
+        // Already cached?
+        if self.cache_matches(&vp) {
+            self.render_dirty = false;
+            self.render_requested_at = None;
+            self.spawn_fullpage_render(ctx, available, ppp);
+            return;
+        }
+
+        // Try instant blit from full-page buffer (covers panning at same zoom)
+        if self.try_blit_from_fullpage(ctx, &vp, available, ppp) {
+            return;
+        }
+
+        // Debounce: wait until input has settled before spawning a render
+        if requested_at.elapsed() < RENDER_DEBOUNCE {
+            ctx.request_repaint_after(RENDER_DEBOUNCE - requested_at.elapsed());
+            return;
+        }
+
+        // Already rendering the same viewport?
+        if let Some(ref inflight) = self.inflight_params
+            && *inflight == vp
+        {
+            return;
+        }
+
+        // Don't pile up viewport renders
+        if self.render_receiver.is_some() {
+            return;
+        }
+
+        // Invalidate full-page buffer if zoom changed
+        {
+            let fit = self.fit_scale(available, &self.pages[vp.page_idx]);
+            let effective_scale = fit * self.zoom;
+            if let Some(ref fp) = self.pages[vp.page_idx].full_page {
+                if (fp.effective_scale - effective_scale).abs() > 0.001
+                    || (fp.ppp - ppp).abs() > 0.001
+                {
+                    self.pages[vp.page_idx].full_page = None;
+                }
+            }
+        }
+
+        // Spawn async viewport render
+        let page = &self.pages[vp.page_idx];
+        let dl = Arc::clone(&page.display_list);
+        let prep = Arc::clone(&page.prepared);
+        let icc = Arc::clone(&page.icc_cache);
+        let img_cache = Arc::clone(&page.image_cache);
+        let no_aa = self.no_aa;
+        let vp_clone = vp.clone();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.render_receiver = Some(rx);
+        self.inflight_params = Some(vp);
+        self.render_requested_at = None;
+
+        let egui_ctx = ctx.clone();
+        rayon::spawn(move || {
+            let rgba = stet_render::render_region_prepared_parallel(
+                &dl, &prep, vp_clone.vp_x, vp_clone.vp_y, vp_clone.vp_w, vp_clone.vp_h,
+                vp_clone.pixel_w, vp_clone.pixel_h, dpi, Some(&icc), Some(&img_cache), no_aa,
+            );
+            let _ = tx.send(AsyncRenderResult {
+                rgba,
+                params: vp_clone,
+            });
+            egui_ctx.request_repaint();
         });
 
-        self.render_dirty = false;
+        ctx.request_repaint();
     }
 
     /// Render or update the minimap thumbnail for the current page.
@@ -680,6 +1058,7 @@ impl ViewerApp {
             self.pan_offset.x = -(target_vp_center_x - available.x / 2.0) + center_x;
             self.pan_offset.y = -(target_vp_center_y - available.y / 2.0) + center_y;
             self.render_dirty = true;
+            self.request_render();
             self.minimap_dragging = true;
         }
         if minimap_response.drag_stopped() {
@@ -770,6 +1149,7 @@ impl eframe::App for ViewerApp {
                 }
                 self.dpi_preset = None;
                 self.render_dirty = true;
+                self.request_render();
             }
             if i.key_pressed(egui::Key::Minus) {
                 let new_zoom = (self.zoom / 1.25).max(1.0);
@@ -780,6 +1160,7 @@ impl eframe::App for ViewerApp {
                 }
                 self.dpi_preset = None;
                 self.render_dirty = true;
+                self.request_render();
             }
             if i.key_pressed(egui::Key::Num0) {
                 self.reset_view();
@@ -801,6 +1182,7 @@ impl eframe::App for ViewerApp {
                         }
                         self.dpi_preset = Some(target_dpi);
                         self.render_dirty = true;
+                        self.request_render();
                         self.minimap = None;
                     }
                 }
@@ -818,6 +1200,7 @@ impl eframe::App for ViewerApp {
                 }
                 self.dpi_preset = None;
                 self.render_dirty = true;
+                self.request_render();
             }
 
             // Page navigation
@@ -836,10 +1219,12 @@ impl eframe::App for ViewerApp {
                 if i.key_pressed(egui::Key::ArrowUp) {
                     self.pan_offset.y += 50.0;
                     self.render_dirty = true;
+                    self.request_render();
                 }
                 if i.key_pressed(egui::Key::ArrowDown) {
                     self.pan_offset.y -= 50.0;
                     self.render_dirty = true;
+                    self.request_render();
                 }
             }
         });
@@ -863,6 +1248,7 @@ impl eframe::App for ViewerApp {
                         if delta.length_sq() > 0.0 {
                             self.pan_offset += delta;
                             self.render_dirty = true;
+                            self.request_render();
                         }
                     }
                     self.last_drag_pos = Some(current_pos);
@@ -898,6 +1284,12 @@ impl eframe::App for ViewerApp {
                     return;
                 }
 
+                // Resize window to fit current page if needed
+                if self.needs_resize {
+                    self.needs_resize = false;
+                    self.size_window_to_page(ctx);
+                }
+
                 let available = ui.available_size();
                 self.central_available = available;
                 let page_idx = self.current_page;
@@ -905,13 +1297,12 @@ impl eframe::App for ViewerApp {
                 // Detect window resize — re-render if available area changed
                 if (available - self.last_available).length_sq() > 1.0 {
                     self.render_dirty = true;
+                    self.request_render();
                     self.last_available = available;
                 }
 
-                // Render viewport if dirty
-                if self.render_dirty {
-                    self.render_viewport(ctx, available, ppp);
-                }
+                // Process async rendering (poll results, spawn new renders)
+                self.process_async_render(ctx, available, ppp);
 
                 // Draw the rendered viewport
                 let page = &self.pages[page_idx];
@@ -921,6 +1312,9 @@ impl eframe::App for ViewerApp {
                 let img_h = page.height as f32 * effective_scale;
 
                 if let Some(ref cached) = page.cached_render {
+                    // New page has a rendered viewport — clear transition texture
+                    self.transition_texture = None;
+
                     // Center the full image area in the available space
                     let center_x = ((available.x - img_w) / 2.0).max(0.0);
                     let center_y = ((available.y - img_h) / 2.0).max(0.0);
@@ -951,6 +1345,21 @@ impl eframe::App for ViewerApp {
                     ui.painter().image(
                         cached.texture.id(),
                         tex_rect,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        egui::Color32::WHITE,
+                    );
+                } else if let Some(ref tex) = self.transition_texture {
+                    // New page not yet rendered — show previous page's texture
+                    // centered at fit-to-window size to avoid black flash
+                    let center_x = ((available.x - img_w) / 2.0).max(0.0);
+                    let center_y = ((available.y - img_h) / 2.0).max(0.0);
+                    let origin = ui.min_rect().min;
+                    let img_origin = origin + egui::vec2(center_x, center_y);
+                    let fill_rect =
+                        egui::Rect::from_min_size(img_origin, egui::vec2(img_w, img_h));
+                    ui.painter().image(
+                        tex.id(),
+                        fill_rect,
                         egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                         egui::Color32::WHITE,
                     );
