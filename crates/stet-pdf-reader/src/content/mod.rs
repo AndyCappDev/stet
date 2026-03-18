@@ -239,11 +239,32 @@ impl<'a> ContentInterpreter<'a> {
             .get(b"N")
             .ok_or(PdfError::Other("no AP/N".into()))?;
 
-        // Resolve to get the Form XObject dict + stream
+        // Resolve to get the Form XObject dict + stream.
+        // AP/N may be a stream (single appearance) or a dict mapping state
+        // names to streams (e.g. checkboxes: << /Yes stream /Off stream >>).
         let n_obj = self.resolver.deref(n_ref)?;
-        let form_dict = n_obj
-            .as_dict()
-            .ok_or(PdfError::Other("AP/N not a stream".into()))?;
+        let (n_ref, form_dict) = if let Some(d) = n_obj.as_dict() {
+            if d.get(b"BBox").is_some() {
+                // It's a Form XObject stream dict
+                (n_ref.clone(), d.clone())
+            } else {
+                // State-specific appearance dict: pick the entry matching /AS
+                let as_name = annot_dict.get_name(b"AS").unwrap_or(b"Off");
+                let state_ref = d.get(as_name)
+                    .or_else(|| {
+                        // If the AS state isn't found, try the first entry
+                        d.entries().first().map(|(_, v)| v)
+                    })
+                    .ok_or(PdfError::Other("AP/N state dict empty".into()))?;
+                let state_obj = self.resolver.deref(state_ref)?;
+                let state_dict = state_obj
+                    .as_dict()
+                    .ok_or(PdfError::Other("AP/N state not a stream".into()))?;
+                (state_ref.clone(), state_dict.clone())
+            }
+        } else {
+            return Err(PdfError::Other("AP/N not a dict or stream".into()));
+        };
 
         // The appearance stream is a Form XObject. Its BBox defines the
         // coordinate space, and we need to map it to the annotation Rect.
@@ -288,7 +309,8 @@ impl<'a> ContentInterpreter<'a> {
             .unwrap_or_else(Matrix::identity);
 
         // Render as a Form XObject with the computed transform
-        self.gstate_stack.push(self.gstate.clone());
+        let saved_gstate = self.gstate.clone();
+        let saved_stack_depth = self.gstate_stack.len();
         let saved_resources = self.resources.clone();
         // Set up resources from the form
         if let Some(res_obj) = form_dict.get(b"Resources")
@@ -307,17 +329,16 @@ impl<'a> ContentInterpreter<'a> {
         // Note: no BBox clip here — appearance streams do their own internal clipping.
 
         // Interpret the form content
-        let form_data = self.resolver.stream_data_from_obj(n_ref)?;
+        let form_data = self.resolver.stream_data_from_obj(&n_ref)?;
         self.depth += 1;
         let _ = self.interpret_stream(&form_data);
         self.depth -= 1;
 
-        // Restore state
+        // Restore state — truncate gstate stack to handle unbalanced q/Q in stream
+        self.gstate_stack.truncate(saved_stack_depth);
         self.content_stream_ctm = saved_content_stream_ctm;
         self.resources = saved_resources;
-        if let Some(gs) = self.gstate_stack.pop() {
-            self.gstate = gs;
-        }
+        self.gstate = saved_gstate;
 
         // Restore clip in display list (annotation may have modified clip state)
         self.display_list.push(DisplayElement::InitClip);
