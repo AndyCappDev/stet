@@ -97,6 +97,9 @@ pub struct CidCffPdfFont {
     /// Optional Unicode→GID cmap (from OpenType substitute fonts).
     /// When present, used for UCS2 glyph lookup instead of CFF's CID mapping.
     pub cmap: Option<HashMap<u32, u16>>,
+    /// CID → GID mapping from the PDF's /CIDToGIDMap stream.
+    /// Used for embedded OpenType/CFF fonts stored as FontFile2.
+    pub pdf_cid_to_gid: Option<Vec<u16>>,
     /// CIDSystemInfo ordering for Unicode→CID width lookup.
     pub ordering: Vec<u8>,
     pub font_matrix: Matrix,
@@ -644,6 +647,7 @@ fn create_cid_cff_from_otf(
     default_width: f64,
     cid_widths: HashMap<u16, f64>,
     ordering: &[u8],
+    pdf_cid_to_gid: Option<Vec<u16>>,
 ) -> Result<PdfFont, PdfError> {
     use stet_fonts::truetype::find_table;
 
@@ -670,6 +674,7 @@ fn create_cid_cff_from_otf(
         cid_widths,
         font_matrix,
         cmap,
+        pdf_cid_to_gid,
         ordering: ordering.to_vec(),
     }))
 }
@@ -1234,7 +1239,30 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
             let substituted;
             let data = if let Some(ff_ref) = desc.get(b"FontFile2") {
                 substituted = false;
-                resolver.stream_data_from_obj(ff_ref)?
+                let font_data = resolver.stream_data_from_obj(ff_ref)?;
+                // Some PDFs store OpenType/CFF fonts as FontFile2 instead of
+                // FontFile3. Detect OTTO magic and use CFF rendering path.
+                if font_data.len() > 4 && &font_data[0..4] == b"OTTO" {
+                    // Parse CIDToGIDMap from the PDF before creating the CFF font
+                    let cid_to_gid_map =
+                        if let Some(map_obj) = cid_font_dict.get(b"CIDToGIDMap") {
+                            if cid_font_dict.get_name(b"CIDToGIDMap") != Some(b"Identity") {
+                                resolver.stream_data_from_obj(map_obj).ok().map(|d| {
+                                    d.chunks_exact(2)
+                                        .map(|p| u16::from_be_bytes([p[0], p[1]]))
+                                        .collect()
+                                })
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+                    return create_cid_cff_from_otf(
+                        &font_data, default_width, cid_widths, &ordering, cid_to_gid_map,
+                    );
+                }
+                font_data
             } else {
                 // Font not embedded — try system font lookup
                 substituted = true;
@@ -1253,7 +1281,7 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                 // If the system font is OpenType/CFF, use CFF rendering path
                 if sys_data.len() > 4 && &sys_data[0..4] == b"OTTO" {
                     return create_cid_cff_from_otf(
-                        &sys_data, default_width, cid_widths, &ordering,
+                        &sys_data, default_width, cid_widths, &ordering, None,
                     );
                 }
                 sys_data
@@ -1314,6 +1342,7 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                     cid_widths,
                     font_matrix,
                     cmap: None,
+                    pdf_cid_to_gid: None,
                     ordering: ordering.clone(),
                 }))
             } else {
@@ -1326,7 +1355,7 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                 // If the system font is OpenType/CFF, use CFF rendering path
                 if sys_data.len() > 4 && &sys_data[0..4] == b"OTTO" {
                     return create_cid_cff_from_otf(
-                        &sys_data, default_width, cid_widths, &ordering,
+                        &sys_data, default_width, cid_widths, &ordering, None,
                     );
                 }
                 let data = sys_data;
@@ -1795,9 +1824,13 @@ impl CidTrueTypePdfFont {
 
 impl CidCffPdfFont {
     fn glyph_path_cid(&self, cid: u16) -> Option<PsPath> {
+        // For embedded OTF/CFF with PDF CIDToGIDMap, use the PDF's mapping.
         // For OpenType/CFF substitutes with a cmap, map Unicode → GID directly.
         // For embedded CID-keyed CFF, use cid_to_gid mapping.
-        let gid = if let Some(ref cmap) = self.cmap {
+        let gid = if let Some(ref map) = self.pdf_cid_to_gid {
+            // Embedded font with PDF-supplied CID→GID map
+            *map.get(cid as usize).unwrap_or(&0) as usize
+        } else if let Some(ref cmap) = self.cmap {
             // OTF substitute: cid is Unicode code point, map via cmap
             *cmap.get(&(cid as u32))? as usize
         } else if !self.font.cid_to_gid.is_empty() {
