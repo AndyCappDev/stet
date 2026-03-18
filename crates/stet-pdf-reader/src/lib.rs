@@ -43,6 +43,9 @@ pub struct PdfDocument<'a> {
     pages: Vec<PageInfo>,
     icc_cache: IccCache,
     font_provider: Option<FontProvider>,
+    /// When false (default), PDF overprint flags (OP/op) are suppressed —
+    /// skips the expensive CMYK buffer simulation that most viewers omit.
+    overprint: bool,
 }
 
 impl<'a> PdfDocument<'a> {
@@ -97,6 +100,7 @@ impl<'a> PdfDocument<'a> {
             pages,
             icc_cache,
             font_provider: None,
+            overprint: false,
         })
     }
 
@@ -145,7 +149,16 @@ impl<'a> PdfDocument<'a> {
             pages,
             icc_cache,
             font_provider: None,
+            overprint: false,
         })
+    }
+
+    /// Enable or disable PDF overprint simulation.
+    ///
+    /// When false (default), OP/op flags in graphics state dicts are ignored,
+    /// avoiding expensive CMYK buffer tracking. Set to true for prepress accuracy.
+    pub fn set_overprint(&mut self, enabled: bool) {
+        self.overprint = enabled;
     }
 
     /// Set a font data provider for environments without filesystem access.
@@ -254,6 +267,7 @@ impl<'a> PdfDocument<'a> {
             ctm,
             &self.icc_cache,
             self.font_provider.clone(),
+            self.overprint,
         );
 
         // Check if the page has a DeviceCMYK transparency group — if so,

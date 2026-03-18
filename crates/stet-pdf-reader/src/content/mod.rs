@@ -117,6 +117,9 @@ pub struct ContentInterpreter<'a> {
     /// When true, DeviceRGB colors are round-tripped through the system CMYK
     /// profile (RGB→CMYK→RGB) to match compositing in a DeviceCMYK page group.
     page_group_is_cmyk: bool,
+    /// When false, PDF overprint flags (OP/op) in graphics state dicts are
+    /// suppressed — the gstate overprint fields stay false regardless of PDF content.
+    overprint_enabled: bool,
 }
 
 impl<'a> ContentInterpreter<'a> {
@@ -127,6 +130,7 @@ impl<'a> ContentInterpreter<'a> {
         initial_ctm: Matrix,
         icc_cache: &IccCache,
         font_provider: Option<FontProvider>,
+        overprint_enabled: bool,
     ) -> Self {
         Self {
             resolver,
@@ -148,6 +152,7 @@ impl<'a> ContentInterpreter<'a> {
             font_provider,
             text_clip_path: None,
             page_group_is_cmyk: false,
+            overprint_enabled,
         }
     }
 
@@ -2708,16 +2713,18 @@ impl<'a> ContentInterpreter<'a> {
         if let Some(PdfObj::Bool(sa)) = gs_dict.get(b"SA") {
             self.gstate.stroke_adjust = *sa;
         }
-        if let Some(PdfObj::Bool(op)) = gs_dict.get(b"OP") {
-            self.gstate.overprint = *op;
-            // OP also sets stroke overprint
-            self.gstate.overprint_stroke = *op;
-        }
-        if let Some(PdfObj::Bool(op)) = gs_dict.get(b"op") {
-            self.gstate.overprint = *op;
-        }
-        if let Some(opm) = gs_dict.get_int(b"OPM") {
-            self.gstate.overprint_mode = opm as i32;
+        if self.overprint_enabled {
+            if let Some(PdfObj::Bool(op)) = gs_dict.get(b"OP") {
+                self.gstate.overprint = *op;
+                // OP also sets stroke overprint
+                self.gstate.overprint_stroke = *op;
+            }
+            if let Some(PdfObj::Bool(op)) = gs_dict.get(b"op") {
+                self.gstate.overprint = *op;
+            }
+            if let Some(opm) = gs_dict.get_int(b"OPM") {
+                self.gstate.overprint_mode = opm as i32;
+            }
         }
         if let Some(ca) = gs_dict.get_f64(b"CA") {
             self.gstate.stroke_alpha = ca;
