@@ -400,9 +400,13 @@ impl<'a> ContentInterpreter<'a> {
                     };
 
                     if op == b"BI" {
+                        // Inline images are structural — errors here are fatal
+                        // because we need to skip the image data bytes.
                         self.handle_inline_image(&mut lexer)?;
-                    } else {
-                        self.dispatch_operator(&op)?;
+                    } else if let Err(_e) = self.dispatch_operator(&op) {
+                        // Continue past operator errors. Malformed PDFs may have
+                        // invalid shadings, missing resources, etc. — stopping
+                        // would skip all remaining content in the stream.
                     }
                     self.operand_stack.clear();
                 }

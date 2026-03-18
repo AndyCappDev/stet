@@ -456,6 +456,10 @@ fn parse_shading_function(dict: &PdfDict, resolver: &Resolver) -> Result<PdfFunc
         .get(b"Function")
         .ok_or(PdfError::Other("shading missing Function".into()))?;
     let fn_obj = resolver.deref(fn_obj)?;
+    // Handle /Function null (invalid but seen in the wild)
+    if matches!(fn_obj, PdfObj::Null) {
+        return Err(PdfError::Other("shading Function is null".into()));
+    }
     if let PdfObj::Array(arr) = &fn_obj {
         if arr.len() == 1 {
             return PdfFunction::parse(&arr[0], resolver);
