@@ -8,8 +8,8 @@
 
 use stet_core::context::Context;
 use stet_core::error::PsError;
-use stet_fonts::geometry::Matrix;
 use stet_core::object::{EntityId, PsObject, PsValue};
+use stet_fonts::geometry::Matrix;
 
 /// Read a 6-element Matrix from a PS array object on the stack.
 fn read_matrix_from_array(

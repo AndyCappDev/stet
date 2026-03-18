@@ -8,11 +8,11 @@
 //! ProcSet's `StartData` procedure. Reads binary CFF data from the current file,
 //! parses it with `cff_parser`, and registers each font via `definefont`.
 
-use stet_fonts::cff_parser::{self, CffFont};
 use stet_core::context::Context;
 use stet_core::dict::DictKey;
 use stet_core::error::PsError;
 use stet_core::object::{ObjFlags, PsObject, PsValue};
+use stet_fonts::cff_parser::{self, CffFont};
 
 /// `.cff_startdata`: byte_count → —
 ///

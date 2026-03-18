@@ -123,7 +123,10 @@ fn dump_display_list_stats() {
         }
     }
 
-    eprintln!("hospital.pdf: {} elements ({fills} fills, {strokes} strokes, {clips} clips, {images} images)", dl.len());
+    eprintln!(
+        "hospital.pdf: {} elements ({fills} fills, {strokes} strokes, {clips} clips, {images} images)",
+        dl.len()
+    );
 }
 
 /// Test against external PDFs if available (e.g., downloaded or from /tmp).

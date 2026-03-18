@@ -9,8 +9,8 @@
 
 use stet_core::context::Context;
 use stet_core::error::PsError;
-use stet_fonts::geometry::{PathSegment, PsPath};
 use stet_core::object::PsObject;
+use stet_fonts::geometry::{PathSegment, PsPath};
 
 /// `infill`: x y → bool — test point against fill (nonzero winding rule)
 ///

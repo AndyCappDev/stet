@@ -12,8 +12,8 @@ use stet_core::context::Context;
 use stet_core::dict::DictKey;
 use stet_core::error::PsError;
 use stet_core::graphics_state::ColorSpace;
-use stet_graphics::color::{CieAParams, CieAbcParams, CieDefParams, CieDefgParams, DeviceColor};
 use stet_core::object::{EntityId, PsObject, PsValue};
+use stet_graphics::color::{CieAParams, CieAbcParams, CieDefParams, CieDefgParams, DeviceColor};
 
 /// `setgray`: num → —
 pub fn op_setgray(ctx: &mut Context) -> Result<(), PsError> {
@@ -28,9 +28,10 @@ pub fn op_setgray(ctx: &mut Context) -> Result<(), PsError> {
     ctx.gstate.current_pattern = None;
     // UseCIEColor remapping (PLRM 6.2.5)
     if is_use_cie_color(ctx)
-        && let Some(cs) = lookup_default_colorspace(ctx, b"DeviceGray") {
-            ctx.gstate.color_space = cs;
-        }
+        && let Some(cs) = lookup_default_colorspace(ctx, b"DeviceGray")
+    {
+        ctx.gstate.color_space = cs;
+    }
     Ok(())
 }
 
@@ -61,9 +62,10 @@ pub fn op_setrgbcolor(ctx: &mut Context) -> Result<(), PsError> {
     ctx.gstate.current_pattern = None;
     // UseCIEColor remapping (PLRM 6.2.5)
     if is_use_cie_color(ctx)
-        && let Some(cs) = lookup_default_colorspace(ctx, b"DeviceRGB") {
-            ctx.gstate.color_space = cs;
-        }
+        && let Some(cs) = lookup_default_colorspace(ctx, b"DeviceRGB")
+    {
+        ctx.gstate.color_space = cs;
+    }
     Ok(())
 }
 
@@ -103,9 +105,10 @@ pub fn op_setcmykcolor(ctx: &mut Context) -> Result<(), PsError> {
     ctx.gstate.current_pattern = None;
     // UseCIEColor remapping (PLRM 6.2.5)
     if is_use_cie_color(ctx)
-        && let Some(cs) = lookup_default_colorspace(ctx, b"DeviceCMYK") {
-            ctx.gstate.color_space = cs;
-        }
+        && let Some(cs) = lookup_default_colorspace(ctx, b"DeviceCMYK")
+    {
+        ctx.gstate.color_space = cs;
+    }
     Ok(())
 }
 
@@ -738,9 +741,10 @@ fn default_color_for_space(cs: &ColorSpace, ctx: &mut Context) -> DeviceColor {
                 _ => return DeviceColor::black(),
             };
             if let Some(hash) = profile_hash
-                && let Some((r, g, b)) = ctx.icc_cache.convert_color(hash, default_comps) {
-                    return DeviceColor::from_rgb(r, g, b);
-                }
+                && let Some((r, g, b)) = ctx.icc_cache.convert_color(hash, default_comps)
+            {
+                return DeviceColor::from_rgb(r, g, b);
+            }
             match n {
                 1 => DeviceColor::from_gray(0.0),
                 3 => DeviceColor::from_rgb(0.0, 0.0, 0.0),
@@ -1494,37 +1498,38 @@ fn resolve_indexed_proc_lookup(ctx: &mut Context, cs: ColorSpace) -> Result<Colo
         ref lookup_proc,
         ..
     } = cs
-        && let Some(proc_obj) = *lookup_proc {
-            let ncomp = match base.as_ref() {
-                ColorSpace::DeviceGray => 1,
-                ColorSpace::DeviceRGB => 3,
-                ColorSpace::DeviceCMYK => 4,
-                _ => 3,
-            };
-            let base = base.clone();
-            let mut lookup = Vec::with_capacity((hival as usize + 1) * ncomp);
-            for idx in 0..=hival {
-                ctx.o_stack.push(PsObject::int(idx as i32))?;
-                ctx.exec_sync(proc_obj)?;
-                // Pop ncomp values (in reverse order)
-                let mut components = vec![0u8; ncomp];
-                for c in (0..ncomp).rev() {
-                    let val = if !ctx.o_stack.is_empty() {
-                        ctx.o_stack.pop()?.as_f64().unwrap_or(0.0).clamp(0.0, 1.0)
-                    } else {
-                        0.0
-                    };
-                    components[c] = (val * 255.0).round() as u8;
-                }
-                lookup.extend_from_slice(&components);
+        && let Some(proc_obj) = *lookup_proc
+    {
+        let ncomp = match base.as_ref() {
+            ColorSpace::DeviceGray => 1,
+            ColorSpace::DeviceRGB => 3,
+            ColorSpace::DeviceCMYK => 4,
+            _ => 3,
+        };
+        let base = base.clone();
+        let mut lookup = Vec::with_capacity((hival as usize + 1) * ncomp);
+        for idx in 0..=hival {
+            ctx.o_stack.push(PsObject::int(idx as i32))?;
+            ctx.exec_sync(proc_obj)?;
+            // Pop ncomp values (in reverse order)
+            let mut components = vec![0u8; ncomp];
+            for c in (0..ncomp).rev() {
+                let val = if !ctx.o_stack.is_empty() {
+                    ctx.o_stack.pop()?.as_f64().unwrap_or(0.0).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                components[c] = (val * 255.0).round() as u8;
             }
-            return Ok(ColorSpace::Indexed {
-                base,
-                hival,
-                lookup,
-                lookup_proc: None,
-            });
+            lookup.extend_from_slice(&components);
         }
+        return Ok(ColorSpace::Indexed {
+            base,
+            hival,
+            lookup,
+            lookup_proc: None,
+        });
+    }
     Ok(cs)
 }
 

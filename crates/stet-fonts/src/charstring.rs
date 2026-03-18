@@ -697,7 +697,8 @@ impl<'a> CharstringInterp<'a> {
                         } else {
                             // No weight vector — use base values only
                             for r in 0..num_results {
-                                self.ps_stack.push(if r < args.len() { args[r] } else { 0.0 });
+                                self.ps_stack
+                                    .push(if r < args.len() { args[r] } else { 0.0 });
                             }
                         }
                     }

@@ -8,8 +8,8 @@
 //! free-form Gouraud triangle meshes (Type 4), lattice-form Gouraud meshes
 //! (Type 5), Coons patch meshes (Type 6), and tensor-product patch meshes (Type 7).
 
-use crate::device::{ShadingPatch, ShadingTriangle, ShadingVertex};
 use crate::color::DeviceColor;
+use crate::device::{ShadingPatch, ShadingTriangle, ShadingVertex};
 
 /// Reads arbitrary bit-width unsigned integers from a byte buffer.
 pub struct BitReader<'a> {

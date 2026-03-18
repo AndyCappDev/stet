@@ -4,10 +4,10 @@
 
 //! PDF graphics state for content stream interpretation.
 
-use stet_graphics::device::{BgUcrState, FillParams, HalftoneState, StrokeParams, TransferState};
-use stet_graphics::display_list::{DisplayList, SoftMaskSubtype};
 use stet_fonts::geometry::{Matrix, PsPath};
 use stet_graphics::color::{DashPattern, DeviceColor, FillRule, LineCap, LineJoin};
+use stet_graphics::device::{BgUcrState, FillParams, HalftoneState, StrokeParams, TransferState};
+use stet_graphics::display_list::{DisplayList, SoftMaskSubtype};
 
 /// Wrapper for a shading pattern's display list (Debug-friendly).
 #[derive(Clone)]

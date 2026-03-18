@@ -9,8 +9,8 @@ use std::f64::consts::PI;
 
 use stet_core::context::Context;
 use stet_core::error::PsError;
-use stet_fonts::geometry::{Matrix, PathSegment, PsPath};
 use stet_core::object::PsObject;
+use stet_fonts::geometry::{Matrix, PathSegment, PsPath};
 
 /// `newpath`: — → — (clear current path)
 pub fn op_newpath(ctx: &mut Context) -> Result<(), PsError> {

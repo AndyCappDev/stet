@@ -27,10 +27,10 @@ pub use page_tree::PageInfo;
 
 use content::ContentInterpreter;
 use resolver::Resolver;
-use stet_graphics::display_list::DisplayList;
-use stet_fonts::geometry::Matrix;
-use stet_graphics::icc::IccCache;
 use std::sync::Arc;
+use stet_fonts::geometry::Matrix;
+use stet_graphics::display_list::DisplayList;
+use stet_graphics::icc::IccCache;
 
 /// Font data provider: maps a font file name (e.g. "NimbusSans-Regular") to raw .t1 bytes.
 ///
@@ -237,8 +237,7 @@ impl<'a> PdfDocument<'a> {
         let ctm = match info.rotate.rem_euclid(360) {
             90 => {
                 // Rotate 90° CW + Y-flip: (x,y) → (y*s, x*s)
-                Matrix::new(0.0, scale, scale, 0.0, 0.0, 0.0)
-                    .concat(&Matrix::translate(-llx, -lly))
+                Matrix::new(0.0, scale, scale, 0.0, 0.0, 0.0).concat(&Matrix::translate(-llx, -lly))
             }
             180 => {
                 // Rotate 180° + Y-flip = just X-flip
@@ -287,7 +286,6 @@ impl<'a> PdfDocument<'a> {
         if let Err(e) = interpreter.interpret_stream_public(&content_data) {
             eprintln!("warning: content stream error: {}", e);
         }
-
 
         // Render annotation appearance streams (form field values, stamps, etc.)
         if !info.annots.is_empty() {
@@ -387,23 +385,30 @@ mod tests {
     #[test]
     #[ignore]
     fn dump_display_list() {
-        use stet_graphics::display_list::{DisplayElement, DisplayList};
         use stet_fonts::geometry::PsPath;
+        use stet_graphics::display_list::{DisplayElement, DisplayList};
 
         fn path_bbox(path: &PsPath) -> String {
             use stet_fonts::geometry::PathSegment;
             let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
             for seg in &path.segments {
                 let pts: Vec<(f64, f64)> = match seg {
-                    PathSegment::MoveTo(x, y)
-                    | PathSegment::LineTo(x, y) => vec![(*x, *y)],
-                    PathSegment::CurveTo { x1, y1, x2, y2, x3, y3 } =>
-                        vec![(*x1, *y1), (*x2, *y2), (*x3, *y3)],
+                    PathSegment::MoveTo(x, y) | PathSegment::LineTo(x, y) => vec![(*x, *y)],
+                    PathSegment::CurveTo {
+                        x1,
+                        y1,
+                        x2,
+                        y2,
+                        x3,
+                        y3,
+                    } => vec![(*x1, *y1), (*x2, *y2), (*x3, *y3)],
                     PathSegment::ClosePath => vec![],
                 };
                 for (px, py) in pts {
-                    x0 = x0.min(px); y0 = y0.min(py);
-                    x1 = x1.max(px); y1 = y1.max(py);
+                    x0 = x0.min(px);
+                    y0 = y0.min(py);
+                    x1 = x1.max(px);
+                    y1 = y1.max(py);
                 }
             }
             format!("bbox=({:.0},{:.0},{:.0},{:.0})", x0, y0, x1, y1)
@@ -415,48 +420,96 @@ mod tests {
                 match elem {
                     DisplayElement::Fill { path, params } => {
                         let c = &params.color;
-                        let cmyk_str = if let Some((c2,m,y,k)) = params.color.native_cmyk {
+                        let cmyk_str = if let Some((c2, m, y, k)) = params.color.native_cmyk {
                             format!(" cmyk=({:.2},{:.2},{:.2},{:.2})", c2, m, y, k)
-                        } else { String::new() };
+                        } else {
+                            String::new()
+                        };
                         eprintln!(
                             "{indent}[{i}] Fill rgb=({:.2},{:.2},{:.2}){} op={} opm={} ch=0x{:x} a={:.2} {}",
-                            c.r, c.g, c.b, cmyk_str, params.overprint, params.overprint_mode, params.painted_channels, params.alpha, path_bbox(path)
+                            c.r,
+                            c.g,
+                            c.b,
+                            cmyk_str,
+                            params.overprint,
+                            params.overprint_mode,
+                            params.painted_channels,
+                            params.alpha,
+                            path_bbox(path)
                         );
                     }
                     DisplayElement::Stroke { path, params } => {
                         let c = &params.color;
-                        eprintln!("{indent}[{i}] Stroke rgb=({:.2},{:.2},{:.2}) {}", c.r, c.g, c.b, path_bbox(path));
+                        eprintln!(
+                            "{indent}[{i}] Stroke rgb=({:.2},{:.2},{:.2}) {}",
+                            c.r,
+                            c.g,
+                            c.b,
+                            path_bbox(path)
+                        );
                     }
-                    DisplayElement::Clip { path, .. } => eprintln!("{indent}[{i}] Clip {}", path_bbox(path)),
+                    DisplayElement::Clip { path, .. } => {
+                        eprintln!("{indent}[{i}] Clip {}", path_bbox(path))
+                    }
                     DisplayElement::InitClip => eprintln!("{indent}[{i}] InitClip"),
                     DisplayElement::Image { params, .. } => {
                         eprintln!("{indent}[{i}] Image {}x{}", params.width, params.height);
                     }
                     DisplayElement::ErasePage => eprintln!("{indent}[{i}] ErasePage"),
                     DisplayElement::AxialShading { params } => {
-                        eprintln!("{indent}[{i}] AxialShading cs={:?} stops={}", params.color_space, params.color_stops.len());
+                        eprintln!(
+                            "{indent}[{i}] AxialShading cs={:?} stops={}",
+                            params.color_space,
+                            params.color_stops.len()
+                        );
                     }
                     DisplayElement::RadialShading { params } => {
-                        eprintln!("{indent}[{i}] RadialShading cs={:?} stops={} ext=({},{}) c0=({:.1},{:.1}) r0={:.1} c1=({:.1},{:.1}) r1={:.1} bbox={:?} op={} ch=0x{:x}",
-                            params.color_space, params.color_stops.len(),
-                            params.extend_start, params.extend_end,
-                            params.x0, params.y0, params.r0, params.x1, params.y1, params.r1,
-                            params.bbox, params.overprint, params.painted_channels);
+                        eprintln!(
+                            "{indent}[{i}] RadialShading cs={:?} stops={} ext=({},{}) c0=({:.1},{:.1}) r0={:.1} c1=({:.1},{:.1}) r1={:.1} bbox={:?} op={} ch=0x{:x}",
+                            params.color_space,
+                            params.color_stops.len(),
+                            params.extend_start,
+                            params.extend_end,
+                            params.x0,
+                            params.y0,
+                            params.r0,
+                            params.x1,
+                            params.y1,
+                            params.r1,
+                            params.bbox,
+                            params.overprint,
+                            params.painted_channels
+                        );
                         // Print first and last stop
                         if let Some(first) = params.color_stops.first() {
-                            eprintln!("{indent}  stop[0]: pos={:.3} rgb=({:.3},{:.3},{:.3}) raw={:?}",
-                                first.position, first.color.r, first.color.g, first.color.b, first.raw_components);
+                            eprintln!(
+                                "{indent}  stop[0]: pos={:.3} rgb=({:.3},{:.3},{:.3}) raw={:?}",
+                                first.position,
+                                first.color.r,
+                                first.color.g,
+                                first.color.b,
+                                first.raw_components
+                            );
                         }
                         if let Some(last) = params.color_stops.last() {
-                            eprintln!("{indent}  stop[{}]: pos={:.3} rgb=({:.3},{:.3},{:.3}) raw={:?}",
-                                params.color_stops.len()-1, last.position, last.color.r, last.color.g, last.color.b, last.raw_components);
+                            eprintln!(
+                                "{indent}  stop[{}]: pos={:.3} rgb=({:.3},{:.3},{:.3}) raw={:?}",
+                                params.color_stops.len() - 1,
+                                last.position,
+                                last.color.r,
+                                last.color.g,
+                                last.color.b,
+                                last.raw_components
+                            );
                         }
                         // Print mid stop
                         let mid = params.color_stops.len() / 2;
                         if mid > 0 && mid < params.color_stops.len() - 1 {
                             let s = &params.color_stops[mid];
-                            eprintln!("{indent}  stop[{mid}]: pos={:.3} rgb=({:.3},{:.3},{:.3}) raw={:?}",
-                                s.position, s.color.r, s.color.g, s.color.b, s.raw_components);
+                            eprintln!(
+                                "{indent}  stop[{mid}]: pos={:.3} rgb=({:.3},{:.3},{:.3}) raw={:?}",
+                                s.position, s.color.r, s.color.g, s.color.b, s.raw_components
+                            );
                         }
                     }
                     DisplayElement::MeshShading { .. } => eprintln!("{indent}[{i}] MeshShading"),
@@ -466,13 +519,29 @@ mod tests {
                     DisplayElement::Group { elements, params } => {
                         eprintln!(
                             "{indent}[{i}] Group iso={} ko={} blend={} a={:.2} bbox=({:.0},{:.0},{:.0},{:.0}) children={}",
-                            params.isolated, params.knockout, params.blend_mode, params.alpha,
-                            params.bbox[0], params.bbox[1], params.bbox[2], params.bbox[3], elements.len()
+                            params.isolated,
+                            params.knockout,
+                            params.blend_mode,
+                            params.alpha,
+                            params.bbox[0],
+                            params.bbox[1],
+                            params.bbox[2],
+                            params.bbox[3],
+                            elements.len()
                         );
                         dump(elements, depth + 1);
                     }
-                    DisplayElement::SoftMasked { mask, content, params } => {
-                        eprintln!("{indent}[{i}] SoftMasked {:?} mask={} content={}", params.subtype, mask.len(), content.len());
+                    DisplayElement::SoftMasked {
+                        mask,
+                        content,
+                        params,
+                    } => {
+                        eprintln!(
+                            "{indent}[{i}] SoftMasked {:?} mask={} content={}",
+                            params.subtype,
+                            mask.len(),
+                            content.len()
+                        );
                         eprintln!("{indent}  MASK:");
                         dump(mask, depth + 2);
                         eprintln!("{indent}  CONTENT:");

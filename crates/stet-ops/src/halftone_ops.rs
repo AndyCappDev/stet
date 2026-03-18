@@ -16,10 +16,10 @@ use stet_core::context::Context;
 use stet_core::dict::DictKey;
 use stet_core::error::PsError;
 use stet_core::graphics_state::PatternData;
+use stet_core::object::{PsObject, PsValue};
 use stet_fonts::geometry::Matrix;
 use stet_graphics::device::HalftoneScreen;
 use stet_graphics::display_list::DisplayList;
-use stet_core::object::{PsObject, PsValue};
 
 // ---------- Halftone pre-computation for PDF output ----------
 
@@ -161,9 +161,10 @@ fn sample_spot_function_2d(
 ) -> Result<Option<Arc<Vec<f64>>>, PsError> {
     // Empty procedure = default
     if let PsValue::Array { len, .. } | PsValue::PackedArray { len, .. } = proc.value
-        && len == 0 {
-            return Ok(None);
-        }
+        && len == 0
+    {
+        return Ok(None);
+    }
     let mut table = Vec::with_capacity(64 * 64);
     for iy in 0..64 {
         let y = -1.0 + iy as f64 * 2.0 / 63.0;
@@ -192,14 +193,15 @@ fn precompute_halftone_screen(
 ) -> Result<HalftoneScreen, PsError> {
     // Empty proc → no precomputation needed
     if let PsValue::Array { len, .. } | PsValue::PackedArray { len, .. } = proc.value
-        && len == 0 {
-            return Ok(HalftoneScreen {
-                frequency: freq,
-                angle,
-                type4_tokens: None,
-                sampled_2d: None,
-            });
-        }
+        && len == 0
+    {
+        return Ok(HalftoneScreen {
+            frequency: freq,
+            angle,
+            type4_tokens: None,
+            sampled_2d: None,
+        });
+    }
 
     // Try Type 4 decompilation first
     let type4_tokens = decompile_spot_to_type4(ctx, proc).map(Arc::new);
@@ -253,24 +255,25 @@ pub fn op_setscreen(ctx: &mut Context) -> Result<(), PsError> {
 pub fn op_currentscreen(ctx: &mut Context) -> Result<(), PsError> {
     // If a halftone dict was set, return its Frequency/Angle/dict
     if let Some(ht_obj) = ctx.gstate.halftone
-        && let PsValue::Dict(entity) = ht_obj.value {
-            let freq_key = DictKey::Name(ctx.names.intern(b"Frequency"));
-            let angle_key = DictKey::Name(ctx.names.intern(b"Angle"));
-            let freq = ctx
-                .dicts
-                .get(entity, &freq_key)
-                .and_then(|o| o.as_f64())
-                .unwrap_or(ctx.gstate.screen_freq);
-            let angle = ctx
-                .dicts
-                .get(entity, &angle_key)
-                .and_then(|o| o.as_f64())
-                .unwrap_or(ctx.gstate.screen_angle);
-            ctx.o_stack.push(PsObject::real(freq))?;
-            ctx.o_stack.push(PsObject::real(angle))?;
-            ctx.o_stack.push(ht_obj)?;
-            return Ok(());
-        }
+        && let PsValue::Dict(entity) = ht_obj.value
+    {
+        let freq_key = DictKey::Name(ctx.names.intern(b"Frequency"));
+        let angle_key = DictKey::Name(ctx.names.intern(b"Angle"));
+        let freq = ctx
+            .dicts
+            .get(entity, &freq_key)
+            .and_then(|o| o.as_f64())
+            .unwrap_or(ctx.gstate.screen_freq);
+        let angle = ctx
+            .dicts
+            .get(entity, &angle_key)
+            .and_then(|o| o.as_f64())
+            .unwrap_or(ctx.gstate.screen_angle);
+        ctx.o_stack.push(PsObject::real(freq))?;
+        ctx.o_stack.push(PsObject::real(angle))?;
+        ctx.o_stack.push(ht_obj)?;
+        return Ok(());
+    }
     ctx.o_stack.push(PsObject::real(ctx.gstate.screen_freq))?;
     ctx.o_stack.push(PsObject::real(ctx.gstate.screen_angle))?;
     match ctx.gstate.screen_proc {
@@ -387,9 +390,10 @@ pub fn op_currentcolorscreen(ctx: &mut Context) -> Result<(), PsError> {
 fn sample_transfer(ctx: &mut Context, proc: PsObject) -> Result<Option<Arc<Vec<f64>>>, PsError> {
     // Empty procedure = identity
     if let PsValue::Array { len, .. } | PsValue::PackedArray { len, .. } = proc.value
-        && len == 0 {
-            return Ok(None);
-        }
+        && len == 0
+    {
+        return Ok(None);
+    }
     let mut table = Vec::with_capacity(256);
     for i in 0..256 {
         let input = i as f64 / 255.0;
@@ -500,9 +504,10 @@ pub fn op_currentcolortransfer(ctx: &mut Context) -> Result<(), PsError> {
 /// Like sample_transfer() but range is [-1,1] instead of [0,1].
 fn sample_ucr(ctx: &mut Context, proc: PsObject) -> Result<Option<Arc<Vec<f64>>>, PsError> {
     if let PsValue::Array { len, .. } | PsValue::PackedArray { len, .. } = proc.value
-        && len == 0 {
-            return Ok(None);
-        }
+        && len == 0
+    {
+        return Ok(None);
+    }
     let mut table = Vec::with_capacity(256);
     for i in 0..256 {
         let input = i as f64 / 255.0;
@@ -592,13 +597,15 @@ pub fn op_sethalftone(ctx: &mut Context) -> Result<(), PsError> {
             let freq_key = DictKey::Name(ctx.names.intern(b"Frequency"));
             let angle_key = DictKey::Name(ctx.names.intern(b"Angle"));
             if let Some(freq_obj) = ctx.dicts.get(entity, &freq_key)
-                && let Some(f) = freq_obj.as_f64() {
-                    ctx.gstate.screen_freq = f;
-                }
+                && let Some(f) = freq_obj.as_f64()
+            {
+                ctx.gstate.screen_freq = f;
+            }
             if let Some(angle_obj) = ctx.dicts.get(entity, &angle_key)
-                && let Some(a) = angle_obj.as_f64() {
-                    ctx.gstate.screen_angle = a;
-                }
+                && let Some(a) = angle_obj.as_f64()
+            {
+                ctx.gstate.screen_angle = a;
+            }
             // Pre-compute halftone for Type 1 dicts with SpotFunction
             let ht_type_key = DictKey::Name(ctx.names.intern(b"HalftoneType"));
             let spot_key = DictKey::Name(ctx.names.intern(b"SpotFunction"));
@@ -1063,49 +1070,48 @@ fn replay_form_elements(
     ctm: &Matrix,
     target: &mut stet_graphics::display_list::DisplayList,
 ) {
-    use stet_graphics::display_list::DisplayElement;
     use stet_fonts::geometry::PathSegment;
+    use stet_graphics::display_list::DisplayElement;
 
-    let transform_path =
-        |path: &stet_fonts::geometry::PsPath| -> stet_fonts::geometry::PsPath {
-            let mut result = stet_fonts::geometry::PsPath::new();
-            for seg in &path.segments {
-                match seg {
-                    PathSegment::MoveTo(x, y) => {
-                        let (nx, ny) = ctm.transform_point(*x, *y);
-                        result.segments.push(PathSegment::MoveTo(nx, ny));
-                    }
-                    PathSegment::LineTo(x, y) => {
-                        let (nx, ny) = ctm.transform_point(*x, *y);
-                        result.segments.push(PathSegment::LineTo(nx, ny));
-                    }
-                    PathSegment::CurveTo {
-                        x1,
-                        y1,
-                        x2,
-                        y2,
-                        x3,
-                        y3,
-                    } => {
-                        let (nx1, ny1) = ctm.transform_point(*x1, *y1);
-                        let (nx2, ny2) = ctm.transform_point(*x2, *y2);
-                        let (nx3, ny3) = ctm.transform_point(*x3, *y3);
-                        result.segments.push(PathSegment::CurveTo {
-                            x1: nx1,
-                            y1: ny1,
-                            x2: nx2,
-                            y2: ny2,
-                            x3: nx3,
-                            y3: ny3,
-                        });
-                    }
-                    PathSegment::ClosePath => {
-                        result.segments.push(PathSegment::ClosePath);
-                    }
+    let transform_path = |path: &stet_fonts::geometry::PsPath| -> stet_fonts::geometry::PsPath {
+        let mut result = stet_fonts::geometry::PsPath::new();
+        for seg in &path.segments {
+            match seg {
+                PathSegment::MoveTo(x, y) => {
+                    let (nx, ny) = ctm.transform_point(*x, *y);
+                    result.segments.push(PathSegment::MoveTo(nx, ny));
+                }
+                PathSegment::LineTo(x, y) => {
+                    let (nx, ny) = ctm.transform_point(*x, *y);
+                    result.segments.push(PathSegment::LineTo(nx, ny));
+                }
+                PathSegment::CurveTo {
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    x3,
+                    y3,
+                } => {
+                    let (nx1, ny1) = ctm.transform_point(*x1, *y1);
+                    let (nx2, ny2) = ctm.transform_point(*x2, *y2);
+                    let (nx3, ny3) = ctm.transform_point(*x3, *y3);
+                    result.segments.push(PathSegment::CurveTo {
+                        x1: nx1,
+                        y1: ny1,
+                        x2: nx2,
+                        y2: ny2,
+                        x3: nx3,
+                        y3: ny3,
+                    });
+                }
+                PathSegment::ClosePath => {
+                    result.segments.push(PathSegment::ClosePath);
                 }
             }
-            result
-        };
+        }
+        result
+    };
 
     for elem in cached.elements() {
         match elem {

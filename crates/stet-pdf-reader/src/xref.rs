@@ -175,7 +175,9 @@ fn find_int_after_key(data: &[u8], key: &[u8]) -> Option<usize> {
     let idx = s.find(key_str)?;
     let after = &s[idx + key_str.len()..];
     let after = after.trim_start();
-    let end = after.find(|c: char| !c.is_ascii_digit()).unwrap_or(after.len());
+    let end = after
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(after.len());
     if end == 0 {
         return None;
     }
@@ -203,20 +205,22 @@ fn rebuild_xref_from_scan(data: &[u8]) -> Result<XrefTable, PdfError> {
         }
 
         // Try to parse: <obj_num> <gen_num> obj
-        if pos < data.len() && data[pos].is_ascii_digit()
-            && let Some((obj_num, generation, obj_offset)) = try_parse_obj_header(data, pos) {
-                let idx = obj_num as usize;
-                if idx < 100_000 {
-                    // sanity limit
-                    if idx >= entries.len() {
-                        entries.resize(idx + 1, None);
-                    }
-                    entries[idx] = Some(XrefEntry::InFile {
-                        offset: obj_offset,
-                        generation,
-                    });
+        if pos < data.len()
+            && data[pos].is_ascii_digit()
+            && let Some((obj_num, generation, obj_offset)) = try_parse_obj_header(data, pos)
+        {
+            let idx = obj_num as usize;
+            if idx < 100_000 {
+                // sanity limit
+                if idx >= entries.len() {
+                    entries.resize(idx + 1, None);
                 }
+                entries[idx] = Some(XrefEntry::InFile {
+                    offset: obj_offset,
+                    generation,
+                });
             }
+        }
 
         // Advance to next line
         while pos < data.len() && data[pos] != b'\n' {
@@ -234,10 +238,7 @@ fn rebuild_xref_from_scan(data: &[u8]) -> Result<XrefTable, PdfError> {
     let trailer = if trailer.get(b"Root").is_none() {
         let mut t = trailer;
         if let Some(root_num) = find_catalog_obj(data, &entries) {
-            t.insert(
-                b"Root".to_vec(),
-                crate::objects::PdfObj::Ref(root_num, 0),
-            );
+            t.insert(b"Root".to_vec(), crate::objects::PdfObj::Ref(root_num, 0));
         }
         t
     } else {
@@ -260,7 +261,10 @@ fn try_parse_obj_header(data: &[u8], pos: usize) -> Option<(u32, u16, usize)> {
     if p == num_start || p >= data.len() {
         return None;
     }
-    let obj_num: u32 = std::str::from_utf8(&data[num_start..p]).ok()?.parse().ok()?;
+    let obj_num: u32 = std::str::from_utf8(&data[num_start..p])
+        .ok()?
+        .parse()
+        .ok()?;
 
     // Skip spaces
     while p < data.len() && data[p] == b' ' {
@@ -275,7 +279,10 @@ fn try_parse_obj_header(data: &[u8], pos: usize) -> Option<(u32, u16, usize)> {
     if p == gen_start || p >= data.len() {
         return None;
     }
-    let generation: u16 = std::str::from_utf8(&data[gen_start..p]).ok()?.parse().ok()?;
+    let generation: u16 = std::str::from_utf8(&data[gen_start..p])
+        .ok()?
+        .parse()
+        .ok()?;
 
     // Skip spaces
     while p < data.len() && data[p] == b' ' {
@@ -288,10 +295,7 @@ fn try_parse_obj_header(data: &[u8], pos: usize) -> Option<(u32, u16, usize)> {
     }
     // "obj" must be followed by whitespace or << (not part of a longer word)
     let after_obj = p + 3;
-    if after_obj < data.len()
-        && !is_whitespace(data[after_obj])
-        && data[after_obj] != b'<'
-    {
+    if after_obj < data.len() && !is_whitespace(data[after_obj]) && data[after_obj] != b'<' {
         return None;
     }
 
@@ -308,9 +312,10 @@ fn find_trailer_dict(data: &[u8]) -> Option<PdfDict> {
             let dict_start = pos + needle.len();
             let mut lexer = Lexer::at(data, dict_start);
             if let Ok(Token::DictBegin) = lexer.next_token()
-                && let Ok(dict) = parse_dict_body(&mut lexer) {
-                    return Some(dict);
-                }
+                && let Ok(dict) = parse_dict_body(&mut lexer)
+            {
+                return Some(dict);
+            }
         }
         pos -= 1;
     }
@@ -353,9 +358,9 @@ fn parse_xref_section(
     } else {
         // Scan backward up to 20 bytes for "xref" (handles off-by-N offsets)
         let scan_start = offset.saturating_sub(20);
-        let found = (scan_start..offset).rev().find(|&off| {
-            off + 4 <= data.len() && &data[off..off + 4] == b"xref"
-        });
+        let found = (scan_start..offset)
+            .rev()
+            .find(|&off| off + 4 <= data.len() && &data[off..off + 4] == b"xref");
         if let Some(xref_pos) = found {
             parse_classic_xref(data, xref_pos)
         } else {

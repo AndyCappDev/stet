@@ -7,20 +7,20 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use skrifa::MetadataProvider;
 use stet_fonts::cff_parser::{CffFont, parse_cff};
 use stet_fonts::charstring::{execute_charstring, execute_charstring_mm};
 use stet_fonts::encoding::{MACROMAN_ENCODING, STANDARD_ENCODING, WINANSI_ENCODING};
+use stet_fonts::geometry::PathSegment;
 use stet_fonts::geometry::{Matrix, PsPath};
 use stet_fonts::truetype::{get_glyf_data, get_units_per_em, parse_cmap, parse_glyf_to_path};
-use stet_fonts::geometry::PathSegment;
-use skrifa::MetadataProvider;
 use stet_fonts::type1_parser::parse_type1;
 use stet_fonts::type2_charstring::execute_type2_charstring;
 
+use crate::FontProvider;
 use crate::error::PdfError;
 use crate::objects::{PdfDict, PdfObj};
 use crate::resolver::Resolver;
-use crate::FontProvider;
 
 /// Resolved PDF font, ready for glyph rendering.
 pub enum PdfFont {
@@ -196,7 +196,8 @@ pub fn resolve_font(
         .unwrap_or_default();
 
     // Extract font descriptor Flags for serif/sans-serif fallback selection
-    let desc_flags = descriptor.as_ref()
+    let desc_flags = descriptor
+        .as_ref()
         .and_then(|d| d.get_int(b"Flags"))
         .unwrap_or(0) as u32;
 
@@ -205,12 +206,23 @@ pub fn resolve_font(
     if let Some(ref desc) = descriptor {
         if desc.get(b"FontFile3").is_some() {
             // Try embedded CFF; fall back to substitution if decompression/parsing fails
-            match resolve_cff(resolver, &descriptor, encoding.clone(), widths, has_explicit_encoding) {
+            match resolve_cff(
+                resolver,
+                &descriptor,
+                encoding.clone(),
+                widths,
+                has_explicit_encoding,
+            ) {
                 Ok(font) => return Ok(font),
                 Err(_) => {
-                    if let Some(font) =
-                        substitute_font(&base_font_name, encoding.clone(), widths, has_pdf_widths, font_provider, desc_flags)
-                    {
+                    if let Some(font) = substitute_font(
+                        &base_font_name,
+                        encoding.clone(),
+                        widths,
+                        has_pdf_widths,
+                        font_provider,
+                        desc_flags,
+                    ) {
                         return Ok(font);
                     }
                 }
@@ -222,21 +234,37 @@ pub fn resolve_font(
             match resolve_truetype(resolver, &descriptor, encoding.clone(), widths) {
                 Ok(font) => return Ok(font),
                 Err(_) => {
-                    if let Some(font) =
-                        substitute_font(&base_font_name, encoding.clone(), widths, has_pdf_widths, font_provider, desc_flags)
-                    {
+                    if let Some(font) = substitute_font(
+                        &base_font_name,
+                        encoding.clone(),
+                        widths,
+                        has_pdf_widths,
+                        font_provider,
+                        desc_flags,
+                    ) {
                         return Ok(font);
                     }
                 }
             }
         }
         if desc.get(b"FontFile").is_some() {
-            match resolve_type1(resolver, &descriptor, encoding.clone(), widths, has_explicit_encoding) {
+            match resolve_type1(
+                resolver,
+                &descriptor,
+                encoding.clone(),
+                widths,
+                has_explicit_encoding,
+            ) {
                 Ok(font) => return Ok(font),
                 Err(_) => {
-                    if let Some(font) =
-                        substitute_font(&base_font_name, encoding.clone(), widths, has_pdf_widths, font_provider, desc_flags)
-                    {
+                    if let Some(font) = substitute_font(
+                        &base_font_name,
+                        encoding.clone(),
+                        widths,
+                        has_pdf_widths,
+                        font_provider,
+                        desc_flags,
+                    ) {
                         return Ok(font);
                     }
                 }
@@ -244,36 +272,50 @@ pub fn resolve_font(
         }
     }
     // No embedded font program — try font substitution
-    if let Some(font) = substitute_font(&base_font_name, encoding.clone(), widths, has_pdf_widths, font_provider, desc_flags) {
+    if let Some(font) = substitute_font(
+        &base_font_name,
+        encoding.clone(),
+        widths,
+        has_pdf_widths,
+        font_provider,
+        desc_flags,
+    ) {
         return Ok(font);
     }
     // For TrueType fonts, try loading from system fonts before giving up
     if subtype == b"TrueType"
-        && let Ok(data) = load_system_truetype_font(&base_font_name) {
-            let units_per_em = get_units_per_em(&data) as f64;
-            let cmap = parse_cmap(&data);
-            let post_name_to_gid = stet_fonts::system_fonts::parse_post_table(&data)
-                .map(|gid_to_name| {
-                    gid_to_name
-                        .into_iter()
-                        .map(|(gid, name)| (name, gid))
-                        .collect()
-                })
-                .unwrap_or_default();
-            return Ok(PdfFont::TrueType(TrueTypePdfFont {
-                data,
-                encoding,
-                widths,
-                cmap,
-                post_name_to_gid,
-                units_per_em,
-            }));
-        }
+        && let Ok(data) = load_system_truetype_font(&base_font_name)
+    {
+        let units_per_em = get_units_per_em(&data) as f64;
+        let cmap = parse_cmap(&data);
+        let post_name_to_gid = stet_fonts::system_fonts::parse_post_table(&data)
+            .map(|gid_to_name| {
+                gid_to_name
+                    .into_iter()
+                    .map(|(gid, name)| (name, gid))
+                    .collect()
+            })
+            .unwrap_or_default();
+        return Ok(PdfFont::TrueType(TrueTypePdfFont {
+            data,
+            encoding,
+            widths,
+            cmap,
+            post_name_to_gid,
+            units_per_em,
+        }));
+    }
 
     // Final fallback based on subtype (will likely fail)
     match subtype {
         b"TrueType" => resolve_truetype(resolver, &descriptor, encoding, widths),
-        _ => resolve_type1(resolver, &descriptor, encoding, widths, has_explicit_encoding),
+        _ => resolve_type1(
+            resolver,
+            &descriptor,
+            encoding,
+            widths,
+            has_explicit_encoding,
+        ),
     }
 }
 
@@ -378,11 +420,14 @@ fn encoding_table_by_name(name: &[u8]) -> &'static [&'static str; 256] {
 pub fn fallback_font(font_provider: Option<&FontProvider>) -> Option<PdfFont> {
     let encoding: [Option<String>; 256] = std::array::from_fn(|i| {
         WINANSI_ENCODING.get(i).and_then(|&s| {
-            if s.is_empty() { None } else { Some(s.to_string()) }
+            if s.is_empty() {
+                None
+            } else {
+                Some(s.to_string())
+            }
         })
     });
-    let widths = super::standard_fonts::standard_font_widths(b"Helvetica")
-        .unwrap_or([0.0f64; 256]);
+    let widths = super::standard_fonts::standard_font_widths(b"Helvetica").unwrap_or([0.0f64; 256]);
     substitute_font("Helvetica", encoding, widths, false, font_provider, 0)
 }
 
@@ -433,8 +478,10 @@ fn substitute_font(
     // font descriptor Flags (serif bit) and weight/style from the font name.
     let font_data = font_data.or_else(|| {
         let lower = clean_name.to_ascii_lowercase();
-        let is_bold = lower.contains("bold") || lower.contains("demi")
-            || lower.contains("black") || lower.contains("heavy");
+        let is_bold = lower.contains("bold")
+            || lower.contains("demi")
+            || lower.contains("black")
+            || lower.contains("heavy");
         let is_italic = lower.contains("italic") || lower.contains("oblique");
         let is_serif = descriptor_flags & 2 != 0; // PDF flag bit 2 = Serif
         let default_name = if is_serif {
@@ -513,20 +560,19 @@ fn substitute_font(
                     _ => continue,
                 };
                 if let Some(cs) = font.charstrings.get(glyph_name)
-                    && let Ok(result) =
-                        execute_charstring(cs, &font.subrs, font.len_iv, false)
-                    {
-                        let sub_w = result.width_x * fm[0];
-                        if sub_w > 0.0 {
-                            let ratio = pdf_w / sub_w;
-                            // Skip mismatched entries (likely unused encoding slots)
-                            if ratio > 0.5 && ratio < 2.0 {
-                                pdf_sum += pdf_w;
-                                sub_sum += sub_w;
-                                count += 1;
-                            }
+                    && let Ok(result) = execute_charstring(cs, &font.subrs, font.len_iv, false)
+                {
+                    let sub_w = result.width_x * fm[0];
+                    if sub_w > 0.0 {
+                        let ratio = pdf_w / sub_w;
+                        // Skip mismatched entries (likely unused encoding slots)
+                        if ratio > 0.5 && ratio < 2.0 {
+                            pdf_sum += pdf_w;
+                            sub_sum += sub_w;
+                            count += 1;
                         }
                     }
+                }
             }
             if count > 5 && sub_sum > 0.0 {
                 let ratio = pdf_sum / sub_sum;
@@ -565,8 +611,12 @@ fn fuzzy_font_match(name: &str) -> Option<&'static str> {
             (false, false) => "NimbusRoman-Regular",
         });
     }
-    if lower.contains("helvetica") || lower.contains("arial") || lower.contains("sans")
-        || lower.contains("calibri") || lower.contains("verdana") || lower.contains("tahoma")
+    if lower.contains("helvetica")
+        || lower.contains("arial")
+        || lower.contains("sans")
+        || lower.contains("calibri")
+        || lower.contains("verdana")
+        || lower.contains("tahoma")
     {
         return Some(match (is_bold, is_italic) {
             (true, true) => "NimbusSans-BoldItalic",
@@ -659,8 +709,8 @@ fn create_cid_cff_from_otf(
     let (cff_off, cff_len) = find_table(otf_data, b"CFF ")
         .ok_or(PdfError::Other("OpenType font has no CFF table".into()))?;
     let cff_data = &otf_data[cff_off..cff_off + cff_len];
-    let fonts = parse_cff(cff_data)
-        .map_err(|e| PdfError::Other(format!("CFF parse error: {e}")))?;
+    let fonts =
+        parse_cff(cff_data).map_err(|e| PdfError::Other(format!("CFF parse error: {e}")))?;
     let font = fonts
         .into_iter()
         .next()
@@ -670,7 +720,11 @@ fn create_cid_cff_from_otf(
 
     // Parse cmap from OTF for Unicode→GID lookup (substitute fonts)
     let otf_cmap = parse_cmap(otf_data);
-    let cmap = if otf_cmap.is_empty() { None } else { Some(otf_cmap) };
+    let cmap = if otf_cmap.is_empty() {
+        None
+    } else {
+        Some(otf_cmap)
+    };
 
     Ok(PdfFont::CidCff(CidCffPdfFont {
         font,
@@ -700,17 +754,19 @@ fn load_system_truetype_font(base_font: &str) -> Result<Vec<u8>, PdfError> {
 
     // Try exact match first
     if let Some(path) = cache.get_font_path(clean_name)
-        && let Ok(data) = read_font_file(path, clean_name) {
-            return Ok(data);
-        }
+        && let Ok(data) = read_font_file(path, clean_name)
+    {
+        return Ok(data);
+    }
 
     // Try known substitutions
     for &(from, to) in CID_FONT_SUBSTITUTIONS {
         if from == clean_name
             && let Some(path) = cache.get_font_path(to)
-                && let Ok(data) = read_font_file(path, to) {
-                    return Ok(data);
-                }
+            && let Ok(data) = read_font_file(path, to)
+        {
+            return Ok(data);
+        }
     }
 
     // Fuzzy family match — split on '-' or ',' to extract family name
@@ -724,10 +780,12 @@ fn load_system_truetype_font(base_font: &str) -> Result<Vec<u8>, PdfError> {
         if ps_lower.contains(family) || family.contains(ps_lower.split('-').next().unwrap_or("")) {
             let name_bold = ps_lower.contains("bold") || ps_lower.contains("demi");
             let name_italic = ps_lower.contains("italic") || ps_lower.contains("oblique");
-            if name_bold == is_bold && name_italic == is_italic
-                && let Ok(data) = read_font_file(path, ps_name) {
-                    return Ok(data);
-                }
+            if name_bold == is_bold
+                && name_italic == is_italic
+                && let Ok(data) = read_font_file(path, ps_name)
+            {
+                return Ok(data);
+            }
         }
     }
 
@@ -755,14 +813,19 @@ fn read_font_file(path: &std::path::Path, ps_name: &str) -> std::io::Result<Vec<
             if off_pos + 4 > data.len() {
                 break;
             }
-            let font_offset =
-                u32::from_be_bytes([data[off_pos], data[off_pos+1], data[off_pos+2], data[off_pos+3]]) as usize;
+            let font_offset = u32::from_be_bytes([
+                data[off_pos],
+                data[off_pos + 1],
+                data[off_pos + 2],
+                data[off_pos + 3],
+            ]) as usize;
             // Check PostScript name in the name table of this sub-font
             if let Some(name) = extract_ps_name_at_offset(&data, font_offset)
-                && name == ps_name {
-                    best_offset = font_offset;
-                    break;
-                }
+                && name == ps_name
+            {
+                best_offset = font_offset;
+                break;
+            }
         }
         // Build a standalone TTF by rewriting the header to point to tables
         // at their absolute offsets within the TTC
@@ -788,8 +851,18 @@ fn extract_ps_name_at_offset(data: &[u8], offset: usize) -> Option<String> {
             break;
         }
         if &data[entry..entry + 4] == b"name" {
-            name_off = u32::from_be_bytes([data[entry+8], data[entry+9], data[entry+10], data[entry+11]]) as usize;
-            name_len = u32::from_be_bytes([data[entry+12], data[entry+13], data[entry+14], data[entry+15]]) as usize;
+            name_off = u32::from_be_bytes([
+                data[entry + 8],
+                data[entry + 9],
+                data[entry + 10],
+                data[entry + 11],
+            ]) as usize;
+            name_len = u32::from_be_bytes([
+                data[entry + 12],
+                data[entry + 13],
+                data[entry + 14],
+                data[entry + 15],
+            ]) as usize;
             break;
         }
     }
@@ -813,8 +886,15 @@ fn extract_ps_name_at_offset(data: &[u8], offset: usize) -> Option<String> {
             if start + length <= nd.len() {
                 let raw = &nd[start..start + length];
                 if pid == 3 {
-                    let s: String = raw.chunks(2)
-                        .filter_map(|c| if c.len() == 2 { Some(u16::from_be_bytes([c[0], c[1]]) as u8 as char) } else { None })
+                    let s: String = raw
+                        .chunks(2)
+                        .filter_map(|c| {
+                            if c.len() == 2 {
+                                Some(u16::from_be_bytes([c[0], c[1]]) as u8 as char)
+                            } else {
+                                None
+                            }
+                        })
                         .collect();
                     return Some(s);
                 } else {
@@ -854,7 +934,9 @@ fn extract_ttf_from_ttc(ttc_data: &[u8], font_offset: usize) -> std::io::Result<
     }
 
     // Build standalone TTF: header + directory + table data
-    let mut result = Vec::with_capacity(header_size + tables.iter().map(|(_, _, l)| (l + 3) & !3).sum::<usize>());
+    let mut result = Vec::with_capacity(
+        header_size + tables.iter().map(|(_, _, l)| (l + 3) & !3).sum::<usize>(),
+    );
 
     // Copy the 12-byte sfnt header
     result.extend_from_slice(&ttc_data[font_offset..font_offset + 12]);
@@ -897,16 +979,19 @@ fn resolve_type3(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
     // Parse widths array (already in glyph space — Type 3 FontMatrix maps to text space).
     // /Widths may be an indirect reference — resolve before accessing.
     let mut widths = [0.0f64; 256];
-    let widths_resolved = font_dict.get(b"Widths").and_then(|obj| resolver.deref(obj).ok());
+    let widths_resolved = font_dict
+        .get(b"Widths")
+        .and_then(|obj| resolver.deref(obj).ok());
     if let Some(ref w_obj) = widths_resolved
-        && let Some(w_arr) = w_obj.as_array() {
-            for (i, obj) in w_arr.iter().enumerate() {
-                let code = first_char + i;
-                if code < 256 {
-                    widths[code] = obj.as_f64().unwrap_or(0.0);
-                }
+        && let Some(w_arr) = w_obj.as_array()
+    {
+        for (i, obj) in w_arr.iter().enumerate() {
+            let code = first_char + i;
+            if code < 256 {
+                widths[code] = obj.as_f64().unwrap_or(0.0);
             }
         }
+    }
 
     // FontMatrix (typically something like [0.01 0 0 0.01 0 0] for 100-unit glyph space)
     let font_matrix = font_dict
@@ -962,9 +1047,10 @@ fn resolve_type3(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
     for code in 0..256u16 {
         if let Some(glyph_name) = &encoding[code as usize]
             && let Some(proc_ref) = char_procs_dict.get(glyph_name.as_bytes())
-                && let Ok(data) = resolver.stream_data_from_obj(proc_ref) {
-                    char_procs.insert(code as u8, data);
-                }
+            && let Ok(data) = resolver.stream_data_from_obj(proc_ref)
+        {
+            char_procs.insert(code as u8, data);
+        }
     }
     Ok(PdfFont::Type3(Type3PdfFont {
         char_procs,
@@ -1248,22 +1334,25 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                 // FontFile3. Detect OTTO magic and use CFF rendering path.
                 if font_data.len() > 4 && &font_data[0..4] == b"OTTO" {
                     // Parse CIDToGIDMap from the PDF before creating the CFF font
-                    let cid_to_gid_map =
-                        if let Some(map_obj) = cid_font_dict.get(b"CIDToGIDMap") {
-                            if cid_font_dict.get_name(b"CIDToGIDMap") != Some(b"Identity") {
-                                resolver.stream_data_from_obj(map_obj).ok().map(|d| {
-                                    d.chunks_exact(2)
-                                        .map(|p| u16::from_be_bytes([p[0], p[1]]))
-                                        .collect()
-                                })
-                            } else {
-                                None
-                            }
+                    let cid_to_gid_map = if let Some(map_obj) = cid_font_dict.get(b"CIDToGIDMap") {
+                        if cid_font_dict.get_name(b"CIDToGIDMap") != Some(b"Identity") {
+                            resolver.stream_data_from_obj(map_obj).ok().map(|d| {
+                                d.chunks_exact(2)
+                                    .map(|p| u16::from_be_bytes([p[0], p[1]]))
+                                    .collect()
+                            })
                         } else {
                             None
-                        };
+                        }
+                    } else {
+                        None
+                    };
                     return create_cid_cff_from_otf(
-                        &font_data, default_width, cid_widths, &ordering, cid_to_gid_map,
+                        &font_data,
+                        default_width,
+                        cid_widths,
+                        &ordering,
+                        cid_to_gid_map,
                     );
                 }
                 font_data
@@ -1285,7 +1374,11 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                 // If the system font is OpenType/CFF, use CFF rendering path
                 if sys_data.len() > 4 && &sys_data[0..4] == b"OTTO" {
                     return create_cid_cff_from_otf(
-                        &sys_data, default_width, cid_widths, &ordering, None,
+                        &sys_data,
+                        default_width,
+                        cid_widths,
+                        &ordering,
+                        None,
                     );
                 }
                 sys_data
@@ -1301,8 +1394,7 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                 } else if let Some(map_obj) = cid_font_dict.get(b"CIDToGIDMap") {
                     match resolver.stream_data_from_obj(map_obj) {
                         Ok(stream_data) => {
-                            let mut gid_map =
-                                Vec::with_capacity(stream_data.len() / 2);
+                            let mut gid_map = Vec::with_capacity(stream_data.len() / 2);
                             for pair in stream_data.chunks_exact(2) {
                                 gid_map.push(u16::from_be_bytes([pair[0], pair[1]]));
                             }
@@ -1359,7 +1451,11 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                 // If the system font is OpenType/CFF, use CFF rendering path
                 if sys_data.len() > 4 && &sys_data[0..4] == b"OTTO" {
                     return create_cid_cff_from_otf(
-                        &sys_data, default_width, cid_widths, &ordering, None,
+                        &sys_data,
+                        default_width,
+                        cid_widths,
+                        &ordering,
+                        None,
                     );
                 }
                 let data = sys_data;
@@ -1418,13 +1514,13 @@ fn hex_to_unicode(hex: &str) -> Option<u32> {
         // Multi-byte: two or more 16-bit codepoints packed together.
         // Check for common ligature sequences and map to Unicode ligature codepoints.
         match hex {
-            "00660066" => Some(0xFB00),             // ff
-            "00660069" => Some(0xFB01),             // fi
-            "0066006C" => Some(0xFB02),             // fl
-            "006600660069" => Some(0xFB03),         // ffi
-            "00660066006C" => Some(0xFB04),         // ffl
-            "017F0074" => Some(0xFB05),             // ſt (long s + t)
-            "00730074" => Some(0xFB06),             // st
+            "00660066" => Some(0xFB00),     // ff
+            "00660069" => Some(0xFB01),     // fi
+            "0066006C" => Some(0xFB02),     // fl
+            "006600660069" => Some(0xFB03), // ffi
+            "00660066006C" => Some(0xFB04), // ffl
+            "017F0074" => Some(0xFB05),     // ſt (long s + t)
+            "00730074" => Some(0xFB06),     // st
             _ => {
                 // Unknown sequence — use first 16-bit codepoint
                 u32::from_str_radix(&hex[..hex.len().min(4)], 16).ok()
@@ -1472,9 +1568,10 @@ fn parse_to_unicode(data: &[u8]) -> HashMap<u16, u32> {
             let tokens = extract_hex_tokens(trimmed);
             if tokens.len() >= 2
                 && let Ok(cid) = u32::from_str_radix(tokens[0], 16)
-                    && let Some(unicode) = hex_to_unicode(tokens[1]) {
-                        map.insert(cid as u16, unicode);
-                    }
+                && let Some(unicode) = hex_to_unicode(tokens[1])
+            {
+                map.insert(cid as u16, unicode);
+            }
         }
 
         if in_bfrange {
@@ -1495,14 +1592,16 @@ fn parse_to_unicode(data: &[u8]) -> HashMap<u16, u32> {
                     && let (Some(start), Some(end)) = (
                         u32::from_str_radix(all_before_bracket[0], 16).ok(),
                         u32::from_str_radix(all_before_bracket[1], 16).ok(),
-                    ) {
-                        for (j, cid) in (start..=end).enumerate() {
-                            if j < in_bracket.len()
-                                && let Some(u) = hex_to_unicode(in_bracket[j]) {
-                                    map.insert(cid as u16, u);
-                                }
+                    )
+                {
+                    for (j, cid) in (start..=end).enumerate() {
+                        if j < in_bracket.len()
+                            && let Some(u) = hex_to_unicode(in_bracket[j])
+                        {
+                            map.insert(cid as u16, u);
                         }
                     }
+                }
             } else if line_tokens.len() >= 3 {
                 // <start> <end> <dst_start>
                 if let (Some(start), Some(end), Some(mut dst)) = (
@@ -1694,9 +1793,8 @@ impl Type1PdfFont {
         let glyph_name = self.encoding[char_code as usize].as_deref()?;
         let charstring = self.font.charstrings.get(glyph_name)?;
         // Provide charstring lookup for seac (accented character composition)
-        let cs_lookup = |name: &str| -> Option<Vec<u8>> {
-            self.font.charstrings.get(name).cloned()
-        };
+        let cs_lookup =
+            |name: &str| -> Option<Vec<u8>> { self.font.charstrings.get(name).cloned() };
         let result = execute_charstring_mm(
             charstring,
             &self.font.subrs,
@@ -1730,9 +1828,10 @@ impl TrueTypePdfFont {
         if !self.cmap.is_empty() {
             if let Some(glyph_name) = &self.encoding[char_code as usize] {
                 if let Some(unicode) = stet_fonts::agl::glyph_name_to_unicode(glyph_name)
-                    && let Some(&gid) = self.cmap.get(&(unicode as u32)) {
-                        return Some(gid);
-                    }
+                    && let Some(&gid) = self.cmap.get(&(unicode as u32))
+                {
+                    return Some(gid);
+                }
                 // Fallback: look up glyph name directly in post table
                 // (handles ligatures like fl/fi that may not be in the cmap)
                 if let Some(&gid) = self.post_name_to_gid.get(glyph_name.as_str()) {
@@ -1756,8 +1855,7 @@ impl CidTrueTypePdfFont {
     /// For UCS2 encodings, convert Unicode code point to CID for width lookup.
     fn resolve_cid(&self, code: u16) -> u16 {
         if self.ucs2_encoding && !self.ordering.is_empty() {
-            super::cid_unicode::unicode_to_cid(&self.ordering, code as u32)
-                .unwrap_or(code)
+            super::cid_unicode::unicode_to_cid(&self.ordering, code as u32).unwrap_or(code)
         } else {
             code
         }
@@ -1902,8 +2000,7 @@ impl CidCffPdfFont {
     fn glyph_width_cid(&self, cid: u16) -> f64 {
         // For OTF substitutes with cmap, map Unicode → CID for width lookup
         let resolved = if self.cmap.is_some() && !self.ordering.is_empty() {
-            super::cid_unicode::unicode_to_cid(&self.ordering, cid as u32)
-                .unwrap_or(cid)
+            super::cid_unicode::unicode_to_cid(&self.ordering, cid as u32).unwrap_or(cid)
         } else {
             cid
         };
@@ -1979,7 +2076,9 @@ impl CffPdfFont {
         let mut combined = base_result.path;
         let offset = Matrix::translate(adx, ady);
         let shifted_accent = accent_result.path.transform(&offset);
-        combined.segments.extend_from_slice(&shifted_accent.segments);
+        combined
+            .segments
+            .extend_from_slice(&shifted_accent.segments);
         Some(combined)
     }
 }
@@ -1995,12 +2094,16 @@ impl skrifa::outline::OutlinePen for PsPathPen {
     fn move_to(&mut self, x: f32, y: f32) {
         self.cur_x = x as f64;
         self.cur_y = y as f64;
-        self.path.segments.push(PathSegment::MoveTo(self.cur_x, self.cur_y));
+        self.path
+            .segments
+            .push(PathSegment::MoveTo(self.cur_x, self.cur_y));
     }
     fn line_to(&mut self, x: f32, y: f32) {
         self.cur_x = x as f64;
         self.cur_y = y as f64;
-        self.path.segments.push(PathSegment::LineTo(self.cur_x, self.cur_y));
+        self.path
+            .segments
+            .push(PathSegment::LineTo(self.cur_x, self.cur_y));
     }
     fn quad_to(&mut self, cx: f32, cy: f32, x: f32, y: f32) {
         let cx = cx as f64;
@@ -2015,16 +2118,24 @@ impl skrifa::outline::OutlinePen for PsPathPen {
         self.cur_x = ex;
         self.cur_y = ey;
         self.path.segments.push(PathSegment::CurveTo {
-            x1: cp1x, y1: cp1y, x2: cp2x, y2: cp2y, x3: ex, y3: ey,
+            x1: cp1x,
+            y1: cp1y,
+            x2: cp2x,
+            y2: cp2y,
+            x3: ex,
+            y3: ey,
         });
     }
     fn curve_to(&mut self, cx0: f32, cy0: f32, cx1: f32, cy1: f32, x: f32, y: f32) {
         self.cur_x = x as f64;
         self.cur_y = y as f64;
         self.path.segments.push(PathSegment::CurveTo {
-            x1: cx0 as f64, y1: cy0 as f64,
-            x2: cx1 as f64, y2: cy1 as f64,
-            x3: self.cur_x, y3: self.cur_y,
+            x1: cx0 as f64,
+            y1: cy0 as f64,
+            x2: cx1 as f64,
+            y2: cy1 as f64,
+            x3: self.cur_x,
+            y3: self.cur_y,
         });
     }
     fn close(&mut self) {

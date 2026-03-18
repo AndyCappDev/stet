@@ -464,25 +464,28 @@ pub fn op_resourceforall(ctx: &mut Context) -> Result<(), PsError> {
 
     // Global resources
     if let Some(dict_obj) = ctx.dicts.get(ctx.global_resources, &cat_key)
-        && let PsValue::Dict(res_dict) = dict_obj.value {
-            for key in ctx.dicts.keys(res_dict) {
-                if let DictKey::Name(nid) = key {
-                    name_ids.push(*nid);
-                }
+        && let PsValue::Dict(res_dict) = dict_obj.value
+    {
+        for key in ctx.dicts.keys(res_dict) {
+            if let DictKey::Name(nid) = key {
+                name_ids.push(*nid);
             }
         }
+    }
 
     // Local resources (only when in local VM mode)
     if !ctx.vm_alloc_mode
         && let Some(dict_obj) = ctx.dicts.get(ctx.local_resources, &cat_key)
-            && let PsValue::Dict(res_dict) = dict_obj.value {
-                for key in ctx.dicts.keys(res_dict) {
-                    if let DictKey::Name(nid) = key
-                        && !name_ids.contains(nid) {
-                            name_ids.push(*nid);
-                        }
-                }
+        && let PsValue::Dict(res_dict) = dict_obj.value
+    {
+        for key in ctx.dicts.keys(res_dict) {
+            if let DictKey::Name(nid) = key
+                && !name_ids.contains(nid)
+            {
+                name_ids.push(*nid);
             }
+        }
+    }
 
     // Also check FontDirectory for Font category
     let font_name_id = ctx.names.find(b"Font");
@@ -491,14 +494,16 @@ pub fn op_resourceforall(ctx: &mut Context) -> Result<(), PsError> {
             ctx.systemdict,
             &DictKey::Name(ctx.names.intern(b"FontDirectory")),
         )
-            && let PsValue::Dict(font_dir) = font_dir_obj.value {
-                for key in ctx.dicts.keys(font_dir) {
-                    if let DictKey::Name(nid) = key
-                        && !name_ids.contains(nid) {
-                            name_ids.push(*nid);
-                        }
-                }
+        && let PsValue::Dict(font_dir) = font_dir_obj.value
+    {
+        for key in ctx.dicts.keys(font_dir) {
+            if let DictKey::Name(nid) = key
+                && !name_ids.contains(nid)
+            {
+                name_ids.push(*nid);
             }
+        }
+    }
 
     // Filter by template pattern and sort
     let mut matching_names: Vec<(NameId, Vec<u8>)> = name_ids

@@ -6,8 +6,8 @@
 
 use stet_core::context::Context;
 use stet_core::error::PsError;
-use stet_fonts::geometry::{PathSegment, PsPath};
 use stet_core::object::{EntityId, PsObject};
+use stet_fonts::geometry::{PathSegment, PsPath};
 
 /// `pathbbox`: — → llx lly urx ury (bounding box of current path in user space)
 ///

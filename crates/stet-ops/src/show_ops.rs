@@ -818,10 +818,7 @@ pub fn op_glyphshow(ctx: &mut Context) -> Result<(), PsError> {
         .map_err(|_| PsError::InvalidFont)?;
 
         let segments = Arc::new(result.path.segments);
-        let cache = ctx
-            .glyph_caches
-            .entry(font_entity)
-            .or_default();
+        let cache = ctx.glyph_caches.entry(font_entity).or_default();
         cache.by_name.insert(
             glyph_name_id,
             CachedGlyph {
@@ -839,10 +836,7 @@ pub fn op_glyphshow(ctx: &mut Context) -> Result<(), PsError> {
             .map_err(|_| PsError::InvalidFont)?;
 
         let segments = Arc::new(result.path.segments);
-        let cache = ctx
-            .glyph_caches
-            .entry(font_entity)
-            .or_default();
+        let cache = ctx.glyph_caches.entry(font_entity).or_default();
         cache.by_name.insert(
             glyph_name_id,
             CachedGlyph {
@@ -1287,10 +1281,7 @@ fn render_show(
 
             let segments = Arc::new(result.path.segments);
             // Store in cache
-            let cache = ctx
-                .glyph_caches
-                .entry(font_entity_for_cache)
-                .or_default();
+            let cache = ctx.glyph_caches.entry(font_entity_for_cache).or_default();
             cache.by_name.insert(
                 glyph_name_id,
                 CachedGlyph {
@@ -1541,10 +1532,7 @@ fn render_show_type2(
             .map_err(|_| PsError::InvalidFont)?;
 
             let segments = Arc::new(result.path.segments);
-            let cache = ctx
-                .glyph_caches
-                .entry(font_entity)
-                .or_default();
+            let cache = ctx.glyph_caches.entry(font_entity).or_default();
             cache.by_name.insert(
                 glyph_name_id,
                 CachedGlyph {
@@ -1639,10 +1627,7 @@ fn measure_string_width_type2(
             )
             .map_err(|_| PsError::InvalidFont)?;
 
-            let cache = ctx
-                .glyph_caches
-                .entry(font_entity)
-                .or_default();
+            let cache = ctx.glyph_caches.entry(font_entity).or_default();
             cache
                 .by_name
                 .entry(glyph_name_id)
@@ -1724,10 +1709,7 @@ fn render_charpath_type2(
             .map_err(|_| PsError::InvalidFont)?;
 
             let segments = Arc::new(result.path.segments);
-            let cache = ctx
-                .glyph_caches
-                .entry(font_entity)
-                .or_default();
+            let cache = ctx.glyph_caches.entry(font_entity).or_default();
             cache.by_name.insert(
                 glyph_name_id,
                 CachedGlyph {
@@ -2087,63 +2069,57 @@ fn render_show_composite(
                             };
 
                             if let Some(ref glyf_bytes) = glyf_bytes
-                                && glyf_bytes.len() >= 10 {
-                                    let glyf_path = {
-                                        let dicts = &ctx.dicts;
-                                        let strings = &ctx.strings;
-                                        let gd = glyph_dir_entity;
-                                        let fd_ref = font_data.as_deref();
-                                        let resolver = |gid: u16| -> Option<Vec<u8>> {
-                                            if let Some(gd_entity) = gd {
-                                                let key = DictKey::Int(gid as i32);
-                                                if let Some(obj) = dicts.get(gd_entity, &key)
-                                                    && let PsValue::String { entity, start, len } =
-                                                        obj.value
-                                                {
-                                                    return Some(
-                                                        strings.get(entity, start, len).to_vec(),
-                                                    );
-                                                }
+                                && glyf_bytes.len() >= 10
+                            {
+                                let glyf_path = {
+                                    let dicts = &ctx.dicts;
+                                    let strings = &ctx.strings;
+                                    let gd = glyph_dir_entity;
+                                    let fd_ref = font_data.as_deref();
+                                    let resolver = |gid: u16| -> Option<Vec<u8>> {
+                                        if let Some(gd_entity) = gd {
+                                            let key = DictKey::Int(gid as i32);
+                                            if let Some(obj) = dicts.get(gd_entity, &key)
+                                                && let PsValue::String { entity, start, len } =
+                                                    obj.value
+                                            {
+                                                return Some(
+                                                    strings.get(entity, start, len).to_vec(),
+                                                );
                                             }
-                                            fd_ref.and_then(|fd| truetype::get_glyf_data(fd, gid))
-                                        };
-                                        truetype::parse_glyf_to_path(glyf_bytes, &resolver)
+                                        }
+                                        fd_ref.and_then(|fd| truetype::get_glyf_data(fd, gid))
                                     };
+                                    truetype::parse_glyf_to_path(glyf_bytes, &resolver)
+                                };
 
-                                    let segments = Arc::new(glyf_path.segments);
-                                    if !segments.is_empty() {
-                                        let user_path = transform_segments(
-                                            &segments,
-                                            &combined_fm,
-                                            cur_x,
-                                            cur_y,
-                                        );
-                                        let device_path = ctm_transform_path(&user_path, &ctm);
-                                        push_glyph_element(
-                                            ctx,
-                                            device_path,
-                                            paint_type,
-                                            stroke_width_dev,
-                                        );
-                                    }
-                                    // Cache with advance width
-                                    let advance = font_data
-                                        .as_ref()
-                                        .and_then(|fd| truetype::get_advance_width(fd, gid))
-                                        .unwrap_or(500);
-                                    let cache = ctx
-                                        .glyph_caches
-                                        .entry(font_entity)
-                                        .or_default();
-                                    cache.by_gid.insert(
-                                        gid,
-                                        CachedGlyph {
-                                            segments,
-                                            width_x: advance as f64,
-                                            width_y: 0.0,
-                                        },
+                                let segments = Arc::new(glyf_path.segments);
+                                if !segments.is_empty() {
+                                    let user_path =
+                                        transform_segments(&segments, &combined_fm, cur_x, cur_y);
+                                    let device_path = ctm_transform_path(&user_path, &ctm);
+                                    push_glyph_element(
+                                        ctx,
+                                        device_path,
+                                        paint_type,
+                                        stroke_width_dev,
                                     );
                                 }
+                                // Cache with advance width
+                                let advance = font_data
+                                    .as_ref()
+                                    .and_then(|fd| truetype::get_advance_width(fd, gid))
+                                    .unwrap_or(500);
+                                let cache = ctx.glyph_caches.entry(font_entity).or_default();
+                                cache.by_gid.insert(
+                                    gid,
+                                    CachedGlyph {
+                                        segments,
+                                        width_x: advance as f64,
+                                        width_y: 0.0,
+                                    },
+                                );
+                            }
 
                             // Advance by actual hmtx width (even if glyf data was
                             // missing or too short — e.g. space has no outlines)
@@ -2280,10 +2256,7 @@ fn render_composite_truetype_cids(
                     .as_ref()
                     .and_then(|fd| truetype::get_advance_width(fd, cid as u16))
                     .unwrap_or(500);
-                let cache = ctx
-                    .glyph_caches
-                    .entry(cidfont_entity)
-                    .or_default();
+                let cache = ctx.glyph_caches.entry(cidfont_entity).or_default();
                 cache.by_cid.insert(
                     cid,
                     CachedGlyph {
@@ -2588,10 +2561,7 @@ fn render_composite_cff_cids(
             .map_err(|_| PsError::InvalidFont)?;
 
             let segments = Arc::new(result.path.segments);
-            let cache = ctx
-                .glyph_caches
-                .entry(cidfont_entity)
-                .or_default();
+            let cache = ctx.glyph_caches.entry(cidfont_entity).or_default();
             cache.by_cid.insert(
                 cid,
                 CachedGlyph {
@@ -2750,10 +2720,7 @@ fn render_show_type3(
             if ctx.char_cache_mode == Some(Type3CacheMode::Cache) {
                 let elements: Vec<DisplayElement> =
                     ctx.display_list.elements_from(dl_start).to_vec();
-                let cache = ctx
-                    .glyph_caches
-                    .entry(font_entity)
-                    .or_default();
+                let cache = ctx.glyph_caches.entry(font_entity).or_default();
                 cache.by_charcode.insert(
                     byte,
                     CachedType3Glyph {
@@ -2846,10 +2813,7 @@ fn measure_string_width(ctx: &mut Context, bytes: &[u8]) -> Result<(f64, f64), P
             let result = charstring::execute_charstring(&cs_bytes, &subrs, info.len_iv, false)
                 .map_err(|_| PsError::InvalidFont)?;
 
-            let cache = ctx
-                .glyph_caches
-                .entry(font_entity_for_cache)
-                .or_default();
+            let cache = ctx.glyph_caches.entry(font_entity_for_cache).or_default();
             cache
                 .by_name
                 .entry(glyph_name_id)
@@ -2941,10 +2905,7 @@ fn render_charpath(ctx: &mut Context, bytes: &[u8]) -> Result<(), PsError> {
                 .map_err(|_| PsError::InvalidFont)?;
 
             let segments = Arc::new(result.path.segments);
-            let cache = ctx
-                .glyph_caches
-                .entry(font_entity_for_cache)
-                .or_default();
+            let cache = ctx.glyph_caches.entry(font_entity_for_cache).or_default();
             cache.by_name.insert(
                 glyph_name_id,
                 CachedGlyph {
@@ -3558,10 +3519,7 @@ fn render_show_displaced(
                             let device_path = ctm_transform_path(&user_path, &ctm);
                             push_glyph_element(ctx, device_path, paint_type, stroke_width_dev);
                         }
-                        let cache = ctx
-                            .glyph_caches
-                            .entry(font_entity_for_cache)
-                            .or_default();
+                        let cache = ctx.glyph_caches.entry(font_entity_for_cache).or_default();
                         cache.by_name.insert(
                             glyph_name_id,
                             CachedGlyph {
@@ -3650,10 +3608,7 @@ fn render_show_displaced_type2(
                             let device_path = ctm_transform_path(&user_path, &ctm);
                             push_glyph_element(ctx, device_path, paint_type, stroke_width_dev);
                         }
-                        let cache = ctx
-                            .glyph_caches
-                            .entry(font_entity)
-                            .or_default();
+                        let cache = ctx.glyph_caches.entry(font_entity).or_default();
                         cache.by_name.insert(
                             glyph_name_id,
                             CachedGlyph {

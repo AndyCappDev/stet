@@ -12,7 +12,7 @@ use crate::dict::DictKey;
 use crate::object::{PsObject, PsValue};
 
 // Re-export font substitution data from stet-fonts for backward compatibility.
-pub use stet_fonts::{find_substitution, FONT_SUBSTITUTIONS};
+pub use stet_fonts::{FONT_SUBSTITUTIONS, find_substitution};
 
 /// Try to load a font by name, using the substitution table.
 /// Checks embedded files first (for WASM), then falls back to disk.

@@ -10,11 +10,11 @@ use stet_core::context::Context;
 use stet_core::dict::DictKey;
 use stet_core::error::PsError;
 use stet_core::graphics_state::ColorSpace;
+use stet_core::object::{PsObject, PsValue};
 use stet_fonts::geometry::Matrix;
 use stet_graphics::color::DeviceColor;
 use stet_graphics::device::{ImageColorSpace, ImageParams};
 use stet_graphics::display_list::DisplayElement;
-use stet_core::object::{PsObject, PsValue};
 
 // ---------- image operator ----------
 
@@ -1383,35 +1383,37 @@ fn samples_to_rgba(
     }
 
     // System CMYK profile bulk conversion for DeviceCMYK images
-    if matches!(ctx.gstate.color_space, ColorSpace::DeviceCMYK) && ncomp == 4
-        && let Some(hash) = ctx.icc_cache.default_cmyk_hash().copied() {
-            let decoded_samples = if is_identity_decode(decode, ncomp) {
-                None
-            } else {
-                let mut decoded = vec![0u8; pixel_count * 4];
-                for i in 0..pixel_count {
-                    for c in 0..4usize {
-                        let raw = samples.get(i * 4 + c).copied().unwrap_or(0) as f64 / 255.0;
-                        let d_min = decode.get(c * 2).copied().unwrap_or(0.0);
-                        let d_max = decode.get(c * 2 + 1).copied().unwrap_or(1.0);
-                        let val = d_min + raw * (d_max - d_min);
-                        decoded[i * 4 + c] = (val.clamp(0.0, 1.0) * 255.0).round() as u8;
-                    }
+    if matches!(ctx.gstate.color_space, ColorSpace::DeviceCMYK)
+        && ncomp == 4
+        && let Some(hash) = ctx.icc_cache.default_cmyk_hash().copied()
+    {
+        let decoded_samples = if is_identity_decode(decode, ncomp) {
+            None
+        } else {
+            let mut decoded = vec![0u8; pixel_count * 4];
+            for i in 0..pixel_count {
+                for c in 0..4usize {
+                    let raw = samples.get(i * 4 + c).copied().unwrap_or(0) as f64 / 255.0;
+                    let d_min = decode.get(c * 2).copied().unwrap_or(0.0);
+                    let d_max = decode.get(c * 2 + 1).copied().unwrap_or(1.0);
+                    let val = d_min + raw * (d_max - d_min);
+                    decoded[i * 4 + c] = (val.clamp(0.0, 1.0) * 255.0).round() as u8;
                 }
-                Some(decoded)
-            };
-            let src = decoded_samples.as_deref().unwrap_or(samples);
-            if let Some(rgb_data) = ctx.icc_cache.convert_image_8bit(&hash, src, pixel_count) {
-                for i in 0..pixel_count {
-                    let pi = i * 4;
-                    let ri = i * 3;
-                    rgba[pi] = rgb_data[ri];
-                    rgba[pi + 1] = rgb_data[ri + 1];
-                    rgba[pi + 2] = rgb_data[ri + 2];
-                }
-                return rgba;
             }
+            Some(decoded)
+        };
+        let src = decoded_samples.as_deref().unwrap_or(samples);
+        if let Some(rgb_data) = ctx.icc_cache.convert_image_8bit(&hash, src, pixel_count) {
+            for i in 0..pixel_count {
+                let pi = i * 4;
+                let ri = i * 3;
+                rgba[pi] = rgb_data[ri];
+                rgba[pi + 1] = rgb_data[ri + 1];
+                rgba[pi + 2] = rgb_data[ri + 2];
+            }
+            return rgba;
         }
+    }
 
     // CIE-based image conversion: run each pixel through CIE pipeline
     let cie_color_space = ctx.gstate.color_space.clone();

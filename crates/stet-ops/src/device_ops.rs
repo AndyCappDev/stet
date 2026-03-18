@@ -10,8 +10,8 @@ use stet_core::device::NullDevice;
 use stet_core::dict::DictKey;
 use stet_core::error::PsError;
 use stet_core::graphics_state::GraphicsState;
-use stet_fonts::geometry::{Matrix, PathSegment};
 use stet_core::object::{EntityId, ObjFlags, PsObject, PsValue};
+use stet_fonts::geometry::{Matrix, PathSegment};
 
 // ---------- Page device dict helpers ----------
 
@@ -124,9 +124,10 @@ pub fn op_setpagedevice(ctx: &mut Context) -> Result<(), PsError> {
     let od_name = ctx.names.intern(b"OutputDevice");
 
     // Check if current page device has .IsPageDevice
-    let cur_has_is_page = ctx.gstate.page_device.is_some_and(|pd| {
-        ctx.dicts.get(pd, &DictKey::Name(is_page_name)).is_some()
-    });
+    let cur_has_is_page = ctx
+        .gstate
+        .page_device
+        .is_some_and(|pd| ctx.dicts.get(pd, &DictKey::Name(is_page_name)).is_some());
 
     let mut need_full_reload = !cur_has_is_page;
 
@@ -138,9 +139,10 @@ pub fn op_setpagedevice(ctx: &mut Context) -> Result<(), PsError> {
             .page_device
             .and_then(|pd| ctx.dicts.get(pd, &DictKey::Name(od_name)));
         if let (Some(req), Some(cur)) = (req_od, cur_od)
-            && req.value != cur.value {
-                need_full_reload = true;
-            }
+            && req.value != cur.value
+        {
+            need_full_reload = true;
+        }
     }
 
     let base_pd = if need_full_reload {

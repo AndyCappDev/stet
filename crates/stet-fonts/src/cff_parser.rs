@@ -172,8 +172,7 @@ pub fn parse_cff(data: &[u8]) -> Result<Vec<CffFont>, String> {
         // Build CID→GID reverse mapping for CID-keyed fonts.
         // In CID fonts, charset values are CID values (not SIDs).
         if font.is_cid && charset_val > 2 {
-            font.cid_to_gid =
-                build_cid_to_gid(data, charset_val as usize, n_glyphs)?;
+            font.cid_to_gid = build_cid_to_gid(data, charset_val as usize, n_glyphs)?;
         }
 
         // Encoding (only for name-keyed fonts, op 16)

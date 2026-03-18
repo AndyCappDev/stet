@@ -732,15 +732,16 @@ impl Context {
         use crate::dict::DictKey;
         if let Some(pd) = self.gstate.page_device
             && let Some(name_id) = self.names.find(b"HWResolution")
-                && let Some(obj) = self.dicts.get(pd, &DictKey::Name(name_id))
-                    && let PsValue::Array { entity, .. } = obj.value {
-                        let first = self.arrays.get_element(entity, 0);
-                        return match first.value {
-                            PsValue::Real(r) => r,
-                            PsValue::Int(i) => i as f64,
-                            _ => 72.0,
-                        };
-                    }
+            && let Some(obj) = self.dicts.get(pd, &DictKey::Name(name_id))
+            && let PsValue::Array { entity, .. } = obj.value
+        {
+            let first = self.arrays.get_element(entity, 0);
+            return match first.value {
+                PsValue::Real(r) => r,
+                PsValue::Int(i) => i as f64,
+                _ => 72.0,
+            };
+        }
         72.0
     }
 

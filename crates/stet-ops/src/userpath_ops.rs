@@ -7,8 +7,8 @@
 
 use stet_core::context::Context;
 use stet_core::error::PsError;
-use stet_fonts::geometry::{Matrix, PathSegment};
 use stet_core::object::{EntityId, PsObject, PsValue};
+use stet_fonts::geometry::{Matrix, PathSegment};
 
 use crate::graphics_state_ops::{op_grestore, op_gsave};
 use crate::insideness_ops::{op_ineofill, op_infill, op_instroke};

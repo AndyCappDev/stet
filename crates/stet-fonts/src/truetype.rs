@@ -125,10 +125,10 @@ pub fn get_glyf_data(font_data: &[u8], gid: u16) -> Option<Vec<u8>> {
     let index_to_loc_format = read_i16(font_data, head_off + 50);
 
     // Try standard loca/glyf first, fall back to PDF-subset locx/glyx
-    let (loca_off, _loca_len) = find_table(font_data, b"loca")
-        .or_else(|| find_table(font_data, b"locx"))?;
-    let (glyf_off, _glyf_len) = find_table(font_data, b"glyf")
-        .or_else(|| find_table(font_data, b"glyx"))?;
+    let (loca_off, _loca_len) =
+        find_table(font_data, b"loca").or_else(|| find_table(font_data, b"locx"))?;
+    let (glyf_off, _glyf_len) =
+        find_table(font_data, b"glyf").or_else(|| find_table(font_data, b"glyx"))?;
 
     let gid = gid as usize;
 
@@ -163,7 +163,11 @@ pub fn get_glyf_data(font_data: &[u8], gid: u16) -> Option<Vec<u8>> {
 
     // For locx/glyx (PDF-subset), offsets are absolute within the font data
     let abs_offset = if has_locx { offset } else { glyf_off + offset };
-    let abs_next = if has_locx { next_offset } else { glyf_off + next_offset };
+    let abs_next = if has_locx {
+        next_offset
+    } else {
+        glyf_off + next_offset
+    };
     if abs_next > font_data.len() {
         return None;
     }

@@ -10,9 +10,9 @@
 use stet_core::context::Context;
 use stet_core::error::PsError;
 use stet_core::graphics_state::{GraphicsState, GstateEntry};
+use stet_core::object::{PsObject, PsValue};
 use stet_graphics::color::{DashPattern, FillRule, LineCap, LineJoin};
 use stet_graphics::display_list::DisplayElement;
-use stet_core::object::{PsObject, PsValue};
 
 /// `gsave`: — → — (push graphics state)
 pub fn op_gsave(ctx: &mut Context) -> Result<(), PsError> {

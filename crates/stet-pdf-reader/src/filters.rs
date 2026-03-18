@@ -136,11 +136,12 @@ fn decode_flate(data: &[u8], parms: Option<&PdfDict>) -> Result<Vec<u8>, PdfErro
         } else if data.len() > 2 {
             // Zlib produced nothing — try raw deflate as last resort
             let (raw_output, _) = decode_flate_inner(&data[2..], false);
-            raw_output.map_err(|_| {
-                PdfError::DecompressionError("flate: decompression failed".into())
-            })?
+            raw_output
+                .map_err(|_| PdfError::DecompressionError("flate: decompression failed".into()))?
         } else {
-            return Err(PdfError::DecompressionError("flate: decompression failed".into()));
+            return Err(PdfError::DecompressionError(
+                "flate: decompression failed".into(),
+            ));
         }
     };
 
@@ -193,7 +194,10 @@ fn decode_flate_inner(data: &[u8], zlib: bool) -> (Result<Vec<u8>, PdfError>, bo
                 return (Ok(output), false);
             }
             Err(e) => {
-                return (Err(PdfError::DecompressionError(format!("flate: {e}"))), false);
+                return (
+                    Err(PdfError::DecompressionError(format!("flate: {e}"))),
+                    false,
+                );
             }
         }
     }
@@ -524,13 +528,14 @@ fn decode_dct(data: &[u8]) -> Result<Vec<u8>, PdfError> {
     // array to process. Undo the decoder's inversion so the PDF renderer gets
     // the original sample values.
     if let Some(info) = decoder.info()
-        && info.pixel_format == jpeg_decoder::PixelFormat::CMYK32 {
-            let mut result = pixels;
-            for b in result.iter_mut() {
-                *b = 255 - *b;
-            }
-            return Ok(result);
+        && info.pixel_format == jpeg_decoder::PixelFormat::CMYK32
+    {
+        let mut result = pixels;
+        for b in result.iter_mut() {
+            *b = 255 - *b;
         }
+        return Ok(result);
+    }
 
     Ok(pixels)
 }
@@ -812,8 +817,7 @@ fn apply_tiff_predictor_subbyte(
                 let decoded = (encoded.wrapping_add(prev[c])) & mask;
                 prev[c] = decoded;
                 // Write back
-                out_row[byte_idx] = (out_row[byte_idx] & !(mask << bit_pos))
-                    | (decoded << bit_pos);
+                out_row[byte_idx] = (out_row[byte_idx] & !(mask << bit_pos)) | (decoded << bit_pos);
             }
         }
         result.extend_from_slice(&out_row);

@@ -5,8 +5,8 @@
 //! Display list — records drawing operations for deferred replay to a device.
 
 use crate::device::{
-    AxialShadingParams, ClipParams, FillParams, ImageParams, MeshShadingParams,
-    PatchShadingParams, PatternFillParams, RadialShadingParams, StrokeParams, TextParams,
+    AxialShadingParams, ClipParams, FillParams, ImageParams, MeshShadingParams, PatchShadingParams,
+    PatternFillParams, RadialShadingParams, StrokeParams, TextParams,
 };
 use stet_fonts::geometry::PsPath;
 
@@ -152,4 +152,3 @@ impl Default for DisplayList {
         Self::new()
     }
 }
-

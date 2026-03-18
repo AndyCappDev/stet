@@ -362,7 +362,12 @@ impl IccCache {
     pub fn convert_cmyk_readonly(&self, c: f64, m: f64, y: f64, k: f64) -> Option<(f64, f64, f64)> {
         let hash = self.default_cmyk_hash.as_ref()?;
         let cached = self.transforms.get(hash)?;
-        let src = [c.clamp(0.0, 1.0), m.clamp(0.0, 1.0), y.clamp(0.0, 1.0), k.clamp(0.0, 1.0)];
+        let src = [
+            c.clamp(0.0, 1.0),
+            m.clamp(0.0, 1.0),
+            y.clamp(0.0, 1.0),
+            k.clamp(0.0, 1.0),
+        ];
         let mut dst = [0.0f64; 3];
         if cached.transform_f64.transform(&src, &mut dst).is_err() {
             return None;

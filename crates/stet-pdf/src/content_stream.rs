@@ -7,6 +7,11 @@
 use std::collections::{HashMap, HashSet};
 use std::io::Write as IoWrite;
 
+use crate::font_embedder;
+use crate::font_tracker::FontTracker;
+use crate::image_ops::{self, ImageXObject};
+use crate::pdf_objects::PdfObj;
+use crate::text_ops;
 use stet_core::context::Context;
 use stet_fonts::geometry::{Matrix, PsPath};
 use stet_graphics::color::{DeviceColor, FillRule, LineCap, LineJoin};
@@ -16,11 +21,6 @@ use stet_graphics::device::{
     TransferState,
 };
 use stet_graphics::display_list::{DisplayElement, DisplayList};
-use crate::font_embedder;
-use crate::font_tracker::FontTracker;
-use crate::image_ops::{self, ImageXObject};
-use crate::pdf_objects::PdfObj;
-use crate::text_ops;
 
 /// Result of generating a content stream from a display list.
 pub struct ContentStreamResult {
@@ -732,9 +732,10 @@ pub fn build_tile_content_stream(
                 emit_matrix(&mut buf, &m);
                 buf.extend(b" cm ");
                 if xobj.is_imagemask
-                    && let Some((r, g, b)) = xobj.mask_color {
-                        emit_fill_color_rgb(&mut buf, r, g, b);
-                    }
+                    && let Some((r, g, b)) = xobj.mask_color
+                {
+                    emit_fill_color_rgb(&mut buf, r, g, b);
+                }
                 writeln!(buf, "/Im{} Do Q", img_idx).unwrap();
                 images.push(xobj);
             }

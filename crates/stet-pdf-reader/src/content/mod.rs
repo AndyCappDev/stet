@@ -29,13 +29,13 @@ use std::sync::Arc;
 use self::font::{FontCache, PdfFont};
 use self::graphics_state::{ShadingPatternDL, TilingPattern};
 use crate::FontProvider;
+use stet_fonts::geometry::{Matrix, PathSegment, PsPath};
+use stet_graphics::color::{DashPattern, DeviceColor, FillRule, LineCap, LineJoin};
 use stet_graphics::device::{ClipParams, ImageColorSpace, ImageParams, PatternFillParams};
-use stet_graphics::icc::IccCache;
 use stet_graphics::display_list::{
     DisplayElement, DisplayList, GroupParams, SoftMaskParams, SoftMaskSubtype,
 };
-use stet_fonts::geometry::{Matrix, PathSegment, PsPath};
-use stet_graphics::color::{DashPattern, DeviceColor, FillRule, LineCap, LineJoin};
+use stet_graphics::icc::IccCache;
 
 /// An operand on the content stream operand stack.
 #[derive(Clone, Debug)]
@@ -241,9 +241,7 @@ impl<'a> ContentInterpreter<'a> {
             _ => return Err(PdfError::Other("AP not a dict".into())),
         };
 
-        let n_ref = ap_dict
-            .get(b"N")
-            .ok_or(PdfError::Other("no AP/N".into()))?;
+        let n_ref = ap_dict.get(b"N").ok_or(PdfError::Other("no AP/N".into()))?;
 
         // Resolve to get the Form XObject dict + stream.
         // AP/N may be a stream (single appearance) or a dict mapping state
@@ -256,7 +254,8 @@ impl<'a> ContentInterpreter<'a> {
             } else {
                 // State-specific appearance dict: pick the entry matching /AS
                 let as_name = annot_dict.get_name(b"AS").unwrap_or(b"Off");
-                let state_ref = d.get(as_name)
+                let state_ref = d
+                    .get(as_name)
                     .or_else(|| {
                         // If the AS state isn't found, try the first entry
                         d.entries().first().map(|(_, v)| v)
@@ -320,9 +319,10 @@ impl<'a> ContentInterpreter<'a> {
         let saved_resources = self.resources.clone();
         // Set up resources from the form
         if let Some(res_obj) = form_dict.get(b"Resources")
-            && let Ok(PdfObj::Dict(d)) = self.resolver.deref(res_obj) {
-                self.resources = d;
-            }
+            && let Ok(PdfObj::Dict(d)) = self.resolver.deref(res_obj)
+        {
+            self.resources = d;
+        }
 
         // Apply CTM: page CTM → bbox_to_rect → form_matrix
         self.gstate.ctm = self.gstate.ctm.concat(&bbox_to_rect).concat(&form_matrix);
@@ -511,19 +511,22 @@ impl<'a> ContentInterpreter<'a> {
                 self.in_text = false;
                 // Apply accumulated text clip path (from rendering modes 4-7)
                 if let Some(clip_path) = self.text_clip_path.take()
-                    && !clip_path.is_empty() {
-                        self.display_list.push(DisplayElement::Clip {
-                            path: clip_path.clone(),
-                            params: ClipParams {
-                                fill_rule: FillRule::NonZeroWinding,
-                                ctm: Matrix::identity(),
-                            },
-                        });
-                        // Track in graphics state so Q/grestore can undo it
-                        self.gstate.clip_stack.push((clip_path.clone(), FillRule::NonZeroWinding));
-                        self.gstate.clip_path = Some(clip_path);
-                        self.gstate.clip_path_version += 1;
-                    }
+                    && !clip_path.is_empty()
+                {
+                    self.display_list.push(DisplayElement::Clip {
+                        path: clip_path.clone(),
+                        params: ClipParams {
+                            fill_rule: FillRule::NonZeroWinding,
+                            ctm: Matrix::identity(),
+                        },
+                    });
+                    // Track in graphics state so Q/grestore can undo it
+                    self.gstate
+                        .clip_stack
+                        .push((clip_path.clone(), FillRule::NonZeroWinding));
+                    self.gstate.clip_path = Some(clip_path);
+                    self.gstate.clip_path_version += 1;
+                }
                 Ok(())
             }
             b"Tf" => self.op_tf(),
@@ -567,8 +570,15 @@ impl<'a> ContentInterpreter<'a> {
             b"sh" => self.op_sh(),
 
             // Marked content (consume operands, otherwise no-op)
-            b"BMC" | b"MP" => { self.operand_stack.pop(); Ok(()) }
-            b"BDC" | b"DP" => { self.operand_stack.pop(); self.operand_stack.pop(); Ok(()) }
+            b"BMC" | b"MP" => {
+                self.operand_stack.pop();
+                Ok(())
+            }
+            b"BDC" | b"DP" => {
+                self.operand_stack.pop();
+                self.operand_stack.pop();
+                Ok(())
+            }
             b"EMC" => Ok(()),
 
             // Type 3 glyph operators (width/cache — we use Widths array instead)
@@ -1255,10 +1265,11 @@ impl<'a> ContentInterpreter<'a> {
                 static WARNED: Mutex<Vec<String>> = Mutex::new(Vec::new());
                 let msg = format!("font /{}: {}", String::from_utf8_lossy(name), e);
                 if let Ok(mut set) = WARNED.lock()
-                    && !set.contains(&msg) {
-                        eprintln!("warning: {msg}");
-                        set.push(msg);
-                    }
+                    && !set.contains(&msg)
+                {
+                    eprintln!("warning: {msg}");
+                    set.push(msg);
+                }
                 // Try fallback font on resolution failure too
                 if let Some(fallback) = font::fallback_font(self.font_provider.as_ref()) {
                     let arc = Arc::new(fallback);
@@ -1467,8 +1478,7 @@ impl<'a> ContentInterpreter<'a> {
 
         // Build the text rendering matrix: CTM × Tm × [fontSize*Th 0 0 fontSize 0 rise] × FontMatrix
         let th = self.gstate.horizontal_scaling;
-        let text_state_matrix =
-            Matrix::new(font_size * th, 0.0, 0.0, font_size, 0.0, text_rise);
+        let text_state_matrix = Matrix::new(font_size * th, 0.0, 0.0, font_size, 0.0, text_rise);
         let trm = self
             .gstate
             .ctm
@@ -1610,7 +1620,8 @@ impl<'a> ContentInterpreter<'a> {
         } else {
             let mut params = self.gstate.fill_params(FillRule::NonZeroWinding);
             params.is_text_glyph = true;
-            self.display_list.push(DisplayElement::Fill { path, params });
+            self.display_list
+                .push(DisplayElement::Fill { path, params });
         }
     }
 
@@ -1773,8 +1784,14 @@ impl<'a> ContentInterpreter<'a> {
             ];
             let x_min = corners.iter().map(|c| c.0).fold(f64::INFINITY, f64::min);
             let y_min = corners.iter().map(|c| c.1).fold(f64::INFINITY, f64::min);
-            let x_max = corners.iter().map(|c| c.0).fold(f64::NEG_INFINITY, f64::max);
-            let y_max = corners.iter().map(|c| c.1).fold(f64::NEG_INFINITY, f64::max);
+            let x_max = corners
+                .iter()
+                .map(|c| c.0)
+                .fold(f64::NEG_INFINITY, f64::max);
+            let y_max = corners
+                .iter()
+                .map(|c| c.1)
+                .fold(f64::NEG_INFINITY, f64::max);
 
             self.display_list.push(DisplayElement::SoftMasked {
                 mask: mask_dl,
@@ -1839,8 +1856,9 @@ impl<'a> ContentInterpreter<'a> {
             }
             Some(_mask_obj) => {
                 // Explicit stencil mask: indirect reference to 1-bit ImageMask stream
-                let mask_alpha =
-                    self.resolve_explicit_mask(dict, width, height).unwrap_or(None);
+                let mask_alpha = self
+                    .resolve_explicit_mask(dict, width, height)
+                    .unwrap_or(None);
                 (None, mask_alpha)
             }
             None => (None, None),
@@ -1870,8 +1888,7 @@ impl<'a> ContentInterpreter<'a> {
         let sample_data = if !is_image_mask {
             if let Some(decode) = dict.get_array(b"Decode") {
                 let n_comps = color_space.num_components() as usize;
-                let decode_vals: Vec<f64> =
-                    decode.iter().filter_map(|o| o.as_f64()).collect();
+                let decode_vals: Vec<f64> = decode.iter().filter_map(|o| o.as_f64()).collect();
                 if decode_vals.len() >= n_comps * 2 {
                     let effective_bpc = if is_jpx { 8 } else { bpc };
                     let max_sample = ((1u32 << effective_bpc) - 1) as f64;
@@ -1944,7 +1961,14 @@ impl<'a> ContentInterpreter<'a> {
         // Handle SMask (soft mask / alpha channel)
         let (sample_data, color_space) = if !is_image_mask {
             if let Some(smask_data) = self.resolve_smask(dict, width, height)? {
-                let rgba = merge_rgb_with_smask(&sample_data, &smask_data, &color_space, width, height, Some(&self.icc_cache));
+                let rgba = merge_rgb_with_smask(
+                    &sample_data,
+                    &smask_data,
+                    &color_space,
+                    width,
+                    height,
+                    Some(&self.icc_cache),
+                );
                 (rgba, ImageColorSpace::PreconvertedRGBA)
             } else {
                 (sample_data, color_space)
@@ -1956,20 +1980,28 @@ impl<'a> ContentInterpreter<'a> {
         // Handle explicit stencil mask (/Mask pointing to 1-bit ImageMask stream).
         // When the mask is larger than the image (MRC scanned PDFs), upscale the
         // image to the mask dimensions so the high-res edge detail is preserved.
-        let (sample_data, color_space, width, height) = if let Some((mask_alpha, mw, mh)) = explicit_mask_data {
-            let (img_data, img_w, img_h) = if mw > width || mh > height {
-                // Upscale image to mask dimensions using bilinear interpolation
-                let upscaled = bilinear_upsample_image(&sample_data, width, height, mw, mh, &color_space);
-                (upscaled, mw, mh)
+        let (sample_data, color_space, width, height) =
+            if let Some((mask_alpha, mw, mh)) = explicit_mask_data {
+                let (img_data, img_w, img_h) = if mw > width || mh > height {
+                    // Upscale image to mask dimensions using bilinear interpolation
+                    let upscaled =
+                        bilinear_upsample_image(&sample_data, width, height, mw, mh, &color_space);
+                    (upscaled, mw, mh)
+                } else {
+                    (sample_data, width, height)
+                };
+                let rgba = merge_rgb_with_smask(
+                    &img_data,
+                    &mask_alpha,
+                    &color_space,
+                    img_w,
+                    img_h,
+                    Some(&self.icc_cache),
+                );
+                (rgba, ImageColorSpace::PreconvertedRGBA, img_w, img_h)
             } else {
-                (sample_data, width, height)
+                (sample_data, color_space, width, height)
             };
-            let rgba =
-                merge_rgb_with_smask(&img_data, &mask_alpha, &color_space, img_w, img_h, Some(&self.icc_cache));
-            (rgba, ImageColorSpace::PreconvertedRGBA, img_w, img_h)
-        } else {
-            (sample_data, color_space, width, height)
-        };
 
         // Apply transfer functions to image pixel data (colorizes grayscale charts etc.)
         let sample_data = if !is_image_mask && self.gstate.transfer.has_functions() {
@@ -2033,22 +2065,23 @@ impl<'a> ContentInterpreter<'a> {
 
         // Apply /Decode array if present (e.g. [1 0] inverts the mask)
         if let Some(decode) = smask_dict.get_array(b"Decode")
-            && decode.len() >= 2 {
-                let d0 = decode[0].as_f64().unwrap_or(0.0);
-                let d1 = decode[1].as_f64().unwrap_or(1.0);
-                if (d0 - 1.0).abs() < 1e-6 && d1.abs() < 1e-6 {
-                    // /Decode [1 0] — invert all bytes
-                    for b in data.iter_mut() {
-                        *b = 255 - *b;
-                    }
-                } else if (d0).abs() > 1e-6 || (d1 - 1.0).abs() > 1e-6 {
-                    // General linear mapping: output = d0 + (d1-d0) * input/255
-                    for b in data.iter_mut() {
-                        let v = d0 + (d1 - d0) * (*b as f64 / 255.0);
-                        *b = (v * 255.0).round().clamp(0.0, 255.0) as u8;
-                    }
+            && decode.len() >= 2
+        {
+            let d0 = decode[0].as_f64().unwrap_or(0.0);
+            let d1 = decode[1].as_f64().unwrap_or(1.0);
+            if (d0 - 1.0).abs() < 1e-6 && d1.abs() < 1e-6 {
+                // /Decode [1 0] — invert all bytes
+                for b in data.iter_mut() {
+                    *b = 255 - *b;
+                }
+            } else if (d0).abs() > 1e-6 || (d1 - 1.0).abs() > 1e-6 {
+                // General linear mapping: output = d0 + (d1-d0) * input/255
+                for b in data.iter_mut() {
+                    let v = d0 + (d1 - d0) * (*b as f64 / 255.0);
+                    *b = (v * 255.0).round().clamp(0.0, 255.0) as u8;
                 }
             }
+        }
 
         // SMask is always DeviceGray, 8bpc — resample if size differs
         if sw == image_w && sh == image_h {
@@ -2060,8 +2093,7 @@ impl<'a> ContentInterpreter<'a> {
                 let sy = (y as u64 * sh as u64 / image_h as u64) as u32;
                 for x in 0..image_w {
                     let sx = (x as u64 * sw as u64 / image_w as u64) as u32;
-                    resampled[(y * image_w + x) as usize] =
-                        data[(sy * sw + sx) as usize];
+                    resampled[(y * image_w + x) as usize] = data[(sy * sw + sx) as usize];
                 }
             }
             Ok(Some(resampled))
@@ -2166,8 +2198,11 @@ impl<'a> ContentInterpreter<'a> {
                             weight += w;
                         }
                     }
-                    resampled[(y * image_w + x) as usize] =
-                        if weight > 0.0 { (sum / weight + 0.5).min(255.0) as u8 } else { 0 };
+                    resampled[(y * image_w + x) as usize] = if weight > 0.0 {
+                        (sum / weight + 0.5).min(255.0) as u8
+                    } else {
+                        0
+                    };
                 }
             }
             Ok(Some((resampled, image_w, image_h)))
@@ -2432,11 +2467,9 @@ impl<'a> ContentInterpreter<'a> {
                             let arr = Self::parse_inline_array(lexer)?;
                             PdfObj::Array(arr)
                         }
-                        Token::DictBegin => {
-                            crate::lexer::parse_dict_body(lexer)
-                                .map(PdfObj::Dict)
-                                .unwrap_or(PdfObj::Null)
-                        }
+                        Token::DictBegin => crate::lexer::parse_dict_body(lexer)
+                            .map(PdfObj::Dict)
+                            .unwrap_or(PdfObj::Null),
                         _ => PdfObj::Null,
                     };
                     dict.insert(expanded_key, val);
@@ -2488,14 +2521,22 @@ impl<'a> ContentInterpreter<'a> {
         // For compressed data (CCITT, Flate, etc.), the compressed data is smaller
         // than the uncompressed size, so we must search from the start of data.
         let start = pos;
-        let search_from = if has_filter { start } else { start + expected_len };
+        let search_from = if has_filter {
+            start
+        } else {
+            start + expected_len
+        };
         // First try: check for "EI" at/near the expected position (some PDFs omit
         // the whitespace before EI that the spec requires).
         let mut end = search_from;
         let mut found_no_ws = false;
         if !has_filter {
             // Check at expected_len-2, expected_len-1, and expected_len for "EI" without leading ws
-            for offset in [expected_len.saturating_sub(2), expected_len.saturating_sub(1), expected_len] {
+            for offset in [
+                expected_len.saturating_sub(2),
+                expected_len.saturating_sub(1),
+                expected_len,
+            ] {
                 let p = start + offset;
                 if p + 1 < data.len()
                     && data[p] == b'E'
@@ -2619,8 +2660,14 @@ impl<'a> ContentInterpreter<'a> {
             ];
             let x_min = corners.iter().map(|c| c.0).fold(f64::INFINITY, f64::min);
             let y_min = corners.iter().map(|c| c.1).fold(f64::INFINITY, f64::min);
-            let x_max = corners.iter().map(|c| c.0).fold(f64::NEG_INFINITY, f64::max);
-            let y_max = corners.iter().map(|c| c.1).fold(f64::NEG_INFINITY, f64::max);
+            let x_max = corners
+                .iter()
+                .map(|c| c.0)
+                .fold(f64::NEG_INFINITY, f64::max);
+            let y_max = corners
+                .iter()
+                .map(|c| c.1)
+                .fold(f64::NEG_INFINITY, f64::max);
 
             self.display_list.push(DisplayElement::SoftMasked {
                 mask: mask_dl,
@@ -2688,7 +2735,6 @@ impl<'a> ContentInterpreter<'a> {
         let gs_dict = gs_obj
             .as_dict()
             .ok_or(PdfError::Other("ExtGState is not a dict".into()))?;
-
 
         // Apply known keys
         if let Some(lw) = gs_dict.get_f64(b"LW") {
@@ -2811,33 +2857,34 @@ impl<'a> ContentInterpreter<'a> {
     /// Flush the current soft mask scope: wrap accumulated elements in SoftMasked.
     fn flush_soft_mask(&mut self) {
         if let Some(scope) = self.soft_mask_scope.take()
-            && self.display_list.len() > scope.start_index {
-                let content = self.display_list.split_off(scope.start_index);
+            && self.display_list.len() > scope.start_index
+        {
+            let content = self.display_list.split_off(scope.start_index);
 
-                // Skip the soft mask if the mask display list is empty, OR if
-                // the mask form's BBox doesn't overlap with the content's clip
-                // region. When BC=[0,0,0], a non-overlapping mask produces zero
-                // luminosity everywhere in the content area, making it invisible.
-                let skip = scope.mask.mask_list.is_empty()
-                    || (scope.mask.backdrop_color == Some([0.0, 0.0, 0.0])
-                        && !self.mask_overlaps_clip(&scope.mask.bbox));
-                if skip {
-                    for elem in content.into_elements() {
-                        self.display_list.push(elem);
-                    }
-                } else {
-                    self.display_list.push(DisplayElement::SoftMasked {
-                        mask: scope.mask.mask_list,
-                        content,
-                        params: SoftMaskParams {
-                            subtype: scope.mask.subtype,
-                            bbox: scope.mask.bbox,
-                            backdrop_color: scope.mask.backdrop_color,
-                            transfer_invert: scope.mask.transfer_invert,
-                        },
-                    });
+            // Skip the soft mask if the mask display list is empty, OR if
+            // the mask form's BBox doesn't overlap with the content's clip
+            // region. When BC=[0,0,0], a non-overlapping mask produces zero
+            // luminosity everywhere in the content area, making it invisible.
+            let skip = scope.mask.mask_list.is_empty()
+                || (scope.mask.backdrop_color == Some([0.0, 0.0, 0.0])
+                    && !self.mask_overlaps_clip(&scope.mask.bbox));
+            if skip {
+                for elem in content.into_elements() {
+                    self.display_list.push(elem);
                 }
+            } else {
+                self.display_list.push(DisplayElement::SoftMasked {
+                    mask: scope.mask.mask_list,
+                    content,
+                    params: SoftMaskParams {
+                        subtype: scope.mask.subtype,
+                        bbox: scope.mask.bbox,
+                        backdrop_color: scope.mask.backdrop_color,
+                        transfer_invert: scope.mask.transfer_invert,
+                    },
+                });
             }
+        }
     }
 
     /// Check if a mask bbox (in device space) overlaps with the current clip region.
@@ -2879,10 +2926,7 @@ impl<'a> ContentInterpreter<'a> {
     }
 
     /// Resolve a soft mask dictionary into a SoftMask.
-    fn resolve_soft_mask(
-        &mut self,
-        dict: &PdfDict,
-    ) -> Result<graphics_state::SoftMask, PdfError> {
+    fn resolve_soft_mask(&mut self, dict: &PdfDict) -> Result<graphics_state::SoftMask, PdfError> {
         // Parse /S (subtype): Alpha or Luminosity (default Luminosity)
         let subtype = match dict.get_name(b"S") {
             Some(b"Alpha") => SoftMaskSubtype::Alpha,
@@ -3036,7 +3080,9 @@ impl<'a> ContentInterpreter<'a> {
         // which inverts the mask values. Detect this by reading the stream content.
         let transfer_invert = if let Some(tr_obj) = dict.get(b"TR") {
             if let Ok(tr_data) = self.resolver.stream_data_from_obj(tr_obj) {
-                let trimmed: Vec<u8> = tr_data.iter().copied()
+                let trimmed: Vec<u8> = tr_data
+                    .iter()
+                    .copied()
                     .filter(|b| !b.is_ascii_whitespace())
                     .collect();
                 let s = String::from_utf8_lossy(&trimmed);
@@ -3160,7 +3206,10 @@ impl<'a> ContentInterpreter<'a> {
             .resolve_resource_subdict(b"Pattern")
             .ok_or(PdfError::Other("no Pattern resources".into()))?;
         let pat_ref = pattern_dict.get(&name).ok_or_else(|| {
-            PdfError::Other(format!("Pattern /{} not found", String::from_utf8_lossy(&name)))
+            PdfError::Other(format!(
+                "Pattern /{} not found",
+                String::from_utf8_lossy(&name)
+            ))
         })?;
         let pat_obj = self.resolver.deref(pat_ref)?;
         let pat_dict = pat_obj
@@ -3171,9 +3220,7 @@ impl<'a> ContentInterpreter<'a> {
         if pattern_type == 2 {
             let shading_dl = self.resolve_shading_pattern(pat_dict)?;
             self.gstate.fill_pattern = None;
-            self.gstate.fill_shading_pattern = Some(Box::new(
-                ShadingPatternDL(shading_dl),
-            ));
+            self.gstate.fill_shading_pattern = Some(Box::new(ShadingPatternDL(shading_dl)));
         } else {
             let pattern = self.resolve_pattern(&name)?;
             self.gstate.fill_shading_pattern = None;
@@ -3209,9 +3256,7 @@ impl<'a> ContentInterpreter<'a> {
         if pattern_type == 2 {
             let shading_dl = self.resolve_shading_pattern(pat_dict)?;
             self.gstate.stroke_pattern = None;
-            self.gstate.stroke_shading_pattern = Some(Box::new(
-                ShadingPatternDL(shading_dl),
-            ));
+            self.gstate.stroke_shading_pattern = Some(Box::new(ShadingPatternDL(shading_dl)));
         } else {
             let pattern = self.resolve_pattern(&name)?;
             self.gstate.stroke_shading_pattern = None;
@@ -3328,8 +3373,7 @@ impl<'a> ContentInterpreter<'a> {
         // page CTM). When the pattern matrix flips Y (negative d), the tile
         // content is designed for flipped Y. Since we interpret with identity
         // CTM, the renderer must flip the tile vertically.
-        let flip_y = pattern_matrix.d < 0.0
-            || (pattern_matrix.d == 0.0 && pattern_matrix.b < 0.0);
+        let flip_y = pattern_matrix.d < 0.0 || (pattern_matrix.d == 0.0 && pattern_matrix.b < 0.0);
 
         Ok(TilingPattern {
             tile: tile_display_list,
@@ -3346,10 +3390,7 @@ impl<'a> ContentInterpreter<'a> {
     /// Resolve a PatternType 2 (shading pattern) by rendering the shading into
     /// a display list. The caller stores this and emits it at fill time,
     /// clipped to the fill path.
-    fn resolve_shading_pattern(
-        &mut self,
-        pat_dict: &PdfDict,
-    ) -> Result<DisplayList, PdfError> {
+    fn resolve_shading_pattern(&mut self, pat_dict: &PdfDict) -> Result<DisplayList, PdfError> {
         let sh_ref = pat_dict
             .get(b"Shading")
             .ok_or(PdfError::Other("shading pattern missing /Shading".into()))?;
@@ -3407,9 +3448,15 @@ fn path_device_bbox(path: &PsPath) -> [f64; 4] {
     };
     for seg in &path.segments {
         match seg {
-            PathSegment::MoveTo(x, y)
-            | PathSegment::LineTo(x, y) => update(*x, *y),
-            PathSegment::CurveTo { x1, y1, x2, y2, x3, y3 } => {
+            PathSegment::MoveTo(x, y) | PathSegment::LineTo(x, y) => update(*x, *y),
+            PathSegment::CurveTo {
+                x1,
+                y1,
+                x2,
+                y2,
+                x3,
+                y3,
+            } => {
                 update(*x1, *y1);
                 update(*x2, *y2);
                 update(*x3, *y3);
@@ -3549,7 +3596,12 @@ fn merge_rgb_with_smask(
     }
 
     // For Separation/DeviceN, convert through tint table to alternate space first
-    if let ImageColorSpace::Separation { alt_space, tint_table, .. } = color_space {
+    if let ImageColorSpace::Separation {
+        alt_space,
+        tint_table,
+        ..
+    } = color_space
+    {
         let n_pixels = (width * height) as usize;
         let no = tint_table.num_outputs as usize;
         let mut expanded = vec![0u8; n_pixels * no];
@@ -3563,7 +3615,12 @@ fn merge_rgb_with_smask(
         }
         return merge_rgb_with_smask(&expanded, smask_data, alt_space, width, height, icc);
     }
-    if let ImageColorSpace::DeviceN { alt_space, tint_table, .. } = color_space {
+    if let ImageColorSpace::DeviceN {
+        alt_space,
+        tint_table,
+        ..
+    } = color_space
+    {
         let ni = tint_table.num_inputs as usize;
         let no = tint_table.num_outputs as usize;
         let n_pixels = (width * height) as usize;

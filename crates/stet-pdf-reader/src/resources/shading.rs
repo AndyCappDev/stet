@@ -5,8 +5,8 @@
 //! Shading (sh operator) → DisplayElement conversion.
 
 use crate::content::color_space::{
-    components_to_device_color_icc, painted_channels_for_cs, resolve_color_space_obj,
-    ResolvedColorSpace,
+    ResolvedColorSpace, components_to_device_color_icc, painted_channels_for_cs,
+    resolve_color_space_obj,
 };
 use crate::content::graphics_state::PdfGraphicsState;
 use crate::error::PdfError;
@@ -14,12 +14,12 @@ use crate::objects::{PdfDict, PdfObj};
 use crate::resolver::Resolver;
 use crate::resources::function::PdfFunction;
 
+use stet_fonts::geometry::Matrix;
 use stet_graphics::device::{
     AxialShadingParams, ColorStop, ImageColorSpace, ImageParams, MeshShadingParams,
     PatchShadingParams, RadialShadingParams, ShadingColorSpace,
 };
 use stet_graphics::display_list::{DisplayElement, DisplayList};
-use stet_fonts::geometry::Matrix;
 use stet_graphics::icc::IccCache;
 
 /// Handle the `sh` operator: parse shading dict and emit display element.
@@ -44,7 +44,14 @@ pub fn handle_shading(
     let resolved_cs = resolve_shading_resolved_cs(dict, resolver);
 
     match shading_type {
-        1 => handle_function_based(dict, gstate, resolver, display_list, &resolved_cs, icc_cache),
+        1 => handle_function_based(
+            dict,
+            gstate,
+            resolver,
+            display_list,
+            &resolved_cs,
+            icc_cache,
+        ),
         2 => handle_axial(
             dict,
             gstate,
@@ -132,8 +139,7 @@ fn handle_function_based(
             let x = domain[0] + (col as f64 + 0.5) / width as f64 * (domain[1] - domain[0]);
             let y = domain[3] - (row as f64 + 0.5) / height as f64 * (domain[3] - domain[2]);
             let components = function.evaluate(&[x, y]);
-            let color =
-                components_to_device_color_icc(resolved_cs, &components, Some(icc_cache));
+            let color = components_to_device_color_icc(resolved_cs, &components, Some(icc_cache));
             let idx = ((row * width + col) * 4) as usize;
             rgba[idx] = (color.r * 255.0 + 0.5) as u8;
             rgba[idx + 1] = (color.g * 255.0 + 0.5) as u8;
@@ -305,7 +311,9 @@ fn handle_mesh(
     let data = resolver.stream_data_from_obj(shading_obj)?;
 
     let mut triangles = match shading_type {
-        4 => stet_graphics::mesh_shading::parse_type4_mesh(&data, bpc, bpco, bpfl, &decode, n_comps),
+        4 => {
+            stet_graphics::mesh_shading::parse_type4_mesh(&data, bpc, bpco, bpfl, &decode, n_comps)
+        }
         5 => {
             let vpr = dict.get_int(b"VerticesPerRow").unwrap_or(2) as usize;
             stet_graphics::mesh_shading::parse_type5_mesh(&data, bpc, bpco, &decode, n_comps, vpr)
@@ -331,7 +339,8 @@ fn handle_mesh(
                 let t = i as f64 / (lut_size - 1) as f64;
                 let input = d_min + t * (d_max - d_min);
                 let components = func.evaluate(&[input]);
-                let color = components_to_device_color_icc(resolved_cs, &components, Some(icc_cache));
+                let color =
+                    components_to_device_color_icc(resolved_cs, &components, Some(icc_cache));
                 lut.push(color);
             }
 
@@ -364,7 +373,8 @@ fn handle_mesh(
                 for v in [&mut t.v0, &mut t.v1, &mut t.v2] {
                     let input = d_min + v.raw_components[0] * (d_max - d_min);
                     let expanded = func.evaluate(&[input]);
-                    let color = components_to_device_color_icc(resolved_cs, &expanded, Some(icc_cache));
+                    let color =
+                        components_to_device_color_icc(resolved_cs, &expanded, Some(icc_cache));
                     v.color = color;
                 }
             }
@@ -380,9 +390,12 @@ fn handle_mesh(
     if color_lut.is_none() {
         // Convert vertex colors through ICC profile (non-LUT path)
         for t in &mut triangles {
-            t.v0.color = components_to_device_color_icc(resolved_cs, &t.v0.raw_components, Some(icc_cache));
-            t.v1.color = components_to_device_color_icc(resolved_cs, &t.v1.raw_components, Some(icc_cache));
-            t.v2.color = components_to_device_color_icc(resolved_cs, &t.v2.raw_components, Some(icc_cache));
+            t.v0.color =
+                components_to_device_color_icc(resolved_cs, &t.v0.raw_components, Some(icc_cache));
+            t.v1.color =
+                components_to_device_color_icc(resolved_cs, &t.v1.raw_components, Some(icc_cache));
+            t.v2.color =
+                components_to_device_color_icc(resolved_cs, &t.v2.raw_components, Some(icc_cache));
         }
     }
 
@@ -454,8 +467,12 @@ fn handle_patches(
     let data = resolver.stream_data_from_obj(shading_obj)?;
 
     let mut patches = match shading_type {
-        6 => stet_graphics::mesh_shading::parse_type6_patches(&data, bpc, bpco, bpfl, &decode, n_comps),
-        7 => stet_graphics::mesh_shading::parse_type7_patches(&data, bpc, bpco, bpfl, &decode, n_comps),
+        6 => stet_graphics::mesh_shading::parse_type6_patches(
+            &data, bpc, bpco, bpfl, &decode, n_comps,
+        ),
+        7 => stet_graphics::mesh_shading::parse_type7_patches(
+            &data, bpc, bpco, bpfl, &decode, n_comps,
+        ),
         _ => return Ok(()),
     };
 
@@ -471,7 +488,8 @@ fn handle_patches(
     // Convert patch corner colors through ICC profile
     for p in &mut patches {
         for i in 0..4 {
-            p.colors[i] = components_to_device_color_icc(resolved_cs, &p.raw_colors[i], Some(icc_cache));
+            p.colors[i] =
+                components_to_device_color_icc(resolved_cs, &p.raw_colors[i], Some(icc_cache));
         }
     }
 
@@ -554,8 +572,7 @@ fn sample_function_to_stops_icc(
         let t = i as f64 / (n_samples - 1) as f64;
         let input = d_min + t * (d_max - d_min);
         let components = function.evaluate(&[input]);
-        let color =
-            components_to_device_color_icc(resolved_cs, &components, Some(icc_cache));
+        let color = components_to_device_color_icc(resolved_cs, &components, Some(icc_cache));
 
         // For DeviceN/Separation with CMYK alternate, store the tint-transformed
         // 4-component CMYK values so the renderer can populate the CMYK tracking buffer.
@@ -631,9 +648,10 @@ fn parse_extend(dict: &PdfDict) -> (bool, bool) {
 /// Resolve the shading's /ColorSpace to a ResolvedColorSpace.
 fn resolve_shading_resolved_cs(dict: &PdfDict, resolver: &Resolver) -> ResolvedColorSpace {
     if let Some(cs_obj) = dict.get(b"ColorSpace")
-        && let Ok(resolved) = resolve_color_space_obj(cs_obj, resolver) {
-            return resolved;
-        }
+        && let Ok(resolved) = resolve_color_space_obj(cs_obj, resolver)
+    {
+        return resolved;
+    }
     ResolvedColorSpace::DeviceRGB
 }
 

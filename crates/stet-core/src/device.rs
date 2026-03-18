@@ -10,11 +10,11 @@ use crate::graphics_state::PsPath;
 // ── Re-exports from stet-graphics ───────────────────────────────────────────
 // These types used to be defined here. Re-export for backward compatibility.
 pub use stet_graphics::device::{
-    AxialShadingParams, BgUcrState, ClipParams, ColorStop, FillParams, HalftoneScreen,
-    HalftoneState, ImageColorSpace, ImageParams, MeshShadingParams, PatchShadingParams,
-    PatternFillParams, RadialShadingParams, ShadingColorSpace, ShadingPatch, ShadingTriangle,
-    ShadingVertex, SimpleColorSpace, SpotColor, SpotColorSpace, StrokeParams, TextParams,
-    TintLookupTable, TransferState, TransferTable, CMYK_ALL, CMYK_C, CMYK_K, CMYK_M, CMYK_Y,
+    AxialShadingParams, BgUcrState, CMYK_ALL, CMYK_C, CMYK_K, CMYK_M, CMYK_Y, ClipParams,
+    ColorStop, FillParams, HalftoneScreen, HalftoneState, ImageColorSpace, ImageParams,
+    MeshShadingParams, PatchShadingParams, PatternFillParams, RadialShadingParams,
+    ShadingColorSpace, ShadingPatch, ShadingTriangle, ShadingVertex, SimpleColorSpace, SpotColor,
+    SpotColorSpace, StrokeParams, TextParams, TintLookupTable, TransferState, TransferTable,
     cmyk_channel_for_name,
 };
 pub use stet_graphics::device::{PageSink, PageSinkFactory};
@@ -68,11 +68,7 @@ pub trait OutputDevice {
     fn page_size(&self) -> (u32, u32);
 
     /// Replay a display list and write output in one step.
-    fn replay_and_show(
-        &mut self,
-        list: DisplayList,
-        output_path: &str,
-    ) -> Result<(), String> {
+    fn replay_and_show(&mut self, list: DisplayList, output_path: &str) -> Result<(), String> {
         for element in list.elements() {
             match element {
                 DisplayElement::Fill { path, params } => self.fill_path(path, params),

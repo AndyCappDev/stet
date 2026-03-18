@@ -161,16 +161,48 @@ fn main() {
 
     match device.as_str() {
         "png" => {
-            run_png_mode(dpi, file_args, no_icc, no_aa, output_profile_path, page_filter, overprint);
+            run_png_mode(
+                dpi,
+                file_args,
+                no_icc,
+                no_aa,
+                output_profile_path,
+                page_filter,
+                overprint,
+            );
         }
         "pdf" => {
-            run_pdf_mode(dpi, file_args, no_icc, no_aa, output_profile_path, page_filter, overprint);
+            run_pdf_mode(
+                dpi,
+                file_args,
+                no_icc,
+                no_aa,
+                output_profile_path,
+                page_filter,
+                overprint,
+            );
         }
         "null" => {
-            run_null_mode(dpi, file_args, no_icc, no_aa, output_profile_path, page_filter, overprint);
+            run_null_mode(
+                dpi,
+                file_args,
+                no_icc,
+                no_aa,
+                output_profile_path,
+                page_filter,
+                overprint,
+            );
         }
         #[cfg(feature = "viewer")]
-        "viewer" => run_viewer_mode(dpi, file_args, no_icc, no_aa, output_profile_path, page_filter, overprint),
+        "viewer" => run_viewer_mode(
+            dpi,
+            file_args,
+            no_icc,
+            no_aa,
+            output_profile_path,
+            page_filter,
+            overprint,
+        ),
         #[cfg(not(feature = "viewer"))]
         "viewer" => {
             eprintln!("Error: viewer not available (built without 'viewer' feature)");
@@ -324,7 +356,14 @@ fn run_viewer_mode(
 
     // PDF files: use fast path (no PS interpreter needed)
     if file_args.iter().all(|f| is_pdf_file(f)) {
-        run_pdf_input_viewer(dpi_override, &file_args, &page_filter, system_cmyk_bytes, no_aa, overprint);
+        run_pdf_input_viewer(
+            dpi_override,
+            &file_args,
+            &page_filter,
+            system_cmyk_bytes,
+            no_aa,
+            overprint,
+        );
         return;
     }
 
@@ -1088,7 +1127,14 @@ fn render_pdf_page_to_rgba(
     let pixel_w = (page_w * scale).round() as u32;
     let pixel_h = (page_h * scale).round() as u32;
     let display_list = doc.render_page(page, dpi)?;
-    let rgba = stet_render::render_to_rgba(&display_list, pixel_w, pixel_h, dpi, Some(doc.icc_cache()), no_aa);
+    let rgba = stet_render::render_to_rgba(
+        &display_list,
+        pixel_w,
+        pixel_h,
+        dpi,
+        Some(doc.icc_cache()),
+        no_aa,
+    );
     Ok((rgba, pixel_w, pixel_h))
 }
 
@@ -1233,7 +1279,8 @@ fn run_pdf_input_viewer(
         for (job_idx, filename) in file_args_owned.iter().enumerate() {
             if job_idx > 0 {
                 // Signal new job
-                let _ = dl_sender.send((stet_graphics::display_list::DisplayList::new(), 0.0, 0, 0));
+                let _ =
+                    dl_sender.send((stet_graphics::display_list::DisplayList::new(), 0.0, 0, 0));
             }
 
             let data = match std::fs::read(filename) {
@@ -1280,7 +1327,8 @@ fn run_pdf_input_viewer(
 
             // Signal job done and wait for advance between jobs
             if job_idx + 1 < file_args_owned.len() {
-                let _ = dl_sender.send((stet_graphics::display_list::DisplayList::new(), -1.0, 0, 0));
+                let _ =
+                    dl_sender.send((stet_graphics::display_list::DisplayList::new(), -1.0, 0, 0));
                 let _ = advance_rx.recv();
             }
         }

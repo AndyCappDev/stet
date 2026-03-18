@@ -76,9 +76,10 @@ pub fn op_filter(ctx: &mut Context) -> Result<(), PsError> {
         // This will return error if params are invalid, before any pops
         extract_dct_encode_params(ctx, de)?;
     } else if filter_name == b"DCTDecode"
-        && let Some(de) = dict_entity {
-            validate_dct_decode_params(ctx, de)?;
-        }
+        && let Some(de) = dict_entity
+    {
+        validate_dct_decode_params(ctx, de)?;
+    }
 
     // Validate filter name is known BEFORE popping operands
     if !is_known_filter_name(&filter_name) {

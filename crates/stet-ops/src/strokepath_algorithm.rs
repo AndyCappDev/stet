@@ -1504,20 +1504,20 @@ fn assemble_open_outline(
         if !is_outside0
             && let Some(trim_pt0) =
                 compute_inner_join_point(end0, prev_tang0, next_start0, next_tang0, half_width)
-            {
-                let fwd_dir = Point::new(
-                    left_offsets[0].2.x - left_offsets[0].1.x,
-                    left_offsets[0].2.y - left_offsets[0].1.y,
-                );
-                let trim_from_start = Point::new(
-                    trim_pt0.x - left_offsets[0].1.x,
-                    trim_pt0.y - left_offsets[0].1.y,
-                );
-                if fwd_dir.dot(trim_from_start) < 0.0 {
-                    degenerate_first_left = true;
-                    degenerate_first_trim_pt = Some(trim_pt0);
-                }
+        {
+            let fwd_dir = Point::new(
+                left_offsets[0].2.x - left_offsets[0].1.x,
+                left_offsets[0].2.y - left_offsets[0].1.y,
+            );
+            let trim_from_start = Point::new(
+                trim_pt0.x - left_offsets[0].1.x,
+                trim_pt0.y - left_offsets[0].1.y,
+            );
+            if fwd_dir.dot(trim_from_start) < 0.0 {
+                degenerate_first_left = true;
+                degenerate_first_trim_pt = Some(trim_pt0);
             }
+        }
     }
 
     // --- Left side (forward direction) ---
@@ -1575,16 +1575,15 @@ fn assemble_open_outline(
                     } else {
                         0.0
                     };
-                    if t_param > 1.0
-                        && line_cap == 1 {
-                            trim_outline_end(&mut outline, tp);
-                            skip_left_indices.insert(i + 1);
-                            if i + 1 == left_offsets.len() - 1 {
-                                degenerate_last_left = true;
-                                _degenerate_last_left_trim_pt = Some(tp);
-                            }
-                            continue;
+                    if t_param > 1.0 && line_cap == 1 {
+                        trim_outline_end(&mut outline, tp);
+                        skip_left_indices.insert(i + 1);
+                        if i + 1 == left_offsets.len() - 1 {
+                            degenerate_last_left = true;
+                            _degenerate_last_left_trim_pt = Some(tp);
                         }
+                        continue;
+                    }
                     trim_outline_end(&mut outline, tp);
                     continue;
                 } else {
@@ -1637,20 +1636,21 @@ fn assemble_open_outline(
                 next_right_end,
                 next_tangent_r,
                 half_width,
-            ) {
-                let orig_dir = Point::new(
-                    right_offsets[last_ri].1.x - right_offsets[last_ri].2.x,
-                    right_offsets[last_ri].1.y - right_offsets[last_ri].2.y,
-                );
-                let trim_dir = Point::new(
-                    tp.x - right_offsets[last_ri].2.x,
-                    tp.y - right_offsets[last_ri].2.y,
-                );
-                if orig_dir.dot(trim_dir) < 0.0 {
-                    degenerate_last_right = true;
-                    degenerate_trim_pt = Some(tp);
-                }
+            )
+        {
+            let orig_dir = Point::new(
+                right_offsets[last_ri].1.x - right_offsets[last_ri].2.x,
+                right_offsets[last_ri].1.y - right_offsets[last_ri].2.y,
+            );
+            let trim_dir = Point::new(
+                tp.x - right_offsets[last_ri].2.x,
+                tp.y - right_offsets[last_ri].2.y,
+            );
+            if orig_dir.dot(trim_dir) < 0.0 {
+                degenerate_last_right = true;
+                degenerate_trim_pt = Some(tp);
             }
+        }
     }
 
     if degenerate_last_left && line_cap == 1 {
@@ -1783,17 +1783,17 @@ fn assemble_open_outline(
                     next_right_end,
                     next_tangent_chk,
                     half_width,
-                ) {
-                    let orig_dir = Point::new(
-                        right_offsets[i].1.x - right_offsets[i].2.x,
-                        right_offsets[i].1.y - right_offsets[i].2.y,
-                    );
-                    let trim_dir =
-                        Point::new(tp.x - right_offsets[i].2.x, tp.y - right_offsets[i].2.y);
-                    if orig_dir.dot(trim_dir) < 0.0 {
-                        skip_reversed = true;
-                    }
+                )
+            {
+                let orig_dir = Point::new(
+                    right_offsets[i].1.x - right_offsets[i].2.x,
+                    right_offsets[i].1.y - right_offsets[i].2.y,
+                );
+                let trim_dir = Point::new(tp.x - right_offsets[i].2.x, tp.y - right_offsets[i].2.y);
+                if orig_dir.dot(trim_dir) < 0.0 {
+                    skip_reversed = true;
                 }
+            }
         }
 
         if !skip_reversed {
@@ -1961,40 +1961,41 @@ pub fn snap_path_to_pixels(algo_path: &mut Path, half_width: f64) {
         let mut i = 0;
         while i < sp.len() {
             if let PathElement::LineTo(lx, ly) = sp[i]
-                && i > 0 {
-                    let (px, py) = match &sp[i - 1] {
-                        PathElement::MoveTo(x, y) | PathElement::LineTo(x, y) => (*x, *y),
-                        _ => {
-                            i += 1;
-                            continue;
-                        }
-                    };
-
-                    let dx = (lx - px).abs();
-                    let dy = (ly - py).abs();
-
-                    if dy < 0.01 && dx > 0.01 {
-                        // Horizontal line — snap y
-                        let snapped_y = snap_coord(py, half_width);
-                        match &mut sp[i - 1] {
-                            PathElement::MoveTo(_, y) | PathElement::LineTo(_, y) => {
-                                *y = snapped_y;
-                            }
-                            _ => {}
-                        }
-                        sp[i] = PathElement::LineTo(lx, snapped_y);
-                    } else if dx < 0.01 && dy > 0.01 {
-                        // Vertical line — snap x
-                        let snapped_x = snap_coord(px, half_width);
-                        match &mut sp[i - 1] {
-                            PathElement::MoveTo(x, _) | PathElement::LineTo(x, _) => {
-                                *x = snapped_x;
-                            }
-                            _ => {}
-                        }
-                        sp[i] = PathElement::LineTo(snapped_x, ly);
+                && i > 0
+            {
+                let (px, py) = match &sp[i - 1] {
+                    PathElement::MoveTo(x, y) | PathElement::LineTo(x, y) => (*x, *y),
+                    _ => {
+                        i += 1;
+                        continue;
                     }
+                };
+
+                let dx = (lx - px).abs();
+                let dy = (ly - py).abs();
+
+                if dy < 0.01 && dx > 0.01 {
+                    // Horizontal line — snap y
+                    let snapped_y = snap_coord(py, half_width);
+                    match &mut sp[i - 1] {
+                        PathElement::MoveTo(_, y) | PathElement::LineTo(_, y) => {
+                            *y = snapped_y;
+                        }
+                        _ => {}
+                    }
+                    sp[i] = PathElement::LineTo(lx, snapped_y);
+                } else if dx < 0.01 && dy > 0.01 {
+                    // Vertical line — snap x
+                    let snapped_x = snap_coord(px, half_width);
+                    match &mut sp[i - 1] {
+                        PathElement::MoveTo(x, _) | PathElement::LineTo(x, _) => {
+                            *x = snapped_x;
+                        }
+                        _ => {}
+                    }
+                    sp[i] = PathElement::LineTo(snapped_x, ly);
                 }
+            }
             i += 1;
         }
     }

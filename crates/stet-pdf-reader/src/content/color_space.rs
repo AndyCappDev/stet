@@ -12,8 +12,8 @@ use crate::resolver::Resolver;
 use crate::resources::function::PdfFunction;
 
 use super::graphics_state::ColorSpaceRef;
-use stet_graphics::device::{ImageColorSpace, TintLookupTable};
 use stet_graphics::color::{CieAParams, CieAbcParams, DeviceColor};
+use stet_graphics::device::{ImageColorSpace, TintLookupTable};
 use stet_graphics::icc::{IccCache, ProfileHash};
 
 /// Resolved color space with enough info to convert color values.
@@ -85,14 +85,14 @@ impl ResolvedColorSpace {
 /// - ICCBased with 4 components: treated as DeviceCMYK
 /// - Other (Gray/RGB/CalGray/CalRGB/Lab/Pattern): 0 (no CMYK overprint)
 pub fn painted_channels_for_cs(cs: &ResolvedColorSpace) -> u8 {
-    use stet_graphics::device::{cmyk_channel_for_name, CMYK_ALL};
+    use stet_graphics::device::{CMYK_ALL, cmyk_channel_for_name};
     match cs {
         ResolvedColorSpace::DeviceCMYK => CMYK_ALL,
         ResolvedColorSpace::ICCBased { n: 4, .. } => CMYK_ALL,
         ResolvedColorSpace::Separation { name, .. } => cmyk_channel_for_name(name),
-        ResolvedColorSpace::DeviceN { names, .. } => {
-            names.iter().fold(0u8, |acc, n| acc | cmyk_channel_for_name(n))
-        }
+        ResolvedColorSpace::DeviceN { names, .. } => names
+            .iter()
+            .fold(0u8, |acc, n| acc | cmyk_channel_for_name(n)),
         ResolvedColorSpace::Indexed { base, .. } => painted_channels_for_cs(base),
         _ => 0,
     }
@@ -128,13 +128,11 @@ fn resolve_named_color_space(
     }
 
     // Look up in resources ColorSpace dict (may be an indirect reference)
-    let cs_dict = resources
-        .get(b"ColorSpace")
-        .and_then(|obj| match obj {
-            PdfObj::Dict(_) => Some(obj.as_dict().unwrap().clone()),
-            PdfObj::Ref(n, g) => resolver.resolve(*n, *g).ok()?.as_dict().cloned(),
-            _ => None,
-        });
+    let cs_dict = resources.get(b"ColorSpace").and_then(|obj| match obj {
+        PdfObj::Dict(_) => Some(obj.as_dict().unwrap().clone()),
+        PdfObj::Ref(n, g) => resolver.resolve(*n, *g).ok()?.as_dict().cloned(),
+        _ => None,
+    });
     let cs_obj = cs_dict.as_ref().and_then(|d| d.get(name)).ok_or_else(|| {
         PdfError::Other(format!(
             "color space /{} not found in resources",
@@ -291,10 +289,7 @@ fn resolve_separation(
     })
 }
 
-fn resolve_devicen(
-    args: &[PdfObj],
-    resolver: &Resolver,
-) -> Result<ResolvedColorSpace, PdfError> {
+fn resolve_devicen(args: &[PdfObj], resolver: &Resolver) -> Result<ResolvedColorSpace, PdfError> {
     // DeviceN array: [names alternateSpace tintTransform]
     if args.len() < 2 {
         return Err(PdfError::Other("DeviceN needs at least 2 args".into()));
@@ -320,10 +315,7 @@ fn resolve_devicen(
     })
 }
 
-fn resolve_cal_gray(
-    args: &[PdfObj],
-    resolver: &Resolver,
-) -> Result<ResolvedColorSpace, PdfError> {
+fn resolve_cal_gray(args: &[PdfObj], resolver: &Resolver) -> Result<ResolvedColorSpace, PdfError> {
     let dict = if !args.is_empty() {
         let obj = resolver.deref(&args[0])?;
         obj.as_dict().cloned()
@@ -333,9 +325,7 @@ fn resolve_cal_gray(
     let dict = dict.as_ref();
 
     let white_point = parse_triple(dict, b"WhitePoint").unwrap_or([0.9505, 1.0, 1.089]);
-    let gamma = dict
-        .and_then(|d| d.get_f64(b"Gamma"))
-        .unwrap_or(1.0);
+    let gamma = dict.and_then(|d| d.get_f64(b"Gamma")).unwrap_or(1.0);
 
     // CalGray maps to CIEBasedA:
     // DecodeA = x^gamma, MatrixA = WhitePoint (so gray=1 → white point XYZ)
@@ -355,10 +345,7 @@ fn resolve_cal_gray(
     Ok(ResolvedColorSpace::CalGray { params })
 }
 
-fn resolve_cal_rgb(
-    args: &[PdfObj],
-    resolver: &Resolver,
-) -> Result<ResolvedColorSpace, PdfError> {
+fn resolve_cal_rgb(args: &[PdfObj], resolver: &Resolver) -> Result<ResolvedColorSpace, PdfError> {
     let dict = if !args.is_empty() {
         let obj = resolver.deref(&args[0])?;
         obj.as_dict().cloned()
@@ -386,9 +373,15 @@ fn resolve_cal_rgb(
 
     let decode_abc = if gamma.iter().any(|&g| (g - 1.0).abs() > 1e-6) {
         Some([
-            (0..256).map(|i| (i as f64 / 255.0).powf(gamma[0])).collect(),
-            (0..256).map(|i| (i as f64 / 255.0).powf(gamma[1])).collect(),
-            (0..256).map(|i| (i as f64 / 255.0).powf(gamma[2])).collect(),
+            (0..256)
+                .map(|i| (i as f64 / 255.0).powf(gamma[0]))
+                .collect(),
+            (0..256)
+                .map(|i| (i as f64 / 255.0).powf(gamma[1]))
+                .collect(),
+            (0..256)
+                .map(|i| (i as f64 / 255.0).powf(gamma[2]))
+                .collect(),
         ])
     } else {
         None
@@ -404,10 +397,7 @@ fn resolve_cal_rgb(
     Ok(ResolvedColorSpace::CalRGB { params })
 }
 
-fn resolve_lab(
-    args: &[PdfObj],
-    resolver: &Resolver,
-) -> Result<ResolvedColorSpace, PdfError> {
+fn resolve_lab(args: &[PdfObj], resolver: &Resolver) -> Result<ResolvedColorSpace, PdfError> {
     let dict = if !args.is_empty() {
         let obj = resolver.deref(&args[0])?;
         obj.as_dict().cloned()
@@ -484,24 +474,25 @@ pub fn components_to_device_color_icc(
             // Try ICC profile conversion first
             if let Some(cache) = icc_cache.as_deref_mut()
                 && let Some(data) = profile_data
-                    && let Some(hash) = cache.register_profile(data)
-                        && let Some((r, g, b)) = cache.convert_color(&hash, components) {
-                            // For 4-component (CMYK) ICC profiles, preserve the
-                            // source CMYK values in native_cmyk for overprint simulation.
-                            if *n == 4 {
-                                let c = components.first().copied().unwrap_or(0.0);
-                                let m = components.get(1).copied().unwrap_or(0.0);
-                                let y = components.get(2).copied().unwrap_or(0.0);
-                                let k = components.get(3).copied().unwrap_or(0.0);
-                                return DeviceColor {
-                                    r,
-                                    g,
-                                    b,
-                                    native_cmyk: Some((c, m, y, k)),
-                                };
-                            }
-                            return DeviceColor::from_rgb(r, g, b);
-                        }
+                && let Some(hash) = cache.register_profile(data)
+                && let Some((r, g, b)) = cache.convert_color(&hash, components)
+            {
+                // For 4-component (CMYK) ICC profiles, preserve the
+                // source CMYK values in native_cmyk for overprint simulation.
+                if *n == 4 {
+                    let c = components.first().copied().unwrap_or(0.0);
+                    let m = components.get(1).copied().unwrap_or(0.0);
+                    let y = components.get(2).copied().unwrap_or(0.0);
+                    let k = components.get(3).copied().unwrap_or(0.0);
+                    return DeviceColor {
+                        r,
+                        g,
+                        b,
+                        native_cmyk: Some((c, m, y, k)),
+                    };
+                }
+                return DeviceColor::from_rgb(r, g, b);
+            }
             // Fall back to alternate color space if available (handles Lab, XYZ, etc.)
             if let Some(alt) = alternate {
                 return components_to_device_color_icc(alt, components, icc_cache);
@@ -553,9 +544,7 @@ pub fn components_to_device_color_icc(
                 // Fallback without tint function
                 match alt.as_ref() {
                     ResolvedColorSpace::DeviceGray => DeviceColor::from_gray(1.0 - tint),
-                    ResolvedColorSpace::DeviceCMYK => {
-                        DeviceColor::from_cmyk(0.0, 0.0, 0.0, tint)
-                    }
+                    ResolvedColorSpace::DeviceCMYK => DeviceColor::from_cmyk(0.0, 0.0, 0.0, tint),
                     _ => DeviceColor::from_gray(1.0 - tint),
                 }
             }

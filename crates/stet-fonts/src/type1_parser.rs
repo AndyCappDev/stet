@@ -112,9 +112,7 @@ pub fn parse_type1(data: &[u8]) -> Result<Type1Font, String> {
     let after_marker = eexec_pos + eexec_marker.len();
     let mut binary_start = after_marker;
     // Skip spaces/tabs
-    while binary_start < data.len()
-        && (data[binary_start] == b' ' || data[binary_start] == b'\t')
-    {
+    while binary_start < data.len() && (data[binary_start] == b' ' || data[binary_start] == b'\t') {
         binary_start += 1;
     }
     // Skip one newline: \r\n, \r, or \n
@@ -146,8 +144,7 @@ pub fn parse_type1(data: &[u8]) -> Result<Type1Font, String> {
     let subrs = parse_subrs(&decrypted);
 
     // Parse /WeightVector from header (Multiple Master fonts)
-    let weight_vector = parse_weight_vector(header)
-        .or_else(|| parse_weight_vector(&decrypted));
+    let weight_vector = parse_weight_vector(header).or_else(|| parse_weight_vector(&decrypted));
 
     Ok(Type1Font {
         font_name,

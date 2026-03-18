@@ -611,16 +611,21 @@ pub fn glyph_name_to_unicode(name: &str) -> Option<u16> {
     }
 
     // uniXXXX convention
-    if name.starts_with("uni") && name.len() == 7
-        && let Ok(cp) = u16::from_str_radix(&name[3..], 16) {
-            return Some(cp);
-        }
+    if name.starts_with("uni")
+        && name.len() == 7
+        && let Ok(cp) = u16::from_str_radix(&name[3..], 16)
+    {
+        return Some(cp);
+    }
 
     // uXXXX convention
-    if name.starts_with('u') && name.len() >= 5 && name.len() <= 6
-        && let Ok(cp) = u16::from_str_radix(&name[1..], 16) {
-            return Some(cp);
-        }
+    if name.starts_with('u')
+        && name.len() >= 5
+        && name.len() <= 6
+        && let Ok(cp) = u16::from_str_radix(&name[1..], 16)
+    {
+        return Some(cp);
+    }
 
     None
 }

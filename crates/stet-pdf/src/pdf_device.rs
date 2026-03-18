@@ -787,7 +787,10 @@ fn build_pdf_colorspace(
 
 /// Build a PDF Type 0 (sampled) function stream from a TintLookupTable.
 /// Returns the object number of the function stream.
-fn build_tint_function(table: &stet_graphics::device::TintLookupTable, writer: &mut PdfWriter) -> u32 {
+fn build_tint_function(
+    table: &stet_graphics::device::TintLookupTable,
+    writer: &mut PdfWriter,
+) -> u32 {
     let ni = table.num_inputs as usize;
     let no = table.num_outputs as usize;
 
@@ -1283,7 +1286,10 @@ fn build_halftone_screen(
 }
 
 /// Build the /HT value for an ExtGState dict from a HalftoneState.
-fn build_halftone_ht(writer: &mut PdfWriter, state: &stet_graphics::device::HalftoneState) -> PdfObj {
+fn build_halftone_ht(
+    writer: &mut PdfWriter,
+    state: &stet_graphics::device::HalftoneState,
+) -> PdfObj {
     if let Some(ref color) = state.color {
         // Type 5 composite halftone
         let mut entries = vec![

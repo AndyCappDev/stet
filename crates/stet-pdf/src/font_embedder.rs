@@ -779,9 +779,10 @@ fn build_type1_font(writer: &mut PdfWriter, usage: &FontUsage, ctx: &Context) ->
             .dicts
             .get(ent, &DictKey::Name(ctx.name_cache.n_char_strings))
             && let PsValue::Dict(e) = obj.value
-                && !charstrings_entities.contains(&e) {
-                    charstrings_entities.push(e);
-                }
+            && !charstrings_entities.contains(&e)
+        {
+            charstrings_entities.push(e);
+        }
     }
     // Sort by entry count descending so the most complete dict is searched first
     charstrings_entities.sort_by(|a, b| {
@@ -793,10 +794,11 @@ fn build_type1_font(writer: &mut PdfWriter, usage: &FontUsage, ctx: &Context) ->
     let mut private_entity = None;
     for &ent in &usage.all_entities {
         if let Some(obj) = ctx.dicts.get(ent, &DictKey::Name(ctx.name_cache.n_private))
-            && let PsValue::Dict(e) = obj.value {
-                private_entity = Some(e);
-                break;
-            }
+            && let PsValue::Dict(e) = obj.value
+        {
+            private_entity = Some(e);
+            break;
+        }
     }
 
     let len_iv = private_entity
@@ -858,10 +860,11 @@ fn build_type1_font(writer: &mut PdfWriter, usage: &FontUsage, ctx: &Context) ->
                 let mut found = None;
                 for &cs_entity in &charstrings_entities {
                     if let Some(obj) = ctx.dicts.get(cs_entity, &DictKey::Name(glyph_name_id))
-                        && let PsValue::String { entity, start, len } = obj.value {
-                            found = Some((entity, start, len));
-                            break;
-                        }
+                        && let PsValue::String { entity, start, len } = obj.value
+                    {
+                        found = Some((entity, start, len));
+                        break;
+                    }
                 }
                 let Some((cs_ent, cs_start, cs_len)) = found else {
                     continue;
@@ -1541,13 +1544,14 @@ fn subset_truetype(font_data: &[u8], used_gids: &HashSet<u16>) -> Option<Vec<u8>
     for gid in 0..num_glyphs {
         loca_offsets.push(new_glyf.len() as u32);
         if used_gids.contains(&(gid as u16))
-            && let Some(glyf_bytes) = truetype::get_glyf_data(font_data, gid as u16) {
-                new_glyf.extend_from_slice(&glyf_bytes);
-                // Pad to 2-byte alignment
-                if !new_glyf.len().is_multiple_of(2) {
-                    new_glyf.push(0);
-                }
+            && let Some(glyf_bytes) = truetype::get_glyf_data(font_data, gid as u16)
+        {
+            new_glyf.extend_from_slice(&glyf_bytes);
+            // Pad to 2-byte alignment
+            if !new_glyf.len().is_multiple_of(2) {
+                new_glyf.push(0);
             }
+        }
         // Unused glyphs: no data written, loca[gid] == loca[gid+1] → zero-length
     }
     loca_offsets.push(new_glyf.len() as u32);
@@ -1632,16 +1636,17 @@ fn reconstruct_truetype(
     for gid in 0..num_glyphs {
         loca_offsets.push(glyf_data.len() as u32);
         if let Some(entry_obj) = ctx.dicts.get(gd_entity, &DictKey::Int(gid as i32))
-            && let PsValue::String { entity, start, len } = entry_obj.value {
-                let glyph_bytes = ctx.strings.get(entity, start, len);
-                if !glyph_bytes.is_empty() {
-                    glyf_data.extend_from_slice(glyph_bytes);
-                    // Pad to 2-byte alignment
-                    if !glyf_data.len().is_multiple_of(2) {
-                        glyf_data.push(0);
-                    }
+            && let PsValue::String { entity, start, len } = entry_obj.value
+        {
+            let glyph_bytes = ctx.strings.get(entity, start, len);
+            if !glyph_bytes.is_empty() {
+                glyf_data.extend_from_slice(glyph_bytes);
+                // Pad to 2-byte alignment
+                if !glyf_data.len().is_multiple_of(2) {
+                    glyf_data.push(0);
                 }
             }
+        }
         // Empty glyphs get same offset as next → zero-length
     }
     // Final loca entry = total glyf size
@@ -2167,41 +2172,42 @@ fn build_cid_tounicode(
     let mut gid_to_unicode: HashMap<u16, u16> = HashMap::new();
 
     if let Some((cmap_off, _)) = truetype::find_table(font_data, b"cmap")
-        && cmap_off + 4 <= font_data.len() {
-            let num_subtables = truetype::read_u16(font_data, cmap_off + 2) as usize;
-            for i in 0..num_subtables {
-                let rec_off = cmap_off + 4 + i * 8;
-                if rec_off + 8 > font_data.len() {
-                    break;
-                }
-                let platform_id = truetype::read_u16(font_data, rec_off);
-                let encoding_id = truetype::read_u16(font_data, rec_off + 2);
-                let st_offset = truetype::read_u32(font_data, rec_off + 4) as usize;
-
-                let is_unicode = platform_id == 0
-                    || (platform_id == 3 && (encoding_id == 1 || encoding_id == 10));
-                if !is_unicode {
-                    continue;
-                }
-
-                let st_off = cmap_off + st_offset;
-                if st_off + 2 > font_data.len() {
-                    continue;
-                }
-                // Parse the cmap subtable to build unicode→gid, then reverse it
-                let mut unicode_to_gid = HashMap::new();
-                let format = truetype::read_u16(font_data, st_off);
-                match format {
-                    4 => parse_cmap_format4(font_data, st_off, &mut unicode_to_gid),
-                    12 => parse_cmap_format12(font_data, st_off, &mut unicode_to_gid),
-                    _ => {}
-                }
-                for (unicode, gid) in unicode_to_gid {
-                    gid_to_unicode.entry(gid).or_insert(unicode);
-                }
-                break; // Use first Unicode subtable
+        && cmap_off + 4 <= font_data.len()
+    {
+        let num_subtables = truetype::read_u16(font_data, cmap_off + 2) as usize;
+        for i in 0..num_subtables {
+            let rec_off = cmap_off + 4 + i * 8;
+            if rec_off + 8 > font_data.len() {
+                break;
             }
+            let platform_id = truetype::read_u16(font_data, rec_off);
+            let encoding_id = truetype::read_u16(font_data, rec_off + 2);
+            let st_offset = truetype::read_u32(font_data, rec_off + 4) as usize;
+
+            let is_unicode =
+                platform_id == 0 || (platform_id == 3 && (encoding_id == 1 || encoding_id == 10));
+            if !is_unicode {
+                continue;
+            }
+
+            let st_off = cmap_off + st_offset;
+            if st_off + 2 > font_data.len() {
+                continue;
+            }
+            // Parse the cmap subtable to build unicode→gid, then reverse it
+            let mut unicode_to_gid = HashMap::new();
+            let format = truetype::read_u16(font_data, st_off);
+            match format {
+                4 => parse_cmap_format4(font_data, st_off, &mut unicode_to_gid),
+                12 => parse_cmap_format12(font_data, st_off, &mut unicode_to_gid),
+                _ => {}
+            }
+            for (unicode, gid) in unicode_to_gid {
+                gid_to_unicode.entry(gid).or_insert(unicode);
+            }
+            break; // Use first Unicode subtable
         }
+    }
 
     // For each used CID, find Unicode via CID → GID → Unicode
     let mut map = HashMap::new();
@@ -2257,13 +2263,14 @@ fn generate_cid_tounicode_cmap(map: &HashMap<u16, u16>, font_name: &str) -> Vec<
 /// Get font bounding box from TrueType head table, scaled to 1000-unit space.
 fn get_truetype_bbox(font_data: &[u8], scale: f64) -> [f64; 4] {
     if let Some((head_off, _)) = truetype::find_table(font_data, b"head")
-        && head_off + 44 <= font_data.len() {
-            let x_min = truetype::read_i16(font_data, head_off + 36) as f64 * scale;
-            let y_min = truetype::read_i16(font_data, head_off + 38) as f64 * scale;
-            let x_max = truetype::read_i16(font_data, head_off + 40) as f64 * scale;
-            let y_max = truetype::read_i16(font_data, head_off + 42) as f64 * scale;
-            return [x_min, y_min, x_max, y_max];
-        }
+        && head_off + 44 <= font_data.len()
+    {
+        let x_min = truetype::read_i16(font_data, head_off + 36) as f64 * scale;
+        let y_min = truetype::read_i16(font_data, head_off + 38) as f64 * scale;
+        let x_max = truetype::read_i16(font_data, head_off + 40) as f64 * scale;
+        let y_max = truetype::read_i16(font_data, head_off + 42) as f64 * scale;
+        return [x_min, y_min, x_max, y_max];
+    }
     [0.0, -200.0, 1000.0, 800.0]
 }
 
@@ -2271,11 +2278,12 @@ fn get_truetype_bbox(font_data: &[u8], scale: f64) -> [f64; 4] {
 fn get_truetype_ascent_descent(font_data: &[u8], scale: f64) -> (f64, f64) {
     // Try hhea table first
     if let Some((hhea_off, _)) = truetype::find_table(font_data, b"hhea")
-        && hhea_off + 8 <= font_data.len() {
-            let ascent = truetype::read_i16(font_data, hhea_off + 4) as f64 * scale;
-            let descent = truetype::read_i16(font_data, hhea_off + 6) as f64 * scale;
-            return (ascent, descent);
-        }
+        && hhea_off + 8 <= font_data.len()
+    {
+        let ascent = truetype::read_i16(font_data, hhea_off + 4) as f64 * scale;
+        let descent = truetype::read_i16(font_data, hhea_off + 6) as f64 * scale;
+        return (ascent, descent);
+    }
     (800.0, -200.0)
 }
 
@@ -2377,9 +2385,10 @@ fn build_type42_font(writer: &mut PdfWriter, usage: &FontUsage, ctx: &Context) -
                 let glyph_name_obj = ctx.arrays.get_element(enc_entity, code as u32);
                 if let PsValue::Name(name_id) = glyph_name_obj.value
                     && let Some(cs_obj) = ctx.dicts.get(cs_entity, &DictKey::Name(name_id))
-                        && let Some(gid) = cs_obj.as_i32() {
-                            seed_gids.insert(gid as u16);
-                        }
+                    && let Some(gid) = cs_obj.as_i32()
+                {
+                    seed_gids.insert(gid as u16);
+                }
             }
             if seed_gids.is_empty() {
                 font_data // can't determine used GIDs, embed whole

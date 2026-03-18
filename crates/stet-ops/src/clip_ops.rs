@@ -6,11 +6,11 @@
 
 use stet_core::context::Context;
 use stet_core::error::PsError;
+use stet_core::object::PsValue;
 use stet_fonts::geometry::{Matrix, PathSegment, PsPath};
 use stet_graphics::color::FillRule;
 use stet_graphics::device::ClipParams;
 use stet_graphics::display_list::DisplayElement;
-use stet_core::object::PsValue;
 
 /// Close all open subpaths in a path (PLRM: clip/eoclip implicitly close subpaths).
 /// If the last segment is a LineTo that returns to the subpath's MoveTo start,

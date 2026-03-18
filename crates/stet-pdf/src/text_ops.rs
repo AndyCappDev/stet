@@ -96,8 +96,8 @@ pub fn emit_text_batch(buf: &mut Vec<u8>, batch: &[&TextParams], font_tracker: &
                     let along_dist = (ndx * tm_a + ndy * tm_b) / adv_len_sq;
                     let mut prev_text_width = 0.0;
                     for &byte_val in &prev.text {
-                        if let Some(w) =
-                            font_tracker.get_glyph_width(EntityId(prev.font_entity), byte_val as u16)
+                        if let Some(w) = font_tracker
+                            .get_glyph_width(EntityId(prev.font_entity), byte_val as u16)
                         {
                             prev_text_width += w as f64;
                         }

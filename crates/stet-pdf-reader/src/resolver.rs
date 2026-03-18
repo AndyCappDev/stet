@@ -133,12 +133,7 @@ impl<'a> Resolver<'a> {
                     Ok(raw)
                 } else {
                     let jbig2_globals = self.resolve_jbig2_globals(&filter_list, &parms)?;
-                    filters::decode_stream(
-                        &raw,
-                        &filter_list,
-                        &parms,
-                        jbig2_globals.as_deref(),
-                    )
+                    filters::decode_stream(&raw, &filter_list, &parms, jbig2_globals.as_deref())
                 }
             }
             _ => Err(PdfError::Other(format!(
@@ -167,12 +162,7 @@ impl<'a> Resolver<'a> {
                     Ok(raw.to_vec())
                 } else {
                     let jbig2_globals = self.resolve_jbig2_globals(&filter_list, &parms)?;
-                    filters::decode_stream(
-                        raw,
-                        &filter_list,
-                        &parms,
-                        jbig2_globals.as_deref(),
-                    )
+                    filters::decode_stream(raw, &filter_list, &parms, jbig2_globals.as_deref())
                 }
             }
             _ => Err(PdfError::Other("expected a stream object".into())),
@@ -242,9 +232,10 @@ impl<'a> Resolver<'a> {
         for (i, f) in filters.iter().enumerate() {
             if *f == filters::Filter::JBIG2Decode
                 && let Some(Some(dp)) = parms.get(i)
-                    && let Some(globals_ref) = dp.get(b"JBIG2Globals") {
-                        return self.stream_data_from_obj(globals_ref).map(Some);
-                    }
+                && let Some(globals_ref) = dp.get(b"JBIG2Globals")
+            {
+                return self.stream_data_from_obj(globals_ref).map(Some);
+            }
         }
         Ok(None)
     }
@@ -268,8 +259,7 @@ impl<'a> Resolver<'a> {
                     // Verify the char after "obj" is whitespace or '<'
                     let after = pos + needle_bytes.len();
                     if after < self.data.len()
-                        && (self.data[after].is_ascii_whitespace()
-                            || self.data[after] == b'<')
+                        && (self.data[after].is_ascii_whitespace() || self.data[after] == b'<')
                     {
                         last_match = Some(pos);
                     }
@@ -302,7 +292,9 @@ impl<'a> Resolver<'a> {
             .or_else(|| {
                 // Scan backward up to 20 bytes for the object header
                 let start = offset.saturating_sub(20);
-                (start..offset).rev().find_map(|off| self.try_parse_obj_header(off))
+                (start..offset)
+                    .rev()
+                    .find_map(|off| self.try_parse_obj_header(off))
             })
             .ok_or(PdfError::InvalidObject(offset))?;
 
@@ -422,9 +414,7 @@ impl<'a> Resolver<'a> {
             if &self.data[pos..pos + needle.len()] == needle {
                 // Strip trailing whitespace before endstream
                 let mut end = pos;
-                while end > data_start
-                    && matches!(self.data[end - 1], b' ' | b'\r' | b'\n')
-                {
+                while end > data_start && matches!(self.data[end - 1], b' ' | b'\r' | b'\n') {
                     end -= 1;
                 }
                 return Ok(end - data_start);

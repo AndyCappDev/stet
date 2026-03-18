@@ -85,9 +85,10 @@ fn collect_pages_recursive(
     } else if let Some(PdfObj::Ref(n, g)) = node_dict.get(b"Resources") {
         // /Resources may be an indirect reference — dereference it
         if let Ok(resolved) = resolver.resolve(*n, *g)
-            && let Some(d) = resolved.as_dict() {
-                inherited.resources = Some(d.clone());
-            }
+            && let Some(d) = resolved.as_dict()
+        {
+            inherited.resources = Some(d.clone());
+        }
     }
 
     // Determine node type
@@ -100,10 +101,7 @@ fn collect_pages_recursive(
         let media_box = inherited.media_box.unwrap_or([0.0, 0.0, 612.0, 792.0]); // Default US Letter
         // CropBox defaults to MediaBox; clamp to MediaBox if it extends beyond
         // (per PDF spec: "should be equal to or smaller than the media box").
-        let crop_box = clamp_box_to_media(
-            &inherited.crop_box.unwrap_or(media_box),
-            &media_box,
-        );
+        let crop_box = clamp_box_to_media(&inherited.crop_box.unwrap_or(media_box), &media_box);
         let rotate = inherited.rotate.unwrap_or(0);
         let resources = inherited.resources.clone().unwrap_or_default();
 
@@ -199,9 +197,10 @@ fn parse_contents(dict: &PdfDict, resolver: &Resolver) -> Result<Vec<(u32, u16)>
             // Could be a ref to a stream OR a ref to an array of refs.
             // Try resolving to check.
             if let Ok(resolved) = resolver.resolve(*n, *g)
-                && let PdfObj::Array(arr) = &resolved {
-                    return collect_refs_from_array(arr);
-                }
+                && let PdfObj::Array(arr) = &resolved
+            {
+                return collect_refs_from_array(arr);
+            }
             // Single content stream reference
             Ok(vec![(*n, *g)])
         }

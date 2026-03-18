@@ -7,6 +7,7 @@
 use stet_core::context::Context;
 use stet_core::error::PsError;
 use stet_core::graphics_state::ColorSpace;
+use stet_core::object::{PsObject, PsValue};
 use stet_fonts::geometry::{Matrix, PathSegment, PsPath};
 use stet_graphics::color::{DashPattern, FillRule};
 use stet_graphics::device::{
@@ -14,7 +15,6 @@ use stet_graphics::device::{
     SpotColorSpace, StrokeParams, TransferState,
 };
 use stet_graphics::display_list::DisplayElement;
-use stet_core::object::{PsObject, PsValue};
 
 /// Capture the current SpotColor from graphics state if in Separation/DeviceN mode.
 pub(crate) fn capture_spot_color(ctx: &Context) -> Option<SpotColor> {
@@ -263,9 +263,10 @@ fn use_native_stroke(ctx: &Context) -> bool {
     if let Some(pd) = ctx.gstate.page_device
         && let Some(name_id) = ctx.names.find(b"StrokeMethod")
         && let Some(obj) = ctx.dicts.get(pd, &DictKey::Name(name_id))
-        && let PsValue::Name(nid) = obj.value {
-            return ctx.names.get_bytes(nid) == b"NativeStroke";
-        }
+        && let PsValue::Name(nid) = obj.value
+    {
+        return ctx.names.get_bytes(nid) == b"NativeStroke";
+    }
     false // default: StrokePathFill
 }
 

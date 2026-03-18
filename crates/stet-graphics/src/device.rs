@@ -7,8 +7,8 @@
 use crate::color::{DashPattern, DeviceColor, FillRule, LineCap, LineJoin};
 use crate::display_list::DisplayList;
 use crate::icc::ProfileHash;
-use stet_fonts::geometry::{Matrix, PsPath};
 use std::sync::Arc;
+use stet_fonts::geometry::{Matrix, PsPath};
 
 /// Pre-sampled transfer function (256 samples, domain [0,1] → range [0,1]).
 /// Arc for cheap clone across display list elements.

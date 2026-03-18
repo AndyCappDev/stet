@@ -8,8 +8,8 @@
 use stet_core::context::Context;
 use stet_core::dict::DictKey;
 use stet_core::error::PsError;
-use stet_fonts::geometry::Matrix;
 use stet_core::object::{ObjFlags, PsObject, PsValue};
+use stet_fonts::geometry::Matrix;
 
 /// `definefont`: key font → font
 ///

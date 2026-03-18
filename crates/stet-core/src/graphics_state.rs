@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 // ── Re-exports from stet-fonts and stet-graphics ────────────────────────────
 // These types used to be defined here. Re-export for backward compatibility.
-pub use stet_fonts::geometry::{round10, Matrix, PathSegment, PsPath};
+pub use stet_fonts::geometry::{Matrix, PathSegment, PsPath, round10};
 pub use stet_graphics::color::{
     CieAParams, CieAbcParams, CieDefParams, CieDefgParams, DashPattern, DeviceColor, FillRule,
     LineCap, LineJoin,
