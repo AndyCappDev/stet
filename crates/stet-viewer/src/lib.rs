@@ -63,18 +63,22 @@ pub struct ViewerEnd {
     pub screen_info_sender: mpsc::SyncSender<ScreenInfo>,
     /// Signals the interpreter to advance to the next job.
     pub advance_sender: mpsc::SyncSender<()>,
+    /// Sends dropped file paths to the interpreter for processing.
+    pub file_drop_sender: mpsc::Sender<String>,
 }
 
 /// Create matched channel pairs for interpreter <-> viewer communication.
 ///
-/// Returns `(InterpreterEnd, ViewerEnd, dl_sender, advance_receiver)`.
+/// Returns `(InterpreterEnd, ViewerEnd, dl_sender, advance_receiver, file_drop_receiver)`.
 /// - `dl_sender` should be set on `Context.display_list_sender`.
 /// - `advance_receiver` is used by the interpreter to wait between jobs.
+/// - `file_drop_receiver` receives file paths dropped onto the viewer window.
 pub fn create_channels() -> (
     InterpreterEnd,
     ViewerEnd,
     mpsc::Sender<DisplayListMsg>,
     mpsc::Receiver<()>,
+    mpsc::Receiver<String>,
 ) {
     // Display list pipe: unbounded (interpreter never blocks at showpage)
     let (dl_tx, dl_rx) = mpsc::channel();
@@ -84,6 +88,8 @@ pub fn create_channels() -> (
     let (info_tx, info_rx) = mpsc::sync_channel(1);
     // Job advance: bounded (interpreter blocks until viewer signals)
     let (advance_tx, advance_rx) = mpsc::sync_channel(0);
+    // File drop: unbounded (viewer sends dropped file paths to interpreter)
+    let (file_drop_tx, file_drop_rx) = mpsc::channel();
 
     (
         InterpreterEnd {
@@ -95,9 +101,11 @@ pub fn create_channels() -> (
             page_receiver: page_rx,
             screen_info_sender: info_tx,
             advance_sender: advance_tx,
+            file_drop_sender: file_drop_tx,
         },
         dl_tx,
         advance_rx,
+        file_drop_rx,
     )
 }
 
@@ -117,6 +125,25 @@ const DEFAULT_PAGE_H: f64 = 792.0;
 ///
 /// This function blocks until the viewer window is closed.
 pub fn run_viewer(
+    viewer_end: ViewerEnd,
+    dpi_override: Option<f64>,
+    filename: Option<&str>,
+    page_size: Option<(f64, f64)>,
+    system_cmyk_bytes: Option<std::sync::Arc<Vec<u8>>>,
+    no_aa: bool,
+) {
+    run_viewer_inner(
+        viewer_end,
+        dpi_override,
+        filename,
+        page_size,
+        system_cmyk_bytes,
+        no_aa,
+    )
+}
+
+/// Inner implementation of `run_viewer`.
+fn run_viewer_inner(
     viewer_end: ViewerEnd,
     dpi_override: Option<f64>,
     filename: Option<&str>,
@@ -161,8 +188,10 @@ pub fn run_viewer(
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(&title)
-            .with_inner_size([init_w, init_h]),
+            .with_inner_size([init_w, init_h])
+            .with_drag_and_drop(true),
         centered: true,
+        persist_window: false,
         ..Default::default()
     };
     eframe::run_native("stet", options, Box::new(|_cc| Ok(Box::new(app))))

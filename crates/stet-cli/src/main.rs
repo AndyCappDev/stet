@@ -30,6 +30,15 @@ impl std::io::Write for SharedWriter {
 }
 
 fn main() {
+    // winit's Wayland backend (0.30+) doesn't support drag-and-drop.
+    // Force X11 backend (via XWayland) by hiding WAYLAND_DISPLAY so winit
+    // falls back to X11 where XDnD file drops work.
+    #[cfg(target_os = "linux")]
+    if std::env::var("WAYLAND_DISPLAY").is_ok() && std::env::var("DISPLAY").is_ok() {
+        // SAFETY: called at program start before any other threads exist.
+        unsafe { std::env::remove_var("WAYLAND_DISPLAY") };
+    }
+
     let args: Vec<String> = std::env::args().collect();
 
     // Parse flags
@@ -363,20 +372,8 @@ fn run_viewer_mode(
         None
     };
 
-    // PDF files: use fast path (no PS interpreter needed)
-    if file_args.iter().all(|f| is_pdf_file(f)) {
-        run_pdf_input_viewer(
-            dpi_override,
-            &file_args,
-            &page_filter,
-            system_cmyk_bytes,
-            no_aa,
-            overprint,
-        );
-        return;
-    }
-
-    let (interp_end, viewer_end, dl_sender, advance_rx) = stet_viewer::create_channels();
+    let (interp_end, viewer_end, dl_sender, advance_rx, file_drop_rx) =
+        stet_viewer::create_channels();
     let first_file = file_args.first().cloned();
 
     // Determine page size for the first file so the window is created at the
@@ -446,9 +443,68 @@ fn run_viewer_mode(
         // NullDevice: no-op rendering — display list capture is the output
         ctx.device_factory = Some(Box::new(|w, h| Box::new(NullDevice::new(w, h))));
 
-        // DPI comes from viewer.ps HWResolution by default, --dpi overrides
-        run_file_jobs_viewer(&mut ctx, dpi_override, &file_args, advance_rx);
-        // ctx drops here → display_list_sender drops → relay thread ends
+        // Process initial CLI files: PDF files go direct, PS/EPS through interpreter
+        let ps_files: Vec<String> = file_args.iter().filter(|f| !is_pdf_file(f)).cloned().collect();
+        let pdf_files: Vec<String> = file_args.iter().filter(|f| is_pdf_file(f)).cloned().collect();
+
+        // Render PDF files first (no interpreter needed)
+        for (i, path) in pdf_files.iter().enumerate() {
+            if i > 0 || !ps_files.is_empty() {
+                if let Some(ref sender) = ctx.display_list_sender {
+                    let _ = sender.send((stet_graphics::display_list::DisplayList::new(), 0.0, 0, 0));
+                }
+            }
+            if let Some(ref sender) = ctx.display_list_sender {
+                render_dropped_pdf(
+                    path, dpi_override, sender, no_icc, output_profile_path.as_deref(), overprint,
+                );
+            }
+        }
+
+        // Render PS/EPS files through interpreter
+        if !ps_files.is_empty() {
+            if !pdf_files.is_empty() {
+                if let Some(ref sender) = ctx.display_list_sender {
+                    let _ = sender.send((stet_graphics::display_list::DisplayList::new(), 0.0, 0, 0));
+                }
+            }
+            run_file_jobs_viewer(&mut ctx, dpi_override, &ps_files, advance_rx);
+        }
+
+        // Capture the established DPI for subsequent drops
+        let established_dpi = Some(ctx.current_page_dpi())
+            .filter(|&d| d > 1.0)
+            .or(dpi_override);
+
+        // CLI files done — send final JobDone, then wait for dropped files
+        if let Some(ref sender) = ctx.display_list_sender {
+            let _ = sender.send((stet_graphics::display_list::DisplayList::new(), -1.0, 0, 0));
+        }
+
+        while let Ok(path) = file_drop_rx.recv() {
+            let sender = match ctx.display_list_sender {
+                Some(ref s) => s.clone(),
+                None => break,
+            };
+
+            // Signal new job so viewer clears old pages
+            let _ = sender.send((stet_graphics::display_list::DisplayList::new(), 0.0, 0, 0));
+
+            if is_pdf_file(&path) {
+                render_dropped_pdf(
+                    &path, established_dpi, &sender, no_icc,
+                    output_profile_path.as_deref(), overprint,
+                );
+            } else {
+                run_file_jobs(
+                    &mut ctx, established_dpi, &[path], "viewer", None, None,
+                );
+            }
+
+            // Signal job done
+            let _ = sender.send((stet_graphics::display_list::DisplayList::new(), -1.0, 0, 0));
+        }
+        // file_drop_sender dropped (viewer closed) → loop ends → ctx drops
     });
 
     // Wait for the first page before creating the viewer window.
@@ -492,6 +548,7 @@ fn run_viewer_mode(
             page_receiver: fwd_rx,
             screen_info_sender,
             advance_sender,
+            file_drop_sender: viewer_end.file_drop_sender,
         };
         stet_viewer::run_viewer(
             new_viewer_end,
@@ -1123,6 +1180,64 @@ fn is_pdf_file(filename: &str) -> bool {
     filename.to_ascii_lowercase().ends_with(".pdf")
 }
 
+/// Render a dropped PDF file and send its pages through the display list channel.
+fn render_dropped_pdf(
+    path: &str,
+    dpi_override: Option<f64>,
+    dl_sender: &std::sync::mpsc::Sender<stet_viewer::DisplayListMsg>,
+    no_icc: bool,
+    output_profile_path: Option<&str>,
+    overprint: bool,
+) {
+    let dpi = dpi_override.unwrap_or(150.0);
+
+    let data = match std::fs::read(path) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("Error: cannot read '{}': {}", path, e);
+            return;
+        }
+    };
+
+    let mut icc_cache = stet_graphics::icc::IccCache::new();
+    if !no_icc {
+        if let Some(profile_path) = output_profile_path {
+            if let Ok(bytes) = std::fs::read(profile_path) {
+                icc_cache.register_profile(&bytes);
+            }
+        } else {
+            icc_cache.search_system_cmyk_profile();
+        }
+    }
+
+    let mut doc = match PdfDocument::from_bytes_with_icc(&data, icc_cache) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("Error: cannot parse '{}': {}", path, e);
+            return;
+        }
+    };
+    doc.set_overprint(overprint);
+
+    let page_count = doc.page_count();
+    eprintln!("PDF: {} ({} pages)", path, page_count);
+
+    for page in 0..page_count {
+        match doc.render_page(page, dpi) {
+            Ok(display_list) => {
+                let (w, h) = doc.page_size(page).unwrap_or((612.0, 792.0));
+                let scale = dpi / 72.0;
+                let pixel_w = (w * scale).round() as u32;
+                let pixel_h = (h * scale).round() as u32;
+                let _ = dl_sender.send((display_list, dpi, pixel_w, pixel_h));
+            }
+            Err(e) => {
+                eprintln!("  Page {}: render error: {}", page + 1, e);
+            }
+        }
+    }
+}
+
 /// Render PDF files to PNG output.
 /// Render a single PDF page to RGBA with configurable anti-aliasing.
 fn render_pdf_page_to_rgba(
@@ -1226,166 +1341,6 @@ fn write_png_file(path: &str, rgba: &[u8], width: u32, height: u32) {
     encoder.set_adaptive_filter(png::AdaptiveFilterType::Adaptive);
     let mut writer = encoder.write_header().unwrap();
     writer.write_image_data(rgba).unwrap();
-}
-
-/// Render PDF files to the viewer.
-#[cfg(feature = "viewer")]
-fn run_pdf_input_viewer(
-    dpi_override: Option<f64>,
-    file_args: &[String],
-    page_filter: &Option<std::collections::HashSet<i32>>,
-    system_cmyk_bytes: Option<std::sync::Arc<Vec<u8>>>,
-    no_aa: bool,
-    overprint: bool,
-) {
-    let (interp_end, viewer_end, dl_sender, advance_rx) = stet_viewer::create_channels();
-
-    let mut icc_cache = stet_graphics::icc::IccCache::new();
-    icc_cache.search_system_cmyk_profile();
-
-    let first_file = file_args.first().cloned();
-
-    // Try to get first page size for proper window sizing
-    let first_page_size = first_file.as_deref().and_then(|path| {
-        let data = std::fs::read(path).ok()?;
-        let doc = PdfDocument::from_bytes_with_icc(&data, icc_cache.clone()).ok()?;
-        doc.page_size(0).ok()
-    });
-
-    // Relay thread: convert display list tuples to ViewerMsg
-    let page_sender = interp_end.page_sender;
-    let dl_receiver = interp_end.dl_receiver;
-    std::thread::spawn(move || {
-        let mut page_num = 1u32;
-        while let Ok((dl, dpi, w, h)) = dl_receiver.recv() {
-            if w == 0 && h == 0 {
-                if dpi < 0.0 {
-                    let _ = page_sender.send(stet_viewer::ViewerMsg::JobDone);
-                } else {
-                    let _ = page_sender.send(stet_viewer::ViewerMsg::NewJob);
-                    page_num = 1;
-                }
-                continue;
-            }
-            let _ = page_sender.send(stet_viewer::ViewerMsg::Page(stet_viewer::PageReady {
-                display_list: dl,
-                width: w,
-                height: h,
-                dpi,
-                page_num,
-            }));
-            page_num += 1;
-        }
-    });
-
-    // PDF rendering thread
-    let file_args_owned: Vec<String> = file_args.to_vec();
-    let page_filter_owned = page_filter.clone();
-    let dpi_override_copy = dpi_override;
-    std::thread::spawn(move || {
-        let dpi = dpi_override_copy.unwrap_or(150.0);
-
-        for (job_idx, filename) in file_args_owned.iter().enumerate() {
-            if job_idx > 0 {
-                // Signal new job
-                let _ =
-                    dl_sender.send((stet_graphics::display_list::DisplayList::new(), 0.0, 0, 0));
-            }
-
-            let data = match std::fs::read(filename) {
-                Ok(d) => d,
-                Err(e) => {
-                    eprintln!("Error: cannot read '{}': {}", filename, e);
-                    continue;
-                }
-            };
-
-            let mut doc = match PdfDocument::from_bytes_with_icc(&data, icc_cache.clone()) {
-                Ok(d) => d,
-                Err(e) => {
-                    eprintln!("Error: cannot parse '{}': {}", filename, e);
-                    continue;
-                }
-            };
-            doc.set_overprint(overprint);
-
-            let page_count = doc.page_count();
-            eprintln!("PDF: {} ({} pages)", filename, page_count);
-
-            for page in 0..page_count {
-                let page_1based = page as i32 + 1;
-                if let Some(ref filter) = page_filter_owned
-                    && !filter.contains(&page_1based)
-                {
-                    continue;
-                }
-
-                match doc.render_page(page, dpi) {
-                    Ok(display_list) => {
-                        let (w, h) = doc.page_size(page).unwrap_or((612.0, 792.0));
-                        let scale = dpi / 72.0;
-                        let pixel_w = (w * scale).round() as u32;
-                        let pixel_h = (h * scale).round() as u32;
-                        let _ = dl_sender.send((display_list, dpi, pixel_w, pixel_h));
-                    }
-                    Err(e) => {
-                        eprintln!("  Page {}: render error: {}", page_1based, e);
-                    }
-                }
-            }
-
-            // Signal job done and wait for advance between jobs
-            if job_idx + 1 < file_args_owned.len() {
-                let _ =
-                    dl_sender.send((stet_graphics::display_list::DisplayList::new(), -1.0, 0, 0));
-                let _ = advance_rx.recv();
-            }
-        }
-        // dl_sender drops → relay thread ends → page_sender drops → viewer sees disconnect
-    });
-
-    // Wait for first page before creating viewer window
-    let page_rx = viewer_end.page_receiver;
-    let screen_info_sender = viewer_end.screen_info_sender;
-    let advance_sender = viewer_end.advance_sender;
-
-    let mut first_page = None;
-    loop {
-        match page_rx.recv() {
-            Ok(msg @ stet_viewer::ViewerMsg::Page(_)) => {
-                first_page = Some(msg);
-                break;
-            }
-            Ok(_) => continue,
-            Err(_) => break,
-        }
-    }
-
-    if let Some(first) = first_page {
-        let (fwd_tx, fwd_rx) = std::sync::mpsc::channel();
-        fwd_tx.send(first).ok();
-        std::thread::spawn(move || {
-            for msg in page_rx {
-                if fwd_tx.send(msg).is_err() {
-                    break;
-                }
-            }
-        });
-        let new_viewer_end = stet_viewer::ViewerEnd {
-            page_receiver: fwd_rx,
-            screen_info_sender,
-            advance_sender,
-        };
-        stet_viewer::run_viewer(
-            new_viewer_end,
-            dpi_override,
-            first_file.as_deref(),
-            first_page_size,
-            system_cmyk_bytes,
-            no_aa,
-        );
-    }
-    std::process::exit(0);
 }
 
 /// Locate the `resources/` directory relative to the executable.

@@ -76,6 +76,10 @@ pub struct ViewerApp {
     fullpage_inflight_scale: Option<(f32, f32)>,
     /// When the full-page render was spawned (for delayed indicator).
     fullpage_started: Option<Instant>,
+    /// Cancellation flag for in-flight renders. Set on zoom/pan change.
+    render_cancel: Arc<std::sync::atomic::AtomicBool>,
+    /// Channel to send dropped file paths to the interpreter.
+    file_drop_sender: Option<std::sync::mpsc::Sender<String>>,
 }
 
 /// Result from a full-page background render.
@@ -215,6 +219,8 @@ impl ViewerApp {
             fullpage_receiver: None,
             fullpage_inflight_scale: None,
             fullpage_started: None,
+            render_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            file_drop_sender: Some(viewer_end.file_drop_sender),
         }
     }
 
@@ -362,13 +368,6 @@ impl ViewerApp {
                 }
                 Ok(ViewerMsg::JobDone) => {
                     self.job_done = true;
-                    // Zero-page job — auto-advance to next job
-                    if self.pages.is_empty() {
-                        if let Some(ref sender) = self.advance_sender {
-                            let _ = sender.send(());
-                        }
-                        self.job_done = false;
-                    }
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
@@ -420,16 +419,11 @@ impl ViewerApp {
             self.current_page += 1;
             self.needs_resize = true;
             self.reset_view();
-        } else if self.job_done && !self.interpreter_done {
-            // Last page of current job, more jobs pending — advance
-            if let Some(ref sender) = self.advance_sender {
-                let _ = sender.send(());
-            }
-            self.job_done = false;
         } else if self.interpreter_done {
             // No more pages, no more jobs — quit
             self.quit_requested = true;
         }
+        // else: on last page but interpreter still alive (accepting drops) — do nothing
     }
 
     /// Go to the previous page.
@@ -577,8 +571,20 @@ impl ViewerApp {
     }
 
     /// Request an async viewport render. Debounces rapid changes.
+    /// Cancels any stale in-flight renders — zoom/pan changed, results would be wrong.
     fn request_render(&mut self) {
         self.render_requested_at = Some(Instant::now());
+        // Signal cancellation to any in-flight render threads
+        self.render_cancel
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        // Create a fresh cancel flag for the next render
+        self.render_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // Drop stale receivers
+        self.render_receiver = None;
+        self.inflight_params = None;
+        self.fullpage_receiver = None;
+        self.fullpage_inflight_scale = None;
+        self.fullpage_started = None;
     }
 
     /// Try to blit the current viewport from the full-page buffer.
@@ -707,6 +713,8 @@ impl ViewerApp {
         let dev_h = page.height as f64;
         let no_aa = self.no_aa;
 
+        let cancel = Arc::clone(&self.render_cancel);
+
         let (tx, rx) = std::sync::mpsc::channel();
         self.fullpage_receiver = Some(rx);
         self.fullpage_inflight_scale = Some((effective_scale, ppp));
@@ -715,10 +723,14 @@ impl ViewerApp {
         let egui_ctx = ctx.clone();
         // Use std::thread (not rayon) so it doesn't compete with viewport renders
         std::thread::spawn(move || {
-            let rgba = stet_render::render_region_prepared_parallel(
+            let result = stet_render::render_region_prepared_parallel_cancellable(
                 &dl, &prep, 0.0, 0.0, dev_w, dev_h, fp_pixel_w, fp_pixel_h, dpi,
-                Some(&icc), Some(&img_cache), no_aa,
+                Some(&icc), Some(&img_cache), no_aa, &cancel,
             );
+            let Some(rgba) = result else {
+                egui_ctx.request_repaint();
+                return;
+            };
             let _ = tx.send(FullPageRenderResult {
                 rgba,
                 pixel_w: fp_pixel_w,
@@ -875,7 +887,7 @@ impl ViewerApp {
             }
         }
 
-        // Spawn async viewport render
+        // Spawn async viewport render (cancellable)
         let page = &self.pages[vp.page_idx];
         let dl = Arc::clone(&page.display_list);
         let prep = Arc::clone(&page.prepared);
@@ -883,6 +895,7 @@ impl ViewerApp {
         let img_cache = Arc::clone(&page.image_cache);
         let no_aa = self.no_aa;
         let vp_clone = vp.clone();
+        let cancel = Arc::clone(&self.render_cancel);
 
         let (tx, rx) = std::sync::mpsc::channel();
         self.render_receiver = Some(rx);
@@ -891,10 +904,16 @@ impl ViewerApp {
 
         let egui_ctx = ctx.clone();
         rayon::spawn(move || {
-            let rgba = stet_render::render_region_prepared_parallel(
+            let result = stet_render::render_region_prepared_parallel_cancellable(
                 &dl, &prep, vp_clone.vp_x, vp_clone.vp_y, vp_clone.vp_w, vp_clone.vp_h,
                 vp_clone.pixel_w, vp_clone.pixel_h, dpi, Some(&icc), Some(&img_cache), no_aa,
+                &cancel,
             );
+            let Some(rgba) = result else {
+                // Cancelled — don't send result
+                egui_ctx.request_repaint();
+                return;
+            };
             let _ = tx.send(AsyncRenderResult {
                 rgba,
                 params: vp_clone,
@@ -1077,8 +1096,11 @@ impl eframe::App for ViewerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Handle quit
         if self.quit_requested {
+            // Drop all channels so interpreter/relay threads unblock and exit
             self.page_receiver = None;
             self.screen_info_sender = None;
+            self.advance_sender = None;
+            self.file_drop_sender = None;
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
         }
@@ -1097,7 +1119,7 @@ impl eframe::App for ViewerApp {
                             egui::RichText::new("Waiting for page...").font(status_font.clone()),
                         );
                     } else {
-                        let total = if self.interpreter_done {
+                        let total = if self.interpreter_done || self.job_done {
                             format!("{}", self.pages.len())
                         } else {
                             format!("{}+", self.pages.len())
@@ -1131,6 +1153,40 @@ impl eframe::App for ViewerApp {
 
         // Poll for new pages
         self.poll_pages(ctx);
+
+        // Debug: check if files are being hovered
+        let hovered = ctx.input(|i| i.raw.hovered_files.len());
+        if hovered > 0 {
+            eprintln!("HOVER: {} files being dragged over window", hovered);
+        }
+
+        // Handle file drops — send to interpreter for processing
+        let dropped: Vec<_> = ctx.input(|i| {
+            i.raw.dropped_files
+                .iter()
+                .filter_map(|f| {
+                    eprintln!("DROP EVENT: path={:?} name={}", f.path, f.name);
+                    f.path.as_ref().map(|p| p.to_string_lossy().to_string())
+                })
+                .collect()
+        });
+        if !dropped.is_empty() {
+            // Update window title to the dropped file name
+            if let Some(last) = dropped.last() {
+                let base = std::path::Path::new(last)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| last.clone());
+                ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!("stet — {}", base)));
+            }
+            if let Some(ref sender) = self.file_drop_sender {
+                for path in dropped {
+                    let _ = sender.send(path);
+                }
+            }
+            // Reset interpreter_done so we accept new pages
+            self.interpreter_done = false;
+        }
 
         // Apply deferred window position (keeps center fixed after resize)
         if let Some(pos) = self.pending_position.take() {
@@ -1285,7 +1341,12 @@ impl eframe::App for ViewerApp {
             .show(ctx, |ui| {
                 if self.pages.is_empty() {
                     ui.centered_and_justified(|ui| {
-                        ui.label("Waiting for first page to render...");
+                        let msg = if self.job_done {
+                            "No pages rendered. Drop a file to open it."
+                        } else {
+                            "Waiting for first page to render..."
+                        };
+                        ui.label(msg);
                     });
                     return;
                 }
@@ -1371,10 +1432,13 @@ impl eframe::App for ViewerApp {
                     );
                 }
 
-                // Pulsing indicator while full-page buffer renders in background
-                // (only shown after 1 second to avoid flashing on fast pages)
-                if self.fullpage_receiver.is_some()
-                    && self.fullpage_started.is_some_and(|t| t.elapsed() >= Duration::from_secs(1))
+                // Pulsing indicator while rendering in background
+                // (only shown after 1 second to avoid flashing on fast renders)
+                let rendering_in_background = self.fullpage_receiver.is_some()
+                    || self.render_receiver.is_some();
+                let render_start = self.fullpage_started.or(self.render_requested_at);
+                if rendering_in_background
+                    && render_start.is_some_and(|t| t.elapsed() >= Duration::from_secs(1))
                 {
                     let t = ctx.input(|i| i.time) as f32;
                     let on = (t % 1.0) < 0.5;
