@@ -69,10 +69,48 @@ impl PdfDevice {
         self.output_profile = Some(bytes);
     }
 
+    /// Build the PDF document into a byte vector.
+    ///
+    /// Returns the complete PDF file contents. The device must have at least
+    /// one page (call after `finish()` or `finish_with_context()`).
+    pub fn take_pdf_bytes(&self) -> Option<Vec<u8>> {
+        if self.pages.is_empty() {
+            return None;
+        }
+        let (writer, catalog_ref, info_ref) = self.build_pdf(None).ok()?;
+        let mut buf = Vec::new();
+        writer.write_pdf(&mut buf, catalog_ref, Some(info_ref)).ok()?;
+        Some(buf)
+    }
+
+    /// Build the PDF document into a byte vector, using Context for font data.
+    pub fn take_pdf_bytes_with_context(&self, ctx: &Context) -> Option<Vec<u8>> {
+        if self.pages.is_empty() {
+            return None;
+        }
+        let (writer, catalog_ref, info_ref) = self.build_pdf(Some(ctx)).ok()?;
+        let mut buf = Vec::new();
+        writer.write_pdf(&mut buf, catalog_ref, Some(info_ref)).ok()?;
+        Some(buf)
+    }
+
     /// Assemble all accumulated pages into a PDF and write to the output file.
     fn write_pdf(&self, ctx: Option<&Context>) -> Result<(), String> {
         let path = self.output_path.as_deref().ok_or("no output path set")?;
+        let (writer, catalog_ref, info_ref) = self.build_pdf(ctx)?;
 
+        let file = std::fs::File::create(path).map_err(|e| format!("create {}: {}", path, e))?;
+        let mut bw = std::io::BufWriter::new(file);
+        writer
+            .write_pdf(&mut bw, catalog_ref, Some(info_ref))
+            .map_err(|e| format!("write {}: {}", path, e))?;
+
+        eprintln!("PDF written: {} ({} pages)", path, self.pages.len());
+        Ok(())
+    }
+
+    /// Build the PDF document, returning the writer and object refs.
+    fn build_pdf(&self, ctx: Option<&Context>) -> Result<(PdfWriter, u32, u32), String> {
         let mut writer = PdfWriter::new();
 
         // Pre-allocate catalog and pages objects
@@ -167,8 +205,10 @@ impl PdfDevice {
         let info_ref = writer.alloc_obj();
         let mut info_entries = vec![(b"Producer".to_vec(), PdfObj::LitString(b"stet".to_vec()))];
         // Title from output filename
-        if let Some(title) = std::path::Path::new(path)
-            .file_stem()
+        if let Some(title) = self
+            .output_path
+            .as_deref()
+            .and_then(|p| std::path::Path::new(p).file_stem())
             .and_then(|s| s.to_str())
         {
             info_entries.push((
@@ -209,15 +249,7 @@ impl PdfDevice {
         }
         writer.set_object(info_ref, &PdfObj::Dict(info_entries));
 
-        // Write to file
-        let file = std::fs::File::create(path).map_err(|e| format!("create {}: {}", path, e))?;
-        let mut bw = std::io::BufWriter::new(file);
-        writer
-            .write_pdf(&mut bw, catalog_ref, Some(info_ref))
-            .map_err(|e| format!("write {}: {}", path, e))?;
-
-        eprintln!("PDF written: {} ({} pages)", path, self.pages.len());
-        Ok(())
+        Ok((writer, catalog_ref, info_ref))
     }
 
     /// Embed all tracked fonts once at document level.
@@ -1017,6 +1049,10 @@ impl OutputDevice for PdfDevice {
             return Ok(());
         }
         self.write_pdf(Some(ctx))
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 

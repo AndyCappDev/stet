@@ -103,6 +103,13 @@ pub trait OutputDevice {
     fn finish_with_context(&mut self, _ctx: &crate::context::Context) -> Result<(), String> {
         self.finish()
     }
+
+    /// Downcast to a concrete type. Override in implementations that need
+    /// to be accessed after rendering (e.g., PdfDevice for in-memory output).
+    fn as_any(&self) -> &dyn std::any::Any {
+        // Default: return a unit reference (downcasts will fail gracefully)
+        &()
+    }
 }
 
 /// A null rendering device that discards all output.

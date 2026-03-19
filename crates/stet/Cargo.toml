@@ -1,0 +1,21 @@
+[package]
+name = "stet"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "PostScript Level 3 interpreter — library API"
+
+[features]
+default = ["render", "pdf-output"]
+render = ["dep:stet-render"]
+pdf-output = ["dep:stet-pdf"]
+
+[dependencies]
+stet-fonts.workspace = true
+stet-graphics.workspace = true
+stet-core.workspace = true
+stet-ops.workspace = true
+stet-engine.workspace = true
+stet-render = { workspace = true, optional = true }
+stet-pdf = { workspace = true, optional = true }
