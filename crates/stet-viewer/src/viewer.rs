@@ -697,10 +697,17 @@ impl ViewerApp {
             }
         }
 
-        // Full-page pixel dimensions at screen resolution
+        // Full-page pixel dimensions at screen resolution.
+        // Cap total pixels to avoid multi-GB allocations at extreme zoom.
+        // The viewport render handles detail at high zoom; the full-page
+        // buffer is only useful for scroll/blit at moderate zoom levels.
         let fp_pixel_w = (page.width as f32 * effective_scale * ppp).round() as u32;
         let fp_pixel_h = (page.height as f32 * effective_scale * ppp).round() as u32;
         if fp_pixel_w == 0 || fp_pixel_h == 0 {
+            return;
+        }
+        const MAX_FULLPAGE_PIXELS: u64 = 64 * 1024 * 1024;
+        if (fp_pixel_w as u64) * (fp_pixel_h as u64) > MAX_FULLPAGE_PIXELS {
             return;
         }
 
@@ -1154,18 +1161,11 @@ impl eframe::App for ViewerApp {
         // Poll for new pages
         self.poll_pages(ctx);
 
-        // Debug: check if files are being hovered
-        let hovered = ctx.input(|i| i.raw.hovered_files.len());
-        if hovered > 0 {
-            eprintln!("HOVER: {} files being dragged over window", hovered);
-        }
-
         // Handle file drops — send to interpreter for processing
         let dropped: Vec<_> = ctx.input(|i| {
             i.raw.dropped_files
                 .iter()
                 .filter_map(|f| {
-                    eprintln!("DROP EVENT: path={:?} name={}", f.path, f.name);
                     f.path.as_ref().map(|p| p.to_string_lossy().to_string())
                 })
                 .collect()
