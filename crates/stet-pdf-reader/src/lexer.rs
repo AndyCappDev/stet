@@ -175,6 +175,27 @@ impl<'a> Lexer<'a> {
             }
         }
 
+        // Handle implicit exponent: "0.00-50" means "0.00e-50".
+        // Some PDF writers omit the 'e', producing a sign+digits suffix
+        // immediately after a real number.
+        let mut implicit_exp = false;
+        if has_dot
+            && self.pos < self.data.len()
+            && (self.data[self.pos] == b'+' || self.data[self.pos] == b'-')
+        {
+            // Peek ahead to check for digits after the sign
+            let sign_pos = self.pos;
+            let mut peek = sign_pos + 1;
+            while peek < self.data.len() && self.data[peek].is_ascii_digit() {
+                peek += 1;
+            }
+            if peek > sign_pos + 1 {
+                // Consume sign + exponent digits
+                self.pos = peek;
+                implicit_exp = true;
+            }
+        }
+
         let s = &self.data[start..self.pos];
         if s == b"+" || s == b"-" || s == b"." || s == b"+." || s == b"-." {
             // Not a valid number — treat as keyword
@@ -182,11 +203,24 @@ impl<'a> Lexer<'a> {
         }
 
         if has_dot {
-            let s_str =
-                std::str::from_utf8(s).map_err(|_| PdfError::Other("invalid number".into()))?;
-            let f: f64 = s_str
-                .parse()
-                .map_err(|_| PdfError::Other(format!("invalid real: {s_str}")))?;
+            let f: f64 = if implicit_exp {
+                // Insert 'e' before the exponent sign: "0.00-50" → "0.00e-50"
+                let s_str = std::str::from_utf8(s)
+                    .map_err(|_| PdfError::Other("invalid number".into()))?;
+                let sign_idx = s_str.rfind(['+', '-']).unwrap();
+                let mut with_e = String::from(&s_str[..sign_idx]);
+                with_e.push('e');
+                with_e.push_str(&s_str[sign_idx..]);
+                with_e
+                    .parse()
+                    .map_err(|_| PdfError::Other(format!("invalid real: {s_str}")))?
+            } else {
+                let s_str = std::str::from_utf8(s)
+                    .map_err(|_| PdfError::Other("invalid number".into()))?;
+                s_str
+                    .parse()
+                    .map_err(|_| PdfError::Other(format!("invalid real: {s_str}")))?
+            };
             Ok(Token::Real(f))
         } else {
             let s_str =
