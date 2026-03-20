@@ -6046,6 +6046,11 @@ fn render_axial_shading(
         axis_x.abs() > 1e-6 && axis_y.abs() > 1e-6
     };
 
+    // Detect rotated BBox: if CTM has rotation components (b or c non-zero),
+    // the BBox is not axis-aligned in device space and needs proper polygon clipping.
+    let bbox_is_rotated = params.bbox.is_some()
+        && (params.ctm.b.abs() > 1e-10 || params.ctm.c.abs() > 1e-10);
+
     if needs_perpendicular_clip {
         // Diagonal gradient with non-extended side — fall back to tiny-skia
         // for Sutherland-Hodgman polygon clipping.
@@ -6072,12 +6077,27 @@ fn render_axial_shading(
             ..Paint::default()
         };
 
-        let mut poly: Vec<(f32, f32)> = vec![
-            (rx_min, ry_min),
-            (rx_max, ry_min),
-            (rx_max, ry_max),
-            (rx_min, ry_max),
-        ];
+        // Use rotated BBox polygon when CTM has rotation, otherwise axis-aligned rect
+        let mut poly: Vec<(f32, f32)> = if bbox_is_rotated {
+            let bbox = params.bbox.as_ref().unwrap();
+            let corners = [
+                params.ctm.transform_point(bbox[0], bbox[1]),
+                params.ctm.transform_point(bbox[2], bbox[1]),
+                params.ctm.transform_point(bbox[2], bbox[3]),
+                params.ctm.transform_point(bbox[0], bbox[3]),
+            ];
+            corners
+                .iter()
+                .map(|(x, y)| ((*x as f32 - vp_x) * scale_x, (*y as f32 - vp_y) * scale_y))
+                .collect()
+        } else {
+            vec![
+                (rx_min, ry_min),
+                (rx_max, ry_min),
+                (rx_max, ry_max),
+                (rx_min, ry_max),
+            ]
+        };
         let ax = (dx1 - dx0) as f32 * scale_x;
         let ay = (dy1 - dy0) as f32 * scale_y;
         if !params.extend_start {
@@ -6181,6 +6201,29 @@ fn render_axial_shading(
         let dt_dx = inv_sx * axis_x * inv_len_sq;
         let dt_dy = inv_sy * axis_y * inv_len_sq;
 
+        // Per-pixel rotated BBox clipping: precompute inverse CTM linear coefficients
+        // to map each pixel back to user space and check against the original BBox.
+        let bbox_pixel_clip = if bbox_is_rotated {
+            if let Some(inv) = params.ctm.invert() {
+                let bbox = params.bbox.as_ref().unwrap();
+                // user_x = inv.a * dev_x + inv.c * dev_y + inv.tx
+                // dev_x = px * inv_sx + vp_x
+                let dux_dx = inv.a * inv_sx;
+                let dux_dy = inv.c * inv_sy;
+                let ux_base = inv.a * dev_origin_x + inv.c * dev_origin_y + inv.tx;
+                let duy_dx = inv.b * inv_sx;
+                let duy_dy = inv.d * inv_sy;
+                let uy_base = inv.b * dev_origin_x + inv.d * dev_origin_y + inv.ty;
+                let (bx0, bx1) = (bbox[0].min(bbox[2]), bbox[0].max(bbox[2]));
+                let (by0, by1) = (bbox[1].min(bbox[3]), bbox[1].max(bbox[3]));
+                Some((dux_dx, dux_dy, ux_base, duy_dx, duy_dy, uy_base, bx0, by0, bx1, by1))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         let ix_min = rx_min.floor() as u32;
         let ix_max = rx_max.ceil().min(pw as f32) as u32;
         let iy_min = ry_min.floor() as u32;
@@ -6193,10 +6236,32 @@ fn render_axial_shading(
         for py in iy_min..iy_max {
             let t_row = t_origin + dt_dy * py as f64;
             let row_offset = py as usize * stride;
+
+            // Precompute row-base values for rotated BBox check
+            let (ux_row, uy_row) = if let Some((_, dux_dy, ux_base, _, duy_dy, uy_base, ..)) =
+                &bbox_pixel_clip
+            {
+                (
+                    ux_base + dux_dy * py as f64,
+                    uy_base + duy_dy * py as f64,
+                )
+            } else {
+                (0.0, 0.0)
+            };
+
             for px in ix_min..ix_max {
                 // Check clip mask
                 if let Some(md) = mask_data {
                     if md[py as usize * pw as usize + px as usize] == 0 {
+                        continue;
+                    }
+                }
+
+                // Per-pixel rotated BBox clip
+                if let Some((dux_dx, _, _, duy_dx, _, _, bx0, by0, bx1, by1)) = &bbox_pixel_clip {
+                    let ux = ux_row + dux_dx * px as f64;
+                    let uy = uy_row + duy_dx * px as f64;
+                    if ux < *bx0 || ux > *bx1 || uy < *by0 || uy > *by1 {
                         continue;
                     }
                 }
@@ -6388,6 +6453,19 @@ fn render_radial_shading(
     let inv_sx = 1.0 / scale_x as f64;
     let inv_sy = 1.0 / scale_y as f64;
 
+    // Rotated BBox: check per-pixel user-space containment
+    let rotated_bbox = if let Some(bbox) = &params.bbox {
+        if params.ctm.b.abs() > 1e-10 || params.ctm.c.abs() > 1e-10 {
+            let (bx0, bx1) = (bbox[0].min(bbox[2]), bbox[0].max(bbox[2]));
+            let (by0, by1) = (bbox[1].min(bbox[3]), bbox[1].max(bbox[3]));
+            Some((bx0, by0, bx1, by1))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     let data = pixmap.data_mut();
     let stride = pw as usize * 4;
 
@@ -6396,6 +6474,14 @@ fn render_radial_shading(
         for px in px_min..px_max {
             let dev_x = px as f64 * inv_sx + vp_x as f64;
             let (ux, uy) = inv_ctm.transform_point(dev_x, dev_y);
+
+            // Per-pixel rotated BBox clip
+            if let Some((bx0, by0, bx1, by1)) = rotated_bbox {
+                if ux < bx0 || ux > bx1 || uy < by0 || uy > by1 {
+                    continue;
+                }
+            }
+
             let t = solve_radial_t(
                 ux,
                 uy,
