@@ -756,6 +756,15 @@ fn decode_jpx(data: &[u8]) -> Result<Vec<u8>, PdfError> {
         .map_err(|e| PdfError::DecompressionError(format!("JPXDecode: {e}")))
 }
 
+/// Query the number of color channels (excluding alpha) and whether alpha is
+/// present in a JPEG 2000 image, without fully decoding the pixel data.
+/// Returns `(color_channels, has_alpha)`.
+#[cfg(feature = "jpx")]
+pub fn jpx_color_info(data: &[u8]) -> Option<(u8, bool)> {
+    let image = hayro_jpeg2000::Image::new(data, &hayro_jpeg2000::DecodeSettings::default()).ok()?;
+    Some((image.color_space().num_channels(), image.has_alpha()))
+}
+
 /// Apply PNG or TIFF predictor to decoded data.
 fn apply_predictor(data: &[u8], parms: &PdfDict, predictor: i64) -> Result<Vec<u8>, PdfError> {
     let columns = parms.get_int(b"Columns").unwrap_or(1) as usize;

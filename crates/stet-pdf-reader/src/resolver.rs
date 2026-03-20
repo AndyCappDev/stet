@@ -142,6 +142,36 @@ impl<'a> Resolver<'a> {
         }
     }
 
+    /// Get the raw (pre-filter) stream bytes and filter list for an object.
+    /// Used for peeking at JPX metadata before full decode.
+    pub fn raw_stream_and_filters(
+        &self,
+        obj: &PdfObj,
+    ) -> Result<(Vec<u8>, Vec<filters::Filter>), PdfError> {
+        let (obj_num, gen_num) = match obj {
+            PdfObj::Ref(n, g) => (*n, *g),
+            _ => return Err(PdfError::Other("expected Ref".into())),
+        };
+        let resolved = self.resolve(obj_num, gen_num)?;
+        match resolved {
+            PdfObj::Stream {
+                dict,
+                data_offset,
+                data_len,
+            } => {
+                let raw_slice = &self.data[data_offset..data_offset + data_len];
+                let raw = if let Some(ref enc) = self.encryption {
+                    enc.decrypt_stream(raw_slice, obj_num, gen_num)
+                } else {
+                    raw_slice.to_vec()
+                };
+                let (filter_list, _parms) = filters::parse_filters(&dict)?;
+                Ok((raw, filter_list))
+            }
+            _ => Err(PdfError::Other("not a stream".into())),
+        }
+    }
+
     /// Resolve an object and return decompressed stream data, accepting a PdfObj directly.
     pub fn stream_data_from_obj(&self, obj: &PdfObj) -> Result<Vec<u8>, PdfError> {
         // If it's a Ref, use stream_data() which handles encryption with obj_num/gen_num.

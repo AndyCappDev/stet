@@ -1713,20 +1713,37 @@ impl<'a> ContentInterpreter<'a> {
         // For JPXDecode without explicit ColorSpace, infer from decoded data length.
         // JP2 embeds its own color space info; the decoder returns interleaved pixel data
         // whose length = width × height × num_components.
-        let resolved_cs = if !is_image_mask && !has_explicit_cs {
+        let (resolved_cs, sample_data) = if !is_image_mask && !has_explicit_cs {
             let pixels = width as usize * height as usize;
             if pixels > 0 {
                 let n_comps = sample_data.len() / pixels;
-                Some(match n_comps {
-                    1 => ResolvedColorSpace::DeviceGray,
-                    4 => ResolvedColorSpace::DeviceCMYK,
-                    _ => ResolvedColorSpace::DeviceRGB, // 3 or 2 (gray+alpha treated as RGB)
-                })
+                // For 4-component JPX images, check JP2 metadata to distinguish
+                // RGBA (sRGB + alpha) from CMYK. Without this, RGBA images get
+                // misidentified as CMYK, producing wrong colors (e.g., orange → blue).
+                if n_comps == 4 && self.is_jpx_rgba(obj) {
+                    // Strip alpha from RGBA → RGB. The alpha is typically opaque
+                    // for these embedded images; proper alpha handling would
+                    // require PreconvertedRGBA but the PDF has no SMask.
+                    let mut rgb = Vec::with_capacity(pixels * 3);
+                    for chunk in sample_data.chunks_exact(4) {
+                        rgb.push(chunk[0]);
+                        rgb.push(chunk[1]);
+                        rgb.push(chunk[2]);
+                    }
+                    (Some(ResolvedColorSpace::DeviceRGB), rgb)
+                } else {
+                    let cs = match n_comps {
+                        1 => ResolvedColorSpace::DeviceGray,
+                        4 => ResolvedColorSpace::DeviceCMYK,
+                        _ => ResolvedColorSpace::DeviceRGB,
+                    };
+                    (Some(cs), sample_data)
+                }
             } else {
-                resolved_cs
+                (resolved_cs, sample_data)
             }
         } else {
-            resolved_cs
+            (resolved_cs, sample_data)
         };
 
         // Image matrix: [width 0 0 -height 0 height] maps unit square to image
@@ -2209,6 +2226,22 @@ impl<'a> ContentInterpreter<'a> {
         }
     }
 
+    /// Check if a JPXDecode image stream contains RGB+alpha (not CMYK).
+    /// Peeks at the JP2 header metadata without re-decoding.
+    fn is_jpx_rgba(&self, obj: &PdfObj) -> bool {
+        #[cfg(feature = "jpx")]
+        {
+            if let Ok((raw, filters)) = self.resolver.raw_stream_and_filters(obj) {
+                if filters.iter().any(|f| matches!(f, crate::filters::Filter::JPXDecode)) {
+                    if let Some((color_channels, has_alpha)) = crate::filters::jpx_color_info(&raw) {
+                        return color_channels == 3 && has_alpha;
+                    }
+                }
+            }
+        }
+        false
+    }
+
     /// Handle a Form XObject (recursive content stream).
     fn handle_form_xobject(&mut self, obj: &PdfObj, dict: &PdfDict) -> Result<(), PdfError> {
         if self.depth >= 20 {
@@ -2313,6 +2346,7 @@ impl<'a> ContentInterpreter<'a> {
             // Extract isolated and knockout flags from Group dict
             let isolated = self.get_group_isolated(dict);
             let knockout = self.get_group_knockout(dict);
+
 
             // Push Group element to parent display list
             self.display_list.push(DisplayElement::Group {
