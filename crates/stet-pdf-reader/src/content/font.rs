@@ -655,6 +655,8 @@ const CID_FONT_SUBSTITUTIONS: &[(&str, &str)] = &[
     ("CourierNewPS-BoldItalicMT", "LiberationMono-BoldItalic"),
     ("CourierNewPS-ItalicMT", "LiberationMono-Italic"),
     ("CourierNewPSMT", "LiberationMono"),
+    ("LucidaConsole", "LiberationMono"),
+    ("LucidaConsole,Bold", "LiberationMono-Bold"),
     ("Calibri", "LiberationSans"),
     ("Calibri,Bold", "LiberationSans-Bold"),
     ("Calibri,BoldItalic", "LiberationSans-BoldItalic"),
