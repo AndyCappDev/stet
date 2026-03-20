@@ -81,9 +81,15 @@ pub fn parse_xref(data: &[u8]) -> Result<XrefTable, PdfError> {
         }
     }
 
-    // If xref parsing failed completely, fall back to scanning the file for objects
+    // If xref parsing failed completely, try discovering orphaned xref sections
+    // (e.g., linearized PDFs where startxref points to byte 0 but the real xref
+    // table is elsewhere in the file). Only fall back to full scan if that also
+    // finds nothing.
     if xref_failed && sections.is_empty() {
-        return rebuild_xref_from_scan(data);
+        discover_orphaned_xref_sections(data, &mut sections, &mut visited);
+        if sections.is_empty() {
+            return rebuild_xref_from_scan(data);
+        }
     }
 
     // Scan all trailer dicts and startxref values in the file for xref
@@ -194,12 +200,17 @@ fn rebuild_xref_from_scan(data: &[u8]) -> Result<XrefTable, PdfError> {
     while pos < data.len() {
         // Skip to something that looks like a digit at start-of-line or start-of-file
         if pos > 0 && data[pos - 1] != b'\n' && data[pos - 1] != b'\r' {
-            // Advance to next line
-            while pos < data.len() && data[pos] != b'\n' {
+            // Advance to next line (handle both \n and \r line endings)
+            while pos < data.len() && data[pos] != b'\n' && data[pos] != b'\r' {
                 pos += 1;
             }
+            // Skip line ending character(s)
             if pos < data.len() {
-                pos += 1; // skip \n
+                if data[pos] == b'\r' && pos + 1 < data.len() && data[pos + 1] == b'\n' {
+                    pos += 2;
+                } else {
+                    pos += 1;
+                }
             }
             continue;
         }
@@ -222,12 +233,16 @@ fn rebuild_xref_from_scan(data: &[u8]) -> Result<XrefTable, PdfError> {
             }
         }
 
-        // Advance to next line
-        while pos < data.len() && data[pos] != b'\n' {
+        // Advance to next line (handle both \n and \r line endings)
+        while pos < data.len() && data[pos] != b'\n' && data[pos] != b'\r' {
             pos += 1;
         }
         if pos < data.len() {
-            pos += 1;
+            if data[pos] == b'\r' && pos + 1 < data.len() && data[pos + 1] == b'\n' {
+                pos += 2;
+            } else {
+                pos += 1;
+            }
         }
     }
 
