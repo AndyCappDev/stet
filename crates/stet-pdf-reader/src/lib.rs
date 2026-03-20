@@ -207,11 +207,17 @@ impl<'a> PdfDocument<'a> {
 
         let mut result = Vec::new();
         for (i, &(obj_num, gen_num)) in info.contents.iter().enumerate() {
-            if i > 0 {
-                result.push(b'\n');
+            // Skip content stream refs that fail (e.g., dict without stream body
+            // in malformed PDFs). Continue with remaining streams.
+            match self.resolver.stream_data(obj_num, gen_num) {
+                Ok(data) => {
+                    if i > 0 && !result.is_empty() {
+                        result.push(b'\n');
+                    }
+                    result.extend_from_slice(&data);
+                }
+                Err(_) => continue,
             }
-            let data = self.resolver.stream_data(obj_num, gen_num)?;
-            result.extend_from_slice(&data);
         }
 
         Ok(result)
