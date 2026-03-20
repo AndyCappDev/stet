@@ -459,7 +459,7 @@ fn run_viewer_mode(
                 }
                 if let Some(ref sender) = ctx.display_list_sender {
                     render_dropped_pdf(
-                        path, dpi_override, sender, no_icc, output_profile_path.as_deref(), overprint,
+                        path, dpi_override, sender, &ctx.icc_cache, overprint,
                     );
                 }
             }
@@ -498,8 +498,7 @@ fn run_viewer_mode(
 
             if is_pdf_file(&path) {
                 render_dropped_pdf(
-                    &path, established_dpi, &sender, no_icc,
-                    output_profile_path.as_deref(), overprint,
+                    &path, established_dpi, &sender, &ctx.icc_cache, overprint,
                 );
             } else {
                 run_file_jobs(
@@ -1216,8 +1215,7 @@ fn render_dropped_pdf(
     path: &str,
     dpi_override: Option<f64>,
     dl_sender: &std::sync::mpsc::Sender<stet_viewer::DisplayListMsg>,
-    no_icc: bool,
-    output_profile_path: Option<&str>,
+    icc_cache: &stet_graphics::icc::IccCache,
     overprint: bool,
 ) {
     let dpi = dpi_override.unwrap_or(150.0);
@@ -1230,18 +1228,7 @@ fn render_dropped_pdf(
         }
     };
 
-    let mut icc_cache = stet_graphics::icc::IccCache::new();
-    if !no_icc {
-        if let Some(profile_path) = output_profile_path {
-            if let Ok(bytes) = std::fs::read(profile_path) {
-                icc_cache.register_profile(&bytes);
-            }
-        } else {
-            icc_cache.search_system_cmyk_profile();
-        }
-    }
-
-    let mut doc = match PdfDocument::from_bytes_with_icc(&data, icc_cache) {
+    let mut doc = match PdfDocument::from_bytes_with_icc(&data, icc_cache.clone()) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("Error: cannot parse '{}': {}", path, e);
