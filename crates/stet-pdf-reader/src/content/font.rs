@@ -2029,12 +2029,21 @@ impl CidCffPdfFont {
 impl CffPdfFont {
     fn glyph_path(&self, char_code: u8) -> Option<PsPath> {
         let glyph_name = self.encoding[char_code as usize].as_deref()?;
-        // Find glyph index from charset (charset[0]=.notdef, charset[i]=GID i)
-        let gid = self
-            .font
-            .charset
-            .iter()
-            .position(|name| name == glyph_name)?;
+        // Use the CFF's built-in encoding (char_code → GID) as the primary
+        // lookup since it's the most direct mapping for embedded fonts.
+        // Fall back to searching the charset by glyph name for cases where
+        // the PDF /Encoding remaps character codes to different glyphs.
+        let gid = {
+            let cff_gid = self.font.encoding.get(char_code as usize).copied().unwrap_or(0) as usize;
+            if cff_gid > 0 && cff_gid < self.font.char_strings.len() {
+                cff_gid
+            } else {
+                self.font
+                    .charset
+                    .iter()
+                    .position(|name| name == glyph_name)?
+            }
+        };
         if gid >= self.font.char_strings.len() {
             return None;
         }
