@@ -13,7 +13,7 @@ authors = ["Scott Bowman <scott@bowmans.org>"]
 thiserror = "2"
 png = "0.17"
 rayon = "1"
-stet-tiny-skia = { path = "crates/tiny-skia" }
+stet-tiny-skia = { path = "crates/stet-tiny-skia" }
 eframe = "0.31"
 egui = "0.31"
 stet-fonts = { path = "crates/stet-fonts" }
