@@ -1240,6 +1240,7 @@ fn render_dropped_pdf(
     let page_count = doc.page_count();
     eprintln!("PDF: {} ({} pages)", path, page_count);
 
+    let start = std::time::Instant::now();
     for page in 0..page_count {
         match doc.render_page(page, dpi) {
             Ok(display_list) => {
@@ -1254,6 +1255,10 @@ fn render_dropped_pdf(
             }
         }
     }
+    eprintln!(
+        "PDF interpret time: {:.3} seconds",
+        start.elapsed().as_secs_f64()
+    );
 }
 
 /// Render PDF files to PNG output.
