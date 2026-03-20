@@ -405,10 +405,33 @@ pub fn op_setcolor(ctx: &mut Context) -> Result<(), PsError> {
             if let Some(hash) = profile_hash {
                 set_icc_color(ctx, n, &hash)
             } else {
+                // No embedded ICC profile — use PLRM formulas, not system ICC profile
                 match n {
                     1 => op_setgray(ctx),
                     3 => op_setrgbcolor(ctx),
-                    4 => op_setcmykcolor(ctx),
+                    4 => {
+                        // Use from_cmyk (PLRM formula) directly, not op_setcmykcolor
+                        // which would apply the system CMYK ICC profile
+                        if ctx.o_stack.len() < 4 {
+                            return Err(PsError::StackUnderflow);
+                        }
+                        let k = ctx.o_stack.peek(0)?.as_f64().ok_or(PsError::TypeCheck)?;
+                        let y = ctx.o_stack.peek(1)?.as_f64().ok_or(PsError::TypeCheck)?;
+                        let m = ctx.o_stack.peek(2)?.as_f64().ok_or(PsError::TypeCheck)?;
+                        let c = ctx.o_stack.peek(3)?.as_f64().ok_or(PsError::TypeCheck)?;
+                        ctx.o_stack.pop()?;
+                        ctx.o_stack.pop()?;
+                        ctx.o_stack.pop()?;
+                        ctx.o_stack.pop()?;
+                        ctx.gstate.color = DeviceColor::from_cmyk(
+                            c.clamp(0.0, 1.0),
+                            m.clamp(0.0, 1.0),
+                            y.clamp(0.0, 1.0),
+                            k.clamp(0.0, 1.0),
+                        );
+                        ctx.gstate.current_pattern = None;
+                        Ok(())
+                    }
                     _ => Err(PsError::RangeCheck),
                 }
             }

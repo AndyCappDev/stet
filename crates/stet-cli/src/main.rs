@@ -526,8 +526,12 @@ fn run_viewer_mode(
                 first_page = Some(msg);
                 break;
             }
+            Ok(stet_viewer::ViewerMsg::JobDone) => {
+                // All CLI files processed without producing pages — no viewer needed
+                break;
+            }
             Ok(_) => {
-                // NewJob/JobDone control messages — keep waiting for a real page
+                // NewJob and other control messages — keep waiting
                 continue;
             }
             Err(_) => {
