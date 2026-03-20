@@ -85,6 +85,24 @@ let mut interp = stet::Interpreter::new();
 interp.exec(b"1 2 add ==")?;  // prints "3" to stdout
 ```
 
+## Choosing a DPI
+
+The `dpi` parameter controls the coordinate space of the display list, not
+just the output pixel count. PostScript paths are transformed to device
+coordinates at the specified DPI during interpretation. For best quality,
+use a DPI that matches your final output:
+
+```rust
+// Standard output (matches built-in device defaults)
+let pages = interp.render(ps_data, 300.0)?;
+
+// Lower resolution for faster screen viewing
+let pages = interp.render(ps_data, 150.0)?;
+
+// High-resolution proofing
+let pages = interp.render(ps_data, 600.0)?;
+```
+
 ## Configuration
 
 ```rust

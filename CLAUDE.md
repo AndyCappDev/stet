@@ -67,6 +67,10 @@ Output goes to `out_page1.png`, `out_page2.png`, etc. in the current directory.
 
 ## Development Conventions
 
+### Documentation Maintenance
+
+When modifying `DisplayElement`, `DisplayList`, or any of the param structs in `stet-graphics/src/device.rs` (e.g., `FillParams`, `StrokeParams`, `ImageParams`, `ImageColorSpace`, `ShadingColorSpace`, `SpotColorSpace`), **you must update `docs/DISPLAY-LIST.md`** to reflect the change. This includes adding, removing, or renaming element variants, fields, or color space types.
+
 ### Code Style
 
 - Use `cargo fmt` (rustfmt) for formatting

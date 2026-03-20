@@ -353,14 +353,6 @@ fn run_viewer_mode(
 ) {
     use stet_core::device::NullDevice;
 
-    if file_args.is_empty() {
-        // REPL mode — no viewer, just run interactively
-        let mut ctx = create_context(no_icc, output_profile_path.as_deref());
-        ctx.device_factory = Some(Box::new(|w, h| Box::new(SkiaDevice::new(w, h))));
-        run_repl(&mut ctx);
-        return;
-    }
-
     // Get CMYK profile bytes for ICC-aware viewer rendering.
     let system_cmyk_bytes = if !no_icc {
         if let Some(ref path) = output_profile_path {
@@ -443,43 +435,55 @@ fn run_viewer_mode(
         // NullDevice: no-op rendering — display list capture is the output
         ctx.device_factory = Some(Box::new(|w, h| Box::new(NullDevice::new(w, h))));
 
-        // Process initial CLI files: PDF files go direct, PS/EPS through interpreter
-        let ps_files: Vec<String> = file_args.iter().filter(|f| !is_pdf_file(f)).cloned().collect();
-        let pdf_files: Vec<String> = file_args.iter().filter(|f| is_pdf_file(f)).cloned().collect();
+        if file_args.is_empty() {
+            // REPL mode with viewer: install a default device, run the REPL,
+            // and send display lists to the viewer as showpage is called.
+            install_device(&mut ctx, dpi_override, "png");
+            run_repl(&mut ctx);
 
-        // Render PDF files first (no interpreter needed)
-        for (i, path) in pdf_files.iter().enumerate() {
-            if i > 0 || !ps_files.is_empty() {
-                if let Some(ref sender) = ctx.display_list_sender {
-                    let _ = sender.send((stet_graphics::display_list::DisplayList::new(), 0.0, 0, 0));
-                }
-            }
+            // REPL done — signal JobDone, then accept dropped files
             if let Some(ref sender) = ctx.display_list_sender {
-                render_dropped_pdf(
-                    path, dpi_override, sender, no_icc, output_profile_path.as_deref(), overprint,
-                );
+                let _ = sender.send((stet_graphics::display_list::DisplayList::new(), -1.0, 0, 0));
             }
-        }
+        } else {
+            // Process initial CLI files: PDF files go direct, PS/EPS through interpreter
+            let ps_files: Vec<String> = file_args.iter().filter(|f| !is_pdf_file(f)).cloned().collect();
+            let pdf_files: Vec<String> = file_args.iter().filter(|f| is_pdf_file(f)).cloned().collect();
 
-        // Render PS/EPS files through interpreter
-        if !ps_files.is_empty() {
-            if !pdf_files.is_empty() {
+            // Render PDF files first (no interpreter needed)
+            for (i, path) in pdf_files.iter().enumerate() {
+                if i > 0 || !ps_files.is_empty() {
+                    if let Some(ref sender) = ctx.display_list_sender {
+                        let _ = sender.send((stet_graphics::display_list::DisplayList::new(), 0.0, 0, 0));
+                    }
+                }
                 if let Some(ref sender) = ctx.display_list_sender {
-                    let _ = sender.send((stet_graphics::display_list::DisplayList::new(), 0.0, 0, 0));
+                    render_dropped_pdf(
+                        path, dpi_override, sender, no_icc, output_profile_path.as_deref(), overprint,
+                    );
                 }
             }
-            run_file_jobs_viewer(&mut ctx, dpi_override, &ps_files, advance_rx);
+
+            // Render PS/EPS files through interpreter
+            if !ps_files.is_empty() {
+                if !pdf_files.is_empty() {
+                    if let Some(ref sender) = ctx.display_list_sender {
+                        let _ = sender.send((stet_graphics::display_list::DisplayList::new(), 0.0, 0, 0));
+                    }
+                }
+                run_file_jobs_viewer(&mut ctx, dpi_override, &ps_files, advance_rx);
+            }
+
+            // CLI files done — send final JobDone
+            if let Some(ref sender) = ctx.display_list_sender {
+                let _ = sender.send((stet_graphics::display_list::DisplayList::new(), -1.0, 0, 0));
+            }
         }
 
-        // Capture the established DPI for subsequent drops
+        // Wait for dropped files (works for both REPL and file-based paths)
         let established_dpi = Some(ctx.current_page_dpi())
             .filter(|&d| d > 1.0)
             .or(dpi_override);
-
-        // CLI files done — send final JobDone, then wait for dropped files
-        if let Some(ref sender) = ctx.display_list_sender {
-            let _ = sender.send((stet_graphics::display_list::DisplayList::new(), -1.0, 0, 0));
-        }
 
         while let Ok(path) = file_drop_rx.recv() {
             let sender = match ctx.display_list_sender {
