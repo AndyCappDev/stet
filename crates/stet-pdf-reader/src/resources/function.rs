@@ -44,6 +44,11 @@ pub enum PdfFunction {
         range: Vec<[f64; 2]>,
         tokens: Vec<CalcToken>,
     },
+    /// Array of functions whose outputs are concatenated.
+    /// Used when a shading's /Function is an array of per-component functions.
+    Composite {
+        functions: Vec<PdfFunction>,
+    },
 }
 
 /// Token for Type 4 calculator functions.
@@ -160,7 +165,19 @@ impl PdfFunction {
                 range,
                 tokens,
             } => evaluate_calculator(inputs, domain, range, tokens),
+            Self::Composite { functions } => {
+                let mut result = Vec::new();
+                for f in functions {
+                    result.extend(f.evaluate(inputs));
+                }
+                result
+            }
         }
+    }
+
+    /// Create a composite function from an array of per-component functions.
+    pub fn composite(functions: Vec<PdfFunction>) -> Self {
+        Self::Composite { functions }
     }
 
     /// Get the first input dimension's domain [min, max].
@@ -170,6 +187,7 @@ impl PdfFunction {
             | Self::Exponential { domain, .. }
             | Self::Stitching { domain, .. }
             | Self::Calculator { domain, .. } => domain,
+            Self::Composite { functions } => return functions.first().map_or([0.0, 1.0], |f| f.domain_0()),
         };
         d.first().copied().unwrap_or([0.0, 1.0])
     }
@@ -191,6 +209,7 @@ impl PdfFunction {
                 }
             }
             Self::Calculator { range, .. } => range.len(),
+            Self::Composite { functions } => functions.iter().map(|f| f.n_outputs()).sum(),
         }
     }
 

@@ -42,7 +42,6 @@ pub fn handle_shading(
 
     // Resolve the color space once, used by all shading types
     let resolved_cs = resolve_shading_resolved_cs(dict, resolver);
-
     match shading_type {
         1 => handle_function_based(
             dict,
@@ -540,8 +539,15 @@ fn parse_shading_function(dict: &PdfDict, resolver: &Resolver) -> Result<PdfFunc
         if arr.len() == 1 {
             return PdfFunction::parse(&arr[0], resolver);
         }
-        if let Some(first) = arr.first() {
-            return PdfFunction::parse(first, resolver);
+        // Array of N functions: each produces 1 output component.
+        // Combine into a composite that concatenates all outputs.
+        // This is common for DeviceCMYK shadings (4 functions → 4 components).
+        if arr.len() > 1 {
+            let mut funcs = Vec::with_capacity(arr.len());
+            for item in arr {
+                funcs.push(PdfFunction::parse(item, resolver)?);
+            }
+            return Ok(PdfFunction::composite(funcs));
         }
     }
     PdfFunction::parse(&fn_obj, resolver)
