@@ -59,6 +59,8 @@ pub struct FdEntry {
     pub nominal_width_x: f64,
     /// Local subroutines for this FD.
     pub local_subrs: Vec<Vec<u8>>,
+    /// Per-FD FontMatrix (None = use top-level FontMatrix).
+    pub font_matrix: Option<[f64; 6]>,
 }
 
 /// Parse CFF binary data into a list of `CffFont` objects.
@@ -240,7 +242,18 @@ pub fn parse_cff(data: &[u8]) -> Result<Vec<CffFont>, String> {
                             default_width_x: 0.0,
                             nominal_width_x: 0.0,
                             local_subrs: Vec::new(),
+                            font_matrix: None,
                         };
+
+                        // Check for FD-level FontMatrix
+                        if let Some(fm_vals) = dict_get(&fd_top, DictOp::TwoByte(12, 7))
+                            && fm_vals.len() == 6
+                        {
+                            fd_entry.font_matrix = Some([
+                                fm_vals[0], fm_vals[1], fm_vals[2],
+                                fm_vals[3], fm_vals[4], fm_vals[5],
+                            ]);
+                        }
 
                         // Each FD has its own Private DICT
                         if let Some(fd_priv_ops) = dict_get(&fd_top, DictOp::OneByte(18))

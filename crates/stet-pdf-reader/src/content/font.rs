@@ -1943,19 +1943,25 @@ impl CidCffPdfFont {
         if gid >= self.font.char_strings.len() {
             return None;
         }
-        // For CID fonts, use per-FD private dict values
-        let (default_width_x, nominal_width_x, local_subrs) = if self.font.is_cid
+        // For CID fonts, use per-FD private dict values and FontMatrix
+        let (default_width_x, nominal_width_x, local_subrs, fd_font_matrix) = if self.font.is_cid
             && !self.font.fd_select.is_empty()
             && !self.font.fd_array.is_empty()
         {
             let fd_idx = *self.font.fd_select.get(gid).unwrap_or(&0) as usize;
             if let Some(fd) = self.font.fd_array.get(fd_idx) {
-                (fd.default_width_x, fd.nominal_width_x, &fd.local_subrs)
+                (
+                    fd.default_width_x,
+                    fd.nominal_width_x,
+                    &fd.local_subrs,
+                    fd.font_matrix,
+                )
             } else {
                 (
                     self.font.default_width_x,
                     self.font.nominal_width_x,
                     &self.font.local_subrs,
+                    None,
                 )
             }
         } else {
@@ -1963,6 +1969,7 @@ impl CidCffPdfFont {
                 self.font.default_width_x,
                 self.font.nominal_width_x,
                 &self.font.local_subrs,
+                None,
             )
         };
         let result = execute_type2_charstring(
@@ -1975,6 +1982,16 @@ impl CidCffPdfFont {
         )
         .ok()?;
 
+        // Apply per-FD FontMatrix if present. The FD FontMatrix maps charstring
+        // coordinates to the top-level glyph space; the top-level FontMatrix
+        // (applied by the text rendering code) then maps to text space.
+        let path = if let Some(fd_fm) = fd_font_matrix {
+            let m = Matrix::new(fd_fm[0], fd_fm[1], fd_fm[2], fd_fm[3], fd_fm[4], fd_fm[5]);
+            result.path.transform(&m)
+        } else {
+            result.path
+        };
+
         // For OTF substitutes: fit glyph within the PDF's expected width.
         // If the glyph is wider than the cell, condense it (scale down).
         // If narrower, center it without stretching (preserves stroke weight).
@@ -1983,18 +2000,16 @@ impl CidCffPdfFont {
             let glyph_w = result.width_x * self.font_matrix.a;
             if glyph_w > 0.001 && pdf_w > 0.001 {
                 if glyph_w > pdf_w * 1.02 {
-                    // Glyph wider than cell: condense horizontally
                     let ratio = pdf_w / glyph_w;
-                    return Some(result.path.transform(&Matrix::scale(ratio, 1.0)));
+                    return Some(path.transform(&Matrix::scale(ratio, 1.0)));
                 } else if glyph_w < pdf_w * 0.98 {
-                    // Glyph narrower than cell: center without stretching
                     let offset = (pdf_w - glyph_w) / 2.0 / self.font_matrix.a;
-                    return Some(result.path.transform(&Matrix::translate(offset, 0.0)));
+                    return Some(path.transform(&Matrix::translate(offset, 0.0)));
                 }
             }
         }
 
-        Some(result.path)
+        Some(path)
     }
 
     fn glyph_width_cid(&self, cid: u16) -> f64 {
