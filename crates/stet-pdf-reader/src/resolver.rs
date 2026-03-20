@@ -128,7 +128,8 @@ impl<'a> Resolver<'a> {
                 } else {
                     raw_slice.to_vec()
                 };
-                let (filter_list, parms) = filters::parse_filters(&dict)?;
+                let (filter_list, mut parms) = filters::parse_filters(&dict)?;
+                filters::resolve_decode_parms(&dict, &mut parms, self);
                 if filter_list.is_empty() {
                     Ok(raw)
                 } else {
@@ -187,7 +188,8 @@ impl<'a> Resolver<'a> {
             } => {
                 // No encryption for inline stream objects (no obj_num to derive key from)
                 let raw = &self.data[data_offset..data_offset + data_len];
-                let (filter_list, parms) = filters::parse_filters(&dict)?;
+                let (filter_list, mut parms) = filters::parse_filters(&dict)?;
+                filters::resolve_decode_parms(&dict, &mut parms, self);
                 if filter_list.is_empty() {
                     Ok(raw.to_vec())
                 } else {
@@ -498,7 +500,8 @@ impl<'a> Resolver<'a> {
         } else {
             raw_slice.to_vec()
         };
-        let (filter_list, parms) = filters::parse_filters(&dict)?;
+        let (filter_list, mut parms) = filters::parse_filters(&dict)?;
+        filters::resolve_decode_parms(&dict, &mut parms, self);
         let stream_data = if filter_list.is_empty() {
             raw
         } else {

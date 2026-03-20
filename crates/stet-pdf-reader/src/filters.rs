@@ -39,14 +39,18 @@ pub fn parse_filters(dict: &PdfDict) -> Result<(Vec<Filter>, Vec<Option<PdfDict>
         filters.push(filter_from_name(name)?);
     }
 
-    // Parse DecodeParms (single dict or array of dicts)
+    // Parse DecodeParms (single dict or array of dicts/refs)
     let parms = match dict.get(b"DecodeParms") {
         Some(crate::objects::PdfObj::Dict(d)) => vec![Some(d.clone())],
+        Some(crate::objects::PdfObj::Ref(_, _)) => {
+            // Single indirect reference to a dict
+            vec![None] // Will be resolved below if resolver is available
+        }
         Some(crate::objects::PdfObj::Array(arr)) => arr
             .iter()
             .map(|o| match o {
                 crate::objects::PdfObj::Dict(d) => Some(d.clone()),
-                _ => None,
+                _ => None, // null or unresolved refs handled below
             })
             .collect(),
         _ => vec![None; filters.len()],
@@ -59,6 +63,46 @@ pub fn parse_filters(dict: &PdfDict) -> Result<(Vec<Filter>, Vec<Option<PdfDict>
     }
 
     Ok((filters, parms))
+}
+
+/// Resolve indirect references in a DecodeParms array.
+/// Call this after `parse_filters` when a Resolver is available.
+pub fn resolve_decode_parms(
+    dict: &PdfDict,
+    parms: &mut [Option<PdfDict>],
+    resolver: &crate::resolver::Resolver,
+) {
+    let dp = match dict.get(b"DecodeParms") {
+        Some(obj) => obj,
+        None => return,
+    };
+
+    match dp {
+        crate::objects::PdfObj::Ref(_, _) => {
+            // Single indirect ref — resolve and use as first entry
+            if let Ok(resolved) = resolver.deref(dp) {
+                if let Some(d) = resolved.as_dict() {
+                    if let Some(slot) = parms.first_mut() {
+                        *slot = Some(d.clone());
+                    }
+                }
+            }
+        }
+        crate::objects::PdfObj::Array(arr) => {
+            for (i, obj) in arr.iter().enumerate() {
+                if let crate::objects::PdfObj::Ref(_, _) = obj {
+                    if let Ok(resolved) = resolver.deref(obj) {
+                        if let Some(d) = resolved.as_dict() {
+                            if let Some(slot) = parms.get_mut(i) {
+                                *slot = Some(d.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 fn filter_from_name(name: &[u8]) -> Result<Filter, PdfError> {
