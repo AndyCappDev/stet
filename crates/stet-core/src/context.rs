@@ -148,6 +148,8 @@ pub struct Context {
 
     // VM save/restore
     pub save_stack: SaveStack,
+    /// Save stack depth when the current job started (for startjob condition 3).
+    pub job_start_save_depth: usize,
 
     // VM allocation mode: true = global, false = local
     pub vm_alloc_mode: bool,
@@ -534,6 +536,7 @@ impl Context {
             name_cache,
             stdout: Box::new(std::io::stdout()),
             save_stack: SaveStack::new(),
+            job_start_save_depth: 0,
             vm_alloc_mode: false,
             object_format: 0,
             current_operator: None,

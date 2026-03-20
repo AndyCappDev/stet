@@ -481,9 +481,11 @@ fn run_viewer_mode(
         }
 
         // Wait for dropped files (works for both REPL and file-based paths)
-        let established_dpi = Some(ctx.current_page_dpi())
-            .filter(|&d| d > 1.0)
-            .or(dpi_override);
+        // Use the explicit --dpi override if given; otherwise let the viewer
+        // OutputDevice resource supply its default (300 DPI).  Don't inherit
+        // from the post-restore page device — that reverts to 72 and would
+        // override the resource's own HWResolution.
+        let established_dpi = dpi_override;
 
         while let Ok(path) = file_drop_rx.recv() {
             let sender = match ctx.display_list_sender {
@@ -845,15 +847,18 @@ fn execjob(
         _ => unreachable!(),
     };
 
-    // 2. Clear execution state
+    // 2. Record job start save depth (for startjob condition 3)
+    ctx.job_start_save_depth = ctx.save_stack.depth();
+
+    // 3. Clear execution state
     ctx.o_stack.clear();
     ctx.e_stack.clear();
     ctx.loops.clear();
 
-    // 3. Reset d_stack to base (systemdict, globaldict, userdict)
+    // 4. Reset d_stack to base (systemdict, globaldict, userdict)
     ctx.d_stack.truncate(3);
 
-    // 4. Reset graphics state
+    // 5. Reset graphics state
     let _ = parse_and_exec(ctx, b"initgraphics");
 
     // 5. Local VM allocation mode
@@ -908,10 +913,17 @@ fn execjob(
     };
 
     // --- Error handling ---
+    // Like PostForge, check $error/newerror to distinguish real errors from
+    // clean exits (quit sets newerror=false before calling stop).
     let job_result = match &exec_result {
         Err(PsError::Stop) => {
-            let _ = parse_and_exec(ctx, b"{ handleerror } stopped pop");
-            exec_result
+            if is_newerror_set(ctx) {
+                let _ = parse_and_exec(ctx, b"{ handleerror } stopped pop");
+                exec_result
+            } else {
+                // Clean stop (e.g. quit) — not an error
+                Ok(())
+            }
         }
         _ => exec_result,
     };
@@ -943,6 +955,17 @@ fn execjob(
     ctx.current_operator = None;
 
     job_result
+}
+
+/// Check if `$error/newerror` is true (indicates a real error, not a clean quit).
+fn is_newerror_set(ctx: &Context) -> bool {
+    use stet_core::dict::DictKey;
+    use stet_core::object::PsValue;
+    let newerror_id = ctx.names.find(b"newerror").unwrap_or(stet_core::object::NameId(0));
+    match ctx.dicts.get(ctx.dollar_error, &DictKey::Name(newerror_id)) {
+        Some(obj) => matches!(obj.value, PsValue::Bool(true)),
+        None => true, // If we can't check, assume error
+    }
 }
 
 /// Run init scripts to bootstrap the resource system, error handlers, and

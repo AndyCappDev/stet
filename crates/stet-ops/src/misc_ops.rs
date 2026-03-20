@@ -4,6 +4,8 @@
 
 //! Miscellaneous operators: bind, run, handleerror, join, and internal stubs.
 
+use std::io::Write;
+
 use stet_core::context::Context;
 use stet_core::dict::DictKey;
 use stet_core::error::PsError;
@@ -500,62 +502,126 @@ pub fn op_exitserver(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.o_stack.is_empty() {
         return Err(PsError::StackUnderflow);
     }
-    // Validate type: must be integer or string
     let pw_obj = ctx.o_stack.peek(0)?;
     match pw_obj.value {
         PsValue::Int(_) | PsValue::String { .. } => {}
         _ => return Err(PsError::TypeCheck),
     }
 
-    // Check password before popping (validate-before-pop)
     if !check_start_job_password(ctx, &pw_obj) {
         return Err(PsError::InvalidAccess);
     }
 
-    // Password correct — pop and succeed
-    ctx.o_stack.pop()?;
+    // Build startjob args: true password startjob
+    let pw_obj = ctx.o_stack.pop()?;
+    ctx.o_stack.push(PsObject::bool(true))?;
+    ctx.o_stack.push(pw_obj)?;
+    op_startjob(ctx)?;
+
+    // Check result
+    let result = ctx.o_stack.pop()?;
+    if result.value != PsValue::Bool(true) {
+        return Err(PsError::InvalidAccess);
+    }
+
+    // Print exitserver message (PLRM)
+    let _ = write!(
+        ctx.stdout,
+        "%%[exitserver: permanent state may be changed]%%\n"
+    );
+
+    // Remove serverdict from d_stack if present
+    let serverdict_name = ctx.names.intern(b"serverdict");
+    if let Some(sd_obj) = ctx.dicts.get(ctx.systemdict, &DictKey::Name(serverdict_name)) {
+        if let PsValue::Dict(sd_entity) = sd_obj.value {
+            // Search from top down, keep bottom 3 (systemdict, globaldict, userdict)
+            for i in (3..ctx.d_stack.len()).rev() {
+                if ctx.d_stack[i] == sd_entity {
+                    ctx.d_stack.remove(i);
+                    break;
+                }
+            }
+        }
+    }
+    ctx.invalidate_name_cache();
     Ok(())
 }
 
 /// `startjob`: bool password → bool (PLRM 3.7.7)
 ///
 /// Three conditions must be met for success (returns true):
-/// 1. Current execution context supports job encapsulation
+/// 1. Current execution context supports job encapsulation (always true for stet)
 /// 2. Password matches StartJobPassword system parameter
 /// 3. Save nesting not deeper than job start level
-///    On failure, returns false.
+///
+/// On success, executes the job server sequence: clears operand stack, resets
+/// dictionary stack, restores VM if previous job was encapsulated, and optionally
+/// saves for the new job. On failure, returns false.
 pub fn op_startjob(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.o_stack.len() < 2 {
         return Err(PsError::StackUnderflow);
     }
-    // Validate types: password (top) must be integer or string, bool below
     let pw_obj = ctx.o_stack.peek(0)?;
     let bool_obj = ctx.o_stack.peek(1)?;
     match pw_obj.value {
         PsValue::Int(_) | PsValue::String { .. } => {}
         _ => return Err(PsError::TypeCheck),
     }
-    match bool_obj.value {
-        PsValue::Bool(_) => {}
+    let persistent = match bool_obj.value {
+        PsValue::Bool(b) => b,
         _ => return Err(PsError::TypeCheck),
-    }
+    };
 
     let pw_obj = ctx.o_stack.pop()?;
     let _bool_obj = ctx.o_stack.pop()?;
 
-    // Condition 2: Password must match StartJobPassword
+    // Condition 1: always true (stet supports job encapsulation)
+    // Condition 2: password match
     let password_ok = check_start_job_password(ctx, &pw_obj);
+    // Condition 3: save nesting at or below job start level
+    let save_nesting_ok = ctx.save_stack.depth() <= ctx.job_start_save_depth;
 
-    // Condition 3: Save nesting must not be deeper than job start level.
-    // Job starts at save level 0 (no saves), so any active save means failure.
-    let save_nesting_ok = ctx.save_stack.depth() == 0;
-
-    if password_ok && save_nesting_ok {
-        // Success: job would start (simplified — no full job server sequence)
-        ctx.o_stack.push(PsObject::bool(true))?;
-    } else {
+    if !(password_ok && save_nesting_ok) {
         ctx.o_stack.push(PsObject::bool(false))?;
+        return Ok(());
     }
+
+    // === Job server sequence (PLRM 3.7.7) ===
+
+    // Step 1: Clear operand stack
+    ctx.o_stack.clear();
+
+    // Step 2: Reset dictionary stack to [systemdict, globaldict, userdict]
+    ctx.d_stack.truncate(3);
+
+    // Step 3: If previous job was encapsulated (save depth > job start), restore VM
+    if ctx.save_stack.depth() > 0 {
+        // Restore all the way to the job boundary save
+        while ctx.save_stack.depth() > ctx.job_start_save_depth {
+            if let Some(level) = ctx.save_stack.levels_ref().last() {
+                let sid = level.save_id;
+                ctx.vm_restore(sid)?;
+            } else {
+                break;
+            }
+        }
+    }
+
+    // Step 4: Begin new job
+    ctx.vm_alloc_mode = false; // local VM allocation mode
+    if persistent {
+        // Unencapsulated: no save — VM changes persist
+        ctx.job_start_save_depth = ctx.save_stack.depth();
+    } else {
+        // Encapsulated: save to create job boundary
+        let _save_obj = ctx.vm_save();
+        ctx.job_start_save_depth = ctx.save_stack.depth();
+    }
+
+    ctx.invalidate_name_cache();
+
+    // Push true result
+    ctx.o_stack.push(PsObject::bool(true))?;
     Ok(())
 }
 
