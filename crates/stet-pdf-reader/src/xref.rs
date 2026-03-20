@@ -111,7 +111,12 @@ pub fn parse_xref(data: &[u8]) -> Result<XrefTable, PdfError> {
             }
             combined_entries[idx] = Some(entry);
         }
-        final_trailer = trailer; // Most recent trailer wins
+        // Merge trailer keys — later sections override earlier ones, but
+        // empty trailers (e.g., from truncated xref sections in truncated
+        // linearized PDFs) won't erase keys like /Root from earlier trailers
+        for (key, val) in trailer.into_entries() {
+            final_trailer.insert(key, val);
+        }
     }
 
     // If %PDF- header isn't at byte 0 (e.g., prepended garbage), adjust all
@@ -166,6 +171,14 @@ fn discover_orphaned_xref_sections(
                 if sx_off > 0 {
                     candidates.push(sx_off);
                 }
+            }
+        }
+        // Also collect xref keyword positions directly — handles linearized PDFs
+        // where the first-page xref section is never reached via /Prev chain
+        if pos + 4 <= data.len() && &data[pos..pos + 4] == b"xref" {
+            // Make sure this isn't "startxref"
+            if pos == 0 || data[pos - 1] != b't' {
+                candidates.push(pos);
             }
         }
         pos += 1;
