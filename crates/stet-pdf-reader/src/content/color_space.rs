@@ -831,17 +831,45 @@ fn lab_f_inv(t: f64) -> f64 {
     }
 }
 
+/// Check if a color space requires CIE→RGB conversion (Lab, CalRGB, CalGray).
+/// The tint table stores pre-converted RGB values for these spaces.
+fn is_cie_space(cs: &ResolvedColorSpace) -> bool {
+    matches!(
+        cs,
+        ResolvedColorSpace::Lab { .. }
+            | ResolvedColorSpace::CalRGB { .. }
+            | ResolvedColorSpace::CalGray { .. }
+    )
+}
+
+/// Convert tint function output through a CIE alternate space to RGB,
+/// pushing 3 f32 values (r, g, b) into `data`.
+fn push_cie_converted(alt: &ResolvedColorSpace, out: &[f64], data: &mut Vec<f32>) {
+    let color = components_to_device_color_icc(alt, out, None);
+    data.push(color.r as f32);
+    data.push(color.g as f32);
+    data.push(color.b as f32);
+}
+
 /// Build a 1D TintLookupTable for Separation image color space.
 fn build_1d_tint_image_cs(func: &PdfFunction, alt: &ResolvedColorSpace) -> ImageColorSpace {
-    let alt_cs = to_image_color_space(alt);
-    let n_out = alt.num_components();
+    let cie = is_cie_space(alt);
+    let (alt_cs, n_out) = if cie {
+        (ImageColorSpace::DeviceRGB, 3)
+    } else {
+        (to_image_color_space(alt), alt.num_components())
+    };
     let samples = 256u32;
     let mut data = Vec::with_capacity(samples as usize * n_out);
     for i in 0..samples {
         let t = i as f64 / 255.0;
         let out = func.evaluate(&[t]);
-        for j in 0..n_out {
-            data.push(out.get(j).copied().unwrap_or(0.0) as f32);
+        if cie {
+            push_cie_converted(alt, &out, &mut data);
+        } else {
+            for j in 0..n_out {
+                data.push(out.get(j).copied().unwrap_or(0.0) as f32);
+            }
         }
     }
     let table = TintLookupTable {
@@ -863,8 +891,12 @@ fn build_nd_tint_image_cs(
     alt: &ResolvedColorSpace,
     n_inputs: usize,
 ) -> ImageColorSpace {
-    let alt_cs = to_image_color_space(alt);
-    let n_out = alt.num_components();
+    let cie = is_cie_space(alt);
+    let (alt_cs, n_out) = if cie {
+        (ImageColorSpace::DeviceRGB, 3)
+    } else {
+        (to_image_color_space(alt), alt.num_components())
+    };
     // Use fewer samples per dimension for higher-dimensional spaces
     let spd = match n_inputs {
         1 => 256u32,
@@ -883,8 +915,12 @@ fn build_nd_tint_image_cs(
             rem /= spd as usize;
         }
         let out = func.evaluate(&inputs);
-        for j in 0..n_out {
-            data.push(out.get(j).copied().unwrap_or(0.0) as f32);
+        if cie {
+            push_cie_converted(alt, &out, &mut data);
+        } else {
+            for j in 0..n_out {
+                data.push(out.get(j).copied().unwrap_or(0.0) as f32);
+            }
         }
     }
     let table = TintLookupTable {
