@@ -303,7 +303,11 @@ fn parse_encoding(header: &[u8]) -> Vec<String> {
 /// Parse /lenIV from the decrypted eexec section.
 fn parse_len_iv(decrypted: &[u8]) -> Option<usize> {
     let text = String::from_utf8_lossy(decrypted);
-    parse_int_value(&text, "/lenIV").map(|v| v as usize)
+    parse_int_value(&text, "/lenIV").map(|v| {
+        // /lenIV -1 means no charstring encryption — use usize::MAX as sentinel
+        // to signal decrypt_charstring to skip decryption entirely.
+        if v < 0 { usize::MAX } else { v as usize }
+    })
 }
 
 /// Parse CharStrings from decrypted eexec data.

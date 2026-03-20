@@ -25,6 +25,11 @@ pub struct CharstringResult {
 /// Decrypt a charstring using the Type 1 charstring cipher (R=4330).
 /// Skips the first `len_iv` random bytes.
 pub fn decrypt_charstring(data: &[u8], len_iv: usize) -> Vec<u8> {
+    // len_iv == usize::MAX is a sentinel for /lenIV -1 (no encryption).
+    // Return raw bytes without decryption or prefix stripping.
+    if len_iv == usize::MAX {
+        return data.to_vec();
+    }
     let c1: u32 = 52845;
     let c2: u32 = 22719;
     let mut r: u32 = 4330;
