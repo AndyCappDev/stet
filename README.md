@@ -1,9 +1,20 @@
-# stet
+<h1 align="center">stet</h1>
 
-A PostScript and PDF rendering engine written in Rust.
+<p align="center">A modern, open-source PostScript and PDF rendering engine written in pure Rust.</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Version-0.1.0-blue" alt="Version 0.1.0">
+  <img src="https://img.shields.io/badge/License-Apache--2.0_OR_MIT-green" alt="License Apache-2.0 OR MIT">
+  <img src="https://img.shields.io/badge/Rust-1.85+-orange" alt="Rust 1.85+">
+</p>
+
+## About
 
 stet interprets PostScript (Level 3) and parses PDF files, rendering both
-to RGBA pixels, PDF documents, or display lists through a unified pipeline.
+to PNG images, PDF documents, or display lists through a unified pipeline.
+It can also render them in an interactive desktop viewer or a browser-based
+WASM viewer.
+
 The PostScript interpreter and PDF reader are independent — use either or
 both — but they produce the same display list type, so every output device
 and rendering path works with both sources.
@@ -31,7 +42,7 @@ and rendering path works with both sources.
 - No dependency on the PostScript interpreter — usable standalone
 
 **Rendering & Output**
-- RGBA rasterization via tiny-skia (banded, multi-threaded)
+- RGBA rasterization via [`stet-tiny-skia`](https://crates.io/crates/stet-tiny-skia) (banded, multi-threaded)
 - PDF output with native CMYK, spot colors, ICC profiles, transfer functions, halftone screens, overprint, and font embedding
 - PNG file output
 - Viewport rendering: render any region at any zoom from a stored display list
@@ -167,7 +178,7 @@ complete element documentation.
 
 | Feature | Default | Description |
 |---------|---------|------------|
-| `render` | yes | RGBA pixel output via `stet-render` (tiny-skia) |
+| `render` | yes | RGBA pixel output via `stet-render` (`stet-tiny-skia`) |
 | `pdf-output` | yes | PDF output via `stet-pdf` |
 
 For the smallest dependency footprint (display lists only):
@@ -253,6 +264,22 @@ zoom presets, minimap navigation, and drag-and-drop.
         │stet-fonts │
         └───────────┘
 ```
+
+| Crate | Role |
+|-------|------|
+| `stet` | Batteries-included library API (facade) |
+| `stet-core` | Interpreter infrastructure: types, VM, tokenizer |
+| `stet-ops` | ~268 PostScript operator implementations |
+| `stet-engine` | Execution engine (eval loop) |
+| `stet-fonts` | Font parsing: Type 1, CFF/Type 2, TrueType |
+| `stet-graphics` | Display list, color types, ICC color management |
+| `stet-render` | Rasterization backend, PNG output |
+| `stet-tiny-skia` | Modified [tiny-skia](https://github.com/AvraamMavridis/tiny-skia) fork with stet-specific optimizations |
+| `stet-pdf` | PDF output device (PS → PDF) |
+| `stet-pdf-reader` | PDF input parser (PDF → display lists) |
+| `stet-viewer` | Interactive egui/winit desktop viewer |
+| `stet-cli` | Command-line interface and REPL |
+| `stet-wasm` | WebAssembly bindings for browser rendering |
 
 See the [Architecture Guide](docs/ARCHITECTURE.md) for a detailed explanation
 of how these crates work together.
