@@ -87,6 +87,11 @@ pub struct CidTrueTypePdfFont {
     /// If true, the encoding is UCS2-based (e.g. UniJIS-UCS2-H) and character
     /// codes are Unicode values that need mapping to CIDs for width lookup.
     pub ucs2_encoding: bool,
+    /// First-byte → code length table from the encoding CMap's codespace ranges.
+    /// Supports mixed-width encodings (e.g. 1-byte space + 2-byte CIDs).
+    pub code_lengths: [u8; 256],
+    /// Code → CID mapping from the encoding CMap (empty = identity).
+    pub code_to_cid: HashMap<u32, u32>,
 }
 
 /// CIDFontType0: CFF outlines accessed by CID (2-byte char codes).
@@ -105,6 +110,10 @@ pub struct CidCffPdfFont {
     /// CIDSystemInfo ordering for Unicode→CID width lookup.
     pub ordering: Vec<u8>,
     pub font_matrix: Matrix,
+    /// First-byte → code length table from the encoding CMap's codespace ranges.
+    pub code_lengths: [u8; 256],
+    /// Code → CID mapping from the encoding CMap (empty = identity).
+    pub code_to_cid: HashMap<u32, u32>,
 }
 
 /// Type 3 font: glyphs defined as content streams (CharProcs).
@@ -701,6 +710,8 @@ fn create_cid_cff_from_otf(
     cid_widths: HashMap<u16, f64>,
     ordering: &[u8],
     pdf_cid_to_gid: Option<Vec<u16>>,
+    code_lengths: [u8; 256],
+    code_to_cid: HashMap<u32, u32>,
 ) -> Result<PdfFont, PdfError> {
     use stet_fonts::truetype::find_table;
 
@@ -733,6 +744,8 @@ fn create_cid_cff_from_otf(
         cmap,
         pdf_cid_to_gid,
         ordering: ordering.to_vec(),
+        code_lengths,
+        code_to_cid,
     }))
 }
 
@@ -1256,8 +1269,24 @@ fn resolve_cff(
 /// Resolve a Type 0 composite font (CIDFontType2 descendant with TrueType outlines).
 fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, PdfError> {
     // Check if encoding is UCS2-based (character codes are Unicode, not CIDs).
+    let encoding_obj = font_dict.get(b"Encoding");
     let encoding_name = font_dict.get_name(b"Encoding").unwrap_or(b"");
     let ucs2_encoding = encoding_name.windows(4).any(|w| w == b"UCS2");
+
+    // Parse the encoding CMap's codespace ranges to determine byte widths,
+    // and the code-to-CID mapping for non-identity encodings.
+    // The encoding can be a name (e.g. "Identity-H") or a stream containing
+    // a custom CMap with mixed-width codespace ranges.
+    let (code_lengths, code_to_cid) = if let Some(enc_obj) = encoding_obj {
+        if let Ok(cmap_data) = resolver.stream_data_from_obj(enc_obj) {
+            let cmap = super::cmap::CMap::parse(&cmap_data);
+            (cmap.code_lengths, cmap.code_to_cid)
+        } else {
+            ([2u8; 256], HashMap::new()) // Named encoding (Identity-H etc.)
+        }
+    } else {
+        ([2u8; 256], HashMap::new())
+    };
 
     // Get DescendantFonts array (must have exactly one entry).
     // May be a direct array or an indirect reference to one.
@@ -1352,6 +1381,8 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                         cid_widths,
                         &ordering,
                         cid_to_gid_map,
+                        code_lengths,
+                        code_to_cid.clone(),
                     );
                 }
                 font_data
@@ -1378,6 +1409,8 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                         cid_widths,
                         &ordering,
                         None,
+                        code_lengths,
+                        code_to_cid.clone(),
                     );
                 }
                 sys_data
@@ -1417,12 +1450,44 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                 to_unicode,
                 ordering: ordering.clone(),
                 ucs2_encoding,
+                code_lengths,
+                code_to_cid: code_to_cid.clone(),
             }))
         }
         b"CIDFontType0" => {
             // CFF-based CID font: FontFile3 with /Subtype /CIDFontType0C
             if let Some(ff_ref) = desc.get(b"FontFile3") {
                 let font_data = resolver.stream_data_from_obj(ff_ref)?;
+                // FontFile3 may be raw CFF or OpenType/CFF (OTTO wrapper)
+                if font_data.len() > 4 && &font_data[0..4] == b"OTTO" {
+                    // Parse CIDToGIDMap for OpenType-wrapped CFF
+                    let pdf_cid_to_gid =
+                        if let Some(map_obj) = cid_font_dict.get(b"CIDToGIDMap") {
+                            match resolver.stream_data_from_obj(map_obj) {
+                                Ok(stream_data) => {
+                                    let mut gid_map =
+                                        Vec::with_capacity(stream_data.len() / 2);
+                                    for pair in stream_data.chunks_exact(2) {
+                                        gid_map
+                                            .push(u16::from_be_bytes([pair[0], pair[1]]));
+                                    }
+                                    Some(gid_map)
+                                }
+                                Err(_) => None,
+                            }
+                        } else {
+                            None
+                        };
+                    return create_cid_cff_from_otf(
+                        &font_data,
+                        default_width,
+                        cid_widths,
+                        &ordering,
+                        pdf_cid_to_gid,
+                        code_lengths,
+                        code_to_cid.clone(),
+                    );
+                }
                 let fonts = parse_cff(&font_data)
                     .map_err(|e| PdfError::Other(format!("CFF parse error: {e}")))?;
                 let font = fonts
@@ -1439,6 +1504,8 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                     cmap: None,
                     pdf_cid_to_gid: None,
                     ordering: ordering.clone(),
+                    code_lengths,
+                    code_to_cid: code_to_cid.clone(),
                 }))
             } else {
                 // Not embedded — substitute with a system font
@@ -1455,6 +1522,8 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                         cid_widths,
                         &ordering,
                         None,
+                        code_lengths,
+                        code_to_cid.clone(),
                     );
                 }
                 let data = sys_data;
@@ -1472,6 +1541,8 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                     to_unicode,
                     ordering: ordering.clone(),
                     ucs2_encoding,
+                    code_lengths,
+                    code_to_cid: code_to_cid.clone(),
                 }))
             }
         }
@@ -1760,9 +1831,39 @@ impl PdfFont {
         }
     }
 
-    /// Whether this is a composite (CID) font that uses 2-byte character codes.
+    /// Whether this is a composite (CID) font that uses multi-byte character codes.
     pub fn is_composite(&self) -> bool {
         matches!(self, PdfFont::CidTrueType(_) | PdfFont::CidCff(_))
+    }
+
+    /// Map a raw character code to a CID using the encoding CMap.
+    /// Returns the code unchanged if no mapping exists (identity encoding).
+    pub fn resolve_code_to_cid(&self, code: u32) -> u32 {
+        match self {
+            PdfFont::CidTrueType(f) => {
+                f.code_to_cid.get(&code).copied().unwrap_or(code)
+            }
+            PdfFont::CidCff(f) => {
+                f.code_to_cid.get(&code).copied().unwrap_or(code)
+            }
+            _ => code,
+        }
+    }
+
+    /// Get the byte width of a character code starting with the given byte.
+    /// Only meaningful for composite fonts; returns 1 for simple fonts.
+    pub fn code_width(&self, first_byte: u8) -> usize {
+        match self {
+            PdfFont::CidTrueType(f) => {
+                let w = f.code_lengths[first_byte as usize];
+                if w == 0 { 2 } else { w as usize }
+            }
+            PdfFont::CidCff(f) => {
+                let w = f.code_lengths[first_byte as usize];
+                if w == 0 { 2 } else { w as usize }
+            }
+            _ => 1,
+        }
     }
 
     /// Whether this is a Type 3 font (glyphs are content streams).

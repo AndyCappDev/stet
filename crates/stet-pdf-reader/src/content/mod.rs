@@ -8,6 +8,7 @@
 //! the existing SkiaDevice pipeline.
 
 pub mod cid_unicode;
+pub mod cmap;
 pub mod color_space;
 pub mod font;
 pub mod graphics_state;
@@ -1388,11 +1389,23 @@ impl<'a> ContentInterpreter<'a> {
         let render_mode = self.gstate.text_rendering_mode;
 
         if font.is_composite() {
-            // Composite (CID) font: 2-byte character codes
+            // Composite (CID) font: variable-width character codes
+            // (most are 2-byte, but some CMaps define 1-byte codes for space etc.)
             let mut i = 0;
-            while i + 1 < text.len() {
-                let cid = ((text[i] as u16) << 8) | (text[i + 1] as u16);
-                i += 2;
+            while i < text.len() {
+                let code_width = font.code_width(text[i]);
+                let raw_code = if code_width == 1 {
+                    let c = text[i] as u32;
+                    i += 1;
+                    c
+                } else if i + 1 < text.len() {
+                    let c = ((text[i] as u32) << 8) | (text[i + 1] as u32);
+                    i += 2;
+                    c
+                } else {
+                    break; // incomplete multi-byte code at end
+                };
+                let cid = font.resolve_code_to_cid(raw_code) as u16;
 
                 if let Some(glyph_path) = font.glyph_path_cid(cid) {
                     let text_state_matrix =

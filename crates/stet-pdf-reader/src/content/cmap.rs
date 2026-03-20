@@ -10,16 +10,17 @@ use std::collections::HashMap;
 pub struct CMap {
     /// Code-to-CID mapping (character code → CID).
     pub code_to_cid: HashMap<u32, u32>,
-    /// Whether this is a 2-byte encoding (most common for CID fonts).
-    pub is_two_byte: bool,
+    /// Precomputed first-byte → code length table.
+    /// 0 = not in any codespace range (treat as 2-byte default).
+    pub code_lengths: [u8; 256],
 }
 
 impl CMap {
-    /// Create an Identity CMap (code == CID).
+    /// Create an Identity CMap (code == CID, all 2-byte).
     pub fn identity() -> Self {
         Self {
             code_to_cid: HashMap::new(),
-            is_two_byte: true,
+            code_lengths: [2; 256],
         }
     }
 
@@ -29,34 +30,33 @@ impl CMap {
         self.code_to_cid.get(&code).copied().unwrap_or(code)
     }
 
+    /// Get the byte width of a character code starting with the given byte.
+    pub fn code_width(&self, first_byte: u8) -> usize {
+        let w = self.code_lengths[first_byte as usize];
+        if w == 0 { 2 } else { w as usize }
+    }
+
     /// Parse a CMap from stream data.
     pub fn parse(data: &[u8]) -> Self {
-        let mut cmap = CMap {
-            code_to_cid: HashMap::new(),
-            is_two_byte: true,
-        };
+        let mut code_to_cid = HashMap::new();
+        let mut codespace_ranges: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
 
         let text = String::from_utf8_lossy(data);
-        // We need `while let ... next()` rather than `for` because the inner loops
-        // also advance the same iterator, which requires re-borrowing between calls.
         #[allow(clippy::while_let_on_iterator)]
         let mut lines = text.lines();
 
         while let Some(line) = lines.next() {
             let line = line.trim();
 
-            // Detect codespace range to determine byte width
+            // Parse codespace ranges
             if line.ends_with("begincodespacerange") {
                 while let Some(range_line) = lines.next() {
                     let range_line = range_line.trim();
                     if range_line == "endcodespacerange" {
                         break;
                     }
-                    // Parse <XX> or <XXXX> to determine byte width
-                    if let Some(first_bracket) = range_line.find('<') {
-                        if let Some(end_bracket) = range_line[first_bracket + 1..].find('>') {
-                            cmap.is_two_byte = end_bracket > 2;
-                        }
+                    if let Some((low, high)) = parse_codespace_range(range_line) {
+                        codespace_ranges.push((low, high));
                     }
                 }
             }
@@ -69,7 +69,7 @@ impl CMap {
                         break;
                     }
                     if let Some((code, cid)) = parse_cidchar_line(char_line) {
-                        cmap.code_to_cid.insert(code, cid);
+                        code_to_cid.insert(code, cid);
                     }
                 }
             }
@@ -83,7 +83,7 @@ impl CMap {
                     }
                     if let Some((start, end, cid_start)) = parse_cidrange_line(range_line) {
                         for code in start..=end {
-                            cmap.code_to_cid.insert(code, cid_start + (code - start));
+                            code_to_cid.insert(code, cid_start + (code - start));
                         }
                     }
                 }
@@ -97,7 +97,7 @@ impl CMap {
                         break;
                     }
                     if let Some((code, unicode)) = parse_bfchar_line(char_line) {
-                        cmap.code_to_cid.insert(code, unicode);
+                        code_to_cid.insert(code, unicode);
                     }
                 }
             }
@@ -110,14 +110,76 @@ impl CMap {
                     }
                     if let Some((start, end, cid_start)) = parse_cidrange_line(range_line) {
                         for code in start..=end {
-                            cmap.code_to_cid.insert(code, cid_start + (code - start));
+                            code_to_cid.insert(code, cid_start + (code - start));
                         }
                     }
                 }
             }
         }
 
-        cmap
+        // Build first-byte → code-length table from codespace ranges.
+        // For each first byte, find the shortest matching codespace range.
+        let mut code_lengths = [0u8; 256];
+        if codespace_ranges.is_empty() {
+            // No codespace ranges → default all to 2-byte
+            code_lengths = [2; 256];
+        } else {
+            for (low, high) in &codespace_ranges {
+                let width = low.len() as u8;
+                let first_lo = low[0];
+                let first_hi = high[0];
+                for byte in first_lo..=first_hi {
+                    let cur = code_lengths[byte as usize];
+                    // Prefer shorter (1-byte over 2-byte) or fill if unset
+                    if cur == 0 || width < cur {
+                        code_lengths[byte as usize] = width;
+                    }
+                }
+            }
+        }
+
+        CMap {
+            code_to_cid,
+            code_lengths,
+        }
+    }
+}
+
+/// Parse a codespace range line like `<20> <20>` or `<0000> <19FF>`.
+/// Returns (low_bytes, high_bytes).
+fn parse_codespace_range(line: &str) -> Option<(Vec<u8>, Vec<u8>)> {
+    let parts: Vec<&str> = line.split_whitespace().collect();
+    if parts.len() >= 2 {
+        let low = parse_hex_bytes(parts[0])?;
+        let high = parse_hex_bytes(parts[1])?;
+        if low.len() == high.len() && !low.is_empty() {
+            Some((low, high))
+        } else {
+            None
+        }
+    } else {
+        None
+    }
+}
+
+/// Parse a hex string like `<0041>` into raw bytes.
+fn parse_hex_bytes(s: &str) -> Option<Vec<u8>> {
+    let s = s.trim();
+    if s.starts_with('<') && s.ends_with('>') {
+        let hex = &s[1..s.len() - 1];
+        let mut bytes = Vec::new();
+        let mut i = 0;
+        while i + 1 < hex.len() {
+            bytes.push(u8::from_str_radix(&hex[i..i + 2], 16).ok()?);
+            i += 2;
+        }
+        // Odd-length hex: pad last nibble
+        if i < hex.len() {
+            bytes.push(u8::from_str_radix(&format!("{}0", &hex[i..]), 16).ok()?);
+        }
+        Some(bytes)
+    } else {
+        None
     }
 }
 
