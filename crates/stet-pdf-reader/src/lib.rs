@@ -51,8 +51,8 @@ pub struct PdfDocument<'a> {
 impl<'a> PdfDocument<'a> {
     /// Parse a PDF from bytes.
     pub fn from_bytes(data: &'a [u8]) -> Result<Self, PdfError> {
-        // Validate header
-        if !data.starts_with(b"%PDF-") {
+        // Validate header — PDF spec allows up to 1024 bytes before %PDF-
+        if !has_pdf_header(data) {
             return Err(PdfError::NotAPdf);
         }
 
@@ -109,7 +109,7 @@ impl<'a> PdfDocument<'a> {
     /// Use this when the caller already has an `IccCache` with the system
     /// CMYK profile loaded (e.g., from the PostScript interpreter context).
     pub fn from_bytes_with_icc(data: &'a [u8], icc_cache: IccCache) -> Result<Self, PdfError> {
-        if !data.starts_with(b"%PDF-") {
+        if !has_pdf_header(data) {
             return Err(PdfError::NotAPdf);
         }
 
@@ -346,6 +346,15 @@ impl<'a> PdfDocument<'a> {
     pub fn pages(&self) -> &[PageInfo] {
         &self.pages
     }
+}
+
+/// Check for `%PDF-` header within the first 1024 bytes.
+/// The PDF spec (§7.5.2) allows data before the header.
+fn has_pdf_header(data: &[u8]) -> bool {
+    let search_range = data.len().min(1024);
+    data[..search_range]
+        .windows(5)
+        .any(|w| w == b"%PDF-")
 }
 
 #[cfg(test)]
