@@ -539,14 +539,11 @@ fn substitute_font(
         }
         derived
     } else {
-        // When the PDF font name indicates a narrow/condensed variant but the
-        // substitute is a regular-width font, scale glyph outlines horizontally
-        // to match the PDF's expected character widths.
-        let lower_name = clean_name.to_ascii_lowercase();
-        let is_narrow = lower_name.contains("narrow")
-            || lower_name.contains("condensed")
-            || lower_name.contains("compressed");
-        if is_narrow {
+        // When the substitute font's glyph widths differ significantly from the
+        // PDF's expected widths, scale glyph outlines horizontally to match.
+        // This handles narrow/condensed variants AND unembedded decorative fonts
+        // (e.g. Spumoni) where the substitute (NimbusSans) has wider glyphs.
+        {
             let mut pdf_sum = 0.0;
             let mut sub_sum = 0.0;
             let mut count = 0;
@@ -574,7 +571,7 @@ fn substitute_font(
                     }
                 }
             }
-            if count > 5 && sub_sum > 0.0 {
+            if count >= 3 && sub_sum > 0.0 {
                 let ratio = pdf_sum / sub_sum;
                 if (ratio - 1.0).abs() > 0.03 {
                     font_matrix.a *= ratio;
