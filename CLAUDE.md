@@ -9,12 +9,11 @@ This file provides guidance to Claude Code when working with the stet codebase.
 - **PostForge** (`~/Projects/postforge`) — A complete PostScript Level 3 interpreter in Python (345 operators, 49 test suites, 5 output devices). This is the **reference implementation and test oracle**. When questions arise about PostScript operator behavior, consult PostForge's implementation first.
 - **xpost** (`~/Projects/xpost`) — A PostScript Level 1-2 interpreter in C. This provides **architectural inspiration**, particularly the arena/entity indirection memory model and dual VM design.
 
-## Project Plans
+## Project Documentation
 
-- **`docs/ROADMAP.md`** — Full 8-phase roadmap from empty project to Level 3 compliance
-- **`docs/PHASE1-PLAN.md`** — Detailed Phase 1 implementation plan with Rust APIs, type system design, operator specifications, and implementation order
-
-**Always consult these plan files before making architectural decisions.** They contain carefully researched designs based on deep analysis of both PostForge and xpost.
+- **`docs/ARCHITECTURE.md`** — Crate architecture, pipelines, OutputDevice trait, rendering stages
+- **`docs/DISPLAY-LIST.md`** — Display list element reference with all field types and code examples
+- **`docs/VIEWER-GUIDE.md`** — Viewer keyboard/mouse controls, DPI, minimap
 
 ## PostScript Reference Manuals
 
@@ -137,10 +136,9 @@ cargo run -- tests/ps/some_test.ps      # Run a PostScript test file
 
 When implementing a PostScript operator:
 
-1. **Check PHASE1-PLAN.md** for the operator specification (stack signature, error conditions, edge cases)
-2. **Check PostForge's implementation** in `~/Projects/postforge/postforge/operators/` for the Python reference
-3. **Check the PLRM** for authoritative specification
-4. **Check PostForge's tests** in `~/Projects/postforge/unit_tests/` for expected behavior
+1. **Check PostForge's implementation** in `~/Projects/postforge/postforge/operators/` for the Python reference
+2. **Check the PLRM** for authoritative specification
+3. **Check PostForge's tests** in `~/Projects/postforge/unit_tests/` for expected behavior
 
 ## Reusable Assets from PostForge
 

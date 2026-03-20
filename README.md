@@ -1,10 +1,52 @@
 # stet
 
-A production-grade PostScript Level 3 interpreter written in Rust.
+A PostScript and PDF rendering engine written in Rust.
 
-stet interprets PostScript and EPS files, producing output as RGBA pixels,
-PDF documents, or display lists. It also includes a standalone PDF reader
-that converts PDF pages to display lists without the PostScript interpreter.
+stet interprets PostScript (Level 3) and parses PDF files, rendering both
+to RGBA pixels, PDF documents, or display lists through a unified pipeline.
+The PostScript interpreter and PDF reader are independent — use either or
+both — but they produce the same display list type, so every output device
+and rendering path works with both sources.
+
+## Features
+
+**PostScript Interpreter**
+- Full PostScript Level 3 with ~268 operators
+- Type 1, CFF/Type 2, TrueType, CID, and Type 3 font rendering
+- All 7 shading types (axial, radial, Gouraud mesh, Coons/tensor patch)
+- CIE color spaces (CIEBasedABC, CIEBasedA, CIEBasedDEF, CIEBasedDEFG)
+- ICC color management with system CMYK profile auto-detection
+- Filters: ASCII85, ASCIIHex, Flate, LZW, RunLength, DCT (JPEG), eexec, SubFile
+- Resource system with embedded fonts (35 URW equivalents of the standard PS fonts)
+- Interactive REPL with `executive`
+
+**PDF Reader**
+- PDF 1.0–2.0 parsing with cross-reference tables and streams
+- Encryption: RC4, AES-128, AES-256
+- Filters: Flate, LZW, ASCII85, ASCIIHex, RunLength, DCT, JPXDecode (JPEG 2000), CCITTFax, JBIG2
+- All PDF color spaces including ICCBased, Separation, DeviceN, Indexed
+- Transparency groups (isolated, knockout), soft masks, blend modes
+- Font rendering: Type 1, TrueType, CFF, CID with CMap/encoding support
+- Annotations (form fields, stamps)
+- No dependency on the PostScript interpreter — usable standalone
+
+**Rendering & Output**
+- RGBA rasterization via tiny-skia (banded, multi-threaded)
+- PDF output with native CMYK, spot colors, ICC profiles, transfer functions, halftone screens, overprint, and font embedding
+- PNG file output
+- Viewport rendering: render any region at any zoom from a stored display list
+- Interactive desktop viewer (egui) with zoom, pan, minimap, drag-and-drop
+- WASM viewer for browser-based rendering
+- Display list as a public API for building custom output devices
+
+**Print Production**
+- Native CMYK color preservation (no lossy RGB round-trip)
+- Separation and DeviceN (spot color) support with tint transforms
+- Overprint and overprint mode (OPM) for both rasterizer simulation and PDF output
+- Transfer functions, halftone screens, black generation, and undercolor removal carried per display element
+- Rendering intent preservation
+- PDF/X-3 OutputIntent with ICC output profile embedding
+- Trim box support
 
 ## Library Usage
 
