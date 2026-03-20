@@ -227,6 +227,12 @@ fn u8_to_blend_mode(mode: u8) -> BlendMode {
 }
 
 /// Convert a `PsPath` to tiny-skia `Path`.
+/// Maximum coordinate magnitude for path rasterization.
+/// Coordinates beyond this cause integer overflow in the scanline rasterizer.
+/// 1e6 is well beyond any real page (e.g. 612×792 pt at 600 DPI = ~5100×6600 px)
+/// but safely within f32 precision and fixed-point limits.
+const MAX_PATH_COORD: f32 = 1e6;
+
 fn build_skia_path(path: &PsPath) -> Option<stet_tiny_skia::Path> {
     let mut pb = PathBuilder::new();
 
@@ -256,7 +262,21 @@ fn build_skia_path(path: &PsPath) -> Option<stet_tiny_skia::Path> {
         }
     }
 
-    pb.finish()
+    let result = pb.finish()?;
+
+    // Reject paths with extreme coordinates that would overflow the scanline
+    // rasterizer's integer math. This handles corrupted PDF content streams
+    // with garbled coordinates.
+    let b = result.bounds();
+    if b.left().abs() > MAX_PATH_COORD
+        || b.top().abs() > MAX_PATH_COORD
+        || b.right().abs() > MAX_PATH_COORD
+        || b.bottom().abs() > MAX_PATH_COORD
+    {
+        return None;
+    }
+
+    Some(result)
 }
 
 /// Convert a tiny-skia Path back to a PsPath.
