@@ -114,6 +114,26 @@ pub fn parse_xref(data: &[u8]) -> Result<XrefTable, PdfError> {
         final_trailer = trailer; // Most recent trailer wins
     }
 
+    // If %PDF- header isn't at byte 0 (e.g., prepended garbage), adjust all
+    // xref offsets by the header position. This handles files where bytes were
+    // prepended after the PDF was created, shifting all internal offsets.
+    let header_offset = data
+        .windows(5)
+        .position(|w| w == b"%PDF-")
+        .unwrap_or(0);
+    if header_offset > 0 {
+        for entry in combined_entries.iter_mut().flatten() {
+            if let XrefEntry::InFile { offset, .. } = entry {
+                *offset += header_offset;
+            }
+        }
+    }
+
+    // Supplement with a scan for objects not in any xref section.
+    // Handles linearized PDFs with objects appended after %%EOF
+    // or incremental updates without proper xref entries.
+    supplement_xref_from_scan(data, &mut combined_entries);
+
     Ok(XrefTable {
         entries: combined_entries,
         trailer: final_trailer,
@@ -168,6 +188,62 @@ fn discover_orphaned_xref_sections(
                     }
                 }
                 Err(_) => break,
+            }
+        }
+    }
+}
+
+/// Scan file for `N G obj` patterns and add entries for objects not already
+/// in the xref table. This catches objects appended after %%EOF in
+/// linearized PDFs or broken incremental updates.
+fn supplement_xref_from_scan(data: &[u8], entries: &mut Vec<Option<XrefEntry>>) {
+    let mut pos = 0;
+    while pos < data.len() {
+        // Advance to start-of-line
+        if pos > 0 && data[pos - 1] != b'\n' && data[pos - 1] != b'\r' {
+            while pos < data.len() && data[pos] != b'\n' && data[pos] != b'\r' {
+                pos += 1;
+            }
+            if pos < data.len() {
+                if data[pos] == b'\r' && pos + 1 < data.len() && data[pos + 1] == b'\n' {
+                    pos += 2;
+                } else {
+                    pos += 1;
+                }
+            }
+            continue;
+        }
+
+        if pos < data.len()
+            && data[pos].is_ascii_digit()
+            && let Some((obj_num, generation, obj_offset)) = try_parse_obj_header(data, pos)
+        {
+            let idx = obj_num as usize;
+            if idx < 100_000 {
+                // Only add if not already in the table
+                let already_present = entries
+                    .get(idx)
+                    .is_some_and(|e| e.is_some());
+                if !already_present {
+                    if idx >= entries.len() {
+                        entries.resize(idx + 1, None);
+                    }
+                    entries[idx] = Some(XrefEntry::InFile {
+                        offset: obj_offset,
+                        generation,
+                    });
+                }
+            }
+        }
+
+        while pos < data.len() && data[pos] != b'\n' && data[pos] != b'\r' {
+            pos += 1;
+        }
+        if pos < data.len() {
+            if data[pos] == b'\r' && pos + 1 < data.len() && data[pos + 1] == b'\n' {
+                pos += 2;
+            } else {
+                pos += 1;
             }
         }
     }
