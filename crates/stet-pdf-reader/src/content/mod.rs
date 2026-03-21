@@ -2953,6 +2953,51 @@ impl<'a> ContentInterpreter<'a> {
         }
     }
 
+    /// Resolve the number of color components from a form XObject's /Group/CS.
+    /// Both /Group and /CS may be indirect references.
+    fn resolve_group_cs_comps(&self, form_dict: &PdfDict) -> usize {
+        let cs_name_to_comps = |cs: &[u8]| -> usize {
+            match cs {
+                b"DeviceGray" => 1,
+                b"DeviceRGB" => 3,
+                b"DeviceCMYK" => 4,
+                _ => 0,
+            }
+        };
+
+        let grp_obj = match form_dict.get(b"Group") {
+            Some(obj) => obj,
+            None => return 0,
+        };
+
+        // Get the Group dict — may be inline or indirect
+        let resolved_grp;
+        let grp = if let Some(d) = grp_obj.as_dict() {
+            d
+        } else if let Ok(r) = self.resolver.deref(grp_obj) {
+            resolved_grp = r;
+            match resolved_grp.as_dict() {
+                Some(d) => d,
+                None => return 0,
+            }
+        } else {
+            return 0;
+        };
+
+        // Get CS — may be inline name or indirect
+        if let Some(cs) = grp.get_name(b"CS") {
+            return cs_name_to_comps(cs);
+        }
+        if let Some(cs_obj) = grp.get(b"CS") {
+            if let Ok(cs_resolved) = self.resolver.deref(cs_obj) {
+                if let Some(cs) = cs_resolved.as_name() {
+                    return cs_name_to_comps(cs);
+                }
+            }
+        }
+        0
+    }
+
     /// Check if a mask bbox (in device space) overlaps with the current clip region.
     fn mask_overlaps_clip(&self, bbox: &[f64; 4]) -> bool {
         // If no clip is set, the entire page is the clip — check page bounds
@@ -3093,16 +3138,7 @@ impl<'a> ContentInterpreter<'a> {
         // Parse /BC (backdrop color) — may be inline array or indirect reference.
         // BC is in the group's color space, so we check /G's /Group/CS to know
         // how many components to use (rather than guessing from array length).
-        let group_n_comps = g_dict
-            .get_dict(b"Group")
-            .and_then(|grp| grp.get_name(b"CS"))
-            .map(|cs| match cs {
-                b"DeviceGray" => 1,
-                b"DeviceRGB" => 3,
-                b"DeviceCMYK" => 4,
-                _ => 0, // unknown — will use heuristic
-            })
-            .unwrap_or(0);
+        let group_n_comps = self.resolve_group_cs_comps(g_dict);
 
         let backdrop_color = if let Some(bc_obj) = dict.get(b"BC") {
             let bc_resolved = self.resolver.deref(bc_obj).ok();
