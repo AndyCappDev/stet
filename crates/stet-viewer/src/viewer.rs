@@ -412,12 +412,28 @@ impl ViewerApp {
         self.minimap = None;
     }
 
+    /// Check if two pages have the same dimensions (in PostScript points).
+    fn pages_same_size(&self, a: usize, b: usize) -> bool {
+        if let (Some(pa), Some(pb)) = (self.pages.get(a), self.pages.get(b)) {
+            let wa = (pa.width as f64 * 72.0 / pa.dpi).round() as u32;
+            let ha = (pa.height as f64 * 72.0 / pa.dpi).round() as u32;
+            let wb = (pb.width as f64 * 72.0 / pb.dpi).round() as u32;
+            let hb = (pb.height as f64 * 72.0 / pb.dpi).round() as u32;
+            wa == wb && ha == hb
+        } else {
+            false
+        }
+    }
+
     /// Advance to the next page.
     fn next_page(&mut self) {
         if self.current_page + 1 < self.pages.len() {
+            let prev = self.current_page;
             self.save_transition_texture();
             self.current_page += 1;
-            self.needs_resize = true;
+            if !self.pages_same_size(prev, self.current_page) {
+                self.needs_resize = true;
+            }
             self.reset_view();
         } else if self.interpreter_done {
             // No more pages, no more jobs — quit
@@ -429,9 +445,12 @@ impl ViewerApp {
     /// Go to the previous page.
     fn prev_page(&mut self) {
         if self.current_page > 0 {
+            let prev = self.current_page;
             self.save_transition_texture();
             self.current_page -= 1;
-            self.needs_resize = true;
+            if !self.pages_same_size(prev, self.current_page) {
+                self.needs_resize = true;
+            }
             self.reset_view();
         }
     }
