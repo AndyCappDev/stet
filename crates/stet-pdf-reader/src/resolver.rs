@@ -23,6 +23,10 @@ pub struct Resolver<'a> {
     resolving: RefCell<HashSet<u32>>,
     /// Encryption state, if the PDF is encrypted.
     encryption: Option<crate::crypto::EncryptionState>,
+    /// Cache of decompressed stream data by object number.
+    /// Avoids re-decompressing the same stream (e.g., ICC profiles
+    /// referenced by thousands of Indexed color spaces).
+    stream_cache: RefCell<HashMap<u32, Vec<u8>>>,
 }
 
 impl<'a> Resolver<'a> {
@@ -35,6 +39,7 @@ impl<'a> Resolver<'a> {
             cache: RefCell::new(HashMap::new()),
             resolving: RefCell::new(HashSet::new()),
             encryption: None,
+            stream_cache: RefCell::new(HashMap::new()),
         }
     }
 
@@ -50,6 +55,7 @@ impl<'a> Resolver<'a> {
             cache: RefCell::new(HashMap::new()),
             resolving: RefCell::new(HashSet::new()),
             encryption,
+            stream_cache: RefCell::new(HashMap::new()),
         }
     }
 
@@ -114,6 +120,11 @@ impl<'a> Resolver<'a> {
 
     /// Resolve an object and return its decompressed stream data.
     pub fn stream_data(&self, obj_num: u32, gen_num: u16) -> Result<Vec<u8>, PdfError> {
+        // Check stream cache first
+        if let Some(cached) = self.stream_cache.borrow().get(&obj_num) {
+            return Ok(cached.clone());
+        }
+
         let obj = self.resolve(obj_num, gen_num)?;
         match obj {
             PdfObj::Stream {
@@ -130,12 +141,21 @@ impl<'a> Resolver<'a> {
                 };
                 let (filter_list, mut parms) = filters::parse_filters(&dict)?;
                 filters::resolve_decode_parms(&dict, &mut parms, self);
-                if filter_list.is_empty() {
+                let result = if filter_list.is_empty() {
                     Ok(raw)
                 } else {
                     let jbig2_globals = self.resolve_jbig2_globals(&filter_list, &parms)?;
                     filters::decode_stream(&raw, &filter_list, &parms, jbig2_globals.as_deref())
+                }?;
+
+                // Cache small streams (ICC profiles, lookup tables, CMaps) to avoid
+                // repeated decompression. Skip large streams (images, page content).
+                if result.len() <= 1_048_576 {
+                    self.stream_cache
+                        .borrow_mut()
+                        .insert(obj_num, result.clone());
                 }
+                Ok(result)
             }
             _ => Err(PdfError::Other(format!(
                 "object {obj_num} {gen_num} is not a stream"

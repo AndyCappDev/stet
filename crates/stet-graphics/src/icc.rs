@@ -73,6 +73,12 @@ impl IccCache {
         }
     }
 
+    /// Compute the SHA-256 hash of an ICC profile without registering it.
+    pub fn hash_profile(bytes: &[u8]) -> ProfileHash {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(bytes).into()
+    }
+
     /// Register an ICC profile from raw bytes. Returns the SHA-256 hash on success.
     pub fn register_profile(&mut self, bytes: &[u8]) -> Option<ProfileHash> {
         use sha2::{Digest, Sha256};

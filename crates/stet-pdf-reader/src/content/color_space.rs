@@ -28,6 +28,8 @@ pub enum ResolvedColorSpace {
         profile_data: Option<Arc<Vec<u8>>>,
         /// Alternate color space from stream dict (used when ICC transform fails).
         alternate: Option<Box<ResolvedColorSpace>>,
+        /// Pre-computed ICC profile hash (avoids re-hashing per color conversion).
+        profile_hash: Option<stet_graphics::icc::ProfileHash>,
     },
     Indexed {
         base: Box<ResolvedColorSpace>,
@@ -214,10 +216,16 @@ fn resolve_icc_based(args: &[PdfObj], resolver: &Resolver) -> Result<ResolvedCol
         .or_else(|| icc_alternate_from_header(profile_data.as_deref(), n))
         .map(Box::new);
 
+    // Pre-compute profile hash to avoid re-hashing per color conversion
+    let profile_hash = profile_data
+        .as_deref()
+        .map(|data| IccCache::hash_profile(data));
+
     Ok(ResolvedColorSpace::ICCBased {
         n,
         profile_data,
         alternate,
+        profile_hash,
     })
 }
 
@@ -470,28 +478,41 @@ pub fn components_to_device_color_icc(
             n,
             profile_data,
             alternate,
+            profile_hash,
         } => {
-            // Try ICC profile conversion first
+            // Try ICC profile conversion first, using pre-computed hash to avoid
+            // re-hashing the profile data on every color conversion.
+            let hash = profile_hash.or_else(|| {
+                icc_cache
+                    .as_deref_mut()
+                    .and_then(|cache| profile_data.as_deref().and_then(|d| cache.register_profile(d)))
+            });
             if let Some(cache) = icc_cache.as_deref_mut()
-                && let Some(data) = profile_data
-                && let Some(hash) = cache.register_profile(data)
-                && let Some((r, g, b)) = cache.convert_color(&hash, components)
+                && let Some(hash) = hash
             {
-                // For 4-component (CMYK) ICC profiles, preserve the
-                // source CMYK values in native_cmyk for overprint simulation.
-                if *n == 4 {
-                    let c = components.first().copied().unwrap_or(0.0);
-                    let m = components.get(1).copied().unwrap_or(0.0);
-                    let y = components.get(2).copied().unwrap_or(0.0);
-                    let k = components.get(3).copied().unwrap_or(0.0);
-                    return DeviceColor {
-                        r,
-                        g,
-                        b,
-                        native_cmyk: Some((c, m, y, k)),
-                    };
+                // Ensure the profile is registered (first time only)
+                if !cache.has_profile(&hash) {
+                    if let Some(data) = profile_data {
+                        cache.register_profile(data);
+                    }
                 }
-                return DeviceColor::from_rgb(r, g, b);
+                if let Some((r, g, b)) = cache.convert_color(&hash, components) {
+                    // For 4-component (CMYK) ICC profiles, preserve the
+                    // source CMYK values in native_cmyk for overprint simulation.
+                    if *n == 4 {
+                        let c = components.first().copied().unwrap_or(0.0);
+                        let m = components.get(1).copied().unwrap_or(0.0);
+                        let y = components.get(2).copied().unwrap_or(0.0);
+                        let k = components.get(3).copied().unwrap_or(0.0);
+                        return DeviceColor {
+                            r,
+                            g,
+                            b,
+                            native_cmyk: Some((c, m, y, k)),
+                        };
+                    }
+                    return DeviceColor::from_rgb(r, g, b);
+                }
             }
             // Fall back to alternate color space if available (handles Lab, XYZ, etc.)
             if let Some(alt) = alternate {
