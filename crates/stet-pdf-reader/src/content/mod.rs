@@ -1988,23 +1988,47 @@ impl<'a> ContentInterpreter<'a> {
             (sample_data, color_space)
         };
 
-        // Handle SMask (soft mask / alpha channel)
-        let (sample_data, color_space) = if !is_image_mask {
-            if let Some(smask_data) = self.resolve_smask(dict, width, height)? {
+        // Handle SMask (soft mask / alpha channel).
+        // When the mask is larger than the image (e.g., 1-bit text mask on a 2×2
+        // color image), upscale the image to the mask dimensions to preserve detail.
+        let (sample_data, color_space, width, height) = if !is_image_mask {
+            if let Some((smask_data, mw, mh)) = self.resolve_smask(dict)? {
+                let (img_data, img_w, img_h) = if mw > width || mh > height {
+                    let upscaled =
+                        bilinear_upsample_image(&sample_data, width, height, mw, mh, &color_space);
+                    (upscaled, mw, mh)
+                } else {
+                    (sample_data, width, height)
+                };
+                // Resample SMask if it doesn't match the (possibly upscaled) image dims
+                let smask_data = if mw != img_w || mh != img_h {
+                    let mut resampled = vec![0u8; (img_w * img_h) as usize];
+                    for y in 0..img_h {
+                        let sy = (y as u64 * mh as u64 / img_h as u64) as u32;
+                        for x in 0..img_w {
+                            let sx = (x as u64 * mw as u64 / img_w as u64) as u32;
+                            resampled[(y * img_w + x) as usize] =
+                                smask_data.get((sy * mw + sx) as usize).copied().unwrap_or(0);
+                        }
+                    }
+                    resampled
+                } else {
+                    smask_data
+                };
                 let rgba = merge_rgb_with_smask(
-                    &sample_data,
+                    &img_data,
                     &smask_data,
                     &color_space,
-                    width,
-                    height,
+                    img_w,
+                    img_h,
                     Some(&self.icc_cache),
                 );
-                (rgba, ImageColorSpace::PreconvertedRGBA)
+                (rgba, ImageColorSpace::PreconvertedRGBA, img_w, img_h)
             } else {
-                (sample_data, color_space)
+                (sample_data, color_space, width, height)
             }
         } else {
-            (sample_data, color_space)
+            (sample_data, color_space, width, height)
         };
 
         // Handle explicit stencil mask (/Mask pointing to 1-bit ImageMask stream).
@@ -2070,13 +2094,13 @@ impl<'a> ContentInterpreter<'a> {
         Ok(())
     }
 
-    /// Resolve an SMask (soft mask) from an image dict, returning the alpha data.
+    /// Resolve an SMask (soft mask) from an image dict.
+    /// Returns `(alpha_data, mask_width, mask_height)` at the mask's native
+    /// resolution so the caller can upscale the image if the mask is larger.
     fn resolve_smask(
         &self,
         dict: &PdfDict,
-        image_w: u32,
-        image_h: u32,
-    ) -> Result<Option<Vec<u8>>, PdfError> {
+    ) -> Result<Option<(Vec<u8>, u32, u32)>, PdfError> {
         let smask_ref = match dict.get(b"SMask") {
             Some(obj) => obj.clone(),
             None => return Ok(None),
@@ -2091,7 +2115,15 @@ impl<'a> ContentInterpreter<'a> {
         if sw == 0 || sh == 0 {
             return Ok(None);
         }
-        let mut data = self.resolver.stream_data_from_obj(&smask_ref)?;
+        let bpc = smask_dict.get_int(b"BitsPerComponent").unwrap_or(8) as u32;
+        let data = self.resolver.stream_data_from_obj(&smask_ref)?;
+
+        // Expand sub-byte BPC to 8-bit (1-bit SMasks are common for text-as-image)
+        let mut data = if bpc < 8 {
+            expand_bits_to_bytes(&data, bpc, sw, sh, 1, false)
+        } else {
+            data
+        };
 
         // Apply /Decode array if present (e.g. [1 0] inverts the mask)
         if let Some(decode) = smask_dict.get_array(b"Decode")
@@ -2113,21 +2145,7 @@ impl<'a> ContentInterpreter<'a> {
             }
         }
 
-        // SMask is always DeviceGray, 8bpc — resample if size differs
-        if sw == image_w && sh == image_h {
-            Ok(Some(data))
-        } else {
-            // Nearest-neighbor resample to match image dimensions
-            let mut resampled = vec![0u8; (image_w * image_h) as usize];
-            for y in 0..image_h {
-                let sy = (y as u64 * sh as u64 / image_h as u64) as u32;
-                for x in 0..image_w {
-                    let sx = (x as u64 * sw as u64 / image_w as u64) as u32;
-                    resampled[(y * image_w + x) as usize] = data[(sy * sw + sx) as usize];
-                }
-            }
-            Ok(Some(resampled))
-        }
+        Ok(Some((data, sw, sh)))
     }
 
     /// Resolve an explicit stencil mask (/Mask stream ref) from an image dict.
