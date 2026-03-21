@@ -1821,12 +1821,17 @@ impl PdfFont {
     }
 
     /// Font matrix (glyph space → text space).
+    ///
+    /// For CidCff fonts, returns identity because the font matrix is already
+    /// applied inside `glyph_path_cid()` (using per-FD or top-level matrix).
+    /// This prevents double-application of the 1/1000 scaling that occurs in
+    /// CID-keyed CFF fonts where both top-level and FD FontMatrix are [0.001,...].
     pub fn font_matrix(&self) -> Matrix {
         match self {
             PdfFont::Type1(f) => f.font_matrix,
             PdfFont::TrueType(_) | PdfFont::CidTrueType(_) => Matrix::identity(),
             PdfFont::Cff(f) => f.font_matrix,
-            PdfFont::CidCff(f) => f.font_matrix,
+            PdfFont::CidCff(_) => Matrix::identity(),
             PdfFont::Type3(f) => f.font_matrix,
         }
     }
@@ -2082,15 +2087,17 @@ impl CidCffPdfFont {
         )
         .ok()?;
 
-        // Apply per-FD FontMatrix if present. The FD FontMatrix maps charstring
-        // coordinates to the top-level glyph space; the top-level FontMatrix
-        // (applied by the text rendering code) then maps to text space.
-        let path = if let Some(fd_fm) = fd_font_matrix {
-            let m = Matrix::new(fd_fm[0], fd_fm[1], fd_fm[2], fd_fm[3], fd_fm[4], fd_fm[5]);
-            result.path.transform(&m)
+        // Apply the effective font matrix inside glyph_path_cid so that the
+        // text rendering code doesn't need to apply font_matrix() again.
+        // For CID-keyed CFF: use per-FD FontMatrix when present, otherwise
+        // use the top-level FontMatrix.  font_matrix() returns identity for
+        // CidCff so we must apply the matrix here.
+        let effective_fm = if let Some(fd_fm) = fd_font_matrix {
+            Matrix::new(fd_fm[0], fd_fm[1], fd_fm[2], fd_fm[3], fd_fm[4], fd_fm[5])
         } else {
-            result.path
+            self.font_matrix
         };
+        let path = result.path.transform(&effective_fm);
 
         // For OTF substitutes: fit glyph within the PDF's expected width.
         // If the glyph is wider than the cell, condense it (scale down).
