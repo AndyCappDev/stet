@@ -91,7 +91,7 @@ impl<'a> Resolver<'a> {
                 // Try the xref offset first; if it's corrupt (e.g. from a
                 // broken incremental update), fall back to scanning the file
                 // for the real "N G obj" header.
-                match self.parse_object_at(offset) {
+                match self.parse_object_at(offset, Some(obj_num)) {
                     Ok(obj) => obj,
                     Err(_) => self.scan_for_object(obj_num)?,
                 }
@@ -320,7 +320,7 @@ impl<'a> Resolver<'a> {
             pos += 1;
         }
         match last_match {
-            Some(offset) => self.parse_object_at(offset),
+            Some(offset) => self.parse_object_at(offset, None),
             None => Err(PdfError::ObjectNotFound {
                 obj_num,
                 gen_num: 0,
@@ -331,7 +331,13 @@ impl<'a> Resolver<'a> {
     /// Parse an indirect object at a file offset.
     /// Handles xref offsets that are off by a few bytes (common in some PDF generators)
     /// by scanning backward up to 20 bytes to find the `N G obj` header.
-    fn parse_object_at(&self, offset: usize) -> Result<PdfObj, PdfError> {
+    /// When `expected_obj_num` is Some, verifies the parsed object number matches;
+    /// returns an error on mismatch so the caller can fall back to scanning.
+    fn parse_object_at(
+        &self,
+        offset: usize,
+        expected_obj_num: Option<u32>,
+    ) -> Result<PdfObj, PdfError> {
         if offset >= self.data.len() {
             return Err(PdfError::InvalidObject(offset));
         }
@@ -352,10 +358,19 @@ impl<'a> Resolver<'a> {
 
         let mut lexer = Lexer::at(self.data, actual_offset);
 
-        // Skip past the "N G obj" header
-        let _obj_num = lexer.next_token()?; // Int
+        // Parse the "N G obj" header and verify the object number
+        let parsed_num = match lexer.next_token()? {
+            Token::Int(n) => n as u32,
+            _ => return Err(PdfError::InvalidObject(offset)),
+        };
         let _gen_num = lexer.next_token()?; // Int
         let _obj_kw = lexer.next_token()?; // Keyword("obj")
+
+        if let Some(expected) = expected_obj_num {
+            if parsed_num != expected {
+                return Err(PdfError::InvalidObject(offset));
+            }
+        }
 
         // Parse the object value
         let obj = parse_object(&mut lexer)?;
