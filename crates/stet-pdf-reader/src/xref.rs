@@ -541,10 +541,13 @@ fn parse_classic_xref(
                 entry_error = true;
                 break;
             };
-            let Ok(generation) = gen_str.trim().parse::<u16>() else {
+            // Parse as u32 first, then clamp to u16 — some PDFs have
+            // generation 65536 which overflows u16 but is otherwise valid.
+            let Ok(gen_val) = gen_str.trim().parse::<u32>() else {
                 entry_error = true;
                 break;
             };
+            let generation = gen_val.min(65535) as u16;
 
             let type_byte = data[pos + 17];
             let obj_num = first_obj as u32 + i;
