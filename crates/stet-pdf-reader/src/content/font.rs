@@ -695,11 +695,25 @@ const CID_FONT_SUBSTITUTIONS: &[(&str, &str)] = &[
     ("DotumChe", "NotoSansCJKkr-Regular"),
     ("Gulim", "NotoSansCJKkr-Regular"),
     ("GulimChe", "NotoSansCJKkr-Regular"),
-    // Chinese CJK fonts
-    ("SimSun", "NotoSansCJKsc-Regular"),
-    ("SimHei", "NotoSansCJKsc-Regular"),
-    ("MingLiU", "NotoSansCJKtc-Regular"),
-    ("PMingLiU", "NotoSansCJKtc-Regular"),
+    // Chinese Simplified CJK fonts (Adobe standard CID fonts)
+    // NotoSerifCJKjp contains all CJK glyphs including SC/TC
+    ("STSongStd-Light", "NotoSerifCJKjp-Regular"),
+    ("STSong-Light", "NotoSerifCJKjp-Regular"),
+    ("AdobeSongStd-Light", "NotoSerifCJKjp-Regular"),
+    ("STFangsong-Light", "NotoSerifCJKjp-Regular"),
+    ("STHeiti-Regular", "NotoSansCJKjp-Regular"),
+    ("STKaiti-Regular", "NotoSansCJKjp-Regular"),
+    ("SimSun", "NotoSerifCJKjp-Regular"),
+    ("SimHei", "NotoSansCJKjp-Regular"),
+    ("FangSong", "NotoSerifCJKjp-Regular"),
+    ("KaiTi", "NotoSansCJKjp-Regular"),
+    // Chinese Traditional CJK fonts (Adobe standard CID fonts)
+    ("MSungStd-Light", "NotoSerifCJKjp-Regular"),
+    ("MSung-Light", "NotoSerifCJKjp-Regular"),
+    ("AdobeMingStd-Light", "NotoSerifCJKjp-Regular"),
+    ("MHei-Medium", "NotoSansCJKjp-Regular"),
+    ("MingLiU", "NotoSerifCJKjp-Regular"),
+    ("PMingLiU", "NotoSerifCJKjp-Regular"),
 ];
 
 /// Create a CidCff font from an OpenType/CFF system font (OTTO magic).
