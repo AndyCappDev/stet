@@ -130,6 +130,10 @@ InitClip
 the clip to the full page. These are control elements — they have no
 visual output but affect all subsequent paint elements.
 
+When `ClipParams.stroke_params` is `Some`, the clip path is a stroke
+centerline rather than a fill path. The renderer expands it to a stroke
+outline before rasterizing the clip mask. Used for shading pattern strokes.
+
 ### ErasePage
 
 ```rust
@@ -159,10 +163,15 @@ includes per-vertex colors and coordinates in device space.
 PatternFill { params: PatternFillParams }
 ```
 
-A path filled with a tiling pattern. Contains a pre-rendered display list
-for a single tile, plus the tiling parameters (step size, bounding box,
-pattern matrix). Supports both colored (PaintType 1) and uncolored
-(PaintType 2) patterns.
+A path filled or stroked with a tiling pattern. Contains a pre-rendered
+display list for a single tile, plus the tiling parameters (step size,
+bounding box, pattern matrix). Supports both colored (PaintType 1) and
+uncolored (PaintType 2) patterns.
+
+When `stroke_params` is `Some`, the `path` is a user-space stroke centerline
+and the renderer expands it to a fill outline using `PathStroker::stroke()`
+with the full stroke parameters (width, cap, join, miter, dash). This is
+used for pattern-stroked paths in PDF.
 
 ### Group (PDF only)
 

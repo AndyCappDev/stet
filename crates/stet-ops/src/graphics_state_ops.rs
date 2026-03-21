@@ -90,6 +90,7 @@ pub fn restore_device_clip(ctx: &mut Context, old_version: u32) {
         let params = stet_graphics::device::ClipParams {
             fill_rule: FillRule::NonZeroWinding,
             ctm: stet_fonts::geometry::Matrix::identity(),
+            stroke_params: None,
         };
         ctx.display_list.push(DisplayElement::Clip {
             path: clip.clone(),

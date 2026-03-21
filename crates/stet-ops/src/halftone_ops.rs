@@ -1175,6 +1175,7 @@ fn replay_form_elements(
                 let new_params = stet_graphics::device::ClipParams {
                     fill_rule: params.fill_rule,
                     ctm: Matrix::identity(),
+                    stroke_params: None,
                 };
                 target.push(DisplayElement::Clip {
                     path: new_path,

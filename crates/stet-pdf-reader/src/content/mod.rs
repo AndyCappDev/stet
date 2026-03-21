@@ -121,6 +121,10 @@ pub struct ContentInterpreter<'a> {
     /// When false, PDF overprint flags (OP/op) in graphics state dicts are
     /// suppressed — the gstate overprint fields stay false regardless of PDF content.
     overprint_enabled: bool,
+    /// Cache of resolved tiling patterns, keyed by PDF indirect reference (obj_num, gen).
+    /// Ensures the same pattern stream is interpreted only once, with the graphics
+    /// state from the first resolution (matching GhostScript behaviour).
+    pattern_cache: std::collections::HashMap<(u32, u16), TilingPattern>,
 }
 
 impl<'a> ContentInterpreter<'a> {
@@ -154,6 +158,7 @@ impl<'a> ContentInterpreter<'a> {
             text_clip_path: None,
             page_group_is_cmyk: false,
             overprint_enabled,
+            pattern_cache: std::collections::HashMap::new(),
         }
     }
 
@@ -355,6 +360,7 @@ impl<'a> ContentInterpreter<'a> {
                 params: ClipParams {
                     fill_rule: FillRule::NonZeroWinding,
                     ctm: Matrix::identity(),
+                    stroke_params: None,
                 },
             });
         }
@@ -519,6 +525,7 @@ impl<'a> ContentInterpreter<'a> {
                         params: ClipParams {
                             fill_rule: FillRule::NonZeroWinding,
                             ctm: Matrix::identity(),
+                            stroke_params: None,
                         },
                     });
                     // Track in graphics state so Q/grestore can undo it
@@ -643,6 +650,7 @@ impl<'a> ContentInterpreter<'a> {
                 params: ClipParams {
                     fill_rule,
                     ctm: Matrix::identity(),
+                    stroke_params: None,
                 },
             });
             // Track the clip for restoring on Q
@@ -689,6 +697,7 @@ impl<'a> ContentInterpreter<'a> {
                 params: ClipParams {
                     fill_rule: *fill_rule,
                     ctm: Matrix::identity(),
+                    stroke_params: None,
                 },
             });
         }
@@ -951,6 +960,7 @@ impl<'a> ContentInterpreter<'a> {
                 params: ClipParams {
                     fill_rule,
                     ctm: Matrix::identity(),
+                    stroke_params: None,
                 },
             });
             for elem in shading_box.0.elements() {
@@ -983,8 +993,9 @@ impl<'a> ContentInterpreter<'a> {
                         None
                     },
                     pattern_id: pattern.pattern_id,
-                    device_space_tile: true,
-                    flip_tile_y: pattern.flip_tile_y,
+                    device_space_tile: false,
+                    flip_tile_y: false,
+                    stroke_params: None,
                 },
             });
         } else {
@@ -1003,21 +1014,72 @@ impl<'a> ContentInterpreter<'a> {
     /// We inverse-transform the path back to user space and pass the CTM to the
     /// renderer so it can apply the stroke correctly.
     fn emit_stroke(&mut self, path: PsPath) {
-        if self.gstate.stroke_shading_pattern.is_some() {
-            // PatternType 2 shading stroke: would need stroke-to-fill conversion
-            // for proper clipping. Skip for now — fill-based shading patterns
-            // (the common case) are fully supported.
-            return;
-        }
-
         let ctm = self.gstate.ctm;
         // Inverse-transform path from device space back to user space
         let user_path = if let Some(inv) = ctm.invert() {
             path.transform(&inv)
         } else {
-            // Degenerate CTM — fall back to device-space stroke
-            path
+            path.clone()
         };
+
+        // Tiling pattern stroke: emit PatternFill with stroke_params so the
+        // renderer expands the centerline path to a stroke outline for masking.
+        if let Some(pattern) = self.gstate.stroke_pattern.clone() {
+            let mut sp = self.gstate.stroke_params_with_ctm();
+            sp.ctm = ctm;
+            self.display_list.push(DisplayElement::PatternFill {
+                params: PatternFillParams {
+                    path: user_path,
+                    fill_rule: FillRule::NonZeroWinding,
+                    tile: pattern.tile,
+                    pattern_matrix: pattern.pattern_matrix,
+                    bbox: pattern.bbox,
+                    xstep: pattern.x_step,
+                    ystep: pattern.y_step,
+                    paint_type: pattern.paint_type,
+                    underlying_color: if pattern.paint_type == 2 {
+                        Some(self.gstate.stroke_color.clone())
+                    } else {
+                        None
+                    },
+                    pattern_id: pattern.pattern_id,
+                    device_space_tile: false,
+                    flip_tile_y: false,
+                    stroke_params: Some(sp),
+                },
+            });
+            return;
+        }
+
+        // Shading pattern stroke: clip to stroke outline, then emit shading.
+        if let Some(shading_box) = self.gstate.stroke_shading_pattern.clone() {
+            let mut sp = self.gstate.stroke_params_with_ctm();
+            sp.ctm = ctm;
+            let bbox = path_device_bbox(&path);
+            let mut group_dl = DisplayList::new();
+            group_dl.push(DisplayElement::Clip {
+                path: user_path,
+                params: ClipParams {
+                    fill_rule: FillRule::NonZeroWinding,
+                    ctm: Matrix::identity(),
+                    stroke_params: Some(sp),
+                },
+            });
+            for elem in shading_box.0.elements() {
+                group_dl.push(elem.clone());
+            }
+            self.display_list.push(DisplayElement::Group {
+                elements: group_dl,
+                params: GroupParams {
+                    bbox,
+                    isolated: true,
+                    knockout: false,
+                    blend_mode: self.gstate.blend_mode,
+                    alpha: self.gstate.stroke_alpha,
+                },
+            });
+            return;
+        }
 
         let mut params = self.gstate.stroke_params_with_ctm();
         params.ctm = ctm;
@@ -1594,6 +1656,7 @@ impl<'a> ContentInterpreter<'a> {
                 params: ClipParams {
                     fill_rule: FillRule::NonZeroWinding,
                     ctm: Matrix::identity(),
+                    stroke_params: None,
                 },
             });
             for elem in shading_box.0.elements() {
@@ -1626,8 +1689,9 @@ impl<'a> ContentInterpreter<'a> {
                         None
                     },
                     pattern_id: pattern.pattern_id,
-                    device_space_tile: true,
-                    flip_tile_y: pattern.flip_tile_y,
+                    device_space_tile: false,
+                    flip_tile_y: false,
+                    stroke_params: None,
                 },
             });
         } else {
@@ -2476,6 +2540,7 @@ impl<'a> ContentInterpreter<'a> {
             params: ClipParams {
                 fill_rule: FillRule::NonZeroWinding,
                 ctm: Matrix::identity(),
+                stroke_params: None,
             },
         });
         self.gstate
@@ -3377,6 +3442,16 @@ impl<'a> ContentInterpreter<'a> {
                 String::from_utf8_lossy(name)
             ))
         })?;
+
+        // Cache tiling patterns by indirect reference — ensures the same
+        // pattern stream is interpreted only once (with the first caller's
+        // graphics state), matching GhostScript's behaviour.
+        if let PdfObj::Ref(obj_num, gen_num) = pat_ref {
+            if let Some(cached) = self.pattern_cache.get(&(*obj_num, *gen_num)) {
+                return Ok(cached.clone());
+            }
+        }
+
         let pat_ref_clone = pat_ref.clone();
         let pat_obj = self.resolver.deref(pat_ref)?;
         let pat_dict = pat_obj
@@ -3385,12 +3460,18 @@ impl<'a> ContentInterpreter<'a> {
 
         let pattern_type = pat_dict.get_int(b"PatternType").unwrap_or(1) as i32;
 
-        match pattern_type {
+        let result = match pattern_type {
             1 => self.resolve_tiling_pattern(&pat_ref_clone, pat_dict),
             _ => Err(PdfError::Other(format!(
                 "Unsupported PatternType {pattern_type}"
             ))),
+        }?;
+
+        if let PdfObj::Ref(obj_num, gen_num) = pat_ref {
+            self.pattern_cache.insert((*obj_num, *gen_num), result.clone());
         }
+
+        Ok(result)
     }
 
     fn resolve_tiling_pattern(
@@ -3447,15 +3528,26 @@ impl<'a> ContentInterpreter<'a> {
         // Form XObjects include the form's coordinate transform.
         let combined_matrix = self.content_stream_ctm.concat(&pattern_matrix);
 
-        // Interpret pattern content stream with the combined pattern matrix
-        // as CTM, so all elements are in device space.
+        // Interpret pattern content stream with identity CTM, keeping tile
+        // elements in pattern space.  The combined_matrix is stored in the
+        // TilingPattern and applied per-element by the renderer (same approach
+        // as PostScript op_makepattern).
         self.gstate_stack.push(self.gstate.clone());
         let saved_resources = std::mem::replace(&mut self.resources, pattern_resources);
         let saved_display_list = std::mem::take(&mut self.display_list);
         let saved_content_stream_ctm = self.content_stream_ctm;
 
-        self.gstate.ctm = combined_matrix;
-        self.content_stream_ctm = combined_matrix;
+        self.gstate.ctm = Matrix::identity();
+        self.content_stream_ctm = Matrix::identity();
+        self.gstate.clip_path = None;
+        self.gstate.clip_path_version = 0;
+        self.gstate.clip_stack.clear();
+        // Clear parent patterns to prevent infinite recursion if the pattern
+        // stream references the same pattern resource.
+        self.gstate.fill_pattern = None;
+        self.gstate.stroke_pattern = None;
+        self.gstate.fill_shading_pattern = None;
+        self.gstate.stroke_shading_pattern = None;
 
         self.depth += 1;
         let _ = self.interpret_stream(&pattern_data);
@@ -3471,12 +3563,6 @@ impl<'a> ContentInterpreter<'a> {
             self.gstate = saved;
         }
 
-        // Detect Y-flip from the PDF pattern matrix (before combining with
-        // page CTM). When the pattern matrix flips Y (negative d), the tile
-        // content is designed for flipped Y. Since we interpret with identity
-        // CTM, the renderer must flip the tile vertically.
-        let flip_y = pattern_matrix.d < 0.0 || (pattern_matrix.d == 0.0 && pattern_matrix.b < 0.0);
-
         Ok(TilingPattern {
             tile: tile_display_list,
             bbox,
@@ -3485,7 +3571,7 @@ impl<'a> ContentInterpreter<'a> {
             pattern_matrix: combined_matrix,
             paint_type,
             pattern_id: 0,
-            flip_tile_y: flip_y,
+            flip_tile_y: false,
         })
     }
 

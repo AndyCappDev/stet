@@ -721,7 +721,7 @@ fn precompute_bboxes(list: &DisplayList, dpi: f64) -> Vec<Option<YBBox>> {
             DisplayElement::PatchShading { params } => {
                 shading_y_bbox_from_bbox(&params.bbox, &params.ctm)
             }
-            DisplayElement::PatternFill { params } => path_y_bbox(&params.path),
+            DisplayElement::PatternFill { params } => pattern_fill_y_bbox(params),
             DisplayElement::Group { params, .. } => Some(YBBox {
                 y_min: params.bbox[1],
                 y_max: params.bbox[3],
@@ -3109,6 +3109,37 @@ fn render_pattern_fill(
         max_y = max_y.max(y);
     }
 
+    // For stroke patterns, the path extends beyond the centerline by half
+    // the stroke width.  The path is in user space; transform the bbox
+    // corners through the CTM to get device-space bounds.
+    if let Some(ref sp) = params.stroke_params {
+        // Transform user-space bbox corners through CTM to device space
+        let ctm = &sp.ctm;
+        let corners = [
+            ctm.transform_point(min_x, min_y),
+            ctm.transform_point(max_x, min_y),
+            ctm.transform_point(min_x, max_y),
+            ctm.transform_point(max_x, max_y),
+        ];
+        min_x = f64::MAX;
+        min_y = f64::MAX;
+        max_x = f64::MIN;
+        max_y = f64::MIN;
+        for (cx, cy) in &corners {
+            min_x = min_x.min(*cx);
+            min_y = min_y.min(*cy);
+            max_x = max_x.max(*cx);
+            max_y = max_y.max(*cy);
+        }
+        // Expand by half stroke width in device space
+        let half_w = sp.line_width * 0.5
+            * (ctm.a * ctm.a + ctm.b * ctm.b).sqrt().max((ctm.c * ctm.c + ctm.d * ctm.d).sqrt());
+        min_x -= half_w;
+        min_y -= half_w;
+        max_x += half_w;
+        max_y += half_w;
+    }
+
     // Clamp to viewport bounds in device space
     min_x = min_x.max(dev_vp_x);
     min_y = min_y.max(dev_vp_y);
@@ -3222,8 +3253,31 @@ fn render_pattern_fill(
                     ((pm.b * pat_offset_x + pm.d * pat_offset_y + pm.ty - dev_vp_y) * sy_f) as f32,
                 );
 
+                let mut tile_clip: Option<Mask> = None;
                 for elem in params.tile.elements() {
+                    let clip_ref = tile_clip.as_ref();
                     match elem {
+                        DisplayElement::Clip { path, params: cp } => {
+                            if let Some(sp) = build_skia_path(path) {
+                                let t = to_transform(&cp.ctm);
+                                let combined = t.post_concat(tile_transform);
+                                let mut mask =
+                                    Mask::new(ctx.out_w, ctx.out_h).expect("mask");
+                                mask.fill_path(
+                                    &sp,
+                                    to_fill_rule(&cp.fill_rule),
+                                    false,
+                                    combined,
+                                );
+                                if let Some(prev) = tile_clip.take() {
+                                    intersect_masks(&mut mask, &prev);
+                                }
+                                tile_clip = Some(mask);
+                            }
+                        }
+                        DisplayElement::InitClip => {
+                            tile_clip = None;
+                        }
                         DisplayElement::Fill { path, params: fp } => {
                             if let Some(sp) = build_skia_path(path) {
                                 let mut paint = if params.paint_type == 1 {
@@ -3240,7 +3294,7 @@ fn render_pattern_fill(
                                 let t = to_transform(&fp.ctm);
                                 let combined = t.post_concat(tile_transform);
                                 let fr = to_fill_rule(&fp.fill_rule);
-                                tile_buf.fill_path(&sp, &paint, fr, combined, None);
+                                tile_buf.fill_path(&sp, &paint, fr, combined, clip_ref);
                             }
                         }
                         DisplayElement::Stroke { path, params: sp } => {
@@ -3249,7 +3303,7 @@ fn render_pattern_fill(
                                 let paint = to_paint(&sp.color);
                                 let t = to_transform(&sp.ctm);
                                 let combined = t.post_concat(tile_transform);
-                                tile_buf.stroke_path(&skp, &paint, &stroke, combined, None);
+                                tile_buf.stroke_path(&skp, &paint, &stroke, combined, clip_ref);
                             }
                         }
                         DisplayElement::Image {
@@ -3274,8 +3328,14 @@ fn render_pattern_fill(
                                                 blend_mode: BlendMode::SourceOver,
                                                 quality: stet_tiny_skia::FilterQuality::Nearest,
                                             };
-                                            tile_buf
-                                                .draw_pixmap(0, 0, img_ref, &paint, combined, None);
+                                            tile_buf.draw_pixmap(
+                                                0,
+                                                0,
+                                                img_ref,
+                                                &paint,
+                                                combined,
+                                                clip_ref,
+                                            );
                                         }
                                     }
                                 }
@@ -3288,7 +3348,7 @@ fn render_pattern_fill(
         }
     }
 
-    // Composite tile_buf onto main pixmap through the fill path
+    // Composite tile_buf onto main pixmap through the fill/stroke path
     let Some(fill_skia_path) = build_skia_path(&params.path) else {
         return;
     };
@@ -3301,7 +3361,23 @@ fn render_pattern_fill(
         ctx.scale_x,
         ctx.scale_y,
     );
-    fill_mask.fill_path(&fill_skia_path, fill_rule, !ctx.no_aa, path_transform);
+    if let Some(ref sp) = params.stroke_params {
+        // Stroke pattern: expand the centerline path to a fill outline
+        // using the stroke parameters (width, cap, join, miter, dash).
+        let stroke = build_stroke(sp, ctx.effective_dpi);
+        let ctm_transform = to_transform(&sp.ctm);
+        let combined = ctm_transform.post_concat(path_transform);
+        if let Some(outline) = fill_skia_path.stroke(&stroke, 1.0) {
+            fill_mask.fill_path(
+                &outline,
+                stet_tiny_skia::FillRule::Winding,
+                !ctx.no_aa,
+                combined,
+            );
+        }
+    } else {
+        fill_mask.fill_path(&fill_skia_path, fill_rule, !ctx.no_aa, path_transform);
+    }
 
     if let Some(clip_mask) = mask_ref {
         intersect_masks(&mut fill_mask, clip_mask);
@@ -3389,9 +3465,23 @@ fn clip_path_unified(
             band_state.clip_region = prev_region;
             return;
         };
-        let transform = ctx.transform(&params.ctm);
         mask.data_mut().fill(0);
-        mask.fill_path(&skia_path, fill_rule, false, transform);
+        if let Some(ref sp) = params.stroke_params {
+            // Stroke-based clip: expand centerline to stroke outline
+            let stroke = build_stroke(sp, ctx.effective_dpi);
+            let transform = ctx.transform(&sp.ctm);
+            if let Some(outline) = skia_path.stroke(&stroke, 1.0) {
+                mask.fill_path(
+                    &outline,
+                    stet_tiny_skia::FillRule::Winding,
+                    false,
+                    transform,
+                );
+            }
+        } else {
+            let transform = ctx.transform(&params.ctm);
+            mask.fill_path(&skia_path, fill_rule, false, transform);
+        }
         if !band_state.clip_mask_seen.insert(path_hash) {
             band_state.clip_mask_cache.insert(path_hash, mask.clone());
         }
@@ -4987,7 +5077,7 @@ fn precompute_full_bboxes(list: &DisplayList, dpi: f64) -> Vec<Option<BBox2D>> {
             }
             DisplayElement::MeshShading { params } => shading_full_bbox(&params.bbox, &params.ctm),
             DisplayElement::PatchShading { params } => shading_full_bbox(&params.bbox, &params.ctm),
-            DisplayElement::PatternFill { params } => path_full_bbox(&params.path),
+            DisplayElement::PatternFill { params } => pattern_fill_full_bbox(params),
             DisplayElement::Group { params, .. } => Some(BBox2D {
                 x_min: params.bbox[0],
                 y_min: params.bbox[1],
@@ -5045,6 +5135,59 @@ fn path_full_bbox(path: &PsPath) -> Option<BBox2D> {
     } else {
         None
     }
+}
+
+/// Compute full 2D bounds for a PatternFill element.
+/// For stroke patterns, the path is in user space and must be transformed
+/// through the CTM to get device-space bounds, then expanded by half
+/// the stroke width.
+fn pattern_fill_full_bbox(
+    params: &stet_graphics::device::PatternFillParams,
+) -> Option<BBox2D> {
+    if let Some(ref sp) = params.stroke_params {
+        let bbox = path_full_bbox(&params.path)?;
+        let ctm = &sp.ctm;
+        let corners = [
+            ctm.transform_point(bbox.x_min, bbox.y_min),
+            ctm.transform_point(bbox.x_max, bbox.y_min),
+            ctm.transform_point(bbox.x_min, bbox.y_max),
+            ctm.transform_point(bbox.x_max, bbox.y_max),
+        ];
+        let mut dev_bbox = BBox2D {
+            x_min: f64::INFINITY,
+            y_min: f64::INFINITY,
+            x_max: f64::NEG_INFINITY,
+            y_max: f64::NEG_INFINITY,
+        };
+        for (x, y) in &corners {
+            dev_bbox.x_min = dev_bbox.x_min.min(*x);
+            dev_bbox.y_min = dev_bbox.y_min.min(*y);
+            dev_bbox.x_max = dev_bbox.x_max.max(*x);
+            dev_bbox.y_max = dev_bbox.y_max.max(*y);
+        }
+        let half_w = sp.line_width * 0.5
+            * (ctm.a * ctm.a + ctm.b * ctm.b)
+                .sqrt()
+                .max((ctm.c * ctm.c + ctm.d * ctm.d).sqrt());
+        dev_bbox.x_min -= half_w;
+        dev_bbox.y_min -= half_w;
+        dev_bbox.x_max += half_w;
+        dev_bbox.y_max += half_w;
+        Some(dev_bbox)
+    } else {
+        path_full_bbox(&params.path)
+    }
+}
+
+/// Compute Y-axis bounds for a PatternFill element (banded rendering).
+fn pattern_fill_y_bbox(
+    params: &stet_graphics::device::PatternFillParams,
+) -> Option<YBBox> {
+    let bbox = pattern_fill_full_bbox(params)?;
+    Some(YBBox {
+        y_min: bbox.y_min,
+        y_max: bbox.y_max,
+    })
 }
 
 /// Compute full 2D bounds for an image from its transform.
@@ -7355,6 +7498,7 @@ mod tests {
         let clip_params = ClipParams {
             fill_rule: FillRule::NonZeroWinding,
             ctm: Matrix::identity(),
+            stroke_params: None,
         };
         dev.clip_path(&clip_path, &clip_params);
 

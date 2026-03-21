@@ -77,6 +77,7 @@ pub fn op_clip(ctx: &mut Context) -> Result<(), PsError> {
     let params = ClipParams {
         fill_rule: FillRule::NonZeroWinding,
         ctm: Matrix::identity(),
+        stroke_params: None,
     };
     ctx.display_list.push(DisplayElement::Clip { path, params });
     // Note: clip does NOT clear the path (unlike fill/stroke)
@@ -98,6 +99,7 @@ pub fn op_eoclip(ctx: &mut Context) -> Result<(), PsError> {
     let params = ClipParams {
         fill_rule: FillRule::EvenOdd,
         ctm: Matrix::identity(),
+        stroke_params: None,
     };
     ctx.display_list.push(DisplayElement::Clip { path, params });
     Ok(())
@@ -220,6 +222,7 @@ pub fn op_rectclip(ctx: &mut Context) -> Result<(), PsError> {
     let params = ClipParams {
         fill_rule: FillRule::NonZeroWinding,
         ctm: Matrix::identity(),
+        stroke_params: None,
     };
     ctx.display_list.push(DisplayElement::Clip { path, params });
     // Implicit newpath
@@ -249,6 +252,7 @@ pub fn op_cliprestore(ctx: &mut Context) -> Result<(), PsError> {
                 let params = ClipParams {
                     fill_rule: FillRule::NonZeroWinding,
                     ctm: Matrix::identity(),
+                    stroke_params: None,
                 };
                 ctx.display_list.push(DisplayElement::Clip {
                     path: clip.clone(),

@@ -237,6 +237,9 @@ pub struct StrokeParams {
 pub struct ClipParams {
     pub fill_rule: FillRule,
     pub ctm: Matrix,
+    /// For stroke-based clips: stroke parameters to expand the clip path
+    /// from a centerline to a stroke outline before rasterizing.
+    pub stroke_params: Option<StrokeParams>,
 }
 
 /// Pre-sampled tint transform: maps input tint values to alt-space components.
@@ -541,6 +544,10 @@ pub struct PatternFillParams {
     /// system (pattern matrix had negative d). The pre-rendered tile must
     /// be vertically flipped before stamping.
     pub flip_tile_y: bool,
+    /// For pattern strokes: stroke parameters to expand the centerline path
+    /// into a fill outline for masking. When Some, `path` is a user-space
+    /// stroke centerline rather than a fill path.
+    pub stroke_params: Option<StrokeParams>,
 }
 
 /// Trait for consuming rendered page pixel data.
