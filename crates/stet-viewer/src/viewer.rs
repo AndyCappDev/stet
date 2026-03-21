@@ -303,13 +303,18 @@ impl ViewerApp {
         let win_w = (content_w + panel_overhead_w).max(400.0);
         let win_h = (content_h + panel_overhead_h).max(300.0);
 
-        // Center window on the monitor.
-        let monitor = ctx.input(|i| i.viewport().monitor_size);
-        if let Some(mon) = monitor {
-            self.pending_position = Some(egui::pos2(
-                ((mon.x - win_w) / 2.0).max(0.0),
-                ((mon.y - win_h) / 2.0).max(0.0),
-            ));
+        // Only center the window on the very first sizing. Subsequent resizes
+        // (page size changes) keep the window on whichever monitor the user moved
+        // it to — just resize in place.
+        if !self.window_sized {
+            let monitor = ctx.input(|i| i.viewport().monitor_size);
+            if let Some(mon) = monitor {
+                self.pending_position = Some(egui::pos2(
+                    ((mon.x - win_w) / 2.0).max(0.0),
+                    ((mon.y - win_h) / 2.0).max(0.0),
+                ));
+            }
+            self.window_sized = true;
         }
 
         ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(win_w, win_h)));
@@ -356,14 +361,15 @@ impl ViewerApp {
                     pages_this_frame += 1;
                 }
                 Ok(ViewerMsg::NewJob) => {
-                    // New job starting — clear accumulated pages
+                    // New job starting — clear accumulated pages.
+                    // Keep window_sized true so dropped files don't move
+                    // the window to a different monitor.
                     self.pages.clear();
                     self.current_page = 0;
                     self.job_done = false;
                     self.render_dirty = true;
                     self.request_render();
                     self.minimap = None;
-                    self.window_sized = false;
                     pages_cleared = true;
                 }
                 Ok(ViewerMsg::JobDone) => {
