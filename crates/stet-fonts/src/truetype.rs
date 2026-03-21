@@ -168,7 +168,7 @@ pub fn get_glyf_data(font_data: &[u8], gid: u16) -> Option<Vec<u8>> {
     } else {
         glyf_off + next_offset
     };
-    if abs_next > font_data.len() {
+    if abs_offset > font_data.len() || abs_next > font_data.len() || abs_offset > abs_next {
         return None;
     }
 
