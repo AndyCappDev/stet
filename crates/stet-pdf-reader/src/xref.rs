@@ -469,7 +469,31 @@ fn parse_xref_section(
             parse_classic_xref(data, xref_pos)
         } else {
             // Xref stream: an indirect object with /Type /XRef
-            parse_xref_stream(data, offset)
+            match parse_xref_stream(data, offset) {
+                Ok(result) => Ok(result),
+                Err(_) => {
+                    // /Prev offset may point into the middle of an xref stream
+                    // object (common in linearized PDFs). Search backwards for
+                    // the actual object header.
+                    let scan_start = offset.saturating_sub(256);
+                    for search in (scan_start..offset).rev() {
+                        if data[search].is_ascii_digit() {
+                            if let Some((_, _, obj_offset)) =
+                                try_parse_obj_header(data, search)
+                            {
+                                if obj_offset == search {
+                                    if let Ok(result) =
+                                        parse_xref_stream(data, search)
+                                    {
+                                        return Ok(result);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    parse_xref_stream(data, offset) // return original error
+                }
+            }
         }
     }
 }
