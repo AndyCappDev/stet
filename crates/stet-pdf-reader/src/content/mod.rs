@@ -3370,6 +3370,12 @@ impl<'a> ContentInterpreter<'a> {
             .and_then(|o| o.as_name())
             .ok_or(PdfError::Other("pattern: expected name".into()))?
             .to_vec();
+
+        // For uncolored patterns (PaintType 2), the scn operands include
+        // underlying color components before the pattern name. Extract them
+        // by resolving the underlying color space from the Pattern CS definition.
+        self.extract_pattern_underlying_color(false)?;
+
         // Check PatternType before resolving — Type 2 (shading) needs different handling
         let pattern_dict = self
             .resolve_resource_subdict(b"Pattern")
@@ -3406,6 +3412,9 @@ impl<'a> ContentInterpreter<'a> {
             .ok_or(PdfError::Other("pattern: expected name".into()))?
             .to_vec();
 
+        // Extract underlying color components for uncolored patterns
+        self.extract_pattern_underlying_color(true)?;
+
         // Check PatternType before resolving — Type 2 (shading) needs different handling
         let pattern_dict = self
             .resolve_resource_subdict(b"Pattern")
@@ -3430,6 +3439,75 @@ impl<'a> ContentInterpreter<'a> {
             let pattern = self.resolve_pattern(&name)?;
             self.gstate.stroke_shading_pattern = None;
             self.gstate.stroke_pattern = Some(pattern);
+        }
+        Ok(())
+    }
+
+    /// Extract underlying color components from the operand stack for Pattern
+    /// color spaces with an underlying CS (e.g., `[/Pattern /DeviceRGB]`).
+    /// For `scn` with an uncolored pattern, the operands are `c1 c2 ... /PatName`
+    /// where c1..cn are the underlying color components.
+    fn extract_pattern_underlying_color(&mut self, is_stroke: bool) -> Result<(), PdfError> {
+        // Get the color space reference (fill or stroke)
+        let cs_ref = if is_stroke {
+            &self.gstate.stroke_color_space
+        } else {
+            &self.gstate.fill_color_space
+        };
+        let cs_name = match cs_ref {
+            ColorSpaceRef::Named(n) => n.clone(),
+            _ => return Ok(()),
+        };
+
+        // Look up the Pattern CS definition in resources to find the underlying CS
+        let cs_dict = self.resources.get(b"ColorSpace").and_then(|obj| match obj {
+            PdfObj::Dict(_) => Some(obj.as_dict().unwrap().clone()),
+            PdfObj::Ref(n, g) => self.resolver.resolve(*n, *g).ok()?.as_dict().cloned(),
+            _ => None,
+        });
+        let cs_obj = match cs_dict.as_ref().and_then(|d| d.get(&cs_name)) {
+            Some(obj) => obj.clone(),
+            None => return Ok(()),
+        };
+        let cs_resolved = self.resolver.deref(&cs_obj)?;
+        let arr = match &cs_resolved {
+            PdfObj::Array(a) if a.len() >= 2 => a,
+            _ => return Ok(()),
+        };
+        // Must be [/Pattern <underlying_cs>]
+        if arr[0].as_name() != Some(b"Pattern") {
+            return Ok(());
+        }
+        // Resolve the underlying color space
+        let underlying_cs =
+            color_space::resolve_color_space_obj(&arr[1], self.resolver)?;
+        let n = underlying_cs.num_components();
+        if n == 0 {
+            return Ok(());
+        }
+
+        // The operand stack has: [... c1 c2 ... cn /PatName]
+        // The pattern name is at the end; color components are before it.
+        let stack_len = self.operand_stack.len();
+        if stack_len < n + 1 {
+            return Ok(()); // not enough operands
+        }
+        // Read n components from positions (stack_len - 1 - n) .. (stack_len - 1)
+        let mut nums = Vec::with_capacity(n);
+        let base = stack_len - 1 - n;
+        for i in 0..n {
+            nums.push(
+                self.operand_stack[base + i]
+                    .as_f64()
+                    .unwrap_or(0.0),
+            );
+        }
+        let color =
+            color_space::components_to_device_color_icc(&underlying_cs, &nums, Some(&mut self.icc_cache));
+        if is_stroke {
+            self.gstate.stroke_color = color;
+        } else {
+            self.gstate.fill_color = color;
         }
         Ok(())
     }
