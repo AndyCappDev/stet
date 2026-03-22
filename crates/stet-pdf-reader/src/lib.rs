@@ -27,6 +27,7 @@ pub use page_tree::PageInfo;
 
 use content::ContentInterpreter;
 use resolver::Resolver;
+use std::collections::HashSet;
 use std::sync::Arc;
 use stet_fonts::geometry::Matrix;
 use stet_graphics::display_list::DisplayList;
@@ -46,6 +47,9 @@ pub struct PdfDocument<'a> {
     /// When false (default), PDF overprint flags (OP/op) are suppressed —
     /// skips the expensive CMYK buffer simulation that most viewers omit.
     overprint: bool,
+    /// Object numbers of Optional Content Groups that are OFF by default.
+    /// Parsed from the catalog's /OCProperties /D /OFF array.
+    ocg_off: HashSet<u32>,
 }
 
 impl<'a> PdfDocument<'a> {
@@ -91,6 +95,7 @@ impl<'a> PdfDocument<'a> {
 
         let resolver = Resolver::with_encryption(data, xref, encryption);
         let pages = page_tree::collect_pages(&resolver)?;
+        let ocg_off = parse_ocg_off(&resolver);
 
         let mut icc_cache = IccCache::new();
         icc_cache.search_system_cmyk_profile();
@@ -101,6 +106,7 @@ impl<'a> PdfDocument<'a> {
             icc_cache,
             font_provider: None,
             overprint: false,
+            ocg_off,
         })
     }
 
@@ -143,6 +149,7 @@ impl<'a> PdfDocument<'a> {
 
         let resolver = Resolver::with_encryption(data, xref, encryption);
         let pages = page_tree::collect_pages(&resolver)?;
+        let ocg_off = parse_ocg_off(&resolver);
 
         Ok(Self {
             resolver,
@@ -150,6 +157,7 @@ impl<'a> PdfDocument<'a> {
             icc_cache,
             font_provider: None,
             overprint: false,
+            ocg_off,
         })
     }
 
@@ -273,6 +281,7 @@ impl<'a> PdfDocument<'a> {
             &self.icc_cache,
             self.font_provider.clone(),
             self.overprint,
+            &self.ocg_off,
         );
 
         // Check if the page has a DeviceCMYK transparency group — if so,
@@ -346,6 +355,62 @@ impl<'a> PdfDocument<'a> {
     pub fn pages(&self) -> &[PageInfo] {
         &self.pages
     }
+}
+
+/// Parse the default OFF set from the catalog's OCProperties.
+/// Returns a set of object numbers for OCGs that are OFF by default.
+/// OCGs not listed in either /ON or /OFF are considered ON (PDF spec default).
+fn parse_ocg_off(resolver: &Resolver) -> HashSet<u32> {
+    let mut off = HashSet::new();
+
+    // Get catalog
+    let root_ref = match resolver.trailer().get_ref(b"Root") {
+        Some(r) => r,
+        None => return off,
+    };
+    let catalog = match resolver.resolve(root_ref.0, root_ref.1) {
+        Ok(c) => c,
+        Err(_) => return off,
+    };
+    let catalog_dict = match catalog.as_dict() {
+        Some(d) => d,
+        None => return off,
+    };
+
+    // Get OCProperties -> D (default configuration) -> OFF array
+    let oc_props = match catalog_dict.get(b"OCProperties") {
+        Some(obj) => match resolver.deref(obj) {
+            Ok(o) => o,
+            Err(_) => return off,
+        },
+        None => return off,
+    };
+    let oc_dict = match oc_props.as_dict() {
+        Some(d) => d,
+        None => return off,
+    };
+    let d_obj = match oc_dict.get(b"D") {
+        Some(obj) => match resolver.deref(obj) {
+            Ok(o) => o,
+            Err(_) => return off,
+        },
+        None => return off,
+    };
+    let d_dict = match d_obj.as_dict() {
+        Some(d) => d,
+        None => return off,
+    };
+
+    // Collect object numbers from /OFF array
+    if let Some(off_arr) = d_dict.get_array(b"OFF") {
+        for obj in off_arr {
+            if let Some((num, _gen)) = obj.as_ref() {
+                off.insert(num);
+            }
+        }
+    }
+
+    off
 }
 
 /// Check for `%PDF-` header within the first 1024 bytes.

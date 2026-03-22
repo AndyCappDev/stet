@@ -129,6 +129,11 @@ pub struct ContentInterpreter<'a> {
     /// Ensures the same pattern stream is interpreted only once, with the graphics
     /// state from the first resolution (matching GhostScript behaviour).
     pattern_cache: std::collections::HashMap<(u32, u16), TilingPattern>,
+    /// Object numbers of Optional Content Groups that are OFF by default.
+    ocg_off: std::collections::HashSet<u32>,
+    /// Nesting depth of suppressed optional content blocks (BDC/EMC).
+    /// When > 0, all operators except BDC/BMC/EMC are skipped.
+    oc_suppression_depth: u32,
 }
 
 impl<'a> ContentInterpreter<'a> {
@@ -140,6 +145,7 @@ impl<'a> ContentInterpreter<'a> {
         icc_cache: &IccCache,
         font_provider: Option<FontProvider>,
         overprint_enabled: bool,
+        ocg_off: &std::collections::HashSet<u32>,
     ) -> Self {
         Self {
             resolver,
@@ -164,6 +170,8 @@ impl<'a> ContentInterpreter<'a> {
             page_group_is_cmyk: false,
             overprint_enabled,
             pattern_cache: std::collections::HashMap::new(),
+            ocg_off: ocg_off.clone(),
+            oc_suppression_depth: 0,
         }
     }
 
@@ -432,6 +440,7 @@ impl<'a> ContentInterpreter<'a> {
                     if op == b"BI" {
                         // Inline images are structural — errors here are fatal
                         // because we need to skip the image data bytes.
+                        // Still parse when OC-suppressed (to advance the lexer).
                         self.handle_inline_image(&mut lexer)?;
                     } else if let Err(_e) = self.dispatch_operator(&op) {
                         // Continue past operator errors. Malformed PDFs may have
@@ -471,6 +480,33 @@ impl<'a> ContentInterpreter<'a> {
 
     /// Dispatch a PDF content stream operator.
     fn dispatch_operator(&mut self, op: &[u8]) -> Result<(), PdfError> {
+        // Skip all operators inside suppressed optional content blocks,
+        // except marked content operators (to maintain proper nesting).
+        if self.oc_suppression_depth > 0 {
+            match op {
+                b"BDC" | b"DP" => {
+                    // Nested BDC inside suppressed block: increment depth
+                    self.operand_stack.pop();
+                    self.operand_stack.pop();
+                    self.oc_suppression_depth += 1;
+                    return Ok(());
+                }
+                b"BMC" | b"MP" => {
+                    self.operand_stack.pop();
+                    self.oc_suppression_depth += 1;
+                    return Ok(());
+                }
+                b"EMC" => {
+                    self.oc_suppression_depth -= 1;
+                    return Ok(());
+                }
+                _ => {
+                    // Discard any operands for the skipped operator
+                    self.operand_stack.clear();
+                    return Ok(());
+                }
+            }
+        }
         match op {
             // Graphics state
             b"q" => self.op_q(),
@@ -595,17 +631,18 @@ impl<'a> ContentInterpreter<'a> {
             // Shading
             b"sh" => self.op_sh(),
 
-            // Marked content (consume operands, otherwise no-op)
+            // Marked content with optional content group (OCG) support
             b"BMC" | b"MP" => {
                 self.operand_stack.pop();
                 Ok(())
             }
-            b"BDC" | b"DP" => {
-                self.operand_stack.pop();
-                self.operand_stack.pop();
+            b"BDC" | b"DP" => self.op_bdc(),
+            b"EMC" => {
+                if self.oc_suppression_depth > 0 {
+                    self.oc_suppression_depth -= 1;
+                }
                 Ok(())
             }
-            b"EMC" => Ok(()),
 
             // Type 3 glyph operators (width/cache — we use Widths array instead)
             b"d0" => Ok(()),
@@ -1738,6 +1775,38 @@ impl<'a> ContentInterpreter<'a> {
             self.display_list
                 .push(DisplayElement::Fill { path, params });
         }
+    }
+
+    // === Marked content operators ===
+
+    /// Handle BDC (begin marked content with properties) / DP (define property).
+    /// Checks for Optional Content Group references and suppresses content
+    /// inside OCG blocks that are OFF by default.
+    fn op_bdc(&mut self) -> Result<(), PdfError> {
+        let props = self.operand_stack.pop();
+        let tag = self.operand_stack.pop();
+
+        // Only check for OC (optional content) tag
+        let is_oc = matches!(&tag, Some(Operand::Name(n)) if n == b"OC");
+        if !is_oc || self.ocg_off.is_empty() {
+            return Ok(());
+        }
+
+        // The properties operand is a name referencing /Properties in resources
+        if let Some(Operand::Name(prop_name)) = props {
+            if let Some(props_dict) = self.resolve_resource_subdict(b"Properties") {
+                if let Some(ocg_obj) = props_dict.get(&prop_name) {
+                    // Get the object number of the referenced OCG
+                    if let Some((obj_num, _)) = ocg_obj.as_ref() {
+                        if self.ocg_off.contains(&obj_num) {
+                            self.oc_suppression_depth = 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 
     // === XObject operator ===
