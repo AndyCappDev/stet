@@ -154,6 +154,10 @@ struct CharstringInterp<'a> {
     cs_lookup: Option<&'a CharstringLookup<'a>>,
     // Multiple Master weight vector for blend OtherSubrs (14-17)
     weight_vector: Option<Vec<f64>>,
+    // seac accent offset: when executing the accent component of a seac,
+    // hsbw/sbw adds this offset to the sidebearing instead of resetting
+    // the current point to zero.
+    seac_accent_offset: Option<(f64, f64)>,
 }
 
 impl<'a> CharstringInterp<'a> {
@@ -181,6 +185,7 @@ impl<'a> CharstringInterp<'a> {
             ps_stack: Vec::new(),
             cs_lookup,
             weight_vector: None,
+            seac_accent_offset: None,
         }
     }
 
@@ -337,8 +342,14 @@ impl<'a> CharstringInterp<'a> {
                     self.lsb_y = 0.0;
                     self.width_x = wx;
                     self.width_y = 0.0;
-                    self.x = sbx;
-                    self.y = 0.0;
+                    if let Some((ox, oy)) = self.seac_accent_offset {
+                        // seac accent: offset from accent's sidebearing origin
+                        self.x = sbx + ox;
+                        self.y = oy;
+                    } else {
+                        self.x = sbx;
+                        self.y = 0.0;
+                    }
                 }
                 14 => {
                     // endchar — signal completion
@@ -528,14 +539,17 @@ impl<'a> CharstringInterp<'a> {
                     let base_lsb = self.lsb_x;
                     self.done = false;
 
-                    // Execute accent character charstring with offset
+                    // Execute accent character charstring with offset.
+                    // Per the Type 1 spec, the accent's origin (0,0) is placed
+                    // at (adx - asb + base_lsb, ady) in the composite's
+                    // coordinate system.  hsbw/sbw adds this translation to
+                    // the accent's sidebearing so all path elements shift.
                     if let Some(achar_data) = achar_data {
-                        let accent_x = adx - asb + base_lsb;
-                        let accent_y = ady;
                         let decrypted = decrypt_charstring(&achar_data, self.len_iv);
-                        self.x = accent_x;
-                        self.y = accent_y;
+                        self.seac_accent_offset =
+                            Some((adx - asb + base_lsb, ady));
                         self.execute(&decrypted)?;
+                        self.seac_accent_offset = None;
                     }
 
                     // Restore original width (from the composite's hsbw/sbw)
@@ -561,8 +575,13 @@ impl<'a> CharstringInterp<'a> {
                 self.lsb_y = sby;
                 self.width_x = wx;
                 self.width_y = wy;
-                self.x = sbx;
-                self.y = sby;
+                if let Some((ox, oy)) = self.seac_accent_offset {
+                    self.x = sbx + ox;
+                    self.y = sby + oy;
+                } else {
+                    self.x = sbx;
+                    self.y = sby;
+                }
             }
             12 => {
                 // div: num1 num2 → num1/num2
