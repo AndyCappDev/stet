@@ -99,6 +99,9 @@ pub struct ContentInterpreter<'a> {
     display_list: DisplayList,
     in_text: bool,
     depth: u32,
+    /// True inside a Type 3 CharProc that started with `d1`. Per PDF spec 9.6.5,
+    /// color operators must be ignored (glyph uses the current text color).
+    d1_color_suppressed: bool,
     font_cache: FontCache,
     current_font: Option<Arc<PdfFont>>,
     /// CTM at the start of the current content stream (page or form).
@@ -150,6 +153,7 @@ impl<'a> ContentInterpreter<'a> {
             content_stream_ctm: initial_ctm,
             in_text: false,
             depth: 0,
+            d1_color_suppressed: false,
             font_cache: FontCache::new(),
             current_font: None,
             icc_cache: icc_cache.clone(),
@@ -397,13 +401,25 @@ impl<'a> ContentInterpreter<'a> {
                     self.operand_stack.push(Operand::Dict(dict));
                 }
                 Token::Keyword(kw) => {
-                    // Check for * suffix (f*, B*, b*, W*, T*)
+                    // Check for operator suffixes:
+                    // * suffix: f*, B*, b*, W*, T*
+                    // digit suffix: d0, d1 (Type 3 glyph operators)
                     let op = if matches!(kw.as_slice(), b"f" | b"B" | b"b" | b"W" | b"T") {
                         let p = lexer.pos();
                         if p < data.len() && data[p] == b'*' {
                             lexer.set_pos(p + 1);
                             let mut combined = kw;
                             combined.push(b'*');
+                            combined
+                        } else {
+                            kw
+                        }
+                    } else if kw == b"d" {
+                        let p = lexer.pos();
+                        if p < data.len() && (data[p] == b'0' || data[p] == b'1') {
+                            lexer.set_pos(p + 1);
+                            let mut combined = kw;
+                            combined.push(data[p]);
                             combined
                         } else {
                             kw
@@ -493,18 +509,20 @@ impl<'a> ContentInterpreter<'a> {
             b"W*" => self.op_big_w_star(),
 
             // Color - device
-            b"G" => self.op_big_g(),
-            b"g" => self.op_small_g(),
-            b"RG" => self.op_big_rg(),
-            b"rg" => self.op_small_rg(),
-            b"K" => self.op_big_k(),
-            b"k" => self.op_small_k(),
+            b"G" if !self.d1_color_suppressed => self.op_big_g(),
+            b"g" if !self.d1_color_suppressed => self.op_small_g(),
+            b"RG" if !self.d1_color_suppressed => self.op_big_rg(),
+            b"rg" if !self.d1_color_suppressed => self.op_small_rg(),
+            b"K" if !self.d1_color_suppressed => self.op_big_k(),
+            b"k" if !self.d1_color_suppressed => self.op_small_k(),
+            b"G" | b"g" | b"RG" | b"rg" | b"K" | b"k" => Ok(()),
 
             // Color - general
-            b"CS" => self.op_big_cs(),
-            b"cs" => self.op_small_cs(),
-            b"SC" | b"SCN" => self.op_sc_stroke(),
-            b"sc" | b"scn" => self.op_sc_fill(),
+            b"CS" if !self.d1_color_suppressed => self.op_big_cs(),
+            b"cs" if !self.d1_color_suppressed => self.op_small_cs(),
+            b"SC" | b"SCN" if !self.d1_color_suppressed => self.op_sc_stroke(),
+            b"sc" | b"scn" if !self.d1_color_suppressed => self.op_sc_fill(),
+            b"CS" | b"cs" | b"SC" | b"SCN" | b"sc" | b"scn" => Ok(()),
 
             // Text operators
             b"BT" => {
@@ -589,7 +607,13 @@ impl<'a> ContentInterpreter<'a> {
             b"EMC" => Ok(()),
 
             // Type 3 glyph operators (width/cache — we use Widths array instead)
-            b"d0" | b"d1" => Ok(()),
+            b"d0" => Ok(()),
+            b"d1" => {
+                // d1: Type 3 glyph with colored content disabled.
+                // Per PDF spec 9.6.5, color operators must be ignored.
+                self.d1_color_suppressed = true;
+                Ok(())
+            }
 
             // Compatibility (no-op)
             b"BX" | b"EX" => Ok(()),
@@ -1589,9 +1613,12 @@ impl<'a> ContentInterpreter<'a> {
 
         self.gstate.ctm = trm;
 
+        let saved_d1 = self.d1_color_suppressed;
+        self.d1_color_suppressed = false;
         self.depth += 1;
         let _ = self.interpret_stream(&proc_data);
         self.depth -= 1;
+        self.d1_color_suppressed = saved_d1;
         // Collect glyph display elements and append to main display list
         let glyph_elements = std::mem::replace(&mut self.display_list, saved_display_list);
         self.resources = saved_resources;
