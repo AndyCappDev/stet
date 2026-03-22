@@ -2007,6 +2007,20 @@ impl<'a> ContentInterpreter<'a> {
             return Ok(());
         }
 
+        // OPM 1 + CMYK all-zero fill: the color means "no ink" = don't paint.
+        // Skip the ImageMask entirely so underlying content shows through.
+        // Check both native_cmyk (set via ICCBased/DeviceCMYK) and RGB white
+        // (for cases where ICC conversion didn't preserve native_cmyk).
+        // OPM 1 + CMYK all-zero fill: "no ink" means don't paint.
+        // Skip the ImageMask so underlying content (e.g. background images)
+        // shows through instead of being covered with opaque white.
+        if is_image_mask
+            && self.gstate.overprint_mode == 1
+            && self.gstate.fill_color.native_cmyk == Some((0.0, 0.0, 0.0, 0.0))
+        {
+            return Ok(());
+        }
+
         let color_space = if is_image_mask {
             ImageColorSpace::Mask {
                 color: self.gstate.fill_color.clone(),
@@ -3030,6 +3044,11 @@ impl<'a> ContentInterpreter<'a> {
         if let Some(PdfObj::Bool(sa)) = gs_dict.get(b"SA") {
             self.gstate.stroke_adjust = *sa;
         }
+        // Always parse OPM — it affects whether CMYK all-zero is transparent,
+        // which is needed even without full overprint simulation.
+        if let Some(opm) = gs_dict.get_int(b"OPM") {
+            self.gstate.overprint_mode = opm as i32;
+        }
         if self.overprint_enabled {
             if let Some(PdfObj::Bool(op)) = gs_dict.get(b"OP") {
                 self.gstate.overprint = *op;
@@ -3038,9 +3057,6 @@ impl<'a> ContentInterpreter<'a> {
             }
             if let Some(PdfObj::Bool(op)) = gs_dict.get(b"op") {
                 self.gstate.overprint = *op;
-            }
-            if let Some(opm) = gs_dict.get_int(b"OPM") {
-                self.gstate.overprint_mode = opm as i32;
             }
         }
         if let Some(ca) = gs_dict.get_f64(b"CA") {
