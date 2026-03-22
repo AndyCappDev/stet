@@ -60,6 +60,12 @@ pub enum ResolvedColorSpace {
 }
 
 impl ResolvedColorSpace {
+    /// True if this is a Separation color space with the special "None" colorant.
+    /// Per PDF spec 4.5.5, "None" produces no visible marks on the page.
+    pub fn is_none_colorant(&self) -> bool {
+        matches!(self, Self::Separation { name, .. } if name == b"None")
+    }
+
     /// Number of color components.
     pub fn num_components(&self) -> usize {
         match self {
@@ -556,7 +562,14 @@ pub fn components_to_device_color_icc(
             }
             components_to_device_color_icc(base, &base_components, icc_cache)
         }
-        ResolvedColorSpace::Separation { alt, tint_fn, .. } => {
+        ResolvedColorSpace::Separation {
+            alt, tint_fn, name, ..
+        } => {
+            // The special colorant name "None" produces no visible marks (PDF spec 4.5.5).
+            // Return white here; callers should also set alpha=0 for true transparency.
+            if name == b"None" {
+                return DeviceColor::from_gray(1.0);
+            }
             let tint = components.first().copied().unwrap_or(0.0);
             if let Some(func) = tint_fn {
                 let alt_components = func.evaluate(&[tint]);

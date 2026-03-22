@@ -138,6 +138,10 @@ pub struct PdfGraphicsState {
     pub clip_path_version: u32,
     pub fill_alpha: f64,
     pub stroke_alpha: f64,
+    /// True when fill color is Separation/None (produces no visible marks).
+    pub fill_is_none: bool,
+    /// True when stroke color is Separation/None (produces no visible marks).
+    pub stroke_is_none: bool,
     /// Blend mode (0=Normal, 1=Multiply, ..., 11=Exclusion).
     pub blend_mode: u8,
     // Text state
@@ -199,6 +203,8 @@ impl PdfGraphicsState {
             clip_path_version: 0,
             fill_alpha: 1.0,
             stroke_alpha: 1.0,
+            fill_is_none: false,
+            stroke_is_none: false,
             blend_mode: 0,
             text_matrix: Matrix::identity(),
             text_line_matrix: Matrix::identity(),
@@ -241,7 +247,7 @@ impl PdfGraphicsState {
             transfer: self.transfer.clone(),
             halftone: HalftoneState::default(),
             bg_ucr: BgUcrState::default(),
-            alpha: self.fill_alpha,
+            alpha: if self.fill_is_none { 0.0 } else { self.fill_alpha },
             blend_mode: self.blend_mode,
         }
     }
@@ -276,7 +282,7 @@ impl PdfGraphicsState {
             transfer: self.transfer.clone(),
             halftone: HalftoneState::default(),
             bg_ucr: BgUcrState::default(),
-            alpha: self.stroke_alpha,
+            alpha: if self.stroke_is_none { 0.0 } else { self.stroke_alpha },
             blend_mode: self.blend_mode,
         }
     }
@@ -307,7 +313,7 @@ impl PdfGraphicsState {
             transfer: self.transfer.clone(),
             halftone: HalftoneState::default(),
             bg_ucr: BgUcrState::default(),
-            alpha: self.stroke_alpha,
+            alpha: if self.stroke_is_none { 0.0 } else { self.stroke_alpha },
             blend_mode: self.blend_mode,
         }
     }
