@@ -418,8 +418,7 @@ impl<'a> ContentInterpreter<'a> {
                         self.handle_inline_image(&mut lexer)?;
                     } else if let Err(_e) = self.dispatch_operator(&op) {
                         // Continue past operator errors. Malformed PDFs may have
-                        // invalid shadings, missing resources, etc. — stopping
-                        // would skip all remaining content in the stream.
+                        // invalid shadings, missing resources, etc.
                     }
                     self.operand_stack.clear();
                 }

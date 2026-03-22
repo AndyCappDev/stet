@@ -3058,6 +3058,99 @@ fn extract_soft_mask_values(
     }
 }
 
+/// Transform a display element's CTM through a matrix so that pattern-space
+/// coordinates map to device space.  Recursively transforms children of
+/// Group and SoftMasked elements, and adjusts their bboxes.
+fn transform_element_ctm(elem: &DisplayElement, pm: &Matrix) -> DisplayElement {
+    match elem {
+        DisplayElement::Fill { path, params } => {
+            let mut p = params.clone();
+            p.ctm = pm.concat(&p.ctm);
+            DisplayElement::Fill { path: path.clone(), params: p }
+        }
+        DisplayElement::Stroke { path, params } => {
+            let mut p = params.clone();
+            p.ctm = pm.concat(&p.ctm);
+            DisplayElement::Stroke { path: path.clone(), params: p }
+        }
+        DisplayElement::Clip { path, params } => {
+            let mut p = params.clone();
+            p.ctm = pm.concat(&p.ctm);
+            DisplayElement::Clip { path: path.clone(), params: p }
+        }
+        DisplayElement::Image { sample_data, params } => {
+            let mut p = params.clone();
+            p.ctm = pm.concat(&p.ctm);
+            DisplayElement::Image { sample_data: sample_data.clone(), params: p }
+        }
+        DisplayElement::MeshShading { params } => {
+            let mut p = params.clone();
+            p.ctm = pm.concat(&p.ctm);
+            DisplayElement::MeshShading { params: p }
+        }
+        DisplayElement::PatchShading { params } => {
+            let mut p = params.clone();
+            p.ctm = pm.concat(&p.ctm);
+            DisplayElement::PatchShading { params: p }
+        }
+        DisplayElement::AxialShading { params } => {
+            let mut p = params.clone();
+            p.ctm = pm.concat(&p.ctm);
+            DisplayElement::AxialShading { params: p }
+        }
+        DisplayElement::RadialShading { params } => {
+            let mut p = params.clone();
+            p.ctm = pm.concat(&p.ctm);
+            DisplayElement::RadialShading { params: p }
+        }
+        DisplayElement::Group { elements, params } => {
+            let mut t = DisplayList::new();
+            for child in elements.elements() {
+                t.push(transform_element_ctm(child, pm));
+            }
+            let mut p = params.clone();
+            let corners = [
+                pm.transform_point(p.bbox[0], p.bbox[1]),
+                pm.transform_point(p.bbox[2], p.bbox[1]),
+                pm.transform_point(p.bbox[0], p.bbox[3]),
+                pm.transform_point(p.bbox[2], p.bbox[3]),
+            ];
+            p.bbox = [
+                corners.iter().map(|c| c.0).fold(f64::INFINITY, f64::min),
+                corners.iter().map(|c| c.1).fold(f64::INFINITY, f64::min),
+                corners.iter().map(|c| c.0).fold(f64::NEG_INFINITY, f64::max),
+                corners.iter().map(|c| c.1).fold(f64::NEG_INFINITY, f64::max),
+            ];
+            DisplayElement::Group { elements: t, params: p }
+        }
+        DisplayElement::SoftMasked { mask, content, params } => {
+            let mut t_mask = DisplayList::new();
+            for child in mask.elements() {
+                t_mask.push(transform_element_ctm(child, pm));
+            }
+            let mut t_content = DisplayList::new();
+            for child in content.elements() {
+                t_content.push(transform_element_ctm(child, pm));
+            }
+            let mut p = params.clone();
+            let corners = [
+                pm.transform_point(p.bbox[0], p.bbox[1]),
+                pm.transform_point(p.bbox[2], p.bbox[1]),
+                pm.transform_point(p.bbox[0], p.bbox[3]),
+                pm.transform_point(p.bbox[2], p.bbox[3]),
+            ];
+            p.bbox = [
+                corners.iter().map(|c| c.0).fold(f64::INFINITY, f64::min),
+                corners.iter().map(|c| c.1).fold(f64::INFINITY, f64::min),
+                corners.iter().map(|c| c.0).fold(f64::NEG_INFINITY, f64::max),
+                corners.iter().map(|c| c.1).fold(f64::NEG_INFINITY, f64::max),
+            ];
+            DisplayElement::SoftMasked { mask: t_mask, content: t_content, params: p }
+        }
+        other => other.clone(),
+    }
+}
+
 /// Render a tiled pattern fill.
 fn render_pattern_fill(
     pixmap: &mut Pixmap,
@@ -3235,10 +3328,91 @@ fn render_pattern_fill(
                 }
             }
         }
+    } else if params.tile.elements().iter().any(|e| {
+        !matches!(
+            e,
+            DisplayElement::Fill { .. }
+                | DisplayElement::Stroke { .. }
+                | DisplayElement::Image { .. }
+                | DisplayElement::Clip { .. }
+                | DisplayElement::InitClip
+        )
+    }) {
+        // Complex tile path: pre-render one tile into a small pixmap using
+        // the full render_element pipeline (handles shadings, groups,
+        // soft masks, etc.), then stamp copies at each tile position.
+        let bbox = &params.bbox;
+        let corners_dev = [
+            pm.transform_point(bbox[0], bbox[1]),
+            pm.transform_point(bbox[2], bbox[1]),
+            pm.transform_point(bbox[0], bbox[3]),
+            pm.transform_point(bbox[2], bbox[3]),
+        ];
+        let (mut td_x0, mut td_y0) = (f64::MAX, f64::MAX);
+        let (mut td_x1, mut td_y1) = (f64::MIN, f64::MIN);
+        for (x, y) in &corners_dev {
+            td_x0 = td_x0.min(*x);
+            td_y0 = td_y0.min(*y);
+            td_x1 = td_x1.max(*x);
+            td_y1 = td_y1.max(*y);
+        }
+        let tile_pw = ((td_x1 - td_x0) * sx_f).ceil().max(1.0) as u32;
+        let tile_ph = ((td_y1 - td_y0) * sy_f).ceil().max(1.0) as u32;
+        let tile_pw = tile_pw.min(8192);
+        let tile_ph = tile_ph.min(8192);
+
+        if let Some(mut one_tile) = Pixmap::new(tile_pw, tile_ph) {
+            let tile_render_ctx = RenderContext {
+                vp_x: td_x0 as f32,
+                vp_y: td_y0 as f32,
+                scale_x: ctx.scale_x,
+                scale_y: ctx.scale_y,
+                out_w: tile_pw,
+                out_h: tile_ph,
+                effective_dpi: ctx.effective_dpi,
+                icc: ctx.icc,
+                image_cache: None,
+                elem_idx: 0,
+                no_aa: ctx.no_aa,
+            };
+            let mut tile_bs = BandState {
+                clip_region: None,
+                spare_mask: None,
+                clip_mask_cache: HashMap::new(),
+                clip_mask_seen: HashSet::new(),
+                mask_pool: Vec::new(),
+                cmyk_buffer: None,
+            };
+            for (idx, elem) in params.tile.elements().iter().enumerate() {
+                let transformed = transform_element_ctm(elem, pm);
+                let elem_ctx = RenderContext {
+                    elem_idx: idx,
+                    ..tile_render_ctx
+                };
+                render_element(&mut one_tile, &mut tile_bs, &transformed, &elem_ctx);
+            }
+            // Stamp pre-rendered tile at each position
+            for tv in tile_y_start..tile_y_end {
+                for tu in tile_x_start..tile_x_end {
+                    let offset_x = tu as f64 * step_ux + tv as f64 * step_vx;
+                    let offset_y = tu as f64 * step_uy + tv as f64 * step_vy;
+                    let px = ((td_x0 + offset_x - dev_vp_x) * sx_f) as i32;
+                    let py = ((td_y0 + offset_y - dev_vp_y) * sy_f) as i32;
+                    let paint = stet_tiny_skia::PixmapPaint {
+                        opacity: 1.0,
+                        blend_mode: BlendMode::SourceOver,
+                        quality: stet_tiny_skia::FilterQuality::Nearest,
+                    };
+                    tile_buf.draw_pixmap(
+                        px, py, one_tile.as_ref(), &paint, Transform::identity(), None,
+                    );
+                }
+            }
+        }
     } else {
-        // Pattern-space tile path: tile elements have identity CTMs.
+        // Simple tile path: tile elements have identity CTMs.
         // Manually apply the pattern matrix + tile offset for each element.
-        // Only handles Fill, Stroke, and Image (the common PostScript cases).
+        // Only handles Fill, Stroke, Image, and Clip.
         for tv in tile_y_start..tile_y_end {
             for tu in tile_x_start..tile_x_end {
                 let pat_offset_x = tu as f64 * params.xstep;
@@ -3412,7 +3586,9 @@ fn clip_path_unified(
         let x_start = ctx.vp_x as u32;
 
         // Y-bbox early exit: if clip path doesn't overlap this band, set empty clip
+        // (only valid when CTM is identity — path coords must be in device space)
         if x_start == 0
+            && params.ctm.a == 1.0 && params.ctm.d == 1.0 && params.ctm.tx == 0.0 && params.ctm.ty == 0.0
             && let Some(bbox) = path_y_bbox(path)
             && (bbox.y_max <= y_start as f64 || bbox.y_min >= (y_start + ctx.out_h) as f64)
         {
@@ -3428,8 +3604,17 @@ fn clip_path_unified(
             return;
         }
 
-        // Rect fast-path (only when x_start==0 for simplicity)
+        // Rect fast-path (only when x_start==0 and CTM is identity —
+        // detect_rect uses raw path coords which are only in device space
+        // when the CTM is identity)
+        let ctm_is_identity = params.ctm.a == 1.0
+            && params.ctm.b == 0.0
+            && params.ctm.c == 0.0
+            && params.ctm.d == 1.0
+            && params.ctm.tx == 0.0
+            && params.ctm.ty == 0.0;
         if x_start == 0
+            && ctm_is_identity
             && let Some(dev_rect) = detect_rect(path, ctx.out_w, u32::MAX)
         {
             let new_rect = translate_clip_rect(&dev_rect, y_start, ctx.out_h);
@@ -6850,10 +7035,25 @@ fn render_mesh_shading(
         let y1 = y1 as f64;
         let x2 = x2 as f64;
         let y2 = y2 as f64;
+        // Swap vertices 1 and 2 when the triangle has reversed winding
+        // (from a CTM with negative determinant, e.g. X- or Y-flip).
+        // This ensures barycentric coordinates stay positive for interior
+        // points regardless of the CTM orientation.
         let denom = (y1 - y2) * (x0 - x2) + (x2 - x1) * (y0 - y2);
         if denom.abs() < 1e-10 {
             continue;
         }
+        let (x1, y1, x2, y2) = if denom < 0.0 {
+            (x2, y2, x1, y1)
+        } else {
+            (x1, y1, x2, y2)
+        };
+        let (v1_ref, v2_ref) = if denom < 0.0 {
+            (&tri.v2, &tri.v1)
+        } else {
+            (&tri.v1, &tri.v2)
+        };
+        let denom = denom.abs();
         let inv_denom = 1.0 / denom;
 
         for py in min_y..max_y {
@@ -6884,8 +7084,8 @@ fn render_mesh_shading(
                 let (r, g, b) = if let Some(lut) = lut {
                     // Interpolate raw function input values per-pixel
                     let raw = w0n * tri.v0.raw_components[0]
-                        + w1n * tri.v1.raw_components[0]
-                        + w2n * tri.v2.raw_components[0];
+                        + w1n * v1_ref.raw_components[0]
+                        + w2n * v2_ref.raw_components[0];
                     let raw = raw.clamp(0.0, 1.0);
                     // Linear interpolation in the LUT
                     let fi = raw * (lut.len() - 1) as f64;
@@ -6900,9 +7100,9 @@ fn render_mesh_shading(
                     )
                 } else {
                     (
-                        w0n * tri.v0.color.r + w1n * tri.v1.color.r + w2n * tri.v2.color.r,
-                        w0n * tri.v0.color.g + w1n * tri.v1.color.g + w2n * tri.v2.color.g,
-                        w0n * tri.v0.color.b + w1n * tri.v1.color.b + w2n * tri.v2.color.b,
+                        w0n * tri.v0.color.r + w1n * v1_ref.color.r + w2n * v2_ref.color.r,
+                        w0n * tri.v0.color.g + w1n * v1_ref.color.g + w2n * v2_ref.color.g,
+                        w0n * tri.v0.color.b + w1n * v1_ref.color.b + w2n * v2_ref.color.b,
                     )
                 };
 
@@ -6912,8 +7112,8 @@ fn render_mesh_shading(
                     if ci + 3 < buf.len() {
                         let cmyk = interpolate_cmyk_from_vertices(
                             &tri.v0,
-                            &tri.v1,
-                            &tri.v2,
+                            v1_ref,
+                            v2_ref,
                             w0n,
                             w1n,
                             w2n,
