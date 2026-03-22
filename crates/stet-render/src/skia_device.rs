@@ -3088,6 +3088,9 @@ fn transform_element_ctm(elem: &DisplayElement, pm: &Matrix) -> DisplayElement {
         DisplayElement::Clip { path, params } => {
             let mut p = params.clone();
             p.ctm = pm.concat(&p.ctm);
+            if let Some(ref mut sp) = p.stroke_params {
+                sp.ctm = pm.concat(&sp.ctm);
+            }
             DisplayElement::Clip { path: path.clone(), params: p }
         }
         DisplayElement::Image { sample_data, params } => {
