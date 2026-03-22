@@ -3536,6 +3536,9 @@ impl<'a> ContentInterpreter<'a> {
         let saved_resources = std::mem::replace(&mut self.resources, pattern_resources);
         let saved_display_list = std::mem::take(&mut self.display_list);
         let saved_content_stream_ctm = self.content_stream_ctm;
+        let saved_path = std::mem::take(&mut self.current_path);
+        let saved_point = self.current_point.take();
+        let saved_subpath = self.subpath_start.take();
 
         self.gstate.ctm = Matrix::identity();
         self.content_stream_ctm = Matrix::identity();
@@ -3559,6 +3562,9 @@ impl<'a> ContentInterpreter<'a> {
         let tile_display_list = std::mem::replace(&mut self.display_list, saved_display_list);
         self.content_stream_ctm = saved_content_stream_ctm;
         self.resources = saved_resources;
+        self.current_path = saved_path;
+        self.current_point = saved_point;
+        self.subpath_start = saved_subpath;
         if let Some(saved) = self.gstate_stack.pop() {
             self.gstate = saved;
         }
