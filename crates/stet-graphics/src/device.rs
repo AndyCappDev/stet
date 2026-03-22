@@ -548,6 +548,9 @@ pub struct PatternFillParams {
     /// into a fill outline for masking. When Some, `path` is a user-space
     /// stroke centerline rather than a fill path.
     pub stroke_params: Option<StrokeParams>,
+    /// PDF overprint mode (0 or 1). When 1, CMYK(0,0,0,0) pixels in tile
+    /// images are transparent (no ink = don't paint).
+    pub overprint_mode: i32,
 }
 
 /// Trait for consuming rendered page pixel data.

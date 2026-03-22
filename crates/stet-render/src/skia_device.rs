@@ -626,6 +626,8 @@ struct RenderContext<'a> {
     elem_idx: usize,
     /// Disable anti-aliasing for all fill/stroke operations.
     no_aa: bool,
+    /// When true, CMYK(0,0,0,0) pixels in images produce alpha=0 (OPM=1).
+    opm_zero_transparent: bool,
 }
 
 impl RenderContext<'_> {
@@ -1327,7 +1329,12 @@ pub fn build_icc_cache_for_list(
 /// Convert raw image samples to RGBA for rasterization.
 ///
 /// Handles all `ImageColorSpace` variants, producing width×height×4 RGBA bytes.
-fn samples_to_rgba(data: &[u8], params: &ImageParams, icc: Option<&IccCache>) -> Vec<u8> {
+fn samples_to_rgba(
+    data: &[u8],
+    params: &ImageParams,
+    icc: Option<&IccCache>,
+    opm_zero_transparent: bool,
+) -> Vec<u8> {
     let w = params.width as usize;
     let h = params.height as usize;
     let npixels = w * h;
@@ -1375,6 +1382,17 @@ fn samples_to_rgba(data: &[u8], params: &ImageParams, icc: Option<&IccCache>) ->
                         rgba[i * 4] = rgb[i * 3];
                         rgba[i * 4 + 1] = rgb[i * 3 + 1];
                         rgba[i * 4 + 2] = rgb[i * 3 + 2];
+                        // OPM=1: CMYK(0,0,0,0) = no ink = transparent
+                        if opm_zero_transparent {
+                            let si = i * 4;
+                            if data[si] == 0
+                                && data[si + 1] == 0
+                                && data[si + 2] == 0
+                                && data[si + 3] == 0
+                            {
+                                rgba[i * 4 + 3] = 0;
+                            }
+                        }
                     }
                     // Remaining pixels (if data was short) stay white (0xFF)
                     return rgba;
@@ -1395,6 +1413,15 @@ fn samples_to_rgba(data: &[u8], params: &ImageParams, icc: Option<&IccCache>) ->
                 rgba[pi] = (r * 255.0).round().clamp(0.0, 255.0) as u8;
                 rgba[pi + 1] = (g * 255.0).round().clamp(0.0, 255.0) as u8;
                 rgba[pi + 2] = (b * 255.0).round().clamp(0.0, 255.0) as u8;
+                // OPM=1: CMYK(0,0,0,0) = no ink = transparent
+                if opm_zero_transparent
+                    && data.get(si).copied().unwrap_or(0) == 0
+                    && data.get(si + 1).copied().unwrap_or(0) == 0
+                    && data.get(si + 2).copied().unwrap_or(0) == 0
+                    && data.get(si + 3).copied().unwrap_or(0) == 0
+                {
+                    rgba[pi + 3] = 0;
+                }
             }
             rgba
         }
@@ -1413,6 +1440,18 @@ fn samples_to_rgba(data: &[u8], params: &ImageParams, icc: Option<&IccCache>) ->
                     rgba[i * 4] = rgb[i * 3];
                     rgba[i * 4 + 1] = rgb[i * 3 + 1];
                     rgba[i * 4 + 2] = rgb[i * 3 + 2];
+                    // OPM=1 on 4-component (CMYK) ICC profiles
+                    if opm_zero_transparent && *n == 4 {
+                        let si = i * *n as usize;
+                        if si + 3 < data.len()
+                            && data[si] == 0
+                            && data[si + 1] == 0
+                            && data[si + 2] == 0
+                            && data[si + 3] == 0
+                        {
+                            rgba[i * 4 + 3] = 0;
+                        }
+                    }
                 }
                 return rgba;
             }
@@ -1427,7 +1466,7 @@ fn samples_to_rgba(data: &[u8], params: &ImageParams, icc: Option<&IccCache>) ->
                 color_space: fallback,
                 ..params.clone()
             };
-            samples_to_rgba(data, &p, icc)
+            samples_to_rgba(data, &p, icc, opm_zero_transparent)
         }
         ImageColorSpace::Indexed {
             base,
@@ -1449,7 +1488,7 @@ fn samples_to_rgba(data: &[u8], params: &ImageParams, icc: Option<&IccCache>) ->
                 color_space: *base.clone(),
                 ..params.clone()
             };
-            samples_to_rgba(&expanded, &p, icc)
+            samples_to_rgba(&expanded, &p, icc, opm_zero_transparent)
         }
         ImageColorSpace::CIEBasedABC { params: cie_params } => {
             let mut rgba = vec![255u8; npixels * 4];
@@ -2247,7 +2286,7 @@ fn render_element(
                         cached
                     } else {
                         owned_rgba = {
-                            let mut rgba = samples_to_rgba(sample_data, params, ctx.icc);
+                            let mut rgba = samples_to_rgba(sample_data, params, ctx.icc, ctx.opm_zero_transparent);
                             if params.mask_color.is_some() {
                                 apply_mask_color_rgba(&mut rgba, sample_data, params);
                             }
@@ -2558,6 +2597,7 @@ fn render_group(
         image_cache: None, // Group elements don't use parent image cache
         elem_idx: 0,
         no_aa: ctx.no_aa,
+        opm_zero_transparent: ctx.opm_zero_transparent,
     };
 
     for (idx, elem) in elements.elements().iter().enumerate() {
@@ -2699,6 +2739,7 @@ fn render_knockout_group(
         image_cache: None,
         elem_idx: 0,
         no_aa: ctx.no_aa,
+        opm_zero_transparent: ctx.opm_zero_transparent,
     };
 
     for elem in elements.elements() {
@@ -2896,6 +2937,7 @@ fn render_soft_masked(
         image_cache: None,
         elem_idx: 0,
         no_aa: ctx.no_aa,
+        opm_zero_transparent: ctx.opm_zero_transparent,
     };
 
     // 1. Render mask form into offscreen
@@ -3323,6 +3365,7 @@ fn render_pattern_fill(
                     image_cache: None,
                     elem_idx: 0,
                     no_aa: ctx.no_aa,
+                    opm_zero_transparent: params.overprint_mode == 1,
                 };
 
                 let mut tile_band = BandState {
@@ -3389,6 +3432,7 @@ fn render_pattern_fill(
                 image_cache: None,
                 elem_idx: 0,
                 no_aa: ctx.no_aa,
+                opm_zero_transparent: params.overprint_mode == 1,
             };
             let mut tile_bs = BandState {
                 clip_region: None,
@@ -3502,7 +3546,7 @@ fn render_pattern_fill(
                             let iw = ip.width;
                             let ih = ip.height;
                             if iw > 0 && ih > 0 {
-                                let rgba = samples_to_rgba(sample_data, ip, ctx.icc);
+                                let rgba = samples_to_rgba(sample_data, ip, ctx.icc, ctx.opm_zero_transparent);
                                 let expected = (iw * ih * 4) as usize;
                                 if rgba.len() >= expected {
                                     if let Some(inv) = ip.image_matrix.invert() {
@@ -3525,6 +3569,22 @@ fn render_pattern_fill(
                                                 combined,
                                                 clip_ref,
                                             );
+                                            // Debug: check output for this tile render
+                                            {
+                                                let data = tile_buf.data();
+                                                let y0 = combined.ty.max(0.0) as usize;
+                                                let y1 = (combined.ty + ih as f32 * combined.sy).max(0.0) as usize;
+                                                let w = ctx.out_w as usize;
+                                                let mut count = 0;
+                                                for y in y0..y1.min(ctx.out_h as usize) {
+                                                    for x in 0..w {
+                                                        if data[(y * w + x) * 4 + 3] > 0 { count += 1; }
+                                                    }
+                                                }
+                                                if tile_transform.tx.abs() < 1.0 && tile_transform.ty.abs() < 1.0 {
+                                                    eprintln!("[CENTER] img_ty={:.1} combined_ty={:.3} strip_y=[{:.0},{:.0}] drawn_px={}", ip.ctm.ty, combined.ty, combined.ty, combined.ty + ih as f32 * combined.sy, count);
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -3874,7 +3934,7 @@ impl OutputDevice for SkiaDevice {
         if w == 0 || h == 0 {
             return;
         }
-        let mut rgba_data = samples_to_rgba(sample_data, params, self.render_icc_cache.as_ref());
+        let mut rgba_data = samples_to_rgba(sample_data, params, self.render_icc_cache.as_ref(), false);
         if params.mask_color.is_some() {
             apply_mask_color_rgba(&mut rgba_data, sample_data, params);
         }
@@ -4021,6 +4081,7 @@ impl OutputDevice for SkiaDevice {
                 image_cache: None,
                 elem_idx: 0,
                 no_aa: self.no_aa,
+                opm_zero_transparent: false,
             };
             render_pattern_fill(&mut self.pixmap, &mut band_state, params, &ctx);
         }
@@ -4061,6 +4122,7 @@ impl OutputDevice for SkiaDevice {
                 image_cache: None,
                 elem_idx: 0,
                 no_aa: self.no_aa,
+                opm_zero_transparent: false,
             };
             let mut band_state = BandState {
                 clip_region: None,
@@ -5145,6 +5207,7 @@ fn render_banded_to_sink(
                     image_cache: None,
                     elem_idx: i,
                     no_aa,
+                    opm_zero_transparent: false,
                 };
                 render_element(&mut band_pixmap, &mut band_state, &elements[i], &ctx);
             }
@@ -5585,7 +5648,7 @@ impl ImageCache {
                     if params.width == 0 || params.height == 0 {
                         return None;
                     }
-                    let mut rgba = samples_to_rgba(sample_data, params, icc);
+                    let mut rgba = samples_to_rgba(sample_data, params, icc, false);
                     if params.mask_color.is_some() {
                         apply_mask_color_rgba(&mut rgba, sample_data, params);
                     }
@@ -5697,6 +5760,7 @@ pub fn render_region_prepared(
                 image_cache,
                 elem_idx: i,
                 no_aa,
+                opm_zero_transparent: false,
             };
             render_element(&mut pixmap, &mut state, &elements[i], &ctx);
         }
@@ -5845,6 +5909,7 @@ pub fn render_region_single_band(
                 image_cache,
                 elem_idx: i,
                 no_aa,
+                opm_zero_transparent: false,
             };
             render_element(&mut pixmap, &mut state, &elements[i], &ctx);
         }
@@ -6284,6 +6349,7 @@ pub fn render_region(
                 image_cache,
                 elem_idx: i,
                 no_aa,
+                opm_zero_transparent: false,
             };
             render_element(&mut pixmap, &mut state, &elements[i], &ctx);
         }

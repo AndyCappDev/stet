@@ -173,6 +173,11 @@ and the renderer expands it to a fill outline using `PathStroker::stroke()`
 with the full stroke parameters (width, cap, join, miter, dash). This is
 used for pattern-stroked paths in PDF.
 
+`overprint_mode` carries the PDF OPM value (0 or 1). When 1 and the tile
+contains CMYK images, zero-CMYK pixels (0,0,0,0) are rendered with alpha=0
+(transparent) instead of opaque white, implementing the "no ink = don't
+paint" semantics required by the PDF overprint specification.
+
 ### Group (PDF only)
 
 ```rust

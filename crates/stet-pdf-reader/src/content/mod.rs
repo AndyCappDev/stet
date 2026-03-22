@@ -1057,6 +1057,7 @@ impl<'a> ContentInterpreter<'a> {
                     device_space_tile: false,
                     flip_tile_y: false,
                     stroke_params: None,
+                    overprint_mode: if self.gstate.overprint { self.gstate.overprint_mode } else { 0 },
                 },
             });
         } else {
@@ -1107,6 +1108,7 @@ impl<'a> ContentInterpreter<'a> {
                     device_space_tile: false,
                     flip_tile_y: false,
                     stroke_params: Some(sp),
+                    overprint_mode: if self.gstate.overprint { self.gstate.overprint_mode } else { 0 },
                 },
             });
             return;
@@ -1767,6 +1769,7 @@ impl<'a> ContentInterpreter<'a> {
                     device_space_tile: false,
                     flip_tile_y: false,
                     stroke_params: None,
+                    overprint_mode: if self.gstate.overprint { self.gstate.overprint_mode } else { 0 },
                 },
             });
         } else {
@@ -2007,12 +2010,13 @@ impl<'a> ContentInterpreter<'a> {
             return Ok(());
         }
 
-        // OPM 1 + CMYK all-zero fill + no pattern: "no ink" means don't paint.
-        // Skip the ImageMask so underlying content (e.g. background images)
-        // shows through instead of being covered with opaque white.
+        // OPM 1 + overprint on + CMYK all-zero fill + no pattern: "no ink" means
+        // don't paint.  Skip the ImageMask so underlying content shows through.
         // When a pattern IS active, the pattern provides the real color and
         // the ImageMask acts as a text stencil — it must still render.
+        // NOTE: OPM only takes effect when overprint (OP/op) is enabled.
         if is_image_mask
+            && self.gstate.overprint
             && self.gstate.overprint_mode == 1
             && self.gstate.fill_pattern.is_none()
             && self.gstate.fill_shading_pattern.is_none()
@@ -2023,6 +2027,10 @@ impl<'a> ContentInterpreter<'a> {
 
         // Imagemask with tiling pattern fill: use SoftMasked to clip pattern to mask shape.
         // The ImageMask provides the text stencil and the pattern provides the color.
+        // We emit tile images directly (composing their CTM with the pattern matrix)
+        // rather than using PatternFill, because the pattern tile covers the full page
+        // and each strip has unique image data — the tiling renderer can't handle this
+        // efficiently.
         if is_image_mask && self.gstate.fill_pattern.is_some() {
             let pattern = self.gstate.fill_pattern.clone().unwrap();
             let row_bytes = width.div_ceil(8);
@@ -2065,28 +2073,22 @@ impl<'a> ContentInterpreter<'a> {
             let x_max = corners.iter().map(|c| c.0).fold(f64::NEG_INFINITY, f64::max);
             let y_max = corners.iter().map(|c| c.1).fold(f64::NEG_INFINITY, f64::max);
 
-            let mut rect_path = PsPath::new();
-            rect_path.segments.push(PathSegment::MoveTo(x_min, y_min));
-            rect_path.segments.push(PathSegment::LineTo(x_max, y_min));
-            rect_path.segments.push(PathSegment::LineTo(x_max, y_max));
-            rect_path.segments.push(PathSegment::LineTo(x_min, y_max));
-            rect_path.segments.push(PathSegment::ClosePath);
-
+            // Emit tile images directly as content, composing their CTM with
+            // the pattern matrix to place them in device space.
+            let pm = &pattern.pattern_matrix;
             let mut content_dl = DisplayList::new();
-            content_dl.push(DisplayElement::PatternFill {
-                params: PatternFillParams {
-                    path: rect_path,
-                    fill_rule: FillRule::NonZeroWinding,
-                    tile: pattern.tile, pattern_matrix: pattern.pattern_matrix,
-                    bbox: pattern.bbox, xstep: pattern.x_step, ystep: pattern.y_step,
-                    paint_type: pattern.paint_type,
-                    underlying_color: if pattern.paint_type == 2 {
-                        Some(self.gstate.fill_color.clone())
-                    } else { None },
-                    pattern_id: pattern.pattern_id,
-                    device_space_tile: false, flip_tile_y: false, stroke_params: None,
-                },
-            });
+            for elem in pattern.tile.elements() {
+                if let DisplayElement::Image { sample_data: sd, params: ip } = elem {
+                    let dev_ctm = pm.multiply(&ip.ctm);
+                    content_dl.push(DisplayElement::Image {
+                        sample_data: sd.clone(),
+                        params: ImageParams {
+                            ctm: dev_ctm,
+                            ..ip.clone()
+                        },
+                    });
+                }
+            }
 
             self.display_list.push(DisplayElement::SoftMasked {
                 mask: mask_dl, content: content_dl,

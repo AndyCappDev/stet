@@ -195,6 +195,7 @@ fn push_fill_element(ctx: &mut Context, path: PsPath, fill_rule: FillRule) {
             device_space_tile: false,
             flip_tile_y: false,
             stroke_params: None,
+            overprint_mode: 0,
         };
         ctx.display_list
             .push(DisplayElement::PatternFill { params });
