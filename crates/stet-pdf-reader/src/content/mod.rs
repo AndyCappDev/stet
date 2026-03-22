@@ -1492,8 +1492,11 @@ impl<'a> ContentInterpreter<'a> {
             // Type 3 font: each glyph is a content stream.
             // Widths are in glyph space — scale by font matrix to get text space.
             let fm = font.font_matrix();
+            let visible = (render_mode & 3) != 3; // mode 3 = invisible
             for &byte in text {
-                self.show_type3_glyph(&font, byte);
+                if visible {
+                    self.show_type3_glyph(&font, byte);
+                }
 
                 let w0_glyph = font.glyph_width(byte);
                 let w0 = w0_glyph * fm.a;
