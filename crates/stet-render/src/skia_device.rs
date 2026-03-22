@@ -1111,22 +1111,34 @@ fn box_resample(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
         let inv_area = 1.0 / (bottom_f - top_f);
 
         // Pre-compute row weights
-        let mut row_weights: [(usize, f32); 8] = [(0, 0.0); 8];
         let n_rows = bottom - top;
-        for (i, sy) in (top..bottom).enumerate() {
-            let pixel_top = sy as f32;
-            let pixel_bottom = (sy + 1) as f32;
-            let w = pixel_bottom.min(bottom_f) - pixel_top.max(top_f);
-            if i < 8 {
-                row_weights[i] = (sy, w);
+        let mut row_weights_buf: [(usize, f32); 8] = [(0, 0.0); 8];
+        let row_weights_vec: Vec<(usize, f32)>;
+        let row_weights: &[(usize, f32)] = if n_rows <= 8 {
+            for (i, sy) in (top..bottom).enumerate() {
+                let pixel_top = sy as f32;
+                let pixel_bottom = (sy + 1) as f32;
+                let w = pixel_bottom.min(bottom_f) - pixel_top.max(top_f);
+                row_weights_buf[i] = (sy, w);
             }
-        }
+            &row_weights_buf[..n_rows]
+        } else {
+            row_weights_vec = (top..bottom)
+                .map(|sy| {
+                    let pixel_top = sy as f32;
+                    let pixel_bottom = (sy + 1) as f32;
+                    let w = pixel_bottom.min(bottom_f) - pixel_top.max(top_f);
+                    (sy, w)
+                })
+                .collect();
+            &row_weights_vec
+        };
 
         let dst_row = dy * out_stride;
         for dx in 0..dw {
             let col = dx * 4;
             let (mut r, mut g, mut b, mut a) = (0.0f32, 0.0, 0.0, 0.0);
-            for &(sy, w) in &row_weights[..n_rows.min(8)] {
+            for &(sy, w) in row_weights {
                 let i = sy * tmp_stride + col;
                 r += tmp[i] * w;
                 g += tmp[i + 1] * w;
