@@ -1961,10 +1961,13 @@ impl<'a> ContentInterpreter<'a> {
         };
 
         // Convert data if BPC != 8 (but NOT for image masks — keep raw 1-bit data).
-        // JPXDecode (JPEG 2000) always produces 8-bit output regardless of BPC.
-        let is_jpx = dict.get_name(b"Filter") == Some(b"JPXDecode");
+        // JPXDecode (JPEG 2000) and DCTDecode (JPEG) always produce 8-bit output
+        // regardless of the /BitsPerComponent value in the PDF dict.
+        let filter_name = dict.get_name(b"Filter");
+        let is_jpx = filter_name == Some(b"JPXDecode");
+        let is_dct = filter_name == Some(b"DCTDecode");
         let is_indexed = matches!(&color_space, ImageColorSpace::Indexed { .. });
-        let sample_data = if is_image_mask || bpc == 8 || bpc == 0 || is_jpx {
+        let sample_data = if is_image_mask || bpc == 8 || bpc == 0 || is_jpx || is_dct {
             sample_data
         } else {
             expand_bits_to_bytes(
@@ -1986,7 +1989,7 @@ impl<'a> ContentInterpreter<'a> {
                 let n_comps = color_space.num_components() as usize;
                 let decode_vals: Vec<f64> = decode.iter().filter_map(|o| o.as_f64()).collect();
                 if decode_vals.len() >= n_comps * 2 {
-                    let effective_bpc = if is_jpx { 8 } else { bpc };
+                    let effective_bpc = if is_jpx || is_dct { 8 } else { bpc };
                     let max_sample = ((1u32 << effective_bpc) - 1) as f64;
                     // Check if it's the default Decode for this color space.
                     // Indexed: default is [0 max_sample]; others: [0 1 0 1 ...].
