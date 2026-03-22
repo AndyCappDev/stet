@@ -1943,29 +1943,28 @@ impl TrueTypePdfFont {
     }
 
     fn char_code_to_gid(&self, char_code: u8) -> Option<u16> {
-        // Try encoding → glyph name → Unicode → cmap
-        if !self.cmap.is_empty() {
-            if let Some(glyph_name) = &self.encoding[char_code as usize] {
-                if let Some(unicode) = stet_fonts::agl::glyph_name_to_unicode(glyph_name)
-                    && let Some(&gid) = self.cmap.get(&(unicode as u32))
-                {
-                    return Some(gid);
-                }
-                // Fallback: look up glyph name directly in post table
-                // (handles ligatures like fl/fi that may not be in the cmap)
-                if let Some(&gid) = self.post_name_to_gid.get(glyph_name.as_str()) {
-                    return Some(gid);
-                }
-            }
-            // Fallback: direct cmap lookup by char code
-            // (handles PDF subset fonts where encoding byte maps directly to GID via cmap)
-            if let Some(&gid) = self.cmap.get(&(char_code as u32)) {
+        if let Some(glyph_name) = &self.encoding[char_code as usize] {
+            // Try encoding → glyph name → Unicode → cmap
+            if let Some(unicode) = stet_fonts::agl::glyph_name_to_unicode(glyph_name)
+                && let Some(&gid) = self.cmap.get(&(unicode as u32))
+            {
                 return Some(gid);
             }
-            None
-        } else {
+            // Try glyph name → post table → GID
+            // (handles subset fonts without cmap, and ligatures like fl/fi)
+            if let Some(&gid) = self.post_name_to_gid.get(glyph_name.as_str()) {
+                return Some(gid);
+            }
+        }
+        // Fallback: direct cmap lookup by char code
+        if let Some(&gid) = self.cmap.get(&(char_code as u32)) {
+            return Some(gid);
+        }
+        if self.cmap.is_empty() {
             // No cmap table: use char code as GID directly (PDF subset identity mapping)
             Some(char_code as u16)
+        } else {
+            None
         }
     }
 }
@@ -2150,21 +2149,26 @@ impl CidCffPdfFont {
 impl CffPdfFont {
     fn glyph_path(&self, char_code: u8) -> Option<PsPath> {
         let glyph_name = self.encoding[char_code as usize].as_deref()?;
-        // Use the CFF's built-in encoding (char_code → GID) as the primary
-        // lookup since it's the most direct mapping for embedded fonts.
-        // Fall back to searching the charset by glyph name for cases where
-        // the PDF /Encoding remaps character codes to different glyphs.
-        let gid = {
-            let cff_gid = self.font.encoding.get(char_code as usize).copied().unwrap_or(0) as usize;
-            if cff_gid > 0 && cff_gid < self.font.char_strings.len() {
-                cff_gid
-            } else {
-                self.font
-                    .charset
-                    .iter()
-                    .position(|name| name == glyph_name)?
-            }
-        };
+        // The PDF /Encoding is authoritative: map char_code → glyph name,
+        // then find that glyph in the CFF charset. This is essential for
+        // subset fonts where the CFF internal encoding maps codes to
+        // sequential GIDs that don't match the PDF encoding's glyph names.
+        // Fall back to the CFF's built-in encoding only when the charset
+        // lookup fails (e.g., fonts without a proper charset).
+        let gid = self
+            .font
+            .charset
+            .iter()
+            .position(|name| name == glyph_name)
+            .or_else(|| {
+                let cff_gid = self.font.encoding.get(char_code as usize).copied().unwrap_or(0) as usize;
+                if cff_gid > 0 && cff_gid < self.font.char_strings.len() {
+                    Some(cff_gid)
+                } else {
+                    None
+                }
+            });
+        let gid = gid?;
         if gid >= self.font.char_strings.len() {
             return None;
         }
