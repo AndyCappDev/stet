@@ -2503,6 +2503,12 @@ impl<'a> ContentInterpreter<'a> {
         let saved_resources = std::mem::replace(&mut self.resources, form_resources);
         let saved_font_cache = std::mem::take(&mut self.font_cache);
         let saved_content_stream_ctm = self.content_stream_ctm;
+        // Save and clear current path — forms start with an empty path per PDF spec.
+        // Without this, an unconsumed path from the parent content stream leaks into
+        // the form and gets painted by the first paint operator inside the form.
+        let saved_path = std::mem::take(&mut self.current_path);
+        let saved_point = self.current_point.take();
+        let saved_subpath = self.subpath_start.take();
 
         // Apply form matrix
         self.gstate.ctm = self.gstate.ctm.concat(&form_matrix);
@@ -2583,6 +2589,9 @@ impl<'a> ContentInterpreter<'a> {
         self.resources = saved_resources;
         self.font_cache = saved_font_cache;
         self.content_stream_ctm = saved_content_stream_ctm;
+        self.current_path = saved_path;
+        self.current_point = saved_point;
+        self.subpath_start = saved_subpath;
         if let Some(saved) = self.gstate_stack.pop() {
             let old_clip_version = self.gstate.clip_path_version;
             self.gstate = saved;
