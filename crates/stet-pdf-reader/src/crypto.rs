@@ -57,6 +57,22 @@ impl EncryptionState {
             return Self::try_open_v5(encrypt_dict, &u_value);
         }
 
+        // V4: check if both StmF and StrF are Identity — if so, nothing is encrypted
+        // (common for PDFs that only encrypt embedded files via /EFF). Skip password
+        // verification since we don't need a key to decrypt anything.
+        if v >= 4 {
+            let stm_name = encrypt_dict.get_name(b"StmF").unwrap_or(b"Identity");
+            let str_name = encrypt_dict.get_name(b"StrF").unwrap_or(b"Identity");
+            if stm_name == b"Identity" && str_name == b"Identity" {
+                return Ok(Self {
+                    key: Vec::new(),
+                    version: v,
+                    stm_method: CryptMethod::None,
+                    str_method: CryptMethod::None,
+                });
+            }
+        }
+
         // Standard handler: compute encryption key from empty password
         let encrypt_metadata = encrypt_dict
             .get(b"EncryptMetadata")
