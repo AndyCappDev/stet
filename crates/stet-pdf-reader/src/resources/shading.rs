@@ -288,7 +288,10 @@ fn handle_mesh(
         .unwrap_or_default();
 
     let cs = resolved_cs_to_shading_cs(resolved_cs);
-    let cs_comps = shading_cs_num_components(&cs);
+    // Use the resolved color space's component count for parsing vertex data.
+    // For Indexed this is 1 (the palette index), even though the shading CS
+    // (after palette expansion) may have 3 or 4 components.
+    let cs_comps = resolved_cs.num_components();
 
     // When a Function is present, vertex data has fewer color components per vertex —
     // the function's input dimension, not the color space dimension. Parse with the
@@ -449,7 +452,10 @@ fn handle_patches(
         .unwrap_or_default();
 
     let cs = resolved_cs_to_shading_cs(resolved_cs);
-    let cs_comps = shading_cs_num_components(&cs);
+    // Use the resolved color space's component count for parsing vertex data.
+    // For Indexed this is 1 (the palette index), even though the shading CS
+    // (after palette expansion) may have 3 or 4 components.
+    let cs_comps = resolved_cs.num_components();
 
     let function = if dict.get(b"Function").is_some() {
         parse_shading_function(dict, resolver).ok()
@@ -515,15 +521,6 @@ fn handle_patches(
         },
     });
     Ok(())
-}
-
-fn shading_cs_num_components(cs: &ShadingColorSpace) -> usize {
-    match cs {
-        ShadingColorSpace::DeviceGray => 1,
-        ShadingColorSpace::DeviceRGB => 3,
-        ShadingColorSpace::DeviceCMYK => 4,
-        _ => 3,
-    }
 }
 
 fn parse_shading_function(dict: &PdfDict, resolver: &Resolver) -> Result<PdfFunction, PdfError> {
@@ -675,6 +672,8 @@ fn resolved_cs_to_shading_cs(cs: &ResolvedColorSpace) -> ShadingColorSpace {
             4 => ShadingColorSpace::DeviceCMYK,
             _ => ShadingColorSpace::DeviceRGB,
         },
+        // Indexed: use the base color space for the display list element
+        ResolvedColorSpace::Indexed { base, .. } => resolved_cs_to_shading_cs(base),
         // Separation/DeviceN with DeviceCMYK alternate: treat as CMYK for overprint
         ResolvedColorSpace::Separation { alt, .. } | ResolvedColorSpace::DeviceN { alt, .. }
             if matches!(**alt, ResolvedColorSpace::DeviceCMYK) =>
