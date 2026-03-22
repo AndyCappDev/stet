@@ -3598,8 +3598,11 @@ fn clip_path_unified(
         let x_start = ctx.vp_x as u32;
 
         // Y-bbox early exit: if clip path doesn't overlap this band, set empty clip
-        // (only valid when CTM is identity — path coords must be in device space)
+        // (only valid when CTM is identity — path coords must be in device space).
+        // Skip when stroke_params is present: the path is in user space and
+        // needs the stroke CTM transform, so raw Y bounds are meaningless here.
         if x_start == 0
+            && params.stroke_params.is_none()
             && params.ctm.a == 1.0 && params.ctm.d == 1.0 && params.ctm.tx == 0.0 && params.ctm.ty == 0.0
             && let Some(bbox) = path_y_bbox(path)
             && (bbox.y_max <= y_start as f64 || bbox.y_min >= (y_start + ctx.out_h) as f64)
