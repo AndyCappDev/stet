@@ -20,8 +20,9 @@ use crate::objects::{PdfDict, PdfObj};
 use crate::resolver::Resolver;
 
 use self::color_space::{
-    ResolvedColorSpace, components_to_device_color_icc, convert_icc_image_data,
-    painted_channels_for_cs, resolve_color_space, resolve_color_space_obj, to_image_color_space,
+    ResolvedColorSpace, components_to_device_color_icc, convert_cie_image_data,
+    convert_icc_image_data, painted_channels_for_cs, resolve_color_space, resolve_color_space_obj,
+    to_image_color_space,
 };
 use self::graphics_state::{ColorSpaceRef, PdfGraphicsState};
 
@@ -2082,6 +2083,10 @@ impl<'a> ContentInterpreter<'a> {
                     convert_icc_image_data(rcs, &sample_data, width, height, &mut self.icc_cache)
                 {
                     (rgb_data, rgb_cs)
+                } else if let Some((rgb_data, rgb_cs)) =
+                    convert_cie_image_data(rcs, &sample_data, width, height)
+                {
+                    (rgb_data, rgb_cs)
                 } else {
                     (sample_data, color_space)
                 }
@@ -2868,6 +2873,23 @@ impl<'a> ContentInterpreter<'a> {
             expand_bits_to_bytes(&sample_data, bpc, width, height, n_components, is_indexed)
         } else {
             sample_data
+        };
+
+        // Convert CalRGB/CalGray image data through CIE pipeline
+        let (sample_data, color_space) = if !is_image_mask {
+            if let Some(ref rcs) = resolved_cs {
+                if let Some((rgb_data, rgb_cs)) =
+                    convert_cie_image_data(rcs, &sample_data, width, height)
+                {
+                    (rgb_data, rgb_cs)
+                } else {
+                    (sample_data, color_space)
+                }
+            } else {
+                (sample_data, color_space)
+            }
+        } else {
+            (sample_data, color_space)
         };
 
         self.display_list.push(DisplayElement::Image {

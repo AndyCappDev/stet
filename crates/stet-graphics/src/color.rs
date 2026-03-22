@@ -228,7 +228,7 @@ impl DeviceColor {
         }
     }
 
-    /// Convert CIE XYZ to sRGB.
+    /// Convert CIE XYZ (D65-adapted) to sRGB.
     fn from_xyz(x: f64, y: f64, z: f64) -> Self {
         // IEC 61966-2-1 sRGB D65 XYZ → linear RGB matrix
         let lr = 3.2404542 * x + (-1.5371385) * y + (-0.4985314) * z;
@@ -241,6 +241,56 @@ impl DeviceColor {
             b: Self::srgb_gamma(lb.max(0.0)).clamp(0.0, 1.0),
             native_cmyk: None,
         }
+    }
+
+    /// Bradford chromatic adaptation: adapt XYZ from source white point to D65.
+    fn adapt_xyz_to_d65(x: f64, y: f64, z: f64, src_wp: &[f64; 3]) -> [f64; 3] {
+        // D65 white point (sRGB standard illuminant)
+        const D65: [f64; 3] = [0.95047, 1.0, 1.08883];
+
+        // Skip adaptation if source is already D65
+        if (src_wp[0] - D65[0]).abs() < 1e-3
+            && (src_wp[1] - D65[1]).abs() < 1e-3
+            && (src_wp[2] - D65[2]).abs() < 1e-3
+        {
+            return [x, y, z];
+        }
+
+        // Bradford matrix (XYZ → LMS cone space), column-major
+        const M: [f64; 9] = [
+            0.8951, -0.7502, 0.0389, 0.2664, 1.7135, -0.0685, -0.1614, 0.0367, 1.0296,
+        ];
+        // Inverse Bradford matrix (LMS → XYZ), column-major
+        const M_INV: [f64; 9] = [
+            0.9869929, 0.4323053, -0.0085287, -0.1470543, 0.5183603, 0.0400428, 0.1599627,
+            0.0492912, 0.9684867,
+        ];
+
+        // Convert source and D65 white points to LMS
+        let lms_src = Self::apply_matrix_3x3(&M, src_wp);
+        let lms_d65 = Self::apply_matrix_3x3(&M, &D65);
+
+        // Diagonal scaling in LMS space
+        let s0 = if lms_src[0].abs() > 1e-10 {
+            lms_d65[0] / lms_src[0]
+        } else {
+            1.0
+        };
+        let s1 = if lms_src[1].abs() > 1e-10 {
+            lms_d65[1] / lms_src[1]
+        } else {
+            1.0
+        };
+        let s2 = if lms_src[2].abs() > 1e-10 {
+            lms_d65[2] / lms_src[2]
+        } else {
+            1.0
+        };
+
+        // Adapt: M_inv × diag(s) × M × [x, y, z]
+        let lms = Self::apply_matrix_3x3(&M, &[x, y, z]);
+        let scaled = [lms[0] * s0, lms[1] * s1, lms[2] * s2];
+        Self::apply_matrix_3x3(&M_INV, &scaled)
     }
 
     /// Apply a column-major 3×3 matrix to a 3-element vector.
@@ -326,6 +376,8 @@ impl DeviceColor {
 
         let xyz = Self::apply_matrix_3x3(&params.matrix_lmn, &[l, m, n]);
 
+        // Chromatic adaptation from source white point to D65
+        let xyz = Self::adapt_xyz_to_d65(xyz[0], xyz[1], xyz[2], &params.white_point);
         Self::from_xyz(xyz[0], xyz[1], xyz[2])
     }
 
@@ -379,6 +431,8 @@ impl DeviceColor {
 
         let xyz = Self::apply_matrix_3x3(&params.matrix_lmn, &[l, m, n]);
 
+        // Chromatic adaptation from source white point to D65
+        let xyz = Self::adapt_xyz_to_d65(xyz[0], xyz[1], xyz[2], &params.white_point);
         Self::from_xyz(xyz[0], xyz[1], xyz[2])
     }
 

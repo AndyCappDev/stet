@@ -716,6 +716,76 @@ pub fn convert_icc_image_data(
     None
 }
 
+/// Convert CalRGB or CalGray image data through the CIE pipeline to sRGB.
+/// Returns (converted_data, ImageColorSpace::DeviceRGB) on success, or None.
+pub fn convert_cie_image_data(
+    cs: &ResolvedColorSpace,
+    data: &[u8],
+    width: u32,
+    height: u32,
+) -> Option<(Vec<u8>, ImageColorSpace)> {
+    match cs {
+        ResolvedColorSpace::CalRGB { params } => Some((
+            convert_cal_rgb_image_to_rgb(data, width, height, params),
+            ImageColorSpace::DeviceRGB,
+        )),
+        ResolvedColorSpace::CalGray { params } => Some((
+            convert_cal_gray_image_to_rgb(data, width, height, params),
+            ImageColorSpace::DeviceRGB,
+        )),
+        _ => None,
+    }
+}
+
+/// Convert 8-bit CalRGB image data to sRGB via CIE ABC pipeline.
+fn convert_cal_rgb_image_to_rgb(
+    data: &[u8],
+    width: u32,
+    height: u32,
+    params: &CieAbcParams,
+) -> Vec<u8> {
+    let pixel_count = (width * height) as usize;
+    let mut rgb = Vec::with_capacity(pixel_count * 3);
+    for i in 0..pixel_count {
+        let offset = i * 3;
+        if offset + 2 < data.len() {
+            let a = data[offset] as f64 / 255.0;
+            let b = data[offset + 1] as f64 / 255.0;
+            let c = data[offset + 2] as f64 / 255.0;
+            let color = DeviceColor::from_cie_abc(a, b, c, params);
+            rgb.push((color.r.clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
+            rgb.push((color.g.clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
+            rgb.push((color.b.clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
+        } else {
+            rgb.extend_from_slice(&[0, 0, 0]);
+        }
+    }
+    rgb
+}
+
+/// Convert 8-bit CalGray image data to sRGB via CIE A pipeline.
+fn convert_cal_gray_image_to_rgb(
+    data: &[u8],
+    width: u32,
+    height: u32,
+    params: &CieAParams,
+) -> Vec<u8> {
+    let pixel_count = (width * height) as usize;
+    let mut rgb = Vec::with_capacity(pixel_count * 3);
+    for i in 0..pixel_count {
+        if i < data.len() {
+            let a = data[i] as f64 / 255.0;
+            let color = DeviceColor::from_cie_a(a, params);
+            rgb.push((color.r.clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
+            rgb.push((color.g.clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
+            rgb.push((color.b.clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
+        } else {
+            rgb.extend_from_slice(&[0, 0, 0]);
+        }
+    }
+    rgb
+}
+
 /// Convert 8-bit Lab image data to RGB.
 /// Default Decode for 3-component ICCBased: L=[0,100], a=[-128,127], b=[-128,127].
 fn convert_lab_image_to_rgb(
