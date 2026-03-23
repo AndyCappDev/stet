@@ -204,6 +204,7 @@ impl<'a> ContentInterpreter<'a> {
         self.flush_soft_mask();
         // Return partial display list even on error — handles malformed PDFs
         // where flate decompression produces truncated content streams.
+        eprintln!("[DL] {} elements", self.display_list.elements().len());
         Ok(self.display_list)
     }
 
@@ -216,6 +217,19 @@ impl<'a> ContentInterpreter<'a> {
     pub fn into_display_list(mut self) -> DisplayList {
         self.flush_soft_mask();
         self.display_list
+    }
+
+    /// Unwind any leftover gstate stack entries from unbalanced q/Q.
+    /// Some PDFs have more q's than Q's; pop each entry as if Q were called,
+    /// restoring clip state at each level so display list clips are correct.
+    pub fn unwind_gstate_stack(&mut self) {
+        while let Some(saved) = self.gstate_stack.pop() {
+            let old_clip_version = self.gstate.clip_path_version;
+            self.gstate = saved;
+            if self.gstate.clip_path_version != old_clip_version {
+                self.restore_clip_from_stack();
+            }
+        }
     }
 
     /// Reset clip state before rendering annotations.

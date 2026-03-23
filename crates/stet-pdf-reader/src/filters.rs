@@ -171,17 +171,24 @@ fn decode_flate(data: &[u8], parms: Option<&PdfDict>) -> Result<Vec<u8>, PdfErro
     let output = if zlib_clean {
         zlib_output?
     } else {
-        // Zlib hit an error (corrupt checksum, etc). Use whatever it produced.
-        // Don't try raw deflate — it may push past the corruption boundary
-        // and decode garbage that renders as visual artifacts.
+        // Zlib hit an error (corrupt checksum, etc).  Try raw deflate (skip
+        // 2-byte zlib header) and use whichever produced more output.  Many
+        // PDFs have valid deflate payloads but bad zlib checksums.
         let zlib_data = zlib_output.unwrap_or_default();
-        if !zlib_data.is_empty() {
-            zlib_data
-        } else if data.len() > 2 {
-            // Zlib produced nothing — try raw deflate as last resort
+        if data.len() > 2 {
             let (raw_output, _) = decode_flate_inner(&data[2..], false);
-            raw_output
-                .map_err(|_| PdfError::DecompressionError("flate: decompression failed".into()))?
+            let raw_data = raw_output.unwrap_or_default();
+            if raw_data.len() > zlib_data.len() {
+                raw_data
+            } else if !zlib_data.is_empty() {
+                zlib_data
+            } else {
+                return Err(PdfError::DecompressionError(
+                    "flate: decompression failed".into(),
+                ));
+            }
+        } else if !zlib_data.is_empty() {
+            zlib_data
         } else {
             return Err(PdfError::DecompressionError(
                 "flate: decompression failed".into(),
