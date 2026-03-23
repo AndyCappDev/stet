@@ -1858,10 +1858,8 @@ impl PdfFont {
 
     /// Font matrix (glyph space → text space).
     ///
-    /// For CidCff fonts, returns identity because the font matrix is already
-    /// applied inside `glyph_path_cid()` (using per-FD or top-level matrix).
-    /// This prevents double-application of the 1/1000 scaling that occurs in
-    /// CID-keyed CFF fonts where both top-level and FD FontMatrix are [0.001,...].
+    /// Returns identity for CidCff because the full matrix (including per-FD
+    /// composition) is applied inside `glyph_path_cid()`.
     pub fn font_matrix(&self) -> Matrix {
         match self {
             PdfFont::Type1(f) => f.font_matrix,
@@ -2138,13 +2136,26 @@ impl CidCffPdfFont {
         )
         .ok()?;
 
-        // Apply the effective font matrix inside glyph_path_cid so that the
-        // text rendering code doesn't need to apply font_matrix() again.
-        // For CID-keyed CFF: use per-FD FontMatrix when present, otherwise
-        // use the top-level FontMatrix.  font_matrix() returns identity for
-        // CidCff so we must apply the matrix here.
+        // Apply the effective font matrix.  font_matrix() returns identity
+        // for CidCff, so all matrix application happens here.
+        //
+        // Per CFF spec, per-FD FontMatrix maps charstring→font space, and
+        // the top-level FontMatrix maps font space→text space.  When both
+        // exist, they must be composed.  However, some buggy fonts specify
+        // the default [0.001,...] in both the FD and top-level dicts.
+        // Detect this by checking whether the per-FD matrix already
+        // includes a scale factor (small a/d values); if so, use it alone.
         let effective_fm = if let Some(fd_fm) = fd_font_matrix {
-            Matrix::new(fd_fm[0], fd_fm[1], fd_fm[2], fd_fm[3], fd_fm[4], fd_fm[5])
+            let fd = Matrix::new(fd_fm[0], fd_fm[1], fd_fm[2], fd_fm[3], fd_fm[4], fd_fm[5]);
+            if fd.a.abs() < 0.01 || fd.d.abs() < 0.01 {
+                // Per-FD already includes scale (e.g., [0.001,...]).
+                // Don't compose with top-level to avoid double-scaling.
+                fd
+            } else {
+                // Per-FD is a non-scaling transform (e.g., shear for italic).
+                // Compose with top-level for the needed scale.
+                self.font_matrix.concat(&fd)
+            }
         } else {
             self.font_matrix
         };
