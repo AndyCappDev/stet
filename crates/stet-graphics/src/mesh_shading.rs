@@ -469,29 +469,37 @@ pub fn parse_type6_patches(
                 }
                 let prev = patches.last().unwrap().clone();
 
+                // Inherit the full 4-point side from the previous patch.
+                // Side 1: pts[0..4], Side 2: pts[3..7], Side 3: pts[6..10],
+                // Side 4: pts[9..12]+pts[0] (wraps).
                 let (inherited_pts, inherited_colors, inherited_raw) = match flag {
                     1 => (
-                        prev.points[3..6].to_vec(),
+                        prev.points[3..7].to_vec(),
                         [prev.colors[1].clone(), prev.colors[2].clone()],
                         [prev.raw_colors[1].clone(), prev.raw_colors[2].clone()],
                     ),
                     2 => (
-                        prev.points[6..9].to_vec(),
-                        [prev.colors[2].clone(), prev.colors[3].clone()],
-                        [prev.raw_colors[2].clone(), prev.raw_colors[3].clone()],
-                    ),
-                    3 => (
-                        prev.points[9..12].to_vec(),
+                        vec![
+                            prev.points[9],
+                            prev.points[10],
+                            prev.points[11],
+                            prev.points[0],
+                        ],
                         [prev.colors[3].clone(), prev.colors[0].clone()],
                         [prev.raw_colors[3].clone(), prev.raw_colors[0].clone()],
+                    ),
+                    3 => (
+                        prev.points[6..10].to_vec(),
+                        [prev.colors[2].clone(), prev.colors[3].clone()],
+                        [prev.raw_colors[2].clone(), prev.raw_colors[3].clone()],
                     ),
                     _ => unreachable!(),
                 };
 
-                // Read remaining 9 points + 2 colors
+                // Read remaining 8 points + 2 colors
                 let mut points = inherited_pts;
                 let mut ok = true;
-                for _ in 0..9 {
+                for _ in 0..8 {
                     if let Some(pt) = read_point(&mut reader) {
                         points.push(pt);
                     } else {
@@ -771,8 +779,8 @@ pub fn build_type5_from_array(
 pub fn build_type6_from_array(values: &[f64], n_comps: usize) -> Vec<ShadingPatch> {
     // flag + 12 points (24 values) + 4 colors (4 * n_comps)
     let full_stride = 1 + 24 + 4 * n_comps;
-    // continuation: flag + 9 points (18 values) + 2 colors (2 * n_comps)
-    let cont_stride = 1 + 18 + 2 * n_comps;
+    // continuation: flag + 8 points (16 values) + 2 colors (2 * n_comps)
+    let cont_stride = 1 + 16 + 2 * n_comps;
     let mut patches = Vec::new();
     let mut pos = 0;
 
@@ -821,33 +829,39 @@ pub fn build_type6_from_array(values: &[f64], n_comps: usize) -> Vec<ShadingPatc
                     break;
                 }
                 let prev = patches.last().unwrap().clone();
+                // Inherit the full 4-point side from the previous patch.
                 let (inherited_pts, inherited_colors, inherited_raw) = match flag {
                     1 => (
-                        prev.points[3..6].to_vec(),
+                        prev.points[3..7].to_vec(),
                         [prev.colors[1].clone(), prev.colors[2].clone()],
                         [prev.raw_colors[1].clone(), prev.raw_colors[2].clone()],
                     ),
                     2 => (
-                        prev.points[6..9].to_vec(),
-                        [prev.colors[2].clone(), prev.colors[3].clone()],
-                        [prev.raw_colors[2].clone(), prev.raw_colors[3].clone()],
-                    ),
-                    3 => (
-                        prev.points[9..12].to_vec(),
+                        vec![
+                            prev.points[9],
+                            prev.points[10],
+                            prev.points[11],
+                            prev.points[0],
+                        ],
                         [prev.colors[3].clone(), prev.colors[0].clone()],
                         [prev.raw_colors[3].clone(), prev.raw_colors[0].clone()],
+                    ),
+                    3 => (
+                        prev.points[6..10].to_vec(),
+                        [prev.colors[2].clone(), prev.colors[3].clone()],
+                        [prev.raw_colors[2].clone(), prev.raw_colors[3].clone()],
                     ),
                     _ => unreachable!(),
                 };
 
-                if pos + 18 + 2 * n_comps > values.len() {
+                if pos + 16 + 2 * n_comps > values.len() {
                     break;
                 }
                 let mut points = inherited_pts;
-                for i in 0..9 {
+                for i in 0..8 {
                     points.push((values[pos + i * 2], values[pos + i * 2 + 1]));
                 }
-                pos += 18;
+                pos += 16;
                 let mut colors = vec![inherited_colors[0].clone(), inherited_colors[1].clone()];
                 let mut raw_colors_vec = vec![inherited_raw[0].clone(), inherited_raw[1].clone()];
                 for _ in 0..2 {
