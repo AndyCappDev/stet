@@ -488,10 +488,7 @@ fn substitute_font(
     };
 
     // Fall back to filesystem
-    let font_data = font_data.or_else(|| {
-        let font_path = format!("resources/Font/{}.t1", font_file_name);
-        std::fs::read(&font_path).ok()
-    });
+    let font_data = font_data.or_else(|| embedded_font(font_file_name));
 
     // If the named font wasn't found, use a default substitute based on the
     // font descriptor Flags (serif bit) and weight/style from the font name.
@@ -523,8 +520,7 @@ fn substitute_font(
                 return Some(data);
             }
         }
-        let path = format!("resources/Font/{}.t1", default_name);
-        std::fs::read(&path).ok()
+        embedded_font(default_name)
     })?;
 
     let font = parse_type1(&font_data).ok()?;
@@ -830,6 +826,63 @@ fn load_system_truetype_font(base_font: &str) -> Result<Vec<u8>, PdfError> {
         "font '{}' not found on system",
         clean_name
     )))
+}
+
+/// Embedded Type 1 substitute fonts (URW families).
+/// Compiled into the binary so the PDF reader works from any directory.
+const EMBEDDED_FONTS: &[(&str, &[u8])] = &[
+    // NimbusRoman (Times)
+    ("NimbusRoman-Regular", include_bytes!("../../../../resources/Font/NimbusRoman-Regular.t1")),
+    ("NimbusRoman-Bold", include_bytes!("../../../../resources/Font/NimbusRoman-Bold.t1")),
+    ("NimbusRoman-Italic", include_bytes!("../../../../resources/Font/NimbusRoman-Italic.t1")),
+    ("NimbusRoman-BoldItalic", include_bytes!("../../../../resources/Font/NimbusRoman-BoldItalic.t1")),
+    // NimbusSans (Helvetica/Arial)
+    ("NimbusSans-Regular", include_bytes!("../../../../resources/Font/NimbusSans-Regular.t1")),
+    ("NimbusSans-Bold", include_bytes!("../../../../resources/Font/NimbusSans-Bold.t1")),
+    ("NimbusSans-Italic", include_bytes!("../../../../resources/Font/NimbusSans-Italic.t1")),
+    ("NimbusSans-BoldItalic", include_bytes!("../../../../resources/Font/NimbusSans-BoldItalic.t1")),
+    // NimbusSansNarrow (Helvetica Narrow)
+    ("NimbusSansNarrow-Regular", include_bytes!("../../../../resources/Font/NimbusSansNarrow-Regular.t1")),
+    ("NimbusSansNarrow-Bold", include_bytes!("../../../../resources/Font/NimbusSansNarrow-Bold.t1")),
+    ("NimbusSansNarrow-Oblique", include_bytes!("../../../../resources/Font/NimbusSansNarrow-Oblique.t1")),
+    ("NimbusSansNarrow-BoldOblique", include_bytes!("../../../../resources/Font/NimbusSansNarrow-BoldOblique.t1")),
+    // NimbusMonoPS (Courier)
+    ("NimbusMonoPS-Regular", include_bytes!("../../../../resources/Font/NimbusMonoPS-Regular.t1")),
+    ("NimbusMonoPS-Bold", include_bytes!("../../../../resources/Font/NimbusMonoPS-Bold.t1")),
+    ("NimbusMonoPS-Italic", include_bytes!("../../../../resources/Font/NimbusMonoPS-Italic.t1")),
+    ("NimbusMonoPS-BoldItalic", include_bytes!("../../../../resources/Font/NimbusMonoPS-BoldItalic.t1")),
+    // P052 (Palatino)
+    ("P052-Roman", include_bytes!("../../../../resources/Font/P052-Roman.t1")),
+    ("P052-Bold", include_bytes!("../../../../resources/Font/P052-Bold.t1")),
+    ("P052-Italic", include_bytes!("../../../../resources/Font/P052-Italic.t1")),
+    ("P052-BoldItalic", include_bytes!("../../../../resources/Font/P052-BoldItalic.t1")),
+    // C059 (New Century Schoolbook)
+    ("C059-Roman", include_bytes!("../../../../resources/Font/C059-Roman.t1")),
+    ("C059-Bold", include_bytes!("../../../../resources/Font/C059-Bold.t1")),
+    ("C059-Italic", include_bytes!("../../../../resources/Font/C059-Italic.t1")),
+    ("C059-BdIta", include_bytes!("../../../../resources/Font/C059-BdIta.t1")),
+    // URWBookman (Bookman)
+    ("URWBookman-Light", include_bytes!("../../../../resources/Font/URWBookman-Light.t1")),
+    ("URWBookman-Demi", include_bytes!("../../../../resources/Font/URWBookman-Demi.t1")),
+    ("URWBookman-LightItalic", include_bytes!("../../../../resources/Font/URWBookman-LightItalic.t1")),
+    ("URWBookman-DemiItalic", include_bytes!("../../../../resources/Font/URWBookman-DemiItalic.t1")),
+    // URWGothic (AvantGarde)
+    ("URWGothic-Book", include_bytes!("../../../../resources/Font/URWGothic-Book.t1")),
+    ("URWGothic-Demi", include_bytes!("../../../../resources/Font/URWGothic-Demi.t1")),
+    ("URWGothic-BookOblique", include_bytes!("../../../../resources/Font/URWGothic-BookOblique.t1")),
+    ("URWGothic-DemiOblique", include_bytes!("../../../../resources/Font/URWGothic-DemiOblique.t1")),
+    // Symbol fonts
+    ("StandardSymbolsPS", include_bytes!("../../../../resources/Font/StandardSymbolsPS.t1")),
+    ("D050000L", include_bytes!("../../../../resources/Font/D050000L.t1")),
+    ("Z003-MediumItalic", include_bytes!("../../../../resources/Font/Z003-MediumItalic.t1")),
+];
+
+/// Look up an embedded Type 1 substitute font by name.
+fn embedded_font(name: &str) -> Option<Vec<u8>> {
+    EMBEDDED_FONTS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, data)| data.to_vec())
 }
 
 /// Read a font file, handling TrueType Collection (.ttc) files by extracting
