@@ -110,6 +110,9 @@ pub struct CidCffPdfFont {
     /// CID → GID mapping from the PDF's /CIDToGIDMap stream.
     /// Used for embedded OpenType/CFF fonts stored as FontFile2.
     pub pdf_cid_to_gid: Option<Vec<u16>>,
+    /// When true, CID maps directly to charstring index (GID = CID).
+    /// Set when CIDToGIDMap is /Identity or absent in CIDFontType2 fonts.
+    pub identity_cid_to_gid: bool,
     /// CIDSystemInfo ordering for Unicode→CID width lookup.
     pub ordering: Vec<u8>,
     pub font_matrix: Matrix,
@@ -731,6 +734,7 @@ fn create_cid_cff_from_otf(
     cid_widths: HashMap<u16, f64>,
     ordering: &[u8],
     pdf_cid_to_gid: Option<Vec<u16>>,
+    identity_cid_to_gid: bool,
     code_lengths: [u8; 256],
     code_to_cid: HashMap<u32, u32>,
 ) -> Result<PdfFont, PdfError> {
@@ -764,6 +768,7 @@ fn create_cid_cff_from_otf(
         font_matrix,
         cmap,
         pdf_cid_to_gid,
+        identity_cid_to_gid,
         ordering: ordering.to_vec(),
         code_lengths,
         code_to_cid,
@@ -1464,12 +1469,14 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                     } else {
                         None
                     };
+                    let identity = cid_to_gid_map.is_none();
                     return create_cid_cff_from_otf(
                         &font_data,
                         default_width,
                         cid_widths,
                         &ordering,
                         cid_to_gid_map,
+                        identity,
                         code_lengths,
                         code_to_cid.clone(),
                     );
@@ -1498,6 +1505,7 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                         cid_widths,
                         &ordering,
                         None,
+                        false, // substituted: use cmap, not identity
                         code_lengths,
                         code_to_cid.clone(),
                     );
@@ -1573,6 +1581,7 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                         cid_widths,
                         &ordering,
                         pdf_cid_to_gid,
+                        false, // CIDFontType0: CFF handles CID mapping internally
                         code_lengths,
                         code_to_cid.clone(),
                     );
@@ -1592,6 +1601,7 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                     font_matrix,
                     cmap: None,
                     pdf_cid_to_gid: None,
+                    identity_cid_to_gid: false,
                     ordering: ordering.clone(),
                     code_lengths,
                     code_to_cid: code_to_cid.clone(),
@@ -1611,6 +1621,7 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                         cid_widths,
                         &ordering,
                         None,
+                        false, // substituted: use cmap, not identity
                         code_lengths,
                         code_to_cid.clone(),
                     );
@@ -2135,6 +2146,10 @@ impl CidCffPdfFont {
         let gid = if let Some(ref map) = self.pdf_cid_to_gid {
             // Embedded font with PDF-supplied CID→GID map
             *map.get(cid as usize).unwrap_or(&0) as usize
+        } else if self.identity_cid_to_gid {
+            // Identity CIDToGIDMap: CID = charstring index directly.
+            // Common for CIDFontType2 fonts stored as OTTO/CFF in FontFile2.
+            cid as usize
         } else if let Some(ref cmap) = self.cmap {
             // OTF font with Unicode cmap.
             // If this is a substituted font with an Adobe CID ordering
