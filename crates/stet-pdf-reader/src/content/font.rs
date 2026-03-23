@@ -2083,8 +2083,17 @@ impl CidCffPdfFont {
             // Embedded font with PDF-supplied CID→GID map
             *map.get(cid as usize).unwrap_or(&0) as usize
         } else if let Some(ref cmap) = self.cmap {
-            // OTF substitute: cid is Unicode code point, map via cmap
-            *cmap.get(&(cid as u32))? as usize
+            // OTF font with Unicode cmap.
+            // If this is a substituted font with an Adobe CID ordering
+            // (e.g. Japan1), the CID is from the Adobe registry, not Unicode.
+            // Convert CID → Unicode first, then look up in cmap.
+            if !self.ordering.is_empty() && self.ordering != b"Identity" {
+                let unicode =
+                    super::cid_unicode::cid_to_unicode(&self.ordering, cid)?;
+                *cmap.get(&unicode)? as usize
+            } else {
+                *cmap.get(&(cid as u32))? as usize
+            }
         } else if !self.font.cid_to_gid.is_empty() {
             let g = *self.font.cid_to_gid.get(cid as usize)?;
             if g == 0xFFFF {
@@ -2182,14 +2191,9 @@ impl CidCffPdfFont {
     }
 
     fn glyph_width_cid(&self, cid: u16) -> f64 {
-        // For OTF substitutes with cmap, map Unicode → CID for width lookup
-        let resolved = if self.cmap.is_some() && !self.ordering.is_empty() {
-            super::cid_unicode::unicode_to_cid(&self.ordering, cid as u32).unwrap_or(cid)
-        } else {
-            cid
-        };
+        // CID widths from the /W array are already keyed by CID — use directly.
         self.cid_widths
-            .get(&resolved)
+            .get(&cid)
             .copied()
             .unwrap_or(self.default_width)
     }
