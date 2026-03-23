@@ -261,6 +261,44 @@ impl IccCache {
         Some(result)
     }
 
+    /// Convert a single color through an ICC profile (read-only, no caching).
+    ///
+    /// Same as `convert_color` but takes `&self` instead of `&mut self`,
+    /// suitable for use from immutable contexts like rendering.
+    pub fn convert_color_readonly(
+        &self,
+        hash: &ProfileHash,
+        components: &[f64],
+    ) -> Option<(f64, f64, f64)> {
+        let cached = self.transforms.get(hash)?;
+        let n = cached.n as usize;
+        let is_lab = cached.is_lab;
+
+        let mut src = vec![0.0f64; n];
+        for (i, s) in src.iter_mut().enumerate() {
+            let v = components.get(i).copied().unwrap_or(0.0);
+            *s = if is_lab {
+                match i {
+                    0 => (v / 100.0).clamp(0.0, 1.0),
+                    _ => ((v + 128.0) / 255.0).clamp(0.0, 1.0),
+                }
+            } else {
+                v.clamp(0.0, 1.0)
+            };
+        }
+
+        let mut dst = [0.0f64; 3];
+        if cached.transform_f64.transform(&src, &mut dst).is_err() {
+            return None;
+        }
+
+        Some((
+            dst[0].clamp(0.0, 1.0),
+            dst[1].clamp(0.0, 1.0),
+            dst[2].clamp(0.0, 1.0),
+        ))
+    }
+
     /// Bulk-convert 8-bit image samples through an ICC profile to RGB.
     /// Input: packed samples (Gray/RGB/CMYK depending on profile).
     /// Output: packed RGB bytes (3 bytes per pixel).

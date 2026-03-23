@@ -13,6 +13,7 @@ use crate::error::PdfError;
 use crate::objects::{PdfDict, PdfObj};
 use crate::resolver::Resolver;
 use crate::resources::function::PdfFunction;
+use std::sync::Arc;
 
 use stet_fonts::geometry::Matrix;
 use stet_graphics::device::{
@@ -666,7 +667,18 @@ fn resolved_cs_to_shading_cs(cs: &ResolvedColorSpace) -> ShadingColorSpace {
         ResolvedColorSpace::DeviceGray => ShadingColorSpace::DeviceGray,
         ResolvedColorSpace::DeviceRGB => ShadingColorSpace::DeviceRGB,
         ResolvedColorSpace::DeviceCMYK => ShadingColorSpace::DeviceCMYK,
-        // ICCBased colors are converted to sRGB at sample time
+        // ICCBased: preserve profile info so the renderer can convert
+        // interpolated colors per-grid-point for accurate patch shading.
+        ResolvedColorSpace::ICCBased {
+            n,
+            profile_hash: Some(hash),
+            profile_data: Some(data),
+            ..
+        } if *n != 1 && *n != 4 => ShadingColorSpace::ICCBased {
+            n: *n as u32,
+            profile_hash: *hash,
+            profile_data: Arc::clone(data),
+        },
         ResolvedColorSpace::ICCBased { n, .. } => match n {
             1 => ShadingColorSpace::DeviceGray,
             4 => ShadingColorSpace::DeviceCMYK,

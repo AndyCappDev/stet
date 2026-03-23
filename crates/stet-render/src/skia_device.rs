@@ -1295,35 +1295,103 @@ pub fn build_icc_cache_for_list(
         cache.set_default_cmyk_hash(hash);
     }
 
-    // Scan display list for ICCBased images
-    for element in list.elements() {
-        let cs = match element {
-            DisplayElement::Image { params, .. } => Some(&params.color_space),
-            _ => None,
-        };
-        if let Some(ImageColorSpace::ICCBased {
-            profile_hash,
-            profile_data,
-            ..
-        }) = cs
-            && seen.insert(*profile_hash)
-        {
-            cache.register_profile(profile_data);
-        }
-        // Also check Indexed with ICCBased base
-        if let Some(ImageColorSpace::Indexed { base, .. }) = cs
-            && let ImageColorSpace::ICCBased {
+    // Scan display list for ICCBased images and shadings (recursing into Groups)
+    fn scan_elements(
+        elements: &[DisplayElement],
+        seen: &mut HashSet<stet_graphics::icc::ProfileHash>,
+        cache: &mut IccCache,
+    ) {
+        for element in elements {
+            // Recurse into groups
+            if let DisplayElement::Group { elements: sub, .. } = element {
+                scan_elements(sub.elements(), seen, cache);
+            }
+            if let DisplayElement::SoftMasked { content, mask, .. } = element {
+                scan_elements(content.elements(), seen, cache);
+                scan_elements(mask.elements(), seen, cache);
+            }
+            // Shading color spaces
+            let shading_cs = match element {
+                DisplayElement::AxialShading { params } => Some(&params.color_space),
+                DisplayElement::RadialShading { params } => Some(&params.color_space),
+                DisplayElement::MeshShading { params } => Some(&params.color_space),
+                DisplayElement::PatchShading { params } => Some(&params.color_space),
+                _ => None,
+            };
+            if let Some(stet_graphics::device::ShadingColorSpace::ICCBased {
                 profile_hash,
                 profile_data,
                 ..
-            } = base.as_ref()
-            && seen.insert(*profile_hash)
-        {
-            cache.register_profile(profile_data);
+            }) = shading_cs
+            {
+                if seen.insert(*profile_hash) {
+                    cache.register_profile(profile_data);
+                }
+            }
+            // Image color spaces
+            if let DisplayElement::Image { params, .. } = element {
+                match &params.color_space {
+                    ImageColorSpace::ICCBased {
+                        profile_hash,
+                        profile_data,
+                        ..
+                    } if seen.insert(*profile_hash) => {
+                        cache.register_profile(profile_data);
+                    }
+                    ImageColorSpace::Indexed { base, .. }
+                        if matches!(base.as_ref(), ImageColorSpace::ICCBased { .. }) =>
+                    {
+                        if let ImageColorSpace::ICCBased {
+                            profile_hash,
+                            profile_data,
+                            ..
+                        } = base.as_ref()
+                        {
+                            if seen.insert(*profile_hash) {
+                                cache.register_profile(profile_data);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
         }
     }
+    scan_elements(list.elements(), &mut seen, &mut cache);
 
     cache
+}
+
+/// Register ICC profiles from shading elements in a display list.
+///
+/// Recursively scans Groups and SoftMasks for ICCBased shading color spaces
+/// and registers their profiles in the cache.
+fn register_shading_icc_profiles(list: &DisplayList, cache: &mut IccCache) {
+    fn scan(elements: &[DisplayElement], cache: &mut IccCache) {
+        for element in elements {
+            if let DisplayElement::Group { elements: sub, .. } = element {
+                scan(sub.elements(), cache);
+            }
+            if let DisplayElement::SoftMasked { content, mask, .. } = element {
+                scan(content.elements(), cache);
+                scan(mask.elements(), cache);
+            }
+            let shading_cs = match element {
+                DisplayElement::AxialShading { params } => Some(&params.color_space),
+                DisplayElement::RadialShading { params } => Some(&params.color_space),
+                DisplayElement::MeshShading { params } => Some(&params.color_space),
+                DisplayElement::PatchShading { params } => Some(&params.color_space),
+                _ => None,
+            };
+            if let Some(stet_graphics::device::ShadingColorSpace::ICCBased {
+                profile_data, ..
+            }) = shading_cs
+            {
+                cache.register_profile(profile_data);
+            }
+        }
+    }
+    scan(list.elements(), cache);
 }
 
 /// Convert raw image samples to RGBA for rasterization.
@@ -6208,10 +6276,13 @@ pub fn render_to_rgba(
         return vec![0xFF; pixel_w as usize * pixel_h as usize * 4];
     }
 
-    let icc_cache = match icc {
+    let mut icc_cache = match icc {
         Some(c) => c.clone(),
         None => IccCache::new(),
     };
+    // Register any ICC profiles from shadings in the display list
+    // (the caller's cache only has image profiles)
+    register_shading_icc_profiles(list, &mut icc_cache);
 
     let mut sink = MemorySink {
         data: Vec::new(),
@@ -7298,7 +7369,14 @@ fn render_patch_shading(
             let extent = (x_max - x_min).max(y_max - y_min).abs() * scale;
             // Target ~2 device pixels per boundary segment
             let n = (extent / 2.0).ceil().clamp(8.0, 64.0) as usize;
-            subdivide_patch_to_triangles(patch, &mut triangles, n);
+            // Extract ICC profile hash for per-grid-point color conversion
+            let icc_profile_hash = match &params.color_space {
+                stet_graphics::device::ShadingColorSpace::ICCBased {
+                    profile_hash, ..
+                } => Some(profile_hash),
+                _ => None,
+            };
+            subdivide_patch_to_triangles(patch, &mut triangles, n, icc_profile_hash, icc);
         }
     }
     if !triangles.is_empty() {
@@ -7324,19 +7402,26 @@ fn render_patch_shading(
         );
     }
 }
-/// Subdivide a Coons/tensor patch into triangles via recursive de Casteljau.
-/// Uses a simple grid subdivision approach: evaluate the patch at NxN points
-/// and triangulate the resulting grid.
+/// Subdivide a Coons/tensor patch into triangles via grid subdivision.
+/// Evaluates the patch at NxN points and triangulates the resulting grid.
+/// When an ICC profile hash and cache are provided, interpolates colors in the
+/// source ICC color space and converts per-grid-point for accurate rendering.
 fn subdivide_patch_to_triangles(
     patch: &stet_graphics::device::ShadingPatch,
     triangles: &mut Vec<stet_graphics::device::ShadingTriangle>,
     n: usize,
+    icc_profile_hash: Option<&stet_graphics::icc::ProfileHash>,
+    icc_cache: Option<&IccCache>,
 ) {
     // Evaluate patch at grid points.
     // Use tensor-product evaluation when 16 control points are available (Type 7),
     // otherwise fall back to Coons blending (Type 6, 12 points).
-    let mut grid: Vec<(f64, f64, DeviceColor)> = Vec::with_capacity((n + 1) * (n + 1));
+    let mut grid: Vec<(f64, f64, DeviceColor, Vec<f64>)> =
+        Vec::with_capacity((n + 1) * (n + 1));
     let use_tensor = patch.points.len() >= 16;
+    let has_raw = !patch.raw_colors[0].is_empty();
+    // Use per-grid-point ICC conversion when profile info is available
+    let use_icc_interp = has_raw && icc_profile_hash.is_some() && icc_cache.is_some();
 
     for row in 0..=n {
         let v = row as f64 / n as f64;
@@ -7347,8 +7432,29 @@ fn subdivide_patch_to_triangles(
             } else {
                 eval_coons_patch(patch, u, v)
             };
-            let color = bilinear_color(&patch.colors, u, v);
-            grid.push((x, y, color));
+            let raw = if has_raw {
+                bilinear_raw(&patch.raw_colors, u, v)
+            } else {
+                vec![]
+            };
+            // When ICC profile is available, convert the interpolated raw
+            // components at each grid point for accurate color rendering.
+            // This interpolates in the source color space (e.g. ProPhoto RGB)
+            // and converts per-grid-point, rather than interpolating pre-converted
+            // sRGB values from only the 4 corners.
+            let color = if use_icc_interp {
+                if let Some((r, g, b)) = icc_cache
+                    .unwrap()
+                    .convert_color_readonly(icc_profile_hash.unwrap(), &raw)
+                {
+                    DeviceColor::from_rgb(r, g, b)
+                } else {
+                    bilinear_color(&patch.colors, u, v)
+                }
+            } else {
+                bilinear_color(&patch.colors, u, v)
+            };
+            grid.push((x, y, color, raw));
         }
     }
 
@@ -7361,50 +7467,32 @@ fn subdivide_patch_to_triangles(
             let i01 = i00 + cols;
             let i11 = i01 + 1;
 
-            let (x00, y00, c00) = &grid[i00];
-            let (x10, y10, c10) = &grid[i10];
-            let (x01, y01, c01) = &grid[i01];
-            let (x11, y11, c11) = &grid[i11];
+            let (x00, y00, c00, r00) = &grid[i00];
+            let (x10, y10, c10, r10) = &grid[i10];
+            let (x01, y01, c01, r01) = &grid[i01];
+            let (x11, y11, c11, r11) = &grid[i11];
 
             use stet_graphics::device::ShadingVertex;
             triangles.push(stet_graphics::device::ShadingTriangle {
                 v0: ShadingVertex {
-                    x: *x00,
-                    y: *y00,
-                    color: c00.clone(),
-                    raw_components: vec![],
+                    x: *x00, y: *y00, color: c00.clone(), raw_components: r00.clone(),
                 },
                 v1: ShadingVertex {
-                    x: *x10,
-                    y: *y10,
-                    color: c10.clone(),
-                    raw_components: vec![],
+                    x: *x10, y: *y10, color: c10.clone(), raw_components: r10.clone(),
                 },
                 v2: ShadingVertex {
-                    x: *x01,
-                    y: *y01,
-                    color: c01.clone(),
-                    raw_components: vec![],
+                    x: *x01, y: *y01, color: c01.clone(), raw_components: r01.clone(),
                 },
             });
             triangles.push(stet_graphics::device::ShadingTriangle {
                 v0: ShadingVertex {
-                    x: *x10,
-                    y: *y10,
-                    color: c10.clone(),
-                    raw_components: vec![],
+                    x: *x10, y: *y10, color: c10.clone(), raw_components: r10.clone(),
                 },
                 v1: ShadingVertex {
-                    x: *x11,
-                    y: *y11,
-                    color: c11.clone(),
-                    raw_components: vec![],
+                    x: *x11, y: *y11, color: c11.clone(), raw_components: r11.clone(),
                 },
                 v2: ShadingVertex {
-                    x: *x01,
-                    y: *y01,
-                    color: c01.clone(),
-                    raw_components: vec![],
+                    x: *x01, y: *y01, color: c01.clone(), raw_components: r01.clone(),
                 },
             });
         }
@@ -7534,6 +7622,19 @@ fn bilinear_color(colors: &[DeviceColor; 4], u: f64, v: f64) -> DeviceColor {
         + (1.0 - u) * v * colors[3].b
         + u * v * colors[2].b;
     DeviceColor::from_rgb(r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0))
+}
+
+/// Bilinear interpolation of raw color components across patch corners.
+fn bilinear_raw(raw_colors: &[Vec<f64>; 4], u: f64, v: f64) -> Vec<f64> {
+    let n = raw_colors[0].len();
+    let mut result = vec![0.0; n];
+    for i in 0..n {
+        result[i] = (1.0 - u) * (1.0 - v) * raw_colors[0][i]
+            + u * (1.0 - v) * raw_colors[1][i]
+            + (1.0 - u) * v * raw_colors[3][i]
+            + u * v * raw_colors[2][i];
+    }
+    result
 }
 
 /// Pre-rasterize color stops into a 256-entry RGBA lookup table.
