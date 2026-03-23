@@ -973,8 +973,16 @@ fn apply_png_predictor(
 ) -> Result<Vec<u8>, PdfError> {
     // Each row has a leading predictor byte + row_bytes data bytes
     let stride = row_bytes + 1;
-    if !data.len().is_multiple_of(stride) && !data.is_empty() {
-        // Try to handle imperfect data
+
+    // Detect data that lacks predictor bytes despite DecodeParms claiming them.
+    // If data divides evenly into row_bytes but NOT into stride, the stream
+    // was written without per-row predictor prefixes — return as-is.
+    if row_bytes > 0
+        && !data.is_empty()
+        && data.len().is_multiple_of(row_bytes)
+        && !data.len().is_multiple_of(stride)
+    {
+        return Ok(data.to_vec());
     }
 
     let num_rows = data.len() / stride;
