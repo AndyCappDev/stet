@@ -938,12 +938,17 @@ fn lab_f_inv(t: f64) -> f64 {
 /// Check if a color space requires CIE→RGB conversion (Lab, CalRGB, CalGray).
 /// The tint table stores pre-converted RGB values for these spaces.
 fn is_cie_space(cs: &ResolvedColorSpace) -> bool {
-    matches!(
-        cs,
+    match cs {
         ResolvedColorSpace::Lab { .. }
-            | ResolvedColorSpace::CalRGB { .. }
-            | ResolvedColorSpace::CalGray { .. }
-    )
+        | ResolvedColorSpace::CalRGB { .. }
+        | ResolvedColorSpace::CalGray { .. } => true,
+        // ICCBased profiles that wrap a CIE alternate (e.g. Lab) need CIE conversion too
+        ResolvedColorSpace::ICCBased {
+            alternate: Some(alt),
+            ..
+        } => is_cie_space(alt),
+        _ => false,
+    }
 }
 
 /// Convert tint function output through a CIE alternate space to RGB,
