@@ -6609,49 +6609,48 @@ fn render_axial_shading(
         // Build a 256-entry RGBA LUT from color stops.
         let lut = build_gradient_lut(&params.color_stops);
 
-        // Compute gradient t as a linear function of pixel coordinates.
-        // In device space: t = dot(P - P0, axis) / dot(axis, axis)
-        // With viewport transform: dev = pixel / scale + vp_offset
-        // So: t(px, py) = t_base + dt_dx * px + dt_dy * py
-        let axis_x = dx1 - dx0;
-        let axis_y = dy1 - dy0;
-        let axis_len_sq = axis_x * axis_x + axis_y * axis_y;
-        if axis_len_sq < 1e-10 {
+        // Compute gradient t by inverse-transforming pixels to shading space and
+        // projecting onto the shading-space axis. This correctly handles non-uniform
+        // scaling (e.g. pattern matrix stretching x differently from y).
+        let ax = params.x1 - params.x0;
+        let ay = params.y1 - params.y0;
+        let axis_sq = ax * ax + ay * ay;
+        if axis_sq < 1e-20 {
             return;
         }
-        let inv_len_sq = 1.0 / axis_len_sq;
 
-        // Device-space origin contribution (pixel 0,0 maps to vp_x/scale_x in dev space)
-        let dev_origin_x = vp_x as f64;
-        let dev_origin_y = vp_y as f64;
+        let Some(inv) = params.ctm.invert() else {
+            return;
+        };
         let inv_sx = 1.0 / scale_x as f64;
         let inv_sy = 1.0 / scale_y as f64;
+        let dev_origin_x = vp_x as f64;
+        let dev_origin_y = vp_y as f64;
 
-        // t at device-space origin
-        let t_origin = ((dev_origin_x - dx0) * axis_x + (dev_origin_y - dy0) * axis_y) * inv_len_sq;
-        // dt per pixel step
-        let dt_dx = inv_sx * axis_x * inv_len_sq;
-        let dt_dy = inv_sy * axis_y * inv_len_sq;
+        // Shading-space coords as linear function of pixel coords:
+        //   sx = sx_base + dsx_dx * px + dsx_dy * py
+        //   sy = sy_base + dsy_dx * px + dsy_dy * py
+        let sx_base = inv.a * dev_origin_x + inv.c * dev_origin_y + inv.tx;
+        let sy_base = inv.b * dev_origin_x + inv.d * dev_origin_y + inv.ty;
+        let dsx_dx = inv.a * inv_sx;
+        let dsx_dy = inv.c * inv_sy;
+        let dsy_dx = inv.b * inv_sx;
+        let dsy_dy = inv.d * inv_sy;
 
-        // Per-pixel rotated BBox clipping: precompute inverse CTM linear coefficients
-        // to map each pixel back to user space and check against the original BBox.
+        // t = dot(P_shading - P0, axis) / dot(axis, axis)
+        let inv_axis_sq = 1.0 / axis_sq;
+        let t_origin =
+            ((sx_base - params.x0) * ax + (sy_base - params.y0) * ay) * inv_axis_sq;
+        let dt_dx = (dsx_dx * ax + dsy_dx * ay) * inv_axis_sq;
+        let dt_dy = (dsx_dy * ax + dsy_dy * ay) * inv_axis_sq;
+
+        // Per-pixel rotated BBox clipping: reuse inverse CTM to map each pixel
+        // back to shading space and check against the original BBox.
         let bbox_pixel_clip = if bbox_is_rotated {
-            if let Some(inv) = params.ctm.invert() {
-                let bbox = params.bbox.as_ref().unwrap();
-                // user_x = inv.a * dev_x + inv.c * dev_y + inv.tx
-                // dev_x = px * inv_sx + vp_x
-                let dux_dx = inv.a * inv_sx;
-                let dux_dy = inv.c * inv_sy;
-                let ux_base = inv.a * dev_origin_x + inv.c * dev_origin_y + inv.tx;
-                let duy_dx = inv.b * inv_sx;
-                let duy_dy = inv.d * inv_sy;
-                let uy_base = inv.b * dev_origin_x + inv.d * dev_origin_y + inv.ty;
-                let (bx0, bx1) = (bbox[0].min(bbox[2]), bbox[0].max(bbox[2]));
-                let (by0, by1) = (bbox[1].min(bbox[3]), bbox[1].max(bbox[3]));
-                Some((dux_dx, dux_dy, ux_base, duy_dx, duy_dy, uy_base, bx0, by0, bx1, by1))
-            } else {
-                None
-            }
+            let bbox = params.bbox.as_ref().unwrap();
+            let (bx0, bx1) = (bbox[0].min(bbox[2]), bbox[0].max(bbox[2]));
+            let (by0, by1) = (bbox[1].min(bbox[3]), bbox[1].max(bbox[3]));
+            Some((dsx_dx, dsx_dy, sx_base, dsy_dx, dsy_dy, sy_base, bx0, by0, bx1, by1))
         } else {
             None
         };
