@@ -167,7 +167,7 @@ pub fn decode_stream(
 fn decode_flate(data: &[u8], parms: Option<&PdfDict>) -> Result<Vec<u8>, PdfError> {
     // Try zlib first. If it ends with an error (truncated output),
     // also try raw deflate (skip 2-byte zlib header) and pick the longer result.
-    let (zlib_output, zlib_clean, zlib_consumed) = decode_flate_inner(data, true);
+    let (zlib_output, zlib_clean, _) = decode_flate_inner(data, true);
     let output = if zlib_clean {
         zlib_output?
     } else {
@@ -177,11 +177,16 @@ fn decode_flate(data: &[u8], parms: Option<&PdfDict>) -> Result<Vec<u8>, PdfErro
         // complete — the error is just a bad trailing checksum, and raw
         // deflate may decode garbage past the stream boundary.
         let zlib_data = zlib_output.unwrap_or_default();
-        let zlib_consumed_most = zlib_consumed + 8 >= data.len();
-        if data.len() > 2 && !zlib_consumed_most {
+        if data.len() > 2 {
             let (raw_output, _, _) = decode_flate_inner(&data[2..], false);
             let raw_data = raw_output.unwrap_or_default();
-            if raw_data.len() > zlib_data.len() {
+            if raw_data.len() > zlib_data.len()
+                && raw_data[..zlib_data.len()] == zlib_data[..]
+                && looks_like_valid_continuation(&raw_data, zlib_data.len())
+            {
+                // Raw produced more data, the shared prefix matches, and the
+                // extra bytes look like valid content — zlib truncated early
+                // due to a checksum error; use the fuller raw output.
                 raw_data
             } else if !zlib_data.is_empty() {
                 zlib_data
@@ -194,12 +199,6 @@ fn decode_flate(data: &[u8], parms: Option<&PdfDict>) -> Result<Vec<u8>, PdfErro
             }
         } else if !zlib_data.is_empty() {
             zlib_data
-        } else if data.len() > 2 {
-            // Zlib consumed all input but produced nothing — last resort
-            let (raw_output, _, _) = decode_flate_inner(&data[2..], false);
-            raw_output.map_err(|_| {
-                PdfError::DecompressionError("flate: decompression failed".into())
-            })?
         } else {
             return Err(PdfError::DecompressionError(
                 "flate: decompression failed".into(),
@@ -216,6 +215,24 @@ fn decode_flate(data: &[u8], parms: Option<&PdfDict>) -> Result<Vec<u8>, PdfErro
     }
 
     Ok(output)
+}
+
+/// Check whether the extra bytes (past `start`) in `data` look like valid
+/// stream content rather than garbage from decoding past a stream boundary.
+/// Checks a sample of bytes for printable ASCII / whitespace, which is typical
+/// for PDF content streams but not for accidentally-decoded binary data.
+fn looks_like_valid_continuation(data: &[u8], start: usize) -> bool {
+    if start >= data.len() {
+        return false;
+    }
+    // Sample the first 64 bytes of the continuation
+    let sample = &data[start..data.len().min(start + 64)];
+    let printable = sample
+        .iter()
+        .filter(|&&b| b.is_ascii_graphic() || b.is_ascii_whitespace())
+        .count();
+    // If >80% of sampled bytes are printable, it's likely valid content
+    printable * 5 >= sample.len() * 4
 }
 
 /// Inner flate decompression. `zlib` = true uses zlib wrapper, false uses raw deflate.
@@ -580,40 +597,29 @@ fn decode_dct(data: &[u8]) -> Result<Vec<u8>, PdfError> {
     // override with ColorTransform::RGB.
     if has_adobe_rgb_marker(data) {
         decoder.set_color_transform(jpeg_decoder::ColorTransform::RGB);
+    } else if adobe_color_transform(data) == Some(2) {
+        // Force YCCK mode for Adobe ColorTransform=2 (YCCK) JPEGs.
+        // jpeg_decoder sometimes fails to apply YCCK→CMYK conversion despite
+        // the APP14 marker indicating YCCK encoding. Forcing the transform
+        // ensures consistent behavior across all YCCK JPEGs.
+        decoder.set_color_transform(jpeg_decoder::ColorTransform::YCCK);
     }
 
     let pixels = decoder
         .decode()
         .map_err(|e| PdfError::DecompressionError(format!("DCTDecode: {e}")))?;
 
-    // For 4-component (CMYK) JPEG, jpeg_decoder inverts all channels (255-x)
-    // but does NOT apply YCCK→CMYK color conversion. We undo the inversion to
-    // get the raw DCT samples back, then check for YCCK encoding (Adobe APP14
-    // ColorTransform=2) and apply the proper conversion ourselves.
+    // For 4-component (CMYK) JPEG, the jpeg_decoder applies a CMYK color
+    // transform that inverts all channels (255-x). However, for PDF streams the
+    // raw JPEG data is already in the correct byte order for the PDF /Decode
+    // array to process. Undo the decoder's inversion so the PDF renderer gets
+    // the original sample values.
     if let Some(info) = decoder.info()
         && info.pixel_format == jpeg_decoder::PixelFormat::CMYK32
     {
-        // Undo decoder's 255-x inversion → raw DCT sample values
         let mut result = pixels;
         for b in result.iter_mut() {
             *b = 255 - *b;
-        }
-        // Check for YCCK encoding via Adobe APP14 ColorTransform
-        let color_transform = adobe_color_transform(data);
-        if color_transform == Some(2) {
-            // YCCK→CMYK conversion: raw (Y, Cb, Cr, K) → standard (C, M, Y_out, K)
-            for chunk in result.chunks_exact_mut(4) {
-                let y = chunk[0] as f32;
-                let cb = chunk[1] as f32 - 128.0;
-                let cr = chunk[2] as f32 - 128.0;
-                let r = (y + 1.402 * cr).round().clamp(0.0, 255.0);
-                let g = (y - 0.344136 * cb - 0.714136 * cr).round().clamp(0.0, 255.0);
-                let b_val = (y + 1.772 * cb).round().clamp(0.0, 255.0);
-                chunk[0] = (255.0 - r) as u8; // C = 255 - R
-                chunk[1] = (255.0 - g) as u8; // M = 255 - G
-                chunk[2] = (255.0 - b_val) as u8; // Y = 255 - B
-                // K stays as-is (chunk[3])
-            }
         }
         return Ok(result);
     }
