@@ -573,64 +573,22 @@ fn decode_dct(data: &[u8]) -> Result<Vec<u8>, PdfError> {
         .decode()
         .map_err(|e| PdfError::DecompressionError(format!("DCTDecode: {e}")))?;
 
-    // For 4-component (CMYK) JPEG, jpeg_decoder inverts all channels (255-x)
-    // but does NOT apply YCCK→CMYK color conversion. We undo the inversion to
-    // get the raw DCT samples back, then check for YCCK encoding (Adobe APP14
-    // ColorTransform=2) and apply the proper conversion ourselves.
+    // For 4-component (CMYK) JPEG, the jpeg_decoder applies a CMYK color
+    // transform that inverts all channels (255-x). However, for PDF streams the
+    // raw JPEG data is already in the correct byte order for the PDF /Decode
+    // array to process. Undo the decoder's inversion so the PDF renderer gets
+    // the original sample values.
     if let Some(info) = decoder.info()
         && info.pixel_format == jpeg_decoder::PixelFormat::CMYK32
     {
-        // Undo decoder's 255-x inversion → raw DCT sample values
         let mut result = pixels;
         for b in result.iter_mut() {
             *b = 255 - *b;
-        }
-        // Check for YCCK encoding via Adobe APP14 ColorTransform
-        let color_transform = adobe_color_transform(data);
-        if color_transform == Some(2) {
-            // YCCK→CMYK conversion: raw (Y, Cb, Cr, K) → standard (C, M, Y_out, K)
-            for chunk in result.chunks_exact_mut(4) {
-                let y = chunk[0] as f32;
-                let cb = chunk[1] as f32 - 128.0;
-                let cr = chunk[2] as f32 - 128.0;
-                let r = (y + 1.402 * cr).round().clamp(0.0, 255.0);
-                let g = (y - 0.344136 * cb - 0.714136 * cr).round().clamp(0.0, 255.0);
-                let b_val = (y + 1.772 * cb).round().clamp(0.0, 255.0);
-                chunk[0] = (255.0 - r) as u8; // C = 255 - R
-                chunk[1] = (255.0 - g) as u8; // M = 255 - G
-                chunk[2] = (255.0 - b_val) as u8; // Y = 255 - B
-                // K stays as-is (chunk[3])
-            }
         }
         return Ok(result);
     }
 
     Ok(pixels)
-}
-
-/// Extract Adobe APP14 ColorTransform value from JPEG data.
-/// Returns Some(0) for raw RGB/CMYK, Some(1) for YCbCr, Some(2) for YCCK, None if absent.
-fn adobe_color_transform(data: &[u8]) -> Option<u8> {
-    let mut i = 2; // skip SOI
-    while i + 4 < data.len() {
-        if data[i] != 0xFF {
-            break;
-        }
-        let marker = data[i + 1];
-        if marker == 0xDA {
-            break; // SOS
-        }
-        let len = u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
-        if i + 2 + len > data.len() {
-            break;
-        }
-        // APP14 (Adobe): length(2) + "Adobe"(5) + version(2) + flags0(2) + flags1(2) + CT(1)
-        if marker == 0xEE && len >= 14 {
-            return Some(data[i + 2 + 13]);
-        }
-        i += 2 + len;
-    }
-    None
 }
 
 /// Check if a JPEG has Adobe APP14 ColorTransform=0 AND uniform sampling factors,
