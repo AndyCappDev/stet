@@ -567,6 +567,12 @@ fn decode_dct(data: &[u8]) -> Result<Vec<u8>, PdfError> {
     // override with ColorTransform::RGB.
     if has_adobe_rgb_marker(data) {
         decoder.set_color_transform(jpeg_decoder::ColorTransform::RGB);
+    } else if adobe_color_transform(data) == Some(2) {
+        // Force YCCK mode for Adobe ColorTransform=2 (YCCK) JPEGs.
+        // jpeg_decoder sometimes fails to apply YCCK→CMYK conversion despite
+        // the APP14 marker indicating YCCK encoding. Forcing the transform
+        // ensures consistent behavior across all YCCK JPEGs.
+        decoder.set_color_transform(jpeg_decoder::ColorTransform::YCCK);
     }
 
     let pixels = decoder
@@ -589,6 +595,33 @@ fn decode_dct(data: &[u8]) -> Result<Vec<u8>, PdfError> {
     }
 
     Ok(pixels)
+}
+
+/// Extract the Adobe APP14 ColorTransform value from JPEG header markers.
+/// Returns Some(0) for raw RGB/CMYK, Some(1) for YCbCr, Some(2) for YCCK,
+/// or None if no Adobe APP14 marker is present.
+fn adobe_color_transform(data: &[u8]) -> Option<u8> {
+    let mut i = 2; // skip SOI
+    while i + 4 < data.len() {
+        if data[i] != 0xFF {
+            break;
+        }
+        let marker = data[i + 1];
+        if marker == 0xDA {
+            break; // SOS — done with headers
+        }
+        let len = u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
+        if i + 2 + len > data.len() {
+            break;
+        }
+        // APP14 (Adobe) marker
+        // Segment layout: length(2) + "Adobe"(5) + version(2) + flags0(2) + flags1(2) + CT(1) = 14
+        if marker == 0xEE && len >= 14 {
+            return Some(data[i + 2 + 13]);
+        }
+        i += 2 + len;
+    }
+    None
 }
 
 /// Check if a JPEG has Adobe APP14 ColorTransform=0 AND uniform sampling factors,
