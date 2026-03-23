@@ -476,8 +476,7 @@ fn parse_xref_section(
                     // object (common in linearized PDFs). Search backwards for
                     // the actual object header.
                     let scan_start = offset.saturating_sub(256);
-                    let scan_end = offset.min(data.len());
-                    for search in (scan_start..scan_end).rev() {
+                    for search in (scan_start..offset).rev() {
                         if data[search].is_ascii_digit() {
                             if let Some((_, _, obj_offset)) =
                                 try_parse_obj_header(data, search)

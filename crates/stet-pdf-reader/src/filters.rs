@@ -167,21 +167,26 @@ pub fn decode_stream(
 fn decode_flate(data: &[u8], parms: Option<&PdfDict>) -> Result<Vec<u8>, PdfError> {
     // Try zlib first. If it ends with an error (truncated output),
     // also try raw deflate (skip 2-byte zlib header) and pick the longer result.
-    let (zlib_output, zlib_clean) = decode_flate_inner(data, true);
+    let (zlib_output, zlib_clean, zlib_consumed) = decode_flate_inner(data, true);
     let output = if zlib_clean {
         zlib_output?
     } else {
         // Zlib hit an error (corrupt checksum, etc).  Try raw deflate (skip
-        // 2-byte zlib header) and use whichever produced more output.  Many
-        // PDFs have valid deflate payloads but bad zlib checksums.
+        // 2-byte zlib header) and prefer it only when zlib clearly truncated
+        // mid-stream.  If zlib consumed (nearly) all input, the data is
+        // complete — the error is just a bad trailing checksum, and raw
+        // deflate may decode garbage past the stream boundary.
         let zlib_data = zlib_output.unwrap_or_default();
-        if data.len() > 2 {
-            let (raw_output, _) = decode_flate_inner(&data[2..], false);
+        let zlib_consumed_most = zlib_consumed + 8 >= data.len();
+        if data.len() > 2 && !zlib_consumed_most {
+            let (raw_output, _, _) = decode_flate_inner(&data[2..], false);
             let raw_data = raw_output.unwrap_or_default();
             if raw_data.len() > zlib_data.len() {
                 raw_data
             } else if !zlib_data.is_empty() {
                 zlib_data
+            } else if !raw_data.is_empty() {
+                raw_data
             } else {
                 return Err(PdfError::DecompressionError(
                     "flate: decompression failed".into(),
@@ -189,6 +194,12 @@ fn decode_flate(data: &[u8], parms: Option<&PdfDict>) -> Result<Vec<u8>, PdfErro
             }
         } else if !zlib_data.is_empty() {
             zlib_data
+        } else if data.len() > 2 {
+            // Zlib consumed all input but produced nothing — last resort
+            let (raw_output, _, _) = decode_flate_inner(&data[2..], false);
+            raw_output.map_err(|_| {
+                PdfError::DecompressionError("flate: decompression failed".into())
+            })?
         } else {
             return Err(PdfError::DecompressionError(
                 "flate: decompression failed".into(),
@@ -209,7 +220,8 @@ fn decode_flate(data: &[u8], parms: Option<&PdfDict>) -> Result<Vec<u8>, PdfErro
 
 /// Inner flate decompression. `zlib` = true uses zlib wrapper, false uses raw deflate.
 /// Returns (Result<data>, clean) where clean=true means StreamEnd was reached normally.
-fn decode_flate_inner(data: &[u8], zlib: bool) -> (Result<Vec<u8>, PdfError>, bool) {
+/// Returns (decompressed_data, clean_finish, bytes_consumed).
+fn decode_flate_inner(data: &[u8], zlib: bool) -> (Result<Vec<u8>, PdfError>, bool, usize) {
     use flate2::Decompress;
 
     let mut decompressor = Decompress::new(zlib);
@@ -233,21 +245,22 @@ fn decode_flate_inner(data: &[u8], zlib: bool) -> (Result<Vec<u8>, PdfError>, bo
 
         match result {
             Ok(status) => match status {
-                flate2::Status::StreamEnd => return (Ok(output), true),
+                flate2::Status::StreamEnd => return (Ok(output), true, input_offset),
                 flate2::Status::Ok | flate2::Status::BufError => {
                     if consumed == 0 && produced == 0 {
-                        return (Ok(output), true);
+                        return (Ok(output), true, input_offset);
                     }
                 }
             },
             Err(_) if !output.is_empty() => {
                 // Partial output — checksum/trailing data error.
-                return (Ok(output), false);
+                return (Ok(output), false, input_offset);
             }
             Err(e) => {
                 return (
                     Err(PdfError::DecompressionError(format!("flate: {e}"))),
                     false,
+                    input_offset,
                 );
             }
         }
@@ -567,29 +580,40 @@ fn decode_dct(data: &[u8]) -> Result<Vec<u8>, PdfError> {
     // override with ColorTransform::RGB.
     if has_adobe_rgb_marker(data) {
         decoder.set_color_transform(jpeg_decoder::ColorTransform::RGB);
-    } else if adobe_color_transform(data) == Some(2) {
-        // Force YCCK mode for Adobe ColorTransform=2 (YCCK) JPEGs.
-        // jpeg_decoder sometimes fails to apply YCCK→CMYK conversion despite
-        // the APP14 marker indicating YCCK encoding. Forcing the transform
-        // ensures consistent behavior across all YCCK JPEGs.
-        decoder.set_color_transform(jpeg_decoder::ColorTransform::YCCK);
     }
 
     let pixels = decoder
         .decode()
         .map_err(|e| PdfError::DecompressionError(format!("DCTDecode: {e}")))?;
 
-    // For 4-component (CMYK) JPEG, the jpeg_decoder applies a CMYK color
-    // transform that inverts all channels (255-x). However, for PDF streams the
-    // raw JPEG data is already in the correct byte order for the PDF /Decode
-    // array to process. Undo the decoder's inversion so the PDF renderer gets
-    // the original sample values.
+    // For 4-component (CMYK) JPEG, jpeg_decoder inverts all channels (255-x)
+    // but does NOT apply YCCK→CMYK color conversion. We undo the inversion to
+    // get the raw DCT samples back, then check for YCCK encoding (Adobe APP14
+    // ColorTransform=2) and apply the proper conversion ourselves.
     if let Some(info) = decoder.info()
         && info.pixel_format == jpeg_decoder::PixelFormat::CMYK32
     {
+        // Undo decoder's 255-x inversion → raw DCT sample values
         let mut result = pixels;
         for b in result.iter_mut() {
             *b = 255 - *b;
+        }
+        // Check for YCCK encoding via Adobe APP14 ColorTransform
+        let color_transform = adobe_color_transform(data);
+        if color_transform == Some(2) {
+            // YCCK→CMYK conversion: raw (Y, Cb, Cr, K) → standard (C, M, Y_out, K)
+            for chunk in result.chunks_exact_mut(4) {
+                let y = chunk[0] as f32;
+                let cb = chunk[1] as f32 - 128.0;
+                let cr = chunk[2] as f32 - 128.0;
+                let r = (y + 1.402 * cr).round().clamp(0.0, 255.0);
+                let g = (y - 0.344136 * cb - 0.714136 * cr).round().clamp(0.0, 255.0);
+                let b_val = (y + 1.772 * cb).round().clamp(0.0, 255.0);
+                chunk[0] = (255.0 - r) as u8; // C = 255 - R
+                chunk[1] = (255.0 - g) as u8; // M = 255 - G
+                chunk[2] = (255.0 - b_val) as u8; // Y = 255 - B
+                // K stays as-is (chunk[3])
+            }
         }
         return Ok(result);
     }
@@ -597,9 +621,8 @@ fn decode_dct(data: &[u8]) -> Result<Vec<u8>, PdfError> {
     Ok(pixels)
 }
 
-/// Extract the Adobe APP14 ColorTransform value from JPEG header markers.
-/// Returns Some(0) for raw RGB/CMYK, Some(1) for YCbCr, Some(2) for YCCK,
-/// or None if no Adobe APP14 marker is present.
+/// Extract Adobe APP14 ColorTransform value from JPEG data.
+/// Returns Some(0) for raw RGB/CMYK, Some(1) for YCbCr, Some(2) for YCCK, None if absent.
 fn adobe_color_transform(data: &[u8]) -> Option<u8> {
     let mut i = 2; // skip SOI
     while i + 4 < data.len() {
@@ -608,14 +631,13 @@ fn adobe_color_transform(data: &[u8]) -> Option<u8> {
         }
         let marker = data[i + 1];
         if marker == 0xDA {
-            break; // SOS — done with headers
+            break; // SOS
         }
         let len = u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
         if i + 2 + len > data.len() {
             break;
         }
-        // APP14 (Adobe) marker
-        // Segment layout: length(2) + "Adobe"(5) + version(2) + flags0(2) + flags1(2) + CT(1) = 14
+        // APP14 (Adobe): length(2) + "Adobe"(5) + version(2) + flags0(2) + flags1(2) + CT(1)
         if marker == 0xEE && len >= 14 {
             return Some(data[i + 2 + 13]);
         }
