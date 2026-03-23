@@ -3758,6 +3758,9 @@ fn clip_path_unified(
         Some(ClipRegion::Rect(rect)) => {
             if rect.is_empty() {
                 band_state.recycle_mask(path_mask);
+                // Intersection with empty clip is still empty — preserve empty state.
+                // Without this, clip_region stays None (= no clip = paint everything).
+                band_state.clip_region = Some(ClipRegion::Rect(rect));
             } else {
                 let mut mask = path_mask;
                 intersect_mask_with_rect(&mut mask, &rect, ctx.out_w, ctx.out_h);
