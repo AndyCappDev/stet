@@ -53,6 +53,9 @@ pub struct TrueTypePdfFont {
     /// other glyphs not reachable via Unicode cmap lookup).
     pub post_name_to_gid: HashMap<String, u16>,
     pub units_per_em: f64,
+    /// Char code → Unicode mapping from /ToUnicode CMap (for gNNNN glyph names
+    /// in substituted fonts where AGL lookup fails).
+    pub to_unicode: HashMap<u16, u32>,
 }
 
 pub struct CffPdfFont {
@@ -142,7 +145,6 @@ pub fn resolve_font(
         .ok_or(PdfError::Other("Font is not a dict".into()))?;
 
     let subtype = font_dict.get_name(b"Subtype").unwrap_or(b"Type1");
-
     // Handle Type 0 composite fonts (CID fonts)
     if subtype == b"Type0" {
         return resolve_type0(resolver, font_dict);
@@ -305,6 +307,13 @@ pub fn resolve_font(
                     .collect()
             })
             .unwrap_or_default();
+        let to_unicode = if let Some(tu_obj) = font_dict.get(b"ToUnicode") {
+            resolver.stream_data_from_obj(tu_obj)
+                .map(|d| parse_to_unicode(&d))
+                .unwrap_or_default()
+        } else {
+            HashMap::new()
+        };
         return Ok(PdfFont::TrueType(TrueTypePdfFont {
             data,
             encoding,
@@ -312,6 +321,7 @@ pub fn resolve_font(
             cmap,
             post_name_to_gid,
             units_per_em,
+            to_unicode,
         }));
     }
 
@@ -704,6 +714,7 @@ const CID_FONT_SUBSTITUTIONS: &[(&str, &str)] = &[
     ("STHeiti-Regular", "NotoSansCJKjp-Regular"),
     ("STKaiti-Regular", "NotoSansCJKjp-Regular"),
     ("SimSun", "NotoSerifCJKjp-Regular"),
+    ("SimSunBold", "NotoSerifCJKjp-Bold"),
     ("SimHei", "NotoSansCJKjp-Regular"),
     ("FangSong", "NotoSerifCJKjp-Regular"),
     ("KaiTi", "NotoSansCJKjp-Regular"),
@@ -1227,6 +1238,7 @@ fn resolve_truetype(
         cmap,
         post_name_to_gid,
         units_per_em,
+        to_unicode: HashMap::new(), // Embedded fonts use glyph data directly
     }))
 }
 
@@ -1965,6 +1977,22 @@ impl TrueTypePdfFont {
             if let Some(&gid) = self.post_name_to_gid.get(glyph_name.as_str()) {
                 return Some(gid);
             }
+            // Try gNNNN pattern → direct GID (common in CJK TrueType subsets)
+            if glyph_name.starts_with('g')
+                && glyph_name.len() > 1
+                && glyph_name[1..].bytes().all(|b| b.is_ascii_digit())
+            {
+                if let Ok(gid) = glyph_name[1..].parse::<u16>() {
+                    return Some(gid);
+                }
+            }
+        }
+        // Fallback: ToUnicode CMap → Unicode → cmap GID
+        // Handles substituted fonts with gNNNN glyph names (e.g. SimSun → Noto CJK)
+        if let Some(&unicode) = self.to_unicode.get(&(char_code as u16))
+            && let Some(&gid) = self.cmap.get(&unicode)
+        {
+            return Some(gid);
         }
         // Fallback: direct cmap lookup by char code
         if let Some(&gid) = self.cmap.get(&(char_code as u32)) {
