@@ -1244,7 +1244,17 @@ fn resolve_cff(
     let ff_ref = desc
         .get(b"FontFile3")
         .ok_or(PdfError::Other("CFF font missing FontFile3".into()))?;
-    let font_data = resolver.stream_data_from_obj(ff_ref)?;
+    let raw_data = resolver.stream_data_from_obj(ff_ref)?;
+
+    // If data starts with "OTTO" it's an OpenType container — extract CFF table
+    let font_data = if raw_data.starts_with(b"OTTO") {
+        use stet_fonts::truetype::find_table;
+        let (offset, length) = find_table(&raw_data, b"CFF ")
+            .ok_or(PdfError::Other("OpenType font has no CFF table".into()))?;
+        raw_data[offset..offset + length].to_vec()
+    } else {
+        raw_data
+    };
 
     let fonts =
         parse_cff(&font_data).map_err(|e| PdfError::Other(format!("CFF parse error: {e}")))?;
