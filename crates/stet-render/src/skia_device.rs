@@ -7332,14 +7332,21 @@ fn subdivide_patch_to_triangles(
     triangles: &mut Vec<stet_graphics::device::ShadingTriangle>,
     n: usize,
 ) {
-    // Evaluate patch at grid points
+    // Evaluate patch at grid points.
+    // Use tensor-product evaluation when 16 control points are available (Type 7),
+    // otherwise fall back to Coons blending (Type 6, 12 points).
     let mut grid: Vec<(f64, f64, DeviceColor)> = Vec::with_capacity((n + 1) * (n + 1));
+    let use_tensor = patch.points.len() >= 16;
 
     for row in 0..=n {
         let v = row as f64 / n as f64;
         for col in 0..=n {
             let u = col as f64 / n as f64;
-            let (x, y) = eval_coons_patch(patch, u, v);
+            let (x, y) = if use_tensor {
+                eval_tensor_patch(patch, u, v)
+            } else {
+                eval_coons_patch(patch, u, v)
+            };
             let color = bilinear_color(&patch.colors, u, v);
             grid.push((x, y, color));
         }
@@ -7439,6 +7446,55 @@ fn eval_coons_patch(patch: &stet_graphics::device::ShadingPatch, u: f64, v: f64)
     let x = (1.0 - v) * c0.0 + v * c2.0 + (1.0 - u) * d0.0 + u * d1.0 - bx;
     let y = (1.0 - v) * c0.1 + v * c2.1 + (1.0 - u) * d0.1 + u * d1.1 - by;
 
+    (x, y)
+}
+
+/// Evaluate a Type 7 tensor-product patch at parameter (u, v).
+///
+/// Uses 16 control points arranged in a 4×4 grid, evaluated as a bicubic
+/// Bernstein surface: S(u,v) = ΣΣ B_i(u) * B_j(v) * P_ij
+///
+/// PDF spec (ISO 32000, Table 85) data ordering for flag=0:
+///   p₁₁ p₁₂ p₁₃ p₁₄  p₂₁ p₂₂ p₂₃ p₂₄  p₃₁ p₃₂ p₃₃ p₃₄  p₄₁ p₄₂ p₄₃ p₄₄
+///
+/// In the grid (Figure 86), column index = u direction, row index = v direction:
+///   grid[v=0][u] = p₁₁, p₂₁, p₃₁, p₄₁  = pts[0], pts[4], pts[8],  pts[12]
+///   grid[v=⅓][u] = p₁₂, p₂₂, p₃₂, p₄₂  = pts[1], pts[5], pts[9],  pts[13]
+///   grid[v=⅔][u] = p₁₃, p₂₃, p₃₃, p₄₃  = pts[2], pts[6], pts[10], pts[14]
+///   grid[v=1][u] = p₁₄, p₂₄, p₃₄, p₄₄  = pts[3], pts[7], pts[11], pts[15]
+fn eval_tensor_patch(
+    patch: &stet_graphics::device::ShadingPatch,
+    u: f64,
+    v: f64,
+) -> (f64, f64) {
+    let pts = &patch.points;
+
+    // Map PDF data indices (Type 6 boundary order + 4 interior) to 4×4 grid [v_row][u_col].
+    // Boundary: pts[0..12] go around the perimeter (same as Type 6).
+    // Interior: pts[12..16] are the 4 interior control points.
+    let grid: [[usize; 4]; 4] = [
+        [0, 1, 2, 3],
+        [11, 12, 13, 4],
+        [10, 15, 14, 5],
+        [9, 8, 7, 6],
+    ];
+
+    // Cubic Bernstein basis values
+    let su = 1.0 - u;
+    let bu = [su * su * su, 3.0 * su * su * u, 3.0 * su * u * u, u * u * u];
+    let sv = 1.0 - v;
+    let bv = [sv * sv * sv, 3.0 * sv * sv * v, 3.0 * sv * v * v, v * v * v];
+
+    let mut x = 0.0;
+    let mut y = 0.0;
+    for j in 0..4 {
+        for i in 0..4 {
+            let w = bu[i] * bv[j];
+            let p = pts[grid[j][i]];
+            x += w * p.0;
+            y += w * p.1;
+        }
+    }
     (x, y)
 }
 
