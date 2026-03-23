@@ -2204,8 +2204,13 @@ impl<'a> ContentInterpreter<'a> {
                         })
                     };
                     if !is_default {
-                        // After expand_bits_to_bytes, all data is in 0-255 range
-                        let max_val = 255.0f64;
+                        // After expand_bits_to_bytes: indexed data keeps raw values
+                        // (0 to 2^bpc-1), non-indexed data is scaled to 0-255.
+                        let max_val = if is_indexed {
+                            ((1u32 << effective_bpc) - 1) as f64
+                        } else {
+                            255.0f64
+                        };
                         let mut result = Vec::with_capacity(sample_data.len());
                         if is_indexed {
                             // Indexed: Decode maps sample values to index values (integer range)
