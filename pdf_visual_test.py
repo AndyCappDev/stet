@@ -38,6 +38,8 @@ from pathlib import Path
 
 try:
     from PIL import Image
+    if Image:
+        Image.MAX_IMAGE_PIXELS = None  # Disable DecompressionBomb warnings for large PDFs
 except ImportError:
     Image = None
 
