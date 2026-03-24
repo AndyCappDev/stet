@@ -119,6 +119,13 @@ pub fn parse_xref(data: &[u8]) -> Result<XrefTable, PdfError> {
         }
     }
 
+    // If the assembled trailer is missing /Root (e.g., corrupted xref where
+    // the parser bailed out before reaching the trailer keyword), fall back to
+    // a full object scan which can recover /Root from the catalog object.
+    if final_trailer.get(b"Root").is_none() {
+        return rebuild_xref_from_scan(data);
+    }
+
     // If %PDF- header isn't at byte 0 (e.g., prepended garbage), adjust all
     // xref offsets by the header position. This handles files where bytes were
     // prepended after the PDF was created, shifting all internal offsets.
