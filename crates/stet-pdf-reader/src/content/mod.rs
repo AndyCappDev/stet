@@ -1908,6 +1908,10 @@ impl<'a> ContentInterpreter<'a> {
             false
         };
 
+        // SMaskInData: JPX streams can embed an alpha channel.
+        // 0 (default) = no embedded mask, 1 or 2 = alpha channel present in JP2 data.
+        let smask_in_data = dict.get_int(b"SMaskInData").unwrap_or(0);
+
         // Decode the stream data
         let sample_data = self.resolver.stream_data_from_obj(obj)?;
 
@@ -1922,16 +1926,33 @@ impl<'a> ContentInterpreter<'a> {
                 // RGBA (sRGB + alpha) from CMYK. Without this, RGBA images get
                 // misidentified as CMYK, producing wrong colors (e.g., orange → blue).
                 if n_comps == 4 && self.is_jpx_rgba(obj) {
-                    // Strip alpha from RGBA → RGB. The alpha is typically opaque
-                    // for these embedded images; proper alpha handling would
-                    // require PreconvertedRGBA but the PDF has no SMask.
-                    let mut rgb = Vec::with_capacity(pixels * 3);
-                    for chunk in sample_data.chunks_exact(4) {
-                        rgb.push(chunk[0]);
-                        rgb.push(chunk[1]);
-                        rgb.push(chunk[2]);
+                    if smask_in_data >= 1 {
+                        // SMaskInData: the JP2 alpha channel is the soft mask.
+                        // Premultiply alpha (tiny-skia expects premultiplied RGBA).
+                        let mut rgba = sample_data;
+                        for chunk in rgba.chunks_exact_mut(4) {
+                            let a = chunk[3] as u16;
+                            if a == 0 {
+                                chunk[0] = 0;
+                                chunk[1] = 0;
+                                chunk[2] = 0;
+                            } else if a < 255 {
+                                chunk[0] = ((chunk[0] as u16 * a + 127) / 255) as u8;
+                                chunk[1] = ((chunk[1] as u16 * a + 127) / 255) as u8;
+                                chunk[2] = ((chunk[2] as u16 * a + 127) / 255) as u8;
+                            }
+                        }
+                        (None, rgba)
+                    } else {
+                        // No embedded mask — strip alpha from RGBA → RGB.
+                        let mut rgb = Vec::with_capacity(pixels * 3);
+                        for chunk in sample_data.chunks_exact(4) {
+                            rgb.push(chunk[0]);
+                            rgb.push(chunk[1]);
+                            rgb.push(chunk[2]);
+                        }
+                        (Some(ResolvedColorSpace::DeviceRGB), rgb)
                     }
-                    (Some(ResolvedColorSpace::DeviceRGB), rgb)
                 } else {
                     let cs = match n_comps {
                         1 => ResolvedColorSpace::DeviceGray,
@@ -2120,8 +2141,11 @@ impl<'a> ContentInterpreter<'a> {
                 color: self.gstate.fill_color.clone(),
                 polarity,
             }
+        } else if let Some(ref rcs) = resolved_cs {
+            to_image_color_space(rcs)
         } else {
-            to_image_color_space(resolved_cs.as_ref().unwrap())
+            // resolved_cs is None for JPX RGBA with SMaskInData — already RGBA
+            ImageColorSpace::PreconvertedRGBA
         };
 
         // JPXDecode with internal palette (pclr): hayro-jpeg2000 applies the JP2 palette

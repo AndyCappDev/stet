@@ -64,6 +64,10 @@ cargo run -- --device png --pages 1-3 file.pdf     # Render pages 1-3
 
 Output goes to `out_page1.png`, `out_page2.png`, etc. in the current directory.
 
+## Fix Philosophy
+
+Always implement the **proper, long-term fix** for issues. Never settle for a "quick hack" or "cleanest shortcut" when a correct solution exists. The proper fix may also be the simplest — that's fine — but correctness and durability are the priority, not expediency. Don't describe fixes as "clean" or "simple"; just implement them correctly.
+
 ## Development Conventions
 
 ### Documentation Maintenance
