@@ -454,27 +454,72 @@ pub fn fallback_font(font_provider: Option<&FontProvider>) -> Option<PdfFont> {
 }
 
 /// Try to load a substitute font for a non-embedded font.
-/// Load a predefined CMap file from system directories.
-/// Searches poppler and GhostScript CMap locations.
+/// Load a predefined CMap file by searching multiple locations.
+///
+/// Search order:
+/// 1. `STET_CMAP_DIR` environment variable (flat directory of CMap files)
+/// 2. `~/.local/share/stet/CMap/` (user-local conventional location)
+/// 3. System poppler-data directories (per-collection subdirs)
+/// 4. System GhostScript directories
 fn load_predefined_cmap(name: &[u8]) -> Option<Vec<u8>> {
     let name_str = std::str::from_utf8(name).ok()?;
-    // Search directories: poppler's per-collection dirs, then GhostScript's flat dir
-    let search_dirs = [
-        "/usr/share/poppler/cMap/Adobe-GB1",
-        "/usr/share/poppler/cMap/Adobe-CNS1",
-        "/usr/share/poppler/cMap/Adobe-Japan1",
-        "/usr/share/poppler/cMap/Adobe-Japan2",
-        "/usr/share/poppler/cMap/Adobe-Korea1",
-        "/usr/share/poppler/cMap/Adobe-KR",
-        "/var/lib/ghostscript/CMap",
-        "/usr/share/ghostscript/Resource/CMap",
-    ];
-    for dir in &search_dirs {
+
+    // 1. User-specified directory via environment variable
+    if let Ok(dir) = std::env::var("STET_CMAP_DIR") {
         let path = format!("{}/{}", dir, name_str);
         if let Ok(data) = std::fs::read(&path) {
             return Some(data);
         }
     }
+
+    // 2. User-local conventional location (~/.local/share/stet/CMap/)
+    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+        let path = std::path::Path::new(&home)
+            .join(".local/share/stet/CMap")
+            .join(name_str);
+        if let Ok(data) = std::fs::read(&path) {
+            return Some(data);
+        }
+    }
+
+    // 3. System poppler-data directories (Linux/macOS)
+    // poppler organizes CMaps in per-collection subdirs (Adobe-GB1/, Adobe-Japan1/, etc.)
+    let poppler_dirs = [
+        "/usr/share/poppler/cMap",
+        "/usr/local/share/poppler/cMap",
+        "/opt/homebrew/share/poppler/cMap", // macOS Homebrew ARM
+        "/usr/local/opt/poppler-data/share/poppler/cMap", // macOS Homebrew Intel
+    ];
+    let collections = [
+        "Adobe-GB1",
+        "Adobe-CNS1",
+        "Adobe-Japan1",
+        "Adobe-Japan2",
+        "Adobe-Korea1",
+        "Adobe-KR",
+    ];
+    for base in &poppler_dirs {
+        for collection in &collections {
+            let path = format!("{}/{}/{}", base, collection, name_str);
+            if let Ok(data) = std::fs::read(&path) {
+                return Some(data);
+            }
+        }
+    }
+
+    // 4. GhostScript directories (flat CMap dirs)
+    let gs_dirs = [
+        "/var/lib/ghostscript/CMap",
+        "/usr/share/ghostscript/Resource/CMap",
+        "/usr/local/share/ghostscript/Resource/CMap",
+    ];
+    for dir in &gs_dirs {
+        let path = format!("{}/{}", dir, name_str);
+        if let Ok(data) = std::fs::read(&path) {
+            return Some(data);
+        }
+    }
+
     None
 }
 
@@ -1451,7 +1496,8 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                 (cmap.code_lengths, cmap.code_to_cid)
             } else {
                 eprintln!(
-                    "warning: predefined CMap '{}' not found; install poppler-data for CJK support",
+                    "warning: predefined CMap '{}' not found; \
+                     set STET_CMAP_DIR or install poppler-data for CJK support",
                     String::from_utf8_lossy(encoding_name)
                 );
                 ([2u8; 256], HashMap::new())
