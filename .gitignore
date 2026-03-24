@@ -12,3 +12,5 @@ crates/stet-wasm/pkg/
 tests/corpus/*/
 tests/corpus/manifest.txt
 tests/corpus-results/
+pdf_samples/
+more_pdf_samples/
