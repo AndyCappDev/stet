@@ -775,6 +775,46 @@ fn create_cid_cff_from_otf(
     }))
 }
 
+/// Detect raw CFF font data (not wrapped in an OpenType container).
+/// CFF starts with: major=1, minor=0, hdrSize>=4, offSize in 1..=4.
+fn is_raw_cff(data: &[u8]) -> bool {
+    data.len() > 4 && data[0] == 1 && data[1] == 0 && data[2] >= 4 && (1..=4).contains(&data[3])
+}
+
+/// Create a CidCff font from raw CFF data (no OpenType wrapper).
+fn create_cid_cff_from_raw(
+    cff_data: &[u8],
+    default_width: f64,
+    cid_widths: HashMap<u16, f64>,
+    ordering: &[u8],
+    pdf_cid_to_gid: Option<Vec<u16>>,
+    identity_cid_to_gid: bool,
+    code_lengths: [u8; 256],
+    code_to_cid: HashMap<u32, u32>,
+) -> Result<PdfFont, PdfError> {
+    let fonts =
+        parse_cff(cff_data).map_err(|e| PdfError::Other(format!("CFF parse error: {e}")))?;
+    let font = fonts
+        .into_iter()
+        .next()
+        .ok_or(PdfError::Other("CFF contains no fonts".into()))?;
+    let fm = font.font_matrix;
+    let font_matrix = Matrix::new(fm[0], fm[1], fm[2], fm[3], fm[4], fm[5]);
+
+    Ok(PdfFont::CidCff(CidCffPdfFont {
+        font,
+        default_width,
+        cid_widths,
+        font_matrix,
+        cmap: None, // Raw CFF has no OTF cmap table
+        pdf_cid_to_gid,
+        identity_cid_to_gid,
+        ordering: ordering.to_vec(),
+        code_lengths,
+        code_to_cid,
+    }))
+}
+
 /// Try to load a TrueType font from the system font cache.
 ///
 /// Used when a CIDFontType2 font is not embedded in the PDF (missing FontFile2).
@@ -1452,9 +1492,11 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
             let data = if let Some(ff_ref) = desc.get(b"FontFile2") {
                 substituted = false;
                 let font_data = resolver.stream_data_from_obj(ff_ref)?;
-                // Some PDFs store OpenType/CFF fonts as FontFile2 instead of
-                // FontFile3. Detect OTTO magic and use CFF rendering path.
-                if font_data.len() > 4 && &font_data[0..4] == b"OTTO" {
+                // Some PDFs store CFF fonts as FontFile2 instead of FontFile3.
+                // Detect OpenType/CFF (OTTO magic) or raw CFF and route accordingly.
+                let is_otf_cff = font_data.len() > 4 && &font_data[0..4] == b"OTTO";
+                let is_raw = is_raw_cff(&font_data);
+                if is_otf_cff || is_raw {
                     // Parse CIDToGIDMap from the PDF before creating the CFF font
                     let cid_to_gid_map = if let Some(map_obj) = cid_font_dict.get(b"CIDToGIDMap") {
                         if cid_font_dict.get_name(b"CIDToGIDMap") != Some(b"Identity") {
@@ -1470,16 +1512,29 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                         None
                     };
                     let identity = cid_to_gid_map.is_none();
-                    return create_cid_cff_from_otf(
-                        &font_data,
-                        default_width,
-                        cid_widths,
-                        &ordering,
-                        cid_to_gid_map,
-                        identity,
-                        code_lengths,
-                        code_to_cid.clone(),
-                    );
+                    if is_otf_cff {
+                        return create_cid_cff_from_otf(
+                            &font_data,
+                            default_width,
+                            cid_widths,
+                            &ordering,
+                            cid_to_gid_map,
+                            identity,
+                            code_lengths,
+                            code_to_cid.clone(),
+                        );
+                    } else {
+                        return create_cid_cff_from_raw(
+                            &font_data,
+                            default_width,
+                            cid_widths,
+                            &ordering,
+                            cid_to_gid_map,
+                            identity,
+                            code_lengths,
+                            code_to_cid.clone(),
+                        );
+                    }
                 }
                 font_data
             } else {
