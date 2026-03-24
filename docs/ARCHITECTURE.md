@@ -268,6 +268,33 @@ The `stet` facade crate embeds all 53 files (4.6 MB) via `include_bytes!()`.
 The CLI discovers them relative to the executable. The WASM build embeds
 them in a virtual filesystem.
 
+### CJK CMap Files (PDF Reader)
+
+PDFs using CJK fonts with predefined encodings (e.g. `GBK-EUC-H`,
+`90ms-RKSJ-H`, `ETen-B5-H`, `KSCms-UHC-H`) require CMap files that map
+character codes to CIDs. These are **not** embedded in the binary — they
+are loaded from the filesystem at runtime.
+
+Search order:
+
+1. **`STET_CMAP_DIR`** environment variable — point to a directory
+   containing CMap files (flat layout, e.g. `$STET_CMAP_DIR/GBK-EUC-H`)
+2. **`~/.local/share/stet/CMap/`** — user-local conventional location
+3. **System poppler-data** — `/usr/share/poppler/cMap/Adobe-*/` (Linux),
+   Homebrew paths (macOS)
+4. **System GhostScript** — `/var/lib/ghostscript/CMap/` etc.
+
+**Setup by platform:**
+
+- **Linux**: `sudo apt install poppler-data` (Debian/Ubuntu) or equivalent
+- **macOS**: `brew install poppler-data`
+- **Windows / other**: Download the
+  [Adobe CMap resources](https://github.com/nicferrier/python-ghostscript/tree/master/ghostscript/CMap)
+  and either set `STET_CMAP_DIR` or place them in `~/.local/share/stet/CMap/`
+
+If a required CMap is not found, a warning is printed and CJK text in the
+affected font will not render correctly.
+
 ## Crate Dependency Graph
 
 ```
