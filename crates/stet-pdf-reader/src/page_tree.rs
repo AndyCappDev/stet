@@ -91,11 +91,17 @@ fn collect_pages_recursive(
         }
     }
 
-    // Determine node type
+    // Determine node type.
+    // Use /Kids presence as the definitive indicator of an intermediate node —
+    // some malformed PDFs have duplicate /Type keys (both /Pages and /Page)
+    // in the same dict, where "last wins" parsing produces /Type /Page even
+    // though the node is clearly an intermediate Pages node with /Kids.
+    let has_kids = node_dict.get(b"Kids").is_some();
     let type_name = node_dict.get_name(b"Type");
 
-    if matches!(type_name, Some(b"Page"))
-        || (type_name.is_none() && node_dict.get(b"Kids").is_none())
+    if !has_kids
+        && (matches!(type_name, Some(b"Page"))
+            || (type_name.is_none() && !has_kids))
     {
         // Leaf page node
         let media_box = inherited.media_box.unwrap_or([0.0, 0.0, 612.0, 792.0]); // Default US Letter
