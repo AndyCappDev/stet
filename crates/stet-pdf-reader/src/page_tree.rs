@@ -71,10 +71,10 @@ fn collect_pages_recursive(
 ) -> Result<(), PdfError> {
     // Update inherited attributes from this node
     let mut inherited = parent_inherited.clone();
-    if let Some(mb) = parse_rect(node_dict, b"MediaBox") {
+    if let Some(mb) = parse_rect(node_dict, b"MediaBox", resolver) {
         inherited.media_box = Some(mb);
     }
-    if let Some(cb) = parse_rect(node_dict, b"CropBox") {
+    if let Some(cb) = parse_rect(node_dict, b"CropBox", resolver) {
         inherited.crop_box = Some(cb);
     }
     if let Some(r) = node_dict.get_int(b"Rotate") {
@@ -171,9 +171,8 @@ fn clamp_box_to_media(crop: &[f64; 4], media: &[f64; 4]) -> [f64; 4] {
     ]
 }
 
-/// Parse a rectangle array [llx, lly, urx, ury] from a dict key.
-fn parse_rect(dict: &PdfDict, key: &[u8]) -> Option<[f64; 4]> {
-    let arr = dict.get_array(key)?;
+/// Convert an array of PdfObj values to a rectangle [llx, lly, urx, ury].
+fn arr_to_rect(arr: &[PdfObj]) -> Option<[f64; 4]> {
     if arr.len() >= 4 {
         Some([
             arr[0].as_f64()?,
@@ -183,6 +182,19 @@ fn parse_rect(dict: &PdfDict, key: &[u8]) -> Option<[f64; 4]> {
         ])
     } else {
         None
+    }
+}
+
+/// Parse a rectangle array [llx, lly, urx, ury] from a dict key.
+/// Handles both direct arrays and indirect references to arrays.
+fn parse_rect(dict: &PdfDict, key: &[u8], resolver: &Resolver) -> Option<[f64; 4]> {
+    match dict.get(key)? {
+        PdfObj::Array(a) => arr_to_rect(a),
+        PdfObj::Ref(n, g) => match resolver.resolve(*n, *g).ok()? {
+            PdfObj::Array(a) => arr_to_rect(&a),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -249,25 +261,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_rect_valid() {
-        let mut dict = PdfDict::new();
-        dict.insert(
-            b"MediaBox".to_vec(),
-            PdfObj::Array(vec![
-                PdfObj::Int(0),
-                PdfObj::Int(0),
-                PdfObj::Real(612.0),
-                PdfObj::Real(792.0),
-            ]),
-        );
-        let rect = parse_rect(&dict, b"MediaBox").unwrap();
+    fn arr_to_rect_valid() {
+        let arr = vec![
+            PdfObj::Int(0),
+            PdfObj::Int(0),
+            PdfObj::Real(612.0),
+            PdfObj::Real(792.0),
+        ];
+        let rect = arr_to_rect(&arr).unwrap();
         assert_eq!(rect, [0.0, 0.0, 612.0, 792.0]);
     }
 
     #[test]
-    fn parse_rect_missing() {
-        let dict = PdfDict::new();
-        assert!(parse_rect(&dict, b"MediaBox").is_none());
+    fn arr_to_rect_too_short() {
+        let arr = vec![PdfObj::Int(0), PdfObj::Int(0)];
+        assert!(arr_to_rect(&arr).is_none());
     }
 
     #[test]
