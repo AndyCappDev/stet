@@ -3272,12 +3272,15 @@ impl<'a> ContentInterpreter<'a> {
             let content = self.display_list.split_off(scope.start_index);
 
             // Skip the soft mask if the mask display list is empty, OR if
-            // the mask form's BBox doesn't overlap with the content's clip
-            // region. When BC=[0,0,0], a non-overlapping mask produces zero
-            // luminosity everywhere in the content area, making it invisible.
+            // the mask form's BBox doesn't meaningfully overlap the visible area.
+            // When the mask bbox has negligible overlap with the clip region and
+            // the backdrop is black (BC=[0,0,0]), the mask produces zero luminosity
+            // everywhere, making content invisible. This also handles PDFs where the
+            // mask form is placed outside the page bounds — rather than making the
+            // content invisible, we render it without the mask.
             let skip = scope.mask.mask_list.is_empty()
                 || (scope.mask.backdrop_color == Some([0.0, 0.0, 0.0])
-                    && !self.mask_overlaps_clip(&scope.mask.bbox));
+                    && !self.mask_has_meaningful_overlap(&scope.mask.bbox));
             if skip {
                 for elem in content.into_elements() {
                     self.display_list.push(elem);
@@ -3342,8 +3345,21 @@ impl<'a> ContentInterpreter<'a> {
         0
     }
 
-    /// Check if a mask bbox (in device space) overlaps with the current clip region.
-    fn mask_overlaps_clip(&self, bbox: &[f64; 4]) -> bool {
+    /// Check if a mask bbox has meaningful overlap with the visible area.
+    /// Returns false when the overlap is negligible (< 2 device pixels in
+    /// either dimension), which happens when the mask form's BBox is placed
+    /// outside the page bounds. In such cases the mask would produce only
+    /// backdrop values across the content area, effectively making the content
+    /// invisible — but this is typically a PDF authoring artifact rather than
+    /// intentional, so we skip the mask and render the content directly.
+    fn mask_has_meaningful_overlap(&self, bbox: &[f64; 4]) -> bool {
+        let (_, _, overlap_w, overlap_h) = self.mask_clip_overlap(bbox);
+        overlap_w >= 2.0 && overlap_h >= 2.0
+    }
+
+    /// Compute the overlap between a mask bbox and the current clip region.
+    /// Returns (clip_w, clip_h, overlap_w, overlap_h).
+    fn mask_clip_overlap(&self, bbox: &[f64; 4]) -> (f64, f64, f64, f64) {
         // If no clip is set, the entire page is the clip — check page bounds
         let page_h = self.gstate.ctm.ty.abs().max(1.0);
         let page_w = page_h; // rough estimate
@@ -3377,7 +3393,11 @@ impl<'a> ContentInterpreter<'a> {
             bbox[1].max(bbox[3]),
         );
 
-        mx0 < cx1 && mx1 > cx0 && my0 < cy1 && my1 > cy0
+        let clip_w = cx1 - cx0;
+        let clip_h = cy1 - cy0;
+        let overlap_w = (mx1.min(cx1) - mx0.max(cx0)).max(0.0);
+        let overlap_h = (my1.min(cy1) - my0.max(cy0)).max(0.0);
+        (clip_w, clip_h, overlap_w, overlap_h)
     }
 
     /// Resolve a soft mask dictionary into a SoftMask.

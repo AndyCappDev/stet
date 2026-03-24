@@ -3091,10 +3091,15 @@ fn render_soft_masked(
     let mut mask_values = vec![0u8; pixel_count];
     extract_soft_mask_values(mask_pixmap.data(), &mut mask_values, params);
 
-    // 3. Render content into another offscreen
+    // 3. Render content into another offscreen, initialized with the parent's
+    // backdrop so non-isolated groups with blend modes (e.g. Multiply) see the
+    // correct background and produce the right composited result.
     let Some(mut content_pixmap) = Pixmap::new(eff_w, eff_h) else {
         return;
     };
+    let backdrop = copy_backdrop_crop(pixmap, crop_x, crop_y, eff_w, eff_h);
+    content_pixmap.data_mut().copy_from_slice(&backdrop);
+
     let content_cmyk = if has_overprint_elements(content_list) || band_state.cmyk_buffer.is_some() {
         let buf_size = eff_w as usize * eff_h as usize * 4;
         let mut buf = vec![0.0f32; buf_size];
@@ -3132,44 +3137,70 @@ fn render_soft_masked(
         render_element(&mut content_pixmap, &mut content_band, elem, &elem_ctx);
     }
 
-    // 4. Multiply content RGBA by mask values
-    let content_data = content_pixmap.data_mut();
-    #[allow(clippy::needless_range_loop)]
-    for i in 0..pixel_count {
-        let m = mask_values[i] as u16;
-        let off = i * 4;
-        content_data[off] = ((content_data[off] as u16 * m + 128) / 255) as u8;
-        content_data[off + 1] = ((content_data[off + 1] as u16 * m + 128) / 255) as u8;
-        content_data[off + 2] = ((content_data[off + 2] as u16 * m + 128) / 255) as u8;
-        content_data[off + 3] = ((content_data[off + 3] as u16 * m + 128) / 255) as u8;
-    }
-
-    // 5. Composite masked content onto parent with clip
+    // 4. Apply soft mask: compute per-pixel masked contribution and write to parent.
+    // result[c] = parent[c] + mask * (content_on_backdrop[c] - backdrop[c]) / 255
     let mut temp_mask = None;
-    let mask_ref = resolve_clip_mask(
+    let clip_ref = resolve_clip_mask(
         &band_state.clip_region,
         &mut temp_mask,
         ctx.out_w,
         ctx.out_h,
     );
-    let mask_ref = match mask_ref {
+    let clip_ref = match clip_ref {
         None => return,
         Some(m) => m,
     };
 
-    let paint = stet_tiny_skia::PixmapPaint {
-        opacity: 1.0,
-        blend_mode: stet_tiny_skia::BlendMode::SourceOver,
-        quality: stet_tiny_skia::FilterQuality::Nearest,
-    };
-    pixmap.draw_pixmap(
-        crop_x,
-        crop_y,
-        content_pixmap.as_ref(),
-        &paint,
-        Transform::identity(),
-        mask_ref,
-    );
+    let content_data = content_pixmap.data();
+    let parent_data = pixmap.data_mut();
+    let parent_stride = ctx.out_w as usize * 4;
+    let content_stride = eff_w as usize * 4;
+
+    for y in 0..eff_h as usize {
+        let py = crop_y as usize + y;
+        if py >= ctx.out_h as usize {
+            break;
+        }
+        let ci_row = y * content_stride;
+        let pi_row = py * parent_stride;
+
+        for x in 0..eff_w as usize {
+            let px = crop_x as usize + x;
+            if px >= ctx.out_w as usize {
+                break;
+            }
+
+            // Check clip mask (in parent coordinates)
+            if let Some(clip) = clip_ref {
+                if clip.data()[py * ctx.out_w as usize + px] == 0 {
+                    continue;
+                }
+            }
+
+            let m = mask_values[y * eff_w as usize + x] as i32;
+            if m == 0 {
+                continue;
+            }
+
+            let ci = ci_row + x * 4;
+            let pi = pi_row + px * 4;
+
+            for c in 0..4 {
+                let content_val = content_data[ci + c] as i32;
+                let backdrop_val = backdrop[ci + c] as i32;
+                let delta = content_val - backdrop_val;
+                if delta != 0 {
+                    let masked_delta = if delta > 0 {
+                        (delta * m + 128) / 255
+                    } else {
+                        (delta * m - 128) / 255
+                    };
+                    let result = (parent_data[pi + c] as i32 + masked_delta).clamp(0, 255);
+                    parent_data[pi + c] = result as u8;
+                }
+            }
+        }
+    }
 
     // Write content CMYK buffer back to parent
     if let (Some(content_cmyk), Some(parent_cmyk)) =
