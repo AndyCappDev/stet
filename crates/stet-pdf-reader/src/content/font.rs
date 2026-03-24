@@ -454,6 +454,30 @@ pub fn fallback_font(font_provider: Option<&FontProvider>) -> Option<PdfFont> {
 }
 
 /// Try to load a substitute font for a non-embedded font.
+/// Load a predefined CMap file from system directories.
+/// Searches poppler and GhostScript CMap locations.
+fn load_predefined_cmap(name: &[u8]) -> Option<Vec<u8>> {
+    let name_str = std::str::from_utf8(name).ok()?;
+    // Search directories: poppler's per-collection dirs, then GhostScript's flat dir
+    let search_dirs = [
+        "/usr/share/poppler/cMap/Adobe-GB1",
+        "/usr/share/poppler/cMap/Adobe-CNS1",
+        "/usr/share/poppler/cMap/Adobe-Japan1",
+        "/usr/share/poppler/cMap/Adobe-Japan2",
+        "/usr/share/poppler/cMap/Adobe-Korea1",
+        "/usr/share/poppler/cMap/Adobe-KR",
+        "/var/lib/ghostscript/CMap",
+        "/usr/share/ghostscript/Resource/CMap",
+    ];
+    for dir in &search_dirs {
+        let path = format!("{}/{}", dir, name_str);
+        if let Ok(data) = std::fs::read(&path) {
+            return Some(data);
+        }
+    }
+    None
+}
+
 fn substitute_font(
     base_font: &str,
     encoding: [Option<String>; 256],
@@ -1409,14 +1433,27 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
 
     // Parse the encoding CMap's codespace ranges to determine byte widths,
     // and the code-to-CID mapping for non-identity encodings.
-    // The encoding can be a name (e.g. "Identity-H") or a stream containing
-    // a custom CMap with mixed-width codespace ranges.
+    // The encoding can be:
+    //   - a stream containing a custom CMap
+    //   - a name like "Identity-H" (identity mapping, 2-byte codes)
+    //   - a predefined CMap name like "GBK-EUC-H" (load from system)
     let (code_lengths, code_to_cid) = if let Some(enc_obj) = encoding_obj {
         if let Ok(cmap_data) = resolver.stream_data_from_obj(enc_obj) {
+            // Embedded CMap stream
             let cmap = super::cmap::CMap::parse(&cmap_data);
             (cmap.code_lengths, cmap.code_to_cid)
+        } else if !encoding_name.is_empty()
+            && !encoding_name.starts_with(b"Identity")
+        {
+            // Predefined CMap name (e.g. GBK-EUC-H) — load from system
+            if let Some(cmap_data) = load_predefined_cmap(encoding_name) {
+                let cmap = super::cmap::CMap::parse(&cmap_data);
+                (cmap.code_lengths, cmap.code_to_cid)
+            } else {
+                ([2u8; 256], HashMap::new())
+            }
         } else {
-            ([2u8; 256], HashMap::new()) // Named encoding (Identity-H etc.)
+            ([2u8; 256], HashMap::new()) // Identity-H/V or fallback
         }
     } else {
         ([2u8; 256], HashMap::new())

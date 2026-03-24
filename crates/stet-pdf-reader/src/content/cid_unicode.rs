@@ -29,7 +29,58 @@ pub fn cid_to_unicode(ordering: &[u8], cid: u16) -> Option<u32> {
         b"Korea1" => KOREA1.get_or_init(|| load_table(include_bytes!("cid_korea1.bin"))),
         _ => return None,
     };
-    table.get(&cid).copied()
+    table.get(&cid).copied().or_else(|| {
+        // Supplemental mappings for half-width Latin CID ranges that share
+        // Unicode code points with proportional CIDs and are therefore not
+        // in the UniXXX-UTF32-H derived tables.
+        match ordering {
+            b"GB1" => gb1_halfwidth_unicode(cid),
+            b"Japan1" => japan1_halfwidth_unicode(cid),
+            b"CNS1" => cns1_halfwidth_unicode(cid),
+            b"Korea1" => korea1_halfwidth_unicode(cid),
+            _ => None,
+        }
+    })
+}
+
+/// Adobe-GB1 half-width Latin: CIDs 814–907 → U+0021–U+007E, CID 7716 → U+0020.
+fn gb1_halfwidth_unicode(cid: u16) -> Option<u32> {
+    if (814..=907).contains(&cid) {
+        Some(0x0021 + (cid - 814) as u32)
+    } else if cid == 7716 {
+        Some(0x0020)
+    } else {
+        None
+    }
+}
+
+/// Adobe-Japan1 half-width Latin: CIDs 231–324 → U+0021–U+007E, CID 230 → U+0020.
+fn japan1_halfwidth_unicode(cid: u16) -> Option<u32> {
+    if (231..=324).contains(&cid) {
+        Some(0x0021 + (cid - 231) as u32)
+    } else if cid == 230 {
+        Some(0x0020)
+    } else {
+        None
+    }
+}
+
+/// Adobe-CNS1 half-width Latin: CIDs 1–94 → U+0020–U+007E (proportional range only).
+fn cns1_halfwidth_unicode(cid: u16) -> Option<u32> {
+    if (1..=94).contains(&cid) {
+        Some(0x001F + cid as u32)
+    } else {
+        None
+    }
+}
+
+/// Adobe-Korea1 half-width Latin: CIDs 1–94 → U+0020–U+007E.
+fn korea1_halfwidth_unicode(cid: u16) -> Option<u32> {
+    if (1..=94).contains(&cid) {
+        Some(0x001F + cid as u32)
+    } else {
+        None
+    }
 }
 
 static JAPAN1_REV: OnceLock<HashMap<u32, u16>> = OnceLock::new();
