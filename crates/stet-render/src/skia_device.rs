@@ -279,6 +279,50 @@ fn build_skia_path(path: &PsPath) -> Option<stet_tiny_skia::Path> {
     Some(result)
 }
 
+/// Detect degenerate fill paths that have zero extent in one dimension.
+///
+/// PDFs commonly draw table grid lines as zero-width or zero-height filled
+/// rectangles (e.g., `8 0 1031 0 re f`). Since these have no area, the
+/// fill rasterizer produces zero pixels. This function detects such paths
+/// so they can be rendered as hairline strokes instead.
+///
+/// The check is performed in the path's own coordinate space (pre-transform)
+/// using a very tight epsilon, so only paths with *exactly* zero extent in
+/// one dimension are detected. Paths containing curves are never degenerate
+/// — only MoveTo/LineTo/ClosePath segments qualify.
+fn is_degenerate_fill(path: &PsPath) -> bool {
+    let mut x_min = f64::INFINITY;
+    let mut x_max = f64::NEG_INFINITY;
+    let mut y_min = f64::INFINITY;
+    let mut y_max = f64::NEG_INFINITY;
+
+    for seg in &path.segments {
+        let (x, y) = match seg {
+            PathSegment::MoveTo(x, y) | PathSegment::LineTo(x, y) => (*x, *y),
+            // Paths with curves are real shapes, not degenerate lines
+            PathSegment::CurveTo { .. } => return false,
+            PathSegment::ClosePath => continue,
+        };
+        x_min = x_min.min(x);
+        x_max = x_max.max(x);
+        y_min = y_min.min(y);
+        y_max = y_max.max(y);
+    }
+
+    if x_min > x_max {
+        return false; // empty path
+    }
+
+    let w = x_max - x_min;
+    let h = y_max - y_min;
+
+    // Degenerate if one dimension is exactly zero (within f64 epsilon)
+    // while the other has real extent. This catches `re` rects with
+    // zero width or height but not legitimate small shapes.
+    let eps = 1e-6;
+    (w < eps && h > eps) || (h < eps && w > eps)
+}
+
 /// Convert a tiny-skia Path back to a PsPath.
 /// Used for overprint stroke handling where we convert a stroked outline to a fill.
 fn skia_path_to_ps_path(path: &stet_tiny_skia::Path) -> PsPath {
@@ -2164,8 +2208,22 @@ fn render_element(
                 let paint =
                     to_paint_alpha(&params.color, params.alpha, params.blend_mode, ctx.no_aa);
                 let transform = ctx.transform(&params.ctm);
-                let fill_rule = to_fill_rule(&params.fill_rule);
-                pixmap.fill_path(&skia_path, &paint, fill_rule, transform, mask_ref);
+
+                // Detect degenerate fill paths: rectangles/lines with zero extent
+                // in one dimension. These are commonly used in PDFs to draw table
+                // grid lines as zero-width or zero-height filled rectangles.
+                // Since they have no area, fill_path produces nothing. Render them
+                // as hairline strokes instead.
+                if is_degenerate_fill(path) {
+                    let stroke = Stroke {
+                        width: 1.0,
+                        ..Stroke::default()
+                    };
+                    pixmap.stroke_path(&skia_path, &paint, &stroke, transform, mask_ref);
+                } else {
+                    let fill_rule = to_fill_rule(&params.fill_rule);
+                    pixmap.fill_path(&skia_path, &paint, fill_rule, transform, mask_ref);
+                }
 
                 // Update CMYK tracking buffer for non-overprint fills
                 if let Some(ref mut cmyk_buf) = band_state.cmyk_buffer {
