@@ -597,11 +597,7 @@ fn decode_dct(data: &[u8]) -> Result<Vec<u8>, PdfError> {
     // override with ColorTransform::RGB.
     if has_adobe_rgb_marker(data) {
         decoder.set_color_transform(jpeg_decoder::ColorTransform::RGB);
-    } else if adobe_color_transform(data) == Some(2) {
-        // Force YCCK mode for Adobe ColorTransform=2 (YCCK) JPEGs.
-        // jpeg_decoder sometimes fails to apply YCCK→CMYK conversion despite
-        // the APP14 marker indicating YCCK encoding. Forcing the transform
-        // ensures consistent behavior across all YCCK JPEGs.
+    } else if needs_ycck_override(data) {
         decoder.set_color_transform(jpeg_decoder::ColorTransform::YCCK);
     }
 
@@ -625,31 +621,6 @@ fn decode_dct(data: &[u8]) -> Result<Vec<u8>, PdfError> {
     }
 
     Ok(pixels)
-}
-
-/// Extract Adobe APP14 ColorTransform value from JPEG data.
-/// Returns Some(0) for raw RGB/CMYK, Some(1) for YCbCr, Some(2) for YCCK, None if absent.
-fn adobe_color_transform(data: &[u8]) -> Option<u8> {
-    let mut i = 2; // skip SOI
-    while i + 4 < data.len() {
-        if data[i] != 0xFF {
-            break;
-        }
-        let marker = data[i + 1];
-        if marker == 0xDA {
-            break; // SOS
-        }
-        let len = u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
-        if i + 2 + len > data.len() {
-            break;
-        }
-        // APP14 (Adobe): length(2) + "Adobe"(5) + version(2) + flags0(2) + flags1(2) + CT(1)
-        if marker == 0xEE && len >= 14 {
-            return Some(data[i + 2 + 13]);
-        }
-        i += 2 + len;
-    }
-    None
 }
 
 /// Check if a JPEG has Adobe APP14 ColorTransform=0 AND uniform sampling factors,
@@ -691,6 +662,48 @@ fn has_adobe_rgb_marker(data: &[u8]) -> bool {
         i += 2 + len;
     }
     has_ct0 && uniform_sampling
+}
+
+/// Work around jpeg_decoder bug: it checks `"Adobe\0"` (6 bytes) in APP14
+/// but the spec defines only 5-byte `"Adobe"`. The 6th byte is the high byte
+/// of the version field. When version >= 256 (high byte != 0), jpeg_decoder
+/// misses the APP14 marker entirely and misidentifies YCCK as plain CMYK.
+/// Returns true when the last APP14 has ColorTransform=2 (YCCK) and jpeg_decoder
+/// would fail to detect it.
+fn needs_ycck_override(data: &[u8]) -> bool {
+    let mut last_ct = None;
+    let mut decoder_would_miss = false;
+    let mut n_components = 0u8;
+    let mut i = 2; // skip SOI
+    while i + 4 < data.len() {
+        if data[i] != 0xFF {
+            break;
+        }
+        let marker = data[i + 1];
+        if marker == 0xDA {
+            break; // SOS
+        }
+        let len = u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
+        if i + 2 + len > data.len() {
+            break;
+        }
+        // APP14 (Adobe): "Adobe"(5) + version(2) + flags0(2) + flags1(2) + CT(1)
+        if marker == 0xEE && len >= 14 && &data[i + 4..i + 9] == b"Adobe" {
+            let ct = data[i + 2 + 13];
+            last_ct = Some(ct);
+            // jpeg_decoder checks data[0..6] == "Adobe\0", so byte index 5
+            // (= data[i+9], the version high byte) must be 0 for it to detect.
+            decoder_would_miss = data[i + 9] != 0;
+        }
+        // SOF0/SOF2: get number of components
+        if (marker == 0xC0 || marker == 0xC2) && i + 9 < data.len() {
+            n_components = data[i + 9];
+        }
+        i += 2 + len;
+    }
+    // Only override when: last APP14 says YCCK, jpeg_decoder would miss it,
+    // and the JPEG has 4 components (CMYK/YCCK domain).
+    last_ct == Some(2) && decoder_would_miss && n_components == 4
 }
 
 /// CCITTFaxDecode (Group 3 / Group 4 fax compression).
