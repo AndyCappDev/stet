@@ -589,49 +589,128 @@ pub fn parse_type7_patches(
     };
 
     while !reader.exhausted() {
-        let Some(_flag) = reader.read(bpfl) else {
+        let Some(flag) = reader.read(bpfl) else {
             break;
         };
-        // Simplified: read all patches as independent (16 points + 4 colors)
-        let mut points = Vec::with_capacity(16);
-        let mut colors = Vec::with_capacity(4);
-        let mut raw_colors_vec = Vec::with_capacity(4);
-        let mut ok = true;
-        for _ in 0..16 {
-            if let Some(pt) = read_point(&mut reader) {
-                points.push(pt);
-            } else {
-                ok = false;
-                break;
-            }
-        }
-        if ok {
-            for _ in 0..4 {
-                if let Some((c, rc)) = read_color(&mut reader) {
-                    colors.push(c);
-                    raw_colors_vec.push(rc);
-                } else {
-                    ok = false;
-                    break;
+
+        match flag {
+            0 => {
+                // Independent patch: 16 points + 4 colors
+                let mut points = Vec::with_capacity(16);
+                let mut colors = Vec::with_capacity(4);
+                let mut raw_colors_vec = Vec::with_capacity(4);
+                let mut ok = true;
+                for _ in 0..16 {
+                    if let Some(pt) = read_point(&mut reader) {
+                        points.push(pt);
+                    } else {
+                        ok = false;
+                        break;
+                    }
+                }
+                if ok {
+                    for _ in 0..4 {
+                        if let Some((c, rc)) = read_color(&mut reader) {
+                            colors.push(c);
+                            raw_colors_vec.push(rc);
+                        } else {
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+                if ok && points.len() == 16 && colors.len() == 4 {
+                    patches.push(ShadingPatch {
+                        points,
+                        colors: [
+                            colors[0].clone(),
+                            colors[1].clone(),
+                            colors[2].clone(),
+                            colors[3].clone(),
+                        ],
+                        raw_colors: [
+                            raw_colors_vec[0].clone(),
+                            raw_colors_vec[1].clone(),
+                            raw_colors_vec[2].clone(),
+                            raw_colors_vec[3].clone(),
+                        ],
+                    });
                 }
             }
-        }
-        if ok && points.len() == 16 && colors.len() == 4 {
-            patches.push(ShadingPatch {
-                points,
-                colors: [
-                    colors[0].clone(),
-                    colors[1].clone(),
-                    colors[2].clone(),
-                    colors[3].clone(),
-                ],
-                raw_colors: [
-                    raw_colors_vec[0].clone(),
-                    raw_colors_vec[1].clone(),
-                    raw_colors_vec[2].clone(),
-                    raw_colors_vec[3].clone(),
-                ],
-            });
+            1..=3 => {
+                // Continuation: inherit side from previous patch as new top row.
+                // 4×4 grid sides: 1=top[0,1,2,3], 2=right[3,7,11,15],
+                // 3=bottom[15,14,13,12], 4=left[12,8,4,0].
+                if patches.is_empty() {
+                    break;
+                }
+                let prev = patches.last().unwrap().clone();
+                let (inherited_pts, inherited_colors, inherited_raw) = match flag {
+                    1 => (
+                        // Side 2 (right col) of prev → top row of new
+                        vec![prev.points[3], prev.points[7], prev.points[11], prev.points[15]],
+                        [prev.colors[1].clone(), prev.colors[2].clone()],
+                        [prev.raw_colors[1].clone(), prev.raw_colors[2].clone()],
+                    ),
+                    2 => (
+                        // Side 4 (left col, reversed) of prev → top row of new
+                        vec![prev.points[12], prev.points[8], prev.points[4], prev.points[0]],
+                        [prev.colors[3].clone(), prev.colors[0].clone()],
+                        [prev.raw_colors[3].clone(), prev.raw_colors[0].clone()],
+                    ),
+                    3 => (
+                        // Side 3 (bottom row, reversed) of prev → top row of new
+                        vec![prev.points[15], prev.points[14], prev.points[13], prev.points[12]],
+                        [prev.colors[2].clone(), prev.colors[3].clone()],
+                        [prev.raw_colors[2].clone(), prev.raw_colors[3].clone()],
+                    ),
+                    _ => unreachable!(),
+                };
+
+                // Read 12 remaining points (rows 1-3 of the 4×4 grid) + 2 colors
+                let mut points = inherited_pts; // top row (pts[0..4])
+                let mut ok = true;
+                for _ in 0..12 {
+                    if let Some(pt) = read_point(&mut reader) {
+                        points.push(pt);
+                    } else {
+                        ok = false;
+                        break;
+                    }
+                }
+                let mut colors = vec![inherited_colors[0].clone(), inherited_colors[1].clone()];
+                let mut raw_colors_vec =
+                    vec![inherited_raw[0].clone(), inherited_raw[1].clone()];
+                if ok {
+                    for _ in 0..2 {
+                        if let Some((c, rc)) = read_color(&mut reader) {
+                            colors.push(c);
+                            raw_colors_vec.push(rc);
+                        } else {
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+                if ok && points.len() == 16 && colors.len() == 4 {
+                    patches.push(ShadingPatch {
+                        points,
+                        colors: [
+                            colors[0].clone(),
+                            colors[1].clone(),
+                            colors[2].clone(),
+                            colors[3].clone(),
+                        ],
+                        raw_colors: [
+                            raw_colors_vec[0].clone(),
+                            raw_colors_vec[1].clone(),
+                            raw_colors_vec[2].clone(),
+                            raw_colors_vec[3].clone(),
+                        ],
+                    });
+                }
+            }
+            _ => break,
         }
     }
 
@@ -898,42 +977,114 @@ pub fn build_type6_from_array(values: &[f64], n_comps: usize) -> Vec<ShadingPatc
 /// Build patches from an array-based Type 7 tensor-product patch mesh.
 pub fn build_type7_from_array(values: &[f64], n_comps: usize) -> Vec<ShadingPatch> {
     // flag + 16 points (32 values) + 4 colors (4 * n_comps)
-    let stride = 1 + 32 + 4 * n_comps;
+    let full_stride = 1 + 32 + 4 * n_comps;
+    // continuation: flag + 12 points (24 values) + 2 colors (2 * n_comps)
+    let _cont_stride = 1 + 24 + 2 * n_comps;
     let mut patches = Vec::new();
     let mut pos = 0;
 
-    while pos + stride <= values.len() {
-        let _flag = values[pos] as u32;
+    while pos < values.len() {
+        let flag = values[pos] as u32;
         pos += 1;
-        let mut points = Vec::with_capacity(16);
-        for i in 0..16 {
-            points.push((values[pos + i * 2], values[pos + i * 2 + 1]));
+
+        match flag {
+            0 => {
+                if pos + 32 + 4 * n_comps > values.len() {
+                    break;
+                }
+                let mut points = Vec::with_capacity(16);
+                for i in 0..16 {
+                    points.push((values[pos + i * 2], values[pos + i * 2 + 1]));
+                }
+                pos += 32;
+                let mut colors = Vec::with_capacity(4);
+                let mut raw_colors_vec = Vec::with_capacity(4);
+                for _ in 0..4 {
+                    let comps: Vec<f64> = values[pos..pos + n_comps].to_vec();
+                    let (c, rc) = components_to_color(&comps);
+                    colors.push(c);
+                    raw_colors_vec.push(rc);
+                    pos += n_comps;
+                }
+                let _ = full_stride;
+                patches.push(ShadingPatch {
+                    points,
+                    colors: [
+                        colors[0].clone(),
+                        colors[1].clone(),
+                        colors[2].clone(),
+                        colors[3].clone(),
+                    ],
+                    raw_colors: [
+                        raw_colors_vec[0].clone(),
+                        raw_colors_vec[1].clone(),
+                        raw_colors_vec[2].clone(),
+                        raw_colors_vec[3].clone(),
+                    ],
+                });
+            }
+            1..=3 => {
+                if patches.is_empty() {
+                    break;
+                }
+                let prev = patches.last().unwrap().clone();
+                // 4×4 grid sides: 1=top[0..4], 2=right[3,7,11,15],
+                // 3=bottom[15,14,13,12], 4=left[12,8,4,0].
+                let (inherited_pts, inherited_colors, inherited_raw) = match flag {
+                    1 => (
+                        vec![prev.points[3], prev.points[7], prev.points[11], prev.points[15]],
+                        [prev.colors[1].clone(), prev.colors[2].clone()],
+                        [prev.raw_colors[1].clone(), prev.raw_colors[2].clone()],
+                    ),
+                    2 => (
+                        vec![prev.points[12], prev.points[8], prev.points[4], prev.points[0]],
+                        [prev.colors[3].clone(), prev.colors[0].clone()],
+                        [prev.raw_colors[3].clone(), prev.raw_colors[0].clone()],
+                    ),
+                    3 => (
+                        vec![prev.points[15], prev.points[14], prev.points[13], prev.points[12]],
+                        [prev.colors[2].clone(), prev.colors[3].clone()],
+                        [prev.raw_colors[2].clone(), prev.raw_colors[3].clone()],
+                    ),
+                    _ => unreachable!(),
+                };
+
+                if pos + 24 + 2 * n_comps > values.len() {
+                    break;
+                }
+                let mut points = inherited_pts; // top row (pts[0..4])
+                for i in 0..12 {
+                    points.push((values[pos + i * 2], values[pos + i * 2 + 1]));
+                }
+                pos += 24;
+                let mut colors = vec![inherited_colors[0].clone(), inherited_colors[1].clone()];
+                let mut raw_colors_vec =
+                    vec![inherited_raw[0].clone(), inherited_raw[1].clone()];
+                for _ in 0..2 {
+                    let comps: Vec<f64> = values[pos..pos + n_comps].to_vec();
+                    let (c, rc) = components_to_color(&comps);
+                    colors.push(c);
+                    raw_colors_vec.push(rc);
+                    pos += n_comps;
+                }
+                patches.push(ShadingPatch {
+                    points,
+                    colors: [
+                        colors[0].clone(),
+                        colors[1].clone(),
+                        colors[2].clone(),
+                        colors[3].clone(),
+                    ],
+                    raw_colors: [
+                        raw_colors_vec[0].clone(),
+                        raw_colors_vec[1].clone(),
+                        raw_colors_vec[2].clone(),
+                        raw_colors_vec[3].clone(),
+                    ],
+                });
+            }
+            _ => break,
         }
-        pos += 32;
-        let mut colors = Vec::with_capacity(4);
-        let mut raw_colors_vec = Vec::with_capacity(4);
-        for _ in 0..4 {
-            let comps: Vec<f64> = values[pos..pos + n_comps].to_vec();
-            let (c, rc) = components_to_color(&comps);
-            colors.push(c);
-            raw_colors_vec.push(rc);
-            pos += n_comps;
-        }
-        patches.push(ShadingPatch {
-            points,
-            colors: [
-                colors[0].clone(),
-                colors[1].clone(),
-                colors[2].clone(),
-                colors[3].clone(),
-            ],
-            raw_colors: [
-                raw_colors_vec[0].clone(),
-                raw_colors_vec[1].clone(),
-                raw_colors_vec[2].clone(),
-                raw_colors_vec[3].clone(),
-            ],
-        });
     }
 
     patches
