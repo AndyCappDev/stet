@@ -1450,6 +1450,10 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                 let cmap = super::cmap::CMap::parse(&cmap_data);
                 (cmap.code_lengths, cmap.code_to_cid)
             } else {
+                eprintln!(
+                    "warning: predefined CMap '{}' not found; install poppler-data for CJK support",
+                    String::from_utf8_lossy(encoding_name)
+                );
                 ([2u8; 256], HashMap::new())
             }
         } else {
