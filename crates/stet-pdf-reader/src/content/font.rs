@@ -245,7 +245,7 @@ pub fn resolve_font(
         if desc.get(b"FontFile2").is_some() {
             // Try embedded TrueType; fall back to substitution if font data is unusable
             // (some PDFs embed only table metadata without actual glyph outlines)
-            match resolve_truetype(resolver, &descriptor, encoding.clone(), widths) {
+            match resolve_truetype(resolver, &descriptor, encoding.clone(), widths, font_dict) {
                 Ok(font) => return Ok(font),
                 Err(_) => {
                     if let Some(font) = substitute_font(
@@ -330,7 +330,7 @@ pub fn resolve_font(
 
     // Final fallback based on subtype (will likely fail)
     match subtype {
-        b"TrueType" => resolve_truetype(resolver, &descriptor, encoding, widths),
+        b"TrueType" => resolve_truetype(resolver, &descriptor, encoding, widths, font_dict),
         _ => resolve_type1(
             resolver,
             &descriptor,
@@ -1362,6 +1362,7 @@ fn resolve_truetype(
     descriptor: &Option<PdfDict>,
     encoding: [Option<String>; 256],
     widths: [f64; 256],
+    font_dict: &PdfDict,
 ) -> Result<PdfFont, PdfError> {
     let desc = descriptor.as_ref().ok_or(PdfError::Other(
         "TrueType font missing FontDescriptor".into(),
@@ -1405,7 +1406,13 @@ fn resolve_truetype(
         cmap,
         post_name_to_gid,
         units_per_em,
-        to_unicode: HashMap::new(), // Embedded fonts use glyph data directly
+        to_unicode: if let Some(tu_obj) = font_dict.get(b"ToUnicode") {
+            resolver.stream_data_from_obj(tu_obj)
+                .map(|d| parse_to_unicode(&d))
+                .unwrap_or_default()
+        } else {
+            HashMap::new()
+        },
     }))
 }
 
@@ -2176,11 +2183,6 @@ impl TrueTypePdfFont {
             {
                 return Some(gid);
             }
-            // Try glyph name → post table → GID
-            // (handles subset fonts without cmap, and ligatures like fl/fi)
-            if let Some(&gid) = self.post_name_to_gid.get(glyph_name.as_str()) {
-                return Some(gid);
-            }
             // Try gNNNN pattern → direct GID (common in CJK TrueType subsets)
             if glyph_name.starts_with('g')
                 && glyph_name.len() > 1
@@ -2191,15 +2193,25 @@ impl TrueTypePdfFont {
                 }
             }
         }
-        // Fallback: ToUnicode CMap → Unicode → cmap GID
-        // Handles substituted fonts with gNNNN glyph names (e.g. SimSun → Noto CJK)
+        // Direct cmap lookup by char code — preferred over post table for subset
+        // TrueType fonts where glyph names may not match character code positions.
+        if let Some(&gid) = self.cmap.get(&(char_code as u32)) {
+            return Some(gid);
+        }
+        // ToUnicode CMap → Unicode → cmap GID
         if let Some(&unicode) = self.to_unicode.get(&(char_code as u16))
             && let Some(&gid) = self.cmap.get(&unicode)
         {
             return Some(gid);
         }
-        // Fallback: direct cmap lookup by char code
-        if let Some(&gid) = self.cmap.get(&(char_code as u32)) {
+        if let Some(glyph_name) = &self.encoding[char_code as usize] {
+            // Post table fallback (handles ligatures like fl/fi)
+            if let Some(&gid) = self.post_name_to_gid.get(glyph_name.as_str()) {
+                return Some(gid);
+            }
+        }
+        // Windows Symbol encoding (U+F0XX range, common in subset fonts)
+        if let Some(&gid) = self.cmap.get(&(0xF000 + char_code as u32)) {
             return Some(gid);
         }
         if self.cmap.is_empty() {

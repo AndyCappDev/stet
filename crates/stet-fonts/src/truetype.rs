@@ -569,10 +569,11 @@ pub fn parse_cmap(font_data: &[u8]) -> std::collections::HashMap<u32, u16> {
         let encoding = read_u16(font_data, entry + 2);
         let offset = read_u32(font_data, entry + 4) as usize;
         let priority = match (platform, encoding) {
-            (3, 10) => 4, // Windows Unicode Full (format 12)
-            (3, 1) => 3,  // Windows Unicode BMP
-            (0, _) => 2,  // Unicode
-            (1, 0) => 1,  // Mac Roman
+            (3, 10) => 5, // Windows Unicode Full (format 12)
+            (3, 1) => 4,  // Windows Unicode BMP
+            (0, _) => 3,  // Unicode
+            (1, 0) => 2,  // Mac Roman
+            (3, 0) => 1,  // Windows Symbol (U+F0XX range, common in subset fonts)
             _ => 0,
         };
         if priority > best_priority {
