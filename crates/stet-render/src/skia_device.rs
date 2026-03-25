@@ -3866,6 +3866,7 @@ fn clip_path_unified(
             && params.ctm.ty == 0.0;
         if x_start == 0
             && ctm_is_identity
+            && params.stroke_params.is_none()
             && let Some(dev_rect) = detect_rect(path, ctx.out_w, u32::MAX)
         {
             let new_rect = translate_clip_rect(&dev_rect, y_start, ctx.out_h);
