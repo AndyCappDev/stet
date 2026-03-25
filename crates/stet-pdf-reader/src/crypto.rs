@@ -54,7 +54,7 @@ impl EncryptionState {
 
         if v == 5 {
             // AES-256 (PDF 2.0)
-            return Self::try_open_v5(encrypt_dict, &u_value);
+            return Self::try_open_v5(encrypt_dict, &u_value, r);
         }
 
         // V4: check if both StmF and StrF are Identity — if so, nothing is encrypted
@@ -118,7 +118,7 @@ impl EncryptionState {
         })
     }
 
-    fn try_open_v5(encrypt_dict: &PdfDict, u_value: &[u8]) -> Result<Self, PdfError> {
+    fn try_open_v5(encrypt_dict: &PdfDict, u_value: &[u8], r: i32) -> Result<Self, PdfError> {
         // AES-256: R=5 or R=6
         if u_value.len() < 48 {
             return Err(PdfError::Other("AES-256: /U too short".into()));
@@ -127,14 +127,22 @@ impl EncryptionState {
         let validation_salt = &u_value[32..40];
         let key_salt = &u_value[40..48];
 
-        // Hash empty password with validation salt
-        let hash = sha256(&[b"", validation_salt]);
+        // Hash empty password with validation salt (u_key is empty for user password)
+        let hash = if r >= 6 {
+            compute_hash_r6(b"", validation_salt, b"")
+        } else {
+            sha256(&[b"", validation_salt])
+        };
         if hash[..] != u_value[..32] {
             return Err(PdfError::Other("PDF requires a password".into()));
         }
 
-        // Derive key: SHA-256(password + key salt)
-        let key_hash = sha256(&[b"", key_salt]);
+        // Derive file encryption key (u_key is empty for user password)
+        let key_hash = if r >= 6 {
+            compute_hash_r6(b"", key_salt, b"")
+        } else {
+            sha256(&[b"", key_salt])
+        };
 
         // Decrypt UE with this key to get file encryption key
         let ue = encrypt_dict
@@ -146,7 +154,8 @@ impl EncryptionState {
             return Err(PdfError::Other("AES-256: /UE too short".into()));
         }
 
-        let file_key = aes_cbc_decrypt(&key_hash, &[0u8; 16], &ue[..32])?;
+        // Decrypt UE without padding removal — the raw 32-byte output IS the file key
+        let file_key = aes_cbc_decrypt_no_pad(&key_hash, &[0u8; 16], &ue[..32]);
 
         Ok(Self {
             key: file_key,
@@ -309,6 +318,26 @@ fn rc4(key: &[u8], data: &[u8]) -> Vec<u8> {
     result
 }
 
+/// AES-CBC decryption without PKCS#7 padding removal (for key derivation).
+fn aes_cbc_decrypt_no_pad(key: &[u8], iv: &[u8], data: &[u8]) -> Vec<u8> {
+    if data.is_empty() || !data.len().is_multiple_of(16) {
+        return data.to_vec();
+    }
+    let mut prev_block = [0u8; 16];
+    let iv_len = iv.len().min(16);
+    prev_block[..iv_len].copy_from_slice(&iv[..iv_len]);
+    let round_keys = aes_key_expansion(key);
+    let mut result = Vec::with_capacity(data.len());
+    for chunk in data.chunks(16) {
+        let decrypted = aes_decrypt_block(chunk, &round_keys);
+        for i in 0..16 {
+            result.push(decrypted[i] ^ prev_block[i]);
+        }
+        prev_block.copy_from_slice(chunk);
+    }
+    result
+}
+
 /// AES-CBC decryption.
 fn aes_cbc_decrypt(key: &[u8], iv: &[u8], data: &[u8]) -> Result<Vec<u8>, PdfError> {
     if data.is_empty() {
@@ -348,6 +377,165 @@ fn aes_cbc_decrypt(key: &[u8], iv: &[u8], data: &[u8]) -> Result<Vec<u8>, PdfErr
     }
 
     Ok(result)
+}
+
+/// AES-CBC encryption (no padding, data must be block-aligned).
+fn aes_cbc_encrypt(key: &[u8], iv: &[u8], data: &[u8]) -> Vec<u8> {
+    let round_keys = aes_key_expansion(key);
+    let mut prev = [0u8; 16];
+    let iv_len = iv.len().min(16);
+    prev[..iv_len].copy_from_slice(&iv[..iv_len]);
+
+    let mut result = Vec::with_capacity(data.len());
+    for chunk in data.chunks(16) {
+        let mut block = [0u8; 16];
+        let n = chunk.len().min(16);
+        block[..n].copy_from_slice(&chunk[..n]);
+        for i in 0..16 {
+            block[i] ^= prev[i];
+        }
+        let encrypted = aes_encrypt_block(&block, &round_keys);
+        result.extend_from_slice(&encrypted);
+        prev = encrypted;
+    }
+    result
+}
+
+/// AES single-block encryption.
+fn aes_encrypt_block(block: &[u8; 16], round_keys: &[[u8; 16]]) -> [u8; 16] {
+    let nr = round_keys.len() - 1;
+    let mut state = *block;
+
+    // AddRoundKey with first round key
+    for i in 0..16 {
+        state[i] ^= round_keys[0][i];
+    }
+
+    for round in 1..nr {
+        for b in &mut state {
+            *b = SBOX[*b as usize];
+        }
+        shift_rows(&mut state);
+        mix_columns(&mut state);
+        for i in 0..16 {
+            state[i] ^= round_keys[round][i];
+        }
+    }
+
+    // Last round (no MixColumns)
+    for b in &mut state {
+        *b = SBOX[*b as usize];
+    }
+    shift_rows(&mut state);
+    for i in 0..16 {
+        state[i] ^= round_keys[nr][i];
+    }
+
+    state
+}
+
+fn shift_rows(state: &mut [u8; 16]) {
+    // Row 1: shift left 1
+    let t = state[1];
+    state[1] = state[5];
+    state[5] = state[9];
+    state[9] = state[13];
+    state[13] = t;
+    // Row 2: shift left 2
+    let (t0, t1) = (state[2], state[6]);
+    state[2] = state[10];
+    state[6] = state[14];
+    state[10] = t0;
+    state[14] = t1;
+    // Row 3: shift left 3 (= shift right 1)
+    let t = state[15];
+    state[15] = state[11];
+    state[11] = state[7];
+    state[7] = state[3];
+    state[3] = t;
+}
+
+fn mix_columns(state: &mut [u8; 16]) {
+    for col in 0..4 {
+        let i = col * 4;
+        let (s0, s1, s2, s3) = (state[i], state[i + 1], state[i + 2], state[i + 3]);
+        state[i] = gmul(0x02, s0) ^ gmul(0x03, s1) ^ s2 ^ s3;
+        state[i + 1] = s0 ^ gmul(0x02, s1) ^ gmul(0x03, s2) ^ s3;
+        state[i + 2] = s0 ^ s1 ^ gmul(0x02, s2) ^ gmul(0x03, s3);
+        state[i + 3] = gmul(0x03, s0) ^ s1 ^ s2 ^ gmul(0x02, s3);
+    }
+}
+
+/// Algorithm 2.B from ISO 32000-2: iterative hash for R=6 encryption.
+fn compute_hash_r6(password: &[u8], salt: &[u8], u_key: &[u8]) -> [u8; 32] {
+    use sha2::Digest;
+
+    // Step 1: initial SHA-256 hash of (password + salt + u_key)
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(password);
+    hasher.update(salt);
+    if !u_key.is_empty() {
+        hasher.update(u_key);
+    }
+    let initial: [u8; 32] = hasher.finalize().into();
+    // K holds the full hash output (32/48/64 bytes depending on hash function)
+    let mut k: Vec<u8> = initial.to_vec();
+
+    let mut round: u32 = 0;
+    loop {
+        // Step 2a: K1 = 64 repetitions of (password + K + u_key)
+        let segment_len = password.len() + k.len() + u_key.len();
+        let mut k1 = Vec::with_capacity(segment_len * 64);
+        for _ in 0..64 {
+            k1.extend_from_slice(password);
+            k1.extend_from_slice(&k);
+            if !u_key.is_empty() {
+                k1.extend_from_slice(u_key);
+            }
+        }
+
+        // Step 2b: AES-128-CBC encrypt K1 using K[0..16] as key, K[16..32] as IV
+        let e = aes_cbc_encrypt(&k[..16], &k[16..32], &k1);
+
+        // Step 2c: determine hash function from first 16 bytes of E mod 3
+        let mut mod3: u32 = 0;
+        for &b in &e[..16] {
+            mod3 = (mod3 * 256 + b as u32) % 3;
+        }
+
+        // Step 2d: hash all of E — keep FULL output (affects K1 size in next round)
+        k = match mod3 {
+            0 => {
+                let mut h = sha2::Sha256::new();
+                h.update(&e);
+                h.finalize().to_vec()
+            }
+            1 => {
+                let mut h = sha2::Sha384::new();
+                h.update(&e);
+                h.finalize().to_vec()
+            }
+            _ => {
+                let mut h = sha2::Sha512::new();
+                h.update(&e);
+                h.finalize().to_vec()
+            }
+        };
+
+        // Step 2f: termination check (increment first, matching spec's round numbering)
+        round += 1;
+        let last_byte = *e.last().unwrap_or(&0);
+        if round >= 64 && (last_byte as u32) <= round - 32 {
+            break;
+        }
+        if round > 1000 {
+            break;
+        }
+    }
+
+    let mut result = [0u8; 32];
+    result.copy_from_slice(&k[..32]);
+    result
 }
 
 /// SHA-256 hash (for AES-256).
@@ -704,6 +892,44 @@ mod tests {
         let padded = pad_password(b"test");
         assert_eq!(&padded[..4], b"test");
         assert_eq!(&padded[4..], &PASSWORD_PADDING[..28]);
+    }
+
+    #[test]
+    fn r6_hash_user_password() {
+        // From pdf_samples/0000120.pdf: R=6, empty user password
+        let validation_salt = [0x94, 0x92, 0x7c, 0x84, 0x96, 0xaf, 0xd8, 0x92];
+        let expected_hash = [
+            0x20, 0x23, 0xa0, 0xa6, 0x05, 0x6b, 0x38, 0x54, 0x42, 0xb0, 0xcb, 0x1a, 0x16, 0x5c,
+            0xb4, 0xf9, 0x29, 0x31, 0xec, 0xd9, 0xaf, 0x4b, 0xd5, 0xc2, 0x32, 0xdf, 0xb6, 0xbc,
+            0x8b, 0xe7, 0xb4, 0x05,
+        ];
+        let result = compute_hash_r6(b"", &validation_salt, b"");
+        assert_eq!(result, expected_hash, "R=6 validation hash mismatch");
+    }
+
+    #[test]
+    fn r6_key_derivation() {
+        // From pdf_samples/0000120.pdf: key derivation
+        let key_salt = [0xa2, 0x33, 0xb1, 0x19, 0xb7, 0x3f, 0xe6, 0xc2];
+        let expected_key_hash: [u8; 32] = [
+            0x0b, 0xdb, 0xaf, 0x8c, 0xa6, 0x25, 0x6c, 0xcf, 0xb1, 0xba, 0x29, 0x4d, 0xeb, 0x54,
+            0xc3, 0x83, 0xfd, 0xcc, 0x11, 0x90, 0xcf, 0x6c, 0xf5, 0x9d, 0x4a, 0x7b, 0xc0, 0x38,
+            0x4f, 0x73, 0x9a, 0x62,
+        ];
+        let result = compute_hash_r6(b"", &key_salt, b"");
+        assert_eq!(result, expected_key_hash, "R=6 key hash mismatch");
+    }
+
+    #[test]
+    fn aes_cbc_encrypt_known_vector() {
+        // AES-128-CBC encrypt: zero key, zero IV, 32 zero bytes
+        let key = [0u8; 16];
+        let iv = [0u8; 16];
+        let data = [0u8; 32];
+        let result = aes_cbc_encrypt(&key, &iv, &data);
+        let expected = "66e94bd4ef8a2c3b884cfa59ca342b2ef795bd4a52e29ed713d313fa20e98dbc";
+        let got: String = result.iter().map(|b| format!("{:02x}", b)).collect();
+        assert_eq!(got, expected);
     }
 
     #[test]
