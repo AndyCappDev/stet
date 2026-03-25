@@ -188,6 +188,17 @@ impl<'a> ContentInterpreter<'a> {
 
     /// Look up a sub-dictionary in the resources, resolving indirect references.
     /// e.g., `resolve_resource_subdict(b"Font")` returns the /Font dict.
+    /// Get an integer value from a dict, resolving indirect references.
+    fn resolve_dict_int(&self, dict: &PdfDict, key: &[u8]) -> Option<i64> {
+        let obj = dict.get(key)?;
+        if let Some(n) = obj.as_int() {
+            return Some(n);
+        }
+        // Resolve indirect reference
+        let resolved = self.resolver.deref(obj).ok()?;
+        resolved.as_int()
+    }
+
     fn resolve_resource_subdict(&self, key: &[u8]) -> Option<PdfDict> {
         let obj = self.resources.get(key)?;
         // If it's already a dict, return it
@@ -1902,11 +1913,10 @@ impl<'a> ContentInterpreter<'a> {
 
     /// Handle an Image XObject.
     fn handle_image_xobject(&mut self, obj: &PdfObj, dict: &PdfDict) -> Result<(), PdfError> {
-        let width = dict
-            .get_int(b"Width")
+        // Width/Height may be indirect references in some PDFs
+        let width = self.resolve_dict_int(dict, b"Width")
             .ok_or(PdfError::Other("image missing Width".into()))? as u32;
-        let height = dict
-            .get_int(b"Height")
+        let height = self.resolve_dict_int(dict, b"Height")
             .ok_or(PdfError::Other("image missing Height".into()))? as u32;
 
         // Check for image mask (1-bit stencil painted with current fill color)
