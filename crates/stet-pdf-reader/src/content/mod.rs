@@ -2691,11 +2691,16 @@ impl<'a> ContentInterpreter<'a> {
             let group_blend_mode = self.gstate.blend_mode;
             let group_alpha = self.gstate.fill_alpha;
 
-            // Reset alpha inside the group: elements render at full opacity.
-            // The inherited alpha is applied when compositing the group as a
-            // whole, avoiding double-application of alpha.
+            // Reset alpha and soft mask inside the group: elements render at
+            // full opacity. The inherited alpha is applied when compositing
+            // the group as a whole, avoiding double-application of alpha.
+            // Clearing soft_mask prevents the parent's SMask from leaking
+            // into q/Q flush detection inside the group — without this,
+            // inner Q restores see the parent SMask in the saved state and
+            // skip flushing inner SMask scopes.
             self.gstate.fill_alpha = 1.0;
             self.gstate.stroke_alpha = 1.0;
+            self.gstate.soft_mask = None;
 
             // Render group contents into a separate sub-DisplayList
             let mut group_list = DisplayList::new();
@@ -3498,6 +3503,11 @@ impl<'a> ContentInterpreter<'a> {
         // Apply form matrix to CTM
         self.gstate.ctm = self.gstate.ctm.concat(&form_matrix);
 
+        // Compute device-space bbox now, before interpret_stream modifies the
+        // CTM via `cm` operators. The form BBox is in the form's coordinate
+        // system (after form matrix), not the content's rotated space.
+        let device_bbox = self.compute_device_bbox(bbox_tuple);
+
         // Clip to BBox
         if let Some((x0, y0, x1, y1)) = bbox_tuple {
             self.push_bbox_clip(x0, y0, x1, y1);
@@ -3518,11 +3528,6 @@ impl<'a> ContentInterpreter<'a> {
 
         // Flush any soft mask scope opened inside the mask form
         self.flush_soft_mask();
-
-        // Compute device-space bbox BEFORE restoring state — the mask form's
-        // display list elements were built with the current CTM (which includes
-        // the form matrix), so the bbox must use the same CTM.
-        let device_bbox = self.compute_device_bbox(bbox_tuple);
 
         let mask_list = std::mem::replace(&mut self.display_list, saved_display_list);
         self.soft_mask_scope = saved_scope;
