@@ -1130,7 +1130,15 @@ impl<'a> ContentInterpreter<'a> {
         if let Some(shading_box) = self.gstate.stroke_shading_pattern.clone() {
             let mut sp = self.gstate.stroke_params_with_ctm();
             sp.ctm = ctm;
-            let bbox = path_device_bbox(&path);
+            // Expand the device-space bbox by half the stroke width to account
+            // for the area the stroke outline covers beyond the centerline.
+            let mut bbox = path_device_bbox(&path);
+            let scale = self.gstate.ctm_scale_factor();
+            let half_w = self.gstate.line_width * scale * 0.5;
+            bbox[0] -= half_w;
+            bbox[1] -= half_w;
+            bbox[2] += half_w;
+            bbox[3] += half_w;
             let mut group_dl = DisplayList::new();
             group_dl.push(DisplayElement::Clip {
                 path: user_path,
