@@ -406,7 +406,6 @@ impl<'a> ContentInterpreter<'a> {
             let tok = match lexer.next_token() {
                 Ok(t) => t,
                 Err(_) => {
-                    // Skip unrecognized bytes (e.g., stray '*' after whitespace)
                     continue;
                 }
             };

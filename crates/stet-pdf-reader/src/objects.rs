@@ -165,11 +165,16 @@ impl PdfDict {
 
     /// Insert or replace a key-value pair.
     pub fn insert(&mut self, key: Vec<u8>, val: PdfObj) {
-        if let Some(entry) = self.0.iter_mut().find(|(k, _)| k == &key) {
-            entry.1 = val;
-        } else {
-            self.0.push((key, val));
+        // For small dicts, check for duplicates (PDF spec says keys should be
+        // unique, but malformed files exist). For large dicts, skip the O(n)
+        // scan — the duplicate check would be O(n²) for 74K+ entry dicts.
+        if self.0.len() < 100 {
+            if let Some(entry) = self.0.iter_mut().find(|(k, _)| k == &key) {
+                entry.1 = val;
+                return;
+            }
         }
+        self.0.push((key, val));
     }
 
     /// Get all entries.

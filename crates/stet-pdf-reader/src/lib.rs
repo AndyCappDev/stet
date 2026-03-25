@@ -302,8 +302,6 @@ impl<'a> PdfDocument<'a> {
             eprintln!("warning: content stream error: {}", e);
         }
         // Unwind any unbalanced q's left by the content stream.
-        // Malformed PDFs may have more q's than Q's; pop leftover gstate entries
-        // so annotations start with a clean state and clip restoration works.
         interpreter.unwind_gstate_stack();
 
         // Render annotation appearance streams (form field values, stamps, etc.)
