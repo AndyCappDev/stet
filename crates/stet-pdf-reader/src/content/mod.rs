@@ -134,6 +134,9 @@ pub struct ContentInterpreter<'a> {
     /// Nesting depth of suppressed optional content blocks (BDC/EMC).
     /// When > 0, all operators except BDC/BMC/EMC are skipped.
     oc_suppression_depth: u32,
+    /// HashMap index of the current resource dict's ColorSpace sub-dict.
+    /// Built lazily on first sc/scn access to avoid O(n) PdfDict scans.
+    cs_index: Option<std::collections::HashMap<Vec<u8>, PdfObj>>,
 }
 
 impl<'a> ContentInterpreter<'a> {
@@ -172,6 +175,7 @@ impl<'a> ContentInterpreter<'a> {
             pattern_cache: std::collections::HashMap::new(),
             ocg_off: ocg_off.clone(),
             oc_suppression_depth: 0,
+            cs_index: None,
         }
     }
 
@@ -452,13 +456,8 @@ impl<'a> ContentInterpreter<'a> {
                     };
 
                     if op == b"BI" {
-                        // Inline images are structural — errors here are fatal
-                        // because we need to skip the image data bytes.
-                        // Still parse when OC-suppressed (to advance the lexer).
                         self.handle_inline_image(&mut lexer)?;
                     } else if let Err(_e) = self.dispatch_operator(&op) {
-                        // Continue past operator errors. Malformed PDFs may have
-                        // invalid shadings, missing resources, etc.
                     }
                     self.operand_stack.clear();
                 }
@@ -1305,13 +1304,49 @@ impl<'a> ContentInterpreter<'a> {
         Ok(())
     }
 
+    /// Resolve a color space from a ColorSpaceRef.
+    /// For named color spaces, uses a HashMap index of the ColorSpace resource
+    /// sub-dict to avoid O(n) linear scans on large dicts (74K+ entries).
+    fn resolve_cs_cached(
+        &mut self,
+        cs_ref: &ColorSpaceRef,
+    ) -> Result<ResolvedColorSpace, PdfError> {
+        if let ColorSpaceRef::Named(name) = cs_ref {
+            // Fast path for device color space names
+            match name.as_slice() {
+                b"DeviceGray" | b"G" => return Ok(ResolvedColorSpace::DeviceGray),
+                b"DeviceRGB" | b"RGB" => return Ok(ResolvedColorSpace::DeviceRGB),
+                b"DeviceCMYK" | b"CMYK" => return Ok(ResolvedColorSpace::DeviceCMYK),
+                b"Pattern" => return Ok(ResolvedColorSpace::Pattern),
+                _ => {}
+            }
+            // Build HashMap index of ColorSpace resource dict on first use
+            if self.cs_index.is_none() {
+                let mut index = std::collections::HashMap::new();
+                if let Some(cs_dict) = self.resolve_resource_subdict(b"ColorSpace") {
+                    for (k, v) in cs_dict.entries() {
+                        index.insert(k.clone(), v.clone());
+                    }
+                }
+                self.cs_index = Some(index);
+            }
+            if let Some(cs_obj) = self.cs_index.as_ref().unwrap().get(name.as_slice()) {
+                let cs_obj = cs_obj.clone();
+                resolve_color_space_obj(&cs_obj, self.resolver)
+            } else {
+                // Name not in cached ColorSpace dict — fall back to full resolution
+                // (handles resources without a ColorSpace sub-dict, or names that
+                // appear due to resource inheritance not captured by the index)
+                resolve_color_space(&ColorSpaceRef::Named(name.to_vec()), &self.resources, self.resolver)
+            }
+        } else {
+            resolve_color_space(cs_ref, &self.resources, self.resolver)
+        }
+    }
+
     fn op_sc_stroke(&mut self) -> Result<(), PdfError> {
         // SC/SCN: set stroke color in current color space
-        let cs = resolve_color_space(
-            &self.gstate.stroke_color_space,
-            &self.resources,
-            self.resolver,
-        )?;
+        let cs = self.resolve_cs_cached(&self.gstate.stroke_color_space.clone())?;
         if matches!(cs, ResolvedColorSpace::Pattern) {
             return self.handle_pattern_stroke();
         }
@@ -1331,11 +1366,7 @@ impl<'a> ContentInterpreter<'a> {
 
     fn op_sc_fill(&mut self) -> Result<(), PdfError> {
         // sc/scn: set fill color in current color space
-        let cs = resolve_color_space(
-            &self.gstate.fill_color_space,
-            &self.resources,
-            self.resolver,
-        )?;
+        let cs = self.resolve_cs_cached(&self.gstate.fill_color_space.clone())?;
         if matches!(cs, ResolvedColorSpace::Pattern) {
             return self.handle_pattern_fill();
         }
@@ -2639,6 +2670,7 @@ impl<'a> ContentInterpreter<'a> {
         self.gstate_stack.push(self.gstate.clone());
         let saved_resources = std::mem::replace(&mut self.resources, form_resources);
         let saved_font_cache = std::mem::take(&mut self.font_cache);
+        let saved_cs_index = self.cs_index.take(); // invalidate — form has its own resources
         let saved_content_stream_ctm = self.content_stream_ctm;
         // Save and clear current path — forms start with an empty path per PDF spec.
         // Without this, an unconsumed path from the parent content stream leaks into
@@ -2725,6 +2757,7 @@ impl<'a> ContentInterpreter<'a> {
         // Restore state — check if clip needs resetting
         self.resources = saved_resources;
         self.font_cache = saved_font_cache;
+        self.cs_index = saved_cs_index;
         self.content_stream_ctm = saved_content_stream_ctm;
         self.current_path = saved_path;
         self.current_point = saved_point;
@@ -3459,6 +3492,7 @@ impl<'a> ContentInterpreter<'a> {
         self.gstate_stack.push(self.gstate.clone());
         let saved_resources = std::mem::replace(&mut self.resources, form_resources);
         let saved_font_cache = std::mem::take(&mut self.font_cache);
+        let saved_cs_index2 = self.cs_index.take();
         let saved_display_list = std::mem::replace(&mut self.display_list, DisplayList::new());
         let saved_scope = self.soft_mask_scope.take();
 
@@ -3495,6 +3529,7 @@ impl<'a> ContentInterpreter<'a> {
         self.soft_mask_scope = saved_scope;
         self.resources = saved_resources;
         self.font_cache = saved_font_cache;
+        self.cs_index = saved_cs_index2;
         if let Some(saved) = self.gstate_stack.pop() {
             self.gstate = saved;
         }

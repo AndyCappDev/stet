@@ -13,6 +13,13 @@ use crate::lexer::{Lexer, Token, parse_object};
 use crate::objects::{PdfDict, PdfObj};
 use crate::xref::{XrefEntry, XrefTable};
 
+/// Cached decompressed ObjStm data + parsed header.
+struct ObjStmCache {
+    data: Vec<u8>,
+    first: usize,
+    offsets: Vec<(u32, usize)>,
+}
+
 /// Resolves indirect object references, caching parsed objects.
 pub struct Resolver<'a> {
     data: &'a [u8],
@@ -27,6 +34,9 @@ pub struct Resolver<'a> {
     /// Avoids re-decompressing the same stream (e.g., ICC profiles
     /// referenced by thousands of Indexed color spaces).
     stream_cache: RefCell<HashMap<u32, Vec<u8>>>,
+    /// Cache of decompressed object streams (ObjStm).
+    /// Avoids re-decompressing the same ObjStm for every object within it.
+    objstm_cache: RefCell<HashMap<u32, ObjStmCache>>,
 }
 
 impl<'a> Resolver<'a> {
@@ -40,6 +50,7 @@ impl<'a> Resolver<'a> {
             resolving: RefCell::new(HashSet::new()),
             encryption: None,
             stream_cache: RefCell::new(HashMap::new()),
+            objstm_cache: RefCell::new(HashMap::new()),
         }
     }
 
@@ -56,6 +67,7 @@ impl<'a> Resolver<'a> {
             resolving: RefCell::new(HashSet::new()),
             encryption,
             stream_cache: RefCell::new(HashMap::new()),
+            objstm_cache: RefCell::new(HashMap::new()),
         }
     }
 
@@ -506,13 +518,13 @@ impl<'a> Resolver<'a> {
         }
     }
 
-    /// Parse an object from inside an object stream (ObjStm).
-    fn parse_object_from_stream(
-        &self,
-        stream_obj_num: u32,
-        index_within: u16,
-    ) -> Result<PdfObj, PdfError> {
-        // Resolve the container object stream
+    /// Ensure the decompressed ObjStm data + header are cached.
+    /// Returns the index into `objstm_cache` for the given stream object.
+    fn ensure_objstm_cached(&self, stream_obj_num: u32) -> Result<(), PdfError> {
+        if self.objstm_cache.borrow().contains_key(&stream_obj_num) {
+            return Ok(());
+        }
+
         let stream_obj = self.resolve(stream_obj_num, 0)?;
         let (dict, data_offset, data_len) = match stream_obj {
             PdfObj::Stream {
@@ -527,8 +539,6 @@ impl<'a> Resolver<'a> {
             }
         };
 
-        // Decompress the stream (already decrypted by resolve → stream_data path
-        // if this were called via stream_data; but here we handle it directly)
         let raw_slice = &self.data[data_offset..data_offset + data_len];
         let raw = if let Some(ref enc) = self.encryption {
             enc.decrypt_stream(raw_slice, stream_obj_num, 0)
@@ -543,13 +553,11 @@ impl<'a> Resolver<'a> {
             filters::decode_stream(&raw, &filter_list, &parms, None)?
         };
 
-        // Parse the header
         let n = dict.get_int(b"N").ok_or(PdfError::MissingKey("N"))? as usize;
         let first = dict
             .get_int(b"First")
             .ok_or(PdfError::MissingKey("First"))? as usize;
 
-        // Parse obj_num/offset pairs from the header
         let mut header_lexer = Lexer::new(&stream_data[..first.min(stream_data.len())]);
         let mut obj_offsets: Vec<(u32, usize)> = Vec::with_capacity(n);
         for _ in 0..n {
@@ -564,38 +572,70 @@ impl<'a> Resolver<'a> {
             obj_offsets.push((num, off));
         }
 
+        self.objstm_cache.borrow_mut().insert(
+            stream_obj_num,
+            ObjStmCache {
+                data: stream_data,
+                first,
+                offsets: obj_offsets,
+            },
+        );
+        Ok(())
+    }
+
+    /// Parse an object from inside an object stream (ObjStm).
+    fn parse_object_from_stream(
+        &self,
+        stream_obj_num: u32,
+        index_within: u16,
+    ) -> Result<PdfObj, PdfError> {
+        // Ensure decompressed data is cached
+        self.ensure_objstm_cached(stream_obj_num)?;
+
+        let cache = self.objstm_cache.borrow();
+        let cached = cache.get(&stream_obj_num).ok_or_else(|| {
+            PdfError::Other(format!("ObjStm {stream_obj_num} not in cache"))
+        })?;
+
         // Find and parse the target object
         let idx = index_within as usize;
-        if idx >= obj_offsets.len() {
+        if idx >= cached.offsets.len() {
             return Err(PdfError::Other(format!(
                 "index {idx} out of range in object stream {stream_obj_num}"
             )));
         }
 
-        let (_target_num, target_offset) = obj_offsets[idx];
-        let abs_offset = first + target_offset;
-        if abs_offset >= stream_data.len() {
+        let (_target_num, target_offset) = cached.offsets[idx];
+        let abs_offset = cached.first + target_offset;
+        if abs_offset >= cached.data.len() {
             return Err(PdfError::Other(format!(
                 "object offset {abs_offset} out of range in stream {stream_obj_num}"
             )));
         }
 
-        let mut obj_lexer = Lexer::new(&stream_data[abs_offset..]);
+        let mut obj_lexer = Lexer::new(&cached.data[abs_offset..]);
         let obj = parse_object(&mut obj_lexer)?;
 
-        // Cache all objects from this stream while we have it decompressed
-        for (i, &(num, off)) in obj_offsets.iter().enumerate() {
+        // Eagerly cache all objects from this stream while we have it
+        let offsets = cached.offsets.clone();
+        let first = cached.first;
+        drop(cache); // release borrow before mutating self.cache
+
+        for (i, &(num, off)) in offsets.iter().enumerate() {
             if i == idx {
-                // Already parsed this one
                 self.cache.borrow_mut().insert(num, obj.clone());
                 continue;
             }
             if !self.cache.borrow().contains_key(&num) {
                 let abs = first + off;
-                if abs < stream_data.len() {
-                    let mut l = Lexer::new(&stream_data[abs..]);
-                    if let Ok(o) = parse_object(&mut l) {
-                        self.cache.borrow_mut().insert(num, o);
+                let stm = self.objstm_cache.borrow();
+                if let Some(c) = stm.get(&stream_obj_num) {
+                    if abs < c.data.len() {
+                        let mut l = Lexer::new(&c.data[abs..]);
+                        if let Ok(o) = parse_object(&mut l) {
+                            drop(stm);
+                            self.cache.borrow_mut().insert(num, o);
+                        }
                     }
                 }
             }
