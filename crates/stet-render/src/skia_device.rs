@@ -3243,12 +3243,28 @@ fn extract_soft_mask_values(
             };
             let backdrop_byte = (backdrop_lum * 255.0 + 0.5) as u8;
 
+            // When BC is specified and the transfer function inverts, semi-transparent
+            // pixels must be composited onto the BC backdrop before computing
+            // luminosity (PDF spec 11.6.5.3). Without this, un-premultiplying
+            // amplifies the colour at low alpha, producing incorrect mask values
+            // that let too much content through (e.g., red fringing in 6024.pdf).
+            let composite_bc = params.backdrop_color.is_some() && params.transfer_invert;
+
             #[allow(clippy::needless_range_loop)]
             for i in 0..pixel_count {
                 let off = i * 4;
                 let a = rgba[off + 3];
                 let lum_byte = if a == 0 {
                     backdrop_byte
+                } else if composite_bc && a < 255 {
+                    // Composite onto BC backdrop: premul_rgb + BC × (1 - alpha/255)
+                    let af = a as f64;
+                    let bd = backdrop_lum * 255.0;
+                    let r = rgba[off] as f64 + bd * (255.0 - af) / 255.0;
+                    let g = rgba[off + 1] as f64 + bd * (255.0 - af) / 255.0;
+                    let b = rgba[off + 2] as f64 + bd * (255.0 - af) / 255.0;
+                    let lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+                    (lum + 0.5).clamp(0.0, 255.0) as u8
                 } else {
                     // Un-premultiply to get linear RGB, then compute luminosity
                     let inv_a = 255.0 / a as f64;
