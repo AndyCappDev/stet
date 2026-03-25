@@ -38,6 +38,11 @@ impl XrefTable {
         self.entries.get(obj_num as usize).and_then(|e| e.as_ref())
     }
 
+    /// Iterate over all entries (including None gaps).
+    pub fn entries(&self) -> &[Option<XrefEntry>] {
+        &self.entries
+    }
+
     /// Total number of entry slots (including None gaps).
     pub fn len(&self) -> usize {
         self.entries.len()

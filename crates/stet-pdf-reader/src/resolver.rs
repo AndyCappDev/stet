@@ -71,6 +71,43 @@ impl<'a> Resolver<'a> {
         }
     }
 
+    /// Pre-decompress and parse all object streams (ObjStm) in the PDF.
+    /// This populates the object cache for all objects stored in ObjStms,
+    /// avoiding per-object decompression during page rendering.
+    pub fn preload_object_streams(&self) {
+        let mut stream_nums: HashSet<u32> = HashSet::new();
+        for entry in self.xref.entries() {
+            if let Some(XrefEntry::InStream { stream_obj_num, .. }) = entry {
+                stream_nums.insert(*stream_obj_num);
+            }
+        }
+        for &stm_num in &stream_nums {
+            let _ = self.ensure_objstm_cached(stm_num);
+            // After caching, eagerly parse all objects
+            let cache = self.objstm_cache.borrow();
+            if let Some(cached) = cache.get(&stm_num) {
+                let offsets = cached.offsets.clone();
+                let first = cached.first;
+                drop(cache);
+                for &(num, off) in &offsets {
+                    if !self.cache.borrow().contains_key(&num) {
+                        let abs = first + off;
+                        let stm = self.objstm_cache.borrow();
+                        if let Some(c) = stm.get(&stm_num) {
+                            if abs < c.data.len() {
+                                let mut l = Lexer::new(&c.data[abs..]);
+                                if let Ok(o) = parse_object(&mut l) {
+                                    drop(stm);
+                                    self.cache.borrow_mut().insert(num, o);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Resolve an indirect reference to its parsed object.
     pub fn resolve(&self, obj_num: u32, _gen_num: u16) -> Result<PdfObj, PdfError> {
         // Check cache first
@@ -616,30 +653,10 @@ impl<'a> Resolver<'a> {
         let mut obj_lexer = Lexer::new(&cached.data[abs_offset..]);
         let obj = parse_object(&mut obj_lexer)?;
 
-        // Eagerly cache all objects from this stream while we have it
-        let offsets = cached.offsets.clone();
-        let first = cached.first;
-        drop(cache); // release borrow before mutating self.cache
-
-        for (i, &(num, off)) in offsets.iter().enumerate() {
-            if i == idx {
-                self.cache.borrow_mut().insert(num, obj.clone());
-                continue;
-            }
-            if !self.cache.borrow().contains_key(&num) {
-                let abs = first + off;
-                let stm = self.objstm_cache.borrow();
-                if let Some(c) = stm.get(&stream_obj_num) {
-                    if abs < c.data.len() {
-                        let mut l = Lexer::new(&c.data[abs..]);
-                        if let Ok(o) = parse_object(&mut l) {
-                            drop(stm);
-                            self.cache.borrow_mut().insert(num, o);
-                        }
-                    }
-                }
-            }
-        }
+        // Cache the parsed object
+        let target_num = cached.offsets[idx].0;
+        drop(cache);
+        self.cache.borrow_mut().insert(target_num, obj.clone());
 
         Ok(obj)
     }
