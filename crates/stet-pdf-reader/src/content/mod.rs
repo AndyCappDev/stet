@@ -3608,10 +3608,30 @@ impl<'a> ContentInterpreter<'a> {
             false
         };
 
+        // When BC is specified and produces a non-zero luminosity value, the
+        // soft mask extends beyond the form's BBox — the BC backdrop fills all
+        // areas outside the form content. Expand the bbox to cover the entire
+        // viewport so the renderer doesn't crop the mask to the form's BBox.
+        let effective_bbox = if let Some(bc) = &backdrop_color {
+            let bc_lum = 0.2126 * bc[0] + 0.7152 * bc[1] + 0.0722 * bc[2];
+            let bc_byte = (bc_lum * 255.0 + 0.5) as u8;
+            // After transfer inversion, the effective mask value is 255 - bc_byte.
+            // If either the original or inverted value is non-zero, the mask has
+            // effect outside the form BBox.
+            let effective = if transfer_invert { 255 - bc_byte } else { bc_byte };
+            if effective > 0 {
+                [0.0, 0.0, 1e9, 1e9]
+            } else {
+                device_bbox
+            }
+        } else {
+            device_bbox
+        };
+
         Ok(graphics_state::SoftMask {
             mask_list,
             subtype,
-            bbox: device_bbox,
+            bbox: effective_bbox,
             backdrop_color,
             transfer_invert,
         })
