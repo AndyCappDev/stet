@@ -2905,11 +2905,20 @@ impl<'a> ContentInterpreter<'a> {
             }
         }
 
-        // Skip single whitespace byte after ID
+        // Skip single whitespace byte after ID.
+        // Treat \r\n as a single EOL delimiter (many PDF generators emit
+        // ID\r\n before the image data).
         let data = lexer.data();
         let mut pos = lexer.pos();
-        if pos < data.len() && (data[pos] == b' ' || data[pos] == b'\n' || data[pos] == b'\r') {
-            pos += 1;
+        if pos < data.len() {
+            if data[pos] == b'\r' {
+                pos += 1;
+                if pos < data.len() && data[pos] == b'\n' {
+                    pos += 1;
+                }
+            } else if data[pos] == b' ' || data[pos] == b'\n' {
+                pos += 1;
+            }
         }
 
         // Read image data until EI
