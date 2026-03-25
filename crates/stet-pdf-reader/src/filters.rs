@@ -838,7 +838,11 @@ fn decode_ccitt_hayro(
         // UnexpectedEof is normal for inline images and streams without EOFB markers.
         // Only warn about genuine decoding errors (InvalidCode, LineLengthMismatch, etc.)
         if e != hayro_ccitt::DecodeError::UnexpectedEof {
-            eprintln!("[CCITT] decode warning: {} (using partial data)", e);
+            use std::sync::atomic::{AtomicBool, Ordering};
+            static WARNED: AtomicBool = AtomicBool::new(false);
+            if !WARNED.swap(true, Ordering::Relaxed) {
+                eprintln!("[CCITT] decode warning: {} (using partial data)", e);
+            }
         }
     }
     Ok(decoder.output)
