@@ -2687,6 +2687,7 @@ impl<'a> ContentInterpreter<'a> {
         self.gstate_stack.push(self.gstate.clone());
         let saved_resources = std::mem::replace(&mut self.resources, form_resources);
         let saved_font_cache = std::mem::take(&mut self.font_cache);
+        let saved_current_font = self.current_font.take();
         let saved_cs_index = self.cs_index.take(); // invalidate — form has its own resources
         let saved_content_stream_ctm = self.content_stream_ctm;
         // Save and clear current path — forms start with an empty path per PDF spec.
@@ -2779,6 +2780,7 @@ impl<'a> ContentInterpreter<'a> {
         // Restore state — check if clip needs resetting
         self.resources = saved_resources;
         self.font_cache = saved_font_cache;
+        self.current_font = saved_current_font;
         self.cs_index = saved_cs_index;
         self.content_stream_ctm = saved_content_stream_ctm;
         self.current_path = saved_path;
@@ -3523,6 +3525,7 @@ impl<'a> ContentInterpreter<'a> {
         self.gstate_stack.push(self.gstate.clone());
         let saved_resources = std::mem::replace(&mut self.resources, form_resources);
         let saved_font_cache = std::mem::take(&mut self.font_cache);
+        let saved_current_font2 = self.current_font.take();
         let saved_cs_index2 = self.cs_index.take();
         let saved_display_list = std::mem::replace(&mut self.display_list, DisplayList::new());
         let saved_scope = self.soft_mask_scope.take();
@@ -3560,6 +3563,7 @@ impl<'a> ContentInterpreter<'a> {
         self.soft_mask_scope = saved_scope;
         self.resources = saved_resources;
         self.font_cache = saved_font_cache;
+        self.current_font = saved_current_font2;
         self.cs_index = saved_cs_index2;
         if let Some(saved) = self.gstate_stack.pop() {
             self.gstate = saved;
