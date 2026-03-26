@@ -2172,7 +2172,12 @@ impl TrueTypePdfFont {
     fn glyph_path(&self, char_code: u8) -> Option<PsPath> {
         let gid = self.char_code_to_gid(char_code)?;
         let path = skrifa_glyph_path(&self.data, gid, self.units_per_em).or_else(|| {
-            // Fallback for locx/glyx PDF-subset fonts that skrifa can't parse
+            // Only fall back to manual glyf parsing for PDF-subset fonts (locx/glyx)
+            // where skrifa can't parse the tables.
+            use stet_fonts::truetype::find_table;
+            if find_table(&self.data, b"glyx").is_none() {
+                return None;
+            }
             let glyf_data = get_glyf_data(&self.data, gid)?;
             let data_ref = &self.data;
             let p = parse_glyf_to_path(&glyf_data, &|cid| get_glyf_data(data_ref, cid));
@@ -2286,6 +2291,14 @@ impl CidTrueTypePdfFont {
             cid
         };
         let path = skrifa_glyph_path(&self.data, gid, self.units_per_em).or_else(|| {
+            // Only fall back to manual glyf parsing for PDF-subset fonts (locx/glyx)
+            // where skrifa can't parse the tables.  For normal fonts, skrifa returning
+            // None means the GID doesn't exist — don't feed random glyf table bytes
+            // to parse_glyf_to_path which would produce millions of garbage segments.
+            use stet_fonts::truetype::find_table;
+            if find_table(&self.data, b"glyx").is_none() {
+                return None;
+            }
             let glyf_data = get_glyf_data(&self.data, gid)?;
             let data_ref = &self.data;
             let p = parse_glyf_to_path(&glyf_data, &|cid| get_glyf_data(data_ref, cid));
