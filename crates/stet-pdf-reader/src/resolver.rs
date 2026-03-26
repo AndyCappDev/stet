@@ -280,6 +280,11 @@ impl<'a> Resolver<'a> {
         self.data
     }
 
+    /// Number of entries in the xref table.
+    pub fn xref_len(&self) -> usize {
+        self.xref.len()
+    }
+
     /// Decrypt all strings within a parsed object tree.
     /// Stream data is NOT decrypted here (handled in stream_data()).
     fn decrypt_object(&self, obj: PdfObj, obj_num: u32, gen_num: u16) -> PdfObj {

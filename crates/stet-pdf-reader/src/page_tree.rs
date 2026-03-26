@@ -46,20 +46,82 @@ pub fn collect_pages(resolver: &Resolver) -> Result<Vec<PageInfo>, PdfError> {
     let catalog = resolver.resolve(root_ref.0, root_ref.1)?;
     let catalog_dict = catalog.as_dict().ok_or(PdfError::MalformedTrailer)?;
 
-    // Get /Pages
-    let pages_obj = catalog_dict
+    // Get /Pages — if the page tree root is missing (truncated PDF),
+    // fall back to scanning all objects for /Type /Page entries.
+    let pages_ref = catalog_dict
         .get(b"Pages")
         .ok_or(PdfError::MissingKey("Pages"))?;
-    let pages_obj = resolver.deref(pages_obj)?;
-    let pages_dict = pages_obj
-        .as_dict()
-        .ok_or(PdfError::Other("catalog /Pages is not a dictionary".into()))?;
+    let pages_obj = match resolver.deref(pages_ref) {
+        Ok(obj) => obj,
+        Err(_) => return collect_pages_by_scan(resolver),
+    };
+    let pages_dict = match pages_obj.as_dict() {
+        Some(d) => d,
+        None => return collect_pages_by_scan(resolver),
+    };
 
     let mut pages = Vec::new();
     let inherited = Inherited::default();
     collect_pages_recursive(resolver, pages_dict, 0, &inherited, &mut pages)?;
 
     Ok(pages)
+}
+
+/// Fallback: scan all xref entries for `/Type /Page` objects.
+/// Used when the page tree root is missing (e.g., truncated PDF).
+fn collect_pages_by_scan(resolver: &Resolver) -> Result<Vec<PageInfo>, PdfError> {
+    let mut pages = Vec::new();
+    let xref_len = resolver.xref_len();
+
+    for obj_num in 0..xref_len as u32 {
+        if let Ok(obj) = resolver.resolve(obj_num, 0) {
+            if let Some(dict) = obj.as_dict() {
+                if dict.get_name(b"Type") == Some(b"Page") && dict.get(b"Kids").is_none() {
+                    let media_box = parse_rect(dict, b"MediaBox", resolver)
+                        .unwrap_or([0.0, 0.0, 612.0, 792.0]);
+                    let crop_box = clamp_box_to_media(
+                        &parse_rect(dict, b"CropBox", resolver).unwrap_or(media_box),
+                        &media_box,
+                    );
+                    let rotate = dict.get_int(b"Rotate").unwrap_or(0) as i32;
+                    let resources = resolve_resources(dict, resolver);
+                    let contents = parse_contents(dict, resolver)?;
+                    let annots = parse_annots(dict, resolver);
+
+                    pages.push(PageInfo {
+                        obj_num,
+                        media_box,
+                        crop_box,
+                        rotate,
+                        resources,
+                        contents,
+                        annots,
+                    });
+                }
+            }
+        }
+    }
+
+    if pages.is_empty() {
+        return Err(PdfError::MissingKey("Pages"));
+    }
+
+    Ok(pages)
+}
+
+/// Resolve /Resources from a dict (direct or indirect ref).
+fn resolve_resources(dict: &PdfDict, resolver: &Resolver) -> PdfDict {
+    if let Some(res) = dict.get_dict(b"Resources") {
+        return res.clone();
+    }
+    if let Some(PdfObj::Ref(n, g)) = dict.get(b"Resources") {
+        if let Ok(resolved) = resolver.resolve(*n, *g) {
+            if let Some(d) = resolved.as_dict() {
+                return d.clone();
+            }
+        }
+    }
+    PdfDict::default()
 }
 
 fn collect_pages_recursive(
