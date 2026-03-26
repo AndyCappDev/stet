@@ -769,11 +769,19 @@ impl<'a> ContentInterpreter<'a> {
             }
 
             let old_clip_version = self.gstate.clip_path_version;
+            let old_font_name = std::mem::take(&mut self.gstate.text_font_name);
             self.gstate = saved;
             // If clip changed during the q/Q block, restore it by
             // replaying the full clip stack (not just the last clip).
             if self.gstate.clip_path_version != old_clip_version {
                 self.restore_clip_from_stack();
+            }
+            // Re-resolve current_font if the restored font name differs
+            if self.gstate.text_font_name != old_font_name
+                && !self.gstate.text_font_name.is_empty()
+            {
+                let name = self.gstate.text_font_name.clone();
+                self.resolve_current_font(&name);
             }
         }
         Ok(())
