@@ -2056,6 +2056,23 @@ impl PdfFont {
         }
     }
 
+    /// Get glyph path for a Unicode code point, bypassing CID machinery.
+    /// Used for malformed PDFs that mix WinAnsi literal strings in CID fonts.
+    pub fn glyph_path_unicode(&self, unicode: u16) -> Option<PsPath> {
+        match self {
+            PdfFont::CidTrueType(f) => f.glyph_path_unicode(unicode),
+            _ => None,
+        }
+    }
+
+    /// Get width for a Unicode code point from hmtx, bypassing CID widths.
+    pub fn glyph_width_unicode(&self, unicode: u16) -> f64 {
+        match self {
+            PdfFont::CidTrueType(f) => f.glyph_width_unicode(unicode),
+            _ => 0.0,
+        }
+    }
+
     /// Get width for a character code (in text space units, already ÷1000).
     pub fn glyph_width(&self, char_code: u8) -> f64 {
         match self {
@@ -2094,6 +2111,17 @@ impl PdfFont {
     /// Whether this is a composite (CID) font that uses multi-byte character codes.
     pub fn is_composite(&self) -> bool {
         matches!(self, PdfFont::CidTrueType(_) | PdfFont::CidCff(_))
+    }
+
+    /// Whether a CID maps to a GID that exists in the font.
+    /// Used to distinguish valid 2-byte CID codes from misinterpreted WinAnsi
+    /// bytes in malformed PDFs that mix 1-byte literal text with CID fonts.
+    pub fn has_cid_glyph(&self, cid: u16) -> bool {
+        match self {
+            PdfFont::CidTrueType(f) => f.has_glyph(cid),
+            PdfFont::CidCff(_) => true, // CFF handles this differently
+            _ => false,
+        }
     }
 
     /// Map a raw character code to a CID using the encoding CMap.
@@ -2172,12 +2200,7 @@ impl TrueTypePdfFont {
     fn glyph_path(&self, char_code: u8) -> Option<PsPath> {
         let gid = self.char_code_to_gid(char_code)?;
         let path = skrifa_glyph_path(&self.data, gid, self.units_per_em).or_else(|| {
-            // Only fall back to manual glyf parsing for PDF-subset fonts (locx/glyx)
-            // where skrifa can't parse the tables.
-            use stet_fonts::truetype::find_table;
-            if find_table(&self.data, b"glyx").is_none() {
-                return None;
-            }
+            // Fallback for locx/glyx PDF-subset fonts that skrifa can't parse
             let glyf_data = get_glyf_data(&self.data, gid)?;
             let data_ref = &self.data;
             let p = parse_glyf_to_path(&glyf_data, &|cid| get_glyf_data(data_ref, cid));
@@ -2201,7 +2224,21 @@ impl TrueTypePdfFont {
                     return Some(gid);
                 }
             }
-            // Try gNNNN pattern → direct GID (common in CJK TrueType subsets)
+        }
+        // ToUnicode CMap → Unicode → cmap GID.  Tried before gNNNN because
+        // gNNNN GIDs are font-specific — they're wrong for substitute fonts
+        // (e.g. SimSun g18331 ≠ NotoSerif GID 18331).
+        // Only use when cmap is Unicode-keyed — non-Unicode cmaps map
+        // re-encoded char codes, not Unicode values.
+        if self.cmap_is_unicode {
+            if let Some(&unicode) = self.to_unicode.get(&(char_code as u16))
+                && let Some(&gid) = self.cmap.get(&unicode)
+            {
+                return Some(gid);
+            }
+        }
+        if let Some(glyph_name) = &self.encoding[char_code as usize] {
+            // Try gNNNN pattern → direct GID (for embedded fonts where GIDs match)
             if glyph_name.starts_with('g')
                 && glyph_name.len() > 1
                 && glyph_name[1..].bytes().all(|b| b.is_ascii_digit())
@@ -2214,12 +2251,6 @@ impl TrueTypePdfFont {
         // Direct cmap lookup by char code — preferred over post table for subset
         // TrueType fonts where glyph names may not match character code positions.
         if let Some(&gid) = self.cmap.get(&(char_code as u32)) {
-            return Some(gid);
-        }
-        // ToUnicode CMap → Unicode → cmap GID
-        if let Some(&unicode) = self.to_unicode.get(&(char_code as u16))
-            && let Some(&gid) = self.cmap.get(&unicode)
-        {
             return Some(gid);
         }
         if let Some(glyph_name) = &self.encoding[char_code as usize] {
@@ -2291,22 +2322,35 @@ impl CidTrueTypePdfFont {
             cid
         };
         let path = skrifa_glyph_path(&self.data, gid, self.units_per_em).or_else(|| {
-            // Only fall back to manual glyf parsing for PDF-subset fonts (locx/glyx)
-            // where skrifa can't parse the tables.  For normal fonts, skrifa returning
-            // None means the GID doesn't exist — don't feed random glyf table bytes
-            // to parse_glyf_to_path which would produce millions of garbage segments.
-            use stet_fonts::truetype::find_table;
-            if find_table(&self.data, b"glyx").is_none() {
-                return None;
-            }
+            // Fallback for fonts where skrifa can't render a glyph (e.g. locx/glyx
+            // PDF-subset tables, or skrifa CFF rendering gaps).
             let glyf_data = get_glyf_data(&self.data, gid)?;
             let data_ref = &self.data;
             let p = parse_glyf_to_path(&glyf_data, &|cid| get_glyf_data(data_ref, cid));
-            if p.is_empty() { None } else { Some(p) }
+            // Sanity check: real glyphs have at most a few thousand segments.
+            // Bogus GIDs reading random glyf bytes can produce millions.
+            if p.is_empty() || p.segments.len() > 10_000 { None } else { Some(p) }
         })?;
         let scale = 1.0 / self.units_per_em;
         let m = Matrix::scale(scale, scale);
         Some(path.transform(&m))
+    }
+
+    /// Check if a GID exists in the font (GID < numGlyphs from maxp table).
+    /// Unlike glyph_path_cid, this returns true for space/whitespace GIDs
+    /// that have no visible outline.
+    fn has_glyph(&self, cid: u16) -> bool {
+        // Resolve CID to GID using the same logic as glyph_path_cid
+        let gid = if let Some(ref map) = self.cid_to_gid_map {
+            *map.get(cid as usize).unwrap_or(&0)
+        } else if self.identity_cid_to_gid {
+            cid
+        } else {
+            return true; // non-identity: assume valid
+        };
+        // Check against font's glyph count
+        let num_glyphs = stet_fonts::truetype::get_num_glyphs(&self.data);
+        (gid as u32) < num_glyphs
     }
 
     fn glyph_width_cid(&self, cid: u16) -> f64 {
@@ -2315,6 +2359,30 @@ impl CidTrueTypePdfFont {
             .get(&resolved)
             .copied()
             .unwrap_or(self.default_width)
+    }
+
+    /// Get glyph path for a Unicode code point via cmap, bypassing CID mapping.
+    /// Used when malformed PDFs embed WinAnsi literal strings in a CID font.
+    fn glyph_path_unicode(&self, unicode: u16) -> Option<PsPath> {
+        let &gid = self.cmap.get(&(unicode as u32))?;
+        let path = skrifa_glyph_path(&self.data, gid, self.units_per_em)?;
+        let scale = 1.0 / self.units_per_em;
+        let m = Matrix::scale(scale, scale);
+        Some(path.transform(&m))
+    }
+
+    /// Get width for a Unicode code point from hmtx via cmap, bypassing CID widths.
+    /// Returns width in the same scale as glyph_width_cid (1/1000 of text space).
+    fn glyph_width_unicode(&self, unicode: u16) -> f64 {
+        if let Some(&gid) = self.cmap.get(&(unicode as u32)) {
+            // hmtx_advance_width returns units in 1/1000 em; CID widths are stored
+            // already divided by 1000, so divide here too for consistency.
+            hmtx_advance_width(&self.data, gid, self.units_per_em)
+                .map(|w| w / 1000.0)
+                .unwrap_or(self.default_width)
+        } else {
+            self.default_width
+        }
     }
 }
 
@@ -2598,6 +2666,74 @@ impl skrifa::outline::OutlinePen for PsPathPen {
 /// Hinting is needed for correct composite glyph assembly — some fonts have
 /// TrueType instructions that adjust component positions. Falls back to the
 /// hand-written parser for fonts skrifa can't handle (e.g., locx/glyx subsets).
+/// Map a WinAnsiEncoding byte to its Unicode code point.
+/// Bytes 0x00-0x7F and 0xA0-0xFF match Unicode (ISO 8859-1).
+/// Bytes 0x80-0x9F differ — WinAnsi maps these to specific Unicode characters.
+pub(crate) fn winansi_byte_to_unicode(byte: u8) -> u16 {
+    match byte {
+        0x80 => 0x20AC, // €
+        0x82 => 0x201A, // ‚
+        0x83 => 0x0192, // ƒ
+        0x84 => 0x201E, // „
+        0x85 => 0x2026, // …
+        0x86 => 0x2020, // †
+        0x87 => 0x2021, // ‡
+        0x88 => 0x02C6, // ˆ
+        0x89 => 0x2030, // ‰
+        0x8A => 0x0160, // Š
+        0x8B => 0x2039, // ‹
+        0x8C => 0x0152, // Œ
+        0x8E => 0x017D, // Ž
+        0x91 => 0x2018, // '
+        0x92 => 0x2019, // '
+        0x93 => 0x201C, // "
+        0x94 => 0x201D, // "
+        0x95 => 0x2022, // •
+        0x96 => 0x2013, // –
+        0x97 => 0x2014, // —
+        0x98 => 0x02DC, // ˜
+        0x99 => 0x2122, // ™
+        0x9A => 0x0161, // š
+        0x9B => 0x203A, // ›
+        0x9C => 0x0153, // œ
+        0x9E => 0x017E, // ž
+        0x9F => 0x0178, // Ÿ
+        _ => byte as u16,
+    }
+}
+
+/// Read the advance width for a GID from the hmtx table, returning the width
+/// in text space (1/1000 em) for PDF CID width compatibility.
+fn hmtx_advance_width(font_data: &[u8], gid: u16, units_per_em: f64) -> Option<f64> {
+    use stet_fonts::truetype::{find_table, read_u16};
+    let (hhea_off, _) = find_table(font_data, b"hhea")?;
+    let (hmtx_off, _) = find_table(font_data, b"hmtx")?;
+    if hhea_off + 36 > font_data.len() {
+        return None;
+    }
+    let num_h_metrics = read_u16(font_data, hhea_off + 34) as usize;
+    let gid = gid as usize;
+    let advance = if gid < num_h_metrics {
+        let offset = hmtx_off + gid * 4;
+        if offset + 2 > font_data.len() {
+            return None;
+        }
+        read_u16(font_data, offset)
+    } else {
+        // Use last metric for GIDs beyond num_h_metrics
+        if num_h_metrics == 0 {
+            return None;
+        }
+        let offset = hmtx_off + (num_h_metrics - 1) * 4;
+        if offset + 2 > font_data.len() {
+            return None;
+        }
+        read_u16(font_data, offset)
+    };
+    // Convert from font units to 1/1000 em (PDF text space)
+    Some(advance as f64 / units_per_em * 1000.0)
+}
+
 fn skrifa_glyph_path(font_data: &[u8], gid: u16, units_per_em: f64) -> Option<PsPath> {
     let font_ref = skrifa::FontRef::new(font_data).ok()?;
     let outlines = font_ref.outline_glyphs();

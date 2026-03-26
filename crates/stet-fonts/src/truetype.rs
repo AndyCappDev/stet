@@ -90,6 +90,16 @@ pub fn get_units_per_em(font_data: &[u8]) -> u16 {
     1000 // fallback
 }
 
+/// Get the number of glyphs from the maxp table.
+pub fn get_num_glyphs(font_data: &[u8]) -> u32 {
+    if let Some((offset, _len)) = find_table(font_data, b"maxp")
+        && offset + 6 <= font_data.len()
+    {
+        return read_u16(font_data, offset + 4) as u32;
+    }
+    0
+}
+
 /// Get the advance width for a glyph ID from the hmtx table.
 pub fn get_advance_width(font_data: &[u8], gid: u16) -> Option<u16> {
     let (hhea_off, _) = find_table(font_data, b"hhea")?;
