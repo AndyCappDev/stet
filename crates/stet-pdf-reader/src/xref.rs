@@ -58,9 +58,17 @@ impl XrefTable {
 pub fn parse_xref(data: &[u8]) -> Result<XrefTable, PdfError> {
     let startxref = find_startxref(data)?;
 
+    // If %PDF- header isn't at byte 0 (e.g., UTF-8 BOM or prepended garbage),
+    // all internal offsets (startxref, /Prev) need adjustment. Compute this
+    // before following the xref chain so /Prev pointers are corrected too.
+    let header_offset = data
+        .windows(5)
+        .position(|w| w == b"%PDF-")
+        .unwrap_or(0);
+
     // Follow the /Prev chain, collecting (entries, trailer) from oldest to newest
     let mut sections = Vec::new();
-    let mut offset = startxref;
+    let mut offset = startxref + header_offset;
     let mut visited = std::collections::HashSet::new();
 
     let mut xref_failed = false;
@@ -72,7 +80,9 @@ pub fn parse_xref(data: &[u8]) -> Result<XrefTable, PdfError> {
 
         match parse_xref_section(data, offset) {
             Ok((entries, trailer)) => {
-                let prev = trailer.get_int(b"Prev").map(|v| v as usize);
+                let prev = trailer
+                    .get_int(b"Prev")
+                    .map(|v| v as usize + header_offset);
                 sections.push((entries, trailer));
                 match prev {
                     Some(p) => offset = p,
@@ -91,7 +101,7 @@ pub fn parse_xref(data: &[u8]) -> Result<XrefTable, PdfError> {
     // table is elsewhere in the file). Only fall back to full scan if that also
     // finds nothing.
     if xref_failed && sections.is_empty() {
-        discover_orphaned_xref_sections(data, &mut sections, &mut visited);
+        discover_orphaned_xref_sections(data, &mut sections, &mut visited, header_offset);
         if sections.is_empty() {
             return rebuild_xref_from_scan(data);
         }
@@ -101,7 +111,7 @@ pub fn parse_xref(data: &[u8]) -> Result<XrefTable, PdfError> {
     // sections not reached by the /Prev chain. This handles PDFs with broken
     // incremental updates where the chain dead-ends (missing trailer, circular
     // /Prev, or self-referencing /Prev) before reaching the original xref.
-    discover_orphaned_xref_sections(data, &mut sections, &mut visited);
+    discover_orphaned_xref_sections(data, &mut sections, &mut visited, header_offset);
 
     // Build the combined table: oldest entries first, newest override
     sections.reverse();
@@ -131,13 +141,8 @@ pub fn parse_xref(data: &[u8]) -> Result<XrefTable, PdfError> {
         return rebuild_xref_from_scan(data);
     }
 
-    // If %PDF- header isn't at byte 0 (e.g., prepended garbage), adjust all
-    // xref offsets by the header position. This handles files where bytes were
-    // prepended after the PDF was created, shifting all internal offsets.
-    let header_offset = data
-        .windows(5)
-        .position(|w| w == b"%PDF-")
-        .unwrap_or(0);
+    // If %PDF- header isn't at byte 0 (e.g., UTF-8 BOM or prepended garbage),
+    // adjust all InFile xref offsets by the header position.
     if header_offset > 0 {
         for entry in combined_entries.iter_mut().flatten() {
             if let XrefEntry::InFile { offset, .. } = entry {
@@ -164,6 +169,7 @@ fn discover_orphaned_xref_sections(
     data: &[u8],
     sections: &mut Vec<(Vec<(u32, XrefEntry)>, PdfDict)>,
     visited: &mut std::collections::HashSet<usize>,
+    header_offset: usize,
 ) {
     let mut candidates = Vec::new();
 
@@ -173,7 +179,8 @@ fn discover_orphaned_xref_sections(
         if &data[pos..pos + 7] == b"trailer" {
             let end = (pos + 500).min(data.len());
             if let Some(prev_off) = find_int_after_key(&data[pos..end], b"/Prev") {
-                candidates.push(prev_off);
+                // /Prev values are PDF-internal offsets, need BOM adjustment
+                candidates.push(prev_off + header_offset);
             }
         }
         // Also collect startxref values (point to xref sections from older revisions)
@@ -181,7 +188,8 @@ fn discover_orphaned_xref_sections(
             let end = (pos + 50).min(data.len());
             if let Some(sx_off) = find_int_after_key(&data[pos..end], b"startxref") {
                 if sx_off > 0 {
-                    candidates.push(sx_off);
+                    // startxref values are PDF-internal offsets, need BOM adjustment
+                    candidates.push(sx_off + header_offset);
                 }
             }
         }
@@ -190,6 +198,7 @@ fn discover_orphaned_xref_sections(
         if pos + 4 <= data.len() && &data[pos..pos + 4] == b"xref" {
             // Make sure this isn't "startxref"
             if pos == 0 || data[pos - 1] != b't' {
+                // This is already an actual file position, no adjustment needed
                 candidates.push(pos);
             }
         }
@@ -205,7 +214,9 @@ fn discover_orphaned_xref_sections(
             }
             match parse_xref_section(data, offset) {
                 Ok((entries, trailer)) => {
-                    let prev = trailer.get_int(b"Prev").map(|v| v as usize);
+                    let prev = trailer
+                        .get_int(b"Prev")
+                        .map(|v| v as usize + header_offset);
                     sections.push((entries, trailer));
                     match prev {
                         Some(p) => offset = p,
