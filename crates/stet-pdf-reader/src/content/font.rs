@@ -13,7 +13,9 @@ use stet_fonts::charstring::{execute_charstring, execute_charstring_mm};
 use stet_fonts::encoding::{MACROMAN_ENCODING, STANDARD_ENCODING, WINANSI_ENCODING};
 use stet_fonts::geometry::PathSegment;
 use stet_fonts::geometry::{Matrix, PsPath};
-use stet_fonts::truetype::{get_glyf_data, get_units_per_em, parse_cmap, parse_glyf_to_path};
+use stet_fonts::truetype::{
+    get_glyf_data, get_units_per_em, parse_cmap, parse_cmap_with_info, parse_glyf_to_path,
+};
 use stet_fonts::type1_parser::parse_type1;
 use stet_fonts::type2_charstring::execute_type2_charstring;
 
@@ -49,6 +51,10 @@ pub struct TrueTypePdfFont {
     pub encoding: [Option<String>; 256],
     pub widths: [f64; 256],
     pub cmap: HashMap<u32, u16>,
+    /// Whether the cmap maps Unicode values (true) or re-encoded char codes (false).
+    /// Non-Unicode cmaps come from (1,0) Mac Roman or (3,0) Symbol subtables in
+    /// subset fonts — the encoding→unicode→cmap lookup path must be skipped.
+    pub cmap_is_unicode: bool,
     /// Glyph name → GID mapping from the `post` table (for ligatures and
     /// other glyphs not reachable via Unicode cmap lookup).
     pub post_name_to_gid: HashMap<String, u16>,
@@ -301,7 +307,7 @@ pub fn resolve_font(
         && let Ok(data) = load_system_truetype_font(&base_font_name)
     {
         let units_per_em = get_units_per_em(&data) as f64;
-        let cmap = parse_cmap(&data);
+        let (cmap, cmap_is_unicode) = parse_cmap_with_info(&data);
         let post_name_to_gid = stet_fonts::system_fonts::parse_post_table(&data)
             .map(|gid_to_name| {
                 gid_to_name
@@ -322,6 +328,7 @@ pub fn resolve_font(
             encoding,
             widths,
             cmap,
+            cmap_is_unicode,
             post_name_to_gid,
             units_per_em,
             to_unicode,
@@ -1387,7 +1394,7 @@ fn resolve_truetype(
     }
 
     let units_per_em = get_units_per_em(&data) as f64;
-    let cmap = parse_cmap(&data);
+    let (cmap, cmap_is_unicode) = parse_cmap_with_info(&data);
 
     // Parse post table (GID → name) and invert to name → GID for fallback lookup
     let post_name_to_gid = stet_fonts::system_fonts::parse_post_table(&data)
@@ -1404,6 +1411,7 @@ fn resolve_truetype(
         encoding,
         widths,
         cmap,
+        cmap_is_unicode,
         post_name_to_gid,
         units_per_em,
         to_unicode: if let Some(tu_obj) = font_dict.get(b"ToUnicode") {
@@ -2177,11 +2185,16 @@ impl TrueTypePdfFont {
 
     fn char_code_to_gid(&self, char_code: u8) -> Option<u16> {
         if let Some(glyph_name) = &self.encoding[char_code as usize] {
-            // Try encoding → glyph name → Unicode → cmap
-            if let Some(unicode) = stet_fonts::agl::glyph_name_to_unicode(glyph_name)
-                && let Some(&gid) = self.cmap.get(&(unicode as u32))
-            {
-                return Some(gid);
+            // Only use encoding → glyph name → Unicode → cmap when the cmap
+            // is Unicode-keyed ((3,1), (3,10), or (0,*)).  Non-Unicode cmaps
+            // ((1,0) Mac Roman, (3,0) Symbol) in subset fonts map re-encoded
+            // char codes directly — looking up Unicode values gives wrong GIDs.
+            if self.cmap_is_unicode {
+                if let Some(unicode) = stet_fonts::agl::glyph_name_to_unicode(glyph_name)
+                    && let Some(&gid) = self.cmap.get(&(unicode as u32))
+                {
+                    return Some(gid);
+                }
             }
             // Try gNNNN pattern → direct GID (common in CJK TrueType subsets)
             if glyph_name.starts_with('g')

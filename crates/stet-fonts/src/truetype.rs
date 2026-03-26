@@ -547,13 +547,21 @@ pub fn parse_glyf_to_path(glyf_data: &[u8], resolver: &dyn Fn(u16) -> Option<Vec
 ///
 /// Supports Format 0 (byte encoding), Format 4 (segment mapping), and Format 6 (trimmed table).
 pub fn parse_cmap(font_data: &[u8]) -> std::collections::HashMap<u32, u16> {
+    parse_cmap_with_info(font_data).0
+}
+
+/// Parse the cmap table, returning the mapping and whether the selected
+/// subtable is Unicode-keyed (platforms (3,1), (3,10), or (0,*)).
+/// Non-Unicode cmaps ((1,0) Mac Roman, (3,0) Windows Symbol) map re-encoded
+/// character codes or F0XX symbol codes — NOT Unicode values.
+pub fn parse_cmap_with_info(font_data: &[u8]) -> (std::collections::HashMap<u32, u16>, bool) {
     let mut map = std::collections::HashMap::new();
     let (cmap_off, _cmap_len) = match find_table(font_data, b"cmap") {
         Some(v) => v,
-        None => return map,
+        None => return (map, false),
     };
     if cmap_off + 4 > font_data.len() {
-        return map;
+        return (map, false);
     }
     let num_subtables = read_u16(font_data, cmap_off + 2) as usize;
 
@@ -581,13 +589,15 @@ pub fn parse_cmap(font_data: &[u8]) -> std::collections::HashMap<u32, u16> {
             best_offset = Some(cmap_off + offset);
         }
     }
+    // Unicode-keyed: (3,10), (3,1), or (0,*)  — priority 3+
+    let cmap_is_unicode = best_priority >= 3;
 
     let subtable_off = match best_offset {
         Some(v) => v,
-        None => return map,
+        None => return (map, cmap_is_unicode),
     };
     if subtable_off + 2 > font_data.len() {
-        return map;
+        return (map, cmap_is_unicode);
     }
     let format = read_u16(font_data, subtable_off);
 
@@ -595,7 +605,7 @@ pub fn parse_cmap(font_data: &[u8]) -> std::collections::HashMap<u32, u16> {
         0 => {
             // Format 0: byte encoding table
             if subtable_off + 6 + 256 > font_data.len() {
-                return map;
+                return (map, cmap_is_unicode);
             }
             for code in 0u32..256 {
                 let gid = font_data[subtable_off + 6 + code as usize] as u16;
@@ -607,7 +617,7 @@ pub fn parse_cmap(font_data: &[u8]) -> std::collections::HashMap<u32, u16> {
         4 => {
             // Format 4: segment mapping to delta values
             if subtable_off + 14 > font_data.len() {
-                return map;
+                return (map, cmap_is_unicode);
             }
             let seg_count = read_u16(font_data, subtable_off + 6) as usize / 2;
             let end_codes_off = subtable_off + 14;
@@ -616,7 +626,7 @@ pub fn parse_cmap(font_data: &[u8]) -> std::collections::HashMap<u32, u16> {
             let range_offsets_off = deltas_off + seg_count * 2;
 
             if range_offsets_off + seg_count * 2 > font_data.len() {
-                return map;
+                return (map, cmap_is_unicode);
             }
 
             for seg in 0..seg_count {
@@ -656,13 +666,13 @@ pub fn parse_cmap(font_data: &[u8]) -> std::collections::HashMap<u32, u16> {
         6 => {
             // Format 6: trimmed table mapping
             if subtable_off + 10 > font_data.len() {
-                return map;
+                return (map, cmap_is_unicode);
             }
             let first_code = read_u16(font_data, subtable_off + 6) as u32;
             let entry_count = read_u16(font_data, subtable_off + 8) as usize;
             let entries_off = subtable_off + 10;
             if entries_off + entry_count * 2 > font_data.len() {
-                return map;
+                return (map, cmap_is_unicode);
             }
             for i in 0..entry_count {
                 let gid = read_u16(font_data, entries_off + i * 2);
@@ -674,12 +684,12 @@ pub fn parse_cmap(font_data: &[u8]) -> std::collections::HashMap<u32, u16> {
         12 => {
             // Format 12: segmented coverage (full 32-bit Unicode)
             if subtable_off + 16 > font_data.len() {
-                return map;
+                return (map, cmap_is_unicode);
             }
             let n_groups = read_u32(font_data, subtable_off + 12) as usize;
             let groups_off = subtable_off + 16;
             if groups_off + n_groups * 12 > font_data.len() {
-                return map;
+                return (map, cmap_is_unicode);
             }
             for i in 0..n_groups {
                 let g = groups_off + i * 12;
@@ -697,7 +707,7 @@ pub fn parse_cmap(font_data: &[u8]) -> std::collections::HashMap<u32, u16> {
         _ => {} // Unsupported format
     }
 
-    map
+    (map, cmap_is_unicode)
 }
 
 #[cfg(test)]
