@@ -337,17 +337,6 @@ impl<'a> ContentInterpreter<'a> {
             })
             .unwrap_or([rect[0], rect[1], rect[2], rect[3]]);
 
-        // Build transform: map BBox → Rect
-        let bbox_w = (bbox[2] - bbox[0]).abs().max(0.001);
-        let bbox_h = (bbox[3] - bbox[1]).abs().max(0.001);
-        let rect_w = (rect[2] - rect[0]).abs();
-        let rect_h = (rect[3] - rect[1]).abs();
-        let sx = rect_w / bbox_w;
-        let sy = rect_h / bbox_h;
-        let tx = rect[0] - bbox[0] * sx;
-        let ty = rect[1] - bbox[1] * sy;
-        let bbox_to_rect = Matrix::new(sx, 0.0, 0.0, sy, tx, ty);
-
         // Apply form's own matrix if present
         let form_matrix = form_dict
             .get_array(b"Matrix")
@@ -361,6 +350,22 @@ impl<'a> ContentInterpreter<'a> {
             })
             .unwrap_or_else(Matrix::identity);
 
+        // Build transform: map the Matrix-transformed BBox → Rect.
+        // Per PDF spec 12.5.5, the form's Matrix transforms the BBox into the
+        // coordinate system where the appearance was authored. We need to map
+        // that transformed extent to the annotation's Rect on the page.
+        let (tb0x, tb0y) = form_matrix.transform_point(bbox[0], bbox[1]);
+        let (tb1x, tb1y) = form_matrix.transform_point(bbox[2], bbox[3]);
+        let tbbox_w = (tb1x - tb0x).abs().max(0.001);
+        let tbbox_h = (tb1y - tb0y).abs().max(0.001);
+        let rect_w = (rect[2] - rect[0]).abs();
+        let rect_h = (rect[3] - rect[1]).abs();
+        let sx = rect_w / tbbox_w;
+        let sy = rect_h / tbbox_h;
+        let tx = rect[0] - tb0x.min(tb1x) * sx;
+        let ty = rect[1] - tb0y.min(tb1y) * sy;
+        let bbox_to_rect = Matrix::new(sx, 0.0, 0.0, sy, tx, ty);
+
         // Render as a Form XObject with the computed transform
         let saved_gstate = self.gstate.clone();
         let saved_stack_depth = self.gstate_stack.len();
@@ -373,6 +378,8 @@ impl<'a> ContentInterpreter<'a> {
         }
 
         // Apply CTM: page CTM → bbox_to_rect → form_matrix
+        // The form_matrix maps form space to the original authoring space,
+        // and bbox_to_rect maps that space to the annotation Rect.
         self.gstate.ctm = self.gstate.ctm.concat(&bbox_to_rect).concat(&form_matrix);
 
         // Update content_stream_ctm so shading patterns inside the annotation
