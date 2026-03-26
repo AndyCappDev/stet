@@ -1849,14 +1849,18 @@ fn apply_mask_color_rgba(rgba: &mut [u8], sample_data: &[u8], params: &ImagePara
 
 /// Choose filter quality for image drawing.
 ///
-/// Use Nearest only for exact 1:1 pixel mapping (no scaling). For any scaling
-/// (up or down), Bilinear produces much better results — especially for scanned
-/// document bitmaps and low-DPI images.
-fn image_filter_quality(transform: Transform) -> stet_tiny_skia::FilterQuality {
+/// When `interpolate` is false, use Nearest for upscaling (crisp pixel edges)
+/// and Bilinear only for downscaling (proper area averaging). When `interpolate`
+/// is true, use Bilinear for any scaling.
+fn image_filter_quality(transform: Transform, interpolate: bool) -> stet_tiny_skia::FilterQuality {
     let eff_sx = (transform.sx * transform.sx + transform.ky * transform.ky).sqrt();
     let eff_sy = (transform.kx * transform.kx + transform.sy * transform.sy).sqrt();
+    let min_scale = eff_sx.min(eff_sy);
     // Near-exact 1:1: Nearest is pixel-perfect and faster
     if (eff_sx - 1.0).abs() < 0.01 && (eff_sy - 1.0).abs() < 0.01 {
+        stet_tiny_skia::FilterQuality::Nearest
+    } else if !interpolate && min_scale >= 0.95 {
+        // Non-interpolated upscaling: nearest-neighbor for crisp pixel edges
         stet_tiny_skia::FilterQuality::Nearest
     } else {
         stet_tiny_skia::FilterQuality::Bilinear
@@ -1872,34 +1876,36 @@ fn prescale_image(
     w: u32,
     h: u32,
     transform: Transform,
+    interpolate: bool,
 ) -> Option<(Vec<u8>, u32, u32, Transform)> {
     // Compute effective scale factors from the 2×2 part of the transform.
     let scale_x = (transform.sx * transform.sx + transform.ky * transform.ky).sqrt();
     let scale_y = (transform.kx * transform.kx + transform.sy * transform.sy).sqrt();
     let min_scale = scale_x.min(scale_y);
 
-    // Upscaling: use bicubic resampling for axis-aligned images.
-    // tiny-skia's bilinear produces soft, noisy results when upscaling scanned
-    // document images (e.g. 150 DPI source at 300 DPI output). Bicubic (Catmull-Rom)
-    // is much sharper — matching GhostScript / Firefox quality.
+    // Upscaling: only apply bicubic resampling when Interpolate is true.
+    // Per PLRM/PDF spec, non-interpolated images should use nearest-neighbor
+    // for upscaling (crisp pixel boundaries, no smoothing).
     if min_scale > 1.05 {
-        let is_axis_aligned = transform.kx.abs() < 1e-4 && transform.ky.abs() < 1e-4;
-        if is_axis_aligned && w >= 2 && h >= 2 {
-            let dw = (w as f32 * transform.sx.abs()).round().max(1.0) as u32;
-            let dh = (h as f32 * transform.sy.abs()).round().max(1.0) as u32;
-            if dw > w || dh > h {
-                let resampled = bicubic_resample(rgba_data, w, h, dw, dh);
-                let new_sx = transform.sx * w as f32 / dw as f32;
-                let new_sy = transform.sy * h as f32 / dh as f32;
-                let adjusted = Transform::from_row(
-                    new_sx,
-                    transform.ky,
-                    transform.kx,
-                    new_sy,
-                    transform.tx,
-                    transform.ty,
-                );
-                return Some((resampled, dw, dh, adjusted));
+        if interpolate {
+            let is_axis_aligned = transform.kx.abs() < 1e-4 && transform.ky.abs() < 1e-4;
+            if is_axis_aligned && w >= 2 && h >= 2 {
+                let dw = (w as f32 * transform.sx.abs()).round().max(1.0) as u32;
+                let dh = (h as f32 * transform.sy.abs()).round().max(1.0) as u32;
+                if dw > w || dh > h {
+                    let resampled = bicubic_resample(rgba_data, w, h, dw, dh);
+                    let new_sx = transform.sx * w as f32 / dw as f32;
+                    let new_sy = transform.sy * h as f32 / dh as f32;
+                    let adjusted = Transform::from_row(
+                        new_sx,
+                        transform.ky,
+                        transform.kx,
+                        new_sy,
+                        transform.tx,
+                        transform.ty,
+                    );
+                    return Some((resampled, dw, dh, adjusted));
+                }
             }
         }
         return None;
@@ -2434,7 +2440,7 @@ fn render_element(
                 // images need proper area averaging when shrinking — "no interpolation"
                 // means don't smooth when *upscaling*, but downscaling without averaging
                 // produces aliased garbage.
-                let prescaled = prescale_image(rgba_data, iw, ih, raw_transform);
+                let prescaled = prescale_image(rgba_data, iw, ih, raw_transform, params.interpolate);
                 let (img_data, img_w, img_h, transform) = match &prescaled {
                     Some((data, w, h, t)) => (data.as_slice(), *w, *h, *t),
                     None => (rgba_data, iw, ih, raw_transform),
@@ -2462,7 +2468,7 @@ fn render_element(
                     }
                 };
                 let img_paint = stet_tiny_skia::PixmapPaint {
-                    quality: image_filter_quality(transform),
+                    quality: image_filter_quality(transform, params.interpolate),
                     opacity: params.alpha as f32,
                     blend_mode: u8_to_blend_mode(params.blend_mode),
                 };
@@ -4126,7 +4132,7 @@ impl OutputDevice for SkiaDevice {
         let combined = params.ctm.concat(&image_inv);
         let raw_transform = to_transform(&combined);
 
-        let prescaled = prescale_image(&rgba_data, w, h, raw_transform);
+        let prescaled = prescale_image(&rgba_data, w, h, raw_transform, params.interpolate);
         let (img_data, img_w, img_h, transform) = match &prescaled {
             Some((data, pw, ph, t)) => (data.as_slice(), *pw, *ph, *t),
             None => (rgba_data.as_slice(), w, h, raw_transform),
@@ -4143,7 +4149,7 @@ impl OutputDevice for SkiaDevice {
         };
 
         let paint = stet_tiny_skia::PixmapPaint {
-            quality: image_filter_quality(transform),
+            quality: image_filter_quality(transform, params.interpolate),
             opacity: params.alpha as f32,
             blend_mode: u8_to_blend_mode(params.blend_mode),
         };
