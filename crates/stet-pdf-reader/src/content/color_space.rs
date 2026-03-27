@@ -677,7 +677,9 @@ pub fn to_image_color_space(cs: &ResolvedColorSpace) -> ImageColorSpace {
     }
 }
 
-/// Try to convert ICCBased image data through the ICC profile.
+/// Try to convert ICCBased (or Indexed-over-ICCBased) image data through the
+/// ICC profile.  For Indexed images, the palette entries are converted through
+/// the profile so the expanded pixel data is already RGB.
 /// Returns (converted_data, ImageColorSpace::DeviceRGB) on success, or None to fall back.
 pub fn convert_icc_image_data(
     cs: &ResolvedColorSpace,
@@ -686,6 +688,46 @@ pub fn convert_icc_image_data(
     height: u32,
     icc_cache: &mut IccCache,
 ) -> Option<(Vec<u8>, ImageColorSpace)> {
+    // Handle Indexed with ICCBased/DeviceCMYK base: convert the palette entries
+    // through the ICC profile so expanded pixel data is already RGB.
+    if let ResolvedColorSpace::Indexed {
+        base,
+        hival,
+        lookup,
+    } = cs
+    {
+        // Only convert ICCBased CMYK palettes through their embedded ICC
+        // profile — this ensures palette colors match ICC-converted fill colors
+        // from the same profile.  DeviceCMYK palettes use the PLRM formula
+        // (matching how DeviceCMYK fills are rendered), and RGB/Gray palettes
+        // are already in a usable representation.
+        let is_icc_cmyk_base = matches!(
+            base.as_ref(),
+            ResolvedColorSpace::ICCBased { n, .. } if *n == 4
+        );
+        if is_icc_cmyk_base {
+            let n_entries = (*hival as usize) + 1;
+            // Convert palette entries through ICC
+            if let Some((rgb_palette, _)) =
+                convert_icc_image_data(base, lookup, n_entries as u32, 1, icc_cache)
+            {
+                // Expand indices using the RGB palette
+                let pixel_count = (width * height) as usize;
+                let mut rgb_data = vec![0u8; pixel_count * 3];
+                for i in 0..pixel_count {
+                    let idx = data.get(i).copied().unwrap_or(0) as usize;
+                    let idx = idx.min(n_entries - 1);
+                    let src = idx * 3;
+                    let dst = i * 3;
+                    rgb_data[dst] = rgb_palette.get(src).copied().unwrap_or(0);
+                    rgb_data[dst + 1] = rgb_palette.get(src + 1).copied().unwrap_or(0);
+                    rgb_data[dst + 2] = rgb_palette.get(src + 2).copied().unwrap_or(0);
+                }
+                return Some((rgb_data, ImageColorSpace::DeviceRGB));
+            }
+        }
+    }
+
     let (hash_result, alternate) = match cs {
         ResolvedColorSpace::ICCBased {
             n,
