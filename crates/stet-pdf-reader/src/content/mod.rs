@@ -736,8 +736,45 @@ impl<'a> ContentInterpreter<'a> {
     /// Apply pending clip if set, then clear it.
     fn apply_pending_clip(&mut self) {
         if let Some((path, fill_rule)) = self.gstate.pending_clip.take() {
+            // A clip path with only MoveTo segments (no lines, curves, or close)
+            // has zero area — it clips everything out. Replace with an empty rect
+            // so the renderer produces a zero-area clip instead of treating the
+            // degenerate path as no-op.
+            let has_drawing_segments = path.segments.iter().any(|s| {
+                matches!(
+                    s,
+                    PathSegment::LineTo(..) | PathSegment::CurveTo { .. } | PathSegment::ClosePath
+                )
+            });
+            // A path with MoveTo but no lines/curves has zero area — clip everything.
+            // An empty path (no segments at all) is a no-op — skip the clip entirely.
+            let has_moveto = path.segments.iter().any(|s| matches!(s, PathSegment::MoveTo(..)));
+            if !has_drawing_segments && has_moveto {
+                // Degenerate path (only MoveTo): create a zero-area clip
+                let mut empty = PsPath::new();
+                empty.segments.push(PathSegment::MoveTo(0.0, 0.0));
+                empty.segments.push(PathSegment::LineTo(0.0, 0.0));
+                empty.segments.push(PathSegment::ClosePath);
+                self.display_list.push(DisplayElement::Clip {
+                    path: empty.clone(),
+                    params: ClipParams {
+                        fill_rule,
+                        ctm: Matrix::identity(),
+                        stroke_params: None,
+                    },
+                });
+                self.gstate.clip_stack.push((empty.clone(), fill_rule));
+                self.gstate.clip_path = Some(empty);
+                self.gstate.clip_path_version += 1;
+                return;
+            }
+            if !has_drawing_segments {
+                // Empty path: no-op, don't change clip
+                return;
+            }
+            let clip_path = path;
             self.display_list.push(DisplayElement::Clip {
-                path: path.clone(),
+                path: clip_path.clone(),
                 params: ClipParams {
                     fill_rule,
                     ctm: Matrix::identity(),
@@ -745,8 +782,8 @@ impl<'a> ContentInterpreter<'a> {
                 },
             });
             // Track the clip for restoring on Q
-            self.gstate.clip_stack.push((path.clone(), fill_rule));
-            self.gstate.clip_path = Some(path);
+            self.gstate.clip_stack.push((clip_path.clone(), fill_rule));
+            self.gstate.clip_path = Some(clip_path);
             self.gstate.clip_path_version += 1;
         }
     }
