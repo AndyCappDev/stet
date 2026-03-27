@@ -2043,7 +2043,30 @@ impl<'a> ContentInterpreter<'a> {
         let smask_in_data = dict.get_int(b"SMaskInData").unwrap_or(0);
 
         // Decode the stream data
-        let sample_data = self.resolver.stream_data_from_obj(obj)?;
+        let mut sample_data = self.resolver.stream_data_from_obj(obj)?;
+
+        // JPXDecode: the JP2 decoder may return more components than the PDF
+        // ColorSpace declares (e.g. embedded alpha when PDF says 3-component RGB).
+        // Strip excess components to match the expected stride, otherwise the
+        // extra bytes cause row misalignment and tiling/color artifacts.
+        if dict.get_name(b"Filter") == Some(b"JPXDecode") {
+            if let Some(ref cs) = resolved_cs {
+                let expected_comps = cs.num_components() as usize;
+                let pixels = width as usize * height as usize;
+                let expected_len = pixels * expected_comps;
+                if pixels > 0 && sample_data.len() > expected_len {
+                    let actual_comps = sample_data.len() / pixels;
+                    if actual_comps > expected_comps && sample_data.len() == pixels * actual_comps {
+                        // Strip trailing components (typically alpha) from each pixel
+                        let mut stripped = Vec::with_capacity(expected_len);
+                        for chunk in sample_data.chunks_exact(actual_comps) {
+                            stripped.extend_from_slice(&chunk[..expected_comps]);
+                        }
+                        sample_data = stripped;
+                    }
+                }
+            }
+        }
 
         // For JPXDecode without explicit ColorSpace, infer from decoded data length.
         // JP2 embeds its own color space info; the decoder returns interleaved pixel data
