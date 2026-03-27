@@ -270,6 +270,27 @@ impl<'a> Resolver<'a> {
         }
     }
 
+    /// Return the raw (undecoded, possibly encrypted) stream bytes for an
+    /// object reference.  Used to parse format-specific headers (e.g. JPEG SOF)
+    /// before full filter decoding.
+    pub fn raw_stream_bytes(&self, obj: &PdfObj) -> Option<&[u8]> {
+        let (obj_num, gen_num) = match obj {
+            PdfObj::Ref(n, g) => (*n, *g),
+            _ => return None,
+        };
+        let resolved = self.resolve(obj_num, gen_num).ok()?;
+        if let PdfObj::Stream {
+            data_offset,
+            data_len,
+            ..
+        } = resolved
+        {
+            Some(&self.data[data_offset..data_offset + data_len])
+        } else {
+            None
+        }
+    }
+
     /// Access the trailer dictionary.
     pub fn trailer(&self) -> &PdfDict {
         &self.xref.trailer

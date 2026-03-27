@@ -2133,6 +2133,22 @@ impl<'a> ContentInterpreter<'a> {
         // Decode the stream data
         let sample_data = self.resolver.stream_data_from_obj(obj)?;
 
+        // For DCTDecode, the JPEG's actual dimensions may differ from the PDF
+        // dict's /Width and /Height.  Trust the JPEG header when they disagree.
+        let filter_is_dct = matches!(dict.get_name(b"Filter"), Some(b"DCTDecode" | b"DCT"));
+        let (width, height) = if filter_is_dct {
+            if let Some(raw) = self.resolver.raw_stream_bytes(obj)
+                && let Some((jw, jh)) = crate::filters::jpeg_dimensions(raw)
+                && (jw != width || jh != height)
+            {
+                (jw, jh)
+            } else {
+                (width, height)
+            }
+        } else {
+            (width, height)
+        };
+
         // For JPXDecode without explicit ColorSpace, infer from decoded data length.
         // JP2 embeds its own color space info; the decoder returns interleaved pixel data
         // whose length = width × height × num_components.

@@ -623,6 +623,37 @@ fn decode_dct(data: &[u8]) -> Result<Vec<u8>, PdfError> {
     Ok(pixels)
 }
 
+/// Extract image dimensions from a JPEG's SOF marker.
+/// Returns `(width, height)` if found.
+pub fn jpeg_dimensions(data: &[u8]) -> Option<(u32, u32)> {
+    if data.len() < 2 || data[0] != 0xFF || data[1] != 0xD8 {
+        return None;
+    }
+    let mut pos = 2;
+    while pos + 4 < data.len() {
+        if data[pos] != 0xFF {
+            pos += 1;
+            continue;
+        }
+        let marker = data[pos + 1];
+        // SOF markers: 0xC0-0xCF except 0xC4 (DHT), 0xC8 (JPG), 0xCC (DAC)
+        if (0xC0..=0xCF).contains(&marker) && marker != 0xC4 && marker != 0xC8 && marker != 0xCC
+        {
+            if pos + 9 < data.len() {
+                let h = ((data[pos + 5] as u32) << 8) | data[pos + 6] as u32;
+                let w = ((data[pos + 7] as u32) << 8) | data[pos + 8] as u32;
+                return Some((w, h));
+            }
+        }
+        if marker == 0xDA {
+            break; // SOS — no more markers
+        }
+        let seg_len = ((data[pos + 2] as usize) << 8) | data[pos + 3] as usize;
+        pos += 2 + seg_len;
+    }
+    None
+}
+
 /// Check if a JPEG has Adobe APP14 ColorTransform=0 AND uniform sampling factors,
 /// confirming the data is truly raw RGB (not YCbCr mislabeled with ColorTransform=0).
 /// YCbCr JPEGs use chroma subsampling (e.g., Y=2×2, Cb/Cr=1×1) while RGB JPEGs
