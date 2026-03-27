@@ -358,6 +358,39 @@ fn rebuild_xref_from_scan(data: &[u8]) -> Result<XrefTable, PdfError> {
         }
     }
 
+    // Try to parse any xref stream objects found during the scan.
+    // These carry the trailer dict (with /Root) and may reference objects
+    // inside object streams that aren't discoverable by byte-scanning alone.
+    for entry in entries.iter().flatten() {
+        if let XrefEntry::InFile { offset, .. } = entry {
+            let search_end = (*offset + 512).min(data.len());
+            let slice = &data[*offset..search_end];
+            if slice.windows(10).any(|w| w == b"/Type/XRef")
+                || slice.windows(11).any(|w| w == b"/Type /XRef")
+            {
+                if let Ok((xref_entries, xref_trailer)) = parse_xref_stream(data, *offset) {
+                    // Merge entries from xref stream (includes ObjStm refs)
+                    let mut merged = entries;
+                    for (num, xentry) in xref_entries {
+                        let idx = num as usize;
+                        if idx < 100_000 {
+                            if idx >= merged.len() {
+                                merged.resize(idx + 1, None);
+                            }
+                            if merged[idx].is_none() {
+                                merged[idx] = Some(xentry);
+                            }
+                        }
+                    }
+                    return Ok(XrefTable {
+                        entries: merged,
+                        trailer: xref_trailer,
+                    });
+                }
+            }
+        }
+    }
+
     // Parse the trailer dict (search for "trailer" keyword)
     let trailer = find_trailer_dict(data).unwrap_or_default();
 
@@ -460,6 +493,27 @@ fn find_catalog_obj(data: &[u8], entries: &[Option<XrefEntry>]) -> Option<u32> {
                 // Verify /Type precedes it
                 if idx > 5 && slice[..idx].windows(5).any(|w| w == b"/Type") {
                     return Some(num as u32);
+                }
+            }
+            // Also check xref stream objects which carry /Root in their dict
+            // (the catalog itself may be inside an object stream, unreachable
+            // by byte-scanning, but the xref stream dict has `/Root N 0 R`).
+            if slice.windows(5).any(|w| w == b"/Root")
+                && slice.windows(10).any(|w| w == b"/Type/XRef")
+            {
+                // Extract the /Root reference: parse the dict to find it
+                let obj_start = slice
+                    .windows(3)
+                    .position(|w| w == b"obj")
+                    .map(|p| p + 3)
+                    .unwrap_or(0);
+                let mut lexer = Lexer::at(slice, obj_start);
+                if let Ok(Token::DictBegin) = lexer.next_token()
+                    && let Ok(dict) = parse_dict_body(&mut lexer)
+                {
+                    if let Some((root_num, _)) = dict.get_ref(b"Root") {
+                        return Some(root_num);
+                    }
                 }
             }
         }

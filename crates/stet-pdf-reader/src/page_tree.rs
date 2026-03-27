@@ -39,12 +39,18 @@ struct Inherited {
 /// Traverse the page tree and collect all leaf pages in order.
 pub fn collect_pages(resolver: &Resolver) -> Result<Vec<PageInfo>, PdfError> {
     // Get /Root -> Catalog
-    let root_ref = resolver
-        .trailer()
-        .get_ref(b"Root")
-        .ok_or(PdfError::MissingKey("Root"))?;
-    let catalog = resolver.resolve(root_ref.0, root_ref.1)?;
-    let catalog_dict = catalog.as_dict().ok_or(PdfError::MalformedTrailer)?;
+    let root_ref = match resolver.trailer().get_ref(b"Root") {
+        Some(r) => r,
+        None => return collect_pages_by_scan(resolver),
+    };
+    let catalog = match resolver.resolve(root_ref.0, root_ref.1) {
+        Ok(c) => c,
+        Err(_) => return collect_pages_by_scan(resolver),
+    };
+    let catalog_dict = match catalog.as_dict() {
+        Some(d) => d,
+        None => return collect_pages_by_scan(resolver),
+    };
 
     // Get /Pages — if the page tree root is missing (truncated PDF),
     // fall back to scanning all objects for /Type /Page entries.
