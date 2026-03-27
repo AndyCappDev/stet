@@ -2522,46 +2522,15 @@ impl<'a> ContentInterpreter<'a> {
         };
 
         // Handle SMask (soft mask / alpha channel).
+        // Emit the image and its SMask as a SoftMasked display element so the
+        // renderer scales them independently, preserving visible edges at hard
+        // alpha boundaries (e.g. text outlines on transparent backgrounds).
         // When the mask is larger than the image (e.g., 1-bit text mask on a 2×2
         // color image), upscale the image to the mask dimensions to preserve detail.
-        let (sample_data, color_space, width, height) = if !is_image_mask {
-            if let Some((smask_data, mw, mh)) = self.resolve_smask(dict)? {
-                let (img_data, img_w, img_h) = if mw > width || mh > height {
-                    let upscaled =
-                        bilinear_upsample_image(&sample_data, width, height, mw, mh, &color_space);
-                    (upscaled, mw, mh)
-                } else {
-                    (sample_data, width, height)
-                };
-                // Resample SMask if it doesn't match the (possibly upscaled) image dims
-                let smask_data = if mw != img_w || mh != img_h {
-                    let mut resampled = vec![0u8; (img_w * img_h) as usize];
-                    for y in 0..img_h {
-                        let sy = (y as u64 * mh as u64 / img_h as u64) as u32;
-                        for x in 0..img_w {
-                            let sx = (x as u64 * mw as u64 / img_w as u64) as u32;
-                            resampled[(y * img_w + x) as usize] =
-                                smask_data.get((sy * mw + sx) as usize).copied().unwrap_or(0);
-                        }
-                    }
-                    resampled
-                } else {
-                    smask_data
-                };
-                let rgba = merge_rgb_with_smask(
-                    &img_data,
-                    &smask_data,
-                    &color_space,
-                    img_w,
-                    img_h,
-                    Some(&self.icc_cache),
-                );
-                (rgba, ImageColorSpace::PreconvertedRGBA, img_w, img_h)
-            } else {
-                (sample_data, color_space, width, height)
-            }
+        let smask_result = if !is_image_mask {
+            self.resolve_smask(dict)?
         } else {
-            (sample_data, color_space, width, height)
+            None
         };
 
         // Handle explicit stencil mask (/Mask pointing to 1-bit ImageMask stream).
@@ -2607,23 +2576,111 @@ impl<'a> ContentInterpreter<'a> {
         // Recompute image_matrix if dimensions changed (e.g. upscaled to match mask)
         let image_matrix =
             Matrix::new(width as f64, 0.0, 0.0, -(height as f64), 0.0, height as f64);
-        self.display_list.push(DisplayElement::Image {
-            sample_data,
-            params: ImageParams {
-                width,
-                height,
-                color_space,
-                ctm: self.gstate.ctm,
-                image_matrix,
-                interpolate,
-                mask_color,
-                alpha: self.gstate.fill_alpha,
-                blend_mode: self.gstate.blend_mode,
-                overprint: self.gstate.overprint,
-                overprint_mode: self.gstate.overprint_mode,
-                painted_channels: self.gstate.fill_painted_channels,
-            },
-        });
+
+        let image_params = ImageParams {
+            width,
+            height,
+            color_space,
+            ctm: self.gstate.ctm,
+            image_matrix,
+            interpolate,
+            mask_color,
+            alpha: self.gstate.fill_alpha,
+            blend_mode: self.gstate.blend_mode,
+            overprint: self.gstate.overprint,
+            overprint_mode: self.gstate.overprint_mode,
+            painted_channels: self.gstate.fill_painted_channels,
+        };
+
+        // When an SMask is present, emit as SoftMasked so the renderer scales
+        // image and mask independently, preserving edge detail at hard alpha
+        // boundaries that premultiplied-alpha averaging would make invisible.
+        if let Some((smask_data, mw, mh)) = smask_result {
+            // Upscale image if mask is larger
+            let (sample_data, width, height) = if mw > width || mh > height {
+                let upscaled =
+                    bilinear_upsample_image(&sample_data, width, height, mw, mh, &image_params.color_space);
+                (upscaled, mw, mh)
+            } else {
+                (sample_data, width, height)
+            };
+
+            // Resample SMask to image dimensions if they differ
+            let smask_data = if mw != width || mh != height {
+                let mut resampled = vec![0u8; (width * height) as usize];
+                for y in 0..height {
+                    let sy = (y as u64 * mh as u64 / height as u64) as u32;
+                    for x in 0..width {
+                        let sx = (x as u64 * mw as u64 / width as u64) as u32;
+                        resampled[(y * width + x) as usize] =
+                            smask_data.get((sy * mw + sx) as usize).copied().unwrap_or(0);
+                    }
+                }
+                resampled
+            } else {
+                smask_data
+            };
+
+            let image_matrix =
+                Matrix::new(width as f64, 0.0, 0.0, -(height as f64), 0.0, height as f64);
+
+            let mut mask_dl = DisplayList::new();
+            mask_dl.push(DisplayElement::Image {
+                sample_data: smask_data,
+                params: ImageParams {
+                    width,
+                    height,
+                    color_space: ImageColorSpace::DeviceGray,
+                    ctm: self.gstate.ctm,
+                    image_matrix,
+                    interpolate,
+                    mask_color: None,
+                    alpha: 1.0,
+                    blend_mode: 0,
+                    overprint: false,
+                    overprint_mode: 0,
+                    painted_channels: 0,
+                },
+            });
+
+            let mut content_dl = DisplayList::new();
+            content_dl.push(DisplayElement::Image {
+                sample_data,
+                params: ImageParams {
+                    width,
+                    height,
+                    image_matrix,
+                    ..image_params
+                },
+            });
+
+            let corners = [
+                self.gstate.ctm.transform_point(0.0, 0.0),
+                self.gstate.ctm.transform_point(1.0, 0.0),
+                self.gstate.ctm.transform_point(0.0, 1.0),
+                self.gstate.ctm.transform_point(1.0, 1.0),
+            ];
+            let x_min = corners.iter().map(|c| c.0).fold(f64::INFINITY, f64::min);
+            let y_min = corners.iter().map(|c| c.1).fold(f64::INFINITY, f64::min);
+            let x_max = corners.iter().map(|c| c.0).fold(f64::NEG_INFINITY, f64::max);
+            let y_max = corners.iter().map(|c| c.1).fold(f64::NEG_INFINITY, f64::max);
+
+            self.display_list.push(DisplayElement::SoftMasked {
+                mask: mask_dl,
+                content: content_dl,
+                params: SoftMaskParams {
+                    subtype: SoftMaskSubtype::Luminosity,
+                    bbox: [x_min, y_min, x_max, y_max],
+                    backdrop_color: None,
+                    transfer_invert: false,
+                },
+            });
+        } else {
+            self.display_list.push(DisplayElement::Image {
+                sample_data,
+                params: image_params,
+            });
+        }
         Ok(())
     }
 
