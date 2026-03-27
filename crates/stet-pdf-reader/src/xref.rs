@@ -256,11 +256,13 @@ fn supplement_xref_from_scan(data: &[u8], entries: &mut Vec<Option<XrefEntry>>) 
         {
             let idx = obj_num as usize;
             if idx < 100_000 {
-                // Only add if not already in the table
-                let already_present = entries
-                    .get(idx)
-                    .is_some_and(|e| e.is_some());
-                if !already_present {
+                // Add if not already in the table, or if the existing entry is
+                // Free (malformed xref tables sometimes mark real objects as
+                // free, e.g. when the subsection start number is off-by-one).
+                let dominated_by_existing = entries.get(idx).is_some_and(|e| {
+                    matches!(e, Some(XrefEntry::InFile { .. } | XrefEntry::InStream { .. }))
+                });
+                if !dominated_by_existing {
                     if idx >= entries.len() {
                         entries.resize(idx + 1, None);
                     }
