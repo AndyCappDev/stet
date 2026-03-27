@@ -472,6 +472,10 @@ pub fn parse_type6_patches(
                 // Inherit the full 4-point side from the previous patch.
                 // Side 1: pts[0..4], Side 2: pts[3..7], Side 3: pts[6..10],
                 // Side 4: pts[9..12]+pts[0] (wraps).
+                // PDF spec: inherit one side from the previous patch.
+                // Flag 1: prev edge 1 (P3→…→P6, C1,C2) becomes new edge 0
+                // Flag 2: prev edge 2 (P6→…→P9, C2,C3) becomes new edge 0
+                // Flag 3: prev edge 3 (P9→…→P0, C3,C0) becomes new edge 0
                 let (inherited_pts, inherited_colors, inherited_raw) = match flag {
                     1 => (
                         prev.points[3..7].to_vec(),
@@ -479,6 +483,11 @@ pub fn parse_type6_patches(
                         [prev.raw_colors[1].clone(), prev.raw_colors[2].clone()],
                     ),
                     2 => (
+                        prev.points[6..10].to_vec(),
+                        [prev.colors[2].clone(), prev.colors[3].clone()],
+                        [prev.raw_colors[2].clone(), prev.raw_colors[3].clone()],
+                    ),
+                    3 => (
                         vec![
                             prev.points[9],
                             prev.points[10],
@@ -487,11 +496,6 @@ pub fn parse_type6_patches(
                         ],
                         [prev.colors[3].clone(), prev.colors[0].clone()],
                         [prev.raw_colors[3].clone(), prev.raw_colors[0].clone()],
-                    ),
-                    3 => (
-                        prev.points[6..10].to_vec(),
-                        [prev.colors[2].clone(), prev.colors[3].clone()],
-                        [prev.raw_colors[2].clone(), prev.raw_colors[3].clone()],
                     ),
                     _ => unreachable!(),
                 };
@@ -638,31 +642,37 @@ pub fn parse_type7_patches(
                 }
             }
             1..=3 => {
-                // Continuation: inherit side from previous patch as new top row.
-                // 4×4 grid sides: 1=top[0,1,2,3], 2=right[3,7,11,15],
-                // 3=bottom[15,14,13,12], 4=left[12,8,4,0].
+                // Continuation: inherit one side from previous patch.
+                // Type 7 uses the same perimeter data ordering as Type 6 for
+                // the first 12 points, so flag indices are identical.
                 if patches.is_empty() {
                     break;
                 }
                 let prev = patches.last().unwrap().clone();
+                // PDF spec: inherit one side from the previous patch.
+                // Flag 1: prev edge 1 (P3→…→P6, C1,C2) becomes new edge 0
+                // Flag 2: prev edge 2 (P6→…→P9, C2,C3) becomes new edge 0
+                // Flag 3: prev edge 3 (P9→…→P0, C3,C0) becomes new edge 0
                 let (inherited_pts, inherited_colors, inherited_raw) = match flag {
                     1 => (
-                        // Side 2 (right col) of prev → top row of new
-                        vec![prev.points[3], prev.points[7], prev.points[11], prev.points[15]],
+                        prev.points[3..7].to_vec(),
                         [prev.colors[1].clone(), prev.colors[2].clone()],
                         [prev.raw_colors[1].clone(), prev.raw_colors[2].clone()],
                     ),
                     2 => (
-                        // Side 4 (left col, reversed) of prev → top row of new
-                        vec![prev.points[12], prev.points[8], prev.points[4], prev.points[0]],
-                        [prev.colors[3].clone(), prev.colors[0].clone()],
-                        [prev.raw_colors[3].clone(), prev.raw_colors[0].clone()],
-                    ),
-                    3 => (
-                        // Side 3 (bottom row, reversed) of prev → top row of new
-                        vec![prev.points[15], prev.points[14], prev.points[13], prev.points[12]],
+                        prev.points[6..10].to_vec(),
                         [prev.colors[2].clone(), prev.colors[3].clone()],
                         [prev.raw_colors[2].clone(), prev.raw_colors[3].clone()],
+                    ),
+                    3 => (
+                        vec![
+                            prev.points[9],
+                            prev.points[10],
+                            prev.points[11],
+                            prev.points[0],
+                        ],
+                        [prev.colors[3].clone(), prev.colors[0].clone()],
+                        [prev.raw_colors[3].clone(), prev.raw_colors[0].clone()],
                     ),
                     _ => unreachable!(),
                 };
@@ -909,6 +919,10 @@ pub fn build_type6_from_array(values: &[f64], n_comps: usize) -> Vec<ShadingPatc
                 }
                 let prev = patches.last().unwrap().clone();
                 // Inherit the full 4-point side from the previous patch.
+                // PDF spec: inherit one side from the previous patch.
+                // Flag 1: prev edge 1 (P3→…→P6, C1,C2) becomes new edge 0
+                // Flag 2: prev edge 2 (P6→…→P9, C2,C3) becomes new edge 0
+                // Flag 3: prev edge 3 (P9→…→P0, C3,C0) becomes new edge 0
                 let (inherited_pts, inherited_colors, inherited_raw) = match flag {
                     1 => (
                         prev.points[3..7].to_vec(),
@@ -916,6 +930,11 @@ pub fn build_type6_from_array(values: &[f64], n_comps: usize) -> Vec<ShadingPatc
                         [prev.raw_colors[1].clone(), prev.raw_colors[2].clone()],
                     ),
                     2 => (
+                        prev.points[6..10].to_vec(),
+                        [prev.colors[2].clone(), prev.colors[3].clone()],
+                        [prev.raw_colors[2].clone(), prev.raw_colors[3].clone()],
+                    ),
+                    3 => (
                         vec![
                             prev.points[9],
                             prev.points[10],
@@ -924,11 +943,6 @@ pub fn build_type6_from_array(values: &[f64], n_comps: usize) -> Vec<ShadingPatc
                         ],
                         [prev.colors[3].clone(), prev.colors[0].clone()],
                         [prev.raw_colors[3].clone(), prev.raw_colors[0].clone()],
-                    ),
-                    3 => (
-                        prev.points[6..10].to_vec(),
-                        [prev.colors[2].clone(), prev.colors[3].clone()],
-                        [prev.raw_colors[2].clone(), prev.raw_colors[3].clone()],
                     ),
                     _ => unreachable!(),
                 };

@@ -510,6 +510,10 @@ pub struct PatchShadingParams {
     pub color_space: ShadingColorSpace,
     pub overprint: bool,
     pub painted_channels: u8,
+    /// When present, vertex `raw_colors[i][0]` holds a normalized [0,1]
+    /// function input. The renderer interpolates this per-pixel, then
+    /// indexes the LUT for per-pixel non-linear function evaluation.
+    pub color_lut: Option<Arc<Vec<DeviceColor>>>,
 }
 
 /// Parameters for a tiled pattern fill.

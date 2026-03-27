@@ -482,22 +482,70 @@ fn handle_patches(
         _ => return Ok(()),
     };
 
-    // Apply shading function to expand corner colors
-    if let Some(ref func) = function {
+    // For single-input function-based patches, build a per-pixel LUT
+    // (matching the mesh shading approach) so non-linear functions (e.g. N=3)
+    // produce correct color transitions.  Corner raw_colors keep the
+    // normalized function input for bilinear interpolation in the renderer.
+    let color_lut = if let Some(ref func) = function {
+        if n_comps == 1 {
+            let d_min = decode.get(4).copied().unwrap_or(0.0);
+            let d_max = decode.get(5).copied().unwrap_or(1.0);
+            let d_range = (d_max - d_min).abs().max(1e-10);
+
+            let lut_size = 256;
+            let mut lut = Vec::with_capacity(lut_size);
+            for i in 0..lut_size {
+                let t = i as f64 / (lut_size - 1) as f64;
+                let input = d_min + t * (d_max - d_min);
+                let components = func.evaluate(&[input]);
+                let color =
+                    components_to_device_color_icc(resolved_cs, &components, Some(icc_cache));
+                lut.push(color);
+            }
+
+            // Normalize vertex raw values to [0, 1] for LUT indexing
+            for p in &mut patches {
+                for i in 0..4 {
+                    let raw = p.raw_colors[i][0];
+                    let normalized = ((raw - d_min) / d_range).clamp(0.0, 1.0);
+                    p.raw_colors[i] = vec![normalized];
+                    // Set corner color from LUT for fallback rendering
+                    let idx = (normalized * 255.0).round() as usize;
+                    p.colors[i] = lut[idx.min(255)].clone();
+                }
+            }
+            Some(std::sync::Arc::new(lut))
+        } else {
+            // Multi-input function: apply at corners only
+            for p in &mut patches {
+                for i in 0..4 {
+                    p.raw_colors[i] = func.evaluate(&p.raw_colors[i]);
+                }
+            }
+            for p in &mut patches {
+                for i in 0..4 {
+                    p.colors[i] = components_to_device_color_icc(
+                        resolved_cs,
+                        &p.raw_colors[i],
+                        Some(icc_cache),
+                    );
+                }
+            }
+            None
+        }
+    } else {
+        // No function: convert direct corner colors through ICC
         for p in &mut patches {
             for i in 0..4 {
-                p.raw_colors[i] = func.evaluate(&p.raw_colors[i]);
+                p.colors[i] = components_to_device_color_icc(
+                    resolved_cs,
+                    &p.raw_colors[i],
+                    Some(icc_cache),
+                );
             }
         }
-    }
-
-    // Convert patch corner colors through ICC profile
-    for p in &mut patches {
-        for i in 0..4 {
-            p.colors[i] =
-                components_to_device_color_icc(resolved_cs, &p.raw_colors[i], Some(icc_cache));
-        }
-    }
+        None
+    };
 
     // Transform patch control points through CTM
     for p in &mut patches {
@@ -519,6 +567,7 @@ fn handle_patches(
             color_space: cs,
             overprint: gstate.overprint,
             painted_channels: painted_channels_for_cs(resolved_cs),
+            color_lut,
         },
     });
     Ok(())

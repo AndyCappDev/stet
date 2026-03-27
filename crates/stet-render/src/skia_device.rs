@@ -7499,7 +7499,7 @@ fn render_patch_shading(
             color_space: params.color_space.clone(),
             overprint: params.overprint,
             painted_channels: params.painted_channels,
-            color_lut: None,
+            color_lut: params.color_lut.clone(),
         };
         render_mesh_shading(
             pixmap,
@@ -7669,9 +7669,9 @@ fn eval_tensor_patch(
 ) -> (f64, f64) {
     let pts = &patch.points;
 
-    // Map PDF data indices (Type 6 boundary order + 4 interior) to 4×4 grid [v_row][u_col].
-    // Boundary: pts[0..12] go around the perimeter (same as Type 6).
-    // Interior: pts[12..16] are the 4 interior control points.
+    // Map data indices to 4×4 grid [row][col].
+    // pts[0..12] are boundary points around the perimeter (same as Type 6).
+    // pts[12..16] are the 4 interior control points.
     let grid: [[usize; 4]; 4] = [
         [0, 1, 2, 3],
         [11, 12, 13, 4],
