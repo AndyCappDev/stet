@@ -1657,19 +1657,22 @@ impl<'a> ContentInterpreter<'a> {
                     // 2-byte code
                     let raw_code = ((text[i] as u32) << 8) | (text[i + 1] as u32);
                     let cid = font.resolve_code_to_cid(raw_code) as u16;
+                    i += 2;
                     if font.has_cid_glyph(cid) {
                         // CID maps to a valid GID in the font
-                        i += 2;
                         self.render_cid_glyph(&font, cid, font_size, char_spacing, th, text_rise, &font_matrix, render_mode);
-                    } else {
-                        // 2-byte code produced no glyph — malformed PDF mixing
+                    } else if raw_code <= 0xFF {
+                        // Low code point with no CID glyph — malformed PDF mixing
                         // 1-byte WinAnsi text in a CID font.  Bypass the CID
                         // machinery and map each byte through WinAnsi→Unicode→cmap.
-                        let b0 = text[i];
-                        let b1 = text[i + 1];
-                        i += 2;
-                        self.render_unicode_glyph(b0, font_size, char_spacing, th, text_rise, &font_matrix, render_mode);
-                        self.render_unicode_glyph(b1, font_size, char_spacing, th, text_rise, &font_matrix, render_mode);
+                        self.render_unicode_glyph(text[i - 2], font_size, char_spacing, th, text_rise, &font_matrix, render_mode);
+                        self.render_unicode_glyph(text[i - 1], font_size, char_spacing, th, text_rise, &font_matrix, render_mode);
+                    } else {
+                        // CID glyph not available (e.g. substitute font for CJK).
+                        // Use CID width for correct advancement; try Unicode for shape.
+                        self.render_cid_glyph_unicode_fallback(
+                            &font, cid, raw_code, font_size, char_spacing, th, text_rise, &font_matrix, render_mode,
+                        );
                     }
                 }
             }
@@ -1749,6 +1752,43 @@ impl<'a> ContentInterpreter<'a> {
                 self.emit_text_glyph(device_path, render_mode);
             }
         }
+        let w0 = font.glyph_width_cid(cid);
+        let tx = (w0 * font_size + char_spacing) * th;
+        let advance = Matrix::translate(tx, 0.0);
+        self.gstate.text_matrix = self.gstate.text_matrix.concat(&advance);
+    }
+
+    /// Render a CID glyph using Unicode→cmap for the glyph shape but the CID
+    /// width table for text advancement. Used for substitute fonts that don't
+    /// have CID-to-GID mappings but can render via Unicode code points.
+    fn render_cid_glyph_unicode_fallback(
+        &mut self,
+        font: &PdfFont,
+        cid: u16,
+        unicode: u32,
+        font_size: f64,
+        char_spacing: f64,
+        th: f64,
+        text_rise: f64,
+        font_matrix: &Matrix,
+        render_mode: i32,
+    ) {
+        // Try to render the glyph shape via Unicode mapping in the substitute font
+        if let Some(glyph_path) = font.glyph_path_unicode(unicode as u16) {
+            let text_state_matrix =
+                Matrix::new(font_size * th, 0.0, 0.0, font_size, 0.0, text_rise);
+            let trm = self
+                .gstate
+                .ctm
+                .concat(&self.gstate.text_matrix)
+                .concat(&text_state_matrix)
+                .concat(font_matrix);
+            let device_path = glyph_path.transform(&trm);
+            if !device_path.is_empty() {
+                self.emit_text_glyph(device_path, render_mode);
+            }
+        }
+        // Always advance by the CID width from the PDF's W table
         let w0 = font.glyph_width_cid(cid);
         let tx = (w0 * font_size + char_spacing) * th;
         let advance = Matrix::translate(tx, 0.0);

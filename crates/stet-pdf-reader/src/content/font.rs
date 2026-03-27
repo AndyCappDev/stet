@@ -1555,6 +1555,26 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
     // Parse /W array (CID-specific widths)
     let cid_widths = parse_cid_widths(cid_font_dict, resolver);
 
+    // When a UCS2-based CMap (e.g. UniJIS-UCS2-H) couldn't be loaded from
+    // disk, build a basic Latin fallback mapping. All Adobe CID collections
+    // (Japan1, GB1, CNS1, Korea1) map Unicode basic Latin to:
+    //   CID 1 = U+0020 (space), CID 2..95 = U+0021..U+007E
+    // This handles the common case of CJK-font PDFs containing English text
+    // when CMap resource files aren't installed.
+    let code_to_cid = if code_to_cid.is_empty()
+        && code_lengths[0] == 2
+        && encoding_name.windows(4).any(|w| w == b"UCS2")
+    {
+        let mut map = HashMap::new();
+        for unicode in 0x0020u32..=0x007Eu32 {
+            let cid = unicode - 0x001F;
+            map.insert(unicode, cid);
+        }
+        map
+    } else {
+        code_to_cid
+    };
+
     // Parse /ToUnicode CMap from the parent Type 0 font dict
     let to_unicode = if let Some(tu_obj) = font_dict.get(b"ToUnicode") {
         match resolver.stream_data_from_obj(tu_obj) {
@@ -1769,7 +1789,19 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                     .get_name(b"BaseFont")
                     .map(|n| String::from_utf8_lossy(n).to_string())
                     .unwrap_or_default();
-                let sys_data = load_system_truetype_font(&base_font)?;
+                let sys_data = if ucs2_encoding {
+                    // UCS2-encoded CID fonts: use a substitute TrueType font so
+                    // the text stays on the composite CID rendering path (correct
+                    // code_lengths and CID width advancement). Without this, the
+                    // simple fallback font treats 2-byte UCS-2 codes as individual
+                    // bytes, producing doubled character spacing.
+                    load_system_truetype_font(&base_font)
+                        .or_else(|_| load_system_truetype_font("DejaVuSans"))
+                        .or_else(|_| load_system_truetype_font("LiberationSans"))
+                        .or_else(|_| load_system_truetype_font("NimbusSans"))?
+                } else {
+                    load_system_truetype_font(&base_font)?
+                };
                 // If the system font is OpenType/CFF, use CFF rendering path
                 if sys_data.len() > 4 && &sys_data[0..4] == b"OTTO" {
                     return create_cid_cff_from_otf(
@@ -2275,7 +2307,10 @@ impl TrueTypePdfFont {
 impl CidTrueTypePdfFont {
     /// For UCS2 encodings, convert Unicode code point to CID for width lookup.
     fn resolve_cid(&self, code: u16) -> u16 {
-        if self.ucs2_encoding && !self.ordering.is_empty() {
+        // Only remap when code_to_cid is empty (no CMap loaded) — in that case
+        // the code IS a raw Unicode code point that needs mapping to a CID.
+        // When a CMap IS loaded, it has already mapped to the correct CID.
+        if self.ucs2_encoding && !self.ordering.is_empty() && self.code_to_cid.is_empty() {
             super::cid_unicode::unicode_to_cid(&self.ordering, code as u32).unwrap_or(code)
         } else {
             code
@@ -2283,22 +2318,17 @@ impl CidTrueTypePdfFont {
     }
 
     fn glyph_path_cid(&self, cid: u16) -> Option<PsPath> {
-        let gid = if self.ucs2_encoding && !self.cmap.is_empty() {
-            // UCS2 encoding: cid is actually a Unicode code point, map via cmap.
-            // If the substitute font doesn't have this Unicode glyph (e.g.,
-            // DroidSansFallback lacks ASCII), fall through to other lookup paths.
+        let gid = if self.ucs2_encoding && !self.cmap.is_empty() && self.code_to_cid.is_empty() {
+            // UCS2 encoding with no CMap: cid is a raw Unicode code point, map via cmap.
             if let Some(&g) = self.cmap.get(&(cid as u32)) {
                 g
             } else {
-                // Try CID-based lookup as fallback
-                let resolved_cid = self.resolve_cid(cid);
-                if self.substituted && !self.ordering.is_empty() {
-                    let unicode = super::cid_unicode::cid_to_unicode(&self.ordering, resolved_cid)?;
-                    *self.cmap.get(&unicode)?
-                } else {
-                    return None;
-                }
+                return None;
             }
+        } else if self.ucs2_encoding && self.substituted && !self.ordering.is_empty() {
+            // CMap was loaded: cid is an Adobe CID, convert back to Unicode for glyph lookup
+            let unicode = super::cid_unicode::cid_to_unicode(&self.ordering, cid)?;
+            *self.cmap.get(&unicode)?
         } else if let Some(ref map) = self.cid_to_gid_map {
             // Explicit CIDToGIDMap stream: look up CID → GID
             *map.get(cid as usize).unwrap_or(&0)
