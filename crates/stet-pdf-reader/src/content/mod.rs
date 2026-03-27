@@ -2021,7 +2021,18 @@ impl<'a> ContentInterpreter<'a> {
         let resolved_cs = if is_image_mask {
             None
         } else if let Some(cs_obj) = dict.get(b"ColorSpace") {
-            Some(resolve_color_space_obj(cs_obj, self.resolver)?)
+            match resolve_color_space_obj(cs_obj, self.resolver) {
+                Ok(cs) => Some(cs),
+                Err(_) => {
+                    // Damaged PDF: color space reference is invalid (e.g. points to
+                    // an XRef stream in a corrupt linearized file). Fall back to a
+                    // device color space based on BPC/component count heuristics.
+                    Some(match bpc {
+                        1 => ResolvedColorSpace::DeviceGray,
+                        _ => ResolvedColorSpace::DeviceRGB,
+                    })
+                }
+            }
         } else {
             // No ColorSpace in dict — will be inferred from JPX data below
             Some(ResolvedColorSpace::DeviceRGB)
@@ -2043,30 +2054,7 @@ impl<'a> ContentInterpreter<'a> {
         let smask_in_data = dict.get_int(b"SMaskInData").unwrap_or(0);
 
         // Decode the stream data
-        let mut sample_data = self.resolver.stream_data_from_obj(obj)?;
-
-        // JPXDecode: the JP2 decoder may return more components than the PDF
-        // ColorSpace declares (e.g. embedded alpha when PDF says 3-component RGB).
-        // Strip excess components to match the expected stride, otherwise the
-        // extra bytes cause row misalignment and tiling/color artifacts.
-        if dict.get_name(b"Filter") == Some(b"JPXDecode") {
-            if let Some(ref cs) = resolved_cs {
-                let expected_comps = cs.num_components() as usize;
-                let pixels = width as usize * height as usize;
-                let expected_len = pixels * expected_comps;
-                if pixels > 0 && sample_data.len() > expected_len {
-                    let actual_comps = sample_data.len() / pixels;
-                    if actual_comps > expected_comps && sample_data.len() == pixels * actual_comps {
-                        // Strip trailing components (typically alpha) from each pixel
-                        let mut stripped = Vec::with_capacity(expected_len);
-                        for chunk in sample_data.chunks_exact(actual_comps) {
-                            stripped.extend_from_slice(&chunk[..expected_comps]);
-                        }
-                        sample_data = stripped;
-                    }
-                }
-            }
-        }
+        let sample_data = self.resolver.stream_data_from_obj(obj)?;
 
         // For JPXDecode without explicit ColorSpace, infer from decoded data length.
         // JP2 embeds its own color space info; the decoder returns interleaved pixel data
