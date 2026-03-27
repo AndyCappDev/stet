@@ -323,23 +323,37 @@ impl PdfFunction {
         range: Vec<[f64; 2]>,
         resolver: &Resolver,
     ) -> Result<Self, PdfError> {
-        let fn_arr = dict
-            .get_array(b"Functions")
-            .ok_or(PdfError::Other("stitching missing Functions".into()))?;
+        // /Functions, /Bounds, /Encode may be indirect references
+        let fn_arr = if let Some(arr) = dict.get_array(b"Functions") {
+            arr.to_vec()
+        } else if let Some(obj) = dict.get(b"Functions") {
+            match resolver.deref(obj)? {
+                PdfObj::Array(arr) => arr,
+                _ => return Err(PdfError::Other("stitching Functions is not an array".into())),
+            }
+        } else {
+            return Err(PdfError::Other("stitching missing Functions".into()));
+        };
 
         let mut functions = Vec::with_capacity(fn_arr.len());
-        for fn_obj in fn_arr {
+        for fn_obj in &fn_arr {
             functions.push(PdfFunction::parse(fn_obj, resolver)?);
         }
 
-        let bounds: Vec<f64> = dict
-            .get_array(b"Bounds")
-            .ok_or(PdfError::Other("stitching missing Bounds".into()))?
-            .iter()
-            .filter_map(|o| o.as_f64())
-            .collect();
+        let bounds_arr = if let Some(arr) = dict.get_array(b"Bounds") {
+            arr.to_vec()
+        } else if let Some(obj) = dict.get(b"Bounds") {
+            match resolver.deref(obj)? {
+                PdfObj::Array(arr) => arr,
+                _ => Vec::new(),
+            }
+        } else {
+            return Err(PdfError::Other("stitching missing Bounds".into()));
+        };
+        let bounds: Vec<f64> = bounds_arr.iter().filter_map(|o| o.as_f64()).collect();
 
-        let encode = parse_domain_range(dict, b"Encode")
+        let encode = parse_domain_range_resolved(dict, b"Encode", resolver)
+            .or_else(|_| parse_domain_range(dict, b"Encode"))
             .unwrap_or_else(|_| functions.iter().map(|_| [0.0, 1.0]).collect());
 
         Ok(Self::Stitching {
@@ -375,6 +389,30 @@ fn parse_domain_range(dict: &PdfDict, key: &[u8]) -> Result<Vec<[f64; 2]>, PdfEr
     let arr = dict
         .get_array(key)
         .ok_or_else(|| PdfError::Other(format!("missing /{}", String::from_utf8_lossy(key))))?;
+    let vals: Vec<f64> = arr.iter().filter_map(|o| o.as_f64()).collect();
+    Ok(vals
+        .chunks(2)
+        .map(|c| [c[0], c.get(1).copied().unwrap_or(c[0])])
+        .collect())
+}
+
+/// Like `parse_domain_range` but resolves indirect references first.
+fn parse_domain_range_resolved(
+    dict: &PdfDict,
+    key: &[u8],
+    resolver: &Resolver,
+) -> Result<Vec<[f64; 2]>, PdfError> {
+    if dict.get_array(key).is_some() {
+        return parse_domain_range(dict, key);
+    }
+    let obj = dict
+        .get(key)
+        .ok_or_else(|| PdfError::Other(format!("missing /{}", String::from_utf8_lossy(key))))?;
+    let resolved = resolver.deref(obj)?;
+    let arr = match &resolved {
+        PdfObj::Array(a) => a,
+        _ => return Err(PdfError::Other(format!("/{} is not an array", String::from_utf8_lossy(key)))),
+    };
     let vals: Vec<f64> = arr.iter().filter_map(|o| o.as_f64()).collect();
     Ok(vals
         .chunks(2)
