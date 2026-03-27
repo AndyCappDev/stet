@@ -265,6 +265,14 @@ fn resolve_indexed(args: &[PdfObj], resolver: &Resolver) -> Result<ResolvedColor
     let lookup = match &lookup_obj {
         PdfObj::Str(s) => s.clone(),
         PdfObj::Stream { .. } => resolver.stream_data_from_obj(&args[2])?,
+        PdfObj::Dict(_) => {
+            // Dict without Stream variant — try reading stream data directly
+            resolver.stream_data_from_obj(&args[2])?
+        }
+        PdfObj::Null => {
+            // Malformed PDF: null lookup table. Use empty data (all indices → black).
+            Vec::new()
+        }
         _ => {
             return Err(PdfError::Other(
                 "Indexed lookup not string or stream".into(),
