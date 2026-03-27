@@ -1363,36 +1363,36 @@ pub fn build_icc_cache_for_list(
                 _ => None,
             };
             if let Some(stet_graphics::device::ShadingColorSpace::ICCBased {
+                n,
                 profile_hash,
                 profile_data,
-                ..
             }) = shading_cs
             {
                 if seen.insert(*profile_hash) {
-                    cache.register_profile(profile_data);
+                    cache.register_profile_with_n(profile_data, Some(*n));
                 }
             }
             // Image color spaces
             if let DisplayElement::Image { params, .. } = element {
                 match &params.color_space {
                     ImageColorSpace::ICCBased {
+                        n,
                         profile_hash,
                         profile_data,
-                        ..
                     } if seen.insert(*profile_hash) => {
-                        cache.register_profile(profile_data);
+                        cache.register_profile_with_n(profile_data, Some(*n));
                     }
                     ImageColorSpace::Indexed { base, .. }
                         if matches!(base.as_ref(), ImageColorSpace::ICCBased { .. }) =>
                     {
                         if let ImageColorSpace::ICCBased {
+                            n,
                             profile_hash,
                             profile_data,
-                            ..
                         } = base.as_ref()
                         {
                             if seen.insert(*profile_hash) {
-                                cache.register_profile(profile_data);
+                                cache.register_profile_with_n(profile_data, Some(*n));
                             }
                         }
                     }
@@ -1428,10 +1428,10 @@ fn register_shading_icc_profiles(list: &DisplayList, cache: &mut IccCache) {
                 _ => None,
             };
             if let Some(stet_graphics::device::ShadingColorSpace::ICCBased {
-                profile_data, ..
+                n, profile_data, ..
             }) = shading_cs
             {
-                cache.register_profile(profile_data);
+                cache.register_profile_with_n(profile_data, Some(*n));
             }
         }
     }

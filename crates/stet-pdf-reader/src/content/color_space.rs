@@ -491,7 +491,7 @@ pub fn components_to_device_color_icc(
             let hash = profile_hash.or_else(|| {
                 icc_cache
                     .as_deref_mut()
-                    .and_then(|cache| profile_data.as_deref().and_then(|d| cache.register_profile(d)))
+                    .and_then(|cache| profile_data.as_deref().and_then(|d| cache.register_profile_with_n(d, Some(*n))))
             });
             if let Some(cache) = icc_cache.as_deref_mut()
                 && let Some(hash) = hash
@@ -499,7 +499,7 @@ pub fn components_to_device_color_icc(
                 // Ensure the profile is registered (first time only)
                 if !cache.has_profile(&hash) {
                     if let Some(data) = profile_data {
-                        cache.register_profile(data);
+                        cache.register_profile_with_n(data, Some(*n));
                     }
                 }
                 if let Some((r, g, b)) = cache.convert_color(&hash, components) {
@@ -680,13 +680,14 @@ pub fn convert_icc_image_data(
 ) -> Option<(Vec<u8>, ImageColorSpace)> {
     let (hash_result, alternate) = match cs {
         ResolvedColorSpace::ICCBased {
+            n,
             profile_data,
             alternate,
             ..
         } => {
             let hash = profile_data
                 .as_ref()
-                .and_then(|d| icc_cache.register_profile(d));
+                .and_then(|d| icc_cache.register_profile_with_n(d, Some(*n)));
             (hash, alternate.as_ref())
         }
         ResolvedColorSpace::DeviceCMYK => {
@@ -821,9 +822,9 @@ pub fn register_icc_profile(
     icc_cache: &mut IccCache,
 ) -> Option<ProfileHash> {
     match cs {
-        ResolvedColorSpace::ICCBased { profile_data, .. } => {
+        ResolvedColorSpace::ICCBased { n, profile_data, .. } => {
             let data = profile_data.as_ref()?;
-            icc_cache.register_profile(data)
+            icc_cache.register_profile_with_n(data, Some(*n))
         }
         _ => None,
     }

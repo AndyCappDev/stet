@@ -9,13 +9,40 @@
 //! DeviceCMYK → RGB conversion beyond the naive PLRM formula.
 
 use moxcms::{
-    ColorProfile, DataColorSpace, Layout, RenderingIntent, TransformExecutor, TransformOptions,
+    CmsError, ColorProfile, DataColorSpace, Layout, RenderingIntent, TransformExecutor,
+    TransformOptions,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
 
 /// SHA-256 hash used as profile key.
 pub type ProfileHash = [u8; 32];
+
+/// Identity Gray→RGB transform: maps each gray value to equal R=G=B.
+/// Used as fallback when a Gray ICC profile can't produce a proper transform.
+struct GrayToRgbIdentity;
+
+impl TransformExecutor<u8> for GrayToRgbIdentity {
+    fn transform(&self, src: &[u8], dst: &mut [u8]) -> Result<(), CmsError> {
+        for (g, rgb) in src.iter().zip(dst.chunks_exact_mut(3)) {
+            rgb[0] = *g;
+            rgb[1] = *g;
+            rgb[2] = *g;
+        }
+        Ok(())
+    }
+}
+
+impl TransformExecutor<f64> for GrayToRgbIdentity {
+    fn transform(&self, src: &[f64], dst: &mut [f64]) -> Result<(), CmsError> {
+        for (g, rgb) in src.iter().zip(dst.chunks_exact_mut(3)) {
+            rgb[0] = *g;
+            rgb[1] = *g;
+            rgb[2] = *g;
+        }
+        Ok(())
+    }
+}
 
 /// Cached ICC transform to sRGB (specific to source layout).
 #[derive(Clone)]
@@ -81,6 +108,19 @@ impl IccCache {
 
     /// Register an ICC profile from raw bytes. Returns the SHA-256 hash on success.
     pub fn register_profile(&mut self, bytes: &[u8]) -> Option<ProfileHash> {
+        self.register_profile_with_n(bytes, None)
+    }
+
+    /// Register an ICC profile, validating that its color space matches the
+    /// expected component count `expected_n`. When the profile's actual color
+    /// space has a different number of components (e.g. an RGB profile stored
+    /// with PDF `/N 1`), the profile is rejected so the caller can fall back
+    /// to the alternate color space.
+    pub fn register_profile_with_n(
+        &mut self,
+        bytes: &[u8],
+        expected_n: Option<u32>,
+    ) -> Option<ProfileHash> {
         use sha2::{Digest, Sha256};
         let hash: ProfileHash = Sha256::digest(bytes).into();
 
@@ -115,6 +155,15 @@ impl IccCache {
                 return None;
             }
         };
+
+        // Reject profile when its actual component count doesn't match the
+        // PDF's /N declaration — the input data won't match the profile's
+        // expected input layout.
+        if let Some(expected) = expected_n {
+            if n != expected {
+                return None;
+            }
+        }
 
         let (src_layout_8, src_layout_f64) = match n {
             1 => (Layout::Gray, Layout::Gray),
@@ -155,8 +204,18 @@ impl IccCache {
         }
         let transform_8bit = match transform_8bit {
             Some(t) => t,
+            None if n == 1 => {
+                // Gray profiles that can't produce Gray→sRGB transforms (e.g.
+                // minimal Linotype profiles with only a TRC): fall back to the
+                // sRGB gray curve, which is functionally correct for most Gray
+                // profiles encountered in PDFs.
+                return self.register_gray_identity(hash, profile);
+            }
             None => {
-                eprintln!("[ICC] Failed to create 8-bit transform for any rendering intent");
+                eprintln!(
+                    "[ICC] Failed to create 8-bit transform (cs={:?})",
+                    profile.color_space
+                );
                 return None;
             }
         };
@@ -182,8 +241,15 @@ impl IccCache {
         }
         let transform_f64 = match transform_f64 {
             Some(t) => t,
+            None if n == 1 => {
+                // Same Gray fallback for f64 path
+                return self.register_gray_identity(hash, profile);
+            }
             None => {
-                eprintln!("[ICC] Failed to create f64 transform for any rendering intent");
+                eprintln!(
+                    "[ICC] Failed to create f64 transform (cs={:?})",
+                    profile.color_space
+                );
                 return None;
             }
         };
@@ -200,6 +266,27 @@ impl IccCache {
             },
         );
 
+        Some(hash)
+    }
+
+    /// Register a Gray profile with an identity Gray→RGB fallback transform.
+    /// Used when the ICC library can't create a proper transform from the profile
+    /// (e.g. minimal profiles with only a TRC and no A2B/B2A tables).
+    fn register_gray_identity(
+        &mut self,
+        hash: ProfileHash,
+        profile: ColorProfile,
+    ) -> Option<ProfileHash> {
+        self.profiles.insert(hash, Arc::new(profile));
+        self.transforms.insert(
+            hash,
+            CachedTransform {
+                transform_8bit: Arc::new(GrayToRgbIdentity),
+                transform_f64: Arc::new(GrayToRgbIdentity),
+                n: 1,
+                is_lab: false,
+            },
+        );
         Some(hash)
     }
 
