@@ -3853,9 +3853,13 @@ impl<'a> ContentInterpreter<'a> {
         let saved_cs_index2 = self.cs_index.take();
         let saved_display_list = std::mem::replace(&mut self.display_list, DisplayList::new());
         let saved_scope = self.soft_mask_scope.take();
+        let saved_content_stream_ctm = self.content_stream_ctm;
 
         // Apply form matrix to CTM
         self.gstate.ctm = self.gstate.ctm.concat(&form_matrix);
+        // Update content_stream_ctm so shading patterns inside the mask form
+        // use the form's coordinate system, not the parent's.
+        self.content_stream_ctm = self.gstate.ctm;
 
         // Compute device-space bbox now, before interpret_stream modifies the
         // CTM via `cm` operators. The form BBox is in the form's coordinate
@@ -3885,6 +3889,7 @@ impl<'a> ContentInterpreter<'a> {
 
         let mask_list = std::mem::replace(&mut self.display_list, saved_display_list);
         self.soft_mask_scope = saved_scope;
+        self.content_stream_ctm = saved_content_stream_ctm;
         self.resources = saved_resources;
         self.font_cache = saved_font_cache;
         self.current_font = saved_current_font2;
