@@ -1763,13 +1763,12 @@ impl<'a> ContentInterpreter<'a> {
         let vertical = font.wmode() == 1;
         if let Some(glyph_path) = font.glyph_path_cid(cid) {
             let text_state_matrix = if vertical {
-                // Vertical mode: no Th, center glyph horizontally (-w0/2),
-                // shift down by v_y so vertical origin aligns with text position.
-                let w0 = font.glyph_width_cid(cid);
-                let dw2 = font.dw2();
+                // Vertical mode: use per-CID metrics (w1, v_x, v_y) from W2/DW2.
+                // v_x/v_y define the position vector from horizontal to vertical origin.
+                let [_w1, v_x, v_y] = font.vertical_metrics_cid(cid);
                 Matrix::new(
                     font_size, 0.0, 0.0, font_size,
-                    -w0 / 2.0 * font_size, -dw2[0] / 1000.0 * font_size,
+                    -v_x / 1000.0 * font_size, -v_y / 1000.0 * font_size,
                 )
             } else {
                 Matrix::new(font_size * th, 0.0, 0.0, font_size, 0.0, text_rise)
@@ -1786,8 +1785,8 @@ impl<'a> ContentInterpreter<'a> {
             }
         }
         if vertical {
-            let dw2 = font.dw2();
-            let ty = dw2[1] / 1000.0 * font_size + char_spacing;
+            let [w1, _vx, _vy] = font.vertical_metrics_cid(cid);
+            let ty = w1 / 1000.0 * font_size + char_spacing;
             let advance = Matrix::translate(0.0, ty);
             self.gstate.text_matrix = self.gstate.text_matrix.concat(&advance);
         } else {
@@ -1817,11 +1816,10 @@ impl<'a> ContentInterpreter<'a> {
         // Try to render the glyph shape via Unicode mapping in the substitute font
         if let Some(glyph_path) = font.glyph_path_unicode(unicode as u16) {
             let text_state_matrix = if vertical {
-                let w0 = font.glyph_width_cid(cid);
-                let dw2 = font.dw2();
+                let [_w1, v_x, v_y] = font.vertical_metrics_cid(cid);
                 Matrix::new(
                     font_size, 0.0, 0.0, font_size,
-                    -w0 / 2.0 * font_size, -dw2[0] / 1000.0 * font_size,
+                    -v_x / 1000.0 * font_size, -v_y / 1000.0 * font_size,
                 )
             } else {
                 Matrix::new(font_size * th, 0.0, 0.0, font_size, 0.0, text_rise)
@@ -1838,8 +1836,8 @@ impl<'a> ContentInterpreter<'a> {
             }
         }
         if vertical {
-            let dw2 = font.dw2();
-            let ty = dw2[1] / 1000.0 * font_size + char_spacing;
+            let [w1, _vx, _vy] = font.vertical_metrics_cid(cid);
+            let ty = w1 / 1000.0 * font_size + char_spacing;
             let advance = Matrix::translate(0.0, ty);
             self.gstate.text_matrix = self.gstate.text_matrix.concat(&advance);
         } else {

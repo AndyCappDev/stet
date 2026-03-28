@@ -106,6 +106,9 @@ pub struct CidTrueTypePdfFont {
     /// Default vertical metrics [v_y, w1] from /DW2 (default: [880, -1000]).
     /// v_y = vertical origin offset, w1 = vertical advance width.
     pub dw2: [f64; 2],
+    /// Per-CID vertical metrics from /W2: CID → (w1, v_x, v_y).
+    /// w1 = vertical advance, v_x/v_y = position vector components (in 1/1000 em).
+    pub w2: HashMap<u16, [f64; 3]>,
 }
 
 /// CIDFontType0: CFF outlines accessed by CID (2-byte char codes).
@@ -135,6 +138,8 @@ pub struct CidCffPdfFont {
     pub wmode: u8,
     /// Default vertical metrics [v_y, w1] from /DW2 (default: [880, -1000]).
     pub dw2: [f64; 2],
+    /// Per-CID vertical metrics from /W2: CID → (w1, v_x, v_y).
+    pub w2: HashMap<u16, [f64; 3]>,
 }
 
 /// Type 3 font: glyphs defined as content streams (CharProcs).
@@ -837,6 +842,7 @@ fn create_cid_cff_from_otf(
     code_to_cid: HashMap<u32, u32>,
     wmode: u8,
     dw2: [f64; 2],
+    w2: HashMap<u16, [f64; 3]>,
 ) -> Result<PdfFont, PdfError> {
     use stet_fonts::truetype::find_table;
 
@@ -874,6 +880,7 @@ fn create_cid_cff_from_otf(
         code_to_cid,
         wmode,
         dw2,
+        w2,
     }))
 }
 
@@ -895,6 +902,7 @@ fn create_cid_cff_from_raw(
     code_to_cid: HashMap<u32, u32>,
     wmode: u8,
     dw2: [f64; 2],
+    w2: HashMap<u16, [f64; 3]>,
 ) -> Result<PdfFont, PdfError> {
     let fonts =
         parse_cff(cff_data).map_err(|e| PdfError::Other(format!("CFF parse error: {e}")))?;
@@ -918,6 +926,7 @@ fn create_cid_cff_from_raw(
         code_to_cid,
         wmode,
         dw2,
+        w2,
     }))
 }
 
@@ -1605,6 +1614,9 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
     // Parse /W array (CID-specific widths)
     let cid_widths = parse_cid_widths(cid_font_dict, resolver);
 
+    // Parse /W2 array (per-CID vertical metrics)
+    let w2 = parse_cid_w2(cid_font_dict, resolver);
+
     // When a UCS2-based CMap (e.g. UniJIS-UCS2-H) couldn't be loaded from
     // disk, build a basic Latin fallback mapping. All Adobe CID collections
     // (Japan1, GB1, CNS1, Korea1) map Unicode basic Latin to:
@@ -1696,6 +1708,7 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                             code_to_cid.clone(),
                             wmode,
                             dw2,
+                            w2.clone(),
                         );
                     } else {
                         return create_cid_cff_from_raw(
@@ -1709,6 +1722,7 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                             code_to_cid.clone(),
                             wmode,
                             dw2,
+                            w2.clone(),
                         );
                     }
                 }
@@ -1741,6 +1755,7 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                         code_to_cid.clone(),
                         wmode,
                         dw2,
+                        w2.clone(),
                     );
                 }
                 sys_data
@@ -1784,6 +1799,7 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                 code_to_cid: code_to_cid.clone(),
                 wmode,
                 dw2,
+                w2: w2.clone(),
             }))
         }
         b"CIDFontType0" => {
@@ -1821,6 +1837,7 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                         code_to_cid.clone(),
                         wmode,
                         dw2,
+                        w2.clone(),
                     );
                 }
                 let fonts = parse_cff(&font_data)
@@ -1844,6 +1861,7 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                     code_to_cid: code_to_cid.clone(),
                     wmode,
                     dw2,
+                    w2: w2.clone(),
                 }))
             } else {
                 // Not embedded — substitute with a system font
@@ -1877,6 +1895,7 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                         code_to_cid.clone(),
                         wmode,
                         dw2,
+                        w2.clone(),
                     );
                 }
                 let data = sys_data;
@@ -1898,6 +1917,7 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                     code_to_cid: code_to_cid.clone(),
                     wmode,
                     dw2,
+                    w2,
                 }))
             }
         }
@@ -2103,6 +2123,70 @@ fn parse_cid_widths(cid_font_dict: &PdfDict, resolver: &Resolver) -> HashMap<u16
     widths
 }
 
+/// Parse /W2 array from CIDFont dict into CID → vertical metrics map.
+///
+/// Format mirrors /W but each entry has 3 values: w1 (vertical advance),
+/// v_x and v_y (position vector from horizontal to vertical origin).
+/// All values are in 1/1000 em units (NOT divided by 1000).
+fn parse_cid_w2(cid_font_dict: &PdfDict, resolver: &Resolver) -> HashMap<u16, [f64; 3]> {
+    let mut metrics = HashMap::new();
+    let w2_obj = match cid_font_dict.get(b"W2") {
+        Some(obj) => match resolver.deref(obj) {
+            Ok(resolved) => resolved,
+            Err(_) => return metrics,
+        },
+        None => return metrics,
+    };
+    let arr = match w2_obj.as_array() {
+        Some(a) => a,
+        None => return metrics,
+    };
+    let mut i = 0;
+    while i < arr.len() {
+        let first_cid = match &arr[i] {
+            PdfObj::Int(n) => *n as u16,
+            _ => break,
+        };
+        i += 1;
+        if i >= arr.len() {
+            break;
+        }
+        let next = resolver.deref(&arr[i]).unwrap_or(arr[i].clone());
+        match &next {
+            PdfObj::Array(sub) => {
+                // [ cid_first [w1_1 v_x1 v_y1 w1_2 v_x2 v_y2 ...] ]
+                let vals: Vec<f64> = sub.iter().filter_map(|o| o.as_f64()).collect();
+                for (j, chunk) in vals.chunks(3).enumerate() {
+                    if chunk.len() == 3 {
+                        metrics.insert(first_cid + j as u16, [chunk[0], chunk[1], chunk[2]]);
+                    }
+                }
+                i += 1;
+            }
+            _ => {
+                // [ cid_first cid_last w1 v_x v_y ]
+                let last_cid = match &next {
+                    PdfObj::Int(n) => *n as u16,
+                    _ => first_cid,
+                };
+                i += 1;
+                if i + 2 < arr.len() {
+                    let w1 = arr[i].as_f64().unwrap_or(-1000.0);
+                    let vx = arr[i + 1].as_f64().unwrap_or(0.0);
+                    let vy = arr[i + 2].as_f64().unwrap_or(880.0);
+                    i += 3;
+                    for cid in first_cid..=last_cid {
+                        metrics.insert(cid, [w1, vx, vy]);
+                    }
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+    metrics
+}
+
 /// Strip PFB (Printer Font Binary) headers from Type 1 font data.
 ///
 /// PFB format wraps ASCII and binary segments with 6-byte headers:
@@ -2227,6 +2311,31 @@ impl PdfFont {
             PdfFont::CidTrueType(f) => f.dw2,
             PdfFont::CidCff(f) => f.dw2,
             _ => [880.0, -1000.0],
+        }
+    }
+
+    /// Get per-CID vertical metrics (w1, v_x, v_y), falling back to DW2.
+    /// Returns values in 1/1000 em units.
+    pub fn vertical_metrics_cid(&self, cid: u16) -> [f64; 3] {
+        match self {
+            PdfFont::CidTrueType(f) => {
+                if let Some(&m) = f.w2.get(&cid) {
+                    m
+                } else {
+                    // DW2 = [v_y, w1]; v_x defaults to half the horizontal width
+                    let w0 = f.cid_widths.get(&cid).copied().unwrap_or(f.default_width) * 1000.0;
+                    [f.dw2[1], w0 / 2.0, f.dw2[0]]
+                }
+            }
+            PdfFont::CidCff(f) => {
+                if let Some(&m) = f.w2.get(&cid) {
+                    m
+                } else {
+                    let w0 = f.cid_widths.get(&cid).copied().unwrap_or(f.default_width) * 1000.0;
+                    [f.dw2[1], w0 / 2.0, f.dw2[0]]
+                }
+            }
+            _ => [-1000.0, 500.0, 880.0],
         }
     }
 
