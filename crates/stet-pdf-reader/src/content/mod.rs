@@ -517,6 +517,14 @@ impl<'a> ContentInterpreter<'a> {
                     let sub = Self::parse_inline_array(lexer)?;
                     elems.push(PdfObj::Array(sub));
                 }
+                Token::DictBegin => {
+                    let d = crate::lexer::parse_dict_body(lexer)
+                        .unwrap_or_default();
+                    elems.push(PdfObj::Dict(d));
+                }
+                Token::Keyword(ref kw) if kw == b"null" => {
+                    elems.push(PdfObj::Null);
+                }
                 _ => {}
             }
         }
