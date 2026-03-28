@@ -784,6 +784,10 @@ pub fn convert_cie_image_data(
             convert_cal_gray_image_to_rgb(data, width, height, params),
             ImageColorSpace::DeviceRGB,
         )),
+        ResolvedColorSpace::Lab { white_point, range } => Some((
+            convert_lab_image_to_rgb(data, width, height, white_point, range),
+            ImageColorSpace::DeviceRGB,
+        )),
         _ => None,
     }
 }
