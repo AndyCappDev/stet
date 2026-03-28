@@ -3237,7 +3237,11 @@ impl<'a> ContentInterpreter<'a> {
                             .unwrap_or(PdfObj::Null),
                         _ => PdfObj::Null,
                     };
-                    dict.insert(expanded_key, val);
+                    // First occurrence wins: when both abbreviated (/W) and full
+                    // (/Width) forms are present, the first one takes precedence.
+                    if dict.get(&expanded_key).is_none() {
+                        dict.insert(expanded_key, val);
+                    }
                 }
                 _ => {}
             }
