@@ -881,11 +881,21 @@ pub fn register_icc_profile(
 }
 
 /// Convert L*a*b* to DeviceColor (sRGB) via XYZ.
+///
+/// PDF Lab color spaces specify a white point, but Lab is a perceptually
+/// uniform space — the same (L*, a*, b*) coordinates represent the same
+/// perceived color regardless of the declared white point.  We convert
+/// directly through D65 (the sRGB reference illuminant), which makes the
+/// specified white point irrelevant and avoids Bradford adaptation errors
+/// for extreme/non-physical white points.
 fn lab_to_device_color(
     components: &[f64],
-    white_point: &[f64; 3],
+    _white_point: &[f64; 3],
     range: &[f64; 4],
 ) -> DeviceColor {
+    // D65 white point (sRGB reference illuminant)
+    const D65: [f64; 3] = [0.95047, 1.0, 1.08883];
+
     let l_star = components.first().copied().unwrap_or(0.0).clamp(0.0, 100.0);
     let a_star = components
         .get(1)
@@ -898,61 +908,19 @@ fn lab_to_device_color(
         .unwrap_or(0.0)
         .clamp(range[2], range[3]);
 
-    // L*a*b* → XYZ (CIE standard formulas)
+    // L*a*b* → XYZ using D65 white point directly
     let fy = (l_star + 16.0) / 116.0;
     let fx = a_star / 500.0 + fy;
     let fz = fy - b_star / 200.0;
 
-    let x = white_point[0] * lab_f_inv(fx);
-    let y = white_point[1] * lab_f_inv(fy);
-    let z = white_point[2] * lab_f_inv(fz);
+    let x = D65[0] * lab_f_inv(fx);
+    let y = D65[1] * lab_f_inv(fy);
+    let z = D65[2] * lab_f_inv(fz);
 
-    // Chromatic adaptation: Lab XYZ (D50) → sRGB XYZ (D65)
-    let (x, y, z) = bradford_adapt(x, y, z, white_point);
+    // Already in D65 XYZ — convert directly to sRGB
     xyz_d65_to_device_color(x, y, z)
 }
 
-/// Bradford chromatic adaptation from source white point to D65.
-fn bradford_adapt(x: f64, y: f64, z: f64, src_wp: &[f64; 3]) -> (f64, f64, f64) {
-    // D65 white point in XYZ
-    const D65: [f64; 3] = [0.95047, 1.0, 1.08883];
-
-    // Bradford cone response matrix
-    const M: [[f64; 3]; 3] = [
-        [0.8951, 0.2664, -0.1614],
-        [-0.7502, 1.7135, 0.0367],
-        [0.0389, -0.0685, 1.0296],
-    ];
-    const M_INV: [[f64; 3]; 3] = [
-        [0.9869929, -0.1470543, 0.1599627],
-        [0.4323053, 0.5183603, 0.0492912],
-        [-0.0085287, 0.0400428, 0.9684867],
-    ];
-
-    // Source and dest cone responses
-    let src_l = M[0][0] * src_wp[0] + M[0][1] * src_wp[1] + M[0][2] * src_wp[2];
-    let src_m = M[1][0] * src_wp[0] + M[1][1] * src_wp[1] + M[1][2] * src_wp[2];
-    let src_s = M[2][0] * src_wp[0] + M[2][1] * src_wp[1] + M[2][2] * src_wp[2];
-
-    let dst_l = M[0][0] * D65[0] + M[0][1] * D65[1] + M[0][2] * D65[2];
-    let dst_m = M[1][0] * D65[0] + M[1][1] * D65[1] + M[1][2] * D65[2];
-    let dst_s = M[2][0] * D65[0] + M[2][1] * D65[1] + M[2][2] * D65[2];
-
-    // Transform input to cone space, scale, transform back
-    let l = M[0][0] * x + M[0][1] * y + M[0][2] * z;
-    let m = M[1][0] * x + M[1][1] * y + M[1][2] * z;
-    let s = M[2][0] * x + M[2][1] * y + M[2][2] * z;
-
-    let la = l * (dst_l / src_l);
-    let ma = m * (dst_m / src_m);
-    let sa = s * (dst_s / src_s);
-
-    let xo = M_INV[0][0] * la + M_INV[0][1] * ma + M_INV[0][2] * sa;
-    let yo = M_INV[1][0] * la + M_INV[1][1] * ma + M_INV[1][2] * sa;
-    let zo = M_INV[2][0] * la + M_INV[2][1] * ma + M_INV[2][2] * sa;
-
-    (xo, yo, zo)
-}
 
 /// D65-adapted XYZ → sRGB → DeviceColor.
 fn xyz_d65_to_device_color(x: f64, y: f64, z: f64) -> DeviceColor {
