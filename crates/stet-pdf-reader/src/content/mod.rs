@@ -110,6 +110,11 @@ pub struct ContentInterpreter<'a> {
     /// of the parent content stream" — for patterns inside Form XObjects,
     /// this includes the form's matrix transform, not just the page CTM.
     content_stream_ctm: Matrix,
+    /// The initial page CTM (DPI scaling + Y-flip + CropBox offset).
+    /// Never modified after construction. Used by annotation rendering to
+    /// position appearance streams relative to the page, not the CTM left
+    /// behind by the content stream.
+    initial_ctm: Matrix,
     /// ICC color profile cache for ICCBased color space conversions.
     icc_cache: IccCache,
     /// Active soft mask scope: tracks which display list elements fall under the current SMask.
@@ -161,6 +166,7 @@ impl<'a> ContentInterpreter<'a> {
             operand_stack: Vec::new(),
             display_list: DisplayList::new(),
             content_stream_ctm: initial_ctm,
+            initial_ctm,
             in_text: false,
             depth: 0,
             d1_color_suppressed: false,
@@ -262,6 +268,14 @@ impl<'a> ContentInterpreter<'a> {
         let annot_dict = annot_obj
             .as_dict()
             .ok_or(PdfError::Other("annotation not a dict".into()))?;
+
+        // Check annotation flags (/F). PDF spec Table 165:
+        // Bit 1 (0x01) = Invisible, Bit 2 (0x02) = Hidden, Bit 6 (0x20) = NoView.
+        // Skip annotations that shouldn't be rendered on screen.
+        let flags = annot_dict.get_int(b"F").unwrap_or(0);
+        if flags & 0x02 != 0 {
+            return Ok(()); // Hidden
+        }
 
         // Get /Rect [llx, lly, urx, ury]
         let rect = annot_dict
@@ -377,10 +391,11 @@ impl<'a> ContentInterpreter<'a> {
             self.resources = d;
         }
 
-        // Apply CTM: page CTM → bbox_to_rect → form_matrix
-        // The form_matrix maps form space to the original authoring space,
-        // and bbox_to_rect maps that space to the annotation Rect.
-        self.gstate.ctm = self.gstate.ctm.concat(&bbox_to_rect).concat(&form_matrix);
+        // Apply CTM: initial page CTM → bbox_to_rect → form_matrix
+        // Use the initial page CTM (not the post-content-stream CTM) because
+        // annotation Rects are in page coordinates, not in whatever coordinate
+        // system the content stream left behind after cm operations.
+        self.gstate.ctm = self.initial_ctm.concat(&bbox_to_rect).concat(&form_matrix);
 
         // Update content_stream_ctm so shading patterns inside the annotation
         // use the annotation's coordinate system (not the page's).
