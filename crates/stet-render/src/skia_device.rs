@@ -1997,6 +1997,47 @@ fn translate_clip_rect(rect: &ClipRect, y_start: u32, band_h: u32) -> ClipRect {
     }
 }
 
+/// Ensure an image transform maps to at least 1 device pixel in each dimension.
+///
+/// PDFs commonly draw rules and borders using tiny image masks (1×1 or 4×1 pixels)
+/// scaled via the CTM to thin rectangles. At low DPI these can map to sub-pixel
+/// device dimensions and vanish. This adjusts the transform's scale components
+/// so the image covers at least 1 pixel in each direction.
+fn enforce_min_image_size(transform: Transform, img_w: u32, img_h: u32) -> Transform {
+    // Effective device-space dimensions
+    let eff_w = ((transform.sx * img_w as f32).powi(2)
+        + (transform.ky * img_w as f32).powi(2))
+    .sqrt();
+    let eff_h = ((transform.kx * img_h as f32).powi(2)
+        + (transform.sy * img_h as f32).powi(2))
+    .sqrt();
+
+    if eff_w >= 1.0 && eff_h >= 1.0 {
+        return transform;
+    }
+
+    // Only boost if the image is a thin rule (large aspect ratio).
+    // Small images that are sub-pixel in both dimensions (e.g. tiny dots)
+    // are left as-is — boosting them would create visible artifacts.
+    let ratio = eff_w.max(eff_h) / eff_w.min(eff_h).max(0.001);
+    if ratio < 3.0 {
+        return transform;
+    }
+
+    let mut t = transform;
+    if eff_w < 1.0 && eff_w > 0.001 {
+        let boost = 1.0 / eff_w;
+        t.sx *= boost;
+        t.ky *= boost;
+    }
+    if eff_h < 1.0 && eff_h > 0.001 {
+        let boost = 1.0 / eff_h;
+        t.kx *= boost;
+        t.sy *= boost;
+    }
+    t
+}
+
 /// Compute minimum line width for hairline strokes at a given DPI and CTM.
 /// Returns the minimum width in user-space units that ensures at least
 /// 0.5 device pixels at ≤150 DPI or 1.0 device pixel above 150 DPI.
@@ -2434,7 +2475,7 @@ fn render_element(
                     return;
                 };
                 let combined = params.ctm.concat(&image_inv);
-                let raw_transform = ctx.transform(&combined);
+                let raw_transform = enforce_min_image_size(ctx.transform(&combined), iw, ih);
 
                 // Pre-scale images that are being downscaled. Even non-interpolated
                 // images need proper area averaging when shrinking — "no interpolation"
@@ -4130,7 +4171,7 @@ impl OutputDevice for SkiaDevice {
             return;
         };
         let combined = params.ctm.concat(&image_inv);
-        let raw_transform = to_transform(&combined);
+        let raw_transform = enforce_min_image_size(to_transform(&combined), w, h);
 
         let prescaled = prescale_image(&rgba_data, w, h, raw_transform, params.interpolate);
         let (img_data, img_w, img_h, transform) = match &prescaled {
