@@ -3158,7 +3158,30 @@ fn render_soft_masked(
         render_element(&mut mask_pixmap, &mut mask_band, elem, &elem_ctx);
     }
 
-    // 2. Extract grayscale mask values
+    // 2. If the mask form had nested soft mask scopes (gs-set SMask inside
+    // the form), composite the rendering onto the backdrop color. Nested
+    // masks produce semi-transparent pixels where alpha encodes mask
+    // modulation; without compositing, un-premultiplying would amplify
+    // the color and lose the modulation.
+    if params.has_nested_mask_scope {
+        let bc = params.backdrop_color.as_ref();
+        let bd_r = bc.map_or(0u8, |c| (c[0].clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
+        let bd_g = bc.map_or(0u8, |c| (c[1].clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
+        let bd_b = bc.map_or(0u8, |c| (c[2].clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
+        for chunk in mask_pixmap.data_mut().chunks_exact_mut(4) {
+            let a = chunk[3] as u16;
+            if a == 255 {
+                continue;
+            }
+            let inv_a = 255 - a;
+            chunk[0] = ((chunk[0] as u16 * 255 + bd_r as u16 * inv_a + 127) / 255) as u8;
+            chunk[1] = ((chunk[1] as u16 * 255 + bd_g as u16 * inv_a + 127) / 255) as u8;
+            chunk[2] = ((chunk[2] as u16 * 255 + bd_b as u16 * inv_a + 127) / 255) as u8;
+            chunk[3] = 255;
+        }
+    }
+
+    // 3. Extract grayscale mask values
     let pixel_count = (eff_w * eff_h) as usize;
     let mut mask_values = vec![0u8; pixel_count];
     extract_soft_mask_values(mask_pixmap.data(), &mut mask_values, params);

@@ -30,6 +30,10 @@ pub struct SoftMaskParams {
     pub backdrop_color: Option<[f64; 3]>,
     /// Whether the mask values should be inverted (from /TR `{1 exch sub}`).
     pub transfer_invert: bool,
+    /// Whether the mask form contained nested soft mask scopes (gs-set SMask).
+    /// When true, the renderer composites semi-transparent pixels onto the
+    /// backdrop before extracting luminosity.
+    pub has_nested_mask_scope: bool,
 }
 
 /// Parameters for a transparency group compositing operation.

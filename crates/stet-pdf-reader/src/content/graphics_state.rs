@@ -67,6 +67,11 @@ pub struct SoftMask {
     pub backdrop_color: Option<[f64; 3]>,
     /// Whether the mask values should be inverted (from /TR `{1 exch sub}`).
     pub transfer_invert: bool,
+    /// Whether the mask form contained nested soft mask scopes (gs-set SMask
+    /// inside the form that was flushed). When true, the renderer must
+    /// composite semi-transparent pixels onto the backdrop before extracting
+    /// luminosity, since the alpha encodes mask modulation from nested masks.
+    pub has_nested_mask_scope: bool,
 }
 
 impl std::fmt::Debug for SoftMask {
@@ -172,6 +177,9 @@ pub struct PdfGraphicsState {
     pub transfer: TransferState,
     /// Active soft mask from ExtGState /SMask.
     pub soft_mask: Option<SoftMask>,
+    /// Generation counter: incremented each time a new SMask is set via gs.
+    /// Used by the Q handler to detect SMask changes within a q/Q block.
+    pub smask_gen: u64,
 }
 
 impl PdfGraphicsState {
@@ -223,6 +231,7 @@ impl PdfGraphicsState {
             next_pattern_id: 0,
             transfer: TransferState::default(),
             soft_mask: None,
+            smask_gen: 0,
         }
     }
 

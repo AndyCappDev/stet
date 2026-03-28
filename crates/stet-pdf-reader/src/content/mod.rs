@@ -119,6 +119,10 @@ pub struct ContentInterpreter<'a> {
     icc_cache: IccCache,
     /// Active soft mask scope: tracks which display list elements fall under the current SMask.
     soft_mask_scope: Option<SoftMaskScope>,
+    /// Counter: incremented when the Q handler flushes a gs-set SMask scope
+    /// (detected via smask_gen change). Used by resolve_soft_mask to detect
+    /// genuine nested mask scopes vs image-level SMasks.
+    nested_mask_flush_count: u32,
     /// Optional font data provider for environments without filesystem access.
     font_provider: Option<FontProvider>,
     /// Accumulated text clip path (for text rendering modes 4-7).
@@ -170,6 +174,7 @@ impl<'a> ContentInterpreter<'a> {
             in_text: false,
             depth: 0,
             d1_color_suppressed: false,
+            nested_mask_flush_count: 0,
             font_cache: FontCache::new(),
             current_font: None,
             icc_cache: icc_cache.clone(),
@@ -820,12 +825,16 @@ impl<'a> ContentInterpreter<'a> {
 
     fn op_big_q(&mut self) -> Result<(), PdfError> {
         if let Some(saved) = self.gstate_stack.pop() {
-            // Flush soft mask scope before restoring state — the restored
-            // state may have a different (or no) soft mask.
-            let restored_has_smask = saved.soft_mask.is_some();
-            let current_has_smask = self.gstate.soft_mask.is_some();
-            if current_has_smask && !restored_has_smask {
+            // Flush soft mask scope if the SMask changed during this q/Q block.
+            // Compare the smask_gen counter: if it changed, a new SMask was set
+            // inside this block and the scope should be flushed. This correctly
+            // handles nested masks inside resolve_soft_mask where both current
+            // and saved gstates have a soft_mask but they're different.
+            if self.soft_mask_scope.is_some()
+                && self.gstate.smask_gen != saved.smask_gen
+            {
                 self.flush_soft_mask();
+                self.nested_mask_flush_count += 1;
             }
 
             let old_clip_version = self.gstate.clip_path_version;
@@ -2337,6 +2346,7 @@ impl<'a> ContentInterpreter<'a> {
                     bbox: [x_min, y_min, x_max, y_max],
                     backdrop_color: None,
                     transfer_invert: false,
+                    has_nested_mask_scope: false,
                 },
             });
             return Ok(());
@@ -2428,7 +2438,7 @@ impl<'a> ContentInterpreter<'a> {
                 params: SoftMaskParams {
                     subtype: SoftMaskSubtype::Luminosity,
                     bbox: [x_min, y_min, x_max, y_max],
-                    backdrop_color: None, transfer_invert: false,
+                    backdrop_color: None, transfer_invert: false, has_nested_mask_scope: false,
                 },
             });
             return Ok(());
@@ -2758,6 +2768,7 @@ impl<'a> ContentInterpreter<'a> {
                     bbox: [x_min, y_min, x_max, y_max],
                     backdrop_color: None,
                     transfer_invert: false,
+                    has_nested_mask_scope: false,
                 },
             });
         } else {
@@ -3457,6 +3468,7 @@ impl<'a> ContentInterpreter<'a> {
                     bbox: [x_min, y_min, x_max, y_max],
                     backdrop_color: None,
                     transfer_invert: false,
+                    has_nested_mask_scope: false,
                 },
             });
             return Ok(());
@@ -3637,6 +3649,7 @@ impl<'a> ContentInterpreter<'a> {
                         Ok(sm) => {
                             let start_index = self.display_list.len();
                             self.gstate.soft_mask = Some(sm.clone());
+                            self.gstate.smask_gen += 1;
                             self.soft_mask_scope = Some(SoftMaskScope {
                                 start_index,
                                 mask: sm,
@@ -3684,6 +3697,7 @@ impl<'a> ContentInterpreter<'a> {
                         bbox: scope.mask.bbox,
                         backdrop_color: scope.mask.backdrop_color,
                         transfer_invert: scope.mask.transfer_invert,
+                        has_nested_mask_scope: scope.mask.has_nested_mask_scope,
                     },
                 });
             }
@@ -3878,11 +3892,19 @@ impl<'a> ContentInterpreter<'a> {
         // luminosity = 0 for the mask.
         let saved_cmyk_hash = self.icc_cache.suspend_default_cmyk();
 
+        let saved_nested_mask_flush_count = self.nested_mask_flush_count;
         self.depth += 1;
         let _ = self.interpret_stream(&form_data);
         self.depth -= 1;
 
         self.icc_cache.restore_default_cmyk(saved_cmyk_hash);
+
+        // Check if Q handlers flushed any gs-set nested soft mask scopes
+        // during interpretation. This is tracked via a counter that's
+        // incremented in op_big_q when smask_gen changes (NOT by image-level
+        // SMasks or other SoftMasked element sources).
+        let has_nested_mask_scope =
+            self.nested_mask_flush_count > saved_nested_mask_flush_count;
 
         // Flush any soft mask scope opened inside the mask form
         self.flush_soft_mask();
@@ -3985,6 +4007,7 @@ impl<'a> ContentInterpreter<'a> {
             bbox: effective_bbox,
             backdrop_color,
             transfer_invert,
+            has_nested_mask_scope,
         })
     }
 
