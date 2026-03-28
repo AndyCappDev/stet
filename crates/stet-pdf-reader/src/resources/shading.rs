@@ -159,6 +159,7 @@ fn handle_function_based(
             width,
             height,
             color_space: ImageColorSpace::PreconvertedRGBA,
+            bits_per_component: 8,
             ctm: combined,
             image_matrix,
             interpolate: true,

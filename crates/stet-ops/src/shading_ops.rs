@@ -376,6 +376,7 @@ fn build_type1_shading(
             width: size as u32,
             height: size as u32,
             color_space: stet_graphics::device::ImageColorSpace::DeviceRGB,
+            bits_per_component: 8,
             ctm,
             image_matrix,
             interpolate: false,

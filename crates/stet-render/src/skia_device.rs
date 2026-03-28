@@ -1450,6 +1450,7 @@ fn samples_to_rgba(
     let w = params.width as usize;
     let h = params.height as usize;
     let npixels = w * h;
+    let bpc = params.bits_per_component;
     match &params.color_space {
         ImageColorSpace::PreconvertedRGBA => {
             // Already RGBA — just return as-is
@@ -1457,23 +1458,45 @@ fn samples_to_rgba(
         }
         ImageColorSpace::DeviceGray => {
             let mut rgba = vec![255u8; npixels * 4];
-            for i in 0..npixels {
-                let g = data.get(i).copied().unwrap_or(0);
-                let pi = i * 4;
-                rgba[pi] = g;
-                rgba[pi + 1] = g;
-                rgba[pi + 2] = g;
+            if bpc == 16 {
+                for i in 0..npixels {
+                    let g = data.get(i * 2).copied().unwrap_or(0);
+                    let pi = i * 4;
+                    rgba[pi] = g;
+                    rgba[pi + 1] = g;
+                    rgba[pi + 2] = g;
+                }
+            } else {
+                for i in 0..npixels {
+                    let g = data.get(i).copied().unwrap_or(0);
+                    let pi = i * 4;
+                    rgba[pi] = g;
+                    rgba[pi + 1] = g;
+                    rgba[pi + 2] = g;
+                }
             }
             rgba
         }
         ImageColorSpace::DeviceRGB => {
             let mut rgba = vec![255u8; npixels * 4];
-            for i in 0..npixels {
-                let si = i * 3;
-                let pi = i * 4;
-                rgba[pi] = data.get(si).copied().unwrap_or(0);
-                rgba[pi + 1] = data.get(si + 1).copied().unwrap_or(0);
-                rgba[pi + 2] = data.get(si + 2).copied().unwrap_or(0);
+            if bpc == 16 {
+                // 16 BPC: 6 bytes per pixel (R_hi R_lo G_hi G_lo B_hi B_lo)
+                // Take high byte of each 16-bit sample
+                for i in 0..npixels {
+                    let si = i * 6;
+                    let pi = i * 4;
+                    rgba[pi] = data.get(si).copied().unwrap_or(0);
+                    rgba[pi + 1] = data.get(si + 2).copied().unwrap_or(0);
+                    rgba[pi + 2] = data.get(si + 4).copied().unwrap_or(0);
+                }
+            } else {
+                for i in 0..npixels {
+                    let si = i * 3;
+                    let pi = i * 4;
+                    rgba[pi] = data.get(si).copied().unwrap_or(0);
+                    rgba[pi + 1] = data.get(si + 1).copied().unwrap_or(0);
+                    rgba[pi + 2] = data.get(si + 2).copied().unwrap_or(0);
+                }
             }
             rgba
         }
@@ -1576,6 +1599,7 @@ fn samples_to_rgba(
             };
             let p = ImageParams {
                 color_space: fallback,
+                bits_per_component: 8,
                 ..params.clone()
             };
             samples_to_rgba(data, &p, icc, opm_zero_transparent)
@@ -1598,6 +1622,7 @@ fn samples_to_rgba(
             }
             let p = ImageParams {
                 color_space: *base.clone(),
+                bits_per_component: 8,
                 ..params.clone()
             };
             samples_to_rgba(&expanded, &p, icc, opm_zero_transparent)

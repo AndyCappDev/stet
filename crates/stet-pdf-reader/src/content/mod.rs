@@ -2294,6 +2294,7 @@ impl<'a> ContentInterpreter<'a> {
                     width,
                     height,
                     color_space: ImageColorSpace::DeviceGray,
+                    bits_per_component: 8,
                     ctm: self.gstate.ctm,
                     image_matrix,
                     interpolate: false,
@@ -2386,6 +2387,7 @@ impl<'a> ContentInterpreter<'a> {
                 params: ImageParams {
                     width, height,
                     color_space: ImageColorSpace::DeviceGray,
+                    bits_per_component: 8,
                     ctm: self.gstate.ctm, image_matrix,
                     interpolate: false, mask_color: None,
                     alpha: 1.0, blend_mode: 0,
@@ -2500,17 +2502,20 @@ impl<'a> ContentInterpreter<'a> {
         let is_jpx = filter_name == Some(b"JPXDecode");
         let is_dct = filter_name == Some(b"DCTDecode");
         let is_indexed = matches!(&color_space, ImageColorSpace::Indexed { .. });
-        let sample_data = if is_image_mask || bpc == 8 || bpc == 0 || is_jpx || is_dct {
-            sample_data
+        // Expand sub-byte samples (1/2/4 BPC) to 8-bit since they're packed
+        // with geometry-dependent alignment. Leave 16-bit data as raw bytes in
+        // the display list to preserve full precision for high-bit-depth outputs.
+        let (sample_data, display_bpc) = if is_image_mask || bpc == 8 || bpc == 0 || bpc > 8 || is_jpx || is_dct {
+            (sample_data, if is_dct || is_jpx { 8 } else { bpc })
         } else {
-            expand_bits_to_bytes(
+            (expand_bits_to_bytes(
                 &sample_data,
                 bpc,
                 width,
                 height,
                 color_space.num_components(),
                 is_indexed,
-            )
+            ), 8)
         };
 
         // Apply /Decode array if present (maps sample values to color component values).
@@ -2659,6 +2664,7 @@ impl<'a> ContentInterpreter<'a> {
             width,
             height,
             color_space,
+            bits_per_component: display_bpc as u8,
             ctm: self.gstate.ctm,
             image_matrix,
             interpolate,
@@ -2709,6 +2715,7 @@ impl<'a> ContentInterpreter<'a> {
                     width,
                     height,
                     color_space: ImageColorSpace::DeviceGray,
+                    bits_per_component: 8,
                     ctm: self.gstate.ctm,
                     image_matrix,
                     interpolate,
@@ -2786,8 +2793,14 @@ impl<'a> ContentInterpreter<'a> {
         let bpc = smask_dict.get_int(b"BitsPerComponent").unwrap_or(8) as u32;
         let data = self.resolver.stream_data_from_obj(&smask_ref)?;
 
-        // Expand sub-byte BPC to 8-bit (1-bit SMasks are common for text-as-image)
-        let mut data = if bpc < 8 {
+        // Expand non-8-bit BPC: sub-byte (1/2/4) are packed bits;
+        // 16-bit needs downsampling to 8-bit for alpha channel use.
+        let mut data = if bpc == 8 {
+            data
+        } else if bpc == 16 {
+            // Take high byte of each 16-bit sample
+            data.chunks(2).map(|c| c[0]).collect()
+        } else if bpc < 8 {
             expand_bits_to_bytes(&data, bpc, sw, sh, 1, false)
         } else {
             data
@@ -3395,6 +3408,7 @@ impl<'a> ContentInterpreter<'a> {
                     width,
                     height,
                     color_space: ImageColorSpace::DeviceGray,
+                    bits_per_component: 8,
                     ctm: self.gstate.ctm,
                     image_matrix,
                     interpolate: false,
@@ -3484,6 +3498,7 @@ impl<'a> ContentInterpreter<'a> {
                 width,
                 height,
                 color_space,
+                bits_per_component: 8,
                 ctm: self.gstate.ctm,
                 image_matrix,
                 interpolate: false,

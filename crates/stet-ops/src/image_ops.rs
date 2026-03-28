@@ -1783,6 +1783,7 @@ fn draw_image_to_device(
         width,
         height,
         color_space,
+        bits_per_component: 8,
         ctm: ctx.gstate.ctm,
         image_matrix: *image_matrix,
         interpolate: false,

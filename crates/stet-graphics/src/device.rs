@@ -371,6 +371,7 @@ pub struct ImageParams {
     pub width: u32,
     pub height: u32,
     pub color_space: ImageColorSpace,
+    pub bits_per_component: u8,
     pub ctm: Matrix,
     pub image_matrix: Matrix,
     pub interpolate: bool,
