@@ -251,6 +251,8 @@ pub fn resolve_font(
                         has_pdf_widths,
                         font_provider,
                         desc_flags,
+                        first_char,
+                        last_char,
                     ) {
                         return Ok(font);
                     }
@@ -270,6 +272,8 @@ pub fn resolve_font(
                         has_pdf_widths,
                         font_provider,
                         desc_flags,
+                        first_char,
+                        last_char,
                     ) {
                         return Ok(font);
                     }
@@ -293,6 +297,8 @@ pub fn resolve_font(
                         has_pdf_widths,
                         font_provider,
                         desc_flags,
+                        first_char,
+                        last_char,
                     ) {
                         return Ok(font);
                     }
@@ -308,6 +314,8 @@ pub fn resolve_font(
         has_pdf_widths,
         font_provider,
         desc_flags,
+        first_char,
+        last_char,
     ) {
         return Ok(font);
     }
@@ -466,7 +474,7 @@ pub fn fallback_font(font_provider: Option<&FontProvider>) -> Option<PdfFont> {
         })
     });
     let widths = super::standard_fonts::standard_font_widths(b"Helvetica").unwrap_or([0.0f64; 256]);
-    substitute_font("Helvetica", encoding, widths, false, font_provider, 0)
+    substitute_font("Helvetica", encoding, widths, false, font_provider, 0, 0, 255)
 }
 
 /// Try to load a substitute font for a non-embedded font.
@@ -546,6 +554,8 @@ fn substitute_font(
     has_pdf_widths: bool,
     font_provider: Option<&FontProvider>,
     descriptor_flags: u32,
+    first_char: usize,
+    last_char: usize,
 ) -> Option<PdfFont> {
     use stet_fonts::FONT_SUBSTITUTIONS;
 
@@ -650,7 +660,10 @@ fn substitute_font(
             let mut pdf_sum = 0.0;
             let mut sub_sum = 0.0;
             let mut count = 0;
-            for code in 0..256usize {
+            // Only compare widths within the PDF's /Widths range [FirstChar, LastChar].
+            // Characters outside this range may have /MissingWidth values that don't
+            // represent real glyph usage and would skew the scaling ratio.
+            for code in first_char..=last_char.min(255) {
                 let pdf_w = widths[code];
                 if pdf_w <= 0.0 {
                     continue;

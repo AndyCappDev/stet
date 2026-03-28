@@ -1729,6 +1729,7 @@ impl<'a> ContentInterpreter<'a> {
                         .concat(&self.gstate.text_matrix)
                         .concat(&text_state_matrix)
                         .concat(&font_matrix);
+
                     let device_path = glyph_path.transform(&trm);
                     if !device_path.is_empty() {
                         self.emit_text_glyph(device_path, render_mode);
