@@ -1595,20 +1595,26 @@ impl<'a> ContentInterpreter<'a> {
             Some(Operand::Array(a)) => a.clone(),
             _ => return Ok(()),
         };
+        let vertical = self.current_font.as_ref().is_some_and(|f| f.wmode() == 1);
         for elem in &arr {
             match elem {
                 PdfObj::Str(s) => self.show_text(s),
                 PdfObj::Int(n) => {
-                    // Negative number → shift right, positive → shift left
-                    let th = self.gstate.horizontal_scaling;
-                    let shift = -*n as f64 / 1000.0 * self.gstate.font_size * th;
-                    let m = Matrix::translate(shift, 0.0);
+                    let shift = -*n as f64 / 1000.0 * self.gstate.font_size;
+                    let m = if vertical {
+                        Matrix::translate(0.0, shift)
+                    } else {
+                        Matrix::translate(shift * self.gstate.horizontal_scaling, 0.0)
+                    };
                     self.gstate.text_matrix = self.gstate.text_matrix.concat(&m);
                 }
                 PdfObj::Real(f) => {
-                    let th = self.gstate.horizontal_scaling;
-                    let shift = -f / 1000.0 * self.gstate.font_size * th;
-                    let m = Matrix::translate(shift, 0.0);
+                    let shift = -f / 1000.0 * self.gstate.font_size;
+                    let m = if vertical {
+                        Matrix::translate(0.0, shift)
+                    } else {
+                        Matrix::translate(shift * self.gstate.horizontal_scaling, 0.0)
+                    };
                     self.gstate.text_matrix = self.gstate.text_matrix.concat(&m);
                 }
                 _ => {}
@@ -1753,9 +1759,20 @@ impl<'a> ContentInterpreter<'a> {
         font_matrix: &Matrix,
         render_mode: i32,
     ) {
+        let vertical = font.wmode() == 1;
         if let Some(glyph_path) = font.glyph_path_cid(cid) {
-            let text_state_matrix =
-                Matrix::new(font_size * th, 0.0, 0.0, font_size, 0.0, text_rise);
+            let text_state_matrix = if vertical {
+                // Vertical mode: no Th, center glyph horizontally (-w0/2),
+                // shift down by v_y so vertical origin aligns with text position.
+                let w0 = font.glyph_width_cid(cid);
+                let dw2 = font.dw2();
+                Matrix::new(
+                    font_size, 0.0, 0.0, font_size,
+                    -w0 / 2.0 * font_size, -dw2[0] / 1000.0 * font_size,
+                )
+            } else {
+                Matrix::new(font_size * th, 0.0, 0.0, font_size, 0.0, text_rise)
+            };
             let trm = self
                 .gstate
                 .ctm
@@ -1767,10 +1784,17 @@ impl<'a> ContentInterpreter<'a> {
                 self.emit_text_glyph(device_path, render_mode);
             }
         }
-        let w0 = font.glyph_width_cid(cid);
-        let tx = (w0 * font_size + char_spacing) * th;
-        let advance = Matrix::translate(tx, 0.0);
-        self.gstate.text_matrix = self.gstate.text_matrix.concat(&advance);
+        if vertical {
+            let dw2 = font.dw2();
+            let ty = dw2[1] / 1000.0 * font_size + char_spacing;
+            let advance = Matrix::translate(0.0, ty);
+            self.gstate.text_matrix = self.gstate.text_matrix.concat(&advance);
+        } else {
+            let w0 = font.glyph_width_cid(cid);
+            let tx = (w0 * font_size + char_spacing) * th;
+            let advance = Matrix::translate(tx, 0.0);
+            self.gstate.text_matrix = self.gstate.text_matrix.concat(&advance);
+        }
     }
 
     /// Render a CID glyph using Unicode→cmap for the glyph shape but the CID
@@ -1788,10 +1812,19 @@ impl<'a> ContentInterpreter<'a> {
         font_matrix: &Matrix,
         render_mode: i32,
     ) {
+        let vertical = font.wmode() == 1;
         // Try to render the glyph shape via Unicode mapping in the substitute font
         if let Some(glyph_path) = font.glyph_path_unicode(unicode as u16) {
-            let text_state_matrix =
-                Matrix::new(font_size * th, 0.0, 0.0, font_size, 0.0, text_rise);
+            let text_state_matrix = if vertical {
+                let w0 = font.glyph_width_cid(cid);
+                let dw2 = font.dw2();
+                Matrix::new(
+                    font_size, 0.0, 0.0, font_size,
+                    -w0 / 2.0 * font_size, -dw2[0] / 1000.0 * font_size,
+                )
+            } else {
+                Matrix::new(font_size * th, 0.0, 0.0, font_size, 0.0, text_rise)
+            };
             let trm = self
                 .gstate
                 .ctm
@@ -1803,11 +1836,17 @@ impl<'a> ContentInterpreter<'a> {
                 self.emit_text_glyph(device_path, render_mode);
             }
         }
-        // Always advance by the CID width from the PDF's W table
-        let w0 = font.glyph_width_cid(cid);
-        let tx = (w0 * font_size + char_spacing) * th;
-        let advance = Matrix::translate(tx, 0.0);
-        self.gstate.text_matrix = self.gstate.text_matrix.concat(&advance);
+        if vertical {
+            let dw2 = font.dw2();
+            let ty = dw2[1] / 1000.0 * font_size + char_spacing;
+            let advance = Matrix::translate(0.0, ty);
+            self.gstate.text_matrix = self.gstate.text_matrix.concat(&advance);
+        } else {
+            let w0 = font.glyph_width_cid(cid);
+            let tx = (w0 * font_size + char_spacing) * th;
+            let advance = Matrix::translate(tx, 0.0);
+            self.gstate.text_matrix = self.gstate.text_matrix.concat(&advance);
+        }
     }
 
     /// Render a single glyph from a WinAnsi byte via Unicode→cmap, bypassing CID.

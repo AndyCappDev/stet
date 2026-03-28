@@ -101,6 +101,11 @@ pub struct CidTrueTypePdfFont {
     pub code_lengths: [u8; 256],
     /// Code → CID mapping from the encoding CMap (empty = identity).
     pub code_to_cid: HashMap<u32, u32>,
+    /// Writing mode: 0 = horizontal, 1 = vertical.
+    pub wmode: u8,
+    /// Default vertical metrics [v_y, w1] from /DW2 (default: [880, -1000]).
+    /// v_y = vertical origin offset, w1 = vertical advance width.
+    pub dw2: [f64; 2],
 }
 
 /// CIDFontType0: CFF outlines accessed by CID (2-byte char codes).
@@ -126,6 +131,10 @@ pub struct CidCffPdfFont {
     pub code_lengths: [u8; 256],
     /// Code → CID mapping from the encoding CMap (empty = identity).
     pub code_to_cid: HashMap<u32, u32>,
+    /// Writing mode: 0 = horizontal, 1 = vertical.
+    pub wmode: u8,
+    /// Default vertical metrics [v_y, w1] from /DW2 (default: [880, -1000]).
+    pub dw2: [f64; 2],
 }
 
 /// Type 3 font: glyphs defined as content streams (CharProcs).
@@ -813,6 +822,8 @@ fn create_cid_cff_from_otf(
     identity_cid_to_gid: bool,
     code_lengths: [u8; 256],
     code_to_cid: HashMap<u32, u32>,
+    wmode: u8,
+    dw2: [f64; 2],
 ) -> Result<PdfFont, PdfError> {
     use stet_fonts::truetype::find_table;
 
@@ -848,6 +859,8 @@ fn create_cid_cff_from_otf(
         ordering: ordering.to_vec(),
         code_lengths,
         code_to_cid,
+        wmode,
+        dw2,
     }))
 }
 
@@ -867,6 +880,8 @@ fn create_cid_cff_from_raw(
     identity_cid_to_gid: bool,
     code_lengths: [u8; 256],
     code_to_cid: HashMap<u32, u32>,
+    wmode: u8,
+    dw2: [f64; 2],
 ) -> Result<PdfFont, PdfError> {
     let fonts =
         parse_cff(cff_data).map_err(|e| PdfError::Other(format!("CFF parse error: {e}")))?;
@@ -888,6 +903,8 @@ fn create_cid_cff_from_raw(
         ordering: ordering.to_vec(),
         code_lengths,
         code_to_cid,
+        wmode,
+        dw2,
     }))
 }
 
@@ -1497,32 +1514,38 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
     //   - a stream containing a custom CMap
     //   - a name like "Identity-H" (identity mapping, 2-byte codes)
     //   - a predefined CMap name like "GBK-EUC-H" (load from system)
-    let (code_lengths, code_to_cid) = if let Some(enc_obj) = encoding_obj {
+    let (code_lengths, code_to_cid, mut wmode) = if let Some(enc_obj) = encoding_obj {
         if let Ok(cmap_data) = resolver.stream_data_from_obj(enc_obj) {
             // Embedded CMap stream
             let cmap = super::cmap::CMap::parse(&cmap_data);
-            (cmap.code_lengths, cmap.code_to_cid)
+            (cmap.code_lengths, cmap.code_to_cid, cmap.wmode)
         } else if !encoding_name.is_empty()
             && !encoding_name.starts_with(b"Identity")
         {
             // Predefined CMap name (e.g. GBK-EUC-H) — load from system
             if let Some(cmap_data) = load_predefined_cmap(encoding_name) {
                 let cmap = super::cmap::CMap::parse(&cmap_data);
-                (cmap.code_lengths, cmap.code_to_cid)
+                (cmap.code_lengths, cmap.code_to_cid, cmap.wmode)
             } else {
                 eprintln!(
                     "warning: predefined CMap '{}' not found; \
                      set STET_CMAP_DIR or install poppler-data for CJK support",
                     String::from_utf8_lossy(encoding_name)
                 );
-                ([2u8; 256], HashMap::new())
+                ([2u8; 256], HashMap::new(), 0)
             }
         } else {
-            ([2u8; 256], HashMap::new()) // Identity-H/V or fallback
+            ([2u8; 256], HashMap::new(), 0) // Identity-H/V or fallback
         }
     } else {
-        ([2u8; 256], HashMap::new())
+        ([2u8; 256], HashMap::new(), 0)
     };
+    // Encoding name suffix overrides CMap WMode: -V = vertical, -H = horizontal
+    if encoding_name.ends_with(b"-V") {
+        wmode = 1;
+    } else if encoding_name.ends_with(b"-H") {
+        wmode = 0;
+    }
 
     // Get DescendantFonts array (must have exactly one entry).
     // May be a direct array or an indirect reference to one.
@@ -1551,6 +1574,20 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
 
     // Parse /DW (default width)
     let default_width = cid_font_dict.get_int(b"DW").unwrap_or(1000) as f64 / 1000.0;
+
+    // Parse /DW2 (default vertical metrics: [v_y w1])
+    // Default: [880, -1000] per PDF spec Table 117
+    let dw2 = cid_font_dict
+        .get_array(b"DW2")
+        .and_then(|arr| {
+            let v: Vec<f64> = arr.iter().filter_map(|o| o.as_f64()).collect();
+            if v.len() >= 2 {
+                Some([v[0], v[1]])
+            } else {
+                None
+            }
+        })
+        .unwrap_or([880.0, -1000.0]);
 
     // Parse /W array (CID-specific widths)
     let cid_widths = parse_cid_widths(cid_font_dict, resolver);
@@ -1644,6 +1681,8 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                             identity,
                             code_lengths,
                             code_to_cid.clone(),
+                            wmode,
+                            dw2,
                         );
                     } else {
                         return create_cid_cff_from_raw(
@@ -1655,6 +1694,8 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                             identity,
                             code_lengths,
                             code_to_cid.clone(),
+                            wmode,
+                            dw2,
                         );
                     }
                 }
@@ -1685,6 +1726,8 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                         false, // substituted: use cmap, not identity
                         code_lengths,
                         code_to_cid.clone(),
+                        wmode,
+                        dw2,
                     );
                 }
                 sys_data
@@ -1726,6 +1769,8 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                 ucs2_encoding,
                 code_lengths,
                 code_to_cid: code_to_cid.clone(),
+                wmode,
+                dw2,
             }))
         }
         b"CIDFontType0" => {
@@ -1761,6 +1806,8 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                         false, // CIDFontType0: CFF handles CID mapping internally
                         code_lengths,
                         code_to_cid.clone(),
+                        wmode,
+                        dw2,
                     );
                 }
                 let fonts = parse_cff(&font_data)
@@ -1782,6 +1829,8 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                     ordering: ordering.clone(),
                     code_lengths,
                     code_to_cid: code_to_cid.clone(),
+                    wmode,
+                    dw2,
                 }))
             } else {
                 // Not embedded — substitute with a system font
@@ -1813,6 +1862,8 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                         false, // substituted: use cmap, not identity
                         code_lengths,
                         code_to_cid.clone(),
+                        wmode,
+                        dw2,
                     );
                 }
                 let data = sys_data;
@@ -1832,6 +1883,8 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                     ucs2_encoding,
                     code_lengths,
                     code_to_cid: code_to_cid.clone(),
+                    wmode,
+                    dw2,
                 }))
             }
         }
@@ -2143,6 +2196,25 @@ impl PdfFont {
     /// Whether this is a composite (CID) font that uses multi-byte character codes.
     pub fn is_composite(&self) -> bool {
         matches!(self, PdfFont::CidTrueType(_) | PdfFont::CidCff(_))
+    }
+
+    /// Writing mode: 0 = horizontal, 1 = vertical.
+    pub fn wmode(&self) -> u8 {
+        match self {
+            PdfFont::CidTrueType(f) => f.wmode,
+            PdfFont::CidCff(f) => f.wmode,
+            _ => 0,
+        }
+    }
+
+    /// Default vertical metrics [v_y, w1] for vertical writing mode.
+    /// v_y = vertical origin y offset (in 1/1000 em), w1 = vertical advance.
+    pub fn dw2(&self) -> [f64; 2] {
+        match self {
+            PdfFont::CidTrueType(f) => f.dw2,
+            PdfFont::CidCff(f) => f.dw2,
+            _ => [880.0, -1000.0],
+        }
     }
 
     /// Whether a CID maps to a GID that exists in the font.

@@ -13,6 +13,8 @@ pub struct CMap {
     /// Precomputed first-byte → code length table.
     /// 0 = not in any codespace range (treat as 2-byte default).
     pub code_lengths: [u8; 256],
+    /// Writing mode: 0 = horizontal, 1 = vertical.
+    pub wmode: u8,
 }
 
 impl CMap {
@@ -21,6 +23,7 @@ impl CMap {
         Self {
             code_to_cid: HashMap::new(),
             code_lengths: [2; 256],
+            wmode: 0,
         }
     }
 
@@ -40,6 +43,7 @@ impl CMap {
     pub fn parse(data: &[u8]) -> Self {
         let mut code_to_cid = HashMap::new();
         let mut codespace_ranges: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        let mut wmode: u8 = 0;
 
         let text = String::from_utf8_lossy(data);
         #[allow(clippy::while_let_on_iterator)]
@@ -47,6 +51,23 @@ impl CMap {
 
         while let Some(line) = lines.next() {
             let line = line.trim();
+
+            // Parse /WMode
+            if let Some(rest) = line.strip_prefix("/WMode") {
+                let rest = rest.trim();
+                if let Some(rest) = rest.strip_prefix("def").or(Some(rest)) {
+                    if let Ok(v) = rest.trim().parse::<u8>() {
+                        wmode = v;
+                    }
+                }
+            }
+            // Also handle "N /WMode def" pattern
+            if line.ends_with("/WMode def") {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if let Some(v) = parts.first().and_then(|s| s.parse::<u8>().ok()) {
+                    wmode = v;
+                }
+            }
 
             // Parse codespace ranges
             if line.ends_with("begincodespacerange") {
@@ -141,6 +162,7 @@ impl CMap {
         CMap {
             code_to_cid,
             code_lengths,
+            wmode,
         }
     }
 }
