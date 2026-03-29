@@ -38,7 +38,22 @@ impl EncryptionState {
     ) -> Result<Self, PdfError> {
         let v = encrypt_dict.get_int(b"V").unwrap_or(0) as i32;
         let r = encrypt_dict.get_int(b"R").unwrap_or(0) as i32;
-        let key_length = encrypt_dict.get_int(b"Length").unwrap_or(40) as usize / 8;
+        // Key length: prefer top-level /Length (in bits), then fall back to the
+        // crypt filter's /Length (in bytes) for V≥4 where the top-level key may
+        // be absent. Default to 40 bits (5 bytes) for older encryption.
+        let key_length = if let Some(len) = encrypt_dict.get_int(b"Length") {
+            len as usize / 8
+        } else if v >= 4 {
+            // Try CF/<filter>/Length (value is in bytes for crypt filter dicts)
+            let cf_len = encrypt_dict.get_dict(b"CF").and_then(|cf| {
+                let filter_name = encrypt_dict.get_name(b"StmF").unwrap_or(b"StdCF");
+                cf.get_dict(filter_name)
+                    .and_then(|f| f.get_int(b"Length").map(|n| n as usize))
+            });
+            cf_len.unwrap_or(16) // AES-128 default
+        } else {
+            5 // 40-bit RC4 default
+        };
 
         let o_value = encrypt_dict
             .get(b"O")
