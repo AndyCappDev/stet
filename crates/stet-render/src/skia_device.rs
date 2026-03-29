@@ -3843,7 +3843,13 @@ fn render_pattern_fill(
                         }
                         DisplayElement::Stroke { path, params: sp } => {
                             if let Some(skp) = build_skia_path(path) {
-                                let stroke = build_stroke(sp, ctx.effective_dpi);
+                                // Compose element CTM with pattern matrix so
+                                // hairline_min_width sees the real device scale,
+                                // not the tile's identity CTM.
+                                let effective_ctm = pm.concat(&sp.ctm);
+                                let mut sp_adj = sp.clone();
+                                sp_adj.ctm = effective_ctm;
+                                let stroke = build_stroke(&sp_adj, ctx.effective_dpi);
                                 let paint = to_paint(&sp.color);
                                 let t = to_transform(&sp.ctm);
                                 let combined = t.post_concat(tile_transform);
