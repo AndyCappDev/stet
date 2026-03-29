@@ -2688,7 +2688,7 @@ impl<'a> ContentInterpreter<'a> {
         // When an SMask is present, emit as SoftMasked so the renderer scales
         // image and mask independently, preserving edge detail at hard alpha
         // boundaries that premultiplied-alpha averaging would make invisible.
-        if let Some((smask_data, mw, mh)) = smask_result {
+        if let Some((smask_data, mw, mh, matte)) = smask_result {
             // Upscale image if mask is larger
             let (sample_data, width, height) = if mw > width || mh > height {
                 let upscaled =
@@ -2712,6 +2712,33 @@ impl<'a> ContentInterpreter<'a> {
                 resampled
             } else {
                 smask_data
+            };
+
+            // Un-premultiply image colors when Matte is specified (PDF spec 11.6.5.3).
+            // The image data was pre-composited against the Matte color; reverse this
+            // to recover the original colors before alpha compositing.
+            let sample_data = if let Some(ref mc) = matte {
+                let n_comps = image_params.color_space.num_components() as usize;
+                if mc.len() >= n_comps && n_comps >= 3 {
+                    let mut out = sample_data;
+                    let pixels = (width * height) as usize;
+                    for i in 0..pixels {
+                        let a = smask_data[i] as f64 / 255.0;
+                        if a > 0.0 && a < 1.0 {
+                            for c in 0..n_comps.min(3) {
+                                let m = (mc[c] * 255.0).clamp(0.0, 255.0);
+                                let premul = out[i * n_comps + c] as f64;
+                                let orig = m + (premul - m) / a;
+                                out[i * n_comps + c] = orig.round().clamp(0.0, 255.0) as u8;
+                            }
+                        }
+                    }
+                    out
+                } else {
+                    sample_data
+                }
+            } else {
+                sample_data
             };
 
             let image_matrix =
@@ -2780,12 +2807,13 @@ impl<'a> ContentInterpreter<'a> {
     }
 
     /// Resolve an SMask (soft mask) from an image dict.
-    /// Returns `(alpha_data, mask_width, mask_height)` at the mask's native
+    /// Returns `(alpha_data, mask_width, mask_height, matte)` at the mask's native
     /// resolution so the caller can upscale the image if the mask is larger.
+    /// The optional Matte array contains the pre-multiplication color (PDF spec 11.6.5.3).
     fn resolve_smask(
         &self,
         dict: &PdfDict,
-    ) -> Result<Option<(Vec<u8>, u32, u32)>, PdfError> {
+    ) -> Result<Option<(Vec<u8>, u32, u32, Option<Vec<f64>>)>, PdfError> {
         let smask_ref = match dict.get(b"SMask") {
             Some(obj) => obj.clone(),
             None => return Ok(None),
@@ -2836,7 +2864,12 @@ impl<'a> ContentInterpreter<'a> {
             }
         }
 
-        Ok(Some((data, sw, sh)))
+        // Parse /Matte array (pre-multiplication color, PDF spec 11.6.5.3)
+        let matte = smask_dict.get_array(b"Matte").map(|arr| {
+            arr.iter().filter_map(|o| o.as_f64()).collect::<Vec<_>>()
+        });
+
+        Ok(Some((data, sw, sh, matte)))
     }
 
     /// Resolve an explicit stencil mask (/Mask stream ref) from an image dict.
