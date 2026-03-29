@@ -241,6 +241,7 @@ fn handle_axial(
             color_space: cs,
             overprint: gstate.overprint,
             painted_channels: painted_channels_for_cs(resolved_cs),
+            alpha: gstate.fill_alpha,
         },
     });
     Ok(())
@@ -291,6 +292,7 @@ fn handle_radial(
             color_space: cs,
             overprint: gstate.overprint,
             painted_channels: painted_channels_for_cs(resolved_cs),
+            alpha: gstate.fill_alpha,
         },
     });
     Ok(())

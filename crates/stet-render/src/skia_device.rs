@@ -7002,6 +7002,7 @@ fn render_axial_shading(
         let stride = pw as usize * 4;
         let data = pixmap.data_mut();
         let mask_data = clip_mask.map(|m| m.data());
+        let alpha = (params.alpha.clamp(0.0, 1.0) * 255.0 + 0.5) as u16;
 
         for py in iy_min..iy_max {
             let t_row = t_origin + dt_dy * py as f64;
@@ -7048,11 +7049,20 @@ fn render_axial_shading(
                 let b = (c0[2] as f32 + frac * (c1[2] as f32 - c0[2] as f32)) as u8;
 
                 let offset = row_offset + px as usize * 4;
-                // Opaque write — gradients are always fully opaque (alpha=255)
-                data[offset] = r;
-                data[offset + 1] = g;
-                data[offset + 2] = b;
-                data[offset + 3] = 255;
+                if alpha >= 255 {
+                    data[offset] = r;
+                    data[offset + 1] = g;
+                    data[offset + 2] = b;
+                    data[offset + 3] = 255;
+                } else {
+                    // Alpha blend: premultiply and composite over existing pixel
+                    let a = alpha as u16;
+                    let inv_a = 255 - a;
+                    data[offset] = ((r as u16 * a + data[offset] as u16 * inv_a + 127) / 255) as u8;
+                    data[offset + 1] = ((g as u16 * a + data[offset + 1] as u16 * inv_a + 127) / 255) as u8;
+                    data[offset + 2] = ((b as u16 * a + data[offset + 2] as u16 * inv_a + 127) / 255) as u8;
+                    data[offset + 3] = ((a + data[offset + 3] as u16 * inv_a / 255).min(255)) as u8;
+                }
             }
         }
     }

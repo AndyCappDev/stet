@@ -181,6 +181,7 @@ fn build_type2_shading(
             color_space: shading_cs,
             overprint: false,
             painted_channels: 0,
+            alpha: 1.0,
         },
     });
 
@@ -242,6 +243,7 @@ fn build_type3_shading(
             color_space: shading_cs,
             overprint: false,
             painted_channels: 0,
+            alpha: 1.0,
         },
     });
 

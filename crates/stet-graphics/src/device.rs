@@ -440,6 +440,8 @@ pub struct AxialShadingParams {
     pub color_space: ShadingColorSpace,
     pub overprint: bool,
     pub painted_channels: u8,
+    /// Fill alpha from graphics state (0.0–1.0).
+    pub alpha: f64,
 }
 
 /// Parameters for radial gradient shading (Type 3).
@@ -459,6 +461,8 @@ pub struct RadialShadingParams {
     pub color_space: ShadingColorSpace,
     pub overprint: bool,
     pub painted_channels: u8,
+    /// Fill alpha from graphics state (0.0–1.0).
+    pub alpha: f64,
 }
 
 /// A vertex in a shading triangle mesh.
