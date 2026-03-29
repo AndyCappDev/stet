@@ -130,8 +130,19 @@ fn handle_function_based(
         })
         .unwrap_or_else(Matrix::identity);
 
-    let width = 256u32;
-    let height = 256u32;
+    let domain_w = domain[1] - domain[0];
+    let domain_h = domain[3] - domain[2];
+    let domain_matrix = Matrix::new(domain_w, 0.0, 0.0, domain_h, domain[0], domain[2]);
+    let combined = gstate.ctm.concat(&shading_matrix).concat(&domain_matrix);
+
+    // Compute rasterization resolution from device-space dimensions.
+    // The combined matrix column vectors give the device extent of the
+    // unit square.  Match that so each rasterized pixel ≈ 1 device pixel.
+    let dev_w = (combined.a * combined.a + combined.b * combined.b).sqrt();
+    let dev_h = (combined.c * combined.c + combined.d * combined.d).sqrt();
+    let width = (dev_w.ceil() as u32).clamp(2, 2048);
+    let height = (dev_h.ceil() as u32).clamp(2, 2048);
+
     let mut rgba = vec![255u8; (width * height * 4) as usize];
 
     for row in 0..height {
@@ -147,10 +158,6 @@ fn handle_function_based(
         }
     }
 
-    let domain_w = domain[1] - domain[0];
-    let domain_h = domain[3] - domain[2];
-    let domain_matrix = Matrix::new(domain_w, 0.0, 0.0, domain_h, domain[0], domain[2]);
-    let combined = gstate.ctm.concat(&shading_matrix).concat(&domain_matrix);
     let image_matrix = Matrix::new(width as f64, 0.0, 0.0, -(height as f64), 0.0, height as f64);
 
     display_list.push(DisplayElement::Image {
