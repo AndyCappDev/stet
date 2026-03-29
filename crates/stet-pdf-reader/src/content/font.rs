@@ -251,6 +251,7 @@ pub fn resolve_font(
                 encoding.clone(),
                 widths,
                 has_explicit_encoding,
+                has_pdf_widths,
             ) {
                 Ok(font) => return Ok(font),
                 Err(_) => {
@@ -1520,6 +1521,7 @@ fn resolve_cff(
     encoding: [Option<String>; 256],
     widths: [f64; 256],
     has_explicit_encoding: bool,
+    has_pdf_widths: bool,
 ) -> Result<PdfFont, PdfError> {
     let desc = descriptor
         .as_ref()
@@ -1564,6 +1566,35 @@ fn resolve_cff(
 
     let fm = font.font_matrix;
     let font_matrix = Matrix::new(fm[0], fm[1], fm[2], fm[3], fm[4], fm[5]);
+
+    // When the PDF has no /Widths array, derive widths from the CFF charstrings.
+    let widths = if !has_pdf_widths {
+        use stet_fonts::type2_charstring::execute_type2_charstring;
+        let mut derived = [0.0f64; 256];
+        for code in 0..256usize {
+            let glyph_name = encoding[code].as_deref().unwrap_or(".notdef");
+            let gid = font
+                .charset
+                .iter()
+                .position(|name| name == glyph_name)
+                .unwrap_or(0);
+            if gid > 0 && gid < font.char_strings.len() {
+                if let Ok(result) = execute_type2_charstring(
+                    &font.char_strings[gid],
+                    &font.local_subrs,
+                    &font.global_subrs,
+                    font.default_width_x,
+                    font.nominal_width_x,
+                    true, // width_only
+                ) {
+                    derived[code] = result.width_x * fm[0];
+                }
+            }
+        }
+        derived
+    } else {
+        widths
+    };
 
     Ok(PdfFont::Cff(CffPdfFont {
         font,
