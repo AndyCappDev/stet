@@ -3875,6 +3875,13 @@ impl<'a> ContentInterpreter<'a> {
         // use the form's coordinate system, not the parent's.
         self.content_stream_ctm = self.gstate.ctm;
 
+        // Reset alpha and soft mask: the mask form is an independent rendering
+        // context. Without this, the parent's ca/CA leak into the mask form
+        // (e.g. ca=0.9 making mask form elements semi-transparent).
+        self.gstate.fill_alpha = 1.0;
+        self.gstate.stroke_alpha = 1.0;
+        self.gstate.soft_mask = None;
+
         // Compute device-space bbox now, before interpret_stream modifies the
         // CTM via `cm` operators. The form BBox is in the form's coordinate
         // system (after form matrix), not the content's rotated space.
