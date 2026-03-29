@@ -3289,7 +3289,25 @@ impl<'a> ContentInterpreter<'a> {
         let resolved_cs = if is_image_mask {
             None
         } else if let Some(cs_obj) = dict.get(b"ColorSpace") {
-            match resolve_color_space_obj(cs_obj, self.resolver) {
+            // For inline images, the CS value may be a resource name (e.g. /R35)
+            // that needs lookup in the page's ColorSpace resources.
+            let cs_resolved = if let PdfObj::Name(name) = cs_obj {
+                // Try the cached index first, then fall back to resolving the
+                // ColorSpace resource sub-dict directly.
+                let from_cache = self.cs_index.as_ref().and_then(|idx| idx.get(name.as_slice()).cloned());
+                let res_obj = from_cache.or_else(|| {
+                    self.resolve_resource_subdict(b"ColorSpace")
+                        .and_then(|d| d.get(name).cloned())
+                });
+                if let Some(ref obj) = res_obj {
+                    resolve_color_space_obj(obj, self.resolver)
+                } else {
+                    resolve_color_space_obj(cs_obj, self.resolver)
+                }
+            } else {
+                resolve_color_space_obj(cs_obj, self.resolver)
+            };
+            match cs_resolved {
                 Ok(resolved) => Some(resolved),
                 Err(_) => Some(ResolvedColorSpace::DeviceGray),
             }
