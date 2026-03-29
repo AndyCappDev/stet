@@ -404,9 +404,16 @@ fn resolve_encoding(
     // symbolic fonts (PDF spec 9.6.6.1: when no BaseEncoding, symbolic fonts
     // use their built-in encoding, not StandardEncoding).
     let base_font = font_dict.get_name(b"BaseFont").unwrap_or(b"");
-    let mut base_table: &[&str; 256] = if base_font == b"ZapfDingbats" {
+    // Strip subset prefix for font name matching
+    let clean_base = if base_font.len() > 7 && base_font.get(6) == Some(&b'+') {
+        &base_font[7..]
+    } else {
+        base_font
+    };
+    let is_symbol_font = clean_base == b"ZapfDingbats" || clean_base == b"Symbol";
+    let mut base_table: &[&str; 256] = if clean_base == b"ZapfDingbats" {
         &stet_fonts::encoding::ZAPFDINGBATS_ENCODING
-    } else if base_font == b"Symbol" {
+    } else if clean_base == b"Symbol" {
         &stet_fonts::encoding::SYMBOL_ENCODING
     } else {
         &STANDARD_ENCODING
@@ -416,12 +423,18 @@ fn resolve_encoding(
         let enc_resolved = resolver.deref(enc_obj)?;
         match &enc_resolved {
             PdfObj::Name(name) => {
-                base_table = encoding_table_by_name(name);
+                // Symbol/ZapfDingbats: keep their fixed encoding, ignore overrides
+                if !is_symbol_font {
+                    base_table = encoding_table_by_name(name);
+                }
             }
             PdfObj::Dict(enc_dict) => {
-                // Dict encoding: optional BaseEncoding + Differences
-                if let Some(base_name) = enc_dict.get_name(b"BaseEncoding") {
-                    base_table = encoding_table_by_name(base_name);
+                // Dict encoding: optional BaseEncoding + Differences.
+                // Symbol/ZapfDingbats keep their fixed base encoding.
+                if !is_symbol_font {
+                    if let Some(base_name) = enc_dict.get_name(b"BaseEncoding") {
+                        base_table = encoding_table_by_name(base_name);
+                    }
                 }
                 {
                     for (i, &name) in base_table.iter().enumerate() {
@@ -596,7 +609,14 @@ fn substitute_font(
         None
     };
 
-    // Fall back to filesystem
+    // Try system font (full glyph set) before bundled subset
+    let font_data = font_data.or_else(|| {
+        let cache = stet_fonts::system_fonts::get_system_font_cache();
+        let path = cache.get_font_path(font_file_name)?;
+        read_font_file(path, font_file_name).ok()
+    });
+
+    // Fall back to bundled subset font
     let font_data = font_data.or_else(|| embedded_font(font_file_name));
 
     // If the named font wasn't found, use a default substitute based on the
