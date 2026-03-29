@@ -44,6 +44,11 @@ pub struct Type1PdfFont {
     pub font_matrix: Matrix,
     /// Multiple Master weight vector (for blend OtherSubrs 14-17).
     pub weight_vector: Option<Vec<f64>>,
+    /// When true, glyph lookup falls back to the font's built-in encoding
+    /// if the PDF encoding's glyph name isn't in CharStrings. Only set for
+    /// symbolic fonts where the naming convention is completely incompatible
+    /// (e.g. StandardEncoding "A" vs font's custom "G41").
+    pub builtin_fallback: bool,
 }
 
 pub struct TrueTypePdfFont {
@@ -224,16 +229,16 @@ pub fn resolve_font(
     // Get FontDescriptor
     let descriptor = get_font_descriptor(font_dict, resolver)?;
 
-    let base_font_name = font_dict
-        .get_name(b"BaseFont")
-        .map(|n| String::from_utf8_lossy(n).to_string())
-        .unwrap_or_default();
-
     // Extract font descriptor Flags for serif/sans-serif fallback selection
     let desc_flags = descriptor
         .as_ref()
         .and_then(|d| d.get_int(b"Flags"))
         .unwrap_or(0) as u32;
+
+    let base_font_name = font_dict
+        .get_name(b"BaseFont")
+        .map(|n| String::from_utf8_lossy(n).to_string())
+        .unwrap_or_default();
 
     // Route based on what font program is actually available in FontDescriptor,
     // not just the /Subtype (which says "Type1" even for CFF-embedded fonts).
@@ -418,10 +423,11 @@ fn resolve_encoding(
                 if let Some(base_name) = enc_dict.get_name(b"BaseEncoding") {
                     base_table = encoding_table_by_name(base_name);
                 }
-                // Apply base
-                for (i, &name) in base_table.iter().enumerate() {
-                    if name != ".notdef" {
-                        encoding[i] = Some(name.to_string());
+                {
+                    for (i, &name) in base_table.iter().enumerate() {
+                        if name != ".notdef" {
+                            encoding[i] = Some(name.to_string());
+                        }
                     }
                 }
                 // Apply Differences array
@@ -710,6 +716,7 @@ fn substitute_font(
         encoding,
         widths,
         font_matrix,
+        builtin_fallback: false,
         weight_vector,
     }))
 }
@@ -1389,6 +1396,25 @@ fn resolve_type1(
         encoding
     };
 
+    // Check if the encoding's glyph names are completely incompatible with the
+    // font's CharStrings (e.g. StandardEncoding "A","B" vs custom "G41","G42").
+    // If so, enable fallback to the font's built-in encoding at glyph lookup.
+    let builtin_fallback = {
+        let flags = desc.get_int(b"Flags").unwrap_or(0) as u32;
+        let is_sym = flags & 4 != 0;
+        let builtin_useful = is_sym
+            && font.encoding.len() == 256
+            && font.encoding.iter().any(|n| n != ".notdef");
+        if builtin_useful {
+            !encoding[32..127].iter().any(|slot| {
+                slot.as_ref()
+                    .is_some_and(|name| font.charstrings.contains_key(name.as_str()))
+            })
+        } else {
+            false
+        }
+    };
+
     let fm = font.font_matrix;
     let font_matrix = Matrix::new(fm[0], fm[1], fm[2], fm[3], fm[4], fm[5]);
 
@@ -1399,6 +1425,7 @@ fn resolve_type1(
         widths,
         font_matrix,
         weight_vector,
+        builtin_fallback,
     }))
 }
 
@@ -2405,7 +2432,15 @@ impl PdfFont {
 impl Type1PdfFont {
     fn glyph_path(&self, char_code: u8) -> Option<PsPath> {
         let glyph_name = self.encoding[char_code as usize].as_deref()?;
-        let charstring = self.font.charstrings.get(glyph_name)?;
+        let charstring = self.font.charstrings.get(glyph_name).or_else(|| {
+            if !self.builtin_fallback { return None; }
+            let builtin = self.font.encoding.get(char_code as usize)?;
+            if builtin != ".notdef" && builtin != glyph_name {
+                self.font.charstrings.get(builtin.as_str())
+            } else {
+                None
+            }
+        })?;
         // Provide charstring lookup for seac (accented character composition)
         let cs_lookup =
             |name: &str| -> Option<Vec<u8>> { self.font.charstrings.get(name).cloned() };
