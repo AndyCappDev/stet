@@ -213,6 +213,23 @@ impl PdfFunction {
         }
     }
 
+    /// Minimum number of samples needed to faithfully reproduce this function.
+    /// For Type 0 (sampled) functions, returns the first dimension's sample count.
+    /// For stitching functions, sums the sub-functions' sample counts.
+    /// For other types, returns 0 (use caller's default).
+    pub fn min_samples(&self) -> usize {
+        match self {
+            Self::Sampled { size, .. } => size.first().copied().unwrap_or(0) as usize,
+            Self::Stitching { functions, .. } => {
+                functions.iter().map(|f| f.min_samples().max(2)).sum()
+            }
+            Self::Composite { functions } => {
+                functions.iter().map(|f| f.min_samples()).max().unwrap_or(0)
+            }
+            _ => 0,
+        }
+    }
+
     fn parse_sampled(
         dict: &PdfDict,
         obj: &PdfObj,

@@ -219,7 +219,8 @@ fn handle_axial(
     }
 
     let function = parse_shading_function(dict, resolver)?;
-    let color_stops = sample_function_to_stops_icc(&function, 64, resolved_cs, icc_cache);
+    let n_stops = function.min_samples().max(64).min(1024);
+    let color_stops = sample_function_to_stops_icc(&function, n_stops, resolved_cs, icc_cache);
 
     // Keep coordinates in shading/user space, pass the CTM to the renderer.
     // The renderer inverse-transforms device pixels to evaluate the gradient,
@@ -265,7 +266,8 @@ fn handle_radial(
     }
 
     let function = parse_shading_function(dict, resolver)?;
-    let color_stops = sample_function_to_stops_icc(&function, 64, resolved_cs, icc_cache);
+    let n_stops = function.min_samples().max(64).min(1024);
+    let color_stops = sample_function_to_stops_icc(&function, n_stops, resolved_cs, icc_cache);
 
     // Keep coordinates in user space; pass the CTM to the renderer so it can
     // inverse-transform device pixels back to user space where circles are circular.

@@ -6944,8 +6944,9 @@ fn render_axial_shading(
             }
         }
 
-        // Build a 256-entry RGBA LUT from color stops.
-        let lut = build_gradient_lut(&params.color_stops);
+        // Build an RGBA LUT from color stops.
+        let lut_size = params.color_stops.len().max(256);
+        let lut = build_gradient_lut(&params.color_stops, lut_size);
 
         // Compute gradient t by inverse-transforming pixels to shading space and
         // projecting onto the shading-space axis. This correctly handles non-uniform
@@ -7037,8 +7038,14 @@ fn render_axial_shading(
 
                 let t = t_row + dt_dx * px as f64;
                 let t_clamped = t.clamp(0.0, 1.0);
-                let lut_idx = (t_clamped * 255.0) as usize;
-                let [r, g, b, _a] = lut[lut_idx];
+                let fi = t_clamped * (lut_size - 1) as f64;
+                let i0 = (fi as usize).min(lut_size - 2);
+                let frac = (fi - i0 as f64) as f32;
+                let c0 = lut[i0];
+                let c1 = lut[i0 + 1];
+                let r = (c0[0] as f32 + frac * (c1[0] as f32 - c0[0] as f32)) as u8;
+                let g = (c0[1] as f32 + frac * (c1[1] as f32 - c0[1] as f32)) as u8;
+                let b = (c0[2] as f32 + frac * (c1[2] as f32 - c0[2] as f32)) as u8;
 
                 let offset = row_offset + px as usize * 4;
                 // Opaque write — gradients are always fully opaque (alpha=255)
@@ -7906,14 +7913,16 @@ fn bilinear_raw(raw_colors: &[Vec<f64>; 4], u: f64, v: f64) -> Vec<f64> {
 /// Each entry is linearly interpolated from the color stops. Used by the
 /// direct-rasterization axial shading path to replace per-pixel stop search
 /// with a single array lookup.
-fn build_gradient_lut(stops: &[stet_graphics::device::ColorStop]) -> [[u8; 4]; 256] {
-    let mut lut = [[0u8; 4]; 256];
+fn build_gradient_lut(stops: &[stet_graphics::device::ColorStop], size: usize) -> Vec<[u8; 4]> {
+    let size = size.max(2);
+    let mut lut = vec![[0u8; 4]; size];
     if stops.is_empty() {
         return lut;
     }
     let mut si = 0usize; // current stop index
-    for i in 0..256 {
-        let t = i as f64 / 255.0;
+    let last = (size - 1) as f64;
+    for i in 0..size {
+        let t = i as f64 / last;
         // Advance stop index
         while si + 1 < stops.len() && stops[si + 1].position < t {
             si += 1;
