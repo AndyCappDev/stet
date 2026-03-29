@@ -273,27 +273,39 @@ fn parse_encoding(header: &[u8]) -> Vec<String> {
         return encoding;
     }
 
-    // Parse custom encoding: `dup N /name put` entries
-    // Look for /Encoding followed by array definition
+    // Parse custom encoding: `dup N /name put` entries.
+    // These may appear on separate lines OR concatenated without whitespace
+    // (e.g. `fordup 32 /space putdup 33 /exclam put`), so scan for all
+    // occurrences of the pattern in the text rather than parsing line-by-line.
     if let Some(enc_idx) = text.find("/Encoding") {
         let enc_section = &text[enc_idx..];
-        // Find all "dup N /name put" patterns
-        for line in enc_section.lines() {
-            let trimmed = line.trim();
-            if !trimmed.starts_with("dup ") {
+        let mut pos = 0;
+        while let Some(dup_pos) = enc_section[pos..].find("dup ") {
+            let start = pos + dup_pos + 4; // skip "dup "
+            // Parse: <index> /<name> put
+            let rest = &enc_section[start..];
+            // Read index
+            let idx_end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(0);
+            if idx_end == 0 {
+                pos = start;
                 continue;
             }
-            // Parse: dup <index> /<name> put
-            let parts: Vec<&str> = trimmed.split_whitespace().collect();
-            if let Ok(idx) = parts[1].parse::<usize>()
-                && parts.len() >= 4
-                && parts[0] == "dup"
-                && parts[3] == "put"
-                && idx < 256
-                && let Some(name) = parts[2].strip_prefix('/')
-            {
-                encoding[idx] = name.to_string();
+            let idx: usize = match rest[..idx_end].parse() {
+                Ok(n) if n < 256 => n,
+                _ => { pos = start; continue; }
+            };
+            // Skip whitespace, expect /name
+            let after_idx = rest[idx_end..].trim_start();
+            if let Some(name_rest) = after_idx.strip_prefix('/') {
+                let name_end = name_rest
+                    .find(|c: char| c.is_ascii_whitespace() || c == '/')
+                    .unwrap_or(name_rest.len());
+                let name = &name_rest[..name_end];
+                if !name.is_empty() {
+                    encoding[idx] = name.to_string();
+                }
             }
+            pos = start + idx_end;
         }
     }
 

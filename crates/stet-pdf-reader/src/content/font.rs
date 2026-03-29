@@ -221,10 +221,11 @@ pub fn resolve_font(
         }
     }
 
-    // Resolve encoding.  Track whether the PDF dict had an explicit /Encoding —
+    // Resolve encoding.  Track whether the PDF dict had a valid /Encoding —
     // embedded CFF fonts that lack one should use the CFF's built-in encoding.
-    let has_explicit_encoding = font_dict.get(b"Encoding").is_some();
-    let encoding = resolve_encoding(font_dict, resolver)?;
+    // Invalid encoding names (e.g. /NULL) are treated as absent.
+    let (encoding, has_valid_encoding) = resolve_encoding(font_dict, resolver)?;
+    let has_explicit_encoding = has_valid_encoding;
 
     // Get FontDescriptor
     let descriptor = get_font_descriptor(font_dict, resolver)?;
@@ -395,10 +396,12 @@ fn get_font_descriptor(
 /// Priority: /Encoding dict with /Differences overlay > /Encoding name > StandardEncoding.
 /// For symbolic fonts (ZapfDingbats, Symbol) with no explicit /BaseEncoding,
 /// the font's built-in encoding is used instead of StandardEncoding.
+/// Returns (encoding, has_valid_encoding) — the bool is false when the
+/// /Encoding entry is missing or contains an unrecognized name (e.g. /NULL).
 fn resolve_encoding(
     font_dict: &PdfDict,
     resolver: &Resolver,
-) -> Result<[Option<String>; 256], PdfError> {
+) -> Result<([Option<String>; 256], bool), PdfError> {
     let mut encoding: [Option<String>; 256] = std::array::from_fn(|_| None);
 
     // Start with a base encoding — use the font's built-in encoding for
@@ -420,21 +423,29 @@ fn resolve_encoding(
         &STANDARD_ENCODING
     };
 
+    let mut has_valid_encoding = is_symbol_font; // symbol fonts always have valid built-in encoding
     if let Some(enc_obj) = font_dict.get(b"Encoding") {
         let enc_resolved = resolver.deref(enc_obj)?;
         match &enc_resolved {
             PdfObj::Name(name) => {
-                // Symbol/ZapfDingbats: keep their fixed encoding, ignore overrides
+                // Symbol/ZapfDingbats: keep their fixed encoding, ignore overrides.
+                // Unknown encoding names (e.g. /NULL): skip, keep the default base.
                 if !is_symbol_font {
-                    base_table = encoding_table_by_name(name);
+                    if let Some(table) = encoding_table_by_name(name) {
+                        base_table = table;
+                        has_valid_encoding = true;
+                    }
                 }
             }
             PdfObj::Dict(enc_dict) => {
                 // Dict encoding: optional BaseEncoding + Differences.
                 // Symbol/ZapfDingbats keep their fixed base encoding.
+                has_valid_encoding = true;
                 if !is_symbol_font {
                     if let Some(base_name) = enc_dict.get_name(b"BaseEncoding") {
-                        base_table = encoding_table_by_name(base_name);
+                        if let Some(table) = encoding_table_by_name(base_name) {
+                            base_table = table;
+                        }
                     }
                 }
                 {
@@ -465,7 +476,7 @@ fn resolve_encoding(
                         }
                     }
                 }
-                return Ok(encoding);
+                return Ok((encoding, has_valid_encoding));
             }
             _ => {}
         }
@@ -478,15 +489,15 @@ fn resolve_encoding(
         }
     }
 
-    Ok(encoding)
+    Ok((encoding, has_valid_encoding))
 }
 
-fn encoding_table_by_name(name: &[u8]) -> &'static [&'static str; 256] {
+fn encoding_table_by_name(name: &[u8]) -> Option<&'static [&'static str; 256]> {
     match name {
-        b"WinAnsiEncoding" => &WINANSI_ENCODING,
-        b"MacRomanEncoding" => &MACROMAN_ENCODING,
-        b"StandardEncoding" => &STANDARD_ENCODING,
-        _ => &STANDARD_ENCODING,
+        b"WinAnsiEncoding" => Some(&WINANSI_ENCODING),
+        b"MacRomanEncoding" => Some(&MACROMAN_ENCODING),
+        b"StandardEncoding" => Some(&STANDARD_ENCODING),
+        _ => None,
     }
 }
 
@@ -1300,7 +1311,7 @@ fn resolve_type3(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
         .unwrap_or([0.0, 0.0, 1.0, 1.0]);
 
     // Resolve encoding: maps char codes → glyph names in CharProcs
-    let encoding = resolve_encoding(font_dict, resolver)?;
+    let (encoding, _) = resolve_encoding(font_dict, resolver)?;
 
     // Get CharProcs dict: maps glyph names → content streams
     // May be a direct dict or an indirect reference
@@ -2485,16 +2496,20 @@ impl PdfFont {
 
 impl Type1PdfFont {
     fn glyph_path(&self, char_code: u8) -> Option<PsPath> {
-        let glyph_name = self.encoding[char_code as usize].as_deref()?;
-        let charstring = self.font.charstrings.get(glyph_name).or_else(|| {
-            if !self.builtin_fallback { return None; }
-            let builtin = self.font.encoding.get(char_code as usize)?;
-            if builtin != ".notdef" && builtin != glyph_name {
-                self.font.charstrings.get(builtin.as_str())
-            } else {
-                None
-            }
-        })?;
+        let glyph_name = self.encoding[char_code as usize].as_deref();
+        let charstring = glyph_name
+            .and_then(|name| self.font.charstrings.get(name))
+            .or_else(|| {
+                if !self.builtin_fallback { return None; }
+                let builtin = self.font.encoding.get(char_code as usize)?;
+                if builtin != ".notdef"
+                    && glyph_name.map_or(true, |n| n != builtin)
+                {
+                    self.font.charstrings.get(builtin.as_str())
+                } else {
+                    None
+                }
+            })?;
         // Provide charstring lookup for seac (accented character composition)
         let cs_lookup =
             |name: &str| -> Option<Vec<u8>> { self.font.charstrings.get(name).cloned() };
