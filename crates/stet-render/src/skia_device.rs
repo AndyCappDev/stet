@@ -3850,7 +3850,16 @@ fn render_pattern_fill(
                                 let mut sp_adj = sp.clone();
                                 sp_adj.ctm = effective_ctm;
                                 let stroke = build_stroke(&sp_adj, ctx.effective_dpi);
-                                let paint = to_paint(&sp.color);
+                                let paint = if params.paint_type == 1 {
+                                    to_paint(&sp.color)
+                                } else {
+                                    to_paint(
+                                        params
+                                            .underlying_color
+                                            .as_ref()
+                                            .unwrap_or(&DeviceColor::black()),
+                                    )
+                                };
                                 let t = to_transform(&sp.ctm);
                                 let combined = t.post_concat(tile_transform);
                                 tile_buf.stroke_path(&skp, &paint, &stroke, combined, clip_ref);

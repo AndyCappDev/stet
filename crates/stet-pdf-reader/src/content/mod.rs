@@ -4205,13 +4205,22 @@ impl<'a> ContentInterpreter<'a> {
             _ => return Ok(()),
         };
 
-        // Look up the Pattern CS definition in resources to find the underlying CS
-        let cs_dict = self.resources.get(b"ColorSpace").and_then(|obj| match obj {
-            PdfObj::Dict(_) => Some(obj.as_dict().unwrap().clone()),
-            PdfObj::Ref(n, g) => self.resolver.resolve(*n, *g).ok()?.as_dict().cloned(),
-            _ => None,
-        });
-        let cs_obj = match cs_dict.as_ref().and_then(|d| d.get(&cs_name)) {
+        // Look up the Pattern CS definition in resources to find the underlying CS.
+        // Use the cached cs_index (built by resolve_cs_cached) for fast lookup,
+        // falling back to the raw ColorSpace resource dict.
+        let cs_obj_opt: Option<crate::objects::PdfObj> = self
+            .cs_index
+            .as_ref()
+            .and_then(|idx| idx.get(cs_name.as_slice()).cloned())
+            .or_else(|| {
+                let cs_dict = self.resources.get(b"ColorSpace").and_then(|obj| match obj {
+                    PdfObj::Dict(_) => Some(obj.as_dict().unwrap().clone()),
+                    PdfObj::Ref(n, g) => self.resolver.resolve(*n, *g).ok()?.as_dict().cloned(),
+                    _ => None,
+                })?;
+                cs_dict.get(&cs_name).cloned()
+            });
+        let cs_obj = match cs_obj_opt {
             Some(obj) => obj.clone(),
             None => return Ok(()),
         };
