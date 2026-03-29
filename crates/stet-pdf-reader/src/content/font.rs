@@ -443,21 +443,24 @@ fn resolve_encoding(
                         }
                     }
                 }
-                // Apply Differences array
-                if let Some(diffs) = enc_dict.get_array(b"Differences") {
-                    let mut code = 0usize;
-                    for obj in diffs {
-                        let obj = resolver.deref(obj).unwrap_or(obj.clone());
-                        match &obj {
-                            PdfObj::Int(n) => code = *n as usize,
-                            PdfObj::Name(name) => {
-                                if code < 256 {
-                                    encoding[code] =
-                                        Some(String::from_utf8_lossy(name).to_string());
-                                    code += 1;
+                // Apply Differences array (may be an indirect reference)
+                if let Some(diffs_obj) = enc_dict.get(b"Differences") {
+                    let diffs_resolved = resolver.deref(diffs_obj)?;
+                    if let Some(diffs) = diffs_resolved.as_array() {
+                        let mut code = 0usize;
+                        for obj in diffs {
+                            let obj = resolver.deref(obj).unwrap_or(obj.clone());
+                            match &obj {
+                                PdfObj::Int(n) => code = *n as usize,
+                                PdfObj::Name(name) => {
+                                    if code < 256 {
+                                        encoding[code] =
+                                            Some(String::from_utf8_lossy(name).to_string());
+                                        code += 1;
+                                    }
                                 }
+                                _ => {}
                             }
-                            _ => {}
                         }
                     }
                 }
