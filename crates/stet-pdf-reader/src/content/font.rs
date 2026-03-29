@@ -67,6 +67,10 @@ pub struct TrueTypePdfFont {
     /// Char code → Unicode mapping from /ToUnicode CMap (for gNNNN glyph names
     /// in substituted fonts where AGL lookup fails).
     pub to_unicode: HashMap<u16, u32>,
+    /// When true, char codes map directly to GIDs (identity mapping).
+    /// Set for symbolic TrueType fonts without an explicit /Encoding, where the
+    /// cmap subtable maps to misleading Unicode values (re-encoded fonts).
+    pub identity_gid: bool,
 }
 
 pub struct CffPdfFont {
@@ -361,6 +365,7 @@ pub fn resolve_font(
             post_name_to_gid,
             units_per_em,
             to_unicode,
+            identity_gid: false, // system font substitutes use normal cmap
         }));
     }
 
@@ -1507,6 +1512,14 @@ fn resolve_truetype(
         })
         .unwrap_or_default();
 
+    // Symbolic TrueType fonts without explicit /Encoding use identity mapping
+    // (char_code = GID). The cmap is often misleading for re-encoded fonts
+    // (e.g. Tamil glyphs at Latin cmap positions).
+    let flags = desc.get_int(b"Flags").unwrap_or(0) as u32;
+    let is_symbolic = flags & 4 != 0;
+    let has_encoding = font_dict.get(b"Encoding").is_some();
+    let identity_gid = is_symbolic && !has_encoding && cmap_is_unicode;
+
     Ok(PdfFont::TrueType(TrueTypePdfFont {
         data,
         encoding,
@@ -1522,6 +1535,7 @@ fn resolve_truetype(
         } else {
             HashMap::new()
         },
+        identity_gid,
     }))
 }
 
@@ -2542,6 +2556,18 @@ impl TrueTypePdfFont {
     }
 
     fn char_code_to_gid(&self, char_code: u8) -> Option<u16> {
+        // Symbolic re-encoded fonts: skip the encoding→AGL→cmap path, which maps
+        // StandardEncoding names (e.g. "circumflex") to wrong Unicode→GID values.
+        // Go directly to the cmap lookup by char code.
+        if self.identity_gid {
+            if let Some(&gid) = self.cmap.get(&(char_code as u32)) {
+                return Some(gid);
+            }
+            if let Some(&gid) = self.cmap.get(&(0xF000 + char_code as u32)) {
+                return Some(gid);
+            }
+            return Some(char_code as u16);
+        }
         if let Some(glyph_name) = &self.encoding[char_code as usize] {
             // Only use encoding → glyph name → Unicode → cmap when the cmap
             // is Unicode-keyed ((3,1), (3,10), or (0,*)).  Non-Unicode cmaps
