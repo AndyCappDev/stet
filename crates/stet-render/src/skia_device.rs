@@ -3464,8 +3464,44 @@ fn transform_element_ctm(elem: &DisplayElement, pm: &Matrix) -> DisplayElement {
             ];
             DisplayElement::SoftMasked { mask: t_mask, content: t_content, params: p }
         }
+        DisplayElement::PatternFill { params } => {
+            let mut p = params.clone();
+            p.pattern_matrix = pm.concat(&p.pattern_matrix);
+            // Transform the fill path (device-space coordinates)
+            p.path = transform_path_by_matrix(&p.path, pm);
+            if let Some(ref mut sp) = p.stroke_params {
+                sp.ctm = pm.concat(&sp.ctm);
+            }
+            DisplayElement::PatternFill { params: p }
+        }
         other => other.clone(),
     }
+}
+
+/// Transform all points in a path through a matrix.
+fn transform_path_by_matrix(path: &PsPath, m: &Matrix) -> PsPath {
+    use stet_fonts::geometry::PathSegment;
+    let mut out = PsPath::new();
+    for seg in &path.segments {
+        out.segments.push(match *seg {
+            PathSegment::MoveTo(x, y) => {
+                let (nx, ny) = m.transform_point(x, y);
+                PathSegment::MoveTo(nx, ny)
+            }
+            PathSegment::LineTo(x, y) => {
+                let (nx, ny) = m.transform_point(x, y);
+                PathSegment::LineTo(nx, ny)
+            }
+            PathSegment::CurveTo { x1, y1, x2, y2, x3, y3 } => {
+                let (nx1, ny1) = m.transform_point(x1, y1);
+                let (nx2, ny2) = m.transform_point(x2, y2);
+                let (nx3, ny3) = m.transform_point(x3, y3);
+                PathSegment::CurveTo { x1: nx1, y1: ny1, x2: nx2, y2: ny2, x3: nx3, y3: ny3 }
+            }
+            PathSegment::ClosePath => PathSegment::ClosePath,
+        });
+    }
+    out
 }
 
 /// Render a tiled pattern fill.
