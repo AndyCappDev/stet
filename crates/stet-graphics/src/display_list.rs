@@ -11,7 +11,7 @@ use crate::device::{
 use stet_fonts::geometry::PsPath;
 
 /// Subtype for soft mask extraction.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum SoftMaskSubtype {
     /// Use the alpha channel of the rendered mask directly.
     Alpha,

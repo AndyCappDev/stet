@@ -3163,7 +3163,12 @@ fn render_soft_masked(
     // masks produce semi-transparent pixels where alpha encodes mask
     // modulation; without compositing, un-premultiplying would amplify
     // the color and lose the modulation.
-    if params.has_nested_mask_scope {
+    // Only for Luminosity masks: Alpha masks extract the alpha channel
+    // directly, so forcing alpha=255 via compositing would destroy the
+    // mask information.
+    if params.has_nested_mask_scope
+        && params.subtype == stet_graphics::display_list::SoftMaskSubtype::Luminosity
+    {
         let bc = params.backdrop_color.as_ref();
         let bd_r = bc.map_or(0u8, |c| (c[0].clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
         let bd_g = bc.map_or(0u8, |c| (c[1].clamp(0.0, 1.0) * 255.0 + 0.5) as u8);

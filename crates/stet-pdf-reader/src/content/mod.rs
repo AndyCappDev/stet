@@ -230,7 +230,6 @@ impl<'a> ContentInterpreter<'a> {
         self.flush_soft_mask();
         // Return partial display list even on error — handles malformed PDFs
         // where flate decompression produces truncated content streams.
-        eprintln!("[DL] {} elements", self.display_list.elements().len());
         Ok(self.display_list)
     }
 
