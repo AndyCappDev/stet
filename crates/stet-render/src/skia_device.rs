@@ -3746,7 +3746,22 @@ fn render_pattern_fill(
                     ((pm.b * pat_offset_x + pm.d * pat_offset_y + pm.ty - dev_vp_y) * sy_f) as f32,
                 );
 
-                let mut tile_clip: Option<Mask> = None;
+                // Clip tile elements to BBox (PDF spec 8.7.4.2)
+                let bbox_clip = {
+                    let bb = &params.bbox;
+                    let mut bp = stet_tiny_skia::PathBuilder::new();
+                    bp.move_to(bb[0] as f32, bb[1] as f32);
+                    bp.line_to(bb[2] as f32, bb[1] as f32);
+                    bp.line_to(bb[2] as f32, bb[3] as f32);
+                    bp.line_to(bb[0] as f32, bb[3] as f32);
+                    bp.close();
+                    bp.finish().and_then(|sp| {
+                        let mut m = Mask::new(ctx.out_w, ctx.out_h)?;
+                        m.fill_path(&sp, stet_tiny_skia::FillRule::Winding, false, tile_transform);
+                        Some(m)
+                    })
+                };
+                let mut tile_clip: Option<Mask> = bbox_clip;
                 for elem in params.tile.elements() {
                     let clip_ref = tile_clip.as_ref();
                     match elem {

@@ -43,6 +43,24 @@ pub fn handle_shading(
 
     // Resolve the color space once, used by all shading types
     let resolved_cs = resolve_shading_resolved_cs(dict, resolver);
+
+    // Background color: fill the entire paint area before the gradient (PDF spec 8.7.4.5.2).
+    // The caller clips the shading to the fill path, so a large rect is fine.
+    if let Some(bg_arr) = dict.get_array(b"Background") {
+        let comps: Vec<f64> = bg_arr.iter().filter_map(|o| o.as_f64()).collect();
+        let bg_color = components_to_device_color_icc(&resolved_cs, &comps, Some(icc_cache));
+        let mut params = gstate.fill_params(stet_graphics::color::FillRule::NonZeroWinding);
+        params.color = bg_color;
+        // Large rect in device space — the shading's clip constrains it
+        let mut path = stet_fonts::geometry::PsPath::new();
+        path.segments.push(stet_fonts::geometry::PathSegment::MoveTo(-1e6, -1e6));
+        path.segments.push(stet_fonts::geometry::PathSegment::LineTo(1e6, -1e6));
+        path.segments.push(stet_fonts::geometry::PathSegment::LineTo(1e6, 1e6));
+        path.segments.push(stet_fonts::geometry::PathSegment::LineTo(-1e6, 1e6));
+        path.segments.push(stet_fonts::geometry::PathSegment::ClosePath);
+        display_list.push(DisplayElement::Fill { path, params });
+    }
+
     match shading_type {
         1 => handle_function_based(
             dict,
