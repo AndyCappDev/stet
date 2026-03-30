@@ -923,13 +923,28 @@ fn find_startxref(data: &[u8]) -> Result<usize, PdfError> {
         }
     }
 
-    let pos = found.ok_or(PdfError::NoStartXref)?;
-    let mut p = pos + needle.len();
-    while p < data.len() && is_whitespace(data[p]) {
-        p += 1;
+    if let Some(pos) = found {
+        let mut p = pos + needle.len();
+        while p < data.len() && is_whitespace(data[p]) {
+            p += 1;
+        }
+        let (offset, _) = parse_int_at(data, p)?;
+        return Ok(offset as usize);
     }
-    let (offset, _) = parse_int_at(data, p)?;
-    Ok(offset as usize)
+
+    // Strategy 3: No startxref at all (truncated file). Scan for the last
+    // "xref" keyword and return its offset directly.
+    let xref_kw = b"xref";
+    let mut last_xref = None;
+    for i in (0..data.len().saturating_sub(xref_kw.len())).rev() {
+        if &data[i..i + xref_kw.len()] == xref_kw
+            && (i == 0 || is_whitespace(data[i - 1]) || data[i - 1] == b'\n')
+        {
+            last_xref = Some(i);
+            break;
+        }
+    }
+    last_xref.ok_or(PdfError::NoStartXref)
 }
 
 /// Parse an integer starting at `pos`, return (value, new_pos).
