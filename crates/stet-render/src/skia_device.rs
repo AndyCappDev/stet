@@ -3877,7 +3877,10 @@ fn render_pattern_fill(
                             let iw = ip.width;
                             let ih = ip.height;
                             if iw > 0 && ih > 0 {
-                                let rgba = samples_to_rgba(sample_data, ip, ctx.icc, ctx.opm_zero_transparent);
+                                let mut rgba = samples_to_rgba(sample_data, ip, ctx.icc, ctx.opm_zero_transparent);
+                                if ip.mask_color.is_some() {
+                                    apply_mask_color_rgba(&mut rgba, sample_data, ip);
+                                }
                                 let expected = (iw * ih * 4) as usize;
                                 if rgba.len() >= expected {
                                     if let Some(inv) = ip.image_matrix.invert() {
