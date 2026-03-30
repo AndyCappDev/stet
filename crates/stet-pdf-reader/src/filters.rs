@@ -595,7 +595,7 @@ fn decode_dct(data: &[u8]) -> Result<Vec<u8>, PdfError> {
     // RGB) is present but component IDs are (1,2,3), the decoder incorrectly
     // applies YCbCr→RGB conversion to already-RGB data. Detect this case and
     // override with ColorTransform::RGB.
-    if has_adobe_rgb_marker(data) {
+    if has_adobe_rgb_marker(data) || is_raw_rgb_jpeg(data) {
         decoder.set_color_transform(jpeg_decoder::ColorTransform::RGB);
     } else if needs_ycck_override(data) {
         decoder.set_color_transform(jpeg_decoder::ColorTransform::YCCK);
@@ -693,6 +693,55 @@ fn has_adobe_rgb_marker(data: &[u8]) -> bool {
         i += 2 + len;
     }
     has_ct0 && uniform_sampling
+}
+
+/// Detect raw RGB JPEGs that have no APP14/JFIF markers and non-standard
+/// component IDs (e.g. 0,1,2 instead of the YCbCr standard 1,2,3).
+/// These JPEGs store raw RGB data — applying YCbCr→RGB conversion produces
+/// completely wrong colors (e.g. blue → magenta).
+fn is_raw_rgb_jpeg(data: &[u8]) -> bool {
+    let mut has_jfif = false;
+    let mut has_adobe = false;
+    let mut non_standard_ids = false;
+    let mut uniform_sampling = false;
+    let mut n_components = 0u8;
+    let mut i = 2; // skip SOI
+    while i + 4 < data.len() {
+        if data[i] != 0xFF {
+            break;
+        }
+        let marker = data[i + 1];
+        if marker == 0xDA {
+            break;
+        }
+        let len = u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
+        if i + 2 + len > data.len() {
+            break;
+        }
+        if marker == 0xE0 && len >= 7 && &data[i + 4..i + 9] == b"JFIF\x00" {
+            has_jfif = true;
+        }
+        if marker == 0xEE && len >= 7 && &data[i + 4..i + 9] == b"Adobe" {
+            has_adobe = true;
+        }
+        if (marker == 0xC0 || marker == 0xC2) && i + 9 < data.len() {
+            n_components = data[i + 9];
+            if n_components == 3 && i + 10 + 9 <= data.len() {
+                let id0 = data[i + 10];
+                let id1 = data[i + 13];
+                let id2 = data[i + 16];
+                // Standard YCbCr uses IDs (1,2,3). Anything else suggests raw RGB.
+                non_standard_ids = !(id0 == 1 && id1 == 2 && id2 == 3);
+                let s0 = data[i + 11];
+                let s1 = data[i + 14];
+                let s2 = data[i + 17];
+                uniform_sampling = s0 == s1 && s1 == s2;
+            }
+        }
+        i += 2 + len;
+    }
+    // Raw RGB: 3 components, non-standard IDs, uniform sampling, no JFIF/Adobe markers
+    n_components == 3 && non_standard_ids && uniform_sampling && !has_jfif && !has_adobe
 }
 
 /// Work around jpeg_decoder bug: it checks `"Adobe\0"` (6 bytes) in APP14
