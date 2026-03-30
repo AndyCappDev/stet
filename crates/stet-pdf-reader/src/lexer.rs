@@ -198,8 +198,10 @@ impl<'a> Lexer<'a> {
 
         let s = &self.data[start..self.pos];
         if s == b"+" || s == b"-" || s == b"." || s == b"+." || s == b"-." {
-            // Not a valid number — treat as keyword
-            return Ok(Token::Keyword(s.to_vec()));
+            // Bare sign or dot without digits.  Treat as zero to match pdf.js
+            // behavior — some malformed PDFs use `--2.5` meaning `0 -2.5`, and
+            // returning a keyword would desynchronize the operand stack.
+            return Ok(Token::Int(0));
         }
 
         if has_dot {
