@@ -3318,6 +3318,21 @@ impl<'a> ContentInterpreter<'a> {
 
         let has_filter = dict.get(b"Filter").is_some() || dict.get(b"F").is_some();
 
+        // Check if the outermost filter is ASCII85 — its data ends with `~>`,
+        // which is a reliable boundary marker (unlike scanning for `\nEI` which
+        // can match false positives inside ASCII85-encoded binary data).
+        let outermost_is_ascii85 = dict
+            .get(b"Filter")
+            .or_else(|| dict.get(b"F"))
+            .map(|f| match f {
+                PdfObj::Name(n) => n == b"ASCII85Decode" || n == b"A85",
+                PdfObj::Array(arr) => arr.first().and_then(|o| o.as_name())
+                    .map(|n| n == b"ASCII85Decode" || n == b"A85")
+                    .unwrap_or(false),
+                _ => false,
+            })
+            .unwrap_or(false);
+
         let resolved_cs = if is_image_mask {
             None
         } else if let Some(cs_obj) = dict.get(b"ColorSpace") {
@@ -3389,15 +3404,49 @@ impl<'a> ContentInterpreter<'a> {
             }
         }
         if !found_no_ws {
-            while end + 2 < data.len() {
-                if is_whitespace_byte(data[end])
-                    && data[end + 1] == b'E'
-                    && data[end + 2] == b'I'
-                    && (end + 3 >= data.len() || is_delimiter_or_ws(data[end + 3]))
-                {
-                    break;
+            if outermost_is_ascii85 {
+                // ASCII85 data ends with `~>`. Search for that first, then find EI after it.
+                // This avoids false-positive `\nEI` matches inside the ASCII85 data.
+                let mut found_a85_end = false;
+                let mut scan = search_from;
+                while scan + 1 < data.len() {
+                    if data[scan] == b'~' && data[scan + 1] == b'>' {
+                        // Found `~>` — skip past it and find EI
+                        end = scan + 2;
+                        while end < data.len() && is_whitespace_byte(data[end]) {
+                            end += 1;
+                        }
+                        // `end` should now point at 'E' of "EI"
+                        found_a85_end = true;
+                        found_no_ws = true; // EI is at `end` without leading ws
+                        break;
+                    }
+                    scan += 1;
                 }
-                end += 1;
+                if !found_a85_end {
+                    // No `~>` found — fall back to standard search
+                    while end + 2 < data.len() {
+                        if is_whitespace_byte(data[end])
+                            && data[end + 1] == b'E'
+                            && data[end + 2] == b'I'
+                            && (end + 3 >= data.len() || is_delimiter_or_ws(data[end + 3]))
+                        {
+                            break;
+                        }
+                        end += 1;
+                    }
+                }
+            } else {
+                while end + 2 < data.len() {
+                    if is_whitespace_byte(data[end])
+                        && data[end + 1] == b'E'
+                        && data[end + 2] == b'I'
+                        && (end + 3 >= data.len() || is_delimiter_or_ws(data[end + 3]))
+                    {
+                        break;
+                    }
+                    end += 1;
+                }
             }
         }
 
