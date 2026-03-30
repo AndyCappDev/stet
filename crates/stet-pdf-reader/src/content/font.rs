@@ -1476,6 +1476,100 @@ fn resolve_type1(
 }
 
 /// Resolve a TrueType font from its FontDescriptor.
+/// If the font data has table directory entries pointing past the data,
+/// try re-decompressing with raw deflate (skipping the zlib header).
+/// Some fonts have corrupt zlib headers (CINFO < 7) that cause truncation.
+fn try_raw_deflate_if_truncated(
+    resolver: &Resolver,
+    ff_ref: &PdfObj,
+    data: Vec<u8>,
+) -> Vec<u8> {
+    // Check if any table extends past the data
+    if data.len() < 12 {
+        return data;
+    }
+    let num_tables = u16::from_be_bytes([data[4], data[5]]) as usize;
+    let mut max_end = 0usize;
+    for i in 0..num_tables {
+        let e = 12 + i * 16;
+        if e + 16 > data.len() {
+            break;
+        }
+        let off = u32::from_be_bytes([data[e + 8], data[e + 9], data[e + 10], data[e + 11]])
+            as usize;
+        let len = u32::from_be_bytes([data[e + 12], data[e + 13], data[e + 14], data[e + 15]])
+            as usize;
+        max_end = max_end.max(off.saturating_add(len));
+    }
+    if max_end <= data.len() {
+        return data; // all tables fit, no truncation
+    }
+    // Tables extend past the data — try raw deflate on the stream
+    let raw_bytes = match resolver.raw_stream_bytes(ff_ref) {
+        Some(b) if b.len() > 2 => b,
+        _ => return data,
+    };
+    // Only retry if the zlib header has CINFO < 7 (suspect window size)
+    let cinfo = raw_bytes[0] >> 4;
+    let cm = raw_bytes[0] & 0xF;
+    if cm != 8 || cinfo >= 7 {
+        return data;
+    }
+    // Decompress with raw deflate (skip 2-byte zlib header)
+    let mut decoder = flate2::Decompress::new(false);
+    let mut output = Vec::with_capacity(data.len() * 2);
+    let mut buf = [0u8; 8192];
+    let input = &raw_bytes[2..];
+    let mut input_offset = 0;
+    loop {
+        let before_in = decoder.total_in() as usize;
+        let before_out = decoder.total_out() as usize;
+        let result = decoder.decompress(
+            &input[input_offset..],
+            &mut buf,
+            flate2::FlushDecompress::None,
+        );
+        let consumed = decoder.total_in() as usize - before_in;
+        let produced = decoder.total_out() as usize - before_out;
+        input_offset += consumed;
+        output.extend_from_slice(&buf[..produced]);
+        match result {
+            Ok(flate2::Status::StreamEnd) => break,
+            Ok(_) => {
+                if consumed == 0 && produced == 0 {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    if output.len() <= data.len() {
+        return data;
+    }
+    // Verify ALL tables fit in the raw output (reject if still truncated)
+    let mut raw_max_end = 0usize;
+    for i in 0..num_tables {
+        let e = 12 + i * 16;
+        if e + 16 > output.len() {
+            return data;
+        }
+        let off = u32::from_be_bytes([output[e + 8], output[e + 9], output[e + 10], output[e + 11]])
+            as usize;
+        let len = u32::from_be_bytes([output[e + 12], output[e + 13], output[e + 14], output[e + 15]])
+            as usize;
+        raw_max_end = raw_max_end.max(off.saturating_add(len));
+    }
+    if raw_max_end > output.len() {
+        return data; // raw output still truncated, don't use it
+    }
+    // Validate the head table has a plausible unitsPerEm (detects shifted data
+    // where the head bytes are misaligned and read as zero)
+    if stet_fonts::truetype::get_units_per_em(&output) == 0 {
+        return data;
+    }
+    output
+}
+
 fn resolve_truetype(
     resolver: &Resolver,
     descriptor: &Option<PdfDict>,
@@ -1490,6 +1584,11 @@ fn resolve_truetype(
         .get(b"FontFile2")
         .ok_or(PdfError::Other("TrueType font missing FontFile2".into()))?;
     let data = resolver.stream_data_from_obj(ff_ref)?;
+
+    // Some fonts have corrupt zlib headers (CINFO < 7) that cause the zlib
+    // decompressor to truncate. If key tables are out of bounds, try raw
+    // deflate decompression which ignores the header.
+    let data = try_raw_deflate_if_truncated(resolver, ff_ref, data);
 
     // Validate that glyph outline data is actually present
     use stet_fonts::truetype::find_table;
