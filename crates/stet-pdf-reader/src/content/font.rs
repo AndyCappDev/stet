@@ -71,6 +71,10 @@ pub struct TrueTypePdfFont {
     /// Set for symbolic TrueType fonts without an explicit /Encoding, where the
     /// cmap subtable maps to misleading Unicode values (re-encoded fonts).
     pub identity_gid: bool,
+    /// When true, gNNNN glyph names in the encoding use hexadecimal GIDs
+    /// (e.g. g003a = GID 58). Set when any gNNNN name contains hex letters (a-f).
+    /// When false, gNNNN names use decimal (e.g. g1863 = GID 1863).
+    pub gid_hex: bool,
 }
 
 pub struct CffPdfFont {
@@ -356,6 +360,7 @@ pub fn resolve_font(
         } else {
             HashMap::new()
         };
+        let gid_hex = TrueTypePdfFont::detect_gid_hex(&encoding);
         return Ok(PdfFont::TrueType(TrueTypePdfFont {
             data,
             encoding,
@@ -366,6 +371,7 @@ pub fn resolve_font(
             units_per_em,
             to_unicode,
             identity_gid: false, // system font substitutes use normal cmap
+            gid_hex,
         }));
     }
 
@@ -1519,6 +1525,7 @@ fn resolve_truetype(
     let is_symbolic = flags & 4 != 0;
     let has_encoding = font_dict.get(b"Encoding").is_some();
     let identity_gid = is_symbolic && !has_encoding && cmap_is_unicode;
+    let gid_hex = TrueTypePdfFont::detect_gid_hex(&encoding);
 
     Ok(PdfFont::TrueType(TrueTypePdfFont {
         data,
@@ -1536,6 +1543,7 @@ fn resolve_truetype(
             HashMap::new()
         },
         identity_gid,
+        gid_hex,
     }))
 }
 
@@ -2541,6 +2549,21 @@ impl Type1PdfFont {
 }
 
 impl TrueTypePdfFont {
+    /// Check if any gNNNN glyph name in the encoding contains hex letters (a-f),
+    /// indicating the subsetting tool used hexadecimal GIDs.
+    fn detect_gid_hex(encoding: &[Option<String>; 256]) -> bool {
+        encoding.iter().any(|name| {
+            if let Some(n) = name {
+                n.starts_with('g')
+                    && n.len() > 1
+                    && n[1..].bytes().all(|b| b.is_ascii_hexdigit())
+                    && n[1..].bytes().any(|b| b.is_ascii_hexdigit() && !b.is_ascii_digit())
+            } else {
+                false
+            }
+        })
+    }
+
     fn glyph_path(&self, char_code: u8) -> Option<PsPath> {
         let gid = self.char_code_to_gid(char_code)?;
         let path = skrifa_glyph_path(&self.data, gid, self.units_per_em).or_else(|| {
@@ -2594,12 +2617,20 @@ impl TrueTypePdfFont {
             }
         }
         if let Some(glyph_name) = &self.encoding[char_code as usize] {
-            // Try gNNNN pattern → direct GID (for embedded fonts where GIDs match)
+            // Try gNNNN pattern → direct GID (for embedded fonts where GIDs match).
+            // Some subsetting tools use hex (g003a = GID 58), others decimal (g1863).
+            // detect_gid_hex() checks if any name in this font has hex letters (a-f).
             if glyph_name.starts_with('g')
                 && glyph_name.len() > 1
-                && glyph_name[1..].bytes().all(|b| b.is_ascii_digit())
+                && glyph_name[1..].bytes().all(|b| b.is_ascii_hexdigit())
             {
-                if let Ok(gid) = glyph_name[1..].parse::<u16>() {
+                let suffix = &glyph_name[1..];
+                let gid = if self.gid_hex {
+                    u16::from_str_radix(suffix, 16).ok()
+                } else {
+                    suffix.parse::<u16>().ok()
+                };
+                if let Some(gid) = gid {
                     return Some(gid);
                 }
             }
