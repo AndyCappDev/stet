@@ -846,9 +846,21 @@ const CID_FONT_SUBSTITUTIONS: &[(&str, &str)] = &[
     ("KozMinPr6N-Regular", "NotoSansCJKjp-Regular"),
     ("KozGoPr6N-Medium", "NotoSansCJKjp-Regular"),
     ("MS-Gothic", "NotoSansCJKjp-Regular"),
+    ("MS-Gothic,Bold", "NotoSansCJKjp-Bold"),
+    ("MS-Gothic,Italic", "NotoSansCJKjp-Regular"),
+    ("MS-Gothic,BoldItalic", "NotoSansCJKjp-Bold"),
     ("MS-PGothic", "NotoSansCJKjp-Regular"),
+    ("MS-PGothic,Bold", "NotoSansCJKjp-Bold"),
+    ("MS-PGothic,Italic", "NotoSansCJKjp-Regular"),
+    ("MS-PGothic,BoldItalic", "NotoSansCJKjp-Bold"),
     ("MS-Mincho", "NotoSansCJKjp-Regular"),
+    ("MS-Mincho,Bold", "NotoSansCJKjp-Bold"),
+    ("MS-Mincho,Italic", "NotoSansCJKjp-Regular"),
+    ("MS-Mincho,BoldItalic", "NotoSansCJKjp-Bold"),
     ("MS-PMincho", "NotoSansCJKjp-Regular"),
+    ("MS-PMincho,Bold", "NotoSansCJKjp-Bold"),
+    ("MS-PMincho,Italic", "NotoSansCJKjp-Regular"),
+    ("MS-PMincho,BoldItalic", "NotoSansCJKjp-Bold"),
     ("MSGothic", "NotoSansCJKjp-Regular"),
     ("MSPGothic", "NotoSansCJKjp-Regular"),
     ("MSMincho", "NotoSansCJKjp-Regular"),
@@ -1763,14 +1775,20 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
     let (code_lengths, code_to_cid, mut wmode) = if let Some(enc_obj) = encoding_obj {
         if let Ok(cmap_data) = resolver.stream_data_from_obj(enc_obj) {
             // Embedded CMap stream
-            let cmap = super::cmap::CMap::parse(&cmap_data);
+            let cmap = super::cmap::CMap::parse_with_loader(
+                &cmap_data,
+                Some(&|name| load_predefined_cmap(name)),
+            );
             (cmap.code_lengths, cmap.code_to_cid, cmap.wmode)
         } else if !encoding_name.is_empty()
             && !encoding_name.starts_with(b"Identity")
         {
             // Predefined CMap name (e.g. GBK-EUC-H) — load from system
             if let Some(cmap_data) = load_predefined_cmap(encoding_name) {
-                let cmap = super::cmap::CMap::parse(&cmap_data);
+                let cmap = super::cmap::CMap::parse_with_loader(
+                    &cmap_data,
+                    Some(&|name| load_predefined_cmap(name)),
+                );
                 (cmap.code_lengths, cmap.code_to_cid, cmap.wmode)
             } else {
                 eprintln!(
@@ -2467,6 +2485,7 @@ impl PdfFont {
     pub fn glyph_path_unicode(&self, unicode: u16) -> Option<PsPath> {
         match self {
             PdfFont::CidTrueType(f) => f.glyph_path_unicode(unicode),
+            PdfFont::CidCff(f) => f.glyph_path_unicode(unicode),
             _ => None,
         }
     }
@@ -2882,42 +2901,11 @@ impl CidTrueTypePdfFont {
 }
 
 impl CidCffPdfFont {
-    fn glyph_path_cid(&self, cid: u16) -> Option<PsPath> {
-        // For embedded OTF/CFF with PDF CIDToGIDMap, use the PDF's mapping.
-        // For OpenType/CFF substitutes with a cmap, map Unicode → GID directly.
-        // For embedded CID-keyed CFF, use cid_to_gid mapping.
-        let gid = if let Some(ref map) = self.pdf_cid_to_gid {
-            // Embedded font with PDF-supplied CID→GID map
-            *map.get(cid as usize).unwrap_or(&0) as usize
-        } else if self.identity_cid_to_gid {
-            // Identity CIDToGIDMap: CID = charstring index directly.
-            // Common for CIDFontType2 fonts stored as OTTO/CFF in FontFile2.
-            cid as usize
-        } else if let Some(ref cmap) = self.cmap {
-            // OTF font with Unicode cmap.
-            // If this is a substituted font with an Adobe CID ordering
-            // (e.g. Japan1), the CID is from the Adobe registry, not Unicode.
-            // Convert CID → Unicode first, then look up in cmap.
-            if !self.ordering.is_empty() && self.ordering != b"Identity" {
-                let unicode =
-                    super::cid_unicode::cid_to_unicode(&self.ordering, cid)?;
-                *cmap.get(&unicode)? as usize
-            } else {
-                *cmap.get(&(cid as u32))? as usize
-            }
-        } else if !self.font.cid_to_gid.is_empty() {
-            let g = *self.font.cid_to_gid.get(cid as usize)?;
-            if g == 0xFFFF {
-                return None;
-            }
-            g as usize
-        } else {
-            cid as usize
-        };
+    /// Render the CFF charstring at the given GID.
+    fn glyph_path_at_gid(&self, gid: usize) -> Option<PsPath> {
         if gid >= self.font.char_strings.len() {
             return None;
         }
-        // For CID fonts, use per-FD private dict values and FontMatrix
         let (default_width_x, nominal_width_x, local_subrs, fd_font_matrix) = if self.font.is_cid
             && !self.font.fd_select.is_empty()
             && !self.font.fd_array.is_empty()
@@ -2955,50 +2943,59 @@ impl CidCffPdfFont {
             false,
         )
         .ok()?;
-
-        // Apply the effective font matrix.  font_matrix() returns identity
-        // for CidCff, so all matrix application happens here.
-        //
-        // Per CFF spec, per-FD FontMatrix maps charstring→font space, and
-        // the top-level FontMatrix maps font space→text space.  When both
-        // exist, they must be composed.  However, some buggy fonts specify
-        // the default [0.001,...] in both the FD and top-level dicts.
-        // Detect this by checking whether the per-FD matrix already
-        // includes a scale factor (small a/d values); if so, use it alone.
         let effective_fm = if let Some(fd_fm) = fd_font_matrix {
             let fd = Matrix::new(fd_fm[0], fd_fm[1], fd_fm[2], fd_fm[3], fd_fm[4], fd_fm[5]);
             if fd.a.abs() < 0.01 || fd.d.abs() < 0.01 {
-                // Per-FD already includes scale (e.g., [0.001,...]).
-                // Don't compose with top-level to avoid double-scaling.
                 fd
             } else {
-                // Per-FD is a non-scaling transform (e.g., shear for italic).
-                // Compose with top-level for the needed scale.
                 self.font_matrix.concat(&fd)
             }
         } else {
             self.font_matrix
         };
-        let path = result.path.transform(&effective_fm);
+        Some(result.path.transform(&effective_fm))
+    }
 
-        // For OTF substitutes: fit glyph within the PDF's expected width.
-        // If the glyph is wider than the cell, condense it (scale down).
-        // If narrower, center it without stretching (preserves stroke weight).
-        if self.cmap.is_some() {
-            let pdf_w = self.glyph_width_cid(cid);
-            let glyph_w = result.width_x * self.font_matrix.a;
-            if glyph_w > 0.001 && pdf_w > 0.001 {
-                if glyph_w > pdf_w * 1.02 {
-                    let ratio = pdf_w / glyph_w;
-                    return Some(path.transform(&Matrix::scale(ratio, 1.0)));
-                } else if glyph_w < pdf_w * 0.98 {
-                    let offset = (pdf_w - glyph_w) / 2.0 / self.font_matrix.a;
-                    return Some(path.transform(&Matrix::translate(offset, 0.0)));
-                }
+    /// Render a glyph by Unicode code point via the font's cmap table.
+    fn glyph_path_unicode(&self, unicode: u16) -> Option<PsPath> {
+        let cmap = self.cmap.as_ref()?;
+        let &gid = cmap.get(&(unicode as u32))?;
+        self.glyph_path_at_gid(gid as usize)
+    }
+
+    fn glyph_path_cid(&self, cid: u16) -> Option<PsPath> {
+        // For embedded OTF/CFF with PDF CIDToGIDMap, use the PDF's mapping.
+        // For OpenType/CFF substitutes with a cmap, map Unicode → GID directly.
+        // For embedded CID-keyed CFF, use cid_to_gid mapping.
+        let gid = if let Some(ref map) = self.pdf_cid_to_gid {
+            // Embedded font with PDF-supplied CID→GID map
+            *map.get(cid as usize).unwrap_or(&0) as usize
+        } else if self.identity_cid_to_gid {
+            // Identity CIDToGIDMap: CID = charstring index directly.
+            // Common for CIDFontType2 fonts stored as OTTO/CFF in FontFile2.
+            cid as usize
+        } else if let Some(ref cmap) = self.cmap {
+            // OTF font with Unicode cmap.
+            // If this is a substituted font with an Adobe CID ordering
+            // (e.g. Japan1), the CID is from the Adobe registry, not Unicode.
+            // Convert CID → Unicode first, then look up in cmap.
+            if !self.ordering.is_empty() && self.ordering != b"Identity" {
+                let unicode =
+                    super::cid_unicode::cid_to_unicode(&self.ordering, cid)?;
+                *cmap.get(&unicode)? as usize
+            } else {
+                *cmap.get(&(cid as u32))? as usize
             }
-        }
-
-        Some(path)
+        } else if !self.font.cid_to_gid.is_empty() {
+            let g = *self.font.cid_to_gid.get(cid as usize)?;
+            if g == 0xFFFF {
+                return None;
+            }
+            g as usize
+        } else {
+            cid as usize
+        };
+        self.glyph_path_at_gid(gid)
     }
 
     fn glyph_width_cid(&self, cid: u16) -> f64 {

@@ -41,6 +41,14 @@ impl CMap {
 
     /// Parse a CMap from stream data.
     pub fn parse(data: &[u8]) -> Self {
+        Self::parse_with_loader(data, None)
+    }
+
+    /// Parse a CMap, optionally resolving `usecmap` with a loader function.
+    pub fn parse_with_loader(
+        data: &[u8],
+        loader: Option<&dyn Fn(&[u8]) -> Option<Vec<u8>>>,
+    ) -> Self {
         let mut code_to_cid = HashMap::new();
         let mut codespace_ranges: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
         let mut wmode: u8 = 0;
@@ -51,6 +59,45 @@ impl CMap {
 
         while let Some(line) = lines.next() {
             let line = line.trim();
+
+            // Handle usecmap: inherit mappings from the referenced CMap
+            if line.ends_with("usecmap") {
+                let name = line.strip_suffix("usecmap").unwrap_or("").trim();
+                let name = name.strip_prefix('/').unwrap_or(name);
+                if !name.is_empty() {
+                    if let Some(load_fn) = loader {
+                        if let Some(base_data) = load_fn(name.as_bytes()) {
+                            let base = Self::parse_with_loader(&base_data, loader);
+                            // Inherit base mappings (current entries override)
+                            for (k, v) in base.code_to_cid {
+                                code_to_cid.entry(k).or_insert(v);
+                            }
+                            if codespace_ranges.is_empty() {
+                                // Inherit codespace from base if not defined yet
+                                for fb in 0..256u16 {
+                                    let w = base.code_lengths[fb as usize];
+                                    if w > 0 {
+                                        let low = if w == 1 {
+                                            vec![fb as u8]
+                                        } else {
+                                            vec![fb as u8, 0x00]
+                                        };
+                                        let high = if w == 1 {
+                                            vec![fb as u8]
+                                        } else {
+                                            vec![fb as u8, 0xFF]
+                                        };
+                                        codespace_ranges.push((low, high));
+                                    }
+                                }
+                            }
+                            if wmode == 0 {
+                                wmode = base.wmode;
+                            }
+                        }
+                    }
+                }
+            }
 
             // Parse /WMode
             if let Some(rest) = line.strip_prefix("/WMode") {
