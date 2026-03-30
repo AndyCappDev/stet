@@ -566,26 +566,47 @@ pub fn parse_cmap(font_data: &[u8]) -> std::collections::HashMap<u32, u16> {
 /// character codes or F0XX symbol codes — NOT Unicode values.
 pub fn parse_cmap_with_info(font_data: &[u8]) -> (std::collections::HashMap<u32, u16>, bool) {
     let mut map = std::collections::HashMap::new();
-    let (cmap_off, _cmap_len) = match find_table(font_data, b"cmap") {
+    let (cmap_off, cmap_len) = match find_table(font_data, b"cmap") {
         Some(v) => v,
         None => return (map, false),
     };
     if cmap_off + 4 > font_data.len() {
         return (map, false);
     }
-    let num_subtables = read_u16(font_data, cmap_off + 2) as usize;
+    let mut actual_cmap_off = cmap_off;
+    let raw_num_subtables = read_u16(font_data, cmap_off + 2) as usize;
+    // Cap to what fits in the cmap table to avoid reading past table bounds
+    // into unrelated data (corrupted/malformed fonts may have wrong numTables).
+    let max_subtables = cmap_len.saturating_sub(4) / 8;
+    let mut num_subtables = raw_num_subtables.min(max_subtables);
+
+    // If numTables from the header doesn't fit in the cmap table, the data may
+    // have a 1-byte alignment error from decompression issues (e.g. corrupt zlib
+    // window size in FlateDecode header). Try reading from offset-1.
+    if raw_num_subtables > max_subtables && cmap_off > 0 {
+        let alt_version = read_u16(font_data, cmap_off - 1);
+        let alt_num = read_u16(font_data, cmap_off + 1) as usize;
+        if alt_version == 0 && alt_num > 0 && alt_num <= max_subtables {
+            actual_cmap_off = cmap_off - 1;
+            num_subtables = alt_num;
+        }
+    }
 
     // Find best subtable: prefer (3,1) Windows Unicode, then (1,0) Mac Roman
     let mut best_offset = None;
     let mut best_priority = 0u8;
     for i in 0..num_subtables {
-        let entry = cmap_off + 4 + i * 8;
+        let entry = actual_cmap_off + 4 + i * 8;
         if entry + 8 > font_data.len() {
             break;
         }
         let platform = read_u16(font_data, entry);
         let encoding = read_u16(font_data, entry + 2);
         let offset = read_u32(font_data, entry + 4) as usize;
+        // Validate subtable offset is within the font data
+        if actual_cmap_off + offset + 2 > font_data.len() {
+            continue;
+        }
         let priority = match (platform, encoding) {
             (3, 10) => 5, // Windows Unicode Full (format 12)
             (3, 1) => 4,  // Windows Unicode BMP
@@ -596,7 +617,7 @@ pub fn parse_cmap_with_info(font_data: &[u8]) -> (std::collections::HashMap<u32,
         };
         if priority > best_priority {
             best_priority = priority;
-            best_offset = Some(cmap_off + offset);
+            best_offset = Some(actual_cmap_off + offset);
         }
     }
     // Unicode-keyed: (3,10), (3,1), or (0,*)  — priority 3+

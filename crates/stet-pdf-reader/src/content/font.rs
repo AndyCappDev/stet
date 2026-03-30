@@ -1505,6 +1505,17 @@ fn resolve_truetype(
         ));
     }
 
+    // Validate essential tables are within bounds. Truncated font data
+    // (e.g. from corrupt zlib headers) may have table directory entries
+    // pointing past the decompressed data.
+    if let Some((off, _)) = find_table(&data, b"head") {
+        if off + 54 > data.len() {
+            return Err(PdfError::Other(
+                "TrueType font head table is out of bounds (truncated data)".into(),
+            ));
+        }
+    }
+
     let units_per_em = get_units_per_em(&data) as f64;
     let (cmap, cmap_is_unicode) = parse_cmap_with_info(&data);
 
