@@ -537,6 +537,23 @@ impl<'a> ContentInterpreter<'a> {
 
     /// Dispatch a PDF content stream operator.
     fn dispatch_operator(&mut self, op: &[u8]) -> Result<(), PdfError> {
+        // Path construction and painting operators have fixed operand counts.
+        // Excess operands indicate garbled content stream data (e.g. from
+        // corrupt FlateDecode) — skip the operator to avoid rendering with
+        // wrong coordinates.  The operand stack is cleared after every
+        // dispatch, so any values present were pushed since the last operator.
+        let expected_args: i32 = match op {
+            b"m" | b"l" => 2,
+            b"v" | b"y" | b"re" => 4,
+            b"c" => 6,
+            b"h" | b"S" | b"s" | b"f" | b"F" | b"f*" | b"B" | b"B*" | b"b" | b"b*"
+            | b"n" => 0,
+            _ => -1, // no check
+        };
+        if expected_args >= 0 && self.operand_stack.len() > expected_args as usize {
+            return Ok(());
+        }
+
         // Skip all operators inside suppressed optional content blocks,
         // except marked content operators (to maintain proper nesting).
         if self.oc_suppression_depth > 0 {
