@@ -1818,8 +1818,8 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
         .as_ref()
         .ok_or(PdfError::Other("CIDFont missing FontDescriptor".into()))?;
 
-    // Parse /DW (default width)
-    let default_width = cid_font_dict.get_int(b"DW").unwrap_or(1000) as f64 / 1000.0;
+    // Parse /DW (default width) — may be int or real
+    let default_width = cid_font_dict.get_f64(b"DW").unwrap_or(1000.0) / 1000.0;
 
     // Parse /DW2 (default vertical metrics: [v_y w1])
     // Default: [880, -1000] per PDF spec Table 117
