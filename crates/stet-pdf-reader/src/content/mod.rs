@@ -146,6 +146,12 @@ pub struct ContentInterpreter<'a> {
     /// HashMap index of the current resource dict's ColorSpace sub-dict.
     /// Built lazily on first sc/scn access to avoid O(n) PdfDict scans.
     cs_index: Option<std::collections::HashMap<Vec<u8>, PdfObj>>,
+    /// Visible Y range in form coordinates for early culling of offscreen content.
+    /// Set when entering a Form XObject whose BBox is much larger than the clip area.
+    /// BT/ET blocks whose Y position falls outside this range are skipped.
+    form_cull_y: Option<(f64, f64)>,
+    /// When true, the current BT/ET block is being skipped (offscreen).
+    bt_culled: bool,
 }
 
 impl<'a> ContentInterpreter<'a> {
@@ -187,6 +193,8 @@ impl<'a> ContentInterpreter<'a> {
             ocg_off: ocg_off.clone(),
             oc_suppression_depth: 0,
             cs_index: None,
+            form_cull_y: None,
+            bt_culled: false,
         }
     }
 
@@ -581,6 +589,16 @@ impl<'a> ContentInterpreter<'a> {
                 }
             }
         }
+        // Skip text operators inside a culled BT/ET block (offscreen in large forms)
+        if self.bt_culled {
+            if op == b"ET" {
+                self.bt_culled = false;
+                self.in_text = false;
+            }
+            self.operand_stack.clear();
+            return Ok(());
+        }
+
         match op {
             // Graphics state
             b"q" => self.op_q(),
@@ -1579,11 +1597,24 @@ impl<'a> ContentInterpreter<'a> {
         }
     }
 
+    /// Check if the current text position is outside the visible form area.
+    /// If so, mark the BT block as culled to skip remaining text ops.
+    fn check_text_cull(&mut self) {
+        if let Some((y_lo, y_hi)) = self.form_cull_y {
+            // Text Y in form coordinates is the ty component of the text matrix
+            let text_y = self.gstate.text_matrix.ty;
+            if text_y < y_lo || text_y > y_hi {
+                self.bt_culled = true;
+            }
+        }
+    }
+
     fn op_td(&mut self) -> Result<(), PdfError> {
         let n = self.get_numbers(2)?;
         let m = Matrix::translate(n[0], n[1]);
         self.gstate.text_line_matrix = self.gstate.text_line_matrix.concat(&m);
         self.gstate.text_matrix = self.gstate.text_line_matrix;
+        self.check_text_cull();
         Ok(())
     }
 
@@ -1593,6 +1624,7 @@ impl<'a> ContentInterpreter<'a> {
         let m = Matrix::translate(n[0], n[1]);
         self.gstate.text_line_matrix = self.gstate.text_line_matrix.concat(&m);
         self.gstate.text_matrix = self.gstate.text_line_matrix;
+        self.check_text_cull();
         Ok(())
     }
 
@@ -1601,6 +1633,7 @@ impl<'a> ContentInterpreter<'a> {
         let m = Matrix::new(n[0], n[1], n[2], n[3], n[4], n[5]);
         self.gstate.text_matrix = m;
         self.gstate.text_line_matrix = m;
+        self.check_text_cull();
         Ok(())
     }
 
@@ -3245,9 +3278,37 @@ impl<'a> ContentInterpreter<'a> {
                 self.push_bbox_clip(x0, y0, x1, y1);
             }
 
+            // Compute visible Y range in form coordinates for early culling.
+            // If the form is much taller than the visible area, skip offscreen
+            // BT/ET blocks during interpretation (avoids font resolution and
+            // glyph measurement for content that will never be rendered).
+            let saved_cull = self.form_cull_y.take();
+            if let Some((_x0, y0, _x1, y1)) = bbox {
+                let form_height = (y1 - y0).abs();
+                // Only cull if form is significantly larger than the page
+                if form_height > 5000.0 {
+                    // Compute visible Y range by inverse-transforming the page
+                    // clip through the CTM. CTM maps form coords to device space.
+                    let ctm = &self.gstate.ctm;
+                    // For a simple scale+translate CTM (common case), inverse Y is:
+                    // form_y = (device_y - ty) / d
+                    if ctm.b.abs() < 1e-6 && ctm.c.abs() < 1e-6 && ctm.d.abs() > 1e-6 {
+                        // device Y range is [0, page_height_px]
+                        let page_h = self.initial_ctm.ty.abs();
+                        let fy0 = (0.0 - ctm.ty) / ctm.d;
+                        let fy1 = (page_h - ctm.ty) / ctm.d;
+                        let (lo, hi) = if fy0 < fy1 { (fy0, fy1) } else { (fy1, fy0) };
+                        // Add margin for text that extends above/below baseline
+                        self.form_cull_y = Some((lo - 100.0, hi + 100.0));
+                    }
+                }
+            }
+
             self.depth += 1;
             self.interpret_stream(&form_data)?;
             self.depth -= 1;
+
+            self.form_cull_y = saved_cull;
         }
 
         // Restore state — check if clip needs resetting
