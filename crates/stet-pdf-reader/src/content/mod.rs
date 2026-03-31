@@ -3774,12 +3774,34 @@ impl<'a> ContentInterpreter<'a> {
             self.gstate.dash_pattern = DashPattern { array, offset };
         }
 
-        // Font
+        // Font — array [font_ref size] sets both font and size
         if let Some(font_arr) = gs_dict.get_array(b"Font")
             && font_arr.len() == 2
             && let Some(size) = font_arr[1].as_f64()
         {
             self.gstate.font_size = size;
+            // Resolve the font object from the first array element
+            let font_ref = &font_arr[0];
+            // Use object number as cache key, or a fallback synthetic name
+            let cache_key = if let PdfObj::Ref(obj_num, _) = font_ref {
+                format!("__gs_font_{obj_num}").into_bytes()
+            } else {
+                b"__gs_font_inline".to_vec()
+            };
+            if let Some(cached) = self.font_cache.get(&cache_key) {
+                self.current_font = Some(Arc::clone(cached));
+            } else {
+                match font::resolve_font(self.resolver, font_ref, self.font_provider.as_ref()) {
+                    Ok(font) => {
+                        let arc = Arc::new(font);
+                        self.font_cache.insert(cache_key, Arc::clone(&arc));
+                        self.current_font = Some(arc);
+                    }
+                    Err(e) => {
+                        eprintln!("warning: ExtGState Font: {e}");
+                    }
+                }
+            }
         }
 
         // Transfer function: TR2 takes priority over TR
