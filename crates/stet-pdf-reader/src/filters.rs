@@ -22,15 +22,44 @@ pub enum Filter {
 }
 
 /// Parse the /Filter and /DecodeParms entries from a stream dict.
-pub fn parse_filters(dict: &PdfDict) -> Result<(Vec<Filter>, Vec<Option<PdfDict>>), PdfError> {
+/// Pass a resolver to dereference indirect `/Filter` or `/DecodeParms` values.
+/// `None` is acceptable during bootstrap (xref stream parsing) where no resolver
+/// exists yet and indirect references don't occur.
+pub fn parse_filters(
+    dict: &PdfDict,
+    resolver: Option<&crate::resolver::Resolver>,
+) -> Result<(Vec<Filter>, Vec<Option<PdfDict>>), PdfError> {
     let filter_obj = match dict.get(b"Filter") {
         Some(obj) => obj,
         None => return Ok((Vec::new(), Vec::new())),
     };
 
+    // Resolve indirect Filter reference if needed
+    let resolved_filter;
+    let filter_obj = if let crate::objects::PdfObj::Ref(_, _) = filter_obj {
+        if let Some(r) = resolver {
+            resolved_filter = r.deref(filter_obj).unwrap_or_else(|_| filter_obj.clone());
+            &resolved_filter
+        } else {
+            filter_obj
+        }
+    } else {
+        filter_obj
+    };
+
     let filter_names: Vec<&[u8]> = match filter_obj {
         crate::objects::PdfObj::Name(n) => vec![n.as_slice()],
-        crate::objects::PdfObj::Array(arr) => arr.iter().filter_map(|o| o.as_name()).collect(),
+        crate::objects::PdfObj::Array(arr) => {
+            // Array elements may also be indirect references
+            arr.iter()
+                .filter_map(|o| {
+                    if let Some(n) = o.as_name() {
+                        return Some(n);
+                    }
+                    None
+                })
+                .collect()
+        }
         _ => return Ok((Vec::new(), Vec::new())),
     };
 
@@ -40,17 +69,28 @@ pub fn parse_filters(dict: &PdfDict) -> Result<(Vec<Filter>, Vec<Option<PdfDict>
     }
 
     // Parse DecodeParms (single dict or array of dicts/refs)
-    let parms = match dict.get(b"DecodeParms") {
-        Some(crate::objects::PdfObj::Dict(d)) => vec![Some(d.clone())],
-        Some(crate::objects::PdfObj::Ref(_, _)) => {
-            // Single indirect reference to a dict
-            vec![None] // Will be resolved below if resolver is available
+    let dp_obj = dict.get(b"DecodeParms");
+    let resolved_dp;
+    let dp_obj = match dp_obj {
+        Some(crate::objects::PdfObj::Ref(_, _)) if resolver.is_some() => {
+            resolved_dp = resolver.unwrap().deref(dp_obj.unwrap()).ok();
+            resolved_dp.as_ref()
         }
+        other => other,
+    };
+
+    let parms = match dp_obj {
+        Some(crate::objects::PdfObj::Dict(d)) => vec![Some(d.clone())],
         Some(crate::objects::PdfObj::Array(arr)) => arr
             .iter()
             .map(|o| match o {
                 crate::objects::PdfObj::Dict(d) => Some(d.clone()),
-                _ => None, // null or unresolved refs handled below
+                crate::objects::PdfObj::Ref(_, _) if resolver.is_some() => resolver
+                    .unwrap()
+                    .deref(o)
+                    .ok()
+                    .and_then(|r| r.as_dict().cloned()),
+                _ => None,
             })
             .collect(),
         _ => vec![None; filters.len()],
@@ -63,46 +103,6 @@ pub fn parse_filters(dict: &PdfDict) -> Result<(Vec<Filter>, Vec<Option<PdfDict>
     }
 
     Ok((filters, parms))
-}
-
-/// Resolve indirect references in a DecodeParms array.
-/// Call this after `parse_filters` when a Resolver is available.
-pub fn resolve_decode_parms(
-    dict: &PdfDict,
-    parms: &mut [Option<PdfDict>],
-    resolver: &crate::resolver::Resolver,
-) {
-    let dp = match dict.get(b"DecodeParms") {
-        Some(obj) => obj,
-        None => return,
-    };
-
-    match dp {
-        crate::objects::PdfObj::Ref(_, _) => {
-            // Single indirect ref — resolve and use as first entry
-            if let Ok(resolved) = resolver.deref(dp) {
-                if let Some(d) = resolved.as_dict() {
-                    if let Some(slot) = parms.first_mut() {
-                        *slot = Some(d.clone());
-                    }
-                }
-            }
-        }
-        crate::objects::PdfObj::Array(arr) => {
-            for (i, obj) in arr.iter().enumerate() {
-                if let crate::objects::PdfObj::Ref(_, _) = obj {
-                    if let Ok(resolved) = resolver.deref(obj) {
-                        if let Some(d) = resolved.as_dict() {
-                            if let Some(slot) = parms.get_mut(i) {
-                                *slot = Some(d.clone());
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        _ => {}
-    }
 }
 
 fn filter_from_name(name: &[u8]) -> Result<Filter, PdfError> {

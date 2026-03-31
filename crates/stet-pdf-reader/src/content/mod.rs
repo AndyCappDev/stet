@@ -3575,9 +3575,8 @@ impl<'a> ContentInterpreter<'a> {
 
         // Apply filters if present
         let sample_data = if has_filter {
-            match crate::filters::parse_filters(&dict) {
-                Ok((filters, mut parms)) if !filters.is_empty() => {
-                    crate::filters::resolve_decode_parms(&dict, &mut parms, self.resolver);
+            match crate::filters::parse_filters(&dict, Some(self.resolver)) {
+                Ok((filters, parms)) if !filters.is_empty() => {
                     crate::filters::decode_stream(&sample_data, &filters, &parms, None)
                         .unwrap_or(sample_data)
                 }

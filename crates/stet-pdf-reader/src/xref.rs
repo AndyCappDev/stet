@@ -782,7 +782,7 @@ fn parse_xref_stream(
     let raw_data = &data[data_start..std::cmp::min(data_start + length, data.len())];
 
     // Decompress the stream
-    let (filter_list, parms) = filters::parse_filters(&dict)?;
+    let (filter_list, parms) = filters::parse_filters(&dict, None)?;
     let stream_data = if filter_list.is_empty() {
         raw_data.to_vec()
     } else {
