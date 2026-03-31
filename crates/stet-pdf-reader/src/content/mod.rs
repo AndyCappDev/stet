@@ -1959,8 +1959,14 @@ impl<'a> ContentInterpreter<'a> {
         let saved_path = std::mem::take(&mut self.current_path);
         let saved_point = self.current_point.take();
         let saved_subpath = self.subpath_start.take();
+        let saved_font = self.current_font.clone();
+        let saved_in_text = self.in_text;
+        let saved_content_stream_ctm = self.content_stream_ctm;
 
         self.gstate.ctm = trm;
+        // Pattern Matrix maps pattern space to the "default coordinate system
+        // of the content stream" — for Type 3 CharProcs, that's the TRM.
+        self.content_stream_ctm = trm;
 
         let saved_d1 = self.d1_color_suppressed;
         self.d1_color_suppressed = false;
@@ -1974,6 +1980,9 @@ impl<'a> ContentInterpreter<'a> {
         self.current_path = saved_path;
         self.current_point = saved_point;
         self.subpath_start = saved_subpath;
+        self.current_font = saved_font;
+        self.in_text = saved_in_text;
+        self.content_stream_ctm = saved_content_stream_ctm;
         // Restore state: truncate any extra gstate_stack entries left by
         // unmatched q/Q inside the CharProc (e.g., if the EI parser consumed Q).
         self.gstate_stack.truncate(stack_depth_before + 1);
@@ -4529,6 +4538,9 @@ impl<'a> ContentInterpreter<'a> {
         self.gstate.stroke_pattern = None;
         self.gstate.fill_shading_pattern = None;
         self.gstate.stroke_shading_pattern = None;
+        // Reset text rendering mode so pattern tiles don't inherit
+        // fill+stroke or other modes from the parent content stream.
+        self.gstate.text_rendering_mode = 0;
 
         self.depth += 1;
         let _ = self.interpret_stream(&pattern_data);
