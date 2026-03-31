@@ -403,11 +403,14 @@ fn parse_ocg_off(resolver: &Resolver) -> HashSet<u32> {
         None => return off,
     };
 
-    // Collect object numbers from /OFF array
-    if let Some(off_arr) = d_dict.get_array(b"OFF") {
-        for obj in off_arr {
-            if let Some((num, _gen)) = obj.as_ref() {
-                off.insert(num);
+    // Collect object numbers from /OFF array (may be an indirect reference)
+    if let Some(off_obj) = d_dict.get(b"OFF") {
+        let off_resolved = resolver.deref(off_obj).unwrap_or_else(|_| off_obj.clone());
+        if let Some(off_arr) = off_resolved.as_array() {
+            for obj in off_arr {
+                if let Some((num, _gen)) = obj.as_ref() {
+                    off.insert(num);
+                }
             }
         }
     }

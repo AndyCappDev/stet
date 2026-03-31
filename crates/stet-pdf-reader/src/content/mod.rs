@@ -2117,17 +2117,76 @@ impl<'a> ContentInterpreter<'a> {
         if let Some(Operand::Name(prop_name)) = props {
             if let Some(props_dict) = self.resolve_resource_subdict(b"Properties") {
                 if let Some(ocg_obj) = props_dict.get(&prop_name) {
-                    // Get the object number of the referenced OCG
-                    if let Some((obj_num, _)) = ocg_obj.as_ref() {
-                        if self.ocg_off.contains(&obj_num) {
-                            self.oc_suppression_depth = 1;
-                        }
+                    if self.is_ocg_off(ocg_obj) {
+                        self.oc_suppression_depth = 1;
                     }
                 }
             }
         }
 
         Ok(())
+    }
+
+    /// Check whether an OCG/OCMD reference is OFF.
+    /// Handles both direct OCG references (`/Type /OCG`) and OCMD wrappers
+    /// (`/Type /OCMD` with `/OCGs` array and optional `/P` visibility policy).
+    fn is_ocg_off(&self, ocg_obj: &PdfObj) -> bool {
+        // Direct OCG reference — check its object number
+        if let Some((obj_num, _)) = ocg_obj.as_ref() {
+            // Dereference to see if it's an OCMD wrapper
+            if let Ok(resolved) = self.resolver.deref(ocg_obj) {
+                if let Some(dict) = resolved.as_dict() {
+                    if dict.get_name(b"Type") == Some(b"OCMD") {
+                        return self.is_ocmd_off(dict);
+                    }
+                }
+            }
+            // Plain OCG reference
+            return self.ocg_off.contains(&obj_num);
+        }
+        // Inline dict (unusual but possible)
+        if let Some(dict) = ocg_obj.as_dict() {
+            if dict.get_name(b"Type") == Some(b"OCMD") {
+                return self.is_ocmd_off(dict);
+            }
+        }
+        false
+    }
+
+    /// Evaluate an OCMD (Optional Content Membership Dictionary).
+    /// `/P` policy: AnyOn (default) = visible if ANY listed OCG is on;
+    /// AnyOff = visible if ANY is off; AllOn = visible if ALL are on;
+    /// AllOff = visible if ALL are off.
+    fn is_ocmd_off(&self, ocmd: &PdfDict) -> bool {
+        let policy = ocmd.get_name(b"P").unwrap_or(b"AnyOn");
+
+        // Collect OCG object numbers from /OCGs (may be a single ref or array)
+        let mut ocg_nums = Vec::new();
+        if let Some(ocgs_obj) = ocmd.get(b"OCGs") {
+            match ocgs_obj {
+                PdfObj::Ref(num, _) => ocg_nums.push(*num),
+                PdfObj::Array(arr) => {
+                    for item in arr {
+                        if let Some((num, _)) = item.as_ref() {
+                            ocg_nums.push(num);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if ocg_nums.is_empty() {
+            return false;
+        }
+
+        // Evaluate visibility based on policy, then return whether suppressed
+        let visible = match policy {
+            b"AllOn" => ocg_nums.iter().all(|n| !self.ocg_off.contains(n)),
+            b"AnyOff" => ocg_nums.iter().any(|n| self.ocg_off.contains(n)),
+            b"AllOff" => ocg_nums.iter().all(|n| self.ocg_off.contains(n)),
+            _ /* AnyOn */ => ocg_nums.iter().any(|n| !self.ocg_off.contains(n)),
+        };
+        !visible
     }
 
     // === XObject operator ===
