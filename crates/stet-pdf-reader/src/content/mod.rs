@@ -2460,16 +2460,43 @@ impl<'a> ContentInterpreter<'a> {
             return Ok(());
         }
 
-        let color_space = if is_image_mask {
-            ImageColorSpace::Mask {
+        // For multi-input DeviceN images, evaluate the tinting function directly
+        // per pixel to avoid lossy N-D lookup table interpolation.  A pre-sampled
+        // table with spd^N entries can never faithfully represent all 256^N possible
+        // 8-bit input combinations for N≥2.  Direct evaluation is exact and fast
+        // enough for typical image sizes.
+        let (color_space, sample_data) = if !is_image_mask
+            && let Some(ResolvedColorSpace::DeviceN { names, alt, tint_fn: Some(func) }) = resolved_cs.as_ref()
+            && names.len() >= 2
+            && matches!(alt.as_ref(), ResolvedColorSpace::DeviceGray | ResolvedColorSpace::DeviceRGB)
+        {
+            let ni = names.len();
+            let npixels = width as usize * height as usize;
+            let mut rgba = vec![255u8; npixels * 4];
+            let mut inputs = vec![0.0f64; ni];
+            for i in 0..npixels {
+                let si = i * ni;
+                for (c, inp) in inputs.iter_mut().enumerate() {
+                    *inp = sample_data.get(si + c).copied().unwrap_or(0) as f64 / 255.0;
+                }
+                let out = func.evaluate(&inputs);
+                let (r, g, b) = color_space::alt_comps_to_rgb_f64(&out, alt);
+                let pi = i * 4;
+                rgba[pi] = r;
+                rgba[pi + 1] = g;
+                rgba[pi + 2] = b;
+            }
+            (ImageColorSpace::PreconvertedRGBA, rgba)
+        } else if is_image_mask {
+            (ImageColorSpace::Mask {
                 color: self.gstate.fill_color.clone(),
                 polarity,
-            }
+            }, sample_data)
         } else if let Some(ref rcs) = resolved_cs {
-            to_image_color_space(rcs)
+            (to_image_color_space(rcs), sample_data)
         } else {
             // resolved_cs is None for JPX RGBA with SMaskInData — already RGBA
-            ImageColorSpace::PreconvertedRGBA
+            (ImageColorSpace::PreconvertedRGBA, sample_data)
         };
 
         // JPXDecode with internal palette (pclr): hayro-jpeg2000 applies the JP2 palette

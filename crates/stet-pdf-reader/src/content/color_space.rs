@@ -1029,12 +1029,15 @@ fn build_nd_tint_image_cs(
     } else {
         (to_image_color_space(alt), alt.num_components())
     };
-    // Use fewer samples per dimension for higher-dimensional spaces
+    // Use fewer samples per dimension for higher-dimensional spaces.
+    // Total table entries = spd^n_inputs × n_out, so balance quality vs memory.
+    // These tables are used for fills/strokes; images with ≥2 inputs bypass
+    // the table via direct per-pixel function evaluation (see mod.rs).
     let spd = match n_inputs {
         1 => 256u32,
         2 => 64,
-        3 => 16,
-        _ => 8,
+        3 => 17,
+        _ => 9,
     };
     let total: usize = (spd as usize).pow(n_inputs as u32);
     let mut data = Vec::with_capacity(total * n_out);
@@ -1065,5 +1068,33 @@ fn build_nd_tint_image_cs(
         names: Vec::new(),
         alt_space: Box::new(alt_cs),
         tint_table: Arc::new(table),
+    }
+}
+
+/// Convert tinting function output components (f64, 0..1) to (R, G, B) bytes
+/// through the given alternative color space.
+pub fn alt_comps_to_rgb_f64(comps: &[f64], alt: &ResolvedColorSpace) -> (u8, u8, u8) {
+    match alt {
+        ResolvedColorSpace::DeviceGray => {
+            let g = (comps.first().copied().unwrap_or(0.0).clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+            (g, g, g)
+        }
+        ResolvedColorSpace::DeviceRGB => {
+            let r = (comps.first().copied().unwrap_or(0.0).clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+            let g = (comps.get(1).copied().unwrap_or(0.0).clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+            let b = (comps.get(2).copied().unwrap_or(0.0).clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+            (r, g, b)
+        }
+        ResolvedColorSpace::DeviceCMYK => {
+            let c = comps.first().copied().unwrap_or(0.0).clamp(0.0, 1.0);
+            let m = comps.get(1).copied().unwrap_or(0.0).clamp(0.0, 1.0);
+            let y = comps.get(2).copied().unwrap_or(0.0).clamp(0.0, 1.0);
+            let k = comps.get(3).copied().unwrap_or(0.0).clamp(0.0, 1.0);
+            let r = ((1.0 - (c + k).min(1.0)) * 255.0 + 0.5) as u8;
+            let g = ((1.0 - (m + k).min(1.0)) * 255.0 + 0.5) as u8;
+            let b = ((1.0 - (y + k).min(1.0)) * 255.0 + 0.5) as u8;
+            (r, g, b)
+        }
+        _ => (0, 0, 0),
     }
 }
