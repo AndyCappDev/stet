@@ -280,8 +280,7 @@ pub fn resolve_font(
             }
         }
         if desc.get(b"FontFile2").is_some() {
-            // Try embedded TrueType; fall back to substitution if font data is unusable
-            // (some PDFs embed only table metadata without actual glyph outlines)
+            // Try embedded TrueType (falls back to CFF internally if data is OTTO/CFF)
             match resolve_truetype(resolver, &descriptor, encoding.clone(), widths, font_dict) {
                 Ok(font) => return Ok(font),
                 Err(_) => {
@@ -1611,6 +1610,15 @@ fn resolve_truetype(
         false
     };
     if !has_glyf && !has_usable_glyx {
+        // Some PDFs store CFF/OpenType fonts as FontFile2 (malformed but common).
+        // Detect and route to CFF parsing instead of failing.
+        let is_otf = data.starts_with(b"OTTO");
+        let is_cff = is_raw_cff(&data);
+        if is_otf || is_cff {
+            let has_explicit_encoding = font_dict.get(b"Encoding").is_some();
+            let has_pdf_widths = font_dict.get(b"Widths").is_some();
+            return build_cff_font(data, encoding, widths, has_explicit_encoding, has_pdf_widths);
+        }
         return Err(PdfError::Other(
             "TrueType font has no usable glyph outline data".into(),
         ));
@@ -1685,7 +1693,17 @@ fn resolve_cff(
         .get(b"FontFile3")
         .ok_or(PdfError::Other("CFF font missing FontFile3".into()))?;
     let raw_data = resolver.stream_data_from_obj(ff_ref)?;
+    build_cff_font(raw_data, encoding, widths, has_explicit_encoding, has_pdf_widths)
+}
 
+/// Build a CFF font from raw font data (may be OpenType/CFF or raw CFF).
+fn build_cff_font(
+    raw_data: Vec<u8>,
+    encoding: [Option<String>; 256],
+    widths: [f64; 256],
+    has_explicit_encoding: bool,
+    has_pdf_widths: bool,
+) -> Result<PdfFont, PdfError> {
     // If data starts with "OTTO" it's an OpenType container — extract CFF table
     let font_data = if raw_data.starts_with(b"OTTO") {
         use stet_fonts::truetype::find_table;
