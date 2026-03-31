@@ -559,8 +559,8 @@ pub fn components_to_device_color_icc(
             hival,
             lookup,
         } => {
-            let idx = components.first().copied().unwrap_or(0.0) as usize;
-            let idx = idx.min(*hival as usize);
+            let raw = components.first().copied().unwrap_or(0.0).round();
+            let idx = (raw as i64).clamp(0, *hival as i64) as usize;
             let n = base.num_components();
             let offset = idx * n;
             let mut base_components = Vec::with_capacity(n);
