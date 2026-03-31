@@ -2122,6 +2122,18 @@ fn build_stroke(params: &StrokeParams, dpi: f64) -> Stroke {
 /// Only axis-aligned segments (horizontal/vertical lines) are snapped.
 /// Diagonal/curved segments are left as-is since snapping would distort them.
 ///
+/// Check whether a CTM indicates the path is already in device space (identity
+/// or simple Y-flip/translation). Stroke adjustment snaps coordinates to pixel
+/// boundaries, which only makes sense when path coordinates are device pixels.
+/// PDF Form XObjects with large scale factors (e.g. [405, 0, 0, 283, ...]) would
+/// cause catastrophic snapping if treated as device-space paths.
+fn ctm_is_device_space(ctm: &Matrix) -> bool {
+    (ctm.a.abs() - 1.0).abs() < 0.01
+        && ctm.b.abs() < 0.01
+        && ctm.c.abs() < 0.01
+        && (ctm.d.abs() - 1.0).abs() < 0.01
+}
+
 /// Apply stroke adjustment for viewport rendering.
 ///
 /// Path coordinates are in reference-DPI device space. The viewport transform
@@ -2335,7 +2347,10 @@ fn render_element(
 
             // Apply stroke adjustment — snap in output device space
             let adjusted;
-            let draw_path = if params.stroke_adjust && stroke.width <= 2.0 {
+            let draw_path = if params.stroke_adjust
+                && stroke.width <= 2.0
+                && ctm_is_device_space(&params.ctm)
+            {
                 adjusted = stroke_adjust_path_viewport(
                     path,
                     stroke.width as f64,
@@ -4133,12 +4148,14 @@ impl OutputDevice for SkiaDevice {
         self.ensure_full_pixmap();
         let stroke = build_stroke(params, self.dpi);
         let adjusted;
-        let draw_path = if params.stroke_adjust && stroke.width <= 2.0 {
-            adjusted = stroke_adjust_path_viewport(path, stroke.width as f64, 1.0, 1.0, 0.0, 0.0);
-            &adjusted
-        } else {
-            path
-        };
+        let draw_path =
+            if params.stroke_adjust && stroke.width <= 2.0 && ctm_is_device_space(&params.ctm) {
+                adjusted =
+                    stroke_adjust_path_viewport(path, stroke.width as f64, 1.0, 1.0, 0.0, 0.0);
+                &adjusted
+            } else {
+                path
+            };
         let Some(skia_path) = build_skia_path(draw_path) else {
             return;
         };
