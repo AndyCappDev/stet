@@ -413,6 +413,16 @@ fn resolve_cal_rgb(args: &[PdfObj], resolver: &Resolver) -> Result<ResolvedColor
         white_point,
         matrix_abc: matrix,
         decode_abc,
+        // MatrixABC produces XYZ values that can exceed 1.0 (e.g. D65 Z=1.089).
+        // Set RangeLMN upper bounds to the white point so values aren't clamped.
+        range_lmn: [
+            0.0,
+            white_point[0].max(1.0),
+            0.0,
+            white_point[1].max(1.0),
+            0.0,
+            white_point[2].max(1.0),
+        ],
         ..Default::default()
     };
 
