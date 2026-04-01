@@ -1011,6 +1011,50 @@ fn create_cid_cff_from_raw(
     }))
 }
 
+/// Fix malformed `head.indexToLocFormat` in embedded TrueType fonts.
+///
+/// Some PDF generators write invalid values (e.g. 256 instead of 0 or 1).
+/// Skrifa checks `== 1` for long format, so any value other than 0 or 1
+/// causes it to use short format incorrectly. Determine the correct format
+/// from the loca table size and patch the head table in-place.
+fn sanitize_index_to_loc_format(font_data: &mut [u8]) {
+    use stet_fonts::truetype::{find_table, read_i16, read_u16};
+
+    let head = find_table(font_data, b"head");
+    let loca = find_table(font_data, b"loca");
+    let maxp = find_table(font_data, b"maxp");
+    let (head_off, _) = match head {
+        Some(h) => h,
+        None => return,
+    };
+    if head_off + 52 > font_data.len() {
+        return;
+    }
+    let format = read_i16(font_data, head_off + 50);
+    if format == 0 || format == 1 {
+        return; // already valid
+    }
+    // Determine correct format from loca table size vs numGlyphs
+    let correct = if let (Some((_, loca_len)), Some((maxp_off, _))) = (loca, maxp) {
+        if maxp_off + 6 <= font_data.len() {
+            let num_glyphs = read_u16(font_data, maxp_off + 4) as usize;
+            // Long format: (numGlyphs + 1) * 4 bytes
+            // Short format: (numGlyphs + 1) * 2 bytes
+            if loca_len == (num_glyphs + 1) * 4 {
+                1i16 // long
+            } else {
+                0i16 // short
+            }
+        } else {
+            if format != 0 { 1 } else { 0 }
+        }
+    } else {
+        if format != 0 { 1 } else { 0 }
+    };
+    font_data[head_off + 50] = (correct >> 8) as u8;
+    font_data[head_off + 51] = correct as u8;
+}
+
 /// Try to load a TrueType font from the system font cache.
 ///
 /// Used when a CIDFontType2 font is not embedded in the PDF (missing FontFile2).
@@ -2020,7 +2064,8 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
             let substituted;
             let data = if let Some(ff_ref) = desc.get(b"FontFile2") {
                 substituted = false;
-                let font_data = resolver.stream_data_from_obj(ff_ref)?;
+                let mut font_data = resolver.stream_data_from_obj(ff_ref)?;
+                sanitize_index_to_loc_format(&mut font_data);
                 // Some PDFs store CFF fonts as FontFile2 instead of FontFile3.
                 // Detect OpenType/CFF (OTTO magic) or raw CFF and route accordingly.
                 let is_otf_cff = font_data.len() > 4 && &font_data[0..4] == b"OTTO";
