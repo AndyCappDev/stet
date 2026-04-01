@@ -399,7 +399,8 @@ def generate_html_report(report_data, html_path, baseline_timings, current_timin
 
     # Table rows (failures first, then sorted by name)
     rows = []
-    for name, status, pct, pages, errs in sorted(report_data, key=lambda r: (r[1] != "fail", r[0])):
+    status_order = {"fail": 0, "error": 1, "skip": 2, "new": 3, "missing": 4, "pass": 5}
+    for name, status, pct, pages, errs in sorted(report_data, key=lambda r: (status_order.get(r[1], 5), r[0])):
         if status == "pass":
             badge = '<span style="color:green">PASS</span>'
         elif status == "fail":
