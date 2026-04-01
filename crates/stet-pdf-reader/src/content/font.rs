@@ -1069,6 +1069,40 @@ fn load_system_truetype_font(base_font: &str) -> Result<Vec<u8>, PdfError> {
     )))
 }
 
+/// Fallback for CID fonts whose names can't be resolved (e.g. GBK-encoded
+/// native names like 黑体). Uses the CIDSystemInfo Ordering to select
+/// the appropriate Noto CJK regional variant.
+fn load_cjk_fallback_font(ordering: &[u8], base_font: &str) -> Result<Vec<u8>, PdfError> {
+    use stet_fonts::system_fonts::get_system_font_cache;
+
+    if ordering.is_empty() {
+        return Err(PdfError::Other("no CJK ordering for fallback".into()));
+    }
+
+    let cache = get_system_font_cache();
+    let lower = base_font.to_ascii_lowercase();
+    let is_bold = lower.contains("bold") || lower.contains("demi");
+
+    // Noto CJK .ttc files contain JP/SC/TC/HK/KR sub-fonts; the system font
+    // cache typically indexes only the first (JP). The JP variant includes
+    // all CJK unified ideographs, so it works for all orderings.
+    let target = if is_bold {
+        "NotoSansCJKjp-Bold"
+    } else {
+        "NotoSansCJKjp-Regular"
+    };
+    if let Some(path) = cache.get_font_path(target)
+        && let Ok(data) = read_font_file(path, target)
+    {
+        return Ok(data);
+    }
+
+    Err(PdfError::Other(format!(
+        "CJK fallback font '{}' not found on system",
+        target
+    )))
+}
+
 /// Embedded Type 1 substitute fonts (URW families).
 /// Compiled into the binary so the PDF reader works from any directory.
 const EMBEDDED_FONTS: &[(&str, &[u8])] = &[
@@ -2052,7 +2086,8 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                         }
                     })
                     .unwrap_or_default();
-                let sys_data = load_system_truetype_font(&base_font)?;
+                let sys_data = load_system_truetype_font(&base_font)
+                    .or_else(|_| load_cjk_fallback_font(&ordering, &base_font))?;
                 // If the system font is OpenType/CFF, use CFF rendering path
                 if sys_data.len() > 4 && &sys_data[0..4] == b"OTTO" {
                     return create_cid_cff_from_otf(
@@ -2191,7 +2226,8 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                         .or_else(|_| load_system_truetype_font("LiberationSans"))
                         .or_else(|_| load_system_truetype_font("NimbusSans"))?
                 } else {
-                    load_system_truetype_font(&base_font)?
+                    load_system_truetype_font(&base_font)
+                        .or_else(|_| load_cjk_fallback_font(&ordering, &base_font))?
                 };
                 // If the system font is OpenType/CFF, use CFF rendering path
                 if sys_data.len() > 4 && &sys_data[0..4] == b"OTTO" {
