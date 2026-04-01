@@ -2940,6 +2940,10 @@ fn render_knockout_group(
 
     let mut accumulated_cmyk = initial_cmyk.clone();
 
+    // Disable anti-aliasing in knockout groups to prevent seam artifacts.
+    // Each element composites independently against the backdrop, so adjacent
+    // fills' AA edges don't mesh — both blend toward the backdrop color,
+    // creating visible 1px white lines at shared boundaries.
     let group_ctx = RenderContext {
         vp_x: eff_vp_x,
         vp_y: eff_vp_y,
@@ -2951,7 +2955,7 @@ fn render_knockout_group(
         icc: ctx.icc,
         image_cache: None,
         elem_idx: 0,
-        no_aa: ctx.no_aa,
+        no_aa: true,
         opm_zero_transparent: ctx.opm_zero_transparent,
     };
 
