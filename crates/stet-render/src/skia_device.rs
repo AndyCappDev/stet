@@ -2955,26 +2955,51 @@ fn render_knockout_group(
         opm_zero_transparent: ctx.opm_zero_transparent,
     };
 
+    // Persistent band state for clip tracking — clips must accumulate across
+    // elements in the knockout group (each paint element still composites
+    // against the initial backdrop, but it must respect the current clip).
+    let mut ko_band = BandState {
+        clip_region: None,
+        spare_mask: None,
+        clip_mask_cache: HashMap::new(),
+        clip_mask_seen: HashSet::new(),
+        mask_pool: Vec::new(),
+        cmyk_buffer: None,
+    };
+
     for elem in elements.elements() {
-        offscreen.data_mut().copy_from_slice(&initial_backdrop);
+        match elem {
+            // State-only elements: update persistent clip, no knockout compositing
+            DisplayElement::Clip { .. } | DisplayElement::InitClip => {
+                render_element(&mut offscreen, &mut ko_band, elem, &group_ctx);
+            }
+            // Paint elements: knockout semantics with persistent clip
+            _ => {
+                offscreen.data_mut().copy_from_slice(&initial_backdrop);
 
-        let ko_cmyk = initial_cmyk.clone();
-        let mut elem_band = BandState {
-            clip_region: None,
-            spare_mask: None,
-            clip_mask_cache: HashMap::new(),
-            clip_mask_seen: HashSet::new(),
-            mask_pool: Vec::new(),
-            cmyk_buffer: ko_cmyk,
-        };
+                ko_band.cmyk_buffer = initial_cmyk.clone();
 
-        render_element(&mut offscreen, &mut elem_band, elem, &group_ctx);
+                render_element(&mut offscreen, &mut ko_band, elem, &group_ctx);
 
-        if let (Some(elem_cmyk), Some(acc_cmyk)) = (&elem_band.cmyk_buffer, &mut accumulated_cmyk) {
-            replace_changed_cmyk(acc_cmyk, elem_cmyk, offscreen.data(), &initial_backdrop);
+                if let (Some(elem_cmyk), Some(acc_cmyk)) =
+                    (&ko_band.cmyk_buffer, &mut accumulated_cmyk)
+                {
+                    replace_changed_cmyk(
+                        acc_cmyk,
+                        elem_cmyk,
+                        offscreen.data(),
+                        &initial_backdrop,
+                    );
+                }
+                ko_band.cmyk_buffer = None;
+
+                replace_changed_pixels(
+                    accumulated.data_mut(),
+                    offscreen.data(),
+                    &initial_backdrop,
+                );
+            }
         }
-
-        replace_changed_pixels(accumulated.data_mut(), offscreen.data(), &initial_backdrop);
     }
 
     let mut temp_mask = None;

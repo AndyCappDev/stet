@@ -3191,6 +3191,7 @@ impl<'a> ContentInterpreter<'a> {
         // Save state (including font cache — form XObjects may have different
         // font resources with different encodings for the same resource name)
         self.gstate_stack.push(self.gstate.clone());
+        let saved_stack_depth = self.gstate_stack.len();
         let saved_resources = std::mem::replace(&mut self.resources, form_resources);
         let saved_font_cache = std::mem::take(&mut self.font_cache);
         let saved_current_font = self.current_font.take();
@@ -3309,6 +3310,15 @@ impl<'a> ContentInterpreter<'a> {
             self.depth -= 1;
 
             self.form_cull_y = saved_cull;
+        }
+
+        // Unwind any unbalanced q's the form content left on the stack.
+        // Form content streams often have q without matching Q (the end of
+        // the stream implicitly unwinds).  Without this, the extra stack
+        // entries cause our own pop below to restore the wrong gstate,
+        // leaking state (e.g. alpha from ExtGState) into the parent scope.
+        while self.gstate_stack.len() > saved_stack_depth {
+            self.gstate_stack.pop();
         }
 
         // Restore state — check if clip needs resetting
