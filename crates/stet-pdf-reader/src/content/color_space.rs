@@ -665,11 +665,43 @@ pub fn to_image_color_space(cs: &ResolvedColorSpace) -> ImageColorSpace {
             base,
             hival,
             lookup,
-        } => ImageColorSpace::Indexed {
-            base: Box::new(to_image_color_space(base)),
-            hival: *hival,
-            lookup: lookup.clone(),
-        },
+        } => {
+            // If the base is a CIE space (Lab, CalRGB, CalGray), pre-convert
+            // the lookup table to RGB so downstream code treats the values correctly.
+            if is_cie_space(base) {
+                let n_base = base.num_components() as usize;
+                let n_entries = (*hival as usize + 1).min(lookup.len() / n_base.max(1));
+                let mut rgb_lookup = vec![0u8; n_entries * 3];
+                // Decode lookup bytes to the base color space's native range.
+                // PDF spec: byte 0→range_min, byte 255→range_max for each component.
+                let ranges = cie_component_ranges(base);
+                for i in 0..n_entries {
+                    let offset = i * n_base;
+                    let comps: Vec<f64> = (0..n_base)
+                        .map(|c| {
+                            let byte = lookup.get(offset + c).copied().unwrap_or(0) as f64;
+                            let (lo, hi) = ranges.get(c).copied().unwrap_or((0.0, 1.0));
+                            lo + byte * (hi - lo) / 255.0
+                        })
+                        .collect();
+                    let color = components_to_device_color(base, &comps);
+                    rgb_lookup[i * 3] = (color.r.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+                    rgb_lookup[i * 3 + 1] = (color.g.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+                    rgb_lookup[i * 3 + 2] = (color.b.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+                }
+                ImageColorSpace::Indexed {
+                    base: Box::new(ImageColorSpace::DeviceRGB),
+                    hival: *hival,
+                    lookup: rgb_lookup,
+                }
+            } else {
+                ImageColorSpace::Indexed {
+                    base: Box::new(to_image_color_space(base)),
+                    hival: *hival,
+                    lookup: lookup.clone(),
+                }
+            }
+        }
         ResolvedColorSpace::Separation { alt, tint_fn, .. } => {
             if let Some(func) = tint_fn {
                 build_1d_tint_image_cs(func, alt)
@@ -975,6 +1007,27 @@ fn lab_f_inv(t: f64) -> f64 {
         t * t * t
     } else {
         3.0 * (6.0 / 29.0) * (6.0 / 29.0) * (t - 4.0 / 29.0)
+    }
+}
+
+/// Return the native (min, max) range for each component of a CIE color space.
+/// Used when decoding Indexed lookup bytes: byte 0→min, 255→max.
+fn cie_component_ranges(cs: &ResolvedColorSpace) -> Vec<(f64, f64)> {
+    match cs {
+        ResolvedColorSpace::Lab { range, .. } => {
+            vec![(0.0, 100.0), (range[0], range[1]), (range[2], range[3])]
+        }
+        ResolvedColorSpace::CalGray { params } => {
+            vec![(params.range_a[0], params.range_a[1])]
+        }
+        ResolvedColorSpace::CalRGB { params } => {
+            vec![
+                (params.range_abc[0], params.range_abc[1]),
+                (params.range_abc[2], params.range_abc[3]),
+                (params.range_abc[4], params.range_abc[5]),
+            ]
+        }
+        _ => vec![(0.0, 1.0)],
     }
 }
 
