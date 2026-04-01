@@ -2775,18 +2775,38 @@ impl<'a> ContentInterpreter<'a> {
         // image to the mask dimensions so the high-res edge detail is preserved.
         let (sample_data, color_space, width, height) =
             if let Some((mask_alpha, mw, mh)) = explicit_mask_data {
+                // Expand Indexed data to the base color space before upscaling,
+                // so bilinear interpolation blends actual colors, not indices.
+                let (up_data, up_cs) =
+                    if let ImageColorSpace::Indexed { base, hival, lookup } = &color_space {
+                        let n_base = base.num_components() as usize;
+                        let n_pixels = (width * height) as usize;
+                        let mut expanded = vec![0u8; n_pixels * n_base];
+                        for i in 0..n_pixels {
+                            let idx = sample_data.get(i).copied().unwrap_or(0) as usize;
+                            let idx = idx.min(*hival as usize);
+                            let offset = idx * n_base;
+                            for c in 0..n_base {
+                                expanded[i * n_base + c] =
+                                    lookup.get(offset + c).copied().unwrap_or(0);
+                            }
+                        }
+                        (expanded, *base.clone())
+                    } else {
+                        (sample_data, color_space)
+                    };
                 let (img_data, img_w, img_h) = if mw > width || mh > height {
                     // Upscale image to mask dimensions using bilinear interpolation
                     let upscaled =
-                        bilinear_upsample_image(&sample_data, width, height, mw, mh, &color_space);
+                        bilinear_upsample_image(&up_data, width, height, mw, mh, &up_cs);
                     (upscaled, mw, mh)
                 } else {
-                    (sample_data, width, height)
+                    (up_data, width, height)
                 };
                 let rgba = merge_rgb_with_smask(
                     &img_data,
                     &mask_alpha,
-                    &color_space,
+                    &up_cs,
                     img_w,
                     img_h,
                     Some(&self.icc_cache),
