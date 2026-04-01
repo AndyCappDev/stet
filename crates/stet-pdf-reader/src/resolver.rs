@@ -37,6 +37,9 @@ pub struct Resolver<'a> {
     /// Cache of decompressed object streams (ObjStm).
     /// Avoids re-decompressing the same ObjStm for every object within it.
     objstm_cache: RefCell<HashMap<u32, ObjStmCache>>,
+    /// Cached scan map: obj_num → file offset of last `N 0 obj` marker.
+    /// Built once on first xref miss, then reused for all subsequent lookups.
+    scan_map: RefCell<Option<HashMap<u32, usize>>>,
 }
 
 impl<'a> Resolver<'a> {
@@ -51,6 +54,7 @@ impl<'a> Resolver<'a> {
             encryption: None,
             stream_cache: RefCell::new(HashMap::new()),
             objstm_cache: RefCell::new(HashMap::new()),
+            scan_map: RefCell::new(None),
         }
     }
 
@@ -68,6 +72,7 @@ impl<'a> Resolver<'a> {
             encryption,
             stream_cache: RefCell::new(HashMap::new()),
             objstm_cache: RefCell::new(HashMap::new()),
+            scan_map: RefCell::new(None),
         }
     }
 
@@ -365,40 +370,101 @@ impl<'a> Resolver<'a> {
         Ok(None)
     }
 
-    /// Scan the entire file for `obj_num G obj` and parse the last occurrence.
-    /// Uses the last match because incremental updates append newer versions
-    /// of objects later in the file; the latest definition should win.
+    /// Look up an object by scanning the file for `N G obj` markers.
+    /// Builds a scan map on first call (one pass over the file), then
+    /// reuses it for all subsequent lookups — O(file_size) total instead
+    /// of O(file_size × num_misses).
     fn scan_for_object(&self, obj_num: u32) -> Result<PdfObj, PdfError> {
-        let needle = format!("{} 0 obj", obj_num);
-        let needle_bytes = needle.as_bytes();
-        let mut last_match = None;
-        let mut pos = 0;
-        while pos + needle_bytes.len() < self.data.len() {
-            if self.data[pos..].starts_with(needle_bytes) {
-                // Verify it's at a line boundary (start of file or after whitespace)
-                if pos == 0
-                    || self.data[pos - 1] == b'\n'
-                    || self.data[pos - 1] == b'\r'
-                    || self.data[pos - 1] == b' '
-                {
-                    // Verify the char after "obj" is whitespace or '<'
-                    let after = pos + needle_bytes.len();
-                    if after < self.data.len()
-                        && (self.data[after].is_ascii_whitespace() || self.data[after] == b'<')
-                    {
-                        last_match = Some(pos);
-                    }
-                }
+        // Build the scan map if we haven't yet
+        {
+            let mut map_ref = self.scan_map.borrow_mut();
+            if map_ref.is_none() {
+                *map_ref = Some(self.build_scan_map());
             }
-            pos += 1;
         }
-        match last_match {
+
+        // Extract the offset and drop the borrow before parse_object_at,
+        // which may recursively call resolve → scan_for_object.
+        let offset = {
+            let map = self.scan_map.borrow();
+            map.as_ref().unwrap().get(&obj_num).copied()
+        };
+        match offset {
             Some(offset) => self.parse_object_at(offset, None),
             None => Err(PdfError::ObjectNotFound {
                 obj_num,
                 gen_num: 0,
             }),
         }
+    }
+
+    /// Scan the entire file once, recording the last file offset of every
+    /// `N G obj` marker. "Last" because incremental updates append newer
+    /// versions later in the file.
+    fn build_scan_map(&self) -> HashMap<u32, usize> {
+        let mut map = HashMap::new();
+        let data = self.data;
+        let len = data.len();
+        let mut pos = 0;
+
+        while pos < len {
+            // Quick scan for digit characters (start of "N G obj")
+            if !data[pos].is_ascii_digit() {
+                pos += 1;
+                continue;
+            }
+
+            // Check line boundary
+            if pos > 0
+                && data[pos - 1] != b'\n'
+                && data[pos - 1] != b'\r'
+                && data[pos - 1] != b' '
+            {
+                pos += 1;
+                continue;
+            }
+
+            // Parse "N G obj" pattern
+            let start = pos;
+            // Parse obj_num (digits)
+            while pos < len && data[pos].is_ascii_digit() {
+                pos += 1;
+            }
+            if pos == start || pos >= len || data[pos] != b' ' {
+                continue;
+            }
+            let num_end = pos;
+            pos += 1; // skip space
+
+            // Parse gen_num (digits)
+            let gen_start = pos;
+            while pos < len && data[pos].is_ascii_digit() {
+                pos += 1;
+            }
+            if pos == gen_start || pos >= len || data[pos] != b' ' {
+                continue;
+            }
+            pos += 1; // skip space
+
+            // Check for "obj" keyword followed by whitespace or '<'
+            if pos + 3 <= len
+                && &data[pos..pos + 3] == b"obj"
+                && (pos + 3 == len
+                    || data[pos + 3].is_ascii_whitespace()
+                    || data[pos + 3] == b'<')
+            {
+                if let Ok(n) = std::str::from_utf8(&data[start..num_end])
+                    .unwrap_or("")
+                    .parse::<u32>()
+                {
+                    // Last occurrence wins (incremental updates)
+                    map.insert(n, start);
+                }
+                pos += 3;
+            }
+        }
+
+        map
     }
 
     /// Parse an indirect object at a file offset.
