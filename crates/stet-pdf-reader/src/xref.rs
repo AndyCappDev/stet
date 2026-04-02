@@ -66,12 +66,41 @@ pub fn parse_xref(data: &[u8]) -> Result<XrefTable, PdfError> {
         .position(|w| w == b"%PDF-")
         .unwrap_or(0);
 
+    // Detect concatenated PDFs (multiple %PDF- headers). When present, the
+    // final section's offsets may be relative to a later header, not the first.
+    let pdf_headers: Vec<usize> = find_all_pdf_headers(data);
+
     // Follow the /Prev chain, collecting (entries, trailer) from oldest to newest
     let mut sections = Vec::new();
     let mut offset = startxref + header_offset;
     let mut visited = std::collections::HashSet::new();
 
     let mut xref_failed = false;
+
+    // If startxref + first header doesn't work, try with other headers
+    // (concatenated PDFs have offsets relative to a later %PDF- header).
+    if offset < data.len() && parse_xref_section(data, offset).is_err() && pdf_headers.len() > 1 {
+        for &h in pdf_headers.iter().skip(1).rev() {
+            let try_offset = startxref + h;
+            if try_offset < data.len() {
+                if let Ok((mut entries, trailer)) = parse_xref_section(data, try_offset) {
+                    // Adjust entry offsets: they're relative to this header
+                    shift_xref_entries(&mut entries, h);
+                    visited.insert(try_offset);
+                    let prev = trailer
+                        .get_int(b"Prev")
+                        .map(|v| v as usize + h);
+                    sections.push((entries, trailer));
+                    if let Some(p) = prev {
+                        offset = p;
+                    } else {
+                        xref_failed = false;
+                    }
+                    break;
+                }
+            }
+        }
+    }
 
     loop {
         if !visited.insert(offset) {
@@ -101,7 +130,13 @@ pub fn parse_xref(data: &[u8]) -> Result<XrefTable, PdfError> {
     // table is elsewhere in the file). Only fall back to full scan if that also
     // finds nothing.
     if xref_failed && sections.is_empty() {
-        discover_orphaned_xref_sections(data, &mut sections, &mut visited, header_offset);
+        discover_orphaned_xref_sections(
+            data,
+            &mut sections,
+            &mut visited,
+            header_offset,
+            &pdf_headers,
+        );
         if sections.is_empty() {
             return rebuild_xref_from_scan(data);
         }
@@ -111,7 +146,13 @@ pub fn parse_xref(data: &[u8]) -> Result<XrefTable, PdfError> {
     // sections not reached by the /Prev chain. This handles PDFs with broken
     // incremental updates where the chain dead-ends (missing trailer, circular
     // /Prev, or self-referencing /Prev) before reaching the original xref.
-    discover_orphaned_xref_sections(data, &mut sections, &mut visited, header_offset);
+    discover_orphaned_xref_sections(
+        data,
+        &mut sections,
+        &mut visited,
+        header_offset,
+        &pdf_headers,
+    );
 
     // Build the combined table: oldest entries first, newest override
     sections.reverse();
@@ -170,6 +211,7 @@ fn discover_orphaned_xref_sections(
     sections: &mut Vec<(Vec<(u32, XrefEntry)>, PdfDict)>,
     visited: &mut std::collections::HashSet<usize>,
     header_offset: usize,
+    pdf_headers: &[usize],
 ) {
     let mut candidates = Vec::new();
 
@@ -188,8 +230,15 @@ fn discover_orphaned_xref_sections(
             let end = (pos + 50).min(data.len());
             if let Some(sx_off) = find_int_after_key(&data[pos..end], b"startxref") {
                 if sx_off > 0 {
-                    // startxref values are PDF-internal offsets, need BOM adjustment
+                    // startxref values are PDF-internal offsets, need BOM adjustment.
+                    // For concatenated PDFs, also try each %PDF header as base.
                     candidates.push(sx_off + header_offset);
+                    for &h in pdf_headers.iter().skip(1) {
+                        let adjusted = sx_off + h;
+                        if adjusted < data.len() {
+                            candidates.push(adjusted);
+                        }
+                    }
                 }
             }
         }
@@ -213,7 +262,13 @@ fn discover_orphaned_xref_sections(
                 break;
             }
             match parse_xref_section(data, offset) {
-                Ok((entries, trailer)) => {
+                Ok((mut entries, trailer)) => {
+                    // If this xref section is under a secondary %PDF header,
+                    // its offsets are relative to that header — shift them.
+                    let section_header = owning_pdf_header(offset, pdf_headers);
+                    if section_header > 0 {
+                        shift_xref_entries(&mut entries, section_header);
+                    }
                     let prev = trailer
                         .get_int(b"Prev")
                         .map(|v| v as usize + header_offset);
@@ -871,6 +926,49 @@ fn read_field(data: &[u8], width: usize) -> u64 {
         }
     }
     val
+}
+
+/// Find all `%PDF-` header positions in the file.
+///
+/// Normal PDFs have one header at offset 0 (or after a BOM). Concatenated PDFs
+/// (e.g., an encrypted revision appended to a plaintext revision) have multiple
+/// headers. Offsets in later sections are relative to their own header.
+fn find_all_pdf_headers(data: &[u8]) -> Vec<usize> {
+    let mut headers = Vec::new();
+    let mut pos = 0;
+    while pos + 5 <= data.len() {
+        if &data[pos..pos + 5] == b"%PDF-" {
+            headers.push(pos);
+            pos += 5;
+        } else {
+            pos += 1;
+        }
+    }
+    headers
+}
+
+/// Determine which `%PDF-` header "owns" a given file position.
+///
+/// Returns the position of the last `%PDF-` header that appears before `pos`.
+/// For positions under the first header (or before any header), returns 0.
+fn owning_pdf_header(pos: usize, pdf_headers: &[usize]) -> usize {
+    // Find the last header that is <= pos
+    match pdf_headers.iter().rposition(|&h| h <= pos) {
+        Some(idx) if idx > 0 => pdf_headers[idx],
+        _ => 0,
+    }
+}
+
+/// Shift all `InFile` xref entries by a base offset.
+///
+/// Used when a xref section's entry offsets are relative to a secondary
+/// `%PDF-` header instead of the file start.
+fn shift_xref_entries(entries: &mut [(u32, XrefEntry)], base: usize) {
+    for (_, entry) in entries.iter_mut() {
+        if let XrefEntry::InFile { offset, .. } = entry {
+            *offset += base;
+        }
+    }
 }
 
 /// Find the `startxref` offset near the end of the file.
