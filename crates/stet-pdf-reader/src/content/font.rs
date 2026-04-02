@@ -2208,7 +2208,8 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
         }
         b"CIDFontType0" => {
             // CFF-based CID font: FontFile3 with /Subtype /CIDFontType0C
-            if let Some(ff_ref) = desc.get(b"FontFile3") {
+            // Some PDFs use /FontFile instead of /FontFile3 — accept both.
+            if let Some(ff_ref) = desc.get(b"FontFile3").or_else(|| desc.get(b"FontFile")) {
                 let font_data = resolver.stream_data_from_obj(ff_ref)?;
                 // FontFile3 may be raw CFF or OpenType/CFF (OTTO wrapper)
                 if font_data.len() > 4 && &font_data[0..4] == b"OTTO" {
