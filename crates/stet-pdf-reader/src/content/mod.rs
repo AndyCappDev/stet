@@ -2657,10 +2657,15 @@ impl<'a> ContentInterpreter<'a> {
         let is_dct = filter_name == Some(b"DCTDecode");
         let is_indexed = matches!(&color_space, ImageColorSpace::Indexed { .. });
         // Expand sub-byte samples (1/2/4 BPC) to 8-bit since they're packed
-        // with geometry-dependent alignment. Leave 16-bit data as raw bytes in
-        // the display list to preserve full precision for high-bit-depth outputs.
-        let (sample_data, display_bpc) = if is_image_mask || bpc == 8 || bpc == 0 || bpc > 8 || is_jpx || is_dct {
+        // with geometry-dependent alignment. Downsample 16-bit to 8-bit (take
+        // high byte) — downstream ICC and color conversion assumes 8-bit data.
+        let (sample_data, display_bpc) = if is_image_mask || bpc == 8 || bpc == 0 || is_jpx || is_dct {
             (sample_data, if is_dct || is_jpx { 8 } else { bpc })
+        } else if bpc == 16 {
+            // Take high byte of each 16-bit big-endian sample
+            (sample_data.chunks(2).map(|c| c[0]).collect(), 8)
+        } else if bpc > 8 {
+            (sample_data, bpc)
         } else {
             (expand_bits_to_bytes(
                 &sample_data,

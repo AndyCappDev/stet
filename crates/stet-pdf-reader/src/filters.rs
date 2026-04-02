@@ -988,6 +988,9 @@ fn apply_predictor(data: &[u8], parms: &PdfDict, predictor: i64) -> Result<Vec<u
         if bpc < 8 {
             // Sub-byte samples: operate at sample level, not byte level
             apply_tiff_predictor_subbyte(data, columns, colors, bpc, row_bytes)
+        } else if bpc == 16 {
+            // 16-bit samples: add as 16-bit values, not byte-by-byte
+            apply_tiff_predictor_16bit(data, columns, colors, row_bytes)
         } else {
             apply_tiff_predictor(data, row_bytes, bytes_per_pixel)
         }
@@ -1036,6 +1039,42 @@ fn apply_tiff_predictor_subbyte(
                 prev[c] = decoded;
                 // Write back
                 out_row[byte_idx] = (out_row[byte_idx] & !(mask << bit_pos)) | (decoded << bit_pos);
+            }
+        }
+        result.extend_from_slice(&out_row);
+    }
+
+    Ok(result)
+}
+
+/// TIFF predictor 2 for 16-bit samples.
+///
+/// Each sample is 2 bytes (big-endian). The byte-level predictor doesn't
+/// propagate carry between high and low bytes, producing wrong results.
+fn apply_tiff_predictor_16bit(
+    data: &[u8],
+    columns: usize,
+    colors: usize,
+    row_bytes: usize,
+) -> Result<Vec<u8>, PdfError> {
+    let mut result = Vec::with_capacity(data.len());
+
+    for row in data.chunks(row_bytes) {
+        let mut out_row = vec![0u8; row.len()];
+        let mut prev = vec![0u16; colors];
+
+        for col in 0..columns {
+            for c in 0..colors {
+                let byte_idx = (col * colors + c) * 2;
+                if byte_idx + 1 >= row.len() {
+                    break;
+                }
+                let encoded = u16::from_be_bytes([row[byte_idx], row[byte_idx + 1]]);
+                let decoded = encoded.wrapping_add(prev[c]);
+                prev[c] = decoded;
+                let [hi, lo] = decoded.to_be_bytes();
+                out_row[byte_idx] = hi;
+                out_row[byte_idx + 1] = lo;
             }
         }
         result.extend_from_slice(&out_row);
