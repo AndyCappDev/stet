@@ -169,7 +169,10 @@ pub fn resolve_color_space_obj(
             ))),
         },
         PdfObj::Array(arr) if !arr.is_empty() => {
-            let cs_name = arr[0]
+            // Deref array[0] in case it's an indirect reference to a name
+            // (e.g., [7 0 R] where obj 7 = /Pattern).
+            let first = resolver.deref(&arr[0])?;
+            let cs_name = first
                 .as_name()
                 .ok_or(PdfError::Other("color space array[0] is not a name".into()))?;
             match cs_name {
