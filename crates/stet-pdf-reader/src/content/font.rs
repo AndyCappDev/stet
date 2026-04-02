@@ -910,6 +910,19 @@ const CID_FONT_SUBSTITUTIONS: &[(&str, &str)] = &[
     ("PMingLiU", "NotoSerifCJKjp-Regular"),
 ];
 
+/// Map proportional Unicode code points to CJK full-width variants.
+///
+/// Substitute fonts (e.g. NotoSansCJK) may render certain characters as
+/// proportional (narrow) glyphs, but the original CJK font used full-width
+/// versions. Return the full-width alternative if one exists.
+fn cjk_fullwidth_alternative(unicode: u32) -> Option<u32> {
+    match unicode {
+        // MIDDLE DOT → KATAKANA MIDDLE DOT (full-width, centered in em square)
+        0x00B7 => Some(0x30FB),
+        _ => None,
+    }
+}
+
 /// Check if an OpenType/CFF font contains a CID-keyed CFF (has ROS operator).
 fn is_cff_cid_keyed(otf_data: &[u8]) -> bool {
     use stet_fonts::truetype::find_table;
@@ -2970,6 +2983,12 @@ impl CidTrueTypePdfFont {
     }
 
     fn glyph_path_cid(&self, cid: u16) -> Option<PsPath> {
+        if std::env::var("STET_DEBUG_TEXT").is_ok() {
+            eprintln!("[cid_tt] cid={} sub={} ordering={} identity={} to_unicode={} cmap={} cid_to_gid_map={}",
+                cid, self.substituted, String::from_utf8_lossy(&self.ordering),
+                self.identity_cid_to_gid, !self.to_unicode.is_empty(),
+                !self.cmap.is_empty(), self.cid_to_gid_map.is_some());
+        }
         let gid = if self.ucs2_encoding && !self.cmap.is_empty() && self.code_to_cid.is_empty() {
             // UCS2 encoding with no CMap: cid is a raw Unicode code point, map via cmap.
             if let Some(&g) = self.cmap.get(&(cid as u32)) {
@@ -3150,7 +3169,14 @@ impl CidCffPdfFont {
             if !self.ordering.is_empty() && self.ordering != b"Identity" {
                 let unicode =
                     super::cid_unicode::cid_to_unicode(&self.ordering, cid)?;
-                *cmap.get(&unicode)? as usize
+                // For CJK substitution, try full-width glyph variants first.
+                // The substitute font may have a proportional glyph for U+00B7
+                // (MIDDLE DOT, narrow) while the original CJK font used a
+                // full-width centered dot. U+30FB is the CJK full-width variant.
+                let gid_opt = cjk_fullwidth_alternative(unicode)
+                    .and_then(|alt| cmap.get(&alt))
+                    .or_else(|| cmap.get(&unicode));
+                *gid_opt? as usize
             } else {
                 *cmap.get(&(cid as u32))? as usize
             }
