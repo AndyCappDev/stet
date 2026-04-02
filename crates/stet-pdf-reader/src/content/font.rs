@@ -209,7 +209,15 @@ pub fn resolve_font(
         for (i, obj) in w_arr.iter().enumerate() {
             let code = first_char + i;
             if code < 256 {
-                widths[code] = obj.as_f64().unwrap_or(0.0) / 1000.0;
+                // Width entries may be indirect references (e.g. `9 0 R`)
+                let val = if obj.as_f64().is_some() {
+                    obj.as_f64().unwrap()
+                } else if let Ok(resolved) = resolver.deref(obj) {
+                    resolved.as_f64().unwrap_or(0.0)
+                } else {
+                    0.0
+                };
+                widths[code] = val / 1000.0;
             }
         }
         has_pdf_widths = true;
@@ -1463,7 +1471,15 @@ fn resolve_type3(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
         for (i, obj) in w_arr.iter().enumerate() {
             let code = first_char + i;
             if code < 256 {
-                widths[code] = obj.as_f64().unwrap_or(0.0);
+                // Width entries may be indirect references
+                let val = if obj.as_f64().is_some() {
+                    obj.as_f64().unwrap()
+                } else if let Ok(resolved) = resolver.deref(obj) {
+                    resolved.as_f64().unwrap_or(0.0)
+                } else {
+                    0.0
+                };
+                widths[code] = val;
             }
         }
     }
@@ -2562,8 +2578,12 @@ fn parse_cid_widths(cid_font_dict: &PdfDict, resolver: &Resolver) -> HashMap<u16
             PdfObj::Array(arr) => {
                 // [ cid_first [w1 w2 w3 ...] ] — consecutive CID widths
                 for (j, w_obj) in arr.iter().enumerate() {
-                    let w = w_obj.as_f64().unwrap_or(0.0) / 1000.0;
-                    widths.insert(first_cid + j as u16, w);
+                    // Width entries may be indirect references
+                    let w_val = w_obj
+                        .as_f64()
+                        .or_else(|| resolver.deref(w_obj).ok().and_then(|r| r.as_f64()))
+                        .unwrap_or(0.0);
+                    widths.insert(first_cid + j as u16, w_val / 1000.0);
                 }
                 i += 1;
             }
@@ -2575,7 +2595,11 @@ fn parse_cid_widths(cid_font_dict: &PdfDict, resolver: &Resolver) -> HashMap<u16
                 };
                 i += 1;
                 let w = if i < w_arr.len() {
-                    w_arr[i].as_f64().unwrap_or(0.0) / 1000.0
+                    let obj = &w_arr[i];
+                    obj.as_f64()
+                        .or_else(|| resolver.deref(obj).ok().and_then(|r| r.as_f64()))
+                        .unwrap_or(0.0)
+                        / 1000.0
                 } else {
                     0.0
                 };
