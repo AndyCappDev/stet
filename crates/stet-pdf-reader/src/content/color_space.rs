@@ -301,7 +301,8 @@ fn resolve_separation(
         .as_name()
         .ok_or(PdfError::Other("Separation name not a name".into()))?
         .to_vec();
-    let alt = resolve_color_space_obj(&args[1], resolver)?;
+    let alt = resolve_color_space_obj(&args[1], resolver)
+        .or_else(|_| fallback_alternate(args, resolver))?;
     let tint_fn = if args.len() >= 3 {
         PdfFunction::parse(&args[2], resolver).ok()
     } else {
@@ -327,7 +328,8 @@ fn resolve_devicen(args: &[PdfObj], resolver: &Resolver) -> Result<ResolvedColor
             .collect(),
         _ => return Err(PdfError::Other("DeviceN names not an array".into())),
     };
-    let alt = resolve_color_space_obj(&args[1], resolver)?;
+    let alt = resolve_color_space_obj(&args[1], resolver)
+        .or_else(|_| fallback_alternate(args, resolver))?;
     let tint_fn = if args.len() >= 3 {
         PdfFunction::parse(&args[2], resolver).ok()
     } else {
@@ -338,6 +340,16 @@ fn resolve_devicen(args: &[PdfObj], resolver: &Resolver) -> Result<ResolvedColor
         alt: Box::new(alt),
         tint_fn,
     })
+}
+
+/// Fallback alternate color space for broken Separation/DeviceN definitions
+/// where the alternate space name is invalid (e.g., same as the colorant name).
+///
+/// Uses DeviceGray as a safe default — the tint function won't be used since
+/// it targets a different number of components, so the Separation evaluator
+/// falls back to a simple gray: tint 0 = white, tint 1 = black.
+fn fallback_alternate(_args: &[PdfObj], _resolver: &Resolver) -> Result<ResolvedColorSpace, PdfError> {
+    Ok(ResolvedColorSpace::DeviceGray)
 }
 
 fn resolve_cal_gray(args: &[PdfObj], resolver: &Resolver) -> Result<ResolvedColorSpace, PdfError> {
