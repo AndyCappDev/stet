@@ -2327,7 +2327,10 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                     // code_lengths and CID width advancement). Without this, the
                     // simple fallback font treats 2-byte UCS-2 codes as individual
                     // bytes, producing doubled character spacing.
+                    // Try CJK fallback before Latin fallback — UCS2-encoded CJK
+                    // fonts (Adobe-Japan1 etc.) need a font with CJK glyphs.
                     load_system_truetype_font(&base_font)
+                        .or_else(|_| load_cjk_fallback_font(&ordering, &base_font))
                         .or_else(|_| load_system_truetype_font("DejaVuSans"))
                         .or_else(|_| load_system_truetype_font("LiberationSans"))
                         .or_else(|_| load_system_truetype_font("NimbusSans"))?
