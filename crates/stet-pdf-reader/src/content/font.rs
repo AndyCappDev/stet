@@ -910,6 +910,19 @@ const CID_FONT_SUBSTITUTIONS: &[(&str, &str)] = &[
     ("PMingLiU", "NotoSerifCJKjp-Regular"),
 ];
 
+/// Check if an OpenType/CFF font contains a CID-keyed CFF (has ROS operator).
+fn is_cff_cid_keyed(otf_data: &[u8]) -> bool {
+    use stet_fonts::truetype::find_table;
+    let Some((cff_off, cff_len)) = find_table(otf_data, b"CFF ") else {
+        return false;
+    };
+    let cff_data = &otf_data[cff_off..cff_off + cff_len];
+    match parse_cff(cff_data) {
+        Ok(fonts) => fonts.first().map_or(false, |f| f.is_cid),
+        Err(_) => false,
+    }
+}
+
 /// Create a CidCff font from an OpenType/CFF system font (OTTO magic).
 /// Extracts the CFF table and builds a CidCffPdfFont.
 fn create_cid_cff_from_otf(
@@ -2217,13 +2230,17 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                         } else {
                             None
                         };
+                    // For non-CID CFF fonts used as CIDFontType0, the CID IS the
+                    // charstring index (identity mapping). For true CID-keyed CFF fonts,
+                    // the CFF charset provides the CID→GID mapping, or the OTF cmap is used.
+                    let cff_is_cid = is_cff_cid_keyed(&font_data);
                     return create_cid_cff_from_otf(
                         &font_data,
                         default_width,
                         cid_widths,
                         &ordering,
                         pdf_cid_to_gid,
-                        false, // CIDFontType0: CFF handles CID mapping internally
+                        !cff_is_cid,
                         code_lengths,
                         code_to_cid.clone(),
                         wmode,
@@ -3125,7 +3142,7 @@ impl CidCffPdfFont {
             // Common for CIDFontType2 fonts stored as OTTO/CFF in FontFile2.
             cid as usize
         } else if let Some(ref cmap) = self.cmap {
-            // OTF font with Unicode cmap.
+            // OTF font with Unicode cmap (substituted fonts, or non-CID fonts).
             // If this is a substituted font with an Adobe CID ordering
             // (e.g. Japan1), the CID is from the Adobe registry, not Unicode.
             // Convert CID → Unicode first, then look up in cmap.
