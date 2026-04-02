@@ -3375,7 +3375,8 @@ fn extract_soft_mask_values(
     match params.subtype {
         SoftMaskSubtype::Alpha => {
             for i in 0..pixel_count {
-                out[i] = rgba[i * 4 + 3]; // alpha channel
+                let a = rgba[i * 4 + 3]; // alpha channel
+                out[i] = if params.transfer_invert { 255 - a } else { a };
             }
         }
         SoftMaskSubtype::Luminosity => {
