@@ -2942,7 +2942,8 @@ impl TrueTypePdfFont {
     }
 
     fn glyph_path(&self, char_code: u8) -> Option<PsPath> {
-        let gid = self.char_code_to_gid(char_code)?;
+        let gid = self.char_code_to_gid(char_code);
+        let gid = gid?;
         let path = skrifa_glyph_path(&self.data, gid, self.units_per_em).or_else(|| {
             // Fallback for locx/glyx PDF-subset fonts that skrifa can't parse
             let glyf_data = get_glyf_data(&self.data, gid)?;
@@ -3026,6 +3027,52 @@ impl TrueTypePdfFont {
         // Windows Symbol encoding (U+F0XX range, common in subset fonts)
         if let Some(&gid) = self.cmap.get(&(0xF000 + char_code as u32)) {
             return Some(gid);
+        }
+        // ToUnicode → glyph lookup.  Handles buggy subset fonts where the (3,0)
+        // Symbol cmap is missing entries (e.g. issue8234: 0xF020 omitted).
+        // Try AGL name → post table first, then skrifa's charmap (which checks
+        // all cmap subtables including ones our parser may not have selected).
+        if let Some(&unicode) = self.to_unicode.get(&(char_code as u16)) {
+            if let Some(name) = stet_fonts::system_fonts::unicode_to_glyph_name(unicode) {
+                if let Some(&gid) = self.post_name_to_gid.get(name) {
+                    return Some(gid);
+                }
+            }
+            if let Ok(font_ref) = skrifa::FontRef::new(&self.data) {
+                let charmap = font_ref.charmap();
+                if let Some(gid) = charmap.map(unicode) {
+                    return Some(gid.to_u32() as u16);
+                }
+            }
+            // Last resort: scan for unmapped composite GIDs.  Buggy subset
+            // fonts may omit cmap entries for some glyphs.  The missing glyph
+            // is typically a TrueType composite (e.g. ä = a + dieresis) at an
+            // unmapped GID — sometimes even GID 0 (issue8234).
+            if !self.cmap.is_empty() {
+                use stet_fonts::truetype::{find_table, read_u16};
+                let mapped: std::collections::HashSet<u16> =
+                    self.cmap.values().copied().collect();
+                let num_glyphs = find_table(&self.data, b"maxp")
+                    .map(|(off, _)| read_u16(&self.data, off + 4))
+                    .unwrap_or(0);
+                // Find an unmapped GID that is a composite glyph (numContours < 0).
+                // Composites are the actual characters; simple glyphs at unmapped
+                // GIDs are base components (a, dieresis, ring, etc.).
+                for gid in 0..num_glyphs {
+                    if mapped.contains(&gid) {
+                        continue;
+                    }
+                    if let Some(glyf_data) = get_glyf_data(&self.data, gid) {
+                        if glyf_data.len() >= 2 {
+                            let num_contours =
+                                stet_fonts::truetype::read_i16(&glyf_data, 0);
+                            if num_contours < 0 {
+                                return Some(gid);
+                            }
+                        }
+                    }
+                }
+            }
         }
         if self.cmap.is_empty() {
             // No cmap table: use char code as GID directly (PDF subset identity mapping)
