@@ -666,6 +666,8 @@ struct RenderContext<'a> {
     icc: Option<&'a IccCache>,
     /// Pre-converted image data cache (for viewport rendering).
     image_cache: Option<&'a ImageCache>,
+    /// Pre-converted and prescaled images (for banded rendering).
+    preprocessed: Option<&'a [Option<PreprocessedImage>]>,
     /// Element index in parent display list (for image cache lookup).
     elem_idx: usize,
     /// Disable anti-aliasing for all fill/stroke operations.
@@ -2491,6 +2493,54 @@ fn render_element(
                     ctx.icc,
                 );
                 band_state.cmyk_buffer = Some(cmyk_buf);
+            } else if let Some(pp) = ctx
+                .preprocessed
+                .and_then(|pp| pp.get(ctx.elem_idx))
+                .and_then(|e| e.as_ref())
+            {
+                // Fast path: use pre-converted and prescaled image data.
+                // Only the per-band translation differs; scale factors are cached.
+                let Some(image_inv) = params.image_matrix.invert() else {
+                    return;
+                };
+                let combined = params.ctm.concat(&image_inv);
+                let raw_transform = ctx.transform(&combined);
+                let transform = Transform::from_row(
+                    pp.adj_sx,
+                    pp.adj_ky,
+                    pp.adj_kx,
+                    pp.adj_sy,
+                    raw_transform.tx,
+                    raw_transform.ty,
+                );
+
+                let Some(img_pixmap) =
+                    stet_tiny_skia::PixmapRef::from_bytes(&pp.data, pp.width, pp.height)
+                else {
+                    return;
+                };
+                #[allow(unused_assignments)]
+                let mut temp_mask = None;
+                let mask_ref = match &band_state.clip_region {
+                    None => None,
+                    Some(ClipRegion::Mask(m)) => Some(m as &Mask),
+                    Some(ClipRegion::Rect(rect)) => {
+                        if rect.is_empty() {
+                            return;
+                        } else if rect.is_full_page(ctx.out_w, ctx.out_h) {
+                            None
+                        } else {
+                            temp_mask = rect.make_mask(ctx.out_w, ctx.out_h);
+                            temp_mask.as_ref()
+                        }
+                    }
+                };
+                let img_paint = stet_tiny_skia::PixmapPaint {
+                    quality: pp.quality,
+                    opacity: params.alpha as f32,
+                    blend_mode: u8_to_blend_mode(params.blend_mode),
+                };
+                pixmap.draw_pixmap(0, 0, img_pixmap, &img_paint, transform, mask_ref);
             } else {
                 // Use pre-converted RGBA from image cache when available
                 let owned_rgba;
@@ -2808,6 +2858,7 @@ fn render_group(
         effective_dpi: ctx.effective_dpi,
         icc: ctx.icc,
         image_cache: None, // Group elements don't use parent image cache
+        preprocessed: None,
         elem_idx: 0,
         no_aa: ctx.no_aa,
         opm_zero_transparent: ctx.opm_zero_transparent,
@@ -2954,6 +3005,7 @@ fn render_knockout_group(
         effective_dpi: ctx.effective_dpi,
         icc: ctx.icc,
         image_cache: None,
+        preprocessed: None,
         elem_idx: 0,
         no_aa: true,
         opm_zero_transparent: ctx.opm_zero_transparent,
@@ -3177,6 +3229,7 @@ fn render_soft_masked(
         effective_dpi: ctx.effective_dpi,
         icc: ctx.icc,
         image_cache: None,
+        preprocessed: None,
         elem_idx: 0,
         no_aa: ctx.no_aa,
         opm_zero_transparent: ctx.opm_zero_transparent,
@@ -3709,6 +3762,7 @@ fn render_pattern_fill(
                     effective_dpi: ctx.effective_dpi,
                     icc: ctx.icc,
                     image_cache: None,
+                    preprocessed: None,
                     elem_idx: 0,
                     no_aa: ctx.no_aa,
                     opm_zero_transparent: params.overprint_mode == 1,
@@ -3776,6 +3830,7 @@ fn render_pattern_fill(
                 effective_dpi: ctx.effective_dpi,
                 icc: ctx.icc,
                 image_cache: None,
+                preprocessed: None,
                 elem_idx: 0,
                 no_aa: ctx.no_aa,
                 opm_zero_transparent: params.overprint_mode == 1,
@@ -4464,6 +4519,7 @@ impl OutputDevice for SkiaDevice {
                 effective_dpi: self.dpi,
                 icc: None,
                 image_cache: None,
+                preprocessed: None,
                 elem_idx: 0,
                 no_aa: self.no_aa,
                 opm_zero_transparent: false,
@@ -4505,6 +4561,7 @@ impl OutputDevice for SkiaDevice {
                 effective_dpi: self.dpi,
                 icc: Some(&icc_cache),
                 image_cache: None,
+                preprocessed: None,
                 elem_idx: 0,
                 no_aa: self.no_aa,
                 opm_zero_transparent: false,
@@ -5516,6 +5573,9 @@ fn render_banded_to_sink(
     // Check if CMYK overprint simulation is needed
     let needs_cmyk_buffer = has_overprint_elements(list);
 
+    // Pre-convert and prescale images once (instead of per-band)
+    let preprocessed_images = preprocess_images_for_bands(list, Some(icc_cache));
+
     // Extra rows rendered above and below each band to provide anti-aliasing
     // context at band seams. Without this, tiny-skia clips geometry at the
     // pixmap edge, producing visible discontinuities in thin diagonal strokes.
@@ -5590,6 +5650,7 @@ fn render_banded_to_sink(
                     effective_dpi: dpi,
                     icc: icc_ref,
                     image_cache: None,
+                    preprocessed: Some(&preprocessed_images),
                     elem_idx: i,
                     no_aa,
                     opm_zero_transparent: false,
@@ -6008,6 +6069,27 @@ pub fn prepare_display_list(list: &DisplayList) -> PreparedDisplayList {
     }
 }
 
+/// Pre-converted and prescaled image for banded rendering.
+///
+/// Built once per page before the band loop so that expensive RGBA conversion
+/// and box-filter prescaling run once instead of once-per-band.
+struct PreprocessedImage {
+    /// RGBA pixel data (prescaled if applicable).
+    data: Vec<u8>,
+    /// Dimensions after prescaling.
+    width: u32,
+    height: u32,
+    /// Scale/rotation part of the adjusted transform.
+    /// Per-band rendering reconstructs the full transform by combining these
+    /// with the band-specific translation (tx, ty).
+    adj_sx: f32,
+    adj_ky: f32,
+    adj_kx: f32,
+    adj_sy: f32,
+    /// Filter quality for draw_pixmap.
+    quality: stet_tiny_skia::FilterQuality,
+}
+
 /// Pre-converted RGBA image data cache, indexed by display list element index.
 ///
 /// Built once per page after display list capture. Reused across all viewport
@@ -6050,6 +6132,71 @@ impl ImageCache {
     pub fn get(&self, index: usize) -> Option<&[u8]> {
         self.entries.get(index).and_then(|e| e.as_deref())
     }
+}
+
+/// Build preprocessed image cache for banded rendering.
+///
+/// For each Image element, converts to RGBA and prescales once.
+/// Banded rendering then only needs `draw_pixmap` per band.
+fn preprocess_images_for_bands(
+    list: &DisplayList,
+    icc: Option<&IccCache>,
+) -> Vec<Option<PreprocessedImage>> {
+    list.elements()
+        .iter()
+        .map(|elem| {
+            let DisplayElement::Image {
+                sample_data,
+                params,
+            } = elem
+            else {
+                return None;
+            };
+            let iw = params.width;
+            let ih = params.height;
+            if iw == 0 || ih == 0 {
+                return None;
+            }
+            // Skip overprint images — they use a separate rendering path
+            if params.overprint {
+                return None;
+            }
+
+            // Convert to RGBA
+            let mut rgba = samples_to_rgba(sample_data, params, icc, false);
+            if params.mask_color.is_some() {
+                apply_mask_color_rgba(&mut rgba, sample_data, params);
+            }
+
+            // Compute the device-space transform (vp_y=0, scale=1.0)
+            let image_inv = params.image_matrix.invert()?;
+            let combined = params.ctm.concat(&image_inv);
+            let base_transform = enforce_min_image_size(to_transform(&combined), iw, ih);
+
+            // Prescale
+            let (data, width, height, adj_t) =
+                match prescale_image(&rgba, iw, ih, base_transform, params.interpolate) {
+                    Some((d, w, h, t)) => {
+                        drop(rgba); // free the full-size RGBA
+                        (d, w, h, t)
+                    }
+                    None => (rgba, iw, ih, base_transform),
+                };
+
+            let quality = image_filter_quality(adj_t, params.interpolate);
+
+            Some(PreprocessedImage {
+                data,
+                width,
+                height,
+                adj_sx: adj_t.sx,
+                adj_ky: adj_t.ky,
+                adj_kx: adj_t.kx,
+                adj_sy: adj_t.sy,
+                quality,
+            })
+        })
+        .collect()
 }
 
 /// Render a rectangular viewport region using precomputed metadata.
@@ -6143,6 +6290,7 @@ pub fn render_region_prepared(
                 effective_dpi,
                 icc,
                 image_cache,
+                preprocessed: None,
                 elem_idx: i,
                 no_aa,
                 opm_zero_transparent: false,
@@ -6292,6 +6440,7 @@ pub fn render_region_single_band(
                 effective_dpi,
                 icc,
                 image_cache,
+                preprocessed: None,
                 elem_idx: i,
                 no_aa,
                 opm_zero_transparent: false,
@@ -6735,6 +6884,7 @@ pub fn render_region(
                 effective_dpi,
                 icc,
                 image_cache,
+                preprocessed: None,
                 elem_idx: i,
                 no_aa,
                 opm_zero_transparent: false,
