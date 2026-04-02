@@ -33,6 +33,15 @@ pub struct XrefTable {
 }
 
 impl XrefTable {
+    /// Create an empty xref table (for tests).
+    #[cfg(test)]
+    pub(crate) fn empty() -> Self {
+        Self {
+            entries: Vec::new(),
+            trailer: PdfDict::new(),
+        }
+    }
+
     /// Look up an object's location by number.
     pub fn get(&self, obj_num: u32) -> Option<&XrefEntry> {
         self.entries.get(obj_num as usize).and_then(|e| e.as_ref())

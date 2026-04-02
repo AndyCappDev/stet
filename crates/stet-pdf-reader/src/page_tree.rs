@@ -246,13 +246,18 @@ fn clamp_box_to_media(crop: &[f64; 4], media: &[f64; 4]) -> [f64; 4] {
 }
 
 /// Convert an array of PdfObj values to a rectangle [llx, lly, urx, ury].
-fn arr_to_rect(arr: &[PdfObj]) -> Option<[f64; 4]> {
+fn arr_to_rect(arr: &[PdfObj], resolver: &Resolver) -> Option<[f64; 4]> {
     if arr.len() >= 4 {
+        // Array elements may be indirect references (e.g. `4 0 R`)
+        let resolve = |obj: &PdfObj| -> Option<f64> {
+            obj.as_f64()
+                .or_else(|| resolver.deref(obj).ok().and_then(|r| r.as_f64()))
+        };
         Some([
-            arr[0].as_f64()?,
-            arr[1].as_f64()?,
-            arr[2].as_f64()?,
-            arr[3].as_f64()?,
+            resolve(&arr[0])?,
+            resolve(&arr[1])?,
+            resolve(&arr[2])?,
+            resolve(&arr[3])?,
         ])
     } else {
         None
@@ -263,9 +268,9 @@ fn arr_to_rect(arr: &[PdfObj]) -> Option<[f64; 4]> {
 /// Handles both direct arrays and indirect references to arrays.
 fn parse_rect(dict: &PdfDict, key: &[u8], resolver: &Resolver) -> Option<[f64; 4]> {
     match dict.get(key)? {
-        PdfObj::Array(a) => arr_to_rect(a),
+        PdfObj::Array(a) => arr_to_rect(a, resolver),
         PdfObj::Ref(n, g) => match resolver.resolve(*n, *g).ok()? {
-            PdfObj::Array(a) => arr_to_rect(&a),
+            PdfObj::Array(a) => arr_to_rect(&a, resolver),
             _ => None,
         },
         _ => None,
@@ -333,23 +338,32 @@ fn collect_refs_from_array(arr: &[PdfObj]) -> Result<Vec<(u32, u16)>, PdfError> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::xref::XrefTable;
+
+    /// Create a dummy resolver for tests that only use direct values.
+    fn dummy_resolver() -> Resolver<'static> {
+        static EMPTY: &[u8] = b"";
+        Resolver::new(EMPTY, &XrefTable::empty())
+    }
 
     #[test]
     fn arr_to_rect_valid() {
+        let r = dummy_resolver();
         let arr = vec![
             PdfObj::Int(0),
             PdfObj::Int(0),
             PdfObj::Real(612.0),
             PdfObj::Real(792.0),
         ];
-        let rect = arr_to_rect(&arr).unwrap();
+        let rect = arr_to_rect(&arr, &r).unwrap();
         assert_eq!(rect, [0.0, 0.0, 612.0, 792.0]);
     }
 
     #[test]
     fn arr_to_rect_too_short() {
+        let r = dummy_resolver();
         let arr = vec![PdfObj::Int(0), PdfObj::Int(0)];
-        assert!(arr_to_rect(&arr).is_none());
+        assert!(arr_to_rect(&arr, &r).is_none());
     }
 
     #[test]
