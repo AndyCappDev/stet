@@ -601,9 +601,18 @@ fn decode_dct(data: &[u8]) -> Result<Vec<u8>, PdfError> {
         decoder.set_color_transform(jpeg_decoder::ColorTransform::YCCK);
     }
 
-    let pixels = decoder
-        .decode()
-        .map_err(|e| PdfError::DecompressionError(format!("DCTDecode: {e}")))?;
+    let pixels = match decoder.decode() {
+        Ok(p) => p,
+        Err(e) => {
+            // jpeg_decoder doesn't support 2-component JPEGs (DeviceN spot
+            // color images). Fall back to zune-jpeg which handles arbitrary
+            // component counts.
+            if let Some(pixels) = decode_dct_zune(data) {
+                return Ok(pixels);
+            }
+            return Err(PdfError::DecompressionError(format!("DCTDecode: {e}")));
+        }
+    };
 
     // For 4-component (CMYK) JPEG, the jpeg_decoder applies a CMYK color
     // transform that inverts all channels (255-x). However, for PDF streams the
@@ -621,6 +630,19 @@ fn decode_dct(data: &[u8]) -> Result<Vec<u8>, PdfError> {
     }
 
     Ok(pixels)
+}
+
+/// Fallback JPEG decoder using zune-jpeg for component counts that
+/// jpeg_decoder doesn't support (e.g., 2-component DeviceN images).
+fn decode_dct_zune(data: &[u8]) -> Option<Vec<u8>> {
+    use zune_jpeg::JpegDecoder;
+    // Request raw 2-component output (LumaA) to avoid unwanted color
+    // conversion. PDF DeviceN images need the original channel values
+    // for the tinting function.
+    let options = zune_core::options::DecoderOptions::default()
+        .jpeg_set_out_colorspace(zune_core::colorspace::ColorSpace::LumaA);
+    let mut decoder = JpegDecoder::new_with_options(std::io::Cursor::new(data), options);
+    decoder.decode().ok()
 }
 
 /// Extract image dimensions from a JPEG's SOF marker.

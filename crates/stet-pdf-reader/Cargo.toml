@@ -11,6 +11,8 @@ thiserror.workspace = true
 flate2 = "1"
 md5 = "0.7"
 jpeg-decoder = "0.3"
+zune-jpeg = "0.5"
+zune-core = "0.5"
 stet-fonts.workspace = true
 stet-graphics.workspace = true
 stet-render = { workspace = true, optional = true }
