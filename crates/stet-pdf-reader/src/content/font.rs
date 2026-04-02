@@ -729,7 +729,17 @@ fn substitute_font(
         // PDF's expected widths, scale glyph outlines horizontally to match.
         // This handles narrow/condensed variants AND unembedded decorative fonts
         // (e.g. Spumoni) where the substitute (NimbusSans) has wider glyphs.
-        {
+        //
+        // Skip for symbol/dingbat fonts — their glyph shapes are completely
+        // unrelated to the text glyphs in the substitute, so a global width
+        // ratio would just stretch the wrong glyphs.
+        let is_symbol_font = {
+            let lower = clean_name.to_ascii_lowercase();
+            lower.contains("wingding")
+                || lower.contains("webding")
+                || lower.contains("dingbat")
+        };
+        if !is_symbol_font {
             let mut pdf_sum = 0.0;
             let mut sub_sum = 0.0;
             let mut count = 0;
