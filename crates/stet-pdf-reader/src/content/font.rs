@@ -834,6 +834,13 @@ const CID_FONT_SUBSTITUTIONS: &[(&str, &str)] = &[
     ("Arial-BoldItalicMT", "LiberationSans-BoldItalic"),
     ("Arial-ItalicMT", "LiberationSans-Italic"),
     ("ArialMT", "LiberationSans"),
+    // Arial Black is a heavy-weight sans-serif; Liberation Sans Bold is the
+    // closest substitute with compatible TrueType glyph ordering.
+    ("ArialBlack", "LiberationSans-Bold"),
+    ("ArialBlack,Bold", "LiberationSans-Bold"),
+    ("ArialBlack,Italic", "LiberationSans-BoldItalic"),
+    ("ArialBlack,BoldItalic", "LiberationSans-BoldItalic"),
+    ("Arial-BlackMT", "LiberationSans-Bold"),
     ("CourierNew", "LiberationMono"),
     ("CourierNew,Bold", "LiberationMono-Bold"),
     ("CourierNew,BoldItalic", "LiberationMono-BoldItalic"),
@@ -1141,7 +1148,8 @@ fn load_system_truetype_font(base_font: &str) -> Result<Vec<u8>, PdfError> {
 
 /// Fallback for CID fonts whose names can't be resolved (e.g. GBK-encoded
 /// native names like 黑体). Uses the CIDSystemInfo Ordering to select
-/// the appropriate Noto CJK regional variant.
+/// the appropriate Noto CJK regional variant. For non-CJK orderings
+/// (Identity), falls back to a Latin sans-serif font instead.
 fn load_cjk_fallback_font(ordering: &[u8], base_font: &str) -> Result<Vec<u8>, PdfError> {
     use stet_fonts::system_fonts::get_system_font_cache;
 
@@ -1151,7 +1159,29 @@ fn load_cjk_fallback_font(ordering: &[u8], base_font: &str) -> Result<Vec<u8>, P
 
     let cache = get_system_font_cache();
     let lower = base_font.to_ascii_lowercase();
-    let is_bold = lower.contains("bold") || lower.contains("demi");
+    let is_bold = lower.contains("bold") || lower.contains("demi") || lower.contains("black");
+
+    // For "Identity" ordering (non-CJK fonts), use a Latin fallback rather
+    // than a CJK font. CJK fonts have incompatible glyph ordering, which
+    // produces garbled text when identity CID-to-GID mapping is used.
+    if ordering == b"Identity" {
+        let latin_targets: &[&str] = if is_bold {
+            &["LiberationSans-Bold", "DejaVuSans-Bold"]
+        } else {
+            &["LiberationSans", "DejaVuSans"]
+        };
+        for &target in latin_targets {
+            if let Some(path) = cache.get_font_path(target)
+                && let Ok(data) = read_font_file(path, target)
+            {
+                return Ok(data);
+            }
+        }
+        return Err(PdfError::Other(format!(
+            "Latin fallback font not found for '{}'",
+            base_font
+        )));
+    }
 
     // Noto CJK .ttc files contain JP/SC/TC/HK/KR sub-fonts; the system font
     // cache typically indexes only the first (JP). The JP variant includes
