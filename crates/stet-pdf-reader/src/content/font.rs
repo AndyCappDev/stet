@@ -49,6 +49,12 @@ pub struct Type1PdfFont {
     /// symbolic fonts where the naming convention is completely incompatible
     /// (e.g. StandardEncoding "A" vs font's custom "G41").
     pub builtin_fallback: bool,
+    /// When true, per-character width scaling adjusts each glyph horizontally
+    /// to match the PDF's /Widths. Set for non-metric-compatible substitutes
+    /// (e.g. NimbusSans for LucidaSans) where the average width mismatch
+    /// exceeds 3%. NOT set for metric-compatible substitutes (e.g. NimbusRoman
+    /// for TimesNewRoman) where widths already match.
+    pub per_char_width_scale: bool,
 }
 
 pub struct TrueTypePdfFont {
@@ -712,6 +718,7 @@ fn substitute_font(
     let font = parse_type1(&font_data).ok()?;
     let fm = font.font_matrix;
     let mut font_matrix = Matrix::new(fm[0], fm[1], fm[2], fm[3], fm[4], fm[5]);
+    let mut per_char_scale = false;
 
     // If the PDF didn't provide an explicit /Widths array, derive widths from
     // the substitute font's charstrings. Standard 14 font fallback tables are
@@ -789,6 +796,9 @@ fn substitute_font(
                 let ratio = pdf_sum / sub_sum;
                 if (ratio - 1.0).abs() > 0.03 {
                     font_matrix.a *= ratio;
+                    // Non-metric-compatible substitute: enable per-character
+                    // width scaling (e.g. NimbusSans for LucidaSans).
+                    per_char_scale = true;
                 }
             }
         }
@@ -805,6 +815,7 @@ fn substitute_font(
         font_matrix,
         builtin_fallback: false,
         weight_vector,
+        per_char_width_scale: per_char_scale,
     }))
 }
 
@@ -1686,6 +1697,7 @@ fn resolve_type1(
         font_matrix,
         weight_vector,
         builtin_fallback,
+        per_char_width_scale: false,
     }))
 }
 
@@ -3001,6 +3013,16 @@ impl Type1PdfFont {
             self.weight_vector.as_deref(),
         )
         .ok()?;
+        // For non-metric-compatible substitutes, scale glyph horizontally so its
+        // width matches the PDF's /Widths entry. Without this, the substitute
+        // font's different glyph metrics cause crowded or sparse character spacing.
+        if self.per_char_width_scale {
+            let pdf_w = self.widths[char_code as usize];
+            let font_w = result.width_x * self.font_matrix.a;
+            if font_w.abs() > 0.001 && pdf_w > 0.001 && (pdf_w / font_w - 1.0).abs() > 0.01 {
+                return Some(result.path.transform(&Matrix::scale(pdf_w / font_w, 1.0)));
+            }
+        }
         Some(result.path)
     }
 }
