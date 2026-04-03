@@ -1851,6 +1851,16 @@ fn resolve_truetype(
     }
 
     let units_per_em = get_units_per_em(&data) as f64;
+
+    // Reject fonts with degenerate unitsPerEm (< 16). These are dummy subsets
+    // with placeholder rectangle "glyphs" that produce enormous shapes when
+    // normalized. Fall through to the substitute font path instead.
+    if units_per_em < 16.0 {
+        return Err(PdfError::Other(
+            "TrueType font has degenerate unitsPerEm (placeholder outlines)".into(),
+        ));
+    }
+
     let (cmap, cmap_is_unicode) = parse_cmap_with_info(&data);
 
     // Parse post table (GID → name) and invert to name → GID for fallback lookup
@@ -3044,12 +3054,6 @@ impl TrueTypePdfFont {
     }
 
     fn glyph_path(&self, char_code: u8) -> Option<PsPath> {
-        // Skip glyph outlines from fonts with absurdly small unitsPerEm (< 16).
-        // These are dummy subsets with placeholder rectangle "glyphs" that, when
-        // normalized by 1/upm, produce enormous shapes covering the entire page.
-        if self.units_per_em < 16.0 {
-            return None;
-        }
         let gid = self.char_code_to_gid(char_code);
         let gid = gid?;
         let path = skrifa_glyph_path(&self.data, gid, self.units_per_em).or_else(|| {
