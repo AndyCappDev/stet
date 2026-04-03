@@ -523,7 +523,7 @@ fn push_bcd_nibble(n: u8, chars: &mut Vec<char>) -> bool {
 /// Resolve a String ID (SID) to its string.
 /// SID 0–390 are predefined standard strings.
 /// SID >= 391 indexes into the String INDEX (offset by 391).
-fn get_sid_string(sid: u16, string_index: &[Vec<u8>]) -> String {
+pub fn get_sid_string(sid: u16, string_index: &[Vec<u8>]) -> String {
     if (sid as usize) < STANDARD_STRINGS.len() {
         return STANDARD_STRINGS[sid as usize].to_string();
     }
@@ -1116,7 +1116,7 @@ const STANDARD_ENCODING_MAP: [(u8, u16); 149] = [
 
 /// Expert Encoding — (code, SID) pairs for non-zero entries.
 #[rustfmt::skip]
-const EXPERT_ENCODING_MAP: [(u8, u16); 165] = [
+pub const EXPERT_ENCODING_MAP: [(u8, u16); 165] = [
     (32, 1), (33, 229), (34, 230), (36, 231), (37, 232), (38, 233), (39, 234),
     (40, 235), (41, 236), (42, 237), (43, 238), (44, 13), (45, 14), (46, 15),
     (47, 99), (48, 239), (49, 240), (50, 241), (51, 242), (52, 243), (53, 244),

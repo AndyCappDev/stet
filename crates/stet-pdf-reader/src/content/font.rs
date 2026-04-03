@@ -240,7 +240,8 @@ pub fn resolve_font(
     // Resolve encoding.  Track whether the PDF dict had a valid /Encoding —
     // embedded CFF fonts that lack one should use the CFF's built-in encoding.
     // Invalid encoding names (e.g. /NULL) are treated as absent.
-    let (encoding, has_valid_encoding, differences) = resolve_encoding(font_dict, resolver)?;
+    let (encoding, has_valid_encoding, differences, no_base_encoding) =
+        resolve_encoding(font_dict, resolver)?;
     let has_explicit_encoding = has_valid_encoding;
 
     // Get FontDescriptor
@@ -270,6 +271,7 @@ pub fn resolve_font(
                 has_explicit_encoding,
                 has_pdf_widths,
                 &differences,
+                no_base_encoding,
             ) {
                 Ok(font) => return Ok(font),
                 Err(_) => {
@@ -316,6 +318,7 @@ pub fn resolve_font(
                 widths,
                 has_explicit_encoding,
                 &differences,
+                no_base_encoding,
             ) {
                 Ok(font) => return Ok(font),
                 Err(_) => {
@@ -394,6 +397,7 @@ pub fn resolve_font(
             widths,
             has_explicit_encoding,
             &differences,
+            no_base_encoding,
         ),
     }
 }
@@ -428,7 +432,7 @@ fn get_font_descriptor(
 fn resolve_encoding(
     font_dict: &PdfDict,
     resolver: &Resolver,
-) -> Result<([Option<String>; 256], bool, Vec<(usize, String)>), PdfError> {
+) -> Result<([Option<String>; 256], bool, Vec<(usize, String)>, bool), PdfError> {
     let mut encoding: [Option<String>; 256] = std::array::from_fn(|_| None);
     let mut differences: Vec<(usize, String)> = Vec::new();
 
@@ -511,7 +515,10 @@ fn resolve_encoding(
                         }
                     }
                 }
-                return Ok((encoding, has_valid_encoding, differences));
+                // Signal "no base encoding" only for non-symbol fonts.
+                // Symbol fonts (ZapfDingbats, Symbol) always use their fixed
+                // built-in encoding, so their has_base_encoding is never set.
+                return Ok((encoding, has_valid_encoding, differences, !has_base_encoding && !is_symbol_font));
             }
             _ => {}
         }
@@ -524,7 +531,7 @@ fn resolve_encoding(
         }
     }
 
-    Ok((encoding, has_valid_encoding, differences))
+    Ok((encoding, has_valid_encoding, differences, false))
 }
 
 fn encoding_table_by_name(name: &[u8]) -> Option<&'static [&'static str; 256]> {
@@ -1510,7 +1517,7 @@ fn resolve_type3(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
         .unwrap_or([0.0, 0.0, 1.0, 1.0]);
 
     // Resolve encoding: maps char codes → glyph names in CharProcs
-    let (encoding, _, _) = resolve_encoding(font_dict, resolver)?;
+    let (encoding, _, _, _) = resolve_encoding(font_dict, resolver)?;
 
     // Get CharProcs dict: maps glyph names → content streams
     // May be a direct dict or an indirect reference
@@ -1559,6 +1566,7 @@ fn resolve_type1(
     widths: [f64; 256],
     has_explicit_encoding: bool,
     differences: &[(usize, String)],
+    no_base_encoding: bool,
 ) -> Result<PdfFont, PdfError> {
     let desc = descriptor
         .as_ref()
@@ -1612,8 +1620,11 @@ fn resolve_type1(
         parse_type1(&font_data).map_err(|e| PdfError::Other(format!("Type1 parse error: {e}")))?;
 
     // PDF spec 9.6.6.1: encoding base depends on whether the font is embedded.
-    let encoding = if !differences.is_empty() && font.encoding.len() == 256 {
-        // Encoding dict had Differences but no BaseEncoding. For embedded fonts,
+    // When the /Encoding dict has no /BaseEncoding, the base for embedded fonts
+    // is the font's built-in encoding (not StandardEncoding). This matters for
+    // expert fonts where e.g. code 97 = "Asmall", not "a".
+    let encoding = if no_base_encoding && font.encoding.len() == 256 {
+        // Encoding dict had no BaseEncoding. For embedded fonts,
         // the base is the font's built-in encoding, not StandardEncoding.
         let mut builtin: [Option<String>; 256] = std::array::from_fn(|_| None);
         for (i, name) in font.encoding.iter().enumerate() {
@@ -1809,7 +1820,7 @@ fn resolve_truetype(
         if is_otf || is_cff {
             let has_explicit_encoding = font_dict.get(b"Encoding").is_some();
             let has_pdf_widths = font_dict.get(b"Widths").is_some();
-            return build_cff_font(data, encoding, widths, has_explicit_encoding, has_pdf_widths, &[]);
+            return build_cff_font(data, encoding, widths, has_explicit_encoding, has_pdf_widths, &[], false);
         }
         return Err(PdfError::Other(
             "TrueType font has no usable glyph outline data".into(),
@@ -1878,6 +1889,7 @@ fn resolve_cff(
     has_explicit_encoding: bool,
     has_pdf_widths: bool,
     differences: &[(usize, String)],
+    no_base_encoding: bool,
 ) -> Result<PdfFont, PdfError> {
     let desc = descriptor
         .as_ref()
@@ -1886,7 +1898,7 @@ fn resolve_cff(
         .get(b"FontFile3")
         .ok_or(PdfError::Other("CFF font missing FontFile3".into()))?;
     let raw_data = resolver.stream_data_from_obj(ff_ref)?;
-    build_cff_font(raw_data, encoding, widths, has_explicit_encoding, has_pdf_widths, differences)
+    build_cff_font(raw_data, encoding, widths, has_explicit_encoding, has_pdf_widths, differences, no_base_encoding)
 }
 
 /// Build a CFF font from raw font data (may be OpenType/CFF or raw CFF).
@@ -1897,6 +1909,7 @@ fn build_cff_font(
     has_explicit_encoding: bool,
     has_pdf_widths: bool,
     differences: &[(usize, String)],
+    no_base_encoding: bool,
 ) -> Result<PdfFont, PdfError> {
     // If data starts with "OTTO" it's an OpenType container — extract CFF table
     let font_data = if raw_data.starts_with(b"OTTO") {
@@ -1916,10 +1929,21 @@ fn build_cff_font(
         .ok_or(PdfError::Other("CFF contains no fonts".into()))?;
 
     // PDF spec 9.6.6.1: encoding base depends on whether the font is embedded.
-    let encoding = if !differences.is_empty() {
-        // Encoding dict had Differences but no BaseEncoding — use CFF built-in
-        // encoding as base, then apply Differences.
+    // When the /Encoding dict has no /BaseEncoding, the base for embedded fonts
+    // is the font's built-in encoding (not StandardEncoding).
+    // Helper: build encoding from the CFF's built-in encoding table.
+    // For codes where the CFF encoding maps to a valid GID, use that name.
+    // For unmapped codes in fonts with Expert charset names (Asmall, etc.),
+    // fill in from the Expert encoding table — handles buggy subset fonts that
+    // claim Standard encoding but have Expert glyph names.
+    let build_cff_encoding = |font: &stet_fonts::cff_parser::CffFont| -> [Option<String>; 256] {
         let mut enc: [Option<String>; 256] = std::array::from_fn(|_| None);
+        let name_to_gid: std::collections::HashMap<&str, u16> = font
+            .charset
+            .iter()
+            .enumerate()
+            .map(|(gid, name)| (name.as_str(), gid as u16))
+            .collect();
         #[allow(clippy::needless_range_loop)]
         for code in 0..256 {
             let gid = font.encoding[code] as usize;
@@ -1927,6 +1951,36 @@ fn build_cff_font(
                 enc[code] = Some(font.charset[gid].clone());
             }
         }
+        // Fill gaps from Expert encoding for fonts with Expert glyph names.
+        if name_to_gid.contains_key("Asmall") {
+            for &(code, sid) in &stet_fonts::cff_parser::EXPERT_ENCODING_MAP {
+                if enc[code as usize].is_none() {
+                    let name = stet_fonts::cff_parser::get_sid_string(sid, &[]);
+                    if let Some(&gid) = name_to_gid.get(name.as_str()) {
+                        if gid > 0 {
+                            enc[code as usize] = Some(font.charset[gid as usize].clone());
+                        }
+                    }
+                }
+            }
+            // Map lowercase a-z to XYZsmall names for broken Expert subsets
+            // where the CFF encoding doesn't cover all used codes.
+            for code in b'a'..=b'z' {
+                if enc[code as usize].is_none() {
+                    let small_name = format!("{}small", (code - b'a' + b'A') as char);
+                    if name_to_gid.contains_key(small_name.as_str()) {
+                        enc[code as usize] = Some(small_name);
+                    }
+                }
+            }
+        }
+        enc
+    };
+
+    let encoding = if no_base_encoding || !differences.is_empty() {
+        // Encoding dict had no BaseEncoding — use CFF built-in
+        // encoding as base, then apply Differences.
+        let mut enc = build_cff_encoding(&font);
         for (code, name) in differences {
             if *code < 256 {
                 enc[*code] = Some(name.clone());
@@ -1935,15 +1989,7 @@ fn build_cff_font(
         enc
     } else if !has_explicit_encoding {
         // No /Encoding at all — use CFF built-in encoding directly.
-        let mut enc: [Option<String>; 256] = std::array::from_fn(|_| None);
-        #[allow(clippy::needless_range_loop)]
-        for code in 0..256 {
-            let gid = font.encoding[code] as usize;
-            if gid > 0 && gid < font.charset.len() && font.charset[gid] != ".notdef" {
-                enc[code] = Some(font.charset[gid].clone());
-            }
-        }
-        enc
+        build_cff_encoding(&font)
     } else {
         encoding
     };
