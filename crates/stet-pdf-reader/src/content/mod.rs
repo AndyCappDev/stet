@@ -4017,6 +4017,18 @@ impl<'a> ContentInterpreter<'a> {
                     self.display_list.push(elem);
                 }
             } else {
+                // Collect Clip/InitClip elements to replay after SoftMasked.
+                // The mask scope may capture clip operations that were established
+                // in gsave levels that extend beyond the scope — these must remain
+                // in the main display list to affect subsequent rendering.
+                let clip_replay: Vec<DisplayElement> = content
+                    .elements()
+                    .iter()
+                    .filter(|e| {
+                        matches!(e, DisplayElement::Clip { .. } | DisplayElement::InitClip)
+                    })
+                    .cloned()
+                    .collect();
                 self.display_list.push(DisplayElement::SoftMasked {
                     mask: scope.mask.mask_list,
                     content,
@@ -4028,6 +4040,9 @@ impl<'a> ContentInterpreter<'a> {
                         has_nested_mask_scope: scope.mask.has_nested_mask_scope,
                     },
                 });
+                for elem in clip_replay {
+                    self.display_list.push(elem);
+                }
             }
         }
     }
@@ -4085,18 +4100,22 @@ impl<'a> ContentInterpreter<'a> {
     /// invisible — but this is typically a PDF authoring artifact rather than
     /// intentional, so we skip the mask and render the content directly.
     fn mask_has_meaningful_overlap(&self, bbox: &[f64; 4]) -> bool {
-        let (_, _, overlap_w, overlap_h) = self.mask_clip_overlap(bbox);
+        let (clip_w, clip_h, overlap_w, overlap_h) = self.mask_clip_overlap(bbox);
+        // If the clip is degenerate (e.g. single moveto from `m W n`),
+        // we can't reliably determine overlap — conservatively assume
+        // the mask IS meaningful rather than making content invisible.
+        if clip_w < 1.0 || clip_h < 1.0 {
+            return true;
+        }
         overlap_w >= 2.0 && overlap_h >= 2.0
     }
 
     /// Compute the overlap between a mask bbox and the current clip region.
     /// Returns (clip_w, clip_h, overlap_w, overlap_h).
     fn mask_clip_overlap(&self, bbox: &[f64; 4]) -> (f64, f64, f64, f64) {
-        // If no clip is set, the entire page is the clip — check page bounds
         let page_h = self.gstate.ctm.ty.abs().max(1.0);
         let page_w = page_h; // rough estimate
         let (cx0, cy0, cx1, cy1) = if let Some(ref clip) = self.gstate.clip_path {
-            // Use the clip path's bounding box
             let segs = &clip.segments;
             let mut min_x = f64::INFINITY;
             let mut min_y = f64::INFINITY;
@@ -4115,7 +4134,7 @@ impl<'a> ContentInterpreter<'a> {
             }
             (min_x, min_y, max_x, max_y)
         } else {
-            (0.0, 0.0, page_w * 2.0, page_h * 2.0) // generous page bounds
+            (0.0, 0.0, page_w * 2.0, page_h * 2.0)
         };
 
         let (mx0, my0, mx1, my1) = (
