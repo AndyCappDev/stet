@@ -83,8 +83,9 @@ pub fn parse_xref(data: &[u8]) -> Result<XrefTable, PdfError> {
     // final section's offsets may be relative to a later header, not the first.
     let pdf_headers: Vec<usize> = find_all_pdf_headers(data);
 
-    // Follow the /Prev chain, collecting (entries, trailer) from oldest to newest
-    let mut sections = Vec::new();
+    // Follow the /Prev chain, collecting (entries, trailer, file_offset).
+    // The file_offset is used to sort sections chronologically for merging.
+    let mut sections: Vec<(Vec<(u32, XrefEntry)>, PdfDict, usize)> = Vec::new();
     let mut offset = startxref + header_offset;
     let mut visited = std::collections::HashSet::new();
 
@@ -103,7 +104,7 @@ pub fn parse_xref(data: &[u8]) -> Result<XrefTable, PdfError> {
                     let prev = trailer
                         .get_int(b"Prev")
                         .map(|v| v as usize + h);
-                    sections.push((entries, trailer));
+                    sections.push((entries, trailer, try_offset));
                     if let Some(p) = prev {
                         offset = p;
                     } else {
@@ -125,7 +126,7 @@ pub fn parse_xref(data: &[u8]) -> Result<XrefTable, PdfError> {
                 let prev = trailer
                     .get_int(b"Prev")
                     .map(|v| v as usize + header_offset);
-                sections.push((entries, trailer));
+                sections.push((entries, trailer, offset));
                 match prev {
                     Some(p) => offset = p,
                     None => break,
@@ -167,12 +168,16 @@ pub fn parse_xref(data: &[u8]) -> Result<XrefTable, PdfError> {
         &pdf_headers,
     );
 
-    // Build the combined table: oldest entries first, newest override
-    sections.reverse();
+    // Build the combined table: oldest entries first, newest override.
+    // Sort by file offset (ascending) — sections at higher offsets are newer
+    // revisions and should override earlier ones. This is more robust than
+    // assuming discovery order matches chronological order, which breaks when
+    // discover_orphaned_xref_sections finds sections in arbitrary order.
+    sections.sort_by_key(|(_, _, file_offset)| *file_offset);
     let mut combined_entries: Vec<Option<XrefEntry>> = Vec::new();
     let mut final_trailer = PdfDict::new();
 
-    for (entries, trailer) in sections {
+    for (entries, trailer, _) in sections {
         for (num, entry) in entries {
             let idx = num as usize;
             if idx >= combined_entries.len() {
@@ -221,7 +226,7 @@ pub fn parse_xref(data: &[u8]) -> Result<XrefTable, PdfError> {
 /// /Prev chain dead-ends before reaching the original xref.
 fn discover_orphaned_xref_sections(
     data: &[u8],
-    sections: &mut Vec<(Vec<(u32, XrefEntry)>, PdfDict)>,
+    sections: &mut Vec<(Vec<(u32, XrefEntry)>, PdfDict, usize)>,
     visited: &mut std::collections::HashSet<usize>,
     header_offset: usize,
     pdf_headers: &[usize],
@@ -285,7 +290,7 @@ fn discover_orphaned_xref_sections(
                     let prev = trailer
                         .get_int(b"Prev")
                         .map(|v| v as usize + header_offset);
-                    sections.push((entries, trailer));
+                    sections.push((entries, trailer, offset));
                     match prev {
                         Some(p) => offset = p,
                         None => break,
