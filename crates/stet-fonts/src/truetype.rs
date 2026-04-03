@@ -65,9 +65,19 @@ pub fn find_table(font_data: &[u8], tag: &[u8; 4]) -> Option<(usize, usize)> {
     if font_data.len() < 12 {
         return None;
     }
-    let num_tables = read_u16(font_data, 4) as usize;
+    // Handle TrueType Collection (TTC): use the first font's offset table.
+    // Table offsets within a TTC are absolute, so returned values work as-is.
+    let base = if font_data.len() >= 16 && &font_data[0..4] == b"ttcf" {
+        read_u32(font_data, 12) as usize
+    } else {
+        0
+    };
+    if base + 12 > font_data.len() {
+        return None;
+    }
+    let num_tables = read_u16(font_data, base + 4) as usize;
     for i in 0..num_tables {
-        let entry_offset = 12 + i * 16;
+        let entry_offset = base + 12 + i * 16;
         if entry_offset + 16 > font_data.len() {
             break;
         }

@@ -3253,6 +3253,17 @@ impl CidTrueTypePdfFont {
         // Resolve CID to GID using the same logic as glyph_path_cid
         let gid = if let Some(ref map) = self.cid_to_gid_map {
             *map.get(cid as usize).unwrap_or(&0)
+        } else if self.substituted && !self.to_unicode.is_empty() {
+            // Substituted font with GID→Unicode table: resolve via cmap
+            if let Some(&unicode) = self.to_unicode.get(&cid) {
+                if let Some(&g) = self.cmap.get(&unicode) {
+                    g
+                } else {
+                    return false;
+                }
+            } else {
+                return false;
+            }
         } else if self.identity_cid_to_gid {
             cid
         } else {
@@ -3630,7 +3641,8 @@ fn hmtx_advance_width(font_data: &[u8], gid: u16, units_per_em: f64) -> Option<f
 }
 
 fn skrifa_glyph_path(font_data: &[u8], gid: u16, units_per_em: f64) -> Option<PsPath> {
-    let font_ref = skrifa::FontRef::new(font_data).ok()?;
+    // Use from_index(0) to handle both plain TrueType and TTC files.
+    let font_ref = skrifa::FontRef::from_index(font_data, 0).ok()?;
     let outlines = font_ref.outline_glyphs();
     let glyph = outlines.get(skrifa::GlyphId::new(gid as u32))?;
 
