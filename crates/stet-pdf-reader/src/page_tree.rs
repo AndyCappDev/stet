@@ -59,11 +59,13 @@ pub fn collect_pages(resolver: &Resolver) -> Result<Vec<PageInfo>, PdfError> {
         return collect_pages_by_scan(resolver);
     };
 
-    // Get /Pages — if the page tree root is missing (truncated PDF),
+    // Get /Pages — if the page tree root is missing (truncated PDF or
+    // corrupt incremental update that swapped /Root and /Info),
     // fall back to scanning all objects for /Type /Page entries.
-    let pages_ref = catalog_dict
-        .get(b"Pages")
-        .ok_or(PdfError::MissingKey("Pages"))?;
+    let pages_ref = match catalog_dict.get(b"Pages") {
+        Some(r) => r,
+        None => return collect_pages_by_scan(resolver),
+    };
     let pages_obj = match resolver.deref(pages_ref) {
         Ok(obj) => obj,
         Err(_) => return collect_pages_by_scan(resolver),
@@ -97,7 +99,7 @@ fn collect_pages_by_scan(resolver: &Resolver) -> Result<Vec<PageInfo>, PdfError>
                         &media_box,
                     );
                     let rotate = dict.get_int(b"Rotate").unwrap_or(0) as i32;
-                    let resources = resolve_resources(dict, resolver);
+                    let resources = resolve_resources_inherited(dict, resolver);
                     let contents = parse_contents(dict, resolver)?;
                     let annots = parse_annots(dict, resolver);
 
@@ -120,6 +122,32 @@ fn collect_pages_by_scan(resolver: &Resolver) -> Result<Vec<PageInfo>, PdfError>
     }
 
     Ok(pages)
+}
+
+/// Resolve /Resources, walking up the /Parent chain if not found on the page.
+fn resolve_resources_inherited(dict: &PdfDict, resolver: &Resolver) -> PdfDict {
+    let res = resolve_resources(dict, resolver);
+    if !res.is_empty() {
+        return res;
+    }
+    // Walk up /Parent chain to find inherited /Resources
+    let mut current = dict.clone();
+    for _ in 0..10 {
+        if let Some(&PdfObj::Ref(n, g)) = current.get(b"Parent") {
+            if let Ok(parent_obj) = resolver.resolve(n, g) {
+                if let Some(parent_dict) = parent_obj.as_dict() {
+                    let res = resolve_resources(parent_dict, resolver);
+                    if !res.is_empty() {
+                        return res;
+                    }
+                    current = parent_dict.clone();
+                    continue;
+                }
+            }
+        }
+        break;
+    }
+    PdfDict::default()
 }
 
 /// Resolve /Resources from a dict (direct or indirect ref).
