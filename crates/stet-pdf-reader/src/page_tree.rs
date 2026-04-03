@@ -61,10 +61,12 @@ pub fn collect_pages(resolver: &Resolver) -> Result<Vec<PageInfo>, PdfError> {
 
     // Get /Pages — if the page tree root is missing (truncated PDF or
     // corrupt incremental update that swapped /Root and /Info),
-    // fall back to scanning all objects for /Type /Page entries.
+    // try to find the real Catalog by scanning objects before falling
+    // back to raw page scanning (which can pick up stale pages from
+    // earlier revisions).
     let pages_ref = match catalog_dict.get(b"Pages") {
         Some(r) => r,
-        None => return collect_pages_by_scan(resolver),
+        None => return collect_pages_via_catalog_scan(resolver),
     };
     let pages_obj = match resolver.deref(pages_ref) {
         Ok(obj) => obj,
@@ -80,6 +82,37 @@ pub fn collect_pages(resolver: &Resolver) -> Result<Vec<PageInfo>, PdfError> {
     collect_pages_recursive(resolver, pages_dict, 0, &inherited, &mut pages)?;
 
     Ok(pages)
+}
+
+/// Try to find the real Catalog's /Pages tree by scanning for a /Type /Catalog
+/// object. Falls back to raw page scanning only if no valid Catalog is found.
+fn collect_pages_via_catalog_scan(resolver: &Resolver) -> Result<Vec<PageInfo>, PdfError> {
+    let xref_len = resolver.xref_len();
+    for obj_num in 0..xref_len as u32 {
+        if let Ok(obj) = resolver.resolve(obj_num, 0) {
+            if let Some(dict) = obj.as_dict() {
+                if dict.get_name(b"Type") == Some(b"Catalog") {
+                    if let Some(pages_ref) = dict.get(b"Pages") {
+                        if let Ok(pages_obj) = resolver.deref(pages_ref) {
+                            if let Some(pages_dict) = pages_obj.as_dict() {
+                                let mut pages = Vec::new();
+                                let inherited = Inherited::default();
+                                if collect_pages_recursive(
+                                    resolver, pages_dict, 0, &inherited, &mut pages,
+                                )
+                                .is_ok()
+                                    && !pages.is_empty()
+                                {
+                                    return Ok(pages);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    collect_pages_by_scan(resolver)
 }
 
 /// Fallback: scan all xref entries for `/Type /Page` objects.

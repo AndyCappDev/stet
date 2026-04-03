@@ -365,18 +365,25 @@ impl<'a> PdfDocument<'a> {
 fn parse_ocg_off(resolver: &Resolver) -> HashSet<u32> {
     let mut off = HashSet::new();
 
-    // Get catalog
-    let root_ref = match resolver.trailer().get_ref(b"Root") {
-        Some(r) => r,
-        None => return off,
-    };
-    let catalog = match resolver.resolve(root_ref.0, root_ref.1) {
-        Ok(c) => c,
-        Err(_) => return off,
-    };
-    let catalog_dict = match catalog.as_dict() {
-        Some(d) => d,
-        None => return off,
+    // Get catalog — try trailer /Root first, fall back to scanning if it
+    // doesn't look like a catalog (corrupt incremental updates can swap
+    // /Root and /Info, leaving Root pointing at the Info dict).
+    let mut catalog_owned;
+    let catalog_dict = if let Some(root_ref) = resolver.trailer().get_ref(b"Root") {
+        if let Ok(c) = resolver.resolve(root_ref.0, root_ref.1) {
+            catalog_owned = c;
+            match catalog_owned.as_dict() {
+                Some(d) if d.get(b"OCProperties").is_some() => d,
+                _ => match find_catalog(resolver) {
+                    Some(c) => { catalog_owned = c; catalog_owned.as_dict().unwrap() }
+                    None => return off,
+                },
+            }
+        } else {
+            return off;
+        }
+    } else {
+        return off;
     };
 
     // Get OCProperties -> D (default configuration) -> OFF array
@@ -416,6 +423,22 @@ fn parse_ocg_off(resolver: &Resolver) -> HashSet<u32> {
     }
 
     off
+}
+
+/// Scan all objects to find the real Catalog dict (has /Type /Catalog).
+/// Used when the trailer's /Root points to the wrong object.
+fn find_catalog(resolver: &Resolver) -> Option<PdfObj> {
+    let xref_len = resolver.xref_len();
+    for obj_num in 0..xref_len as u32 {
+        if let Ok(obj) = resolver.resolve(obj_num, 0) {
+            if let Some(dict) = obj.as_dict() {
+                if dict.get_name(b"Type") == Some(b"Catalog") && dict.get(b"Pages").is_some() {
+                    return Some(obj);
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Check for `%PDF-` header within the first 1024 bytes.
