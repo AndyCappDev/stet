@@ -563,8 +563,10 @@ impl<'a> ContentInterpreter<'a> {
             return Ok(());
         }
 
-        // Skip all operators inside suppressed optional content blocks,
-        // except marked content operators (to maintain proper nesting).
+        // Skip rendering operators inside suppressed optional content blocks,
+        // but still process state-setting operators so the graphics state is
+        // correct when the block ends. Marked content operators always execute
+        // to maintain proper nesting.
         if self.oc_suppression_depth > 0 {
             match op {
                 b"BDC" | b"DP" => {
@@ -583,8 +585,20 @@ impl<'a> ContentInterpreter<'a> {
                     self.oc_suppression_depth -= 1;
                     return Ok(());
                 }
+                // State-setting operators: let these through so text/graphics
+                // state is correct for content after the suppressed block.
+                b"Tc" | b"Tw" | b"Tz" | b"TL" | b"Tf" | b"Tr" | b"Ts"
+                | b"Td" | b"TD" | b"Tm" | b"T*" | b"BT" | b"ET"
+                | b"q" | b"Q" | b"cm" | b"gs"
+                | b"g" | b"G" | b"rg" | b"RG" | b"k" | b"K"
+                | b"cs" | b"CS" | b"sc" | b"SC" | b"scn" | b"SCN"
+                | b"w" | b"J" | b"j" | b"M" | b"d" | b"ri" | b"i" => {
+                    // Fall through to normal operator dispatch
+                }
+                // Rendering operators: skip with operand cleanup.
+                // Includes path construction (m/l/c/re/h), painting (S/f/B/n),
+                // text showing (Tj/TJ/'/"), images (Do/BI/ID/EI), shading (sh).
                 _ => {
-                    // Discard any operands for the skipped operator
                     self.operand_stack.clear();
                     return Ok(());
                 }
