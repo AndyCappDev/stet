@@ -610,6 +610,12 @@ fn decode_dct(data: &[u8]) -> Result<Vec<u8>, PdfError> {
             if let Some(pixels) = decode_dct_zune(data) {
                 return Ok(pixels);
             }
+            // Some JPEGs use DNL (Define Number of Lines) markers to specify
+            // the height after encoding. Patch the SOF header with the DNL
+            // height and retry.
+            if let Some(patched) = patch_jpeg_dnl_height(data) {
+                return decode_dct(&patched);
+            }
             return Err(PdfError::DecompressionError(format!("DCTDecode: {e}")));
         }
     };
@@ -645,8 +651,75 @@ fn decode_dct_zune(data: &[u8]) -> Option<Vec<u8>> {
     decoder.decode().ok()
 }
 
+/// Patch a JPEG that uses DNL (Define Number of Lines, marker 0xFFDC) to specify
+/// its height. Finds the DNL marker, extracts the height, writes it into the SOF
+/// header, and strips the DNL marker from the scan data so standard decoders can
+/// parse it.
+fn patch_jpeg_dnl_height(data: &[u8]) -> Option<Vec<u8>> {
+    // Find DNL marker (0xFF 0xDC) and extract height
+    let dnl_height = {
+        let mut pos = 0;
+        let mut found = None;
+        while pos + 4 < data.len() {
+            if data[pos] == 0xFF && data[pos + 1] == 0xDC {
+                // DNL: FF DC 00 04 <height_hi> <height_lo>
+                if pos + 5 < data.len() {
+                    let h = ((data[pos + 4] as u16) << 8) | data[pos + 5] as u16;
+                    found = Some((pos, h));
+                }
+                break;
+            }
+            pos += 1;
+        }
+        found
+    };
+    let (dnl_pos, height) = dnl_height?;
+    if height == 0 {
+        return None;
+    }
+
+    // Find SOF marker (0xFFC0..0xFFC3) and patch height field
+    let mut patched = data.to_vec();
+    let mut pos = 2; // skip SOI
+    while pos + 8 < patched.len() {
+        if patched[pos] != 0xFF {
+            pos += 1;
+            continue;
+        }
+        let marker = patched[pos + 1];
+        if (0xC0..=0xC3).contains(&marker) {
+            // SOF: FF Cn LL LL PP HH HH WW WW ...
+            // Height is at offset +5 (2 bytes, big-endian)
+            patched[pos + 5] = (height >> 8) as u8;
+            patched[pos + 6] = (height & 0xFF) as u8;
+            break;
+        }
+        if marker == 0xDA {
+            break; // SOS — stop before scan data
+        }
+        // Skip marker segment
+        if pos + 3 < patched.len() {
+            let seg_len = ((patched[pos + 2] as usize) << 8) | patched[pos + 3] as usize;
+            pos += 2 + seg_len;
+        } else {
+            break;
+        }
+    }
+
+    // Remove the DNL marker (6 bytes: FF DC 00 04 HH HH)
+    if dnl_pos + 6 <= patched.len() {
+        patched.drain(dnl_pos..dnl_pos + 6);
+    }
+
+    Some(patched)
+}
+
 /// Extract image dimensions from a JPEG's SOF marker.
 /// Returns `(width, height)` if found.
+///
+/// When the JPEG uses DNL (Define Number of Lines, marker 0xFFDC) — indicated by
+/// a dummy SOF height of 0 or 0xFFFF — scans the bitstream for the DNL marker
+/// and returns its height instead.
 pub fn jpeg_dimensions(data: &[u8]) -> Option<(u32, u32)> {
     if data.len() < 2 || data[0] != 0xFF || data[1] != 0xD8 {
         return None;
@@ -662,8 +735,14 @@ pub fn jpeg_dimensions(data: &[u8]) -> Option<(u32, u32)> {
         if (0xC0..=0xCF).contains(&marker) && marker != 0xC4 && marker != 0xC8 && marker != 0xCC
         {
             if pos + 9 < data.len() {
-                let h = ((data[pos + 5] as u32) << 8) | data[pos + 6] as u32;
+                let mut h = ((data[pos + 5] as u32) << 8) | data[pos + 6] as u32;
                 let w = ((data[pos + 7] as u32) << 8) | data[pos + 8] as u32;
+                // SOF height 0 or 0xFFFF means "defined by DNL marker later"
+                if h == 0 || h == 0xFFFF {
+                    if let Some(dnl_h) = find_dnl_height(data) {
+                        h = dnl_h as u32;
+                    }
+                }
                 return Some((w, h));
             }
         }
@@ -672,6 +751,18 @@ pub fn jpeg_dimensions(data: &[u8]) -> Option<(u32, u32)> {
         }
         let seg_len = ((data[pos + 2] as usize) << 8) | data[pos + 3] as usize;
         pos += 2 + seg_len;
+    }
+    None
+}
+
+/// Scan JPEG data for a DNL (Define Number of Lines) marker and return its height.
+fn find_dnl_height(data: &[u8]) -> Option<u16> {
+    let mut pos = 0;
+    while pos + 5 < data.len() {
+        if data[pos] == 0xFF && data[pos + 1] == 0xDC && pos + 5 < data.len() {
+            return Some(((data[pos + 4] as u16) << 8) | data[pos + 5] as u16);
+        }
+        pos += 1;
     }
     None
 }
