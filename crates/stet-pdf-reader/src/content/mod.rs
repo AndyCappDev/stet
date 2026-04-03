@@ -11,6 +11,7 @@ pub mod cid_unicode;
 pub mod cmap;
 pub mod color_space;
 pub mod font;
+mod gid_maps;
 pub mod graphics_state;
 mod standard_fonts;
 

@@ -2302,6 +2302,40 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                     (true, None) // no CIDToGIDMap → default to identity
                 };
 
+            // For non-embedded fonts with Identity CIDToGIDMap, the CID values
+            // are GIDs from the original font. A substitute font has different
+            // glyph ordering, so CID-as-GID produces garbled text. Use hardcoded
+            // GID-to-Unicode tables (same approach as PDF.js) to map known fonts'
+            // GIDs to Unicode, enabling correct rendering with any substitute.
+            let to_unicode = if substituted
+                && identity_cid_to_gid
+                && to_unicode.is_empty()
+                && encoding_name.starts_with(b"Identity")
+            {
+                let base_name = cid_font_dict
+                    .get_name(b"BaseFont")
+                    .unwrap_or(b"");
+                let name_str = String::from_utf8_lossy(base_name);
+                // Strip subset prefix (e.g. "ABCDEF+Calibri,Bold" → "Calibri,Bold")
+                let clean = if name_str.len() > 7
+                    && name_str.as_bytes().get(6) == Some(&b'+')
+                {
+                    &name_str[7..]
+                } else {
+                    &name_str
+                };
+                // Extract family name before style suffix
+                let family = clean
+                    .split(&[',', '-'][..])
+                    .next()
+                    .unwrap_or(clean)
+                    .to_ascii_lowercase();
+                super::gid_maps::get_gid_to_unicode_map(&family)
+                    .unwrap_or(to_unicode)
+            } else {
+                to_unicode
+            };
+
             Ok(PdfFont::CidTrueType(CidTrueTypePdfFont {
                 data,
                 default_width,
@@ -3193,7 +3227,22 @@ impl CidTrueTypePdfFont {
             if p.is_empty() || p.segments.len() > 10_000 { None } else { Some(p) }
         })?;
         let scale = 1.0 / self.units_per_em;
-        let m = Matrix::scale(scale, scale);
+        // For substituted fonts, scale glyphs horizontally so their width matches
+        // the PDF's /W array (original font metrics). Without this, the substitute
+        // font's wider/narrower glyphs cause crowded or sparse text.
+        let m = if self.substituted {
+            let pdf_w = self.cid_widths.get(&cid).copied().unwrap_or(self.default_width);
+            let font_w = hmtx_advance_width(&self.data, gid, self.units_per_em)
+                .unwrap_or(0.0)
+                / 1000.0;
+            if font_w > 0.001 && pdf_w > 0.001 {
+                Matrix::new(scale * pdf_w / font_w, 0.0, 0.0, scale, 0.0, 0.0)
+            } else {
+                Matrix::scale(scale, scale)
+            }
+        } else {
+            Matrix::scale(scale, scale)
+        };
         Some(path.transform(&m))
     }
 
