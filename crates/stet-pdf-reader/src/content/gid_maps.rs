@@ -31,6 +31,10 @@ pub fn get_gid_to_unicode_map(font_family: &str) -> Option<HashMap<u16, u32>> {
             }
             Some(map)
         }
+        // These fonts share the standard TrueType glyph ordering
+        "tahoma" | "verdana" | "arial" | "trebuchet ms" | "trebuchetms" => {
+            Some(standard_glyph_map())
+        }
         _ => None,
     }
 }
@@ -248,14 +252,27 @@ static STANDARD_GLYPHS: &[(u16, u32)] = &[
     (269, 313),
     (275, 323),
     (276, 324),
+    (277, 327),
     (278, 328),
+    (279, 336),
+    (280, 337),
+    (281, 338),
+    (282, 339),
     (283, 344),
     (284, 345),
     (285, 346),
     (286, 347),
+    (287, 350),
+    (288, 351),
+    (289, 354),
+    (290, 355),
+    (291, 366),
     (292, 367),
+    (293, 368),
+    (294, 369),
     (295, 377),
     (296, 378),
+    (297, 379),
     (298, 380),
     (305, 963),
     (306, 964),
