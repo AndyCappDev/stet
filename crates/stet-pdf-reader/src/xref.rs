@@ -65,7 +65,11 @@ impl XrefTable {
 
 /// Parse the complete xref structure from a PDF file.
 pub fn parse_xref(data: &[u8]) -> Result<XrefTable, PdfError> {
-    let startxref = find_startxref(data)?;
+    let startxref = match find_startxref(data) {
+        Ok(v) => v,
+        Err(PdfError::NoStartXref) => return rebuild_xref_from_scan(data),
+        Err(e) => return Err(e),
+    };
 
     // If %PDF- header isn't at byte 0 (e.g., UTF-8 BOM or prepended garbage),
     // all internal offsets (startxref, /Prev) need adjustment. Compute this
