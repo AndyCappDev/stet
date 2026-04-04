@@ -2432,10 +2432,34 @@ impl<'a> ContentInterpreter<'a> {
             (width, height)
         };
 
-        // For JPXDecode without explicit ColorSpace, infer from decoded data length.
-        // JP2 embeds its own color space info; the decoder returns interleaved pixel data
-        // whose length = width × height × num_components.
-        let (resolved_cs, sample_data) = if !is_image_mask && !has_explicit_cs {
+        // For JPXDecode with SMaskInData, the JP2 decoder returns N+1 components
+        // (color channels + alpha). When an explicit ColorSpace is present, the decoded
+        // data has one extra component per pixel that must be separated into an SMask.
+        // When no explicit ColorSpace is present, infer the color space from the
+        // decoded data length.
+        let (resolved_cs, sample_data, smask_in_data_alpha) = if !is_image_mask
+            && filter_is_jpx
+            && smask_in_data >= 1
+            && has_explicit_cs
+        {
+            // Explicit ColorSpace + SMaskInData: the JP2 data has n_cs+1 components.
+            let n_cs = resolved_cs.as_ref().map_or(3, |cs| cs.num_components() as usize);
+            let pixels = width as usize * height as usize;
+            let decoded_comps = if pixels > 0 { sample_data.len() / pixels } else { n_cs };
+            if decoded_comps == n_cs + 1 {
+                // Extract the alpha channel (last component per pixel)
+                let mut color_data = Vec::with_capacity(pixels * n_cs);
+                let mut alpha_data = Vec::with_capacity(pixels);
+                for chunk in sample_data.chunks_exact(decoded_comps) {
+                    color_data.extend_from_slice(&chunk[..n_cs]);
+                    alpha_data.push(chunk[n_cs]);
+                }
+                (resolved_cs, color_data, Some(alpha_data))
+            } else {
+                // Unexpected component count — pass through unchanged
+                (resolved_cs, sample_data, None)
+            }
+        } else if !is_image_mask && !has_explicit_cs {
             let pixels = width as usize * height as usize;
             if pixels > 0 {
                 let n_comps = sample_data.len() / pixels;
@@ -2459,7 +2483,7 @@ impl<'a> ContentInterpreter<'a> {
                                 chunk[2] = ((chunk[2] as u16 * a + 127) / 255) as u8;
                             }
                         }
-                        (None, rgba)
+                        (None, rgba, None)
                     } else {
                         // No embedded mask — strip alpha from RGBA → RGB.
                         let mut rgb = Vec::with_capacity(pixels * 3);
@@ -2468,7 +2492,7 @@ impl<'a> ContentInterpreter<'a> {
                             rgb.push(chunk[1]);
                             rgb.push(chunk[2]);
                         }
-                        (Some(ResolvedColorSpace::DeviceRGB), rgb)
+                        (Some(ResolvedColorSpace::DeviceRGB), rgb, None)
                     }
                 } else {
                     let cs = match n_comps {
@@ -2476,13 +2500,13 @@ impl<'a> ContentInterpreter<'a> {
                         4 => ResolvedColorSpace::DeviceCMYK,
                         _ => ResolvedColorSpace::DeviceRGB,
                     };
-                    (Some(cs), sample_data)
+                    (Some(cs), sample_data, None)
                 }
             } else {
-                (resolved_cs, sample_data)
+                (resolved_cs, sample_data, None)
             }
         } else {
-            (resolved_cs, sample_data)
+            (resolved_cs, sample_data, None)
         };
 
         // Image matrix: [width 0 0 -height 0 height] maps unit square to image
@@ -2864,7 +2888,17 @@ impl<'a> ContentInterpreter<'a> {
         // When the mask is larger than the image (e.g., 1-bit text mask on a 2×2
         // color image), upscale the image to the mask dimensions to preserve detail.
         let smask_result = if !is_image_mask {
-            self.resolve_smask(dict)?
+            let dict_smask = self.resolve_smask(dict)?;
+            // Use SMaskInData alpha when no explicit /SMask entry exists
+            if dict_smask.is_none() {
+                if let Some(alpha) = smask_in_data_alpha {
+                    Some((alpha, width, height, None))
+                } else {
+                    None
+                }
+            } else {
+                dict_smask
+            }
         } else {
             None
         };
