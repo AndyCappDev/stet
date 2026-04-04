@@ -323,6 +323,7 @@ pub fn resolve_font(
                 encoding.clone(),
                 widths,
                 has_explicit_encoding,
+                has_pdf_widths,
                 &differences,
                 no_base_encoding,
             ) {
@@ -402,6 +403,7 @@ pub fn resolve_font(
             encoding,
             widths,
             has_explicit_encoding,
+            has_pdf_widths,
             &differences,
             no_base_encoding,
         ),
@@ -1576,6 +1578,7 @@ fn resolve_type1(
     encoding: [Option<String>; 256],
     widths: [f64; 256],
     has_explicit_encoding: bool,
+    has_pdf_widths: bool,
     differences: &[(usize, String)],
     no_base_encoding: bool,
 ) -> Result<PdfFont, PdfError> {
@@ -1688,6 +1691,34 @@ fn resolve_type1(
 
     let fm = font.font_matrix;
     let font_matrix = Matrix::new(fm[0], fm[1], fm[2], fm[3], fm[4], fm[5]);
+
+    // When the PDF has no /Widths array, derive widths from the Type 1 charstrings.
+    let widths = if !has_pdf_widths {
+        let mut derived = [0.0f64; 256];
+        for code in 0..256usize {
+            let glyph_name = encoding[code].as_deref().unwrap_or(".notdef");
+            if glyph_name == ".notdef" {
+                continue;
+            }
+            if let Some(charstring) = font.charstrings.get(glyph_name) {
+                let cs_lookup =
+                    |name: &str| -> Option<Vec<u8>> { font.charstrings.get(name).cloned() };
+                if let Ok(result) = execute_charstring_mm(
+                    charstring,
+                    &font.subrs,
+                    font.len_iv,
+                    false,
+                    Some(&cs_lookup),
+                    font.weight_vector.as_deref(),
+                ) {
+                    derived[code] = result.width_x * fm[0];
+                }
+            }
+        }
+        derived
+    } else {
+        widths
+    };
 
     let weight_vector = font.weight_vector.clone();
     Ok(PdfFont::Type1(Type1PdfFont {
