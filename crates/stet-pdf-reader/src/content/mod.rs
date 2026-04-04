@@ -2337,8 +2337,14 @@ impl<'a> ContentInterpreter<'a> {
         let sample_data = self.resolver.stream_data_from_obj(obj)?;
 
         // For DCTDecode, the JPEG's actual dimensions may differ from the PDF
-        // dict's /Width and /Height.  Trust the JPEG header when they disagree.
-        let filter_is_dct = matches!(dict.get_name(b"Filter"), Some(b"DCTDecode" | b"DCT"));
+        // dict's /Width and /Height.  Trust the image header when they disagree.
+        let filter_name_raw = dict.get_name(b"Filter");
+        let filter_is_dct = matches!(filter_name_raw, Some(b"DCTDecode" | b"DCT"));
+        // JPXDecode may be a single filter name or inside a filter array
+        let filter_is_jpx = matches!(filter_name_raw, Some(b"JPXDecode" | b"JPX"))
+            || dict.get_array(b"Filter").is_some_and(|arr| {
+                arr.iter().any(|f| matches!(f.as_name(), Some(b"JPXDecode" | b"JPX")))
+            });
         let (width, height) = if filter_is_dct {
             if let Some(raw) = self.resolver.raw_stream_bytes(obj)
                 && let Some((jw, jh)) = crate::filters::jpeg_dimensions(raw)
@@ -2348,6 +2354,28 @@ impl<'a> ContentInterpreter<'a> {
             } else {
                 (width, height)
             }
+        } else if filter_is_jpx {
+            #[cfg(feature = "jpx")]
+            {
+                // JPXDecode: the JPEG 2000 stream may have different dimensions
+                // than the PDF dict (malformed but common). Decode the filter chain
+                // up to but not including JPXDecode to get the raw JP2 data.
+                if let Some(raw) = self.resolver.raw_stream_bytes(obj) {
+                    // Apply preceding filters (e.g. ASCIIHexDecode) to get JP2 data
+                    let jp2_data = crate::filters::decode_pre_jpx(raw, dict);
+                    if let Some((jw, jh)) = crate::filters::jpx_dimensions(&jp2_data)
+                        && (jw != width || jh != height)
+                    {
+                        (jw, jh)
+                    } else {
+                        (width, height)
+                    }
+                } else {
+                    (width, height)
+                }
+            }
+            #[cfg(not(feature = "jpx"))]
+            { (width, height) }
         } else {
             (width, height)
         };
@@ -2667,9 +2695,8 @@ impl<'a> ContentInterpreter<'a> {
         // Convert data if BPC != 8 (but NOT for image masks — keep raw 1-bit data).
         // JPXDecode (JPEG 2000) and DCTDecode (JPEG) always produce 8-bit output
         // regardless of the /BitsPerComponent value in the PDF dict.
-        let filter_name = dict.get_name(b"Filter");
-        let is_jpx = filter_name == Some(b"JPXDecode");
-        let is_dct = filter_name == Some(b"DCTDecode");
+        let is_jpx = filter_is_jpx;
+        let is_dct = filter_is_dct;
         let is_indexed = matches!(&color_space, ImageColorSpace::Indexed { .. });
         // Expand sub-byte samples (1/2/4 BPC) to 8-bit since they're packed
         // with geometry-dependent alignment. Downsample 16-bit to 8-bit (take

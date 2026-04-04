@@ -1087,6 +1087,27 @@ pub fn jpx_color_info(data: &[u8]) -> Option<(u8, bool)> {
     Some((image.color_space().num_channels(), image.has_alpha()))
 }
 
+/// Extract image dimensions from a JPEG 2000 stream without full decode.
+/// Returns `(width, height)`.
+#[cfg(feature = "jpx")]
+pub fn jpx_dimensions(data: &[u8]) -> Option<(u32, u32)> {
+    let image = hayro_jpeg2000::Image::new(data, &hayro_jpeg2000::DecodeSettings::default()).ok()?;
+    Some((image.width(), image.height()))
+}
+
+/// Decode filters preceding JPXDecode in a filter chain (e.g. ASCIIHexDecode).
+/// Returns the raw JP2/J2K data ready for `jpx_dimensions` / `jpx_color_info`.
+pub fn decode_pre_jpx(raw: &[u8], dict: &crate::objects::PdfDict) -> Vec<u8> {
+    let (filters, parms) = parse_filters(dict, None).unwrap_or_default();
+    // Apply all filters except JPXDecode
+    let pre_count = filters.iter().take_while(|f| !matches!(f, Filter::JPXDecode)).count();
+    if pre_count == 0 {
+        return raw.to_vec();
+    }
+    let pre_parms: Vec<_> = parms.into_iter().take(pre_count).collect();
+    decode_stream(raw, &filters[..pre_count], &pre_parms, None).unwrap_or_else(|_| raw.to_vec())
+}
+
 /// Apply PNG or TIFF predictor to decoded data.
 fn apply_predictor(data: &[u8], parms: &PdfDict, predictor: i64) -> Result<Vec<u8>, PdfError> {
     let columns = parms.get_int(b"Columns").unwrap_or(1) as usize;
