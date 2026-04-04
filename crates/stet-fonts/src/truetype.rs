@@ -181,18 +181,52 @@ pub fn get_glyf_data(font_data: &[u8], gid: u16) -> Option<Vec<u8>> {
         return None; // Empty glyph (e.g., space)
     }
 
-    // For locx/glyx (PDF-subset), offsets are absolute within the font data
-    let abs_offset = if has_locx { offset } else { glyf_off + offset };
-    let abs_next = if has_locx {
+    // Handle non-monotonic loca tables (found in some PDF font subsets).
+    // When loca[gid+1] < loca[gid], the glyph data is stored out of order in
+    // the glyf table. Determine the glyph's end by finding the smallest loca
+    // offset that is strictly greater than this glyph's start offset.
+    let end_offset = if next_offset >= offset {
         next_offset
     } else {
-        glyf_off + next_offset
+        let num_glyphs = get_num_glyphs(font_data) as usize;
+        let entry_size = if use_long { 4 } else { 2 };
+        let mut best = if has_locx {
+            font_data.len()
+        } else {
+            _glyf_len
+        };
+        for i in 0..=num_glyphs {
+            let pos = loca_off + i * entry_size;
+            let entry = if use_long {
+                if pos + 4 <= font_data.len() {
+                    read_u32(font_data, pos) as usize
+                } else {
+                    continue;
+                }
+            } else if pos + 2 <= font_data.len() {
+                read_u16(font_data, pos) as usize * 2
+            } else {
+                continue;
+            };
+            if entry > offset && entry < best {
+                best = entry;
+            }
+        }
+        best
     };
-    if abs_offset > font_data.len() || abs_next > font_data.len() || abs_offset > abs_next {
+
+    // For locx/glyx (PDF-subset), offsets are absolute within the font data
+    let abs_offset = if has_locx { offset } else { glyf_off + offset };
+    let abs_end = if has_locx {
+        end_offset
+    } else {
+        glyf_off + end_offset
+    };
+    if abs_offset >= font_data.len() || abs_end > font_data.len() || abs_offset >= abs_end {
         return None;
     }
 
-    Some(font_data[abs_offset..abs_next].to_vec())
+    Some(font_data[abs_offset..abs_end].to_vec())
 }
 
 /// Point from glyf contour parsing.
