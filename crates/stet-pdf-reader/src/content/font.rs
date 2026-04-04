@@ -2382,6 +2382,40 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
             // Some PDFs use /FontFile instead of /FontFile3 — accept both.
             if let Some(ff_ref) = desc.get(b"FontFile3").or_else(|| desc.get(b"FontFile")) {
                 let font_data = resolver.stream_data_from_obj(ff_ref)?;
+                // Some PDFs mislabel TrueType data as CIDFontType0C. Detect the
+                // TrueType magic (\x00\x01\x00\x00) and route to TrueType path.
+                let is_truetype = font_data.len() > 4
+                    && &font_data[0..4] == b"\x00\x01\x00\x00";
+                if is_truetype {
+                    let mut font_data = font_data;
+                    sanitize_index_to_loc_format(&mut font_data);
+                    let units_per_em = get_units_per_em(&font_data) as f64;
+                    let cmap = parse_cmap(&font_data);
+                    let (identity_cid_to_gid, cid_to_gid_map) =
+                        if let Some(name) = cid_font_dict.get_name(b"CIDToGIDMap") {
+                            (name == b"Identity", None)
+                        } else {
+                            (true, None)
+                        };
+                    return Ok(PdfFont::CidTrueType(CidTrueTypePdfFont {
+                        data: font_data,
+                        default_width,
+                        cid_widths,
+                        cmap,
+                        units_per_em,
+                        identity_cid_to_gid,
+                        substituted: false,
+                        cid_to_gid_map,
+                        to_unicode,
+                        ordering: ordering.clone(),
+                        ucs2_encoding,
+                        code_lengths,
+                        code_to_cid: code_to_cid.clone(),
+                        wmode,
+                        dw2,
+                        w2: w2.clone(),
+                    }));
+                }
                 // FontFile3 may be raw CFF or OpenType/CFF (OTTO wrapper)
                 if font_data.len() > 4 && &font_data[0..4] == b"OTTO" {
                     // Parse CIDToGIDMap for OpenType-wrapped CFF
