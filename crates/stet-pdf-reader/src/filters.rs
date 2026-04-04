@@ -616,6 +616,39 @@ fn decode_dct(data: &[u8]) -> Result<Vec<u8>, PdfError> {
             if let Some(patched) = patch_jpeg_dnl_height(data) {
                 return decode_dct(&patched);
             }
+            // Truncated JPEGs: try tolerant decode that returns partial data.
+            if let Some(pixels) = decode_dct_tolerant(data) {
+                return Ok(pixels);
+            }
+            // Last resort: append EOI marker to truncated JPEG and retry.
+            // jpeg-decoder may succeed when the stream is terminated properly.
+            {
+                let mut padded = data.to_vec();
+                // Strip any partial marker at end, then add EOI
+                if padded.last() == Some(&0xFF) {
+                    padded.pop();
+                }
+                padded.extend_from_slice(&[0xFF, 0xD9]);
+                let mut retry_dec = Decoder::new(&padded[..]);
+                if has_adobe_rgb_marker(&padded) || is_raw_rgb_jpeg(&padded) {
+                    retry_dec.set_color_transform(jpeg_decoder::ColorTransform::RGB);
+                } else if needs_ycck_override(&padded) {
+                    retry_dec.set_color_transform(jpeg_decoder::ColorTransform::YCCK);
+                }
+                if let Ok(pixels) = retry_dec.decode() {
+                    // Apply same CMYK inversion as the normal path
+                    if let Some(info) = retry_dec.info()
+                        && info.pixel_format == jpeg_decoder::PixelFormat::CMYK32
+                    {
+                        let mut result = pixels;
+                        for b in result.iter_mut() {
+                            *b = 255 - *b;
+                        }
+                        return Ok(result);
+                    }
+                    return Ok(pixels);
+                }
+            }
             return Err(PdfError::DecompressionError(format!("DCTDecode: {e}")));
         }
     };
@@ -649,6 +682,27 @@ fn decode_dct_zune(data: &[u8]) -> Option<Vec<u8>> {
         .jpeg_set_out_colorspace(zune_core::colorspace::ColorSpace::LumaA);
     let mut decoder = JpegDecoder::new_with_options(std::io::Cursor::new(data), options);
     decoder.decode().ok()
+}
+
+/// Tolerant JPEG decoder for truncated streams.
+/// Returns partial pixel data for whatever MCU rows decoded successfully.
+/// Applies the same CMYK channel inversion as the primary decoder path.
+fn decode_dct_tolerant(data: &[u8]) -> Option<Vec<u8>> {
+    use zune_jpeg::JpegDecoder;
+    // Detect component count from SOF to set the right output colorspace.
+    // Without this, zune-jpeg converts CMYK to RGB, producing wrong data.
+    let n_comps = jpeg_dimensions_and_components(data).map(|(_, _, n)| n).unwrap_or(3);
+    let out_cs = match n_comps {
+        1 => zune_core::colorspace::ColorSpace::Luma,
+        4 => zune_core::colorspace::ColorSpace::CMYK,
+        _ => zune_core::colorspace::ColorSpace::RGB,
+    };
+    let options = zune_core::options::DecoderOptions::default()
+        .set_strict_mode(false)
+        .jpeg_set_out_colorspace(out_cs);
+    let mut decoder = JpegDecoder::new_with_options(std::io::Cursor::new(data), options);
+    let pixels = decoder.decode().ok()?;
+    Some(pixels)
 }
 
 /// Patch a JPEG that uses DNL (Define Number of Lines, marker 0xFFDC) to specify
@@ -749,6 +803,36 @@ pub fn patch_jpeg_sof_height(data: &mut [u8], new_height: u16) {
         };
         pos += 2 + seg_len;
     }
+}
+
+/// Extract width, height, and component count from a JPEG SOF header.
+fn jpeg_dimensions_and_components(data: &[u8]) -> Option<(u32, u32, u8)> {
+    if data.len() < 2 || data[0] != 0xFF || data[1] != 0xD8 {
+        return None;
+    }
+    let mut pos = 2;
+    while pos + 4 < data.len() {
+        if data[pos] != 0xFF {
+            pos += 1;
+            continue;
+        }
+        let marker = data[pos + 1];
+        if (0xC0..=0xCF).contains(&marker) && marker != 0xC4 && marker != 0xC8 && marker != 0xCC
+        {
+            if pos + 9 < data.len() {
+                let h = ((data[pos + 5] as u32) << 8) | data[pos + 6] as u32;
+                let w = ((data[pos + 7] as u32) << 8) | data[pos + 8] as u32;
+                let n = data[pos + 9];
+                return Some((w, h, n));
+            }
+        }
+        if marker == 0xDA {
+            break;
+        }
+        let seg_len = ((data[pos + 2] as usize) << 8) | data[pos + 3] as usize;
+        pos += 2 + seg_len;
+    }
+    None
 }
 
 /// When the JPEG uses DNL (Define Number of Lines, marker 0xFFDC) — indicated by
