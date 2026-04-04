@@ -159,6 +159,9 @@ pub struct CidCffPdfFont {
     pub dw2: [f64; 2],
     /// Per-CID vertical metrics from /W2: CID → (w1, v_x, v_y).
     pub w2: HashMap<u16, [f64; 3]>,
+    /// Pre-computed glyph paths for Type 1 fonts used as CIDFontType0.
+    /// When set, glyph_path_cid uses this cache instead of CFF charstrings.
+    pub type1_paths: Option<HashMap<u16, PsPath>>,
 }
 
 /// Type 3 font: glyphs defined as content streams (CharProcs).
@@ -1033,6 +1036,7 @@ fn create_cid_cff_from_otf(
         wmode,
         dw2,
         w2,
+        type1_paths: None,
     }))
 }
 
@@ -1079,6 +1083,100 @@ fn create_cid_cff_from_raw(
         wmode,
         dw2,
         w2,
+        type1_paths: None,
+    }))
+}
+
+/// Create a CID font from Type 1 font data mislabeled as CIDFontType0.
+///
+/// Parses the Type 1 font, maps each CID to a glyph name via ToUnicode + AGL,
+/// executes the charstring, and stores pre-computed paths in a CidCffPdfFont.
+fn create_cid_from_type1(
+    font_data: &[u8],
+    default_width: f64,
+    cid_widths: HashMap<u16, f64>,
+    _to_unicode: &HashMap<u16, u32>,
+    code_lengths: [u8; 256],
+    code_to_cid: HashMap<u32, u32>,
+    wmode: u8,
+    dw2: [f64; 2],
+    w2: HashMap<u16, [f64; 3]>,
+) -> Result<PdfFont, PdfError> {
+    let font = parse_type1(font_data)
+        .map_err(|e| PdfError::Other(format!("Type1 parse error: {e}")))?;
+    let fm = font.font_matrix;
+    let font_matrix = Matrix::new(fm[0], fm[1], fm[2], fm[3], fm[4], fm[5]);
+
+    // Build CID → glyph path mapping.
+    // The CID directly indexes the Type 1 font's built-in encoding:
+    // CID N → encoding[N] → glyph name → charstring → path.
+    let mut paths = HashMap::new();
+    for (&cid, _) in &cid_widths {
+        let glyph_name = if (cid as usize) < font.encoding.len() {
+            font.encoding[cid as usize].as_str()
+        } else {
+            ".notdef"
+        };
+        if let Some(cs) = font.charstrings.get(glyph_name) {
+            if let Ok(result) = execute_charstring(cs, &font.subrs, font.len_iv, false) {
+                let path = result.path.transform(&font_matrix);
+                paths.insert(cid, path);
+            }
+        }
+    }
+    // Also map CIDs that are in the encoding but not in /W
+    for (code, name) in font.encoding.iter().enumerate() {
+        let cid = code as u16;
+        if paths.contains_key(&cid) {
+            continue;
+        }
+        {
+            let name = name.as_str();
+            if name != ".notdef" {
+                if let Some(cs) = font.charstrings.get(name) {
+                    if let Ok(result) = execute_charstring(cs, &font.subrs, font.len_iv, false) {
+                        let path = result.path.transform(&font_matrix);
+                        paths.insert(cid, path);
+                    }
+                }
+            }
+        }
+    }
+
+    // Create a dummy CffFont — the type1_paths field will be used instead
+    let dummy_cff = stet_fonts::cff_parser::CffFont {
+        name: font.font_name.clone(),
+        font_matrix: fm,
+        font_bbox: [0.0; 4],
+        char_strings: Vec::new(),
+        global_subrs: Vec::new(),
+        local_subrs: Vec::new(),
+        charset: Vec::new(),
+        encoding: Vec::new(),
+        default_width_x: 0.0,
+        nominal_width_x: 0.0,
+        is_cid: false,
+        fd_array: Vec::new(),
+        fd_select: Vec::new(),
+        ros: None,
+        cid_to_gid: Vec::new(),
+    };
+
+    Ok(PdfFont::CidCff(CidCffPdfFont {
+        font: dummy_cff,
+        default_width,
+        cid_widths,
+        font_matrix,
+        cmap: None,
+        pdf_cid_to_gid: None,
+        identity_cid_to_gid: true,
+        ordering: Vec::new(),
+        code_lengths,
+        code_to_cid,
+        wmode,
+        dw2,
+        w2,
+        type1_paths: Some(paths),
     }))
 }
 
@@ -2516,6 +2614,23 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                         w2.clone(),
                     );
                 }
+                // Detect Type 1 font data (ASCII "%!" or PFB 0x80) mislabeled
+                // as CIDFontType0.  Parse as Type 1, pre-compute glyph paths
+                // for each CID using ToUnicode → AGL → charstrings.
+                let is_type1 = font_data.starts_with(b"%!") || font_data.first() == Some(&0x80);
+                if is_type1 {
+                    return create_cid_from_type1(
+                        &font_data,
+                        default_width,
+                        cid_widths,
+                        &to_unicode,
+                        code_lengths,
+                        code_to_cid.clone(),
+                        wmode,
+                        dw2,
+                        w2.clone(),
+                    );
+                }
                 let fonts = parse_cff(&font_data)
                     .map_err(|e| PdfError::Other(format!("CFF parse error: {e}")))?;
                 let font = fonts
@@ -2538,6 +2653,7 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                     wmode,
                     dw2,
                     w2: w2.clone(),
+                    type1_paths: None,
                 }))
             } else {
                 // Not embedded — substitute with a system font
@@ -3500,6 +3616,10 @@ impl CidCffPdfFont {
     }
 
     fn glyph_path_cid(&self, cid: u16) -> Option<PsPath> {
+        // Type 1 fonts wrapped as CIDFontType0: use pre-computed paths.
+        if let Some(ref paths) = self.type1_paths {
+            return paths.get(&cid).cloned();
+        }
         // For embedded OTF/CFF with PDF CIDToGIDMap, use the PDF's mapping.
         // For OpenType/CFF substitutes with a cmap, map Unicode → GID directly.
         // For embedded CID-keyed CFF, use cid_to_gid mapping.
