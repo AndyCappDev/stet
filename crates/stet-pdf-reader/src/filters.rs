@@ -717,6 +717,40 @@ fn patch_jpeg_dnl_height(data: &[u8]) -> Option<Vec<u8>> {
 /// Extract image dimensions from a JPEG's SOF marker.
 /// Returns `(width, height)` if found.
 ///
+/// Patch the SOF height field in raw JPEG data.
+/// Used when the SOF header has a streaming-encoder placeholder height (e.g.
+/// 60000) that exceeds the PDF dict's authoritative /Height value.
+pub fn patch_jpeg_sof_height(data: &mut [u8], new_height: u16) {
+    if data.len() < 2 || data[0] != 0xFF || data[1] != 0xD8 {
+        return;
+    }
+    let mut pos = 2;
+    while pos + 4 < data.len() {
+        if data[pos] != 0xFF {
+            pos += 1;
+            continue;
+        }
+        let marker = data[pos + 1];
+        if (0xC0..=0xCF).contains(&marker) && marker != 0xC4 && marker != 0xC8 && marker != 0xCC
+        {
+            if pos + 6 < data.len() {
+                data[pos + 5] = (new_height >> 8) as u8;
+                data[pos + 6] = (new_height & 0xFF) as u8;
+            }
+            return;
+        }
+        if marker == 0xDA {
+            return; // SOS — too late
+        }
+        let seg_len = if pos + 3 < data.len() {
+            ((data[pos + 2] as usize) << 8) | data[pos + 3] as usize
+        } else {
+            return;
+        };
+        pos += 2 + seg_len;
+    }
+}
+
 /// When the JPEG uses DNL (Define Number of Lines, marker 0xFFDC) — indicated by
 /// a dummy SOF height of 0 or 0xFFFF — scans the bitstream for the DNL marker
 /// and returns its height instead.

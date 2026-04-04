@@ -2361,11 +2361,6 @@ impl<'a> ContentInterpreter<'a> {
         // 0 (default) = no embedded mask, 1 or 2 = alpha channel present in JP2 data.
         let smask_in_data = dict.get_int(b"SMaskInData").unwrap_or(0);
 
-        // Decode the stream data
-        let sample_data = self.resolver.stream_data_from_obj(obj)?;
-
-        // For DCTDecode, the JPEG's actual dimensions may differ from the PDF
-        // dict's /Width and /Height.  Trust the image header when they disagree.
         let filter_name_raw = dict.get_name(b"Filter");
         let filter_is_dct = matches!(filter_name_raw, Some(b"DCTDecode" | b"DCT"));
         // JPXDecode may be a single filter name or inside a filter array
@@ -2373,10 +2368,39 @@ impl<'a> ContentInterpreter<'a> {
             || dict.get_array(b"Filter").is_some_and(|arr| {
                 arr.iter().any(|f| matches!(f.as_name(), Some(b"JPXDecode" | b"JPX")))
             });
+
+        // Decode the stream data. For DCTDecode with a bogus SOF height
+        // (streaming encoder placeholder like 60000), patch the JPEG header
+        // to the PDF dict height before decoding to avoid wasting time on
+        // excess zero-filled rows.
+        let sample_data = if filter_is_dct {
+            if let Some(raw) = self.resolver.raw_stream_bytes(obj)
+                && let Some((_jw, jh)) = crate::filters::jpeg_dimensions(raw)
+                && jh > height * 2
+            {
+                let mut patched = raw.to_vec();
+                crate::filters::patch_jpeg_sof_height(&mut patched, height as u16);
+                crate::filters::decode_stream(
+                    &patched,
+                    &[crate::filters::Filter::DCTDecode],
+                    &[],
+                    None,
+                )?
+            } else {
+                self.resolver.stream_data_from_obj(obj)?
+            }
+        } else {
+            self.resolver.stream_data_from_obj(obj)?
+        };
+
+        // For DCTDecode, the JPEG's actual dimensions may differ from the PDF
+        // dict's /Width and /Height.  Trust the image header when they disagree,
+        // but only when the JPEG dimensions are close to the PDF dict values.
         let (width, height) = if filter_is_dct {
             if let Some(raw) = self.resolver.raw_stream_bytes(obj)
                 && let Some((jw, jh)) = crate::filters::jpeg_dimensions(raw)
                 && (jw != width || jh != height)
+                && jw <= width * 2 && jh <= height * 2
             {
                 (jw, jh)
             } else {
