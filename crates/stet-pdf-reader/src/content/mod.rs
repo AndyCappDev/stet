@@ -1776,10 +1776,28 @@ impl<'a> ContentInterpreter<'a> {
                     i += 1;
                     self.render_unicode_glyph(byte, font_size, char_spacing, th, text_rise, &font_matrix, render_mode);
                 } else {
-                    // 2-byte code
-                    let raw_code = ((text[i] as u32) << 8) | (text[i + 1] as u32);
+                    // Multi-byte code (2, 3, or 4 bytes from codespace ranges).
+                    let width = code_width.min(text.len() - i);
+                    let mut raw_code = 0u32;
+                    for b in &text[i..i + width] {
+                        raw_code = (raw_code << 8) | (*b as u32);
+                    }
                     let cid = font.resolve_code_to_cid(raw_code) as u16;
-                    i += 2;
+                    // If the multi-byte code resolves to CID 0 (or the raw code
+                    // itself for identity), the sequence may be invalid (e.g.
+                    // UTF-8 continuation bytes out of range).  Try interpreting
+                    // the first byte as a 1-byte code instead.
+                    let (cid, consumed) = if cid == 0 || (cid == raw_code as u16 && width > 2) {
+                        let byte_cid = font.resolve_code_to_cid(text[i] as u32) as u16;
+                        if byte_cid != 0 && byte_cid != text[i] as u16 {
+                            (byte_cid, 1)
+                        } else {
+                            (cid, width)
+                        }
+                    } else {
+                        (cid, width)
+                    };
+                    i += consumed;
                     if font.has_cid_glyph(cid) {
                         // CID maps to a valid GID in the font
                         self.render_cid_glyph(&font, cid, font_size, char_spacing, th, text_rise, &font_matrix, render_mode);

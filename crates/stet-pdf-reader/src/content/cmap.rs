@@ -54,6 +54,7 @@ impl CMap {
         let mut wmode: u8 = 0;
 
         let text = String::from_utf8_lossy(data);
+
         #[allow(clippy::while_let_on_iterator)]
         let mut lines = text.lines();
 
@@ -118,6 +119,7 @@ impl CMap {
 
             // Parse codespace ranges
             if line.ends_with("begincodespacerange") {
+
                 while let Some(range_line) = lines.next() {
                     let range_line = range_line.trim();
                     if range_line == "endcodespacerange" {
@@ -131,6 +133,7 @@ impl CMap {
 
             // Parse cidchar mappings: <code> cid
             if line.ends_with("begincidchar") {
+
                 while let Some(char_line) = lines.next() {
                     let char_line = char_line.trim();
                     if char_line == "endcidchar" {
@@ -138,6 +141,9 @@ impl CMap {
                     }
                     if let Some((code, cid)) = parse_cidchar_line(char_line) {
                         code_to_cid.insert(code, cid);
+
+                    } else {
+
                     }
                 }
             }
@@ -217,10 +223,10 @@ impl CMap {
 /// Parse a codespace range line like `<20> <20>` or `<0000> <19FF>`.
 /// Returns (low_bytes, high_bytes).
 fn parse_codespace_range(line: &str) -> Option<(Vec<u8>, Vec<u8>)> {
-    let parts: Vec<&str> = line.split_whitespace().collect();
-    if parts.len() >= 2 {
-        let low = parse_hex_bytes(parts[0])?;
-        let high = parse_hex_bytes(parts[1])?;
+    let tokens = split_cmap_tokens(line);
+    if tokens.len() >= 2 {
+        let low = parse_hex_bytes(&tokens[0])?;
+        let high = parse_hex_bytes(&tokens[1])?;
         if low.len() == high.len() && !low.is_empty() {
             Some((low, high))
         } else {
@@ -252,6 +258,42 @@ fn parse_hex_bytes(s: &str) -> Option<Vec<u8>> {
     }
 }
 
+/// Split a CMap line into tokens at `>` boundaries and whitespace.
+/// Handles concatenated tokens like `<e0>151` or `<20><5b>1`.
+fn split_cmap_tokens(line: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut i = 0;
+    let bytes = line.as_bytes();
+    while i < bytes.len() {
+        // Skip whitespace
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        if bytes[i] == b'<' {
+            // Hex token: consume until '>'
+            let start = i;
+            while i < bytes.len() && bytes[i] != b'>' {
+                i += 1;
+            }
+            if i < bytes.len() {
+                i += 1; // consume '>'
+            }
+            tokens.push(line[start..i].to_string());
+        } else {
+            // Non-hex token: consume until whitespace or '<'
+            let start = i;
+            while i < bytes.len() && !bytes[i].is_ascii_whitespace() && bytes[i] != b'<' {
+                i += 1;
+            }
+            tokens.push(line[start..i].to_string());
+        }
+    }
+    tokens
+}
+
 /// Parse a hex string like `<0041>` into a u32.
 fn parse_hex(s: &str) -> Option<u32> {
     let s = s.trim();
@@ -262,28 +304,28 @@ fn parse_hex(s: &str) -> Option<u32> {
     }
 }
 
-/// Parse a cidchar line: `<code> cid`
+/// Parse a cidchar line: `<code> cid` or `<code>cid` (no space).
 fn parse_cidchar_line(line: &str) -> Option<(u32, u32)> {
-    let parts: Vec<&str> = line.split_whitespace().collect();
-    if parts.len() >= 2 {
-        let code = parse_hex(parts[0])?;
-        let cid = parts[1].parse::<u32>().ok()?;
+    let tokens = split_cmap_tokens(line);
+    if tokens.len() >= 2 {
+        let code = parse_hex(&tokens[0])?;
+        let cid = tokens[1].parse::<u32>().ok()?;
         Some((code, cid))
     } else {
         None
     }
 }
 
-/// Parse a cidrange line: `<start> <end> cid_start`
+/// Parse a cidrange line: `<start> <end> cid_start` or `<start><end>cid_start`.
 fn parse_cidrange_line(line: &str) -> Option<(u32, u32, u32)> {
-    let parts: Vec<&str> = line.split_whitespace().collect();
-    if parts.len() >= 3 {
-        let start = parse_hex(parts[0])?;
-        let end = parse_hex(parts[1])?;
-        let cid_start = if parts[2].starts_with('<') {
-            parse_hex(parts[2])?
+    let tokens = split_cmap_tokens(line);
+    if tokens.len() >= 3 {
+        let start = parse_hex(&tokens[0])?;
+        let end = parse_hex(&tokens[1])?;
+        let cid_start = if tokens[2].starts_with('<') {
+            parse_hex(&tokens[2])?
         } else {
-            parts[2].parse::<u32>().ok()?
+            tokens[2].parse::<u32>().ok()?
         };
         Some((start, end, cid_start))
     } else {
@@ -291,12 +333,12 @@ fn parse_cidrange_line(line: &str) -> Option<(u32, u32, u32)> {
     }
 }
 
-/// Parse a bfchar line: `<code> <unicode>`
+/// Parse a bfchar line: `<code> <unicode>` or `<code><unicode>`.
 fn parse_bfchar_line(line: &str) -> Option<(u32, u32)> {
-    let parts: Vec<&str> = line.split_whitespace().collect();
-    if parts.len() >= 2 {
-        let code = parse_hex(parts[0])?;
-        let unicode = parse_hex(parts[1])?;
+    let tokens = split_cmap_tokens(line);
+    if tokens.len() >= 2 {
+        let code = parse_hex(&tokens[0])?;
+        let unicode = parse_hex(&tokens[1])?;
         Some((code, unicode))
     } else {
         None
