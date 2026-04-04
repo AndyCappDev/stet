@@ -31,9 +31,12 @@ pub struct Resolver<'a> {
     /// Encryption state, if the PDF is encrypted.
     encryption: Option<crate::crypto::EncryptionState>,
     /// Cache of decompressed stream data by object number.
-    /// Avoids re-decompressing the same stream (e.g., ICC profiles
-    /// referenced by thousands of Indexed color spaces).
+    /// Small streams (≤1MB) are cached immediately; larger streams use
+    /// "cache on second sight" to avoid caching one-off large images
+    /// while still caching reused ones (e.g., Type 3 emoji glyphs).
     stream_cache: RefCell<HashMap<u32, Vec<u8>>>,
+    /// Tracks obj_nums that have been decoded at least once (for large streams).
+    stream_seen: RefCell<HashSet<u32>>,
     /// Cache of decompressed object streams (ObjStm).
     /// Avoids re-decompressing the same ObjStm for every object within it.
     objstm_cache: RefCell<HashMap<u32, ObjStmCache>>,
@@ -53,6 +56,7 @@ impl<'a> Resolver<'a> {
             resolving: RefCell::new(HashSet::new()),
             encryption: None,
             stream_cache: RefCell::new(HashMap::new()),
+            stream_seen: RefCell::new(HashSet::new()),
             objstm_cache: RefCell::new(HashMap::new()),
             scan_map: RefCell::new(None),
         }
@@ -71,6 +75,7 @@ impl<'a> Resolver<'a> {
             resolving: RefCell::new(HashSet::new()),
             encryption,
             stream_cache: RefCell::new(HashMap::new()),
+            stream_seen: RefCell::new(HashSet::new()),
             objstm_cache: RefCell::new(HashMap::new()),
             scan_map: RefCell::new(None),
         }
@@ -201,12 +206,20 @@ impl<'a> Resolver<'a> {
                     filters::decode_stream(&raw, &filter_list, &parms, jbig2_globals.as_deref())
                 }?;
 
-                // Cache small streams (ICC profiles, lookup tables, CMaps) to avoid
-                // repeated decompression. Skip large streams (images, page content).
+                // Cache small streams immediately. For large streams, use
+                // "cache on second sight": first access just marks it as seen,
+                // second access caches it. This avoids caching one-off large
+                // images while caching reused ones (e.g., Type 3 emoji glyphs).
                 if result.len() <= 1_048_576 {
                     self.stream_cache
                         .borrow_mut()
                         .insert(obj_num, result.clone());
+                } else if self.stream_seen.borrow().contains(&obj_num) {
+                    self.stream_cache
+                        .borrow_mut()
+                        .insert(obj_num, result.clone());
+                } else {
+                    self.stream_seen.borrow_mut().insert(obj_num);
                 }
                 Ok(result)
             }

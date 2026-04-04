@@ -179,7 +179,7 @@ fn handle_function_based(
     let image_matrix = Matrix::new(width as f64, 0.0, 0.0, -(height as f64), 0.0, height as f64);
 
     display_list.push(DisplayElement::Image {
-        sample_data: rgba,
+        sample_data: std::sync::Arc::new(rgba),
         params: ImageParams {
             width,
             height,

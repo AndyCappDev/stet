@@ -4,6 +4,8 @@
 
 //! Display list — records drawing operations for deferred replay to a device.
 
+use std::sync::Arc;
+
 use crate::device::{
     AxialShadingParams, ClipParams, FillParams, ImageParams, MeshShadingParams, PatchShadingParams,
     PatternFillParams, RadialShadingParams, StrokeParams, TextParams,
@@ -65,7 +67,7 @@ pub enum DisplayElement {
     InitClip,
     /// Draw an image (raw sample data in native color space).
     Image {
-        sample_data: Vec<u8>,
+        sample_data: Arc<Vec<u8>>,
         params: ImageParams,
     },
     /// Erase the page (fill with white).

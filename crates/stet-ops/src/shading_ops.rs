@@ -373,7 +373,7 @@ fn build_type1_shading(
     let _ = bbox;
 
     ctx.display_list.push(DisplayElement::Image {
-        sample_data: rgb_data,
+        sample_data: std::sync::Arc::new(rgb_data),
         params: ImageParams {
             width: size as u32,
             height: size as u32,

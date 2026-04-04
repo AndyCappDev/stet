@@ -1795,7 +1795,7 @@ fn draw_image_to_device(
         painted_channels: 0,
     };
     ctx.display_list.push(DisplayElement::Image {
-        sample_data,
+        sample_data: std::sync::Arc::new(sample_data),
         params,
     });
 }

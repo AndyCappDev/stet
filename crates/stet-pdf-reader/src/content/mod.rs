@@ -80,6 +80,21 @@ impl Operand {
     }
 }
 
+/// Cached result of a fully-processed Image XObject.
+/// Keyed by obj_num in the content interpreter's `image_cache`.
+#[derive(Clone)]
+struct CachedImage {
+    sample_data: Arc<Vec<u8>>,
+    width: u32,
+    height: u32,
+    color_space: ImageColorSpace,
+    bits_per_component: u8,
+    interpolate: bool,
+    mask_color: Option<Vec<u8>>,
+    /// For soft-masked images: (mask_gray_data, mask_width, mask_height, matte).
+    smask: Option<(Arc<Vec<u8>>, u32, u32, Option<Vec<f64>>)>,
+}
+
 /// Tracks the scope of an active soft mask in the display list.
 struct SoftMaskScope {
     /// Index in display_list where the mask scope began.
@@ -153,6 +168,10 @@ pub struct ContentInterpreter<'a> {
     form_cull_y: Option<(f64, f64)>,
     /// When true, the current BT/ET block is being skipped (offscreen).
     bt_culled: bool,
+    /// Cache of fully-processed Image XObject data, keyed by obj_num.
+    /// Avoids re-decompressing and re-converting the same image (e.g.,
+    /// Type 3 emoji glyphs that reference the same XObject 73 times).
+    image_cache: std::collections::HashMap<u32, CachedImage>,
 }
 
 impl<'a> ContentInterpreter<'a> {
@@ -196,6 +215,7 @@ impl<'a> ContentInterpreter<'a> {
             cs_index: None,
             form_cull_y: None,
             bt_culled: false,
+            image_cache: std::collections::HashMap::new(),
         }
     }
 
@@ -2275,6 +2295,14 @@ impl<'a> ContentInterpreter<'a> {
 
     /// Handle an Image XObject.
     fn handle_image_xobject(&mut self, obj: &PdfObj, dict: &PdfDict) -> Result<(), PdfError> {
+        // Check image cache: if we've already processed this XObject, reuse the
+        // decoded data with fresh graphics-state params (CTM, alpha, blend, etc.).
+        if let PdfObj::Ref(obj_num, _) = obj {
+            if let Some(cached) = self.image_cache.get(obj_num).cloned() {
+                return self.emit_cached_image(cached);
+            }
+        }
+
         // Width/Height may be indirect references in some PDFs
         let width = self.resolve_dict_int(dict, b"Width")
             .ok_or(PdfError::Other("image missing Width".into()))? as u32;
@@ -2458,7 +2486,7 @@ impl<'a> ContentInterpreter<'a> {
 
             let mut mask_dl = DisplayList::new();
             mask_dl.push(DisplayElement::Image {
-                sample_data: gray,
+                sample_data: Arc::new(gray),
                 params: ImageParams {
                     width,
                     height,
@@ -2553,7 +2581,7 @@ impl<'a> ContentInterpreter<'a> {
 
             let mut mask_dl = DisplayList::new();
             mask_dl.push(DisplayElement::Image {
-                sample_data: gray,
+                sample_data: Arc::new(gray),
                 params: ImageParams {
                     width, height,
                     color_space: ImageColorSpace::DeviceGray,
@@ -2953,12 +2981,28 @@ impl<'a> ContentInterpreter<'a> {
                 sample_data
             };
 
+            // Cache the fully-processed image data for reuse (Arc for cheap cloning).
+            let sample_arc = Arc::new(sample_data);
+            let smask_arc = Arc::new(smask_data);
+            if let PdfObj::Ref(obj_num, _) = obj {
+                self.image_cache.insert(*obj_num, CachedImage {
+                    sample_data: Arc::clone(&sample_arc),
+                    width,
+                    height,
+                    color_space: image_params.color_space.clone(),
+                    bits_per_component: image_params.bits_per_component,
+                    interpolate,
+                    mask_color: image_params.mask_color.clone(),
+                    smask: Some((Arc::clone(&smask_arc), width, height, matte.clone())),
+                });
+            }
+
             let image_matrix =
                 Matrix::new(width as f64, 0.0, 0.0, -(height as f64), 0.0, height as f64);
 
             let mut mask_dl = DisplayList::new();
             mask_dl.push(DisplayElement::Image {
-                sample_data: smask_data,
+                sample_data: smask_arc,
                 params: ImageParams {
                     width,
                     height,
@@ -2967,6 +3011,110 @@ impl<'a> ContentInterpreter<'a> {
                     ctm: self.gstate.ctm,
                     image_matrix,
                     interpolate,
+                    mask_color: None,
+                    alpha: 1.0,
+                    blend_mode: 0,
+                    overprint: false,
+                    overprint_mode: 0,
+                    painted_channels: 0,
+                },
+            });
+
+            let mut content_dl = DisplayList::new();
+            content_dl.push(DisplayElement::Image {
+                sample_data: sample_arc,
+                params: ImageParams {
+                    width,
+                    height,
+                    image_matrix,
+                    ..image_params
+                },
+            });
+
+            let corners = [
+                self.gstate.ctm.transform_point(0.0, 0.0),
+                self.gstate.ctm.transform_point(1.0, 0.0),
+                self.gstate.ctm.transform_point(0.0, 1.0),
+                self.gstate.ctm.transform_point(1.0, 1.0),
+            ];
+            let x_min = corners.iter().map(|c| c.0).fold(f64::INFINITY, f64::min);
+            let y_min = corners.iter().map(|c| c.1).fold(f64::INFINITY, f64::min);
+            let x_max = corners.iter().map(|c| c.0).fold(f64::NEG_INFINITY, f64::max);
+            let y_max = corners.iter().map(|c| c.1).fold(f64::NEG_INFINITY, f64::max);
+
+            self.display_list.push(DisplayElement::SoftMasked {
+                mask: mask_dl,
+                content: content_dl,
+                params: SoftMaskParams {
+                    subtype: SoftMaskSubtype::Luminosity,
+                    bbox: [x_min, y_min, x_max, y_max],
+                    backdrop_color: None,
+                    transfer_invert: false,
+                    has_nested_mask_scope: false,
+                },
+            });
+        } else {
+            // Cache plain image for reuse (Arc for cheap cloning).
+            let sample_arc = Arc::new(sample_data);
+            if let PdfObj::Ref(obj_num, _) = obj {
+                self.image_cache.insert(*obj_num, CachedImage {
+                    sample_data: Arc::clone(&sample_arc),
+                    width,
+                    height,
+                    color_space: image_params.color_space.clone(),
+                    bits_per_component: image_params.bits_per_component,
+                    interpolate,
+                    mask_color: image_params.mask_color.clone(),
+                    smask: None,
+                });
+            }
+
+            self.display_list.push(DisplayElement::Image {
+                sample_data: sample_arc,
+                params: image_params,
+            });
+        }
+        Ok(())
+    }
+
+    /// Build a CachedImage, pre-downscaling if the image is much larger than
+    /// its device-pixel target size (detected from the current CTM).
+    #[allow(clippy::too_many_arguments)]
+    /// Emit a display element from a cached image, applying current graphics state.
+    /// The cache already contains pre-downscaled data when applicable.
+    fn emit_cached_image(&mut self, cached: CachedImage) -> Result<(), PdfError> {
+        let (sample_data, smask, width, height) =
+            (cached.sample_data, cached.smask, cached.width, cached.height);
+
+        let image_matrix = Matrix::new(width as f64, 0.0, 0.0, -(height as f64), 0.0, height as f64);
+        let image_params = ImageParams {
+            width,
+            height,
+            color_space: cached.color_space,
+            bits_per_component: cached.bits_per_component,
+            ctm: self.gstate.ctm,
+            image_matrix,
+            interpolate: cached.interpolate,
+            mask_color: cached.mask_color,
+            alpha: self.gstate.fill_alpha,
+            blend_mode: self.gstate.blend_mode,
+            overprint: self.gstate.overprint,
+            overprint_mode: self.gstate.overprint_mode,
+            painted_channels: self.gstate.fill_painted_channels,
+        };
+
+        if let Some((smask_data, sw, sh, _matte)) = smask {
+            let mut mask_dl = DisplayList::new();
+            mask_dl.push(DisplayElement::Image {
+                sample_data: smask_data,
+                params: ImageParams {
+                    width: sw,
+                    height: sh,
+                    color_space: ImageColorSpace::DeviceGray,
+                    bits_per_component: 8,
+                    ctm: self.gstate.ctm,
+                    image_matrix,
+                    interpolate: cached.interpolate,
                     mask_color: None,
                     alpha: 1.0,
                     blend_mode: 0,
@@ -3766,7 +3914,7 @@ impl<'a> ContentInterpreter<'a> {
             // Mask display list: the imagemask as a grayscale image
             let mut mask_dl = DisplayList::new();
             mask_dl.push(DisplayElement::Image {
-                sample_data: gray,
+                sample_data: Arc::new(gray),
                 params: ImageParams {
                     width,
                     height,
@@ -3857,7 +4005,7 @@ impl<'a> ContentInterpreter<'a> {
         };
 
         self.display_list.push(DisplayElement::Image {
-            sample_data,
+            sample_data: Arc::new(sample_data),
             params: ImageParams {
                 width,
                 height,
@@ -4931,6 +5079,7 @@ fn expand_inline_value(name: &[u8]) -> Vec<u8> {
         _ => name.to_vec(),
     }
 }
+
 
 /// Bilinear upsample of image data to target dimensions.
 /// Used when an explicit mask is higher resolution than the image (MRC PDFs).
