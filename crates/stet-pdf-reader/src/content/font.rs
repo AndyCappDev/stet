@@ -2242,8 +2242,8 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
 
     match cid_subtype {
         b"CIDFontType2" => {
-            let substituted;
-            let data = if let Some(ff_ref) = desc.get(b"FontFile2") {
+            let mut substituted;
+            let mut data = if let Some(ff_ref) = desc.get(b"FontFile2") {
                 substituted = false;
                 let mut font_data = resolver.stream_data_from_obj(ff_ref)?;
                 sanitize_index_to_loc_format(&mut font_data);
@@ -2333,6 +2333,37 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                 sys_data
             };
 
+            // Detect corrupted font data: check whether ANY CID in the /W
+            // table produces a valid glyph outline.  If none do, the font data
+            // is likely damaged (e.g. from a broken/truncated zlib stream) and
+            // we should fall back to the system font.
+            // Only check when identity CID→GID is in effect (no explicit
+            // CIDToGIDMap stream), since we test CIDs directly as GIDs.
+            let has_cid_to_gid_map = cid_font_dict.get(b"CIDToGIDMap")
+                .is_some_and(|v| v.as_name().is_none_or(|n| n != b"Identity"));
+            if !substituted && !cid_widths.is_empty() && !has_cid_to_gid_map {
+                let upm_f = get_units_per_em(&data) as f64;
+                let any_glyph = cid_widths.keys().any(|&cid| {
+                    skrifa_glyph_path(&data, cid, upm_f).is_some()
+                });
+                if !any_glyph {
+                    let base_font = cid_font_dict
+                        .get_name(b"BaseFont")
+                        .map(|n| {
+                            let s = String::from_utf8_lossy(n);
+                            if s.len() > 7 && s.as_bytes().get(6) == Some(&b'+') {
+                                s[7..].to_string()
+                            } else {
+                                s.to_string()
+                            }
+                        })
+                        .unwrap_or_default();
+                    if let Ok(sys_data) = load_system_truetype_font(&base_font) {
+                        data = sys_data;
+                        substituted = true;
+                    }
+                }
+            }
             let units_per_em = get_units_per_em(&data) as f64;
             let cmap = parse_cmap(&data);
 
@@ -3322,7 +3353,8 @@ impl CidTrueTypePdfFont {
             // Sanity check: real glyphs have at most a few thousand segments.
             // Bogus GIDs reading random glyf bytes can produce millions.
             if p.is_empty() || p.segments.len() > 10_000 { None } else { Some(p) }
-        })?;
+        });
+        let path = path?;
         let scale = 1.0 / self.units_per_em;
         // For substituted fonts, scale glyphs horizontally so their width matches
         // the PDF's /W array (original font metrics). Without this, the substitute

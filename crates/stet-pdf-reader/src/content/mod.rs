@@ -1783,18 +1783,26 @@ impl<'a> ContentInterpreter<'a> {
                     if font.has_cid_glyph(cid) {
                         // CID maps to a valid GID in the font
                         self.render_cid_glyph(&font, cid, font_size, char_spacing, th, text_rise, &font_matrix, render_mode);
-                    } else if raw_code <= 0xFF {
-                        // Low code point with no CID glyph — malformed PDF mixing
-                        // 1-byte WinAnsi text in a CID font.  Bypass the CID
-                        // machinery and map each byte through WinAnsi→Unicode→cmap.
-                        self.render_unicode_glyph(text[i - 2], font_size, char_spacing, th, text_rise, &font_matrix, render_mode);
-                        self.render_unicode_glyph(text[i - 1], font_size, char_spacing, th, text_rise, &font_matrix, render_mode);
                     } else {
-                        // CID glyph not available (e.g. substitute font for CJK).
-                        // Use CID width for correct advancement; try Unicode for shape.
-                        self.render_cid_glyph_unicode_fallback(
-                            &font, cid, raw_code, font_size, char_spacing, th, text_rise, &font_matrix, render_mode,
-                        );
+                        // 2-byte CID has no glyph.  Some malformed PDFs encode
+                        // single-byte CIDs in 2-byte Identity-H strings with a
+                        // padding high byte (e.g. 0x20).  Try the low byte alone.
+                        let lo_cid = (raw_code & 0xFF) as u16;
+                        if lo_cid > 0 && font.has_cid_glyph(lo_cid) {
+                            self.render_cid_glyph(&font, lo_cid, font_size, char_spacing, th, text_rise, &font_matrix, render_mode);
+                        } else if raw_code <= 0xFF {
+                            // Low code point with no CID glyph — malformed PDF mixing
+                            // 1-byte WinAnsi text in a CID font.  Bypass the CID
+                            // machinery and map each byte through WinAnsi→Unicode→cmap.
+                            self.render_unicode_glyph(text[i - 2], font_size, char_spacing, th, text_rise, &font_matrix, render_mode);
+                            self.render_unicode_glyph(text[i - 1], font_size, char_spacing, th, text_rise, &font_matrix, render_mode);
+                        } else {
+                            // CID glyph not available (e.g. substitute font for CJK).
+                            // Use CID width for correct advancement; try Unicode for shape.
+                            self.render_cid_glyph_unicode_fallback(
+                                &font, cid, raw_code, font_size, char_spacing, th, text_rise, &font_matrix, render_mode,
+                            );
+                        }
                     }
                 }
             }
