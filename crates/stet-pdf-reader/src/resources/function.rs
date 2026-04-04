@@ -213,6 +213,65 @@ impl PdfFunction {
         }
     }
 
+    /// Collect input values where this function has discontinuities (stitching bounds).
+    /// Returns values in the function's input domain, NOT normalized to [0,1].
+    pub fn discontinuity_positions(&self) -> Vec<f64> {
+        let mut positions = Vec::new();
+        self.collect_discontinuities(&mut positions);
+        positions
+    }
+
+    fn collect_discontinuities(&self, out: &mut Vec<f64>) {
+        match self {
+            Self::Stitching {
+                domain,
+                bounds,
+                functions,
+                encode,
+                ..
+            } => {
+                let d = domain.first().copied().unwrap_or([0.0, 1.0]);
+                // Each bound is a potential discontinuity in the input domain
+                for &b in bounds {
+                    if b > d[0] && b < d[1] {
+                        out.push(b);
+                    }
+                }
+                // Also recurse into sub-functions: their internal discontinuities
+                // need to be mapped back to the parent's input domain
+                for (k, f) in functions.iter().enumerate() {
+                    let sub_discs = f.discontinuity_positions();
+                    if sub_discs.is_empty() {
+                        continue;
+                    }
+                    let enc = encode.get(k).copied().unwrap_or([0.0, 1.0]);
+                    let d_lo = if k == 0 { d[0] } else { bounds[k - 1] };
+                    let d_hi = if k >= bounds.len() { d[1] } else { bounds[k] };
+                    for sd in sub_discs {
+                        // Reverse the encode mapping: x_enc -> x in parent domain
+                        // x_enc = interpolate(x, d_lo, d_hi, enc[0], enc[1])
+                        // so x = interpolate(x_enc, enc[0], enc[1], d_lo, d_hi)
+                        // But sd is in the sub-function's domain, which is what x_enc
+                        // gets clamped to. We need to invert through encode.
+                        if (enc[1] - enc[0]).abs() < 1e-15 {
+                            continue;
+                        }
+                        let x = d_lo + (sd - enc[0]) * (d_hi - d_lo) / (enc[1] - enc[0]);
+                        if x > d[0] && x < d[1] {
+                            out.push(x);
+                        }
+                    }
+                }
+            }
+            Self::Composite { functions } => {
+                for f in functions {
+                    f.collect_discontinuities(out);
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Minimum number of samples needed to faithfully reproduce this function.
     /// For Type 0 (sampled) functions, returns the first dimension's sample count.
     /// For stitching functions, sums the sub-functions' sample counts.

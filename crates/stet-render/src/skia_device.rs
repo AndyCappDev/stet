@@ -7144,19 +7144,25 @@ fn render_axial_shading(
             }
         }
 
-        // Build an RGBA LUT from color stops.
-        let lut_size = params.color_stops.len().max(256);
-        let lut = build_gradient_lut(&params.color_stops, lut_size);
-
-        // Compute gradient t by inverse-transforming pixels to shading space and
-        // projecting onto the shading-space axis. This correctly handles non-uniform
-        // scaling (e.g. pattern matrix stretching x differently from y).
+        // Compute gradient axis in shading space.
         let ax = params.x1 - params.x0;
         let ay = params.y1 - params.y0;
         let axis_sq = ax * ax + ay * ay;
         if axis_sq < 1e-20 {
             return;
         }
+
+        // Size the LUT to the gradient's pixel span so each entry covers ≤1 pixel.
+        // This ensures nearest-neighbor lookup produces pixel-perfect sharp edges
+        // at stitching function discontinuities without banding in smooth gradients.
+        let pixel_dx = (dx1 - dx0) * scale_x as f64;
+        let pixel_dy = (dy1 - dy0) * scale_y as f64;
+        let pixel_axis_len = (pixel_dx * pixel_dx + pixel_dy * pixel_dy).sqrt();
+        let lut_size = (pixel_axis_len as usize)
+            .max(params.color_stops.len())
+            .max(256)
+            .min(16384);
+        let lut = build_gradient_lut(&params.color_stops, lut_size);
 
         let Some(inv) = params.ctm.invert() else {
             return;
@@ -7239,14 +7245,8 @@ fn render_axial_shading(
 
                 let t = t_row + dt_dx * px as f64;
                 let t_clamped = t.clamp(0.0, 1.0);
-                let fi = t_clamped * (lut_size - 1) as f64;
-                let i0 = (fi as usize).min(lut_size - 2);
-                let frac = (fi - i0 as f64) as f32;
-                let c0 = lut[i0];
-                let c1 = lut[i0 + 1];
-                let r = (c0[0] as f32 + frac * (c1[0] as f32 - c0[0] as f32)) as u8;
-                let g = (c0[1] as f32 + frac * (c1[1] as f32 - c0[1] as f32)) as u8;
-                let b = (c0[2] as f32 + frac * (c1[2] as f32 - c0[2] as f32)) as u8;
+                let idx = (t_clamped * (lut_size - 1) as f64 + 0.5) as usize;
+                let [r, g, b, _] = lut[idx.min(lut_size - 1)];
 
                 let offset = row_offset + px as usize * 4;
                 if alpha >= 255 {

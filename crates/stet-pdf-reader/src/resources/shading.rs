@@ -650,10 +650,43 @@ fn sample_function_to_stops_icc(
     };
 
     let [d_min, d_max] = function.domain_0();
-    let mut stops = Vec::with_capacity(n_samples);
-    for i in 0..n_samples {
-        let t = i as f64 / (n_samples - 1) as f64;
-        let input = d_min + t * (d_max - d_min);
+    let span = d_max - d_min;
+
+    // Collect discontinuity positions and convert to normalized t in [0,1].
+    // At each discontinuity we insert two samples (before and at) to produce a sharp edge.
+    let disc_positions = function.discontinuity_positions();
+    let mut disc_ts: Vec<f64> = disc_positions
+        .iter()
+        .filter_map(|&d| {
+            if span.abs() < 1e-15 {
+                return None;
+            }
+            let t = (d - d_min) / span;
+            if t > 0.0 && t < 1.0 {
+                Some(t)
+            } else {
+                None
+            }
+        })
+        .collect();
+    disc_ts.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    disc_ts.dedup_by(|a, b| (*a - *b).abs() < 1e-12);
+
+    // Build sample positions: uniform grid + discontinuity pairs
+    let mut sample_ts: Vec<f64> = (0..n_samples)
+        .map(|i| i as f64 / (n_samples - 1) as f64)
+        .collect();
+    let eps = 1e-10;
+    for &dt in &disc_ts {
+        sample_ts.push((dt - eps).max(0.0));
+        sample_ts.push(dt);
+    }
+    sample_ts.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    sample_ts.dedup_by(|a, b| (*a - *b).abs() < 1e-14);
+
+    let mut stops = Vec::with_capacity(sample_ts.len());
+    for t in sample_ts {
+        let input = d_min + t * span;
         let components = function.evaluate(&[input]);
         let color = components_to_device_color_icc(resolved_cs, &components, Some(icc_cache));
 
