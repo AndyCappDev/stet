@@ -3866,15 +3866,36 @@ impl<'a> ContentInterpreter<'a> {
                 let mut found_a85_end = false;
                 let mut scan = search_from;
                 while scan + 1 < data.len() {
-                    if data[scan] == b'~' && data[scan + 1] == b'>' {
-                        // Found `~>` — skip past it and find EI
-                        end = scan + 2;
+                    if data[scan] == b'~' {
+                        if data[scan + 1] == b'>' {
+                            // Standard `~>` end-of-data marker
+                            end = scan + 2;
+                        } else if is_whitespace_byte(data[scan + 1]) {
+                            // Malformed: `~` followed by whitespace (missing `>`)
+                            // Accept if `EI` follows shortly after.
+                            let mut probe = scan + 1;
+                            while probe < data.len() && is_whitespace_byte(data[probe]) {
+                                probe += 1;
+                            }
+                            if probe + 1 < data.len()
+                                && data[probe] == b'E'
+                                && data[probe + 1] == b'I'
+                            {
+                                end = scan + 1;
+                            } else {
+                                scan += 1;
+                                continue;
+                            }
+                        } else {
+                            scan += 1;
+                            continue;
+                        }
                         while end < data.len() && is_whitespace_byte(data[end]) {
                             end += 1;
                         }
                         // `end` should now point at 'E' of "EI"
                         found_a85_end = true;
-                        found_no_ws = true; // EI is at `end` without leading ws
+                        found_no_ws = true;
                         break;
                     }
                     scan += 1;
