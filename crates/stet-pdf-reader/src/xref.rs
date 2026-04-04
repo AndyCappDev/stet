@@ -528,9 +528,12 @@ fn try_parse_obj_header(data: &[u8], pos: usize) -> Option<(u32, u16, usize)> {
     if p + 3 > data.len() || &data[p..p + 3] != b"obj" {
         return None;
     }
-    // "obj" must be followed by whitespace or << (not part of a longer word)
+    // "obj" must be followed by whitespace or a PDF delimiter (not part of a longer word)
     let after_obj = p + 3;
-    if after_obj < data.len() && !is_whitespace(data[after_obj]) && data[after_obj] != b'<' {
+    if after_obj < data.len()
+        && !is_whitespace(data[after_obj])
+        && !matches!(data[after_obj], b'<' | b'[' | b'(' | b'/')
+    {
         return None;
     }
 

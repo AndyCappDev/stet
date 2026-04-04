@@ -459,12 +459,12 @@ impl<'a> Resolver<'a> {
             }
             pos += 1; // skip space
 
-            // Check for "obj" keyword followed by whitespace or '<'
+            // Check for "obj" keyword followed by whitespace or PDF delimiter
             if pos + 3 <= len
                 && &data[pos..pos + 3] == b"obj"
                 && (pos + 3 == len
                     || data[pos + 3].is_ascii_whitespace()
-                    || data[pos + 3] == b'<')
+                    || matches!(data[pos + 3], b'<' | b'[' | b'(' | b'/'))
             {
                 if let Ok(n) = std::str::from_utf8(&data[start..num_end])
                     .unwrap_or("")
