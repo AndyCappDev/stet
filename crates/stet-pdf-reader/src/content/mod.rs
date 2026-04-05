@@ -2406,6 +2406,7 @@ impl<'a> ContentInterpreter<'a> {
         // (streaming encoder placeholder like 60000), patch the JPEG header
         // to the PDF dict height before decoding to avoid wasting time on
         // excess zero-filled rows.
+        let cs_is_indexed = matches!(resolved_cs, Some(ResolvedColorSpace::Indexed { .. }));
         let sample_data = if filter_is_dct {
             if let Some(raw) = self.resolver.raw_stream_bytes(obj)
                 && let Some((_jw, jh)) = crate::filters::jpeg_dimensions(raw)
@@ -2422,6 +2423,32 @@ impl<'a> ContentInterpreter<'a> {
             } else {
                 self.resolver.stream_data_from_obj(obj)?
             }
+        } else if filter_is_jpx && cs_is_indexed {
+            // JPXDecode + PDF Indexed color space: skip JP2-internal palette
+            // resolution so the PDF's own lookup table handles depalettization.
+            // Some JP2 files declare wrong palette column precision (e.g. 4-bit
+            // for 8-bit values), causing hayro's palette expansion to corrupt colors.
+            #[cfg(feature = "jpx")]
+            {
+                if let Some(raw) = self.resolver.raw_stream_bytes(obj) {
+                    let jp2_data = crate::filters::decode_pre_jpx(raw, dict);
+                    let (mut data, bpc) = crate::filters::decode_jpx_no_palette(&jp2_data)?;
+                    // hayro normalizes sub-8-bit data to 0-255 grayscale.
+                    // Un-normalize back to raw palette indices using the
+                    // codestream's original bit depth.
+                    if bpc < 8 {
+                        let max_val = ((1u32 << bpc) - 1) as f64;
+                        for b in data.iter_mut() {
+                            *b = (*b as f64 / 255.0 * max_val).round() as u8;
+                        }
+                    }
+                    data
+                } else {
+                    self.resolver.stream_data_from_obj(obj)?
+                }
+            }
+            #[cfg(not(feature = "jpx"))]
+            { self.resolver.stream_data_from_obj(obj)? }
         } else {
             self.resolver.stream_data_from_obj(obj)?
         };

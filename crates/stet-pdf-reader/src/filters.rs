@@ -1196,6 +1196,37 @@ fn decode_jpx(data: &[u8]) -> Result<Vec<u8>, PdfError> {
         .map_err(|e| PdfError::DecompressionError(format!("JPXDecode: {e}")))
 }
 
+/// JPXDecode without resolving the JP2-internal palette.
+///
+/// Some Adobe-generated JP2 files declare 4-bit palette column precision but
+/// store 8-bit values.  hayro-jpeg2000's palette resolution rescales based on
+/// the declared precision, corrupting the colors.  When the PDF provides its
+/// own Indexed color space, we skip the JP2 palette and let the PDF lookup
+/// table handle it.
+///
+/// Returns `(decoded_data, original_bit_depth)`.  The original bit depth is
+/// needed to un-normalize hayro's 8-bit output back to raw palette indices
+/// (hayro rescales sub-8-bit data to 0-255).
+#[cfg(feature = "jpx")]
+pub fn decode_jpx_no_palette(data: &[u8]) -> Result<(Vec<u8>, u8), PdfError> {
+    if data.is_empty() {
+        return Ok((Vec::new(), 8));
+    }
+
+    let settings = hayro_jpeg2000::DecodeSettings {
+        resolve_palette_indices: false,
+        ..Default::default()
+    };
+    let image = hayro_jpeg2000::Image::new(data, &settings)
+        .map_err(|e| PdfError::DecompressionError(format!("JPXDecode: {e}")))?;
+    let bit_depth = image.original_bit_depth();
+
+    let pixels = image
+        .decode()
+        .map_err(|e| PdfError::DecompressionError(format!("JPXDecode: {e}")))?;
+    Ok((pixels, bit_depth))
+}
+
 /// Query the number of color channels (excluding alpha) and whether alpha is
 /// present in a JPEG 2000 image, without fully decoding the pixel data.
 /// Returns `(color_channels, has_alpha)`.
