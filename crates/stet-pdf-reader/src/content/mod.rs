@@ -498,12 +498,15 @@ impl<'a> ContentInterpreter<'a> {
             .and_then(|o| o.as_f64())
             .unwrap_or(1.0);
 
-        // Border width
+        // Border width: prefer /BS dict /W, then /Border array [h_radius v_radius width]
         let border_width = dict
             .get(b"BS")
             .and_then(|bs| self.resolver.deref(bs).ok())
-            .and_then(|bs| bs.as_dict().and_then(|d| d.get_int(b"W").map(|w| w as f64)))
-            .or_else(|| dict.get_int(b"Border").map(|w| w as f64)) // simplified
+            .and_then(|bs| bs.as_dict().and_then(|d| d.get_f64(b"W")))
+            .or_else(|| {
+                dict.get_array(b"Border")
+                    .and_then(|arr| arr.get(2).and_then(|o| o.as_f64()))
+            })
             .unwrap_or(1.0);
 
         // Dash pattern from /BS /D
@@ -733,6 +736,11 @@ impl<'a> ContentInterpreter<'a> {
                 }
             }
             b"Square" => {
+                // Skip entirely if no border and no interior color
+                let has_ic = dict.get_array(b"IC").is_some();
+                if border_width < 0.001 && !has_ic {
+                    return Ok(());
+                }
                 let path = PsPath { segments: vec![
                     PathSegment::MoveTo(rect[0], rect[1]),
                     PathSegment::LineTo(rect[2], rect[1]),
@@ -770,6 +778,7 @@ impl<'a> ContentInterpreter<'a> {
                         },
                     });
                 }
+                if border_width < 0.001 { return Ok(()); }
                 self.display_list.push(DisplayElement::Stroke {
                     path,
                     params: StrokeParams {
@@ -796,6 +805,10 @@ impl<'a> ContentInterpreter<'a> {
                 });
             }
             b"Circle" => {
+                let has_ic = dict.get_array(b"IC").is_some();
+                if border_width < 0.001 && !has_ic {
+                    return Ok(());
+                }
                 // Approximate circle/ellipse with Bezier curves
                 let cx = (rect[0] + rect[2]) / 2.0;
                 let cy = (rect[1] + rect[3]) / 2.0;
@@ -839,6 +852,7 @@ impl<'a> ContentInterpreter<'a> {
                         },
                     });
                 }
+                if border_width < 0.001 { return Ok(()); }
                 self.display_list.push(DisplayElement::Stroke {
                     path,
                     params: StrokeParams {
