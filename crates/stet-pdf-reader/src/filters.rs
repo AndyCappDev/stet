@@ -671,6 +671,20 @@ fn decode_dct(data: &[u8]) -> Result<Vec<u8>, PdfError> {
     Ok(pixels)
 }
 
+/// Run a closure that may panic, suppressing the panic message and returning
+/// `None` on panic.  Used for third-party JPEG decoders that can panic on
+/// malformed input.
+fn catch_silent<F, T>(f: F) -> Option<T>
+where
+    F: FnOnce() -> Option<T> + std::panic::UnwindSafe,
+{
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let result = std::panic::catch_unwind(f).ok().flatten();
+    std::panic::set_hook(prev);
+    result
+}
+
 /// Fallback JPEG decoder using zune-jpeg for component counts that
 /// jpeg_decoder doesn't support (e.g., 2-component DeviceN images).
 fn decode_dct_zune(data: &[u8]) -> Option<Vec<u8>> {
@@ -678,31 +692,36 @@ fn decode_dct_zune(data: &[u8]) -> Option<Vec<u8>> {
     // Request raw 2-component output (LumaA) to avoid unwanted color
     // conversion. PDF DeviceN images need the original channel values
     // for the tinting function.
-    let options = zune_core::options::DecoderOptions::default()
-        .jpeg_set_out_colorspace(zune_core::colorspace::ColorSpace::LumaA);
-    let mut decoder = JpegDecoder::new_with_options(std::io::Cursor::new(data), options);
-    decoder.decode().ok()
+    let data = data.to_vec();
+    catch_silent(move || {
+        let options = zune_core::options::DecoderOptions::default()
+            .jpeg_set_out_colorspace(zune_core::colorspace::ColorSpace::LumaA);
+        let mut decoder = JpegDecoder::new_with_options(std::io::Cursor::new(&data), options);
+        decoder.decode().ok()
+    })
 }
 
 /// Tolerant JPEG decoder for truncated streams.
 /// Returns partial pixel data for whatever MCU rows decoded successfully.
 /// Applies the same CMYK channel inversion as the primary decoder path.
 fn decode_dct_tolerant(data: &[u8]) -> Option<Vec<u8>> {
-    use zune_jpeg::JpegDecoder;
     // Detect component count from SOF to set the right output colorspace.
     // Without this, zune-jpeg converts CMYK to RGB, producing wrong data.
     let n_comps = jpeg_dimensions_and_components(data).map(|(_, _, n)| n).unwrap_or(3);
-    let out_cs = match n_comps {
-        1 => zune_core::colorspace::ColorSpace::Luma,
-        4 => zune_core::colorspace::ColorSpace::CMYK,
-        _ => zune_core::colorspace::ColorSpace::RGB,
-    };
-    let options = zune_core::options::DecoderOptions::default()
-        .set_strict_mode(false)
-        .jpeg_set_out_colorspace(out_cs);
-    let mut decoder = JpegDecoder::new_with_options(std::io::Cursor::new(data), options);
-    let pixels = decoder.decode().ok()?;
-    Some(pixels)
+    let data = data.to_vec();
+    catch_silent(move || {
+        use zune_jpeg::JpegDecoder;
+        let out_cs = match n_comps {
+            1 => zune_core::colorspace::ColorSpace::Luma,
+            4 => zune_core::colorspace::ColorSpace::CMYK,
+            _ => zune_core::colorspace::ColorSpace::RGB,
+        };
+        let options = zune_core::options::DecoderOptions::default()
+            .set_strict_mode(false)
+            .jpeg_set_out_colorspace(out_cs);
+        let mut decoder = JpegDecoder::new_with_options(std::io::Cursor::new(&data), options);
+        decoder.decode().ok()
+    })
 }
 
 /// Patch a JPEG that uses DNL (Define Number of Lines, marker 0xFFDC) to specify
