@@ -2521,12 +2521,22 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                 } else {
                     &name_str
                 };
-                // Extract family name before style suffix
-                let family = clean
+                // Extract family name before style suffix, stripping
+                // PostScript suffixes (MT, PS, PSMT) that don't appear
+                // in the GID map keys.
+                let mut family = clean
                     .split(&[',', '-'][..])
                     .next()
                     .unwrap_or(clean)
                     .to_ascii_lowercase();
+                for suffix in &["psmt", "ps", "mt"] {
+                    if family.len() > suffix.len()
+                        && family.ends_with(suffix)
+                    {
+                        family.truncate(family.len() - suffix.len());
+                        break;
+                    }
+                }
                 super::gid_maps::get_gid_to_unicode_map(&family)
                     .unwrap_or(to_unicode)
             } else {
@@ -3516,6 +3526,12 @@ impl CidTrueTypePdfFont {
     /// Unlike glyph_path_cid, this returns true for space/whitespace GIDs
     /// that have no visible outline.
     fn has_glyph(&self, cid: u16) -> bool {
+        // A CID with an explicit width in /W is always valid — even if we
+        // can't resolve it to a glyph in the substitute font, the CID path
+        // must be used so text advancement uses the correct width.
+        if self.cid_widths.contains_key(&cid) {
+            return true;
+        }
         // Resolve CID to GID using the same logic as glyph_path_cid
         let gid = if let Some(ref map) = self.cid_to_gid_map {
             *map.get(cid as usize).unwrap_or(&0)
@@ -3542,10 +3558,23 @@ impl CidTrueTypePdfFont {
 
     fn glyph_width_cid(&self, cid: u16) -> f64 {
         let resolved = self.resolve_cid(cid);
-        self.cid_widths
-            .get(&resolved)
-            .copied()
-            .unwrap_or(self.default_width)
+        if let Some(&w) = self.cid_widths.get(&resolved) {
+            return w;
+        }
+        // For substituted fonts with GID-to-Unicode tables, use the substitute
+        // font's actual advance width instead of /DW. Many PDFs only populate
+        // /W for a subset of CIDs, and /DW 1000 (full em) is wildly wrong for
+        // narrow Latin characters like accented letters.
+        if self.substituted && !self.to_unicode.is_empty() {
+            if let Some(&unicode) = self.to_unicode.get(&cid) {
+                if let Some(&gid) = self.cmap.get(&unicode) {
+                    if let Some(w) = hmtx_advance_width(&self.data, gid, self.units_per_em) {
+                        return w / 1000.0;
+                    }
+                }
+            }
+        }
+        self.default_width
     }
 
     /// Get glyph path for a Unicode code point via cmap, bypassing CID mapping.
