@@ -2485,35 +2485,13 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                     (true, None) // no CIDToGIDMap → default to identity
                 };
 
-            // For substituted fonts with a CIDToGIDMap stream, verify the map
-            // is compatible with the substitute font.  The CIDToGIDMap was built
-            // for the original font's GIDs; metric-compatible substitutes (e.g.
-            // LiberationSans ↔ Arial) share the same GID ordering, but incompatible
-            // ones (e.g. NotoSans for Calibri) do not.  Compare a sample of
-            // CID→GID mappings with what the cmap produces for the same Unicode
-            // code points.  If they disagree, discard the map.
-            let cid_to_gid_map = if substituted && cid_to_gid_map.is_some() && !cmap.is_empty() {
-                let map = cid_to_gid_map.as_ref().unwrap();
-                let mut agree = 0;
-                let mut disagree = 0;
-                // Test printable ASCII CIDs (which are Unicode code points
-                // for Identity-H encoded fonts)
-                for cid in (0x41..=0x5Au16).chain(0x61..=0x7A) {
-                    let map_gid = map.get(cid as usize).copied().unwrap_or(0);
-                    let cmap_gid = cmap.get(&(cid as u32)).copied().unwrap_or(0);
-                    if map_gid > 0 && cmap_gid > 0 {
-                        if map_gid == cmap_gid {
-                            agree += 1;
-                        } else {
-                            disagree += 1;
-                        }
-                    }
-                }
-                if disagree > agree {
-                    None // incompatible — discard CIDToGIDMap
-                } else {
-                    cid_to_gid_map
-                }
+            // For substituted fonts, always discard CIDToGIDMap streams.
+            // The map encodes GID ordering specific to the original font and
+            // is never valid for a different font — even metric-compatible
+            // pairs (e.g. TimesNewRoman ↔ LiberationSerif) share ASCII GIDs
+            // but diverge for extended characters (ě, í, – etc.).
+            let cid_to_gid_map = if substituted && cid_to_gid_map.is_some() {
+                None
             } else {
                 cid_to_gid_map
             };
