@@ -3695,12 +3695,20 @@ impl CidTrueTypePdfFont {
         // the PDF's /W array (original font metrics). Without this, the substitute
         // font's wider/narrower glyphs cause crowded or sparse text.
         let m = if self.substituted {
-            let pdf_w = self.cid_widths.get(&cid).copied().unwrap_or(self.default_width);
+            // Only scale horizontally when the CID has an explicit /W entry.
+            // When the width comes from the substitute font's hmtx (no /W entry),
+            // the advance and glyph width already match — scaling would stretch
+            // the glyph to DW while the advance uses the natural hmtx width.
+            let pdf_w = self.cid_widths.get(&cid).copied();
             let font_w = hmtx_advance_width(&self.data, gid, self.units_per_em)
                 .unwrap_or(0.0)
                 / 1000.0;
-            if font_w > 0.001 && pdf_w > 0.001 {
-                Matrix::new(scale * pdf_w / font_w, 0.0, 0.0, scale, 0.0, 0.0)
+            if let Some(pw) = pdf_w {
+                if font_w > 0.001 && pw > 0.001 {
+                    Matrix::new(scale * pw / font_w, 0.0, 0.0, scale, 0.0, 0.0)
+                } else {
+                    Matrix::scale(scale, scale)
+                }
             } else {
                 Matrix::scale(scale, scale)
             }
