@@ -34,7 +34,9 @@ use self::graphics_state::{ShadingPatternDL, TilingPattern};
 use crate::FontProvider;
 use stet_fonts::geometry::{Matrix, PathSegment, PsPath};
 use stet_graphics::color::{DashPattern, DeviceColor, FillRule, LineCap, LineJoin};
-use stet_graphics::device::{ClipParams, ImageColorSpace, ImageParams, PatternFillParams};
+use stet_graphics::device::{
+    ClipParams, FillParams, ImageColorSpace, ImageParams, PatternFillParams, StrokeParams,
+};
 use stet_graphics::display_list::{
     DisplayElement, DisplayList, GroupParams, SoftMaskParams, SoftMaskSubtype,
 };
@@ -310,27 +312,30 @@ impl<'a> ContentInterpreter<'a> {
             return Ok(()); // Hidden
         }
 
-        // Get /Rect [llx, lly, urx, ury]
+        // Get /Rect [llx, lly, urx, ury], normalizing swapped coordinates
         let rect = annot_dict
             .get_array(b"Rect")
             .and_then(|a| {
                 if a.len() >= 4 {
-                    Some([
-                        a[0].as_f64()?,
-                        a[1].as_f64()?,
-                        a[2].as_f64()?,
-                        a[3].as_f64()?,
-                    ])
+                    let r0 = a[0].as_f64()?;
+                    let r1 = a[1].as_f64()?;
+                    let r2 = a[2].as_f64()?;
+                    let r3 = a[3].as_f64()?;
+                    Some([r0.min(r2), r1.min(r3), r0.max(r2), r1.max(r3)])
                 } else {
                     None
                 }
             })
             .ok_or(PdfError::Other("annotation missing Rect".into()))?;
 
-        // Get /AP dict → /N (normal appearance)
-        let ap_obj = annot_dict
-            .get(b"AP")
-            .ok_or(PdfError::Other("no AP".into()))?;
+        // Get /AP dict → /N (normal appearance).
+        // If no AP, synthesize appearance from annotation properties.
+        let ap_obj = match annot_dict.get(b"AP") {
+            Some(ap) => ap,
+            None => {
+                return self.synthesize_annotation(annot_dict, &rect);
+            }
+        };
         let ap_dict = match self.resolver.deref(ap_obj)? {
             PdfObj::Dict(d) => d,
             _ => return Err(PdfError::Other("AP not a dict".into())),
@@ -460,6 +465,408 @@ impl<'a> ContentInterpreter<'a> {
                     stroke_params: None,
                 },
             });
+        }
+
+        Ok(())
+    }
+
+    /// Synthesize an appearance for annotations that lack an /AP stream.
+    /// Handles Line, PolyLine, Ink, Highlight, StrikeOut, Underline, and Squiggly.
+    fn synthesize_annotation(
+        &mut self,
+        dict: &crate::objects::PdfDict,
+        rect: &[f64; 4],
+    ) -> Result<(), PdfError> {
+        let subtype = dict.get_name(b"Subtype").unwrap_or(b"");
+
+        // Extract annotation color (/C array, default black)
+        let color = if let Some(c) = dict.get_array(b"C") {
+            let vals: Vec<f64> = c.iter().filter_map(|o| o.as_f64()).collect();
+            match vals.len() {
+                1 => DeviceColor::from_gray(vals[0]),
+                3 => DeviceColor::from_rgb(vals[0], vals[1], vals[2]),
+                4 => DeviceColor::from_cmyk(vals[0], vals[1], vals[2], vals[3]),
+                _ => DeviceColor::from_gray(0.0),
+            }
+        } else {
+            DeviceColor::from_gray(0.0)
+        };
+
+        // Opacity
+        let alpha = dict
+            .get(b"CA")
+            .and_then(|o| o.as_f64())
+            .unwrap_or(1.0);
+
+        // Border width
+        let border_width = dict
+            .get(b"BS")
+            .and_then(|bs| self.resolver.deref(bs).ok())
+            .and_then(|bs| bs.as_dict().and_then(|d| d.get_int(b"W").map(|w| w as f64)))
+            .or_else(|| dict.get_int(b"Border").map(|w| w as f64)) // simplified
+            .unwrap_or(1.0);
+
+        // Dash pattern from /BS /D
+        let dash = dict
+            .get(b"BS")
+            .and_then(|bs| self.resolver.deref(bs).ok())
+            .and_then(|bs| {
+                let d = bs.as_dict()?;
+                let style = d.get_name(b"S")?;
+                if style == b"D" {
+                    let arr = d
+                        .get_array(b"D")
+                        .map(|a| a.iter().filter_map(|o| o.as_f64()).collect::<Vec<_>>())
+                        .unwrap_or_else(|| vec![3.0]);
+                    Some(DashPattern {
+                        array: arr,
+                        offset: 0.0,
+                    })
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default();
+
+        let ctm = self.initial_ctm;
+
+        match subtype {
+            b"Line" => {
+                // /L [x1 y1 x2 y2]
+                if let Some(l) = dict.get_array(b"L") {
+                    let coords: Vec<f64> = l.iter().filter_map(|o| o.as_f64()).collect();
+                    if coords.len() >= 4 {
+                        let (x1, y1, x2, y2) = (coords[0], coords[1], coords[2], coords[3]);
+                        let path = PsPath { segments: vec![
+                            PathSegment::MoveTo(x1, y1),
+                            PathSegment::LineTo(x2, y2),
+                        ] };
+                        self.display_list.push(DisplayElement::Stroke {
+                            path,
+                            params: StrokeParams {
+                                color: color.clone(),
+                                line_width: border_width,
+                                line_cap: LineCap::Butt,
+                                line_join: LineJoin::Miter,
+                                miter_limit: 10.0,
+                                dash_pattern: dash.clone(),
+                                ctm,
+                                stroke_adjust: false,
+                                is_text_glyph: false,
+                                overprint: false,
+                                overprint_mode: 0,
+                                painted_channels: 0,
+                                spot_color: None,
+                                rendering_intent: 0,
+                                transfer: Default::default(),
+                                halftone: Default::default(),
+                                bg_ucr: Default::default(),
+                                alpha,
+                                blend_mode: 0,
+                            },
+                        });
+                    }
+                }
+            }
+            b"PolyLine" | b"Polygon" => {
+                if let Some(verts) = dict.get_array(b"Vertices") {
+                    let coords: Vec<f64> = verts.iter().filter_map(|o| o.as_f64()).collect();
+                    if coords.len() >= 4 {
+                        let mut segs = vec![PathSegment::MoveTo(coords[0], coords[1])];
+                        for pair in coords[2..].chunks_exact(2) {
+                            segs.push(PathSegment::LineTo(pair[0], pair[1]));
+                        }
+                        if subtype == b"Polygon" {
+                            segs.push(PathSegment::ClosePath);
+                        }
+                        let path = PsPath { segments: segs };
+                        self.display_list.push(DisplayElement::Stroke {
+                            path,
+                            params: StrokeParams {
+                                color: color.clone(),
+                                line_width: border_width,
+                                line_cap: LineCap::Butt,
+                                line_join: LineJoin::Miter,
+                                miter_limit: 10.0,
+                                dash_pattern: dash.clone(),
+                                ctm,
+                                stroke_adjust: false,
+                                is_text_glyph: false,
+                                overprint: false,
+                                overprint_mode: 0,
+                                painted_channels: 0,
+                                spot_color: None,
+                                rendering_intent: 0,
+                                transfer: Default::default(),
+                                halftone: Default::default(),
+                                bg_ucr: Default::default(),
+                                alpha,
+                                blend_mode: 0,
+                            },
+                        });
+                    }
+                }
+            }
+            b"Ink" => {
+                if let Some(ink_list) = dict.get_array(b"InkList") {
+                    for stroke_obj in ink_list {
+                        let stroke_arr = match stroke_obj {
+                            crate::objects::PdfObj::Array(a) => a,
+                            _ => continue,
+                        };
+                        let coords: Vec<f64> =
+                            stroke_arr.iter().filter_map(|o| o.as_f64()).collect();
+                        if coords.len() >= 4 {
+                            let mut segs = vec![PathSegment::MoveTo(coords[0], coords[1])];
+                            for pair in coords[2..].chunks_exact(2) {
+                                segs.push(PathSegment::LineTo(pair[0], pair[1]));
+                            }
+                            let path = PsPath { segments: segs };
+                            self.display_list.push(DisplayElement::Stroke {
+                                path,
+                                params: StrokeParams {
+                                    color: color.clone(),
+                                    line_width: border_width,
+                                    line_cap: LineCap::Round,
+                                    line_join: LineJoin::Round,
+                                    miter_limit: 10.0,
+                                    dash_pattern: DashPattern::default(),
+                                    ctm,
+                                    stroke_adjust: false,
+                                    is_text_glyph: false,
+                                    overprint: false,
+                                    overprint_mode: 0,
+                                    painted_channels: 0,
+                                    spot_color: None,
+                                    rendering_intent: 0,
+                                    transfer: Default::default(),
+                                    halftone: Default::default(),
+                                    bg_ucr: Default::default(),
+                                    alpha,
+                                    blend_mode: 0,
+                                },
+                            });
+                        }
+                    }
+                }
+            }
+            b"Highlight" | b"StrikeOut" | b"Underline" | b"Squiggly" => {
+                if let Some(qp) = dict.get_array(b"QuadPoints") {
+                    let pts: Vec<f64> = qp.iter().filter_map(|o| o.as_f64()).collect();
+                    // QuadPoints: groups of 8 (x1,y1, x2,y2, x3,y3, x4,y4)
+                    // Order: top-left, top-right, bottom-left, bottom-right
+                    for quad in pts.chunks_exact(8) {
+                        let (x1, y1) = (quad[0], quad[1]); // top-left
+                        let (x2, y2) = (quad[2], quad[3]); // top-right
+                        let (x3, y3) = (quad[4], quad[5]); // bottom-left
+                        let (x4, y4) = (quad[6], quad[7]); // bottom-right
+
+                        if subtype == b"Highlight" {
+                            // Fill the quad with translucent color
+                            let path = PsPath { segments: vec![
+                                PathSegment::MoveTo(x1, y1),
+                                PathSegment::LineTo(x2, y2),
+                                PathSegment::LineTo(x4, y4),
+                                PathSegment::LineTo(x3, y3),
+                                PathSegment::ClosePath,
+                            ] };
+                            self.display_list.push(DisplayElement::Fill {
+                                path,
+                                params: FillParams {
+                                    color: color.clone(),
+                                    fill_rule: FillRule::NonZeroWinding,
+                                    ctm,
+                                    is_text_glyph: false,
+                                    overprint: false,
+                                    overprint_mode: 0,
+                                    painted_channels: 0,
+                                    is_device_cmyk: false,
+                                    spot_color: None,
+                                    rendering_intent: 0,
+                                    transfer: Default::default(),
+                                    halftone: Default::default(),
+                                    bg_ucr: Default::default(),
+                                    alpha,
+                                    blend_mode: 3, // Multiply for highlight
+                                },
+                            });
+                        } else {
+                            // StrikeOut/Underline/Squiggly: draw a line
+                            let (lx1, ly1, lx2, ly2) = if subtype == b"StrikeOut" {
+                                // Middle of the quad
+                                ((x1 + x3) / 2.0, (y1 + y3) / 2.0,
+                                 (x2 + x4) / 2.0, (y2 + y4) / 2.0)
+                            } else {
+                                // Bottom of the quad
+                                (x3, y3, x4, y4)
+                            };
+                            let path = PsPath { segments: vec![
+                                PathSegment::MoveTo(lx1, ly1),
+                                PathSegment::LineTo(lx2, ly2),
+                            ] };
+                            self.display_list.push(DisplayElement::Stroke {
+                                path,
+                                params: StrokeParams {
+                                    color: color.clone(),
+                                    line_width: border_width,
+                                    line_cap: LineCap::Butt,
+                                    line_join: LineJoin::Miter,
+                                    miter_limit: 10.0,
+                                    dash_pattern: DashPattern::default(),
+                                    ctm,
+                                    stroke_adjust: false,
+                                    is_text_glyph: false,
+                                    overprint: false,
+                                    overprint_mode: 0,
+                                    painted_channels: 0,
+                                    spot_color: None,
+                                    rendering_intent: 0,
+                                    transfer: Default::default(),
+                                    halftone: Default::default(),
+                                    bg_ucr: Default::default(),
+                                    alpha,
+                                    blend_mode: 0,
+                                },
+                            });
+                        }
+                    }
+                }
+            }
+            b"Square" => {
+                let path = PsPath { segments: vec![
+                    PathSegment::MoveTo(rect[0], rect[1]),
+                    PathSegment::LineTo(rect[2], rect[1]),
+                    PathSegment::LineTo(rect[2], rect[3]),
+                    PathSegment::LineTo(rect[0], rect[3]),
+                    PathSegment::ClosePath,
+                ] };
+                // Fill with /IC (interior color) if present
+                if let Some(ic) = dict.get_array(b"IC") {
+                    let vals: Vec<f64> = ic.iter().filter_map(|o| o.as_f64()).collect();
+                    let ic_color = match vals.len() {
+                        1 => DeviceColor::from_gray(vals[0]),
+                        3 => DeviceColor::from_rgb(vals[0], vals[1], vals[2]),
+                        4 => DeviceColor::from_cmyk(vals[0], vals[1], vals[2], vals[3]),
+                        _ => DeviceColor::from_gray(1.0),
+                    };
+                    self.display_list.push(DisplayElement::Fill {
+                        path: path.clone(),
+                        params: FillParams {
+                            color: ic_color,
+                            fill_rule: FillRule::NonZeroWinding,
+                            ctm,
+                            is_text_glyph: false,
+                            overprint: false,
+                            overprint_mode: 0,
+                            painted_channels: 0,
+                            is_device_cmyk: false,
+                            spot_color: None,
+                            rendering_intent: 0,
+                            transfer: Default::default(),
+                            halftone: Default::default(),
+                            bg_ucr: Default::default(),
+                            alpha,
+                            blend_mode: 0,
+                        },
+                    });
+                }
+                self.display_list.push(DisplayElement::Stroke {
+                    path,
+                    params: StrokeParams {
+                        color,
+                        line_width: border_width,
+                        line_cap: LineCap::Butt,
+                        line_join: LineJoin::Miter,
+                        miter_limit: 10.0,
+                        dash_pattern: dash,
+                        ctm,
+                        stroke_adjust: false,
+                        is_text_glyph: false,
+                        overprint: false,
+                        overprint_mode: 0,
+                        painted_channels: 0,
+                        spot_color: None,
+                        rendering_intent: 0,
+                        transfer: Default::default(),
+                        halftone: Default::default(),
+                        bg_ucr: Default::default(),
+                        alpha,
+                        blend_mode: 0,
+                    },
+                });
+            }
+            b"Circle" => {
+                // Approximate circle/ellipse with Bezier curves
+                let cx = (rect[0] + rect[2]) / 2.0;
+                let cy = (rect[1] + rect[3]) / 2.0;
+                let rx = (rect[2] - rect[0]) / 2.0;
+                let ry = (rect[3] - rect[1]) / 2.0;
+                let k = 0.5522847498; // magic number for circular Bezier approximation
+                let path = PsPath { segments: vec![
+                    PathSegment::MoveTo(cx + rx, cy),
+                    PathSegment::CurveTo { x1: cx + rx, y1: cy + ry * k, x2: cx + rx * k, y2: cy + ry, x3: cx, y3: cy + ry },
+                    PathSegment::CurveTo { x1: cx - rx * k, y1: cy + ry, x2: cx - rx, y2: cy + ry * k, x3: cx - rx, y3: cy },
+                    PathSegment::CurveTo { x1: cx - rx, y1: cy - ry * k, x2: cx - rx * k, y2: cy - ry, x3: cx, y3: cy - ry },
+                    PathSegment::CurveTo { x1: cx + rx * k, y1: cy - ry, x2: cx + rx, y2: cy - ry * k, x3: cx + rx, y3: cy },
+                    PathSegment::ClosePath,
+                ] };
+                if let Some(ic) = dict.get_array(b"IC") {
+                    let vals: Vec<f64> = ic.iter().filter_map(|o| o.as_f64()).collect();
+                    let ic_color = match vals.len() {
+                        1 => DeviceColor::from_gray(vals[0]),
+                        3 => DeviceColor::from_rgb(vals[0], vals[1], vals[2]),
+                        4 => DeviceColor::from_cmyk(vals[0], vals[1], vals[2], vals[3]),
+                        _ => DeviceColor::from_gray(1.0),
+                    };
+                    self.display_list.push(DisplayElement::Fill {
+                        path: path.clone(),
+                        params: FillParams {
+                            color: ic_color,
+                            fill_rule: FillRule::NonZeroWinding,
+                            ctm,
+                            is_text_glyph: false,
+                            overprint: false,
+                            overprint_mode: 0,
+                            painted_channels: 0,
+                            is_device_cmyk: false,
+                            spot_color: None,
+                            rendering_intent: 0,
+                            transfer: Default::default(),
+                            halftone: Default::default(),
+                            bg_ucr: Default::default(),
+                            alpha,
+                            blend_mode: 0,
+                        },
+                    });
+                }
+                self.display_list.push(DisplayElement::Stroke {
+                    path,
+                    params: StrokeParams {
+                        color,
+                        line_width: border_width,
+                        line_cap: LineCap::Butt,
+                        line_join: LineJoin::Miter,
+                        miter_limit: 10.0,
+                        dash_pattern: dash,
+                        ctm,
+                        stroke_adjust: false,
+                        is_text_glyph: false,
+                        overprint: false,
+                        overprint_mode: 0,
+                        painted_channels: 0,
+                        spot_color: None,
+                        rendering_intent: 0,
+                        transfer: Default::default(),
+                        halftone: Default::default(),
+                        bg_ucr: Default::default(),
+                        alpha,
+                        blend_mode: 0,
+                    },
+                });
+            }
+            _ => {
+                // Unsupported annotation type without AP — skip silently
+            }
         }
 
         Ok(())
