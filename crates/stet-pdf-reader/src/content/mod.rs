@@ -3989,6 +3989,10 @@ impl<'a> ContentInterpreter<'a> {
             // Save and clear soft mask scope — it belongs to the parent display list
             let saved_scope = self.soft_mask_scope.take();
 
+            // Compute device-space bbox now, before interpret_stream modifies
+            // the CTM via `cm` operators inside the form content.
+            let device_bbox = self.compute_device_bbox(bbox);
+
             // Clip to BBox inside the group's display list
             if let Some((x0, y0, x1, y1)) = bbox {
                 self.push_bbox_clip(x0, y0, x1, y1);
@@ -4007,9 +4011,6 @@ impl<'a> ContentInterpreter<'a> {
 
             // Restore parent's soft mask scope
             self.soft_mask_scope = saved_scope;
-
-            // Compute device-space bbox from form BBox + CTM
-            let device_bbox = self.compute_device_bbox(bbox);
 
             // Extract isolated and knockout flags from Group dict
             let isolated = self.get_group_isolated(dict);
@@ -5062,7 +5063,14 @@ impl<'a> ContentInterpreter<'a> {
                 None
             }
         } else {
-            None
+            // No /BC specified: default is all zeros in the group color space.
+            // For DeviceCMYK, [0,0,0,0] = no ink = white → RGB [1,1,1].
+            // For DeviceRGB/Gray, [0,0,0] = black → RGB [0,0,0] (luminosity 0).
+            if group_n_comps == 4 {
+                Some([1.0, 1.0, 1.0])
+            } else {
+                None
+            }
         };
 
         // Check for /TR (transfer function). The common case is {1 exch sub}
