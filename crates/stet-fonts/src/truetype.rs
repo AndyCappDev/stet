@@ -689,6 +689,67 @@ pub fn parse_cmap_with_info(font_data: &[u8]) -> (std::collections::HashMap<u32,
                 }
             }
         }
+        2 => {
+            // Format 2: high-byte mapping through table.
+            // Used for mixed single/multi-byte encodings (e.g. Shift-JIS) and
+            // some subset fonts that pack Unicode BMP into format 2.
+            // Structure: subHeaderKeys[256] → subHeaders[] → glyphIndexArray[]
+            let shk_off = subtable_off + 6; // 256 × u16 subHeaderKeys
+            let sh_base = shk_off + 512; // subHeaders start here
+            if sh_base + 8 > font_data.len() {
+                return (map, cmap_is_unicode);
+            }
+            // Single-byte characters via subHeaders[0]
+            {
+                let first_code = read_u16(font_data, sh_base) as u32;
+                let entry_count = read_u16(font_data, sh_base + 2) as u32;
+                let id_delta = read_i16(font_data, sh_base + 4) as i32;
+                let ro_addr = sh_base + 6;
+                let range_off = read_u16(font_data, ro_addr) as usize;
+                for j in 0..entry_count {
+                    let addr = ro_addr + range_off + j as usize * 2;
+                    if addr + 2 > font_data.len() {
+                        break;
+                    }
+                    let gid_raw = read_u16(font_data, addr);
+                    if gid_raw != 0 {
+                        let gid = ((gid_raw as i32 + id_delta) & 0xFFFF) as u16;
+                        if gid != 0 {
+                            map.insert(first_code + j, gid);
+                        }
+                    }
+                }
+            }
+            // Two-byte characters: high bytes with subHeaderKeys[h] > 0
+            for high in 1u32..256 {
+                let k = read_u16(font_data, shk_off + high as usize * 2) as usize / 8;
+                if k == 0 {
+                    continue; // maps to single-byte subHeader, already handled
+                }
+                let s = sh_base + k * 8;
+                if s + 8 > font_data.len() {
+                    continue;
+                }
+                let first_code = read_u16(font_data, s) as u32;
+                let entry_count = read_u16(font_data, s + 2) as u32;
+                let id_delta = read_i16(font_data, s + 4) as i32;
+                let ro_addr = s + 6;
+                let range_off = read_u16(font_data, ro_addr) as usize;
+                for j in 0..entry_count {
+                    let addr = ro_addr + range_off + j as usize * 2;
+                    if addr + 2 > font_data.len() {
+                        break;
+                    }
+                    let gid_raw = read_u16(font_data, addr);
+                    if gid_raw != 0 {
+                        let gid = ((gid_raw as i32 + id_delta) & 0xFFFF) as u16;
+                        if gid != 0 {
+                            map.insert((high << 8) | (first_code + j), gid);
+                        }
+                    }
+                }
+            }
+        }
         4 => {
             // Format 4: segment mapping to delta values
             if subtable_off + 14 > font_data.len() {
