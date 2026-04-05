@@ -460,7 +460,10 @@ pub fn parse_object_from_token(lexer: &mut Lexer, tok: Token) -> Result<PdfObj, 
                 if t == Token::ArrayEnd || t == Token::Eof {
                     break;
                 }
-                elems.push(parse_object_from_token(lexer, t)?);
+                match parse_object_from_token(lexer, t) {
+                    Ok(obj) => elems.push(obj),
+                    Err(_) => {} // skip unparseable tokens in arrays (corrupt PDF)
+                }
             }
             Ok(PdfObj::Array(elems))
         }
