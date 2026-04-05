@@ -1472,10 +1472,14 @@ fn load_cjk_fallback_font(ordering: &[u8], base_font: &str) -> Result<Vec<u8>, P
     let lower = base_font.to_ascii_lowercase();
     let is_bold = lower.contains("bold") || lower.contains("demi") || lower.contains("black");
 
-    // For "Identity" ordering (non-CJK fonts), use a Latin fallback rather
-    // than a CJK font. CJK fonts have incompatible glyph ordering, which
-    // produces garbled text when identity CID-to-GID mapping is used.
-    if ordering == b"Identity" {
+    // For "Identity" ordering, check whether the font name indicates a CJK
+    // font. If so, fall through to the CJK lookup path instead of using a
+    // Latin fallback that can't render CJK characters.
+    let is_cjk_name = ["cn", "sc", "jp", "kr", "tc", "hk", "cjk", "gothic",
+        "ming", "song", "hei", "kai", "fang", "han"]
+        .iter()
+        .any(|kw| lower.contains(kw));
+    if ordering == b"Identity" && !is_cjk_name {
         let latin_targets: &[&str] = if is_bold {
             &["LiberationSans-Bold", "DejaVuSans-Bold"]
         } else {
@@ -1494,23 +1498,39 @@ fn load_cjk_fallback_font(ordering: &[u8], base_font: &str) -> Result<Vec<u8>, P
         )));
     }
 
-    // Noto CJK .ttc files contain JP/SC/TC/HK/KR sub-fonts; the system font
-    // cache typically indexes only the first (JP). The JP variant includes
-    // all CJK unified ideographs, so it works for all orderings.
-    let target = if is_bold {
-        "NotoSansCJKjp-Bold"
+    // Noto CJK .ttc files contain JP/SC/TC/HK/KR sub-fonts with different
+    // GID orderings. Select the variant matching the font name or ordering
+    // so GIDs are compatible with the original font.
+    let lang = if lower.contains("cn") || lower.contains("sc") || ordering == b"GB1" {
+        "sc"
+    } else if lower.contains("tw") || lower.contains("tc") || ordering == b"CNS1" {
+        "tc"
+    } else if lower.contains("kr") || ordering == b"Korea1" {
+        "kr"
+    } else if lower.contains("hk") {
+        "hk"
     } else {
-        "NotoSansCJKjp-Regular"
+        "jp" // default: Japan1 or unknown
     };
-    if let Some(path) = cache.get_font_path(target)
-        && let Ok(data) = read_font_file(path, target)
-    {
-        return Ok(data);
+    let heavy = lower.contains("heavy") || lower.contains("black");
+    // Try weight-matched variant first, then regular/bold fallback
+    let weight_suffix = if heavy { "Black" } else if is_bold { "Bold" } else { "Regular" };
+    let targets = [
+        format!("NotoSansCJK{lang}-{weight_suffix}"),
+        if is_bold || heavy { format!("NotoSansCJK{lang}-Bold") } else { format!("NotoSansCJK{lang}-Regular") },
+        format!("NotoSansCJKjp-{weight_suffix}"),
+    ];
+    for target in &targets {
+        if let Some(path) = cache.get_font_path(target)
+            && let Ok(data) = read_font_file(path, target)
+        {
+            return Ok(data);
+        }
     }
 
     Err(PdfError::Other(format!(
-        "CJK fallback font '{}' not found on system",
-        target
+        "CJK fallback font not found on system for '{}'",
+        base_font
     )))
 }
 
@@ -2525,7 +2545,7 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                 let is_otf_cff = font_data.len() > 4 && &font_data[0..4] == b"OTTO";
                 let is_raw = is_raw_cff(&font_data);
                 if is_otf_cff || is_raw {
-                    // Parse CIDToGIDMap from the PDF before creating the CFF font
+                    // Parse CIDToGIDMap from the PDF
                     let cid_to_gid_map = if let Some(map_obj) = cid_font_dict.get(b"CIDToGIDMap") {
                         if cid_font_dict.get_name(b"CIDToGIDMap") != Some(b"Identity") {
                             resolver.stream_data_from_obj(map_obj).ok().map(|d| {
@@ -2539,7 +2559,29 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                     } else {
                         None
                     };
-                    let identity = cid_to_gid_map.is_none();
+                    // For CID-keyed CFF fonts, the CFF handles CID→charstring
+                    // mapping internally. The PDF's CIDToGIDMap is a sparse subset
+                    // artifact that maps most CIDs to GID 0 — ignore it.
+                    // For non-CID CFF fonts, the CIDToGIDMap provides the actual
+                    // CID→GID mapping and must be used.
+                    let is_cid_keyed = {
+                        use stet_fonts::truetype::find_table;
+                        let cff_range = if is_otf_cff {
+                            find_table(&font_data, b"CFF ")
+                        } else {
+                            Some((0, font_data.len()))
+                        };
+                        cff_range.and_then(|(off, len)| {
+                            parse_cff(&font_data[off..off+len]).ok()
+                        }).and_then(|fonts| fonts.into_iter().next())
+                        .is_some_and(|f| f.is_cid)
+                    };
+                    let (cid_to_gid_map, identity) = if is_cid_keyed {
+                        (None, true) // CFF handles CID mapping
+                    } else {
+                        let id = cid_to_gid_map.is_none();
+                        (cid_to_gid_map, id)
+                    };
                     if is_otf_cff {
                         return create_cid_cff_from_otf(
                             &font_data,
@@ -2850,9 +2892,33 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                     .into_iter()
                     .next()
                     .ok_or(PdfError::Other("CFF contains no fonts".into()))?;
+                // Detect tiny CFF subsets for CJK fonts. Some PDFs embed a
+                // minimal "ghost" CFF (3-4 glyphs) to satisfy spec requirements
+                // while expecting the viewer to use the system CJK font (which
+                // has matching GID ordering). Only fall through for CJK fonts
+                // where the system substitute has compatible glyph indices.
+                let cs_count = font.char_strings.len();
+                let base_lower = cid_font_dict
+                    .get_name(b"BaseFont")
+                    .map(|n| {
+                        let s = String::from_utf8_lossy(n).to_ascii_lowercase();
+                        // Strip subset prefix (e.g. "ydxfhk+minionpro" → "minionpro")
+                        if s.len() > 7 && s.as_bytes().get(6) == Some(&b'+') {
+                            s[7..].to_string()
+                        } else {
+                            s
+                        }
+                    })
+                    .unwrap_or_default();
+                let is_cjk_font = ["cn", "sc", "jp", "kr", "tc", "hk", "cjk",
+                    "gothic", "ming", "song", "hei", "han"]
+                    .iter().any(|kw| base_lower.contains(kw));
+                if cs_count > 0 && cid_widths.len() > cs_count * 4 && is_cjk_font {
+                    // Drop the parsed CFF and fall through to the system font path.
+                } else {
                 let fm = font.font_matrix;
                 let font_matrix = Matrix::new(fm[0], fm[1], fm[2], fm[3], fm[4], fm[5]);
-                Ok(PdfFont::CidCff(CidCffPdfFont {
+                return Ok(PdfFont::CidCff(CidCffPdfFont {
                     font,
                     default_width,
                     cid_widths,
@@ -2867,9 +2933,11 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                     dw2,
                     w2: w2.clone(),
                     type1_paths: None,
-                }))
-            } else {
-                // Not embedded — substitute with a system font
+                }));
+                }
+            }
+            // Not embedded or tiny subset — substitute with a system font
+            {
                 let base_font = cid_font_dict
                     .get_name(b"BaseFont")
                     .map(|n| String::from_utf8_lossy(n).to_string())
@@ -2891,15 +2959,29 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                     load_system_truetype_font(&base_font)
                         .or_else(|_| load_cjk_fallback_font(&ordering, &base_font))?
                 };
-                // If the system font is OpenType/CFF, use CFF rendering path
-                if sys_data.len() > 4 && &sys_data[0..4] == b"OTTO" {
+                // For Identity ordering, CIDs are GIDs from the original font.
+                // When the substitute is the same font family, identity mapping
+                // gives correct glyphs. For non-Identity orderings, the cmap
+                // path (CID→Unicode→GID) is used instead.
+                let identity = ordering == b"Identity";
+                // If the system font is OpenType/CFF (or a TTC containing
+                // OpenType/CFF sub-fonts), use the CFF rendering path.
+                // find_table() handles both plain OTF and TTC files.
+                let is_otto = sys_data.len() > 4 && &sys_data[0..4] == b"OTTO";
+                let is_ttc_cff = sys_data.len() > 16 && &sys_data[0..4] == b"ttcf" && {
+                    let off = u32::from_be_bytes([
+                        sys_data[12], sys_data[13], sys_data[14], sys_data[15],
+                    ]) as usize;
+                    off + 4 <= sys_data.len() && &sys_data[off..off + 4] == b"OTTO"
+                };
+                if is_otto || is_ttc_cff {
                     return create_cid_cff_from_otf(
                         &sys_data,
                         default_width,
                         cid_widths,
                         &ordering,
                         None,
-                        false, // substituted: use cmap, not identity
+                        identity,
                         code_lengths,
                         code_to_cid.clone(),
                         wmode,
