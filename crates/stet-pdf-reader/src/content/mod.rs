@@ -2310,6 +2310,13 @@ impl<'a> ContentInterpreter<'a> {
             .as_dict()
             .ok_or(PdfError::Other("XObject is not a stream".into()))?;
 
+        // Check Optional Content visibility on the XObject itself
+        if let Some(oc_obj) = dict.get(b"OC") {
+            if self.is_ocg_off(oc_obj) {
+                return Ok(());
+            }
+        }
+
         let subtype = dict.get_name(b"Subtype").unwrap_or(b"");
         match subtype {
             b"Image" => self.handle_image_xobject(&xobj_ref_clone, dict)?,
