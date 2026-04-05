@@ -1088,6 +1088,180 @@ fn create_cid_cff_from_raw(
     }))
 }
 
+/// Create a CID font from a PostScript CIDFont program (Resource-CIDFont).
+///
+/// These contain CIDFontType 0 definitions with binary charstring data after
+/// `StartData`. The binary data layout: CID map (GDBytes×CIDCount) followed
+/// by subroutines and charstring data indexed by offsets in the CID map.
+fn create_cid_from_ps_cidfont(
+    font_data: &[u8],
+    default_width: f64,
+    cid_widths: HashMap<u16, f64>,
+    code_lengths: [u8; 256],
+    code_to_cid: HashMap<u32, u32>,
+    wmode: u8,
+    dw2: [f64; 2],
+    w2: HashMap<u16, [f64; 3]>,
+) -> Result<PdfFont, PdfError> {
+    let text = String::from_utf8_lossy(font_data);
+
+    // Extract key parameters from the PS header
+    let get_int = |key: &str| -> Option<usize> {
+        let pat = format!("/{key}");
+        let idx = text.find(&pat)?;
+        let rest = &text[idx + pat.len()..];
+        rest.split_whitespace().next()?.parse().ok()
+    };
+
+    let cid_count = get_int("CIDCount").unwrap_or(0);
+    let fd_bytes = get_int("FDBytes").unwrap_or(0);
+    let gd_bytes = get_int("GDBytes").unwrap_or(4);
+    let subr_map_offset = get_int("SubrMapOffset").unwrap_or(0);
+    let sd_bytes = get_int("SDBytes").unwrap_or(4);
+    let subr_count = get_int("SubrCount").unwrap_or(0);
+    let len_iv = get_int("lenIV").unwrap_or(4) as u16;
+
+    // Extract FontMatrix from the FDArray Private dict
+    let font_matrix = if let Some(fm_idx) = text.find("/FontMatrix") {
+        let rest = &text[fm_idx..];
+        if let Some(start) = rest.find('[') {
+            let end_bracket = rest[start..].find(']').unwrap_or(50) + start;
+            let vals: Vec<f64> = rest[start + 1..end_bracket]
+                .split_whitespace()
+                .filter_map(|s| s.parse().ok())
+                .collect();
+            if vals.len() == 6 {
+                Matrix::new(vals[0], vals[1], vals[2], vals[3], vals[4], vals[5])
+            } else {
+                Matrix::new(0.001, 0.0, 0.0, 0.001, 0.0, 0.0)
+            }
+        } else {
+            Matrix::new(0.001, 0.0, 0.0, 0.001, 0.0, 0.0)
+        }
+    } else {
+        Matrix::new(0.001, 0.0, 0.0, 0.001, 0.0, 0.0)
+    };
+
+    // Extract subrs from the Private dict (OtherSubrs / Subrs style)
+    // For PS CIDFonts, subroutines are in the binary data, not in the PS text.
+
+    // Find the binary data after "StartData"
+    // Format: "(Binary) NNNN StartData<whitespace><binary data>"
+    // The binary data begins after "StartData" + one whitespace byte.
+    // We must NOT skip \x00 bytes — they are part of the binary CID map.
+    let binary_data = {
+        let sd_marker = b"StartData";
+        let pos = font_data.windows(sd_marker.len())
+            .position(|w| w == sd_marker)
+            .ok_or(PdfError::Other("PS CIDFont: no StartData found".into()))?;
+        let after = &font_data[pos + sd_marker.len()..];
+        // Skip only ASCII whitespace (space, tab, CR, LF) — NOT null bytes
+        let skip = after.iter().position(|&b| !matches!(b, b' ' | b'\t' | b'\r' | b'\n')).unwrap_or(0);
+        &font_data[pos + sd_marker.len() + skip..]
+    };
+
+    // Parse CID map: CIDCount × (FDBytes + GDBytes) bytes
+    let entry_size = fd_bytes + gd_bytes;
+    let cid_map_size = cid_count * entry_size;
+    if binary_data.len() < cid_map_size {
+        return Err(PdfError::Other("PS CIDFont: binary data too short for CID map".into()));
+    }
+
+    // Read charstring offsets for each CID
+    let read_be = |data: &[u8], off: usize, n: usize| -> usize {
+        let mut val = 0usize;
+        for i in 0..n {
+            if off + i < data.len() {
+                val = (val << 8) | data[off + i] as usize;
+            }
+        }
+        val
+    };
+
+    let mut cid_offsets: Vec<usize> = Vec::with_capacity(cid_count + 1);
+    for c in 0..cid_count {
+        let entry_off = c * entry_size + fd_bytes;
+        let offset = read_be(binary_data, entry_off, gd_bytes);
+        cid_offsets.push(offset);
+    }
+    // Sentinel: end of last charstring = start of subroutine map
+    cid_offsets.push(subr_map_offset);
+
+    // Parse subroutine offsets
+    let mut subrs: Vec<Vec<u8>> = Vec::with_capacity(subr_count);
+    if subr_count > 0 && subr_map_offset + (subr_count + 1) * sd_bytes <= binary_data.len() {
+        let mut sub_offsets: Vec<usize> = Vec::with_capacity(subr_count + 1);
+        for i in 0..=subr_count {
+            let off = read_be(binary_data, subr_map_offset + i * sd_bytes, sd_bytes);
+            sub_offsets.push(off);
+        }
+        for i in 0..subr_count {
+            let start = sub_offsets[i];
+            let end = sub_offsets[i + 1];
+            if start < end && end <= binary_data.len() {
+                subrs.push(binary_data[start..end].to_vec());
+            } else {
+                subrs.push(Vec::new());
+            }
+        }
+    }
+
+    // Execute charstrings for each CID that has a width entry
+    let mut paths = HashMap::new();
+    for &cid in cid_widths.keys() {
+        let c = cid as usize;
+        if c >= cid_count {
+            continue;
+        }
+        let cs_start = cid_offsets[c];
+        let cs_end = cid_offsets[c + 1];
+        if cs_start >= cs_end || cs_end > binary_data.len() {
+            continue;
+        }
+        let charstring = &binary_data[cs_start..cs_end];
+        if let Ok(result) = execute_charstring(charstring, &subrs, len_iv.into(), false) {
+            let path = result.path.transform(&font_matrix);
+            paths.insert(cid, path);
+        }
+    }
+
+    // Create dummy CffFont with pre-computed paths
+    let dummy_cff = stet_fonts::cff_parser::CffFont {
+        name: String::new(),
+        font_matrix: [font_matrix.a, font_matrix.b, font_matrix.c, font_matrix.d, font_matrix.tx, font_matrix.ty],
+        font_bbox: [0.0; 4],
+        char_strings: Vec::new(),
+        global_subrs: Vec::new(),
+        local_subrs: Vec::new(),
+        charset: Vec::new(),
+        encoding: Vec::new(),
+        default_width_x: 0.0,
+        nominal_width_x: 0.0,
+        is_cid: true,
+        fd_array: Vec::new(),
+        fd_select: Vec::new(),
+        ros: None,
+        cid_to_gid: Vec::new(),
+    };
+
+    Ok(PdfFont::CidCff(CidCffPdfFont {
+        font: dummy_cff,
+        default_width,
+        cid_widths,
+        font_matrix,
+        cmap: None,
+        pdf_cid_to_gid: None,
+        identity_cid_to_gid: true,
+        ordering: Vec::new(),
+        code_lengths,
+        code_to_cid,
+        wmode,
+        dw2,
+        w2,
+        type1_paths: Some(paths),
+    }))
+}
+
 /// Create a CID font from Type 1 font data mislabeled as CIDFontType0.
 ///
 /// Parses the Type 1 font, maps each CID to a glyph name via ToUnicode + AGL,
@@ -2632,6 +2806,20 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                         &ordering,
                         pdf_cid_to_gid,
                         !cff_is_cid,
+                        code_lengths,
+                        code_to_cid.clone(),
+                        wmode,
+                        dw2,
+                        w2.clone(),
+                    );
+                }
+                // PostScript CIDFont programs: "%!PS-Adobe-3.0 Resource-CIDFont"
+                // These contain binary charstring data after StartData.
+                if font_data.starts_with(b"%!") && font_data.windows(16).any(|w| w == b"Resource-CIDFont") {
+                    return create_cid_from_ps_cidfont(
+                        &font_data,
+                        default_width,
+                        cid_widths,
                         code_lengths,
                         code_to_cid.clone(),
                         wmode,
