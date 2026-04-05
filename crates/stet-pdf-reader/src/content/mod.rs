@@ -312,10 +312,13 @@ impl<'a> ContentInterpreter<'a> {
             return Ok(()); // Hidden
         }
 
-        // Get /Rect [llx, lly, urx, ury], normalizing swapped coordinates
+        // Get /Rect [llx, lly, urx, ury], normalizing swapped coordinates.
+        // Rect may be an indirect reference — resolve before parsing.
         let rect = annot_dict
-            .get_array(b"Rect")
-            .and_then(|a| {
+            .get(b"Rect")
+            .and_then(|obj| {
+                let resolved = self.resolver.deref(obj).ok().unwrap_or(obj.clone());
+                let a = resolved.as_array().or_else(|| annot_dict.get_array(b"Rect"))?;
                 if a.len() >= 4 {
                     let r0 = a[0].as_f64()?;
                     let r1 = a[1].as_f64()?;
@@ -373,16 +376,14 @@ impl<'a> ContentInterpreter<'a> {
 
         // The appearance stream is a Form XObject. Its BBox defines the
         // coordinate space, and we need to map it to the annotation Rect.
+        // BBox may be an indirect reference — resolve before accessing.
         let bbox = form_dict
-            .get_array(b"BBox")
-            .and_then(|a| {
+            .get(b"BBox")
+            .and_then(|obj| {
+                let resolved = self.resolver.deref(obj).ok().unwrap_or(obj.clone());
+                let a = resolved.as_array()?;
                 if a.len() >= 4 {
-                    Some([
-                        a[0].as_f64()?,
-                        a[1].as_f64()?,
-                        a[2].as_f64()?,
-                        a[3].as_f64()?,
-                    ])
+                    Some([a[0].as_f64()?, a[1].as_f64()?, a[2].as_f64()?, a[3].as_f64()?])
                 } else {
                     None
                 }
