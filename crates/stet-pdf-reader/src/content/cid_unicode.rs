@@ -54,12 +54,10 @@ fn gb1_halfwidth_unicode(cid: u16) -> Option<u32> {
     }
 }
 
-/// Adobe-Japan1 half-width Latin: CIDs 231–324 → U+0021–U+007E, CID 230 → U+0020.
+/// Adobe-Japan1 half-width Latin: CIDs 231–324 → U+0020–U+007D.
 fn japan1_halfwidth_unicode(cid: u16) -> Option<u32> {
     if (231..=324).contains(&cid) {
-        Some(0x0021 + (cid - 231) as u32)
-    } else if cid == 230 {
-        Some(0x0020)
+        Some(0x0020 + (cid - 231) as u32)
     } else {
         None
     }
