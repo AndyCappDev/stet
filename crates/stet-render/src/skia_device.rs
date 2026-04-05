@@ -2382,11 +2382,19 @@ fn render_element(
                         + transform.sy * transform.sy)
                         .sqrt()
                         .max(1.0);
-                    // Stroke in user space first, then transform to device space.
-                    // The old code transformed the path first, then stroked — which
-                    // applied the stroke width in device pixels instead of user units,
-                    // producing strokes that were too thick when CTM had small scale.
-                    if let Some(stroked_user) = skia_path.stroke(&stroke, resolution_scale)
+                    // Apply dash pattern first (Path::stroke doesn't handle dashing),
+                    // then stroke in user space and transform to device space.
+                    let dashed_op;
+                    let stroke_src = if let Some(ref dash) = stroke.dash {
+                        dashed_op = skia_path.dash(dash, resolution_scale);
+                        match dashed_op.as_ref() {
+                            Some(p) => p,
+                            None => &skia_path,
+                        }
+                    } else {
+                        &skia_path
+                    };
+                    if let Some(stroked_user) = stroke_src.stroke(&stroke, resolution_scale)
                         && let Some(stroked) = stroked_user.transform(transform)
                     {
                         overprint_handled = true;
@@ -4047,10 +4055,23 @@ fn render_pattern_fill(
     if let Some(ref sp) = params.stroke_params {
         // Stroke pattern: expand the centerline path to a fill outline
         // using the stroke parameters (width, cap, join, miter, dash).
+        // Apply dash pattern first (Path::stroke doesn't handle dashing).
         let stroke = build_stroke(sp, ctx.effective_dpi);
         let ctm_transform = to_transform(&sp.ctm);
         let combined = ctm_transform.post_concat(path_transform);
-        if let Some(outline) = fill_skia_path.stroke(&stroke, 1.0) {
+        let res_scale =
+            stet_tiny_skia::PathStroker::compute_resolution_scale(&combined);
+        let dashed;
+        let stroke_path = if let Some(ref dash) = stroke.dash {
+            dashed = fill_skia_path.dash(dash, res_scale);
+            match dashed.as_ref() {
+                Some(p) => p,
+                None => &fill_skia_path,
+            }
+        } else {
+            &fill_skia_path
+        };
+        if let Some(outline) = stroke_path.stroke(&stroke, res_scale) {
             fill_mask.fill_path(
                 &outline,
                 stet_tiny_skia::FillRule::Winding,
@@ -4165,10 +4186,23 @@ fn clip_path_unified(
         };
         mask.data_mut().fill(0);
         if let Some(ref sp) = params.stroke_params {
-            // Stroke-based clip: expand centerline to stroke outline
+            // Stroke-based clip: expand centerline to stroke outline.
+            // Apply dash pattern first (Path::stroke doesn't handle dashing).
             let stroke = build_stroke(sp, ctx.effective_dpi);
             let transform = ctx.transform(&sp.ctm);
-            if let Some(outline) = skia_path.stroke(&stroke, 1.0) {
+            let res_scale =
+                stet_tiny_skia::PathStroker::compute_resolution_scale(&transform);
+            let dashed;
+            let stroke_path = if let Some(ref dash) = stroke.dash {
+                dashed = skia_path.dash(dash, res_scale);
+                match dashed.as_ref() {
+                    Some(p) => p,
+                    None => &skia_path,
+                }
+            } else {
+                &skia_path
+            };
+            if let Some(outline) = stroke_path.stroke(&stroke, res_scale) {
                 mask.fill_path(
                     &outline,
                     stet_tiny_skia::FillRule::Winding,
