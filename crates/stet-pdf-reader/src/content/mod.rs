@@ -2000,13 +2000,34 @@ impl<'a> ContentInterpreter<'a> {
 
     /// Resolve the current font by name from the font cache or resources.
     fn resolve_current_font(&mut self, name: &[u8]) {
-        // Check cache first
+        // Check cache by name first (fast path for the common case where the
+        // same name maps to the same font object across resource scopes).
         if let Some(cached) = self.font_cache.get(name) {
-            self.current_font = Some(Arc::clone(cached));
-            return;
+            // Verify the cached font still matches — different resource scopes
+            // (page vs annotation vs form) may map the same name to different
+            // font objects (e.g. /TT1 → obj 90 on page, /TT1 → obj 407 in annot).
+            let font_ref = self
+                .resolve_resource_subdict(b"Font")
+                .and_then(|fd| fd.get(name).cloned());
+            if let Some(PdfObj::Ref(obj_num, _)) = &font_ref {
+                let obj_key = obj_num.to_le_bytes().to_vec();
+                if let Some(obj_cached) = self.font_cache.get(&obj_key) {
+                    // The obj-keyed cache has this font — use it (handles both
+                    // same-as-name and different-from-name cases).
+                    self.current_font = Some(Arc::clone(obj_cached));
+                    return;
+                }
+                // obj key not in cache → this is a NEW font object that happens
+                // to share a name with a previously cached font. Fall through to
+                // resolve the new font instead of using the stale name-cached entry.
+            } else {
+                // No obj ref — use the name-cached font
+                self.current_font = Some(Arc::clone(cached));
+                return;
+            }
         }
 
-        // Look up in resources /Font dict (may be an indirect reference)
+        // Cache miss — look up in resources /Font dict
         let font_ref = self
             .resolve_resource_subdict(b"Font")
             .and_then(|fd| fd.get(name).cloned());
@@ -2025,9 +2046,25 @@ impl<'a> ContentInterpreter<'a> {
             }
         };
 
+        // Check if this same object was already resolved under a different name
+        if let PdfObj::Ref(obj_num, _) = &font_ref {
+            let obj_key = obj_num.to_le_bytes().to_vec();
+            if let Some(cached) = self.font_cache.get(&obj_key) {
+                let arc = Arc::clone(cached);
+                self.font_cache.insert(name.to_vec(), Arc::clone(&arc));
+                self.current_font = Some(arc);
+                return;
+            }
+        }
+
         match font::resolve_font(self.resolver, &font_ref, self.font_provider.as_ref()) {
             Ok(font) => {
                 let arc = Arc::new(font);
+                // Cache under both the name and object number keys
+                if let PdfObj::Ref(obj_num, _) = &font_ref {
+                    self.font_cache
+                        .insert(obj_num.to_le_bytes().to_vec(), Arc::clone(&arc));
+                }
                 self.font_cache.insert(name.to_vec(), Arc::clone(&arc));
                 self.current_font = Some(arc);
             }
