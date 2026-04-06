@@ -1180,7 +1180,21 @@ fn decode_ccitt_hayro(
 
 /// JBIG2Decode.
 fn decode_jbig2(data: &[u8], globals: Option<&[u8]>) -> Result<Vec<u8>, PdfError> {
-    let image = hayro_jbig2::decode_embedded(data, globals)
+    // Run JBIG2 decode with a timeout to guard against malformed data that
+    // causes the decoder to hang (e.g. issue15942.pdf).
+    let data_owned = data.to_vec();
+    let globals_owned = globals.map(|g| g.to_vec());
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = hayro_jbig2::decode_embedded(
+            &data_owned,
+            globals_owned.as_deref(),
+        );
+        let _ = tx.send(result);
+    });
+    let image = rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .map_err(|_| PdfError::DecompressionError("JBIG2: decode timed out".into()))?
         .map_err(|e| PdfError::DecompressionError(format!("JBIG2: {e}")))?;
     // Convert Vec<bool> to packed bytes (8 pixels/byte, MSB first)
     // JBIG2: true = black, false = white
