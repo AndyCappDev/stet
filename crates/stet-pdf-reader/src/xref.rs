@@ -852,9 +852,33 @@ fn parse_xref_stream(
         data_start += 1;
     }
 
-    let length = dict
-        .get_int(b"Length")
-        .ok_or(PdfError::StreamMissingLength)? as usize;
+    // /Length may be a direct integer or — in malformed PDFs — an indirect
+    // reference that we cannot resolve at this stage (the resolver isn't
+    // built yet). When the direct integer isn't available, recover by
+    // scanning forward for the `endstream` keyword.
+    let length = match dict.get_int(b"Length") {
+        Some(n) => n as usize,
+        None => {
+            let needle = b"endstream";
+            let search_end = data.len().saturating_sub(needle.len());
+            let mut pos = data_start;
+            let mut found = None;
+            while pos <= search_end {
+                if &data[pos..pos + needle.len()] == needle {
+                    let mut end = pos;
+                    while end > data_start
+                        && matches!(data[end - 1], b' ' | b'\r' | b'\n')
+                    {
+                        end -= 1;
+                    }
+                    found = Some(end - data_start);
+                    break;
+                }
+                pos += 1;
+            }
+            found.ok_or(PdfError::StreamMissingLength)?
+        }
+    };
     let raw_data = &data[data_start..std::cmp::min(data_start + length, data.len())];
 
     // Decompress the stream
