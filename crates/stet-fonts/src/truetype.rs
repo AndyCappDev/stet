@@ -647,8 +647,11 @@ pub fn parse_cmap_with_info(font_data: &[u8]) -> (std::collections::HashMap<u32,
         let platform = read_u16(font_data, entry);
         let encoding = read_u16(font_data, entry + 2);
         let offset = read_u32(font_data, entry + 4) as usize;
-        // Validate subtable offset is within the font data
-        if actual_cmap_off + offset + 2 > font_data.len() {
+        // Validate subtable offset is within the cmap table itself, not just
+        // the overall font data. Some malformed PDFs declare a subtable whose
+        // offset points past the end of the cmap table — into the next sfnt
+        // table — which would otherwise be misinterpreted as a valid subtable.
+        if offset + 2 > cmap_len || actual_cmap_off + offset + 2 > font_data.len() {
             continue;
         }
         let priority = match (platform, encoding) {
