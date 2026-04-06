@@ -2596,22 +2596,12 @@ impl<'a> ContentInterpreter<'a> {
             }
             1 => {
                 // Stroke only
-                let mut params = self.gstate.stroke_params();
-                params.is_text_glyph = true;
-                self.display_list.push(DisplayElement::Stroke {
-                    path: device_path.clone(),
-                    params,
-                });
+                self.emit_text_stroke(device_path.clone());
             }
             2 => {
                 // Fill then stroke
                 self.emit_text_fill(device_path.clone());
-                let mut stroke_params = self.gstate.stroke_params();
-                stroke_params.is_text_glyph = true;
-                self.display_list.push(DisplayElement::Stroke {
-                    path: device_path.clone(),
-                    params: stroke_params,
-                });
+                self.emit_text_stroke(device_path.clone());
             }
             _ => {} // mode 3 = invisible
         }
@@ -2681,6 +2671,81 @@ impl<'a> ContentInterpreter<'a> {
             self.display_list
                 .push(DisplayElement::Fill { path, params });
         }
+    }
+
+    /// Emit a text glyph stroke, handling shading patterns, tiling patterns,
+    /// or solid color strokes.
+    fn emit_text_stroke(&mut self, path: PsPath) {
+        // Shading pattern stroke: clip to stroked outline of glyph, emit shading.
+        if let Some(shading_box) = self.gstate.stroke_shading_pattern.clone() {
+            let mut sp = self.gstate.stroke_params();
+            sp.is_text_glyph = true;
+            // Expand bbox by half the (already device-scaled) stroke width.
+            let mut bbox = path_device_bbox(&path);
+            let half_w = sp.line_width * 0.5;
+            bbox[0] -= half_w;
+            bbox[1] -= half_w;
+            bbox[2] += half_w;
+            bbox[3] += half_w;
+            let mut group_dl = DisplayList::new();
+            group_dl.push(DisplayElement::Clip {
+                path,
+                params: ClipParams {
+                    fill_rule: FillRule::NonZeroWinding,
+                    ctm: Matrix::identity(),
+                    stroke_params: Some(sp),
+                },
+            });
+            for elem in shading_box.0.elements() {
+                group_dl.push(elem.clone());
+            }
+            self.display_list.push(DisplayElement::Group {
+                elements: group_dl,
+                params: GroupParams {
+                    bbox,
+                    isolated: true,
+                    knockout: false,
+                    blend_mode: self.gstate.blend_mode,
+                    alpha: self.gstate.stroke_alpha,
+                },
+            });
+            return;
+        }
+
+        // Tiling pattern stroke: emit PatternFill with stroke_params so the
+        // renderer tiles the pattern over the stroked outline of the glyph.
+        if let Some(pattern) = self.gstate.stroke_pattern.clone() {
+            let mut sp = self.gstate.stroke_params();
+            sp.is_text_glyph = true;
+            self.display_list.push(DisplayElement::PatternFill {
+                params: PatternFillParams {
+                    path,
+                    fill_rule: FillRule::NonZeroWinding,
+                    tile: pattern.tile,
+                    pattern_matrix: pattern.pattern_matrix,
+                    bbox: pattern.bbox,
+                    xstep: pattern.x_step,
+                    ystep: pattern.y_step,
+                    paint_type: pattern.paint_type,
+                    underlying_color: if pattern.paint_type == 2 {
+                        Some(self.gstate.stroke_color.clone())
+                    } else {
+                        None
+                    },
+                    pattern_id: pattern.pattern_id,
+                    device_space_tile: false,
+                    flip_tile_y: false,
+                    stroke_params: Some(sp),
+                    overprint_mode: if self.gstate.overprint { self.gstate.overprint_mode } else { 0 },
+                },
+            });
+            return;
+        }
+
+        let mut params = self.gstate.stroke_params();
+        params.is_text_glyph = true;
+        self.display_list
+            .push(DisplayElement::Stroke { path, params });
     }
 
     // === Marked content operators ===
