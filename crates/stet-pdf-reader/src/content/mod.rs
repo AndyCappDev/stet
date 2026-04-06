@@ -1209,9 +1209,23 @@ impl<'a> ContentInterpreter<'a> {
             // Type 3 glyph operators (width/cache — we use Widths array instead)
             b"d0" => Ok(()),
             b"d1" => {
-                // d1: Type 3 glyph with colored content disabled.
-                // Per PDF spec 9.6.5, color operators must be ignored.
+                // d1: Type 3 glyph with colored content disabled. Per PDF spec
+                // 9.6.5, the glyph description shall be treated as a single
+                // mask whose source colour is the current colour. Color
+                // operators inside the glyph are ignored, AND any path painting
+                // operation (fill or stroke) inside the glyph must use the
+                // single text color — which for the default text rendering
+                // mode 0 is the fill color. Force the stroke color (and any
+                // patterns) to match the fill color so a glyph procedure that
+                // calls `S` or `b` paints with the fill color, not whatever
+                // stroke color happened to be set on the page.
                 self.d1_color_suppressed = true;
+                self.gstate.stroke_color = self.gstate.fill_color.clone();
+                self.gstate.stroke_color_space = self.gstate.fill_color_space.clone();
+                self.gstate.stroke_pattern = None;
+                self.gstate.stroke_shading_pattern = None;
+                self.gstate.stroke_painted_channels = self.gstate.fill_painted_channels;
+                self.gstate.stroke_is_none = self.gstate.fill_is_none;
                 Ok(())
             }
 
