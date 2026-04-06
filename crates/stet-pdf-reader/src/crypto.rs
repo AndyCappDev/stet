@@ -112,6 +112,20 @@ impl EncryptionState {
             return Err(PdfError::Other("PDF requires a password".into()));
         }
 
+        // Acrobat quirk: when V=4 specifies a sub-128-bit /Length (e.g. 40-bit
+        // RC4 keys in some Adobe InDesign / PDF Library 8.0 files), Acrobat
+        // pads the file encryption key with NUL bytes out to 128 bits before
+        // deriving per-object keys via Algorithm 1. The /U value is still
+        // verified against the un-padded key. Without this padding, every
+        // stream and string in the file decrypts to garbage.
+        let key = if v >= 4 && key.len() < 16 {
+            let mut padded = key;
+            padded.resize(16, 0);
+            padded
+        } else {
+            key
+        };
+
         let (stm_method, str_method) = if v >= 4 {
             // Parse CF dict for methods
             let cf = encrypt_dict.get_dict(b"CF");
