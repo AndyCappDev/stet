@@ -2237,11 +2237,14 @@ impl<'a> ContentInterpreter<'a> {
             while i < text.len() {
                 let code_width = font.code_width(text[i]);
                 if code_width == 1 {
-                    // 1-byte code
+                    // 1-byte code. Per PDF spec 9.3.3, word spacing applies to
+                    // the single-byte character code 32 (SPACE) even in a
+                    // composite font.
                     let raw_code = text[i] as u32;
+                    let extra = if raw_code == 0x20 { word_spacing } else { 0.0 };
                     i += 1;
                     let cid = font.resolve_code_to_cid(raw_code) as u16;
-                    self.render_cid_glyph(&font, cid, font_size, char_spacing, th, text_rise, &font_matrix, render_mode);
+                    self.render_cid_glyph(&font, cid, font_size, char_spacing, th, text_rise, &font_matrix, render_mode, extra);
                 } else if i + 1 >= text.len() {
                     // Incomplete trailing byte in 2-byte font — treat as WinAnsi
                     let byte = text[i];
@@ -2269,17 +2272,19 @@ impl<'a> ContentInterpreter<'a> {
                     } else {
                         (cid, width)
                     };
+                    // Word spacing applies only to SINGLE-byte code 32.
+                    let extra = if consumed == 1 && text[i] == 0x20 { word_spacing } else { 0.0 };
                     i += consumed;
                     if font.has_cid_glyph(cid) {
                         // CID maps to a valid GID in the font
-                        self.render_cid_glyph(&font, cid, font_size, char_spacing, th, text_rise, &font_matrix, render_mode);
+                        self.render_cid_glyph(&font, cid, font_size, char_spacing, th, text_rise, &font_matrix, render_mode, extra);
                     } else {
                         // 2-byte CID has no glyph.  Some malformed PDFs encode
                         // single-byte CIDs in 2-byte Identity-H strings with a
                         // padding high byte (e.g. 0x20).  Try the low byte alone.
                         let lo_cid = (raw_code & 0xFF) as u16;
                         if lo_cid > 0 && font.has_cid_glyph(lo_cid) {
-                            self.render_cid_glyph(&font, lo_cid, font_size, char_spacing, th, text_rise, &font_matrix, render_mode);
+                            self.render_cid_glyph(&font, lo_cid, font_size, char_spacing, th, text_rise, &font_matrix, render_mode, extra);
                         } else if raw_code <= 0xFF {
                             // Low code point with no CID glyph — malformed PDF mixing
                             // 1-byte WinAnsi text in a CID font.  Bypass the CID
@@ -2290,7 +2295,7 @@ impl<'a> ContentInterpreter<'a> {
                             // CID glyph not available (e.g. substitute font for CJK).
                             // Use CID width for correct advancement; try Unicode for shape.
                             self.render_cid_glyph_unicode_fallback(
-                                &font, cid, raw_code, font_size, char_spacing, th, text_rise, &font_matrix, render_mode,
+                                &font, cid, raw_code, font_size, char_spacing, th, text_rise, &font_matrix, render_mode, extra,
                             );
                         }
                     }
@@ -2358,6 +2363,7 @@ impl<'a> ContentInterpreter<'a> {
         text_rise: f64,
         font_matrix: &Matrix,
         render_mode: i32,
+        extra_advance: f64,
     ) {
         let vertical = font.wmode() == 1;
         if let Some(glyph_path) = font.glyph_path_cid(cid) {
@@ -2385,12 +2391,12 @@ impl<'a> ContentInterpreter<'a> {
         }
         if vertical {
             let [w1, _vx, _vy] = font.vertical_metrics_cid(cid);
-            let ty = w1 / 1000.0 * font_size + char_spacing;
+            let ty = w1 / 1000.0 * font_size + char_spacing + extra_advance;
             let advance = Matrix::translate(0.0, ty);
             self.gstate.text_matrix = self.gstate.text_matrix.concat(&advance);
         } else {
             let w0 = font.glyph_width_cid(cid);
-            let tx = (w0 * font_size + char_spacing) * th;
+            let tx = (w0 * font_size + char_spacing + extra_advance) * th;
             let advance = Matrix::translate(tx, 0.0);
             self.gstate.text_matrix = self.gstate.text_matrix.concat(&advance);
         }
@@ -2410,6 +2416,7 @@ impl<'a> ContentInterpreter<'a> {
         text_rise: f64,
         font_matrix: &Matrix,
         render_mode: i32,
+        extra_advance: f64,
     ) {
         let vertical = font.wmode() == 1;
         // Try to render the glyph shape via Unicode mapping in the substitute font
@@ -2436,12 +2443,12 @@ impl<'a> ContentInterpreter<'a> {
         }
         if vertical {
             let [w1, _vx, _vy] = font.vertical_metrics_cid(cid);
-            let ty = w1 / 1000.0 * font_size + char_spacing;
+            let ty = w1 / 1000.0 * font_size + char_spacing + extra_advance;
             let advance = Matrix::translate(0.0, ty);
             self.gstate.text_matrix = self.gstate.text_matrix.concat(&advance);
         } else {
             let w0 = font.glyph_width_cid(cid);
-            let tx = (w0 * font_size + char_spacing) * th;
+            let tx = (w0 * font_size + char_spacing + extra_advance) * th;
             let advance = Matrix::translate(tx, 0.0);
             self.gstate.text_matrix = self.gstate.text_matrix.concat(&advance);
         }
