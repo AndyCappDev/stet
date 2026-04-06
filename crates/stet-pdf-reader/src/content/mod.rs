@@ -1951,7 +1951,13 @@ impl<'a> ContentInterpreter<'a> {
     }
 
     fn op_sc_stroke(&mut self) -> Result<(), PdfError> {
-        // SC/SCN: set stroke color in current color space
+        // SC/SCN: set stroke color in current color space.
+        // Some non-conforming PDFs use `/PatternName SCN` without first doing
+        // `/Pattern CS` — detect a name operand and treat it as a pattern
+        // reference regardless of the current color space.
+        if matches!(self.operand_stack.last(), Some(Operand::Name(_))) {
+            return self.handle_pattern_stroke();
+        }
         let cs = self.resolve_cs_cached(&self.gstate.stroke_color_space.clone())?;
         if matches!(cs, ResolvedColorSpace::Pattern) {
             return self.handle_pattern_stroke();
@@ -1971,7 +1977,13 @@ impl<'a> ContentInterpreter<'a> {
     }
 
     fn op_sc_fill(&mut self) -> Result<(), PdfError> {
-        // sc/scn: set fill color in current color space
+        // sc/scn: set fill color in current color space.
+        // Some non-conforming PDFs use `/PatternName scn` without first doing
+        // `/Pattern cs` — detect a name operand and treat it as a pattern
+        // reference regardless of the current color space (matches hayro/Firefox).
+        if matches!(self.operand_stack.last(), Some(Operand::Name(_))) {
+            return self.handle_pattern_fill();
+        }
         let cs = self.resolve_cs_cached(&self.gstate.fill_color_space.clone())?;
         if matches!(cs, ResolvedColorSpace::Pattern) {
             return self.handle_pattern_fill();
