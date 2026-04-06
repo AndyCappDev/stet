@@ -3506,11 +3506,25 @@ impl<'a> ContentInterpreter<'a> {
         // image and mask independently, preserving edge detail at hard alpha
         // boundaries that premultiplied-alpha averaging would make invisible.
         if let Some((smask_data, mw, mh, matte)) = smask_result {
-            // Upscale image if mask is larger
-            let (sample_data, width, height) = if mw > width || mh > height {
+            // Upscale image to mask dimensions if the mask is larger — this
+            // preserves sharp mask edges (e.g. MRC text masks on low-res images).
+            // Cap the target pixel count to avoid allocating enormous buffers
+            // when the mask is vastly larger than the image (e.g. 34862×4332
+            // mask on a 2×2 image in issue16263.pdf). The limit is generous
+            // enough for high-DPI and zoomed rendering but prevents pathological
+            // cases from consuming gigabytes of memory.
+            const MAX_PIXELS: u64 = 16_000_000; // ~4096×4096
+            let mut target_w = mw.max(width);
+            let mut target_h = mh.max(height);
+            if (target_w as u64) * (target_h as u64) > MAX_PIXELS {
+                let scale = (MAX_PIXELS as f64 / (target_w as f64 * target_h as f64)).sqrt();
+                target_w = (target_w as f64 * scale).ceil() as u32;
+                target_h = (target_h as f64 * scale).ceil() as u32;
+            }
+            let (sample_data, width, height) = if target_w > width || target_h > height {
                 let upscaled =
-                    bilinear_upsample_image(&sample_data, width, height, mw, mh, &image_params.color_space);
-                (upscaled, mw, mh)
+                    bilinear_upsample_image(&sample_data, width, height, target_w, target_h, &image_params.color_space);
+                (upscaled, target_w, target_h)
             } else {
                 (sample_data, width, height)
             };
