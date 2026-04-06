@@ -304,6 +304,8 @@ impl<'a> ContentInterpreter<'a> {
             .as_dict()
             .ok_or(PdfError::Other("annotation not a dict".into()))?;
 
+        let subtype = annot_dict.get_name(b"Subtype").unwrap_or(b"");
+
         // Check annotation flags (/F). PDF spec Table 165:
         // Bit 1 (0x01) = Invisible, Bit 2 (0x02) = Hidden, Bit 6 (0x20) = NoView.
         // Skip annotations that shouldn't be rendered on screen.
@@ -355,15 +357,26 @@ impl<'a> ContentInterpreter<'a> {
                 // It's a Form XObject stream dict
                 (n_ref.clone(), d.clone())
             } else {
-                // State-specific appearance dict: pick the entry matching /AS
+                // State-specific appearance dict: pick the entry matching /AS.
+                // For Widget annotations (checkboxes/radios), /AS determines
+                // which appearance to show (e.g. /Yes = checked, /Off = unchecked).
+                // When /AS is absent, default to /Off (unchecked). Only fall back
+                // to the first entry for non-Widget annotations.
                 let as_name = annot_dict.get_name(b"AS").unwrap_or(b"Off");
-                let state_ref = d
-                    .get(as_name)
-                    .or_else(|| {
-                        // If the AS state isn't found, try the first entry
-                        d.entries().first().map(|(_, v)| v)
-                    })
-                    .ok_or(PdfError::Other("AP/N state dict empty".into()))?;
+                let state_ref = match d.get(as_name) {
+                    Some(r) => r,
+                    None if subtype == b"Widget" => {
+                        // Widget with no matching state — skip rendering
+                        return Ok(());
+                    }
+                    None => {
+                        // Non-widget: try the first entry as fallback
+                        match d.entries().first().map(|(_, v)| v) {
+                            Some(r) => r,
+                            None => return Ok(()),
+                        }
+                    }
+                };
                 let state_obj = self.resolver.deref(state_ref)?;
                 let state_dict = state_obj
                     .as_dict()
