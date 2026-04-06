@@ -610,14 +610,20 @@ impl<'a> Resolver<'a> {
 
     /// Check if `endstream` keyword appears at or near the given offset.
     fn check_endstream_at(&self, offset: usize) -> bool {
-        let needle = b"endstream";
+        // Accept "endstream" or common typo "endsteam" (missing 'r').
+        // The latter appears in some PDFs (e.g. issue18122.pdf) with an empty
+        // pattern stream; without tolerating it, the recovery path would scan
+        // ahead and consume subsequent objects' data as this stream's content.
+        let needles: &[&[u8]] = &[b"endstream", b"endsteam"];
         // Allow up to 2 bytes of whitespace between stream data and endstream
         for skip in 0..=2 {
             let pos = offset + skip;
-            if pos + needle.len() <= self.data.len()
-                && &self.data[pos..pos + needle.len()] == needle
-            {
-                return true;
+            for needle in needles {
+                if pos + needle.len() <= self.data.len()
+                    && &self.data[pos..pos + needle.len()] == *needle
+                {
+                    return true;
+                }
             }
         }
         false
