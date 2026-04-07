@@ -8176,26 +8176,26 @@ fn render_axial_shading(
                         data[offset + 1] = (gv * 255.0).round().clamp(0.0, 255.0) as u8;
                         data[offset + 2] = (bv * 255.0).round().clamp(0.0, 255.0) as u8;
                     } else {
+                        // Non-overprint axial shading: write the source CMYK
+                        // to the buffer for any consumer that needs it (e.g.
+                        // overprint sibling tracking) but leave the pixmap
+                        // alone — `build_gradient_lut` already painted the
+                        // pixel with linearly-interpolated source RGB, and
+                        // round-tripping CMYK→RGB through the ICC profile
+                        // produces a different gradient curve (linear in
+                        // CMYK rather than linear in RGB) that diverges
+                        // visibly from the LUT result. The CMYK buffer is
+                        // only consumed by `composite_non_isolated_cmyk`,
+                        // which excludes shading-containing groups via
+                        // `group_content_is_native_cmyk`, so the
+                        // buffer/pixmap mismatch never reaches a consumer
+                        // that would notice. Reintroducing the round-trip
+                        // here was the 3000_9 / 3000_10 snowman shading
+                        // regression in the silly-weaving-bird plan.
                         buf[ci] = cmyk.0 as f32;
                         buf[ci + 1] = cmyk.1 as f32;
                         buf[ci + 2] = cmyk.2 as f32;
                         buf[ci + 3] = cmyk.3 as f32;
-                        // Recomposite RGB from CMYK via ICC
-                        if let Some(icc_cache) = icc {
-                            let c = buf[ci] as f64;
-                            let m = buf[ci + 1] as f64;
-                            let y = buf[ci + 2] as f64;
-                            let k = buf[ci + 3] as f64;
-                            if let Some((rv, gv, bv)) = icc_cache.convert_cmyk_readonly(c, m, y, k)
-                            {
-                                let stride = pixmap.data().len() / pixmap.height() as usize;
-                                let offset = py as usize * stride + px as usize * 4;
-                                let data = pixmap.data_mut();
-                                data[offset] = (rv * 255.0).round().clamp(0.0, 255.0) as u8;
-                                data[offset + 1] = (gv * 255.0).round().clamp(0.0, 255.0) as u8;
-                                data[offset + 2] = (bv * 255.0).round().clamp(0.0, 255.0) as u8;
-                            }
-                        }
                     }
                 }
             }
@@ -8356,8 +8356,22 @@ fn render_radial_shading(
                 data[offset + 2] = (color.b * 255.0).round().clamp(0.0, 255.0) as u8;
                 data[offset + 3] = 255;
 
-                // Recomposite RGB from CMYK buffer via ICC (only for CMYK shadings)
-                if matches!(params.color_space, ShadingColorSpace::DeviceCMYK)
+                // Recomposite RGB from the CMYK buffer via ICC only for
+                // overprint shadings, where the per-channel merge in the
+                // buffer means the displayed pixel must reflect the merged
+                // CMYK rather than the source's RGB. For non-overprint
+                // shadings the LUT-rendered pixmap (above) is already
+                // correct, and round-tripping CMYK→RGB through the ICC
+                // profile produces a different gradient curve (linear in
+                // CMYK rather than linear in RGB) — that drift was the
+                // 3000_9 / 3000_10 snowman shading regression. The CMYK
+                // buffer is only consumed by `composite_non_isolated_cmyk`,
+                // which excludes shading-containing groups via
+                // `group_content_is_native_cmyk`, so the buffer/pixmap
+                // mismatch never reaches a consumer that would notice.
+                if params.overprint
+                    && params.painted_channels != stet_graphics::device::CMYK_ALL
+                    && matches!(params.color_space, ShadingColorSpace::DeviceCMYK)
                     && let Some(ref mut buf) = cmyk_buf
                 {
                     let ci = (py as usize * pw as usize + px as usize) * 4;
