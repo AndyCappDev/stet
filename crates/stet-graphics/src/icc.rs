@@ -510,39 +510,75 @@ impl IccCache {
         ))
     }
 
+    /// Build the lazy sRGB→CMYK reverse transform from the system CMYK profile.
+    /// Returns `Some(())` if the transform is now present (built or already
+    /// cached). Returns `None` if no system CMYK profile is registered or no
+    /// rendering intent could create a transform.
+    fn ensure_reverse_cmyk_transform(&mut self) -> Option<()> {
+        if self.reverse_cmyk_f64.is_some() {
+            return Some(());
+        }
+        let hash = *self.default_cmyk_hash.as_ref()?;
+        let cmyk_profile = self.profiles.get(&hash)?.clone();
+        let intents = [
+            RenderingIntent::RelativeColorimetric,
+            RenderingIntent::Perceptual,
+            RenderingIntent::AbsoluteColorimetric,
+            RenderingIntent::Saturation,
+        ];
+        for &intent in &intents {
+            let options = TransformOptions {
+                rendering_intent: intent,
+                ..TransformOptions::default()
+            };
+            if let Ok(t) = self.srgb_profile.create_transform_f64(
+                Layout::Rgb,
+                &cmyk_profile,
+                Layout::Rgba,
+                options,
+            ) {
+                self.reverse_cmyk_f64 = Some(t);
+                return Some(());
+            }
+        }
+        None
+    }
+
+    /// Pre-warm the lazy sRGB→CMYK reverse transform. Should be called once on
+    /// the build thread that owns `&mut IccCache`, after the system CMYK
+    /// profile has been registered, so that band renderers (which only hold
+    /// `&IccCache`) can use [`Self::convert_rgb_to_cmyk_readonly`] without
+    /// having to mutate state.
+    pub fn prepare_reverse_cmyk(&mut self) {
+        let _ = self.ensure_reverse_cmyk_transform();
+    }
+
+    /// Convert an sRGB color to CMYK using the system CMYK profile, without
+    /// mutating any state. Returns `None` when the reverse transform has not
+    /// been pre-built (call [`Self::prepare_reverse_cmyk`] first) or when no
+    /// system CMYK profile is registered.
+    ///
+    /// The returned components are clamped to `[0, 1]`.
+    pub fn convert_rgb_to_cmyk_readonly(&self, r: f64, g: f64, b: f64) -> Option<[f64; 4]> {
+        let reverse = self.reverse_cmyk_f64.as_ref()?;
+        let src_rgb = [r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0)];
+        let mut cmyk = [0.0f64; 4];
+        reverse.transform(&src_rgb, &mut cmyk).ok()?;
+        Some([
+            cmyk[0].clamp(0.0, 1.0),
+            cmyk[1].clamp(0.0, 1.0),
+            cmyk[2].clamp(0.0, 1.0),
+            cmyk[3].clamp(0.0, 1.0),
+        ])
+    }
+
     /// Round-trip an RGB color through the system CMYK profile: sRGB→CMYK→sRGB.
     /// Used when compositing in a DeviceCMYK page group — saturated RGB colors
     /// become more muted after passing through the CMYK gamut.
     /// Returns None if no CMYK profile is loaded.
     pub fn round_trip_rgb_via_cmyk(&mut self, r: f64, g: f64, b: f64) -> Option<(f64, f64, f64)> {
+        self.ensure_reverse_cmyk_transform()?;
         let hash = *self.default_cmyk_hash.as_ref()?;
-
-        // Build reverse (sRGB→CMYK) transform lazily
-        if self.reverse_cmyk_f64.is_none() {
-            let cmyk_profile = self.profiles.get(&hash)?.clone();
-            let intents = [
-                RenderingIntent::RelativeColorimetric,
-                RenderingIntent::Perceptual,
-                RenderingIntent::AbsoluteColorimetric,
-                RenderingIntent::Saturation,
-            ];
-            for &intent in &intents {
-                let options = TransformOptions {
-                    rendering_intent: intent,
-                    ..TransformOptions::default()
-                };
-                if let Ok(t) = self.srgb_profile.create_transform_f64(
-                    Layout::Rgb,
-                    &cmyk_profile,
-                    Layout::Rgba,
-                    options,
-                ) {
-                    self.reverse_cmyk_f64 = Some(t);
-                    break;
-                }
-            }
-        }
-
         let reverse = self.reverse_cmyk_f64.as_ref()?;
 
         // sRGB → CMYK
@@ -710,5 +746,39 @@ mod tests {
         assert!(result[0] > 240);
         assert!(result[1] < 15);
         assert!(result[2] < 15);
+    }
+
+    #[test]
+    fn test_convert_rgb_to_cmyk_readonly() {
+        // Skip when no system CMYK profile is available (CI without ICC packs).
+        let Some(cmyk_bytes) = find_system_cmyk_profile() else {
+            return;
+        };
+        let mut cache = IccCache::new();
+        let hash = cache.register_profile(&cmyk_bytes).unwrap();
+        cache.set_default_cmyk_hash(hash);
+
+        // Before pre-warming the reverse transform must be unavailable.
+        assert!(cache.convert_rgb_to_cmyk_readonly(0.0, 0.0, 0.0).is_none());
+
+        cache.prepare_reverse_cmyk();
+
+        // Pure black sRGB should land deep in K (any reasonable CMYK profile
+        // produces a high K component).
+        let cmyk = cache
+            .convert_rgb_to_cmyk_readonly(0.0, 0.0, 0.0)
+            .expect("reverse transform should be available after prepare");
+        assert!(
+            cmyk[3] > 0.5,
+            "expected K>0.5 for sRGB black, got cmyk={cmyk:?}"
+        );
+
+        // Pure white sRGB should land near (0,0,0,0) — minimal ink.
+        let cmyk = cache
+            .convert_rgb_to_cmyk_readonly(1.0, 1.0, 1.0)
+            .expect("reverse transform should be available");
+        for (i, v) in cmyk.iter().enumerate() {
+            assert!(*v < 0.05, "expected near-zero ink at chan {i}, got {v}");
+        }
     }
 }

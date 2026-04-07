@@ -1339,6 +1339,10 @@ pub fn build_icc_cache_for_list(
         seen.insert(hash);
         // Set the default CMYK hash so convert_image_8bit works for DeviceCMYK
         cache.set_default_cmyk_hash(hash);
+        // Pre-warm the sRGB→CMYK reverse transform so band renderers, which
+        // only hold an `&IccCache`, can use `convert_rgb_to_cmyk_readonly`
+        // when populating the parallel CMYK buffer for non-CMYK painters.
+        cache.prepare_reverse_cmyk();
     }
 
     // Scan display list for ICCBased images and shadings (recursing into Groups)
@@ -2325,6 +2329,7 @@ fn render_element(
                         ctx.out_h,
                         &band_state.clip_region,
                         ctx.no_aa,
+                        ctx.icc,
                     );
                 }
             }
@@ -2452,6 +2457,26 @@ fn render_element(
                 let paint =
                     to_paint_alpha(&params.color, params.alpha, params.blend_mode, ctx.no_aa);
                 pixmap.stroke_path(&skia_path, &paint, &stroke, transform, mask_ref);
+
+                // Update the CMYK tracking buffer for non-overprint strokes so
+                // the parallel CMYK plane stays consistent with the pixmap. The
+                // overprint branch above already wrote to the buffer via
+                // render_overprint_fill, so this only runs when we fell
+                // through to the regular pixmap stroke path.
+                if let Some(ref mut cmyk_buf) = band_state.cmyk_buffer {
+                    update_cmyk_buffer_for_stroke(
+                        cmyk_buf,
+                        draw_path,
+                        params,
+                        &stroke,
+                        transform,
+                        ctx.out_w,
+                        ctx.out_h,
+                        &band_state.clip_region,
+                        ctx.no_aa,
+                        ctx.icc,
+                    );
+                }
             }
         }
         DisplayElement::Clip { path, params } => {
@@ -2549,6 +2574,28 @@ fn render_element(
                     blend_mode: u8_to_blend_mode(params.blend_mode),
                 };
                 pixmap.draw_pixmap(0, 0, img_pixmap, &img_paint, transform, mask_ref);
+
+                // Update CMYK tracking buffer for non-overprint images on the
+                // fast path. Reading from the post-draw pixmap means the same
+                // helper handles native-CMYK and non-CMYK source images, even
+                // though `pp.data` is prescaled and we no longer have a
+                // matching native RGBA buffer.
+                if let Some(ref mut cmyk_buf) = band_state.cmyk_buffer {
+                    update_cmyk_buffer_for_image(
+                        cmyk_buf,
+                        sample_data,
+                        pixmap.data(),
+                        params,
+                        ctx.vp_x,
+                        ctx.vp_y,
+                        ctx.scale_x,
+                        ctx.scale_y,
+                        ctx.out_w,
+                        ctx.out_h,
+                        &band_state.clip_region,
+                        ctx.icc,
+                    );
+                }
             } else {
                 // Use pre-converted RGBA from image cache when available
                 let owned_rgba;
@@ -2613,11 +2660,14 @@ fn render_element(
                 };
                 pixmap.draw_pixmap(0, 0, img_pixmap, &img_paint, transform, mask_ref);
 
-                // Update CMYK tracking buffer for non-overprint images
+                // Update CMYK tracking buffer for non-overprint images. Sample
+                // the now-composited pixmap so non-CMYK source images can be
+                // reverse-converted to CMYK via the system profile.
                 if let Some(ref mut cmyk_buf) = band_state.cmyk_buffer {
                     update_cmyk_buffer_for_image(
                         cmyk_buf,
                         sample_data,
+                        pixmap.data(),
                         params,
                         ctx.vp_x,
                         ctx.vp_y,
@@ -2626,6 +2676,7 @@ fn render_element(
                         ctx.out_w,
                         ctx.out_h,
                         &band_state.clip_region,
+                        ctx.icc,
                     );
                 }
             }
@@ -2946,9 +2997,53 @@ fn render_group(
     // edges (the diff-against-backdrop logic mishandles partially-blended
     // edge pixels otherwise).
     use stet_graphics::display_list::GroupColorSpace;
-    let plan_cmyk_compose = !params.isolated
-        && matches!(params.blend_mode, 10..=15)
-        && group_only_native_cmyk_fills(elements);
+
+    // Allocate a CMYK buffer for the group when:
+    //   - it tracks overprint, OR
+    //   - the parent already has one (CMYK context inheritance), OR
+    //   - this group itself or one of its descendants declares an explicit
+    //     `/CS DeviceCMYK`, meaning compositing within it needs CMYK math.
+    let needs_group_cmyk = has_overprint_elements(elements)
+        || band_state.cmyk_buffer.is_some()
+        || params.color_space == GroupColorSpace::DeviceCMYK
+        || has_cmyk_group(elements);
+
+    // Decide whether to run the per-pixel CMYK composite-back. The default
+    // (gated) rule restricts it to the cases the prior rendering session
+    // explicitly validated. The `STET_FORCE_CMYK_COMPOSITE_BACK=1` env var
+    // bypasses both gates and switches to the principled rule that the rest
+    // of this plan will adopt — useful for A/B-comparing the broader fix
+    // before flipping the default in Step 9.
+    let force_cmyk_compose =
+        std::env::var_os("STET_FORCE_CMYK_COMPOSITE_BACK").as_deref() == Some("1".as_ref());
+    let plan_cmyk_compose = if force_cmyk_compose {
+        // Principled rule: non-isolated group with an inversion-sensitive
+        // blend mode (Difference, Exclusion, Hue, Saturation, Color,
+        // Luminosity) whose painters all supply native CMYK source colors.
+        //
+        // The blend-mode restriction is intentional: bm 10..=15 produce
+        // visibly *wrong* results in sRGB (the GWG 16.0 transparency test
+        // exists exactly to expose this), so CMYK math is unambiguously
+        // correct there. The separable modes 1..=9 (Multiply, Screen, etc.)
+        // are spec-defensible in either color space but look noticeably
+        // different — most renderers blend them in sRGB, and PDFs authored
+        // for that look "wrong" if we suddenly switch them to CMYK math.
+        //
+        // The painter-set restriction (no shadings, no non-CMYK content)
+        // exists because the parallel CMYK buffer can only faithfully track
+        // single-CMYK-value-per-pixel painters; gradients interpolate
+        // differently in pixmap RGB vs buffer CMYK and the divergence makes
+        // the composite-back read stale source values.
+        !params.isolated
+            && matches!(params.blend_mode, 10..=15)
+            && needs_group_cmyk
+            && band_state.cmyk_buffer.is_some()
+            && group_content_is_native_cmyk(elements)
+    } else {
+        !params.isolated
+            && matches!(params.blend_mode, 10..=15)
+            && group_only_native_cmyk_fills(elements)
+    };
     let needs_backdrop_preload = !params.isolated && (params.blend_mode == 0 || plan_cmyk_compose);
     let backdrop = if needs_backdrop_preload {
         let data = if crop.is_some() {
@@ -2961,16 +3056,6 @@ fn render_group(
     } else {
         None
     };
-
-    // Allocate a CMYK buffer for the group when:
-    //   - it tracks overprint, OR
-    //   - the parent already has one (CMYK context inheritance), OR
-    //   - this group itself or one of its descendants declares an explicit
-    //     `/CS DeviceCMYK`, meaning compositing within it needs CMYK math.
-    let needs_group_cmyk = has_overprint_elements(elements)
-        || band_state.cmyk_buffer.is_some()
-        || params.color_space == GroupColorSpace::DeviceCMYK
-        || has_cmyk_group(elements);
     let group_cmyk = if needs_group_cmyk {
         let buf_size = eff_w as usize * eff_h as usize * 4;
         let mut buf = vec![0.0f32; buf_size];
@@ -5131,6 +5216,83 @@ fn group_only_native_cmyk_fills(elements: &DisplayList) -> bool {
     found_paint
 }
 
+/// Stronger predicate: returns `true` when every paint operation in `elements`
+/// supplies its color directly as CMYK with one CMYK value per painted pixel
+/// — i.e. the parallel CMYK buffer is *guaranteed* to match the rendered
+/// pixmap on a per-pixel basis. When this holds, the per-pixel CMYK
+/// composite-back can run safely.
+///
+/// Importantly, this excludes **shadings** even when their declared color
+/// space is DeviceCMYK. The pixmap rasterizer interpolates the per-stop
+/// `.color` (RGB) linearly across the gradient via [`build_gradient_lut`],
+/// while [`interpolate_cmyk_from_stops`] interpolates the per-stop CMYK
+/// `raw_components` linearly. Because the system CMYK ICC profile is
+/// non-linear, the two interpolation strategies produce different intermediate
+/// colors at each gradient pixel — the buffer no longer represents what the
+/// pixmap shows, and feeding that into the composite-back yields visibly
+/// shifted colors. Until the per-pixel rasterizer is taught to interpolate
+/// CMYK directly (or the buffer is filled by ICC-reversing the pixmap), keep
+/// shadings on the existing sRGB compositing path.
+///
+/// Recurses into nested groups and soft masks. Returns `false` if the group
+/// contains no paint operations at all (so the composite-back has no work).
+fn group_content_is_native_cmyk(elements: &DisplayList) -> bool {
+    let mut found_paint = false;
+    for elem in elements.elements() {
+        match elem {
+            DisplayElement::InitClip => continue,
+            DisplayElement::Clip { .. } => continue,
+            DisplayElement::Text { .. } => continue,
+            DisplayElement::ErasePage => continue,
+            DisplayElement::Fill { params, .. } => {
+                if params.color.native_cmyk.is_none() {
+                    return false;
+                }
+                found_paint = true;
+            }
+            DisplayElement::Stroke { params, .. } => {
+                if params.color.native_cmyk.is_none() {
+                    return false;
+                }
+                found_paint = true;
+            }
+            DisplayElement::Image { params, .. } => {
+                if !is_cmyk_color_space(&params.color_space) {
+                    return false;
+                }
+                found_paint = true;
+            }
+            DisplayElement::AxialShading { .. }
+            | DisplayElement::RadialShading { .. }
+            | DisplayElement::MeshShading { .. }
+            | DisplayElement::PatchShading { .. } => {
+                // See doc comment above: shading interpolation strategies
+                // diverge between pixmap and buffer.
+                return false;
+            }
+            DisplayElement::PatternFill { .. } => {
+                // Pattern tiles render through their own BandState with
+                // `cmyk_buffer: None`, so the parallel CMYK buffer can't track
+                // per-tile source CMYK. Treat patterns as non-CMYK content.
+                return false;
+            }
+            DisplayElement::Group { elements: sub, .. } => {
+                if !group_content_is_native_cmyk(sub) {
+                    return false;
+                }
+                found_paint = true;
+            }
+            DisplayElement::SoftMasked { content, .. } => {
+                if !group_content_is_native_cmyk(content) {
+                    return false;
+                }
+                found_paint = true;
+            }
+        }
+    }
+    found_paint
+}
+
 /// Scan a display list for any overprint fill/stroke elements that need CMYK simulation.
 fn has_overprint_elements(list: &DisplayList) -> bool {
     for elem in list.elements() {
@@ -5483,9 +5645,26 @@ fn update_cmyk_buffer_for_fill(
     out_h: u32,
     clip_region: &Option<ClipRegion>,
     no_aa: bool,
+    icc: Option<&IccCache>,
 ) {
-    let Some((src_c, src_m, src_y, src_k)) = params.color.native_cmyk else {
-        return;
+    // Source CMYK preference: native CMYK supplied with the fill > ICC reverse
+    // (sRGB→CMYK via the system CMYK profile) > PLRM (1−r, 1−g, 1−b, 0)
+    // fallback. The ICC reverse keeps non-CMYK fills (RGB/Gray/Lab/etc.)
+    // representable as accurate CMYK in the parallel buffer so the
+    // non-isolated CMYK composite-back can blend them correctly.
+    let (src_c, src_m, src_y, src_k) = if let Some(c) = params.color.native_cmyk {
+        c
+    } else if let Some(cmyk) = icc.and_then(|i| {
+        i.convert_rgb_to_cmyk_readonly(params.color.r, params.color.g, params.color.b)
+    }) {
+        (cmyk[0], cmyk[1], cmyk[2], cmyk[3])
+    } else {
+        (
+            (1.0 - params.color.r).clamp(0.0, 1.0),
+            (1.0 - params.color.g).clamp(0.0, 1.0),
+            (1.0 - params.color.b).clamp(0.0, 1.0),
+            0.0,
+        )
     };
     let Some(skia_path) = build_skia_path(path) else {
         return;
@@ -5508,6 +5687,110 @@ fn update_cmyk_buffer_for_fill(
     // Constrain iteration to the path's device-space bounding box
     let (mut bx0, mut by0, mut bx1, mut by1) =
         path_device_bbox(&skia_path, transform, out_w, out_h);
+    if let Some(ClipRegion::Rect(r)) = clip_region {
+        bx0 = bx0.max(r.x0 as usize);
+        by0 = by0.max(r.y0 as usize);
+        bx1 = bx1.min(r.x1 as usize);
+        by1 = by1.min(r.y1 as usize);
+    }
+
+    let stride = out_w as usize;
+    for y in by0..by1 {
+        for x in bx0..bx1 {
+            let mi = y * stride + x;
+            let mut cov = cov_data[mi] as f32 / 255.0;
+            if let Some(clip) = clip_data {
+                cov *= clip[mi] as f32 / 255.0;
+            }
+            if cov > 0.0 {
+                let ci = mi * 4;
+                cmyk_buf[ci] = src_c as f32;
+                cmyk_buf[ci + 1] = src_m as f32;
+                cmyk_buf[ci + 2] = src_y as f32;
+                cmyk_buf[ci + 3] = src_k as f32;
+            }
+        }
+    }
+}
+
+/// Update the CMYK buffer for a non-overprint stroke. Mirrors
+/// [`update_cmyk_buffer_for_fill`] but rasterizes a stroked outline path
+/// instead of a filled one. Source-CMYK selection follows the same
+/// native_cmyk → ICC reverse → PLRM cascade.
+#[allow(clippy::too_many_arguments)]
+fn update_cmyk_buffer_for_stroke(
+    cmyk_buf: &mut [f32],
+    path: &PsPath,
+    params: &StrokeParams,
+    stroke: &Stroke,
+    transform: Transform,
+    out_w: u32,
+    out_h: u32,
+    clip_region: &Option<ClipRegion>,
+    no_aa: bool,
+    icc: Option<&IccCache>,
+) {
+    let (src_c, src_m, src_y, src_k) = if let Some(c) = params.color.native_cmyk {
+        c
+    } else if let Some(cmyk) = icc.and_then(|i| {
+        i.convert_rgb_to_cmyk_readonly(params.color.r, params.color.g, params.color.b)
+    }) {
+        (cmyk[0], cmyk[1], cmyk[2], cmyk[3])
+    } else {
+        (
+            (1.0 - params.color.r).clamp(0.0, 1.0),
+            (1.0 - params.color.g).clamp(0.0, 1.0),
+            (1.0 - params.color.b).clamp(0.0, 1.0),
+            0.0,
+        )
+    };
+
+    let Some(skia_path) = build_skia_path(path) else {
+        return;
+    };
+
+    // Convert the stroke outline into a fill path so we can rasterize it via
+    // Mask::fill_path. Mirrors the dance in the overprint stroke branch:
+    // dash → stroke-to-outline (in user space) → device transform.
+    let resolution_scale = (transform.sx * transform.sx + transform.sy * transform.sy)
+        .sqrt()
+        .max(1.0);
+    let dashed_op;
+    let stroke_src = if let Some(ref dash) = stroke.dash {
+        dashed_op = skia_path.dash(dash, resolution_scale);
+        match dashed_op.as_ref() {
+            Some(p) => p,
+            None => &skia_path,
+        }
+    } else {
+        &skia_path
+    };
+    let Some(stroked_user) = stroke_src.stroke(stroke, resolution_scale) else {
+        return;
+    };
+    let Some(stroked) = stroked_user.transform(transform) else {
+        return;
+    };
+
+    let mut coverage_mask = match Mask::new(out_w, out_h) {
+        Some(m) => m,
+        None => return,
+    };
+    coverage_mask.fill_path(
+        &stroked,
+        SkiaFillRule::Winding,
+        !no_aa,
+        Transform::identity(),
+    );
+
+    let cov_data = coverage_mask.data();
+    let clip_data: Option<&[u8]> = match clip_region {
+        Some(ClipRegion::Mask(m)) => Some(m.data()),
+        _ => None,
+    };
+
+    let (mut bx0, mut by0, mut bx1, mut by1) =
+        path_device_bbox(&stroked, Transform::identity(), out_w, out_h);
     if let Some(ClipRegion::Rect(r)) = clip_region {
         bx0 = bx0.max(r.x0 as usize);
         by0 = by0.max(r.y0 as usize);
@@ -5754,10 +6037,19 @@ fn render_overprint_image(
 }
 
 /// Update CMYK buffer for a non-overprint image.
+///
+/// For native-CMYK image color spaces (DeviceCMYK / ICCBased(4) / Separation
+/// or DeviceN with CMYK alt), the source CMYK is sampled directly via
+/// `sample_pixel_cmyk`. For non-CMYK source spaces (RGB/Gray/Lab/etc.), the
+/// already-composited pixmap pixel is read and reverse-converted to CMYK via
+/// the system CMYK ICC profile, falling back to the PLRM formula. This keeps
+/// the parallel CMYK buffer faithful for any image painter inside a
+/// CMYK-tracked context.
 #[allow(clippy::too_many_arguments)]
 fn update_cmyk_buffer_for_image(
     cmyk_buf: &mut [f32],
     sample_data: &[u8],
+    pixmap_rgba: &[u8],
     params: &ImageParams,
     vp_x: f32,
     vp_y: f32,
@@ -5766,6 +6058,7 @@ fn update_cmyk_buffer_for_image(
     out_w: u32,
     out_h: u32,
     clip_region: &Option<ClipRegion>,
+    icc: Option<&IccCache>,
 ) {
     let iw = params.width as usize;
     let ih = params.height as usize;
@@ -5792,8 +6085,6 @@ fn update_cmyk_buffer_for_image(
             *polarity,
             iw.div_ceil(8),
         ))
-    } else if !is_cmyk_color_space(&params.color_space) {
-        return;
     } else {
         None
     };
@@ -5859,6 +6150,29 @@ fn update_cmyk_buffer_for_image(
                 cmyk_buf[ci + 1] = sm as f32;
                 cmyk_buf[ci + 2] = sy as f32;
                 cmyk_buf[ci + 3] = sk as f32;
+            } else if ci + 3 < pixmap_rgba.len() && pixmap_rgba[ci + 3] > 0 {
+                // Non-CMYK source space: reverse-convert the composited pixmap
+                // pixel to CMYK via the system profile. Falls back to PLRM
+                // (1 − r, 1 − g, 1 − b, 0) when no ICC reverse is available.
+                let r = pixmap_rgba[ci] as f64 / 255.0;
+                let g = pixmap_rgba[ci + 1] as f64 / 255.0;
+                let b = pixmap_rgba[ci + 2] as f64 / 255.0;
+                let cmyk = if let Some(c) =
+                    icc.and_then(|i| i.convert_rgb_to_cmyk_readonly(r, g, b))
+                {
+                    c
+                } else {
+                    [
+                        (1.0 - r).clamp(0.0, 1.0),
+                        (1.0 - g).clamp(0.0, 1.0),
+                        (1.0 - b).clamp(0.0, 1.0),
+                        0.0,
+                    ]
+                };
+                cmyk_buf[ci] = cmyk[0] as f32;
+                cmyk_buf[ci + 1] = cmyk[1] as f32;
+                cmyk_buf[ci + 2] = cmyk[2] as f32;
+                cmyk_buf[ci + 3] = cmyk[3] as f32;
             }
         }
     }
@@ -7817,6 +8131,7 @@ fn render_axial_shading(
                     &params.color_space,
                     clamped,
                     &color,
+                    icc,
                 );
                 let ci = (py as usize * pw as usize + px as usize) * 4;
                 if ci + 3 < buf.len() {
@@ -8002,6 +8317,7 @@ fn render_radial_shading(
                             &params.color_space,
                             clamped,
                             &color,
+                            icc,
                         );
                         if params.overprint
                             && params.painted_channels != stet_graphics::device::CMYK_ALL
@@ -8261,6 +8577,7 @@ fn render_mesh_shading(
                             r,
                             g,
                             b,
+                            icc,
                         );
                         if params.overprint
                             && params.painted_channels != stet_graphics::device::CMYK_ALL
@@ -8727,14 +9044,36 @@ fn interpolate_color_stops(
 }
 
 /// Derive CMYK values from color stops at parameter t.
-/// Uses raw_components when the shading is in DeviceCMYK, otherwise
-/// reverse-engineers from the interpolated RGB.
+///
+/// For DeviceCMYK shading color spaces the per-stop `raw_components` carry the
+/// authoritative 4-channel CMYK values (already tint-transformed for
+/// Separation/DeviceN with a CMYK alt) — those are interpolated directly.
+///
+/// For non-CMYK source color spaces (DeviceRGB, DeviceGray, CalRGB, CalGray,
+/// ICCBased non-4) the interpolated sRGB color is round-tripped to CMYK via
+/// the system CMYK ICC profile so the parallel CMYK buffer holds an accurate
+/// representation. Falls back to PLRM `(1−r, 1−g, 1−b, 0)` when no system
+/// profile is registered (e.g. `--no-icc`).
 fn interpolate_cmyk_from_stops(
     stops: &[stet_graphics::device::ColorStop],
     cs: &ShadingColorSpace,
     t: f64,
     color: &DeviceColor,
+    icc: Option<&IccCache>,
 ) -> (f64, f64, f64, f64) {
+    let rgb_to_cmyk = |c: &DeviceColor| -> (f64, f64, f64, f64) {
+        if let Some(cmyk) = icc.and_then(|i| i.convert_rgb_to_cmyk_readonly(c.r, c.g, c.b)) {
+            (cmyk[0], cmyk[1], cmyk[2], cmyk[3])
+        } else {
+            (
+                (1.0 - c.r).clamp(0.0, 1.0),
+                (1.0 - c.g).clamp(0.0, 1.0),
+                (1.0 - c.b).clamp(0.0, 1.0),
+                0.0,
+            )
+        }
+    };
+
     match cs {
         ShadingColorSpace::DeviceCMYK => {
             // Interpolate raw CMYK components from stops
@@ -8769,24 +9108,18 @@ fn interpolate_cmyk_from_stops(
                     lo.raw_components[3] + frac * (hi.raw_components[3] - lo.raw_components[3]),
                 )
             } else {
-                // Fallback: reverse from RGB
-                let r = color.r;
-                let g = color.g;
-                let b = color.b;
-                (1.0 - r, 1.0 - g, 1.0 - b, 0.0)
+                rgb_to_cmyk(color)
             }
         }
-        _ => {
-            // Non-CMYK color space: reverse-engineer from RGB
-            let r = color.r;
-            let g = color.g;
-            let b = color.b;
-            (1.0 - r, 1.0 - g, 1.0 - b, 0.0)
-        }
+        _ => rgb_to_cmyk(color),
     }
 }
 
 /// Derive CMYK values from triangle mesh vertices using barycentric weights.
+///
+/// Mirrors [`interpolate_cmyk_from_stops`]: DeviceCMYK source spaces use the
+/// per-vertex `raw_components`, non-CMYK spaces ICC-reverse the interpolated
+/// sRGB color, and PLRM is the last-resort fallback.
 #[allow(clippy::too_many_arguments)]
 fn interpolate_cmyk_from_vertices(
     v0: &ShadingVertex,
@@ -8799,7 +9132,21 @@ fn interpolate_cmyk_from_vertices(
     r: f64,
     g: f64,
     b: f64,
+    icc: Option<&IccCache>,
 ) -> (f64, f64, f64, f64) {
+    let rgb_to_cmyk = |r: f64, g: f64, b: f64| -> (f64, f64, f64, f64) {
+        if let Some(cmyk) = icc.and_then(|i| i.convert_rgb_to_cmyk_readonly(r, g, b)) {
+            (cmyk[0], cmyk[1], cmyk[2], cmyk[3])
+        } else {
+            (
+                (1.0 - r).clamp(0.0, 1.0),
+                (1.0 - g).clamp(0.0, 1.0),
+                (1.0 - b).clamp(0.0, 1.0),
+                0.0,
+            )
+        }
+    };
+
     match cs {
         ShadingColorSpace::DeviceCMYK => {
             if v0.raw_components.len() >= 4
@@ -8821,10 +9168,10 @@ fn interpolate_cmyk_from_vertices(
                         + w2 * v2.raw_components[3],
                 )
             } else {
-                (1.0 - r, 1.0 - g, 1.0 - b, 0.0)
+                rgb_to_cmyk(r, g, b)
             }
         }
-        _ => (1.0 - r, 1.0 - g, 1.0 - b, 0.0),
+        _ => rgb_to_cmyk(r, g, b),
     }
 }
 
