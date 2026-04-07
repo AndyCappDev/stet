@@ -287,7 +287,7 @@ impl<'a> PdfDocument<'a> {
         // Check if the page has a DeviceCMYK transparency group — if so,
         // RGB colors need round-tripping through CMYK to match compositing
         // in CMYK space (mutes saturated out-of-gamut RGB colors).
-        if let Ok(page_obj) = self.resolver.resolve(info.obj_num, 0)
+        let page_group_is_cmyk = if let Ok(page_obj) = self.resolver.resolve(info.obj_num, 0)
             && let Some(page_dict) = page_obj.as_dict()
             && let Some(group_obj) = page_dict.get(b"Group")
             && let Ok(group_resolved) = self.resolver.deref(group_obj)
@@ -295,7 +295,10 @@ impl<'a> PdfDocument<'a> {
             && group_dict.get_name(b"CS") == Some(b"DeviceCMYK")
         {
             interpreter.set_page_group_cmyk();
-        }
+            true
+        } else {
+            false
+        };
 
         // Render page content
         if let Err(e) = interpreter.interpret_stream_public(&content_data) {
@@ -312,7 +315,11 @@ impl<'a> PdfDocument<'a> {
             }
         }
 
-        Ok(interpreter.into_display_list())
+        let mut dl = interpreter.into_display_list();
+        if page_group_is_cmyk {
+            dl.set_page_group_color_space(stet_graphics::display_list::GroupColorSpace::DeviceCMYK);
+        }
+        Ok(dl)
     }
 
     /// Render a page to RGBA pixel data at the given DPI.

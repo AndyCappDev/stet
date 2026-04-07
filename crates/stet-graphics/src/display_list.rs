@@ -38,6 +38,24 @@ pub struct SoftMaskParams {
     pub has_nested_mask_scope: bool,
 }
 
+/// Color space declared by a transparency group's `/CS` entry. Per PDF spec
+/// §11.6.7, this is the color space in which the group's compositing
+/// computations are performed; renderers that need spec-correct blend mode
+/// math (especially for the inversion-sensitive separable modes and the HSL
+/// non-separable modes) must operate in this space rather than the device's
+/// display space.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GroupColorSpace {
+    /// No `/CS` entry — inherits from the enclosing group / page group.
+    Inherited,
+    /// `/DeviceGray` or `/CalGray` or `/ICCBased` with N=1.
+    DeviceGray,
+    /// `/DeviceRGB` or `/CalRGB` or `/ICCBased` with N=3.
+    DeviceRGB,
+    /// `/DeviceCMYK` or `/ICCBased` with N=4.
+    DeviceCMYK,
+}
+
 /// Parameters for a transparency group compositing operation.
 #[derive(Clone)]
 pub struct GroupParams {
@@ -52,6 +70,9 @@ pub struct GroupParams {
     pub blend_mode: u8,
     /// Opacity for compositing the group result (0.0–1.0).
     pub alpha: f64,
+    /// Group's transparency color space (`/CS` entry on the `/Group` dict).
+    /// Inherited from the enclosing group when not explicitly declared.
+    pub color_space: GroupColorSpace,
 }
 
 /// A single recorded drawing operation.
@@ -101,6 +122,11 @@ pub enum DisplayElement {
 #[derive(Clone)]
 pub struct DisplayList {
     elements: Vec<DisplayElement>,
+    /// Color space of the page-level transparency group, when one is declared.
+    /// Per PDF spec §11.6.7 the page group's color space is the one in which
+    /// any contained transparency compositing must be performed; renderers
+    /// use this to decide whether to track CMYK alongside sRGB.
+    page_group_color_space: GroupColorSpace,
 }
 
 impl DisplayList {
@@ -108,7 +134,19 @@ impl DisplayList {
     pub fn new() -> Self {
         Self {
             elements: Vec::new(),
+            page_group_color_space: GroupColorSpace::Inherited,
         }
+    }
+
+    /// Returns the page-level transparency group color space.
+    pub fn page_group_color_space(&self) -> GroupColorSpace {
+        self.page_group_color_space
+    }
+
+    /// Set the page-level transparency group color space (called by the PDF
+    /// reader when the page dictionary declares a `/Group /CS`).
+    pub fn set_page_group_color_space(&mut self, cs: GroupColorSpace) {
+        self.page_group_color_space = cs;
     }
 
     /// Append a drawing operation.
@@ -144,7 +182,10 @@ impl DisplayList {
     /// Drain elements from `start..` into a new DisplayList, truncating self.
     pub fn split_off(&mut self, start: usize) -> DisplayList {
         let drained: Vec<DisplayElement> = self.elements.drain(start..).collect();
-        DisplayList { elements: drained }
+        DisplayList {
+            elements: drained,
+            page_group_color_space: GroupColorSpace::Inherited,
+        }
     }
 
     /// Consume the display list and return the elements.

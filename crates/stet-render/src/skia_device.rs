@@ -2771,6 +2771,139 @@ fn compute_group_crop(bbox: &[f64; 4], ctx: &RenderContext<'_>) -> Option<(i32, 
     Some((x0, y0, crop_w, crop_h))
 }
 
+/// Apply a separable PDF blend mode in DeviceCMYK using the spec's "effective"
+/// inversion convention (PDF 1.7 §11.3.5.2): the inverse value `1−c` is used as
+/// input to the RGB-style blend function, and the result is inverted back.
+fn blend_cmyk_separable_channel(cb: f64, cs: f64, mode: u8) -> f64 {
+    let cbi = 1.0 - cb;
+    let csi = 1.0 - cs;
+    let result_inv = match mode {
+        1 => cbi * csi,                                    // Multiply
+        2 => cbi + csi - cbi * csi,                        // Screen
+        3 => {
+            // Overlay(b, s) = HardLight(s, b)
+            if cbi <= 0.5 {
+                2.0 * cbi * csi
+            } else {
+                1.0 - 2.0 * (1.0 - cbi) * (1.0 - csi)
+            }
+        }
+        4 => cbi.min(csi),                                 // Darken
+        5 => cbi.max(csi),                                 // Lighten
+        6 => {
+            // ColorDodge
+            if csi >= 1.0 {
+                1.0
+            } else {
+                (cbi / (1.0 - csi)).min(1.0)
+            }
+        }
+        7 => {
+            // ColorBurn
+            if csi <= 0.0 {
+                0.0
+            } else {
+                1.0 - ((1.0 - cbi) / csi).min(1.0)
+            }
+        }
+        8 => {
+            // HardLight
+            if csi <= 0.5 {
+                2.0 * cbi * csi
+            } else {
+                1.0 - 2.0 * (1.0 - cbi) * (1.0 - csi)
+            }
+        }
+        9 => {
+            // SoftLight (Adobe formulation)
+            let d = if cbi <= 0.25 {
+                ((16.0 * cbi - 12.0) * cbi + 4.0) * cbi
+            } else {
+                cbi.sqrt()
+            };
+            if csi <= 0.5 {
+                cbi - (1.0 - 2.0 * csi) * cbi * (1.0 - cbi)
+            } else {
+                cbi + (2.0 * csi - 1.0) * (d - cbi)
+            }
+        }
+        10 => (cbi - csi).abs(),                           // Difference
+        11 => cbi + csi - 2.0 * cbi * csi,                 // Exclusion
+        _ => csi,                                          // Normal/fallback
+    };
+    1.0 - result_inv.clamp(0.0, 1.0)
+}
+
+/// Apply a non-separable HSL-style PDF blend mode (Hue, Saturation, Color,
+/// Luminosity) in DeviceCMYK. Per the spec, the inverted CMY components are
+/// treated as "effective RGB" and the standard non-separable formulas are
+/// applied; the K channel is taken from the source (it acts as the source's
+/// luminosity contribution for the purposes of the blend).
+fn blend_cmyk_nonseparable(cb: [f64; 4], cs: [f64; 4], mode: u8) -> [f64; 4] {
+    fn lum(c: [f64; 3]) -> f64 {
+        0.3 * c[0] + 0.59 * c[1] + 0.11 * c[2]
+    }
+    fn clip_color(mut c: [f64; 3]) -> [f64; 3] {
+        let l = lum(c);
+        let n = c[0].min(c[1]).min(c[2]);
+        let x = c[0].max(c[1]).max(c[2]);
+        if n < 0.0 {
+            for ci in c.iter_mut() {
+                *ci = l + (*ci - l) * l / (l - n);
+            }
+        }
+        if x > 1.0 {
+            for ci in c.iter_mut() {
+                *ci = l + (*ci - l) * (1.0 - l) / (x - l);
+            }
+        }
+        c
+    }
+    fn set_lum(c: [f64; 3], l: f64) -> [f64; 3] {
+        let d = l - lum(c);
+        clip_color([c[0] + d, c[1] + d, c[2] + d])
+    }
+    fn sat(c: [f64; 3]) -> f64 {
+        c[0].max(c[1]).max(c[2]) - c[0].min(c[1]).min(c[2])
+    }
+    fn set_sat(c: [f64; 3], s: f64) -> [f64; 3] {
+        // Index components by rank: min, mid, max.
+        let mut idx = [0usize, 1, 2];
+        idx.sort_by(|a, b| c[*a].partial_cmp(&c[*b]).unwrap_or(std::cmp::Ordering::Equal));
+        let (i_min, i_mid, i_max) = (idx[0], idx[1], idx[2]);
+        let mut out = c;
+        if c[i_max] > c[i_min] {
+            out[i_mid] = (c[i_mid] - c[i_min]) * s / (c[i_max] - c[i_min]);
+            out[i_max] = s;
+        } else {
+            out[i_mid] = 0.0;
+            out[i_max] = 0.0;
+        }
+        out[i_min] = 0.0;
+        out
+    }
+
+    let cb_rgb = [1.0 - cb[0], 1.0 - cb[1], 1.0 - cb[2]];
+    let cs_rgb = [1.0 - cs[0], 1.0 - cs[1], 1.0 - cs[2]];
+    let result_rgb = match mode {
+        12 => set_lum(set_sat(cs_rgb, sat(cb_rgb)), lum(cb_rgb)), // Hue
+        13 => set_lum(set_sat(cb_rgb, sat(cs_rgb)), lum(cb_rgb)), // Saturation
+        14 => set_lum(cs_rgb, lum(cb_rgb)),                       // Color
+        15 => set_lum(cb_rgb, lum(cs_rgb)),                       // Luminosity
+        _ => cs_rgb,
+    };
+    // Hue/Saturation/Color preserve the backdrop's luminosity, which in CMYK
+    // is carried primarily by the K channel. Luminosity transfers the source's
+    // luminosity, so it takes K from the source.
+    let result_k = if mode == 15 { cs[3] } else { cb[3] };
+    [
+        (1.0 - result_rgb[0]).clamp(0.0, 1.0),
+        (1.0 - result_rgb[1]).clamp(0.0, 1.0),
+        (1.0 - result_rgb[2]).clamp(0.0, 1.0),
+        result_k,
+    ]
+}
+
 /// Render a transparency group into a pixmap.
 ///
 /// Creates an offscreen pixmap, renders the group's child elements into it,
@@ -2805,14 +2938,19 @@ fn render_group(
         return;
     };
 
-    // For non-isolated groups, copy the parent backdrop into the offscreen buffer.
-    // Exception: for non-Normal blend modes, render as isolated to avoid
-    // anti-aliased clip edges at BBox boundaries creating visible artifacts.
-    // The contribution-extraction approach (comparing source vs backdrop byte-by-byte)
-    // mishandles partially-blended edge pixels, causing them to be Screen/Multiply/etc.
-    // blended incorrectly. Rendering as isolated uses proper alpha coverage instead.
-    let treat_as_isolated = params.blend_mode != 0;
-    let backdrop = if !params.isolated && !treat_as_isolated {
+    // Decide upfront whether the composite-back will run in CMYK. The CMYK
+    // path needs the parent backdrop pre-loaded into the offscreen so that
+    // per-element painting accumulates in the right starting state. The
+    // sRGB contribution-extraction path renders against an empty offscreen
+    // for non-Normal BMs to avoid anti-aliased clip artifacts at the BBox
+    // edges (the diff-against-backdrop logic mishandles partially-blended
+    // edge pixels otherwise).
+    use stet_graphics::display_list::GroupColorSpace;
+    let plan_cmyk_compose = !params.isolated
+        && matches!(params.blend_mode, 10..=15)
+        && group_only_native_cmyk_fills(elements);
+    let needs_backdrop_preload = !params.isolated && (params.blend_mode == 0 || plan_cmyk_compose);
+    let backdrop = if needs_backdrop_preload {
         let data = if crop.is_some() {
             copy_backdrop_crop(pixmap, crop_x, crop_y, eff_w, eff_h)
         } else {
@@ -2824,8 +2962,16 @@ fn render_group(
         None
     };
 
-    // Allocate CMYK buffer for the group if overprint tracking is needed
-    let group_cmyk = if has_overprint_elements(elements) || band_state.cmyk_buffer.is_some() {
+    // Allocate a CMYK buffer for the group when:
+    //   - it tracks overprint, OR
+    //   - the parent already has one (CMYK context inheritance), OR
+    //   - this group itself or one of its descendants declares an explicit
+    //     `/CS DeviceCMYK`, meaning compositing within it needs CMYK math.
+    let needs_group_cmyk = has_overprint_elements(elements)
+        || band_state.cmyk_buffer.is_some()
+        || params.color_space == GroupColorSpace::DeviceCMYK
+        || has_cmyk_group(elements);
+    let group_cmyk = if needs_group_cmyk {
         let buf_size = eff_w as usize * eff_h as usize * 4;
         let mut buf = vec![0.0f32; buf_size];
         if let Some(ref parent_cmyk) = band_state.cmyk_buffer {
@@ -2846,6 +2992,13 @@ fn render_group(
     } else {
         None
     };
+
+    // Snapshot the pre-load CMYK so the composite-back can identify pixels
+    // the group actually modified. Without a separate snapshot we'd have to
+    // diff against the parent CMYK buffer, which would lose any in-place
+    // updates to the parent across the group's lifetime.
+    let backdrop_cmyk: Option<Vec<f32>> =
+        if !params.isolated { group_cmyk.clone() } else { None };
 
     let mut group_band = BandState {
         clip_region: None,
@@ -2891,10 +3044,48 @@ fn render_group(
         Some(m) => m,
     };
 
+    let mut cmyk_compose_done = false;
     if let Some(backdrop) = &backdrop {
-        composite_non_isolated_group_cropped(
-            pixmap, &offscreen, backdrop, params, mask_ref, crop_x, crop_y,
-        );
+        // Non-isolated group. For the inversion-sensitive blend modes
+        // (Difference, Exclusion) and the HSL non-separable modes (Hue,
+        // Saturation, Color, Luminosity), tiny-skia's sRGB blend math gives
+        // visibly wrong results for the GWG 16.0 transparency test, where
+        // the source colors are chosen so that, in CMYK, the blend produces
+        // the backdrop color exactly. Run the composite-back per pixel in
+        // CMYK for those modes when the inner content is exclusively
+        // native-CMYK fills (so the inner CMYK buffer faithfully represents
+        // the source). The other separable modes (Multiply / Lighten /
+        // Darken / etc.) and non-CMYK content stay on the existing sRGB
+        // contribution-extraction path because their CMYK pipeline currently
+        // depends on `interpolate_cmyk_from_stops`, which derives CMYK from
+        // sRGB via the lossy `(1−r,1−g,1−b,0)` inverse for shadings/images
+        // and would shift their colors. Lifting that restriction requires
+        // computing exact CMYK from each shading/image's source color space
+        // (e.g. running the DeviceN tint transform), which is a larger
+        // change than this fix attempts.
+        let inner_cmyk = group_band.cmyk_buffer.as_deref();
+        let pre_cmyk = backdrop_cmyk.as_deref();
+        if plan_cmyk_compose
+            && let (Some(inner), Some(pre)) = (inner_cmyk, pre_cmyk)
+        {
+            composite_non_isolated_cmyk(
+                pixmap,
+                band_state.cmyk_buffer.as_deref_mut(),
+                &offscreen,
+                inner,
+                pre,
+                params,
+                mask_ref,
+                crop_x,
+                crop_y,
+                ctx.icc,
+            );
+            cmyk_compose_done = true;
+        } else {
+            composite_non_isolated_group_cropped(
+                pixmap, &offscreen, backdrop, params, mask_ref, crop_x, crop_y,
+            );
+        }
     } else {
         let paint = stet_tiny_skia::PixmapPaint {
             opacity: params.alpha as f32,
@@ -2911,9 +3102,14 @@ fn render_group(
         );
     }
 
-    // Write group CMYK buffer back to parent
-    if let (Some(group_cmyk), Some(parent_cmyk)) =
-        (&group_band.cmyk_buffer, &mut band_state.cmyk_buffer)
+    // Write group CMYK buffer back to parent. Skip when the CMYK composite-back
+    // already wrote the blended values into the parent CMYK buffer — running
+    // `copy_cmyk_buffer_to_parent` afterwards would overwrite those blended
+    // values with the inner buffer's raw source colors, breaking subsequent
+    // siblings that read the parent CMYK as their backdrop.
+    if !cmyk_compose_done
+        && let (Some(group_cmyk), Some(parent_cmyk)) =
+            (&group_band.cmyk_buffer, &mut band_state.cmyk_buffer)
     {
         copy_cmyk_buffer_to_parent(
             parent_cmyk,
@@ -2926,6 +3122,209 @@ fn render_group(
             ctx.out_w as usize,
             ctx.out_h as usize,
         );
+    }
+}
+
+/// CMYK-aware composite-back for a non-isolated transparency group.
+///
+/// For each pixel in the group's region:
+///   1. If the inner CMYK buffer matches the snapshot taken when the group
+///      started, the group painted nothing there → leave the parent unchanged.
+///   2. Otherwise apply the group blend mode in DeviceCMYK using the spec's
+///      effective inversion formulas (`blend_cmyk_separable_channel` or
+///      `blend_cmyk_nonseparable`), convert the result to sRGB through the
+///      ICC system CMYK profile so it sits seamlessly next to the rest of the
+///      page, and write the result to both the parent pixmap and (when
+///      present) the parent CMYK buffer.
+#[allow(clippy::too_many_arguments)]
+fn composite_non_isolated_cmyk(
+    target: &mut Pixmap,
+    parent_cmyk: Option<&mut [f32]>,
+    source: &Pixmap,
+    source_cmyk: &[f32],
+    backdrop_cmyk: &[f32],
+    params: &stet_graphics::display_list::GroupParams,
+    clip_mask: Option<&stet_tiny_skia::Mask>,
+    crop_x: i32,
+    crop_y: i32,
+    icc: Option<&IccCache>,
+) {
+    let cw = source.width() as usize;
+    let ch = source.height() as usize;
+    let target_w = target.width() as usize;
+    let target_h = target.height() as usize;
+
+    let opacity = params.alpha.clamp(0.0, 1.0);
+    let blend_mode = params.blend_mode;
+    let is_nonseparable = matches!(blend_mode, 12..=15);
+
+    let target_data = target.data_mut();
+    let target_stride = target_w * 4;
+    let group_stride = cw * 4;
+
+    let clip_data = clip_mask.map(|m| m.data());
+
+    for gy in 0..ch {
+        let ty = crop_y + gy as i32;
+        if ty < 0 || ty as usize >= target_h {
+            continue;
+        }
+        let ty = ty as usize;
+        let group_row = gy * group_stride;
+        let target_row = ty * target_stride;
+
+        for gx in 0..cw {
+            let tx = crop_x + gx as i32;
+            if tx < 0 || tx as usize >= target_w {
+                continue;
+            }
+            let tx = tx as usize;
+            let gi = group_row + gx * 4;
+            let ti = target_row + tx * 4;
+
+            // Did the group actually paint this pixel?
+            let bc = backdrop_cmyk[gi] as f64;
+            let bm = backdrop_cmyk[gi + 1] as f64;
+            let by_ = backdrop_cmyk[gi + 2] as f64;
+            let bk = backdrop_cmyk[gi + 3] as f64;
+            let sc = source_cmyk[gi] as f64;
+            let sm = source_cmyk[gi + 1] as f64;
+            let sy_ = source_cmyk[gi + 2] as f64;
+            let sk = source_cmyk[gi + 3] as f64;
+            if (sc - bc).abs() < 1.0 / 255.0
+                && (sm - bm).abs() < 1.0 / 255.0
+                && (sy_ - by_).abs() < 1.0 / 255.0
+                && (sk - bk).abs() < 1.0 / 255.0
+            {
+                continue;
+            }
+
+            // Clip mask coverage in target coordinates.
+            let cov = if let Some(cd) = clip_data {
+                cd[ty * target_w + tx] as f64 / 255.0
+            } else {
+                1.0
+            };
+            if cov <= 0.0 {
+                continue;
+            }
+
+            // Apply the group's blend mode in CMYK.
+            let (rc, rm, ry, rk) = if is_nonseparable {
+                let r = blend_cmyk_nonseparable(
+                    [bc, bm, by_, bk],
+                    [sc, sm, sy_, sk],
+                    blend_mode,
+                );
+                (r[0], r[1], r[2], r[3])
+            } else {
+                (
+                    blend_cmyk_separable_channel(bc, sc, blend_mode),
+                    blend_cmyk_separable_channel(bm, sm, blend_mode),
+                    blend_cmyk_separable_channel(by_, sy_, blend_mode),
+                    blend_cmyk_separable_channel(bk, sk, blend_mode),
+                )
+            };
+
+            let (new_r, new_g, new_b) = icc
+                .and_then(|i| i.convert_cmyk_readonly(rc, rm, ry, rk))
+                .unwrap_or_else(|| cmyk_to_rgb_plrm(rc, rm, ry, rk));
+
+            // tiny-skia stores premultiplied sRGB. Composite the new color
+            // (treated as fully opaque, αs = 1) onto the destination using
+            // the group's effective alpha (`mix`). This is the standard
+            // SourceOver formula:
+            //   αn = αs + αb · (1 − αs)        with αs = mix
+            //   Cn = αs·Cs + (1 − αs)·αb·Cb     in straight-RGB form
+            // and pre-multiplied for the pixmap.
+            let dst_a = target_data[ti + 3] as f64 / 255.0;
+            let (dst_r, dst_g, dst_b) = if dst_a > 0.0 {
+                let inv_a = 1.0 / dst_a;
+                (
+                    (target_data[ti] as f64 / 255.0) * inv_a,
+                    (target_data[ti + 1] as f64 / 255.0) * inv_a,
+                    (target_data[ti + 2] as f64 / 255.0) * inv_a,
+                )
+            } else {
+                (0.0, 0.0, 0.0)
+            };
+
+            let mix = cov * opacity;
+            let out_a = mix + dst_a * (1.0 - mix);
+            if out_a <= 0.0 {
+                continue;
+            }
+            let out_r = (mix * new_r + (1.0 - mix) * dst_a * dst_r) / out_a;
+            let out_g = (mix * new_g + (1.0 - mix) * dst_a * dst_g) / out_a;
+            let out_b = (mix * new_b + (1.0 - mix) * dst_a * dst_b) / out_a;
+
+            target_data[ti] = (out_r * out_a * 255.0).round().clamp(0.0, 255.0) as u8;
+            target_data[ti + 1] = (out_g * out_a * 255.0).round().clamp(0.0, 255.0) as u8;
+            target_data[ti + 2] = (out_b * out_a * 255.0).round().clamp(0.0, 255.0) as u8;
+            target_data[ti + 3] = (out_a * 255.0).round().clamp(0.0, 255.0) as u8;
+        }
+    }
+
+    // Write the blended CMYK back to the parent CMYK buffer so subsequent
+    // sibling groups see consistent backdrop values. We re-walk the same
+    // region — keeps the inner loop above tight (no double-borrow on the
+    // parent buffer) and only touches pixels we actually modified.
+    if let Some(parent_cmyk) = parent_cmyk {
+        for gy in 0..ch {
+            let ty = crop_y + gy as i32;
+            if ty < 0 || ty as usize >= target_h {
+                continue;
+            }
+            let ty = ty as usize;
+            let group_row = gy * group_stride;
+            let parent_row = ty * target_stride;
+
+            for gx in 0..cw {
+                let tx = crop_x + gx as i32;
+                if tx < 0 || tx as usize >= target_w {
+                    continue;
+                }
+                let tx = tx as usize;
+                let gi = group_row + gx * 4;
+                let pi = parent_row + tx * 4;
+
+                let bc = backdrop_cmyk[gi] as f64;
+                let bm = backdrop_cmyk[gi + 1] as f64;
+                let by_ = backdrop_cmyk[gi + 2] as f64;
+                let bk = backdrop_cmyk[gi + 3] as f64;
+                let sc = source_cmyk[gi] as f64;
+                let sm = source_cmyk[gi + 1] as f64;
+                let sy_ = source_cmyk[gi + 2] as f64;
+                let sk = source_cmyk[gi + 3] as f64;
+                if (sc - bc).abs() < 1.0 / 255.0
+                    && (sm - bm).abs() < 1.0 / 255.0
+                    && (sy_ - by_).abs() < 1.0 / 255.0
+                    && (sk - bk).abs() < 1.0 / 255.0
+                {
+                    continue;
+                }
+
+                let (rc, rm, ry, rk) = if is_nonseparable {
+                    let r = blend_cmyk_nonseparable(
+                        [bc, bm, by_, bk],
+                        [sc, sm, sy_, sk],
+                        blend_mode,
+                    );
+                    (r[0], r[1], r[2], r[3])
+                } else {
+                    (
+                        blend_cmyk_separable_channel(bc, sc, blend_mode),
+                        blend_cmyk_separable_channel(bm, sm, blend_mode),
+                        blend_cmyk_separable_channel(by_, sy_, blend_mode),
+                        blend_cmyk_separable_channel(bk, sk, blend_mode),
+                    )
+                };
+                parent_cmyk[pi] = rc as f32;
+                parent_cmyk[pi + 1] = rm as f32;
+                parent_cmyk[pi + 2] = ry as f32;
+                parent_cmyk[pi + 3] = rk as f32;
+            }
+        }
     }
 }
 
@@ -4681,6 +5080,57 @@ impl SkiaDevice {
     }
 }
 
+/// Returns true if any descendant transparency group declares an explicit
+/// `/CS DeviceCMYK`. The renderer uses this to decide whether to allocate a
+/// parallel CMYK buffer for the band/page so that compositing inside CMYK
+/// groups can read the exact backdrop CMYK rather than rounding-trip via sRGB.
+fn has_cmyk_group(list: &DisplayList) -> bool {
+    use stet_graphics::display_list::GroupColorSpace;
+    for elem in list.elements() {
+        match elem {
+            DisplayElement::Group { elements, params } => {
+                if params.color_space == GroupColorSpace::DeviceCMYK {
+                    return true;
+                }
+                if has_cmyk_group(elements) {
+                    return true;
+                }
+            }
+            DisplayElement::SoftMasked { content, mask, .. } => {
+                if has_cmyk_group(content) || has_cmyk_group(mask) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Returns true if every visible element in `elements` is a `Fill` whose
+/// color carries `native_cmyk`. Clip and `InitClip` ops are skipped (they
+/// don't paint). Returns `false` for any other shape (shadings, images,
+/// patterns, nested groups, etc.) where the inner CMYK buffer would be
+/// derived from sRGB via the lossy `interpolate_cmyk_from_stops` /
+/// `(1-r,1-g,1-b,0)` inverse rather than tracked from the source CMYK.
+fn group_only_native_cmyk_fills(elements: &DisplayList) -> bool {
+    let mut found_paint = false;
+    for elem in elements.elements() {
+        match elem {
+            DisplayElement::InitClip => continue,
+            DisplayElement::Clip { .. } => continue,
+            DisplayElement::Fill { params, .. } => {
+                if params.color.native_cmyk.is_none() {
+                    return false;
+                }
+                found_paint = true;
+            }
+            _ => return false,
+        }
+    }
+    found_paint
+}
+
 /// Scan a display list for any overprint fill/stroke elements that need CMYK simulation.
 fn has_overprint_elements(list: &DisplayList) -> bool {
     for elem in list.elements() {
@@ -5604,8 +6054,14 @@ fn render_banded_to_sink(
     // Pre-populate clip_mask_seen so repeated clip paths get cached from first band
     let clip_seen = precompute_clip_seen(list);
 
-    // Check if CMYK overprint simulation is needed
-    let needs_cmyk_buffer = has_overprint_elements(list);
+    // Allocate a CMYK buffer at the page level when CMYK math is needed:
+    // overprint simulation, an explicit DeviceCMYK page-level transparency
+    // group (PDF spec §11.6.7), or any descendant group that declares its own
+    // DeviceCMYK transparency CS.
+    use stet_graphics::display_list::GroupColorSpace;
+    let needs_cmyk_buffer = has_overprint_elements(list)
+        || list.page_group_color_space() == GroupColorSpace::DeviceCMYK
+        || has_cmyk_group(list);
 
     // Pre-convert and prescale images once (instead of per-band)
     let preprocessed_images = preprocess_images_for_bands(list, Some(icc_cache));
@@ -6265,7 +6721,11 @@ pub fn render_region_prepared(
     // Start transparent — white background composited after content rendering
     pixmap.fill(Color::TRANSPARENT);
 
-    let cmyk_buf = if has_overprint_elements(list) {
+    let cmyk_buf = if has_overprint_elements(list)
+        || list.page_group_color_space()
+            == stet_graphics::display_list::GroupColorSpace::DeviceCMYK
+        || has_cmyk_group(list)
+    {
         Some(vec![0.0f32; pixel_w as usize * pixel_h as usize * 4])
     } else {
         None
@@ -6416,7 +6876,11 @@ pub fn render_region_single_band(
     let mut pixmap = Pixmap::new(pixel_w, render_h).expect("Failed to create band pixmap");
     pixmap.fill(Color::TRANSPARENT);
 
-    let cmyk_buf = if has_overprint_elements(list) {
+    let cmyk_buf = if has_overprint_elements(list)
+        || list.page_group_color_space()
+            == stet_graphics::display_list::GroupColorSpace::DeviceCMYK
+        || has_cmyk_group(list)
+    {
         Some(vec![0.0f32; pixel_w as usize * render_h as usize * 4])
     } else {
         None
@@ -6858,7 +7322,11 @@ pub fn render_region(
     let mut pixmap = Pixmap::new(pixel_w, pixel_h).expect("Failed to create viewport pixmap");
     pixmap.fill(Color::TRANSPARENT);
 
-    let cmyk_buf = if has_overprint_elements(list) {
+    let cmyk_buf = if has_overprint_elements(list)
+        || list.page_group_color_space()
+            == stet_graphics::display_list::GroupColorSpace::DeviceCMYK
+        || has_cmyk_group(list)
+    {
         Some(vec![0.0f32; pixel_w as usize * pixel_h as usize * 4])
     } else {
         None

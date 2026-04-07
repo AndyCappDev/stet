@@ -1660,6 +1660,7 @@ impl<'a> ContentInterpreter<'a> {
                     knockout: false,
                     blend_mode: self.gstate.blend_mode,
                     alpha: self.gstate.fill_alpha,
+                    color_space: stet_graphics::display_list::GroupColorSpace::Inherited,
                 },
             });
         } else if let Some(pattern) = self.gstate.fill_pattern.clone() {
@@ -1772,6 +1773,7 @@ impl<'a> ContentInterpreter<'a> {
                     knockout: false,
                     blend_mode: self.gstate.blend_mode,
                     alpha: self.gstate.stroke_alpha,
+                    color_space: stet_graphics::display_list::GroupColorSpace::Inherited,
                 },
             });
             return;
@@ -2654,6 +2656,7 @@ impl<'a> ContentInterpreter<'a> {
                     knockout: false,
                     blend_mode: self.gstate.blend_mode,
                     alpha: self.gstate.fill_alpha,
+                    color_space: stet_graphics::display_list::GroupColorSpace::Inherited,
                 },
             });
         } else if let Some(pattern) = self.gstate.fill_pattern.clone() {
@@ -2721,6 +2724,7 @@ impl<'a> ContentInterpreter<'a> {
                     knockout: false,
                     blend_mode: self.gstate.blend_mode,
                     alpha: self.gstate.stroke_alpha,
+                    color_space: stet_graphics::display_list::GroupColorSpace::Inherited,
                 },
             });
             return;
@@ -4188,7 +4192,7 @@ impl<'a> ContentInterpreter<'a> {
             // Extract isolated and knockout flags from Group dict
             let isolated = self.get_group_isolated(dict);
             let knockout = self.get_group_knockout(dict);
-
+            let color_space = self.get_group_color_space(dict);
 
             // Push Group element to parent display list
             self.display_list.push(DisplayElement::Group {
@@ -4199,6 +4203,7 @@ impl<'a> ContentInterpreter<'a> {
                     knockout,
                     blend_mode: group_blend_mode,
                     alpha: group_alpha,
+                    color_space,
                 },
             });
         } else {
@@ -4309,6 +4314,63 @@ impl<'a> ContentInterpreter<'a> {
         match group_dict.get(b"K") {
             Some(PdfObj::Bool(b)) => *b,
             _ => false,
+        }
+    }
+
+    /// Extract the `/CS` color space from a Form XObject's `/Group` dict and
+    /// classify it for rendering purposes. Returns `Inherited` when the entry
+    /// is missing or refers to a color space we don't categorise here.
+    fn get_group_color_space(
+        &self,
+        dict: &PdfDict,
+    ) -> stet_graphics::display_list::GroupColorSpace {
+        use stet_graphics::display_list::GroupColorSpace;
+        let Some(group_obj) = dict.get(b"Group") else {
+            return GroupColorSpace::Inherited;
+        };
+        let group_dict = match self.resolver.deref(group_obj) {
+            Ok(PdfObj::Dict(d)) => d,
+            _ => return GroupColorSpace::Inherited,
+        };
+        let Some(cs_obj) = group_dict.get(b"CS") else {
+            return GroupColorSpace::Inherited;
+        };
+        let cs_obj = match self.resolver.deref(cs_obj) {
+            Ok(o) => o,
+            Err(_) => return GroupColorSpace::Inherited,
+        };
+        match cs_obj {
+            PdfObj::Name(n) => match n.as_slice() {
+                b"DeviceGray" | b"CalGray" | b"G" => GroupColorSpace::DeviceGray,
+                b"DeviceRGB" | b"CalRGB" | b"RGB" => GroupColorSpace::DeviceRGB,
+                b"DeviceCMYK" | b"CMYK" => GroupColorSpace::DeviceCMYK,
+                _ => GroupColorSpace::Inherited,
+            },
+            PdfObj::Array(arr) => {
+                // [/ICCBased <<stream>>] — classify by N component count.
+                if let Some(PdfObj::Name(name)) = arr.first()
+                    && name.as_slice() == b"ICCBased"
+                    && let Some(stream_obj) = arr.get(1)
+                {
+                    let stream_obj = match self.resolver.deref(stream_obj) {
+                        Ok(o) => o,
+                        Err(_) => return GroupColorSpace::Inherited,
+                    };
+                    if let PdfObj::Stream { dict: stream_dict, .. } = stream_obj
+                        && let Some(n_obj) = stream_dict.get(b"N")
+                        && let Some(n_val) = n_obj.as_int()
+                    {
+                        return match n_val {
+                            1 => GroupColorSpace::DeviceGray,
+                            3 => GroupColorSpace::DeviceRGB,
+                            4 => GroupColorSpace::DeviceCMYK,
+                            _ => GroupColorSpace::Inherited,
+                        };
+                    }
+                }
+                GroupColorSpace::Inherited
+            }
+            _ => GroupColorSpace::Inherited,
         }
     }
 
