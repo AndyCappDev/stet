@@ -5282,11 +5282,18 @@ fn group_content_is_native_cmyk(elements: &DisplayList) -> bool {
                 }
                 found_paint = true;
             }
-            DisplayElement::SoftMasked { content, .. } => {
-                if !group_content_is_native_cmyk(content) {
-                    return false;
-                }
-                found_paint = true;
+            DisplayElement::SoftMasked { .. } => {
+                // Soft masks apply a per-pixel alpha modulation that the
+                // parallel CMYK buffer cannot represent: the buffer holds raw
+                // source CMYK while the pixmap holds the soft-masked blend
+                // (`backdrop * (1 − mask) + source * mask`). Running
+                // `composite_non_isolated_cmyk` over a soft-masked region
+                // would feed the unmodulated source CMYK into the blend
+                // formula and produce the wrong result for any non-Normal
+                // parent blend mode (5310.pdf phone highlight regression).
+                // Fall back to the sRGB contribution-extraction path, which
+                // handles soft masks correctly.
+                return false;
             }
         }
     }
