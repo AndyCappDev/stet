@@ -1001,17 +1001,21 @@ impl<'a> ContentInterpreter<'a> {
 
     /// Dispatch a PDF content stream operator.
     fn dispatch_operator(&mut self, op: &[u8]) -> Result<(), PdfError> {
-        // Path construction and painting operators have fixed operand counts.
-        // Excess operands indicate garbled content stream data (e.g. from
-        // corrupt FlateDecode) — skip the operator to avoid rendering with
+        // Path construction operators have fixed operand counts.  Excess
+        // operands indicate garbled content stream data (e.g. from corrupt
+        // FlateDecode) — skip the operator to avoid drawing path segments to
         // wrong coordinates.  The operand stack is cleared after every
         // dispatch, so any values present were pushed since the last operator.
+        //
+        // Painters (f, S, etc.) are deliberately *not* checked here: per the
+        // PDF spec they consume zero operands, so excess values cannot make
+        // them paint anything wrong.  Skipping them would also break lenient
+        // lexing of operator sequences like `5f` (which pdf.js, GhostScript,
+        // hayro, Ocular, and Firefox all interpret as `5 f`).
         let expected_args: i32 = match op {
             b"m" | b"l" => 2,
             b"v" | b"y" | b"re" => 4,
             b"c" => 6,
-            b"h" | b"S" | b"s" | b"f" | b"F" | b"f*" | b"B" | b"B*" | b"b" | b"b*"
-            | b"n" => 0,
             _ => -1, // no check
         };
         if expected_args >= 0 && self.operand_stack.len() > expected_args as usize {
