@@ -903,17 +903,43 @@ impl<'a> ContentInterpreter<'a> {
     /// Interpret content stream bytes (can be called recursively for Form XObjects).
     fn interpret_stream(&mut self, data: &[u8]) -> Result<(), PdfError> {
         let mut lexer = Lexer::new(data);
+        // Tracks whether the previous token was a number whose terminating
+        // byte was *not* whitespace.  Used to detect lenient lexing of
+        // sequences like `5f` (= `5 f`), where the painter is glued to a
+        // preceding number with no separator.  pdf.js, GhostScript, hayro,
+        // Ocular, and Firefox all interpret these as `<number> <operator>`.
+        let mut prev_token_was_glued_number = false;
         loop {
+            // Capture position before next_token so we can detect whether the
+            // upcoming token is glued to the previous one (no whitespace
+            // separator).  If the previous token was a number that ended on a
+            // non-whitespace byte, this token is glued to it.
+            let pos_before = lexer.pos();
+            let glued_to_prev_number = prev_token_was_glued_number
+                && pos_before < data.len()
+                && !is_whitespace_byte(data[pos_before]);
             let tok = match lexer.next_token() {
                 Ok(t) => t,
                 Err(_) => {
+                    prev_token_was_glued_number = false;
                     continue;
                 }
             };
+            // Default: clear "glued number" flag.  Set it again below for
+            // numeric tokens that ended on a non-whitespace byte.
+            prev_token_was_glued_number = false;
             match tok {
                 Token::Eof => break,
-                Token::Int(n) => self.operand_stack.push(Operand::Int(n)),
-                Token::Real(f) => self.operand_stack.push(Operand::Real(f)),
+                Token::Int(n) => {
+                    self.operand_stack.push(Operand::Int(n));
+                    let p = lexer.pos();
+                    prev_token_was_glued_number = p < data.len() && !is_whitespace_byte(data[p]);
+                }
+                Token::Real(f) => {
+                    self.operand_stack.push(Operand::Real(f));
+                    let p = lexer.pos();
+                    prev_token_was_glued_number = p < data.len() && !is_whitespace_byte(data[p]);
+                }
                 Token::Name(n) => self.operand_stack.push(Operand::Name(n)),
                 Token::LitString(s) | Token::HexString(s) => {
                     self.operand_stack.push(Operand::Str(s));
@@ -957,7 +983,7 @@ impl<'a> ContentInterpreter<'a> {
 
                     if op == b"BI" {
                         self.handle_inline_image(&mut lexer)?;
-                    } else if let Err(_e) = self.dispatch_operator(&op) {
+                    } else if let Err(_e) = self.dispatch_operator(&op, glued_to_prev_number) {
                     }
                     self.operand_stack.clear();
                 }
@@ -1000,25 +1026,32 @@ impl<'a> ContentInterpreter<'a> {
     }
 
     /// Dispatch a PDF content stream operator.
-    fn dispatch_operator(&mut self, op: &[u8]) -> Result<(), PdfError> {
-        // Path construction operators have fixed operand counts.  Excess
-        // operands indicate garbled content stream data (e.g. from corrupt
-        // FlateDecode) — skip the operator to avoid drawing path segments to
+    ///
+    /// `glued_to_prev_number` is true when the operator token in the source
+    /// stream was immediately preceded by a number with no whitespace
+    /// separator (e.g. `5f`).  Lenient parsers (pdf.js, GhostScript, hayro,
+    /// Ocular, Firefox) all interpret such sequences as `<number> <operator>`,
+    /// and this flag lets us bypass the operand-count guard so the painter
+    /// still runs.  Without that escape hatch, the guard would silently drop
+    /// the painter, leaving the path unpainted (issue994.pdf).
+    fn dispatch_operator(&mut self, op: &[u8], glued_to_prev_number: bool) -> Result<(), PdfError> {
+        // Path construction and painting operators have fixed operand counts.
+        // Excess operands indicate garbled content stream data (e.g. from
+        // corrupt FlateDecode) — skip the operator to avoid rendering with
         // wrong coordinates.  The operand stack is cleared after every
         // dispatch, so any values present were pushed since the last operator.
-        //
-        // Painters (f, S, etc.) are deliberately *not* checked here: per the
-        // PDF spec they consume zero operands, so excess values cannot make
-        // them paint anything wrong.  Skipping them would also break lenient
-        // lexing of operator sequences like `5f` (which pdf.js, GhostScript,
-        // hayro, Ocular, and Firefox all interpret as `5 f`).
         let expected_args: i32 = match op {
             b"m" | b"l" => 2,
             b"v" | b"y" | b"re" => 4,
             b"c" => 6,
+            b"h" | b"S" | b"s" | b"f" | b"F" | b"f*" | b"B" | b"B*" | b"b" | b"b*"
+            | b"n" => 0,
             _ => -1, // no check
         };
-        if expected_args >= 0 && self.operand_stack.len() > expected_args as usize {
+        if expected_args >= 0
+            && self.operand_stack.len() > expected_args as usize
+            && !glued_to_prev_number
+        {
             return Ok(());
         }
 
