@@ -5040,16 +5040,49 @@ impl<'a> ContentInterpreter<'a> {
         {
             let content = self.display_list.split_off(scope.start_index);
 
-            // Skip the soft mask if the mask display list is empty, OR if
-            // the mask form's BBox doesn't meaningfully overlap the visible area.
-            // When the mask bbox has negligible overlap with the clip region and
-            // the backdrop is black (BC=[0,0,0]), the mask produces zero luminosity
-            // everywhere, making content invisible. This also handles PDFs where the
-            // mask form is placed outside the page bounds — rather than making the
-            // content invisible, we render it without the mask.
-            let skip = scope.mask.mask_list.is_empty()
-                || (scope.mask.backdrop_color == Some([0.0, 0.0, 0.0])
-                    && !self.mask_has_meaningful_overlap(&scope.mask.bbox));
+            // Skip conditions:
+            //
+            // 1. The mask display list is empty: there is no mask raster
+            //    to compute, so the SoftMasked element would have nothing
+            //    to do — emit content directly.
+            //
+            // 2. (5795.pdf-style escape hatch) The mask form's bbox does
+            //    not have *substantial* overlap with the content's painted
+            //    area AND the backdrop is black. In this case the mask, if
+            //    honored literally, would multiply most content pixels by
+            //    0 (the BC fallback) and effectively erase the content.
+            //    Both Ghostscript and Poppler short-circuit this and render
+            //    the content as if no mask were present. We match that for:
+            //
+            //    - 5795.pdf: botanical background image. The mask `/G` form
+            //      bbox sits at PDF x=[-767.7, 0.29] (essentially all
+            //      negative-x). The content image is at PDF x=[0, 768].
+            //      The bboxes touch only in the [0, 0.29 pt] sliver — no
+            //      substantial overlap.
+            //    - 907.pdf p24: gradient callout arrows. The SMask `/G`
+            //      form bbox is at PDF y=[-155.6, -52.4] (negative-y, off
+            //      the bottom of the page). The content image is at PDF
+            //      y=[423, 501] — disjoint from the mask form bbox.
+            //
+            //    The CRITICAL distinction from 5296.pdf's /GS29 + /Fm30
+            //    bug is that in 5296 the mask form's bbox at PDF
+            //    x=[-519, -8] overlaps the content rectangle's bbox at
+            //    PDF x=[-390, 121] across ~382 pt of x. The mask is
+            //    *meant* to apply to the content — the visible portion of
+            //    the content (x=[0, 121]) just falls outside the mask's
+            //    spatial extent and should be erased by the BC=0 fallback.
+            //
+            //    The threshold of 2 device pt in both dimensions matches
+            //    the original `mask_has_meaningful_overlap` threshold but
+            //    measures against the content bbox (not the parent clip
+            //    bbox), which is what actually distinguishes the two
+            //    cases.
+            let content_bbox = self.content_paint_bbox(&content);
+            let drop_shadow_skip = scope.mask.backdrop_color == Some([0.0, 0.0, 0.0])
+                && content_bbox
+                    .map(|c| !bboxes_overlap_substantially(&c, &scope.mask.bbox, 2.0))
+                    .unwrap_or(false);
+            let skip = scope.mask.mask_list.is_empty() || drop_shadow_skip;
             if skip {
                 for elem in content.into_elements() {
                     self.display_list.push(elem);
@@ -5133,63 +5166,96 @@ impl<'a> ContentInterpreter<'a> {
         0
     }
 
-    /// Check if a mask bbox has meaningful overlap with the visible area.
-    /// Returns false when the overlap is negligible (< 2 device pixels in
-    /// either dimension), which happens when the mask form's BBox is placed
-    /// outside the page bounds. In such cases the mask would produce only
-    /// backdrop values across the content area, effectively making the content
-    /// invisible — but this is typically a PDF authoring artifact rather than
-    /// intentional, so we skip the mask and render the content directly.
-    fn mask_has_meaningful_overlap(&self, bbox: &[f64; 4]) -> bool {
-        let (clip_w, clip_h, overlap_w, overlap_h) = self.mask_clip_overlap(bbox);
-        // If the clip is degenerate (e.g. single moveto from `m W n`),
-        // we can't reliably determine overlap — conservatively assume
-        // the mask IS meaningful rather than making content invisible.
-        if clip_w < 1.0 || clip_h < 1.0 {
-            return true;
-        }
-        overlap_w >= 2.0 && overlap_h >= 2.0
-    }
-
-    /// Compute the overlap between a mask bbox and the current clip region.
-    /// Returns (clip_w, clip_h, overlap_w, overlap_h).
-    fn mask_clip_overlap(&self, bbox: &[f64; 4]) -> (f64, f64, f64, f64) {
-        let page_h = self.gstate.ctm.ty.abs().max(1.0);
-        let page_w = page_h; // rough estimate
-        let (cx0, cy0, cx1, cy1) = if let Some(ref clip) = self.gstate.clip_path {
-            let segs = &clip.segments;
-            let mut min_x = f64::INFINITY;
-            let mut min_y = f64::INFINITY;
-            let mut max_x = f64::NEG_INFINITY;
-            let mut max_y = f64::NEG_INFINITY;
-            for seg in segs {
-                let (x, y) = match seg {
-                    PathSegment::MoveTo(x, y) | PathSegment::LineTo(x, y) => (*x, *y),
-                    PathSegment::CurveTo { x3, y3, .. } => (*x3, *y3),
-                    PathSegment::ClosePath => continue,
-                };
-                min_x = min_x.min(x);
-                min_y = min_y.min(y);
-                max_x = max_x.max(x);
-                max_y = max_y.max(y);
-            }
-            (min_x, min_y, max_x, max_y)
-        } else {
-            (0.0, 0.0, page_w * 2.0, page_h * 2.0)
+    /// Compute the union of paint bounds for the elements in `content`.
+    /// Returns `None` if no element contributes a bounded paint extent.
+    ///
+    /// This is a coarse estimate used by `flush_soft_mask` to decide
+    /// whether the mask form's bbox overlaps the content. Only the most
+    /// common element kinds are inspected (Fill, Stroke, Image, Group,
+    /// SoftMasked, PatternFill); shading elements and text are treated
+    /// as contributing no bound (we conservatively skip them, which
+    /// for the drop-shadow-skip heuristic means we'll trust the result
+    /// from the other elements present).
+    fn content_paint_bbox(&self, content: &DisplayList) -> Option<[f64; 4]> {
+        let mut x_min = f64::INFINITY;
+        let mut y_min = f64::INFINITY;
+        let mut x_max = f64::NEG_INFINITY;
+        let mut y_max = f64::NEG_INFINITY;
+        let mut grow = |bx: [f64; 4]| {
+            x_min = x_min.min(bx[0].min(bx[2]));
+            y_min = y_min.min(bx[1].min(bx[3]));
+            x_max = x_max.max(bx[0].max(bx[2]));
+            y_max = y_max.max(bx[1].max(bx[3]));
         };
-
-        let (mx0, my0, mx1, my1) = (
-            bbox[0].min(bbox[2]),
-            bbox[1].min(bbox[3]),
-            bbox[0].max(bbox[2]),
-            bbox[1].max(bbox[3]),
-        );
-
-        let clip_w = cx1 - cx0;
-        let clip_h = cy1 - cy0;
-        let overlap_w = (mx1.min(cx1) - mx0.max(cx0)).max(0.0);
-        let overlap_h = (my1.min(cy1) - my0.max(cy0)).max(0.0);
-        (clip_w, clip_h, overlap_w, overlap_h)
+        for elem in content.elements() {
+            match elem {
+                DisplayElement::Fill { path, .. }
+                | DisplayElement::Stroke { path, .. }
+                | DisplayElement::Clip { path, .. } => {
+                    let mut px_min = f64::INFINITY;
+                    let mut py_min = f64::INFINITY;
+                    let mut px_max = f64::NEG_INFINITY;
+                    let mut py_max = f64::NEG_INFINITY;
+                    for seg in &path.segments {
+                        let pts: &[(f64, f64)] = match seg {
+                            PathSegment::MoveTo(x, y) | PathSegment::LineTo(x, y) => &[(*x, *y)],
+                            PathSegment::CurveTo {
+                                x1,
+                                y1,
+                                x2,
+                                y2,
+                                x3,
+                                y3,
+                            } => &[(*x1, *y1), (*x2, *y2), (*x3, *y3)][..],
+                            PathSegment::ClosePath => &[],
+                        };
+                        for (x, y) in pts {
+                            px_min = px_min.min(*x);
+                            py_min = py_min.min(*y);
+                            px_max = px_max.max(*x);
+                            py_max = py_max.max(*y);
+                        }
+                    }
+                    if px_min.is_finite() && px_min < px_max && py_min < py_max {
+                        grow([px_min, py_min, px_max, py_max]);
+                    }
+                }
+                DisplayElement::Image { params, .. } => {
+                    // Image is drawn into the unit square mapped through
+                    // params.ctm. Compute the four corner positions.
+                    let ctm = &params.ctm;
+                    let corners = [
+                        ctm.transform_point(0.0, 0.0),
+                        ctm.transform_point(1.0, 0.0),
+                        ctm.transform_point(0.0, 1.0),
+                        ctm.transform_point(1.0, 1.0),
+                    ];
+                    let mut ix_min = f64::INFINITY;
+                    let mut iy_min = f64::INFINITY;
+                    let mut ix_max = f64::NEG_INFINITY;
+                    let mut iy_max = f64::NEG_INFINITY;
+                    for (cx, cy) in &corners {
+                        ix_min = ix_min.min(*cx);
+                        iy_min = iy_min.min(*cy);
+                        ix_max = ix_max.max(*cx);
+                        iy_max = iy_max.max(*cy);
+                    }
+                    grow([ix_min, iy_min, ix_max, iy_max]);
+                }
+                DisplayElement::Group { params, .. } => {
+                    grow(params.bbox);
+                }
+                DisplayElement::SoftMasked { params, .. } => {
+                    grow(params.bbox);
+                }
+                _ => {} // Shadings, patterns, text — coarse estimate skips them.
+            }
+        }
+        if x_min.is_finite() && x_min < x_max && y_min < y_max {
+            Some([x_min, y_min, x_max, y_max])
+        } else {
+            None
+        }
     }
 
     /// Resolve a soft mask dictionary into a SoftMask.
@@ -5860,6 +5926,35 @@ impl<'a> ContentInterpreter<'a> {
         result?;
         Ok(shading_dl)
     }
+}
+
+/// Test whether two `[xmin, ymin, xmax, ymax]` rectangles overlap by at
+/// least `min_extent` device units in BOTH dimensions. The `[f64; 4]`
+/// slots are accepted in either ordering (we min/max the pair of x and y
+/// components before testing).
+///
+/// Used by `flush_soft_mask` to discriminate "mask form is meaningfully
+/// covering the content" (≥ min_extent in both axes) from "mask form is
+/// only edge-touching the content" (< min_extent in at least one axis).
+/// The latter case is treated as a no-op mask, matching the historical
+/// Ghostscript behavior on PDFs like 5795.pdf where the mask form lives
+/// in off-page coordinates and barely grazes the visible content.
+fn bboxes_overlap_substantially(a: &[f64; 4], b: &[f64; 4], min_extent: f64) -> bool {
+    let (ax0, ay0, ax1, ay1) = (
+        a[0].min(a[2]),
+        a[1].min(a[3]),
+        a[0].max(a[2]),
+        a[1].max(a[3]),
+    );
+    let (bx0, by0, bx1, by1) = (
+        b[0].min(b[2]),
+        b[1].min(b[3]),
+        b[0].max(b[2]),
+        b[1].max(b[3]),
+    );
+    let overlap_w = (ax1.min(bx1) - ax0.max(bx0)).max(0.0);
+    let overlap_h = (ay1.min(by1) - ay0.max(by0)).max(0.0);
+    overlap_w >= min_extent && overlap_h >= min_extent
 }
 
 fn path_device_bbox(path: &PsPath) -> [f64; 4] {
