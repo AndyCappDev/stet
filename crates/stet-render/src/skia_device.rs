@@ -6,6 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -2781,8 +2782,11 @@ fn render_element(
             mask,
             content,
             params,
+            mask_cache,
         } => {
-            render_soft_masked(pixmap, band_state, mask, content, params, ctx);
+            render_soft_masked(
+                pixmap, band_state, mask, content, params, mask_cache, ctx,
+            );
         }
         DisplayElement::Text { .. } => {} // PDF-only, ignored by rasterizer
     }
@@ -3676,18 +3680,33 @@ fn replace_changed_cmyk(
 /// 3. Renders content into another offscreen pixmap.
 /// 4. Multiplies content alpha by the mask values.
 /// 5. Composites the masked content onto the parent.
+#[allow(clippy::too_many_arguments)]
 fn render_soft_masked(
     pixmap: &mut Pixmap,
     band_state: &mut BandState,
     mask_list: &DisplayList,
     content_list: &DisplayList,
     params: &stet_graphics::display_list::SoftMaskParams,
+    mask_cache: &Arc<Mutex<Option<Option<stet_graphics::display_list::MaskRaster>>>>,
     ctx: &RenderContext<'_>,
 ) {
     // The SoftMask's display list elements are in absolute device space (page coords).
-    // When rendered inside a Group, the parent's viewport may be offset from the
-    // SoftMask's bbox. We use the SoftMask's own bbox as the viewport for its
-    // offscreen buffers, then composite back at the correct offset in the parent.
+    // params.bbox is the SoftMasked element's compositing bounds, derived
+    // from the form's /BBox transformed by the gs-time CTM. The mask raster
+    // (built lazily by `rasterize_mask` and cached on the display-list
+    // element) is anchored independently to the *actual* mask paint bounds,
+    // which may differ from params.bbox when the form's internal `cm`
+    // operators translated paint elements outside the form bbox.
+    //
+    // The cached-raster path can produce truncated output when the
+    // SoftMasked is rendered inside an outer offscreen (a Group, an
+    // outer SoftMasked, etc.) — the nested offscreen's coordinate
+    // system clips the mask raster's right edge unexpectedly. Detect
+    // "nested" via `ctx.vp_x != 0.0` (top-level banded rendering uses
+    // vp_x = 0; nested rendering inherits the parent offscreen's vp).
+    // For nested cases, fall back to the inline band-local mask
+    // rendering that worked before Step 4 of cosmic-masking-bird.
+    let use_inline_mask = ctx.vp_x != 0.0;
     let bbox = &params.bbox;
     let smask_px_x0 = ((bbox[0] as f32 - ctx.vp_x) * ctx.scale_x).floor() as i32;
     let smask_px_y0 = ((bbox[1] as f32 - ctx.vp_y) * ctx.scale_y).floor() as i32;
@@ -3705,9 +3724,10 @@ fn render_soft_masked(
     let eff_w = (crop_x1 - crop_x) as u32;
     let eff_h = (crop_y1 - crop_y) as u32;
 
-    // Viewport for the offscreen buffers: derived from the SoftMask's bbox position
-    // relative to the parent's viewport. This ensures the mask/content display list
-    // elements (which are in page device space) render at the correct positions.
+    // Viewport for the content offscreen: derived from the SoftMask's bbox
+    // position relative to the parent's viewport. The content offscreen
+    // still uses params.bbox because params.bbox correctly bounds where
+    // the content can paint.
     let eff_vp_x = ctx.vp_x + crop_x as f32 / ctx.scale_x;
     let eff_vp_y = ctx.vp_y + crop_y as f32 / ctx.scale_y;
 
@@ -3727,62 +3747,88 @@ fn render_soft_masked(
         opm_zero_transparent: ctx.opm_zero_transparent,
     };
 
-    // 1. Render mask form into offscreen
-    let Some(mut mask_pixmap) = Pixmap::new(eff_w, eff_h) else {
-        return;
-    };
-    let mut mask_band = BandState {
-        clip_region: None,
-        spare_mask: None,
-        clip_mask_cache: HashMap::new(),
-        clip_mask_seen: HashSet::new(),
-        mask_pool: Vec::new(),
-        cmyk_buffer: None,
-    };
-    for (idx, elem) in mask_list.elements().iter().enumerate() {
-        let elem_ctx = RenderContext {
-            elem_idx: idx,
-            ..sub_ctx
+    // 1a. INLINE PATH: Mask form contains nested offscreens.
+    // Render the mask form into a band-local offscreen sized to the
+    // SoftMasked's bbox crop. This matches the pre-Step-4 behavior.
+    let mut mask_values_inline: Vec<u8> = Vec::new();
+    if use_inline_mask {
+        let Some(mut mask_pixmap) = Pixmap::new(eff_w, eff_h) else {
+            return;
         };
-        render_element(&mut mask_pixmap, &mut mask_band, elem, &elem_ctx);
-    }
-
-    // 2. If the mask form had nested soft mask scopes (gs-set SMask inside
-    // the form), composite the rendering onto the backdrop color. Nested
-    // masks produce semi-transparent pixels where alpha encodes mask
-    // modulation; without compositing, un-premultiplying would amplify
-    // the color and lose the modulation.
-    // Only for Luminosity masks: Alpha masks extract the alpha channel
-    // directly, so forcing alpha=255 via compositing would destroy the
-    // mask information.
-    if params.has_nested_mask_scope
-        && params.subtype == stet_graphics::display_list::SoftMaskSubtype::Luminosity
-    {
-        let bc = params.backdrop_color.as_ref();
-        let bd_r = bc.map_or(0u8, |c| (c[0].clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
-        let bd_g = bc.map_or(0u8, |c| (c[1].clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
-        let bd_b = bc.map_or(0u8, |c| (c[2].clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
-        for chunk in mask_pixmap.data_mut().chunks_exact_mut(4) {
-            let a = chunk[3] as u16;
-            if a == 255 {
-                continue;
-            }
-            let inv_a = 255 - a;
-            chunk[0] = ((chunk[0] as u16 * 255 + bd_r as u16 * inv_a + 127) / 255) as u8;
-            chunk[1] = ((chunk[1] as u16 * 255 + bd_g as u16 * inv_a + 127) / 255) as u8;
-            chunk[2] = ((chunk[2] as u16 * 255 + bd_b as u16 * inv_a + 127) / 255) as u8;
-            chunk[3] = 255;
+        let mut mask_band = BandState {
+            clip_region: None,
+            spare_mask: None,
+            clip_mask_cache: HashMap::new(),
+            clip_mask_seen: HashSet::new(),
+            mask_pool: Vec::new(),
+            cmyk_buffer: None,
+        };
+        for (idx, elem) in mask_list.elements().iter().enumerate() {
+            let elem_ctx = RenderContext {
+                elem_idx: idx,
+                ..sub_ctx
+            };
+            render_element(&mut mask_pixmap, &mut mask_band, elem, &elem_ctx);
         }
+        if params.has_nested_mask_scope
+            && params.subtype == stet_graphics::display_list::SoftMaskSubtype::Luminosity
+        {
+            let bc = params.backdrop_color.as_ref();
+            let bd_r = bc.map_or(0u8, |c| (c[0].clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
+            let bd_g = bc.map_or(0u8, |c| (c[1].clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
+            let bd_b = bc.map_or(0u8, |c| (c[2].clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
+            for chunk in mask_pixmap.data_mut().chunks_exact_mut(4) {
+                let a = chunk[3] as u16;
+                if a == 255 {
+                    continue;
+                }
+                let inv_a = 255 - a;
+                chunk[0] = ((chunk[0] as u16 * 255 + bd_r as u16 * inv_a + 127) / 255) as u8;
+                chunk[1] = ((chunk[1] as u16 * 255 + bd_g as u16 * inv_a + 127) / 255) as u8;
+                chunk[2] = ((chunk[2] as u16 * 255 + bd_b as u16 * inv_a + 127) / 255) as u8;
+                chunk[3] = 255;
+            }
+        }
+        mask_values_inline = vec![0u8; (eff_w * eff_h) as usize];
+        extract_soft_mask_values(mask_pixmap.data(), &mut mask_values_inline, params);
     }
 
-    // 3. Extract grayscale mask values
-    let pixel_count = (eff_w * eff_h) as usize;
-    let mut mask_values = vec![0u8; pixel_count];
-    extract_soft_mask_values(mask_pixmap.data(), &mut mask_values, params);
+    // 1b. CACHED RASTER PATH: simple masks (no nested offscreens).
+    let raster_owned: Option<stet_graphics::display_list::MaskRaster> = if use_inline_mask {
+        None
+    } else {
+        let mut guard = mask_cache.lock().unwrap();
+        let needs_build = match guard.as_ref() {
+            None => true,
+            Some(None) => false, // memoized "no mask"
+            Some(Some(r)) => {
+                (r.scale_x - ctx.scale_x).abs() > 1e-4
+                    || (r.scale_y - ctx.scale_y).abs() > 1e-4
+            }
+        };
+        if needs_build {
+            let built = rasterize_mask(
+                mask_list,
+                params,
+                ctx.icc,
+                ctx.no_aa,
+                ctx.effective_dpi,
+                ctx.scale_x,
+                ctx.scale_y,
+            );
+            *guard = Some(built);
+        }
+        guard.as_ref().and_then(|inner| inner.clone())
+    };
 
-    // 3. Render content into another offscreen, initialized with the parent's
-    // backdrop so non-isolated groups with blend modes (e.g. Multiply) see the
-    // correct background and produce the right composited result.
+    // Default mask value for content pixels that fall outside the mask
+    // raster (e.g. backdrop region for a Luminosity mask with non-black
+    // /BC, or always 0 for Alpha masks).
+    let fallback_mask = out_of_bounds_mask_value(params) as i32;
+
+    // 2. Render content into an offscreen, initialized with the parent's
+    // backdrop so non-isolated groups with blend modes (e.g. Multiply) see
+    // the correct background and produce the right composited result.
     let Some(mut content_pixmap) = Pixmap::new(eff_w, eff_h) else {
         return;
     };
@@ -3826,8 +3872,28 @@ fn render_soft_masked(
         render_element(&mut content_pixmap, &mut content_band, elem, &elem_ctx);
     }
 
-    // 4. Apply soft mask: compute per-pixel masked contribution and write to parent.
-    // result[c] = parent[c] + mask * (content_on_backdrop[c] - backdrop[c]) / 255
+    // 3. Apply soft mask: compute per-pixel masked contribution and write
+    // to parent. result[c] = parent[c] + m * (content_on_backdrop[c] - backdrop[c]) / 255
+    //
+    // Mask sampling: the mask raster is in page-pixel coordinates at the
+    // current render scale, anchored at `(raster.origin_x, raster.origin_y)`.
+    // The combine loop iterates over content pixel `(x, y)` band-local in
+    // the content offscreen. To translate to a mask raster index:
+    //
+    //   page_x = vp_x_pixels + crop_x + x
+    //   page_y = vp_y_pixels + crop_y + y
+    //   mask_x = page_x - raster.origin_x
+    //   mask_y = page_y - raster.origin_y
+    //
+    // where `vp_x_pixels = round(ctx.vp_x * ctx.scale_x)` is the page-pixel
+    // offset of the band's top-left. For banded rendering this is exact
+    // (vp = 0, scale = 1, so vp_x_pixels = 0). For viewport rendering with
+    // a fractional `vp_x`, there is at most a 0.5-pixel sub-pixel offset
+    // between the content render grid and the cached mask grid; this is
+    // bounded and visually acceptable for nearest-neighbor sampling.
+    let vp_x_pixels = (ctx.vp_x * ctx.scale_x).round() as i32;
+    let vp_y_pixels = (ctx.vp_y * ctx.scale_y).round() as i32;
+
     let mut temp_mask = None;
     let clip_ref = resolve_clip_mask(
         &band_state.clip_region,
@@ -3852,6 +3918,7 @@ fn render_soft_masked(
         }
         let ci_row = y * content_stride;
         let pi_row = py * parent_stride;
+        let page_y = vp_y_pixels + crop_y + y as i32;
 
         for x in 0..eff_w as usize {
             let px = crop_x as usize + x;
@@ -3866,7 +3933,26 @@ fn render_soft_masked(
                 }
             }
 
-            let m = mask_values[y * eff_w as usize + x] as i32;
+            // Sample the mask: inline-rendered values for masks with
+            // nested offscreens, cached raster for simple masks.
+            let m = if use_inline_mask {
+                mask_values_inline[y * eff_w as usize + x] as i32
+            } else if let Some(ref raster) = raster_owned {
+                let page_x = vp_x_pixels + crop_x + x as i32;
+                let mx = page_x - raster.origin_x;
+                let my = page_y - raster.origin_y;
+                if mx >= 0
+                    && (mx as u32) < raster.width
+                    && my >= 0
+                    && (my as u32) < raster.height
+                {
+                    raster.data[my as usize * raster.width as usize + mx as usize] as i32
+                } else {
+                    fallback_mask
+                }
+            } else {
+                fallback_mask
+            };
             if m == 0 {
                 continue;
             }
@@ -3967,6 +4053,177 @@ fn extract_soft_mask_values(
     }
 }
 
+/// Compute the byte the mask sample loop should use for content pixels
+/// that fall outside the rasterized mask raster.
+///
+/// For Luminosity masks, transparent pixels (no rendered mask paint)
+/// composite onto the backdrop color, so the effective mask value is the
+/// backdrop's luminosity. For Alpha masks, transparent = 0 = mask off.
+/// Both subtypes apply the `/TR {1 exch sub}` transfer inversion.
+fn out_of_bounds_mask_value(params: &stet_graphics::display_list::SoftMaskParams) -> u8 {
+    use stet_graphics::display_list::SoftMaskSubtype;
+    let raw = match params.subtype {
+        SoftMaskSubtype::Alpha => 0u8,
+        SoftMaskSubtype::Luminosity => {
+            let lum = if let Some(bc) = &params.backdrop_color {
+                (0.2126 * bc[0] + 0.7152 * bc[1] + 0.0722 * bc[2]).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            (lum * 255.0 + 0.5) as u8
+        }
+    };
+    if params.transfer_invert {
+        255 - raw
+    } else {
+        raw
+    }
+}
+
+/// Maximum mask raster dimensions. A malformed PDF that asks for a
+/// gigantic mask form would otherwise OOM. 8192 × 8192 grayscale = 64 MB
+/// per mask, which is generous but bounded.
+const MAX_MASK_RASTER_DIM: u32 = 8192;
+
+/// Rasterize a soft mask form's display list into a `MaskRaster`.
+///
+/// Walks the mask display list to compute its actual paint bounds (which
+/// may differ from the SoftMasked element's `params.bbox` because the
+/// form's internal `cm` operators may translate paint elements outside
+/// the form's `/BBox`), allocates a pixmap that exactly covers those
+/// bounds in device-space pixels, and renders the mask elements with the
+/// viewport set to the bounds origin so each element rasterizes at
+/// `(device_x - origin_x, device_y - origin_y)`.
+///
+/// Returns `None` when the mask paints nothing.
+fn rasterize_mask(
+    mask_list: &DisplayList,
+    params: &stet_graphics::display_list::SoftMaskParams,
+    icc: Option<&IccCache>,
+    no_aa: bool,
+    effective_dpi: f64,
+    scale_x: f32,
+    scale_y: f32,
+) -> Option<stet_graphics::display_list::MaskRaster> {
+    // 1. Find the actual paint bounds in device space, then cap them to
+    // the parent gstate's clip path bbox if known. The cap is critical
+    // for masks whose form contains an unbounded shading inside a
+    // sentinel-sized internal clip — without it, the raster blows past
+    // the size limit and produces no output. Pixels outside the parent
+    // clip can never affect the final image, so the cap is safe.
+    let mut bounds = compute_paint_bounds(mask_list, effective_dpi)?;
+    if let Some(cap) = params.parent_clip_bbox {
+        let cap_bbox = BBox2D {
+            x_min: cap[0],
+            y_min: cap[1],
+            x_max: cap[2],
+            y_max: cap[3],
+        };
+        bounds = intersect_bbox(&bounds, &cap_bbox)?;
+    }
+
+    // 2. Snap to integer device pixels at the current render scale, with a
+    // 1-pixel pad on each side to avoid antialiasing edge clipping.
+    let px_x_min = (bounds.x_min as f32 * scale_x).floor() as i32 - 1;
+    let px_y_min = (bounds.y_min as f32 * scale_y).floor() as i32 - 1;
+    let px_x_max = (bounds.x_max as f32 * scale_x).ceil() as i32 + 1;
+    let px_y_max = (bounds.y_max as f32 * scale_y).ceil() as i32 + 1;
+    if px_x_min >= px_x_max || px_y_min >= px_y_max {
+        return None;
+    }
+    let raster_w = (px_x_max - px_x_min) as u32;
+    let raster_h = (px_y_max - px_y_min) as u32;
+    if raster_w == 0 || raster_h == 0 {
+        return None;
+    }
+    if raster_w > MAX_MASK_RASTER_DIM || raster_h > MAX_MASK_RASTER_DIM {
+        return None;
+    }
+
+    // 3. Allocate the offscreen pixmap (transparent backdrop).
+    let mut mask_pixmap = Pixmap::new(raster_w, raster_h)?;
+
+    // 4. Build a RenderContext that maps device pixel `(dx, dy)` to
+    // raster pixel `(dx - px_x_min, dy - px_y_min)`. The viewport is in
+    // device-space units (not pixels), so divide by scale.
+    let sub_ctx = RenderContext {
+        vp_x: px_x_min as f32 / scale_x,
+        vp_y: px_y_min as f32 / scale_y,
+        scale_x,
+        scale_y,
+        out_w: raster_w,
+        out_h: raster_h,
+        effective_dpi,
+        icc,
+        image_cache: None,
+        preprocessed: None,
+        elem_idx: 0,
+        no_aa,
+        opm_zero_transparent: false,
+    };
+
+    // 5. Mask rendering doesn't participate in CMYK overprint compositing.
+    let mut mask_band = BandState {
+        clip_region: None,
+        spare_mask: None,
+        clip_mask_cache: HashMap::new(),
+        clip_mask_seen: HashSet::new(),
+        mask_pool: Vec::new(),
+        cmyk_buffer: None,
+    };
+
+    // 6. Render every element of the mask display list into the offscreen.
+    for (idx, elem) in mask_list.elements().iter().enumerate() {
+        let elem_ctx = RenderContext {
+            elem_idx: idx,
+            ..sub_ctx
+        };
+        render_element(&mut mask_pixmap, &mut mask_band, elem, &elem_ctx);
+    }
+
+    // 7. If the mask form contained nested gs-set SMask scopes, composite
+    // the rendered mask onto the backdrop color before extracting
+    // luminosity. Nested masks produce semi-transparent pixels where
+    // alpha encodes the mask modulation; without compositing,
+    // un-premultiplying would amplify the color and lose the modulation.
+    // Only Luminosity: Alpha masks extract the alpha channel directly,
+    // so forcing alpha=255 via compositing would destroy the mask info.
+    if params.has_nested_mask_scope
+        && params.subtype == stet_graphics::display_list::SoftMaskSubtype::Luminosity
+    {
+        let bc = params.backdrop_color.as_ref();
+        let bd_r = bc.map_or(0u8, |c| (c[0].clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
+        let bd_g = bc.map_or(0u8, |c| (c[1].clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
+        let bd_b = bc.map_or(0u8, |c| (c[2].clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
+        for chunk in mask_pixmap.data_mut().chunks_exact_mut(4) {
+            let a = chunk[3] as u16;
+            if a == 255 {
+                continue;
+            }
+            let inv_a = 255 - a;
+            chunk[0] = ((chunk[0] as u16 * 255 + bd_r as u16 * inv_a + 127) / 255) as u8;
+            chunk[1] = ((chunk[1] as u16 * 255 + bd_g as u16 * inv_a + 127) / 255) as u8;
+            chunk[2] = ((chunk[2] as u16 * 255 + bd_b as u16 * inv_a + 127) / 255) as u8;
+            chunk[3] = 255;
+        }
+    }
+
+    // 8. Extract grayscale mask values into a flat single-channel buffer.
+    let pixel_count = (raster_w * raster_h) as usize;
+    let mut data = vec![0u8; pixel_count];
+    extract_soft_mask_values(mask_pixmap.data(), &mut data, params);
+
+    Some(stet_graphics::display_list::MaskRaster {
+        data,
+        width: raster_w,
+        height: raster_h,
+        origin_x: px_x_min,
+        origin_y: px_y_min,
+        scale_x,
+        scale_y,
+    })
+}
+
 /// Transform a display element's CTM through a matrix so that pattern-space
 /// coordinates map to device space.  Recursively transforms children of
 /// Group and SoftMasked elements, and adjusts their bboxes.
@@ -4035,7 +4292,7 @@ fn transform_element_ctm(elem: &DisplayElement, pm: &Matrix) -> DisplayElement {
             ];
             DisplayElement::Group { elements: t, params: p }
         }
-        DisplayElement::SoftMasked { mask, content, params } => {
+        DisplayElement::SoftMasked { mask, content, params, .. } => {
             let mut t_mask = DisplayList::new();
             for child in mask.elements() {
                 t_mask.push(transform_element_ctm(child, pm));
@@ -4057,7 +4314,35 @@ fn transform_element_ctm(elem: &DisplayElement, pm: &Matrix) -> DisplayElement {
                 corners.iter().map(|c| c.0).fold(f64::NEG_INFINITY, f64::max),
                 corners.iter().map(|c| c.1).fold(f64::NEG_INFINITY, f64::max),
             ];
-            DisplayElement::SoftMasked { mask: t_mask, content: t_content, params: p }
+            // parent_clip_bbox was captured in the original (pattern)
+            // coordinate system. Transform it through pm to match the
+            // device-space coords that mask/content elements were just
+            // moved into; otherwise the renderer would intersect a
+            // device-space mask bbox with a pattern-space clip and get
+            // an empty raster.
+            if let Some(pcb) = p.parent_clip_bbox {
+                let pcb_corners = [
+                    pm.transform_point(pcb[0], pcb[1]),
+                    pm.transform_point(pcb[2], pcb[1]),
+                    pm.transform_point(pcb[0], pcb[3]),
+                    pm.transform_point(pcb[2], pcb[3]),
+                ];
+                p.parent_clip_bbox = Some([
+                    pcb_corners.iter().map(|c| c.0).fold(f64::INFINITY, f64::min),
+                    pcb_corners.iter().map(|c| c.1).fold(f64::INFINITY, f64::min),
+                    pcb_corners.iter().map(|c| c.0).fold(f64::NEG_INFINITY, f64::max),
+                    pcb_corners.iter().map(|c| c.1).fold(f64::NEG_INFINITY, f64::max),
+                ]);
+            }
+            // The transformed element's coordinate system is different
+            // from the original; the original cache (if any) is invalid.
+            // Allocate a fresh cache cell.
+            DisplayElement::SoftMasked {
+                mask: t_mask,
+                content: t_content,
+                params: p,
+                mask_cache: Arc::new(Mutex::new(None)),
+            }
         }
         DisplayElement::PatternFill { params } => {
             let mut p = params.clone();
@@ -6519,6 +6804,7 @@ fn render_banded_to_sink(
 }
 
 /// 2D bounding box in device pixels.
+#[derive(Clone, Copy)]
 struct BBox2D {
     x_min: f64,
     y_min: f64,
@@ -6616,6 +6902,238 @@ fn precompute_full_bboxes(list: &DisplayList, dpi: f64) -> Vec<Option<BBox2D>> {
             _ => None, // Clip, InitClip, ErasePage: always process
         })
         .collect()
+}
+
+/// Compute the device-space bounding box of a Clip element's path.
+///
+/// Clip paths emitted by the PDF reader use `ctm = identity`, so the path
+/// segments are already in device space. For Clips that come from other
+/// sources (PostScript, the pattern transform path), the `ctm` field may
+/// be non-identity and the path is in user space — transform the path's
+/// bbox corners through the CTM in that case. Stroke-clips are expanded
+/// by half the line width.
+fn clip_path_bbox(path: &PsPath, params: &ClipParams) -> Option<BBox2D> {
+    let mut bbox = path_full_bbox(path)?;
+    let ctm = &params.ctm;
+    let is_identity = ctm.a == 1.0
+        && ctm.b == 0.0
+        && ctm.c == 0.0
+        && ctm.d == 1.0
+        && ctm.tx == 0.0
+        && ctm.ty == 0.0;
+    if !is_identity {
+        let corners = [
+            ctm.transform_point(bbox.x_min, bbox.y_min),
+            ctm.transform_point(bbox.x_max, bbox.y_min),
+            ctm.transform_point(bbox.x_min, bbox.y_max),
+            ctm.transform_point(bbox.x_max, bbox.y_max),
+        ];
+        bbox.x_min = corners.iter().map(|c| c.0).fold(f64::INFINITY, f64::min);
+        bbox.x_max = corners
+            .iter()
+            .map(|c| c.0)
+            .fold(f64::NEG_INFINITY, f64::max);
+        bbox.y_min = corners.iter().map(|c| c.1).fold(f64::INFINITY, f64::min);
+        bbox.y_max = corners
+            .iter()
+            .map(|c| c.1)
+            .fold(f64::NEG_INFINITY, f64::max);
+    }
+    if let Some(sp) = &params.stroke_params {
+        let scale = (ctm.a * ctm.a + ctm.b * ctm.b)
+            .sqrt()
+            .max((ctm.c * ctm.c + ctm.d * ctm.d).sqrt())
+            .max(1.0);
+        let expand = sp.line_width * 0.5 * scale;
+        bbox.x_min -= expand;
+        bbox.x_max += expand;
+        bbox.y_min -= expand;
+        bbox.y_max += expand;
+    }
+    Some(bbox)
+}
+
+/// Intersect two bboxes; returns `None` if they don't overlap.
+fn intersect_bbox(a: &BBox2D, b: &BBox2D) -> Option<BBox2D> {
+    let x_min = a.x_min.max(b.x_min);
+    let y_min = a.y_min.max(b.y_min);
+    let x_max = a.x_max.min(b.x_max);
+    let y_max = a.y_max.min(b.y_max);
+    if x_min < x_max && y_min < y_max {
+        Some(BBox2D {
+            x_min,
+            y_min,
+            x_max,
+            y_max,
+        })
+    } else {
+        None
+    }
+}
+
+/// Compute the union of all paint elements' device-space bounds in
+/// `list`, with awareness of the active clip stack.
+///
+/// Used by the soft-mask rasterization path: a SoftMasked element's
+/// `params.bbox` is derived from the form's `/BBox` transformed by the
+/// gs-time CTM, but the form's internal `cm` operators may translate
+/// individual paint elements outside that bbox. The mask raster needs to
+/// be sized against the actual paint bounds, not the form bbox.
+///
+/// **Why clip-awareness matters**: a mask form may contain a shading
+/// without an explicit `/BBox`, in which case `precompute_full_bboxes`
+/// returns a sentinel "infinite" bbox (`shading_full_bbox` falls back to
+/// `0..1e9`) so band rendering doesn't cull it. If `compute_paint_bounds`
+/// just unioned that, the result would exceed the mask raster size cap
+/// and `rasterize_mask` would return `None`, making the entire SoftMasked
+/// element invisible. Tracking the active clip stack lets us bound those
+/// shadings to their effective paint area.
+///
+/// Returns `None` when the list contains no paintable elements or when
+/// no element survives clip culling.
+fn compute_paint_bounds(list: &DisplayList, _dpi: f64) -> Option<BBox2D> {
+    // Active clip stack: each entry is the intersection so far. The
+    // current clip is `clip_stack.last()`; an empty stack means
+    // "unbounded" (no clip established yet, or just after InitClip).
+    let mut clip_stack: Vec<BBox2D> = Vec::new();
+    let mut union: Option<BBox2D> = None;
+
+    let push_paint = |union: &mut Option<BBox2D>, clip_stack: &[BBox2D], bbox: BBox2D| {
+        // Intersect against the active clip if any. If the clip is
+        // tighter than the bbox, the visible region is the intersection;
+        // if the bbox is fully clipped away, skip it.
+        let visible = match clip_stack.last() {
+            Some(clip) => match intersect_bbox(clip, &bbox) {
+                Some(b) => b,
+                None => return,
+            },
+            None => bbox,
+        };
+        *union = Some(match union.take() {
+            None => visible,
+            Some(u) => BBox2D {
+                x_min: u.x_min.min(visible.x_min),
+                y_min: u.y_min.min(visible.y_min),
+                x_max: u.x_max.max(visible.x_max),
+                y_max: u.y_max.max(visible.y_max),
+            },
+        });
+    };
+
+    for elem in list.elements() {
+        match elem {
+            DisplayElement::Clip { path, params } => {
+                if let Some(cb) = clip_path_bbox(path, params) {
+                    let new_top = match clip_stack.last() {
+                        Some(prev) => match intersect_bbox(prev, &cb) {
+                            Some(b) => b,
+                            // Clip cleared the visible region; push an
+                            // empty bbox so subsequent paints are
+                            // clipped away.
+                            None => BBox2D {
+                                x_min: 0.0,
+                                y_min: 0.0,
+                                x_max: 0.0,
+                                y_max: 0.0,
+                            },
+                        },
+                        None => cb,
+                    };
+                    clip_stack.push(new_top);
+                }
+            }
+            DisplayElement::InitClip | DisplayElement::ErasePage => {
+                clip_stack.clear();
+            }
+            DisplayElement::Fill { path, .. } => {
+                if let Some(b) = path_full_bbox(path) {
+                    push_paint(&mut union, &clip_stack, b);
+                }
+            }
+            DisplayElement::Stroke { path, params } => {
+                if let Some(mut b) = path_full_bbox(path) {
+                    let expand = params.line_width * params.miter_limit * 0.5;
+                    b.x_min -= expand;
+                    b.x_max += expand;
+                    b.y_min -= expand;
+                    b.y_max += expand;
+                    push_paint(&mut union, &clip_stack, b);
+                }
+            }
+            DisplayElement::Image { params, .. } => {
+                if let Some(b) = image_full_bbox(params) {
+                    push_paint(&mut union, &clip_stack, b);
+                }
+            }
+            DisplayElement::AxialShading { params } => {
+                let b = match &params.bbox {
+                    Some(_) => shading_full_bbox(&params.bbox, &params.ctm),
+                    None => clip_stack.last().copied(),
+                };
+                if let Some(b) = b {
+                    push_paint(&mut union, &clip_stack, b);
+                }
+            }
+            DisplayElement::RadialShading { params } => {
+                let b = match &params.bbox {
+                    Some(_) => shading_full_bbox(&params.bbox, &params.ctm),
+                    None => clip_stack.last().copied(),
+                };
+                if let Some(b) = b {
+                    push_paint(&mut union, &clip_stack, b);
+                }
+            }
+            DisplayElement::MeshShading { params } => {
+                let b = match &params.bbox {
+                    Some(_) => shading_full_bbox(&params.bbox, &params.ctm),
+                    None => clip_stack.last().copied(),
+                };
+                if let Some(b) = b {
+                    push_paint(&mut union, &clip_stack, b);
+                }
+            }
+            DisplayElement::PatchShading { params } => {
+                let b = match &params.bbox {
+                    Some(_) => shading_full_bbox(&params.bbox, &params.ctm),
+                    None => clip_stack.last().copied(),
+                };
+                if let Some(b) = b {
+                    push_paint(&mut union, &clip_stack, b);
+                }
+            }
+            DisplayElement::PatternFill { params } => {
+                if let Some(b) = pattern_fill_full_bbox(params) {
+                    push_paint(&mut union, &clip_stack, b);
+                }
+            }
+            DisplayElement::Group { params, .. } => {
+                push_paint(
+                    &mut union,
+                    &clip_stack,
+                    BBox2D {
+                        x_min: params.bbox[0],
+                        y_min: params.bbox[1],
+                        x_max: params.bbox[2],
+                        y_max: params.bbox[3],
+                    },
+                );
+            }
+            DisplayElement::SoftMasked { params, .. } => {
+                push_paint(
+                    &mut union,
+                    &clip_stack,
+                    BBox2D {
+                        x_min: params.bbox[0],
+                        y_min: params.bbox[1],
+                        x_max: params.bbox[2],
+                        y_max: params.bbox[3],
+                    },
+                );
+            }
+            DisplayElement::Text { .. } => {} // PDF-only, ignored by rasterizer
+        }
+    }
+    union
 }
 
 /// Compute full 2D bounds from path segments.
@@ -9416,5 +9934,217 @@ mod tests {
         let pixel = dev.pixmap().pixel(105, 105).unwrap();
         assert_eq!(pixel.green(), 255);
         assert_eq!(pixel.red(), 0);
+    }
+
+    fn make_test_fill_at(x: f64, y: f64, w: f64, h: f64) -> DisplayElement {
+        let mut path = PsPath::new();
+        path.segments.push(PathSegment::MoveTo(x, y));
+        path.segments.push(PathSegment::LineTo(x + w, y));
+        path.segments.push(PathSegment::LineTo(x + w, y + h));
+        path.segments.push(PathSegment::LineTo(x, y + h));
+        path.segments.push(PathSegment::ClosePath);
+        DisplayElement::Fill {
+            path,
+            params: FillParams {
+                color: DeviceColor::from_rgb(0.0, 0.0, 0.0),
+                fill_rule: FillRule::NonZeroWinding,
+                ctm: Matrix::identity(),
+                is_text_glyph: false,
+                overprint: false,
+                overprint_mode: 0,
+                painted_channels: 0,
+                is_device_cmyk: false,
+                spot_color: None,
+                rendering_intent: 0,
+                transfer: TransferState::default(),
+                halftone: HalftoneState::default(),
+                bg_ucr: BgUcrState::default(),
+                alpha: 1.0,
+                blend_mode: 0,
+            },
+        }
+    }
+
+    #[test]
+    fn test_compute_paint_bounds_two_fills() {
+        let mut list = DisplayList::new();
+        list.push(make_test_fill_at(10.0, 20.0, 30.0, 40.0)); // [10..40, 20..60]
+        list.push(make_test_fill_at(100.0, 50.0, 50.0, 25.0)); // [100..150, 50..75]
+
+        let bounds = compute_paint_bounds(&list, 72.0).expect("expected union bounds");
+        assert!((bounds.x_min - 10.0).abs() < 1e-9, "x_min was {}", bounds.x_min);
+        assert!((bounds.y_min - 20.0).abs() < 1e-9, "y_min was {}", bounds.y_min);
+        assert!((bounds.x_max - 150.0).abs() < 1e-9, "x_max was {}", bounds.x_max);
+        assert!((bounds.y_max - 75.0).abs() < 1e-9, "y_max was {}", bounds.y_max);
+    }
+
+    #[test]
+    fn test_compute_paint_bounds_empty_list() {
+        let list = DisplayList::new();
+        assert!(compute_paint_bounds(&list, 72.0).is_none());
+    }
+
+    #[test]
+    fn test_compute_paint_bounds_only_clip_returns_none() {
+        let mut list = DisplayList::new();
+        list.push(DisplayElement::InitClip);
+        // Clip / InitClip / ErasePage are skipped (return None from
+        // precompute_full_bboxes), so a list of only clip ops yields no bounds.
+        assert!(compute_paint_bounds(&list, 72.0).is_none());
+    }
+
+    #[test]
+    fn test_rasterize_mask_anchors_to_paint_bounds() {
+        use stet_graphics::display_list::{SoftMaskParams, SoftMaskSubtype};
+
+        // A 50×40 white fill at page coords (200, 300)..(250, 340).
+        // Mask paint bounds in device units: x [200..250], y [300..340].
+        let mut mask = DisplayList::new();
+        let mut path = PsPath::new();
+        path.segments.push(PathSegment::MoveTo(200.0, 300.0));
+        path.segments.push(PathSegment::LineTo(250.0, 300.0));
+        path.segments.push(PathSegment::LineTo(250.0, 340.0));
+        path.segments.push(PathSegment::LineTo(200.0, 340.0));
+        path.segments.push(PathSegment::ClosePath);
+        mask.push(DisplayElement::Fill {
+            path,
+            params: FillParams {
+                color: DeviceColor::from_rgb(1.0, 1.0, 1.0),
+                fill_rule: FillRule::NonZeroWinding,
+                ctm: Matrix::identity(),
+                is_text_glyph: false,
+                overprint: false,
+                overprint_mode: 0,
+                painted_channels: 0,
+                is_device_cmyk: false,
+                spot_color: None,
+                rendering_intent: 0,
+                transfer: TransferState::default(),
+                halftone: HalftoneState::default(),
+                bg_ucr: BgUcrState::default(),
+                alpha: 1.0,
+                blend_mode: 0,
+            },
+        });
+
+        let params = SoftMaskParams {
+            subtype: SoftMaskSubtype::Luminosity,
+            // Form bbox; intentionally tighter than paint bounds — the
+            // raster should follow paint bounds, not this.
+            bbox: [0.0, 0.0, 100.0, 100.0],
+            backdrop_color: None, // black backdrop → out-of-bounds value = 0
+            transfer_invert: false,
+            has_nested_mask_scope: false,
+            parent_clip_bbox: None,
+        };
+
+        let raster =
+            rasterize_mask(&mask, &params, None, false, 72.0, 1.0, 1.0).expect("expected raster");
+
+        // Origin must be at (or just before) the paint bounds, with the
+        // 1-pixel AA pad.
+        assert_eq!(raster.origin_x, 199);
+        assert_eq!(raster.origin_y, 299);
+        // Width / height = paint bounds + 2 pixels of pad (1 each side).
+        assert_eq!(raster.width, 52);
+        assert_eq!(raster.height, 42);
+        assert_eq!(raster.scale_x, 1.0);
+        assert_eq!(raster.scale_y, 1.0);
+
+        // The raster should be non-zero somewhere inside the painted region.
+        // Sample the center of the painted area: page (225, 320) → mask
+        // index (225 - 199, 320 - 299) = (26, 21).
+        let mx = 225 - raster.origin_x;
+        let my = 320 - raster.origin_y;
+        assert!(mx >= 0 && (mx as u32) < raster.width);
+        assert!(my >= 0 && (my as u32) < raster.height);
+        let center_value = raster.data[(my as usize) * raster.width as usize + mx as usize];
+        assert_eq!(
+            center_value, 255,
+            "center of painted mask should be opaque white (lum=255)"
+        );
+
+        // A point outside the paint bounds (page (300, 320)) maps to mask
+        // index (101, 21) which is outside the raster width — sampling
+        // there should fall back to out_of_bounds_mask_value(params) = 0.
+        let mx_out = 300 - raster.origin_x;
+        let in_bounds = mx_out >= 0 && (mx_out as u32) < raster.width;
+        assert!(!in_bounds, "page x=300 should be outside the mask raster");
+        assert_eq!(
+            out_of_bounds_mask_value(&params),
+            0,
+            "black backdrop → out-of-bounds = 0"
+        );
+    }
+
+    #[test]
+    fn test_band_local_to_mask_formula() {
+        // Verify the band-local → page-pixel → mask-index arithmetic for
+        // several band offsets. This is the highest-risk part of Step 4
+        // because it bridges three coordinate systems:
+        //
+        //   band-local pixel (x, y)
+        //     + (crop_x, crop_y)            → soft-mask offset within band
+        //     + (vp_x_pixels, vp_y_pixels)  → page-pixel position
+        //     - (origin_x, origin_y)        → mask raster index
+
+        // Mask raster anchored at page-pixel (200, 300).
+        let raster_origin_x = 200i32;
+        let raster_origin_y = 300i32;
+
+        // Helper that runs the formula from render_soft_masked.
+        let sample = |vp_x_dev: f32,
+                      vp_y_dev: f32,
+                      scale: f32,
+                      crop_x: i32,
+                      crop_y: i32,
+                      x: i32,
+                      y: i32|
+         -> (i32, i32) {
+            let vp_x_pixels = (vp_x_dev * scale).round() as i32;
+            let vp_y_pixels = (vp_y_dev * scale).round() as i32;
+            let page_x = vp_x_pixels + crop_x + x;
+            let page_y = vp_y_pixels + crop_y + y;
+            let mx = page_x - raster_origin_x;
+            let my = page_y - raster_origin_y;
+            (mx, my)
+        };
+
+        // Case 1: band starts at page Y=0 (top band of page).
+        // vp_y=0, scale=1. The soft-mask top-left page (220, 310) must
+        // map to mask index (20, 10).
+        // crop_x = floor((220 - 0) * 1) = 220, crop_y = floor((310 - 0) * 1) = 310
+        let (mx, my) = sample(0.0, 0.0, 1.0, 220, 310, 0, 0);
+        assert_eq!((mx, my), (20, 10), "top band: smask top-left");
+
+        // 5 pixels into the smask region (band-local): page (225, 315)
+        let (mx, my) = sample(0.0, 0.0, 1.0, 220, 310, 5, 5);
+        assert_eq!((mx, my), (25, 15), "top band: 5px into smask");
+
+        // Case 2: band starts at page Y=400. The smask region [310..340]
+        // doesn't intersect this band — covered by the early-return path.
+        // But test a band that DOES intersect the smask, e.g. starting at
+        // Y=305. Then page-Y 310 is band-local Y=5.
+        // vp_y_pixels = round(305 * 1) = 305
+        // crop_y = floor((310 - 305) * 1) = 5  (band-local)
+        // For content y=0 (band-local), page_y = 305 + 5 + 0 = 310 ✓
+        let (mx, my) = sample(0.0, 305.0, 1.0, 220, 5, 0, 0);
+        assert_eq!((mx, my), (20, 10), "mid band: smask top-left");
+
+        // Case 3: viewport rendering at scale 2. vp_x=100.0, vp_y=150.0,
+        // scale=2. Page pixel offset = (200, 300). The smask region
+        // [220..270] in device units = [440..540] in page-pixels at scale 2.
+        // But the mask raster was built at scale 1, so this is a
+        // SCALE-MISMATCH case — the cache would invalidate and rebuild.
+        // We're not testing the rebuild, just that the formula computes
+        // the right page-pixel coords:
+        //   vp_x_pixels = round(100 * 2) = 200
+        //   smask in band: page (440..540), band-local (240..340)
+        //   crop_x = max(0, floor((220 - 100) * 2)) = 240
+        //   For x=0 (band-local), page_x = 200 + 240 + 0 = 440 ✓
+        let vp_x_pixels = (100.0_f32 * 2.0).round() as i32;
+        let crop_x = ((220.0_f32 - 100.0) * 2.0).floor() as i32;
+        let page_x_for_x_zero = vp_x_pixels + crop_x;
+        assert_eq!(page_x_for_x_zero, 440, "viewport scale-2: page-x at x=0");
     }
 }

@@ -4,13 +4,45 @@
 
 //! Display list — records drawing operations for deferred replay to a device.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::device::{
     AxialShadingParams, ClipParams, FillParams, ImageParams, MeshShadingParams, PatchShadingParams,
     PatternFillParams, RadialShadingParams, StrokeParams, TextParams,
 };
 use stet_fonts::geometry::PsPath;
+
+/// A pre-rasterized soft mask, cached on the display-list `SoftMasked`
+/// element so the renderer can build it once at gs-time CTM and sample it
+/// per content pixel without re-rasterizing for every band.
+///
+/// The renderer holds the mask raster in its own device-space pixel
+/// coordinate system (anchored at `(origin_x, origin_y)`) rather than the
+/// `SoftMasked.params.bbox` viewport, because the mask form's internal
+/// `cm` operators may translate the actual paint elements outside the
+/// form's `/BBox` after the gs-time CTM is applied. Sampling per content
+/// pixel by device coordinates decouples the mask and content coordinate
+/// systems entirely.
+#[derive(Clone, Debug)]
+pub struct MaskRaster {
+    /// Single-channel mask values (luminosity or alpha), row-major.
+    pub data: Vec<u8>,
+    /// Width of the raster in pixels.
+    pub width: u32,
+    /// Height of the raster in pixels.
+    pub height: u32,
+    /// Top-left corner of the raster in device-space pixels at `scale`.
+    pub origin_x: i32,
+    /// Top-left corner of the raster in device-space pixels at `scale`.
+    pub origin_y: i32,
+    /// Horizontal scale at which the raster was built. The CLI egui
+    /// viewer and the WASM viewport both re-render the same captured
+    /// display list at varying zoom scales, so the cache must invalidate
+    /// when this changes.
+    pub scale_x: f32,
+    /// Vertical scale at which the raster was built.
+    pub scale_y: f32,
+}
 
 /// Subtype for soft mask extraction.
 #[derive(Clone, Debug, PartialEq)]
@@ -36,6 +68,20 @@ pub struct SoftMaskParams {
     /// When true, the renderer composites semi-transparent pixels onto the
     /// backdrop before extracting luminosity.
     pub has_nested_mask_scope: bool,
+    /// Bounding box of the parent gstate's clip path at the moment the
+    /// SoftMasked element was emitted (in device space).
+    ///
+    /// Used by the renderer as a hard upper bound on the cached mask
+    /// raster size: pixels outside the parent clip can't affect the
+    /// final image, so the raster never needs to extend beyond it.
+    /// Without this cap, a soft mask whose form contains an unbounded
+    /// shading (no `/BBox`) inside a sentinel-sized internal clip would
+    /// blow past the renderer's mask-raster size limit and rasterize
+    /// to nothing, making the entire SoftMasked element invisible.
+    ///
+    /// `None` means the parent had no active clip path — the renderer
+    /// then bounds the raster only by the mask's actual paint bounds.
+    pub parent_clip_bbox: Option<[f64; 4]>,
 }
 
 /// Color space declared by a transparency group's `/CS` entry. Per PDF spec
@@ -115,6 +161,19 @@ pub enum DisplayElement {
         mask: DisplayList,
         content: DisplayList,
         params: SoftMaskParams,
+        /// Render-time cache of the rasterized mask. `None` means "not
+        /// yet rasterized". `Some(None)` means "rasterized and produced
+        /// no visible mask" — memoized so subsequent bands skip the
+        /// rasterization work. `Some(Some(raster))` is the populated
+        /// raster; the renderer compares `raster.scale_x/scale_y`
+        /// against the current render scale and re-rasterizes if they
+        /// differ.
+        ///
+        /// Wrapped in `Arc<Mutex<...>>` so cloned display lists (e.g. by
+        /// the egui viewer or the WASM viewport during zoom) share the
+        /// same cache cell, and so the cache can be replaced when the
+        /// scale changes.
+        mask_cache: Arc<Mutex<Option<Option<MaskRaster>>>>,
     },
 }
 

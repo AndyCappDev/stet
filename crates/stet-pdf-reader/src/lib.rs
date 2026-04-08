@@ -650,6 +650,7 @@ mod tests {
                         mask,
                         content,
                         params,
+                        ..
                     } => {
                         eprintln!(
                             "{indent}[{i}] SoftMasked {:?} mask={} content={}",

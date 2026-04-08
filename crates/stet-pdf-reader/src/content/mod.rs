@@ -27,7 +27,7 @@ use self::color_space::{
 };
 use self::graphics_state::{ColorSpaceRef, PdfGraphicsState};
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use self::font::{FontCache, PdfFont};
 use self::graphics_state::{ShadingPatternDL, TilingPattern};
@@ -3218,6 +3218,7 @@ impl<'a> ContentInterpreter<'a> {
                 .map(|c| c.1)
                 .fold(f64::NEG_INFINITY, f64::max);
 
+            let parent_clip_bbox = self.current_clip_bbox();
             self.display_list.push(DisplayElement::SoftMasked {
                 mask: mask_dl,
                 content: content_dl,
@@ -3227,7 +3228,9 @@ impl<'a> ContentInterpreter<'a> {
                     backdrop_color: None,
                     transfer_invert: false,
                     has_nested_mask_scope: false,
+                    parent_clip_bbox,
                 },
+                mask_cache: Arc::new(Mutex::new(None)),
             });
             return Ok(());
         }
@@ -3313,13 +3316,16 @@ impl<'a> ContentInterpreter<'a> {
                 }
             }
 
+            let parent_clip_bbox = self.current_clip_bbox();
             self.display_list.push(DisplayElement::SoftMasked {
                 mask: mask_dl, content: content_dl,
                 params: SoftMaskParams {
                     subtype: SoftMaskSubtype::Luminosity,
                     bbox: [x_min, y_min, x_max, y_max],
                     backdrop_color: None, transfer_invert: false, has_nested_mask_scope: false,
+                    parent_clip_bbox,
                 },
+                mask_cache: Arc::new(Mutex::new(None)),
             });
             return Ok(());
         }
@@ -3758,6 +3764,7 @@ impl<'a> ContentInterpreter<'a> {
             let x_max = corners.iter().map(|c| c.0).fold(f64::NEG_INFINITY, f64::max);
             let y_max = corners.iter().map(|c| c.1).fold(f64::NEG_INFINITY, f64::max);
 
+            let parent_clip_bbox = self.current_clip_bbox();
             self.display_list.push(DisplayElement::SoftMasked {
                 mask: mask_dl,
                 content: content_dl,
@@ -3767,7 +3774,9 @@ impl<'a> ContentInterpreter<'a> {
                     backdrop_color: None,
                     transfer_invert: false,
                     has_nested_mask_scope: false,
+                    parent_clip_bbox,
                 },
+                mask_cache: Arc::new(Mutex::new(None)),
             });
         } else {
             // Cache plain image for reuse (Arc for cheap cloning).
@@ -3862,6 +3871,7 @@ impl<'a> ContentInterpreter<'a> {
             let x_max = corners.iter().map(|c| c.0).fold(f64::NEG_INFINITY, f64::max);
             let y_max = corners.iter().map(|c| c.1).fold(f64::NEG_INFINITY, f64::max);
 
+            let parent_clip_bbox = self.current_clip_bbox();
             self.display_list.push(DisplayElement::SoftMasked {
                 mask: mask_dl,
                 content: content_dl,
@@ -3871,7 +3881,9 @@ impl<'a> ContentInterpreter<'a> {
                     backdrop_color: None,
                     transfer_invert: false,
                     has_nested_mask_scope: false,
+                    parent_clip_bbox,
                 },
+                mask_cache: Arc::new(Mutex::new(None)),
             });
         } else {
             self.display_list.push(DisplayElement::Image {
@@ -4402,6 +4414,43 @@ impl<'a> ContentInterpreter<'a> {
     }
 
     /// Compute device-space bounding box from form BBox + current CTM.
+    /// Compute the device-space bounding box of the current gstate's
+    /// clip path. Clip paths are stored in device coordinates, so this
+    /// is just `path_bbox(clip_path)`. Returns `None` when no clip path
+    /// is active.
+    fn current_clip_bbox(&self) -> Option<[f64; 4]> {
+        let path = self.gstate.clip_path.as_ref()?;
+        let mut x_min = f64::INFINITY;
+        let mut y_min = f64::INFINITY;
+        let mut x_max = f64::NEG_INFINITY;
+        let mut y_max = f64::NEG_INFINITY;
+        for seg in &path.segments {
+            let pts: &[(f64, f64)] = match seg {
+                PathSegment::MoveTo(x, y) | PathSegment::LineTo(x, y) => &[(*x, *y)],
+                PathSegment::CurveTo {
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    x3,
+                    y3,
+                } => &[(*x1, *y1), (*x2, *y2), (*x3, *y3)][..],
+                PathSegment::ClosePath => &[],
+            };
+            for (x, y) in pts {
+                x_min = x_min.min(*x);
+                y_min = y_min.min(*y);
+                x_max = x_max.max(*x);
+                y_max = y_max.max(*y);
+            }
+        }
+        if x_min.is_finite() && x_min < x_max && y_min < y_max {
+            Some([x_min, y_min, x_max, y_max])
+        } else {
+            None
+        }
+    }
+
     fn compute_device_bbox(&self, bbox: Option<(f64, f64, f64, f64)>) -> [f64; 4] {
         let Some((x0, y0, x1, y1)) = bbox else {
             // No BBox — use large sentinel
@@ -4752,6 +4801,7 @@ impl<'a> ContentInterpreter<'a> {
                 .map(|c| c.1)
                 .fold(f64::NEG_INFINITY, f64::max);
 
+            let parent_clip_bbox = self.current_clip_bbox();
             self.display_list.push(DisplayElement::SoftMasked {
                 mask: mask_dl,
                 content: content_dl,
@@ -4761,7 +4811,9 @@ impl<'a> ContentInterpreter<'a> {
                     backdrop_color: None,
                     transfer_invert: false,
                     has_nested_mask_scope: false,
+                    parent_clip_bbox,
                 },
+                mask_cache: Arc::new(Mutex::new(None)),
             });
             return Ok(());
         }
@@ -5015,6 +5067,7 @@ impl<'a> ContentInterpreter<'a> {
                     })
                     .cloned()
                     .collect();
+                let parent_clip_bbox = self.current_clip_bbox();
                 self.display_list.push(DisplayElement::SoftMasked {
                     mask: scope.mask.mask_list,
                     content,
@@ -5024,7 +5077,9 @@ impl<'a> ContentInterpreter<'a> {
                         backdrop_color: scope.mask.backdrop_color,
                         transfer_invert: scope.mask.transfer_invert,
                         has_nested_mask_scope: scope.mask.has_nested_mask_scope,
+                        parent_clip_bbox,
                     },
+                    mask_cache: Arc::new(Mutex::new(None)),
                 });
                 for elem in clip_replay {
                     self.display_list.push(elem);
