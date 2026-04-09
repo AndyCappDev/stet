@@ -675,6 +675,35 @@ struct RenderContext<'a> {
     no_aa: bool,
     /// When true, CMYK(0,0,0,0) pixels in images produce alpha=0 (OPM=1).
     opm_zero_transparent: bool,
+    /// Knockout group painter rendering pass override. The knockout group
+    /// renders each Group painter twice — once for the blended-color result
+    /// (`ColorPass`), once for the painter's coverage mask (`CoveragePass`).
+    /// Both passes need to override `render_group`'s usual decisions:
+    ///   * `ColorPass` expands the per-pixel CMYK composite-back gate to all
+    ///     non-Normal blend modes so painters with separable blends like
+    ///     Screen / ColorDodge / Overlay / SoftLight blend in DeviceCMYK
+    ///     (matching the spec for `/CS DeviceCMYK` knockout groups) instead
+    ///     of in tiny-skia's sRGB blend.
+    ///   * `CoveragePass` disables the CMYK composite-back (its
+    ///     "source==backdrop" guard would discard white-CMYK painters
+    ///     against the transparent coverage backdrop) and forces the
+    ///     painter's alpha to 1.0 with Normal blend so the coverage offscreen
+    ///     captures the painter's *shape* even when the original alpha was 0
+    ///     (Opacity 0% test) or its blend mode would erase the source.
+    knockout_painter_pass: KnockoutPainterPass,
+}
+
+/// Override mode applied to `render_group` while the knockout group renders
+/// one of its painters; see [`RenderContext::knockout_painter_pass`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum KnockoutPainterPass {
+    /// Default rendering — no knockout overrides.
+    None,
+    /// Pass 1 (color): widen `plan_cmyk_compose` to any non-Normal blend mode.
+    ColorPass,
+    /// Pass 2 (coverage): disable CMYK composite-back, force full alpha and
+    /// Normal blend so the coverage offscreen captures the painter's shape.
+    CoveragePass,
 }
 
 impl RenderContext<'_> {
@@ -3020,33 +3049,54 @@ fn render_group(
     // before flipping the default in Step 9.
     let force_cmyk_compose =
         std::env::var_os("STET_FORCE_CMYK_COMPOSITE_BACK").as_deref() == Some("1".as_ref());
-    let plan_cmyk_compose = if force_cmyk_compose {
-        // Principled rule: non-isolated group with an inversion-sensitive
-        // blend mode (Difference, Exclusion, Hue, Saturation, Color,
-        // Luminosity) whose painters all supply native CMYK source colors.
-        //
-        // The blend-mode restriction is intentional: bm 10..=15 produce
-        // visibly *wrong* results in sRGB (the GWG 16.0 transparency test
-        // exists exactly to expose this), so CMYK math is unambiguously
-        // correct there. The separable modes 1..=9 (Multiply, Screen, etc.)
-        // are spec-defensible in either color space but look noticeably
-        // different — most renderers blend them in sRGB, and PDFs authored
-        // for that look "wrong" if we suddenly switch them to CMYK math.
-        //
-        // The painter-set restriction (no shadings, no non-CMYK content)
-        // exists because the parallel CMYK buffer can only faithfully track
-        // single-CMYK-value-per-pixel painters; gradients interpolate
-        // differently in pixmap RGB vs buffer CMYK and the divergence makes
-        // the composite-back read stale source values.
-        !params.isolated
-            && matches!(params.blend_mode, 10..=15)
-            && needs_group_cmyk
-            && band_state.cmyk_buffer.is_some()
-            && group_content_is_native_cmyk(elements)
-    } else {
-        !params.isolated
-            && matches!(params.blend_mode, 10..=15)
-            && group_only_native_cmyk_fills(elements)
+    // The knockout group's coverage pass disables CMYK composite-back so the
+    // painter falls through to the simple sRGB draw_pixmap path. Without this,
+    // a white-source painter (CMYK 0,0,0,0) would be skipped by the
+    // composite-back's "source==backdrop" guard against the transparent
+    // coverage backdrop, and pass 2 wouldn't capture the painter's coverage.
+    //
+    // The color pass widens the gate to all non-Normal blend modes so a
+    // `/CS DeviceCMYK` knockout group's painters with separable blends like
+    // Screen / ColorDodge / Overlay / SoftLight blend in CMYK math (matching
+    // the spec) instead of in tiny-skia's sRGB blend.
+    let plan_cmyk_compose = match ctx.knockout_painter_pass {
+        KnockoutPainterPass::CoveragePass => false,
+        KnockoutPainterPass::ColorPass => {
+            !params.isolated
+                && params.blend_mode != 0
+                && needs_group_cmyk
+                && band_state.cmyk_buffer.is_some()
+                && group_content_is_native_cmyk(elements)
+        }
+        KnockoutPainterPass::None if force_cmyk_compose => {
+            // Principled rule: non-isolated group with an inversion-sensitive
+            // blend mode (Difference, Exclusion, Hue, Saturation, Color,
+            // Luminosity) whose painters all supply native CMYK source colors.
+            //
+            // The blend-mode restriction is intentional: bm 10..=15 produce
+            // visibly *wrong* results in sRGB (the GWG 16.0 transparency test
+            // exists exactly to expose this), so CMYK math is unambiguously
+            // correct there. The separable modes 1..=9 (Multiply, Screen, etc.)
+            // are spec-defensible in either color space but look noticeably
+            // different — most renderers blend them in sRGB, and PDFs authored
+            // for that look "wrong" if we suddenly switch them to CMYK math.
+            //
+            // The painter-set restriction (no shadings, no non-CMYK content)
+            // exists because the parallel CMYK buffer can only faithfully track
+            // single-CMYK-value-per-pixel painters; gradients interpolate
+            // differently in pixmap RGB vs buffer CMYK and the divergence makes
+            // the composite-back read stale source values.
+            !params.isolated
+                && matches!(params.blend_mode, 10..=15)
+                && needs_group_cmyk
+                && band_state.cmyk_buffer.is_some()
+                && group_content_is_native_cmyk(elements)
+        }
+        KnockoutPainterPass::None => {
+            !params.isolated
+                && matches!(params.blend_mode, 10..=15)
+                && group_only_native_cmyk_fills(elements)
+        }
     };
     let needs_backdrop_preload = !params.isolated && (params.blend_mode == 0 || plan_cmyk_compose);
     let backdrop = if needs_backdrop_preload {
@@ -3112,6 +3162,7 @@ fn render_group(
         elem_idx: 0,
         no_aa: ctx.no_aa,
         opm_zero_transparent: ctx.opm_zero_transparent,
+        knockout_painter_pass: ctx.knockout_painter_pass,
     };
 
     for (idx, elem) in elements.elements().iter().enumerate() {
@@ -3132,6 +3183,23 @@ fn render_group(
         None => return, // empty clip → nothing visible
         Some(m) => m,
     };
+
+    // Coverage pass override: force opacity 1.0 + Normal blend so the
+    // painter's shape reaches the coverage offscreen even when the
+    // original alpha was 0 (Opacity 0% test) or the blend mode would
+    // erase the source against the transparent coverage backdrop.
+    let coverage_params;
+    let effective_params: &stet_graphics::display_list::GroupParams =
+        if ctx.knockout_painter_pass == KnockoutPainterPass::CoveragePass {
+            coverage_params = stet_graphics::display_list::GroupParams {
+                alpha: 1.0,
+                blend_mode: 0,
+                ..params.clone()
+            };
+            &coverage_params
+        } else {
+            params
+        };
 
     let mut cmyk_compose_done = false;
     if let Some(backdrop) = &backdrop {
@@ -3163,7 +3231,7 @@ fn render_group(
                 &offscreen,
                 inner,
                 pre,
-                params,
+                effective_params,
                 mask_ref,
                 crop_x,
                 crop_y,
@@ -3172,13 +3240,13 @@ fn render_group(
             cmyk_compose_done = true;
         } else {
             composite_non_isolated_group_cropped(
-                pixmap, &offscreen, backdrop, params, mask_ref, crop_x, crop_y,
+                pixmap, &offscreen, backdrop, effective_params, mask_ref, crop_x, crop_y,
             );
         }
     } else {
         let paint = stet_tiny_skia::PixmapPaint {
-            opacity: params.alpha as f32,
-            blend_mode: u8_to_blend_mode(params.blend_mode),
+            opacity: effective_params.alpha as f32,
+            blend_mode: u8_to_blend_mode(effective_params.blend_mode),
             quality: stet_tiny_skia::FilterQuality::Nearest,
         };
         pixmap.draw_pixmap(
@@ -3505,6 +3573,7 @@ fn render_knockout_group(
         elem_idx: 0,
         no_aa: true,
         opm_zero_transparent: ctx.opm_zero_transparent,
+        knockout_painter_pass: ctx.knockout_painter_pass,
     };
 
     // Persistent band state for clip tracking — clips must accumulate across
@@ -3519,13 +3588,97 @@ fn render_knockout_group(
         cmyk_buffer: None,
     };
 
+    // Coverage offscreen for two-pass painter rendering of nested transparency
+    // groups. Reused (zeroed) across painters; allocated lazily on first need.
+    let mut coverage_offscreen: Option<Pixmap> = None;
+
     for elem in elements.elements() {
         match elem {
             // State-only elements: update persistent clip, no knockout compositing
             DisplayElement::Clip { .. } | DisplayElement::InitClip => {
                 render_element(&mut offscreen, &mut ko_band, elem, &group_ctx);
             }
-            // Paint elements: knockout semantics with persistent clip
+            // Group painters need two-pass rendering. Knockout semantics
+            // require each painter to overwrite previous siblings within its
+            // coverage area, even when the painter's blend mode happens to
+            // produce a result that equals the initial backdrop (e.g.
+            // Darken(red, white)=red, SoftLight(red, black)=red,
+            // Multiply(red, magenta)=red — which is exactly what GWG 16.1
+            // tests). The single-pass change-against-backdrop check used for
+            // simpler painter types would miss those pixels, and earlier
+            // siblings' contributions would bleed through.
+            DisplayElement::Group { .. } => {
+                // Pass 1: render painter against initial_backdrop to compute
+                // the blended-color result (the painter's contribution).
+                // Use ColorPass mode so any non-Normal blend mode goes through
+                // the per-pixel CMYK composite-back — required for separable
+                // blends like Screen / ColorDodge / Overlay / SoftLight whose
+                // sRGB result drifts away from the CMYK-math result.
+                let pass1_ctx = RenderContext {
+                    knockout_painter_pass: KnockoutPainterPass::ColorPass,
+                    ..group_ctx
+                };
+                offscreen.data_mut().copy_from_slice(&initial_backdrop);
+                ko_band.cmyk_buffer = initial_cmyk.clone();
+                render_element(&mut offscreen, &mut ko_band, elem, &pass1_ctx);
+                let pass1_cmyk = ko_band.cmyk_buffer.take();
+
+                // Pass 2: render painter into a fresh transparent offscreen so
+                // the alpha channel captures the painter's coverage, which the
+                // result-color comparison cannot recover when the blend mode
+                // outputs the backdrop color exactly.
+                let cov = match coverage_offscreen.as_mut() {
+                    Some(p) => {
+                        p.data_mut().fill(0);
+                        p
+                    }
+                    None => {
+                        let Some(p) = Pixmap::new(eff_w, eff_h) else {
+                            // Out of memory for coverage buffer — fall back
+                            // to the change-detection path so the painter
+                            // still appears (just without proper knockout).
+                            replace_changed_pixels(
+                                accumulated.data_mut(),
+                                offscreen.data(),
+                                &initial_backdrop,
+                            );
+                            if let (Some(p1), Some(acc)) = (&pass1_cmyk, &mut accumulated_cmyk) {
+                                replace_changed_cmyk(acc, p1, offscreen.data(), &initial_backdrop);
+                            }
+                            continue;
+                        };
+                        coverage_offscreen = Some(p);
+                        coverage_offscreen.as_mut().unwrap()
+                    }
+                };
+                ko_band.cmyk_buffer = None;
+                // Coverage pass: render through the simple sRGB path with
+                // alpha forced to 1.0 and Normal blend so the painter's
+                // shape reaches the coverage offscreen even for white-source
+                // CMYK painters and zero-alpha painters (Opacity 0% test).
+                let coverage_ctx = RenderContext {
+                    knockout_painter_pass: KnockoutPainterPass::CoveragePass,
+                    ..group_ctx
+                };
+                render_element(cov, &mut ko_band, elem, &coverage_ctx);
+
+                // Use the coverage offscreen's alpha as a knockout mask: the
+                // painter's contribution from pass 1 source-overs onto
+                // accumulated weighted by the coverage alpha.
+                replace_with_coverage_mask(
+                    accumulated.data_mut(),
+                    offscreen.data(),
+                    cov.data(),
+                );
+
+                if let (Some(p1_cmyk), Some(acc_cmyk)) = (&pass1_cmyk, &mut accumulated_cmyk) {
+                    replace_cmyk_with_coverage_mask(acc_cmyk, p1_cmyk, cov.data());
+                }
+                ko_band.cmyk_buffer = None;
+            }
+            // Other paint elements: single-pass with change-against-backdrop.
+            // Direct path/image/shading paints always change pixels they cover,
+            // so the simpler detection works and avoids the second-pass cost.
             _ => {
                 offscreen.data_mut().copy_from_slice(&initial_backdrop);
 
@@ -3590,6 +3743,56 @@ fn render_knockout_group(
         );
     }
 }
+/// Source-over `source` onto `target` weighted by `coverage`'s alpha channel.
+/// Used for the two-pass knockout group rendering: `coverage` is rendered
+/// into a transparent offscreen so its alpha records the painter's coverage
+/// regardless of whether the painter's blend mode produced backdrop-equal
+/// pixels in the color pass. Both `source` and `target` are assumed fully
+/// opaque pixmaps (alpha=255 everywhere) since the knockout offscreens are
+/// pre-loaded with the opaque initial backdrop.
+fn replace_with_coverage_mask(target: &mut [u8], source: &[u8], coverage: &[u8]) {
+    for i in (0..target.len()).step_by(4) {
+        let cov_a = coverage[i + 3];
+        if cov_a == 0 {
+            continue;
+        }
+        if cov_a == 255 {
+            target[i..i + 4].copy_from_slice(&source[i..i + 4]);
+            continue;
+        }
+        let a = cov_a as u32;
+        let inv = 255 - a;
+        for c in 0..4 {
+            let s = source[i + c] as u32;
+            let t = target[i + c] as u32;
+            target[i + c] = ((s * a + t * inv + 127) / 255) as u8;
+        }
+    }
+}
+
+/// Source-over CMYK values from `source` onto `target` weighted by the
+/// coverage offscreen's alpha channel. Companion to
+/// `replace_with_coverage_mask` for the parallel CMYK buffer.
+fn replace_cmyk_with_coverage_mask(target: &mut [f32], source: &[f32], coverage: &[u8]) {
+    let pixel_count = target.len() / 4;
+    for i in 0..pixel_count {
+        let pi = i * 4;
+        let cov_a = coverage[pi + 3];
+        if cov_a == 0 {
+            continue;
+        }
+        if cov_a == 255 {
+            target[pi..pi + 4].copy_from_slice(&source[pi..pi + 4]);
+            continue;
+        }
+        let a = cov_a as f32 / 255.0;
+        let inv = 1.0 - a;
+        for c in 0..4 {
+            target[pi + c] = source[pi + c] * a + target[pi + c] * inv;
+        }
+    }
+}
+
 /// Replace pixels in `target` with pixels from `source` wherever `source`
 /// differs from `backdrop`. Used for knockout group per-element compositing
 /// where each element replaces (not blends with) previous elements.
@@ -3745,6 +3948,7 @@ fn render_soft_masked(
         elem_idx: 0,
         no_aa: ctx.no_aa,
         opm_zero_transparent: ctx.opm_zero_transparent,
+        knockout_painter_pass: ctx.knockout_painter_pass,
     };
 
     // 1a. INLINE PATH: Mask form contains nested offscreens.
@@ -4160,6 +4364,7 @@ fn rasterize_mask(
         elem_idx: 0,
         no_aa,
         opm_zero_transparent: false,
+        knockout_painter_pass: KnockoutPainterPass::None,
     };
 
     // 5. Mask rendering doesn't participate in CMYK overprint compositing.
@@ -4543,6 +4748,7 @@ fn render_pattern_fill(
                     elem_idx: 0,
                     no_aa: ctx.no_aa,
                     opm_zero_transparent: params.overprint_mode == 1,
+                    knockout_painter_pass: ctx.knockout_painter_pass,
                 };
 
                 let mut tile_band = BandState {
@@ -4611,6 +4817,7 @@ fn render_pattern_fill(
                 elem_idx: 0,
                 no_aa: ctx.no_aa,
                 opm_zero_transparent: params.overprint_mode == 1,
+                knockout_painter_pass: ctx.knockout_painter_pass,
             };
             let mut tile_bs = BandState {
                 clip_region: None,
@@ -5326,6 +5533,7 @@ impl OutputDevice for SkiaDevice {
                 elem_idx: 0,
                 no_aa: self.no_aa,
                 opm_zero_transparent: false,
+                knockout_painter_pass: KnockoutPainterPass::None,
             };
             render_pattern_fill(&mut self.pixmap, &mut band_state, params, &ctx);
         }
@@ -5368,6 +5576,7 @@ impl OutputDevice for SkiaDevice {
                 elem_idx: 0,
                 no_aa: self.no_aa,
                 opm_zero_transparent: false,
+                knockout_painter_pass: KnockoutPainterPass::None,
             };
             let mut band_state = BandState {
                 clip_region: None,
@@ -5490,6 +5699,17 @@ fn group_only_native_cmyk_fills(elements: &DisplayList) -> bool {
             DisplayElement::InitClip => continue,
             DisplayElement::Clip { .. } => continue,
             DisplayElement::Fill { params, .. } => {
+                if params.color.native_cmyk.is_none() {
+                    return false;
+                }
+                found_paint = true;
+            }
+            DisplayElement::Stroke { params, .. } => {
+                // Strokes write a single CMYK value per painted pixel just
+                // like fills, so the parallel CMYK buffer stays in sync with
+                // the pixmap. Including strokes here is required by GWG 16.1
+                // painters whose X path is both filled and stroked with the
+                // same registration color.
                 if params.color.native_cmyk.is_none() {
                     return false;
                 }
@@ -6750,6 +6970,7 @@ fn render_banded_to_sink(
                     elem_idx: i,
                     no_aa,
                     opm_zero_transparent: false,
+                    knockout_painter_pass: KnockoutPainterPass::None,
                 };
                 render_element(&mut band_pixmap, &mut band_state, &elements[i], &ctx);
             }
@@ -7627,6 +7848,7 @@ pub fn render_region_prepared(
                 elem_idx: i,
                 no_aa,
                 opm_zero_transparent: false,
+                knockout_painter_pass: KnockoutPainterPass::None,
             };
             render_element(&mut pixmap, &mut state, &elements[i], &ctx);
         }
@@ -7781,6 +8003,7 @@ pub fn render_region_single_band(
                 elem_idx: i,
                 no_aa,
                 opm_zero_transparent: false,
+                knockout_painter_pass: KnockoutPainterPass::None,
             };
             render_element(&mut pixmap, &mut state, &elements[i], &ctx);
         }
@@ -8229,6 +8452,7 @@ pub fn render_region(
                 elem_idx: i,
                 no_aa,
                 opm_zero_transparent: false,
+                knockout_painter_pass: KnockoutPainterPass::None,
             };
             render_element(&mut pixmap, &mut state, &elements[i], &ctx);
         }
