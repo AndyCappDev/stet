@@ -151,11 +151,30 @@ fn resolve_named_color_space(
     resolve_color_space_obj(cs_obj, resolver)
 }
 
+/// Maximum recursion depth for color space resolution. Guards against PDFs
+/// with self-referential color space definitions (e.g., an Indexed space
+/// whose base points back to itself via an indirect reference — seen in
+/// Acrobat Distiller 4.0 output).
+const MAX_CS_DEPTH: u32 = 16;
+
 /// Resolve a color space from a PdfObj (name or array).
 pub fn resolve_color_space_obj(
     obj: &PdfObj,
     resolver: &Resolver,
 ) -> Result<ResolvedColorSpace, PdfError> {
+    resolve_color_space_obj_depth(obj, resolver, 0)
+}
+
+fn resolve_color_space_obj_depth(
+    obj: &PdfObj,
+    resolver: &Resolver,
+    depth: u32,
+) -> Result<ResolvedColorSpace, PdfError> {
+    if depth >= MAX_CS_DEPTH {
+        return Err(PdfError::Other(
+            "color space recursion limit exceeded".into(),
+        ));
+    }
     let obj = resolver.deref(obj)?;
     match &obj {
         PdfObj::Name(name) => match name.as_slice() {
@@ -179,10 +198,10 @@ pub fn resolve_color_space_obj(
                 b"DeviceGray" => Ok(ResolvedColorSpace::DeviceGray),
                 b"DeviceRGB" => Ok(ResolvedColorSpace::DeviceRGB),
                 b"DeviceCMYK" => Ok(ResolvedColorSpace::DeviceCMYK),
-                b"ICCBased" => resolve_icc_based(&arr[1..], resolver),
-                b"Indexed" | b"I" => resolve_indexed(&arr[1..], resolver),
-                b"Separation" => resolve_separation(&arr[1..], resolver),
-                b"DeviceN" => resolve_devicen(&arr[1..], resolver),
+                b"ICCBased" => resolve_icc_based(&arr[1..], resolver, depth + 1),
+                b"Indexed" | b"I" => resolve_indexed(&arr[1..], resolver, depth + 1),
+                b"Separation" => resolve_separation(&arr[1..], resolver, depth + 1),
+                b"DeviceN" => resolve_devicen(&arr[1..], resolver, depth + 1),
                 b"CalGray" => resolve_cal_gray(&arr[1..], resolver),
                 b"CalRGB" => resolve_cal_rgb(&arr[1..], resolver),
                 b"Lab" => resolve_lab(&arr[1..], resolver),
@@ -199,7 +218,11 @@ pub fn resolve_color_space_obj(
     }
 }
 
-fn resolve_icc_based(args: &[PdfObj], resolver: &Resolver) -> Result<ResolvedColorSpace, PdfError> {
+fn resolve_icc_based(
+    args: &[PdfObj],
+    resolver: &Resolver,
+    depth: u32,
+) -> Result<ResolvedColorSpace, PdfError> {
     if args.is_empty() {
         return Err(PdfError::Other("ICCBased missing stream ref".into()));
     }
@@ -221,7 +244,7 @@ fn resolve_icc_based(args: &[PdfObj], resolver: &Resolver) -> Result<ResolvedCol
     // Parse /Alternate color space (used as fallback when ICC transform fails)
     let alternate = dict
         .get(b"Alternate")
-        .and_then(|obj| resolve_color_space_obj(obj, resolver).ok())
+        .and_then(|obj| resolve_color_space_obj_depth(obj, resolver, depth).ok())
         .or_else(|| icc_alternate_from_header(profile_data.as_deref(), n))
         .map(Box::new);
 
@@ -255,11 +278,15 @@ fn icc_alternate_from_header(data: Option<&Vec<u8>>, _n: u32) -> Option<Resolved
     }
 }
 
-fn resolve_indexed(args: &[PdfObj], resolver: &Resolver) -> Result<ResolvedColorSpace, PdfError> {
+fn resolve_indexed(
+    args: &[PdfObj],
+    resolver: &Resolver,
+    depth: u32,
+) -> Result<ResolvedColorSpace, PdfError> {
     if args.len() < 3 {
         return Err(PdfError::Other("Indexed color space needs 3 args".into()));
     }
-    let base = resolve_color_space_obj(&args[0], resolver)?;
+    let base = resolve_color_space_obj_depth(&args[0], resolver, depth)?;
     let hival = args[1]
         .as_int()
         .ok_or(PdfError::Other("Indexed hival not int".into()))? as u32;
@@ -293,6 +320,7 @@ fn resolve_indexed(args: &[PdfObj], resolver: &Resolver) -> Result<ResolvedColor
 fn resolve_separation(
     args: &[PdfObj],
     resolver: &Resolver,
+    depth: u32,
 ) -> Result<ResolvedColorSpace, PdfError> {
     if args.len() < 2 {
         return Err(PdfError::Other("Separation needs at least 2 args".into()));
@@ -301,7 +329,7 @@ fn resolve_separation(
         .as_name()
         .ok_or(PdfError::Other("Separation name not a name".into()))?
         .to_vec();
-    let alt = resolve_color_space_obj(&args[1], resolver)
+    let alt = resolve_color_space_obj_depth(&args[1], resolver, depth)
         .or_else(|_| fallback_alternate(args, resolver))?;
     let tint_fn = if args.len() >= 3 {
         PdfFunction::parse(&args[2], resolver).ok()
@@ -315,7 +343,11 @@ fn resolve_separation(
     })
 }
 
-fn resolve_devicen(args: &[PdfObj], resolver: &Resolver) -> Result<ResolvedColorSpace, PdfError> {
+fn resolve_devicen(
+    args: &[PdfObj],
+    resolver: &Resolver,
+    depth: u32,
+) -> Result<ResolvedColorSpace, PdfError> {
     // DeviceN array: [names alternateSpace tintTransform]
     if args.len() < 2 {
         return Err(PdfError::Other("DeviceN needs at least 2 args".into()));
@@ -328,7 +360,7 @@ fn resolve_devicen(args: &[PdfObj], resolver: &Resolver) -> Result<ResolvedColor
             .collect(),
         _ => return Err(PdfError::Other("DeviceN names not an array".into())),
     };
-    let alt = resolve_color_space_obj(&args[1], resolver)
+    let alt = resolve_color_space_obj_depth(&args[1], resolver, depth)
         .or_else(|_| fallback_alternate(args, resolver))?;
     let tint_fn = if args.len() >= 3 {
         PdfFunction::parse(&args[2], resolver).ok()
