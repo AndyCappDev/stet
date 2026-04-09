@@ -102,6 +102,29 @@ pub fn parse_filters(
         parms.push(None);
     }
 
+    // Fill in CCITT decode hints from the image/stream dict when missing.
+    // PDF image streams always carry /Width and /Height, but malformed producers
+    // sometimes omit the matching /Columns and /Rows in /DecodeParms. Without
+    // /Rows the decoder has no target height and bails out mid-stream on
+    // damaged Group 4 data. Copy them over so the CCITT filter can cap its
+    // row count and pad short output with white scanlines.
+    for (i, filter) in filters.iter().enumerate() {
+        if *filter != Filter::CCITTFaxDecode {
+            continue;
+        }
+        let dp = parms[i].get_or_insert_with(PdfDict::new);
+        if dp.get_int(b"Columns").is_none()
+            && let Some(w) = dict.get_int(b"Width")
+        {
+            dp.insert(b"Columns".to_vec(), crate::objects::PdfObj::Int(w));
+        }
+        if dp.get_int(b"Rows").is_none()
+            && let Some(h) = dict.get_int(b"Height")
+        {
+            dp.insert(b"Rows".to_vec(), crate::objects::PdfObj::Int(h));
+        }
+    }
+
     Ok((filters, parms))
 }
 
@@ -1157,25 +1180,128 @@ impl hayro_ccitt::Decoder for CcittByteDecoder {
     }
 }
 
-/// Decode CCITT data using hayro-ccitt (supports Group 3 and Group 4).
+/// Decode CCITT data using hayro-ccitt (supports Group 3 and Group 4), with
+/// a fall-through to the `fax` crate when hayro rejects the stream with a
+/// hard error (Overflow, InvalidCode, LineLengthMismatch). The `fax` crate is
+/// more lenient with malformed Group 4 streams produced by old Acrobat
+/// Distiller versions, where hayro's strict position-arithmetic checks can
+/// bail out mid-stream even though the image is still decodable.
 fn decode_ccitt_hayro(
     data: &[u8],
     settings: &hayro_ccitt::DecodeSettings,
     black_is1: bool,
 ) -> Result<Vec<u8>, PdfError> {
     let mut decoder = CcittByteDecoder::new(black_is1);
-    if let Err(e) = hayro_ccitt::decode(data, &mut decoder, settings) {
-        // UnexpectedEof is normal for inline images and streams without EOFB markers.
-        // Only warn about genuine decoding errors (InvalidCode, LineLengthMismatch, etc.)
-        if e != hayro_ccitt::DecodeError::UnexpectedEof {
-            use std::sync::atomic::{AtomicBool, Ordering};
-            static WARNED: AtomicBool = AtomicBool::new(false);
+    let hayro_err = hayro_ccitt::decode(data, &mut decoder, settings).err();
+
+    // If hayro failed with anything other than a soft EOF, try `fax` as a
+    // fallback. Keep whichever decoder produced more byte output.
+    if let Some(e) = hayro_err
+        && e != hayro_ccitt::DecodeError::UnexpectedEof
+    {
+        let fallback = decode_ccitt_fax(data, settings, black_is1);
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static WARNED: AtomicBool = AtomicBool::new(false);
+        if fallback.len() > decoder.output.len() {
             if !WARNED.swap(true, Ordering::Relaxed) {
-                eprintln!("[CCITT] decode warning: {} (using partial data)", e);
+                eprintln!(
+                    "[CCITT] hayro-ccitt error: {} — fell back to `fax` crate",
+                    e
+                );
             }
+            return Ok(fallback);
+        }
+        if !WARNED.swap(true, Ordering::Relaxed) {
+            eprintln!("[CCITT] decode warning: {} (using partial data)", e);
         }
     }
     Ok(decoder.output)
+}
+
+/// Decode CCITT data using the `fax` crate as a fallback. Returns a byte-packed
+/// buffer with the same polarity/layout as the hayro path.
+fn decode_ccitt_fax(
+    data: &[u8],
+    settings: &hayro_ccitt::DecodeSettings,
+    black_is1: bool,
+) -> Vec<u8> {
+    let width = settings.columns as u16;
+    let row_bytes = settings.columns.div_ceil(8) as usize;
+    let mut out: Vec<u8> = Vec::new();
+    // Byte value for a full chunk of "white" and "black" pixels after polarity.
+    // black_is1=false (PDF default): 0=black, 1=white → white row = 0xFF, black = 0x00
+    // black_is1=true: 0=white, 1=black → white row = 0x00, black = 0xFF
+    let white_byte: u8 = if black_is1 { 0x00 } else { 0xFF };
+    let black_byte: u8 = !white_byte;
+
+    let rows_limit = if settings.rows == u32::MAX || settings.rows == 0 {
+        None
+    } else {
+        Some(settings.rows.min(u16::MAX as u32) as u16)
+    };
+
+    let mut emit_row = |transitions: &[u16]| {
+        // Rebuild one packed row from the transition list.
+        let mut row = vec![white_byte; row_bytes];
+        // Row starts white; each transition flips color starting at that index.
+        let mut color_white = true;
+        let mut cursor: u16 = 0;
+        // Add the sentinel `width` transition so we close the final run.
+        let iter = transitions.iter().copied().chain(std::iter::once(width));
+        for next in iter {
+            let end = next.min(width);
+            if !color_white && end > cursor {
+                fill_bits(&mut row, cursor as usize, end as usize, black_byte != 0);
+            }
+            color_white = !color_white;
+            cursor = end;
+            if cursor >= width {
+                break;
+            }
+        }
+        out.extend_from_slice(&row);
+    };
+
+    match settings.encoding {
+        hayro_ccitt::EncodingMode::Group4 => {
+            let _ = fax::decoder::decode_g4(data.iter().copied(), width, rows_limit, &mut emit_row);
+        }
+        hayro_ccitt::EncodingMode::Group3_1D | hayro_ccitt::EncodingMode::Group3_2D { .. } => {
+            let _ = fax::decoder::decode_g3(data.iter().copied(), &mut emit_row);
+        }
+    }
+
+    // Pad truncated output with white scanlines so downstream image handling
+    // sees the full-height buffer. Without this, a Group 4 stream that the
+    // decoder can't finish (malformed PDF) would produce a buffer short by
+    // thousands of bytes; the image code fills the missing rows with zeros,
+    // which lands as a solid black rectangle covering part of the page.
+    if let Some(target_rows) = rows_limit {
+        let expected = row_bytes * target_rows as usize;
+        if out.len() < expected {
+            out.resize(expected, white_byte);
+        }
+    }
+
+    out
+}
+
+/// Flip bits in a byte-packed (MSB-first) row between `[start, end)` to black.
+/// `start`/`end` are pixel indices; the buffer is pre-filled with the "white"
+/// polarity, so this routine only needs to set the black-colored runs.
+fn fill_bits(row: &mut [u8], start: usize, end: usize, black_is_one: bool) {
+    if end <= start {
+        return;
+    }
+    for x in start..end {
+        let byte = x / 8;
+        let bit = 0x80u8 >> (x % 8);
+        if black_is_one {
+            row[byte] |= bit;
+        } else {
+            row[byte] &= !bit;
+        }
+    }
 }
 
 /// JBIG2Decode.
