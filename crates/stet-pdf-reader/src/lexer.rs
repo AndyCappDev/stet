@@ -482,12 +482,30 @@ pub fn parse_object_from_token(lexer: &mut Lexer, tok: Token) -> Result<PdfObj, 
 pub fn parse_dict_body(lexer: &mut Lexer) -> Result<PdfDict, PdfError> {
     let mut dict = PdfDict::new();
     loop {
-        let t = lexer.next_token()?;
+        // Tolerate garbage bytes between entries: a lexer error here just means
+        // next_token hit a byte that isn't a valid PDF token start (e.g. a
+        // stray backtick in a malformed dict like `/Encoding 30 0`R`). The
+        // lexer has already advanced past the bad byte, so we can retry.
+        let t = match lexer.next_token() {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
         match t {
             Token::DictEnd | Token::Eof => break,
             Token::Name(key) => {
-                let val = parse_object(lexer)?;
-                dict.insert(key, val);
+                // Parse the value. On a value-level parse error (e.g. a garbage
+                // byte inside the value slot), insert /Null and resync on the
+                // next token rather than discarding the whole dict. Keeping
+                // already-parsed entries is what lets the Times-Roman /BaseFont
+                // survive a later /Encoding parse failure.
+                match parse_object(lexer) {
+                    Ok(val) => {
+                        dict.insert(key, val);
+                    }
+                    Err(_) => {
+                        dict.insert(key, PdfObj::Null);
+                    }
+                }
             }
             _ => {
                 // Tolerate unexpected tokens in dict (skip and continue)
