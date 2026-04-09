@@ -2897,23 +2897,20 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                 // while expecting the viewer to use the system CJK font (which
                 // has matching GID ordering). Only fall through for CJK fonts
                 // where the system substitute has compatible glyph indices.
+                //
+                // Gate this on the Adobe CID registry from CIDSystemInfo
+                // /Ordering, *not* on substring matches against the BaseFont
+                // name. The 2-letter substrings the old heuristic tested ("sc",
+                // "cn", "jp", "kr", "tc", "hk") false-positive on common Latin
+                // font names like "BentonSansCond" → "sc", causing the embedded
+                // CFF to be discarded and replaced with NotoSansCJK whose GIDs
+                // don't match — producing garbled text.
                 let cs_count = font.char_strings.len();
-                let base_lower = cid_font_dict
-                    .get_name(b"BaseFont")
-                    .map(|n| {
-                        let s = String::from_utf8_lossy(n).to_ascii_lowercase();
-                        // Strip subset prefix (e.g. "ydxfhk+minionpro" → "minionpro")
-                        if s.len() > 7 && s.as_bytes().get(6) == Some(&b'+') {
-                            s[7..].to_string()
-                        } else {
-                            s
-                        }
-                    })
-                    .unwrap_or_default();
-                let is_cjk_font = ["cn", "sc", "jp", "kr", "tc", "hk", "cjk",
-                    "gothic", "ming", "song", "hei", "han"]
-                    .iter().any(|kw| base_lower.contains(kw));
-                if cs_count > 0 && cid_widths.len() > cs_count * 4 && is_cjk_font {
+                let is_adobe_cjk_registry = matches!(
+                    ordering.as_slice(),
+                    b"GB1" | b"CNS1" | b"Japan1" | b"Japan2" | b"Korea1" | b"KR"
+                );
+                if cs_count > 0 && cid_widths.len() > cs_count * 4 && is_adobe_cjk_registry {
                     // Drop the parsed CFF and fall through to the system font path.
                 } else {
                 let fm = font.font_matrix;
