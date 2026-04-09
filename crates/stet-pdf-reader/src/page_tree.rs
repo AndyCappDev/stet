@@ -7,6 +7,12 @@
 use crate::error::PdfError;
 use crate::objects::{PdfDict, PdfObj};
 use crate::resolver::Resolver;
+use std::collections::HashSet;
+
+/// Maximum depth for /Pages tree recursion. Protects against pathologically
+/// deep trees when cycle detection hasn't triggered (e.g., an intermediate
+/// node reached via an inline dict rather than an indirect reference).
+const MAX_PAGE_TREE_DEPTH: u32 = 256;
 
 /// Resolved page information (after inheritance).
 #[derive(Debug, Clone)]
@@ -79,7 +85,16 @@ pub fn collect_pages(resolver: &Resolver) -> Result<Vec<PageInfo>, PdfError> {
 
     let mut pages = Vec::new();
     let inherited = Inherited::default();
-    collect_pages_recursive(resolver, pages_dict, 0, &inherited, &mut pages)?;
+    let mut visited: HashSet<u32> = HashSet::new();
+    collect_pages_recursive(
+        resolver,
+        pages_dict,
+        0,
+        &inherited,
+        &mut pages,
+        &mut visited,
+        0,
+    )?;
 
     Ok(pages)
 }
@@ -97,8 +112,15 @@ fn collect_pages_via_catalog_scan(resolver: &Resolver) -> Result<Vec<PageInfo>, 
                             if let Some(pages_dict) = pages_obj.as_dict() {
                                 let mut pages = Vec::new();
                                 let inherited = Inherited::default();
+                                let mut visited: HashSet<u32> = HashSet::new();
                                 if collect_pages_recursive(
-                                    resolver, pages_dict, 0, &inherited, &mut pages,
+                                    resolver,
+                                    pages_dict,
+                                    0,
+                                    &inherited,
+                                    &mut pages,
+                                    &mut visited,
+                                    0,
                                 )
                                 .is_ok()
                                     && !pages.is_empty()
@@ -204,7 +226,18 @@ fn collect_pages_recursive(
     obj_num: u32,
     parent_inherited: &Inherited,
     pages: &mut Vec<PageInfo>,
+    visited: &mut HashSet<u32>,
+    depth: u32,
 ) -> Result<(), PdfError> {
+    // Guard against /Pages trees that form a cycle (malformed PDFs) or are
+    // pathologically deep. Without this, a kid that points back to an ancestor
+    // would recurse forever and overflow the stack.
+    if depth >= MAX_PAGE_TREE_DEPTH {
+        return Ok(());
+    }
+    if obj_num != 0 && !visited.insert(obj_num) {
+        return Ok(());
+    }
     // Update inherited attributes from this node
     let mut inherited = parent_inherited.clone();
     if let Some(mb) = parse_rect(node_dict, b"MediaBox", resolver) {
@@ -282,13 +315,29 @@ fn collect_pages_recursive(
                 PdfObj::Ref(n, g) => {
                     let child = resolver.resolve(*n, *g)?;
                     if let Some(child_dict) = child.as_dict() {
-                        collect_pages_recursive(resolver, child_dict, *n, &inherited, pages)?;
+                        collect_pages_recursive(
+                            resolver,
+                            child_dict,
+                            *n,
+                            &inherited,
+                            pages,
+                            visited,
+                            depth + 1,
+                        )?;
                     }
                 }
                 _ => {
                     // Inline dict (unusual but possible)
                     if let Some(child_dict) = kid.as_dict() {
-                        collect_pages_recursive(resolver, child_dict, 0, &inherited, pages)?;
+                        collect_pages_recursive(
+                            resolver,
+                            child_dict,
+                            0,
+                            &inherited,
+                            pages,
+                            visited,
+                            depth + 1,
+                        )?;
                     }
                 }
             }
