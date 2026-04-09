@@ -902,6 +902,21 @@ impl<'a> ContentInterpreter<'a> {
 
     /// Interpret content stream bytes (can be called recursively for Form XObjects).
     fn interpret_stream(&mut self, data: &[u8]) -> Result<(), PdfError> {
+        // Isolate the operand stack from any caller.  This matters for the
+        // recursive entries (Form XObjects, tiling patterns, Type 3 glyphs,
+        // soft-mask groups), which are reached via dispatch_operator while
+        // the parent's operand stack still has the operator's own operand
+        // (e.g. the `/F1` for `Do`) on it.  Without this, the parent operand
+        // would be seen by the first operator in the nested stream and
+        // (because of the operand-count guard in dispatch_operator) silently
+        // drop it.  See circ_compare.pdf reproduction for the original bug.
+        let saved_operand_stack = std::mem::take(&mut self.operand_stack);
+        let result = self.interpret_stream_inner(data);
+        self.operand_stack = saved_operand_stack;
+        result
+    }
+
+    fn interpret_stream_inner(&mut self, data: &[u8]) -> Result<(), PdfError> {
         let mut lexer = Lexer::new(data);
         // Tracks whether the previous token was a number whose terminating
         // byte was *not* whitespace.  Used to detect lenient lexing of
