@@ -93,6 +93,8 @@ struct CachedImage {
     bits_per_component: u8,
     interpolate: bool,
     mask_color: Option<Vec<u8>>,
+    /// CMYK painted channels derived from the image's own color space.
+    painted_channels: u8,
     /// For soft-masked images: (mask_gray_data, mask_width, mask_height, matte).
     smask: Option<(Arc<Vec<u8>>, u32, u32, Option<Vec<f64>>)>,
 }
@@ -3682,7 +3684,10 @@ impl<'a> ContentInterpreter<'a> {
             blend_mode: self.gstate.blend_mode,
             overprint: self.gstate.overprint,
             overprint_mode: self.gstate.overprint_mode,
-            painted_channels: self.gstate.fill_painted_channels,
+            painted_channels: resolved_cs
+                .as_ref()
+                .map(painted_channels_for_cs)
+                .unwrap_or(self.gstate.fill_painted_channels),
         };
 
         // When an SMask is present, emit as SoftMasked so the renderer scales
@@ -3767,6 +3772,7 @@ impl<'a> ContentInterpreter<'a> {
                     bits_per_component: image_params.bits_per_component,
                     interpolate,
                     mask_color: image_params.mask_color.clone(),
+                    painted_channels: image_params.painted_channels,
                     smask: Some((Arc::clone(&smask_arc), width, height, matte.clone())),
                 });
             }
@@ -3842,6 +3848,7 @@ impl<'a> ContentInterpreter<'a> {
                     bits_per_component: image_params.bits_per_component,
                     interpolate,
                     mask_color: image_params.mask_color.clone(),
+                    painted_channels: image_params.painted_channels,
                     smask: None,
                 });
             }
@@ -3877,7 +3884,7 @@ impl<'a> ContentInterpreter<'a> {
             blend_mode: self.gstate.blend_mode,
             overprint: self.gstate.overprint,
             overprint_mode: self.gstate.overprint_mode,
-            painted_channels: self.gstate.fill_painted_channels,
+            painted_channels: cached.painted_channels,
         };
 
         if let Some((smask_data, sw, sh, _matte)) = smask {
@@ -4919,7 +4926,10 @@ impl<'a> ContentInterpreter<'a> {
                 blend_mode: self.gstate.blend_mode,
                 overprint: self.gstate.overprint,
                 overprint_mode: self.gstate.overprint_mode,
-                painted_channels: self.gstate.fill_painted_channels,
+                painted_channels: resolved_cs
+                    .as_ref()
+                    .map(painted_channels_for_cs)
+                    .unwrap_or(self.gstate.fill_painted_channels),
             },
         });
 

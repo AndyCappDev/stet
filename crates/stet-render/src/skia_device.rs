@@ -2244,13 +2244,21 @@ fn render_element(
 ) {
     match element {
         DisplayElement::Fill { path, params } => {
-            // Only use overprint path for CMYK fills with partial channels.
-            // When all channels are painted (CMYK_ALL) or for non-CMYK fills,
-            // overprint has no visual effect — use the normal rendering path.
+            // Use the overprint compositing path for DeviceCMYK fills that
+            // need per-channel rendering: partial channels or OPM 1 (zero-
+            // valued components don't paint). Only Normal blend — non-Normal
+            // modes handle zero values through their blend math. Text glyphs
+            // skip this path because the coverage-mask approach produces
+            // subtly different anti-aliasing from tiny-skia's native fill.
+            // Separation/DeviceN fills use the normal pixmap path (their tint-
+            // function-derived RGB is correct) with CMYK buffer tracking.
             let needs_overprint = params.overprint
                 && params.is_device_cmyk
-                && params.painted_channels != stet_graphics::device::CMYK_ALL
-                && band_state.cmyk_buffer.is_some();
+                && band_state.cmyk_buffer.is_some()
+                && params.blend_mode == 0
+                && !params.is_text_glyph
+                && (params.painted_channels != stet_graphics::device::CMYK_ALL
+                    || params.overprint_mode == 1);
 
             if needs_overprint {
                 let mut cmyk_buf = band_state.cmyk_buffer.take().unwrap();
@@ -5985,6 +5993,13 @@ fn render_overprint_fill(
         if src_k != 0.0 {
             channels |= stet_graphics::device::CMYK_K;
         }
+        // All-zero CMYK (white) with OPM 1: no non-zero channels to filter,
+        // so paint all channels normally. The zero-skipping rule only applies
+        // when at least one component is non-zero (otherwise the fill would
+        // become invisible, contradicting the intent to paint white).
+        if channels == 0 {
+            channels = stet_graphics::device::CMYK_ALL;
+        }
     }
 
     if channels == stet_graphics::device::CMYK_ALL {
@@ -6081,14 +6096,6 @@ fn render_overprint_fill(
             } else {
                 cur_k
             };
-
-            if (new_c as f32 - cmyk_buf[ci]).abs() < 1e-6
-                && (new_m as f32 - cmyk_buf[ci + 1]).abs() < 1e-6
-                && (new_y as f32 - cmyk_buf[ci + 2]).abs() < 1e-6
-                && (new_k as f32 - cmyk_buf[ci + 3]).abs() < 1e-6
-            {
-                continue;
-            }
 
             cmyk_buf[ci] = new_c as f32;
             cmyk_buf[ci + 1] = new_m as f32;
