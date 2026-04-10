@@ -105,7 +105,7 @@ impl<'a> PdfDocument<'a> {
             pages,
             icc_cache,
             font_provider: None,
-            overprint: false,
+            overprint: true,
             ocg_off,
         })
     }
@@ -156,15 +156,15 @@ impl<'a> PdfDocument<'a> {
             pages,
             icc_cache,
             font_provider: None,
-            overprint: false,
+            overprint: true,
             ocg_off,
         })
     }
 
     /// Enable or disable PDF overprint simulation.
     ///
-    /// When false (default), OP/op flags in graphics state dicts are ignored,
-    /// avoiding expensive CMYK buffer tracking. Set to true for prepress accuracy.
+    /// Enabled by default. When disabled, OP/op flags in graphics state dicts
+    /// are ignored, avoiding CMYK buffer tracking.
     pub fn set_overprint(&mut self, enabled: bool) {
         self.overprint = enabled;
     }

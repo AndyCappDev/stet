@@ -47,7 +47,6 @@ fn main() {
     let mut device_name: Option<String> = None;
     let mut no_icc = false;
     let mut no_aa = false;
-    let mut overprint = false;
     let mut output_profile_path: Option<String> = None;
     let mut pages_spec: Option<String> = None;
     let mut file_args: Vec<String> = Vec::new();
@@ -102,11 +101,6 @@ fn main() {
             }
             "--no-aa" => {
                 no_aa = true;
-                i += 1;
-                continue;
-            }
-            "--overprint" => {
-                overprint = true;
                 i += 1;
                 continue;
             }
@@ -186,7 +180,6 @@ fn main() {
                 no_aa,
                 output_profile_path,
                 page_filter,
-                overprint,
             );
         }
         "pdf" => {
@@ -197,7 +190,6 @@ fn main() {
                 no_aa,
                 output_profile_path,
                 page_filter,
-                overprint,
             );
         }
         "null" => {
@@ -208,7 +200,6 @@ fn main() {
                 no_aa,
                 output_profile_path,
                 page_filter,
-                overprint,
             );
         }
         #[cfg(feature = "viewer")]
@@ -219,7 +210,6 @@ fn main() {
             no_aa,
             output_profile_path,
             page_filter,
-            overprint,
         ),
         #[cfg(not(feature = "viewer"))]
         "viewer" => {
@@ -242,12 +232,11 @@ fn run_png_mode(
     no_aa: bool,
     output_profile_path: Option<String>,
     page_filter: Option<std::collections::HashSet<i32>>,
-    overprint: bool,
 ) {
     // Check if all files are PDFs — use fast path (no PS interpreter needed)
     if !file_args.is_empty() && file_args.iter().all(|f| is_pdf_file(f)) {
         let dpi = dpi_override.unwrap_or(300.0);
-        run_pdf_input_png(dpi, &file_args, &page_filter, no_aa, overprint);
+        run_pdf_input_png(dpi, &file_args, &page_filter, no_aa);
         return;
     }
 
@@ -280,7 +269,6 @@ fn run_pdf_mode(
     _no_aa: bool,
     output_profile_path: Option<String>,
     page_filter: Option<std::collections::HashSet<i32>>,
-    _overprint: bool,
 ) {
     // Read profile bytes for PDF embedding (create_context already validated the path)
     let output_profile_bytes: Option<Vec<u8>> = if !no_icc {
@@ -321,7 +309,6 @@ fn run_null_mode(
     _no_aa: bool,
     output_profile_path: Option<String>,
     page_filter: Option<std::collections::HashSet<i32>>,
-    _overprint: bool,
 ) {
     use stet_core::device::NullDevice;
 
@@ -349,7 +336,6 @@ fn run_viewer_mode(
     no_aa: bool,
     output_profile_path: Option<String>,
     page_filter: Option<std::collections::HashSet<i32>>,
-    overprint: bool,
 ) {
     use stet_core::device::NullDevice;
 
@@ -459,7 +445,7 @@ fn run_viewer_mode(
                 }
                 if let Some(ref sender) = ctx.display_list_sender {
                     render_dropped_pdf(
-                        path, dpi_override, sender, &ctx.icc_cache, overprint,
+                        path, dpi_override, sender, &ctx.icc_cache,
                     );
                 }
             }
@@ -498,7 +484,7 @@ fn run_viewer_mode(
 
             if is_pdf_file(&path) {
                 render_dropped_pdf(
-                    &path, established_dpi, &sender, &ctx.icc_cache, overprint,
+                    &path, established_dpi, &sender, &ctx.icc_cache,
                 );
             } else {
                 run_file_jobs(
@@ -1216,7 +1202,6 @@ fn render_dropped_pdf(
     dpi_override: Option<f64>,
     dl_sender: &std::sync::mpsc::Sender<stet_viewer::DisplayListMsg>,
     icc_cache: &stet_graphics::icc::IccCache,
-    overprint: bool,
 ) {
     let dpi = dpi_override.unwrap_or(150.0);
 
@@ -1228,14 +1213,13 @@ fn render_dropped_pdf(
         }
     };
 
-    let mut doc = match PdfDocument::from_bytes_with_icc(&data, icc_cache.clone()) {
+    let doc = match PdfDocument::from_bytes_with_icc(&data, icc_cache.clone()) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("Error: cannot parse '{}': {}", path, e);
             return;
         }
     };
-    doc.set_overprint(overprint);
 
     let page_count = doc.page_count();
     eprintln!("PDF: {} ({} pages)", path, page_count);
@@ -1290,7 +1274,6 @@ fn run_pdf_input_png(
     file_args: &[String],
     page_filter: &Option<std::collections::HashSet<i32>>,
     no_aa: bool,
-    overprint: bool,
 ) {
     let mut icc_cache = stet_graphics::icc::IccCache::new();
     icc_cache.search_system_cmyk_profile();
@@ -1301,12 +1284,11 @@ fn run_pdf_input_png(
             std::process::exit(1);
         });
 
-        let mut doc =
+        let doc =
             PdfDocument::from_bytes_with_icc(&data, icc_cache.clone()).unwrap_or_else(|e| {
                 eprintln!("Error: cannot parse '{}': {}", filename, e);
                 std::process::exit(1);
             });
-        doc.set_overprint(overprint);
 
         let output_base = filename
             .strip_suffix(".pdf")

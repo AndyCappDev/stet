@@ -5961,9 +5961,23 @@ impl<'a> ContentInterpreter<'a> {
         // applied to the CTM so coordinates are in device space.
         // Use content_stream_ctm so that patterns inside Form XObjects include
         // the form's coordinate transform.
+        //
+        // Clear overprint while building the shading display list. The pattern
+        // is resolved at `scn`/`SCN` time, but overprint should come from the
+        // graphics state at paint time (when Tj/f/S executes). Capturing the
+        // resolution-time overprint bakes a stale flag into the shading elements
+        // — if the caller applies a different ExtGState between `scn` and the
+        // paint operator, the shading would carry the wrong overprint state.
+        // Setting overprint=false here is safe because paint-time code wraps
+        // shading patterns in isolated groups, so overprint compositing does
+        // not cross the group boundary.
         let combined_matrix = self.content_stream_ctm.concat(&pattern_matrix);
         let saved_ctm = self.gstate.ctm;
+        let saved_overprint = self.gstate.overprint;
+        let saved_overprint_stroke = self.gstate.overprint_stroke;
         self.gstate.ctm = combined_matrix;
+        self.gstate.overprint = false;
+        self.gstate.overprint_stroke = false;
 
         let mut shading_dl = DisplayList::new();
         let result = crate::resources::shading::handle_shading(
@@ -5975,6 +5989,8 @@ impl<'a> ContentInterpreter<'a> {
             &mut self.icc_cache,
         );
         self.gstate.ctm = saved_ctm;
+        self.gstate.overprint = saved_overprint;
+        self.gstate.overprint_stroke = saved_overprint_stroke;
         result?;
         Ok(shading_dl)
     }

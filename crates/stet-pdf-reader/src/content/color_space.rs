@@ -646,7 +646,7 @@ pub fn components_to_device_color_icc(
                 return DeviceColor::from_gray(1.0);
             }
             let tint = components.first().copied().unwrap_or(0.0);
-            if let Some(func) = tint_fn {
+            let mut color = if let Some(func) = tint_fn {
                 let alt_components = func.evaluate(&[tint]);
                 components_to_device_color_icc(alt, &alt_components, icc_cache)
             } else {
@@ -656,7 +656,28 @@ pub fn components_to_device_color_icc(
                     ResolvedColorSpace::DeviceCMYK => DeviceColor::from_cmyk(0.0, 0.0, 0.0, tint),
                     _ => DeviceColor::from_gray(1.0 - tint),
                 }
+            };
+            // For CMYK process colorants (Cyan/Magenta/Yellow/Black), ensure
+            // native_cmyk is set even when the alternate space is non-CMYK
+            // (e.g. ICCBased RGB). Without this, overprint simulation uses
+            // the (1-r, 1-g, 1-b, 0) fallback which puts Black ink into C+M+Y
+            // instead of K, making Separation /Black strokes invisible when
+            // painted_channels = CMYK_K.
+            if color.native_cmyk.is_none() {
+                use stet_graphics::device::{CMYK_C, CMYK_M, CMYK_Y, CMYK_K, cmyk_channel_for_name};
+                let ch = cmyk_channel_for_name(name);
+                if ch != 0 {
+                    let (c, m, y, k) = match ch {
+                        CMYK_C => (tint, 0.0, 0.0, 0.0),
+                        CMYK_M => (0.0, tint, 0.0, 0.0),
+                        CMYK_Y => (0.0, 0.0, tint, 0.0),
+                        CMYK_K => (0.0, 0.0, 0.0, tint),
+                        _ => (0.0, 0.0, 0.0, 0.0),
+                    };
+                    color.native_cmyk = Some((c, m, y, k));
+                }
             }
+            color
         }
         ResolvedColorSpace::DeviceN { alt, tint_fn, .. } => {
             if let Some(func) = tint_fn {
