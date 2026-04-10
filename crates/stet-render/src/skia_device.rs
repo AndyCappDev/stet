@@ -691,6 +691,14 @@ struct RenderContext<'a> {
     ///     captures the painter's *shape* even when the original alpha was 0
     ///     (Opacity 0% test) or its blend mode would erase the source.
     knockout_painter_pass: KnockoutPainterPass,
+    /// True when the immediately enclosing transparency group was isolated.
+    /// GWG 16.2's nested CMYK painter pattern (Painter B → Sub A/B) only
+    /// requires CMYK math at the inner non-isolated layer when Painter B
+    /// itself is isolated; for non-isolated parents (the 907 p28 financial
+    /// chart pattern) the existing sRGB compositing path produces the right
+    /// result and the new CMYK math would over-darken anti-aliased gray
+    /// strokes.
+    parent_group_isolated: bool,
 }
 
 /// Override mode applied to `render_group` while the knockout group renders
@@ -3093,9 +3101,35 @@ fn render_group(
                 && group_content_is_native_cmyk(elements)
         }
         KnockoutPainterPass::None => {
-            !params.isolated
+            // Default rule: only the inversion-sensitive blend modes
+            // (Difference, Exclusion, HSL non-separable) need CMYK math; the
+            // separable modes 1..=9 are spec-defensible in either color space
+            // and most sRGB-authored PDFs expect them to blend in sRGB.
+            let inversion_sensitive = !params.isolated
                 && matches!(params.blend_mode, 10..=15)
-                && group_only_native_cmyk_fills(elements)
+                && group_only_native_cmyk_fills(elements);
+            // GWG 16.2 ("Transparency Basic Blend Modes — DeviceCMYK,
+            // Isolated") nests non-isolated `/CS DeviceCMYK` painter sub-groups
+            // inside an isolated `/CS DeviceCMYK` group, with the swatch's
+            // blend mode applied at the inner Do. Per PDF spec §11.6.7 the
+            // compositing for those inner groups must happen in DeviceCMYK,
+            // not sRGB — otherwise their colored X-shape produces the wrong
+            // color and fails to cover the painter-A black X. The explicit
+            // `/CS DeviceCMYK` declaration plus the isolated parent are the
+            // spec signal that the author wants CMYK-space compositing for
+            // a fresh transparent backdrop. The `parent_group_isolated`
+            // gate keeps the rule from firing for non-isolated parents like
+            // 907 page 28's chart panels, where the existing sRGB
+            // contribution-extraction path correctly preserves anti-aliased
+            // gray strokes.
+            let cmyk_group_blend = !params.isolated
+                && ctx.parent_group_isolated
+                && params.blend_mode != 0
+                && params.color_space == GroupColorSpace::DeviceCMYK
+                && needs_group_cmyk
+                && band_state.cmyk_buffer.is_some()
+                && group_content_is_native_cmyk(elements);
+            inversion_sensitive || cmyk_group_blend
         }
     };
     let needs_backdrop_preload = !params.isolated && (params.blend_mode == 0 || plan_cmyk_compose);
@@ -3163,6 +3197,8 @@ fn render_group(
         no_aa: ctx.no_aa,
         opm_zero_transparent: ctx.opm_zero_transparent,
         knockout_painter_pass: ctx.knockout_painter_pass,
+        // The children of this group see *this* group as their parent.
+        parent_group_isolated: params.isolated,
     };
 
     for (idx, elem) in elements.elements().iter().enumerate() {
@@ -3231,6 +3267,7 @@ fn render_group(
                 &offscreen,
                 inner,
                 pre,
+                backdrop,
                 effective_params,
                 mask_ref,
                 crop_x,
@@ -3300,6 +3337,7 @@ fn composite_non_isolated_cmyk(
     source: &Pixmap,
     source_cmyk: &[f32],
     backdrop_cmyk: &[f32],
+    backdrop_pixels: &[u8],
     params: &stet_graphics::display_list::GroupParams,
     clip_mask: Option<&stet_tiny_skia::Mask>,
     crop_x: i32,
@@ -3366,6 +3404,71 @@ fn composite_non_isolated_cmyk(
                 continue;
             }
 
+            // Transparent-backdrop fast path: when the backdrop pixmap's alpha
+            // is 0 the parent group hasn't painted this pixel, so PDF spec
+            // §11.4.6 says the blended result reduces to α_s · source — the
+            // blend formula must NOT be applied. Without this check, formulas
+            // like ColorBurn / ColorDodge / Lighten / Screen produce visibly
+            // wrong colors (yellow instead of orange-yellow, white instead of
+            // the source) because an all-zero CMYK backdrop is identical to
+            // opaque white in CMYK terms. Using the pixmap alpha as the
+            // sentinel correctly distinguishes "truly nothing painted"
+            // (alpha 0) from "white painted" (alpha 1, CMYK 0,0,0,0).
+            //
+            // For this branch we composite the source pixmap directly via
+            // SourceOver (rather than converting source CMYK→sRGB) so the
+            // source's per-pixel alpha — including anti-aliased edges and
+            // partially-transparent paint like 907 page 28's gray rules —
+            // is preserved. The CMYK→sRGB direct path used the un-modulated
+            // painter color and the group opacity, which forced antialiased
+            // gray strokes to opaque black.
+            let backdrop_alpha = backdrop_pixels[gi + 3];
+            let backdrop_transparent = backdrop_alpha == 0;
+
+            let mix = cov * opacity;
+            let dst_a = target_data[ti + 3] as f64 / 255.0;
+
+            if backdrop_transparent {
+                // SourceOver of the source pixmap (already correctly rendered
+                // for transparent-backdrop semantics) modulated by the group's
+                // mix factor. To ensure inner-group AA edges don't leave
+                // sliver gaps where the outer parent pixmap had previously
+                // drawn a near-identical path (GWG 16.2 directly-drawn black
+                // X covered by Painter B's slightly-offset colored X), we
+                // promote any non-zero source alpha to the painter's full
+                // unpremultiplied source CMYK converted to sRGB. This
+                // produces fully-opaque coverage at edge pixels matching
+                // what the inner painter would render at the path interior,
+                // so the inner group can fully knock out the outer's AA
+                // edge when composited back to its parent.
+                let src_data = source.data();
+                let src_a_pm = src_data[gi + 3] as f64 / 255.0;
+                if src_a_pm <= 0.0 {
+                    continue;
+                }
+                // Convert source CMYK directly to sRGB. The CMYK at this
+                // pixel was written by the inner painter at its full
+                // un-modulated value (the cmyk_buf doesn't track AA), so
+                // this is the pure painter color regardless of AA cov.
+                let (full_r, full_g, full_b) = icc
+                    .and_then(|i| i.convert_cmyk_readonly(sc, sm, sy_, sk))
+                    .unwrap_or_else(|| cmyk_to_rgb_plrm(sc, sm, sy_, sk));
+                let alpha_s = mix;
+                let inv_sa = 1.0 - alpha_s;
+                let dst_r_pm = target_data[ti] as f64 / 255.0;
+                let dst_g_pm = target_data[ti + 1] as f64 / 255.0;
+                let dst_b_pm = target_data[ti + 2] as f64 / 255.0;
+                let out_r = full_r * alpha_s + dst_r_pm * inv_sa;
+                let out_g = full_g * alpha_s + dst_g_pm * inv_sa;
+                let out_b = full_b * alpha_s + dst_b_pm * inv_sa;
+                let out_a = alpha_s + dst_a * inv_sa;
+                target_data[ti] = (out_r * 255.0).round().clamp(0.0, 255.0) as u8;
+                target_data[ti + 1] = (out_g * 255.0).round().clamp(0.0, 255.0) as u8;
+                target_data[ti + 2] = (out_b * 255.0).round().clamp(0.0, 255.0) as u8;
+                target_data[ti + 3] = (out_a * 255.0).round().clamp(0.0, 255.0) as u8;
+                continue;
+            }
+
             // Apply the group's blend mode in CMYK.
             let (rc, rm, ry, rk) = if is_nonseparable {
                 let r = blend_cmyk_nonseparable(
@@ -3387,16 +3490,26 @@ fn composite_non_isolated_cmyk(
                 .and_then(|i| i.convert_cmyk_readonly(rc, rm, ry, rk))
                 .unwrap_or_else(|| cmyk_to_rgb_plrm(rc, rm, ry, rk));
 
-            // tiny-skia stores premultiplied sRGB. Composite the new color
-            // (treated as fully opaque, αs = 1) onto the destination using
-            // the group's effective alpha (`mix`). This is the standard
-            // SourceOver formula:
-            //   αn = αs + αb · (1 − αs)        with αs = mix
-            //   Cn = αs·Cs + (1 − αs)·αb·Cb     in straight-RGB form
-            // and pre-multiplied for the pixmap.
-            let dst_a = target_data[ti + 3] as f64 / 255.0;
-            let (dst_r, dst_g, dst_b) = if dst_a > 0.0 {
-                let inv_a = 1.0 / dst_a;
+            // tiny-skia stores premultiplied sRGB. Apply the PDF
+            // §11.4.6 result formula in straight-color form. We force the
+            // source alpha to 1 (subject to clip + group opacity) at any
+            // pixel where the source CMYK was written by the inner painter
+            // — the cmyk_buf flags coverage at the path's full extent, even
+            // at AA edges. Using full alpha here ensures the inner group
+            // fully covers the outer parent's previously-drawn content
+            // when both reference near-identical paths (GWG 16.2 directly-
+            // drawn outer X path covered by Painter B's slightly-offset
+            // colored X path). Without this, the formula's partial-cover
+            // mix produces a 1-pixel sliver of darker color where the two
+            // paths' rasterizations diverge sub-pixel-wise.
+            let alpha_s = mix;
+            let alpha_b = dst_a;
+            let out_a = alpha_s + alpha_b * (1.0 - alpha_s);
+            if out_a <= 0.0 {
+                continue;
+            }
+            let (dst_r, dst_g, dst_b) = if alpha_b > 0.0 {
+                let inv_a = 1.0 / alpha_b;
                 (
                     (target_data[ti] as f64 / 255.0) * inv_a,
                     (target_data[ti + 1] as f64 / 255.0) * inv_a,
@@ -3405,15 +3518,19 @@ fn composite_non_isolated_cmyk(
             } else {
                 (0.0, 0.0, 0.0)
             };
-
-            let mix = cov * opacity;
-            let out_a = mix + dst_a * (1.0 - mix);
-            if out_a <= 0.0 {
-                continue;
-            }
-            let out_r = (mix * new_r + (1.0 - mix) * dst_a * dst_r) / out_a;
-            let out_g = (mix * new_g + (1.0 - mix) * dst_a * dst_g) / out_a;
-            let out_b = (mix * new_b + (1.0 - mix) * dst_a * dst_b) / out_a;
+            // Spec §11.4.6 result computation:
+            //   C_o = (α_s·(1−α_b)·C_s + α_s·α_b·B(C_b,C_s) + (1−α_s)·α_b·C_b) / α_o
+            // Here we already have B(C_b,C_s) computed in CMYK and converted
+            // to sRGB as (new_r, new_g, new_b). The "C_s" term — the source
+            // color un-blended — uses the same value because the spec says
+            // when α_b = 0 the formula reduces to source-as-is, which the
+            // (1−α_b) coefficient already handles.
+            let coef_b = alpha_s * alpha_b;
+            let coef_s = alpha_s * (1.0 - alpha_b);
+            let coef_d = (1.0 - alpha_s) * alpha_b;
+            let out_r = (coef_s * new_r + coef_b * new_r + coef_d * dst_r) / out_a;
+            let out_g = (coef_s * new_g + coef_b * new_g + coef_d * dst_g) / out_a;
+            let out_b = (coef_s * new_b + coef_b * new_b + coef_d * dst_b) / out_a;
 
             target_data[ti] = (out_r * out_a * 255.0).round().clamp(0.0, 255.0) as u8;
             target_data[ti + 1] = (out_g * out_a * 255.0).round().clamp(0.0, 255.0) as u8;
@@ -3461,7 +3578,15 @@ fn composite_non_isolated_cmyk(
                     continue;
                 }
 
-                let (rc, rm, ry, rk) = if is_nonseparable {
+                // Same transparent-backdrop fast path as above: use source
+                // as-is. We read the original backdrop alpha from the saved
+                // backdrop_pixels slice, NOT the live target — the live
+                // target's alpha was already updated by the first loop's
+                // composite-back writes.
+                let backdrop_transparent = backdrop_pixels[gi + 3] == 0;
+                let (rc, rm, ry, rk) = if backdrop_transparent {
+                    (sc, sm, sy_, sk)
+                } else if is_nonseparable {
                     let r = blend_cmyk_nonseparable(
                         [bc, bm, by_, bk],
                         [sc, sm, sy_, sk],
@@ -3574,6 +3699,10 @@ fn render_knockout_group(
         no_aa: true,
         opm_zero_transparent: ctx.opm_zero_transparent,
         knockout_painter_pass: ctx.knockout_painter_pass,
+        // Knockout groups composite each element against the initial backdrop;
+        // children effectively see this group's "fresh" backdrop. Treat the
+        // knockout group as isolated for the purposes of the inner CMYK rule.
+        parent_group_isolated: true,
     };
 
     // Persistent band state for clip tracking — clips must accumulate across
@@ -3949,6 +4078,7 @@ fn render_soft_masked(
         no_aa: ctx.no_aa,
         opm_zero_transparent: ctx.opm_zero_transparent,
         knockout_painter_pass: ctx.knockout_painter_pass,
+        parent_group_isolated: ctx.parent_group_isolated,
     };
 
     // 1a. INLINE PATH: Mask form contains nested offscreens.
@@ -4365,6 +4495,7 @@ fn rasterize_mask(
         no_aa,
         opm_zero_transparent: false,
         knockout_painter_pass: KnockoutPainterPass::None,
+        parent_group_isolated: false,
     };
 
     // 5. Mask rendering doesn't participate in CMYK overprint compositing.
@@ -4749,6 +4880,7 @@ fn render_pattern_fill(
                     no_aa: ctx.no_aa,
                     opm_zero_transparent: params.overprint_mode == 1,
                     knockout_painter_pass: ctx.knockout_painter_pass,
+                    parent_group_isolated: ctx.parent_group_isolated,
                 };
 
                 let mut tile_band = BandState {
@@ -4818,6 +4950,7 @@ fn render_pattern_fill(
                 no_aa: ctx.no_aa,
                 opm_zero_transparent: params.overprint_mode == 1,
                 knockout_painter_pass: ctx.knockout_painter_pass,
+                parent_group_isolated: ctx.parent_group_isolated,
             };
             let mut tile_bs = BandState {
                 clip_region: None,
@@ -5534,6 +5667,7 @@ impl OutputDevice for SkiaDevice {
                 no_aa: self.no_aa,
                 opm_zero_transparent: false,
                 knockout_painter_pass: KnockoutPainterPass::None,
+                parent_group_isolated: false,
             };
             render_pattern_fill(&mut self.pixmap, &mut band_state, params, &ctx);
         }
@@ -5577,6 +5711,7 @@ impl OutputDevice for SkiaDevice {
                 no_aa: self.no_aa,
                 opm_zero_transparent: false,
                 knockout_painter_pass: KnockoutPainterPass::None,
+                parent_group_isolated: false,
             };
             let mut band_state = BandState {
                 clip_region: None,
@@ -6971,6 +7106,7 @@ fn render_banded_to_sink(
                     no_aa,
                     opm_zero_transparent: false,
                     knockout_painter_pass: KnockoutPainterPass::None,
+                    parent_group_isolated: false,
                 };
                 render_element(&mut band_pixmap, &mut band_state, &elements[i], &ctx);
             }
@@ -7849,6 +7985,7 @@ pub fn render_region_prepared(
                 no_aa,
                 opm_zero_transparent: false,
                 knockout_painter_pass: KnockoutPainterPass::None,
+                parent_group_isolated: false,
             };
             render_element(&mut pixmap, &mut state, &elements[i], &ctx);
         }
@@ -8004,6 +8141,7 @@ pub fn render_region_single_band(
                 no_aa,
                 opm_zero_transparent: false,
                 knockout_painter_pass: KnockoutPainterPass::None,
+                parent_group_isolated: false,
             };
             render_element(&mut pixmap, &mut state, &elements[i], &ctx);
         }
@@ -8453,6 +8591,7 @@ pub fn render_region(
                 no_aa,
                 opm_zero_transparent: false,
                 knockout_painter_pass: KnockoutPainterPass::None,
+                parent_group_isolated: false,
             };
             render_element(&mut pixmap, &mut state, &elements[i], &ctx);
         }
