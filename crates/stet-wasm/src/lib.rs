@@ -7,7 +7,7 @@
 //! Provides `Interpreter` (a fully initialized PostScript context with embedded
 //! resources) and `render()` (renders PostScript/EPS data to RGBA pages).
 
-mod embedded_resources;
+pub mod embedded_resources;
 mod memory_sink;
 
 use std::sync::{Arc, Mutex};
@@ -114,6 +114,12 @@ fn log(msg: &str) {
 
 #[wasm_bindgen]
 pub fn create_interpreter() -> Interpreter {
+    // Forward Rust panics to console.error with file/line/message.
+    // Required: WASM builds default to panic=abort, which surfaces to JS as
+    // the opaque "RuntimeError: unreachable executed". This hook replaces that
+    // with a readable panic message before the abort fires.
+    std::panic::set_hook(Box::new(console_error_panic_hook::hook));
+
     log("stet: creating context...");
     let mut ctx = Context::new();
 

@@ -611,6 +611,21 @@ fn decode_run_length(data: &[u8]) -> Result<Vec<u8>, PdfError> {
 fn decode_dct(data: &[u8]) -> Result<Vec<u8>, PdfError> {
     use jpeg_decoder::Decoder;
 
+    // wasm32: prefer zune-jpeg over jpeg-decoder as the primary decoder.
+    // jpeg-decoder's wasm SIMD IDCT path traps (raw `unreachable`, bypasses
+    // std::panic::set_hook) on JPEGs whose bitstream ends early — the native
+    // scalar reader returns a clean `Err("failed to fill whole buffer")`
+    // which the fallback chain below catches, but on wasm32 the SIMD path
+    // writes past the end of an intermediate buffer before the stream check
+    // fires, tripping wasm's bounds check. Starting with zune avoids that
+    // code path entirely for the most common JPEGs. jpeg-decoder is still
+    // tried below as a secondary fallback (e.g. for Adobe YCCK streams
+    // where zune's color transform would give wrong results).
+    #[cfg(target_arch = "wasm32")]
+    if let Some(pixels) = decode_dct_via_zune(data) {
+        return Ok(pixels);
+    }
+
     let mut decoder = Decoder::new(data);
 
     // Work around jpeg_decoder bug: it checks component IDs (1,2,3) → YCbCr
@@ -706,6 +721,27 @@ where
     let result = std::panic::catch_unwind(f).ok().flatten();
     std::panic::set_hook(prev);
     result
+}
+
+/// Primary JPEG decoder on wasm32. Uses zune-jpeg directly (no `catch_silent`
+/// wrapper — `catch_unwind` is a no-op under `panic=abort` and the hook swap
+/// would clobber the WASM panic hook). Picks the output colorspace from the
+/// SOF component count so 1/3/4-component JPEGs all decode to their natural
+/// format. Returns `None` if zune-jpeg can't decode — caller falls back to
+/// jpeg-decoder.
+#[cfg(target_arch = "wasm32")]
+fn decode_dct_via_zune(data: &[u8]) -> Option<Vec<u8>> {
+    use zune_jpeg::JpegDecoder;
+    let n_comps = jpeg_dimensions_and_components(data).map(|(_, _, n)| n).unwrap_or(3);
+    let out_cs = match n_comps {
+        1 => zune_core::colorspace::ColorSpace::Luma,
+        4 => zune_core::colorspace::ColorSpace::CMYK,
+        _ => zune_core::colorspace::ColorSpace::RGB,
+    };
+    let options = zune_core::options::DecoderOptions::default()
+        .jpeg_set_out_colorspace(out_cs);
+    let mut decoder = JpegDecoder::new_with_options(std::io::Cursor::new(data), options);
+    decoder.decode().ok()
 }
 
 /// Fallback JPEG decoder using zune-jpeg for component counts that
@@ -848,7 +884,7 @@ pub fn patch_jpeg_sof_height(data: &mut [u8], new_height: u16) {
 }
 
 /// Extract width, height, and component count from a JPEG SOF header.
-fn jpeg_dimensions_and_components(data: &[u8]) -> Option<(u32, u32, u8)> {
+pub(crate) fn jpeg_dimensions_and_components(data: &[u8]) -> Option<(u32, u32, u8)> {
     if data.len() < 2 || data[0] != 0xFF || data[1] != 0xD8 {
         return None;
     }
@@ -1306,22 +1342,34 @@ fn fill_bits(row: &mut [u8], start: usize, end: usize, black_is_one: bool) {
 
 /// JBIG2Decode.
 fn decode_jbig2(data: &[u8], globals: Option<&[u8]>) -> Result<Vec<u8>, PdfError> {
-    // Run JBIG2 decode with a timeout to guard against malformed data that
-    // causes the decoder to hang (e.g. issue15942.pdf).
-    let data_owned = data.to_vec();
-    let globals_owned = globals.map(|g| g.to_vec());
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let result = hayro_jbig2::decode_embedded(
-            &data_owned,
-            globals_owned.as_deref(),
-        );
-        let _ = tx.send(result);
-    });
-    let image = rx
-        .recv_timeout(std::time::Duration::from_secs(2))
-        .map_err(|_| PdfError::DecompressionError("JBIG2: decode timed out".into()))?
+    // Native builds run the decode on a sidecar thread with a 2-second
+    // watchdog, guarding against malformed streams that hang the decoder
+    // (e.g. issue15942.pdf). wasm32-unknown-unknown has no thread support,
+    // so the watchdog is skipped there and we call the decoder directly —
+    // a hanging stream will hang the page, but normal streams (like those
+    // in pdf_samples/1321.pdf) will now decode instead of panicking at
+    // `std::thread::spawn`.
+    #[cfg(not(target_arch = "wasm32"))]
+    let image = {
+        let data_owned = data.to_vec();
+        let globals_owned = globals.map(|g| g.to_vec());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = hayro_jbig2::decode_embedded(
+                &data_owned,
+                globals_owned.as_deref(),
+            );
+            let _ = tx.send(result);
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(2))
+            .map_err(|_| PdfError::DecompressionError("JBIG2: decode timed out".into()))?
+            .map_err(|e| PdfError::DecompressionError(format!("JBIG2: {e}")))?
+    };
+
+    #[cfg(target_arch = "wasm32")]
+    let image = hayro_jbig2::decode_embedded(data, globals)
         .map_err(|e| PdfError::DecompressionError(format!("JBIG2: {e}")))?;
+
     // Convert Vec<bool> to packed bytes (8 pixels/byte, MSB first)
     // JBIG2: true = black, false = white
     // PDF DeviceGray: 0 = black, 1 = white
