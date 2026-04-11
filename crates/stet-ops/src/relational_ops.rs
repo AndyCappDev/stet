@@ -153,18 +153,15 @@ fn objects_compare(
 
 /// `eq`: any1 any2 → bool
 ///
-/// Both operands require read access (comparing composite objects
-/// requires reading their contents). The PLRM note that "access
-/// attributes are not considered in comparisons" means access level
-/// does not affect equality — not that access checks are bypassed.
+/// Per PLRM: "The literal/executable and access attributes of objects
+/// are not considered in comparisons between objects." `eq` and `ne`
+/// therefore operate on no-access strings, dictionaries, etc.
 pub fn op_eq(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.o_stack.len() < 2 {
         return Err(PsError::StackUnderflow);
     }
     let b = ctx.o_stack.peek(0)?;
     let a = ctx.o_stack.peek(1)?;
-    a.flags.require_read()?;
-    b.flags.require_read()?;
     let result = objects_equal(ctx, &a, &b);
     ctx.o_stack.pop()?;
     ctx.o_stack.pop()?;
@@ -179,8 +176,6 @@ pub fn op_ne(ctx: &mut Context) -> Result<(), PsError> {
     }
     let b = ctx.o_stack.peek(0)?;
     let a = ctx.o_stack.peek(1)?;
-    a.flags.require_read()?;
-    b.flags.require_read()?;
     let result = !objects_equal(ctx, &a, &b);
     ctx.o_stack.pop()?;
     ctx.o_stack.pop()?;
