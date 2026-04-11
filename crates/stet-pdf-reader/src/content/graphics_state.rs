@@ -128,6 +128,8 @@ pub struct PdfGraphicsState {
     pub fill_is_device_cmyk: bool,
     /// CMYK channel bitmask for stroke overprint.
     pub stroke_painted_channels: u8,
+    /// True when stroke color space is DeviceCMYK or ICCBased(4) — OPM 1 only applies to these.
+    pub stroke_is_device_cmyk: bool,
     pub flatness: f64,
     pub fill_color_space: ColorSpaceRef,
     pub stroke_color_space: ColorSpaceRef,
@@ -202,6 +204,7 @@ impl PdfGraphicsState {
             fill_painted_channels: 0,
             fill_is_device_cmyk: false,
             stroke_painted_channels: 0,
+            stroke_is_device_cmyk: false,
             flatness: 1.0,
             fill_color_space: ColorSpaceRef::DeviceGray,
             stroke_color_space: ColorSpaceRef::DeviceGray,
@@ -286,6 +289,7 @@ impl PdfGraphicsState {
             overprint: self.overprint_stroke,
             overprint_mode: self.overprint_mode,
             painted_channels: self.stroke_painted_channels,
+            is_device_cmyk: self.stroke_is_device_cmyk,
             spot_color: None,
             rendering_intent: self.rendering_intent,
             transfer: self.transfer.clone(),
@@ -317,6 +321,7 @@ impl PdfGraphicsState {
             overprint: self.overprint_stroke,
             overprint_mode: self.overprint_mode,
             painted_channels: self.stroke_painted_channels,
+            is_device_cmyk: self.stroke_is_device_cmyk,
             spot_color: None,
             rendering_intent: self.rendering_intent,
             transfer: self.transfer.clone(),

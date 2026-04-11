@@ -2244,21 +2244,28 @@ fn render_element(
 ) {
     match element {
         DisplayElement::Fill { path, params } => {
-            // Use the overprint compositing path for DeviceCMYK fills that
-            // need per-channel rendering: partial channels or OPM 1 (zero-
-            // valued components don't paint). Only Normal blend — non-Normal
-            // modes handle zero values through their blend math. Text glyphs
-            // skip this path because the coverage-mask approach produces
-            // subtly different anti-aliasing from tiny-skia's native fill.
-            // Separation/DeviceN fills use the normal pixmap path (their tint-
-            // function-derived RGB is correct) with CMYK buffer tracking.
+            // Use the overprint compositing path whenever the fill needs
+            // per-channel CMYK rendering. Three cases trigger it:
+            //   1. Subset painted_channels (Separation /Magenta, DeviceN, etc.)
+            //      — only the named channels touch the buffer; the rest are
+            //      preserved from the backdrop.
+            //   2. DeviceCMYK + OPM 1 — zero-valued components don't paint, so
+            //      a per-pixel filter is required.
+            //   3. (Combinations of the above.)
+            // Only fires for Normal blend; non-Normal blend modes handle zero
+            // values through their blend math, not through overprint filtering.
+            // Includes text glyphs: when overprint is meaningful (the test
+            // suite's GWG 1.0 swatches f/a use Separation /Magenta + glyphs),
+            // correctness wins over the slight AA difference vs tiny-skia.
+            let painted = params.painted_channels;
+            let subset_channels =
+                painted != 0 && painted != stet_graphics::device::CMYK_ALL;
+            let opm1_cmyk =
+                params.is_device_cmyk && params.overprint_mode == 1;
             let needs_overprint = params.overprint
-                && params.is_device_cmyk
                 && band_state.cmyk_buffer.is_some()
                 && params.blend_mode == 0
-                && !params.is_text_glyph
-                && (params.painted_channels != stet_graphics::device::CMYK_ALL
-                    || params.overprint_mode == 1);
+                && (subset_channels || opm1_cmyk);
 
             if needs_overprint {
                 let mut cmyk_buf = band_state.cmyk_buffer.take().unwrap();
@@ -2367,17 +2374,20 @@ fn render_element(
                 path
             };
 
+            // Mirror the Fill gating: per-channel CMYK rendering kicks in for
+            // subset painted_channels (Separation /Magenta, DeviceN, etc.) or
+            // for DeviceCMYK + OPM 1 (zero-valued source components don't paint).
+            // GWG 1.0 swatch a/b/f/g need this for the magenta X stroke that
+            // overlays the same path the fill already drew.
+            let painted = params.painted_channels;
+            let subset_channels =
+                painted != 0 && painted != stet_graphics::device::CMYK_ALL;
+            let opm1_cmyk = params.is_device_cmyk && params.overprint_mode == 1;
             let needs_overprint = params.overprint
-                && params.painted_channels != 0
-                && params.painted_channels != stet_graphics::device::CMYK_ALL
-                && band_state.cmyk_buffer.is_some();
+                && band_state.cmyk_buffer.is_some()
+                && params.blend_mode == 0
+                && (subset_channels || opm1_cmyk);
 
-            // For overprint strokes, try converting stroke outline to a fill
-            // for per-channel CMYK simulation. If the stroke-to-fill conversion
-            // fails (e.g., hairline strokes too thin for outline conversion),
-            // fall through to the normal stroke path so the stroke still renders.
-            // Always render the stroke through the normal pixmap path for
-            // consistent quality (stroke adjustment, proper anti-aliasing).
             let Some(skia_path) = build_skia_path(draw_path) else {
                 return;
             };
@@ -2390,17 +2400,38 @@ fn render_element(
             ) else {
                 return;
             };
-            let paint =
-                to_paint_alpha(&params.color, params.alpha, params.blend_mode, ctx.no_aa);
-            pixmap.stroke_path(&skia_path, &paint, &stroke, transform, mask_ref);
 
             if needs_overprint {
-                // Per-channel CMYK buffer update for overprint strokes.
-                // The stroke was already rendered to the pixmap above with
-                // proper quality. Now update only the painted CMYK channels
-                // in the buffer, using the stroke outline for coverage.
+                // Convert the stroke outline to a fill path and route it
+                // through the same per-channel CMYK compositing logic the
+                // fill path uses, so the post-overprint result lands in the
+                // pixmap (not the raw source colour).
+                let mut cmyk_buf = band_state.cmyk_buffer.take().unwrap();
+                render_overprint_stroke(
+                    pixmap,
+                    &mut cmyk_buf,
+                    band_state,
+                    &skia_path,
+                    &stroke,
+                    transform,
+                    params,
+                    ctx.out_w,
+                    ctx.out_h,
+                    ctx.icc,
+                    ctx.no_aa,
+                );
+                band_state.cmyk_buffer = Some(cmyk_buf);
+            } else {
+                let paint = to_paint_alpha(
+                    &params.color,
+                    params.alpha,
+                    params.blend_mode,
+                    ctx.no_aa,
+                );
+                pixmap.stroke_path(&skia_path, &paint, &stroke, transform, mask_ref);
+
                 if let Some(ref mut cmyk_buf) = band_state.cmyk_buffer {
-                    update_cmyk_buffer_for_stroke_overprint(
+                    update_cmyk_buffer_for_stroke(
                         cmyk_buf,
                         draw_path,
                         params,
@@ -2413,19 +2444,6 @@ fn render_element(
                         ctx.icc,
                     );
                 }
-            } else if let Some(ref mut cmyk_buf) = band_state.cmyk_buffer {
-                update_cmyk_buffer_for_stroke(
-                    cmyk_buf,
-                    draw_path,
-                    params,
-                    &stroke,
-                    transform,
-                    ctx.out_w,
-                    ctx.out_h,
-                    &band_state.clip_region,
-                    ctx.no_aa,
-                    ctx.icc,
-                );
             }
         }
         DisplayElement::Clip { path, params } => {
@@ -6112,21 +6130,27 @@ fn render_overprint_fill(
 
             let a = (cov * params.alpha as f32).min(1.0);
             let dst_a = px_data[pi + 3] as f32 / 255.0;
-            let out_a = a + dst_a * (1.0 - a);
+            let one_minus_a = 1.0 - a;
+            let out_a = a + dst_a * one_minus_a;
             if out_a > 0.0 {
-                let inv = 1.0 / out_a;
-                px_data[pi] =
-                    ((r as f32 * a + px_data[pi] as f32 / 255.0 * dst_a * (1.0 - a)) * inv * 255.0)
-                        .round() as u8;
-                px_data[pi + 1] = ((g as f32 * a
-                    + px_data[pi + 1] as f32 / 255.0 * dst_a * (1.0 - a))
-                    * inv
+                // tiny-skia stores premultiplied RGBA. Use the standard
+                // src-over formula in premul space: result_pre = src*a + dst_pre*(1-a).
+                // Reading px_data[pi]/255 already gives the premul value, so no
+                // additional divide-by-out_a step is needed.
+                px_data[pi] = ((r as f32 * a
+                    + (px_data[pi] as f32 / 255.0) * one_minus_a)
                     * 255.0)
+                    .clamp(0.0, 255.0)
+                    .round() as u8;
+                px_data[pi + 1] = ((g as f32 * a
+                    + (px_data[pi + 1] as f32 / 255.0) * one_minus_a)
+                    * 255.0)
+                    .clamp(0.0, 255.0)
                     .round() as u8;
                 px_data[pi + 2] = ((b as f32 * a
-                    + px_data[pi + 2] as f32 / 255.0 * dst_a * (1.0 - a))
-                    * inv
+                    + (px_data[pi + 2] as f32 / 255.0) * one_minus_a)
                     * 255.0)
+                    .clamp(0.0, 255.0)
                     .round() as u8;
                 px_data[pi + 3] = (out_a * 255.0).round() as u8;
             }
@@ -6270,6 +6294,250 @@ fn update_cmyk_buffer_for_fill(
     }
 }
 
+/// Render an overprint stroke: convert the stroke outline to a fill path,
+/// rasterize a coverage mask, then composite per-pixel in CMYK so the painted
+/// channels of the stroke colour replace the matching backdrop channels and
+/// the result lands in the pixmap as RGB. Mirrors `render_overprint_fill`.
+#[allow(clippy::too_many_arguments)]
+fn render_overprint_stroke(
+    pixmap: &mut Pixmap,
+    cmyk_buf: &mut [f32],
+    band_state: &mut BandState,
+    skia_path: &stet_tiny_skia::Path,
+    stroke: &Stroke,
+    transform: Transform,
+    params: &StrokeParams,
+    out_w: u32,
+    out_h: u32,
+    icc: Option<&IccCache>,
+    no_aa: bool,
+) {
+    // Convert stroke outline to fill path. Mirrors update_cmyk_buffer_for_stroke_overprint.
+    let resolution_scale = (transform.sx * transform.sx + transform.sy * transform.sy)
+        .sqrt()
+        .max(1.0);
+    let dashed_op;
+    let stroke_src = if let Some(ref dash) = stroke.dash {
+        dashed_op = skia_path.dash(dash, resolution_scale);
+        match dashed_op.as_ref() {
+            Some(p) => p,
+            None => skia_path,
+        }
+    } else {
+        skia_path
+    };
+    let Some(stroked_user) = stroke_src.stroke(stroke, resolution_scale) else {
+        return;
+    };
+    let Some(stroked) = stroked_user.transform(transform) else {
+        return;
+    };
+
+    let mut coverage_mask = match Mask::new(out_w, out_h) {
+        Some(m) => m,
+        None => return,
+    };
+    coverage_mask.fill_path(
+        &stroked,
+        SkiaFillRule::Winding,
+        !no_aa,
+        Transform::identity(),
+    );
+
+    let (bbox_x0, bbox_y0, bbox_x1, bbox_y1) =
+        path_device_bbox(&stroked, Transform::identity(), out_w, out_h);
+
+    // Intersect with clip mask (same logic as render_overprint_fill).
+    let clip_coverage: Option<&[u8]> = match &band_state.clip_region {
+        None => None,
+        Some(ClipRegion::Rect(r)) => {
+            let data = coverage_mask.data_mut();
+            let stride = out_w as usize;
+            for y in bbox_y0..bbox_y1 {
+                let row_start = y * stride;
+                for x in bbox_x0..bbox_x1 {
+                    let yu = y as u32;
+                    let xu = x as u32;
+                    if yu < r.y0 || yu >= r.y1 || xu < r.x0 || xu >= r.x1 {
+                        data[row_start + x] = 0;
+                    }
+                }
+            }
+            None
+        }
+        Some(ClipRegion::Mask(clip_mask)) => Some(clip_mask.data()),
+    };
+
+    let (src_c, src_m, src_y, src_k) = params.color.native_cmyk.unwrap_or_else(|| {
+        let r = params.color.r;
+        let g = params.color.g;
+        let b = params.color.b;
+        (1.0 - r, 1.0 - g, 1.0 - b, 0.0)
+    });
+
+    let mut channels = params.painted_channels;
+    if channels == 0 {
+        channels = stet_graphics::device::CMYK_ALL;
+    }
+    if params.overprint_mode == 1
+        && channels == stet_graphics::device::CMYK_ALL
+        && params.is_device_cmyk
+    {
+        channels = 0;
+        if src_c != 0.0 {
+            channels |= stet_graphics::device::CMYK_C;
+        }
+        if src_m != 0.0 {
+            channels |= stet_graphics::device::CMYK_M;
+        }
+        if src_y != 0.0 {
+            channels |= stet_graphics::device::CMYK_Y;
+        }
+        if src_k != 0.0 {
+            channels |= stet_graphics::device::CMYK_K;
+        }
+        if channels == 0 {
+            channels = stet_graphics::device::CMYK_ALL;
+        }
+    }
+
+    if channels == stet_graphics::device::CMYK_ALL {
+        // Full-channel replacement: write source CMYK to buffer for covered
+        // pixels and let tiny-skia stroke the pixmap with the source colour.
+        let cov_data = coverage_mask.data();
+        let stride = out_w as usize;
+        for y in bbox_y0..bbox_y1 {
+            for x in bbox_x0..bbox_x1 {
+                let mi = y * stride + x;
+                let mut cov = cov_data[mi] as f32 / 255.0;
+                if let Some(clip) = clip_coverage {
+                    cov *= clip[mi] as f32 / 255.0;
+                }
+                if cov > 0.0 {
+                    let ci = mi * 4;
+                    cmyk_buf[ci] = src_c as f32;
+                    cmyk_buf[ci + 1] = src_m as f32;
+                    cmyk_buf[ci + 2] = src_y as f32;
+                    cmyk_buf[ci + 3] = src_k as f32;
+                }
+            }
+        }
+        let mut temp_mask = None;
+        let Some(mask_ref) =
+            resolve_clip_mask(&band_state.clip_region, &mut temp_mask, out_w, out_h)
+        else {
+            return;
+        };
+        let paint = to_paint_alpha(&params.color, params.alpha, params.blend_mode, no_aa);
+        pixmap.stroke_path(skia_path, &paint, stroke, transform, mask_ref);
+        return;
+    }
+
+    let cov_data = coverage_mask.data();
+    let stride = out_w as usize;
+    let px_data = pixmap.data_mut();
+    let px_stride = out_w as usize * 4;
+
+    for y in bbox_y0..bbox_y1 {
+        for x in bbox_x0..bbox_x1 {
+            let mi = y * stride + x;
+            let mut cov = cov_data[mi] as f32 / 255.0;
+            if let Some(clip) = clip_coverage {
+                cov *= clip[mi] as f32 / 255.0;
+            }
+            if cov <= 0.0 {
+                continue;
+            }
+
+            let ci = mi * 4;
+            let pi = y * px_stride + x * 4;
+            let (cur_c, cur_m, cur_y, cur_k) = {
+                let c = cmyk_buf[ci] as f64;
+                let m = cmyk_buf[ci + 1] as f64;
+                let y_val = cmyk_buf[ci + 2] as f64;
+                let k = cmyk_buf[ci + 3] as f64;
+                if c == 0.0 && m == 0.0 && y_val == 0.0 && k == 0.0 && px_data[pi + 3] > 0 {
+                    let r = px_data[pi] as f64 / 255.0;
+                    let g = px_data[pi + 1] as f64 / 255.0;
+                    let b = px_data[pi + 2] as f64 / 255.0;
+                    let rk = 1.0 - r.max(g).max(b);
+                    if rk >= 1.0 {
+                        (0.0, 0.0, 0.0, 1.0)
+                    } else {
+                        let inv = 1.0 / (1.0 - rk);
+                        (
+                            (1.0 - r - rk) * inv,
+                            (1.0 - g - rk) * inv,
+                            (1.0 - b - rk) * inv,
+                            rk,
+                        )
+                    }
+                } else {
+                    (c, m, y_val, k)
+                }
+            };
+
+            let new_c = if channels & stet_graphics::device::CMYK_C != 0 {
+                src_c
+            } else {
+                cur_c
+            };
+            let new_m = if channels & stet_graphics::device::CMYK_M != 0 {
+                src_m
+            } else {
+                cur_m
+            };
+            let new_y = if channels & stet_graphics::device::CMYK_Y != 0 {
+                src_y
+            } else {
+                cur_y
+            };
+            let new_k = if channels & stet_graphics::device::CMYK_K != 0 {
+                src_k
+            } else {
+                cur_k
+            };
+
+            cmyk_buf[ci] = new_c as f32;
+            cmyk_buf[ci + 1] = new_m as f32;
+            cmyk_buf[ci + 2] = new_y as f32;
+            cmyk_buf[ci + 3] = new_k as f32;
+
+            let (r, g, b) = if let Some(icc_cache) = icc {
+                icc_cache
+                    .convert_cmyk_readonly(new_c, new_m, new_y, new_k)
+                    .unwrap_or_else(|| cmyk_to_rgb_plrm(new_c, new_m, new_y, new_k))
+            } else {
+                cmyk_to_rgb_plrm(new_c, new_m, new_y, new_k)
+            };
+
+            let a = (cov * params.alpha as f32).min(1.0);
+            let dst_a = px_data[pi + 3] as f32 / 255.0;
+            let one_minus_a = 1.0 - a;
+            let out_a = a + dst_a * one_minus_a;
+            if out_a > 0.0 {
+                // tiny-skia stores premultiplied RGBA (see render_overprint_fill).
+                px_data[pi] = ((r as f32 * a
+                    + (px_data[pi] as f32 / 255.0) * one_minus_a)
+                    * 255.0)
+                    .clamp(0.0, 255.0)
+                    .round() as u8;
+                px_data[pi + 1] = ((g as f32 * a
+                    + (px_data[pi + 1] as f32 / 255.0) * one_minus_a)
+                    * 255.0)
+                    .clamp(0.0, 255.0)
+                    .round() as u8;
+                px_data[pi + 2] = ((b as f32 * a
+                    + (px_data[pi + 2] as f32 / 255.0) * one_minus_a)
+                    * 255.0)
+                    .clamp(0.0, 255.0)
+                    .round() as u8;
+                px_data[pi + 3] = (out_a * 255.0).round() as u8;
+            }
+        }
+    }
+}
+
 /// Update the CMYK buffer for a non-overprint stroke. Mirrors
 /// [`update_cmyk_buffer_for_fill`] but rasterizes a stroked outline path
 /// instead of a filled one. Source-CMYK selection follows the same
@@ -6369,118 +6637,6 @@ fn update_cmyk_buffer_for_stroke(
                 cmyk_buf[ci + 1] = src_m as f32;
                 cmyk_buf[ci + 2] = src_y as f32;
                 cmyk_buf[ci + 3] = src_k as f32;
-            }
-        }
-    }
-}
-
-/// Per-channel CMYK buffer update for overprint strokes.
-///
-/// Like `update_cmyk_buffer_for_stroke` but only writes the channels indicated
-/// by `painted_channels`, preserving other channels for overprint simulation.
-/// The pixmap stroke was already rendered through the normal path for quality;
-/// this function only updates the parallel CMYK tracking buffer.
-#[allow(clippy::too_many_arguments)]
-fn update_cmyk_buffer_for_stroke_overprint(
-    cmyk_buf: &mut [f32],
-    path: &PsPath,
-    params: &StrokeParams,
-    stroke: &Stroke,
-    transform: Transform,
-    out_w: u32,
-    out_h: u32,
-    clip_region: &Option<ClipRegion>,
-    no_aa: bool,
-    icc: Option<&IccCache>,
-) {
-    let (src_c, src_m, src_y, src_k) = if let Some(c) = params.color.native_cmyk {
-        c
-    } else if let Some(cmyk) = icc.and_then(|i| {
-        i.convert_rgb_to_cmyk_readonly(params.color.r, params.color.g, params.color.b)
-    }) {
-        (cmyk[0], cmyk[1], cmyk[2], cmyk[3])
-    } else {
-        (
-            (1.0 - params.color.r).clamp(0.0, 1.0),
-            (1.0 - params.color.g).clamp(0.0, 1.0),
-            (1.0 - params.color.b).clamp(0.0, 1.0),
-            0.0,
-        )
-    };
-
-    let Some(skia_path) = build_skia_path(path) else {
-        return;
-    };
-
-    let resolution_scale = (transform.sx * transform.sx + transform.sy * transform.sy)
-        .sqrt()
-        .max(1.0);
-    let dashed_op;
-    let stroke_src = if let Some(ref dash) = stroke.dash {
-        dashed_op = skia_path.dash(dash, resolution_scale);
-        match dashed_op.as_ref() {
-            Some(p) => p,
-            None => &skia_path,
-        }
-    } else {
-        &skia_path
-    };
-    let Some(stroked_user) = stroke_src.stroke(stroke, resolution_scale) else {
-        return;
-    };
-    let Some(stroked) = stroked_user.transform(transform) else {
-        return;
-    };
-
-    let mut coverage_mask = match Mask::new(out_w, out_h) {
-        Some(m) => m,
-        None => return,
-    };
-    coverage_mask.fill_path(
-        &stroked,
-        SkiaFillRule::Winding,
-        !no_aa,
-        Transform::identity(),
-    );
-
-    let cov_data = coverage_mask.data();
-    let clip_data: Option<&[u8]> = match clip_region {
-        Some(ClipRegion::Mask(m)) => Some(m.data()),
-        _ => None,
-    };
-
-    let (mut bx0, mut by0, mut bx1, mut by1) =
-        path_device_bbox(&stroked, Transform::identity(), out_w, out_h);
-    if let Some(ClipRegion::Rect(r)) = clip_region {
-        bx0 = bx0.max(r.x0 as usize);
-        by0 = by0.max(r.y0 as usize);
-        bx1 = bx1.min(r.x1 as usize);
-        by1 = by1.min(r.y1 as usize);
-    }
-
-    let channels = params.painted_channels;
-    let stride = out_w as usize;
-    for y in by0..by1 {
-        for x in bx0..bx1 {
-            let mi = y * stride + x;
-            let mut cov = cov_data[mi] as f32 / 255.0;
-            if let Some(clip) = clip_data {
-                cov *= clip[mi] as f32 / 255.0;
-            }
-            if cov > 0.0 {
-                let ci = mi * 4;
-                if channels & stet_graphics::device::CMYK_C != 0 {
-                    cmyk_buf[ci] = src_c as f32;
-                }
-                if channels & stet_graphics::device::CMYK_M != 0 {
-                    cmyk_buf[ci + 1] = src_m as f32;
-                }
-                if channels & stet_graphics::device::CMYK_Y != 0 {
-                    cmyk_buf[ci + 2] = src_y as f32;
-                }
-                if channels & stet_graphics::device::CMYK_K != 0 {
-                    cmyk_buf[ci + 3] = src_k as f32;
-                }
             }
         }
     }
@@ -10149,6 +10305,7 @@ mod tests {
             overprint: false,
             overprint_mode: 0,
             painted_channels: 0,
+            is_device_cmyk: false,
             spot_color: None,
             rendering_intent: 0,
             transfer: TransferState::default(),

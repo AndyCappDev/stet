@@ -575,6 +575,7 @@ impl<'a> ContentInterpreter<'a> {
                                 overprint: false,
                                 overprint_mode: 0,
                                 painted_channels: 0,
+                                is_device_cmyk: false,
                                 spot_color: None,
                                 rendering_intent: 0,
                                 transfer: Default::default(),
@@ -614,6 +615,7 @@ impl<'a> ContentInterpreter<'a> {
                                 overprint: false,
                                 overprint_mode: 0,
                                 painted_channels: 0,
+                                is_device_cmyk: false,
                                 spot_color: None,
                                 rendering_intent: 0,
                                 transfer: Default::default(),
@@ -656,6 +658,7 @@ impl<'a> ContentInterpreter<'a> {
                                     overprint: false,
                                     overprint_mode: 0,
                                     painted_channels: 0,
+                                    is_device_cmyk: false,
                                     spot_color: None,
                                     rendering_intent: 0,
                                     transfer: Default::default(),
@@ -738,6 +741,7 @@ impl<'a> ContentInterpreter<'a> {
                                     overprint: false,
                                     overprint_mode: 0,
                                     painted_channels: 0,
+                                    is_device_cmyk: false,
                                     spot_color: None,
                                     rendering_intent: 0,
                                     transfer: Default::default(),
@@ -810,6 +814,7 @@ impl<'a> ContentInterpreter<'a> {
                         overprint: false,
                         overprint_mode: 0,
                         painted_channels: 0,
+                        is_device_cmyk: false,
                         spot_color: None,
                         rendering_intent: 0,
                         transfer: Default::default(),
@@ -884,6 +889,7 @@ impl<'a> ContentInterpreter<'a> {
                         overprint: false,
                         overprint_mode: 0,
                         painted_channels: 0,
+                        is_device_cmyk: false,
                         spot_color: None,
                         rendering_intent: 0,
                         transfer: Default::default(),
@@ -1279,6 +1285,7 @@ impl<'a> ContentInterpreter<'a> {
                 self.gstate.stroke_pattern = None;
                 self.gstate.stroke_shading_pattern = None;
                 self.gstate.stroke_painted_channels = self.gstate.fill_painted_channels;
+                self.gstate.stroke_is_device_cmyk = self.gstate.fill_is_device_cmyk;
                 self.gstate.stroke_is_none = self.gstate.fill_is_none;
                 Ok(())
             }
@@ -1870,6 +1877,7 @@ impl<'a> ContentInterpreter<'a> {
         self.gstate.stroke_color = DeviceColor::from_gray(g);
         self.gstate.stroke_color_space = ColorSpaceRef::DeviceGray;
         self.gstate.stroke_painted_channels = 0;
+        self.gstate.stroke_is_device_cmyk = false;
         self.gstate.stroke_is_none = false;
         self.gstate.stroke_pattern = None;
         self.gstate.stroke_shading_pattern = None;
@@ -1896,6 +1904,7 @@ impl<'a> ContentInterpreter<'a> {
         self.gstate.stroke_color = DeviceColor::from_rgb(r, g, b);
         self.gstate.stroke_color_space = ColorSpaceRef::DeviceRGB;
         self.gstate.stroke_painted_channels = 0;
+        self.gstate.stroke_is_device_cmyk = false;
         self.gstate.stroke_is_none = false;
         self.gstate.stroke_pattern = None;
         self.gstate.stroke_shading_pattern = None;
@@ -1934,6 +1943,7 @@ impl<'a> ContentInterpreter<'a> {
             DeviceColor::from_cmyk_icc(n[0], n[1], n[2], n[3], &mut self.icc_cache);
         self.gstate.stroke_color_space = ColorSpaceRef::DeviceCMYK;
         self.gstate.stroke_painted_channels = stet_graphics::device::CMYK_ALL;
+        self.gstate.stroke_is_device_cmyk = true;
         self.gstate.stroke_is_none = false;
         self.gstate.stroke_pattern = None;
         self.gstate.stroke_shading_pattern = None;
@@ -2039,6 +2049,10 @@ impl<'a> ContentInterpreter<'a> {
         let nums = self.get_numbers(n)?;
         self.gstate.stroke_painted_channels = painted_channels_for_cs(&cs);
         self.gstate.stroke_is_none = cs.is_none_colorant();
+        self.gstate.stroke_is_device_cmyk = matches!(
+            cs,
+            ResolvedColorSpace::DeviceCMYK | ResolvedColorSpace::ICCBased { n: 4, .. }
+        );
         self.gstate.stroke_color =
             components_to_device_color_icc(&cs, &nums, Some(&mut self.icc_cache));
         self.gstate.stroke_pattern = None;

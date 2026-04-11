@@ -1157,6 +1157,7 @@ fn replay_form_elements(
                     overprint: params.overprint,
                     overprint_mode: params.overprint_mode,
                     painted_channels: params.painted_channels,
+                    is_device_cmyk: params.is_device_cmyk,
                     spot_color: params.spot_color.clone(),
                     rendering_intent: params.rendering_intent,
                     transfer: params.transfer.clone(),
