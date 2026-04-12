@@ -1361,7 +1361,12 @@ fn decode_jbig2(data: &[u8], globals: Option<&[u8]>) -> Result<Vec<u8>, PdfError
             );
             let _ = tx.send(result);
         });
-        rx.recv_timeout(std::time::Duration::from_secs(2))
+        // Scale timeout with data size: 5s base + 5s per MB of compressed data.
+        // Large scanned-document pages (e.g. 19k×25k bilevel at 2MB) need more
+        // than the original 2s, while the watchdog still catches malformed
+        // streams that hang the decoder indefinitely.
+        let timeout_secs = 5 + (data.len() as u64 / (1024 * 1024)) * 5;
+        rx.recv_timeout(std::time::Duration::from_secs(timeout_secs))
             .map_err(|_| PdfError::DecompressionError("JBIG2: decode timed out".into()))?
             .map_err(|e| PdfError::DecompressionError(format!("JBIG2: {e}")))?
     };
