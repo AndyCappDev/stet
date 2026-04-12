@@ -132,59 +132,87 @@ impl CMap {
             }
 
             // Parse cidchar mappings: <code> cid
-            if line.ends_with("begincidchar") {
-
-                while let Some(char_line) = lines.next() {
-                    let char_line = char_line.trim();
-                    if char_line == "endcidchar" {
-                        break;
-                    }
-                    if let Some((code, cid)) = parse_cidchar_line(char_line) {
+            // Handles both multi-line format (data on subsequent lines) and
+            // inline format where data appears between begincidchar/endcidchar
+            // on the same line (e.g. "1 begincidchar <0020> 1 endcidchar").
+            if line.contains("begincidchar") {
+                // Check for inline format: both begin and end on same line
+                if let Some(inline) = extract_inline_data(line, "begincidchar", "endcidchar") {
+                    if let Some((code, cid)) = parse_cidchar_line(inline) {
                         code_to_cid.insert(code, cid);
-
-                    } else {
-
+                    }
+                } else if line.ends_with("begincidchar") {
+                    while let Some(char_line) = lines.next() {
+                        let char_line = char_line.trim();
+                        if char_line == "endcidchar" {
+                            break;
+                        }
+                        if let Some((code, cid)) = parse_cidchar_line(char_line) {
+                            code_to_cid.insert(code, cid);
+                        }
                     }
                 }
             }
 
             // Parse cidrange mappings: <start> <end> cid_start
-            if line.ends_with("begincidrange") {
-                while let Some(range_line) = lines.next() {
-                    let range_line = range_line.trim();
-                    if range_line == "endcidrange" {
-                        break;
-                    }
-                    if let Some((start, end, cid_start)) = parse_cidrange_line(range_line) {
+            if line.contains("begincidrange") {
+                if let Some(inline) = extract_inline_data(line, "begincidrange", "endcidrange") {
+                    if let Some((start, end, cid_start)) = parse_cidrange_line(inline) {
                         for code in start..=end {
                             code_to_cid.insert(code, cid_start + (code - start));
+                        }
+                    }
+                } else if line.ends_with("begincidrange") {
+                    while let Some(range_line) = lines.next() {
+                        let range_line = range_line.trim();
+                        if range_line == "endcidrange" {
+                            break;
+                        }
+                        if let Some((start, end, cid_start)) = parse_cidrange_line(range_line) {
+                            for code in start..=end {
+                                code_to_cid.insert(code, cid_start + (code - start));
+                            }
                         }
                     }
                 }
             }
 
             // Also parse bfchar/bfrange (some CMaps use these)
-            if line.ends_with("beginbfchar") {
-                while let Some(char_line) = lines.next() {
-                    let char_line = char_line.trim();
-                    if char_line == "endbfchar" {
-                        break;
-                    }
-                    if let Some((code, unicode)) = parse_bfchar_line(char_line) {
+            if line.contains("beginbfchar") {
+                if let Some(inline) = extract_inline_data(line, "beginbfchar", "endbfchar") {
+                    if let Some((code, unicode)) = parse_bfchar_line(inline) {
                         code_to_cid.insert(code, unicode);
+                    }
+                } else if line.ends_with("beginbfchar") {
+                    while let Some(char_line) = lines.next() {
+                        let char_line = char_line.trim();
+                        if char_line == "endbfchar" {
+                            break;
+                        }
+                        if let Some((code, unicode)) = parse_bfchar_line(char_line) {
+                            code_to_cid.insert(code, unicode);
+                        }
                     }
                 }
             }
 
-            if line.ends_with("beginbfrange") {
-                while let Some(range_line) = lines.next() {
-                    let range_line = range_line.trim();
-                    if range_line == "endbfrange" {
-                        break;
-                    }
-                    if let Some((start, end, cid_start)) = parse_cidrange_line(range_line) {
+            if line.contains("beginbfrange") {
+                if let Some(inline) = extract_inline_data(line, "beginbfrange", "endbfrange") {
+                    if let Some((start, end, cid_start)) = parse_cidrange_line(inline) {
                         for code in start..=end {
                             code_to_cid.insert(code, cid_start + (code - start));
+                        }
+                    }
+                } else if line.ends_with("beginbfrange") {
+                    while let Some(range_line) = lines.next() {
+                        let range_line = range_line.trim();
+                        if range_line == "endbfrange" {
+                            break;
+                        }
+                        if let Some((start, end, cid_start)) = parse_cidrange_line(range_line) {
+                            for code in start..=end {
+                                code_to_cid.insert(code, cid_start + (code - start));
+                            }
                         }
                     }
                 }
@@ -217,6 +245,27 @@ impl CMap {
             code_lengths,
             wmode,
         }
+    }
+}
+
+/// Extract inline data between a begin/end keyword pair on the same line.
+/// For example, from `"1 begincidchar  <0020>  1 endcidchar"`,
+/// returns `Some("<0020>  1")`.
+fn extract_inline_data<'a>(line: &'a str, begin_kw: &str, end_kw: &str) -> Option<&'a str> {
+    let begin_pos = line.find(begin_kw)?;
+    let end_pos = line.find(end_kw)?;
+    if end_pos <= begin_pos {
+        return None;
+    }
+    let data_start = begin_pos + begin_kw.len();
+    if data_start >= end_pos {
+        return None;
+    }
+    let data = line[data_start..end_pos].trim();
+    if data.is_empty() {
+        None
+    } else {
+        Some(data)
     }
 }
 
