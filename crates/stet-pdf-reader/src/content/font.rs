@@ -3757,8 +3757,14 @@ impl CidTrueTypePdfFont {
             *map.get(cid as usize).unwrap_or(&0)
         } else if self.substituted && !self.to_unicode.is_empty() {
             // Substituted font: CID → Unicode (via ToUnicode) → GID (via cmap)
-            let unicode = *self.to_unicode.get(&cid)?;
-            *self.cmap.get(&unicode)?
+            if let Some(&unicode) = self.to_unicode.get(&cid) {
+                *self.cmap.get(&unicode)?
+            } else {
+                // GID not covered by the to_unicode map (e.g. extended Latin
+                // chars missing from the standard glyph map). Fall back to
+                // CID as GID directly — may be wrong but better than blank.
+                cid
+            }
         } else if self.substituted && !self.ordering.is_empty() && self.ordering != b"Identity" {
             // Substituted font with Adobe CID registry (CJK): use CID→Unicode table
             let unicode = super::cid_unicode::cid_to_unicode(&self.ordering, cid)?;

@@ -40,6 +40,14 @@ pub fn get_gid_to_unicode_map(font_family: &str) -> Option<HashMap<u16, u32>> {
         | "cambria" | "candara" | "constantia" | "corbel" => {
             Some(standard_glyph_map())
         }
+        // ArialBlack uses the standard map plus overrides for Polish chars
+        "arialblack" | "arial black" => {
+            let mut map = standard_glyph_map();
+            for (gid, unicode) in ARIAL_BLACK_SUPPLEMENT {
+                map.insert(*gid, *unicode);
+            }
+            Some(map)
+        }
         // Fallback: for any non-embedded CIDFontType2 + Identity-H font,
         // the standard TrueType glyph ordering is the best guess. Without
         // any mapping the text is guaranteed garbled; the standard map is
@@ -575,6 +583,15 @@ static STANDARD_GLYPHS: &[(u16, u32)] = &[
 
 /// Calibri-specific GID→Unicode overrides (from PDF.js getSupplementalGlyphMapForCalibri).
 ///
+/// ArialBlack overrides for Polish/Central European characters whose GIDs
+/// differ from the standard TrueType table (from PDF.js
+/// getSupplementalGlyphMapForArialBlack).
+static ARIAL_BLACK_SUPPLEMENT: &[(u16, u32)] = &[
+    (227, 322),  // ł
+    (264, 261),  // ą
+    (291, 346),  // Ś
+];
+
 /// These override the standard table entries for GIDs that differ in Calibri's
 /// glyph ordering from the generic TrueType convention.
 static CALIBRI_SUPPLEMENT: &[(u16, u32)] = &[
