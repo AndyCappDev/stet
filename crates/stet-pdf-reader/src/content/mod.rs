@@ -3606,7 +3606,7 @@ impl<'a> ContentInterpreter<'a> {
         // When the mask is larger than the image (e.g., 1-bit text mask on a 2×2
         // color image), upscale the image to the mask dimensions to preserve detail.
         let smask_result = if !is_image_mask {
-            let dict_smask = self.resolve_smask(dict)?;
+            let dict_smask = self.resolve_smask(dict, width, height)?;
             // Use SMaskInData alpha when no explicit /SMask entry exists
             if dict_smask.is_none() {
                 if let Some(alpha) = smask_in_data_alpha {
@@ -3974,6 +3974,8 @@ impl<'a> ContentInterpreter<'a> {
     fn resolve_smask(
         &self,
         dict: &PdfDict,
+        image_w: u32,
+        image_h: u32,
     ) -> Result<Option<(Vec<u8>, u32, u32, Option<Vec<f64>>)>, PdfError> {
         let smask_ref = match dict.get(b"SMask") {
             Some(obj) => obj.clone(),
@@ -3984,8 +3986,10 @@ impl<'a> ContentInterpreter<'a> {
             Some(d) => d,
             None => return Ok(None),
         };
-        let sw = smask_dict.get_int(b"Width").unwrap_or(0) as u32;
-        let sh = smask_dict.get_int(b"Height").unwrap_or(0) as u32;
+        // Fall back to parent image dimensions when the SMask dict is
+        // malformed (e.g. /Height missing — issue19611.pdf).
+        let sw = smask_dict.get_int(b"Width").unwrap_or(image_w as i64) as u32;
+        let sh = smask_dict.get_int(b"Height").unwrap_or(image_h as i64) as u32;
         if sw == 0 || sh == 0 {
             return Ok(None);
         }
