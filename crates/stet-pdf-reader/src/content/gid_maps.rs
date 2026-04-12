@@ -32,10 +32,19 @@ pub fn get_gid_to_unicode_map(font_family: &str) -> Option<HashMap<u16, u32>> {
             Some(map)
         }
         // These fonts share the standard TrueType glyph ordering
-        "tahoma" | "verdana" | "arial" | "trebuchet ms" | "trebuchetms" => {
+        "tahoma" | "verdana" | "arial" | "trebuchet ms" | "trebuchetms"
+        | "centurygothic" | "century gothic" | "comicsansms" | "comic sans ms"
+        | "consolas" | "georgia" | "impact" | "lucidaconsole" | "lucida console"
+        | "palatinolinotype" | "palatino linotype" | "segoeui" | "segoe ui"
+        | "timesnewroman" | "times new roman" | "couriernew" | "courier new"
+        | "cambria" | "candara" | "constantia" | "corbel" => {
             Some(standard_glyph_map())
         }
-        _ => None,
+        // Fallback: for any non-embedded CIDFontType2 + Identity-H font,
+        // the standard TrueType glyph ordering is the best guess. Without
+        // any mapping the text is guaranteed garbled; the standard map is
+        // correct for the vast majority of Western TrueType fonts.
+        _ => Some(standard_glyph_map()),
     }
 }
 

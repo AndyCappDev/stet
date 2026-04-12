@@ -897,6 +897,10 @@ const CID_FONT_SUBSTITUTIONS: &[(&str, &str)] = &[
     ("Calibri,Bold", "LiberationSans-Bold"),
     ("Calibri,BoldItalic", "LiberationSans-BoldItalic"),
     ("Calibri,Italic", "LiberationSans-Italic"),
+    ("CenturyGothic", "LiberationSans"),
+    ("CenturyGothic,Bold", "LiberationSans-Bold"),
+    ("CenturyGothic,BoldItalic", "LiberationSans-BoldItalic"),
+    ("CenturyGothic,Italic", "LiberationSans-Italic"),
     ("TimesNewRoman", "LiberationSerif"),
     ("TimesNewRoman,Bold", "LiberationSerif-Bold"),
     ("TimesNewRoman,BoldItalic", "LiberationSerif-BoldItalic"),
@@ -1475,10 +1479,21 @@ fn load_cjk_fallback_font(ordering: &[u8], base_font: &str) -> Result<Vec<u8>, P
     // For "Identity" ordering, check whether the font name indicates a CJK
     // font. If so, fall through to the CJK lookup path instead of using a
     // Latin fallback that can't render CJK characters.
-    let is_cjk_name = ["cn", "sc", "jp", "kr", "tc", "hk", "cjk", "gothic",
-        "ming", "song", "hei", "kai", "fang", "han"]
-        .iter()
-        .any(|kw| lower.contains(kw));
+    // Note: "gothic" needs special handling — it appears in CJK fonts
+    // (MSGothic, MS-Gothic, IPAGothic) but also Western fonts (CenturyGothic,
+    // FranklinGothic). Only match when preceded by a non-letter (word boundary).
+    let has_cjk_gothic = {
+        if let Some(pos) = lower.find("gothic") {
+            pos == 0 || !lower.as_bytes()[pos - 1].is_ascii_alphabetic()
+        } else {
+            false
+        }
+    };
+    let is_cjk_name = has_cjk_gothic
+        || ["cn", "sc", "jp", "kr", "tc", "hk", "cjk",
+            "ming", "song", "hei", "kai", "fang", "han"]
+            .iter()
+            .any(|kw| lower.contains(kw));
     if ordering == b"Identity" && !is_cjk_name {
         let latin_targets: &[&str] = if is_bold {
             &["LiberationSans-Bold", "DejaVuSans-Bold"]
@@ -2536,7 +2551,14 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
     match cid_subtype {
         b"CIDFontType2" => {
             let mut substituted;
-            let mut data = if let Some(ff_ref) = desc.get(b"FontFile2") {
+            let mut data = if let Some(ff_ref) = desc.get(b"FontFile2")
+                // Some PDFs store TrueType data under /FontFile instead
+                // of the correct /FontFile2 — accept it as a fallback.
+                .or_else(|| desc.get(b"FontFile").filter(|obj| {
+                    resolver.stream_data_from_obj(obj).ok()
+                        .is_some_and(|d| d.len() > 4 && d[..4] == [0, 1, 0, 0])
+                }))
+            {
                 substituted = false;
                 let mut font_data = resolver.stream_data_from_obj(ff_ref)?;
                 sanitize_index_to_loc_format(&mut font_data);
