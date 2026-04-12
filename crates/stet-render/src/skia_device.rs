@@ -649,6 +649,11 @@ struct RenderContext<'a> {
     /// result and the new CMYK math would over-darken anti-aliased gray
     /// strokes.
     parent_group_isolated: bool,
+    /// True when rendering an alpha-extraction pass for a non-isolated group
+    /// with non-Normal blend mode.  Nested groups must render as isolated
+    /// (no backdrop preload, no two-pass) so the alpha channel reflects
+    /// pure element coverage rather than backdrop-blended results.
+    alpha_extraction_pass: bool,
 }
 
 /// Override mode applied to `render_group` while the knockout group renders
@@ -1053,6 +1058,71 @@ fn composite_non_isolated_group_cropped(
         {
             chunk.copy_from_slice(&src_data[off..off + 4]);
         }
+    }
+
+    let paint = stet_tiny_skia::PixmapPaint {
+        opacity: params.alpha as f32,
+        blend_mode: u8_to_blend_mode(params.blend_mode),
+        quality: stet_tiny_skia::FilterQuality::Nearest,
+    };
+    target.draw_pixmap(
+        crop_x,
+        crop_y,
+        contribution.as_ref(),
+        &paint,
+        Transform::identity(),
+        clip_mask,
+    );
+}
+
+/// Non-isolated group composite-back using the proper source-extraction
+/// formula (ISO 32000-1 §11.4.8).
+///
+/// `source` was rendered against the `backdrop`; `isolated` was rendered
+/// against transparent.  The isolated render's alpha channel gives the
+/// group's shape, which lets us extract the source color:
+///
+///   C_g_premul = R - B · (1 - α_g)      (premultiplied source color)
+///   α_g        = isolated alpha channel
+///
+/// The extracted contribution is then composited onto `target` with the
+/// group's blend mode and opacity.
+fn composite_non_isolated_extracted(
+    target: &mut Pixmap,
+    source: &Pixmap,
+    isolated: &Pixmap,
+    backdrop: &[u8],
+    params: &stet_graphics::display_list::GroupParams,
+    clip_mask: Option<&stet_tiny_skia::Mask>,
+    crop_x: i32,
+    crop_y: i32,
+) {
+    let cw = source.width();
+    let ch = source.height();
+
+    let Some(mut contribution) = Pixmap::new(cw, ch) else {
+        return;
+    };
+    let src_data = source.data();
+    let iso_data = isolated.data();
+    let contrib_data = contribution.data_mut();
+
+    for i in 0..(cw as usize * ch as usize) {
+        let off = i * 4;
+        let alpha_g = iso_data[off + 3];
+        if alpha_g == 0 {
+            continue; // no group contribution at this pixel
+        }
+
+        // Extract premultiplied source: C_g_premul = R - B · (1 - α_g/255)
+        let inv_alpha = 255 - alpha_g as i32;
+        for c in 0..3 {
+            let r = src_data[off + c] as i32;
+            let b = backdrop[off + c] as i32;
+            let raw = r - (b * inv_alpha + 127) / 255;
+            contrib_data[off + c] = raw.clamp(0, 255) as u8;
+        }
+        contrib_data[off + 3] = alpha_g;
     }
 
     let paint = stet_tiny_skia::PixmapPaint {
@@ -3061,7 +3131,16 @@ fn render_group(
             inversion_sensitive || cmyk_group_blend
         }
     };
-    let needs_backdrop_preload = !params.isolated && (params.blend_mode == 0 || plan_cmyk_compose);
+    // Non-isolated groups with non-Normal blend modes on the sRGB path
+    // need a two-pass render: once against the backdrop (for correct
+    // internal blending) and once against transparent (to extract the
+    // group's shape/alpha for the proper source-contribution formula).
+    let needs_alpha_extraction =
+        !params.isolated && params.blend_mode != 0 && !plan_cmyk_compose
+        && !ctx.alpha_extraction_pass;
+    let needs_backdrop_preload =
+        !params.isolated
+        && (params.blend_mode == 0 || plan_cmyk_compose || needs_alpha_extraction);
     let backdrop = if needs_backdrop_preload {
         let data = if crop.is_some() {
             copy_backdrop_crop(pixmap, crop_x, crop_y, eff_w, eff_h)
@@ -3128,6 +3207,7 @@ fn render_group(
         knockout_painter_pass: ctx.knockout_painter_pass,
         // The children of this group see *this* group as their parent.
         parent_group_isolated: params.isolated,
+        alpha_extraction_pass: ctx.alpha_extraction_pass,
     };
 
     for (idx, elem) in elements.elements().iter().enumerate() {
@@ -3137,6 +3217,38 @@ fn render_group(
         };
         render_element(&mut offscreen, &mut group_band, elem, &elem_ctx);
     }
+
+    // Second pass: render against transparent to extract the group's
+    // shape/alpha.  Only needed for the sRGB two-pass composite-back
+    // path (non-isolated, non-Normal blend, no CMYK compose).
+    let alpha_offscreen = if needs_alpha_extraction {
+        let mut iso = Pixmap::new(eff_w, eff_h);
+        if let Some(ref mut iso_pm) = iso {
+            let mut iso_band = BandState {
+                clip_region: None,
+                spare_mask: None,
+                clip_mask_cache: HashMap::new(),
+                clip_mask_seen: HashSet::new(),
+                mask_pool: Vec::new(),
+                cmyk_buffer: None,
+            };
+            let iso_ctx = RenderContext {
+                parent_group_isolated: true,
+                alpha_extraction_pass: true,
+                ..group_ctx
+            };
+            for (idx, elem) in elements.elements().iter().enumerate() {
+                let elem_ctx = RenderContext {
+                    elem_idx: idx,
+                    ..iso_ctx
+                };
+                render_element(iso_pm, &mut iso_band, elem, &elem_ctx);
+            }
+        }
+        iso
+    } else {
+        None
+    };
 
     let mut temp_mask = None;
     let mask_ref = match resolve_clip_mask(
@@ -3204,6 +3316,17 @@ fn render_group(
                 ctx.icc,
             );
             cmyk_compose_done = true;
+        } else if let Some(ref alpha_os) = alpha_offscreen {
+            composite_non_isolated_extracted(
+                pixmap,
+                &offscreen,
+                alpha_os,
+                backdrop,
+                effective_params,
+                mask_ref,
+                crop_x,
+                crop_y,
+            );
         } else {
             composite_non_isolated_group_cropped(
                 pixmap, &offscreen, backdrop, effective_params, mask_ref, crop_x, crop_y,
@@ -3632,6 +3755,7 @@ fn render_knockout_group(
         // children effectively see this group's "fresh" backdrop. Treat the
         // knockout group as isolated for the purposes of the inner CMYK rule.
         parent_group_isolated: true,
+        alpha_extraction_pass: false,
     };
 
     // Persistent band state for clip tracking — clips must accumulate across
@@ -4008,6 +4132,10 @@ fn render_soft_masked(
         opm_zero_transparent: ctx.opm_zero_transparent,
         knockout_painter_pass: ctx.knockout_painter_pass,
         parent_group_isolated: ctx.parent_group_isolated,
+        // Soft masks render into their own independent offscreen and must
+        // not inherit the alpha extraction pass — their groups need normal
+        // backdrop preloading regardless of the outer extraction context.
+        alpha_extraction_pass: false,
     };
 
     // 1a. INLINE PATH: Mask form contains nested offscreens.
@@ -4425,6 +4553,7 @@ fn rasterize_mask(
         opm_zero_transparent: false,
         knockout_painter_pass: KnockoutPainterPass::None,
         parent_group_isolated: false,
+                alpha_extraction_pass: false,
     };
 
     // 5. Mask rendering doesn't participate in CMYK overprint compositing.
@@ -4810,6 +4939,7 @@ fn render_pattern_fill(
                     opm_zero_transparent: params.overprint_mode == 1,
                     knockout_painter_pass: ctx.knockout_painter_pass,
                     parent_group_isolated: ctx.parent_group_isolated,
+                    alpha_extraction_pass: ctx.alpha_extraction_pass,
                 };
 
                 let mut tile_band = BandState {
@@ -4880,6 +5010,7 @@ fn render_pattern_fill(
                 opm_zero_transparent: params.overprint_mode == 1,
                 knockout_painter_pass: ctx.knockout_painter_pass,
                 parent_group_isolated: ctx.parent_group_isolated,
+                alpha_extraction_pass: ctx.alpha_extraction_pass,
             };
             let mut tile_bs = BandState {
                 clip_region: None,
@@ -5597,6 +5728,7 @@ impl OutputDevice for SkiaDevice {
                 opm_zero_transparent: false,
                 knockout_painter_pass: KnockoutPainterPass::None,
                 parent_group_isolated: false,
+                alpha_extraction_pass: false,
             };
             render_pattern_fill(&mut self.pixmap, &mut band_state, params, &ctx);
         }
@@ -5641,6 +5773,7 @@ impl OutputDevice for SkiaDevice {
                 opm_zero_transparent: false,
                 knockout_painter_pass: KnockoutPainterPass::None,
                 parent_group_isolated: false,
+                alpha_extraction_pass: false,
             };
             let mut band_state = BandState {
                 clip_region: None,
@@ -7285,6 +7418,7 @@ fn render_banded_to_sink(
                     opm_zero_transparent: false,
                     knockout_painter_pass: KnockoutPainterPass::None,
                     parent_group_isolated: false,
+                alpha_extraction_pass: false,
                 };
                 render_element(&mut band_pixmap, &mut band_state, &elements[i], &ctx);
             }
@@ -8164,6 +8298,7 @@ pub fn render_region_prepared(
                 opm_zero_transparent: false,
                 knockout_painter_pass: KnockoutPainterPass::None,
                 parent_group_isolated: false,
+                alpha_extraction_pass: false,
             };
             render_element(&mut pixmap, &mut state, &elements[i], &ctx);
         }
@@ -8320,6 +8455,7 @@ pub fn render_region_single_band(
                 opm_zero_transparent: false,
                 knockout_painter_pass: KnockoutPainterPass::None,
                 parent_group_isolated: false,
+                alpha_extraction_pass: false,
             };
             render_element(&mut pixmap, &mut state, &elements[i], &ctx);
         }
@@ -8770,6 +8906,7 @@ pub fn render_region(
                 opm_zero_transparent: false,
                 knockout_painter_pass: KnockoutPainterPass::None,
                 parent_group_isolated: false,
+                alpha_extraction_pass: false,
             };
             render_element(&mut pixmap, &mut state, &elements[i], &ctx);
         }
