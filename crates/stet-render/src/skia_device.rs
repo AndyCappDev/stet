@@ -4471,10 +4471,13 @@ fn out_of_bounds_mask_value(params: &stet_graphics::display_list::SoftMaskParams
     }
 }
 
-/// Maximum mask raster dimensions. A malformed PDF that asks for a
-/// gigantic mask form would otherwise OOM. 8192 × 8192 grayscale = 64 MB
-/// per mask, which is generous but bounded.
-const MAX_MASK_RASTER_DIM: u32 = 8192;
+/// Maximum mask raster area in pixels.  A malformed PDF that asks for a
+/// gigantic mask form would otherwise OOM. 64 megapixels = 64 MB for
+/// grayscale or 256 MB for RGBA — generous but bounded.  Using an area
+/// limit instead of a per-dimension limit correctly handles narrow-but-tall
+/// pages (e.g. infographics that exceed 8192 pixels in height while being
+/// only ~1000 pixels wide).
+const MAX_MASK_RASTER_PIXELS: u64 = 64 * 1024 * 1024;
 
 /// Rasterize a soft mask form's display list into a `MaskRaster`.
 ///
@@ -4527,7 +4530,7 @@ fn rasterize_mask(
     if raster_w == 0 || raster_h == 0 {
         return None;
     }
-    if raster_w > MAX_MASK_RASTER_DIM || raster_h > MAX_MASK_RASTER_DIM {
+    if (raster_w as u64) * (raster_h as u64) > MAX_MASK_RASTER_PIXELS {
         return None;
     }
 

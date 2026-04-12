@@ -521,9 +521,57 @@ impl ViewerApp {
         if new_zoom <= 1.0 {
             self.pan_offset = Vec2::ZERO;
         }
+
+        // Clamp to valid bounds — the zoom formula can overshoot
+        self.clamp_pan(self.central_available);
     }
 
-    /// Render the visible viewport of the current page and return/update the texture.
+    /// Adjust pan offset so the viewport center stays fixed when the window
+    /// resizes or zoom changes.
+    ///
+    /// Without this, `pan_offset` (computed for the old available/scale) can
+    /// push the image entirely off-screen after a resize.  This method
+    /// rescales pan so the same image-space center point remains centered,
+    /// then clamps to valid bounds.
+    fn clamp_pan(&mut self, available: Vec2) {
+        if self.pages.is_empty() || self.zoom <= 1.0 {
+            self.pan_offset = Vec2::ZERO;
+            return;
+        }
+        let page = &self.pages[self.current_page];
+        let fit = self.fit_scale(available, page);
+        let effective_scale = fit * self.zoom;
+        let img_w = page.width as f32 * effective_scale;
+        let img_h = page.height as f32 * effective_scale;
+
+        // Rescale pan relative to the old available size so the viewport
+        // center stays at the same image-space position.
+        let old = self.last_available;
+        if old.x > 0.0 && img_w > available.x {
+            // Image-space center that was visible: center_img = -pan + old_avail/2
+            // New pan to keep same center: pan_new = -(center_img - new_avail/2)
+            //   = pan_old + (new_avail - old_avail) / 2
+            self.pan_offset.x += (available.x - old.x) / 2.0;
+        }
+        if old.y > 0.0 && img_h > available.y {
+            self.pan_offset.y += (available.y - old.y) / 2.0;
+        }
+
+        // Clamp to valid bounds
+        if img_w <= available.x {
+            self.pan_offset.x = 0.0;
+        } else {
+            let max_scroll = img_w - available.x;
+            self.pan_offset.x = self.pan_offset.x.clamp(-max_scroll, 0.0);
+        }
+        if img_h <= available.y {
+            self.pan_offset.y = 0.0;
+        } else {
+            let max_scroll = img_h - available.y;
+            self.pan_offset.y = self.pan_offset.y.clamp(-max_scroll, 0.0);
+        }
+    }
+
     /// Compute the current viewport parameters for the active page.
     fn compute_viewport_params(&self, available: Vec2, ppp: f32) -> Option<(ViewportParams, f64)> {
         if self.pages.is_empty() {
@@ -837,11 +885,14 @@ impl ViewerApp {
                     self.inflight_params = None;
                     // Viewport render done — spawn full-page render in background
                     self.spawn_fullpage_render(ctx, available, ppp);
-                    // If viewport moved since we spawned, handle it
+                    // If viewport moved since we spawned, mark dirty but
+                    // don't cancel — let the next process_async_render cycle
+                    // handle it naturally. Calling request_render here would
+                    // cancel the freshly completed render and reset debounce,
+                    // which with layout oscillations creates an infinite loop.
                     if let Some((vp, _)) = self.compute_viewport_params(available, ppp) {
                         if !self.cache_matches(&vp) {
                             self.render_dirty = true;
-                            self.request_render();
                         } else {
                             self.render_dirty = false;
                         }
@@ -935,14 +986,16 @@ impl ViewerApp {
         self.render_requested_at = None;
 
         let egui_ctx = ctx.clone();
-        rayon::spawn(move || {
+        // Use std::thread (not rayon::spawn) so the render isn't blocked
+        // behind a cancelled render that's still holding the rayon pool
+        // in a par_iter().collect() call.
+        std::thread::spawn(move || {
             let result = stet_render::render_region_prepared_parallel_cancellable(
                 &dl, &prep, vp_clone.vp_x, vp_clone.vp_y, vp_clone.vp_w, vp_clone.vp_h,
                 vp_clone.pixel_w, vp_clone.pixel_h, dpi, Some(&icc), Some(&img_cache), no_aa,
                 &cancel,
             );
             let Some(rgba) = result else {
-                // Cancelled — don't send result
                 egui_ctx.request_repaint();
                 return;
             };
@@ -1305,11 +1358,13 @@ impl eframe::App for ViewerApp {
             if self.zoom > 1.01 {
                 if i.key_pressed(egui::Key::ArrowUp) {
                     self.pan_offset.y += 50.0;
+                    self.clamp_pan(self.central_available);
                     self.render_dirty = true;
                     self.request_render();
                 }
                 if i.key_pressed(egui::Key::ArrowDown) {
                     self.pan_offset.y -= 50.0;
+                    self.clamp_pan(self.central_available);
                     self.render_dirty = true;
                     self.request_render();
                 }
@@ -1334,6 +1389,7 @@ impl eframe::App for ViewerApp {
                         let delta = current_pos - last_pos;
                         if delta.length_sq() > 0.0 {
                             self.pan_offset += delta;
+                            self.clamp_pan(self.central_available);
                             self.render_dirty = true;
                             self.request_render();
                         }
@@ -1386,10 +1442,15 @@ impl eframe::App for ViewerApp {
                 self.central_available = available;
                 let page_idx = self.current_page;
 
-                // Detect window resize — re-render if available area changed
+                // Detect window resize — mark dirty so the next idle
+                // cycle spawns a render for the new viewport.  Do NOT
+                // cancel in-flight renders or reset the debounce timer:
+                // egui layout oscillations (status bar text changes) can
+                // fire this every frame, and cancelling every frame would
+                // prevent any render from ever completing.
                 if (available - self.last_available).length_sq() > 1.0 {
+                    self.clamp_pan(available);
                     self.render_dirty = true;
-                    self.request_render();
                     self.last_available = available;
                 }
 
@@ -1423,23 +1484,45 @@ impl eframe::App for ViewerApp {
                     let img_origin = origin
                         + egui::vec2(center_x + self.pan_offset.x, center_y + self.pan_offset.y);
 
-                    // Checkerboard background for the full image area
+                    // Check if the cached texture rect is visible on screen.
+                    // After zoom/resize, the stale cached viewport may map to
+                    // coordinates entirely off-screen, leaving a blank page
+                    // until the re-render completes. In that case, stretch the
+                    // texture to fill the full image area as a placeholder.
+                    let tex_origin = img_origin + egui::vec2(tex_x, tex_y);
+                    let visible_area = egui::Rect::from_min_size(origin, available);
+                    let tex_rect_candidate = egui::Rect::from_min_size(
+                        tex_origin,
+                        egui::vec2(tex_w, tex_h),
+                    );
+
+                    let tex_visible = visible_area.intersects(tex_rect_candidate)
+                        && tex_w > 1.0 && tex_h > 1.0;
+
+                    // Background for the full image area
                     let full_rect = egui::Rect::from_min_size(img_origin, egui::vec2(img_w, img_h));
                     ui.painter()
                         .rect_filled(full_rect, 0.0, egui::Color32::from_gray(200));
 
-                    // Draw the viewport texture, sized by the viewport's device
-                    // coords mapped to screen space (egui scales the texture to fit)
-                    let tex_rect = egui::Rect::from_min_size(
-                        img_origin + egui::vec2(tex_x, tex_y),
-                        egui::vec2(tex_w, tex_h),
-                    );
-                    ui.painter().image(
-                        cached.texture.id(),
-                        tex_rect,
-                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                        egui::Color32::WHITE,
-                    );
+                    if tex_visible {
+                        // Draw at the correct viewport position
+                        ui.painter().image(
+                            cached.texture.id(),
+                            tex_rect_candidate,
+                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                            egui::Color32::WHITE,
+                        );
+                    } else {
+                        // Stale texture is off-screen — stretch it to fill the
+                        // full image area as a blurry placeholder until the
+                        // re-render arrives.
+                        ui.painter().image(
+                            cached.texture.id(),
+                            full_rect,
+                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                            egui::Color32::WHITE,
+                        );
+                    }
                 } else if let Some(ref tex) = self.transition_texture {
                     // New page not yet rendered — show previous page's texture
                     // centered at fit-to-window size to avoid black flash
