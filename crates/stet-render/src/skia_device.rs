@@ -4782,6 +4782,43 @@ fn transform_path_by_matrix(path: &PsPath, m: &Matrix) -> PsPath {
 }
 
 /// Render a tiled pattern fill.
+/// Bilinear downscale of premultiplied RGBA image data.
+///
+/// Used to pre-scale pattern tile images when the device-space tile is smaller
+/// than the image resolution, since tiny-skia's `draw_pixmap` doesn't handle
+/// sub-1.0 scale transforms.
+fn bilinear_prescale(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
+    let mut dst = vec![0u8; (dw * dh * 4) as usize];
+    for dy in 0..dh {
+        let sy_f = (dy as f64 + 0.5) * sh as f64 / dh as f64 - 0.5;
+        let sy0 = sy_f.floor().max(0.0) as u32;
+        let sy1 = (sy0 + 1).min(sh - 1);
+        let fy = (sy_f - sy0 as f64) as f32;
+        let ify = 1.0 - fy;
+        for dx in 0..dw {
+            let sx_f = (dx as f64 + 0.5) * sw as f64 / dw as f64 - 0.5;
+            let sx0 = sx_f.floor().max(0.0) as u32;
+            let sx1 = (sx0 + 1).min(sw - 1);
+            let fx = (sx_f - sx0 as f64) as f32;
+            let ifx = 1.0 - fx;
+
+            let i00 = (sy0 * sw + sx0) as usize * 4;
+            let i10 = (sy0 * sw + sx1) as usize * 4;
+            let i01 = (sy1 * sw + sx0) as usize * 4;
+            let i11 = (sy1 * sw + sx1) as usize * 4;
+            let di = (dy * dw + dx) as usize * 4;
+            for c in 0..4 {
+                dst[di + c] = (src[i00 + c] as f32 * ifx * ify
+                    + src[i10 + c] as f32 * fx * ify
+                    + src[i01 + c] as f32 * ifx * fy
+                    + src[i11 + c] as f32 * fx * fy)
+                    .round() as u8;
+            }
+        }
+    }
+    dst
+}
+
 fn render_pattern_fill(
     pixmap: &mut Pixmap,
     band_state: &mut BandState,
@@ -5053,16 +5090,88 @@ fn render_pattern_fill(
         // Simple tile path: tile elements have identity CTMs.
         // Manually apply the pattern matrix + tile offset for each element.
         // Only handles Fill, Stroke, Image, and Clip.
+
+        // Pre-process Image elements: convert to RGBA once and pre-scale if
+        // the combined transform would require downscaling (scale < 1.0).
+        // tiny-skia's draw_pixmap doesn't handle sub-1.0 scale transforms.
+        struct PreprocessedImage {
+            rgba: Vec<u8>,
+            width: u32,
+            height: u32,
+            /// Transform from pixel coords to pattern space, possibly adjusted
+            /// to account for pre-scaling.
+            img_transform: Transform,
+        }
+        let tile_elements = params.tile.elements();
+        let mut preprocessed: Vec<Option<PreprocessedImage>> = Vec::with_capacity(tile_elements.len());
+        // Tile transform scale components (constant across all tiles)
+        let tt_sx = (pm.a * sx_f) as f32;
+        let tt_sy = (pm.d * sy_f) as f32;
+        let tt_kx = (pm.c * sx_f) as f32;
+        let tt_ky = (pm.b * sy_f) as f32;
+        for elem in tile_elements {
+            if let DisplayElement::Image { sample_data, params: ip } = elem {
+                let iw = ip.width;
+                let ih = ip.height;
+                if iw > 0 && ih > 0 {
+                    let mut rgba = samples_to_rgba(sample_data, ip, ctx.icc, ctx.opm_zero_transparent);
+                    if ip.mask_color.is_some() {
+                        apply_mask_color_rgba(&mut rgba, sample_data, ip);
+                    }
+                    let expected = (iw * ih * 4) as usize;
+                    if rgba.len() >= expected {
+                        if let Some(inv) = ip.image_matrix.invert() {
+                            let combined_mat = ip.ctm.concat(&inv);
+                            let t = to_transform(&combined_mat);
+                            // Check effective scale: t maps image pixels → pattern space,
+                            // tile_transform maps pattern space → device space.
+                            let test = t.post_concat(Transform::from_row(tt_sx, tt_ky, tt_kx, tt_sy, 0.0, 0.0));
+                            let eff_sx = (test.sx * test.sx + test.ky * test.ky).sqrt();
+                            let eff_sy = (test.kx * test.kx + test.sy * test.sy).sqrt();
+                            if eff_sx < 0.99 || eff_sy < 0.99 {
+                                // Pre-scale image to avoid sub-1.0 draw_pixmap transform.
+                                // Use floor so the scaled image is smaller than the
+                                // device-space tile, ensuring the adjusted scale >= 1.0.
+                                let tw = (iw as f32 * eff_sx).floor().max(1.0) as u32;
+                                let th = (ih as f32 * eff_sy).floor().max(1.0) as u32;
+                                let scaled = bilinear_prescale(&rgba, iw, ih, tw, th);
+                                // Adjust transform: pre-multiply a scale that maps new
+                                // pixel coords back to original pixel coords
+                                let adj = Transform::from_scale(iw as f32 / tw as f32, ih as f32 / th as f32);
+                                preprocessed.push(Some(PreprocessedImage {
+                                    rgba: scaled, width: tw, height: th,
+                                    img_transform: t.pre_concat(adj),
+                                }));
+                            } else {
+                                preprocessed.push(Some(PreprocessedImage {
+                                    rgba, width: iw, height: ih,
+                                    img_transform: t,
+                                }));
+                            }
+                        } else {
+                            preprocessed.push(None);
+                        }
+                    } else {
+                        preprocessed.push(None);
+                    }
+                } else {
+                    preprocessed.push(None);
+                }
+                // Note: only Image elements push to preprocessed, so img_idx
+                // in the tile loop correctly indexes this array.
+            }
+        }
+
         for tv in tile_y_start..tile_y_end {
             for tu in tile_x_start..tile_x_end {
                 let pat_offset_x = tu as f64 * params.xstep;
                 let pat_offset_y = tv as f64 * params.ystep;
 
                 let tile_transform = Transform::from_row(
-                    (pm.a * sx_f) as f32,
-                    (pm.b * sy_f) as f32,
-                    (pm.c * sx_f) as f32,
-                    (pm.d * sy_f) as f32,
+                    tt_sx,
+                    tt_ky,
+                    tt_kx,
+                    tt_sy,
                     ((pm.a * pat_offset_x + pm.c * pat_offset_y + pm.tx - dev_vp_x) * sx_f) as f32,
                     ((pm.b * pat_offset_x + pm.d * pat_offset_y + pm.ty - dev_vp_y) * sy_f) as f32,
                 );
@@ -5083,7 +5192,8 @@ fn render_pattern_fill(
                     })
                 };
                 let mut tile_clip: Option<Mask> = bbox_clip;
-                for elem in params.tile.elements() {
+                let mut img_idx = 0usize;
+                for elem in tile_elements {
                     let clip_ref = tile_clip.as_ref();
                     match elem {
                         DisplayElement::Clip { path, params: cp } => {
@@ -5150,59 +5260,28 @@ fn render_pattern_fill(
                                 tile_buf.stroke_path(&skp, &paint, &stroke, combined, clip_ref);
                             }
                         }
-                        DisplayElement::Image {
-                            sample_data,
-                            params: ip,
-                        } => {
-                            let iw = ip.width;
-                            let ih = ip.height;
-                            if iw > 0 && ih > 0 {
-                                let mut rgba = samples_to_rgba(sample_data, ip, ctx.icc, ctx.opm_zero_transparent);
-                                if ip.mask_color.is_some() {
-                                    apply_mask_color_rgba(&mut rgba, sample_data, ip);
-                                }
-                                let expected = (iw * ih * 4) as usize;
-                                if rgba.len() >= expected {
-                                    if let Some(inv) = ip.image_matrix.invert() {
-                                        let combined_mat = ip.ctm.concat(&inv);
-                                        let t = to_transform(&combined_mat);
-                                        let combined = t.post_concat(tile_transform);
-                                        if let Some(img_ref) =
-                                            stet_tiny_skia::PixmapRef::from_bytes(&rgba, iw, ih)
-                                        {
-                                            let paint = stet_tiny_skia::PixmapPaint {
-                                                opacity: 1.0,
-                                                blend_mode: BlendMode::SourceOver,
-                                                quality: stet_tiny_skia::FilterQuality::Nearest,
-                                            };
-                                            tile_buf.draw_pixmap(
-                                                0,
-                                                0,
-                                                img_ref,
-                                                &paint,
-                                                combined,
-                                                clip_ref,
-                                            );
-                                            // Debug: check output for this tile render
-                                            {
-                                                let data = tile_buf.data();
-                                                let y0 = combined.ty.max(0.0) as usize;
-                                                let y1 = (combined.ty + ih as f32 * combined.sy).max(0.0) as usize;
-                                                let w = ctx.out_w as usize;
-                                                let mut count = 0;
-                                                for y in y0..y1.min(ctx.out_h as usize) {
-                                                    for x in 0..w {
-                                                        if data[(y * w + x) * 4 + 3] > 0 { count += 1; }
-                                                    }
-                                                }
-                                                if tile_transform.tx.abs() < 1.0 && tile_transform.ty.abs() < 1.0 {
-                                                    eprintln!("[CENTER] img_ty={:.1} combined_ty={:.3} strip_y=[{:.0},{:.0}] drawn_px={}", ip.ctm.ty, combined.ty, combined.ty, combined.ty + ih as f32 * combined.sy, count);
-                                                }
-                                            }
-                                        }
-                                    }
+                        DisplayElement::Image { .. } => {
+                            if let Some(ref pi) = preprocessed[img_idx] {
+                                let combined = pi.img_transform.post_concat(tile_transform);
+                                if let Some(img_ref) =
+                                    stet_tiny_skia::PixmapRef::from_bytes(&pi.rgba, pi.width, pi.height)
+                                {
+                                    let paint = stet_tiny_skia::PixmapPaint {
+                                        opacity: 1.0,
+                                        blend_mode: BlendMode::SourceOver,
+                                        quality: stet_tiny_skia::FilterQuality::Nearest,
+                                    };
+                                    tile_buf.draw_pixmap(
+                                        0,
+                                        0,
+                                        img_ref,
+                                        &paint,
+                                        combined,
+                                        clip_ref,
+                                    );
                                 }
                             }
+                            img_idx += 1;
                         }
                         _ => {}
                     }
