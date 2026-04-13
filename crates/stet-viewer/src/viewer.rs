@@ -940,8 +940,9 @@ impl ViewerApp {
         }
 
         // Debounce: wait until input has settled before spawning a render
-        if requested_at.elapsed() < RENDER_DEBOUNCE {
-            ctx.request_repaint_after(RENDER_DEBOUNCE - requested_at.elapsed());
+        let elapsed = requested_at.elapsed();
+        if elapsed < RENDER_DEBOUNCE {
+            ctx.request_repaint_after(RENDER_DEBOUNCE - elapsed);
             return;
         }
 
