@@ -3578,6 +3578,26 @@ impl<'a> ContentInterpreter<'a> {
             sample_data
         };
 
+        // In CMYK page groups, promote 1-BPC DeviceGray images to K-only
+        // DeviceCMYK so they go through the same ICC pipeline as CMYK fills.
+        // This ensures DeviceGray black matches CMYK(0,0,0,1) visually —
+        // required by tests like GWG 17.3 (JBIG2 compression).
+        let (sample_data, color_space, resolved_cs) = if !is_image_mask
+            && bpc == 1
+            && self.page_group_is_cmyk
+            && matches!(color_space, ImageColorSpace::DeviceGray)
+        {
+            let npixels = (width * height) as usize;
+            let mut cmyk = vec![0u8; npixels * 4];
+            for i in 0..npixels {
+                let g = sample_data.get(i).copied().unwrap_or(0);
+                cmyk[i * 4 + 3] = 255 - g; // K = 1 - gray
+            }
+            (cmyk, ImageColorSpace::DeviceCMYK, Some(ResolvedColorSpace::DeviceCMYK))
+        } else {
+            (sample_data, color_space, resolved_cs)
+        };
+
         // Convert ICCBased image data through ICC profile if available
         let (sample_data, color_space) = if !is_image_mask {
             if let Some(ref rcs) = resolved_cs {
