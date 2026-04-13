@@ -3705,6 +3705,45 @@ impl<'a> ContentInterpreter<'a> {
         let image_matrix =
             Matrix::new(width as f64, 0.0, 0.0, -(height as f64), 0.0, height as f64);
 
+        // For K-only Indexed/DeviceCMYK palettes (grayscale images encoded as
+        // CMYK), narrow painted_channels to CMYK_K so the overprint renderer
+        // only paints the K channel.  This preserves spot-color contributions
+        // on C/M/Y underneath — required by GWG 3.1 (Gray Image Overprint).
+        // Non-K palettes keep CMYK_ALL so all channels are painted, matching
+        // the PDF spec rule that OPM 1 per-channel zeroing does not apply to
+        // Indexed color spaces (required by GWG 1.0 h/i).
+        let painted_channels_override =
+            if let ImageColorSpace::Indexed { base, hival, lookup } = &color_space {
+                if matches!(
+                    base.as_ref(),
+                    ImageColorSpace::DeviceCMYK | ImageColorSpace::ICCBased { n: 4, .. }
+                ) {
+                    let n_entries = (*hival as usize + 1).min(lookup.len() / 4);
+                    let is_k_only = n_entries > 0
+                        && (0..n_entries).all(|i| {
+                            let off = i * 4;
+                            lookup.get(off).copied().unwrap_or(0) == 0
+                                && lookup.get(off + 1).copied().unwrap_or(0) == 0
+                                && lookup.get(off + 2).copied().unwrap_or(0) == 0
+                        });
+                    if is_k_only {
+                        stet_graphics::device::CMYK_K
+                    } else {
+                        stet_graphics::device::CMYK_ALL
+                    }
+                } else {
+                    resolved_cs
+                        .as_ref()
+                        .map(painted_channels_for_cs)
+                        .unwrap_or(self.gstate.fill_painted_channels)
+                }
+            } else {
+                resolved_cs
+                    .as_ref()
+                    .map(painted_channels_for_cs)
+                    .unwrap_or(self.gstate.fill_painted_channels)
+            };
+
         let image_params = ImageParams {
             width,
             height,
@@ -3718,10 +3757,7 @@ impl<'a> ContentInterpreter<'a> {
             blend_mode: self.gstate.blend_mode,
             overprint: self.gstate.overprint,
             overprint_mode: self.gstate.overprint_mode,
-            painted_channels: resolved_cs
-                .as_ref()
-                .map(painted_channels_for_cs)
-                .unwrap_or(self.gstate.fill_painted_channels),
+            painted_channels: painted_channels_override,
         };
 
         // When an SMask is present, emit as SoftMasked so the renderer scales
