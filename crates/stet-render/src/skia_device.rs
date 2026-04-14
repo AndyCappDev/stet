@@ -8498,7 +8498,19 @@ pub fn render_region_prepared(
     let scale_y = pixel_h as f64 / vp_h;
     let effective_dpi = dpi * scale_x;
 
-    let mut pixmap = Pixmap::new(pixel_w, pixel_h).expect("Failed to create viewport pixmap");
+    // Allocate a pixmap with the same OVERLAP padding as the banded page
+    // renderer. This is essential for matching the banded baseline: the page
+    // pipeline always allocates `band_h + 2*BAND_OVERLAP` rows, even for a
+    // single-band render. tiny-skia's `Mask::fill_path` chooses between
+    // edge-clipped and unclipped rasterization based on whether the path
+    // bounds fit within the mask, and the two paths produce subtly different
+    // winding counts at some pixels. Without the OVERLAP padding here, the
+    // viewport pipeline rasterizes clip paths into a tighter mask than the
+    // banded pipeline does, producing 39 (and other counts) of edge-pixel
+    // divergences on samples like 1915_1.pdf.
+    const OVERLAP: u32 = 6;
+    let render_h = pixel_h + 2 * OVERLAP;
+    let mut pixmap = Pixmap::new(pixel_w, render_h).expect("Failed to create viewport pixmap");
     // Start transparent — white background composited after content rendering
     pixmap.fill(Color::TRANSPARENT);
 
@@ -8507,7 +8519,7 @@ pub fn render_region_prepared(
             == stet_graphics::display_list::GroupColorSpace::DeviceCMYK
         || has_cmyk_group(list)
     {
-        Some(vec![0.0f32; pixel_w as usize * pixel_h as usize * 4])
+        Some(vec![0.0f32; pixel_w as usize * render_h as usize * 4])
     } else {
         None
     };
@@ -8569,7 +8581,7 @@ pub fn render_region_prepared(
                 scale_x: sx,
                 scale_y: sy,
                 out_w: pixel_w,
-                out_h: pixel_h,
+                out_h: render_h,
                 effective_dpi,
                 icc,
                 image_cache,
@@ -8587,7 +8599,10 @@ pub fn render_region_prepared(
 
     // Composite onto white background
     composite_onto_white(pixmap.data_mut());
-    pixmap.data().to_vec()
+    // Extract only the requested pixel_h rows (skip the OVERLAP padding at the bottom).
+    let row_bytes = pixel_w as usize * 4;
+    let end = pixel_h as usize * row_bytes;
+    pixmap.data()[..end].to_vec()
 }
 
 /// Compute the number of bands and band height for viewport banding.
@@ -8651,11 +8666,20 @@ pub fn render_region_single_band(
         pixel_h - out_y_start
     };
 
-    // Add overlap above/below for anti-aliasing at seams
+    // Add overlap above/below for anti-aliasing at seams.
+    //
+    // The pixmap is always `band_h + 2*OVERLAP` rows — matching the page
+    // renderer (`render_banded_to_sink`) — even at the bottom band, where
+    // content rendering stops at `pixel_h`. Without this, the bottom band's
+    // pixmap is shorter than the page renderer's, and tiny-skia's
+    // `Mask::fill_path` rasterizes clip paths into a tighter mask, producing
+    // edge-pixel divergences from the banded baseline (39 pixels on
+    // 1915_1.pdf, etc.). The extra rows below `pixel_h` are unused for output
+    // but ensure mask-size-independent rasterization.
     const OVERLAP: u32 = 6;
     let render_y_start = out_y_start.saturating_sub(OVERLAP);
     let render_y_end = (out_y_start + actual_h + OVERLAP).min(pixel_h);
-    let render_h = render_y_end - render_y_start;
+    let render_h = band_h + 2 * OVERLAP;
     let overlap_top = out_y_start - render_y_start;
 
     // Source-space Y range for culling
@@ -9112,6 +9136,168 @@ pub fn render_to_rgba_viewport(
     )
 }
 
+/// Debug helper: format both bbox precomputations side-by-side.
+///
+/// Returns one line per element describing its Y-only bbox (used by the
+/// banded page pipeline) and its 2D bbox (used by the viewport pipeline).
+/// Elements that disagree on presence, or whose 2D bbox's Y extent differs
+/// from the Y-only bbox, are marked with `DIFF`.
+fn debug_bbox_lines(
+    list: &DisplayList,
+    dpi: f64,
+    depth: usize,
+    out: &mut Vec<String>,
+) {
+    let y_bboxes = precompute_bboxes(list, dpi);
+    let full_bboxes = precompute_full_bboxes(list, dpi);
+    let elements = list.elements();
+    let indent = "  ".repeat(depth);
+    for (i, elem) in elements.iter().enumerate() {
+        let kind = match elem {
+            DisplayElement::Fill { .. } => "Fill",
+            DisplayElement::Stroke { .. } => "Stroke",
+            DisplayElement::Image { .. } => "Image",
+            DisplayElement::AxialShading { .. } => "AxialShading",
+            DisplayElement::RadialShading { .. } => "RadialShading",
+            DisplayElement::MeshShading { .. } => "MeshShading",
+            DisplayElement::PatchShading { .. } => "PatchShading",
+            DisplayElement::PatternFill { .. } => "PatternFill",
+            DisplayElement::Group { .. } => "Group",
+            DisplayElement::SoftMasked { .. } => "SoftMasked",
+            DisplayElement::OcgGroup { .. } => "OcgGroup",
+            DisplayElement::Clip { .. } => "Clip",
+            DisplayElement::InitClip => "InitClip",
+            DisplayElement::ErasePage => "ErasePage",
+            DisplayElement::Text { .. } => "Text",
+        };
+        let yb = &y_bboxes[i];
+        let fb = &full_bboxes[i];
+        let mut diff = false;
+        if yb.is_some() != fb.is_some() {
+            diff = true;
+        }
+        if let (Some(yb), Some(fb)) = (yb, fb)
+            && ((yb.y_min - fb.y_min).abs() > 1e-9 || (yb.y_max - fb.y_max).abs() > 1e-9)
+        {
+            diff = true;
+        }
+        let yb_s = match yb {
+            Some(b) => format!("Y[{:8.3}..{:8.3}]", b.y_min, b.y_max),
+            None => "Y[None]".to_string(),
+        };
+        let fb_s = match fb {
+            Some(b) => format!(
+                "2D[x {:8.3}..{:8.3} y {:8.3}..{:8.3}]",
+                b.x_min, b.x_max, b.y_min, b.y_max
+            ),
+            None => "2D[None]".to_string(),
+        };
+        out.push(format!(
+            "{}{:4} {:15} {:30} {:55} {}",
+            indent,
+            i,
+            kind,
+            yb_s,
+            fb_s,
+            if diff { "DIFF" } else { "" }
+        ));
+        if let DisplayElement::Stroke { path, params } = elem {
+            let rp = path_full_bbox(path);
+            let m = &params.ctm;
+            out.push(format!(
+                "{}        ctm=[{:.4} {:.4} {:.4} {:.4} {:.4} {:.4}] lw={:.4} miter={:.4} raw={}",
+                indent,
+                m.a, m.b, m.c, m.d, m.tx, m.ty,
+                params.line_width, params.miter_limit,
+                match rp {
+                    Some(b) => format!(
+                        "x[{:.3}..{:.3}] y[{:.3}..{:.3}]",
+                        b.x_min, b.x_max, b.y_min, b.y_max
+                    ),
+                    None => "None".to_string(),
+                }
+            ));
+        }
+        if let DisplayElement::Clip { path, params } = elem {
+            let rp = path_full_bbox(path);
+            let m = &params.ctm;
+            out.push(format!(
+                "{}        clip ctm=[{:.4} {:.4} {:.4} {:.4} {:.4} {:.4}] rule={:?} raw={}",
+                indent,
+                m.a, m.b, m.c, m.d, m.tx, m.ty,
+                params.fill_rule,
+                match rp {
+                    Some(b) => format!(
+                        "x[{:.3}..{:.3}] y[{:.3}..{:.3}]",
+                        b.x_min, b.x_max, b.y_min, b.y_max
+                    ),
+                    None => "None".to_string(),
+                }
+            ));
+        }
+        if let DisplayElement::PatchShading { params } = elem {
+            out.push(format!(
+                "{}        patch ctm=[{:.4} {:.4} {:.4} {:.4} {:.4} {:.4}] bbox={:?} patches={}",
+                indent,
+                params.ctm.a, params.ctm.b, params.ctm.c, params.ctm.d,
+                params.ctm.tx, params.ctm.ty,
+                params.bbox,
+                params.patches.len()
+            ));
+            if !params.patches.is_empty() {
+                let patch = &params.patches[0];
+                // Compute device-space bbox of patch points
+                let mut x_min = f64::INFINITY;
+                let mut y_min = f64::INFINITY;
+                let mut x_max = f64::NEG_INFINITY;
+                let mut y_max = f64::NEG_INFINITY;
+                for &(px, py) in &patch.points {
+                    let (dx, dy) = params.ctm.transform_point(px, py);
+                    x_min = x_min.min(dx);
+                    y_min = y_min.min(dy);
+                    x_max = x_max.max(dx);
+                    y_max = y_max.max(dy);
+                }
+                out.push(format!(
+                    "{}        patch[0] pts={} dev x[{:.3}..{:.3}] y[{:.3}..{:.3}]",
+                    indent,
+                    patch.points.len(),
+                    x_min, x_max, y_min, y_max
+                ));
+            }
+        }
+        if let DisplayElement::Group { elements: inner, params } = elem {
+            out.push(format!(
+                "{}        group bbox={:?} iso={} ko={} alpha={} bm={} cs={:?}",
+                indent,
+                params.bbox, params.isolated, params.knockout, params.alpha, params.blend_mode,
+                params.color_space
+            ));
+            debug_bbox_lines(inner, dpi, depth + 1, out);
+        }
+        if let DisplayElement::SoftMasked { content, params, .. } = elem {
+            out.push(format!(
+                "{}        softmasked bbox={:?}",
+                indent, params.bbox
+            ));
+            debug_bbox_lines(content, dpi, depth + 1, out);
+        }
+        if let DisplayElement::OcgGroup { elements: inner, default_visible, .. } = elem {
+            out.push(format!(
+                "{}        ocg default_visible={}",
+                indent, default_visible
+            ));
+            debug_bbox_lines(inner, dpi, depth + 1, out);
+        }
+    }
+}
+
+pub fn debug_bbox_comparison(list: &DisplayList, dpi: f64) -> Vec<String> {
+    let mut out = Vec::new();
+    debug_bbox_lines(list, dpi, 0, &mut out);
+    out
+}
+
 /// In-memory page sink that collects RGBA rows into a Vec.
 struct MemorySink {
     data: Vec<u8>,
@@ -9170,7 +9356,13 @@ pub fn render_region(
     let epochs = build_viewport_epochs(list, &bboxes);
     let clip_seen = precompute_clip_seen(list);
 
-    let mut pixmap = Pixmap::new(pixel_w, pixel_h).expect("Failed to create viewport pixmap");
+    // OVERLAP padding to match `render_banded_to_sink`. See the comment in
+    // `render_region_prepared` for why this is required for tiny-skia
+    // mask-rasterization parity with the page renderer.
+    const OVERLAP: u32 = 6;
+    let render_h = pixel_h + 2 * OVERLAP;
+
+    let mut pixmap = Pixmap::new(pixel_w, render_h).expect("Failed to create viewport pixmap");
     pixmap.fill(Color::TRANSPARENT);
 
     let cmyk_buf = if has_overprint_elements(list)
@@ -9178,7 +9370,7 @@ pub fn render_region(
             == stet_graphics::display_list::GroupColorSpace::DeviceCMYK
         || has_cmyk_group(list)
     {
-        Some(vec![0.0f32; pixel_w as usize * pixel_h as usize * 4])
+        Some(vec![0.0f32; pixel_w as usize * render_h as usize * 4])
     } else {
         None
     };
@@ -9241,7 +9433,7 @@ pub fn render_region(
                 scale_x: sx,
                 scale_y: sy,
                 out_w: pixel_w,
-                out_h: pixel_h,
+                out_h: render_h,
                 effective_dpi,
                 icc,
                 image_cache,
@@ -9258,7 +9450,10 @@ pub fn render_region(
     }
 
     composite_onto_white(pixmap.data_mut());
-    pixmap.data().to_vec()
+    // Extract only the requested pixel_h rows (skip OVERLAP padding).
+    let row_bytes = pixel_w as usize * 4;
+    let end = pixel_h as usize * row_bytes;
+    pixmap.data()[..end].to_vec()
 }
 /// Copy a rectangular region from parent pixmap into a smaller crop pixmap.
 fn copy_backdrop_crop(

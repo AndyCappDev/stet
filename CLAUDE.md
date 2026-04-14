@@ -74,6 +74,11 @@ Always implement the **proper, long-term fix** for issues. Never settle for a "q
 
 When modifying `DisplayElement`, `DisplayList`, or any of the param structs in `stet-graphics/src/device.rs` (e.g., `FillParams`, `StrokeParams`, `ImageParams`, `ImageColorSpace`, `ShadingColorSpace`, `SpotColorSpace`), **you must update `docs/DISPLAY-LIST.md`** to reflect the change. This includes adding, removing, or renaming element variants, fields, or color space types.
 
+Also keep the debug helpers in sync:
+- `debug_bbox_lines` in `crates/stet-render/src/skia_device.rs` — pattern-matches every `DisplayElement` variant to label kinds and recurse into container variants (`Group`, `SoftMasked`, `OcgGroup`). If you add, remove, or rename a variant, update this function.
+- `crates/stet-cli/examples/dump_bboxes.rs` — debug binary that invokes `debug_bbox_comparison`. No changes typically needed, but verify it still builds after variant changes.
+- The bbox computations `precompute_bboxes` (Y-only, banded) and `precompute_full_bboxes` (2D, viewport) in the same file must both handle every variant consistently — divergence between the two produced the `1915_1.pdf` viewport-pipeline bug.
+
 ### Code Style
 
 - Use `cargo fmt` (rustfmt) for formatting
