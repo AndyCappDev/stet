@@ -738,6 +738,22 @@ fn select_band_height(w: u32, h: u32) -> u32 {
     band
 }
 
+/// True if this display list contains any `Clip`/`InitClip` op, recursively
+/// descending into `OcgGroup` / `Group` / `SoftMasked` children. When an
+/// `OcgGroup` wraps clip ops, Y-bbox culling would skip the whole group for
+/// bands its paint content doesn't overlap, but the clip state changes inside
+/// must still be applied — otherwise subsequent top-level elements inherit a
+/// stale clip. Use this to force such `OcgGroup`s to always be processed.
+fn contains_clip_op(list: &DisplayList) -> bool {
+    list.elements().iter().any(|e| match e {
+        DisplayElement::Clip { .. } | DisplayElement::InitClip => true,
+        DisplayElement::OcgGroup { elements, .. } => contains_clip_op(elements),
+        DisplayElement::Group { elements, .. } => contains_clip_op(elements),
+        DisplayElement::SoftMasked { content, .. } => contains_clip_op(content),
+        _ => false,
+    })
+}
+
 /// Compute conservative Y bounding boxes for display list elements.
 /// Returns `None` for elements that must always be processed (Clip, InitClip, ErasePage).
 ///
@@ -771,6 +787,32 @@ fn precompute_bboxes(list: &DisplayList, dpi: f64) -> Vec<Option<YBBox>> {
                 y_min: params.bbox[1],
                 y_max: params.bbox[3],
             }),
+            DisplayElement::OcgGroup {
+                elements,
+                default_visible,
+                ..
+            } => {
+                // Hidden groups without clip ops contribute nothing — cull.
+                // (Hidden + has clip ops is handled below: we return paint
+                // bounds so the epoch has correct extent, and the band loop
+                // skips per-element culling for OcgGroups so the clip ops
+                // always execute.)
+                if !*default_visible && !contains_clip_op(elements) {
+                    return None;
+                }
+                let child_bboxes = precompute_bboxes(elements, dpi);
+                let mut y_min = f64::INFINITY;
+                let mut y_max = f64::NEG_INFINITY;
+                for cb in child_bboxes.into_iter().flatten() {
+                    y_min = y_min.min(cb.y_min);
+                    y_max = y_max.max(cb.y_max);
+                }
+                if y_min <= y_max {
+                    Some(YBBox { y_min, y_max })
+                } else {
+                    None
+                }
+            }
             _ => None, // Clip, InitClip, ErasePage: always process
         })
         .collect()
@@ -1418,6 +1460,9 @@ pub fn build_icc_cache_for_list(
                 scan_elements(content.elements(), seen, cache);
                 scan_elements(mask.elements(), seen, cache);
             }
+            if let DisplayElement::OcgGroup { elements: sub, .. } = element {
+                scan_elements(sub.elements(), seen, cache);
+            }
             // Shading color spaces
             let shading_cs = match element {
                 DisplayElement::AxialShading { params } => Some(&params.color_space),
@@ -1483,6 +1528,9 @@ fn register_shading_icc_profiles(list: &DisplayList, cache: &mut IccCache) {
             if let DisplayElement::SoftMasked { content, mask, .. } = element {
                 scan(content.elements(), cache);
                 scan(mask.elements(), cache);
+            }
+            if let DisplayElement::OcgGroup { elements: sub, .. } = element {
+                scan(sub.elements(), cache);
             }
             let shading_cs = match element {
                 DisplayElement::AxialShading { params } => Some(&params.color_space),
@@ -2825,6 +2873,33 @@ fn render_element(
             );
         }
         DisplayElement::Text { .. } => {} // PDF-only, ignored by rasterizer
+        DisplayElement::OcgGroup {
+            elements,
+            default_visible,
+            ..
+        } => {
+            // Visible groups render every child. OFF-by-default groups still
+            // apply Clip/InitClip so the band's clip state stays in sync —
+            // otherwise a transient clip from the previous group would leak
+            // into the next visible one. Paint ops are skipped; that's what
+            // "hidden layer" means.
+            let visible = *default_visible;
+            for (idx, elem) in elements.elements().iter().enumerate() {
+                if !visible
+                    && !matches!(
+                        elem,
+                        DisplayElement::Clip { .. } | DisplayElement::InitClip
+                    )
+                {
+                    continue;
+                }
+                let elem_ctx = RenderContext {
+                    elem_idx: idx,
+                    ..*ctx
+                };
+                render_element(pixmap, band_state, elem, &elem_ctx);
+            }
+        }
     }
 }
 
@@ -4751,6 +4826,21 @@ fn transform_element_ctm(elem: &DisplayElement, pm: &Matrix) -> DisplayElement {
             }
             DisplayElement::PatternFill { params: p }
         }
+        DisplayElement::OcgGroup {
+            elements,
+            ocg_id,
+            default_visible,
+        } => {
+            let mut t = DisplayList::new();
+            for child in elements.elements() {
+                t.push(transform_element_ctm(child, pm));
+            }
+            DisplayElement::OcgGroup {
+                elements: t,
+                ocg_id: *ocg_id,
+                default_visible: *default_visible,
+            }
+        }
         other => other.clone(),
     }
 }
@@ -5959,6 +6049,11 @@ fn has_cmyk_group(list: &DisplayList) -> bool {
                     return true;
                 }
             }
+            DisplayElement::OcgGroup { elements, .. } => {
+                if has_cmyk_group(elements) {
+                    return true;
+                }
+            }
             _ => {}
         }
     }
@@ -6079,6 +6174,12 @@ fn group_content_is_native_cmyk(elements: &DisplayList) -> bool {
                 // handles soft masks correctly.
                 return false;
             }
+            DisplayElement::OcgGroup { elements: sub, .. } => {
+                if !group_content_is_native_cmyk(sub) {
+                    return false;
+                }
+                found_paint = true;
+            }
         }
     }
     found_paint
@@ -6130,6 +6231,11 @@ fn has_overprint_elements(list: &DisplayList) -> bool {
             }
             DisplayElement::SoftMasked { content, mask, .. } => {
                 if has_overprint_elements(content) || has_overprint_elements(mask) {
+                    return true;
+                }
+            }
+            DisplayElement::OcgGroup { elements, .. } => {
+                if has_overprint_elements(elements) {
                     return true;
                 }
             }
@@ -7479,7 +7585,18 @@ fn render_banded_to_sink(
             }
 
             for i in epoch.start_idx..epoch.end_idx {
-                if let Some(ref bbox) = bboxes[i]
+                // OcgGroups containing Clip/InitClip must always be
+                // processed so their clip-state changes apply for every
+                // band — per-element Y culling would strand clip mutations
+                // inside a group whose paint content doesn't touch the
+                // current band.
+                let force_process = matches!(
+                    &elements[i],
+                    DisplayElement::OcgGroup { elements: inner, .. }
+                        if contains_clip_op(inner)
+                );
+                if !force_process
+                    && let Some(ref bbox) = bboxes[i]
                     && (bbox.y_max <= render_y_start as f64 || bbox.y_min >= render_y_end_f)
                 {
                     continue;
@@ -7650,6 +7767,40 @@ fn precompute_full_bboxes(list: &DisplayList, dpi: f64) -> Vec<Option<BBox2D>> {
                 x_max: params.bbox[2],
                 y_max: params.bbox[3],
             }),
+            DisplayElement::OcgGroup {
+                elements,
+                default_visible,
+                ..
+            } => {
+                // Hidden groups without clip ops contribute nothing. Hidden
+                // + has clip ops is force-processed at the render-loop layer
+                // (see the viewport render_region_prepared loop) so we still
+                // return the paint bounds here for correct epoch bbox.
+                if !*default_visible && !contains_clip_op(elements) {
+                    return None;
+                }
+                let child_bboxes = precompute_full_bboxes(elements, dpi);
+                let mut x_min = f64::INFINITY;
+                let mut y_min = f64::INFINITY;
+                let mut x_max = f64::NEG_INFINITY;
+                let mut y_max = f64::NEG_INFINITY;
+                for cb in child_bboxes.into_iter().flatten() {
+                    x_min = x_min.min(cb.x_min);
+                    y_min = y_min.min(cb.y_min);
+                    x_max = x_max.max(cb.x_max);
+                    y_max = y_max.max(cb.y_max);
+                }
+                if x_min <= x_max && y_min <= y_max {
+                    Some(BBox2D {
+                        x_min,
+                        y_min,
+                        x_max,
+                        y_max,
+                    })
+                } else {
+                    None
+                }
+            }
             _ => None, // Clip, InitClip, ErasePage: always process
         })
         .collect()
@@ -7882,6 +8033,12 @@ fn compute_paint_bounds(list: &DisplayList, _dpi: f64) -> Option<BBox2D> {
                 );
             }
             DisplayElement::Text { .. } => {} // PDF-only, ignored by rasterizer
+            DisplayElement::OcgGroup { .. } => {
+                // OCG groups have no inherent bbox; their children's bounds
+                // are unknown without recursion. Conservative: skip here —
+                // if the mask form contains OCG layers, the parent bbox cap
+                // provides a sufficient upper bound.
+            }
         }
     }
     union
@@ -8356,7 +8513,15 @@ pub fn render_region_prepared(
 
         #[allow(clippy::needless_range_loop)]
         for i in epoch.start_idx..epoch.end_idx {
-            if let Some(ref bbox) = prepared.bboxes[i]
+            // OcgGroups with Clip/InitClip must always be processed — see
+            // the banded renderer for the rationale.
+            let force_process = matches!(
+                &elements[i],
+                DisplayElement::OcgGroup { elements: inner, .. }
+                    if contains_clip_op(inner)
+            );
+            if !force_process
+                && let Some(ref bbox) = prepared.bboxes[i]
                 && (bbox.x_max <= vp_x
                     || bbox.x_min >= vp_x_max
                     || bbox.y_max <= vp_y
@@ -8513,7 +8678,16 @@ pub fn render_region_single_band(
 
         #[allow(clippy::needless_range_loop)]
         for i in epoch.start_idx..epoch.end_idx {
-            if let Some(ref bbox) = prepared.bboxes[i]
+            // OcgGroups containing Clip/InitClip must always be processed
+            // regardless of this band's bbox — see the full-page banded
+            // renderer for the rationale.
+            let force_process = matches!(
+                &elements[i],
+                DisplayElement::OcgGroup { elements: inner, .. }
+                    if contains_clip_op(inner)
+            );
+            if !force_process
+                && let Some(ref bbox) = prepared.bboxes[i]
                 && (bbox.x_max <= vp_x
                     || bbox.x_min >= vp_x_max
                     || bbox.y_max <= src_y_min
@@ -8963,8 +9137,16 @@ pub fn render_region(
         }
 
         for i in epoch.start_idx..epoch.end_idx {
+            // OcgGroups with Clip/InitClip must always be processed — see
+            // render_region_prepared for the rationale.
+            let force_process = matches!(
+                &elements[i],
+                DisplayElement::OcgGroup { elements: inner, .. }
+                    if contains_clip_op(inner)
+            );
             // Element-level culling
-            if let Some(ref bbox) = bboxes[i]
+            if !force_process
+                && let Some(ref bbox) = bboxes[i]
                 && (bbox.x_max <= vp_x
                     || bbox.x_min >= vp_x_max
                     || bbox.y_max <= vp_y

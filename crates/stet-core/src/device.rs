@@ -89,6 +89,50 @@ pub trait OutputDevice {
                 DisplayElement::Group { .. } | DisplayElement::SoftMasked { .. } => {
                     // Groups/SoftMasked are handled by the banded renderer (SkiaDevice).
                 }
+                DisplayElement::OcgGroup {
+                    elements,
+                    default_visible,
+                    ..
+                } => {
+                    // Clip ops always apply so subsequent top-level elements
+                    // inherit the right clip region, even when the layer is
+                    // hidden; paint ops are gated on visibility.
+                    let visible = *default_visible;
+                    for elem in elements.elements() {
+                        match elem {
+                            DisplayElement::Clip { path, params } => {
+                                self.clip_path(path, params)
+                            }
+                            DisplayElement::InitClip => self.init_clip(),
+                            _ if !visible => {}
+                            DisplayElement::Fill { path, params } => self.fill_path(path, params),
+                            DisplayElement::Stroke { path, params } => {
+                                self.stroke_path(path, params)
+                            }
+                            DisplayElement::Image {
+                                sample_data,
+                                params,
+                            } => self.draw_image(sample_data, params),
+                            DisplayElement::ErasePage => self.erase_page(),
+                            DisplayElement::AxialShading { params } => {
+                                self.paint_axial_shading(params)
+                            }
+                            DisplayElement::RadialShading { params } => {
+                                self.paint_radial_shading(params)
+                            }
+                            DisplayElement::MeshShading { params } => {
+                                self.paint_mesh_shading(params)
+                            }
+                            DisplayElement::PatchShading { params } => {
+                                self.paint_patch_shading(params)
+                            }
+                            DisplayElement::PatternFill { params } => {
+                                self.paint_pattern_fill(params)
+                            }
+                            _ => {}
+                        }
+                    }
+                }
             }
         }
         self.show_page(output_path)
@@ -185,6 +229,30 @@ pub fn replay_to_device(list: &DisplayList, device: &mut dyn OutputDevice) {
             }
             DisplayElement::SoftMasked { content, .. } => {
                 replay_to_device(content, device);
+            }
+            DisplayElement::OcgGroup {
+                elements,
+                default_visible,
+                ..
+            } => {
+                if *default_visible {
+                    replay_to_device(elements, device);
+                } else {
+                    // Still replay Clip/InitClip so they affect subsequent
+                    // top-level elements (see OcgGroup render path for the
+                    // rationale).
+                    for elem in elements.elements() {
+                        match elem {
+                            DisplayElement::Clip { path, params } => {
+                                device.clip_path(path, params);
+                            }
+                            DisplayElement::InitClip => {
+                                device.init_clip();
+                            }
+                            _ => {}
+                        }
+                    }
+                }
             }
         }
     }

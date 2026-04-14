@@ -42,6 +42,23 @@ use stet_graphics::display_list::{
 };
 use stet_graphics::icc::IccCache;
 
+/// One entry on the marked-content stack. Pushed on every BDC/BMC, popped
+/// on every EMC — so the stack stays balanced regardless of how OC and
+/// non-OC blocks interleave. Only `Ocg` entries swap the display list;
+/// `Other` entries carry no state but must still exist so EMC pops the
+/// correct frame.
+enum MarkedContentFrame {
+    /// An `/OC BDC` block: parent display list was swapped out, and the
+    /// matching EMC wraps the collected children in an `OcgGroup`.
+    Ocg {
+        parent_list: DisplayList,
+        ocg_id: u32,
+        default_visible: bool,
+    },
+    /// Any other BDC (non-OC property reference) or BMC.
+    Other,
+}
+
 /// An operand on the content stream operand stack.
 #[derive(Clone, Debug)]
 pub enum Operand {
@@ -160,9 +177,11 @@ pub struct ContentInterpreter<'a> {
     pattern_cache: std::collections::HashMap<(u32, u16), TilingPattern>,
     /// Object numbers of Optional Content Groups that are OFF by default.
     ocg_off: std::collections::HashSet<u32>,
-    /// Nesting depth of suppressed optional content blocks (BDC/EMC).
-    /// When > 0, all operators except BDC/BMC/EMC are skipped.
-    oc_suppression_depth: u32,
+    /// Stack of marked-content frames. Every BDC/BMC pushes one frame,
+    /// every EMC pops one — keeping the stack balanced even when OC and
+    /// non-OC sections interleave. Only `Ocg` frames actually swap the
+    /// display list; `Other` frames are placeholders.
+    mc_stack: Vec<MarkedContentFrame>,
     /// HashMap index of the current resource dict's ColorSpace sub-dict.
     /// Built lazily on first sc/scn access to avoid O(n) PdfDict scans.
     cs_index: Option<std::collections::HashMap<Vec<u8>, PdfObj>>,
@@ -215,7 +234,7 @@ impl<'a> ContentInterpreter<'a> {
             overprint_enabled,
             pattern_cache: std::collections::HashMap::new(),
             ocg_off: ocg_off.clone(),
-            oc_suppression_depth: 0,
+            mc_stack: Vec::new(),
             cs_index: None,
             form_cull_y: None,
             bt_culled: false,
@@ -274,6 +293,17 @@ impl<'a> ContentInterpreter<'a> {
     /// Consume the interpreter and return the display list.
     pub fn into_display_list(mut self) -> DisplayList {
         self.flush_soft_mask();
+        // Close any unmatched marked-content blocks from unbalanced BDC/EMC
+        while let Some(frame) = self.mc_stack.pop() {
+            if let MarkedContentFrame::Ocg { parent_list, ocg_id, default_visible } = frame {
+                let ocg_list = std::mem::replace(&mut self.display_list, parent_list);
+                self.display_list.push(DisplayElement::OcgGroup {
+                    elements: ocg_list,
+                    ocg_id,
+                    default_visible,
+                });
+            }
+        }
         self.display_list
     }
 
@@ -438,6 +468,7 @@ impl<'a> ContentInterpreter<'a> {
         let saved_gstate = self.gstate.clone();
         let saved_stack_depth = self.gstate_stack.len();
         let saved_resources = self.resources.clone();
+        let saved_mc_stack = std::mem::take(&mut self.mc_stack);
         // Set up resources from the form
         if let Some(res_obj) = form_dict.get(b"Resources")
             && let Ok(PdfObj::Dict(d)) = self.resolver.deref(res_obj)
@@ -468,6 +499,7 @@ impl<'a> ContentInterpreter<'a> {
         self.gstate_stack.truncate(saved_stack_depth);
         self.content_stream_ctm = saved_content_stream_ctm;
         self.resources = saved_resources;
+        self.mc_stack = saved_mc_stack;
         self.gstate = saved_gstate;
 
         // Restore clip in display list (annotation may have modified clip state)
@@ -1078,47 +1110,6 @@ impl<'a> ContentInterpreter<'a> {
             return Ok(());
         }
 
-        // Skip rendering operators inside suppressed optional content blocks,
-        // but still process state-setting operators so the graphics state is
-        // correct when the block ends. Marked content operators always execute
-        // to maintain proper nesting.
-        if self.oc_suppression_depth > 0 {
-            match op {
-                b"BDC" | b"DP" => {
-                    // Nested BDC inside suppressed block: increment depth
-                    self.operand_stack.pop();
-                    self.operand_stack.pop();
-                    self.oc_suppression_depth += 1;
-                    return Ok(());
-                }
-                b"BMC" | b"MP" => {
-                    self.operand_stack.pop();
-                    self.oc_suppression_depth += 1;
-                    return Ok(());
-                }
-                b"EMC" => {
-                    self.oc_suppression_depth -= 1;
-                    return Ok(());
-                }
-                // State-setting operators: let these through so text/graphics
-                // state is correct for content after the suppressed block.
-                b"Tc" | b"Tw" | b"Tz" | b"TL" | b"Tf" | b"Tr" | b"Ts"
-                | b"Td" | b"TD" | b"Tm" | b"T*" | b"BT" | b"ET"
-                | b"q" | b"Q" | b"cm" | b"gs"
-                | b"g" | b"G" | b"rg" | b"RG" | b"k" | b"K"
-                | b"cs" | b"CS" | b"sc" | b"SC" | b"scn" | b"SCN"
-                | b"w" | b"J" | b"j" | b"M" | b"d" | b"ri" | b"i" => {
-                    // Fall through to normal operator dispatch
-                }
-                // Rendering operators: skip with operand cleanup.
-                // Includes path construction (m/l/c/re/h), painting (S/f/B/n),
-                // text showing (Tj/TJ/'/"), images (Do/BI/ID/EI), shading (sh).
-                _ => {
-                    self.operand_stack.clear();
-                    return Ok(());
-                }
-            }
-        }
         // Skip text operators inside a culled BT/ET block (offscreen in large forms)
         if self.bt_culled {
             if op == b"ET" {
@@ -1253,15 +1244,37 @@ impl<'a> ContentInterpreter<'a> {
             // Shading
             b"sh" => self.op_sh(),
 
-            // Marked content with optional content group (OCG) support
-            b"BMC" | b"MP" => {
+            // Marked content with optional content group (OCG) support.
+            // BDC/BMC open a section that must be closed by EMC; MP/DP are
+            // single-shot marked points with no closing operator.
+            b"BMC" => {
+                self.operand_stack.pop();
+                self.mc_stack.push(MarkedContentFrame::Other);
+                Ok(())
+            }
+            b"MP" => {
                 self.operand_stack.pop();
                 Ok(())
             }
-            b"BDC" | b"DP" => self.op_bdc(),
+            b"DP" => {
+                self.operand_stack.pop();
+                self.operand_stack.pop();
+                Ok(())
+            }
+            b"BDC" => self.op_bdc(),
             b"EMC" => {
-                if self.oc_suppression_depth > 0 {
-                    self.oc_suppression_depth -= 1;
+                if let Some(MarkedContentFrame::Ocg {
+                    parent_list,
+                    ocg_id,
+                    default_visible,
+                }) = self.mc_stack.pop()
+                {
+                    let ocg_list = std::mem::replace(&mut self.display_list, parent_list);
+                    self.display_list.push(DisplayElement::OcgGroup {
+                        elements: ocg_list,
+                        ocg_id,
+                        default_visible,
+                    });
                 }
                 Ok(())
             }
@@ -2631,6 +2644,7 @@ impl<'a> ContentInterpreter<'a> {
         let saved_font = self.current_font.clone();
         let saved_in_text = self.in_text;
         let saved_content_stream_ctm = self.content_stream_ctm;
+        let saved_mc_stack = std::mem::take(&mut self.mc_stack);
 
         self.gstate.ctm = trm;
         // Pattern Matrix maps pattern space to the "default coordinate system
@@ -2652,6 +2666,7 @@ impl<'a> ContentInterpreter<'a> {
         self.current_font = saved_font;
         self.in_text = saved_in_text;
         self.content_stream_ctm = saved_content_stream_ctm;
+        self.mc_stack = saved_mc_stack;
         // Restore state: truncate any extra gstate_stack entries left by
         // unmatched q/Q inside the CharProc (e.g., if the EI parser consumed Q).
         self.gstate_stack.truncate(stack_depth_before + 1);
@@ -2836,31 +2851,57 @@ impl<'a> ContentInterpreter<'a> {
 
     // === Marked content operators ===
 
-    /// Handle BDC (begin marked content with properties) / DP (define property).
-    /// Checks for Optional Content Group references and suppresses content
-    /// inside OCG blocks that are OFF by default.
+    /// Handle BDC (begin marked content with properties). Checks for Optional
+    /// Content Group references and wraps content inside OCG blocks in an
+    /// `OcgGroup` display list element for deferred visibility filtering at
+    /// render time. Every BDC pushes a frame onto `mc_stack` — only `/OC`
+    /// BDCs are `Ocg` frames; other BDCs are `Other` placeholders so the
+    /// stack stays balanced with EMC.
     fn op_bdc(&mut self) -> Result<(), PdfError> {
         let props = self.operand_stack.pop();
         let tag = self.operand_stack.pop();
 
-        // Only check for OC (optional content) tag
         let is_oc = matches!(&tag, Some(Operand::Name(n)) if n == b"OC");
-        if !is_oc || self.ocg_off.is_empty() {
+        if !is_oc {
+            self.mc_stack.push(MarkedContentFrame::Other);
             return Ok(());
         }
 
         // The properties operand is a name referencing /Properties in resources
+        let mut pushed = false;
         if let Some(Operand::Name(prop_name)) = props {
             if let Some(props_dict) = self.resolve_resource_subdict(b"Properties") {
                 if let Some(ocg_obj) = props_dict.get(&prop_name) {
-                    if self.is_ocg_off(ocg_obj) {
-                        self.oc_suppression_depth = 1;
-                    }
+                    let ocg_id = self.ocg_obj_num(ocg_obj);
+                    let is_off = self.is_ocg_off(ocg_obj);
+                    let parent_list =
+                        std::mem::replace(&mut self.display_list, DisplayList::new());
+                    self.mc_stack.push(MarkedContentFrame::Ocg {
+                        parent_list,
+                        ocg_id,
+                        default_visible: !is_off,
+                    });
+                    pushed = true;
                 }
             }
         }
+        if !pushed {
+            // OC BDC without a resolvable properties entry still opens a
+            // section that EMC must close.
+            self.mc_stack.push(MarkedContentFrame::Other);
+        }
 
         Ok(())
+    }
+
+    /// Extract the PDF object number from an OCG reference. Returns 0 for
+    /// inline dicts or non-reference objects.
+    fn ocg_obj_num(&self, ocg_obj: &PdfObj) -> u32 {
+        if let Some((obj_num, _)) = ocg_obj.as_ref() {
+            obj_num
+        } else {
+            0
+        }
     }
 
     /// Check whether an OCG/OCMD reference is OFF.
@@ -2952,11 +2993,23 @@ impl<'a> ContentInterpreter<'a> {
             .as_dict()
             .ok_or(PdfError::Other("XObject is not a stream".into()))?;
 
-        // Check Optional Content visibility on the XObject itself
-        if let Some(oc_obj) = dict.get(b"OC") {
-            if self.is_ocg_off(oc_obj) {
-                return Ok(());
-            }
+        // Check Optional Content visibility on the XObject itself.
+        // Instead of suppressing content, wrap it in an OcgGroup so visibility
+        // can be toggled at render time.
+        let xobj_ocg_info: Option<(u32, bool)> = dict.get(b"OC").map(|oc_obj| {
+            (self.ocg_obj_num(oc_obj), !self.is_ocg_off(oc_obj))
+        });
+
+        let mut wrapped = false;
+        if let Some((ocg_id, default_visible)) = xobj_ocg_info {
+            let parent_list =
+                std::mem::replace(&mut self.display_list, DisplayList::new());
+            self.mc_stack.push(MarkedContentFrame::Ocg {
+                parent_list,
+                ocg_id,
+                default_visible,
+            });
+            wrapped = true;
         }
 
         let subtype = dict.get_name(b"Subtype").unwrap_or(b"");
@@ -2965,6 +3018,24 @@ impl<'a> ContentInterpreter<'a> {
             b"Form" => self.handle_form_xobject(&xobj_ref_clone, dict)?,
             _ => {}
         }
+
+        // Close the XObject OCG wrapper if one was opened.
+        if wrapped {
+            if let Some(MarkedContentFrame::Ocg {
+                parent_list,
+                ocg_id,
+                default_visible,
+            }) = self.mc_stack.pop()
+            {
+                let ocg_list = std::mem::replace(&mut self.display_list, parent_list);
+                self.display_list.push(DisplayElement::OcgGroup {
+                    elements: ocg_list,
+                    ocg_id,
+                    default_visible,
+                });
+            }
+        }
+
         Ok(())
     }
 
@@ -4273,6 +4344,7 @@ impl<'a> ContentInterpreter<'a> {
         let saved_current_font = self.current_font.take();
         let saved_cs_index = self.cs_index.take(); // invalidate — form has its own resources
         let saved_content_stream_ctm = self.content_stream_ctm;
+        let saved_mc_stack = std::mem::take(&mut self.mc_stack);
         // Save and clear current path — forms start with an empty path per PDF spec.
         // Without this, an unconsumed path from the parent content stream leaks into
         // the form and gets painted by the first paint operator inside the form.
@@ -4408,6 +4480,7 @@ impl<'a> ContentInterpreter<'a> {
         self.current_path = saved_path;
         self.current_point = saved_point;
         self.subpath_start = saved_subpath;
+        self.mc_stack = saved_mc_stack;
         if let Some(saved) = self.gstate_stack.pop() {
             let old_clip_version = self.gstate.clip_path_version;
             self.gstate = saved;
@@ -5458,6 +5531,7 @@ impl<'a> ContentInterpreter<'a> {
         let saved_display_list = std::mem::replace(&mut self.display_list, DisplayList::new());
         let saved_scope = self.soft_mask_scope.take();
         let saved_content_stream_ctm = self.content_stream_ctm;
+        let saved_mc_stack = std::mem::take(&mut self.mc_stack);
 
         // Apply form matrix to CTM
         self.gstate.ctm = self.gstate.ctm.concat(&form_matrix);
@@ -5513,6 +5587,7 @@ impl<'a> ContentInterpreter<'a> {
         self.font_cache = saved_font_cache;
         self.current_font = saved_current_font2;
         self.cs_index = saved_cs_index2;
+        self.mc_stack = saved_mc_stack;
         if let Some(saved) = self.gstate_stack.pop() {
             self.gstate = saved;
         }
@@ -5971,6 +6046,7 @@ impl<'a> ContentInterpreter<'a> {
         let saved_path = std::mem::take(&mut self.current_path);
         let saved_point = self.current_point.take();
         let saved_subpath = self.subpath_start.take();
+        let saved_mc_stack = std::mem::take(&mut self.mc_stack);
 
         self.gstate.ctm = Matrix::identity();
         self.content_stream_ctm = Matrix::identity();
@@ -6000,6 +6076,7 @@ impl<'a> ContentInterpreter<'a> {
         self.current_path = saved_path;
         self.current_point = saved_point;
         self.subpath_start = saved_subpath;
+        self.mc_stack = saved_mc_stack;
         if let Some(saved) = self.gstate_stack.pop() {
             self.gstate = saved;
         }

@@ -156,6 +156,16 @@ pub enum DisplayElement {
         elements: DisplayList,
         params: GroupParams,
     },
+    /// PDF Optional Content Group (layer). Children are rendered only when
+    /// the layer is visible. Visibility defaults to `default_visible` and
+    /// can be overridden at render time via a set of hidden layer IDs.
+    OcgGroup {
+        elements: DisplayList,
+        /// PDF object number identifying the OCG (or OCMD).
+        ocg_id: u32,
+        /// Whether this layer is visible in the default configuration.
+        default_visible: bool,
+    },
     /// Soft-masked content: render mask form to grayscale, multiply with content alpha.
     SoftMasked {
         mask: DisplayList,

@@ -663,6 +663,19 @@ mod tests {
                         eprintln!("{indent}  CONTENT:");
                         dump(content, depth + 2);
                     }
+                    DisplayElement::OcgGroup {
+                        elements,
+                        ocg_id,
+                        default_visible,
+                    } => {
+                        eprintln!(
+                            "{indent}[{i}] OcgGroup id={} visible={} children={}",
+                            ocg_id,
+                            default_visible,
+                            elements.len()
+                        );
+                        dump(elements, depth + 1);
+                    }
                 }
             }
         }

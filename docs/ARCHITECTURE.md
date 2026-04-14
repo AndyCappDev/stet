@@ -17,6 +17,61 @@ The **display list** is the meeting point. Both pipelines produce a
 `Vec<DisplayElement>` per page, and every output format — PNG, PDF,
 viewport render, or custom — consumes display lists.
 
+## Why a Display List?
+
+Most rendering engines (including GhostScript and hayro) interpret and
+render in a single pass: the interpreter calls directly into the
+rasterizer, and once a page is drawn the source must be re-interpreted to
+draw it again. stet takes a fundamentally different approach — the
+interpreter produces an intermediate **display list**, and rendering is a
+separate step that consumes it.
+
+This decoupling is the foundation of stet's architecture, and it enables
+capabilities that are difficult or impossible to retrofit onto a
+direct-rendering pipeline:
+
+- **Viewport rendering.** Render any rectangular region of a page at any
+  zoom level without re-interpreting the source. The display list is data
+  that can be queried, culled, and projected onto arbitrary viewports. This
+  is what powers the desktop viewer's pan/zoom and the WASM viewer's
+  on-demand tile rendering.
+
+- **Multiple outputs from one interpretation.** A single interpretation
+  pass produces a display list that can be rasterized to PNG, converted to
+  PDF, displayed in a viewer, or consumed by a custom output device — all
+  without re-parsing the source.
+
+- **Pipelined multi-page rendering.** The interpreter can build page N+1's
+  display list while the rasterizer is still rendering page N in the
+  background. Display lists are self-contained values that can be handed
+  off across threads.
+
+- **Cancellation and streaming.** Banded rendering processes the display
+  list in chunks. Cancellation between bands is trivial — check a flag
+  and bail. There is no deeply-nested interpreter state to unwind.
+
+- **Layer toggling.** The display list architecture makes it straightforward
+  to tag elements with their PDF Optional Content Group (OCG) and filter by
+  layer visibility at render time — no re-interpretation required. (Not yet
+  implemented; the OCG parsing and BDC/EMC tracking infrastructure is in
+  place.)
+
+- **Caching.** Store the display list and re-render at different
+  DPI, zoom, or viewport without re-parsing. The prepare/cache pipeline
+  (bounding boxes, image conversion, ICC transforms) is computed once and
+  reused across renders.
+
+- **Custom output devices.** The display list is a public, documented data
+  structure. Building a new output format (SVG, TIFF, accessibility tree,
+  diffing tool) is a matter of iterating over elements — no need to hook
+  into interpreter internals.
+
+The tradeoff is that display lists use memory and replay has per-element
+overhead. For pages with tens of thousands of elements, a direct-rendering
+engine avoids that cost. But the design ceiling is higher: the display list
+is data you can index, filter, cache, and parallelize over. A
+direct-rendering pipeline is a black box that runs start-to-finish.
+
 ## The Display List
 
 See also the [Display List Reference](DISPLAY-LIST.md) for complete field

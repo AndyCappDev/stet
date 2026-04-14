@@ -189,6 +189,20 @@ onto the parent with the specified blend mode and opacity. Supports
 isolated and knockout semantics. Produced by the PDF reader; the
 PostScript interpreter does not generate these.
 
+### OcgGroup (PDF only)
+
+```rust
+OcgGroup { elements: DisplayList, ocg_id: u32, default_visible: bool }
+```
+
+A PDF Optional Content Group (layer). Children are rendered only when the
+layer is visible. `ocg_id` is the PDF object number of the OCG (or OCMD)
+dictionary. `default_visible` records whether the layer is ON in the
+document's default configuration. Produced by the PDF reader for `/OC BDC`
+marked content blocks and XObjects with `/OC` entries. The rasterizer
+currently renders all children unconditionally; layer toggling will be
+added in a future update.
+
 ### SoftMasked (PDF only)
 
 ```rust

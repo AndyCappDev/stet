@@ -19,6 +19,17 @@ The PostScript interpreter and PDF reader are independent — use either or
 both — but they produce the same display list type, so every output device
 and rendering path works with both sources.
 
+### Display List Architecture
+
+Unlike rendering engines that interpret and rasterize in a single pass,
+stet decouples the two: interpreters produce an intermediate **display
+list**, and rendering is a separate step that consumes it. This enables
+viewport rendering at arbitrary zoom without re-interpretation, pipelined
+multi-page rendering, trivial cancellation between render bands, multiple
+output formats from a single interpretation pass, and display list caching
+for repeated renders at different resolutions. See the
+[Architecture Guide](docs/ARCHITECTURE.md) for details.
+
 ## Features
 
 **PostScript Interpreter**
