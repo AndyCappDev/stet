@@ -180,6 +180,21 @@ fn main() {
                 no_aa,
                 output_profile_path,
                 page_filter,
+                false,
+            );
+        }
+        "viewport-png" => {
+            // Audit path: renders through the viewport pipeline instead of
+            // the banded page pipeline. Used by the visual test runner to
+            // exercise the viewer's render path against the same baselines.
+            run_png_mode(
+                dpi,
+                file_args,
+                no_icc,
+                no_aa,
+                output_profile_path,
+                page_filter,
+                true,
             );
         }
         "pdf" => {
@@ -218,13 +233,16 @@ fn main() {
         }
         other => {
             eprintln!("Error: unknown device '{}'", other);
-            eprintln!("Available devices: png, pdf, null, viewer");
+            eprintln!("Available devices: png, viewport-png, pdf, null, viewer");
             std::process::exit(1);
         }
     }
 }
 
-/// Run in PNG output mode (existing behavior).
+/// Run in PNG output mode. When `use_viewport` is true, rendering is routed
+/// through the viewport pipeline (same code path the interactive viewer
+/// uses) instead of the banded full-page pipeline — this is the audit mode
+/// behind `--device viewport-png`.
 fn run_png_mode(
     dpi_override: Option<f64>,
     file_args: Vec<String>,
@@ -232,11 +250,12 @@ fn run_png_mode(
     no_aa: bool,
     output_profile_path: Option<String>,
     page_filter: Option<std::collections::HashSet<i32>>,
+    use_viewport: bool,
 ) {
     // Check if all files are PDFs — use fast path (no PS interpreter needed)
     if !file_args.is_empty() && file_args.iter().all(|f| is_pdf_file(f)) {
         let dpi = dpi_override.unwrap_or(300.0);
-        run_pdf_input_png(dpi, &file_args, &page_filter, no_aa);
+        run_pdf_input_png(dpi, &file_args, &page_filter, no_aa, use_viewport);
         return;
     }
 
@@ -251,6 +270,7 @@ fn run_png_mode(
             dev.set_system_cmyk_bytes(bytes.clone());
         }
         dev.set_no_aa(no_aa);
+        dev.set_use_viewport_path(use_viewport);
         Box::new(dev)
     }));
 
@@ -1247,25 +1267,39 @@ fn render_dropped_pdf(
 
 /// Render PDF files to PNG output.
 /// Render a single PDF page to RGBA with configurable anti-aliasing.
+/// When `use_viewport` is true, rendering is routed through the viewport
+/// pipeline so visual tests can audit that path against the same baseline.
 fn render_pdf_page_to_rgba(
     doc: &PdfDocument,
     page: usize,
     dpi: f64,
     no_aa: bool,
+    use_viewport: bool,
 ) -> Result<(Vec<u8>, u32, u32), stet_pdf_reader::PdfError> {
     let (page_w, page_h) = doc.page_size(page)?;
     let scale = dpi / 72.0;
     let pixel_w = (page_w * scale).round() as u32;
     let pixel_h = (page_h * scale).round() as u32;
     let display_list = doc.render_page(page, dpi)?;
-    let rgba = stet_render::render_to_rgba(
-        &display_list,
-        pixel_w,
-        pixel_h,
-        dpi,
-        Some(doc.icc_cache()),
-        no_aa,
-    );
+    let rgba = if use_viewport {
+        stet_render::render_to_rgba_viewport(
+            &display_list,
+            pixel_w,
+            pixel_h,
+            dpi,
+            Some(doc.icc_cache()),
+            no_aa,
+        )
+    } else {
+        stet_render::render_to_rgba(
+            &display_list,
+            pixel_w,
+            pixel_h,
+            dpi,
+            Some(doc.icc_cache()),
+            no_aa,
+        )
+    };
     Ok((rgba, pixel_w, pixel_h))
 }
 
@@ -1274,6 +1308,7 @@ fn run_pdf_input_png(
     file_args: &[String],
     page_filter: &Option<std::collections::HashSet<i32>>,
     no_aa: bool,
+    use_viewport: bool,
 ) {
     let mut icc_cache = stet_graphics::icc::IccCache::new();
     icc_cache.search_system_cmyk_profile();
@@ -1309,7 +1344,7 @@ fn run_pdf_input_png(
                 continue;
             }
 
-            match render_pdf_page_to_rgba(&doc, page, dpi, no_aa) {
+            match render_pdf_page_to_rgba(&doc, page, dpi, no_aa, use_viewport) {
                 Ok((rgba, w, h)) => {
                     let out_path = if page_count == 1 {
                         format!("{}.png", output_base)

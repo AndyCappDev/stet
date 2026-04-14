@@ -50,13 +50,23 @@ STET_CLI = PROJECT_ROOT / "target" / "release" / "stet"
 
 
 def get_dirs():
-    """Get directory paths for visual tests."""
+    """Get directory paths for visual tests.
+
+    The banded PNG path is the authoritative baseline. The viewport path
+    is a second render of the same samples through the viewer's pipeline;
+    it's compared against the same baseline so drift between the two
+    paths flags a bug in whichever path diverged.
+    """
     base = PROJECT_ROOT / "visual_tests_pdf_png"
     return {
         "base": base,
         "baseline": base / "baseline",
+        # Banded PNG (existing paths — unchanged for back-compat).
         "current": base / "current",
         "diff": base / "diff",
+        # Viewport PNG (audit path).
+        "current_viewport": base / "current_viewport",
+        "diff_viewport": base / "diff_viewport",
         "timings": base / "baseline_timings.txt",
         "report": base / "report.html",
         "config": PROJECT_ROOT / "visual_tests_pdf_png.conf",
@@ -100,9 +110,15 @@ def get_sample_files(specific=None, exclude=None):
     return samples
 
 
-def render_one(pdf_file, output_dir, timeout, extra_flags):
+def render_one(pdf_file, output_dir, timeout, extra_flags, device="png"):
     """Render a single PDF file. Copies input to output dir, runs stet,
-    removes the copy, keeps the PNGs."""
+    removes the copy, keeps the PNGs.
+
+    `device` selects which stet rendering path to exercise. "png" is the
+    authoritative banded-page path (what baselines are generated from);
+    "viewport-png" is the audit path that routes through the same pipeline
+    the interactive viewer uses.
+    """
     name = pdf_file.stem
     sample_out = output_dir / name
     sample_out.mkdir(parents=True, exist_ok=True)
@@ -113,7 +129,7 @@ def render_one(pdf_file, output_dir, timeout, extra_flags):
 
     start = time.monotonic()
     try:
-        cmd = [str(STET_CLI), "--device", "png", "--dpi", "150"]
+        cmd = [str(STET_CLI), "--device", device, "--dpi", "150"]
         if extra_flags:
             cmd.extend(extra_flags)
         cmd.append(local_copy.name)
@@ -190,7 +206,8 @@ def _report_render_result(name, fname, pngs, elapsed, stderr_errors,
     timings[name] = elapsed
 
 
-def render_samples(samples, output_dir, timeout=60, extra_flags=None, jobs=1):
+def render_samples(samples, output_dir, timeout=60, extra_flags=None, jobs=1,
+                   device="png"):
     output_dir.mkdir(parents=True, exist_ok=True)
     results = {}
     timings = {}
@@ -201,7 +218,7 @@ def render_samples(samples, output_dir, timeout=60, extra_flags=None, jobs=1):
         for pdf_file in samples:
             print(f"  Rendering {pdf_file.name}...", end=" ", flush=True)
             name, fname, pngs, elapsed, stderr_errors = render_one(
-                pdf_file, output_dir, timeout, extra_flags)
+                pdf_file, output_dir, timeout, extra_flags, device)
             _report_render_result(name, fname, pngs, elapsed, stderr_errors,
                                   results, timings, errors)
     else:
@@ -210,7 +227,7 @@ def render_samples(samples, output_dir, timeout=60, extra_flags=None, jobs=1):
         with concurrent.futures.ProcessPoolExecutor(max_workers=jobs) as pool:
             future_to_file = {
                 pool.submit(render_one, pdf_file, output_dir, timeout,
-                            extra_flags): pdf_file
+                            extra_flags, device): pdf_file
                 for pdf_file in ordered
             }
             for future in concurrent.futures.as_completed(future_to_file):
@@ -357,27 +374,110 @@ document.addEventListener('keydown',function(e){if(e.key==='Escape')document.que
 </script>"""
 
 
-def generate_html_report(report_data, html_path, baseline_timings, current_timings,
+def _status_badge(status, pct):
+    if status == "pass":
+        return '<span style="color:green">PASS</span>'
+    if status == "fail":
+        return f'<span style="color:red">FAIL ({pct:.6f}%)</span>'
+    if status == "new":
+        return '<span style="color:blue">NEW</span>'
+    if status == "missing":
+        return '<span style="color:orange">MISSING</span>'
+    if status == "skip":
+        return '<span style="color:gray">SKIP</span>'
+    if status == "error":
+        return '<span style="color:red">ERROR</span>'
+    return f'<span style="color:gray">{status.upper()}</span>'
+
+
+def _images_block(pages, status, html_path_parent):
+    if not pages:
+        return ""
+    failed_indices = [i for i, (_, _, diff_p) in enumerate(pages) if diff_p is not None]
+    show_indices = failed_indices if (status == "fail" and failed_indices) else [0]
+    out = ""
+    for i in show_indices:
+        base_p, curr_p, diff_p = pages[i]
+        page_label = f"Page {i + 1}" if len(pages) > 1 else ""
+        base_rel = os.path.relpath(base_p, html_path_parent) if base_p else ""
+        curr_rel = os.path.relpath(curr_p, html_path_parent) if curr_p else ""
+        diff_rel = os.path.relpath(diff_p, html_path_parent) if diff_p else ""
+        if page_label:
+            out += f'<div style="margin:5px 0"><strong>{page_label}</strong></div>'
+        out += '<div style="display:flex;gap:10px;margin:5px 0">'
+        if base_rel:
+            out += f'<div><div>Baseline</div><img src="{base_rel}" style="max-width:300px" onclick="lb(this.src)"></div>'
+        if curr_rel:
+            out += f'<div><div>Current</div><img src="{curr_rel}" style="max-width:300px" onclick="lb(this.src)"></div>'
+        if diff_rel:
+            out += f'<div><div>Diff</div><img src="{diff_rel}" style="max-width:300px" onclick="lb(this.src)"></div>'
+        out += "</div>"
+    return out
+
+
+def generate_html_report(merged, html_path, baseline_timings, current_timings,
                          config_overrides=None, default_threshold=0,
                          baseline_wall_clock=None, current_wall_clock=None,
-                         compare_time=None):
-    # Summary stats
-    counts = {}
-    for _, status, _, _, _ in report_data:
-        counts[status] = counts.get(status, 0) + 1
-    total = len(report_data)
-    n_pass = counts.get("pass", 0)
-    n_fail = counts.get("fail", 0)
-    n_error = counts.get("error", 0)
-    n_new = counts.get("new", 0)
-    n_missing = counts.get("missing", 0)
-    n_skip = counts.get("skip", 0)
+                         compare_time=None, viewport_timings=None,
+                         viewport_wall_clock=None):
+    """Render the report. `merged` is a list of tuples
+    `(name, banded_entry, viewport_entry)` where each entry is the tuple
+    `(name, status, pct, pages, errs)` or `None` if the viewport pass was
+    skipped.
+
+    Both paths are diffed against the same baseline; the viewer's pipeline
+    is audited against the authoritative banded PNG output.
+    """
+    total = len(merged)
+
+    # Summary: worst-of-both status per sample, plus per-path counts.
+    worst_status_rank = {"error": 0, "fail": 1, "missing": 2, "new": 3, "skip": 4, "pass": 5}
+    n_pass = n_fail = n_error = n_new = n_missing = n_skip = 0
+    banded_counts = {"pass": 0, "fail": 0, "new": 0, "error": 0, "skip": 0, "missing": 0}
+    vp_counts = dict(banded_counts)
+    has_viewport = False
+    for _name, b_entry, vp_entry in merged:
+        b_status = b_entry[1]
+        banded_counts[b_status] = banded_counts.get(b_status, 0) + 1
+        statuses = [b_status]
+        if vp_entry is not None:
+            has_viewport = True
+            v_status = vp_entry[1]
+            vp_counts[v_status] = vp_counts.get(v_status, 0) + 1
+            statuses.append(v_status)
+        worst = min(statuses, key=lambda s: worst_status_rank.get(s, 6))
+        if worst == "pass":
+            n_pass += 1
+        elif worst == "fail":
+            n_fail += 1
+        elif worst == "error":
+            n_error += 1
+        elif worst == "new":
+            n_new += 1
+        elif worst == "missing":
+            n_missing += 1
+        elif worst == "skip":
+            n_skip += 1
 
     total_bt = sum(baseline_timings.values()) if baseline_timings else 0
     total_ct = sum(current_timings.values()) if current_timings else 0
+    total_vt = sum((viewport_timings or {}).values())
+
+    vp_summary_line = ""
+    if has_viewport:
+        vp_summary_line = f"""<div style="margin-top:4px">
+<strong>Per-path results:</strong>
+banded: <span style="color:green">{banded_counts['pass']} pass</span>,
+<span style="color:red">{banded_counts['fail']} fail</span>
+&nbsp;·&nbsp;
+viewport: <span style="color:green">{vp_counts['pass']} pass</span>,
+<span style="color:red">{vp_counts['fail']} fail</span>
+</div>"""
 
     summary = f"""<div class="summary">
-<div><strong>Total samples:</strong> {total}</div>
+<div><strong>Total samples:</strong> {total}
+&nbsp;—&nbsp; overall status uses the worse of banded vs viewport
+</div>
 <div style="margin-top:8px">
 <span style="color:green"><strong>{n_pass}</strong> passed</span>
 <span style="color:red"><strong>{n_fail}</strong> failed</span>
@@ -386,90 +486,92 @@ def generate_html_report(report_data, html_path, baseline_timings, current_timin
 <span style="color:orange"><strong>{n_missing}</strong> missing</span>
 <span style="color:gray"><strong>{n_skip}</strong> skipped</span>
 </div>
+{vp_summary_line}
 <div style="margin-top:8px">
 <strong>Baseline total:</strong> {format_duration(total_bt)} &nbsp;|&nbsp;
-<strong>Current total:</strong> {format_duration(total_ct)}
+<strong>Banded total:</strong> {format_duration(total_ct)}
+{"&nbsp;|&nbsp; <strong>Viewport total:</strong> " + format_duration(total_vt) if has_viewport else ""}
 </div>
 <div style="margin-top:4px">
 <strong>Baseline wall-clock:</strong> {format_duration(baseline_wall_clock) if baseline_wall_clock else "-"} &nbsp;|&nbsp;
-<strong>Current wall-clock:</strong> {format_duration(current_wall_clock) if current_wall_clock else "-"} &nbsp;|&nbsp;
+<strong>Banded wall-clock:</strong> {format_duration(current_wall_clock) if current_wall_clock else "-"}
+{"&nbsp;|&nbsp; <strong>Viewport wall-clock:</strong> " + format_duration(viewport_wall_clock) if (has_viewport and viewport_wall_clock is not None) else ""}
+&nbsp;|&nbsp;
 <strong>Comparison time:</strong> {format_duration(compare_time) if compare_time else "-"}
 </div>
 </div>"""
 
-    # Table rows (failures first, then sorted by name)
+    # Sort: samples where *either* path fails come first.
+    def _row_order(item):
+        _n, b, v = item
+        b_status = b[1]
+        v_status = v[1] if v is not None else "pass"
+        worst = min([b_status, v_status], key=lambda s: worst_status_rank.get(s, 6))
+        return (worst_status_rank.get(worst, 6), _n)
+
     rows = []
-    status_order = {"fail": 0, "error": 1, "skip": 2, "new": 3, "missing": 4, "pass": 5}
-    for name, status, pct, pages, errs in sorted(report_data, key=lambda r: (status_order.get(r[1], 5), r[0])):
-        if status == "pass":
-            badge = '<span style="color:green">PASS</span>'
-        elif status == "fail":
-            badge = f'<span style="color:red">FAIL ({pct:.6f}%)</span>'
-        elif status == "new":
-            badge = '<span style="color:blue">NEW</span>'
-        elif status == "missing":
-            badge = '<span style="color:orange">MISSING</span>'
-        elif status == "skip":
-            badge = '<span style="color:gray">SKIP (no pages)</span>'
-        elif status == "error":
-            badge = '<span style="color:red">ERROR</span>'
+    for name, b_entry, vp_entry in sorted(merged, key=_row_order):
+        _n, b_status, b_pct, b_pages, b_errs = b_entry
+        b_badge = _status_badge(b_status, b_pct)
+
+        if vp_entry is not None:
+            _vn, v_status, v_pct, v_pages, v_errs = vp_entry
+            v_badge = _status_badge(v_status, v_pct)
         else:
-            badge = f'<span style="color:gray">{status.upper()}</span>'
+            v_status, v_pct, v_pages, v_errs = "pass", 0.0, None, None
+            v_badge = "<em>(not run)</em>"
 
         bt = baseline_timings.get(name)
         ct = current_timings.get(name)
+        vt = (viewport_timings or {}).get(name)
         time_baseline = format_duration(bt) if bt is not None else "-"
-        time_current = format_duration(ct) if ct is not None else "-"
+        time_banded = format_duration(ct) if ct is not None else "-"
+        time_viewport = format_duration(vt) if vt is not None else "-"
 
         threshold = (config_overrides or {}).get(f"{name}.pdf", default_threshold)
         threshold_str = f"{threshold:g}%"
+        threshold_display = (
+            f'<span style="color:blue">{threshold_str}</span>'
+            if threshold > 0 else threshold_str
+        )
 
-        imgs = ""
-        if pages:
-            failed_indices = [i for i, (_, _, diff_p) in enumerate(pages) if diff_p is not None]
-            show_indices = failed_indices if (status == "fail" and failed_indices) else [0]
-            for i in show_indices:
-                base_p, curr_p, diff_p = pages[i]
-                page_label = f"Page {i + 1}" if len(pages) > 1 else ""
-                base_rel = os.path.relpath(base_p, html_path.parent) if base_p else ""
-                curr_rel = os.path.relpath(curr_p, html_path.parent) if curr_p else ""
-                diff_rel = os.path.relpath(diff_p, html_path.parent) if diff_p else ""
-                if page_label:
-                    imgs += f'<div style="margin:5px 0"><strong>{page_label}</strong></div>'
-                imgs += '<div style="display:flex;gap:10px;margin:5px 0">'
-                if base_rel:
-                    imgs += f'<div><div>Baseline</div><img src="{base_rel}" style="max-width:300px" onclick="lb(this.src)"></div>'
-                if curr_rel:
-                    imgs += f'<div><div>Current</div><img src="{curr_rel}" style="max-width:300px" onclick="lb(this.src)"></div>'
-                if diff_rel:
-                    imgs += f'<div><div>Diff</div><img src="{diff_rel}" style="max-width:300px" onclick="lb(this.src)"></div>'
-                imgs += "</div>"
+        def _diff_line(pct, status):
+            if pct is None:
+                return ""
+            color = "green" if pct <= threshold else "red"
+            return f'<span style="color:{color}">{pct:.4f}%</span>'
 
-        error_html = ""
-        if errs:
-            error_html = '<div style="margin-top:5px">'
+        page_count = len(b_pages) if b_pages else (len(v_pages) if v_pages else 0)
+        name_cell = f"{name}<br><br>Pages: {page_count}<br>Threshold: {threshold_display}"
+
+        b_imgs = _images_block(b_pages, b_status, html_path.parent)
+        v_imgs = _images_block(v_pages, v_status, html_path.parent) if vp_entry is not None else ""
+
+        def _err_block(errs):
+            if not errs:
+                return ""
+            out = '<div style="margin-top:5px">'
             for e in errs:
-                error_html += f'<pre style="color:red;margin:2px 0;white-space:pre-wrap">{html_mod.escape(e)}</pre>'
-            error_html += "</div>"
+                out += f'<pre style="color:red;margin:2px 0;white-space:pre-wrap">{html_mod.escape(e)}</pre>'
+            return out + "</div>"
 
-        page_count = len(pages) if pages else 0
-        threshold_display = f'<span style="color:blue">{threshold_str}</span>' if threshold > 0 else threshold_str
-        if pct is not None:
-            diff_color = "green" if pct <= threshold else "red"
-            diff_display = f'Diff: <span style="color:{diff_color}">{pct:.2f}%</span>'
+        banded_cell = (
+            f"{b_badge}<br>Diff: {_diff_line(b_pct, b_status)}<br>"
+            f"Time: {time_banded}{_err_block(b_errs)}{b_imgs}"
+        )
+        if vp_entry is not None:
+            viewport_cell = (
+                f"{v_badge}<br>Diff: {_diff_line(v_pct, v_status)}<br>"
+                f"Time: {time_viewport}{_err_block(v_errs)}{v_imgs}"
+            )
         else:
-            diff_display = ""
-        if page_count:
-            name_cell = f"{name}<br><br>Pages: {page_count}<br>Threshold: {threshold_display}"
-        else:
-            name_cell = f"{name}<br><br>Threshold: {threshold_display}"
-        if diff_display:
-            name_cell += f"<br>{diff_display}"
+            viewport_cell = "<em>not run</em>"
 
         rows.append(
-            f"<tr><td>{name_cell}</td><td>{badge}</td>"
-            f"<td>{time_baseline}</td><td>{time_current}</td>"
-            f"<td>{imgs}{error_html}</td></tr>"
+            f"<tr><td>{name_cell}</td>"
+            f"<td>Baseline<br>{time_baseline}</td>"
+            f"<td>{banded_cell}</td>"
+            f"<td>{viewport_cell}</td></tr>"
         )
 
     html = f"""<!DOCTYPE html>
@@ -480,11 +582,15 @@ def generate_html_report(report_data, html_path, baseline_timings, current_timin
 <h1>stet PDF Visual Regression Report</h1>
 {summary}
 <table>
-<thead><tr><th>Sample</th><th>Status</th><th>Baseline Time</th><th>Current Time</th><th>Images</th></tr></thead>
+<thead><tr>
+<th>Sample</th>
+<th>Baseline</th>
+<th>Banded PNG<br><small>(--device png)</small></th>
+<th>Viewport PNG<br><small>(--device viewport-png)</small></th>
+</tr></thead>
 <tbody>
 {"".join(rows)}
 </tbody>
-<tfoot><tr><td>Total</td><td></td><td>{format_duration(total_bt)}</td><td>{format_duration(total_ct)}</td><td></td></tr></tfoot>
 </table>
 {REPORT_JS}
 </body></html>"""
@@ -522,6 +628,54 @@ def cmd_baseline(args, dirs):
     return 0
 
 
+def _run_compare_pass(samples, results, render_errors, config_overrides,
+                      default_threshold, baseline_dir, diff_dir, jobs):
+    """Diff one set of rendered results against the baseline. Returns the
+    standard report_data list (one entry per sample)."""
+    compare_items = []
+    for name, current_pngs in sorted(results.items()):
+        compare_items.append((name, ".pdf", current_pngs, render_errors.get(name)))
+
+    report_data = []
+    if jobs == 1:
+        for name, ext, current_pngs, errs in compare_items:
+            print(f"  Comparing {name}{ext}...", end=" ", flush=True)
+            r = compare_one(name, ext, current_pngs, errs,
+                            default_threshold, config_overrides,
+                            baseline_dir, diff_dir)
+            _name, status, max_pct, page_data, _errs, msg = r
+            print(msg)
+            report_data.append((name, status, max_pct, page_data, _errs))
+    else:
+        def _page_count(item):
+            pngs = item[2]
+            return -(len(pngs) if isinstance(pngs, list) else 0)
+        ordered = sorted(compare_items, key=_page_count)
+        with concurrent.futures.ProcessPoolExecutor(max_workers=jobs) as pool:
+            futures = {
+                pool.submit(compare_one, name, ext, current_pngs, errs,
+                            default_threshold, config_overrides,
+                            baseline_dir, diff_dir): (name, ext)
+                for name, ext, current_pngs, errs in ordered
+            }
+            for future in concurrent.futures.as_completed(futures):
+                name, ext = futures[future]
+                _name, status, max_pct, page_data, _errs, msg = future.result()
+                print(f"  Compared {name}{ext}... {msg}")
+                report_data.append((name, status, max_pct, page_data, _errs))
+    return report_data
+
+
+def _summarise(report_data, label):
+    counts = {"pass": 0, "fail": 0, "new": 0, "error": 0, "skip": 0, "missing": 0}
+    for _, status, _, _, _ in report_data:
+        counts[status] = counts.get(status, 0) + 1
+    print(f"  {label}: {counts['pass']} passed, {counts['fail']} failed, "
+          f"{counts['skip']} skipped, {counts['new']} new, "
+          f"{counts['error']} errors")
+    return counts
+
+
 def cmd_compare(args, dirs):
     if Image is None:
         print("Error: Pillow is required for comparison. Install with: pip install Pillow")
@@ -536,83 +690,64 @@ def cmd_compare(args, dirs):
         print("No PDF sample files found.")
         return 1
 
-    if dirs["current"].exists():
-        shutil.rmtree(dirs["current"])
-    if dirs["diff"].exists():
-        shutil.rmtree(dirs["diff"])
+    for key in ("current", "diff", "current_viewport", "diff_viewport"):
+        if dirs[key].exists():
+            shutil.rmtree(dirs[key])
 
-    print(f"Rendering {len(samples)} PDF samples...")
-    results, current_timings, current_wall_clock, render_errors = render_samples(
+    # ── Banded PNG render (authoritative against baseline) ──
+    print(f"Rendering {len(samples)} PDF samples (banded PNG)...")
+    banded_results, current_timings, current_wall_clock, render_errors = render_samples(
         samples, dirs["current"], timeout=args.timeout, extra_flags=args.flags,
-        jobs=args.jobs)
+        jobs=args.jobs, device="png")
     baseline_timings, baseline_wall_clock = load_timings(dirs["timings"])
 
-    print("Comparing against baseline...")
+    # ── Viewport PNG render (audit against same baseline) ──
+    vp_results = {}
+    vp_timings = {}
+    vp_wall_clock = 0.0
+    vp_render_errors = {}
+    if not args.skip_viewport:
+        print(f"\nRendering {len(samples)} PDF samples (viewport PNG)...")
+        vp_results, vp_timings, vp_wall_clock, vp_render_errors = render_samples(
+            samples, dirs["current_viewport"], timeout=args.timeout,
+            extra_flags=args.flags, jobs=args.jobs, device="viewport-png")
+
+    print("\nComparing banded against baseline...")
     compare_start = time.monotonic()
     config_overrides = load_config(dirs["config"])
-    report_data = []
-    pass_count = 0
-    fail_count = 0
-    new_count = 0
-    error_count = 0
-    skip_count = 0
+    banded_report = _run_compare_pass(
+        samples, banded_results, render_errors, config_overrides,
+        args.threshold, dirs["baseline"], dirs["diff"], args.jobs)
 
-    compare_items = []
-    for name, current_pngs in sorted(results.items()):
-        compare_items.append((name, ".pdf", current_pngs, render_errors.get(name)))
-
-    if args.jobs == 1:
-        for name, ext, current_pngs, errs in compare_items:
-            print(f"  Comparing {name}{ext}...", end=" ", flush=True)
-            r = compare_one(name, ext, current_pngs, errs,
-                            args.threshold, config_overrides,
-                            dirs["baseline"], dirs["diff"])
-            _name, status, max_pct, page_data, _errs, msg = r
-            print(msg)
-            report_data.append((name, status, max_pct, page_data, _errs))
-    else:
-        # Sort by page count descending so multi-page samples start first
-        def _page_count(item):
-            pngs = item[2]
-            return -(len(pngs) if isinstance(pngs, list) else 0)
-        ordered = sorted(compare_items, key=_page_count)
-        with concurrent.futures.ProcessPoolExecutor(max_workers=args.jobs) as pool:
-            futures = {
-                pool.submit(compare_one, name, ext, current_pngs, errs,
-                            args.threshold, config_overrides,
-                            dirs["baseline"], dirs["diff"]): (name, ext)
-                for name, ext, current_pngs, errs in ordered
-            }
-            for future in concurrent.futures.as_completed(futures):
-                name, ext = futures[future]
-                _name, status, max_pct, page_data, _errs, msg = future.result()
-                print(f"  Compared {name}{ext}... {msg}")
-                report_data.append((name, status, max_pct, page_data, _errs))
-
-    for _, status, _, _, _ in report_data:
-        if status == "pass":
-            pass_count += 1
-        elif status == "fail":
-            fail_count += 1
-        elif status == "new":
-            new_count += 1
-        elif status == "error":
-            error_count += 1
-        elif status == "skip":
-            skip_count += 1
+    viewport_report = []
+    if not args.skip_viewport:
+        print("\nComparing viewport against baseline...")
+        viewport_report = _run_compare_pass(
+            samples, vp_results, vp_render_errors, config_overrides,
+            args.threshold, dirs["baseline"], dirs["diff_viewport"], args.jobs)
 
     compare_elapsed = time.monotonic() - compare_start
     print(f"\n  Comparison time: {format_duration(compare_elapsed)}")
-    if error_count > 0:
-        print(f"ERRORS: {error_count} (render failed)")
-    print(f"Results: {pass_count} passed, {fail_count} failed, "
-          f"{skip_count} skipped, {new_count} new, {error_count} errors")
+
+    banded_counts = _summarise(banded_report, "Banded path")
+    vp_counts = _summarise(viewport_report, "Viewport path") if viewport_report else {}
+
+    # Merged per-sample report: one row per sample, holding both path results.
+    vp_by_name = {r[0]: r for r in viewport_report}
+    merged = []
+    for entry in banded_report:
+        name = entry[0]
+        vp = vp_by_name.get(name)
+        merged.append((name, entry, vp))
 
     report_path = Path(args.html) if args.html else dirs["report"]
-    generate_html_report(report_data, report_path, baseline_timings, current_timings,
+    generate_html_report(merged, report_path, baseline_timings, current_timings,
                          config_overrides, args.threshold,
-                         baseline_wall_clock, current_wall_clock, compare_elapsed)
+                         baseline_wall_clock, current_wall_clock, compare_elapsed,
+                         viewport_timings=vp_timings,
+                         viewport_wall_clock=vp_wall_clock)
 
+    fail_count = banded_counts.get("fail", 0) + vp_counts.get("fail", 0)
     return 1 if fail_count > 0 else 0
 
 
@@ -629,6 +764,10 @@ def main():
                         help="PDF sample filenames to exclude")
     parser.add_argument("-j", "--jobs", type=int, default=4,
                         help="Number of parallel render workers (default: 4)")
+    parser.add_argument("--skip-viewport", action="store_true",
+                        help="Skip the viewport-path audit render. Default is to "
+                             "render each sample twice (banded + viewport) and "
+                             "compare both against the same baseline.")
     parser.add_argument("--flags", nargs=argparse.REMAINDER, default=None,
                         help="Extra flags to pass to stet-cli (must be last argument)")
     args = parser.parse_args()

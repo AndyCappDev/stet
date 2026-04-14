@@ -104,6 +104,11 @@ pub struct SkiaDevice {
     render_icc_cache: Option<IccCache>,
     /// Disable anti-aliasing for all fill/stroke operations (matches GhostScript).
     no_aa: bool,
+    /// Route `replay_and_show` through the viewport code path instead of the
+    /// banded full-page path. Used by `--device viewport-png` to audit the
+    /// viewport pipeline against the banded PNG baselines — same display list,
+    /// different culling/epoch logic, same expected output.
+    use_viewport_path: bool,
 }
 
 impl SkiaDevice {
@@ -144,7 +149,14 @@ impl SkiaDevice {
             system_cmyk_bytes: None,
             render_icc_cache: None,
             no_aa: false,
+            use_viewport_path: false,
         }
+    }
+
+    /// Route rendering through the viewport pipeline. Used by the visual
+    /// test runner's `--device viewport-png` mode.
+    pub fn set_use_viewport_path(&mut self, on: bool) {
+        self.use_viewport_path = on;
     }
 
     /// Ensure `self.pixmap` is allocated at full page dimensions.
@@ -5919,6 +5931,28 @@ impl OutputDevice for SkiaDevice {
         self.join_pending()?;
 
         let (page_w, page_h) = self.page_size();
+
+        // Audit mode: re-render through the viewport pipeline so visual tests
+        // can catch viewport-only bugs against the same baselines. Same
+        // `render_element`, same display list — differs only in how culling
+        // and epochs are computed.
+        if self.use_viewport_path {
+            let icc_cache = build_icc_cache_for_list(&list, self.system_cmyk_bytes.as_ref());
+            let rgba = render_to_rgba_viewport(
+                &list,
+                page_w,
+                page_h,
+                self.dpi,
+                Some(&icc_cache),
+                self.no_aa,
+            );
+            let mut sink = self.sink_factory.create_sink(output_path)?;
+            sink.begin_page(page_w, page_h)?;
+            sink.write_rows(&rgba, page_h)?;
+            sink.end_page()?;
+            return Ok(());
+        }
+
         let band_h = select_band_height(page_w, page_h);
 
         // Build ICC cache for this page's display list
@@ -9029,6 +9063,53 @@ pub fn render_to_rgba(
     }
 
     sink.data
+}
+
+/// Render a display list to RGBA using the **viewport** code path, with
+/// the viewport set to the full page at 1:1 scale.
+///
+/// This exists to audit the viewport pipeline (`render_region_prepared_*`)
+/// against the same baselines the banded PNG path uses. The two paths share
+/// `render_element` and the same display list, so their output should be
+/// pixel-identical on a correctly implemented display list. Differences
+/// indicate a bug in one of the two culling / epoch / bbox pipelines.
+///
+/// The CLI exposes this as `--device viewport-png`; the visual test runner
+/// uses it to double-cover each sample without maintaining a second
+/// baseline.
+pub fn render_to_rgba_viewport(
+    list: &DisplayList,
+    pixel_w: u32,
+    pixel_h: u32,
+    dpi: f64,
+    icc: Option<&IccCache>,
+    no_aa: bool,
+) -> Vec<u8> {
+    if pixel_w == 0 || pixel_h == 0 {
+        return vec![0xFF; pixel_w as usize * pixel_h as usize * 4];
+    }
+
+    let mut icc_cache = match icc {
+        Some(c) => c.clone(),
+        None => IccCache::new(),
+    };
+    register_shading_icc_profiles(list, &mut icc_cache);
+
+    let prepared = prepare_display_list(list);
+    render_region_prepared_parallel(
+        list,
+        &prepared,
+        0.0,
+        0.0,
+        pixel_w as f64,
+        pixel_h as f64,
+        pixel_w,
+        pixel_h,
+        dpi,
+        Some(&icc_cache),
+        None,
+        no_aa,
+    )
 }
 
 /// In-memory page sink that collects RGBA rows into a Vec.
