@@ -425,25 +425,32 @@ def generate_html_report(merged, html_path, baseline_timings, current_timings,
                          viewport_wall_clock=None):
     """Render the report. `merged` is a list of tuples
     `(name, banded_entry, viewport_entry)` where each entry is the tuple
-    `(name, status, pct, pages, errs)` or `None` if the viewport pass was
-    skipped. Both paths are diffed against the same baseline.
+    `(name, status, pct, pages, errs)` or `None` if that path was skipped.
+
+    Paths whose entries are entirely absent are omitted from the report
+    (their column, summary counts, and totals are all hidden).
     """
     total = len(merged)
+
+    has_banded = any(b is not None for _n, b, _v in merged)
+    has_viewport = any(v is not None for _n, _b, v in merged)
 
     worst_status_rank = {"error": 0, "fail": 1, "missing": 2, "new": 3, "skip": 4, "pass": 5}
     n_pass = n_fail = n_error = n_new = n_missing = n_skip = 0
     banded_counts = {"pass": 0, "fail": 0, "new": 0, "error": 0, "skip": 0, "missing": 0}
     vp_counts = dict(banded_counts)
-    has_viewport = False
     for _name, b_entry, vp_entry in merged:
-        b_status = b_entry[1]
-        banded_counts[b_status] = banded_counts.get(b_status, 0) + 1
-        statuses = [b_status]
+        statuses = []
+        if b_entry is not None:
+            b_status = b_entry[1]
+            banded_counts[b_status] = banded_counts.get(b_status, 0) + 1
+            statuses.append(b_status)
         if vp_entry is not None:
-            has_viewport = True
             v_status = vp_entry[1]
             vp_counts[v_status] = vp_counts.get(v_status, 0) + 1
             statuses.append(v_status)
+        if not statuses:
+            continue
         worst = min(statuses, key=lambda s: worst_status_rank.get(s, 6))
         if worst == "pass":
             n_pass += 1
@@ -462,9 +469,9 @@ def generate_html_report(merged, html_path, baseline_timings, current_timings,
     total_ct = sum(current_timings.values()) if current_timings else 0
     total_vt = sum((viewport_timings or {}).values())
 
-    vp_summary_line = ""
-    if has_viewport:
-        vp_summary_line = f"""<div style="margin-top:4px">
+    per_path_line = ""
+    if has_banded and has_viewport:
+        per_path_line = f"""<div style="margin-top:4px">
 <strong>Per-path results:</strong>
 banded: <span style="color:green">{banded_counts['pass']} pass</span>,
 <span style="color:red">{banded_counts['fail']} fail</span>
@@ -473,9 +480,30 @@ viewport: <span style="color:green">{vp_counts['pass']} pass</span>,
 <span style="color:red">{vp_counts['fail']} fail</span>
 </div>"""
 
+    header_line = "overall status uses the worse of banded vs viewport"
+    if has_banded and not has_viewport:
+        header_line = "banded path only"
+    elif has_viewport and not has_banded:
+        header_line = "viewport path only"
+
+    totals_parts = [f"<strong>Baseline total:</strong> {format_duration(total_bt)}"]
+    if has_banded:
+        totals_parts.append(f"<strong>Banded total:</strong> {format_duration(total_ct)}")
+    if has_viewport:
+        totals_parts.append(f"<strong>Viewport total:</strong> {format_duration(total_vt)}")
+    totals_line = " &nbsp;|&nbsp; ".join(totals_parts)
+
+    wall_parts = [f'<strong>Baseline wall-clock:</strong> {format_duration(baseline_wall_clock) if baseline_wall_clock else "-"}']
+    if has_banded:
+        wall_parts.append(f'<strong>Banded wall-clock:</strong> {format_duration(current_wall_clock) if current_wall_clock else "-"}')
+    if has_viewport and viewport_wall_clock is not None:
+        wall_parts.append(f'<strong>Viewport wall-clock:</strong> {format_duration(viewport_wall_clock)}')
+    wall_parts.append(f'<strong>Comparison time:</strong> {format_duration(compare_time) if compare_time else "-"}')
+    wall_line = " &nbsp;|&nbsp; ".join(wall_parts)
+
     summary = f"""<div class="summary">
 <div><strong>Total samples:</strong> {total}
-&nbsp;—&nbsp; overall status uses the worse of banded vs viewport
+&nbsp;—&nbsp; {header_line}
 </div>
 <div style="margin-top:8px">
 <span style="color:green"><strong>{n_pass}</strong> passed</span>
@@ -485,39 +513,34 @@ viewport: <span style="color:green">{vp_counts['pass']} pass</span>,
 <span style="color:orange"><strong>{n_missing}</strong> missing</span>
 <span style="color:gray"><strong>{n_skip}</strong> skipped</span>
 </div>
-{vp_summary_line}
-<div style="margin-top:8px">
-<strong>Baseline total:</strong> {format_duration(total_bt)} &nbsp;|&nbsp;
-<strong>Banded total:</strong> {format_duration(total_ct)}
-{"&nbsp;|&nbsp; <strong>Viewport total:</strong> " + format_duration(total_vt) if has_viewport else ""}
-</div>
-<div style="margin-top:4px">
-<strong>Baseline wall-clock:</strong> {format_duration(baseline_wall_clock) if baseline_wall_clock else "-"} &nbsp;|&nbsp;
-<strong>Banded wall-clock:</strong> {format_duration(current_wall_clock) if current_wall_clock else "-"}
-{"&nbsp;|&nbsp; <strong>Viewport wall-clock:</strong> " + format_duration(viewport_wall_clock) if (has_viewport and viewport_wall_clock is not None) else ""}
-&nbsp;|&nbsp;
-<strong>Comparison time:</strong> {format_duration(compare_time) if compare_time else "-"}
-</div>
+{per_path_line}
+<div style="margin-top:8px">{totals_line}</div>
+<div style="margin-top:4px">{wall_line}</div>
 </div>"""
 
     def _row_order(item):
         _n, b, v = item
-        b_status = b[1]
-        v_status = v[1] if v is not None else "pass"
-        worst = min([b_status, v_status], key=lambda s: worst_status_rank.get(s, 6))
+        statuses = []
+        if b is not None:
+            statuses.append(b[1])
+        if v is not None:
+            statuses.append(v[1])
+        worst = min(statuses, key=lambda s: worst_status_rank.get(s, 6)) if statuses else "pass"
         return (worst_status_rank.get(worst, 6), _n)
 
     rows = []
     for name, b_entry, vp_entry in sorted(merged, key=_row_order):
-        _n, b_status, b_pct, b_pages, b_errs = b_entry
-        b_badge = _status_badge(b_status, b_pct)
+        if b_entry is not None:
+            _n, b_status, b_pct, b_pages, b_errs = b_entry
+            b_badge = _status_badge(b_status, b_pct)
+        else:
+            b_status, b_pct, b_pages, b_errs, b_badge = "pass", None, None, None, ""
 
         if vp_entry is not None:
             _vn, v_status, v_pct, v_pages, v_errs = vp_entry
             v_badge = _status_badge(v_status, v_pct)
         else:
-            v_status, v_pct, v_pages, v_errs = "pass", 0.0, None, None
-            v_badge = "<em>(not run)</em>"
+            v_status, v_pct, v_pages, v_errs, v_badge = "pass", None, None, None, ""
 
         bt = baseline_timings.get(name)
         ct = current_timings.get(name)
@@ -539,10 +562,15 @@ viewport: <span style="color:green">{vp_counts['pass']} pass</span>,
             color = "green" if pct <= threshold else "red"
             return f'<span style="color:{color}">{pct:.4f}%</span>'
 
-        page_count = len(b_pages) if b_pages else (len(v_pages) if v_pages else 0)
+        if b_pages:
+            page_count = len(b_pages)
+        elif v_pages:
+            page_count = len(v_pages)
+        else:
+            page_count = 0
         name_cell = f"{name}<br><br>Pages: {page_count}<br>Threshold: {threshold_display}"
 
-        b_imgs = _images_block(b_pages, b_status, html_path.parent)
+        b_imgs = _images_block(b_pages, b_status, html_path.parent) if b_entry is not None else ""
         v_imgs = _images_block(v_pages, v_status, html_path.parent) if vp_entry is not None else ""
 
         def _err_block(errs):
@@ -553,24 +581,27 @@ viewport: <span style="color:green">{vp_counts['pass']} pass</span>,
                 out += f'<pre style="color:red;margin:2px 0;white-space:pre-wrap">{html_mod.escape(e)}</pre>'
             return out + "</div>"
 
-        banded_cell = (
-            f"{b_badge}<br>Diff: {_diff_line(b_pct, b_status)}<br>"
-            f"Time: {time_banded}{_err_block(b_errs)}{b_imgs}"
-        )
-        if vp_entry is not None:
+        cells = [f"<td>{name_cell}</td>", f"<td>Baseline<br>{time_baseline}</td>"]
+        if has_banded:
+            banded_cell = (
+                f"{b_badge}<br>Diff: {_diff_line(b_pct, b_status)}<br>"
+                f"Time: {time_banded}{_err_block(b_errs)}{b_imgs}"
+            )
+            cells.append(f"<td>{banded_cell}</td>")
+        if has_viewport:
             viewport_cell = (
                 f"{v_badge}<br>Diff: {_diff_line(v_pct, v_status)}<br>"
                 f"Time: {time_viewport}{_err_block(v_errs)}{v_imgs}"
             )
-        else:
-            viewport_cell = "<em>not run</em>"
+            cells.append(f"<td>{viewport_cell}</td>")
+        rows.append("<tr>" + "".join(cells) + "</tr>")
 
-        rows.append(
-            f"<tr><td>{name_cell}</td>"
-            f"<td>Baseline<br>{time_baseline}</td>"
-            f"<td>{banded_cell}</td>"
-            f"<td>{viewport_cell}</td></tr>"
-        )
+    headers = ["<th>Sample</th>", "<th>Baseline</th>"]
+    if has_banded:
+        headers.append('<th>Banded PNG<br><small>(--device png)</small></th>')
+    if has_viewport:
+        headers.append('<th>Viewport PNG<br><small>(--device viewport-png)</small></th>')
+    header_row = "".join(headers)
 
     html = f"""<!DOCTYPE html>
 <html><head><title>stet Visual Regression Report</title>
@@ -580,12 +611,7 @@ viewport: <span style="color:green">{vp_counts['pass']} pass</span>,
 <h1>stet Visual Regression Report</h1>
 {summary}
 <table>
-<thead><tr>
-<th>Sample</th>
-<th>Baseline</th>
-<th>Banded PNG<br><small>(--device png)</small></th>
-<th>Viewport PNG<br><small>(--device viewport-png)</small></th>
-</tr></thead>
+<thead><tr>{header_row}</tr></thead>
 <tbody>
 {"".join(rows)}
 </tbody>
@@ -690,15 +716,29 @@ def cmd_compare(args, dirs):
         print("No sample files found.")
         return 1
 
+    # Positive-selection path flags: default (no flag set) runs both paths.
+    # Passing --banded alone runs only banded; --viewport alone runs only
+    # viewport; passing both is equivalent to the default.
+    if not args.banded and not args.viewport:
+        run_banded = run_viewport = True
+    else:
+        run_banded = args.banded
+        run_viewport = args.viewport
+
     for key in ("current", "diff", "current_viewport", "diff_viewport"):
         if dirs[key].exists():
             shutil.rmtree(dirs[key])
 
     # ── Banded PNG render (authoritative against baseline) ──
-    print(f"Rendering {len(samples)} samples (banded PNG)...")
-    banded_results, current_timings, current_wall_clock, render_errors = render_samples(
-        samples, dirs["current"], timeout=args.timeout, extra_flags=args.flags,
-        jobs=args.jobs, device="png")
+    banded_results = {}
+    current_timings = {}
+    current_wall_clock = 0.0
+    render_errors = {}
+    if run_banded:
+        print(f"Rendering {len(samples)} samples (banded PNG)...")
+        banded_results, current_timings, current_wall_clock, render_errors = render_samples(
+            samples, dirs["current"], timeout=args.timeout, extra_flags=args.flags,
+            jobs=args.jobs, device="png")
     baseline_timings, baseline_wall_clock = load_timings(dirs["timings"])
 
     # ── Viewport PNG render (audit against same baseline) ──
@@ -706,21 +746,24 @@ def cmd_compare(args, dirs):
     vp_timings = {}
     vp_wall_clock = 0.0
     vp_render_errors = {}
-    if not args.skip_viewport:
+    if run_viewport:
         print(f"\nRendering {len(samples)} samples (viewport PNG)...")
         vp_results, vp_timings, vp_wall_clock, vp_render_errors = render_samples(
             samples, dirs["current_viewport"], timeout=args.timeout,
             extra_flags=args.flags, jobs=args.jobs, device="viewport-png")
 
-    print("\nComparing banded against baseline...")
     compare_start = time.monotonic()
     config_overrides = load_config(dirs["config"])
-    banded_report = _run_compare_pass(
-        samples, banded_results, render_errors, config_overrides,
-        args.threshold, dirs["baseline"], dirs["diff"], args.jobs)
+
+    banded_report = []
+    if run_banded:
+        print("\nComparing banded against baseline...")
+        banded_report = _run_compare_pass(
+            samples, banded_results, render_errors, config_overrides,
+            args.threshold, dirs["baseline"], dirs["diff"], args.jobs)
 
     viewport_report = []
-    if not args.skip_viewport:
+    if run_viewport:
         print("\nComparing viewport against baseline...")
         viewport_report = _run_compare_pass(
             samples, vp_results, vp_render_errors, config_overrides,
@@ -729,15 +772,16 @@ def cmd_compare(args, dirs):
     compare_elapsed = time.monotonic() - compare_start
     print(f"\n  Comparison time: {format_duration(compare_elapsed)}")
 
-    banded_counts = _summarise(banded_report, "Banded path")
-    vp_counts = _summarise(viewport_report, "Viewport path") if viewport_report else {}
+    banded_counts = _summarise(banded_report, "Banded path") if run_banded else {}
+    vp_counts = _summarise(viewport_report, "Viewport path") if run_viewport else {}
 
+    banded_by_name = {r[0]: r for r in banded_report}
     vp_by_name = {r[0]: r for r in viewport_report}
-    merged = []
-    for entry in banded_report:
-        name = entry[0]
-        vp = vp_by_name.get(name)
-        merged.append((name, entry, vp))
+    all_names = sorted(set(banded_by_name) | set(vp_by_name))
+    merged = [
+        (name, banded_by_name.get(name), vp_by_name.get(name))
+        for name in all_names
+    ]
 
     report_path = Path(args.html) if args.html else dirs["report"]
     generate_html_report(merged, report_path, baseline_timings, current_timings,
@@ -763,10 +807,14 @@ def main():
                         help="Sample filenames to exclude")
     parser.add_argument("-j", "--jobs", type=int, default=4,
                         help="Number of parallel render workers (default: 4)")
-    parser.add_argument("--skip-viewport", action="store_true",
-                        help="Skip the viewport-path audit render. Default is to "
-                             "render each sample twice (banded + viewport) and "
-                             "compare both against the same baseline.")
+    parser.add_argument("--banded", action="store_true",
+                        help="Run only the banded PNG path. Default (no path "
+                             "flag) is to run both banded and viewport.")
+    parser.add_argument("--viewport", action="store_true",
+                        help="Run only the viewport PNG path. Default (no path "
+                             "flag) is to run both banded and viewport. "
+                             "Pass both --banded and --viewport to force both "
+                             "paths (same as the default).")
     parser.add_argument("--flags", nargs=argparse.REMAINDER, default=None,
                         help="Extra flags to pass to stet-cli (must be last argument)")
     args = parser.parse_args()
