@@ -584,6 +584,14 @@ struct BandState {
     /// paint bbox on non-overprint writes so a later non-overprint fill
     /// establishes a fresh backdrop for subsequent overprints.
     op_touched: Option<Vec<u8>>,
+    /// Per-pixel marker for "this pixel's pixmap colour includes spot-
+    /// colorant contribution not reflected in `cmyk_buffer`". Set by
+    /// DeviceN/Separation paints that include at least one spot colorant
+    /// (i.e. `process_cmyk != native_cmyk`). Consulted by CMYK overprint
+    /// rendering so the no-op-delta skip only fires on pixels where
+    /// preserving the pixmap actually preserves spot colour — other pixels
+    /// still go through the ICC(new_cmyk) replace path.
+    spot_mask: Option<Vec<u8>>,
 }
 
 /// Maximum masks to keep in the recycling pool. Enough to avoid alloc churn
@@ -635,6 +643,17 @@ impl BandState {
     fn restore_op_buffers(&mut self, bg: Vec<u8>, touched: Vec<u8>) {
         self.op_bg_snapshot = Some(bg);
         self.op_touched = Some(touched);
+    }
+
+    /// Take (or lazily allocate) the spot-contribution mask (1 byte/pixel).
+    fn take_spot_mask(&mut self, w: u32, h: u32) -> Vec<u8> {
+        let n = w as usize * h as usize;
+        self.spot_mask.take().unwrap_or_else(|| vec![0u8; n])
+    }
+
+    /// Put the spot-contribution mask back after a paint.
+    fn restore_spot_mask(&mut self, mask: Vec<u8>) {
+        self.spot_mask = Some(mask);
     }
 
     /// Clear the overprint touched flag for pixels in the given bbox. Called
@@ -2257,6 +2276,93 @@ fn hairline_min_width(ctm: &Matrix, dpi: f64) -> f64 {
     }
 }
 
+/// True when the paint's source CMYK is K-only (C=M=Y=0, any K).
+/// Used to route OPM 0 DeviceCMYK paints that encode "K-only" — like
+/// `0 0 0 0.5 k` — through the per-pixel overprint path, so the no-op delta
+/// skip can preserve a spot-painted backdrop at pixels where K already equals
+/// the source value.
+fn is_k_only_src(color: &DeviceColor) -> bool {
+    if let Some((c, m, y, _k)) = color.native_cmyk {
+        c == 0.0 && m == 0.0 && y == 0.0
+    } else {
+        false
+    }
+}
+
+/// Detect a DeviceGray paint that should be promoted to CMYK_K for overprint.
+///
+/// DeviceGray `g` sets `painted_channels = 0` and leaves `native_cmyk = None`,
+/// so overprint dispatch can't see it as a K-ink paint. When overprint is
+/// active we re-describe the paint as DeviceCMYK `(0, 0, 0, 1-g)` with
+/// `painted_channels = CMYK_K`: it flows through the subset path, only the K
+/// plate is touched, and the pixmap is updated multiplicatively so any
+/// backdrop spot contribution survives.
+fn needs_gray_promotion(
+    overprint: bool,
+    painted_channels: u8,
+    is_device_cmyk: bool,
+    color: &DeviceColor,
+) -> Option<f64> {
+    if !overprint
+        || painted_channels != 0
+        || is_device_cmyk
+        || color.native_cmyk.is_some()
+        || color.process_cmyk.is_some()
+    {
+        return None;
+    }
+    let r = color.r;
+    if (r - color.g).abs() > f64::EPSILON || (r - color.b).abs() > f64::EPSILON {
+        return None;
+    }
+    Some(r.clamp(0.0, 1.0))
+}
+
+/// Promote a gray `FillParams` to a DeviceCMYK K-only overprint description if
+/// the paint qualifies (see [`needs_gray_promotion`]).
+fn maybe_promote_gray_fill<'a>(
+    params: &'a FillParams,
+    buf: &'a mut Option<FillParams>,
+) -> &'a FillParams {
+    if let Some(gray) = needs_gray_promotion(
+        params.overprint,
+        params.painted_channels,
+        params.is_device_cmyk,
+        &params.color,
+    ) {
+        let mut promoted = params.clone();
+        promoted.is_device_cmyk = true;
+        promoted.painted_channels = stet_graphics::device::CMYK_K;
+        promoted.color.native_cmyk = Some((0.0, 0.0, 0.0, 1.0 - gray));
+        promoted.color.process_cmyk = Some((0.0, 0.0, 0.0, 1.0 - gray));
+        *buf = Some(promoted);
+        return buf.as_ref().unwrap();
+    }
+    params
+}
+
+/// Promote a gray `StrokeParams` to a DeviceCMYK K-only overprint description.
+fn maybe_promote_gray_stroke<'a>(
+    params: &'a StrokeParams,
+    buf: &'a mut Option<StrokeParams>,
+) -> &'a StrokeParams {
+    if let Some(gray) = needs_gray_promotion(
+        params.overprint,
+        params.painted_channels,
+        params.is_device_cmyk,
+        &params.color,
+    ) {
+        let mut promoted = params.clone();
+        promoted.is_device_cmyk = true;
+        promoted.painted_channels = stet_graphics::device::CMYK_K;
+        promoted.color.native_cmyk = Some((0.0, 0.0, 0.0, 1.0 - gray));
+        promoted.color.process_cmyk = Some((0.0, 0.0, 0.0, 1.0 - gray));
+        *buf = Some(promoted);
+        return buf.as_ref().unwrap();
+    }
+    params
+}
+
 /// Build a stroke with minimum line-width enforcement (shared by trait impl and band rendering).
 /// `dpi` is the device resolution, used to select the hairline minimum width:
 /// at ≤150 DPI use 0.6 device pixels; above 150 DPI use 1.0 device pixel.
@@ -2428,8 +2534,15 @@ fn render_element(
 ) {
     match element {
         DisplayElement::Fill { path, params } => {
+            // DeviceGray with overprint behaves as a K-only process paint —
+            // promote it to DeviceCMYK (0, 0, 0, 1-gray) with painted_channels
+            // set to CMYK_K so it flows through the overprint subset path,
+            // preserving backdrop CMY plates and the spot-derived visual
+            // instead of knocking the pixmap out with plain RGB gray.
+            let mut promoted_fill: Option<FillParams> = None;
+            let params = maybe_promote_gray_fill(params, &mut promoted_fill);
             // Use the overprint compositing path whenever the fill needs
-            // per-channel CMYK rendering. Four cases trigger it:
+            // per-channel CMYK rendering. Five cases trigger it:
             //   1. Subset painted_channels (Separation /Magenta, DeviceN, etc.)
             //      — only the named channels touch the buffer; the rest are
             //      preserved from the backdrop.
@@ -2438,7 +2551,11 @@ fn render_element(
             //   3. Custom spot (painted_channels=0, non-CMYK, with native_cmyk)
             //      under overprint — process plates must be preserved; the
             //      spot's alt-CMYK only contributes multiplicatively to RGB.
-            //   4. (Combinations of the above.)
+            //   4. DeviceCMYK + overprint (any OPM) with CMYK_ALL — the per-
+            //      pixel path lets us recognise a "no-op" overprint (src CMYK
+            //      == backdrop CMYK) and leave the pixmap untouched, which
+            //      preserves any spot-derived colour already visible there.
+            //   5. (Combinations of the above.)
             // Only fires for Normal blend; non-Normal blend modes handle zero
             // values through their blend math, not through overprint filtering.
             // Includes text glyphs: when overprint is meaningful (the test
@@ -2452,20 +2569,30 @@ fn render_element(
             let custom_spot = painted == 0
                 && !params.is_device_cmyk
                 && params.color.native_cmyk.is_some();
+            // A "near-K-only" DeviceCMYK paint under OPM 0 — e.g. `0 0 0 0.5 k`
+            // — matches the Black-component plate of a DeviceN [Black, spot]
+            // backdrop exactly. Routing it through the per-pixel path lets the
+            // no-op-delta skip preserve the spot-derived colour instead of
+            // wiping it with plain grey (GWG 3.0 "50% K over spot").
+            let is_k_only_cmyk = params.is_device_cmyk
+                && params.overprint_mode == 0
+                && is_k_only_src(&params.color);
             let needs_overprint = params.overprint
                 && band_state.cmyk_buffer.is_some()
                 && params.blend_mode == 0
-                && (subset_channels || opm1_cmyk || custom_spot);
+                && (subset_channels || opm1_cmyk || custom_spot || is_k_only_cmyk);
 
             if needs_overprint {
                 let mut cmyk_buf = band_state.cmyk_buffer.take().unwrap();
                 let (mut op_bg, mut op_touched) =
                     band_state.take_op_buffers(ctx.out_w, ctx.out_h);
+                let spot_mask = band_state.take_spot_mask(ctx.out_w, ctx.out_h);
                 render_overprint_fill(
                     pixmap,
                     &mut cmyk_buf,
                     &mut op_bg,
                     &mut op_touched,
+                    &spot_mask,
                     band_state,
                     path,
                     params,
@@ -2480,6 +2607,7 @@ fn render_element(
                 );
                 band_state.cmyk_buffer = Some(cmyk_buf);
                 band_state.restore_op_buffers(op_bg, op_touched);
+                band_state.restore_spot_mask(spot_mask);
             } else {
                 let Some(skia_path) = build_skia_path(path) else {
                     return;
@@ -2514,9 +2642,13 @@ fn render_element(
                 }
 
                 // Update CMYK tracking buffer for non-overprint fills
-                if let Some(ref mut cmyk_buf) = band_state.cmyk_buffer {
+                if band_state.cmyk_buffer.is_some() {
+                    let mut cmyk_buf = band_state.cmyk_buffer.take().unwrap();
+                    let mut spot_mask =
+                        band_state.take_spot_mask(ctx.out_w, ctx.out_h);
                     update_cmyk_buffer_for_fill(
-                        cmyk_buf,
+                        &mut cmyk_buf,
+                        &mut spot_mask,
                         path,
                         params,
                         ctx.vp_x,
@@ -2529,10 +2661,14 @@ fn render_element(
                         ctx.no_aa,
                         ctx.icc,
                     );
+                    band_state.cmyk_buffer = Some(cmyk_buf);
+                    band_state.restore_spot_mask(spot_mask);
                 }
             }
         }
         DisplayElement::Stroke { path, params } => {
+            let mut promoted_stroke: Option<StrokeParams> = None;
+            let params = maybe_promote_gray_stroke(params, &mut promoted_stroke);
             let transform = ctx.transform(&params.ctm);
             // Build stroke using the composited transform so hairline width
             // calculations account for the actual output resolution.
@@ -2583,10 +2719,13 @@ fn render_element(
             let custom_spot = painted == 0
                 && !params.is_device_cmyk
                 && params.color.native_cmyk.is_some();
+            let is_k_only_cmyk = params.is_device_cmyk
+                && params.overprint_mode == 0
+                && is_k_only_src(&params.color);
             let needs_overprint = params.overprint
                 && band_state.cmyk_buffer.is_some()
                 && params.blend_mode == 0
-                && (subset_channels || opm1_cmyk || custom_spot);
+                && (subset_channels || opm1_cmyk || custom_spot || is_k_only_cmyk);
 
             let Some(skia_path) = build_skia_path(draw_path) else {
                 return;
@@ -2609,11 +2748,13 @@ fn render_element(
                 let mut cmyk_buf = band_state.cmyk_buffer.take().unwrap();
                 let (mut op_bg, mut op_touched) =
                     band_state.take_op_buffers(ctx.out_w, ctx.out_h);
+                let spot_mask = band_state.take_spot_mask(ctx.out_w, ctx.out_h);
                 render_overprint_stroke(
                     pixmap,
                     &mut cmyk_buf,
                     &mut op_bg,
                     &mut op_touched,
+                    &spot_mask,
                     band_state,
                     &skia_path,
                     &stroke,
@@ -2626,6 +2767,7 @@ fn render_element(
                 );
                 band_state.cmyk_buffer = Some(cmyk_buf);
                 band_state.restore_op_buffers(op_bg, op_touched);
+                band_state.restore_spot_mask(spot_mask);
             } else {
                 let paint = to_paint_alpha(
                     &params.color,
@@ -2635,9 +2777,13 @@ fn render_element(
                 );
                 pixmap.stroke_path(&skia_path, &paint, &stroke, transform, mask_ref);
 
-                if let Some(ref mut cmyk_buf) = band_state.cmyk_buffer {
+                if band_state.cmyk_buffer.is_some() {
+                    let mut cmyk_buf = band_state.cmyk_buffer.take().unwrap();
+                    let mut spot_mask =
+                        band_state.take_spot_mask(ctx.out_w, ctx.out_h);
                     update_cmyk_buffer_for_stroke(
-                        cmyk_buf,
+                        &mut cmyk_buf,
+                        &mut spot_mask,
                         draw_path,
                         params,
                         &stroke,
@@ -2648,6 +2794,8 @@ fn render_element(
                         ctx.no_aa,
                         ctx.icc,
                     );
+                    band_state.cmyk_buffer = Some(cmyk_buf);
+                    band_state.restore_spot_mask(spot_mask);
                 }
             }
         }
@@ -3357,6 +3505,7 @@ fn render_group(
         cmyk_buffer: group_cmyk,
         op_bg_snapshot: None,
         op_touched: None,
+        spot_mask: None,
     };
 
     let group_ctx = RenderContext {
@@ -3402,6 +3551,7 @@ fn render_group(
                 cmyk_buffer: None,
                 op_bg_snapshot: None,
                 op_touched: None,
+                spot_mask: None,
             };
             let iso_ctx = RenderContext {
                 parent_group_isolated: true,
@@ -3941,6 +4091,7 @@ fn render_knockout_group(
         cmyk_buffer: None,
         op_bg_snapshot: None,
         op_touched: None,
+        spot_mask: None,
     };
 
     // Coverage offscreen for two-pass painter rendering of nested transparency
@@ -4328,6 +4479,7 @@ fn render_soft_masked(
             cmyk_buffer: None,
             op_bg_snapshot: None,
             op_touched: None,
+            spot_mask: None,
         };
         for (idx, elem) in mask_list.elements().iter().enumerate() {
             let elem_ctx = RenderContext {
@@ -4431,6 +4583,7 @@ fn render_soft_masked(
         cmyk_buffer: content_cmyk,
         op_bg_snapshot: None,
         op_touched: None,
+        spot_mask: None,
     };
     for (idx, elem) in content_list.elements().iter().enumerate() {
         let elem_ctx = RenderContext {
@@ -4746,6 +4899,7 @@ fn rasterize_mask(
         cmyk_buffer: None,
         op_bg_snapshot: None,
         op_touched: None,
+        spot_mask: None,
     };
 
     // 6. Render every element of the mask display list into the offscreen.
@@ -5185,6 +5339,7 @@ fn render_pattern_fill(
                     cmyk_buffer: None,
                     op_bg_snapshot: None,
                     op_touched: None,
+                    spot_mask: None,
                 };
 
                 for (idx, elem) in params.tile.elements().iter().enumerate() {
@@ -5257,6 +5412,7 @@ fn render_pattern_fill(
                 cmyk_buffer: None,
                 op_bg_snapshot: None,
                 op_touched: None,
+                spot_mask: None,
             };
             for (idx, elem) in params.tile.elements().iter().enumerate() {
                 let transformed = transform_element_ctm(elem, pm);
@@ -5992,6 +6148,7 @@ impl OutputDevice for SkiaDevice {
             cmyk_buffer: None,
             op_bg_snapshot: None,
             op_touched: None,
+            spot_mask: None,
         };
         {
             let ctx = RenderContext {
@@ -6088,6 +6245,7 @@ impl OutputDevice for SkiaDevice {
                 cmyk_buffer: None,
                 op_bg_snapshot: None,
                 op_touched: None,
+                spot_mask: None,
             };
             for (idx, elem) in list.elements().iter().enumerate() {
                 let elem_ctx = RenderContext {
@@ -6387,6 +6545,7 @@ fn render_overprint_fill(
     cmyk_buf: &mut [f32],
     op_bg: &mut [u8],
     op_touched: &mut [u8],
+    spot_mask: &[u8],
     band_state: &mut BandState,
     path: &PsPath,
     params: &FillParams,
@@ -6484,7 +6643,17 @@ fn render_overprint_fill(
         }
     }
 
-    if channels == stet_graphics::device::CMYK_ALL && !is_custom_spot {
+    // Bulk tiny-skia fast path for the plain CMYK_ALL replace case. Skipped
+    // only for K-only DeviceCMYK paints under OPM 0 (C=M=Y=0, any K) because
+    // those match the Black plate of a DeviceN [Black, spot] backdrop and
+    // need the per-pixel no-op-delta skip to preserve spot-derived colour —
+    // the bulk fill_path here would otherwise wipe the spot. Other CMYK
+    // overprints (teal, full-colour, etc.) stay on the fast path to avoid
+    // AA drift vs the non-overprint rasteriser.
+    let is_k_only_cmyk = params.is_device_cmyk
+        && params.overprint_mode == 0
+        && src_c == 0.0 && src_m == 0.0 && src_y == 0.0;
+    if channels == stet_graphics::device::CMYK_ALL && !is_custom_spot && !is_k_only_cmyk {
         let cov_data = coverage_mask.data();
         let stride = out_w as usize;
         for y in bbox_y0..bbox_y1 {
@@ -6574,22 +6743,49 @@ fn render_overprint_fill(
             let use_multiplicative =
                 (is_custom_spot || cur_is_clean) && pixmap_has_colour;
 
-            let new_c = if channels & stet_graphics::device::CMYK_C != 0 {
+            // Promoted DeviceGray on a non-spot backdrop: fall back to a
+            // plain knockout that replaces all four CMYK plates. The
+            // `maybe_promote_gray_fill` path describes the paint as a
+            // K-only subset so spot-backed swatches can preserve the spot
+            // plate (GWG 3.0 "50% gray over spot"), but on a plain CMYK
+            // backdrop that would preserve the old CMY values and turn the
+            // cross into the bg colour (GWG 3.0 "50% gray over CMYK" e/k).
+            // Expanding to CMYK_ALL here restores the regular-fill result
+            // at those pixels.
+            //
+            // Gate on `params.painted_channels == CMYK_K` so this only fires
+            // for genuinely-promoted DeviceGray. A `0 0 0 0.5 k` DeviceCMYK
+            // paint filtered to CMYK_K by OPM 1 has `params.painted_channels
+            // = CMYK_ALL`, and must stay K-subset so its CMY=0 values do
+            // not wipe a CMYK backdrop (GWG 3.0 "50% K over CMYK" j/d).
+            let is_promoted_gray = params.painted_channels == stet_graphics::device::CMYK_K
+                && channels == stet_graphics::device::CMYK_K
+                && params.is_device_cmyk
+                && src_c == 0.0
+                && src_m == 0.0
+                && src_y == 0.0;
+            let effective_channels = if is_promoted_gray && spot_mask[mi] == 0 {
+                stet_graphics::device::CMYK_ALL
+            } else {
+                channels
+            };
+
+            let new_c = if effective_channels & stet_graphics::device::CMYK_C != 0 {
                 src_c
             } else {
                 cur_c
             };
-            let new_m = if channels & stet_graphics::device::CMYK_M != 0 {
+            let new_m = if effective_channels & stet_graphics::device::CMYK_M != 0 {
                 src_m
             } else {
                 cur_m
             };
-            let new_y = if channels & stet_graphics::device::CMYK_Y != 0 {
+            let new_y = if effective_channels & stet_graphics::device::CMYK_Y != 0 {
                 src_y
             } else {
                 cur_y
             };
-            let new_k = if channels & stet_graphics::device::CMYK_K != 0 {
+            let new_k = if effective_channels & stet_graphics::device::CMYK_K != 0 {
                 src_k
             } else {
                 cur_k
@@ -6605,7 +6801,49 @@ fn render_overprint_fill(
                 cmyk_buf[ci + 3] = new_k as f32;
             }
 
-            let (r, g, b) = if use_multiplicative {
+            // No-op overprint: the paint's effective CMYK equals the existing
+            // process state, so no plate actually changes. Skip the pixmap
+            // write entirely — otherwise ICC(new_cmyk) paints a plain process
+            // composite that erases any spot-derived colour already visible
+            // at this pixel (GWG 3.0 "50% K over spot" swatches where the
+            // backdrop's Black component and the cross's K value match).
+            //
+            // Only fire when a DeviceN/Separation paint with spot colorants
+            // actually landed on this pixel (spot_mask[mi] != 0). On plain
+            // CMYK backdrops, ICC(cmyk_buf) == pixmap_rgb already, and
+            // skipping vs replacing produces the same result — but making
+            // the skip unconditional subtly drifts AA edges because prior
+            // stroke/fill precision accumulates (regressed GWG 1.0/1.1).
+            let delta = (new_c - cur_c)
+                .abs()
+                .max((new_m - cur_m).abs())
+                .max((new_y - cur_y).abs())
+                .max((new_k - cur_k).abs());
+            if delta < 1e-4
+                && spot_mask[mi] != 0
+                && pixmap_has_colour
+                && !is_custom_spot
+            {
+                continue;
+            }
+
+            let (r, g, b) = if is_promoted_gray && effective_channels == stet_graphics::device::CMYK_ALL {
+                // Promoted DeviceGray collapsing to a full replace — use the
+                // paint's RGB directly so the pixmap matches the colour a
+                // regular non-overprint gray fill would paint at the same
+                // pixel. Going through ICC(CMYK) here would produce a
+                // slightly different gray (e.g. 151 vs 127) and leave a
+                // darker outline where a subsequent non-promoted gray
+                // stroke overpaints on top of it.
+                //
+                // Checked before `use_multiplicative` because a white gray
+                // paint (`1 g`, native CMYK (0,0,0,0)) on a coloured RGB
+                // backdrop (e.g. the red `Reset Form` button in 682.pdf
+                // page 2) would otherwise hit the multiplicative branch
+                // with all-zero source CMYK, which leaves the backdrop
+                // unchanged — hiding the white label.
+                (params.color.r, params.color.g, params.color.b)
+            } else if use_multiplicative {
                 // Multiplicative ink stacking: each painted channel attenuates
                 // the corresponding RGB component; preserved channels leave
                 // the pixmap's existing colour untouched. This keeps any spot
@@ -6771,6 +7009,7 @@ fn path_device_bbox(
 
 fn update_cmyk_buffer_for_fill(
     cmyk_buf: &mut [f32],
+    spot_mask: &mut [u8],
     path: &PsPath,
     params: &FillParams,
     vp_x: f32,
@@ -6790,13 +7029,40 @@ fn update_cmyk_buffer_for_fill(
     // spot's visible contribution in the pixmap.
     let is_custom_spot = params.painted_channels == 0 && !params.is_device_cmyk;
 
-    // Source CMYK preference: native CMYK supplied with the fill > ICC reverse
-    // (sRGB→CMYK via the system CMYK profile) > PLRM (1−r, 1−g, 1−b, 0)
+    // A DeviceN/Separation paint leaves "spot contribution" on the pixmap
+    // when its full alt-CMYK (`native_cmyk`) differs from the process-only
+    // tint (`process_cmyk`) — the extra RGB in the pixmap comes from a spot
+    // plate that `cmyk_buf` cannot reflect. Pure DeviceCMYK paints have
+    // `process_cmyk == None` (fall back to native), so no spot contribution.
+    //
+    // A "real" custom spot paint (`is_custom_spot && native_cmyk.is_some()`)
+    // also deposits spot RGB that `cmyk_buf` loses (it's zeroed by the
+    // custom-spot branch). Exclude DeviceRGB / DeviceGray / ICCBased-RGB
+    // paints — those also satisfy `is_custom_spot = painted==0 &&
+    // !is_device_cmyk` but carry no spot-plate contribution, and flagging
+    // them would gate later OPM-1 cancel skips on a signal that doesn't
+    // actually mean anything.
+    let has_spot_contrib = (is_custom_spot && params.color.native_cmyk.is_some())
+        || matches!(
+            (params.color.native_cmyk, params.color.process_cmyk),
+            (Some(nat), Some(proc_))
+                if (nat.0 - proc_.0).abs() > 1e-6
+                    || (nat.1 - proc_.1).abs() > 1e-6
+                    || (nat.2 - proc_.2).abs() > 1e-6
+                    || (nat.3 - proc_.3).abs() > 1e-6
+        );
+
+    // Source CMYK preference: process-only CMYK (from Separation/DeviceN paints
+    // so spot-colorant tint contributions stay out of the process buffer) >
+    // native CMYK (full alt-CMYK tint, fine for pure DeviceCMYK paints) > ICC
+    // reverse (sRGB→CMYK via the system CMYK profile) > PLRM (1−r, 1−g, 1−b, 0)
     // fallback. The ICC reverse keeps non-CMYK fills (RGB/Gray/Lab/etc.)
     // representable as accurate CMYK in the parallel buffer so the
     // non-isolated CMYK composite-back can blend them correctly.
     let (src_c, src_m, src_y, src_k) = if is_custom_spot {
         (0.0, 0.0, 0.0, 0.0)
+    } else if let Some(c) = params.color.process_cmyk {
+        c
     } else if let Some(c) = params.color.native_cmyk {
         c
     } else if let Some(cmyk) = icc.and_then(|i| {
@@ -6853,6 +7119,9 @@ fn update_cmyk_buffer_for_fill(
                 cmyk_buf[ci + 1] = src_m as f32;
                 cmyk_buf[ci + 2] = src_y as f32;
                 cmyk_buf[ci + 3] = src_k as f32;
+                if has_spot_contrib {
+                    spot_mask[mi] = 1;
+                }
             }
         }
     }
@@ -6868,6 +7137,7 @@ fn render_overprint_stroke(
     cmyk_buf: &mut [f32],
     op_bg: &mut [u8],
     op_touched: &mut [u8],
+    spot_mask: &[u8],
     band_state: &mut BandState,
     skia_path: &stet_tiny_skia::Path,
     stroke: &Stroke,
@@ -6972,9 +7242,14 @@ fn render_overprint_stroke(
         }
     }
 
-    if channels == stet_graphics::device::CMYK_ALL && !is_custom_spot {
+    let is_k_only_cmyk = params.is_device_cmyk
+        && params.overprint_mode == 0
+        && src_c == 0.0 && src_m == 0.0 && src_y == 0.0;
+    if channels == stet_graphics::device::CMYK_ALL && !is_custom_spot && !is_k_only_cmyk {
         // Full-channel replacement: write source CMYK to buffer for covered
         // pixels and let tiny-skia stroke the pixmap with the source colour.
+        // Only K-only DeviceCMYK OPM 0 paints are routed to the per-pixel
+        // path (see render_overprint_fill).
         let cov_data = coverage_mask.data();
         let stride = out_w as usize;
         for y in bbox_y0..bbox_y1 {
@@ -7051,22 +7326,36 @@ fn render_overprint_stroke(
             let use_multiplicative =
                 (is_custom_spot || cur_is_clean) && pixmap_has_colour;
 
-            let new_c = if channels & stet_graphics::device::CMYK_C != 0 {
+            // Promoted DeviceGray on non-spot backdrop: replace all channels
+            // (see render_overprint_fill).
+            let is_promoted_gray = params.painted_channels == stet_graphics::device::CMYK_K
+                && channels == stet_graphics::device::CMYK_K
+                && params.is_device_cmyk
+                && src_c == 0.0
+                && src_m == 0.0
+                && src_y == 0.0;
+            let effective_channels = if is_promoted_gray && spot_mask[mi] == 0 {
+                stet_graphics::device::CMYK_ALL
+            } else {
+                channels
+            };
+
+            let new_c = if effective_channels & stet_graphics::device::CMYK_C != 0 {
                 src_c
             } else {
                 cur_c
             };
-            let new_m = if channels & stet_graphics::device::CMYK_M != 0 {
+            let new_m = if effective_channels & stet_graphics::device::CMYK_M != 0 {
                 src_m
             } else {
                 cur_m
             };
-            let new_y = if channels & stet_graphics::device::CMYK_Y != 0 {
+            let new_y = if effective_channels & stet_graphics::device::CMYK_Y != 0 {
                 src_y
             } else {
                 cur_y
             };
-            let new_k = if channels & stet_graphics::device::CMYK_K != 0 {
+            let new_k = if effective_channels & stet_graphics::device::CMYK_K != 0 {
                 src_k
             } else {
                 cur_k
@@ -7079,7 +7368,28 @@ fn render_overprint_stroke(
                 cmyk_buf[ci + 3] = new_k as f32;
             }
 
-            let (r, g, b) = if use_multiplicative {
+            // No-op overprint skip — see render_overprint_fill for rationale.
+            let delta = (new_c - cur_c)
+                .abs()
+                .max((new_m - cur_m).abs())
+                .max((new_y - cur_y).abs())
+                .max((new_k - cur_k).abs());
+            if delta < 1e-4
+                && spot_mask[mi] != 0
+                && pixmap_has_colour
+                && !is_custom_spot
+            {
+                continue;
+            }
+
+            let (r, g, b) = if is_promoted_gray && effective_channels == stet_graphics::device::CMYK_ALL {
+                // Promoted DeviceGray collapsing to a full replace — see
+                // render_overprint_fill for the rationale (must run before
+                // the multiplicative branch so a `1 g` / `1 G` white paint
+                // doesn't get folded into the backdrop via zero-source
+                // multiplication).
+                (params.color.r, params.color.g, params.color.b)
+            } else if use_multiplicative {
                 let bg_r = px_data[pi] as f64 / 255.0;
                 let bg_g = px_data[pi + 1] as f64 / 255.0;
                 let bg_b = px_data[pi + 2] as f64 / 255.0;
@@ -7178,6 +7488,7 @@ fn render_overprint_stroke(
 #[allow(clippy::too_many_arguments)]
 fn update_cmyk_buffer_for_stroke(
     cmyk_buf: &mut [f32],
+    spot_mask: &mut [u8],
     path: &PsPath,
     params: &StrokeParams,
     stroke: &Stroke,
@@ -7192,9 +7503,21 @@ fn update_cmyk_buffer_for_stroke(
     // under the stroke so later overprints fall into the multiplicative-blend
     // branch (see update_cmyk_buffer_for_fill).
     let is_custom_spot = params.painted_channels == 0 && !params.is_device_cmyk;
+    // See update_cmyk_buffer_for_fill for rationale.
+    let has_spot_contrib = (is_custom_spot && params.color.native_cmyk.is_some())
+        || matches!(
+            (params.color.native_cmyk, params.color.process_cmyk),
+            (Some(nat), Some(proc_))
+                if (nat.0 - proc_.0).abs() > 1e-6
+                    || (nat.1 - proc_.1).abs() > 1e-6
+                    || (nat.2 - proc_.2).abs() > 1e-6
+                    || (nat.3 - proc_.3).abs() > 1e-6
+        );
 
     let (src_c, src_m, src_y, src_k) = if is_custom_spot {
         (0.0, 0.0, 0.0, 0.0)
+    } else if let Some(c) = params.color.process_cmyk {
+        c
     } else if let Some(c) = params.color.native_cmyk {
         c
     } else if let Some(cmyk) = icc.and_then(|i| {
@@ -7277,6 +7600,9 @@ fn update_cmyk_buffer_for_stroke(
                 cmyk_buf[ci + 1] = src_m as f32;
                 cmyk_buf[ci + 2] = src_y as f32;
                 cmyk_buf[ci + 3] = src_k as f32;
+                if has_spot_contrib {
+                    spot_mask[mi] = 1;
+                }
             }
         }
     }
@@ -7939,6 +8265,7 @@ fn render_banded_to_sink(
             cmyk_buffer: cmyk_buf,
             op_bg_snapshot: None,
             op_touched: None,
+            spot_mask: None,
         };
 
         // Epoch-based replay
@@ -8870,6 +9197,7 @@ pub fn render_region_prepared(
         cmyk_buffer: cmyk_buf,
         op_bg_snapshot: None,
         op_touched: None,
+        spot_mask: None,
     };
 
     let elements = list.elements();
@@ -9050,6 +9378,7 @@ pub fn render_region_single_band(
         cmyk_buffer: cmyk_buf,
         op_bg_snapshot: None,
         op_touched: None,
+        spot_mask: None,
     };
 
     let elements = list.elements();
@@ -9725,6 +10054,7 @@ pub fn render_region(
         cmyk_buffer: cmyk_buf,
         op_bg_snapshot: None,
         op_touched: None,
+        spot_mask: None,
     };
 
     let elements = list.elements();

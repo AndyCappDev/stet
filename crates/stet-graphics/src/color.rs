@@ -78,7 +78,15 @@ pub struct DeviceColor {
     pub g: f64,
     pub b: f64,
     /// Native CMYK components for lossless roundtrip when color space is CMYK.
+    /// For DeviceN/Separation paints this is the *full* alt-CMYK tint transform
+    /// (process + spot contributions combined).
     pub native_cmyk: Option<(f64, f64, f64, f64)>,
+    /// Process-colorant-only CMYK contribution. Populated by DeviceN/Separation
+    /// paints so the overprint tracker can record only what actually lands on
+    /// process plates (C/M/Y/K), leaving any spot colorant's alt-CMYK out of
+    /// the process buffer. `None` means "use `native_cmyk` as the process
+    /// contribution" (pure DeviceCMYK / DeviceGray / DeviceRGB).
+    pub process_cmyk: Option<(f64, f64, f64, f64)>,
 }
 
 impl DeviceColor {
@@ -88,6 +96,7 @@ impl DeviceColor {
             g: gray,
             b: gray,
             native_cmyk: None,
+            process_cmyk: None,
         }
     }
 
@@ -97,6 +106,7 @@ impl DeviceColor {
             g,
             b,
             native_cmyk: None,
+            process_cmyk: None,
         }
     }
 
@@ -106,6 +116,7 @@ impl DeviceColor {
             g: 1.0 - (m + k).min(1.0),
             b: 1.0 - (y + k).min(1.0),
             native_cmyk: Some((c, m, y, k)),
+            process_cmyk: None,
         }
     }
 
@@ -118,6 +129,7 @@ impl DeviceColor {
                 g,
                 b,
                 native_cmyk: Some((c, m, y, k)),
+                process_cmyk: None,
             }
         } else {
             Self::from_cmyk(c, m, y, k)
@@ -158,6 +170,7 @@ impl DeviceColor {
             g,
             b: bl,
             native_cmyk: None,
+            process_cmyk: None,
         }
     }
 
@@ -216,6 +229,7 @@ impl DeviceColor {
             g: 0.0,
             b: 0.0,
             native_cmyk: None,
+            process_cmyk: None,
         }
     }
 
@@ -240,6 +254,7 @@ impl DeviceColor {
             g: Self::srgb_gamma(lg.max(0.0)).clamp(0.0, 1.0),
             b: Self::srgb_gamma(lb.max(0.0)).clamp(0.0, 1.0),
             native_cmyk: None,
+            process_cmyk: None,
         }
     }
 

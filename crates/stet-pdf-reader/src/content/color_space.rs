@@ -527,6 +527,61 @@ pub fn components_to_device_color(cs: &ResolvedColorSpace, components: &[f64]) -
     components_to_device_color_icc(cs, components, None)
 }
 
+/// Process-only CMYK contribution for a Separation colorant. Returns
+/// `Some((c, m, y, k))` with the tint placed on the named process channel
+/// (or `(0, 0, 0, 0)` for a pure spot colorant so the overprint tracker
+/// writes zero to its plates instead of the spot's alt-CMYK tint).
+fn separation_process_cmyk(name: &[u8], tint: f64) -> Option<(f64, f64, f64, f64)> {
+    use stet_graphics::device::{CMYK_C, CMYK_K, CMYK_M, CMYK_Y, cmyk_channel_for_name};
+    let tint = tint.clamp(0.0, 1.0);
+    match cmyk_channel_for_name(name) {
+        CMYK_C => Some((tint, 0.0, 0.0, 0.0)),
+        CMYK_M => Some((0.0, tint, 0.0, 0.0)),
+        CMYK_Y => Some((0.0, 0.0, tint, 0.0)),
+        CMYK_K => Some((0.0, 0.0, 0.0, tint)),
+        0 => Some((0.0, 0.0, 0.0, 0.0)),
+        _ => None,
+    }
+}
+
+/// Process-only CMYK contribution for a DeviceN paint. Each component whose
+/// colorant name maps to a process channel (C/M/Y/K/All) adds its tint to
+/// that plate via subtractive (multiplicative-complement) stacking; spot
+/// colorants contribute nothing to the process buffer.
+#[allow(non_snake_case)]
+fn deviceN_process_cmyk(names: &[Vec<u8>], tints: &[f64]) -> Option<(f64, f64, f64, f64)> {
+    if names.len() != tints.len() {
+        return None;
+    }
+    let mut c_compl = 1.0f64;
+    let mut m_compl = 1.0f64;
+    let mut y_compl = 1.0f64;
+    let mut k_compl = 1.0f64;
+    for (name, &tint) in names.iter().zip(tints.iter()) {
+        let t = tint.clamp(0.0, 1.0);
+        match name.as_slice() {
+            b"Cyan" => c_compl *= 1.0 - t,
+            b"Magenta" => m_compl *= 1.0 - t,
+            b"Yellow" => y_compl *= 1.0 - t,
+            b"Black" => k_compl *= 1.0 - t,
+            b"All" => {
+                let mult = 1.0 - t;
+                c_compl *= mult;
+                m_compl *= mult;
+                y_compl *= mult;
+                k_compl *= mult;
+            }
+            _ => {} // spot colorant — no process contribution
+        }
+    }
+    Some((
+        1.0 - c_compl,
+        1.0 - m_compl,
+        1.0 - y_compl,
+        1.0 - k_compl,
+    ))
+}
+
 /// Convert color components to DeviceColor, with optional ICC profile support.
 pub fn components_to_device_color_icc(
     cs: &ResolvedColorSpace,
@@ -590,6 +645,7 @@ pub fn components_to_device_color_icc(
                             g,
                             b,
                             native_cmyk: Some((c, m, y, k)),
+                            process_cmyk: None,
                         };
                     }
                     return DeviceColor::from_rgb(r, g, b);
@@ -677,17 +733,24 @@ pub fn components_to_device_color_icc(
                     color.native_cmyk = Some((c, m, y, k));
                 }
             }
+            // Process-only contribution: for a process colorant the tint maps
+            // directly to that process channel; for a pure spot the process
+            // contribution is zero (the alt-CMYK is spot-derived and must not
+            // leak into the process-CMYK tracker).
+            color.process_cmyk = separation_process_cmyk(name, tint);
             color
         }
-        ResolvedColorSpace::DeviceN { alt, tint_fn, .. } => {
-            if let Some(func) = tint_fn {
+        ResolvedColorSpace::DeviceN { names, alt, tint_fn, .. } => {
+            let mut color = if let Some(func) = tint_fn {
                 let alt_components = func.evaluate(components);
                 components_to_device_color_icc(alt, &alt_components, icc_cache)
             } else {
                 // Fallback: use first component as gray
                 let v = components.first().copied().unwrap_or(0.0);
                 DeviceColor::from_gray(1.0 - v)
-            }
+            };
+            color.process_cmyk = deviceN_process_cmyk(names, components);
+            color
         }
         ResolvedColorSpace::CalGray { params } => {
             let a = components.first().copied().unwrap_or(0.0);
