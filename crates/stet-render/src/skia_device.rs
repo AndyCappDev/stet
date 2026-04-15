@@ -2375,13 +2375,16 @@ fn render_element(
     match element {
         DisplayElement::Fill { path, params } => {
             // Use the overprint compositing path whenever the fill needs
-            // per-channel CMYK rendering. Three cases trigger it:
+            // per-channel CMYK rendering. Four cases trigger it:
             //   1. Subset painted_channels (Separation /Magenta, DeviceN, etc.)
             //      — only the named channels touch the buffer; the rest are
             //      preserved from the backdrop.
             //   2. DeviceCMYK + OPM 1 — zero-valued components don't paint, so
             //      a per-pixel filter is required.
-            //   3. (Combinations of the above.)
+            //   3. Custom spot (painted_channels=0, non-CMYK, with native_cmyk)
+            //      under overprint — process plates must be preserved; the
+            //      spot's alt-CMYK only contributes multiplicatively to RGB.
+            //   4. (Combinations of the above.)
             // Only fires for Normal blend; non-Normal blend modes handle zero
             // values through their blend math, not through overprint filtering.
             // Includes text glyphs: when overprint is meaningful (the test
@@ -2392,10 +2395,13 @@ fn render_element(
                 painted != 0 && painted != stet_graphics::device::CMYK_ALL;
             let opm1_cmyk =
                 params.is_device_cmyk && params.overprint_mode == 1;
+            let custom_spot = painted == 0
+                && !params.is_device_cmyk
+                && params.color.native_cmyk.is_some();
             let needs_overprint = params.overprint
                 && band_state.cmyk_buffer.is_some()
                 && params.blend_mode == 0
-                && (subset_channels || opm1_cmyk);
+                && (subset_channels || opm1_cmyk || custom_spot);
 
             if needs_overprint {
                 let mut cmyk_buf = band_state.cmyk_buffer.take().unwrap();
@@ -2505,18 +2511,23 @@ fn render_element(
             };
 
             // Mirror the Fill gating: per-channel CMYK rendering kicks in for
-            // subset painted_channels (Separation /Magenta, DeviceN, etc.) or
-            // for DeviceCMYK + OPM 1 (zero-valued source components don't paint).
-            // GWG 1.0 swatch a/b/f/g need this for the magenta X stroke that
-            // overlays the same path the fill already drew.
+            // subset painted_channels (Separation /Magenta, DeviceN, etc.), for
+            // DeviceCMYK + OPM 1 (zero-valued source components don't paint),
+            // or for a custom spot (painted=0, non-CMYK) under overprint — so
+            // the spot applies multiplicatively to RGB without disturbing the
+            // process plates. GWG 1.0 swatch a/b/f/g need this for the magenta
+            // X stroke that overlays the same path the fill already drew.
             let painted = params.painted_channels;
             let subset_channels =
                 painted != 0 && painted != stet_graphics::device::CMYK_ALL;
             let opm1_cmyk = params.is_device_cmyk && params.overprint_mode == 1;
+            let custom_spot = painted == 0
+                && !params.is_device_cmyk
+                && params.color.native_cmyk.is_some();
             let needs_overprint = params.overprint
                 && band_state.cmyk_buffer.is_some()
                 && params.blend_mode == 0
-                && (subset_channels || opm1_cmyk);
+                && (subset_channels || opm1_cmyk || custom_spot);
 
             let Some(skia_path) = build_skia_path(draw_path) else {
                 return;
@@ -6342,6 +6353,13 @@ fn render_overprint_fill(
         (1.0 - r, 1.0 - g, 1.0 - b, 0.0)
     });
 
+    // Custom spot paints (Separation/DeviceN whose named colorants don't include
+    // any process channel) go to a separation plate, not CMYK. In the composite
+    // preview we layer the spot's alt-CMYK onto the pixmap via multiplicative
+    // ink stacking and leave the cmyk_buffer untouched — otherwise a later OPM 1
+    // overprint would see the spot's alt-CMYK as "backdrop" and knock it out.
+    let is_custom_spot = params.painted_channels == 0 && !params.is_device_cmyk;
+
     let mut channels = params.painted_channels;
     // Non-CMYK fills (painted_channels=0, e.g. Separation spot colors, RGB, Gray)
     // replace all color at each pixel — update all CMYK channels to keep buffer in sync.
@@ -6375,7 +6393,7 @@ fn render_overprint_fill(
         }
     }
 
-    if channels == stet_graphics::device::CMYK_ALL {
+    if channels == stet_graphics::device::CMYK_ALL && !is_custom_spot {
         let cov_data = coverage_mask.data();
         let stride = out_w as usize;
         for y in bbox_y0..bbox_y1 {
@@ -6423,31 +6441,34 @@ fn render_overprint_fill(
 
             let ci = mi * 4;
             let pi = y * px_stride + x * 4;
-            let (cur_c, cur_m, cur_y, cur_k) = {
-                let c = cmyk_buf[ci] as f64;
-                let m = cmyk_buf[ci + 1] as f64;
-                let y_val = cmyk_buf[ci + 2] as f64;
-                let k = cmyk_buf[ci + 3] as f64;
-                if c == 0.0 && m == 0.0 && y_val == 0.0 && k == 0.0 && px_data[pi + 3] > 0 {
-                    let r = px_data[pi] as f64 / 255.0;
-                    let g = px_data[pi + 1] as f64 / 255.0;
-                    let b = px_data[pi + 2] as f64 / 255.0;
-                    let rk = 1.0 - r.max(g).max(b);
-                    if rk >= 1.0 {
-                        (0.0, 0.0, 0.0, 1.0)
-                    } else {
-                        let inv = 1.0 / (1.0 - rk);
-                        (
-                            (1.0 - r - rk) * inv,
-                            (1.0 - g - rk) * inv,
-                            (1.0 - b - rk) * inv,
-                            rk,
-                        )
-                    }
-                } else {
-                    (c, m, y_val, k)
-                }
-            };
+            let cur_c = cmyk_buf[ci] as f64;
+            let cur_m = cmyk_buf[ci + 1] as f64;
+            let cur_y = cmyk_buf[ci + 2] as f64;
+            let cur_k = cmyk_buf[ci + 3] as f64;
+            // Switch to multiplicative ink-stacking when the pixmap carries a
+            // contribution not reflected in cmyk_buffer: either this paint is
+            // itself a custom spot (painted_channels=0, non-CMYK) or the
+            // process-ink state is empty while the pixmap shows colour *and*
+            // is actually opaque — that signals a spot (or RGB) paint landed
+            // here and the "replace" CMYK→RGB model would erase the
+            // contribution for the channels being overwritten. Fully
+            // transparent pixels are stored as premultiplied (0,0,0,0), so we
+            // must require alpha>0 before trusting the RGB — otherwise fresh
+            // paper (alpha=0) looks like "black backdrop" and multiplicative
+            // darkening would paint the fill pure black.
+            let cur_is_clean =
+                cur_c == 0.0 && cur_m == 0.0 && cur_y == 0.0 && cur_k == 0.0;
+            let pixmap_has_colour = px_data[pi + 3] > 0
+                && (px_data[pi] < 250 || px_data[pi + 1] < 250 || px_data[pi + 2] < 250);
+            // Multiplicative ink-stacking only when the pixmap carries a real
+            // backdrop: either this paint is a custom spot landing on an
+            // already-coloured pixel, or the process-ink buffer is empty but
+            // the pixmap shows colour (prior spot/RGB paint). On fresh paper
+            // (alpha=0 → premultiplied (0,0,0,0)) multiplicative would darken
+            // the fill to pure black, so those pixels fall through to the
+            // replace path where the source RGB paints normally.
+            let use_multiplicative =
+                (is_custom_spot || cur_is_clean) && pixmap_has_colour;
 
             let new_c = if channels & stet_graphics::device::CMYK_C != 0 {
                 src_c
@@ -6470,12 +6491,51 @@ fn render_overprint_fill(
                 cur_k
             };
 
-            cmyk_buf[ci] = new_c as f32;
-            cmyk_buf[ci + 1] = new_m as f32;
-            cmyk_buf[ci + 2] = new_y as f32;
-            cmyk_buf[ci + 3] = new_k as f32;
+            // Custom spot paints live on a separation plate — skip the
+            // cmyk_buffer write so a later OPM 1 overprint still sees the
+            // original process-ink state as backdrop.
+            if !is_custom_spot {
+                cmyk_buf[ci] = new_c as f32;
+                cmyk_buf[ci + 1] = new_m as f32;
+                cmyk_buf[ci + 2] = new_y as f32;
+                cmyk_buf[ci + 3] = new_k as f32;
+            }
 
-            let (r, g, b) = if let Some(icc_cache) = icc {
+            let (r, g, b) = if use_multiplicative {
+                // Multiplicative ink stacking: each painted channel attenuates
+                // the corresponding RGB component; preserved channels leave
+                // the pixmap's existing colour untouched. This keeps any spot
+                // contribution already in the pixmap visible under overprints
+                // whose zero-valued CMYK components should not erase it.
+                let bg_r = px_data[pi] as f64 / 255.0;
+                let bg_g = px_data[pi + 1] as f64 / 255.0;
+                let bg_b = px_data[pi + 2] as f64 / 255.0;
+                let over_r = if channels & stet_graphics::device::CMYK_C != 0 {
+                    1.0 - src_c
+                } else {
+                    1.0
+                };
+                let over_g = if channels & stet_graphics::device::CMYK_M != 0 {
+                    1.0 - src_m
+                } else {
+                    1.0
+                };
+                let over_b = if channels & stet_graphics::device::CMYK_Y != 0 {
+                    1.0 - src_y
+                } else {
+                    1.0
+                };
+                let k_fac = if channels & stet_graphics::device::CMYK_K != 0 {
+                    1.0 - src_k
+                } else {
+                    1.0
+                };
+                (
+                    (bg_r * over_r * k_fac).clamp(0.0, 1.0),
+                    (bg_g * over_g * k_fac).clamp(0.0, 1.0),
+                    (bg_b * over_b * k_fac).clamp(0.0, 1.0),
+                )
+            } else if let Some(icc_cache) = icc {
                 icc_cache
                     .convert_cmyk_readonly(new_c, new_m, new_y, new_k)
                     .unwrap_or_else(|| cmyk_to_rgb_plrm(new_c, new_m, new_y, new_k))
@@ -6583,12 +6643,21 @@ fn update_cmyk_buffer_for_fill(
     no_aa: bool,
     icc: Option<&IccCache>,
 ) {
+    // Custom spot paints (Separation/DeviceN naming no process channel) go to
+    // their own separation plate — the process CMYK buffer must be zeroed
+    // under the paint (knockout) so a later overprint sees "no process ink"
+    // and falls into the multiplicative-blend branch that preserves the
+    // spot's visible contribution in the pixmap.
+    let is_custom_spot = params.painted_channels == 0 && !params.is_device_cmyk;
+
     // Source CMYK preference: native CMYK supplied with the fill > ICC reverse
     // (sRGB→CMYK via the system CMYK profile) > PLRM (1−r, 1−g, 1−b, 0)
     // fallback. The ICC reverse keeps non-CMYK fills (RGB/Gray/Lab/etc.)
     // representable as accurate CMYK in the parallel buffer so the
     // non-isolated CMYK composite-back can blend them correctly.
-    let (src_c, src_m, src_y, src_k) = if let Some(c) = params.color.native_cmyk {
+    let (src_c, src_m, src_y, src_k) = if is_custom_spot {
+        (0.0, 0.0, 0.0, 0.0)
+    } else if let Some(c) = params.color.native_cmyk {
         c
     } else if let Some(cmyk) = icc.and_then(|i| {
         i.convert_rgb_to_cmyk_readonly(params.color.r, params.color.g, params.color.b)
@@ -6730,6 +6799,11 @@ fn render_overprint_stroke(
         (1.0 - r, 1.0 - g, 1.0 - b, 0.0)
     });
 
+    // See render_overprint_fill for the rationale: a custom spot stroke must
+    // preserve the process CMYK buffer and blend multiplicatively in RGB so
+    // later OPM 1 overprints don't knock out the spot's visible colour.
+    let is_custom_spot = params.painted_channels == 0 && !params.is_device_cmyk;
+
     let mut channels = params.painted_channels;
     if channels == 0 {
         channels = stet_graphics::device::CMYK_ALL;
@@ -6756,7 +6830,7 @@ fn render_overprint_stroke(
         }
     }
 
-    if channels == stet_graphics::device::CMYK_ALL {
+    if channels == stet_graphics::device::CMYK_ALL && !is_custom_spot {
         // Full-channel replacement: write source CMYK to buffer for covered
         // pixels and let tiny-skia stroke the pixmap with the source colour.
         let cov_data = coverage_mask.data();
@@ -6806,31 +6880,23 @@ fn render_overprint_stroke(
 
             let ci = mi * 4;
             let pi = y * px_stride + x * 4;
-            let (cur_c, cur_m, cur_y, cur_k) = {
-                let c = cmyk_buf[ci] as f64;
-                let m = cmyk_buf[ci + 1] as f64;
-                let y_val = cmyk_buf[ci + 2] as f64;
-                let k = cmyk_buf[ci + 3] as f64;
-                if c == 0.0 && m == 0.0 && y_val == 0.0 && k == 0.0 && px_data[pi + 3] > 0 {
-                    let r = px_data[pi] as f64 / 255.0;
-                    let g = px_data[pi + 1] as f64 / 255.0;
-                    let b = px_data[pi + 2] as f64 / 255.0;
-                    let rk = 1.0 - r.max(g).max(b);
-                    if rk >= 1.0 {
-                        (0.0, 0.0, 0.0, 1.0)
-                    } else {
-                        let inv = 1.0 / (1.0 - rk);
-                        (
-                            (1.0 - r - rk) * inv,
-                            (1.0 - g - rk) * inv,
-                            (1.0 - b - rk) * inv,
-                            rk,
-                        )
-                    }
-                } else {
-                    (c, m, y_val, k)
-                }
-            };
+            let cur_c = cmyk_buf[ci] as f64;
+            let cur_m = cmyk_buf[ci + 1] as f64;
+            let cur_y = cmyk_buf[ci + 2] as f64;
+            let cur_k = cmyk_buf[ci + 3] as f64;
+            let cur_is_clean =
+                cur_c == 0.0 && cur_m == 0.0 && cur_y == 0.0 && cur_k == 0.0;
+            let pixmap_has_colour = px_data[pi + 3] > 0
+                && (px_data[pi] < 250 || px_data[pi + 1] < 250 || px_data[pi + 2] < 250);
+            // Multiplicative ink-stacking only when the pixmap carries a real
+            // backdrop: either this paint is a custom spot landing on an
+            // already-coloured pixel, or the process-ink buffer is empty but
+            // the pixmap shows colour (prior spot/RGB paint). On fresh paper
+            // (alpha=0 → premultiplied (0,0,0,0)) multiplicative would darken
+            // the fill to pure black, so those pixels fall through to the
+            // replace path where the source RGB paints normally.
+            let use_multiplicative =
+                (is_custom_spot || cur_is_clean) && pixmap_has_colour;
 
             let new_c = if channels & stet_graphics::device::CMYK_C != 0 {
                 src_c
@@ -6853,12 +6919,43 @@ fn render_overprint_stroke(
                 cur_k
             };
 
-            cmyk_buf[ci] = new_c as f32;
-            cmyk_buf[ci + 1] = new_m as f32;
-            cmyk_buf[ci + 2] = new_y as f32;
-            cmyk_buf[ci + 3] = new_k as f32;
+            if !is_custom_spot {
+                cmyk_buf[ci] = new_c as f32;
+                cmyk_buf[ci + 1] = new_m as f32;
+                cmyk_buf[ci + 2] = new_y as f32;
+                cmyk_buf[ci + 3] = new_k as f32;
+            }
 
-            let (r, g, b) = if let Some(icc_cache) = icc {
+            let (r, g, b) = if use_multiplicative {
+                let bg_r = px_data[pi] as f64 / 255.0;
+                let bg_g = px_data[pi + 1] as f64 / 255.0;
+                let bg_b = px_data[pi + 2] as f64 / 255.0;
+                let over_r = if channels & stet_graphics::device::CMYK_C != 0 {
+                    1.0 - src_c
+                } else {
+                    1.0
+                };
+                let over_g = if channels & stet_graphics::device::CMYK_M != 0 {
+                    1.0 - src_m
+                } else {
+                    1.0
+                };
+                let over_b = if channels & stet_graphics::device::CMYK_Y != 0 {
+                    1.0 - src_y
+                } else {
+                    1.0
+                };
+                let k_fac = if channels & stet_graphics::device::CMYK_K != 0 {
+                    1.0 - src_k
+                } else {
+                    1.0
+                };
+                (
+                    (bg_r * over_r * k_fac).clamp(0.0, 1.0),
+                    (bg_g * over_g * k_fac).clamp(0.0, 1.0),
+                    (bg_b * over_b * k_fac).clamp(0.0, 1.0),
+                )
+            } else if let Some(icc_cache) = icc {
                 icc_cache
                     .convert_cmyk_readonly(new_c, new_m, new_y, new_k)
                     .unwrap_or_else(|| cmyk_to_rgb_plrm(new_c, new_m, new_y, new_k))
@@ -6910,7 +7007,14 @@ fn update_cmyk_buffer_for_stroke(
     no_aa: bool,
     icc: Option<&IccCache>,
 ) {
-    let (src_c, src_m, src_y, src_k) = if let Some(c) = params.color.native_cmyk {
+    // Custom spot strokes knockout the process CMYK plates — zero the buffer
+    // under the stroke so later overprints fall into the multiplicative-blend
+    // branch (see update_cmyk_buffer_for_fill).
+    let is_custom_spot = params.painted_channels == 0 && !params.is_device_cmyk;
+
+    let (src_c, src_m, src_y, src_k) = if is_custom_spot {
+        (0.0, 0.0, 0.0, 0.0)
+    } else if let Some(c) = params.color.native_cmyk {
         c
     } else if let Some(cmyk) = icc.and_then(|i| {
         i.convert_rgb_to_cmyk_readonly(params.color.r, params.color.g, params.color.b)
@@ -7125,6 +7229,21 @@ fn render_overprint_image(
                     | ImageColorSpace::ICCBased { n: 4, .. }
                     | ImageColorSpace::Mask { .. }
             );
+            // Custom spot image: process plates stay untouched and the per-pixel
+            // sampled CMYK is the spot's alt-CMYK, which we layer multiplicatively
+            // onto the pixmap. For image masks, the spot identity lives on the
+            // fill color (recognise them via painted_channels=0 paired with a
+            // native-CMYK fill color from the alt-space conversion). Indexed
+            // images inherit the base space, so an Indexed /DeviceCMYK palette
+            // is NOT a custom spot even when painted_channels=0. Plain DeviceCMYK
+            // / ICCBased(4) images keep is_custom_spot=false so standard OPM 1
+            // behaviour still applies.
+            let is_custom_spot = params.painted_channels == 0
+                && !is_cmyk_color_space(&params.color_space)
+                && match &params.color_space {
+                    ImageColorSpace::Mask { color, .. } => color.native_cmyk.is_some(),
+                    _ => true,
+                };
             if params.overprint_mode == 1
                 && channels == stet_graphics::device::CMYK_ALL
                 && is_direct_cmyk
@@ -7148,31 +7267,23 @@ fn render_overprint_image(
             let ci = mi * 4;
             let pi = mi * 4;
 
-            let (cur_c, cur_m, cur_y, cur_k) = {
-                let c = cmyk_buf[ci] as f64;
-                let m = cmyk_buf[ci + 1] as f64;
-                let y_val = cmyk_buf[ci + 2] as f64;
-                let k = cmyk_buf[ci + 3] as f64;
-                if c == 0.0 && m == 0.0 && y_val == 0.0 && k == 0.0 && px_data[pi + 3] > 0 {
-                    let r = px_data[pi] as f64 / 255.0;
-                    let g = px_data[pi + 1] as f64 / 255.0;
-                    let b = px_data[pi + 2] as f64 / 255.0;
-                    let rk = 1.0 - r.max(g).max(b);
-                    if rk >= 1.0 {
-                        (0.0, 0.0, 0.0, 1.0)
-                    } else {
-                        let inv = 1.0 / (1.0 - rk);
-                        (
-                            (1.0 - r - rk) * inv,
-                            (1.0 - g - rk) * inv,
-                            (1.0 - b - rk) * inv,
-                            rk,
-                        )
-                    }
-                } else {
-                    (c, m, y_val, k)
-                }
-            };
+            let cur_c = cmyk_buf[ci] as f64;
+            let cur_m = cmyk_buf[ci + 1] as f64;
+            let cur_y = cmyk_buf[ci + 2] as f64;
+            let cur_k = cmyk_buf[ci + 3] as f64;
+            let cur_is_clean =
+                cur_c == 0.0 && cur_m == 0.0 && cur_y == 0.0 && cur_k == 0.0;
+            let pixmap_has_colour = px_data[pi + 3] > 0
+                && (px_data[pi] < 250 || px_data[pi + 1] < 250 || px_data[pi + 2] < 250);
+            // Multiplicative ink-stacking only when the pixmap carries a real
+            // backdrop: either this paint is a custom spot landing on an
+            // already-coloured pixel, or the process-ink buffer is empty but
+            // the pixmap shows colour (prior spot/RGB paint). On fresh paper
+            // (alpha=0 → premultiplied (0,0,0,0)) multiplicative would darken
+            // the fill to pure black, so those pixels fall through to the
+            // replace path where the source RGB paints normally.
+            let use_multiplicative =
+                (is_custom_spot || cur_is_clean) && pixmap_has_colour;
 
             let new_c = if channels & stet_graphics::device::CMYK_C != 0 {
                 src_c
@@ -7195,12 +7306,43 @@ fn render_overprint_image(
                 cur_k
             };
 
-            cmyk_buf[ci] = new_c as f32;
-            cmyk_buf[ci + 1] = new_m as f32;
-            cmyk_buf[ci + 2] = new_y as f32;
-            cmyk_buf[ci + 3] = new_k as f32;
+            if !is_custom_spot {
+                cmyk_buf[ci] = new_c as f32;
+                cmyk_buf[ci + 1] = new_m as f32;
+                cmyk_buf[ci + 2] = new_y as f32;
+                cmyk_buf[ci + 3] = new_k as f32;
+            }
 
-            let (r, g, b) = if let Some(icc_cache) = icc {
+            let (r, g, b) = if use_multiplicative {
+                let bg_r = px_data[pi] as f64 / 255.0;
+                let bg_g = px_data[pi + 1] as f64 / 255.0;
+                let bg_b = px_data[pi + 2] as f64 / 255.0;
+                let over_r = if channels & stet_graphics::device::CMYK_C != 0 {
+                    1.0 - src_c
+                } else {
+                    1.0
+                };
+                let over_g = if channels & stet_graphics::device::CMYK_M != 0 {
+                    1.0 - src_m
+                } else {
+                    1.0
+                };
+                let over_b = if channels & stet_graphics::device::CMYK_Y != 0 {
+                    1.0 - src_y
+                } else {
+                    1.0
+                };
+                let k_fac = if channels & stet_graphics::device::CMYK_K != 0 {
+                    1.0 - src_k
+                } else {
+                    1.0
+                };
+                (
+                    (bg_r * over_r * k_fac).clamp(0.0, 1.0),
+                    (bg_g * over_g * k_fac).clamp(0.0, 1.0),
+                    (bg_b * over_b * k_fac).clamp(0.0, 1.0),
+                )
+            } else if let Some(icc_cache) = icc {
                 icc_cache
                     .convert_cmyk_readonly(new_c, new_m, new_y, new_k)
                     .unwrap_or_else(|| cmyk_to_rgb_plrm(new_c, new_m, new_y, new_k))
@@ -10051,67 +10193,132 @@ fn render_radial_shading(
                     continue;
                 }
 
-                // Write CMYK buffer at non-clipped pixels
-                if let Some(ref mut buf) = cmyk_buf {
-                    let ci = (py as usize * pw as usize + px as usize) * 4;
+                // Decide whether this pixel should use the multiplicative
+                // ink-stacking blend to preserve a spot backdrop. We mirror
+                // the rule in `render_overprint_fill`: overprint + subset
+                // painted channels + buffer effectively empty at this pixel
+                // means the pixmap carries a non-CMYK contribution (or the
+                // pixel is fresh), so per-channel ink-stacking gives the
+                // correct result whether the backdrop was spot-painted or
+                // plain.
+                let cmyk = interpolate_cmyk_from_stops(
+                    &params.color_stops,
+                    &params.color_space,
+                    clamped,
+                    &color,
+                    icc,
+                );
+                let ci = (py as usize * pw as usize + px as usize) * 4;
+                let buffer_clean = if let Some(ref buf) = cmyk_buf {
                     if ci + 3 < buf.len() {
-                        let cmyk = interpolate_cmyk_from_stops(
-                            &params.color_stops,
-                            &params.color_space,
-                            clamped,
-                            &color,
-                            icc,
-                        );
-                        if params.overprint
-                            && params.painted_channels != stet_graphics::device::CMYK_ALL
-                        {
-                            if params.painted_channels & stet_graphics::device::CMYK_C != 0 {
-                                buf[ci] = cmyk.0 as f32;
-                            }
-                            if params.painted_channels & stet_graphics::device::CMYK_M != 0 {
-                                buf[ci + 1] = cmyk.1 as f32;
-                            }
-                            if params.painted_channels & stet_graphics::device::CMYK_Y != 0 {
-                                buf[ci + 2] = cmyk.2 as f32;
-                            }
-                            if params.painted_channels & stet_graphics::device::CMYK_K != 0 {
-                                buf[ci + 3] = cmyk.3 as f32;
-                            }
-                        } else {
+                        buf[ci] == 0.0
+                            && buf[ci + 1] == 0.0
+                            && buf[ci + 2] == 0.0
+                            && buf[ci + 3] == 0.0
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                let offset_for_check = py as usize * stride + px as usize * 4;
+                let pixmap_has_colour = data[offset_for_check + 3] > 0
+                    && (data[offset_for_check] < 250
+                        || data[offset_for_check + 1] < 250
+                        || data[offset_for_check + 2] < 250);
+                let use_multiplicative = params.overprint
+                    && params.painted_channels != stet_graphics::device::CMYK_ALL
+                    && buffer_clean
+                    && pixmap_has_colour;
+
+                // Write CMYK buffer at non-clipped pixels
+                if let Some(ref mut buf) = cmyk_buf
+                    && ci + 3 < buf.len()
+                {
+                    if params.overprint
+                        && params.painted_channels != stet_graphics::device::CMYK_ALL
+                    {
+                        if params.painted_channels & stet_graphics::device::CMYK_C != 0 {
                             buf[ci] = cmyk.0 as f32;
+                        }
+                        if params.painted_channels & stet_graphics::device::CMYK_M != 0 {
                             buf[ci + 1] = cmyk.1 as f32;
+                        }
+                        if params.painted_channels & stet_graphics::device::CMYK_Y != 0 {
                             buf[ci + 2] = cmyk.2 as f32;
+                        }
+                        if params.painted_channels & stet_graphics::device::CMYK_K != 0 {
                             buf[ci + 3] = cmyk.3 as f32;
                         }
+                    } else {
+                        buf[ci] = cmyk.0 as f32;
+                        buf[ci + 1] = cmyk.1 as f32;
+                        buf[ci + 2] = cmyk.2 as f32;
+                        buf[ci + 3] = cmyk.3 as f32;
                     }
                 }
 
                 let offset = py as usize * stride + px as usize * 4;
-                data[offset] = (color.r * 255.0).round().clamp(0.0, 255.0) as u8;
-                data[offset + 1] = (color.g * 255.0).round().clamp(0.0, 255.0) as u8;
-                data[offset + 2] = (color.b * 255.0).round().clamp(0.0, 255.0) as u8;
-                data[offset + 3] = 255;
+                if use_multiplicative {
+                    // Ink-stack the per-stop CMYK onto the pixmap RGB. Only
+                    // channels named by painted_channels contribute; others
+                    // leave the pixmap untouched, so a spot-painted backdrop
+                    // survives with just the named inks darkening it.
+                    let bg_r = data[offset] as f64 / 255.0;
+                    let bg_g = data[offset + 1] as f64 / 255.0;
+                    let bg_b = data[offset + 2] as f64 / 255.0;
+                    let over_r = if params.painted_channels & stet_graphics::device::CMYK_C != 0 {
+                        1.0 - cmyk.0
+                    } else {
+                        1.0
+                    };
+                    let over_g = if params.painted_channels & stet_graphics::device::CMYK_M != 0 {
+                        1.0 - cmyk.1
+                    } else {
+                        1.0
+                    };
+                    let over_b = if params.painted_channels & stet_graphics::device::CMYK_Y != 0 {
+                        1.0 - cmyk.2
+                    } else {
+                        1.0
+                    };
+                    let k_fac = if params.painted_channels & stet_graphics::device::CMYK_K != 0 {
+                        1.0 - cmyk.3
+                    } else {
+                        1.0
+                    };
+                    data[offset] =
+                        ((bg_r * over_r * k_fac).clamp(0.0, 1.0) * 255.0).round() as u8;
+                    data[offset + 1] =
+                        ((bg_g * over_g * k_fac).clamp(0.0, 1.0) * 255.0).round() as u8;
+                    data[offset + 2] =
+                        ((bg_b * over_b * k_fac).clamp(0.0, 1.0) * 255.0).round() as u8;
+                    data[offset + 3] = 255;
+                } else {
+                    data[offset] = (color.r * 255.0).round().clamp(0.0, 255.0) as u8;
+                    data[offset + 1] = (color.g * 255.0).round().clamp(0.0, 255.0) as u8;
+                    data[offset + 2] = (color.b * 255.0).round().clamp(0.0, 255.0) as u8;
+                    data[offset + 3] = 255;
 
-                // Recomposite RGB from the CMYK buffer via ICC only for
-                // overprint shadings, where the per-channel merge in the
-                // buffer means the displayed pixel must reflect the merged
-                // CMYK rather than the source's RGB. For non-overprint
-                // shadings the LUT-rendered pixmap (above) is already
-                // correct, and round-tripping CMYK→RGB through the ICC
-                // profile produces a different gradient curve (linear in
-                // CMYK rather than linear in RGB) — that drift was the
-                // 3000_9 / 3000_10 snowman shading regression. The CMYK
-                // buffer is only consumed by `composite_non_isolated_cmyk`,
-                // which excludes shading-containing groups via
-                // `group_content_is_native_cmyk`, so the buffer/pixmap
-                // mismatch never reaches a consumer that would notice.
-                if params.overprint
-                    && params.painted_channels != stet_graphics::device::CMYK_ALL
-                    && matches!(params.color_space, ShadingColorSpace::DeviceCMYK)
-                    && let Some(ref mut buf) = cmyk_buf
-                {
-                    let ci = (py as usize * pw as usize + px as usize) * 4;
-                    if ci + 3 < buf.len()
+                    // Recomposite RGB from the CMYK buffer via ICC only for
+                    // overprint DeviceCMYK shadings on a CMYK-only backdrop,
+                    // where the per-channel merge in the buffer means the
+                    // displayed pixel must reflect the merged CMYK rather
+                    // than the source's RGB. For non-overprint shadings the
+                    // LUT-rendered pixmap (above) is already correct, and
+                    // round-tripping CMYK→RGB through the ICC profile
+                    // produces a different gradient curve (linear in CMYK
+                    // rather than linear in RGB) — that drift was the
+                    // 3000_9 / 3000_10 snowman shading regression. The CMYK
+                    // buffer is only consumed by `composite_non_isolated_cmyk`,
+                    // which excludes shading-containing groups via
+                    // `group_content_is_native_cmyk`, so the buffer/pixmap
+                    // mismatch never reaches a consumer that would notice.
+                    if params.overprint
+                        && params.painted_channels != stet_graphics::device::CMYK_ALL
+                        && matches!(params.color_space, ShadingColorSpace::DeviceCMYK)
+                        && let Some(ref mut buf) = cmyk_buf
+                        && ci + 3 < buf.len()
                         && let Some(icc_cache) = icc
                     {
                         let c = buf[ci] as f64;
