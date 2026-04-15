@@ -387,6 +387,7 @@ fn build_type1_shading(
             blend_mode: 0,
             overprint: false,
             overprint_mode: 0,
+            opm_paired: false,
             painted_channels: 0,
         },
     });

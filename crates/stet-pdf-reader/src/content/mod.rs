@@ -606,6 +606,7 @@ impl<'a> ContentInterpreter<'a> {
                                 is_text_glyph: false,
                                 overprint: false,
                                 overprint_mode: 0,
+                                opm_paired: false,
                                 painted_channels: 0,
                                 is_device_cmyk: false,
                                 spot_color: None,
@@ -646,6 +647,7 @@ impl<'a> ContentInterpreter<'a> {
                                 is_text_glyph: false,
                                 overprint: false,
                                 overprint_mode: 0,
+                                opm_paired: false,
                                 painted_channels: 0,
                                 is_device_cmyk: false,
                                 spot_color: None,
@@ -689,6 +691,7 @@ impl<'a> ContentInterpreter<'a> {
                                     is_text_glyph: false,
                                     overprint: false,
                                     overprint_mode: 0,
+                                    opm_paired: false,
                                     painted_channels: 0,
                                     is_device_cmyk: false,
                                     spot_color: None,
@@ -733,6 +736,7 @@ impl<'a> ContentInterpreter<'a> {
                                     is_text_glyph: false,
                                     overprint: false,
                                     overprint_mode: 0,
+                                    opm_paired: false,
                                     painted_channels: 0,
                                     is_device_cmyk: false,
                                     spot_color: None,
@@ -772,6 +776,7 @@ impl<'a> ContentInterpreter<'a> {
                                     is_text_glyph: false,
                                     overprint: false,
                                     overprint_mode: 0,
+                                    opm_paired: false,
                                     painted_channels: 0,
                                     is_device_cmyk: false,
                                     spot_color: None,
@@ -818,6 +823,7 @@ impl<'a> ContentInterpreter<'a> {
                             is_text_glyph: false,
                             overprint: false,
                             overprint_mode: 0,
+                            opm_paired: false,
                             painted_channels: 0,
                             is_device_cmyk: false,
                             spot_color: None,
@@ -845,6 +851,7 @@ impl<'a> ContentInterpreter<'a> {
                         is_text_glyph: false,
                         overprint: false,
                         overprint_mode: 0,
+                        opm_paired: false,
                         painted_channels: 0,
                         is_device_cmyk: false,
                         spot_color: None,
@@ -893,6 +900,7 @@ impl<'a> ContentInterpreter<'a> {
                             is_text_glyph: false,
                             overprint: false,
                             overprint_mode: 0,
+                            opm_paired: false,
                             painted_channels: 0,
                             is_device_cmyk: false,
                             spot_color: None,
@@ -920,6 +928,7 @@ impl<'a> ContentInterpreter<'a> {
                         is_text_glyph: false,
                         overprint: false,
                         overprint_mode: 0,
+                        opm_paired: false,
                         painted_channels: 0,
                         is_device_cmyk: false,
                         spot_color: None,
@@ -3331,6 +3340,7 @@ impl<'a> ContentInterpreter<'a> {
                     blend_mode: 0,
                     overprint: false,
                     overprint_mode: 0,
+                    opm_paired: false,
                     painted_channels: 0,
                 },
             });
@@ -3423,7 +3433,7 @@ impl<'a> ContentInterpreter<'a> {
                     ctm: self.gstate.ctm, image_matrix,
                     interpolate: false, mask_color: None,
                     alpha: 1.0, blend_mode: 0,
-                    overprint: false, overprint_mode: 0, painted_channels: 0,
+                    overprint: false, overprint_mode: 0, opm_paired: false, painted_channels: 0,
                 },
             });
 
@@ -3828,6 +3838,7 @@ impl<'a> ContentInterpreter<'a> {
             blend_mode: self.gstate.blend_mode,
             overprint: self.gstate.overprint,
             overprint_mode: self.gstate.overprint_mode,
+            opm_paired: self.gstate.opm_paired,
             painted_channels: painted_channels_override,
         };
 
@@ -3937,6 +3948,7 @@ impl<'a> ContentInterpreter<'a> {
                     blend_mode: 0,
                     overprint: false,
                     overprint_mode: 0,
+                    opm_paired: false,
                     painted_channels: 0,
                 },
             });
@@ -4025,6 +4037,7 @@ impl<'a> ContentInterpreter<'a> {
             blend_mode: self.gstate.blend_mode,
             overprint: self.gstate.overprint,
             overprint_mode: self.gstate.overprint_mode,
+            opm_paired: self.gstate.opm_paired,
             painted_channels: cached.painted_channels,
         };
 
@@ -4045,6 +4058,7 @@ impl<'a> ContentInterpreter<'a> {
                     blend_mode: 0,
                     overprint: false,
                     overprint_mode: 0,
+                    opm_paired: false,
                     painted_channels: 0,
                 },
             });
@@ -4979,6 +4993,7 @@ impl<'a> ContentInterpreter<'a> {
                     blend_mode: 0,
                     overprint: false,
                     overprint_mode: 0,
+                    opm_paired: false,
                     painted_channels: 0,
                 },
             });
@@ -5073,6 +5088,7 @@ impl<'a> ContentInterpreter<'a> {
                 blend_mode: self.gstate.blend_mode,
                 overprint: self.gstate.overprint,
                 overprint_mode: self.gstate.overprint_mode,
+                opm_paired: self.gstate.opm_paired,
                 painted_channels: resolved_cs
                     .as_ref()
                     .map(painted_channels_for_cs)
@@ -5124,9 +5140,11 @@ impl<'a> ContentInterpreter<'a> {
         }
         // Always parse OPM — it affects whether CMYK all-zero is transparent,
         // which is needed even without full overprint simulation.
+        let has_opm = gs_dict.get(b"OPM").is_some();
         if let Some(opm) = gs_dict.get_int(b"OPM") {
             self.gstate.overprint_mode = opm as i32;
         }
+        let has_op_flag = gs_dict.get(b"OP").is_some() || gs_dict.get(b"op").is_some();
         if self.overprint_enabled {
             if let Some(PdfObj::Bool(op)) = gs_dict.get(b"OP") {
                 self.gstate.overprint = *op;
@@ -5136,6 +5154,19 @@ impl<'a> ContentInterpreter<'a> {
             if let Some(PdfObj::Bool(op)) = gs_dict.get(b"op") {
                 self.gstate.overprint = *op;
             }
+        }
+        // Track whether /OPM and /op|/OP were set together in this dict. The
+        // strict OPM-1 "preserve zero-source components" behavior only applies
+        // when both are set together (as Adobe Illustrator emits them). An
+        // inherited OPM=1 paired with a standalone /op true — common in
+        // real-world PDFs where /op is toggled without re-asserting /OPM —
+        // falls back to legacy "zero = knockout" semantics, so a `0 0 0 0 k`
+        // fill still acts as a white knockout. Matches Adobe Acrobat behavior
+        // on files like pdf_samples/2495.pdf page 5 (white icon arrow).
+        if has_opm && has_op_flag {
+            self.gstate.opm_paired = true;
+        } else if has_opm || has_op_flag {
+            self.gstate.opm_paired = false;
         }
         if let Some(ca) = gs_dict.get_f64(b"CA") {
             self.gstate.stroke_alpha = ca;

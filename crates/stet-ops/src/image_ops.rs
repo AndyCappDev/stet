@@ -1792,6 +1792,7 @@ fn draw_image_to_device(
         blend_mode: 0,
         overprint: false,
         overprint_mode: 0,
+        opm_paired: false,
         painted_channels: 0,
     };
     ctx.display_list.push(DisplayElement::Image {

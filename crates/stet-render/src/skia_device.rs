@@ -6634,11 +6634,17 @@ fn render_overprint_fill(
         if src_k != 0.0 {
             channels |= stet_graphics::device::CMYK_K;
         }
-        // All-zero CMYK (white) with OPM 1: no non-zero channels to filter,
-        // so paint all channels normally. The zero-skipping rule only applies
-        // when at least one component is non-zero (otherwise the fill would
-        // become invisible, contradicting the intent to paint white).
-        if channels == 0 {
+        // PDF 1.7 §7.6.4.5: OPM 1 with /op true preserves zero-source
+        // components — leave `channels = 0` for an all-zero CMYK source only
+        // when /OPM and /op (or /OP) were set together in the same ExtGState
+        // dict, signaling the author deliberately enabled strict-spec
+        // semantics (as Adobe Illustrator emits). When the current /op was
+        // set standalone and OPM was merely inherited, fall back to legacy
+        // knockout so `0 0 0 0 k` still paints white. Matches Adobe Acrobat
+        // behavior: GWG 4.0.1 swatches g/j (paired /OPM+/op in /GS0,/GS3)
+        // preserve the backdrop; pdf_samples/2495.pdf page 5 icon (only /op
+        // on /R20, OPM inherited from /R11) performs the expected knockout.
+        if channels == 0 && !params.opm_paired {
             channels = stet_graphics::device::CMYK_ALL;
         }
     }
@@ -7237,7 +7243,10 @@ fn render_overprint_stroke(
         if src_k != 0.0 {
             channels |= stet_graphics::device::CMYK_K;
         }
-        if channels == 0 {
+        // See render_overprint_fill: an all-zero CMYK source preserves the
+        // backdrop only when /OPM and /op|/OP were set together in the same
+        // ExtGState. Inherited-OPM cases fall back to legacy knockout.
+        if channels == 0 && !params.opm_paired {
             channels = stet_graphics::device::CMYK_ALL;
         }
     }
@@ -11681,6 +11690,7 @@ mod tests {
             is_text_glyph: false,
             overprint: false,
             overprint_mode: 0,
+            opm_paired: false,
             painted_channels: 0,
             is_device_cmyk: false,
             spot_color: None,
@@ -11719,6 +11729,7 @@ mod tests {
             is_text_glyph: false,
             overprint: false,
             overprint_mode: 0,
+            opm_paired: false,
             painted_channels: 0,
             is_device_cmyk: false,
             spot_color: None,
@@ -11770,6 +11781,7 @@ mod tests {
             is_text_glyph: false,
             overprint: false,
             overprint_mode: 0,
+            opm_paired: false,
             painted_channels: 0,
             is_device_cmyk: false,
             spot_color: None,
@@ -11809,6 +11821,7 @@ mod tests {
             is_text_glyph: false,
             overprint: false,
             overprint_mode: 0,
+            opm_paired: false,
             painted_channels: 0,
             is_device_cmyk: false,
             spot_color: None,
@@ -11857,6 +11870,7 @@ mod tests {
             is_text_glyph: false,
             overprint: false,
             overprint_mode: 0,
+            opm_paired: false,
             painted_channels: 0,
             is_device_cmyk: false,
             spot_color: None,
@@ -11891,6 +11905,7 @@ mod tests {
                 is_text_glyph: false,
                 overprint: false,
                 overprint_mode: 0,
+                opm_paired: false,
                 painted_channels: 0,
                 is_device_cmyk: false,
                 spot_color: None,
@@ -11954,6 +11969,7 @@ mod tests {
                 is_text_glyph: false,
                 overprint: false,
                 overprint_mode: 0,
+                opm_paired: false,
                 painted_channels: 0,
                 is_device_cmyk: false,
                 spot_color: None,

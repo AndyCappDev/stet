@@ -134,6 +134,11 @@ pub struct FillParams {
     pub overprint: bool,
     /// Overprint mode (0 or 1). With OPM 1 + DeviceCMYK, only non-zero channels are painted.
     pub overprint_mode: i32,
+    /// True when /OPM was set together with /op or /OP in the same ExtGState
+    /// dict that configured this fill. Enables strict OPM-1 "preserve zero
+    /// components" behavior; when false, an all-zero CMYK source still
+    /// performs a full knockout (legacy Adobe compatibility).
+    pub opm_paired: bool,
     /// Which CMYK channels this fill paints (bitmask of CMYK_C/M/Y/K).
     pub painted_channels: u8,
     /// True when color space is DeviceCMYK or ICCBased(4).
@@ -214,6 +219,9 @@ pub struct StrokeParams {
     pub overprint: bool,
     /// Overprint mode (0 or 1).
     pub overprint_mode: i32,
+    /// See FillParams::opm_paired. Strict OPM-1 preserve requires both
+    /// /OPM and /op|/OP set in the same ExtGState dict.
+    pub opm_paired: bool,
     /// Which CMYK channels this stroke paints (bitmask of CMYK_C/M/Y/K).
     pub painted_channels: u8,
     /// True when stroke color space is DeviceCMYK or ICCBased(4) — OPM 1 only applies to these.
@@ -382,6 +390,8 @@ pub struct ImageParams {
     pub blend_mode: u8,
     pub overprint: bool,
     pub overprint_mode: i32,
+    /// See FillParams::opm_paired.
+    pub opm_paired: bool,
     pub painted_channels: u8,
 }
 

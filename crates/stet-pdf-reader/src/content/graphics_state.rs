@@ -122,6 +122,13 @@ pub struct PdfGraphicsState {
     pub overprint_stroke: bool,
     /// Overprint mode: 0 = all components painted, 1 = only non-zero components painted.
     pub overprint_mode: i32,
+    /// True when the most recent ExtGState dict set BOTH /OPM and (/op or /OP)
+    /// together. Strict OPM-1 semantics (zero source preserves backdrop) apply
+    /// only when this is true; otherwise an inherited OPM=1 paired with a
+    /// separately-set /op falls back to legacy knockout semantics for an
+    /// all-zero CMYK source — matching Adobe Acrobat's behavior on real-world
+    /// PDFs that set /op in isolation without re-asserting /OPM.
+    pub opm_paired: bool,
     /// CMYK channel bitmask for fill overprint (which channels the current fill color space paints).
     pub fill_painted_channels: u8,
     /// True when fill color space is DeviceCMYK or ICCBased(4) — OPM 1 only applies to these.
@@ -201,6 +208,7 @@ impl PdfGraphicsState {
             overprint: false,
             overprint_stroke: false,
             overprint_mode: 0,
+            opm_paired: false,
             fill_painted_channels: 0,
             fill_is_device_cmyk: false,
             stroke_painted_channels: 0,
@@ -252,6 +260,7 @@ impl PdfGraphicsState {
             is_text_glyph: false,
             overprint: self.overprint,
             overprint_mode: self.overprint_mode,
+            opm_paired: self.opm_paired,
             painted_channels: self.fill_painted_channels,
             is_device_cmyk: self.fill_is_device_cmyk,
             spot_color: None,
@@ -288,6 +297,7 @@ impl PdfGraphicsState {
             is_text_glyph: false,
             overprint: self.overprint_stroke,
             overprint_mode: self.overprint_mode,
+            opm_paired: self.opm_paired,
             painted_channels: self.stroke_painted_channels,
             is_device_cmyk: self.stroke_is_device_cmyk,
             spot_color: None,
@@ -320,6 +330,7 @@ impl PdfGraphicsState {
             is_text_glyph: false,
             overprint: self.overprint_stroke,
             overprint_mode: self.overprint_mode,
+            opm_paired: self.opm_paired,
             painted_channels: self.stroke_painted_channels,
             is_device_cmyk: self.stroke_is_device_cmyk,
             spot_color: None,
