@@ -572,6 +572,18 @@ struct BandState {
     /// Only allocated when the display list contains overprint elements.
     /// Layout: [C, M, Y, K] as f32 per pixel, band_w * band_h * 4 entries.
     cmyk_buffer: Option<Vec<f32>>,
+    /// Per-pixel snapshot of pixmap RGBA *before* the first overprint paint
+    /// touched that pixel in this band. Subsequent overprint paints at the
+    /// same pixel blend their result against this snapshot instead of the
+    /// current (already-overprinted) pixmap, so AA edges of stacked overprints
+    /// do not leak earlier colour through later paints.
+    /// Lazily allocated on first overprint paint. 4 bytes per pixel.
+    op_bg_snapshot: Option<Vec<u8>>,
+    /// Parallel to `op_bg_snapshot`: 1 byte per pixel, non-zero iff the
+    /// snapshot for that pixel has been captured. Reset to zero over the
+    /// paint bbox on non-overprint writes so a later non-overprint fill
+    /// establishes a fresh backdrop for subsequent overprints.
+    op_touched: Option<Vec<u8>>,
 }
 
 /// Maximum masks to keep in the recycling pool. Enough to avoid alloc churn
@@ -603,6 +615,48 @@ impl BandState {
             .take()
             .or_else(|| self.mask_pool.pop())
             .unwrap_or_else(|| Mask::new(w, h).expect("Failed to create mask"))
+    }
+
+    /// Take (or lazily allocate) the overprint background snapshot and
+    /// touched-flag buffers. Caller must pass them back via
+    /// `restore_op_buffers`. Layout: snapshot is 4 bytes/pixel (RGBA),
+    /// touched is 1 byte/pixel.
+    fn take_op_buffers(&mut self, w: u32, h: u32) -> (Vec<u8>, Vec<u8>) {
+        let n = w as usize * h as usize;
+        let bg = self
+            .op_bg_snapshot
+            .take()
+            .unwrap_or_else(|| vec![0u8; n * 4]);
+        let touched = self.op_touched.take().unwrap_or_else(|| vec![0u8; n]);
+        (bg, touched)
+    }
+
+    /// Put the overprint buffers back after an overprint render pass.
+    fn restore_op_buffers(&mut self, bg: Vec<u8>, touched: Vec<u8>) {
+        self.op_bg_snapshot = Some(bg);
+        self.op_touched = Some(touched);
+    }
+
+    /// Clear the overprint touched flag for pixels in the given bbox. Called
+    /// by non-overprint paints so a subsequent overprint at those pixels
+    /// captures a fresh backdrop snapshot instead of reusing a stale one.
+    #[allow(dead_code)]
+    fn invalidate_op_snapshot(
+        &mut self,
+        bbox_x0: usize,
+        bbox_y0: usize,
+        bbox_x1: usize,
+        bbox_y1: usize,
+        stride: usize,
+    ) {
+        if let Some(touched) = self.op_touched.as_mut() {
+            for y in bbox_y0..bbox_y1 {
+                let row = y * stride;
+                for x in bbox_x0..bbox_x1 {
+                    touched[row + x] = 0;
+                }
+            }
+        }
     }
 }
 
@@ -2405,9 +2459,13 @@ fn render_element(
 
             if needs_overprint {
                 let mut cmyk_buf = band_state.cmyk_buffer.take().unwrap();
+                let (mut op_bg, mut op_touched) =
+                    band_state.take_op_buffers(ctx.out_w, ctx.out_h);
                 render_overprint_fill(
                     pixmap,
                     &mut cmyk_buf,
+                    &mut op_bg,
+                    &mut op_touched,
                     band_state,
                     path,
                     params,
@@ -2421,6 +2479,7 @@ fn render_element(
                     ctx.no_aa,
                 );
                 band_state.cmyk_buffer = Some(cmyk_buf);
+                band_state.restore_op_buffers(op_bg, op_touched);
             } else {
                 let Some(skia_path) = build_skia_path(path) else {
                     return;
@@ -2548,9 +2607,13 @@ fn render_element(
                 // fill path uses, so the post-overprint result lands in the
                 // pixmap (not the raw source colour).
                 let mut cmyk_buf = band_state.cmyk_buffer.take().unwrap();
+                let (mut op_bg, mut op_touched) =
+                    band_state.take_op_buffers(ctx.out_w, ctx.out_h);
                 render_overprint_stroke(
                     pixmap,
                     &mut cmyk_buf,
+                    &mut op_bg,
+                    &mut op_touched,
                     band_state,
                     &skia_path,
                     &stroke,
@@ -2562,6 +2625,7 @@ fn render_element(
                     ctx.no_aa,
                 );
                 band_state.cmyk_buffer = Some(cmyk_buf);
+                band_state.restore_op_buffers(op_bg, op_touched);
             } else {
                 let paint = to_paint_alpha(
                     &params.color,
@@ -2619,9 +2683,13 @@ fn render_element(
 
             if needs_overprint {
                 let mut cmyk_buf = band_state.cmyk_buffer.take().unwrap();
+                let (mut op_bg, mut op_touched) =
+                    band_state.take_op_buffers(ctx.out_w, ctx.out_h);
                 render_overprint_image(
                     pixmap,
                     &mut cmyk_buf,
+                    &mut op_bg,
+                    &mut op_touched,
                     band_state,
                     sample_data,
                     params,
@@ -2634,6 +2702,7 @@ fn render_element(
                     ctx.icc,
                 );
                 band_state.cmyk_buffer = Some(cmyk_buf);
+                band_state.restore_op_buffers(op_bg, op_touched);
             } else if let Some(pp) = ctx
                 .preprocessed
                 .and_then(|pp| pp.get(ctx.elem_idx))
@@ -3286,6 +3355,8 @@ fn render_group(
         clip_mask_seen: HashSet::new(),
         mask_pool: Vec::new(),
         cmyk_buffer: group_cmyk,
+        op_bg_snapshot: None,
+        op_touched: None,
     };
 
     let group_ctx = RenderContext {
@@ -3329,6 +3400,8 @@ fn render_group(
                 clip_mask_seen: HashSet::new(),
                 mask_pool: Vec::new(),
                 cmyk_buffer: None,
+                op_bg_snapshot: None,
+                op_touched: None,
             };
             let iso_ctx = RenderContext {
                 parent_group_isolated: true,
@@ -3866,6 +3939,8 @@ fn render_knockout_group(
         clip_mask_seen: HashSet::new(),
         mask_pool: Vec::new(),
         cmyk_buffer: None,
+        op_bg_snapshot: None,
+        op_touched: None,
     };
 
     // Coverage offscreen for two-pass painter rendering of nested transparency
@@ -4251,6 +4326,8 @@ fn render_soft_masked(
             clip_mask_seen: HashSet::new(),
             mask_pool: Vec::new(),
             cmyk_buffer: None,
+            op_bg_snapshot: None,
+            op_touched: None,
         };
         for (idx, elem) in mask_list.elements().iter().enumerate() {
             let elem_ctx = RenderContext {
@@ -4352,6 +4429,8 @@ fn render_soft_masked(
         clip_mask_seen: HashSet::new(),
         mask_pool: Vec::new(),
         cmyk_buffer: content_cmyk,
+        op_bg_snapshot: None,
+        op_touched: None,
     };
     for (idx, elem) in content_list.elements().iter().enumerate() {
         let elem_ctx = RenderContext {
@@ -4665,6 +4744,8 @@ fn rasterize_mask(
         clip_mask_seen: HashSet::new(),
         mask_pool: Vec::new(),
         cmyk_buffer: None,
+        op_bg_snapshot: None,
+        op_touched: None,
     };
 
     // 6. Render every element of the mask display list into the offscreen.
@@ -5102,6 +5183,8 @@ fn render_pattern_fill(
                     clip_mask_seen: HashSet::new(),
                     mask_pool: Vec::new(),
                     cmyk_buffer: None,
+                    op_bg_snapshot: None,
+                    op_touched: None,
                 };
 
                 for (idx, elem) in params.tile.elements().iter().enumerate() {
@@ -5172,6 +5255,8 @@ fn render_pattern_fill(
                 clip_mask_seen: HashSet::new(),
                 mask_pool: Vec::new(),
                 cmyk_buffer: None,
+                op_bg_snapshot: None,
+                op_touched: None,
             };
             for (idx, elem) in params.tile.elements().iter().enumerate() {
                 let transformed = transform_element_ctm(elem, pm);
@@ -5905,6 +5990,8 @@ impl OutputDevice for SkiaDevice {
             clip_mask_seen: HashSet::new(),
             mask_pool: Vec::new(),
             cmyk_buffer: None,
+            op_bg_snapshot: None,
+            op_touched: None,
         };
         {
             let ctx = RenderContext {
@@ -5999,6 +6086,8 @@ impl OutputDevice for SkiaDevice {
                 clip_mask_seen: HashSet::new(),
                 mask_pool: Vec::new(),
                 cmyk_buffer: None,
+                op_bg_snapshot: None,
+                op_touched: None,
             };
             for (idx, elem) in list.elements().iter().enumerate() {
                 let elem_ctx = RenderContext {
@@ -6296,6 +6385,8 @@ fn has_overprint_elements(list: &DisplayList) -> bool {
 fn render_overprint_fill(
     pixmap: &mut Pixmap,
     cmyk_buf: &mut [f32],
+    op_bg: &mut [u8],
+    op_touched: &mut [u8],
     band_state: &mut BandState,
     path: &PsPath,
     params: &FillParams,
@@ -6441,6 +6532,19 @@ fn render_overprint_fill(
 
             let ci = mi * 4;
             let pi = y * px_stride + x * 4;
+            // Snapshot-based AA blending: on the first overprint touch of a
+            // pixel that already has a backdrop (alpha > 0), capture the
+            // pre-paint pixmap RGBA. Subsequent overprints at the same pixel
+            // blend against the snapshot rather than the current pixmap, so
+            // AA edges of stacked OPM-1 overprints do not leak colour from
+            // earlier paints into later ones.
+            if op_touched[mi] == 0 && px_data[pi + 3] > 0 {
+                op_bg[pi] = px_data[pi];
+                op_bg[pi + 1] = px_data[pi + 1];
+                op_bg[pi + 2] = px_data[pi + 2];
+                op_bg[pi + 3] = px_data[pi + 3];
+                op_touched[mi] = 1;
+            }
             let cur_c = cmyk_buf[ci] as f64;
             let cur_m = cmyk_buf[ci + 1] as f64;
             let cur_y = cmyk_buf[ci + 2] as f64;
@@ -6544,26 +6648,62 @@ fn render_overprint_fill(
             };
 
             let a = (cov * params.alpha as f32).min(1.0);
-            let dst_a = px_data[pi + 3] as f32 / 255.0;
+            // Blend backdrop: prefer the pre-overprint snapshot only when
+            // this paint's colour is close to the snapshot — that signals
+            // the paint effectively returns the pixel to its original
+            // backdrop (e.g. the almost-white cross in GWG 4.1 cancelling
+            // the red cross's M/Y contributions). In that case blending
+            // against the snapshot keeps AA edges clean.
+            //
+            // When the paint introduces colour (e.g. a magenta stroke
+            // following a magenta fill — both lay down ink that should
+            // stack), fall through to the current pixmap so repeated
+            // same-colour paints keep compounding at edges instead of
+            // snapping back to bg.
+            let (bk_r, bk_g, bk_b, bk_a) = if op_touched[mi] != 0 {
+                let new_r = (r as f32 * 255.0).clamp(0.0, 255.0);
+                let new_g = (g as f32 * 255.0).clamp(0.0, 255.0);
+                let new_b = (b as f32 * 255.0).clamp(0.0, 255.0);
+                let dr = (op_bg[pi] as f32 - new_r).abs();
+                let dg = (op_bg[pi + 1] as f32 - new_g).abs();
+                let db = (op_bg[pi + 2] as f32 - new_b).abs();
+                if dr.max(dg).max(db) <= 4.0 {
+                    (op_bg[pi], op_bg[pi + 1], op_bg[pi + 2], op_bg[pi + 3])
+                } else {
+                    (
+                        px_data[pi],
+                        px_data[pi + 1],
+                        px_data[pi + 2],
+                        px_data[pi + 3],
+                    )
+                }
+            } else {
+                (
+                    px_data[pi],
+                    px_data[pi + 1],
+                    px_data[pi + 2],
+                    px_data[pi + 3],
+                )
+            };
+            let dst_a = bk_a as f32 / 255.0;
             let one_minus_a = 1.0 - a;
             let out_a = a + dst_a * one_minus_a;
             if out_a > 0.0 {
                 // tiny-skia stores premultiplied RGBA. Use the standard
                 // src-over formula in premul space: result_pre = src*a + dst_pre*(1-a).
-                // Reading px_data[pi]/255 already gives the premul value, so no
+                // The backdrop values are already premultiplied, so no
                 // additional divide-by-out_a step is needed.
-                px_data[pi] = ((r as f32 * a
-                    + (px_data[pi] as f32 / 255.0) * one_minus_a)
+                px_data[pi] = ((r as f32 * a + (bk_r as f32 / 255.0) * one_minus_a)
                     * 255.0)
                     .clamp(0.0, 255.0)
                     .round() as u8;
                 px_data[pi + 1] = ((g as f32 * a
-                    + (px_data[pi + 1] as f32 / 255.0) * one_minus_a)
+                    + (bk_g as f32 / 255.0) * one_minus_a)
                     * 255.0)
                     .clamp(0.0, 255.0)
                     .round() as u8;
                 px_data[pi + 2] = ((b as f32 * a
-                    + (px_data[pi + 2] as f32 / 255.0) * one_minus_a)
+                    + (bk_b as f32 / 255.0) * one_minus_a)
                     * 255.0)
                     .clamp(0.0, 255.0)
                     .round() as u8;
@@ -6726,6 +6866,8 @@ fn update_cmyk_buffer_for_fill(
 fn render_overprint_stroke(
     pixmap: &mut Pixmap,
     cmyk_buf: &mut [f32],
+    op_bg: &mut [u8],
+    op_touched: &mut [u8],
     band_state: &mut BandState,
     skia_path: &stet_tiny_skia::Path,
     stroke: &Stroke,
@@ -6880,6 +7022,17 @@ fn render_overprint_stroke(
 
             let ci = mi * 4;
             let pi = y * px_stride + x * 4;
+            // Snapshot-based AA blending — see render_overprint_fill for the
+            // rationale. Capture the pre-paint pixmap on first overprint touch
+            // so stacked overprints at the same pixel blend against the
+            // original backdrop rather than each other.
+            if op_touched[mi] == 0 && px_data[pi + 3] > 0 {
+                op_bg[pi] = px_data[pi];
+                op_bg[pi + 1] = px_data[pi + 1];
+                op_bg[pi + 2] = px_data[pi + 2];
+                op_bg[pi + 3] = px_data[pi + 3];
+                op_touched[mi] = 1;
+            }
             let cur_c = cmyk_buf[ci] as f64;
             let cur_m = cmyk_buf[ci + 1] as f64;
             let cur_y = cmyk_buf[ci + 2] as f64;
@@ -6964,23 +7117,51 @@ fn render_overprint_stroke(
             };
 
             let a = (cov * params.alpha as f32).min(1.0);
-            let dst_a = px_data[pi + 3] as f32 / 255.0;
+            // Blend backdrop: prefer snapshot only when this paint's colour
+            // closely matches the snapshot — see render_overprint_fill for
+            // the rationale (keeps aw-on-red-style cancel paints clean at
+            // edges while preserving additive same-colour stacking).
+            let (bk_r, bk_g, bk_b, bk_a) = if op_touched[mi] != 0 {
+                let new_r = (r as f32 * 255.0).clamp(0.0, 255.0);
+                let new_g = (g as f32 * 255.0).clamp(0.0, 255.0);
+                let new_b = (b as f32 * 255.0).clamp(0.0, 255.0);
+                let dr = (op_bg[pi] as f32 - new_r).abs();
+                let dg = (op_bg[pi + 1] as f32 - new_g).abs();
+                let db = (op_bg[pi + 2] as f32 - new_b).abs();
+                if dr.max(dg).max(db) <= 4.0 {
+                    (op_bg[pi], op_bg[pi + 1], op_bg[pi + 2], op_bg[pi + 3])
+                } else {
+                    (
+                        px_data[pi],
+                        px_data[pi + 1],
+                        px_data[pi + 2],
+                        px_data[pi + 3],
+                    )
+                }
+            } else {
+                (
+                    px_data[pi],
+                    px_data[pi + 1],
+                    px_data[pi + 2],
+                    px_data[pi + 3],
+                )
+            };
+            let dst_a = bk_a as f32 / 255.0;
             let one_minus_a = 1.0 - a;
             let out_a = a + dst_a * one_minus_a;
             if out_a > 0.0 {
                 // tiny-skia stores premultiplied RGBA (see render_overprint_fill).
-                px_data[pi] = ((r as f32 * a
-                    + (px_data[pi] as f32 / 255.0) * one_minus_a)
+                px_data[pi] = ((r as f32 * a + (bk_r as f32 / 255.0) * one_minus_a)
                     * 255.0)
                     .clamp(0.0, 255.0)
                     .round() as u8;
                 px_data[pi + 1] = ((g as f32 * a
-                    + (px_data[pi + 1] as f32 / 255.0) * one_minus_a)
+                    + (bk_g as f32 / 255.0) * one_minus_a)
                     * 255.0)
                     .clamp(0.0, 255.0)
                     .round() as u8;
                 px_data[pi + 2] = ((b as f32 * a
-                    + (px_data[pi + 2] as f32 / 255.0) * one_minus_a)
+                    + (bk_b as f32 / 255.0) * one_minus_a)
                     * 255.0)
                     .clamp(0.0, 255.0)
                     .round() as u8;
@@ -7106,6 +7287,8 @@ fn update_cmyk_buffer_for_stroke(
 fn render_overprint_image(
     pixmap: &mut Pixmap,
     cmyk_buf: &mut [f32],
+    op_bg: &mut [u8],
+    op_touched: &mut [u8],
     band_state: &mut BandState,
     sample_data: &[u8],
     params: &ImageParams,
@@ -7349,6 +7532,16 @@ fn render_overprint_image(
             } else {
                 cmyk_to_rgb_plrm(new_c, new_m, new_y, new_k)
             };
+
+            // Snapshot the pre-paint pixmap so a later overprint fill/stroke
+            // at this pixel can blend against it (see render_overprint_fill).
+            if op_touched[mi] == 0 && px_data[pi + 3] > 0 {
+                op_bg[pi] = px_data[pi];
+                op_bg[pi + 1] = px_data[pi + 1];
+                op_bg[pi + 2] = px_data[pi + 2];
+                op_bg[pi + 3] = px_data[pi + 3];
+                op_touched[mi] = 1;
+            }
 
             px_data[pi] = (r * 255.0).round() as u8;
             px_data[pi + 1] = (g * 255.0).round() as u8;
@@ -7744,6 +7937,8 @@ fn render_banded_to_sink(
             clip_mask_seen: clip_seen.clone(),
             mask_pool: Vec::new(),
             cmyk_buffer: cmyk_buf,
+            op_bg_snapshot: None,
+            op_touched: None,
         };
 
         // Epoch-based replay
@@ -8673,6 +8868,8 @@ pub fn render_region_prepared(
         clip_mask_seen: prepared.clip_seen.clone(),
         mask_pool: Vec::new(),
         cmyk_buffer: cmyk_buf,
+        op_bg_snapshot: None,
+        op_touched: None,
     };
 
     let elements = list.elements();
@@ -8851,6 +9048,8 @@ pub fn render_region_single_band(
         clip_mask_seen: prepared.clip_seen.clone(),
         mask_pool: Vec::new(),
         cmyk_buffer: cmyk_buf,
+        op_bg_snapshot: None,
+        op_touched: None,
     };
 
     let elements = list.elements();
@@ -9524,6 +9723,8 @@ pub fn render_region(
         clip_mask_seen: clip_seen,
         mask_pool: Vec::new(),
         cmyk_buffer: cmyk_buf,
+        op_bg_snapshot: None,
+        op_touched: None,
     };
 
     let elements = list.elements();
