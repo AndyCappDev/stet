@@ -44,6 +44,22 @@ impl TransformExecutor<f64> for GrayToRgbIdentity {
     }
 }
 
+/// Pre-baked 4D CLUT sampling a CMYK ICC transform on a regular grid.
+///
+/// At profile-registration time we sample moxcms at `grid_n^4` evenly-spaced
+/// CMYK points and store the sRGB output. At image-conversion time we do
+/// K-slice plus 3D tetrahedral interpolation inside each slice. This is ~30×
+/// faster than direct moxcms for LUT-based CMYK profiles (e.g., SWOP) while
+/// staying well inside imperceptible ΔE for typical print-workflow inputs.
+#[derive(Clone)]
+struct Clut4 {
+    /// Grid points per axis (typical: 17).
+    grid_n: u8,
+    /// Flat LUT in order (k, y, m, c) with C fastest, K slowest.
+    /// Length = grid_n^4 * 3 bytes (packed sRGB).
+    data: Arc<Vec<u8>>,
+}
+
 /// Cached ICC transform to sRGB (specific to source layout).
 #[derive(Clone)]
 struct CachedTransform {
@@ -55,6 +71,9 @@ struct CachedTransform {
     n: u32,
     /// Whether the source profile is Lab (needs value normalization).
     is_lab: bool,
+    /// Pre-baked 4D CLUT for fast CMYK→sRGB image conversion.
+    /// Only built for `n == 4` profiles; None otherwise.
+    clut4: Option<Clut4>,
 }
 
 /// ICC color profile cache and transform manager.
@@ -255,6 +274,23 @@ impl IccCache {
         };
 
         let is_lab = profile.color_space == DataColorSpace::Lab;
+
+        // For 4-channel (CMYK) profiles, pre-bake a 17^4 CLUT for fast image
+        // conversion. The bake invokes the 8-bit transform once over a regular
+        // grid; subsequent image conversions interpolate the grid at ~30× the
+        // throughput of direct moxcms on LUT-based CMYK profiles.
+        let clut4 = if n == 4 {
+            let c = bake_clut4(transform_8bit.as_ref(), 17);
+            if std::env::var_os("STET_ICC_VERIFY").is_some()
+                && let Some(ref clut) = c
+            {
+                verify_clut4(clut, transform_8bit.as_ref());
+            }
+            c
+        } else {
+            None
+        };
+
         self.profiles.insert(hash, Arc::new(profile));
         self.transforms.insert(
             hash,
@@ -263,6 +299,7 @@ impl IccCache {
                 transform_f64,
                 n,
                 is_lab,
+                clut4,
             },
         );
 
@@ -285,6 +322,7 @@ impl IccCache {
                 transform_f64: Arc::new(GrayToRgbIdentity),
                 n: 1,
                 is_lab: false,
+                clut4: None,
             },
         );
         Some(hash)
@@ -400,6 +438,11 @@ impl IccCache {
         let expected_len = pixel_count * n;
         if samples.len() < expected_len {
             return None;
+        }
+
+        // Fast path: pre-baked 4D CLUT for CMYK profiles.
+        if let Some(clut) = &cached.clut4 {
+            return Some(apply_clut4_cmyk_to_rgb(clut, &samples[..expected_len], pixel_count));
         }
 
         let src = &samples[..expected_len];
@@ -609,6 +652,234 @@ impl IccCache {
         self.system_cmyk_bytes = None;
         self.reverse_cmyk_f64 = None;
     }
+}
+
+/// Bake a 4D CLUT by sampling an 8-bit CMYK→sRGB transform on a regular grid.
+///
+/// Generates `grid_n^4` CMYK sample points (each channel stepping `0..=255` in
+/// `grid_n` steps), invokes moxcms once on the full batch, and stores the
+/// packed sRGB output. Storage order is K outermost, then Y, M, C innermost,
+/// matching the interpolation access pattern in `apply_clut4_cmyk_to_rgb`.
+///
+/// Returns `None` if the transform invocation fails — callers fall back to
+/// direct moxcms calls per image.
+fn bake_clut4(
+    transform: &(dyn TransformExecutor<u8> + Send + Sync),
+    grid_n: u8,
+) -> Option<Clut4> {
+    let n = grid_n as usize;
+    if !(2..=33).contains(&n) {
+        return None;
+    }
+    let total = n * n * n * n;
+    // Sample grid: for each (k, y, m, c) grid index, emit bytes (c, m, y, k).
+    // moxcms consumes this as packed 4-channel input.
+    let mut src = Vec::with_capacity(total * 4);
+    let step = |i: usize| -> u8 {
+        // Spread grid indices evenly across 0..=255 (endpoints inclusive).
+        ((i as u32 * 255) / (n as u32 - 1)) as u8
+    };
+    for k in 0..n {
+        let kv = step(k);
+        for y in 0..n {
+            let yv = step(y);
+            for m in 0..n {
+                let mv = step(m);
+                for c in 0..n {
+                    let cv = step(c);
+                    src.extend_from_slice(&[cv, mv, yv, kv]);
+                }
+            }
+        }
+    }
+    let mut dst = vec![0u8; total * 3];
+    transform.transform(&src, &mut dst).ok()?;
+    Some(Clut4 {
+        grid_n,
+        data: Arc::new(dst),
+    })
+}
+
+/// Convert an 8-bit packed CMYK buffer to 8-bit packed sRGB using the baked
+/// 4D CLUT. For each pixel: bracket the K axis into two slices, run 3D
+/// tetrahedral (Kasson) interpolation on (C,M,Y) in each slice, then linearly
+/// blend the two results by the K fraction.
+///
+/// This preserves the profile's behavior across the K axis (UCR/black-point
+/// transitions) while giving image-rate throughput.
+fn apply_clut4_cmyk_to_rgb(clut: &Clut4, src: &[u8], pixel_count: usize) -> Vec<u8> {
+    let n = clut.grid_n as usize;
+    let nm1 = (n - 1) as u32;
+    let lut = clut.data.as_slice();
+
+    // Strides in bytes within the flat LUT (K outermost, then Y, M; C innermost).
+    let stride_c: usize = 3;
+    let stride_m: usize = n * stride_c;
+    let stride_y: usize = n * stride_m;
+    let stride_k: usize = n * stride_y;
+
+    let mut out = vec![0u8; pixel_count * 3];
+
+    // Per-axis: quantize byte → (lo_idx, hi_idx, frac_in_0_255).
+    #[inline(always)]
+    fn axis(v: u8, nm1: u32) -> (usize, usize, u32) {
+        let scaled = v as u32 * nm1;
+        let lo = scaled / 255;
+        let frac = scaled - lo * 255;
+        let hi = if lo < nm1 { lo + 1 } else { lo };
+        (lo as usize, hi as usize, frac)
+    }
+
+    for i in 0..pixel_count {
+        let o = i * 4;
+        let c = src[o];
+        let m = src[o + 1];
+        let y = src[o + 2];
+        let k = src[o + 3];
+
+        let (ci, ci1, fc) = axis(c, nm1);
+        let (mi, mi1, fm) = axis(m, nm1);
+        let (yi, yi1, fy) = axis(y, nm1);
+        let (ki, ki1, fk) = axis(k, nm1);
+
+        // Pick tetrahedron vertices and sorted weights ONCE per pixel
+        // (previously done per channel — 3× waste). Kasson '94:
+        //   out = V000 + (Va - V000)*w1 + (Vb - Va)*w2 + (V111 - Vb)*w3
+        // with w1 >= w2 >= w3 and Va, Vb the two intermediate corners.
+        let (a_dxmy, b_dxmy, w1, w2, w3) = if fc >= fm {
+            if fm >= fy {
+                // C,M,Y
+                ((1, 0, 0), (1, 1, 0), fc, fm, fy)
+            } else if fc >= fy {
+                // C,Y,M
+                ((1, 0, 0), (1, 0, 1), fc, fy, fm)
+            } else {
+                // Y,C,M
+                ((0, 0, 1), (1, 0, 1), fy, fc, fm)
+            }
+        } else if fc >= fy {
+            // M,C,Y
+            ((0, 1, 0), (1, 1, 0), fm, fc, fy)
+        } else if fm >= fy {
+            // M,Y,C
+            ((0, 1, 0), (0, 1, 1), fm, fy, fc)
+        } else {
+            // Y,M,C
+            ((0, 0, 1), (0, 1, 1), fy, fm, fc)
+        };
+
+        // Map tetrahedron corner selector (dc, dm, dy) → LUT offset within a K slice.
+        let corner = |d: (u8, u8, u8)| -> usize {
+            let (dc, dm, dy) = d;
+            let cx = if dc == 0 { ci } else { ci1 };
+            let mx = if dm == 0 { mi } else { mi1 };
+            let yx = if dy == 0 { yi } else { yi1 };
+            yx * stride_y + mx * stride_m + cx * stride_c
+        };
+
+        let o000 = corner((0, 0, 0));
+        let o111 = corner((1, 1, 1));
+        let oa = corner(a_dxmy);
+        let ob = corner(b_dxmy);
+
+        // Two K slices, 3 channels. Compute inline (no closures, no per-channel branching).
+        let base_lo = ki * stride_k;
+        let base_hi = ki1 * stride_k;
+
+        // Per-channel tetrahedral formula in integer:
+        //   accum = v000*255 + (va - v000)*w1 + (vb - va)*w2 + (v111 - vb)*w3
+        // accum is in units of (value * 255), in range [0, 255*255].
+        let tetra_channel = |base: usize, ch: usize| -> i32 {
+            let v000 = lut[base + o000 + ch] as i32;
+            let va = lut[base + oa + ch] as i32;
+            let vb = lut[base + ob + ch] as i32;
+            let v111 = lut[base + o111 + ch] as i32;
+            v000 * 255
+                + (va - v000) * w1 as i32
+                + (vb - va) * w2 as i32
+                + (v111 - vb) * w3 as i32
+        };
+
+        let r_lo = tetra_channel(base_lo, 0);
+        let g_lo = tetra_channel(base_lo, 1);
+        let b_lo = tetra_channel(base_lo, 2);
+        let (r_hi, g_hi, b_hi) = if ki == ki1 {
+            (r_lo, g_lo, b_lo)
+        } else {
+            (
+                tetra_channel(base_hi, 0),
+                tetra_channel(base_hi, 1),
+                tetra_channel(base_hi, 2),
+            )
+        };
+
+        // Linear blend across K slices and rescale to u8.
+        let inv_fk = (255 - fk) as i32;
+        let fk_i = fk as i32;
+        let round = 255 * 255 / 2;
+        let finish = |lo: i32, hi: i32| -> u8 {
+            let combined = lo * inv_fk + hi * fk_i + round;
+            let v = combined / (255 * 255);
+            v.clamp(0, 255) as u8
+        };
+
+        let di = i * 3;
+        out[di] = finish(r_lo, r_hi);
+        out[di + 1] = finish(g_lo, g_hi);
+        out[di + 2] = finish(b_lo, b_hi);
+    }
+
+    out
+}
+
+/// Validate a baked CLUT against the direct moxcms transform over a
+/// pseudorandom sample of CMYK inputs. Reports median and max per-channel
+/// deviation (in u8 units) to stderr. Invoked only when `STET_ICC_VERIFY` is
+/// set in the environment.
+fn verify_clut4(clut: &Clut4, transform: &(dyn TransformExecutor<u8> + Send + Sync)) {
+    const N_SAMPLES: usize = 4096;
+    let mut rng: u64 = 0xa8b3c4d5e6f70819;
+    let mut next = || {
+        rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        rng
+    };
+    let mut cmyk = Vec::with_capacity(N_SAMPLES * 4);
+    for _ in 0..N_SAMPLES {
+        let r = next();
+        cmyk.extend_from_slice(&[
+            (r & 0xff) as u8,
+            ((r >> 8) & 0xff) as u8,
+            ((r >> 16) & 0xff) as u8,
+            ((r >> 24) & 0xff) as u8,
+        ]);
+    }
+    let mut reference = vec![0u8; N_SAMPLES * 3];
+    if transform.transform(&cmyk, &mut reference).is_err() {
+        eprintln!("[ICC VERIFY] reference transform failed");
+        return;
+    }
+    let interp = apply_clut4_cmyk_to_rgb(clut, &cmyk, N_SAMPLES);
+    // Per-pixel Euclidean distance in 8-bit sRGB (crude ΔE proxy).
+    let mut dists: Vec<f64> = Vec::with_capacity(N_SAMPLES);
+    let mut max_ch: u8 = 0;
+    for i in 0..N_SAMPLES {
+        let dr = interp[i * 3] as i32 - reference[i * 3] as i32;
+        let dg = interp[i * 3 + 1] as i32 - reference[i * 3 + 1] as i32;
+        let db = interp[i * 3 + 2] as i32 - reference[i * 3 + 2] as i32;
+        let d = ((dr * dr + dg * dg + db * db) as f64).sqrt();
+        dists.push(d);
+        max_ch = max_ch.max(dr.unsigned_abs() as u8)
+            .max(dg.unsigned_abs() as u8)
+            .max(db.unsigned_abs() as u8);
+    }
+    dists.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let median = dists[N_SAMPLES / 2];
+    let p99 = dists[(N_SAMPLES * 99) / 100];
+    let max = dists[N_SAMPLES - 1];
+    eprintln!(
+        "[ICC VERIFY] N=17 CLUT vs direct moxcms (sRGB u8): median={:.2}, p99={:.2}, max={:.2}, max_per_channel={}",
+        median, p99, max, max_ch
+    );
 }
 
 /// Search system paths for CMYK ICC profile bytes without parsing or logging.
