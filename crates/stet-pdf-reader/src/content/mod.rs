@@ -1686,8 +1686,7 @@ impl<'a> ContentInterpreter<'a> {
         // B: fill (non-zero) + stroke
         let path = self.take_path();
         if !path.is_empty() {
-            self.emit_fill(path.clone(), FillRule::NonZeroWinding);
-            self.emit_stroke(path);
+            self.emit_fill_stroke(path, FillRule::NonZeroWinding);
         }
         self.apply_pending_clip();
         Ok(())
@@ -1697,8 +1696,7 @@ impl<'a> ContentInterpreter<'a> {
         // B*: fill (even-odd) + stroke
         let path = self.take_path();
         if !path.is_empty() {
-            self.emit_fill(path.clone(), FillRule::EvenOdd);
-            self.emit_stroke(path);
+            self.emit_fill_stroke(path, FillRule::EvenOdd);
         }
         self.apply_pending_clip();
         Ok(())
@@ -1868,6 +1866,119 @@ impl<'a> ContentInterpreter<'a> {
             path: user_path,
             params,
         });
+    }
+
+    /// Emit fill+stroke atomically: when both are simple (no pattern/shading)
+    /// and blend mode is Normal, wrap them in an isolated Group so the stroke
+    /// erases the fill's AA edges inside the offscreen buffer before the
+    /// combined result composites onto the page. This prevents the fill's
+    /// anti-aliased edge pixels from leaking into the pixmap where a
+    /// subsequent overprint knockout at a slightly different position would
+    /// not fully cover them (GWG 4.0.1 swatch d).
+    fn emit_fill_stroke(&mut self, path: PsPath, fill_rule: FillRule) {
+        let is_simple_fill = self.gstate.fill_shading_pattern.is_none()
+            && self.gstate.fill_pattern.is_none();
+        let is_simple_stroke = self.gstate.stroke_shading_pattern.is_none()
+            && self.gstate.stroke_pattern.is_none();
+
+        // Group wrapping is safe when the paint's rendering doesn't depend on
+        // per-channel backdrop interaction that differs between a real page
+        // backdrop and an isolated group's transparent backdrop.
+        //
+        // - Non-overprint paints always replace the backdrop: safe to group.
+        // - Overprint paints can preserve backdrop channels (spot plates,
+        //   zero-valued CMYK channels under strict OPM-1). To be safe we
+        //   require BOTH fill and stroke to be DeviceCMYK (no Separation /
+        //   DeviceN so spot plates aren't involved), the source to be white
+        //   (0,0,0,0) so OPM-0 produces a full knockout regardless of
+        //   backdrop, and NOT under strict OPM-1 (which would preserve zero
+        //   channels and thus depend on the actual backdrop).
+        let strict_opm1 = self.gstate.overprint_mode == 1 && self.gstate.opm_paired;
+        let is_white_fill = self.gstate.fill_is_device_cmyk
+            && self
+                .gstate
+                .fill_color
+                .native_cmyk
+                .map(|(c, m, y, k)| c == 0.0 && m == 0.0 && y == 0.0 && k == 0.0)
+                .unwrap_or(false);
+        let is_white_stroke = self.gstate.stroke_is_device_cmyk
+            && self
+                .gstate
+                .stroke_color
+                .native_cmyk
+                .map(|(c, m, y, k)| c == 0.0 && m == 0.0 && y == 0.0 && k == 0.0)
+                .unwrap_or(false);
+        let has_any_overprint = self.gstate.overprint || self.gstate.overprint_stroke;
+        // When any overprint is active, require BOTH sides to be DeviceCMYK so
+        // spot colorants (which depend on multiplicative backdrop interaction
+        // for correct rendering) aren't involved. Mixing a DeviceCMYK overprint
+        // fill with a Separation stroke (GWG 4.0.1 swatches a/b/c) would lose
+        // the spot backdrop inside the group.
+        let both_device_cmyk =
+            self.gstate.fill_is_device_cmyk && self.gstate.stroke_is_device_cmyk;
+        let fill_overprint_safe = !self.gstate.overprint
+            || (is_white_fill && both_device_cmyk && !strict_opm1);
+        let stroke_overprint_safe = !self.gstate.overprint_stroke
+            || (is_white_stroke && both_device_cmyk && !strict_opm1);
+        // Extra guard: even if each side's own overprint check passes, refuse
+        // when *any* overprint is active and the OTHER side isn't DeviceCMYK —
+        // this catches the "inherited overprint_stroke=false + Separation
+        // stroke + overprint fill" case where the fill alone looks safe.
+        let mixed_space_with_overprint = has_any_overprint && !both_device_cmyk;
+
+        if is_simple_fill
+            && is_simple_stroke
+            && self.gstate.blend_mode == 0
+            && fill_overprint_safe
+            && stroke_overprint_safe
+            && !mixed_space_with_overprint
+        {
+            let ctm = self.gstate.ctm;
+
+            let mut bbox = path_device_bbox(&path);
+            let scale = self.gstate.ctm_scale_factor();
+            let half_w = self.gstate.line_width * scale * 0.5;
+            bbox[0] -= half_w;
+            bbox[1] -= half_w;
+            bbox[2] += half_w;
+            bbox[3] += half_w;
+
+            let fill_elem = DisplayElement::Fill {
+                path: path.clone(),
+                params: self.gstate.fill_params(fill_rule),
+            };
+
+            let user_path = if let Some(inv) = ctm.invert() {
+                path.transform(&inv)
+            } else {
+                path.clone()
+            };
+            let mut stroke_params = self.gstate.stroke_params_with_ctm();
+            stroke_params.ctm = ctm;
+            let stroke_elem = DisplayElement::Stroke {
+                path: user_path,
+                params: stroke_params,
+            };
+
+            let mut group_dl = DisplayList::new();
+            group_dl.push(fill_elem);
+            group_dl.push(stroke_elem);
+
+            self.display_list.push(DisplayElement::Group {
+                elements: group_dl,
+                params: stet_graphics::display_list::GroupParams {
+                    bbox,
+                    isolated: true,
+                    knockout: false,
+                    blend_mode: 0,
+                    alpha: 1.0,
+                    color_space: stet_graphics::display_list::GroupColorSpace::Inherited,
+                },
+            });
+        } else {
+            self.emit_fill(path.clone(), fill_rule);
+            self.emit_stroke(path);
+        }
     }
 
     fn op_n(&mut self) -> Result<(), PdfError> {
