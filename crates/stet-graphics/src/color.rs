@@ -329,6 +329,43 @@ impl DeviceColor {
         table[i0] + (table[i0 + 1] - table[i0]) * frac
     }
 
+    /// Convert CIE L\*a\*b\* to sRGB.
+    ///
+    /// PDF Lab color spaces specify a white point, but Lab is perceptually
+    /// uniform — the same (L\*, a\*, b\*) coordinates represent the same
+    /// perceived color regardless of the declared white point.  We convert
+    /// directly through D65 (the sRGB reference illuminant), which makes
+    /// the specified white point irrelevant and avoids Bradford adaptation
+    /// errors for extreme/non-physical white points.
+    ///
+    /// `range` is the a\*/b\* clamp range: [a_min, a_max, b_min, b_max].
+    pub fn from_lab(l_star: f64, a_star: f64, b_star: f64, range: &[f64; 4]) -> Self {
+        // D65 white point (sRGB reference illuminant)
+        const D65: [f64; 3] = [0.95047, 1.0, 1.08883];
+
+        let l_star = l_star.clamp(0.0, 100.0);
+        let a_star = a_star.clamp(range[0], range[1]);
+        let b_star = b_star.clamp(range[2], range[3]);
+
+        let fy = (l_star + 16.0) / 116.0;
+        let fx = a_star / 500.0 + fy;
+        let fz = fy - b_star / 200.0;
+
+        let x = D65[0] * Self::lab_f_inv(fx);
+        let y = D65[1] * Self::lab_f_inv(fy);
+        let z = D65[2] * Self::lab_f_inv(fz);
+
+        Self::from_xyz(x, y, z)
+    }
+
+    fn lab_f_inv(t: f64) -> f64 {
+        if t > 6.0 / 29.0 {
+            t * t * t
+        } else {
+            3.0 * (6.0 / 29.0) * (6.0 / 29.0) * (t - 4.0 / 29.0)
+        }
+    }
+
     /// Convert CIEBasedABC color to sRGB.
     pub fn from_cie_abc(a: f64, b: f64, c: f64, params: &CieAbcParams) -> Self {
         let mut a = a.clamp(params.range_abc[0], params.range_abc[1]);

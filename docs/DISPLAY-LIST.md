@@ -92,8 +92,9 @@ program or PDF:
 | `Indexed { base, hival, lookup }` | Palette-indexed color |
 | `Separation { name, alt, tint_table }` | Named spot ink with tint transform |
 | `DeviceN { names, alt, tint_table }` | Multi-ink with tint transform |
-| `CIEBasedABC { params }` | CIE-based 3-component (L\*a\*b\*, CalRGB) |
+| `CIEBasedABC { params }` | CIE-based 3-component (CalRGB) |
 | `CIEBasedA { params }` | CIE-based 1-component (CalGray) |
+| `Lab { white_point, range }` | CIE L\*a\*b\* 3-component |
 | `Mask { color, polarity }` | 1-bit stencil mask with paint color |
 | `PreconvertedRGBA` | Already RGBA (from JPEG 2000 decoder) |
 

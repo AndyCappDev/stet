@@ -339,6 +339,15 @@ pub enum ImageColorSpace {
     CIEBasedA {
         params: Arc<crate::color::CieAParams>,
     },
+    /// CIE L*a*b* color space (PDF /Lab or ICCBased Lab alternate).
+    ///
+    /// Sample byte layout: 3 components (L, a, b), 8-bit each. Decode
+    /// scales bytes: L = byte/255 × 100; a = byte/255 × (range[1]-range[0]) + range[0];
+    /// b = byte/255 × (range[3]-range[2]) + range[2].
+    Lab {
+        white_point: [f64; 3],
+        range: [f64; 4],
+    },
     Separation {
         name: Vec<u8>,
         alt_space: Box<ImageColorSpace>,
@@ -367,6 +376,7 @@ impl ImageColorSpace {
             ImageColorSpace::Indexed { .. } => 1,
             ImageColorSpace::CIEBasedABC { .. } => 3,
             ImageColorSpace::CIEBasedA { .. } => 1,
+            ImageColorSpace::Lab { .. } => 3,
             ImageColorSpace::Separation { .. } => 1,
             ImageColorSpace::DeviceN { tint_table, .. } => tint_table.num_inputs,
             ImageColorSpace::Mask { .. } => 1,

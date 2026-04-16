@@ -21,9 +21,8 @@ use crate::objects::{PdfDict, PdfObj};
 use crate::resolver::Resolver;
 
 use self::color_space::{
-    ResolvedColorSpace, components_to_device_color_icc, convert_cie_image_data,
-    convert_icc_image_data, painted_channels_for_cs, resolve_color_space, resolve_color_space_obj,
-    to_image_color_space,
+    ResolvedColorSpace, components_to_device_color_icc, painted_channels_for_cs,
+    register_icc_profile, resolve_color_space, resolve_color_space_obj, to_image_color_space,
 };
 use self::graphics_state::{ColorSpaceRef, PdfGraphicsState};
 
@@ -3790,26 +3789,14 @@ impl<'a> ContentInterpreter<'a> {
             (sample_data, color_space, resolved_cs)
         };
 
-        // Convert ICCBased image data through ICC profile if available
-        let (sample_data, color_space) = if !is_image_mask {
+        // Register the ICC profile with the cache so the rasterizer can find
+        // it by hash.  Conversion itself is deferred to samples_to_rgba() so
+        // only pixels that actually land on screen pay the color-transform cost.
+        if !is_image_mask {
             if let Some(ref rcs) = resolved_cs {
-                if let Some((rgb_data, rgb_cs)) =
-                    convert_icc_image_data(rcs, &sample_data, width, height, &mut self.icc_cache)
-                {
-                    (rgb_data, rgb_cs)
-                } else if let Some((rgb_data, rgb_cs)) =
-                    convert_cie_image_data(rcs, &sample_data, width, height)
-                {
-                    (rgb_data, rgb_cs)
-                } else {
-                    (sample_data, color_space)
-                }
-            } else {
-                (sample_data, color_space)
+                register_icc_profile(rcs, &mut self.icc_cache);
             }
-        } else {
-            (sample_data, color_space)
-        };
+        }
 
         // Handle SMask (soft mask / alpha channel).
         // Emit the image and its SMask as a SoftMasked display element so the
@@ -5167,22 +5154,13 @@ impl<'a> ContentInterpreter<'a> {
             sample_data
         };
 
-        // Convert CalRGB/CalGray image data through CIE pipeline
-        let (sample_data, color_space) = if !is_image_mask {
+        // Register ICC profile with the cache so the rasterizer can find it
+        // by hash.  Color conversion itself is deferred to samples_to_rgba().
+        if !is_image_mask {
             if let Some(ref rcs) = resolved_cs {
-                if let Some((rgb_data, rgb_cs)) =
-                    convert_cie_image_data(rcs, &sample_data, width, height)
-                {
-                    (rgb_data, rgb_cs)
-                } else {
-                    (sample_data, color_space)
-                }
-            } else {
-                (sample_data, color_space)
+                register_icc_profile(rcs, &mut self.icc_cache);
             }
-        } else {
-            (sample_data, color_space)
-        };
+        }
 
         self.display_list.push(DisplayElement::Image {
             sample_data: Arc::new(sample_data),

@@ -1605,17 +1605,44 @@ pub fn build_icc_cache_for_list(
 /// Recursively scans Groups and SoftMasks for ICCBased shading color spaces
 /// and registers their profiles in the cache.
 fn register_shading_icc_profiles(list: &DisplayList, cache: &mut IccCache) {
-    fn scan(elements: &[DisplayElement], cache: &mut IccCache) {
+    fn register_image_iccs(
+        cs: &ImageColorSpace,
+        seen: &mut HashSet<stet_graphics::icc::ProfileHash>,
+        cache: &mut IccCache,
+    ) {
+        match cs {
+            ImageColorSpace::ICCBased {
+                n,
+                profile_hash,
+                profile_data,
+            } => {
+                if seen.insert(*profile_hash) {
+                    cache.register_profile_with_n(profile_data, Some(*n));
+                }
+            }
+            ImageColorSpace::Indexed { base, .. } => register_image_iccs(base, seen, cache),
+            ImageColorSpace::Separation { alt_space, .. }
+            | ImageColorSpace::DeviceN { alt_space, .. } => {
+                register_image_iccs(alt_space, seen, cache)
+            }
+            _ => {}
+        }
+    }
+    fn scan(
+        elements: &[DisplayElement],
+        seen: &mut HashSet<stet_graphics::icc::ProfileHash>,
+        cache: &mut IccCache,
+    ) {
         for element in elements {
             if let DisplayElement::Group { elements: sub, .. } = element {
-                scan(sub.elements(), cache);
+                scan(sub.elements(), seen, cache);
             }
             if let DisplayElement::SoftMasked { content, mask, .. } = element {
-                scan(content.elements(), cache);
-                scan(mask.elements(), cache);
+                scan(content.elements(), seen, cache);
+                scan(mask.elements(), seen, cache);
             }
             if let DisplayElement::OcgGroup { elements: sub, .. } = element {
-                scan(sub.elements(), cache);
+                scan(sub.elements(), seen, cache);
             }
             let shading_cs = match element {
                 DisplayElement::AxialShading { params } => Some(&params.color_space),
@@ -1625,14 +1652,21 @@ fn register_shading_icc_profiles(list: &DisplayList, cache: &mut IccCache) {
                 _ => None,
             };
             if let Some(stet_graphics::device::ShadingColorSpace::ICCBased {
-                n, profile_data, ..
+                n,
+                profile_hash,
+                profile_data,
             }) = shading_cs
+                && seen.insert(*profile_hash)
             {
                 cache.register_profile_with_n(profile_data, Some(*n));
             }
+            if let DisplayElement::Image { params, .. } = element {
+                register_image_iccs(&params.color_space, seen, cache);
+            }
         }
     }
-    scan(list.elements(), cache);
+    let mut seen = HashSet::new();
+    scan(list.elements(), &mut seen, cache);
 }
 
 /// Convert raw image samples to RGBA for rasterization.
@@ -1844,6 +1878,23 @@ fn samples_to_rgba(
             for i in 0..npixels {
                 let val = data.get(i).copied().unwrap_or(0) as f64 / 255.0;
                 let color = DeviceColor::from_cie_a(val, cie_params);
+                let pi = i * 4;
+                rgba[pi] = (color.r * 255.0).round().clamp(0.0, 255.0) as u8;
+                rgba[pi + 1] = (color.g * 255.0).round().clamp(0.0, 255.0) as u8;
+                rgba[pi + 2] = (color.b * 255.0).round().clamp(0.0, 255.0) as u8;
+            }
+            rgba
+        }
+        ImageColorSpace::Lab { range, .. } => {
+            let mut rgba = vec![255u8; npixels * 4];
+            let a_span = range[1] - range[0];
+            let b_span = range[3] - range[2];
+            for i in 0..npixels {
+                let si = i * 3;
+                let l = data.get(si).copied().unwrap_or(0) as f64 / 255.0 * 100.0;
+                let a = data.get(si + 1).copied().unwrap_or(0) as f64 / 255.0 * a_span + range[0];
+                let b = data.get(si + 2).copied().unwrap_or(0) as f64 / 255.0 * b_span + range[2];
+                let color = DeviceColor::from_lab(l, a, b, range);
                 let pi = i * 4;
                 rgba[pi] = (color.r * 255.0).round().clamp(0.0, 255.0) as u8;
                 rgba[pi + 1] = (color.g * 255.0).round().clamp(0.0, 255.0) as u8;

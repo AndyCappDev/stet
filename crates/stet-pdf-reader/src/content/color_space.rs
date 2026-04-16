@@ -775,8 +775,23 @@ pub fn to_image_color_space(cs: &ResolvedColorSpace) -> ImageColorSpace {
         ResolvedColorSpace::DeviceGray => ImageColorSpace::DeviceGray,
         ResolvedColorSpace::DeviceRGB => ImageColorSpace::DeviceRGB,
         ResolvedColorSpace::DeviceCMYK => ImageColorSpace::DeviceCMYK,
-        ResolvedColorSpace::ICCBased { n, alternate, .. } => {
-            // If we have an alternate that's Lab/CalRGB/CalGray, use its image color space
+        ResolvedColorSpace::ICCBased {
+            n,
+            profile_data,
+            profile_hash,
+            alternate,
+        } => {
+            // When an ICC profile is available, the rasterizer transforms
+            // samples through it directly — keep ImageColorSpace::ICCBased so
+            // that path runs.  Only fall back to the declared alternate (Lab /
+            // CalRGB / CalGray / device) when no profile bytes are present.
+            if let (Some(data), Some(hash)) = (profile_data, profile_hash) {
+                return ImageColorSpace::ICCBased {
+                    n: *n,
+                    profile_hash: *hash,
+                    profile_data: data.clone(),
+                };
+            }
             if let Some(alt) = alternate {
                 match alt.as_ref() {
                     ResolvedColorSpace::Lab { .. }
@@ -796,43 +811,11 @@ pub fn to_image_color_space(cs: &ResolvedColorSpace) -> ImageColorSpace {
             base,
             hival,
             lookup,
-        } => {
-            // If the base is a CIE space (Lab, CalRGB, CalGray), pre-convert
-            // the lookup table to RGB so downstream code treats the values correctly.
-            if is_cie_space(base) {
-                let n_base = base.num_components() as usize;
-                let n_entries = (*hival as usize + 1).min(lookup.len() / n_base.max(1));
-                let mut rgb_lookup = vec![0u8; n_entries * 3];
-                // Decode lookup bytes to the base color space's native range.
-                // PDF spec: byte 0→range_min, byte 255→range_max for each component.
-                let ranges = cie_component_ranges(base);
-                for i in 0..n_entries {
-                    let offset = i * n_base;
-                    let comps: Vec<f64> = (0..n_base)
-                        .map(|c| {
-                            let byte = lookup.get(offset + c).copied().unwrap_or(0) as f64;
-                            let (lo, hi) = ranges.get(c).copied().unwrap_or((0.0, 1.0));
-                            lo + byte * (hi - lo) / 255.0
-                        })
-                        .collect();
-                    let color = components_to_device_color(base, &comps);
-                    rgb_lookup[i * 3] = (color.r.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
-                    rgb_lookup[i * 3 + 1] = (color.g.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
-                    rgb_lookup[i * 3 + 2] = (color.b.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
-                }
-                ImageColorSpace::Indexed {
-                    base: Box::new(ImageColorSpace::DeviceRGB),
-                    hival: *hival,
-                    lookup: rgb_lookup,
-                }
-            } else {
-                ImageColorSpace::Indexed {
-                    base: Box::new(to_image_color_space(base)),
-                    hival: *hival,
-                    lookup: lookup.clone(),
-                }
-            }
-        }
+        } => ImageColorSpace::Indexed {
+            base: Box::new(to_image_color_space(base)),
+            hival: *hival,
+            lookup: lookup.clone(),
+        },
         ResolvedColorSpace::Separation { alt, tint_fn, .. } => {
             if let Some(func) = tint_fn {
                 build_1d_tint_image_cs(func, alt)
@@ -851,206 +834,18 @@ pub fn to_image_color_space(cs: &ResolvedColorSpace) -> ImageColorSpace {
                 ImageColorSpace::DeviceGray
             }
         }
-        // CIE color spaces in images: use PreconvertedRGBA pipeline.
-        // For simplicity in image decode, fall back to device equivalent.
-        ResolvedColorSpace::CalGray { .. } => ImageColorSpace::DeviceGray,
-        ResolvedColorSpace::CalRGB { .. } => ImageColorSpace::DeviceRGB,
-        ResolvedColorSpace::Lab { .. } => ImageColorSpace::DeviceRGB,
+        ResolvedColorSpace::CalGray { params } => ImageColorSpace::CIEBasedA {
+            params: std::sync::Arc::new(params.clone()),
+        },
+        ResolvedColorSpace::CalRGB { params } => ImageColorSpace::CIEBasedABC {
+            params: std::sync::Arc::new(params.clone()),
+        },
+        ResolvedColorSpace::Lab { white_point, range } => ImageColorSpace::Lab {
+            white_point: *white_point,
+            range: *range,
+        },
         ResolvedColorSpace::Pattern => ImageColorSpace::DeviceRGB,
     }
-}
-
-/// Try to convert ICCBased (or Indexed-over-ICCBased) image data through the
-/// ICC profile.  For Indexed images, the palette entries are converted through
-/// the profile so the expanded pixel data is already RGB.
-/// Returns (converted_data, ImageColorSpace::DeviceRGB) on success, or None to fall back.
-pub fn convert_icc_image_data(
-    cs: &ResolvedColorSpace,
-    data: &[u8],
-    width: u32,
-    height: u32,
-    icc_cache: &mut IccCache,
-) -> Option<(Vec<u8>, ImageColorSpace)> {
-    // Handle Indexed with ICCBased/DeviceCMYK base: convert the palette entries
-    // through the ICC profile so expanded pixel data is already RGB.
-    if let ResolvedColorSpace::Indexed {
-        base,
-        hival,
-        lookup,
-    } = cs
-    {
-        // Only convert ICCBased CMYK palettes through their embedded ICC
-        // profile — this ensures palette colors match ICC-converted fill colors
-        // from the same profile.  DeviceCMYK palettes use the PLRM formula
-        // (matching how DeviceCMYK fills are rendered), and RGB/Gray palettes
-        // are already in a usable representation.
-        let is_icc_cmyk_base = matches!(
-            base.as_ref(),
-            ResolvedColorSpace::ICCBased { n, .. } if *n == 4
-        );
-        if is_icc_cmyk_base {
-            let n_entries = (*hival as usize) + 1;
-            // Convert palette entries through ICC
-            if let Some((rgb_palette, _)) =
-                convert_icc_image_data(base, lookup, n_entries as u32, 1, icc_cache)
-            {
-                // Expand indices using the RGB palette
-                let pixel_count = (width * height) as usize;
-                let mut rgb_data = vec![0u8; pixel_count * 3];
-                for i in 0..pixel_count {
-                    let idx = data.get(i).copied().unwrap_or(0) as usize;
-                    let idx = idx.min(n_entries - 1);
-                    let src = idx * 3;
-                    let dst = i * 3;
-                    rgb_data[dst] = rgb_palette.get(src).copied().unwrap_or(0);
-                    rgb_data[dst + 1] = rgb_palette.get(src + 1).copied().unwrap_or(0);
-                    rgb_data[dst + 2] = rgb_palette.get(src + 2).copied().unwrap_or(0);
-                }
-                return Some((rgb_data, ImageColorSpace::DeviceRGB));
-            }
-        }
-    }
-
-    let (hash_result, alternate) = match cs {
-        ResolvedColorSpace::ICCBased {
-            n,
-            profile_data,
-            alternate,
-            ..
-        } => {
-            let hash = profile_data
-                .as_ref()
-                .and_then(|d| icc_cache.register_profile_with_n(d, Some(*n)));
-            (hash, alternate.as_ref())
-        }
-        ResolvedColorSpace::DeviceCMYK => {
-            let hash = icc_cache.default_cmyk_hash().copied();
-            (hash, None)
-        }
-        _ => return None,
-    };
-
-    if let Some(hash) = hash_result {
-        let pixel_count = (width * height) as usize;
-        if let Some(rgb_data) = icc_cache.convert_image_8bit(&hash, data, pixel_count) {
-            return Some((rgb_data, ImageColorSpace::DeviceRGB));
-        }
-    }
-
-    // ICC failed — try software Lab→RGB conversion for Lab alternate
-    if let Some(alt) = alternate {
-        if let ResolvedColorSpace::Lab { white_point, range } = alt.as_ref() {
-            return Some((
-                convert_lab_image_to_rgb(data, width, height, white_point, range),
-                ImageColorSpace::DeviceRGB,
-            ));
-        }
-    }
-
-    None
-}
-
-/// Convert CalRGB or CalGray image data through the CIE pipeline to sRGB.
-/// Returns (converted_data, ImageColorSpace::DeviceRGB) on success, or None.
-pub fn convert_cie_image_data(
-    cs: &ResolvedColorSpace,
-    data: &[u8],
-    width: u32,
-    height: u32,
-) -> Option<(Vec<u8>, ImageColorSpace)> {
-    match cs {
-        ResolvedColorSpace::CalRGB { params } => Some((
-            convert_cal_rgb_image_to_rgb(data, width, height, params),
-            ImageColorSpace::DeviceRGB,
-        )),
-        ResolvedColorSpace::CalGray { params } => Some((
-            convert_cal_gray_image_to_rgb(data, width, height, params),
-            ImageColorSpace::DeviceRGB,
-        )),
-        ResolvedColorSpace::Lab { white_point, range } => Some((
-            convert_lab_image_to_rgb(data, width, height, white_point, range),
-            ImageColorSpace::DeviceRGB,
-        )),
-        _ => None,
-    }
-}
-
-/// Convert 8-bit CalRGB image data to sRGB via CIE ABC pipeline.
-fn convert_cal_rgb_image_to_rgb(
-    data: &[u8],
-    width: u32,
-    height: u32,
-    params: &CieAbcParams,
-) -> Vec<u8> {
-    let pixel_count = (width * height) as usize;
-    let mut rgb = Vec::with_capacity(pixel_count * 3);
-    for i in 0..pixel_count {
-        let offset = i * 3;
-        if offset + 2 < data.len() {
-            let a = data[offset] as f64 / 255.0;
-            let b = data[offset + 1] as f64 / 255.0;
-            let c = data[offset + 2] as f64 / 255.0;
-            let color = DeviceColor::from_cie_abc(a, b, c, params);
-            rgb.push((color.r.clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
-            rgb.push((color.g.clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
-            rgb.push((color.b.clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
-        } else {
-            rgb.extend_from_slice(&[0, 0, 0]);
-        }
-    }
-    rgb
-}
-
-/// Convert 8-bit CalGray image data to sRGB via CIE A pipeline.
-fn convert_cal_gray_image_to_rgb(
-    data: &[u8],
-    width: u32,
-    height: u32,
-    params: &CieAParams,
-) -> Vec<u8> {
-    let pixel_count = (width * height) as usize;
-    let mut rgb = Vec::with_capacity(pixel_count * 3);
-    for i in 0..pixel_count {
-        if i < data.len() {
-            let a = data[i] as f64 / 255.0;
-            let color = DeviceColor::from_cie_a(a, params);
-            rgb.push((color.r.clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
-            rgb.push((color.g.clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
-            rgb.push((color.b.clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
-        } else {
-            rgb.extend_from_slice(&[0, 0, 0]);
-        }
-    }
-    rgb
-}
-
-/// Convert 8-bit Lab image data to RGB.
-/// Default Decode for 3-component ICCBased: L=[0,100], a=[-128,127], b=[-128,127].
-fn convert_lab_image_to_rgb(
-    data: &[u8],
-    width: u32,
-    height: u32,
-    white_point: &[f64; 3],
-    range: &[f64; 4],
-) -> Vec<u8> {
-    let pixel_count = (width * height) as usize;
-    let mut rgb = Vec::with_capacity(pixel_count * 3);
-    for i in 0..pixel_count {
-        let offset = i * 3;
-        if offset + 2 < data.len() {
-            // Decode 8-bit to Lab ranges: L=[0,100], a/b from Range
-            let l = data[offset] as f64 / 255.0 * 100.0;
-            let a = data[offset + 1] as f64 / 255.0 * (range[1] - range[0]) + range[0];
-            let b = data[offset + 2] as f64 / 255.0 * (range[3] - range[2]) + range[2];
-            let color = lab_to_device_color(&[l, a, b], white_point, range);
-            rgb.push((color.r.clamp(0.0, 1.0) * 255.0) as u8);
-            rgb.push((color.g.clamp(0.0, 1.0) * 255.0) as u8);
-            rgb.push((color.b.clamp(0.0, 1.0) * 255.0) as u8);
-        } else {
-            rgb.extend_from_slice(&[0, 0, 0]);
-        }
-    }
-    rgb
 }
 
 /// Register an ICC profile and return its hash (for use in color conversions).
@@ -1067,99 +862,15 @@ pub fn register_icc_profile(
     }
 }
 
-/// Convert L*a*b* to DeviceColor (sRGB) via XYZ.
-///
-/// PDF Lab color spaces specify a white point, but Lab is a perceptually
-/// uniform space — the same (L*, a*, b*) coordinates represent the same
-/// perceived color regardless of the declared white point.  We convert
-/// directly through D65 (the sRGB reference illuminant), which makes the
-/// specified white point irrelevant and avoids Bradford adaptation errors
-/// for extreme/non-physical white points.
 fn lab_to_device_color(
     components: &[f64],
     _white_point: &[f64; 3],
     range: &[f64; 4],
 ) -> DeviceColor {
-    // D65 white point (sRGB reference illuminant)
-    const D65: [f64; 3] = [0.95047, 1.0, 1.08883];
-
-    let l_star = components.first().copied().unwrap_or(0.0).clamp(0.0, 100.0);
-    let a_star = components
-        .get(1)
-        .copied()
-        .unwrap_or(0.0)
-        .clamp(range[0], range[1]);
-    let b_star = components
-        .get(2)
-        .copied()
-        .unwrap_or(0.0)
-        .clamp(range[2], range[3]);
-
-    // L*a*b* → XYZ using D65 white point directly
-    let fy = (l_star + 16.0) / 116.0;
-    let fx = a_star / 500.0 + fy;
-    let fz = fy - b_star / 200.0;
-
-    let x = D65[0] * lab_f_inv(fx);
-    let y = D65[1] * lab_f_inv(fy);
-    let z = D65[2] * lab_f_inv(fz);
-
-    // Already in D65 XYZ — convert directly to sRGB
-    xyz_d65_to_device_color(x, y, z)
-}
-
-
-/// D65-adapted XYZ → sRGB → DeviceColor.
-fn xyz_d65_to_device_color(x: f64, y: f64, z: f64) -> DeviceColor {
-    // IEC 61966-2-1 sRGB D65 XYZ → linear RGB matrix
-    let lr = 3.2404542 * x - 1.5371385 * y - 0.4985314 * z;
-    let lg = -0.9692660 * x + 1.8760108 * y + 0.0415560 * z;
-    let lb = 0.0556434 * x - 0.2040259 * y + 1.0572252 * z;
-
-    let r = srgb_gamma(lr.max(0.0)).clamp(0.0, 1.0);
-    let g = srgb_gamma(lg.max(0.0)).clamp(0.0, 1.0);
-    let b = srgb_gamma(lb.max(0.0)).clamp(0.0, 1.0);
-
-    DeviceColor::from_rgb(r, g, b)
-}
-
-/// sRGB gamma companding (linear → sRGB).
-fn srgb_gamma(c: f64) -> f64 {
-    if c <= 0.0031308 {
-        12.92 * c
-    } else {
-        1.055 * c.powf(1.0 / 2.4) - 0.055
-    }
-}
-
-/// Inverse of the CIE Lab f function.
-fn lab_f_inv(t: f64) -> f64 {
-    if t > 6.0 / 29.0 {
-        t * t * t
-    } else {
-        3.0 * (6.0 / 29.0) * (6.0 / 29.0) * (t - 4.0 / 29.0)
-    }
-}
-
-/// Return the native (min, max) range for each component of a CIE color space.
-/// Used when decoding Indexed lookup bytes: byte 0→min, 255→max.
-fn cie_component_ranges(cs: &ResolvedColorSpace) -> Vec<(f64, f64)> {
-    match cs {
-        ResolvedColorSpace::Lab { range, .. } => {
-            vec![(0.0, 100.0), (range[0], range[1]), (range[2], range[3])]
-        }
-        ResolvedColorSpace::CalGray { params } => {
-            vec![(params.range_a[0], params.range_a[1])]
-        }
-        ResolvedColorSpace::CalRGB { params } => {
-            vec![
-                (params.range_abc[0], params.range_abc[1]),
-                (params.range_abc[2], params.range_abc[3]),
-                (params.range_abc[4], params.range_abc[5]),
-            ]
-        }
-        _ => vec![(0.0, 1.0)],
-    }
+    let l_star = components.first().copied().unwrap_or(0.0);
+    let a_star = components.get(1).copied().unwrap_or(0.0);
+    let b_star = components.get(2).copied().unwrap_or(0.0);
+    DeviceColor::from_lab(l_star, a_star, b_star, range)
 }
 
 /// Check if a color space requires CIE→RGB conversion (Lab, CalRGB, CalGray).
@@ -1187,13 +898,29 @@ fn push_cie_converted(alt: &ResolvedColorSpace, out: &[f64], data: &mut Vec<f32>
     data.push(color.b as f32);
 }
 
+/// Collapse the tint table's alt color space to a device-only ImageColorSpace.
+/// The tint table stores the raw tint-function output components; at rasterize
+/// time `alt_comps_to_rgb` interprets them.  That function only knows Device*
+/// variants, so any ICCBased alt must be flattened to the matching device
+/// space (which matches the old parse-time behaviour).
+fn tint_alt_device_cs(alt: &ResolvedColorSpace) -> ImageColorSpace {
+    match alt {
+        ResolvedColorSpace::ICCBased { n, .. } => match n {
+            1 => ImageColorSpace::DeviceGray,
+            4 => ImageColorSpace::DeviceCMYK,
+            _ => ImageColorSpace::DeviceRGB,
+        },
+        _ => to_image_color_space(alt),
+    }
+}
+
 /// Build a 1D TintLookupTable for Separation image color space.
 fn build_1d_tint_image_cs(func: &PdfFunction, alt: &ResolvedColorSpace) -> ImageColorSpace {
     let cie = is_cie_space(alt);
     let (alt_cs, n_out) = if cie {
         (ImageColorSpace::DeviceRGB, 3)
     } else {
-        (to_image_color_space(alt), alt.num_components())
+        (tint_alt_device_cs(alt), alt.num_components())
     };
     let samples = 256u32;
     let mut data = Vec::with_capacity(samples as usize * n_out);
@@ -1231,7 +958,7 @@ fn build_nd_tint_image_cs(
     let (alt_cs, n_out) = if cie {
         (ImageColorSpace::DeviceRGB, 3)
     } else {
-        (to_image_color_space(alt), alt.num_components())
+        (tint_alt_device_cs(alt), alt.num_components())
     };
     // Use fewer samples per dimension for higher-dimensional spaces.
     // Total table entries = spd^n_inputs × n_out, so balance quality vs memory.

@@ -268,6 +268,36 @@ pub fn convert_image(sample_data: &[u8], params: &ImageParams) -> ImageXObject {
                 icc_profile: None,
             }
         }
+        ImageColorSpace::Lab { range, .. } => {
+            let npixels = (params.width * params.height) as usize;
+            let mut rgb = Vec::with_capacity(npixels * 3);
+            let a_span = range[1] - range[0];
+            let b_span = range[3] - range[2];
+            for i in 0..npixels {
+                let si = i * 3;
+                let l = sample_data.get(si).copied().unwrap_or(0) as f64 / 255.0 * 100.0;
+                let a = sample_data.get(si + 1).copied().unwrap_or(0) as f64 / 255.0 * a_span
+                    + range[0];
+                let b = sample_data.get(si + 2).copied().unwrap_or(0) as f64 / 255.0 * b_span
+                    + range[2];
+                let color = DeviceColor::from_lab(l, a, b, range);
+                rgb.push((color.r * 255.0).round().clamp(0.0, 255.0) as u8);
+                rgb.push((color.g * 255.0).round().clamp(0.0, 255.0) as u8);
+                rgb.push((color.b * 255.0).round().clamp(0.0, 255.0) as u8);
+            }
+            ImageXObject {
+                sample_data: rgb,
+                smask_data: None,
+                width: params.width,
+                height: params.height,
+                pdf_color_space: PdfColorSpace::DeviceRGB,
+                bits_per_component: 8,
+                is_imagemask: false,
+                mask_color: None,
+                color_key_mask: params.mask_color.clone(),
+                icc_profile: None,
+            }
+        }
     }
 }
 
