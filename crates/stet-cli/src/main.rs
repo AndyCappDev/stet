@@ -10,10 +10,34 @@ use std::path::PathBuf;
 use stet_core::context::Context;
 use stet_core::eps::{content_is_epsf, read_eps_bounding_box, strip_dos_eps_header};
 use stet_engine::eval::{parse_and_exec, parse_and_exec_file};
+use stet_graphics::icc::{BpcMode, IccCacheOptions};
 use stet_ops::build_system_dict;
 use stet_pdf::PdfDevice;
 use stet_pdf_reader::PdfDocument;
 use stet_render::SkiaDevice;
+
+/// CLI-level ICC configuration: aggregates `--no-icc`, `--output-profile`,
+/// `--cmyk-profile`, and `--bpc` into a single value passed through the
+/// rendering modes. Cheap to clone.
+#[derive(Clone, Default)]
+struct IccCliConfig {
+    no_icc: bool,
+    output_profile_path: Option<String>,
+    cmyk_profile_path: Option<String>,
+    bpc_mode: BpcMode,
+}
+
+impl IccCliConfig {
+    /// Resolved source CMYK profile path: `--cmyk-profile` wins over
+    /// `--output-profile` when both are given. Used as the "source CMYK"
+    /// override; `--output-profile` continues to control PDF embedding bytes
+    /// independently.
+    fn source_cmyk_path(&self) -> Option<&str> {
+        self.cmyk_profile_path
+            .as_deref()
+            .or(self.output_profile_path.as_deref())
+    }
+}
 
 /// A `Write` implementation that writes to a shared `Vec<u8>` behind a mutex.
 struct SharedWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
@@ -48,6 +72,9 @@ fn main() {
     let mut no_icc = false;
     let mut no_aa = false;
     let mut output_profile_path: Option<String> = None;
+    let mut cmyk_profile_path: Option<String> = None;
+    let mut bpc_mode = BpcMode::Auto;
+    let mut bpc_explicit = false;
     let mut pages_spec: Option<String> = None;
     let mut file_args: Vec<String> = Vec::new();
     let mut i = 1;
@@ -114,6 +141,38 @@ fn main() {
                     std::process::exit(1);
                 }
             }
+            "--cmyk-profile" => {
+                if i + 1 < args.len() {
+                    cmyk_profile_path = Some(args[i + 1].clone());
+                    i += 2;
+                    continue;
+                } else {
+                    eprintln!("Error: --cmyk-profile requires a path");
+                    std::process::exit(1);
+                }
+            }
+            "--bpc" => {
+                if i + 1 < args.len() {
+                    bpc_mode = match args[i + 1].as_str() {
+                        "on" => BpcMode::On,
+                        "off" => BpcMode::Off,
+                        "auto" => BpcMode::Auto,
+                        other => {
+                            eprintln!(
+                                "Error: --bpc must be one of: on, off, auto (got '{}')",
+                                other
+                            );
+                            std::process::exit(1);
+                        }
+                    };
+                    bpc_explicit = true;
+                    i += 2;
+                    continue;
+                } else {
+                    eprintln!("Error: --bpc requires a value (on|off|auto)");
+                    std::process::exit(1);
+                }
+            }
             "--pages" => {
                 if i + 1 < args.len() {
                     pages_spec = Some(args[i + 1].clone());
@@ -129,6 +188,23 @@ fn main() {
         file_args.push(args[i].clone());
         i += 1;
     }
+
+    if no_icc && cmyk_profile_path.is_some() {
+        eprintln!("Error: --cmyk-profile cannot be combined with --no-icc");
+        std::process::exit(1);
+    }
+    if no_icc && bpc_explicit {
+        eprintln!("Error: --bpc cannot be combined with --no-icc");
+        std::process::exit(1);
+    }
+
+    let _ = bpc_explicit; // already consumed by the conflict check above
+    let icc_cfg = IccCliConfig {
+        no_icc,
+        output_profile_path,
+        cmyk_profile_path,
+        bpc_mode,
+    };
 
     // Determine the output device
     let device = device_name.unwrap_or_else(|| {
@@ -173,59 +249,22 @@ fn main() {
 
     match device.as_str() {
         "png" => {
-            run_png_mode(
-                dpi,
-                file_args,
-                no_icc,
-                no_aa,
-                output_profile_path,
-                page_filter,
-                false,
-            );
+            run_png_mode(dpi, file_args, &icc_cfg, no_aa, page_filter, false);
         }
         "viewport-png" => {
             // Audit path: renders through the viewport pipeline instead of
             // the banded page pipeline. Used by the visual test runner to
             // exercise the viewer's render path against the same baselines.
-            run_png_mode(
-                dpi,
-                file_args,
-                no_icc,
-                no_aa,
-                output_profile_path,
-                page_filter,
-                true,
-            );
+            run_png_mode(dpi, file_args, &icc_cfg, no_aa, page_filter, true);
         }
         "pdf" => {
-            run_pdf_mode(
-                dpi,
-                file_args,
-                no_icc,
-                no_aa,
-                output_profile_path,
-                page_filter,
-            );
+            run_pdf_mode(dpi, file_args, &icc_cfg, no_aa, page_filter);
         }
         "null" => {
-            run_null_mode(
-                dpi,
-                file_args,
-                no_icc,
-                no_aa,
-                output_profile_path,
-                page_filter,
-            );
+            run_null_mode(dpi, file_args, &icc_cfg, no_aa, page_filter);
         }
         #[cfg(feature = "viewer")]
-        "viewer" => run_viewer_mode(
-            dpi,
-            file_args,
-            no_icc,
-            no_aa,
-            output_profile_path,
-            page_filter,
-        ),
+        "viewer" => run_viewer_mode(dpi, file_args, &icc_cfg, no_aa, page_filter),
         #[cfg(not(feature = "viewer"))]
         "viewer" => {
             eprintln!("Error: viewer not available (built without 'viewer' feature)");
@@ -246,20 +285,19 @@ fn main() {
 fn run_png_mode(
     dpi_override: Option<f64>,
     file_args: Vec<String>,
-    no_icc: bool,
+    icc_cfg: &IccCliConfig,
     no_aa: bool,
-    output_profile_path: Option<String>,
     page_filter: Option<std::collections::HashSet<i32>>,
     use_viewport: bool,
 ) {
     // Check if all files are PDFs — use fast path (no PS interpreter needed)
     if !file_args.is_empty() && file_args.iter().all(|f| is_pdf_file(f)) {
         let dpi = dpi_override.unwrap_or(300.0);
-        run_pdf_input_png(dpi, &file_args, &page_filter, no_aa, use_viewport);
+        run_pdf_input_png(dpi, &file_args, &page_filter, no_aa, use_viewport, icc_cfg);
         return;
     }
 
-    let mut ctx = create_context(no_icc, output_profile_path.as_deref());
+    let mut ctx = create_context(icc_cfg);
     ctx.page_filter = page_filter;
 
     // Register device factory (before setpagedevice)
@@ -285,21 +323,21 @@ fn run_png_mode(
 fn run_pdf_mode(
     dpi_override: Option<f64>,
     file_args: Vec<String>,
-    no_icc: bool,
+    icc_cfg: &IccCliConfig,
     _no_aa: bool,
-    output_profile_path: Option<String>,
     page_filter: Option<std::collections::HashSet<i32>>,
 ) {
     // Read profile bytes for PDF embedding (create_context already validated the path)
-    let output_profile_bytes: Option<Vec<u8>> = if !no_icc {
-        output_profile_path
+    let output_profile_bytes: Option<Vec<u8>> = if !icc_cfg.no_icc {
+        icc_cfg
+            .output_profile_path
             .as_ref()
             .and_then(|p| std::fs::read(p).ok())
     } else {
         None
     };
 
-    let mut ctx = create_context(no_icc, output_profile_path.as_deref());
+    let mut ctx = create_context(icc_cfg);
     ctx.page_filter = page_filter;
     let dpi_val = dpi_override.unwrap_or(300.0);
 
@@ -325,14 +363,13 @@ fn run_pdf_mode(
 fn run_null_mode(
     dpi_override: Option<f64>,
     file_args: Vec<String>,
-    no_icc: bool,
+    icc_cfg: &IccCliConfig,
     _no_aa: bool,
-    output_profile_path: Option<String>,
     page_filter: Option<std::collections::HashSet<i32>>,
 ) {
     use stet_core::device::NullDevice;
 
-    let mut ctx = create_context(no_icc, output_profile_path.as_deref());
+    let mut ctx = create_context(icc_cfg);
     ctx.page_filter = page_filter;
     ctx.device_factory = Some(Box::new(|w, h| Box::new(NullDevice::new(w, h))));
 
@@ -352,16 +389,16 @@ fn run_null_mode(
 fn run_viewer_mode(
     dpi_override: Option<f64>,
     file_args: Vec<String>,
-    no_icc: bool,
+    icc_cfg: &IccCliConfig,
     no_aa: bool,
-    output_profile_path: Option<String>,
     page_filter: Option<std::collections::HashSet<i32>>,
 ) {
     use stet_core::device::NullDevice;
 
     // Get CMYK profile bytes for ICC-aware viewer rendering.
-    let system_cmyk_bytes = if !no_icc {
-        if let Some(ref path) = output_profile_path {
+    // --cmyk-profile takes precedence over --output-profile when both are set.
+    let system_cmyk_bytes = if !icc_cfg.no_icc {
+        if let Some(path) = icc_cfg.source_cmyk_path() {
             std::fs::read(path).ok().map(std::sync::Arc::new)
         } else {
             stet_graphics::icc::find_system_cmyk_profile_bytes()
@@ -431,8 +468,9 @@ fn run_viewer_mode(
 
     // Spawn interpreter thread
     let _screen_info_receiver = interp_end.screen_info_receiver;
+    let icc_cfg_thread = icc_cfg.clone();
     std::thread::spawn(move || {
-        let mut ctx = create_context(no_icc, output_profile_path.as_deref());
+        let mut ctx = create_context(&icc_cfg_thread);
         ctx.page_filter = page_filter;
 
         // Set display_list_sender for incremental delivery at each showpage
@@ -620,31 +658,89 @@ fn parse_page_ranges(spec: &str) -> Result<std::collections::HashSet<i32>, Strin
     Ok(pages)
 }
 
-/// Create and initialize a Context with the resource system.
-fn create_context(no_icc: bool, output_profile_path: Option<&str>) -> Context {
-    let mut ctx = Context::new();
-    if !no_icc {
-        if let Some(path) = output_profile_path {
-            // User-specified profile replaces system CMYK
-            let bytes = std::fs::read(path).unwrap_or_else(|e| {
-                eprintln!("Error: cannot read output profile '{}': {}", path, e);
-                std::process::exit(1);
-            });
-            if bytes.len() < 40 || &bytes[36..40] != b"acsp" {
-                eprintln!("Error: '{}' is not a valid ICC profile", path);
-                std::process::exit(1);
-            }
-            if let Some(hash) = ctx.icc_cache.register_profile(&bytes) {
-                eprintln!("[ICC] Loaded output profile: {}", path);
-                ctx.icc_cache.set_system_cmyk(&bytes, hash);
-            } else {
-                eprintln!("Error: failed to parse ICC profile '{}'", path);
-                std::process::exit(1);
-            }
-        } else {
-            ctx.icc_cache.search_system_cmyk_profile();
-        }
+/// Build an [`IccCache`](stet_graphics::icc::IccCache) from the CLI config.
+///
+/// Resolution rules:
+/// - `--no-icc` ⇒ empty cache, BPC mode forced to `Off`.
+/// - `--cmyk-profile <path>` overrides `--output-profile` for the source CMYK
+///   profile. The path is read and validated as a 4-component CMYK ICC.
+/// - `--output-profile <path>` (without `--cmyk-profile`) preserves prior
+///   behavior: bytes serve as both the source CMYK profile and the embedded
+///   PDF output profile. Validated as a generic ICC (`acsp` magic) only.
+/// - Otherwise the system CMYK profile is searched in the standard locations.
+fn build_icc_cache(icc_cfg: &IccCliConfig) -> stet_graphics::icc::IccCache {
+    use stet_graphics::icc::IccCache;
+
+    if icc_cfg.no_icc {
+        return IccCache::new_with_options(IccCacheOptions {
+            bpc_mode: BpcMode::Off,
+            source_cmyk_profile: None,
+        });
     }
+
+    if let Some(path) = icc_cfg.cmyk_profile_path.as_deref() {
+        let bytes = std::fs::read(path).unwrap_or_else(|e| {
+            eprintln!("Error: cannot read --cmyk-profile '{}': {}", path, e);
+            std::process::exit(1);
+        });
+        validate_cmyk_icc(&bytes, path);
+        eprintln!("[ICC] Loaded source CMYK profile: {}", path);
+        return IccCache::new_with_options(IccCacheOptions {
+            bpc_mode: icc_cfg.bpc_mode,
+            source_cmyk_profile: Some(bytes),
+        });
+    }
+
+    if let Some(path) = icc_cfg.output_profile_path.as_deref() {
+        let bytes = std::fs::read(path).unwrap_or_else(|e| {
+            eprintln!("Error: cannot read output profile '{}': {}", path, e);
+            std::process::exit(1);
+        });
+        if bytes.len() < 40 || &bytes[36..40] != b"acsp" {
+            eprintln!("Error: '{}' is not a valid ICC profile", path);
+            std::process::exit(1);
+        }
+        eprintln!("[ICC] Loaded output profile: {}", path);
+        return IccCache::new_with_options(IccCacheOptions {
+            bpc_mode: icc_cfg.bpc_mode,
+            source_cmyk_profile: Some(bytes),
+        });
+    }
+
+    let mut cache = IccCache::new_with_options(IccCacheOptions {
+        bpc_mode: icc_cfg.bpc_mode,
+        source_cmyk_profile: None,
+    });
+    cache.search_system_cmyk_profile();
+    cache
+}
+
+/// Validate that an ICC profile byte slice is a 4-component CMYK profile.
+/// Exits the process on failure.
+fn validate_cmyk_icc(bytes: &[u8], path: &str) {
+    if bytes.len() < 40 || &bytes[36..40] != b"acsp" {
+        eprintln!("Error: '{}' is not a valid ICC profile", path);
+        std::process::exit(1);
+    }
+    // ICC header: data color space at offset 16..20.
+    if &bytes[16..20] != b"CMYK" {
+        let cs = String::from_utf8_lossy(&bytes[16..20]);
+        eprintln!(
+            "Error: --cmyk-profile '{}' has data color space '{}'; expected CMYK",
+            path,
+            cs.trim()
+        );
+        std::process::exit(1);
+    }
+}
+
+/// Create and initialize a Context with the resource system.
+fn create_context(icc_cfg: &IccCliConfig) -> Context {
+    let mut ctx = Context::new();
+    // Replace the default IccCache with one configured per the CLI options.
+    // This is where `--bpc` lands; commits 2-3 of docs/PLAN-BPC.md will turn
+    // the stored mode into actual conversion-time behavior.
+    ctx.icc_cache = build_icc_cache(icc_cfg);
     ctx.exec_sync_fn = Some(stet_engine::eval::exec_sync);
     build_system_dict(&mut ctx);
 
@@ -1309,9 +1405,9 @@ fn run_pdf_input_png(
     page_filter: &Option<std::collections::HashSet<i32>>,
     no_aa: bool,
     use_viewport: bool,
+    icc_cfg: &IccCliConfig,
 ) {
-    let mut icc_cache = stet_graphics::icc::IccCache::new();
-    icc_cache.search_system_cmyk_profile();
+    let icc_cache = build_icc_cache(icc_cfg);
 
     for filename in file_args {
         let data = std::fs::read(filename).unwrap_or_else(|e| {

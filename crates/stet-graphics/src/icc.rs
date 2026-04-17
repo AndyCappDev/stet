@@ -18,6 +18,51 @@ use std::sync::Arc;
 /// SHA-256 hash used as profile key.
 pub type ProfileHash = [u8; 32];
 
+/// Black Point Compensation mode for CMYK→sRGB conversion.
+///
+/// Reference renderers (Ghostscript, Acrobat, Firefox via lcms2) apply BPC by
+/// default for relative-colorimetric CMYK→sRGB. moxcms 0.8.1 ships BPC
+/// commented out, so without it K-heavy colors render visibly lighter than
+/// reference renderers. See `docs/PLAN-BPC.md` for the full design.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BpcMode {
+    /// Skip BPC; matches stet's pre-fix behavior. Useful for proofing-style
+    /// renders that should preserve actual densities, or for bit-for-bit
+    /// reproduction of older baselines.
+    Off,
+    /// Always apply BPC during CMYK→sRGB conversion.
+    On,
+    /// Default — currently equivalent to `On`. Reserved for forward
+    /// compatibility (eventually could honor PDF rendering-intent or
+    /// output-intent hints).
+    #[default]
+    Auto,
+}
+
+impl BpcMode {
+    /// True when BPC should be applied at conversion time.
+    #[inline]
+    pub fn is_enabled(self) -> bool {
+        matches!(self, BpcMode::On | BpcMode::Auto)
+    }
+}
+
+/// Construction-time options for [`IccCache`].
+///
+/// Bundles together the BPC mode and an optional pre-supplied source CMYK
+/// profile (overriding the automatic system-profile search). Created via
+/// [`IccCache::new_with_options`].
+#[derive(Clone, Default)]
+pub struct IccCacheOptions {
+    /// BPC mode for CMYK→sRGB conversion.
+    pub bpc_mode: BpcMode,
+    /// Raw bytes of a source CMYK profile to register as the system profile.
+    /// When `None`, the cache is created empty and the caller is responsible
+    /// for invoking [`IccCache::search_system_cmyk_profile`] (or providing
+    /// bytes some other way).
+    pub source_cmyk_profile: Option<Vec<u8>>,
+}
+
 /// Identity Gray→RGB transform: maps each gray value to equal R=G=B.
 /// Used as fallback when a Gray ICC profile can't produce a proper transform.
 struct GrayToRgbIdentity;
@@ -96,6 +141,10 @@ pub struct IccCache {
     srgb_profile: ColorProfile,
     /// Cached sRGB→CMYK reverse transform (for RGB round-trip through CMYK page groups).
     reverse_cmyk_f64: Option<Arc<dyn TransformExecutor<f64> + Send + Sync>>,
+    /// Black Point Compensation mode for CMYK→sRGB conversion. Set at
+    /// construction time via [`IccCacheOptions`]; consulted by future BPC
+    /// apply paths (commit 2 of `docs/PLAN-BPC.md`).
+    bpc_mode: BpcMode,
 }
 
 impl Default for IccCache {
@@ -105,9 +154,20 @@ impl Default for IccCache {
 }
 
 impl IccCache {
-    /// Create an empty ICC cache.
+    /// Create an empty ICC cache with default options (BPC `Auto`, no
+    /// pre-supplied source CMYK profile).
     pub fn new() -> Self {
-        Self {
+        Self::new_with_options(IccCacheOptions::default())
+    }
+
+    /// Create an ICC cache with the given options.
+    ///
+    /// When `opts.source_cmyk_profile` is `Some`, the bytes are registered as
+    /// the system CMYK profile (overriding any later
+    /// [`Self::search_system_cmyk_profile`] call). Otherwise the cache starts
+    /// empty and the caller is expected to supply a profile separately.
+    pub fn new_with_options(opts: IccCacheOptions) -> Self {
+        let mut cache = Self {
             profiles: HashMap::new(),
             transforms: HashMap::new(),
             color_cache: HashMap::new(),
@@ -116,7 +176,18 @@ impl IccCache {
             raw_bytes: HashMap::new(),
             srgb_profile: ColorProfile::new_srgb(),
             reverse_cmyk_f64: None,
+            bpc_mode: opts.bpc_mode,
+        };
+        if let Some(bytes) = opts.source_cmyk_profile {
+            cache.load_cmyk_profile_bytes(&bytes);
         }
+        cache
+    }
+
+    /// Current Black Point Compensation mode.
+    #[inline]
+    pub fn bpc_mode(&self) -> BpcMode {
+        self.bpc_mode
     }
 
     /// Compute the SHA-256 hash of an ICC profile without registering it.
@@ -973,6 +1044,38 @@ mod tests {
         let cache = IccCache::new();
         assert!(cache.default_cmyk_hash.is_none());
         assert!(cache.profiles.is_empty());
+        assert_eq!(cache.bpc_mode(), BpcMode::Auto);
+    }
+
+    #[test]
+    fn test_icc_cache_options_default_matches_new() {
+        let cache = IccCache::new_with_options(IccCacheOptions::default());
+        assert_eq!(cache.bpc_mode(), BpcMode::Auto);
+        assert!(cache.default_cmyk_hash.is_none());
+    }
+
+    #[test]
+    fn test_icc_cache_options_bpc_off() {
+        let cache = IccCache::new_with_options(IccCacheOptions {
+            bpc_mode: BpcMode::Off,
+            source_cmyk_profile: None,
+        });
+        assert_eq!(cache.bpc_mode(), BpcMode::Off);
+        assert!(!cache.bpc_mode().is_enabled());
+    }
+
+    #[test]
+    fn test_icc_cache_options_preloads_cmyk_profile() {
+        // Skip when no system CMYK profile is available.
+        let Some(cmyk_bytes) = find_system_cmyk_profile() else {
+            return;
+        };
+        let cache = IccCache::new_with_options(IccCacheOptions {
+            bpc_mode: BpcMode::On,
+            source_cmyk_profile: Some(cmyk_bytes.clone()),
+        });
+        assert!(cache.default_cmyk_hash().is_some());
+        assert_eq!(cache.bpc_mode(), BpcMode::On);
     }
 
     #[test]
