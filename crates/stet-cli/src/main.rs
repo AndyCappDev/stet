@@ -25,6 +25,12 @@ struct IccCliConfig {
     output_profile_path: Option<String>,
     cmyk_profile_path: Option<String>,
     bpc_mode: BpcMode,
+    /// When true, prefer the PDF's embedded `/OutputIntents[].DestOutputProfile`
+    /// over the system-default CMYK profile (unless `--cmyk-profile` is also
+    /// set, which always wins). Off by default because it changes the sRGB
+    /// output for every CMYK pixel and can expose CMYK-math drift that the
+    /// GS default profile happens to mask.
+    use_output_intent: bool,
 }
 
 impl IccCliConfig {
@@ -75,6 +81,7 @@ fn main() {
     let mut cmyk_profile_path: Option<String> = None;
     let mut bpc_mode = BpcMode::Auto;
     let mut bpc_explicit = false;
+    let mut use_output_intent = false;
     let mut pages_spec: Option<String> = None;
     let mut file_args: Vec<String> = Vec::new();
     let mut i = 1;
@@ -123,6 +130,11 @@ fn main() {
             }
             "--no-icc" => {
                 no_icc = true;
+                i += 1;
+                continue;
+            }
+            "--use-output-intent" => {
+                use_output_intent = true;
                 i += 1;
                 continue;
             }
@@ -204,6 +216,7 @@ fn main() {
         output_profile_path,
         cmyk_profile_path,
         bpc_mode,
+        use_output_intent,
     };
 
     // Determine the output device
@@ -504,6 +517,7 @@ fn run_viewer_mode(
                 if let Some(ref sender) = ctx.display_list_sender {
                     render_dropped_pdf(
                         path, dpi_override, sender, &ctx.icc_cache,
+                        icc_cfg_thread.use_output_intent,
                     );
                 }
             }
@@ -543,6 +557,7 @@ fn run_viewer_mode(
             if is_pdf_file(&path) {
                 render_dropped_pdf(
                     &path, established_dpi, &sender, &ctx.icc_cache,
+                    icc_cfg_thread.use_output_intent,
                 );
             } else {
                 run_file_jobs(
@@ -1318,6 +1333,7 @@ fn render_dropped_pdf(
     dpi_override: Option<f64>,
     dl_sender: &std::sync::mpsc::Sender<stet_viewer::DisplayListMsg>,
     icc_cache: &stet_graphics::icc::IccCache,
+    use_output_intent: bool,
 ) {
     let dpi = dpi_override.unwrap_or(150.0);
 
@@ -1329,13 +1345,16 @@ fn render_dropped_pdf(
         }
     };
 
-    let doc = match PdfDocument::from_bytes_with_icc(&data, icc_cache.clone()) {
+    let mut doc = match PdfDocument::from_bytes_with_icc(&data, icc_cache.clone()) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("Error: cannot parse '{}': {}", path, e);
             return;
         }
     };
+    if use_output_intent && doc.apply_output_intent_as_default_cmyk() {
+        eprintln!("[ICC] Using PDF OutputIntent profile for {}", path);
+    }
 
     let page_count = doc.page_count();
     eprintln!("PDF: {} ({} pages)", path, page_count);
@@ -1415,11 +1434,23 @@ fn run_pdf_input_png(
             std::process::exit(1);
         });
 
-        let doc =
+        let mut doc =
             PdfDocument::from_bytes_with_icc(&data, icc_cache.clone()).unwrap_or_else(|e| {
                 eprintln!("Error: cannot parse '{}': {}", filename, e);
                 std::process::exit(1);
             });
+        // Opt-in: when `--use-output-intent` is set and the user didn't pin a
+        // source CMYK profile via `--cmyk-profile`/`--output-profile`, prefer
+        // the PDF's own `/OutputIntents[].DestOutputProfile`. Gated because
+        // changing the CMYK→sRGB profile shifts every pixel and can expose
+        // small CMYK-math drift that the system-default profile happens to
+        // mask (e.g. GWG overprint swatches on PDFX-ready_Output-Test).
+        if icc_cfg.use_output_intent
+            && icc_cfg.source_cmyk_path().is_none()
+            && doc.apply_output_intent_as_default_cmyk()
+        {
+            eprintln!("[ICC] Using PDF OutputIntent profile for {}", filename);
+        }
 
         let output_base = filename
             .strip_suffix(".pdf")

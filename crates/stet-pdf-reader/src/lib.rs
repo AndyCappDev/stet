@@ -50,6 +50,10 @@ pub struct PdfDocument<'a> {
     /// Object numbers of Optional Content Groups that are OFF by default.
     /// Parsed from the catalog's /OCProperties /D /OFF array.
     ocg_off: HashSet<u32>,
+    /// Decompressed ICC profile bytes from the first /OutputIntents entry's
+    /// /DestOutputProfile stream, if present. Used to match the document's
+    /// intended CMYK rendering (ISO Coated v2, SWOP, etc.) at render time.
+    output_intent_icc: Option<Vec<u8>>,
 }
 
 impl<'a> PdfDocument<'a> {
@@ -96,6 +100,7 @@ impl<'a> PdfDocument<'a> {
         let resolver = Resolver::with_encryption(data, xref, encryption);
         let pages = page_tree::collect_pages(&resolver)?;
         let ocg_off = parse_ocg_off(&resolver);
+        let output_intent_icc = parse_output_intent_icc(&resolver);
 
         let mut icc_cache = IccCache::new();
         icc_cache.search_system_cmyk_profile();
@@ -107,6 +112,7 @@ impl<'a> PdfDocument<'a> {
             font_provider: None,
             overprint: true,
             ocg_off,
+            output_intent_icc,
         })
     }
 
@@ -150,6 +156,7 @@ impl<'a> PdfDocument<'a> {
         let resolver = Resolver::with_encryption(data, xref, encryption);
         let pages = page_tree::collect_pages(&resolver)?;
         let ocg_off = parse_ocg_off(&resolver);
+        let output_intent_icc = parse_output_intent_icc(&resolver);
 
         Ok(Self {
             resolver,
@@ -158,6 +165,7 @@ impl<'a> PdfDocument<'a> {
             font_provider: None,
             overprint: true,
             ocg_off,
+            output_intent_icc,
         })
     }
 
@@ -355,6 +363,30 @@ impl<'a> PdfDocument<'a> {
         &self.icc_cache
     }
 
+    /// Decompressed ICC profile bytes from the PDF's OutputIntent, if any.
+    /// PDF/X files declare their intended CMYK rendering space here (e.g.
+    /// ISO Coated v2 300% (ECI)); using it at render time matches the
+    /// document author's colour expectations, which system-default profiles
+    /// (GS `default_cmyk.icc`, FOGRA39) often approximate only coarsely.
+    pub fn output_intent_icc(&self) -> Option<&[u8]> {
+        self.output_intent_icc.as_deref()
+    }
+
+    /// Register the PDF's OutputIntent ICC profile as the default CMYK profile
+    /// in this document's ICC cache, replacing whatever was loaded from
+    /// `search_system_cmyk_profile`. Returns `true` when the profile was
+    /// present and registered.
+    pub fn apply_output_intent_as_default_cmyk(&mut self) -> bool {
+        let Some(bytes) = self.output_intent_icc.as_deref() else {
+            return false;
+        };
+        let Some(hash) = self.icc_cache.register_profile(bytes) else {
+            return false;
+        };
+        self.icc_cache.set_system_cmyk(bytes, hash);
+        true
+    }
+
     /// Access the resolver for arbitrary object lookups.
     pub fn resolver(&self) -> &Resolver<'a> {
         &self.resolver
@@ -430,6 +462,59 @@ fn parse_ocg_off(resolver: &Resolver) -> HashSet<u32> {
     }
 
     off
+}
+
+/// Extract the decompressed ICC profile bytes from the first PDF/X
+/// OutputIntent whose `/DestOutputProfile` is a CMYK ICC stream.
+///
+/// PDF/X files declare their intended CMYK rendering profile (e.g. "ISO
+/// Coated v2 300% (ECI)") via `/Catalog/OutputIntents` with an embedded
+/// `/DestOutputProfile` stream. Using that profile at render time matches
+/// the author's colour expectations; the system-default profiles used as
+/// fallback (GS `default_cmyk.icc`, FOGRA39) only approximate it.
+fn parse_output_intent_icc(resolver: &Resolver) -> Option<Vec<u8>> {
+    let mut catalog_owned;
+    let catalog_dict = if let Some(root_ref) = resolver.trailer().get_ref(b"Root") {
+        if let Ok(c) = resolver.resolve(root_ref.0, root_ref.1) {
+            catalog_owned = c;
+            match catalog_owned.as_dict() {
+                Some(d) if d.get(b"OutputIntents").is_some() => d,
+                _ => {
+                    catalog_owned = find_catalog(resolver)?;
+                    catalog_owned.as_dict()?
+                }
+            }
+        } else {
+            catalog_owned = find_catalog(resolver)?;
+            catalog_owned.as_dict()?
+        }
+    } else {
+        catalog_owned = find_catalog(resolver)?;
+        catalog_owned.as_dict()?
+    };
+
+    let intents_obj = resolver.deref(catalog_dict.get(b"OutputIntents")?).ok()?;
+    let intents_arr = intents_obj.as_array()?;
+    for entry in intents_arr {
+        let intent = match resolver.deref(entry) {
+            Ok(o) => o,
+            Err(_) => continue,
+        };
+        let Some(intent_dict) = intent.as_dict() else {
+            continue;
+        };
+        let Some(profile_obj) = intent_dict.get(b"DestOutputProfile") else {
+            continue;
+        };
+        let Ok(bytes) = resolver.stream_data_from_obj(profile_obj) else {
+            continue;
+        };
+        // ICC header: color space at offset 16, 'acsp' magic at offset 36.
+        if bytes.len() >= 40 && &bytes[36..40] == b"acsp" && &bytes[16..20] == b"CMYK" {
+            return Some(bytes);
+        }
+    }
+    None
 }
 
 /// Scan all objects to find the real Catalog dict (has /Type /Catalog).
