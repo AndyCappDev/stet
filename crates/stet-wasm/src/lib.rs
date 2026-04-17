@@ -499,6 +499,7 @@ pub fn render_viewport(
     let list = &interp.page_display_lists[i];
     let page_dpi = interp.page_info[i].dpi;
     let prepared = interp.page_prepared[i].as_ref().unwrap();
+    let icc = interp.page_icc[i].as_ref();
     let image_cache = interp.page_image_cache[i].as_ref();
     let rgba = stet_render::render_region_prepared(
         list,
@@ -510,7 +511,7 @@ pub fn render_viewport(
         pixel_w,
         pixel_h,
         page_dpi,
-        None,
+        icc,
         image_cache,
         false,
     );
@@ -567,6 +568,7 @@ pub fn render_viewport_band(
     let list = &interp.page_display_lists[i];
     let page_dpi = interp.page_info[i].dpi;
     let prepared = interp.page_prepared[i].as_ref().unwrap();
+    let icc = interp.page_icc[i].as_ref();
     let image_cache = interp.page_image_cache[i].as_ref();
     let rgba = stet_render::render_region_single_band(
         list,
@@ -581,7 +583,7 @@ pub fn render_viewport_band(
         band_h,
         num_bands,
         page_dpi,
-        None,
+        icc,
         image_cache,
         false,
     );
