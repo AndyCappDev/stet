@@ -7786,6 +7786,101 @@ fn render_overprint_image(
                     continue;
                 };
 
+            let mi = by * stride + bx;
+            let ci = mi * 4;
+            let pi = mi * 4;
+
+            // Spot-tint images (Separation / DeviceN with CMYK alt and at
+            // least one non-process colorant): per PDF spec 11.7.4.5 the
+            // image affects only the device colorants identified by its color
+            // space.  In composite preview that means:
+            //   * Where the CMYK buffer is empty (fresh paper or a custom
+            //     spot painted earlier whose alt-CMYK we never tracked),
+            //     paint the pixel directly from the image's tint output —
+            //     the spot's full alt-CMYK contribution shows up, and a
+            //     same-spot underlying paint (e.g. a /GWG-Green X under an
+            //     image whose GWG-Green is zero) is knocked out because
+            //     ICC(0,0,0,0) is white.
+            //   * Where the CMYK buffer carries prior CMYK (a `1 0 1 0.5 k`
+            //     ✓ underneath), REPLACE only the NAMED PROCESS plates with
+            //     the image's tint output and PRESERVE the rest, then
+            //     recompose the pixmap.  A duotone DeviceN [Black, Green]
+            //     image's "no ink" pixel knocks the ✓'s K=0.5 down to 0 —
+            //     lightening it to (C=1, M=0, Y=1, K=0) — while leaving its
+            //     C=1, Y=1 untouched.
+            if image_cs_has_spot_tint_transform(&params.color_space) {
+                let cur_c = cmyk_buf[ci] as f64;
+                let cur_m = cmyk_buf[ci + 1] as f64;
+                let cur_y = cmyk_buf[ci + 2] as f64;
+                let cur_k = cmyk_buf[ci + 3] as f64;
+                let cur_is_zero =
+                    cur_c == 0.0 && cur_m == 0.0 && cur_y == 0.0 && cur_k == 0.0;
+                let named = params.painted_channels;
+                // OPM=1 zero-source preservation: when the image's tint
+                // output for a named plate is zero, the underlying value is
+                // preserved instead of replaced.  Without this, a duotone
+                // DeviceN [Black, GWG-Green] image's "no ink" pixel
+                // overwrote the K=0.5 of an underlying CMYK ✓ with 0,
+                // rendering the checkmark too light versus Adobe Acrobat.
+                let opm1 = params.overprint_mode == 1;
+                let (new_c, new_m, new_y, new_k) = if cur_is_zero {
+                    (src_c, src_m, src_y, src_k)
+                } else {
+                    let nc = if named & stet_graphics::device::CMYK_C != 0
+                        && !(opm1 && src_c == 0.0)
+                    {
+                        src_c
+                    } else {
+                        cur_c
+                    };
+                    let nm = if named & stet_graphics::device::CMYK_M != 0
+                        && !(opm1 && src_m == 0.0)
+                    {
+                        src_m
+                    } else {
+                        cur_m
+                    };
+                    let ny = if named & stet_graphics::device::CMYK_Y != 0
+                        && !(opm1 && src_y == 0.0)
+                    {
+                        src_y
+                    } else {
+                        cur_y
+                    };
+                    let nk = if named & stet_graphics::device::CMYK_K != 0
+                        && !(opm1 && src_k == 0.0)
+                    {
+                        src_k
+                    } else {
+                        cur_k
+                    };
+                    (nc, nm, ny, nk)
+                };
+                cmyk_buf[ci] = new_c as f32;
+                cmyk_buf[ci + 1] = new_m as f32;
+                cmyk_buf[ci + 2] = new_y as f32;
+                cmyk_buf[ci + 3] = new_k as f32;
+                let (r, g, b) = if let Some(icc_cache) = icc {
+                    icc_cache
+                        .convert_cmyk_readonly(new_c, new_m, new_y, new_k)
+                        .unwrap_or_else(|| cmyk_to_rgb_plrm(new_c, new_m, new_y, new_k))
+                } else {
+                    cmyk_to_rgb_plrm(new_c, new_m, new_y, new_k)
+                };
+                if op_touched[mi] == 0 && px_data[pi + 3] > 0 {
+                    op_bg[pi] = px_data[pi];
+                    op_bg[pi + 1] = px_data[pi + 1];
+                    op_bg[pi + 2] = px_data[pi + 2];
+                    op_bg[pi + 3] = px_data[pi + 3];
+                    op_touched[mi] = 1;
+                }
+                px_data[pi] = (r * 255.0).round() as u8;
+                px_data[pi + 1] = (g * 255.0).round() as u8;
+                px_data[pi + 2] = (b * 255.0).round() as u8;
+                px_data[pi + 3] = 255;
+                continue;
+            }
+
             let mut channels = params.painted_channels;
             // Non-CMYK images (painted_channels=0, e.g. Separation/DeviceN spot colors)
             // replace all CMYK channels with the tinted equivalent.
@@ -7831,10 +7926,6 @@ fn render_overprint_image(
                     channels |= stet_graphics::device::CMYK_K;
                 }
             }
-
-            let mi = by * stride + bx;
-            let ci = mi * 4;
-            let pi = mi * 4;
 
             let cur_c = cmyk_buf[ci] as f64;
             let cur_m = cmyk_buf[ci + 1] as f64;
@@ -8103,6 +8194,38 @@ fn is_cmyk_color_space(cs: &ImageColorSpace) -> bool {
         ImageColorSpace::DeviceCMYK => true,
         ImageColorSpace::ICCBased { n: 4, .. } => true,
         ImageColorSpace::Indexed { base, .. } => is_cmyk_color_space(base),
+        _ => false,
+    }
+}
+
+/// True when an image's color space is a Separation/DeviceN with a CMYK
+/// alternate AND at least one non-process spot colorant.  These images
+/// represent paint that affects a virtual spot plate; the per-pixel CMYK
+/// produced by the tint transform must blend multiplicatively with the
+/// tracked CMYK buffer (rather than per-channel REPLACE) so that
+/// underlying CMYK paints survive while same-spot underlying paints are
+/// replaced by the image's "no ink" pixels.
+fn image_cs_has_spot_tint_transform(cs: &ImageColorSpace) -> bool {
+    use stet_graphics::device::cmyk_channel_for_name;
+    match cs {
+        ImageColorSpace::Separation {
+            name, alt_space, ..
+        } => {
+            cmyk_channel_for_name(name) == 0
+                && matches!(
+                    alt_space.as_ref(),
+                    ImageColorSpace::DeviceCMYK | ImageColorSpace::ICCBased { n: 4, .. }
+                )
+        }
+        ImageColorSpace::DeviceN {
+            names, alt_space, ..
+        } => {
+            matches!(
+                alt_space.as_ref(),
+                ImageColorSpace::DeviceCMYK | ImageColorSpace::ICCBased { n: 4, .. }
+            ) && names.iter().any(|n| cmyk_channel_for_name(n) == 0)
+        }
+        ImageColorSpace::Indexed { base, .. } => image_cs_has_spot_tint_transform(base),
         _ => false,
     }
 }
@@ -10611,7 +10734,99 @@ fn render_axial_shading(
                 );
                 let ci = (py as usize * pw as usize + px as usize) * 4;
                 if ci + 3 < buf.len() {
-                    if params.overprint
+                    if params.spot_tint_blend && params.overprint {
+                        // Per PDF spec 11.7.4.5 a Separation/DeviceN gradient
+                        // only affects the device colorants identified by its
+                        // color space: plates for NAMED PROCESS colorants are
+                        // REPLACED with the gradient's CMYK value at this
+                        // pixel, plates not tied to a named process colorant
+                        // are PRESERVED.  The LUT-painted pixmap already
+                        // carries the spot's full ICC-converted color, so:
+                        //
+                        // Gated on `overprint` because the LUT pass for
+                        // non-overprint shadings carries the author-intended
+                        // blend mode (e.g. 2265.pdf draws each circle wedge
+                        // twice — Normal then Multiply — and the multiplied
+                        // pixmap is the wedge's final color).  Recomposing
+                        // here would overwrite the multiply-darkened result
+                        // with a single ICC sample of the source CMYK.
+                        //   * Where the CMYK buffer is empty (fresh paper),
+                        //     leave the pixmap alone — re-running CMYK→RGB
+                        //     here would round-trip through the system
+                        //     profile and produce a perceptibly different
+                        //     gradient curve (the snowman shading regression
+                        //     guarded against in the original recompose
+                        //     branch).  Just record the named-process
+                        //     contribution to the buffer for later overprint
+                        //     tracking.
+                        //   * Where the CMYK buffer has prior values (a
+                        //     CMYK fill underneath, e.g. a `1 0 1 0.5 k`
+                        //     checkmark under the strip), the LUT-paint had
+                        //     wiped that underlying paint from the pixmap.
+                        //     Recompose the pixmap from the merged CMYK
+                        //     (REPLACE named, preserve non-named) to restore
+                        //     the checkmark with the gradient's named-plate
+                        //     contribution layered on top.
+                        let cur_c = buf[ci] as f64;
+                        let cur_m = buf[ci + 1] as f64;
+                        let cur_y = buf[ci + 2] as f64;
+                        let cur_k = buf[ci + 3] as f64;
+                        let cur_is_zero =
+                            cur_c == 0.0 && cur_m == 0.0 && cur_y == 0.0 && cur_k == 0.0;
+                        let named = params.painted_channels;
+                        if cur_is_zero {
+                            if named & stet_graphics::device::CMYK_C != 0 {
+                                buf[ci] = cmyk.0 as f32;
+                            }
+                            if named & stet_graphics::device::CMYK_M != 0 {
+                                buf[ci + 1] = cmyk.1 as f32;
+                            }
+                            if named & stet_graphics::device::CMYK_Y != 0 {
+                                buf[ci + 2] = cmyk.2 as f32;
+                            }
+                            if named & stet_graphics::device::CMYK_K != 0 {
+                                buf[ci + 3] = cmyk.3 as f32;
+                            }
+                        } else {
+                            let new_c = if named & stet_graphics::device::CMYK_C != 0 {
+                                cmyk.0
+                            } else {
+                                cur_c
+                            };
+                            let new_m = if named & stet_graphics::device::CMYK_M != 0 {
+                                cmyk.1
+                            } else {
+                                cur_m
+                            };
+                            let new_y = if named & stet_graphics::device::CMYK_Y != 0 {
+                                cmyk.2
+                            } else {
+                                cur_y
+                            };
+                            let new_k = if named & stet_graphics::device::CMYK_K != 0 {
+                                cmyk.3
+                            } else {
+                                cur_k
+                            };
+                            buf[ci] = new_c as f32;
+                            buf[ci + 1] = new_m as f32;
+                            buf[ci + 2] = new_y as f32;
+                            buf[ci + 3] = new_k as f32;
+                            let (rv, gv, bv) = if let Some(icc_cache) = icc {
+                                icc_cache
+                                    .convert_cmyk_readonly(new_c, new_m, new_y, new_k)
+                                    .unwrap_or_else(|| cmyk_to_rgb_plrm(new_c, new_m, new_y, new_k))
+                            } else {
+                                cmyk_to_rgb_plrm(new_c, new_m, new_y, new_k)
+                            };
+                            let stride = pixmap.data().len() / pixmap.height() as usize;
+                            let offset = py as usize * stride + px as usize * 4;
+                            let data = pixmap.data_mut();
+                            data[offset] = (rv * 255.0).round().clamp(0.0, 255.0) as u8;
+                            data[offset + 1] = (gv * 255.0).round().clamp(0.0, 255.0) as u8;
+                            data[offset + 2] = (bv * 255.0).round().clamp(0.0, 255.0) as u8;
+                        }
+                    } else if params.overprint
                         && params.painted_channels != stet_graphics::device::CMYK_ALL
                     {
                         if params.painted_channels & stet_graphics::device::CMYK_C != 0 {

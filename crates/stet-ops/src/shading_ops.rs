@@ -182,6 +182,7 @@ fn build_type2_shading(
             overprint: false,
             painted_channels: 0,
             alpha: 1.0,
+            spot_tint_blend: false,
         },
     });
 
@@ -244,6 +245,7 @@ fn build_type3_shading(
             overprint: false,
             painted_channels: 0,
             alpha: 1.0,
+            spot_tint_blend: false,
         },
     });
 

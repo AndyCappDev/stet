@@ -243,6 +243,7 @@ fn handle_axial(
             overprint: gstate.overprint,
             painted_channels: painted_channels_for_cs(resolved_cs),
             alpha: gstate.fill_alpha,
+            spot_tint_blend: cs_has_spot_with_cmyk_alt(resolved_cs),
         },
     });
     Ok(())
@@ -294,9 +295,28 @@ fn handle_radial(
             overprint: gstate.overprint,
             painted_channels: painted_channels_for_cs(resolved_cs),
             alpha: gstate.fill_alpha,
+            spot_tint_blend: cs_has_spot_with_cmyk_alt(resolved_cs),
         },
     });
     Ok(())
+}
+
+/// True when a resolved color space is Separation/DeviceN with a CMYK
+/// alternate AND at least one non-process spot colorant.  See
+/// [`AxialShadingParams::spot_tint_blend`].
+fn cs_has_spot_with_cmyk_alt(cs: &ResolvedColorSpace) -> bool {
+    use stet_graphics::device::cmyk_channel_for_name;
+    match cs {
+        ResolvedColorSpace::Separation { name, alt, .. } => {
+            cmyk_channel_for_name(name) == 0
+                && matches!(alt.as_ref(), ResolvedColorSpace::DeviceCMYK)
+        }
+        ResolvedColorSpace::DeviceN { names, alt, .. } => {
+            matches!(alt.as_ref(), ResolvedColorSpace::DeviceCMYK)
+                && names.iter().any(|n| cmyk_channel_for_name(n) == 0)
+        }
+        _ => false,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

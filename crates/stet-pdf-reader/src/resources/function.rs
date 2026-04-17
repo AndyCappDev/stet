@@ -1097,4 +1097,128 @@ mod tests {
         let result = f.evaluate(&[0.5]);
         assert!((result[0] - 1.0).abs() < 1e-10);
     }
+
+    #[test]
+    fn devicen_duotone_black_green_diag() {
+        let code = "{1.000000 3 1 roll 1.000000 3 1 roll 1.000000 3 1 roll 1 index 1.000000 \
+cvr exch sub 3 1 roll 6 -1 roll 1 index 0.500000 mul 1.000000 cvr \
+exch sub mul 1.000000 cvr exch sub 6 1 roll 5 -1 roll 1 index \
+0.000000 mul 1.000000 cvr exch sub mul 1.000000 cvr exch sub 5 1 roll 4 \
+-1 roll 1 index 1.000000 mul 1.000000 cvr exch sub mul 1.000000 cvr exch sub \
+4 1 roll 3 -1 roll 1 index 0.000000 mul 1.000000 cvr exch sub mul \
+1.000000 cvr exch sub 3 1 roll pop pop }";
+        let tokens = parse_calc_tokens(code).unwrap();
+        let f = PdfFunction::Calculator {
+            domain: vec![[0.0, 1.0], [0.0, 1.0]],
+            range: vec![[0.0, 1.0], [0.0, 1.0], [0.0, 1.0], [0.0, 1.0]],
+            tokens,
+        };
+        for (b, g, label) in [
+            (0.0, 0.0, "white"),
+            (1.0, 0.0, "black only"),
+            (0.0, 1.0, "green only"),
+            (1.0, 1.0, "both full"),
+            (0.5, 0.5, "both half"),
+        ] {
+            let r = f.evaluate(&[b, g]);
+            eprintln!("{label} (b={b}, g={g}) -> CMYK={r:?}");
+        }
+        // Expected: black-only -> (0, 0, 0, 1); green-only -> (0.5, 0, 1, 0)
+        let r = f.evaluate(&[1.0, 0.0]);
+        assert!((r[0]).abs() < 1e-6 && (r[1]).abs() < 1e-6 && (r[2]).abs() < 1e-6 && (r[3] - 1.0).abs() < 1e-6,
+                "black-only got CMYK={r:?}");
+        let r = f.evaluate(&[0.0, 1.0]);
+        assert!((r[0] - 0.5).abs() < 1e-6 && (r[1]).abs() < 1e-6 && (r[2] - 1.0).abs() < 1e-6 && (r[3]).abs() < 1e-6,
+                "green-only got CMYK={r:?}");
+    }
+
+    #[test]
+    fn devicen_cyan_green_gradient() {
+        let code = "{0 index 1.000000 cvr exch sub 3 1 roll 1.000000 3 1 roll 1.000000 3 \
+1 roll 1.000000 3 1 roll 6 -1 roll 2 index 0.500000 mul 1.000000 cvr \
+exch sub mul 1.000000 cvr exch sub 6 1 roll 5 -1 roll 2 index \
+0.000000 mul 1.000000 cvr exch sub mul 1.000000 cvr exch sub 5 1 roll 4 \
+-1 roll 2 index 1.000000 mul 1.000000 cvr exch sub mul 1.000000 cvr exch sub \
+4 1 roll 3 -1 roll 2 index 0.000000 mul 1.000000 cvr exch sub mul \
+1.000000 cvr exch sub 3 1 roll pop pop }";
+        let tokens = parse_calc_tokens(code).unwrap();
+        let f = PdfFunction::Calculator {
+            domain: vec![[0.0, 1.0], [0.0, 1.0]],
+            range: vec![[0.0, 1.0], [0.0, 1.0], [0.0, 1.0], [0.0, 1.0]],
+            tokens,
+        };
+        for (g, c, label) in [
+            (0.0, 0.0, "white"),
+            (1.0, 0.0, "green only"),
+            (0.0, 1.0, "cyan only"),
+            (0.5, 0.5, "both half"),
+        ] {
+            let r = f.evaluate(&[g, c]);
+            eprintln!("{label} (g={g}, c={c}) -> CMYK={r:?}");
+        }
+        let r = f.evaluate(&[1.0, 0.0]);
+        assert!((r[0] - 0.5).abs() < 1e-6 && (r[2] - 1.0).abs() < 1e-6,
+                "green-only: CMYK={r:?}");
+        let r = f.evaluate(&[0.0, 1.0]);
+        assert!((r[0] - 1.0).abs() < 1e-6 && (r[1]).abs() < 1e-6 && (r[2]).abs() < 1e-6,
+                "cyan-only: CMYK={r:?}");
+    }
+
+    #[test]
+    fn devicen_duotone_via_tint_table() {
+        use stet_graphics::device::TintLookupTable;
+        use std::sync::Arc;
+        let code = "{1.000000 3 1 roll 1.000000 3 1 roll 1.000000 3 1 roll 1 index 1.000000 \
+cvr exch sub 3 1 roll 6 -1 roll 1 index 0.500000 mul 1.000000 cvr \
+exch sub mul 1.000000 cvr exch sub 6 1 roll 5 -1 roll 1 index \
+0.000000 mul 1.000000 cvr exch sub mul 1.000000 cvr exch sub 5 1 roll 4 \
+-1 roll 1 index 1.000000 mul 1.000000 cvr exch sub mul 1.000000 cvr exch sub \
+4 1 roll 3 -1 roll 1 index 0.000000 mul 1.000000 cvr exch sub mul \
+1.000000 cvr exch sub 3 1 roll pop pop }";
+        let tokens = parse_calc_tokens(code).unwrap();
+        let f = PdfFunction::Calculator {
+            domain: vec![[0.0, 1.0], [0.0, 1.0]],
+            range: vec![[0.0, 1.0], [0.0, 1.0], [0.0, 1.0], [0.0, 1.0]],
+            tokens,
+        };
+        // Build a 64x64x4 tint table the way build_nd_tint_image_cs does
+        let n_inputs = 2usize;
+        let n_out = 4usize;
+        let spd = 64u32;
+        let total: usize = (spd as usize).pow(n_inputs as u32);
+        let mut data = Vec::with_capacity(total * n_out);
+        let mut inputs = vec![0.0f64; n_inputs];
+        for idx in 0..total {
+            let mut rem = idx;
+            for d in (0..n_inputs).rev() {
+                inputs[d] = (rem % spd as usize) as f64 / (spd - 1) as f64;
+                rem /= spd as usize;
+            }
+            let out = f.evaluate(&inputs);
+            for j in 0..n_out {
+                data.push(out.get(j).copied().unwrap_or(0.0) as f32);
+            }
+        }
+        let table = TintLookupTable {
+            num_inputs: n_inputs as u32,
+            num_outputs: n_out as u32,
+            samples_per_dim: spd,
+            data,
+        };
+        let mut out = vec![0.0f32; 4];
+        for (b, g, label) in [
+            (0.0, 0.0, "white"),
+            (1.0, 0.0, "black only"),
+            (0.0, 1.0, "green only"),
+            (1.0, 1.0, "both full"),
+            (0.5, 0.5, "both half"),
+        ] {
+            table.lookup_nd(&[b as f32, g as f32], &mut out);
+            eprintln!("table {label} (b={b}, g={g}) -> CMYK={out:?}");
+        }
+        // Expected: green only at index ~1.0 second axis -> CMYK (0.5, 0, 1, 0)
+        table.lookup_nd(&[0.0, 1.0], &mut out);
+        assert!((out[0] - 0.5).abs() < 0.02, "green-only via table: C={out:?}");
+        assert!((out[2] - 1.0).abs() < 0.02, "green-only via table: Y={out:?}");
+    }
 }

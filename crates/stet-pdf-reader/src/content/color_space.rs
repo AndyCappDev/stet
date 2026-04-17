@@ -816,9 +816,9 @@ pub fn to_image_color_space(cs: &ResolvedColorSpace) -> ImageColorSpace {
             hival: *hival,
             lookup: lookup.clone(),
         },
-        ResolvedColorSpace::Separation { alt, tint_fn, .. } => {
+        ResolvedColorSpace::Separation { name, alt, tint_fn } => {
             if let Some(func) = tint_fn {
-                build_1d_tint_image_cs(func, alt)
+                build_1d_tint_image_cs(func, alt, name.clone())
             } else {
                 ImageColorSpace::DeviceGray
             }
@@ -829,7 +829,7 @@ pub fn to_image_color_space(cs: &ResolvedColorSpace) -> ImageColorSpace {
             tint_fn,
         } => {
             if let Some(func) = tint_fn {
-                build_nd_tint_image_cs(func, alt, names.len())
+                build_nd_tint_image_cs(func, alt, names.clone())
             } else {
                 ImageColorSpace::DeviceGray
             }
@@ -915,7 +915,11 @@ fn tint_alt_device_cs(alt: &ResolvedColorSpace) -> ImageColorSpace {
 }
 
 /// Build a 1D TintLookupTable for Separation image color space.
-fn build_1d_tint_image_cs(func: &PdfFunction, alt: &ResolvedColorSpace) -> ImageColorSpace {
+fn build_1d_tint_image_cs(
+    func: &PdfFunction,
+    alt: &ResolvedColorSpace,
+    name: Vec<u8>,
+) -> ImageColorSpace {
     let cie = is_cie_space(alt);
     let (alt_cs, n_out) = if cie {
         (ImageColorSpace::DeviceRGB, 3)
@@ -942,7 +946,7 @@ fn build_1d_tint_image_cs(func: &PdfFunction, alt: &ResolvedColorSpace) -> Image
         data,
     };
     ImageColorSpace::Separation {
-        name: Vec::new(),
+        name,
         alt_space: Box::new(alt_cs),
         tint_table: Arc::new(table),
     }
@@ -952,8 +956,9 @@ fn build_1d_tint_image_cs(func: &PdfFunction, alt: &ResolvedColorSpace) -> Image
 fn build_nd_tint_image_cs(
     func: &PdfFunction,
     alt: &ResolvedColorSpace,
-    n_inputs: usize,
+    names: Vec<Vec<u8>>,
 ) -> ImageColorSpace {
+    let n_inputs = names.len();
     let cie = is_cie_space(alt);
     let (alt_cs, n_out) = if cie {
         (ImageColorSpace::DeviceRGB, 3)
@@ -996,7 +1001,7 @@ fn build_nd_tint_image_cs(
         data,
     };
     ImageColorSpace::DeviceN {
-        names: Vec::new(),
+        names,
         alt_space: Box::new(alt_cs),
         tint_table: Arc::new(table),
     }

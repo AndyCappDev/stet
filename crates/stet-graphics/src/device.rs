@@ -464,6 +464,13 @@ pub struct AxialShadingParams {
     pub painted_channels: u8,
     /// Fill alpha from graphics state (0.0–1.0).
     pub alpha: f64,
+    /// True when this shading uses a Separation/DeviceN color space with a
+    /// CMYK alternate AND at least one non-process spot colorant.  The
+    /// renderer composites the per-pixel CMYK from the gradient stops with
+    /// the tracked CMYK buffer multiplicatively, preserving underlying CMYK
+    /// paints under the gradient (e.g. green checkmarks under a green→cyan
+    /// DeviceN strip survive).
+    pub spot_tint_blend: bool,
 }
 
 /// Parameters for radial gradient shading (Type 3).
@@ -485,6 +492,8 @@ pub struct RadialShadingParams {
     pub painted_channels: u8,
     /// Fill alpha from graphics state (0.0–1.0).
     pub alpha: f64,
+    /// See [`AxialShadingParams::spot_tint_blend`].
+    pub spot_tint_blend: bool,
 }
 
 /// A vertex in a shading triangle mesh.
