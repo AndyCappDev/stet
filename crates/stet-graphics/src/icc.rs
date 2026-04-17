@@ -8,6 +8,9 @@
 //! converts colors to sRGB. Also searches for system CMYK profiles to improve
 //! DeviceCMYK → RGB conversion beyond the naive PLRM formula.
 
+pub mod bpc;
+
+use bpc::{BpcParams, apply_bpc_f64, compute_bpc_params, detect_source_black_point};
 use moxcms::{
     CmsError, ColorProfile, DataColorSpace, Layout, RenderingIntent, TransformExecutor,
     TransformOptions,
@@ -119,6 +122,11 @@ struct CachedTransform {
     /// Pre-baked 4D CLUT for fast CMYK→sRGB image conversion.
     /// Only built for `n == 4` profiles; None otherwise.
     clut4: Option<Clut4>,
+    /// Cached Black Point Compensation parameters for this profile. Computed
+    /// when `n == 4` and `IccCache::bpc_mode` is enabled. Applied as a
+    /// post-correction on the moxcms output (sRGB → XYZ-D50 → BPC shift →
+    /// back to sRGB) so K-heavy CMYK colours map to true zero black.
+    bpc_params: Option<BpcParams>,
 }
 
 /// ICC color profile cache and transform manager.
@@ -150,6 +158,17 @@ pub struct IccCache {
 impl Default for IccCache {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Apply BPC to an sRGB triple if `params` is `Some`; otherwise return the
+/// triple unchanged. Centralised so every conversion entry point stays in
+/// sync.
+#[inline]
+fn bpc_post_correct(rgb: [f64; 3], params: Option<&BpcParams>) -> [f64; 3] {
+    match params {
+        Some(p) => apply_bpc_f64(rgb, p),
+        None => rgb,
     }
 }
 
@@ -362,6 +381,17 @@ impl IccCache {
             None
         };
 
+        // BPC parameters for CMYK profiles. Detect the source profile's
+        // "as-mapped" black point by sampling (1,1,1,1) through the 8-bit
+        // transform, then derive per-axis shift coefficients targeting
+        // sRGB's true zero black.
+        let bpc_params = if n == 4 && self.bpc_mode.is_enabled() {
+            detect_source_black_point(transform_8bit.as_ref())
+                .map(|sbp| compute_bpc_params(sbp, [0.0; 3], bpc::WP_D50))
+        } else {
+            None
+        };
+
         self.profiles.insert(hash, Arc::new(profile));
         self.transforms.insert(
             hash,
@@ -371,6 +401,7 @@ impl IccCache {
                 n,
                 is_lab,
                 clut4,
+                bpc_params,
             },
         );
 
@@ -394,6 +425,7 @@ impl IccCache {
                 n: 1,
                 is_lab: false,
                 clut4: None,
+                bpc_params: None,
             },
         );
         Some(hash)
@@ -443,6 +475,7 @@ impl IccCache {
             return None;
         }
 
+        let dst = bpc_post_correct(dst, cached.bpc_params.as_ref());
         let result = (
             dst[0].clamp(0.0, 1.0),
             dst[1].clamp(0.0, 1.0),
@@ -488,6 +521,7 @@ impl IccCache {
             return None;
         }
 
+        let dst = bpc_post_correct(dst, cached.bpc_params.as_ref());
         Some((
             dst[0].clamp(0.0, 1.0),
             dst[1].clamp(0.0, 1.0),
@@ -617,6 +651,7 @@ impl IccCache {
         if cached.transform_f64.transform(&src, &mut dst).is_err() {
             return None;
         }
+        let dst = bpc_post_correct(dst, cached.bpc_params.as_ref());
         Some((
             dst[0].clamp(0.0, 1.0),
             dst[1].clamp(0.0, 1.0),
@@ -705,6 +740,7 @@ impl IccCache {
         let mut dst = [0.0f64; 3];
         forward.transform_f64.transform(&cmyk, &mut dst).ok()?;
 
+        let dst = bpc_post_correct(dst, forward.bpc_params.as_ref());
         Some((
             dst[0].clamp(0.0, 1.0),
             dst[1].clamp(0.0, 1.0),
@@ -1076,6 +1112,59 @@ mod tests {
         });
         assert!(cache.default_cmyk_hash().is_some());
         assert_eq!(cache.bpc_mode(), BpcMode::On);
+    }
+
+    #[test]
+    fn test_bpc_darkens_pure_k_per_color() {
+        // Skip when no system CMYK profile is available.
+        let Some(cmyk_bytes) = find_system_cmyk_profile() else {
+            return;
+        };
+
+        // Without BPC: K=1 through default_cmyk.icc lands near RGB(55, 53, 53)
+        // — the profile's as-mapped black projected through moxcms's sRGB B2A.
+        let mut off = IccCache::new_with_options(IccCacheOptions {
+            bpc_mode: BpcMode::Off,
+            source_cmyk_profile: Some(cmyk_bytes.clone()),
+        });
+        let off_rgb = off.convert_cmyk(0.0, 0.0, 0.0, 1.0).unwrap();
+
+        // With BPC: K=1 must land significantly darker. Adobe Acrobat (lcms2)
+        // produces RGB(35, 31, 32). moxcms's sRGB B2A handles very-dark XYZ
+        // slightly differently from lcms2, so our post-correct lands a few
+        // levels brighter than Acrobat — the meaningful invariant is "K=1 is
+        // visibly darker than the no-BPC baseline by a substantial margin."
+        let mut on = IccCache::new_with_options(IccCacheOptions {
+            bpc_mode: BpcMode::On,
+            source_cmyk_profile: Some(cmyk_bytes),
+        });
+        let on_rgb = on.convert_cmyk(0.0, 0.0, 0.0, 1.0).unwrap();
+
+        assert!(
+            on_rgb.1 + 0.03 < off_rgb.1,
+            "BPC should darken K=1 by ≥0.03 (~8 RGB levels): off={off_rgb:?} on={on_rgb:?}"
+        );
+        // And the resulting RGB should be in the "deep gray" range — well
+        // under 0.25 (RGB ≤ ~64) on every channel.
+        assert!(
+            on_rgb.0 < 0.25 && on_rgb.1 < 0.25 && on_rgb.2 < 0.25,
+            "Expected deep gray after BPC, got {on_rgb:?}"
+        );
+    }
+
+    #[test]
+    fn test_bpc_white_anchored_per_color() {
+        // Skip when no system CMYK profile is available.
+        let Some(cmyk_bytes) = find_system_cmyk_profile() else {
+            return;
+        };
+        let mut cache = IccCache::new_with_options(IccCacheOptions {
+            bpc_mode: BpcMode::On,
+            source_cmyk_profile: Some(cmyk_bytes),
+        });
+        // CMYK white (no ink) must still render as sRGB white under BPC.
+        let (r, g, b) = cache.convert_cmyk(0.0, 0.0, 0.0, 0.0).unwrap();
+        assert!(r > 0.99 && g > 0.99 && b > 0.99, "({r}, {g}, {b})");
     }
 
     #[test]
