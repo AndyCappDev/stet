@@ -10,7 +10,9 @@
 
 pub mod bpc;
 
-use bpc::{BpcParams, apply_bpc_f64, compute_bpc_params, detect_source_black_point};
+use bpc::{
+    BpcParams, apply_bpc_f64, apply_bpc_rgb_u8, compute_bpc_params, detect_source_black_point,
+};
 use moxcms::{
     CmsError, ColorProfile, DataColorSpace, Layout, RenderingIntent, TransformExecutor,
     TransformOptions,
@@ -365,29 +367,32 @@ impl IccCache {
 
         let is_lab = profile.color_space == DataColorSpace::Lab;
 
-        // For 4-channel (CMYK) profiles, pre-bake a 17^4 CLUT for fast image
-        // conversion. The bake invokes the 8-bit transform once over a regular
-        // grid; subsequent image conversions interpolate the grid at ~30× the
-        // throughput of direct moxcms on LUT-based CMYK profiles.
-        let clut4 = if n == 4 {
-            let c = bake_clut4(transform_8bit.as_ref(), 17);
-            if std::env::var_os("STET_ICC_VERIFY").is_some()
-                && let Some(ref clut) = c
-            {
-                verify_clut4(clut, transform_8bit.as_ref());
-            }
-            c
+        // BPC parameters for CMYK profiles. Detect the source profile's
+        // "as-mapped" black point by sampling (1,1,1,1) through the 8-bit
+        // transform, then derive per-axis shift coefficients targeting
+        // sRGB's true zero black. Computed before the CLUT bake so the
+        // bake can fold BPC in once and the runtime CLUT lookup stays at
+        // zero per-pixel cost.
+        let bpc_params = if n == 4 && self.bpc_mode.is_enabled() {
+            detect_source_black_point(transform_8bit.as_ref())
+                .map(|sbp| compute_bpc_params(sbp, [0.0; 3], bpc::WP_D50))
         } else {
             None
         };
 
-        // BPC parameters for CMYK profiles. Detect the source profile's
-        // "as-mapped" black point by sampling (1,1,1,1) through the 8-bit
-        // transform, then derive per-axis shift coefficients targeting
-        // sRGB's true zero black.
-        let bpc_params = if n == 4 && self.bpc_mode.is_enabled() {
-            detect_source_black_point(transform_8bit.as_ref())
-                .map(|sbp| compute_bpc_params(sbp, [0.0; 3], bpc::WP_D50))
+        // For 4-channel (CMYK) profiles, pre-bake a 17^4 CLUT for fast image
+        // conversion. The bake invokes the 8-bit transform once over a regular
+        // grid; subsequent image conversions interpolate the grid at ~30× the
+        // throughput of direct moxcms on LUT-based CMYK profiles. BPC is baked
+        // in here when present, so per-pixel runtime cost stays at zero.
+        let clut4 = if n == 4 {
+            let c = bake_clut4(transform_8bit.as_ref(), 17, bpc_params.as_ref());
+            if std::env::var_os("STET_ICC_VERIFY").is_some()
+                && let Some(ref clut) = c
+            {
+                verify_clut4(clut, transform_8bit.as_ref(), bpc_params.as_ref());
+            }
+            c
         } else {
             None
         };
@@ -545,7 +550,9 @@ impl IccCache {
             return None;
         }
 
-        // Fast path: pre-baked 4D CLUT for CMYK profiles.
+        // Fast path: pre-baked 4D CLUT for CMYK profiles. BPC is already
+        // baked into the CLUT (when enabled), so no per-pixel correction
+        // is needed here.
         if let Some(clut) = &cached.clut4 {
             return Some(apply_clut4_cmyk_to_rgb(clut, &samples[..expected_len], pixel_count));
         }
@@ -554,7 +561,20 @@ impl IccCache {
         let mut dst = vec![0u8; pixel_count * 3];
 
         match cached.transform_8bit.transform(src, &mut dst) {
-            Ok(()) => Some(dst),
+            Ok(()) => {
+                // Apply BPC per pixel for non-CLUT bulk paths (CMYK profiles
+                // whose CLUT bake failed; today no other layouts populate
+                // bpc_params, so this is a no-op for RGB/Gray/Lab).
+                if let Some(p) = cached.bpc_params.as_ref() {
+                    for px in dst.chunks_exact_mut(3) {
+                        let out = apply_bpc_rgb_u8([px[0], px[1], px[2]], p);
+                        px[0] = out[0];
+                        px[1] = out[1];
+                        px[2] = out[2];
+                    }
+                }
+                Some(dst)
+            }
             Err(e) => {
                 eprintln!("[ICC] Image transform failed: {e}");
                 None
@@ -773,6 +793,7 @@ impl IccCache {
 fn bake_clut4(
     transform: &(dyn TransformExecutor<u8> + Send + Sync),
     grid_n: u8,
+    bpc_params: Option<&BpcParams>,
 ) -> Option<Clut4> {
     let n = grid_n as usize;
     if !(2..=33).contains(&n) {
@@ -801,6 +822,18 @@ fn bake_clut4(
     }
     let mut dst = vec![0u8; total * 3];
     transform.transform(&src, &mut dst).ok()?;
+
+    // Bake BPC into every grid point so runtime CLUT lookup stays at zero
+    // per-pixel cost.
+    if let Some(p) = bpc_params {
+        for px in dst.chunks_exact_mut(3) {
+            let out = apply_bpc_rgb_u8([px[0], px[1], px[2]], p);
+            px[0] = out[0];
+            px[1] = out[1];
+            px[2] = out[2];
+        }
+    }
+
     Some(Clut4 {
         grid_n,
         data: Arc::new(dst),
@@ -943,7 +976,11 @@ fn apply_clut4_cmyk_to_rgb(clut: &Clut4, src: &[u8], pixel_count: usize) -> Vec<
 /// pseudorandom sample of CMYK inputs. Reports median and max per-channel
 /// deviation (in u8 units) to stderr. Invoked only when `STET_ICC_VERIFY` is
 /// set in the environment.
-fn verify_clut4(clut: &Clut4, transform: &(dyn TransformExecutor<u8> + Send + Sync)) {
+fn verify_clut4(
+    clut: &Clut4,
+    transform: &(dyn TransformExecutor<u8> + Send + Sync),
+    bpc_params: Option<&BpcParams>,
+) {
     const N_SAMPLES: usize = 4096;
     let mut rng: u64 = 0xa8b3c4d5e6f70819;
     let mut next = || {
@@ -964,6 +1001,16 @@ fn verify_clut4(clut: &Clut4, transform: &(dyn TransformExecutor<u8> + Send + Sy
     if transform.transform(&cmyk, &mut reference).is_err() {
         eprintln!("[ICC VERIFY] reference transform failed");
         return;
+    }
+    // Mirror the CLUT bake's BPC step in the reference path so the
+    // comparison measures interpolation error, not whether BPC was applied.
+    if let Some(p) = bpc_params {
+        for px in reference.chunks_exact_mut(3) {
+            let out = apply_bpc_rgb_u8([px[0], px[1], px[2]], p);
+            px[0] = out[0];
+            px[1] = out[1];
+            px[2] = out[2];
+        }
     }
     let interp = apply_clut4_cmyk_to_rgb(clut, &cmyk, N_SAMPLES);
     // Per-pixel Euclidean distance in 8-bit sRGB (crude ΔE proxy).
@@ -1165,6 +1212,73 @@ mod tests {
         // CMYK white (no ink) must still render as sRGB white under BPC.
         let (r, g, b) = cache.convert_cmyk(0.0, 0.0, 0.0, 0.0).unwrap();
         assert!(r > 0.99 && g > 0.99 && b > 0.99, "({r}, {g}, {b})");
+    }
+
+    #[test]
+    fn test_bpc_image_clut_path_darkens_pure_k() {
+        // Skip when no system CMYK profile is available.
+        let Some(cmyk_bytes) = find_system_cmyk_profile() else {
+            return;
+        };
+
+        // Build a 1-pixel CMYK image at K=1 and route it through the CLUT.
+        // Without BPC vs with BPC, the K=1 pixel must shift darker, mirroring
+        // the per-color path behaviour.
+        let off = IccCache::new_with_options(IccCacheOptions {
+            bpc_mode: BpcMode::Off,
+            source_cmyk_profile: Some(cmyk_bytes.clone()),
+        });
+        let on = IccCache::new_with_options(IccCacheOptions {
+            bpc_mode: BpcMode::On,
+            source_cmyk_profile: Some(cmyk_bytes),
+        });
+        let off_hash = *off.default_cmyk_hash().unwrap();
+        let on_hash = *on.default_cmyk_hash().unwrap();
+
+        let pixel = [0u8, 0, 0, 255]; // C=0 M=0 Y=0 K=255
+        let off_rgb = off.convert_image_8bit(&off_hash, &pixel, 1).unwrap();
+        let on_rgb = on.convert_image_8bit(&on_hash, &pixel, 1).unwrap();
+
+        // BPC must darken the green channel by ≥8 RGB levels (mirrors the
+        // per-color path's anchor in test_bpc_darkens_pure_k_per_color).
+        assert!(
+            (on_rgb[1] as i32) + 8 < (off_rgb[1] as i32),
+            "CLUT BPC should darken K=1 image green by ≥8 levels: off={off_rgb:?} on={on_rgb:?}"
+        );
+        // And land in the deep-gray range.
+        assert!(
+            on_rgb[0] < 64 && on_rgb[1] < 64 && on_rgb[2] < 64,
+            "Expected deep gray after CLUT BPC, got {on_rgb:?}"
+        );
+    }
+
+    #[test]
+    fn test_bpc_off_image_matches_per_color_off() {
+        // With --bpc off, the bulk image path's K=1 output must match the
+        // per-color path's K=1 output (within u8 quantization). Anchors that
+        // disabling BPC reproduces stet's pre-fix behaviour bit-for-bit on
+        // the dominant CMYK image path.
+        let Some(cmyk_bytes) = find_system_cmyk_profile() else {
+            return;
+        };
+        let mut cache = IccCache::new_with_options(IccCacheOptions {
+            bpc_mode: BpcMode::Off,
+            source_cmyk_profile: Some(cmyk_bytes),
+        });
+        let hash = *cache.default_cmyk_hash().unwrap();
+
+        let pixel = [0u8, 0, 0, 255];
+        let img = cache.convert_image_8bit(&hash, &pixel, 1).unwrap();
+        let (r, g, b) = cache.convert_cmyk(0.0, 0.0, 0.0, 1.0).unwrap();
+        let pc = [
+            (r * 255.0).round() as i32,
+            (g * 255.0).round() as i32,
+            (b * 255.0).round() as i32,
+        ];
+        // CLUT interpolation drift can introduce ±1 vs the direct f64 path.
+        assert!((img[0] as i32 - pc[0]).abs() <= 2, "img={img:?} pc={pc:?}");
+        assert!((img[1] as i32 - pc[1]).abs() <= 2, "img={img:?} pc={pc:?}");
+        assert!((img[2] as i32 - pc[2]).abs() <= 2, "img={img:?} pc={pc:?}");
     }
 
     #[test]
