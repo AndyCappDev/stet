@@ -2717,6 +2717,20 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                             .ok()
                             .is_some_and(|d| d.len() > 4 && d[..4] == [0, 1, 0, 0])
                     })
+                })
+                // PDF/X-4 and others embed CIDFontType2 outlines via
+                // /FontFile3 with /Subtype /OpenType. The wrapped sfnt may
+                // be TrueType-flavored (glyf/loca) or CFF-flavored (OTTO);
+                // downstream OTTO/raw-CFF detection routes either correctly.
+                .or_else(|| {
+                    desc.get(b"FontFile3").filter(|obj| {
+                        resolver.stream_data_from_obj(obj).ok().is_some_and(|d| {
+                            d.len() > 4
+                                && (d[..4] == [0, 1, 0, 0]
+                                    || &d[..4] == b"true"
+                                    || &d[..4] == b"OTTO")
+                        })
+                    })
                 }) {
                 substituted = false;
                 let mut font_data = resolver.stream_data_from_obj(ff_ref)?;
