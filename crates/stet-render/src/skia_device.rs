@@ -3362,6 +3362,228 @@ fn blend_cmyk_nonseparable(cb: [f64; 4], cs: [f64; 4], mode: u8) -> [f64; 4] {
 }
 
 /// Render a transparency group into a pixmap.
+/// Device-space axis-aligned bbox of a path, computed from its segment
+/// endpoints and curve control points. Returned as (x0, y0, x1, y1) with
+/// x0 ≤ x1, y0 ≤ y1. Returns `None` for an empty path.
+fn ps_path_bbox(path: &PsPath) -> Option<(f64, f64, f64, f64)> {
+    let mut it = path.segments.iter().filter_map(|seg| match *seg {
+        PathSegment::MoveTo(x, y) | PathSegment::LineTo(x, y) => Some(vec![(x, y)]),
+        PathSegment::CurveTo { x1, y1, x2, y2, x3, y3 } => {
+            Some(vec![(x1, y1), (x2, y2), (x3, y3)])
+        }
+        PathSegment::ClosePath => None,
+    });
+    let first = it.next()?.into_iter().next()?;
+    let (mut x0, mut y0) = first;
+    let (mut x1, mut y1) = first;
+    for seg_points in std::iter::once(vec![first]).chain(it) {
+        for (x, y) in seg_points {
+            x0 = x0.min(x);
+            y0 = y0.min(y);
+            x1 = x1.max(x);
+            y1 = y1.max(y);
+        }
+    }
+    Some((x0, y0, x1, y1))
+}
+
+/// True when rectangle `inner` fits inside `outer` with `tolerance` slack
+/// (positive tolerance = inner may protrude by up to `tolerance` units).
+fn bbox_contains(outer: (f64, f64, f64, f64), inner: (f64, f64, f64, f64), tolerance: f64) -> bool {
+    inner.0 >= outer.0 - tolerance
+        && inner.1 >= outer.1 - tolerance
+        && inner.2 <= outer.2 + tolerance
+        && inner.3 <= outer.3 + tolerance
+}
+
+/// Detect the GWG "reference-under-test" authoring pattern: a parent Fill
+/// that will be fully covered by the first Fill of a following isolated
+/// transparency group. When detected, the parent's Fill can be skipped —
+/// its AA edges otherwise bleed into the dest under the group's partial-
+/// alpha source during composite-back, producing a visible outline where
+/// Acrobat shows none (see GWG 16.2 Opacity(0%) analysis in
+/// `project_icc_profile_stability.md`).
+///
+/// Returns indices in `elements` that should be skipped. Safety conditions:
+///   1. Parent fill is fully opaque, Normal blend.
+///   2. Next paint (ignoring Clip/InitClip) is an isolated, alpha-1,
+///      Normal-blend Group whose first paint is a Fill with matching
+///      path (within tolerance) and the same opacity/blend conditions.
+///   3. The group's declared bbox fully contains the parent path's bbox
+///      — i.e. the form's own BBox clip won't carve the fill away.
+///   4. Every Clip element between the parent fill and the group, and
+///      every Clip between the group's start and its first fill, has a
+///      bbox that also fully contains the parent path — so no additional
+///      clip can cut the group's first fill to a subset of the parent's
+///      extent.
+///   5. PDF's isolated transparency semantics guarantee that once the
+///      first fill establishes alpha=1 at the parent-path pixels, later
+///      Normal-blend paints can only add colour there; alpha can't
+///      decrease. So nothing in the group's tail can re-expose backdrop,
+///      even without auditing those elements explicitly.
+fn compute_obscured_fill_skips(elements: &DisplayList) -> Vec<usize> {
+    let mut skips = Vec::new();
+    let els = elements.elements();
+    for i in 0..els.len() {
+        let DisplayElement::Fill {
+            path: parent_path,
+            params: parent_params,
+        } = &els[i]
+        else {
+            continue;
+        };
+        if (parent_params.alpha - 1.0).abs() > 1e-6 || parent_params.blend_mode != 0 {
+            continue;
+        }
+        let Some(parent_bbox) = ps_path_bbox(parent_path) else {
+            continue;
+        };
+        // Walk forward past Clip/InitClip between parent fill and the
+        // group. Each such clip must contain the parent's extent; any
+        // other element type ends the scan.
+        let mut j = i + 1;
+        let mut clips_ok = true;
+        while j < els.len() {
+            match &els[j] {
+                DisplayElement::InitClip => {}
+                DisplayElement::Clip { path: clip_path, .. } => {
+                    match ps_path_bbox(clip_path) {
+                        Some(cb) if bbox_contains(cb, parent_bbox, 0.5) => {}
+                        _ => {
+                            clips_ok = false;
+                            break;
+                        }
+                    }
+                }
+                _ => break,
+            }
+            j += 1;
+        }
+        if !clips_ok {
+            continue;
+        }
+        let Some(DisplayElement::Group {
+            elements: group_elements,
+            params: group_params,
+        }) = els.get(j)
+        else {
+            continue;
+        };
+        if !group_params.isolated
+            || (group_params.alpha - 1.0).abs() > 1e-6
+            || group_params.blend_mode != 0
+        {
+            continue;
+        }
+        // The form's declared BBox acts as a clip inside the group; the
+        // parent's fill must fit inside it or the group's output will be
+        // carved away where we'd rely on coverage.
+        let group_bbox = (
+            group_params.bbox[0],
+            group_params.bbox[1],
+            group_params.bbox[2],
+            group_params.bbox[3],
+        );
+        if !bbox_contains(group_bbox, parent_bbox, 0.5) {
+            continue;
+        }
+        // Walk past Clip/InitClip inside the group to its first paint,
+        // requiring each clip to contain the parent's extent.
+        let inner_els = group_elements.elements();
+        let mut k = 0;
+        let mut inner_clips_ok = true;
+        while k < inner_els.len() {
+            match &inner_els[k] {
+                DisplayElement::InitClip => {}
+                DisplayElement::Clip { path: clip_path, .. } => {
+                    match ps_path_bbox(clip_path) {
+                        Some(cb) if bbox_contains(cb, parent_bbox, 0.5) => {}
+                        _ => {
+                            inner_clips_ok = false;
+                            break;
+                        }
+                    }
+                }
+                _ => break,
+            }
+            k += 1;
+        }
+        if !inner_clips_ok {
+            continue;
+        }
+        let Some(DisplayElement::Fill {
+            path: group_path,
+            params: group_fill_params,
+        }) = inner_els.get(k)
+        else {
+            continue;
+        };
+        if (group_fill_params.alpha - 1.0).abs() > 1e-6 || group_fill_params.blend_mode != 0 {
+            continue;
+        }
+        if paths_approximately_equal(parent_path, group_path, 0.5) {
+            skips.push(i);
+        }
+    }
+    skips
+}
+
+/// True when two device-space paths have the same segment sequence and
+/// matching endpoints within `tolerance` device pixels per coordinate.
+/// Used by `compute_obscured_fill_skips` to recognise PDF-authored patterns
+/// where the same logical X path is emitted twice with sub-unit rounding
+/// differences (GWG test suite authoring style from InDesign CS6).
+fn paths_approximately_equal(a: &PsPath, b: &PsPath, tolerance: f64) -> bool {
+    if a.segments.len() != b.segments.len() {
+        return false;
+    }
+    for (sa, sb) in a.segments.iter().zip(b.segments.iter()) {
+        let close_pair = |(x1, y1): (f64, f64), (x2, y2): (f64, f64)| -> bool {
+            (x1 - x2).abs() <= tolerance && (y1 - y2).abs() <= tolerance
+        };
+        match (sa, sb) {
+            (PathSegment::MoveTo(x1, y1), PathSegment::MoveTo(x2, y2)) => {
+                if !close_pair((*x1, *y1), (*x2, *y2)) {
+                    return false;
+                }
+            }
+            (PathSegment::LineTo(x1, y1), PathSegment::LineTo(x2, y2)) => {
+                if !close_pair((*x1, *y1), (*x2, *y2)) {
+                    return false;
+                }
+            }
+            (
+                PathSegment::CurveTo {
+                    x1: ax1,
+                    y1: ay1,
+                    x2: ax2,
+                    y2: ay2,
+                    x3: ax3,
+                    y3: ay3,
+                },
+                PathSegment::CurveTo {
+                    x1: bx1,
+                    y1: by1,
+                    x2: bx2,
+                    y2: by2,
+                    x3: bx3,
+                    y3: by3,
+                },
+            ) => {
+                if !close_pair((*ax1, *ay1), (*bx1, *by1))
+                    || !close_pair((*ax2, *ay2), (*bx2, *by2))
+                    || !close_pair((*ax3, *ay3), (*bx3, *by3))
+                {
+                    return false;
+                }
+            }
+            (PathSegment::ClosePath, PathSegment::ClosePath) => {}
+            _ => return false,
+        }
+    }
+    true
+}
+
 ///
 /// Creates an offscreen pixmap, renders the group's child elements into it,
 /// then composites back onto the parent with the group's blend mode and alpha.
@@ -3579,7 +3801,11 @@ fn render_group(
         alpha_extraction_pass: ctx.alpha_extraction_pass,
     };
 
+    let skip_indices = compute_obscured_fill_skips(elements);
     for (idx, elem) in elements.elements().iter().enumerate() {
+        if skip_indices.contains(&idx) {
+            continue;
+        }
         let elem_ctx = RenderContext {
             elem_idx: idx,
             ..group_ctx
@@ -12367,5 +12593,220 @@ mod tests {
         let crop_x = ((220.0_f32 - 100.0) * 2.0).floor() as i32;
         let page_x_for_x_zero = vp_x_pixels + crop_x;
         assert_eq!(page_x_for_x_zero, 440, "viewport scale-2: page-x at x=0");
+    }
+
+    // --- obscured-fill skip (§ GWG reference-under-test pattern) ---
+
+    fn x_path() -> PsPath {
+        let mut p = PsPath::new();
+        p.segments.push(PathSegment::MoveTo(10.0, 10.0));
+        p.segments.push(PathSegment::LineTo(20.0, 20.0));
+        p.segments.push(PathSegment::LineTo(30.0, 10.0));
+        p.segments.push(PathSegment::LineTo(20.0, 0.0));
+        p.segments.push(PathSegment::ClosePath);
+        p
+    }
+
+    fn x_path_perturbed() -> PsPath {
+        // Same shape, sub-unit rounding — stand-in for GWG's 0.001-unit
+        // coordinate drift between duplicated path emissions.
+        let mut p = PsPath::new();
+        p.segments.push(PathSegment::MoveTo(10.001, 10.0));
+        p.segments.push(PathSegment::LineTo(20.0, 19.999));
+        p.segments.push(PathSegment::LineTo(30.002, 10.001));
+        p.segments.push(PathSegment::LineTo(19.999, 0.0));
+        p.segments.push(PathSegment::ClosePath);
+        p
+    }
+
+    fn fill(path: PsPath, alpha: f64, blend: u8) -> DisplayElement {
+        DisplayElement::Fill {
+            path,
+            params: FillParams {
+                color: DeviceColor::from_rgb(0.0, 0.0, 0.0),
+                fill_rule: FillRule::NonZeroWinding,
+                ctm: Matrix::identity(),
+                is_text_glyph: false,
+                overprint: false,
+                overprint_mode: 0,
+                opm_paired: false,
+                painted_channels: 0,
+                is_device_cmyk: false,
+                spot_color: None,
+                rendering_intent: 0,
+                transfer: TransferState::default(),
+                halftone: HalftoneState::default(),
+                bg_ucr: BgUcrState::default(),
+                alpha,
+                blend_mode: blend,
+            },
+        }
+    }
+
+    fn rect_path(x0: f64, y0: f64, x1: f64, y1: f64) -> PsPath {
+        let mut p = PsPath::new();
+        p.segments.push(PathSegment::MoveTo(x0, y0));
+        p.segments.push(PathSegment::LineTo(x1, y0));
+        p.segments.push(PathSegment::LineTo(x1, y1));
+        p.segments.push(PathSegment::LineTo(x0, y1));
+        p.segments.push(PathSegment::ClosePath);
+        p
+    }
+
+    fn clip_elem(path: PsPath) -> DisplayElement {
+        DisplayElement::Clip {
+            path,
+            params: ClipParams {
+                fill_rule: FillRule::NonZeroWinding,
+                ctm: Matrix::identity(),
+                stroke_params: None,
+            },
+        }
+    }
+
+    fn group_elem(
+        inner: Vec<DisplayElement>,
+        bbox: [f64; 4],
+        isolated: bool,
+        alpha: f64,
+        blend: u8,
+    ) -> DisplayElement {
+        let mut dl = DisplayList::new();
+        for e in inner {
+            dl.push(e);
+        }
+        DisplayElement::Group {
+            elements: dl,
+            params: stet_graphics::display_list::GroupParams {
+                bbox,
+                isolated,
+                knockout: false,
+                blend_mode: blend,
+                alpha,
+                color_space: stet_graphics::display_list::GroupColorSpace::Inherited,
+            },
+        }
+    }
+
+    fn dl(elements: Vec<DisplayElement>) -> DisplayList {
+        let mut d = DisplayList::new();
+        for e in elements {
+            d.push(e);
+        }
+        d
+    }
+
+    #[test]
+    fn obscured_skip_fires_on_matching_fill_plus_iso_group() {
+        // Classic GWG pattern: parent Fill, then a clip, then an isolated
+        // alpha-1 Group whose first paint is a matching Fill.
+        let parent = fill(x_path(), 1.0, 0);
+        let inner = vec![fill(x_path_perturbed(), 1.0, 0)];
+        let grp = group_elem(inner, [0.0, -5.0, 40.0, 30.0], true, 1.0, 0);
+        let d = dl(vec![parent, clip_elem(rect_path(0.0, -5.0, 40.0, 30.0)), grp]);
+        assert_eq!(compute_obscured_fill_skips(&d), vec![0]);
+    }
+
+    #[test]
+    fn obscured_skip_does_not_fire_on_non_isolated_group() {
+        let parent = fill(x_path(), 1.0, 0);
+        let inner = vec![fill(x_path(), 1.0, 0)];
+        let grp = group_elem(inner, [0.0, -5.0, 40.0, 30.0], false, 1.0, 0);
+        let d = dl(vec![parent, grp]);
+        assert!(compute_obscured_fill_skips(&d).is_empty());
+    }
+
+    #[test]
+    fn obscured_skip_does_not_fire_on_partial_alpha_group() {
+        let parent = fill(x_path(), 1.0, 0);
+        let inner = vec![fill(x_path(), 1.0, 0)];
+        let grp = group_elem(inner, [0.0, -5.0, 40.0, 30.0], true, 0.5, 0);
+        let d = dl(vec![parent, grp]);
+        assert!(compute_obscured_fill_skips(&d).is_empty());
+    }
+
+    #[test]
+    fn obscured_skip_does_not_fire_on_non_normal_blend() {
+        let parent = fill(x_path(), 1.0, 0);
+        let inner = vec![fill(x_path(), 1.0, 0)];
+        // blend_mode = 10 (Difference) on the group — composite-back
+        // semantics differ from Normal, so skipping parent is unsafe.
+        let grp = group_elem(inner, [0.0, -5.0, 40.0, 30.0], true, 1.0, 10);
+        let d = dl(vec![parent, grp]);
+        assert!(compute_obscured_fill_skips(&d).is_empty());
+    }
+
+    #[test]
+    fn obscured_skip_does_not_fire_when_paths_differ() {
+        let parent = fill(rect_path(0.0, 0.0, 5.0, 5.0), 1.0, 0);
+        let inner = vec![fill(x_path(), 1.0, 0)];
+        let grp = group_elem(inner, [0.0, -5.0, 40.0, 30.0], true, 1.0, 0);
+        let d = dl(vec![parent, grp]);
+        assert!(compute_obscured_fill_skips(&d).is_empty());
+    }
+
+    #[test]
+    fn obscured_skip_does_not_fire_when_group_bbox_too_small() {
+        // Parent fills a rectangle larger than the group's declared
+        // bbox — the form's BBox would clip the inner fill to a subset
+        // of the parent's extent, so the parent cannot be dropped.
+        let big = rect_path(0.0, 0.0, 100.0, 100.0);
+        let parent = fill(big.clone(), 1.0, 0);
+        let inner = vec![fill(big, 1.0, 0)];
+        // Group bbox only covers [0..10, 0..10], much smaller than parent.
+        let grp = group_elem(inner, [0.0, 0.0, 10.0, 10.0], true, 1.0, 0);
+        let d = dl(vec![parent, grp]);
+        assert!(compute_obscured_fill_skips(&d).is_empty());
+    }
+
+    #[test]
+    fn obscured_skip_does_not_fire_when_intervening_clip_too_small() {
+        // A clip between the parent fill and the group is narrower than
+        // the parent's extent — dropping the parent's fill would reveal
+        // backdrop where the group couldn't paint.
+        let parent = fill(x_path(), 1.0, 0);
+        let narrow_clip = clip_elem(rect_path(12.0, 5.0, 18.0, 15.0));
+        let inner = vec![fill(x_path(), 1.0, 0)];
+        let grp = group_elem(inner, [0.0, -5.0, 40.0, 30.0], true, 1.0, 0);
+        let d = dl(vec![parent, narrow_clip, grp]);
+        assert!(compute_obscured_fill_skips(&d).is_empty());
+    }
+
+    #[test]
+    fn obscured_skip_does_not_fire_when_inner_clip_too_small() {
+        // Clip *inside* the group is narrower than the parent's extent.
+        let parent = fill(x_path(), 1.0, 0);
+        let inner = vec![
+            clip_elem(rect_path(12.0, 5.0, 18.0, 15.0)),
+            fill(x_path(), 1.0, 0),
+        ];
+        let grp = group_elem(inner, [0.0, -5.0, 40.0, 30.0], true, 1.0, 0);
+        let d = dl(vec![parent, grp]);
+        assert!(compute_obscured_fill_skips(&d).is_empty());
+    }
+
+    #[test]
+    fn obscured_skip_fires_when_inner_clip_is_wider_than_parent_path() {
+        // A clip inside the group that's larger than the parent's fill
+        // doesn't threaten coverage; still safe to skip the parent.
+        let parent = fill(x_path(), 1.0, 0);
+        let inner = vec![
+            clip_elem(rect_path(-10.0, -10.0, 40.0, 30.0)),
+            fill(x_path_perturbed(), 1.0, 0),
+        ];
+        let grp = group_elem(inner, [0.0, -5.0, 40.0, 30.0], true, 1.0, 0);
+        let d = dl(vec![parent, grp]);
+        assert_eq!(compute_obscured_fill_skips(&d), vec![0]);
+    }
+
+    #[test]
+    fn obscured_skip_does_not_fire_on_partial_alpha_parent() {
+        // A parent fill at alpha < 1 might blend with backdrop; dropping
+        // it changes the visual even when the group overpaints.
+        let parent = fill(x_path(), 0.5, 0);
+        let inner = vec![fill(x_path(), 1.0, 0)];
+        let grp = group_elem(inner, [0.0, -5.0, 40.0, 30.0], true, 1.0, 0);
+        let d = dl(vec![parent, grp]);
+        assert!(compute_obscured_fill_skips(&d).is_empty());
     }
 }
