@@ -377,7 +377,7 @@ pub fn op_flushpage(ctx: &mut Context) -> Result<(), PsError> {
             .as_ref()
             .map(|d| d.page_size())
             .unwrap_or((ctx.page_width, ctx.page_height));
-        let _ = sender.send((ctx.display_list.clone(), dpi, w, h));
+        let _ = sender.send((ctx.display_list.clone(), dpi, w, h, None));
         return Ok(());
     }
 

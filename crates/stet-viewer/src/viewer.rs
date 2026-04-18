@@ -341,10 +341,16 @@ impl ViewerApp {
             match receiver.try_recv() {
                 Ok(ViewerMsg::Page(page)) => {
                     let prepared = stet_render::prepare_display_list(&page.display_list);
-                    let icc_cache = stet_render::build_icc_cache_for_list(
-                        &page.display_list,
-                        self.system_cmyk_bytes.as_ref(),
-                    );
+                    // Prefer the per-page CMYK bytes (e.g. a PDF's OutputIntent)
+                    // so render-time overprint math uses the same profile that
+                    // baked the display list's RGB. Falls back to the CLI-level
+                    // system default for PS input and PDFs without OI.
+                    let cmyk_bytes = page
+                        .cmyk_bytes
+                        .as_ref()
+                        .or(self.system_cmyk_bytes.as_ref());
+                    let icc_cache =
+                        stet_render::build_icc_cache_for_list(&page.display_list, cmyk_bytes);
                     let image_cache = ImageCache::build(&page.display_list, Some(&icc_cache));
                     self.pages.push(StoredPage {
                         display_list: Arc::new(page.display_list),

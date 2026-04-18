@@ -180,7 +180,15 @@ pub struct Context {
     /// When `Some`, each showpage sends a clone of the display list through this channel.
     /// Used by the CLI viewer for incremental display list delivery.
     /// Tuple: (DisplayList, dpi, page_width, page_height).
-    pub display_list_sender: Option<std::sync::mpsc::Sender<(DisplayList, f64, u32, u32)>>,
+    pub display_list_sender: Option<
+        std::sync::mpsc::Sender<(
+            DisplayList,
+            f64,
+            u32,
+            u32,
+            Option<std::sync::Arc<Vec<u8>>>,
+        )>,
+    >,
     pub page_width: u32,
     pub page_height: u32,
     pub output_path: Option<String>,
@@ -725,7 +733,9 @@ impl Context {
                 .as_ref()
                 .map(|d| d.page_size())
                 .unwrap_or((self.page_width, self.page_height));
-            let _ = sender.send((self.display_list.clone(), dpi, w, h));
+            // PS interpreter output: no PDF-specific CMYK profile in play, so
+            // the viewer uses its CLI-level default.
+            let _ = sender.send((self.display_list.clone(), dpi, w, h, None));
         }
         std::mem::take(&mut self.display_list)
     }

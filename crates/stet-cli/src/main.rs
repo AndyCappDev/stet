@@ -453,7 +453,7 @@ fn run_viewer_mode(
     let dl_receiver = interp_end.dl_receiver;
     std::thread::spawn(move || {
         let mut page_num = 1u32;
-        while let Ok((dl, dpi, w, h)) = dl_receiver.recv() {
+        while let Ok((dl, dpi, w, h, cmyk_bytes)) = dl_receiver.recv() {
             // Sentinel: zero dimensions = control message
             if w == 0 && h == 0 {
                 if dpi < 0.0 {
@@ -472,6 +472,7 @@ fn run_viewer_mode(
                 height: h,
                 dpi,
                 page_num,
+                cmyk_bytes,
             }));
             page_num += 1;
         }
@@ -500,7 +501,7 @@ fn run_viewer_mode(
 
             // REPL done — signal JobDone, then accept dropped files
             if let Some(ref sender) = ctx.display_list_sender {
-                let _ = sender.send((stet_graphics::display_list::DisplayList::new(), -1.0, 0, 0));
+                let _ = sender.send((stet_graphics::display_list::DisplayList::new(), -1.0, 0, 0, None));
             }
         } else {
             // Process initial CLI files: PDF files go direct, PS/EPS through interpreter
@@ -511,7 +512,7 @@ fn run_viewer_mode(
             for (i, path) in pdf_files.iter().enumerate() {
                 if i > 0 || !ps_files.is_empty() {
                     if let Some(ref sender) = ctx.display_list_sender {
-                        let _ = sender.send((stet_graphics::display_list::DisplayList::new(), 0.0, 0, 0));
+                        let _ = sender.send((stet_graphics::display_list::DisplayList::new(), 0.0, 0, 0, None));
                     }
                 }
                 if let Some(ref sender) = ctx.display_list_sender {
@@ -526,7 +527,7 @@ fn run_viewer_mode(
             if !ps_files.is_empty() {
                 if !pdf_files.is_empty() {
                     if let Some(ref sender) = ctx.display_list_sender {
-                        let _ = sender.send((stet_graphics::display_list::DisplayList::new(), 0.0, 0, 0));
+                        let _ = sender.send((stet_graphics::display_list::DisplayList::new(), 0.0, 0, 0, None));
                     }
                 }
                 run_file_jobs_viewer(&mut ctx, dpi_override, &ps_files, advance_rx);
@@ -534,7 +535,7 @@ fn run_viewer_mode(
 
             // CLI files done — send final JobDone
             if let Some(ref sender) = ctx.display_list_sender {
-                let _ = sender.send((stet_graphics::display_list::DisplayList::new(), -1.0, 0, 0));
+                let _ = sender.send((stet_graphics::display_list::DisplayList::new(), -1.0, 0, 0, None));
             }
         }
 
@@ -552,7 +553,7 @@ fn run_viewer_mode(
             };
 
             // Signal new job so viewer clears old pages
-            let _ = sender.send((stet_graphics::display_list::DisplayList::new(), 0.0, 0, 0));
+            let _ = sender.send((stet_graphics::display_list::DisplayList::new(), 0.0, 0, 0, None));
 
             if is_pdf_file(&path) {
                 render_dropped_pdf(
@@ -566,7 +567,7 @@ fn run_viewer_mode(
             }
 
             // Signal job done
-            let _ = sender.send((stet_graphics::display_list::DisplayList::new(), -1.0, 0, 0));
+            let _ = sender.send((stet_graphics::display_list::DisplayList::new(), -1.0, 0, 0, None));
         }
         // file_drop_sender dropped (viewer closed) → loop ends → ctx drops
     });
@@ -856,7 +857,7 @@ fn run_file_jobs(
         if job_idx > 0
             && let Some(ref sender) = ctx.display_list_sender
         {
-            let _ = sender.send((DisplayList::new(), 0.0, 0, 0));
+            let _ = sender.send((DisplayList::new(), 0.0, 0, 0, None));
         }
 
         let job_start = std::time::Instant::now();
@@ -905,7 +906,7 @@ fn run_file_jobs(
             && job_idx + 1 < num_jobs
         {
             if let Some(ref sender) = ctx.display_list_sender {
-                let _ = sender.send((DisplayList::new(), -1.0, 0, 0));
+                let _ = sender.send((DisplayList::new(), -1.0, 0, 0, None));
             }
             // Block until viewer signals advance (or disconnects)
             let _ = adv_rx.recv();
@@ -1355,6 +1356,9 @@ fn render_dropped_pdf(
     if use_output_intent && doc.apply_output_intent_as_default_cmyk() {
         eprintln!("[ICC] Using PDF OutputIntent profile for {}", path);
     }
+    // Snapshot the effective CMYK bytes (post-OI-apply) so the viewer's
+    // render-time ICC cache matches the one used to bake the display list.
+    let effective_cmyk_bytes = doc.icc_cache().system_cmyk_bytes().cloned();
 
     let page_count = doc.page_count();
     eprintln!("PDF: {} ({} pages)", path, page_count);
@@ -1367,7 +1371,13 @@ fn render_dropped_pdf(
                 let scale = dpi / 72.0;
                 let pixel_w = (w * scale).round() as u32;
                 let pixel_h = (h * scale).round() as u32;
-                let _ = dl_sender.send((display_list, dpi, pixel_w, pixel_h));
+                let _ = dl_sender.send((
+                    display_list,
+                    dpi,
+                    pixel_w,
+                    pixel_h,
+                    effective_cmyk_bytes.clone(),
+                ));
             }
             Err(e) => {
                 eprintln!("  Page {}: render error: {}", page + 1, e);
