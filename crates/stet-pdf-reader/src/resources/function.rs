@@ -214,7 +214,7 @@ impl PdfFunction {
     }
 
     /// Collect input values where this function has discontinuities (stitching bounds).
-    /// Returns values in the function's input domain, NOT normalized to [0,1].
+    /// Returns values in the function's input domain, NOT normalized to `[0,1]`.
     pub fn discontinuity_positions(&self) -> Vec<f64> {
         let mut positions = Vec::new();
         self.collect_discontinuities(&mut positions);

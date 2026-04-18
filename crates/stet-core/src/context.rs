@@ -181,13 +181,7 @@ pub struct Context {
     /// Used by the CLI viewer for incremental display list delivery.
     /// Tuple: (DisplayList, dpi, page_width, page_height).
     pub display_list_sender: Option<
-        std::sync::mpsc::Sender<(
-            DisplayList,
-            f64,
-            u32,
-            u32,
-            Option<std::sync::Arc<Vec<u8>>>,
-        )>,
+        std::sync::mpsc::Sender<(DisplayList, f64, u32, u32, Option<std::sync::Arc<Vec<u8>>>)>,
     >,
     pub page_width: u32,
     pub page_height: u32,

@@ -808,7 +808,7 @@ mod tests {
 
     #[test]
     fn test_reals() {
-        assert_eq!(tokenize_all(b"3.14"), vec![Token::Real(3.14)]);
+        assert_eq!(tokenize_all(b"2.5"), vec![Token::Real(2.5)]);
         assert_eq!(tokenize_all(b"-0.5"), vec![Token::Real(-0.5)]);
         assert_eq!(tokenize_all(b"1e10"), vec![Token::Real(1e10)]);
         assert_eq!(tokenize_all(b"1.5E-3"), vec![Token::Real(1.5e-3)]);

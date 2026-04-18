@@ -100,9 +100,7 @@ pub trait OutputDevice {
                     let visible = *default_visible;
                     for elem in elements.elements() {
                         match elem {
-                            DisplayElement::Clip { path, params } => {
-                                self.clip_path(path, params)
-                            }
+                            DisplayElement::Clip { path, params } => self.clip_path(path, params),
                             DisplayElement::InitClip => self.init_clip(),
                             _ if !visible => {}
                             DisplayElement::Fill { path, params } => self.fill_path(path, params),

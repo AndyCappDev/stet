@@ -190,11 +190,7 @@ pub fn get_glyf_data(font_data: &[u8], gid: u16) -> Option<Vec<u8>> {
     } else {
         let num_glyphs = get_num_glyphs(font_data) as usize;
         let entry_size = if use_long { 4 } else { 2 };
-        let mut best = if has_locx {
-            font_data.len()
-        } else {
-            _glyf_len
-        };
+        let mut best = if has_locx { font_data.len() } else { _glyf_len };
         for i in 0..=num_glyphs {
             let pos = loca_off + i * entry_size;
             let entry = if use_long {

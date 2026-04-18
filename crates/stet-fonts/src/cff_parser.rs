@@ -250,8 +250,8 @@ pub fn parse_cff(data: &[u8]) -> Result<Vec<CffFont>, String> {
                             && fm_vals.len() == 6
                         {
                             fd_entry.font_matrix = Some([
-                                fm_vals[0], fm_vals[1], fm_vals[2],
-                                fm_vals[3], fm_vals[4], fm_vals[5],
+                                fm_vals[0], fm_vals[1], fm_vals[2], fm_vals[3], fm_vals[4],
+                                fm_vals[5],
                             ]);
                         }
 

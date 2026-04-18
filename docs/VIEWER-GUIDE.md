@@ -133,7 +133,21 @@ higher effective DPI.
 | Option | Effect |
 |--------|--------|
 | `--dpi <DPI>` | Set the reference DPI (affects initial zoom level) |
-| `--no-icc` | Disable ICC color management |
+| `--threads <N>` | Override the rayon worker count (default: 75% of cores in viewer mode) |
+| `--pages <RANGE>` | Only render specified pages (e.g. `1-5`, `3`, `1-3,7,10-12`) |
 | `--no-aa` | Disable anti-aliasing |
-| `--overprint` | Enable overprint simulation |
-| `--pages <RANGE>` | Only render specified pages |
+
+### Color management
+
+| Option | Effect |
+|--------|--------|
+| `--no-icc` | Disable ICC colour management entirely; CMYK falls back to the PLRM formulas |
+| `--cmyk-profile <PATH>` | Pin the source CMYK ICC profile used for CMYK→sRGB conversion |
+| `--output-profile <PATH>` | Generic output profile; also used as the source CMYK profile when `--cmyk-profile` is not given |
+| `--no-output-intent` | Ignore the PDF's `/OutputIntents[].DestOutputProfile` (default: honoured) |
+| `--use-output-intent` | Kept for backward compatibility; OutputIntent is honoured by default |
+| `--bpc <on\|off\|auto>` | Black-point compensation for CMYK→sRGB (default: `auto`, currently equivalent to `on`; `off` skips BPC) |
+
+Precedence for the source CMYK profile is `--cmyk-profile` > `--output-profile` >
+PDF OutputIntent (unless `--no-output-intent`) > system default. `--no-icc`
+conflicts with `--cmyk-profile` and `--bpc`.

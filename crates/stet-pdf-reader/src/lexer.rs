@@ -566,7 +566,7 @@ mod tests {
 
     #[test]
     fn reals() {
-        assert_eq!(tokenize(b"3.14"), vec![Token::Real(3.14)]);
+        assert_eq!(tokenize(b"2.5"), vec![Token::Real(2.5)]);
         assert_eq!(tokenize(b".5"), vec![Token::Real(0.5)]);
         assert_eq!(tokenize(b"-2.0"), vec![Token::Real(-2.0)]);
     }

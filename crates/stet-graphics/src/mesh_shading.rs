@@ -689,8 +689,7 @@ pub fn parse_type7_patches(
                     }
                 }
                 let mut colors = vec![inherited_colors[0].clone(), inherited_colors[1].clone()];
-                let mut raw_colors_vec =
-                    vec![inherited_raw[0].clone(), inherited_raw[1].clone()];
+                let mut raw_colors_vec = vec![inherited_raw[0].clone(), inherited_raw[1].clone()];
                 if ok {
                     for _ in 0..2 {
                         if let Some((c, rc)) = read_color(&mut reader) {
@@ -1046,17 +1045,32 @@ pub fn build_type7_from_array(values: &[f64], n_comps: usize) -> Vec<ShadingPatc
                 // 3=bottom[15,14,13,12], 4=left[12,8,4,0].
                 let (inherited_pts, inherited_colors, inherited_raw) = match flag {
                     1 => (
-                        vec![prev.points[3], prev.points[7], prev.points[11], prev.points[15]],
+                        vec![
+                            prev.points[3],
+                            prev.points[7],
+                            prev.points[11],
+                            prev.points[15],
+                        ],
                         [prev.colors[1].clone(), prev.colors[2].clone()],
                         [prev.raw_colors[1].clone(), prev.raw_colors[2].clone()],
                     ),
                     2 => (
-                        vec![prev.points[12], prev.points[8], prev.points[4], prev.points[0]],
+                        vec![
+                            prev.points[12],
+                            prev.points[8],
+                            prev.points[4],
+                            prev.points[0],
+                        ],
                         [prev.colors[3].clone(), prev.colors[0].clone()],
                         [prev.raw_colors[3].clone(), prev.raw_colors[0].clone()],
                     ),
                     3 => (
-                        vec![prev.points[15], prev.points[14], prev.points[13], prev.points[12]],
+                        vec![
+                            prev.points[15],
+                            prev.points[14],
+                            prev.points[13],
+                            prev.points[12],
+                        ],
                         [prev.colors[2].clone(), prev.colors[3].clone()],
                         [prev.raw_colors[2].clone(), prev.raw_colors[3].clone()],
                     ),
@@ -1072,8 +1086,7 @@ pub fn build_type7_from_array(values: &[f64], n_comps: usize) -> Vec<ShadingPatc
                 }
                 pos += 24;
                 let mut colors = vec![inherited_colors[0].clone(), inherited_colors[1].clone()];
-                let mut raw_colors_vec =
-                    vec![inherited_raw[0].clone(), inherited_raw[1].clone()];
+                let mut raw_colors_vec = vec![inherited_raw[0].clone(), inherited_raw[1].clone()];
                 for _ in 0..2 {
                     let comps: Vec<f64> = values[pos..pos + n_comps].to_vec();
                     let (c, rc) = components_to_color(&comps);

@@ -292,7 +292,10 @@ fn parse_encoding(header: &[u8]) -> Vec<String> {
             }
             let idx: usize = match rest[..idx_end].parse() {
                 Ok(n) if n < 256 => n,
-                _ => { pos = start; continue; }
+                _ => {
+                    pos = start;
+                    continue;
+                }
             };
             // Skip whitespace, expect /name
             let after_idx = rest[idx_end..].trim_start();

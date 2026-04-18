@@ -323,11 +323,7 @@ mod tests {
     #[test]
     fn bradford_round_trip() {
         // D65 white in XYZ
-        for xyz in [
-            [0.95047, 1.0, 1.08883],
-            [0.5, 0.5, 0.5],
-            [0.1, 0.05, 0.2],
-        ] {
+        for xyz in [[0.95047, 1.0, 1.08883], [0.5, 0.5, 0.5], [0.1, 0.05, 0.2]] {
             let d50 = matmul3(&D65_TO_D50, xyz);
             let back = matmul3(&D50_TO_D65, d50);
             assert!(rgb_approx_eq(xyz, back, 1e-6), "xyz={xyz:?} back={back:?}");

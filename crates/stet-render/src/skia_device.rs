@@ -339,7 +339,6 @@ fn is_degenerate_fill(path: &PsPath) -> bool {
 /// Convert a tiny-skia Path back to a PsPath.
 /// Used for overprint stroke handling where we convert a stroked outline to a fill.
 
-
 /// Convert PostScript FillRule to tiny-skia FillRule.
 fn to_fill_rule(rule: &FillRule) -> SkiaFillRule {
     match rule {
@@ -2278,12 +2277,10 @@ fn translate_clip_rect(rect: &ClipRect, y_start: u32, band_h: u32) -> ClipRect {
 /// so the image covers at least 1 pixel in each direction.
 fn enforce_min_image_size(transform: Transform, img_w: u32, img_h: u32) -> Transform {
     // Effective device-space dimensions
-    let eff_w = ((transform.sx * img_w as f32).powi(2)
-        + (transform.ky * img_w as f32).powi(2))
-    .sqrt();
-    let eff_h = ((transform.kx * img_h as f32).powi(2)
-        + (transform.sy * img_h as f32).powi(2))
-    .sqrt();
+    let eff_w =
+        ((transform.sx * img_w as f32).powi(2) + (transform.ky * img_w as f32).powi(2)).sqrt();
+    let eff_h =
+        ((transform.kx * img_h as f32).powi(2) + (transform.sy * img_h as f32).powi(2)).sqrt();
 
     if eff_w >= 1.0 && eff_h >= 1.0 {
         return transform;
@@ -2613,21 +2610,17 @@ fn render_element(
             // suite's GWG 1.0 swatches f/a use Separation /Magenta + glyphs),
             // correctness wins over the slight AA difference vs tiny-skia.
             let painted = params.painted_channels;
-            let subset_channels =
-                painted != 0 && painted != stet_graphics::device::CMYK_ALL;
-            let opm1_cmyk =
-                params.is_device_cmyk && params.overprint_mode == 1;
-            let custom_spot = painted == 0
-                && !params.is_device_cmyk
-                && params.color.native_cmyk.is_some();
+            let subset_channels = painted != 0 && painted != stet_graphics::device::CMYK_ALL;
+            let opm1_cmyk = params.is_device_cmyk && params.overprint_mode == 1;
+            let custom_spot =
+                painted == 0 && !params.is_device_cmyk && params.color.native_cmyk.is_some();
             // A "near-K-only" DeviceCMYK paint under OPM 0 — e.g. `0 0 0 0.5 k`
             // — matches the Black-component plate of a DeviceN [Black, spot]
             // backdrop exactly. Routing it through the per-pixel path lets the
             // no-op-delta skip preserve the spot-derived colour instead of
             // wiping it with plain grey (GWG 3.0 "50% K over spot").
-            let is_k_only_cmyk = params.is_device_cmyk
-                && params.overprint_mode == 0
-                && is_k_only_src(&params.color);
+            let is_k_only_cmyk =
+                params.is_device_cmyk && params.overprint_mode == 0 && is_k_only_src(&params.color);
             let needs_overprint = params.overprint
                 && band_state.cmyk_buffer.is_some()
                 && params.blend_mode == 0
@@ -2635,8 +2628,7 @@ fn render_element(
 
             if needs_overprint {
                 let mut cmyk_buf = band_state.cmyk_buffer.take().unwrap();
-                let (mut op_bg, mut op_touched) =
-                    band_state.take_op_buffers(ctx.out_w, ctx.out_h);
+                let (mut op_bg, mut op_touched) = band_state.take_op_buffers(ctx.out_w, ctx.out_h);
                 let spot_mask = band_state.take_spot_mask(ctx.out_w, ctx.out_h);
                 render_overprint_fill(
                     pixmap,
@@ -2695,8 +2687,7 @@ fn render_element(
                 // Update CMYK tracking buffer for non-overprint fills
                 if band_state.cmyk_buffer.is_some() {
                     let mut cmyk_buf = band_state.cmyk_buffer.take().unwrap();
-                    let mut spot_mask =
-                        band_state.take_spot_mask(ctx.out_w, ctx.out_h);
+                    let mut spot_mask = band_state.take_spot_mask(ctx.out_w, ctx.out_h);
                     update_cmyk_buffer_for_fill(
                         &mut cmyk_buf,
                         &mut spot_mask,
@@ -2764,15 +2755,12 @@ fn render_element(
             // process plates. GWG 1.0 swatch a/b/f/g need this for the magenta
             // X stroke that overlays the same path the fill already drew.
             let painted = params.painted_channels;
-            let subset_channels =
-                painted != 0 && painted != stet_graphics::device::CMYK_ALL;
+            let subset_channels = painted != 0 && painted != stet_graphics::device::CMYK_ALL;
             let opm1_cmyk = params.is_device_cmyk && params.overprint_mode == 1;
-            let custom_spot = painted == 0
-                && !params.is_device_cmyk
-                && params.color.native_cmyk.is_some();
-            let is_k_only_cmyk = params.is_device_cmyk
-                && params.overprint_mode == 0
-                && is_k_only_src(&params.color);
+            let custom_spot =
+                painted == 0 && !params.is_device_cmyk && params.color.native_cmyk.is_some();
+            let is_k_only_cmyk =
+                params.is_device_cmyk && params.overprint_mode == 0 && is_k_only_src(&params.color);
             let needs_overprint = params.overprint
                 && band_state.cmyk_buffer.is_some()
                 && params.blend_mode == 0
@@ -2797,8 +2785,7 @@ fn render_element(
                 // fill path uses, so the post-overprint result lands in the
                 // pixmap (not the raw source colour).
                 let mut cmyk_buf = band_state.cmyk_buffer.take().unwrap();
-                let (mut op_bg, mut op_touched) =
-                    band_state.take_op_buffers(ctx.out_w, ctx.out_h);
+                let (mut op_bg, mut op_touched) = band_state.take_op_buffers(ctx.out_w, ctx.out_h);
                 let spot_mask = band_state.take_spot_mask(ctx.out_w, ctx.out_h);
                 render_overprint_stroke(
                     pixmap,
@@ -2820,18 +2807,13 @@ fn render_element(
                 band_state.restore_op_buffers(op_bg, op_touched);
                 band_state.restore_spot_mask(spot_mask);
             } else {
-                let paint = to_paint_alpha(
-                    &params.color,
-                    params.alpha,
-                    params.blend_mode,
-                    ctx.no_aa,
-                );
+                let paint =
+                    to_paint_alpha(&params.color, params.alpha, params.blend_mode, ctx.no_aa);
                 pixmap.stroke_path(&skia_path, &paint, &stroke, transform, mask_ref);
 
                 if band_state.cmyk_buffer.is_some() {
                     let mut cmyk_buf = band_state.cmyk_buffer.take().unwrap();
-                    let mut spot_mask =
-                        band_state.take_spot_mask(ctx.out_w, ctx.out_h);
+                    let mut spot_mask = band_state.take_spot_mask(ctx.out_w, ctx.out_h);
                     update_cmyk_buffer_for_stroke(
                         &mut cmyk_buf,
                         &mut spot_mask,
@@ -2882,8 +2864,7 @@ fn render_element(
 
             if needs_overprint {
                 let mut cmyk_buf = band_state.cmyk_buffer.take().unwrap();
-                let (mut op_bg, mut op_touched) =
-                    band_state.take_op_buffers(ctx.out_w, ctx.out_h);
+                let (mut op_bg, mut op_touched) = band_state.take_op_buffers(ctx.out_w, ctx.out_h);
                 render_overprint_image(
                     pixmap,
                     &mut cmyk_buf,
@@ -2975,19 +2956,21 @@ fn render_element(
             } else {
                 // Use pre-converted RGBA from image cache when available
                 let owned_rgba;
-                let rgba_data: &[u8] =
-                    if let Some(cached) = ctx.image_cache.and_then(|c| c.get(ctx.elem_idx)) {
-                        cached
-                    } else {
-                        owned_rgba = {
-                            let mut rgba = samples_to_rgba(sample_data, params, ctx.icc, ctx.opm_zero_transparent);
-                            if params.mask_color.is_some() {
-                                apply_mask_color_rgba(&mut rgba, sample_data, params);
-                            }
-                            rgba
-                        };
-                        &owned_rgba
+                let rgba_data: &[u8] = if let Some(cached) =
+                    ctx.image_cache.and_then(|c| c.get(ctx.elem_idx))
+                {
+                    cached
+                } else {
+                    owned_rgba = {
+                        let mut rgba =
+                            samples_to_rgba(sample_data, params, ctx.icc, ctx.opm_zero_transparent);
+                        if params.mask_color.is_some() {
+                            apply_mask_color_rgba(&mut rgba, sample_data, params);
+                        }
+                        rgba
                     };
+                    &owned_rgba
+                };
                 let expected = (iw * ih * 4) as usize;
                 if rgba_data.len() < expected {
                     return;
@@ -3002,7 +2985,8 @@ fn render_element(
                 // images need proper area averaging when shrinking — "no interpolation"
                 // means don't smooth when *upscaling*, but downscaling without averaging
                 // produces aliased garbage.
-                let prescaled = prescale_image(rgba_data, iw, ih, raw_transform, params.interpolate);
+                let prescaled =
+                    prescale_image(rgba_data, iw, ih, raw_transform, params.interpolate);
                 let (img_data, img_w, img_h, transform) = match &prescaled {
                     Some((data, w, h, t)) => (data.as_slice(), *w, *h, *t),
                     None => (rgba_data, iw, ih, raw_transform),
@@ -3159,9 +3143,7 @@ fn render_element(
             params,
             mask_cache,
         } => {
-            render_soft_masked(
-                pixmap, band_state, mask, content, params, mask_cache, ctx,
-            );
+            render_soft_masked(pixmap, band_state, mask, content, params, mask_cache, ctx);
         }
         DisplayElement::Text { .. } => {} // PDF-only, ignored by rasterizer
         DisplayElement::OcgGroup {
@@ -3177,10 +3159,7 @@ fn render_element(
             let visible = *default_visible;
             for (idx, elem) in elements.elements().iter().enumerate() {
                 if !visible
-                    && !matches!(
-                        elem,
-                        DisplayElement::Clip { .. } | DisplayElement::InitClip
-                    )
+                    && !matches!(elem, DisplayElement::Clip { .. } | DisplayElement::InitClip)
                 {
                     continue;
                 }
@@ -3235,8 +3214,8 @@ fn blend_cmyk_separable_channel(cb: f64, cs: f64, mode: u8) -> f64 {
     let cbi = 1.0 - cb;
     let csi = 1.0 - cs;
     let result_inv = match mode {
-        1 => cbi * csi,                                    // Multiply
-        2 => cbi + csi - cbi * csi,                        // Screen
+        1 => cbi * csi,             // Multiply
+        2 => cbi + csi - cbi * csi, // Screen
         3 => {
             // Overlay(b, s) = HardLight(s, b)
             if cbi <= 0.5 {
@@ -3245,8 +3224,8 @@ fn blend_cmyk_separable_channel(cb: f64, cs: f64, mode: u8) -> f64 {
                 1.0 - 2.0 * (1.0 - cbi) * (1.0 - csi)
             }
         }
-        4 => cbi.min(csi),                                 // Darken
-        5 => cbi.max(csi),                                 // Lighten
+        4 => cbi.min(csi), // Darken
+        5 => cbi.max(csi), // Lighten
         6 => {
             // ColorDodge
             if csi >= 1.0 {
@@ -3284,9 +3263,9 @@ fn blend_cmyk_separable_channel(cb: f64, cs: f64, mode: u8) -> f64 {
                 cbi + (2.0 * csi - 1.0) * (d - cbi)
             }
         }
-        10 => (cbi - csi).abs(),                           // Difference
-        11 => cbi + csi - 2.0 * cbi * csi,                 // Exclusion
-        _ => csi,                                          // Normal/fallback
+        10 => (cbi - csi).abs(),           // Difference
+        11 => cbi + csi - 2.0 * cbi * csi, // Exclusion
+        _ => csi,                          // Normal/fallback
     };
     1.0 - result_inv.clamp(0.0, 1.0)
 }
@@ -3326,7 +3305,11 @@ fn blend_cmyk_nonseparable(cb: [f64; 4], cs: [f64; 4], mode: u8) -> [f64; 4] {
     fn set_sat(c: [f64; 3], s: f64) -> [f64; 3] {
         // Index components by rank: min, mid, max.
         let mut idx = [0usize, 1, 2];
-        idx.sort_by(|a, b| c[*a].partial_cmp(&c[*b]).unwrap_or(std::cmp::Ordering::Equal));
+        idx.sort_by(|a, b| {
+            c[*a]
+                .partial_cmp(&c[*b])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         let (i_min, i_mid, i_max) = (idx[0], idx[1], idx[2]);
         let mut out = c;
         if c[i_max] > c[i_min] {
@@ -3368,9 +3351,14 @@ fn blend_cmyk_nonseparable(cb: [f64; 4], cs: [f64; 4], mode: u8) -> [f64; 4] {
 fn ps_path_bbox(path: &PsPath) -> Option<(f64, f64, f64, f64)> {
     let mut it = path.segments.iter().filter_map(|seg| match *seg {
         PathSegment::MoveTo(x, y) | PathSegment::LineTo(x, y) => Some(vec![(x, y)]),
-        PathSegment::CurveTo { x1, y1, x2, y2, x3, y3 } => {
-            Some(vec![(x1, y1), (x2, y2), (x3, y3)])
-        }
+        PathSegment::CurveTo {
+            x1,
+            y1,
+            x2,
+            y2,
+            x3,
+            y3,
+        } => Some(vec![(x1, y1), (x2, y2), (x3, y3)]),
         PathSegment::ClosePath => None,
     });
     let first = it.next()?.into_iter().next()?;
@@ -3446,15 +3434,15 @@ fn compute_obscured_fill_skips(elements: &DisplayList) -> Vec<usize> {
         while j < els.len() {
             match &els[j] {
                 DisplayElement::InitClip => {}
-                DisplayElement::Clip { path: clip_path, .. } => {
-                    match ps_path_bbox(clip_path) {
-                        Some(cb) if bbox_contains(cb, parent_bbox, 0.5) => {}
-                        _ => {
-                            clips_ok = false;
-                            break;
-                        }
+                DisplayElement::Clip {
+                    path: clip_path, ..
+                } => match ps_path_bbox(clip_path) {
+                    Some(cb) if bbox_contains(cb, parent_bbox, 0.5) => {}
+                    _ => {
+                        clips_ok = false;
+                        break;
                     }
-                }
+                },
                 _ => break,
             }
             j += 1;
@@ -3495,15 +3483,15 @@ fn compute_obscured_fill_skips(elements: &DisplayList) -> Vec<usize> {
         while k < inner_els.len() {
             match &inner_els[k] {
                 DisplayElement::InitClip => {}
-                DisplayElement::Clip { path: clip_path, .. } => {
-                    match ps_path_bbox(clip_path) {
-                        Some(cb) if bbox_contains(cb, parent_bbox, 0.5) => {}
-                        _ => {
-                            inner_clips_ok = false;
-                            break;
-                        }
+                DisplayElement::Clip {
+                    path: clip_path, ..
+                } => match ps_path_bbox(clip_path) {
+                    Some(cb) if bbox_contains(cb, parent_bbox, 0.5) => {}
+                    _ => {
+                        inner_clips_ok = false;
+                        break;
                     }
-                }
+                },
                 _ => break,
             }
             k += 1;
@@ -3723,12 +3711,12 @@ fn render_group(
     // need a two-pass render: once against the backdrop (for correct
     // internal blending) and once against transparent (to extract the
     // group's shape/alpha for the proper source-contribution formula).
-    let needs_alpha_extraction =
-        !params.isolated && params.blend_mode != 0 && !plan_cmyk_compose
+    let needs_alpha_extraction = !params.isolated
+        && params.blend_mode != 0
+        && !plan_cmyk_compose
         && !ctx.alpha_extraction_pass;
     let needs_backdrop_preload =
-        !params.isolated
-        && (params.blend_mode == 0 || plan_cmyk_compose || needs_alpha_extraction);
+        !params.isolated && (params.blend_mode == 0 || plan_cmyk_compose || needs_alpha_extraction);
     let backdrop = if needs_backdrop_preload {
         let data = if crop.is_some() {
             copy_backdrop_crop(pixmap, crop_x, crop_y, eff_w, eff_h)
@@ -3766,8 +3754,11 @@ fn render_group(
     // the group actually modified. Without a separate snapshot we'd have to
     // diff against the parent CMYK buffer, which would lose any in-place
     // updates to the parent across the group's lifetime.
-    let backdrop_cmyk: Option<Vec<f32>> =
-        if !params.isolated { group_cmyk.clone() } else { None };
+    let backdrop_cmyk: Option<Vec<f32>> = if !params.isolated {
+        group_cmyk.clone()
+    } else {
+        None
+    };
 
     let mut group_band = BandState {
         clip_region: None,
@@ -3897,9 +3888,7 @@ fn render_group(
         // change than this fix attempts.
         let inner_cmyk = group_band.cmyk_buffer.as_deref();
         let pre_cmyk = backdrop_cmyk.as_deref();
-        if plan_cmyk_compose
-            && let (Some(inner), Some(pre)) = (inner_cmyk, pre_cmyk)
-        {
+        if plan_cmyk_compose && let (Some(inner), Some(pre)) = (inner_cmyk, pre_cmyk) {
             composite_non_isolated_cmyk(
                 pixmap,
                 band_state.cmyk_buffer.as_deref_mut(),
@@ -3927,7 +3916,13 @@ fn render_group(
             );
         } else {
             composite_non_isolated_group_cropped(
-                pixmap, &offscreen, backdrop, effective_params, mask_ref, crop_x, crop_y,
+                pixmap,
+                &offscreen,
+                backdrop,
+                effective_params,
+                mask_ref,
+                crop_x,
+                crop_y,
             );
         }
     } else {
@@ -4121,11 +4116,7 @@ fn composite_non_isolated_cmyk(
 
             // Apply the group's blend mode in CMYK.
             let (rc, rm, ry, rk) = if is_nonseparable {
-                let r = blend_cmyk_nonseparable(
-                    [bc, bm, by_, bk],
-                    [sc, sm, sy_, sk],
-                    blend_mode,
-                );
+                let r = blend_cmyk_nonseparable([bc, bm, by_, bk], [sc, sm, sy_, sk], blend_mode);
                 (r[0], r[1], r[2], r[3])
             } else {
                 (
@@ -4237,11 +4228,8 @@ fn composite_non_isolated_cmyk(
                 let (rc, rm, ry, rk) = if backdrop_transparent {
                     (sc, sm, sy_, sk)
                 } else if is_nonseparable {
-                    let r = blend_cmyk_nonseparable(
-                        [bc, bm, by_, bk],
-                        [sc, sm, sy_, sk],
-                        blend_mode,
-                    );
+                    let r =
+                        blend_cmyk_nonseparable([bc, bm, by_, bk], [sc, sm, sy_, sk], blend_mode);
                     (r[0], r[1], r[2], r[3])
                 } else {
                     (
@@ -4448,11 +4436,7 @@ fn render_knockout_group(
                 // Use the coverage offscreen's alpha as a knockout mask: the
                 // painter's contribution from pass 1 source-overs onto
                 // accumulated weighted by the coverage alpha.
-                replace_with_coverage_mask(
-                    accumulated.data_mut(),
-                    offscreen.data(),
-                    cov.data(),
-                );
+                replace_with_coverage_mask(accumulated.data_mut(), offscreen.data(), cov.data());
 
                 if let (Some(p1_cmyk), Some(acc_cmyk)) = (&pass1_cmyk, &mut accumulated_cmyk) {
                     replace_cmyk_with_coverage_mask(acc_cmyk, p1_cmyk, cov.data());
@@ -4472,20 +4456,11 @@ fn render_knockout_group(
                 if let (Some(elem_cmyk), Some(acc_cmyk)) =
                     (&ko_band.cmyk_buffer, &mut accumulated_cmyk)
                 {
-                    replace_changed_cmyk(
-                        acc_cmyk,
-                        elem_cmyk,
-                        offscreen.data(),
-                        &initial_backdrop,
-                    );
+                    replace_changed_cmyk(acc_cmyk, elem_cmyk, offscreen.data(), &initial_backdrop);
                 }
                 ko_band.cmyk_buffer = None;
 
-                replace_changed_pixels(
-                    accumulated.data_mut(),
-                    offscreen.data(),
-                    &initial_backdrop,
-                );
+                replace_changed_pixels(accumulated.data_mut(), offscreen.data(), &initial_backdrop);
             }
         }
     }
@@ -4797,8 +4772,7 @@ fn render_soft_masked(
             None => true,
             Some(None) => false, // memoized "no mask"
             Some(Some(r)) => {
-                (r.scale_x - ctx.scale_x).abs() > 1e-4
-                    || (r.scale_y - ctx.scale_y).abs() > 1e-4
+                (r.scale_x - ctx.scale_x).abs() > 1e-4 || (r.scale_y - ctx.scale_y).abs() > 1e-4
             }
         };
         if needs_build {
@@ -4966,11 +4940,7 @@ fn render_soft_masked(
                 let page_x = vp_x_pixels + crop_x + x as i32;
                 let mx = page_x - raster.origin_x;
                 let my = page_y - raster.origin_y;
-                if mx >= 0
-                    && (mx as u32) < raster.width
-                    && my >= 0
-                    && (my as u32) < raster.height
-                {
+                if mx >= 0 && (mx as u32) < raster.width && my >= 0 && (my as u32) < raster.height {
                     raster.data[my as usize * raster.width as usize + mx as usize] as i32
                 } else {
                     fallback_mask
@@ -5276,7 +5246,7 @@ fn rasterize_mask(
         opm_zero_transparent: false,
         knockout_painter_pass: KnockoutPainterPass::None,
         parent_group_isolated: false,
-                alpha_extraction_pass: false,
+        alpha_extraction_pass: false,
     };
 
     // 5. Mask rendering doesn't participate in CMYK overprint compositing.
@@ -5352,12 +5322,18 @@ fn transform_element_ctm(elem: &DisplayElement, pm: &Matrix) -> DisplayElement {
         DisplayElement::Fill { path, params } => {
             let mut p = params.clone();
             p.ctm = pm.concat(&p.ctm);
-            DisplayElement::Fill { path: path.clone(), params: p }
+            DisplayElement::Fill {
+                path: path.clone(),
+                params: p,
+            }
         }
         DisplayElement::Stroke { path, params } => {
             let mut p = params.clone();
             p.ctm = pm.concat(&p.ctm);
-            DisplayElement::Stroke { path: path.clone(), params: p }
+            DisplayElement::Stroke {
+                path: path.clone(),
+                params: p,
+            }
         }
         DisplayElement::Clip { path, params } => {
             let mut p = params.clone();
@@ -5365,12 +5341,21 @@ fn transform_element_ctm(elem: &DisplayElement, pm: &Matrix) -> DisplayElement {
             if let Some(ref mut sp) = p.stroke_params {
                 sp.ctm = pm.concat(&sp.ctm);
             }
-            DisplayElement::Clip { path: path.clone(), params: p }
+            DisplayElement::Clip {
+                path: path.clone(),
+                params: p,
+            }
         }
-        DisplayElement::Image { sample_data, params } => {
+        DisplayElement::Image {
+            sample_data,
+            params,
+        } => {
             let mut p = params.clone();
             p.ctm = pm.concat(&p.ctm);
-            DisplayElement::Image { sample_data: sample_data.clone(), params: p }
+            DisplayElement::Image {
+                sample_data: sample_data.clone(),
+                params: p,
+            }
         }
         DisplayElement::MeshShading { params } => {
             let mut p = params.clone();
@@ -5407,12 +5392,26 @@ fn transform_element_ctm(elem: &DisplayElement, pm: &Matrix) -> DisplayElement {
             p.bbox = [
                 corners.iter().map(|c| c.0).fold(f64::INFINITY, f64::min),
                 corners.iter().map(|c| c.1).fold(f64::INFINITY, f64::min),
-                corners.iter().map(|c| c.0).fold(f64::NEG_INFINITY, f64::max),
-                corners.iter().map(|c| c.1).fold(f64::NEG_INFINITY, f64::max),
+                corners
+                    .iter()
+                    .map(|c| c.0)
+                    .fold(f64::NEG_INFINITY, f64::max),
+                corners
+                    .iter()
+                    .map(|c| c.1)
+                    .fold(f64::NEG_INFINITY, f64::max),
             ];
-            DisplayElement::Group { elements: t, params: p }
+            DisplayElement::Group {
+                elements: t,
+                params: p,
+            }
         }
-        DisplayElement::SoftMasked { mask, content, params, .. } => {
+        DisplayElement::SoftMasked {
+            mask,
+            content,
+            params,
+            ..
+        } => {
             let mut t_mask = DisplayList::new();
             for child in mask.elements() {
                 t_mask.push(transform_element_ctm(child, pm));
@@ -5431,8 +5430,14 @@ fn transform_element_ctm(elem: &DisplayElement, pm: &Matrix) -> DisplayElement {
             p.bbox = [
                 corners.iter().map(|c| c.0).fold(f64::INFINITY, f64::min),
                 corners.iter().map(|c| c.1).fold(f64::INFINITY, f64::min),
-                corners.iter().map(|c| c.0).fold(f64::NEG_INFINITY, f64::max),
-                corners.iter().map(|c| c.1).fold(f64::NEG_INFINITY, f64::max),
+                corners
+                    .iter()
+                    .map(|c| c.0)
+                    .fold(f64::NEG_INFINITY, f64::max),
+                corners
+                    .iter()
+                    .map(|c| c.1)
+                    .fold(f64::NEG_INFINITY, f64::max),
             ];
             // parent_clip_bbox was captured in the original (pattern)
             // coordinate system. Transform it through pm to match the
@@ -5448,10 +5453,22 @@ fn transform_element_ctm(elem: &DisplayElement, pm: &Matrix) -> DisplayElement {
                     pm.transform_point(pcb[2], pcb[3]),
                 ];
                 p.parent_clip_bbox = Some([
-                    pcb_corners.iter().map(|c| c.0).fold(f64::INFINITY, f64::min),
-                    pcb_corners.iter().map(|c| c.1).fold(f64::INFINITY, f64::min),
-                    pcb_corners.iter().map(|c| c.0).fold(f64::NEG_INFINITY, f64::max),
-                    pcb_corners.iter().map(|c| c.1).fold(f64::NEG_INFINITY, f64::max),
+                    pcb_corners
+                        .iter()
+                        .map(|c| c.0)
+                        .fold(f64::INFINITY, f64::min),
+                    pcb_corners
+                        .iter()
+                        .map(|c| c.1)
+                        .fold(f64::INFINITY, f64::min),
+                    pcb_corners
+                        .iter()
+                        .map(|c| c.0)
+                        .fold(f64::NEG_INFINITY, f64::max),
+                    pcb_corners
+                        .iter()
+                        .map(|c| c.1)
+                        .fold(f64::NEG_INFINITY, f64::max),
                 ]);
             }
             // The transformed element's coordinate system is different
@@ -5507,11 +5524,25 @@ fn transform_path_by_matrix(path: &PsPath, m: &Matrix) -> PsPath {
                 let (nx, ny) = m.transform_point(x, y);
                 PathSegment::LineTo(nx, ny)
             }
-            PathSegment::CurveTo { x1, y1, x2, y2, x3, y3 } => {
+            PathSegment::CurveTo {
+                x1,
+                y1,
+                x2,
+                y2,
+                x3,
+                y3,
+            } => {
                 let (nx1, ny1) = m.transform_point(x1, y1);
                 let (nx2, ny2) = m.transform_point(x2, y2);
                 let (nx3, ny3) = m.transform_point(x3, y3);
-                PathSegment::CurveTo { x1: nx1, y1: ny1, x2: nx2, y2: ny2, x3: nx3, y3: ny3 }
+                PathSegment::CurveTo {
+                    x1: nx1,
+                    y1: ny1,
+                    x2: nx2,
+                    y2: ny2,
+                    x3: nx3,
+                    y3: ny3,
+                }
             }
             PathSegment::ClosePath => PathSegment::ClosePath,
         });
@@ -5630,8 +5661,11 @@ fn render_pattern_fill(
             max_y = max_y.max(*cy);
         }
         // Expand by half stroke width in device space
-        let half_w = sp.line_width * 0.5
-            * (ctm.a * ctm.a + ctm.b * ctm.b).sqrt().max((ctm.c * ctm.c + ctm.d * ctm.d).sqrt());
+        let half_w = sp.line_width
+            * 0.5
+            * (ctm.a * ctm.a + ctm.b * ctm.b)
+                .sqrt()
+                .max((ctm.c * ctm.c + ctm.d * ctm.d).sqrt());
         min_x -= half_w;
         min_y -= half_w;
         max_x += half_w;
@@ -5825,7 +5859,12 @@ fn render_pattern_fill(
                         quality: stet_tiny_skia::FilterQuality::Nearest,
                     };
                     tile_buf.draw_pixmap(
-                        px, py, one_tile.as_ref(), &paint, Transform::identity(), None,
+                        px,
+                        py,
+                        one_tile.as_ref(),
+                        &paint,
+                        Transform::identity(),
+                        None,
                     );
                 }
             }
@@ -5847,18 +5886,24 @@ fn render_pattern_fill(
             img_transform: Transform,
         }
         let tile_elements = params.tile.elements();
-        let mut preprocessed: Vec<Option<PreprocessedImage>> = Vec::with_capacity(tile_elements.len());
+        let mut preprocessed: Vec<Option<PreprocessedImage>> =
+            Vec::with_capacity(tile_elements.len());
         // Tile transform scale components (constant across all tiles)
         let tt_sx = (pm.a * sx_f) as f32;
         let tt_sy = (pm.d * sy_f) as f32;
         let tt_kx = (pm.c * sx_f) as f32;
         let tt_ky = (pm.b * sy_f) as f32;
         for elem in tile_elements {
-            if let DisplayElement::Image { sample_data, params: ip } = elem {
+            if let DisplayElement::Image {
+                sample_data,
+                params: ip,
+            } = elem
+            {
                 let iw = ip.width;
                 let ih = ip.height;
                 if iw > 0 && ih > 0 {
-                    let mut rgba = samples_to_rgba(sample_data, ip, ctx.icc, ctx.opm_zero_transparent);
+                    let mut rgba =
+                        samples_to_rgba(sample_data, ip, ctx.icc, ctx.opm_zero_transparent);
                     if ip.mask_color.is_some() {
                         apply_mask_color_rgba(&mut rgba, sample_data, ip);
                     }
@@ -5869,7 +5914,9 @@ fn render_pattern_fill(
                             let t = to_transform(&combined_mat);
                             // Check effective scale: t maps image pixels → pattern space,
                             // tile_transform maps pattern space → device space.
-                            let test = t.post_concat(Transform::from_row(tt_sx, tt_ky, tt_kx, tt_sy, 0.0, 0.0));
+                            let test = t.post_concat(Transform::from_row(
+                                tt_sx, tt_ky, tt_kx, tt_sy, 0.0, 0.0,
+                            ));
                             let eff_sx = (test.sx * test.sx + test.ky * test.ky).sqrt();
                             let eff_sy = (test.kx * test.kx + test.sy * test.sy).sqrt();
                             if eff_sx < 0.99 || eff_sy < 0.99 {
@@ -5881,14 +5928,21 @@ fn render_pattern_fill(
                                 let scaled = bilinear_prescale(&rgba, iw, ih, tw, th);
                                 // Adjust transform: pre-multiply a scale that maps new
                                 // pixel coords back to original pixel coords
-                                let adj = Transform::from_scale(iw as f32 / tw as f32, ih as f32 / th as f32);
+                                let adj = Transform::from_scale(
+                                    iw as f32 / tw as f32,
+                                    ih as f32 / th as f32,
+                                );
                                 preprocessed.push(Some(PreprocessedImage {
-                                    rgba: scaled, width: tw, height: th,
+                                    rgba: scaled,
+                                    width: tw,
+                                    height: th,
                                     img_transform: t.pre_concat(adj),
                                 }));
                             } else {
                                 preprocessed.push(Some(PreprocessedImage {
-                                    rgba, width: iw, height: ih,
+                                    rgba,
+                                    width: iw,
+                                    height: ih,
                                     img_transform: t,
                                 }));
                             }
@@ -5931,7 +5985,12 @@ fn render_pattern_fill(
                     bp.close();
                     bp.finish().and_then(|sp| {
                         let mut m = Mask::new(ctx.out_w, ctx.out_h)?;
-                        m.fill_path(&sp, stet_tiny_skia::FillRule::Winding, false, tile_transform);
+                        m.fill_path(
+                            &sp,
+                            stet_tiny_skia::FillRule::Winding,
+                            false,
+                            tile_transform,
+                        );
                         Some(m)
                     })
                 };
@@ -5944,14 +6003,8 @@ fn render_pattern_fill(
                             if let Some(sp) = build_skia_path(path) {
                                 let t = to_transform(&cp.ctm);
                                 let combined = t.post_concat(tile_transform);
-                                let mut mask =
-                                    Mask::new(ctx.out_w, ctx.out_h).expect("mask");
-                                mask.fill_path(
-                                    &sp,
-                                    to_fill_rule(&cp.fill_rule),
-                                    false,
-                                    combined,
-                                );
+                                let mut mask = Mask::new(ctx.out_w, ctx.out_h).expect("mask");
+                                mask.fill_path(&sp, to_fill_rule(&cp.fill_rule), false, combined);
                                 if let Some(prev) = tile_clip.take() {
                                     intersect_masks(&mut mask, &prev);
                                 }
@@ -6007,22 +6060,15 @@ fn render_pattern_fill(
                         DisplayElement::Image { .. } => {
                             if let Some(ref pi) = preprocessed[img_idx] {
                                 let combined = pi.img_transform.post_concat(tile_transform);
-                                if let Some(img_ref) =
-                                    stet_tiny_skia::PixmapRef::from_bytes(&pi.rgba, pi.width, pi.height)
-                                {
+                                if let Some(img_ref) = stet_tiny_skia::PixmapRef::from_bytes(
+                                    &pi.rgba, pi.width, pi.height,
+                                ) {
                                     let paint = stet_tiny_skia::PixmapPaint {
                                         opacity: 1.0,
                                         blend_mode: BlendMode::SourceOver,
                                         quality: stet_tiny_skia::FilterQuality::Nearest,
                                     };
-                                    tile_buf.draw_pixmap(
-                                        0,
-                                        0,
-                                        img_ref,
-                                        &paint,
-                                        combined,
-                                        clip_ref,
-                                    );
+                                    tile_buf.draw_pixmap(0, 0, img_ref, &paint, combined, clip_ref);
                                 }
                             }
                             img_idx += 1;
@@ -6054,8 +6100,7 @@ fn render_pattern_fill(
         let stroke = build_stroke(sp, ctx.effective_dpi);
         let ctm_transform = to_transform(&sp.ctm);
         let combined = ctm_transform.post_concat(path_transform);
-        let res_scale =
-            stet_tiny_skia::PathStroker::compute_resolution_scale(&combined);
+        let res_scale = stet_tiny_skia::PathStroker::compute_resolution_scale(&combined);
         let dashed;
         let stroke_path = if let Some(ref dash) = stroke.dash {
             dashed = fill_skia_path.dash(dash, res_scale);
@@ -6116,7 +6161,10 @@ fn clip_path_unified(
         // needs the stroke CTM transform, so raw Y bounds are meaningless here.
         if x_start == 0
             && params.stroke_params.is_none()
-            && params.ctm.a == 1.0 && params.ctm.d == 1.0 && params.ctm.tx == 0.0 && params.ctm.ty == 0.0
+            && params.ctm.a == 1.0
+            && params.ctm.d == 1.0
+            && params.ctm.tx == 0.0
+            && params.ctm.ty == 0.0
             && let Some(bbox) = path_y_bbox(path)
             && (bbox.y_max <= y_start as f64 || bbox.y_min >= (y_start + ctx.out_h) as f64)
         {
@@ -6185,8 +6233,7 @@ fn clip_path_unified(
             // Apply dash pattern first (Path::stroke doesn't handle dashing).
             let stroke = build_stroke(sp, ctx.effective_dpi);
             let transform = ctx.transform(&sp.ctm);
-            let res_scale =
-                stet_tiny_skia::PathStroker::compute_resolution_scale(&transform);
+            let res_scale = stet_tiny_skia::PathStroker::compute_resolution_scale(&transform);
             let dashed;
             let stroke_path = if let Some(ref dash) = stroke.dash {
                 dashed = skia_path.dash(dash, res_scale);
@@ -6403,7 +6450,8 @@ impl OutputDevice for SkiaDevice {
         if w == 0 || h == 0 {
             return;
         }
-        let mut rgba_data = samples_to_rgba(sample_data, params, self.render_icc_cache.as_ref(), false);
+        let mut rgba_data =
+            samples_to_rgba(sample_data, params, self.render_icc_cache.as_ref(), false);
         if params.mask_color.is_some() {
             apply_mask_color_rgba(&mut rgba_data, sample_data, params);
         }
@@ -7086,7 +7134,9 @@ fn render_overprint_fill(
     // AA drift vs the non-overprint rasteriser.
     let is_k_only_cmyk = params.is_device_cmyk
         && params.overprint_mode == 0
-        && src_c == 0.0 && src_m == 0.0 && src_y == 0.0;
+        && src_c == 0.0
+        && src_m == 0.0
+        && src_y == 0.0;
     if channels == stet_graphics::device::CMYK_ALL && !is_custom_spot && !is_k_only_cmyk {
         let cov_data = coverage_mask.data();
         let stride = out_w as usize;
@@ -7163,8 +7213,7 @@ fn render_overprint_fill(
             // must require alpha>0 before trusting the RGB — otherwise fresh
             // paper (alpha=0) looks like "black backdrop" and multiplicative
             // darkening would paint the fill pure black.
-            let cur_is_clean =
-                cur_c == 0.0 && cur_m == 0.0 && cur_y == 0.0 && cur_k == 0.0;
+            let cur_is_clean = cur_c == 0.0 && cur_m == 0.0 && cur_y == 0.0 && cur_k == 0.0;
             let pixmap_has_colour = px_data[pi + 3] > 0
                 && (px_data[pi] < 250 || px_data[pi + 1] < 250 || px_data[pi + 2] < 250);
             // Multiplicative ink-stacking only when the pixmap carries a real
@@ -7174,8 +7223,7 @@ fn render_overprint_fill(
             // (alpha=0 → premultiplied (0,0,0,0)) multiplicative would darken
             // the fill to pure black, so those pixels fall through to the
             // replace path where the source RGB paints normally.
-            let use_multiplicative =
-                (is_custom_spot || cur_is_clean) && pixmap_has_colour;
+            let use_multiplicative = (is_custom_spot || cur_is_clean) && pixmap_has_colour;
 
             // Promoted DeviceGray on a non-spot backdrop: fall back to a
             // plain knockout that replaces all four CMYK plates. The
@@ -7253,71 +7301,68 @@ fn render_overprint_fill(
                 .max((new_m - cur_m).abs())
                 .max((new_y - cur_y).abs())
                 .max((new_k - cur_k).abs());
-            if delta < 1e-4
-                && spot_mask[mi] != 0
-                && pixmap_has_colour
-                && !is_custom_spot
-            {
+            if delta < 1e-4 && spot_mask[mi] != 0 && pixmap_has_colour && !is_custom_spot {
                 continue;
             }
 
-            let (r, g, b) = if is_promoted_gray && effective_channels == stet_graphics::device::CMYK_ALL {
-                // Promoted DeviceGray collapsing to a full replace — use the
-                // paint's RGB directly so the pixmap matches the colour a
-                // regular non-overprint gray fill would paint at the same
-                // pixel. Going through ICC(CMYK) here would produce a
-                // slightly different gray (e.g. 151 vs 127) and leave a
-                // darker outline where a subsequent non-promoted gray
-                // stroke overpaints on top of it.
-                //
-                // Checked before `use_multiplicative` because a white gray
-                // paint (`1 g`, native CMYK (0,0,0,0)) on a coloured RGB
-                // backdrop (e.g. the red `Reset Form` button in 682.pdf
-                // page 2) would otherwise hit the multiplicative branch
-                // with all-zero source CMYK, which leaves the backdrop
-                // unchanged — hiding the white label.
-                (params.color.r, params.color.g, params.color.b)
-            } else if use_multiplicative {
-                // Multiplicative ink stacking: each painted channel attenuates
-                // the corresponding RGB component; preserved channels leave
-                // the pixmap's existing colour untouched. This keeps any spot
-                // contribution already in the pixmap visible under overprints
-                // whose zero-valued CMYK components should not erase it.
-                let bg_r = px_data[pi] as f64 / 255.0;
-                let bg_g = px_data[pi + 1] as f64 / 255.0;
-                let bg_b = px_data[pi + 2] as f64 / 255.0;
-                let over_r = if channels & stet_graphics::device::CMYK_C != 0 {
-                    1.0 - src_c
+            let (r, g, b) =
+                if is_promoted_gray && effective_channels == stet_graphics::device::CMYK_ALL {
+                    // Promoted DeviceGray collapsing to a full replace — use the
+                    // paint's RGB directly so the pixmap matches the colour a
+                    // regular non-overprint gray fill would paint at the same
+                    // pixel. Going through ICC(CMYK) here would produce a
+                    // slightly different gray (e.g. 151 vs 127) and leave a
+                    // darker outline where a subsequent non-promoted gray
+                    // stroke overpaints on top of it.
+                    //
+                    // Checked before `use_multiplicative` because a white gray
+                    // paint (`1 g`, native CMYK (0,0,0,0)) on a coloured RGB
+                    // backdrop (e.g. the red `Reset Form` button in 682.pdf
+                    // page 2) would otherwise hit the multiplicative branch
+                    // with all-zero source CMYK, which leaves the backdrop
+                    // unchanged — hiding the white label.
+                    (params.color.r, params.color.g, params.color.b)
+                } else if use_multiplicative {
+                    // Multiplicative ink stacking: each painted channel attenuates
+                    // the corresponding RGB component; preserved channels leave
+                    // the pixmap's existing colour untouched. This keeps any spot
+                    // contribution already in the pixmap visible under overprints
+                    // whose zero-valued CMYK components should not erase it.
+                    let bg_r = px_data[pi] as f64 / 255.0;
+                    let bg_g = px_data[pi + 1] as f64 / 255.0;
+                    let bg_b = px_data[pi + 2] as f64 / 255.0;
+                    let over_r = if channels & stet_graphics::device::CMYK_C != 0 {
+                        1.0 - src_c
+                    } else {
+                        1.0
+                    };
+                    let over_g = if channels & stet_graphics::device::CMYK_M != 0 {
+                        1.0 - src_m
+                    } else {
+                        1.0
+                    };
+                    let over_b = if channels & stet_graphics::device::CMYK_Y != 0 {
+                        1.0 - src_y
+                    } else {
+                        1.0
+                    };
+                    let k_fac = if channels & stet_graphics::device::CMYK_K != 0 {
+                        1.0 - src_k
+                    } else {
+                        1.0
+                    };
+                    (
+                        (bg_r * over_r * k_fac).clamp(0.0, 1.0),
+                        (bg_g * over_g * k_fac).clamp(0.0, 1.0),
+                        (bg_b * over_b * k_fac).clamp(0.0, 1.0),
+                    )
+                } else if let Some(icc_cache) = icc {
+                    icc_cache
+                        .convert_cmyk_readonly(new_c, new_m, new_y, new_k)
+                        .unwrap_or_else(|| cmyk_to_rgb_plrm(new_c, new_m, new_y, new_k))
                 } else {
-                    1.0
+                    cmyk_to_rgb_plrm(new_c, new_m, new_y, new_k)
                 };
-                let over_g = if channels & stet_graphics::device::CMYK_M != 0 {
-                    1.0 - src_m
-                } else {
-                    1.0
-                };
-                let over_b = if channels & stet_graphics::device::CMYK_Y != 0 {
-                    1.0 - src_y
-                } else {
-                    1.0
-                };
-                let k_fac = if channels & stet_graphics::device::CMYK_K != 0 {
-                    1.0 - src_k
-                } else {
-                    1.0
-                };
-                (
-                    (bg_r * over_r * k_fac).clamp(0.0, 1.0),
-                    (bg_g * over_g * k_fac).clamp(0.0, 1.0),
-                    (bg_b * over_b * k_fac).clamp(0.0, 1.0),
-                )
-            } else if let Some(icc_cache) = icc {
-                icc_cache
-                    .convert_cmyk_readonly(new_c, new_m, new_y, new_k)
-                    .unwrap_or_else(|| cmyk_to_rgb_plrm(new_c, new_m, new_y, new_k))
-            } else {
-                cmyk_to_rgb_plrm(new_c, new_m, new_y, new_k)
-            };
 
             let a = (cov * params.alpha as f32).min(1.0);
             // Blend backdrop: prefer the pre-overprint snapshot only when
@@ -7365,18 +7410,13 @@ fn render_overprint_fill(
                 // src-over formula in premul space: result_pre = src*a + dst_pre*(1-a).
                 // The backdrop values are already premultiplied, so no
                 // additional divide-by-out_a step is needed.
-                px_data[pi] = ((r as f32 * a + (bk_r as f32 / 255.0) * one_minus_a)
-                    * 255.0)
+                px_data[pi] = ((r as f32 * a + (bk_r as f32 / 255.0) * one_minus_a) * 255.0)
                     .clamp(0.0, 255.0)
                     .round() as u8;
-                px_data[pi + 1] = ((g as f32 * a
-                    + (bk_g as f32 / 255.0) * one_minus_a)
-                    * 255.0)
+                px_data[pi + 1] = ((g as f32 * a + (bk_g as f32 / 255.0) * one_minus_a) * 255.0)
                     .clamp(0.0, 255.0)
                     .round() as u8;
-                px_data[pi + 2] = ((b as f32 * a
-                    + (bk_b as f32 / 255.0) * one_minus_a)
-                    * 255.0)
+                px_data[pi + 2] = ((b as f32 * a + (bk_b as f32 / 255.0) * one_minus_a) * 255.0)
                     .clamp(0.0, 255.0)
                     .round() as u8;
                 px_data[pi + 3] = (out_a * 255.0).round() as u8;
@@ -7681,7 +7721,9 @@ fn render_overprint_stroke(
 
     let is_k_only_cmyk = params.is_device_cmyk
         && params.overprint_mode == 0
-        && src_c == 0.0 && src_m == 0.0 && src_y == 0.0;
+        && src_c == 0.0
+        && src_m == 0.0
+        && src_y == 0.0;
     if channels == stet_graphics::device::CMYK_ALL && !is_custom_spot && !is_k_only_cmyk {
         // Full-channel replacement: write source CMYK to buffer for covered
         // pixels and let tiny-skia stroke the pixmap with the source colour.
@@ -7749,8 +7791,7 @@ fn render_overprint_stroke(
             let cur_m = cmyk_buf[ci + 1] as f64;
             let cur_y = cmyk_buf[ci + 2] as f64;
             let cur_k = cmyk_buf[ci + 3] as f64;
-            let cur_is_clean =
-                cur_c == 0.0 && cur_m == 0.0 && cur_y == 0.0 && cur_k == 0.0;
+            let cur_is_clean = cur_c == 0.0 && cur_m == 0.0 && cur_y == 0.0 && cur_k == 0.0;
             let pixmap_has_colour = px_data[pi + 3] > 0
                 && (px_data[pi] < 250 || px_data[pi + 1] < 250 || px_data[pi + 2] < 250);
             // Multiplicative ink-stacking only when the pixmap carries a real
@@ -7760,8 +7801,7 @@ fn render_overprint_stroke(
             // (alpha=0 → premultiplied (0,0,0,0)) multiplicative would darken
             // the fill to pure black, so those pixels fall through to the
             // replace path where the source RGB paints normally.
-            let use_multiplicative =
-                (is_custom_spot || cur_is_clean) && pixmap_has_colour;
+            let use_multiplicative = (is_custom_spot || cur_is_clean) && pixmap_has_colour;
 
             // Promoted DeviceGray on non-spot backdrop: replace all channels
             // (see render_overprint_fill).
@@ -7811,57 +7851,54 @@ fn render_overprint_stroke(
                 .max((new_m - cur_m).abs())
                 .max((new_y - cur_y).abs())
                 .max((new_k - cur_k).abs());
-            if delta < 1e-4
-                && spot_mask[mi] != 0
-                && pixmap_has_colour
-                && !is_custom_spot
-            {
+            if delta < 1e-4 && spot_mask[mi] != 0 && pixmap_has_colour && !is_custom_spot {
                 continue;
             }
 
-            let (r, g, b) = if is_promoted_gray && effective_channels == stet_graphics::device::CMYK_ALL {
-                // Promoted DeviceGray collapsing to a full replace — see
-                // render_overprint_fill for the rationale (must run before
-                // the multiplicative branch so a `1 g` / `1 G` white paint
-                // doesn't get folded into the backdrop via zero-source
-                // multiplication).
-                (params.color.r, params.color.g, params.color.b)
-            } else if use_multiplicative {
-                let bg_r = px_data[pi] as f64 / 255.0;
-                let bg_g = px_data[pi + 1] as f64 / 255.0;
-                let bg_b = px_data[pi + 2] as f64 / 255.0;
-                let over_r = if channels & stet_graphics::device::CMYK_C != 0 {
-                    1.0 - src_c
+            let (r, g, b) =
+                if is_promoted_gray && effective_channels == stet_graphics::device::CMYK_ALL {
+                    // Promoted DeviceGray collapsing to a full replace — see
+                    // render_overprint_fill for the rationale (must run before
+                    // the multiplicative branch so a `1 g` / `1 G` white paint
+                    // doesn't get folded into the backdrop via zero-source
+                    // multiplication).
+                    (params.color.r, params.color.g, params.color.b)
+                } else if use_multiplicative {
+                    let bg_r = px_data[pi] as f64 / 255.0;
+                    let bg_g = px_data[pi + 1] as f64 / 255.0;
+                    let bg_b = px_data[pi + 2] as f64 / 255.0;
+                    let over_r = if channels & stet_graphics::device::CMYK_C != 0 {
+                        1.0 - src_c
+                    } else {
+                        1.0
+                    };
+                    let over_g = if channels & stet_graphics::device::CMYK_M != 0 {
+                        1.0 - src_m
+                    } else {
+                        1.0
+                    };
+                    let over_b = if channels & stet_graphics::device::CMYK_Y != 0 {
+                        1.0 - src_y
+                    } else {
+                        1.0
+                    };
+                    let k_fac = if channels & stet_graphics::device::CMYK_K != 0 {
+                        1.0 - src_k
+                    } else {
+                        1.0
+                    };
+                    (
+                        (bg_r * over_r * k_fac).clamp(0.0, 1.0),
+                        (bg_g * over_g * k_fac).clamp(0.0, 1.0),
+                        (bg_b * over_b * k_fac).clamp(0.0, 1.0),
+                    )
+                } else if let Some(icc_cache) = icc {
+                    icc_cache
+                        .convert_cmyk_readonly(new_c, new_m, new_y, new_k)
+                        .unwrap_or_else(|| cmyk_to_rgb_plrm(new_c, new_m, new_y, new_k))
                 } else {
-                    1.0
+                    cmyk_to_rgb_plrm(new_c, new_m, new_y, new_k)
                 };
-                let over_g = if channels & stet_graphics::device::CMYK_M != 0 {
-                    1.0 - src_m
-                } else {
-                    1.0
-                };
-                let over_b = if channels & stet_graphics::device::CMYK_Y != 0 {
-                    1.0 - src_y
-                } else {
-                    1.0
-                };
-                let k_fac = if channels & stet_graphics::device::CMYK_K != 0 {
-                    1.0 - src_k
-                } else {
-                    1.0
-                };
-                (
-                    (bg_r * over_r * k_fac).clamp(0.0, 1.0),
-                    (bg_g * over_g * k_fac).clamp(0.0, 1.0),
-                    (bg_b * over_b * k_fac).clamp(0.0, 1.0),
-                )
-            } else if let Some(icc_cache) = icc {
-                icc_cache
-                    .convert_cmyk_readonly(new_c, new_m, new_y, new_k)
-                    .unwrap_or_else(|| cmyk_to_rgb_plrm(new_c, new_m, new_y, new_k))
-            } else {
-                cmyk_to_rgb_plrm(new_c, new_m, new_y, new_k)
-            };
 
             let a = (cov * params.alpha as f32).min(1.0);
             // Blend backdrop: prefer snapshot only when this paint's colour
@@ -7898,18 +7935,13 @@ fn render_overprint_stroke(
             let out_a = a + dst_a * one_minus_a;
             if out_a > 0.0 {
                 // tiny-skia stores premultiplied RGBA (see render_overprint_fill).
-                px_data[pi] = ((r as f32 * a + (bk_r as f32 / 255.0) * one_minus_a)
-                    * 255.0)
+                px_data[pi] = ((r as f32 * a + (bk_r as f32 / 255.0) * one_minus_a) * 255.0)
                     .clamp(0.0, 255.0)
                     .round() as u8;
-                px_data[pi + 1] = ((g as f32 * a
-                    + (bk_g as f32 / 255.0) * one_minus_a)
-                    * 255.0)
+                px_data[pi + 1] = ((g as f32 * a + (bk_g as f32 / 255.0) * one_minus_a) * 255.0)
                     .clamp(0.0, 255.0)
                     .round() as u8;
-                px_data[pi + 2] = ((b as f32 * a
-                    + (bk_b as f32 / 255.0) * one_minus_a)
-                    * 255.0)
+                px_data[pi + 2] = ((b as f32 * a + (bk_b as f32 / 255.0) * one_minus_a) * 255.0)
                     .clamp(0.0, 255.0)
                     .round() as u8;
                 px_data[pi + 3] = (out_a * 255.0).round() as u8;
@@ -8190,8 +8222,7 @@ fn render_overprint_image(
                 let cur_m = cmyk_buf[ci + 1] as f64;
                 let cur_y = cmyk_buf[ci + 2] as f64;
                 let cur_k = cmyk_buf[ci + 3] as f64;
-                let cur_is_zero =
-                    cur_c == 0.0 && cur_m == 0.0 && cur_y == 0.0 && cur_k == 0.0;
+                let cur_is_zero = cur_c == 0.0 && cur_m == 0.0 && cur_y == 0.0 && cur_k == 0.0;
                 let named = params.painted_channels;
                 // OPM=1 zero-source preservation: when the image's tint
                 // output for a named plate is zero, the underlying value is
@@ -8203,34 +8234,30 @@ fn render_overprint_image(
                 let (new_c, new_m, new_y, new_k) = if cur_is_zero {
                     (src_c, src_m, src_y, src_k)
                 } else {
-                    let nc = if named & stet_graphics::device::CMYK_C != 0
-                        && !(opm1 && src_c == 0.0)
-                    {
-                        src_c
-                    } else {
-                        cur_c
-                    };
-                    let nm = if named & stet_graphics::device::CMYK_M != 0
-                        && !(opm1 && src_m == 0.0)
-                    {
-                        src_m
-                    } else {
-                        cur_m
-                    };
-                    let ny = if named & stet_graphics::device::CMYK_Y != 0
-                        && !(opm1 && src_y == 0.0)
-                    {
-                        src_y
-                    } else {
-                        cur_y
-                    };
-                    let nk = if named & stet_graphics::device::CMYK_K != 0
-                        && !(opm1 && src_k == 0.0)
-                    {
-                        src_k
-                    } else {
-                        cur_k
-                    };
+                    let nc =
+                        if named & stet_graphics::device::CMYK_C != 0 && !(opm1 && src_c == 0.0) {
+                            src_c
+                        } else {
+                            cur_c
+                        };
+                    let nm =
+                        if named & stet_graphics::device::CMYK_M != 0 && !(opm1 && src_m == 0.0) {
+                            src_m
+                        } else {
+                            cur_m
+                        };
+                    let ny =
+                        if named & stet_graphics::device::CMYK_Y != 0 && !(opm1 && src_y == 0.0) {
+                            src_y
+                        } else {
+                            cur_y
+                        };
+                    let nk =
+                        if named & stet_graphics::device::CMYK_K != 0 && !(opm1 && src_k == 0.0) {
+                            src_k
+                        } else {
+                            cur_k
+                        };
                     (nc, nm, ny, nk)
                 };
                 cmyk_buf[ci] = new_c as f32;
@@ -8308,8 +8335,7 @@ fn render_overprint_image(
             let cur_m = cmyk_buf[ci + 1] as f64;
             let cur_y = cmyk_buf[ci + 2] as f64;
             let cur_k = cmyk_buf[ci + 3] as f64;
-            let cur_is_clean =
-                cur_c == 0.0 && cur_m == 0.0 && cur_y == 0.0 && cur_k == 0.0;
+            let cur_is_clean = cur_c == 0.0 && cur_m == 0.0 && cur_y == 0.0 && cur_k == 0.0;
             let pixmap_has_colour = px_data[pi + 3] > 0
                 && (px_data[pi] < 250 || px_data[pi + 1] < 250 || px_data[pi + 2] < 250);
             // Multiplicative ink-stacking only when the pixmap carries a real
@@ -8319,8 +8345,7 @@ fn render_overprint_image(
             // (alpha=0 → premultiplied (0,0,0,0)) multiplicative would darken
             // the fill to pure black, so those pixels fall through to the
             // replace path where the source RGB paints normally.
-            let use_multiplicative =
-                (is_custom_spot || cur_is_clean) && pixmap_has_colour;
+            let use_multiplicative = (is_custom_spot || cur_is_clean) && pixmap_has_colour;
 
             let new_c = if channels & stet_graphics::device::CMYK_C != 0 {
                 src_c
@@ -8526,18 +8551,17 @@ fn update_cmyk_buffer_for_image(
                 let r = pixmap_rgba[ci] as f64 / 255.0;
                 let g = pixmap_rgba[ci + 1] as f64 / 255.0;
                 let b = pixmap_rgba[ci + 2] as f64 / 255.0;
-                let cmyk = if let Some(c) =
-                    icc.and_then(|i| i.convert_rgb_to_cmyk_readonly(r, g, b))
-                {
-                    c
-                } else {
-                    [
-                        (1.0 - r).clamp(0.0, 1.0),
-                        (1.0 - g).clamp(0.0, 1.0),
-                        (1.0 - b).clamp(0.0, 1.0),
-                        0.0,
-                    ]
-                };
+                let cmyk =
+                    if let Some(c) = icc.and_then(|i| i.convert_rgb_to_cmyk_readonly(r, g, b)) {
+                        c
+                    } else {
+                        [
+                            (1.0 - r).clamp(0.0, 1.0),
+                            (1.0 - g).clamp(0.0, 1.0),
+                            (1.0 - b).clamp(0.0, 1.0),
+                            0.0,
+                        ]
+                    };
                 cmyk_buf[ci] = cmyk[0] as f32;
                 cmyk_buf[ci + 1] = cmyk[1] as f32;
                 cmyk_buf[ci + 2] = cmyk[2] as f32;
@@ -8875,7 +8899,7 @@ fn render_banded_to_sink(
                     opm_zero_transparent: false,
                     knockout_painter_pass: KnockoutPainterPass::None,
                     parent_group_isolated: false,
-                alpha_extraction_pass: false,
+                    alpha_extraction_pass: false,
                 };
                 render_element(&mut band_pixmap, &mut band_state, &elements[i], &ctx);
             }
@@ -9348,9 +9372,7 @@ fn path_full_bbox(path: &PsPath) -> Option<BBox2D> {
 /// For stroke patterns, the path is in user space and must be transformed
 /// through the CTM to get device-space bounds, then expanded by half
 /// the stroke width.
-fn pattern_fill_full_bbox(
-    params: &stet_graphics::device::PatternFillParams,
-) -> Option<BBox2D> {
+fn pattern_fill_full_bbox(params: &stet_graphics::device::PatternFillParams) -> Option<BBox2D> {
     if let Some(ref sp) = params.stroke_params {
         let bbox = path_full_bbox(&params.path)?;
         let ctm = &sp.ctm;
@@ -9372,7 +9394,8 @@ fn pattern_fill_full_bbox(
             dev_bbox.x_max = dev_bbox.x_max.max(*x);
             dev_bbox.y_max = dev_bbox.y_max.max(*y);
         }
-        let half_w = sp.line_width * 0.5
+        let half_w = sp.line_width
+            * 0.5
             * (ctm.a * ctm.a + ctm.b * ctm.b)
                 .sqrt()
                 .max((ctm.c * ctm.c + ctm.d * ctm.d).sqrt());
@@ -9387,9 +9410,7 @@ fn pattern_fill_full_bbox(
 }
 
 /// Compute Y-axis bounds for a PatternFill element (banded rendering).
-fn pattern_fill_y_bbox(
-    params: &stet_graphics::device::PatternFillParams,
-) -> Option<YBBox> {
+fn pattern_fill_y_bbox(params: &stet_graphics::device::PatternFillParams) -> Option<YBBox> {
     let bbox = pattern_fill_full_bbox(params)?;
     Some(YBBox {
         y_min: bbox.y_min,
@@ -9739,8 +9760,7 @@ pub fn render_region_prepared(
     pixmap.fill(Color::TRANSPARENT);
 
     let cmyk_buf = if has_overprint_elements(list)
-        || list.page_group_color_space()
-            == stet_graphics::display_list::GroupColorSpace::DeviceCMYK
+        || list.page_group_color_space() == stet_graphics::display_list::GroupColorSpace::DeviceCMYK
         || has_cmyk_group(list)
     {
         Some(vec![0.0f32; pixel_w as usize * render_h as usize * 4])
@@ -9920,8 +9940,7 @@ pub fn render_region_single_band(
     pixmap.fill(Color::TRANSPARENT);
 
     let cmyk_buf = if has_overprint_elements(list)
-        || list.page_group_color_space()
-            == stet_graphics::display_list::GroupColorSpace::DeviceCMYK
+        || list.page_group_color_space() == stet_graphics::display_list::GroupColorSpace::DeviceCMYK
         || has_cmyk_group(list)
     {
         Some(vec![0.0f32; pixel_w as usize * render_h as usize * 4])
@@ -10140,7 +10159,17 @@ pub fn render_region_prepared_parallel_with_progress(
 
     if num_bands <= 1 {
         let result = render_region_prepared(
-            list, prepared, vp_x, vp_y, vp_w, vp_h, pixel_w, pixel_h, dpi, icc, image_cache,
+            list,
+            prepared,
+            vp_x,
+            vp_y,
+            vp_w,
+            vp_h,
+            pixel_w,
+            pixel_h,
+            dpi,
+            icc,
+            image_cache,
             no_aa,
         );
         progress.store(1, std::sync::atomic::Ordering::Relaxed);
@@ -10149,8 +10178,21 @@ pub fn render_region_prepared_parallel_with_progress(
 
     let render_band = |band_idx: u32| -> Vec<u8> {
         render_region_single_band(
-            list, prepared, vp_x, vp_y, vp_w, vp_h, pixel_w, pixel_h, band_idx, band_h,
-            num_bands, dpi, icc, image_cache, no_aa,
+            list,
+            prepared,
+            vp_x,
+            vp_y,
+            vp_w,
+            vp_h,
+            pixel_w,
+            pixel_h,
+            band_idx,
+            band_h,
+            num_bands,
+            dpi,
+            icc,
+            image_cache,
+            no_aa,
         )
     };
 
@@ -10220,15 +10262,38 @@ pub fn render_region_prepared_parallel_cancellable(
 
     if num_bands <= 1 {
         return Some(render_region_prepared(
-            list, prepared, vp_x, vp_y, vp_w, vp_h, pixel_w, pixel_h, dpi, icc, image_cache,
+            list,
+            prepared,
+            vp_x,
+            vp_y,
+            vp_w,
+            vp_h,
+            pixel_w,
+            pixel_h,
+            dpi,
+            icc,
+            image_cache,
             no_aa,
         ));
     }
 
     let render_band = |band_idx: u32| -> Vec<u8> {
         render_region_single_band(
-            list, prepared, vp_x, vp_y, vp_w, vp_h, pixel_w, pixel_h, band_idx, band_h,
-            num_bands, dpi, icc, image_cache, no_aa,
+            list,
+            prepared,
+            vp_x,
+            vp_y,
+            vp_w,
+            vp_h,
+            pixel_w,
+            pixel_h,
+            band_idx,
+            band_h,
+            num_bands,
+            dpi,
+            icc,
+            image_cache,
+            no_aa,
         )
     };
 
@@ -10372,12 +10437,7 @@ pub fn render_to_rgba_viewport(
 /// banded page pipeline) and its 2D bbox (used by the viewport pipeline).
 /// Elements that disagree on presence, or whose 2D bbox's Y extent differs
 /// from the Y-only bbox, are marked with `DIFF`.
-fn debug_bbox_lines(
-    list: &DisplayList,
-    dpi: f64,
-    depth: usize,
-    out: &mut Vec<String>,
-) {
+fn debug_bbox_lines(list: &DisplayList, dpi: f64, depth: usize, out: &mut Vec<String>) {
     let y_bboxes = precompute_bboxes(list, dpi);
     let full_bboxes = precompute_full_bboxes(list, dpi);
     let elements = list.elements();
@@ -10437,8 +10497,14 @@ fn debug_bbox_lines(
             out.push(format!(
                 "{}        ctm=[{:.4} {:.4} {:.4} {:.4} {:.4} {:.4}] lw={:.4} miter={:.4} raw={}",
                 indent,
-                m.a, m.b, m.c, m.d, m.tx, m.ty,
-                params.line_width, params.miter_limit,
+                m.a,
+                m.b,
+                m.c,
+                m.d,
+                m.tx,
+                m.ty,
+                params.line_width,
+                params.miter_limit,
                 match rp {
                     Some(b) => format!(
                         "x[{:.3}..{:.3}] y[{:.3}..{:.3}]",
@@ -10454,7 +10520,12 @@ fn debug_bbox_lines(
             out.push(format!(
                 "{}        clip ctm=[{:.4} {:.4} {:.4} {:.4} {:.4} {:.4}] rule={:?} raw={}",
                 indent,
-                m.a, m.b, m.c, m.d, m.tx, m.ty,
+                m.a,
+                m.b,
+                m.c,
+                m.d,
+                m.tx,
+                m.ty,
                 params.fill_rule,
                 match rp {
                     Some(b) => format!(
@@ -10469,8 +10540,12 @@ fn debug_bbox_lines(
             out.push(format!(
                 "{}        patch ctm=[{:.4} {:.4} {:.4} {:.4} {:.4} {:.4}] bbox={:?} patches={}",
                 indent,
-                params.ctm.a, params.ctm.b, params.ctm.c, params.ctm.d,
-                params.ctm.tx, params.ctm.ty,
+                params.ctm.a,
+                params.ctm.b,
+                params.ctm.c,
+                params.ctm.d,
+                params.ctm.tx,
+                params.ctm.ty,
                 params.bbox,
                 params.patches.len()
             ));
@@ -10492,27 +10567,46 @@ fn debug_bbox_lines(
                     "{}        patch[0] pts={} dev x[{:.3}..{:.3}] y[{:.3}..{:.3}]",
                     indent,
                     patch.points.len(),
-                    x_min, x_max, y_min, y_max
+                    x_min,
+                    x_max,
+                    y_min,
+                    y_max
                 ));
             }
         }
-        if let DisplayElement::Group { elements: inner, params } = elem {
+        if let DisplayElement::Group {
+            elements: inner,
+            params,
+        } = elem
+        {
             out.push(format!(
                 "{}        group bbox={:?} iso={} ko={} alpha={} bm={} cs={:?}",
                 indent,
-                params.bbox, params.isolated, params.knockout, params.alpha, params.blend_mode,
+                params.bbox,
+                params.isolated,
+                params.knockout,
+                params.alpha,
+                params.blend_mode,
                 params.color_space
             ));
             debug_bbox_lines(inner, dpi, depth + 1, out);
         }
-        if let DisplayElement::SoftMasked { content, params, .. } = elem {
+        if let DisplayElement::SoftMasked {
+            content, params, ..
+        } = elem
+        {
             out.push(format!(
                 "{}        softmasked bbox={:?}",
                 indent, params.bbox
             ));
             debug_bbox_lines(content, dpi, depth + 1, out);
         }
-        if let DisplayElement::OcgGroup { elements: inner, default_visible, .. } = elem {
+        if let DisplayElement::OcgGroup {
+            elements: inner,
+            default_visible,
+            ..
+        } = elem
+        {
             out.push(format!(
                 "{}        ocg default_visible={}",
                 indent, default_visible
@@ -10596,8 +10690,7 @@ pub fn render_region(
     pixmap.fill(Color::TRANSPARENT);
 
     let cmyk_buf = if has_overprint_elements(list)
-        || list.page_group_color_space()
-            == stet_graphics::display_list::GroupColorSpace::DeviceCMYK
+        || list.page_group_color_space() == stet_graphics::display_list::GroupColorSpace::DeviceCMYK
         || has_cmyk_group(list)
     {
         Some(vec![0.0f32; pixel_w as usize * render_h as usize * 4])
@@ -10810,8 +10903,8 @@ fn render_axial_shading(
 
     // Detect rotated BBox: if CTM has rotation components (b or c non-zero),
     // the BBox is not axis-aligned in device space and needs proper polygon clipping.
-    let bbox_is_rotated = params.bbox.is_some()
-        && (params.ctm.b.abs() > 1e-10 || params.ctm.c.abs() > 1e-10);
+    let bbox_is_rotated =
+        params.bbox.is_some() && (params.ctm.b.abs() > 1e-10 || params.ctm.c.abs() > 1e-10);
 
     if needs_perpendicular_clip {
         // Diagonal gradient with non-extended side — fall back to tiny-skia
@@ -10976,8 +11069,7 @@ fn render_axial_shading(
 
         // t = dot(P_shading - P0, axis) / dot(axis, axis)
         let inv_axis_sq = 1.0 / axis_sq;
-        let t_origin =
-            ((sx_base - params.x0) * ax + (sy_base - params.y0) * ay) * inv_axis_sq;
+        let t_origin = ((sx_base - params.x0) * ax + (sy_base - params.y0) * ay) * inv_axis_sq;
         let dt_dx = (dsx_dx * ax + dsy_dx * ay) * inv_axis_sq;
         let dt_dy = (dsx_dy * ax + dsy_dy * ay) * inv_axis_sq;
 
@@ -10987,7 +11079,9 @@ fn render_axial_shading(
             let bbox = params.bbox.as_ref().unwrap();
             let (bx0, bx1) = (bbox[0].min(bbox[2]), bbox[0].max(bbox[2]));
             let (by0, by1) = (bbox[1].min(bbox[3]), bbox[1].max(bbox[3]));
-            Some((dsx_dx, dsx_dy, sx_base, dsy_dx, dsy_dy, sy_base, bx0, by0, bx1, by1))
+            Some((
+                dsx_dx, dsx_dy, sx_base, dsy_dx, dsy_dy, sy_base, bx0, by0, bx1, by1,
+            ))
         } else {
             None
         };
@@ -11007,16 +11101,12 @@ fn render_axial_shading(
             let row_offset = py as usize * stride;
 
             // Precompute row-base values for rotated BBox check
-            let (ux_row, uy_row) = if let Some((_, dux_dy, ux_base, _, duy_dy, uy_base, ..)) =
-                &bbox_pixel_clip
-            {
-                (
-                    ux_base + dux_dy * py as f64,
-                    uy_base + duy_dy * py as f64,
-                )
-            } else {
-                (0.0, 0.0)
-            };
+            let (ux_row, uy_row) =
+                if let Some((_, dux_dy, ux_base, _, duy_dy, uy_base, ..)) = &bbox_pixel_clip {
+                    (ux_base + dux_dy * py as f64, uy_base + duy_dy * py as f64)
+                } else {
+                    (0.0, 0.0)
+                };
 
             for px in ix_min..ix_max {
                 // Check clip mask
@@ -11051,8 +11141,10 @@ fn render_axial_shading(
                     let a = alpha as u16;
                     let inv_a = 255 - a;
                     data[offset] = ((r as u16 * a + data[offset] as u16 * inv_a + 127) / 255) as u8;
-                    data[offset + 1] = ((g as u16 * a + data[offset + 1] as u16 * inv_a + 127) / 255) as u8;
-                    data[offset + 2] = ((b as u16 * a + data[offset + 2] as u16 * inv_a + 127) / 255) as u8;
+                    data[offset + 1] =
+                        ((g as u16 * a + data[offset + 1] as u16 * inv_a + 127) / 255) as u8;
+                    data[offset + 2] =
+                        ((b as u16 * a + data[offset + 2] as u16 * inv_a + 127) / 255) as u8;
                     data[offset + 3] = ((a + data[offset + 3] as u16 * inv_a / 255).min(255)) as u8;
                 }
             }
@@ -11470,8 +11562,7 @@ fn render_radial_shading(
                     } else {
                         1.0
                     };
-                    data[offset] =
-                        ((bg_r * over_r * k_fac).clamp(0.0, 1.0) * 255.0).round() as u8;
+                    data[offset] = ((bg_r * over_r * k_fac).clamp(0.0, 1.0) * 255.0).round() as u8;
                     data[offset + 1] =
                         ((bg_g * over_g * k_fac).clamp(0.0, 1.0) * 255.0).round() as u8;
                     data[offset + 2] =
@@ -11800,9 +11891,9 @@ fn render_patch_shading(
             let n = (extent / 2.0).ceil().clamp(8.0, 64.0) as usize;
             // Extract ICC profile hash for per-grid-point color conversion
             let icc_profile_hash = match &params.color_space {
-                stet_graphics::device::ShadingColorSpace::ICCBased {
-                    profile_hash, ..
-                } => Some(profile_hash),
+                stet_graphics::device::ShadingColorSpace::ICCBased { profile_hash, .. } => {
+                    Some(profile_hash)
+                }
                 _ => None,
             };
             subdivide_patch_to_triangles(patch, &mut triangles, n, icc_profile_hash, icc);
@@ -11845,8 +11936,7 @@ fn subdivide_patch_to_triangles(
     // Evaluate patch at grid points.
     // Use tensor-product evaluation when 16 control points are available (Type 7),
     // otherwise fall back to Coons blending (Type 6, 12 points).
-    let mut grid: Vec<(f64, f64, DeviceColor, Vec<f64>)> =
-        Vec::with_capacity((n + 1) * (n + 1));
+    let mut grid: Vec<(f64, f64, DeviceColor, Vec<f64>)> = Vec::with_capacity((n + 1) * (n + 1));
     let use_tensor = patch.points.len() >= 16;
     let has_raw = !patch.raw_colors[0].is_empty();
     // Use per-grid-point ICC conversion when profile info is available
@@ -11904,24 +11994,42 @@ fn subdivide_patch_to_triangles(
             use stet_graphics::device::ShadingVertex;
             triangles.push(stet_graphics::device::ShadingTriangle {
                 v0: ShadingVertex {
-                    x: *x00, y: *y00, color: c00.clone(), raw_components: r00.clone(),
+                    x: *x00,
+                    y: *y00,
+                    color: c00.clone(),
+                    raw_components: r00.clone(),
                 },
                 v1: ShadingVertex {
-                    x: *x10, y: *y10, color: c10.clone(), raw_components: r10.clone(),
+                    x: *x10,
+                    y: *y10,
+                    color: c10.clone(),
+                    raw_components: r10.clone(),
                 },
                 v2: ShadingVertex {
-                    x: *x01, y: *y01, color: c01.clone(), raw_components: r01.clone(),
+                    x: *x01,
+                    y: *y01,
+                    color: c01.clone(),
+                    raw_components: r01.clone(),
                 },
             });
             triangles.push(stet_graphics::device::ShadingTriangle {
                 v0: ShadingVertex {
-                    x: *x10, y: *y10, color: c10.clone(), raw_components: r10.clone(),
+                    x: *x10,
+                    y: *y10,
+                    color: c10.clone(),
+                    raw_components: r10.clone(),
                 },
                 v1: ShadingVertex {
-                    x: *x11, y: *y11, color: c11.clone(), raw_components: r11.clone(),
+                    x: *x11,
+                    y: *y11,
+                    color: c11.clone(),
+                    raw_components: r11.clone(),
                 },
                 v2: ShadingVertex {
-                    x: *x01, y: *y01, color: c01.clone(), raw_components: r01.clone(),
+                    x: *x01,
+                    y: *y01,
+                    color: c01.clone(),
+                    raw_components: r01.clone(),
                 },
             });
         }
@@ -11979,22 +12087,13 @@ fn eval_coons_patch(patch: &stet_graphics::device::ShadingPatch, u: f64, v: f64)
 ///   grid[v=⅓][u] = p₁₂, p₂₂, p₃₂, p₄₂  = pts[1], pts[5], pts[9],  pts[13]
 ///   grid[v=⅔][u] = p₁₃, p₂₃, p₃₃, p₄₃  = pts[2], pts[6], pts[10], pts[14]
 ///   grid[v=1][u] = p₁₄, p₂₄, p₃₄, p₄₄  = pts[3], pts[7], pts[11], pts[15]
-fn eval_tensor_patch(
-    patch: &stet_graphics::device::ShadingPatch,
-    u: f64,
-    v: f64,
-) -> (f64, f64) {
+fn eval_tensor_patch(patch: &stet_graphics::device::ShadingPatch, u: f64, v: f64) -> (f64, f64) {
     let pts = &patch.points;
 
     // Map data indices to 4×4 grid [row][col].
     // pts[0..12] are boundary points around the perimeter (same as Type 6).
     // pts[12..16] are the 4 interior control points.
-    let grid: [[usize; 4]; 4] = [
-        [0, 1, 2, 3],
-        [11, 12, 13, 4],
-        [10, 15, 14, 5],
-        [9, 8, 7, 6],
-    ];
+    let grid: [[usize; 4]; 4] = [[0, 1, 2, 3], [11, 12, 13, 4], [10, 15, 14, 5], [9, 8, 7, 6]];
 
     // Cubic Bernstein basis values
     let su = 1.0 - u;
@@ -12569,10 +12668,26 @@ mod tests {
         list.push(make_test_fill_at(100.0, 50.0, 50.0, 25.0)); // [100..150, 50..75]
 
         let bounds = compute_paint_bounds(&list, 72.0).expect("expected union bounds");
-        assert!((bounds.x_min - 10.0).abs() < 1e-9, "x_min was {}", bounds.x_min);
-        assert!((bounds.y_min - 20.0).abs() < 1e-9, "y_min was {}", bounds.y_min);
-        assert!((bounds.x_max - 150.0).abs() < 1e-9, "x_max was {}", bounds.x_max);
-        assert!((bounds.y_max - 75.0).abs() < 1e-9, "y_max was {}", bounds.y_max);
+        assert!(
+            (bounds.x_min - 10.0).abs() < 1e-9,
+            "x_min was {}",
+            bounds.x_min
+        );
+        assert!(
+            (bounds.y_min - 20.0).abs() < 1e-9,
+            "y_min was {}",
+            bounds.y_min
+        );
+        assert!(
+            (bounds.x_max - 150.0).abs() < 1e-9,
+            "x_max was {}",
+            bounds.x_max
+        );
+        assert!(
+            (bounds.y_max - 75.0).abs() < 1e-9,
+            "y_max was {}",
+            bounds.y_max
+        );
     }
 
     #[test]
@@ -12854,7 +12969,11 @@ mod tests {
         let parent = fill(x_path(), 1.0, 0);
         let inner = vec![fill(x_path_perturbed(), 1.0, 0)];
         let grp = group_elem(inner, [0.0, -5.0, 40.0, 30.0], true, 1.0, 0);
-        let d = dl(vec![parent, clip_elem(rect_path(0.0, -5.0, 40.0, 30.0)), grp]);
+        let d = dl(vec![
+            parent,
+            clip_elem(rect_path(0.0, -5.0, 40.0, 30.0)),
+            grp,
+        ]);
         assert_eq!(compute_obscured_fill_skips(&d), vec![0]);
     }
 

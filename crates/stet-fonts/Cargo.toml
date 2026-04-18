@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 description = "Font parsing and geometry types for the stet PostScript interpreter"
+repository.workspace = true
+homepage.workspace = true
+keywords = ["postscript", "font", "type1", "truetype", "cff"]
+categories = ["graphics", "parser-implementations"]
 
 [dependencies]
 rustc-hash = "2"

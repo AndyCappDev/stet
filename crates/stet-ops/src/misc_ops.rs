@@ -532,7 +532,10 @@ pub fn op_exitserver(ctx: &mut Context) -> Result<(), PsError> {
 
     // Remove serverdict from d_stack if present
     let serverdict_name = ctx.names.intern(b"serverdict");
-    if let Some(sd_obj) = ctx.dicts.get(ctx.systemdict, &DictKey::Name(serverdict_name)) {
+    if let Some(sd_obj) = ctx
+        .dicts
+        .get(ctx.systemdict, &DictKey::Name(serverdict_name))
+    {
         if let PsValue::Dict(sd_entity) = sd_obj.value {
             // Search from top down, keep bottom 3 (systemdict, globaldict, userdict)
             for i in (3..ctx.d_stack.len()).rev() {
@@ -814,7 +817,7 @@ pub fn op_currentoverprint(ctx: &mut Context) -> Result<(), PsError> {
 /// `setcacheparams`: mark int ... → — (set font cache parameters)
 /// `setcacheparams`: mark ... int(s) → —
 ///
-/// PLRM: Accepts 1-3 ints above the mark: [upper], [lower upper], [size lower upper].
+/// PLRM: Accepts 1-3 ints above the mark: `[upper]`, `[lower upper]`, `[size lower upper]`.
 /// Stores upper as MaxFontItem, lower as MinFontCompress, size as MaxFontCache.
 pub fn op_setcacheparams(ctx: &mut Context) -> Result<(), PsError> {
     // Validate all elements above the mark before popping any

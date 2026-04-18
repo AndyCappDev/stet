@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 description = "PDF output device for stet PostScript interpreter"
+repository.workspace = true
+homepage.workspace = true
+keywords = ["pdf", "postscript", "graphics", "output"]
+categories = ["graphics"]
 
 [dependencies]
 stet-fonts.workspace = true

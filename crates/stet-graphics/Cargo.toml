@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 description = "Graphics types, display list, and ICC color support for the stet PostScript interpreter"
+repository.workspace = true
+homepage.workspace = true
+keywords = ["postscript", "graphics", "color", "icc", "display-list"]
+categories = ["graphics", "rendering"]
 
 [dependencies]
 stet-fonts.workspace = true

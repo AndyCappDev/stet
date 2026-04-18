@@ -405,7 +405,7 @@ fn pop_and_concat_matrix(ctx: &mut Context) -> Result<(), PsError> {
     Ok(())
 }
 
-/// `ustroke`: userpath [matrix] → —
+/// `ustroke`: `userpath [matrix] → —`
 pub fn op_ustroke(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.o_stack.is_empty() {
         return Err(PsError::StackUnderflow);
@@ -445,7 +445,7 @@ pub fn op_ustroke(ctx: &mut Context) -> Result<(), PsError> {
     result
 }
 
-/// `ustrokepath`: userpath [matrix] → —
+/// `ustrokepath`: `userpath [matrix] → —`
 pub fn op_ustrokepath(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.o_stack.is_empty() {
         return Err(PsError::StackUnderflow);
@@ -537,7 +537,7 @@ pub fn op_inueofill(ctx: &mut Context) -> Result<(), PsError> {
     result
 }
 
-/// `inustroke`: x y userpath [matrix] → bool
+/// `inustroke`: `x y userpath [matrix] → bool`
 pub fn op_inustroke(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.o_stack.len() < 3 {
         return Err(PsError::StackUnderflow);

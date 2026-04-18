@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 description = "tiny-skia rendering backend for stet PostScript interpreter"
+repository.workspace = true
+homepage.workspace = true
+keywords = ["postscript", "pdf", "rendering", "rasterizer", "graphics"]
+categories = ["rendering", "graphics"]
 
 [features]
 default = ["parallel"]

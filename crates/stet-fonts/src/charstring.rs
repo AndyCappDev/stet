@@ -546,8 +546,7 @@ impl<'a> CharstringInterp<'a> {
                     // the accent's sidebearing so all path elements shift.
                     if let Some(achar_data) = achar_data {
                         let decrypted = decrypt_charstring(&achar_data, self.len_iv);
-                        self.seac_accent_offset =
-                            Some((adx - asb + base_lsb, ady));
+                        self.seac_accent_offset = Some((adx - asb + base_lsb, ady));
                         self.execute(&decrypted)?;
                         self.seac_accent_offset = None;
                     }

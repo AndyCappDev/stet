@@ -5,6 +5,10 @@ edition.workspace = true
 license = "Apache-2.0 OR MIT"
 authors.workspace = true
 description = "PDF parser and renderer"
+repository.workspace = true
+homepage.workspace = true
+keywords = ["pdf", "parser", "rendering", "graphics"]
+categories = ["parser-implementations", "graphics"]
 
 [dependencies]
 thiserror.workspace = true

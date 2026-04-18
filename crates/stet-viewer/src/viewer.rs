@@ -345,10 +345,7 @@ impl ViewerApp {
                     // so render-time overprint math uses the same profile that
                     // baked the display list's RGB. Falls back to the CLI-level
                     // system default for PS input and PDFs without OI.
-                    let cmyk_bytes = page
-                        .cmyk_bytes
-                        .as_ref()
-                        .or(self.system_cmyk_bytes.as_ref());
+                    let cmyk_bytes = page.cmyk_bytes.as_ref().or(self.system_cmyk_bytes.as_ref());
                     let icc_cache =
                         stet_render::build_icc_cache_for_list(&page.display_list, cmyk_bytes);
                     let image_cache = ImageCache::build(&page.display_list, Some(&icc_cache));
@@ -722,10 +719,8 @@ impl ViewerApp {
             }
         }
 
-        let image = ColorImage::from_rgba_unmultiplied(
-            [vp.pixel_w as usize, vp.pixel_h as usize],
-            &rgba,
-        );
+        let image =
+            ColorImage::from_rgba_unmultiplied([vp.pixel_w as usize, vp.pixel_h as usize], &rgba);
         let texture = ctx.load_texture(
             format!("viewport_p{}", page.page_num),
             image,
@@ -762,8 +757,7 @@ impl ViewerApp {
 
         // Already have a valid buffer?
         if let Some(ref fp) = page.full_page {
-            if (fp.effective_scale - effective_scale).abs() < 0.001
-                && (fp.ppp - ppp).abs() < 0.001
+            if (fp.effective_scale - effective_scale).abs() < 0.001 && (fp.ppp - ppp).abs() < 0.001
             {
                 return;
             }
@@ -810,8 +804,19 @@ impl ViewerApp {
         // Use std::thread (not rayon) so it doesn't compete with viewport renders
         std::thread::spawn(move || {
             let result = stet_render::render_region_prepared_parallel_cancellable(
-                &dl, &prep, 0.0, 0.0, dev_w, dev_h, fp_pixel_w, fp_pixel_h, dpi,
-                Some(&icc), Some(&img_cache), no_aa, &cancel,
+                &dl,
+                &prep,
+                0.0,
+                0.0,
+                dev_w,
+                dev_h,
+                fp_pixel_w,
+                fp_pixel_h,
+                dpi,
+                Some(&icc),
+                Some(&img_cache),
+                no_aa,
+                &cancel,
             );
             let Some(rgba) = result else {
                 egui_ctx.request_repaint();
@@ -998,8 +1003,18 @@ impl ViewerApp {
         // in a par_iter().collect() call.
         std::thread::spawn(move || {
             let result = stet_render::render_region_prepared_parallel_cancellable(
-                &dl, &prep, vp_clone.vp_x, vp_clone.vp_y, vp_clone.vp_w, vp_clone.vp_h,
-                vp_clone.pixel_w, vp_clone.pixel_h, dpi, Some(&icc), Some(&img_cache), no_aa,
+                &dl,
+                &prep,
+                vp_clone.vp_x,
+                vp_clone.vp_y,
+                vp_clone.vp_w,
+                vp_clone.vp_h,
+                vp_clone.pixel_w,
+                vp_clone.pixel_h,
+                dpi,
+                Some(&icc),
+                Some(&img_cache),
+                no_aa,
                 &cancel,
             );
             let Some(rgba) = result else {
@@ -1248,11 +1263,10 @@ impl eframe::App for ViewerApp {
 
         // Handle file drops — send to interpreter for processing
         let dropped: Vec<_> = ctx.input(|i| {
-            i.raw.dropped_files
+            i.raw
+                .dropped_files
                 .iter()
-                .filter_map(|f| {
-                    f.path.as_ref().map(|p| p.to_string_lossy().to_string())
-                })
+                .filter_map(|f| f.path.as_ref().map(|p| p.to_string_lossy().to_string()))
                 .collect()
         });
         if !dropped.is_empty() {
@@ -1498,13 +1512,11 @@ impl eframe::App for ViewerApp {
                     // texture to fill the full image area as a placeholder.
                     let tex_origin = img_origin + egui::vec2(tex_x, tex_y);
                     let visible_area = egui::Rect::from_min_size(origin, available);
-                    let tex_rect_candidate = egui::Rect::from_min_size(
-                        tex_origin,
-                        egui::vec2(tex_w, tex_h),
-                    );
+                    let tex_rect_candidate =
+                        egui::Rect::from_min_size(tex_origin, egui::vec2(tex_w, tex_h));
 
-                    let tex_visible = visible_area.intersects(tex_rect_candidate)
-                        && tex_w > 1.0 && tex_h > 1.0;
+                    let tex_visible =
+                        visible_area.intersects(tex_rect_candidate) && tex_w > 1.0 && tex_h > 1.0;
 
                     // Background for the full image area
                     let full_rect = egui::Rect::from_min_size(img_origin, egui::vec2(img_w, img_h));
@@ -1537,8 +1549,7 @@ impl eframe::App for ViewerApp {
                     let center_y = ((available.y - img_h) / 2.0).max(0.0);
                     let origin = ui.min_rect().min;
                     let img_origin = origin + egui::vec2(center_x, center_y);
-                    let fill_rect =
-                        egui::Rect::from_min_size(img_origin, egui::vec2(img_w, img_h));
+                    let fill_rect = egui::Rect::from_min_size(img_origin, egui::vec2(img_w, img_h));
                     ui.painter().image(
                         tex.id(),
                         fill_rect,
@@ -1549,8 +1560,8 @@ impl eframe::App for ViewerApp {
 
                 // Pulsing indicator while rendering in background
                 // (only shown after 1 second to avoid flashing on fast renders)
-                let rendering_in_background = self.fullpage_receiver.is_some()
-                    || self.render_receiver.is_some();
+                let rendering_in_background =
+                    self.fullpage_receiver.is_some() || self.render_receiver.is_some();
                 let render_start = self.fullpage_started.or(self.render_requested_at);
                 if rendering_in_background
                     && render_start.is_some_and(|t| t.elapsed() >= Duration::from_secs(1))

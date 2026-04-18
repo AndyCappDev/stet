@@ -241,7 +241,7 @@ mod tests {
     #[test]
     fn obj_as_f64_int_and_real() {
         assert_eq!(PdfObj::Int(42).as_f64(), Some(42.0));
-        assert_eq!(PdfObj::Real(3.14).as_f64(), Some(3.14));
+        assert_eq!(PdfObj::Real(2.5).as_f64(), Some(2.5));
         assert_eq!(PdfObj::Null.as_f64(), None);
     }
 

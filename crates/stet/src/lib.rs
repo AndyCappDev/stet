@@ -150,11 +150,7 @@ impl Interpreter {
     ///
     /// The interpreter state is isolated via save/restore between calls.
     #[cfg(feature = "render")]
-    pub fn render(
-        &mut self,
-        ps_data: &[u8],
-        dpi: f64,
-    ) -> Result<Vec<RenderedPage>, StetError> {
+    pub fn render(&mut self, ps_data: &[u8], dpi: f64) -> Result<Vec<RenderedPage>, StetError> {
         let dl_pages = self.render_to_display_list(ps_data, dpi)?;
 
         let icc_cache = if self.use_icc {
@@ -223,11 +219,7 @@ impl Interpreter {
     ///
     /// Returns the PDF file contents as bytes.
     #[cfg(feature = "pdf-output")]
-    pub fn render_to_pdf(
-        &mut self,
-        ps_data: &[u8],
-        dpi: f64,
-    ) -> Result<Vec<u8>, StetError> {
+    pub fn render_to_pdf(&mut self, ps_data: &[u8], dpi: f64) -> Result<Vec<u8>, StetError> {
         let ps_data = strip_dos_eps_header(ps_data);
         let is_eps = content_is_epsf(ps_data);
 
@@ -396,7 +388,11 @@ impl Interpreter {
         #[cfg(feature = "render")]
         let need_showpage = pages_ref.lock().map(|g| g.is_empty()).unwrap_or(true);
         #[cfg(not(feature = "render"))]
-        let need_showpage = self.ctx.capture_display_lists.as_ref().map_or(true, |v| v.is_empty());
+        let need_showpage = self
+            .ctx
+            .capture_display_lists
+            .as_ref()
+            .map_or(true, |v| v.is_empty());
 
         if need_showpage {
             let _ = parse_and_exec(&mut self.ctx, b"grestore showpage");
@@ -421,12 +417,7 @@ impl Interpreter {
     }
 
     #[cfg(feature = "pdf-output")]
-    fn exec_eps(
-        &mut self,
-        ps_data: &[u8],
-        llx: f64,
-        lly: f64,
-    ) -> Result<(), StetError> {
+    fn exec_eps(&mut self, ps_data: &[u8], llx: f64, lly: f64) -> Result<(), StetError> {
         let wrapper = format!("gsave {} {} translate", -llx, -lly);
         parse_and_exec(&mut self.ctx, wrapper.as_bytes()).map_err(ps_err)?;
         let _ = parse_and_exec(&mut self.ctx, ps_data);
@@ -441,9 +432,7 @@ impl Interpreter {
             let factory = NullSinkFactory(pages_ref.clone());
             let mut dev = stet_render::SkiaDevice::with_sink_factory(w, h, Box::new(factory));
             if use_icc {
-                dev.set_system_cmyk_bytes(Arc::new(
-                    embedded_resources::DEFAULT_CMYK_ICC.to_vec(),
-                ));
+                dev.set_system_cmyk_bytes(Arc::new(embedded_resources::DEFAULT_CMYK_ICC.to_vec()));
             }
             Box::new(dev) as Box<dyn OutputDevice>
         }));
@@ -507,11 +496,18 @@ unsafe impl Sync for NullSinkFactory {}
 
 #[cfg(feature = "render")]
 impl stet_graphics::device::PageSinkFactory for NullSinkFactory {
-    fn create_sink(&self, _output_path: &str) -> Result<Box<dyn stet_graphics::device::PageSink>, String> {
+    fn create_sink(
+        &self,
+        _output_path: &str,
+    ) -> Result<Box<dyn stet_graphics::device::PageSink>, String> {
         // We don't know the pixel dimensions here — they'll be set by begin_page.
         // Use 0x0 as placeholders; the actual dimensions come from the device.
         let pages = self.0.clone();
-        Ok(Box::new(NullSink { width: 0, height: 0, pages }))
+        Ok(Box::new(NullSink {
+            width: 0,
+            height: 0,
+            pages,
+        }))
     }
 }
 
@@ -595,7 +591,14 @@ fn install_device(
         h = height_pt,
         dpi = dpi
     );
-    parse_and_exec(ctx, setup.as_bytes()).map_err(ps_err)
+    // The caller-supplied DPI is an explicit library-level request, not
+    // an unsolicited change from within the PS program. Open the gate
+    // around setpagedevice so merge_request_dict accepts HWResolution.
+    let saved = ctx.allow_ps_resolution;
+    ctx.allow_ps_resolution = true;
+    let result = parse_and_exec(ctx, setup.as_bytes()).map_err(ps_err);
+    ctx.allow_ps_resolution = saved;
+    result
 }
 
 fn finish_device(ctx: &mut Context) {

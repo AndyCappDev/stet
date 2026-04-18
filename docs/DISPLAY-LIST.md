@@ -27,6 +27,7 @@ through the CTM). `FillParams` carries:
 | `ctm` | `Matrix` | CTM at paint time (identity for device-space paths) |
 | `overprint` | `bool` | Overprint flag |
 | `overprint_mode` | `i32` | OPM (0 or 1) |
+| `opm_paired` | `bool` | True when `/OPM` and `/op`/`/OP` were set in the same ExtGState — enables strict OPM-1 zero-preserve |
 | `painted_channels` | `u8` | CMYK channel bitmask for overprint |
 | `is_device_cmyk` | `bool` | True when color space is DeviceCMYK/ICCBased(4) |
 | `spot_color` | `Option<SpotColor>` | Separation/DeviceN color (if applicable) |
@@ -44,8 +45,9 @@ through the CTM). `FillParams` carries:
 Stroke { path: PsPath, params: StrokeParams }
 ```
 
-A stroked path. `StrokeParams` carries everything `FillParams` has for
-color/overprint/transfer, plus line style:
+A stroked path. `StrokeParams` carries the same colour/overprint/transfer/
+halftone/BG-UCR state as `FillParams` (including `opm_paired`, `spot_color`,
+`rendering_intent`, `alpha`, `blend_mode`), plus line style:
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -59,17 +61,20 @@ color/overprint/transfer, plus line style:
 ### Image
 
 ```rust
-Image { sample_data: Vec<u8>, params: ImageParams }
+Image { sample_data: Arc<Vec<u8>>, params: ImageParams }
 ```
 
-A raster image. `sample_data` contains raw pixel samples in the **native
-color space** — CMYK images are CMYK bytes, not pre-converted to RGB.
+A raster image. `sample_data` is an `Arc<Vec<u8>>` of raw pixel samples in
+the **native color space** — CMYK images are CMYK bytes, not pre-converted
+to RGB. The `Arc` lets cloned display lists (viewer zoom, WASM viewport)
+share the sample buffer without copying.
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `width` | `u32` | Image width in samples |
 | `height` | `u32` | Image height in samples |
 | `color_space` | `ImageColorSpace` | Native color space (see below) |
+| `bits_per_component` | `u8` | 1, 2, 4, 8, or 16 |
 | `ctm` | `Matrix` | Image-to-device transform |
 | `image_matrix` | `Matrix` | Sample-to-image transform |
 | `interpolate` | `bool` | Bilinear interpolation hint |
@@ -77,6 +82,9 @@ color space** — CMYK images are CMYK bytes, not pre-converted to RGB.
 | `alpha` | `f64` | Image opacity |
 | `blend_mode` | `u8` | PDF blend mode |
 | `overprint` | `bool` | Overprint flag |
+| `overprint_mode` | `i32` | OPM (0 or 1) |
+| `opm_paired` | `bool` | Strict OPM-1 flag (see `FillParams`) |
+| `painted_channels` | `u8` | CMYK channel bitmask for overprint |
 
 #### Image Color Spaces
 
@@ -90,8 +98,8 @@ program or PDF:
 | `DeviceCMYK` | 4 components per sample |
 | `ICCBased { n, profile_hash, profile_data }` | N components with embedded ICC profile bytes |
 | `Indexed { base, hival, lookup }` | Palette-indexed color |
-| `Separation { name, alt, tint_table }` | Named spot ink with tint transform |
-| `DeviceN { names, alt, tint_table }` | Multi-ink with tint transform |
+| `Separation { name, alt_space, tint_table }` | Named spot ink with tint transform |
+| `DeviceN { names, alt_space, tint_table }` | Multi-ink with tint transform |
 | `CIEBasedABC { params }` | CIE-based 3-component (CalRGB) |
 | `CIEBasedA { params }` | CIE-based 1-component (CalGray) |
 | `Lab { white_point, range }` | CIE L\*a\*b\* 3-component |
@@ -117,8 +125,15 @@ the rasterizer (which renders text via Fill elements with glyph outlines).
 | `font_type` | `i32` | 0 (composite), 1 (Type 1), 2 (CFF), 3 (Type 3), 42 (TrueType) |
 | `font_size` | `f64` | Effective device-space font size |
 | `color` | `DeviceColor` | Text color |
+| `ctm` | `[f64; 6]` | CTM at render time |
+| `font_matrix` | `[f64; 6]` | User-space font matrix |
 | `paint_type` | `i32` | 0 = filled, 2 = stroked |
+| `stroke_width` | `f64` | Device-space stroke width for PaintType 2 |
 | `spot_color` | `Option<SpotColor>` | Separation/DeviceN text color |
+| `rendering_intent` | `u8` | ICC rendering intent |
+| `transfer` | `TransferState` | Pre-sampled transfer function tables |
+| `halftone` | `HalftoneState` | Halftone screen parameters |
+| `bg_ucr` | `BgUcrState` | Black generation / undercolor removal tables |
 
 ### Clip / InitClip
 
@@ -165,19 +180,35 @@ PatternFill { params: PatternFillParams }
 ```
 
 A path filled or stroked with a tiling pattern. Contains a pre-rendered
-display list for a single tile, plus the tiling parameters (step size,
+display list for a single tile plus the tiling parameters (step size,
 bounding box, pattern matrix). Supports both colored (PaintType 1) and
 uncolored (PaintType 2) patterns.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `path` | `PsPath` | Path to fill (or stroke centreline when `stroke_params` is `Some`) |
+| `fill_rule` | `FillRule` | `NonZeroWinding` or `EvenOdd` |
+| `tile` | `DisplayList` | Pre-rendered display list for a single tile |
+| `pattern_matrix` | `Matrix` | Pattern-space → device-space transform |
+| `bbox` | `[f64; 4]` | Tile bbox in pattern space |
+| `xstep`, `ystep` | `f64` | Horizontal/vertical step between tile origins |
+| `paint_type` | `i32` | 1 = colored, 2 = uncolored |
+| `underlying_color` | `Option<DeviceColor>` | Fill color for uncolored patterns |
+| `pattern_id` | `u32` | Unique ID for PDF dedup |
+| `device_space_tile` | `bool` | `true` when tile element CTMs already bake in the pattern matrix |
+| `flip_tile_y` | `bool` | `true` when the tile was authored Y-flipped (negative `d` in pattern matrix) |
+| `stroke_params` | `Option<StrokeParams>` | When `Some`, `path` is a user-space stroke centreline |
+| `overprint_mode` | `i32` | PDF OPM (0 or 1) |
 
 When `stroke_params` is `Some`, the `path` is a user-space stroke centerline
 and the renderer expands it to a fill outline using `PathStroker::stroke()`
 with the full stroke parameters (width, cap, join, miter, dash). This is
 used for pattern-stroked paths in PDF.
 
-`overprint_mode` carries the PDF OPM value (0 or 1). When 1 and the tile
-contains CMYK images, zero-CMYK pixels (0,0,0,0) are rendered with alpha=0
-(transparent) instead of opaque white, implementing the "no ink = don't
-paint" semantics required by the PDF overprint specification.
+When `overprint_mode` is 1 and the tile contains CMYK images, zero-CMYK
+pixels (0,0,0,0) are rendered with alpha=0 (transparent) instead of opaque
+white, implementing the "no ink = don't paint" semantics required by the
+PDF overprint specification.
 
 ### Group (PDF only)
 
@@ -189,6 +220,15 @@ A PDF transparency group. Children are rendered offscreen and composited
 onto the parent with the specified blend mode and opacity. Supports
 isolated and knockout semantics. Produced by the PDF reader; the
 PostScript interpreter does not generate these.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `bbox` | `[f64; 4]` | Device-space bbox (`[x_min, y_min, x_max, y_max]`) |
+| `isolated` | `bool` | When `true`, composite against a transparent backdrop |
+| `knockout` | `bool` | When `true`, children composite against the initial backdrop, not siblings |
+| `blend_mode` | `u8` | Blend mode for compositing onto the parent |
+| `alpha` | `f64` | Group opacity (0.0–1.0) |
+| `color_space` | `GroupColorSpace` | `Inherited` / `DeviceGray` / `DeviceRGB` / `DeviceCMYK` — the `/CS` entry on the `/Group` dict; drives whether renderers must track CMYK alongside sRGB for correct blend-mode math |
 
 ### OcgGroup (PDF only)
 
@@ -207,12 +247,45 @@ added in a future update.
 ### SoftMasked (PDF only)
 
 ```rust
-SoftMasked { mask: DisplayList, content: DisplayList, params: SoftMaskParams }
+SoftMasked {
+    mask: DisplayList,
+    content: DisplayList,
+    params: SoftMaskParams,
+    mask_cache: Arc<Mutex<Option<Option<MaskRaster>>>>,
+}
 ```
 
 Content masked by a soft mask form. The mask display list is rendered to
 grayscale (luminosity or alpha), then multiplied with the content's alpha
 channel. Produced by the PDF reader only.
+
+`mask_cache` holds the rasterized mask across bands and zoom levels: `None`
+= not yet rasterized; `Some(None)` = rasterized and produced no visible
+mask (memoized); `Some(Some(raster))` = populated. The raster is
+invalidated when the render scale changes.
+
+`SoftMaskParams`:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `subtype` | `SoftMaskSubtype` | `Alpha` or `Luminosity` |
+| `bbox` | `[f64; 4]` | Device-space bbox |
+| `backdrop_color` | `Option<[f64; 3]>` | Backdrop RGB for luminosity masks (`None` = black) |
+| `transfer_invert` | `bool` | Invert mask values (from `/TR {1 exch sub}`) |
+| `has_nested_mask_scope` | `bool` | The mask form itself contained `gs`-set SMasks; renderer composites semi-transparent mask pixels onto the backdrop before extracting luminosity |
+| `parent_clip_bbox` | `Option<[f64; 4]>` | Parent gstate's clip bbox at emit time — used as an upper bound on the cached raster size so unbounded shadings inside a sentinel clip can't blow out mask allocation |
+
+## Page-Level Group Color Space
+
+`DisplayList` also carries a page-level `GroupColorSpace`, settable via
+`set_page_group_color_space()` and read via `page_group_color_space()`.
+The PDF reader populates this when a page dictionary declares a `/Group /CS`
+entry. Per PDF §11.6.7, the page group's colour space is the one in which
+any contained transparency compositing must be performed. The rasterizer
+uses this as a signal to maintain a parallel CMYK buffer alongside the
+sRGB pixmap so blend-mode math (especially the inversion-sensitive
+separable modes and the non-separable HSL modes) operates in the spec-
+correct space.
 
 ## Path Representation
 

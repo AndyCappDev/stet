@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 description = "Interactive egui viewer for stet PostScript interpreter"
+repository.workspace = true
+homepage.workspace = true
+keywords = ["postscript", "pdf", "viewer", "gui"]
+categories = ["gui", "graphics"]
 
 [dependencies]
 stet-graphics.workspace = true

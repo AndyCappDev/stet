@@ -554,7 +554,11 @@ impl IccCache {
         // baked into the CLUT (when enabled), so no per-pixel correction
         // is needed here.
         if let Some(clut) = &cached.clut4 {
-            return Some(apply_clut4_cmyk_to_rgb(clut, &samples[..expected_len], pixel_count));
+            return Some(apply_clut4_cmyk_to_rgb(
+                clut,
+                &samples[..expected_len],
+                pixel_count,
+            ));
         }
 
         let src = &samples[..expected_len];
@@ -934,10 +938,7 @@ fn apply_clut4_cmyk_to_rgb(clut: &Clut4, src: &[u8], pixel_count: usize) -> Vec<
             let va = lut[base + oa + ch] as i32;
             let vb = lut[base + ob + ch] as i32;
             let v111 = lut[base + o111 + ch] as i32;
-            v000 * 255
-                + (va - v000) * w1 as i32
-                + (vb - va) * w2 as i32
-                + (v111 - vb) * w3 as i32
+            v000 * 255 + (va - v000) * w1 as i32 + (vb - va) * w2 as i32 + (v111 - vb) * w3 as i32
         };
 
         let r_lo = tetra_channel(base_lo, 0);
@@ -984,7 +985,9 @@ fn verify_clut4(
     const N_SAMPLES: usize = 4096;
     let mut rng: u64 = 0xa8b3c4d5e6f70819;
     let mut next = || {
-        rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        rng = rng
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         rng
     };
     let mut cmyk = Vec::with_capacity(N_SAMPLES * 4);
@@ -1022,7 +1025,8 @@ fn verify_clut4(
         let db = interp[i * 3 + 2] as i32 - reference[i * 3 + 2] as i32;
         let d = ((dr * dr + dg * dg + db * db) as f64).sqrt();
         dists.push(d);
-        max_ch = max_ch.max(dr.unsigned_abs() as u8)
+        max_ch = max_ch
+            .max(dr.unsigned_abs() as u8)
             .max(dg.unsigned_abs() as u8)
             .max(db.unsigned_abs() as u8);
     }
@@ -1359,4 +1363,3 @@ mod tests {
         }
     }
 }
-

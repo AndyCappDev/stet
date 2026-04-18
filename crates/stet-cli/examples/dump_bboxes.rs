@@ -24,7 +24,10 @@ fn main() {
     let page = page_1based - 1;
     let list = doc.render_page(page, dpi).unwrap();
 
-    println!("# Display list for {} page {} at {} DPI", pdf_path, page_1based, dpi);
+    println!(
+        "# Display list for {} page {} at {} DPI",
+        pdf_path, page_1based, dpi
+    );
     println!("# Elements: {}", list.elements().len());
     println!();
     for line in debug_bbox_comparison(&list, dpi) {

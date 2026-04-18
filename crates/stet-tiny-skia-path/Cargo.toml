@@ -26,7 +26,8 @@ keywords = [
 ]
 categories = ["graphics"]
 license = "BSD-3-Clause"
-repository = "https://github.com/RazrFalcon/tiny-skia/tree/master/path"
+repository = "https://github.com/AndyCappDev/stet"
+homepage = "https://github.com/AndyCappDev/stet"
 
 [dependencies.arrayref]
 version = "0.3.6"

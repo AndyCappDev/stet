@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 description = "PostScript Level 3 interpreter — library API"
+repository.workspace = true
+homepage.workspace = true
+keywords = ["postscript", "pdf", "interpreter", "rendering", "graphics"]
+categories = ["graphics", "rendering"]
 
 [features]
 default = ["render", "pdf-output"]
@@ -19,3 +23,17 @@ stet-ops.workspace = true
 stet-engine.workspace = true
 stet-render = { workspace = true, optional = true }
 stet-pdf = { workspace = true, optional = true }
+
+[dev-dependencies]
+png = { workspace = true }
+stet-pdf-reader = { workspace = true }
+
+[[example]]
+name = "render_ps"
+required-features = ["render"]
+
+[[example]]
+name = "render_pdf"
+
+[[example]]
+name = "display_list"

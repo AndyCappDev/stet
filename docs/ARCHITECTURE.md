@@ -94,8 +94,9 @@ describe everything on a page in device coordinates:
 | `MeshShading { params }` | Gouraud triangle mesh (Types 4/5) |
 | `PatchShading { params }` | Coons/tensor patch mesh (Types 6/7) |
 | `PatternFill { params }` | Tiled pattern |
-| `Group { elements, params }` | Transparency group (blend mode, alpha, isolated/knockout) |
-| `SoftMasked { content, mask, params }` | Soft mask (luminosity or alpha mask) |
+| `Group { elements, params }` | Transparency group (blend mode, alpha, isolated/knockout, group CS) |
+| `OcgGroup { elements, ocg_id, default_visible }` | PDF Optional Content Group (layer) |
+| `SoftMasked { mask, content, params, mask_cache }` | Soft mask (luminosity or alpha mask) |
 
 Paths are already transformed through the CTM to device coordinates at
 construction time. Colors are resolved. Images contain raw sample data in
@@ -128,7 +129,7 @@ later (e.g., zooming in the viewer) scales the device-space coordinates.
    at a time. Executable names are looked up in the dictionary stack and
    dispatched; procedures are stepped through element by element.
 
-3. **Operators** (`stet-ops`): ~268 native Rust functions that manipulate
+3. **Operators** (`stet-ops`): ~320 native Rust functions that manipulate
    the operand stack, dictionary stack, graphics state, and display list.
    Path-building operators (`moveto`, `lineto`, `curveto`) construct paths
    on the graphics state. Painting operators (`fill`, `stroke`, `image`)
@@ -180,7 +181,7 @@ consumer (rasterizer, PDF writer, viewport renderer) works with both sources.
 
 | Device | Crate | Description |
 |--------|-------|------------|
-| `SkiaDevice` | `stet-render` | Rasterizes to RGBA via tiny-skia. Banded rendering, clip caching, ICC color. |
+| `SkiaDevice` | `stet-render` | Rasterizes to RGBA via the vendored `stet-tiny-skia` fork. Banded rendering, clip caching, ICC color. |
 | `PdfDevice` | `stet-pdf` | Converts display lists to PDF with font embedding, image compression, shadings. |
 | `NullDevice` | `stet-core` | Discards all output. Used for test suites and display list capture. |
 
@@ -190,6 +191,7 @@ Output devices implement the `OutputDevice` trait from `stet-core`:
 
 ```rust
 pub trait OutputDevice {
+    // Required:
     fn fill_path(&mut self, path: &PsPath, params: &FillParams);
     fn stroke_path(&mut self, path: &PsPath, params: &StrokeParams);
     fn clip_path(&mut self, path: &PsPath, params: &ClipParams);
@@ -205,14 +207,29 @@ pub trait OutputDevice {
     fn paint_mesh_shading(&mut self, params: &MeshShadingParams) {}
     fn paint_patch_shading(&mut self, params: &PatchShadingParams) {}
     fn paint_pattern_fill(&mut self, params: &PatternFillParams) {}
+    fn set_trim_box(&mut self, llx: f64, lly: f64, urx: f64, ury: f64) {}
     fn replay_and_show(&mut self, list: DisplayList, path: &str) -> Result<(), String>;
     fn finish(&mut self) -> Result<(), String> { Ok(()) }
+    fn finish_with_context(&mut self, ctx: &Context) -> Result<(), String> { self.finish() }
+    fn as_any(&self) -> &dyn std::any::Any { &() }
 }
 ```
 
 The trait has a default `replay_and_show()` that iterates over a display list
-and dispatches each element to the appropriate method. Devices like `SkiaDevice`
-override this with optimized banded rendering.
+and dispatches each element to the appropriate method. `Group` and
+`SoftMasked` elements are no-ops in the default — devices that care about
+transparency (currently only `SkiaDevice`) override `replay_and_show()`
+with their own banded renderer. `OcgGroup` is unwrapped inline: clip ops
+always apply so downstream clips are consistent, but paint ops are gated
+on `default_visible`. `Text` elements are ignored by rasterizers and only
+consumed by `PdfDevice`.
+
+`set_trim_box` is only meaningful for PDF output; other devices ignore
+it. `finish_with_context` gives devices a chance to run context-aware
+finalization (e.g., PDF output needs access to the font directory) and
+defaults to `finish()`. `as_any` is the downcast escape hatch for
+consumers that need the concrete device (e.g., reading `PdfDevice`'s
+in-memory bytes).
 
 ### Creating a Custom Output Device
 
@@ -353,28 +370,75 @@ affected font will not render correctly.
 ## Crate Dependency Graph
 
 ```
+stet-tiny-skia-path  Vendored fork of tiny-skia-path (BSD-3-Clause)
+stet-tiny-skia       Vendored fork of tiny-skia — rasterizer (BSD-3-Clause)
+     │
 stet-fonts           No dependencies (geometry, font parsing, encoding)
      │
 stet-graphics        Color types, display list, ICC, mesh shading
      │
 stet-core            PS types, Context, VM stores, tokenizer, OutputDevice trait
      │
-stet-ops             ~268 operator implementations
+stet-ops             ~320 operator implementations
      │
 stet-engine          Eval loop, parse_and_exec, exec_sync
      │
-stet-render          tiny-skia rasterizer, viewport rendering, PNG output
+stet-render          stet-tiny-skia rasterizer, viewport rendering, PNG output
 stet-pdf             PDF output device (display list → PDF)
 stet-pdf-reader      PDF parser (PDF → display list) — independent of stet-core
 stet-viewer          egui desktop viewer
 stet (facade)        Batteries-included API with embedded resources
 stet-cli             Binary entry point
-stet-wasm            WebAssembly bindings
+stet-wasm            WebAssembly bindings (excluded from the main workspace)
 ```
 
-### Independence of stet-pdf-reader
+The two `stet-tiny-skia*` crates are vendored forks of the upstream
+tiny-skia / tiny-skia-path crates. They carry their own BSD-3-Clause
+licence (separate from the workspace's Apache-2.0 OR MIT) and are
+modified for stet's specific rasterisation needs.
 
-The PDF reader depends only on `stet-fonts` and `stet-graphics`. It does not
-use the PostScript VM, operator system, or eval loop. This means it can be
-used in contexts where PostScript interpretation is not needed — for example,
-a pure PDF viewer or a PDF-to-image converter.
+### Using Individual Crates
+
+Not every stet crate is coupled to the PostScript interpreter. The
+workspace is layered so you can pick up just the pieces you need.
+
+**Zero PS-VM dependency — standalone building blocks:**
+
+| Crate | Internal deps | What it gives you |
+|-------|---------------|-------------------|
+| `stet-tiny-skia-path` | none | Bezier path primitives (vendored, BSD-3) |
+| `stet-tiny-skia` | stet-tiny-skia-path | Software rasterizer (vendored, BSD-3) |
+| `stet-fonts` | none | Type 1 / CFF / TrueType parsing, `PsPath`, `Matrix`, AGL, encodings |
+| `stet-graphics` | stet-fonts | `DisplayList`, `DeviceColor`, `IccCache`, mesh-shading parser |
+| `stet-pdf-reader` | stet-fonts, stet-graphics | PDF → `DisplayList`; no PS interpreter involved |
+
+**Output / rendering crates** pull in `stet-core` for the `OutputDevice`
+trait, but do **not** pull in the interpreter (`stet-ops`, `stet-engine`):
+
+| Crate | Internal deps | What it gives you |
+|-------|---------------|-------------------|
+| `stet-render` | stet-fonts, stet-graphics, stet-core, stet-tiny-skia | `DisplayList` → RGBA (banded, viewport, ICC-aware) |
+| `stet-pdf` | stet-fonts, stet-graphics, stet-core | `DisplayList` → PDF bytes |
+
+**Interpreter-only** crates that rarely make sense to depend on in
+isolation: `stet-core` (PS VM types), `stet-ops` (operator
+implementations), `stet-engine` (eval loop), `stet-viewer` (egui desktop
+viewer), `stet-cli` (binary), `stet-wasm` (wasm-bindgen glue).
+
+**Useful external combos:**
+
+- **Pure PDF viewer / rasterizer:** `stet-pdf-reader` + `stet-render` —
+  no PostScript VM involved.
+- **PDF → PDF normaliser / rewriter:** `stet-pdf-reader` + `stet-pdf`.
+- **Custom output format (SVG, TIFF, accessibility tree):**
+  `stet-pdf-reader` + your own `DisplayElement` iterator — no rendering
+  crate required at all.
+- **Font-only workflows:** `stet-fonts` on its own.
+- **Batteries-included:** the `stet` facade, which exposes PS
+  interpretation, rendering, and PDF output behind feature flags.
+
+The deliberate design choice worth highlighting: **`stet-pdf-reader` has
+no dependency on `stet-core`**. The full PDF parser can be linked without
+the PostScript VM, operator system, or eval loop — it produces the same
+`DisplayList` type that the interpreter produces, and every downstream
+consumer treats them identically.

@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 description = "PostScript operator implementations for stet"
+repository.workspace = true
+homepage.workspace = true
+keywords = ["postscript", "operators", "interpreter"]
+categories = ["graphics"]
 
 [dependencies]
 stet-fonts.workspace = true

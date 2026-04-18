@@ -541,10 +541,10 @@ mod tests {
 
     #[test]
     fn test_ps_object_real() {
-        let obj = PsObject::real(3.14);
+        let obj = PsObject::real(2.5);
         assert!(obj.is_real());
         assert!(obj.is_numeric());
-        assert_eq!(obj.as_f64(), Some(3.14));
+        assert_eq!(obj.as_f64(), Some(2.5));
         assert_eq!(obj.as_i32(), None);
         assert_eq!(obj.type_name(), b"realtype");
     }

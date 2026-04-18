@@ -512,23 +512,46 @@ fn run_viewer_mode(
 
             // REPL done — signal JobDone, then accept dropped files
             if let Some(ref sender) = ctx.display_list_sender {
-                let _ = sender.send((stet_graphics::display_list::DisplayList::new(), -1.0, 0, 0, None));
+                let _ = sender.send((
+                    stet_graphics::display_list::DisplayList::new(),
+                    -1.0,
+                    0,
+                    0,
+                    None,
+                ));
             }
         } else {
             // Process initial CLI files: PDF files go direct, PS/EPS through interpreter
-            let ps_files: Vec<String> = file_args.iter().filter(|f| !is_pdf_file(f)).cloned().collect();
-            let pdf_files: Vec<String> = file_args.iter().filter(|f| is_pdf_file(f)).cloned().collect();
+            let ps_files: Vec<String> = file_args
+                .iter()
+                .filter(|f| !is_pdf_file(f))
+                .cloned()
+                .collect();
+            let pdf_files: Vec<String> = file_args
+                .iter()
+                .filter(|f| is_pdf_file(f))
+                .cloned()
+                .collect();
 
             // Render PDF files first (no interpreter needed)
             for (i, path) in pdf_files.iter().enumerate() {
                 if i > 0 || !ps_files.is_empty() {
                     if let Some(ref sender) = ctx.display_list_sender {
-                        let _ = sender.send((stet_graphics::display_list::DisplayList::new(), 0.0, 0, 0, None));
+                        let _ = sender.send((
+                            stet_graphics::display_list::DisplayList::new(),
+                            0.0,
+                            0,
+                            0,
+                            None,
+                        ));
                     }
                 }
                 if let Some(ref sender) = ctx.display_list_sender {
                     render_dropped_pdf(
-                        path, dpi_override, sender, &ctx.icc_cache,
+                        path,
+                        dpi_override,
+                        sender,
+                        &ctx.icc_cache,
                         icc_cfg_thread.use_output_intent,
                     );
                 }
@@ -538,7 +561,13 @@ fn run_viewer_mode(
             if !ps_files.is_empty() {
                 if !pdf_files.is_empty() {
                     if let Some(ref sender) = ctx.display_list_sender {
-                        let _ = sender.send((stet_graphics::display_list::DisplayList::new(), 0.0, 0, 0, None));
+                        let _ = sender.send((
+                            stet_graphics::display_list::DisplayList::new(),
+                            0.0,
+                            0,
+                            0,
+                            None,
+                        ));
                     }
                 }
                 run_file_jobs_viewer(&mut ctx, dpi_override, &ps_files, advance_rx);
@@ -546,7 +575,13 @@ fn run_viewer_mode(
 
             // CLI files done — send final JobDone
             if let Some(ref sender) = ctx.display_list_sender {
-                let _ = sender.send((stet_graphics::display_list::DisplayList::new(), -1.0, 0, 0, None));
+                let _ = sender.send((
+                    stet_graphics::display_list::DisplayList::new(),
+                    -1.0,
+                    0,
+                    0,
+                    None,
+                ));
             }
         }
 
@@ -564,21 +599,34 @@ fn run_viewer_mode(
             };
 
             // Signal new job so viewer clears old pages
-            let _ = sender.send((stet_graphics::display_list::DisplayList::new(), 0.0, 0, 0, None));
+            let _ = sender.send((
+                stet_graphics::display_list::DisplayList::new(),
+                0.0,
+                0,
+                0,
+                None,
+            ));
 
             if is_pdf_file(&path) {
                 render_dropped_pdf(
-                    &path, established_dpi, &sender, &ctx.icc_cache,
+                    &path,
+                    established_dpi,
+                    &sender,
+                    &ctx.icc_cache,
                     icc_cfg_thread.use_output_intent,
                 );
             } else {
-                run_file_jobs(
-                    &mut ctx, established_dpi, &[path], "viewer", None, None,
-                );
+                run_file_jobs(&mut ctx, established_dpi, &[path], "viewer", None, None);
             }
 
             // Signal job done
-            let _ = sender.send((stet_graphics::display_list::DisplayList::new(), -1.0, 0, 0, None));
+            let _ = sender.send((
+                stet_graphics::display_list::DisplayList::new(),
+                -1.0,
+                0,
+                0,
+                None,
+            ));
         }
         // file_drop_sender dropped (viewer closed) → loop ends → ctx drops
     });
@@ -1089,7 +1137,10 @@ fn execjob(
 fn is_newerror_set(ctx: &Context) -> bool {
     use stet_core::dict::DictKey;
     use stet_core::object::PsValue;
-    let newerror_id = ctx.names.find(b"newerror").unwrap_or(stet_core::object::NameId(0));
+    let newerror_id = ctx
+        .names
+        .find(b"newerror")
+        .unwrap_or(stet_core::object::NameId(0));
     match ctx.dicts.get(ctx.dollar_error, &DictKey::Name(newerror_id)) {
         Some(obj) => matches!(obj.value, PsValue::Bool(true)),
         None => true, // If we can't check, assume error

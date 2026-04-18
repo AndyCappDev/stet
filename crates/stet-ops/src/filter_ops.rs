@@ -10,7 +10,7 @@ use stet_core::error::PsError;
 use stet_core::file_store::FilterKind;
 use stet_core::object::{EntityId, ObjFlags, PsObject, PsValue};
 
-/// `filter`: source [params] /filtername filter → file
+/// `filter`: `source [params] /filtername filter → file`
 ///
 /// Creates a filter file that decodes data from `source` through the named filter.
 /// `source` can be a file or string.

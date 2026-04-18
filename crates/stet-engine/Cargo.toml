@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 description = "Execution engine for stet PostScript interpreter"
+repository.workspace = true
+homepage.workspace = true
+keywords = ["postscript", "interpreter", "eval"]
+categories = ["graphics"]
 
 [dependencies]
 stet-core.workspace = true

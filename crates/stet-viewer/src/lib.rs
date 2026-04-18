@@ -23,13 +23,7 @@ use stet_graphics::display_list::DisplayList;
 /// render-time ICC cache so runtime overprint math stays consistent with the
 /// baked RGB values in the display list. `None` means "use the CLI-level
 /// default" (typically the system CMYK profile).
-pub type DisplayListMsg = (
-    DisplayList,
-    f64,
-    u32,
-    u32,
-    Option<std::sync::Arc<Vec<u8>>>,
-);
+pub type DisplayListMsg = (DisplayList, f64, u32, u32, Option<std::sync::Arc<Vec<u8>>>);
 
 /// Message from interpreter to viewer via the relay thread.
 pub enum ViewerMsg {

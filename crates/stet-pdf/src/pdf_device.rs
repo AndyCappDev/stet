@@ -79,7 +79,9 @@ impl PdfDevice {
         }
         let (writer, catalog_ref, info_ref) = self.build_pdf(None).ok()?;
         let mut buf = Vec::new();
-        writer.write_pdf(&mut buf, catalog_ref, Some(info_ref)).ok()?;
+        writer
+            .write_pdf(&mut buf, catalog_ref, Some(info_ref))
+            .ok()?;
         Some(buf)
     }
 
@@ -90,7 +92,9 @@ impl PdfDevice {
         }
         let (writer, catalog_ref, info_ref) = self.build_pdf(Some(ctx)).ok()?;
         let mut buf = Vec::new();
-        writer.write_pdf(&mut buf, catalog_ref, Some(info_ref)).ok()?;
+        writer
+            .write_pdf(&mut buf, catalog_ref, Some(info_ref))
+            .ok()?;
         Some(buf)
     }
 

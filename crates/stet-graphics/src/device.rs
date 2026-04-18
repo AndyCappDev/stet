@@ -10,7 +10,7 @@ use crate::icc::ProfileHash;
 use std::sync::Arc;
 use stet_fonts::geometry::{Matrix, PsPath};
 
-/// Pre-sampled transfer function (256 samples, domain [0,1] → range [0,1]).
+/// Pre-sampled transfer function (256 samples, domain `[0,1]` → range `[0,1]`).
 /// Arc for cheap clone across display list elements.
 pub type TransferTable = Arc<Vec<f64>>;
 
@@ -45,7 +45,7 @@ pub struct HalftoneScreen {
     /// Spot function as PDF Type 4 calculator bytes (e.g., b"{ dup mul exch dup mul add 1 exch sub }").
     /// None if conversion failed (falls back to sampled_2d).
     pub type4_tokens: Option<Arc<Vec<u8>>>,
-    /// Spot function sampled on a 64×64 grid (4096 f64 values, domain [-1,1]², range [0,1]).
+    /// Spot function sampled on a 64×64 grid (4096 f64 values, domain `[-1,1]²`, range `[0,1]`).
     /// Used when Type 4 decompilation fails.
     pub sampled_2d: Option<Arc<Vec<f64>>>,
 }
@@ -53,9 +53,9 @@ pub struct HalftoneScreen {
 /// Pre-sampled black generation / undercolor removal state for PDF output.
 #[derive(Clone, Debug, Default)]
 pub struct BgUcrState {
-    /// Black generation function (256 samples, domain [0,1] → range [0,1]).
+    /// Black generation function (256 samples, domain `[0,1]` → range `[0,1]`).
     pub bg: Option<Arc<Vec<f64>>>,
-    /// Undercolor removal function (256 samples, domain [0,1] → range [-1,1]).
+    /// Undercolor removal function (256 samples, domain `[0,1]` → range `[-1,1]`).
     pub ucr: Option<Arc<Vec<f64>>>,
 }
 
@@ -342,8 +342,8 @@ pub enum ImageColorSpace {
     /// CIE L*a*b* color space (PDF /Lab or ICCBased Lab alternate).
     ///
     /// Sample byte layout: 3 components (L, a, b), 8-bit each. Decode
-    /// scales bytes: L = byte/255 × 100; a = byte/255 × (range[1]-range[0]) + range[0];
-    /// b = byte/255 × (range[3]-range[2]) + range[2].
+    /// scales bytes: L = byte/255 × 100; a = byte/255 × (`range[1]`-`range[0]`) + `range[0]`;
+    /// b = byte/255 × (`range[3]`-`range[2]`) + `range[2]`.
     Lab {
         white_point: [f64; 3],
         range: [f64; 4],
@@ -523,7 +523,7 @@ pub struct MeshShadingParams {
     pub overprint: bool,
     pub painted_channels: u8,
     /// Pre-sampled color LUT for function-based mesh shadings.
-    /// When present, vertex `raw_components[0]` holds a normalized [0,1]
+    /// When present, vertex `raw_components[0]` holds a normalized `[0,1]`
     /// function input. The renderer interpolates this per-pixel, then
     /// indexes the LUT instead of Gouraud-interpolating DeviceColor.
     pub color_lut: Option<Arc<Vec<DeviceColor>>>,
@@ -546,7 +546,7 @@ pub struct PatchShadingParams {
     pub color_space: ShadingColorSpace,
     pub overprint: bool,
     pub painted_channels: u8,
-    /// When present, vertex `raw_colors[i][0]` holds a normalized [0,1]
+    /// When present, vertex `raw_colors[i][0]` holds a normalized `[0,1]`
     /// function input. The renderer interpolates this per-pixel, then
     /// indexes the LUT for per-pixel non-linear function evaluation.
     pub color_lut: Option<Arc<Vec<DeviceColor>>>,

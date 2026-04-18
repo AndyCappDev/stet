@@ -24,7 +24,8 @@ keywords = [
 ]
 categories = ["rendering"]
 license = "BSD-3-Clause"
-repository = "https://github.com/RazrFalcon/tiny-skia"
+repository = "https://github.com/AndyCappDev/stet"
+homepage = "https://github.com/AndyCappDev/stet"
 
 [dependencies.arrayref]
 version = "0.3.6"
@@ -50,6 +51,7 @@ optional = true
 [dependencies.tiny-skia-path]
 path = "../stet-tiny-skia-path"
 package = "stet-tiny-skia-path"
+version = "0.11.4"
 default-features = false
 
 [features]

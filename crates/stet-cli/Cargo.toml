@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 description = "CLI entry point for stet PostScript interpreter"
+repository.workspace = true
+homepage.workspace = true
+keywords = ["postscript", "pdf", "cli", "interpreter", "rendering"]
+categories = ["command-line-utilities", "graphics"]
 
 [[bin]]
 name = "stet"
