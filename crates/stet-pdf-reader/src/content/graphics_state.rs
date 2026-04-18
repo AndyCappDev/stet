@@ -268,7 +268,11 @@ impl PdfGraphicsState {
             transfer: self.transfer.clone(),
             halftone: HalftoneState::default(),
             bg_ucr: BgUcrState::default(),
-            alpha: if self.fill_is_none { 0.0 } else { self.fill_alpha },
+            alpha: if self.fill_is_none {
+                0.0
+            } else {
+                self.fill_alpha
+            },
             blend_mode: self.blend_mode,
         }
     }
@@ -305,7 +309,11 @@ impl PdfGraphicsState {
             transfer: self.transfer.clone(),
             halftone: HalftoneState::default(),
             bg_ucr: BgUcrState::default(),
-            alpha: if self.stroke_is_none { 0.0 } else { self.stroke_alpha },
+            alpha: if self.stroke_is_none {
+                0.0
+            } else {
+                self.stroke_alpha
+            },
             blend_mode: self.blend_mode,
         }
     }
@@ -338,7 +346,11 @@ impl PdfGraphicsState {
             transfer: self.transfer.clone(),
             halftone: HalftoneState::default(),
             bg_ucr: BgUcrState::default(),
-            alpha: if self.stroke_is_none { 0.0 } else { self.stroke_alpha },
+            alpha: if self.stroke_is_none {
+                0.0
+            } else {
+                self.stroke_alpha
+            },
             blend_mode: self.blend_mode,
         }
     }

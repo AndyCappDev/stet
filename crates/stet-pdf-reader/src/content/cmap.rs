@@ -119,7 +119,6 @@ impl CMap {
 
             // Parse codespace ranges
             if line.ends_with("begincodespacerange") {
-
                 while let Some(range_line) = lines.next() {
                     let range_line = range_line.trim();
                     if range_line == "endcodespacerange" {
@@ -262,11 +261,7 @@ fn extract_inline_data<'a>(line: &'a str, begin_kw: &str, end_kw: &str) -> Optio
         return None;
     }
     let data = line[data_start..end_pos].trim();
-    if data.is_empty() {
-        None
-    } else {
-        Some(data)
-    }
+    if data.is_empty() { None } else { Some(data) }
 }
 
 /// Parse a codespace range line like `<20> <20>` or `<0000> <19FF>`.

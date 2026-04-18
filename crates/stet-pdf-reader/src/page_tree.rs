@@ -147,8 +147,8 @@ fn collect_pages_by_scan(resolver: &Resolver) -> Result<Vec<PageInfo>, PdfError>
         if let Ok(obj) = resolver.resolve(obj_num, 0) {
             if let Some(dict) = obj.as_dict() {
                 if dict.get_name(b"Type") == Some(b"Page") && dict.get(b"Kids").is_none() {
-                    let media_box = parse_rect(dict, b"MediaBox", resolver)
-                        .unwrap_or([0.0, 0.0, 612.0, 792.0]);
+                    let media_box =
+                        parse_rect(dict, b"MediaBox", resolver).unwrap_or([0.0, 0.0, 612.0, 792.0]);
                     let crop_box = clamp_box_to_media(
                         &parse_rect(dict, b"CropBox", resolver).unwrap_or(media_box),
                         &media_box,
@@ -268,10 +268,7 @@ fn collect_pages_recursive(
     let has_kids = node_dict.get(b"Kids").is_some();
     let type_name = node_dict.get_name(b"Type");
 
-    if !has_kids
-        && (matches!(type_name, Some(b"Page"))
-            || (type_name.is_none() && !has_kids))
-    {
+    if !has_kids && (matches!(type_name, Some(b"Page")) || (type_name.is_none() && !has_kids)) {
         // Leaf page node
         let media_box = inherited.media_box.unwrap_or([0.0, 0.0, 612.0, 792.0]); // Default US Letter
         // CropBox defaults to MediaBox; clamp to MediaBox if it extends beyond

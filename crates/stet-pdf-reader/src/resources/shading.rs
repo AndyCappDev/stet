@@ -53,11 +53,16 @@ pub fn handle_shading(
         params.color = bg_color;
         // Large rect in device space — the shading's clip constrains it
         let mut path = stet_fonts::geometry::PsPath::new();
-        path.segments.push(stet_fonts::geometry::PathSegment::MoveTo(-1e6, -1e6));
-        path.segments.push(stet_fonts::geometry::PathSegment::LineTo(1e6, -1e6));
-        path.segments.push(stet_fonts::geometry::PathSegment::LineTo(1e6, 1e6));
-        path.segments.push(stet_fonts::geometry::PathSegment::LineTo(-1e6, 1e6));
-        path.segments.push(stet_fonts::geometry::PathSegment::ClosePath);
+        path.segments
+            .push(stet_fonts::geometry::PathSegment::MoveTo(-1e6, -1e6));
+        path.segments
+            .push(stet_fonts::geometry::PathSegment::LineTo(1e6, -1e6));
+        path.segments
+            .push(stet_fonts::geometry::PathSegment::LineTo(1e6, 1e6));
+        path.segments
+            .push(stet_fonts::geometry::PathSegment::LineTo(-1e6, 1e6));
+        path.segments
+            .push(stet_fonts::geometry::PathSegment::ClosePath);
         display_list.push(DisplayElement::Fill { path, params });
     }
 
@@ -588,11 +593,8 @@ fn handle_patches(
         // No function: convert direct corner colors through ICC
         for p in &mut patches {
             for i in 0..4 {
-                p.colors[i] = components_to_device_color_icc(
-                    resolved_cs,
-                    &p.raw_colors[i],
-                    Some(icc_cache),
-                );
+                p.colors[i] =
+                    components_to_device_color_icc(resolved_cs, &p.raw_colors[i], Some(icc_cache));
             }
         }
         None
@@ -683,11 +685,7 @@ fn sample_function_to_stops_icc(
                 return None;
             }
             let t = (d - d_min) / span;
-            if t > 0.0 && t < 1.0 {
-                Some(t)
-            } else {
-                None
-            }
+            if t > 0.0 && t < 1.0 { Some(t) } else { None }
         })
         .collect();
     disc_ts.sort_by(|a, b| a.partial_cmp(b).unwrap());

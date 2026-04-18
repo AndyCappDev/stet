@@ -380,7 +380,10 @@ fn resolve_devicen(
 /// Uses DeviceGray as a safe default — the tint function won't be used since
 /// it targets a different number of components, so the Separation evaluator
 /// falls back to a simple gray: tint 0 = white, tint 1 = black.
-fn fallback_alternate(_args: &[PdfObj], _resolver: &Resolver) -> Result<ResolvedColorSpace, PdfError> {
+fn fallback_alternate(
+    _args: &[PdfObj],
+    _resolver: &Resolver,
+) -> Result<ResolvedColorSpace, PdfError> {
     Ok(ResolvedColorSpace::DeviceGray)
 }
 
@@ -574,12 +577,7 @@ fn deviceN_process_cmyk(names: &[Vec<u8>], tints: &[f64]) -> Option<(f64, f64, f
             _ => {} // spot colorant — no process contribution
         }
     }
-    Some((
-        1.0 - c_compl,
-        1.0 - m_compl,
-        1.0 - y_compl,
-        1.0 - k_compl,
-    ))
+    Some((1.0 - c_compl, 1.0 - m_compl, 1.0 - y_compl, 1.0 - k_compl))
 }
 
 /// Convert color components to DeviceColor, with optional ICC profile support.
@@ -619,9 +617,11 @@ pub fn components_to_device_color_icc(
             // Try ICC profile conversion first, using pre-computed hash to avoid
             // re-hashing the profile data on every color conversion.
             let hash = profile_hash.or_else(|| {
-                icc_cache
-                    .as_deref_mut()
-                    .and_then(|cache| profile_data.as_deref().and_then(|d| cache.register_profile_with_n(d, Some(*n))))
+                icc_cache.as_deref_mut().and_then(|cache| {
+                    profile_data
+                        .as_deref()
+                        .and_then(|d| cache.register_profile_with_n(d, Some(*n)))
+                })
             });
             if let Some(cache) = icc_cache.as_deref_mut()
                 && let Some(hash) = hash
@@ -720,7 +720,9 @@ pub fn components_to_device_color_icc(
             // instead of K, making Separation /Black strokes invisible when
             // painted_channels = CMYK_K.
             if color.native_cmyk.is_none() {
-                use stet_graphics::device::{CMYK_C, CMYK_M, CMYK_Y, CMYK_K, cmyk_channel_for_name};
+                use stet_graphics::device::{
+                    CMYK_C, CMYK_K, CMYK_M, CMYK_Y, cmyk_channel_for_name,
+                };
                 let ch = cmyk_channel_for_name(name);
                 if ch != 0 {
                     let (c, m, y, k) = match ch {
@@ -740,7 +742,12 @@ pub fn components_to_device_color_icc(
             color.process_cmyk = separation_process_cmyk(name, tint);
             color
         }
-        ResolvedColorSpace::DeviceN { names, alt, tint_fn, .. } => {
+        ResolvedColorSpace::DeviceN {
+            names,
+            alt,
+            tint_fn,
+            ..
+        } => {
             let mut color = if let Some(func) = tint_fn {
                 let alt_components = func.evaluate(components);
                 components_to_device_color_icc(alt, &alt_components, icc_cache)
@@ -854,7 +861,9 @@ pub fn register_icc_profile(
     icc_cache: &mut IccCache,
 ) -> Option<ProfileHash> {
     match cs {
-        ResolvedColorSpace::ICCBased { n, profile_data, .. } => {
+        ResolvedColorSpace::ICCBased {
+            n, profile_data, ..
+        } => {
             let data = profile_data.as_ref()?;
             icc_cache.register_profile_with_n(data, Some(*n))
         }

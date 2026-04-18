@@ -376,7 +376,8 @@ pub fn resolve_font(
             })
             .unwrap_or_default();
         let to_unicode = if let Some(tu_obj) = font_dict.get(b"ToUnicode") {
-            resolver.stream_data_from_obj(tu_obj)
+            resolver
+                .stream_data_from_obj(tu_obj)
                 .map(|d| parse_to_unicode(&d))
                 .unwrap_or_default()
         } else {
@@ -509,8 +510,7 @@ fn resolve_encoding(
                                 PdfObj::Int(n) => code = *n as usize,
                                 PdfObj::Name(name) => {
                                     if code < 256 {
-                                        let name_str =
-                                            String::from_utf8_lossy(name).to_string();
+                                        let name_str = String::from_utf8_lossy(name).to_string();
                                         encoding[code] = Some(name_str.clone());
                                         // Collect differences when no BaseEncoding was
                                         // specified — embedded fonts need to re-apply
@@ -529,7 +529,12 @@ fn resolve_encoding(
                 // Signal "no base encoding" only for non-symbol fonts.
                 // Symbol fonts (ZapfDingbats, Symbol) always use their fixed
                 // built-in encoding, so their has_base_encoding is never set.
-                return Ok((encoding, has_valid_encoding, differences, !has_base_encoding && !is_symbol_font));
+                return Ok((
+                    encoding,
+                    has_valid_encoding,
+                    differences,
+                    !has_base_encoding && !is_symbol_font,
+                ));
             }
             _ => {}
         }
@@ -566,7 +571,16 @@ pub fn fallback_font(font_provider: Option<&FontProvider>) -> Option<PdfFont> {
         })
     });
     let widths = super::standard_fonts::standard_font_widths(b"Helvetica").unwrap_or([0.0f64; 256]);
-    substitute_font("Helvetica", encoding, widths, false, font_provider, 0, 0, 255)
+    substitute_font(
+        "Helvetica",
+        encoding,
+        widths,
+        false,
+        font_provider,
+        0,
+        0,
+        255,
+    )
 }
 
 /// Try to load a substitute font for a non-embedded font.
@@ -762,9 +776,7 @@ fn substitute_font(
         // ratio would just stretch the wrong glyphs.
         let is_symbol_font = {
             let lower = clean_name.to_ascii_lowercase();
-            lower.contains("wingding")
-                || lower.contains("webding")
-                || lower.contains("dingbat")
+            lower.contains("wingding") || lower.contains("webding") || lower.contains("dingbat")
         };
         if !is_symbol_font {
             let mut pdf_sum = 0.0;
@@ -1155,12 +1167,16 @@ fn create_cid_from_ps_cidfont(
     // We must NOT skip \x00 bytes — they are part of the binary CID map.
     let binary_data = {
         let sd_marker = b"StartData";
-        let pos = font_data.windows(sd_marker.len())
+        let pos = font_data
+            .windows(sd_marker.len())
             .position(|w| w == sd_marker)
             .ok_or(PdfError::Other("PS CIDFont: no StartData found".into()))?;
         let after = &font_data[pos + sd_marker.len()..];
         // Skip only ASCII whitespace (space, tab, CR, LF) — NOT null bytes
-        let skip = after.iter().position(|&b| !matches!(b, b' ' | b'\t' | b'\r' | b'\n')).unwrap_or(0);
+        let skip = after
+            .iter()
+            .position(|&b| !matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
+            .unwrap_or(0);
         &font_data[pos + sd_marker.len() + skip..]
     };
 
@@ -1168,7 +1184,9 @@ fn create_cid_from_ps_cidfont(
     let entry_size = fd_bytes + gd_bytes;
     let cid_map_size = cid_count * entry_size;
     if binary_data.len() < cid_map_size {
-        return Err(PdfError::Other("PS CIDFont: binary data too short for CID map".into()));
+        return Err(PdfError::Other(
+            "PS CIDFont: binary data too short for CID map".into(),
+        ));
     }
 
     // Read charstring offsets for each CID
@@ -1232,7 +1250,14 @@ fn create_cid_from_ps_cidfont(
     // Create dummy CffFont with pre-computed paths
     let dummy_cff = stet_fonts::cff_parser::CffFont {
         name: String::new(),
-        font_matrix: [font_matrix.a, font_matrix.b, font_matrix.c, font_matrix.d, font_matrix.tx, font_matrix.ty],
+        font_matrix: [
+            font_matrix.a,
+            font_matrix.b,
+            font_matrix.c,
+            font_matrix.d,
+            font_matrix.tx,
+            font_matrix.ty,
+        ],
         font_bbox: [0.0; 4],
         char_strings: Vec::new(),
         global_subrs: Vec::new(),
@@ -1281,8 +1306,8 @@ fn create_cid_from_type1(
     dw2: [f64; 2],
     w2: HashMap<u16, [f64; 3]>,
 ) -> Result<PdfFont, PdfError> {
-    let font = parse_type1(font_data)
-        .map_err(|e| PdfError::Other(format!("Type1 parse error: {e}")))?;
+    let font =
+        parse_type1(font_data).map_err(|e| PdfError::Other(format!("Type1 parse error: {e}")))?;
     let fm = font.font_matrix;
     let font_matrix = Matrix::new(fm[0], fm[1], fm[2], fm[3], fm[4], fm[5]);
 
@@ -1490,10 +1515,11 @@ fn load_cjk_fallback_font(ordering: &[u8], base_font: &str) -> Result<Vec<u8>, P
         }
     };
     let is_cjk_name = has_cjk_gothic
-        || ["cn", "sc", "jp", "kr", "tc", "hk", "cjk",
-            "ming", "song", "hei", "kai", "fang", "han"]
-            .iter()
-            .any(|kw| lower.contains(kw));
+        || [
+            "cn", "sc", "jp", "kr", "tc", "hk", "cjk", "ming", "song", "hei", "kai", "fang", "han",
+        ]
+        .iter()
+        .any(|kw| lower.contains(kw));
     if ordering == b"Identity" && !is_cjk_name {
         let latin_targets: &[&str] = if is_bold {
             &["LiberationSans-Bold", "DejaVuSans-Bold"]
@@ -1529,10 +1555,20 @@ fn load_cjk_fallback_font(ordering: &[u8], base_font: &str) -> Result<Vec<u8>, P
     };
     let heavy = lower.contains("heavy") || lower.contains("black");
     // Try weight-matched variant first, then regular/bold fallback
-    let weight_suffix = if heavy { "Black" } else if is_bold { "Bold" } else { "Regular" };
+    let weight_suffix = if heavy {
+        "Black"
+    } else if is_bold {
+        "Bold"
+    } else {
+        "Regular"
+    };
     let targets = [
         format!("NotoSansCJK{lang}-{weight_suffix}"),
-        if is_bold || heavy { format!("NotoSansCJK{lang}-Bold") } else { format!("NotoSansCJK{lang}-Regular") },
+        if is_bold || heavy {
+            format!("NotoSansCJK{lang}-Bold")
+        } else {
+            format!("NotoSansCJK{lang}-Regular")
+        },
         format!("NotoSansCJKjp-{weight_suffix}"),
     ];
     for target in &targets {
@@ -1553,49 +1589,154 @@ fn load_cjk_fallback_font(ordering: &[u8], base_font: &str) -> Result<Vec<u8>, P
 /// Compiled into the binary so the PDF reader works from any directory.
 const EMBEDDED_FONTS: &[(&str, &[u8])] = &[
     // NimbusRoman (Times)
-    ("NimbusRoman-Regular", include_bytes!("../../../../resources/Font/NimbusRoman-Regular.t1")),
-    ("NimbusRoman-Bold", include_bytes!("../../../../resources/Font/NimbusRoman-Bold.t1")),
-    ("NimbusRoman-Italic", include_bytes!("../../../../resources/Font/NimbusRoman-Italic.t1")),
-    ("NimbusRoman-BoldItalic", include_bytes!("../../../../resources/Font/NimbusRoman-BoldItalic.t1")),
+    (
+        "NimbusRoman-Regular",
+        include_bytes!("../../../../resources/Font/NimbusRoman-Regular.t1"),
+    ),
+    (
+        "NimbusRoman-Bold",
+        include_bytes!("../../../../resources/Font/NimbusRoman-Bold.t1"),
+    ),
+    (
+        "NimbusRoman-Italic",
+        include_bytes!("../../../../resources/Font/NimbusRoman-Italic.t1"),
+    ),
+    (
+        "NimbusRoman-BoldItalic",
+        include_bytes!("../../../../resources/Font/NimbusRoman-BoldItalic.t1"),
+    ),
     // NimbusSans (Helvetica/Arial)
-    ("NimbusSans-Regular", include_bytes!("../../../../resources/Font/NimbusSans-Regular.t1")),
-    ("NimbusSans-Bold", include_bytes!("../../../../resources/Font/NimbusSans-Bold.t1")),
-    ("NimbusSans-Italic", include_bytes!("../../../../resources/Font/NimbusSans-Italic.t1")),
-    ("NimbusSans-BoldItalic", include_bytes!("../../../../resources/Font/NimbusSans-BoldItalic.t1")),
+    (
+        "NimbusSans-Regular",
+        include_bytes!("../../../../resources/Font/NimbusSans-Regular.t1"),
+    ),
+    (
+        "NimbusSans-Bold",
+        include_bytes!("../../../../resources/Font/NimbusSans-Bold.t1"),
+    ),
+    (
+        "NimbusSans-Italic",
+        include_bytes!("../../../../resources/Font/NimbusSans-Italic.t1"),
+    ),
+    (
+        "NimbusSans-BoldItalic",
+        include_bytes!("../../../../resources/Font/NimbusSans-BoldItalic.t1"),
+    ),
     // NimbusSansNarrow (Helvetica Narrow)
-    ("NimbusSansNarrow-Regular", include_bytes!("../../../../resources/Font/NimbusSansNarrow-Regular.t1")),
-    ("NimbusSansNarrow-Bold", include_bytes!("../../../../resources/Font/NimbusSansNarrow-Bold.t1")),
-    ("NimbusSansNarrow-Oblique", include_bytes!("../../../../resources/Font/NimbusSansNarrow-Oblique.t1")),
-    ("NimbusSansNarrow-BoldOblique", include_bytes!("../../../../resources/Font/NimbusSansNarrow-BoldOblique.t1")),
+    (
+        "NimbusSansNarrow-Regular",
+        include_bytes!("../../../../resources/Font/NimbusSansNarrow-Regular.t1"),
+    ),
+    (
+        "NimbusSansNarrow-Bold",
+        include_bytes!("../../../../resources/Font/NimbusSansNarrow-Bold.t1"),
+    ),
+    (
+        "NimbusSansNarrow-Oblique",
+        include_bytes!("../../../../resources/Font/NimbusSansNarrow-Oblique.t1"),
+    ),
+    (
+        "NimbusSansNarrow-BoldOblique",
+        include_bytes!("../../../../resources/Font/NimbusSansNarrow-BoldOblique.t1"),
+    ),
     // NimbusMonoPS (Courier)
-    ("NimbusMonoPS-Regular", include_bytes!("../../../../resources/Font/NimbusMonoPS-Regular.t1")),
-    ("NimbusMonoPS-Bold", include_bytes!("../../../../resources/Font/NimbusMonoPS-Bold.t1")),
-    ("NimbusMonoPS-Italic", include_bytes!("../../../../resources/Font/NimbusMonoPS-Italic.t1")),
-    ("NimbusMonoPS-BoldItalic", include_bytes!("../../../../resources/Font/NimbusMonoPS-BoldItalic.t1")),
+    (
+        "NimbusMonoPS-Regular",
+        include_bytes!("../../../../resources/Font/NimbusMonoPS-Regular.t1"),
+    ),
+    (
+        "NimbusMonoPS-Bold",
+        include_bytes!("../../../../resources/Font/NimbusMonoPS-Bold.t1"),
+    ),
+    (
+        "NimbusMonoPS-Italic",
+        include_bytes!("../../../../resources/Font/NimbusMonoPS-Italic.t1"),
+    ),
+    (
+        "NimbusMonoPS-BoldItalic",
+        include_bytes!("../../../../resources/Font/NimbusMonoPS-BoldItalic.t1"),
+    ),
     // P052 (Palatino)
-    ("P052-Roman", include_bytes!("../../../../resources/Font/P052-Roman.t1")),
-    ("P052-Bold", include_bytes!("../../../../resources/Font/P052-Bold.t1")),
-    ("P052-Italic", include_bytes!("../../../../resources/Font/P052-Italic.t1")),
-    ("P052-BoldItalic", include_bytes!("../../../../resources/Font/P052-BoldItalic.t1")),
+    (
+        "P052-Roman",
+        include_bytes!("../../../../resources/Font/P052-Roman.t1"),
+    ),
+    (
+        "P052-Bold",
+        include_bytes!("../../../../resources/Font/P052-Bold.t1"),
+    ),
+    (
+        "P052-Italic",
+        include_bytes!("../../../../resources/Font/P052-Italic.t1"),
+    ),
+    (
+        "P052-BoldItalic",
+        include_bytes!("../../../../resources/Font/P052-BoldItalic.t1"),
+    ),
     // C059 (New Century Schoolbook)
-    ("C059-Roman", include_bytes!("../../../../resources/Font/C059-Roman.t1")),
-    ("C059-Bold", include_bytes!("../../../../resources/Font/C059-Bold.t1")),
-    ("C059-Italic", include_bytes!("../../../../resources/Font/C059-Italic.t1")),
-    ("C059-BdIta", include_bytes!("../../../../resources/Font/C059-BdIta.t1")),
+    (
+        "C059-Roman",
+        include_bytes!("../../../../resources/Font/C059-Roman.t1"),
+    ),
+    (
+        "C059-Bold",
+        include_bytes!("../../../../resources/Font/C059-Bold.t1"),
+    ),
+    (
+        "C059-Italic",
+        include_bytes!("../../../../resources/Font/C059-Italic.t1"),
+    ),
+    (
+        "C059-BdIta",
+        include_bytes!("../../../../resources/Font/C059-BdIta.t1"),
+    ),
     // URWBookman (Bookman)
-    ("URWBookman-Light", include_bytes!("../../../../resources/Font/URWBookman-Light.t1")),
-    ("URWBookman-Demi", include_bytes!("../../../../resources/Font/URWBookman-Demi.t1")),
-    ("URWBookman-LightItalic", include_bytes!("../../../../resources/Font/URWBookman-LightItalic.t1")),
-    ("URWBookman-DemiItalic", include_bytes!("../../../../resources/Font/URWBookman-DemiItalic.t1")),
+    (
+        "URWBookman-Light",
+        include_bytes!("../../../../resources/Font/URWBookman-Light.t1"),
+    ),
+    (
+        "URWBookman-Demi",
+        include_bytes!("../../../../resources/Font/URWBookman-Demi.t1"),
+    ),
+    (
+        "URWBookman-LightItalic",
+        include_bytes!("../../../../resources/Font/URWBookman-LightItalic.t1"),
+    ),
+    (
+        "URWBookman-DemiItalic",
+        include_bytes!("../../../../resources/Font/URWBookman-DemiItalic.t1"),
+    ),
     // URWGothic (AvantGarde)
-    ("URWGothic-Book", include_bytes!("../../../../resources/Font/URWGothic-Book.t1")),
-    ("URWGothic-Demi", include_bytes!("../../../../resources/Font/URWGothic-Demi.t1")),
-    ("URWGothic-BookOblique", include_bytes!("../../../../resources/Font/URWGothic-BookOblique.t1")),
-    ("URWGothic-DemiOblique", include_bytes!("../../../../resources/Font/URWGothic-DemiOblique.t1")),
+    (
+        "URWGothic-Book",
+        include_bytes!("../../../../resources/Font/URWGothic-Book.t1"),
+    ),
+    (
+        "URWGothic-Demi",
+        include_bytes!("../../../../resources/Font/URWGothic-Demi.t1"),
+    ),
+    (
+        "URWGothic-BookOblique",
+        include_bytes!("../../../../resources/Font/URWGothic-BookOblique.t1"),
+    ),
+    (
+        "URWGothic-DemiOblique",
+        include_bytes!("../../../../resources/Font/URWGothic-DemiOblique.t1"),
+    ),
     // Symbol fonts
-    ("StandardSymbolsPS", include_bytes!("../../../../resources/Font/StandardSymbolsPS.t1")),
-    ("D050000L", include_bytes!("../../../../resources/Font/D050000L.t1")),
-    ("Z003-MediumItalic", include_bytes!("../../../../resources/Font/Z003-MediumItalic.t1")),
+    (
+        "StandardSymbolsPS",
+        include_bytes!("../../../../resources/Font/StandardSymbolsPS.t1"),
+    ),
+    (
+        "D050000L",
+        include_bytes!("../../../../resources/Font/D050000L.t1"),
+    ),
+    (
+        "Z003-MediumItalic",
+        include_bytes!("../../../../resources/Font/Z003-MediumItalic.t1"),
+    ),
 ];
 
 /// Look up an embedded Type 1 substitute font by name.
@@ -1984,9 +2125,8 @@ fn resolve_type1(
     let builtin_fallback = {
         let flags = desc.get_int(b"Flags").unwrap_or(0) as u32;
         let is_sym = flags & 4 != 0;
-        let builtin_useful = is_sym
-            && font.encoding.len() == 256
-            && font.encoding.iter().any(|n| n != ".notdef");
+        let builtin_useful =
+            is_sym && font.encoding.len() == 256 && font.encoding.iter().any(|n| n != ".notdef");
         if builtin_useful {
             !encoding[32..127].iter().any(|slot| {
                 slot.as_ref()
@@ -2044,11 +2184,7 @@ fn resolve_type1(
 /// If the font data has table directory entries pointing past the data,
 /// try re-decompressing with raw deflate (skipping the zlib header).
 /// Some fonts have corrupt zlib headers (CINFO < 7) that cause truncation.
-fn try_raw_deflate_if_truncated(
-    resolver: &Resolver,
-    ff_ref: &PdfObj,
-    data: Vec<u8>,
-) -> Vec<u8> {
+fn try_raw_deflate_if_truncated(resolver: &Resolver, ff_ref: &PdfObj, data: Vec<u8>) -> Vec<u8> {
     // Check if any table extends past the data
     if data.len() < 12 {
         return data;
@@ -2060,10 +2196,10 @@ fn try_raw_deflate_if_truncated(
         if e + 16 > data.len() {
             break;
         }
-        let off = u32::from_be_bytes([data[e + 8], data[e + 9], data[e + 10], data[e + 11]])
-            as usize;
-        let len = u32::from_be_bytes([data[e + 12], data[e + 13], data[e + 14], data[e + 15]])
-            as usize;
+        let off =
+            u32::from_be_bytes([data[e + 8], data[e + 9], data[e + 10], data[e + 11]]) as usize;
+        let len =
+            u32::from_be_bytes([data[e + 12], data[e + 13], data[e + 14], data[e + 15]]) as usize;
         max_end = max_end.max(off.saturating_add(len));
     }
     if max_end <= data.len() {
@@ -2120,8 +2256,12 @@ fn try_raw_deflate_if_truncated(
         }
         let off = u32::from_be_bytes([output[e + 8], output[e + 9], output[e + 10], output[e + 11]])
             as usize;
-        let len = u32::from_be_bytes([output[e + 12], output[e + 13], output[e + 14], output[e + 15]])
-            as usize;
+        let len = u32::from_be_bytes([
+            output[e + 12],
+            output[e + 13],
+            output[e + 14],
+            output[e + 15],
+        ]) as usize;
         raw_max_end = raw_max_end.max(off.saturating_add(len));
     }
     if raw_max_end > output.len() {
@@ -2171,7 +2311,15 @@ fn resolve_truetype(
         if is_otf || is_cff {
             let has_explicit_encoding = font_dict.get(b"Encoding").is_some();
             let has_pdf_widths = font_dict.get(b"Widths").is_some();
-            return build_cff_font(data, encoding, widths, has_explicit_encoding, has_pdf_widths, &[], false);
+            return build_cff_font(
+                data,
+                encoding,
+                widths,
+                has_explicit_encoding,
+                has_pdf_widths,
+                &[],
+                false,
+            );
         }
         return Err(PdfError::Other(
             "TrueType font has no usable glyph outline data".into(),
@@ -2230,7 +2378,8 @@ fn resolve_truetype(
         post_name_to_gid,
         units_per_em,
         to_unicode: if let Some(tu_obj) = font_dict.get(b"ToUnicode") {
-            resolver.stream_data_from_obj(tu_obj)
+            resolver
+                .stream_data_from_obj(tu_obj)
                 .map(|d| parse_to_unicode(&d))
                 .unwrap_or_default()
         } else {
@@ -2259,7 +2408,15 @@ fn resolve_cff(
         .get(b"FontFile3")
         .ok_or(PdfError::Other("CFF font missing FontFile3".into()))?;
     let raw_data = resolver.stream_data_from_obj(ff_ref)?;
-    build_cff_font(raw_data, encoding, widths, has_explicit_encoding, has_pdf_widths, differences, no_base_encoding)
+    build_cff_font(
+        raw_data,
+        encoding,
+        widths,
+        has_explicit_encoding,
+        has_pdf_widths,
+        differences,
+        no_base_encoding,
+    )
 }
 
 /// Build a CFF font from raw font data (may be OpenType/CFF or raw CFF).
@@ -2416,9 +2573,7 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                 Some(&|name| load_predefined_cmap(name)),
             );
             (cmap.code_lengths, cmap.code_to_cid, cmap.wmode)
-        } else if !encoding_name.is_empty()
-            && !encoding_name.starts_with(b"Identity")
-        {
+        } else if !encoding_name.is_empty() && !encoding_name.starts_with(b"Identity") {
             // Predefined CMap name (e.g. GBK-EUC-H) — load from system
             if let Some(cmap_data) = load_predefined_cmap(encoding_name) {
                 let cmap = super::cmap::CMap::parse_with_loader(
@@ -2551,14 +2706,18 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
     match cid_subtype {
         b"CIDFontType2" => {
             let mut substituted;
-            let mut data = if let Some(ff_ref) = desc.get(b"FontFile2")
+            let mut data = if let Some(ff_ref) = desc
+                .get(b"FontFile2")
                 // Some PDFs store TrueType data under /FontFile instead
                 // of the correct /FontFile2 — accept it as a fallback.
-                .or_else(|| desc.get(b"FontFile").filter(|obj| {
-                    resolver.stream_data_from_obj(obj).ok()
-                        .is_some_and(|d| d.len() > 4 && d[..4] == [0, 1, 0, 0])
-                }))
-            {
+                .or_else(|| {
+                    desc.get(b"FontFile").filter(|obj| {
+                        resolver
+                            .stream_data_from_obj(obj)
+                            .ok()
+                            .is_some_and(|d| d.len() > 4 && d[..4] == [0, 1, 0, 0])
+                    })
+                }) {
                 substituted = false;
                 let mut font_data = resolver.stream_data_from_obj(ff_ref)?;
                 sanitize_index_to_loc_format(&mut font_data);
@@ -2593,10 +2752,10 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                         } else {
                             Some((0, font_data.len()))
                         };
-                        cff_range.and_then(|(off, len)| {
-                            parse_cff(&font_data[off..off+len]).ok()
-                        }).and_then(|fonts| fonts.into_iter().next())
-                        .is_some_and(|f| f.is_cid)
+                        cff_range
+                            .and_then(|(off, len)| parse_cff(&font_data[off..off + len]).ok())
+                            .and_then(|fonts| fonts.into_iter().next())
+                            .is_some_and(|f| f.is_cid)
                     };
                     let (cid_to_gid_map, identity) = if is_cid_keyed {
                         (None, true) // CFF handles CID mapping
@@ -2676,13 +2835,14 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
             // we should fall back to the system font.
             // Only check when identity CID→GID is in effect (no explicit
             // CIDToGIDMap stream), since we test CIDs directly as GIDs.
-            let has_cid_to_gid_map = cid_font_dict.get(b"CIDToGIDMap")
+            let has_cid_to_gid_map = cid_font_dict
+                .get(b"CIDToGIDMap")
                 .is_some_and(|v| v.as_name().is_none_or(|n| n != b"Identity"));
             if !substituted && !cid_widths.is_empty() && !has_cid_to_gid_map {
                 let upm_f = get_units_per_em(&data) as f64;
-                let any_glyph = cid_widths.keys().any(|&cid| {
-                    skrifa_glyph_path(&data, cid, upm_f).is_some()
-                });
+                let any_glyph = cid_widths
+                    .keys()
+                    .any(|&cid| skrifa_glyph_path(&data, cid, upm_f).is_some());
                 if !any_glyph {
                     let base_font = cid_font_dict
                         .get_name(b"BaseFont")
@@ -2747,14 +2907,10 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                 && to_unicode.is_empty()
                 && encoding_name.starts_with(b"Identity")
             {
-                let base_name = cid_font_dict
-                    .get_name(b"BaseFont")
-                    .unwrap_or(b"");
+                let base_name = cid_font_dict.get_name(b"BaseFont").unwrap_or(b"");
                 let name_str = String::from_utf8_lossy(base_name);
                 // Strip subset prefix (e.g. "ABCDEF+Calibri,Bold" → "Calibri,Bold")
-                let clean = if name_str.len() > 7
-                    && name_str.as_bytes().get(6) == Some(&b'+')
-                {
+                let clean = if name_str.len() > 7 && name_str.as_bytes().get(6) == Some(&b'+') {
                     &name_str[7..]
                 } else {
                     &name_str
@@ -2768,15 +2924,12 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                     .unwrap_or(clean)
                     .to_ascii_lowercase();
                 for suffix in &["psmt", "ps", "mt"] {
-                    if family.len() > suffix.len()
-                        && family.ends_with(suffix)
-                    {
+                    if family.len() > suffix.len() && family.ends_with(suffix) {
                         family.truncate(family.len() - suffix.len());
                         break;
                     }
                 }
-                super::gid_maps::get_gid_to_unicode_map(&family)
-                    .unwrap_or(to_unicode)
+                super::gid_maps::get_gid_to_unicode_map(&family).unwrap_or(to_unicode)
             } else {
                 to_unicode
             };
@@ -2807,8 +2960,7 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                 let font_data = resolver.stream_data_from_obj(ff_ref)?;
                 // Some PDFs mislabel TrueType data as CIDFontType0C. Detect the
                 // TrueType magic (\x00\x01\x00\x00) and route to TrueType path.
-                let is_truetype = font_data.len() > 4
-                    && &font_data[0..4] == b"\x00\x01\x00\x00";
+                let is_truetype = font_data.len() > 4 && &font_data[0..4] == b"\x00\x01\x00\x00";
                 if is_truetype {
                     let mut font_data = font_data;
                     sanitize_index_to_loc_format(&mut font_data);
@@ -2842,23 +2994,20 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                 // FontFile3 may be raw CFF or OpenType/CFF (OTTO wrapper)
                 if font_data.len() > 4 && &font_data[0..4] == b"OTTO" {
                     // Parse CIDToGIDMap for OpenType-wrapped CFF
-                    let pdf_cid_to_gid =
-                        if let Some(map_obj) = cid_font_dict.get(b"CIDToGIDMap") {
-                            match resolver.stream_data_from_obj(map_obj) {
-                                Ok(stream_data) => {
-                                    let mut gid_map =
-                                        Vec::with_capacity(stream_data.len() / 2);
-                                    for pair in stream_data.chunks_exact(2) {
-                                        gid_map
-                                            .push(u16::from_be_bytes([pair[0], pair[1]]));
-                                    }
-                                    Some(gid_map)
+                    let pdf_cid_to_gid = if let Some(map_obj) = cid_font_dict.get(b"CIDToGIDMap") {
+                        match resolver.stream_data_from_obj(map_obj) {
+                            Ok(stream_data) => {
+                                let mut gid_map = Vec::with_capacity(stream_data.len() / 2);
+                                for pair in stream_data.chunks_exact(2) {
+                                    gid_map.push(u16::from_be_bytes([pair[0], pair[1]]));
                                 }
-                                Err(_) => None,
+                                Some(gid_map)
                             }
-                        } else {
-                            None
-                        };
+                            Err(_) => None,
+                        }
+                    } else {
+                        None
+                    };
                     // For non-CID CFF fonts used as CIDFontType0, the CID IS the
                     // charstring index (identity mapping). For true CID-keyed CFF fonts,
                     // the CFF charset provides the CID→GID mapping, or the OTF cmap is used.
@@ -2879,7 +3028,9 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                 }
                 // PostScript CIDFont programs: "%!PS-Adobe-3.0 Resource-CIDFont"
                 // These contain binary charstring data after StartData.
-                if font_data.starts_with(b"%!") && font_data.windows(16).any(|w| w == b"Resource-CIDFont") {
+                if font_data.starts_with(b"%!")
+                    && font_data.windows(16).any(|w| w == b"Resource-CIDFont")
+                {
                     return create_cid_from_ps_cidfont(
                         &font_data,
                         default_width,
@@ -2935,24 +3086,24 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                 if cs_count > 0 && cid_widths.len() > cs_count * 4 && is_adobe_cjk_registry {
                     // Drop the parsed CFF and fall through to the system font path.
                 } else {
-                let fm = font.font_matrix;
-                let font_matrix = Matrix::new(fm[0], fm[1], fm[2], fm[3], fm[4], fm[5]);
-                return Ok(PdfFont::CidCff(CidCffPdfFont {
-                    font,
-                    default_width,
-                    cid_widths,
-                    font_matrix,
-                    cmap: None,
-                    pdf_cid_to_gid: None,
-                    identity_cid_to_gid: false,
-                    ordering: ordering.clone(),
-                    code_lengths,
-                    code_to_cid: code_to_cid.clone(),
-                    wmode,
-                    dw2,
-                    w2: w2.clone(),
-                    type1_paths: None,
-                }));
+                    let fm = font.font_matrix;
+                    let font_matrix = Matrix::new(fm[0], fm[1], fm[2], fm[3], fm[4], fm[5]);
+                    return Ok(PdfFont::CidCff(CidCffPdfFont {
+                        font,
+                        default_width,
+                        cid_widths,
+                        font_matrix,
+                        cmap: None,
+                        pdf_cid_to_gid: None,
+                        identity_cid_to_gid: false,
+                        ordering: ordering.clone(),
+                        code_lengths,
+                        code_to_cid: code_to_cid.clone(),
+                        wmode,
+                        dw2,
+                        w2: w2.clone(),
+                        type1_paths: None,
+                    }));
                 }
             }
             // Not embedded or tiny subset — substitute with a system font
@@ -2989,7 +3140,10 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                 let is_otto = sys_data.len() > 4 && &sys_data[0..4] == b"OTTO";
                 let is_ttc_cff = sys_data.len() > 16 && &sys_data[0..4] == b"ttcf" && {
                     let off = u32::from_be_bytes([
-                        sys_data[12], sys_data[13], sys_data[14], sys_data[15],
+                        sys_data[12],
+                        sys_data[13],
+                        sys_data[14],
+                        sys_data[15],
                     ]) as usize;
                     off + 4 <= sys_data.len() && &sys_data[off..off + 4] == b"OTTO"
                 };
@@ -3473,12 +3627,8 @@ impl PdfFont {
     /// Returns the code unchanged if no mapping exists (identity encoding).
     pub fn resolve_code_to_cid(&self, code: u32) -> u32 {
         match self {
-            PdfFont::CidTrueType(f) => {
-                f.code_to_cid.get(&code).copied().unwrap_or(code)
-            }
-            PdfFont::CidCff(f) => {
-                f.code_to_cid.get(&code).copied().unwrap_or(code)
-            }
+            PdfFont::CidTrueType(f) => f.code_to_cid.get(&code).copied().unwrap_or(code),
+            PdfFont::CidCff(f) => f.code_to_cid.get(&code).copied().unwrap_or(code),
             _ => code,
         }
     }
@@ -3527,11 +3677,11 @@ impl Type1PdfFont {
         let charstring = glyph_name
             .and_then(|name| self.font.charstrings.get(name))
             .or_else(|| {
-                if !self.builtin_fallback { return None; }
+                if !self.builtin_fallback {
+                    return None;
+                }
                 let builtin = self.font.encoding.get(char_code as usize)?;
-                if builtin != ".notdef"
-                    && glyph_name.map_or(true, |n| n != builtin)
-                {
+                if builtin != ".notdef" && glyph_name.map_or(true, |n| n != builtin) {
                     self.font.charstrings.get(builtin.as_str())
                 } else {
                     None
@@ -3572,7 +3722,9 @@ impl TrueTypePdfFont {
                 n.starts_with('g')
                     && n.len() > 1
                     && n[1..].bytes().all(|b| b.is_ascii_hexdigit())
-                    && n[1..].bytes().any(|b| b.is_ascii_hexdigit() && !b.is_ascii_digit())
+                    && n[1..]
+                        .bytes()
+                        .any(|b| b.is_ascii_hexdigit() && !b.is_ascii_digit())
             } else {
                 false
             }
@@ -3688,8 +3840,7 @@ impl TrueTypePdfFont {
             // unmapped GID — sometimes even GID 0 (issue8234).
             if !self.cmap.is_empty() {
                 use stet_fonts::truetype::{find_table, read_u16};
-                let mapped: std::collections::HashSet<u16> =
-                    self.cmap.values().copied().collect();
+                let mapped: std::collections::HashSet<u16> = self.cmap.values().copied().collect();
                 let num_glyphs = find_table(&self.data, b"maxp")
                     .map(|(off, _)| read_u16(&self.data, off + 4))
                     .unwrap_or(0);
@@ -3702,8 +3853,7 @@ impl TrueTypePdfFont {
                     }
                     if let Some(glyf_data) = get_glyf_data(&self.data, gid) {
                         if glyf_data.len() >= 2 {
-                            let num_contours =
-                                stet_fonts::truetype::read_i16(&glyf_data, 0);
+                            let num_contours = stet_fonts::truetype::read_i16(&glyf_data, 0);
                             if num_contours < 0 {
                                 return Some(gid);
                             }
@@ -3736,10 +3886,16 @@ impl CidTrueTypePdfFont {
 
     fn glyph_path_cid(&self, cid: u16) -> Option<PsPath> {
         if std::env::var("STET_DEBUG_TEXT").is_ok() {
-            eprintln!("[cid_tt] cid={} sub={} ordering={} identity={} to_unicode={} cmap={} cid_to_gid_map={}",
-                cid, self.substituted, String::from_utf8_lossy(&self.ordering),
-                self.identity_cid_to_gid, !self.to_unicode.is_empty(),
-                !self.cmap.is_empty(), self.cid_to_gid_map.is_some());
+            eprintln!(
+                "[cid_tt] cid={} sub={} ordering={} identity={} to_unicode={} cmap={} cid_to_gid_map={}",
+                cid,
+                self.substituted,
+                String::from_utf8_lossy(&self.ordering),
+                self.identity_cid_to_gid,
+                !self.to_unicode.is_empty(),
+                !self.cmap.is_empty(),
+                self.cid_to_gid_map.is_some()
+            );
         }
         let gid = if self.ucs2_encoding && !self.cmap.is_empty() && self.code_to_cid.is_empty() {
             // UCS2 encoding with no CMap: cid is a raw Unicode code point, map via cmap.
@@ -3794,7 +3950,11 @@ impl CidTrueTypePdfFont {
             let p = parse_glyf_to_path(&glyf_data, &|cid| get_glyf_data(data_ref, cid));
             // Sanity check: real glyphs have at most a few thousand segments.
             // Bogus GIDs reading random glyf bytes can produce millions.
-            if p.is_empty() || p.segments.len() > 10_000 { None } else { Some(p) }
+            if p.is_empty() || p.segments.len() > 10_000 {
+                None
+            } else {
+                Some(p)
+            }
         });
         let path = path?;
         let scale = 1.0 / self.units_per_em;
@@ -3807,9 +3967,8 @@ impl CidTrueTypePdfFont {
             // the advance and glyph width already match — scaling would stretch
             // the glyph to DW while the advance uses the natural hmtx width.
             let pdf_w = self.cid_widths.get(&cid).copied();
-            let font_w = hmtx_advance_width(&self.data, gid, self.units_per_em)
-                .unwrap_or(0.0)
-                / 1000.0;
+            let font_w =
+                hmtx_advance_width(&self.data, gid, self.units_per_em).unwrap_or(0.0) / 1000.0;
             if let Some(pw) = pdf_w {
                 if font_w > 0.001 && pw > 0.001 {
                     Matrix::new(scale * pw / font_w, 0.0, 0.0, scale, 0.0, 0.0)
@@ -3989,8 +4148,7 @@ impl CidCffPdfFont {
             // (e.g. Japan1), the CID is from the Adobe registry, not Unicode.
             // Convert CID → Unicode first, then look up in cmap.
             if !self.ordering.is_empty() && self.ordering != b"Identity" {
-                let unicode =
-                    super::cid_unicode::cid_to_unicode(&self.ordering, cid)?;
+                let unicode = super::cid_unicode::cid_to_unicode(&self.ordering, cid)?;
                 // For CJK substitution, try full-width glyph variants first.
                 // The substitute font may have a proportional glyph for U+00B7
                 // (MIDDLE DOT, narrow) while the original CJK font used a
@@ -4038,7 +4196,12 @@ impl CffPdfFont {
             .iter()
             .position(|name| name == glyph_name)
             .or_else(|| {
-                let cff_gid = self.font.encoding.get(char_code as usize).copied().unwrap_or(0) as usize;
+                let cff_gid = self
+                    .font
+                    .encoding
+                    .get(char_code as usize)
+                    .copied()
+                    .unwrap_or(0) as usize;
                 if cff_gid > 0 && cff_gid < self.font.char_strings.len() {
                     Some(cff_gid)
                 } else {

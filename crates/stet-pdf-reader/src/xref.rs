@@ -74,10 +74,7 @@ pub fn parse_xref(data: &[u8]) -> Result<XrefTable, PdfError> {
     // If %PDF- header isn't at byte 0 (e.g., UTF-8 BOM or prepended garbage),
     // all internal offsets (startxref, /Prev) need adjustment. Compute this
     // before following the xref chain so /Prev pointers are corrected too.
-    let header_offset = data
-        .windows(5)
-        .position(|w| w == b"%PDF-")
-        .unwrap_or(0);
+    let header_offset = data.windows(5).position(|w| w == b"%PDF-").unwrap_or(0);
 
     // Detect concatenated PDFs (multiple %PDF- headers). When present, the
     // final section's offsets may be relative to a later header, not the first.
@@ -101,9 +98,7 @@ pub fn parse_xref(data: &[u8]) -> Result<XrefTable, PdfError> {
                     // Adjust entry offsets: they're relative to this header
                     shift_xref_entries(&mut entries, h);
                     visited.insert(try_offset);
-                    let prev = trailer
-                        .get_int(b"Prev")
-                        .map(|v| v as usize + h);
+                    let prev = trailer.get_int(b"Prev").map(|v| v as usize + h);
                     sections.push((entries, trailer, try_offset));
                     if let Some(p) = prev {
                         offset = p;
@@ -123,9 +118,7 @@ pub fn parse_xref(data: &[u8]) -> Result<XrefTable, PdfError> {
 
         match parse_xref_section(data, offset) {
             Ok((entries, trailer)) => {
-                let prev = trailer
-                    .get_int(b"Prev")
-                    .map(|v| v as usize + header_offset);
+                let prev = trailer.get_int(b"Prev").map(|v| v as usize + header_offset);
                 sections.push((entries, trailer, offset));
                 match prev {
                     Some(p) => offset = p,
@@ -287,9 +280,7 @@ fn discover_orphaned_xref_sections(
                     if section_header > 0 {
                         shift_xref_entries(&mut entries, section_header);
                     }
-                    let prev = trailer
-                        .get_int(b"Prev")
-                        .map(|v| v as usize + header_offset);
+                    let prev = trailer.get_int(b"Prev").map(|v| v as usize + header_offset);
                     sections.push((entries, trailer, offset));
                     match prev {
                         Some(p) => offset = p,
@@ -333,7 +324,10 @@ fn supplement_xref_from_scan(data: &[u8], entries: &mut Vec<Option<XrefEntry>>) 
                 // Free (malformed xref tables sometimes mark real objects as
                 // free, e.g. when the subsection start number is off-by-one).
                 let dominated_by_existing = entries.get(idx).is_some_and(|e| {
-                    matches!(e, Some(XrefEntry::InFile { .. } | XrefEntry::InStream { .. }))
+                    matches!(
+                        e,
+                        Some(XrefEntry::InFile { .. } | XrefEntry::InStream { .. })
+                    )
                 });
                 if !dominated_by_existing {
                     if idx >= entries.len() {
@@ -634,13 +628,9 @@ fn parse_xref_section(
                     let scan_end = offset.min(data.len());
                     for search in (scan_start..scan_end).rev() {
                         if data[search].is_ascii_digit() {
-                            if let Some((_, _, obj_offset)) =
-                                try_parse_obj_header(data, search)
-                            {
+                            if let Some((_, _, obj_offset)) = try_parse_obj_header(data, search) {
                                 if obj_offset == search {
-                                    if let Ok(result) =
-                                        parse_xref_stream(data, search)
-                                    {
+                                    if let Ok(result) = parse_xref_stream(data, search) {
                                         return Ok(result);
                                     }
                                 }
@@ -866,9 +856,7 @@ fn parse_xref_stream(
             while pos <= search_end {
                 if &data[pos..pos + needle.len()] == needle {
                     let mut end = pos;
-                    while end > data_start
-                        && matches!(data[end - 1], b' ' | b'\r' | b'\n')
-                    {
+                    while end > data_start && matches!(data[end - 1], b' ' | b'\r' | b'\n') {
                         end -= 1;
                     }
                     found = Some(end - data_start);

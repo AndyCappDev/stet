@@ -207,8 +207,8 @@ impl<'a> Lexer<'a> {
         if has_dot {
             let f: f64 = if implicit_exp {
                 // Insert 'e' before the exponent sign: "0.00-50" → "0.00e-50"
-                let s_str = std::str::from_utf8(s)
-                    .map_err(|_| PdfError::Other("invalid number".into()))?;
+                let s_str =
+                    std::str::from_utf8(s).map_err(|_| PdfError::Other("invalid number".into()))?;
                 let sign_idx = s_str.rfind(['+', '-']).unwrap();
                 let mut with_e = String::from(&s_str[..sign_idx]);
                 with_e.push('e');
@@ -217,8 +217,8 @@ impl<'a> Lexer<'a> {
                     .parse()
                     .map_err(|_| PdfError::Other(format!("invalid real: {s_str}")))?
             } else {
-                let s_str = std::str::from_utf8(s)
-                    .map_err(|_| PdfError::Other("invalid number".into()))?;
+                let s_str =
+                    std::str::from_utf8(s).map_err(|_| PdfError::Other("invalid number".into()))?;
                 s_str
                     .parse()
                     .map_err(|_| PdfError::Other(format!("invalid real: {s_str}")))?

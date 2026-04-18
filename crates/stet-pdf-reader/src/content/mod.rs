@@ -294,7 +294,12 @@ impl<'a> ContentInterpreter<'a> {
         self.flush_soft_mask();
         // Close any unmatched marked-content blocks from unbalanced BDC/EMC
         while let Some(frame) = self.mc_stack.pop() {
-            if let MarkedContentFrame::Ocg { parent_list, ocg_id, default_visible } = frame {
+            if let MarkedContentFrame::Ocg {
+                parent_list,
+                ocg_id,
+                default_visible,
+            } = frame
+            {
                 let ocg_list = std::mem::replace(&mut self.display_list, parent_list);
                 self.display_list.push(DisplayElement::OcgGroup {
                     elements: ocg_list,
@@ -351,7 +356,9 @@ impl<'a> ContentInterpreter<'a> {
             .get(b"Rect")
             .and_then(|obj| {
                 let resolved = self.resolver.deref(obj).ok().unwrap_or(obj.clone());
-                let a = resolved.as_array().or_else(|| annot_dict.get_array(b"Rect"))?;
+                let a = resolved
+                    .as_array()
+                    .or_else(|| annot_dict.get_array(b"Rect"))?;
                 if a.len() >= 4 {
                     let r0 = a[0].as_f64()?;
                     let r1 = a[1].as_f64()?;
@@ -427,7 +434,12 @@ impl<'a> ContentInterpreter<'a> {
                 let resolved = self.resolver.deref(obj).ok().unwrap_or(obj.clone());
                 let a = resolved.as_array()?;
                 if a.len() >= 4 {
-                    Some([a[0].as_f64()?, a[1].as_f64()?, a[2].as_f64()?, a[3].as_f64()?])
+                    Some([
+                        a[0].as_f64()?,
+                        a[1].as_f64()?,
+                        a[2].as_f64()?,
+                        a[3].as_f64()?,
+                    ])
                 } else {
                     None
                 }
@@ -540,10 +552,7 @@ impl<'a> ContentInterpreter<'a> {
         };
 
         // Opacity
-        let alpha = dict
-            .get(b"CA")
-            .and_then(|o| o.as_f64())
-            .unwrap_or(1.0);
+        let alpha = dict.get(b"CA").and_then(|o| o.as_f64()).unwrap_or(1.0);
 
         // Border width: prefer /BS dict /W, then /Border array [h_radius v_radius width]
         let border_width = dict
@@ -587,10 +596,12 @@ impl<'a> ContentInterpreter<'a> {
                     let coords: Vec<f64> = l.iter().filter_map(|o| o.as_f64()).collect();
                     if coords.len() >= 4 {
                         let (x1, y1, x2, y2) = (coords[0], coords[1], coords[2], coords[3]);
-                        let path = PsPath { segments: vec![
-                            PathSegment::MoveTo(x1, y1),
-                            PathSegment::LineTo(x2, y2),
-                        ] };
+                        let path = PsPath {
+                            segments: vec![
+                                PathSegment::MoveTo(x1, y1),
+                                PathSegment::LineTo(x2, y2),
+                            ],
+                        };
                         self.display_list.push(DisplayElement::Stroke {
                             path,
                             params: StrokeParams {
@@ -719,13 +730,15 @@ impl<'a> ContentInterpreter<'a> {
 
                         if subtype == b"Highlight" {
                             // Fill the quad with translucent color
-                            let path = PsPath { segments: vec![
-                                PathSegment::MoveTo(x1, y1),
-                                PathSegment::LineTo(x2, y2),
-                                PathSegment::LineTo(x4, y4),
-                                PathSegment::LineTo(x3, y3),
-                                PathSegment::ClosePath,
-                            ] };
+                            let path = PsPath {
+                                segments: vec![
+                                    PathSegment::MoveTo(x1, y1),
+                                    PathSegment::LineTo(x2, y2),
+                                    PathSegment::LineTo(x4, y4),
+                                    PathSegment::LineTo(x3, y3),
+                                    PathSegment::ClosePath,
+                                ],
+                            };
                             self.display_list.push(DisplayElement::Fill {
                                 path,
                                 params: FillParams {
@@ -751,16 +764,22 @@ impl<'a> ContentInterpreter<'a> {
                             // StrikeOut/Underline/Squiggly: draw a line
                             let (lx1, ly1, lx2, ly2) = if subtype == b"StrikeOut" {
                                 // Middle of the quad
-                                ((x1 + x3) / 2.0, (y1 + y3) / 2.0,
-                                 (x2 + x4) / 2.0, (y2 + y4) / 2.0)
+                                (
+                                    (x1 + x3) / 2.0,
+                                    (y1 + y3) / 2.0,
+                                    (x2 + x4) / 2.0,
+                                    (y2 + y4) / 2.0,
+                                )
                             } else {
                                 // Bottom of the quad
                                 (x3, y3, x4, y4)
                             };
-                            let path = PsPath { segments: vec![
-                                PathSegment::MoveTo(lx1, ly1),
-                                PathSegment::LineTo(lx2, ly2),
-                            ] };
+                            let path = PsPath {
+                                segments: vec![
+                                    PathSegment::MoveTo(lx1, ly1),
+                                    PathSegment::LineTo(lx2, ly2),
+                                ],
+                            };
                             self.display_list.push(DisplayElement::Stroke {
                                 path,
                                 params: StrokeParams {
@@ -797,13 +816,15 @@ impl<'a> ContentInterpreter<'a> {
                 if border_width < 0.001 && !has_ic {
                     return Ok(());
                 }
-                let path = PsPath { segments: vec![
-                    PathSegment::MoveTo(rect[0], rect[1]),
-                    PathSegment::LineTo(rect[2], rect[1]),
-                    PathSegment::LineTo(rect[2], rect[3]),
-                    PathSegment::LineTo(rect[0], rect[3]),
-                    PathSegment::ClosePath,
-                ] };
+                let path = PsPath {
+                    segments: vec![
+                        PathSegment::MoveTo(rect[0], rect[1]),
+                        PathSegment::LineTo(rect[2], rect[1]),
+                        PathSegment::LineTo(rect[2], rect[3]),
+                        PathSegment::LineTo(rect[0], rect[3]),
+                        PathSegment::ClosePath,
+                    ],
+                };
                 // Fill with /IC (interior color) if present
                 if let Some(ic) = dict.get_array(b"IC") {
                     let vals: Vec<f64> = ic.iter().filter_map(|o| o.as_f64()).collect();
@@ -835,7 +856,9 @@ impl<'a> ContentInterpreter<'a> {
                         },
                     });
                 }
-                if border_width < 0.001 { return Ok(()); }
+                if border_width < 0.001 {
+                    return Ok(());
+                }
                 self.display_list.push(DisplayElement::Stroke {
                     path,
                     params: StrokeParams {
@@ -874,14 +897,44 @@ impl<'a> ContentInterpreter<'a> {
                 let rx = (rect[2] - rect[0]) / 2.0;
                 let ry = (rect[3] - rect[1]) / 2.0;
                 let k = 0.5522847498; // magic number for circular Bezier approximation
-                let path = PsPath { segments: vec![
-                    PathSegment::MoveTo(cx + rx, cy),
-                    PathSegment::CurveTo { x1: cx + rx, y1: cy + ry * k, x2: cx + rx * k, y2: cy + ry, x3: cx, y3: cy + ry },
-                    PathSegment::CurveTo { x1: cx - rx * k, y1: cy + ry, x2: cx - rx, y2: cy + ry * k, x3: cx - rx, y3: cy },
-                    PathSegment::CurveTo { x1: cx - rx, y1: cy - ry * k, x2: cx - rx * k, y2: cy - ry, x3: cx, y3: cy - ry },
-                    PathSegment::CurveTo { x1: cx + rx * k, y1: cy - ry, x2: cx + rx, y2: cy - ry * k, x3: cx + rx, y3: cy },
-                    PathSegment::ClosePath,
-                ] };
+                let path = PsPath {
+                    segments: vec![
+                        PathSegment::MoveTo(cx + rx, cy),
+                        PathSegment::CurveTo {
+                            x1: cx + rx,
+                            y1: cy + ry * k,
+                            x2: cx + rx * k,
+                            y2: cy + ry,
+                            x3: cx,
+                            y3: cy + ry,
+                        },
+                        PathSegment::CurveTo {
+                            x1: cx - rx * k,
+                            y1: cy + ry,
+                            x2: cx - rx,
+                            y2: cy + ry * k,
+                            x3: cx - rx,
+                            y3: cy,
+                        },
+                        PathSegment::CurveTo {
+                            x1: cx - rx,
+                            y1: cy - ry * k,
+                            x2: cx - rx * k,
+                            y2: cy - ry,
+                            x3: cx,
+                            y3: cy - ry,
+                        },
+                        PathSegment::CurveTo {
+                            x1: cx + rx * k,
+                            y1: cy - ry,
+                            x2: cx + rx,
+                            y2: cy - ry * k,
+                            x3: cx + rx,
+                            y3: cy,
+                        },
+                        PathSegment::ClosePath,
+                    ],
+                };
                 if let Some(ic) = dict.get_array(b"IC") {
                     let vals: Vec<f64> = ic.iter().filter_map(|o| o.as_f64()).collect();
                     let ic_color = match vals.len() {
@@ -912,7 +965,9 @@ impl<'a> ContentInterpreter<'a> {
                         },
                     });
                 }
-                if border_width < 0.001 { return Ok(()); }
+                if border_width < 0.001 {
+                    return Ok(());
+                }
                 self.display_list.push(DisplayElement::Stroke {
                     path,
                     params: StrokeParams {
@@ -1075,8 +1130,7 @@ impl<'a> ContentInterpreter<'a> {
                     elems.push(PdfObj::Array(sub));
                 }
                 Token::DictBegin => {
-                    let d = crate::lexer::parse_dict_body(lexer)
-                        .unwrap_or_default();
+                    let d = crate::lexer::parse_dict_body(lexer).unwrap_or_default();
                     elems.push(PdfObj::Dict(d));
                 }
                 Token::Keyword(ref kw) if kw == b"null" => {
@@ -1107,8 +1161,7 @@ impl<'a> ContentInterpreter<'a> {
             b"m" | b"l" => 2,
             b"v" | b"y" | b"re" => 4,
             b"c" => 6,
-            b"h" | b"S" | b"s" | b"f" | b"F" | b"f*" | b"B" | b"B*" | b"b" | b"b*"
-            | b"n" => 0,
+            b"h" | b"S" | b"s" | b"f" | b"F" | b"f*" | b"B" | b"B*" | b"b" | b"b*" | b"n" => 0,
             _ => -1, // no check
         };
         if expected_args >= 0
@@ -1376,7 +1429,10 @@ impl<'a> ContentInterpreter<'a> {
             });
             // A path with MoveTo but no lines/curves has zero area — clip everything.
             // An empty path (no segments at all) is a no-op — skip the clip entirely.
-            let has_moveto = path.segments.iter().any(|s| matches!(s, PathSegment::MoveTo(..)));
+            let has_moveto = path
+                .segments
+                .iter()
+                .any(|s| matches!(s, PathSegment::MoveTo(..)));
             if !has_drawing_segments && has_moveto {
                 // Degenerate path (only MoveTo): create a zero-area clip
                 let mut empty = PsPath::new();
@@ -1430,9 +1486,7 @@ impl<'a> ContentInterpreter<'a> {
             // inside this block and the scope should be flushed. This correctly
             // handles nested masks inside resolve_soft_mask where both current
             // and saved gstates have a soft_mask but they're different.
-            if self.soft_mask_scope.is_some()
-                && self.gstate.smask_gen != saved.smask_gen
-            {
+            if self.soft_mask_scope.is_some() && self.gstate.smask_gen != saved.smask_gen {
                 self.flush_soft_mask();
                 self.nested_mask_flush_count += 1;
             }
@@ -1446,8 +1500,7 @@ impl<'a> ContentInterpreter<'a> {
                 self.restore_clip_from_stack();
             }
             // Re-resolve current_font if the restored font name differs
-            if self.gstate.text_font_name != old_font_name
-                && !self.gstate.text_font_name.is_empty()
+            if self.gstate.text_font_name != old_font_name && !self.gstate.text_font_name.is_empty()
             {
                 let name = self.gstate.text_font_name.clone();
                 self.resolve_current_font(&name);
@@ -1763,7 +1816,11 @@ impl<'a> ContentInterpreter<'a> {
                     device_space_tile: false,
                     flip_tile_y: false,
                     stroke_params: None,
-                    overprint_mode: if self.gstate.overprint { self.gstate.overprint_mode } else { 0 },
+                    overprint_mode: if self.gstate.overprint {
+                        self.gstate.overprint_mode
+                    } else {
+                        0
+                    },
                 },
             });
         } else {
@@ -1814,7 +1871,11 @@ impl<'a> ContentInterpreter<'a> {
                     device_space_tile: false,
                     flip_tile_y: false,
                     stroke_params: Some(sp),
-                    overprint_mode: if self.gstate.overprint { self.gstate.overprint_mode } else { 0 },
+                    overprint_mode: if self.gstate.overprint {
+                        self.gstate.overprint_mode
+                    } else {
+                        0
+                    },
                 },
             });
             return;
@@ -1875,10 +1936,10 @@ impl<'a> ContentInterpreter<'a> {
     /// subsequent overprint knockout at a slightly different position would
     /// not fully cover them (GWG 4.0.1 swatch d).
     fn emit_fill_stroke(&mut self, path: PsPath, fill_rule: FillRule) {
-        let is_simple_fill = self.gstate.fill_shading_pattern.is_none()
-            && self.gstate.fill_pattern.is_none();
-        let is_simple_stroke = self.gstate.stroke_shading_pattern.is_none()
-            && self.gstate.stroke_pattern.is_none();
+        let is_simple_fill =
+            self.gstate.fill_shading_pattern.is_none() && self.gstate.fill_pattern.is_none();
+        let is_simple_stroke =
+            self.gstate.stroke_shading_pattern.is_none() && self.gstate.stroke_pattern.is_none();
 
         // Group wrapping is safe when the paint's rendering doesn't depend on
         // per-channel backdrop interaction that differs between a real page
@@ -1913,12 +1974,11 @@ impl<'a> ContentInterpreter<'a> {
         // for correct rendering) aren't involved. Mixing a DeviceCMYK overprint
         // fill with a Separation stroke (GWG 4.0.1 swatches a/b/c) would lose
         // the spot backdrop inside the group.
-        let both_device_cmyk =
-            self.gstate.fill_is_device_cmyk && self.gstate.stroke_is_device_cmyk;
-        let fill_overprint_safe = !self.gstate.overprint
-            || (is_white_fill && both_device_cmyk && !strict_opm1);
-        let stroke_overprint_safe = !self.gstate.overprint_stroke
-            || (is_white_stroke && both_device_cmyk && !strict_opm1);
+        let both_device_cmyk = self.gstate.fill_is_device_cmyk && self.gstate.stroke_is_device_cmyk;
+        let fill_overprint_safe =
+            !self.gstate.overprint || (is_white_fill && both_device_cmyk && !strict_opm1);
+        let stroke_overprint_safe =
+            !self.gstate.overprint_stroke || (is_white_stroke && both_device_cmyk && !strict_opm1);
         // Extra guard: even if each side's own overprint check passes, refuse
         // when *any* overprint is active and the OTHER side isn't DeviceCMYK —
         // this catches the "inherited overprint_stroke=false + Separation
@@ -2155,7 +2215,11 @@ impl<'a> ContentInterpreter<'a> {
                 // Name not in cached ColorSpace dict — fall back to full resolution
                 // (handles resources without a ColorSpace sub-dict, or names that
                 // appear due to resource inheritance not captured by the index)
-                resolve_color_space(&ColorSpaceRef::Named(name.to_vec()), &self.resources, self.resolver)
+                resolve_color_space(
+                    &ColorSpaceRef::Named(name.to_vec()),
+                    &self.resources,
+                    self.resolver,
+                )
             }
         } else {
             resolve_color_space(cs_ref, &self.resources, self.resolver)
@@ -2472,12 +2536,30 @@ impl<'a> ContentInterpreter<'a> {
                     let extra = if raw_code == 0x20 { word_spacing } else { 0.0 };
                     i += 1;
                     let cid = font.resolve_code_to_cid(raw_code) as u16;
-                    self.render_cid_glyph(&font, cid, font_size, char_spacing, th, text_rise, &font_matrix, render_mode, extra);
+                    self.render_cid_glyph(
+                        &font,
+                        cid,
+                        font_size,
+                        char_spacing,
+                        th,
+                        text_rise,
+                        &font_matrix,
+                        render_mode,
+                        extra,
+                    );
                 } else if i + 1 >= text.len() {
                     // Incomplete trailing byte in 2-byte font — treat as WinAnsi
                     let byte = text[i];
                     i += 1;
-                    self.render_unicode_glyph(byte, font_size, char_spacing, th, text_rise, &font_matrix, render_mode);
+                    self.render_unicode_glyph(
+                        byte,
+                        font_size,
+                        char_spacing,
+                        th,
+                        text_rise,
+                        &font_matrix,
+                        render_mode,
+                    );
                 } else {
                     // Multi-byte code (2, 3, or 4 bytes from codespace ranges).
                     let width = code_width.min(text.len() - i);
@@ -2501,29 +2583,78 @@ impl<'a> ContentInterpreter<'a> {
                         (cid, width)
                     };
                     // Word spacing applies only to SINGLE-byte code 32.
-                    let extra = if consumed == 1 && text[i] == 0x20 { word_spacing } else { 0.0 };
+                    let extra = if consumed == 1 && text[i] == 0x20 {
+                        word_spacing
+                    } else {
+                        0.0
+                    };
                     i += consumed;
                     if font.has_cid_glyph(cid) {
                         // CID maps to a valid GID in the font
-                        self.render_cid_glyph(&font, cid, font_size, char_spacing, th, text_rise, &font_matrix, render_mode, extra);
+                        self.render_cid_glyph(
+                            &font,
+                            cid,
+                            font_size,
+                            char_spacing,
+                            th,
+                            text_rise,
+                            &font_matrix,
+                            render_mode,
+                            extra,
+                        );
                     } else {
                         // 2-byte CID has no glyph.  Some malformed PDFs encode
                         // single-byte CIDs in 2-byte Identity-H strings with a
                         // padding high byte (e.g. 0x20).  Try the low byte alone.
                         let lo_cid = (raw_code & 0xFF) as u16;
                         if lo_cid > 0 && font.has_cid_glyph(lo_cid) {
-                            self.render_cid_glyph(&font, lo_cid, font_size, char_spacing, th, text_rise, &font_matrix, render_mode, extra);
+                            self.render_cid_glyph(
+                                &font,
+                                lo_cid,
+                                font_size,
+                                char_spacing,
+                                th,
+                                text_rise,
+                                &font_matrix,
+                                render_mode,
+                                extra,
+                            );
                         } else if raw_code <= 0xFF {
                             // Low code point with no CID glyph — malformed PDF mixing
                             // 1-byte WinAnsi text in a CID font.  Bypass the CID
                             // machinery and map each byte through WinAnsi→Unicode→cmap.
-                            self.render_unicode_glyph(text[i - 2], font_size, char_spacing, th, text_rise, &font_matrix, render_mode);
-                            self.render_unicode_glyph(text[i - 1], font_size, char_spacing, th, text_rise, &font_matrix, render_mode);
+                            self.render_unicode_glyph(
+                                text[i - 2],
+                                font_size,
+                                char_spacing,
+                                th,
+                                text_rise,
+                                &font_matrix,
+                                render_mode,
+                            );
+                            self.render_unicode_glyph(
+                                text[i - 1],
+                                font_size,
+                                char_spacing,
+                                th,
+                                text_rise,
+                                &font_matrix,
+                                render_mode,
+                            );
                         } else {
                             // CID glyph not available (e.g. substitute font for CJK).
                             // Use CID width for correct advancement; try Unicode for shape.
                             self.render_cid_glyph_unicode_fallback(
-                                &font, cid, raw_code, font_size, char_spacing, th, text_rise, &font_matrix, render_mode, extra,
+                                &font,
+                                cid,
+                                raw_code,
+                                font_size,
+                                char_spacing,
+                                th,
+                                text_rise,
+                                &font_matrix,
+                                render_mode,
+                                extra,
                             );
                         }
                     }
@@ -2600,8 +2731,12 @@ impl<'a> ContentInterpreter<'a> {
                 // v_x/v_y define the position vector from horizontal to vertical origin.
                 let [_w1, v_x, v_y] = font.vertical_metrics_cid(cid);
                 Matrix::new(
-                    font_size, 0.0, 0.0, font_size,
-                    -v_x / 1000.0 * font_size, -v_y / 1000.0 * font_size,
+                    font_size,
+                    0.0,
+                    0.0,
+                    font_size,
+                    -v_x / 1000.0 * font_size,
+                    -v_y / 1000.0 * font_size,
                 )
             } else {
                 Matrix::new(font_size * th, 0.0, 0.0, font_size, 0.0, text_rise)
@@ -2652,8 +2787,12 @@ impl<'a> ContentInterpreter<'a> {
             let text_state_matrix = if vertical {
                 let [_w1, v_x, v_y] = font.vertical_metrics_cid(cid);
                 Matrix::new(
-                    font_size, 0.0, 0.0, font_size,
-                    -v_x / 1000.0 * font_size, -v_y / 1000.0 * font_size,
+                    font_size,
+                    0.0,
+                    0.0,
+                    font_size,
+                    -v_x / 1000.0 * font_size,
+                    -v_y / 1000.0 * font_size,
                 )
             } else {
                 Matrix::new(font_size * th, 0.0, 0.0, font_size, 0.0, text_rise)
@@ -2695,7 +2834,9 @@ impl<'a> ContentInterpreter<'a> {
         render_mode: i32,
     ) {
         let unicode = font::winansi_byte_to_unicode(byte);
-        if let Some(glyph_path) = self.current_font.as_ref()
+        if let Some(glyph_path) = self
+            .current_font
+            .as_ref()
             .and_then(|f| f.glyph_path_unicode(unicode))
         {
             let text_state_matrix =
@@ -2711,7 +2852,9 @@ impl<'a> ContentInterpreter<'a> {
                 self.emit_text_glyph(device_path, render_mode);
             }
         }
-        let w0 = self.current_font.as_ref()
+        let w0 = self
+            .current_font
+            .as_ref()
             .map(|f| f.glyph_width_unicode(unicode))
             .unwrap_or(0.0);
         let tx = (w0 * font_size + char_spacing) * th;
@@ -2881,7 +3024,11 @@ impl<'a> ContentInterpreter<'a> {
                     device_space_tile: false,
                     flip_tile_y: false,
                     stroke_params: None,
-                    overprint_mode: if self.gstate.overprint { self.gstate.overprint_mode } else { 0 },
+                    overprint_mode: if self.gstate.overprint {
+                        self.gstate.overprint_mode
+                    } else {
+                        0
+                    },
                 },
             });
         } else {
@@ -2956,7 +3103,11 @@ impl<'a> ContentInterpreter<'a> {
                     device_space_tile: false,
                     flip_tile_y: false,
                     stroke_params: Some(sp),
-                    overprint_mode: if self.gstate.overprint { self.gstate.overprint_mode } else { 0 },
+                    overprint_mode: if self.gstate.overprint {
+                        self.gstate.overprint_mode
+                    } else {
+                        0
+                    },
                 },
             });
             return;
@@ -2993,8 +3144,7 @@ impl<'a> ContentInterpreter<'a> {
                 if let Some(ocg_obj) = props_dict.get(&prop_name) {
                     let ocg_id = self.ocg_obj_num(ocg_obj);
                     let is_off = self.is_ocg_off(ocg_obj);
-                    let parent_list =
-                        std::mem::replace(&mut self.display_list, DisplayList::new());
+                    let parent_list = std::mem::replace(&mut self.display_list, DisplayList::new());
                     self.mc_stack.push(MarkedContentFrame::Ocg {
                         parent_list,
                         ocg_id,
@@ -3115,14 +3265,13 @@ impl<'a> ContentInterpreter<'a> {
         // Check Optional Content visibility on the XObject itself.
         // Instead of suppressing content, wrap it in an OcgGroup so visibility
         // can be toggled at render time.
-        let xobj_ocg_info: Option<(u32, bool)> = dict.get(b"OC").map(|oc_obj| {
-            (self.ocg_obj_num(oc_obj), !self.is_ocg_off(oc_obj))
-        });
+        let xobj_ocg_info: Option<(u32, bool)> = dict
+            .get(b"OC")
+            .map(|oc_obj| (self.ocg_obj_num(oc_obj), !self.is_ocg_off(oc_obj)));
 
         let mut wrapped = false;
         if let Some((ocg_id, default_visible)) = xobj_ocg_info {
-            let parent_list =
-                std::mem::replace(&mut self.display_list, DisplayList::new());
+            let parent_list = std::mem::replace(&mut self.display_list, DisplayList::new());
             self.mc_stack.push(MarkedContentFrame::Ocg {
                 parent_list,
                 ocg_id,
@@ -3169,9 +3318,11 @@ impl<'a> ContentInterpreter<'a> {
         }
 
         // Width/Height may be indirect references in some PDFs
-        let width = self.resolve_dict_int(dict, b"Width")
+        let width = self
+            .resolve_dict_int(dict, b"Width")
             .ok_or(PdfError::Other("image missing Width".into()))? as u32;
-        let height = self.resolve_dict_int(dict, b"Height")
+        let height = self
+            .resolve_dict_int(dict, b"Height")
             .ok_or(PdfError::Other("image missing Height".into()))? as u32;
 
         // Check for image mask (1-bit stencil painted with current fill color)
@@ -3231,7 +3382,8 @@ impl<'a> ContentInterpreter<'a> {
         // JPXDecode may be a single filter name or inside a filter array
         let filter_is_jpx = matches!(filter_name_raw, Some(b"JPXDecode" | b"JPX"))
             || dict.get_array(b"Filter").is_some_and(|arr| {
-                arr.iter().any(|f| matches!(f.as_name(), Some(b"JPXDecode" | b"JPX")))
+                arr.iter()
+                    .any(|f| matches!(f.as_name(), Some(b"JPXDecode" | b"JPX")))
             });
 
         // Decode the stream data. For DCTDecode with a bogus SOF height
@@ -3280,7 +3432,9 @@ impl<'a> ContentInterpreter<'a> {
                 }
             }
             #[cfg(not(feature = "jpx"))]
-            { self.resolver.stream_data_from_obj(obj)? }
+            {
+                self.resolver.stream_data_from_obj(obj)?
+            }
         } else {
             self.resolver.stream_data_from_obj(obj)?
         };
@@ -3292,7 +3446,8 @@ impl<'a> ContentInterpreter<'a> {
             if let Some(raw) = self.resolver.raw_stream_bytes(obj)
                 && let Some((jw, jh)) = crate::filters::jpeg_dimensions(raw)
                 && (jw != width || jh != height)
-                && jw <= width * 2 && jh <= height * 2
+                && jw <= width * 2
+                && jh <= height * 2
             {
                 (jw, jh)
             } else {
@@ -3319,7 +3474,9 @@ impl<'a> ContentInterpreter<'a> {
                 }
             }
             #[cfg(not(feature = "jpx"))]
-            { (width, height) }
+            {
+                (width, height)
+            }
         } else {
             (width, height)
         };
@@ -3333,83 +3490,87 @@ impl<'a> ContentInterpreter<'a> {
         // doesn't reinterpret interleaved alpha bytes as image samples.
         // When no explicit ColorSpace is present, infer it from the decoded
         // data length.
-        let (resolved_cs, sample_data, smask_in_data_alpha) = if !is_image_mask
-            && filter_is_jpx
-            && has_explicit_cs
-        {
-            let n_cs = resolved_cs.as_ref().map_or(3, |cs| cs.num_components() as usize);
-            let pixels = width as usize * height as usize;
-            let decoded_comps = if pixels > 0 { sample_data.len() / pixels } else { n_cs };
-            if smask_in_data >= 1 && decoded_comps == n_cs + 1 {
-                // Extract the alpha channel (last component per pixel)
-                let mut color_data = Vec::with_capacity(pixels * n_cs);
-                let mut alpha_data = Vec::with_capacity(pixels);
-                for chunk in sample_data.chunks_exact(decoded_comps) {
-                    color_data.extend_from_slice(&chunk[..n_cs]);
-                    alpha_data.push(chunk[n_cs]);
+        let (resolved_cs, sample_data, smask_in_data_alpha) =
+            if !is_image_mask && filter_is_jpx && has_explicit_cs {
+                let n_cs = resolved_cs
+                    .as_ref()
+                    .map_or(3, |cs| cs.num_components() as usize);
+                let pixels = width as usize * height as usize;
+                let decoded_comps = if pixels > 0 {
+                    sample_data.len() / pixels
+                } else {
+                    n_cs
+                };
+                if smask_in_data >= 1 && decoded_comps == n_cs + 1 {
+                    // Extract the alpha channel (last component per pixel)
+                    let mut color_data = Vec::with_capacity(pixels * n_cs);
+                    let mut alpha_data = Vec::with_capacity(pixels);
+                    for chunk in sample_data.chunks_exact(decoded_comps) {
+                        color_data.extend_from_slice(&chunk[..n_cs]);
+                        alpha_data.push(chunk[n_cs]);
+                    }
+                    (resolved_cs, color_data, Some(alpha_data))
+                } else if decoded_comps > n_cs {
+                    // Drop extra components (e.g. ignored alpha) — keep only the
+                    // first n_cs samples of each pixel.
+                    let mut color_data = Vec::with_capacity(pixels * n_cs);
+                    for chunk in sample_data.chunks_exact(decoded_comps) {
+                        color_data.extend_from_slice(&chunk[..n_cs]);
+                    }
+                    (resolved_cs, color_data, None)
+                } else {
+                    // Component count matches (or is unexpectedly low) — pass through
+                    (resolved_cs, sample_data, None)
                 }
-                (resolved_cs, color_data, Some(alpha_data))
-            } else if decoded_comps > n_cs {
-                // Drop extra components (e.g. ignored alpha) — keep only the
-                // first n_cs samples of each pixel.
-                let mut color_data = Vec::with_capacity(pixels * n_cs);
-                for chunk in sample_data.chunks_exact(decoded_comps) {
-                    color_data.extend_from_slice(&chunk[..n_cs]);
-                }
-                (resolved_cs, color_data, None)
-            } else {
-                // Component count matches (or is unexpectedly low) — pass through
-                (resolved_cs, sample_data, None)
-            }
-        } else if !is_image_mask && !has_explicit_cs {
-            let pixels = width as usize * height as usize;
-            if pixels > 0 {
-                let n_comps = sample_data.len() / pixels;
-                // For 4-component JPX images, check JP2 metadata to distinguish
-                // RGBA (sRGB + alpha) from CMYK. Without this, RGBA images get
-                // misidentified as CMYK, producing wrong colors (e.g., orange → blue).
-                if n_comps == 4 && self.is_jpx_rgba(obj) {
-                    if smask_in_data >= 1 {
-                        // SMaskInData: the JP2 alpha channel is the soft mask.
-                        // Premultiply alpha (tiny-skia expects premultiplied RGBA).
-                        let mut rgba = sample_data;
-                        for chunk in rgba.chunks_exact_mut(4) {
-                            let a = chunk[3] as u16;
-                            if a == 0 {
-                                chunk[0] = 0;
-                                chunk[1] = 0;
-                                chunk[2] = 0;
-                            } else if a < 255 {
-                                chunk[0] = ((chunk[0] as u16 * a + 127) / 255) as u8;
-                                chunk[1] = ((chunk[1] as u16 * a + 127) / 255) as u8;
-                                chunk[2] = ((chunk[2] as u16 * a + 127) / 255) as u8;
+            } else if !is_image_mask && !has_explicit_cs {
+                let pixels = width as usize * height as usize;
+                if pixels > 0 {
+                    let n_comps = sample_data.len() / pixels;
+                    // For 4-component JPX images, check JP2 metadata to distinguish
+                    // RGBA (sRGB + alpha) from CMYK. Without this, RGBA images get
+                    // misidentified as CMYK, producing wrong colors (e.g., orange → blue).
+                    if n_comps == 4 && self.is_jpx_rgba(obj) {
+                        if smask_in_data >= 1 {
+                            // SMaskInData: the JP2 alpha channel is the soft mask.
+                            // Premultiply alpha (tiny-skia expects premultiplied RGBA).
+                            let mut rgba = sample_data;
+                            for chunk in rgba.chunks_exact_mut(4) {
+                                let a = chunk[3] as u16;
+                                if a == 0 {
+                                    chunk[0] = 0;
+                                    chunk[1] = 0;
+                                    chunk[2] = 0;
+                                } else if a < 255 {
+                                    chunk[0] = ((chunk[0] as u16 * a + 127) / 255) as u8;
+                                    chunk[1] = ((chunk[1] as u16 * a + 127) / 255) as u8;
+                                    chunk[2] = ((chunk[2] as u16 * a + 127) / 255) as u8;
+                                }
                             }
+                            (None, rgba, None)
+                        } else {
+                            // No embedded mask — strip alpha from RGBA → RGB.
+                            let mut rgb = Vec::with_capacity(pixels * 3);
+                            for chunk in sample_data.chunks_exact(4) {
+                                rgb.push(chunk[0]);
+                                rgb.push(chunk[1]);
+                                rgb.push(chunk[2]);
+                            }
+                            (Some(ResolvedColorSpace::DeviceRGB), rgb, None)
                         }
-                        (None, rgba, None)
                     } else {
-                        // No embedded mask — strip alpha from RGBA → RGB.
-                        let mut rgb = Vec::with_capacity(pixels * 3);
-                        for chunk in sample_data.chunks_exact(4) {
-                            rgb.push(chunk[0]);
-                            rgb.push(chunk[1]);
-                            rgb.push(chunk[2]);
-                        }
-                        (Some(ResolvedColorSpace::DeviceRGB), rgb, None)
+                        let cs = match n_comps {
+                            1 => ResolvedColorSpace::DeviceGray,
+                            4 => ResolvedColorSpace::DeviceCMYK,
+                            _ => ResolvedColorSpace::DeviceRGB,
+                        };
+                        (Some(cs), sample_data, None)
                     }
                 } else {
-                    let cs = match n_comps {
-                        1 => ResolvedColorSpace::DeviceGray,
-                        4 => ResolvedColorSpace::DeviceCMYK,
-                        _ => ResolvedColorSpace::DeviceRGB,
-                    };
-                    (Some(cs), sample_data, None)
+                    (resolved_cs, sample_data, None)
                 }
             } else {
                 (resolved_cs, sample_data, None)
-            }
-        } else {
-            (resolved_cs, sample_data, None)
-        };
+            };
 
         // Image matrix: [width 0 0 -height 0 height] maps unit square to image
         let image_matrix =
@@ -3537,13 +3698,20 @@ impl<'a> ContentInterpreter<'a> {
             mask_dl.push(DisplayElement::Image {
                 sample_data: Arc::new(gray),
                 params: ImageParams {
-                    width, height,
+                    width,
+                    height,
                     color_space: ImageColorSpace::DeviceGray,
                     bits_per_component: 8,
-                    ctm: self.gstate.ctm, image_matrix,
-                    interpolate: false, mask_color: None,
-                    alpha: 1.0, blend_mode: 0,
-                    overprint: false, overprint_mode: 0, opm_paired: false, painted_channels: 0,
+                    ctm: self.gstate.ctm,
+                    image_matrix,
+                    interpolate: false,
+                    mask_color: None,
+                    alpha: 1.0,
+                    blend_mode: 0,
+                    overprint: false,
+                    overprint_mode: 0,
+                    opm_paired: false,
+                    painted_channels: 0,
                 },
             });
 
@@ -3555,15 +3723,25 @@ impl<'a> ContentInterpreter<'a> {
             ];
             let x_min = corners.iter().map(|c| c.0).fold(f64::INFINITY, f64::min);
             let y_min = corners.iter().map(|c| c.1).fold(f64::INFINITY, f64::min);
-            let x_max = corners.iter().map(|c| c.0).fold(f64::NEG_INFINITY, f64::max);
-            let y_max = corners.iter().map(|c| c.1).fold(f64::NEG_INFINITY, f64::max);
+            let x_max = corners
+                .iter()
+                .map(|c| c.0)
+                .fold(f64::NEG_INFINITY, f64::max);
+            let y_max = corners
+                .iter()
+                .map(|c| c.1)
+                .fold(f64::NEG_INFINITY, f64::max);
 
             // Emit tile images directly as content, composing their CTM with
             // the pattern matrix to place them in device space.
             let pm = &pattern.pattern_matrix;
             let mut content_dl = DisplayList::new();
             for elem in pattern.tile.elements() {
-                if let DisplayElement::Image { sample_data: sd, params: ip } = elem {
+                if let DisplayElement::Image {
+                    sample_data: sd,
+                    params: ip,
+                } = elem
+                {
                     let dev_ctm = pm.multiply(&ip.ctm);
                     content_dl.push(DisplayElement::Image {
                         sample_data: sd.clone(),
@@ -3577,11 +3755,14 @@ impl<'a> ContentInterpreter<'a> {
 
             let parent_clip_bbox = self.current_clip_bbox();
             self.display_list.push(DisplayElement::SoftMasked {
-                mask: mask_dl, content: content_dl,
+                mask: mask_dl,
+                content: content_dl,
                 params: SoftMaskParams {
                     subtype: SoftMaskSubtype::Luminosity,
                     bbox: [x_min, y_min, x_max, y_max],
-                    backdrop_color: None, transfer_invert: false, has_nested_mask_scope: false,
+                    backdrop_color: None,
+                    transfer_invert: false,
+                    has_nested_mask_scope: false,
                     parent_clip_bbox,
                 },
                 mask_cache: Arc::new(Mutex::new(None)),
@@ -3595,10 +3776,16 @@ impl<'a> ContentInterpreter<'a> {
         // 8-bit input combinations for N≥2.  Direct evaluation is exact and fast
         // enough for typical image sizes.
         let (color_space, sample_data) = if !is_image_mask
-            && let Some(ResolvedColorSpace::DeviceN { names, alt, tint_fn: Some(func) }) = resolved_cs.as_ref()
+            && let Some(ResolvedColorSpace::DeviceN {
+                names,
+                alt,
+                tint_fn: Some(func),
+            }) = resolved_cs.as_ref()
             && names.len() >= 2
-            && matches!(alt.as_ref(), ResolvedColorSpace::DeviceGray | ResolvedColorSpace::DeviceRGB)
-        {
+            && matches!(
+                alt.as_ref(),
+                ResolvedColorSpace::DeviceGray | ResolvedColorSpace::DeviceRGB
+            ) {
             let ni = names.len();
             let npixels = width as usize * height as usize;
             let mut rgba = vec![255u8; npixels * 4];
@@ -3617,10 +3804,13 @@ impl<'a> ContentInterpreter<'a> {
             }
             (ImageColorSpace::PreconvertedRGBA, rgba)
         } else if is_image_mask {
-            (ImageColorSpace::Mask {
-                color: self.gstate.fill_color.clone(),
-                polarity,
-            }, sample_data)
+            (
+                ImageColorSpace::Mask {
+                    color: self.gstate.fill_color.clone(),
+                    polarity,
+                },
+                sample_data,
+            )
         } else if let Some(ref rcs) = resolved_cs {
             (to_image_color_space(rcs), sample_data)
         } else {
@@ -3686,23 +3876,27 @@ impl<'a> ContentInterpreter<'a> {
         // Expand sub-byte samples (1/2/4 BPC) to 8-bit since they're packed
         // with geometry-dependent alignment. Downsample 16-bit to 8-bit (take
         // high byte) — downstream ICC and color conversion assumes 8-bit data.
-        let (sample_data, display_bpc) = if is_image_mask || bpc == 8 || bpc == 0 || is_jpx || is_dct {
-            (sample_data, if is_dct || is_jpx { 8 } else { bpc })
-        } else if bpc == 16 {
-            // Take high byte of each 16-bit big-endian sample
-            (sample_data.chunks(2).map(|c| c[0]).collect(), 8)
-        } else if bpc > 8 {
-            (sample_data, bpc)
-        } else {
-            (expand_bits_to_bytes(
-                &sample_data,
-                bpc,
-                width,
-                height,
-                color_space.num_components(),
-                is_indexed,
-            ), 8)
-        };
+        let (sample_data, display_bpc) =
+            if is_image_mask || bpc == 8 || bpc == 0 || is_jpx || is_dct {
+                (sample_data, if is_dct || is_jpx { 8 } else { bpc })
+            } else if bpc == 16 {
+                // Take high byte of each 16-bit big-endian sample
+                (sample_data.chunks(2).map(|c| c[0]).collect(), 8)
+            } else if bpc > 8 {
+                (sample_data, bpc)
+            } else {
+                (
+                    expand_bits_to_bytes(
+                        &sample_data,
+                        bpc,
+                        width,
+                        height,
+                        color_space.num_components(),
+                        is_indexed,
+                    ),
+                    8,
+                )
+            };
 
         // Apply /Decode array if present (maps sample values to color component values).
         // Default for most color spaces is [0 1 0 1 ...] (identity).
@@ -3784,7 +3978,11 @@ impl<'a> ContentInterpreter<'a> {
                 let g = sample_data.get(i).copied().unwrap_or(0);
                 cmyk[i * 4 + 3] = 255 - g; // K = 1 - gray
             }
-            (cmyk, ImageColorSpace::DeviceCMYK, Some(ResolvedColorSpace::DeviceCMYK))
+            (
+                cmyk,
+                ImageColorSpace::DeviceCMYK,
+                Some(ResolvedColorSpace::DeviceCMYK),
+            )
         } else {
             (sample_data, color_space, resolved_cs)
         };
@@ -3827,28 +4025,30 @@ impl<'a> ContentInterpreter<'a> {
             if let Some((mask_alpha, mw, mh)) = explicit_mask_data {
                 // Expand Indexed data to the base color space before upscaling,
                 // so bilinear interpolation blends actual colors, not indices.
-                let (up_data, up_cs) =
-                    if let ImageColorSpace::Indexed { base, hival, lookup } = &color_space {
-                        let n_base = base.num_components() as usize;
-                        let n_pixels = (width * height) as usize;
-                        let mut expanded = vec![0u8; n_pixels * n_base];
-                        for i in 0..n_pixels {
-                            let idx = sample_data.get(i).copied().unwrap_or(0) as usize;
-                            let idx = idx.min(*hival as usize);
-                            let offset = idx * n_base;
-                            for c in 0..n_base {
-                                expanded[i * n_base + c] =
-                                    lookup.get(offset + c).copied().unwrap_or(0);
-                            }
+                let (up_data, up_cs) = if let ImageColorSpace::Indexed {
+                    base,
+                    hival,
+                    lookup,
+                } = &color_space
+                {
+                    let n_base = base.num_components() as usize;
+                    let n_pixels = (width * height) as usize;
+                    let mut expanded = vec![0u8; n_pixels * n_base];
+                    for i in 0..n_pixels {
+                        let idx = sample_data.get(i).copied().unwrap_or(0) as usize;
+                        let idx = idx.min(*hival as usize);
+                        let offset = idx * n_base;
+                        for c in 0..n_base {
+                            expanded[i * n_base + c] = lookup.get(offset + c).copied().unwrap_or(0);
                         }
-                        (expanded, *base.clone())
-                    } else {
-                        (sample_data, color_space)
-                    };
+                    }
+                    (expanded, *base.clone())
+                } else {
+                    (sample_data, color_space)
+                };
                 let (img_data, img_w, img_h) = if mw > width || mh > height {
                     // Upscale image to mask dimensions using bilinear interpolation
-                    let upscaled =
-                        bilinear_upsample_image(&up_data, width, height, mw, mh, &up_cs);
+                    let upscaled = bilinear_upsample_image(&up_data, width, height, mw, mh, &up_cs);
                     (upscaled, mw, mh)
                 } else {
                     (up_data, width, height)
@@ -3891,37 +4091,41 @@ impl<'a> ContentInterpreter<'a> {
         // Non-K palettes keep CMYK_ALL so all channels are painted, matching
         // the PDF spec rule that OPM 1 per-channel zeroing does not apply to
         // Indexed color spaces (required by GWG 1.0 h/i).
-        let painted_channels_override =
-            if let ImageColorSpace::Indexed { base, hival, lookup } = &color_space {
-                if matches!(
-                    base.as_ref(),
-                    ImageColorSpace::DeviceCMYK | ImageColorSpace::ICCBased { n: 4, .. }
-                ) {
-                    let n_entries = (*hival as usize + 1).min(lookup.len() / 4);
-                    let is_k_only = n_entries > 0
-                        && (0..n_entries).all(|i| {
-                            let off = i * 4;
-                            lookup.get(off).copied().unwrap_or(0) == 0
-                                && lookup.get(off + 1).copied().unwrap_or(0) == 0
-                                && lookup.get(off + 2).copied().unwrap_or(0) == 0
-                        });
-                    if is_k_only {
-                        stet_graphics::device::CMYK_K
-                    } else {
-                        stet_graphics::device::CMYK_ALL
-                    }
+        let painted_channels_override = if let ImageColorSpace::Indexed {
+            base,
+            hival,
+            lookup,
+        } = &color_space
+        {
+            if matches!(
+                base.as_ref(),
+                ImageColorSpace::DeviceCMYK | ImageColorSpace::ICCBased { n: 4, .. }
+            ) {
+                let n_entries = (*hival as usize + 1).min(lookup.len() / 4);
+                let is_k_only = n_entries > 0
+                    && (0..n_entries).all(|i| {
+                        let off = i * 4;
+                        lookup.get(off).copied().unwrap_or(0) == 0
+                            && lookup.get(off + 1).copied().unwrap_or(0) == 0
+                            && lookup.get(off + 2).copied().unwrap_or(0) == 0
+                    });
+                if is_k_only {
+                    stet_graphics::device::CMYK_K
                 } else {
-                    resolved_cs
-                        .as_ref()
-                        .map(painted_channels_for_cs)
-                        .unwrap_or(self.gstate.fill_painted_channels)
+                    stet_graphics::device::CMYK_ALL
                 }
             } else {
                 resolved_cs
                     .as_ref()
                     .map(painted_channels_for_cs)
                     .unwrap_or(self.gstate.fill_painted_channels)
-            };
+            }
+        } else {
+            resolved_cs
+                .as_ref()
+                .map(painted_channels_for_cs)
+                .unwrap_or(self.gstate.fill_painted_channels)
+        };
 
         let image_params = ImageParams {
             width,
@@ -3960,8 +4164,14 @@ impl<'a> ContentInterpreter<'a> {
                 target_h = (target_h as f64 * scale).ceil() as u32;
             }
             let (sample_data, width, height) = if target_w > width || target_h > height {
-                let upscaled =
-                    bilinear_upsample_image(&sample_data, width, height, target_w, target_h, &image_params.color_space);
+                let upscaled = bilinear_upsample_image(
+                    &sample_data,
+                    width,
+                    height,
+                    target_w,
+                    target_h,
+                    &image_params.color_space,
+                );
                 (upscaled, target_w, target_h)
             } else {
                 (sample_data, width, height)
@@ -3974,8 +4184,10 @@ impl<'a> ContentInterpreter<'a> {
                     let sy = (y as u64 * mh as u64 / height as u64) as u32;
                     for x in 0..width {
                         let sx = (x as u64 * mw as u64 / width as u64) as u32;
-                        resampled[(y * width + x) as usize] =
-                            smask_data.get((sy * mw + sx) as usize).copied().unwrap_or(0);
+                        resampled[(y * width + x) as usize] = smask_data
+                            .get((sy * mw + sx) as usize)
+                            .copied()
+                            .unwrap_or(0);
                     }
                 }
                 resampled
@@ -4014,17 +4226,20 @@ impl<'a> ContentInterpreter<'a> {
             let sample_arc = Arc::new(sample_data);
             let smask_arc = Arc::new(smask_data);
             if let PdfObj::Ref(obj_num, _) = obj {
-                self.image_cache.insert(*obj_num, CachedImage {
-                    sample_data: Arc::clone(&sample_arc),
-                    width,
-                    height,
-                    color_space: image_params.color_space.clone(),
-                    bits_per_component: image_params.bits_per_component,
-                    interpolate,
-                    mask_color: image_params.mask_color.clone(),
-                    painted_channels: image_params.painted_channels,
-                    smask: Some((Arc::clone(&smask_arc), width, height, matte.clone())),
-                });
+                self.image_cache.insert(
+                    *obj_num,
+                    CachedImage {
+                        sample_data: Arc::clone(&sample_arc),
+                        width,
+                        height,
+                        color_space: image_params.color_space.clone(),
+                        bits_per_component: image_params.bits_per_component,
+                        interpolate,
+                        mask_color: image_params.mask_color.clone(),
+                        painted_channels: image_params.painted_channels,
+                        smask: Some((Arc::clone(&smask_arc), width, height, matte.clone())),
+                    },
+                );
             }
 
             let image_matrix =
@@ -4070,8 +4285,14 @@ impl<'a> ContentInterpreter<'a> {
             ];
             let x_min = corners.iter().map(|c| c.0).fold(f64::INFINITY, f64::min);
             let y_min = corners.iter().map(|c| c.1).fold(f64::INFINITY, f64::min);
-            let x_max = corners.iter().map(|c| c.0).fold(f64::NEG_INFINITY, f64::max);
-            let y_max = corners.iter().map(|c| c.1).fold(f64::NEG_INFINITY, f64::max);
+            let x_max = corners
+                .iter()
+                .map(|c| c.0)
+                .fold(f64::NEG_INFINITY, f64::max);
+            let y_max = corners
+                .iter()
+                .map(|c| c.1)
+                .fold(f64::NEG_INFINITY, f64::max);
 
             let parent_clip_bbox = self.current_clip_bbox();
             self.display_list.push(DisplayElement::SoftMasked {
@@ -4091,17 +4312,20 @@ impl<'a> ContentInterpreter<'a> {
             // Cache plain image for reuse (Arc for cheap cloning).
             let sample_arc = Arc::new(sample_data);
             if let PdfObj::Ref(obj_num, _) = obj {
-                self.image_cache.insert(*obj_num, CachedImage {
-                    sample_data: Arc::clone(&sample_arc),
-                    width,
-                    height,
-                    color_space: image_params.color_space.clone(),
-                    bits_per_component: image_params.bits_per_component,
-                    interpolate,
-                    mask_color: image_params.mask_color.clone(),
-                    painted_channels: image_params.painted_channels,
-                    smask: None,
-                });
+                self.image_cache.insert(
+                    *obj_num,
+                    CachedImage {
+                        sample_data: Arc::clone(&sample_arc),
+                        width,
+                        height,
+                        color_space: image_params.color_space.clone(),
+                        bits_per_component: image_params.bits_per_component,
+                        interpolate,
+                        mask_color: image_params.mask_color.clone(),
+                        painted_channels: image_params.painted_channels,
+                        smask: None,
+                    },
+                );
             }
 
             self.display_list.push(DisplayElement::Image {
@@ -4118,10 +4342,15 @@ impl<'a> ContentInterpreter<'a> {
     /// Emit a display element from a cached image, applying current graphics state.
     /// The cache already contains pre-downscaled data when applicable.
     fn emit_cached_image(&mut self, cached: CachedImage) -> Result<(), PdfError> {
-        let (sample_data, smask, width, height) =
-            (cached.sample_data, cached.smask, cached.width, cached.height);
+        let (sample_data, smask, width, height) = (
+            cached.sample_data,
+            cached.smask,
+            cached.width,
+            cached.height,
+        );
 
-        let image_matrix = Matrix::new(width as f64, 0.0, 0.0, -(height as f64), 0.0, height as f64);
+        let image_matrix =
+            Matrix::new(width as f64, 0.0, 0.0, -(height as f64), 0.0, height as f64);
         let image_params = ImageParams {
             width,
             height,
@@ -4180,8 +4409,14 @@ impl<'a> ContentInterpreter<'a> {
             ];
             let x_min = corners.iter().map(|c| c.0).fold(f64::INFINITY, f64::min);
             let y_min = corners.iter().map(|c| c.1).fold(f64::INFINITY, f64::min);
-            let x_max = corners.iter().map(|c| c.0).fold(f64::NEG_INFINITY, f64::max);
-            let y_max = corners.iter().map(|c| c.1).fold(f64::NEG_INFINITY, f64::max);
+            let x_max = corners
+                .iter()
+                .map(|c| c.0)
+                .fold(f64::NEG_INFINITY, f64::max);
+            let y_max = corners
+                .iter()
+                .map(|c| c.1)
+                .fold(f64::NEG_INFINITY, f64::max);
 
             let parent_clip_bbox = self.current_clip_bbox();
             self.display_list.push(DisplayElement::SoftMasked {
@@ -4269,9 +4504,9 @@ impl<'a> ContentInterpreter<'a> {
         }
 
         // Parse /Matte array (pre-multiplication color, PDF spec 11.6.5.3)
-        let matte = smask_dict.get_array(b"Matte").map(|arr| {
-            arr.iter().filter_map(|o| o.as_f64()).collect::<Vec<_>>()
-        });
+        let matte = smask_dict
+            .get_array(b"Matte")
+            .map(|arr| arr.iter().filter_map(|o| o.as_f64()).collect::<Vec<_>>());
 
         Ok(Some((data, sw, sh, matte)))
     }
@@ -4391,8 +4626,12 @@ impl<'a> ContentInterpreter<'a> {
         #[cfg(feature = "jpx")]
         {
             if let Ok((raw, filters)) = self.resolver.raw_stream_and_filters(obj) {
-                if filters.iter().any(|f| matches!(f, crate::filters::Filter::JPXDecode)) {
-                    if let Some((color_channels, has_alpha)) = crate::filters::jpx_color_info(&raw) {
+                if filters
+                    .iter()
+                    .any(|f| matches!(f, crate::filters::Filter::JPXDecode))
+                {
+                    if let Some((color_channels, has_alpha)) = crate::filters::jpx_color_info(&raw)
+                    {
                         return color_channels == 3 && has_alpha;
                     }
                 }
@@ -4686,7 +4925,9 @@ impl<'a> ContentInterpreter<'a> {
                         Ok(o) => o,
                         Err(_) => return GroupColorSpace::Inherited,
                     };
-                    if let PdfObj::Stream { dict: stream_dict, .. } = stream_obj
+                    if let PdfObj::Stream {
+                        dict: stream_dict, ..
+                    } = stream_obj
                         && let Some(n_obj) = stream_dict.get(b"N")
                         && let Some(n_val) = n_obj.as_int()
                     {
@@ -4866,7 +5107,9 @@ impl<'a> ContentInterpreter<'a> {
             .or_else(|| dict.get(b"F"))
             .map(|f| match f {
                 PdfObj::Name(n) => n == b"ASCII85Decode" || n == b"A85",
-                PdfObj::Array(arr) => arr.first().and_then(|o| o.as_name())
+                PdfObj::Array(arr) => arr
+                    .first()
+                    .and_then(|o| o.as_name())
                     .map(|n| n == b"ASCII85Decode" || n == b"A85")
                     .unwrap_or(false),
                 _ => false,
@@ -4881,7 +5124,10 @@ impl<'a> ContentInterpreter<'a> {
             let cs_resolved = if let PdfObj::Name(name) = cs_obj {
                 // Try the cached index first, then fall back to resolving the
                 // ColorSpace resource sub-dict directly.
-                let from_cache = self.cs_index.as_ref().and_then(|idx| idx.get(name.as_slice()).cloned());
+                let from_cache = self
+                    .cs_index
+                    .as_ref()
+                    .and_then(|idx| idx.get(name.as_slice()).cloned());
                 let res_obj = from_cache.or_else(|| {
                     self.resolve_resource_subdict(b"ColorSpace")
                         .and_then(|d| d.get(name).cloned())
@@ -5424,9 +5670,7 @@ impl<'a> ContentInterpreter<'a> {
                 let clip_replay: Vec<DisplayElement> = content
                     .elements()
                     .iter()
-                    .filter(|e| {
-                        matches!(e, DisplayElement::Clip { .. } | DisplayElement::InitClip)
-                    })
+                    .filter(|e| matches!(e, DisplayElement::Clip { .. } | DisplayElement::InitClip))
                     .cloned()
                     .collect();
                 let parent_clip_bbox = self.current_clip_bbox();
@@ -5694,8 +5938,7 @@ impl<'a> ContentInterpreter<'a> {
         // during interpretation. This is tracked via a counter that's
         // incremented in op_big_q when smask_gen changes (NOT by image-level
         // SMasks or other SoftMasked element sources).
-        let has_nested_mask_scope =
-            self.nested_mask_flush_count > saved_nested_mask_flush_count;
+        let has_nested_mask_scope = self.nested_mask_flush_count > saved_nested_mask_flush_count;
 
         // Flush any soft mask scope opened inside the mask form
         self.flush_soft_mask();
@@ -5790,7 +6033,11 @@ impl<'a> ContentInterpreter<'a> {
             // After transfer inversion, the effective mask value is 255 - bc_byte.
             // If either the original or inverted value is non-zero, the mask has
             // effect outside the form BBox.
-            let effective = if transfer_invert { 255 - bc_byte } else { bc_byte };
+            let effective = if transfer_invert {
+                255 - bc_byte
+            } else {
+                bc_byte
+            };
             if effective > 0 {
                 [0.0, 0.0, 1e9, 1e9]
             } else {
@@ -6005,11 +6252,14 @@ impl<'a> ContentInterpreter<'a> {
             .as_ref()
             .and_then(|idx| idx.get(cs_name.as_slice()).cloned())
             .or_else(|| {
-                let cs_dict = self.resources.get(b"ColorSpace").and_then(|obj| match obj {
-                    PdfObj::Dict(_) => Some(obj.as_dict().unwrap().clone()),
-                    PdfObj::Ref(n, g) => self.resolver.resolve(*n, *g).ok()?.as_dict().cloned(),
-                    _ => None,
-                })?;
+                let cs_dict = self
+                    .resources
+                    .get(b"ColorSpace")
+                    .and_then(|obj| match obj {
+                        PdfObj::Dict(_) => Some(obj.as_dict().unwrap().clone()),
+                        PdfObj::Ref(n, g) => self.resolver.resolve(*n, *g).ok()?.as_dict().cloned(),
+                        _ => None,
+                    })?;
                 cs_dict.get(&cs_name).cloned()
             });
         let cs_obj = match cs_obj_opt {
@@ -6026,8 +6276,7 @@ impl<'a> ContentInterpreter<'a> {
             return Ok(());
         }
         // Resolve the underlying color space
-        let underlying_cs =
-            color_space::resolve_color_space_obj(&arr[1], self.resolver)?;
+        let underlying_cs = color_space::resolve_color_space_obj(&arr[1], self.resolver)?;
         let n = underlying_cs.num_components();
         if n == 0 {
             return Ok(());
@@ -6043,14 +6292,13 @@ impl<'a> ContentInterpreter<'a> {
         let mut nums = Vec::with_capacity(n);
         let base = stack_len - 1 - n;
         for i in 0..n {
-            nums.push(
-                self.operand_stack[base + i]
-                    .as_f64()
-                    .unwrap_or(0.0),
-            );
+            nums.push(self.operand_stack[base + i].as_f64().unwrap_or(0.0));
         }
-        let color =
-            color_space::components_to_device_color_icc(&underlying_cs, &nums, Some(&mut self.icc_cache));
+        let color = color_space::components_to_device_color_icc(
+            &underlying_cs,
+            &nums,
+            Some(&mut self.icc_cache),
+        );
         if is_stroke {
             self.gstate.stroke_color = color;
         } else {
@@ -6095,7 +6343,8 @@ impl<'a> ContentInterpreter<'a> {
         }?;
 
         if let PdfObj::Ref(obj_num, gen_num) = pat_ref {
-            self.pattern_cache.insert((*obj_num, *gen_num), result.clone());
+            self.pattern_cache
+                .insert((*obj_num, *gen_num), result.clone());
         }
 
         Ok(result)
@@ -6381,7 +6630,6 @@ fn expand_inline_value(name: &[u8]) -> Vec<u8> {
         _ => name.to_vec(),
     }
 }
-
 
 /// Bilinear upsample of image data to target dimensions.
 /// Used when an explicit mask is higher resolution than the image (MRC PDFs).

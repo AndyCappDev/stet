@@ -414,7 +414,10 @@ fn parse_ocg_off(resolver: &Resolver) -> HashSet<u32> {
             match catalog_owned.as_dict() {
                 Some(d) if d.get(b"OCProperties").is_some() => d,
                 _ => match find_catalog(resolver) {
-                    Some(c) => { catalog_owned = c; catalog_owned.as_dict().unwrap() }
+                    Some(c) => {
+                        catalog_owned = c;
+                        catalog_owned.as_dict().unwrap()
+                    }
                     None => return off,
                 },
             }
@@ -537,9 +540,7 @@ fn find_catalog(resolver: &Resolver) -> Option<PdfObj> {
 /// The PDF spec (§7.5.2) allows data before the header.
 fn has_pdf_header(data: &[u8]) -> bool {
     let search_range = data.len().min(1024);
-    data[..search_range]
-        .windows(5)
-        .any(|w| w == b"%PDF-")
+    data[..search_range].windows(5).any(|w| w == b"%PDF-")
 }
 
 #[cfg(test)]

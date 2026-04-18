@@ -32,12 +32,11 @@ pub fn get_gid_to_unicode_map(font_family: &str) -> Option<HashMap<u16, u32>> {
             Some(map)
         }
         // These fonts share the standard TrueType glyph ordering
-        "tahoma" | "verdana" | "arial" | "trebuchet ms" | "trebuchetms"
-        | "centurygothic" | "century gothic" | "comicsansms" | "comic sans ms"
-        | "consolas" | "georgia" | "impact" | "lucidaconsole" | "lucida console"
-        | "palatinolinotype" | "palatino linotype" | "segoeui" | "segoe ui"
-        | "timesnewroman" | "times new roman" | "couriernew" | "courier new"
-        | "cambria" | "candara" | "constantia" | "corbel" => {
+        "tahoma" | "verdana" | "arial" | "trebuchet ms" | "trebuchetms" | "centurygothic"
+        | "century gothic" | "comicsansms" | "comic sans ms" | "consolas" | "georgia"
+        | "impact" | "lucidaconsole" | "lucida console" | "palatinolinotype"
+        | "palatino linotype" | "segoeui" | "segoe ui" | "timesnewroman" | "times new roman"
+        | "couriernew" | "courier new" | "cambria" | "candara" | "constantia" | "corbel" => {
             Some(standard_glyph_map())
         }
         // ArialBlack uses the standard map plus overrides for Polish chars
@@ -587,9 +586,9 @@ static STANDARD_GLYPHS: &[(u16, u32)] = &[
 /// differ from the standard TrueType table (from PDF.js
 /// getSupplementalGlyphMapForArialBlack).
 static ARIAL_BLACK_SUPPLEMENT: &[(u16, u32)] = &[
-    (227, 322),  // ł
-    (264, 261),  // ą
-    (291, 346),  // Ś
+    (227, 322), // ł
+    (264, 261), // ą
+    (291, 346), // Ś
 ];
 
 /// These override the standard table entries for GIDs that differ in Calibri's

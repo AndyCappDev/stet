@@ -428,10 +428,7 @@ impl<'a> Resolver<'a> {
             }
 
             // Check line boundary
-            if pos > 0
-                && data[pos - 1] != b'\n'
-                && data[pos - 1] != b'\r'
-                && data[pos - 1] != b' '
+            if pos > 0 && data[pos - 1] != b'\n' && data[pos - 1] != b'\r' && data[pos - 1] != b' '
             {
                 pos += 1;
                 continue;
@@ -738,9 +735,9 @@ impl<'a> Resolver<'a> {
         self.ensure_objstm_cached(stream_obj_num)?;
 
         let cache = self.objstm_cache.borrow();
-        let cached = cache.get(&stream_obj_num).ok_or_else(|| {
-            PdfError::Other(format!("ObjStm {stream_obj_num} not in cache"))
-        })?;
+        let cached = cache
+            .get(&stream_obj_num)
+            .ok_or_else(|| PdfError::Other(format!("ObjStm {stream_obj_num} not in cache")))?;
 
         // Find and parse the target object
         let idx = index_within as usize;

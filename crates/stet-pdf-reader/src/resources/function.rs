@@ -46,9 +46,7 @@ pub enum PdfFunction {
     },
     /// Array of functions whose outputs are concatenated.
     /// Used when a shading's /Function is an array of per-component functions.
-    Composite {
-        functions: Vec<PdfFunction>,
-    },
+    Composite { functions: Vec<PdfFunction> },
 }
 
 /// Token for Type 4 calculator functions.
@@ -187,7 +185,9 @@ impl PdfFunction {
             | Self::Exponential { domain, .. }
             | Self::Stitching { domain, .. }
             | Self::Calculator { domain, .. } => domain,
-            Self::Composite { functions } => return functions.first().map_or([0.0, 1.0], |f| f.domain_0()),
+            Self::Composite { functions } => {
+                return functions.first().map_or([0.0, 1.0], |f| f.domain_0());
+            }
         };
         d.first().copied().unwrap_or([0.0, 1.0])
     }
@@ -405,7 +405,11 @@ impl PdfFunction {
         } else if let Some(obj) = dict.get(b"Functions") {
             match resolver.deref(obj)? {
                 PdfObj::Array(arr) => arr,
-                _ => return Err(PdfError::Other("stitching Functions is not an array".into())),
+                _ => {
+                    return Err(PdfError::Other(
+                        "stitching Functions is not an array".into(),
+                    ));
+                }
             }
         } else {
             return Err(PdfError::Other("stitching missing Functions".into()));
@@ -487,7 +491,12 @@ fn parse_domain_range_resolved(
     let resolved = resolver.deref(obj)?;
     let arr = match &resolved {
         PdfObj::Array(a) => a,
-        _ => return Err(PdfError::Other(format!("/{} is not an array", String::from_utf8_lossy(key)))),
+        _ => {
+            return Err(PdfError::Other(format!(
+                "/{} is not an array",
+                String::from_utf8_lossy(key)
+            )));
+        }
     };
     let vals: Vec<f64> = arr.iter().filter_map(|o| o.as_f64()).collect();
     Ok(vals
@@ -1125,11 +1134,21 @@ exch sub mul 1.000000 cvr exch sub 6 1 roll 5 -1 roll 1 index \
         }
         // Expected: black-only -> (0, 0, 0, 1); green-only -> (0.5, 0, 1, 0)
         let r = f.evaluate(&[1.0, 0.0]);
-        assert!((r[0]).abs() < 1e-6 && (r[1]).abs() < 1e-6 && (r[2]).abs() < 1e-6 && (r[3] - 1.0).abs() < 1e-6,
-                "black-only got CMYK={r:?}");
+        assert!(
+            (r[0]).abs() < 1e-6
+                && (r[1]).abs() < 1e-6
+                && (r[2]).abs() < 1e-6
+                && (r[3] - 1.0).abs() < 1e-6,
+            "black-only got CMYK={r:?}"
+        );
         let r = f.evaluate(&[0.0, 1.0]);
-        assert!((r[0] - 0.5).abs() < 1e-6 && (r[1]).abs() < 1e-6 && (r[2] - 1.0).abs() < 1e-6 && (r[3]).abs() < 1e-6,
-                "green-only got CMYK={r:?}");
+        assert!(
+            (r[0] - 0.5).abs() < 1e-6
+                && (r[1]).abs() < 1e-6
+                && (r[2] - 1.0).abs() < 1e-6
+                && (r[3]).abs() < 1e-6,
+            "green-only got CMYK={r:?}"
+        );
     }
 
     #[test]
@@ -1157,17 +1176,21 @@ exch sub mul 1.000000 cvr exch sub 6 1 roll 5 -1 roll 2 index \
             eprintln!("{label} (g={g}, c={c}) -> CMYK={r:?}");
         }
         let r = f.evaluate(&[1.0, 0.0]);
-        assert!((r[0] - 0.5).abs() < 1e-6 && (r[2] - 1.0).abs() < 1e-6,
-                "green-only: CMYK={r:?}");
+        assert!(
+            (r[0] - 0.5).abs() < 1e-6 && (r[2] - 1.0).abs() < 1e-6,
+            "green-only: CMYK={r:?}"
+        );
         let r = f.evaluate(&[0.0, 1.0]);
-        assert!((r[0] - 1.0).abs() < 1e-6 && (r[1]).abs() < 1e-6 && (r[2]).abs() < 1e-6,
-                "cyan-only: CMYK={r:?}");
+        assert!(
+            (r[0] - 1.0).abs() < 1e-6 && (r[1]).abs() < 1e-6 && (r[2]).abs() < 1e-6,
+            "cyan-only: CMYK={r:?}"
+        );
     }
 
     #[test]
     fn devicen_duotone_via_tint_table() {
-        use stet_graphics::device::TintLookupTable;
         use std::sync::Arc;
+        use stet_graphics::device::TintLookupTable;
         let code = "{1.000000 3 1 roll 1.000000 3 1 roll 1.000000 3 1 roll 1 index 1.000000 \
 cvr exch sub 3 1 roll 6 -1 roll 1 index 0.500000 mul 1.000000 cvr \
 exch sub mul 1.000000 cvr exch sub 6 1 roll 5 -1 roll 1 index \
@@ -1218,7 +1241,13 @@ exch sub mul 1.000000 cvr exch sub 6 1 roll 5 -1 roll 1 index \
         }
         // Expected: green only at index ~1.0 second axis -> CMYK (0.5, 0, 1, 0)
         table.lookup_nd(&[0.0, 1.0], &mut out);
-        assert!((out[0] - 0.5).abs() < 0.02, "green-only via table: C={out:?}");
-        assert!((out[2] - 1.0).abs() < 0.02, "green-only via table: Y={out:?}");
+        assert!(
+            (out[0] - 0.5).abs() < 0.02,
+            "green-only via table: C={out:?}"
+        );
+        assert!(
+            (out[2] - 1.0).abs() < 0.02,
+            "green-only via table: Y={out:?}"
+        );
     }
 }

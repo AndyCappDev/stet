@@ -732,14 +732,15 @@ where
 #[cfg(target_arch = "wasm32")]
 fn decode_dct_via_zune(data: &[u8]) -> Option<Vec<u8>> {
     use zune_jpeg::JpegDecoder;
-    let n_comps = jpeg_dimensions_and_components(data).map(|(_, _, n)| n).unwrap_or(3);
+    let n_comps = jpeg_dimensions_and_components(data)
+        .map(|(_, _, n)| n)
+        .unwrap_or(3);
     let out_cs = match n_comps {
         1 => zune_core::colorspace::ColorSpace::Luma,
         4 => zune_core::colorspace::ColorSpace::CMYK,
         _ => zune_core::colorspace::ColorSpace::RGB,
     };
-    let options = zune_core::options::DecoderOptions::default()
-        .jpeg_set_out_colorspace(out_cs);
+    let options = zune_core::options::DecoderOptions::default().jpeg_set_out_colorspace(out_cs);
     let mut decoder = JpegDecoder::new_with_options(std::io::Cursor::new(data), options);
     decoder.decode().ok()
 }
@@ -766,7 +767,9 @@ fn decode_dct_zune(data: &[u8]) -> Option<Vec<u8>> {
 fn decode_dct_tolerant(data: &[u8]) -> Option<Vec<u8>> {
     // Detect component count from SOF to set the right output colorspace.
     // Without this, zune-jpeg converts CMYK to RGB, producing wrong data.
-    let n_comps = jpeg_dimensions_and_components(data).map(|(_, _, n)| n).unwrap_or(3);
+    let n_comps = jpeg_dimensions_and_components(data)
+        .map(|(_, _, n)| n)
+        .unwrap_or(3);
     let data = data.to_vec();
     catch_silent(move || {
         use zune_jpeg::JpegDecoder;
@@ -863,8 +866,7 @@ pub fn patch_jpeg_sof_height(data: &mut [u8], new_height: u16) {
             continue;
         }
         let marker = data[pos + 1];
-        if (0xC0..=0xCF).contains(&marker) && marker != 0xC4 && marker != 0xC8 && marker != 0xCC
-        {
+        if (0xC0..=0xCF).contains(&marker) && marker != 0xC4 && marker != 0xC8 && marker != 0xCC {
             if pos + 6 < data.len() {
                 data[pos + 5] = (new_height >> 8) as u8;
                 data[pos + 6] = (new_height & 0xFF) as u8;
@@ -895,8 +897,7 @@ pub(crate) fn jpeg_dimensions_and_components(data: &[u8]) -> Option<(u32, u32, u
             continue;
         }
         let marker = data[pos + 1];
-        if (0xC0..=0xCF).contains(&marker) && marker != 0xC4 && marker != 0xC8 && marker != 0xCC
-        {
+        if (0xC0..=0xCF).contains(&marker) && marker != 0xC4 && marker != 0xC8 && marker != 0xCC {
             if pos + 9 < data.len() {
                 let h = ((data[pos + 5] as u32) << 8) | data[pos + 6] as u32;
                 let w = ((data[pos + 7] as u32) << 8) | data[pos + 8] as u32;
@@ -928,8 +929,7 @@ pub fn jpeg_dimensions(data: &[u8]) -> Option<(u32, u32)> {
         }
         let marker = data[pos + 1];
         // SOF markers: 0xC0-0xCF except 0xC4 (DHT), 0xC8 (JPG), 0xCC (DAC)
-        if (0xC0..=0xCF).contains(&marker) && marker != 0xC4 && marker != 0xC8 && marker != 0xCC
-        {
+        if (0xC0..=0xCF).contains(&marker) && marker != 0xC4 && marker != 0xC8 && marker != 0xCC {
             if pos + 9 < data.len() {
                 let mut h = ((data[pos + 5] as u32) << 8) | data[pos + 6] as u32;
                 let w = ((data[pos + 7] as u32) << 8) | data[pos + 8] as u32;
@@ -1355,10 +1355,7 @@ fn decode_jbig2(data: &[u8], globals: Option<&[u8]>) -> Result<Vec<u8>, PdfError
         let globals_owned = globals.map(|g| g.to_vec());
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let result = hayro_jbig2::decode_embedded(
-                &data_owned,
-                globals_owned.as_deref(),
-            );
+            let result = hayro_jbig2::decode_embedded(&data_owned, globals_owned.as_deref());
             let _ = tx.send(result);
         });
         // Scale timeout with data size: 5s base + 5s per MB of compressed data.
@@ -1444,7 +1441,8 @@ pub fn decode_jpx_no_palette(data: &[u8]) -> Result<(Vec<u8>, u8), PdfError> {
 /// Returns `(color_channels, has_alpha)`.
 #[cfg(feature = "jpx")]
 pub fn jpx_color_info(data: &[u8]) -> Option<(u8, bool)> {
-    let image = hayro_jpeg2000::Image::new(data, &hayro_jpeg2000::DecodeSettings::default()).ok()?;
+    let image =
+        hayro_jpeg2000::Image::new(data, &hayro_jpeg2000::DecodeSettings::default()).ok()?;
     Some((image.color_space().num_channels(), image.has_alpha()))
 }
 
@@ -1452,7 +1450,8 @@ pub fn jpx_color_info(data: &[u8]) -> Option<(u8, bool)> {
 /// Returns `(width, height)`.
 #[cfg(feature = "jpx")]
 pub fn jpx_dimensions(data: &[u8]) -> Option<(u32, u32)> {
-    let image = hayro_jpeg2000::Image::new(data, &hayro_jpeg2000::DecodeSettings::default()).ok()?;
+    let image =
+        hayro_jpeg2000::Image::new(data, &hayro_jpeg2000::DecodeSettings::default()).ok()?;
     Some((image.width(), image.height()))
 }
 
@@ -1461,7 +1460,10 @@ pub fn jpx_dimensions(data: &[u8]) -> Option<(u32, u32)> {
 pub fn decode_pre_jpx(raw: &[u8], dict: &crate::objects::PdfDict) -> Vec<u8> {
     let (filters, parms) = parse_filters(dict, None).unwrap_or_default();
     // Apply all filters except JPXDecode
-    let pre_count = filters.iter().take_while(|f| !matches!(f, Filter::JPXDecode)).count();
+    let pre_count = filters
+        .iter()
+        .take_while(|f| !matches!(f, Filter::JPXDecode))
+        .count();
     if pre_count == 0 {
         return raw.to_vec();
     }
