@@ -21,6 +21,18 @@
 //! `assert!` guards that the OutputIntent column is not materially worse
 //! than the GS-default column.
 //!
+//! **Known noise floor**: the local-delta metric is NOT purely a ref-vs-test
+//! drift signal. It also sees (a) 1–2 pixel AA at the edge of each solid
+//! swatch, and (b) the colour step between adjacent swatches in the strip.
+//! Both of those get amplified under the OutputIntent profile because the
+//! same CMYK maps to a perceptually different sRGB there — that's a
+//! legitimate ICC difference, not a bug. Sampling within swatches shows
+//! e.g. GWG 2.0 has uniform `(142,199,68)` under GS and uniform
+//! `(148,193,32)` under OI — no visible X, but Δ+833 from boundary AA.
+//! Interpret the Δ column directionally: a movement in the right direction
+//! after a WS1/WS2 fix is the signal. A visible X artefact registers as a
+//! much larger Δ (e.g. GWG 16.2 top Δ+2061 under the current baseline).
+//!
 //! Skips gracefully when the sample PDF is absent.
 
 use stet_pdf_reader::PdfDocument;
@@ -164,10 +176,12 @@ const X4_SWATCHES: &[Swatch] = &[
         w: 1080,
         h: 293,
     },
-    // Page 4 — GWG 1.1 / 4.1 overprint + DeviceN strips (top rows).
+    // Page 4 — actual layout is GWG 2.0 (left, 2 rows) / 4.1 (right, large) /
+    // 4.0 (left, mid) / 4.0.1 (right, mid) / 3.1 (left) / 12.0 (right) /
+    // 8.1 (left bot). Only 4.1 is in the user's regression list.
     Swatch {
         page: 4,
-        name: "p4 top-left strip (1.1)",
+        name: "GWG 2.0 (Spot to CMYK Overprint) — top row",
         x: 210,
         y: 1044,
         w: 1080,
@@ -175,7 +189,7 @@ const X4_SWATCHES: &[Swatch] = &[
     },
     Swatch {
         page: 4,
-        name: "p4 top-right strip (4.1)",
+        name: "GWG 4.1 (White Overprint Mode)",
         x: 1300,
         y: 1001,
         w: 1080,
