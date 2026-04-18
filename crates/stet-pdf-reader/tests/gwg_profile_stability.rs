@@ -52,153 +52,201 @@ struct Swatch {
 /// header above and the labels below. These are seeded approximately; WS3's
 /// first job once the scaffold runs is to tighten them and split out
 /// per-swatch sub-bboxes.
+/// Swatch bboxes discovered by scanning rendered x4-p{1..4}-gsdefault.png
+/// (at 300 DPI) for horizontal strips where the "left/right column" region is
+/// non-white *and* horizontally varied — i.e. rows filled with colored
+/// swatches. Coordinates are the outer union of the colored strip only; text
+/// labels above/below are excluded, so the absolute score reflects colour
+/// drift alone rather than label anti-aliasing.
+///
+/// Swatch-to-GWG-section assignments are approximate — the GWG booklet labels
+/// sit above each strip and can't be anchored programmatically. The Δ column
+/// (OutputInt − GS-default) is independent of the mapping.
 const X4_SWATCHES: &[Swatch] = &[
-    // Page 2 — confirmed by the user: area (210,1480)..(1290,2085) at 300 DPI
-    // covers the entire GWG 16.2 section including title + labels. The
-    // colored-swatch strip is the top band of that region.
+    // Page 1 — top two GWG sections (left and right columns).
     Swatch {
-        page: 2,
-        name: "GWG 16.2 (DeviceCMYK, Isolated) — swatch strip",
+        page: 1,
+        name: "p1 top-left strip",
         x: 210,
-        y: 1540,
+        y: 972,
         w: 1080,
-        h: 180,
-    },
-    // Rough bboxes for neighbouring sections on page 2 — same layout:
-    // "title / colored-swatch row / labels / footer" from top to bottom.
-    Swatch {
-        page: 2,
-        name: "GWG 16.0 (DeviceCMYK, Non-Knockout) — swatch strip",
-        x: 210,
-        y: 810,
-        w: 1080,
-        h: 180,
+        h: 123,
     },
     Swatch {
-        page: 2,
-        name: "GWG 16.1 (DeviceCMYK, Knockout) — swatch strip",
+        page: 1,
+        name: "p1 top-right strip",
         x: 1300,
-        y: 810,
+        y: 972,
         w: 1080,
-        h: 180,
+        h: 123,
     },
-    // Page 1 — GWG 19.x overprint sections. Layout-equivalent bboxes.
+    // Page 1 — middle-left (includes GWG 19.x overprint swatches).
     Swatch {
         page: 1,
-        name: "GWG 19.0 — swatch strip",
+        name: "p1 mid-left strip",
         x: 210,
-        y: 1540,
+        y: 1149,
         w: 1080,
-        h: 180,
+        h: 123,
     },
     Swatch {
         page: 1,
-        name: "GWG 19.1 — swatch strip",
+        name: "p1 mid-right upper strip",
         x: 1300,
-        y: 1540,
+        y: 1621,
         w: 1080,
-        h: 180,
+        h: 95,
     },
     Swatch {
         page: 1,
-        name: "GWG 19.2 — swatch strip",
-        x: 210,
-        y: 2270,
+        name: "p1 mid-right lower strip",
+        x: 1300,
+        y: 1787,
         w: 1080,
-        h: 180,
+        h: 97,
     },
-    // Page 3 — GWG 17.x image softmasks / image masks.
+    // Page 2 — GWG 16.0 (non-knockout) / 16.1 (knockout) / 16.2 (isolated).
+    // User confirmed 16.2 in the earlier session.
+    Swatch {
+        page: 2,
+        name: "GWG 16.0 (CMYK, Non-Knockout) — top row",
+        x: 210,
+        y: 956,
+        w: 1080,
+        h: 96,
+    },
+    Swatch {
+        page: 2,
+        name: "GWG 16.0 (CMYK, Non-Knockout) — bottom row",
+        x: 210,
+        y: 1098,
+        w: 1080,
+        h: 97,
+    },
+    Swatch {
+        page: 2,
+        name: "GWG 16.1 (CMYK, Knockout) — top row",
+        x: 1300,
+        y: 956,
+        w: 1080,
+        h: 96,
+    },
+    Swatch {
+        page: 2,
+        name: "GWG 16.1 (CMYK, Knockout) — bottom row",
+        x: 1300,
+        y: 1098,
+        w: 1080,
+        h: 97,
+    },
+    Swatch {
+        page: 2,
+        name: "GWG 16.2 (CMYK, Isolated) — top row",
+        x: 210,
+        y: 1558,
+        w: 1080,
+        h: 96,
+    },
+    Swatch {
+        page: 2,
+        name: "GWG 16.2 (CMYK, Isolated) — bottom row",
+        x: 210,
+        y: 1700,
+        w: 1080,
+        h: 96,
+    },
+    // Page 3 — GWG 17.x image softmasks (right column has tall strips).
     Swatch {
         page: 3,
-        name: "GWG 17.0 — swatch strip",
-        x: 210,
-        y: 810,
-        w: 1080,
-        h: 180,
-    },
-    // TODO(ws3): 17.3 bbox lands on whitespace — retighten after visual
-    // inspection of target/gwg_stability/x4-p3-*.png.
-    Swatch {
-        page: 3,
-        name: "GWG 17.3 — swatch strip (PLACEHOLDER)",
+        name: "p3 mid-right image-softmask strip",
         x: 1300,
-        y: 1540,
+        y: 2204,
         w: 1080,
-        h: 180,
+        h: 293,
     },
-    // Page 4 — GWG 1.1 overprint / 4.1 DeviceN.
+    // Page 4 — GWG 1.1 / 4.1 overprint + DeviceN strips (top rows).
     Swatch {
         page: 4,
-        name: "GWG 1.1 — swatch strip",
+        name: "p4 top-left strip (1.1)",
         x: 210,
-        y: 810,
+        y: 1044,
         w: 1080,
-        h: 180,
+        h: 96,
     },
     Swatch {
         page: 4,
-        name: "GWG 4.1 — swatch strip",
+        name: "p4 top-right strip (4.1)",
         x: 1300,
-        y: 810,
+        y: 1001,
         w: 1080,
-        h: 180,
+        h: 242,
     },
 ];
 
-/// Sum of per-channel (p95 − p5) over the RGB channels of a swatch region.
+/// Sum-across-channels of the mean per-pixel local deviation within a
+/// swatch region (×1000 for readability as an integer score).
 ///
-/// Robust to a small amount of text/icon noise (the outlier tails get
-/// clipped) but sensitive to the faint systematic lighter-X pattern that
-/// GWG swatches produce when ref vs test CMYK drift apart.
+/// For each interior pixel we compute the max |channel-delta| to its 4-
+/// neighbours (N, S, E, W), summed over the three RGB channels. We then
+/// take the mean across the region.
 ///
-/// A perfectly uniform region scores ~0. Hairline-visible X patterns score
-/// in the low single digits. Obvious visual regressions score 10+.
+/// Why a local metric: each "swatch strip" in the GWG booklet is a row of
+/// ~10 differently-coloured squares side-by-side, so a global spread metric
+/// (p95−p5) sees the whole colour range and gives a huge number dominated
+/// by the between-swatch colour change, not by within-swatch uniformity
+/// violations. A local metric is near-zero on solid-colour interiors,
+/// contributes a small amount on the ~1-pixel-thick boundary between
+/// adjacent swatches (bounded by boundary-pixels ÷ region-pixels), and
+/// grows proportionally to any faint systematic "X pattern" drift, which
+/// is what the GWG test is designed to reveal.
+///
+/// Returned as floor(mean × 1000). Perfectly uniform columns of solid
+/// swatches with only the boundary transitions score in the low tens;
+/// swatches with visible X artefacts score higher, and the Δ column
+/// (OutputInt − GS) isolates the profile-sensitivity contribution.
 fn uniformity_score(rgba: &[u8], pixel_w: u32, pixel_h: u32, sw: &Swatch) -> u32 {
     let x0 = sw.x.min(pixel_w);
     let y0 = sw.y.min(pixel_h);
     let x1 = (sw.x + sw.w).min(pixel_w);
     let y1 = (sw.y + sw.h).min(pixel_h);
-    if x1 <= x0 || y1 <= y0 {
+    if x1 <= x0 + 2 || y1 <= y0 + 2 {
         return 0;
     }
-
-    let mut hist = [[0u32; 256]; 3];
-    let mut count = 0u32;
-    for y in y0..y1 {
-        let row = (y as usize) * (pixel_w as usize) * 4;
-        for x in x0..x1 {
-            let px = row + (x as usize) * 4;
-            hist[0][rgba[px] as usize] += 1;
-            hist[1][rgba[px + 1] as usize] += 1;
-            hist[2][rgba[px + 2] as usize] += 1;
-            count += 1;
+    let stride = pixel_w as usize * 4;
+    let mut total = 0u64;
+    let mut n = 0u64;
+    for y in (y0 + 1)..(y1 - 1) {
+        let row = (y as usize) * stride;
+        let up = ((y - 1) as usize) * stride;
+        let dn = ((y + 1) as usize) * stride;
+        for x in (x0 + 1)..(x1 - 1) {
+            let c = row + (x as usize) * 4;
+            let l = row + ((x - 1) as usize) * 4;
+            let r = row + ((x + 1) as usize) * 4;
+            let u = up + (x as usize) * 4;
+            let d = dn + (x as usize) * 4;
+            let mut sum = 0u32;
+            for ch in 0..3 {
+                let cv = rgba[c + ch] as i32;
+                let mx = [
+                    (cv - rgba[l + ch] as i32).abs(),
+                    (cv - rgba[r + ch] as i32).abs(),
+                    (cv - rgba[u + ch] as i32).abs(),
+                    (cv - rgba[d + ch] as i32).abs(),
+                ]
+                .into_iter()
+                .max()
+                .unwrap_or(0);
+                sum += mx as u32;
+            }
+            total += sum as u64;
+            n += 1;
         }
     }
-    if count == 0 {
+    if n == 0 {
         return 0;
     }
-
-    let p_lo = (count as f64 * 0.05) as u32;
-    let p_hi = (count as f64 * 0.95) as u32;
-
-    let mut total_spread = 0u32;
-    for channel in &hist {
-        let mut acc = 0u32;
-        let mut lo = 0u8;
-        let mut hi = 255u8;
-        for (v, &bucket) in channel.iter().enumerate() {
-            acc += bucket;
-            if acc <= p_lo {
-                lo = v as u8;
-            }
-            if acc >= p_hi {
-                hi = v as u8;
-                break;
-            }
-        }
-        total_spread += hi.saturating_sub(lo) as u32;
-    }
-    total_spread
+    ((total * 1000) / n) as u32
 }
 
 fn try_load_pdf(name: &str) -> Option<Vec<u8>> {
