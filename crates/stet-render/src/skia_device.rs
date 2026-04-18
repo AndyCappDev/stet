@@ -4851,6 +4851,13 @@ fn render_soft_masked(
     } else {
         None
     };
+    // Snapshot the pre-content CMYK state so the mask blend can run in CMYK
+    // space. Without this, the downstream sRGB blend interpolates between
+    // CMYK backdrop and source after each has been ICC-converted separately,
+    // which shifts the midtones away from the CMYK-interpolated result the
+    // source was authored against (pink cast vs warm peach on GWG 16.10
+    // inner-glow in PDFX-ready_Output-Test_X4.pdf).
+    let backdrop_cmyk: Option<Vec<f32>> = content_cmyk.clone();
     let mut content_band = BandState {
         clip_region: None,
         spare_mask: None,
@@ -4903,6 +4910,26 @@ fn render_soft_masked(
         None => return,
         Some(m) => m,
     };
+
+    // Decide whether to interpolate the masked delta in CMYK (with ICC→sRGB
+    // on the way out) instead of sRGB. The CMYK path matches Acrobat's
+    // behaviour when the transparency group declares /CS DeviceCMYK and all
+    // content is native CMYK — the blend color space is then CMYK, and
+    // sRGB-space interpolation on ICC-converted endpoints loses the warm
+    // midtone that M+Y mixing produces under a proper CMYK profile.
+    //
+    // Gate strictly: content_list must be a flat list of native-CMYK fills
+    // or strokes with Normal blend and full opacity. Any nested Group,
+    // SoftMasked, Image, or blend-mode-modulated paint means the parallel
+    // cmyk_buffer can't be trusted to match the pixmap — running CMYK
+    // interpolation against a mismatched CMYK snapshot produced wrong
+    // colors on GWG 16.10 outer-glow C (Fm5 is a Screen-blend white rect
+    // inside a Group; cmyk_buffer held raw white while pixmap held the
+    // screen-blended light gray).
+    let use_cmyk_blend = ctx.icc.is_some()
+        && backdrop_cmyk.is_some()
+        && content_band.cmyk_buffer.is_some()
+        && content_list_is_simple_native_cmyk(content_list);
 
     let content_data = content_pixmap.data();
     let parent_data = pixmap.data_mut();
@@ -4958,38 +4985,124 @@ fn render_soft_masked(
             let ci = ci_row + x * 4;
             let pi = pi_row + px * 4;
 
-            for c in 0..4 {
-                let content_val = content_data[ci + c] as i32;
-                let backdrop_val = backdrop[ci + c] as i32;
-                let delta = content_val - backdrop_val;
+            // Per-pixel gate: CMYK interpolation is only safe when both
+            // endpoints are faithfully tracked. ICC-convert both cmyk
+            // snapshots and compare with the sRGB endpoints; only take
+            // the CMYK path if BOTH agree within tolerance. The backdrop
+            // check catches image/RGB paints upstream (tile_clamp_bug.pdf
+            // photo background) where cmyk_buffer is an approximate
+            // reverse-transform. The content check catches cases where
+            // non-CMYK paints inside content leave the cmyk_buffer stale
+            // relative to the sRGB content pixmap.
+            let ci_cmyk = (y * eff_w as usize + x) * 4;
+            let cmyk_path_ok = use_cmyk_blend && {
+                let bc_cmyk = &backdrop_cmyk.as_ref().unwrap()[ci_cmyk..ci_cmyk + 4];
+                let cc_cmyk = &content_band.cmyk_buffer.as_ref().unwrap()[ci_cmyk..ci_cmyk + 4];
+                let icc_match = |cmyk: &[f32], rgb: &[u8]| -> bool {
+                    let (r, g, b) = ctx
+                        .icc
+                        .and_then(|i| {
+                            i.convert_cmyk_readonly(
+                                cmyk[0] as f64,
+                                cmyk[1] as f64,
+                                cmyk[2] as f64,
+                                cmyk[3] as f64,
+                            )
+                        })
+                        .unwrap_or_else(|| {
+                            cmyk_to_rgb_plrm(
+                                cmyk[0] as f64,
+                                cmyk[1] as f64,
+                                cmyk[2] as f64,
+                                cmyk[3] as f64,
+                            )
+                        });
+                    let r = (r * 255.0).round() as i32;
+                    let g = (g * 255.0).round() as i32;
+                    let b = (b * 255.0).round() as i32;
+                    (r - rgb[0] as i32).abs() <= 3
+                        && (g - rgb[1] as i32).abs() <= 3
+                        && (b - rgb[2] as i32).abs() <= 3
+                };
+                icc_match(bc_cmyk, &backdrop[ci..ci + 3])
+                    && icc_match(cc_cmyk, &content_data[ci..ci + 3])
+            };
+
+            if cmyk_path_ok {
+                // CMYK-space mask blend: result_cmyk = backdrop + m*(content - backdrop)
+                let bc_cmyk = &backdrop_cmyk.as_ref().unwrap()[ci_cmyk..ci_cmyk + 4];
+                let cc_cmyk = &content_band.cmyk_buffer.as_ref().unwrap()[ci_cmyk..ci_cmyk + 4];
+                let mf = m as f64 / 255.0;
+                let rc = bc_cmyk[0] as f64 + mf * (cc_cmyk[0] as f64 - bc_cmyk[0] as f64);
+                let rm = bc_cmyk[1] as f64 + mf * (cc_cmyk[1] as f64 - bc_cmyk[1] as f64);
+                let ry = bc_cmyk[2] as f64 + mf * (cc_cmyk[2] as f64 - bc_cmyk[2] as f64);
+                let rk = bc_cmyk[3] as f64 + mf * (cc_cmyk[3] as f64 - bc_cmyk[3] as f64);
+                let (fr, fg, fb) = ctx
+                    .icc
+                    .and_then(|i| i.convert_cmyk_readonly(rc, rm, ry, rk))
+                    .unwrap_or_else(|| cmyk_to_rgb_plrm(rc, rm, ry, rk));
+                parent_data[pi] = (fr * 255.0).round().clamp(0.0, 255.0) as u8;
+                parent_data[pi + 1] = (fg * 255.0).round().clamp(0.0, 255.0) as u8;
+                parent_data[pi + 2] = (fb * 255.0).round().clamp(0.0, 255.0) as u8;
+                // Alpha channel: keep sRGB delta blend.
+                let content_a = content_data[ci + 3] as i32;
+                let backdrop_a = backdrop[ci + 3] as i32;
+                let delta = content_a - backdrop_a;
                 if delta != 0 {
                     let masked_delta = if delta > 0 {
                         (delta * m + 128) / 255
                     } else {
                         (delta * m - 128) / 255
                     };
-                    let result = (parent_data[pi + c] as i32 + masked_delta).clamp(0, 255);
-                    parent_data[pi + c] = result as u8;
+                    let result = (parent_data[pi + 3] as i32 + masked_delta).clamp(0, 255);
+                    parent_data[pi + 3] = result as u8;
+                }
+                // The parent's cmyk_buffer is deliberately NOT written here.
+                // Writing back mask-blended CMYK would overwrite backdrop
+                // tracking that downstream CMYK consumers (outer groups,
+                // subsequent masks) depend on and cause them to render
+                // nearby pixels as pure CMYK channels (e.g. the outer-glow
+                // C regression: adjacent gray pixels ICC-resolved to a
+                // black K silhouette). The sRGB pixmap carries the mask-
+                // blended color; parent_cmyk stays untouched.
+            } else {
+                for c in 0..4 {
+                    let content_val = content_data[ci + c] as i32;
+                    let backdrop_val = backdrop[ci + c] as i32;
+                    let delta = content_val - backdrop_val;
+                    if delta != 0 {
+                        let masked_delta = if delta > 0 {
+                            (delta * m + 128) / 255
+                        } else {
+                            (delta * m - 128) / 255
+                        };
+                        let result = (parent_data[pi + c] as i32 + masked_delta).clamp(0, 255);
+                        parent_data[pi + c] = result as u8;
+                    }
                 }
             }
         }
     }
 
-    // Write content CMYK buffer back to parent
-    if let (Some(content_cmyk), Some(parent_cmyk)) =
-        (&content_band.cmyk_buffer, &mut band_state.cmyk_buffer)
-    {
-        copy_cmyk_buffer_to_parent(
-            parent_cmyk,
-            content_cmyk,
-            content_pixmap.data(),
-            crop_x as usize,
-            crop_y as usize,
-            eff_w as usize,
-            eff_h as usize,
-            ctx.out_w as usize,
-            ctx.out_h as usize,
-        );
+    // Write content CMYK buffer back to parent. Skip when the CMYK blend
+    // loop already updated band_state.cmyk_buffer with mask-blended values
+    // — copying the unmodulated content CMYK here would overwrite them.
+    if !use_cmyk_blend {
+        if let (Some(content_cmyk), Some(parent_cmyk)) =
+            (&content_band.cmyk_buffer, &mut band_state.cmyk_buffer)
+        {
+            copy_cmyk_buffer_to_parent(
+                parent_cmyk,
+                content_cmyk,
+                content_pixmap.data(),
+                crop_x as usize,
+                crop_y as usize,
+                eff_w as usize,
+                eff_h as usize,
+                ctx.out_w as usize,
+                ctx.out_h as usize,
+            );
+        }
     }
 }
 /// Extract grayscale mask values from rendered RGBA pixels.
@@ -6749,6 +6862,44 @@ fn group_content_is_native_cmyk(elements: &DisplayList) -> bool {
                 }
                 found_paint = true;
             }
+        }
+    }
+    found_paint
+}
+
+/// True when `list` is a flat sequence of native-CMYK Fill/Stroke paints
+/// with Normal blend and full opacity — i.e. the cmyk_buffer's content
+/// faithfully represents what the pixmap shows. Used by `render_soft_masked`
+/// to decide whether to interpolate the mask blend in CMYK (ICC→sRGB).
+/// Rejects Group/SoftMasked/Image/Shading/Pattern and any blend-mode-modulated
+/// paint because those would diverge from the parallel CMYK snapshot.
+fn content_list_is_simple_native_cmyk(list: &DisplayList) -> bool {
+    let mut found_paint = false;
+    for elem in list.elements() {
+        match elem {
+            DisplayElement::InitClip
+            | DisplayElement::Clip { .. }
+            | DisplayElement::Text { .. }
+            | DisplayElement::ErasePage => continue,
+            DisplayElement::Fill { params, .. } => {
+                if params.color.native_cmyk.is_none() {
+                    return false;
+                }
+                if params.blend_mode != 0 || params.alpha != 1.0 {
+                    return false;
+                }
+                found_paint = true;
+            }
+            DisplayElement::Stroke { params, .. } => {
+                if params.color.native_cmyk.is_none() {
+                    return false;
+                }
+                if params.blend_mode != 0 || params.alpha != 1.0 {
+                    return false;
+                }
+                found_paint = true;
+            }
+            _ => return false,
         }
     }
     found_paint
