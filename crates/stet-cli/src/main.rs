@@ -81,7 +81,12 @@ fn main() {
     let mut cmyk_profile_path: Option<String> = None;
     let mut bpc_mode = BpcMode::Auto;
     let mut bpc_explicit = false;
-    let mut use_output_intent = false;
+    // Default: honour the PDF's declared OutputIntent as the CMYK→sRGB
+    // source profile. Matches Acrobat's behaviour for PDF/X files and
+    // eliminates profile-approximation artefacts on GWG swatches (e.g.
+    // the near-invisible Hue/Sat/Color X on 16.2). `--no-output-intent`
+    // reverts to the system CMYK profile for comparison renders.
+    let mut use_output_intent = true;
     let mut pages_spec: Option<String> = None;
     let mut file_args: Vec<String> = Vec::new();
     let mut i = 1;
@@ -134,7 +139,13 @@ fn main() {
                 continue;
             }
             "--use-output-intent" => {
+                // Kept for backward compat; OutputIntent is on by default now.
                 use_output_intent = true;
+                i += 1;
+                continue;
+            }
+            "--no-output-intent" => {
+                use_output_intent = false;
                 i += 1;
                 continue;
             }
