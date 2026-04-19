@@ -1,6 +1,6 @@
 #!/bin/bash
 # stet PostScript Visual Regression Test Launcher
-# Runs visual_test.py with passed arguments
+# Runs ps_visual_test.py with passed arguments
 #
 # Usage:
 #   ./ps_visual_test.sh --baseline                  # Generate PNG baseline
@@ -102,7 +102,7 @@ for arg in "$@"; do
 done
 
 if [ ${#STET_ARGS[@]} -gt 0 ]; then
-    python3 "$SCRIPT_DIR/visual_test.py" "${VISUAL_ARGS[@]}" --flags "${STET_ARGS[@]}"
+    python3 "$SCRIPT_DIR/ps_visual_test.py" "${VISUAL_ARGS[@]}" --flags "${STET_ARGS[@]}"
 else
-    python3 "$SCRIPT_DIR/visual_test.py" "${VISUAL_ARGS[@]}"
+    python3 "$SCRIPT_DIR/ps_visual_test.py" "${VISUAL_ARGS[@]}"
 fi
