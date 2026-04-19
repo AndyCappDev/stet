@@ -7,22 +7,22 @@
 
 Usage:
     # Generate baseline reference images
-    ./visual_test.sh --baseline
+    ./ps_visual_test.sh --baseline
 
     # Compare current output against baseline
-    ./visual_test.sh
+    ./ps_visual_test.sh
 
     # Compare with custom threshold (default 0.0% pixel difference)
-    ./visual_test.sh --threshold 0.5
+    ./ps_visual_test.sh --threshold 0.5
 
     # Test specific samples only
-    ./visual_test.sh --samples tiger.ps hospital.eps
+    ./ps_visual_test.sh --samples tiger.ps hospital.eps
 
     # Exclude specific samples
-    ./visual_test.sh --exclude eazybbs.ps
+    ./ps_visual_test.sh --exclude eazybbs.ps
 
     # Pass extra flags to stet-cli
-    ./visual_test.sh -- --dpi 600
+    ./ps_visual_test.sh -- --dpi 600
 """
 
 import argparse
@@ -55,7 +55,7 @@ def get_dirs():
     same baseline so drift between the two paths flags a bug in whichever
     diverged.
     """
-    base = PROJECT_ROOT / "visual_tests_png"
+    base = PROJECT_ROOT / "visual_tests_ps_png"
     return {
         "base": base,
         "baseline": base / "baseline",
@@ -65,7 +65,7 @@ def get_dirs():
         "diff_viewport": base / "diff_viewport",
         "timings": base / "baseline_timings.txt",
         "report": base / "report.html",
-        "config": PROJECT_ROOT / "visual_tests_png.conf",
+        "config": PROJECT_ROOT / "visual_tests_ps_png.conf",
     }
 
 

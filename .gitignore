@@ -5,13 +5,9 @@ Cargo.lock
 *.png
 !crates/stet-tiny-skia/tests/images/**/*.png
 visual_tests_*
-tests/pixeldiff/
 web/pkg/
 crates/stet-wasm/pkg/
 .test_stats.tmp
-tests/corpus/*/
-tests/corpus/manifest.txt
-tests/corpus-results/
 pdf_samples/
 more_pdf_samples/
 

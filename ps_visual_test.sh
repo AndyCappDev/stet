@@ -1,13 +1,13 @@
 #!/bin/bash
-# stet Visual Regression Test Launcher
+# stet PostScript Visual Regression Test Launcher
 # Runs visual_test.py with passed arguments
 #
 # Usage:
-#   ./visual_test.sh --baseline                  # Generate PNG baseline
-#   ./visual_test.sh                             # Compare against PNG baseline
-#   ./visual_test.sh --samples tiger.ps          # Test specific sample
-#   ./visual_test.sh -- --dpi 600                # Pass --dpi 600 to stet
-#   ./visual_test.sh --device pdf --baseline     # Generate PDF baseline (flat dir)
+#   ./ps_visual_test.sh --baseline                  # Generate PNG baseline
+#   ./ps_visual_test.sh                             # Compare against PNG baseline
+#   ./ps_visual_test.sh --samples tiger.ps          # Test specific sample
+#   ./ps_visual_test.sh -- --dpi 600                # Pass --dpi 600 to stet
+#   ./ps_visual_test.sh --device pdf --baseline     # Generate PDF baseline (flat dir)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
