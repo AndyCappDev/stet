@@ -1,5 +1,8 @@
 # stet-pdf-reader
 
+[![crates.io](https://img.shields.io/crates/v/stet-pdf-reader.svg)](https://crates.io/crates/stet-pdf-reader)
+[![docs.rs](https://img.shields.io/docsrs/stet-pdf-reader)](https://docs.rs/stet-pdf-reader)
+
 PDF parser and renderer. Reads PDF files and converts pages to display lists
 for rendering.
 

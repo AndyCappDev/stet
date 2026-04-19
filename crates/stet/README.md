@@ -1,5 +1,8 @@
 # stet
 
+[![crates.io](https://img.shields.io/crates/v/stet.svg)](https://crates.io/crates/stet)
+[![docs.rs](https://img.shields.io/docsrs/stet)](https://docs.rs/stet)
+
 A PostScript Level 3 interpreter and PDF rendering engine written in Rust.
 
 **stet** renders PostScript, EPS, and PDF files to RGBA pixels, PDF output, or

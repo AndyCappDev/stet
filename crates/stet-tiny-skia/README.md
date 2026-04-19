@@ -1,5 +1,8 @@
 # stet-tiny-skia
 
+[![crates.io](https://img.shields.io/crates/v/stet-tiny-skia.svg)](https://crates.io/crates/stet-tiny-skia)
+[![docs.rs](https://img.shields.io/docsrs/stet-tiny-skia)](https://docs.rs/stet-tiny-skia)
+
 A modified fork of [tiny-skia](https://github.com/RazrFalcon/tiny-skia)
 for use in the stet PostScript and PDF rendering engine.
 

@@ -1,5 +1,8 @@
 # stet-pdf
 
+[![crates.io](https://img.shields.io/crates/v/stet-pdf.svg)](https://crates.io/crates/stet-pdf)
+[![docs.rs](https://img.shields.io/docsrs/stet-pdf)](https://docs.rs/stet-pdf)
+
 PDF output device for the stet PostScript interpreter.
 
 Converts display lists into print-production-quality PDF files. The display

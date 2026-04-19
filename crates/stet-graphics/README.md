@@ -1,5 +1,8 @@
 # stet-graphics
 
+[![crates.io](https://img.shields.io/crates/v/stet-graphics.svg)](https://crates.io/crates/stet-graphics)
+[![docs.rs](https://img.shields.io/docsrs/stet-graphics)](https://docs.rs/stet-graphics)
+
 The graphics foundation for the stet PostScript and PDF rendering stack —
 colours, the display list, ICC profile management, and the mesh / patch
 shading parsers.

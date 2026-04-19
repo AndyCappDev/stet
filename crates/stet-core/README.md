@@ -1,5 +1,8 @@
 # stet-core
 
+[![crates.io](https://img.shields.io/crates/v/stet-core.svg)](https://crates.io/crates/stet-core)
+[![docs.rs](https://img.shields.io/docsrs/stet-core)](https://docs.rs/stet-core)
+
 Core type system, storage, tokenizer, and interpreter context for the stet PostScript interpreter.
 
 This is a low-level crate. Most users should use the [`stet`](https://crates.io/crates/stet)

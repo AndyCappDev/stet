@@ -1,5 +1,8 @@
 # stet-fonts
 
+[![crates.io](https://img.shields.io/crates/v/stet-fonts.svg)](https://crates.io/crates/stet-fonts)
+[![docs.rs](https://img.shields.io/docsrs/stet-fonts)](https://docs.rs/stet-fonts)
+
 Pure-Rust parsers for Type 1, CFF / Type 2, and TrueType fonts, plus the
 geometry primitives they produce.
 

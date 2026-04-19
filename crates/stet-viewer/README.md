@@ -1,5 +1,8 @@
 # stet-viewer
 
+[![crates.io](https://img.shields.io/crates/v/stet-viewer.svg)](https://crates.io/crates/stet-viewer)
+[![docs.rs](https://img.shields.io/docsrs/stet-viewer)](https://docs.rs/stet-viewer)
+
 Interactive desktop viewer (egui / winit) for **PostScript, EPS, and PDF**
 files, backed by the stet rendering pipeline.
 

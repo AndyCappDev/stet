@@ -1,5 +1,8 @@
 # stet-tiny-skia-path
 
+[![crates.io](https://img.shields.io/crates/v/stet-tiny-skia-path.svg)](https://crates.io/crates/stet-tiny-skia-path)
+[![docs.rs](https://img.shields.io/docsrs/stet-tiny-skia-path)](https://docs.rs/stet-tiny-skia-path)
+
 Bezier path types for [`stet-tiny-skia`](https://crates.io/crates/stet-tiny-skia).
 
 Provides a memory-efficient Bezier path container, path builder, path

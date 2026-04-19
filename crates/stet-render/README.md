@@ -1,5 +1,8 @@
 # stet-render
 
+[![crates.io](https://img.shields.io/crates/v/stet-render.svg)](https://crates.io/crates/stet-render)
+[![docs.rs](https://img.shields.io/docsrs/stet-render)](https://docs.rs/stet-render)
+
 Software rasterizer for stet display lists. Turns a
 [`DisplayList`](https://docs.rs/stet-graphics/latest/stet_graphics/display_list/struct.DisplayList.html)
 — whether it came from the stet PostScript interpreter or from

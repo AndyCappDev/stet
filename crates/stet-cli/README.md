@@ -1,5 +1,8 @@
 # stet-cli
 
+[![crates.io](https://img.shields.io/crates/v/stet-cli.svg)](https://crates.io/crates/stet-cli)
+[![docs.rs](https://img.shields.io/docsrs/stet-cli)](https://docs.rs/stet-cli)
+
 Command-line interface for stet — the `stet` binary renders PostScript,
 EPS, and PDF files to PNG, PDF, or an interactive desktop viewer.
 

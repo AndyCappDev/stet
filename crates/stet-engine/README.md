@@ -1,5 +1,8 @@
 # stet-engine
 
+[![crates.io](https://img.shields.io/crates/v/stet-engine.svg)](https://crates.io/crates/stet-engine)
+[![docs.rs](https://img.shields.io/docsrs/stet-engine)](https://docs.rs/stet-engine)
+
 Execution engine for the stet PostScript interpreter.
 
 This is a low-level crate. Most users should use the [`stet`](https://crates.io/crates/stet)

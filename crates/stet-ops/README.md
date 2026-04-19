@@ -1,5 +1,8 @@
 # stet-ops
 
+[![crates.io](https://img.shields.io/crates/v/stet-ops.svg)](https://crates.io/crates/stet-ops)
+[![docs.rs](https://img.shields.io/docsrs/stet-ops)](https://docs.rs/stet-ops)
+
 PostScript operator implementations for the stet interpreter.
 
 This is a low-level crate. Most users should use the [`stet`](https://crates.io/crates/stet)
