@@ -17,6 +17,11 @@ use stet_core::tokenizer::{Token, Tokenizer, stream_next_token};
 /// `Stop` propagate to the caller.
 pub fn eval(ctx: &mut Context) -> Result<(), PsError> {
     while let Some(mut obj) = ctx.e_stack.try_pop() {
+        if let Some(ref flag) = ctx.interrupt_flag
+            && flag.load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return Err(PsError::Quit);
+        }
         // Deferred objects (nested procs from exec_procedure) → push to operand stack
         // Clear the deferred flag so the executable flag is preserved.
         if obj.flags.is_deferred() {
@@ -80,6 +85,11 @@ pub fn exec_sync(ctx: &mut Context, proc_obj: PsObject) -> Result<(), PsError> {
     ctx.e_stack.push(proc_obj)?;
 
     while ctx.e_stack.len() > base_depth {
+        if let Some(ref flag) = ctx.interrupt_flag
+            && flag.load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return Err(PsError::Quit);
+        }
         let Some(mut obj) = ctx.e_stack.try_pop() else {
             break;
         };

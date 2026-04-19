@@ -14,9 +14,33 @@ use stet_render::{ImageCache, PreparedDisplayList};
 
 use crate::{ScreenInfo, ViewerEnd, ViewerMsg};
 
+/// Message delivered from the prep worker to the main viewer thread.
+/// Page content has already been processed (display list prepared, ICC
+/// cache built, image cache decoded), so the main thread only appends.
+enum PreparedMsg {
+    Page(Box<StoredPage>),
+    NewJob,
+    JobDone,
+}
+
+/// Config handed off to the prep worker thread (spawned lazily on first
+/// update, where we have an `egui::Context` for cross-thread repaints).
+struct PendingWorker {
+    raw_rx: Receiver<ViewerMsg>,
+    prepared_tx: std::sync::mpsc::Sender<PreparedMsg>,
+    system_cmyk_bytes: Option<Arc<Vec<u8>>>,
+    discard_flag: Arc<std::sync::atomic::AtomicBool>,
+}
+
 /// Interactive viewer for PostScript pages with viewport-based rendering.
 pub struct ViewerApp {
-    page_receiver: Option<Receiver<ViewerMsg>>,
+    page_receiver: Option<Receiver<PreparedMsg>>,
+    /// Worker config, consumed on first update(). `None` once spawned.
+    pending_worker: Option<PendingWorker>,
+    /// Shared flag: when set, the prep worker skips preparing any Page
+    /// messages until a `NewJob` arrives. Also consulted by the main
+    /// thread so any already-prepared stragglers are discarded.
+    prep_discard_flag: Arc<std::sync::atomic::AtomicBool>,
     screen_info_sender: Option<SyncSender<ScreenInfo>>,
     advance_sender: Option<SyncSender<()>>,
     dpi_override: Option<f64>,
@@ -58,8 +82,6 @@ pub struct ViewerApp {
     minimap: Option<MinimapState>,
     /// Whether the user is dragging the minimap viewport rectangle.
     minimap_dragging: bool,
-    /// System CMYK ICC profile bytes (for ICC-aware rendering).
-    system_cmyk_bytes: Option<std::sync::Arc<Vec<u8>>>,
     /// Disable anti-aliasing for all rendering.
     no_aa: bool,
     /// Previous page's texture, shown during page transitions to avoid black flash.
@@ -80,6 +102,13 @@ pub struct ViewerApp {
     render_cancel: Arc<std::sync::atomic::AtomicBool>,
     /// Channel to send dropped file paths to the interpreter.
     file_drop_sender: Option<std::sync::mpsc::Sender<String>>,
+    /// Shared flag the interpreter polls to abort an in-flight parse when
+    /// a new file is dropped.
+    interpreter_interrupt: Arc<std::sync::atomic::AtomicBool>,
+    /// After a drop, discard `Page` messages in the queue (leftovers from
+    /// the aborted job) until a fresh `NewJob` sentinel arrives. Clears
+    /// automatically in `poll_pages` on `NewJob`.
+    discard_pages_until_newjob: bool,
 }
 
 /// Result from a full-page background render.
@@ -186,8 +215,22 @@ impl ViewerApp {
         system_cmyk_bytes: Option<std::sync::Arc<Vec<u8>>>,
         no_aa: bool,
     ) -> Self {
+        // Heavy per-page prep runs on a worker thread so navigation input
+        // stays snappy even while many pages are streaming in. The worker
+        // is spawned lazily on the first update() call because it needs
+        // an egui::Context to wake the UI thread when pages are ready.
+        let (prepared_tx, prepared_rx) = std::sync::mpsc::channel::<PreparedMsg>();
+        let prep_discard_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let pending_worker = Some(PendingWorker {
+            raw_rx: viewer_end.page_receiver,
+            prepared_tx,
+            system_cmyk_bytes: system_cmyk_bytes.clone(),
+            discard_flag: prep_discard_flag.clone(),
+        });
         Self {
-            page_receiver: Some(viewer_end.page_receiver),
+            page_receiver: Some(prepared_rx),
+            pending_worker,
+            prep_discard_flag,
             screen_info_sender: Some(viewer_end.screen_info_sender),
             advance_sender: Some(viewer_end.advance_sender),
             dpi_override,
@@ -210,7 +253,6 @@ impl ViewerApp {
             central_available: Vec2::ZERO,
             minimap: None,
             minimap_dragging: false,
-            system_cmyk_bytes,
             no_aa,
             transition_texture: None,
             render_requested_at: None,
@@ -221,6 +263,8 @@ impl ViewerApp {
             fullpage_started: None,
             render_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             file_drop_sender: Some(viewer_end.file_drop_sender),
+            interpreter_interrupt: viewer_end.interrupt_flag,
+            discard_pages_until_newjob: false,
         }
     }
 
@@ -320,50 +364,96 @@ impl ViewerApp {
         ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(win_w, win_h)));
     }
 
+    /// Spawn the prep worker (if not yet running). Called on the first
+    /// frame so we have an `egui::Context` to wake the UI thread from.
+    fn ensure_prep_worker(&mut self, ctx: &egui::Context) {
+        let Some(cfg) = self.pending_worker.take() else {
+            return;
+        };
+        let PendingWorker {
+            raw_rx,
+            prepared_tx,
+            system_cmyk_bytes,
+            discard_flag,
+        } = cfg;
+        let ui_ctx = ctx.clone();
+        std::thread::spawn(move || {
+            while let Ok(msg) = raw_rx.recv() {
+                match msg {
+                    ViewerMsg::Page(page) => {
+                        if discard_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                            continue;
+                        }
+                        let prepared =
+                            stet_render::prepare_display_list(&page.display_list);
+                        let cmyk_bytes =
+                            page.cmyk_bytes.as_ref().or(system_cmyk_bytes.as_ref());
+                        let icc_cache = stet_render::build_icc_cache_for_list(
+                            &page.display_list,
+                            cmyk_bytes,
+                        );
+                        let image_cache =
+                            ImageCache::build(&page.display_list, Some(&icc_cache));
+                        let stored = StoredPage {
+                            display_list: Arc::new(page.display_list),
+                            prepared: Arc::new(prepared),
+                            width: page.width,
+                            height: page.height,
+                            dpi: page.dpi,
+                            page_num: page.page_num,
+                            cached_render: None,
+                            icc_cache: Arc::new(icc_cache),
+                            image_cache: Arc::new(image_cache),
+                            full_page: None,
+                        };
+                        if prepared_tx
+                            .send(PreparedMsg::Page(Box::new(stored)))
+                            .is_err()
+                        {
+                            return;
+                        }
+                        ui_ctx.request_repaint();
+                    }
+                    ViewerMsg::NewJob => {
+                        discard_flag
+                            .store(false, std::sync::atomic::Ordering::Relaxed);
+                        if prepared_tx.send(PreparedMsg::NewJob).is_err() {
+                            return;
+                        }
+                        ui_ctx.request_repaint();
+                    }
+                    ViewerMsg::JobDone => {
+                        if prepared_tx.send(PreparedMsg::JobDone).is_err() {
+                            return;
+                        }
+                        ui_ctx.request_repaint();
+                    }
+                }
+            }
+        });
+    }
+
     /// Check for newly arrived pages (non-blocking).
-    /// Limits intake to a few pages per frame so the first frame renders quickly.
+    /// The heavy per-page prep runs on a worker thread, so this is cheap
+    /// (just an append + sentinel handling).
     fn poll_pages(&mut self, ctx: &egui::Context) {
         let had_pages = !self.pages.is_empty();
         let mut pages_cleared = false;
         let Some(receiver) = self.page_receiver.take() else {
             return;
         };
-        // Accept at most a few pages per frame to avoid blocking the first paint.
-        // Control messages (NewJob, JobDone) don't count toward the limit.
-        let mut pages_this_frame = 0;
-        const MAX_PAGES_PER_FRAME: usize = 4;
         loop {
-            if pages_this_frame >= MAX_PAGES_PER_FRAME {
-                // More pages may be waiting — request another repaint to drain them.
-                ctx.request_repaint();
-                break;
-            }
             match receiver.try_recv() {
-                Ok(ViewerMsg::Page(page)) => {
-                    let prepared = stet_render::prepare_display_list(&page.display_list);
-                    // Prefer the per-page CMYK bytes (e.g. a PDF's OutputIntent)
-                    // so render-time overprint math uses the same profile that
-                    // baked the display list's RGB. Falls back to the CLI-level
-                    // system default for PS input and PDFs without OI.
-                    let cmyk_bytes = page.cmyk_bytes.as_ref().or(self.system_cmyk_bytes.as_ref());
-                    let icc_cache =
-                        stet_render::build_icc_cache_for_list(&page.display_list, cmyk_bytes);
-                    let image_cache = ImageCache::build(&page.display_list, Some(&icc_cache));
-                    self.pages.push(StoredPage {
-                        display_list: Arc::new(page.display_list),
-                        prepared: Arc::new(prepared),
-                        width: page.width,
-                        height: page.height,
-                        dpi: page.dpi,
-                        page_num: page.page_num,
-                        cached_render: None,
-                        icc_cache: Arc::new(icc_cache),
-                        image_cache: Arc::new(image_cache),
-                        full_page: None,
-                    });
-                    pages_this_frame += 1;
+                Ok(PreparedMsg::Page(page)) => {
+                    if self.discard_pages_until_newjob {
+                        // Stale page from an aborted job that the worker
+                        // had already finished preparing before it saw the
+                        // discard flag — drop it.
+                        continue;
+                    }
+                    self.pages.push(*page);
                 }
-                Ok(ViewerMsg::NewJob) => {
+                Ok(PreparedMsg::NewJob) => {
                     // New job starting — clear accumulated pages.
                     // Keep window_sized true so dropped files don't move
                     // the window to a different monitor.
@@ -374,8 +464,11 @@ impl ViewerApp {
                     self.request_render();
                     self.minimap = None;
                     pages_cleared = true;
+                    // Worker already cleared its own discard flag before
+                    // forwarding NewJob; mirror that here.
+                    self.discard_pages_until_newjob = false;
                 }
-                Ok(ViewerMsg::JobDone) => {
+                Ok(PreparedMsg::JobDone) => {
                     self.job_done = true;
                 }
                 Err(TryRecvError::Empty) => break,
@@ -1258,7 +1351,11 @@ impl eframe::App for ViewerApp {
         // Send screen info to interpreter
         self.send_screen_info(ctx);
 
-        // Poll for new pages
+        // First frame: spawn the prep worker (needs ctx for repaint).
+        self.ensure_prep_worker(ctx);
+
+        // Poll for new pages (cheap — heavy per-page prep runs on a worker
+        // thread, so this is just an mpsc drain + Vec::push).
         self.poll_pages(ctx);
 
         // Handle file drops — send to interpreter for processing
@@ -1279,6 +1376,21 @@ impl eframe::App for ViewerApp {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!("stet — {}", base)));
             }
             if let Some(ref sender) = self.file_drop_sender {
+                // Set interrupt *before* sending so the interpreter sees
+                // the flag when it wakes up on the new channel message.
+                self.interpreter_interrupt
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                // Tell the prep worker to drop any queued Page messages
+                // for the aborted job without doing the expensive prep.
+                self.prep_discard_flag
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                // Drop any pages currently displayed and skip leftover
+                // already-prepared pages that slip through before NewJob.
+                self.pages.clear();
+                self.current_page = 0;
+                self.render_dirty = true;
+                self.minimap = None;
+                self.discard_pages_until_newjob = true;
                 for path in dropped {
                     let _ = sender.send(path);
                 }

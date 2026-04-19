@@ -243,6 +243,11 @@ pub struct Context {
     /// Name resolution cache indexed by NameId. Each entry is (dict_version, resolved_object).
     /// Public for inline cache checks in the eval loop's hot path.
     pub name_resolve_cache: Vec<(u64, PsObject)>,
+
+    /// When set, the eval loop aborts with `PsError::Quit` on the next iteration.
+    /// Used by the interactive viewer to cancel an in-flight parse when the
+    /// user drops a new file.
+    pub interrupt_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl Context {
@@ -581,6 +586,7 @@ impl Context {
             start_time: None,
             dict_version: 0,
             name_resolve_cache: Vec::new(),
+            interrupt_flag: None,
         }
     }
 

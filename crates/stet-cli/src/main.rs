@@ -431,7 +431,7 @@ fn run_viewer_mode(
         None
     };
 
-    let (interp_end, viewer_end, dl_sender, advance_rx, file_drop_rx) =
+    let (interp_end, viewer_end, dl_sender, advance_rx, file_drop_rx, interrupt_flag) =
         stet_viewer::create_channels();
     let first_file = file_args.first().cloned();
 
@@ -494,9 +494,11 @@ fn run_viewer_mode(
     // Spawn interpreter thread
     let _screen_info_receiver = interp_end.screen_info_receiver;
     let icc_cfg_thread = icc_cfg.clone();
+    let interrupt_flag_thread = interrupt_flag.clone();
     std::thread::spawn(move || {
         let mut ctx = create_context(&icc_cfg_thread);
         ctx.page_filter = page_filter;
+        ctx.interrupt_flag = Some(interrupt_flag_thread.clone());
 
         // Set display_list_sender for incremental delivery at each showpage
         ctx.display_list_sender = Some(dl_sender);
@@ -553,6 +555,7 @@ fn run_viewer_mode(
                         sender,
                         &ctx.icc_cache,
                         icc_cfg_thread.use_output_intent,
+                        &interrupt_flag_thread,
                     );
                 }
             }
@@ -592,41 +595,73 @@ fn run_viewer_mode(
         // override the resource's own HWResolution.
         let established_dpi = dpi_override;
 
-        while let Ok(path) = file_drop_rx.recv() {
-            let sender = match ctx.display_list_sender {
-                Some(ref s) => s.clone(),
-                None => break,
-            };
+        while let Ok(mut path) = file_drop_rx.recv() {
+            loop {
+                // Drain any additional paths queued while we were blocked or
+                // parsing — only the most recent drop matters.
+                while let Ok(newer) = file_drop_rx.try_recv() {
+                    path = newer;
+                }
 
-            // Signal new job so viewer clears old pages
-            let _ = sender.send((
-                stet_graphics::display_list::DisplayList::new(),
-                0.0,
-                0,
-                0,
-                None,
-            ));
+                // Clear the interrupt flag now that we've picked up the
+                // latest path. Any *further* drops during parsing will set
+                // it again and abort the job.
+                interrupt_flag_thread.store(false, std::sync::atomic::Ordering::Relaxed);
 
-            if is_pdf_file(&path) {
-                render_dropped_pdf(
-                    &path,
-                    established_dpi,
-                    &sender,
-                    &ctx.icc_cache,
-                    icc_cfg_thread.use_output_intent,
-                );
-            } else {
-                run_file_jobs(&mut ctx, established_dpi, &[path], "viewer", None, None);
+                let sender = match ctx.display_list_sender {
+                    Some(ref s) => s.clone(),
+                    None => return,
+                };
+
+                // Signal new job so viewer clears old pages
+                let _ = sender.send((
+                    stet_graphics::display_list::DisplayList::new(),
+                    0.0,
+                    0,
+                    0,
+                    None,
+                ));
+
+                if is_pdf_file(&path) {
+                    render_dropped_pdf(
+                        &path,
+                        established_dpi,
+                        &sender,
+                        &ctx.icc_cache,
+                        icc_cfg_thread.use_output_intent,
+                        &interrupt_flag_thread,
+                    );
+                } else {
+                    run_file_jobs(&mut ctx, established_dpi, &[path.clone()], "viewer", None, None);
+                }
+
+                // Signal job done
+                let _ = sender.send((
+                    stet_graphics::display_list::DisplayList::new(),
+                    -1.0,
+                    0,
+                    0,
+                    None,
+                ));
+
+                // If the job was interrupted by a new drop, the next path is
+                // already (or about to be) in the channel — loop back and
+                // grab it without blocking on recv().
+                if interrupt_flag_thread.load(std::sync::atomic::Ordering::Relaxed) {
+                    match file_drop_rx.try_recv() {
+                        Ok(next) => {
+                            path = next;
+                            continue;
+                        }
+                        Err(_) => {
+                            // Flag set but channel hadn't delivered yet — race
+                            // is rare; fall through to outer recv().
+                            break;
+                        }
+                    }
+                }
+                break;
             }
-
-            // Signal job done
-            let _ = sender.send((
-                stet_graphics::display_list::DisplayList::new(),
-                -1.0,
-                0,
-                0,
-                None,
-            ));
         }
         // file_drop_sender dropped (viewer closed) → loop ends → ctx drops
     });
@@ -677,6 +712,7 @@ fn run_viewer_mode(
             screen_info_sender,
             advance_sender,
             file_drop_sender: viewer_end.file_drop_sender,
+            interrupt_flag: viewer_end.interrupt_flag,
         };
         stet_viewer::run_viewer(
             new_viewer_end,
@@ -1399,6 +1435,7 @@ fn render_dropped_pdf(
     dl_sender: &std::sync::mpsc::Sender<stet_viewer::DisplayListMsg>,
     icc_cache: &stet_graphics::icc::IccCache,
     use_output_intent: bool,
+    interrupt_flag: &std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     let dpi = dpi_override.unwrap_or(150.0);
 
@@ -1429,6 +1466,9 @@ fn render_dropped_pdf(
 
     let start = std::time::Instant::now();
     for page in 0..page_count {
+        if interrupt_flag.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
         match doc.render_page(page, dpi) {
             Ok(display_list) => {
                 let (w, h) = doc.page_size(page).unwrap_or((612.0, 792.0));

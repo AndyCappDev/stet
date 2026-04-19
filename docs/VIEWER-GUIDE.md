@@ -84,6 +84,13 @@ was launched with files, not from the REPL). Supported formats:
 
 The window title updates to show the dropped file name.
 
+Dropping a new file while another is still being parsed or loaded cancels
+the in-flight job immediately. The interpreter aborts at the next eval
+iteration (PS/EPS) or the next page boundary (PDF), any already-prepared
+but not-yet-displayed pages are discarded, and the dropped file's pages
+start arriving in their place. Rapid drops coalesce — only the most
+recent file is processed.
+
 ## Status Bar
 
 The bottom status bar shows:

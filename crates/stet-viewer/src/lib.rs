@@ -107,20 +107,30 @@ pub struct ViewerEnd {
     pub advance_sender: mpsc::SyncSender<()>,
     /// Sends dropped file paths to the interpreter for processing.
     pub file_drop_sender: mpsc::Sender<String>,
+    /// Shared flag set by the viewer when a new file is dropped while
+    /// another is still being parsed; the interpreter aborts the
+    /// in-flight job and picks up the newly queued path.
+    pub interrupt_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Create matched channel pairs for interpreter <-> viewer communication.
 ///
-/// Returns `(InterpreterEnd, ViewerEnd, dl_sender, advance_receiver, file_drop_receiver)`.
+/// Returns `(InterpreterEnd, ViewerEnd, dl_sender, advance_receiver,
+/// file_drop_receiver, interrupt_flag)`.
 /// - `dl_sender` should be set on `Context.display_list_sender`.
 /// - `advance_receiver` is used by the interpreter to wait between jobs.
 /// - `file_drop_receiver` receives file paths dropped onto the viewer window.
+/// - `interrupt_flag` should be set on `Context.interrupt_flag`; the viewer
+///   sets it when a new file is dropped so the interpreter can abort the
+///   in-flight job. The same `Arc` is also stored in `ViewerEnd` for the
+///   viewer-app side.
 pub fn create_channels() -> (
     InterpreterEnd,
     ViewerEnd,
     mpsc::Sender<DisplayListMsg>,
     mpsc::Receiver<()>,
     mpsc::Receiver<String>,
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     // Display list pipe: unbounded (interpreter never blocks at showpage)
     let (dl_tx, dl_rx) = mpsc::channel();
@@ -132,6 +142,8 @@ pub fn create_channels() -> (
     let (advance_tx, advance_rx) = mpsc::sync_channel(0);
     // File drop: unbounded (viewer sends dropped file paths to interpreter)
     let (file_drop_tx, file_drop_rx) = mpsc::channel();
+    // Interrupt flag: viewer sets, interpreter polls
+    let interrupt_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     (
         InterpreterEnd {
@@ -144,10 +156,12 @@ pub fn create_channels() -> (
             screen_info_sender: info_tx,
             advance_sender: advance_tx,
             file_drop_sender: file_drop_tx,
+            interrupt_flag: interrupt_flag.clone(),
         },
         dl_tx,
         advance_rx,
         file_drop_rx,
+        interrupt_flag,
     )
 }
 
