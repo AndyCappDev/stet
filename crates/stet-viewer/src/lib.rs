@@ -64,6 +64,10 @@ pub enum ViewerMsg {
     NewJob,
     /// Current job is finished — all pages for this job have been sent.
     JobDone,
+    /// An encrypted PDF needs a password. The viewer should prompt the
+    /// user and send the response via `ViewerEnd::password_response_sender`.
+    /// `retry` is true when a previous password was rejected.
+    PasswordRequired { filename: String, retry: bool },
 }
 
 /// A page ready for display, carrying its resolution-independent display list.
@@ -111,12 +115,16 @@ pub struct ViewerEnd {
     /// another is still being parsed; the interpreter aborts the
     /// in-flight job and picks up the newly queued path.
     pub interrupt_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Sends the user's response to a `PasswordRequired` prompt.
+    /// `Some(pw)` submits a password; `None` cancels and the interpreter
+    /// gives up on that file.
+    pub password_response_sender: mpsc::Sender<Option<String>>,
 }
 
 /// Create matched channel pairs for interpreter <-> viewer communication.
 ///
 /// Returns `(InterpreterEnd, ViewerEnd, dl_sender, advance_receiver,
-/// file_drop_receiver, interrupt_flag)`.
+/// file_drop_receiver, interrupt_flag, password_response_receiver)`.
 /// - `dl_sender` should be set on `Context.display_list_sender`.
 /// - `advance_receiver` is used by the interpreter to wait between jobs.
 /// - `file_drop_receiver` receives file paths dropped onto the viewer window.
@@ -124,6 +132,8 @@ pub struct ViewerEnd {
 ///   sets it when a new file is dropped so the interpreter can abort the
 ///   in-flight job. The same `Arc` is also stored in `ViewerEnd` for the
 ///   viewer-app side.
+/// - `password_response_receiver` receives `Some(password)` or `None`
+///   from the viewer after a `ViewerMsg::PasswordRequired` prompt.
 pub fn create_channels() -> (
     InterpreterEnd,
     ViewerEnd,
@@ -131,6 +141,7 @@ pub fn create_channels() -> (
     mpsc::Receiver<()>,
     mpsc::Receiver<String>,
     std::sync::Arc<std::sync::atomic::AtomicBool>,
+    mpsc::Receiver<Option<String>>,
 ) {
     // Display list pipe: unbounded (interpreter never blocks at showpage)
     let (dl_tx, dl_rx) = mpsc::channel();
@@ -144,6 +155,9 @@ pub fn create_channels() -> (
     let (file_drop_tx, file_drop_rx) = mpsc::channel();
     // Interrupt flag: viewer sets, interpreter polls
     let interrupt_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Password response: viewer → interpreter, unbounded (typically 0-1
+    // messages in flight, but no reason to block the viewer UI on send).
+    let (password_response_tx, password_response_rx) = mpsc::channel();
 
     (
         InterpreterEnd {
@@ -157,11 +171,13 @@ pub fn create_channels() -> (
             advance_sender: advance_tx,
             file_drop_sender: file_drop_tx,
             interrupt_flag: interrupt_flag.clone(),
+            password_response_sender: password_response_tx,
         },
         dl_tx,
         advance_rx,
         file_drop_rx,
         interrupt_flag,
+        password_response_rx,
     )
 }
 

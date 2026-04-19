@@ -29,12 +29,27 @@ enum CryptMethod {
 }
 
 impl EncryptionState {
-    /// Try to decrypt with empty user password.
-    /// Returns Ok(state) if successful, Err if password required.
+    /// Try to decrypt with an empty user password.
+    /// Equivalent to `try_open_with_password(..., b"")`.
+    /// Returns `Err(PdfError::PasswordRequired)` if the empty password
+    /// does not match; callers that want to try a user-supplied password
+    /// should use [`Self::try_open_with_password`] instead.
     pub fn try_open(
+        encrypt_dict: &PdfDict,
+        trailer: &PdfDict,
+        file_id: &[u8],
+    ) -> Result<Self, PdfError> {
+        Self::try_open_with_password(encrypt_dict, trailer, file_id, b"")
+    }
+
+    /// Try to decrypt with the given user password.
+    /// Returns `Ok(state)` on success and
+    /// `Err(PdfError::PasswordRequired)` when the password doesn't match.
+    pub fn try_open_with_password(
         encrypt_dict: &PdfDict,
         _trailer: &PdfDict,
         file_id: &[u8],
+        password: &[u8],
     ) -> Result<Self, PdfError> {
         let v = encrypt_dict.get_int(b"V").unwrap_or(0) as i32;
         let r = encrypt_dict.get_int(b"R").unwrap_or(0) as i32;
@@ -69,7 +84,7 @@ impl EncryptionState {
 
         if v == 5 {
             // AES-256 (PDF 2.0)
-            return Self::try_open_v5(encrypt_dict, &u_value, r);
+            return Self::try_open_v5(encrypt_dict, &u_value, r, password);
         }
 
         // V4: check if both StmF and StrF are Identity — if so, nothing is encrypted
@@ -88,7 +103,7 @@ impl EncryptionState {
             }
         }
 
-        // Standard handler: compute encryption key from empty password
+        // Standard handler: compute encryption key from the given password.
         let encrypt_metadata = encrypt_dict
             .get(b"EncryptMetadata")
             .and_then(|o| match o {
@@ -96,7 +111,6 @@ impl EncryptionState {
                 _ => None,
             })
             .unwrap_or(true);
-        let password = b"";
         let key = compute_encryption_key(
             password,
             &o_value,
@@ -109,7 +123,7 @@ impl EncryptionState {
 
         // Verify against /U value
         if !verify_user_password(&key, &u_value, file_id, r) {
-            return Err(PdfError::Other("PDF requires a password".into()));
+            return Err(PdfError::PasswordRequired);
         }
 
         // Acrobat quirk: when V=4 specifies a sub-128-bit /Length (e.g. 40-bit
@@ -147,7 +161,12 @@ impl EncryptionState {
         })
     }
 
-    fn try_open_v5(encrypt_dict: &PdfDict, u_value: &[u8], r: i32) -> Result<Self, PdfError> {
+    fn try_open_v5(
+        encrypt_dict: &PdfDict,
+        u_value: &[u8],
+        r: i32,
+        password: &[u8],
+    ) -> Result<Self, PdfError> {
         // AES-256: R=5 or R=6
         if u_value.len() < 48 {
             return Err(PdfError::Other("AES-256: /U too short".into()));
@@ -156,21 +175,21 @@ impl EncryptionState {
         let validation_salt = &u_value[32..40];
         let key_salt = &u_value[40..48];
 
-        // Hash empty password with validation salt (u_key is empty for user password)
+        // Hash the given password with validation salt (u_key is empty for user password).
         let hash = if r >= 6 {
-            compute_hash_r6(b"", validation_salt, b"")
+            compute_hash_r6(password, validation_salt, b"")
         } else {
-            sha256(&[b"", validation_salt])
+            sha256(&[password, validation_salt])
         };
         if hash[..] != u_value[..32] {
-            return Err(PdfError::Other("PDF requires a password".into()));
+            return Err(PdfError::PasswordRequired);
         }
 
-        // Derive file encryption key (u_key is empty for user password)
+        // Derive file encryption key (u_key is empty for user password).
         let key_hash = if r >= 6 {
-            compute_hash_r6(b"", key_salt, b"")
+            compute_hash_r6(password, key_salt, b"")
         } else {
-            sha256(&[b"", key_salt])
+            sha256(&[password, key_salt])
         };
 
         // Decrypt UE with this key to get file encryption key

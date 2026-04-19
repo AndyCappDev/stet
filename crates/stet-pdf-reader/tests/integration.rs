@@ -146,7 +146,7 @@ fn parse_external_pdfs() {
         if let Ok(data) = std::fs::read(path) {
             match PdfDocument::from_bytes(&data) {
                 Ok(_) => parsed += 1,
-                Err(stet_pdf_reader::PdfError::Encrypted) => parsed += 1,
+                Err(stet_pdf_reader::PdfError::PasswordRequired) => parsed += 1,
                 Err(_e) => {
                     failed += 1;
                     eprintln!("  FAIL: {}: {_e}", path.display());

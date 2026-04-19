@@ -93,61 +93,9 @@ pub struct PdfDocument<'a> {
 impl<'a> PdfDocument<'a> {
     /// Parse a PDF from bytes.
     pub fn from_bytes(data: &'a [u8]) -> Result<Self, PdfError> {
-        // Validate header — PDF spec allows up to 1024 bytes before %PDF-
-        if !has_pdf_header(data) {
-            return Err(PdfError::NotAPdf);
-        }
-
-        // Check for encryption (we'll detect it after parsing the trailer)
-        let xref = xref::parse_xref(data)?;
-
-        // Handle encryption: try to open with empty password.
-        // /Encrypt null means no encryption (some generators emit this).
-        let encryption = if let Some(encrypt_ref) = xref.trailer.get(b"Encrypt") {
-            if matches!(encrypt_ref, crate::objects::PdfObj::Null) {
-                None
-            } else {
-                // Use a temporary resolver (without encryption) to dereference the Encrypt dict
-                let temp_resolver = Resolver::new(data, &xref);
-                let encrypt_obj = temp_resolver.deref(encrypt_ref)?;
-                let encrypt_dict = encrypt_obj
-                    .as_dict()
-                    .ok_or(PdfError::Other("Encrypt is not a dict".into()))?;
-
-                // Get file ID from trailer
-                let file_id = xref
-                    .trailer
-                    .get_array(b"ID")
-                    .and_then(|arr| arr.first()?.as_str().map(|s| s.to_vec()))
-                    .unwrap_or_default();
-
-                Some(crypto::EncryptionState::try_open(
-                    encrypt_dict,
-                    &xref.trailer,
-                    &file_id,
-                )?)
-            }
-        } else {
-            None
-        };
-
-        let resolver = Resolver::with_encryption(data, xref, encryption);
-        let pages = page_tree::collect_pages(&resolver)?;
-        let ocg_off = parse_ocg_off(&resolver);
-        let output_intent_icc = parse_output_intent_icc(&resolver);
-
         let mut icc_cache = IccCache::new();
         icc_cache.search_system_cmyk_profile();
-
-        Ok(Self {
-            resolver,
-            pages,
-            icc_cache,
-            font_provider: None,
-            overprint: true,
-            ocg_off,
-            output_intent_icc,
-        })
+        Self::from_bytes_inner(data, icc_cache, b"")
     }
 
     /// Parse a PDF from bytes, using a pre-loaded ICC cache.
@@ -155,16 +103,42 @@ impl<'a> PdfDocument<'a> {
     /// Use this when the caller already has an `IccCache` with the system
     /// CMYK profile loaded (e.g., from the PostScript interpreter context).
     pub fn from_bytes_with_icc(data: &'a [u8], icc_cache: IccCache) -> Result<Self, PdfError> {
+        Self::from_bytes_inner(data, icc_cache, b"")
+    }
+
+    /// Parse a PDF from bytes using a user-supplied password.
+    ///
+    /// Returns `PdfError::PasswordRequired` if the password does not
+    /// match; callers can retry by calling this again with a different
+    /// password.
+    pub fn from_bytes_with_password(
+        data: &'a [u8],
+        icc_cache: IccCache,
+        password: &[u8],
+    ) -> Result<Self, PdfError> {
+        Self::from_bytes_inner(data, icc_cache, password)
+    }
+
+    fn from_bytes_inner(
+        data: &'a [u8],
+        icc_cache: IccCache,
+        password: &[u8],
+    ) -> Result<Self, PdfError> {
+        // Validate header — PDF spec allows up to 1024 bytes before %PDF-
         if !has_pdf_header(data) {
             return Err(PdfError::NotAPdf);
         }
 
         let xref = xref::parse_xref(data)?;
 
+        // Handle encryption. /Encrypt null means no encryption (some
+        // generators emit this).
         let encryption = if let Some(encrypt_ref) = xref.trailer.get(b"Encrypt") {
             if matches!(encrypt_ref, crate::objects::PdfObj::Null) {
                 None
             } else {
+                // Temporary resolver (without encryption) to dereference
+                // the Encrypt dict itself.
                 let temp_resolver = Resolver::new(data, &xref);
                 let encrypt_obj = temp_resolver.deref(encrypt_ref)?;
                 let encrypt_dict = encrypt_obj
@@ -177,10 +151,11 @@ impl<'a> PdfDocument<'a> {
                     .and_then(|arr| arr.first()?.as_str().map(|s| s.to_vec()))
                     .unwrap_or_default();
 
-                Some(crypto::EncryptionState::try_open(
+                Some(crypto::EncryptionState::try_open_with_password(
                     encrypt_dict,
                     &xref.trailer,
                     &file_id,
+                    password,
                 )?)
             }
         } else {

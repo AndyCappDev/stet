@@ -88,6 +88,7 @@ fn main() {
     // reverts to the system CMYK profile for comparison renders.
     let mut use_output_intent = true;
     let mut pages_spec: Option<String> = None;
+    let mut password: Option<String> = None;
     let mut file_args: Vec<String> = Vec::new();
     let mut i = 1;
     while i < args.len() {
@@ -206,6 +207,16 @@ fn main() {
                     std::process::exit(1);
                 }
             }
+            "--password" => {
+                if i + 1 < args.len() {
+                    password = Some(args[i + 1].clone());
+                    i += 2;
+                    continue;
+                } else {
+                    eprintln!("Error: --password requires a value");
+                    std::process::exit(1);
+                }
+            }
             _ => {}
         }
         file_args.push(args[i].clone());
@@ -273,22 +284,41 @@ fn main() {
 
     match device.as_str() {
         "png" => {
-            run_png_mode(dpi, file_args, &icc_cfg, no_aa, page_filter, false);
+            run_png_mode(
+                dpi,
+                file_args,
+                &icc_cfg,
+                no_aa,
+                page_filter,
+                false,
+                password.as_deref(),
+            );
         }
         "viewport-png" => {
             // Audit path: renders through the viewport pipeline instead of
             // the banded page pipeline. Used by the visual test runner to
             // exercise the viewer's render path against the same baselines.
-            run_png_mode(dpi, file_args, &icc_cfg, no_aa, page_filter, true);
+            run_png_mode(
+                dpi,
+                file_args,
+                &icc_cfg,
+                no_aa,
+                page_filter,
+                true,
+                password.as_deref(),
+            );
         }
         "pdf" => {
+            // `--device pdf` produces PDF from PostScript input — no PDF
+            // input path here, so --password does not apply.
+            let _ = &password;
             run_pdf_mode(dpi, file_args, &icc_cfg, no_aa, page_filter);
         }
         "null" => {
             run_null_mode(dpi, file_args, &icc_cfg, no_aa, page_filter);
         }
         #[cfg(feature = "viewer")]
-        "viewer" => run_viewer_mode(dpi, file_args, &icc_cfg, no_aa, page_filter),
+        "viewer" => run_viewer_mode(dpi, file_args, &icc_cfg, no_aa, page_filter, password),
         #[cfg(not(feature = "viewer"))]
         "viewer" => {
             eprintln!("Error: viewer not available (built without 'viewer' feature)");
@@ -313,11 +343,20 @@ fn run_png_mode(
     no_aa: bool,
     page_filter: Option<std::collections::HashSet<i32>>,
     use_viewport: bool,
+    password: Option<&str>,
 ) {
     // Check if all files are PDFs — use fast path (no PS interpreter needed)
     if !file_args.is_empty() && file_args.iter().all(|f| is_pdf_file(f)) {
         let dpi = dpi_override.unwrap_or(300.0);
-        run_pdf_input_png(dpi, &file_args, &page_filter, no_aa, use_viewport, icc_cfg);
+        run_pdf_input_png(
+            dpi,
+            &file_args,
+            &page_filter,
+            no_aa,
+            use_viewport,
+            icc_cfg,
+            password,
+        );
         return;
     }
 
@@ -416,6 +455,7 @@ fn run_viewer_mode(
     icc_cfg: &IccCliConfig,
     no_aa: bool,
     page_filter: Option<std::collections::HashSet<i32>>,
+    cli_password: Option<String>,
 ) {
     use stet_core::device::NullDevice;
 
@@ -431,8 +471,15 @@ fn run_viewer_mode(
         None
     };
 
-    let (interp_end, viewer_end, dl_sender, advance_rx, file_drop_rx, interrupt_flag) =
-        stet_viewer::create_channels();
+    let (
+        interp_end,
+        viewer_end,
+        dl_sender,
+        advance_rx,
+        file_drop_rx,
+        interrupt_flag,
+        password_response_rx,
+    ) = stet_viewer::create_channels();
     let first_file = file_args.first().cloned();
 
     // Determine page size for the first file so the window is created at the
@@ -460,7 +507,10 @@ fn run_viewer_mode(
     // Spawn relay thread: converts raw display list tuples from Context's
     // sender into PageReady messages for the viewer. Runs concurrently with
     // interpretation so pages appear in the viewer as they're produced.
+    // A clone of `page_sender` also goes to the interpreter thread so it
+    // can post `PasswordRequired` prompts for encrypted PDFs directly.
     let page_sender = interp_end.page_sender;
+    let page_sender_for_interp = page_sender.clone();
     let dl_receiver = interp_end.dl_receiver;
     std::thread::spawn(move || {
         let mut page_num = 1u32;
@@ -495,6 +545,9 @@ fn run_viewer_mode(
     let _screen_info_receiver = interp_end.screen_info_receiver;
     let icc_cfg_thread = icc_cfg.clone();
     let interrupt_flag_thread = interrupt_flag.clone();
+    let password_response_rx_thread = password_response_rx;
+    let page_sender_thread = page_sender_for_interp;
+    let cli_password_thread = cli_password;
     std::thread::spawn(move || {
         let mut ctx = create_context(&icc_cfg_thread);
         ctx.page_filter = page_filter;
@@ -556,6 +609,9 @@ fn run_viewer_mode(
                         &ctx.icc_cache,
                         icc_cfg_thread.use_output_intent,
                         &interrupt_flag_thread,
+                        Some(&page_sender_thread),
+                        Some(&password_response_rx_thread),
+                        cli_password_thread.as_deref(),
                     );
                 }
             }
@@ -630,6 +686,9 @@ fn run_viewer_mode(
                         &ctx.icc_cache,
                         icc_cfg_thread.use_output_intent,
                         &interrupt_flag_thread,
+                        Some(&page_sender_thread),
+                        Some(&password_response_rx_thread),
+                        None,
                     );
                 } else {
                     run_file_jobs(&mut ctx, established_dpi, &[path.clone()], "viewer", None, None);
@@ -673,12 +732,18 @@ fn run_viewer_mode(
     let screen_info_sender = viewer_end.screen_info_sender;
     let advance_sender = viewer_end.advance_sender;
 
-    // Block until the first real page or disconnect
-    let mut first_page = None;
+    // Block until the first real page, a password prompt, or disconnect.
+    // A `PasswordRequired` is enough reason to open the viewer — the modal
+    // must be drawn before the user can respond.
+    let mut first_event: Option<stet_viewer::ViewerMsg> = None;
     loop {
         match page_rx.recv() {
             Ok(msg @ stet_viewer::ViewerMsg::Page(_)) => {
-                first_page = Some(msg);
+                first_event = Some(msg);
+                break;
+            }
+            Ok(msg @ stet_viewer::ViewerMsg::PasswordRequired { .. }) => {
+                first_event = Some(msg);
                 break;
             }
             Ok(stet_viewer::ViewerMsg::JobDone) => {
@@ -696,8 +761,8 @@ fn run_viewer_mode(
         }
     }
 
-    if let Some(first) = first_page {
-        // Forward first page + remaining messages through a new channel
+    if let Some(first) = first_event {
+        // Forward first event + remaining messages through a new channel
         let (fwd_tx, fwd_rx) = std::sync::mpsc::channel();
         fwd_tx.send(first).ok();
         std::thread::spawn(move || {
@@ -713,6 +778,7 @@ fn run_viewer_mode(
             advance_sender,
             file_drop_sender: viewer_end.file_drop_sender,
             interrupt_flag: viewer_end.interrupt_flag,
+            password_response_sender: viewer_end.password_response_sender,
         };
         stet_viewer::run_viewer(
             new_viewer_end,
@@ -1429,6 +1495,16 @@ fn is_pdf_file(filename: &str) -> bool {
 }
 
 /// Render a dropped PDF file and send its pages through the display list channel.
+///
+/// When the PDF is password-protected, posts a `ViewerMsg::PasswordRequired`
+/// via `page_sender` and blocks on `password_response_rx` for the user's
+/// reply; loops until the PDF opens, the user cancels, or the interrupt
+/// flag fires. The caller-supplied `initial_password` (from `--password`)
+/// is tried first; if absent or wrong, the prompt is used. `page_sender`
+/// and `password_response_rx` may be `None` for headless callers (no
+/// viewer) — in that case only `initial_password` is tried and failure
+/// is reported to stderr.
+#[allow(clippy::too_many_arguments)]
 fn render_dropped_pdf(
     path: &str,
     dpi_override: Option<f64>,
@@ -1436,6 +1512,9 @@ fn render_dropped_pdf(
     icc_cache: &stet_graphics::icc::IccCache,
     use_output_intent: bool,
     interrupt_flag: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    page_sender: Option<&std::sync::mpsc::Sender<stet_viewer::ViewerMsg>>,
+    password_response_rx: Option<&std::sync::mpsc::Receiver<Option<String>>>,
+    initial_password: Option<&str>,
 ) {
     let dpi = dpi_override.unwrap_or(150.0);
 
@@ -1447,11 +1526,52 @@ fn render_dropped_pdf(
         }
     };
 
-    let mut doc = match PdfDocument::from_bytes_with_icc(&data, icc_cache.clone()) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("Error: cannot parse '{}': {}", path, e);
-            return;
+    let mut password_attempt: Option<String> = initial_password.map(|s| s.to_string());
+    let mut any_password_tried = false;
+    let mut doc = loop {
+        let result = match password_attempt.as_deref() {
+            None => PdfDocument::from_bytes_with_icc(&data, icc_cache.clone()),
+            Some(pw) => PdfDocument::from_bytes_with_password(
+                &data,
+                icc_cache.clone(),
+                pw.as_bytes(),
+            ),
+        };
+        match result {
+            Ok(d) => break d,
+            Err(stet_pdf_reader::PdfError::PasswordRequired) => {
+                let (Some(tx), Some(rx)) = (page_sender, password_response_rx) else {
+                    eprintln!(
+                        "Error: '{}' is password-protected (use --password or drop onto viewer)",
+                        path
+                    );
+                    return;
+                };
+                if tx
+                    .send(stet_viewer::ViewerMsg::PasswordRequired {
+                        filename: path.to_string(),
+                        retry: any_password_tried,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+                match rx.recv() {
+                    Ok(Some(pw)) => {
+                        password_attempt = Some(pw);
+                        any_password_tried = true;
+                        if interrupt_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                            return;
+                        }
+                        continue;
+                    }
+                    _ => return,
+                }
+            }
+            Err(e) => {
+                eprintln!("Error: cannot parse '{}': {}", path, e);
+                return;
+            }
         }
     };
     if use_output_intent && doc.apply_output_intent_as_default_cmyk() {
@@ -1539,6 +1659,7 @@ fn run_pdf_input_png(
     no_aa: bool,
     use_viewport: bool,
     icc_cfg: &IccCliConfig,
+    password: Option<&str>,
 ) {
     let icc_cache = build_icc_cache(icc_cfg);
 
@@ -1548,11 +1669,22 @@ fn run_pdf_input_png(
             std::process::exit(1);
         });
 
-        let mut doc =
-            PdfDocument::from_bytes_with_icc(&data, icc_cache.clone()).unwrap_or_else(|e| {
-                eprintln!("Error: cannot parse '{}': {}", filename, e);
-                std::process::exit(1);
-            });
+        let open_result = match password {
+            Some(pw) => {
+                PdfDocument::from_bytes_with_password(&data, icc_cache.clone(), pw.as_bytes())
+            }
+            None => PdfDocument::from_bytes_with_icc(&data, icc_cache.clone()),
+        };
+        let mut doc = open_result.unwrap_or_else(|e| {
+            match e {
+                stet_pdf_reader::PdfError::PasswordRequired => eprintln!(
+                    "Error: '{}' is password-protected (use --password)",
+                    filename
+                ),
+                _ => eprintln!("Error: cannot parse '{}': {}", filename, e),
+            }
+            std::process::exit(1);
+        });
         // Opt-in: when `--use-output-intent` is set and the user didn't pin a
         // source CMYK profile via `--cmyk-profile`/`--output-profile`, prefer
         // the PDF's own `/OutputIntents[].DestOutputProfile`. Gated because

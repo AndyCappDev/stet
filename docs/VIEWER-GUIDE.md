@@ -91,6 +91,19 @@ but not-yet-displayed pages are discarded, and the dropped file's pages
 start arriving in their place. Rapid drops coalesce — only the most
 recent file is processed.
 
+### Password-protected PDFs
+
+When a dropped (or CLI-launched) PDF is encrypted, a modal dialog opens
+asking for the password. Type it and press **Enter** (or click **Open**)
+to continue, or press **Esc** / click **Cancel** to skip the file. If
+the password is wrong, the dialog stays up with an "Incorrect password —
+try again" notice.
+
+For non-interactive workflows (headless rendering, scripting) pass the
+password on the command line with `--password <pw>`. The flag applies
+to the initial CLI files only — drag-dropped files still show the modal
+prompt so one run can open several differently-keyed PDFs.
+
 ## Status Bar
 
 The bottom status bar shows:
@@ -142,6 +155,7 @@ higher effective DPI.
 | `--dpi <DPI>` | Set the reference DPI (affects initial zoom level) |
 | `--threads <N>` | Override the rayon worker count (default: 75% of cores in viewer mode) |
 | `--pages <RANGE>` | Only render specified pages (e.g. `1-5`, `3`, `1-3,7,10-12`) |
+| `--password <PW>` | Open a password-protected PDF with the given user password |
 | `--no-aa` | Disable anti-aliasing |
 
 ### Color management

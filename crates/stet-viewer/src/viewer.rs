@@ -21,6 +21,7 @@ enum PreparedMsg {
     Page(Box<StoredPage>),
     NewJob,
     JobDone,
+    PasswordRequired { filename: String, retry: bool },
 }
 
 /// Config handed off to the prep worker thread (spawned lazily on first
@@ -109,6 +110,20 @@ pub struct ViewerApp {
     /// the aborted job) until a fresh `NewJob` sentinel arrives. Clears
     /// automatically in `poll_pages` on `NewJob`.
     discard_pages_until_newjob: bool,
+    /// Channel back to the interpreter carrying the user's response to a
+    /// password prompt (`Some(pw)` submit, `None` cancel).
+    password_response_sender: Option<std::sync::mpsc::Sender<Option<String>>>,
+    /// Active password-prompt modal, if any.
+    password_prompt: Option<PasswordPromptState>,
+}
+
+/// State of the modal password-prompt dialog.
+struct PasswordPromptState {
+    filename: String,
+    retry: bool,
+    text: String,
+    /// Set on the first frame so we can grab focus once the widget exists.
+    just_opened: bool,
 }
 
 /// Result from a full-page background render.
@@ -265,6 +280,8 @@ impl ViewerApp {
             file_drop_sender: Some(viewer_end.file_drop_sender),
             interpreter_interrupt: viewer_end.interrupt_flag,
             discard_pages_until_newjob: false,
+            password_response_sender: Some(viewer_end.password_response_sender),
+            password_prompt: None,
         }
     }
 
@@ -428,6 +445,15 @@ impl ViewerApp {
                         }
                         ui_ctx.request_repaint();
                     }
+                    ViewerMsg::PasswordRequired { filename, retry } => {
+                        if prepared_tx
+                            .send(PreparedMsg::PasswordRequired { filename, retry })
+                            .is_err()
+                        {
+                            return;
+                        }
+                        ui_ctx.request_repaint();
+                    }
                 }
             }
         });
@@ -471,6 +497,17 @@ impl ViewerApp {
                 Ok(PreparedMsg::JobDone) => {
                     self.job_done = true;
                 }
+                Ok(PreparedMsg::PasswordRequired { filename, retry }) => {
+                    // If the modal is already open (e.g. retry after a
+                    // wrong password) keep the existing text field empty
+                    // and just toggle the retry flag. Otherwise open it.
+                    self.password_prompt = Some(PasswordPromptState {
+                        filename,
+                        retry,
+                        text: String::new(),
+                        just_opened: true,
+                    });
+                }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     self.interpreter_done = true;
@@ -493,6 +530,74 @@ impl ViewerApp {
 
         // Put receiver back
         self.page_receiver = Some(receiver);
+    }
+
+    /// Draw the modal password prompt, if any. Sends the user's
+    /// response (submit / cancel) through `password_response_sender` and
+    /// clears the prompt state when the user finishes interacting.
+    fn draw_password_prompt(&mut self, ctx: &egui::Context) {
+        let Some(mut state) = self.password_prompt.take() else {
+            return;
+        };
+
+        let mut submit = false;
+        let mut cancel = false;
+
+        let title_base = std::path::Path::new(&state.filename)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| state.filename.clone());
+
+        egui::Window::new("Password Required")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.label(format!("'{}' is password-protected.", title_base));
+                if state.retry {
+                    ui.colored_label(egui::Color32::RED, "Incorrect password — try again.");
+                }
+                ui.add_space(6.0);
+                let edit = egui::TextEdit::singleline(&mut state.text)
+                    .password(true)
+                    .desired_width(280.0);
+                let response = ui.add(edit);
+                if state.just_opened {
+                    response.request_focus();
+                    state.just_opened = false;
+                }
+                if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    submit = true;
+                }
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Open").clicked() {
+                        submit = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+                if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    cancel = true;
+                }
+            });
+
+        if submit {
+            if let Some(ref tx) = self.password_response_sender {
+                let _ = tx.send(Some(state.text));
+            }
+            // Leave the prompt closed; the interpreter will either start
+            // rendering (NewJob clears state) or send another
+            // PasswordRequired with retry=true.
+        } else if cancel {
+            if let Some(ref tx) = self.password_response_sender {
+                let _ = tx.send(None);
+            }
+        } else {
+            // Put it back — still open.
+            self.password_prompt = Some(state);
+        }
     }
 
     /// Save the current page's texture for transition display.
@@ -1380,6 +1485,13 @@ impl eframe::App for ViewerApp {
                 // the flag when it wakes up on the new channel message.
                 self.interpreter_interrupt
                     .store(true, std::sync::atomic::Ordering::Relaxed);
+                // If a password prompt is open for the file we're
+                // abandoning, cancel it so the interpreter stops waiting.
+                if self.password_prompt.take().is_some()
+                    && let Some(ref pw_tx) = self.password_response_sender
+                {
+                    let _ = pw_tx.send(None);
+                }
                 // Tell the prep worker to drop any queued Page messages
                 // for the aborted job without doing the expensive prep.
                 self.prep_discard_flag
@@ -1404,7 +1516,16 @@ impl eframe::App for ViewerApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
         }
 
-        // Handle keyboard input
+        // Password prompt (modal) — swallows input while open.
+        self.draw_password_prompt(ctx);
+
+        // Handle keyboard input — skip while the password prompt owns input.
+        if self.password_prompt.is_some() {
+            // Still repaint so incoming pages (after prompt dismissal) show.
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            return;
+        }
+
         ctx.input(|i| {
             // Quit
             if i.key_pressed(egui::Key::Q) || i.key_pressed(egui::Key::Escape) {

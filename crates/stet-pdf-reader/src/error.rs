@@ -57,8 +57,8 @@ pub enum PdfError {
     #[error("circular reference detected for object {0} {1}")]
     CircularReference(u32, u16),
 
-    #[error("encrypted PDF (not yet supported)")]
-    Encrypted,
+    #[error("PDF requires a password")]
+    PasswordRequired,
 
     #[error("{0}")]
     Other(String),
