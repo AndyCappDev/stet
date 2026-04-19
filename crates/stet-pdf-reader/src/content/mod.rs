@@ -58,6 +58,24 @@ enum MarkedContentFrame {
     Other,
 }
 
+/// Read a numeric array entry, following an indirect reference if needed.
+///
+/// PDF dict values like `/BBox`, `/Matrix`, `/MediaBox`, etc. are commonly
+/// shared across multiple objects via indirect references (e.g. several form
+/// XObjects may share a single `/BBox 4 0 R`). `PdfDict::get_array` returns
+/// `None` for an indirect-ref value, so callers that need the numbers must
+/// dereference first.
+fn deref_num_array(resolver: &Resolver, dict: &PdfDict, key: &[u8]) -> Option<Vec<f64>> {
+    let obj = dict.get(key)?;
+    if let Some(arr) = obj.as_array() {
+        return Some(arr.iter().filter_map(|o| o.as_f64()).collect());
+    }
+    let resolved = resolver.deref(obj).ok()?;
+    resolved
+        .as_array()
+        .map(|a| a.iter().filter_map(|o| o.as_f64()).collect())
+}
+
 /// An operand on the content stream operand stack.
 #[derive(Clone, Debug)]
 pub enum Operand {
@@ -447,10 +465,8 @@ impl<'a> ContentInterpreter<'a> {
             .unwrap_or([rect[0], rect[1], rect[2], rect[3]]);
 
         // Apply form's own matrix if present
-        let form_matrix = form_dict
-            .get_array(b"Matrix")
-            .and_then(|a| {
-                let v: Vec<f64> = a.iter().filter_map(|o| o.as_f64()).collect();
+        let form_matrix = deref_num_array(self.resolver, &form_dict, b"Matrix")
+            .and_then(|v| {
                 if v.len() == 6 {
                     Some(Matrix::new(v[0], v[1], v[2], v[3], v[4], v[5]))
                 } else {
@@ -4657,8 +4673,7 @@ impl<'a> ContentInterpreter<'a> {
         };
 
         // Form matrix
-        let form_matrix = if let Some(arr) = dict.get_array(b"Matrix") {
-            let vals: Vec<f64> = arr.iter().filter_map(|o| o.as_f64()).collect();
+        let form_matrix = if let Some(vals) = deref_num_array(self.resolver, dict, b"Matrix") {
             if vals.len() == 6 {
                 Matrix::new(vals[0], vals[1], vals[2], vals[3], vals[4], vals[5])
             } else {
@@ -4669,8 +4684,7 @@ impl<'a> ContentInterpreter<'a> {
         };
 
         // BBox clipping
-        let bbox = if let Some(arr) = dict.get_array(b"BBox") {
-            let vals: Vec<f64> = arr.iter().filter_map(|o| o.as_f64()).collect();
+        let bbox = if let Some(vals) = deref_num_array(self.resolver, dict, b"BBox") {
             if vals.len() == 4 {
                 Some((vals[0], vals[1], vals[2], vals[3]))
             } else {
@@ -5849,8 +5863,7 @@ impl<'a> ContentInterpreter<'a> {
             .ok_or_else(|| PdfError::Other("SMask /G is not a dict".into()))?;
 
         // Get form BBox
-        let bbox_tuple = if let Some(arr) = g_dict.get_array(b"BBox") {
-            let vals: Vec<f64> = arr.iter().filter_map(|o| o.as_f64()).collect();
+        let bbox_tuple = if let Some(vals) = deref_num_array(self.resolver, g_dict, b"BBox") {
             if vals.len() == 4 {
                 Some((vals[0], vals[1], vals[2], vals[3]))
             } else {
@@ -5861,8 +5874,7 @@ impl<'a> ContentInterpreter<'a> {
         };
 
         // Form matrix
-        let form_matrix = if let Some(arr) = g_dict.get_array(b"Matrix") {
-            let vals: Vec<f64> = arr.iter().filter_map(|o| o.as_f64()).collect();
+        let form_matrix = if let Some(vals) = deref_num_array(self.resolver, g_dict, b"Matrix") {
             if vals.len() == 6 {
                 Matrix::new(vals[0], vals[1], vals[2], vals[3], vals[4], vals[5])
             } else {
@@ -6360,10 +6372,8 @@ impl<'a> ContentInterpreter<'a> {
         }
         let paint_type = pat_dict.get_int(b"PaintType").unwrap_or(1) as i32;
 
-        let bbox = pat_dict
-            .get_array(b"BBox")
-            .map(|a| {
-                let v: Vec<f64> = a.iter().filter_map(|o| o.as_f64()).collect();
+        let bbox = deref_num_array(self.resolver, pat_dict, b"BBox")
+            .map(|v| {
                 if v.len() >= 4 {
                     [v[0], v[1], v[2], v[3]]
                 } else {
@@ -6375,10 +6385,8 @@ impl<'a> ContentInterpreter<'a> {
         let x_step = pat_dict.get_f64(b"XStep").unwrap_or(bbox[2] - bbox[0]);
         let y_step = pat_dict.get_f64(b"YStep").unwrap_or(bbox[3] - bbox[1]);
 
-        let pattern_matrix = pat_dict
-            .get_array(b"Matrix")
-            .map(|a| {
-                let v: Vec<f64> = a.iter().filter_map(|o| o.as_f64()).collect();
+        let pattern_matrix = deref_num_array(self.resolver, pat_dict, b"Matrix")
+            .map(|v| {
                 if v.len() >= 6 {
                     Matrix::new(v[0], v[1], v[2], v[3], v[4], v[5])
                 } else {
@@ -6475,10 +6483,8 @@ impl<'a> ContentInterpreter<'a> {
             .as_dict()
             .ok_or(PdfError::Other("Shading is not a dict".into()))?;
 
-        let pattern_matrix = pat_dict
-            .get_array(b"Matrix")
-            .map(|a| {
-                let v: Vec<f64> = a.iter().filter_map(|o| o.as_f64()).collect();
+        let pattern_matrix = deref_num_array(self.resolver, pat_dict, b"Matrix")
+            .map(|v| {
                 if v.len() >= 6 {
                     Matrix::new(v[0], v[1], v[2], v[3], v[4], v[5])
                 } else {
