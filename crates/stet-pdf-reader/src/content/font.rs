@@ -809,7 +809,19 @@ fn substitute_font(
                     }
                 }
             }
-            if count >= 3 && sub_sum > 0.0 {
+            if count >= 3 && sub_sum > 0.0 && !is_standard_14_alias(clean_name) {
+                // Standard 14 fonts (and their `,Bold`/`,Italic` aliases) use
+                // metric-compatible URW Nimbus substitutes by design — the
+                // substitute's natural glyph widths already track the original
+                // closely. Skipping the rescale here matches Acrobat / PDF.js
+                // behavior (PDF.js bug 1671312 / PR #12725): PDFs that author
+                // `Tc` and `TJ` kerning against the original font's natural
+                // widths render correctly only when the substitute is left at
+                // its natural metrics. Forcing PDF `/Widths` onto the glyph,
+                // either globally via `font_matrix.a` or per-glyph via
+                // `per_char_scale`, breaks both the bug-1671312 case (overlaps
+                // and gaps in "Purposes") and PDFs whose `/Widths` array is
+                // skewed by placeholder values for unused code points.
                 let ratio = pdf_sum / sub_sum;
                 if (ratio - 1.0).abs() > 0.03 {
                     font_matrix.a *= ratio;
@@ -834,6 +846,38 @@ fn substitute_font(
         weight_vector,
         per_char_width_scale: per_char_scale,
     }))
+}
+
+/// Returns true if `name` (after normalizing commas to hyphens) is one of the
+/// PDF standard 14 base fonts. Used to suppress per-glyph horizontal squashing
+/// for substitute fonts (PDF.js bug 1671312 / PR #12725): the standard 14
+/// substitutes (URW Nimbus family) are metric-compatible by design, so
+/// rescaling glyphs to the PDF's `/Widths` corrupts text whose `Tc` values
+/// were calibrated against the original font's natural widths.
+///
+/// "Narrow" family members (e.g. ArialNarrow) are deliberately excluded —
+/// they aren't standard 14, so they retain the squashing path because their
+/// substitute (regular-width Arial/Helvetica) genuinely needs to be
+/// horizontally compressed.
+fn is_standard_14_alias(name: &str) -> bool {
+    let normalized = name.replace(',', "-");
+    matches!(
+        normalized.as_str(),
+        "Times-Roman"
+            | "Times-Bold"
+            | "Times-Italic"
+            | "Times-BoldItalic"
+            | "Helvetica"
+            | "Helvetica-Bold"
+            | "Helvetica-Oblique"
+            | "Helvetica-BoldOblique"
+            | "Courier"
+            | "Courier-Bold"
+            | "Courier-Oblique"
+            | "Courier-BoldOblique"
+            | "Symbol"
+            | "ZapfDingbats"
+    )
 }
 
 /// Fuzzy font family matching for names not in the substitution table.
