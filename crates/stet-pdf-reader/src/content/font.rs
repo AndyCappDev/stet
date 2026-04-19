@@ -887,7 +887,14 @@ fn fuzzy_font_match(name: &str) -> Option<&'static str> {
     let is_bold = lower.contains("bold") || lower.contains("demi");
     let is_italic = lower.contains("italic") || lower.contains("oblique");
 
-    if lower.contains("times") || lower.contains("roman") || lower.contains("serif") {
+    // Strip trailing PostScript style suffixes so we match the *family*
+    // name, not a style word. Without this "MetaPlusMedium-Roman" (a
+    // sans-serif) would match the "roman" serif cue below and end up
+    // substituted with NimbusRoman. "Roman" in a PS font name normally
+    // means "regular upright", not "serif".
+    let family = strip_style_suffix(&lower);
+
+    if family.contains("times") || family.contains("serif") {
         return Some(match (is_bold, is_italic) {
             (true, true) => "NimbusRoman-BoldItalic",
             (true, false) => "NimbusRoman-Bold",
@@ -895,12 +902,12 @@ fn fuzzy_font_match(name: &str) -> Option<&'static str> {
             (false, false) => "NimbusRoman-Regular",
         });
     }
-    if lower.contains("helvetica")
-        || lower.contains("arial")
-        || lower.contains("sans")
-        || lower.contains("calibri")
-        || lower.contains("verdana")
-        || lower.contains("tahoma")
+    if family.contains("helvetica")
+        || family.contains("arial")
+        || family.contains("sans")
+        || family.contains("calibri")
+        || family.contains("verdana")
+        || family.contains("tahoma")
     {
         return Some(match (is_bold, is_italic) {
             (true, true) => "NimbusSans-BoldItalic",
@@ -909,7 +916,7 @@ fn fuzzy_font_match(name: &str) -> Option<&'static str> {
             (false, false) => "NimbusSans-Regular",
         });
     }
-    if lower.contains("courier") || lower.contains("mono") {
+    if family.contains("courier") || family.contains("mono") {
         return Some(match (is_bold, is_italic) {
             (true, true) => "NimbusMonoPS-BoldItalic",
             (true, false) => "NimbusMonoPS-Bold",
@@ -918,6 +925,23 @@ fn fuzzy_font_match(name: &str) -> Option<&'static str> {
         });
     }
     None
+}
+
+/// Strip trailing style words (`-Roman`, `-Regular`, etc.) so family-name
+/// pattern matching sees the family, not the style. Works on an
+/// already-lowercased string. Only touches the very end of the name.
+fn strip_style_suffix(lower: &str) -> &str {
+    // Order matters: longer variants first so "-bookitalic" doesn't match "italic".
+    const SUFFIXES: &[&str] = &[
+        "-roman", " roman", "-regular", " regular", "-medium", " medium", "-book", " book",
+        "-normal", " normal", "-light", " light",
+    ];
+    for suffix in SUFFIXES {
+        if let Some(prefix) = lower.strip_suffix(suffix) {
+            return prefix;
+        }
+    }
+    lower
 }
 
 /// Known CID font substitutions for fonts commonly missing on Linux.
