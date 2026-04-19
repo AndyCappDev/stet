@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # Fast lint + format check — only needs one OS.
+  lint:
+    name: fmt + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+      - name: cargo clippy
+        # Clippy runs but doesn't gate on warnings yet — the workspace has
+        # a few hundred pre-existing style warnings documented as non-
+        # blockers in PUBLISH-TODO.md. We still want the clippy output in
+        # CI logs so new warnings are easy to spot in a diff.
+        run: cargo clippy --workspace --all-targets
+
+  # Cross-platform build + test. Proves the code compiles on each OS and
+  # catches portability regressions early. Some file-I/O unit tests
+  # hardcode /tmp paths and will fail on Windows until ported to
+  # std::env::temp_dir() — tracked separately, not a publish blocker.
+  build-test:
+    name: ${{ matrix.os }} / ${{ matrix.rust }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        rust: [stable]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
+      - name: cargo build --release --workspace
+        run: cargo build --release --workspace
+      - name: cargo test --workspace
+        # Tests cover the library surface on every OS. A few file-I/O tests
+        # currently hardcode /tmp paths and fail on Windows — tracked as a
+        # portability fix; does not block publication.
+        run: cargo test --workspace
+
+  # WASM build — smoke test that the browser-facing crate still compiles.
+  # stet-wasm is excluded from the default workspace, so it needs its own
+  # step. No tests here — wasm-pack test would need a browser runtime.
+  wasm:
+    name: wasm32 build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: wasm
+      - name: cargo check --target wasm32-unknown-unknown
+        working-directory: crates/stet-wasm
+        run: cargo check --target wasm32-unknown-unknown --release
