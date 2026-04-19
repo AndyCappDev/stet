@@ -1210,7 +1210,14 @@ mod tests {
     /// Done-when #4: File round-trip
     #[test]
     fn test_file_round_trip() {
-        let path = "/tmp/stet_phase2_file_test.txt";
+        // Use forward slashes even on Windows — PostScript string-literal
+        // syntax treats `\` as an escape character, so a native Windows
+        // path like `C:\Users\...` would be mangled inside `(...)`.
+        // Rust's fs APIs on Windows accept `/` just fine.
+        let path = std::env::temp_dir()
+            .join("stet_phase2_file_test.txt")
+            .to_string_lossy()
+            .replace('\\', "/");
         let source = format!(
             "({}) (w) file /f exch def f (hello world) writestring f closefile \
              ({}) (r) file /f exch def f 11 string readstring pop print f closefile",
@@ -1218,7 +1225,7 @@ mod tests {
         );
         let output = run_ps(source.as_bytes());
         assert_eq!(output, "hello world");
-        std::fs::remove_file(path).ok();
+        std::fs::remove_file(&path).ok();
     }
 
     /// Done-when #5: `{ 1 0 div } stopped { (caught\n) print } if` → prints "caught"

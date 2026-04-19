@@ -1152,6 +1152,15 @@ mod tests {
     use super::*;
     use stet_core::object::PsObject;
 
+    /// Build a path inside the OS temp directory. Portable across Linux,
+    /// macOS, and Windows.
+    fn tmp_path(name: &str) -> String {
+        std::env::temp_dir()
+            .join(name)
+            .to_string_lossy()
+            .into_owned()
+    }
+
     fn test_ctx_with_capture() -> (Context, std::sync::Arc<std::sync::Mutex<Vec<u8>>>) {
         let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let writer = buf.clone();
@@ -1191,7 +1200,8 @@ mod tests {
     #[test]
     fn test_file_round_trip() {
         let mut ctx = Context::new();
-        let path = "/tmp/stet_test_file_ops.txt";
+        let path = tmp_path("stet_test_file_ops.txt");
+        let path = path.as_str();
 
         // Open for write
         let name_ent = ctx.strings.allocate_from(path.as_bytes());
@@ -1250,7 +1260,8 @@ mod tests {
         let mut ctx = Context::new();
 
         // Test existing file — returns pages bytes referenced created true
-        let path = "/tmp/stet_test_status.txt";
+        let path = tmp_path("stet_test_status.txt");
+        let path = path.as_str();
         std::fs::write(path, "x").ok();
         let ent = ctx.strings.allocate_from(path.as_bytes());
         ctx.o_stack
@@ -1268,8 +1279,11 @@ mod tests {
         ctx.o_stack.pop().unwrap(); // pages
 
         // Test non-existing file — returns false
-        let ent2 = ctx.strings.allocate_from(b"/tmp/stet_nonexistent_file_xyz");
-        ctx.o_stack.push(PsObject::string(ent2, 29)).unwrap();
+        let absent = tmp_path("stet_nonexistent_file_xyz");
+        let ent2 = ctx.strings.allocate_from(absent.as_bytes());
+        ctx.o_stack
+            .push(PsObject::string(ent2, absent.len() as u32))
+            .unwrap();
         op_status(&mut ctx).unwrap();
         assert!(matches!(
             ctx.o_stack.pop().unwrap().value,
@@ -1295,7 +1309,8 @@ mod tests {
     #[test]
     fn test_deletefile() {
         let mut ctx = Context::new();
-        let path = "/tmp/stet_test_delete.txt";
+        let path = tmp_path("stet_test_delete.txt");
+        let path = path.as_str();
         std::fs::write(path, "x").unwrap();
 
         let ent = ctx.strings.allocate_from(path.as_bytes());
@@ -1309,8 +1324,10 @@ mod tests {
     #[test]
     fn test_renamefile() {
         let mut ctx = Context::new();
-        let old_path = "/tmp/stet_test_rename_old.txt";
-        let new_path = "/tmp/stet_test_rename_new.txt";
+        let old_path = tmp_path("stet_test_rename_old.txt");
+        let old_path = old_path.as_str();
+        let new_path = tmp_path("stet_test_rename_new.txt");
+        let new_path = new_path.as_str();
         std::fs::write(old_path, "x").unwrap();
 
         let old_ent = ctx.strings.allocate_from(old_path.as_bytes());

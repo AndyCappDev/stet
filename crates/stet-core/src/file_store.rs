@@ -2411,6 +2411,16 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    /// Build a path inside the OS temp directory. Portable across Linux
+    /// (`/tmp`), macOS (`/var/folders/...`), and Windows
+    /// (`%LOCALAPPDATA%\Temp`).
+    fn tmp_path(name: &str) -> String {
+        std::env::temp_dir()
+            .join(name)
+            .to_string_lossy()
+            .into_owned()
+    }
+
     #[test]
     fn test_prealloc_standard_streams() {
         let store = FileStore::new();
@@ -2432,7 +2442,8 @@ mod tests {
     #[test]
     fn test_file_round_trip() {
         let mut store = FileStore::new();
-        let path = "/tmp/stet_test_file_store.txt";
+        let path = tmp_path("stet_test_file_store.txt");
+        let path = path.as_str();
 
         // Write
         let wid = store.open(path, "w").unwrap();
@@ -2455,7 +2466,8 @@ mod tests {
     #[test]
     fn test_readline() {
         let mut store = FileStore::new();
-        let path = "/tmp/stet_test_readline.txt";
+        let path = tmp_path("stet_test_readline.txt");
+        let path = path.as_str();
 
         // Write test data
         {
@@ -2480,7 +2492,8 @@ mod tests {
     #[test]
     fn test_file_position() {
         let mut store = FileStore::new();
-        let path = "/tmp/stet_test_filepos.txt";
+        let path = tmp_path("stet_test_filepos.txt");
+        let path = path.as_str();
         {
             let mut f = std::fs::File::create(path).unwrap();
             f.write_all(b"abcdef").unwrap();
@@ -2500,7 +2513,8 @@ mod tests {
     #[test]
     fn test_close_and_reopen() {
         let mut store = FileStore::new();
-        let path = "/tmp/stet_test_close.txt";
+        let path = tmp_path("stet_test_close.txt");
+        let path = path.as_str();
         let id = store.open(path, "w").unwrap();
         store.write_from(id, b"test").unwrap();
         store.close(id).unwrap();
@@ -2511,13 +2525,18 @@ mod tests {
     #[test]
     fn test_invalid_mode() {
         let mut store = FileStore::new();
-        assert!(store.open("/tmp/test", "z").is_err());
+        assert!(
+            store
+                .open(&tmp_path("stet_test_invalid_mode"), "z")
+                .is_err()
+        );
     }
 
     #[test]
     fn test_read_byte() {
         let mut store = FileStore::new();
-        let path = "/tmp/stet_test_readbyte.txt";
+        let path = tmp_path("stet_test_readbyte.txt");
+        let path = path.as_str();
         {
             let mut f = std::fs::File::create(path).unwrap();
             f.write_all(b"AB").unwrap();
@@ -2774,7 +2793,8 @@ mod tests {
     #[test]
     fn test_lzw_encode_single_byte() {
         let mut store = FileStore::new();
-        let path = "/tmp/stet_test_lzw_single.bin";
+        let path = tmp_path("stet_test_lzw_single.bin");
+        let path = path.as_str();
 
         let target = store.open(path, "w").unwrap();
         let enc = store.create_encode_filter(target, FilterKind::lzw_encode(true));
@@ -2800,7 +2820,8 @@ mod tests {
         let original = b"Hello LZW!";
 
         // Create a string source as the write target (we'll use a temp file)
-        let path = "/tmp/stet_test_lzw_encode.bin";
+        let path = tmp_path("stet_test_lzw_encode.bin");
+        let path = path.as_str();
         let target = store.open(path, "w").unwrap();
         let enc = store.create_encode_filter(target, FilterKind::lzw_encode(true));
 
@@ -2826,7 +2847,8 @@ mod tests {
     fn test_ascii_hex_encode_roundtrip() {
         let mut store = FileStore::new();
         let original = b"Hello";
-        let path = "/tmp/stet_test_hex_encode.bin";
+        let path = tmp_path("stet_test_hex_encode.bin");
+        let path = path.as_str();
 
         let target = store.open(path, "w").unwrap();
         let enc = store.create_encode_filter(target, FilterKind::ascii_hex_encode());
@@ -2850,7 +2872,8 @@ mod tests {
     fn test_ascii85_encode_roundtrip() {
         let mut store = FileStore::new();
         let original = b"Man sure.";
-        let path = "/tmp/stet_test_a85_encode.bin";
+        let path = tmp_path("stet_test_a85_encode.bin");
+        let path = path.as_str();
 
         let target = store.open(path, "w").unwrap();
         let enc = store.create_encode_filter(target, FilterKind::ascii85_encode());
@@ -2874,7 +2897,8 @@ mod tests {
     fn test_rle_encode_roundtrip() {
         let mut store = FileStore::new();
         let original = b"AAAAAABCBCBCBC";
-        let path = "/tmp/stet_test_rle_encode.bin";
+        let path = tmp_path("stet_test_rle_encode.bin");
+        let path = path.as_str();
 
         let target = store.open(path, "w").unwrap();
         let enc = store.create_encode_filter(target, FilterKind::run_length_encode());
@@ -2898,7 +2922,8 @@ mod tests {
     fn test_flate_encode_roundtrip() {
         let mut store = FileStore::new();
         let original = b"Hello Flate compression test data!";
-        let path = "/tmp/stet_test_flate_encode.bin";
+        let path = tmp_path("stet_test_flate_encode.bin");
+        let path = path.as_str();
 
         let target = store.open(path, "w").unwrap();
         let enc = store.create_encode_filter(target, FilterKind::flate_encode(1, 1, 1, 8));

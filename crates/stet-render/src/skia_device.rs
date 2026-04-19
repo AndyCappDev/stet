@@ -12662,10 +12662,12 @@ mod tests {
     #[test]
     fn test_show_page() {
         let mut dev = SkiaDevice::new(10, 10);
-        let result = dev.show_page("/tmp/stet_test_output.png");
+        let path = std::env::temp_dir().join("stet_test_output.png");
+        let path_str = path.to_string_lossy();
+        let result = dev.show_page(&path_str);
         assert!(result.is_ok());
-        assert!(std::path::Path::new("/tmp/stet_test_output.png").exists());
-        std::fs::remove_file("/tmp/stet_test_output.png").ok();
+        assert!(path.exists());
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]

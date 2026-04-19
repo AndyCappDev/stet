@@ -198,13 +198,16 @@ fn test_clipping() {
 /// Test 7: tiger.ps produces a valid PNG with substantial content.
 #[test]
 fn test_tiger_ps() {
-    let tiger_path = std::path::Path::new("/tmp/tiger.ps");
+    let tiger_path = std::env::temp_dir().join("tiger.ps");
     if !tiger_path.exists() {
-        eprintln!("Skipping tiger.ps test — file not found at /tmp/tiger.ps");
+        eprintln!(
+            "Skipping tiger.ps test — file not found at {}",
+            tiger_path.display()
+        );
         return;
     }
 
-    let source = std::fs::read(tiger_path).expect("read tiger.ps");
+    let source = std::fs::read(&tiger_path).expect("read tiger.ps");
     let tmp_path = std::env::temp_dir().join(format!("stet_tiger_test_{}.png", std::process::id()));
     let path_str = tmp_path.to_str().unwrap().to_string();
 
@@ -410,13 +413,13 @@ fn test_selectfont() {
 /// Test 16: tiger.ps continues to render correctly after Phase 4 changes.
 #[test]
 fn test_tiger_ps_regression() {
-    let tiger_path = std::path::Path::new("/tmp/tiger.ps");
+    let tiger_path = std::env::temp_dir().join("tiger.ps");
     if !tiger_path.exists() {
         eprintln!("Skipping tiger.ps regression test — file not found");
         return;
     }
 
-    let source = std::fs::read(tiger_path).expect("read tiger.ps");
+    let source = std::fs::read(&tiger_path).expect("read tiger.ps");
     let tmp_path =
         std::env::temp_dir().join(format!("stet_tiger_phase4_{}.png", std::process::id()));
     let path_str = tmp_path.to_str().unwrap().to_string();
