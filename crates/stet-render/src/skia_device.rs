@@ -847,7 +847,7 @@ fn precompute_bboxes(list: &DisplayList, dpi: f64) -> Vec<Option<YBBox>> {
     list.elements()
         .iter()
         .map(|elem| match elem {
-            DisplayElement::Fill { path, .. } => path_y_bbox(path),
+            DisplayElement::Fill { path, params } => fill_device_y_bbox(path, &params.ctm),
             DisplayElement::Stroke { path, params } => stroke_device_y_bbox(path, params, dpi),
             DisplayElement::Image { params, .. } => image_y_bbox(params),
             DisplayElement::AxialShading { params } => {
@@ -1009,6 +1009,40 @@ fn stroke_device_y_bbox(path: &PsPath, params: &StrokeParams, dpi: f64) -> Optio
     dev_y_min -= expand;
     dev_y_max += expand;
 
+    Some(YBBox {
+        y_min: dev_y_min,
+        y_max: dev_y_max,
+    })
+}
+
+/// Compute device-space Y bounds for a Fill element, accounting for CTM.
+/// Mirrors `stroke_device_y_bbox` but without stroke-width expansion.
+/// Paths may be stored either in device space (identity CTM, content streams)
+/// or user space (non-identity CTM, synthesized annotation appearances).
+fn fill_device_y_bbox(path: &PsPath, ctm: &Matrix) -> Option<YBBox> {
+    let is_identity = ctm.a == 1.0
+        && ctm.b == 0.0
+        && ctm.c == 0.0
+        && ctm.d == 1.0
+        && ctm.tx == 0.0
+        && ctm.ty == 0.0;
+    if is_identity {
+        return path_y_bbox(path);
+    }
+    let bbox = path_full_bbox(path)?;
+    let corners = [
+        (bbox.x_min, bbox.y_min),
+        (bbox.x_max, bbox.y_min),
+        (bbox.x_min, bbox.y_max),
+        (bbox.x_max, bbox.y_max),
+    ];
+    let mut dev_y_min = f64::INFINITY;
+    let mut dev_y_max = f64::NEG_INFINITY;
+    for (x, y) in &corners {
+        let dy = ctm.b * x + ctm.d * y + ctm.ty;
+        dev_y_min = dev_y_min.min(dy);
+        dev_y_max = dev_y_max.max(dy);
+    }
     Some(YBBox {
         y_min: dev_y_min,
         y_max: dev_y_max,
@@ -8967,7 +9001,7 @@ fn precompute_full_bboxes(list: &DisplayList, dpi: f64) -> Vec<Option<BBox2D>> {
     list.elements()
         .iter()
         .map(|elem| match elem {
-            DisplayElement::Fill { path, .. } => path_full_bbox(path),
+            DisplayElement::Fill { path, params } => fill_device_full_bbox(path, &params.ctm),
             DisplayElement::Stroke { path, params } => {
                 path_full_bbox(path).map(|mut bbox| {
                     // Use effective line width: actual width or hairline minimum
@@ -9327,6 +9361,46 @@ fn compute_paint_bounds(list: &DisplayList, _dpi: f64) -> Option<BBox2D> {
 }
 
 /// Compute full 2D bounds from path segments.
+/// Compute device-space 2D bounds for a Fill element, accounting for CTM.
+/// Paths may be stored in device space (identity CTM) or user space
+/// (non-identity CTM, e.g. synthesized annotation appearances).
+fn fill_device_full_bbox(path: &PsPath, ctm: &Matrix) -> Option<BBox2D> {
+    let bbox = path_full_bbox(path)?;
+    let is_identity = ctm.a == 1.0
+        && ctm.b == 0.0
+        && ctm.c == 0.0
+        && ctm.d == 1.0
+        && ctm.tx == 0.0
+        && ctm.ty == 0.0;
+    if is_identity {
+        return Some(bbox);
+    }
+    let corners = [
+        (bbox.x_min, bbox.y_min),
+        (bbox.x_max, bbox.y_min),
+        (bbox.x_min, bbox.y_max),
+        (bbox.x_max, bbox.y_max),
+    ];
+    let mut x_min = f64::INFINITY;
+    let mut x_max = f64::NEG_INFINITY;
+    let mut y_min = f64::INFINITY;
+    let mut y_max = f64::NEG_INFINITY;
+    for (x, y) in &corners {
+        let dx = ctm.a * x + ctm.c * y + ctm.tx;
+        let dy = ctm.b * x + ctm.d * y + ctm.ty;
+        x_min = x_min.min(dx);
+        x_max = x_max.max(dx);
+        y_min = y_min.min(dy);
+        y_max = y_max.max(dy);
+    }
+    Some(BBox2D {
+        x_min,
+        y_min,
+        x_max,
+        y_max,
+    })
+}
+
 fn path_full_bbox(path: &PsPath) -> Option<BBox2D> {
     let mut x_min = f64::INFINITY;
     let mut x_max = f64::NEG_INFINITY;
