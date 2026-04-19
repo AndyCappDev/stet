@@ -248,6 +248,14 @@ pub struct Context {
     /// Used by the interactive viewer to cancel an in-flight parse when the
     /// user drops a new file.
     pub interrupt_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+
+    /// When true, each successful `showpage` / `copypage` sets `interrupt_flag`
+    /// after capturing the display list, so the eval loop yields back to the
+    /// caller one page at a time. The caller clears the flag and re-enters
+    /// `eval` to drive the next page. Used by the WASM viewer to stream
+    /// multi-page PostScript documents: page 1 renders while pages 2..N are
+    /// still pending interpretation. Requires `interrupt_flag` to be set.
+    pub yield_after_showpage: bool,
 }
 
 impl Context {
@@ -587,6 +595,7 @@ impl Context {
             dict_version: 0,
             name_resolve_cache: Vec::new(),
             interrupt_flag: None,
+            yield_after_showpage: false,
         }
     }
 
@@ -735,6 +744,14 @@ impl Context {
             // PS interpreter output: no PDF-specific CMYK profile in play, so
             // the viewer uses its CLI-level default.
             let _ = sender.send((self.display_list.clone(), dpi, w, h, None));
+        }
+        // Page-boundary yield: once the display list for this page has been
+        // captured (above), signal the eval loop to return so the caller can
+        // hand the page off to a renderer before interpreting the next one.
+        if self.yield_after_showpage
+            && let Some(ref flag) = self.interrupt_flag
+        {
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
         }
         std::mem::take(&mut self.display_list)
     }

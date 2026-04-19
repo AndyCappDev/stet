@@ -10,6 +10,7 @@
 pub mod embedded_resources;
 mod memory_sink;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use wasm_bindgen::prelude::*;
@@ -18,9 +19,10 @@ use stet_core::context::Context;
 use stet_core::device::OutputDevice;
 use stet_core::eps::{content_is_epsf, read_eps_bounding_box};
 use stet_core::error::PsError;
+use stet_core::object::{ObjFlags, PsObject, PsValue};
+use stet_engine::eval::{eval, parse_and_exec};
 use stet_graphics::display_list::DisplayList;
 use stet_graphics::icc::IccCache;
-use stet_engine::eval::parse_and_exec;
 use stet_render::{ImageCache, PreparedDisplayList, SkiaDevice};
 
 use memory_sink::{NullSinkFactory, PageData, set_sink_callback};
@@ -37,6 +39,26 @@ struct PageInfo {
     /// The DPI this page was rendered at (may differ from initial reference
     /// if the PS program called setpagedevice with a different HWResolution).
     dpi: f64,
+}
+
+/// Preserved state for streaming PostScript interpretation.
+///
+/// `render()` returns as soon as the first `showpage` is captured, leaving
+/// the interpreter paused mid-program. `step_ps_page()` re-enters the eval
+/// loop to drive the next page. This state holds everything the resumed
+/// eval needs that isn't already on `Context` itself.
+struct PsStreamState {
+    /// VM save level captured before interpretation started; restored at
+    /// end-of-program so per-file VM changes don't leak across renders.
+    save_id: u32,
+    /// Shared page-data buffer populated by the NullSinkFactory as each
+    /// `end_page` fires. Drained (per step) to pair dimensions with the
+    /// newly-captured display lists.
+    pages_ref: Arc<Mutex<Vec<PageData>>>,
+    /// Flag set by `take_display_list` after each page is captured, causing
+    /// the eval loop to return `PsError::Quit`. Cleared at the start of
+    /// every step before re-entering eval.
+    interrupt_flag: Arc<AtomicBool>,
 }
 
 /// A fully initialized PostScript interpreter context.
@@ -69,6 +91,10 @@ pub struct Interpreter {
     /// ICC cache captured at `open_pdf` time; cloned into a new
     /// `PdfDocument` for each per-page render.
     pdf_icc_cache: Option<IccCache>,
+    /// Active PostScript streaming session, if any. `render()` installs this
+    /// and returns after the first `showpage`; `step_ps_page` uses it to
+    /// resume eval for subsequent pages. Cleared when the program completes.
+    ps_stream: Option<PsStreamState>,
 }
 
 /// A single rendered page with dimensions and RGBA pixel data.
@@ -170,6 +196,7 @@ pub fn create_interpreter() -> Interpreter {
         system_cmyk_bytes: cmyk_bytes,
         pdf_bytes: None,
         pdf_icc_cache: None,
+        ps_stream: None,
     }
 }
 
@@ -226,6 +253,7 @@ pub fn render(interp: &mut Interpreter, ps_data: &[u8], dpi: f64, filename: &str
     // PS rendering doesn't use the lazy-PDF state
     interp.pdf_bytes = None;
     interp.pdf_icc_cache = None;
+    abandon_ps_stream(interp);
 
     // Enable display list capture
     interp.ctx.capture_display_lists = Some(Vec::new());
@@ -299,7 +327,13 @@ pub fn render(interp: &mut Interpreter, ps_data: &[u8], dpi: f64, filename: &str
         return Ok(JsValue::from(page_count));
     }
 
-    // Non-EPS or no valid bounding box: standard page rendering
+    // Non-EPS or no valid bounding box: stream page-by-page.
+    // Setup: device factory, setpagedevice, vm_save, push source on e_stack,
+    // wire yield-after-showpage. Then drive the eval loop until the first
+    // `showpage` fires (or the program ends). Pages 2..N are driven by
+    // later `step_ps_page` calls — the worker is idle between them so it
+    // can service viewport-render requests for page 1 while we queue up
+    // page 2's interpretation.
     let pages_for_factory = pages_ref.clone();
     let cmyk_for_factory = interp.system_cmyk_bytes.clone();
     interp.ctx.device_factory = Some(Box::new(move |w, h| {
@@ -312,16 +346,99 @@ pub fn render(interp: &mut Interpreter, ps_data: &[u8], dpi: f64, filename: &str
     install_device_via_setpagedevice(&mut interp.ctx, dpi, 612.0, 792.0)
         .map_err(|e| JsValue::from_str(&format!("Device setup error: {}", e)))?;
 
-    // Wrap execution in save/restore to isolate VM changes between renders
     let save_obj = interp.ctx.vm_save();
     let save_id = match save_obj.value {
-        stet_core::object::PsValue::Save(stet_core::object::SaveLevel(id)) => id,
+        PsValue::Save(stet_core::object::SaveLevel(id)) => id,
         _ => unreachable!(),
     };
-    match parse_and_exec(&mut interp.ctx, ps_data) {
-        Ok(()) => {}
-        Err(PsError::Quit) => {
-            log("stet: after exec — Quit");
+
+    let interrupt_flag = Arc::new(AtomicBool::new(false));
+    interp.ctx.interrupt_flag = Some(interrupt_flag.clone());
+    interp.ctx.yield_after_showpage = true;
+
+    // Inline the setup side of parse_and_exec: install the source as a
+    // StringSource in FileStore and push it as an executable File on the
+    // exec stack. Future step_ps_page calls just re-enter eval — the File
+    // stays on e_stack and the StringSource's cursor preserves position.
+    let file_entity = interp.ctx.files.create_string_source(ps_data.to_vec());
+    if let Err(e) = interp.ctx.e_stack.push(PsObject {
+        value: PsValue::File(file_entity),
+        flags: ObjFlags::executable_composite(),
+    }) {
+        return Err(JsValue::from_str(&format!("PS setup error: {}", e)));
+    }
+
+    interp.ps_stream = Some(PsStreamState {
+        save_id,
+        pages_ref,
+        interrupt_flag,
+    });
+
+    match drive_ps_eval(interp) {
+        Ok(page_count) => Ok(JsValue::from(page_count)),
+        Err(e) => Err(e),
+    }
+}
+
+/// Resume PS interpretation up to the next `showpage`, appending any new
+/// pages to the interpreter's page tables. Returns the total page count so
+/// far. Returns the same count when the program has already completed — JS
+/// can poll this to learn when streaming is finished (the returned count
+/// stops increasing and `ps_stream_active` reads false).
+#[wasm_bindgen]
+pub fn step_ps_page(interp: &mut Interpreter) -> Result<JsValue, JsValue> {
+    if interp.ps_stream.is_none() {
+        return Ok(JsValue::from(interp.page_display_lists.len() as u32));
+    }
+    match drive_ps_eval(interp) {
+        Ok(page_count) => Ok(JsValue::from(page_count)),
+        Err(e) => Err(e),
+    }
+}
+
+/// True while a PS program has more pages to interpret. JS can stop its
+/// step-loop as soon as this goes false.
+#[wasm_bindgen]
+pub fn ps_stream_active(interp: &Interpreter) -> bool {
+    interp.ps_stream.is_some()
+}
+
+/// Run the eval loop until the next showpage-induced yield, end-of-program,
+/// or error. Collects any newly-captured display lists into the interpreter
+/// and finalises device/VM state when the program terminates.
+///
+/// Returns the total page count after this step. On a fatal PS error with
+/// zero captured pages the function returns an `Err` describing it;
+/// otherwise it logs the error and returns the pages captured so far (same
+/// resilience the monolithic path used to provide).
+fn drive_ps_eval(interp: &mut Interpreter) -> Result<u32, JsValue> {
+    let state = interp
+        .ps_stream
+        .as_ref()
+        .expect("drive_ps_eval called without an active PS stream");
+    let interrupt_flag = state.interrupt_flag.clone();
+    let pages_ref = state.pages_ref.clone();
+    let save_id = state.save_id;
+
+    // Clear flag before each step so the leftover `true` from the previous
+    // showpage doesn't trip the Quit check on the first iteration.
+    interrupt_flag.store(false, Ordering::Relaxed);
+
+    let result = eval(&mut interp.ctx);
+    let yielded_by_page = interrupt_flag.load(Ordering::Relaxed);
+
+    // Drain any newly-captured pages regardless of how eval returned.
+    collect_streaming_pages(interp, &pages_ref);
+
+    match result {
+        Err(PsError::Quit) if yielded_by_page => {
+            // Ordinary page-boundary pause. Leave the PS stream active.
+            Ok(interp.page_display_lists.len() as u32)
+        }
+        Ok(()) | Err(PsError::Quit) => {
+            // Program ran to completion (or PS `quit` op fired).
+            finalize_ps_stream(interp, save_id);
+            Ok(interp.page_display_lists.len() as u32)
         }
         Err(e) => {
             log(&format!(
@@ -331,26 +448,71 @@ pub fn render(interp: &mut Interpreter, ps_data: &[u8], dpi: f64, filename: &str
                 interp.ctx.e_stack.len(),
                 interp.ctx.d_stack.len()
             ));
-            finish_device(&mut interp.ctx);
-            let pages = extract_pages(&pages_ref);
-            collect_display_lists(interp, &pages);
-            let _ = interp.ctx.vm_restore(save_id);
-            reset_context(&mut interp.ctx);
+            finalize_ps_stream(interp, save_id);
             let page_count = interp.page_display_lists.len() as u32;
             if page_count == 0 {
                 return Err(JsValue::from_str(&format!("PS error: {}", e)));
             }
-            return Ok(JsValue::from(page_count));
+            Ok(page_count)
         }
     }
+}
 
+/// Move any newly-captured display lists from `ctx.capture_display_lists`
+/// into the interpreter's page tables, pairing each with the matching
+/// `PageData` dimensions from the shared sink buffer. Leaves capture
+/// enabled (with a fresh empty vec) so the next step can collect more.
+fn collect_streaming_pages(interp: &mut Interpreter, pages_ref: &Arc<Mutex<Vec<PageData>>>) {
+    let captured = std::mem::replace(
+        &mut interp.ctx.capture_display_lists,
+        Some(Vec::new()),
+    )
+    .unwrap_or_default();
+    let pages = extract_pages(pages_ref);
+    for (i, (dl, dpi)) in captured.into_iter().enumerate() {
+        interp.page_display_lists.push(dl);
+        interp.page_prepared.push(None);
+        interp.page_icc.push(None);
+        interp.page_image_cache.push(None);
+        if i < pages.len() {
+            interp.page_info.push(PageInfo {
+                width: pages[i].width,
+                height: pages[i].height,
+                dpi,
+            });
+        } else {
+            interp.page_info.push(PageInfo {
+                width: (612.0 * dpi / 72.0) as u32,
+                height: (792.0 * dpi / 72.0) as u32,
+                dpi,
+            });
+        }
+    }
+}
+
+/// Finish a PS streaming session: flush the device, restore the VM, reset
+/// per-render context, drop the streaming state. Idempotent.
+fn finalize_ps_stream(interp: &mut Interpreter, save_id: u32) {
     finish_device(&mut interp.ctx);
-    let pages = extract_pages(&pages_ref);
-    collect_display_lists(interp, &pages);
     let _ = interp.ctx.vm_restore(save_id);
     reset_context(&mut interp.ctx);
-    let page_count = interp.page_display_lists.len() as u32;
-    Ok(JsValue::from(page_count))
+    interp.ctx.interrupt_flag = None;
+    interp.ctx.yield_after_showpage = false;
+    interp.ctx.capture_display_lists = None;
+    interp.ps_stream = None;
+}
+
+/// Tear down a streaming session without finalising (the VM is in an
+/// undefined state, so skip vm_restore). Used when the next render is about
+/// to overwrite everything anyway — e.g. a new file is dropped mid-stream.
+fn abandon_ps_stream(interp: &mut Interpreter) {
+    if interp.ps_stream.is_some() {
+        reset_context(&mut interp.ctx);
+        interp.ctx.interrupt_flag = None;
+        interp.ctx.yield_after_showpage = false;
+        interp.ctx.capture_display_lists = None;
+        interp.ps_stream = None;
+    }
 }
 
 /// Open a PDF file and parse its structure (xref, page tree, page sizes).
@@ -375,6 +537,7 @@ pub fn open_pdf(interp: &mut Interpreter, pdf_data: &[u8], dpi: f64) -> Result<J
     interp.reference_dpi = dpi;
     interp.pdf_bytes = None;
     interp.pdf_icc_cache = None;
+    abandon_ps_stream(interp);
 
     let mut icc_cache = IccCache::new();
     icc_cache.load_cmyk_profile_bytes(DEFAULT_CMYK_ICC);

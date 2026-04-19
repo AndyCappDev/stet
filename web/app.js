@@ -162,6 +162,26 @@ worker.onmessage = function(e) {
         }
         updateMinimap();
 
+    } else if (msg.type === 'pages_appended') {
+        // Streaming-PS: more pages finished interpreting in the background.
+        // Extend pageDims + refresh the nav so the user sees the growing
+        // total immediately.
+        for (let i = 0; i < msg.pages.length; i++) {
+            pageDims[msg.startIndex + i] = msg.pages[i];
+        }
+        pageCount = msg.totalPages;
+        if (pageCount > 1) {
+            pageNav.classList.remove('hidden');
+        }
+        updatePageNav();
+
+    } else if (msg.type === 'ps_stream_done') {
+        pageCount = msg.totalPages;
+        updatePageNav();
+
+    } else if (msg.type === 'ps_stream_error') {
+        console.error('PS stream error:', msg.message);
+
     } else if (msg.type === 'viewport_error') {
         if (msg.requestId === pendingRequestId) {
             pendingRequestId = null;
