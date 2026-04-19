@@ -1,0 +1,77 @@
+% Create a dictionary of often-used repeat patterns ...
+/stepnrptparams 40 dict def stepnrptparams begin
+
+% The repeat array values, starting from the left are as follows . . .
+
+% -numpages- number of pages to be printed
+% -numhoriz- number of repeats in horizontal direction
+% -numvert- number of repeats in vertical direction
+% -inchoriz- horizontal repeat spacing in points
+% -incvert- vertical repeat spacing in points
+% -horstart- horizontal starting position in points, lower left
+% -vertstart- vertical starting position in points, lower left
+% -portrait- true = portrait; false = landscape
+% -ticklen- length of tick in points
+% -ticktrue- true or false for showing crop marks
+% -seqnumber- true or false for sequential numbering
+
+/admitonetick [6 5 9 150 60 25 25 true 10 true true] def
+/babybumper [1 2 10 270 72 40 30 false 20 true false] def
+/badgeaminit [1 2 3 220 220 90 60 false 250 true false] def
+/bigbumpstick [1 1 3 792 205 0 0 true 40 true false] def
+/businesscard [1 3 4 256 143 12 20 true 20 true false] def
+
+/decaapus [1 2 5 306 158 0 0 false 50 true false] def
+/hexsplit [1 2 3 306 264 0 0 false 50 true false] def
+/lilbumpstick [1 1 5 610 150 0 20 false 60 true false] def
+/octopus [1 2 4 306 198 0 0 false 50 true false] def
+/quadsplit [1 2 2 396 306 0 0 true 50 true false] def
+
+/readerservice [1 12 25 25 -15 120 450 false 0 false true] def
+/seqbuscard [1 3 4 256 143 12 20 true 20 true true] def
+/shiplabel [1 1 4 290 180 314 75 false 0 false false] def
+/stdplabel [1 1 11 254 74 320 5 false 20 true false] def
+
+/tenlabel [1 2 5 305 144 0 45 false 0 false false] def
+/vhsvideospline [1 1 13 424 56 80 35 false 0 false false] def
+/3.5disklabel [1 2 3 216 226 100 60 false 20 false false] def
+/5.25disklabel [1 1 7 316 110 275 35 false 0 false false] def
+
+end % the repeatparams dictionary
+
+/setrepeatparams {cvn stepnrptparams exch get aload pop /seqnumber exch
+def /ticktrue exch def /ticklen exch def /portrait exch def /vertstart exch def
+/horstart exch def /incvert exch def /inchoriz exch def /numvert exch def
+/numhoriz exch def /numpages exch def portrait {-90 rotate -792 0 translate
+} if} def
+
+/onetick { 0 ticklen 2 div rmoveto 0 ticklen neg rlineto ticklen 2 div neg dup
+neg rmoveto ticklen 0 rlineto 0 setlinewidth stroke} def
+
+/drawticks {gsave ticktrue {0 0 moveto onetick inchoriz 0 moveto onetick 0
+incvert moveto onetick inchoriz incvert moveto onetick} if grestore}def
+
+/stepandrepeat { setrepeatparams numpages {gsave horstart vertstart
+translate gsave numhoriz {gsave numvert { drawticks save /rptsave1 exch
+def repeatproc rptsave1 restore seqnumber {/runningnumber
+runningnumber 1 add def} if 0 incvert translate } repeat grestore inchoriz 0
+translate} repeat grestore showpage grestore} repeat } def
+
+
+% //// demo - remove or alter before reuse. ////
+/Helvetica-BoldOblique findfont [11 0 0 11 0 0] makefont setfont
+
+/startingnumber 673 def
+/runningnumber startingnumber def
+/numstring 10 string def
+
+% Your image has to be named /repeatproc and must be well behaved . . .
+% Substitute it for this simple demo.
+
+/repeatproc {57 70 moveto (This is business card #) show
+runningnumber numstring cvs show} def
+
+% Your step and repeat format has to be defined in stepnrepeatparams
+% Here is how to call it . . .
+
+(seqbuscard) stepandrepeat % no showpage required (!)

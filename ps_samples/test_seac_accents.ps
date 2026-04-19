@@ -1,0 +1,119 @@
+%!PS-Adobe-3.0
+%%Title: Test seac accented character embedding in PDF
+%%Pages: 1
+%%EndComments
+
+%%Page: 1 1
+
+% This file tests that seac-composed accented characters render correctly
+% in PDF output. The seac instruction in Type 1 CharStrings builds accented
+% glyphs from base + accent components via StandardEncoding indices.
+% If seac dependencies are not resolved during font subsetting, the base
+% or accent glyphs may be missing from the embedded font.
+
+% Re-encode fonts to ISOLatin1Encoding so octal codes map to accented glyphs.
+% Standard PS fonts use StandardEncoding where positions 128-255 differ from Latin-1.
+
+/ReEncode { % font-name new-name -> font
+    exch findfont dup length dict begin
+        {1 index /FID ne {def} {pop pop} ifelse} forall
+        /Encoding ISOLatin1Encoding def
+        currentdict
+    end
+    definefont
+} bind def
+
+/Times-Roman /Times-Latin1 ReEncode pop
+/Helvetica /Helv-Latin1 ReEncode pop
+/Courier /Cour-Latin1 ReEncode pop
+
+/Times-Latin1 findfont 28 scalefont setfont
+
+72 750 moveto
+(Accented characters via seac:) show
+
+/Times-Latin1 findfont 36 scalefont setfont
+
+% French accents
+72 700 moveto
+(\351) show  % eacute
+20 0 rmoveto
+(\350) show  % egrave
+20 0 rmoveto
+(\352) show  % ecircumflex
+20 0 rmoveto
+(\353) show  % edieresis
+20 0 rmoveto
+(\347) show  % ccedilla
+
+/Times-Latin1 findfont 24 scalefont setfont
+72 660 moveto
+(French: r\351sum\351, cr\350me, fa\347ade) show
+
+% German umlauts
+/Times-Latin1 findfont 36 scalefont setfont
+72 610 moveto
+(\374) show  % udieresis
+20 0 rmoveto
+(\366) show  % odieresis
+20 0 rmoveto
+(\344) show  % adieresis
+20 0 rmoveto
+(\337) show  % germandbls
+
+/Times-Latin1 findfont 24 scalefont setfont
+72 570 moveto
+(German: \374ber, sch\366n, Stra\337e) show
+
+% Spanish
+/Times-Latin1 findfont 36 scalefont setfont
+72 520 moveto
+(\361) show  % ntilde
+20 0 rmoveto
+(\355) show  % iacute
+20 0 rmoveto
+(\363) show  % oacute
+20 0 rmoveto
+(\341) show  % aacute
+20 0 rmoveto
+(\372) show  % uacute
+20 0 rmoveto
+(\277) show  % questiondown
+
+/Times-Latin1 findfont 24 scalefont setfont
+72 480 moveto
+(Spanish: Espa\361a, \277qu\351 tal?) show
+
+% Scandinavian
+/Times-Latin1 findfont 36 scalefont setfont
+72 430 moveto
+(\345) show  % aring
+20 0 rmoveto
+(\370) show  % oslash
+20 0 rmoveto
+(\346) show  % ae
+
+/Times-Latin1 findfont 24 scalefont setfont
+72 390 moveto
+(Scandinavian: \345, \370, \346) show
+
+% Mixed sentence with multiple fonts
+/Times-Latin1 findfont 28 scalefont setfont
+72 330 moveto
+(Mixed fonts:) show
+
+/Helv-Latin1 findfont 24 scalefont setfont
+72 290 moveto
+(Helvetica: caf\351, na\357ve, r\364le) show
+
+/Cour-Latin1 findfont 24 scalefont setfont
+72 250 moveto
+(Courier: caf\351, na\357ve, r\364le) show
+
+% Accented capital letters
+/Times-Latin1 findfont 24 scalefont setfont
+72 200 moveto
+(Accented capitals: \311cole, \334bung, \307a) show
+
+showpage
+%%EOF

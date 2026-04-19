@@ -1,0 +1,253 @@
+%!PS-Adobe-3.0
+%%Title: Indexed Color Space Image Test
+%%BoundingBox: 0 0 612 792
+%%EndComments
+
+% Test file for Indexed color space rendering
+% Creates several images using palette-based color lookup
+
+/Helvetica findfont 12 scalefont setfont
+
+% ============================================================
+% Test 1: 8-bpc Indexed RGB image (3x3 pixels, 3 colors)
+% Palette: 0=Red, 1=Green, 2=Blue
+% ============================================================
+50 708 moveto (Test 1: 8-bpc Indexed/DeviceRGB 3x3) show
+
+gsave
+50 640 translate
+60 60 scale
+
+[/Indexed /DeviceRGB 2 <FF0000 00FF00 0000FF>] setcolorspace
+
+/imgdata1 <000102 010200 020001> def
+<<
+  /ImageType 1
+  /Width 3
+  /Height 3
+  /BitsPerComponent 8
+  /Decode [0 2]
+  /ImageMatrix [3 0 0 -3 0 3]
+  /DataSource imgdata1
+>>
+image
+grestore
+
+% ============================================================
+% Test 2: 8-bpc Indexed RGB image (4x4, 8-color palette)
+% Rainbow palette
+% ============================================================
+50 608 moveto (Test 2: 8-bpc Indexed/DeviceRGB 4x4 rainbow) show
+
+gsave
+50 540 translate
+60 60 scale
+
+[/Indexed /DeviceRGB 7
+  <FF0000 FF8000 FFFF00 00FF00 00FFFF 0000FF FF00FF FFFFFF>
+] setcolorspace
+
+/imgdata2 <00010203 04050607 07060504 03020100> def
+<<
+  /ImageType 1
+  /Width 4
+  /Height 4
+  /BitsPerComponent 8
+  /Decode [0 7]
+  /ImageMatrix [4 0 0 -4 0 4]
+  /DataSource imgdata2
+>>
+image
+grestore
+
+% ============================================================
+% Test 3: 4-bpc Indexed RGB image (4x4, 4-color palette)
+% ============================================================
+50 508 moveto (Test 3: 4-bpc Indexed/DeviceRGB 4x4) show
+
+gsave
+50 440 translate
+60 60 scale
+
+[/Indexed /DeviceRGB 3 <FF0000 00FF00 0000FF FFFF00>] setcolorspace
+
+% 4-bit samples: each byte = 2 pixels
+% Row 0: 0,1,2,3  Row 1: 1,2,3,0  Row 2: 2,3,0,1  Row 3: 3,0,1,2
+/imgdata3 <0123 1230 2301 3012> def
+<<
+  /ImageType 1
+  /Width 4
+  /Height 4
+  /BitsPerComponent 4
+  /Decode [0 3]
+  /ImageMatrix [4 0 0 -4 0 4]
+  /DataSource imgdata3
+>>
+image
+grestore
+
+% ============================================================
+% Test 4: 1-bpc Indexed RGB image (8x4, 2 colors)
+% Black and white checkerboard
+% ============================================================
+50 408 moveto (Test 4: 1-bpc Indexed/DeviceRGB 8x4 checker) show
+
+gsave
+50 340 translate
+60 60 scale
+
+[/Indexed /DeviceRGB 1 <000000 FFFFFF>] setcolorspace
+
+% 1-bit: AA=10101010, 55=01010101
+/imgdata4 <AA 55 AA 55> def
+<<
+  /ImageType 1
+  /Width 8
+  /Height 4
+  /BitsPerComponent 1
+  /Decode [0 1]
+  /ImageMatrix [8 0 0 -4 0 4]
+  /DataSource imgdata4
+>>
+image
+grestore
+
+% ============================================================
+% Test 5: Indexed with DeviceGray base (8-bpc, 4x4 gradient)
+% ============================================================
+50 308 moveto (Test 5: 8-bpc Indexed/DeviceGray 4x4 gradient) show
+
+gsave
+50 240 translate
+60 60 scale
+
+[/Indexed /DeviceGray 3 <00 55 AA FF>] setcolorspace
+
+/imgdata5 <00010203 00010203 00010203 00010203> def
+<<
+  /ImageType 1
+  /Width 4
+  /Height 4
+  /BitsPerComponent 8
+  /Decode [0 3]
+  /ImageMatrix [4 0 0 -4 0 4]
+  /DataSource imgdata5
+>>
+image
+grestore
+
+% ============================================================
+% Test 6: Indexed with DeviceCMYK base (8-bpc, 2x2)
+% ============================================================
+50 208 moveto (Test 6: 8-bpc Indexed/DeviceCMYK 2x2) show
+
+gsave
+50 140 translate
+60 60 scale
+
+[/Indexed /DeviceCMYK 3
+  <FF000000 00FF0000 0000FF00 000000FF>
+] setcolorspace
+
+/imgdata6 <00 01 02 03> def
+<<
+  /ImageType 1
+  /Width 2
+  /Height 2
+  /BitsPerComponent 8
+  /Decode [0 3]
+  /ImageMatrix [2 0 0 -2 0 2]
+  /DataSource imgdata6
+>>
+image
+grestore
+
+% ============================================================
+% Test 7: Larger indexed image (16x16, 256-color palette)
+% Smooth color gradient
+% ============================================================
+350 708 moveto (Test 7: 8-bpc 16x16 256-color gradient) show
+
+gsave
+350 640 translate
+60 60 scale
+
+% Build a 256-color RGB palette
+/palette 768 string def
+0 1 255 {
+  /idx exch def
+  /r idx 32 idiv 255 mul 7 div def
+  /g idx 8 mod 4 idiv 255 mul 3 div def
+  /b idx 4 mod 255 mul 3 div def
+  palette idx 3 mul r round cvi 255 min put
+  palette idx 3 mul 1 add g round cvi 255 min put
+  palette idx 3 mul 2 add b round cvi 255 min put
+} for
+
+[/Indexed /DeviceRGB 255 palette] setcolorspace
+
+/imgdata7 256 string def
+0 1 255 {
+  /i exch def
+  imgdata7 i i put
+} for
+
+<<
+  /ImageType 1
+  /Width 16
+  /Height 16
+  /BitsPerComponent 8
+  /Decode [0 255]
+  /ImageMatrix [16 0 0 -16 0 16]
+  /DataSource imgdata7
+>>
+image
+grestore
+
+% ============================================================
+% Test 8: Indexed setcolor for fill/stroke (not images)
+% ============================================================
+350 608 moveto (Test 8: Indexed setcolor for fill/stroke) show
+
+[/Indexed /DeviceRGB 2 <FF0000 00FF00 0000FF>] setcolorspace
+
+% Red rectangle
+0 setcolor
+350 540 50 50 rectfill
+
+% Green rectangle
+1 setcolor
+410 540 50 50 rectfill
+
+% Blue rectangle
+2 setcolor
+470 540 50 50 rectfill
+
+% ============================================================
+% Test 9: 2-bpc Indexed image (8x2, 4-color palette)
+% ============================================================
+350 508 moveto (Test 9: 2-bpc Indexed/DeviceRGB 8x2) show
+
+gsave
+350 440 translate
+60 60 scale
+
+[/Indexed /DeviceRGB 3 <FF0000 00FF00 0000FF FFFF00>] setcolorspace
+
+% 2-bit samples: 4 pixels per byte
+% Row 0: 00 01 10 11 00 01 10 11 = 1B 1B
+% Row 1: 11 10 01 00 11 10 01 00 = E4 E4
+/imgdata9 <1B1B E4E4> def
+<<
+  /ImageType 1
+  /Width 8
+  /Height 2
+  /BitsPerComponent 2
+  /Decode [0 3]
+  /ImageMatrix [8 0 0 -2 0 2]
+  /DataSource imgdata9
+>>
+image
+grestore
+
+showpage

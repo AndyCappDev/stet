@@ -13,8 +13,8 @@ use stet_core::object::{PsObject, PsValue};
 /// `setuserparams`: dict → — (store user parameters)
 ///
 /// Updates user parameters from the provided dict. Only keys that already
-/// exist in the user_params dict are updated (matching PostForge behavior).
-/// After storing, applies relevant parameters to the context (stack sizes, etc.).
+/// exist in the user_params dict are updated. After storing, applies
+/// relevant parameters to the context (stack sizes, etc.).
 pub fn op_setuserparams(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.o_stack.is_empty() {
         return Err(PsError::StackUnderflow);
@@ -47,7 +47,7 @@ pub fn op_setuserparams(ctx: &mut Context) -> Result<(), PsError> {
 
     ctx.o_stack.pop()?;
 
-    // Only update keys that already exist in user_params (matching PostForge)
+    // Only update keys that already exist in user_params
     for (key, val) in &new_entries {
         if ctx.dicts.known(ctx.user_params, key) {
             ctx.dicts.put(ctx.user_params, key.clone(), *val);

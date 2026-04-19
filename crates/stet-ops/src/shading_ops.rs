@@ -23,7 +23,7 @@ use stet_graphics::mesh_shading;
 
 use crate::color_ops::{precompute_cie_decode_tables, resolve_color_space_from_obj};
 
-// Number of samples for function-based gradients (matches PostForge).
+// Number of samples for function-based gradients.
 const NUM_GRADIENT_SAMPLES: usize = 64;
 
 // Resolution for Type 1 function-based shading rasterization.

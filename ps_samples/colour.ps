@@ -1,0 +1,158 @@
+%!PS
+%%BoundingBox: 60 75 196 161
+% (c) Stijn van Dongen.
+
+% %%%%%%%%%%%%%%%%%%%%%%%
+%  Set both dimX and dimY to either one of 0,1,2,3,
+%  The meaning of these integers is 0=c 1=m 2=y 3=k.
+%  A colour spectrum will be made by varying the chosen dimensions.
+%  (Set dimX and dimY to different values)
+
+%        |
+%        V
+
+/dimX    0     def    % (that's 0 for c, 1 for m, 2 for y, 3 for k)
+/dimY    1     def    % (that's 0 for c, 1 for m, 2 for y, 3 for k)
+
+% %%%%%%%%%%%%%%%%%%%%%%%
+%  Set widthX to a value between 0 and 1.0. Do not set to 0.
+%  Set widthY to a value between 0 and 1.0. Do not set to 0.
+%  The corresponding cmyk dimension will span an interval of length widthX
+%  (widthY), divided into ten equal parts. The start of the interval is
+%  determined by the corresponding offset.
+
+%        |
+%        V
+
+/widthX  0.9   def
+/widthY  0.9   def
+
+% %%%%%%%%%%%%%%%%%%%%%%%
+%  Offset values for cmyk. For two of these the values are fixed; the other
+%  will vary. Which ones depends on dimX and dimY. If the starting values of
+%  the varying dimensions are high then widthX and/or widthY must/can be chosen
+%  low (parts of the spectrum will be equal if offset+width>1.0).
+%  Choose offset values between 0.0 and 1.0.
+
+%        |
+%        V
+
+/c       0.1   def     % ugly blue,    set number between 0.0 and 1.0.
+/m       0.1   def     % ugly purple,  set number between 0.0 and 1.0.
+/y       0.5   def     % ugly yellow,  set number between 0.0 and 1.0.
+/k       0.2   def     % ugly dim,     set number between 0.0 and 1.0.
+
+
+  %%%%%%%%  %%%%%%%%  %%%%%%%%  %%%%%%%%  %%%%%%%%  %%%%%%%%  %%%%%%%%  %%%%%%%%
+  %%    %%  %%    %%  %%    %%  %%    %%  %%    %%  %%    %%  %%    %%  %%    %%
+  %%    %%  %%    %%  %%    %%  %%    %%  %%    %%  %%    %%  %%    %%  %%    %%
+  %%%%%%%%  %%%%%%%%  %%%%%%%%  %%%%%%%%  %%%%%%%%  %%%%%%%%  %%%%%%%%  %%%%%%%%
+
+
+/scaleX 1000 widthX div def
+/scaleY 1000 widthY div def
+
+/str 10 string def
+
+0.0 setgray
+% /Times-Roman findfont
+% /Helvetica findfont
+/NimbusMonL-BoldObli findfont
+16 scalefont
+setfont
+
+0 80 translate
+.5 .5 scale
+
+/cmyk [(c) (m) (y) (k)] def
+150 80 moveto
+   (varying:) show
+
+230 80 moveto
+   cmyk dimY get show
+   ( |__) show
+   5 0 rmoveto
+   cmyk dimX get show
+
+150 50 moveto
+   (offsets:) show
+
+230 50 moveto
+   (c) show 250 50 moveto (=  ) show
+   c str cvs show
+
+230 30 moveto
+   (m) show 250 30 moveto (=  ) show
+   m str cvs show
+
+230 10 moveto
+   (y) show 250 10 moveto (=  ) show
+   y str cvs show
+
+230 -10 moveto
+   (k) show 250 -10 moveto (=  ) show
+   k str cvs show
+
+320 50 moveto
+   (width:) show
+
+380 50 moveto
+   cmyk dimX get show 405 50 moveto (=  ) show
+   widthX str cvs show
+
+380 30 moveto
+   cmyk dimY get show 405 30 moveto (=  ) show
+   widthY str cvs show
+
+/box {
+   gsave
+      moveto
+                  %%    newpath moveto
+      60 0 rlineto
+      0 60 rlineto
+     -60 0 rlineto
+      closepath fill
+   grestore
+} def
+
+100 100 1000
+{
+   100 100 1000
+   {
+      exch dup 3 1 roll                % stack X Y
+      2 copy                           % stack X Y X Y
+      c m y k                          % stack X Y X Y c m y k
+      6 -2 roll                        % stack X Y c m y k X Y 
+      scaleY div exch scaleX div       % stack X Y c m y k dy dx
+
+      6 dimX -1 mul add                % number of positions to roll
+      -1 roll                          % roll left, stack e.g. X Y m y k dy dx c
+      add                              % stack e.g. X Y m y k dy c'
+      dup /tmpx exch def               % set tmpx to c'
+      5 dimX -1 mul add 1 roll         % roll back, stack e.g. X Y c' m y k dy
+
+      5 dimY -1 mul add                % number of positions to roll
+      -1 roll                          % roll left, stack e.g. X Y c' y k dy m
+      add                              % stack e.g. X Y c' y k m'
+      dup /tmpy exch def               % set tmpy to m'
+      4 dimY -1 mul add 1 roll         % roll back, stack e.g. X Y c' m' y k
+
+      setcmykcolor
+
+      2 copy                           % extra for moving
+      50 add exch 50 add exch box
+
+      30 add exch 50 add exch
+      moveto
+      0.0 setgray
+      tmpy 1000 mul cvi
+      tmpx 1000 mul cvi
+      str cvs show
+      (,) show
+      str cvs show
+      
+   } for
+} for
+
+showpage
+

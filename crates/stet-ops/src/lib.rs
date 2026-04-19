@@ -2,7 +2,27 @@
 // Copyright (c) 2026 Scott Bowman
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! PostScript operator implementations and registration.
+//! PostScript operator implementations for the stet interpreter.
+//!
+//! This crate provides ~320 native-Rust PostScript Level 3 operators —
+//! stack, math, type/conversion, dictionary, control flow, composite,
+//! string, file, path, painting, clipping, colour, graphics-state, matrix,
+//! font, show, image, halftone, pattern, resource, VM, filter, shading,
+//! and more — and registers them into a `stet_core::context::Context`
+//! via [`build_system_dict`].
+//!
+//! Most users should use the [`stet`](https://crates.io/crates/stet) facade
+//! crate rather than depending on `stet-ops` directly. Pull this in only
+//! when you are assembling your own PostScript interpreter on top of
+//! `stet-core`.
+//!
+//! ```no_run
+//! use stet_core::context::Context;
+//! use stet_ops::build_system_dict;
+//!
+//! let mut ctx = Context::new();
+//! build_system_dict(&mut ctx);  // register every operator into systemdict
+//! ```
 
 pub mod array_ops;
 pub mod cff_ops;

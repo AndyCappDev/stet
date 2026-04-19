@@ -266,16 +266,15 @@ mod tests {
 
     #[test]
     fn test_load_real_font() {
-        let font_path = std::path::Path::new(
-            "/home/scott/Projects/postforge/postforge/resources/Font/NimbusSans-Regular.t1",
-        );
+        let font_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../resources/Font/NimbusSans-Regular.t1");
         if !font_path.exists() {
             eprintln!("Skipping test — font file not found");
             return;
         }
 
         let mut ctx = Context::new();
-        let font_data = std::fs::read(font_path).unwrap();
+        let font_data = std::fs::read(&font_path).unwrap();
         let font_obj = load_type1_font(&mut ctx, &font_data).unwrap();
 
         // Verify it's a dict

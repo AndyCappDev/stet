@@ -826,7 +826,7 @@ impl FileStore {
             FilterKind::DCTEncode { buf, .. } => {
                 // Buffering is inherent to JPEG — DCT transform, Huffman table
                 // optimization, and quantization all require the full image.
-                // PostForge also buffers entirely. Not convertible to streaming.
+                // Not convertible to streaming.
                 buf.extend_from_slice(data);
                 Ok(())
             }
@@ -1889,10 +1889,10 @@ impl FileStore {
 
         const C1: u16 = 52845;
         const C2: u16 = 22719;
-        // Produce exactly 1 output byte per refill, matching PostForge's
-        // byte-at-a-time approach.  The underlying source stream does its own
-        // buffering; over-reading here would cause the source position to
-        // drift past the encrypted section into the cleartext padding.
+        // Produce exactly 1 output byte per refill (byte-at-a-time). The
+        // underlying source stream does its own buffering; over-reading
+        // here would cause the source position to drift past the
+        // encrypted section into the cleartext padding.
         const TARGET: usize = 1;
 
         // Auto-detect format on first call: read 8 bytes and check if hex

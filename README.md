@@ -19,6 +19,31 @@ The PostScript interpreter and PDF reader are independent — use either or
 both — but they produce the same display list type, so every output device
 and rendering path works with both sources.
 
+### Try it online
+
+<!-- The URL below follows GitHub's project-Pages convention for
+     AndyCappDev/stet. Pages deployment itself is still pending — see
+     docs/PUBLISH-TODO.md. -->
+A browser-based WASM build lives at
+**[andycappdev.github.io/stet](https://andycappdev.github.io/stet/)** —
+drop a PS, EPS, or PDF on the page and stet renders it client-side.
+
+The online build is a **capability sampler, not a production viewer**. It
+exists so you can check stet's rendering quality on your own files before
+installing anything. In particular:
+
+- **No system fonts.** A browser WASM sandbox can't reach the OS font
+  directories, so font coverage is limited to the 35 URW fonts embedded
+  in the binary plus whatever the source PDF embeds. Documents that
+  expect a specific unembedded font will fall back to a URW substitute.
+- **Fixed zoom stops** (fit, 75, 150, 300, 600 DPI) rather than
+  arbitrary zoom — re-rasterizing at every scroll was too slow in
+  single-threaded WASM to feel responsive.
+- **Single-threaded WASM.** No rayon parallelism. Rendering is ~2× slower
+  than native stet.
+
+For production work, use the native crates below.
+
 ### Display List Architecture
 
 Unlike rendering engines that interpret and rasterize in a single pass,
@@ -33,7 +58,7 @@ for repeated renders at different resolutions. See the
 ## Features
 
 **PostScript Interpreter**
-- Full PostScript Level 3 with ~268 operators
+- Full PostScript Level 3 with ~320 operators
 - Type 1, CFF/Type 2, TrueType, CID, and Type 3 font rendering
 - All 7 shading types (axial, radial, Gouraud mesh, Coons/tensor patch)
 - CIE color spaces (CIEBasedABC, CIEBasedA, CIEBasedDEF, CIEBasedDEFG)
@@ -232,10 +257,13 @@ zoom presets, minimap navigation, and drag-and-drop.
 | `--device <TYPE>` | Output: `png`, `pdf`, `viewer` (default), `null` |
 | `--dpi <DPI>` | Resolution (overrides device default; all built-in devices default to 300) |
 | `--pages <RANGE>` | Page filter: `1`, `1-5`, `2,4,6` |
-| `--no-icc` | Disable ICC color management |
+| `--threads <N>` | Worker-thread count (default: 75 % of cores in viewer mode, 8 otherwise) |
+| `--no-icc` | Disable ICC color management entirely |
 | `--no-aa` | Disable anti-aliasing |
-| `--overprint` | Enable overprint simulation |
-| `--profile <FILE>` | Specify ICC output profile |
+| `--output-profile <FILE>` | Generic ICC output profile (also used as source CMYK when `--cmyk-profile` is absent) |
+| `--cmyk-profile <FILE>` | Pin the source CMYK ICC profile for CMYK→sRGB conversion |
+| `--no-output-intent` | Ignore the PDF's embedded OutputIntent (default: honoured) |
+| `--bpc <on\|off\|auto>` | Black-point compensation (default: `auto`, currently equivalent to `on`) |
 
 ## Crate Overview
 
@@ -280,12 +308,13 @@ zoom presets, minimap navigation, and drag-and-drop.
 |-------|------|
 | `stet` | Batteries-included library API (facade) |
 | `stet-core` | Interpreter infrastructure: types, VM, tokenizer |
-| `stet-ops` | ~268 PostScript operator implementations |
+| `stet-ops` | ~320 PostScript operator implementations |
 | `stet-engine` | Execution engine (eval loop) |
 | `stet-fonts` | Font parsing: Type 1, CFF/Type 2, TrueType |
 | `stet-graphics` | Display list, color types, ICC color management |
 | `stet-render` | Rasterization backend, PNG output |
-| `stet-tiny-skia` | Modified [tiny-skia](https://github.com/AvraamMavridis/tiny-skia) fork with stet-specific optimizations |
+| `stet-tiny-skia` | Modified [tiny-skia](https://github.com/RazrFalcon/tiny-skia) fork with stet-specific optimizations (BSD-3-Clause) |
+| `stet-tiny-skia-path` | Companion path/stroker crate for `stet-tiny-skia` (BSD-3-Clause) |
 | `stet-pdf` | PDF output device (PS → PDF) |
 | `stet-pdf-reader` | PDF input parser (PDF → display lists) |
 | `stet-viewer` | Interactive egui/winit desktop viewer |
@@ -299,7 +328,7 @@ of how these crates work together.
 
 ```bash
 cargo build                    # Build all crates
-cargo test                     # Run all tests (~720 tests)
+cargo test                     # Run all tests (759 passing)
 cargo run -- file.ps           # Run a PostScript file
 cargo run                      # Interactive REPL
 cargo clippy                   # Lint
@@ -311,6 +340,24 @@ cargo clippy                   # Lint
 cd web && ./build.sh           # Build WASM module
 python3 serve.py               # Serve at localhost:8000
 ```
+
+## Acknowledgements
+
+- **[hayro](https://github.com/LaurenzV/hayro)** — PDF renderer by
+  Laurenz Stampfl. `stet-pdf-reader` uses the project's
+  [`hayro-jpeg2000`](https://crates.io/crates/hayro-jpeg2000),
+  [`hayro-jbig2`](https://crates.io/crates/hayro-jbig2), and
+  [`hayro-ccitt`](https://crates.io/crates/hayro-ccitt) crates for
+  JPEG 2000, JBIG2, and CCITT-Fax stream decoding — the PDF filters
+  that have no other pure-Rust implementation. Big thanks to the hayro
+  project for factoring these out as reusable crates.
+- **[tiny-skia](https://github.com/RazrFalcon/tiny-skia)** by
+  [Yevhenii Reizner](https://github.com/RazrFalcon) — a Skia subset
+  ported to Rust. `stet-tiny-skia` / `stet-tiny-skia-path` are modified
+  forks (see each crate's README for the specific changes).
+- **[moxcms](https://crates.io/crates/moxcms)** — pure-Rust ICC colour
+  management. `stet-graphics` uses it for CMYK↔sRGB conversion, image
+  bulk transforms, and black-point compensation.
 
 ## License
 

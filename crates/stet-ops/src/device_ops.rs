@@ -119,7 +119,6 @@ pub fn op_setpagedevice(ctx: &mut Context) -> Result<(), PsError> {
     // PLRM: when current device is not a page device (e.g. after nulldevice),
     // or when switching to a different output device, create a new device
     // dictionary from scratch before merging request params.
-    // This matches PostForge's setpagedevice detection logic exactly.
     let is_page_name = ctx.names.intern(b".IsPageDevice");
     let od_name = ctx.names.intern(b"OutputDevice");
 
@@ -208,7 +207,6 @@ pub fn op_setpagedevice(ctx: &mut Context) -> Result<(), PsError> {
 
     // Store as current page device.
     // Must be in global VM so save/restore COW doesn't revert PageCount etc.
-    // (PostForge's page device dict is a Python dict not subject to PS VM save/restore.)
     // If the dict is local, copy it to a new global dict.
     let base_pd = if !base_pd.is_global() {
         let new_pd =
@@ -508,8 +506,8 @@ pub fn op_showpage_continue(ctx: &mut Context) -> Result<(), PsError> {
         device.init_clip();
     }
 
-    // Note: gstate_stack is NOT cleared by showpage (per PLRM / PostForge).
-    // Programs like dvi_ps rely on gsave/grestore around showpage to preserve
+    // Note: gstate_stack is NOT cleared by showpage (per PLRM). Programs
+    // like dvi_ps rely on gsave/grestore around showpage to preserve
     // coordinate system setup across page boundaries.
 
     // Push BeginPage for execution

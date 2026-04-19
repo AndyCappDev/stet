@@ -86,7 +86,7 @@ pub fn op_image(ctx: &mut Context) -> Result<(), PsError> {
         return Ok(());
     }
 
-    // Pop all 5 operands before reading data (matches PostForge behavior)
+    // Pop all 5 operands before reading data
     ctx.o_stack.pop()?; // src
     ctx.o_stack.pop()?; // matrix
     ctx.o_stack.pop()?; // bps
@@ -120,7 +120,7 @@ fn image_dict_form(ctx: &mut Context) -> Result<(), PsError> {
         _ => return Err(PsError::TypeCheck),
     };
 
-    // Check ImageType — required per PostForge (TypeCheck if missing or non-integer)
+    // ImageType is required — TypeCheck if missing or non-integer
     let image_type_obj = dict_get_obj(ctx, dict_entity, b"ImageType").ok_or(PsError::TypeCheck)?;
     let image_type = image_type_obj.as_i32().ok_or(PsError::TypeCheck)?;
     match image_type {

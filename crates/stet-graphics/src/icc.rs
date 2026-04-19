@@ -772,8 +772,8 @@ impl IccCache {
         ))
     }
 
-    /// Disable all ICC color management (equivalent to PostForge's `--no-icc`).
-    /// Clears all profiles, transforms, and caches.
+    /// Disable all ICC color management — clears all profiles, transforms,
+    /// and caches. Equivalent to the CLI's `--no-icc` flag.
     pub fn disable(&mut self) {
         self.profiles.clear();
         self.transforms.clear();

@@ -43,8 +43,8 @@ except ImportError:
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-SAMPLES_DIR = PROJECT_ROOT / "samples"
-XFORGE_CLI = PROJECT_ROOT / "target" / "release" / "stet"
+SAMPLES_DIR = PROJECT_ROOT / "ps_samples"
+STET_CLI = PROJECT_ROOT / "target" / "release" / "stet"
 
 
 def get_dirs():
@@ -126,7 +126,7 @@ def render_one(ps_file, output_dir, timeout, extra_flags, device="png"):
 
     start = time.monotonic()
     try:
-        cmd = [str(XFORGE_CLI), "--device", device]
+        cmd = [str(STET_CLI), "--device", device]
         if extra_flags:
             cmd.extend(extra_flags)
         cmd.append(local_copy.name)
@@ -819,8 +819,8 @@ def main():
                         help="Extra flags to pass to stet-cli (must be last argument)")
     args = parser.parse_args()
 
-    if not XFORGE_CLI.exists():
-        print(f"Error: stet-cli not found at {XFORGE_CLI}")
+    if not STET_CLI.exists():
+        print(f"Error: stet-cli not found at {STET_CLI}")
         print("Run 'cargo build --release' first.")
         return 1
 

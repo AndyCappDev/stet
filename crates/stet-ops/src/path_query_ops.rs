@@ -267,7 +267,7 @@ fn reverse_path(path: &PsPath) -> PsPath {
 
 /// Reverse a single subpath.
 ///
-/// Algorithm (matching PostForge):
+/// Algorithm:
 /// 1. Extract moveto point and drawing segments (LineTo/CurveTo), note if closepath present
 /// 2. Build points list: points[0] = moveto, points[i+1] = endpoint of segment i
 /// 3. Start reversed subpath with MoveTo at last point

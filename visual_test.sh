@@ -59,7 +59,7 @@ if [ "$DEVICE" = "pdf" ]; then
     SAMPLE_FILES=()
     while IFS= read -r -d '' f; do
         SAMPLE_FILES+=("$f")
-    done < <(find "$SCRIPT_DIR/samples" -maxdepth 1 \( -name '*.ps' -o -name '*.eps' \) -print0 | sort -z)
+    done < <(find "$SCRIPT_DIR/ps_samples" -maxdepth 1 \( -name '*.ps' -o -name '*.eps' \) -print0 | sort -z)
     echo "Rendering ${#SAMPLE_FILES[@]} samples to PDF in $OUTDIR..."
 
     OKAY=0
@@ -87,7 +87,7 @@ fi
 
 # Standard PNG mode: split arguments at "--" separator
 VISUAL_ARGS=()
-XFORGE_ARGS=()
+STET_ARGS=()
 FOUND_SEP=false
 for arg in "$@"; do
     if [ "$arg" = "--" ] && ! $FOUND_SEP; then
@@ -95,14 +95,14 @@ for arg in "$@"; do
         continue
     fi
     if $FOUND_SEP; then
-        XFORGE_ARGS+=("$arg")
+        STET_ARGS+=("$arg")
     else
         VISUAL_ARGS+=("$arg")
     fi
 done
 
-if [ ${#XFORGE_ARGS[@]} -gt 0 ]; then
-    python3 "$SCRIPT_DIR/visual_test.py" "${VISUAL_ARGS[@]}" --flags "${XFORGE_ARGS[@]}"
+if [ ${#STET_ARGS[@]} -gt 0 ]; then
+    python3 "$SCRIPT_DIR/visual_test.py" "${VISUAL_ARGS[@]}" --flags "${STET_ARGS[@]}"
 else
     python3 "$SCRIPT_DIR/visual_test.py" "${VISUAL_ARGS[@]}"
 fi

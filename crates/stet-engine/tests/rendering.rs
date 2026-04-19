@@ -448,15 +448,8 @@ fn test_turkey_imagemask() {
         .unwrap()
         .parent()
         .unwrap()
-        .join("tests")
-        .join("ps")
+        .join("ps_samples")
         .join("turkey-imagemask.ps");
-    // Also try the postforge samples path
-    let turkey_path = if turkey_path.exists() {
-        turkey_path
-    } else {
-        std::path::PathBuf::from("/home/scott/Projects/postforge/samples/turkey-imagemask.ps")
-    };
     if !turkey_path.exists() {
         eprintln!("Skipping turkey-imagemask.ps test — file not found");
         return;

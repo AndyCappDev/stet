@@ -2,11 +2,42 @@
 // Copyright (c) 2026 Scott Bowman
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Interactive egui viewer for the stet PostScript interpreter.
+//! Interactive egui/winit desktop viewer for stet — displays PostScript,
+//! EPS, and PDF pages with zoom, pan, page navigation, and a minimap.
 //!
-//! Displays rendered PostScript pages in a window with zoom, pan, and page
-//! navigation. The interpreter sends display lists via channels; the viewer
-//! renders visible viewport regions on demand via `render_region()`.
+//! The viewer consumes
+//! `stet_graphics::display_list::DisplayList` values over a channel, so it
+//! is agnostic about where the display list came from: the
+//! stet PostScript interpreter and
+//! [`stet-pdf-reader`](https://crates.io/crates/stet-pdf-reader) both
+//! produce the same type, and a single viewer window handles PS, EPS,
+//! and PDF input interchangeably. Zoom / pan / page changes re-rasterize
+//! the stored display list via
+//! [`stet-render`](https://crates.io/crates/stet-render) — the source is
+//! never re-interpreted.
+//!
+//! # Architecture
+//!
+//! The viewer always runs on the main thread (egui/winit requirement).
+//! The PS interpreter or PDF reader runs on a background thread and
+//! streams display lists in over [`create_channels`]:
+//!
+//! ```text
+//!    background thread                          main thread
+//!   ┌────────────────────┐   DisplayList    ┌──────────────────┐
+//!   │ stet::Interpreter  │   messages       │   run_viewer()   │
+//!   │ stet_pdf_reader    │ ───────────────► │  egui event loop │
+//!   └────────────────────┘                  └──────────────────┘
+//! ```
+//!
+//! # Typical use
+//!
+//! Most users drive the viewer through the
+//! [`stet-cli`](https://crates.io/crates/stet-cli) binary rather than
+//! embedding it directly. See
+//! [`stet-cli`'s `run_viewer_mode`](https://github.com/AndyCappDev/stet/blob/main/crates/stet-cli/src/main.rs)
+//! for a worked example of wiring the PS interpreter thread and the PDF
+//! thread to a single viewer.
 
 mod viewer;
 

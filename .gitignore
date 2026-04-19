@@ -14,3 +14,7 @@ tests/corpus/manifest.txt
 tests/corpus-results/
 pdf_samples/
 more_pdf_samples/
+
+# AI-assistant files — local only, never committed
+CLAUDE.md
+.claude/

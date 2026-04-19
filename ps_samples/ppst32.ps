@@ -1,0 +1,703 @@
+%!PS-Adobe-1.0
+%%DocumentFonts: (atend)
+%%Title: PostScript Processing Speed Test
+%%Creator: Jean-Serge Gagnon
+%%User: Jean-Serge Gagnon
+%%Pages: (atend)
+%%BoundingBox: 0 0 612 792
+%%EndComments
+% --------------------------------------------------------------------
+%     Adobe PostScript Processing Speed Test version 3.2 (PPST)
+% --------------------------------------------------------------------
+%         by:   Jean-Serge Gagnon
+%               Computer Hardware Maintenance Specialist
+%               222 Jean Perrin
+%               Gatineau, Quebec, Canada
+%               J8V 2R4
+%               (613) 791-0785
+%
+% --------------------------------------------------------------------
+%                       E-mail addresses
+%
+%            internet:   JSG8A@ACADVM1.UOTTAWA.CA
+%
+% ====================================================================
+%
+%    I would like to hear from you about this program. Please let
+% me know of any bugs, problems with your printer or fixes that you
+% would recommend. I am always open to new ideas. A future release
+% will include a few of the more popular printers with a relative
+% index comparing your printer to them, but I need your input.
+%
+%    Please send info including the manufacturer of the printer, the
+% model number and/or name, and the results from this test. I would
+% also appreciate getting your name and e-mail (or regular) address
+% and/or phone so that I can reach you should it be necessary. I would
+% also be interested in knowing your occupation and interest in this
+% matter.
+%
+%                                 Thanking you for your replies
+%                                     Jean-Serge Gagnon
+%
+% ====================================================================
+%                 Set and define all working variables
+% --------------------------------------------------------------------
+%     Please note that if you wish the program to stay acurate,
+% you musn't change any of these variables, as they would have
+% an effect of changing the value of the PPST index.
+% --------------------------------------------------------------------
+
+/test_version (3.2) def                 % This program version number.
+/last_update (March 9th, 1994) def      % Last programming update.
+/stdppst-g 329.375 def                  % PPST-G for Apple LaserWriter.
+/stdppst-r 231.563 def                  % PPST-R for Apple LaserWriter.
+/stdppst-m 221.813 def                  % PPST-M for Apple LaserWriter.
+/stdppst-i .125 def                     % PPST-I for Apple LaserWriter.
+/stdppst 782.875 def                    % PPST for Apple LaserWriter.
+/bottombox 5 def                        % Bottom of results box.
+/leftbox 2.1 def                        % Left side of results box.
+72 72 scale                             % Work with inches.
+/numberoflines 90 def                   % Number of lines for graphics.
+
+% ====================================================================
+%                         Define user functions
+% ====================================================================
+
+% --------------------------------------------------------------------
+%                       Get printer name
+% --------------------------------------------------------------------
+/getname {
+    statusdict /product known           % Check if variable exists.
+    { /statusdict load                  % Load the proper dictionary.
+      /product get                      % Get the product name.
+    }{ (Unknown device) } ifelse        % If unknown.
+    /printername exch def               % Define the variable.
+} def
+
+% --------------------------------------------------------------------
+%                  Get user time in seconds.
+% --------------------------------------------------------------------
+/gettime {
+    usertime                            % Get timer value.
+    1000 div                            % Convert to seconds.
+} def
+
+% --------------------------------------------------------------------
+%                  Print text centered on current point
+% --------------------------------------------------------------------
+/centershow {
+    dup stringwidth pop                 % Find point size of string.
+    2 div neg 0 rmoveto                 % Divide it by two and move to
+    show                                % there. Then print it.
+} def
+
+% --------------------------------------------------------------------
+%                  Print text centered on decimal place.
+% --------------------------------------------------------------------
+/decimalshow {
+    dup dup (.) atstr dup               % Find position of decimal.
+    -1 eq                               % Is there a decimal?
+    { pop pop show }                    % No? Then print it all.
+    { 0 exch getinterval                % Get begining of string.
+    rightshow                           % Show left of decimal.
+    (.) show                            % Show decimal point.
+    dup length exch                     % Get length of string.
+    dup (.) atstr 1 add dup             % Get position of decimal.
+    4 -1 roll exch sub                  % Calc. remainder of string.
+    getinterval show } ifelse           % Print the remainder.
+} def
+
+% --------------------------------------------------------------------
+%                  Print text with right justification
+% --------------------------------------------------------------------
+/rightshow {
+    dup stringwidth pop                 % Find point size of string.
+    neg 0 rmoveto                       % Move to correct start point.
+    show                                % Then print it.
+} def
+
+% --------------------------------------------------------------------
+%            Find location of a character in a string
+% --------------------------------------------------------------------
+%
+%   string1 string2 atstr location
+%
+%   string1 is the string in which to locate the character string2
+%   which is of length one. Upon return, the function leaves on the
+%   stack either -1 if string2 is not found in string1 or a number
+%   representing the location of string2 in string1, starting with
+%   0 as the first character in string1.
+%
+% --------------------------------------------------------------------
+/atstr {
+    0 get cvi                           % Convert character to integer.
+    /searchchar exch def                % Define search character.
+    /searchstr exch def                 % Define search string.
+    /atstrcounter 0 def                 % This is where we're at.
+    { atstrcounter 1 add                % Go to next position.
+        searchstr length                % Are we past end of string?
+        ge { /atstrcounter                  % Yes?
+            -1 def exit                     % Then exit with -1
+           } if                             % as the "at" code.
+        searchstr atstrcounter          % If we found the
+        get cvi searchchar                  % character, then
+        eq { exit } if                      % exit with location.
+        /atstrcounter atstrcounter      % Otherwise,
+        1 add def                           % go to next location.
+    } loop                              % Check another time.
+    atstrcounter                        % Put result on stack.
+} def
+
+% --------------------------------------------------------------------
+%                 Add two strings together.
+% --------------------------------------------------------------------
+%
+%   string1 string2 addstr string3
+%
+%   string3 is an addition of string1 and string2 with string1 being
+%   the first part of string3 and string2 the end of string3.
+%
+% --------------------------------------------------------------------
+/addstr {
+   /stringtwo exch def                  % Get both strings off
+   /stringone exch def                      % of the stack.
+   /exitstr stringone length            % Define empty string the
+   stringtwo length add string def          % length of both.
+   exitstr 0 stringone putinterval      % Put first string in.
+   exitstr stringone length             % And then,
+   stringtwo putinterval                    % put the second string.
+   exitstr                              % Leave it on stack.
+} def
+
+% --------------------------------------------------------------------
+%         Calculate and print difference between two times
+% --------------------------------------------------------------------
+/showtime {
+    20 string                           % Put empty string on stack.
+    cvs                                 % Convert to a string
+    5 4 addzeros                        % Add lead. blanks & trail. zeros.
+    remblanks                           % Remove leading blanks.
+    show                                % Then print it.
+} def
+
+% --------------------------------------------------------------------
+%                      Show PPST index values
+% --------------------------------------------------------------------
+/showppst {
+    dup .0001 le                        % Is time too small?
+      { pop pop                         % If so, then
+        (too fast!) centershow }        % print too fast!
+      { div                             % Get index value.
+        .05 add                         % Round value.
+        20 string cvs                   % Convert to a string.
+        3 1 addzeros                    % Add zeros and spaces.
+        decimalshow                     % Show the new string.
+      } ifelse                          % Otherwise print it.
+} def
+
+% --------------------------------------------------------------------
+%           Remove leading and trailing blanks in string
+% --------------------------------------------------------------------
+%
+%   string1 remblanks string2
+%
+%   string2 is the result of removing the leading blanks and the
+%   trailing blanks from string1.
+%
+% --------------------------------------------------------------------
+/remblanks {
+    {   dup 0 get cvi                   % Get first character.
+        32 ne {exit} if                 % If it's a space,
+        dup length 1 sub 1 exch             % then remove it
+        getinterval                         % from the string.
+    } loop                              % Check next one.
+    {   dup dup length 1 sub get cvi    % Get last character.
+        32 ne {exit} if                 % If it's a space,
+        dup length 1 sub 0 exch             % then remove it
+        getinterval                         % from the string.
+    } loop                              % Almost done, check next.
+} def
+
+% --------------------------------------------------------------------
+%         Add leading blanks and trailing zeros to string.
+% --------------------------------------------------------------------
+%
+%   string1 leftdec rightdec addzeros string2
+%
+%   string2 is the result of making string1 have at least leftdec leading
+%   spaces and rightdec trailing zeros.
+%
+% --------------------------------------------------------------------
+/addzeros {
+    /rightdec exch def                  % Define no. of num. bef. decimal.
+    /leftdec exch def                   % Define sign. dig. after decimal.
+    /totalength rightdec leftdec add    % Calculate maximum length
+    1 add def                               % of string.
+    dup (.) atstr                       % Find out if there is decimal.
+    -1 eq { (.) addstr } if             % No? Then add decimal.
+    { dup                               % Make sure we don't loose string.
+        (.) atstr                       % Now where is the decimal?
+        leftdec                         % Get where decimal place.
+        ge { exit } if                  % Exit if in right spot.
+        ( ) exch addstr                 % Add space in front of string.
+    } loop                              % Check again until done.
+    { dup                               % Make sure we don't loose string.
+        length                          % Get length of string.
+        totalength                      % Get total length of string.
+        ge { exit } if                  % Exit if right length.
+        (0) addstr                      % Add 0 at end of string.
+    } loop                              % Do it until done.
+    dup (.) atstr                       % Where is decimal at?
+    rightdec add 1 add                  % What is new length of string?
+    0 exch getinterval                  % Make sure string isn't too long.
+} def
+
+% --------------------------------------------------------------------
+%                Calculate all the times of tests.
+% --------------------------------------------------------------------
+/calctimes {
+    /graphtime                          % Calculate
+        rambegin graphbegin                 % the graphics
+    sub def                                 % time.
+    /ramtime                            % Calculate
+        mathbegin rambegin                  % the ram speed
+    sub def                                 % time.
+    /mathtime                           % Calculate
+        imagebegin mathbegin                % the mathematics
+    sub def                                 % time.
+    /imagetime                          % Calculate
+        endtime imagebegin                  % the image
+    sub def                                 % time.
+    /totaltime                          % Calculate
+        endtime graphbegin                  % the total
+    sub def                                 % time.
+} def
+% --------------------------------------------------------------------
+%                     Draw a circle of lines
+% --------------------------------------------------------------------
+/circleoflines {
+    save 3 1 roll                       % Save current coordinate settings.
+    translate                           % Change origin point.
+    /turned 0 def                       % Start at 0 degrees rotation.
+    degrees neg rotate                  % Make sure first line is at 0.
+    .0001 setlinewidth                  % Make the smallest lines possible.
+    newpath                             % Start with a new drawing path.
+    { /turned turned degrees add def    % Turn by "degrees" degrees.
+        turned 360 gt { exit } if       % Check if all done.
+        degrees rotate                  % Rotate coordinate system.
+        0 0 moveto                      % Do a line of 1 inch from
+        0 1 lineto                          % center of coordinate system.
+    } loop                              % Do next line.
+    stroke                              % Set ink on page.
+    restore                             % Restore old coordinate settings.
+} def
+
+% --------------------------------------------------------------------
+%                         Draw the main border
+% --------------------------------------------------------------------
+/border {
+    1 setlinewidth                      % Set width of border.
+    newpath                             % Start a new drawing path.
+    0 0 moveto                          % Draw a box starting here
+    8.5 0 lineto                            % right
+    8.5 11 lineto                           % back to
+    0 11 lineto                             % the first
+    closepath                               % point.
+    stroke                              % And print it on page.
+} def
+
+% --------------------------------------------------------------------
+%                       Add the graphics to the page
+% --------------------------------------------------------------------
+/graphics {
+    .0001 setlinewidth                  % Make sure lines are small.
+    newpath                             % Start a new drawing path.
+    /yjump 10 numberoflines div def     % Distance for y axis.
+    /xjump 7.5 numberoflines div def    % Distance for x axis.
+    /curx .5 def                        % Start of x axis.
+    /cury 10.5 def                      % Start of y axis.
+    { curx .5 moveto                    % Draw the lines
+        .5 cury lineto                      % on the left
+        /curx curx xjump add def            % and bottom
+        curx 8 gt { exit } if               % of the
+        /cury cury yjump sub def            % page.
+    } loop                              % Keep drawing until done.
+    /curx .5 def                        % Start of x axis.
+    /cury .5 def                        % Start of y axis.
+    { curx .5 moveto                    % Draw the lines
+        8 cury lineto                       % on the right
+        /curx curx xjump add def            % and bottom
+        curx 8 gt { exit } if               % of the
+        /cury cury yjump add def            % page.
+    } loop                              % Keep drawing until done.
+    /curx .5 def                        % Start of x axis.
+    /cury .5 def                        % Start of y axis.
+    { curx 10.5 moveto                  % Draw the lines
+        .5 cury lineto                      % on the left
+        /curx curx xjump add def            % and top
+        curx 8 gt { exit } if               % of the
+        /cury cury yjump add def            % page.
+    } loop                              % Keep drawing until done.
+    /curx .5 def                        % Start of x axis.
+    /cury 10.5 def                      % Start of y axis.
+    { curx 10.5 moveto                  % Draw the lines
+        8 cury lineto                       % on the right
+        /curx curx xjump add def            % and top
+        curx 8 gt { exit } if               % of the
+        /cury cury yjump sub def            % page.
+    } loop                              % Keep drawing until done.
+    stroke                              % Set ink on the page.
+    /degrees 360 numberoflines          % Degrees between lines
+        4 mul div def                       % for circle.
+    1.7 1.7 circleoflines               % Do a circle in bottom-left.
+    6.8 1.7 circleoflines               % Do another in bottom-right.
+    1.7 9.3 circleoflines               % Again in top-left.
+    6.8 9.3 circleoflines               % Lastly in top-right.
+} def
+
+% --------------------------------------------------------------------
+%                      Do the graphics test
+% --------------------------------------------------------------------
+/graphtest {
+    0                                   % Start the loop counter.
+    { dup 10 ge {exit} if               % Exit if test done.
+        1 add                           % Increase the loop counter.
+        0 0 moveto 8 0 lineto           % Draw a box
+        8 10.5 lineto 0 10.5 lineto     % on entire page.
+        .75 setgray                     % Set color to gray.
+        fill                            % Paint entire page.
+        0 setgray                       % Set color back to black.
+        newpath                         % Clear any current path.
+        .01 setlinewidth                % Set width of lines for test.
+        0 0 moveto                      % Reset current point
+        5 5 2 0 45 arc                  % Make counterclockwise arc.
+        0 0 moveto                      % Reset current point
+        1.225 4.332 1.987 0 45 arc      % Make counterclockwise arc.
+        7 7 moveto                      % Reset current point
+        .1 setlinewidth                 % Set width of lines for test.
+        2 2 1 90 0 arcn                 % Make clockwise arc.
+        7 7 moveto                      % Reset current point
+        .0987 .1122 .1564 90 0 arcn     % Make clockwise arc.
+        3 8 moveto                      % Reset current point
+        6 6 4 8 2 arcto                 % Append arc to.
+        3 8 moveto                      % Reset current point
+        1.1 2.2 3.221 6.876 2 arcto     % Append arc to.
+        pop pop pop pop                 % Clear stack
+        .5 setlinewidth                 % Set width of lines for test.
+        pop pop pop pop                     % of arc values.
+        1 3 moveto                      % Reset current point
+        1 1 2 1 4 0 curveto             % Make a curve.
+        1 3 moveto                      % Reset current point
+        .32 setlinewidth                % Set width of lines for test.
+        1.154 .913 2.1 1.99 4 0 curveto % Make a curve.
+        gsave                           % Save current graphics state.
+        1.897 2.345 scale               % Modify scalling.
+        22 rotate                       % Rotate the coordinate system.
+        5 5 translate                   % Move coordinate 0,0.
+        .9878 .7656 scale               % Change scale.
+        255 rotate                      % Rotate coordinates again.
+        28.777 7.777 scale              % again.
+        grestore                        % Restore graphics state.
+        stroke                          % Draw lines along path.
+        newpath                         % Clear path.
+        erasepage                       % Clear the page.
+    } loop pop                          % Loop until done.
+} def
+
+% --------------------------------------------------------------------
+%                         Test RAM speed
+% --------------------------------------------------------------------
+/ramtest {
+    0                                   % Start the loop counter.
+    { dup 25000 ge {exit} if            % Exit if all done.
+        1 add                           % Increase the loops counter.
+        (this is a test string 1234567890 abcdefghijklmnopqrstuvwxyz)
+        dup dup dup dup dup
+        pop pop pop pop pop pop
+        (Another test string)
+        dup dup dup dup dup dup dup dup dup dup dup dup dup dup dup
+        pop pop pop pop pop pop pop pop pop pop pop pop pop pop pop
+        pop (String 3 ABCDEFGHIJKLMNOPQRSTUVWXYZ !@#$%^&*()_+)
+        dup dup dup dup dup dup dup
+        pop pop pop pop pop pop pop pop
+    } loop pop                          % Do the functions again.
+} def
+
+% --------------------------------------------------------------------
+%                        Do the math test
+% --------------------------------------------------------------------
+/mathtest {
+    0                                   % Start the loop counter.
+    { dup 3000 ge {exit} if             % Exit if all done.
+        1 add                           % Increase the loops counter.
+        2.1 9.9 add pop                 % Addition function.
+        .132 .992 add pop               % Addition function.
+        5.5 1.1 div pop                 % Division function.
+        325.32 43.543 div pop           % Division function.
+        875 5 idiv pop                  % Integer division function.
+        5000 25 idiv pop                % Integer division function.
+        252 3 mod pop                   % Modulo function.
+        24982 15 mod pop                % Modulo function.
+        4.554 5.4999 mul pop            % Multiplication function.
+        .9814 .4612 mul pop             % Multiplication function.
+        3.3 1.9 sub pop                 % Subtraction function.
+        1.111 9 sub pop                 % Subtraction function.
+        -9919.746 abs pop               % Absolut value function.
+        -239.5181 abs pop               % Absolut value function.
+        7343.43 neg pop                 % Negation function.
+        7343.43 neg pop                 % Negation function.
+        1.5673 ceiling pop              % Ceiling function.
+        1.5673 ceiling pop              % Ceiling function.
+        -1.2323 floor pop               % Floor function.
+        -1.2323 floor pop               % Floor function.
+        675.2432 round pop              % Rounding function.
+        675.2432 round pop              % Rounding function.
+        1.21121 truncate pop            % Truncation function.
+        1.21121 truncate pop            % Truncation function.
+        4.5 sqrt pop                    % Square root function.
+        4.5 sqrt pop                    % Square root function.
+        1 0 atan pop                    % Arc Tangeant function.
+        1 0 atan pop                    % Arc Tangeant function.
+        65 cos pop                      % Cosinus function.
+        65 cos pop                      % Cosinus function.
+        89 sin pop                      % Sinus function.
+        89 sin pop                      % Sinus function.
+        10 3 exp pop                    % Exponentiation function.
+        10 3 exp pop                    % Exponentiation function.
+        4 ln pop                        % Natural logarithmic function.
+        4 ln pop                        % Natural logarithmic function.
+        5 log pop                       % Base 10 logarithmic function.
+        5 log pop                       % Base 10 logarithmic function.
+        rand pop                        % Random function.
+        rand pop                        % Random function.
+        2 srand rrand pop               % More random function.
+        2 srand rrand pop               % More random function.
+    } loop pop                          % Do the functions again.
+} def
+
+
+% --------------------------------------------------------------------
+%                  Do the bitmapped image test
+% --------------------------------------------------------------------
+/imagetest {
+    0                                   % Start the loop counter.
+    { dup 100 ge {exit} if              % Exit if all done.
+        1 add                           % Increase the loop counter.
+
+    } loop pop
+} def
+
+
+% --------------------------------------------------------------------
+%                      Print the results of the test
+%
+%     This section prints the results of the different tests with
+% the times in seconds for each.
+% --------------------------------------------------------------------
+/result {
+    /Times-Bold findfont 18 72 div scalefont setfont
+    4.25 8.75 moveto (PostScript) centershow
+    4.25 8.50 moveto (Processing speed test) centershow
+    4.25 8.25 moveto (version ) test_version addstr centershow
+    4.25 7.75 moveto (Test executed on:) centershow
+    4.25 7.50 moveto printername centershow
+    4.25 7.25 moveto
+    (Running Adobe PostScript)
+    centershow
+    4.25 7 moveto (version number )
+    version addstr centershow
+    /Times-Bold findfont 10 72 div scalefont setfont
+    4.25 .39 moveto 1 setgray
+    (The white area around the border shows your printer's dead-zone.)
+    centershow
+    0 setgray 2.5 bottombox .3 sub moveto
+    /Times-Bold findfont 8 72 div scalefont setfont
+    (The numbers printed represent a relative) show
+    ( index to the first widely used) show
+    2.1 bottombox .41 sub moveto
+    (PostScript printer, the Apple LaserWriter.) show
+    ( If the numbers under the "This Printer") show
+    2.1 bottombox .52 sub moveto
+    (column indicate a 1.0, then your printer ) show
+    (is as fast as an Apple LaserWriter. If the) show
+    2.1 bottombox .63 sub moveto
+    (bottom number is 5.0, then it is 5 times faster ) show
+    (than the Apple LaserWriter. Lastly,) show
+    2.1 bottombox .74 sub moveto
+    (if the number is less than one, for example 0.8,) show
+    ( then your printer is slower than the) show
+    2.1 bottombox .85 sub moveto
+    (Apple LaserWriter. The numbers in each row have this meaning:) show
+    2.5 bottombox .96 sub moveto
+    (PPST-G is for graphics speed, PPST-R is for ) show
+    (RAM & cache speed, PPST-M is) show
+    2.1 bottombox 1.07 sub moveto
+    (for mathematics speed, PPST-I is for bitmapped ) show
+    (image speed and PPST, the last row,) show
+    2.1 bottombox 1.18 sub moveto
+    (is for the overall speed rating. Note that the ) show
+    (overall speed rating is not an average but) show
+    2.1 bottombox 1.29 sub moveto
+    (is based on the time of all the tests added together.) show
+    2.6 bottombox 1.51 sub moveto
+    (The actual number of seconds of execution ) show
+    (for each test is as follows: ) show
+    2.3 bottombox 1.62 sub moveto
+    graphtime showtime ( seconds for PPST-G, ) show
+    ramtime showtime ( seconds for PPST-R, ) show
+    mathtime showtime ( seconds for) show
+    2.3 bottombox 1.73 sub moveto
+    (PPST-M, ) show imagetime showtime ( seconds for PPST-I, and ) show
+    totaltime showtime ( seconds for the entire test,) show
+    2.3 bottombox 1.84 sub moveto (or PPST for short.) show
+    /Times-Bold findfont 6 72 div scalefont setfont
+    4.25 2.3 moveto
+    (by Jean-Serge Gagnon <JSG8A@ACADVM1.UOTTAWA.CA>)
+    centershow 4.25 2.2 moveto
+    (Computer Hardware Maintenance Specialist)
+    centershow 4.25 2.1 moveto
+    (222 Jean Perrin)
+    centershow 4.25 2 moveto
+    (Gatineau, Quebec, Canada  J8V 2R4)
+    centershow 4.25 1.8 moveto
+    (613-791-0785) centershow
+    4.25 1.7 moveto last_update centershow
+} def
+
+% --------------------------------------------------------------------
+%                  Print the PPST index values
+%
+%    This section displays a small box at the bottom of the page
+% indicating all the Printer Speed Test results with indexes.
+% --------------------------------------------------------------------
+/ppstindex {
+    .02 setlinewidth                    % Regular lines.
+    newpath
+    leftbox .1 sub bottombox 1.6 add moveto
+    leftbox .1 sub bottombox .1 sub lineto
+    leftbox 4.4 add bottombox .1 sub lineto
+    leftbox 4.4 add bottombox 1.6 add lineto
+    .9 setgray fill 0 setgray
+    newpath                             % Start a new drawing path.
+    leftbox bottombox 1.14 add moveto           % Draw
+    leftbox 4.3 add bottombox 1.14 add lineto   % the
+    leftbox 4.3 add bottombox lineto            % lines
+    leftbox bottombox lineto                    % for
+    closepath                                   % the
+    leftbox .5 add bottombox 1.14 add moveto    % processing
+    leftbox .5 add bottombox lineto             % speed
+    leftbox bottombox .84 add moveto            % test
+    leftbox 4.3 add bottombox .84 add lineto    % index
+    stroke newpath                              % results
+    .001 setlinewidth                           % box.
+    leftbox 1.4 add bottombox 1.14 add moveto
+    leftbox 1.4 add bottombox lineto
+    leftbox 2.45 add bottombox 1.14 add moveto
+    leftbox 2.45 add bottombox lineto
+    leftbox 3.35 add bottombox 1.14 add moveto  % Draw
+    leftbox 3.35 add bottombox lineto           % the
+    leftbox bottombox .24 add moveto            % smaller
+    leftbox 4.3 add bottombox .24 add lineto    % lines.
+    leftbox bottombox .22 add moveto            % The next part displays
+    leftbox 4.3 add bottombox .22 add lineto    % all the relevant text
+    stroke                                      % for the tests.
+    leftbox 2.15 add bottombox 1.22 add moveto
+    /Times-Bold findfont 35 72 div scalefont setfont
+    (PPST index results) centershow
+    /Times-Bold findfont 8 72 div scalefont setfont
+    leftbox .09 add bottombox .9 add moveto (index) show
+    leftbox .09 add bottombox .71 add moveto (PPST-G) show
+    leftbox .09 add bottombox .57 add moveto (PPST-R) show
+    leftbox .09 add bottombox .44 add moveto (PPST-M) show
+    leftbox .09 add bottombox .3 add moveto (PPST-I) show
+    leftbox .09 add bottombox .07 add moveto (PPST) show
+    leftbox .975 add bottombox 1.025 add moveto (Apple) centershow
+    leftbox .975 add bottombox .9 add moveto (LaserWriter) centershow
+    leftbox .975 add bottombox .71 add moveto (1.0) centershow
+    leftbox .975 add bottombox .57 add moveto (1.0) centershow
+    leftbox .975 add bottombox .44 add moveto (1.0) centershow
+    leftbox .975 add bottombox .3 add moveto
+    (Next ver) centershow
+%    (1.0) centershow
+    leftbox .975 add bottombox .07 add moveto (1.0) centershow
+    leftbox 1.925 add bottombox 1.025 add moveto (Apple) centershow
+    leftbox 1.925 add bottombox .9 add moveto
+    (LaserWriter II NTX) centershow
+    leftbox 1.925 add bottombox .71 add moveto (3.8) decimalshow
+    leftbox 1.925 add bottombox .57 add moveto (3.0) decimalshow
+    leftbox 1.925 add bottombox .44 add moveto (2.9) decimalshow
+    leftbox 1.925 add bottombox .3 add moveto
+    (Next ver) centershow
+%    (x.x) decimalshow
+    leftbox 1.925 add bottombox .07 add moveto (3.3) decimalshow
+    leftbox 2.875 add bottombox 1.025 add moveto (QMS) centershow
+    leftbox 2.875 add bottombox .9 add moveto (PS 2000) centershow
+    leftbox 2.875 add bottombox .71 add moveto (334.6) decimalshow
+    leftbox 2.875 add bottombox .57 add moveto (36.0) decimalshow
+    leftbox 2.875 add bottombox .44 add moveto (83.0) decimalshow
+    leftbox 2.875 add bottombox .3 add moveto
+    (Next ver) centershow
+%    (x.x) decimalshow
+    leftbox 2.875 add bottombox .07 add moveto (77.4) decimalshow
+    leftbox 3.825 add bottombox 1.025 add moveto (This) centershow
+    leftbox 3.825 add bottombox .9 add moveto (printer) centershow
+    leftbox 3.825 add bottombox .71 add moveto
+    stdppst-g graphtime showppst
+    leftbox 3.825 add bottombox .57 add moveto
+    stdppst-r ramtime showppst
+    leftbox 3.825 add bottombox .44 add moveto
+    stdppst-m mathtime showppst
+    leftbox 3.825 add bottombox .3 add moveto
+    (Next ver) centershow
+%    stdppst-i imagetime showppst
+    leftbox 3.825 add bottombox .07 add moveto
+    stdppst totaltime showppst
+} def
+
+% --------------------------------------------------------------------
+%                         Main program
+%
+%     I defined this as a function so that it is executed only once the
+% whole PostScript file has been loaded into the printer. Otherwise,
+% transmission to the printer would render the test un-precise. An
+% example would be the difference between parallel and serial
+% transmission speed, or problems with delays on a LAN spooler.
+% --------------------------------------------------------------------
+/speed_test {
+    /graphbegin gettime def             % Get start time.
+    graphtest                           % Do the graphics test
+    /rambegin gettime def               % Get time for graphics.
+    ramtest                             % Do RAM and font tests.
+    /mathbegin gettime def              % Get time for fonts.
+    mathtest                            % Do math test.
+    /imagebegin gettime def             % Get time for btmapped images.
+    imagetest                           % Do image processing test.
+    /endtime gettime def                % Get end time.
+    0 setgray                           % Set color back to black.
+    border                              % Draw the border.
+    graphics                            % Do the graphics around page.
+    getname                             % Get the printer name.
+    calctimes                           % Calculate all speed times.
+    result                              % Print result of tests.
+
+% Remove the comments (%) on the following line if you have trouble
+% seeing the results because of the resolution and the size of the text.
+
+%    2.5 2.5 scale
+%    -90 rotate
+%    -6.5 -4 translate
+
+    ppstindex                           % Show PPST index results.
+    showpage                            % Outpage full page.
+} def
+%%EndProlog
+%%Page: 0 1
+
+% --------------------------------------------------------------------
+%                    Do the Processing Speed Test
+% --------------------------------------------------------------------
+speed_test
+
+%%Trailer
+%%DocumentFonts: Times-Roman Times-Bold Courier Helvetica-Bold
+%%Pages: 1

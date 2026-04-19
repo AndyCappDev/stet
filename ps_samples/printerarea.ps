@@ -1,0 +1,100 @@
+%!PS-Adobe-2.0 EPSF-2.0
+
+% version = 1.03 of printerarea.ps 1996 March 14
+% origin about 1991 February 12
+% This program determines the printable area of a printer
+% and prints the coordinates out in readable form.
+% In addition, it draws a rectangle around the area,
+% then it makes a series of shrinking rectangles to help
+% visualize where the boundary is.  Finally, the corners
+% of all these rectangles are connected to a single
+% point on the image, to make it clear what is going on.
+%  Tom Schneider
+%  toms@alum.mit.edu
+%  https://alum.mit.edu/www/toms/
+%
+% source for this code:
+% https://alum.mit.edu/www/toms/ftp/printerarea.ps
+
+erasepage
+/Times-Roman findfont 30 scalefont setfont
+/down {0 -50 rmoveto} def
+/print {gsave show 10 string cvs show grestore down} def
+
+% obtain the imagable area of the printer using initclip
+gsave initclip clippath pathbbox grestore
+%pstack % use this if you want to see the stack
+        % while running the program
+
+% capture the corners of the imagable area
+% (see pathbbox in the red book)
+/ury exch def
+/urx exch def
+/lly exch def
+/llx exch def
+
+% use the following if you want to see the values
+% llx lly urx ury
+% pstack  % this stack should match the first one
+% clear
+
+150 450 moveto
+(printer imageable area:) gsave show grestore down
+
+% print the values
+llx ( lower left x [llx]: ) print
+lly ( lower left y [lly]: ) print
+urx (upper right x [urx]: ) print
+ury (upper right y [ury]: ) print
+urx llx sub (Delta x:) print
+ury lly sub (Delta y:) print
+
+urx llx sub ury lly sub div (Delta y / Delta x:) print
+
+/tospot { % draw a line to a special spot
+% to help keep track of what's happening
+gsave currentpoint moveto 200 500 lineto stroke grestore
+} def
+
+/roundstroke{
+% draw a box around the area
+llx lly moveto
+tospot
+urx lly lineto
+tospot
+urx ury lineto
+tospot
+llx ury lineto
+tospot
+llx lly lineto
+tospot
+stroke
+} def
+
+/shift 20 def % amount to decrease the area each time
+
+/shiftinward {
+% reduction of the area by the amount shift
+/ury ury shift sub def
+/urx urx shift sub def
+/lly lly shift add def
+/llx llx shift add def
+} def
+
+% draw a series of decreasing boxes to help figure
+% things out
+roundstroke
+shiftinward
+
+roundstroke
+shiftinward
+
+roundstroke
+shiftinward
+
+roundstroke
+shiftinward
+
+roundstroke
+
+showpage

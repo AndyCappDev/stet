@@ -1,0 +1,60 @@
+/px {/zz exch def /yy exch def /xx exch def yo dup yy add div dup xx xo sub
+mul exch zz zo sub mul} def /psave {/zh zz def /yh yy def /xh xx def} def /pm
+{px psave moveto} def
+/prm {/zi exch def /yi exch def /xi exch def objrot cos xi mul objrot sin yi
+mul sub xh add objrot sin xi mul objrot cos yi mul add yh add zi zh add px
+moveto psave} def
+/prd {/zi exch def /yi exch def /xi exch def objrot cos xi mul objrot sin yi mul
+sub xh add objrot sin xi mul objrot cos yi mul add yh add zi zh add px lineto
+psave} def
+/xrd {0 0 prd} def /yrd {0 exch 0 prd} def /zrd {0 exch 0 exch prd} def /zrm {0
+exch 0 exch prm} def
+/xzrect {/zdis exch def /xdis exch def save zdis zrd xdis xrd zdis neg zrd
+closepath gsave currentshade setgray fill grestore stroke restore} def
+/yzrect {/zdis exch def /ydis exch def save zdis zrd ydis yrd zdis neg zrd
+closepath gsave currentshade setgray fill grestore stroke restore} def
+/pbox {/zdis exch def /ydis exch def /xdis exch def save xdis zdis xzrect
+restore save ydis zdis yzrect restore save zdis zrm xdis ydis xyrect restore}
+def
+/xyrect {/ydis exch def /xdis exch def save ydis yrd xdis xrd ydis
+neg yrd closepath gsave currentshade setgray fill grestore stroke
+restore} def
+
+% two of the magic brick routines
+
+/xzbrickwall {gsave /zbri exch def /xbri exch def xbri brickwide mul 0 0 prm
+0 1 zbri 1 sub cvi {gsave pop xbri brickwide mul neg 0 brickhi prm xbri
+brickwide mul 0 0 prd stroke grestore} for xbri brickwide neg mul 0 0 prm 0
+1 xbri 1 sub cvi {gsave pop brickwide 0 zbri brickhi mul neg prm
+currentpoint exch pop /cph exch def 0 0 zbri brickhi mul prd cph
+currentpoint exch pop sub abs zbri div mark exch ] 0 setdash stroke
+grestore} for xbri brickwide neg mul 0 0 prm 0 1 xbri 1 sub cvi {gsave pop
+brickwide 0 zbri brickhi mul neg prm currentpoint exch pop /cph exch def 0
+0 zbri brickhi mul prd cph currentpoint exch pop sub abs zbri div dup mark
+exch ] exch setdash stroke grestore } for} def
+/yzbrickwall { gsave /zbri exch def /ybri exch def 0 ybri brickwide mul 0 prm
+0 1 zbri 1 sub cvi {gsave pop 0 ybri brickwide mul neg brickhi prm 0 ybri
+brickwide mul 0 prd stroke grestore} for 0 ybri brickwide neg mul 0 prm 0 1
+ybri 1 sub cvi {gsave pop 0 brickwide zbri brickhi mul neg prm currentpoint
+exch pop /cph exch def 0 0 zbri brickhi mul prd cph currentpoint exch pop
+sub abs zbri div dup mark exch ] exch setdash stroke grestore } for 0 ybri
+brickwide neg mul 0 prm 0 1 ybri 1 sub cvi {gsave pop 0 brickwide zbri
+brickhi mul neg prm currentpoint exch pop /cph exch def 0 0 zbri brickhi
+mul prd cph currentpoint exch pop sub abs zbri div mark exch ] 0 setdash
+stroke grestore } for} def
+
+% and here is how it all comes together
+
+106 45 {dup mul exch dup mul add 1.0 exch sub} setscreen
+160 710 translate 0 setlinewidth /xo 00 def /yo 700 def /zo 250 def /objrot
+45 def /brickhi 5 def /brickwide 16 def /numbricksx 10.5 def /numbricksy
+2.5 def /numbricksz 12.5 def /bldz numbricksz brickhi mul def /bldx
+numbricksx brickwide mul def/bldy numbricksy brickwide mul def
+/currentshade 1 def 0 0 0 pm bldx bldy bldz pbox /currentshade 0.9 def 0 0
+brickhi 11 mul pm bldx bldy brickhi 1.5 mul pbox /currentshade 1 def
+0 0 0 pm numbricksx numbricksz 1.5 sub xzbrickwall
+0 0 0 pm numbricksy numbricksz 1.5 sub yzbrickwall
+0 0 0 pm numbricksy brickwide mul yrd numbricksz brickhi mul zrd
+numbricksx brickwide mul xrd numbricksy brickwide mul neg yrd
+numbricksz brickhi mul neg zrd closepath 0.8 setlinewidth stroke
+showpage quit

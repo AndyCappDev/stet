@@ -134,7 +134,7 @@ fn format_object_cvs(ctx: &Context, obj: &PsObject) -> String {
 
 /// Format a real number following PostScript conventions.
 fn format_real(v: f64) -> String {
-    // Round to 6 decimal places to avoid floating-point noise (matching PostForge)
+    // Round to 6 decimal places to avoid floating-point noise
     let rounded = (v * 1e6).round() / 1e6;
 
     // Check if it's effectively an integer

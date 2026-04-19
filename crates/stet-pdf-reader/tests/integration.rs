@@ -5,7 +5,7 @@ use stet_pdf_reader::PdfDocument;
 
 fn try_load_pdf(name: &str) -> Option<Vec<u8>> {
     let path = format!(
-        "{}/samples/{name}",
+        "{}/ps_samples/{name}",
         env!("CARGO_MANIFEST_DIR").replace("/crates/stet-pdf-reader", "")
     );
     match std::fs::read(&path) {
@@ -82,7 +82,7 @@ fn render_hospital_pdf_to_png() {
     let (rgba, w, h) = doc.render_page_to_rgba(0, 150.0).unwrap();
 
     let out_path = format!(
-        "{}/samples/hospital-pdf-render.png",
+        "{}/ps_samples/hospital-pdf-render.png",
         env!("CARGO_MANIFEST_DIR").replace("/crates/stet-pdf-reader", "")
     );
     let file = std::fs::File::create(&out_path).unwrap();

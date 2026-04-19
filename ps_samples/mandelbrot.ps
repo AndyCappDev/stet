@@ -1,0 +1,72 @@
+%!PS
+
+%% =======================================================================
+%% Copyright (c) 1997,2002, Mitchell Jay Richling <https://www.mitchr.me>
+%% All rights reserved.
+%% 
+%% Redistribution and use in source and binary forms, with or without
+%% modification, are permitted provided that the following conditions are
+%% met:
+%% 
+%% 1. Redistributions of source code must retain the above copyright
+%%    notice, this list of conditions, and the following disclaimer.
+%% 
+%% 2. Redistributions in binary form must reproduce the above copyright
+%%    notice, this list of conditions, and the following disclaimer in
+%%    the documentation and/or other materials provided with the
+%%    distribution.
+%% 
+%% 3. Neither the name of the copyright holder nor the names of its
+%%    contributors may be used to endorse or promote products derived
+%%    from this software without specific prior written permission.
+%% 
+%% THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+%% "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+%% LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+%% A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+%% HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+%% SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+%% LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+%% DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+%% THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+%% (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+%% OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+%% =======================================================================
+
+/XMAX 504 def                             % Width of image
+/YMAX 504 def                             % Height of image
+/PSIZE 0.48 def                           % Size in pt of sample spot 
+
+/XMINR -2.0 def                           % Min re(z)
+/XMAXR 2.0 def                            % Max re(z)
+/YMINR -2.0 def                           % Min im(z)
+/YMAXR 2.0 def                            % Max im(z)
+
+true setstrokeadjust
+
+/XWIDE XMAXR XMINR sub XMAX div def       % Width of "pixel"
+/YWIDE YMAXR YMINR sub YMAX div def       % Width of "pixel"
+
+/MAXC 200 def                             % Max iterations before bailout
+
+1 PSIZE XMAX {
+  1 PSIZE YMAX { 
+     1 index 2 copy                                            % STK: x y x
+     XWIDE mul XMINR add                                       % STK: x y x cx
+     exch YWIDE mul YMINR add                                  % STK: x y x cx cy
+     0.0 0.0 0                                                 % STK: x y x cx cy zx zy c
+     { 2 index dup mul 2 index dup mul sub 5 index add         % STK: x y x cx cy zx zy c 'zx*zx-zy*zy+cx'<=>newZX
+       4 2 roll mul 2 mul 3 index add                          % STK: x y x cx cy c newZX 'zx*zy*2+cy'<=>newZY
+       3 2 roll 1 add                                          % STK: x y x cx cy newZX newZY 'c+1'<=>newC
+       3 copy                                                  % STK: x y x cx cy newZX newZY newC newZX newZY newC
+       MAXC gt                                                 % STK: x y x cx cy newZX newZY newC newZX newZY 'newC>MAXC'
+       3 1 roll dup mul exch dup mul add 4 gt                  % STK: x y x cx cy newZX newZY newC 'newC>MAXC' 'newZX*newZX+newZY*newZY>4'
+       or                                                      % STK: x y x cx cy newZX newZY newC 'newC>MAXC or newZX*newZX+newZY*newZY>4'
+       { exit } if                                             % STK: x y x cx cy newZX newZY newC
+     } loop                                             
+     dup MAXC gt { pop 0 } if
+     5 mul MAXC mod MAXC div 0 0 setrgbcolor                   % STK: x y x cx cy newZX newZY
+     pop pop pop pop 54 add exch 144 add PSIZE PSIZE rectfill  % STK: x
+     } for pop                                                 % STK:
+} for
+showpage

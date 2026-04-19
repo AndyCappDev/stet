@@ -2,7 +2,24 @@
 // Copyright (c) 2026 Scott Bowman
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Core type system, storage, tokenizer, and context for the stet PostScript interpreter.
+//! Core type system, storage, tokenizer, and runtime context for the stet
+//! PostScript interpreter.
+//!
+//! This crate provides the PostScript VM building blocks: `PsObject` /
+//! `PsValue`, the interpreter [`Context`](context::Context) (operand /
+//! execution / dictionary stacks, graphics state, VM stores), the arena-
+//! backed `StringStore` / `ArrayStore` / `DictStore` with copy-on-write
+//! save/restore semantics, the `NameTable` name-interning system, the PS
+//! tokenizer, the [`OutputDevice`](device::OutputDevice) trait, file
+//! handles, and the error hierarchy.
+//!
+//! Most users should use the [`stet`](https://crates.io/crates/stet) facade
+//! crate rather than depending on `stet-core` directly. Pull this crate in
+//! only when you need to build alternative PS-interpreter tooling or
+//! implement a custom [`OutputDevice`](device::OutputDevice).
+//!
+//! See the [Architecture Guide](https://github.com/AndyCappDev/stet/blob/main/docs/ARCHITECTURE.md)
+//! for how this crate fits into the broader workspace.
 
 // ── Re-exports from stet-fonts ──────────────────────────────────────────────
 // These modules now live in stet-fonts but are re-exported here for backward

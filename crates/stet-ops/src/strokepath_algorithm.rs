@@ -7,8 +7,6 @@
 //! Produces moveto/lineto/curveto geometry (no tessellation).
 //! Standalone module with no PostScript interpreter dependencies.
 //!
-//! Faithfully ported from PostForge's `strokepath_algorithm.py`.
-//!
 //! Components:
 //! 1. Dash pattern processor (de Casteljau splitting for curves)
 //! 2. Line/curve offset (Tiller-Hanson adaptive subdivision for cubics)

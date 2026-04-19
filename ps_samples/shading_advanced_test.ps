@@ -1,0 +1,268 @@
+%!PS-Adobe-3.0
+%%Title: Advanced Shading Tests (Types 1, 4-7 + Asymmetric Extend)
+%%BoundingBox: 0 0 612 792
+%%EndComments
+
+/Helvetica findfont 9 scalefont setfont
+
+% =====================================================================
+% Test 1: Type 1 Function-Based Shading (2D color field)
+% Uses a Type 0 sampled function with a 4x4 2D grid → 3 RGB outputs
+% Grid maps (x,y) in [0,1]x[0,1] to RGB.
+% x=0,y=0 → red; x=1,y=0 → green; x=0,y=1 → blue; x=1,y=1 → white
+% =====================================================================
+
+% Build a 4x4 grid of RGB samples (4*4*3 = 48 bytes, 8 bps)
+% Grid ordering: x varies fastest (innermost), y slowest (outermost)
+/funcdata1 48 string def
+
+% y=0 row (bottom): red → orange → yellow-green → green
+funcdata1  0 255 put  funcdata1  1   0 put  funcdata1  2   0 put   % (0,0) red
+funcdata1  3 170 put  funcdata1  4  85 put  funcdata1  5   0 put   % (1,0)
+funcdata1  6  85 put  funcdata1  7 170 put  funcdata1  8   0 put   % (2,0)
+funcdata1  9   0 put  funcdata1 10 255 put  funcdata1 11   0 put   % (3,0) green
+
+% y=1 row
+funcdata1 12 170 put  funcdata1 13   0 put  funcdata1 14  85 put
+funcdata1 15 128 put  funcdata1 16  64 put  funcdata1 17  64 put
+funcdata1 18  64 put  funcdata1 19 128 put  funcdata1 20  64 put
+funcdata1 21   0 put  funcdata1 22 170 put  funcdata1 23  85 put
+
+% y=2 row
+funcdata1 24  85 put  funcdata1 25   0 put  funcdata1 26 170 put
+funcdata1 27  64 put  funcdata1 28  64 put  funcdata1 29 128 put
+funcdata1 30  64 put  funcdata1 31 128 put  funcdata1 32 128 put
+funcdata1 33   0 put  funcdata1 34  85 put  funcdata1 35 170 put
+
+% y=3 row (top): blue → purple → cyan → white
+funcdata1 36   0 put  funcdata1 37   0 put  funcdata1 38 255 put   % (0,3) blue
+funcdata1 39  85 put  funcdata1 40  85 put  funcdata1 41 170 put
+funcdata1 42  85 put  funcdata1 43 170 put  funcdata1 44 170 put
+funcdata1 45 255 put  funcdata1 46 255 put  funcdata1 47 255 put   % (3,3) white
+
+<<
+  /ShadingType 1
+  /ColorSpace /DeviceRGB
+  /Domain [0 1 0 1]
+  /Matrix [200 0 0 200 72 570]
+  /Function <<
+    /FunctionType 0
+    /Domain [0 1 0 1]
+    /Range [0 1 0 1 0 1]
+    /Size [4 4]
+    /BitsPerSample 8
+    /DataSource funcdata1
+  >>
+>> shfill
+
+0 setgray
+72 555 moveto (Test 1: Type 1 function-based \(4x4 sampled 2D, R-G-B-W corners\)) show
+
+% =====================================================================
+% Test 2: Type 1 with BBox clipping and grayscale
+% 2x2 grid: dark corners at bottom, light at top
+% =====================================================================
+
+/funcdata2 4 string def
+funcdata2 0  20 put   % (0,0) dark
+funcdata2 1  60 put   % (1,0) medium-dark
+funcdata2 2 180 put   % (0,1) medium-light
+funcdata2 3 250 put   % (1,1) bright
+
+<<
+  /ShadingType 1
+  /ColorSpace /DeviceGray
+  /Domain [0 1 0 1]
+  /Matrix [150 0 0 150 340 570]
+  /BBox [340 570 490 720]
+  /Function <<
+    /FunctionType 0
+    /Domain [0 1 0 1]
+    /Range [0 1]
+    /Size [2 2]
+    /BitsPerSample 8
+    /DataSource funcdata2
+  >>
+>> shfill
+
+0 setgray
+340 555 moveto (Test 2: Type 1 grayscale 2x2 with BBox) show
+
+% =====================================================================
+% Test 3: Axial gradient with asymmetric extend (start only)
+% =====================================================================
+
+<<
+  /ShadingType 2
+  /ColorSpace /DeviceRGB
+  /Coords [150 510 350 510]
+  /Domain [0 1]
+  /Function <<
+    /FunctionType 2
+    /Domain [0 1]
+    /C0 [0.8 0 0.2]
+    /C1 [0.2 0.8 0]
+    /N 1
+  >>
+  /Extend [true false]
+  /BBox [50 490 450 530]
+>> shfill
+
+0 setgray
+50 477 moveto (Test 3: Axial extend=[true false] — start extends, end stops) show
+
+% =====================================================================
+% Test 4: Axial gradient with asymmetric extend (end only)
+% =====================================================================
+
+<<
+  /ShadingType 2
+  /ColorSpace /DeviceRGB
+  /Coords [150 455 350 455]
+  /Domain [0 1]
+  /Function <<
+    /FunctionType 2
+    /Domain [0 1]
+    /C0 [0 0.3 0.9]
+    /C1 [0.9 0.6 0]
+    /N 1
+  >>
+  /Extend [false true]
+  /BBox [50 435 450 475]
+>> shfill
+
+0 setgray
+50 422 moveto (Test 4: Axial extend=[false true] — start stops, end extends) show
+
+% =====================================================================
+% Test 5: Type 4 Free-Form Gouraud Triangle Mesh
+% Two triangles sharing an edge, forming a colored quad
+% Uses array-based DataSource (array of vertex dicts)
+% =====================================================================
+
+<<
+  /ShadingType 4
+  /ColorSpace /DeviceRGB
+  /DataSource [
+    % Triangle 1: 3 new vertices (flag 0)
+    0  72 400  1 0 0     % vertex A: flag=0, (72,400), red
+    0 272 400  0 1 0     % vertex B: flag=0, (272,400), green
+    0 172 320  0 0 1     % vertex C: flag=0, (172,320), blue
+    % Triangle 2: 1 new vertex sharing edge BC (flag 1)
+    1 172 400  1 1 0     % vertex D: flag=1, (172,400), yellow
+  ]
+>> shfill
+
+0 setgray
+72 305 moveto (Test 5: Type 4 Gouraud mesh — two triangles \(R-G-B + Y\)) show
+
+% =====================================================================
+% Test 6: Type 5 Lattice-Form Gouraud Mesh (3x2 grid)
+% Uses array-based DataSource (no flags for Type 5)
+% =====================================================================
+
+<<
+  /ShadingType 5
+  /ColorSpace /DeviceRGB
+  /VerticesPerRow 3
+  /DataSource [
+    % Row 0 (y=290): magenta, yellow, cyan
+    320 290  1 0 1       % v0: magenta
+    420 290  1 1 0       % v1: yellow
+    520 290  0 1 1       % v2: cyan
+    % Row 1 (y=390): white, black, orange
+    320 390  1 1 1       % v3: white
+    420 390  0 0 0       % v4: black
+    520 390  1 0.5 0     % v5: orange
+  ]
+>> shfill
+
+0 setgray
+320 275 moveto (Test 6: Type 5 lattice mesh \(3x2 grid\)) show
+
+% =====================================================================
+% Test 7: Type 6 Coons Patch (single patch)
+% A curved color-blended quad with 12 cubic Bezier control points
+% Uses array-based DataSource
+% =====================================================================
+
+<<
+  /ShadingType 6
+  /ColorSpace /DeviceRGB
+  /DataSource [
+    0                    % flag = 0 (new independent patch)
+
+    % Side 0 (bottom, left to right): 4 control points
+    100 100              % pt0: bottom-left corner
+    150  80              % pt1: control point (curves down)
+    200  80              % pt2: control point
+    250 100              % pt3: bottom-right corner
+
+    % Side 1 (right, bottom to top): 3 control points (pt3 already given)
+    270 140              % pt4
+    270 180              % pt5
+    250 220              % pt6: top-right corner
+
+    % Side 2 (top, right to left): 3 control points (pt6 already given)
+    200 240              % pt7
+    150 240              % pt8
+    100 220              % pt9: top-left corner
+
+    % Side 3 (left, top to bottom): 2 control points (pt9 already given, closes to pt0)
+     80 180              % pt10
+     80 140              % pt11
+
+    % 4 corner colors (corners 0,1,2,3)
+    1 0 0                % corner 0 (pt0): red
+    0 1 0                % corner 1 (pt3): green
+    0 0 1                % corner 2 (pt6): blue
+    1 1 0                % corner 3 (pt9): yellow
+  ]
+>> shfill
+
+0 setgray
+80 65 moveto (Test 7: Type 6 Coons patch — curved quad with color blend) show
+
+% =====================================================================
+% Test 8: Diagonal axial gradient with both asymmetric extends
+% Two side-by-side gradients to compare start-only vs end-only
+% =====================================================================
+
+gsave
+  % Left half: extend start only
+  72 170 moveto 270 170 lineto 270 240 lineto 72 240 lineto closepath clip newpath
+  <<
+    /ShadingType 2
+    /ColorSpace /DeviceRGB
+    /Coords [120 205 220 205]
+    /Domain [0 1]
+    /Function << /FunctionType 2 /Domain [0 1] /C0 [1 0 0] /C1 [0 0 1] /N 1 >>
+    /Extend [true false]
+  >> shfill
+grestore
+
+gsave
+  % Right half: extend end only
+  310 170 moveto 510 170 lineto 510 240 lineto 310 240 lineto closepath clip newpath
+  <<
+    /ShadingType 2
+    /ColorSpace /DeviceRGB
+    /Coords [360 205 460 205]
+    /Domain [0 1]
+    /Function << /FunctionType 2 /Domain [0 1] /C0 [1 0 0] /C1 [0 0 1] /N 1 >>
+    /Extend [false true]
+  >> shfill
+grestore
+
+0 setgray
+72 157 moveto (Test 8: Clipped asymmetric — left=[T F] right=[F T]) show
+
+% =====================================================================
+% Page title
+% =====================================================================
+/Helvetica-Bold findfont 14 scalefont setfont
+0 setgray
+72 760 moveto (Advanced Shading Tests: Types 1, 4, 5, 6 + Asymmetric Extend) show
+
+showpage
+%%EOF

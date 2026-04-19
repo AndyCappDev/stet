@@ -1089,8 +1089,8 @@ fn execjob(
     };
 
     // --- Error handling ---
-    // Like PostForge, check $error/newerror to distinguish real errors from
-    // clean exits (quit sets newerror=false before calling stop).
+    // Check $error/newerror to distinguish real errors from clean exits
+    // (quit sets newerror=false before calling stop).
     let job_result = match &exec_result {
         Err(PsError::Stop) => {
             if is_newerror_set(ctx) {
@@ -1104,7 +1104,7 @@ fn execjob(
         _ => exec_result,
     };
 
-    // --- Job cleanup (always runs, like PostForge's _cleanup_job finally) ---
+    // --- Job cleanup (always runs, like a finally-block) ---
 
     // 1. Flush device BEFORE restore (restore reverts gstate.page_device)
     if let Some(mut dev) = ctx.device.take() {
@@ -1197,7 +1197,7 @@ fn run_init_scripts(ctx: &mut Context) {
     // Ensure sane state regardless of init success/failure:
     // - VM allocation mode should be local (false) after init
     // - End initialization phase — enable access checks
-    // - Set systemdict to read-only (matches PostForge behavior)
+    // - Set systemdict to read-only
     ctx.vm_alloc_mode = false;
     ctx.initializing = false;
     ctx.dicts.set_access(
@@ -1345,7 +1345,8 @@ fn install_device_with_size(
     }
 }
 
-/// Print the operand stack contents to stderr (PostForge format).
+/// Print the operand stack contents to stderr, each object formatted
+/// as `==` would render it, wrapped in `[…]` with comma separators.
 fn print_stack(ctx: &Context) {
     let slice = ctx.o_stack.as_slice();
     if slice.is_empty() {
@@ -1365,7 +1366,8 @@ fn print_stack(ctx: &Context) {
     eprintln!();
 }
 
-/// Print the execution stack contents to stderr (PostForge format).
+/// Print the execution stack contents to stderr in the same `[…]` form
+/// as `print_stack`.
 fn print_exec_stack(ctx: &Context) {
     let slice = ctx.e_stack.as_slice();
     if slice.is_empty() {

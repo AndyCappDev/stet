@@ -1,0 +1,57 @@
+%!PS-Adobe-1.0
+% adapted from a PS file found on the website of Noam Elkies (Harvard university) 
+
+/erath{
+% The procedure erath is invoked with "x erath" where x is some integer. 
+% It returns a boolean array siv of length x+1 (PS arrays are indexed from zero)
+% whose n-th element is "true" if n is prime and "false" otherwise.
+% In this sample application all the primes up to 10000 are printed
+
+% store the argument in the variable x
+  /x exch def
+
+  /siv x 1 add array def
+  2 1 x { siv exch true put  } for
+  0 1 1 { siv exch false put } for
+% initialize the array siv so its 0th and 1st elements are "false", the rest "true"
+
+  2 1 x sqrt{ /p exch def siv p cvi get {
+% loop over primes from 2 to sqrt(x)
+
+  p p add p x {siv exch false put} for
+% set the 2p-th, 3p-th,... elements of siv to false
+
+  }if }for siv
+} def
+
+% first select a font and define a `carriage-return' utility "cr"
+% and a right-justification routine `rightjustify'
+/Times-Roman findfont 8 scalefont setfont
+/leftmargin 30 def
+/pagetop 680 def
+/pagebottom 40 def
+/columnwidth 30 def
+/spacing 10 def
+/cr1{ leftmargin currentpoint spacing sub exch pop moveto }def
+/cr{
+  cr1 currentpoint pagebottom le 
+  {/leftmargin leftmargin columnwidth add def leftmargin pagetop moveto}
+  if pop
+} def
+/rightjustify {dup stringwidth pop neg 0 rmoveto show} def
+
+% run the Sieve on x=10000 and pop siv off the stack
+10000 erath pop
+
+% move to top of 8.5"x11" page and print heading
+230 720 moveto
+(PRIMES UP TO 10000) show leftmargin pagetop moveto
+
+% create a character string "str" to hold the 4-digit primes
+/str (    ) def
+
+% and show them ("cvs" = convert to string)
+2 1 10000 { dup siv exch get {str cvs rightjustify cr} {pop} ifelse} for
+
+% finally print out the page
+showpage

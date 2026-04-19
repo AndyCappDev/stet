@@ -1,0 +1,479 @@
+%!
+%%IncludeFeature: languagelevel 1
+% September 22, 1990
+%
+%                           RESOLUTION BAROMETER
+%                  Dot Addressable Resolution Measurement
+%
+% Author: Allen L. Frazier
+% (c) Copyright 1990 DP-Tek Inc.
+%
+%                          !!! Do Not Modify !!!
+% This program may be used without charge to test or demonstrate
+% Postscript compatable devices, without modification only.
+% All other rights are reserved.
+%
+% DP-Tek, Inc. makes no representations or warranties with respect
+% to the contents hereof and specifically disclaims any implied
+% warranties of merchantability or fitnes for any particular purpose.
+%
+% For information concerning modification or problems contact:
+%
+%                          DP-Tek Inc.
+%                          3031 W. Pawnee
+%                          Wichita, KS  67213
+%                                             (316) 945-8600
+
+initgraphics
+/cntrshow { % string x y
+ /y exch def /x exch def
+  dup stringwidth pop 2 div
+  x exch sub
+  y moveto
+  show } def
+
+
+/elipsh {  1.2 1.0 scale  0 0 20 0 360 arc  stroke } def
+/elipsv {  1.0 1.2 scale  0 0 20 0 360 arc  stroke } def
+72 2400 div setlinewidth
+0 setlinewidth gsave 306 100  translate 0.144 1.5 scale 24 {elipsh} repeat
+grestore gsave 509 396  translate 1.5 0.144 scale 24 {elipsv} repeat
+grestore gsave 109 396  translate 1.5 0.144 scale 24 {elipsv} repeat
+grestore /string256 256 string def /ffill {  1 index sub  exch 255 mul
+0 1 255 { string256 exch dup 4 index mul 3 index add cvi put } for
+pop pop 1 256 8 [1 0 0 256 0 0] {string256} image } bind def
+
+currentscreen /spot exch def pop pop 70 45 /spot load setscreen
+gsave 206 270 translate -90 rotate 15 100 scale 1 0 ffill grestore
+gsave 306 270 translate -90 rotate 15 100 scale 1 0 ffill grestore
+gsave 206 285 translate -90 rotate 15 100 scale 0 1 ffill grestore
+gsave 306 285 translate -90 rotate 15 100 scale 0 1 ffill grestore
+
+85 45 /spot load setscreen
+gsave 206 220 translate -90 rotate 15 100 scale 1 0 ffill grestore
+gsave 306 220 translate -90 rotate 15 100 scale 1 0 ffill grestore
+gsave 206 235 translate -90 rotate 15 100 scale 0 1 ffill grestore
+gsave 306 235 translate -90 rotate 15 100 scale 0 1 ffill grestore
+
+100 45 /spot load setscreen
+gsave 206 170 translate -90 rotate 15 100 scale 1 0 ffill grestore
+gsave 306 170 translate -90 rotate 15 100 scale 1 0 ffill grestore
+gsave 206 185 translate -90 rotate 15 100 scale 0 1 ffill grestore
+gsave 306 185 translate -90 rotate 15 100 scale 0 1 ffill grestore
+gsave
+
+/dxy { transform round exch round exch itransform } def
+
+/dxy_yo { transform round dup cvi 2 mod add 1 add exch round exch itransform }
+def
+
+/dxy_ye { transform round dup cvi 2 mod add exch round exch itransform } def
+
+/dxy_xo { transform round exch round dup cvi 2 mod add 1 add exch itransform }
+def
+
+/dxy_xe { transform round exch round dup cvi 2 mod add exch itransform } def
+
+0.5 0.5 scale 326 550 dxy_yo translate 72 2400 div setlinewidth
+%! /Lucida-Bold findfont 90 scalefont setfont
+/Courier-Bold findfont 90 scalefont setfont
+
+/hlines_ye { 720 -72 25 div 72 { 72 exch dxy_ye moveto 126 0 rlineto stroke }
+for } def
+
+/hlines_yd { 720 -72 25 div 72 { 72 exch dxy_ye yd add dxy moveto 126 0 rlineto
+stroke } for
+  } def
+
+/vlines_xe { 378 72 25 div 378 126 add { 720 dxy_xe moveto 0 -648 rlineto
+stroke } for } def
+
+/vlines_xd { 378 72 25 div 378 126 add { 720 dxy_xe exch xd add exch dxy moveto
+    0 -648 rlineto stroke  } for
+     } def
+
+/printresv { newpath x 10 sub y 48 sub moveto
+                     0 125 rlineto
+                     216 0 rlineto
+                     0 -125 rlineto
+                     closepath
+                     clip newpath hlines_yd
+                     /yd yd neg def hlines_yd
+                     initclip
+                     gsave
+                     1 setlinewidth
+                     198 y 125 add 48 sub moveto 40 0 rlineto stroke
+                     338 y 125 add 48 sub moveto 40 0 rlineto stroke
+                     str 288 y 62 add cntrshow
+                     grestore
+            } def
+
+/printresh { newpath x 12 sub y 48 sub moveto
+                     0 125 rlineto
+                     216 0 rlineto
+                     0 -125 rlineto
+                     closepath
+                     clip newpath vlines_xd
+                     /xd xd neg def vlines_xd
+   initclip } def
+
+hlines_ye
+/Times-Bold findfont 45 scalefont setfont
+
+% /str (1200) def
+% 82 720 -100 add dxy
+% /y exch def
+% /x exch def
+% /yd 72 1199 div def
+% printresv
+
+/str (1000) def
+82 720 -100 add dxy
+/y exch def
+/x exch def
+/yd 72 999 div def
+printresv
+
+/str (800) def
+82 720 -225 add dxy
+/y exch def
+/x exch def
+/yd 72 799 div def
+printresv
+
+/str (600) def
+82 720 -350 add dxy
+/y exch def
+/x exch def
+/yd 72 599 div def
+printresv
+
+/str (400) def
+82 720 -475 add dxy
+/y exch def
+/x exch def
+/yd 72 399 div def
+printresv
+
+/str (300) def
+82 720 -600 add dxy
+/y exch def
+/x exch def
+/yd 72 299 div def
+printresv
+
+vlines_xe
+
+% /str (1200) def
+% 300 720 -100 add dxy
+% /y exch def
+% /x exch def
+% /xd 72 1199 div def
+% printresh
+
+/str (1000) def
+300 720 -100 add dxy
+/y exch def
+/x exch def
+/xd 72 999 div def
+printresh
+
+/str (800) def
+300 720 -225 add dxy
+/y exch def
+/x exch def
+/xd 72 799 div def
+printresh
+
+/str (600) def
+300 720 -350 add dxy
+/y exch def
+/x exch def
+/xd 72 599 div def
+printresh
+
+/str (400) def
+300 720 -475 add dxy
+/y exch def
+/x exch def
+/xd 72 399 div def
+printresh
+
+/str (300) def
+300 720 -600 add dxy
+/y exch def
+/x exch def
+/xd 72 299 div def
+printresh
+grestore
+
+/Times-Bold findfont 30 scalefont setfont
+  (RESOLUTION  BAROMETER)
+  306 716 cntrshow
+/Times-Bold findfont 20 scalefont setfont
+  (Dot Addressable Resolution Measurement)
+  306 686 cntrshow
+/Times-Bold findfont 10 scalefont setfont
+%  (Horizontal Resolution       Vertical Resolution)
+  (Vertical Resolution)
+  230 646 cntrshow
+  (Horizontal Resolution)
+  383 646 cntrshow
+/Times-Bold findfont 10 scalefont setfont
+  (70 Line Halftone)
+  306 290 cntrshow
+/Times-Bold findfont 10 scalefont setfont
+  (85 Line Halftone)
+  306 240 cntrshow
+/Times-Bold findfont 10 scalefont setfont
+  (100 Line Halftone)
+  306 190 cntrshow
+
+/Courier findfont 8 scalefont setfont
+  ((C) Copyright 1990, DP-TEK Inc.)
+  106 16 cntrshow
+
+
+showpage
+
+%!
+% September 22, 1990
+%
+%                           RESOLUTION BAROMETER
+%                  Dot Addressable Resolution Measurement
+%
+% Author: Allen L. Frazier
+% (c) Copyright 1990 DP-Tek Inc.
+%
+%                          !!! Do Not Modify !!!
+% This program may be used without charge to test or demonstrate
+% Postscript compatable devices, without modification only.
+% All other rights are reserved.
+%
+% DP-Tek, Inc. makes no representations or warranties with respect
+% to the contents hereof and specifically disclaims any implied
+% warranties of merchantability or fitnes for any particular purpose.
+%
+% For information concerning modification or problems contact:
+%
+%                          DP-Tek Inc.
+%                          3031 W. Pawnee
+%                          Wichita, KS  67213
+%                                             (316) 945-8600
+
+% Program modified to handle changes in Adobe PostScript Level 2
+% currentscreen and setscreen commands from Level 1.  The modifications
+% also work with Level 1.  Telephonic permission to make these changes
+% was given by DP-Tek October 5, 1995, 11:30AM.
+
+/cntrshow { % string x y
+ /y exch def /x exch def
+  dup stringwidth pop 2 div
+  x exch sub
+  y moveto
+  show } def
+
+
+/elipsh {  1.2 1.0 scale  0 0 20 0 360 arc  stroke } def
+/elipsv {  1.0 1.2 scale  0 0 20 0 360 arc  stroke } def
+72 2400 div setlinewidth
+0 setlinewidth gsave 306 100  translate 0.144 1.5 scale 24 {elipsh} repeat
+grestore gsave 509 396  translate 1.5 0.144 scale 24 {elipsv} repeat
+grestore gsave 109 396  translate 1.5 0.144 scale 24 {elipsv} repeat
+grestore /string256 256 string def /ffill {  1 index sub  exch 255 mul
+0 1 255 { string256 exch dup 4 index mul 3 index add cvi put } for
+pop pop 1 256 8 [1 0 0 256 0 0] {string256} image } bind def
+
+currentscreen /spot exch def pop pop 70 45 /spot load setscreen
+gsave 206 270 translate -90 rotate 15 100 scale 1 0 ffill grestore
+gsave 306 270 translate -90 rotate 15 100 scale 1 0 ffill grestore
+gsave 206 285 translate -90 rotate 15 100 scale 0 1 ffill grestore
+gsave 306 285 translate -90 rotate 15 100 scale 0 1 ffill grestore
+
+85 45 /spot load setscreen
+gsave 206 220 translate -90 rotate 15 100 scale 1 0 ffill grestore
+gsave 306 220 translate -90 rotate 15 100 scale 1 0 ffill grestore
+gsave 206 235 translate -90 rotate 15 100 scale 0 1 ffill grestore
+gsave 306 235 translate -90 rotate 15 100 scale 0 1 ffill grestore
+
+100 45 /spot load setscreen
+gsave 206 170 translate -90 rotate 15 100 scale 1 0 ffill grestore
+gsave 306 170 translate -90 rotate 15 100 scale 1 0 ffill grestore
+gsave 206 185 translate -90 rotate 15 100 scale 0 1 ffill grestore
+gsave 306 185 translate -90 rotate 15 100 scale 0 1 ffill grestore
+gsave
+
+/dxy { transform round exch round exch itransform } def
+
+/dxy_yo { transform round dup cvi 2 mod add 1 add exch round exch itransform }
+def
+
+/dxy_ye { transform round dup cvi 2 mod add exch round exch itransform } def
+
+/dxy_xo { transform round exch round dup cvi 2 mod add 1 add exch itransform }
+def
+
+/dxy_xe { transform round exch round dup cvi 2 mod add exch itransform } def
+
+0.5 0.5 scale 326 550 dxy_yo translate 72 2400 div setlinewidth
+%! /Lucida-Bold findfont 90 scalefont setfont
+/Courier-Bold findfont 90 scalefont setfont
+
+/hlines_ye { 720 -72 25 div 72 { 72 exch dxy_ye moveto 126 0 rlineto stroke }
+for } def
+
+/hlines_yd { 720 -72 25 div 72 { 72 exch dxy_ye yd add dxy moveto 126 0 rlineto
+stroke } for
+  } def
+
+/vlines_xe { 378 72 25 div 378 126 add { 720 dxy_xe moveto 0 -648 rlineto
+stroke } for } def
+
+/vlines_xd { 378 72 25 div 378 126 add { 720 dxy_xe exch xd add exch dxy moveto
+    0 -648 rlineto stroke  } for
+     } def
+
+/printresv { newpath x 10 sub y 48 sub moveto
+                     0 125 rlineto
+                     216 0 rlineto
+                     0 -125 rlineto
+                     closepath
+                     clip newpath hlines_yd
+                     /yd yd neg def hlines_yd
+                     initclip
+                     gsave
+                     1 setlinewidth
+                     198 y 125 add 48 sub moveto 40 0 rlineto stroke
+                     338 y 125 add 48 sub moveto 40 0 rlineto stroke
+                     str 288 y 62 add cntrshow
+                     grestore
+            } def
+
+/printresh { newpath x 12 sub y 48 sub moveto
+                     0 125 rlineto
+                     216 0 rlineto
+                     0 -125 rlineto
+                     closepath
+                     clip newpath vlines_xd
+                     /xd xd neg def vlines_xd
+   initclip } def
+
+hlines_ye
+/Times-Bold findfont 45 scalefont setfont
+
+% /str (1200) def
+% 82 720 -100 add dxy
+% /y exch def
+% /x exch def
+% /yd 72 1199 div def
+% printresv
+
+/str (1000) def
+82 720 -100 add dxy
+/y exch def
+/x exch def
+/yd 72 999 div def
+printresv
+
+/str (800) def
+82 720 -225 add dxy
+/y exch def
+/x exch def
+/yd 72 799 div def
+printresv
+
+/str (600) def
+82 720 -350 add dxy
+/y exch def
+/x exch def
+/yd 72 599 div def
+printresv
+
+/str (400) def
+82 720 -475 add dxy
+/y exch def
+/x exch def
+/yd 72 399 div def
+printresv
+
+/str (300) def
+82 720 -600 add dxy
+/y exch def
+/x exch def
+/yd 72 299 div def
+printresv
+
+vlines_xe
+
+% /str (1200) def
+% 300 720 -100 add dxy
+% /y exch def
+% /x exch def
+% /xd 72 1199 div def
+% printresh
+
+/str (1000) def
+300 720 -100 add dxy
+/y exch def
+/x exch def
+/xd 72 999 div def
+printresh
+
+/str (800) def
+300 720 -225 add dxy
+/y exch def
+/x exch def
+/xd 72 799 div def
+printresh
+
+/str (600) def
+300 720 -350 add dxy
+/y exch def
+/x exch def
+/xd 72 599 div def
+printresh
+
+/str (400) def
+300 720 -475 add dxy
+/y exch def
+/x exch def
+/xd 72 399 div def
+printresh
+
+/str (300) def
+300 720 -600 add dxy
+/y exch def
+/x exch def
+/xd 72 299 div def
+printresh
+grestore
+
+/Times-Bold findfont 30 scalefont setfont
+  (RESOLUTION  BAROMETER)
+  306 716 cntrshow
+/Times-Bold findfont 20 scalefont setfont
+  (Dot Addressable Resolution Measurement)
+  306 686 cntrshow
+/Times-Bold findfont 10 scalefont setfont
+%  (Horizontal Resolution       Vertical Resolution)
+  (Vertical Resolution)
+  230 646 cntrshow
+  (Horizontal Resolution)
+  383 646 cntrshow
+/Times-Bold findfont 10 scalefont setfont
+  (70 Line Halftone)
+  306 290 cntrshow
+/Times-Bold findfont 10 scalefont setfont
+  (85 Line Halftone)
+  306 240 cntrshow
+/Times-Bold findfont 10 scalefont setfont
+  (100 Line Halftone)
+  306 190 cntrshow
+
+/Courier findfont 8 scalefont setfont
+  ((C) Copyright 1990, DP-TEK Inc.)
+  106 16 cntrshow
+
+
+showpage
+

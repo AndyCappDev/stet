@@ -4339,8 +4339,8 @@ fn emit_text_element_with_fm(
         fm.ty * fm_scale,
     ];
 
-    // Compute effective device-space font size
-    // PostForge: point_size × sqrt(scale_x × scale_y)
+    // Compute effective device-space font size:
+    // point_size × sqrt(scale_x × scale_y)
     let point_size = fm.a * fm_scale;
     let ctm = ctx.gstate.ctm;
     let scale_x = (ctm.a * ctm.a + ctm.b * ctm.b).sqrt();
@@ -4659,20 +4659,19 @@ mod tests {
     use stet_core::context::Context;
 
     fn test_ctx_with_font() -> Option<Context> {
-        let font_path = std::path::Path::new(
-            "/home/scott/Projects/postforge/postforge/resources/Font/NimbusSans-Regular.t1",
-        );
+        let font_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../resources/Font");
+        let font_path = font_dir.join("NimbusSans-Regular.t1");
         if !font_path.exists() {
             return None;
         }
 
         let mut ctx = Context::new();
         crate::build_system_dict(&mut ctx);
-        ctx.font_resource_path =
-            Some("/home/scott/Projects/postforge/postforge/resources/Font".to_string());
+        ctx.font_resource_path = Some(font_dir.to_string_lossy().into_owned());
 
         // Load and scale font: Helvetica 12pt
-        let font_data = std::fs::read(font_path).ok()?;
+        let font_data = std::fs::read(&font_path).ok()?;
         let font_obj = stet_core::font_loader::load_type1_font(&mut ctx, &font_data).ok()?;
 
         // Scale by 12

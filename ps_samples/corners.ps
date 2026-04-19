@@ -1,0 +1,100 @@
+%%%%%%%%%% GUTIL13A.PTL EXCERPTS %%%%%%%%%%
+% superstroke and superinsidestroke take a predefined path and a top-of-stack
+% array of [width1 gray1 width2 gray2 .. widthn grayn] and do multiple strokes
+% for wires, fancy borders, or braiding. Note that the FIRST array value pair has to
+% be the WIDEST, etc. Use superstroke for wires; superinsidestroke for borders.
+/superstroke { save /sssnap exch def /sscmd exch def mark 0 2 sscmd length 2
+div cvi 1 sub 2 mul {/aposn exch def gsave sscmd aposn get setlinewidth sscmd
+aposn 1 add get setgray stroke grestore} for cleartomark sssnap restore newpath}
+def
+/flushends {0 setlinecap} def % rounded path ends
+/roundjoins {1 setlinejoin} def % rounded path joins
+% This creates a rounded path from -radius- [x1 y1 x2 y2 ... xn yn] roundpath.
+% Does NOT round path ends.
+/roundpath {/rpdata exch def /rprad exch def rpdata length 1 sub cvi /rppoints
+exch def rpdata 0 get rpdata 1 get moveto 2 2 rppoints 2 sub {/rpvalue exch def 0
+1 3 {rpdata exch rpvalue add get } for rprad arcto pop pop pop pop} for rpdata
+rppoints 1 sub get rpdata rppoints get lineto} def
+%%%%%%%%%% END GUTIL13A.PTL EXCERPTS %%%%%%%%%%
+%SOME HINTS: Here are more examples of some serendipitous border code...
+/ss {[5 0 2.5 1 0.6 0] superstroke} def flushends roundjoins
+0 -50 translate
+% Top row has OUTSIDE TRIANGLE
+/path { [0 70 0 120 -20 100 30 100 ] roundpath} def
+gsave 80 0 translate -6 path ss grestore
+gsave 150 0 translate 0 path ss grestore
+gsave 220 0 translate 5 path ss grestore
+gsave 290 0 translate 8 path ss grestore
+gsave 360 0 translate 10 path ss grestore
+gsave 430 0 translate 11 path ss grestore
+gsave 505 0 translate 16 path ss grestore
+% Second row has FLAT INSIDE NOTCH
+/path { [0 50 0 80 20 80 20 100 60 100 ] roundpath} def
+gsave 80 100 translate -12 path ss grestore
+gsave 150 100 translate 0 path ss grestore
+gsave 220 100 translate 5 path ss grestore
+gsave 290 100 translate 10 path ss grestore
+gsave 360 100 translate 15.8 path ss grestore
+gsave 430 100 translate 19.9 path ss grestore
+gsave 505 100 translate 25 path ss grestore
+
+% Third row has ANGLED INSIDE NOTCH
+/path { [0 50 0 80 30 70 20 100 50 100 ] roundpath} def
+gsave 80 200 translate -10 path ss grestore
+gsave 150 200 translate 0 path ss grestore
+gsave 220 200 translate 5 path ss grestore
+gsave 290 200 translate 8 path ss grestore
+gsave 360 200 translate 15 path ss grestore
+gsave 430 200 translate 19.9 path ss grestore
+/path { [0 40 0 80 30 70 20 100 60 100 ] roundpath} def
+gsave 505 200 translate 25 path ss grestore
+% Fourth row has INSIDE LOOP
+/path {[0 60 0 100 20 100 20 80 0 80 0 100 40 100] roundpath} def
+gsave 80 300 translate -12 path ss grestore
+gsave 150 300 translate 0 path ss grestore
+gsave 220 300 translate 5 path ss grestore
+gsave 290 300 translate 10 path ss grestore
+gsave 360 300 translate 15.8 path ss grestore
+gsave 430 300 translate 19.9 path ss grestore
+/path {[0 60 0 100 10 100 10 90 0 90 0 100 40 100] roundpath} def
+gsave 505 300 translate 17.5 path ss grestore
+% Fifth row has OUTSIDE LOOP
+/path { [0 60 0 100 -20 100 -20 80 20 80 ] roundpath} def
+gsave 80 400 translate -12 path ss grestore
+gsave 150 400 translate 0 path ss grestore
+gsave 220 400 translate 5 path ss grestore
+gsave 290 400 translate 10 path ss grestore
+gsave 360 400 translate 15.5 path ss grestore
+gsave 420 400 translate 19.9 path ss grestore
+/path { [0 50 0 100 -20 100 -20 80 20 80 ] roundpath} def
+gsave 495 400 translate 22 path ss grestore
+% Sixth row has OUTSIDE TRIANGLE
+/path { [0 60 0 90 20 90 30 70 10 80 10 100 40 100 ] roundpath} def
+gsave 80 500 translate -10 path ss grestore
+gsave 150 500 translate 0 path ss grestore
+gsave 220 500 translate 5 path ss grestore
+gsave 290 500 translate 8 path ss grestore
+gsave 360 500 translate 9.9 path ss grestore
+gsave 430 500 translate 11 path ss grestore
+gsave 505 500 translate 16 path ss grestore
+% Seventh row has OFFSET INSIDE LOOP
+/path { [0 60 0 90 20 90 20 80 10 80 10 100 40 100 ] roundpath} def
+gsave 80 600 translate -10 path ss grestore
+gsave 150 600 translate 0 path ss grestore
+gsave 220 600 translate 5 path ss grestore
+gsave 290 600 translate 8 path ss grestore
+gsave 360 600 translate 9.9 path ss grestore
+gsave 430 600 translate 11 path ss grestore
+gsave 505 600 translate 16 path ss grestore
+
+% Bottom row has INSIDE TRAPAZOID
+/path {[0 60 0 100 20 100 30 70 0 80 0 100 40 100] roundpath} def
+gsave 80 700 translate -12 path ss grestore
+gsave 150 700 translate 0 path ss grestore
+gsave 220 700 translate 5 path ss grestore
+gsave 290 700 translate 10 path ss grestore
+gsave 360 700 translate 15.8 path ss grestore
+gsave 430 700 translate 19.9 path ss grestore
+/path {[0 60 0 100 10 100 10 90 0 90 0 100 40 100] roundpath} def
+gsave 505 700 translate 17.5 path ss grestore
+grestore showpage

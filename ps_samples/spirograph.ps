@@ -1,0 +1,35 @@
+% This is the magic epicycloid positioning code...
+letter
+/cposn { /ang exch def a b sub ang cos mul a b sub b div ang mul cos b mul
+penarm mul add a b sub ang sin mul a b sub b div ang mul sin b mul penarm mul
+sub} def
+
+% And this routine takes care of calling it...
+
+/drawspiro {newpath a b 1 penarm sub mul sub 0 moveto 0 res maxang 360 mul
+cvi { cposn lineto currentpoint stroke moveto} for} def
+
+% /// demo - remove or alter before reuse. ///
+
+310 400 translate               % position on page
+0.7 setlinewidth                % pensize
+1 setlinejoin                   % round joints
+1 setlinecap                    % round line caps
+
+/a 96 def                       % inside wheel diameter
+/b 75 def                       % outside wheel diameter
+/maxang 25 def                  % number of go-rounds needed
+/res 8 def                      % degrees resolution per increment
+/penarm 0.8 def                 % pen arm as ratio of outside wheel radius
+
+drawspiro                       % draw the frosting on the bagel
+
+/a 96 def                       % inside wheel diameter
+/b -15 def                      % outside wheel diameter
+/maxang 5 def                   % number of go-rounds needed
+/res 2 def                      % degress resolution per increment
+/penarm 1 def                   % pen arm as ratio of outside wheel radius
+
+drawspiro                       % draw the bagel itself
+
+showpage %quit

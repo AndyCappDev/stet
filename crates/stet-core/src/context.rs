@@ -247,7 +247,6 @@ pub struct Context {
 
 impl Context {
     /// Execute a PostScript procedure synchronously and return.
-    /// Equivalent to PostForge's `exec_exec()`.
     pub fn exec_sync(&mut self, proc_obj: PsObject) -> Result<(), PsError> {
         let f = self.exec_sync_fn.expect("exec_sync not initialized");
         f(self, proc_obj)
@@ -312,9 +311,9 @@ impl Context {
         let local_resources = dicts.allocate(20, b"LocalResources");
         let category_registry = dicts.allocate_with(30, b"CategoryRegistry", 0, true, 0);
 
-        // Parameter dicts — pre-populate user_params with recognized keys
-        // (matching PostForge context_init.py). setuserparams only updates
-        // existing keys; unknown keys are ignored per PLRM.
+        // Parameter dicts — pre-populate user_params with recognized keys.
+        // setuserparams only updates existing keys; unknown keys are
+        // ignored per PLRM.
         let user_params = dicts.allocate(25, b"UserParams");
         for key_name in [
             "MaxDictStack",
@@ -674,7 +673,7 @@ impl Context {
             PsValue::Bool(v) => Ok(DictKey::Bool(v)),
             PsValue::String { entity, start, len } => {
                 // Intern string as name — PostScript treats string and name
-                // keys as equivalent in dict lookups (matching PostForge behavior)
+                // keys as equivalent in dict lookups.
                 let bytes = self.strings.get(entity, start, len).to_vec();
                 let name_id = self.names.intern(&bytes);
                 Ok(DictKey::Name(name_id))

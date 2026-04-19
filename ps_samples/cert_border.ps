@@ -1,0 +1,23 @@
+letter
+
+/bline {gsave -0.5 0 moveto 0.3 -0.6 0.7 -0.6 1 0 rcurveto stroke
+grestore} def
+
+/bloop { gsave -0.5 0 moveto -1 3 1 3 0 0 rcurveto stroke grestore} def
+
+/bcorner { gsave 0 -0.8 moveto 0.4 0.15 0.1 0.6 0 0.8 rcurveto -3.8 1.8
+-1.8 3.8 0 0 rcurveto 0.2 -0.1 0.65 -0.4 0.8 0 rcurveto stroke grestore} def
+/drawscrollborder {borderlinewidth borderthickness div 0.37 div
+setlinewidth gsave translate borderthickness .37 mul dup scale 2.25
+hloops 1 sub 0.0 mul add 3.853 vloops 1 sub 1 mul add translate bcorner
+1.3 0 translate hloops 1 sub {bloop bline 1 0 translate } repeat bloop 0.3
+0 translate -90 rotate bcorner 1.3 0 translate vloops 1 sub {bloop bline 1
+0 translate } repeat bloop 0.3 0 translate -90 rotate bcorner 1.3 0
+translate hloops 1 sub {bloop bline 1 0 translate} repeat bloop 0.3 0
+translate -90 rotate bcorner 1.3 0 translate vloops 1 sub {bloop bline 1 0
+translate } repeat bloop grestore} def
+
+% /// demo - remove before use. ///
+/borderthickness 50 def /borderlinewidth 0.5 def /hloops 34 def /vloops
+25 def -90 rotate -792 0 translate % for landscape
+37 28 drawscrollborder showpage

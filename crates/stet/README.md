@@ -1,10 +1,10 @@
 # stet
 
-A PostScript Level 3 interpreter written in Rust.
+A PostScript Level 3 interpreter and PDF rendering engine written in Rust.
 
-**stet** renders PostScript and EPS files to RGBA pixels, PDF, or display lists.
-All resources (35 fonts, init scripts, encodings, ICC profiles) are embedded in
-the binary — no external files needed.
+**stet** renders PostScript, EPS, and PDF files to RGBA pixels, PDF output, or
+display lists. All resources (35 fonts, init scripts, encodings, ICC profiles)
+are embedded in the binary — no external files needed.
 
 ## Quick Start
 
@@ -12,6 +12,8 @@ the binary — no external files needed.
 [dependencies]
 stet = "0.1"
 ```
+
+### PostScript / EPS
 
 ```rust
 use stet::Interpreter;
@@ -27,6 +29,39 @@ fn main() -> Result<(), stet::StetError> {
     Ok(())
 }
 ```
+
+### PDF
+
+PDF reading lives in the companion [`stet-pdf-reader`](https://crates.io/crates/stet-pdf-reader)
+crate and is deliberately **independent of `stet`** — it does not depend on the
+PostScript interpreter at all, so PDF-only users don't pay for the VM:
+
+```toml
+[dependencies]
+stet-pdf-reader = "0.1"
+```
+
+```rust
+use stet_pdf_reader::PdfDocument;
+
+let data = std::fs::read("document.pdf")?;
+let doc = PdfDocument::from_bytes(&data)?;
+
+for page in 0..doc.page_count() {
+    // DisplayList — same type the PS interpreter produces.
+    let display_list = doc.render_page(page, 300.0)?;
+
+    // …or go straight to RGBA with the `render` feature (default):
+    let (rgba, w, h) = doc.render_page_to_rgba(page, 300.0)?;
+}
+```
+
+Because both `stet` and `stet-pdf-reader` produce the same
+`DisplayList` type, every downstream consumer (rasterizer, PDF writer,
+custom output device) works with both sources interchangeably.
+
+See [`crates/stet/examples/`](https://github.com/AndyCappDev/stet/tree/main/crates/stet/examples)
+for runnable `render_ps`, `render_pdf`, and `display_list` programs.
 
 ## Output Modes
 
@@ -147,12 +182,16 @@ stet::ps_exec(ctx, b"/greeting (Hello, PostScript!) def greeting print")?;
 |-------|------|
 | `stet` | Batteries-included library API (this crate) |
 | `stet-core` | Interpreter infrastructure: types, VM, tokenizer |
-| `stet-ops` | ~268 PostScript operator implementations |
+| `stet-ops` | ~320 PostScript operator implementations |
 | `stet-engine` | Execution engine (eval loop) |
 | `stet-fonts` | Font parsing (Type 1, CFF, TrueType) |
 | `stet-graphics` | Display list, color types, ICC |
-| `stet-render` | tiny-skia rendering backend |
-| `stet-pdf` | PDF output device |
+| `stet-render` | `stet-tiny-skia` rendering backend |
+| `stet-pdf` | PDF output device (display list → PDF) |
+| `stet-pdf-reader` | PDF input parser (PDF → display list), independent of `stet-core` |
+| `stet-viewer` | Interactive egui desktop viewer |
+| `stet-cli` | Command-line `stet` binary |
+| `stet-tiny-skia` / `-path` | Vendored tiny-skia fork (BSD-3-Clause) |
 
 ## License
 

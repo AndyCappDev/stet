@@ -1,0 +1,102 @@
+% Utility and demo to find the approximate length of a single Bezier (curveto)
+% cubic spline curve. This opens up all sorts of new design opportunities,
+% especially when fitting text between two arbitrary curves.
+% WARNING: Two way comm channel required for host length reporting.
+% Demo to find the length along a Bezier curve and selected parametric points
+% along a curve. Being able to use SELECTED PORTIONS of a SINGLE Bezier curve
+% opens up all sorts of new possibilities. Not the least of which is forcing text
+% between two arbitrary curves.
+
+% Theory#1: For a parametric curve of x(t) = axt^3 + bxt^2 + cxt + x0 and
+% y(t) = ayt^3 + byt^2 + cyt + y0 along with a Bezier graphing space of x0,y0,
+% x1,y1, x2,y2, and x3,y3, simultaneous solution yields
+
+% cx = 3(x1-x0) bx = 3x2 -6x1 +3x0 ax = x3 -3x2 +3x1 -x0
+% cy = 3(y1-y0) by = 3y2 -6y1 +3y0 ay = y3 -3y2 +3y1 -y0
+
+% This transforms you from graph to equation space.
+
+% Theory#2: To approximate nearly any messy curve, break the curve up into
+% straight line segments and add up their total length. The answer will always be
+% a tad low, but usually converges very quickly.
+
+% DEMO COPY OF MY SETGRID ROUTINES from #102 UTILITY.GPS ...
+
+%letter
+
+/quadpixel {transform 4 div round 4 mul itransform} def
+
+/setgrid {save /rubbersnap exch def quadpixel /size exch def quadpixel exch
+quadpixel exch translate size dup scale} def
+
+/drawlines {72 300 div lw mul size div setlinewidth /hposs 0 def #hlines gs div 1
+add cvi {hposs 0 moveto 0 #vlines rlineto stroke /hposs hposs gs add def} repeat
+/vposs 0 def #vlines gs div 1 add cvi {0 vposs moveto #hlines 0 rlineto stroke
+/vposs vposs gs add def} repeat} def
+
+/showgrid{ seegrid {gsave /#vlines exch def /#hlines exch def 106 45 {pop pop 0}
+setscreen 0.9 setgray /gs 1 def /lw 1 def drawlines fat5 {/gs 5 def /lw 3 def
+drawlines} if fatter10 {/gs 10 def /lw 5 def drawlines} if grestore}if} def
+
+/fat5 true def /fatter10 true def /seegrid true def
+
+% pcurveto grabs the parameters for a curveto
+
+/pcurveto {6 copy /y3 exch def /x3 exch def /y2 exch def /x2 exch def /y1 exch def
+/x1 exch def currentpoint /y0 exch def /x0 exch def curveto} def
+
+% xtt finds x(t) given t in the range of 0 to 1 ...
+
+/xtt {x3 x2 3 mul sub x1 3 mul add x0 sub tt 3 exp mul x2 3 mul x1 6 mul neg
+add x0 3 mul add tt dup mul mul add x1 3 mul x0 3 mul neg add tt mul add x0
+add} def
+
+% ytt finds y(t) given t in the range of 0 to 1 ...
+
+/ytt {y3 y2 3 mul sub y1 3 mul add y0 sub tt 3 exp mul y2 3 mul y1 6 mul neg add
+y0 3 mul add tt dup mul mul add y1 3 mul y0 3 mul neg add tt mul add y0 add}
+def
+
+% plotdots is used in the demo to show the position of t along the curve.
+% In general, t changes more quickly along the "more bent" portions.
+
+/numpoints 100 def % default - usually fast and 0.1 percent accurate
+/dotsize 0.12 def % default
+
+/plotdots {0 1 numpoints 1 sub div 1.00001 {/tt exch def xtt ytt dotsize 0 360 arc
+fill} for }def
+
+% bezierlength finds the length of a Bezier curve routed through pcurveto and
+% leaves that length on the stack. It works by breaking the curve up into straight
+% line approximate segments.
+
+/bezierlength {/oldx x0 def /oldy y0 def /blength 0 def 0 1 numpoints 1 sub div
+1.0001 {/tt exch def xtt ytt /newy exch def /newx exch def newx oldx sub dup mul
+newy oldy sub dup mul add sqrt blength add /blength exch def /oldy newy def
+/oldx newx def} for }def
+
+% //// demo - remove or alter before reuse ////
+
+100 200 30 setgrid 10 10 showgrid % Draw a pretty 20 x 20 grid
+
+% Draw a desired single Bezier curve, saving key values ...
+
+0 setlinewidth
+0 0 moveto
+1 18 9 -8 10 10 pcurveto % your Bezier curve goes here
+stroke
+
+% Show dots for incremental value of Bezier z from 0 to 1 ...
+
+/numpoints 23 def % pick the number of segments
+plotdots % and plot them
+
+% Find the approximate length of the curve and report to host ...
+
+1500 {37 sin pop} repeat % optional host reporting delay
+
+bezierlength % calculate length
+blength == flush % report to host
+
+% reported length for the curve shown: 21.585
+showpage

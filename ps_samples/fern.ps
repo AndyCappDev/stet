@@ -1,0 +1,24 @@
+letter
+/problistcreate {mark /counter 0 def probabilities {128 mul round cvi
+{transforms counter get} repeat /counter counter 1 add def} forall
+counttomark 128 sub neg dup 0 gt { [1 0 0 1 0 0] repeat} {pop} ifelse]
+/problist exch def} bind def
+/doit {problistcreate 1 1 20 {problist rand -24 bitshift get transform 2 copy
+moveto 0.001 10 rlineto} repeat newpath numdots {problist rand -24 bitshift
+get transform 2 copy moveto 0.001 0 rlineto stroke} repeat} bind def
+
+% /// demo - remove before use. ///
+/numdots 250000 def % increase for denser image; decrease to print faster
+/transforms [
+[0 0 0 .16 0 0]
+[.2 .23 -.26 .22 0 1.6]
+[-.15 .26 .28 .24 0 .44]
+[.85 -.04 .04 .85 0 1.6]
+] def
+/probabilities [ .01 .07 .07 .85 ] def
+1 setlinecap
+0 setlinewidth
+300 100 translate
+60 dup scale
+doit
+showpage

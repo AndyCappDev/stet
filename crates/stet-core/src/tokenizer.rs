@@ -409,7 +409,7 @@ impl<'a> Tokenizer<'a> {
 
 // ─── Standalone helpers (shared by slice-based and streaming tokenizers) ─────
 
-/// PostScript whitespace: all bytes ≤ 0x20 (matching PostForge).
+/// PostScript whitespace: all bytes ≤ 0x20.
 fn is_whitespace(b: u8) -> bool {
     b <= b' '
 }

@@ -4,7 +4,7 @@
 # Usage:
 #   ./scripts/pixeldiff.sh [OPTIONS] [FILE ...]
 #
-# If no files specified, compares all samples/*.ps and samples/*.eps.
+# If no files specified, compares all ps_samples/*.ps and ps_samples/*.eps.
 #
 # Options:
 #   -d, --dpi DPI        Render resolution (default: 150)
@@ -77,7 +77,7 @@ fi
 if [[ ${#FILES[@]} -eq 0 ]]; then
     while IFS= read -r -d '' f; do
         FILES+=("$f")
-    done < <(find samples/ -maxdepth 1 \( -name '*.ps' -o -name '*.eps' \) -print0 | sort -z)
+    done < <(find ps_samples/ -maxdepth 1 \( -name '*.ps' -o -name '*.eps' \) -print0 | sort -z)
 fi
 
 if [[ ${#FILES[@]} -eq 0 ]]; then

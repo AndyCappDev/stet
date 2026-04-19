@@ -22,7 +22,7 @@ use crate::type_ops::write_obj_equal;
 
 /// Resolve a relative filename against likely directories.
 ///
-/// Fallback chain (matches PostForge's `_resolve_filename`):
+/// Fallback chain:
 /// 1. Absolute or exists as-is → return it
 /// 2. Exec stack walk → scan for File entries, try parent directory of innermost real file
 /// 3. Resource base path → try `resource_base_path/filename`
@@ -51,7 +51,7 @@ pub(crate) fn resolve_filename(ctx: &Context, filename: &str) -> String {
                     return candidate.to_string_lossy().to_string();
                 }
             }
-            // Only check the innermost real file (matches PostForge)
+            // Only check the innermost real file
             break;
         }
     }
@@ -562,9 +562,9 @@ pub fn op_currentfile(ctx: &mut Context) -> Result<(), PsError> {
 
 /// `line`: file → int (return current line number)
 ///
-/// PostForge extension. Returns the current line number (1-based) of the
-/// source being scanned. Line numbers are tracked per-file as the tokenizer
-/// processes newlines (CR, LF, CR-LF, FF).
+/// Non-standard extension. Returns the current line number (1-based) of
+/// the source being scanned. Line numbers are tracked per-file as the
+/// tokenizer processes newlines (CR, LF, CR-LF, FF).
 pub fn op_line(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.o_stack.is_empty() {
         return Err(PsError::StackUnderflow);

@@ -1,0 +1,524 @@
+%!PS-Adobe-3.0
+%%Title: CIE Decode Procedures & DEF/DEFG Test
+%%BoundingBox: 0 0 500 700
+%%EndComments
+
+% Visual test for CIE DecodeABC, DecodeLMN, DecodeA procedures,
+% and CIEBasedDEF / CIEBasedDEFG color spaces.
+%
+% Each section shows pairs of swatches that should match if the
+% decode pipeline is working correctly.
+
+/Helvetica findfont 10 scalefont setfont
+
+% --- Helper procedures ---
+
+/rect { 4 dict begin
+  /h exch def /w exch def /y exch def /x exch def
+  newpath x y moveto w 0 rlineto 0 h rlineto w neg 0 rlineto closepath fill
+end } def
+
+/label { 3 dict begin
+  /txt exch def /y exch def /x exch def
+  0 0 0 setrgbcolor x y moveto txt show
+end } def
+
+/section_title { 2 dict begin
+  /txt exch def /y exch def
+  /Helvetica-Bold findfont 12 scalefont setfont
+  0 0 0 setrgbcolor 25 y moveto txt show
+  /Helvetica findfont 10 scalefont setfont
+end } def
+
+% =====================================================================
+% Section 1: DecodeABC with gamma=2 (dup mul)
+% =====================================================================
+
+675 (Section 1: DecodeABC with gamma=2) section_title
+
+% CIE with no decode (identity)
+/CIE_identity [/CIEBasedABC <<
+  /WhitePoint [0.9505 1.0 1.089]
+  /RangeABC [0 1 0 1 0 1]
+>>] def
+
+% CIE with DecodeABC gamma=2: each component squared
+/CIE_gamma2 [/CIEBasedABC <<
+  /WhitePoint [0.9505 1.0 1.089]
+  /RangeABC [0 1 0 1 0 1]
+  /DecodeABC [{ dup mul } bind { dup mul } bind { dup mul } bind]
+>>] def
+
+% Row 1a: Input 0.5 - gamma should make it darker
+25 655 (Input = 0.5 0.5 0.5:  No decode vs Gamma=2 \(should be darker\)) label
+
+CIE_identity setcolorspace
+0.5 0.5 0.5 setcolor
+25 625 60 25 rect
+25 613 (no decode) label
+
+CIE_gamma2 setcolorspace
+0.5 0.5 0.5 setcolor
+95 625 60 25 rect
+95 613 (gamma=2) label
+
+% Row 1b: Verification - gamma at sqrt(0.5)=0.707 should match identity at 0.5
+% because 0.707^2 = 0.5
+25 598 (Verify: gamma=2 at 0.707 should match no-decode at 0.5) label
+
+CIE_identity setcolorspace
+0.5 0.5 0.5 setcolor
+25 568 60 25 rect
+25 556 (ident 0.5) label
+
+CIE_gamma2 setcolorspace
+0.7071 0.7071 0.7071 setcolor
+95 568 60 25 rect
+95 556 (gam 0.707) label
+
+% Row 1c: Colored - Red channel with gamma
+25 541 (Mixed color: no decode 0.5 0.3 0.7 vs gamma=2 \(should differ\)) label
+
+CIE_identity setcolorspace
+0.5 0.3 0.7 setcolor
+25 511 60 25 rect
+25 499 (ident) label
+
+CIE_gamma2 setcolorspace
+0.5 0.3 0.7 setcolor
+95 511 60 25 rect
+95 499 (gamma=2) label
+
+% Verification: gamma at sqrt values should match identity
+% sqrt(0.5)=0.707, sqrt(0.3)=0.548, sqrt(0.7)=0.837
+CIE_gamma2 setcolorspace
+0.7071 0.5477 0.8367 setcolor
+165 511 60 25 rect
+165 499 (gam sqrt) label
+
+25 486 (gam sqrt should match ident) label
+
+% Row 1d: Full ramp comparison - 10 steps
+25 471 (Ramp 0..1: top=no decode, bottom=gamma=2 \(bottom darker in midtones\)) label
+
+CIE_identity setcolorspace
+0 1 9 {
+  /i exch def
+  /v i 9 div def
+  v v v setcolor
+  25 i 45 mul add 441 45 25 rect
+} for
+
+CIE_gamma2 setcolorspace
+0 1 9 {
+  /i exch def
+  /v i 9 div def
+  v v v setcolor
+  25 i 45 mul add 416 45 25 rect
+} for
+
+% =====================================================================
+% Section 2: DecodeLMN (applies after MatrixABC, before MatrixLMN)
+% =====================================================================
+
+395 (Section 2: DecodeLMN with gamma=2) section_title
+
+% CIE with DecodeLMN only (no DecodeABC)
+/CIE_decodeLMN [/CIEBasedABC <<
+  /WhitePoint [0.9505 1.0 1.089]
+  /RangeABC [0 1 0 1 0 1]
+  /DecodeLMN [{ dup mul } bind { dup mul } bind { dup mul } bind]
+>>] def
+
+25 375 (Input 0.5: no decode vs DecodeLMN gamma=2 \(should differ\)) label
+
+CIE_identity setcolorspace
+0.5 0.5 0.5 setcolor
+25 345 60 25 rect
+25 333 (no decode) label
+
+CIE_decodeLMN setcolorspace
+0.5 0.5 0.5 setcolor
+95 345 60 25 rect
+95 333 (decodeLMN) label
+
+% =====================================================================
+% Section 3: DecodeA (single component, CIEBasedA)
+% =====================================================================
+
+310 (Section 3: DecodeA with gamma=2) section_title
+
+% CIEBasedA with no decode
+/CIE_A_plain [/CIEBasedA <<
+  /WhitePoint [0.9505 1.0 1.089]
+  /MatrixA [0.9505 1.0 1.089]
+>>] def
+
+% CIEBasedA with DecodeA gamma=2
+/CIE_A_gamma [/CIEBasedA <<
+  /WhitePoint [0.9505 1.0 1.089]
+  /MatrixA [0.9505 1.0 1.089]
+  /DecodeA { dup mul } bind
+>>] def
+
+25 290 (Input 0.5: no decode vs DecodeA gamma=2 \(should be darker\)) label
+
+CIE_A_plain setcolorspace
+0.5 setcolor
+25 260 60 25 rect
+25 248 (plain 0.5) label
+
+CIE_A_gamma setcolorspace
+0.5 setcolor
+95 260 60 25 rect
+95 248 (gamma 0.5) label
+
+% Verify: gamma at sqrt(0.5)=0.707 should match plain at 0.5
+CIE_A_gamma setcolorspace
+0.7071 setcolor
+165 260 60 25 rect
+165 248 (gam 0.707) label
+
+25 235 (gamma 0.707 should match plain 0.5) label
+
+% DecodeA ramp comparison
+25 220 (Ramp 0..1: top=no decode, bottom=DecodeA gamma=2) label
+
+CIE_A_plain setcolorspace
+0 1 9 {
+  /i exch def
+  /v i 9 div def
+  v setcolor
+  25 i 45 mul add 190 45 25 rect
+} for
+
+CIE_A_gamma setcolorspace
+0 1 9 {
+  /i exch def
+  /v i 9 div def
+  v setcolor
+  25 i 45 mul add 165 45 25 rect
+} for
+
+% =====================================================================
+% Section 4: Combined DecodeABC + DecodeLMN
+% =====================================================================
+
+145 (Section 4: DecodeABC sqrt + DecodeLMN sqrt = effective identity) section_title
+
+% sqrt decode: { 0.5 exp } = square root
+% If DecodeABC applies sqrt and DecodeLMN applies sqrt,
+% the combined effect is input^(0.5*0.5) = input^0.25 (fourth root)
+% NOT identity. But sqrt(sqrt(x)) = x^0.25.
+
+/CIE_both_sqrt [/CIEBasedABC <<
+  /WhitePoint [0.9505 1.0 1.089]
+  /RangeABC [0 1 0 1 0 1]
+  /DecodeABC [{ 0.5 exp } bind { 0.5 exp } bind { 0.5 exp } bind]
+  /DecodeLMN [{ 0.5 exp } bind { 0.5 exp } bind { 0.5 exp } bind]
+>>] def
+
+25 125 (Input 0.15: no decode vs sqrt+sqrt \(should be brighter - fourth root\)) label
+
+CIE_identity setcolorspace
+0.15 0.15 0.15 setcolor
+25 95 60 25 rect
+25 83 (ident .15) label
+
+CIE_both_sqrt setcolorspace
+0.15 0.15 0.15 setcolor
+95 95 60 25 rect
+95 83 (4thrt .15) label
+
+% Verify: 0.15^0.25 = 0.6224, so both_sqrt at 0.15 should be much brighter
+% And identity at 0.6224 should match
+CIE_identity setcolorspace
+0.6224 0.6224 0.6224 setcolor
+165 95 60 25 rect
+165 83 (ident .62) label
+
+25 70 (4throot .15 should match ident .62) label
+
+% =====================================================================
+% Section 5: CIEBasedDEF - 3D lookup table
+% =====================================================================
+
+50 (Section 5: CIEBasedDEF 2x2x2 identity table) section_title
+
+% Build a 2x2x2 identity lookup table.
+% Table format: [m1 m2 m3 [string_d0 string_d1]]
+% Each string has m2*m3*3 = 2*2*3 = 12 bytes.
+% Byte values 0-255 map linearly to RangeABC [0 1].
+%
+% String for d=0:
+%   (e=0,f=0): A=0,B=0,C=0     -> \x00\x00\x00
+%   (e=0,f=1): A=0,B=0,C=255   -> \x00\x00\xff
+%   (e=1,f=0): A=0,B=255,C=0   -> \x00\xff\x00
+%   (e=1,f=1): A=0,B=255,C=255 -> \x00\xff\xff
+%
+% String for d=1:
+%   (e=0,f=0): A=255,B=0,C=0     -> \xff\x00\x00
+%   (e=0,f=1): A=255,B=0,C=255   -> \xff\x00\xff
+%   (e=1,f=0): A=255,B=255,C=0   -> \xff\xff\x00
+%   (e=1,f=1): A=255,B=255,C=255 -> \xff\xff\xff
+
+/CIE_DEF [/CIEBasedDEF <<
+  /WhitePoint [0.9505 1.0 1.089]
+  /RangeABC [0 1 0 1 0 1]
+  /RangeDEF [0 1 0 1 0 1]
+  /Table [2 2 2 [
+    <000000 0000FF 00FF00 00FFFF>
+    <FF0000 FF00FF FFFF00 FFFFFF>
+  ]]
+>>] def
+
+% DEF at (1,0,0) should map to ABC (1,0,0) → red
+% DEF at (0,1,0) should map to ABC (0,1,0) → green
+% DEF at (0,0,1) should map to ABC (0,0,1) → blue
+
+25 30 (DEF primaries should match CIEBasedABC primaries) label
+
+CIE_DEF setcolorspace
+1 0 0 setcolor
+25 0 40 25 rect
+25 -12 (DEF R) label
+
+CIE_identity setcolorspace
+1 0 0 setcolor
+70 0 40 25 rect
+70 -12 (ABC R) label
+
+CIE_DEF setcolorspace
+0 1 0 setcolor
+120 0 40 25 rect
+120 -12 (DEF G) label
+
+CIE_identity setcolorspace
+0 1 0 setcolor
+165 0 40 25 rect
+165 -12 (ABC G) label
+
+CIE_DEF setcolorspace
+0 0 1 setcolor
+215 0 40 25 rect
+215 -12 (DEF B) label
+
+CIE_identity setcolorspace
+0 0 1 setcolor
+260 0 40 25 rect
+260 -12 (ABC B) label
+
+% Mixed color: DEF (0.5, 0.5, 0.5) should interpolate to ABC (0.5, 0.5, 0.5)
+CIE_DEF setcolorspace
+0.5 0.5 0.5 setcolor
+310 0 40 25 rect
+310 -12 (DEF .5) label
+
+CIE_identity setcolorspace
+0.5 0.5 0.5 setcolor
+355 0 40 25 rect
+355 -12 (ABC .5) label
+
+showpage
+
+%%Page: 2 2
+
+/Helvetica findfont 10 scalefont setfont
+
+% =====================================================================
+% Section 6: CIEBasedDEFG - 4D lookup table
+% =====================================================================
+
+675 (Section 6: CIEBasedDEFG 2x2x2x2 table) section_title
+
+% 2x2x2x2 table: maps DEFG (CMYK-like) to ABC (RGB-like)
+% Each string has m2*m3*m4*3 = 2*2*2*3 = 24 bytes.
+% Offset = (ei*m3*m4 + fi*m4 + gi) * 3
+%
+% We'll make a CMYK-to-RGB-ish mapping:
+% D=C, E=M, F=Y, G=K
+% RGB = (1-C-K, 1-M-K, 1-Y-K) clamped
+%
+% String for d=0 (C=0):
+%   e=0,f=0,g=0 (M=0,Y=0,K=0): R=1,G=1,B=1 = (255,255,255)
+%   e=0,f=0,g=1 (M=0,Y=0,K=1): R=0,G=0,B=0 = (0,0,0)
+%   e=0,f=1,g=0 (M=0,Y=1,K=0): R=1,G=1,B=0 = (255,255,0)
+%   e=0,f=1,g=1 (M=0,Y=1,K=1): R=0,G=0,B=0 = (0,0,0)
+%   e=1,f=0,g=0 (M=1,Y=0,K=0): R=1,G=0,B=1 = (255,0,255)
+%   e=1,f=0,g=1 (M=1,Y=0,K=1): R=0,G=0,B=0 = (0,0,0)
+%   e=1,f=1,g=0 (M=1,Y=1,K=0): R=1,G=0,B=0 = (255,0,0)
+%   e=1,f=1,g=1 (M=1,Y=1,K=1): R=0,G=0,B=0 = (0,0,0)
+%
+% String for d=1 (C=1):
+%   e=0,f=0,g=0: R=0,G=1,B=1 = (0,255,255)
+%   e=0,f=0,g=1: R=0,G=0,B=0 = (0,0,0)
+%   e=0,f=1,g=0: R=0,G=1,B=0 = (0,255,0)
+%   e=0,f=1,g=1: R=0,G=0,B=0 = (0,0,0)
+%   e=1,f=0,g=0: R=0,G=0,B=1 = (0,0,255)
+%   e=1,f=0,g=1: R=0,G=0,B=0 = (0,0,0)
+%   e=1,f=1,g=0: R=0,G=0,B=0 = (0,0,0)
+%   e=1,f=1,g=1: R=0,G=0,B=0 = (0,0,0)
+
+/CIE_DEFG [/CIEBasedDEFG <<
+  /WhitePoint [0.9505 1.0 1.089]
+  /RangeABC [0 1 0 1 0 1]
+  /RangeDEFG [0 1 0 1 0 1 0 1]
+  /Table [2 2 2 2 [
+    <FFFFFF 000000 FFFF00 000000 FF00FF 000000 FF0000 000000>
+    <00FFFF 000000 00FF00 000000 0000FF 000000 000000 000000>
+  ]]
+>>] def
+
+% DEFG (0,0,0,0) = white, (1,0,0,0) = cyan, (0,1,0,0) = magenta
+25 655 (DEFG CMYK-like mapping: C=0 M=0 Y=0 K=0 should be white) label
+
+CIE_DEFG setcolorspace
+0 0 0 0 setcolor
+25 625 60 25 rect
+25 613 (CMYK 0000) label
+
+CIE_DEFG setcolorspace
+1 0 0 0 setcolor
+95 625 60 25 rect
+95 613 (C=1 cyan) label
+
+CIE_DEFG setcolorspace
+0 1 0 0 setcolor
+165 625 60 25 rect
+165 613 (M=1 mag) label
+
+CIE_DEFG setcolorspace
+0 0 1 0 setcolor
+235 625 60 25 rect
+235 613 (Y=1 yel) label
+
+CIE_DEFG setcolorspace
+0 0 0 1 setcolor
+305 625 60 25 rect
+305 613 (K=1 black) label
+
+CIE_DEFG setcolorspace
+1 1 0 0 setcolor
+375 625 60 25 rect
+375 613 (CM blue) label
+
+% =====================================================================
+% Section 7: DecodeABC with table lookup (complex decode)
+% =====================================================================
+
+590 (Section 7: DecodeABC with inversion \({1 exch sub}\)) section_title
+
+/CIE_invert [/CIEBasedABC <<
+  /WhitePoint [0.9505 1.0 1.089]
+  /RangeABC [0 1 0 1 0 1]
+  /DecodeABC [{1 exch sub} bind {1 exch sub} bind {1 exch sub} bind]
+>>] def
+
+25 570 (Inverted: input \(1,0,0\) red -> decode to \(0,1,1\) -> should be cyan-ish) label
+
+CIE_invert setcolorspace
+1 0 0 setcolor
+25 540 60 25 rect
+25 528 (inv R->C) label
+
+CIE_identity setcolorspace
+0 1 1 setcolor
+95 540 60 25 rect
+95 528 (ident 011) label
+
+CIE_invert setcolorspace
+0 1 0 setcolor
+165 540 60 25 rect
+165 528 (inv G->M) label
+
+CIE_identity setcolorspace
+1 0 1 setcolor
+235 540 60 25 rect
+235 528 (ident 101) label
+
+CIE_invert setcolorspace
+0 0 1 setcolor
+305 540 60 25 rect
+305 528 (inv B->Y) label
+
+CIE_identity setcolorspace
+1 1 0 setcolor
+375 540 60 25 rect
+375 528 (ident 110) label
+
+% =====================================================================
+% Section 8: DecodeABC conditional (if/else in procedure)
+% =====================================================================
+
+505 (Section 8: DecodeABC with threshold \(step function\)) section_title
+
+% Step function: values < 0.5 become 0, values >= 0.5 become 1
+/CIE_step [/CIEBasedABC <<
+  /WhitePoint [0.9505 1.0 1.089]
+  /RangeABC [0 1 0 1 0 1]
+  /DecodeABC [
+    { 0.5 ge { 1 } { 0 } ifelse } bind
+    { 0.5 ge { 1 } { 0 } ifelse } bind
+    { 0.5 ge { 1 } { 0 } ifelse } bind
+  ]
+>>] def
+
+25 485 (Step: values <0.5 -> 0, >=0.5 -> 1. Ramp should show sharp transition.) label
+
+% Ramp with step function - should show abrupt black-to-white transition
+CIE_step setcolorspace
+0 1 9 {
+  /i exch def
+  /v i 9 div def
+  v v v setcolor
+  25 i 45 mul add 455 45 25 rect
+} for
+
+25 443 (Step ramp: first 5 should be dark, last 5 should be bright) label
+
+% =====================================================================
+% Section 9: Visual summary - Gamma ramps side by side
+% =====================================================================
+
+420 (Section 9: Gamma comparison ramps \(20 steps\)) section_title
+
+25 400 (Top: identity  |  Middle: gamma=0.5 \(sqrt, brighter\)  |  Bottom: gamma=2 \(square, darker\)) label
+
+/CIE_sqrt [/CIEBasedABC <<
+  /WhitePoint [0.9505 1.0 1.089]
+  /RangeABC [0 1 0 1 0 1]
+  /DecodeABC [{ 0.5 exp } bind { 0.5 exp } bind { 0.5 exp } bind]
+>>] def
+
+% Identity ramp (top)
+CIE_identity setcolorspace
+0 1 19 {
+  /i exch def
+  /v i 19 div def
+  v v v setcolor
+  25 i 22 mul add 370 22 20 rect
+} for
+
+% Sqrt ramp (middle) - should be brighter in midtones
+CIE_sqrt setcolorspace
+0 1 19 {
+  /i exch def
+  /v i 19 div def
+  v v v setcolor
+  25 i 22 mul add 350 22 20 rect
+} for
+
+% Gamma=2 ramp (bottom) - should be darker in midtones
+CIE_gamma2 setcolorspace
+0 1 19 {
+  /i exch def
+  /v i 19 div def
+  v v v setcolor
+  25 i 22 mul add 330 22 20 rect
+} for
+
+0 setgray 25 318 (identity) label
+0 setgray 175 318 (sqrt \(bright\)) label
+0 setgray 350 318 (gamma2 \(dark\)) label
+
+showpage

@@ -5,7 +5,6 @@
 //! Geometry types: affine transform matrices, path segments, and paths.
 
 /// Round to 10 decimal places to eliminate floating-point artifacts.
-/// Matches PostForge's `Decimal.quantize(Decimal('0.0000000001'))`.
 #[inline]
 pub fn round10(v: f64) -> f64 {
     (v * 1e10).round() / 1e10

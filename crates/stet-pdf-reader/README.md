@@ -41,6 +41,18 @@ for page in 0..doc.page_count() {
 }
 ```
 
+## Acknowledgements
+
+JPEG 2000, JBIG2, and CCITT-Fax stream decoding use the
+[`hayro-jpeg2000`](https://crates.io/crates/hayro-jpeg2000),
+[`hayro-jbig2`](https://crates.io/crates/hayro-jbig2), and
+[`hayro-ccitt`](https://crates.io/crates/hayro-ccitt) crates from the
+[hayro](https://github.com/LaurenzV/hayro) PDF renderer by Laurenz
+Stampfl. These are the best pure-Rust decoders available for those three
+PDF stream filters, and `stet-pdf-reader` would not support the full PDF
+stream-filter surface without them. Thanks to the hayro project for
+factoring them out as reusable crates.
+
 ## License
 
 Apache-2.0 OR MIT

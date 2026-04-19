@@ -1,0 +1,81 @@
+/usinglevel2 true def
+
+%The maxstraight variable determines how long the longest line is allowed to be
+%without changing it into two or more curvea. This prevents "short cuts". A very
+%large value turns this feature off..
+/maxstraight 5000 def % maximum allowable straight line length
+
+/savecp {2 copy /y0 exch def /x0 exch def} def
+
+/mt {savecp /xx0 x0 def /yy0 y0 def nlt moveto} def
+/li {noshortcuts} def
+/ct {savecp 3 {6 2 roll nlt} repeat curveto} def
+/cp {xx0 yy0 li closepath} def
+
+% nlmap does a nonlinear mapping of an ALREADY CREATED PATH using an nlt
+% algorithm to do the actual mapping. It produces an on-stack array of the
+% nonlinear mapping...
+
+/nlmap {gsave mark /newpath cvx {/mt cvx}{/li cvx}{/ct cvx}
+{/cp cvx} pathforall newpath] grestore cvx} def
+
+% makecurves converts long lines into Bezier curvetos with control points on the
+%line at the .333 and .667 points. This approximation is simple and fairly good
+%looking. It is easily improved by reducing maxstraight at the expense of longer
+%files and runtimes.
+
+/makecurves {floor cvi y1 y0 sub 1 index div 3 div /ydelta
+exch def x1 x0 sub 1 index div 3 div /xdelta exch def {x0 y0 ydelta
+add exch xdelta add exch 2 copy ydelta add exch xdelta add exch
+2 copy ydelta add exch xdelta add exch ct} repeat} def
+
+% noshortcuts decides whether a lineto is long enough to need conversion into two or more curvetos...
+
+/noshortcuts {/y1 exch def /x1 exch def y1 y0 sub abs x1 x0 sub abs
+add maxstraight div dup 1 gt {makecurves}{pop x1 y1 savecp nlt lineto}
+ifelse} def
+
+/spxf {dup sin 3 1 roll cos exch sin mul exch} def
+/nlt {spxf} def
+
+/maxstraight 5 def % maximum allowable straight line length
+
+% latlon draws latitude and longitude curves. The method shown is level I
+%friendly. For level 2, just piling the entire path up on the stack without any
+%saves/restores is faster and more flexible.
+
+/latres 18 def % latitude resolution in degrees
+/lonres 18 def % longitude resolution in degrees
+
+/latlon {newpath -90 lonres 90 {save /llsnap exch def -90 moveto 0 180 rlineto
+nlmap exec stroke llsnap restore} for -90 latres 90 {save /llsnap exch def -90 exch
+moveto 180 0 rlineto nlmap exec stroke} for llsnap restore} def
+
+% spoutline emphasizes the sphere outline
+/spoutline {-90 -90 moveto 180 0 rlineto 0 180 rlineto -180 0 rlineto closepath}
+def
+
+% cspheremsg centers a character message on x y (msg).
+/cspheremsg {/msg exch def /ypos exch def /xpos exch def newpath 0 0 moveto
+xpos msg stringwidth pop 2 div sub ypos moveto msg false charpath} def
+
+
+% //// demo - remove or alter before reuse ////
+% use save and restore to minimize vm usage
+save /spheresnap exch def
+% pick a location and scale the unit radius sphere...
+200 200 translate 100 dup scale
+% draw the latitude and longitude lines...
+gsave 0 setlinewidth latlon grestore
+% make the outline slightly heavier...
+gsave spoutline nlmap exec .005 setlinewidth stroke grestore
+% put some words on the sphere. Font size is in degrees..
+/NewCenturySchlbk-Bold findfont [33 0 0 33 0 0] makefont setfont
+usinglevel2 {
+gsave 0 5 (FREE) cspheremsg nlmap cvx exec fill grestore
+gsave 0 -28 (FONT) cspheremsg nlmap cvx exec fill grestore
+} if
+spheresnap restore % recycle vm
+
+showpage
+

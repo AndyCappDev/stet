@@ -1,0 +1,499 @@
+%!PS-2
+% (c) Stijn van Dongen.
+% segmentC and segmentD implement same functionality as
+% segmentA en segmentB, however, they cause fewer bumps in
+% the drawing.
+
+% leftspiral  rightspiral
+
+/_a 1.0 def   /_A 1.0 def
+/_b 2.0 def   /_B 2.0 def
+/_c 0.2 def   /_C 0.05 def
+
+/nleft 8 def
+/nright 16 def
+/offsetleft 0 def
+/offsetright 0 def
+
+/blacklinewidth 8.0 def
+/whitelinewidth 4.0 def
+
+/B_drawblack 1 def
+/B_drawwhite 1 def
+
+/lidxlb 0 def
+/lidxub nleft 1 sub def
+
+/ridxlb -10 def
+/ridxub 33 def
+
+
+% =======================
+
+/zero 0 def
+/one  1 def
+
+/pi 180.0 def
+/twopi 360.0 def
+
+/Times-Roman findfont
+20 scalefont
+setfont 
+
+240 300 translate
+0 0 moveto
+
+%         (t)                             (t)                    
+%     a  b   cos (2pi c t - d)  ,     a  b   sin (2pi c t - d)  
+%
+%         (t)                             (t)                     
+%     A  B   cos (2pi C t - D)  ,  -  A  B   sin (2pi C t - D)   
+
+/logab  _a _b mul log def
+/logAB  _A _B mul log def
+
+/radius 0.8 def
+
+/sqr { dup mul } def
+
+                           % on stack: lidx t values.
+                           % return (x, y) pair.
+                           %
+                           % d == lidx * (360/n)
+/lsp
+{
+0 begin
+   /t exch def
+   /lidx exch def
+
+   _a
+      _b t exp
+   mul
+   /P exch def
+
+   twopi _c mul t mul
+      twopi lidx mul nleft div
+   sub
+   /Q exch def
+
+   [P Q cos mul P Q sin mul]
+end
+} def
+
+/lsp load 0 4 dict put
+
+
+                           % on stack: d t values.
+                           % return (x, y) pair.
+/rsp
+{
+0 begin
+   /t exch def
+   /ridx exch def
+
+   _A
+      _B t exp
+   mul
+   /P exch def
+
+   twopi _C mul t mul
+      twopi ridx mul nright div
+   sub
+   /Q exch def
+
+   [P Q cos mul P Q sin mul -1 mul]
+end
+} def
+
+/rsp load 0 4 dict put
+
+
+                                    % stack: radius [x y]
+                                    % use array to find location.
+/circle {
+      aload pop moveto
+      gsave currentpoint 3 -1 roll 0 360 arc
+      0 setgray fill grestore
+} def
+
+/alp { aload pop } def
+/alpm { aload pop moveto } def
+/alpl { aload pop lineto } def
+/pscadd { pscale padd } def
+
+                                    % stack: scalef [x y]
+/pscale
+{
+   alp                              % s x y
+      3 -1 roll dup                 % x y s s
+      3 1 roll                      % x s y s
+      mul                           % x s ys
+      3 1 roll mul                  % ys xs
+      exch
+      2 array astore
+} def
+
+                                    % stack: [x1 x2] [y1 y2]
+/padd
+{
+   alp                              % [x1 x2] y1 y2
+   3 -1 roll aload pop              % y1 y2 x1 x2
+   3 -1 roll                        % y1 x1 x2 y2
+   add 3 1 roll                     % x2+y2 y1 x1
+   add exch
+   2 array astore
+} def
+
+/pnorm
+{
+   alp
+   sqr exch sqr add
+   sqrt
+} def
+
+                                    % stack: lidx.
+/leftspiral {
+0 begin
+   /lidx exch def
+   0 0.002 10.0
+   {
+      lidx exch lsp                 % make appropriate value for circle radius
+         dup
+         aload pop
+         sqr exch sqr add sqrt
+         sqrt 100 div
+      exch
+      circle
+   }
+   for
+end
+} def
+
+/leftspiral load 0 1 dict put
+
+                                 
+                                    % stack: ridx.
+/rightspiral {
+0 begin
+   /ridx exch def
+
+   0 0.010 10.0
+   {
+      ridx exch rsp                 % make appropriate value for circle radius
+         dup
+         aload pop
+         sqr exch sqr add sqrt
+         sqrt 100 div
+      exch
+      circle
+   }
+   for
+} def
+
+/rightspiral load 0 1 dict put
+
+
+zero 1 eq {
+0 1 nleft 1 sub
+{
+   leftspiral
+}
+for
+
+0 1 nright 1 sub
+{
+   rightspiral
+}
+for
+} if
+
+                           % stack: lidx ridx
+                           % return t1 t2 pair giving the intersection
+                           % of spirals determined by lidx and ridx.
+/isec  {
+0 begin
+   /ridx exch def
+   /lidx exch def
+                           %           d + D
+                           % -----------------------------
+                           %    2pi c + 2pi C log(ab)/log(AB)
+
+   lidx twopi mul nleft div
+      ridx twopi mul nright div
+   add
+
+      twopi _c mul
+         twopi _C mul
+            logab logAB div
+         mul
+      add
+
+   div
+
+   /t1 exch def
+   /t2 t1 logab mul logAB div def
+   [ t1 t2 ]
+end
+} def
+
+/isec load 0 5 dict put
+
+                                       % stack: L1 R1 L2 R2 L3 R3
+
+
+                                       % stack: L1 R1 L2 R2 L3 R3
+/segmentA {
+0 begin
+   /R3 exch def
+   /L3 exch def
+   /R2 exch def
+   /L2 exch def
+   /R1 exch def
+   /L1 exch def
+
+   0.6250 L1 pscale 0.2500 L2 pscadd 0.1250 R1 pscadd alpm
+   0.5000 L1 pscale 0.5000 L2 pscadd alpl
+   0.7500 L2 pscale 0.2500 R2 pscadd alpl
+   0.6250 L2 pscale 0.2500 L3 pscadd 0.1250 R2 pscadd alpl
+
+   0.4375 L1 pscale 0.3125 R1 pscadd 0.1875 L2 pscadd 0.0625 R2 pscadd alpm
+   0.3750 L1 pscale 0.3750 L2 pscadd 0.1250 R1 pscadd 0.1250 R2 pscadd alpl
+   0.5000 L2 pscale 0.5000 R2 pscadd alpl 
+   0.4375 L2 pscale 0.3125 R2 pscadd 0.1875 L3 pscadd 0.0625 R3 pscadd alpl
+
+   0.4375 R1 pscale 0.3125 L1 pscadd 0.1875 R2 pscadd 0.0625 L2 pscadd alpm
+   0.3750 R1 pscale 0.3750 R2 pscadd 0.1250 L1 pscadd 0.1250 L2 pscadd alpl
+   0.5000 R2 pscale 0.5000 L2 pscadd alpl 
+   0.4375 R2 pscale 0.3125 L2 pscadd 0.1875 R3 pscadd 0.0625 L3 pscadd alpl
+
+   0.6250 R1 pscale 0.2500 R2 pscadd 0.1250 L1 pscadd alpm
+   0.5000 R1 pscale 0.5000 R2 pscadd alpl
+   0.7500 R2 pscale 0.2500 L2 pscadd alpl
+   0.6250 R2 pscale 0.2500 R3 pscadd 0.1250 L2 pscadd alpl
+   stroke
+end
+} def
+
+/segmentA load 0 6 dict put
+
+/segmentB {
+0 begin
+   /R3 exch def
+   /L3 exch def
+   /R2 exch def
+   /L2 exch def
+   /R1 exch def
+   /L1 exch def
+
+   0.6875 L1 pscale 0.1875 L2 pscadd 0.0625 R1 pscadd 0.0625 R2 pscadd alpm
+   0.3750 L1 pscale 0.3750 L2 pscadd 0.1250 R1 pscadd 0.1250 R2 pscadd alpl
+   L2 alpl
+   0.6875 L2 pscale 0.1875 L3 pscadd 0.0625 R2 pscadd 0.0625 R3 pscadd alpl
+
+   0.5000 L1 pscale 0.2500 R1 pscadd 0.1250 L2 pscadd 0.1250 R2 pscadd alpm
+   0.2500 L1 pscale 0.2500 R1 pscadd 0.2500 L2 pscadd 0.2500 R2 pscadd alpl
+   0.7500 L2 pscale 0.2500 R2 pscadd alpl
+   0.5000 L2 pscale 0.2500 R2 pscadd 0.1250 L3 pscadd 0.1250 R3 pscadd alpl
+
+   0.5000 R1 pscale 0.2500 L1 pscadd 0.1250 R2 pscadd 0.1250 L2 pscadd alpm
+   0.2500 R1 pscale 0.2500 L1 pscadd 0.2500 R2 pscadd 0.2500 L2 pscadd alpl
+   0.7500 R2 pscale 0.2500 L2 pscadd alpl
+   0.5000 R2 pscale 0.2500 L2 pscadd 0.1250 R3 pscadd 0.1250 L3 pscadd alpl
+
+   0.6875 R1 pscale 0.1875 R2 pscadd 0.0625 L1 pscadd 0.0625 L2 pscadd alpm
+   0.3750 R1 pscale 0.3750 R2 pscadd 0.1250 L1 pscadd 0.1250 L2 pscadd alpl
+   R2 alpl
+   0.6875 R2 pscale 0.1875 R3 pscadd 0.0625 L2 pscadd 0.0625 L3 pscadd alpl
+
+   stroke
+end
+} def
+
+/segmentB load 0 6 dict put
+
+                                            %         +
+                                            %  _  _  / \   +
+                                            % |  / \ \|/
+                                            % |_ \ /_ | 
+
+                                            % + are extra control points.
+/segmentC {
+0 begin
+   /S2 exch def
+   /S1 exch def
+   /R3 exch def
+   /R2 exch def
+   /R1 exch def
+   /L2 exch def
+   /L1 exch def
+
+   % eerste
+   0.5000 L1 pscale 0.5000 R1 pscadd alpm 
+   0.3750 L1 pscale 0.3750 L2 pscadd 0.1250 R1 pscadd 0.1250 R2 pscadd alpl
+   0.5000 L2 pscale 0.5000 R2 pscadd alpl 
+
+   % tweede
+   0.5000 L1 pscale 0.5000 R1 pscadd alpm 
+   0.3750 R1 pscale 0.3750 R2 pscadd 0.1250 L1 pscadd 0.1250 L2 pscadd alpl
+   0.5000 L2 pscale 0.5000 R2 pscadd alpl 
+
+   % derde
+   0.5000 R1 pscale 0.5000 R2 pscadd alpm
+   0.2500 L2 pscale 0.7500 R2 pscadd alpl
+   0.5000 R2 pscale 0.5000 R3 pscadd alpl
+
+   % laatste.
+   0.5000 R1 pscale 0.5000 R2 pscadd alpm
+   0.7500 R2 pscale 0.2500 S2 pscadd alpl
+   0.5000 R2 pscale 0.5000 R3 pscadd alpl
+
+   stroke
+end
+} def
+
+/segmentC load 0 8 dict put
+
+                                            % +       +
+                                            %  _ /_\ _      +
+                                            % |  \ / /|\
+                                            % |_ _ _ \|/    +
+
+                                            % + are extra control points.
+/segmentD {
+0 begin
+   /S2 exch def
+   /S1 exch def
+   /R3 exch def
+   /R2 exch def
+   /R1 exch def
+   /L3 exch def
+   /L2 exch def
+   /L1 exch def
+
+   0.2500 L1 pscale 0.2500 R1 pscadd 0.2500 L2 pscadd 0.2500 R2 pscadd alpm
+   0.7500 L2 pscale 0.2500 R2 pscadd alpl
+   0.2500 L2 pscale 0.2500 R2 pscadd 0.2500 L3 pscadd 0.2500 R3 pscadd alpl
+
+   0.2500 L1 pscale 0.2500 R1 pscadd 0.2500 L2 pscadd 0.2500 R2 pscadd alpm
+   0.2500 L2 pscale 0.7500 R2 pscadd alpl
+   0.2500 L2 pscale 0.2500 R2 pscadd 0.2500 L3 pscadd 0.2500 R3 pscadd alpl
+
+   R1 alpm
+   0.3750 R1 pscale 0.3750 R2 pscadd 0.1250 L1 pscadd 0.1250 L2 pscadd alpl
+   R2 alpl
+
+   R1 alpm
+   0.3750 R1 pscale 0.3750 R2 pscadd 0.1250 S1 pscadd 0.1250 S2 pscadd alpl
+   R2 alpl
+
+   stroke
+end
+} def
+
+/segmentD load 0 8 dict put
+
+
+
+/showradius 3.0 def
+
+zero 1 eq {
+8 1 15                              % this is the ridx value.
+{  dup
+      1 exch                        % set lidx to 1, and switch with ridx.
+      isec aload pop pop
+      1 exch lsp showradius exch
+      circle
+
+      2 exch                       % set lidx to 2.
+      isec aload pop pop
+      2 exch lsp showradius exch
+      circle
+} for
+} if
+
+
+
+/linewidth blacklinewidth def          % draw black first.
+
+0 1 1 {
+
+/loopidx exch def
+
+loopidx one eq                         % draw white second.
+{ /linewidth whitelinewidth def
+  1.0 setgray
+} if
+
+   loopidx zero eq
+      B_drawblack 1 eq
+   and
+
+   loopidx one eq
+      B_drawwhite 1 eq
+   and
+or
+{
+lidxlb 1 lidxub {
+/lidx exch def
+
+ridxlb 1 ridxub {
+/ridx exch def
+
+
+lidx ridx isec aload pop pop
+lidx exch lsp /L1 exch def
+
+lidx 1 add ridx isec aload pop pop
+lidx 1 add exch lsp /R1 exch def
+
+
+lidx ridx 1 add isec aload pop pop
+lidx exch lsp /L2 exch def
+
+lidx 1 add ridx 1 add isec aload pop pop
+lidx 1 add exch lsp /R2 exch def
+
+
+lidx ridx 2 add isec aload pop pop
+lidx exch lsp /L3 exch def
+
+lidx 1 add ridx 2 add isec aload pop pop
+lidx 1 add exch lsp /R3 exch def
+
+% ====
+
+lidx 2 add ridx isec aload pop pop
+lidx 2 add exch lsp /S1 exch def
+
+lidx 2 add ridx 1 add isec aload pop pop
+lidx 2 add exch lsp /S2 exch def
+
+% ====
+
+% make lines thinner in the inside.
+% L1 pnorm 600 add 400 div linewidth mul setlinewidth
+
+L1 pnorm dup 50 add div sqr linewidth mul 0.2 add setlinewidth
+
+zero 1 eq {
+ L1 R1 L2 R2 L3 R3 segmentA
+ L2 L1 R2 R1 A2 S1 segmentB
+} {
+L3 R3 L2 R2 S2 L1 R1 segmentC
+L1 L2 L3 R1 R2 R3 S1 S2 segmentD
+} ifelse
+
+} for
+} for
+} if
+} for
+
+showpage
+
+%==========================
+
+%/_a 1.0 def   /_A 1.0 def
+%/_b 2.0 def   /_B 2.0 def
+%/_c 0.2 def   /_C 0.05 def
+
+

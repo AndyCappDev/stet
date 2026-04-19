@@ -1,0 +1,147 @@
+%!PS-3.0
+% (c) Stijn van Dongen.
+
+
+/gridunit   10    def       % length of triangle side.
+/angle      30    def       % angle with baseline.
+                            % 0 makes normal baseline a direction of grid,
+                            % 30 makes vertical a direction of grid.
+
+2.845 2.845 scale
+
+/shear 32.204228 def        % this is the 7 8 13 triangle.
+/shear 21.786789 def        % this is the 3 5 7 triangle
+
+1.0 setgray
+0.8 setlinewidth
+
+/step gridunit 0.866025 mul def     % that's 1/2 * sqrt(3)
+
+/BBLRx 5 def
+/BBLRy 5 def
+/BBURx 205 def
+/BBURy 292 def
+
+newpath
+BBLRx BBLRy moveto
+BBURx BBLRy lineto
+BBURx BBURy lineto
+BBLRx BBURy lineto
+closepath clip newpath
+
+gsave
+0.0 setgray
+newpath
+BBLRx BBLRy moveto
+BBURx BBLRy lineto
+BBURx BBURy lineto
+BBLRx BBURy lineto
+closepath fill newpath
+grestore
+
+105 149 translate
+
+1.0 1.0 scale
+
+angle rotate
+
+/radius 280 def
+/mradius radius -1 mul def
+/dradius radius 2 mul def
+
+                                 % make sure we hit the origin, i.e. (0,0).
+gsave
+3
+{  mradius step div floor step mul
+   step
+   radius
+   {  mradius exch moveto dradius 0 rlineto
+   }
+   for
+   120 rotate
+}
+repeat
+stroke
+grestore
+
+gsave
+shear rotate
+3
+{  mradius step div floor step mul     % make sure we hit the origin, i.e. (0,0).
+   step
+   radius
+   {  mradius exch moveto dradius 0 rlineto
+   }
+   for
+   120 rotate
+}
+repeat
+stroke
+grestore
+
+gsave
+shear -1 mul rotate
+3
+{  mradius step div floor step mul     % make sure we hit the origin, i.e. (0,0).
+   step
+   radius
+   {  mradius exch moveto dradius 0 rlineto
+   }
+   for
+   120 rotate
+}
+repeat
+stroke
+grestore
+
+
+
+0.0 setgray
+0.2 setlinewidth
+
+gsave
+3
+{  mradius step div floor step mul     % make sure we hit the origin, i.e. (0,0).
+   step
+   radius
+   {  mradius exch moveto dradius 0 rlineto
+   }
+   for
+   120 rotate
+}
+repeat
+stroke
+grestore
+
+gsave
+shear rotate
+3
+{  mradius step div floor step mul     % make sure we hit the origin, i.e. (0,0).
+   step
+   radius
+   {  mradius exch moveto dradius 0 rlineto
+   }
+   for
+   120 rotate
+}
+repeat
+stroke
+grestore
+
+gsave
+shear -1 mul rotate
+3
+{  mradius step div floor step mul     % make sure we hit the origin, i.e. (0,0).
+   step
+   radius
+   {  mradius exch moveto dradius 0 rlineto
+   }
+   for
+   120 rotate
+}
+repeat
+stroke
+grestore
+
+showpage
+

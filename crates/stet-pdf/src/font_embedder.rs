@@ -33,7 +33,7 @@ const EEXEC_C2: u16 = 22719;
 
 /// Encrypt data using Adobe eexec encryption.
 fn eexec_encrypt(plaintext: &[u8]) -> Vec<u8> {
-    // 4-byte random prefix (all zeros, like PostForge)
+    // 4-byte random prefix (all zeros)
     let prefix = [0u8; 4];
     let mut r: u16 = EEXEC_R;
     let mut result = Vec::with_capacity(plaintext.len() + 4);
@@ -304,8 +304,8 @@ fn build_type1_font_file(
 ) -> Option<(Vec<u8>, usize, usize, usize)> {
     let font_name_str = String::from_utf8_lossy(&usage.font_name);
 
-    // Always use standard Type 1 FontMatrix [0.001 0 0 0.001 0 0] for embedded fonts.
-    // PostForge does the same — the embedded font program must use the standard
+    // Always use standard Type 1 FontMatrix [0.001 0 0 0.001 0 0] for
+    // embedded fonts — the embedded font program must use the standard
     // 1000-unit coordinate system regardless of the original font's matrix.
     let font_matrix = [0.001, 0.0, 0.0, 0.001, 0.0, 0.0];
 
@@ -357,13 +357,12 @@ fn build_type1_font_file(
     }
     writeln!(cleartext, "readonly def").unwrap();
     writeln!(cleartext, "currentdict end").unwrap();
-    // PostForge: "currentfile eexec\n" — newline after eexec, no trailing space
+    // "currentfile eexec\n" — newline after eexec, no trailing space
     cleartext.extend_from_slice(b"currentfile eexec\n");
     let length1 = cleartext.len();
 
     // === Section 2: Private dict (to be eexec encrypted) ===
     // Build plaintext that will be eexec-encrypted.
-    // Matches PostForge's _build_private_and_charstrings exactly.
     let mut lines: Vec<Vec<u8>> = Vec::new();
 
     lines.push(b"dup".to_vec());
@@ -445,13 +444,13 @@ fn build_type1_font_file(
     lines.push(b"dup /FontName get exch definefont pop".to_vec());
     lines.push(b"mark currentfile closefile".to_vec());
 
-    // Join with newlines (no trailing newline, matches PostForge)
+    // Join with newlines (no trailing newline)
     let private: Vec<u8> = lines.join(&b'\n');
     let encrypted = eexec_encrypt(&private);
     let length2 = encrypted.len();
 
     // === Section 3: Footer ===
-    // 512 ASCII '0' chars + newline + cleartomark + newline (matches PostForge)
+    // 512 ASCII '0' chars + newline + cleartomark + newline
     let mut footer = Vec::new();
     footer.extend_from_slice(&[b'0'; 512]);
     footer.extend_from_slice(b"\ncleartomark\n");
@@ -459,7 +458,7 @@ fn build_type1_font_file(
 
     // Wrap in PFB format (binary segment markers).
     // PDF /FontFile streams accept both PFA and PFB; PFB is more reliable
-    // with PDF viewers (matches PostForge's approach).
+    // with PDF viewers.
     let mut result = Vec::with_capacity(cleartext.len() + encrypted.len() + footer.len() + 20);
     // Segment 1: ASCII header
     result.push(0x80);

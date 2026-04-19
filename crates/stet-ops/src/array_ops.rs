@@ -190,7 +190,7 @@ pub fn op_dict_from_mark(ctx: &mut Context) -> Result<(), PsError> {
 
 /// `reverse`: array → array (reverse elements in place)
 ///
-/// PostForge extension. Reverses the elements of an array or string in place.
+/// Non-standard extension. Reverses the elements of an array or string in place.
 pub fn op_reverse(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.o_stack.is_empty() {
         return Err(PsError::StackUnderflow);
@@ -212,7 +212,7 @@ pub fn op_reverse(ctx: &mut Context) -> Result<(), PsError> {
 
 /// `printarray`: array → (print array contents to stdout)
 ///
-/// PostForge extension. Prints the array in PostScript notation: [elem1 elem2 ...]
+/// Non-standard extension. Prints the array in PostScript notation: [elem1 elem2 ...]
 pub fn op_printarray(ctx: &mut Context) -> Result<(), PsError> {
     use std::io::Write;
 

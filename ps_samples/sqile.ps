@@ -1,0 +1,140 @@
+%!PS-3.0
+
+00 300 translate
+0.5 0.5 scale
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% options
+
+/depth   3       def    % set to 0, 1, 2, 3, 4.
+/rvideo  1       def    % set to 1 or 0 (bool)
+/angle   90      def
+/gray    10      def    % set to 0, 1, .. 100.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+/thre    2       def    % undocumented option.
+                        % perhaps not active at all.
+
+rvideo 0 eq { /rv false def
+} { /rv true def
+} ifelse
+
+/graytone gray 100.0 div def
+
+%     ctrx ctry radius
+/sq
+{  /rad exch def
+   gsave
+   translate
+   newpath
+   rad -1 mul rad -1 mul moveto
+   rad 2 mul 0 rlineto
+   0 rad 2 mul rlineto
+   rad -2 mul 0 rlineto
+   closepath
+   dostroke { stroke } { fill } ifelse
+   grestore
+} def
+
+/squares [
+[ -62 -62  50 ]
+[  23 -77  35 ]
+[  85 -85  27 ]
+[  66 -50   8 ]
+[  93 -39  19 ]
+[   3 -27  15 ]
+[  35 -25  17 ]
+[  63 -31  11 ]
+[ -83  17  29 ]
+[ -29  13  25 ]
+[   5  -3   9 ]
+[  16 -10   2 ]
+[ -79  79  33 ]
+[ -50  42   4 ]
+[  -9  75  37 ]
+[  12  22  16 ]
+[  21  -1   7 ]
+[  46  10  18 ]
+[  58 -14   6 ]
+[  88   4  24 ]
+[  70  70  42 ]
+] def
+
+/cmtx matrix def
+/str 20 string def
+/k    0      def
+
+/Palatino-Roman findfont
+8 scalefont
+setfont
+
+
+/tile       % expects (3) depth (2) radius (1) ctrx (0) ctry
+{  gsave
+   translate               %  depth radius
+
+   dup                     %  depth radius radius
+   112 div dup             %  depth radius fac fac
+   scale                   %  depth radius
+
+0.1 setlinewidth
+
+   k 90 mul rotate
+   /k k 1 add def
+   -1 1 scale
+
+% 0 0 moveto
+% gsave
+% 0.0 setgray
+% 3 3 scale
+% cmtx currentmatrix 5 get
+% str cvs show
+% 0 5 rmoveto
+% k str cvs show
+% grestore
+
+   exch                    %  radius depth
+   dup 1 sub               %  radius depth depth'
+
+   squares { aload pop sq } forall
+
+   exch 0 gt               %  radius depth' bool
+   3 -1 roll               %  depth' bool radius
+
+   % cmtx currentmatrix
+   % 0 get                   %  depth' bool radius scale
+
+   0 mul                   %  depth' bool 0
+   thre  le                %  depth' bool bool
+   and                     %  depth'
+   {
+      squares {
+         aload pop         %  depth' ctrx ctry radius
+         4 -1 roll dup     %  ctrx ctry radius depth' depth'
+         5 2 roll          %  depth' depth' ctrx ctry radius
+         3 1 roll          %  depth' depth' radius ctrx ctry
+         tile              %  depth'
+      } forall
+   } if
+   pop                     %  == this pops the extra depth'
+
+   grestore
+} def
+
+150 700 translate
+4   -4   scale
+
+graytone setgray
+
+rv {
+   /dostroke false def
+   112 112 112 sq
+   1.0 setgray
+} if
+
+/dostroke true def
+depth 112 112 112 tile
+
+showpage
+

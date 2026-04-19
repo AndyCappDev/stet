@@ -1,0 +1,83 @@
+%!
+% A simple PostScript file that prints a pair of identical blank
+% scoresheets for chess games (70 moves) on an 8.5x11 page.
+% Copyright (C) 1997 by Noam D. Elkies
+% May be viewed or printed gratis; may not be sold; copying allowed,
+% but only without modification -- in particular this copyright notice
+% must be preserved
+
+3 dup scale  % One unit = 3 pts. = 12.5 pixels (300ppi) = 1/24 in ~= 1mm
+
+/m {moveto} def
+/l {lineto} def
+/rm {rmoveto} def
+/rl {rlineto} def
+/tr {translate} def
+/s {stroke} def
+
+90 rotate 0 -204 tr   % treat 8.5x11 page as 11x8.5
+
+/DF {findfont exch scalefont setfont} def % usage: <scale> /fontname DF
+/justify{
+  /jr exch def
+  dup stringwidth exch jr mul neg exch rm show
+  } def
+/center {.5 justify} def % "0 justify" is "show"
+
+/scoresheet{
+
+5 /Times-Bold DF
+
+66 189 m (C H E S S   S C O R E   S H E E T) center
+
+0 setlinewidth
+
+newpath 12 156 m 120 156 l 120 180 l 12 180 l closepath s
+162 6 174 {12 exch m 108 0 rl s} for
+
+3 /Times-Roman DF
+
+13 176 m (Event) show
+100 174 m 0 6 rl s
+101 176 m (Round) show
+
+13 170 m (White) show
+66 168 m 0 6 rl s
+67 170 m (Black) show
+
+13 164 m (Team) show
+66 162 m 0 6 rl s
+67 164 m (Team) show
+
+13 158 m (Time Control) show
+45 156 m 0 6 rl s
+46 158 m (Opening) show
+100 156 m 0 6 rl s
+101 158 m (Result) show
+
+
+12 15 m 120 15 l 120 148 l 12 148 l closepath s
+16 15 m 16 148 l s
+40.9 15 m 40.9 148 l s
+66.2 15 m 66.2 148 l s
+65.8 15 m 65.8 148 l s
+70.2 15 m 70.2 148 l s
+93.1 15 m 93.1 148 l s
+
+
+1 1 35{
+  /n exch def
+  12 15 n 3.8 mul add m 108 0 rl s
+  14 11.7 n 3.8 mul add m 36 n sub (  ) cvs center
+  68.2 11.7 n 3.8 mul add m 71 n sub (  ) cvs center
+  }for
+
+} def
+
+scoresheet
+
+132 0 tr
+
+scoresheet
+
+showpage

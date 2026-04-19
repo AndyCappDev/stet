@@ -1,0 +1,145 @@
+%!PS-Adobe-3.0
+%%Title: execform test
+%%BoundingBox: 0 0 612 792
+%%EndComments
+
+% Test 1: Basic form - colored rectangle with label
+/myform 10 dict def
+myform begin
+  /FormType 1 def
+  /BBox [0 0 200 100] def
+  /Matrix [1 0 0 1 0 0] def
+  /PaintProc {
+    pop  % consume the form dict
+    0.2 0.6 0.9 setrgbcolor
+    0 0 200 100 rectfill
+    0 0 0 setrgbcolor
+    2 2 moveto 198 2 lineto 198 98 lineto 2 98 lineto closepath stroke
+    /Helvetica findfont 14 scalefont setfont
+    0.0 0.0 0.0 setrgbcolor
+    50 45 moveto (Form) show
+  } def
+end
+
+% Draw form at default position (lower-left area)
+gsave
+  50 600 translate
+  myform execform
+grestore
+
+% Draw form at a different position and scaled
+gsave
+  300 600 translate
+  0.75 0.75 scale
+  myform execform
+grestore
+
+% Draw form rotated
+gsave
+  200 400 translate
+  30 rotate
+  myform execform
+grestore
+
+% Test 2: Form is cached - second invocation replays display list
+gsave
+  350 350 translate
+  0.5 0.5 scale
+  myform execform
+grestore
+
+% Test 3: BBox clipping - PaintProc draws outside BBox, should be clipped
+/clipform 10 dict def
+clipform begin
+  /FormType 1 def
+  /BBox [0 0 100 50] def
+  /Matrix [1 0 0 1 0 0] def
+  /PaintProc {
+    pop
+    1 0.3 0.3 setrgbcolor
+    % Draw a large rectangle that exceeds the BBox - should be clipped
+    -50 -50 300 200 rectfill
+    0 0 0 setrgbcolor
+    /Helvetica findfont 10 scalefont setfont
+    10 20 moveto (Clipped) show
+  } def
+end
+
+gsave
+  50 250 translate
+  clipform execform
+grestore
+
+% Label
+/Helvetica findfont 12 scalefont setfont
+0 0 0 setrgbcolor
+50 230 moveto (BBox clip test: red rect should be 100x50) show
+
+% Test 4: Form with embedded image (checkerboard)
+/imgform 10 dict def
+imgform begin
+  /FormType 1 def
+  /BBox [0 0 100 80] def
+  /Matrix [1 0 0 1 0 0] def
+  /PaintProc {
+    pop
+    0.2 0.6 0.9 setrgbcolor
+    0 0 100 80 rectfill
+    % 4x4 checkerboard image
+    gsave
+      10 10 translate 30 30 scale
+      4 4 8 [4 0 0 -4 0 4]
+      {<FF 00 FF 00 00 FF 00 FF FF 00 FF 00 00 FF 00 FF>}
+      image
+    grestore
+    /Helvetica findfont 10 scalefont setfont
+    0 0 0 setrgbcolor
+    50 40 moveto (Img) show
+  } def
+end
+
+gsave
+  350 170 translate
+  imgform execform
+grestore
+
+% Replay scaled
+gsave
+  500 170 translate
+  0.75 0.75 scale
+  imgform execform
+grestore
+
+% Replay rotated
+gsave
+  350 70 translate
+  20 rotate
+  imgform execform
+grestore
+
+300 55 moveto (Image form test: checkerboard at 3 transforms) show
+
+% Test 5: Form with non-identity Matrix
+/matform 10 dict def
+matform begin
+  /FormType 1 def
+  /BBox [0 0 1 1] def
+  /Matrix [150 0 0 75 0 0] def
+  /PaintProc {
+    pop
+    0.3 0.8 0.3 setrgbcolor
+    0 0 1 1 rectfill
+    0 0 0 setrgbcolor
+    0.01 setlinewidth
+    0.02 0.02 moveto 0.98 0.02 lineto 0.98 0.98 lineto 0.02 0.98 lineto closepath stroke
+  } def
+end
+
+gsave
+  50 120 translate
+  matform execform
+grestore
+
+50 100 moveto (Matrix scaling test: 150x75 green rect) show
+
+showpage

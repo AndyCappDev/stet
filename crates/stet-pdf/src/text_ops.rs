@@ -242,7 +242,7 @@ struct TmKey {
 
 impl TmKey {
     fn new(a: f64, b: f64, c: f64, d: f64) -> Self {
-        // Quantize to 0.01 resolution (same as PostForge's _fmt comparison)
+        // Quantize to 0.01 resolution
         Self {
             a: (a * 100.0).round() as i64,
             b: (b * 100.0).round() as i64,

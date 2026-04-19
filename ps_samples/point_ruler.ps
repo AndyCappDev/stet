@@ -1,0 +1,45 @@
+letter
+
+-30 212 translate -125 rotate
+
+% This routine generates the two unit small ticks…
+/xstrt -776 def
+/vstrt 200 def
+/tick1 -6 def
+/pos xstrt def
+436 {pos vstrt moveto 0 tick1 rlineto /pos pos 2 add def
+0 setlinewidth stroke} repeat
+
+% This routine generates the ten unit medium ticks…
+newpath
+/pos xstrt def
+/tick2 -12 def
+88 {pos vstrt moveto 0 tick2 rlineto /pos pos 10 add def 0.20
+setlinewidth stroke} repeat
+
+% This routine generates the fifty unit large ticks…
+/pos xstrt def
+/tick3 -18 def
+18 {pos vstrt moveto 0 tick3 rlineto /pos pos 50 add def 0.20
+setlinewidth stroke} repeat
+
+% The lettering for all the three digit numbers. Note that there are
+% five spaces between each group
+newpath
+/Helvetica findfont [ 12 0 0 13 0 0 ] makefont setfont /vstrt
+vstrt 32 sub def
+/xstrt xstrt 12 sub def xstrt vstrt moveto -688 168 moveto
+1.66 0 (100 150 200 250 300 350 400 450 500 550
+600 650 700 750 800 850) ashow
+
+% The single digit zero…
+-734 168 moveto 1.66 0 (50) ashow -780 168 moveto (0) show
+
+% The ruler name…
+-465 146 moveto /Helvetica findfont [40 0 0 15 0 0 ] makefont setfont
+(POINT RULE) show
+
+% The bottom line stripe
+newpath -776 135 moveto 870 0 rlineto 1 setlinewidth stroke
+
+showpage

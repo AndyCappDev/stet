@@ -89,7 +89,7 @@ pub fn op_def(ctx: &mut Context) -> Result<(), PsError> {
         }
     }
 
-    // Name the dict after its key (like PostForge), so it displays nicely
+    // Name the dict after its key, so it displays nicely
     if let (PsValue::Dict(e), PsValue::Name(name_id)) = (val.value, key_obj.value) {
         let name_bytes = ctx.names.get_bytes(name_id).to_vec();
         ctx.dicts.set_name(e, &name_bytes);
@@ -298,7 +298,7 @@ pub fn op_cleardictstack(ctx: &mut Context) -> Result<(), PsError> {
 
 /// `dictname`: dict → name (return the dict's name)
 ///
-/// PostForge extension. Replaces the dict on the stack with its name.
+/// Non-standard extension. Replaces the dict on the stack with its name.
 pub fn op_dictname(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.o_stack.is_empty() {
         return Err(PsError::StackUnderflow);

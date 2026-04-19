@@ -13,7 +13,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-SAMPLES_DIR="$PROJECT_DIR/samples"
+SAMPLES_DIR="$PROJECT_DIR/ps_samples"
 PROFILE_DIR="$PROJECT_DIR/target/pgo-profiles"
 
 # --- Workload definitions ---

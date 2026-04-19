@@ -227,8 +227,7 @@ fn find_subpath_start(segments: &[PathSegment]) -> Option<(f64, f64)> {
     None
 }
 
-/// Convert a circular arc to cubic bezier segments (≤90° each).
-/// Ported from PostForge's `_acuteArcToBezier`.
+/// Convert a circular arc (≤90°) to cubic bezier control points.
 fn acute_arc_to_bezier(start: f64, size: f64) -> (f64, f64, f64, f64, f64, f64, f64, f64) {
     let alpha = size / 2.0;
     let cos_alpha = alpha.cos();
@@ -258,10 +257,10 @@ fn acute_arc_to_bezier(start: f64, size: f64) -> (f64, f64, f64, f64, f64, f64, 
 /// All coordinates are computed in user space (center+radius), then transformed
 /// through the CTM to device space before storing in the path.
 ///
-/// Matches PostForge's algorithm:
+/// Algorithm:
 /// - `arc` (counterclockwise=false): greedy segments of up to PI/2
 /// - `arcn` (counterclockwise=true): generate forward arc, then reverse
-///   segment order and swap control points (PostForge's battle-tested approach)
+///   segment order and swap control points
 #[allow(clippy::too_many_arguments)]
 fn arc_segments(
     cx: f64,
@@ -373,9 +372,9 @@ fn arc_segments_arc(
 }
 
 /// Generate CW arc segments (the `arcn` operator).
-/// PostForge's approach: swap angles, generate forward (CCW) arc,
-/// then reverse segment order and swap control points within each segment.
-/// Points are computed in user space, then transformed through CTM to device space.
+/// Strategy: swap angles, generate the forward (CCW) arc, then reverse
+/// segment order and swap control points within each segment. Points are
+/// computed in user space, then transformed through CTM to device space.
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn arc_segments_arcn(
     cx: f64,
@@ -387,7 +386,7 @@ fn arc_segments_arcn(
     has_current_point: bool,
     ctm: &Matrix,
 ) -> (f64, f64) {
-    // PostForge swaps angle1 and angle2 for arcn
+    // Swap angle1 and angle2 for arcn
     let start = angle2_deg;
     let mut stop = angle1_deg;
     while stop < start {
@@ -407,7 +406,8 @@ fn arc_segments_arcn(
     while stop_rad - current > epsilon {
         let arc_to_draw = (stop_rad - current).min(half_pi);
         let (p0x, p0y, p1x, p1y, p2x, p2y, p3x, p3y) = acute_arc_to_bezier(current, arc_to_draw);
-        // Reverse control point order: p3,p2,p1,p0 (matching PostForge's curves.insert(0, ...))
+        // Reverse control point order: p3,p2,p1,p0; prepend to the vector
+        // so the final curve list runs in reverse
         curves.insert(0, (p3x, p3y, p2x, p2y, p1x, p1y, p0x, p0y));
         current += arc_to_draw;
     }
@@ -530,8 +530,8 @@ pub fn op_arcn(ctx: &mut Context) -> Result<(), PsError> {
 
 /// `arcto`: x1 y1 x2 y2 r → xt1 yt1 xt2 yt2
 ///
-/// Algorithm ported from PostForge's `_compute_arc_from_tangents` + `arcto`.
-/// Tangent computation is in user space (for return values); path storage is device space.
+/// Computes the arc from two tangents and a radius. Tangent computation
+/// is in user space (for the return values); path storage is device space.
 pub fn op_arcto(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.o_stack.len() < 5 {
         return Err(PsError::StackUnderflow);
@@ -597,7 +597,7 @@ pub fn op_arcto(ctx: &mut Context) -> Result<(), PsError> {
         return Ok(());
     }
 
-    // Half angle between the two lines (PostForge's acos approach)
+    // Half angle between the two lines (acos of dot product)
     let dot = (u1x * u2x + u1y * u2y).clamp(-1.0, 1.0);
     let half_angle = dot.acos() / 2.0;
 
@@ -958,7 +958,7 @@ mod tests {
 
     #[test]
     fn test_arc_negative_radius() {
-        // Negative radius is treated as abs(r), matching PostForge
+        // Negative radius is treated as abs(r)
         let mut ctx = setup();
         ctx.o_stack.push(PsObject::real(0.0)).unwrap();
         ctx.o_stack.push(PsObject::real(0.0)).unwrap();

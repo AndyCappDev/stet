@@ -1,0 +1,36 @@
+% Creates fine gray grids without dropouts or rattiness.
+% The code shown is device specific for 300 dpi printers.
+
+% To create a grid, use -hpos- -vpos- -gridsize- setgrid Until restored, all
+% further images will be "locked" to the grid and will expand and contract
+% with it. Note that optimum linewidths and font sizes will usually be much
+% less than 1.0 after locking.
+
+% To show a grid, use -#hlines- -#vlines- showgrid.
+
+% The seegrid command displays the grid when true.
+% The fat5 command emphasizes every fifth line when true.
+% the fatter10 command emphasizes every tenth line when true.
+letter
+/quadpixel {transform 4 div round 4 mul itransform} def
+
+/setgrid {save /rubbersnap exch def quadpixel /size exch def quadpixel exch
+quadpixel exch translate size dup scale} def
+
+/drawlines {72 300 div lw mul size div setlinewidth /hposs 0 def #hlines gs
+div 1 add cvi {hposs 0 moveto 0 #vlines rlineto stroke /hposs hposs gs add
+def} repeat /vposs 0 def #vlines gs div 1 add cvi {0 vposs moveto #hlines 0
+rlineto stroke /vposs vposs gs add def} repeat} def
+
+/showgrid{ seegrid {gsave /#vlines exch def /#hlines exch def 106 45 {pop
+pop 0} setscreen 0.9 setgray /gs 1 def /lw 1 def drawlines fat5 {/gs 5 def /lw
+3 def drawlines} if fatter10 {/gs 10 def /lw 5 def drawlines} if grestore}if} def
+
+/fat5 true def /fatter10 true def /seegrid true def
+
+% use examples: -xpos- -ypos- -gridsize- setgrid -#hlines- -#vlines- showgrid
+% {anything you want locked to the grid} clear rubbersnap restore
+
+% /// demo - remove before use ////
+
+100 200 10 setgrid 20 20 showgrid showpage

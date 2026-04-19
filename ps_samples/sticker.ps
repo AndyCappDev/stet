@@ -1,0 +1,59 @@
+%!PS-Adobe-1.0
+%  adapted from a bumper implementation by John Walker, www.fourmilab.ch,  1990
+
+/A4 false def
+/edef { exch def } def
+/pop4 { pop pop pop pop } def
+
+/centreText {
+    /width exch def /str exch def width str stringwidth pop sub 2.0
+    div 0 rmoveto str show
+} def
+
+/filled-box {
+    10 dict begin gsave /ury edef /urx edef /lly edef /llx edef
+    newpath llx lly moveto llx ury lineto urx ury lineto urx lly
+    lineto closepath setrgbcolor fill grestore end
+} def
+
+/box {
+    4 dict begin /ury edef /urx edef /lly edef /llx edef newpath llx
+    lly moveto llx ury lineto urx ury lineto urx lly lineto closepath
+    stroke end
+} def
+
+/BumperSticker {
+    gsave
+        90 rotate translate 1.45 1.45 scale
+        gsave
+            12 12 scale
+
+            [ 0.1 0.1 ] 0 setdash 0 0 44 14.33 0.05 setlinewidth
+            newpath /height exch def /width exch def moveto width 0
+            rlineto 0 height rlineto width neg 0 rlineto closepath
+            stroke
+
+            [ ] 0 setdash 0.2 setlinewidth 1 0.38 moveto 42 13.68 1
+            currentpoint /y exch def /x exch def newpath /corner exch
+            def /height exch def /width exch def /xend x width add def
+            /yend y height add def x y corner add moveto x yend xend
+            yend corner arcto pop4 xend yend xend y corner arcto pop4
+            xend y x y corner arcto pop4 x y x yend corner arcto pop4
+            stroke
+
+            1 0 translate
+            /NewCenturySchlbk-Roman findfont 5 scalefont setfont
+            11 9.7 moveto (Yoda) 21.5 centreText
+
+            0 -6 translate
+            /NewCenturySchlbk-Roman findfont 5 scalefont setfont
+            11 9.7 moveto (for president) 21.5 centreText
+
+        grestore
+    grestore
+} def
+
+A4 { 25 -270} { 10 -288} ifelse BumperSticker
+A4 { 25 -550} { 10 -576} ifelse BumperSticker
+
+showpage

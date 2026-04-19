@@ -1,0 +1,65 @@
+% Copyright c 1989 by Don Lancaster and Synergetics, 746 First Street, Box 809,
+% Thatcher AZ 85552. (520) 428-4073. All commercial rights reserved.
+% Personal use permitted so long as this header remains present and intact.
+
+/roundpath {/rpd exch def /rprad exch def rpd length 1 sub cvi /rppoints exch def
+rpd 0 get rpd 1 get moveto 2 2 rppoints 2 sub {/rpvalue exch def 0 1 3 {rpd exch
+rpvalue add get } for rprad arcto pop pop pop pop} for rpd rppoints 1 sub get rpd
+rppoints get lineto} def
+
+/bestgray {106 45 {dup mul exch dup mul add 1.0 exch sub} setscreen} def
+/showsegrule true def /hdist {pdis 2 div dup mul zdis 2 div dup mul add sqrt} def
+/hangle {zdis pdis atan} def
+
+% pathtosteparray converts a path [ ang0 ang1 ... angn ] into an array
+% [ [xa0 ya0 xb0 yb0] [xa1 ya1 xb1 yb1] ... ] The "a" points are zdis normal
+% "above" path center, while "b" points are zdis normal "below" path center.
+
+/pathtosteparray {mark exch {/curang exch def currentpoint /yref exch def /xref exch
+def mark curang hangle add dup cos hdist mul xref add exch sin hdist mul yref add
+curang hangle sub dup cos hdist mul xref add exch sin hdist mul yref add ] curang
+cos pdis mul curang sin pdis mul rlineto} forall ] /edgepointarray exch def } def
+
+% drawelement grabs three edgepoint sets and passes them on to drawproc
+
+/drawelement {0 1 edgepointarray length 3 sub { /aposn exch def edgepointarray
+aposn 2 add get aload pop /y5 exch def /x5 exch def /y4 exch def /x4 exch def
+edgepointarray aposn 1 add get aload pop /y3 exch def /x3 exch def /y2 exch def
+/x2 exch def edgepointarray aposn get aload pop /y1 exch def /x1 exch def /y0 exch
+def /x0 exch def save /dpsnap exch def drawproc clear dpsnap restore} for} def
+
+% rope1 builds a rope turn of one-half pdis. 500 max. drawarope automates it.
+
+/half1 {x2 x0 sub 2 div x0 add y2 y0 sub 2 div y0 add} def % service sub
+/half2 {x4 x2 sub 2 div x2 add y4 y2 sub 2 div y2 add} def % service sub
+/rope1 {newpath 0.5 [ x2 y2 half2 x3 y3 x1 y1 half1 x2 y2 ] roundpath showsegrule
+{gsave bestgray 0.99 setgray fill grestore 0.167 setlinewidth stroke}{newpath} ifelse}
+def
+
+/drawarope {/drawproc {rope1} def pathtosteparray drawelement} def
+
+% hsquareknot draws a horizontal square knot, aided by rsqloop1 and lsqloop
+
+/rsqloop1 [0 0 0 0 0 0 0 0 0 0 0 15 30 45 45 45 30 15 0 0 -15 -30 -45 -60 -75
+-90 -90 -90 -105 -120 -135 -150 -165 -180 -180 165 150 135 135 135 150 165 180
+180 180 180 180 -165 -150 -135 -135 -135 ] def
+
+/lsqloop1 [180 180 180 180 180 180 180 180 180 180 180 165 150 135 135 135
+150 165 180 180 -165 -150 -135 -120 -105 -90 -90 -90 -75 -60 -45 -30 -15 0 0 15
+30 45 45 45 30 15 0 0 0 0 0 -15 -30 -45 -45 -45] def
+
+/hsquareknot {save /squaresnap exch def currentpoint /yhold exch def /xhold exch
+def rsqloop1 drawarope save /sssnap exch def xhold 31.5 pdis mul add yhold
+moveto lsqloop1 drawarope clear sssnap restore /showsegrule {aposn 1 add dup 8 ge
+exch 10 le and aposn 1 add dup 23 ge exch 29 le and or aposn 1 add dup 42 ge
+exch 45 le and or} def xhold yhold moveto rsqloop1 drawarope clear squaresnap
+restore } def
+
+% --- border with square knot demo. remove before use ---
+
+bestgray 0.8 setgray % only for subtle fuzzy effect shown here; otherwise 0 setgray
+88 150 translate 6 dup scale /pdis 1.3 def /zdis 2.6 def 10 80 moveto hsquareknot
+
+10 pdis 2.5 mul add 80 moveto [180 180 180 180 -165 -150 -135 -120 -105 -90 50
+{-90} repeat -90 -75 -60 -45 -30 -15 0 0 0 40 {0} repeat 15 30 45 60 75 90 50 {90}
+repeat 90 105 120 135 150 165 180 12 {180} repeat] drawarope showpage

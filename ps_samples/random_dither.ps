@@ -1,0 +1,12 @@
+letter
+
+/random {rand 32768 div 65536 div mul floor} def
+
+/randscreen {gsave patnum srand 300 mul 72 div /rndhigh
+exch def 300 mul 72 div /rndwide exch def 72 300 div dup
+scale 1 setlinecap 1 setlinewidth rndhigh rndwide mul
+density mul cvi{rndwide random rndhigh random moveto
+0.01 0 rlineto stroke} repeat grestore} def
+
+/patnum 12345678 def /density 0.09 def 72 72
+randscreen showpage

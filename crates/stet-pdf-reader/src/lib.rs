@@ -4,11 +4,45 @@
 
 //! PDF parser, page navigator, and content stream interpreter.
 //!
-//! Phase A: structural parsing — open a PDF, navigate its object graph,
-//! find pages, and extract raw content streams.
+//! `stet-pdf-reader` is a self-contained PDF reader: it opens a PDF, walks
+//! its object graph, and interprets each page's content stream into a
+//! `stet_graphics::display_list::DisplayList` that any downstream consumer
+//! (rasterizer, PDF writer, custom output device) can render.
 //!
-//! Phase B: content stream interpretation — convert PDF page content into
-//! DisplayList elements for rendering through the SkiaDevice pipeline.
+//! The crate intentionally has **no dependency on `stet-core`** — it uses
+//! only `stet-fonts` (font parsing) and `stet-graphics` (display list and
+//! ICC types), so it can be used as a standalone PDF parser/renderer
+//! without pulling in the PostScript interpreter.
+//!
+//! # Quick start
+//!
+//! ```no_run
+//! use stet_pdf_reader::PdfDocument;
+//!
+//! let data = std::fs::read("document.pdf")?;
+//! let doc = PdfDocument::from_bytes(&data)?;
+//!
+//! for page in 0..doc.page_count() {
+//!     let display_list = doc.render_page(page, 150.0)?;
+//!     // …consume the display list (rasterize, convert, inspect, etc.)
+//! }
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//!
+//! With the default `render` feature enabled, [`PdfDocument::render_page_to_rgba`]
+//! skips the display-list-handling boilerplate and produces RGBA pixels
+//! directly via `stet-render`.
+//!
+//! # Acknowledgements
+//!
+//! JPEG 2000, JBIG2, and CCITT-Fax stream decoding use the
+//! [`hayro-jpeg2000`](https://crates.io/crates/hayro-jpeg2000),
+//! [`hayro-jbig2`](https://crates.io/crates/hayro-jbig2), and
+//! [`hayro-ccitt`](https://crates.io/crates/hayro-ccitt) crates from the
+//! [hayro](https://github.com/LaurenzV/hayro) PDF renderer by Laurenz
+//! Stampfl. Big thanks to the hayro project for factoring those decoders
+//! out as reusable crates — `stet-pdf-reader` would not cover the full
+//! PDF stream-filter surface without them.
 
 pub mod content;
 pub mod crypto;

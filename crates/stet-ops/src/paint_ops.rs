@@ -99,7 +99,7 @@ pub(crate) fn ctm_singular_values(ctm: &Matrix) -> (f64, f64) {
 }
 
 /// Check if CTM has anisotropic scaling (non-uniform in X vs Y).
-/// Uses the ratio of SVD singular values, matching PostForge's threshold.
+/// Uses the ratio of SVD singular values with a 1.01 threshold.
 pub(crate) fn is_anisotropic(ctm: &Matrix) -> bool {
     let (s_max, s_min) = ctm_singular_values(ctm);
     let det = (ctm.a * ctm.d - ctm.b * ctm.c).abs();
@@ -614,8 +614,8 @@ pub fn op_showpage(ctx: &mut Context) -> Result<(), PsError> {
     if let Some(ref mut device) = ctx.device {
         device.init_clip();
     }
-    // Note: gstate_stack is NOT cleared by showpage (per PLRM / PostForge).
-    // Programs like dvi_ps rely on gsave/grestore around showpage to preserve
+    // Note: gstate_stack is NOT cleared by showpage (per PLRM). Programs
+    // like dvi_ps rely on gsave/grestore around showpage to preserve
     // coordinate system setup across page boundaries.
 
     Ok(())

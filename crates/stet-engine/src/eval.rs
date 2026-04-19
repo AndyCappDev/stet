@@ -71,10 +71,10 @@ pub fn eval(ctx: &mut Context) -> Result<(), PsError> {
 
 /// Synchronously execute a PostScript procedure and return.
 ///
-/// Equivalent to PostForge's `exec_exec()`: pushes the procedure on the
-/// e_stack and runs the eval loop until the e_stack returns to its original
-/// depth. Used by operators that need to call PS procedures as callbacks
-/// (filter/image data sources, tint transforms, BuildChar, etc.).
+/// Pushes the procedure onto the e_stack and runs the eval loop until the
+/// e_stack returns to its original depth. Used by operators that need to
+/// call PS procedures as callbacks (filter/image data sources, tint
+/// transforms, BuildChar, etc.).
 pub fn exec_sync(ctx: &mut Context, proc_obj: PsObject) -> Result<(), PsError> {
     let base_depth = ctx.e_stack.len();
     ctx.e_stack.push(proc_obj)?;
@@ -539,7 +539,7 @@ fn eval_one(ctx: &mut Context, obj: PsObject) -> Result<(), PsError> {
 ///
 /// Instead of expanding all procedure elements onto the e_stack, we push a
 /// single `ExecArray` cursor that the eval loop advances one element at a time.
-/// This matches PostForge's behavior where a procedure is one exec stack item.
+/// Each procedure occupies exactly one exec-stack item.
 fn exec_procedure(
     ctx: &mut Context,
     entity: EntityId,

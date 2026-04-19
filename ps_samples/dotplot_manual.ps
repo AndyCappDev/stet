@@ -1,0 +1,5558 @@
+%% New PS driver
+statusdict begin /waittimeout 0 def end
+initgraphics erasepage
+/bd{bind def}bind def /ed{exch def}bind def
+72 300 div dup scale
+/gr {grestore}bd /gs {gsave}bd
+/np {newpath}bd /cp {currentpoint}bd
+/lto {lineto}bd /mto {moveto}bd
+/clw {currentlinewidth}bd
+np 1 setlinejoin
+/bwin{/lry ed /lrx ed /uly ed /ulx ed
+gs 0 av 49 add uly sub translate np
+ulx uly mto ulx lry lto lrx lry lto lrx uly lto clip
+/av av uly lry sub 50 div ceiling 50 mul sub def /ah 0 def}bd
+/ewin{gr}bd
+/path{np mto{lto}repeat}bd
+/circle{np 0 0 1 0 360 arc}bd
+/ah 0 def /av 2960 def /CR{/ah 0 def}bd
+/LF{av 50 sub dup /av ed 0 le {FF}if}bd
+/FF{av 2960 ne ah 0 ne or{copypage erasepage gr gs /ah 0 def /av 2960 def}if}bd
+/aface 0 def /au false def
+/atext{fonts aface get findfont 50 scalefont setfont
+dup length /al ed np ah av mto show
+au{ah av mto al{(_)show}repeat}if cp /av ed /ah ed}bd
+/rend{gs 1 setlinecap np mto cp lto stroke gr}bd
+/vl{dup /st ed dup apath exch get tx sub dup mul
+exch 1 add apath exch get ty sub dup mul add sqrt}bd
+/doarrow{/rot ed /ty ed /tx ed
+6 array currentmatrix tx ty translate
+clw 4 lt{4}{clw}ifelse dup scale rot rotate
+np 0 0 mto -3 1.5 lto -3 -1.5 lto fill setmatrix}bd
+/arpath{np apath 0 get apath 1 get mto 2 2 points 1 sub
+{dup apath exch get exch 1 add apath exch get lto}for}bd
+/arrowline{/apath ed /lend ed /lbeg ed
+/len clw 3 mul def /points apath length def
+lbeg{apath 0 get dup /tx ed /x1 ed
+apath 1 get dup /ty ed /y1 ed
+true 2 2 points 1 sub{vl len ge{pop false exit}if}for
+{/lbeg false def /lend false def}{apath 2 apath st points st sub
+getinterval putinterval /r1 y1 apath 3 get sub x1 apath 2 get sub atan def
+apath 0 x1 r1 cos len mul sub put apath 1 y1 r1 sin len mul sub put
+/points points st 2 sub sub def}ifelse }if
+lend{apath points 2 sub get dup /tx ed /x2 ed
+apath points 1 sub get dup /ty ed /y2 ed
+true points 4 sub -2 0{vl len ge{pop false exit}if}for
+{/lbeg false def /lend false def}
+{/r2 y2 apath st 1 add get sub x2 apath st get sub atan def
+/st st 2 add def apath st x2 r2 cos len mul sub put
+apath st 1 add y2 r2 sin len mul sub put /points st 2 add def}ifelse}if
+lbeg {x1 y1 r1 doarrow}if lend {x2 y2 r2 doarrow}if arpath}bd
+/ac{6 array currentmatrix xt yt translate xs ys scale}bd
+/shorten{dup mul exch dup mul add sqrt clw 150 mul exch div}bd
+/xang{}bd
+/arrowarc{/eang ed /bang ed /ys ed /xs ed
+/yt ed /xt ed /lend ed /lbeg ed
+ac np 0 0 1 bang xang eang xang arc setmatrix
+cp /y2 ed /x2 ed
+ac np 0 0 1 bang xang dup arc setmatrix
+cp /y1 ed /x1 ed
+lbeg{/bang bang xs ys shorten add def}if
+lend{/eang eang xs ys shorten sub def}if
+ac np 0 0 1 bang xang eang xang arc setmatrix
+gs stroke gr
+lend{x2 y2 cp y2 exch sub exch x2 exch sub atan doarrow}if
+lbeg{ac np 0 0 1 bang xang dup arc setmatrix
+x1 y1 cp y1 exch sub exch x1 exch sub atan doarrow}if}bd
+/rbox{/ury ed /urx ed /lly ed /llx ed
+urx llx sub 4 div dup 50 gt{pop 50}if /radius ed
+ury lly sub 4 div dup radius gt{pop radius}if /radius ed
+np urx radius sub ury mto
+llx ury llx lly radius arcto 4{pop}repeat
+llx lly urx lly radius arcto 4{pop}repeat
+urx lly urx ury radius arcto 4{pop}repeat
+urx ury llx ury radius arcto 4{pop}repeat}bd
+/marker{1 sub mdef exch get /mproc ed 32 div /msize ed
+{gs np translate msize dup scale mproc stroke gr}repeat}bd
+/mdef[{0 0 mto 1 0 lto 1 1 lto 0 1 lto closepath}
+{-16 0 mto 16 0 lto 0 -16 mto 0 16 lto}
+{0 -16 mto 0 16 lto 13.9 8 mto -13.9 -8 lto 13.9 -8 mto -13.9 8 lto}
+{16 16 mto -16 16 lto -16 -16 lto 16 -16 lto closepath}
+{16 16 mto -16 -16 lto -16 16 mto 16 -16 lto}
+{16 0 mto 0 16 lto -16 0 lto 0 -16 lto closepath}]def
+/patdef{/patbits exch store /patname exch store
+CharStrings patname[16 16 true[16 0 0 16 0 0]patbits /imagemask load]cvx put}bd
+/patname null def /patbits null def /BuildCharDict 10 dict def
+/ExFont 7 dict def ExFont begin /FontType 3 def /FontMatrix[1 0 0 1 0 0 ]def
+/FontBBox[0 0 1 1]def /Encoding 256 array def 0 1 255{Encoding exch /.notdef put}for
+/CharStrings 39 dict def CharStrings /.notdef{}put
+/BuildChar{BuildCharDict begin /char ed /fontdict ed
+/charproc fontdict /Encoding get char get fontdict /CharStrings get exch get def
+1 0 0 0 1 1 setcachedevice gs charproc gr end}bd end
+/PatFont ExFont definefont pop
+/tile{/tchar ed /txl ed /tyl ed /ty ed /tx ed
+gs 1 setgray eofill gr gs eoclip np
+/PatFont findfont 32 scalefont setfont
+tx ty mto tyl{gs txl{tchar show}repeat
+gr 0 -32 rmoveto}repeat gr}bd
+/ellpie{/pie ed /eang ed /bang ed
+/ys ed /xs ed /yt ed /xt ed
+6 array currentmatrix xt yt translate xs ys scale
+np pie{0 0 mto}if
+0 0 1 bang xang eang xang arc setmatrix}bd
+/roundarc{gs 1 setlinecap cp np mto
+cp lto stroke gr}bd
+/decode{{vrep 0.1 gt{/vrep vrep 1 sub def scan}
+{/spos 0 def{currentfile token pop currentfile token pop
+exch imop exch get exec spos smax ge{scan exit}if}loop}ifelse}image}bd
+/imop[{<ff> psc}{<00> psc}
+{currentfile patlen string readhexstring pop psc}
+{string currentfile exch readhexstring pop 1 exch psc}
+{1 sub /vrep ed}]def
+/psc{dup length /plen ed exch -1 1 {pop dup scan exch
+spos exch putinterval /spos spos plen add def}for pop}bd
+/gtext{gs /msg ed /ty ed /tx ed
+tx ty translate trotate rotate tcolor setgray
+fonts tface get findfont tscale scalefont setfont
+10 setflat horz halign get exec vert valign get exec
+tpos msg show
+tunder{extents pop /x1 ed 5 div dup neg setlinewidth 1.5 mul ty add /ty ed
+pop np tx ty mto x1 tx add ty lto stroke}if gr}bd
+/tpos{np tx ty mto}bd
+/jtext{gs /msg ed /just ed
+/dx ed /ty ed /tx ed
+tx ty translate trotate rotate tcolor setgray
+fonts tface get findfont tscale scalefont setfont
+10 setflat jhorz halign get exec vert valign get exec
+justify just get exec
+tunder{cp extents pop /x1 ed 5 div dup neg setlinewidth
+1.5 mul ty add /ty ed pop
+np tx ty mto dx tx add ty lto stroke}if gr}bd
+/justify[{tpos msg show}{countsp spaces 0 eq{tpos msg show}
+{extra spaces div 0 32 tpos msg widthshow}ifelse}
+{extra msg length 1 sub dup 0 eq {pop pop tpos msg show}{div 0 tpos msg ashow}ifelse}]def
+/countsp{/spaces 0 def msg( ){search{/spaces spaces 1 add def pop}{pop exit}ifelse}loop}bd
+/extra{extents pop exch pop exch sub dx exch sub}def
+/horz[{/tx 0 def}{msg stringwidth pop -2 div /tx ed}
+{msg stringwidth pop neg /tx ed}]def
+/extents{(_) bbox pop pop msg stringwidth pop (]) bbox 3{exch pop}repeat}bd
+/bbox{np 0 0 mto false charpath flattenpath pathbbox np}bd
+/vert[{/ty 0 def}{extents -2 div /ty ed pop pop pop}
+{extents neg /ty ed pop pop pop}{extents pop pop neg /ty ed pop}]def
+/jhorz[{/tx 0 def}{/tx dx -2 div def}{/tx dx neg def}]def
+/reencd 12 dict def /ReEncode { reencd begin
+/newcodes ed /newfname ed /basefname
+ed /basefd basefname findfont def /newfont
+basefd maxlength dict def basefd { exch dup /FID ne {
+dup /Encoding eq { exch dup length array copy newfont 3 1 roll
+put } { exch newfont 3 1 roll put } ifelse } { pop pop } ifelse }
+forall newfont /FontName newfname put newcodes aload
+pop newcodes length 2 idiv { newfont /Encoding get 3 1
+roll put } repeat newfname newfont definefont pop end }bd
+/mkod 7 dict def
+/MkOutF { mkod begin /uniqueid ed
+/strokewidth ed /newfname ed /basefname ed
+/basefd basefname findfont def
+/numentries basefd maxlength 3 add def
+basefd /UniqueID known not
+{ /numentries numentries 1 add def } if
+/outfd numentries dict def
+basefd { exch dup /FID ne { exch outfd 3 1 roll put }
+{ pop pop } ifelse } forall
+outfd /FontName newfname put
+outfd /PaintType 2 put
+outfd /StrokeWidth strokewidth put
+outfd /UniqueId uniqueid put
+newfname outfd definefont pop end }bd
+/Evec [ 128 /Ccedilla 129 /udieresis 130 /eacute 131
+/acircumflex 132 /adieresis 133 /agrave 134 /aring 135 /ccedilla
+136 /ecircumflex 137 /edieresis 138 /egrave 139 /idieresis 140
+/icircumflex 141 /igrave 142 /Adieresis 143 /Aring 144 /Eacute
+145 /ae 146 /AE 147 /ocircumflex 148 /odieresis 149 /ograve 150
+/ucircumflex 151 /ugrave 152 /ydieresis 153 /Odieresis 154
+/Udieresis 155 /oslash 156 /sterling 157 /Oslash 158 /germandbls 159
+/florin 160 /aacute 161 /iacute 162 /oacute 163 /uacute 164
+/ntilde 165 /Ntilde 166 /a 167 /o 168 /questiondown 169
+/guilsinglleft 170 /guilsinglright 171 /space 172 /space 173
+/exclamdown 174 /guillemotleft 175 /guillemotright 176 /atilde 177
+/otilde 178 /yen 179 /cent 180 /oe 181 /OE 182 /Agrave 183
+/Atilde 184 /Otilde 185 /dieresis 186 /acute 187 /dagger
+188 /paragraph 189 /space 190 /space 191 /space 249 /bullet
+225 /germandbls ] def
+/makpenf { /penf ed /name ed
+FontDirectory name known { name penf Evec ReEncode } if } def
+/makoutf { /id ed /sw ed /outl ed /intm ed /name ed
+FontDirectory name known { name intm Evec ReEncode intm outl sw id MkOutF } if } def
+/Courier /Courier-RM makpenf
+/Courier-Bold /Courier-BD makpenf
+/Courier-Oblique /Courier-IT makpenf
+/Courier-BoldOblique /Courier-BI makpenf
+/Helvetica /Helv-RM /Helv-RMO 16 4201 makoutf
+/Helvetica-Bold /Helv-BD /Helv-BDO 25 4202 makoutf
+/Helvetica-Oblique /Helv-IT /Helv-ITO 16 4203 makoutf
+/Helvetica-BoldOblique /Helv-BI /Helv-BIO 25 4204 makoutf
+/Times-Roman /Times-RM /Times-RMO 12 4205 makoutf
+/Times-Bold /Times-BD /Times-BDO 20 4206 makoutf
+/Times-Italic /Times-IT /Times-ITO 12 4207 makoutf
+/Times-BoldItalic /Times-BI /Times-BIO 20 4208 makoutf
+/AvantGarde-Book /AvGarde-RM /AvGarde-RMO 16 4209 makoutf
+/AvantGarde-Demi /AvGarde-BD /AvGarde-BDO 25 4210 makoutf
+/AvantGarde-BookOblique /AvGarde-IT /AvGarde-ITO 16 4211 makoutf
+/AvantGarde-DemiOblique /AvGarde-BI /AvGarde-BIO 25 4212 makoutf
+/Bookman-Light /Bookman-RM /Bookman-RMO 12 4213 makoutf
+/Bookman-Demi /Bookman-BD /Bookman-BDO 20 4214 makoutf
+/Bookman-LightItalic /Bookman-IT /Bookman-ITO 12 4215 makoutf
+/Bookman-DemiItalic /Bookman-BI /Bookman-BIO 20 4216 makoutf
+/NewCenturySchlbk-Roman /Century-RM /Century-RMO 12 4217 makoutf
+/NewCenturySchlbk-Bold /Century-BD /Century-BDO 20 4218 makoutf
+/NewCenturySchlbk-Italic /Century-IT /Century-ITO 12 4219 makoutf
+/NewCenturySchlbk-BoldItalic /Century-BI /Century-BIO 20 4220 makoutf
+/Palatino-Roman /Palatino-RM /Palatino-RMO 12 4221 makoutf
+/Palatino-Bold /Palatino-BD /Palatino-BDO 20 4222 makoutf
+/Palatino-Italic /Palatino-IT /Palatino-ITO 12 4223 makoutf
+/Palatino-BoldItalic /Palatino-BI /Palatino-BIO 20 4224 makoutf
+/Symbol /Symbol-RM /Symbol-RMO 12 4225 makoutf
+/fonts [ /Courier-RM /Courier-BD
+/Courier-IT /Courier-BI
+/Courier-RM /Courier-BD
+/Courier-IT /Courier-BI
+/Helv-RM /Helv-BD
+/Helv-IT /Helv-BI
+/Helv-RMO /Helv-BDO
+/Helv-ITO /Helv-BIO
+/Times-RM /Times-BD
+/Times-IT /Times-BI
+/Times-RMO /Times-BDO
+/Times-ITO /Times-BIO
+/AvGarde-RM /AvGarde-BD
+/AvGarde-IT /AvGarde-BI
+/AvGarde-RMO /AvGarde-BDO
+/AvGarde-ITO /AvGarde-BIO
+/Bookman-RM /Bookman-BD
+/Bookman-IT /Bookman-BI
+/Bookman-RMO /Bookman-BDO
+/Bookman-ITO /Bookman-BIO
+/Century-RM /Century-BD
+/Century-IT /Century-BI
+/Century-RMO /Century-BDO
+/Century-ITO /Century-BIO
+/Palatino-RM /Palatino-BD
+/Palatino-IT /Palatino-BI
+/Palatino-RMO /Palatino-BDO
+/Palatino-ITO /Palatino-BIO
+/Symbol /Symbol
+/Symbol /Symbol
+/Symbol /Symbol
+/Symbol /Symbol
+] def
+gs
+/saveobj save def
+/rs{saveobj restore /saveobj save def}bd
+/saveobj save def
+gs initclip
+0 3494 2470 3494 2470 0 0 0 np mto lto lto lto clip np
+0 -13 2480 -13 2480 3494 3 0 3494 path
+0 setgray
+gs 0 8 div setgray
+gs eofill gr gr
+0 -14 1724 -14 1724 1198 3 0 1198 path
+0 setgray
+gs 1 setgray
+gs eofill gr gr
+56 2 /vrep 0 def /patlen exch def dup string /scan exch def /smax exch def
+0 -14 1724 -14 1724 1198 0 1198 gs np mto lto lto lto clip
+1725 1213 0 -14 translate scale
+448 400 1 [448 0 0 -400 0 400 ]decode
+1 56 1 56 1 56 1 56 1 56 1 15 3 5 2525224a4a
+1 36 1 14 3 7 514a4a44949464
+1 35 1 13 3 9 12a29494893b7958a0
+1 34 1 12 3 10 0264a4a92912e4a323c5
+1 34 1 12 3 11 4ca54532522d4946451e24
+1 33 1 11 3 13 0414ca8a54a4d297959e28d840
+1 32 1 11 3 13 15999514a949256a3228f36190
+1 32 1 11 3 14 9829952952924e946cf3c4866280
+1 31 1 10 3 15 12ab332a529524993951451b198f30
+1 31 1 10 3 15 53305654552a4972e3679e6c663ccc
+1 31 1 9 3 17 0265566658aa5492ad428a28b098f33180
+1 30 1 9 3 17 02a660cca954a92d53913cf34363ccc650
+1 30 1 9 3 17 24aaad5552995653ae3651cd8c8f331946
+1 30 1 9 3 18 a4cac19aa532a8a654a9e716333ccc651980
+1 29 1 8 3 19 02a54d5ab2c665515ca9b29e684cf331946630
+1 29 1 8 3 19 12c55583354aaaa2ab734729b1b3ccc61398cc
+1 29 1 8 3 19 534999b66a95554d55ca9cf2c6cf333a0ce733
+1 29 1 7 3 21 01534a9b06cb2aaa92ea9b39cf1b3cccca3319cc60
+1 28 1 7 3 21 09554ab36cd65555259714e7346c733329dce67398
+1 28 1 7 3 21 29558b360daa669a5b6c99ce58914ccca6633b8ce0
+1 28 1 7 3 21 69659356db34cd34aeb9a739e3653334999dcc7703
+1 28 1 6 3 23 016966956c2b595a695571cef68d94ccd4ee6673981c60
+1 27 1 6 3 23 0969a6966db6b2b4d2bac939cb3653735333bb8ce0e380
+1 27 1 6 3 23 2969a6a6d460d565a56f8a773cd94d9d4dcccc77071c18
+1 27 1 6 3 23 2969ab2adb6d66ab4ad74dced1673661363773b838e0e6
+1 27 1 6 3 24 a969ab2d68dacd5695acd3b9669ed9a1d9d99dc1c70f7980
+1 26 1 5 3 24 029569ad2db6db96ad3f58ee779b7b66a6e6ee660e38739e
+1 27 1 5 3 25 0a94eaad59b1b6ab5aeff49d5e6ded9a9b3b73b871c39ce060
+1 26 1 5 3 25 0954eace5b636b56b55aef7728b7b662fcdd9dc39e1def0798
+1 26 1 5 3 25 2554eace5b636e6d6ab58ceef3dedbc3676eee1ce1ee7079e0
+1 26 1 5 3 25 25548ad6b5c6dcdad56f4bbbcf3b6d4d9bf370e70e73839e05
+1 26 1 4 3 26 01154c8ad6b6c62db5aafe777534adb57efd9d873877bc3de044
+1 26 1 4 3 27 0512aa8adab78ddaeb56d85d5edab6c5b36eee39c3b9c1ce0441c0
+1 25 1 4 3 27 028aaabadced8f75b6aeb5bb796adb06dfb371ce1dde1ef0441e70
+1 25 1 4 3 27 128aaabb5d6f18e6ed7da6eaa7ab6e3f6ddf8671fee1ef0441e780
+1 25 1 4 3 27 09496abb5d63076ddadfa5fbdeafbadbfefc3b8eef0ef0441e781c
+1 25 1 4 3 27 494556bb6dd83ddbb5bb7f7f7abdebedb761dc7770f70441ef81e7
+1 25 1 3 3 28 0124a556bbb9de63b77fba6f5daaf63f7fdb8ee3ff8f78443ef03ef8
+1 25 1 4 3 28 a4a2d67bbaf07dbdebbaeb72ebdc6dbefc773fb8778443cf07cf01c0
+1 24 1 3 3 29 045252b57bbbbcc77bd7736befaf75fff7e3b9ddc7f8443df079f03e70
+1 24 1 3 3 29 124952ad7bbb8c3ef7afe65bbebddfbfff1dcffe3b8443de0fbe07cf80
+1 24 1 3 3 29 0929296d7bbdfffdef7f6a5ef6f67ff6d8fe7ee3fc443fe1f7c0fbf01c
+1 24 1 3 3 29 4494a95b7bf4781f1ecf325dd7f8f7ffe7e7ff3fc447fc1ef81f7c07e0
+1 24 1 3 3 28 a28a955b7bf7fff8fdcf72555fe7ffff3f3ff1fc447bc3ef07ef81f8
+1 25 3 32 000001514954b77bf7f7f7fbf79b5d7fbffef9f9ff9fc447fc3df0fbf03e000f
+1 24 1 3 3 30 a8a52ab77bf87e2ff7e19b7dfcfbfecfcff9fe447f87fe1f7c0fc003f3c0
+1 23 3 32 0000045452aa6ef94fefffeff4dbf7f1faf67e6fcfe44ff8ffc3ef83f000fcfc
+1 24 3 33 0000033e29555dff2fb1ffdb5c6bdfcdfff3f77eee44ff8ff87ff07c007f7f00f0
+1 23 3 32 0000108b154b5baff3db9ff4366b7e3f5fdfbfe7e44ff1ff0ffc1f801f9f807f
+1 24 3 33 00000c4592aab7afff6e0fcf636dadbef6fdb77744ff3ff1ff87e007efe03f8078
+1 23 3 33 00002232ea55afaffdb7dffcb5f6e6ebb7edf7744ef3fe3df0f801fff01fc07f80
+1 23 3 33 0000998955355faf96cfbfeb5f9b9f5dbfebb745ee7bc7bc3f00fff80fe07f803e
+1 23 3 34 00006644eaaadeef7b37be1d6f6c55f5fedbb45fe779f78fc03ffe0ff03f803fcf80
+1 22 3 33 000199333555b7ef78d1bdcab4b16abff5fb85def73ff1f00fff07f03fc07fdff0
+1 23 3 34 000066c89aad6fedea5b7a2ad2e295ffadb81ddef7be7e07efc3f83fc07fbfe007c0
+1 22 3 33 000619b64f56efed119ae01549ad6f697d819ddef79f81ffe1fc3fc07fffc01ff8
+1 23 3 34 0001866935abb6ed6855854725923bd7dc39b9def3e07df8fe1fc0ffff807fe003f0
+1 22 3 33 00006196cbd6f7acc235041a8505debcc3bf3b9efc1e7c7f1fe0ffff81ff801ffc
+1 23 3 32 00181c6da4edbfaaa04a40a2422ae14c33f773bf0f9e3f9fe1feff03fe00ffe0
+1 24 3 34 0007031b5b76fafa2890200180571ec33e7e7fc3cf9fcfe1fdfe0ffc07ff000001fc
+1 22 3 33 0060e0c6f4bb7f788827c00600aaa633cf8ff0f3cfeff1f9fc3ff03ff800003ffe
+1 23 3 34 001e1c39bf5df0a0130400382d026628b1fe78fffff3f1f8ffc0ffc00007ffc001fe
+1 22 3 33 00c1c3066efaff40985bcb3c614665166f9e7ff7f3e3f1ff07ff0000fff800fffe
+1 23 3 35 003c38e19ba87d846aec3f00092652cde71dffffc3e7fe3ff8001fff007fff0000ff80
+1 21 3 33 01c3c79c77fd3707cb697fe34340013d86fbffc7dff9ffc003ffe03fff8003ffff
+1 23 3 35 003e3c738dff8ea7d6bd6b1c9c800fe17df787bfeffe007ffc1fffc00ffffc0001ffc0
+1 21 3 33 0781f3cf73ffc6079e1d10f9c401f09cf30e7ffff00fff8fffe01ffff0003ffffe
+1 23 3 35 007e0f3cee7df526688731d9d9340c720cfdff83fff7fff07fffe00fffffc00007ffe0
+1 21 3 35 0f01f8fbdddf12308738041b68102001e3fc7ffffff9ffff81fffff0003ffffff7fff0
+1 21 3 33 1fff07e7fffef82717ad2adc0804230feffe7ffffffe3ffffe00fffff83ffffff0
+1 23 3 29 00ff3f1fbdff8065739dd1ffbee43eff0ff1fff3ffffc7fffe00fffff8
+1 3 3 3 fffffc
+1 21 3 27 3fc03f1f7fcb63d8ed23aa7fd0c381c0fe0fffcfff0007fffe000f
+0 5 1 24 3 22 003fff1f06f483ce3b8621362040403e0180003fff7f
+0 4 3 1 f0
+1 3 3 1 3f
+0 3 3 1 fe
+1 21 1 3 3 15 fff9042d1a1ef3c6f7c79fc002007f
+0 10 3 3 00003f
+0 3 3 1 fe
+1 21 1 4 3 12 01fce2947f68de0f87e01ffc
+1 5 3 1 7f
+0 6 1 28 0 5 3 6 f80189004020
+1 3 3 1 1f
+0 6 3 1 c0
+1 34 3 16 0001fffffc004b87302ddc1fbff00001
+0 19 1 21 3 18 fffe01ffe3c9c3727568e46f3f0e003e000f
+0 3 3 1 df
+0 8 3 1 f0
+1 25 3 19 00fffe7fd8452db6761078bef08200400ff01f
+0 7 3 1 fe
+1 3 3 1 0f
+0 4 3 1 80
+1 20 3 22 ff01ff9c37306aea6e5bfa8aec03078ff03fe0ffffef
+0 3 3 2 e001
+0 5 3 1 e0
+1 23 3 20 07fe1f1feb21ffd25bc1cc9d6b6118103fffff0f
+0 4 3 2 f81f
+0 3 3 7 e000001fffffc0
+1 20 3 30 f80f9f7fa75de081cca07f6feef910e7c3c3ff0ffff7ffff87fffffc001f
+0 3 3 1 e0
+1 22 3 36 0fcf8fb07a9a0271c47f70eddf84c0087dfc3f1ffc07fffc7ffff803fffffc00001fffe0
+1 20 3 34 ffc3f70ff4203d265648030f605200c0863fbfe7fcfff803ffff07ffffc003fffffe
+1 22 3 36 f07c74dfbb993197c7fe1705950108d098c79fe7fffff7ffe000ffff803ffffc0001fff0
+1 20 3 21 1f8e4dffc66fe1d899cde1fbf8014003e039e3eff8
+0 3 3 11 9fff80007fffc003ffffc0
+1 21 3 36 e1edceef712930ef966a16ffe6800b240fc03df3fffc0ffe7ffc7ffe00003ffff0003ff8
+1 20 3 35 1fdcf77bc4d349c5ac5686e37a2a9458911fc27df9ffff01ffc3ffc1fff800000ffff8
+1 21 3 36 fdc73bef1b521a56f1a30bfc8dc229a7e66e7b827ffdffffc03ffc3ffe07ffe0000007fc
+1 20 3 34 dc79dd7a72447ca2b221f79e1136a2cb3fb3b9f386fffeffbff003ff81ffe01fff80
+1 22 3 35 c38eed6bda292681ad56dee1e202203cd9fccef7c70fffff7fcffc007ff01fff007ffe
+1 21 3 36 3cf76fab739fae8602dbe7d8020004036fcef77bcf8e1ffeff3fe3ff000fff00fff801fe
+1 20 3 36 c739ecad7e70d9c6a20cfa661e200450b67e779dffbe1e3dfeff9ff0ffc000ffe007ff80
+1 20 3 36 38cdb2b991e6ab61df3eacb99804850d4bf7739ef7fefc3c7dfe7f8ff83ff0001ffc007f
+1 20 3 20 c73dcaeb7dcc2bd3d8f1e95e6402100394bf7bbc
+0 3 3 13 f87c79fc7fc7fc0ffc0003ffc0
+1 20 3 36 39b62bacf99041903b0e86011b116ba13b5bfbbde7dffff7e078fbfc3fc3fe03ff00003f
+1 20 3 22 cf98ad9b771acaf75fce00000ec0947547a5bbbdef1f
+0 3 3 10 c0f9f3fc3fe1ff80ffc0
+1 21 3 36 3e62b577aac185b7a7950508063c4b8ea87edbbdcf78fbefdfbf01f3e3fc1fe07fc03ff0
+1 20 3 37 f38ad5cfd5e984e577b086c00c0b24fbd5cf6db9de7be7ffbf7efe03e7e3fc1ff03fe00f80
+1 19 3 36 cc2952b7eb8832a3f79082610406d2557ab1f6dbdfe3df1f7efdf9f807e7c3fc0ff01ff0
+1 20 3 37 30a7ce3fd74828a3174401021801adafaf5a97edfdef3ef8f9f3f7f7f007cfc3fc0ff80f80
+1 19 3 36 c29b97fdaea4423a8ac61804e0107a5af5ef72ffdfcff9f7c7efcf8fcfe00fdf83fc07f8
+1 20 3 37 0a6a73795868805672a019a41aa61fa577bdee2ffffcf78fbe1f3e7e3f1f801fbf83fc07c0
+1 19 3 36 29b9bbe2862bd9d7d26980d46549c7fad7fdbde5fdffcffc7df0fdf9f8fc7f003fff03fc
+1 20 3 37 a6f29ee70ab28024684c26610f0031ffaaf5b7fcdffffc7bc3cf83e7e7e3f8fc007f7e03c0
+1 19 3 36 99cdd7ec75b488243040273a30fd2c7f7ff6b6fbc9ffffc7be3e7c1f1f1f87e3f8007efe
+1 20 3 37 6514bdd8f68540a41a86485c87e2cb1f5556f6df79bffffc7de1f3e0fcfc7e1f87e000ffe0
+1 19 3 37 9c6eefb7e2e990c58800522f403f92c7fffffedfffb3bfffe3df0f9f03e3f1f87e1fc001e0
+1 19 3 36 78ad5b6f576b240523008c97bbdc65f9dffef7fbfff27bbbde3ef07cf81f0f87e1fc3f80
+1 20 3 36 e37ff2dea3d651061100954bcdffdf3677abfeff7ffa677fbde1ef83e7c0fc7e1f83f07e
+1 20 3 37 8deaa3bd7bd6a900002c9555f403bcdf97bfffbfefffe4f7fbde1e781e3e03e1f87e0fc1e0
+1 19 3 36 1355657b1c6e5500889c6666fabfbba5efeff7f7f9fff4cf77bde1f7c1f1f01f87c1f83f
+1 20 3 37 6f6beaf7bf6eb280809655bf7f5f37fb7bfbfffefb3f7ed8ef7bde0f3c0f8f807c3f07e0f0
+1 19 3 37 9abed5e9ecdd6920814235d3bfeaf76efeffdffd9be7efd99ef7bde0f3e07c7c03e0f81f80
+1 19 3 37 7955ab6bfefad538ac6155b5dff5fefdbfbedffff7fcfdfdb1cf7bde0f9e03e3e01f87e070
+1 19 3 37 f6ab56d4ffbdb53bce49351adfbdf6ffcfefb7fffcff9fbbb73ce73df079f01e1f007c1f80
+1 19 3 37 eb56adb0e5fb6b3a90a4ad776fcaefdb67fbedffef9bf3f77763def3cf078f01f0f803e070
+1 19 3 37 95f55b7fffbddabaa0b49b7bb7b75edb6deefb6f7ff77e7eff6c39ef3cf07cf80f87c01f80
+1 19 3 37 6ab2b693ebfbb6baa2aa577bbbffbefb7f2bbedffb6ced8feeecc79ef3cf03c7c07c3e0070
+1 19 3 36 b5656d23ff56ee7ac9353763d1dfeeeb7b8ebfbbdfff9ff1dddcd871cf3cf03c3c03e1f0
+1 20 3 37 4acad947d7fbdb7ad45aa8dfa3efe7ef7bcfffe6fedb737e3bbb9b8f3cf3cf03e3e01e0f80
+1 19 3 37 b595b3fe3e77bb4ad4b69bbf77f7ebfd7ffbfffdb7ffecefc7777bb0f3cf3cf01e1e01f070
+1 19 3 37 5b28578f9fcf774b695d34d9bbfbedfdbf5efffb6fb6db9df8eef7370e38e3cf01f1f00f80
+1 19 3 37 a650a91f7ff7eead71adcdf67dfdf7edefde9ffed9ffff63b71dcee761e79e3cf80f0f0070
+1 19 3 36 55a152fbff5fdead753b9beffefee7aff7ff957fb66db6dc6ee3b9dc6c1c79e3c780f0f8
+1 20 3 37 b241afbeffffbead766ed77fff7f6f8ffdfbf7dfed9b6dfb9ddc773bcdc3c79e3c780f8780
+1 19 3 37 64833c7dfeeffdad1ab7adfdb67fb7eedaeff5f7fb77ffb763bb0ee739d83c71e3c7807870
+1 19 3 37 c90678edff3ff1ad2cdedb9bffffdbffffbf7d3dfeccdb6edc67e1dce71b838f1e3c780780
+1 19 3 37 926c977bfbffef6ded5f76ffffcfefddff5ddf2f7fb336ddbb1cdc3b9ef3f078f1c3c78070
+1 19 3 36 24d92dda7dcfbf6def3bebcf6fe7f5ec6df7ffebdfeccdbb76e3bb8771ce77070f3c3c78
+1 20 3 37 49b2e377967fff6dfb59bb7cf673fafe3febabaab5fb33f6cddc7770ee39c7e0f0e3c3c780
+1 19 3 37 9355dde97bfffeec7b6fedfffe0b7d7fbfb4fefa6b7ecc6dbb330cee1de738ec0f1e3c3c70
+1 19 3 37 26a7b76f7d9ffeef7e7bfdbb0ff5beb7e6df777e5edfb39b76eee39dc39ce78dc0e1e3c3c0
+1 19 3 37 4d490dd2eff7e6ef7edcdefffdfadf5f637e9ddd57b7ee66edd99c7338739e71f81e1c3c30
+1 19 3 37 9a9116def7fe75ef6787fbf9feffefebb1fbeef7d5edf9999b37730ee60e71ce3b81c3c3c0
+1 19 3 37 352eddbddb3ff3ef57b7feff83c7f7bdd9edd3abf55b7e6676eccce19dc1ce39c3f03c3c30
+1 19 3 37 665db73defdfffef91be65fcff7bfbd6ef377ddeadb6df998d9bbb9873b839c73c7703c3c0
+1 19 3 37 ccb85b7bafefffef9d8fff7f7fbf4deb7d1faa757aadb7e6637666770e770738e387e03830
+1 19 3 37 9888767bd1fbffef9f63e7fe60dfa775b78afdbbdfab6df99ccdddcce18ce0e71c70fc0780
+1 19 3 37 2916daf75f7f7fefff193fbfbfbbd3badecf574ef56ad37e633b333398739c1ce3cf1dc060
+1 19 3 36 52ed6d776fbfefefffdffffff7ec71dd7b6dfbb7abd33cd798c6ecee670e73839c38e1f8
+1 20 3 37 a5c2d9eebbdfefefffc7d91fde37bf6eadbcaee95efd4b3de6319b999cc1ce7073871c3f80
+1 19 3 37 4b9b5aeebeefef2ff3f11fffefdbefbb57d47554f52b56cb798c6666733831cc0e70e387e0
+1 19 3 37 90b5b3db5f7beeaff03fff3f8c7b7bddaafe5bbb2bded5b6de631d9dcce70e3381cf1c7860
+1 19 3 36 170b55dd77bdffafef8feffff78dbdf6d56b6eee9eb7a66db79ce3733398c1ce7038e3c7
+1 20 3 37 2e0d67aebddeffafefefefffc6f6f69b6ab5a55565695a9b6de318ccce673831ce071c38c0
+1 19 3 36 5cd6cebabedf7fafefe07c75fb1d7b4db55ee3bbd3def6a49b7cc633399cc70e39c0e387
+1 20 3 37 b5ab575aeef7dfaf2ffff7ffeee36dc6daab52eeaca53d2b66db318ee66338c1c7381c70c0
+1 19 3 36 08359d757b77dfaf2fe7f7c2fdbdb7636d55ab55727bcaced9b6cc61999ce73838c7038e
+1 20 3 37 735aaeb5bdbbdfaf4e07be3feef758ddb6aadd2b9d94b7b7366db318667318c60638e07180
+1 19 3 36 e6ab3aeaddbddfaf48f03bf97eb8d76edb55771cea4f69694d9b6cc619cce739c1c7180e
+1 20 3 37 acd65d6af6dedfaf7bfffbdff76f6db7adaaea9757b296d65366db31c63318c63838e70180
+1 19 3 36 416a75b3b6eeefcf7bffe37cbf5dd6dbd6d7b55abd49ed3d9c99b6cc31cce739c6071ce0
+1 20 3 36 9aacbad5bb776fff77f31df7fbb62b752b695aa9caf453cb6e644db30c3318c631c0c31c
+1 20 3 36 3354eb55eb77b7fa77c07d8fde1bdaeb15bcaf70752b3cb6929b336cc30ce6318e3038e3
+1 20 3 36 659975ab6dbbbbfbf719f178fdd76db68ae6559cabd48a69eca6ccdb30c319ce718e071c
+1 20 3 36 0ab2d6ab75dbbdfbf77feef7ef6d8adb46b32aead4af67965b39b336ce30e6318c71c0c3
+1 20 3 36 d5536b4bd6ddbdfbf77f8edf1eebb66dbb5995556f52914d349c4ccdb18e19cc738c3038
+1 20 3 36 9665ad56daedbdfbf5f83ebdf7b6db56ddaccaaaa2bdecf2cf6533336c6186338c638e06
+1 20 3 36 2aa6ce56eb6ebefbf5e0fb7b8f7362aeaed66575c54a522db2d94cccdb18618c631c71c0
+1 20 3 36 554b56abadb6defbf5eff76efbdaed5b576b329a76a5299a49a6732336c618731ce30c30
+1 20 3 36 558d9aadadb75f7bf5efdf5dc7b9b6cdb435994f2b7bde45b6793cd8cdb1860ce318e38c
+1 20 3 36 aa96ad2dd5bb5f7bebbcddb77ddd5daada2acca5d514a5234d16ce36326c618318c71860
+1 20 3 36 532b355756db6f7bbbbc7bb77d76db556d15665aaa2a52d8b2cd32898d9b1870c638c718
+1 20 3 36 552d5a5b5adb6f7bbbbc7baeef6eadb36a8ab3255537bda469b2c8a66266c60c39c630c0
+1 20 3 36 aa5a6a9b6b6d777bbbb7eedbbebb5769b5755992abd94a5b1649b6399999b18306318e30
+1 20 3 36 4c5ab2b6ab6d777bbaf7eedb77b736d55abaacc954a8a5348d36699c66666c60c18c7180
+1 20 3 36 54b4d4b6ad6e777bbaf63dd75f5dab6cad9d5664aa505bca62c9166519199b1c30630c60
+1 20 3 35 a8b56556b5b6b77bbade3daddbdb9b566ad6cd325d28b4a591a6cd9144c666c30c18e3
+1 21 3 36 2969a96d56b6bb7bbade376db7aed5b536a86699a7d4ca5b4c59b36c733199b0c30718c0
+1 20 3 35 51aaaa6d56d6bb7bbadbf6eb6c6daadaab54334c52af4534b234489338cc666c30e0c6
+1 21 3 36 62d352b55adabb7bb9dbded6ddd766d595aa19a6295283ca698b366c8a33199b0c183180
+1 20 3 35 a55552daab5adb7bb9db1bb5d7b6b56d4cd514d314a944a59446891b628cc666c3060c
+1 21 3 35 45a594daad5adb7bb9bb1bb576ebb336aacceaa9ca54a6534b2166c498e33199b0c183
+1 21 3 35 4aaaa56aad6cdd7bb56f7b736bdb5ab565667554a52a532ca698d133647888666c3060
+1 21 3 35 8b4b25b2d5acdd7bb56eef5adb75d95b52b55aaa52d5ad1a59642cc8db1c66119b0c18
+1 21 3 35 15554ab555ad6d7bad6d8ddab6edacd5a99aad55292b5a2534d31b3624c5198c66c306
+1 21 3 35 16964ad556b56d7bad6d8db9b5badcad555550aa9496a532ca2c84891b31c66319b0c0
+1 21 3 35 2aaa93655ab56d7b6d6d8dad6db6d656d4aca8554a49529925926366c4c8f198c66c30
+1 21 3 35 0d2c956aaad56d7b5d6dbbad5add6d556a56642aa524a948d34d109133263846319b0c
+1 21 3 35 155496aaab556e7b5cdb76dcdadd6b2b55335395529254b128a2cc6cc8d98a318c66c0
+1 21 3 35 0a5526aaab59b67b5cd6c6daada2b6a9b329aacca9492a699659a2122626438c4319b0
+1 21 3 35 02a92ad2b559b67b5cb6c6d6ad6eb5959a95556a54a49594cd34590d991931e330c660
+1 21 3 35 04aa4d555559b6bb5cb6ddb66b5d5acad54acab52a524a4a428b24c246c6cc70cc3180
+1 21 3 35 01525555556ab6bb5cb6db6d56b75acaaca6655a952925a509649a21b1313314330c40
+1 21 3 34 015255a556aab6bb5ab6db6b36b6ad6566a5352d4a949252cc93459848c8c88708c3
+1 22 3 35 00a49aa956aab6badab5a36b2d5bad553552aa90a54a69a92668b24436263663c63080
+1 21 3 34 00a4aaaaaaaad6badaab62d6ab5b56b2ab29554852a51654d21649b309190998f18c
+1 22 3 34 00492b2aaab2d6badaab6db59ad5d6a959a8ccab2952892b2849344886c4c6443862
+1 22 3 34 0049354aaab2dabada5b6db595adab594d54a65594a9449496648b34612331b30e18
+1 22 3 34 00115552ab535abad65b6db555aaeb54aaca5332ca54a24a4933448b10d8884cc784
+1 22 3 34 0012565555535abad65b519acd56d5aca6652aa9654a5125a490b3448c24663231e0
+1 22 3 34 0002aa9555555a8ad65ab0dacad6d55655551994b4a52892534248b3621b19098870
+1 22 3 34 0004aaa555556a8ad65ab6daaad36ad62b3294ca5a92944928a33448910484c66610
+1 22 3 34 0004cca955556a8ad659b6d5a6ab6aab29994a6521494a2494598b346cc363319180
+1 22 3 34 0001552a95656a8ace55b0cd656ab56a95554552a0a525126b24c48b122098884c40
+1 22 3 33 0001552aaaa56a8ace55a8ad6555b55594cca52a96529289149252448918646633
+1 23 3 34 0000994aaaa5aa8acd4d9b6d53355cb54a6652994b2949448a4919a346c413110c80
+1 22 3 33 0000a952aaa5aa8acd2d5b6ab2b4daaac555494ca594a4a245268c58b1230c8cc2
+1 23 3 33 00002a54aaa5ac8acd2d5b66b2aace5aa53328a652ca525132d1662448d8826330
+1 23 3 33 000012952aaaac8aad2cd856a95aad5562a994a529652928892892923624619088
+1 23 3 33 0000129552caac8aad2cd43659556b2d32955252a4b29494449648cd8912104c60
+1 23 3 33 000004a5554aac8aad2ad5b5595556aaa94cca2994824a4a22492462448d8c3210
+1 23 3 33 000004a9554aac8aab2acdb354ad3596992a6514ca41252519249a312362420980
+1 23 3 33 0000012a554ab4eaab2aadab2caaab5554a55292a52c9292849a4590d891310640
+1 23 3 32 0000012a954ab4eaab26ac1aaca69b4b4c53324a52964949424522422448c8c1
+1 24 1 3 3 29 4aa54ad4e9ab266adaaa5659aaaa4a9945294b28a4a122d12312362620
+1 24 1 3 3 29 52a94ad4e9ab266ad9aa5555a9962994a2992594545091289189091918
+1 24 1 3 3 29 14aa9354e9ab1666d596532cd55524cc924ca2ca2a2848966886c48484
+1 24 1 3 3 29 14aa9554e9aa95660d552aaad4cb14a6514a5265251424491611236260
+1 24 1 3 3 29 052a9554e9aa95560cd52aa66aaa8a6528a52902928a13248918909190
+1 24 1 3 3 29 014a9554e9a695556ccb29956a654953245314b149450892448c4c4840
+1 24 1 3 3 28 014a9554e9a695556aca95555554c5299249925924a2c44922463236
+1 25 1 4 3 27 52955569a693356aaa94cb3532a4994a29492c9251222691228909
+1 25 1 4 3 27 14955569a69333066992aaaaaa6294c914a516492891116cd8c4c4
+1 25 1 4 3 27 15155569a6933306654aa99a99514a648a528b2494488892246320
+1 25 1 4 3 27 05255569a592aab5554a655a55312652893149924a244449123090
+1 25 1 4 3 27 05255569a58aaab554c954cd4ca8a531451924c925122224891440
+1 25 1 4 3 26 012a9969658aaab332c552ad2a94932922949205128911124486
+1 26 1 5 3 25 2aa969658a998332a532a6a6545294a14a4962894488892363
+1 26 1 5 3 25 2aa969654a999aaaa4aa56952a494a512528b144a246449090
+1 26 1 5 3 25 0aa9696549995aaa62995552a624ca48a31458a29121226c48
+1 26 1 5 3 25 0aa96965499559995295334a9514a524528a4c914890999220
+1 26 1 5 3 24 02a96955495541995254aaa95312529449492648a4484449
+1 27 1 6 3 24 a9695549554155314c99a54a8a329224a493245224222480
+1 26 1 6 3 23 2969554954cd54a94a9554a98929491452499229121112
+1 27 1 6 3 23 296955454ccccca92a54d2a54494a50a31440914890888
+1 27 1 6 3 23 096953454cacca98a54aca54a294a28928a2c492448440
+1 27 1 6 3 23 016953454aa0aa94952a6952a24a524494916249224220
+1 27 1 7 3 21 695344caa6a6545326652a514629228a4931249121
+1 28 1 7 3 21 2952c4ca66a65452a554a9312528a1452498a24890
+1 28 1 7 3 21 0952c4aa66654a4a9532952892949125124c512448
+1 28 1 7 3 21 0152a4a656552a2992aa5498518a48928a26489220
+1 28 1 8 3 19 52a4a650532a294a9a4a94494a285149132449
+1 29 1 8 3 19 12a4a55353252549552a4a24a52428a4881224
+1 29 1 8 3 19 02a2a533329514a94d252a24a2922462458910
+1 29 1 9 3 18 a2a5332a9514a4ca9525125289125124c480
+1 29 1 9 3 17 22652829929264a692950a29490a289262
+1 30 1 9 3 17 02532829528a52a54a928928a485145130
+1 30 1 9 3 17 025329994a8a5253494a8494a2448a4880
+1 30 1 10 3 22 52a99549892a532549448a51424a2400094948929280
+1 24 1 10 3 22 129994c945292aa4a4c24a2921451014494948929299
+1 24 1 11 3 22 9414a544a92992a4a2452890a2849449494892929928
+1 23 1 11 3 23 14cca54494a952525125144890948a24a94892a5322940
+1 22 1 11 3 23 04caa4a29494c95250928a4852524a24a5489325325149
+1 22 1 12 3 23 4a64a24c94a92928914a25294a4a24a548952532529210
+1 21 1 12 3 23 0252a24a4a64a92849450499292524a4c8952534a29224
+1 21 1 13 3 23 12514a4a54949448a02294a52512a4c8952664a52428a0
+1 20 1 14 3 22 5125253254942404924c94a31264a8a52a64a5244944
+1 20 1 15 3 21 25252a4a4a0012492652929254a8a54a694a489189
+1 20 1 17 3 1 08
+1 3 3 16 8928a54a528a54a8a54ac94a48a29220
+1 19 1 21 3 16 44a45329498954a8a54cc9949125144c
+1 19 1 20 3 18 0822924a95294952a8a654d294a14a289880
+1 18 1 20 3 18 2411492994a54932a8a6541329228c493120
+1 18 1 20 3 18 92092514caa4c532a8a65595294494926244
+1 18 1 19 3 19 0449049292aa54a4aaa8aa99a532452924c489
+1 18 1 19 3 20 1224824a4a6552a4aaa8aa99a6528a5249891240
+1 17 1 19 3 20 499a412525352a62aa68aaab2a6512628b126c88
+1 17 1 18 3 21 022645a092a2b2a9529a68aaab4ca514a5162c9332
+1 17 1 18 3 21 099922504a529a953259652cb354ca294a2c51244c
+1 17 1 18 3 22 16449128252955553259652cb05552529258a2489040
+1 16 1 18 3 22 4d22489422a4acaaa955652d3699945324b144932188
+1 16 1 17 3 23 0232d9b64a1154a6aa9955652d56aaa4a529668b64c230
+1 16 1 17 3 23 0989a4492588aa5556592d554d60b3294a52c934890c42
+1 16 1 17 3 24 06665b249a44952b5554ad55556d35514ca5924936118c80
+1 15 1 17 3 24 2191b49b452252a9ab4cad55556d5652994b249648663320
+1 15 1 17 3 24 986c4a44a2912955aaacab5556ad6aa33296492890884cc0
+1 15 1 16 3 25 02661337b25948954ad5aaaab55aa2aca5552092d36331b308
+1 15 1 16 3 25 01998c8949a4a44aa6ad5656b55adacd4a6541652484464c36
+1 15 1 16 3 25 0c666366f65a5a25556ad656b55adad94cca829acb1999b0d8
+1 15 1 16 3 26 0319989929252512aab6ab56b55ac59a95948525342626c36140
+1 14 1 16 3 25 60c66464de9ada8959b56b36b55b75b32aa90a5a48c8d90d85
+1 15 1 15 3 27 0198319b1b35652544d55b5b2db55db6b5335214a4b13366361430
+1 14 1 16 3 26 660c66c6cbd2d2a2aaaeb5abb56d8b6a56a4295b464498d850cc
+1 14 1 15 3 27 0619c319b126ada951556db5ab75758b6aacc852a5899b63614330
+1 14 1 15 3 27 018730c66cd97a54a8ab375b9b7575eed4d550ad4a366d8d811dc3
+1 14 1 15 3 28 1870cc319b36d52f5455aedad7757776d55aa157b448b63620660cc0
+1 13 1 15 3 27 670c3b0e668d2fdaaa2b5b6ed7757717aab542aa59b358d8a1b877
+1 14 1 15 3 28 1cc386e19962daa55d15aded6dddbb1db36a8554a24da3628ec39830
+1 13 1 14 3 29 0183b8719866d9b7faa78b6bb76dddbbedd5ad0eabcd96cd8a330ce1cc
+1 13 1 14 3 29 0670770c7619b66955fac5b5eeebddbe3b66da19f5167b3608dc770e70
+1 13 1 14 3 29 01ce0ce38dc66d9efa5562db1dbbddbe5badb4374a69acd90763b87383
+1 13 1 14 3 29 183dc39863b19b65afaab175f7b7bd8fdedb586abcb6f3651b8cc39c1c
+1 13 1 14 3 29 3783b8771c6c66db5f5d595b7ef63deff798afd5534bcd94ec771ce1e0
+1 13 1 14 3 30 6f70770ee31b1db4f5f7aeaec7ddfdf0bdb75eaee5bd365371b8e70e00c0
+1 12 1 14 3 30 1eff0ef1dce7e36f2feafd5b7fbdfdfc8f6dbd7b9ed6d84d8fc778700f30
+1 12 1 13 3 31 01c1eee1ce3b1cd8dbdafdd6add3fbfdfffb7b7ad7297b607e763b8780f3c0
+1 12 1 14 3 30 3c1ffe3dc7e33e36f7bf7b577feffdfd7ec6f5fcf7eda1b1b8dc38073c1c
+1 12 1 13 3 31 0703c1ddc3b8dce7cdbdddadabdffebdf1fbbdefab5fb6a7cfc7e1c07bc1e0
+1 12 1 14 3 30 f03c3ffc773b99b36f75fef5edf19597fdfbfb75bedabe7e3f1e07bc1e0e
+1 12 1 13 3 31 0e0f83c3ff8ee7677cdabfb7dafffff5ba7bdfdfdaeb62d9b1f8e07bc1e0f0
+1 12 1 13 3 32 39f0783c3ff9fcfccfb7eefffd7efff5bbfe3fbfaff783efcfc703bc3e1f0380
+1 11 1 13 3 32 07cf87c3c3bf1f9fbbeffab7eefb7df57a37ff76f7d51f3e7e783fc3c3e07ce0
+1 11 1 13 3 31 703e7c3c3c3f73f3f679feff777fdfd8ebfffefd57557db3f383fc3c3c0fbf
+1 12 1 13 3 32 0fc1fbc3e3c7fe7e7dde7ff6ffbfbbd8d767fefffd55ef9f9c1fc3c7c1f7c070
+1 11 1 12 3 33 01e03f07fe1e3c76eecdbedff777dfaee8b5fbffebd51dbefde1fc7cf83ef81f80
+1 11 1 13 3 32 1f80f83ff1f3e77cd9f6f7f7dfee1ba8a6fc7f7fd43db7ee1fe78f07ff07e03c
+1 11 1 14 3 31 7e07e1ff8f1e6ddbfdf5f7eff6ead54b1eff7bd0bfb771fe79f1ffc1f81fc0
+1 11 1 12 3 32 078001fc1f8ffcf9eedbfdb5fdb32b656549edefff66bfb78fe79e3ff87e07e0
+1 12 1 13 3 32 7f8003f07c7fe79eeb7fbfff6cd564a93adc97edbfbdb8eefbe7fe1f83f8001f
+1 11 1 12 3 33 1f007f000fc3f3ef7dec3ef7eede78a88933397f34ddedceef7cffc7e1fc001fe0
+1 11 1 13 3 33 ff80ff003f8fcf7bdec2defbb18628200333b8d3777e6ef79ef9f87e001fe00f80
+1 10 1 12 3 33 3f007f80ff007e3e7bbdec7b9f6d09100025245b4aabe66ffbde7e3f801fe01ff0
+1 11 1 13 3 33 ffc07fc0fe01f9fb9fff8771dad200084c43e52d5f67ff73df9fc01fe07fe007e0
+1 10 1 12 3 33 7f003ff03fe1fe07f7fcfffaa6a622014551480102be7ffe77e7e01fe0ff803ff8
+1 11 1 13 3 33 fff00ffc1ff1fc0fdf66ee2c580110cdd0c61095b7dfcffbf81fe1ff01ffc007f0
+1 10 1 11 3 34 01fe000fff03ff0ff3fc3ffb17e4010060fda566612f2df1bffc1fe7fe0ffe00fff8
+1 11 1 12 3 34 01fffc00fff0ffcffbfc7de834400af8b8760981509a2ffe1feff87ff03fff000ff8
+1 10 1 11 3 35 03ff0003fff80fff3ff7fff9f7015f55bec80ff48b0341df9ffff3ff87ffc01ffffffc
+1 10 1 11 3 34 07ff7ffff007fff0fffffdfbffc841ce7a05b3e4420127dfdffffcfff81fff9ffff0
+1 11 1 13 3 33 7ffff0fffe0fffeffefc79fe0a8a22ff9492b549ff1f3fdfff3ff81fff80003fff
+1 10 1 11 3 30 0ffffc0000fffe01ffdfff3f8e10c95805c53f4fba6618f8ffbfc03ff803
+0 3 3 1 c0
+1 11 1 13 3 1 03
+0 4 3 29 01ffc007c3f060089874c4ed8080210706007fdffffffc00007fffff80
+1 9 1 18 0 3 3 14 f81c0070877f747885c7dcdf0001
+0 6 3 6 fc007fffff80
+1 9 1 22 3 12 1ffff07f0982d64a9e38e07f
+1 3 3 1 1f
+0 3 3 1 fc
+1 14 1 11 3 1 3f
+0 12 3 1 e0
+1 3 3 6 2fc28804007f
+0 3 3 1 f0
+1 18 1 15 3 1 07
+0 6 3 13 8000001f893002e7563ff8007f
+0 11 3 1 c0
+1 9 1 11 3 1 7f
+0 3 3 3 f80003
+0 3 3 17 e07f8020ec13896bff185bc603807ffff7
+0 5 3 1 e0
+1 12 1 13 3 1 3f
+0 3 3 19 fc1ffffe1ff0700fedd4ea025546bf22000f83
+0 5 3 6 80001fffffe0
+1 9 1 11 3 34 ffffc0001fffffe7fff9ff0f30d00543335351fd9a831cf07c7ffbffffc07ffffff8
+1 11 1 12 3 35 1fffffe01ffff9fff7f881309179db75af8e1016f9211fff8ffffffc3ffffc0007fff0
+1 9 1 10 3 36 01ffe0007fffe0fffeffee0471cc024f1923025a7dffdd06e38fcffdfff3fffc03ffffc0
+1 10 1 11 3 36 01ffff803fff0ffff81df3ff200af7137d1749507ef2e01df3cfe1ffcfff83fffc003ff8
+1 9 1 10 3 36 03fe001fffc0fff3e0fff3f7c893ea0ff4cb92bda03b0444267bf7eff03ff87ffc03fffc
+1 10 1 11 3 36 07ffe00fff1f83eff7f3f7367ca07f31481f7432d861052999f7fffff807ff03ffe003fc
+1 9 1 10 3 36 07f800fff07f1f8ff7f1fbcccec229fe7195b11f0dbf8000716ef7cffff7fc00fff01fff
+1 10 1 11 3 37 0fff01fc7f1ff7f87ff7bbdc298e01eecdfc91bfbb210807833bdf0feff3fe000ffe00fe00
+1 8 1 10 3 37 07f00ff1fc3fe7f83ffdff79d294b1c37883412cd5d6f8a2a13c5dfffe1fcff9ff8001ffc0
+1 9 1 11 3 36 3fcff03fc7f81fdfffef192ded10c9679839b42c69a0175ad362ef7df83fc7f87fc0003f
+1 9 1 10 3 36 0f3fc07fc3f80fefffffe396df6d83264e68271575942808ef6d3b37fdf7f03f87f83fe0
+1 10 1 10 3 37 1f00ff83fc03f3f7ff7c3b7df16a0c355070a22b6a0042c19df6dbb9fdffcfc07f07f81ff0
+1 9 1 11 3 37 ff03fc01fcfdfbff07b7eda150702a70b8b287a562785473bfffb98fefff3f80ff07f80f80
+1 8 1 10 3 37 1f03fc00fe3f3e7fe07f7efd0ba5e0c310802705488252520efbedfb8c7f3efc7e00fe07f8
+1 9 1 10 3 38 03fc007f0fcfdffc0f77fef85e5e000d20502fbb88084091a5db6fdfbc67fdfbf1fc01fc07c0
+1 8 1 10 3 37 3c003f87f3f3ef80fffff6c3f4b98081405e3ff74009832c3a7b6fffffc73be7cfc3f003fc
+1 9 1 11 3 37 0fc1f8fc7df01fff7f773feba6e0709077bffcad084cc34daf6fdffffc39df3f3f0fc003c0
+1 8 1 10 3 37 07f07e3f1fbe01eff7f3f9debf9b4443203effefb088303cd3576dfbffffe1def8f8fc3f80
+1 9 1 10 3 37 781f87c3e7c01fff7fbfcefd5f6c5b8a47aa3f8748249ffbb6fd6dbf3fbfde1ee7c7e3f07e
+1 9 1 10 3 38 07e1f87cf803fef7f9fe76f7ddb02320934a1fabb25224066d3aadf7f3fbbde0e73e1f0fc1e0
+1 8 1 10 3 37 787e1f9f003def7b8ff3f6af76d5dad94852c21323154bf99bc3fffefe7ffbde0779f0fc3f
+1 9 1 10 3 38 1f83e3e007def3bcffbffffddbea393b26059ac3922ab7c7b6f9f5efcfc777bff07bcfc3e0e0
+1 8 1 10 3 38 e07c7c0079ef3dc77dfef7e76b0ff8f6a8ad4a9092cd58ff3fbf7ffdf9f8ff79ef03de3e1f80
+1 8 1 10 3 38 1f8f800fbef3de3beff7ffb5a8f1a7ed60044a9548e6af3cfdefd7efbf3f8ef79ef01ff1f070
+1 8 1 10 3 38 e1f000f3cf3de3ff7fbefefeab3f9fdd51813ad3482751ffcd7bf5ffe7e771ee79ef81ff0f80
+1 8 1 10 3 38 3e001f3cf3ce1ddbfcfff3fab5ddffbb001f620044876ebff97aecfffcfcee1de79e780f7870
+1 8 1 9 3 39 01c001e3cf1cf1eedf67fecfebdffb2f7b4b22038004ba3747bffaaaafff9b9de3de79e7807fc0
+1 8 1 11 3 37 1e7cf1ef0e76fbbfff3fee6ef8def750200382024d7bfbff7eaaeb7fe773dc39e71e7807f8
+1 8 1 10 3 38 03e78f1e7077b7dcdbd9ffffbfdfedf60ebdc39e1aa37dffb7fbeafaff7cee3b879cf1e7c038
+1 8 1 10 3 37 3c78f1e787b9b6e7ff66ff7bf7bfda7b5fa33b64395efedff7fefabe9bff9dc77073cf1e3c
+1 9 1 9 3 39 01c78f1e3839ddbf3b7f9bfd6dbecfb4fb464d3b7c83937f4ebffbfeaf96fb73b8ef0f3cf1e3c0
+1 8 1 10 3 38 78f0e3c1cefdd8dfec7ff7bfb5bf6af87ff08b1184b9bfa67bfb5fabd5dfec771ce0e38f1e38
+1 8 1 9 3 39 038f0f3c1ef7eee7efb1ffdfbdfbe6d6f18cdaeb2311ce7fd2ff7f77caf536df8ce39c1e78f1e0
+1 8 1 10 3 38 f0f1c0e737773b7dcfef7dbdafe5af7e5a93ab2f5774f5e8fdff7d72bd4dfb739c73c1c78f1c
+1 8 1 9 3 39 030f1e0f39b3b8ddb637bdf7afd9eb5fe19be2ab2ac2ee6ef47daffafcef5bb6ec730f383c70f0
+1 8 1 10 3 38 f0e071cd9dc76fd8def7dfed7ff8bfc6b5a2ab2ac9bbb77a3dd5efbf7bfa6fdb8ee0e7038f0c
+1 8 1 9 3 39 030f038e6cee3bb6e37bcadfeabdddfffb37254a99a9773ffebdffafefdeda99b771dc1ce078f0
+1 8 1 10 3 38 f03cf36730cdfb0def3ef57d9bbbfffd6ba54a99acdddffefddaefd3f7b6a77eec3b839e070c
+1 8 1 9 3 39 0301c71b39c776cc77bcfbffd7df77f71e6f474a9b65bbed7f7eddf77cadedaccd9b877071c0f0
+1 8 1 10 3 38 0e38d9ce3bbb719ef3dbabebbeefbfeede65ca9d74efcaefbeef5dff7a7bef337770ce0e380c
+1 8 1 10 3 38 f1cece70ccdd86fbcd5efe9ff5defff6f74d0a85d67f77f7defeaeea9f9e7b4eeccc39c1c780
+1 8 1 9 3 39 031e7e738777661b6f377d5d7b6bbbf81dbeab6ab6f077fbfbef7edbbfe7e79e519bbb87383c70
+1 8 1 10 3 38 e3f18c399bb86db45d57f6bad777e98de41b6ab0fabf91fdf736f55dd979e796677770e7038c
+1 8 1 9 3 39 031f8e70ceecc1b6d9edfae975aedf7ff7becedaddbb627d56fb1b6af774d679f79cccce1ce070
+1 8 1 10 3 38 fc738733730edb67afafb76fddbdf8767d98dadee03ffefd7d8dbdabbf3d9e6de33bb9839c0c
+1 8 1 9 3 39 03e39c39dd8c336d9aaad74bff3b7bc78f1058dadefd81087edec7ff5eeacf679b68e666707380
+1 8 1 9 3 39 031ce0ce6670cdb66fbd7c975a76ef7fecfdbbda1efddfff5faf62f6b577b2d1e6cb199dce0c70
+1 8 1 10 3 38 e30733b98336d9b7f6ab7eb4eddde01e1b47ba2f062083b1dbb3db4b9de9bc79b3c67339838c
+1 8 1 9 3 39 031c39ccc60cdb66d55bf4bd69db77dfd9e73e3a20f1dffe1f6ddb6df4ef566f1e6cf1cce67070
+1 8 1 10 3 38 e0c67738776d8b57a5597ed3b6ee3fcff8be3a20feefbfcfb6edb7eb52bd9ac79b343399ce0c
+1 8 1 9 3 39 03073998c199b635dadfa7eba76dbb8fb3d7713a277f2fff6beb76dab4bdea45b1e6e58c673180
+1 8 1 10 3 38 38ce63066ed8dbad6a4ad55ed76f7f9fce91fa3f40f7df8635bb6ddb4a57b36c7999e39cce70
+1 8 1 10 3 38 c7339c19b3636af6bd97aeadadd8c164718fca5f8749fc731cedb76eb7bdecdb1e66786339cc
+1 8 1 9 3 39 0339cc6066cd8dbb4b526f5b5b5b763f3faf7fca5fff97efdaf676dab7494a523685999e18e630
+1 8 1 10 3 38 c671839b3636f5b5ecbdb4b6b6ddf9d3feffca5e7e7a38f97b5b6d5db4b7bd896367668719cc
+1 8 1 9 3 39 03398e0c6cd849deda917ae96d6dbb1e7ee5ffca5e78a7f7dcddadb4eaeb694b66d8d8d8b0c630
+1 8 1 10 3 38 c63031b361b5692f66d552d9b6c3f3a73324a7e8a3fd1c706356d8355496f691b636363c31cc
+1 8 1 9 3 39 0338c0c6cd86dcb6d48beaa5b36db78cf1fe94a7e8cf3e7b8e5dab6c1bba6d29ec6d8d8d8f0e30
+1 8 1 10 3 38 c7033b321b7bc96915954b66d6edff7ecdf2a7ebff55eefb2f55b62ccd929e5b13636373c18c
+1 8 1 9 3 39 03180ccccc6ced36b66f6e96cd6d0f19e267fe67f3fdff3dc41bb35b377749e5b48c98d8ccd860
+1 8 1 10 3 38 607333319296cb48ba992d9ad6defefbfe7e67f331fff77b9459ad9aaaa6534b636636331e18
+1 8 1 9 3 39 01818cccc66e6935b15d725b2d6db7aa5d9d4fe7ff57ab5eeecbb4d6cd55d92cb698d90d8cc780
+1 8 1 10 3 38 06333309bdb65a46f2acf55ad73dfdf4d72fffff663ffbbd06daad76ae749a69e436c36331e0
+1 8 1 10 3 38 18cccc3672c9ac8bad51aab56b6354b7ffefffff7efcef76e57556ab73aa65965b09b0d8cc78
+1 8 1 10 3 38 633330d9cd32d31552a3555ad6d8fb8b3fe9fffc7ed5cdd8b2baab559955934d34c64c363318
+1 8 1 9 3 39 018cccc327b64d646ba746aab56cf66a69bae5fffdfbdff1a3417555aaceae4cb2cb31b30d8cc0
+1 8 1 10 3 38 33330cde5996989e4c8d555ab9bdf777aefdff9d9b1eb6edd8dacad56553a249a6c86cc36330
+1 8 1 10 3 38 cccc3339a66b2174b93aaaad5b6fd7d7fe9dff9dab66fed7acada56ab2b9593659a61330d8c0
+1 8 1 10 3 38 33304ce6c9b446ab52555556b3dbeedf7fdd9fadbf6ffb76dc5752d5514ea4c934598cc83630
+1 8 1 10 3 38 ccc1b3cb32498974a4aa9aab66c7ae2f75dd5fb5bdef736b162ea96aa2a572268b3643360d80
+1 8 1 10 3 38 33064f344db217c9495535556db7ddaffddcdfb9bdbf7dbb6b2b54d553529d9166c930c98360
+1 8 1 10 3 38 4c1994d9924c6a92b2aa5aaacc6f5dbefddfdfbfbdb79db5b715aaaaa9b94a4cd126cc2660c0
+1 8 1 10 3 38 306679266d90952f4554ab559b6fbb5efdfbdfbecdb7beddb58ad65554cee5222cd9a2199820
+1 8 1 10 3 37 4199e6c892217ed48aa9555b36debb5eebbbdfbedef7bedadac5d52aaa653bd91224598666
+1 9 1 10 3 38 06679b336cc6a9291552aaab36df76bdfbbbdfbededbdf6edac56a95553294a4cd9b36619980
+1 8 1 10 3 38 088a2444910952522aa555566dbd76bdfbbbdfbededbdf6d6d62b54aaa994a52224489104440
+1 8 gr  rs
+0 1196 1724 1196 1724 1198 3 0 1198 path
+0 setgray
+gs 0 setgray
+gs eofill gr gr
+0 -14 1724 -14 1724 -12 3 0 -12 path
+0 setgray
+gs 0 setgray
+gs eofill gr gr
+0 -14 2 -14 2 1198 3 0 1198 path
+0 setgray
+gs 0 setgray
+gs eofill gr gr
+1722 -14 1724 -14 1724 1198 3 1722 1198 path
+0 setgray
+gs 0 setgray
+gs eofill gr gr
+461 2014 1475 2014 1475 2663 3 461 2663 path
+0 setgray
+gs 1 setgray
+gs eofill gr gr
+21 2 /vrep 0 def /patlen exch def dup string /scan exch def /smax exch def
+461 2014 1475 2014 1475 2663 461 2663 gs np mto lto lto lto clip
+1015 650 461 2014 translate scale
+168 111 1 [168 0 0 -111 0 111 ]decode
+1 20 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 4 3 3 01ff80
+1 7 3 2 7f80
+1 4 3 1 07
+1 4 3 3 030080
+1 7 3 2 c080
+1 4 3 1 07
+1 4 3 7 0201c0000003f0
+1 3 3 7 8180000003f007
+1 4 3 11 0600400000061000000181
+1 3 3 3 061007
+1 4 3 11 0400e00000043000000103
+1 3 3 3 043007
+1 4 3 11 0c302000000c20000001c2
+1 3 3 3 0c2007
+1 4 3 17 086060ffc0f87c3ffc008600ffc0f87c07
+1 4 3 17 1878418041800460040184018041800407
+1 4 3 17 10d0c700e1000c400e010c0700e1000c07
+1 4 3 17 30b08c00230008c00203080c0023000807
+1 4 3 17 21a1880062001880060218080062001807
+1 4 3 17 6161187843e1f187840610187843e1f007
+1 4 3 17 434310d0c043010d0c043010d0c0430007
+1 4 3 17 c2c230b080c2030b080c2030b080c20007
+1 4 3 17 868621a18086021a18086021a180860007
+1 3 3 18 018584616101840616101840616101840007
+1 3 3 18 010d0c4343010c04343010c04343010c0007
+1 3 3 18 030b08c2c203080c2c203080c2c203080007
+1 3 3 18 021e18868602180868602180868602180007
+1 3 3 18 061811858406101858406101858406100007
+1 3 3 18 0430310f0c043e10f0c1c3810f0c043e0007
+1 3 3 18 0c00e300080c02300083008300080c020007
+1 3 3 18 080182001808062001820182001808060007
+1 3 3 18 18070380700e04600706010380700e040007
+1 3 3 18 100c0100c0040c400c04030100c0040c0007
+1 3 3 18 1ff801ff8007f8c3f807fe01ff8007f80007
+1 10 3 1 86
+1 9 3 1 07
+1 9 3 2 0184
+1 9 3 1 07
+1 9 3 2 010c
+1 9 3 1 07
+1 9 3 2 01f8
+1 9 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 5 3 2 0198
+1 3 3 11 60000001f800f1f8000007
+1 5 3 2 0198
+1 6 3 8 0180019830000007
+1 5 3 16 0198f1f0f8e0f1f001f001b860000007
+1 5 3 16 0199999980619998001801d830000007
+1 5 3 16 0199f980f06199980018019818000007
+1 6 3 15 f18180186199980198619998000007
+1 6 3 15 60f181f0f0f19800f060f0f0000007
+1 20 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 4 3 3 fc00cc
+1 8 3 6 307878300007
+1 3 3 4 018600d8
+1 8 3 6 70cccc700007
+1 3 3 18 017a00f078f8f879d878f80030cccc300007
+1 3 3 18 016200e00ccccccdfc0ccc00307c7c300007
+1 3 3 18 016200f07cc0c0fdac7ccc00300c0c300007
+1 3 3 18 017a00d8ccc0c0c18ccccc00301818300007
+1 3 3 18 018600cc7cc0c0798c7ccc00fc7070fc0007
+1 4 3 1 fc
+1 15 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+1 20 3 1 07
+gr  rs
+1826 387 2122 387 2122 2911 3 1826 2911 path
+0 setgray
+gs 0 8 div setgray
+gs eofill gr gr
+1880 1659 1959 1659 1959 1777 3 1880 1777 path
+0 setgray
+gs 0 8 div setgray
+gs eofill gr gr
+1434 1945 1513 1945 1513 2676 3 1434 2676 path
+0 setgray
+gs 0 8 div setgray
+gs eofill gr gr
+gr rs
+/av 0 def FF
+gs initclip
+0 3494 2470 3494 2470 0 0 0 np mto lto lto lto clip np
+106 387 2184 387 2184 537 3 106 537 path
+0 setgray
+gs 1 setgray
+gs eofill gr gr
+8 /tface exch def
+0 2 div /tcolor exch def
+42 /tscale exch def
+0 /trotate exch def
+0 /halign exch def
+0 /valign exch def
+/tunder false def
+106 482 (No) gtext
+175 482 (part) gtext
+263 482 (of) gtext
+313 482 (this) gtext
+394 482 (publication) gtext
+609 482 (may) gtext
+704 482 (be) gtext
+766 482 (copied) gtext
+906 482 (in) gtext
+956 482 (any) gtext
+1040 482 (form) gtext
+1139 482 (without) gtext
+1288 482 (the) gtext
+1363 482 (citation) gtext
+1512 482 (of) gtext
+1564 482 (the) gtext
+1638 482 (original) gtext
+1789 482 (artical) gtext
+1917 482 (:) gtext
+1946 482 (Karreman,) gtext
+2157 482 (C) gtext
+106 432 (\(1992\)) gtext
+238 432 (A) gtext
+278 432 (dotplot) gtext
+415 432 (program) gtext
+582 432 (for) gtext
+643 432 (the) gtext
+712 432 (Atari) gtext
+810 432 (ST,) gtext
+887 432 (capable) gtext
+1045 432 (of) gtext
+1092 432 (assaying) gtext
+1268 432 (DNA) gtext
+1368 432 (and) gtext
+1450 432 (protein) gtext
+1589 432 (sequences.) gtext
+1814 432 (CABIOS) gtext
+10 /tface exch def
+1983 432 (8) gtext
+8 /tface exch def
+2019 432 (No.) gtext
+2095 432 (1) gtext
+2119 432 (.) gtext
+106 1541 2184 1541 2184 2722 3 106 2722 path
+0 setgray
+gs 1 setgray
+gs eofill gr gr
+50 /tscale exch def
+159 2659 (DOTPLOT) gtext
+410 2659 (is) gtext
+461 2659 (a) gtext
+504 2659 (program) gtext
+705 2659 (for) gtext
+778 2659 (comparing) gtext
+1026 2659 (two) gtext
+1134 2659 (protein) gtext
+1302 2659 (or) gtext
+1362 2659 (DNA) gtext
+1482 2659 (sequences) gtext
+1754 2659 (and) gtext
+1852 2659 (for) gtext
+1926 2659 (doing) gtext
+2063 2659 (so) gtext
+11 /tface exch def
+856 2601 (quickly) gtext
+8 /tface exch def
+1043 2601 (and) gtext
+11 /tface exch def
+1141 2601 (interactively) gtext
+8 /tface exch def
+1075 2543 (on) gtext
+1145 2543 (the) gtext
+9 /tface exch def
+1042 2484 (Atari) gtext
+1170 2484 (ST.) gtext
+gr rs
+/av 0 def FF
+gs initclip
+0 3494 2470 3494 2470 0 0 0 np mto lto lto lto clip np
+8 /tface exch def
+0 2 div /tcolor exch def
+42 /tscale exch def
+0 /trotate exch def
+0 /halign exch def
+0 /valign exch def
+/tunder false def
+1228 199 23 1 (3) jtext
+106 387 2184 387 2184 3194 3 106 3194 path
+0 setgray
+gs 1 setgray
+gs eofill gr gr
+50 /tscale exch def
+617 3132 (Contents) gtext
+42 /tscale exch def
+106 2930 (Installation) gtext
+317 2930 (of) gtext
+363 2930 (DOTPLOT.) gtext
+106 2830 (Running) gtext
+273 2830 (DOTPLOT.) gtext
+245 2730 (Info) gtext
+ rs
+8 /tface exch def
+0 2 div /tcolor exch def
+42 /tscale exch def
+0 /trotate exch def
+0 /halign exch def
+0 /valign exch def
+/tunder false def
+245 2680 (DNA/Protein) gtext
+245 2630 (Scoring-tables) gtext
+245 2580 (Length) gtext
+245 2530 (Reverse) gtext
+245 2430 (Options.) gtext
+346 2380 (Zoom-in) gtext
+346 2330 (Show) gtext
+462 2330 (Homology) gtext
+346 2280 (Borders) gtext
+411 2230 (Shift) gtext
+411 2180 (Expand) gtext
+346 2130 (Change) gtext
+ rs
+8 /tface exch def
+0 2 div /tcolor exch def
+42 /tscale exch def
+0 /trotate exch def
+0 /halign exch def
+0 /valign exch def
+/tunder false def
+346 2080 (Conditions) gtext
+346 2030 (Parameters) gtext
+346 1980 (Output) gtext
+346 1930 (Another) gtext
+503 1930 (run) gtext
+106 1780 (The) gtext
+189 1780 (DOTPLOT) gtext
+398 1780 (editor.) gtext
+106 1680 (Principle) gtext
+277 1680 (of) gtext
+324 1680 (DOTPLOT.) gtext
+106 1580 (The) gtext
+189 1580 (files) gtext
+275 1580 (on) gtext
+334 1580 (the) gtext
+404 1580 (disk.) gtext
+106 1480 (Formats.) gtext
+106 1380 (References.) gtext
+1380 1210 1755 1210 1755 3194 3 1380 3194 path
+0 setgray
+gs 1 setgray
+gs eofill gr gr
+1403 2930 (4.) gtext
+1403 2830 (4.) gtext
+ rs
+8 /tface exch def
+0 2 div /tcolor exch def
+42 /tscale exch def
+0 /trotate exch def
+0 /halign exch def
+0 /valign exch def
+/tunder false def
+1403 2730 (4.) gtext
+1403 2680 (5.) gtext
+1403 2630 (5.) gtext
+1403 2580 (7.) gtext
+1403 2530 (7.) gtext
+1403 2380 (8.) gtext
+1403 2330 (8.) gtext
+1403 2280 (9.) gtext
+1403 2230 (9.) gtext
+1403 2180 (9.) gtext
+1403 2130 (9.) gtext
+ rs
+8 /tface exch def
+0 2 div /tcolor exch def
+42 /tscale exch def
+0 /trotate exch def
+0 /halign exch def
+0 /valign exch def
+/tunder false def
+1403 2080 (9.) gtext
+1403 2030 (9.) gtext
+1403 1980 (9.) gtext
+1380 1930 (10.) gtext
+1380 1780 (10.) gtext
+1380 1680 (11.) gtext
+1380 1580 (11.) gtext
+1380 1480 (12.) gtext
+1380 1380 (12.) gtext
+33 1907 195 1907 195 2767 3 33 2767 path
+0 setgray
+gs 1 setgray
+gs eofill gr gr
+168 1916 296 1916 296 2351 3 168 2351 path
+0 setgray
+gs 1 setgray
+gs eofill gr gr
+262 2203 410 2203 410 2238 3 262 2238 path
+0 setgray
+gs 1 setgray
+gs eofill gr gr
+gr rs
+/av 0 def FF
+gs initclip
+0 3494 2470 3494 2470 0 0 0 np mto lto lto lto clip np
+8 /tface exch def
+0 2 div /tcolor exch def
+42 /tscale exch def
+0 /trotate exch def
+0 /halign exch def
+0 /valign exch def
+/tunder false def
+1228 199 23 1 (4) jtext
+106 1730 2184 1730 2184 3194 3 106 3194 path
+0 setgray
+gs 1 setgray
+gs eofill gr gr
+106 3140 (Installation) gtext
+317 3140 (of) gtext
+363 3140 (DOTPLOT.) gtext
+106 3040 (For) gtext
+181 3040 (the) gtext
+252 3040 (installation) gtext
+462 3040 (of) gtext
+510 3040 (DOTPLOT) gtext
+719 3040 (you) gtext
+799 3040 (will) gtext
+870 3040 (need) gtext
+976 3040 (at) gtext
+1024 3040 (least) gtext
+1125 3040 (an) gtext
+1184 3040 (Atari) gtext
+1283 3040 (1024) gtext
+1388 3040 (ST) gtext
+1455 3040 (with) gtext
+1542 3040 (a) gtext
+1578 3040 (black) gtext
+1688 3040 (and) gtext
+1771 3040 (white) gtext
+1881 3040 (monitor) gtext
+2033 3040 (and) gtext
+2116 3040 (one) gtext
+ rs
+8 /tface exch def
+0 2 div /tcolor exch def
+42 /tscale exch def
+0 /trotate exch def
+0 /halign exch def
+0 /valign exch def
+/tunder false def
+106 2990 (single-sided) gtext
+344 2990 (disk) gtext
+434 2990 (drive.) gtext
+552 2990 (Atari) gtext
+654 2990 (computers) gtext
+866 2990 (with) gtext
+956 2990 (more) gtext
+1068 2990 (RAM) gtext
+1178 2990 (memory,) gtext
+1357 2990 (e.g.) gtext
+1443 2990 (the) gtext
+1517 2990 (Mega) gtext
+1638 2990 (ST) gtext
+1708 2990 (2) gtext
+1749 2990 (or) gtext
+1803 2990 (Mega) gtext
+1923 2990 (ST) gtext
+1993 2990 (4) gtext
+2033 2990 (are) gtext
+2110 2990 (also) gtext
+106 2940 (fine;) gtext
+201 2940 (a) gtext
+241 2940 (harddisk) gtext
+416 2940 (will) gtext
+491 2940 (speed) gtext
+622 2940 (up) gtext
+686 2940 (the) gtext
+761 2940 (loading) gtext
+914 2940 (and) gtext
+1000 2940 (saving) gtext
+1139 2940 (of) gtext
+1190 2940 (your) gtext
+1290 2940 (files) gtext
+1382 2940 (considerably) gtext
+1632 2940 (but) gtext
+1708 2940 (is) gtext
+1755 2940 (not) gtext
+1831 2940 (necessary.) gtext
+2051 2940 (A) gtext
+2096 2940 (color) gtext
+106 2890 (monitor) gtext
+256 2890 (is) gtext
+299 2890 (not) gtext
+368 2890 (compatible) gtext
+582 2890 (with) gtext
+668 2890 (DOTPLOT;) gtext
+888 2890 (you) gtext
+968 2890 (need) gtext
+1072 2890 (a) gtext
+1107 2890 (high-resolution) gtext
+1393 2890 (screen.) gtext
+106 2840 (Dotplot) gtext
+255 2840 (comes) gtext
+394 2840 (on) gtext
+458 2840 (one) gtext
+544 2840 (floppy) gtext
+671 2840 (disk) gtext
+762 2840 (that) gtext
+849 2840 (contains) gtext
+1021 2840 (a) gtext
+1061 2840 (total) gtext
+1156 2840 (of) gtext
+1208 2840 (four) gtext
+1296 2840 (subdirectories) gtext
+1573 2840 (\(folders\).) gtext
+1754 2840 (The) gtext
+1842 2840 (program) gtext
+2014 2840 (itself,) gtext
+2128 2840 (the) gtext
+106 2790 (program) gtext
+280 2790 (editor) gtext
+403 2790 (and) gtext
+491 2790 (all) gtext
+552 2790 (data) gtext
+652 2790 (files) gtext
+745 2790 (are) gtext
+824 2790 (in) gtext
+876 2790 (the) gtext
+953 2790 (DOTPLOT-folder,) gtext
+1298 2790 (the) gtext
+1375 2790 (data) gtext
+1475 2790 (files) gtext
+1568 2790 (are) gtext
+1647 2790 (all) gtext
+1708 2790 (in) gtext
+1759 2790 (their) gtext
+1859 2790 (own) gtext
+1953 2790 (folder) gtext
+2076 2790 (called) gtext
+106 2740 (DATA.) gtext
+106 2690 (To) gtext
+171 2690 (install) gtext
+295 2690 (DOTPLOT) gtext
+508 2690 (you) gtext
+593 2690 (will) gtext
+667 2690 (have) gtext
+775 2690 (to) gtext
+827 2690 (copy) gtext
+932 2690 (at) gtext
+983 2690 (least) gtext
+1088 2690 (the) gtext
+1164 2690 (DOTPLOT) gtext
+1379 2690 (folder) gtext
+1500 2690 (and) gtext
+1588 2690 (its) gtext
+1646 2690 (contents) gtext
+1822 2690 (to) gtext
+1875 2690 (the) gtext
+1950 2690 (disk) gtext
+2042 2690 (you) gtext
+2126 2690 (are) gtext
+106 2640 (planning) gtext
+278 2640 (to) gtext
+328 2640 (use) gtext
+410 2640 (for) gtext
+474 2640 (running) gtext
+628 2640 (DOTPLOT.) gtext
+851 2640 (This) gtext
+945 2640 (can) gtext
+1027 2640 (be) gtext
+1088 2640 (another) gtext
+1244 2640 (floppy) gtext
+1371 2640 (disk) gtext
+1460 2640 (but) gtext
+1532 2640 (preferably) gtext
+1732 2640 (it) gtext
+1767 2640 (will) gtext
+1839 2640 (be) gtext
+1901 2640 (a) gtext
+1938 2640 (logical) gtext
+2071 2640 (sector) gtext
+106 2590 (of) gtext
+160 2590 (y) gtext
+181 2590 (our) gtext
+261 2590 (harddisk.) gtext
+450 2590 (Since) gtext
+575 2590 (DOTPLOT) gtext
+791 2590 (will) gtext
+869 2590 (be) gtext
+936 2590 (writing) gtext
+1076 2590 (as) gtext
+1140 2590 (well) gtext
+1232 2590 (as) gtext
+1296 2590 (reading) gtext
+1455 2590 (the) gtext
+1533 2590 (disk) gtext
+1627 2590 (during) gtext
+1762 2590 (the) gtext
+1840 2590 (run,) gtext
+1932 2590 (it) gtext
+1973 2590 (can) gtext
+2060 2590 (not) gtext
+2138 2590 (be) gtext
+106 2540 (write-protected.) gtext
+413 2540 (This) gtext
+511 2540 (will) gtext
+589 2540 (make) gtext
+711 2540 (the) gtext
+789 2540 (disk) gtext
+883 2540 (very) gtext
+983 2540 (sensitive) gtext
+1165 2540 (to) gtext
+1221 2540 (any) gtext
+1309 2540 (viruses) gtext
+1462 2540 (that) gtext
+1551 2540 (are) gtext
+1632 2540 (in) gtext
+1686 2540 (your) gtext
+1788 2540 (system.) gtext
+1951 2540 (So) gtext
+2023 2540 (to) gtext
+2079 2540 (install) gtext
+106 2490 (DOTPLOT,) gtext
+332 2490 (switch) gtext
+466 2490 (off) gtext
+530 2490 (your) gtext
+629 2490 (system) gtext
+779 2490 (\(hard) gtext
+894 2490 (reset\)) gtext
+1019 2490 (and) gtext
+1106 2490 (then,) gtext
+1217 2490 (before) gtext
+1353 2490 (you) gtext
+1438 2490 (run) gtext
+1516 2490 (anything) gtext
+1692 2490 (else) gtext
+1786 2490 (make) gtext
+1906 2490 (a) gtext
+1946 2490 (copy) gtext
+2052 2490 (of) gtext
+2105 2490 (your) gtext
+ rs
+8 /tface exch def
+0 2 div /tcolor exch def
+42 /tscale exch def
+0 /trotate exch def
+0 /halign exch def
+0 /valign exch def
+/tunder false def
+106 2440 (DOTPLOT) gtext
+314 2440 (disk.) gtext
+412 2440 (Keep) gtext
+521 2440 (the) gtext
+591 2440 (original) gtext
+737 2440 (disk) gtext
+824 2440 (write-protected) gtext
+1111 2440 (at) gtext
+1158 2440 (all) gtext
+1212 2440 (times.) gtext
+106 2390 (The) gtext
+196 2390 (other) gtext
+310 2390 (two) gtext
+394 2390 (folders) gtext
+538 2390 (that) gtext
+627 2390 (are) gtext
+706 2390 (on) gtext
+771 2390 (the) gtext
+848 2390 (disk) gtext
+941 2390 (are) gtext
+1020 2390 (called) gtext
+1148 2390 (DNA) gtext
+1255 2390 (and) gtext
+1344 2390 (PROTEIN.) gtext
+1559 2390 (They) gtext
+1671 2390 (contain) gtext
+1842 2390 (two) gtext
+1925 2390 (DNA) gtext
+2032 2390 (and) gtext
+2121 2390 (two) gtext
+106 2340 (protein) gtext
+247 2340 (sequence) gtext
+442 2340 (files) gtext
+530 2340 (respectively.) gtext
+776 2340 (When) gtext
+899 2340 (compared) gtext
+1099 2340 (with) gtext
+1187 2340 (each) gtext
+1293 2340 (other) gtext
+1403 2340 (by) gtext
+1461 2340 (DOTPLOT) gtext
+1672 2340 (they) gtext
+1765 2340 (will) gtext
+1838 2340 (reveal) gtext
+1966 2340 (stretches) gtext
+2150 2340 (of) gtext
+106 2290 (homology;) gtext
+310 2290 (this) gtext
+387 2290 (will) gtext
+456 2290 (give) gtext
+545 2290 (you) gtext
+624 2290 (some) gtext
+738 2290 (idea) gtext
+829 2290 (about) gtext
+945 2290 (the) gtext
+1015 2290 (desirable) gtext
+1196 2290 (default) gtext
+1333 2290 (values) gtext
+1465 2290 (and) gtext
+1547 2290 (graphic) gtext
+1695 2290 (output.) gtext
+106 2240 (Although) gtext
+287 2240 (the) gtext
+362 2240 (two) gtext
+443 2240 (latter) gtext
+552 2240 (folders) gtext
+694 2240 (are) gtext
+772 2240 (not) gtext
+847 2240 (absolutely) gtext
+1050 2240 (necessary) gtext
+1257 2240 (to) gtext
+1309 2240 (run) gtext
+1386 2240 (the) gtext
+1461 2240 (program) gtext
+1632 2240 (it) gtext
+1670 2240 (is) gtext
+1717 2240 (advisable) gtext
+1910 2240 (to) gtext
+1962 2240 (install) gtext
+2084 2240 (these) gtext
+106 2190 (two) gtext
+186 2190 (folders) gtext
+327 2190 (on) gtext
+390 2190 (the) gtext
+465 2190 (same) gtext
+584 2190 (logical) gtext
+719 2190 (sector) gtext
+848 2190 (as) gtext
+909 2190 (your) gtext
+1007 2190 (DOTPLOTfolder.) gtext
+1337 2190 (The) gtext
+1425 2190 (program) gtext
+1597 2190 (will) gtext
+1671 2190 (look) gtext
+1765 2190 (for) gtext
+1830 2190 (them,) gtext
+1952 2190 (and) gtext
+2037 2190 (the) gtext
+2112 2190 (files) gtext
+106 2140 (contained) gtext
+298 2140 (in) gtext
+343 2140 (them,) gtext
+459 2140 (first.) gtext
+106 2090 (If) gtext
+141 2090 (you) gtext
+220 2090 (have) gtext
+322 2090 (copied) gtext
+457 2090 (all) gtext
+511 2090 (the) gtext
+581 2090 (folders) gtext
+718 2090 (you) gtext
+797 2090 (are) gtext
+869 2090 (ready) gtext
+985 2090 (to) gtext
+1032 2090 (run) gtext
+1104 2090 (DOTPLOT.) gtext
+106 1940 (Running) gtext
+273 1940 (DOTPLOT.) gtext
+106 1840 (To) gtext
+170 1840 (run) gtext
+246 1840 (DOTPLOT) gtext
+459 1840 (you) gtext
+542 1840 (start) gtext
+639 1840 (the) gtext
+713 1840 (program) gtext
+884 1840 (by) gtext
+944 1840 (double-clicking) gtext
+1236 1840 (on) gtext
+1297 1840 (DOTPLOT.PRG,) gtext
+1624 1840 (this) gtext
+1704 1840 (will) gtext
+1778 1840 (load) gtext
+1872 1840 (the) gtext
+1946 1840 (program) gtext
+2117 1840 (and) gtext
+106 1790 (start) gtext
+200 1790 (its) gtext
+254 1790 (execution.) gtext
+457 1790 (The) gtext
+542 1790 (first) gtext
+623 1790 (you) gtext
+703 1790 (will) gtext
+775 1790 (see) gtext
+856 1790 (is) gtext
+899 1790 (the) gtext
+971 1790 (same) gtext
+1086 1790 (picture) gtext
+1225 1790 (as) gtext
+1283 1790 (on) gtext
+1342 1790 (the) gtext
+1414 1790 (front) gtext
+1511 1790 (of) gtext
+1560 1790 (these) gtext
+1675 1790 (instructions,) gtext
+1911 1790 (although) gtext
+2085 1790 (it) gtext
+2118 1790 (is) gtext
+2162 1790 (a) gtext
+ rs
+8 /tface exch def
+0 2 div /tcolor exch def
+42 /tscale exch def
+0 /trotate exch def
+0 /halign exch def
+0 /valign exch def
+/tunder false def
+106 1740 (very) gtext
+197 1740 (nice) gtext
+287 1740 (picture) gtext
+425 1740 (and) gtext
+507 1740 (you) gtext
+587 1740 (can) gtext
+668 1740 (probably) gtext
+840 1740 (watch) gtext
+962 1740 (it) gtext
+996 1740 (for) gtext
+1058 1740 (hours,) gtext
+1186 1740 (a) gtext
+1223 1740 (single) gtext
+1344 1740 (click) gtext
+1439 1740 (on) gtext
+1500 1740 (one) gtext
+1582 1740 (of) gtext
+1631 1740 (the) gtext
+1702 1740 (mousebuttons) gtext
+1978 1740 (or) gtext
+2029 1740 (pressing) gtext
+611 1057 1669 1057 1669 1718 3 611 1718 path
+0 setgray
+gs 1 setgray
+gs eofill gr gr
+80 2 /vrep 0 def /patlen exch def dup string /scan exch def /smax exch def
+611 1057 1669 1057 1669 1718 611 1718 gs np mto lto lto lto clip
+1059 662 611 1057 translate scale
+640 400 1 [640 0 0 -400 0 400 ]decode
+2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 11 3 2 3ff0
+1 7 3 2 0ff0
+1 7 2 25 aaaa
+3 1 a8
+1 11 3 2 6010
+1 7 3 2 1810
+1 7 2 25 5555
+3 1 50
+1 11 3 2 4038
+1 3 3 1 7e
+1 3 3 2 1030
+1 3 3 1 7e
+1 3 2 25 aaaa
+3 1 a8
+1 11 3 2 c008
+1 3 3 1 c2
+1 3 3 2 3020
+1 3 3 1 c2
+1 3 2 25 5555
+3 1 50
+1 11 3 2 801c
+1 3 3 1 86
+1 3 3 2 2060
+1 3 3 1 86
+1 3 2 25 aaaa
+3 1 a8
+1 10 3 7 01860400000184
+1 3 3 6 384000000184
+1 3 2 25 5555
+3 1 50
+1 10 3 19 010c0c1ff81f0f87ff8010c01ff81f0f800000
+2 25 aaaa
+3 1 a8
+1 10 3 19 030f08300830008c0080308030083000800000
+2 25 5555
+3 1 50
+1 10 3 19 021a18e01c20018801c02180e01c2001800000
+2 25 aaaa
+3 1 a8
+1 10 3 16 06161180046001180040610180046001
+1 3 2 25 5555
+3 1 50
+1 10 3 16 043431000c40031000c04301000c4003
+1 3 2 25 aaaa
+3 1 a8
+1 10 3 16 0c2c230f087c3e30f080c2030f087c3e
+1 3 2 25 5555
+3 1 50
+1 10 3 16 0868621a18086021a18086021a180860
+1 3 2 25 aaaa
+3 1 a8
+1 10 3 16 18584616101840616101840616101840
+1 3 2 25 5555
+3 1 50
+1 10 3 16 10d0c4343010c04343010c04343010c0
+1 3 2 25 aaaa
+3 1 a8
+1 10 3 16 30b08c2c203080c2c203080c2c203080
+1 3 2 25 5555
+3 1 50
+1 10 3 16 21a18868602180868602180868602180
+1 3 2 25 aaaa
+3 1 a8
+1 10 3 15 616118584061018584061018584061
+1 4 2 25 5555
+3 1 50
+1 10 3 15 43c310d0c043010d0c043010d0c043
+1 4 2 25 aaaa
+3 1 a8
+1 10 3 15 c30230b080c2030b080c2030b080c2
+1 4 2 25 5555
+3 1 50
+1 10 3 16 860621e18087c21e18387021e18087c0
+1 3 2 25 aaaa
+3 1 a8
+1 9 3 17 01801c6001018046001060106001018040
+1 3 2 25 5555
+3 1 50
+1 9 3 17 01003040030100c40030403040030100c0
+1 3 2 25 aaaa
+3 1 a8
+1 9 3 17 0300e0700e01c08c00e0c020700e01c080
+1 3 2 25 5555
+3 1 50
+1 9 3 17 0201802018008188018080602018008180
+1 3 2 25 aaaa
+3 1 a8
+1 9 3 16 03ff003ff000ff187f00ffc03ff000ff
+1 4 2 25 5555
+3 1 50
+1 16 3 2 10c0
+1 11 2 25 aaaa
+3 1 a8
+1 16 3 2 3080
+1 11 2 25 5555
+3 1 50
+1 16 3 2 2180
+1 11 2 25 aaaa
+3 1 a8
+1 16 3 1 3f
+1 12 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 12 3 1 33
+1 3 3 1 0c
+1 3 3 4 3f001e3f
+1 5 2 25 aaaa
+3 1 a8
+1 12 3 1 33
+1 7 3 4 30003306
+1 5 2 25 5555
+3 1 50
+1 12 3 12 331e3e1f1c1e3e003e00370c
+1 5 2 25 aaaa
+3 1 a8
+1 12 3 12 333333300c33330003003b06
+1 5 2 25 5555
+3 1 50
+1 12 3 12 333f301e0c33330003003303
+1 5 2 25 aaaa
+3 1 a8
+1 12 3 12 1e3030030c333300330c3333
+1 5 2 25 5555
+3 1 50
+1 12 3 12 0c1e303e1e1e33001e0c1e1e
+1 5 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 10 3 4 1f801980
+1 7 3 4 060f0f06
+1 4 2 25 5555
+3 1 50
+1 10 3 3 30c01b
+1 8 3 4 0e19998e
+1 4 2 25 aaaa
+3 1 a8
+1 10 3 15 2f401e0f1f1f0f3b0f1f0006199986
+1 4 2 25 5555
+3 1 50
+1 10 3 15 2c401c01999999bf819980060f8f86
+1 4 2 25 aaaa
+3 1 a8
+1 10 3 15 2c401e0f98181fb58f998006018186
+1 4 2 25 5555
+3 1 50
+1 10 3 15 2f401b199818183199998006030306
+1 4 2 25 aaaa
+3 1 a8
+1 10 3 16 30c0198f98180f318f99801f8e0e1f80
+1 3 2 25 5555
+3 1 50
+1 10 3 2 1f80
+1 17 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 3 4 55555540
+1 43 3 4 05555550
+1 29 3 4 aaaaaaaf
+0 43 3 4 eaaaaaa8
+1 29 3 4 5555554f
+0 43 3 4 e5555550
+1 29 3 4 aaaaaaaf
+0 43 3 4 eaaaaaa8
+1 29 3 4 5555554f
+0 43 3 4 e5555550
+1 29 3 4 aaaaaaaf
+1 42 3 5 01eaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 5 3 2 fc3f
+0 11 3 3 3fff8f
+0 5 3 1 3f
+0 3 3 1 fc
+0 10 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 5 3 2 fc1f
+0 9 3 5 3fff3fff0f
+0 4 3 2 3f3f
+0 3 3 1 fc
+0 3 3 1 3f
+0 6 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 5 3 2 fc8f
+0 9 3 1 3f
+0 3 3 1 3f
+0 4 3 1 3f
+0 4 3 1 fc
+0 3 3 1 3f
+0 6 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 5 3 30 fcce1ffcce1ccff9ce1e1c0ffe3e1f3e1c1c9e1c0e3e1e1ffe1c1e1ccc0f
+0 6 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 5 3 30 fccc0ffccc0ccff9ce0c0c0ffe3c0c0c0c080e0c0e3c0c0ffe0c0c0ccc0f
+0 6 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 5 3 30 fccccffccccccff94fcccf3fff3ccc0cccc80fcf3f3ccccfffcccccccf3f
+0 6 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 5 3 30 fccccffccccccff94e0ccf3fff3ccf3cccf94e0f3f3ccccffe0ccccccf3f
+0 6 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 5 3 30 fccccffccccccff80c0ccf3fff3ccf3cccf94c0f3f3ccccffc0ccccccf3f
+0 6 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 5 3 30 fccccffccccccff80ccccf3fff3ccf3cccf94ccf3f3ccccffccccccccf3f
+0 6 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 5 3 30 fc8ccffc0ccccff88ccccf3fff3ccf3cccf9cccf3f3ccccffccccccccf3f
+0 6 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 5 3 30 fc1c0ffe0c0c0ff9cc0ccf0ffe1ccf3c0cf9cc0f0e1c0ccffc0c0c0c0f0f
+0 6 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 5 3 30 fc3e1fffce1e0ffbee0ccf8ffe1ccf3e1cf9ce0f8e1e1ccffe0c1e1e0f8f
+0 6 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 8 3 2 fc0f
+0 31 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 8 3 2 fc1f
+0 31 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 9 3 9 f03e0700c070fe0700
+0 23 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 9 3 9 e7b8f67e9f66f8f67e
+0 23 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 9 3 9 ef9bf6fcbf6cfbf6fc
+0 5 3 9 9ffffffe07ff0e070f
+0 9 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 9 3 9 cdd33631334df33631
+0 5 3 9 9ffffffe07fe060607
+0 9 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 9 3 9 d99667676659f66767
+0 8 3 6 fe7ffe67ce67
+0 9 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 9 3 23 99a66e6e669be66e6ffe670e0f071f0f0ffe7ffe67ce67
+0 9 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 9 3 23 b32ccececcb3eccecffe660606071e0607fe0ffe679fcf
+0 9 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 9 3 23 334cdcdcfd37ccdcdffe6666667f9e6667fe07fe479fcf
+0 9 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 9 3 23 66599d9df167d99d9ffe66667e3f9e6667ffe7fe27cf9f
+0 9 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 8 3 24 fe6699b9b9866f99b9bffe66067f0f9e6667ffe7fe67cf9f
+0 9 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 8 3 24 fedcb33b3b3ec1b33b3fff0e7e7fc79e6667ffe79e66679f
+0 9 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 8 3 23 fcf9bf73737cfdbf737fff0e7e7fe79e6667fe679e6667
+0 10 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 8 3 24 fde3bc76767df9bc767fff9e067e070e0667fe079e06079f
+0 9 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 8 3 24 fc0f81f0f0fc0381f0ffff9f067e0f0f0e67ff0f9f0f0f9f
+0 9 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 22 3 1 e0
+1 7 3 1 01
+0 10 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 9 3 1 fc
+1 7 3 1 03
+0 4 3 1 e0
+1 7 3 1 01
+0 10 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 9 3 1 fd
+0 7 3 1 fb
+0 4 3 1 e0
+1 7 3 1 01
+0 10 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 9 3 1 fd
+0 7 3 1 fb
+0 4 3 1 e0
+0 7 3 1 c1
+0 10 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 9 3 1 fd
+0 7 3 1 fb
+0 4 3 1 e0
+0 7 3 1 c1
+0 10 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 9 3 1 fd
+0 7 3 1 fb
+0 4 3 1 e0
+0 7 3 1 c1
+0 10 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 9 3 5 fdfffff99f
+0 3 3 1 fb
+0 4 3 5 e0fffffccf
+0 3 3 1 c1
+0 10 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 9 3 5 fdfffff99f
+0 3 3 1 fb
+0 4 3 5 e0fffffccf
+0 3 3 1 c1
+0 10 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 9 3 5 fdfffff99f
+0 3 3 1 fb
+0 4 3 5 e0fffffccf
+0 3 3 1 c1
+0 10 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 9 3 9 fdfffff99c3c1ffffb
+0 4 3 9 e0fffffc4e1fffffc1
+0 10 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 9 3 9 fdfffffc38181ffffb
+0 4 3 9 e0fffffc4c0fffffc1
+0 10 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 9 3 9 fdfffffc3999fffffb
+0 4 3 9 e0fffffc0ccfffffc1
+0 10 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 9 3 9 fdfffffe7998fffffb
+0 4 3 9 e0fffffc0ccfffffc1
+0 10 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 9 3 9 fdfffffe781c3ffffb
+0 4 3 9 e0fffffc8ccfffffc1
+0 10 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 9 3 9 fdfffffe79ff1ffffb
+0 4 3 9 e0fffffc8ccfffffc1
+0 10 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 9 3 9 fdfffffe79ff9ffffb
+0 4 3 9 e0fffffccccfffffc1
+0 10 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 9 3 9 fdfffffe78181ffffb
+0 4 3 9 e0fffffccc0fffffc1
+0 10 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 9 3 9 fdfffffe7c183ffffb
+0 4 3 9 e0fffffcce1fffffc1
+0 10 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 9 3 1 fd
+0 7 3 1 fb
+0 4 3 1 e0
+0 7 3 1 c1
+0 10 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 9 3 1 fd
+0 7 3 1 fb
+0 4 3 1 e0
+0 7 3 1 c1
+0 10 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 9 3 1 fd
+0 7 3 1 fb
+0 4 3 1 e0
+1 7 3 1 01
+0 10 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 9 3 1 fc
+1 7 3 1 03
+0 4 3 1 e0
+1 7 3 1 01
+0 10 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 22 3 1 e0
+1 7 3 1 01
+0 10 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 4 5555554f
+1 42 3 5 01e5555550
+1 29 3 4 aaaaaaaf
+0 43 3 4 eaaaaaa8
+1 29 3 4 5555554f
+0 43 3 4 e5555550
+1 29 3 4 aaaaaaaf
+0 43 3 4 eaaaaaa8
+1 29 3 4 5555554f
+0 43 3 4 e5555550
+1 29 3 4 aaaaaaa0
+1 43 3 4 0aaaaaa8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 gr  rs
+106 387 2184 387 2184 950 3 106 950 path
+0 setgray
+gs 1 setgray
+gs eofill gr gr
+8 /tface exch def
+0 2 div /tcolor exch def
+42 /tscale exch def
+0 /trotate exch def
+0 /halign exch def
+0 /valign exch def
+/tunder false def
+106 896 (As) gtext
+167 896 (is) gtext
+210 896 (customary) gtext
+416 896 (for) gtext
+478 896 (most) gtext
+582 896 (programs) gtext
+771 896 (the) gtext
+843 896 (thick-lined) gtext
+1045 896 (box) gtext
+1125 896 (is) gtext
+1169 896 (the) gtext
+1240 896 (default) gtext
+1379 896 (option:) gtext
+1518 896 (if) gtext
+1552 896 (<RETURN>) gtext
+1788 896 (is) gtext
+1831 896 (pressed) gtext
+1993 896 (this) gtext
+2072 896 (option) gtext
+106 846 (is) gtext
+149 846 (automarically) gtext
+407 846 (selected.) gtext
+587 846 (You) gtext
+674 846 (can) gtext
+754 846 (select) gtext
+876 846 ("Yes") gtext
+990 846 (by) gtext
+1046 846 (clicking) gtext
+1196 846 (the) gtext
+1266 846 (left) gtext
+1334 846 (mousebutton) gtext
+1588 846 (after) gtext
+1684 846 (placing) gtext
+1829 846 (the) gtext
+1899 846 (mouse) gtext
+2037 846 (arrow) gtext
+2154 846 (in) gtext
+106 796 (the) gtext
+185 796 (in) gtext
+240 796 (the) gtext
+320 796 ("Yes"-box.) gtext
+536 796 (If) gtext
+581 796 (you) gtext
+670 796 (want) gtext
+780 796 (to) gtext
+837 796 (have) gtext
+949 796 (more) gtext
+1066 796 (information) gtext
+1294 796 (at) gtext
+1351 796 (this) gtext
+1438 796 (point,) gtext
+1561 796 (here) gtext
+1666 796 (is) gtext
+1718 796 (your) gtext
+1821 796 (opportunity.) gtext
+2061 796 (All) gtext
+2128 796 (the) gtext
+106 746 (information,) gtext
+342 746 (of) gtext
+396 746 (course,) gtext
+552 746 (is) gtext
+620 746 (also) gtext
+715 746 (contained) gtext
+915 746 (in) gtext
+966 746 (this) gtext
+1050 746 (set) gtext
+1125 746 (of) gtext
+1179 746 (instructions.) gtext
+1421 746 (The) gtext
+1512 746 (built-in) gtext
+1655 746 (help) gtext
+1753 746 (files) gtext
+1847 746 (are) gtext
+1926 746 (accessible) gtext
+2141 746 (by) gtext
+106 696 (looking) gtext
+252 696 (up) gtext
+312 696 (the) gtext
+384 696 (item) gtext
+476 696 (of) gtext
+525 696 (interest) gtext
+676 696 (on) gtext
+736 696 (the) gtext
+808 696 (INDEX-page) gtext
+1056 696 (\(page) gtext
+1177 696 (2\)) gtext
+1228 696 (and) gtext
+1311 696 (selecting) gtext
+1489 696 (the) gtext
+1560 696 (corresponding) gtext
+1838 696 (page) gtext
+1945 696 (by) gtext
+2002 696 (typing) gtext
+2127 696 (the) gtext
+106 646 (number) gtext
+268 646 (on) gtext
+335 646 (the) gtext
+414 646 (prompt.) gtext
+576 646 (It) gtext
+620 646 (is) gtext
+672 646 (also) gtext
+769 646 (possible) gtext
+943 646 (to) gtext
+999 646 (browse) gtext
+1154 646 (by) gtext
+1219 646 (pressing) gtext
+1397 646 (<RETURN>.) gtext
+1652 646 (After) gtext
+1761 646 (you) gtext
+1849 646 (select) gtext
+1979 646 ("QUIT") gtext
+2129 646 (the) gtext
+106 596 (information) gtext
+327 596 (mode) gtext
+446 596 (is) gtext
+491 596 (left) gtext
+561 596 (behind) gtext
+702 596 (and) gtext
+786 596 (you) gtext
+868 596 (will) gtext
+941 596 (return) gtext
+1064 596 (to) gtext
+1114 596 (the) gtext
+1187 596 (next) gtext
+1279 596 (option.) gtext
+1419 596 (This) gtext
+1512 596 (is) gtext
+1557 596 (of) gtext
+1607 596 (course) gtext
+1746 596 (the) gtext
+1819 596 (same) gtext
+1935 596 (as) gtext
+1994 596 (you) gtext
+2076 596 (would) gtext
+106 546 (have) gtext
+208 546 (encountered) gtext
+451 546 (if) gtext
+484 546 (you) gtext
+563 546 (hadn't) gtext
+689 546 (opted) gtext
+805 546 (for) gtext
+866 546 (information) gtext
+1084 546 (in) gtext
+1128 546 (the) gtext
+1198 546 (first) gtext
+1277 546 (place.) gtext
+106 962 2184 962 2184 1045 3 106 1045 path
+0 setgray
+gs 1 setgray
+gs eofill gr gr
+33 /tscale exch def
+106 999 (The) gtext
+173 999 (first) gtext
+237 999 (question) gtext
+373 999 (of) gtext
+410 999 (DOTPLOT.PRG.) gtext
+gr rs
+/av 0 def FF
+gs initclip
+0 3494 2470 3494 2470 0 0 0 np mto lto lto lto clip np
+8 /tface exch def
+0 2 div /tcolor exch def
+42 /tscale exch def
+0 /trotate exch def
+0 /halign exch def
+0 /valign exch def
+/tunder false def
+1228 199 23 1 (5) jtext
+622 2533 1680 2533 1680 3194 3 622 3194 path
+0 setgray
+gs 1 setgray
+gs eofill gr gr
+80 2 /vrep 0 def /patlen exch def dup string /scan exch def /smax exch def
+622 2533 1680 2533 1680 3194 622 3194 gs np mto lto lto lto clip
+1059 662 622 2533 translate scale
+640 400 1 [640 0 0 -400 0 400 ]decode
+1 80 1 80 1 80 1 16 3 5 7e66787e66
+1 59 1 16 3 5 7e667c7e66
+1 59 1 16 3 5 18666e6066
+1 59 1 16 3 5 187666603c
+1 41 3 2 3ff0
+1 7 3 2 0ff0
+1 7 1 16 3 5 1876667c3c
+1 41 3 2 6010
+1 7 3 2 1810
+1 7 1 16 3 5 187e667c18
+1 41 3 2 4038
+1 3 3 1 7e
+1 3 3 2 1030
+1 3 3 1 7e
+1 3 1 16 3 5 187e666018
+1 41 3 2 c008
+1 3 3 1 c2
+1 3 3 2 3020
+1 3 3 1 c2
+1 3 1 16 3 5 186e66603c
+1 41 3 2 801c
+1 3 3 1 86
+1 3 3 2 2060
+1 3 3 1 86
+1 3 1 16 3 6 186e66603c18
+1 39 3 7 01860400000184
+1 3 3 6 384000000184
+1 3 1 16 3 6 18666e606618
+1 39 3 19 010c0c1ff81f0f87ff8010c01ff81f0f800000
+1 16 3 6 7e667c7e6618
+1 39 3 19 030f08300830008c0080308030083000800000
+1 16 3 6 7e66787e6618
+1 39 3 19 021a18e01c20018801c02180e01c2001800000
+1 61 3 16 06161180046001180040610180046001
+1 3 1 61 3 16 043431000c40031000c04301000c4003
+1 3 1 61 3 16 0c2c230f087c3e30f080c2030f087c3e
+1 3 1 61 3 16 0868621a18086021a18086021a180860
+1 3 1 61 3 16 18584616101840616101840616101840
+1 3 1 61 3 16 10d0c4343010c04343010c04343010c0
+1 3 1 61 3 16 30b08c2c203080c2c203080c2c203080
+1 3 1 61 3 16 21a18868602180868602180868602180
+1 3 1 61 3 15 616118584061018584061018584061
+1 4 1 61 3 15 43c310d0c043010d0c043010d0c043
+1 4 1 61 3 15 c30230b080c2030b080c2030b080c2
+1 4 1 61 3 16 860621e18087c21e18387021e18087c0
+1 3 1 60 3 17 01801c6001018046001060106001018040
+1 3 1 60 3 17 01003040030100c40030403040030100c0
+1 3 1 60 3 17 0300e0700e01c08c00e0c020700e01c080
+1 3 1 60 3 17 0201802018008188018080602018008180
+1 3 1 60 3 16 03ff003ff000ff187f00ffc03ff000ff
+1 4 1 67 3 2 10c0
+1 11 1 67 3 2 3080
+1 11 1 67 3 2 2180
+1 11 3 6 78000e000038
+1 43 3 1 7e
+1 17 3 1 3f
+1 12 3 7 7c001e00003818
+1 42 3 1 7e
+1 30 3 7 6e001800001818
+1 42 3 1 0c
+1 30 3 8 663c183c66187e3e
+1 41 3 1 0c
+1 30 3 9 667e7e3e66187e7e00
+2 18 7e7e
+3 1 7e
+1 3 3 1 18
+1 30 3 9 66667e066618186000
+2 18 7e7e
+3 1 7e
+1 3 3 1 18
+1 30 3 8 6666183e66181870
+1 41 3 1 0c
+1 30 3 8 667e187e6618183c
+1 41 3 1 0c
+1 30 3 9 666018666618180e18
+1 40 3 1 66
+1 30 3 9 6e6018666618180618
+1 40 3 1 66
+1 30 3 9 7c7e187e7e3c1e7e18
+1 40 3 1 7e
+1 30 3 9 783e183e3e3c0e7c18
+1 40 3 1 3c
+1 30 1 80 1 80 1 80 1 80 1 18 3 1 7e
+1 5 3 1 18
+1 24 3 1 7e
+1 30 1 18 3 3 7e0018
+1 3 3 1 18
+1 24 3 1 7e
+1 30 1 18 3 3 600018
+1 28 3 1 0c
+1 30 1 18 3 10 60667e3c3c3e383c3c3e
+1 21 3 1 0c
+1 13 3 1 33
+1 3 3 1 0c
+1 3 3 4 3f001e3f
+1 5 1 18 3 11 7c667e7e7e7e387e7e7e00
+2 8 7e7e
+3 1 7e
+1 3 3 1 18
+1 13 3 1 33
+1 7 3 4 30003306
+1 5 1 18 3 11 7c3c186666601866666000
+2 8 7e7e
+3 1 7e
+1 3 3 1 18
+1 13 3 12 331e3e1f1c1e3e003e00370c
+1 5 1 18 3 10 603c1866667018666670
+1 21 3 1 0c
+1 13 3 12 333333300c33330003003b06
+1 5 1 18 3 10 6018187e663c1866663c
+1 21 3 1 0c
+1 13 3 12 333f301e0c33330003003303
+1 5 1 18 3 11 603c1860660e1866660e18
+1 20 3 1 66
+1 13 3 12 1e3030030c333300330c3333
+1 5 1 18 3 11 603c186066061866660618
+1 20 3 1 66
+1 13 3 12 0c1e303e1e1e33001e0c1e1e
+1 5 1 18 3 11 7e661e7e667e3c7e667e18
+1 20 3 1 7e
+1 30 1 18 3 11 7e660e3e667c3c3c667c18
+1 20 3 1 3c
+1 30 1 80 1 80 1 80 1 80 1 18 3 4 c6180006
+1 6 3 3 06003e
+1 18 3 1 0c
+1 30 1 18 3 4 c6180006
+1 6 3 3 06007e
+1 18 3 1 0c
+1 30 1 18 3 4 c6000006
+1 6 3 3 060060
+1 18 3 1 1c
+1 11 3 4 1f801980
+1 7 3 4 060f0f06
+1 4 1 18 3 18 c6383c3e3cc63e003c3c3e00603c3c7c3c3e
+1 13 3 1 1c
+1 11 3 3 30c01b
+1 8 3 4 0e19998e
+1 4 1 18 3 14 c6387e7e7ec67e003e7e7e00707c
+2 7 7e7e
+1 3 3 1 3c
+1 11 3 15 2f401e0f1f1f0f3b0f1f0006199986
+1 4 1 18 3 18 d618666666d6600006666600386066666660
+2 5 7e7e
+1 3 3 1 3c
+1 11 3 15 2c401c01999999bf819980060f8f86
+1 4 1 18 3 18 d618666666d670003e6666001c6066606670
+1 13 3 1 6c
+1 11 3 15 2c401e0f98181fb58f998006018186
+1 4 1 18 3 18 fe18666666fe3c007e6666000e6066607e3c
+1 13 3 1 6c
+1 11 3 15 2f401b199818183199998006030306
+1 4 1 18 3 18 fe18666666fe0e006666660006606660600e
+1 13 3 1 7e
+1 11 3 16 30c0198f98180f318f99801f8e0e1f80
+1 3 1 18 3 18 ee18666666ee060066666600066066606006
+1 13 3 1 7e
+1 11 3 2 1f80
+1 17 1 18 3 18 c63c667e7ec67e007e667e007e7e7e607e7e
+1 13 3 1 0c
+1 30 1 18 3 18 823c663e3c827c003e663e007c3e3c603e7c
+1 13 3 1 0c
+1 30 1 80 1 80 1 80 1 80 3 1 3e
+1 3 3 1 18
+1 5 3 2 6038
+1 37 3 1 7e
+1 30 3 1 7e
+1 3 3 1 18
+1 3 3 4 18006038
+1 37 3 1 7e
+1 30 3 1 60
+1 7 3 4 18006018
+1 37 3 1 60
+1 30 3 14 603c3c7c383c3e007e3c7c183c3e
+1 35 3 1 60
+1 30 3 15 707c7e7e387e7e7e7e3e7e187e7e00
+2 15 7e7e
+3 1 7e
+1 3 3 1 7c
+1 30 3 15 386066661866667e18066618666000
+2 15 7e7e
+3 1 7e
+1 3 3 1 7e
+1 30 3 14 1c60666018666600183e66186670
+1 35 3 1 06
+1 30 3 14 0e60666018666600187e66187e3c
+1 35 3 1 06
+1 30 3 15 066066601866660018666618600e18
+1 34 3 1 06
+1 30 3 15 0660666018667e0018666618600618
+1 34 3 1 66
+1 30 3 15 7e7e7e603c663e001e7e7e3c7e7e18
+1 34 3 1 7e
+1 30 3 15 7c3e3c603c6606000e3e7c3c3e7c18
+1 34 3 1 3c
+1 30 1 6 3 1 7e
+1 73 1 6 3 1 7c
+1 73 1 80 1 80 3 5 6018001800
+1 3 3 9 0e00783c7e7c603c7e
+1 32 3 1 3c
+1 30 3 5 6018001818
+1 3 3 9 1e007c7e7e7e607e7e
+1 32 3 1 7e
+1 30 3 1 60
+1 3 3 1 18
+1 3 3 9 18006e661866606618
+1 32 3 1 66
+1 30 3 17 60386c387e3e003c180066661866606618
+1 32 3 1 66
+1 30 3 18 6038fe387e7e007e7e006666186660661800
+2 14 7e7e
+1 3 3 1 3c
+1 30 3 18 6018fe18186000667e006666186660661800
+2 14 7e7e
+1 3 3 1 3c
+1 30 3 17 6018d6181870006618006666187e606618
+1 32 3 1 66
+1 30 3 17 6018d618183c006618006666187c606618
+1 32 3 1 66
+1 30 3 18 6018d618180e006618006666186060661818
+1 31 3 1 66
+1 30 3 18 6018c6181806006618006e66186060661818
+1 31 3 1 66
+1 30 3 18 7e3cc63c1e7e007e18007c7e18607e7e1818
+1 31 3 1 7e
+1 30 3 18 7e3cc63c0e7c003c1800783c18607e3c1818
+1 31 3 1 3c
+1 30 1 80 1 80 1 80 1 80 1 18 3 2 3e18
+1 29 3 1 3c
+1 30 1 18 3 2 7e18
+1 29 3 1 7e
+1 30 1 18 3 1 60
+1 30 3 1 66
+1 30 1 18 3 4 60387e3c
+1 27 3 1 66
+1 30 1 18 3 5 70387e7e00
+2 11 7e7e
+3 1 7e
+1 3 3 1 3c
+1 30 1 18 3 5 38180c6600
+2 11 7e7e
+3 1 7e
+1 3 3 1 3c
+1 30 1 18 3 4 1c181866
+1 27 3 1 66
+1 30 1 18 3 4 0e18187e
+1 27 3 1 66
+1 30 1 18 3 5 0618306018
+1 26 3 1 66
+1 30 1 18 3 5 0618306018
+1 26 3 1 66
+1 30 1 18 3 5 7e3c7e7e18
+1 26 3 1 7e
+1 30 1 18 3 5 7c3c7e3e18
+1 26 3 1 3c
+1 30 1 80 1 80 1 80 1 80 1 18 3 2 3c60
+1 29 3 1 3c
+1 30 1 18 3 2 7e60
+1 4 3 1 18
+1 24 3 1 7e
+1 30 1 18 3 2 6660
+1 4 3 1 18
+1 24 3 1 66
+1 30 1 18 3 10 667c3c7c3c3c7e3c7c3e
+1 21 3 1 66
+1 30 1 18 3 11 607e3e7e3e7c7e7e7e7e00
+2 8 7e7e
+3 1 7e
+1 3 3 1 7e
+1 30 1 18 3 11 6066066606601866666000
+2 8 7e7e
+3 1 7e
+1 3 3 1 3e
+1 30 1 18 3 10 60663e603e6018666070
+1 21 3 1 06
+1 30 1 18 3 10 60667e607e60187e603c
+1 21 3 1 06
+1 30 1 18 3 11 6666666066601860600e18
+1 20 3 1 06
+1 30 1 18 3 11 6666666066601860600618
+1 20 3 1 0e
+1 30 1 18 3 11 7e667e607e7e1e7e607e18
+1 20 3 1 3c
+1 30 1 18 3 11 3c663e603e3e0e3e607c18
+1 20 3 1 38
+1 30 1 80 1 80 1 80 1 80 3 2 7e60
+1 3 3 1 18
+1 8 3 3 06007c
+1 3 3 1 38
+1 27 3 2 183c
+1 30 3 2 7e60
+1 3 3 4 18001800
+1 5 3 3 06007e
+1 3 3 1 38
+1 27 3 2 187e
+1 30 3 2 1860
+1 5 3 1 18
+1 6 3 3 060066
+1 3 3 1 18
+1 27 3 2 3866
+1 30 3 21 187c3c007c383c7e667c3c003c3c3e00663c3c3c18
+1 27 3 2 3866
+1 30 3 22 187e7e007e387c7e667e7e003e7e7e00663e7e7e1800
+2 12 7e7e
+3 4 00001866
+1 30 3 22 18666600661860186666660006666600660666661800
+2 12 7e7e
+3 4 0000186e
+1 30 3 21 1866660066186018666066003e6666007e3e666618
+1 27 3 2 1876
+1 30 3 21 18667e006618601866607e007e6666007c7e667e18
+1 27 3 2 1866
+1 30 3 22 18666000661860186660600066666600606666601818
+1 26 3 2 1866
+1 30 3 22 18666000661860186660600066666600606666601818
+1 26 3 2 1866
+1 30 3 22 18667e007e3c7e1e7e607e007e667e00607e667e3c18
+1 26 3 2 7e7e
+1 30 3 22 18663e007c3c3e0e3e603e003e663e00603e663e3c18
+1 26 3 2 7e3c
+1 30 1 4 3 1 60
+1 75 1 4 3 1 60
+1 75 1 80 1 80 1 18 3 2 7c18
+1 28 3 2 183c
+1 30 1 18 3 5 7e18001800
+1 25 3 2 187e
+1 30 1 18 3 4 66000018
+1 26 3 2 3866
+1 30 1 18 3 7 66383c7e667c3c
+1 23 3 2 3866
+1 30 1 18 3 8 66387c7e667e7e00
+2 10 7e7e
+3 4 00001866
+1 30 1 18 3 8 6618601866666600
+2 10 7e7e
+3 4 0000186e
+1 30 1 18 3 7 7e186018666066
+1 23 3 2 1876
+1 30 1 18 3 7 7c18601866607e
+1 23 3 2 1866
+1 30 1 18 3 8 6018601866606018
+1 22 3 2 1866
+1 30 1 18 3 8 6018601866606018
+1 22 3 2 1866
+1 30 1 18 3 8 603c7e1e7e607e18
+1 22 3 2 7e7e
+1 30 1 18 3 8 603c3e0e3e603e18
+1 22 3 2 7e3c
+1 30 1 80 1 80 1 80 1 80 1 27 3 1 7e
+1 4 3 1 18
+1 15 3 2 183c
+1 30 1 27 3 1 7e
+1 4 3 1 18
+1 15 3 2 187e
+1 30 1 27 3 1 0c
+1 20 3 2 3866
+1 30 1 27 3 7 0c3c3c6c00383c
+1 14 3 2 3866
+1 30 1 27 3 8 187e7efe7e387e00
+2 5 7e7e
+3 5 7e00001866
+1 30 1 27 3 8 186666fe7e186600
+2 5 7e7e
+3 5 7e0000186e
+1 30 1 27 3 7 306666d6001866
+1 14 3 2 1876
+1 30 1 27 3 7 306666d6001866
+1 14 3 2 1866
+1 30 1 27 3 8 606666d600186618
+1 13 3 2 1866
+1 30 1 27 3 8 606666c600186618
+1 13 3 2 1866
+1 30 1 27 3 8 7e7e7ec6003c6618
+1 13 3 2 7e7e
+1 30 1 27 3 8 7e3c3cc6003c6618
+1 13 3 2 7e3c
+1 30 1 80 1 80 1 80 1 80 1 27 3 2 3e60
+1 3 3 1 66
+1 3 3 1 38
+1 11 3 2 1818
+1 30 1 27 3 2 7e60
+1 3 3 1 66
+1 3 3 1 38
+1 11 3 2 1818
+1 30 1 27 3 2 6060
+1 3 3 1 66
+1 3 3 1 18
+1 11 3 2 3838
+1 30 1 27 3 13 607c3cc600663c6c3c183c3e66
+1 8 3 2 3838
+1 30 1 27 3 13 707e7ec6007e7efe7e187e7e66
+2 3 7e7e
+3 4 00001818
+1 30 1 27 3 13 386666d6007e66fe6618666666
+2 3 7e7e
+3 4 00001818
+1 30 1 27 3 13 1c6666d6006666d66618666666
+1 8 3 2 1818
+1 30 1 27 3 13 0e6666fe006666d66618666666
+1 8 3 2 1818
+1 30 1 27 3 13 066666fe006666d66618666666
+1 8 3 2 1818
+1 30 1 27 3 13 066666ee006666c66618667e7e
+1 8 3 2 1818
+1 30 1 27 3 13 7e667ec600667ec67e3c7e3e3e
+1 8 3 2 7e7e
+1 30 1 27 3 13 7c663c8200663cc63c3c3c0606
+1 8 3 2 7e7e
+1 30 1 38 3 2 7e7e
+1 40 1 38 3 2 7c7c
+1 40 1 80 1 80 1 18 3 1 7c
+1 3 3 1 38
+1 25 3 2 183c
+1 30 1 18 3 1 7e
+1 3 3 1 38
+1 25 3 2 187e
+1 30 1 18 3 1 66
+1 3 3 1 18
+1 25 3 2 3866
+1 30 1 18 3 5 663c3c3c18
+1 25 3 2 3866
+1 30 1 18 3 6 663e7e7e1800
+2 11 7e7e
+3 4 0000180c
+1 30 1 18 3 6 660666661800
+2 11 7e7e
+3 4 0000180c
+1 30 1 18 3 5 7e3e666618
+1 25 3 2 1818
+1 30 1 18 3 5 7c7e667e18
+1 25 3 2 1818
+1 30 1 18 3 6 606666601818
+1 24 3 2 1830
+1 30 1 18 3 6 606666601818
+1 24 3 2 1830
+1 30 1 18 3 6 607e667e3c18
+1 24 3 2 7e7e
+1 30 1 18 3 6 603e663e3c18
+1 24 3 2 7e7e
+1 30 1 80 1 80 1 80 1 80 1 27 3 4 3e60180e
+1 17 3 2 183c
+1 30 1 27 3 5 7e60181e18
+1 16 3 2 187e
+1 30 1 27 3 5 6060001818
+1 16 3 2 3866
+1 30 1 27 3 5 607c38187e
+1 16 3 2 3866
+1 30 1 27 3 6 707e387e7e00
+2 6 7e7e
+3 5 7e0000180c
+1 30 1 27 3 6 3866187e1800
+2 6 7e7e
+3 5 7e0000180c
+1 30 1 27 3 5 1c66181818
+1 16 3 2 1818
+1 30 1 27 3 5 0e66181818
+1 16 3 2 1818
+1 30 1 27 3 6 066618181818
+1 15 3 2 1830
+1 30 1 27 3 6 066618181818
+1 15 3 2 1830
+1 30 1 27 3 6 7e663c181e18
+1 15 3 2 7e7e
+1 30 1 27 3 6 7c663c180e18
+1 15 3 2 7e7e
+1 30 1 80 1 80 1 80 1 80 1 27 3 1 7e
+1 4 3 1 06
+1 15 3 2 187e
+1 30 1 27 3 1 7e
+1 4 3 1 06
+1 15 3 2 187e
+1 30 1 27 3 1 60
+1 4 3 1 06
+1 15 3 2 380c
+1 30 1 27 3 6 60667c3c3c3e
+1 15 3 2 380c
+1 30 1 27 3 7 7c667e3e7e7e00
+2 6 7e7e
+3 4 00001818
+1 30 1 27 3 7 7c3c6606666600
+2 6 7e7e
+3 4 00001818
+1 30 1 27 3 6 603c663e6666
+1 15 3 2 180c
+1 30 1 27 3 6 6018667e6666
+1 15 3 2 180c
+1 30 1 27 3 7 603c6666666618
+1 14 3 2 1866
+1 30 1 27 3 7 603c6666666618
+1 14 3 2 1866
+1 30 1 27 3 7 7e667e7e667e18
+1 14 3 2 7e7e
+1 30 1 27 3 7 7e667c3e663e18
+1 14 3 2 7e3c
+1 30 1 29 3 1 60
+1 50 1 29 3 1 60
+1 50 1 80 1 80 1 27 3 2 3c60
+1 19 3 2 187e
+1 30 1 27 3 2 7e60
+1 19 3 2 187e
+1 30 1 27 3 2 6660
+1 19 3 2 380c
+1 30 1 27 3 6 667c3c3c3e3c
+1 15 3 2 380c
+1 30 1 27 3 7 607e3e7e7e7e00
+2 6 7e7e
+3 4 00001818
+1 30 1 27 3 7 60660666666600
+2 6 7e7e
+3 4 00001818
+1 30 1 27 3 6 60663e666666
+1 15 3 2 180c
+1 30 1 27 3 6 60667e66667e
+1 15 3 2 180c
+1 30 1 27 3 7 66666666666018
+1 14 3 2 1866
+1 30 1 27 3 7 666666667e6018
+1 14 3 2 1866
+1 30 1 27 3 7 7e667e663e7e18
+1 14 3 2 7e7e
+1 30 1 27 3 7 3c663e66063e18
+1 14 3 2 7e3c
+1 30 1 31 3 1 7e
+1 48 1 31 3 1 7c
+1 48 1 80 1 80 1 27 3 8 3c00000618001800
+1 13 3 2 180c
+1 30 1 27 3 7 7e000006181818
+1 14 3 2 180c
+1 30 1 27 3 6 660000060018
+1 15 3 2 381c
+1 30 1 27 3 10 663c3c3e387e383c3c3e
+1 11 3 2 381c
+1 30 1 27 3 11 607e7e7e387e387e7e7e00
+2 4 7e7e
+3 4 0000183c
+1 30 1 27 3 11 6066666618181866666000
+2 4 7e7e
+3 4 0000183c
+1 30 1 27 3 10 60666666181818666670
+1 11 3 2 186c
+1 30 1 27 3 10 6066666618181866663c
+1 11 3 2 186c
+1 30 1 27 3 11 6666666618181866660e18
+1 10 3 2 187e
+1 30 1 27 3 11 6666666618181866660618
+1 10 3 2 187e
+1 30 1 27 3 11 7e7e667e3c1e3c7e667e18
+1 10 3 2 7e0c
+1 30 1 27 3 11 3c3c663e3c0e3c3c667c18
+1 10 3 2 7e0c
+1 30 1 80 1 80 1 80 1 80 1 27 3 1 7c
+1 20 3 2 187e
+1 30 1 27 3 1 7e
+1 5 3 1 18
+1 14 3 2 187e
+1 30 1 27 3 1 66
+1 5 3 1 18
+1 14 3 2 3860
+1 30 1 27 3 10 663c7c3c6c3c7e3c7c3e
+1 11 3 2 3860
+1 30 1 27 3 11 663e7e3efe7e7e7e7e7e00
+2 4 7e7e
+3 4 0000187c
+1 30 1 27 3 11 66066606fe661866666000
+2 4 7e7e
+3 4 0000187e
+1 30 1 27 3 10 7e3e603ed66618666070
+1 11 3 2 1806
+1 30 1 27 3 10 7c7e607ed67e187e603c
+1 11 3 2 1806
+1 30 1 27 3 11 60666066d6601860600e18
+1 10 3 2 1806
+1 30 1 27 3 11 60666066c6601860600618
+1 10 3 2 1866
+1 30 1 27 3 11 607e607ec67e1e7e607e18
+1 10 3 2 7e7e
+1 30 1 27 3 11 603e603ec63e0e3e607c18
+1 10 3 2 7e3c
+1 30 1 80 1 80 1 80 1 80 1 27 3 1 3c
+1 20 3 2 187e
+1 30 1 27 3 6 7e0018000018
+1 15 3 2 187e
+1 30 1 27 3 6 660018000018
+1 15 3 2 3860
+1 30 1 27 3 6 66667e7c667e
+1 15 3 2 3860
+1 30 1 27 3 7 66667e7e667e00
+2 6 7e7e
+3 4 0000187c
+1 30 1 27 3 7 66661866661800
+2 6 7e7e
+3 4 0000187e
+1 30 1 27 3 6 666618666618
+1 15 3 2 1806
+1 30 1 27 3 6 666618666618
+1 15 3 2 1806
+1 30 1 27 3 7 66661866661818
+1 14 3 2 1806
+1 30 1 27 3 7 66661866661818
+1 14 3 2 1866
+1 30 1 27 3 7 7e7e1e7e7e1e18
+1 14 3 2 7e7e
+1 30 1 27 3 7 3c3e0e7c3e0e18
+1 14 3 2 7e3c
+1 30 1 30 3 1 60
+1 49 1 30 3 1 60
+1 49 1 80 1 80 1 27 3 1 18
+1 3 3 1 60
+1 16 3 2 181c
+1 30 1 27 3 5 3c00001860
+1 16 3 2 183c
+1 30 1 27 3 5 7e00001860
+1 16 3 2 3870
+1 30 1 27 3 11 663c3c7e7c3c7c007c663c
+1 10 3 2 3860
+1 30 1 27 3 1 66
+2 3 7e7e
+3 5 007e667e00
+2 3 7e7e
+3 5 7e00001860
+1 30 1 27 3 12 666666186666660066666600
+2 3 7e7e
+3 5 7e0000187c
+1 30 1 27 3 11 7e66661866666000606666
+1 10 3 2 187e
+1 30 1 27 3 11 7e666618667e6000606666
+1 10 3 2 1866
+1 30 1 27 3 12 666666186660600060666618
+1 9 3 2 1866
+1 30 1 27 3 12 666666186660600060666618
+1 9 3 2 1866
+1 30 1 27 3 12 66667e1e667e6000607e6618
+1 9 3 2 7e7e
+1 30 1 27 3 12 66663c0e663e6000603e6618
+1 9 3 2 7e3c
+1 30 1 80 1 80 1 80 1 80 1 80 1 80 1 80 1 80 1 80 1 80 1 80 1 80 1 80 1 80 1 80 1 80 1 80 1 80 1 80 1 80 1 80 1 80 1 80 1 37 3 1 3f
+0 7 3 1 e0
+1 34 1 37 3 1 3f
+0 7 3 1 e0
+1 34 1 4 3 1 0f
+0 7 3 1 80
+1 24 3 1 3f
+0 7 3 1 e0
+1 34 1 4 3 1 08
+1 7 3 1 80
+1 24 3 1 38
+1 7 3 1 e0
+1 34 1 4 3 1 08
+1 7 3 1 80
+1 24 3 1 38
+1 7 3 1 e0
+1 34 1 4 3 1 08
+1 7 3 1 80
+1 24 3 1 38
+1 7 3 1 e0
+1 34 1 4 3 1 08
+1 7 3 1 80
+1 24 3 1 38
+1 7 3 1 e0
+1 34 1 4 3 1 08
+1 7 3 1 80
+1 24 3 1 38
+1 7 3 1 e0
+1 34 1 4 3 1 08
+1 7 3 1 80
+1 24 3 1 38
+1 7 3 1 e0
+1 34 1 4 3 1 08
+1 7 3 1 80
+1 3 3 1 3f
+0 14 3 1 c0
+1 5 3 1 38
+1 7 3 1 e0
+1 34 1 4 3 1 08
+1 7 3 1 80
+1 3 3 1 3f
+0 14 3 1 c0
+1 5 3 1 38
+1 7 3 1 e0
+1 34 1 4 3 14 08000f199f9f800080000000307f
+0 8 3 6 e660667fffc0
+1 5 3 5 3800003ccc
+1 3 3 1 e0
+1 34 1 4 3 15 08001f999f9f800080000000207ff9
+0 7 3 6 e660667fffc0
+1 5 3 5 3800007ecc
+1 3 3 1 e0
+1 34 1 4 3 9 080019998606000080
+1 3 3 3 27fff9
+0 7 3 6 f0fcf0ffffc0
+1 5 3 5 38000066d8
+1 3 3 1 e0
+1 34 1 4 3 9 080019998606000080
+1 3 3 16 27f0e070ffe0f0f070fff0fcf0ffffc0
+1 5 3 5 38000066d8
+1 3 3 1 e0
+1 34 1 4 3 9 080019998606000080
+1 3 3 16 246060607fe07060607fc039c03fffc0
+1 5 3 5 38000066f0
+1 3 3 1 e0
+1 34 1 4 3 9 080019998606000080
+1 3 3 16 246679e67fe67e66667fc039c03fffc0
+1 5 3 5 38000066f0
+1 3 3 1 e0
+1 34 1 4 3 9 080019998606000080
+1 3 3 16 266679e67fe67066667ff0fcf0ffffc0
+1 5 3 5 38000066d8
+1 3 3 1 e0
+1 34 1 4 3 9 080019998606000080
+1 3 3 16 266679e67fe66066607ff0fcf0ffffc0
+1 5 3 5 38000066d8
+1 3 3 1 e0
+1 34 1 4 3 9 080019998606000080
+1 3 3 16 266679e67fe6666667ffe666667fffc0
+1 5 3 5 38000066cc
+1 3 3 1 e0
+1 34 1 4 3 9 08001a998606000080
+1 3 3 16 266679e67fe6666067ffe666667fffc0
+1 5 3 5 38000066cc
+1 3 3 1 e0
+1 34 1 4 3 9 08001f1f9f86000080
+1 3 3 16 206078607fe06070607fffe07fffffc0
+1 5 3 5 3800007ec6
+1 3 3 1 e0
+1 34 1 4 3 9 08000d8f1f86000080
+1 3 3 12 30f0fc70ffe0f07e707ffff0
+0 3 3 1 c0
+1 5 3 5 3800003cc6
+1 3 3 1 e0
+1 34 1 4 3 1 08
+1 7 3 1 80
+1 3 3 1 3f
+0 4 3 4 e7ffe07f
+0 6 3 1 c0
+1 5 3 1 38
+1 7 3 1 e0
+1 34 1 4 3 1 08
+1 7 3 1 80
+1 3 3 1 3f
+0 4 3 3 e7ffe0
+0 7 3 1 c0
+1 5 3 1 38
+1 7 3 1 e0
+1 34 1 4 3 1 08
+1 7 3 1 80
+1 24 3 1 38
+1 7 3 1 e0
+1 34 1 4 3 1 0f
+0 7 3 1 80
+1 24 3 1 3f
+0 7 3 1 e0
+1 34 1 37 3 1 3f
+0 7 3 1 e0
+1 34 1 37 3 1 3f
+0 7 3 1 e0
+1 34 1 80 1 80 1 80 1 80 1 80 1 80 1 80 1 80 1 80 1 80 1 80 1 80 1 80 gr  rs
+105 2226 2183 2226 2183 2414 3 105 2414 path
+0 setgray
+gs 1 setgray
+gs eofill gr gr
+8 /tface exch def
+0 2 div /tcolor exch def
+42 /tscale exch def
+0 /trotate exch def
+0 /halign exch def
+0 /valign exch def
+/tunder false def
+105 2360 (The) gtext
+192 2360 (next) gtext
+288 2360 (question) gtext
+463 2360 (of) gtext
+514 2360 (DOTPLOT) gtext
+728 2360 (will) gtext
+802 2360 (probably) gtext
+979 2360 (be) gtext
+1042 2360 (of) gtext
+1094 2360 (more) gtext
+1206 2360 (interest) gtext
+1358 2360 (to) gtext
+1410 2360 (you) gtext
+1494 2360 (as) gtext
+1555 2360 (you) gtext
+1639 2360 (are) gtext
+1716 2360 (now) gtext
+1809 2360 (getting) gtext
+1951 2360 (impatient) gtext
+2137 2360 (for) gtext
+ rs
+8 /tface exch def
+0 2 div /tcolor exch def
+42 /tscale exch def
+0 /trotate exch def
+0 /halign exch def
+0 /valign exch def
+/tunder false def
+105 2310 (some) gtext
+219 2310 (serious) gtext
+367 2310 (DOTPLOTting.) gtext
+655 2310 (Here) gtext
+759 2310 (your) gtext
+853 2310 (first) gtext
+933 2310 (real) gtext
+1015 2310 (choice) gtext
+1149 2310 (is) gtext
+1192 2310 (made;) gtext
+1321 2310 (either) gtext
+1440 2310 (for) gtext
+1501 2310 (DNA) gtext
+1603 2310 (\(or) gtext
+1667 2310 (RNA) gtext
+1769 2310 (see) gtext
+1850 2310 (pages) gtext
+1977 2310 (8) gtext
+2014 2310 (and) gtext
+2096 2310 (9\)) gtext
+2147 2310 (or) gtext
+105 2260 (for) gtext
+165 2260 (proteins.) gtext
+105 2419 2187 2419 2187 2516 3 105 2516 path
+0 setgray
+gs 1 setgray
+gs eofill gr gr
+33 /tscale exch def
+105 2470 (The) gtext
+172 2470 (INDEX) gtext
+284 2470 (page) gtext
+368 2470 (of) gtext
+406 2470 (the) gtext
+462 2470 (built-in) gtext
+570 2470 (information.) gtext
+603 1543 1661 1543 1661 2204 3 603 2204 path
+0 setgray
+gs 1 setgray
+gs eofill gr gr
+80 2 /vrep 0 def /patlen exch def dup string /scan exch def /smax exch def
+603 1543 1661 1543 1661 2204 603 2204 gs np mto lto lto lto clip
+1059 662 603 1543 translate scale
+640 400 1 [640 0 0 -400 0 400 ]decode
+2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 11 3 2 3ff0
+1 7 3 2 0ff0
+1 7 2 25 aaaa
+3 1 a8
+1 11 3 2 6010
+1 7 3 2 1810
+1 7 2 25 5555
+3 1 50
+1 11 3 2 4038
+1 3 3 1 7e
+1 3 3 2 1030
+1 3 3 1 7e
+1 3 2 25 aaaa
+3 1 a8
+1 11 3 2 c008
+1 3 3 1 c2
+1 3 3 2 3020
+1 3 3 1 c2
+1 3 2 25 5555
+3 1 50
+1 11 3 2 801c
+1 3 3 1 86
+1 3 3 2 2060
+1 3 3 1 86
+1 3 2 25 aaaa
+3 1 a8
+1 10 3 7 01860400000184
+1 3 3 6 384000000184
+1 3 2 25 5555
+3 1 50
+1 10 3 19 010c0c1ff81f0f87ff8010c01ff81f0f800000
+2 25 aaaa
+3 1 a8
+1 10 3 19 030f08300830008c0080308030083000800000
+2 25 5555
+3 1 50
+1 10 3 19 021a18e01c20018801c02180e01c2001800000
+2 25 aaaa
+3 1 a8
+1 10 3 16 06161180046001180040610180046001
+1 3 2 25 5555
+3 1 50
+1 10 3 16 043431000c40031000c04301000c4003
+1 3 2 25 aaaa
+3 1 a8
+1 10 3 16 0c2c230f087c3e30f080c2030f087c3e
+1 3 2 25 5555
+3 1 50
+1 10 3 16 0868621a18086021a18086021a180860
+1 3 2 25 aaaa
+3 1 a8
+1 10 3 16 18584616101840616101840616101840
+1 3 2 25 5555
+3 1 50
+1 10 3 16 10d0c4343010c04343010c04343010c0
+1 3 2 25 aaaa
+3 1 a8
+1 10 3 16 30b08c2c203080c2c203080c2c203080
+1 3 2 25 5555
+3 1 50
+1 10 3 16 21a18868602180868602180868602180
+1 3 2 25 aaaa
+3 1 a8
+1 10 3 15 616118584061018584061018584061
+1 4 2 25 5555
+3 1 50
+1 10 3 15 43c310d0c043010d0c043010d0c043
+1 4 2 25 aaaa
+3 1 a8
+1 10 3 15 c30230b080c2030b080c2030b080c2
+1 4 2 25 5555
+3 1 50
+1 10 3 16 860621e18087c21e18387021e18087c0
+1 3 2 25 aaaa
+3 1 a8
+1 9 3 17 01801c6001018046001060106001018040
+1 3 2 25 5555
+3 1 50
+1 9 3 17 01003040030100c40030403040030100c0
+1 3 2 25 aaaa
+3 1 a8
+1 9 3 17 0300e0700e01c08c00e0c020700e01c080
+1 3 2 25 5555
+3 1 50
+1 9 3 17 0201802018008188018080602018008180
+1 3 2 25 aaaa
+3 1 a8
+1 9 3 16 03ff003ff000ff187f00ffc03ff000ff
+1 4 2 25 5555
+3 1 50
+1 16 3 2 10c0
+1 11 2 25 aaaa
+3 1 a8
+1 16 3 2 3080
+1 11 2 25 5555
+3 1 50
+1 16 3 2 2180
+1 11 2 25 aaaa
+3 1 a8
+1 16 3 1 3f
+1 12 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 12 3 1 33
+1 3 3 1 0c
+1 3 3 4 3f001e3f
+1 5 2 25 aaaa
+3 1 a8
+1 12 3 1 33
+1 7 3 4 30003306
+1 5 2 25 5555
+3 1 50
+1 12 3 12 331e3e1f1c1e3e003e00370c
+1 5 2 25 aaaa
+3 1 a8
+1 12 3 12 333333300c33330003003b06
+1 5 2 25 5555
+3 1 50
+1 12 3 12 333f301e0c33330003003303
+1 5 2 25 aaaa
+3 1 a8
+1 12 3 12 1e3030030c333300330c3333
+1 5 2 25 5555
+3 1 50
+1 12 3 12 0c1e303e1e1e33001e0c1e1e
+1 5 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 10 3 4 1f801980
+1 7 3 4 060f0f06
+1 4 2 25 5555
+3 1 50
+1 10 3 3 30c01b
+1 8 3 4 0e19998e
+1 4 2 25 aaaa
+3 1 a8
+1 10 3 15 2f401e0f1f1f0f3b0f1f0006199986
+1 4 2 25 5555
+3 1 50
+1 10 3 15 2c401c01999999bf819980060f8f86
+1 4 2 25 aaaa
+3 1 a8
+1 10 3 15 2c401e0f98181fb58f998006018186
+1 4 2 25 5555
+3 1 50
+1 10 3 15 2f401b199818183199998006030306
+1 4 2 25 aaaa
+3 1 a8
+1 10 3 16 30c0198f98180f318f99801f8e0e1f80
+1 3 2 25 5555
+3 1 50
+1 10 3 2 1f80
+1 17 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 3 4 55555540
+1 43 3 4 05555550
+1 29 3 4 aaaaaaaf
+0 43 3 4 eaaaaaa8
+1 29 3 4 5555554f
+0 43 3 4 e5555550
+1 29 3 4 aaaaaaaf
+0 43 3 4 eaaaaaa8
+1 29 3 4 5555554f
+0 43 3 4 e5555550
+1 29 3 4 aaaaaaaf
+1 42 3 5 01eaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 9 3 1 f0
+0 31 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 9 3 2 f07f
+0 8 3 4 fcfffcff
+0 18 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 9 3 2 f23f
+0 8 3 4 fcfffcff
+0 18 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 9 3 23 f3387ff338733fe73878703ff0387ff87872707870787f
+0 9 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 9 3 23 f3303ff330333fe73830303ff0303ff07020303830303f
+0 9 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 9 3 23 f3333ff333333fe53f333cfffcf33ff3f320333f33333f
+0 9 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 9 3 23 f3333ff333333fe538333cfffcf33ff3f325333833f33f
+0 9 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 9 3 23 f3333ff333333fe030333cfffcf33ff3f325333033f03f
+0 9 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 9 3 22 f3333ff333333fe033333cfffcf33ff3f325333333f3
+0 10 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 9 3 22 f2333ff033333fe233333cfffcf33ff3f327333333f3
+0 10 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 9 3 23 f0703ff830303fe730333c3ffc303ff03027303033f03f
+0 9 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 9 3 23 f0f87fff38783fefb8333e3ffe387ff83867307833f83f
+0 9 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 12 3 2 f03f
+0 13 3 1 f3
+0 13 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 12 3 2 f07f
+0 13 3 1 f3
+0 13 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 12 3 3 0f33cf
+0 4 3 1 07
+0 4 3 3 cfff87
+0 14 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 12 3 3 073387
+0 4 3 8 03ffffcfffcfff03
+0 14 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 12 3 3 233303
+0 4 3 4 33ffffcf
+0 3 3 1 33
+0 14 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 12 3 15 331333ff8707ff33078703878f8733
+0 14 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 12 3 15 331333ff0303ff33030303038f03e7
+0 14 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 12 3 15 330333ff3333ff333333cf33cf33e7
+0 14 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 12 3 9 330303ff333fff033f
+2 3 33cf
+0 14 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 12 3 15 332303ff333fff073f33cf03cf33cf
+0 14 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 12 3 15 332333ff333fff3f3f33cf3fcf33cf
+0 14 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 12 3 14 233333ff333fff3f3f33cf3fcf33
+0 15 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 12 3 15 073333ff033fff3f3f03c3038733cf
+0 14 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 12 3 15 0f3333ff873fff3f3f87e3838733cf
+0 14 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 22 3 1 e0
+1 7 3 1 01
+0 10 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 9 3 1 fc
+1 7 3 1 03
+0 4 3 1 e0
+1 7 3 1 01
+0 10 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 9 3 1 fd
+0 7 3 1 fb
+0 4 3 1 e0
+1 7 3 1 01
+0 10 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 9 3 1 fd
+0 7 3 1 fb
+0 4 3 1 e0
+0 7 3 1 c1
+0 10 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 9 3 1 fd
+0 7 3 1 fb
+0 4 3 1 e0
+0 7 3 1 c1
+0 10 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 9 3 1 fd
+0 7 3 1 fb
+0 4 3 1 e0
+0 7 3 1 c1
+0 10 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 9 3 9 fdfffff8799e7ffffb
+0 4 3 9 e0c183e1c0c0c0ccc1
+0 10 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 9 3 9 fdfffff8399c3ffffb
+0 4 3 9 e0c081c0c0c0c0ccc1
+0 10 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 9 3 9 fdfffff919981ffffb
+0 4 3 9 e0cc99ccf3cff3ccc1
+0 10 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 9 3 9 fdfffff998999ffffb
+0 4 3 9 e0cc99ccf3cff3c4c1
+0 10 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 9 3 9 fdfffff998999ffffb
+0 4 3 9 e0cc99ccf3c1f3c4c1
+0 10 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 9 3 9 fdfffff998199ffffb
+0 4 3 9 e0cc81ccf3c1f3c0c1
+0 10 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 9 3 9 fdfffff998181ffffb
+0 4 3 9 e0c083ccf3cff3c0c1
+0 10 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 9 3 9 fdfffff999181ffffb
+0 4 3 9 e0c193ccf3cff3c8c1
+0 10 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 9 3 9 fdfffff999199ffffb
+0 4 3 9 e0cf99ccf3cff3c8c1
+0 10 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 9 3 9 fdfffff919999ffffb
+0 4 3 9 e0cf99ccf3cff3ccc1
+0 10 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 9 3 9 fdfffff839999ffffb
+0 4 3 9 e0cf9cc0f3c0c0ccc1
+0 10 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 9 3 9 fdfffff879999ffffb
+0 4 3 9 e0cf9ce1f3c0c0ccc1
+0 10 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 9 3 1 fd
+0 7 3 1 fb
+0 4 3 1 e0
+0 7 3 1 c1
+0 10 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 9 3 1 fd
+0 7 3 1 fb
+0 4 3 1 e0
+0 7 3 1 c1
+0 10 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 9 3 1 fd
+0 7 3 1 fb
+0 4 3 1 e0
+1 7 3 1 01
+0 10 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 9 3 1 fc
+1 7 3 1 03
+0 4 3 1 e0
+1 7 3 1 01
+0 10 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 22 3 1 e0
+1 7 3 1 01
+0 10 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 4 5555554f
+1 42 3 5 01e5555550
+1 29 3 4 aaaaaaaf
+0 43 3 4 eaaaaaa8
+1 29 3 4 5555554f
+0 43 3 4 e5555550
+1 29 3 4 aaaaaaaf
+0 43 3 4 eaaaaaa8
+1 29 3 4 5555554f
+0 43 3 4 e5555550
+1 29 3 4 aaaaaaa0
+1 43 3 4 0aaaaaa8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 gr  rs
+105 1443 2183 1443 2183 1526 3 105 1526 path
+0 setgray
+gs 1 setgray
+gs eofill gr gr
+8 /tface exch def
+0 2 div /tcolor exch def
+33 /tscale exch def
+0 /trotate exch def
+0 /halign exch def
+0 /valign exch def
+/tunder false def
+105 1480 (The) gtext
+172 1480 (DNA/Protein) gtext
+367 1480 (options.) gtext
+105 632 2183 632 2183 1432 3 105 1432 path
+0 setgray
+gs 1 setgray
+gs eofill gr gr
+42 /tscale exch def
+105 1377 (As) gtext
+168 1377 (can) gtext
+250 1377 (be) gtext
+312 1377 (seen) gtext
+417 1377 (by) gtext
+476 1377 (the) gtext
+549 1377 (thick) gtext
+650 1377 (lined) gtext
+753 1377 (box) gtext
+835 1377 (<RETURN>) gtext
+1072 1377 (will) gtext
+1145 1377 (get) gtext
+1218 1377 (you) gtext
+1300 1377 (the) gtext
+1373 1377 (protein) gtext
+1515 1377 (option.) gtext
+1670 1377 (Since) gtext
+1789 1377 (this) gtext
+1869 1377 (is) gtext
+1914 1377 (the) gtext
+1987 1377 (most) gtext
+2093 1377 (used) gtext
+105 1327 (\(right,) gtext
+228 1327 (thats) gtext
+335 1327 (why) gtext
+426 1327 (it) gtext
+464 1327 (is) gtext
+511 1327 (the) gtext
+586 1327 (default\),) gtext
+754 1327 (this) gtext
+836 1327 (leaflet) gtext
+964 1327 (will) gtext
+1039 1327 (first) gtext
+1123 1327 (cover) gtext
+1242 1327 (the) gtext
+1317 1327 (events) gtext
+1456 1327 (following) gtext
+1635 1327 (your) gtext
+1733 1327 (pressing) gtext
+1909 1327 (<RETURN>) gtext
+2148 1327 (or) gtext
+105 1277 ("clicking") gtext
+283 1277 (the) gtext
+353 1277 (right-hand) gtext
+552 1277 (box.) gtext
+643 1277 (For) gtext
+717 1277 (DNA) gtext
+817 1277 (go) gtext
+876 1277 (directly) gtext
+1020 1277 (to) gtext
+1066 1277 (page) gtext
+1171 1277 (7.) gtext
+105 1227 (As) gtext
+165 1227 (soon) gtext
+267 1227 (as) gtext
+323 1227 (you) gtext
+403 1227 (have) gtext
+505 1227 (selected) gtext
+672 1227 (proteins) gtext
+832 1227 (you) gtext
+912 1227 (get) gtext
+981 1227 (your) gtext
+1074 1227 (second) gtext
+1221 1227 (choice) gtext
+1353 1227 (to) gtext
+1400 1227 (make.) gtext
+615 504 1673 504 1673 1166 3 615 1166 path
+0 setgray
+gs 1 setgray
+gs eofill gr gr
+80 2 /vrep 0 def /patlen exch def dup string /scan exch def /smax exch def
+615 504 1673 504 1673 1166 615 1166 gs np mto lto lto lto clip
+1059 663 615 504 translate scale
+640 400 1 [640 0 0 -400 0 400 ]decode
+2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 11 3 2 3ff0
+1 7 3 2 0ff0
+1 7 2 25 aaaa
+3 1 a8
+1 11 3 2 6010
+1 7 3 2 1810
+1 7 2 25 5555
+3 1 50
+1 11 3 2 4038
+1 3 3 1 7e
+1 3 3 2 1030
+1 3 3 1 7e
+1 3 2 25 aaaa
+3 1 a8
+1 11 3 2 c008
+1 3 3 1 c2
+1 3 3 2 3020
+1 3 3 1 c2
+1 3 2 25 5555
+3 1 50
+1 11 3 2 801c
+1 3 3 1 86
+1 3 3 2 2060
+1 3 3 1 86
+1 3 2 25 aaaa
+3 1 a8
+1 10 3 7 01860400000184
+1 3 3 6 384000000184
+1 3 2 25 5555
+3 1 50
+1 10 3 19 010c0c1ff81f0f87ff8010c01ff81f0f800000
+2 25 aaaa
+3 1 a8
+1 10 3 19 030f08300830008c0080308030083000800000
+2 25 5555
+3 1 50
+1 10 3 19 021a18e01c20018801c02180e01c2001800000
+2 25 aaaa
+3 1 a8
+1 10 3 16 06161180046001180040610180046001
+1 3 2 25 5555
+3 1 50
+1 10 3 16 043431000c40031000c04301000c4003
+1 3 2 25 aaaa
+3 1 a8
+1 10 3 16 0c2c230f087c3e30f080c2030f087c3e
+1 3 2 25 5555
+3 1 50
+1 10 3 16 0868621a18086021a18086021a180860
+1 3 2 25 aaaa
+3 1 a8
+1 10 3 16 18584616101840616101840616101840
+1 3 2 25 5555
+3 1 50
+1 10 3 16 10d0c4343010c04343010c04343010c0
+1 3 2 25 aaaa
+3 1 a8
+1 10 3 16 30b08c2c203080c2c203080c2c203080
+1 3 2 25 5555
+3 1 50
+1 10 3 16 21a18868602180868602180868602180
+1 3 2 25 aaaa
+3 1 a8
+1 10 3 15 616118584061018584061018584061
+1 4 2 25 5555
+3 1 50
+1 10 3 15 43c310d0c043010d0c043010d0c043
+1 4 2 25 aaaa
+3 1 a8
+1 10 3 15 c30230b080c2030b080c2030b080c2
+1 4 2 25 5555
+3 1 50
+1 10 3 16 860621e18087c21e18387021e18087c0
+1 3 2 25 aaaa
+3 1 a8
+1 9 3 17 01801c6001018046001060106001018040
+1 3 2 25 5555
+3 1 50
+1 9 3 17 01003040030100c40030403040030100c0
+1 3 2 25 aaaa
+3 1 a8
+1 9 3 17 0300e0700e01c08c00e0c020700e01c080
+1 3 2 25 5555
+3 1 50
+1 9 3 17 0201802018008188018080602018008180
+1 3 2 25 aaaa
+3 1 a8
+1 9 3 16 03ff003ff000ff187f00ffc03ff000ff
+1 4 2 25 5555
+3 1 50
+1 16 3 2 10c0
+1 11 2 25 aaaa
+3 1 a8
+1 16 3 2 3080
+1 11 2 25 5555
+3 1 50
+1 16 3 2 2180
+1 11 2 25 aaaa
+3 1 a8
+1 16 3 1 3f
+1 12 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 12 3 1 33
+1 3 3 1 0c
+1 3 3 4 3f001e3f
+1 5 2 25 aaaa
+3 1 a8
+1 12 3 1 33
+1 7 3 4 30003306
+1 5 2 25 5555
+3 1 50
+1 12 3 12 331e3e1f1c1e3e003e00370c
+1 5 2 25 aaaa
+3 1 a8
+1 12 3 12 333333300c33330003003b06
+1 5 2 25 5555
+3 1 50
+1 12 3 12 333f301e0c33330003003303
+1 5 2 25 aaaa
+3 1 a8
+1 12 3 12 1e3030030c333300330c3333
+1 5 2 25 5555
+3 1 50
+1 12 3 12 0c1e303e1e1e33001e0c1e1e
+1 5 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 10 3 4 1f801980
+1 7 3 4 060f0f06
+1 4 2 25 5555
+3 1 50
+1 10 3 3 30c01b
+1 8 3 4 0e19998e
+1 4 2 25 aaaa
+3 1 a8
+1 10 3 15 2f401e0f1f1f0f3b0f1f0006199986
+1 4 2 25 5555
+3 1 50
+1 10 3 15 2c401c01999999bf819980060f8f86
+1 4 2 25 aaaa
+3 1 a8
+1 10 3 15 2c401e0f98181fb58f998006018186
+1 4 2 25 5555
+3 1 50
+1 10 3 15 2f401b199818183199998006030306
+1 4 2 25 aaaa
+3 1 a8
+1 10 3 16 30c0198f98180f318f99801f8e0e1f80
+1 3 2 25 5555
+3 1 50
+1 10 3 2 1f80
+1 17 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 3 4 55555540
+1 43 3 4 05555550
+1 29 3 4 aaaaaaaf
+0 43 3 4 eaaaaaa8
+1 29 3 4 5555554f
+0 43 3 4 e5555550
+1 29 3 4 aaaaaaaf
+0 43 3 4 eaaaaaa8
+1 29 3 4 5555554f
+0 43 3 4 e5555550
+1 29 3 4 aaaaaaaf
+1 42 3 5 01eaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 9 3 1 f0
+0 31 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 9 3 2 f07f
+0 8 3 4 fcfffcff
+0 18 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 9 3 2 f23f
+0 8 3 4 fcfffcff
+0 18 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 9 3 21 f3387ff338733fe73878703ff0387ff338387ff87f
+0 11 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 9 3 21 f3303ff330333fe73830303ff0303ff330303ff83f
+0 11 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 9 3 22 f3333ff333333fe53f333cfffcf33ff333f33fff3fff
+0 10 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 9 3 21 f3333ff333333fe538333cfffcf33ff331f33ff83f
+0 11 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 9 3 21 f3333ff333333fe030333cfffcf33ff338703ff03f
+0 11 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 9 3 21 f3333ff333333fe033333cfffcf33ff33e33fff33f
+0 11 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 9 3 21 f2333ff033333fe233333cfffcf33ff33f33fff33f
+0 11 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 9 3 21 f0703ff830303fe730333c3ffc303ff030303ff03f
+0 11 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 9 3 21 f0f87fff38783fefb8333e3ffe387ff830783ff83f
+0 11 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 12 3 2 f03f
+0 27 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 12 3 2 f07f
+0 27 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 12 3 2 fc1f
+0 4 3 7 f81ff9fc7ffc3f
+0 16 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 12 3 2 f81f
+0 4 3 7 f81ff9fc7ff81f
+0 16 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 12 3 1 f9
+0 5 3 7 fe7ff9fe7ff99f
+0 16 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 12 3 13 f9fc3c383c3ffe7c383e7c399f
+0 16 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 12 3 13 f8f8381818181e7c181e781f3f
+0 16 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 12 3 13 fc79f99999981e7f999e799f3f
+0 16 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 12 3 13 fe39f999f99ffe7c199e799e7f
+0 16 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 13 3 12 19f999f81ffe78199e781e7f
+0 16 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 13 3 12 99f999f9fffe79999e79fe7f
+0 16 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 13 3 10 99f999f9fffe79999e79
+0 18 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 12 3 13 f8181819f81ffe78181c381e7f
+0 16 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 12 3 13 f83c1c39fc1ffe7c183c3c1e7f
+0 16 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 22 3 1 e0
+1 7 3 1 01
+0 10 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 9 3 1 fc
+1 7 3 1 03
+0 4 3 1 e0
+1 7 3 1 01
+0 10 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 9 3 1 fd
+0 7 3 1 fb
+0 4 3 1 e0
+1 7 3 1 01
+0 10 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 9 3 1 fd
+0 7 3 1 fb
+0 4 3 1 e0
+0 7 3 1 c1
+0 10 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 9 3 1 fd
+0 7 3 1 fb
+0 4 3 1 e0
+0 7 3 1 c1
+0 10 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 9 3 1 fd
+0 7 3 1 fb
+0 4 3 1 e0
+0 7 3 1 c1
+0 10 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 9 3 5 fdfffff99f
+0 3 3 1 fb
+0 4 3 5 e0fffffccf
+0 3 3 1 c1
+0 10 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 9 3 5 fdfffff99f
+0 3 3 1 fb
+0 4 3 5 e0fffffccf
+0 3 3 1 c1
+0 10 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 9 3 5 fdfffff99f
+0 3 3 1 fb
+0 4 3 5 e0fffffccf
+0 3 3 1 c1
+0 10 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 9 3 9 fdfffff99c3c1ffffb
+0 4 3 9 e0fffffc4e1fffffc1
+0 10 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 9 3 9 fdfffffc38181ffffb
+0 4 3 9 e0fffffc4c0fffffc1
+0 10 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 9 3 9 fdfffffc3999fffffb
+0 4 3 9 e0fffffc0ccfffffc1
+0 10 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 9 3 9 fdfffffe7998fffffb
+0 4 3 9 e0fffffc0ccfffffc1
+0 10 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 9 3 9 fdfffffe781c3ffffb
+0 4 3 9 e0fffffc8ccfffffc1
+0 10 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 9 3 9 fdfffffe79ff1ffffb
+0 4 3 9 e0fffffc8ccfffffc1
+0 10 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 9 3 9 fdfffffe79ff9ffffb
+0 4 3 9 e0fffffccccfffffc1
+0 10 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 9 3 9 fdfffffe78181ffffb
+0 4 3 9 e0fffffccc0fffffc1
+0 10 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 9 3 9 fdfffffe7c183ffffb
+0 4 3 9 e0fffffcce1fffffc1
+0 10 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 9 3 1 fd
+0 7 3 1 fb
+0 4 3 1 e0
+0 7 3 1 c1
+0 10 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 9 3 1 fd
+0 7 3 1 fb
+0 4 3 1 e0
+0 7 3 1 c1
+0 10 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 9 3 1 fd
+0 7 3 1 fb
+0 4 3 1 e0
+1 7 3 1 01
+0 10 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 9 3 1 fc
+1 7 3 1 03
+0 4 3 1 e0
+1 7 3 1 01
+0 10 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 22 3 1 e0
+1 7 3 1 01
+0 10 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 5 5555554f7f
+0 41 3 5 fde5555550
+1 29 3 5 aaaaaaaf7f
+0 41 3 5 fdeaaaaaa8
+1 29 3 4 5555554f
+1 42 3 5 01e5555550
+1 29 3 4 aaaaaaaf
+0 43 3 4 eaaaaaa8
+1 29 3 4 5555554f
+0 43 3 4 e5555550
+1 29 3 4 aaaaaaaf
+0 43 3 4 eaaaaaa8
+1 29 3 4 5555554f
+0 43 3 4 e5555550
+1 29 3 4 aaaaaaa0
+1 43 3 4 0aaaaaa8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 2 25 5555
+3 1 50
+1 29 2 25 aaaa
+3 1 a8
+1 29 gr  rs
+105 387 2184 387 2184 502 3 105 502 path
+0 setgray
+gs 1 setgray
+gs eofill gr gr
+8 /tface exch def
+0 2 div /tcolor exch def
+33 /tscale exch def
+0 /trotate exch def
+0 /halign exch def
+0 /valign exch def
+/tunder false def
+105 456 (The) gtext
+172 456 (score-table) gtext
+347 456 (option.) gtext
+gr rs
+/av 0 def FF

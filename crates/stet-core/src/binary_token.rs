@@ -955,7 +955,7 @@ fn number_array_repr(r: u8) -> Result<(usize, bool, u8, bool), PsError> {
         0..=31 => Ok((4, false, r, true)),
         32..=47 => Ok((2, false, r - 32, true)),
         48 => Ok((4, true, 0, true)),
-        49 => Ok((4, true, 0, true)), // native real — treat as LE on x86 but count is BE per PostForge
+        49 => Ok((4, true, 0, true)), // native real — treat as LE on x86 but length/count is BE
         128..=159 => Ok((4, false, r - 128, false)),
         160..=175 => Ok((2, false, r - 160, false)),
         176 => Ok((4, true, 0, false)),

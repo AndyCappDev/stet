@@ -656,14 +656,14 @@ impl<'a> CharstringInterp<'a> {
 
                         // Push y then x onto ps_stack so pop+pop+setcurrentpoint
                         // gets the correct order (x on top, popped first into
-                        // charstring stack, then y — matching PostForge)
+                        // charstring stack, then y).
                         self.ps_stack.push(self.y);
                         self.ps_stack.push(self.x);
                     }
                     1 => {
                         // StartFlex: begin accumulating flex points
                         // Do NOT pre-push current point — OtherSubrs 2 (AddFlex)
-                        // handles all point accumulation (matching PostForge)
+                        // handles all point accumulation.
                         self.flex_active = true;
                         self.flex_points.clear();
                     }
@@ -671,7 +671,7 @@ impl<'a> CharstringInterp<'a> {
                         // AddFlex: add current point to flex list
                         self.flex_points.push((self.x, self.y));
                         // Push y then x onto ps_stack for the subsequent pop+pop
-                        // in the standard flex subroutine (matching PostForge)
+                        // in the standard flex subroutine.
                         self.ps_stack.push(self.y);
                         self.ps_stack.push(self.x);
                     }
@@ -860,15 +860,14 @@ mod tests {
     #[test]
     fn test_execute_real_charstring() {
         // Load a real font and execute the 'space' charstring
-        let font_path = std::path::Path::new(
-            "/home/scott/Projects/postforge/postforge/resources/Font/NimbusSans-Regular.t1",
-        );
+        let font_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../resources/Font/NimbusSans-Regular.t1");
         if !font_path.exists() {
             eprintln!("Skipping test — font file not found");
             return;
         }
 
-        let data = std::fs::read(font_path).unwrap();
+        let data = std::fs::read(&font_path).unwrap();
         let font = crate::type1_parser::parse_type1(&data).unwrap();
 
         // Execute 'space' charstring — should have a width but no path
@@ -890,15 +889,14 @@ mod tests {
 
     #[test]
     fn test_execute_multiple_glyphs() {
-        let font_path = std::path::Path::new(
-            "/home/scott/Projects/postforge/postforge/resources/Font/NimbusSans-Regular.t1",
-        );
+        let font_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../resources/Font/NimbusSans-Regular.t1");
         if !font_path.exists() {
             eprintln!("Skipping test — font file not found");
             return;
         }
 
-        let data = std::fs::read(font_path).unwrap();
+        let data = std::fs::read(&font_path).unwrap();
         let font = crate::type1_parser::parse_type1(&data).unwrap();
 
         // Execute several common glyphs

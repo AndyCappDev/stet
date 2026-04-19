@@ -169,8 +169,7 @@ pub fn op_run(ctx: &mut Context) -> Result<(), PsError> {
     let ps_data = stet_core::eps::strip_dos_eps_header(&source);
 
     // Create a file-backed source and push it on the exec stack.
-    // Using File (not String) means `currentfile` can find it —
-    // matching PostForge's Run object behavior.
+    // Using File (not String) means `currentfile` can find it.
     // Set the resolved path as the file name so nested run/file calls
     // can find this file's directory on the exec stack.
     let file_entity = ctx.files.create_string_source(ps_data.to_vec());
@@ -191,9 +190,9 @@ pub fn op_run(ctx: &mut Context) -> Result<(), PsError> {
 
 /// `join`: separator array dest_string → result_string
 ///
-/// PostForge extension. Joins the strings in array using separator as the
-/// delimiter, writing the result into dest_string. Returns a substring of
-/// dest_string containing the joined result.
+/// Non-standard extension. Joins the strings in array using separator
+/// as the delimiter, writing the result into dest_string. Returns a
+/// substring of dest_string containing the joined result.
 pub fn op_join(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.o_stack.len() < 3 {
         return Err(PsError::StackUnderflow);

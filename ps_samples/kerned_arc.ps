@@ -1,0 +1,25 @@
+/str ( ) def % define a string abreviation
+/customkernchar (~) def % define a character to use for kerning
+
+/karcjustify {gsave /msg exch def /radius exch def translate msg stringwidth pop
+0 msg {customkernchar 0 get eq {1 add} if} forall dup 0 gt { customkernchar
+stringwidth pop neg customkern add mul} if add msg length 1 sub arckern mul
+add 2 div dup 57.29578 mul radius div msg {str exch 0 exch put gsave rotate 0
+radius moveto str dup dup dup customkernchar eq not {stringwidth pop 2 div
+57.29578 mul radius div neg rotate show stringwidth pop} {customkern 2 div
+57.29578 mul radius div neg rotate pop pop pop customkern} ifelse arckern add
+sub dup 57.29578 mul radius div grestore} forall pop pop grestore} def
+
+% demo, remove before use --
+/arckern -1.25 def % slight character kerning
+/customkern -1.25 def
+/Helvetica-Bold findfont [45 0 0 35 0 0] makefont setfont 300 305 160 (F~R~EE
+F~O~N~T, F~R~EE F~O~N~T) karcjustify % and show it convex
+/customkern -1 def /arckern 0.1 def
+/Helvetica-Bold findfont [22 0 0 18 0 0] makefont setfont 300 300 -170
+(SPONSORED B~Y) karcjustify % same - only concave
+/customkern -0.2 def /arckern 0.05 def
+/Helvetica-Bold findfont [25 0 0 20 0 0] makefont setfont 300 300 -192.5 (FR~EE
+FONT, FR~EE FONT) karcjustify % second concave line
+showpage
+

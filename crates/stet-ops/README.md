@@ -7,7 +7,7 @@ facade crate instead.
 
 ## Contents
 
-~268 PostScript Level 3 operators organized by category:
+~320 PostScript Level 3 operators organized by category:
 
 | Category | Count | Examples |
 |----------|-------|---------|

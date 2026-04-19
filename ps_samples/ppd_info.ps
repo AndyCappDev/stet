@@ -1,0 +1,272 @@
+%!
+%%Title: "ppd_info.ps - Create PPD information for a printer"
+%%Creator: Bjorn P. Brox, brox@dms.corena.no
+%%BoundingBox: 0 0 0 0
+% SCCS Id: @(#)ppd_info.ps	1.1
+% This file may be freely copied and redistributed.
+%
+% PostScript, Display PostScript, and Adobe are registered trademarks of
+% Adobe Systems Incorporated.
+%
+%%EndComments
+
+vmstatus exch sub cvi /FreeWM exch def
+
+% Change this if your printer is able to return output from /print.
+% (Automatic detected when using Display PostScript)
+/USE_PRINT false def
+
+% Parts from sort.ps, Copyright 1990 by Adobe Systems Incorporated
+/$sort 20 dict def
+
+% SortInit returns the root node of an empty binary tree.
+
+/SortInit {
+    1 array
+} def
+
+% Insert expects a root node and string on the stack.
+% inserts the string into the tree. It expect /compare
+% to be defined, and to take two strings and return a boolian
+% that tells if the first is greater than the second.
+/compare /gt load def
+
+/Insert { %def
+    exch dup 0 get type (nulltype) eq { %ifelse
+	exch [ exch 1 array 1 array ] 0 exch put
+    }{ %else
+	aload pop aload pop 4 2 roll 2 copy
+	2 copy eq {
+	    clear
+	} { compare {
+		pop 3 -1 roll pop Insert
+	    }{ %else
+		pop exch pop Insert
+	    } ifelse
+	} ifelse
+    } ifelse
+} bind def
+
+%PrefixWalk expects a root node  and a proc body on the operand stack.
+%For each element in the array, it executes the proc body.
+
+/PrefixWalk { %def
+    $sort begin
+    cvx /!bt exch def bpwalk 
+    end
+} bind def
+
+
+/Sort { %def
+  $sort begin
+     % dictionary is on the stack
+     { % forall
+         pop
+	 (                                  )cvs dup length string copy
+	 tree exch Insert
+     } forall
+  end
+} bind def
+
+/ListFont {
+    /ListProc exch def
+    $sort begin
+	tree {ListProc} PrefixWalk
+    end
+} bind def
+
+$sort begin
+
+/bpwalk { %def
+    dup 0 get type /nulltype eq { %ifelse
+	pop
+    }{ %else
+	aload pop aload pop exch bpwalk exch !bt bpwalk
+    } ifelse
+} bind def
+
+end %end of $sort
+
+/F0 /Courier findfont 10 scalefont def
+/F1 /Courier-Bold findfont 10 scalefont def
+/MG 60 def
+/X0 MG def
+/Y0 842 MG sub def
+
+/DD 3 dict def
+DD begin
+/X X0 def
+/Y Y0 def
+/Tmp 200 string def
+end
+
+%       Are we display postscript?
+/DPS? systemdict /viewclip known def
+
+DPS? USE_PRINT or {
+	/SH /print load def
+	/LF {(\n) print} bind def
+	/ShowPage {} def
+   } {
+	/SH /show load def
+	/LF {DD begin
+	    /X X0 def /Y Y 12 sub def Y MG le { ShowPage } if
+	    end} bind def
+	/ShowPage { showpage /X X0 def /Y Y0 def } bind def
+   } ifelse
+
+/P { DD begin X Y moveto Tmp cvs SH /X currentpoint pop def end} bind def
+/L { P LF } bind def
+/S { (") P P (") L } bind def
+/T { { (True) }{ (False) } ifelse L } bind def
+
+/show_font {
+    /fn exch def
+    fn findfont /fz exch def
+    (*Font ) P fz /FontName get dup P fn eq not {(/)P fn P} if
+    fz /Encoding get dup StandardEncoding eq {
+	pop (: Standard "\()
+    }{
+	/ISOLatin1Encoding where { pop
+	    ISOLatin1Encoding eq {
+		(: Latin1 "\()
+	    } {
+		(: Special "\()
+	    } ifelse
+	} { pop
+	    (: Special "\()
+	} ifelse
+    } ifelse
+    P
+    fz /FontInfo get /version get P
+    (\)") L
+} bind def
+
+%%EndProlog
+%%BeginSetup
+/tree SortInit def
+/diskfonts 200 dict def
+F0 setfont
+%%EndSetup
+
+(*% Adobe Systems PostScript\(R\) Printer Description File) L
+(*% For ")P statusdict /product get P (" version ) P version L
+(*% Produced by "ppd_info.ps" version 1.1) L
+(*%) L
+(*FormatVersion: "3.0") L
+(*FileVersion: "1.0") L
+(*LanguageVersion: English)L
+() L
+(*Product: ) P statusdict /product get S
+(*PSVersion: "\() P version P (\) ) P statusdict /revision get P (") L
+(*NickName: ) P statusdict /printername known {
+	statusdict begin =string printername end} {()} ifelse S
+(*LanguageLevel: )P
+/languagelevel where { begin languagelevel end} {(1)} ifelse L
+() L
+(*% General Information and Defaults ===============) L
+(*FreeWM: ) P FreeWM S
+(*ColorDevice: ) P systemdict /colorimage known T
+/deviceinfo where {pop deviceinfo{ exch (*)P P (: ) P S} forall} if
+/currentsystemparams where {
+	pop currentsystemparams{ exch (*)P P (: ) P S} forall} if
+/currentuserparams where {
+	pop currentuserparams{ exch (*)P P (: ) P S} forall} if
+(*VariablePaperSize: ) P /setpageparams where{pop(True)}{(False)} ifelse L
+(*FileSystem: ) P
+/diskonline where { begin diskonline end T}
+{ /deletefile where{pop(True)}{(False)} ifelse L } ifelse
+(*DefaultResolution: ) P % Following migth not be correct
+gsave initmatrix 72 0 dtransform pop grestore cvi P (dpi) L
+()L
+(*% Halftone Information ===============) L
+(*ScreenFreq: ) P currentscreen pop pop S
+(*ScreenAngle: ) P currentscreen pop exch pop S
+()L
+(*% Paper Handling ===================)L
+statusdict /defaultpapersize known {
+    (*DefaultPaperTray: )P
+    12 dict begin
+	/letter (Letter) def
+	/legal (Legal) def
+	/a4 (A4) def
+	/a5 (A5) def
+	/b5 (B5) def
+	/executive (Executive) def
+	/3.875x7.5envelope (Envelope.279.540) def
+	/3.875x8.875envelope (Envelope.279.639) def
+	/4.125x9.5envelope (Envelope.297.684) def
+	/110x220envelope (Envelope.312.624) def
+	/162x229envelope (Envelope.460.649) def
+	/176x250envelope (Envelope.499.709) def
+	statusdict /defaultpapersize get exec
+	{{load exec} stopped not {P}if}{
+	    {load exec} stopped not{P(.Transverse)P}{(Unknown)P}ifelse
+	}ifelse
+    end
+    ()L
+} {
+    (*DefaultPaperTray: Unknown)L
+} ifelse
+
+statusdict /papertray known {
+    (*DefaultInputSlot: ) P
+    5 dict begin
+    /0 (Upper) def
+    /1 (Lower) def
+    /2 (Envelope) def
+    /3 (Manual) def
+    /4 (ManualEnvelope) def
+    statusdict /papertray get exec
+    {( ) cvs cvn load exec} stopped not{P}if
+    end
+} {
+    (*DefaultInputSlot: None) L
+} ifelse
+()L
+(*% The following entries provide information about specific paper keywords.) L
+statusdict /pagetype known
+	{ (*PageType: ) P statusdict begin pagetype end S } if
+(*ImageableArea XX: ") P
+  save newpath clippath pathbbox
+  4 -2 roll exch 2 {ceiling cvi P ( ) P} repeat
+  exch floor cvi P ( ) P floor cvi P
+  (") P
+  restore () L
+(*DefaultManualFeed: ) P /manualfeed where {pop manualfeed T}{(None)P}ifelse
+() L
+clear
+() L
+(*% Font Information =====================) L
+(*DefaultFont: ) P
+{/NonExistingFont_$$ findfont /FontName get L} stopped {(Error)L} if clear
+
+%%?BeginFontListQuery
+/filenameforall where { %if
+    begin
+    diskfonts begin
+	mark { (fonts/*) {
+	    dup length 6 sub 6 exch getinterval
+	    dup findfont def
+	} bind 128 string filenameforall } stopped cleartomark
+	mark {(%font%*) {
+	    dup length 6 sub 6 exch getinterval
+	    (.) search {3 1 roll pop pop} if % remove extention
+	    dup {findfont def} stopped pop
+	} bind 128 string filenameforall} stopped cleartomark
+	FontDirectory { def } forall
+    end end
+    diskfonts Sort
+} if
+FontDirectory Sort
+/SharedFontDirectory where { pop SharedFontDirectory Sort } if
+
+%%?EndFontListQuery:
+
+()L
+{show_font} ListFont
+()L
+
+(*% end of PPD file for ) P statusdict /product get L
+showpage
+

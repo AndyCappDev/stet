@@ -1,0 +1,185 @@
+%!PS-Adobe-3.0
+%%Title: Gradient Shading Test (shfill Types 2 & 3)
+%%BoundingBox: 0 0 612 792
+%%EndComments
+
+% === Test 1: Simple axial gradient (red to blue), horizontal ===
+<<
+  /ShadingType 2
+  /ColorSpace /DeviceRGB
+  /Coords [72 750 300 750]
+  /Domain [0 1]
+  /Function <<
+    /FunctionType 2
+    /Domain [0 1]
+    /C0 [1 0 0]
+    /C1 [0 0 1]
+    /N 1
+  >>
+  /Extend [true true]
+  /BBox [0 740 310 770]
+>> shfill
+
+% Label
+0 setgray
+/Helvetica findfont 10 scalefont setfont
+72 730 moveto (Test 1: Axial red-to-blue, Extend both + BBox) show
+
+% === Test 2: Axial gradient (black to white), vertical ===
+<<
+  /ShadingType 2
+  /ColorSpace /DeviceGray
+  /Coords [350 770 350 690]
+  /Domain [0 1]
+  /Function <<
+    /FunctionType 2
+    /Domain [0 1]
+    /C0 [0]
+    /C1 [1]
+    /N 1
+  >>
+  /Extend [false false]
+  /BBox [320 690 540 770]
+>> shfill
+
+0 setgray
+320 675 moveto (Test 2: Axial gray, BBox clipped) show
+
+% === Test 3: Radial gradient (yellow center to green edge) ===
+<<
+  /ShadingType 3
+  /ColorSpace /DeviceRGB
+  /Coords [186 550 0 186 550 100]
+  /Domain [0 1]
+  /Function <<
+    /FunctionType 2
+    /Domain [0 1]
+    /C0 [1 1 0]
+    /C1 [0 0.5 0]
+    /N 1
+  >>
+  /Extend [true true]
+  /BBox [66 440 306 660]
+>> shfill
+
+0 setgray
+100 430 moveto (Test 3: Radial yellow-to-green, Extend + BBox) show
+
+% === Test 4: Radial with inner radius (ring gradient) ===
+<<
+  /ShadingType 3
+  /ColorSpace /DeviceRGB
+  /Coords [430 530 30 430 530 100]
+  /Domain [0 1]
+  /Function <<
+    /FunctionType 2
+    /Domain [0 1]
+    /C0 [1 0.5 0]
+    /C1 [0.5 0 1]
+    /N 1
+  >>
+  /Extend [false false]
+>> shfill
+
+0 setgray
+350 415 moveto (Test 4: Radial ring, no extend) show
+
+% === Test 5: Stitching function (3-color gradient: red-green-blue) ===
+<<
+  /ShadingType 2
+  /ColorSpace /DeviceRGB
+  /Coords [72 380 540 380]
+  /Domain [0 1]
+  /Function <<
+    /FunctionType 3
+    /Domain [0 1]
+    /Bounds [0.5]
+    /Encode [0 1 0 1]
+    /Functions [
+      <<
+        /FunctionType 2
+        /Domain [0 1]
+        /C0 [1 0 0]
+        /C1 [0 1 0]
+        /N 1
+      >>
+      <<
+        /FunctionType 2
+        /Domain [0 1]
+        /C0 [0 1 0]
+        /C1 [0 0 1]
+        /N 1
+      >>
+    ]
+  >>
+  /Extend [true true]
+  /BBox [72 360 540 400]
+>> shfill
+
+0 setgray
+72 345 moveto (Test 5: Stitched 3-color axial: red-green-blue) show
+
+% === Test 6: Exponential interpolation with N=2 (nonlinear) ===
+<<
+  /ShadingType 2
+  /ColorSpace /DeviceRGB
+  /Coords [72 300 540 300]
+  /Domain [0 1]
+  /Function <<
+    /FunctionType 2
+    /Domain [0 1]
+    /C0 [0 0 0]
+    /C1 [1 1 1]
+    /N 2
+  >>
+  /Extend [true true]
+  /BBox [72 280 540 320]
+>> shfill
+
+0 setgray
+72 265 moveto (Test 6: Exponential N=2, black-to-white \(nonlinear\)) show
+
+% === Test 7: CMYK color space gradient ===
+<<
+  /ShadingType 2
+  /ColorSpace /DeviceCMYK
+  /Coords [72 220 540 220]
+  /Domain [0 1]
+  /Function <<
+    /FunctionType 2
+    /Domain [0 1]
+    /C0 [1 0 0 0]
+    /C1 [0 0 1 0]
+    /N 1
+  >>
+  /Extend [true true]
+  /BBox [72 200 540 240]
+>> shfill
+
+0 setgray
+72 185 moveto (Test 7: CMYK axial, cyan-to-yellow) show
+
+% === Test 8: Gradient under clipping path ===
+gsave
+  250 120 50 0 360 arc clip newpath
+  <<
+    /ShadingType 2
+    /ColorSpace /DeviceRGB
+    /Coords [200 120 300 120]
+    /Domain [0 1]
+    /Function <<
+      /FunctionType 2
+      /Domain [0 1]
+      /C0 [1 0 0]
+      /C1 [0 0 1]
+      /N 1
+    >>
+    /Extend [true true]
+  >> shfill
+grestore
+
+0 setgray
+200 55 moveto (Test 8: Axial clipped to circle) show
+
+showpage
+%%EOF

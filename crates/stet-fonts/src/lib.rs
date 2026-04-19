@@ -2,18 +2,50 @@
 // Copyright (c) 2026 Scott Bowman
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Font parsing and geometry types for the stet PostScript interpreter.
+//! Pure-Rust parsers for Type 1, CFF / Type 2, and TrueType fonts, plus
+//! the shared geometry primitives they produce.
 //!
-//! This crate provides:
-//! - Affine transformation matrices and path geometry (`geometry`)
-//! - Font encoding tables (`encoding`)
-//! - Adobe Glyph List mapping (`agl`)
-//! - Type 1 font parsing (`type1_parser`)
-//! - CFF font parsing (`cff_parser`)
-//! - Type 1 charstring interpretation (`charstring`)
-//! - Type 2 charstring interpretation (`type2_charstring`)
-//! - TrueType glyph parsing (`truetype`)
-//! - System font discovery (`system_fonts`)
+//! This crate has **no stet-specific dependencies**, so it is usable on
+//! its own for font-parsing workflows that don't need a PostScript
+//! interpreter or a PDF renderer. The rest of the stet workspace uses it
+//! as the foundational font/geometry layer.
+//!
+//! # What's here
+//!
+//! - [`geometry`] — `Matrix` (affine transforms), `PathSegment`, `PsPath`
+//! - [`type1_parser`] / [`charstring`] — Adobe Type 1 parsing and
+//!   charstring interpretation (eexec decryption included)
+//! - [`cff_parser`] / [`type2_charstring`] — Compact Font Format parser
+//!   and Type 2 charstring interpreter
+//! - [`truetype`] — TrueType table accessors, simple + composite glyph
+//!   resolution, `glyf` → [`PsPath`] conversion
+//! - [`encoding`] — StandardEncoding, ISOLatin1Encoding, SymbolEncoding,
+//!   MacRoman, etc.
+//! - [`agl`] — Adobe Glyph List (glyph name ↔ Unicode)
+//! - [`system_fonts`] — platform font directory discovery and 35-standard
+//!   PostScript → URW substitution
+//!
+//! # Quick example
+//!
+//! Parse a Type 1 font and inspect its glyph dictionary:
+//!
+//! ```no_run
+//! use stet_fonts::type1_parser::parse_type1;
+//!
+//! let data = std::fs::read("NimbusRoman-Regular.t1")?;
+//! let font = parse_type1(&data)?;
+//! println!("font: {} ({} glyphs)", font.font_name, font.charstrings.len());
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//!
+//! # Scope and non-goals
+//!
+//! The surface is shaped around what stet needs to render PDFs and run a
+//! PostScript Level 3 interpreter — whole-font parsing with glyph
+//! outlines as `PsPath`. There is no text layout, no shaping, no colour
+//! fonts, no variable-font interpolation, and no OpenType
+//! GSUB/GPOS/BASE/GDEF tables. For a general-purpose font-layout
+//! library, consider `ttf-parser`, `rustybuzz`, or `skrifa`.
 
 pub mod agl;
 pub mod cff_parser;

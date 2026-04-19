@@ -1,0 +1,64 @@
+letter
+
+% Some working tools ...
+/rr { 1 add 1 exch div dia 2 div mul dup 0 exch 0 360 arc} def % creates a real part circle path
+/xx+ { dup 0 eq {pop 0.001} if 1 exch div dia 2 div mul 0 exch dup 0 360 arc} def
+
+% creates a positive imaginary circle path
+/xx- { dup 0 eq {0 0 moveto dia 2 div 0 lineto} { 1 exch div dia 2 div mul neg 0
+exch dup neg 0 360 arc} ifelse} def % creates a negative imaginary circle path
+
+/plotr {/jj exch def /real exch def jj 1 real add atan 2 mul /ang exch def 1 1 real
+add div dia 2 div mul dup 0 exch ang dup neg arcn} def % creates a path from the intersection of the negative x to the postive x intercept
+/plotr2 {/jj2 exch def /jj1 exch def /real exch def jj1 1 real add atan 2 mul /sang
+exch def jj2 1 real add atan 2 mul /eang exch def 1 1 real add div dia 2 div mul
+dup 0 exch sang eang arcn} def % creates a path from the intersection of the first x to the second x
+/plotx {/jj exch def /real2 exch def /real1 exch def jj 1 real1 add atan 2 mul 90
+sub /ang1 exch def jj 1 real2 add atan 2 mul 90 sub /ang2 exch def 0 1 jj div dia
+2 div mul dup ang1 ang2 arcn} def % creates a path from the intersection of the first r to the second r
+/plotx- {neg /jj exch def /real2 exch def /real1 exch def jj 1 real1 add atan 2 mul
+90 sub /ang1 exch def jj 1 real2 add atan 2 mul 90 sub /ang2 exch def 0 1 jj div
+dia 2 div mul dup ang1 ang2 arc} def
+
+/px{3 copy plotx stroke plotx- stroke} def
+/px2{3 copy plotr2 stroke neg exch neg plotr2 stroke} def
+
+/smithchart {0.6 setlinewidth 0 rr stroke 0.4 setlinewidth 0 0 moveto dia 0 lineto
+stroke 0 setlinewidth highresolution {0 0.01 0.2001 {0.2 plotr stroke} for 0.01
+0.01 0.2001 {0 exch 0.2 exch px} for 0.2 0.02 0.5001 {0.5 plotr stroke} for 0.02
+0.02 0.5001 {0.2 exch 0.5 exch px} for 0 0.02 0.5001 {0.5 0.2 px2} for 0.2 0.02
+0.5001 {0 exch 0.5 exch px} for 0.5 0.05 1.001 {1.0 plotr stroke} for 0.05 0.05
+1.001 {0.5 exch 1.0 exch px} for 0 0.05 1.001 {1.0 0.5 px2} for 0.5 0.05 1.001 {0
+exch 1.0 exch px} for 1 0.1 2.001 {2.0 plotr stroke} for 0.1 0.1 2.001 {1.0 exch 2.0
+exch px} for 0 0.1 1.001 {2.0 1.0 px2} for 1 0.1 2.001 {0 exch 2.0 exch px} for 2
+0.2 5.001 {5.0 plotr stroke} for 0.2 0.2 5.001 {2.0 exch 5.0 exch px} for 0 0.2
+2.001 {5.0 2.0 px2} for 2 0.2 5.001 {0 exch 5.0 exch px} for 5 1 10.001 {10.0 plotr
+stroke} for 1 1 10.001 {5.0 exch 10.0 exch px} for 0 0.5 5.001 {10.0 5.0 px2} for 5
+1 10.001 {0 exch 10.0 exch px} for 10 2 20.001 {20.0 plotr stroke} for 2 2 20.001
+{10.0 exch 20.0 exch px} for 0 2 10.001 {20.0 10.0 px2} for 10 2 20.001 {0 exch
+20.0 exch px} for 20 10 50.001 {50.0 plotr stroke} for 10 10 50.001 {20.0 exch
+50.0 exch px} for 0 10 20.001 {50 20.0 px2} for 20 10 50.001 {0 exch 50.0 exch
+px} for} if % end hires if used
+
+% low res starts here
+0.4 setlinewidth
+0 0.05 0.2001 {0.2 plotr stroke} for 0.05 0.05 0.2001 {0 exch 0.2 exch px} for 0.2
+0.1 0.5001 {0.5 plotr stroke} for 0.1 0.1 0.5001 {0.2 exch 0.5 exch px} for 0 0.1
+0.5001 {0.5 0.2 px2} for 0.2 0.1 0.5001 {0 exch 0.5 exch px} for 0.5 0.1 1.001 {1.0
+plotr stroke} for 0.1 0.1 1.001 {0.5 exch 1.0 exch px} for 0 0.1 1.001 {1.0 0.5 px2}
+for 0.5 0.1 1.001 {0 exch 1.0 exch px} for 1 0.2 2.001 {2.0 plotr stroke} for 0.2 0.2
+2.001 {1.0 exch 2.0 exch px} for 0 0.2 1.001 {2.0 1.0 px2} for 1 0.2 2.001 {0 exch
+2.0 exch px} for 2 1 5.001 {5.0 plotr stroke} for 1 1 5.001 {2.0 exch 5.0 exch px}
+for 0 1 2.001 {5.0 2.0 px2} for 2 1 5.001 {0 exch 5.0 exch px} for 5 5 10.001 {10.0
+plotr stroke} for 5 5 10.001 {5.0 exch 10.0 exch px} for 0 5 5.001 {10.0 5.0 px2}
+for 5 5 10.001 {0 exch 10.0 exch px} for 10 10 20.001 {20.0 plotr stroke} for 10
+10 20.001 {10.0 exch 20.0 exch px} for 0 10 10.001 {20.0 10.0 px2} for 10 10
+20.001 {0 exch 20.0 exch px} for 50 rr stroke 50 50 50.001 {0.0001 exch 2000
+exch px} for} def
+
+% //// demo - remove before use. ////
+50 350 translate % where?
+/dia 500 def % how big?
+/highresolution true def % lots of detail?
+smithchart % draw one
+showpage
