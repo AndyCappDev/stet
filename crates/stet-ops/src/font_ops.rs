@@ -616,8 +616,8 @@ mod tests {
     fn test_ctx() -> Context {
         let mut ctx = Context::new();
         crate::build_system_dict(&mut ctx);
-        let font_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../resources/Font");
+        let font_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../resources/Font");
         ctx.font_resource_path = Some(font_dir.to_string_lossy().into_owned());
         ctx
     }

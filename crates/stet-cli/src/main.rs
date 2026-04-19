@@ -691,7 +691,14 @@ fn run_viewer_mode(
                         None,
                     );
                 } else {
-                    run_file_jobs(&mut ctx, established_dpi, &[path.clone()], "viewer", None, None);
+                    run_file_jobs(
+                        &mut ctx,
+                        established_dpi,
+                        &[path.clone()],
+                        "viewer",
+                        None,
+                        None,
+                    );
                 }
 
                 // Signal job done
@@ -1531,11 +1538,9 @@ fn render_dropped_pdf(
     let mut doc = loop {
         let result = match password_attempt.as_deref() {
             None => PdfDocument::from_bytes_with_icc(&data, icc_cache.clone()),
-            Some(pw) => PdfDocument::from_bytes_with_password(
-                &data,
-                icc_cache.clone(),
-                pw.as_bytes(),
-            ),
+            Some(pw) => {
+                PdfDocument::from_bytes_with_password(&data, icc_cache.clone(), pw.as_bytes())
+            }
         };
         match result {
             Ok(d) => break d,

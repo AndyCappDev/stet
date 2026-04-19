@@ -401,16 +401,11 @@ impl ViewerApp {
                         if discard_flag.load(std::sync::atomic::Ordering::Relaxed) {
                             continue;
                         }
-                        let prepared =
-                            stet_render::prepare_display_list(&page.display_list);
-                        let cmyk_bytes =
-                            page.cmyk_bytes.as_ref().or(system_cmyk_bytes.as_ref());
-                        let icc_cache = stet_render::build_icc_cache_for_list(
-                            &page.display_list,
-                            cmyk_bytes,
-                        );
-                        let image_cache =
-                            ImageCache::build(&page.display_list, Some(&icc_cache));
+                        let prepared = stet_render::prepare_display_list(&page.display_list);
+                        let cmyk_bytes = page.cmyk_bytes.as_ref().or(system_cmyk_bytes.as_ref());
+                        let icc_cache =
+                            stet_render::build_icc_cache_for_list(&page.display_list, cmyk_bytes);
+                        let image_cache = ImageCache::build(&page.display_list, Some(&icc_cache));
                         let stored = StoredPage {
                             display_list: Arc::new(page.display_list),
                             prepared: Arc::new(prepared),
@@ -432,8 +427,7 @@ impl ViewerApp {
                         ui_ctx.request_repaint();
                     }
                     ViewerMsg::NewJob => {
-                        discard_flag
-                            .store(false, std::sync::atomic::Ordering::Relaxed);
+                        discard_flag.store(false, std::sync::atomic::Ordering::Relaxed);
                         if prepared_tx.send(PreparedMsg::NewJob).is_err() {
                             return;
                         }

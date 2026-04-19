@@ -4659,8 +4659,8 @@ mod tests {
     use stet_core::context::Context;
 
     fn test_ctx_with_font() -> Option<Context> {
-        let font_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../resources/Font");
+        let font_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../resources/Font");
         let font_path = font_dir.join("NimbusSans-Regular.t1");
         if !font_path.exists() {
             return None;
