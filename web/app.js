@@ -45,6 +45,14 @@ const minimapViewport = $('minimap-viewport');
 const progressContainer = $('progress-container');
 const progressBar = $('progress-bar');
 
+/// Update the text shown inside the loading overlay without changing its
+/// visibility. Lets us swap "Parsing PDF…" → "Rendering page 1…" without
+/// a flash of empty canvas in between.
+function setLoadingMessage(text) {
+    const span = loading.querySelector('span');
+    if (span) span.textContent = text;
+}
+
 // --- Web Worker setup ---
 
 const worker = new Worker('./worker.js', { type: 'module' });
@@ -62,14 +70,20 @@ worker.onmessage = function(e) {
         pageDims = msg.pages;
         referenceDpi = msg.referenceDpi;
 
-        loading.classList.add('hidden');
-
         if (pageCount === 0) {
+            loading.classList.add('hidden');
             statusEl.textContent = 'No pages rendered';
             dropZone.classList.remove('hidden');
             canvasContainer.classList.add('hidden');
             return;
         }
+
+        // Swap the spinner message to reflect the render phase. The loading
+        // overlay stays on top of the (empty) canvas until the first viewport
+        // arrives so the user always sees an active indicator — rendering
+        // the first page of a complex PDF can take several seconds and a
+        // stuck-at-0% progress bar alone reads as "nothing is happening."
+        setLoadingMessage('Rendering page 1\u2026');
 
         currentPage = 0;
         fitMode = true;
@@ -127,6 +141,8 @@ worker.onmessage = function(e) {
         if (msg.requestId !== pendingRequestId) return;
         pendingRequestId = null;
         progressContainer.classList.add('hidden');
+        // The first page is rendered — drop the loading overlay.
+        loading.classList.add('hidden');
 
         const rgba = new Uint8Array(msg.rgba);
         canvas.width = msg.width;
@@ -150,6 +166,7 @@ worker.onmessage = function(e) {
         if (msg.requestId === pendingRequestId) {
             pendingRequestId = null;
             progressContainer.classList.add('hidden');
+            loading.classList.add('hidden');
             console.error('Viewport render error:', msg.message);
         }
 
@@ -190,8 +207,26 @@ function renderFile(data) {
     dropZone.classList.add('hidden');
     canvasContainer.classList.add('hidden');
     pageNav.classList.add('hidden');
+    minimap.classList.add('hidden');
+    progressContainer.classList.add('hidden');
+
+    // Wipe any previously rendered pixels so the old file doesn't flash
+    // back when canvasContainer unhides before the new viewport arrives.
+    canvas.width = 0;
+    canvas.height = 0;
+    canvas.style.width = '';
+    canvas.style.height = '';
+    minimapCanvas.width = 0;
+    minimapCanvas.height = 0;
+
+    // Invalidate any in-flight viewport/thumbnail responses from the old file.
+    pendingRequestId = null;
+    pendingThumbnailId = null;
+
     const isPdf = currentFileName.toLowerCase().endsWith('.pdf');
-    statusEl.textContent = isPdf ? 'Parsing PDF...' : 'Interpreting...';
+    const phaseText = isPdf ? 'Parsing PDF\u2026' : 'Interpreting\u2026';
+    statusEl.textContent = phaseText;
+    setLoadingMessage(phaseText);
 
     // Reset state
     pageCount = 0;
