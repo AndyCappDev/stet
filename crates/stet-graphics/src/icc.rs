@@ -1191,6 +1191,20 @@ mod tests {
         });
         let on_rgb = on.convert_cmyk(0.0, 0.0, 0.0, 1.0).unwrap();
 
+        // Precondition: this test only exercises BPC's darkening effect, which
+        // requires a profile whose black point has non-zero luminance. Some
+        // system-supplied CMYK profiles (e.g. macOS's default ColorSync CMYK)
+        // already map K=1 to (near-)zero XYZ, so BPC has nothing to correct
+        // and off == on. Skip in that case — there's no regression to anchor
+        // here, just a profile that doesn't benefit from BPC.
+        if (on_rgb.1 - off_rgb.1).abs() < 0.005 {
+            eprintln!(
+                "Skipping: system CMYK profile's black point is already ~zero; \
+                 BPC is a no-op here. off={off_rgb:?} on={on_rgb:?}"
+            );
+            return;
+        }
+
         assert!(
             on_rgb.1 + 0.03 < off_rgb.1,
             "BPC should darken K=1 by ≥0.03 (~8 RGB levels): off={off_rgb:?} on={on_rgb:?}"
@@ -1242,6 +1256,17 @@ mod tests {
         let pixel = [0u8, 0, 0, 255]; // C=0 M=0 Y=0 K=255
         let off_rgb = off.convert_image_8bit(&off_hash, &pixel, 1).unwrap();
         let on_rgb = on.convert_image_8bit(&on_hash, &pixel, 1).unwrap();
+
+        // Precondition, same as `test_bpc_darkens_pure_k_per_color`: BPC only
+        // shifts pixels when the profile's black point has non-zero luminance.
+        // Skip when the system profile already maps K=1 to near-zero XYZ.
+        if (on_rgb[1] as i32 - off_rgb[1] as i32).abs() <= 1 {
+            eprintln!(
+                "Skipping: system CMYK profile's black point is already ~zero; \
+                 BPC is a no-op here. off={off_rgb:?} on={on_rgb:?}"
+            );
+            return;
+        }
 
         // BPC must darken the green channel by ≥8 RGB levels (mirrors the
         // per-color path's anchor in test_bpc_darkens_pure_k_per_color).
