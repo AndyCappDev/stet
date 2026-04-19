@@ -33,6 +33,32 @@
 //! skips the display-list-handling boilerplate and produces RGBA pixels
 //! directly via `stet-render`.
 //!
+//! # Encrypted PDFs
+//!
+//! `from_bytes` / `from_bytes_with_icc` try the empty password. If the
+//! file uses a non-empty user password they return
+//! [`PdfError::PasswordRequired`]; the caller can then prompt the user
+//! and retry with [`PdfDocument::from_bytes_with_password`]:
+//!
+//! ```no_run
+//! use stet_pdf_reader::{PdfDocument, PdfError};
+//! use stet_graphics::icc::IccCache;
+//!
+//! let data = std::fs::read("encrypted.pdf")?;
+//! let doc = match PdfDocument::from_bytes(&data) {
+//!     Ok(doc) => doc,
+//!     Err(PdfError::PasswordRequired) => {
+//!         let pw = prompt_user_for_password();
+//!         PdfDocument::from_bytes_with_password(&data, IccCache::new(), pw.as_bytes())?
+//!     }
+//!     Err(e) => return Err(e.into()),
+//! };
+//! # fn prompt_user_for_password() -> String { String::new() }
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//!
+//! RC4 (40/128-bit), AES-128, and AES-256 (R=5/6) are all supported.
+//!
 //! # Acknowledgements
 //!
 //! JPEG 2000, JBIG2, and CCITT-Fax stream decoding use the
