@@ -103,10 +103,26 @@ def get_sample_files(specific=None, exclude=None):
     if specific:
         samples = [SAMPLES_DIR / s for s in specific if (SAMPLES_DIR / s).exists()]
     else:
-        samples = sorted(SAMPLES_DIR.glob("*.pdf"))
+        # Walk with followlinks=True so corpora living under subdirectories
+        # or symlinked directories (e.g. `pdf_samples/pdfjs/` populated by
+        # `scripts/fetch_test_pdfs.sh`) are picked up alongside any flat
+        # top-level fixtures. Skip dotted dirs like `.pdfjs-src` — those
+        # hold the fetcher's git checkout while the clean PDFs are exposed
+        # via a sibling symlink.
+        found = []
+        for dirpath, dirnames, filenames in os.walk(SAMPLES_DIR, followlinks=True):
+            dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+            for f in filenames:
+                if f.lower().endswith(".pdf"):
+                    found.append(Path(dirpath) / f)
+        samples = sorted(found)
     if exclude:
         exclude_set = set(exclude)
-        samples = [s for s in samples if s.name not in exclude_set]
+        samples = [
+            s for s in samples
+            if s.name not in exclude_set
+            and str(s.relative_to(SAMPLES_DIR)) not in exclude_set
+        ]
     return samples
 
 
@@ -119,7 +135,16 @@ def render_one(pdf_file, output_dir, timeout, extra_flags, device="png"):
     "viewport-png" is the audit path that routes through the same pipeline
     the interactive viewer uses.
     """
-    name = pdf_file.stem
+    # Name encodes the relative path (without .pdf) so PDFs living under
+    # different corpus subdirs (pdf_samples/pdfjs/foo.pdf vs top-level
+    # pdf_samples/foo.pdf) get distinct baseline/current/diff dirs. Use
+    # the logical path (not resolve()) so a symlinked corpus stays keyed
+    # by the corpus name the fetch script exposed it under.
+    try:
+        rel = pdf_file.relative_to(SAMPLES_DIR)
+    except ValueError:
+        rel = Path(pdf_file.name)
+    name = str(rel.with_suffix(""))
     sample_out = output_dir / name
     sample_out.mkdir(parents=True, exist_ok=True)
 

@@ -341,6 +341,34 @@ cd web && ./build.sh           # Build WASM module
 python3 serve.py               # Serve at localhost:8000
 ```
 
+## Contributing
+
+`cargo test` runs with no extra setup. The PDF visual-regression
+harness (`./pdf_visual_test.sh`) needs a local corpus of test PDFs,
+which the project doesn't ship (most are third-party). To reproduce
+PDF-rendering bugs or check for regressions across a large corpus:
+
+```bash
+# 1. Fetch public test corpora into pdf_samples/ (clones with
+#    sparse-checkout so only the PDFs are pulled).
+./scripts/fetch_test_pdfs.sh            # all corpora
+./scripts/fetch_test_pdfs.sh --list     # see what's available
+
+# 2. Generate your local baseline on a known-good commit
+#    (typically `main` before your changes).
+./pdf_visual_test.sh --baseline
+
+# 3. Switch to your feature branch and compare.
+./pdf_visual_test.sh
+```
+
+Any PDFs you already have at the top level of `pdf_samples/` keep
+working; the fetcher drops new corpora into their own subdirs
+(e.g. `pdf_samples/pdfjs/`) and the visual-test harness walks the
+tree so both flat and subdir layouts are picked up. Corpus
+subdirectories are gitignored — nothing third-party lands in a
+commit.
+
 ## Acknowledgements
 
 - **[hayro](https://github.com/LaurenzV/hayro)** — PDF renderer by
