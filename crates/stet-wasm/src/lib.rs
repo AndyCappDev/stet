@@ -61,6 +61,14 @@ pub struct Interpreter {
     reference_dpi: f64,
     /// Embedded CMYK ICC profile bytes for ICC-aware viewport rendering.
     system_cmyk_bytes: Arc<Vec<u8>>,
+    /// Owned PDF source bytes, kept so per-page rendering is lazy:
+    /// `open_pdf` parses only xref + page tree; each page's content stream
+    /// is interpreted on demand by `render_pdf_page` (or implicitly by the
+    /// first `render_viewport`/`render_viewport_band` call for that page).
+    pdf_bytes: Option<Vec<u8>>,
+    /// ICC cache captured at `open_pdf` time; cloned into a new
+    /// `PdfDocument` for each per-page render.
+    pdf_icc_cache: Option<IccCache>,
 }
 
 /// A single rendered page with dimensions and RGBA pixel data.
@@ -160,6 +168,8 @@ pub fn create_interpreter() -> Interpreter {
         page_info: Vec::new(),
         reference_dpi: 150.0,
         system_cmyk_bytes: cmyk_bytes,
+        pdf_bytes: None,
+        pdf_icc_cache: None,
     }
 }
 
@@ -213,6 +223,9 @@ pub fn render(interp: &mut Interpreter, ps_data: &[u8], dpi: f64, filename: &str
     interp.page_image_cache.clear();
     interp.page_info.clear();
     interp.reference_dpi = dpi;
+    // PS rendering doesn't use the lazy-PDF state
+    interp.pdf_bytes = None;
+    interp.pdf_icc_cache = None;
 
     // Enable display list capture
     interp.ctx.capture_display_lists = Some(Vec::new());
@@ -340,13 +353,18 @@ pub fn render(interp: &mut Interpreter, ps_data: &[u8], dpi: f64, filename: &str
     Ok(JsValue::from(page_count))
 }
 
-/// Render a PDF file — parse it, build display lists for each page, and store
-/// them for viewport re-rendering via `render_viewport()`.
+/// Open a PDF file and parse its structure (xref, page tree, page sizes).
+///
+/// Does **not** interpret page content streams — those are built on demand by
+/// `render_pdf_page` (or implicitly by the first `render_viewport` /
+/// `render_viewport_band` call for that page). This keeps the initial call
+/// fast on large documents: a 500-page PDF returns its page count and
+/// per-page dimensions in milliseconds instead of seconds.
 ///
 /// Returns the number of pages, or throws on parse error.
 #[wasm_bindgen]
-pub fn render_pdf(interp: &mut Interpreter, pdf_data: &[u8], dpi: f64) -> Result<JsValue, JsValue> {
-    log(&format!("stet: render_pdf() called — {} bytes, dpi={}", pdf_data.len(), dpi));
+pub fn open_pdf(interp: &mut Interpreter, pdf_data: &[u8], dpi: f64) -> Result<JsValue, JsValue> {
+    log(&format!("stet: open_pdf() called — {} bytes, dpi={}", pdf_data.len(), dpi));
 
     // Clear previous state
     interp.page_display_lists.clear();
@@ -355,45 +373,97 @@ pub fn render_pdf(interp: &mut Interpreter, pdf_data: &[u8], dpi: f64) -> Result
     interp.page_image_cache.clear();
     interp.page_info.clear();
     interp.reference_dpi = dpi;
+    interp.pdf_bytes = None;
+    interp.pdf_icc_cache = None;
 
-    let mut icc_cache = stet_graphics::icc::IccCache::new();
+    let mut icc_cache = IccCache::new();
     icc_cache.load_cmyk_profile_bytes(DEFAULT_CMYK_ICC);
-    let mut doc = stet_pdf_reader::PdfDocument::from_bytes_with_icc(pdf_data, icc_cache)
+
+    // Parse structure only — page content streams are deferred.
+    let doc = stet_pdf_reader::PdfDocument::from_bytes_with_icc(pdf_data, icc_cache.clone())
+        .map_err(|e| JsValue::from_str(&format!("PDF parse error: {}", e)))?;
+
+    let count = doc.page_count();
+    let scale = dpi / 72.0;
+    for page_idx in 0..count {
+        let (page_w, page_h) = doc.page_size(page_idx).map_err(|e| {
+            JsValue::from_str(&format!("PDF page {} error: {}", page_idx, e))
+        })?;
+        interp.page_display_lists.push(DisplayList::new());
+        interp.page_prepared.push(None);
+        interp.page_icc.push(None);
+        interp.page_image_cache.push(None);
+        interp.page_info.push(PageInfo {
+            width: (page_w * scale).round() as u32,
+            height: (page_h * scale).round() as u32,
+            dpi,
+        });
+    }
+
+    // Stash bytes + ICC cache so per-page renders can recreate the document.
+    // PDF parse state is xref + page tree only; there's no mutable render
+    // state to preserve, so re-parsing per page is cheap.
+    interp.pdf_bytes = Some(pdf_data.to_vec());
+    interp.pdf_icc_cache = Some(icc_cache);
+
+    log(&format!("stet: open_pdf complete — {} pages (content streams deferred)", count));
+    Ok(JsValue::from(count as u32))
+}
+
+/// Build the display list for a single PDF page.
+///
+/// Idempotent: if the page is already rendered, returns immediately.
+/// Called implicitly by `render_viewport`/`render_viewport_band` on first
+/// access, but exposed to JS so callers can prefetch future pages during
+/// idle time.
+#[wasm_bindgen]
+pub fn render_pdf_page(interp: &mut Interpreter, page_index: u32) -> Result<(), JsValue> {
+    let idx = page_index as usize;
+    if idx >= interp.page_display_lists.len() {
+        return Err(JsValue::from_str(&format!(
+            "Page index {} out of range (have {} pages)",
+            page_index,
+            interp.page_display_lists.len()
+        )));
+    }
+    ensure_pdf_page_rendered(interp, idx)
+}
+
+/// Internal: ensure `page_display_lists[idx]` is populated for a PDF-backed
+/// interpreter. Returns `Err` only if PDF state is missing or re-parse fails.
+/// Idempotent — checks `page_display_lists[idx]` for existing content first.
+fn ensure_pdf_page_rendered(interp: &mut Interpreter, idx: usize) -> Result<(), JsValue> {
+    // Already rendered (or PS-interpreted, which pre-populates with real content)
+    if !interp.page_display_lists[idx].elements().is_empty() {
+        return Ok(());
+    }
+    // No PDF open → nothing to lazy-render. This is expected for PS files;
+    // an empty display list there means an empty page.
+    let pdf_bytes = match interp.pdf_bytes.as_deref() {
+        Some(b) => b,
+        None => return Ok(()),
+    };
+    let icc_cache = interp
+        .pdf_icc_cache
+        .clone()
+        .ok_or_else(|| JsValue::from_str("Missing ICC cache state"))?;
+
+    let mut doc = stet_pdf_reader::PdfDocument::from_bytes_with_icc(pdf_bytes, icc_cache)
         .map_err(|e| JsValue::from_str(&format!("PDF parse error: {}", e)))?;
     doc.set_font_provider(embedded_resources::build_font_provider());
 
-    let scale = dpi / 72.0;
+    let dpi = interp.reference_dpi;
+    let dl = doc
+        .render_page(idx, dpi)
+        .map_err(|e| JsValue::from_str(&format!("PDF page {} render error: {}", idx, e)))?;
 
-    for page_idx in 0..doc.page_count() {
-        let (page_w, page_h) = doc.page_size(page_idx)
-            .map_err(|e| JsValue::from_str(&format!("PDF page {} error: {}", page_idx, e)))?;
-
-        let pixel_w = (page_w * scale).round() as u32;
-        let pixel_h = (page_h * scale).round() as u32;
-
-        match doc.render_page(page_idx, dpi) {
-            Ok(dl) => {
-                log(&format!("stet: page {} — {} display elements, {}x{} px",
-                    page_idx, dl.elements().len(), pixel_w, pixel_h));
-                interp.page_display_lists.push(dl);
-                interp.page_prepared.push(None);
-                interp.page_icc.push(None);
-                interp.page_image_cache.push(None);
-                interp.page_info.push(PageInfo {
-                    width: pixel_w,
-                    height: pixel_h,
-                    dpi,
-                });
-            }
-            Err(e) => {
-                log(&format!("stet: PDF page {} render error: {}", page_idx, e));
-            }
-        }
-    }
-
-    let num_pages = interp.page_display_lists.len() as u32;
-    log(&format!("stet: render_pdf complete — {} pages", num_pages));
-    Ok(JsValue::from(num_pages))
+    log(&format!(
+        "stet: rendered page {} — {} display elements",
+        idx,
+        dl.elements().len()
+    ));
+    interp.page_display_lists[idx] = dl;
+    Ok(())
 }
 
 /// Get the number of pages available for viewport rendering.
@@ -494,6 +564,7 @@ pub fn render_viewport(
         )));
     }
 
+    ensure_pdf_page_rendered(interp, i)?;
     ensure_page_caches!(interp, i);
 
     let list = &interp.page_display_lists[i];
@@ -563,6 +634,7 @@ pub fn render_viewport_band(
         )));
     }
 
+    ensure_pdf_page_rendered(interp, i)?;
     ensure_page_caches!(interp, i);
 
     let list = &interp.page_display_lists[i];

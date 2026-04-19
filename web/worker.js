@@ -1,7 +1,8 @@
 import init, {
     create_interpreter,
     render,
-    render_pdf,
+    open_pdf,
+    render_pdf_page,
     render_viewport,
     viewport_band_params,
     render_viewport_band,
@@ -41,8 +42,12 @@ self.onmessage = async function(e) {
             // Detect PDF vs PostScript and use appropriate renderer
             const dpi = 300;
             const isPdf = filename.toLowerCase().endsWith('.pdf');
+            // PDFs use lazy per-page rendering: open_pdf parses only the
+            // xref + page tree here so the first viewport render can start
+            // immediately; each page's content stream is interpreted on
+            // demand by render_viewport / render_viewport_band.
             const numPages = isPdf
-                ? render_pdf(interpreter, data, dpi)
+                ? open_pdf(interpreter, data, dpi)
                 : render(interpreter, data, dpi, filename);
             const elapsed = performance.now() - start;
 
