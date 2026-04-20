@@ -1,0 +1,44 @@
+%% pagedevice dictionary for pdf output device
+
+<<
+    /OutputDeviceName (pdf)
+    /OutputDevice /pdf
+    /PageSize [612 792]
+    /HWResolution [300 300]
+    /Margins [0.0 0.0]
+    /PageOffset [0 0]
+    /BitsPerPixel 24
+    /NumCopies null
+    /Install {
+        .9 setflat
+        {} settransfer
+        /DeviceRGB setcolorspace
+    } bind
+    /BeginPage {pop} bind
+    /EndPage {
+        dup 0 eq { %% called from showpage
+            pop true
+        } {
+            1 eq { %% called from copypage
+                true
+            } { %% called from device deactivation
+                pop false
+            } ifelse
+        } ifelse
+    } bind
+    /InputAttributes <<>>
+    /OutputAttributes <<>>
+    /ColorModel /DeviceRGB
+    /ProcessColorModel /DeviceRGB
+    /Policies <<>>
+    /PageCount 0
+    /.IsPageDevice true
+    /Separations false
+    /Supported {}
+    /RedValues 256
+    /GreenValues 256
+    /BlueValues 256
+    /Colors 3
+    /TextRenderingMode /GlyphPaths
+    /StrokeMethod /NativeStroke
+>>

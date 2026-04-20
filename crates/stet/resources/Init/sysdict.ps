@@ -1,0 +1,769 @@
+%% systemdict initialization for stet
+%% Adapted from PostForge's sysdict.ps
+%%
+%% Executes on startup when systemdict is the ONLY
+%% dictionary on the dictionary stack and is already
+%% populated with all the built-in operators.
+%%
+%% vm allocation mode is false when this script is run
+
+%% create the globaldict & serverdict
+true setglobal
+/globaldict 200 dict def
+/serverdict 50 dict def
+false setglobal
+
+% set some userparams
+<<
+    /MaxDictStack 500
+    /MaxExecStack 5000
+    /MaxOpStack 300000
+    /ExecutionHistory false
+    /ExecutionHistorySize 20
+>> setuserparams
+
+%% create the local statusdict
+/statusdict 50 dict def
+
+%% create the local userdict
+/userdict 200 dict def
+
+%% create the local $error dict
+/$error 200 dict dup /initializing true put def
+
+%% create the local errordict
+/errordict 50 dict def
+
+%% create the local FontDirectory dictionary
+/FontDirectory 100 dict def
+
+%% create the Global and Shared Font Directories
+true setglobal
+/GlobalFontDirectory 100 dict def
+/SharedFontDirectory GlobalFontDirectory def
+/setshared //setglobal def
+/currentshared //currentglobal def
+/currentdevice //currentpagedevice def
+false setglobal
+
+%% push the globaldict on the dictionary stack
+//globaldict begin
+
+%% push the userdict on the dictionary stack
+//userdict begin
+
+
+
+//systemdict begin
+    true setglobal
+    /product (stet) def
+    /version (3010) def
+    /revision 1 def
+    /revisionstring (0.1.0) def
+    /revisiondate (2026-02-25) def
+    /serialnumber 42 def
+    /languagelevel 3 def
+
+    /=controlcharsdict <<9(t)10(n)12(f)13(r)>> def
+
+    % define the cleardictstack procedure
+    /cleardictstack { %def
+        { %loop
+            {end} stopped {//$error /newerror //false put exit} if
+        } loop
+    } bind def
+
+    /=print {
+        dup type /stringtype ne {
+            =string cvs
+        } if
+        print
+    } bind def
+
+    /= {
+        count 0 eq {
+            //$error /errorname /stackunderflow put
+            //$error /newerror true put
+            //$error /command /= put
+            handleerror
+        } {
+            dup type /stringtype ne {
+                =string cvs
+            } if
+            print (\n) print
+        } ifelse
+    } bind def
+
+    /=only {
+        =string cvs print flush
+    } bind def
+
+    /pstack { %def
+        0 1 count 3 sub { % for
+            index ==
+        } for
+    } bind def
+
+    /ppstack { %def
+        (\n** Operand Stack **\n-----------------\n) print pstack (\n) print
+    } bind def
+
+    /stack { %def
+        0 1 count 3 sub { % for
+            index =
+        } for
+    } bind def
+
+    %% create the ==dict
+    /==dict 50 dict def
+
+    //==dict begin %% start ==dict definitions
+        /typeprint {
+            dup type exec
+        } bind def
+
+        /tprint {
+            dup length cp add rmargin gt
+            {
+                NL print ( ) print /cp 0 def
+            } if
+
+            dup length cp add /cp exch def print
+        } bind def
+
+        /cvsprint {
+            =string cvs tprint ( ) tprint
+        } bind def
+
+        /booleantype {cvsprint} def
+        /dicttype {dictname (<<-) tprint =string cvs tprint (->> ) tprint} bind def
+        /filetype {pop (-filestream- ) tprint} bind def
+        /fonttype {pop (-fontid- ) tprint} bind def
+        /integertype {cvsprint} def
+        /marktype {pop (-mark- ) tprint} bind def
+        /nametype {
+            dup xcheck not { %if
+                (/) tprint
+            } if
+            cvsprint
+        } bind def
+        /nulltype {pop (-null- ) tprint} bind def
+        /operatortype {(--) tprint =string cvs tprint (-- ) tprint} bind def
+        /realtype {cvsprint} def
+        /savetype {pop (-savelevel- ) tprint} bind def
+        /stringtype {
+            dup rcheck
+            {
+                (\() tprint
+                {
+                    dup 32 lt 1 index 126 gt or {
+                        (\\) print
+                        //=controlcharsdict 1 index known {
+                            //=controlcharsdict exch get tprint
+                        } {
+                            dup -6 bitshift 7 and =char1 cvs tprint
+                            dup -3 bitshift 7 and =char1 cvs tprint
+                            7 and =char1 cvs tprint
+                        } ifelse
+                    }
+                    {
+                        =char1 dup 0 4 -1 roll put tprint
+                    } ifelse
+                }
+                forall
+                (\) ) tprint
+            }
+            {
+                pop (-string- ) tprint
+            } ifelse
+        } bind def
+        /arraytype {
+            dup rcheck
+            {
+                dup xcheck
+                {
+                    ({) tprint
+                    dup length 0 gt {
+                        {
+                            typeprint
+                        } forall
+                        (\b) tprint (} ) tprint
+                    } {
+                        (} ) tprint
+                        pop
+                    } ifelse
+                }
+                {
+                    ([) tprint
+                    dup length 0 gt {
+                        {
+                            typeprint
+                        } forall
+                        (\b] ) tprint
+                    } {
+                        (] ) tprint
+                        pop
+                    } ifelse
+                } ifelse
+            }
+            {
+                pop (-packedarray- ) tprint
+            } ifelse
+        } bind def
+        /packedarraytype //arraytype def
+    end % ==dict
+
+    %% more systemdict definitions
+    /== { %def
+        count 0 eq {
+            //$error /errorname /stackunderflow put
+            //$error /newerror true put
+            //$error /command /== put
+            handleerror
+        }
+        {
+            //==dict begin /cp 0 def typeprint NL print end
+        } ifelse
+    } bind def
+    /==only { %def
+        count 0 eq {
+            //$error /errorname /stackunderflow put
+            //$error /newerror true put
+            //$error /command /==only put
+            handleerror
+        }
+        {
+            //==dict begin /cp 0 def typeprint end
+        } ifelse
+    } bind def
+    /NL (\n) def
+    /rmargin 120 def
+    %% junk string
+    /=string 256 string def
+    %% 1 char long string for displaying strings
+    /=char1 1 string def
+    %% another junk string
+    /=fstring 256 string def
+
+    %% the .error procedure
+    /.error {
+        % Pause execution history recording during error handling
+        pauseexechistory
+        false setglobal
+        //$error exch /errorname exch put //$error exch /command exch put
+        //$error /newerror true put //$error /errorname get /VMError ne
+        {
+            % save snapshots of the operand, execution, and dictionary stacks
+            //$error /ostackarry get null eq
+            {
+                //$error /estackarray 250 array put
+                //$error /ostackarry 500 array put
+                //$error /dstackarray 20 array put
+            } if
+            count //$error /ostackarry get exch 0 exch getinterval
+            astore //$error exch /ostack exch put
+            //$error /dstack //$error /dstackarray get dictstack put
+            //$error /estack //$error /estackarray get execstack
+            dup length 2 sub 0 exch getinterval put
+            //$error /ostack get aload pop
+        } if
+        //$error /initializing get {
+            handleerror
+        } if
+        stop
+    } bind def
+
+    %% TN: 5044 operators
+    /findcmykcustomcolor { 5 array astore } bind def
+    /findrgbcustomcolor { 4 array astore } bind def
+    /setcustomcolor {pop pop} bind def
+
+end % systemdict
+
+false setglobal
+
+//$error begin
+    /newerror false def
+    /doclose false def
+    /ostackarry null def
+end % $error
+
+
+//errordict begin %% begin errordict
+
+    /handleerror {
+        //$error begin newerror
+        {
+            /newerror false def NL print (%%[ Error: ) print errorname
+            {
+                dup type /stringtype ne
+                {
+                    =string cvs
+                } if
+                print
+            }
+            exec (; OffendingCommand: ) print /command load
+            {
+                dup type /stringtype ne
+                {
+                    =string cvs
+                } if
+                print
+            }
+            exec ( ]%%)
+            {
+                {
+                    dup type /stringtype ne
+                    {
+                        =string cvs
+                    } if
+                    print
+                }
+                exec (\n) print
+            }
+            exec
+
+            % Pretty print the stack contents if available
+            {
+                currentdict /ostack known {
+                    (\n** OPERAND STACK **\n) print
+                    ostack dup length 0 gt {
+                        dup length 1 sub -1 0 {
+                            1 index exch get //== exec
+                        } for
+                        pop
+                    } {
+                        pop (  <empty>\n) print
+                    } ifelse
+                } if
+            } stopped {
+                (\nError displaying operand stack\n) print
+            } if
+
+            {
+                currentdict /dstack known {
+                    (\n** DICTIONARY STACK **\n) print
+                    dstack dup length 0 gt {
+                        dup length 1 sub -1 0 {
+                            1 index exch get //== exec
+                        } for
+                        pop
+                    } {
+                        pop (  <empty>\n) print
+                    } ifelse
+                } if
+            } stopped {
+                (\nError displaying dictionary stack\n) print
+            } if
+
+            {
+                currentdict /estack known {
+                    (\n** EXECUTION STACK **\n) print
+                    estack dup length 0 gt {
+                        dup length 1 sub -1 0 {
+                            1 index exch get //== exec
+                        } for
+                        pop
+                    } {
+                        pop (  <empty>\n) print
+                    } ifelse
+                } if
+            } stopped {
+                (\nError displaying execution stack\n) print
+            } if
+
+            flush
+        } if
+        end
+        % Resume execution history recording after error handling
+        resumeexechistory
+    } bind def
+
+    /VMError {/VMError //.error exec} def
+    /dictfull {/dictfull //.error exec} def
+    /dictstackoverflow {/dictstackoverflow //.error exec} def
+    /dictstackunderflow {/dictstackunderflow //.error exec} def
+    /execstackoverflow {/execstackoverflow //.error exec} def
+    /invalidaccess {/invalidaccess //.error exec} def
+    /invalidexit {/invalidexit //.error exec} def
+    /invalidfileaccess {/invalidfileaccess //.error exec} def
+    /invalidfont {/invalidfont //.error exec} def
+    /invalidrestore {/invalidrestore //.error exec} def
+    /ioerror {/ioerror //.error exec} def
+    /limitcheck {/limitcheck //.error exec} def
+    /nocurrentpoint {/nocurrentpoint //.error exec} def
+    /rangecheck {/rangecheck //.error exec} def
+    /stackoverflow {/stackoverflow //.error exec} def
+    /stackunderflow {/stackunderflow //.error exec} def
+    /syntaxerror {/syntaxerror //.error exec} def
+    /timeout {/timeout //.error exec} def
+    /typecheck {/typecheck //.error exec} def
+    /undefined {/undefined //.error exec} def
+    /undefinedfilename {/undefinedfilename //.error exec} def
+    /undefinedresource {/undefinedresource //.error exec} def
+    /undefinedresult {/undefinedresult //.error exec} def
+    /unmatchedmark {/unmatchedmark //.error exec} def
+    /unregistered {/unregistered //.error exec} def
+    /unsupported {/unsupported //.error exec} def
+    /configurationerror {/configurationerror //.error exec} def
+end % errordict
+
+
+//systemdict begin %% begin systemdict
+    true setglobal
+    /handleerror {
+        //errordict /handleerror get exec
+    } bind def
+
+    false setglobal
+end % systemdict
+
+
+
+true setglobal
+% the Generic Resource Category
+/Generic <<
+    /DefineResource //defineresource
+    /UndefineResource {currentdict exch undef}
+    /FindResource {
+        % is the resource already loaded?
+        currentglobal { %ifelse
+            % search only the global resource dictionary
+            Category globalresourcedict pop
+            dup 2 index known { %ifelse
+                exch get
+            } {
+                pop % pop the resource dict - the resource name is still on the stack
+                % try to load the resource
+                (/) [ResourceDir () [5 index =string cvs ResourceExtension] =string join] =string join
+                dup status {4 {pop} repeat} {/findresource /undefinedresource .error} ifelse
+                run dup type /dicttype eq { dup /__status__ 1 put } if Category defineresource
+            } ifelse
+        } {
+            % search local resource dictionary first
+            Category localresourcedict pop
+            dup 2 index known { %ifelse
+                exch get
+            } {
+                pop % pop the resource dict - the resource name is still on the stack
+                % now search the global resource dictionary
+                Category globalresourcedict pop
+                dup 2 index known { %ifelse
+                    exch get
+                } {
+                    pop % pop the resource dict - the resource name is still on the stack
+                    % try to load the resource
+                    (/) [ResourceDir () [5 index =string cvs ResourceExtension] =string join] =string join
+                    dup status {4 {pop} repeat} {pop /findresource /undefinedresource .error} ifelse
+                    run dup type /dicttype eq { dup /__status__ 1 put } if Category defineresource
+                } ifelse
+            } ifelse
+        } ifelse
+    } bind
+    /ResourceStatus {
+        Category localresourcedict {
+            1 index known {
+                pop 1 15000 true
+            } {
+                Category globalresourcedict {
+                    1 index known {
+                        pop 1 15000 true
+                    } {
+                        pop false
+                    } ifelse
+                } {
+                    pop false
+                } ifelse
+            } ifelse
+        } {
+            Category globalresourcedict {
+                1 index known {
+                    pop 1 15000 true
+                } {
+                    pop false
+                } ifelse
+            } {
+                pop false
+            } ifelse
+        } ifelse
+    } bind
+    /ResourceForAll {
+        /scratch exch def
+        /proc exch def
+        /template exch def
+
+        currentglobal not {
+            Category localresourcedict {
+                {
+                    exch
+                    dup type /nametype eq {
+                        256 string cvs dup /keystr exch def
+                        template (*) eq {
+                            keystr proc exec
+                        } {
+                            keystr template eq {
+                                keystr proc exec
+                            } if
+                        } ifelse
+                    } {
+                        pop
+                    } ifelse
+                    pop
+                } forall
+            } if
+        } if
+
+        Category globalresourcedict {
+            {
+                exch
+                dup type /nametype eq {
+                    256 string cvs dup /keystr exch def
+                    template (*) eq {
+                        keystr proc exec
+                    } {
+                        keystr template eq {
+                            keystr proc exec
+                        } if
+                    } ifelse
+                } {
+                    pop
+                } ifelse
+                pop
+            } forall
+        } if
+
+        currentdict /template undef
+        currentdict /proc undef
+        currentdict /scratch undef
+    } bind
+
+    /Category /Generic
+    /ResourceDir ()
+    /ResourceExtension ()
+>> /Category defineresource pop
+false setglobal
+
+
+% Initialize all the resource categories
+
+(resources/Init/resourcecategories.ps) run
+
+% Load font substitution mappings
+
+(resources/Init/fontmapping.ps) run
+
+% Resource convenience operators for backward compatibility
+
+true setglobal
+
+//systemdict begin
+
+    % Font category convenience operators
+    /findfont { /Font findresource } bind def
+
+    /definefont { /Font defineresource } bind def
+    /undefinefont { /Font undefineresource } bind def
+    /selectfont {
+        count 2 lt {/selectfont /stackunderflow .error} if
+        dup type /integertype eq 1 index type /realtype eq 2 index type /arraytype eq or or not
+        {/selectfont /typecheck .error} if
+
+        dup type /arraytype eq {
+            dup length 6 ne {/selectfont /rangecheck .error} if
+            dup {
+                dup type /integertype eq exch type /realtype eq or not {/selectfont /typecheck .error} if
+            } forall
+
+            1 index findfont 1 index makefont setfont
+            pop pop
+        } {
+            1 index findfont 1 index scalefont setfont
+            pop pop
+        } ifelse
+    } bind def
+
+    % Encoding category convenience operator
+    /findencoding { /Encoding findresource } bind def
+
+    % ColorRendering category convenience operator
+    /findcolorrendering { /ColorRendering findresource } bind def
+
+    % Standard encodings - load from resource files
+
+    /StandardEncoding /StandardEncoding /Encoding findresource def
+    /SymbolEncoding /SymbolEncoding /Encoding findresource def
+    /ISOLatin1Encoding /ISOLatin1Encoding /Encoding findresource def
+end
+
+false setglobal
+
+
+
+% Standard page size procedures (PLRM Appendix G)
+/letter {<< /PageSize [612 792] >> setpagedevice} bind def
+/lettersmall {<< /PageSize [612 792] >> setpagedevice} bind def
+/legal {<< /PageSize [612 1008] >> setpagedevice} bind def
+/statement {<< /PageSize [396 612] >> setpagedevice} bind def
+/note {<< /PageSize [612 792] >> setpagedevice} bind def
+/11x17 {<< /PageSize [792 1224] >> setpagedevice} bind def
+/tabloid {<< /PageSize [792 1224] >> setpagedevice} bind def
+/ledger {<< /PageSize [1224 792] >> setpagedevice} bind def
+/folio {<< /PageSize [612 936] >> setpagedevice} bind def
+/quarto {<< /PageSize [610 780] >> setpagedevice} bind def
+/a0 {<< /PageSize [2384 3370] >> setpagedevice} bind def
+/a1 {<< /PageSize [1684 2384] >> setpagedevice} bind def
+/a2 {<< /PageSize [1191 1684] >> setpagedevice} bind def
+/a3 {<< /PageSize [842 1191] >> setpagedevice} bind def
+/a4 {<< /PageSize [595 842] >> setpagedevice} bind def
+/a4small {<< /PageSize [595 842] >> setpagedevice} bind def
+/a5 {<< /PageSize [420 595] >> setpagedevice} bind def
+/b4 {<< /PageSize [709 1001] >> setpagedevice} bind def
+/b5 {<< /PageSize [499 709] >> setpagedevice} bind def
+
+% the default font
+/defaultfontname /Courier def
+
+
+statusdict begin
+    /product product def
+    /version version def
+    /revision revision def
+    /revisiondate revisiondate def
+    /languagelevel languagelevel def
+
+    /setjobtimeout {pop} def
+
+    /lettertray {} def
+end % statusdict
+
+
+serverdict begin
+    systemdict /exitserver get /exitserver exch def
+end
+
+
+%%% Executive %%%
+/execdict 20 dict def
+execdict begin
+    /execdepth 0 def
+    /continueflag false def
+
+    /checkquit {
+        quitflag {exit} if
+        continueflag {exit} if
+    } bind def
+
+    /cvsprint {=string cvs print} bind def
+end % execdict
+
+systemdict begin
+    true setglobal
+
+    /prompt {
+        (PS[) print countexecstack cvsprint ( ) print
+        countdictstack 1 sub cvsprint ( ) print count cvsprint
+        (]) print execdepth { (>) print } repeat ( ) print flush
+    } bind def
+
+    /continue {
+        //execdict /continueflag true put
+    } bind def
+
+    /cont {
+        //execdict /continueflag true put
+    } bind def
+
+    /executive {
+        true {
+            //execdict begin
+            /execdepth execdepth 1 add def
+            /continueflag false def
+            true .setinteractivepaint
+            execdepth 1 eq {
+                product print ( ) print (Version ) print revisionstring print ( \() print revisiondate print (\)\n) print
+                (Copyright \(C\) ) print revisiondate 0 4 getinterval print ( Scott Bowman.\n) print
+                (This software is licensed under Apache-2.0 OR MIT.\n) print
+            } if
+            { %loop
+                /quitflag false def
+                //$error /newerror false put
+                /prompt load stopped {
+                    handleerror
+                    (Error during prompt execution\n) print exit
+                } if
+                { %stopped
+                    mark
+                    /stmtfile (%statementedit) (r) file def
+                } stopped {
+                    cleartomark
+                    //$error /newerror get {
+                        //$error /errorname get /undefinedfilename ne {
+                            handleerror
+                        } if
+                        //$error /newerror false put exit
+                    } if
+                }
+                {
+                    pop stmtfile end { %stopped
+                        cvx exec
+                    } stopped
+                    //execdict begin {
+                        handleerror
+                        stmtfile closefile
+                    } if
+                } ifelse
+                checkquit
+            } loop
+            false .setinteractivepaint
+            continueflag {
+                /continueflag false def
+                /execdepth execdepth 1 sub def
+            end % execdict
+            } {
+                /quitflag false def
+                /execdepth execdepth 1 sub def
+            end % execdict
+                //$error /doclose false put
+                stop
+            } ifelse
+        } {
+            (Only one level of executive allowed\n) print
+        } ifelse
+    } bind def
+end % systemdict
+
+false setglobal
+
+% PS-level quit (shadows native quit in userdict)
+/quit {
+    //$error /newerror false put
+    //execdict /quitflag true put stop
+} bind def
+
+
+systemdict begin
+    true setglobal
+    %% define some GhostScript compatibility functions
+    /.max {max} bind def
+    /.min {min} bind def
+
+    /runlibfile {run} def
+    /QUIET true def
+
+    % temp stuff
+    /dpage {showpage currentfile flushfile} bind def
+    /ppath {
+             (\nCurrent Path\n------------\n) print
+             {(moveto: ) print exch 20 string cvs print ( ) print ==}
+             {(lineto: ) print exch 20 string cvs print ( ) print ==}
+             {pop pop pop pop pop pop}
+             {(closepath) ==} pathforall
+           } bind def
+
+    %% File header operators
+    /@PJL {currentfile =string readline pop pop} bind def
+end
+
+%% Mark initialization as complete
+
+//$error /initializing false put
