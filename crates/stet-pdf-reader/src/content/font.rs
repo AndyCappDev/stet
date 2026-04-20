@@ -1725,39 +1725,18 @@ const EMBEDDED_FONTS: &[(&str, &[u8])] = &[
         include_bytes!("../../fonts/NimbusMonoPS-BoldItalic.t1"),
     ),
     // P052 (Palatino)
-    (
-        "P052-Roman",
-        include_bytes!("../../fonts/P052-Roman.t1"),
-    ),
-    (
-        "P052-Bold",
-        include_bytes!("../../fonts/P052-Bold.t1"),
-    ),
-    (
-        "P052-Italic",
-        include_bytes!("../../fonts/P052-Italic.t1"),
-    ),
+    ("P052-Roman", include_bytes!("../../fonts/P052-Roman.t1")),
+    ("P052-Bold", include_bytes!("../../fonts/P052-Bold.t1")),
+    ("P052-Italic", include_bytes!("../../fonts/P052-Italic.t1")),
     (
         "P052-BoldItalic",
         include_bytes!("../../fonts/P052-BoldItalic.t1"),
     ),
     // C059 (New Century Schoolbook)
-    (
-        "C059-Roman",
-        include_bytes!("../../fonts/C059-Roman.t1"),
-    ),
-    (
-        "C059-Bold",
-        include_bytes!("../../fonts/C059-Bold.t1"),
-    ),
-    (
-        "C059-Italic",
-        include_bytes!("../../fonts/C059-Italic.t1"),
-    ),
-    (
-        "C059-BdIta",
-        include_bytes!("../../fonts/C059-BdIta.t1"),
-    ),
+    ("C059-Roman", include_bytes!("../../fonts/C059-Roman.t1")),
+    ("C059-Bold", include_bytes!("../../fonts/C059-Bold.t1")),
+    ("C059-Italic", include_bytes!("../../fonts/C059-Italic.t1")),
+    ("C059-BdIta", include_bytes!("../../fonts/C059-BdIta.t1")),
     // URWBookman (Bookman)
     (
         "URWBookman-Light",
@@ -1797,10 +1776,7 @@ const EMBEDDED_FONTS: &[(&str, &[u8])] = &[
         "StandardSymbolsPS",
         include_bytes!("../../fonts/StandardSymbolsPS.t1"),
     ),
-    (
-        "D050000L",
-        include_bytes!("../../fonts/D050000L.t1"),
-    ),
+    ("D050000L", include_bytes!("../../fonts/D050000L.t1")),
     (
         "Z003-MediumItalic",
         include_bytes!("../../fonts/Z003-MediumItalic.t1"),
