@@ -1,0 +1,33 @@
+# Tell GitHub's linguist to exclude embedded / vendored / test content
+# from the repo's language-stats pie chart. None of these directories
+# contain source code we *write* — they're URW fonts shipped with the
+# binary, initialisation PS scripts, or ported test fixtures.
+#
+# The repo is a Rust project; the pie chart should say so.
+
+# Workspace-root resources embedded via include_bytes! (35 URW fonts,
+# init scripts, encodings, CMaps, ICC profile).
+resources/**           linguist-vendored
+
+# Per-crate copies of those resources — required for each crate tarball
+# to be self-contained at publish time, but not "source" in any
+# meaningful sense.
+crates/stet/resources/**       linguist-vendored
+crates/stet-pdf-reader/fonts/** linguist-vendored
+
+# Embedded CMYK ICC profile (binary, not language content).
+*.icc                  binary
+
+# Unit-test PostScript programs — ported verbatim from the sister
+# PostForge project; not language we maintain.
+unit_tests/**          linguist-vendored
+
+# Sample PS/EPS files kept for benchmarking and visual regression —
+# data, not source.
+ps_samples/**          linguist-vendored
+
+# Vendored tiny-skia forks — upstream code with local modifications
+# in a handful of files. Not ideal to mark wholly vendored, but for
+# first-impression stats the Rust-we-actually-wrote is elsewhere.
+crates/stet-tiny-skia/**       linguist-vendored
+crates/stet-tiny-skia-path/**  linguist-vendored
