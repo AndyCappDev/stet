@@ -27,4 +27,4 @@ stet-render = { path = "crates/stet-render", version = "0.1.0" }
 stet-pdf = { path = "crates/stet-pdf", version = "0.1.0" }
 stet-viewer = { path = "crates/stet-viewer", version = "0.1.0" }
 stet-pdf-reader = { path = "crates/stet-pdf-reader", version = "0.1.0" }
-stet = { path = "crates/stet", version = "0.1.0" }
+stet = { path = "crates/stet", version = "0.1.2" }
