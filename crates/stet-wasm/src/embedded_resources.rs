@@ -15,80 +15,80 @@ use stet_core::file_store::FileStore;
 use stet_pdf_reader::FontProvider;
 
 // Init scripts
-const SYSDICT_PS: &[u8] = include_bytes!("../../../resources/Init/sysdict.ps");
+const SYSDICT_PS: &[u8] = include_bytes!("../../stet/resources/Init/sysdict.ps");
 const RESOURCE_CATEGORIES_PS: &[u8] =
-    include_bytes!("../../../resources/Init/resourcecategories.ps");
-const FONT_CATEGORY_PS: &[u8] = include_bytes!("../../../resources/Init/fontcategory.ps");
-const FONT_MAPPING_PS: &[u8] = include_bytes!("../../../resources/Init/fontmapping.ps");
+    include_bytes!("../../stet/resources/Init/resourcecategories.ps");
+const FONT_CATEGORY_PS: &[u8] = include_bytes!("../../stet/resources/Init/fontcategory.ps");
+const FONT_MAPPING_PS: &[u8] = include_bytes!("../../stet/resources/Init/fontmapping.ps");
 
 // Encodings
 const STANDARD_ENCODING_PS: &[u8] =
-    include_bytes!("../../../resources/Encoding/StandardEncoding.ps");
+    include_bytes!("../../stet/resources/Encoding/StandardEncoding.ps");
 const ISO_LATIN1_ENCODING_PS: &[u8] =
-    include_bytes!("../../../resources/Encoding/ISOLatin1Encoding.ps");
-const SYMBOL_ENCODING_PS: &[u8] = include_bytes!("../../../resources/Encoding/SymbolEncoding.ps");
+    include_bytes!("../../stet/resources/Encoding/ISOLatin1Encoding.ps");
+const SYMBOL_ENCODING_PS: &[u8] = include_bytes!("../../stet/resources/Encoding/SymbolEncoding.ps");
 
 // ProcSet
-const CID_INIT_PS: &[u8] = include_bytes!("../../../resources/ProcSet/CIDInit.ps");
-const FONT_SET_INIT_PS: &[u8] = include_bytes!("../../../resources/ProcSet/FontSetInit.ps");
+const CID_INIT_PS: &[u8] = include_bytes!("../../stet/resources/ProcSet/CIDInit.ps");
+const FONT_SET_INIT_PS: &[u8] = include_bytes!("../../stet/resources/ProcSet/FontSetInit.ps");
 
 // CMap
-const IDENTITY_H_PS: &[u8] = include_bytes!("../../../resources/CMap/Identity-H.ps");
-const IDENTITY_V_PS: &[u8] = include_bytes!("../../../resources/CMap/Identity-V.ps");
+const IDENTITY_H_PS: &[u8] = include_bytes!("../../stet/resources/CMap/Identity-H.ps");
+const IDENTITY_V_PS: &[u8] = include_bytes!("../../stet/resources/CMap/Identity-V.ps");
 
 // Fonts — Core 13 families (17 font files covering the standard PostScript fonts)
 const NIMBUS_ROMAN_REGULAR: &[u8] =
-    include_bytes!("../../../resources/Font/NimbusRoman-Regular.t1");
-const NIMBUS_ROMAN_BOLD: &[u8] = include_bytes!("../../../resources/Font/NimbusRoman-Bold.t1");
-const NIMBUS_ROMAN_ITALIC: &[u8] = include_bytes!("../../../resources/Font/NimbusRoman-Italic.t1");
+    include_bytes!("../../stet/resources/Font/NimbusRoman-Regular.t1");
+const NIMBUS_ROMAN_BOLD: &[u8] = include_bytes!("../../stet/resources/Font/NimbusRoman-Bold.t1");
+const NIMBUS_ROMAN_ITALIC: &[u8] = include_bytes!("../../stet/resources/Font/NimbusRoman-Italic.t1");
 const NIMBUS_ROMAN_BOLD_ITALIC: &[u8] =
-    include_bytes!("../../../resources/Font/NimbusRoman-BoldItalic.t1");
+    include_bytes!("../../stet/resources/Font/NimbusRoman-BoldItalic.t1");
 const NIMBUS_SANS_REGULAR: &[u8] =
-    include_bytes!("../../../resources/Font/NimbusSans-Regular.t1");
-const NIMBUS_SANS_BOLD: &[u8] = include_bytes!("../../../resources/Font/NimbusSans-Bold.t1");
-const NIMBUS_SANS_ITALIC: &[u8] = include_bytes!("../../../resources/Font/NimbusSans-Italic.t1");
+    include_bytes!("../../stet/resources/Font/NimbusSans-Regular.t1");
+const NIMBUS_SANS_BOLD: &[u8] = include_bytes!("../../stet/resources/Font/NimbusSans-Bold.t1");
+const NIMBUS_SANS_ITALIC: &[u8] = include_bytes!("../../stet/resources/Font/NimbusSans-Italic.t1");
 const NIMBUS_SANS_BOLD_ITALIC: &[u8] =
-    include_bytes!("../../../resources/Font/NimbusSans-BoldItalic.t1");
+    include_bytes!("../../stet/resources/Font/NimbusSans-BoldItalic.t1");
 const NIMBUS_MONO_REGULAR: &[u8] =
-    include_bytes!("../../../resources/Font/NimbusMonoPS-Regular.t1");
-const NIMBUS_MONO_BOLD: &[u8] = include_bytes!("../../../resources/Font/NimbusMonoPS-Bold.t1");
+    include_bytes!("../../stet/resources/Font/NimbusMonoPS-Regular.t1");
+const NIMBUS_MONO_BOLD: &[u8] = include_bytes!("../../stet/resources/Font/NimbusMonoPS-Bold.t1");
 const NIMBUS_MONO_ITALIC: &[u8] =
-    include_bytes!("../../../resources/Font/NimbusMonoPS-Italic.t1");
+    include_bytes!("../../stet/resources/Font/NimbusMonoPS-Italic.t1");
 const NIMBUS_MONO_BOLD_ITALIC: &[u8] =
-    include_bytes!("../../../resources/Font/NimbusMonoPS-BoldItalic.t1");
-const STANDARD_SYMBOLS: &[u8] = include_bytes!("../../../resources/Font/StandardSymbolsPS.t1");
-const DINGBATS: &[u8] = include_bytes!("../../../resources/Font/D050000L.t1");
+    include_bytes!("../../stet/resources/Font/NimbusMonoPS-BoldItalic.t1");
+const STANDARD_SYMBOLS: &[u8] = include_bytes!("../../stet/resources/Font/StandardSymbolsPS.t1");
+const DINGBATS: &[u8] = include_bytes!("../../stet/resources/Font/D050000L.t1");
 const NIMBUS_SANS_NARROW_REGULAR: &[u8] =
-    include_bytes!("../../../resources/Font/NimbusSansNarrow-Regular.t1");
+    include_bytes!("../../stet/resources/Font/NimbusSansNarrow-Regular.t1");
 const NIMBUS_SANS_NARROW_BOLD: &[u8] =
-    include_bytes!("../../../resources/Font/NimbusSansNarrow-Bold.t1");
+    include_bytes!("../../stet/resources/Font/NimbusSansNarrow-Bold.t1");
 const NIMBUS_SANS_NARROW_OBLIQUE: &[u8] =
-    include_bytes!("../../../resources/Font/NimbusSansNarrow-Oblique.t1");
+    include_bytes!("../../stet/resources/Font/NimbusSansNarrow-Oblique.t1");
 const NIMBUS_SANS_NARROW_BOLD_OBLIQUE: &[u8] =
-    include_bytes!("../../../resources/Font/NimbusSansNarrow-BoldOblique.t1");
+    include_bytes!("../../stet/resources/Font/NimbusSansNarrow-BoldOblique.t1");
 
 // Extended fonts
-const P052_ROMAN: &[u8] = include_bytes!("../../../resources/Font/P052-Roman.t1");
-const P052_BOLD: &[u8] = include_bytes!("../../../resources/Font/P052-Bold.t1");
-const P052_ITALIC: &[u8] = include_bytes!("../../../resources/Font/P052-Italic.t1");
-const P052_BOLD_ITALIC: &[u8] = include_bytes!("../../../resources/Font/P052-BoldItalic.t1");
-const C059_ROMAN: &[u8] = include_bytes!("../../../resources/Font/C059-Roman.t1");
-const C059_BOLD: &[u8] = include_bytes!("../../../resources/Font/C059-Bold.t1");
-const C059_ITALIC: &[u8] = include_bytes!("../../../resources/Font/C059-Italic.t1");
-const C059_BD_ITA: &[u8] = include_bytes!("../../../resources/Font/C059-BdIta.t1");
-const URW_BOOKMAN_LIGHT: &[u8] = include_bytes!("../../../resources/Font/URWBookman-Light.t1");
-const URW_BOOKMAN_DEMI: &[u8] = include_bytes!("../../../resources/Font/URWBookman-Demi.t1");
+const P052_ROMAN: &[u8] = include_bytes!("../../stet/resources/Font/P052-Roman.t1");
+const P052_BOLD: &[u8] = include_bytes!("../../stet/resources/Font/P052-Bold.t1");
+const P052_ITALIC: &[u8] = include_bytes!("../../stet/resources/Font/P052-Italic.t1");
+const P052_BOLD_ITALIC: &[u8] = include_bytes!("../../stet/resources/Font/P052-BoldItalic.t1");
+const C059_ROMAN: &[u8] = include_bytes!("../../stet/resources/Font/C059-Roman.t1");
+const C059_BOLD: &[u8] = include_bytes!("../../stet/resources/Font/C059-Bold.t1");
+const C059_ITALIC: &[u8] = include_bytes!("../../stet/resources/Font/C059-Italic.t1");
+const C059_BD_ITA: &[u8] = include_bytes!("../../stet/resources/Font/C059-BdIta.t1");
+const URW_BOOKMAN_LIGHT: &[u8] = include_bytes!("../../stet/resources/Font/URWBookman-Light.t1");
+const URW_BOOKMAN_DEMI: &[u8] = include_bytes!("../../stet/resources/Font/URWBookman-Demi.t1");
 const URW_BOOKMAN_LIGHT_ITALIC: &[u8] =
-    include_bytes!("../../../resources/Font/URWBookman-LightItalic.t1");
+    include_bytes!("../../stet/resources/Font/URWBookman-LightItalic.t1");
 const URW_BOOKMAN_DEMI_ITALIC: &[u8] =
-    include_bytes!("../../../resources/Font/URWBookman-DemiItalic.t1");
-const URW_GOTHIC_BOOK: &[u8] = include_bytes!("../../../resources/Font/URWGothic-Book.t1");
-const URW_GOTHIC_DEMI: &[u8] = include_bytes!("../../../resources/Font/URWGothic-Demi.t1");
+    include_bytes!("../../stet/resources/Font/URWBookman-DemiItalic.t1");
+const URW_GOTHIC_BOOK: &[u8] = include_bytes!("../../stet/resources/Font/URWGothic-Book.t1");
+const URW_GOTHIC_DEMI: &[u8] = include_bytes!("../../stet/resources/Font/URWGothic-Demi.t1");
 const URW_GOTHIC_BOOK_OBLIQUE: &[u8] =
-    include_bytes!("../../../resources/Font/URWGothic-BookOblique.t1");
+    include_bytes!("../../stet/resources/Font/URWGothic-BookOblique.t1");
 const URW_GOTHIC_DEMI_OBLIQUE: &[u8] =
-    include_bytes!("../../../resources/Font/URWGothic-DemiOblique.t1");
-const Z003_MEDIUM_ITALIC: &[u8] = include_bytes!("../../../resources/Font/Z003-MediumItalic.t1");
+    include_bytes!("../../stet/resources/Font/URWGothic-DemiOblique.t1");
+const Z003_MEDIUM_ITALIC: &[u8] = include_bytes!("../../stet/resources/Font/Z003-MediumItalic.t1");
 
 /// Register all embedded resource files into the FileStore's virtual filesystem.
 ///
