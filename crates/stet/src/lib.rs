@@ -45,7 +45,7 @@
 //! | `render` | `render()` — RGBA pixel output | `stet-render` (tiny-skia) |
 //! | `pdf-output` | `render_to_pdf()` — PDF output | `stet-pdf` |
 
-mod embedded_resources;
+pub mod embedded_resources;
 mod init;
 
 use std::sync::{Arc, Mutex};

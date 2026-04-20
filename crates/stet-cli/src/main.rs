@@ -928,11 +928,19 @@ fn create_context(icc_cfg: &IccCliConfig) -> Context {
     ctx.exec_sync_fn = Some(stet_engine::eval::exec_sync);
     build_system_dict(&mut ctx);
 
-    // Discover the resources/ directory and set paths
-    let resource_path = find_resource_path();
-    if let Some(ref rp) = resource_path {
+    // Register the embedded resource tree (init scripts, encodings, fonts,
+    // CMaps, ICC profile) into the virtual filesystem. This is what the init
+    // scripts and findresource lookups consume — without it, the CLI would
+    // have to rely on an external resources/ directory.
+    stet::embedded_resources::register_all(&mut ctx.files);
+    ctx.font_resource_path = Some("Font".to_string());
+
+    // If a filesystem resources/ tree is adjacent to the binary (development
+    // builds, explicit install layouts), expose it so users can override or
+    // extend the embedded set with their own fonts/resources.
+    if let Some(rp) = find_resource_path() {
         ctx.resource_base_path = Some(rp.clone());
-        let font_path = PathBuf::from(rp).join("Font");
+        let font_path = PathBuf::from(&rp).join("Font");
         if font_path.is_dir() {
             ctx.font_resource_path = Some(font_path.to_string_lossy().to_string());
         }
