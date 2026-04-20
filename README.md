@@ -359,11 +359,11 @@ commit.
 
 ## Try it online
 
-A browser-based WASM sampler is coming — it'll let you drop a PS, EPS,
-or PDF file onto a page and see stet render it client-side without
-installing anything. Not deployed yet; follow the repo for updates.
+Try it at **<https://andycappdev.github.io/stet/>** — drop a PS, EPS,
+or PDF file onto the page and stet renders it client-side, no install
+required.
 
-When it lands, it'll be a **capability sampler, not a production viewer**:
+This is a **capability sampler, not a production viewer**:
 
 - **No system fonts.** A browser WASM sandbox can't reach the OS font
   directories, so font coverage is limited to the 35 URW fonts embedded
