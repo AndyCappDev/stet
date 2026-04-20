@@ -1,10 +1,10 @@
 [package]
 name = "stet-fonts"
-version.workspace = true
+version = "0.1.1"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Font parsing and geometry types for the stet PostScript interpreter"
+description = "Pure-Rust Type 1, CFF / Type 2, and TrueType font parsers plus geometry types, usable standalone or inside stet's PostScript and PDF pipelines"
 repository.workspace = true
 homepage.workspace = true
 keywords = ["postscript", "font", "type1", "truetype", "cff"]

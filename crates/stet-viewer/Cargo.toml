@@ -1,10 +1,10 @@
 [package]
 name = "stet-viewer"
-version.workspace = true
+version = "0.1.1"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Interactive egui viewer for stet PostScript interpreter"
+description = "Interactive egui desktop viewer for PostScript, EPS, and PDF files"
 repository.workspace = true
 homepage.workspace = true
 keywords = ["postscript", "pdf", "viewer", "gui"]

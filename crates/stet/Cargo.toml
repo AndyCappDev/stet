@@ -1,10 +1,10 @@
 [package]
 name = "stet"
-version.workspace = true
+version = "0.1.1"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "PostScript Level 3 interpreter — library API"
+description = "PostScript Level 3 interpreter and PDF rendering engine — library API"
 repository.workspace = true
 homepage.workspace = true
 keywords = ["postscript", "pdf", "interpreter", "rendering", "graphics"]
