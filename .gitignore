@@ -14,3 +14,11 @@ more_pdf_samples/
 # AI-assistant files — local only, never committed
 CLAUDE.md
 .claude/
+
+# Internal planning docs — kept locally, not tracked / never committed.
+# Anything living under docs/ with the PUBLISH-*, PLAN-*, or TODO-* prefix
+# stays out of the public repo. Generic project docs (ARCHITECTURE.md,
+# DISPLAY-LIST.md, VIEWER-GUIDE.md) continue to track normally.
+docs/PUBLISH-*.md
+docs/PLAN-*.md
+docs/TODO-*.md
