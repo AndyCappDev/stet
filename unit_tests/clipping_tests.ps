@@ -43,7 +43,7 @@ gsave
   clip
   clippath pathbbox
   /ury exch def /urx exch def /lly exch def /llx exch def
-  % Second clip replaces first (PostForge does not compute true intersection)
+  % Second clip replaces first (stet does not compute true intersection)
   llx 100 ge [true] assert
   lly 100 ge [true] assert
 grestore

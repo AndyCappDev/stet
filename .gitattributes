@@ -5,21 +5,17 @@
 #
 # The repo is a Rust project; the pie chart should say so.
 
-# Workspace-root resources embedded via include_bytes! (35 URW fonts,
-# init scripts, encodings, CMaps, ICC profile).
-resources/**           linguist-vendored
-
-# Per-crate copies of those resources — required for each crate tarball
-# to be self-contained at publish time, but not "source" in any
-# meaningful sense.
+# Embedded resources for the stet library (35 URW fonts, init scripts,
+# encodings, CMaps, ICC profile) — shipped with the published crate
+# via include_bytes!.
 crates/stet/resources/**       linguist-vendored
 crates/stet-pdf-reader/fonts/** linguist-vendored
 
 # Embedded CMYK ICC profile (binary, not language content).
 *.icc                  binary
 
-# Unit-test PostScript programs — ported verbatim from the sister
-# PostForge project; not language we maintain.
+# Unit-test PostScript programs — ported test fixtures, not language
+# we maintain.
 unit_tests/**          linguist-vendored
 
 # Sample PS/EPS files kept for benchmarking and visual regression —

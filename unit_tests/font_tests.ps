@@ -5,7 +5,7 @@ userdict /$unittest known not {(unit_tests/unittest.ps) run} if
 
 %!PS-Adobe-3.0
 %%Title: Font Resource Unit Tests
-%%Creator: PostForge Testing Framework
+%%Creator: stet Testing Framework
 %%EndComments
 
 % Font Resource Tests %%
@@ -169,7 +169,7 @@ setglobal  % Restore original mode
 % Should execute without error
 
 % Test finding fonts that don't exist
-% PostForge implements font substitution: when a requested font is not found,
+% stet implements font substitution: when a requested font is not found,
 % it substitutes the default font (Helvetica) rather than raising undefinedresource.
 % This provides graceful degradation for documents using unavailable fonts.
 % The substituted font dictionary has its FontName rewritten to the requested name
