@@ -1,0 +1,153 @@
+%!PS-Adobe-3.0 Resource-ProcSet
+%%Title: CIDInit
+%%Creator: PostForge
+%%VMusage: 4000 200
+%%EndComments
+
+% CIDInit ProcSet - provides CMap construction operators
+% Used by CID-keyed font infrastructure (Adobe CMap files, CUPS output, etc.)
+
+<<
+    /Title (CID Init)
+    /Version 1.0
+    /Revision 0
+
+    % ---- CMap construction operators ----
+
+    /begincmap {
+        % Mark start of CMap definition
+        % The CMap dict should already be on the dict stack
+    } bind
+
+    /endcmap {
+        % Finalize the CMap
+        % Build a CodeMap array from collected mappings if not already present
+        currentdict /CIDCharMappings known
+        currentdict /CIDRangeMappings known or
+        currentdict /BFCharMappings known or
+        currentdict /BFRangeMappings known or {
+            % Collect all mappings into a single CodeMap array
+            [
+                currentdict /CIDCharMappings known {
+                    currentdict /CIDCharMappings get aload pop
+                } if
+                currentdict /CIDRangeMappings known {
+                    currentdict /CIDRangeMappings get aload pop
+                } if
+                currentdict /BFCharMappings known {
+                    currentdict /BFCharMappings get aload pop
+                } if
+                currentdict /BFRangeMappings known {
+                    currentdict /BFRangeMappings get aload pop
+                } if
+            ]
+            currentdict exch /CodeMap exch put
+        } if
+    } bind
+
+    /begincodespacerange {
+        % n begincodespacerange -
+        /.codespacecount exch def
+    } bind
+
+    /endcodespacerange {
+        % lo1 hi1 ... lon hin endcodespacerange -
+        % Collect n pairs into CodeSpaceRange array
+        .codespacecount 2 mul array astore
+        currentdict exch /CodeSpaceRange exch put
+    } bind
+
+    /usefont {
+        % fontnum usefont -
+        currentdict exch /CurrentFontNum exch put
+    } bind
+
+    /begincidchar {
+        % n begincidchar -
+        /.cidcharcount exch def
+    } bind
+
+    /endcidchar {
+        % src1 dst1 ... srcn dstn endcidchar -
+        .cidcharcount 2 mul array astore
+        currentdict exch /CIDCharMappings exch put
+    } bind
+
+    /begincidrange {
+        % n begincidrange -
+        /.cidrangecount exch def
+    } bind
+
+    /endcidrange {
+        % srclo1 srchi1 dstcid1 ... srclon srhin dstcidn endcidrange -
+        .cidrangecount 3 mul array astore
+        currentdict exch /CIDRangeMappings exch put
+    } bind
+
+    /beginbfchar {
+        % n beginbfchar -
+        /.bfcharcount exch def
+    } bind
+
+    /endbfchar {
+        % src1 dst1 ... srcn dstn endbfchar -
+        .bfcharcount 2 mul array astore
+        currentdict exch /BFCharMappings exch put
+    } bind
+
+    /beginbfrange {
+        % n beginbfrange -
+        /.bfrangecount exch def
+    } bind
+
+    /endbfrange {
+        % srclo1 srchi1 dst1 ... srclon srhin dstn endbfrange -
+        .bfrangecount 3 mul array astore
+        currentdict exch /BFRangeMappings exch put
+    } bind
+
+    /beginnotdefchar {
+        % n beginnotdefchar -
+        /.notdefcharcount exch def
+    } bind
+
+    /endnotdefchar {
+        % src1 dst1 ... srcn dstn endnotdefchar -
+        .notdefcharcount 2 mul array astore
+        currentdict exch /NotDefCharMappings exch put
+    } bind
+
+    /beginnotdefrange {
+        % n beginnotdefrange -
+        /.notdefrangecount exch def
+    } bind
+
+    /endnotdefrange {
+        % srclo1 srchi1 dst1 ... srclon srhin dstn endnotdefrange -
+        .notdefrangecount 3 mul array astore
+        currentdict exch /NotDefRangeMappings exch put
+    } bind
+
+    /beginusematrix {
+        % fontnum beginusematrix -
+        /.usematrixfontnum exch def
+    } bind
+
+    /endusematrix {
+        % matrix endusematrix -
+        currentdict exch .usematrixfontnum exch put
+    } bind
+
+    /usecmap {
+        % name usecmap -
+        /CMap findresource
+        currentdict exch /UseCMap exch put
+    } bind
+
+    /StartData {
+        % string int StartData -
+        % Handle binary CIDFont data - consume and ignore for now
+        pop pop
+    } bind
+
+>> % CIDInit ProcSet dictionary
