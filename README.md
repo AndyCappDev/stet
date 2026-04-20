@@ -3,10 +3,23 @@
 <p align="center">A modern, open-source PostScript and PDF rendering engine written in pure Rust.</p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-0.1.0-blue" alt="Version 0.1.0">
+  <img src="https://img.shields.io/badge/Version-0.1.2-blue" alt="Version 0.1.2">
   <img src="https://img.shields.io/badge/License-Apache--2.0_OR_MIT-green" alt="License Apache-2.0 OR MIT">
   <img src="https://img.shields.io/badge/Rust-1.85+-orange" alt="Rust 1.85+">
 </p>
+
+> **Upgrade notice for `stet-cli` users** — versions **0.1.0** and **0.1.1**
+> have been yanked from crates.io. Both shipped without embedded-resource
+> registration, so the `stet` binary fell back to a PNG-writing rasterizer
+> whenever you opened a PostScript file in the interactive viewer. **0.1.2**
+> is self-contained and fixes this. If you previously ran `cargo install
+> stet-cli`, upgrade with:
+>
+> ```
+> cargo install stet-cli --force
+> ```
+>
+> The `stet` library crate (used via `Interpreter`) was never affected.
 
 ## About
 
