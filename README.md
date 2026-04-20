@@ -19,31 +19,6 @@ The PostScript interpreter and PDF reader are independent — use either or
 both — but they produce the same display list type, so every output device
 and rendering path works with both sources.
 
-### Try it online
-
-<!-- The URL below follows GitHub's project-Pages convention for
-     AndyCappDev/stet. Pages deployment itself is still pending — see
-     docs/PUBLISH-TODO.md. -->
-A browser-based WASM build lives at
-**[andycappdev.github.io/stet](https://andycappdev.github.io/stet/)** —
-drop a PS, EPS, or PDF on the page and stet renders it client-side.
-
-The online build is a **capability sampler, not a production viewer**. It
-exists so you can check stet's rendering quality on your own files before
-installing anything. In particular:
-
-- **No system fonts.** A browser WASM sandbox can't reach the OS font
-  directories, so font coverage is limited to the 35 URW fonts embedded
-  in the binary plus whatever the source PDF embeds. Documents that
-  expect a specific unembedded font will fall back to a URW substitute.
-- **Fixed zoom stops** (fit, 75, 150, 300, 600 DPI) rather than
-  arbitrary zoom — re-rasterizing at every scroll was too slow in
-  single-threaded WASM to feel responsive.
-- **Single-threaded WASM.** No rayon parallelism. Rendering is ~2× slower
-  than native stet.
-
-For production work, use the native crates below.
-
 ### Display List Architecture
 
 Unlike rendering engines that interpret and rasterize in a single pass,
@@ -368,6 +343,26 @@ working; the fetcher drops new corpora into their own subdirs
 tree so both flat and subdir layouts are picked up. Corpus
 subdirectories are gitignored — nothing third-party lands in a
 commit.
+
+## Try it online
+
+A browser-based WASM sampler is coming — it'll let you drop a PS, EPS,
+or PDF file onto a page and see stet render it client-side without
+installing anything. Not deployed yet; follow the repo for updates.
+
+When it lands, it'll be a **capability sampler, not a production viewer**:
+
+- **No system fonts.** A browser WASM sandbox can't reach the OS font
+  directories, so font coverage is limited to the 35 URW fonts embedded
+  in the binary plus whatever the source PDF embeds. Documents that
+  expect a specific unembedded font will fall back to a URW substitute.
+- **Fixed zoom stops** (fit, 75, 150, 300, 600 DPI) rather than
+  arbitrary zoom — re-rasterizing at every scroll was too slow in
+  single-threaded WASM to feel responsive.
+- **Single-threaded WASM.** No rayon parallelism. Rendering is ~2× slower
+  than native stet.
+
+For production work, use the native crates documented above.
 
 ## Acknowledgements
 
