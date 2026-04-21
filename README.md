@@ -80,8 +80,29 @@ for repeated renders at different resolutions. See the
 - Overprint and overprint mode (OPM) for both rasterizer simulation and PDF output
 - Transfer functions, halftone screens, black generation, and undercolor removal carried per display element
 - Rendering intent preservation
-- PDF/X-3 OutputIntent with ICC output profile embedding
 - Trim box support
+
+## Rendering Correctness
+
+Two issues that plague most PDF and PostScript renderers are handled
+correctly here:
+
+- **No seams on shared clip edges.** Anti-aliased clip masks produce
+  visible seams where adjacent clipped regions meet — the background
+  bleeds through the softened edge. stet uses binary clip coverage
+  instead, so AGM (Adobe Graphics Manager) EPS exports and other
+  heavily-clipped artwork render without artifacts.
+- **Overprint simulation.** Overprint is a print-workflow feature
+  where the painter combines with the canvas below instead of
+  replacing it. Correct simulation requires honest CMYK blend math,
+  knockout group handling, and spot channel preservation — work most
+  on-screen renderers skip because it doesn't affect a browser preview.
+  stet implements it, so PDF/X-4 files, GWG test pages, and prepress
+  proofs render the way a print operator expects, not the way a
+  browser renders them.
+
+If you're doing prepress, proofing, or any color-separated output,
+these matter more than raw rendering speed.
 
 ## Library Usage
 

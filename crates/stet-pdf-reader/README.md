@@ -9,6 +9,16 @@ for rendering.
 This crate has **no dependency on stet-core** — it depends only on `stet-fonts`
 and `stet-graphics`, making it usable independently of the PostScript interpreter.
 
+## Rendering Correctness
+
+The display list produced by `stet-pdf-reader` preserves overprint, spot
+colors, knockout groups, and ICC-based CMYK blend math — features most
+lightweight PDF renderers drop because they don't affect on-screen preview.
+Combined with binary clip coverage in the `stet-render` backend, this makes
+the output suitable for prepress and proofing, not just viewing. See the
+[repository README](https://github.com/AndyCappDev/stet#rendering-correctness)
+for detail.
+
 ## Contents
 
 - **`PdfDocument`** — Main entry point: parse a PDF, enumerate pages, render to display lists

@@ -9,6 +9,15 @@ A PostScript Level 3 interpreter and PDF rendering engine written in Rust.
 display lists. All resources (35 fonts, init scripts, encodings, ICC profiles)
 are embedded in the binary — no external files needed.
 
+## Rendering Correctness
+
+stet handles two rendering issues that most PDF/PostScript renderers get
+wrong: no seams on adjacent clipped regions (binary clip coverage, not
+anti-aliased), and full overprint simulation with CMYK blend math, knockout
+groups, and spot channel preservation. See the [repository
+README](https://github.com/AndyCappDev/stet#rendering-correctness) for
+detail — it matters for prepress and proofing workflows.
+
 ## Quick Start
 
 ```toml
