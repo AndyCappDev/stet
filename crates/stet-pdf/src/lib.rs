@@ -10,8 +10,7 @@
 //! PDF constructs. It preserves the full fidelity of the source, including
 //! native CMYK and spot colours (without a lossy RGB round-trip),
 //! transfer functions, halftone screens, black-generation / undercolour
-//! removal, overprint settings, rendering intent, trim boxes, and ICC
-//! output profiles (PDF/X-3 OutputIntent).
+//! removal, overprint settings, rendering intent, and trim boxes.
 //!
 //! Fonts are subsetted to the glyphs actually used on the page, with
 //! per-font ToUnicode CMaps for text extraction and search.

@@ -390,26 +390,12 @@ fn run_pdf_mode(
     _no_aa: bool,
     page_filter: Option<std::collections::HashSet<i32>>,
 ) {
-    // Read profile bytes for PDF embedding (create_context already validated the path)
-    let output_profile_bytes: Option<Vec<u8>> = if !icc_cfg.no_icc {
-        icc_cfg
-            .output_profile_path
-            .as_ref()
-            .and_then(|p| std::fs::read(p).ok())
-    } else {
-        None
-    };
-
     let mut ctx = create_context(icc_cfg);
     ctx.page_filter = page_filter;
     let dpi_val = dpi_override.unwrap_or(300.0);
 
     ctx.device_factory = Some(Box::new(move |w, h| {
-        let mut dev = PdfDevice::new(w, h, dpi_val);
-        if let Some(ref bytes) = output_profile_bytes {
-            dev.set_output_profile(bytes.clone());
-        }
-        Box::new(dev)
+        Box::new(PdfDevice::new(w, h, dpi_val))
     }));
 
     if !file_args.is_empty() {

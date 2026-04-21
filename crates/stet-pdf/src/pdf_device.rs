@@ -41,7 +41,9 @@ pub struct PdfDevice {
     dpi: f64,
     output_path: Option<String>,
     pending_trim_box: Option<(f64, f64, f64, f64)>,
-    /// ICC output profile for PDF/X-3 OutputIntent embedding.
+    /// ICC output profile bytes, retained for forward compatibility with a
+    /// future PDF/X-4 OutputIntent implementation. Currently unused.
+    #[allow(dead_code)]
     output_profile: Option<Vec<u8>>,
 }
 
@@ -64,7 +66,17 @@ impl PdfDevice {
         self.pending_trim_box = Some((llx, lly, urx, ury));
     }
 
-    /// Set an ICC output profile for PDF/X-3 OutputIntent embedding.
+    /// Set an ICC output profile.
+    ///
+    /// Previously embedded as a PDF/X-3 OutputIntent, but the emitted output
+    /// contained transparency features (soft masks) that PDF/X-3 prohibits.
+    /// The OutputIntent emission path has been removed pending a correct
+    /// PDF/X-4 implementation; calling this currently has no effect on the
+    /// output. The setter is retained so the API is forward-compatible with
+    /// the eventual X-4 work.
+    #[deprecated(
+        note = "OutputIntent emission is temporarily disabled pending PDF/X-4 support; calling this has no effect"
+    )]
     pub fn set_output_profile(&mut self, bytes: Vec<u8>) {
         self.output_profile = Some(bytes);
     }
@@ -170,38 +182,10 @@ impl PdfDevice {
         );
 
         // Catalog
-        let mut catalog_entries = vec![
+        let catalog_entries = vec![
             (b"Type".to_vec(), PdfObj::name("Catalog")),
             (b"Pages".to_vec(), PdfObj::Ref(pages_ref)),
         ];
-
-        // OutputIntent for PDF/X-3 (when output profile is provided)
-        if let Some(ref profile_bytes) = self.output_profile {
-            let (n, description) = parse_icc_header(profile_bytes);
-            let icc_stream_ref = writer.add_stream(
-                vec![(b"N".to_vec(), PdfObj::Int(n as i64))],
-                profile_bytes,
-                true,
-            );
-            let output_intent = PdfObj::Dict(vec![
-                (b"Type".to_vec(), PdfObj::name("OutputIntent")),
-                (b"S".to_vec(), PdfObj::name("GTS_PDFX")),
-                (
-                    b"OutputConditionIdentifier".to_vec(),
-                    PdfObj::LitString(description.as_bytes().to_vec()),
-                ),
-                (
-                    b"Info".to_vec(),
-                    PdfObj::LitString(description.as_bytes().to_vec()),
-                ),
-                (b"DestOutputProfile".to_vec(), PdfObj::Ref(icc_stream_ref)),
-            ]);
-            let intent_ref = writer.add_object(&output_intent);
-            catalog_entries.push((
-                b"OutputIntents".to_vec(),
-                PdfObj::Array(vec![PdfObj::Ref(intent_ref)]),
-            ));
-        }
 
         writer.set_object(catalog_ref, &PdfObj::Dict(catalog_entries));
 
@@ -243,12 +227,6 @@ impl PdfDevice {
             info_entries.push((
                 b"CreationDate".to_vec(),
                 PdfObj::LitString(date_str.into_bytes()),
-            ));
-        }
-        if self.output_profile.is_some() {
-            info_entries.push((
-                b"GTS_PDFXVersion".to_vec(),
-                PdfObj::LitString(b"PDF/X-3:2003".to_vec()),
             ));
         }
         writer.set_object(info_ref, &PdfObj::Dict(info_entries));
@@ -1064,6 +1042,10 @@ impl OutputDevice for PdfDevice {
 ///
 /// Returns (N, description) where N is derived from the color space signature
 /// at bytes 16–19 and description is extracted from the `desc` or `mluc` tag.
+///
+/// Currently unused — kept for forward compatibility with the planned
+/// PDF/X-4 OutputIntent implementation.
+#[allow(dead_code)]
 fn parse_icc_header(data: &[u8]) -> (u32, String) {
     let n = if data.len() >= 20 {
         match &data[16..20] {
@@ -1083,6 +1065,7 @@ fn parse_icc_header(data: &[u8]) -> (u32, String) {
 /// Extract the profile description from an ICC profile's tag table.
 ///
 /// Looks for the `desc` tag (v2, type 'desc') or `mluc` tag (v4, type 'mluc').
+#[allow(dead_code)]
 fn extract_icc_description(data: &[u8]) -> Option<String> {
     if data.len() < 132 {
         return None;

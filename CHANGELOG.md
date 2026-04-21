@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`stet-pdf`**: removed the PDF/X-3 OutputIntent emission. The writer was
+  emitting soft-mask transparency (prohibited by PDF/X-3) while labelling
+  output as `PDF/X-3:2003` — a conformance conflict that any preflight tool
+  would flag. PDF output is now a plain PDF 1.7 document with no PDF/X
+  conformance claim. A correct PDF/X-4 implementation is planned.
+- **`stet-pdf`**: `PdfDevice::set_output_profile()` is now a `#[deprecated]`
+  no-op. The method and the private `output_profile` field are retained
+  for forward API compatibility with the planned PDF/X-4 work.
+
+### Added (documentation)
+
+- New **Rendering Correctness** section in the root README covering
+  seam-free rendering on adjacent clipped regions and full overprint
+  simulation — the two places where stet meaningfully outperforms most
+  open-source PDF/PS renderers.
+
 ## [0.1.0] — 2026-04-18
 
 Initial public release.

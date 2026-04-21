@@ -38,7 +38,6 @@ and its associated graphics state into the corresponding PDF constructs:
 | Halftone screens | ExtGState with `/HT` (Type 1/5 halftone dictionaries) |
 | Black generation / UCR | ExtGState with `/BG2`, `/UCR2` (sampled functions) |
 | Trim box | Per-page `/TrimBox` |
-| ICC output profile | PDF/X-3 OutputIntent with `/DestOutputProfile` |
 
 ### Images
 
