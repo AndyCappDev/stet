@@ -8,19 +8,6 @@
   <img src="https://img.shields.io/badge/Rust-1.85+-orange" alt="Rust 1.85+">
 </p>
 
-> **Upgrade notice for `stet-cli` users** — versions **0.1.0** and **0.1.1**
-> have been yanked from crates.io. Both shipped without embedded-resource
-> registration, so the `stet` binary fell back to a PNG-writing rasterizer
-> whenever you opened a PostScript file in the interactive viewer. **0.1.2**
-> is self-contained and fixes this. If you previously ran `cargo install
-> stet-cli`, upgrade with:
->
-> ```
-> cargo install stet-cli --force
-> ```
->
-> The `stet` library crate (used via `Interpreter`) was never affected.
-
 ## About
 
 stet interprets PostScript (Level 3) and parses PDF files, rendering both
@@ -32,16 +19,48 @@ The PostScript interpreter and PDF reader are independent — use either or
 both — but they produce the same display list type, so every output device
 and rendering path works with both sources.
 
-### Display List Architecture
+## Try it online
+
+Try it at **<https://andycappdev.github.io/stet/>** — drop a PS, EPS,
+or PDF file onto the page and stet renders it client-side, no install
+required.
+
+This is a **capability sampler, not a production viewer**:
+
+- **No system fonts.** A browser WASM sandbox can't reach the OS font
+  directories, so font coverage is limited to the 35 URW fonts embedded
+  in the binary plus whatever the source PDF embeds. Documents that
+  expect a specific unembedded font will fall back to a URW substitute.
+- **Fixed zoom stops** (fit, 75, 150, 300, 600 DPI) rather than
+  arbitrary zoom — re-rasterizing at every scroll was too slow in
+  single-threaded WASM to feel responsive.
+- **Single-threaded WASM.** No rayon parallelism. Rendering is ~2× slower
+  than native stet.
+
+For production work, use the native crates documented below.
+
+## Display List Architecture
 
 Unlike rendering engines that interpret and rasterize in a single pass,
 stet decouples the two: interpreters produce an intermediate **display
-list**, and rendering is a separate step that consumes it. This enables
-viewport rendering at arbitrary zoom without re-interpretation, pipelined
-multi-page rendering, trivial cancellation between render bands, multiple
-output formats from a single interpretation pass, and display list caching
-for repeated renders at different resolutions. See the
-[Architecture Guide](docs/ARCHITECTURE.md) for details.
+list**, and rendering is a separate step that consumes it.
+
+The display list is a public, iterable Rust data structure — a flat
+sequence of painting operations (fills, strokes, images, shadings,
+text, groups, clips) that you can walk directly. Emit SVG, extract
+structured text or metadata, diff two documents, transform the list
+before rendering, feed it to an analysis or ML pipeline, or build a
+custom renderer for a non-standard target. Few rendering engines
+expose this layer; stet treats it as the interchange format between
+parser and consumer — use it for anything you want.
+
+This decoupling also enables viewport rendering at arbitrary zoom
+without re-interpretation, pipelined multi-page rendering, trivial
+cancellation between render bands, multiple output formats from a
+single interpretation pass, and display list caching for repeated
+renders at different resolutions. See the
+[Architecture Guide](docs/ARCHITECTURE.md) and
+[Display List Reference](docs/DISPLAY-LIST.md) for details.
 
 ## Features
 
@@ -95,11 +114,16 @@ correctly here:
 - **Overprint simulation.** Overprint is a print-workflow feature
   where the painter combines with the canvas below instead of
   replacing it. Correct simulation requires honest CMYK blend math,
-  knockout group handling, and spot channel preservation — work most
-  on-screen renderers skip because it doesn't affect a browser preview.
-  stet implements it, so PDF/X-4 files, GWG test pages, and prepress
-  proofs render the way a print operator expects, not the way a
-  browser renders them.
+  knockout group handling, and spot channel preservation — complexity
+  that most on-screen renderers skip for historical reasons, treating
+  overprint as a print-only concern. The result is that documents
+  relying on it render visibly wrong everywhere: Firefox/pdf.js,
+  Okular/poppler, Chromium/pdfium, and most others all show incorrect
+  colours on PDF/X-4 files and the Ghent Workgroup (GWG) conformance
+  test suite. Only Adobe Acrobat gets it right — and stet. Overprint
+  support in stet is actively being hardened: the common cases and
+  most GWG conformance files render correctly today, but stet is not
+  yet bug-for-bug Acrobat parity on every edge case.
 
 If you're doing prepress, proofing, or any color-separated output,
 these matter more than raw rendering speed.
@@ -377,26 +401,6 @@ working; the fetcher drops new corpora into their own subdirs
 tree so both flat and subdir layouts are picked up. Corpus
 subdirectories are gitignored — nothing third-party lands in a
 commit.
-
-## Try it online
-
-Try it at **<https://andycappdev.github.io/stet/>** — drop a PS, EPS,
-or PDF file onto the page and stet renders it client-side, no install
-required.
-
-This is a **capability sampler, not a production viewer**:
-
-- **No system fonts.** A browser WASM sandbox can't reach the OS font
-  directories, so font coverage is limited to the 35 URW fonts embedded
-  in the binary plus whatever the source PDF embeds. Documents that
-  expect a specific unembedded font will fall back to a URW substitute.
-- **Fixed zoom stops** (fit, 75, 150, 300, 600 DPI) rather than
-  arbitrary zoom — re-rasterizing at every scroll was too slow in
-  single-threaded WASM to feel responsive.
-- **Single-threaded WASM.** No rayon parallelism. Rendering is ~2× slower
-  than native stet.
-
-For production work, use the native crates documented above.
 
 ## Acknowledgements
 
