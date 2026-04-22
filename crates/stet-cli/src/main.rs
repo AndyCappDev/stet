@@ -89,6 +89,8 @@ fn main() {
     let mut use_output_intent = true;
     let mut pages_spec: Option<String> = None;
     let mut password: Option<String> = None;
+    let mut target_width: Option<u32> = None;
+    let mut target_height: Option<u32> = None;
     let mut file_args: Vec<String> = Vec::new();
     let mut i = 1;
     while i < args.len() {
@@ -217,6 +219,40 @@ fn main() {
                     std::process::exit(1);
                 }
             }
+            "--width" => {
+                if i + 1 < args.len() {
+                    target_width = Some(args[i + 1].parse().unwrap_or_else(|_| {
+                        eprintln!("Error: invalid --width value '{}'", args[i + 1]);
+                        std::process::exit(1);
+                    }));
+                    if target_width == Some(0) {
+                        eprintln!("Error: --width must be at least 1");
+                        std::process::exit(1);
+                    }
+                    i += 2;
+                    continue;
+                } else {
+                    eprintln!("Error: --width requires a pixel value");
+                    std::process::exit(1);
+                }
+            }
+            "--height" => {
+                if i + 1 < args.len() {
+                    target_height = Some(args[i + 1].parse().unwrap_or_else(|_| {
+                        eprintln!("Error: invalid --height value '{}'", args[i + 1]);
+                        std::process::exit(1);
+                    }));
+                    if target_height == Some(0) {
+                        eprintln!("Error: --height must be at least 1");
+                        std::process::exit(1);
+                    }
+                    i += 2;
+                    continue;
+                } else {
+                    eprintln!("Error: --height requires a pixel value");
+                    std::process::exit(1);
+                }
+            }
             _ => {}
         }
         file_args.push(args[i].clone());
@@ -229,6 +265,10 @@ fn main() {
     }
     if no_icc && bpc_explicit {
         eprintln!("Error: --bpc cannot be combined with --no-icc");
+        std::process::exit(1);
+    }
+    if (target_width.is_some() || target_height.is_some()) && dpi.is_some() {
+        eprintln!("Error: --width/--height cannot be combined with --dpi");
         std::process::exit(1);
     }
 
@@ -282,6 +322,16 @@ fn main() {
         })
     });
 
+    if (target_width.is_some() || target_height.is_some())
+        && !matches!(device.as_str(), "png" | "viewport-png")
+    {
+        eprintln!(
+            "Error: --width/--height is only supported for --device png (got '{}')",
+            device
+        );
+        std::process::exit(1);
+    }
+
     match device.as_str() {
         "png" => {
             run_png_mode(
@@ -292,6 +342,8 @@ fn main() {
                 page_filter,
                 false,
                 password.as_deref(),
+                target_width,
+                target_height,
             );
         }
         "viewport-png" => {
@@ -306,6 +358,8 @@ fn main() {
                 page_filter,
                 true,
                 password.as_deref(),
+                target_width,
+                target_height,
             );
         }
         "pdf" => {
@@ -336,6 +390,7 @@ fn main() {
 /// through the viewport pipeline (same code path the interactive viewer
 /// uses) instead of the banded full-page pipeline — this is the audit mode
 /// behind `--device viewport-png`.
+#[allow(clippy::too_many_arguments)]
 fn run_png_mode(
     dpi_override: Option<f64>,
     file_args: Vec<String>,
@@ -344,6 +399,8 @@ fn run_png_mode(
     page_filter: Option<std::collections::HashSet<i32>>,
     use_viewport: bool,
     password: Option<&str>,
+    target_width: Option<u32>,
+    target_height: Option<u32>,
 ) {
     // Check if all files are PDFs — use fast path (no PS interpreter needed)
     if !file_args.is_empty() && file_args.iter().all(|f| is_pdf_file(f)) {
@@ -356,8 +413,17 @@ fn run_png_mode(
             use_viewport,
             icc_cfg,
             password,
+            target_width,
+            target_height,
         );
         return;
+    }
+
+    if target_width.is_some() || target_height.is_some() {
+        eprintln!(
+            "Error: --width/--height is not yet supported for PostScript input — use --dpi for now"
+        );
+        std::process::exit(1);
     }
 
     let mut ctx = create_context(icc_cfg);
@@ -1617,24 +1683,68 @@ fn render_dropped_pdf(
 /// Render a single PDF page to RGBA with configurable anti-aliasing.
 /// When `use_viewport` is true, rendering is routed through the viewport
 /// pipeline so visual tests can audit that path against the same baseline.
+/// Compute aspect-preserving fit dimensions.
+///
+/// Given the source page's point dimensions and optional target pixel
+/// dimensions (at least one of which must be `Some`), returns
+/// `(output_width_px, output_height_px, effective_dpi)`. The output
+/// aspect ratio matches the input; when both targets are given, the
+/// smaller of the two scale factors wins (the page fits *inside* the
+/// target box).
+fn compute_fit_dims(
+    page_w_pt: f64,
+    page_h_pt: f64,
+    target_w: Option<u32>,
+    target_h: Option<u32>,
+) -> (u32, u32, f64) {
+    let scale = match (target_w, target_h) {
+        (Some(w), Some(h)) => {
+            let sx = w as f64 / page_w_pt;
+            let sy = h as f64 / page_h_pt;
+            sx.min(sy)
+        }
+        (Some(w), None) => w as f64 / page_w_pt,
+        (None, Some(h)) => h as f64 / page_h_pt,
+        (None, None) => {
+            // Caller contract: at least one must be Some. This branch is
+            // unreachable in correct CLI flow.
+            return (page_w_pt.round() as u32, page_h_pt.round() as u32, 72.0);
+        }
+    };
+    let dpi = scale * 72.0;
+    let out_w = ((page_w_pt * scale).round().max(1.0)) as u32;
+    let out_h = ((page_h_pt * scale).round().max(1.0)) as u32;
+    (out_w, out_h, dpi)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn render_pdf_page_to_rgba(
     doc: &PdfDocument,
     page: usize,
     dpi: f64,
     no_aa: bool,
     use_viewport: bool,
+    target_width: Option<u32>,
+    target_height: Option<u32>,
 ) -> Result<(Vec<u8>, u32, u32), stet_pdf_reader::PdfError> {
     let (page_w, page_h) = doc.page_size(page)?;
-    let scale = dpi / 72.0;
-    let pixel_w = (page_w * scale).round() as u32;
-    let pixel_h = (page_h * scale).round() as u32;
-    let display_list = doc.render_page(page, dpi)?;
+    let (pixel_w, pixel_h, effective_dpi) = if target_width.is_some() || target_height.is_some() {
+        compute_fit_dims(page_w, page_h, target_width, target_height)
+    } else {
+        let scale = dpi / 72.0;
+        (
+            (page_w * scale).round() as u32,
+            (page_h * scale).round() as u32,
+            dpi,
+        )
+    };
+    let display_list = doc.render_page(page, effective_dpi)?;
     let rgba = if use_viewport {
         stet_render::render_to_rgba_viewport(
             &display_list,
             pixel_w,
             pixel_h,
-            dpi,
+            effective_dpi,
             Some(doc.icc_cache()),
             no_aa,
         )
@@ -1643,7 +1753,7 @@ fn render_pdf_page_to_rgba(
             &display_list,
             pixel_w,
             pixel_h,
-            dpi,
+            effective_dpi,
             Some(doc.icc_cache()),
             no_aa,
         )
@@ -1651,6 +1761,7 @@ fn render_pdf_page_to_rgba(
     Ok((rgba, pixel_w, pixel_h))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_pdf_input_png(
     dpi: f64,
     file_args: &[String],
@@ -1659,6 +1770,8 @@ fn run_pdf_input_png(
     use_viewport: bool,
     icc_cfg: &IccCliConfig,
     password: Option<&str>,
+    target_width: Option<u32>,
+    target_height: Option<u32>,
 ) {
     let icc_cache = build_icc_cache(icc_cfg);
 
@@ -1716,7 +1829,15 @@ fn run_pdf_input_png(
                 continue;
             }
 
-            match render_pdf_page_to_rgba(&doc, page, dpi, no_aa, use_viewport) {
+            match render_pdf_page_to_rgba(
+                &doc,
+                page,
+                dpi,
+                no_aa,
+                use_viewport,
+                target_width,
+                target_height,
+            ) {
                 Ok((rgba, w, h)) => {
                     let out_path = if page_count == 1 {
                         format!("{}.png", output_base)
@@ -1775,4 +1896,68 @@ fn find_resource_path() -> Option<String> {
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compute_fit_dims;
+
+    const LETTER_W: f64 = 612.0;
+    const LETTER_H: f64 = 792.0;
+
+    fn close(a: f64, b: f64) -> bool {
+        (a - b).abs() < 0.01
+    }
+
+    #[test]
+    fn fit_letter_portrait_into_256_square_is_height_constrained() {
+        // Portrait Letter into 256x256 box: height 792pt is the long side,
+        // so height caps at 256px; width scales proportionally.
+        let (w, h, dpi) = compute_fit_dims(LETTER_W, LETTER_H, Some(256), Some(256));
+        assert_eq!(h, 256);
+        assert_eq!(w, 198); // 612 * 256/792 = 197.8...
+        assert!(close(dpi, 256.0 * 72.0 / 792.0));
+    }
+
+    #[test]
+    fn fit_letter_landscape_into_256_square_is_width_constrained() {
+        let (w, h, dpi) = compute_fit_dims(LETTER_H, LETTER_W, Some(256), Some(256));
+        assert_eq!(w, 256);
+        assert_eq!(h, 198);
+        assert!(close(dpi, 256.0 * 72.0 / 792.0));
+    }
+
+    #[test]
+    fn width_only_preserves_aspect() {
+        let (w, h, dpi) = compute_fit_dims(LETTER_W, LETTER_H, Some(512), None);
+        assert_eq!(w, 512);
+        assert_eq!(h, 663); // 792 * 512/612 = 662.588 → rounds to 663
+        assert!(close(dpi, 512.0 * 72.0 / 612.0));
+    }
+
+    #[test]
+    fn height_only_preserves_aspect() {
+        let (w, h, dpi) = compute_fit_dims(LETTER_W, LETTER_H, None, Some(512));
+        assert_eq!(h, 512);
+        assert_eq!(w, 396); // 612 * 512/792 = 395.6...
+        assert!(close(dpi, 512.0 * 72.0 / 792.0));
+    }
+
+    #[test]
+    fn fit_preserves_minimum_dimension_of_one() {
+        // A very tall skinny page fit into a box where the width would
+        // round to zero should still produce at least 1x1.
+        let (w, h, _dpi) = compute_fit_dims(1.0, 10000.0, Some(32), Some(32));
+        assert!(w >= 1);
+        assert!(h >= 1);
+    }
+
+    #[test]
+    fn thumbnailer_128_bucket_letter_portrait() {
+        // XDG "normal" bucket — matches what file manager thumbnailers request.
+        let (w, h, dpi) = compute_fit_dims(LETTER_W, LETTER_H, Some(128), Some(128));
+        assert_eq!(w, 99);
+        assert_eq!(h, 128);
+        assert!(close(dpi, 128.0 * 72.0 / 792.0)); // ~11.6
+    }
 }
