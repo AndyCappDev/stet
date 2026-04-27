@@ -39,6 +39,7 @@
 
 pub mod configuration;
 pub mod metadata;
+pub mod ocmd;
 
 pub use configuration::{
     AutoStateEvent, AutoStateRule, BaseState, Configuration, LayerTree, LayerTreeNode, ListMode,

@@ -81,10 +81,20 @@ impl LayerSet {
 
     /// Evaluate an [`OcgVisibility`] predicate.
     ///
-    /// `default_visible` on each variant supplies the per-OCG fallback
-    /// when this `LayerSet` has no opinion. For the `Membership` and
-    /// `Expression` variants, every leaf OCG's visibility is resolved
-    /// the same way (explicit override → fallback `default_visible`).
+    /// Each variant's `default_visible` is the renderer's fallback
+    /// **for the whole group** when this `LayerSet` has no opinion on
+    /// any of its leaves. Specifically:
+    ///
+    /// - `Single` → consult the LayerSet for `ocg_id`; fall back to
+    ///   `default_visible`.
+    /// - `Membership` / `Expression` → if **none** of the relevant
+    ///   leaves are overridden by this LayerSet, return
+    ///   `default_visible` directly. This is the "consumer has no
+    ///   opinion at all" path and preserves byte-identity for OCMD
+    ///   defaults baked at parse time.
+    /// - With at least one leaf overridden, evaluate the policy or
+    ///   expression: overridden leaves use their override value,
+    ///   missing leaves fall back to the variant's `default_visible`.
     pub fn evaluate(&self, vis: &OcgVisibility) -> bool {
         match vis {
             OcgVisibility::Single {
@@ -99,6 +109,13 @@ impl LayerSet {
                 if ocg_ids.is_empty() {
                     // PDF spec: an OCMD with no /OCGs is always visible.
                     return true;
+                }
+                // Fast path: no leaf has an override → return the
+                // OCMD's overall default (matches the document's
+                // statically-evaluated visibility under the default
+                // configuration).
+                if ocg_ids.iter().all(|id| !self.states.contains_key(id)) {
+                    return *default_visible;
                 }
                 let on_count = ocg_ids
                     .iter()
@@ -115,7 +132,12 @@ impl LayerSet {
             OcgVisibility::Expression {
                 expr,
                 default_visible,
-            } => self.evaluate_expr(expr, *default_visible),
+            } => {
+                if !expr_touches_overrides(expr, &self.states) {
+                    return *default_visible;
+                }
+                self.evaluate_expr(expr, *default_visible)
+            }
         }
     }
 
@@ -146,6 +168,20 @@ impl LayerSet {
             } else {
                 self.states.insert(id, false);
             }
+        }
+    }
+}
+
+/// Return true when any `Layer(id)` leaf of the expression has an
+/// explicit entry in `states`. Used by [`LayerSet::evaluate`] to
+/// detect "consumer has no opinion" and short-circuit to the
+/// variant's `default_visible`.
+fn expr_touches_overrides(expr: &VisibilityExpr, states: &HashMap<u32, bool>) -> bool {
+    match expr {
+        VisibilityExpr::Layer(id) => states.contains_key(id),
+        VisibilityExpr::Not(inner) => expr_touches_overrides(inner, states),
+        VisibilityExpr::And(operands) | VisibilityExpr::Or(operands) => {
+            operands.iter().any(|o| expr_touches_overrides(o, states))
         }
     }
 }
@@ -181,61 +217,85 @@ mod tests {
     }
 
     #[test]
-    fn membership_any_on_default() {
+    fn membership_empty_layer_set_returns_default() {
+        // With no overrides, every Membership / Expression returns
+        // its own `default_visible` directly — the OCMD's overall
+        // baked-in default. Policy is irrelevant on this fast path.
         let s = LayerSet::new();
-        let vis = OcgVisibility::Membership {
+        for policy in [
+            MembershipPolicy::AnyOn,
+            MembershipPolicy::AllOn,
+            MembershipPolicy::AllOff,
+            MembershipPolicy::AnyOff,
+        ] {
+            for default in [true, false] {
+                let vis = OcgVisibility::Membership {
+                    ocg_ids: vec![1, 2],
+                    policy,
+                    default_visible: default,
+                };
+                assert_eq!(
+                    s.evaluate(&vis),
+                    default,
+                    "{policy:?} default={default}: empty set should pass through default"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn membership_overrides_run_policy() {
+        // When at least one leaf is overridden the policy runs;
+        // missing leaves fall back to `default_visible`.
+        let any_on = OcgVisibility::Membership {
             ocg_ids: vec![1, 2],
             policy: MembershipPolicy::AnyOn,
             default_visible: false,
         };
-        assert!(!s.evaluate(&vis), "both default off");
-
-        let mut s2 = s;
-        s2.set(2, true);
-        assert!(s2.evaluate(&vis));
-    }
-
-    #[test]
-    fn membership_all_on() {
         let mut s = LayerSet::new();
-        let vis = OcgVisibility::Membership {
+        s.set(2, true);
+        assert!(s.evaluate(&any_on), "leaf 2 ON → AnyOn=true");
+        s.set(1, false);
+        s.set(2, false);
+        assert!(!s.evaluate(&any_on), "all leaves OFF → AnyOn=false");
+
+        let all_on = OcgVisibility::Membership {
             ocg_ids: vec![1, 2],
             policy: MembershipPolicy::AllOn,
             default_visible: true,
         };
-        assert!(s.evaluate(&vis));
+        let mut s = LayerSet::new();
         s.set(1, false);
-        assert!(!s.evaluate(&vis));
+        // Leaf 1 overridden false; leaf 2 falls back to default_visible=true.
+        assert!(!s.evaluate(&all_on));
+        s.set(2, true);
+        s.set(1, true);
+        assert!(s.evaluate(&all_on));
     }
 
     #[test]
     fn membership_all_off_and_any_off() {
-        let all_off_default_off = OcgVisibility::Membership {
+        let all_off = OcgVisibility::Membership {
             ocg_ids: vec![1, 2],
             policy: MembershipPolicy::AllOff,
             default_visible: false,
         };
-        let any_off_default_on = OcgVisibility::Membership {
+        let any_off = OcgVisibility::Membership {
             ocg_ids: vec![1, 2],
             policy: MembershipPolicy::AnyOff,
             default_visible: true,
         };
 
-        let s = LayerSet::new();
-        // Empty set, default OFF: both leaves resolve OFF → all_off true.
-        assert!(s.evaluate(&all_off_default_off));
-        // Empty set, default ON: both leaves resolve ON → no any_off.
-        assert!(!s.evaluate(&any_off_default_on));
-
-        // Flip one leaf in the set with default OFF — no longer all_off.
-        let mut s = LayerSet::new();
-        s.set(1, true);
-        assert!(!s.evaluate(&all_off_default_off));
-
-        // Flip one leaf in the set with default ON — now one is off so any_off.
+        // Force-overriding both leaves OFF makes AllOff true.
         let mut s = LayerSet::new();
         s.set(1, false);
-        assert!(s.evaluate(&any_off_default_on));
+        s.set(2, false);
+        assert!(s.evaluate(&all_off));
+
+        // Forcing one leaf OFF makes AnyOff true.
+        let mut s = LayerSet::new();
+        s.set(1, false);
+        assert!(s.evaluate(&any_off));
     }
 
     #[test]

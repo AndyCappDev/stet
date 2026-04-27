@@ -3200,40 +3200,47 @@ impl<'a> ContentInterpreter<'a> {
     /// Build an [`OcgVisibility`] from an `/OC BDC` properties reference
     /// or an XObject `/OC` entry.
     ///
-    /// Phase 3 emits only [`OcgVisibility::Single`]:
-    ///
-    /// - Direct OCG ref → `Single { ocg_id, default_visible }` driven
-    ///   by `/OCProperties /D /OFF` membership. Runtime-toggleable
-    ///   through a `LayerSet`.
-    /// - OCMD ref → `Single { ocg_id: 0, default_visible: <baked
-    ///   policy eval> }`. Preserves existing byte-identical render
-    ///   output; OCMDs become individually toggleable in Phase 4 when
-    ///   they're upgraded to [`OcgVisibility::Membership`] /
-    ///   `Expression`.
+    /// - Direct OCG ref → [`OcgVisibility::Single`] driven by
+    ///   `/OCProperties /D /OFF` membership.
+    /// - OCMD with `/VE` → [`OcgVisibility::Expression`].
+    /// - OCMD with `/OCGs` (and optional `/P`) →
+    ///   [`OcgVisibility::Membership`] with the parsed policy.
+    /// - Unparseable shape → `Single { ocg_id: 0, default_visible:
+    ///   <baked> }` so the renderer falls back to the document's
+    ///   static evaluation.
     fn build_visibility(&self, ocg_obj: &PdfObj) -> OcgVisibility {
+        let resolved = self.resolver.deref(ocg_obj).ok();
+        let dict = resolved.as_ref().and_then(|o| o.as_dict());
+
+        if let Some(dict) = dict
+            && dict.get_name(b"Type") == Some(b"OCMD")
+        {
+            // Default-visible for the whole OCMD = its static
+            // evaluation under the document's default config. Acts as
+            // the fast-path return value of `LayerSet::evaluate` when
+            // no leaf has been overridden.
+            let default_visible = !self.is_ocg_off(ocg_obj);
+            // OCMD parsing produces Membership or Expression. We
+            // don't have a `WarningSink` plumbed through the content
+            // stream pipeline yet, so route warnings into a local
+            // throwaway sink — `/VE` malformations are infrequent and
+            // already fall back to AnyOn membership.
+            let throwaway = crate::diagnostics::WarningSink::new();
+            return crate::layers::ocmd::build_ocmd_visibility(
+                self.resolver,
+                dict,
+                default_visible,
+                &throwaway,
+            );
+        }
+
         if let Some((ocg_id, _)) = ocg_obj.as_ref() {
-            // Resolve to determine OCG vs OCMD.
-            let resolved = self.resolver.deref(ocg_obj).ok();
-            let is_ocmd = resolved
-                .as_ref()
-                .and_then(|o| o.as_dict())
-                .and_then(|d| d.get_name(b"Type"))
-                == Some(b"OCMD");
-            if is_ocmd {
-                // Bake the OCMD's static evaluation into a sentinel
-                // Single. Phase 4 replaces this with proper Membership
-                // / Expression so the OCMD's leaves become
-                // individually toggleable.
-                return OcgVisibility::Single {
-                    ocg_id: 0,
-                    default_visible: !self.is_ocg_off(ocg_obj),
-                };
-            }
             return OcgVisibility::Single {
                 ocg_id,
                 default_visible: !self.ocg_off.contains(&ocg_id),
             };
         }
+
         // Inline OCG dict or other unparseable shape.
         OcgVisibility::Single {
             ocg_id: 0,

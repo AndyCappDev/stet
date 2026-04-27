@@ -2967,6 +2967,314 @@ mod tests {
         assert_eq!(set.get(9), Some(false));
     }
 
+    /// Build a PDF with one OCMD wrapping a content block.
+    ///
+    /// `policy` is one of `b"AllOn"` / `b"AnyOn"` / `b"AllOff"` /
+    /// `b"AnyOff"`. The OCMD references OCGs 5 and 6 from /Properties
+    /// /OC1. /OCProperties /D /OFF lists the OCGs supplied in `off`,
+    /// so the OCMD's static evaluation matches the per-leaf defaults.
+    fn build_pdf_with_ocmd(policy: &[u8], off: &[u32]) -> Vec<u8> {
+        let mut pdf = Vec::new();
+        pdf.extend(b"%PDF-1.6\n");
+        let mut offsets: Vec<usize> = Vec::new();
+        let mut push_obj = |buf: &mut Vec<u8>, body: &[u8]| {
+            offsets.push(buf.len());
+            buf.extend(body);
+        };
+
+        let mut off_arr = String::from("[");
+        for id in off {
+            off_arr.push_str(&format!("{id} 0 R "));
+        }
+        off_arr.push(']');
+
+        let cat = format!(
+            "1 0 obj\n<< /Type /Catalog /Pages 2 0 R /OCProperties << \
+              /OCGs [5 0 R 6 0 R] /D << /Order [5 0 R 6 0 R] /OFF {off_arr} >> >> >>\nendobj\n"
+        );
+        push_obj(&mut pdf, cat.as_bytes());
+        push_obj(
+            &mut pdf,
+            b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
+        );
+        // Page references the OCMD via /Properties /OC1.
+        push_obj(
+            &mut pdf,
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] \
+              /Contents 4 0 R /Resources << /Properties << /OC1 7 0 R >> >> >>\nendobj\n",
+        );
+        // Content: red baseline + blue OCMD-wrapped rect.
+        let stream = b"q 1 0 0 rg 0 0 50 50 re f Q\n\
+                       /OC /OC1 BDC q 0 0 1 rg 50 50 50 50 re f Q EMC";
+        let stream_obj = format!(
+            "4 0 obj\n<< /Length {} >>\nstream\n{}\nendstream\nendobj\n",
+            stream.len(),
+            std::str::from_utf8(stream).unwrap()
+        );
+        push_obj(&mut pdf, stream_obj.as_bytes());
+        push_obj(
+            &mut pdf,
+            b"5 0 obj\n<< /Type /OCG /Name (LayerA) >>\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            b"6 0 obj\n<< /Type /OCG /Name (LayerB) >>\nendobj\n",
+        );
+        // OCMD over LayerA + LayerB with the requested policy.
+        let ocmd = format!(
+            "7 0 obj\n<< /Type /OCMD /OCGs [5 0 R 6 0 R] /P /{} >>\nendobj\n",
+            std::str::from_utf8(policy).unwrap()
+        );
+        push_obj(&mut pdf, ocmd.as_bytes());
+
+        let xref_offset = pdf.len();
+        pdf.extend(b"xref\n0 8\n");
+        pdf.extend(b"0000000000 65535 f\r\n");
+        for off_v in &offsets {
+            pdf.extend(format!("{:010} 00000 n\r\n", off_v).as_bytes());
+        }
+        pdf.extend(b"trailer\n<< /Size 8 /Root 1 0 R >>\n");
+        pdf.extend(format!("startxref\n{xref_offset}\n%%EOF\n").as_bytes());
+        pdf
+    }
+
+    fn ocmd_visibility(pdf: &[u8]) -> OcgVisibility {
+        let doc = PdfDocument::from_bytes(pdf).unwrap();
+        let dl = doc.render_page(0, 72.0).unwrap();
+        for elem in dl.elements() {
+            if let stet_graphics::display_list::DisplayElement::OcgGroup { visibility, .. } = elem {
+                return visibility.clone();
+            }
+        }
+        panic!("expected an OcgGroup in display list")
+    }
+
+    #[test]
+    fn ocmd_emits_membership_with_policy() {
+        let v = ocmd_visibility(&build_pdf_with_ocmd(b"AllOn", &[]));
+        match v {
+            OcgVisibility::Membership {
+                ocg_ids,
+                policy,
+                default_visible,
+            } => {
+                assert_eq!(ocg_ids, vec![5, 6]);
+                assert_eq!(policy, MembershipPolicy::AllOn);
+                // Both leaves on by default → AllOn → visible.
+                assert!(default_visible);
+            }
+            other => panic!("expected Membership, got {other:?}"),
+        }
+
+        // AnyOff with both default ON → policy fails → invisible.
+        let v = ocmd_visibility(&build_pdf_with_ocmd(b"AnyOff", &[]));
+        match v {
+            OcgVisibility::Membership {
+                policy,
+                default_visible,
+                ..
+            } => {
+                assert_eq!(policy, MembershipPolicy::AnyOff);
+                assert!(!default_visible);
+            }
+            other => panic!("expected Membership, got {other:?}"),
+        }
+
+        // AllOff with both default OFF → invisible would hold for AllOff → visible.
+        let v = ocmd_visibility(&build_pdf_with_ocmd(b"AllOff", &[5, 6]));
+        match v {
+            OcgVisibility::Membership {
+                policy,
+                default_visible,
+                ..
+            } => {
+                assert_eq!(policy, MembershipPolicy::AllOff);
+                assert!(default_visible);
+            }
+            other => panic!("expected Membership, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ocmd_membership_truth_table_via_layer_set() {
+        // /AllOn over [5, 6] with both default ON.
+        let pdf = build_pdf_with_ocmd(b"AllOn", &[]);
+        let v = ocmd_visibility(&pdf);
+
+        for a in [false, true] {
+            for b in [false, true] {
+                let mut s = LayerSet::new();
+                s.set(5, a);
+                s.set(6, b);
+                let expected = a && b;
+                assert_eq!(
+                    s.evaluate(&v),
+                    expected,
+                    "AllOn(5={a}, 6={b}) expected {expected}"
+                );
+            }
+        }
+    }
+
+    /// Build a PDF with an OCMD using a `/VE` expression
+    /// `[/And [layer_5] [/Or [layer_6] [/Not [layer_7]]]]`.
+    fn build_pdf_with_ve_expression() -> Vec<u8> {
+        let mut pdf = Vec::new();
+        pdf.extend(b"%PDF-1.6\n");
+        let mut offsets: Vec<usize> = Vec::new();
+        let mut push_obj = |buf: &mut Vec<u8>, body: &[u8]| {
+            offsets.push(buf.len());
+            buf.extend(body);
+        };
+
+        push_obj(
+            &mut pdf,
+            b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R /OCProperties << \
+              /OCGs [5 0 R 6 0 R 7 0 R] /D << /Order [5 0 R 6 0 R 7 0 R] >> >> >>\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] \
+              /Contents 4 0 R /Resources << /Properties << /OC1 8 0 R >> >> >>\nendobj\n",
+        );
+        let stream = b"/OC /OC1 BDC q 0 0 1 rg 0 0 100 100 re f Q EMC";
+        let stream_obj = format!(
+            "4 0 obj\n<< /Length {} >>\nstream\n{}\nendstream\nendobj\n",
+            stream.len(),
+            std::str::from_utf8(stream).unwrap()
+        );
+        push_obj(&mut pdf, stream_obj.as_bytes());
+        push_obj(&mut pdf, b"5 0 obj\n<< /Type /OCG /Name (A) >>\nendobj\n");
+        push_obj(&mut pdf, b"6 0 obj\n<< /Type /OCG /Name (B) >>\nendobj\n");
+        push_obj(&mut pdf, b"7 0 obj\n<< /Type /OCG /Name (C) >>\nendobj\n");
+        // OCMD with /VE = [/And [/Layer 5] [/Or [/Layer 6] [/Not [/Layer 7]]]]
+        // PDF /VE leaves are bare OCG refs (e.g. `5 0 R`), not nested
+        // arrays — only operators wrap their operands in arrays.
+        push_obj(
+            &mut pdf,
+            b"8 0 obj\n<< /Type /OCMD /VE [/And 5 0 R [/Or 6 0 R [/Not 7 0 R]]] >>\nendobj\n",
+        );
+
+        let xref_offset = pdf.len();
+        pdf.extend(b"xref\n0 9\n");
+        pdf.extend(b"0000000000 65535 f\r\n");
+        for off in &offsets {
+            pdf.extend(format!("{:010} 00000 n\r\n", off).as_bytes());
+        }
+        pdf.extend(b"trailer\n<< /Size 9 /Root 1 0 R >>\n");
+        pdf.extend(format!("startxref\n{xref_offset}\n%%EOF\n").as_bytes());
+        pdf
+    }
+
+    #[test]
+    fn ve_expression_parsed_into_visibility_expr() {
+        let pdf = build_pdf_with_ve_expression();
+        let v = ocmd_visibility(&pdf);
+        match &v {
+            OcgVisibility::Expression { expr, .. } => match expr {
+                VisibilityExpr::And(args) => {
+                    assert_eq!(args.len(), 2);
+                    assert!(matches!(args[0], VisibilityExpr::Layer(5)));
+                    match &args[1] {
+                        VisibilityExpr::Or(or_args) => {
+                            assert_eq!(or_args.len(), 2);
+                            assert!(matches!(or_args[0], VisibilityExpr::Layer(6)));
+                            match &or_args[1] {
+                                VisibilityExpr::Not(inner) => {
+                                    assert!(matches!(**inner, VisibilityExpr::Layer(7)));
+                                }
+                                other => panic!("expected Not, got {other:?}"),
+                            }
+                        }
+                        other => panic!("expected Or, got {other:?}"),
+                    }
+                }
+                other => panic!("expected And, got {other:?}"),
+            },
+            other => panic!("expected Expression, got {other:?}"),
+        }
+
+        // Truth table over (a, b, c) for a && (b || !c).
+        for a in [false, true] {
+            for b in [false, true] {
+                for c in [false, true] {
+                    let mut s = LayerSet::new();
+                    s.set(5, a);
+                    s.set(6, b);
+                    s.set(7, c);
+                    let expected = a && (b || !c);
+                    assert_eq!(
+                        s.evaluate(&v),
+                        expected,
+                        "(a={a}, b={b}, c={c}) expected {expected}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_ve_falls_back_to_membership() {
+        // /VE with an unknown leading operator name.
+        let mut pdf = Vec::new();
+        pdf.extend(b"%PDF-1.6\n");
+        let mut offsets: Vec<usize> = Vec::new();
+        let mut push_obj = |buf: &mut Vec<u8>, body: &[u8]| {
+            offsets.push(buf.len());
+            buf.extend(body);
+        };
+        push_obj(
+            &mut pdf,
+            b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R /OCProperties << \
+              /OCGs [5 0 R] /D << /Order [5 0 R] >> >> >>\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] \
+              /Contents 4 0 R /Resources << /Properties << /OC1 6 0 R >> >> >>\nendobj\n",
+        );
+        let stream = b"/OC /OC1 BDC q 1 0 0 rg 0 0 100 100 re f Q EMC";
+        let stream_obj = format!(
+            "4 0 obj\n<< /Length {} >>\nstream\n{}\nendstream\nendobj\n",
+            stream.len(),
+            std::str::from_utf8(stream).unwrap()
+        );
+        push_obj(&mut pdf, stream_obj.as_bytes());
+        push_obj(&mut pdf, b"5 0 obj\n<< /Type /OCG /Name (X) >>\nendobj\n");
+        // /VE with /Not arity 2 — invalid → falls back to /OCGs membership.
+        push_obj(
+            &mut pdf,
+            b"6 0 obj\n<< /Type /OCMD /VE [/Not 5 0 R 5 0 R] /OCGs [5 0 R] /P /AnyOn >>\nendobj\n",
+        );
+        let xref_offset = pdf.len();
+        pdf.extend(b"xref\n0 7\n");
+        pdf.extend(b"0000000000 65535 f\r\n");
+        for off in &offsets {
+            pdf.extend(format!("{:010} 00000 n\r\n", off).as_bytes());
+        }
+        pdf.extend(b"trailer\n<< /Size 7 /Root 1 0 R >>\n");
+        pdf.extend(format!("startxref\n{xref_offset}\n%%EOF\n").as_bytes());
+
+        let v = ocmd_visibility(&pdf);
+        match v {
+            OcgVisibility::Membership {
+                ocg_ids, policy, ..
+            } => {
+                assert_eq!(ocg_ids, vec![5]);
+                assert_eq!(policy, MembershipPolicy::AnyOn);
+            }
+            other => panic!("expected fallback to Membership, got {other:?}"),
+        }
+    }
+
     #[test]
     fn layer_set_from_configuration_applies_base_state() {
         let pdf = build_pdf_with_layer_hierarchy();
