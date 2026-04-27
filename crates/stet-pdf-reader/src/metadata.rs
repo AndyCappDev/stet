@@ -191,11 +191,23 @@ fn catalog_dict_for_metadata(resolver: &Resolver) -> Option<PdfDict> {
 ///
 /// Returns `None` for non-string-like objects.
 fn pdf_string_to_rust(obj: &PdfObj) -> Option<String> {
+    pdf_string_to_rust_pub(obj)
+}
+
+/// Crate-internal alias for [`pdf_string_to_rust`], usable from sibling
+/// modules that need the same Info-string decoding (destinations,
+/// outline titles, etc.).
+pub(crate) fn pdf_string_to_rust_pub(obj: &PdfObj) -> Option<String> {
     match obj {
         PdfObj::Str(bytes) => Some(decode_pdf_text_string(bytes)),
         PdfObj::Name(bytes) => Some(decode_pdf_text_string(bytes)),
         _ => None,
     }
+}
+
+/// Crate-internal alias for [`decode_pdf_text_string`].
+pub(crate) fn decode_pdf_text_string_pub(bytes: &[u8]) -> String {
+    decode_pdf_text_string(bytes)
 }
 
 fn decode_pdf_text_string(bytes: &[u8]) -> String {

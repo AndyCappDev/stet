@@ -162,6 +162,22 @@ fn parse_external_pdfs() {
     }
 }
 
+/// Outline-tree extraction must never panic and must return a cached
+/// reference. PDFs without bookmarks return an empty slice.
+#[test]
+fn outline_no_panic() {
+    let candidates = ["hospital.pdf", "10-ch8.pdf", "ppst32.pdf"];
+    for name in candidates {
+        let Some(data) = try_load_pdf(name) else {
+            continue;
+        };
+        let doc = PdfDocument::from_bytes(&data).unwrap();
+        let a = doc.outline();
+        let b = doc.outline();
+        assert!(std::ptr::eq(a, b), "{name}: outline() not cached");
+    }
+}
+
 /// Calling `metadata()` and `viewer_preferences()` on real-world PDFs must
 /// never panic, regardless of how the document populates (or fails to
 /// populate) those fields. The accessors are also cached behind

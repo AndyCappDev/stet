@@ -72,20 +72,24 @@
 
 pub mod content;
 pub mod crypto;
+pub mod destination;
 pub mod error;
 pub mod filters;
 pub mod lexer;
 pub mod metadata;
 pub mod objects;
+pub mod outline;
 pub mod page_tree;
 pub mod resolver;
 pub mod resources;
 pub mod viewer_prefs;
 pub mod xref;
 
+pub use destination::{Action, Destination, ViewSpec};
 pub use error::PdfError;
 pub use metadata::{DocumentMetadata, PdfDate, TrappedFlag};
 pub use objects::{PdfDict, PdfObj};
+pub use outline::{OutlineItem, OutlineStyle};
 pub use page_tree::PageInfo;
 pub use viewer_prefs::{
     Duplex, PageLayout, PageMode, PrintScaling, ReadingDirection, ViewerPreferences,
@@ -125,6 +129,8 @@ pub struct PdfDocument<'a> {
     metadata_cache: OnceCell<DocumentMetadata>,
     /// Viewer preferences, parsed lazily on first access.
     viewer_prefs_cache: OnceCell<ViewerPreferences>,
+    /// Outline tree, parsed lazily on first access.
+    outline_cache: OnceCell<Vec<OutlineItem>>,
 }
 
 impl<'a> PdfDocument<'a> {
@@ -214,6 +220,7 @@ impl<'a> PdfDocument<'a> {
             output_intent_icc,
             metadata_cache: OnceCell::new(),
             viewer_prefs_cache: OnceCell::new(),
+            outline_cache: OnceCell::new(),
         })
     }
 
@@ -465,6 +472,26 @@ impl<'a> PdfDocument<'a> {
     pub fn viewer_preferences(&self) -> &ViewerPreferences {
         self.viewer_prefs_cache
             .get_or_init(|| viewer_prefs::parse_viewer_preferences(&self.resolver))
+    }
+
+    /// Document outline (bookmarks) as a tree of [`OutlineItem`]s.
+    ///
+    /// Returns an empty slice if the document has no outline. Parsed
+    /// lazily on first call and cached. Cycles, broken `/First`/`/Next`
+    /// chains, and pathological depth are tolerated by hard caps.
+    pub fn outline(&self) -> &[OutlineItem] {
+        self.outline_cache
+            .get_or_init(|| outline::parse_outline_tree(&self.resolver, &self.pages))
+    }
+
+    /// Resolve a named destination by name, returning the explicit
+    /// destination it points to.
+    ///
+    /// This is a Phase-2-stub: it walks only the legacy `/Catalog
+    /// /Dests` direct dict, not the `/Catalog /Names /Dests` name
+    /// tree. Phase 3 will add proper name-tree traversal.
+    pub fn resolve_named_destination(&self, name: &str) -> Option<Destination> {
+        destination::resolve_named_destination_legacy(&self.resolver, &self.pages, name)
     }
 }
 
@@ -841,6 +868,124 @@ mod tests {
         let dl = doc.render_page(0, 72.0).unwrap();
         eprintln!("=== Display list: {} top-level elements ===", dl.len());
         dump(&dl, 0);
+    }
+
+    /// Build a minimal PDF with a 3-node outline tree: a parent
+    /// "Chapter 1" with two children "Section 1.1" and "Section 1.2".
+    /// Used to exercise the outline walker end-to-end.
+    fn build_pdf_with_outline() -> Vec<u8> {
+        let mut pdf = Vec::new();
+        pdf.extend(b"%PDF-1.4\n");
+
+        let mut offsets: Vec<usize> = Vec::new();
+        let mut push_obj = |buf: &mut Vec<u8>, body: &[u8]| {
+            offsets.push(buf.len());
+            buf.extend(body);
+        };
+
+        // 1: Catalog (with /Outlines ref)
+        push_obj(
+            &mut pdf,
+            b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R /Outlines 4 0 R >>\nendobj\n",
+        );
+        // 2: Pages
+        push_obj(
+            &mut pdf,
+            b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
+        );
+        // 3: Page
+        push_obj(
+            &mut pdf,
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>\nendobj\n",
+        );
+        // 4: Outlines (root): /First and /Last both point to obj 5
+        push_obj(
+            &mut pdf,
+            b"4 0 obj\n<< /Type /Outlines /First 5 0 R /Last 5 0 R /Count 3 >>\nendobj\n",
+        );
+        // 5: Outline "Chapter 1" (open, two children)
+        push_obj(
+            &mut pdf,
+            b"5 0 obj\n<< /Title (Chapter 1) /Parent 4 0 R /First 6 0 R /Last 7 0 R \
+              /Count 2 /Dest [3 0 R /Fit] /F 2 >>\nendobj\n",
+        );
+        // 6: Outline "Section 1.1"
+        push_obj(
+            &mut pdf,
+            b"6 0 obj\n<< /Title (Section 1.1) /Parent 5 0 R /Next 7 0 R \
+              /Dest [3 0 R /XYZ 72 700 1.0] /C [0.2 0.3 0.4] >>\nendobj\n",
+        );
+        // 7: Outline "Section 1.2"
+        push_obj(
+            &mut pdf,
+            b"7 0 obj\n<< /Title (Section 1.2) /Parent 5 0 R /Prev 6 0 R \
+              /A << /S /URI /URI (https://example.com) >> /F 1 >>\nendobj\n",
+        );
+
+        let xref_offset = pdf.len();
+        pdf.extend(b"xref\n0 8\n");
+        pdf.extend(b"0000000000 65535 f\r\n");
+        for off in &offsets {
+            pdf.extend(format!("{:010} 00000 n\r\n", off).as_bytes());
+        }
+        pdf.extend(b"trailer\n<< /Size 8 /Root 1 0 R >>\n");
+        pdf.extend(format!("startxref\n{xref_offset}\n%%EOF\n").as_bytes());
+
+        pdf
+    }
+
+    #[test]
+    fn outline_basic_tree() {
+        let pdf = build_pdf_with_outline();
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+        let outline = doc.outline();
+
+        assert_eq!(outline.len(), 1, "expected one top-level entry");
+        let chapter = &outline[0];
+        assert_eq!(chapter.title, "Chapter 1");
+        assert!(chapter.open, "Chapter 1 has /Count 2 (positive = open)");
+        assert!(chapter.style.bold);
+        assert!(!chapter.style.italic);
+        assert_eq!(chapter.children.len(), 2);
+
+        let s11 = &chapter.children[0];
+        assert_eq!(s11.title, "Section 1.1");
+        assert!(s11.action.is_none());
+        match &s11.destination {
+            Some(crate::Destination::PageView { page, view }) => {
+                assert_eq!(*page, Some(0));
+                assert!(matches!(view, crate::ViewSpec::Xyz { .. }));
+            }
+            other => panic!("expected PageView destination, got {other:?}"),
+        }
+        assert_eq!(s11.color, Some([0.2, 0.3, 0.4]));
+
+        let s12 = &chapter.children[1];
+        assert_eq!(s12.title, "Section 1.2");
+        assert!(s12.style.italic && !s12.style.bold);
+        match &s12.action {
+            Some(crate::Action::Uri { uri, is_map }) => {
+                assert_eq!(uri, "https://example.com");
+                assert!(!is_map);
+            }
+            other => panic!("expected URI action, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn outline_caches_across_calls() {
+        let pdf = build_pdf_with_outline();
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+        let a = doc.outline();
+        let b = doc.outline();
+        assert!(std::ptr::eq(a, b), "outline() must be cached");
+    }
+
+    #[test]
+    fn outline_empty_when_absent() {
+        let pdf = build_minimal_pdf();
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+        assert!(doc.outline().is_empty());
     }
 
     /// Build a minimal valid PDF for testing.
