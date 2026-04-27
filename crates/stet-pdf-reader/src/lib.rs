@@ -193,8 +193,9 @@ pub use form_fields::{
 };
 pub use layers::{
     AutoStateEvent, AutoStateRule, BaseState, Configuration, CreatorInfo, ExportUsage,
-    LanguageUsage, Layer, LayerIntent, LayerTree, LayerTreeNode, LayerUsage, ListMode,
-    PageElementSubtype, PrintUsage, UsageState, UserUsage, ViewUsage, ZoomUsage,
+    LanguageUsage, Layer, LayerIntent, LayerSet, LayerTree, LayerTreeNode, LayerUsage, ListMode,
+    MembershipPolicy, OcgVisibility, PageElementSubtype, PrintUsage, UsageState, UserUsage,
+    ViewUsage, VisibilityExpr, ZoomUsage,
 };
 pub use metadata::{DocumentMetadata, PdfDate, TrappedFlag};
 pub use objects::{PdfDict, PdfObj};
@@ -537,6 +538,27 @@ impl<'a> PdfDocument<'a> {
         page: usize,
         dpi: f64,
     ) -> Result<(Vec<u8>, u32, u32), PdfError> {
+        self.render_page_to_rgba_with_layers(page, dpi, &LayerSet::new())
+    }
+
+    /// Like [`render_page_to_rgba`](Self::render_page_to_rgba) but
+    /// consults the supplied [`LayerSet`] when evaluating each
+    /// `OcgGroup`'s visibility.
+    ///
+    /// Pass an empty `LayerSet::new()` (or use the plain
+    /// `render_page_to_rgba`) to fall back to each layer's
+    /// `default_visible` baked from the document's default
+    /// configuration. Use [`layers::layer_set_from_document`] or
+    /// [`layers::layer_set_from_configuration`] to build a populated
+    /// set, then mutate it with `set` / `clear` before passing it
+    /// here.
+    #[cfg(feature = "render")]
+    pub fn render_page_to_rgba_with_layers(
+        &self,
+        page: usize,
+        dpi: f64,
+        layer_set: &LayerSet,
+    ) -> Result<(Vec<u8>, u32, u32), PdfError> {
         let (page_w, page_h) = self.page_size(page)?;
         let scale = dpi / 72.0;
         let pixel_w = (page_w * scale).round() as u32;
@@ -544,13 +566,14 @@ impl<'a> PdfDocument<'a> {
 
         let display_list = self.render_page(page, dpi)?;
 
-        let rgba = stet_render::render_to_rgba(
+        let rgba = stet_render::render_to_rgba_with_layers(
             &display_list,
             pixel_w,
             pixel_h,
             dpi,
             Some(&self.icc_cache),
             false,
+            layer_set,
         );
 
         Ok((rgba, pixel_w, pixel_h))
@@ -1161,13 +1184,11 @@ mod tests {
                     }
                     DisplayElement::OcgGroup {
                         elements,
-                        ocg_id,
-                        default_visible,
+                        visibility,
                     } => {
                         eprintln!(
-                            "{indent}[{i}] OcgGroup id={} visible={} children={}",
-                            ocg_id,
-                            default_visible,
+                            "{indent}[{i}] OcgGroup vis={:?} children={}",
+                            visibility,
                             elements.len()
                         );
                         dump(elements, depth + 1);
@@ -2809,6 +2830,164 @@ mod tests {
                 .any(|w| matches!(w.phase, ParsePhase::Layers) && w.message.contains("Orphan")),
             "expected a Layers warning about the orphan string, got {warnings:?}"
         );
+    }
+
+    /// Build a PDF whose page draws two filled rectangles, one wrapped
+    /// in an `/OC BDC` block tied to OCG object 5 (default ON).
+    /// Layer 6 references `MissingLayer` (no resource entry) so the
+    /// content gets emitted unwrapped — provides a baseline rectangle
+    /// that's always visible.
+    fn build_pdf_with_layered_content() -> Vec<u8> {
+        let mut pdf = Vec::new();
+        pdf.extend(b"%PDF-1.6\n");
+        let mut offsets: Vec<usize> = Vec::new();
+        let mut push_obj = |buf: &mut Vec<u8>, body: &[u8]| {
+            offsets.push(buf.len());
+            buf.extend(body);
+        };
+
+        // 1: Catalog with /OCProperties listing one OCG.
+        push_obj(
+            &mut pdf,
+            b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R /OCProperties << \
+              /OCGs [5 0 R] /D << /Order [5 0 R] >> >> >>\nendobj\n",
+        );
+        // 2: Pages.
+        push_obj(
+            &mut pdf,
+            b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
+        );
+        // 3: Page referencing the OCG via /Resources /Properties.
+        push_obj(
+            &mut pdf,
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] \
+              /Contents 4 0 R /Resources << /Properties << /OC1 5 0 R >> >> >>\nendobj\n",
+        );
+        // 4: Content stream — baseline red rect, then layer-wrapped blue rect.
+        let stream = b"q 1 0 0 rg 0 0 50 50 re f Q\n\
+                       /OC /OC1 BDC q 0 0 1 rg 50 50 50 50 re f Q EMC";
+        let stream_obj = format!(
+            "4 0 obj\n<< /Length {} >>\nstream\n{}\nendstream\nendobj\n",
+            stream.len(),
+            std::str::from_utf8(stream).unwrap()
+        );
+        push_obj(&mut pdf, stream_obj.as_bytes());
+        // 5: OCG.
+        push_obj(
+            &mut pdf,
+            b"5 0 obj\n<< /Type /OCG /Name (BlueLayer) >>\nendobj\n",
+        );
+
+        let xref_offset = pdf.len();
+        pdf.extend(b"xref\n0 6\n");
+        pdf.extend(b"0000000000 65535 f\r\n");
+        for off in &offsets {
+            pdf.extend(format!("{:010} 00000 n\r\n", off).as_bytes());
+        }
+        pdf.extend(b"trailer\n<< /Size 6 /Root 1 0 R >>\n");
+        pdf.extend(format!("startxref\n{xref_offset}\n%%EOF\n").as_bytes());
+        pdf
+    }
+
+    /// Sample the centre of the layered region (pixel 75,25 in a 100x100
+    /// page) so we can detect whether the layer's content rendered.
+    fn sample_pixel(rgba: &[u8], w: u32, x: u32, y: u32) -> [u8; 4] {
+        let i = (y as usize * w as usize + x as usize) * 4;
+        [rgba[i], rgba[i + 1], rgba[i + 2], rgba[i + 3]]
+    }
+
+    #[cfg(feature = "render")]
+    #[test]
+    fn render_default_layer_set_matches_implicit_render() {
+        let pdf = build_pdf_with_layered_content();
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+
+        let (rgba_default, w, h) = doc.render_page_to_rgba(0, 72.0).unwrap();
+        let (rgba_with_set, w2, h2) = doc
+            .render_page_to_rgba_with_layers(0, 72.0, &LayerSet::new())
+            .unwrap();
+
+        assert_eq!(w, w2);
+        assert_eq!(h, h2);
+        assert_eq!(
+            rgba_default, rgba_with_set,
+            "empty LayerSet must render byte-identical to plain render_page_to_rgba"
+        );
+    }
+
+    #[cfg(feature = "render")]
+    #[test]
+    fn render_layer_off_hides_layer_content() {
+        let pdf = build_pdf_with_layered_content();
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+
+        // Default render — blue rect at (75, 25) should be visible.
+        // Page is in PDF Y-up coords; (50,50)-(100,100) maps to top-right
+        // in device space (origin at top-left). So sample top-right.
+        let (rgba_on, w, _h) = doc.render_page_to_rgba(0, 72.0).unwrap();
+        let on_pixel = sample_pixel(&rgba_on, w, 75, 25);
+        assert!(
+            on_pixel[2] > 200 && on_pixel[0] < 50,
+            "expected blue layer pixel, got rgba={:?}",
+            on_pixel
+        );
+
+        // Toggle layer 5 OFF.
+        let mut layers = layers::layer_set_from_document(&doc);
+        layers.set(5, false);
+
+        let (rgba_off, _w, _h) = doc
+            .render_page_to_rgba_with_layers(0, 72.0, &layers)
+            .unwrap();
+        let off_pixel = sample_pixel(&rgba_off, w, 75, 25);
+        assert!(
+            off_pixel[0] >= 250 && off_pixel[1] >= 250 && off_pixel[2] >= 250,
+            "expected layer-off pixel to be background white, got rgba={:?}",
+            off_pixel
+        );
+
+        // Baseline red rect still rendered (independent of layer).
+        let baseline = sample_pixel(&rgba_off, w, 25, 75);
+        assert!(
+            baseline[0] > 200 && baseline[1] < 50 && baseline[2] < 50,
+            "baseline red rect should still render, got rgba={:?}",
+            baseline
+        );
+    }
+
+    #[test]
+    fn layer_set_from_document_populates_defaults() {
+        let pdf = build_pdf_with_layers();
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+        let set = layers::layer_set_from_document(&doc);
+
+        // Object 9 was default-OFF; rest are ON.
+        assert_eq!(set.get(5), Some(true));
+        assert_eq!(set.get(6), Some(true));
+        assert_eq!(set.get(9), Some(false));
+    }
+
+    #[test]
+    fn layer_set_from_configuration_applies_base_state() {
+        let pdf = build_pdf_with_layer_hierarchy();
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+
+        // Default config: BaseState=Off, ON=[5,7], OFF=[9].
+        let d = layers::layer_set_from_configuration(&doc, 0).unwrap();
+        assert_eq!(d.get(5), Some(true));
+        assert_eq!(d.get(6), Some(false));
+        assert_eq!(d.get(7), Some(true));
+        assert_eq!(d.get(8), Some(false));
+        assert_eq!(d.get(9), Some(false));
+
+        // Alternate config: BaseState=On, OFF=[5].
+        let alt = layers::layer_set_from_configuration(&doc, 1).unwrap();
+        assert_eq!(alt.get(5), Some(false));
+        assert_eq!(alt.get(6), Some(true));
+        assert_eq!(alt.get(7), Some(true));
+
+        // Out-of-range index returns None.
+        assert!(layers::layer_set_from_configuration(&doc, 99).is_none());
     }
 
     /// Build a minimal valid PDF for testing.

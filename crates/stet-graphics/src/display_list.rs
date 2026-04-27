@@ -121,6 +121,94 @@ pub struct GroupParams {
     pub color_space: GroupColorSpace,
 }
 
+/// Visibility predicate for an [`DisplayElement::OcgGroup`].
+///
+/// Three forms exist in PDF:
+///
+/// - `Single` — a `/OC BDC` block whose property is a direct OCG ref,
+///   or a single-OCG OCMD. Most common case.
+/// - `Membership` — an OCMD with a `/P` policy (AllOn / AnyOn /
+///   AllOff / AnyOff) over multiple OCGs. PDF default policy is
+///   `AnyOn`.
+/// - `Expression` — an OCMD with a `/VE` boolean expression
+///   (PDF 1.6+). Most expressive form.
+///
+/// The renderer evaluates the predicate against the active
+/// `LayerSet` (in `stet-pdf-reader`); each variant's
+/// `default_visible` is the fallback when the LayerSet has no
+/// opinion.
+#[derive(Clone, Debug)]
+pub enum OcgVisibility {
+    /// Visibility tied to a single OCG.
+    Single { ocg_id: u32, default_visible: bool },
+    /// OCMD with a `/P` membership policy over a set of OCGs.
+    Membership {
+        ocg_ids: Vec<u32>,
+        policy: MembershipPolicy,
+        default_visible: bool,
+    },
+    /// OCMD with a `/VE` visibility expression.
+    Expression {
+        expr: VisibilityExpr,
+        default_visible: bool,
+    },
+}
+
+/// `/P` policy on an OCMD.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MembershipPolicy {
+    /// `/AllOn` — visible iff every OCG is on.
+    AllOn,
+    /// `/AnyOn` — visible iff at least one OCG is on. PDF default.
+    AnyOn,
+    /// `/AllOff` — visible iff every OCG is off.
+    AllOff,
+    /// `/AnyOff` — visible iff at least one OCG is off.
+    AnyOff,
+}
+
+/// Boolean visibility expression from an OCMD `/VE` array.
+///
+/// The parser always emits the canonical form (operands as
+/// `Vec<VisibilityExpr>`); leaves are layer references.
+#[derive(Clone, Debug)]
+pub enum VisibilityExpr {
+    /// Conjunction — visible iff every operand is visible.
+    And(Vec<VisibilityExpr>),
+    /// Disjunction — visible iff any operand is visible.
+    Or(Vec<VisibilityExpr>),
+    /// Negation — exactly one operand.
+    Not(Box<VisibilityExpr>),
+    /// Leaf: refer to a single OCG by object number.
+    Layer(u32),
+}
+
+impl OcgVisibility {
+    /// Convenience constructor for the most common case.
+    pub fn single(ocg_id: u32, default_visible: bool) -> Self {
+        OcgVisibility::Single {
+            ocg_id,
+            default_visible,
+        }
+    }
+
+    /// The fallback visibility used when no `LayerSet` has an
+    /// opinion. Renderers that do not consult a LayerSet read this.
+    pub fn default_visible(&self) -> bool {
+        match self {
+            OcgVisibility::Single {
+                default_visible, ..
+            }
+            | OcgVisibility::Membership {
+                default_visible, ..
+            }
+            | OcgVisibility::Expression {
+                default_visible, ..
+            } => *default_visible,
+        }
+    }
+}
+
 /// A single recorded drawing operation.
 #[derive(Clone)]
 pub enum DisplayElement {
@@ -156,15 +244,16 @@ pub enum DisplayElement {
         elements: DisplayList,
         params: GroupParams,
     },
-    /// PDF Optional Content Group (layer). Children are rendered only when
-    /// the layer is visible. Visibility defaults to `default_visible` and
-    /// can be overridden at render time via a set of hidden layer IDs.
+    /// PDF Optional Content Group (layer). Children are rendered only
+    /// when [`OcgVisibility`] evaluates to `true` under the active
+    /// `LayerSet` (consult `stet-pdf-reader`'s `LayerSet::evaluate`).
+    /// `default_visible` on each variant is the fallback used when the
+    /// renderer has no `LayerSet` opinion for the relevant OCGs.
     OcgGroup {
         elements: DisplayList,
-        /// PDF object number identifying the OCG (or OCMD).
-        ocg_id: u32,
-        /// Whether this layer is visible in the default configuration.
-        default_visible: bool,
+        /// Visibility predicate: a single OCG, an OCMD membership
+        /// policy, or a /VE expression.
+        visibility: OcgVisibility,
     },
     /// Soft-masked content: render mask form to grayscale, multiply with content alpha.
     SoftMasked {

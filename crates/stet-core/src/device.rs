@@ -91,13 +91,12 @@ pub trait OutputDevice {
                 }
                 DisplayElement::OcgGroup {
                     elements,
-                    default_visible,
-                    ..
+                    visibility,
                 } => {
                     // Clip ops always apply so subsequent top-level elements
                     // inherit the right clip region, even when the layer is
                     // hidden; paint ops are gated on visibility.
-                    let visible = *default_visible;
+                    let visible = visibility.default_visible();
                     for elem in elements.elements() {
                         match elem {
                             DisplayElement::Clip { path, params } => self.clip_path(path, params),
@@ -230,10 +229,9 @@ pub fn replay_to_device(list: &DisplayList, device: &mut dyn OutputDevice) {
             }
             DisplayElement::OcgGroup {
                 elements,
-                default_visible,
-                ..
+                visibility,
             } => {
-                if *default_visible {
+                if visibility.default_visible() {
                     replay_to_device(elements, device);
                 } else {
                     // Still replay Clip/InitClip so they affect subsequent

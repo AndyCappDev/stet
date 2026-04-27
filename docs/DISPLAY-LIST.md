@@ -233,16 +233,46 @@ PostScript interpreter does not generate these.
 ### OcgGroup (PDF only)
 
 ```rust
-OcgGroup { elements: DisplayList, ocg_id: u32, default_visible: bool }
+OcgGroup { elements: DisplayList, visibility: OcgVisibility }
+
+pub enum OcgVisibility {
+    Single { ocg_id: u32, default_visible: bool },
+    Membership { ocg_ids: Vec<u32>, policy: MembershipPolicy, default_visible: bool },
+    Expression { expr: VisibilityExpr, default_visible: bool },
+}
+
+pub enum MembershipPolicy { AllOn, AnyOn, AllOff, AnyOff }
+
+pub enum VisibilityExpr {
+    And(Vec<VisibilityExpr>),
+    Or(Vec<VisibilityExpr>),
+    Not(Box<VisibilityExpr>),
+    Layer(u32),
+}
 ```
 
 A PDF Optional Content Group (layer). Children are rendered only when the
-layer is visible. `ocg_id` is the PDF object number of the OCG (or OCMD)
-dictionary. `default_visible` records whether the layer is ON in the
-document's default configuration. Produced by the PDF reader for `/OC BDC`
-marked content blocks and XObjects with `/OC` entries. The rasterizer
-currently renders all children unconditionally; layer toggling will be
-added in a future update.
+group's [`OcgVisibility`] predicate evaluates to `true` against the active
+[`LayerSet`]. The renderer holds a `LayerSet` on `SkiaDevice` (or accepts
+one through `render_to_rgba_with_layers`); each variant's `default_visible`
+is the fallback used when the `LayerSet` has no explicit override for the
+relevant OCGs. Produced by the PDF reader for `/OC BDC` marked content
+blocks and XObjects with `/OC` entries.
+
+Phase 3 of the layers plan emits only `OcgVisibility::Single`. OCMDs
+(Optional Content Membership Dictionaries) are still emitted as `Single`
+with their static evaluation baked into `default_visible`; Phase 4 will
+upgrade them to `Membership` (with the parsed `/P` policy) or
+`Expression` (for `/VE` boolean expressions) so each layer in the OCMD
+becomes individually toggleable.
+
+The renderer's clip-op carve-out still applies: `Clip` and `InitClip`
+elements inside an `OcgGroup` always execute even when the group's
+visibility evaluates to false, so subsequent top-level elements inherit
+the correct clip state.
+
+[`OcgVisibility`]: https://docs.rs/stet-graphics/latest/stet_graphics/display_list/enum.OcgVisibility.html
+[`LayerSet`]: https://docs.rs/stet-graphics/latest/stet_graphics/layer_set/struct.LayerSet.html
 
 ### SoftMasked (PDF only)
 

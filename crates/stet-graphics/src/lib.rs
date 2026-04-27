@@ -31,4 +31,5 @@ pub mod color;
 pub mod device;
 pub mod display_list;
 pub mod icc;
+pub mod layer_set;
 pub mod mesh_shading;

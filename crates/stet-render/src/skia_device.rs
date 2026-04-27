@@ -24,6 +24,7 @@ use stet_graphics::device::{
     StrokeParams, TintLookupTable,
 };
 use stet_graphics::icc::IccCache;
+use stet_graphics::layer_set::LayerSet;
 
 /// Axis-aligned rectangle in device pixel coordinates.
 #[derive(Clone, Copy)]
@@ -109,6 +110,11 @@ pub struct SkiaDevice {
     /// viewport pipeline against the banded PNG baselines — same display list,
     /// different culling/epoch logic, same expected output.
     use_viewport_path: bool,
+    /// OCG visibility overrides applied to every render that consults
+    /// the layer system. Defaults to empty (every layer falls back to
+    /// its `default_visible`); a consumer building a layer panel can
+    /// install an explicit set via `set_layer_set`.
+    layer_set: LayerSet,
 }
 
 impl SkiaDevice {
@@ -150,6 +156,7 @@ impl SkiaDevice {
             render_icc_cache: None,
             no_aa: false,
             use_viewport_path: false,
+            layer_set: LayerSet::new(),
         }
     }
 
@@ -157,6 +164,21 @@ impl SkiaDevice {
     /// test runner's `--device viewport-png` mode.
     pub fn set_use_viewport_path(&mut self, on: bool) {
         self.use_viewport_path = on;
+    }
+
+    /// Replace the device's OCG visibility overrides.
+    ///
+    /// The empty default has every layer fall back to its
+    /// `default_visible` baked into the display list. Callers building
+    /// a layer panel hand in a populated [`LayerSet`] each render
+    /// pass.
+    pub fn set_layer_set(&mut self, layer_set: LayerSet) {
+        self.layer_set = layer_set;
+    }
+
+    /// Read-only view of the device's current OCG visibility overrides.
+    pub fn layer_set(&self) -> &LayerSet {
+        &self.layer_set
     }
 
     /// Ensure `self.pixmap` is allocated at full page dimensions.
@@ -738,6 +760,9 @@ struct RenderContext<'a> {
     /// (no backdrop preload, no two-pass) so the alpha channel reflects
     /// pure element coverage rather than backdrop-blended results.
     alpha_extraction_pass: bool,
+    /// OCG visibility overrides. Empty (every layer at its
+    /// `default_visible`) when the caller didn't supply one.
+    layer_set: &'a LayerSet,
 }
 
 /// Override mode applied to `render_group` while the knockout group renders
@@ -873,15 +898,14 @@ fn precompute_bboxes(list: &DisplayList, dpi: f64) -> Vec<Option<YBBox>> {
             }),
             DisplayElement::OcgGroup {
                 elements,
-                default_visible,
-                ..
+                visibility,
             } => {
                 // Hidden groups without clip ops contribute nothing — cull.
                 // (Hidden + has clip ops is handled below: we return paint
                 // bounds so the epoch has correct extent, and the band loop
                 // skips per-element culling for OcgGroups so the clip ops
                 // always execute.)
-                if !*default_visible && !contains_clip_op(elements) {
+                if !visibility.default_visible() && !contains_clip_op(elements) {
                     return None;
                 }
                 let child_bboxes = precompute_bboxes(elements, dpi);
@@ -3182,15 +3206,14 @@ fn render_element(
         DisplayElement::Text { .. } => {} // PDF-only, ignored by rasterizer
         DisplayElement::OcgGroup {
             elements,
-            default_visible,
-            ..
+            visibility,
         } => {
             // Visible groups render every child. OFF-by-default groups still
             // apply Clip/InitClip so the band's clip state stays in sync —
             // otherwise a transient clip from the previous group would leak
             // into the next visible one. Paint ops are skipped; that's what
             // "hidden layer" means.
-            let visible = *default_visible;
+            let visible = ctx.layer_set.evaluate(visibility);
             for (idx, elem) in elements.elements().iter().enumerate() {
                 if !visible
                     && !matches!(elem, DisplayElement::Clip { .. } | DisplayElement::InitClip)
@@ -3824,6 +3847,7 @@ fn render_group(
         // The children of this group see *this* group as their parent.
         parent_group_isolated: params.isolated,
         alpha_extraction_pass: ctx.alpha_extraction_pass,
+        layer_set: ctx.layer_set,
     };
 
     let skip_indices = compute_obscured_fill_skips(elements);
@@ -4376,6 +4400,7 @@ fn render_knockout_group(
         // knockout group as isolated for the purposes of the inner CMYK rule.
         parent_group_isolated: true,
         alpha_extraction_pass: false,
+        layer_set: ctx.layer_set,
     };
 
     // Persistent band state for clip tracking — clips must accumulate across
@@ -4746,6 +4771,7 @@ fn render_soft_masked(
         // not inherit the alpha extraction pass — their groups need normal
         // backdrop preloading regardless of the outer extraction context.
         alpha_extraction_pass: false,
+        layer_set: ctx.layer_set,
     };
 
     // 1a. INLINE PATH: Mask form contains nested offscreens.
@@ -4818,6 +4844,7 @@ fn render_soft_masked(
                 ctx.effective_dpi,
                 ctx.scale_x,
                 ctx.scale_y,
+                ctx.layer_set,
             );
             *guard = Some(built);
         }
@@ -5222,6 +5249,7 @@ fn rasterize_mask(
     effective_dpi: f64,
     scale_x: f32,
     scale_y: f32,
+    layer_set: &LayerSet,
 ) -> Option<stet_graphics::display_list::MaskRaster> {
     // 1. Find the actual paint bounds in device space, then cap them to
     // the parent gstate's clip path bbox if known. The cap is critical
@@ -5281,6 +5309,7 @@ fn rasterize_mask(
         knockout_painter_pass: KnockoutPainterPass::None,
         parent_group_isolated: false,
         alpha_extraction_pass: false,
+        layer_set,
     };
 
     // 5. Mask rendering doesn't participate in CMYK overprint compositing.
@@ -5527,8 +5556,7 @@ fn transform_element_ctm(elem: &DisplayElement, pm: &Matrix) -> DisplayElement {
         }
         DisplayElement::OcgGroup {
             elements,
-            ocg_id,
-            default_visible,
+            visibility,
         } => {
             let mut t = DisplayList::new();
             for child in elements.elements() {
@@ -5536,8 +5564,7 @@ fn transform_element_ctm(elem: &DisplayElement, pm: &Matrix) -> DisplayElement {
             }
             DisplayElement::OcgGroup {
                 elements: t,
-                ocg_id: *ocg_id,
-                default_visible: *default_visible,
+                visibility: visibility.clone(),
             }
         }
         other => other.clone(),
@@ -5786,6 +5813,7 @@ fn render_pattern_fill(
                     knockout_painter_pass: ctx.knockout_painter_pass,
                     parent_group_isolated: ctx.parent_group_isolated,
                     alpha_extraction_pass: ctx.alpha_extraction_pass,
+                    layer_set: ctx.layer_set,
                 };
 
                 let mut tile_band = BandState {
@@ -5860,6 +5888,7 @@ fn render_pattern_fill(
                 knockout_painter_pass: ctx.knockout_painter_pass,
                 parent_group_isolated: ctx.parent_group_isolated,
                 alpha_extraction_pass: ctx.alpha_extraction_pass,
+                layer_set: ctx.layer_set,
             };
             let mut tile_bs = BandState {
                 clip_region: None,
@@ -6640,6 +6669,7 @@ impl OutputDevice for SkiaDevice {
                 knockout_painter_pass: KnockoutPainterPass::None,
                 parent_group_isolated: false,
                 alpha_extraction_pass: false,
+                layer_set: &self.layer_set,
             };
             render_pattern_fill(&mut self.pixmap, &mut band_state, params, &ctx);
         }
@@ -6707,6 +6737,7 @@ impl OutputDevice for SkiaDevice {
                 knockout_painter_pass: KnockoutPainterPass::None,
                 parent_group_isolated: false,
                 alpha_extraction_pass: false,
+                layer_set: &self.layer_set,
             };
             let mut band_state = BandState {
                 clip_region: None,
@@ -6739,6 +6770,7 @@ impl OutputDevice for SkiaDevice {
         // Create the sink for this page before spawning background work
         let mut sink = self.sink_factory.create_sink(output_path)?;
         let dpi = self.dpi;
+        let layer_set = self.layer_set.clone();
 
         #[cfg(feature = "parallel")]
         {
@@ -6749,7 +6781,7 @@ impl OutputDevice for SkiaDevice {
             let (tx, rx) = std::sync::mpsc::sync_channel(1);
             rayon::spawn(move || {
                 let result = render_banded_to_sink(
-                    page_w, page_h, band_h, dpi, &list, &mut *sink, &icc_cache, no_aa,
+                    page_w, page_h, band_h, dpi, &list, &mut *sink, &icc_cache, no_aa, &layer_set,
                 );
                 let _ = tx.send(result);
             });
@@ -6758,7 +6790,7 @@ impl OutputDevice for SkiaDevice {
         #[cfg(not(feature = "parallel"))]
         {
             render_banded_to_sink(
-                page_w, page_h, band_h, dpi, &list, &mut *sink, &icc_cache, self.no_aa,
+                page_w, page_h, band_h, dpi, &list, &mut *sink, &icc_cache, self.no_aa, &layer_set,
             )?;
         }
 
@@ -8815,6 +8847,7 @@ fn render_banded_to_sink(
     sink: &mut dyn stet_graphics::device::PageSink,
     icc_cache: &IccCache,
     no_aa: bool,
+    layer_set: &LayerSet,
 ) -> Result<(), String> {
     // Precompute Y bounding boxes for culling
     let bboxes = precompute_bboxes(list, dpi);
@@ -8934,6 +8967,7 @@ fn render_banded_to_sink(
                     knockout_painter_pass: KnockoutPainterPass::None,
                     parent_group_isolated: false,
                     alpha_extraction_pass: false,
+                    layer_set,
                 };
                 render_element(&mut band_pixmap, &mut band_state, &elements[i], &ctx);
             }
@@ -9085,14 +9119,13 @@ fn precompute_full_bboxes(list: &DisplayList, dpi: f64) -> Vec<Option<BBox2D>> {
             }),
             DisplayElement::OcgGroup {
                 elements,
-                default_visible,
-                ..
+                visibility,
             } => {
                 // Hidden groups without clip ops contribute nothing. Hidden
                 // + has clip ops is force-processed at the render-loop layer
                 // (see the viewport render_region_prepared loop) so we still
                 // return the paint bounds here for correct epoch bbox.
-                if !*default_visible && !contains_clip_op(elements) {
+                if !visibility.default_visible() && !contains_clip_op(elements) {
                     return None;
                 }
                 let child_bboxes = precompute_full_bboxes(elements, dpi);
@@ -9813,6 +9846,7 @@ pub fn render_region_prepared(
         return vec![0xFF; pixel_w as usize * pixel_h as usize * 4];
     }
 
+    let layer_set = LayerSet::new();
     let scale_x = pixel_w as f64 / vp_w;
     let scale_y = pixel_h as f64 / vp_h;
     let effective_dpi = dpi * scale_x;
@@ -9913,6 +9947,7 @@ pub fn render_region_prepared(
                 knockout_painter_pass: KnockoutPainterPass::None,
                 parent_group_isolated: false,
                 alpha_extraction_pass: false,
+                layer_set: &layer_set,
             };
             render_element(&mut pixmap, &mut state, &elements[i], &ctx);
         }
@@ -9975,6 +10010,7 @@ pub fn render_region_single_band(
         return vec![0xFF; pixel_w as usize * actual_h as usize * 4];
     }
 
+    let layer_set = LayerSet::new();
     let scale_x = pixel_w as f64 / vp_w;
     let scale_y = pixel_h as f64 / vp_h;
     let effective_dpi = dpi * scale_x;
@@ -10093,6 +10129,7 @@ pub fn render_region_single_band(
                 knockout_painter_pass: KnockoutPainterPass::None,
                 parent_group_isolated: false,
                 alpha_extraction_pass: false,
+                layer_set: &layer_set,
             };
             render_element(&mut pixmap, &mut state, &elements[i], &ctx);
         }
@@ -10430,6 +10467,25 @@ pub fn render_to_rgba(
     icc: Option<&IccCache>,
     no_aa: bool,
 ) -> Vec<u8> {
+    render_to_rgba_with_layers(list, pixel_w, pixel_h, dpi, icc, no_aa, &LayerSet::new())
+}
+
+/// Like [`render_to_rgba`] but consults the supplied [`LayerSet`] when
+/// evaluating each `OcgGroup`'s visibility.
+///
+/// Pass `&LayerSet::new()` (or use [`render_to_rgba`]) to fall back to
+/// each OCG's `default_visible` baked from the document's default
+/// configuration.
+#[allow(clippy::too_many_arguments)]
+pub fn render_to_rgba_with_layers(
+    list: &DisplayList,
+    pixel_w: u32,
+    pixel_h: u32,
+    dpi: f64,
+    icc: Option<&IccCache>,
+    no_aa: bool,
+    layer_set: &LayerSet,
+) -> Vec<u8> {
     if pixel_w == 0 || pixel_h == 0 {
         return vec![0xFF; pixel_w as usize * pixel_h as usize * 4];
     }
@@ -10449,7 +10505,7 @@ pub fn render_to_rgba(
 
     let band_h = select_band_height(pixel_w, pixel_h);
     if let Err(e) = render_banded_to_sink(
-        pixel_w, pixel_h, band_h, dpi, list, &mut sink, &icc_cache, no_aa,
+        pixel_w, pixel_h, band_h, dpi, list, &mut sink, &icc_cache, no_aa, layer_set,
     ) {
         eprintln!("render_to_rgba: banded render failed: {e}");
         return vec![0xFF; pixel_w as usize * pixel_h as usize * 4];
@@ -10677,13 +10733,13 @@ fn debug_bbox_lines(list: &DisplayList, dpi: f64, depth: usize, out: &mut Vec<St
         }
         if let DisplayElement::OcgGroup {
             elements: inner,
-            default_visible,
-            ..
+            visibility,
         } = elem
         {
             out.push(format!(
                 "{}        ocg default_visible={}",
-                indent, default_visible
+                indent,
+                visibility.default_visible()
             ));
             debug_bbox_lines(inner, dpi, depth + 1, out);
         }
@@ -10745,6 +10801,7 @@ pub fn render_region(
         return vec![0xFF; pixel_w as usize * pixel_h as usize * 4];
     }
 
+    let layer_set = LayerSet::new();
     let scale_x = pixel_w as f64 / vp_w;
     let scale_y = pixel_h as f64 / vp_h;
     // Effective DPI for hairline decisions — reference DPI scaled by zoom
@@ -10844,6 +10901,7 @@ pub fn render_region(
                 knockout_painter_pass: KnockoutPainterPass::None,
                 parent_group_isolated: false,
                 alpha_extraction_pass: false,
+                layer_set: &layer_set,
             };
             render_element(&mut pixmap, &mut state, &elements[i], &ctx);
         }
@@ -12827,8 +12885,17 @@ mod tests {
             parent_clip_bbox: None,
         };
 
-        let raster =
-            rasterize_mask(&mask, &params, None, false, 72.0, 1.0, 1.0).expect("expected raster");
+        let raster = rasterize_mask(
+            &mask,
+            &params,
+            None,
+            false,
+            72.0,
+            1.0,
+            1.0,
+            &LayerSet::new(),
+        )
+        .expect("expected raster");
 
         // Origin must be at (or just before) the paint bounds, with the
         // 1-pixel AA pad.

@@ -37,7 +37,7 @@ use stet_graphics::device::{
     ClipParams, FillParams, ImageColorSpace, ImageParams, PatternFillParams, StrokeParams,
 };
 use stet_graphics::display_list::{
-    DisplayElement, DisplayList, GroupParams, SoftMaskParams, SoftMaskSubtype,
+    DisplayElement, DisplayList, GroupParams, OcgVisibility, SoftMaskParams, SoftMaskSubtype,
 };
 use stet_graphics::icc::IccCache;
 
@@ -51,8 +51,7 @@ enum MarkedContentFrame {
     /// matching EMC wraps the collected children in an `OcgGroup`.
     Ocg {
         parent_list: DisplayList,
-        ocg_id: u32,
-        default_visible: bool,
+        visibility: OcgVisibility,
     },
     /// Any other BDC (non-OC property reference) or BMC.
     Other,
@@ -314,15 +313,13 @@ impl<'a> ContentInterpreter<'a> {
         while let Some(frame) = self.mc_stack.pop() {
             if let MarkedContentFrame::Ocg {
                 parent_list,
-                ocg_id,
-                default_visible,
+                visibility,
             } = frame
             {
                 let ocg_list = std::mem::replace(&mut self.display_list, parent_list);
                 self.display_list.push(DisplayElement::OcgGroup {
                     elements: ocg_list,
-                    ocg_id,
-                    default_visible,
+                    visibility,
                 });
             }
         }
@@ -1342,15 +1339,13 @@ impl<'a> ContentInterpreter<'a> {
             b"EMC" => {
                 if let Some(MarkedContentFrame::Ocg {
                     parent_list,
-                    ocg_id,
-                    default_visible,
+                    visibility,
                 }) = self.mc_stack.pop()
                 {
                     let ocg_list = std::mem::replace(&mut self.display_list, parent_list);
                     self.display_list.push(DisplayElement::OcgGroup {
                         elements: ocg_list,
-                        ocg_id,
-                        default_visible,
+                        visibility,
                     });
                 }
                 Ok(())
@@ -3155,20 +3150,17 @@ impl<'a> ContentInterpreter<'a> {
 
         // The properties operand is a name referencing /Properties in resources
         let mut pushed = false;
-        if let Some(Operand::Name(prop_name)) = props {
-            if let Some(props_dict) = self.resolve_resource_subdict(b"Properties") {
-                if let Some(ocg_obj) = props_dict.get(&prop_name) {
-                    let ocg_id = self.ocg_obj_num(ocg_obj);
-                    let is_off = self.is_ocg_off(ocg_obj);
-                    let parent_list = std::mem::replace(&mut self.display_list, DisplayList::new());
-                    self.mc_stack.push(MarkedContentFrame::Ocg {
-                        parent_list,
-                        ocg_id,
-                        default_visible: !is_off,
-                    });
-                    pushed = true;
-                }
-            }
+        if let Some(Operand::Name(prop_name)) = props
+            && let Some(props_dict) = self.resolve_resource_subdict(b"Properties")
+            && let Some(ocg_obj) = props_dict.get(&prop_name)
+        {
+            let visibility = self.build_visibility(ocg_obj);
+            let parent_list = std::mem::replace(&mut self.display_list, DisplayList::new());
+            self.mc_stack.push(MarkedContentFrame::Ocg {
+                parent_list,
+                visibility,
+            });
+            pushed = true;
         }
         if !pushed {
             // OC BDC without a resolvable properties entry still opens a
@@ -3177,16 +3169,6 @@ impl<'a> ContentInterpreter<'a> {
         }
 
         Ok(())
-    }
-
-    /// Extract the PDF object number from an OCG reference. Returns 0 for
-    /// inline dicts or non-reference objects.
-    fn ocg_obj_num(&self, ocg_obj: &PdfObj) -> u32 {
-        if let Some((obj_num, _)) = ocg_obj.as_ref() {
-            obj_num
-        } else {
-            0
-        }
     }
 
     /// Check whether an OCG/OCMD reference is OFF.
@@ -3213,6 +3195,50 @@ impl<'a> ContentInterpreter<'a> {
             }
         }
         false
+    }
+
+    /// Build an [`OcgVisibility`] from an `/OC BDC` properties reference
+    /// or an XObject `/OC` entry.
+    ///
+    /// Phase 3 emits only [`OcgVisibility::Single`]:
+    ///
+    /// - Direct OCG ref → `Single { ocg_id, default_visible }` driven
+    ///   by `/OCProperties /D /OFF` membership. Runtime-toggleable
+    ///   through a `LayerSet`.
+    /// - OCMD ref → `Single { ocg_id: 0, default_visible: <baked
+    ///   policy eval> }`. Preserves existing byte-identical render
+    ///   output; OCMDs become individually toggleable in Phase 4 when
+    ///   they're upgraded to [`OcgVisibility::Membership`] /
+    ///   `Expression`.
+    fn build_visibility(&self, ocg_obj: &PdfObj) -> OcgVisibility {
+        if let Some((ocg_id, _)) = ocg_obj.as_ref() {
+            // Resolve to determine OCG vs OCMD.
+            let resolved = self.resolver.deref(ocg_obj).ok();
+            let is_ocmd = resolved
+                .as_ref()
+                .and_then(|o| o.as_dict())
+                .and_then(|d| d.get_name(b"Type"))
+                == Some(b"OCMD");
+            if is_ocmd {
+                // Bake the OCMD's static evaluation into a sentinel
+                // Single. Phase 4 replaces this with proper Membership
+                // / Expression so the OCMD's leaves become
+                // individually toggleable.
+                return OcgVisibility::Single {
+                    ocg_id: 0,
+                    default_visible: !self.is_ocg_off(ocg_obj),
+                };
+            }
+            return OcgVisibility::Single {
+                ocg_id,
+                default_visible: !self.ocg_off.contains(&ocg_id),
+            };
+        }
+        // Inline OCG dict or other unparseable shape.
+        OcgVisibility::Single {
+            ocg_id: 0,
+            default_visible: !self.is_ocg_off(ocg_obj),
+        }
     }
 
     /// Evaluate an OCMD (Optional Content Membership Dictionary).
@@ -3281,17 +3307,14 @@ impl<'a> ContentInterpreter<'a> {
         // Check Optional Content visibility on the XObject itself.
         // Instead of suppressing content, wrap it in an OcgGroup so visibility
         // can be toggled at render time.
-        let xobj_ocg_info: Option<(u32, bool)> = dict
-            .get(b"OC")
-            .map(|oc_obj| (self.ocg_obj_num(oc_obj), !self.is_ocg_off(oc_obj)));
+        let xobj_visibility = dict.get(b"OC").map(|oc_obj| self.build_visibility(oc_obj));
 
         let mut wrapped = false;
-        if let Some((ocg_id, default_visible)) = xobj_ocg_info {
+        if let Some(visibility) = xobj_visibility {
             let parent_list = std::mem::replace(&mut self.display_list, DisplayList::new());
             self.mc_stack.push(MarkedContentFrame::Ocg {
                 parent_list,
-                ocg_id,
-                default_visible,
+                visibility,
             });
             wrapped = true;
         }
@@ -3307,15 +3330,13 @@ impl<'a> ContentInterpreter<'a> {
         if wrapped {
             if let Some(MarkedContentFrame::Ocg {
                 parent_list,
-                ocg_id,
-                default_visible,
+                visibility,
             }) = self.mc_stack.pop()
             {
                 let ocg_list = std::mem::replace(&mut self.display_list, parent_list);
                 self.display_list.push(DisplayElement::OcgGroup {
                     elements: ocg_list,
-                    ocg_id,
-                    default_visible,
+                    visibility,
                 });
             }
         }
