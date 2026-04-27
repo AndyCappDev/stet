@@ -125,6 +125,8 @@
 //! - [`page_boxes`](PdfDocument::page_boxes) — all 5 page boxes + presentation hints
 //! - [`embedded_files`](PdfDocument::embedded_files) +
 //!   [`embedded_file_bytes`](PdfDocument::embedded_file_bytes) — file attachments
+//! - [`layers`](PdfDocument::layers) + [`layer`](PdfDocument::layer) —
+//!   Optional Content Group (layer) metadata
 //! - [`parse_warnings`](PdfDocument::parse_warnings) — diagnostics
 //!
 //! Walkers that recurse over potentially-cyclic structures
@@ -158,6 +160,7 @@ pub mod embedded_files;
 pub mod error;
 pub mod filters;
 pub mod form_fields;
+pub mod layers;
 pub mod lexer;
 pub mod metadata;
 pub mod name_tree;
@@ -183,6 +186,10 @@ pub use error::PdfError;
 pub use form_fields::{
     ButtonField, ButtonType, ChoiceField, ChoiceOption, FieldFlags, FieldKind, FieldValue,
     FormCatalog, FormField, SigFlags, SignatureField, TextField,
+};
+pub use layers::{
+    CreatorInfo, ExportUsage, LanguageUsage, Layer, LayerIntent, LayerUsage, PageElementSubtype,
+    PrintUsage, UsageState, UserUsage, ViewUsage, ZoomUsage,
 };
 pub use metadata::{DocumentMetadata, PdfDate, TrappedFlag};
 pub use objects::{PdfDict, PdfObj};
@@ -243,6 +250,9 @@ pub struct PdfDocument<'a> {
     /// Embedded files (file attachments), parsed lazily on first
     /// access from the catalog's `/Names /EmbeddedFiles` name tree.
     embedded_files_cache: OnceCell<HashMap<String, EmbeddedFile>>,
+    /// Optional Content Groups (layers), parsed lazily on first
+    /// access from the catalog's `/OCProperties /OCGs`.
+    layers_cache: OnceCell<Vec<Layer>>,
     /// Parse-time warnings accumulated by structural parsers
     /// (outline, annotations, form fields, ...). The sink uses
     /// interior mutability so accessors can record warnings while
@@ -343,6 +353,7 @@ impl<'a> PdfDocument<'a> {
             page_annotations_cache,
             form_cache: OnceCell::new(),
             embedded_files_cache: OnceCell::new(),
+            layers_cache: OnceCell::new(),
             warnings: WarningSink::new(),
         })
     }
@@ -720,6 +731,30 @@ impl<'a> PdfDocument<'a> {
             ef.stream_obj_num,
             ef.stream_gen_num,
         )
+    }
+
+    /// All Optional Content Groups (layers) declared by the document.
+    ///
+    /// Each [`Layer`] carries the OCG's display name, intent, lock
+    /// state, full `/Usage` sub-dict, and its initial visibility under
+    /// the default configuration. The hierarchy (`/Order`), alternate
+    /// configurations, and runtime visibility overrides land in later
+    /// phases of the layers API.
+    ///
+    /// Returns an empty slice when the document has no `/OCProperties`.
+    /// Parsed lazily on first call and cached.
+    pub fn layers(&self) -> &[Layer] {
+        self.layers_cache
+            .get_or_init(|| layers::metadata::parse_layers(&self.resolver, &self.warnings))
+            .as_slice()
+    }
+
+    /// Look up a single layer by its OCG object number.
+    ///
+    /// Useful when the caller already has an `ocg_id` from a display
+    /// list `OcgGroup` element and wants the layer's metadata.
+    pub fn layer(&self, ocg_id: u32) -> Option<&Layer> {
+        self.layers().iter().find(|l| l.ocg_id == ocg_id)
     }
 }
 
@@ -2185,6 +2220,267 @@ mod tests {
             _ => panic!("expected PageView"),
         }
         assert!(doc.resolve_named_destination("MissingName").is_none());
+    }
+
+    /// Build a PDF with five OCGs that together exercise every Phase 1
+    /// metadata path:
+    ///
+    /// - Object 5: minimal OCG with a PDFDocEncoding `/Name`.
+    /// - Object 6: OCG whose name is UTF-16BE with BOM, with an array
+    ///   `/Intent` of two values, locked, and full `/Usage` sub-dict
+    ///   covering View/Print/Export/Zoom/Language/User/PageElement/CreatorInfo.
+    /// - Object 7: OCG with single-name array `/Intent`
+    ///   (`[/Design]`) — should collapse to `LayerIntent::Design`.
+    /// - Object 8: OCG with `/Intent /Custom` — `LayerIntent::Other`.
+    /// - Object 9: OCG default-OFF (listed in `/D /OFF`) and
+    ///   `/CreatorInfo` directly on the OCG dict.
+    fn build_pdf_with_layers() -> Vec<u8> {
+        let mut pdf = Vec::new();
+        pdf.extend(b"%PDF-1.6\n");
+
+        let mut offsets: Vec<usize> = Vec::new();
+        let mut push_obj = |buf: &mut Vec<u8>, body: &[u8]| {
+            offsets.push(buf.len());
+            buf.extend(body);
+        };
+
+        // 1: Catalog with /OCProperties
+        push_obj(
+            &mut pdf,
+            b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R /OCProperties << \
+              /OCGs [5 0 R 6 0 R 7 0 R 8 0 R 9 0 R] \
+              /D << /Order [5 0 R 6 0 R 7 0 R 8 0 R 9 0 R] \
+                    /OFF [9 0 R] /Locked [6 0 R] >> \
+              >> >>\nendobj\n",
+        );
+        // 2: Pages
+        push_obj(
+            &mut pdf,
+            b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
+        );
+        // 3: Page
+        push_obj(
+            &mut pdf,
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>\nendobj\n",
+        );
+        // 4: (placeholder so OCG numbering matches the doc-comment)
+        push_obj(&mut pdf, b"4 0 obj\nnull\nendobj\n");
+
+        // 5: simplest OCG — only /Type and /Name (PDFDocEncoding ASCII).
+        push_obj(
+            &mut pdf,
+            b"5 0 obj\n<< /Type /OCG /Name (Background) >>\nendobj\n",
+        );
+
+        // 6: OCG with UTF-16BE name (FE FF "T" "e" "s" "t") plus full
+        // /Usage and array /Intent.
+        let mut obj6 = Vec::new();
+        obj6.extend(b"6 0 obj\n<< /Type /OCG ");
+        obj6.extend(b"/Name <FEFF005400650073007400200394> ");
+        // Array /Intent with two distinct names.
+        obj6.extend(b"/Intent [/View /Design] ");
+        // /Usage — every sub-dict.
+        obj6.extend(b"/Usage << ");
+        obj6.extend(b"/View << /ViewState /ON >> ");
+        obj6.extend(b"/Print << /PrintState /OFF /Subtype /Watermark >> ");
+        obj6.extend(b"/Export << /ExportState /ON >> ");
+        obj6.extend(b"/Zoom << /min 0.5 /max 4.0 >> ");
+        obj6.extend(b"/Language << /Lang (en-US) /Preferred /ON >> ");
+        obj6.extend(b"/User << /Type /Ind /Name (alice) >> ");
+        obj6.extend(b"/PageElement << /Subtype /HF >> ");
+        obj6.extend(b"/CreatorInfo << /Creator (CADtool) /Subtype /Technical >> ");
+        obj6.extend(b">> ");
+        obj6.extend(b">>\nendobj\n");
+        push_obj(&mut pdf, &obj6);
+
+        // 7: single-element array /Intent → should collapse to Design.
+        push_obj(
+            &mut pdf,
+            b"7 0 obj\n<< /Type /OCG /Name (DesignLayer) /Intent [/Design] >>\nendobj\n",
+        );
+
+        // 8: unknown intent name → LayerIntent::Other.
+        push_obj(
+            &mut pdf,
+            b"8 0 obj\n<< /Type /OCG /Name (Custom) /Intent /Custom >>\nendobj\n",
+        );
+
+        // 9: default-OFF, /CreatorInfo on the OCG itself, /User array.
+        push_obj(
+            &mut pdf,
+            b"9 0 obj\n<< /Type /OCG /Name (HiddenLayer) \
+              /CreatorInfo << /Creator (Inkscape) /Subtype /Artwork >> \
+              /Usage << /User << /Type /Org /Name [(group-a) (group-b)] >> >> \
+              >>\nendobj\n",
+        );
+
+        let xref_offset = pdf.len();
+        pdf.extend(b"xref\n0 10\n");
+        pdf.extend(b"0000000000 65535 f\r\n");
+        for off in &offsets {
+            pdf.extend(format!("{:010} 00000 n\r\n", off).as_bytes());
+        }
+        pdf.extend(b"trailer\n<< /Size 10 /Root 1 0 R >>\n");
+        pdf.extend(format!("startxref\n{xref_offset}\n%%EOF\n").as_bytes());
+        pdf
+    }
+
+    #[test]
+    fn layers_basic_enumeration() {
+        let pdf = build_pdf_with_layers();
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+        let layers = doc.layers();
+        assert_eq!(layers.len(), 5, "expected 5 OCGs, got {}", layers.len());
+
+        // Default-OFF set: only object 9 is in /D /OFF.
+        assert!(
+            layers
+                .iter()
+                .find(|l| l.ocg_id == 5)
+                .unwrap()
+                .default_visible
+        );
+        assert!(
+            layers
+                .iter()
+                .find(|l| l.ocg_id == 6)
+                .unwrap()
+                .default_visible
+        );
+        assert!(
+            !layers
+                .iter()
+                .find(|l| l.ocg_id == 9)
+                .unwrap()
+                .default_visible
+        );
+
+        // Locked set: only object 6 is in /D /Locked.
+        assert!(layers.iter().find(|l| l.ocg_id == 6).unwrap().locked);
+        assert!(!layers.iter().find(|l| l.ocg_id == 5).unwrap().locked);
+        assert!(!layers.iter().find(|l| l.ocg_id == 9).unwrap().locked);
+    }
+
+    #[test]
+    fn layers_name_decoding() {
+        let pdf = build_pdf_with_layers();
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+
+        // Object 5: PDFDocEncoding ASCII → "Background".
+        let bg = doc.layer(5).unwrap();
+        assert_eq!(bg.name, "Background");
+
+        // Object 6: UTF-16BE BOM + "Test " + GREEK CAPITAL LETTER DELTA (U+0394).
+        let utf16 = doc.layer(6).unwrap();
+        assert_eq!(utf16.name, "Test \u{0394}");
+    }
+
+    #[test]
+    fn layers_intent_variants() {
+        let pdf = build_pdf_with_layers();
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+
+        // No /Intent → default View.
+        assert_eq!(doc.layer(5).unwrap().intent, LayerIntent::View);
+
+        // Two-element array /Intent → Multiple.
+        match &doc.layer(6).unwrap().intent {
+            LayerIntent::Multiple(names) => {
+                assert_eq!(names.len(), 2);
+                assert_eq!(names[0], "View");
+                assert_eq!(names[1], "Design");
+            }
+            other => panic!("expected Multiple, got {other:?}"),
+        }
+
+        // Single-element array /Intent → collapses to Design.
+        assert_eq!(doc.layer(7).unwrap().intent, LayerIntent::Design);
+
+        // Unknown name /Intent → Other.
+        match &doc.layer(8).unwrap().intent {
+            LayerIntent::Other(s) => assert_eq!(s, "Custom"),
+            other => panic!("expected Other, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn layers_full_usage_dict() {
+        let pdf = build_pdf_with_layers();
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+        let l = doc.layer(6).unwrap();
+
+        // /View
+        let view = l.usage.view.expect("view sub-dict");
+        assert_eq!(view.state, UsageState::On);
+
+        // /Print with subtype
+        let print = l.usage.print.as_ref().expect("print sub-dict");
+        assert_eq!(print.state, UsageState::Off);
+        assert_eq!(print.subtype.as_deref(), Some("Watermark"));
+
+        // /Export
+        let export = l.usage.export.expect("export sub-dict");
+        assert_eq!(export.state, UsageState::On);
+
+        // /Zoom
+        let zoom = l.usage.zoom.expect("zoom sub-dict");
+        assert_eq!(zoom.min, Some(0.5));
+        assert_eq!(zoom.max, Some(4.0));
+
+        // /Language
+        let lang = l.usage.language.as_ref().expect("language sub-dict");
+        assert_eq!(lang.lang, "en-US");
+        assert!(lang.preferred);
+
+        // /User (single string form)
+        let user = l.usage.user.as_ref().expect("user sub-dict");
+        assert_eq!(user.user_type.as_deref(), Some("Ind"));
+        assert_eq!(user.names, vec!["alice".to_string()]);
+
+        // /PageElement
+        assert_eq!(l.usage.page_element, Some(PageElementSubtype::HeaderFooter));
+
+        // /CreatorInfo nested under /Usage
+        let ci = l.usage.creator_info.as_ref().expect("creator_info");
+        assert_eq!(ci.creator, "CADtool");
+        assert_eq!(ci.subtype.as_deref(), Some("Technical"));
+    }
+
+    #[test]
+    fn layers_creator_info_on_ocg() {
+        let pdf = build_pdf_with_layers();
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+        let hidden = doc.layer(9).unwrap();
+
+        // /CreatorInfo on the OCG itself.
+        let ci = hidden.creator_info.as_ref().expect("creator_info");
+        assert_eq!(ci.creator, "Inkscape");
+        assert_eq!(ci.subtype.as_deref(), Some("Artwork"));
+
+        // /User /Name as an array of strings.
+        let user = hidden.usage.user.as_ref().expect("user sub-dict");
+        assert_eq!(user.user_type.as_deref(), Some("Org"));
+        assert_eq!(
+            user.names,
+            vec!["group-a".to_string(), "group-b".to_string()]
+        );
+    }
+
+    #[test]
+    fn layers_empty_when_no_oc_properties() {
+        let pdf = build_minimal_pdf();
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+        assert!(doc.layers().is_empty());
+        assert!(doc.layer(42).is_none());
+    }
+
+    #[test]
+    fn layers_caches_across_calls() {
+        let pdf = build_pdf_with_layers();
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+        let first = doc.layers().as_ptr();
+        let second = doc.layers().as_ptr();
+        assert_eq!(first, second, "layers() should return a cached slice");
     }
 
     /// Build a minimal valid PDF for testing.

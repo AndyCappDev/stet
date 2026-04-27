@@ -44,10 +44,16 @@ pub enum ParsePhase {
     ViewerPreferences,
     Outline,
     Destinations,
-    Annotations { page: usize },
+    Annotations {
+        page: usize,
+    },
     Form,
-    PageBoxes { page: usize },
+    PageBoxes {
+        page: usize,
+    },
     EmbeddedFiles,
+    /// Optional Content (layers): metadata, hierarchy, configurations.
+    Layers,
 }
 
 /// Where in the document a problem occurred.
