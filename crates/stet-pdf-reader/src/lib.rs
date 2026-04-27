@@ -70,6 +70,7 @@
 //! out as reusable crates — `stet-pdf-reader` would not cover the full
 //! PDF stream-filter surface without them.
 
+pub mod annotations;
 pub mod content;
 pub mod crypto;
 pub mod destination;
@@ -86,6 +87,12 @@ pub mod resources;
 pub mod viewer_prefs;
 pub mod xref;
 
+pub use annotations::{
+    Annotation, AnnotationColor, AnnotationDate, AnnotationFlags, AnnotationKind,
+    AnnotationKindData, Border, CaretAnnotation, FileAttachmentAnnotation, FreeTextAnnotation,
+    InkAnnotation, LineAnnotation, LinkAnnotation, MarkupAnnotation, PolygonAnnotation,
+    PopupAnnotation, ShapeAnnotation, StampAnnotation, TextAnnotation,
+};
 pub use destination::{Action, Destination, ViewSpec};
 pub use error::PdfError;
 pub use metadata::{DocumentMetadata, PdfDate, TrappedFlag};
@@ -135,6 +142,10 @@ pub struct PdfDocument<'a> {
     /// Named destinations (legacy /Dests + /Names /Dests name tree),
     /// parsed lazily on first access.
     destinations_cache: OnceCell<HashMap<String, Destination>>,
+    /// Per-page annotation lists. Each `OnceCell` parses on first
+    /// access for that page only — large documents don't pay for
+    /// pages a caller never visits.
+    page_annotations_cache: Vec<OnceCell<Vec<Annotation>>>,
 }
 
 impl<'a> PdfDocument<'a> {
@@ -214,6 +225,7 @@ impl<'a> PdfDocument<'a> {
         let ocg_off = parse_ocg_off(&resolver);
         let output_intent_icc = parse_output_intent_icc(&resolver);
 
+        let page_annotations_cache = (0..pages.len()).map(|_| OnceCell::new()).collect();
         Ok(Self {
             resolver,
             pages,
@@ -226,6 +238,7 @@ impl<'a> PdfDocument<'a> {
             viewer_prefs_cache: OnceCell::new(),
             outline_cache: OnceCell::new(),
             destinations_cache: OnceCell::new(),
+            page_annotations_cache,
         })
     }
 
@@ -511,6 +524,24 @@ impl<'a> PdfDocument<'a> {
     /// without bookkeeping.
     pub fn resolve_named_destination(&self, name: &str) -> Option<Destination> {
         self.destinations().get(name).cloned()
+    }
+
+    /// Annotations attached to `page` (0-based).
+    ///
+    /// Returns an empty slice when the page has no annotations.
+    /// Parsed lazily on first call **per page** and cached, so a
+    /// 1000-page document with annotations only on a handful of
+    /// pages doesn't pay to parse the rest.
+    ///
+    /// Returns `Err(PdfError::PageOutOfRange)` if `page >= page_count()`.
+    pub fn page_annotations(&self, page: usize) -> Result<&[Annotation], PdfError> {
+        if page >= self.pages.len() {
+            return Err(PdfError::PageOutOfRange(page, self.pages.len()));
+        }
+        let cell = &self.page_annotations_cache[page];
+        let annots = cell
+            .get_or_init(|| annotations::parse_page_annotations(&self.resolver, &self.pages, page));
+        Ok(annots.as_slice())
     }
 }
 
@@ -1197,6 +1228,187 @@ mod tests {
         let a = doc.destinations();
         let b = doc.destinations();
         assert!(std::ptr::eq(a, b), "destinations() must be cached");
+    }
+
+    /// Build a one-page PDF with five annotations exercising the most
+    /// commonly used subtypes: Link (URI), Text (sticky note),
+    /// Highlight (markup with /QuadPoints), Square (interior color),
+    /// FreeText (default appearance + quadding).
+    fn build_pdf_with_annotations() -> Vec<u8> {
+        let mut pdf = Vec::new();
+        pdf.extend(b"%PDF-1.4\n");
+
+        let mut offsets: Vec<usize> = Vec::new();
+        let mut push_obj = |buf: &mut Vec<u8>, body: &[u8]| {
+            offsets.push(buf.len());
+            buf.extend(body);
+        };
+
+        // 1: Catalog
+        push_obj(
+            &mut pdf,
+            b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
+        );
+        // 2: Pages
+        push_obj(
+            &mut pdf,
+            b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
+        );
+        // 3: Page with /Annots referencing 4..8
+        push_obj(
+            &mut pdf,
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] \
+              /Annots [4 0 R 5 0 R 6 0 R 7 0 R 8 0 R] >>\nendobj\n",
+        );
+        // 4: Link annotation with URI action
+        push_obj(
+            &mut pdf,
+            b"4 0 obj\n<< /Type /Annot /Subtype /Link /Rect [72 720 540 740] \
+              /Border [0 0 1] \
+              /A << /S /URI /URI (https://example.com) >> >>\nendobj\n",
+        );
+        // 5: Text annotation (sticky note)
+        push_obj(
+            &mut pdf,
+            b"5 0 obj\n<< /Type /Annot /Subtype /Text /Rect [100 600 120 620] \
+              /Contents (A note) /Open true /Name /Comment /T (Scott) \
+              /M (D:20260427120000Z) >>\nendobj\n",
+        );
+        // 6: Highlight markup
+        push_obj(
+            &mut pdf,
+            b"6 0 obj\n<< /Type /Annot /Subtype /Highlight /Rect [72 500 300 520] \
+              /QuadPoints [72 520 300 520 72 500 300 500] \
+              /C [1.0 0.95 0.0] >>\nendobj\n",
+        );
+        // 7: Square shape with interior color
+        push_obj(
+            &mut pdf,
+            b"7 0 obj\n<< /Type /Annot /Subtype /Square /Rect [200 400 300 450] \
+              /IC [0.0 0.5 1.0] /C [0.0 0.0 0.0] /F 4 >>\nendobj\n",
+        );
+        // 8: FreeText
+        push_obj(
+            &mut pdf,
+            b"8 0 obj\n<< /Type /Annot /Subtype /FreeText /Rect [72 300 300 350] \
+              /Contents (Visible text) /DA (/Helv 10 Tf 0 g) /Q 1 \
+              /IT /FreeTextCallout >>\nendobj\n",
+        );
+
+        let xref_offset = pdf.len();
+        pdf.extend(b"xref\n0 9\n");
+        pdf.extend(b"0000000000 65535 f\r\n");
+        for off in &offsets {
+            pdf.extend(format!("{:010} 00000 n\r\n", off).as_bytes());
+        }
+        pdf.extend(b"trailer\n<< /Size 9 /Root 1 0 R >>\n");
+        pdf.extend(format!("startxref\n{xref_offset}\n%%EOF\n").as_bytes());
+
+        pdf
+    }
+
+    #[test]
+    fn page_annotations_basic_subtypes() {
+        let pdf = build_pdf_with_annotations();
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+        let annots = doc.page_annotations(0).unwrap();
+        assert_eq!(annots.len(), 5);
+
+        // Link
+        let link = &annots[0];
+        assert_eq!(link.kind, crate::AnnotationKind::Link);
+        assert_eq!(link.rect, [72.0, 720.0, 540.0, 740.0]);
+        match &link.kind_data {
+            crate::AnnotationKindData::Link(l) => match &l.action {
+                Some(crate::Action::Uri { uri, .. }) => {
+                    assert_eq!(uri, "https://example.com");
+                }
+                other => panic!("expected Uri action, got {other:?}"),
+            },
+            other => panic!("expected Link kind data, got {other:?}"),
+        }
+
+        // Text
+        let text = &annots[1];
+        assert_eq!(text.kind, crate::AnnotationKind::Text);
+        assert_eq!(text.contents.as_deref(), Some("A note"));
+        assert_eq!(text.title.as_deref(), Some("Scott"));
+        match &text.kind_data {
+            crate::AnnotationKindData::Text(t) => {
+                assert!(t.open);
+                assert_eq!(t.icon.as_deref(), Some("Comment"));
+            }
+            _ => panic!("expected Text kind"),
+        }
+        // Modified date should parse.
+        assert!(matches!(
+            text.modified,
+            Some(crate::AnnotationDate::Date(_))
+        ));
+
+        // Highlight
+        let hl = &annots[2];
+        assert_eq!(hl.kind, crate::AnnotationKind::Highlight);
+        assert_eq!(
+            hl.color,
+            Some(crate::AnnotationColor::Rgb([1.0, 0.95, 0.0]))
+        );
+        match &hl.kind_data {
+            crate::AnnotationKindData::Markup(m) => {
+                assert_eq!(m.quad_points.len(), 1);
+            }
+            _ => panic!("expected Markup kind"),
+        }
+
+        // Square
+        let sq = &annots[3];
+        assert_eq!(sq.kind, crate::AnnotationKind::Square);
+        assert!(sq.flags.print);
+        match &sq.kind_data {
+            crate::AnnotationKindData::Shape(s) => {
+                assert_eq!(
+                    s.interior_color,
+                    Some(crate::AnnotationColor::Rgb([0.0, 0.5, 1.0]))
+                );
+            }
+            _ => panic!("expected Shape kind"),
+        }
+
+        // FreeText
+        let ft = &annots[4];
+        assert_eq!(ft.kind, crate::AnnotationKind::FreeText);
+        match &ft.kind_data {
+            crate::AnnotationKindData::FreeText(f) => {
+                assert_eq!(f.default_appearance.as_deref(), Some("/Helv 10 Tf 0 g"));
+                assert_eq!(f.quadding, 1);
+                assert_eq!(f.intent.as_deref(), Some("FreeTextCallout"));
+            }
+            _ => panic!("expected FreeText kind"),
+        }
+    }
+
+    #[test]
+    fn page_annotations_caches_per_page() {
+        let pdf = build_pdf_with_annotations();
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+        let a = doc.page_annotations(0).unwrap();
+        let b = doc.page_annotations(0).unwrap();
+        assert!(std::ptr::eq(a, b), "page_annotations(0) must be cached");
+    }
+
+    #[test]
+    fn page_annotations_out_of_range() {
+        let pdf = build_pdf_with_annotations();
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+        assert!(doc.page_annotations(99).is_err());
+    }
+
+    #[test]
+    fn page_annotations_empty_when_absent() {
+        let pdf = build_minimal_pdf();
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+        let annots = doc.page_annotations(0).unwrap();
+        assert!(annots.is_empty());
     }
 
     #[test]
