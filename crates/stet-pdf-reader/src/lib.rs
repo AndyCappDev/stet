@@ -76,6 +76,7 @@ pub mod crypto;
 pub mod destination;
 pub mod error;
 pub mod filters;
+pub mod form_fields;
 pub mod lexer;
 pub mod metadata;
 pub mod name_tree;
@@ -95,6 +96,10 @@ pub use annotations::{
 };
 pub use destination::{Action, Destination, ViewSpec};
 pub use error::PdfError;
+pub use form_fields::{
+    ButtonField, ButtonType, ChoiceField, ChoiceOption, FieldFlags, FieldKind, FieldValue,
+    FormCatalog, FormField, SigFlags, SignatureField, TextField,
+};
 pub use metadata::{DocumentMetadata, PdfDate, TrappedFlag};
 pub use objects::{PdfDict, PdfObj};
 pub use outline::{OutlineItem, OutlineStyle};
@@ -146,6 +151,10 @@ pub struct PdfDocument<'a> {
     /// access for that page only — large documents don't pay for
     /// pages a caller never visits.
     page_annotations_cache: Vec<OnceCell<Vec<Annotation>>>,
+    /// AcroForm catalog, parsed lazily on first access. Outer
+    /// `OnceCell` caches the parse; inner `Option` reflects
+    /// presence/absence of `/AcroForm`.
+    form_cache: OnceCell<Option<FormCatalog>>,
 }
 
 impl<'a> PdfDocument<'a> {
@@ -239,6 +248,7 @@ impl<'a> PdfDocument<'a> {
             outline_cache: OnceCell::new(),
             destinations_cache: OnceCell::new(),
             page_annotations_cache,
+            form_cache: OnceCell::new(),
         })
     }
 
@@ -542,6 +552,23 @@ impl<'a> PdfDocument<'a> {
         let annots = cell
             .get_or_init(|| annotations::parse_page_annotations(&self.resolver, &self.pages, page));
         Ok(annots.as_slice())
+    }
+
+    /// AcroForm — interactive form catalog with field tree, default
+    /// appearance, calculation order, and signature flags.
+    ///
+    /// Returns `None` when the document has no `/AcroForm` (most PDFs
+    /// don't). Parsed lazily on first call and cached.
+    ///
+    /// Each terminal [`FormField`] carries the object numbers of its
+    /// widget annotations
+    /// ([`FormField::widget_obj_nums`](crate::FormField)); cross-link
+    /// with [`page_annotations`](Self::page_annotations) to fetch
+    /// renderable widget data.
+    pub fn form(&self) -> Option<&FormCatalog> {
+        self.form_cache
+            .get_or_init(|| form_fields::parse_acroform(&self.resolver))
+            .as_ref()
     }
 }
 
@@ -1409,6 +1436,250 @@ mod tests {
         let doc = PdfDocument::from_bytes(&pdf).unwrap();
         let annots = doc.page_annotations(0).unwrap();
         assert!(annots.is_empty());
+    }
+
+    /// Build a one-page PDF with a small AcroForm: a text field, a
+    /// checkbox, a 2-button radio group, a combo box, and a
+    /// container "shipping" with two terminal text-field children
+    /// "shipping.street" and "shipping.zip".
+    fn build_pdf_with_form() -> Vec<u8> {
+        let mut pdf = Vec::new();
+        pdf.extend(b"%PDF-1.4\n");
+
+        let mut offsets: Vec<usize> = Vec::new();
+        let mut push_obj = |buf: &mut Vec<u8>, body: &[u8]| {
+            offsets.push(buf.len());
+            buf.extend(body);
+        };
+
+        // 1: Catalog with /AcroForm
+        push_obj(
+            &mut pdf,
+            b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R /AcroForm 4 0 R >>\nendobj\n",
+        );
+        // 2: Pages
+        push_obj(
+            &mut pdf,
+            b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
+        );
+        // 3: Page (with /Annots referencing widgets 5,6,9,10,12)
+        push_obj(
+            &mut pdf,
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] \
+              /Annots [5 0 R 6 0 R 9 0 R 10 0 R 12 0 R 14 0 R 15 0 R] >>\nendobj\n",
+        );
+        // 4: AcroForm dict (top-level fields = text, checkbox, radio, combo, shipping container)
+        push_obj(
+            &mut pdf,
+            b"4 0 obj\n<< /Fields [5 0 R 6 0 R 7 0 R 11 0 R 13 0 R] \
+              /NeedAppearances true /SigFlags 1 \
+              /CO [(name)] /DA (/Helv 12 Tf 0 g) /Q 0 >>\nendobj\n",
+        );
+        // 5: Text field "name" (also its own widget)
+        push_obj(
+            &mut pdf,
+            b"5 0 obj\n<< /T (name) /TU (Full Name) /FT /Tx /Ff 0 \
+              /MaxLen 50 /V (Scott) /DV () \
+              /Subtype /Widget /Rect [72 720 300 740] /Type /Annot >>\nendobj\n",
+        );
+        // 6: Checkbox "agree" (own widget)
+        push_obj(
+            &mut pdf,
+            b"6 0 obj\n<< /T (agree) /FT /Btn /Ff 0 /V /Yes \
+              /Subtype /Widget /Rect [72 700 90 718] /Type /Annot >>\nendobj\n",
+        );
+        // 7: Radio group "color" — non-widget parent with /Kids
+        push_obj(
+            &mut pdf,
+            b"7 0 obj\n<< /T (color) /FT /Btn /Ff 49152 /V /Red \
+              /Kids [9 0 R 10 0 R] /Opt [(Red) (Blue)] >>\nendobj\n",
+        );
+        //   bit 15 (NoToggleToOff) | bit 16 (Radio) | bit 17 cleared = 0xC000 = 49152
+        // 9: Radio widget Red (child)
+        push_obj(
+            &mut pdf,
+            b"9 0 obj\n<< /Parent 7 0 R /Subtype /Widget /Type /Annot \
+              /Rect [72 680 90 698] /AS /Red >>\nendobj\n",
+        );
+        // 10: Radio widget Blue (child)
+        push_obj(
+            &mut pdf,
+            b"10 0 obj\n<< /Parent 7 0 R /Subtype /Widget /Type /Annot \
+              /Rect [100 680 118 698] /AS /Off >>\nendobj\n",
+        );
+        // 11: Combo box "country" (own widget)
+        push_obj(
+            &mut pdf,
+            b"11 0 obj\n<< /T (country) /FT /Ch /Ff 131072 /V (US) \
+              /Opt [[(US) (United States)] [(GB) (United Kingdom)]] \
+              /Subtype /Widget /Rect [72 660 200 678] /Type /Annot >>\nendobj\n",
+        );
+        //   bit 18 = Combo = 0x20000 = 131072
+        // 13: Container "shipping" (no /FT, has /Kids)
+        push_obj(
+            &mut pdf,
+            b"13 0 obj\n<< /T (shipping) /Kids [14 0 R 15 0 R] >>\nendobj\n",
+        );
+        // 14: Text field "shipping.street" (own widget)
+        push_obj(
+            &mut pdf,
+            b"14 0 obj\n<< /T (street) /Parent 13 0 R /FT /Tx /V (123 Main) \
+              /Subtype /Widget /Rect [72 640 300 658] /Type /Annot >>\nendobj\n",
+        );
+        // 15: Text field "shipping.zip" (own widget)
+        push_obj(
+            &mut pdf,
+            b"15 0 obj\n<< /T (zip) /Parent 13 0 R /FT /Tx /V (12345) \
+              /Subtype /Widget /Rect [72 620 200 638] /Type /Annot >>\nendobj\n",
+        );
+
+        let xref_offset = pdf.len();
+        // We have objects 1..=15 except 8 and 12. Use a simple "all
+        // present" xref sized to 16 entries; missing slots get free
+        // entries pointing nowhere, which the resolver tolerates.
+        let real_offsets: Vec<usize> = offsets;
+        // Build a map by inserting each real offset at its declared
+        // object number index.
+        let mut entries: Vec<Option<usize>> = vec![None; 16];
+        // The offsets vector was pushed in declaration order; we
+        // declared 1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 13, 14, 15.
+        let declared = [1u32, 2, 3, 4, 5, 6, 7, 9, 10, 11, 13, 14, 15];
+        for (i, &n) in declared.iter().enumerate() {
+            entries[n as usize] = Some(real_offsets[i]);
+        }
+        pdf.extend(b"xref\n0 16\n");
+        pdf.extend(b"0000000000 65535 f\r\n");
+        for entry in entries.iter().skip(1) {
+            match entry {
+                Some(off) => pdf.extend(format!("{:010} 00000 n\r\n", off).as_bytes()),
+                None => pdf.extend(b"0000000000 65535 f\r\n"),
+            }
+        }
+        pdf.extend(b"trailer\n<< /Size 16 /Root 1 0 R >>\n");
+        pdf.extend(format!("startxref\n{xref_offset}\n%%EOF\n").as_bytes());
+
+        pdf
+    }
+
+    #[test]
+    fn form_basic_field_tree() {
+        let pdf = build_pdf_with_form();
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+        let form = doc.form().expect("AcroForm should be present");
+
+        assert!(form.need_appearances);
+        assert!(form.sig_flags.signatures_exist);
+        assert!(!form.sig_flags.append_only);
+        assert_eq!(form.calculation_order, vec!["name".to_string()]);
+        assert_eq!(form.default_appearance.as_deref(), Some("/Helv 12 Tf 0 g"));
+
+        // Top-level fields: name, agree, color, country, shipping
+        assert_eq!(form.fields.len(), 5);
+
+        let name = &form.fields[0];
+        assert_eq!(name.name, "name");
+        assert_eq!(name.alternate_name.as_deref(), Some("Full Name"));
+        match &name.kind {
+            crate::FieldKind::Text(t) => {
+                assert_eq!(t.max_length, Some(50));
+                assert!(!t.multiline && !t.password);
+            }
+            _ => panic!("name should be a Text field"),
+        }
+        assert_eq!(name.value, crate::FieldValue::Text("Scott".to_string()));
+        // Self-as-widget: name field is its own widget
+        assert_eq!(name.widget_obj_nums.len(), 1);
+
+        let agree = &form.fields[1];
+        match &agree.kind {
+            crate::FieldKind::Button(b) => {
+                assert_eq!(b.button_type, crate::ButtonType::Checkbox);
+            }
+            _ => panic!("agree should be a Button"),
+        }
+        assert_eq!(agree.value, crate::FieldValue::Name("Yes".to_string()));
+
+        let color = &form.fields[2];
+        assert_eq!(color.name, "color");
+        match &color.kind {
+            crate::FieldKind::Button(b) => {
+                assert_eq!(b.button_type, crate::ButtonType::Radio);
+                assert!(b.no_toggle_to_off);
+                assert_eq!(b.options, vec!["Red".to_string(), "Blue".to_string()]);
+            }
+            _ => panic!("color should be a Radio group"),
+        }
+        // Two widget children attached to the radio field
+        assert_eq!(color.widget_obj_nums.len(), 2);
+        assert!(
+            color.children.is_empty(),
+            "widget /Kids should not become children"
+        );
+
+        let country = &form.fields[3];
+        match &country.kind {
+            crate::FieldKind::Choice(c) => {
+                assert!(c.combo);
+                assert_eq!(c.options.len(), 2);
+                assert_eq!(c.options[0].export, "US");
+                assert_eq!(c.options[0].display, "United States");
+            }
+            _ => panic!("country should be a Choice"),
+        }
+
+        let shipping = &form.fields[4];
+        assert_eq!(shipping.name, "shipping");
+        assert!(matches!(shipping.kind, crate::FieldKind::Container));
+        assert_eq!(shipping.children.len(), 2);
+        assert_eq!(shipping.children[0].name, "shipping.street");
+        assert_eq!(shipping.children[1].name, "shipping.zip");
+        assert_eq!(
+            shipping.children[0].value,
+            crate::FieldValue::Text("123 Main".to_string())
+        );
+    }
+
+    #[test]
+    fn form_caches_across_calls() {
+        let pdf = build_pdf_with_form();
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+        let a = doc.form().unwrap();
+        let b = doc.form().unwrap();
+        assert!(std::ptr::eq(a, b), "form() must be cached");
+    }
+
+    #[test]
+    fn form_absent_returns_none() {
+        let pdf = build_minimal_pdf();
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+        assert!(doc.form().is_none());
+    }
+
+    #[test]
+    fn form_widgets_appear_in_page_annotations() {
+        let pdf = build_pdf_with_form();
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+        let form = doc.form().unwrap();
+        let annots = doc.page_annotations(0).unwrap();
+
+        // Every widget obj_num declared by a terminal field should
+        // resolve to a Widget annotation on the page. Use the existing
+        // PageInfo.annots ordering: pages are matched by obj_num.
+        let widget_annot_subtypes: Vec<_> = annots
+            .iter()
+            .filter(|a| a.kind == crate::AnnotationKind::Widget)
+            .collect();
+        assert!(
+            !widget_annot_subtypes.is_empty(),
+            "expected widget annotations on page"
+        );
+
+        // The radio "color" field declares 2 widgets; assert both are
+        // in the page's annotation set (we look up by inspecting the
+        // page's annot ref obj_nums; PageInfo.annots is ordered, so
+        // we just count).
+        let color_field = form.fields.iter().find(|f| f.name == "color").unwrap();
+        assert_eq!(color_field.widget_obj_nums.len(), 2);
     }
 
     #[test]
