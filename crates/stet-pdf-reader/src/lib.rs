@@ -74,6 +74,7 @@ pub mod annotations;
 pub mod content;
 pub mod crypto;
 pub mod destination;
+pub mod diagnostics;
 pub mod embedded_files;
 pub mod error;
 pub mod filters;
@@ -97,6 +98,7 @@ pub use annotations::{
     PopupAnnotation, ShapeAnnotation, StampAnnotation, TextAnnotation,
 };
 pub use destination::{Action, Destination, ViewSpec};
+pub use diagnostics::{LocationHint, ParsePhase, ParseWarning, Severity, WarningSink};
 pub use embedded_files::{AfRelationship, EmbeddedFile};
 pub use error::PdfError;
 pub use form_fields::{
@@ -162,6 +164,11 @@ pub struct PdfDocument<'a> {
     /// Embedded files (file attachments), parsed lazily on first
     /// access from the catalog's `/Names /EmbeddedFiles` name tree.
     embedded_files_cache: OnceCell<HashMap<String, EmbeddedFile>>,
+    /// Parse-time warnings accumulated by structural parsers
+    /// (outline, annotations, form fields, ...). The sink uses
+    /// interior mutability so accessors can record warnings while
+    /// holding only `&self`.
+    warnings: WarningSink,
 }
 
 impl<'a> PdfDocument<'a> {
@@ -257,6 +264,7 @@ impl<'a> PdfDocument<'a> {
             page_annotations_cache,
             form_cache: OnceCell::new(),
             embedded_files_cache: OnceCell::new(),
+            warnings: WarningSink::new(),
         })
     }
 
@@ -514,10 +522,13 @@ impl<'a> PdfDocument<'a> {
     ///
     /// Returns an empty slice if the document has no outline. Parsed
     /// lazily on first call and cached. Cycles, broken `/First`/`/Next`
-    /// chains, and pathological depth are tolerated by hard caps.
+    /// chains, and pathological depth are tolerated by hard caps;
+    /// each truncation pushes a warning visible through
+    /// [`parse_warnings`](Self::parse_warnings).
     pub fn outline(&self) -> &[OutlineItem] {
-        self.outline_cache
-            .get_or_init(|| outline::parse_outline_tree(&self.resolver, &self.pages))
+        self.outline_cache.get_or_init(|| {
+            outline::parse_outline_tree(&self.resolver, &self.pages, &self.warnings)
+        })
     }
 
     /// All named destinations in the document, merged from both
@@ -557,8 +568,9 @@ impl<'a> PdfDocument<'a> {
             return Err(PdfError::PageOutOfRange(page, self.pages.len()));
         }
         let cell = &self.page_annotations_cache[page];
-        let annots = cell
-            .get_or_init(|| annotations::parse_page_annotations(&self.resolver, &self.pages, page));
+        let annots = cell.get_or_init(|| {
+            annotations::parse_page_annotations(&self.resolver, &self.pages, page, &self.warnings)
+        });
         Ok(annots.as_slice())
     }
 
@@ -575,8 +587,23 @@ impl<'a> PdfDocument<'a> {
     /// renderable widget data.
     pub fn form(&self) -> Option<&FormCatalog> {
         self.form_cache
-            .get_or_init(|| form_fields::parse_acroform(&self.resolver))
+            .get_or_init(|| form_fields::parse_acroform(&self.resolver, &self.warnings))
             .as_ref()
+    }
+
+    /// Parse-time warnings accumulated by the structural accessors.
+    ///
+    /// Outline cycles, dropped annotations (missing `/Rect`),
+    /// form-field tree truncations, and similar recoverable issues
+    /// are surfaced here. The list grows as accessors are called for
+    /// the first time; cached subsequent calls don't re-emit.
+    ///
+    /// Returns a borrow of the underlying slice — drop the returned
+    /// `Ref` before calling any other accessor that could push more
+    /// warnings (e.g. iterating with `for w in doc.parse_warnings().iter()`
+    /// is fine; calling `doc.outline()` mid-iteration is not).
+    pub fn parse_warnings(&self) -> std::cell::Ref<'_, [ParseWarning]> {
+        self.warnings.borrow_slice()
     }
 
     /// Page geometry for a page (0-based) — all five PDF page boxes
@@ -1880,6 +1907,155 @@ mod tests {
         let a = doc.embedded_files();
         let b = doc.embedded_files();
         assert!(std::ptr::eq(a, b), "embedded_files() must be cached");
+    }
+
+    /// Build a PDF whose outline tree has a cycle: outline node 5
+    /// references itself as its own /Next sibling.
+    fn build_pdf_with_cyclic_outline() -> Vec<u8> {
+        let mut pdf = Vec::new();
+        pdf.extend(b"%PDF-1.4\n");
+
+        let mut offsets: Vec<usize> = Vec::new();
+        let mut push_obj = |buf: &mut Vec<u8>, body: &[u8]| {
+            offsets.push(buf.len());
+            buf.extend(body);
+        };
+
+        push_obj(
+            &mut pdf,
+            b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R /Outlines 4 0 R >>\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            b"4 0 obj\n<< /Type /Outlines /First 5 0 R /Last 5 0 R /Count 1 >>\nendobj\n",
+        );
+        // 5: cyclic — /Next points back at itself.
+        push_obj(
+            &mut pdf,
+            b"5 0 obj\n<< /Title (Loop) /Parent 4 0 R /Next 5 0 R >>\nendobj\n",
+        );
+
+        let xref_offset = pdf.len();
+        pdf.extend(b"xref\n0 6\n");
+        pdf.extend(b"0000000000 65535 f\r\n");
+        for off in &offsets {
+            pdf.extend(format!("{:010} 00000 n\r\n", off).as_bytes());
+        }
+        pdf.extend(b"trailer\n<< /Size 6 /Root 1 0 R >>\n");
+        pdf.extend(format!("startxref\n{xref_offset}\n%%EOF\n").as_bytes());
+
+        pdf
+    }
+
+    #[test]
+    fn warning_emitted_for_outline_cycle() {
+        let pdf = build_pdf_with_cyclic_outline();
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+        // Trigger outline parse.
+        let outline = doc.outline();
+        // The single Loop entry parses; the cycle stops further siblings.
+        assert_eq!(outline.len(), 1);
+        let warnings = doc.parse_warnings();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| matches!(w.phase, crate::ParsePhase::Outline)
+                    && w.severity == crate::Severity::Warning
+                    && w.message.contains("cycle")),
+            "expected outline cycle warning, got: {:?}",
+            warnings.iter().collect::<Vec<_>>()
+        );
+    }
+
+    /// Build a PDF where the page's /Annots array references an
+    /// annotation dict that has /Subtype but no /Rect.
+    fn build_pdf_with_rectless_annot() -> Vec<u8> {
+        let mut pdf = Vec::new();
+        pdf.extend(b"%PDF-1.4\n");
+
+        let mut offsets: Vec<usize> = Vec::new();
+        let mut push_obj = |buf: &mut Vec<u8>, body: &[u8]| {
+            offsets.push(buf.len());
+            buf.extend(body);
+        };
+
+        push_obj(
+            &mut pdf,
+            b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] \
+              /Annots [4 0 R] >>\nendobj\n",
+        );
+        // Annotation with /Subtype but missing /Rect.
+        push_obj(
+            &mut pdf,
+            b"4 0 obj\n<< /Type /Annot /Subtype /Text /Contents (no rect) >>\nendobj\n",
+        );
+
+        let xref_offset = pdf.len();
+        pdf.extend(b"xref\n0 5\n");
+        pdf.extend(b"0000000000 65535 f\r\n");
+        for off in &offsets {
+            pdf.extend(format!("{:010} 00000 n\r\n", off).as_bytes());
+        }
+        pdf.extend(b"trailer\n<< /Size 5 /Root 1 0 R >>\n");
+        pdf.extend(format!("startxref\n{xref_offset}\n%%EOF\n").as_bytes());
+
+        pdf
+    }
+
+    #[test]
+    fn warning_emitted_for_rectless_annotation() {
+        let pdf = build_pdf_with_rectless_annot();
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+        let annots = doc.page_annotations(0).unwrap();
+        // The /Rect-less annotation is skipped.
+        assert_eq!(annots.len(), 0);
+        let warnings = doc.parse_warnings();
+        assert!(
+            warnings.iter().any(
+                |w| matches!(w.phase, crate::ParsePhase::Annotations { page: 0 })
+                    && w.message.contains("/Rect")
+            ),
+            "expected /Rect warning, got: {:?}",
+            warnings.iter().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn parse_warnings_empty_for_clean_document() {
+        let pdf = build_minimal_pdf();
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+        // Touch every accessor; nothing should warn for a clean doc.
+        let _ = doc.metadata();
+        let _ = doc.viewer_preferences();
+        let _ = doc.outline();
+        let _ = doc.destinations();
+        let _ = doc.page_annotations(0).unwrap();
+        let _ = doc.form();
+        let _ = doc.embedded_files();
+        let _ = doc.page_boxes(0).unwrap();
+        let warnings = doc.parse_warnings();
+        assert_eq!(
+            warnings.len(),
+            0,
+            "got: {:?}",
+            warnings.iter().collect::<Vec<_>>()
+        );
     }
 
     #[test]

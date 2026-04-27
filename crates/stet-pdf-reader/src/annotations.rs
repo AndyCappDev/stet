@@ -27,6 +27,7 @@
 //! the document's AcroForm.
 
 use crate::destination::{Action, Destination, parse_action, parse_destination};
+use crate::diagnostics::{LocationHint, ParsePhase, Severity, WarningSink};
 use crate::metadata::{PdfDate, pdf_string_to_rust_pub};
 use crate::objects::{PdfDict, PdfObj};
 use crate::page_tree::PageInfo;
@@ -393,12 +394,16 @@ pub struct PopupAnnotation {
 
 /// Parse all annotations on a page from its [`PageInfo::annots`] list.
 ///
-/// Skips annotations missing the required `/Rect` field, dropping
-/// them silently. Always returns a `Vec` (possibly empty).
+/// Skips annotations missing the required `/Rect` field; the skipped
+/// entry produces a [`ParseWarning`] in `sink`. Always returns a
+/// `Vec` (possibly empty).
+///
+/// [`ParseWarning`]: crate::ParseWarning
 pub fn parse_page_annotations(
     resolver: &Resolver,
     pages: &[PageInfo],
     page_index: usize,
+    sink: &WarningSink,
 ) -> Vec<Annotation> {
     let Some(page) = pages.get(page_index) else {
         return Vec::new();
@@ -406,11 +411,40 @@ pub fn parse_page_annotations(
     let mut out = Vec::with_capacity(page.annots.len());
     for &(num, gen_num) in &page.annots {
         let Ok(obj) = resolver.resolve(num, gen_num) else {
+            sink.record(
+                ParsePhase::Annotations { page: page_index },
+                Some(LocationHint::Object {
+                    obj_num: num,
+                    gen_num,
+                }),
+                Severity::Warning,
+                "annotation object could not be resolved; skipped",
+            );
             continue;
         };
-        let Some(dict) = obj.as_dict() else { continue };
-        if let Some(annot) = parse_annotation(resolver, pages, dict) {
-            out.push(annot);
+        let Some(dict) = obj.as_dict() else {
+            sink.record(
+                ParsePhase::Annotations { page: page_index },
+                Some(LocationHint::Object {
+                    obj_num: num,
+                    gen_num,
+                }),
+                Severity::Warning,
+                "annotation object is not a dict; skipped",
+            );
+            continue;
+        };
+        match parse_annotation(resolver, pages, dict) {
+            Some(annot) => out.push(annot),
+            None => sink.record(
+                ParsePhase::Annotations { page: page_index },
+                Some(LocationHint::Object {
+                    obj_num: num,
+                    gen_num,
+                }),
+                Severity::Warning,
+                "annotation missing or malformed /Rect; skipped",
+            ),
         }
     }
     out

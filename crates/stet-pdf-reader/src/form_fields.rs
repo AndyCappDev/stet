@@ -27,6 +27,7 @@
 
 use std::collections::HashSet;
 
+use crate::diagnostics::{LocationHint, ParsePhase, Severity, WarningSink};
 use crate::metadata::pdf_string_to_rust_pub;
 use crate::objects::{PdfDict, PdfObj};
 use crate::resolver::Resolver;
@@ -305,8 +306,11 @@ impl FieldValue {
 ///
 /// Returns `None` when the catalog has no `/AcroForm` entry. Always
 /// returns a populated value otherwise; malformed sub-entries are
-/// tolerated (defaulted) rather than fatal.
-pub fn parse_acroform(resolver: &Resolver) -> Option<FormCatalog> {
+/// tolerated (defaulted) rather than fatal, and structural truncations
+/// (cycle, depth-cap, field-cap) push [`ParseWarning`]s into `sink`.
+///
+/// [`ParseWarning`]: crate::ParseWarning
+pub fn parse_acroform(resolver: &Resolver, sink: &WarningSink) -> Option<FormCatalog> {
     let catalog = catalog_dict(resolver)?;
     let acroform_obj = catalog.get(b"AcroForm")?;
     let acroform = resolver.deref(acroform_obj).ok()?;
@@ -347,6 +351,7 @@ pub fn parse_acroform(resolver: &Resolver) -> Option<FormCatalog> {
                 &mut visited,
                 &mut total_fields,
                 0,
+                sink,
             ) {
                 roots.push(field);
             }
@@ -389,6 +394,7 @@ impl FieldDefaults {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // recursive walker; context struct doesn't pay off
 fn walk_field(
     resolver: &Resolver,
     field_obj: &PdfObj,
@@ -397,14 +403,45 @@ fn walk_field(
     visited: &mut HashSet<u32>,
     total_fields: &mut usize,
     depth: u32,
+    sink: &WarningSink,
 ) -> Option<FormField> {
-    if depth >= MAX_FIELD_DEPTH || *total_fields >= MAX_FORM_FIELDS {
+    if depth >= MAX_FIELD_DEPTH {
+        sink.record(
+            ParsePhase::Form,
+            Some(LocationHint::FieldName(parent_qualified_name.to_string())),
+            Severity::Error,
+            format!(
+                "form-field depth limit {MAX_FIELD_DEPTH} reached; \
+                 deeper sub-fields dropped"
+            ),
+        );
+        return None;
+    }
+    if *total_fields >= MAX_FORM_FIELDS {
+        sink.record(
+            ParsePhase::Form,
+            None,
+            Severity::Error,
+            format!(
+                "form-field count limit {MAX_FORM_FIELDS} reached; \
+                 remaining fields dropped"
+            ),
+        );
         return None;
     }
     let obj_num = field_obj.as_ref().map(|(n, _)| n);
     if let Some(n) = obj_num
         && !visited.insert(n)
     {
+        sink.record(
+            ParsePhase::Form,
+            Some(LocationHint::Object {
+                obj_num: n,
+                gen_num: 0,
+            }),
+            Severity::Warning,
+            "form-field cycle detected; sub-tree truncated",
+        );
         return None;
     }
 
@@ -498,6 +535,7 @@ fn walk_field(
                 visited,
                 total_fields,
                 depth + 1,
+                sink,
             ) {
                 children.push(child);
             }

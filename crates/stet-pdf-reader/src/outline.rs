@@ -17,6 +17,7 @@
 use std::collections::HashSet;
 
 use crate::destination::{Action, Destination, parse_action, parse_destination};
+use crate::diagnostics::{LocationHint, ParsePhase, Severity, WarningSink};
 use crate::metadata::pdf_string_to_rust_pub;
 use crate::page_tree::PageInfo;
 use crate::resolver::Resolver;
@@ -78,8 +79,15 @@ impl OutlineStyle {
 ///
 /// Returns an empty `Vec` when the document has no outline.
 /// Cycles, broken `/First`/`/Next` chains, and truncated trees are
-/// tolerated by bounding traversal with a visited set + depth cap.
-pub fn parse_outline_tree(resolver: &Resolver, pages: &[PageInfo]) -> Vec<OutlineItem> {
+/// tolerated by bounding traversal with a visited set + depth cap;
+/// each truncation pushes a [`ParseWarning`] into `sink`.
+///
+/// [`ParseWarning`]: crate::ParseWarning
+pub fn parse_outline_tree(
+    resolver: &Resolver,
+    pages: &[PageInfo],
+    sink: &WarningSink,
+) -> Vec<OutlineItem> {
     let Some(outlines_dict_ref) = catalog_outlines_ref(resolver) else {
         return Vec::new();
     };
@@ -95,7 +103,15 @@ pub fn parse_outline_tree(resolver: &Resolver, pages: &[PageInfo]) -> Vec<Outlin
 
     let mut visited = HashSet::new();
     let mut node_count = 0usize;
-    walk_siblings(resolver, pages, first, &mut visited, &mut node_count, 0)
+    walk_siblings(
+        resolver,
+        pages,
+        first,
+        &mut visited,
+        &mut node_count,
+        0,
+        sink,
+    )
 }
 
 fn walk_siblings(
@@ -105,26 +121,72 @@ fn walk_siblings(
     visited: &mut HashSet<u32>,
     node_count: &mut usize,
     depth: u32,
+    sink: &WarningSink,
 ) -> Vec<OutlineItem> {
     let mut items = Vec::new();
     if depth >= MAX_OUTLINE_DEPTH {
+        sink.record(
+            ParsePhase::Outline,
+            None,
+            Severity::Error,
+            format!(
+                "outline depth limit {MAX_OUTLINE_DEPTH} reached; \
+                 deeper entries truncated"
+            ),
+        );
         return items;
     }
     let mut current = Some(start);
     while let Some((num, gen_num)) = current {
         if !visited.insert(num) {
             // Cycle — stop following this chain.
+            sink.record(
+                ParsePhase::Outline,
+                Some(LocationHint::Object {
+                    obj_num: num,
+                    gen_num,
+                }),
+                Severity::Warning,
+                "outline cycle detected; sibling chain truncated",
+            );
             break;
         }
         if *node_count >= MAX_OUTLINE_NODES {
+            sink.record(
+                ParsePhase::Outline,
+                None,
+                Severity::Error,
+                format!(
+                    "outline node limit {MAX_OUTLINE_NODES} reached; \
+                     remaining entries dropped"
+                ),
+            );
             break;
         }
         *node_count += 1;
 
         let Ok(node) = resolver.resolve(num, gen_num) else {
+            sink.record(
+                ParsePhase::Outline,
+                Some(LocationHint::Object {
+                    obj_num: num,
+                    gen_num,
+                }),
+                Severity::Warning,
+                "outline node could not be resolved; chain stopped",
+            );
             break;
         };
         let Some(dict) = node.as_dict() else {
+            sink.record(
+                ParsePhase::Outline,
+                Some(LocationHint::Object {
+                    obj_num: num,
+                    gen_num,
+                }),
+                Severity::Warning,
+                "outline node is not a dict; chain stopped",
+            );
             break;
         };
 
@@ -154,7 +216,15 @@ fn walk_siblings(
         let open = count > 0;
 
         let children = if let Some(child_first) = dict.get_ref(b"First") {
-            walk_siblings(resolver, pages, child_first, visited, node_count, depth + 1)
+            walk_siblings(
+                resolver,
+                pages,
+                child_first,
+                visited,
+                node_count,
+                depth + 1,
+                sink,
+            )
         } else {
             Vec::new()
         };
