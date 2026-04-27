@@ -74,6 +74,7 @@ pub mod annotations;
 pub mod content;
 pub mod crypto;
 pub mod destination;
+pub mod embedded_files;
 pub mod error;
 pub mod filters;
 pub mod form_fields;
@@ -82,6 +83,7 @@ pub mod metadata;
 pub mod name_tree;
 pub mod objects;
 pub mod outline;
+pub mod page_boxes;
 pub mod page_tree;
 pub mod resolver;
 pub mod resources;
@@ -95,6 +97,7 @@ pub use annotations::{
     PopupAnnotation, ShapeAnnotation, StampAnnotation, TextAnnotation,
 };
 pub use destination::{Action, Destination, ViewSpec};
+pub use embedded_files::{AfRelationship, EmbeddedFile};
 pub use error::PdfError;
 pub use form_fields::{
     ButtonField, ButtonType, ChoiceField, ChoiceOption, FieldFlags, FieldKind, FieldValue,
@@ -103,6 +106,7 @@ pub use form_fields::{
 pub use metadata::{DocumentMetadata, PdfDate, TrappedFlag};
 pub use objects::{PdfDict, PdfObj};
 pub use outline::{OutlineItem, OutlineStyle};
+pub use page_boxes::PageBoxes;
 pub use page_tree::PageInfo;
 pub use viewer_prefs::{
     Duplex, PageLayout, PageMode, PrintScaling, ReadingDirection, ViewerPreferences,
@@ -155,6 +159,9 @@ pub struct PdfDocument<'a> {
     /// `OnceCell` caches the parse; inner `Option` reflects
     /// presence/absence of `/AcroForm`.
     form_cache: OnceCell<Option<FormCatalog>>,
+    /// Embedded files (file attachments), parsed lazily on first
+    /// access from the catalog's `/Names /EmbeddedFiles` name tree.
+    embedded_files_cache: OnceCell<HashMap<String, EmbeddedFile>>,
 }
 
 impl<'a> PdfDocument<'a> {
@@ -249,6 +256,7 @@ impl<'a> PdfDocument<'a> {
             destinations_cache: OnceCell::new(),
             page_annotations_cache,
             form_cache: OnceCell::new(),
+            embedded_files_cache: OnceCell::new(),
         })
     }
 
@@ -569,6 +577,43 @@ impl<'a> PdfDocument<'a> {
         self.form_cache
             .get_or_init(|| form_fields::parse_acroform(&self.resolver))
             .as_ref()
+    }
+
+    /// Page geometry for a page (0-based) — all five PDF page boxes
+    /// (MediaBox, CropBox, BleedBox, TrimBox, ArtBox) plus rotation,
+    /// user unit, and presentation hints.
+    ///
+    /// Returns `Err(PdfError::PageOutOfRange)` if `page >= page_count()`.
+    pub fn page_boxes(&self, page: usize) -> Result<PageBoxes, PdfError> {
+        page_boxes::parse_page_boxes(&self.resolver, &self.pages, page)
+            .ok_or(PdfError::PageOutOfRange(page, self.pages.len()))
+    }
+
+    /// All file attachments declared in the catalog's
+    /// `/Names /EmbeddedFiles` name tree, keyed by attachment name.
+    ///
+    /// Parsed lazily on first call and cached. Returns an empty map
+    /// when the document has no embedded files. Use
+    /// [`embedded_file_bytes`](Self::embedded_file_bytes) to read the
+    /// underlying bytes of an attachment on demand.
+    pub fn embedded_files(&self) -> &HashMap<String, EmbeddedFile> {
+        self.embedded_files_cache
+            .get_or_init(|| embedded_files::parse_embedded_files(&self.resolver))
+    }
+
+    /// Read the decompressed bytes of a named embedded file.
+    ///
+    /// Returns `Err(PdfError::Other(...))` if the name is unknown.
+    pub fn embedded_file_bytes(&self, name: &str) -> Result<Vec<u8>, PdfError> {
+        let ef = self
+            .embedded_files()
+            .get(name)
+            .ok_or_else(|| PdfError::Other(format!("embedded file not found: {name}")))?;
+        embedded_files::decode_embedded_file_stream(
+            &self.resolver,
+            ef.stream_obj_num,
+            ef.stream_gen_num,
+        )
     }
 }
 
@@ -1653,6 +1698,196 @@ mod tests {
         let pdf = build_minimal_pdf();
         let doc = PdfDocument::from_bytes(&pdf).unwrap();
         assert!(doc.form().is_none());
+    }
+
+    /// Build a one-page PDF declaring all five page boxes plus a
+    /// non-default UserUnit and a /Rotate of 90.
+    fn build_pdf_with_page_boxes() -> Vec<u8> {
+        let mut pdf = Vec::new();
+        pdf.extend(b"%PDF-1.4\n");
+
+        let mut offsets: Vec<usize> = Vec::new();
+        let mut push_obj = |buf: &mut Vec<u8>, body: &[u8]| {
+            offsets.push(buf.len());
+            buf.extend(body);
+        };
+
+        push_obj(
+            &mut pdf,
+            b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
+        );
+        // Page with all 5 boxes distinct, /Rotate 90, /UserUnit 1.5,
+        // /Dur 5, /Trans presence, /AA presence.
+        push_obj(
+            &mut pdf,
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R \
+              /MediaBox [0 0 612 792] \
+              /CropBox  [10 10 602 782] \
+              /BleedBox [5 5 607 787] \
+              /TrimBox  [20 20 592 772] \
+              /ArtBox   [30 30 582 762] \
+              /Rotate 90 /UserUnit 1.5 /Dur 5.0 \
+              /Trans << /S /Wipe >> /AA << /O 5 0 R >> >>\nendobj\n",
+        );
+
+        let xref_offset = pdf.len();
+        pdf.extend(b"xref\n0 4\n");
+        pdf.extend(b"0000000000 65535 f\r\n");
+        for off in &offsets {
+            pdf.extend(format!("{:010} 00000 n\r\n", off).as_bytes());
+        }
+        pdf.extend(b"trailer\n<< /Size 4 /Root 1 0 R >>\n");
+        pdf.extend(format!("startxref\n{xref_offset}\n%%EOF\n").as_bytes());
+
+        pdf
+    }
+
+    #[test]
+    fn page_boxes_full_set() {
+        let pdf = build_pdf_with_page_boxes();
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+        let pb = doc.page_boxes(0).unwrap();
+        assert_eq!(pb.media_box, [0.0, 0.0, 612.0, 792.0]);
+        assert_eq!(pb.crop_box, Some([10.0, 10.0, 602.0, 782.0]));
+        assert_eq!(pb.bleed_box, Some([5.0, 5.0, 607.0, 787.0]));
+        assert_eq!(pb.trim_box, Some([20.0, 20.0, 592.0, 772.0]));
+        assert_eq!(pb.art_box, Some([30.0, 30.0, 582.0, 762.0]));
+        assert_eq!(pb.rotate, 90);
+        assert_eq!(pb.user_unit, 1.5);
+        assert_eq!(pb.duration, Some(5.0));
+        assert!(pb.has_transition);
+        assert!(pb.has_additional_actions);
+    }
+
+    #[test]
+    fn page_boxes_minimal_defaults() {
+        let pdf = build_minimal_pdf();
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+        let pb = doc.page_boxes(0).unwrap();
+        assert_eq!(pb.media_box, [0.0, 0.0, 612.0, 792.0]);
+        // No CropBox / BleedBox / TrimBox / ArtBox declared.
+        assert!(pb.crop_box.is_none());
+        assert!(pb.bleed_box.is_none());
+        assert!(pb.trim_box.is_none());
+        assert!(pb.art_box.is_none());
+        assert_eq!(pb.rotate, 0);
+        assert_eq!(pb.user_unit, 1.0);
+        assert!(pb.duration.is_none());
+        assert!(!pb.has_transition);
+        assert!(!pb.has_additional_actions);
+    }
+
+    #[test]
+    fn page_boxes_out_of_range() {
+        let pdf = build_minimal_pdf();
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+        assert!(doc.page_boxes(99).is_err());
+    }
+
+    /// Build a PDF carrying one embedded file via the catalog's
+    /// /Names /EmbeddedFiles name tree. The attached "data.csv" is
+    /// stored uncompressed so we can round-trip its bytes through
+    /// embedded_file_bytes.
+    fn build_pdf_with_embedded_file() -> Vec<u8> {
+        let mut pdf = Vec::new();
+        pdf.extend(b"%PDF-1.4\n");
+
+        let mut offsets: Vec<usize> = Vec::new();
+        let mut push_obj = |buf: &mut Vec<u8>, body: &[u8]| {
+            offsets.push(buf.len());
+            buf.extend(body);
+        };
+
+        // 1: Catalog → Names dict at obj 4
+        push_obj(
+            &mut pdf,
+            b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R /Names 4 0 R >>\nendobj\n",
+        );
+        // 2: Pages
+        push_obj(
+            &mut pdf,
+            b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
+        );
+        // 3: Page
+        push_obj(
+            &mut pdf,
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>\nendobj\n",
+        );
+        // 4: /Names dict pointing at /EmbeddedFiles tree at obj 5
+        push_obj(&mut pdf, b"4 0 obj\n<< /EmbeddedFiles 5 0 R >>\nendobj\n");
+        // 5: name-tree leaf, single entry "data.csv" → filespec at obj 6
+        push_obj(
+            &mut pdf,
+            b"5 0 obj\n<< /Names [(data.csv) 6 0 R] >>\nendobj\n",
+        );
+        // 6: filespec dict
+        push_obj(
+            &mut pdf,
+            b"6 0 obj\n<< /Type /Filespec /F (data.csv) /UF (data.csv) \
+              /Desc (Sample CSV) /AFRelationship /Data \
+              /EF << /F 7 0 R /UF 7 0 R >> >>\nendobj\n",
+        );
+        // 7: embedded-file stream — uncompressed payload "id,name\n1,a\n"
+        // (12 bytes). /Length 12.
+        let payload = b"id,name\n1,a\n";
+        let stream_header = b"7 0 obj\n<< /Type /EmbeddedFile /Subtype /text#2Fcsv \
+            /Length 12 /Params << /Size 12 >> >>\nstream\n";
+        offsets.push(pdf.len());
+        pdf.extend(stream_header);
+        pdf.extend(payload);
+        pdf.extend(b"\nendstream\nendobj\n");
+
+        let xref_offset = pdf.len();
+        pdf.extend(b"xref\n0 8\n");
+        pdf.extend(b"0000000000 65535 f\r\n");
+        for off in &offsets {
+            pdf.extend(format!("{:010} 00000 n\r\n", off).as_bytes());
+        }
+        pdf.extend(b"trailer\n<< /Size 8 /Root 1 0 R >>\n");
+        pdf.extend(format!("startxref\n{xref_offset}\n%%EOF\n").as_bytes());
+
+        pdf
+    }
+
+    #[test]
+    fn embedded_files_basic() {
+        let pdf = build_pdf_with_embedded_file();
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+        let map = doc.embedded_files();
+        assert_eq!(map.len(), 1);
+
+        let ef = map.get("data.csv").expect("data.csv missing");
+        assert_eq!(ef.name, "data.csv");
+        assert_eq!(ef.filename.as_deref(), Some("data.csv"));
+        assert_eq!(ef.unicode_filename.as_deref(), Some("data.csv"));
+        assert_eq!(ef.description.as_deref(), Some("Sample CSV"));
+        assert_eq!(ef.relationship, Some(crate::AfRelationship::Data));
+        assert_eq!(ef.mime_type.as_deref(), Some("text/csv"));
+        assert_eq!(ef.size, Some(12));
+
+        let bytes = doc.embedded_file_bytes("data.csv").unwrap();
+        assert_eq!(&bytes[..], b"id,name\n1,a\n");
+    }
+
+    #[test]
+    fn embedded_files_caches_across_calls() {
+        let pdf = build_pdf_with_embedded_file();
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+        let a = doc.embedded_files();
+        let b = doc.embedded_files();
+        assert!(std::ptr::eq(a, b), "embedded_files() must be cached");
+    }
+
+    #[test]
+    fn embedded_files_empty_when_absent() {
+        let pdf = build_minimal_pdf();
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+        assert!(doc.embedded_files().is_empty());
+        assert!(doc.embedded_file_bytes("missing").is_err());
     }
 
     #[test]
