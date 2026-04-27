@@ -161,3 +161,41 @@ fn parse_external_pdfs() {
         );
     }
 }
+
+/// Calling `metadata()` and `viewer_preferences()` on real-world PDFs must
+/// never panic, regardless of how the document populates (or fails to
+/// populate) those fields. The accessors are also cached behind
+/// `OnceCell`; calling twice should produce the same reference.
+#[test]
+fn metadata_and_viewer_prefs_no_panic() {
+    let candidates = ["hospital.pdf", "10-ch8.pdf", "ppst32.pdf"];
+    let mut visited = 0;
+    for name in candidates {
+        let Some(data) = try_load_pdf(name) else {
+            continue;
+        };
+        let doc = PdfDocument::from_bytes(&data).unwrap();
+
+        let m1 = doc.metadata();
+        let m2 = doc.metadata();
+        assert!(std::ptr::eq(m1, m2), "{name}: metadata() not cached");
+
+        let v1 = doc.viewer_preferences();
+        let v2 = doc.viewer_preferences();
+        assert!(
+            std::ptr::eq(v1, v2),
+            "{name}: viewer_preferences() not cached"
+        );
+
+        // Producer is set by nearly every PDF generator; use it as a
+        // soft sanity check that *something* was parsed when the file
+        // does have an /Info dict.
+        if let Some(producer) = m1.producer.as_deref() {
+            assert!(!producer.is_empty(), "{name}: parsed empty producer string");
+        }
+        visited += 1;
+    }
+    if visited == 0 {
+        eprintln!("(no sample PDFs available to exercise metadata API)");
+    }
+}

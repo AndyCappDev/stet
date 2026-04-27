@@ -75,18 +75,25 @@ pub mod crypto;
 pub mod error;
 pub mod filters;
 pub mod lexer;
+pub mod metadata;
 pub mod objects;
 pub mod page_tree;
 pub mod resolver;
 pub mod resources;
+pub mod viewer_prefs;
 pub mod xref;
 
 pub use error::PdfError;
+pub use metadata::{DocumentMetadata, PdfDate, TrappedFlag};
 pub use objects::{PdfDict, PdfObj};
 pub use page_tree::PageInfo;
+pub use viewer_prefs::{
+    Duplex, PageLayout, PageMode, PrintScaling, ReadingDirection, ViewerPreferences,
+};
 
 use content::ContentInterpreter;
 use resolver::Resolver;
+use std::cell::OnceCell;
 use std::collections::HashSet;
 use std::sync::Arc;
 use stet_fonts::geometry::Matrix;
@@ -114,6 +121,10 @@ pub struct PdfDocument<'a> {
     /// /DestOutputProfile stream, if present. Used to match the document's
     /// intended CMYK rendering (ISO Coated v2, SWOP, etc.) at render time.
     output_intent_icc: Option<Vec<u8>>,
+    /// Document metadata (Info dict + XMP), parsed lazily on first access.
+    metadata_cache: OnceCell<DocumentMetadata>,
+    /// Viewer preferences, parsed lazily on first access.
+    viewer_prefs_cache: OnceCell<ViewerPreferences>,
 }
 
 impl<'a> PdfDocument<'a> {
@@ -201,6 +212,8 @@ impl<'a> PdfDocument<'a> {
             overprint: true,
             ocg_off,
             output_intent_icc,
+            metadata_cache: OnceCell::new(),
+            viewer_prefs_cache: OnceCell::new(),
         })
     }
 
@@ -431,6 +444,28 @@ impl<'a> PdfDocument<'a> {
     pub fn pages(&self) -> &[PageInfo] {
         &self.pages
     }
+
+    /// Document metadata: the trailer's `/Info` dict (title, author,
+    /// dates, etc.) and the catalog's `/Metadata` XMP stream.
+    ///
+    /// Parsed lazily on first call and cached. All fields are optional;
+    /// a document without an `/Info` dict still returns a value with
+    /// every field empty.
+    pub fn metadata(&self) -> &DocumentMetadata {
+        self.metadata_cache
+            .get_or_init(|| metadata::parse_document_metadata(&self.resolver))
+    }
+
+    /// Viewer preferences: how the document hints it should be displayed
+    /// (page layout, page mode, hide-toolbar, fit-window, print
+    /// preferences, etc.).
+    ///
+    /// Parsed lazily on first call and cached. Fields default per the
+    /// PDF spec when the corresponding entries are absent.
+    pub fn viewer_preferences(&self) -> &ViewerPreferences {
+        self.viewer_prefs_cache
+            .get_or_init(|| viewer_prefs::parse_viewer_preferences(&self.resolver))
+    }
 }
 
 /// Parse the default OFF set from the catalog's OCProperties.
@@ -557,7 +592,7 @@ fn parse_output_intent_icc(resolver: &Resolver) -> Option<Vec<u8>> {
 
 /// Scan all objects to find the real Catalog dict (has /Type /Catalog).
 /// Used when the trailer's /Root points to the wrong object.
-fn find_catalog(resolver: &Resolver) -> Option<PdfObj> {
+pub(crate) fn find_catalog(resolver: &Resolver) -> Option<PdfObj> {
     let xref_len = resolver.xref_len();
     for obj_num in 0..xref_len as u32 {
         if let Ok(obj) = resolver.resolve(obj_num, 0) {
