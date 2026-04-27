@@ -74,7 +74,7 @@ pub enum LayerIntent {
 
 impl LayerIntent {
     /// Construct from the raw `/Intent` value.
-    fn from_obj(resolver: &Resolver, obj: &PdfObj) -> Self {
+    pub(super) fn from_obj(resolver: &Resolver, obj: &PdfObj) -> Self {
         match resolver.deref(obj).ok().as_ref().unwrap_or(obj) {
             PdfObj::Name(name) => Self::from_single_name(name),
             PdfObj::Array(items) => {

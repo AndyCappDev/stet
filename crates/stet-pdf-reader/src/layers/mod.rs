@@ -37,8 +37,12 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
+pub mod configuration;
 pub mod metadata;
 
+pub use configuration::{
+    AutoStateEvent, AutoStateRule, BaseState, Configuration, LayerTree, LayerTreeNode, ListMode,
+};
 pub use metadata::{
     CreatorInfo, ExportUsage, LanguageUsage, Layer, LayerIntent, LayerUsage, PageElementSubtype,
     PrintUsage, UsageState, UserUsage, ViewUsage, ZoomUsage,

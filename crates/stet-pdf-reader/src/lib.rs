@@ -127,6 +127,10 @@
 //!   [`embedded_file_bytes`](PdfDocument::embedded_file_bytes) — file attachments
 //! - [`layers`](PdfDocument::layers) + [`layer`](PdfDocument::layer) —
 //!   Optional Content Group (layer) metadata
+//! - [`configurations`](PdfDocument::configurations) +
+//!   [`default_configuration`](PdfDocument::default_configuration) +
+//!   [`layer_tree`](PdfDocument::layer_tree) — layer hierarchy and
+//!   alternate configurations
 //! - [`parse_warnings`](PdfDocument::parse_warnings) — diagnostics
 //!
 //! Walkers that recurse over potentially-cyclic structures
@@ -188,8 +192,9 @@ pub use form_fields::{
     FormCatalog, FormField, SigFlags, SignatureField, TextField,
 };
 pub use layers::{
-    CreatorInfo, ExportUsage, LanguageUsage, Layer, LayerIntent, LayerUsage, PageElementSubtype,
-    PrintUsage, UsageState, UserUsage, ViewUsage, ZoomUsage,
+    AutoStateEvent, AutoStateRule, BaseState, Configuration, CreatorInfo, ExportUsage,
+    LanguageUsage, Layer, LayerIntent, LayerTree, LayerTreeNode, LayerUsage, ListMode,
+    PageElementSubtype, PrintUsage, UsageState, UserUsage, ViewUsage, ZoomUsage,
 };
 pub use metadata::{DocumentMetadata, PdfDate, TrappedFlag};
 pub use objects::{PdfDict, PdfObj};
@@ -253,6 +258,9 @@ pub struct PdfDocument<'a> {
     /// Optional Content Groups (layers), parsed lazily on first
     /// access from the catalog's `/OCProperties /OCGs`.
     layers_cache: OnceCell<Vec<Layer>>,
+    /// Layer configurations (default `/D` plus alternates from
+    /// `/Configs`), parsed lazily on first access.
+    configurations_cache: OnceCell<Vec<Configuration>>,
     /// Parse-time warnings accumulated by structural parsers
     /// (outline, annotations, form fields, ...). The sink uses
     /// interior mutability so accessors can record warnings while
@@ -354,6 +362,7 @@ impl<'a> PdfDocument<'a> {
             form_cache: OnceCell::new(),
             embedded_files_cache: OnceCell::new(),
             layers_cache: OnceCell::new(),
+            configurations_cache: OnceCell::new(),
             warnings: WarningSink::new(),
         })
     }
@@ -755,6 +764,47 @@ impl<'a> PdfDocument<'a> {
     /// list `OcgGroup` element and wants the layer's metadata.
     pub fn layer(&self, ocg_id: u32) -> Option<&Layer> {
         self.layers().iter().find(|l| l.ocg_id == ocg_id)
+    }
+
+    /// All layer configurations declared by the document.
+    ///
+    /// Index 0 is always the default configuration (`/OCProperties /D`);
+    /// indices 1..N are the entries of `/OCProperties /Configs` in the
+    /// order they appear. Returns an empty slice when the document has
+    /// no `/OCProperties`.
+    ///
+    /// Parsed lazily on first call and cached.
+    pub fn configurations(&self) -> &[Configuration] {
+        self.configurations_cache
+            .get_or_init(|| {
+                layers::configuration::parse_configurations(&self.resolver, &self.warnings)
+            })
+            .as_slice()
+    }
+
+    /// The default configuration (`/OCProperties /D`).
+    ///
+    /// Returns `None` when the document has no `/OCProperties` at all.
+    pub fn default_configuration(&self) -> Option<&Configuration> {
+        self.configurations().first()
+    }
+
+    /// Look up a configuration by index — `0` for the default, `1..N`
+    /// for alternates in the order they appear in `/Configs`.
+    pub fn configuration(&self, index: usize) -> Option<&Configuration> {
+        self.configurations().get(index)
+    }
+
+    /// The default configuration's `/Order` hierarchy.
+    ///
+    /// Convenience for layer-panel UIs that want the tree without
+    /// traversing through [`default_configuration`](Self::default_configuration).
+    /// Returns an empty tree when the document has no `/OCProperties`
+    /// or no `/Order` on the default config.
+    pub fn layer_tree(&self) -> LayerTree {
+        self.default_configuration()
+            .map(|c| c.order.clone())
+            .unwrap_or_default()
     }
 }
 
@@ -2481,6 +2531,284 @@ mod tests {
         let first = doc.layers().as_ptr();
         let second = doc.layers().as_ptr();
         assert_eq!(first, second, "layers() should return a cached slice");
+    }
+
+    /// Build a PDF whose `/D` configuration exercises every Phase 2
+    /// parsing path:
+    ///
+    /// - Five OCGs in `/OCGs` (objects 5..=9).
+    /// - `/Order` mixes a flat layer ref, a string-labelled section,
+    ///   a header-layer section, and a bare nested array.
+    /// - `/BaseState /OFF` with explicit `/ON` overrides.
+    /// - One `/AS` rule.
+    /// - One `/RBGroups` group.
+    /// - `/ListMode /VisiblePages`.
+    /// - `/Configs` with one alternate configuration that has its
+    ///   own `/Name`, `/Creator`, `/Intent /Design`, and a different
+    ///   `/Order`.
+    fn build_pdf_with_layer_hierarchy() -> Vec<u8> {
+        let mut pdf = Vec::new();
+        pdf.extend(b"%PDF-1.6\n");
+
+        let mut offsets: Vec<usize> = Vec::new();
+        let mut push_obj = |buf: &mut Vec<u8>, body: &[u8]| {
+            offsets.push(buf.len());
+            buf.extend(body);
+        };
+
+        // 1: Catalog with a rich /OCProperties.
+        let mut cat = Vec::new();
+        cat.extend(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R /OCProperties << ");
+        cat.extend(b"/OCGs [5 0 R 6 0 R 7 0 R 8 0 R 9 0 R] ");
+        cat.extend(b"/D << /Name (Default) /Creator (TestApp) ");
+        cat.extend(b"/BaseState /OFF /ON [5 0 R 7 0 R] /OFF [9 0 R] ");
+        cat.extend(b"/Locked [6 0 R] ");
+        cat.extend(b"/Intent /View ");
+        cat.extend(b"/ListMode /VisiblePages ");
+        // /Order: flat ref, string-labelled section with two leaves,
+        // header-layer section (8 leads its own subarray), bare nested
+        // array (anonymous section).
+        cat.extend(b"/Order [5 0 R (Backgrounds) [6 0 R 7 0 R] 8 0 R [9 0 R] [5 0 R]] ");
+        cat.extend(b"/RBGroups [[6 0 R 7 0 R]] ");
+        cat.extend(b"/AS [<< /Event /Print /Category [/Print] /OCGs [9 0 R] >>] ");
+        cat.extend(b">> ");
+        cat.extend(b"/Configs [<< /Name (Alternate) /Creator (Other) ");
+        cat.extend(b"/BaseState /ON /OFF [5 0 R] /Intent /Design ");
+        cat.extend(b"/Order [6 0 R 7 0 R] >>] ");
+        cat.extend(b">> >>\nendobj\n");
+        push_obj(&mut pdf, &cat);
+
+        push_obj(
+            &mut pdf,
+            b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>\nendobj\n",
+        );
+        // 4: filler so OCG numbering matches doc-comment.
+        push_obj(&mut pdf, b"4 0 obj\nnull\nendobj\n");
+        // 5..=9: minimal OCGs.
+        for (n, name) in (5u32..=9).zip(["L5", "L6", "L7", "L8", "L9"]) {
+            let body = format!("{n} 0 obj\n<< /Type /OCG /Name ({name}) >>\nendobj\n");
+            push_obj(&mut pdf, body.as_bytes());
+        }
+
+        let xref_offset = pdf.len();
+        pdf.extend(b"xref\n0 10\n");
+        pdf.extend(b"0000000000 65535 f\r\n");
+        for off in &offsets {
+            pdf.extend(format!("{:010} 00000 n\r\n", off).as_bytes());
+        }
+        pdf.extend(b"trailer\n<< /Size 10 /Root 1 0 R >>\n");
+        pdf.extend(format!("startxref\n{xref_offset}\n%%EOF\n").as_bytes());
+        pdf
+    }
+
+    #[test]
+    fn configurations_default_and_alternate() {
+        let pdf = build_pdf_with_layer_hierarchy();
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+        let configs = doc.configurations();
+        assert_eq!(configs.len(), 2, "default + one alternate");
+
+        let d = doc.default_configuration().unwrap();
+        assert_eq!(d.index, 0);
+        assert_eq!(d.name.as_deref(), Some("Default"));
+        assert_eq!(d.creator.as_deref(), Some("TestApp"));
+        assert_eq!(d.base_state, BaseState::Off);
+        assert_eq!(d.on, vec![5, 7]);
+        assert_eq!(d.off, vec![9]);
+        assert_eq!(d.locked, vec![6]);
+        assert_eq!(d.list_mode, ListMode::VisiblePages);
+        assert_eq!(d.intent, LayerIntent::View);
+
+        let alt = doc.configuration(1).unwrap();
+        assert_eq!(alt.index, 1);
+        assert_eq!(alt.name.as_deref(), Some("Alternate"));
+        assert_eq!(alt.creator.as_deref(), Some("Other"));
+        assert_eq!(alt.base_state, BaseState::On);
+        assert_eq!(alt.off, vec![5]);
+        assert_eq!(alt.intent, LayerIntent::Design);
+    }
+
+    #[test]
+    fn order_mixes_flat_labelled_header_and_anonymous_sections() {
+        let pdf = build_pdf_with_layer_hierarchy();
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+        let tree = doc.layer_tree();
+
+        // /Order: 5 0 R, "Backgrounds" [6,7], 8 0 R [9], [5]
+        // Phase 2 parser:
+        //   nodes[0] = Layer(5)
+        //   nodes[1] = Section{label="Backgrounds", header_layer=None, children=[Layer(6),Layer(7)]}
+        //   nodes[2] = Section{header_layer=Some(8), children=[Layer(9)]}
+        //   nodes[3] = Section{header_layer=None, label=None, children=[Layer(5)]}
+        assert_eq!(tree.nodes.len(), 4, "expected 4 top-level nodes");
+
+        match &tree.nodes[0] {
+            LayerTreeNode::Layer(id) => assert_eq!(*id, 5),
+            other => panic!("nodes[0]: expected Layer(5), got {other:?}"),
+        }
+        match &tree.nodes[1] {
+            LayerTreeNode::Section {
+                label,
+                header_layer,
+                children,
+            } => {
+                assert_eq!(label.as_deref(), Some("Backgrounds"));
+                assert!(header_layer.is_none());
+                assert_eq!(children.len(), 2);
+                if let LayerTreeNode::Layer(id) = &children[0] {
+                    assert_eq!(*id, 6);
+                } else {
+                    panic!("children[0] not a Layer");
+                }
+                if let LayerTreeNode::Layer(id) = &children[1] {
+                    assert_eq!(*id, 7);
+                } else {
+                    panic!("children[1] not a Layer");
+                }
+            }
+            other => panic!("nodes[1]: expected labelled Section, got {other:?}"),
+        }
+        match &tree.nodes[2] {
+            LayerTreeNode::Section {
+                label,
+                header_layer,
+                children,
+            } => {
+                assert!(label.is_none());
+                assert_eq!(*header_layer, Some(8));
+                assert_eq!(children.len(), 1);
+                if let LayerTreeNode::Layer(id) = &children[0] {
+                    assert_eq!(*id, 9);
+                } else {
+                    panic!("children[0] not a Layer");
+                }
+            }
+            other => panic!("nodes[2]: expected header-layer Section, got {other:?}"),
+        }
+        match &tree.nodes[3] {
+            LayerTreeNode::Section {
+                label,
+                header_layer,
+                children,
+            } => {
+                assert!(label.is_none());
+                assert!(header_layer.is_none());
+                assert_eq!(children.len(), 1);
+                if let LayerTreeNode::Layer(id) = &children[0] {
+                    assert_eq!(*id, 5);
+                } else {
+                    panic!("children[0] not a Layer");
+                }
+            }
+            other => panic!("nodes[3]: expected anonymous Section, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn auto_state_rules_parsed() {
+        let pdf = build_pdf_with_layer_hierarchy();
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+        let d = doc.default_configuration().unwrap();
+        assert_eq!(d.auto_state.len(), 1);
+        let rule = &d.auto_state[0];
+        assert_eq!(rule.event, AutoStateEvent::Print);
+        assert_eq!(rule.categories, vec!["Print".to_string()]);
+        assert_eq!(rule.ocgs, vec![9]);
+    }
+
+    #[test]
+    fn rb_groups_parsed() {
+        let pdf = build_pdf_with_layer_hierarchy();
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+        let d = doc.default_configuration().unwrap();
+        assert_eq!(d.rb_groups, vec![vec![6, 7]]);
+    }
+
+    #[test]
+    fn layer_tree_alternate_config_differs() {
+        let pdf = build_pdf_with_layer_hierarchy();
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+        let alt = doc.configuration(1).unwrap();
+        // Alternate /Order is a flat list of two layers.
+        assert_eq!(alt.order.nodes.len(), 2);
+        assert!(matches!(alt.order.nodes[0], LayerTreeNode::Layer(6)));
+        assert!(matches!(alt.order.nodes[1], LayerTreeNode::Layer(7)));
+    }
+
+    #[test]
+    fn configurations_empty_when_no_oc_properties() {
+        let pdf = build_minimal_pdf();
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+        assert!(doc.configurations().is_empty());
+        assert!(doc.default_configuration().is_none());
+        assert!(doc.configuration(0).is_none());
+        assert!(doc.layer_tree().nodes.is_empty());
+    }
+
+    #[test]
+    fn configurations_caches_across_calls() {
+        let pdf = build_pdf_with_layer_hierarchy();
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+        let first = doc.configurations().as_ptr();
+        let second = doc.configurations().as_ptr();
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn order_with_dangling_string_emits_warning() {
+        // Build a tiny PDF whose /Order has a string with no following
+        // array. The parser should drop the string and record a warning.
+        let mut pdf = Vec::new();
+        pdf.extend(b"%PDF-1.6\n");
+        let mut offsets: Vec<usize> = Vec::new();
+        let mut push_obj = |buf: &mut Vec<u8>, body: &[u8]| {
+            offsets.push(buf.len());
+            buf.extend(body);
+        };
+
+        push_obj(
+            &mut pdf,
+            b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R /OCProperties << \
+              /OCGs [4 0 R] /D << /Order [(Orphan) 4 0 R] >> >> >>\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            b"4 0 obj\n<< /Type /OCG /Name (Solo) >>\nendobj\n",
+        );
+        let xref_offset = pdf.len();
+        pdf.extend(b"xref\n0 5\n");
+        pdf.extend(b"0000000000 65535 f\r\n");
+        for off in &offsets {
+            pdf.extend(format!("{:010} 00000 n\r\n", off).as_bytes());
+        }
+        pdf.extend(b"trailer\n<< /Size 5 /Root 1 0 R >>\n");
+        pdf.extend(format!("startxref\n{xref_offset}\n%%EOF\n").as_bytes());
+
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+        let tree = doc.layer_tree();
+        // Orphan string dropped; remaining ref becomes a Layer leaf.
+        assert_eq!(tree.nodes.len(), 1);
+        assert!(matches!(tree.nodes[0], LayerTreeNode::Layer(4)));
+
+        let warnings = doc.parse_warnings();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| matches!(w.phase, ParsePhase::Layers) && w.message.contains("Orphan")),
+            "expected a Layers warning about the orphan string, got {warnings:?}"
+        );
     }
 
     /// Build a minimal valid PDF for testing.
