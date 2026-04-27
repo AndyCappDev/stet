@@ -356,23 +356,55 @@ fn parse_field_name_list(resolver: &Resolver, obj: Option<&PdfObj>) -> Vec<Strin
         .collect()
 }
 
-/// Resolve a `Destination::NamedDest` against the catalog's named-dest
-/// table.
+/// Build the document-wide named-destination table by merging both
+/// PDF-spec sources:
 ///
-/// Phase 3 will provide a richer resolver; for now this is a stub that
-/// looks for the legacy `/Catalog /Dests` direct dict only (no name
-/// tree). Returns `None` if the name isn't found there.
-pub fn resolve_named_destination_legacy(
+/// 1. **Legacy** — `/Catalog /Dests`, a direct dict (PDF 1.1).
+/// 2. **Modern** — `/Catalog /Names /Dests`, a name tree (PDF 1.2+).
+///
+/// Per ISO 32000-2 §12.3.2.3, when both forms are present the legacy
+/// `/Dests` entries take precedence over name-tree entries with the
+/// same key. Both sources are walked unconditionally; this function
+/// always returns a populated map (possibly empty) and never panics.
+pub fn parse_named_destinations(
     resolver: &Resolver,
     pages: &[PageInfo],
-    name: &str,
-) -> Option<Destination> {
-    let catalog = catalog_dict_for_dests(resolver)?;
-    let dests_obj = catalog.get(b"Dests")?;
-    let dests = resolver.deref(dests_obj).ok()?;
-    let dests_dict = dests.as_dict()?;
-    let entry = dests_dict.get(name.as_bytes())?;
-    parse_destination(resolver, pages, entry)
+) -> std::collections::HashMap<String, Destination> {
+    use std::collections::HashMap;
+
+    let mut map: HashMap<String, Destination> = HashMap::new();
+
+    let catalog = match catalog_dict_for_dests(resolver) {
+        Some(c) => c,
+        None => return map,
+    };
+
+    // Modern: /Names /Dests name tree (parsed first so legacy wins).
+    if let Some(names_obj) = catalog.get(b"Names")
+        && let Ok(names_dict_obj) = resolver.deref(names_obj)
+        && let Some(names_dict) = names_dict_obj.as_dict()
+        && let Some(dests_root) = names_dict.get(b"Dests")
+    {
+        let tree = crate::name_tree::walk_name_tree(resolver, dests_root, |r, val| {
+            parse_destination(r, pages, val)
+        });
+        map.extend(tree);
+    }
+
+    // Legacy: /Dests direct dict — entries here override name-tree entries.
+    if let Some(dests_obj) = catalog.get(b"Dests")
+        && let Ok(dests) = resolver.deref(dests_obj)
+        && let Some(dests_dict) = dests.as_dict()
+    {
+        for (key, val) in dests_dict.entries() {
+            if let Some(d) = parse_destination(resolver, pages, val) {
+                let k = String::from_utf8_lossy(key).into_owned();
+                map.insert(k, d);
+            }
+        }
+    }
+
+    map
 }
 
 fn catalog_dict_for_dests(resolver: &Resolver) -> Option<PdfDict> {

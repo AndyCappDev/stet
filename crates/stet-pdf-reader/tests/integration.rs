@@ -178,6 +178,27 @@ fn outline_no_panic() {
     }
 }
 
+/// Named-destination extraction must never panic and must return a
+/// cached reference. PDFs without named destinations return an empty
+/// map. resolve_named_destination must agree with destinations().
+#[test]
+fn destinations_no_panic() {
+    let candidates = ["hospital.pdf", "10-ch8.pdf", "ppst32.pdf"];
+    for name in candidates {
+        let Some(data) = try_load_pdf(name) else {
+            continue;
+        };
+        let doc = PdfDocument::from_bytes(&data).unwrap();
+        let a = doc.destinations();
+        let b = doc.destinations();
+        assert!(std::ptr::eq(a, b), "{name}: destinations() not cached");
+        for (key, dest) in a.iter().take(3) {
+            let resolved = doc.resolve_named_destination(key).unwrap();
+            assert_eq!(&resolved, dest, "{name}: resolve disagreed for {key}");
+        }
+    }
+}
+
 /// Calling `metadata()` and `viewer_preferences()` on real-world PDFs must
 /// never panic, regardless of how the document populates (or fails to
 /// populate) those fields. The accessors are also cached behind

@@ -77,6 +77,7 @@ pub mod error;
 pub mod filters;
 pub mod lexer;
 pub mod metadata;
+pub mod name_tree;
 pub mod objects;
 pub mod outline;
 pub mod page_tree;
@@ -98,7 +99,7 @@ pub use viewer_prefs::{
 use content::ContentInterpreter;
 use resolver::Resolver;
 use std::cell::OnceCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use stet_fonts::geometry::Matrix;
 use stet_graphics::display_list::DisplayList;
@@ -131,6 +132,9 @@ pub struct PdfDocument<'a> {
     viewer_prefs_cache: OnceCell<ViewerPreferences>,
     /// Outline tree, parsed lazily on first access.
     outline_cache: OnceCell<Vec<OutlineItem>>,
+    /// Named destinations (legacy /Dests + /Names /Dests name tree),
+    /// parsed lazily on first access.
+    destinations_cache: OnceCell<HashMap<String, Destination>>,
 }
 
 impl<'a> PdfDocument<'a> {
@@ -221,6 +225,7 @@ impl<'a> PdfDocument<'a> {
             metadata_cache: OnceCell::new(),
             viewer_prefs_cache: OnceCell::new(),
             outline_cache: OnceCell::new(),
+            destinations_cache: OnceCell::new(),
         })
     }
 
@@ -484,14 +489,28 @@ impl<'a> PdfDocument<'a> {
             .get_or_init(|| outline::parse_outline_tree(&self.resolver, &self.pages))
     }
 
-    /// Resolve a named destination by name, returning the explicit
-    /// destination it points to.
+    /// All named destinations in the document, merged from both
+    /// `/Catalog /Dests` (legacy) and `/Catalog /Names /Dests` (name
+    /// tree). Legacy entries take precedence on key conflict per
+    /// ISO 32000-2 §12.3.2.3.
     ///
-    /// This is a Phase-2-stub: it walks only the legacy `/Catalog
-    /// /Dests` direct dict, not the `/Catalog /Names /Dests` name
-    /// tree. Phase 3 will add proper name-tree traversal.
+    /// Parsed lazily on first call and cached. Returns an empty map
+    /// when neither source is present.
+    pub fn destinations(&self) -> &HashMap<String, Destination> {
+        self.destinations_cache
+            .get_or_init(|| destination::parse_named_destinations(&self.resolver, &self.pages))
+    }
+
+    /// Resolve a named destination by name to its explicit
+    /// destination.
+    ///
+    /// Looks up the document's full name table (legacy + name tree).
+    /// If the looked-up entry is itself another named destination
+    /// (legal but unusual), the chain is **not** followed — the
+    /// caller receives the raw `NamedDest`. This avoids cycles
+    /// without bookkeeping.
     pub fn resolve_named_destination(&self, name: &str) -> Option<Destination> {
-        destination::resolve_named_destination_legacy(&self.resolver, &self.pages, name)
+        self.destinations().get(name).cloned()
     }
 }
 
@@ -986,6 +1005,213 @@ mod tests {
         let pdf = build_minimal_pdf();
         let doc = PdfDocument::from_bytes(&pdf).unwrap();
         assert!(doc.outline().is_empty());
+    }
+
+    /// Build a PDF with named destinations declared via the legacy
+    /// `/Catalog /Dests` direct dict.
+    fn build_pdf_with_legacy_dests() -> Vec<u8> {
+        let mut pdf = Vec::new();
+        pdf.extend(b"%PDF-1.4\n");
+
+        let mut offsets: Vec<usize> = Vec::new();
+        let mut push_obj = |buf: &mut Vec<u8>, body: &[u8]| {
+            offsets.push(buf.len());
+            buf.extend(body);
+        };
+
+        // 1: Catalog with /Dests pointing at obj 4
+        push_obj(
+            &mut pdf,
+            b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R /Dests 4 0 R >>\nendobj\n",
+        );
+        // 2: Pages
+        push_obj(
+            &mut pdf,
+            b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
+        );
+        // 3: Page
+        push_obj(
+            &mut pdf,
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>\nendobj\n",
+        );
+        // 4: Legacy /Dests dict
+        push_obj(
+            &mut pdf,
+            b"4 0 obj\n<< /Intro [3 0 R /Fit] /Glossary [3 0 R /XYZ 100 700 1.0] >>\nendobj\n",
+        );
+
+        let xref_offset = pdf.len();
+        pdf.extend(b"xref\n0 5\n");
+        pdf.extend(b"0000000000 65535 f\r\n");
+        for off in &offsets {
+            pdf.extend(format!("{:010} 00000 n\r\n", off).as_bytes());
+        }
+        pdf.extend(b"trailer\n<< /Size 5 /Root 1 0 R >>\n");
+        pdf.extend(format!("startxref\n{xref_offset}\n%%EOF\n").as_bytes());
+
+        pdf
+    }
+
+    /// Build a PDF with named destinations declared via the modern
+    /// `/Catalog /Names /Dests` name tree (flat leaf form).
+    fn build_pdf_with_name_tree_dests() -> Vec<u8> {
+        let mut pdf = Vec::new();
+        pdf.extend(b"%PDF-1.4\n");
+
+        let mut offsets: Vec<usize> = Vec::new();
+        let mut push_obj = |buf: &mut Vec<u8>, body: &[u8]| {
+            offsets.push(buf.len());
+            buf.extend(body);
+        };
+
+        // 1: Catalog with /Names dict
+        push_obj(
+            &mut pdf,
+            b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R /Names 4 0 R >>\nendobj\n",
+        );
+        // 2: Pages
+        push_obj(
+            &mut pdf,
+            b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
+        );
+        // 3: Page
+        push_obj(
+            &mut pdf,
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>\nendobj\n",
+        );
+        // 4: /Names dict pointing at /Dests name-tree root
+        push_obj(&mut pdf, b"4 0 obj\n<< /Dests 5 0 R >>\nendobj\n");
+        // 5: Name-tree leaf with two entries (sorted)
+        push_obj(
+            &mut pdf,
+            b"5 0 obj\n<< /Names [(Alpha) [3 0 R /Fit] (Beta) [3 0 R /XYZ 50 500 0]] >>\nendobj\n",
+        );
+
+        let xref_offset = pdf.len();
+        pdf.extend(b"xref\n0 6\n");
+        pdf.extend(b"0000000000 65535 f\r\n");
+        for off in &offsets {
+            pdf.extend(format!("{:010} 00000 n\r\n", off).as_bytes());
+        }
+        pdf.extend(b"trailer\n<< /Size 6 /Root 1 0 R >>\n");
+        pdf.extend(format!("startxref\n{xref_offset}\n%%EOF\n").as_bytes());
+
+        pdf
+    }
+
+    /// Build a PDF where the *same* destination name appears in both
+    /// legacy /Dests and the name tree, with different targets — the
+    /// legacy entry must win per spec.
+    fn build_pdf_with_dest_conflict() -> Vec<u8> {
+        let mut pdf = Vec::new();
+        pdf.extend(b"%PDF-1.4\n");
+
+        let mut offsets: Vec<usize> = Vec::new();
+        let mut push_obj = |buf: &mut Vec<u8>, body: &[u8]| {
+            offsets.push(buf.len());
+            buf.extend(body);
+        };
+
+        // 1: Catalog with both /Dests and /Names
+        push_obj(
+            &mut pdf,
+            b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R /Dests 4 0 R /Names 5 0 R >>\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>\nendobj\n",
+        );
+        // 4: legacy /Dests — Conflict points at /Fit
+        push_obj(&mut pdf, b"4 0 obj\n<< /Conflict [3 0 R /Fit] >>\nendobj\n");
+        // 5: /Names with /Dests — Conflict points at /FitB (should be overridden)
+        push_obj(&mut pdf, b"5 0 obj\n<< /Dests 6 0 R >>\nendobj\n");
+        push_obj(
+            &mut pdf,
+            b"6 0 obj\n<< /Names [(Conflict) [3 0 R /FitB]] >>\nendobj\n",
+        );
+
+        let xref_offset = pdf.len();
+        pdf.extend(b"xref\n0 7\n");
+        pdf.extend(b"0000000000 65535 f\r\n");
+        for off in &offsets {
+            pdf.extend(format!("{:010} 00000 n\r\n", off).as_bytes());
+        }
+        pdf.extend(b"trailer\n<< /Size 7 /Root 1 0 R >>\n");
+        pdf.extend(format!("startxref\n{xref_offset}\n%%EOF\n").as_bytes());
+
+        pdf
+    }
+
+    #[test]
+    fn destinations_legacy_dict() {
+        let pdf = build_pdf_with_legacy_dests();
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+        let dests = doc.destinations();
+        assert_eq!(dests.len(), 2);
+        match dests.get("Intro") {
+            Some(crate::Destination::PageView { page, view }) => {
+                assert_eq!(*page, Some(0));
+                assert_eq!(*view, crate::ViewSpec::Fit);
+            }
+            other => panic!("expected PageView for Intro, got {other:?}"),
+        }
+        assert!(dests.contains_key("Glossary"));
+    }
+
+    #[test]
+    fn destinations_name_tree() {
+        let pdf = build_pdf_with_name_tree_dests();
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+        let dests = doc.destinations();
+        assert_eq!(dests.len(), 2);
+        assert!(dests.contains_key("Alpha"));
+        assert!(dests.contains_key("Beta"));
+    }
+
+    #[test]
+    fn destinations_legacy_overrides_name_tree() {
+        let pdf = build_pdf_with_dest_conflict();
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+        let dests = doc.destinations();
+        assert_eq!(dests.len(), 1);
+        match dests.get("Conflict") {
+            Some(crate::Destination::PageView { view, .. }) => {
+                assert_eq!(
+                    *view,
+                    crate::ViewSpec::Fit,
+                    "legacy /Dests must override /Names /Dests"
+                );
+            }
+            other => panic!("expected PageView, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn destinations_caches_across_calls() {
+        let pdf = build_pdf_with_legacy_dests();
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+        let a = doc.destinations();
+        let b = doc.destinations();
+        assert!(std::ptr::eq(a, b), "destinations() must be cached");
+    }
+
+    #[test]
+    fn resolve_named_destination_returns_dest() {
+        let pdf = build_pdf_with_legacy_dests();
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+        let d = doc.resolve_named_destination("Intro").unwrap();
+        match d {
+            crate::Destination::PageView { page, view } => {
+                assert_eq!(page, Some(0));
+                assert_eq!(view, crate::ViewSpec::Fit);
+            }
+            _ => panic!("expected PageView"),
+        }
+        assert!(doc.resolve_named_destination("MissingName").is_none());
     }
 
     /// Build a minimal valid PDF for testing.
