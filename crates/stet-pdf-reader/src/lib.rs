@@ -59,6 +59,85 @@
 //!
 //! RC4 (40/128-bit), AES-128, and AES-256 (R=5/6) are all supported.
 //!
+//! # Structural API
+//!
+//! In addition to rendering, [`PdfDocument`] exposes typed, read-only
+//! access to a document's structural content — for indexers,
+//! accessibility tools, link extractors, format converters, and other
+//! consumers that want to *inspect* a PDF rather than display it.
+//!
+//! Every accessor parses lazily on first call and caches its result;
+//! a document the caller only renders pays nothing for the structural
+//! API surface.
+//!
+//! ```no_run
+//! use stet_pdf_reader::PdfDocument;
+//!
+//! let data = std::fs::read("document.pdf")?;
+//! let doc = PdfDocument::from_bytes(&data)?;
+//!
+//! // Document metadata (Info dict + XMP).
+//! let m = doc.metadata();
+//! println!("Title:    {:?}", m.title);
+//! println!("Author:   {:?}", m.author);
+//! println!("Producer: {:?}", m.producer);
+//!
+//! // Outline / bookmarks.
+//! for item in doc.outline() {
+//!     println!("- {} ({} children)", item.title, item.children.len());
+//! }
+//!
+//! // Annotations on page 1.
+//! for annot in doc.page_annotations(0)? {
+//!     println!("{:?} at {:?}", annot.kind, annot.rect);
+//! }
+//!
+//! // AcroForm field tree.
+//! if let Some(form) = doc.form() {
+//!     for field in &form.fields {
+//!         println!("{}: {:?}", field.name, field.value);
+//!     }
+//! }
+//!
+//! // Embedded file attachments.
+//! for (name, file) in doc.embedded_files() {
+//!     let bytes = doc.embedded_file_bytes(name)?;
+//!     println!("{name} ({} bytes, {:?})", bytes.len(), file.mime_type);
+//! }
+//!
+//! // Recoverable parse problems (cycles, dropped entries, etc.).
+//! for w in doc.parse_warnings().iter() {
+//!     eprintln!("[{:?}] {:?}: {}", w.severity, w.phase, w.message);
+//! }
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//!
+//! Full accessor list, each cached after first call:
+//!
+//! - [`metadata`](PdfDocument::metadata) — Info dict + XMP
+//! - [`viewer_preferences`](PdfDocument::viewer_preferences) — display hints
+//! - [`outline`](PdfDocument::outline) — bookmark tree
+//! - [`destinations`](PdfDocument::destinations) +
+//!   [`resolve_named_destination`](PdfDocument::resolve_named_destination) —
+//!   named-destination table
+//! - [`page_annotations`](PdfDocument::page_annotations) — per-page typed annotations
+//! - [`form`](PdfDocument::form) — AcroForm field tree
+//! - [`page_boxes`](PdfDocument::page_boxes) — all 5 page boxes + presentation hints
+//! - [`embedded_files`](PdfDocument::embedded_files) +
+//!   [`embedded_file_bytes`](PdfDocument::embedded_file_bytes) — file attachments
+//! - [`parse_warnings`](PdfDocument::parse_warnings) — diagnostics
+//!
+//! Walkers that recurse over potentially-cyclic structures
+//! (outline tree, name trees, form-field tree) bound traversal with a
+//! visited-set and a depth cap; truncations are surfaced via
+//! [`parse_warnings`](PdfDocument::parse_warnings) so a missing branch
+//! is never silent.
+//!
+//! For a longer-form reference with one focused example per accessor,
+//! see the [PDF Reader API
+//! guide](https://github.com/AndyCappDev/stet/blob/main/docs/PDF-READER-API.md)
+//! in the repository.
+//!
 //! # Acknowledgements
 //!
 //! JPEG 2000, JBIG2, and CCITT-Fax stream decoding use the

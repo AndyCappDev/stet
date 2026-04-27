@@ -175,6 +175,50 @@ interpreter. It has no dependency on `stet-core` — only on `stet-fonts`
 Because both pipelines produce the same `DisplayList` type, every downstream
 consumer (rasterizer, PDF writer, viewport renderer) works with both sources.
 
+### PDF Structural API (stet-pdf-reader)
+
+In addition to producing display lists for rendering, `stet-pdf-reader`
+exposes the document's structural content as typed Rust data — for
+indexers, accessibility tools, link extractors, format converters, and
+anything else that needs to *read* a PDF rather than display it.
+
+Every accessor parses lazily on first call (most behind `OnceCell`,
+per-page annotations behind a `Vec<OnceCell<...>>`), so a 1000-page
+document with bookmarks the caller never asks for doesn't pay to
+parse them.
+
+| Accessor on `PdfDocument` | Returns | Source |
+|---------------------------|---------|--------|
+| `metadata()` | `&DocumentMetadata` | `/Info` dict + XMP `/Metadata` stream |
+| `viewer_preferences()` | `&ViewerPreferences` | catalog `/ViewerPreferences` + `/PageLayout` + `/PageMode` |
+| `outline()` | `&[OutlineItem]` | catalog `/Outlines` (recursive `/First` / `/Next`) |
+| `destinations()` | `&HashMap<String, Destination>` | merged legacy `/Catalog /Dests` + `/Catalog /Names /Dests` name tree |
+| `resolve_named_destination(name)` | `Option<Destination>` | shorthand for `destinations().get(name)` |
+| `page_annotations(page)` | `&[Annotation]` | per-page `/Annots` array; per-page `OnceCell` cache |
+| `form()` | `Option<&FormCatalog>` | catalog `/AcroForm` field tree |
+| `page_boxes(page)` | `PageBoxes` (value) | inheritable boxes from `PageInfo`, page-local boxes from the page dict |
+| `embedded_files()` | `&HashMap<String, EmbeddedFile>` | catalog `/Names /EmbeddedFiles` name tree |
+| `embedded_file_bytes(name)` | `Result<Vec<u8>, PdfError>` | on-demand stream decode |
+| `parse_warnings()` | `Ref<'_, [ParseWarning]>` | warnings emitted by the structural parsers |
+
+The implementation lives in 9 sibling modules under
+`crates/stet-pdf-reader/src/`: `metadata.rs`, `viewer_prefs.rs`,
+`outline.rs`, `destination.rs`, `name_tree.rs` (generic name-tree walker
+reusable for embedded files and named destinations), `annotations.rs`,
+`form_fields.rs`, `page_boxes.rs`, `embedded_files.rs`, plus
+`diagnostics.rs` for the warning sink. Each module is independently
+testable; cross-references are explicit (e.g., a terminal `FormField`
+carries `widget_obj_nums: Vec<u32>` so a consumer can find the matching
+widgets in `page_annotations()`).
+
+Walkers that recurse over potentially-cyclic PDF structures
+(outline tree, name trees, form-field tree) all bound traversal with a
+visited-set + depth cap; truncations push a `ParseWarning` so the
+absence of data is never silent.
+
+See [`docs/PDF-READER-API.md`](PDF-READER-API.md) for the public API
+reference with examples per accessor.
+
 ## Output Devices
 
 ### Built-in Devices

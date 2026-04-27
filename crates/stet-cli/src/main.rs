@@ -59,6 +59,8 @@ impl std::io::Write for SharedWriter {
     }
 }
 
+mod inspect;
+
 fn main() {
     // winit's Wayland backend (0.30+) doesn't support drag-and-drop.
     // Force X11 backend (via XWayland) by hiding WAYLAND_DISPLAY so winit
@@ -70,6 +72,13 @@ fn main() {
     }
 
     let args: Vec<String> = std::env::args().collect();
+
+    // `stet inspect <file.pdf> [--password <pw>]` — print PDF structure.
+    // Dispatch before the main render-flag parser so `inspect` can take its
+    // own narrow flag set.
+    if args.get(1).map(String::as_str) == Some("inspect") {
+        std::process::exit(run_inspect_subcommand(&args[2..]));
+    }
 
     // Parse flags
     let mut dpi: Option<f64> = None;
@@ -1896,6 +1905,52 @@ fn find_resource_path() -> Option<String> {
     }
 
     None
+}
+
+/// Implementation of the `stet inspect` subcommand. Parses its own narrow
+/// argument set (a single file path plus optional `--password`) and
+/// delegates the printing to [`inspect::run_inspect`].
+fn run_inspect_subcommand(args: &[String]) -> i32 {
+    let mut password: Option<String> = None;
+    let mut path: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--password" => {
+                if i + 1 >= args.len() {
+                    eprintln!("Error: --password requires a value");
+                    return 1;
+                }
+                password = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--help" | "-h" => {
+                println!("stet inspect <file.pdf> [--password <pw>]");
+                println!();
+                println!("Prints a structural summary of a PDF: metadata, outline,");
+                println!("annotations, form fields, embedded files, and parse warnings.");
+                return 0;
+            }
+            other if other.starts_with('-') => {
+                eprintln!("Error: unknown flag '{other}' for `stet inspect`");
+                return 1;
+            }
+            _ => {
+                if path.is_some() {
+                    eprintln!("Error: `stet inspect` accepts a single file path");
+                    return 1;
+                }
+                path = Some(args[i].clone());
+                i += 1;
+            }
+        }
+    }
+    let Some(path) = path else {
+        eprintln!("Error: `stet inspect` requires a file path");
+        eprintln!("Usage: stet inspect <file.pdf> [--password <pw>]");
+        return 1;
+    };
+    inspect::run_inspect(&path, password.as_deref().map(str::as_bytes))
 }
 
 #[cfg(test)]

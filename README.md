@@ -84,6 +84,17 @@ renders at different resolutions. See the
 - Annotations (form fields, stamps)
 - No dependency on the PostScript interpreter — usable standalone
 
+**PDF Structural API** (read-only, on top of the reader)
+- Document metadata: `/Info` dict + XMP `/Metadata` stream, with PDFDocEncoding / UTF-16BE / UTF-8-BOM string decoding and PDF-date parsing
+- Outline (bookmarks) tree with cycle protection and 64-level depth cap
+- Typed [`Destination`] and [`Action`] (URI, GoTo, GoToR, Named, JavaScript, SubmitForm, …)
+- Named-destination table merging legacy `/Dests` and the modern `/Names /Dests` name tree
+- Per-page annotations as structured data — Link, Text, Highlight/Underline/Squiggly/StrikeOut, FreeText, Line, Square/Circle, Polygon/PolyLine, Ink, Stamp, Caret, FileAttachment, Popup
+- AcroForm field tree with Button/Text/Choice/Signature kinds, Ff-bit decoding, dotted-path field names, widget cross-references back to annotations
+- All 5 PDF page boxes (MediaBox, CropBox, BleedBox, TrimBox, ArtBox) plus rotation, user unit, presentation hints
+- Embedded files (file attachments) with on-demand byte access and AfRelationship hints
+- Parse warnings (`ParseWarning`, `ParsePhase`, `Severity`) for cycles, dropped entries, and structural truncations
+
 **Rendering & Output**
 - RGBA rasterization via [`stet-tiny-skia`](https://crates.io/crates/stet-tiny-skia) (banded, multi-threaded)
 - PDF output with native CMYK, spot colors, ICC profiles, transfer functions, halftone screens, overprint, and font embedding
@@ -278,10 +289,48 @@ stet --device pdf document.ps          # PostScript → PDF
 stet --device png document.pdf         # PDF → PNG
 stet document.ps                       # Interactive viewer
 stet                                   # REPL (viewer opens on first showpage)
+stet inspect document.pdf              # Print PDF structural summary
 ```
 
 See the [Viewer Guide](docs/VIEWER-GUIDE.md) for keyboard/mouse controls,
 zoom presets, minimap navigation, and drag-and-drop.
+
+### `stet inspect <file.pdf>`
+
+Prints a human-readable summary of the document structure: metadata,
+page count and dimensions, outline (bookmark) tree, named destinations,
+per-page annotation counts by subtype, AcroForm field summary, embedded
+file attachments, and any parse warnings. Read-only; never writes to the
+file. See the [PDF Reader API guide](docs/PDF-READER-API.md) for the
+underlying library API.
+
+```
+$ stet inspect document.pdf
+document.pdf
+
+Metadata:
+  Title: Annual Report 2026
+  Author: Scott Bowman
+  Producer: stet 0.1.2
+  Created: 2026-04-27 12:00:00 UTC
+
+Pages: 4
+  Page 1 size: 612.0 × 792.0 pt (8.50 × 11.00 in)
+
+Outline (3 entries):
+  - Chapter 1 → page 1 (fit)
+    - Section 1.1 → page 2 (xyz)
+  - Chapter 2 → page 3 (fit)
+
+Annotations: 3
+  Page 1: 2 Link
+  Page 3: 1 Highlight
+
+Form: 4 terminal fields (4 widgets)
+  By kind: Button: 1, Text: 3
+```
+
+Pass `--password <pw>` for encrypted documents.
 
 ### Options
 
