@@ -7,7 +7,13 @@
 //! All PLRM-defined errors plus internal control flow signals.
 
 /// PostScript error codes and internal control flow signals.
+///
+/// Marked `#[non_exhaustive]` so future PLRM-derived error variants
+/// (or new internal control-flow signals) can land additively;
+/// embedders that pattern-match for friendly error reporting must
+/// include a wildcard arm.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum PsError {
     #[error("VMerror")]
     VMError,
