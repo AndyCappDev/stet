@@ -746,6 +746,19 @@ pub fn build_system_dict(ctx: &mut Context) {
     register(ctx, sd, "beginsoftmask", transparency_ops::op_beginsoftmask);
     register(ctx, sd, "endsoftmask", transparency_ops::op_endsoftmask);
     register(ctx, sd, "clearsoftmask", transparency_ops::op_clearsoftmask);
+    register(ctx, sd, "defineocg", transparency_ops::op_defineocg);
+    register(
+        ctx,
+        sd,
+        "beginoptionalcontent",
+        transparency_ops::op_beginoptionalcontent,
+    );
+    register(
+        ctx,
+        sd,
+        "endoptionalcontent",
+        transparency_ops::op_endoptionalcontent,
+    );
 
     // --- Page size no-ops ---
     register(ctx, sd, "letter", font_ops::op_letter);

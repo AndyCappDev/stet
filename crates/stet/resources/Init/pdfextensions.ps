@@ -35,5 +35,10 @@ systemdict begin
     /.begintransparencymaskgroup    { beginsoftmask } bind def
     /.endtransparencymask           { endsoftmask } bind def
 
+    % --- Phase 4: optional content (OCG / layers) ---
+    /.defineocg                 /defineocg load def
+    /.beginoptionalcontent      /beginoptionalcontent load def
+    /.endoptionalcontent        /endoptionalcontent load def
+
     false setglobal
 end

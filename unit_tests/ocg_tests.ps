@@ -1,0 +1,103 @@
+%% Optional content (OCG) operator tests — PDF extensions Phase 4.
+%%
+%% Exercises defineocg / beginoptionalcontent / endoptionalcontent
+%% plus the GhostScript-style aliases. Stack effects + error paths only.
+
+userdict /$unittest known not {(unit_tests/unittest.ps) run} if
+
+gsave nulldevice
+
+
+%% =============================================================================
+%% defineocg returns a name; basic scope opens and closes cleanly
+%% =============================================================================
+
+%% defineocg with /Name and default visibility — returned name has nametype
+<< /Name (Layer1) >> defineocg
+/type [/nametype] assert
+
+%% redefine and round-trip through beginoptionalcontent/endoptionalcontent
+<< /Name (Layer1) >> defineocg
+beginoptionalcontent
+  newpath 10 10 moveto 90 90 lineto stroke
+endoptionalcontent
+count [0] assert
+
+
+%% =============================================================================
+%% /DefaultVisible accepted as a boolean (true and false)
+%% =============================================================================
+
+<< /Name (LayerVisible) /DefaultVisible true >> defineocg pop
+<< /Name (LayerHidden) /DefaultVisible false >> defineocg pop
+
+
+%% =============================================================================
+%% defineocg accepts a name literal for /Name as well as a string
+%% =============================================================================
+
+<< /Name /Direct >> defineocg
+/type [/nametype] assert
+
+
+%% =============================================================================
+%% missing /Name → undefined
+%% =============================================================================
+
+/badocg << /DefaultVisible true >> def
+badocg /defineocg [badocg /undefined] assert
+
+
+%% =============================================================================
+%% beginoptionalcontent on an unregistered name → undefined
+%% =============================================================================
+
+/NeverDefined /beginoptionalcontent [/NeverDefined /undefined] assert
+
+
+%% =============================================================================
+%% endoptionalcontent without a matching begin → rangecheck
+%% =============================================================================
+
+/endoptionalcontent [/rangecheck] assert
+
+
+%% =============================================================================
+%% endtransparencygroup may not close an OCG frame
+%% =============================================================================
+
+<< /Name (X) >> defineocg
+beginoptionalcontent
+  /endtransparencygroup [/rangecheck] assert
+endoptionalcontent
+
+
+%% =============================================================================
+%% nesting: OCG inside OCG, OCG inside transparency group
+%% =============================================================================
+
+<< /Name (Outer) >> defineocg
+beginoptionalcontent
+  << /Name (Inner) >> defineocg
+  beginoptionalcontent
+  endoptionalcontent
+endoptionalcontent
+
+<< >> begintransparencygroup
+  << /Name (NestedOCG) >> defineocg
+  beginoptionalcontent
+    newpath 0 0 moveto 50 50 lineto stroke
+  endoptionalcontent
+endtransparencygroup
+
+
+%% =============================================================================
+%% GhostScript-style aliases from pdfextensions.ps
+%% =============================================================================
+
+<< /Name (AliasLayer) >> .defineocg
+.beginoptionalcontent
+.endoptionalcontent
+
+
+grestore     %% pop nulldevice

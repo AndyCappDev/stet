@@ -184,6 +184,16 @@ pub struct Context {
     /// this to refuse a revert that would unwind across an unbalanced
     /// `begintransparencygroup` / `endtransparencygroup` pair.
     pub save_group_depths: rustc_hash::FxHashMap<u32, usize>,
+    /// Registry of OCGs (PDF Optional Content Groups) declared via the
+    /// `defineocg` operator. Keyed by the interned `NameId` of the
+    /// human-readable layer name from the OCG dict's `/Name` entry.
+    /// `beginoptionalcontent` looks up an OCG by name to obtain the
+    /// `ocg_id` and `default_visible` it embeds into the emitted
+    /// [`stet_graphics::display_list::OcgVisibility::Single`].
+    pub ocg_registry: rustc_hash::FxHashMap<NameId, OcgRecord>,
+    /// Monotonic counter feeding [`OcgRecord::ocg_id`]. Each call to
+    /// `defineocg` increments this; ids never recycle.
+    pub next_ocg_id: u32,
     /// When `Some`, each showpage clones the display list here before consuming it.
     /// Used by the WASM frontend to retain display lists for viewport re-rendering.
     /// Each entry is (DisplayList, dpi) where dpi is from the pagedevice HWResolution.
@@ -310,6 +320,25 @@ pub enum GroupKind {
         mask: DisplayList,
         params: SoftMaskParams,
     },
+    /// Opened by `beginoptionalcontent`. On close, the captured
+    /// `display_list` becomes the children of a
+    /// `DisplayElement::OcgGroup` whose visibility is
+    /// `OcgVisibility::Single { ocg_id, default_visible }`.
+    OptionalContent { ocg_id: u32, default_visible: bool },
+}
+
+/// One entry in `Context::ocg_registry`. `defineocg` allocates these
+/// and indexes them by the OCG's interned `NameId` so
+/// `beginoptionalcontent` can resolve a name back to its `ocg_id` and
+/// the `default_visible` flag the producer set.
+#[derive(Clone, Debug)]
+pub struct OcgRecord {
+    /// Monotonic id assigned by `defineocg`. Embedded into
+    /// `OcgVisibility::Single` on the display list.
+    pub ocg_id: u32,
+    /// Initial visibility, used by the renderer when no `LayerSet`
+    /// override exists for this OCG.
+    pub default_visible: bool,
 }
 
 impl Context {
@@ -618,6 +647,8 @@ impl Context {
             display_list: DisplayList::new(),
             group_stack: Vec::new(),
             save_group_depths: rustc_hash::FxHashMap::default(),
+            ocg_registry: rustc_hash::FxHashMap::default(),
+            next_ocg_id: 0,
             capture_display_lists: None,
             display_list_sender: None,
             page_width: 612,

@@ -10,12 +10,13 @@
 //! `docs/PLAN-PDF-EXTENSIONS.md` and the GhostScript-compatible aliases in
 //! `resources/Init/pdfextensions.ps`.
 
-use stet_core::context::{Context, GroupFrame, GroupKind};
+use stet_core::context::{Context, GroupFrame, GroupKind, OcgRecord};
 use stet_core::dict::DictKey;
 use stet_core::error::PsError;
 use stet_core::object::{EntityId, PsObject, PsValue};
 use stet_graphics::display_list::{
-    DisplayElement, DisplayList, GroupColorSpace, GroupParams, SoftMaskParams, SoftMaskSubtype,
+    DisplayElement, DisplayList, GroupColorSpace, GroupParams, OcgVisibility, SoftMaskParams,
+    SoftMaskSubtype,
 };
 
 /// `setfillopacity`: num → — (PDF `ca`).
@@ -621,6 +622,136 @@ fn path_device_bbox(path: &stet_fonts::geometry::PsPath) -> Option<[f64; 4]> {
     }
 }
 
+// ----- Optional content (Phase 4) -----------------------------------------
+
+/// Read the `/Name` entry from an OCG dict as an interned `NameId`.
+/// Accepts either a string (interned to a name) or a name (used
+/// directly). Anything else raises `typecheck`.
+fn ocg_name_id(ctx: &mut Context, dict: EntityId) -> Result<stet_core::object::NameId, PsError> {
+    let obj = dict_get(ctx, dict, b"Name").ok_or(PsError::Undefined)?;
+    match obj.value {
+        PsValue::String { entity, start, len } => {
+            let bytes = ctx.strings.get(entity, start, len).to_vec();
+            Ok(ctx.names.intern(&bytes))
+        }
+        PsValue::Name(n) => Ok(n),
+        _ => Err(PsError::TypeCheck),
+    }
+}
+
+/// `defineocg`: dict → name
+///
+/// Register a PDF Optional Content Group declared by a stet
+/// extension dict. Required key: `/Name` (string or name — the
+/// human-readable layer label). Optional key: `/DefaultVisible`
+/// (boolean, default `true`). Returns a literal name that
+/// [`op_beginoptionalcontent`] consumes to open a scope. The OCG
+/// dict's `/Intent` and `/Usage` entries are accepted but otherwise
+/// ignored at this layer; layer set evaluation against
+/// usage/intent metadata lives one level up
+/// (`stet_pdf_reader::layers`).
+pub fn op_defineocg(ctx: &mut Context) -> Result<(), PsError> {
+    if ctx.o_stack.is_empty() {
+        return Err(PsError::StackUnderflow);
+    }
+    let dict = match ctx.o_stack.peek(0)?.value {
+        PsValue::Dict(e) => e,
+        _ => return Err(PsError::TypeCheck),
+    };
+    let name_id = ocg_name_id(ctx, dict)?;
+    let default_visible = match dict_get(ctx, dict, b"DefaultVisible").map(|o| o.value) {
+        Some(PsValue::Bool(b)) => b,
+        Some(_) => return Err(PsError::TypeCheck),
+        None => true,
+    };
+    let ocg_id = ctx.next_ocg_id;
+    ctx.next_ocg_id = ctx.next_ocg_id.checked_add(1).ok_or(PsError::LimitCheck)?;
+    ctx.ocg_registry.insert(
+        name_id,
+        OcgRecord {
+            ocg_id,
+            default_visible,
+        },
+    );
+    ctx.o_stack.pop()?;
+    ctx.o_stack.push(PsObject::name_lit(name_id))?;
+    Ok(())
+}
+
+/// `beginoptionalcontent`: name → —
+///
+/// Open an OCG scope. The name must have been registered by an
+/// earlier [`op_defineocg`] (raises `undefined` otherwise). While the
+/// scope is active, paint operators emit into the frame's display
+/// list. [`op_endoptionalcontent`] pops the frame and emits a
+/// `DisplayElement::OcgGroup` whose visibility is
+/// `OcgVisibility::Single { ocg_id, default_visible }`.
+pub fn op_beginoptionalcontent(ctx: &mut Context) -> Result<(), PsError> {
+    if ctx.o_stack.is_empty() {
+        return Err(PsError::StackUnderflow);
+    }
+    let name = match ctx.o_stack.peek(0)?.value {
+        PsValue::Name(n) => n,
+        _ => return Err(PsError::TypeCheck),
+    };
+    let record = ctx
+        .ocg_registry
+        .get(&name)
+        .cloned()
+        .ok_or(PsError::Undefined)?;
+    ctx.o_stack.pop()?;
+    let saved_clip_path_version = ctx.gstate.clip_path_version;
+    let saved_gsave_depth = ctx.gstate_stack.len();
+    ctx.group_stack.push(GroupFrame {
+        display_list: DisplayList::new(),
+        kind: GroupKind::OptionalContent {
+            ocg_id: record.ocg_id,
+            default_visible: record.default_visible,
+        },
+        saved_clip_path_version,
+        saved_gsave_depth,
+    });
+    Ok(())
+}
+
+/// `endoptionalcontent`: — → —
+///
+/// Close the topmost OCG scope and emit a `DisplayElement::OcgGroup`
+/// containing the captured children. The topmost frame must be in
+/// the [`GroupKind::OptionalContent`] state, and its
+/// `saved_gsave_depth` must match the current `gstate_stack.len()` —
+/// `rangecheck` otherwise (an unbalanced `gsave` inside the scope
+/// must be matched before close).
+pub fn op_endoptionalcontent(ctx: &mut Context) -> Result<(), PsError> {
+    let Some(top) = ctx.group_stack.last() else {
+        return Err(PsError::RangeCheck);
+    };
+    if !matches!(top.kind, GroupKind::OptionalContent { .. }) {
+        return Err(PsError::RangeCheck);
+    }
+    if ctx.gstate_stack.len() != top.saved_gsave_depth {
+        return Err(PsError::RangeCheck);
+    }
+    let mut frame = ctx.group_stack.pop().unwrap();
+    let (ocg_id, default_visible) = match frame.kind {
+        GroupKind::OptionalContent {
+            ocg_id,
+            default_visible,
+        } => (ocg_id, default_visible),
+        _ => unreachable!(),
+    };
+    let elements = std::mem::take(&mut frame.display_list);
+    ctx.current_display_list_mut()
+        .push(DisplayElement::OcgGroup {
+            elements,
+            visibility: OcgVisibility::Single {
+                ocg_id,
+                default_visible,
+            },
+        });
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1187,6 +1318,208 @@ mod tests {
                 assert_eq!(content.len(), 2);
             }
             _ => panic!("expected SoftMasked"),
+        }
+    }
+
+    fn make_string(ctx: &mut Context, bytes: &[u8]) -> PsObject {
+        let entity = ctx.strings.allocate_from(bytes);
+        PsObject::string(entity, bytes.len() as u32)
+    }
+
+    #[test]
+    fn defineocg_returns_named_layer() {
+        let mut ctx = make_ctx();
+        let name_obj = make_string(&mut ctx, b"Layer1");
+        let dict = make_dict(&mut ctx, &[(b"Name", name_obj)]);
+        ctx.o_stack.push(dict).unwrap();
+        op_defineocg(&mut ctx).unwrap();
+        let returned = ctx.o_stack.peek(0).unwrap();
+        let nid = match returned.value {
+            PsValue::Name(n) => n,
+            other => panic!("expected name, got {:?}", other),
+        };
+        assert_eq!(ctx.names.get_bytes(nid), b"Layer1");
+        let record = ctx.ocg_registry.get(&nid).expect("registered");
+        assert_eq!(record.ocg_id, 0);
+        assert!(record.default_visible);
+    }
+
+    #[test]
+    fn defineocg_default_visible_false() {
+        let mut ctx = make_ctx();
+        let name_obj = make_string(&mut ctx, b"Hidden");
+        let dict = make_dict(
+            &mut ctx,
+            &[
+                (b"Name", name_obj),
+                (b"DefaultVisible", PsObject::bool(false)),
+            ],
+        );
+        ctx.o_stack.push(dict).unwrap();
+        op_defineocg(&mut ctx).unwrap();
+        let returned = ctx.o_stack.peek(0).unwrap();
+        let nid = match returned.value {
+            PsValue::Name(n) => n,
+            _ => panic!("expected name"),
+        };
+        let record = ctx.ocg_registry.get(&nid).unwrap();
+        assert!(!record.default_visible);
+    }
+
+    #[test]
+    fn defineocg_assigns_unique_ocg_ids() {
+        let mut ctx = make_ctx();
+        for i in 0..3 {
+            let name_obj = make_string(&mut ctx, format!("L{}", i).as_bytes());
+            let dict = make_dict(&mut ctx, &[(b"Name", name_obj)]);
+            ctx.o_stack.push(dict).unwrap();
+            op_defineocg(&mut ctx).unwrap();
+            let nid = match ctx.o_stack.peek(0).unwrap().value {
+                PsValue::Name(n) => n,
+                _ => panic!(),
+            };
+            assert_eq!(ctx.ocg_registry.get(&nid).unwrap().ocg_id, i as u32);
+            ctx.o_stack.pop().unwrap();
+        }
+        assert_eq!(ctx.next_ocg_id, 3);
+    }
+
+    #[test]
+    fn defineocg_missing_name_undefined() {
+        let mut ctx = make_ctx();
+        let dict = make_dict(&mut ctx, &[]);
+        ctx.o_stack.push(dict).unwrap();
+        assert!(matches!(op_defineocg(&mut ctx), Err(PsError::Undefined)));
+        assert_eq!(ctx.o_stack.len(), 1);
+    }
+
+    #[test]
+    fn beginoptionalcontent_unregistered_undefined() {
+        let mut ctx = make_ctx();
+        let nid = ctx.names.intern(b"NeverDefined");
+        ctx.o_stack.push(PsObject::name_lit(nid)).unwrap();
+        assert!(matches!(
+            op_beginoptionalcontent(&mut ctx),
+            Err(PsError::Undefined)
+        ));
+        assert!(ctx.group_stack.is_empty());
+    }
+
+    #[test]
+    fn ocg_open_capture_close() {
+        let mut ctx = make_ctx();
+        let name_obj = make_string(&mut ctx, b"Layer1");
+        let dict = make_dict(&mut ctx, &[(b"Name", name_obj)]);
+        ctx.o_stack.push(dict).unwrap();
+        op_defineocg(&mut ctx).unwrap();
+        op_beginoptionalcontent(&mut ctx).unwrap();
+        assert!(matches!(
+            ctx.group_stack.last().unwrap().kind,
+            GroupKind::OptionalContent {
+                ocg_id: 0,
+                default_visible: true
+            }
+        ));
+        // Paint inside the scope routes into the frame.
+        ctx.current_display_list_mut()
+            .push(DisplayElement::InitClip);
+        op_endoptionalcontent(&mut ctx).unwrap();
+        assert!(ctx.group_stack.is_empty());
+        match &ctx.display_list.elements()[0] {
+            DisplayElement::OcgGroup {
+                visibility:
+                    OcgVisibility::Single {
+                        ocg_id,
+                        default_visible,
+                    },
+                elements,
+            } => {
+                assert_eq!(*ocg_id, 0);
+                assert!(*default_visible);
+                assert_eq!(elements.len(), 1);
+            }
+            _ => panic!("expected OcgGroup"),
+        }
+    }
+
+    #[test]
+    fn endoptionalcontent_without_begin_rangecheck() {
+        let mut ctx = make_ctx();
+        assert!(matches!(
+            op_endoptionalcontent(&mut ctx),
+            Err(PsError::RangeCheck)
+        ));
+    }
+
+    #[test]
+    fn endtransparencygroup_rejects_ocg_frame() {
+        let mut ctx = make_ctx();
+        let name_obj = make_string(&mut ctx, b"L");
+        let dict = make_dict(&mut ctx, &[(b"Name", name_obj)]);
+        ctx.o_stack.push(dict).unwrap();
+        op_defineocg(&mut ctx).unwrap();
+        op_beginoptionalcontent(&mut ctx).unwrap();
+        assert!(matches!(
+            op_endtransparencygroup(&mut ctx),
+            Err(PsError::RangeCheck)
+        ));
+        assert_eq!(ctx.group_stack.len(), 1);
+    }
+
+    #[test]
+    fn ocg_unbalanced_gsave_blocks_close() {
+        let mut ctx = make_ctx();
+        let name_obj = make_string(&mut ctx, b"L");
+        let dict = make_dict(&mut ctx, &[(b"Name", name_obj)]);
+        ctx.o_stack.push(dict).unwrap();
+        op_defineocg(&mut ctx).unwrap();
+        op_beginoptionalcontent(&mut ctx).unwrap();
+        ctx.gstate_stack
+            .push(stet_core::graphics_state::GstateEntry {
+                state: ctx.gstate.clone(),
+                saved_by_save: false,
+            });
+        assert!(matches!(
+            op_endoptionalcontent(&mut ctx),
+            Err(PsError::RangeCheck)
+        ));
+        assert_eq!(ctx.group_stack.len(), 1);
+    }
+
+    #[test]
+    fn nested_ocg_routes_inner_into_outer_frame() {
+        let mut ctx = make_ctx();
+        let outer_name = make_string(&mut ctx, b"Outer");
+        let outer_dict = make_dict(&mut ctx, &[(b"Name", outer_name)]);
+        ctx.o_stack.push(outer_dict).unwrap();
+        op_defineocg(&mut ctx).unwrap();
+        op_beginoptionalcontent(&mut ctx).unwrap();
+        let inner_name = make_string(&mut ctx, b"Inner");
+        let inner_dict = make_dict(&mut ctx, &[(b"Name", inner_name)]);
+        ctx.o_stack.push(inner_dict).unwrap();
+        op_defineocg(&mut ctx).unwrap();
+        op_beginoptionalcontent(&mut ctx).unwrap();
+        op_endoptionalcontent(&mut ctx).unwrap();
+        // Inner frame closed; outer still open. Inner OcgGroup should
+        // live in outer's display list, not on the page.
+        assert_eq!(ctx.group_stack.len(), 1);
+        assert_eq!(ctx.display_list.len(), 0);
+        assert_eq!(ctx.group_stack.last().unwrap().display_list.len(), 1);
+        op_endoptionalcontent(&mut ctx).unwrap();
+        assert_eq!(ctx.display_list.len(), 1);
+    }
+
+    #[test]
+    fn ocg_name_can_be_a_name_literal_too() {
+        let mut ctx = make_ctx();
+        let nid = ctx.names.intern(b"Direct");
+        let dict = make_dict(&mut ctx, &[(b"Name", PsObject::name_lit(nid))]);
+        ctx.o_stack.push(dict).unwrap();
+        op_defineocg(&mut ctx).unwrap();
+        let returned = ctx.o_stack.peek(0).unwrap();
+        match returned.value {
+            PsValue::Name(n) => assert_eq!(n, nid),
+            _ => panic!("expected name"),
         }
     }
 
