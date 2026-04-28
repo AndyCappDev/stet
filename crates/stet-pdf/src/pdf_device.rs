@@ -246,11 +246,35 @@ impl PdfDevice {
             ]),
         );
 
+        // Outlines — emitted from `/OUT pdfmark` records on the
+        // pdfmark buffer. Returns `None` when no /OUT records were
+        // issued, in which case /Catalog stays free of /Outlines.
+        let outlines_ref = ctx.and_then(|c| {
+            let records: Vec<stet_core::pdfmark::OutlineRecord> = c
+                .pdfmark_buffer
+                .records()
+                .iter()
+                .filter_map(|r| match r {
+                    stet_core::pdfmark::PdfMarkRecord::Outline(rec) => Some(rec.clone()),
+                    _ => None,
+                })
+                .collect();
+            if records.is_empty() {
+                return None;
+            }
+            let tree = stet_core::pdfmark::build_outline_tree(&records);
+            crate::outline::write_outline_tree(&mut writer, &tree, &page_refs)
+        });
+
         // Catalog
-        let catalog_entries = vec![
+        let mut catalog_entries = vec![
             (b"Type".to_vec(), PdfObj::name("Catalog")),
             (b"Pages".to_vec(), PdfObj::Ref(pages_ref)),
         ];
+        if let Some(outline_ref) = outlines_ref {
+            catalog_entries.push((b"Outlines".to_vec(), PdfObj::Ref(outline_ref)));
+            catalog_entries.push((b"PageMode".to_vec(), PdfObj::name("UseOutlines")));
+        }
 
         writer.set_object(catalog_ref, &PdfObj::Dict(catalog_entries));
 
@@ -1407,36 +1431,35 @@ fn default_now_pdf_date() -> String {
 fn collect_docinfo(ctx: &Context) -> stet_core::pdfmark::DocInfoRecord {
     let mut acc = stet_core::pdfmark::DocInfoRecord::default();
     for record in ctx.pdfmark_buffer.records() {
-        match record {
-            stet_core::pdfmark::PdfMarkRecord::DocInfo(rec) => {
-                if let Some(v) = &rec.title {
-                    acc.title = Some(v.clone());
-                }
-                if let Some(v) = &rec.author {
-                    acc.author = Some(v.clone());
-                }
-                if let Some(v) = &rec.subject {
-                    acc.subject = Some(v.clone());
-                }
-                if let Some(v) = &rec.keywords {
-                    acc.keywords = Some(v.clone());
-                }
-                if let Some(v) = &rec.creator {
-                    acc.creator = Some(v.clone());
-                }
-                if let Some(v) = &rec.producer {
-                    acc.producer = Some(v.clone());
-                }
-                if let Some(v) = &rec.creation_date {
-                    acc.creation_date = Some(v.clone());
-                }
-                if let Some(v) = &rec.mod_date {
-                    acc.mod_date = Some(v.clone());
-                }
-                if let Some(v) = rec.trapped {
-                    acc.trapped = Some(v);
-                }
-            }
+        let stet_core::pdfmark::PdfMarkRecord::DocInfo(rec) = record else {
+            continue;
+        };
+        if let Some(v) = &rec.title {
+            acc.title = Some(v.clone());
+        }
+        if let Some(v) = &rec.author {
+            acc.author = Some(v.clone());
+        }
+        if let Some(v) = &rec.subject {
+            acc.subject = Some(v.clone());
+        }
+        if let Some(v) = &rec.keywords {
+            acc.keywords = Some(v.clone());
+        }
+        if let Some(v) = &rec.creator {
+            acc.creator = Some(v.clone());
+        }
+        if let Some(v) = &rec.producer {
+            acc.producer = Some(v.clone());
+        }
+        if let Some(v) = &rec.creation_date {
+            acc.creation_date = Some(v.clone());
+        }
+        if let Some(v) = &rec.mod_date {
+            acc.mod_date = Some(v.clone());
+        }
+        if let Some(v) = rec.trapped {
+            acc.trapped = Some(v);
         }
     }
     acc

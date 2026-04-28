@@ -19,9 +19,13 @@
 //! the type-tag match.
 
 use stet_core::context::Context;
+use stet_core::dict::DictKey;
 use stet_core::error::PsError;
-use stet_core::object::{PsObject, PsValue};
-use stet_core::pdfmark::{DocDate, DocInfoRecord, PdfMarkRecord, TrappedState};
+use stet_core::object::{EntityId, PsObject, PsValue};
+use stet_core::pdfmark::{
+    DocDate, DocInfoRecord, GoToTarget, OutlineAction, OutlineDestination, OutlineRecord,
+    PdfMarkRecord, TrappedState, ViewSpec,
+};
 
 /// `pdfmark`: mark arg1 ... argN typetag → —
 ///
@@ -68,12 +72,20 @@ pub fn op_pdfmark(ctx: &mut Context) -> Result<(), PsError> {
     ctx.o_stack.truncate(mark_pos);
 
     let tag_bytes = ctx.names.get_bytes(tag_name).to_vec();
-    if tag_bytes.as_slice() == b"DOCINFO"
-        && let Some(rec) = parse_docinfo(ctx, &payload)
-    {
-        ctx.pdfmark_buffer.push(PdfMarkRecord::DocInfo(rec));
+    match tag_bytes.as_slice() {
+        b"DOCINFO" => {
+            if let Some(rec) = parse_docinfo(ctx, &payload) {
+                ctx.pdfmark_buffer.push(PdfMarkRecord::DocInfo(rec));
+            }
+        }
+        b"OUT" => {
+            if let Some(rec) = parse_outline(ctx, &payload) {
+                ctx.pdfmark_buffer.push(PdfMarkRecord::Outline(rec));
+            }
+        }
+        // Unknown type-tags silently emit nothing (Adobe convention).
+        _ => {}
     }
-    // Unknown type-tags silently emit nothing (Adobe convention).
     Ok(())
 }
 
@@ -159,6 +171,214 @@ fn parse_docinfo(ctx: &Context, payload: &[PsObject]) -> Option<DocInfoRecord> {
     })
 }
 
+/// Pull a `/Key <int>` entry. Reals that round-trip cleanly count as
+/// integers (`1.0` → `1`).
+fn extract_i32(ctx: &Context, payload: &[PsObject], key: &[u8]) -> Option<i32> {
+    let key_id = ctx.names.find(key)?;
+    for (k, v) in pairs_iter(payload) {
+        if k == key_id {
+            return v.as_i32();
+        }
+    }
+    None
+}
+
+/// Pull a `/Key <array>` entry, returning the array's elements as a
+/// `Vec<PsObject>`. Returns `None` when the key is absent or the value
+/// is not an array.
+fn extract_array(ctx: &Context, payload: &[PsObject], key: &[u8]) -> Option<Vec<PsObject>> {
+    let key_id = ctx.names.find(key)?;
+    for (k, v) in pairs_iter(payload) {
+        if k != key_id {
+            continue;
+        }
+        let (entity, start, len) = match v.value {
+            PsValue::Array { entity, start, len } | PsValue::PackedArray { entity, start, len } => {
+                (entity, start, len)
+            }
+            _ => return None,
+        };
+        let mut out = Vec::with_capacity(len as usize);
+        for i in 0..len {
+            out.push(ctx.arrays.get_element(entity, start + i));
+        }
+        return Some(out);
+    }
+    None
+}
+
+/// Pull a `/Key <dict>` entry's `EntityId` so a handler can probe its
+/// own keys directly.
+fn extract_dict_entity(ctx: &Context, payload: &[PsObject], key: &[u8]) -> Option<EntityId> {
+    let key_id = ctx.names.find(key)?;
+    for (k, v) in pairs_iter(payload) {
+        if k == key_id {
+            return match v.value {
+                PsValue::Dict(e) => Some(e),
+                _ => None,
+            };
+        }
+    }
+    None
+}
+
+/// Treat a `PsObject` as a number (int or real) for `[/XYZ ...]` style
+/// view specs. PostScript `null` becomes `None` (PDF spec: null in a
+/// /Dest array means "keep current value").
+fn obj_as_opt_f64(obj: &PsObject) -> Option<f64> {
+    if matches!(obj.value, PsValue::Null) {
+        return None;
+    }
+    obj.as_f64()
+}
+
+/// Decode a PDF view-spec array (`[/XYZ left top zoom]`, `[/Fit]`,
+/// `[/FitR …]`, etc.) into a [`ViewSpec`]. Returns `None` for
+/// malformed input — the caller can fall back to
+/// [`ViewSpec::default()`].
+fn parse_view_spec_with_ctx(ctx: &Context, elements: &[PsObject]) -> Option<ViewSpec> {
+    let leading = match elements.first().map(|e| e.value) {
+        Some(PsValue::Name(n)) => n,
+        _ => return None,
+    };
+    let rest = &elements[1..];
+    let kind = ctx.names.get_bytes(leading);
+    match kind {
+        b"XYZ" => Some(ViewSpec::Xyz {
+            left: rest.first().and_then(obj_as_opt_f64),
+            top: rest.get(1).and_then(obj_as_opt_f64),
+            zoom: rest.get(2).and_then(obj_as_opt_f64),
+        }),
+        b"Fit" => Some(ViewSpec::Fit),
+        b"FitH" => Some(ViewSpec::FitH(rest.first().and_then(obj_as_opt_f64))),
+        b"FitV" => Some(ViewSpec::FitV(rest.first().and_then(obj_as_opt_f64))),
+        b"FitR" if rest.len() >= 4 => Some(ViewSpec::FitR {
+            left: rest[0].as_f64()?,
+            bottom: rest[1].as_f64()?,
+            right: rest[2].as_f64()?,
+            top: rest[3].as_f64()?,
+        }),
+        b"FitB" => Some(ViewSpec::FitB),
+        b"FitBH" => Some(ViewSpec::FitBH(rest.first().and_then(obj_as_opt_f64))),
+        b"FitBV" => Some(ViewSpec::FitBV(rest.first().and_then(obj_as_opt_f64))),
+        _ => None,
+    }
+}
+
+/// Decode an `/Action <<...>>` dict into an [`OutlineAction`]. Currently
+/// recognises `/S /URI` and `/S /GoTo` (with both named and explicit
+/// destinations).
+fn parse_action_dict(ctx: &Context, dict: EntityId) -> Option<OutlineAction> {
+    let s_id = ctx.names.find(b"S")?;
+    let s_obj = ctx.dicts.get(dict, &DictKey::Name(s_id))?;
+    let s_name = match s_obj.value {
+        PsValue::Name(n) => n,
+        _ => return None,
+    };
+    match ctx.names.get_bytes(s_name) {
+        b"URI" => {
+            let uri_id = ctx.names.find(b"URI")?;
+            let uri_obj = ctx.dicts.get(dict, &DictKey::Name(uri_id))?;
+            let (entity, start, len) = match uri_obj.value {
+                PsValue::String { entity, start, len } => (entity, start, len),
+                _ => return None,
+            };
+            let bytes = ctx.strings.get(entity, start, len);
+            Some(OutlineAction::Uri(
+                String::from_utf8_lossy(bytes).into_owned(),
+            ))
+        }
+        b"GoTo" => {
+            let d_id = ctx.names.find(b"D")?;
+            let d_obj = ctx.dicts.get(dict, &DictKey::Name(d_id))?;
+            match d_obj.value {
+                PsValue::Name(n) => Some(OutlineAction::GoTo(GoToTarget::Named(
+                    String::from_utf8_lossy(ctx.names.get_bytes(n)).into_owned(),
+                ))),
+                PsValue::String { entity, start, len } => {
+                    let bytes = ctx.strings.get(entity, start, len);
+                    Some(OutlineAction::GoTo(GoToTarget::Named(
+                        String::from_utf8_lossy(bytes).into_owned(),
+                    )))
+                }
+                PsValue::Array { entity, start, len }
+                | PsValue::PackedArray { entity, start, len } => {
+                    if len < 2 {
+                        return None;
+                    }
+                    let page = ctx.arrays.get_element(entity, start).as_i32()?;
+                    let page = u32::try_from(page).ok()?;
+                    let mut rest = Vec::with_capacity(len as usize - 1);
+                    for i in 1..len {
+                        rest.push(ctx.arrays.get_element(entity, start + i));
+                    }
+                    let view = parse_view_spec_with_ctx(ctx, &rest).unwrap_or_default();
+                    Some(OutlineAction::GoTo(GoToTarget::Explicit { page, view }))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Resolve `/Page` + optional `/View`, `/Dest`, or `/Action` keys into
+/// an [`OutlineDestination`]. Returns `None` when none of the three is
+/// present (the bookmark is a non-navigable label). `/Action` wins over
+/// `/Dest` wins over `/Page`, matching GhostScript pdfwrite precedence.
+fn extract_outline_destination(ctx: &Context, payload: &[PsObject]) -> Option<OutlineDestination> {
+    if let Some(dict) = extract_dict_entity(ctx, payload, b"Action")
+        && let Some(action) = parse_action_dict(ctx, dict)
+    {
+        return Some(OutlineDestination::Action(action));
+    }
+    if let Some(name) = extract_name(ctx, payload, b"Dest") {
+        return Some(OutlineDestination::NamedDest(
+            String::from_utf8_lossy(name).into_owned(),
+        ));
+    }
+    if let Some(name) = extract_string(ctx, payload, b"Dest") {
+        return Some(OutlineDestination::NamedDest(name));
+    }
+    if let Some(page) = extract_i32(ctx, payload, b"Page")
+        && let Ok(page) = u32::try_from(page)
+    {
+        let view = extract_array(ctx, payload, b"View")
+            .as_deref()
+            .and_then(|el| parse_view_spec_with_ctx(ctx, el))
+            .unwrap_or_default();
+        return Some(OutlineDestination::PageView { page, view });
+    }
+    None
+}
+
+/// Parse a `/OUT pdfmark` payload into an [`OutlineRecord`]. Records
+/// without a `/Title` are dropped silently — there is nothing useful to
+/// emit for a titleless bookmark, and Adobe pdfwrite behaves the same.
+fn parse_outline(ctx: &Context, payload: &[PsObject]) -> Option<OutlineRecord> {
+    let title = extract_string(ctx, payload, b"Title")?;
+    let destination = extract_outline_destination(ctx, payload);
+    let count = extract_i32(ctx, payload, b"Count");
+    let outline_level = extract_i32(ctx, payload, b"OutlineLevel")
+        .and_then(|n| u32::try_from(n).ok())
+        .filter(|n| *n > 0);
+    let color = extract_array(ctx, payload, b"Color").and_then(|el| {
+        if el.len() < 3 {
+            return None;
+        }
+        Some([el[0].as_f64()?, el[1].as_f64()?, el[2].as_f64()?])
+    });
+    let flags = extract_i32(ctx, payload, b"F").and_then(|n| u32::try_from(n).ok());
+    Some(OutlineRecord {
+        title,
+        destination,
+        count,
+        outline_level,
+        color,
+        flags,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,7 +410,9 @@ mod tests {
         op_pdfmark(&mut ctx).unwrap();
         assert!(ctx.o_stack.is_empty());
         assert_eq!(ctx.pdfmark_buffer.records().len(), 1);
-        let PdfMarkRecord::DocInfo(rec) = &ctx.pdfmark_buffer.records()[0];
+        let PdfMarkRecord::DocInfo(rec) = &ctx.pdfmark_buffer.records()[0] else {
+            panic!("expected DocInfo record");
+        };
         assert_eq!(rec.title.as_deref(), Some("Hello"));
         assert!(rec.author.is_none());
     }
@@ -244,7 +466,9 @@ mod tests {
         op_pdfmark(&mut ctx).unwrap();
         assert!(ctx.o_stack.is_empty());
         assert_eq!(ctx.pdfmark_buffer.records().len(), 1);
-        let PdfMarkRecord::DocInfo(rec) = &ctx.pdfmark_buffer.records()[0];
+        let PdfMarkRecord::DocInfo(rec) = &ctx.pdfmark_buffer.records()[0] else {
+            panic!("expected DocInfo record");
+        };
         assert!(rec.title.is_none());
     }
 
@@ -298,13 +522,215 @@ mod tests {
         ctx.o_stack.push(PsObject::name_lit(docinfo_id)).unwrap();
 
         op_pdfmark(&mut ctx).unwrap();
-        let PdfMarkRecord::DocInfo(rec) = &ctx.pdfmark_buffer.records()[0];
+        let PdfMarkRecord::DocInfo(rec) = &ctx.pdfmark_buffer.records()[0] else {
+            panic!("expected DocInfo record");
+        };
         assert_eq!(rec.title.as_deref(), Some("T"));
         assert_eq!(rec.author.as_deref(), Some("A"));
         assert_eq!(rec.subject.as_deref(), Some("S"));
         assert_eq!(rec.keywords.as_deref(), Some("K"));
         assert_eq!(rec.creator.as_deref(), Some("C"));
         assert_eq!(rec.producer.as_deref(), Some("P"));
+    }
+
+    /// Push `[ /Title (Hello) /Page 5 /OUT` so the dispatcher records
+    /// one outline entry that targets page 5.
+    fn push_outline_simple(ctx: &mut Context) {
+        let title_id = ctx.names.intern(b"Title");
+        let page_id = ctx.names.intern(b"Page");
+        let out_id = ctx.names.intern(b"OUT");
+        let title_str = ctx.strings.allocate_from(b"Hello");
+        ctx.o_stack.push(PsObject::mark()).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(title_id)).unwrap();
+        ctx.o_stack.push(PsObject::string(title_str, 5)).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(page_id)).unwrap();
+        ctx.o_stack.push(PsObject::int(5)).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(out_id)).unwrap();
+    }
+
+    #[test]
+    fn outline_simple_page_target() {
+        let mut ctx = make_ctx();
+        push_outline_simple(&mut ctx);
+        op_pdfmark(&mut ctx).unwrap();
+        assert!(ctx.o_stack.is_empty());
+        assert_eq!(ctx.pdfmark_buffer.records().len(), 1);
+        let PdfMarkRecord::Outline(rec) = &ctx.pdfmark_buffer.records()[0] else {
+            panic!("expected Outline record");
+        };
+        assert_eq!(rec.title, "Hello");
+        match &rec.destination {
+            Some(OutlineDestination::PageView { page, .. }) => assert_eq!(*page, 5),
+            other => panic!("expected PageView destination, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn outline_titleless_dropped() {
+        let mut ctx = make_ctx();
+        let page_id = ctx.names.intern(b"Page");
+        let out_id = ctx.names.intern(b"OUT");
+        ctx.o_stack.push(PsObject::mark()).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(page_id)).unwrap();
+        ctx.o_stack.push(PsObject::int(2)).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(out_id)).unwrap();
+        op_pdfmark(&mut ctx).unwrap();
+        assert!(ctx.pdfmark_buffer.is_empty());
+    }
+
+    #[test]
+    fn outline_count_recorded() {
+        let mut ctx = make_ctx();
+        let title_id = ctx.names.intern(b"Title");
+        let count_id = ctx.names.intern(b"Count");
+        let out_id = ctx.names.intern(b"OUT");
+        let s = ctx.strings.allocate_from(b"Parent");
+        ctx.o_stack.push(PsObject::mark()).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(title_id)).unwrap();
+        ctx.o_stack.push(PsObject::string(s, 6)).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(count_id)).unwrap();
+        ctx.o_stack.push(PsObject::int(-3)).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(out_id)).unwrap();
+        op_pdfmark(&mut ctx).unwrap();
+        let PdfMarkRecord::Outline(rec) = &ctx.pdfmark_buffer.records()[0] else {
+            panic!("expected Outline record");
+        };
+        assert_eq!(rec.count, Some(-3));
+    }
+
+    #[test]
+    fn outline_outline_level_normalises_negative_to_none() {
+        let mut ctx = make_ctx();
+        let title_id = ctx.names.intern(b"Title");
+        let level_id = ctx.names.intern(b"OutlineLevel");
+        let out_id = ctx.names.intern(b"OUT");
+        let s = ctx.strings.allocate_from(b"Sub");
+        ctx.o_stack.push(PsObject::mark()).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(title_id)).unwrap();
+        ctx.o_stack.push(PsObject::string(s, 3)).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(level_id)).unwrap();
+        ctx.o_stack.push(PsObject::int(-1)).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(out_id)).unwrap();
+        op_pdfmark(&mut ctx).unwrap();
+        let PdfMarkRecord::Outline(rec) = &ctx.pdfmark_buffer.records()[0] else {
+            panic!("expected Outline record");
+        };
+        assert!(rec.outline_level.is_none());
+    }
+
+    #[test]
+    fn outline_view_xyz_round_trip() {
+        let mut ctx = make_ctx();
+        let title_id = ctx.names.intern(b"Title");
+        let page_id = ctx.names.intern(b"Page");
+        let view_id = ctx.names.intern(b"View");
+        let xyz_id = ctx.names.intern(b"XYZ");
+        let out_id = ctx.names.intern(b"OUT");
+        let s = ctx.strings.allocate_from(b"WithView");
+        // Build the View array [/XYZ 100 700 1.5]
+        let view_entity = ctx.arrays.allocate(4);
+        let elements = vec![
+            PsObject::name_lit(xyz_id),
+            PsObject::int(100),
+            PsObject::int(700),
+            PsObject::real(1.5),
+        ];
+        let dest = ctx.arrays.get_mut(view_entity, 0, 4);
+        dest.copy_from_slice(&elements);
+        let view_obj = PsObject::array(view_entity, 4);
+
+        ctx.o_stack.push(PsObject::mark()).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(title_id)).unwrap();
+        ctx.o_stack.push(PsObject::string(s, 8)).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(page_id)).unwrap();
+        ctx.o_stack.push(PsObject::int(2)).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(view_id)).unwrap();
+        ctx.o_stack.push(view_obj).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(out_id)).unwrap();
+        op_pdfmark(&mut ctx).unwrap();
+        let PdfMarkRecord::Outline(rec) = &ctx.pdfmark_buffer.records()[0] else {
+            panic!("expected Outline record");
+        };
+        match &rec.destination {
+            Some(OutlineDestination::PageView { page, view }) => {
+                assert_eq!(*page, 2);
+                match view {
+                    ViewSpec::Xyz { left, top, zoom } => {
+                        assert_eq!(*left, Some(100.0));
+                        assert_eq!(*top, Some(700.0));
+                        assert_eq!(*zoom, Some(1.5));
+                    }
+                    other => panic!("expected XYZ view, got {other:?}"),
+                }
+            }
+            other => panic!("expected PageView, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn outline_action_uri() {
+        let mut ctx = make_ctx();
+        let title_id = ctx.names.intern(b"Title");
+        let action_id = ctx.names.intern(b"Action");
+        let s_id = ctx.names.intern(b"S");
+        let uri_name_id = ctx.names.intern(b"URI");
+        let out_id = ctx.names.intern(b"OUT");
+        let title_s = ctx.strings.allocate_from(b"GoSomewhere");
+        let url_s = ctx.strings.allocate_from(b"https://example.org");
+        // Action dict: << /S /URI /URI (https://...) >>
+        let action_dict = ctx.dicts.allocate(4, b"action");
+        ctx.dicts.put(
+            action_dict,
+            DictKey::Name(s_id),
+            PsObject::name_lit(uri_name_id),
+        );
+        ctx.dicts.put(
+            action_dict,
+            DictKey::Name(uri_name_id),
+            PsObject::string(url_s, 19),
+        );
+        ctx.o_stack.push(PsObject::mark()).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(title_id)).unwrap();
+        ctx.o_stack.push(PsObject::string(title_s, 11)).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(action_id)).unwrap();
+        ctx.o_stack.push(PsObject::dict(action_dict)).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(out_id)).unwrap();
+        op_pdfmark(&mut ctx).unwrap();
+        let PdfMarkRecord::Outline(rec) = &ctx.pdfmark_buffer.records()[0] else {
+            panic!("expected Outline record");
+        };
+        match &rec.destination {
+            Some(OutlineDestination::Action(OutlineAction::Uri(uri))) => {
+                assert_eq!(uri, "https://example.org");
+            }
+            other => panic!("expected URI action, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn outline_named_dest() {
+        let mut ctx = make_ctx();
+        let title_id = ctx.names.intern(b"Title");
+        let dest_id = ctx.names.intern(b"Dest");
+        let target_name_id = ctx.names.intern(b"chapter1");
+        let out_id = ctx.names.intern(b"OUT");
+        let s = ctx.strings.allocate_from(b"NamedJump");
+        ctx.o_stack.push(PsObject::mark()).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(title_id)).unwrap();
+        ctx.o_stack.push(PsObject::string(s, 9)).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(dest_id)).unwrap();
+        ctx.o_stack
+            .push(PsObject::name_lit(target_name_id))
+            .unwrap();
+        ctx.o_stack.push(PsObject::name_lit(out_id)).unwrap();
+        op_pdfmark(&mut ctx).unwrap();
+        let PdfMarkRecord::Outline(rec) = &ctx.pdfmark_buffer.records()[0] else {
+            panic!("expected Outline record");
+        };
+        match &rec.destination {
+            Some(OutlineDestination::NamedDest(name)) => assert_eq!(name, "chapter1"),
+            other => panic!("expected NamedDest, got {other:?}"),
+        }
     }
 
     #[test]
@@ -318,7 +744,9 @@ mod tests {
         ctx.o_stack.push(PsObject::name_lit(true_id)).unwrap();
         ctx.o_stack.push(PsObject::name_lit(docinfo_id)).unwrap();
         op_pdfmark(&mut ctx).unwrap();
-        let PdfMarkRecord::DocInfo(rec) = &ctx.pdfmark_buffer.records()[0];
+        let PdfMarkRecord::DocInfo(rec) = &ctx.pdfmark_buffer.records()[0] else {
+            panic!("expected DocInfo record");
+        };
         assert_eq!(rec.trapped, Some(TrappedState::True));
     }
 }

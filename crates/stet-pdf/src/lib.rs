@@ -29,6 +29,7 @@ mod content_stream;
 mod font_embedder;
 mod font_tracker;
 mod image_ops;
+mod outline;
 mod pdf_device;
 mod pdf_objects;
 mod pdf_writer;

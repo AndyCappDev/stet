@@ -19,13 +19,15 @@
 
 /// One accumulated `pdfmark` record. Each variant corresponds to a
 /// type-tag the interpreter recognises (`/DOCINFO`, `/OUT`, `/ANN`, …).
-/// Only [`PdfMarkRecord::DocInfo`] is implemented in Phase 1; later phases
-/// add variants without disturbing this enum's external API beyond the
-/// new variant itself.
+/// Later phases add variants without disturbing this enum's external API
+/// beyond the new variant itself.
 #[derive(Clone, Debug)]
 pub enum PdfMarkRecord {
     /// `/DOCINFO` — entries to merge into the PDF Info dictionary.
     DocInfo(DocInfoRecord),
+    /// `/OUT` — one bookmark entry, contributing to the document's
+    /// outline tree.
+    Outline(OutlineRecord),
 }
 
 /// Buffered `pdfmark` records. Lives on `Context` for the entire job;
@@ -278,6 +280,236 @@ impl PdfDate {
     }
 }
 
+// ----- Outlines (Phase 2) ---------------------------------------------------
+
+/// One `/OUT pdfmark` entry. Each record contributes a bookmark node to
+/// the document outline tree the PDF writer assembles at end-of-job.
+#[derive(Clone, Debug)]
+pub struct OutlineRecord {
+    /// `/Title` — required user-visible label.
+    pub title: String,
+    /// `/Page`, `/Dest`, or `/Action` — what clicking the bookmark
+    /// resolves to. `None` is allowed (bookmark is a non-navigable
+    /// label).
+    pub destination: Option<OutlineDestination>,
+    /// `/Count` — Adobe nesting hint. Positive: this bookmark is
+    /// expanded with `count` direct children that immediately follow.
+    /// Negative: collapsed with `|count|` children. Zero / absent:
+    /// leaf. `None` = absent.
+    pub count: Option<i32>,
+    /// `/OutlineLevel` — stet extension. Explicit nesting level
+    /// (1-based; 1 is top-level). When at least one record uses this,
+    /// the tree builder switches to level-based parenting and ignores
+    /// `count`.
+    pub outline_level: Option<u32>,
+    /// `/Color` — RGB triple in `[0, 1]`, optional.
+    pub color: Option<[f64; 3]>,
+    /// `/F` — style flags: bit 0 = italic, bit 1 = bold (matches the
+    /// PDF 1.4 outline `/F` field).
+    pub flags: Option<u32>,
+}
+
+/// What a bookmark entry navigates to when clicked.
+#[derive(Clone, Debug)]
+pub enum OutlineDestination {
+    /// `/Page N /View [...]` — explicit page + view spec.
+    PageView { page: u32, view: ViewSpec },
+    /// `/Dest /Name` — reference to a named destination registered
+    /// elsewhere (in Phase 4 via `/DEST pdfmark`).
+    NamedDest(String),
+    /// `/Action <<...>>` — passthrough action dict. Phase 1 captures
+    /// the URI subset; richer action types (GoTo, JavaScript, …) land
+    /// as later phases need them.
+    Action(OutlineAction),
+}
+
+/// Outline view spec, mirroring PDF's `/Dest` array shape.
+#[derive(Clone, Copy, Debug)]
+pub enum ViewSpec {
+    /// `[/XYZ left top zoom]` — null components keep the current value.
+    Xyz {
+        left: Option<f64>,
+        top: Option<f64>,
+        zoom: Option<f64>,
+    },
+    /// `[/Fit]`.
+    Fit,
+    /// `[/FitH top]`.
+    FitH(Option<f64>),
+    /// `[/FitV left]`.
+    FitV(Option<f64>),
+    /// `[/FitR left bottom right top]`.
+    FitR {
+        left: f64,
+        bottom: f64,
+        right: f64,
+        top: f64,
+    },
+    /// `[/FitB]`.
+    FitB,
+    /// `[/FitBH top]`.
+    FitBH(Option<f64>),
+    /// `[/FitBV left]`.
+    FitBV(Option<f64>),
+}
+
+impl Default for ViewSpec {
+    fn default() -> Self {
+        ViewSpec::Xyz {
+            left: None,
+            top: None,
+            zoom: None,
+        }
+    }
+}
+
+/// Outline-action passthrough. Phase 1 only models URI actions; later
+/// phases can extend this enum without breaking the existing variants.
+#[derive(Clone, Debug)]
+pub enum OutlineAction {
+    /// `<< /S /URI /URI (string) >>`.
+    Uri(String),
+    /// `<< /S /GoTo /D <name-or-array> >>` — the destination is either
+    /// a named destination (`Named`) or an explicit page+view
+    /// (`Explicit`).
+    GoTo(GoToTarget),
+}
+
+/// `/GoTo` action target.
+#[derive(Clone, Debug)]
+pub enum GoToTarget {
+    /// `/D /SomeName` — resolved against the document's name tree.
+    Named(String),
+    /// `/D [N /Fit]` — explicit 1-based page + view spec.
+    Explicit { page: u32, view: ViewSpec },
+}
+
+/// One node in the assembled outline tree.
+#[derive(Clone, Debug)]
+pub struct OutlineNode {
+    pub record: OutlineRecord,
+    pub children: Vec<OutlineNode>,
+}
+
+/// Build an outline tree from a flat sequence of [`OutlineRecord`]s.
+///
+/// Two authoring conventions are supported and detected automatically:
+///
+/// 1. **Level-based** (stet extension): when *any* record carries
+///    `outline_level`, the builder uses those levels exclusively and
+///    ignores `count`. Each level-1 record opens a new top-level
+///    branch; deeper records become descendants of the most recent
+///    record at the level immediately above them.
+/// 2. **Count-based** (Adobe convention): the default. Each record
+///    declares how many direct children follow it via `count`
+///    (positive = expanded, negative = collapsed; sign affects display
+///    but not topology). Records with `count.is_none()` or `count == 0`
+///    are leaves.
+///
+/// Mixed input — some records use `outline_level`, others use
+/// `count` — falls into the level-based path; `count` on
+/// level-tagged records is preserved on each node so the writer can
+/// still emit Adobe-style `/Count` initial-display hints.
+pub fn build_outline_tree(records: &[OutlineRecord]) -> Vec<OutlineNode> {
+    if records.is_empty() {
+        return Vec::new();
+    }
+    let any_level = records.iter().any(|r| r.outline_level.is_some());
+    if any_level {
+        build_level_based(records)
+    } else {
+        build_count_based(records)
+    }
+}
+
+fn build_count_based(records: &[OutlineRecord]) -> Vec<OutlineNode> {
+    let mut idx = 0;
+    let mut roots = Vec::new();
+    while idx < records.len() {
+        roots.push(consume_count_node(records, &mut idx));
+    }
+    roots
+}
+
+fn consume_count_node(records: &[OutlineRecord], idx: &mut usize) -> OutlineNode {
+    let record = records[*idx].clone();
+    let child_count = record.count.unwrap_or(0).unsigned_abs() as usize;
+    *idx += 1;
+    let mut children = Vec::with_capacity(child_count);
+    for _ in 0..child_count {
+        if *idx >= records.len() {
+            break;
+        }
+        children.push(consume_count_node(records, idx));
+    }
+    OutlineNode { record, children }
+}
+
+fn build_level_based(records: &[OutlineRecord]) -> Vec<OutlineNode> {
+    // `stack[i]` is the in-progress sibling list at depth `i + 1`. When
+    // a record at depth d arrives we close out everything deeper than
+    // d-1 (folding child lists into their parents) before pushing.
+    let mut roots: Vec<OutlineNode> = Vec::new();
+    let mut stack: Vec<Vec<OutlineNode>> = Vec::new();
+    let mut depths: Vec<u32> = Vec::new();
+
+    for record in records {
+        let mut depth = record.outline_level.unwrap_or(1).max(1);
+        // Disallow gaps: clamp the requested depth to one deeper than
+        // the deepest currently open node, falling back to 1 when the
+        // stack is empty.
+        let max_allowed = depths.last().copied().unwrap_or(0) + 1;
+        if depth > max_allowed {
+            depth = max_allowed;
+        }
+        // Fold every open level deeper than (or equal to) `depth` back
+        // into its parent so the new record can sit at `depth`.
+        while let Some(&top_depth) = depths.last() {
+            if top_depth < depth {
+                break;
+            }
+            let folded = stack.pop().unwrap_or_default();
+            depths.pop();
+            attach_children(&mut roots, &mut stack, folded);
+        }
+        let node = OutlineNode {
+            record: record.clone(),
+            children: Vec::new(),
+        };
+        if depth == 1 {
+            roots.push(node);
+            stack.push(Vec::new());
+            depths.push(1);
+        } else {
+            stack.last_mut().unwrap().push(node);
+            stack.push(Vec::new());
+            depths.push(depth);
+        }
+    }
+    while let Some(level_children) = stack.pop() {
+        depths.pop();
+        attach_children(&mut roots, &mut stack, level_children);
+    }
+    roots
+}
+
+fn attach_children(
+    roots: &mut [OutlineNode],
+    stack: &mut [Vec<OutlineNode>],
+    children: Vec<OutlineNode>,
+) {
+    if children.is_empty() {
+        return;
+    }
+    let parent = match stack.last_mut() {
+        Some(siblings) => siblings.last_mut(),
+        None => roots.last_mut(),
+    };
+    if let Some(p) = parent {
+        p.children = children;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -330,5 +562,134 @@ mod tests {
         let drained = buf.drain();
         assert_eq!(drained.len(), 1);
         assert!(buf.is_empty());
+    }
+
+    fn outline(title: &str, count: Option<i32>, level: Option<u32>) -> OutlineRecord {
+        OutlineRecord {
+            title: title.into(),
+            destination: None,
+            count,
+            outline_level: level,
+            color: None,
+            flags: None,
+        }
+    }
+
+    #[test]
+    fn outline_empty_input() {
+        let tree = build_outline_tree(&[]);
+        assert!(tree.is_empty());
+    }
+
+    #[test]
+    fn outline_count_based_three_with_two_kids_each() {
+        // Adobe convention: each parent declares a /Count of 2, then
+        // its two children follow immediately.
+        let records = vec![
+            outline("A", Some(2), None),
+            outline("A.1", None, None),
+            outline("A.2", None, None),
+            outline("B", Some(2), None),
+            outline("B.1", None, None),
+            outline("B.2", None, None),
+            outline("C", Some(2), None),
+            outline("C.1", None, None),
+            outline("C.2", None, None),
+        ];
+        let tree = build_outline_tree(&records);
+        assert_eq!(tree.len(), 3);
+        for (i, root) in tree.iter().enumerate() {
+            assert_eq!(root.children.len(), 2, "root {i} should have 2 kids");
+        }
+        assert_eq!(tree[0].record.title, "A");
+        assert_eq!(tree[0].children[0].record.title, "A.1");
+        assert_eq!(tree[2].children[1].record.title, "C.2");
+    }
+
+    #[test]
+    fn outline_count_based_collapsed_negative() {
+        // Negative count = collapsed but topology is the same as
+        // positive: still 2 direct children.
+        let records = vec![
+            outline("A", Some(-2), None),
+            outline("A.1", None, None),
+            outline("A.2", None, None),
+        ];
+        let tree = build_outline_tree(&records);
+        assert_eq!(tree.len(), 1);
+        assert_eq!(tree[0].children.len(), 2);
+    }
+
+    #[test]
+    fn outline_count_based_nested_grandchildren() {
+        // A has 1 child A.1 which itself declares 2 grandchildren.
+        let records = vec![
+            outline("A", Some(1), None),
+            outline("A.1", Some(2), None),
+            outline("A.1.1", None, None),
+            outline("A.1.2", None, None),
+        ];
+        let tree = build_outline_tree(&records);
+        assert_eq!(tree.len(), 1);
+        assert_eq!(tree[0].children.len(), 1);
+        assert_eq!(tree[0].children[0].children.len(), 2);
+    }
+
+    #[test]
+    fn outline_level_based_1_2_2_1_2_3_3_1() {
+        // Sequence levels 1,2,2,1,2,3,3,1 → three top-level items, the
+        // first with 2 kids, second with 1 kid (which itself has 2),
+        // third a leaf.
+        let records = vec![
+            outline("A", None, Some(1)),
+            outline("A.1", None, Some(2)),
+            outline("A.2", None, Some(2)),
+            outline("B", None, Some(1)),
+            outline("B.1", None, Some(2)),
+            outline("B.1.1", None, Some(3)),
+            outline("B.1.2", None, Some(3)),
+            outline("C", None, Some(1)),
+        ];
+        let tree = build_outline_tree(&records);
+        assert_eq!(tree.len(), 3);
+        assert_eq!(tree[0].record.title, "A");
+        assert_eq!(tree[0].children.len(), 2);
+        assert_eq!(tree[1].record.title, "B");
+        assert_eq!(tree[1].children.len(), 1);
+        assert_eq!(tree[1].children[0].children.len(), 2);
+        assert_eq!(tree[1].children[0].children[1].record.title, "B.1.2");
+        assert_eq!(tree[2].record.title, "C");
+        assert!(tree[2].children.is_empty());
+    }
+
+    #[test]
+    fn outline_level_skip_clamps_to_next_depth() {
+        // A jump from level 1 directly to level 5 is clamped to
+        // level 2 (one deeper than the open root). This stops malformed
+        // input from producing dangling phantom nodes.
+        let records = vec![
+            outline("Root", None, Some(1)),
+            outline("Child", None, Some(5)),
+        ];
+        let tree = build_outline_tree(&records);
+        assert_eq!(tree.len(), 1);
+        assert_eq!(tree[0].children.len(), 1);
+        assert_eq!(tree[0].children[0].record.title, "Child");
+    }
+
+    #[test]
+    fn outline_mixed_input_uses_level_path() {
+        // Any /OutlineLevel entry switches the whole batch to the
+        // level-based builder. The leading count-only record without
+        // a level falls into the default depth = 1.
+        let records = vec![
+            outline("Bare", Some(2), None),
+            outline("Tagged-1", None, Some(1)),
+            outline("Tagged-2", None, Some(2)),
+        ];
+        let tree = build_outline_tree(&records);
+        assert_eq!(tree.len(), 2);
+        assert!(tree[0].children.is_empty());
+        assert_eq!(tree[1].children.len(), 1);
     }
 }

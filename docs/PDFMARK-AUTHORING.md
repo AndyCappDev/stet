@@ -87,6 +87,73 @@ track the parameters or react to them.
 
 ## Type-tag reference
 
+### `/OUT` — outline / bookmark entry
+
+```postscript
+[ /Title (Chapter 1)
+  /Page 5
+  /View [/XYZ 100 700 1.5]
+  /Count 3
+  /Color [0.0 0.0 0.5]
+  /F 2
+  /OUT pdfmark
+```
+
+Each `/OUT pdfmark` records one bookmark entry; the writer assembles the
+flat sequence into the document's outline tree at end-of-job. Bookmarks
+without a `/Title` are dropped silently.
+
+| Key | Type | Meaning |
+|---|---|---|
+| `/Title` | string | Required — user-visible label |
+| `/Page` | integer | 1-based page target. Combine with optional `/View` |
+| `/View` | array | PDF view spec — `[/XYZ left top zoom]`, `[/Fit]`, `[/FitH top]`, `[/FitV left]`, `[/FitR left bottom right top]`, `[/FitB]`, `[/FitBH top]`, `[/FitBV left]`. `null` components mean "keep current value" |
+| `/Dest` | name or string | Reference to a named destination (registered via `/DEST pdfmark` in a later phase) |
+| `/Action` | dict | Action to fire on click. Currently recognised: `<< /S /URI /URI (string) >>` and `<< /S /GoTo /D <name-or-array> >>` |
+| `/Count` | integer | Adobe nesting hint. Positive: this entry is *expanded* with `count` direct children that immediately follow. Negative: collapsed with `\|count\|` children. Zero / absent: leaf |
+| `/OutlineLevel` | integer ≥ 1 | **stet extension.** Explicit nesting level (1 = top-level). When *any* record uses this key, the whole batch switches to level-based parenting and `/Count` is ignored for topology (the sign is still honoured for the open/closed display state). Not compatible with GhostScript pdfwrite |
+| `/Color` | 3-array of `0..=1` reals | Bookmark text colour (PDF 1.4 outline `/C` entry) |
+| `/F` | integer | Style flags; bit 0 = italic, bit 1 = bold (PDF 1.4 outline `/F` entry) |
+
+`/Action` wins over `/Dest`, `/Dest` wins over `/Page`. A bookmark
+without any of the three becomes a non-navigable label.
+
+#### Authoring conventions
+
+**Count-based** — Adobe's native shape; pdfwrite-compatible. Each parent
+declares `/Count N` and the next *N* records become its direct children:
+
+```postscript
+[ /Title (Part I)  /Count 2 /Page 1 /OUT pdfmark
+[ /Title (Chapter 1)         /Page 2 /OUT pdfmark
+[ /Title (Chapter 2)         /Page 9 /OUT pdfmark
+[ /Title (Part II) /Count 1 /Page 20 /OUT pdfmark
+[ /Title (Chapter 3)         /Page 21 /OUT pdfmark
+```
+
+**Level-based** — stet extension, easier to author programmatically.
+Each entry says how deep it is; the builder figures out parents:
+
+```postscript
+[ /Title (Part I)    /OutlineLevel 1 /Page 1  /OUT pdfmark
+[ /Title (Chapter 1) /OutlineLevel 2 /Page 2  /OUT pdfmark
+[ /Title (Chapter 2) /OutlineLevel 2 /Page 9  /OUT pdfmark
+[ /Title (Part II)   /OutlineLevel 1 /Page 20 /OUT pdfmark
+[ /Title (Chapter 3) /OutlineLevel 2 /Page 21 /OUT pdfmark
+```
+
+The two conventions don't mix in a single document — when *any* record
+carries `/OutlineLevel`, the whole batch uses the level-based builder.
+
+When the writer encounters an out-of-range `/Page` (zero, or larger
+than the last `showpage`), it drops just that entry's destination —
+the bookmark itself still emits as a non-navigable label so the user
+can see something went wrong instead of the catalog silently
+disappearing.
+
+The catalog also gets `/PageMode /UseOutlines` whenever any `/OUT`
+records exist, so PDF viewers open the bookmark pane by default.
+
 ### `/DOCINFO` — document Info dictionary
 
 ```postscript

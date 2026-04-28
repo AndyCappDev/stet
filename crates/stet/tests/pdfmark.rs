@@ -125,6 +125,170 @@ fn no_docinfo_keeps_default_producer() {
     assert!(!info_str.contains("/Keywords"));
 }
 
+/// Locate every PDF indirect object body in `pdf` whose dict contains
+/// the substring `marker`. Returns each matching object body as a
+/// borrowed slice of `pdf`. Used to assert on outline-tree contents
+/// without having to fully parse the PDF.
+fn objects_containing(pdf: &[u8], marker: &[u8]) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut cursor = 0;
+    while cursor < pdf.len() {
+        let Some(obj_idx) = pdf[cursor..]
+            .windows(b" 0 obj".len())
+            .position(|w| w == b" 0 obj")
+        else {
+            break;
+        };
+        let body_start_rel = obj_idx + b" 0 obj".len();
+        let body_end_rel = pdf[cursor + body_start_rel..]
+            .windows(b"endobj".len())
+            .position(|w| w == b"endobj")
+            .unwrap_or(pdf.len() - cursor - body_start_rel);
+        let body = &pdf[cursor + body_start_rel..cursor + body_start_rel + body_end_rel];
+        if body.windows(marker.len()).any(|w| w == marker) {
+            out.push(body.to_vec());
+        }
+        cursor += body_start_rel + body_end_rel;
+    }
+    out
+}
+
+#[test]
+fn outline_simple_two_bookmarks() {
+    let pdf = render_one_page_pdf(
+        "[ /Title (Intro) /Page 1 /OUT pdfmark
+         [ /Title (Details) /Page 1 /OUT pdfmark",
+    );
+    // The catalog must reference /Outlines and have /PageMode /UseOutlines.
+    assert!(
+        pdf.windows(b"/Outlines ".len()).any(|w| w == b"/Outlines "),
+        "/Outlines not referenced from catalog"
+    );
+    assert!(
+        pdf.windows(b"/PageMode /UseOutlines".len())
+            .any(|w| w == b"/PageMode /UseOutlines"),
+        "/PageMode /UseOutlines missing"
+    );
+    // Both bookmark titles appear as /Title literals.
+    let intro = objects_containing(&pdf, b"(Intro)");
+    let details = objects_containing(&pdf, b"(Details)");
+    assert_eq!(intro.len(), 1, "expected exactly one Intro outline node");
+    assert_eq!(
+        details.len(),
+        1,
+        "expected exactly one Details outline node"
+    );
+    // The /Outlines root carries /Count 2 (two visible top-level entries).
+    let outlines_root = objects_containing(&pdf, b"/Type /Outlines");
+    assert_eq!(outlines_root.len(), 1);
+    let root_str = String::from_utf8_lossy(&outlines_root[0]);
+    assert!(
+        root_str.contains("/Count 2"),
+        "expected /Count 2 on /Outlines root, got: {root_str}",
+    );
+}
+
+#[test]
+fn outline_count_based_nesting() {
+    // Adobe count-based authoring: parent declares /Count 2, then two
+    // children follow. Render multi-page so /Page targets resolve.
+    let mut interp = Interpreter::new();
+    let script = "[ /Title (Parent) /Page 1 /Count 2 /OUT pdfmark
+                  [ /Title (Child A) /Page 1 /OUT pdfmark
+                  [ /Title (Child B) /Page 1 /OUT pdfmark
+                  showpage";
+    let pdf = interp
+        .render_to_pdf(script.as_bytes(), 72.0)
+        .expect("render");
+    let parent = objects_containing(&pdf, b"(Parent)");
+    assert_eq!(parent.len(), 1);
+    let parent_str = String::from_utf8_lossy(&parent[0]);
+    // Parent dict carries /First, /Last, /Count (signed).
+    assert!(
+        parent_str.contains("/First"),
+        "parent missing /First: {parent_str}"
+    );
+    assert!(
+        parent_str.contains("/Last"),
+        "parent missing /Last: {parent_str}"
+    );
+    // /Count -2 (default closed since the producer didn't set positive).
+    assert!(
+        parent_str.contains("/Count 2") || parent_str.contains("/Count -2"),
+        "parent missing /Count: {parent_str}",
+    );
+    // Outlines root has /Count 3 (1 parent visible + 2 children counted
+    // because /Count is positive — the producer asked for expanded).
+    let outlines_root = objects_containing(&pdf, b"/Type /Outlines");
+    let root_str = String::from_utf8_lossy(&outlines_root[0]);
+    assert!(
+        root_str.contains("/Count 3"),
+        "expected /Count 3 on root, got: {root_str}",
+    );
+}
+
+#[test]
+fn outline_uri_action() {
+    let pdf = render_one_page_pdf(
+        "[ /Title (Visit Example)
+            /Action << /S /URI /URI (https://example.org) >>
+            /OUT pdfmark",
+    );
+    let nodes = objects_containing(&pdf, b"(Visit Example)");
+    assert_eq!(nodes.len(), 1);
+    let body = String::from_utf8_lossy(&nodes[0]);
+    assert!(body.contains("/A "), "expected /A action entry: {body}",);
+    assert!(
+        body.contains("(https://example.org)"),
+        "expected URI string: {body}",
+    );
+    assert!(body.contains("/S /URI"), "expected /S /URI: {body}",);
+}
+
+#[test]
+fn outline_view_xyz_passes_through() {
+    let pdf = render_one_page_pdf("[ /Title (Top) /Page 1 /View [/XYZ 100 700 1.5] /OUT pdfmark");
+    let nodes = objects_containing(&pdf, b"(Top)");
+    assert_eq!(nodes.len(), 1);
+    let body = String::from_utf8_lossy(&nodes[0]);
+    assert!(body.contains("/XYZ"), "expected /XYZ in dest: {body}");
+    assert!(body.contains("100"), "expected x=100 in dest: {body}");
+    assert!(body.contains("700"), "expected y=700 in dest: {body}");
+    assert!(body.contains("1.5"), "expected zoom=1.5 in dest: {body}");
+}
+
+#[test]
+fn outline_named_dest_passes_through() {
+    let pdf = render_one_page_pdf("[ /Title (Jump) /Dest /chap1 /OUT pdfmark");
+    let nodes = objects_containing(&pdf, b"(Jump)");
+    assert_eq!(nodes.len(), 1);
+    let body = String::from_utf8_lossy(&nodes[0]);
+    assert!(
+        body.contains("/Dest (chap1)"),
+        "expected named destination as literal string, got: {body}",
+    );
+}
+
+#[test]
+fn outline_titleless_does_not_emit() {
+    // No /Title → record dropped silently → no /Outlines on catalog.
+    let pdf = render_one_page_pdf("[ /Page 1 /OUT pdfmark");
+    assert!(
+        !pdf.windows(b"/Outlines ".len()).any(|w| w == b"/Outlines "),
+        "expected catalog without /Outlines reference",
+    );
+}
+
+#[test]
+fn no_outline_records_no_catalog_reference() {
+    // Sanity: when no /OUT pdfmark issued, /Catalog has no /Outlines.
+    let pdf = render_one_page_pdf("");
+    assert!(
+        !pdf.windows(b"/Outlines ".len()).any(|w| w == b"/Outlines "),
+        "expected catalog without /Outlines reference",
+    );
+}
+
 #[test]
 fn unknown_typetag_is_silent() {
     let pdf = render_one_page_pdf("[ /Foo (bar) /SOMENEWTHING pdfmark");
