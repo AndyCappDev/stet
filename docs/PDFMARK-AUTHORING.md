@@ -292,6 +292,69 @@ key applies; otherwise the device default.
 A `/PAGE` record with neither any box nor a `/Rotate` is dropped —
 there's nothing to apply.
 
+### `/VIEWERPREFERENCES` — catalog viewer preferences
+
+```postscript
+[ /HideToolbar true
+  /FitWindow true
+  /PageMode /FullScreen
+  /PageLayout /TwoColumnLeft
+  /VIEWERPREFERENCES pdfmark
+```
+
+Catalog-level UI hints. The keys split into two groups: most live
+under the `/ViewerPreferences` indirect object on `/Catalog`, while
+`/PageLayout` and `/PageMode` are catalog-level entries proper. Adobe
+pdfmark groups them all under `/VIEWERPREFERENCES`; stet does the same
+and writes them to the right places automatically.
+
+Multiple `/VIEWERPREFERENCES pdfmark` blocks merge — later records
+override earlier ones key-by-key.
+
+#### `/ViewerPreferences` dict (boolean entries)
+
+| Key | Type |
+|---|---|
+| `/HideToolbar` | bool |
+| `/HideMenubar` | bool |
+| `/HideWindowUI` | bool |
+| `/FitWindow` | bool |
+| `/CenterWindow` | bool |
+| `/DisplayDocTitle` | bool |
+| `/NonFullScreenPageMode` | name: `UseNone`, `UseOutlines`, `UseThumbs`, `UseOC` |
+| `/Direction` | name: `L2R`, `R2L` |
+
+Unknown name values are dropped silently.
+
+#### Catalog-level entries
+
+| Key | Type | Allowed values |
+|---|---|---|
+| `/PageLayout` | name | `SinglePage`, `OneColumn`, `TwoColumnLeft`, `TwoColumnRight`, `TwoPageLeft`, `TwoPageRight` |
+| `/PageMode` | name | `UseNone`, `UseOutlines`, `UseThumbs`, `FullScreen`, `UseOC`, `UseAttachments` |
+
+`/PageMode` from `/VIEWERPREFERENCES` wins over the `UseOutlines`
+default the writer applies when `/OUT` records exist. Invalid name
+values are dropped silently. The catalog gets a `/ViewerPreferences`
+ref only when at least one nested boolean / name entry is set.
+
+### `/Metadata` — XMP metadata stream
+
+```postscript
+[ /Metadata (<?xpacket begin='?'?><x:xmpmeta>...</x:xmpmeta><?xpacket end='w'?>)
+  /Metadata pdfmark
+```
+
+Attaches an XMP packet to the document. The writer wraps the bytes in
+a stream object with `/Type /Metadata` / `/Subtype /XML` and references
+it from `/Catalog /Metadata`. The XMP is round-tripped byte-for-byte
+and written uncompressed (PDF spec requires this for grep-friendly
+extraction).
+
+When multiple `/Metadata pdfmark` blocks appear, the last one wins —
+the XMP packet is a single stream, not a merged document. Records with
+no string value are dropped silently.
+
 ### `/DOCINFO` — document Info dictionary
 
 ```postscript

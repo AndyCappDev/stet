@@ -315,6 +315,26 @@ impl PdfDevice {
             crate::names::write_names_dict(&mut writer, &records, &page_refs)
         });
 
+        // /VIEWERPREFERENCES — merge all records into one effective
+        // viewer-prefs bag, then split into the `/ViewerPreferences`
+        // indirect object plus the catalog-level `/PageLayout` and
+        // `/PageMode` entries which sit on `/Catalog` directly.
+        let merged_prefs = ctx.map(collect_viewer_prefs).unwrap_or_default();
+        let viewer_prefs_ref = crate::metadata::write_viewer_prefs(&mut writer, &merged_prefs);
+
+        // /Metadata — last record wins; emit the stream object.
+        let metadata_ref = ctx.and_then(|c| {
+            c.pdfmark_buffer
+                .records()
+                .iter()
+                .rev()
+                .find_map(|r| match r {
+                    stet_core::pdfmark::PdfMarkRecord::Metadata(rec) => Some(rec.clone()),
+                    _ => None,
+                })
+                .map(|rec| crate::metadata::write_xmp_metadata(&mut writer, &rec))
+        });
+
         // Catalog
         let mut catalog_entries = vec![
             (b"Type".to_vec(), PdfObj::name("Catalog")),
@@ -322,10 +342,35 @@ impl PdfDevice {
         ];
         if let Some(outline_ref) = outlines_ref {
             catalog_entries.push((b"Outlines".to_vec(), PdfObj::Ref(outline_ref)));
-            catalog_entries.push((b"PageMode".to_vec(), PdfObj::name("UseOutlines")));
         }
         if let Some(names_ref) = names_ref {
             catalog_entries.push((b"Names".to_vec(), PdfObj::Ref(names_ref)));
+        }
+        if let Some(viewer_prefs_ref) = viewer_prefs_ref {
+            catalog_entries.push((b"ViewerPreferences".to_vec(), PdfObj::Ref(viewer_prefs_ref)));
+        }
+        // /PageLayout — only the producer-supplied value, validated.
+        if let Some(layout_bytes) = merged_prefs
+            .page_layout
+            .as_deref()
+            .and_then(crate::metadata::validated_page_layout)
+        {
+            catalog_entries.push((b"PageLayout".to_vec(), PdfObj::Name(layout_bytes.to_vec())));
+        }
+        // /PageMode — producer's /VIEWERPREFERENCES /PageMode wins;
+        // otherwise fall back to /UseOutlines when an outline tree
+        // exists so viewers open the bookmark pane by default.
+        let effective_page_mode: Option<Vec<u8>> = merged_prefs
+            .page_mode
+            .as_deref()
+            .and_then(crate::metadata::validated_page_mode)
+            .map(|v| v.to_vec())
+            .or_else(|| outlines_ref.map(|_| b"UseOutlines".to_vec()));
+        if let Some(mode) = effective_page_mode {
+            catalog_entries.push((b"PageMode".to_vec(), PdfObj::Name(mode)));
+        }
+        if let Some(metadata_ref) = metadata_ref {
+            catalog_entries.push((b"Metadata".to_vec(), PdfObj::Ref(metadata_ref)));
         }
 
         writer.set_object(catalog_ref, &PdfObj::Dict(catalog_entries));
@@ -1568,6 +1613,20 @@ fn default_now_pdf_date() -> String {
 /// effective record. Later records override earlier ones key-by-key,
 /// matching GhostScript pdfwrite's behaviour where multiple
 /// `[ /DOCINFO pdfmark` blocks accumulate.
+/// Merge every `/VIEWERPREFERENCES pdfmark` record into one effective
+/// record. Later records override earlier ones key-by-key, matching
+/// the same "later wins" rule we apply to `/DOCINFO`.
+fn collect_viewer_prefs(ctx: &Context) -> stet_core::pdfmark::ViewerPrefsRecord {
+    use stet_core::pdfmark::{PdfMarkRecord, ViewerPrefsRecord};
+    let mut acc = ViewerPrefsRecord::default();
+    for record in ctx.pdfmark_buffer.records() {
+        if let PdfMarkRecord::ViewerPrefs(rec) = record {
+            acc = rec.merge_over(&acc);
+        }
+    }
+    acc
+}
+
 fn collect_docinfo(ctx: &Context) -> stet_core::pdfmark::DocInfoRecord {
     let mut acc = stet_core::pdfmark::DocInfoRecord::default();
     for record in ctx.pdfmark_buffer.records() {

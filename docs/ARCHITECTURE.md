@@ -240,6 +240,21 @@ same scope. The result is a flat per-page table the page builder
 consults when emitting `/CropBox` / `/BleedBox` / `/TrimBox` /
 `/ArtBox` / `/Rotate`.
 
+`/VIEWERPREFERENCES` records are similarly merged via
+`collect_viewer_prefs` into one effective bag in `metadata.rs`. The
+writer splits the bag in two: boolean entries (`/HideToolbar`,
+`/FitWindow`, …) and name entries with allow-lists
+(`/NonFullScreenPageMode`, `/Direction`) go into a single
+`/ViewerPreferences` indirect object referenced from `/Catalog`, while
+`/PageLayout` and `/PageMode` are validated against their respective
+allow-lists and emitted as catalog-level entries proper. A producer-
+supplied `/PageMode` wins over the `UseOutlines` default the writer
+applies when `/OUT` records exist. `/Metadata` records emit one stream
+object with `/Type /Metadata /Subtype /XML` referenced from
+`/Catalog /Metadata`; the bytes are round-tripped verbatim and
+written uncompressed (PDF spec requirement for grep-friendly
+extraction).
+
 ## Pipeline: PDF Reading
 
 ```

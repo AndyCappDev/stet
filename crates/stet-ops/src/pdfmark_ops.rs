@@ -16,12 +16,13 @@
 //! Currently recognised type-tags: `/DOCINFO` (document Info dict),
 //! `/OUT` (outline / bookmark entry), `/ANN` (Link / Text / FreeText
 //! annotations), `/DEST` (named destination), `/PAGE` and `/PAGES`
-//! (per-page and document-wide page-box / rotate overrides).
-//! Subsequent phases add `/VIEWERPREFERENCES`, `/Metadata`, `/EMBED`,
-//! `/FORM`, `/Widget` (form fields), and the Tagged-PDF structure-tree
-//! set as new arms in the type-tag match. Unknown type-tags silently
-//! no-op (Adobe convention) so PS code targeting newer features stays
-//! runnable on older interpreters.
+//! (per-page and document-wide page-box / rotate overrides),
+//! `/VIEWERPREFERENCES` (catalog viewer preferences plus `/PageLayout`
+//! and `/PageMode`), `/Metadata` (XMP stream). Subsequent phases add
+//! `/EMBED`, `/FORM`, `/Widget` (form fields), and the Tagged-PDF
+//! structure-tree set as new arms in the type-tag match. Unknown
+//! type-tags silently no-op (Adobe convention) so PS code targeting
+//! newer features stays runnable on older interpreters.
 
 use stet_core::context::Context;
 use stet_core::dict::DictKey;
@@ -29,9 +30,9 @@ use stet_core::error::PsError;
 use stet_core::object::{EntityId, PsObject, PsValue};
 use stet_core::pdfmark::{
     AnnotationRecord, AnnotationSubtype, AnnotationTarget, Border, DestRecord, DocDate,
-    DocInfoRecord, GoToTarget, LinkHighlight, OutlineAction, OutlineDestination, OutlineRecord,
-    PageBoxes, PageOverrideRecord, PageOverrideScope, PdfMarkRecord, TextAnnotationIcon,
-    TrappedState, ViewSpec,
+    DocInfoRecord, GoToTarget, LinkHighlight, MetadataRecord, OutlineAction, OutlineDestination,
+    OutlineRecord, PageBoxes, PageOverrideRecord, PageOverrideScope, PdfMarkRecord,
+    TextAnnotationIcon, TrappedState, ViewSpec, ViewerPrefsRecord,
 };
 
 /// `pdfmark`: mark arg1 ... argN typetag → —
@@ -108,6 +109,16 @@ pub fn op_pdfmark(ctx: &mut Context) -> Result<(), PsError> {
         b"PAGES" => {
             if let Some(rec) = parse_page_override(ctx, &payload, true) {
                 ctx.pdfmark_buffer.push(PdfMarkRecord::PageOverride(rec));
+            }
+        }
+        b"VIEWERPREFERENCES" => {
+            if let Some(rec) = parse_viewer_prefs(ctx, &payload) {
+                ctx.pdfmark_buffer.push(PdfMarkRecord::ViewerPrefs(rec));
+            }
+        }
+        b"Metadata" => {
+            if let Some(rec) = parse_metadata(ctx, &payload) {
+                ctx.pdfmark_buffer.push(PdfMarkRecord::Metadata(rec));
             }
         }
         // Unknown type-tags silently emit nothing (Adobe convention).
@@ -688,6 +699,55 @@ fn parse_page_override(
         boxes,
         rotate,
     })
+}
+
+// ----- Viewer prefs + metadata (Phase 5) -----------------------------------
+
+/// Pull a `/Key /Name` and return its bytes as a UTF-8 lossy `String`.
+/// Convenience for viewer-prefs entries that store name-typed values
+/// (`/PageMode`, `/PageLayout`, `/Direction`, …).
+fn extract_name_string(ctx: &Context, payload: &[PsObject], key: &[u8]) -> Option<String> {
+    extract_name(ctx, payload, key).map(|n| String::from_utf8_lossy(n).into_owned())
+}
+
+/// Parse a `/VIEWERPREFERENCES pdfmark` payload. Every recognised key
+/// is optional; the record is dropped if no recognised key is set so
+/// stray pdfmarks don't pollute the catalog.
+fn parse_viewer_prefs(ctx: &Context, payload: &[PsObject]) -> Option<ViewerPrefsRecord> {
+    let rec = ViewerPrefsRecord {
+        hide_toolbar: extract_bool(ctx, payload, b"HideToolbar"),
+        hide_menubar: extract_bool(ctx, payload, b"HideMenubar"),
+        hide_window_ui: extract_bool(ctx, payload, b"HideWindowUI"),
+        fit_window: extract_bool(ctx, payload, b"FitWindow"),
+        center_window: extract_bool(ctx, payload, b"CenterWindow"),
+        display_doc_title: extract_bool(ctx, payload, b"DisplayDocTitle"),
+        non_full_screen_page_mode: extract_name_string(ctx, payload, b"NonFullScreenPageMode"),
+        direction: extract_name_string(ctx, payload, b"Direction"),
+        page_layout: extract_name_string(ctx, payload, b"PageLayout"),
+        page_mode: extract_name_string(ctx, payload, b"PageMode"),
+    };
+    if rec.nested_is_empty() && rec.page_layout.is_none() && rec.page_mode.is_none() {
+        return None;
+    }
+    Some(rec)
+}
+
+/// Parse a `/Metadata pdfmark` payload. The `/Metadata` value is the
+/// raw XMP XML; pass through bytes verbatim so producers that hand-
+/// craft their XMP keep byte-for-byte fidelity. Returns `None` when
+/// the value is missing or not a string.
+fn parse_metadata(ctx: &Context, payload: &[PsObject]) -> Option<MetadataRecord> {
+    let key_id = ctx.names.find(b"Metadata")?;
+    for (k, v) in pairs_iter(payload) {
+        if k != key_id {
+            continue;
+        }
+        if let PsValue::String { entity, start, len } = v.value {
+            let bytes = ctx.strings.get(entity, start, len).to_vec();
+            return Some(MetadataRecord { xmp_bytes: bytes });
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -1387,6 +1447,76 @@ mod tests {
             panic!("expected PageOverride record");
         };
         assert_eq!(rec.rotate, Some(90));
+    }
+
+    #[test]
+    fn viewer_prefs_full_set() {
+        let mut ctx = make_ctx();
+        let hide_id = ctx.names.intern(b"HideToolbar");
+        let fit_id = ctx.names.intern(b"FitWindow");
+        let pm_id = ctx.names.intern(b"PageMode");
+        let fs_id = ctx.names.intern(b"FullScreen");
+        let pl_id = ctx.names.intern(b"PageLayout");
+        let tcl_id = ctx.names.intern(b"TwoColumnLeft");
+        let tag_id = ctx.names.intern(b"VIEWERPREFERENCES");
+        ctx.o_stack.push(PsObject::mark()).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(hide_id)).unwrap();
+        ctx.o_stack.push(PsObject::bool(true)).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(fit_id)).unwrap();
+        ctx.o_stack.push(PsObject::bool(true)).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(pm_id)).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(fs_id)).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(pl_id)).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(tcl_id)).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(tag_id)).unwrap();
+        op_pdfmark(&mut ctx).unwrap();
+        let PdfMarkRecord::ViewerPrefs(rec) = &ctx.pdfmark_buffer.records()[0] else {
+            panic!("expected ViewerPrefs record");
+        };
+        assert_eq!(rec.hide_toolbar, Some(true));
+        assert_eq!(rec.fit_window, Some(true));
+        assert_eq!(rec.page_mode.as_deref(), Some("FullScreen"));
+        assert_eq!(rec.page_layout.as_deref(), Some("TwoColumnLeft"));
+    }
+
+    #[test]
+    fn viewer_prefs_empty_dropped() {
+        let mut ctx = make_ctx();
+        let tag_id = ctx.names.intern(b"VIEWERPREFERENCES");
+        ctx.o_stack.push(PsObject::mark()).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(tag_id)).unwrap();
+        op_pdfmark(&mut ctx).unwrap();
+        assert!(ctx.pdfmark_buffer.is_empty());
+    }
+
+    #[test]
+    fn metadata_string_passthrough() {
+        let mut ctx = make_ctx();
+        let meta_key_id = ctx.names.intern(b"Metadata");
+        let tag_id = ctx.names.intern(b"Metadata");
+        let xmp = b"<?xpacket begin='\xef\xbb\xbf'?><x:xmpmeta/>";
+        let s = ctx.strings.allocate_from(xmp);
+        ctx.o_stack.push(PsObject::mark()).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(meta_key_id)).unwrap();
+        ctx.o_stack
+            .push(PsObject::string(s, xmp.len() as u32))
+            .unwrap();
+        ctx.o_stack.push(PsObject::name_lit(tag_id)).unwrap();
+        op_pdfmark(&mut ctx).unwrap();
+        let PdfMarkRecord::Metadata(rec) = &ctx.pdfmark_buffer.records()[0] else {
+            panic!("expected Metadata record");
+        };
+        assert_eq!(rec.xmp_bytes, xmp);
+    }
+
+    #[test]
+    fn metadata_missing_value_dropped() {
+        let mut ctx = make_ctx();
+        let tag_id = ctx.names.intern(b"Metadata");
+        ctx.o_stack.push(PsObject::mark()).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(tag_id)).unwrap();
+        op_pdfmark(&mut ctx).unwrap();
+        assert!(ctx.pdfmark_buffer.is_empty());
     }
 
     #[test]

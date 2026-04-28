@@ -563,6 +563,124 @@ fn no_dest_records_no_names_in_catalog() {
 }
 
 #[test]
+fn viewer_prefs_emits_dict() {
+    let pdf = render_one_page_pdf(
+        "[ /HideToolbar true /FitWindow true /Direction /L2R /VIEWERPREFERENCES pdfmark",
+    );
+    let catalog = objects_containing(&pdf, b"/Type /Catalog");
+    let cat_str = String::from_utf8_lossy(&catalog[0]);
+    assert!(
+        cat_str.contains("/ViewerPreferences"),
+        "/ViewerPreferences not on catalog: {cat_str}",
+    );
+    let vp = objects_containing(&pdf, b"/HideToolbar true");
+    assert_eq!(vp.len(), 1);
+    let body = String::from_utf8_lossy(&vp[0]);
+    assert!(
+        body.contains("/FitWindow true"),
+        "missing FitWindow: {body}"
+    );
+    assert!(
+        body.contains("/Direction /L2R"),
+        "missing Direction: {body}"
+    );
+}
+
+#[test]
+fn viewer_prefs_page_mode_lifts_to_catalog() {
+    let pdf = render_one_page_pdf(
+        "[ /PageMode /FullScreen /PageLayout /TwoColumnLeft /VIEWERPREFERENCES pdfmark",
+    );
+    let catalog = objects_containing(&pdf, b"/Type /Catalog");
+    let cat_str = String::from_utf8_lossy(&catalog[0]);
+    assert!(
+        cat_str.contains("/PageMode /FullScreen"),
+        "expected /PageMode /FullScreen on catalog: {cat_str}",
+    );
+    assert!(
+        cat_str.contains("/PageLayout /TwoColumnLeft"),
+        "expected /PageLayout on catalog: {cat_str}",
+    );
+}
+
+#[test]
+fn viewer_prefs_page_mode_overrides_outline_default() {
+    // /OUT records normally cause /PageMode /UseOutlines on the catalog;
+    // an explicit /VIEWERPREFERENCES /PageMode /UseThumbs must win.
+    let pdf = render_one_page_pdf(
+        "[ /Title (Intro) /Page 1 /OUT pdfmark
+         [ /PageMode /UseThumbs /VIEWERPREFERENCES pdfmark",
+    );
+    let catalog = objects_containing(&pdf, b"/Type /Catalog");
+    let cat_str = String::from_utf8_lossy(&catalog[0]);
+    assert!(
+        cat_str.contains("/PageMode /UseThumbs"),
+        "expected /PageMode /UseThumbs override: {cat_str}",
+    );
+    assert!(
+        !cat_str.contains("/PageMode /UseOutlines"),
+        "did not expect /PageMode /UseOutlines after override: {cat_str}",
+    );
+}
+
+#[test]
+fn viewer_prefs_invalid_page_layout_dropped() {
+    let pdf = render_one_page_pdf("[ /PageLayout /MadeUpLayout /VIEWERPREFERENCES pdfmark");
+    let catalog = objects_containing(&pdf, b"/Type /Catalog");
+    let cat_str = String::from_utf8_lossy(&catalog[0]);
+    assert!(
+        !cat_str.contains("/PageLayout"),
+        "expected invalid /PageLayout to be dropped: {cat_str}",
+    );
+}
+
+#[test]
+fn metadata_emits_xmp_stream() {
+    let xmp =
+        "<?xpacket begin='?'?><x:xmpmeta xmlns:x='adobe:ns:meta/'></x:xmpmeta><?xpacket end='w'?>";
+    let pdf = render_one_page_pdf(&format!("[ /Metadata ({}) /Metadata pdfmark", xmp));
+    // /Catalog references /Metadata
+    let catalog = objects_containing(&pdf, b"/Type /Catalog");
+    let cat_str = String::from_utf8_lossy(&catalog[0]);
+    assert!(
+        cat_str.contains("/Metadata "),
+        "/Metadata not on catalog: {cat_str}",
+    );
+    // The stream object carries /Type /Metadata /Subtype /XML.
+    let metadata = objects_containing(&pdf, b"/Type /Metadata");
+    // Two matches: catalog (with `/Metadata <ref>`) and the stream
+    // dict itself. We want at least the stream dict to appear.
+    assert!(!metadata.is_empty());
+    let stream_body = metadata
+        .iter()
+        .find(|o| {
+            let s = String::from_utf8_lossy(o);
+            s.contains("/Subtype /XML") && s.contains("stream")
+        })
+        .expect("metadata stream object present");
+    let stream_str = String::from_utf8_lossy(stream_body);
+    assert!(
+        stream_str.contains("xmpmeta"),
+        "XMP body not preserved: {stream_str}",
+    );
+}
+
+#[test]
+fn no_viewer_prefs_no_catalog_entry() {
+    let pdf = render_one_page_pdf("");
+    let catalog = objects_containing(&pdf, b"/Type /Catalog");
+    let cat_str = String::from_utf8_lossy(&catalog[0]);
+    assert!(
+        !cat_str.contains("/ViewerPreferences"),
+        "expected no /ViewerPreferences when no record: {cat_str}",
+    );
+    assert!(
+        !cat_str.contains("/Metadata "),
+        "expected no /Metadata when no record: {cat_str}",
+    );
+}
+
+#[test]
 fn unknown_typetag_is_silent() {
     let pdf = render_one_page_pdf("[ /Foo (bar) /SOMENEWTHING pdfmark");
     let info = find_info_dict_bytes(&pdf);

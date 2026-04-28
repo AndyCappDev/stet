@@ -21,8 +21,9 @@
 //! `/OUT` (outline / bookmark), `/ANN` (Link / Text / FreeText
 //! annotations), `/DEST` (named destination contributing to
 //! /Names /Dests), `/PAGE` and `/PAGES` (per-page and document-wide
-//! page-box / rotate overrides). Unknown type-tags silently no-op
-//! (Adobe convention).
+//! page-box / rotate overrides), `/VIEWERPREFERENCES` (catalog viewer
+//! preferences plus `/PageLayout` and `/PageMode`), and `/Metadata`
+//! (XMP stream). Unknown type-tags silently no-op (Adobe convention).
 //! `pdfmark` and the matching `currentdistillerparams` /
 //! `setdistillerparams` operators are gated behind
 //! [`register_pdf_authoring_ops`] so they only appear in `systemdict` on

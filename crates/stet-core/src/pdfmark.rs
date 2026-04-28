@@ -36,6 +36,12 @@ pub enum PdfMarkRecord {
     /// default for keys that aren't already overridden on a specific
     /// page).
     PageOverride(PageOverrideRecord),
+    /// `/VIEWERPREFERENCES` — catalog-level viewer preferences plus
+    /// the `/PageLayout` and `/PageMode` overrides that live directly
+    /// on `/Catalog` rather than nested under `/ViewerPreferences`.
+    ViewerPrefs(ViewerPrefsRecord),
+    /// `/Metadata` — XMP metadata stream attached to `/Catalog`.
+    Metadata(MetadataRecord),
 }
 
 /// Buffered `pdfmark` records. Lives on `Context` for the entire job;
@@ -690,6 +696,85 @@ pub struct PageBoxes {
     pub bleed_box: Option<[f64; 4]>,
     pub trim_box: Option<[f64; 4]>,
     pub art_box: Option<[f64; 4]>,
+}
+
+// ----- Viewer prefs + metadata (Phase 5) -----------------------------------
+
+/// One `/VIEWERPREFERENCES pdfmark` payload. All keys are optional;
+/// later records override earlier ones key-by-key. The "page layout"
+/// and "page mode" entries technically live on `/Catalog` directly
+/// (not under `/ViewerPreferences`) but Adobe pdfmark groups them with
+/// the rest of the viewer-control bag, so stet does too.
+#[derive(Clone, Debug, Default)]
+pub struct ViewerPrefsRecord {
+    pub hide_toolbar: Option<bool>,
+    pub hide_menubar: Option<bool>,
+    pub hide_window_ui: Option<bool>,
+    pub fit_window: Option<bool>,
+    pub center_window: Option<bool>,
+    pub display_doc_title: Option<bool>,
+    /// `/NonFullScreenPageMode` — one of `UseNone`, `UseOutlines`,
+    /// `UseThumbs`, `UseOC`. Stored as the raw bytes for forward-
+    /// compatibility with values stet doesn't recognise.
+    pub non_full_screen_page_mode: Option<String>,
+    /// `/Direction` — `L2R` or `R2L`.
+    pub direction: Option<String>,
+    /// Catalog-level `/PageLayout`: `SinglePage`, `OneColumn`,
+    /// `TwoColumnLeft`, `TwoColumnRight`, `TwoPageLeft`, `TwoPageRight`.
+    pub page_layout: Option<String>,
+    /// Catalog-level `/PageMode`: `UseNone`, `UseOutlines`,
+    /// `UseThumbs`, `FullScreen`, `UseOC`, `UseAttachments`. Wins over
+    /// the `UseOutlines` default the writer applies when `/OUT`
+    /// records exist.
+    pub page_mode: Option<String>,
+}
+
+impl ViewerPrefsRecord {
+    /// Merge `other` into `self` — `self`'s `Some` values win when both
+    /// records set the same key. Used to layer multiple
+    /// `/VIEWERPREFERENCES pdfmark` blocks into one effective record.
+    pub fn merge_over(&self, other: &ViewerPrefsRecord) -> ViewerPrefsRecord {
+        ViewerPrefsRecord {
+            hide_toolbar: self.hide_toolbar.or(other.hide_toolbar),
+            hide_menubar: self.hide_menubar.or(other.hide_menubar),
+            hide_window_ui: self.hide_window_ui.or(other.hide_window_ui),
+            fit_window: self.fit_window.or(other.fit_window),
+            center_window: self.center_window.or(other.center_window),
+            display_doc_title: self.display_doc_title.or(other.display_doc_title),
+            non_full_screen_page_mode: self
+                .non_full_screen_page_mode
+                .clone()
+                .or_else(|| other.non_full_screen_page_mode.clone()),
+            direction: self.direction.clone().or_else(|| other.direction.clone()),
+            page_layout: self
+                .page_layout
+                .clone()
+                .or_else(|| other.page_layout.clone()),
+            page_mode: self.page_mode.clone().or_else(|| other.page_mode.clone()),
+        }
+    }
+
+    /// True when no field has a value — the writer skips the catalog
+    /// entry entirely in this case.
+    pub fn nested_is_empty(&self) -> bool {
+        self.hide_toolbar.is_none()
+            && self.hide_menubar.is_none()
+            && self.hide_window_ui.is_none()
+            && self.fit_window.is_none()
+            && self.center_window.is_none()
+            && self.display_doc_title.is_none()
+            && self.non_full_screen_page_mode.is_none()
+            && self.direction.is_none()
+    }
+}
+
+/// One `/Metadata pdfmark` entry — an XMP stream attached to the
+/// document's `/Catalog`. The writer wraps the bytes in a
+/// `/Type /Metadata /Subtype /XML` stream object.
+#[derive(Clone, Debug)]
+pub struct MetadataRecord {
+    /// Raw XMP XML bytes — round-tripped verbatim.
+    pub xmp_bytes: Vec<u8>,
 }
 
 impl PageBoxes {
