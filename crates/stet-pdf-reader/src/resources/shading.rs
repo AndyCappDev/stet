@@ -200,6 +200,7 @@ fn handle_function_based(
             overprint_mode: 0,
             opm_paired: false,
             painted_channels: 0,
+            alpha_is_shape: false,
         },
     });
     Ok(())
@@ -248,6 +249,8 @@ fn handle_axial(
             overprint: gstate.overprint,
             painted_channels: painted_channels_for_cs(resolved_cs),
             alpha: gstate.fill_alpha,
+            blend_mode: gstate.blend_mode,
+            alpha_is_shape: gstate.alpha_is_shape,
             spot_tint_blend: cs_has_spot_with_cmyk_alt(resolved_cs),
         },
     });
@@ -300,6 +303,8 @@ fn handle_radial(
             overprint: gstate.overprint,
             painted_channels: painted_channels_for_cs(resolved_cs),
             alpha: gstate.fill_alpha,
+            blend_mode: gstate.blend_mode,
+            alpha_is_shape: gstate.alpha_is_shape,
             spot_tint_blend: cs_has_spot_with_cmyk_alt(resolved_cs),
         },
     });
@@ -483,6 +488,9 @@ fn handle_mesh(
             overprint: gstate.overprint,
             painted_channels: painted_channels_for_cs(resolved_cs),
             color_lut,
+            alpha: gstate.fill_alpha,
+            blend_mode: gstate.blend_mode,
+            alpha_is_shape: gstate.alpha_is_shape,
         },
     });
     Ok(())
@@ -621,6 +629,9 @@ fn handle_patches(
             overprint: gstate.overprint,
             painted_channels: painted_channels_for_cs(resolved_cs),
             color_lut,
+            alpha: gstate.fill_alpha,
+            blend_mode: gstate.blend_mode,
+            alpha_is_shape: gstate.alpha_is_shape,
         },
     });
     Ok(())

@@ -4372,6 +4372,11 @@ fn emit_text_element_with_fm(
         transfer: crate::paint_ops::capture_transfer_state(ctx),
         halftone: crate::paint_ops::capture_halftone_state(ctx),
         bg_ucr: crate::paint_ops::capture_bg_ucr_state(ctx),
+        fill_opacity: ctx.gstate.fill_opacity,
+        stroke_opacity: ctx.gstate.stroke_opacity,
+        blend_mode: ctx.gstate.blend_mode,
+        alpha_is_shape: ctx.gstate.alpha_is_shape,
+        text_knockout: ctx.gstate.text_knockout,
     };
     ctx.display_list.push(DisplayElement::Text { params });
 }
@@ -4410,8 +4415,9 @@ fn push_glyph_element(
             transfer,
             halftone: halftone.clone(),
             bg_ucr: bg_ucr.clone(),
-            alpha: 1.0,
-            blend_mode: 0,
+            alpha: ctx.gstate.stroke_opacity,
+            blend_mode: ctx.gstate.blend_mode,
+            alpha_is_shape: ctx.gstate.alpha_is_shape,
         };
         ctx.display_list.push(DisplayElement::Stroke {
             path: device_path,
@@ -4433,8 +4439,9 @@ fn push_glyph_element(
             transfer,
             halftone,
             bg_ucr,
-            alpha: 1.0,
-            blend_mode: 0,
+            alpha: ctx.gstate.fill_opacity,
+            blend_mode: ctx.gstate.blend_mode,
+            alpha_is_shape: ctx.gstate.alpha_is_shape,
         };
         ctx.display_list.push(DisplayElement::Fill {
             path: device_path,

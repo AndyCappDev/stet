@@ -1,0 +1,28 @@
+%!PS-Adobe-3.0
+% stet PDF-imaging extensions — compatibility aliases.
+%
+% The PostScript Level 3 spec does not define operators for the PDF
+% transparency imaging model. stet adds them as stet-specific
+% extensions with spec-style names (setfillopacity, setblendmode,
+% currentblendmode, ...). This file provides GhostScript-compatible
+% aliases so PS code written against GS's leading-dot convention
+% works without changes.
+
+systemdict begin
+    true setglobal
+
+    % --- Phase 1: alpha + blend modes ---
+    /.setopacityalpha           { dup setfillopacity setstrokeopacity } bind def
+    /.currentopacityalpha       /currentfillopacity load def
+    /.setshapealpha             { true setalphaisshape dup setfillopacity setstrokeopacity } bind def
+    /.setfillconstantalpha      /setfillopacity load def
+    /.setstrokeconstantalpha    /setstrokeopacity load def
+    /.setblendmode              /setblendmode load def
+    /.currentblendmode          /currentblendmode load def
+    /.setalphaisshape           /setalphaisshape load def
+    /.currentalphaisshape       /currentalphaisshape load def
+    /.settextknockout           /settextknockout load def
+    /.currenttextknockout       /currenttextknockout load def
+
+    false setglobal
+end

@@ -32,6 +32,10 @@ const ENTRIES: &[(&str, &[u8])] = &[
         "Init/fontmapping.ps",
         include_bytes!("../resources/Init/fontmapping.ps"),
     ),
+    (
+        "Init/pdfextensions.ps",
+        include_bytes!("../resources/Init/pdfextensions.ps"),
+    ),
     // Encodings
     (
         "Encoding/StandardEncoding.ps",

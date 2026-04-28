@@ -296,6 +296,17 @@ pub struct GraphicsState {
     /// Cached pre-sampled tint lookup table for the current Separation/DeviceN color space.
     /// Set when setcolorspace installs a Separation/DeviceN space.
     pub cached_tint_table: Option<Arc<crate::device::TintLookupTable>>,
+
+    /// Constant fill opacity (PDF `ca`). Range \[0,1\]. Default 1.0.
+    pub fill_opacity: f64,
+    /// Constant stroke opacity (PDF `CA`). Range \[0,1\]. Default 1.0.
+    pub stroke_opacity: f64,
+    /// Blend mode index. 0=Normal, 1=Multiply, …, 15=Luminosity. Default 0.
+    pub blend_mode: u8,
+    /// Alpha-is-shape flag (PDF `AIS`). Default false.
+    pub alpha_is_shape: bool,
+    /// Text knockout flag (PDF `TK`). Default true.
+    pub text_knockout: bool,
 }
 
 impl GraphicsState {
@@ -345,6 +356,11 @@ impl GraphicsState {
             bbox: None,
             tint_values: None,
             cached_tint_table: None,
+            fill_opacity: 1.0,
+            stroke_opacity: 1.0,
+            blend_mode: 0,
+            alpha_is_shape: false,
+            text_knockout: true,
         }
     }
 }

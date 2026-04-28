@@ -181,7 +181,9 @@ fn build_type2_shading(
             color_space: shading_cs,
             overprint: false,
             painted_channels: 0,
-            alpha: 1.0,
+            alpha: ctx.gstate.fill_opacity,
+            blend_mode: ctx.gstate.blend_mode,
+            alpha_is_shape: ctx.gstate.alpha_is_shape,
             spot_tint_blend: false,
         },
     });
@@ -244,7 +246,9 @@ fn build_type3_shading(
             color_space: shading_cs,
             overprint: false,
             painted_channels: 0,
-            alpha: 1.0,
+            alpha: ctx.gstate.fill_opacity,
+            blend_mode: ctx.gstate.blend_mode,
+            alpha_is_shape: ctx.gstate.alpha_is_shape,
             spot_tint_blend: false,
         },
     });
@@ -385,12 +389,13 @@ fn build_type1_shading(
             image_matrix,
             interpolate: false,
             mask_color: None,
-            alpha: 1.0,
-            blend_mode: 0,
+            alpha: ctx.gstate.fill_opacity,
+            blend_mode: ctx.gstate.blend_mode,
             overprint: false,
             overprint_mode: 0,
             opm_paired: false,
             painted_channels: 0,
+            alpha_is_shape: ctx.gstate.alpha_is_shape,
         },
     });
 
@@ -441,6 +446,9 @@ fn build_type4_shading(
                 overprint: false,
                 painted_channels: 0,
                 color_lut: None,
+                alpha: ctx.gstate.fill_opacity,
+                blend_mode: ctx.gstate.blend_mode,
+                alpha_is_shape: ctx.gstate.alpha_is_shape,
             },
         });
     }
@@ -490,6 +498,9 @@ fn build_type5_shading(
                 overprint: false,
                 painted_channels: 0,
                 color_lut: None,
+                alpha: ctx.gstate.fill_opacity,
+                blend_mode: ctx.gstate.blend_mode,
+                alpha_is_shape: ctx.gstate.alpha_is_shape,
             },
         });
     }
@@ -539,6 +550,9 @@ fn build_type6_shading(
                 overprint: false,
                 painted_channels: 0,
                 color_lut: None,
+                alpha: ctx.gstate.fill_opacity,
+                blend_mode: ctx.gstate.blend_mode,
+                alpha_is_shape: ctx.gstate.alpha_is_shape,
             },
         });
     }
@@ -586,6 +600,9 @@ fn build_type7_shading(
                 overprint: false,
                 painted_channels: 0,
                 color_lut: None,
+                alpha: ctx.gstate.fill_opacity,
+                blend_mode: ctx.gstate.blend_mode,
+                alpha_is_shape: ctx.gstate.alpha_is_shape,
             },
         });
     }

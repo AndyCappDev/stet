@@ -157,6 +157,9 @@ pub struct FillParams {
     pub alpha: f64,
     /// Blend mode (0=Normal, 1=Multiply, ..., 11=Exclusion). Default 0.
     pub blend_mode: u8,
+    /// PDF `AIS` (alpha-is-shape). When true, the source is interpreted as
+    /// shape rather than opacity. Default false.
+    pub alpha_is_shape: bool,
 }
 
 /// Parameters for a text element emitted by show operators.
@@ -199,6 +202,16 @@ pub struct TextParams {
     pub halftone: HalftoneState,
     /// Pre-sampled black generation / undercolor removal for PDF output.
     pub bg_ucr: BgUcrState,
+    /// Fill opacity (0.0–1.0, default 1.0). Used by PDF transparency.
+    pub fill_opacity: f64,
+    /// Stroke opacity (0.0–1.0, default 1.0). Applies to PaintType-2 fonts.
+    pub stroke_opacity: f64,
+    /// Blend mode (0=Normal, 1=Multiply, …, 15=Luminosity). Default 0.
+    pub blend_mode: u8,
+    /// Alpha-is-shape (PDF `AIS`). Default false.
+    pub alpha_is_shape: bool,
+    /// Text knockout (PDF `TK`). Default true.
+    pub text_knockout: bool,
 }
 
 /// Parameters for stroking a path.
@@ -240,6 +253,9 @@ pub struct StrokeParams {
     pub alpha: f64,
     /// Blend mode (0=Normal, 1=Multiply, ..., 11=Exclusion). Default 0.
     pub blend_mode: u8,
+    /// PDF `AIS` (alpha-is-shape). When true, the source is interpreted as
+    /// shape rather than opacity. Default false.
+    pub alpha_is_shape: bool,
 }
 
 /// Parameters for clipping.
@@ -403,6 +419,8 @@ pub struct ImageParams {
     /// See FillParams::opm_paired.
     pub opm_paired: bool,
     pub painted_channels: u8,
+    /// PDF `AIS` (alpha-is-shape). Default false.
+    pub alpha_is_shape: bool,
 }
 
 /// Color space carried through the display list for native shading output.
@@ -464,6 +482,10 @@ pub struct AxialShadingParams {
     pub painted_channels: u8,
     /// Fill alpha from graphics state (0.0–1.0).
     pub alpha: f64,
+    /// Blend mode (0=Normal, …, 15=Luminosity). Default 0.
+    pub blend_mode: u8,
+    /// PDF `AIS` (alpha-is-shape). Default false.
+    pub alpha_is_shape: bool,
     /// True when this shading uses a Separation/DeviceN color space with a
     /// CMYK alternate AND at least one non-process spot colorant.  The
     /// renderer composites the per-pixel CMYK from the gradient stops with
@@ -492,6 +514,10 @@ pub struct RadialShadingParams {
     pub painted_channels: u8,
     /// Fill alpha from graphics state (0.0–1.0).
     pub alpha: f64,
+    /// Blend mode (0=Normal, …, 15=Luminosity). Default 0.
+    pub blend_mode: u8,
+    /// PDF `AIS` (alpha-is-shape). Default false.
+    pub alpha_is_shape: bool,
     /// See [`AxialShadingParams::spot_tint_blend`].
     pub spot_tint_blend: bool,
 }
@@ -527,6 +553,12 @@ pub struct MeshShadingParams {
     /// function input. The renderer interpolates this per-pixel, then
     /// indexes the LUT instead of Gouraud-interpolating DeviceColor.
     pub color_lut: Option<Arc<Vec<DeviceColor>>>,
+    /// Fill alpha from graphics state (0.0–1.0). Default 1.0.
+    pub alpha: f64,
+    /// Blend mode (0=Normal, …, 15=Luminosity). Default 0.
+    pub blend_mode: u8,
+    /// PDF `AIS` (alpha-is-shape). Default false.
+    pub alpha_is_shape: bool,
 }
 
 /// A patch in a Coons or tensor-product patch mesh.
@@ -550,6 +582,12 @@ pub struct PatchShadingParams {
     /// function input. The renderer interpolates this per-pixel, then
     /// indexes the LUT for per-pixel non-linear function evaluation.
     pub color_lut: Option<Arc<Vec<DeviceColor>>>,
+    /// Fill alpha from graphics state (0.0–1.0). Default 1.0.
+    pub alpha: f64,
+    /// Blend mode (0=Normal, …, 15=Luminosity). Default 0.
+    pub blend_mode: u8,
+    /// PDF `AIS` (alpha-is-shape). Default false.
+    pub alpha_is_shape: bool,
 }
 
 /// Parameters for a tiled pattern fill.

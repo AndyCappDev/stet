@@ -55,6 +55,14 @@ impl PdfObj {
         }
     }
 
+    /// Return the boolean value, or None.
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            PdfObj::Bool(b) => Some(*b),
+            _ => None,
+        }
+    }
+
     /// Return the string bytes, or None.
     pub fn as_str(&self) -> Option<&[u8]> {
         match self {
@@ -141,6 +149,11 @@ impl PdfDict {
     /// Get a numeric (int or real) value as f64.
     pub fn get_f64(&self, key: &[u8]) -> Option<f64> {
         self.get(key).and_then(|v| v.as_f64())
+    }
+
+    /// Get a boolean value for a key.
+    pub fn get_bool(&self, key: &[u8]) -> Option<bool> {
+        self.get(key).and_then(|v| v.as_bool())
     }
 
     /// Get an array value for a key.

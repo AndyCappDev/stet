@@ -1135,6 +1135,7 @@ fn replay_form_elements(
                     bg_ucr: params.bg_ucr.clone(),
                     alpha: params.alpha,
                     blend_mode: params.blend_mode,
+                    alpha_is_shape: params.alpha_is_shape,
                 };
                 target.push(DisplayElement::Fill {
                     path: new_path,
@@ -1167,6 +1168,7 @@ fn replay_form_elements(
                     bg_ucr: params.bg_ucr.clone(),
                     alpha: params.alpha,
                     blend_mode: params.blend_mode,
+                    alpha_is_shape: params.alpha_is_shape,
                 };
                 target.push(DisplayElement::Stroke {
                     path: new_path,

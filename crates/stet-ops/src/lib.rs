@@ -53,6 +53,7 @@ pub mod show_ops;
 pub mod stack_ops;
 pub mod string_ops;
 pub mod strokepath_algorithm;
+pub mod transparency_ops;
 pub mod type_ops;
 pub mod userpath_ops;
 pub mod vm_ops;
@@ -672,6 +673,63 @@ pub fn build_system_dict(ctx: &mut Context) {
         sd,
         ".copypage_continue",
         device_ops::op_copypage_continue,
+    );
+
+    // --- PDF-imaging transparency extensions ---
+    register(
+        ctx,
+        sd,
+        "setfillopacity",
+        transparency_ops::op_setfillopacity,
+    );
+    register(
+        ctx,
+        sd,
+        "currentfillopacity",
+        transparency_ops::op_currentfillopacity,
+    );
+    register(
+        ctx,
+        sd,
+        "setstrokeopacity",
+        transparency_ops::op_setstrokeopacity,
+    );
+    register(
+        ctx,
+        sd,
+        "currentstrokeopacity",
+        transparency_ops::op_currentstrokeopacity,
+    );
+    register(ctx, sd, "setblendmode", transparency_ops::op_setblendmode);
+    register(
+        ctx,
+        sd,
+        "currentblendmode",
+        transparency_ops::op_currentblendmode,
+    );
+    register(
+        ctx,
+        sd,
+        "setalphaisshape",
+        transparency_ops::op_setalphaisshape,
+    );
+    register(
+        ctx,
+        sd,
+        "currentalphaisshape",
+        transparency_ops::op_currentalphaisshape,
+    );
+    register(
+        ctx,
+        sd,
+        "settextknockout",
+        transparency_ops::op_settextknockout,
+    );
+    register(
+        ctx,
+        sd,
+        "currenttextknockout",
+        transparency_ops::op_currenttextknockout,
     );
 
     // --- Page size no-ops ---

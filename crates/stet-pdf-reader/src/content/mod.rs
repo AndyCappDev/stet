@@ -639,6 +639,7 @@ impl<'a> ContentInterpreter<'a> {
                                 bg_ucr: Default::default(),
                                 alpha,
                                 blend_mode: 0,
+                                alpha_is_shape: false,
                             },
                         });
                     }
@@ -680,6 +681,7 @@ impl<'a> ContentInterpreter<'a> {
                                 bg_ucr: Default::default(),
                                 alpha,
                                 blend_mode: 0,
+                                alpha_is_shape: false,
                             },
                         });
                     }
@@ -724,6 +726,7 @@ impl<'a> ContentInterpreter<'a> {
                                     bg_ucr: Default::default(),
                                     alpha,
                                     blend_mode: 0,
+                                    alpha_is_shape: false,
                                 },
                             });
                         }
@@ -771,6 +774,7 @@ impl<'a> ContentInterpreter<'a> {
                                     bg_ucr: Default::default(),
                                     alpha,
                                     blend_mode: 3, // Multiply for highlight
+                                    alpha_is_shape: false,
                                 },
                             });
                         } else {
@@ -817,6 +821,7 @@ impl<'a> ContentInterpreter<'a> {
                                     bg_ucr: Default::default(),
                                     alpha,
                                     blend_mode: 0,
+                                    alpha_is_shape: false,
                                 },
                             });
                         }
@@ -866,6 +871,7 @@ impl<'a> ContentInterpreter<'a> {
                             bg_ucr: Default::default(),
                             alpha,
                             blend_mode: 0,
+                            alpha_is_shape: false,
                         },
                     });
                 }
@@ -896,6 +902,7 @@ impl<'a> ContentInterpreter<'a> {
                         bg_ucr: Default::default(),
                         alpha,
                         blend_mode: 0,
+                        alpha_is_shape: false,
                     },
                 });
             }
@@ -975,6 +982,7 @@ impl<'a> ContentInterpreter<'a> {
                             bg_ucr: Default::default(),
                             alpha,
                             blend_mode: 0,
+                            alpha_is_shape: false,
                         },
                     });
                 }
@@ -1005,6 +1013,7 @@ impl<'a> ContentInterpreter<'a> {
                         bg_ucr: Default::default(),
                         alpha,
                         blend_mode: 0,
+                        alpha_is_shape: false,
                     },
                 });
             }
@@ -3657,6 +3666,7 @@ impl<'a> ContentInterpreter<'a> {
                     overprint_mode: 0,
                     opm_paired: false,
                     painted_channels: 0,
+                    alpha_is_shape: false,
                 },
             });
 
@@ -3756,6 +3766,7 @@ impl<'a> ContentInterpreter<'a> {
                     overprint_mode: 0,
                     opm_paired: false,
                     painted_channels: 0,
+                    alpha_is_shape: false,
                 },
             });
 
@@ -4186,6 +4197,7 @@ impl<'a> ContentInterpreter<'a> {
             overprint_mode: self.gstate.overprint_mode,
             opm_paired: self.gstate.opm_paired,
             painted_channels: painted_channels_override,
+            alpha_is_shape: self.gstate.alpha_is_shape,
         };
 
         // When an SMask is present, emit as SoftMasked so the renderer scales
@@ -4307,6 +4319,7 @@ impl<'a> ContentInterpreter<'a> {
                     overprint_mode: 0,
                     opm_paired: false,
                     painted_channels: 0,
+                    alpha_is_shape: false,
                 },
             });
 
@@ -4410,6 +4423,7 @@ impl<'a> ContentInterpreter<'a> {
             overprint_mode: self.gstate.overprint_mode,
             opm_paired: self.gstate.opm_paired,
             painted_channels: cached.painted_channels,
+            alpha_is_shape: self.gstate.alpha_is_shape,
         };
 
         if let Some((smask_data, sw, sh, _matte)) = smask {
@@ -4431,6 +4445,7 @@ impl<'a> ContentInterpreter<'a> {
                     overprint_mode: 0,
                     opm_paired: false,
                     painted_channels: 0,
+                    alpha_is_shape: false,
                 },
             });
 
@@ -5381,6 +5396,7 @@ impl<'a> ContentInterpreter<'a> {
                     overprint_mode: 0,
                     opm_paired: false,
                     painted_channels: 0,
+                    alpha_is_shape: false,
                 },
             });
 
@@ -5470,6 +5486,7 @@ impl<'a> ContentInterpreter<'a> {
                     .as_ref()
                     .map(painted_channels_for_cs)
                     .unwrap_or(self.gstate.fill_painted_channels),
+                alpha_is_shape: self.gstate.alpha_is_shape,
             },
         });
 
@@ -5550,6 +5567,12 @@ impl<'a> ContentInterpreter<'a> {
         }
         if let Some(ca) = gs_dict.get_f64(b"ca") {
             self.gstate.fill_alpha = ca;
+        }
+        if let Some(b) = gs_dict.get_bool(b"AIS") {
+            self.gstate.alpha_is_shape = b;
+        }
+        if let Some(b) = gs_dict.get_bool(b"TK") {
+            self.gstate.text_knockout = b;
         }
 
         // Blend mode

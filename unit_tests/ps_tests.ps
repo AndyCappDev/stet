@@ -137,6 +137,9 @@ clear
 % Type 1 font tests
 (unit_tests/type1_font_tests.ps) run_testfile
 
+% PDF-imaging extension operators (alpha + blend mode)
+(unit_tests/transparency_tests.ps) run_testfile
+
 % Standalone job control tests - these destroy VM via startjob/exitserver
 % and cannot use the unittest framework.  They write results directly to
 % the stats file.

@@ -1788,12 +1788,13 @@ fn draw_image_to_device(
         image_matrix: *image_matrix,
         interpolate: false,
         mask_color,
-        alpha: 1.0,
-        blend_mode: 0,
+        alpha: ctx.gstate.fill_opacity,
+        blend_mode: ctx.gstate.blend_mode,
         overprint: false,
         overprint_mode: 0,
         opm_paired: false,
         painted_channels: 0,
+        alpha_is_shape: ctx.gstate.alpha_is_shape,
     };
     ctx.display_list.push(DisplayElement::Image {
         sample_data: std::sync::Arc::new(sample_data),

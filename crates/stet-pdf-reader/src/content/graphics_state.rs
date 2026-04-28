@@ -158,6 +158,10 @@ pub struct PdfGraphicsState {
     pub stroke_is_none: bool,
     /// Blend mode (0=Normal, 1=Multiply, ..., 11=Exclusion).
     pub blend_mode: u8,
+    /// PDF `AIS` (alpha-is-shape) from ExtGState. Default false.
+    pub alpha_is_shape: bool,
+    /// PDF `TK` (text knockout) from ExtGState. Default true.
+    pub text_knockout: bool,
     // Text state
     pub text_matrix: Matrix,
     pub text_line_matrix: Matrix,
@@ -225,6 +229,8 @@ impl PdfGraphicsState {
             fill_is_none: false,
             stroke_is_none: false,
             blend_mode: 0,
+            alpha_is_shape: false,
+            text_knockout: true,
             text_matrix: Matrix::identity(),
             text_line_matrix: Matrix::identity(),
             font_size: 0.0,
@@ -274,6 +280,7 @@ impl PdfGraphicsState {
                 self.fill_alpha
             },
             blend_mode: self.blend_mode,
+            alpha_is_shape: self.alpha_is_shape,
         }
     }
 
@@ -315,6 +322,7 @@ impl PdfGraphicsState {
                 self.stroke_alpha
             },
             blend_mode: self.blend_mode,
+            alpha_is_shape: self.alpha_is_shape,
         }
     }
 
@@ -352,6 +360,7 @@ impl PdfGraphicsState {
                 self.stroke_alpha
             },
             blend_mode: self.blend_mode,
+            alpha_is_shape: self.alpha_is_shape,
         }
     }
 

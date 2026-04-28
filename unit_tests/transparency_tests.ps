@@ -1,0 +1,184 @@
+%% PDF-imaging transparency extension operator tests
+%% Tests for setfillopacity, setstrokeopacity, setblendmode, setalphaisshape,
+%% settextknockout, and the GhostScript-style aliases in pdfextensions.ps.
+
+userdict /$unittest known not {(unit_tests/unittest.ps) run} if
+
+gsave nulldevice
+
+
+%% =============================================================================
+%% setfillopacity / currentfillopacity
+%% =============================================================================
+
+%% default is 1.0 %%
+/currentfillopacity [1.0] assert
+
+%% round-trip 0.5 %%
+0.5 setfillopacity
+/currentfillopacity [0.5] assert
+
+%% range error: > 1 leaves operand on stack %%
+1.5 /setfillopacity [1.5 /rangecheck] assert
+
+%% range error: < 0 %%
+-0.1 /setfillopacity [-0.1 /rangecheck] assert
+
+%% type error: not a number %%
+/Normal /setfillopacity [/Normal /typecheck] assert
+
+%% reset %%
+1.0 setfillopacity
+
+
+%% =============================================================================
+%% setstrokeopacity / currentstrokeopacity
+%% =============================================================================
+
+%% default is 1.0 %%
+/currentstrokeopacity [1.0] assert
+
+%% round-trip 0.25 %%
+0.25 setstrokeopacity
+/currentstrokeopacity [0.25] assert
+
+%% range error: > 1 %%
+2 /setstrokeopacity [2 /rangecheck] assert
+
+%% reset %%
+1.0 setstrokeopacity
+
+
+%% =============================================================================
+%% setblendmode / currentblendmode
+%% =============================================================================
+
+%% default is /Normal %%
+/currentblendmode [/Normal] assert
+
+%% round-trip /Multiply %%
+/Multiply setblendmode
+/currentblendmode [/Multiply] assert
+
+%% /Compatible aliases to /Normal %%
+/Compatible setblendmode
+/currentblendmode [/Normal] assert
+
+%% all named modes round-trip — set then read %%
+/Screen setblendmode /currentblendmode [/Screen] assert
+/Overlay setblendmode /currentblendmode [/Overlay] assert
+/Darken setblendmode /currentblendmode [/Darken] assert
+/Lighten setblendmode /currentblendmode [/Lighten] assert
+/ColorDodge setblendmode /currentblendmode [/ColorDodge] assert
+/ColorBurn setblendmode /currentblendmode [/ColorBurn] assert
+/HardLight setblendmode /currentblendmode [/HardLight] assert
+/SoftLight setblendmode /currentblendmode [/SoftLight] assert
+/Difference setblendmode /currentblendmode [/Difference] assert
+/Exclusion setblendmode /currentblendmode [/Exclusion] assert
+/Hue setblendmode /currentblendmode [/Hue] assert
+/Saturation setblendmode /currentblendmode [/Saturation] assert
+/Color setblendmode /currentblendmode [/Color] assert
+/Luminosity setblendmode /currentblendmode [/Luminosity] assert
+
+%% range error: unknown name %%
+/NotARealMode /setblendmode [/NotARealMode /rangecheck] assert
+
+%% type error: not a name %%
+0.5 /setblendmode [0.5 /typecheck] assert
+
+%% reset %%
+/Normal setblendmode
+
+
+%% =============================================================================
+%% setalphaisshape / currentalphaisshape
+%% =============================================================================
+
+%% default is false %%
+/currentalphaisshape [false] assert
+
+%% round-trip true %%
+true setalphaisshape
+/currentalphaisshape [true] assert
+
+%% type error: not a bool %%
+0 /setalphaisshape [0 /typecheck] assert
+
+%% reset %%
+false setalphaisshape
+
+
+%% =============================================================================
+%% settextknockout / currenttextknockout
+%% =============================================================================
+
+%% default is true (PDF spec) %%
+/currenttextknockout [true] assert
+
+%% round-trip false %%
+false settextknockout
+/currenttextknockout [false] assert
+
+%% type error: not a bool %%
+/Normal /settextknockout [/Normal /typecheck] assert
+
+%% reset %%
+true settextknockout
+
+
+%% =============================================================================
+%% gsave / grestore restore the new fields
+%% =============================================================================
+
+gsave
+  0.5 setfillopacity
+  0.3 setstrokeopacity
+  /Multiply setblendmode
+  true setalphaisshape
+  false settextknockout
+  /currentfillopacity [0.5] assert
+  /currentstrokeopacity [0.3] assert
+  /currentblendmode [/Multiply] assert
+  /currentalphaisshape [true] assert
+  /currenttextknockout [false] assert
+grestore
+/currentfillopacity [1.0] assert
+/currentstrokeopacity [1.0] assert
+/currentblendmode [/Normal] assert
+/currentalphaisshape [false] assert
+/currenttextknockout [true] assert
+
+
+%% =============================================================================
+%% GhostScript aliases (loaded from pdfextensions.ps)
+%% =============================================================================
+
+%% .setopacityalpha sets BOTH fill and stroke %%
+0.4 .setopacityalpha
+/currentfillopacity [0.4] assert
+/currentstrokeopacity [0.4] assert
+
+%% .currentopacityalpha is currentfillopacity %%
+/.currentopacityalpha [0.4] assert
+
+%% .setfillconstantalpha is setfillopacity %%
+0.6 .setfillconstantalpha
+/currentfillopacity [0.6] assert
+
+%% .setstrokeconstantalpha is setstrokeopacity %%
+0.7 .setstrokeconstantalpha
+/currentstrokeopacity [0.7] assert
+
+%% .setblendmode is setblendmode %%
+/Screen .setblendmode
+/currentblendmode [/Screen] assert
+/.currentblendmode [/Screen] assert
+
+%% .setshapealpha sets AIS true and both opacities %%
+0.8 .setshapealpha
+/currentalphaisshape [true] assert
+/currentfillopacity [0.8] assert
+/currentstrokeopacity [0.8] assert
+
+
+grestore     %% pop nulldevice

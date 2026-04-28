@@ -12040,6 +12040,9 @@ fn render_patch_shading(
             overprint: params.overprint,
             painted_channels: params.painted_channels,
             color_lut: params.color_lut.clone(),
+            alpha: params.alpha,
+            blend_mode: params.blend_mode,
+            alpha_is_shape: params.alpha_is_shape,
         };
         render_mesh_shading(
             pixmap,
@@ -12574,6 +12577,7 @@ mod tests {
             bg_ucr: BgUcrState::default(),
             alpha: 1.0,
             blend_mode: 0,
+            alpha_is_shape: false,
         };
         dev.fill_path(&path, &params);
 
@@ -12613,6 +12617,7 @@ mod tests {
             bg_ucr: BgUcrState::default(),
             alpha: 1.0,
             blend_mode: 0,
+            alpha_is_shape: false,
         };
         dev.stroke_path(&path, &params);
 
@@ -12665,6 +12670,7 @@ mod tests {
             bg_ucr: BgUcrState::default(),
             alpha: 1.0,
             blend_mode: 0,
+            alpha_is_shape: false,
         };
         dev.fill_path(&fill_path, &fill_params);
 
@@ -12705,6 +12711,7 @@ mod tests {
             bg_ucr: BgUcrState::default(),
             alpha: 1.0,
             blend_mode: 0,
+            alpha_is_shape: false,
         };
         dev.fill_path(&path, &params);
 
@@ -12756,6 +12763,7 @@ mod tests {
             bg_ucr: BgUcrState::default(),
             alpha: 1.0,
             blend_mode: 0,
+            alpha_is_shape: false,
         };
         dev.fill_path(&path, &params);
 
@@ -12791,6 +12799,7 @@ mod tests {
                 bg_ucr: BgUcrState::default(),
                 alpha: 1.0,
                 blend_mode: 0,
+                alpha_is_shape: false,
             },
         }
     }
@@ -12871,6 +12880,7 @@ mod tests {
                 bg_ucr: BgUcrState::default(),
                 alpha: 1.0,
                 blend_mode: 0,
+                alpha_is_shape: false,
             },
         });
 
@@ -13048,6 +13058,7 @@ mod tests {
                 bg_ucr: BgUcrState::default(),
                 alpha,
                 blend_mode: blend,
+                alpha_is_shape: false,
             },
         }
     }
