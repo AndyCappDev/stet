@@ -1016,6 +1016,7 @@ fn emit_line_state(buf: &mut Vec<u8>, params: &StrokeParams, gs: &mut GState) {
         LineCap::Butt => 0,
         LineCap::Round => 1,
         LineCap::Square => 2,
+        _ => 0,
     };
     if gs.line_cap != lc {
         writeln!(buf, "{} J", lc).unwrap();
@@ -1026,6 +1027,7 @@ fn emit_line_state(buf: &mut Vec<u8>, params: &StrokeParams, gs: &mut GState) {
         LineJoin::Miter => 0,
         LineJoin::Round => 1,
         LineJoin::Bevel => 2,
+        _ => 0,
     };
     if gs.line_join != lj {
         writeln!(buf, "{} j", lj).unwrap();

@@ -23,7 +23,9 @@ cd "$REPO_ROOT"
 FILES=(
     crates/stet-graphics/src/display_list.rs
     crates/stet-graphics/src/device.rs
+    crates/stet-graphics/src/color.rs
     crates/stet-core/src/error.rs
+    crates/stet-core/src/file_store.rs
     crates/stet-core/src/pdfmark.rs
     crates/stet-pdf-reader/src/error.rs
     crates/stet-pdf-reader/src/destination.rs
@@ -54,6 +56,9 @@ ALLOWLIST=(
     # device.rs — alt-space discriminator, only ever used inside
     # SpotColorSpace payloads.
     "SimpleColorSpace"
+    # file_store.rs — runtime VM file handle. External callers see
+    # opaque file IDs through PostScript operators, not this enum.
+    "FileHandle"
 )
 
 violations=0

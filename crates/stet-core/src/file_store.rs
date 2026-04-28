@@ -18,6 +18,7 @@ use crate::object::EntityId;
 
 /// State for a RunLengthDecode filter.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum RleState {
     /// Waiting for a length byte.
     Init,
@@ -30,6 +31,7 @@ pub enum RleState {
 }
 
 /// Which filter to apply.
+#[non_exhaustive]
 pub enum FilterKind {
     /// Hex digit pairs → bytes, EOD = `>`.
     ASCIIHexDecode,

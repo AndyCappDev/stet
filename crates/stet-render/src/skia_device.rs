@@ -366,6 +366,7 @@ fn to_fill_rule(rule: &FillRule) -> SkiaFillRule {
     match rule {
         FillRule::NonZeroWinding => SkiaFillRule::Winding,
         FillRule::EvenOdd => SkiaFillRule::EvenOdd,
+        _ => SkiaFillRule::Winding,
     }
 }
 
@@ -375,6 +376,7 @@ fn to_line_cap(cap: LineCap) -> SkiaLineCap {
         LineCap::Butt => SkiaLineCap::Butt,
         LineCap::Round => SkiaLineCap::Round,
         LineCap::Square => SkiaLineCap::Square,
+        _ => SkiaLineCap::Butt,
     }
 }
 
@@ -384,6 +386,7 @@ fn to_line_join(join: LineJoin) -> SkiaLineJoin {
         LineJoin::Miter => SkiaLineJoin::Miter,
         LineJoin::Round => SkiaLineJoin::Round,
         LineJoin::Bevel => SkiaLineJoin::Bevel,
+        _ => SkiaLineJoin::Miter,
     }
 }
 

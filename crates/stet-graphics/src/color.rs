@@ -6,6 +6,7 @@
 
 /// Line cap style.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum LineCap {
     #[default]
     Butt = 0,
@@ -26,6 +27,7 @@ impl LineCap {
 
 /// Line join style.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum LineJoin {
     #[default]
     Miter = 0,
@@ -46,6 +48,7 @@ impl LineJoin {
 
 /// Fill rule for path filling.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FillRule {
     #[default]
     NonZeroWinding,
