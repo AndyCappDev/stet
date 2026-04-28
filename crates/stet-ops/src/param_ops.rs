@@ -144,6 +144,48 @@ pub fn op_setdevparams(ctx: &mut Context) -> Result<(), PsError> {
     Ok(())
 }
 
+/// `setdistillerparams`: dict → — (Distiller compatibility stub)
+///
+/// Adobe Distiller / GhostScript expose Distiller parameters via the
+/// `currentdistillerparams` / `setdistillerparams` pair. PostScript code
+/// commonly written for those workflows checks `systemdict /pdfmark
+/// known` and, when true, queries `currentdistillerparams /CoreDistVersion
+/// get` before issuing pdfmarks. stet's PDF output is not Distiller-
+/// compatible the way Adobe's is, but registering both operators with
+/// sensible defaults keeps the production prologue path runnable instead
+/// of hitting `undefined` after `pdfmark` was loaded.
+pub fn op_setdistillerparams(ctx: &mut Context) -> Result<(), PsError> {
+    if ctx.o_stack.is_empty() {
+        return Err(PsError::StackUnderflow);
+    }
+    if !matches!(ctx.o_stack.peek(0)?.value, PsValue::Dict(_)) {
+        return Err(PsError::TypeCheck);
+    }
+    ctx.o_stack.pop()?;
+    Ok(())
+}
+
+/// `currentdistillerparams`: — → dict
+///
+/// Returns a small dict carrying the entries production PostScript
+/// prologues actually inspect — chiefly `/CoreDistVersion` and
+/// `/CompatibilityLevel`. We report `CoreDistVersion = 4000` (Distiller
+/// 6.0 era): high enough to satisfy `>= 2000` checks that older
+/// FrameMaker-style scripts use to gate pdfmark emission, but low
+/// enough that newer Adobe Illustrator scripts which gate distiller-
+/// only stream injection on `< 5000` route their binary metadata
+/// streams down the `flushfile cleartomark` path stet can actually
+/// handle. See [`op_setdistillerparams`].
+pub fn op_currentdistillerparams(ctx: &mut Context) -> Result<(), PsError> {
+    let d = ctx.dicts.allocate(8, b"distillerparams");
+    let core = ctx.names.intern(b"CoreDistVersion");
+    ctx.dicts.put(d, DictKey::Name(core), PsObject::int(4000));
+    let compat = ctx.names.intern(b"CompatibilityLevel");
+    ctx.dicts.put(d, DictKey::Name(compat), PsObject::real(1.7));
+    ctx.o_stack.push(PsObject::dict(d))?;
+    Ok(())
+}
+
 /// `currentdevparams`: string → dict (get device parameters, stub returns empty dict)
 pub fn op_currentdevparams(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.o_stack.is_empty() {

@@ -125,6 +125,71 @@ impl PdfDevice {
         Ok(())
     }
 
+    /// Build the contents of the /Info dict. Starts with device defaults
+    /// (Producer + auto-derived Title + UTC CreationDate) and lets any
+    /// `/DOCINFO` pdfmark record on `ctx.pdfmark_buffer` override or
+    /// extend each key. The pdfmark buffer is *not* drained here; phases
+    /// past Phase 1 may want to consult it for separate concerns.
+    fn build_info_dict(&self, ctx: Option<&Context>) -> Vec<(Vec<u8>, PdfObj)> {
+        let docinfo = ctx.map(|c| collect_docinfo(c)).unwrap_or_default();
+
+        let producer = docinfo
+            .producer
+            .clone()
+            .unwrap_or_else(|| "stet".to_string());
+        let mut entries: Vec<(Vec<u8>, PdfObj)> = vec![(
+            b"Producer".to_vec(),
+            PdfObj::LitString(producer.into_bytes()),
+        )];
+
+        // Title — pdfmark wins; otherwise derive from filename.
+        let title = docinfo.title.clone().or_else(|| {
+            self.output_path
+                .as_deref()
+                .and_then(|p| std::path::Path::new(p).file_stem())
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_string())
+        });
+        if let Some(t) = title {
+            entries.push((b"Title".to_vec(), PdfObj::LitString(t.into_bytes())));
+        }
+
+        for (key, value) in [
+            (&b"Author"[..], &docinfo.author),
+            (&b"Subject"[..], &docinfo.subject),
+            (&b"Keywords"[..], &docinfo.keywords),
+            (&b"Creator"[..], &docinfo.creator),
+        ] {
+            if let Some(v) = value {
+                entries.push((key.to_vec(), PdfObj::LitString(v.clone().into_bytes())));
+            }
+        }
+
+        // CreationDate — pdfmark override or default to "now in UTC".
+        let creation_date = docinfo
+            .creation_date_string()
+            .unwrap_or_else(default_now_pdf_date);
+        entries.push((
+            b"CreationDate".to_vec(),
+            PdfObj::LitString(creation_date.into_bytes()),
+        ));
+
+        if let Some(md) = docinfo.mod_date_string() {
+            entries.push((b"ModDate".to_vec(), PdfObj::LitString(md.into_bytes())));
+        }
+
+        if let Some(t) = docinfo.trapped {
+            let name: &[u8] = match t {
+                stet_core::pdfmark::TrappedState::True => b"True",
+                stet_core::pdfmark::TrappedState::False => b"False",
+                stet_core::pdfmark::TrappedState::Unknown => b"Unknown",
+            };
+            entries.push((b"Trapped".to_vec(), PdfObj::Name(name.to_vec())));
+        }
+
+        entries
+    }
+
     /// Build the PDF document, returning the writer and object refs.
     fn build_pdf(&self, ctx: Option<&Context>) -> Result<(PdfWriter, u32, u32), String> {
         let mut writer = PdfWriter::new();
@@ -189,46 +254,10 @@ impl PdfDevice {
 
         writer.set_object(catalog_ref, &PdfObj::Dict(catalog_entries));
 
-        // Info dictionary
+        // Info dictionary — start with device defaults, then let any
+        // /DOCINFO pdfmark records override or extend.
         let info_ref = writer.alloc_obj();
-        let mut info_entries = vec![(b"Producer".to_vec(), PdfObj::LitString(b"stet".to_vec()))];
-        // Title from output filename
-        if let Some(title) = self
-            .output_path
-            .as_deref()
-            .and_then(|p| std::path::Path::new(p).file_stem())
-            .and_then(|s| s.to_str())
-        {
-            info_entries.push((
-                b"Title".to_vec(),
-                PdfObj::LitString(title.as_bytes().to_vec()),
-            ));
-        }
-        // CreationDate in PDF date format: D:YYYYMMDDHHmmSS
-        {
-            use std::time::SystemTime;
-            let now = SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            // Convert to broken-down time via simple arithmetic (UTC)
-            let secs_per_day = 86400u64;
-            let days = now / secs_per_day;
-            let time_of_day = now % secs_per_day;
-            let hours = time_of_day / 3600;
-            let minutes = (time_of_day % 3600) / 60;
-            let seconds = time_of_day % 60;
-            // Days since 1970-01-01 to Y/M/D
-            let (year, month, day) = days_to_ymd(days);
-            let date_str = format!(
-                "D:{:04}{:02}{:02}{:02}{:02}{:02}Z",
-                year, month, day, hours, minutes, seconds
-            );
-            info_entries.push((
-                b"CreationDate".to_vec(),
-                PdfObj::LitString(date_str.into_bytes()),
-            ));
-        }
+        let info_entries = self.build_info_dict(ctx);
         writer.set_object(info_ref, &PdfObj::Dict(info_entries));
 
         Ok((writer, catalog_ref, info_ref))
@@ -1349,4 +1378,66 @@ fn days_to_ymd(days: u64) -> (u64, u64, u64) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
     (y, m, d)
+}
+
+/// Format the current wall-clock time as a PDF date string in UTC.
+fn default_now_pdf_date() -> String {
+    use std::time::SystemTime;
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let secs_per_day = 86400u64;
+    let days = now / secs_per_day;
+    let time_of_day = now % secs_per_day;
+    let hours = time_of_day / 3600;
+    let minutes = (time_of_day % 3600) / 60;
+    let seconds = time_of_day % 60;
+    let (year, month, day) = days_to_ymd(days);
+    format!(
+        "D:{:04}{:02}{:02}{:02}{:02}{:02}Z",
+        year, month, day, hours, minutes, seconds
+    )
+}
+
+/// Merge every `/DOCINFO` pdfmark record on the buffer into a single
+/// effective record. Later records override earlier ones key-by-key,
+/// matching GhostScript pdfwrite's behaviour where multiple
+/// `[ /DOCINFO pdfmark` blocks accumulate.
+fn collect_docinfo(ctx: &Context) -> stet_core::pdfmark::DocInfoRecord {
+    let mut acc = stet_core::pdfmark::DocInfoRecord::default();
+    for record in ctx.pdfmark_buffer.records() {
+        match record {
+            stet_core::pdfmark::PdfMarkRecord::DocInfo(rec) => {
+                if let Some(v) = &rec.title {
+                    acc.title = Some(v.clone());
+                }
+                if let Some(v) = &rec.author {
+                    acc.author = Some(v.clone());
+                }
+                if let Some(v) = &rec.subject {
+                    acc.subject = Some(v.clone());
+                }
+                if let Some(v) = &rec.keywords {
+                    acc.keywords = Some(v.clone());
+                }
+                if let Some(v) = &rec.creator {
+                    acc.creator = Some(v.clone());
+                }
+                if let Some(v) = &rec.producer {
+                    acc.producer = Some(v.clone());
+                }
+                if let Some(v) = &rec.creation_date {
+                    acc.creation_date = Some(v.clone());
+                }
+                if let Some(v) = &rec.mod_date {
+                    acc.mod_date = Some(v.clone());
+                }
+                if let Some(v) = rec.trapped {
+                    acc.trapped = Some(v);
+                }
+            }
+        }
+    }
+    acc
 }

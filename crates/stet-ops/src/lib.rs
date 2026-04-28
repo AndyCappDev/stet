@@ -4,7 +4,7 @@
 
 //! PostScript operator implementations for the stet interpreter.
 //!
-//! This crate provides ~330 native-Rust PostScript Level 3 operators —
+//! This crate provides ~331 native-Rust PostScript Level 3 operators —
 //! stack, math, type/conversion, dictionary, control flow, composite,
 //! string, file, path, painting, clipping, colour, graphics-state, matrix,
 //! font, show, image, halftone, pattern, resource, VM, filter, shading,
@@ -13,6 +13,17 @@
 //! stet-specific PDF-imaging extensions: constant alpha + blend modes,
 //! transparency groups, soft masks, and optional-content (OCG) layers.
 //! See `docs/PDF-EXTENSIONS.md`.
+//!
+//! The [`pdfmark_ops`] module implements Adobe's `pdfmark` authoring
+//! bridge — PostScript code issues `[ … /TYPETAG pdfmark` calls and
+//! records land on `Context::pdfmark_buffer` for the PDF output device
+//! to consume. `pdfmark` and the matching `currentdistillerparams` /
+//! `setdistillerparams` operators are gated behind
+//! [`register_pdf_authoring_ops`] so they only appear in `systemdict` on
+//! the PDF rendering path; screen / viewer rendering leaves them
+//! undefined, which is what FrameMaker / Adobe Illustrator prologues
+//! that branch on `systemdict /pdfmark known` expect for non-Distiller
+//! targets. See `docs/PDFMARK-AUTHORING.md`.
 //!
 //! Most users should use the [`stet`](https://crates.io/crates/stet) facade
 //! crate rather than depending on `stet-ops` directly. Pull this in only
@@ -49,6 +60,7 @@ pub mod paint_ops;
 pub mod param_ops;
 pub mod path_ops;
 pub mod path_query_ops;
+pub mod pdfmark_ops;
 pub mod relational_ops;
 pub mod resource_ops;
 pub mod shading_ops;
@@ -780,6 +792,40 @@ pub fn build_system_dict(ctx: &mut Context) {
     let version_obj = PsObject::string(version_entity, 5);
     let version_name = ctx.names.intern(b"version");
     ctx.dicts.put(sd, DictKey::Name(version_name), version_obj);
+}
+
+/// Register the PDF authoring operators — `pdfmark`, `currentdistillerparams`,
+/// `setdistillerparams` — into systemdict.
+///
+/// These operators are gated for one specific reason: PostScript code in the
+/// wild routinely branches on `systemdict /pdfmark known` to decide whether
+/// it is "talking to" Adobe Distiller (or an equivalent PDF writer) versus
+/// a screen / display device. FrameMaker 5.0 prologues for example switch
+/// from CMYK→`setcmykcolor` to RGB→`setrgbcolor` when pdfmark is present,
+/// because Distiller is happier with RGB. For stet's PNG / viewer / WASM
+/// rendering paths that swap produces a brighter blue (direct RGB→sRGB)
+/// than the document was designed for (CMYK→ICC→sRGB). For PDF output the
+/// RGB swap is fine — that's exactly what FrameMaker intended.
+///
+/// Call this from your PDF output pipeline (after [`build_system_dict`])
+/// and leave it out of the screen / viewer path. The non-PDF path keeps
+/// `pdfmark known` returning false so Distiller-aware PostScript files
+/// take their CMYK branch.
+pub fn register_pdf_authoring_ops(ctx: &mut Context) {
+    let sd = ctx.systemdict;
+    register(ctx, sd, "pdfmark", pdfmark_ops::op_pdfmark);
+    register(
+        ctx,
+        sd,
+        "setdistillerparams",
+        param_ops::op_setdistillerparams,
+    );
+    register(
+        ctx,
+        sd,
+        "currentdistillerparams",
+        param_ops::op_currentdistillerparams,
+    );
 }
 
 /// Register a single operator: add to operator table and systemdict.

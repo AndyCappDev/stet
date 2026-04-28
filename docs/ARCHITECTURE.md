@@ -178,6 +178,37 @@ across the boundary, and `showpage` / `copypage` raise `rangecheck`
 while a frame is open. See `docs/PDF-EXTENSIONS.md` for the
 operator reference.
 
+### pdfmark authoring buffer
+
+The `pdfmark` operator (Adobe / GhostScript convention) feeds a
+producer/consumer pipeline that's independent of the paint pipeline.
+PostScript code issues `[ … /TYPETAG pdfmark` calls during
+interpretation; the dispatcher in `stet-ops::pdfmark_ops` parses each
+call into a [`stet_core::pdfmark::PdfMarkRecord`] and pushes it onto
+`Context::pdfmark_buffer`. The `PdfDevice` reads that buffer at
+end-of-job (in `build_info_dict()` and forthcoming outline / annotation
+writers) and merges every record into the output PDF's catalog, info
+dictionary, page tree, and so on. Non-PDF output devices simply never
+read the buffer, which keeps `pdfmark` a true no-op for screen / viewer
+rendering.
+
+The buffer is **document-global**: `save` / `restore` do not roll it
+back, because pdfmark records are catalog-scoped facts about the PDF
+being produced rather than VM-level state.
+
+The pdfmark operators (`pdfmark`, `currentdistillerparams`,
+`setdistillerparams`) are not registered by the default
+`stet_ops::build_system_dict` — only the PDF rendering paths
+(`stet::Interpreter::render_to_pdf` and the CLI's `run_pdf_mode`) call
+the separate `register_pdf_authoring_ops`. PostScript prologues that
+branch on `systemdict /pdfmark known` therefore see Distiller-equivalent
+semantics on the PDF output path and pre-Distiller semantics on the
+screen / viewer / WASM paths — which matters for prologues like
+FrameMaker 5.0's that switch between CMYK→`setcmykcolor` (designed for
+print and stet's CMYK→ICC→sRGB conversion) and direct RGB
+→`setrgbcolor` (designed for Distiller). See `docs/PDFMARK-AUTHORING.md`
+for the operator reference.
+
 ## Pipeline: PDF Reading
 
 ```

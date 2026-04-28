@@ -263,7 +263,12 @@ false setglobal
             astore //$error exch /ostack exch put
             //$error /dstack //$error /dstackarray get dictstack put
             //$error /estack //$error /estackarray get execstack
-            dup length 2 sub 0 exch getinterval put
+            % Subarray that strips this very error-handler frame plus the
+            % errordict dispatch frame above it. Clamp to >=0 so a shallow
+            % e_stack (depth < 2 at the time of the original error) doesn't
+            % rangecheck inside the error handler itself and mask the real
+            % failure.
+            dup length 2 sub dup 0 lt { pop 0 } if 0 exch getinterval put
             //$error /ostack get aload pop
         } if
         //$error /initializing get {

@@ -242,6 +242,12 @@ impl Interpreter {
         self.ctx.output_path = Some("output.pdf".to_string());
         install_device(&mut self.ctx, dpi, page_w, page_h)?;
 
+        // PDF output: register pdfmark + distiller params so prologues that
+        // branch on `systemdict /pdfmark known` see Distiller-equivalent
+        // semantics. The screen/viewer path leaves these undefined so the
+        // same prologue takes its CMYK→ICC branch instead.
+        stet_ops::register_pdf_authoring_ops(&mut self.ctx);
+
         // Save/restore isolation
         let save_obj = self.ctx.vm_save();
         let save_id = extract_save_id(&save_obj);
@@ -263,7 +269,7 @@ impl Interpreter {
             let bytes = dev
                 .as_any()
                 .downcast_ref::<stet_pdf::PdfDevice>()
-                .and_then(|pdf_dev| pdf_dev.take_pdf_bytes())
+                .and_then(|pdf_dev| pdf_dev.take_pdf_bytes_with_context(&self.ctx))
                 .unwrap_or_default();
             self.ctx.device = Some(dev);
             bytes

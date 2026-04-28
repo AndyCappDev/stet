@@ -473,6 +473,11 @@ fn run_pdf_mode(
         Box::new(PdfDevice::new(w, h, dpi_val))
     }));
 
+    // PDF output: enable pdfmark + distiller-params so prologues see a
+    // Distiller-equivalent host. Screen-rendering modes deliberately
+    // leave these undefined.
+    stet_ops::register_pdf_authoring_ops(&mut ctx);
+
     if !file_args.is_empty() {
         run_file_jobs(&mut ctx, dpi_override, &file_args, "pdf", None, None);
     } else {

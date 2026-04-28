@@ -22,3 +22,5 @@ CLAUDE.md
 docs/PUBLISH-*.md
 docs/PLAN-*.md
 docs/TODO-*.md
+# Integration test artifact — render_to_pdf writes here when output_path is unset
+crates/stet/output.pdf
