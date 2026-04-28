@@ -58,6 +58,22 @@ pub enum FilterKind {
         decoded: bool,
         color_transform: Option<bool>,
     },
+    /// JBIG2 (bi-level raster): buffered, lazily decoded on first read.
+    /// Output is row-packed 1-bit-per-pixel (8 pixels/byte, MSB first), with
+    /// 0=black and 1=white per PDF DeviceGray convention.
+    JBIG2Decode {
+        decoded: bool,
+        /// Optional /JBIG2Globals stream contents (shared globals segment
+        /// referenced by the embedded image data). Decoded once and used
+        /// as the `globals` argument to `hayro_jbig2::decode_embedded`.
+        globals: Option<Vec<u8>>,
+    },
+    /// JPEG 2000 (JP2 / J2K): buffered, lazily decoded on first read.
+    /// Output is interleaved pixel data; the caller declares the colour
+    /// space via `setcolorspace` (the JPX-internal CS is informational).
+    JPXDecode {
+        decoded: bool,
+    },
     SubFileDecode {
         eod_string: Vec<u8>,
         eod_count: i32,
@@ -1305,6 +1321,58 @@ impl FileStore {
                     state.eof = true;
                 }
             }
+            FilterKind::JBIG2Decode { decoded, .. } => {
+                if !*decoded {
+                    let source = state.source;
+                    let raw = self.read_all(source)?;
+                    // Snapshot globals before mutating state.kind.
+                    let globals = match &state.kind {
+                        FilterKind::JBIG2Decode { globals, .. } => globals.clone(),
+                        _ => None,
+                    };
+                    let image = hayro_jbig2::decode_embedded(&raw, globals.as_deref())
+                        .map_err(|e| io::Error::other(format!("JBIG2 decode error: {e}")))?;
+                    // Pack the bool grid into PDF DeviceGray bytes (1 bit per
+                    // pixel, MSB-first; 0=black, 1=white). Pad each row to a
+                    // byte boundary so the consumer can treat it as a
+                    // standard 1-bpc raster.
+                    let row_bytes = (image.width as usize).div_ceil(8);
+                    let mut packed = vec![0xFFu8; row_bytes * image.height as usize];
+                    for y in 0..image.height as usize {
+                        for x in 0..image.width as usize {
+                            if image.data[y * image.width as usize + x] {
+                                packed[y * row_bytes + x / 8] &= !(0x80 >> (x % 8));
+                            }
+                        }
+                    }
+                    state.output_buf = packed;
+                    state.output_pos = 0;
+                    if let FilterKind::JBIG2Decode { decoded, .. } = &mut state.kind {
+                        *decoded = true;
+                    }
+                } else {
+                    state.eof = true;
+                }
+            }
+            FilterKind::JPXDecode { decoded } => {
+                if !*decoded {
+                    let source = state.source;
+                    let raw = self.read_all(source)?;
+                    let image = hayro_jpeg2000::Image::new(
+                        &raw,
+                        &hayro_jpeg2000::DecodeSettings::default(),
+                    )
+                    .map_err(|e| io::Error::other(format!("JPXDecode error: {e}")))?;
+                    let pixels = image
+                        .decode()
+                        .map_err(|e| io::Error::other(format!("JPXDecode error: {e}")))?;
+                    state.output_buf = pixels;
+                    state.output_pos = 0;
+                    *decoded = true;
+                } else {
+                    state.eof = true;
+                }
+            }
             FilterKind::CCITTFaxDecode { decoded, .. } => {
                 if !*decoded {
                     let source = state.source;
@@ -2241,6 +2309,22 @@ impl FilterKind {
         }
     }
 
+    /// Create a new JBIG2Decode filter (lazily decoded on first read).
+    /// `globals` is the optional /JBIG2Globals stream referenced by the
+    /// PDF spec; pass `None` for an embedded stream that doesn't share a
+    /// globals segment.
+    pub fn jbig2_decode(globals: Option<Vec<u8>>) -> Self {
+        Self::JBIG2Decode {
+            decoded: false,
+            globals,
+        }
+    }
+
+    /// Create a new JPXDecode filter (lazily decoded on first read).
+    pub fn jpx_decode() -> Self {
+        Self::JPXDecode { decoded: false }
+    }
+
     /// Create a new DCTEncode filter.
     pub fn dct_encode(
         columns: u32,
@@ -2941,5 +3025,56 @@ mod tests {
         }
         assert_eq!(&result, original);
         std::fs::remove_file(path).ok();
+    }
+
+    // --- JBIG2Decode / JPXDecode tests ---
+
+    #[test]
+    fn test_jbig2_decode_constructor() {
+        let kind = FilterKind::jbig2_decode(None);
+        match kind {
+            FilterKind::JBIG2Decode {
+                decoded: false,
+                globals: None,
+            } => {}
+            _ => panic!("unexpected variant"),
+        }
+        let kind = FilterKind::jbig2_decode(Some(vec![1, 2, 3]));
+        match kind {
+            FilterKind::JBIG2Decode {
+                decoded: false,
+                globals: Some(ref g),
+            } if g == &[1, 2, 3] => {}
+            _ => panic!("globals not stored"),
+        }
+    }
+
+    #[test]
+    fn test_jpx_decode_constructor() {
+        let kind = FilterKind::jpx_decode();
+        match kind {
+            FilterKind::JPXDecode { decoded: false } => {}
+            _ => panic!("unexpected variant"),
+        }
+    }
+
+    #[test]
+    fn test_jbig2_decode_malformed_returns_ioerror() {
+        // Random bytes that don't form a valid JBIG2 stream — the
+        // decoder must surface the failure as an io::Error rather than
+        // panicking. We don't assert the exact error string; just that
+        // reading the filter produces an Err.
+        let mut store = FileStore::new();
+        let src = store.create_string_source(b"not a jbig2 stream".to_vec());
+        let filt = store.create_filter(src, FilterKind::jbig2_decode(None));
+        assert!(store.read_byte(filt).is_err());
+    }
+
+    #[test]
+    fn test_jpx_decode_malformed_returns_ioerror() {
+        let mut store = FileStore::new();
+        let src = store.create_string_source(b"not a jpeg2000 stream".to_vec());
+        let filt = store.create_filter(src, FilterKind::jpx_decode());
+        assert!(store.read_byte(filt).is_err());
     }
 }

@@ -1,0 +1,60 @@
+%% JBIG2Decode / JPXDecode filter operator tests — PDF extensions Phase 5.
+%%
+%% Verifies the two new filters are recognised by the `filter` operator
+%% and surface decode errors when fed malformed input. Round-trip
+%% decoding of real JBIG2 / JPEG 2000 streams is exercised via the PDF
+%% reader path (its filter tests load real bilevel/JP2 images); here
+%% we only confirm the PS-side plumbing.
+
+userdict /$unittest known not {(unit_tests/unittest.ps) run} if
+
+gsave nulldevice
+
+
+%% =============================================================================
+%% Filter creation: name is recognised and produces a file object
+%% =============================================================================
+
+%% JBIG2Decode without /JBIG2Globals
+(not a jbig2 stream) /JBIG2Decode filter
+/type [/filetype] assert
+
+%% JPXDecode (parameterless)
+(not a jp2 stream) /JPXDecode filter
+/type [/filetype] assert
+
+%% JBIG2Decode with /JBIG2Globals as a string source
+(not a jbig2 stream) << /JBIG2Globals (globals payload) >> /JBIG2Decode filter
+/type [/filetype] assert
+
+
+%% =============================================================================
+%% Malformed streams: reading the filter raises ioerror that bubbles up
+%% =============================================================================
+
+/jbig2_read_fail? {
+    mark
+    (not a jbig2 stream) /JBIG2Decode filter
+    { 1024 string readstring } stopped
+    /caught exch def
+    cleartomark
+    caught
+} bind def
+
+/jpx_read_fail? {
+    mark
+    (not a jp2 stream) /JPXDecode filter
+    { 1024 string readstring } stopped
+    /caught exch def
+    cleartomark
+    caught
+} bind def
+
+%% Reading malformed JBIG2 → stopped catches the propagated stop.
+/jbig2_read_fail? [true] assert
+
+%% Reading malformed JPX → stopped catches the propagated stop.
+/jpx_read_fail? [true] assert
+
+
+grestore     %% pop nulldevice

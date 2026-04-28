@@ -149,6 +149,9 @@ clear
 % PDF-imaging extension operators (optional content / OCG)
 (unit_tests/ocg_tests.ps) run_testfile
 
+% PDF-imaging extension filters (JBIG2 + JPX)
+(unit_tests/jbig2_jpx_filter_tests.ps) run_testfile
+
 % Standalone job control tests - these destroy VM via startjob/exitserver
 % and cannot use the unittest framework.  They write results directly to
 % the stats file.

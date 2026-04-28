@@ -574,6 +574,17 @@ fn create_filter_by_name(
         b"SubFileDecode" => Ok(ctx
             .files
             .create_filter(source, FilterKind::sub_file_decode(Vec::new(), 0, None))),
+        b"JBIG2Decode" => {
+            let globals = if let Some(de) = dict_entity {
+                read_jbig2_globals(ctx, de)?
+            } else {
+                None
+            };
+            Ok(ctx
+                .files
+                .create_filter(source, FilterKind::jbig2_decode(globals)))
+        }
+        b"JPXDecode" => Ok(ctx.files.create_filter(source, FilterKind::jpx_decode())),
         // Encode filters
         b"ASCIIHexEncode" => Ok(ctx
             .files
@@ -629,7 +640,43 @@ fn is_known_filter_name(name: &[u8]) -> bool {
             | b"NullEncode"
             | b"DCTEncode"
             | b"CCITTFaxDecode"
+            | b"JBIG2Decode"
+            | b"JPXDecode"
     )
+}
+
+/// Drain the `/JBIG2Globals` entry from a filter parameter dict into a
+/// byte buffer suitable for `FilterKind::jbig2_decode`. The PDF spec
+/// expects a stream/file source whose contents are the globals segment;
+/// we accept either a file (read to EOF) or a string (used directly).
+/// Returns `None` when the dict has no `/JBIG2Globals`.
+fn read_jbig2_globals(
+    ctx: &mut Context,
+    dict_entity: stet_core::object::EntityId,
+) -> Result<Option<Vec<u8>>, PsError> {
+    let nid = match ctx.names.find(b"JBIG2Globals") {
+        Some(n) => n,
+        None => return Ok(None),
+    };
+    let Some(obj) = ctx
+        .dicts
+        .get(dict_entity, &stet_core::dict::DictKey::Name(nid))
+    else {
+        return Ok(None);
+    };
+    match obj.value {
+        PsValue::String { entity, start, len } => {
+            Ok(Some(ctx.strings.get(entity, start, len).to_vec()))
+        }
+        PsValue::File(file_entity) => {
+            let bytes = ctx
+                .files
+                .read_all(file_entity)
+                .map_err(|_| PsError::IOError)?;
+            Ok(Some(bytes))
+        }
+        _ => Err(PsError::TypeCheck),
+    }
 }
 
 /// Check if an object is an executable array (procedure).
