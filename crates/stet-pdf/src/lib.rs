@@ -26,6 +26,7 @@
 //! touching the filesystem.
 
 mod annotations;
+mod attachments;
 mod content_stream;
 mod font_embedder;
 mod font_tracker;

@@ -16,14 +16,16 @@
 //! Currently recognised type-tags: `/DOCINFO` (document Info dict),
 //! `/OUT` (outline / bookmark entry), `/ANN` (Link / Text / FreeText /
 //! Widget annotations), `/DEST` (named destination), `/PAGE` and
-//! `/PAGES` (per-page and document-wide page-box / rotate overrides),
-//! `/VIEWERPREFERENCES` (catalog viewer preferences plus `/PageLayout`
-//! and `/PageMode`), `/Metadata` (XMP stream), `/FORM` (document-level
-//! AcroForm dict — `/Fields` is implicit, built from `/Widget`
-//! annotations at write time). Subsequent phases add `/EMBED` and the
-//! Tagged-PDF structure-tree set as new arms in the type-tag match.
-//! Unknown type-tags silently no-op (Adobe convention) so PS code
-//! targeting newer features stays runnable on older interpreters.
+//! `/PAGES` (per-page and document-wide page-box / rotate / additional-
+//! action overrides), `/VIEWERPREFERENCES` (catalog viewer preferences
+//! plus `/PageLayout` and `/PageMode`), `/Metadata` (XMP stream),
+//! `/FORM` (document-level AcroForm dict — `/Fields` is implicit, built
+//! from `/Widget` annotations at write time), `/EMBED` (embedded file
+//! attachments contributing to `/Names /EmbeddedFiles`). Subsequent
+//! phases add the Tagged-PDF structure-tree set as new arms in the
+//! type-tag match. Unknown type-tags silently no-op (Adobe convention)
+//! so PS code targeting newer features stays runnable on older
+//! interpreters.
 
 use stet_core::context::Context;
 use stet_core::dict::DictKey;
@@ -31,10 +33,10 @@ use stet_core::error::PsError;
 use stet_core::object::{EntityId, PsObject, PsValue};
 use stet_core::pdfmark::{
     AnnotationRecord, AnnotationSubtype, AnnotationTarget, Border, ChoiceOption, DestRecord,
-    DocDate, DocInfoRecord, FieldType, FieldValue, FormRecord, GoToTarget, LinkHighlight,
-    MetadataRecord, OutlineAction, OutlineDestination, OutlineRecord, PageBoxes,
-    PageOverrideRecord, PageOverrideScope, PdfMarkRecord, TextAnnotationIcon, TrappedState,
-    ViewSpec, ViewerPrefsRecord, WidgetAnnotation,
+    DocDate, DocInfoRecord, EmbedRecord, FieldType, FieldValue, FormRecord, GoToTarget,
+    LinkHighlight, MetadataRecord, OutlineAction, OutlineDestination, OutlineRecord,
+    PageAdditionalActions, PageBoxes, PageOverrideRecord, PageOverrideScope, PdfMarkRecord,
+    TextAnnotationIcon, TrappedState, ViewSpec, ViewerPrefsRecord, WidgetAnnotation,
 };
 
 /// `pdfmark`: mark arg1 ... argN typetag → —
@@ -126,6 +128,11 @@ pub fn op_pdfmark(ctx: &mut Context) -> Result<(), PsError> {
         b"FORM" => {
             if let Some(rec) = parse_form(ctx, &payload) {
                 ctx.pdfmark_buffer.push(PdfMarkRecord::Form(rec));
+            }
+        }
+        b"EMBED" => {
+            if let Some(rec) = parse_embed(ctx, &payload) {
+                ctx.pdfmark_buffer.push(PdfMarkRecord::Embed(rec));
             }
         }
         // Unknown type-tags silently emit nothing (Adobe convention).
@@ -310,9 +317,10 @@ fn parse_view_spec_with_ctx(ctx: &Context, elements: &[PsObject]) -> Option<View
     }
 }
 
-/// Decode an `/Action <<...>>` dict into an [`OutlineAction`]. Currently
-/// recognises `/S /URI` and `/S /GoTo` (with both named and explicit
-/// destinations).
+/// Decode an `/Action <<...>>` dict into an [`OutlineAction`].
+/// Recognises `/S /URI`, `/S /GoTo`, `/S /JavaScript`, and `/S /Named`.
+/// Other action subtypes return `None` and the producer's record is
+/// dropped — Adobe pdfwrite has the same behaviour.
 fn parse_action_dict(ctx: &Context, dict: EntityId) -> Option<OutlineAction> {
     let s_id = ctx.names.find(b"S")?;
     let s_obj = ctx.dicts.get(dict, &DictKey::Name(s_id))?;
@@ -362,6 +370,33 @@ fn parse_action_dict(ctx: &Context, dict: EntityId) -> Option<OutlineAction> {
                 }
                 _ => None,
             }
+        }
+        b"JavaScript" => {
+            // /JS can be either a literal string or a stream — the
+            // pdfmark surface takes the string form (streams require
+            // the producer to know about indirect objects).
+            let js_id = ctx.names.find(b"JS")?;
+            let js_obj = ctx.dicts.get(dict, &DictKey::Name(js_id))?;
+            let (entity, start, len) = match js_obj.value {
+                PsValue::String { entity, start, len } => (entity, start, len),
+                _ => return None,
+            };
+            let bytes = ctx.strings.get(entity, start, len);
+            Some(OutlineAction::JavaScript(
+                String::from_utf8_lossy(bytes).into_owned(),
+            ))
+        }
+        b"Named" => {
+            let n_id = ctx.names.find(b"N")?;
+            let n_obj = ctx.dicts.get(dict, &DictKey::Name(n_id))?;
+            let name = match n_obj.value {
+                PsValue::Name(n) => String::from_utf8_lossy(ctx.names.get_bytes(n)).into_owned(),
+                PsValue::String { entity, start, len } => {
+                    String::from_utf8_lossy(ctx.strings.get(entity, start, len)).into_owned()
+                }
+                _ => return None,
+            };
+            Some(OutlineAction::Named(name))
         }
         _ => None,
     }
@@ -885,14 +920,44 @@ fn parse_page_override(
         art_box: extract_rect_array(ctx, payload, b"ArtBox"),
     };
     let rotate = extract_i32(ctx, payload, b"Rotate");
-    if boxes.is_empty() && rotate.is_none() {
+    let additional_actions = parse_page_additional_actions(ctx, payload);
+    if boxes.is_empty() && rotate.is_none() && additional_actions.is_none() {
         return None;
     }
     Some(PageOverrideRecord {
         scope,
         boxes,
         rotate,
+        additional_actions,
     })
+}
+
+/// Parse the optional `/AA <</O ... /C ...>>` page-additional-actions
+/// dict on a `/PAGE` (or `/PAGES`) payload. Returns `None` when the
+/// key is absent or the dict carries nothing recognisable.
+fn parse_page_additional_actions(
+    ctx: &Context,
+    payload: &[PsObject],
+) -> Option<PageAdditionalActions> {
+    let dict = extract_dict_entity(ctx, payload, b"AA")?;
+    let on_open = extract_action_subdict(ctx, dict, b"O");
+    let on_close = extract_action_subdict(ctx, dict, b"C");
+    if on_open.is_none() && on_close.is_none() {
+        return None;
+    }
+    Some(PageAdditionalActions { on_open, on_close })
+}
+
+/// Look up `key` in `dict`, expecting a nested action dict, and parse
+/// it via [`parse_action_dict`]. Returns `None` when the key is absent
+/// or the value isn't a dict (or the action subtype isn't recognised).
+fn extract_action_subdict(ctx: &Context, dict: EntityId, key: &[u8]) -> Option<OutlineAction> {
+    let key_id = ctx.names.find(key)?;
+    let obj = ctx.dicts.get(dict, &DictKey::Name(key_id))?;
+    match obj.value {
+        PsValue::Dict(inner) => parse_action_dict(ctx, inner),
+        _ => None,
+    }
 }
 
 // ----- Viewer prefs + metadata (Phase 5) -----------------------------------
@@ -924,6 +989,43 @@ fn parse_viewer_prefs(ctx: &Context, payload: &[PsObject]) -> Option<ViewerPrefs
         return None;
     }
     Some(rec)
+}
+
+/// Parse an `/EMBED pdfmark` payload. Required keys: `/FS` (filename)
+/// and `/DataSource` (raw bytes — string only; file handles aren't
+/// drained because the producer's typical pattern is `(...binary...)`
+/// literals or `currentfile <subfile> read`). Returns `None` when
+/// either is missing.
+fn parse_embed(ctx: &Context, payload: &[PsObject]) -> Option<EmbedRecord> {
+    let filename = extract_name_or_string(ctx, payload, b"FS")?;
+    if filename.is_empty() {
+        return None;
+    }
+    // /DataSource — expect a literal string. Real producers using a
+    // file-handle source would need a richer integration; for MVP we
+    // accept only string-typed data sources.
+    let key_id = ctx.names.find(b"DataSource")?;
+    let data: Vec<u8> =
+        pairs_iter(payload)
+            .find(|(k, _)| *k == key_id)
+            .and_then(|(_, v)| match v.value {
+                PsValue::String { entity, start, len } => {
+                    Some(ctx.strings.get(entity, start, len).to_vec())
+                }
+                _ => None,
+            })?;
+    let unicode_filename = extract_string(ctx, payload, b"UF");
+    let description = extract_string(ctx, payload, b"Desc");
+    let af_relationship = extract_name_string(ctx, payload, b"AFRelationship");
+    let mime_type = extract_string(ctx, payload, b"MIMEType");
+    Some(EmbedRecord {
+        filename,
+        data,
+        unicode_filename,
+        description,
+        af_relationship,
+        mime_type,
+    })
 }
 
 /// Parse a `/Metadata pdfmark` payload. The `/Metadata` value is the

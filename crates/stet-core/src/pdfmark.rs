@@ -46,6 +46,10 @@ pub enum PdfMarkRecord {
     /// last-wins key-by-key; the `/Fields` array is implicit (built from
     /// `/Widget` annotations at write time).
     Form(FormRecord),
+    /// `/EMBED` — one embedded file attachment. Multiple records
+    /// accumulate; the writer assembles a `/Names /EmbeddedFiles`
+    /// name tree and references it from `/Catalog`.
+    Embed(EmbedRecord),
 }
 
 /// Buffered `pdfmark` records. Lives on `Context` for the entire job;
@@ -382,8 +386,10 @@ impl Default for ViewSpec {
     }
 }
 
-/// Outline-action passthrough. Phase 1 only models URI actions; later
-/// phases can extend this enum without breaking the existing variants.
+/// Outline-action passthrough. Despite the name, this enum is shared
+/// across every place an "action dict" appears — outline `/Action`,
+/// link annotation `/A`, page `/AA` open / close — because the on-the-
+/// wire shape is identical.
 #[derive(Clone, Debug)]
 pub enum OutlineAction {
     /// `<< /S /URI /URI (string) >>`.
@@ -392,6 +398,17 @@ pub enum OutlineAction {
     /// a named destination (`Named`) or an explicit page+view
     /// (`Explicit`).
     GoTo(GoToTarget),
+    /// `<< /S /JavaScript /JS (string) >>` — pass-through. stet does
+    /// **not** execute JavaScript; the bytes are round-tripped verbatim
+    /// so a downstream viewer (Acrobat, Foxit) that does run JS can
+    /// pick them up.
+    JavaScript(String),
+    /// `<< /S /Named /N /<name> >>` — a built-in viewer command
+    /// (e.g. `/NextPage`, `/PrevPage`, `/FirstPage`, `/LastPage`,
+    /// `/Print`, `/Find`, …). The producer-supplied name is round-
+    /// tripped verbatim; viewers that don't recognise it ignore the
+    /// action.
+    Named(String),
 }
 
 /// `/GoTo` action target.
@@ -761,6 +778,63 @@ pub struct PageOverrideRecord {
     /// `/Rotate` — 0, 90, 180, or 270. Other values land here as-is
     /// and are dropped at write time.
     pub rotate: Option<i32>,
+    /// `/AA` — additional-actions dict. Page-open (`/O`) fires when
+    /// the page becomes visible; page-close (`/C`) fires when the
+    /// user navigates away.
+    pub additional_actions: Option<PageAdditionalActions>,
+}
+
+/// Page-level `/AA` (additional actions) — open and close hooks the
+/// PDF viewer fires when a page becomes / leaves visible. Either
+/// hook is optional; both are passed through verbatim from the
+/// producer's action dict.
+#[derive(Clone, Debug, Default)]
+pub struct PageAdditionalActions {
+    /// `/O` — fired when the page becomes visible.
+    pub on_open: Option<OutlineAction>,
+    /// `/C` — fired when the page leaves visibility.
+    pub on_close: Option<OutlineAction>,
+}
+
+impl PageAdditionalActions {
+    pub fn is_empty(&self) -> bool {
+        self.on_open.is_none() && self.on_close.is_none()
+    }
+
+    /// Merge `other` under `self` — `self`'s `Some` actions win.
+    pub fn merge_over(&self, other: &PageAdditionalActions) -> PageAdditionalActions {
+        PageAdditionalActions {
+            on_open: self.on_open.clone().or_else(|| other.on_open.clone()),
+            on_close: self.on_close.clone().or_else(|| other.on_close.clone()),
+        }
+    }
+}
+
+/// One `/EMBED pdfmark` entry — a single attached file. The writer
+/// emits one `/Filespec` dict + one `/EmbeddedFile` stream per record
+/// and assembles them into a `/Names /EmbeddedFiles` name tree.
+#[derive(Clone, Debug)]
+pub struct EmbedRecord {
+    /// `/FS` — file specification string (typically the original
+    /// filename). Required.
+    pub filename: String,
+    /// `/DataSource` — raw file contents. Required. PostScript
+    /// strings can hold arbitrary bytes, so binary attachments
+    /// (PNGs, ZIPs, …) round-trip without re-encoding.
+    pub data: Vec<u8>,
+    /// `/UF` — unicode filename. PDF spec recommends both `/F` and
+    /// `/UF`; when absent, the writer reuses `filename`.
+    pub unicode_filename: Option<String>,
+    /// `/Desc` — human-readable description.
+    pub description: Option<String>,
+    /// `/AFRelationship` — relationship of this attachment to the
+    /// document content. Allow-list: `Source`, `Data`, `Alternative`,
+    /// `Supplement`, `EncryptedPayload`, `Unspecified`.
+    pub af_relationship: Option<String>,
+    /// `/MIMEType` (PDF 1.7) — MIME type of the attached file.
+    /// Optional; viewers that respect it use it to pick the right
+    /// "open with" handler.
+    pub mime_type: Option<String>,
 }
 
 /// Whether a [`PageOverrideRecord`] targets one specific page or the

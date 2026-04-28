@@ -10,11 +10,12 @@
 //! `/Annots` array at page-build time.
 
 use stet_core::pdfmark::{
-    AnnotationRecord, AnnotationSubtype, AnnotationTarget, Border, GoToTarget, LinkHighlight,
-    OutlineAction, TextAnnotationIcon, ViewSpec, WidgetAnnotation,
+    AnnotationRecord, AnnotationSubtype, AnnotationTarget, Border, LinkHighlight,
+    TextAnnotationIcon, ViewSpec, WidgetAnnotation,
 };
 
 use crate::form_fields::push_field_level_keys;
+use crate::outline::encode_action;
 use crate::pdf_objects::PdfObj;
 use crate::pdf_writer::PdfWriter;
 
@@ -232,35 +233,11 @@ fn attach_target(
                 PdfObj::LitString(name.clone().into_bytes()),
             ));
         }
-        AnnotationTarget::Action(action) => match action {
-            OutlineAction::Uri(uri) => {
-                entries.push((
-                    b"A".to_vec(),
-                    PdfObj::Dict(vec![
-                        (b"Type".to_vec(), PdfObj::name("Action")),
-                        (b"S".to_vec(), PdfObj::name("URI")),
-                        (b"URI".to_vec(), PdfObj::LitString(uri.clone().into_bytes())),
-                    ]),
-                ));
+        AnnotationTarget::Action(action) => {
+            if let Some(dict) = encode_action(action, page_refs) {
+                entries.push((b"A".to_vec(), dict));
             }
-            OutlineAction::GoTo(target) => {
-                let d = match target {
-                    GoToTarget::Named(name) => PdfObj::LitString(name.clone().into_bytes()),
-                    GoToTarget::Explicit { page, view } => match page_to_ref(*page, page_refs) {
-                        Some(page_ref) => page_view_dest_array(page_ref, view),
-                        None => return,
-                    },
-                };
-                entries.push((
-                    b"A".to_vec(),
-                    PdfObj::Dict(vec![
-                        (b"Type".to_vec(), PdfObj::name("Action")),
-                        (b"S".to_vec(), PdfObj::name("GoTo")),
-                        (b"D".to_vec(), d),
-                    ]),
-                ));
-            }
-        },
+        }
     }
 }
 

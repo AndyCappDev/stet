@@ -18,14 +18,13 @@ use stet_core::pdfmark::{DestRecord, ViewSpec};
 use crate::pdf_objects::PdfObj;
 use crate::pdf_writer::PdfWriter;
 
-/// Build the `/Names /Dests` indirect object from a slice of
-/// destination records. Returns the indirect object number of the
-/// `/Names` catalog entry — i.e. a dict that contains
-/// `/Dests <<...>>`. Returns `None` when no records were issued.
+/// Build the `/Dests` leaf indirect object from a slice of destination
+/// records. Returns the leaf's indirect ref, ready to drop into the
+/// `/Names` catalog entry under `/Dests`. Returns `None` when no
+/// records were issued or every record targeted an out-of-range page.
 ///
 /// `page_refs` maps 1-based page numbers to PDF page-object refs.
-/// Records that target an out-of-range page are dropped silently.
-pub fn write_names_dict(
+pub fn build_dests_leaf(
     writer: &mut PdfWriter,
     records: &[DestRecord],
     page_refs: &[u32],
@@ -68,7 +67,7 @@ pub fn write_names_dict(
     };
 
     // Single leaf — no /Kids, just /Names + /Limits.
-    let dests_leaf_ref = writer.add_object(&PdfObj::Dict(vec![
+    Some(writer.add_object(&PdfObj::Dict(vec![
         (
             b"Limits".to_vec(),
             PdfObj::Array(vec![
@@ -77,14 +76,27 @@ pub fn write_names_dict(
             ]),
         ),
         (b"Names".to_vec(), PdfObj::Array(names_array)),
-    ]));
+    ])))
+}
 
-    // /Names catalog entry: << /Dests <leaf> >>
-    let names_root = writer.add_object(&PdfObj::Dict(vec![(
-        b"Dests".to_vec(),
-        PdfObj::Ref(dests_leaf_ref),
-    )]));
-    Some(names_root)
+/// Build the document-level `/Names` catalog entry from any combination
+/// of name-tree leaves. Returns `None` when every input is `None`.
+pub fn write_names_root(
+    writer: &mut PdfWriter,
+    dests_leaf: Option<u32>,
+    embedded_files_leaf: Option<u32>,
+) -> Option<u32> {
+    let mut entries: Vec<(Vec<u8>, PdfObj)> = Vec::new();
+    if let Some(r) = dests_leaf {
+        entries.push((b"Dests".to_vec(), PdfObj::Ref(r)));
+    }
+    if let Some(r) = embedded_files_leaf {
+        entries.push((b"EmbeddedFiles".to_vec(), PdfObj::Ref(r)));
+    }
+    if entries.is_empty() {
+        return None;
+    }
+    Some(writer.add_object(&PdfObj::Dict(entries)))
 }
 
 fn page_to_ref(page: u32, page_refs: &[u32]) -> Option<u32> {

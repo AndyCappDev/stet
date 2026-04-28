@@ -255,6 +255,25 @@ object with `/Type /Metadata /Subtype /XML` referenced from
 written uncompressed (PDF spec requirement for grep-friendly
 extraction).
 
+File attachments (`/EMBED` records) and embedded JavaScript /
+named-action passthrough are Phase 7 additions. `/EMBED` records
+flow through `attachments.rs::build_embedded_files_leaf`, which emits
+one flate-compressed `/EmbeddedFile` stream + one `/Filespec` dict
+per record and groups them into a single-leaf `/EmbeddedFiles` name
+tree. The names.rs writer splits in two: `build_dests_leaf` returns
+the `/Dests` leaf ref, and `write_names_root` combines any
+combination of `/Dests` + `/EmbeddedFiles` leaves into one
+`/Catalog /Names` dict. JavaScript and named actions ride on
+`OutlineAction::JavaScript(String)` / `OutlineAction::Named(String)`
+variants — stet doesn't execute either, the bytes are round-tripped
+verbatim. Page-level `/AA` (additional actions — `/O` open, `/C`
+close) extends `/PAGE` and `/PAGES`: `compute_page_overrides`
+layers per-page actions over document-wide defaults the same way it
+layers page boxes. The shared `outline::encode_action` helper
+emits the same on-the-wire shape for outline `/Action`, annotation
+`/A`, and page `/AA` so the four action subtypes (URI, GoTo,
+JavaScript, Named) stay in one place.
+
 Form fields (`/Subtype /Widget` annotations and `/FORM` records) take
 a different shape because the AcroForm needs the field tree to
 predate any individual field object — `/Parent` and `/Kids` cross-

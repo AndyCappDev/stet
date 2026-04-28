@@ -347,8 +347,11 @@ impl PdfDevice {
             crate::outline::write_outline_tree(&mut writer, &tree, &page_refs)
         });
 
-        // /Names /Dests — name tree built from /DEST pdfmark records.
-        let names_ref = ctx.and_then(|c| {
+        // /Names — combined tree of /Dests (from /DEST records) and
+        // /EmbeddedFiles (from /EMBED records). Each leaf is built
+        // separately, then `write_names_root` combines them into one
+        // catalog-level dict.
+        let dests_leaf = ctx.and_then(|c| {
             let records: Vec<stet_core::pdfmark::DestRecord> = c
                 .pdfmark_buffer
                 .records()
@@ -358,8 +361,22 @@ impl PdfDevice {
                     _ => None,
                 })
                 .collect();
-            crate::names::write_names_dict(&mut writer, &records, &page_refs)
+            crate::names::build_dests_leaf(&mut writer, &records, &page_refs)
         });
+        let embedded_files_leaf = ctx.and_then(|c| {
+            let records: Vec<stet_core::pdfmark::EmbedRecord> = c
+                .pdfmark_buffer
+                .records()
+                .iter()
+                .filter_map(|r| match r {
+                    stet_core::pdfmark::PdfMarkRecord::Embed(rec) => Some(rec.clone()),
+                    _ => None,
+                })
+                .collect();
+            crate::attachments::build_embedded_files_leaf(&mut writer, &records)
+        });
+        let names_ref =
+            crate::names::write_names_root(&mut writer, dests_leaf, embedded_files_leaf);
 
         // /VIEWERPREFERENCES — merge all records into one effective
         // viewer-prefs bag, then split into the `/ViewerPreferences`
@@ -816,6 +833,28 @@ impl PdfDevice {
                 b"Annots".to_vec(),
                 PdfObj::Array(annot_refs.iter().map(|r| PdfObj::Ref(*r)).collect()),
             ));
+        }
+        if let Some(aa) = &overrides.additional_actions
+            && !aa.is_empty()
+        {
+            // Page-level /AA — open / close hooks. Page refs aren't
+            // available to action targets here (an /O /GoTo can land
+            // on any page; we use the empty page_refs slice so out-of-
+            // range refs short-circuit to None and the action drops).
+            let mut aa_entries: Vec<(Vec<u8>, PdfObj)> = Vec::new();
+            if let Some(action) = &aa.on_open
+                && let Some(dict) = crate::outline::encode_action(action, &[])
+            {
+                aa_entries.push((b"O".to_vec(), dict));
+            }
+            if let Some(action) = &aa.on_close
+                && let Some(dict) = crate::outline::encode_action(action, &[])
+            {
+                aa_entries.push((b"C".to_vec(), dict));
+            }
+            if !aa_entries.is_empty() {
+                page_entries.push((b"AA".to_vec(), PdfObj::Dict(aa_entries)));
+            }
         }
         writer.set_object(page_ref, &PdfObj::Dict(page_entries));
 
@@ -1568,10 +1607,11 @@ fn build_halftone_ht(
 }
 
 /// Effective per-page override after layering /PAGES under /PAGE.
-#[derive(Default, Clone, Copy)]
+#[derive(Default, Clone)]
 struct EffectivePageOverride {
     boxes: stet_core::pdfmark::PageBoxes,
     rotate: Option<i32>,
+    additional_actions: Option<stet_core::pdfmark::PageAdditionalActions>,
 }
 
 /// Walk the pdfmark buffer and compute one [`EffectivePageOverride`]
@@ -1586,9 +1626,12 @@ fn compute_page_overrides(ctx: Option<&Context>, page_count: usize) -> Vec<Effec
     };
     let mut all_boxes = stet_core::pdfmark::PageBoxes::default();
     let mut all_rotate: Option<i32> = None;
+    let mut all_aa: Option<stet_core::pdfmark::PageAdditionalActions> = None;
     let mut per_page_boxes: Vec<stet_core::pdfmark::PageBoxes> =
         vec![stet_core::pdfmark::PageBoxes::default(); page_count];
     let mut per_page_rotate: Vec<Option<i32>> = vec![None; page_count];
+    let mut per_page_aa: Vec<Option<stet_core::pdfmark::PageAdditionalActions>> =
+        vec![None; page_count];
 
     for record in c.pdfmark_buffer.records() {
         let PdfMarkRecord::PageOverride(rec) = record else {
@@ -1599,6 +1642,12 @@ fn compute_page_overrides(ctx: Option<&Context>, page_count: usize) -> Vec<Effec
                 all_boxes = rec.boxes.merge_over(&all_boxes);
                 if rec.rotate.is_some() {
                     all_rotate = rec.rotate;
+                }
+                if let Some(new_aa) = &rec.additional_actions {
+                    all_aa = Some(match all_aa {
+                        Some(prev) => new_aa.merge_over(&prev),
+                        None => new_aa.clone(),
+                    });
                 }
             }
             PageOverrideScope::Single(page) => {
@@ -1611,6 +1660,12 @@ fn compute_page_overrides(ctx: Option<&Context>, page_count: usize) -> Vec<Effec
                 if rec.rotate.is_some() {
                     per_page_rotate[i] = rec.rotate;
                 }
+                if let Some(new_aa) = &rec.additional_actions {
+                    per_page_aa[i] = Some(match per_page_aa[i].clone() {
+                        Some(prev) => new_aa.merge_over(&prev),
+                        None => new_aa.clone(),
+                    });
+                }
             }
         }
     }
@@ -1618,6 +1673,12 @@ fn compute_page_overrides(ctx: Option<&Context>, page_count: usize) -> Vec<Effec
     for i in 0..page_count {
         out[i].boxes = per_page_boxes[i].merge_over(&all_boxes);
         out[i].rotate = per_page_rotate[i].or(all_rotate);
+        out[i].additional_actions = match (&per_page_aa[i], &all_aa) {
+            (Some(p), Some(a)) => Some(p.merge_over(a)),
+            (Some(p), None) => Some(p.clone()),
+            (None, Some(a)) => Some(a.clone()),
+            (None, None) => None,
+        };
     }
     out
 }

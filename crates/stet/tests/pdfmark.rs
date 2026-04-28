@@ -934,3 +934,137 @@ fn form_only_no_widgets_emits_minimal_acroform() {
     assert!(s.contains("/Fields []"));
     assert!(s.contains("/SigFlags 3"));
 }
+
+// ----- Phase 7: /EMBED + JavaScript / Named actions + page /AA -----------
+
+#[test]
+fn embed_attaches_file_and_emits_embedded_files_tree() {
+    let pdf = render_one_page_pdf(
+        "[ /FS (notes.txt) /DataSource (Hello, attachment.) \
+         /Desc (Reader notes) /AFRelationship /Source /EMBED pdfmark",
+    );
+    let catalog = find_catalog_bytes(&pdf);
+    let names_ref = extract_indirect_ref(&catalog, "Names").expect("/Names ref");
+    let names = read_indirect_object(&pdf, names_ref);
+    let names_str = String::from_utf8_lossy(&names);
+    assert!(
+        names_str.contains("/EmbeddedFiles "),
+        "/EmbeddedFiles missing from /Names: {names_str}",
+    );
+    // Filespec dict carries /F (notes.txt), /Desc (Reader notes),
+    // /AFRelationship /Source.
+    let pdf_str = String::from_utf8_lossy(&pdf);
+    assert!(pdf_str.contains("/F (notes.txt)"));
+    assert!(pdf_str.contains("/Desc (Reader notes)"));
+    assert!(pdf_str.contains("/AFRelationship /Source"));
+    assert!(pdf_str.contains("/Type /EmbeddedFile"));
+}
+
+#[test]
+fn embed_without_filename_dropped() {
+    let pdf = render_one_page_pdf("[ /DataSource (data) /EMBED pdfmark");
+    let catalog = find_catalog_bytes(&pdf);
+    let s = String::from_utf8_lossy(&catalog);
+    assert!(!s.contains("/Names"));
+}
+
+#[test]
+fn embed_unknown_af_relationship_dropped() {
+    let pdf = render_one_page_pdf(
+        "[ /FS (notes.txt) /DataSource (x) /AFRelationship /BogusValue /EMBED pdfmark",
+    );
+    let pdf_str = String::from_utf8_lossy(&pdf);
+    // Filespec emitted but no /AFRelationship key (allow-list dropped it).
+    assert!(pdf_str.contains("/F (notes.txt)"));
+    assert!(!pdf_str.contains("/AFRelationship"));
+}
+
+#[test]
+fn embed_dest_and_attachment_share_names_tree() {
+    // /DEST → /Names /Dests, /EMBED → /Names /EmbeddedFiles. Both
+    // should land under one /Names catalog entry.
+    let pdf = render_one_page_pdf(
+        "[ /Dest /chap1 /Page 1 /View [/Fit] /DEST pdfmark
+         [ /FS (a.txt) /DataSource (data) /EMBED pdfmark",
+    );
+    let catalog = find_catalog_bytes(&pdf);
+    let names_ref = extract_indirect_ref(&catalog, "Names").expect("/Names ref");
+    let names = read_indirect_object(&pdf, names_ref);
+    let names_str = String::from_utf8_lossy(&names);
+    assert!(names_str.contains("/Dests "));
+    assert!(names_str.contains("/EmbeddedFiles "));
+}
+
+#[test]
+fn outline_javascript_action_round_trips() {
+    let pdf = render_one_page_pdf(
+        "[ /Title (Run Script) \
+         /Action << /S /JavaScript /JS (app.alert\\(\"hi\"\\);) >> /OUT pdfmark",
+    );
+    let pdf_str = String::from_utf8_lossy(&pdf);
+    assert!(pdf_str.contains("/S /JavaScript"));
+    assert!(pdf_str.contains("/JS "));
+    assert!(pdf_str.contains("app.alert"));
+}
+
+#[test]
+fn link_javascript_action_round_trips() {
+    let pdf = render_one_page_pdf(
+        "[ /Rect [72 720 540 750] /Subtype /Link \
+         /Action << /S /JavaScript /JS (app.alert\\(\"clicked\"\\);) >> /ANN pdfmark",
+    );
+    let pdf_str = String::from_utf8_lossy(&pdf);
+    assert!(pdf_str.contains("/S /JavaScript"));
+    assert!(pdf_str.contains("app.alert"));
+}
+
+#[test]
+fn outline_named_action_emits_n_name() {
+    let pdf = render_one_page_pdf(
+        "[ /Title (Next page) /Action << /S /Named /N /NextPage >> /OUT pdfmark",
+    );
+    let pdf_str = String::from_utf8_lossy(&pdf);
+    assert!(pdf_str.contains("/S /Named"));
+    assert!(pdf_str.contains("/N /NextPage"));
+}
+
+#[test]
+fn page_aa_open_action_emits_on_page_dict() {
+    let pdf = render_one_page_pdf(
+        "[ /AA << /O << /S /JavaScript /JS (console.println\\(\"open\"\\);) >> >> \
+         /Page 1 /PAGE pdfmark",
+    );
+    let pdf_str = String::from_utf8_lossy(&pdf);
+    assert!(
+        pdf_str.contains("/AA "),
+        "page /AA missing from output: {}",
+        &pdf_str[..pdf_str.len().min(2000)]
+    );
+    assert!(pdf_str.contains("/O "));
+    assert!(pdf_str.contains("console.println"));
+}
+
+#[test]
+fn page_aa_close_action_named() {
+    let pdf = render_one_page_pdf("[ /AA << /C << /S /Named /N /Print >> >> /Page 1 /PAGE pdfmark");
+    let pdf_str = String::from_utf8_lossy(&pdf);
+    assert!(pdf_str.contains("/C "));
+    assert!(pdf_str.contains("/N /Print"));
+}
+
+#[test]
+fn pages_aa_lifts_to_all_pages() {
+    let mut interp = Interpreter::new();
+    let script = "[ /AA << /O << /S /Named /N /FirstPage >> >> /PAGES pdfmark
+                  showpage
+                  showpage";
+    let pdf = interp
+        .render_to_pdf(script.as_bytes(), 72.0)
+        .expect("render");
+    let pdf_str = String::from_utf8_lossy(&pdf);
+    let aa_count = pdf_str.matches("/N /FirstPage").count();
+    assert!(
+        aa_count >= 2,
+        "expected /AA action on every page, found {aa_count} instances"
+    );
+}

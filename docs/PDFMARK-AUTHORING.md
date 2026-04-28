@@ -109,7 +109,7 @@ without a `/Title` are dropped silently.
 | `/Page` | integer | 1-based page target. Combine with optional `/View` |
 | `/View` | array | PDF view spec — `[/XYZ left top zoom]`, `[/Fit]`, `[/FitH top]`, `[/FitV left]`, `[/FitR left bottom right top]`, `[/FitB]`, `[/FitBH top]`, `[/FitBV left]`. `null` components mean "keep current value" |
 | `/Dest` | name or string | Reference to a named destination (registered via `/DEST pdfmark` in a later phase) |
-| `/Action` | dict | Action to fire on click. Currently recognised: `<< /S /URI /URI (string) >>` and `<< /S /GoTo /D <name-or-array> >>` |
+| `/Action` | dict | Action to fire on click — see [Action dicts](#action-dicts) |
 | `/Count` | integer | Adobe nesting hint. Positive: this entry is *expanded* with `count` direct children that immediately follow. Negative: collapsed with `\|count\|` children. Zero / absent: leaf |
 | `/OutlineLevel` | integer ≥ 1 | **stet extension.** Explicit nesting level (1 = top-level). When *any* record uses this key, the whole batch switches to level-based parenting and `/Count` is ignored for topology (the sign is still honoured for the open/closed display state). Not compatible with GhostScript pdfwrite |
 | `/Color` | 3-array of `0..=1` reals | Bookmark text colour (PDF 1.4 outline `/C` entry) |
@@ -193,7 +193,7 @@ end-of-job. Annotations whose `/Subtype` is unrecognised, or whose
 
 | Key | Type | Meaning |
 |---|---|---|
-| `/Action` | dict | Action to fire on click. Same shape as `/OUT`'s `/Action`: `<< /S /URI /URI (string) >>` or `<< /S /GoTo /D <name-or-array> >>` |
+| `/Action` | dict | Action to fire on click. Same shape as `/OUT`'s `/Action` — see [Action dicts](#action-dicts) |
 | `/Page` + `/View` | int + array | Internal jump target; same view-spec syntax as `/OUT` |
 | `/Dest` | name or string | Named destination (resolved against the document's name tree once `/DEST pdfmark` lands) |
 | `/H` | name | Highlight mode: `/N` none, `/I` invert, `/O` outline, `/P` push |
@@ -284,6 +284,7 @@ page. Both share the same key set:
 | `/SrcPg` | integer | Alias for `/Page` |
 | `/CropBox`, `/BleedBox`, `/TrimBox`, `/ArtBox` | 4-array | `[llx lly urx ury]` in default user space |
 | `/Rotate` | integer | 0, 90, 180, 270 (or their negative equivalents). Other values dropped silently |
+| `/AA` | dict | Page-level additional actions — `<< /O <action> /C <action> >>`. `/O` fires when the page becomes visible; `/C` fires when the user navigates away. Action shape per [Action dicts](#action-dicts) |
 
 Resolution rule (per key, per page): the most recent `/PAGE` for that
 specific page wins; if none exists, the most recent `/PAGES` for that
@@ -296,8 +297,19 @@ key applies; otherwise the device default.
 [ /CropBox [200 200 400 400] /Page 1 /PAGE pdfmark
 ```
 
-A `/PAGE` record with neither any box nor a `/Rotate` is dropped —
-there's nothing to apply.
+`/AA` lifts the same way: `/PAGES` sets defaults, `/PAGE` overrides
+on a specific page. Hooks merge key-by-key (`/O` and `/C`) under the
+same precedence rule.
+
+```postscript
+% Print on every page-open; jump to the first page on close.
+[ /AA << /O << /S /Named /N /Print >>
+        /C << /S /Named /N /FirstPage >> >>
+  /PAGES pdfmark
+```
+
+A `/PAGE` record with no `/CropBox` / `/BleedBox` / `/TrimBox` /
+`/ArtBox` / `/Rotate` / `/AA` is dropped — there's nothing to apply.
 
 ### `/VIEWERPREFERENCES` — catalog viewer preferences
 
@@ -512,6 +524,58 @@ ones key-by-key (matching GhostScript's pdfwrite behaviour).
 Date strings are passed through verbatim. Date format per PDF spec:
 `D:YYYYMMDDHHmmSSOHH'mm'` where `O` is one of `+`, `-`, or `Z` (UTC);
 the parts after the year are optional.
+
+### `/EMBED` — embedded file attachment
+
+```postscript
+[ /FS (notes.txt)
+  /DataSource (Notes for the reviewer.)
+  /UF (notes.txt)
+  /Desc (Reviewer notes)
+  /AFRelationship /Source
+  /MIMEType (text/plain)
+  /EMBED pdfmark
+```
+
+Each `/EMBED pdfmark` attaches one file to the document. The writer
+emits an `/EmbeddedFile` stream + `/Filespec` dict per record and
+groups them all into a `/Names /EmbeddedFiles` name tree referenced
+from `/Catalog` (sharing the tree with `/DEST`'s `/Dests` leaf when
+both kinds of records exist).
+
+| Key | Type | Meaning |
+|---|---|---|
+| `/FS` | string or name | Required — file specification (typically the original filename). Round-tripped as `/F` on the `/Filespec` dict |
+| `/DataSource` | string | Required — raw file contents. PostScript strings can hold arbitrary bytes, so binary attachments (PNGs, ZIPs, …) round-trip without re-encoding |
+| `/UF` | string | Optional — unicode filename. PDF spec recommends both `/F` and `/UF`; when absent, the writer reuses `/FS` |
+| `/Desc` | string | Optional — human-readable description |
+| `/AFRelationship` | name | Optional — relationship to the document content. Allow-list: `Source`, `Data`, `Alternative`, `Supplement`, `EncryptedPayload`, `Unspecified`, `FormData`. Unknown values dropped silently |
+| `/MIMEType` | string | Optional — MIME type written as the stream's `/Subtype`. Viewers that respect it use it to pick the right "open with" handler |
+
+Records without `/FS` or `/DataSource` are dropped silently. Multiple
+records sharing a filename resolve "last wins" (matching the rest of
+the pdfmark surface).
+
+The writer accepts only string-typed `/DataSource` values. PostScript
+file-handle sources (`currentfile`, `(file.bin) (rb) file`) aren't
+drained — the producer's typical pattern is `(...binary...)` literals.
+
+### Action dicts
+
+Three pdfmark surfaces (`/OUT`'s `/Action`, `/ANN /Subtype /Link`'s
+`/Action`, `/PAGE` and `/PAGES`'s `/AA <</O .. /C ..>>`) all accept
+the same action-dict shape:
+
+| `/S` | Other keys | Meaning |
+|---|---|---|
+| `/URI` | `/URI (string)` | External hyperlink |
+| `/GoTo` | `/D <name-or-array>` | Jump to a named destination (`/D /chap1`) or explicit page+view (`/D [2 /Fit]`) |
+| `/JavaScript` | `/JS (string)` | Run JavaScript. **Pass-through only** — stet doesn't execute JavaScript; the bytes are round-tripped verbatim so a downstream viewer (Acrobat, Foxit) that does run JS can pick them up |
+| `/Named` | `/N /<name>` | Built-in viewer command. Common names: `/NextPage`, `/PrevPage`, `/FirstPage`, `/LastPage`, `/Print`, `/Find`. Producer-supplied names are round-tripped verbatim; viewers ignore unrecognised ones |
+
+Other action subtypes (Launch, Sound, Movie, ResetForm, …) currently
+return `None` from the parser and the producer's record is dropped —
+matching Adobe pdfwrite's "skip unknown action types" behaviour.
 
 ## Activation model
 

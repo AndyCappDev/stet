@@ -174,28 +174,48 @@ fn destination_to_pdf(dest: &OutlineDestination, page_refs: &[u32]) -> Destinati
         OutlineDestination::NamedDest(name) => {
             DestinationEmit::Dest(PdfObj::LitString(name.clone().into_bytes()))
         }
-        OutlineDestination::Action(action) => match action {
-            OutlineAction::Uri(uri) => DestinationEmit::Action(PdfObj::Dict(vec![
-                (b"Type".to_vec(), PdfObj::name("Action")),
-                (b"S".to_vec(), PdfObj::name("URI")),
-                (b"URI".to_vec(), PdfObj::LitString(uri.clone().into_bytes())),
-            ])),
-            OutlineAction::GoTo(target) => {
-                let d = match target {
-                    GoToTarget::Named(name) => PdfObj::LitString(name.clone().into_bytes()),
-                    GoToTarget::Explicit { page, view } => match page_to_ref(*page, page_refs) {
-                        Some(page_ref) => page_view_dest_array(page_ref, view),
-                        None => return DestinationEmit::None,
-                    },
-                };
-                DestinationEmit::Action(PdfObj::Dict(vec![
-                    (b"Type".to_vec(), PdfObj::name("Action")),
-                    (b"S".to_vec(), PdfObj::name("GoTo")),
-                    (b"D".to_vec(), d),
-                ]))
-            }
+        OutlineDestination::Action(action) => match encode_action(action, page_refs) {
+            Some(dict) => DestinationEmit::Action(dict),
+            None => DestinationEmit::None,
         },
     }
+}
+
+/// Encode an action dict for either an outline or annotation. Returns
+/// `None` when the action's target page is out of range and the
+/// caller should drop the action altogether.
+pub(crate) fn encode_action(action: &OutlineAction, page_refs: &[u32]) -> Option<PdfObj> {
+    Some(PdfObj::Dict(match action {
+        OutlineAction::Uri(uri) => vec![
+            (b"Type".to_vec(), PdfObj::name("Action")),
+            (b"S".to_vec(), PdfObj::name("URI")),
+            (b"URI".to_vec(), PdfObj::LitString(uri.clone().into_bytes())),
+        ],
+        OutlineAction::GoTo(target) => {
+            let d = match target {
+                GoToTarget::Named(name) => PdfObj::LitString(name.clone().into_bytes()),
+                GoToTarget::Explicit { page, view } => match page_to_ref(*page, page_refs) {
+                    Some(page_ref) => page_view_dest_array(page_ref, view),
+                    None => return None,
+                },
+            };
+            vec![
+                (b"Type".to_vec(), PdfObj::name("Action")),
+                (b"S".to_vec(), PdfObj::name("GoTo")),
+                (b"D".to_vec(), d),
+            ]
+        }
+        OutlineAction::JavaScript(js) => vec![
+            (b"Type".to_vec(), PdfObj::name("Action")),
+            (b"S".to_vec(), PdfObj::name("JavaScript")),
+            (b"JS".to_vec(), PdfObj::LitString(js.clone().into_bytes())),
+        ],
+        OutlineAction::Named(name) => vec![
+            (b"Type".to_vec(), PdfObj::name("Action")),
+            (b"S".to_vec(), PdfObj::name("Named")),
+            (b"N".to_vec(), PdfObj::name(name)),
+        ],
+    }))
 }
 
 /// 1-based page index → PDF object ref. Out-of-range pages produce
