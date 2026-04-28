@@ -56,6 +56,7 @@ pub struct Layer {
 /// [`LayerIntent::Multiple`]. Names other than `View`/`Design`/`Export`
 /// are preserved verbatim under [`LayerIntent::Other`].
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum LayerIntent {
     /// Default. Layer is meaningful for on-screen viewing.
     View,
@@ -142,6 +143,7 @@ pub struct LayerUsage {
 
 /// Usage state — `/ON` or `/OFF`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum UsageState {
     On,
     Off,
@@ -215,6 +217,7 @@ pub struct UserUsage {
 
 /// `/PageElement /Subtype` value — role of the layer on the page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PageElementSubtype {
     /// `/HF` — headers and footers. PDF combines them under one name.
     HeaderFooter,

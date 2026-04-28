@@ -22,6 +22,7 @@ use crate::resolver::Resolver;
 
 /// A target location within (or referenced from) a PDF document.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum Destination {
     /// Explicit destination: a specific page in this document plus a
     /// view spec.
@@ -43,6 +44,7 @@ pub enum Destination {
 /// Each variant maps to one of the explicit-destination forms in
 /// ISO 32000-2 §12.3.2.2.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub enum ViewSpec {
     /// `[page /XYZ left top zoom]` — position the upper-left corner of
     /// the page region at `(left, top)` and zoom to `zoom` (1.0 = 100%).
@@ -90,6 +92,7 @@ impl Default for ViewSpec {
 /// want to render link panels, route handlers, or convert to other
 /// formats.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum Action {
     /// `/S /GoTo` — jump to a destination in this document.
     GoTo(Destination),

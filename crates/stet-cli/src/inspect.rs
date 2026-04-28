@@ -178,6 +178,7 @@ fn print_outline_node(item: &OutlineItem, depth: usize) {
         }
         Some(Destination::PageView { page: None, .. }) => " → (broken page ref)".to_string(),
         Some(Destination::NamedDest(name)) => format!(" → /{name}"),
+        Some(_) => String::new(),
         None => String::new(),
     };
     let title = if item.title.is_empty() {
@@ -201,6 +202,7 @@ fn format_view_brief(view: &ViewSpec) -> &'static str {
         ViewSpec::FitB => "(fitb)",
         ViewSpec::FitBH { .. } => "(fitbh)",
         ViewSpec::FitBV { .. } => "(fitbv)",
+        _ => "(?)",
     }
 }
 
@@ -305,6 +307,7 @@ fn walk_form_for_summary(
             FieldKind::Signature(_) => Some("Signature"),
             FieldKind::Other { .. } => Some("Other"),
             FieldKind::Container => None,
+            _ => Some("Unknown"),
         };
         if let Some(name) = label {
             *counts.entry(name).or_insert(0) += 1;
@@ -370,6 +373,7 @@ fn print_warnings(doc: &PdfDocument) {
             Severity::Info => "info",
             Severity::Warning => "warn",
             Severity::Error => "error",
+            _ => "?",
         };
         println!("  [{sev}] {}: {}", format_phase(&w.phase), w.message);
     }
@@ -389,5 +393,6 @@ fn format_phase(phase: &ParsePhase) -> String {
         ParsePhase::PageBoxes { page } => format!("page-boxes(page {})", page + 1),
         ParsePhase::EmbeddedFiles => "embedded-files".to_string(),
         ParsePhase::Layers => "layers".to_string(),
+        _ => "other".to_string(),
     }
 }

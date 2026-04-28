@@ -39,6 +39,7 @@ pub struct ParseWarning {
 
 /// The structural area a warning came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ParsePhase {
     Metadata,
     ViewerPreferences,
@@ -58,6 +59,7 @@ pub enum ParsePhase {
 
 /// Where in the document a problem occurred.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum LocationHint {
     /// 0-based page index.
     Page(usize),
@@ -75,6 +77,7 @@ pub enum LocationHint {
 /// Severity hint for consumers. The reader treats all of these the
 /// same internally; they only inform UI/log presentation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Severity {
     /// Worth noting but the data is fine — e.g. "this PDF used a
     /// truncated date string but we recovered the year/month".

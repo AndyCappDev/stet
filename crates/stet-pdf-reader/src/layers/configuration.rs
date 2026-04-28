@@ -34,6 +34,7 @@ pub struct LayerTree {
 
 /// One node in the layer tree.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum LayerTreeNode {
     /// A leaf referencing a single layer by OCG object number.
     Layer(u32),
@@ -93,6 +94,7 @@ pub struct Configuration {
 
 /// `/BaseState` value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum BaseState {
     /// `/ON` — all layers visible until `/OFF` flips them.
     On,
@@ -116,6 +118,7 @@ impl BaseState {
 
 /// `/ListMode` — layer-panel visibility scope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum ListMode {
     /// `/AllPages` — show every layer regardless of which pages use
     /// it. Default.
@@ -149,6 +152,7 @@ pub struct AutoStateRule {
 
 /// `/Event` value on an `/AS` rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AutoStateEvent {
     View,
     Print,

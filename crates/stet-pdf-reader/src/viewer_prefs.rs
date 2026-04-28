@@ -76,6 +76,7 @@ impl Default for ViewerPreferences {
 
 /// `/PageLayout` — how pages should be displayed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PageLayout {
     /// `/SinglePage` — display one page at a time (default).
     SinglePage,
@@ -93,6 +94,7 @@ pub enum PageLayout {
 
 /// `/PageMode` — initial document presentation mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PageMode {
     /// `/UseNone` — neither outlines nor thumbnails visible (default).
     UseNone,
@@ -110,6 +112,7 @@ pub enum PageMode {
 
 /// `/Direction` — predominant reading order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ReadingDirection {
     /// `/L2R` — left-to-right (default).
     L2R,
@@ -119,6 +122,7 @@ pub enum ReadingDirection {
 
 /// `/PrintScaling` — default print-scaling preference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PrintScaling {
     /// `/None` — no scaling.
     None,
@@ -128,6 +132,7 @@ pub enum PrintScaling {
 
 /// `/Duplex` — default print-duplex preference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Duplex {
     /// `/Simplex` — single-sided.
     Simplex,

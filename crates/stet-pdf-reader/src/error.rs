@@ -7,7 +7,11 @@
 use thiserror::Error;
 
 /// Errors that can occur during PDF parsing and object resolution.
+///
+/// Marked `#[non_exhaustive]` so new error variants can land additively;
+/// downstream consumers must include a wildcard arm in `match` sites.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum PdfError {
     #[error("not a PDF file (missing %PDF header)")]
     NotAPdf,

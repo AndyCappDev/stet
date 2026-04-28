@@ -65,6 +65,7 @@ use crate::PdfDocument;
 /// PDF authors use this to hide print-only watermarks during
 /// interactive viewing, or to surface annotations only for export.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RenderIntent {
     /// `/View` — interactive on-screen display.
     View,

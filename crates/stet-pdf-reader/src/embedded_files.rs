@@ -61,6 +61,7 @@ pub struct EmbeddedFile {
 /// `/AFRelationship` — relationship of an associated file to the host
 /// document, from PDF 2.0 §14.13.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AfRelationship {
     Source,
     Data,

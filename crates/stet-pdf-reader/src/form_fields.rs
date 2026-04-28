@@ -141,6 +141,7 @@ impl FieldFlags {
 
 /// Field type plus subtype-specific data.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum FieldKind {
     /// `/FT /Btn`.
     Button(ButtonField),
@@ -176,6 +177,7 @@ pub struct ButtonField {
 
 /// Resolved button kind (pre-classified for caller convenience).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ButtonType {
     /// Default kind: not pushbutton, not radio.
     #[default]
@@ -257,6 +259,7 @@ pub struct SignatureField {
 /// each `/V` (or `/DV`) to one of these variants based on the field
 /// type and the value's PDF type.
 #[derive(Debug, Clone, Default, PartialEq)]
+#[non_exhaustive]
 pub enum FieldValue {
     /// `/V` is absent or `null`.
     #[default]

@@ -10,6 +10,37 @@ The `stet inspect <file.pdf>` CLI subcommand exercises the full API as
 a human-readable summary; see the bottom of this document for sample
 output.
 
+## Stability
+
+Every public **enum** in this API is marked `#[non_exhaustive]` so
+new variants (PDF 2.0 features, additional annotation subtypes,
+new error kinds, additional page-element subtypes, …) can land
+additively without forcing a major version bump. Cross-crate `match`
+expressions over these enums **must include a wildcard arm**:
+
+- `PdfError` (parser/resolver errors)
+- `Destination`, `ViewSpec`, `Action` (link/outline targets)
+- `AnnotationKind`, `AnnotationKindData`, `AnnotationDate`,
+  `AnnotationColor`
+- `FieldKind`, `ButtonType`, `FieldValue`
+- `TrappedFlag`, `PageLayout`, `PageMode`, `ReadingDirection`,
+  `PrintScaling`, `Duplex`, `AfRelationship`
+- `LayerIntent`, `UsageState`, `PageElementSubtype`,
+  `LayerTreeNode`, `BaseState`, `ListMode`, `AutoStateEvent`,
+  `RenderIntent`
+- `ParsePhase`, `LocationHint`, `Severity` (parse diagnostics)
+
+The structural **structs** (`DocumentMetadata`, `OutlineItem`,
+`Annotation`, `FormField`, `Layer`, `Configuration`, `LayerSet`,
+`OcgVisibility`, `EmbeddedFile`, `PageBoxes`, …) are intentionally
+**not** `#[non_exhaustive]`. Marking a struct that way blocks all
+cross-crate struct expression syntax, including `..Default::default()`
+updates — which would prevent users from constructing their own
+`LayerSet` overrides or building synthetic documents in tests. New
+fields on these structs land additively; consumers should pattern-
+match with `..` or read fields directly so field additions remain
+non-breaking on the read path.
+
 ## Quick start
 
 ```rust

@@ -73,6 +73,7 @@ pub struct Annotation {
 /// `/M` modification entry — usually a PDF date string, occasionally
 /// an arbitrary string.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum AnnotationDate {
     /// Successfully parsed as a PDF date.
     Date(PdfDate),
@@ -82,6 +83,7 @@ pub enum AnnotationDate {
 
 /// Annotation subtype.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AnnotationKind {
     Text,
     Link,
@@ -185,6 +187,7 @@ impl AnnotationFlags {
 
 /// `/C` color array — interpreted by length per spec.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub enum AnnotationColor {
     /// Empty array — transparent / no color.
     Transparent,
@@ -220,6 +223,7 @@ pub struct Border {
 
 /// Subtype-specific annotation data.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum AnnotationKindData {
     Link(LinkAnnotation),
     Text(TextAnnotation),
