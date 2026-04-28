@@ -1,0 +1,117 @@
+%% Soft-mask operator tests (PDF extensions Phase 3).
+%%
+%% Exercises beginsoftmask / endsoftmask / clearsoftmask, plus the
+%% GhostScript-style aliases. Stack effects + error paths only — visual
+%% coverage of luminosity vs alpha vs invert lives in samples/.
+
+userdict /$unittest known not {(unit_tests/unittest.ps) run} if
+
+gsave nulldevice
+
+
+%% =============================================================================
+%% basic open/close: Luminosity subtype with BBox required
+%% =============================================================================
+
+<< /Subtype /Luminosity /BBox [0 0 100 100] >> beginsoftmask
+endsoftmask
+clearsoftmask
+count [0] assert
+
+
+%% =============================================================================
+%% Alpha subtype works
+%% =============================================================================
+
+<< /Subtype /Alpha /BBox [0 0 1 1] >> beginsoftmask
+endsoftmask
+clearsoftmask
+
+
+%% =============================================================================
+%% missing /BBox → undefined
+%% =============================================================================
+
+/badmask << /Subtype /Luminosity >> def
+badmask /beginsoftmask [badmask /undefined] assert
+
+
+%% =============================================================================
+%% missing /Subtype → undefined
+%% =============================================================================
+
+/nosub << /BBox [0 0 1 1] >> def
+nosub /beginsoftmask [nosub /undefined] assert
+
+
+%% =============================================================================
+%% unknown /Subtype name → rangecheck
+%% =============================================================================
+
+/badsub << /Subtype /NotASubtype /BBox [0 0 1 1] >> def
+badsub /beginsoftmask [badsub /rangecheck] assert
+
+
+%% =============================================================================
+%% endsoftmask / clearsoftmask without an active mask → rangecheck
+%% =============================================================================
+
+/endsoftmask [/rangecheck] assert
+/clearsoftmask [/rangecheck] assert
+
+
+%% =============================================================================
+%% endtransparencygroup may not close a soft-mask frame
+%% =============================================================================
+
+<< /Subtype /Luminosity /BBox [0 0 1 1] >> beginsoftmask
+/endtransparencygroup [/rangecheck] assert
+endsoftmask
+clearsoftmask
+
+
+%% =============================================================================
+%% nesting: mask scope contains a transparency group
+%% =============================================================================
+
+<< /Subtype /Luminosity /BBox [0 0 100 100] >> beginsoftmask
+  << >> begintransparencygroup
+    newpath 10 10 moveto 50 50 lineto stroke
+  endtransparencygroup
+endsoftmask
+  newpath 0 0 moveto 90 90 lineto stroke
+clearsoftmask
+
+
+%% =============================================================================
+%% /BC backdrop color accepted as RGB triple
+%% =============================================================================
+
+<< /Subtype /Luminosity /BBox [0 0 1 1] /BC [0.5 0.5 0.5] >> beginsoftmask
+endsoftmask
+clearsoftmask
+
+
+%% =============================================================================
+%% /TR { 1 exch sub } accepted as the canonical invert
+%% =============================================================================
+
+<< /Subtype /Luminosity /BBox [0 0 1 1] /TR { 1 exch sub } >> beginsoftmask
+endsoftmask
+clearsoftmask
+
+
+%% =============================================================================
+%% GhostScript-style aliases
+%% =============================================================================
+
+<< /Subtype /Alpha /BBox [0 0 1 1] >> .beginsoftmask
+.endsoftmask
+.clearsoftmask
+
+<< /Subtype /Alpha /BBox [0 0 1 1] >> .begintransparencymaskgroup
+.endtransparencymask
+.clearsoftmask
+
+
+grestore     %% pop nulldevice

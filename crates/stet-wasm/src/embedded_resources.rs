@@ -20,6 +20,7 @@ const RESOURCE_CATEGORIES_PS: &[u8] =
     include_bytes!("../../stet/resources/Init/resourcecategories.ps");
 const FONT_CATEGORY_PS: &[u8] = include_bytes!("../../stet/resources/Init/fontcategory.ps");
 const FONT_MAPPING_PS: &[u8] = include_bytes!("../../stet/resources/Init/fontmapping.ps");
+const PDF_EXTENSIONS_PS: &[u8] = include_bytes!("../../stet/resources/Init/pdfextensions.ps");
 
 // Encodings
 const STANDARD_ENCODING_PS: &[u8] =
@@ -102,6 +103,7 @@ pub fn register_embedded_resources(files: &mut FileStore) {
         ("Init/resourcecategories.ps", RESOURCE_CATEGORIES_PS),
         ("Init/fontcategory.ps", FONT_CATEGORY_PS),
         ("Init/fontmapping.ps", FONT_MAPPING_PS),
+        ("Init/pdfextensions.ps", PDF_EXTENSIONS_PS),
         // Encodings
         ("Encoding/StandardEncoding.ps", STANDARD_ENCODING_PS),
         ("Encoding/ISOLatin1Encoding.ps", ISO_LATIN1_ENCODING_PS),

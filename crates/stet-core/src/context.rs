@@ -8,7 +8,7 @@ use std::io::Write;
 
 use crate::device::OutputDevice;
 use crate::dict::DictKey;
-use crate::display_list::{DisplayList, GroupParams};
+use crate::display_list::{DisplayList, GroupParams, SoftMaskParams};
 use crate::dual_array_store::DualArrayStore;
 use crate::dual_dict_store::DualDictStore;
 use crate::dual_string_store::DualStringStore;
@@ -270,23 +270,46 @@ pub struct Context {
 }
 
 /// One frame on `Context::group_stack`. Captures paint operators emitted
-/// between `begintransparencygroup` and `endtransparencygroup`.
+/// between a `begin*` and a matching close. The active capture target is
+/// always [`Self::display_list`]; what happens to it on close depends on
+/// [`Self::kind`].
 pub struct GroupFrame {
-    /// Paint operators emitted while this group is active. On
-    /// `endtransparencygroup`, this becomes the `elements` of a
-    /// `DisplayElement::Group` appended to the next-innermost target.
+    /// Paint operators emitted while this frame is on top of
+    /// `group_stack`. The semantics on close depend on `kind`.
     pub display_list: DisplayList,
-    /// Compositing parameters resolved at `begintransparencygroup`.
-    pub params: GroupParams,
-    /// `gstate.clip_path_version` snapshot taken when the group opened —
-    /// not currently consumed but kept so a future fix can detect clip
-    /// state changes that crossed the group boundary.
+    /// What this frame represents — transparency group, soft-mask
+    /// builder, or post-`endsoftmask` masked-content scope.
+    pub kind: GroupKind,
+    /// `gstate.clip_path_version` snapshot taken when the frame opened.
+    /// Reserved for future use (e.g. detecting clip changes that
+    /// crossed the boundary).
     pub saved_clip_path_version: u32,
-    /// `gstate_stack.len()` at the moment the group opened. Used by
-    /// `gsave` / `grestore` to refuse pops that would orphan this frame
-    /// (a `grestore` may not unwind a graphics state created outside the
-    /// group while the group is still open).
+    /// `gstate_stack.len()` at the moment the frame opened. Used by
+    /// `gsave` / `grestore` and `restore` to refuse pops that would
+    /// orphan this frame.
     pub saved_gsave_depth: usize,
+}
+
+/// What a [`GroupFrame`] is capturing, determining what gets emitted
+/// when it closes.
+pub enum GroupKind {
+    /// Opened by `begintransparencygroup`. On close, the captured
+    /// `display_list` becomes the children of a
+    /// `DisplayElement::Group` with these `params`.
+    Transparency { params: GroupParams },
+    /// Opened by `beginsoftmask`. While active, paint ops emit into the
+    /// frame's `display_list` to build the mask form. `endsoftmask`
+    /// transmutes the frame to [`Self::Masked`] without popping.
+    SoftMask { params: SoftMaskParams },
+    /// Implicitly opened by `endsoftmask`. While active, paint ops emit
+    /// into `display_list` as the *content* the mask attenuates. On
+    /// `clearsoftmask` the frame pops and emits a
+    /// `DisplayElement::SoftMasked` carrying `mask`, the captured
+    /// content, and `params`.
+    Masked {
+        mask: DisplayList,
+        params: SoftMaskParams,
+    },
 }
 
 impl Context {

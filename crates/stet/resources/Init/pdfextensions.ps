@@ -28,5 +28,12 @@ systemdict begin
     /.begintransparencygroup    /begintransparencygroup load def
     /.endtransparencygroup      /endtransparencygroup load def
 
+    % --- Phase 3: soft masks ---
+    /.beginsoftmask             /beginsoftmask load def
+    /.endsoftmask               /endsoftmask load def
+    /.clearsoftmask             /clearsoftmask load def
+    /.begintransparencymaskgroup    { beginsoftmask } bind def
+    /.endtransparencymask           { endsoftmask } bind def
+
     false setglobal
 end

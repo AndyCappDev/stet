@@ -10,11 +10,13 @@
 //! `docs/PLAN-PDF-EXTENSIONS.md` and the GhostScript-compatible aliases in
 //! `resources/Init/pdfextensions.ps`.
 
-use stet_core::context::{Context, GroupFrame};
+use stet_core::context::{Context, GroupFrame, GroupKind};
 use stet_core::dict::DictKey;
 use stet_core::error::PsError;
 use stet_core::object::{EntityId, PsObject, PsValue};
-use stet_graphics::display_list::{DisplayElement, DisplayList, GroupColorSpace, GroupParams};
+use stet_graphics::display_list::{
+    DisplayElement, DisplayList, GroupColorSpace, GroupParams, SoftMaskParams, SoftMaskSubtype,
+};
 
 /// `setfillopacity`: num → — (PDF `ca`).
 pub fn op_setfillopacity(ctx: &mut Context) -> Result<(), PsError> {
@@ -334,7 +336,7 @@ pub fn op_begintransparencygroup(ctx: &mut Context) -> Result<(), PsError> {
     let saved_gsave_depth = ctx.gstate_stack.len();
     ctx.group_stack.push(GroupFrame {
         display_list: DisplayList::new(),
-        params,
+        kind: GroupKind::Transparency { params },
         saved_clip_path_version,
         saved_gsave_depth,
     });
@@ -353,22 +355,270 @@ pub fn op_begintransparencygroup(ctx: &mut Context) -> Result<(), PsError> {
 /// differs from begin — a `gsave` made inside the group must be matched
 /// by a `grestore` before close.
 pub fn op_endtransparencygroup(ctx: &mut Context) -> Result<(), PsError> {
-    let Some(mut frame) = ctx.group_stack.pop() else {
+    let Some(top) = ctx.group_stack.last() else {
         return Err(PsError::RangeCheck);
     };
-    if ctx.gstate_stack.len() != frame.saved_gsave_depth {
-        ctx.group_stack.push(frame);
+    if !matches!(top.kind, GroupKind::Transparency { .. }) {
+        // Topmost frame isn't a transparency group — endsoftmask /
+        // clearsoftmask are required to close those variants.
         return Err(PsError::RangeCheck);
     }
+    if ctx.gstate_stack.len() != top.saved_gsave_depth {
+        return Err(PsError::RangeCheck);
+    }
+    let mut frame = ctx.group_stack.pop().unwrap();
     let _ = frame.saved_clip_path_version; // informational
-    frame.params.alpha = ctx.gstate.fill_opacity;
-    frame.params.blend_mode = ctx.gstate.blend_mode;
+    let mut params = match frame.kind {
+        GroupKind::Transparency { params } => params,
+        // Shape was matches!-checked above.
+        _ => unreachable!(),
+    };
+    params.alpha = ctx.gstate.fill_opacity;
+    params.blend_mode = ctx.gstate.blend_mode;
     let elements = std::mem::take(&mut frame.display_list);
-    ctx.current_display_list_mut().push(DisplayElement::Group {
-        elements,
-        params: frame.params,
+    ctx.current_display_list_mut()
+        .push(DisplayElement::Group { elements, params });
+    Ok(())
+}
+
+// ----- Soft masks (Phase 3) ------------------------------------------------
+
+/// Recognise the canonical PostScript "invert" transfer procedure
+/// `{ 1 exch sub }`. When `/TR` matches this exact body the renderer
+/// can take a fast inversion path; anything else is treated as identity
+/// for now (sampling arbitrary transfer functions into a LUT is an
+/// expansion left to a future fix).
+fn is_invert_transfer(ctx: &Context, obj: &PsObject) -> bool {
+    let (entity, start, len) = match obj.value {
+        PsValue::Array { entity, start, len } | PsValue::PackedArray { entity, start, len } => {
+            (entity, start, len)
+        }
+        _ => return false,
+    };
+    if !obj.flags.is_executable() || len != 3 {
+        return false;
+    }
+    let e0 = ctx.arrays.get_element(entity, start);
+    let e1 = ctx.arrays.get_element(entity, start + 1);
+    let e2 = ctx.arrays.get_element(entity, start + 2);
+    let one = matches!(e0.value, PsValue::Int(1) | PsValue::Real(_))
+        && e0.as_f64().is_some_and(|v| (v - 1.0).abs() < 1e-12);
+    let exch_ok = match e1.value {
+        PsValue::Name(n) => ctx.names.get_bytes(n) == b"exch" && e1.flags.is_executable(),
+        _ => false,
+    };
+    let sub_ok = match e2.value {
+        PsValue::Name(n) => ctx.names.get_bytes(n) == b"sub" && e2.flags.is_executable(),
+        _ => false,
+    };
+    one && exch_ok && sub_ok
+}
+
+/// Resolve the `/Subtype` entry on a soft-mask dict.
+fn resolve_softmask_subtype(ctx: &Context, dict: EntityId) -> Result<SoftMaskSubtype, PsError> {
+    let obj = dict_get(ctx, dict, b"Subtype").ok_or(PsError::Undefined)?;
+    let name = match obj.value {
+        PsValue::Name(n) => n,
+        _ => return Err(PsError::TypeCheck),
+    };
+    match ctx.names.get_bytes(name) {
+        b"Alpha" => Ok(SoftMaskSubtype::Alpha),
+        b"Luminosity" => Ok(SoftMaskSubtype::Luminosity),
+        _ => Err(PsError::RangeCheck),
+    }
+}
+
+/// Read `/BC` (backdrop color) as a 3-component RGB value. Single-
+/// component (gray) and 4-component (CMYK→RGB approx) entries are
+/// flattened to RGB so the renderer always sees 3 floats. `None` when
+/// absent or malformed.
+fn resolve_backdrop(ctx: &Context, dict: EntityId) -> Option<[f64; 3]> {
+    let obj = dict_get(ctx, dict, b"BC")?;
+    let (entity, start, len) = match obj.value {
+        PsValue::Array { entity, start, len } => (entity, start, len),
+        _ => return None,
+    };
+    let mut comps = Vec::with_capacity(len as usize);
+    for i in 0..len {
+        comps.push(ctx.arrays.get_element(entity, start + i).as_f64()?);
+    }
+    match comps.len() {
+        1 => Some([comps[0], comps[0], comps[0]]),
+        3 => Some([comps[0], comps[1], comps[2]]),
+        4 => {
+            // PDF "approximate" CMYK→RGB: r = (1-C)(1-K), etc.
+            let (c, m, y, k) = (comps[0], comps[1], comps[2], comps[3]);
+            Some([
+                (1.0 - c) * (1.0 - k),
+                (1.0 - m) * (1.0 - k),
+                (1.0 - y) * (1.0 - k),
+            ])
+        }
+        _ => None,
+    }
+}
+
+/// `beginsoftmask`: dict → —
+///
+/// Open a soft-mask builder frame. Subsequent paint operators emit
+/// into the frame and become the mask form. `endsoftmask` then opens
+/// an implicit content scope; `clearsoftmask` closes it and emits a
+/// `DisplayElement::SoftMasked`. Required keys: `/Subtype`
+/// (`/Alpha` or `/Luminosity`) and `/BBox` (4-element user-space
+/// array). Optional keys: `/BC` (backdrop colour for luminosity
+/// masks) and `/TR` (transfer function — only the canonical
+/// `{ 1 exch sub }` invert form is recognised; other procedures are
+/// treated as identity).
+pub fn op_beginsoftmask(ctx: &mut Context) -> Result<(), PsError> {
+    if ctx.o_stack.is_empty() {
+        return Err(PsError::StackUnderflow);
+    }
+    let dict = match ctx.o_stack.peek(0)?.value {
+        PsValue::Dict(e) => e,
+        _ => return Err(PsError::TypeCheck),
+    };
+    let subtype = resolve_softmask_subtype(ctx, dict)?;
+    let bbox = match user_bbox_to_device(ctx, dict)? {
+        Some(b) => b,
+        None => return Err(PsError::Undefined), // /BBox required
+    };
+    let backdrop_color = resolve_backdrop(ctx, dict);
+    let transfer_invert = match dict_get(ctx, dict, b"TR") {
+        Some(tr) => is_invert_transfer(ctx, &tr),
+        None => false,
+    };
+    let parent_clip_bbox = ctx.gstate.clip_path.as_ref().and_then(path_device_bbox);
+    ctx.o_stack.pop()?;
+
+    let params = SoftMaskParams {
+        subtype,
+        bbox,
+        backdrop_color,
+        transfer_invert,
+        has_nested_mask_scope: false,
+        parent_clip_bbox,
+    };
+    let saved_clip_path_version = ctx.gstate.clip_path_version;
+    let saved_gsave_depth = ctx.gstate_stack.len();
+    ctx.group_stack.push(GroupFrame {
+        display_list: DisplayList::new(),
+        kind: GroupKind::SoftMask { params },
+        saved_clip_path_version,
+        saved_gsave_depth,
     });
     Ok(())
+}
+
+/// `endsoftmask`: — → —
+///
+/// Close the current soft-mask builder and open an implicit content
+/// scope. The frame on top of `group_stack` must have been opened by
+/// `beginsoftmask`. After `endsoftmask` the same frame is repurposed —
+/// its `display_list` is moved into [`GroupKind::Masked`] as `mask`,
+/// and a fresh empty list is installed for capturing the content the
+/// mask attenuates. `clearsoftmask` finishes the scope and emits a
+/// [`DisplayElement::SoftMasked`].
+pub fn op_endsoftmask(ctx: &mut Context) -> Result<(), PsError> {
+    let Some(top) = ctx.group_stack.last() else {
+        return Err(PsError::RangeCheck);
+    };
+    if !matches!(top.kind, GroupKind::SoftMask { .. }) {
+        return Err(PsError::RangeCheck);
+    }
+    if ctx.gstate_stack.len() != top.saved_gsave_depth {
+        return Err(PsError::RangeCheck);
+    }
+    let frame = ctx.group_stack.last_mut().unwrap();
+    let mask = std::mem::take(&mut frame.display_list);
+    let params = match std::mem::replace(
+        &mut frame.kind,
+        GroupKind::Transparency {
+            // placeholder, overwritten immediately below
+            params: GroupParams {
+                bbox: [0.0; 4],
+                isolated: false,
+                knockout: false,
+                blend_mode: 0,
+                alpha: 1.0,
+                color_space: GroupColorSpace::Inherited,
+            },
+        },
+    ) {
+        GroupKind::SoftMask { params } => params,
+        _ => unreachable!(),
+    };
+    frame.kind = GroupKind::Masked { mask, params };
+    Ok(())
+}
+
+/// `clearsoftmask`: — → —
+///
+/// Close the implicit content scope opened by `endsoftmask` and emit a
+/// `DisplayElement::SoftMasked` into the next-innermost target. The
+/// frame on top of `group_stack` must be in the [`GroupKind::Masked`]
+/// state. Raises `rangecheck` otherwise (including a `clearsoftmask`
+/// with no active soft-mask frame at all).
+pub fn op_clearsoftmask(ctx: &mut Context) -> Result<(), PsError> {
+    let Some(top) = ctx.group_stack.last() else {
+        return Err(PsError::RangeCheck);
+    };
+    if !matches!(top.kind, GroupKind::Masked { .. }) {
+        return Err(PsError::RangeCheck);
+    }
+    if ctx.gstate_stack.len() != top.saved_gsave_depth {
+        return Err(PsError::RangeCheck);
+    }
+    let mut frame = ctx.group_stack.pop().unwrap();
+    let content = std::mem::take(&mut frame.display_list);
+    let (mask, params) = match frame.kind {
+        GroupKind::Masked { mask, params } => (mask, params),
+        _ => unreachable!(),
+    };
+    ctx.current_display_list_mut()
+        .push(DisplayElement::SoftMasked {
+            mask,
+            content,
+            params,
+            mask_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        });
+    Ok(())
+}
+
+/// Best-effort bounding box of a device-space path (returns `None` for
+/// empty paths).
+fn path_device_bbox(path: &stet_fonts::geometry::PsPath) -> Option<[f64; 4]> {
+    let mut xmin = f64::INFINITY;
+    let mut ymin = f64::INFINITY;
+    let mut xmax = f64::NEG_INFINITY;
+    let mut ymax = f64::NEG_INFINITY;
+    let mut saw = false;
+    for seg in &path.segments {
+        use stet_fonts::geometry::PathSegment::*;
+        let pts: &[(f64, f64)] = match seg {
+            MoveTo(x, y) | LineTo(x, y) => &[(*x, *y)][..],
+            CurveTo {
+                x1,
+                y1,
+                x2,
+                y2,
+                x3,
+                y3,
+            } => &[(*x1, *y1), (*x2, *y2), (*x3, *y3)][..],
+            ClosePath => &[][..],
+        };
+        for (x, y) in pts {
+            xmin = xmin.min(*x);
+            ymin = ymin.min(*y);
+            xmax = xmax.max(*x);
+            ymax = ymax.max(*y);
+            saw = true;
+        }
+    }
+    if saw {
+        Some([xmin, ymin, xmax, ymax])
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -659,6 +909,285 @@ mod tests {
             Err(PsError::RangeCheck)
         ));
         assert_eq!(ctx.group_stack.len(), 1);
+    }
+
+    fn make_array(ctx: &mut Context, elems: &[PsObject]) -> PsObject {
+        let entity = ctx.arrays.allocate_from(elems);
+        PsObject {
+            value: PsValue::Array {
+                entity,
+                start: 0,
+                len: elems.len() as u32,
+            },
+            flags: stet_core::object::ObjFlags::literal(),
+        }
+    }
+
+    #[test]
+    fn softmask_open_capture_close() {
+        let mut ctx = make_ctx();
+        let lum = ctx.names.intern(b"Luminosity");
+        let bbox = make_array(
+            &mut ctx,
+            &[
+                PsObject::real(0.0),
+                PsObject::real(0.0),
+                PsObject::real(100.0),
+                PsObject::real(100.0),
+            ],
+        );
+        let dict = make_dict(
+            &mut ctx,
+            &[(b"Subtype", PsObject::name_lit(lum)), (b"BBox", bbox)],
+        );
+        ctx.o_stack.push(dict).unwrap();
+        op_beginsoftmask(&mut ctx).unwrap();
+        assert!(matches!(
+            ctx.group_stack.last().unwrap().kind,
+            GroupKind::SoftMask { .. }
+        ));
+        op_endsoftmask(&mut ctx).unwrap();
+        assert!(matches!(
+            ctx.group_stack.last().unwrap().kind,
+            GroupKind::Masked { .. }
+        ));
+        op_clearsoftmask(&mut ctx).unwrap();
+        assert!(ctx.group_stack.is_empty());
+        match &ctx.display_list.elements()[0] {
+            DisplayElement::SoftMasked { params, .. } => {
+                assert_eq!(params.subtype, SoftMaskSubtype::Luminosity);
+                assert_eq!(params.bbox, [0.0, 0.0, 100.0, 100.0]);
+            }
+            _ => panic!("expected SoftMasked"),
+        }
+    }
+
+    #[test]
+    fn softmask_subtype_alpha_round_trip() {
+        let mut ctx = make_ctx();
+        let alpha = ctx.names.intern(b"Alpha");
+        let bbox = make_array(
+            &mut ctx,
+            &[
+                PsObject::real(0.0),
+                PsObject::real(0.0),
+                PsObject::real(50.0),
+                PsObject::real(50.0),
+            ],
+        );
+        let dict = make_dict(
+            &mut ctx,
+            &[(b"Subtype", PsObject::name_lit(alpha)), (b"BBox", bbox)],
+        );
+        ctx.o_stack.push(dict).unwrap();
+        op_beginsoftmask(&mut ctx).unwrap();
+        op_endsoftmask(&mut ctx).unwrap();
+        op_clearsoftmask(&mut ctx).unwrap();
+        match &ctx.display_list.elements()[0] {
+            DisplayElement::SoftMasked { params, .. } => {
+                assert_eq!(params.subtype, SoftMaskSubtype::Alpha);
+            }
+            _ => panic!("expected SoftMasked"),
+        }
+    }
+
+    #[test]
+    fn softmask_requires_bbox() {
+        let mut ctx = make_ctx();
+        let lum = ctx.names.intern(b"Luminosity");
+        let dict = make_dict(&mut ctx, &[(b"Subtype", PsObject::name_lit(lum))]);
+        ctx.o_stack.push(dict).unwrap();
+        assert!(matches!(
+            op_beginsoftmask(&mut ctx),
+            Err(PsError::Undefined)
+        ));
+        assert_eq!(ctx.o_stack.len(), 1);
+        assert!(ctx.group_stack.is_empty());
+    }
+
+    #[test]
+    fn softmask_unknown_subtype_rangecheck() {
+        let mut ctx = make_ctx();
+        let bogus = ctx.names.intern(b"NotAValidSubtype");
+        let bbox = make_array(
+            &mut ctx,
+            &[
+                PsObject::real(0.0),
+                PsObject::real(0.0),
+                PsObject::real(1.0),
+                PsObject::real(1.0),
+            ],
+        );
+        let dict = make_dict(
+            &mut ctx,
+            &[(b"Subtype", PsObject::name_lit(bogus)), (b"BBox", bbox)],
+        );
+        ctx.o_stack.push(dict).unwrap();
+        assert!(matches!(
+            op_beginsoftmask(&mut ctx),
+            Err(PsError::RangeCheck)
+        ));
+    }
+
+    #[test]
+    fn softmask_endsoftmask_without_begin_rangecheck() {
+        let mut ctx = make_ctx();
+        assert!(matches!(op_endsoftmask(&mut ctx), Err(PsError::RangeCheck)));
+        assert!(matches!(
+            op_clearsoftmask(&mut ctx),
+            Err(PsError::RangeCheck)
+        ));
+    }
+
+    #[test]
+    fn endtransparencygroup_rejects_softmask_frame() {
+        let mut ctx = make_ctx();
+        let lum = ctx.names.intern(b"Luminosity");
+        let bbox = make_array(
+            &mut ctx,
+            &[
+                PsObject::real(0.0),
+                PsObject::real(0.0),
+                PsObject::real(1.0),
+                PsObject::real(1.0),
+            ],
+        );
+        let dict = make_dict(
+            &mut ctx,
+            &[(b"Subtype", PsObject::name_lit(lum)), (b"BBox", bbox)],
+        );
+        ctx.o_stack.push(dict).unwrap();
+        op_beginsoftmask(&mut ctx).unwrap();
+        assert!(matches!(
+            op_endtransparencygroup(&mut ctx),
+            Err(PsError::RangeCheck)
+        ));
+        assert_eq!(ctx.group_stack.len(), 1);
+    }
+
+    #[test]
+    fn softmask_transfer_invert_detected() {
+        let mut ctx = make_ctx();
+        let lum = ctx.names.intern(b"Luminosity");
+        let bbox = make_array(
+            &mut ctx,
+            &[
+                PsObject::real(0.0),
+                PsObject::real(0.0),
+                PsObject::real(1.0),
+                PsObject::real(1.0),
+            ],
+        );
+        // Build the procedure { 1 exch sub } as an executable array.
+        let exch_id = ctx.names.intern(b"exch");
+        let sub_id = ctx.names.intern(b"sub");
+        let proc_entity = ctx.arrays.allocate_from(&[
+            PsObject::int(1),
+            PsObject::name_exec(exch_id),
+            PsObject::name_exec(sub_id),
+        ]);
+        let tr = PsObject::procedure(proc_entity, 3);
+        let dict = make_dict(
+            &mut ctx,
+            &[
+                (b"Subtype", PsObject::name_lit(lum)),
+                (b"BBox", bbox),
+                (b"TR", tr),
+            ],
+        );
+        ctx.o_stack.push(dict).unwrap();
+        op_beginsoftmask(&mut ctx).unwrap();
+        match &ctx.group_stack.last().unwrap().kind {
+            GroupKind::SoftMask { params } => assert!(params.transfer_invert),
+            _ => panic!("expected SoftMask"),
+        }
+        op_endsoftmask(&mut ctx).unwrap();
+        op_clearsoftmask(&mut ctx).unwrap();
+    }
+
+    #[test]
+    fn softmask_backdrop_color_rgb_round_trip() {
+        let mut ctx = make_ctx();
+        let lum = ctx.names.intern(b"Luminosity");
+        let bbox = make_array(
+            &mut ctx,
+            &[
+                PsObject::real(0.0),
+                PsObject::real(0.0),
+                PsObject::real(1.0),
+                PsObject::real(1.0),
+            ],
+        );
+        let bc = make_array(
+            &mut ctx,
+            &[
+                PsObject::real(0.25),
+                PsObject::real(0.5),
+                PsObject::real(0.75),
+            ],
+        );
+        let dict = make_dict(
+            &mut ctx,
+            &[
+                (b"Subtype", PsObject::name_lit(lum)),
+                (b"BBox", bbox),
+                (b"BC", bc),
+            ],
+        );
+        ctx.o_stack.push(dict).unwrap();
+        op_beginsoftmask(&mut ctx).unwrap();
+        match &ctx.group_stack.last().unwrap().kind {
+            GroupKind::SoftMask { params } => {
+                assert_eq!(params.backdrop_color, Some([0.25, 0.5, 0.75]))
+            }
+            _ => panic!("expected SoftMask"),
+        }
+        op_endsoftmask(&mut ctx).unwrap();
+        op_clearsoftmask(&mut ctx).unwrap();
+    }
+
+    #[test]
+    fn softmask_paint_routes_through_mask_then_content() {
+        let mut ctx = make_ctx();
+        let lum = ctx.names.intern(b"Luminosity");
+        let bbox = make_array(
+            &mut ctx,
+            &[
+                PsObject::real(0.0),
+                PsObject::real(0.0),
+                PsObject::real(10.0),
+                PsObject::real(10.0),
+            ],
+        );
+        let dict = make_dict(
+            &mut ctx,
+            &[(b"Subtype", PsObject::name_lit(lum)), (b"BBox", bbox)],
+        );
+        ctx.o_stack.push(dict).unwrap();
+        op_beginsoftmask(&mut ctx).unwrap();
+        // While building the mask, paint emits into frame.display_list.
+        ctx.current_display_list_mut()
+            .push(stet_graphics::display_list::DisplayElement::InitClip);
+        op_endsoftmask(&mut ctx).unwrap();
+        // After endsoftmask, frame.display_list is reset for content
+        // capture and the mask is stashed in GroupKind::Masked::mask.
+        assert_eq!(
+            ctx.group_stack.last().unwrap().display_list.len(),
+            0,
+            "content list should start empty"
+        );
+        ctx.current_display_list_mut()
+            .push(stet_graphics::display_list::DisplayElement::InitClip);
+        ctx.current_display_list_mut()
+            .push(stet_graphics::display_list::DisplayElement::InitClip);
+        op_clearsoftmask(&mut ctx).unwrap();
+        match &ctx.display_list.elements()[0] {
+            DisplayElement::SoftMasked { mask, content, .. } => {
+                assert_eq!(mask.len(), 1);
+                assert_eq!(content.len(), 2);
+            }
+            _ => panic!("expected SoftMasked"),
+        }
     }
 
     #[test]

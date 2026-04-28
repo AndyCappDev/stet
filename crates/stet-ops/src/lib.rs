@@ -743,6 +743,9 @@ pub fn build_system_dict(ctx: &mut Context) {
         "endtransparencygroup",
         transparency_ops::op_endtransparencygroup,
     );
+    register(ctx, sd, "beginsoftmask", transparency_ops::op_beginsoftmask);
+    register(ctx, sd, "endsoftmask", transparency_ops::op_endsoftmask);
+    register(ctx, sd, "clearsoftmask", transparency_ops::op_clearsoftmask);
 
     // --- Page size no-ops ---
     register(ctx, sd, "letter", font_ops::op_letter);
