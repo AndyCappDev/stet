@@ -183,6 +183,7 @@ impl PdfDevice {
                 stet_core::pdfmark::TrappedState::True => b"True",
                 stet_core::pdfmark::TrappedState::False => b"False",
                 stet_core::pdfmark::TrappedState::Unknown => b"Unknown",
+                _ => b"Unknown",
             };
             entries.push((b"Trapped".to_vec(), PdfObj::Name(name.to_vec())));
         }
@@ -1668,6 +1669,7 @@ fn compute_page_overrides(ctx: Option<&Context>, page_count: usize) -> Vec<Effec
                     });
                 }
             }
+            _ => continue,
         }
     }
 

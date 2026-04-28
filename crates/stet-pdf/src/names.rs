@@ -145,6 +145,7 @@ fn page_view_dest_array(page_ref: u32, view: &ViewSpec) -> PdfObj {
             elems.push(PdfObj::name("FitBV"));
             elems.push(opt_real(*left));
         }
+        _ => elems.push(PdfObj::name("Fit")),
     }
     PdfObj::Array(elems)
 }

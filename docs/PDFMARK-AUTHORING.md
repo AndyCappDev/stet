@@ -633,6 +633,33 @@ arranged for `pdfmark` to be defined (it shouldn't be — see above).
 - **3D content (`/RichMedia`, U3D/PRC), movies, sound, geospatial
   annotations.** Out of the pdfmark spec or deprecated in modern PDFs.
 
+## Extending the record surface
+
+The `stet_core::pdfmark` module is a stable extension point. Future
+type-tags (Tagged PDF, more annotation subtypes) will land as new
+variants on `PdfMarkRecord` and friends, so the public enums there
+are marked `#[non_exhaustive]`:
+
+- `PdfMarkRecord` — top-level record kind dispatched on type-tag
+- `AnnotationSubtype`, `AnnotationTarget` — annotation kinds and targets
+- `OutlineDestination`, `OutlineAction`, `GoToTarget`, `ViewSpec` —
+  destination/action shapes
+- `FieldType`, `FieldValue` — form-field discriminators
+- `DocDate`, `TrappedState`, `TzSign`, `LinkHighlight`,
+  `TextAnnotationIcon`, `PageOverrideScope` — small helper enums
+
+Cross-crate `match` expressions over these enums must include a
+`_ =>` arm; new variants are then additive. The corresponding record
+**structs** (`DocInfoRecord`, `OutlineRecord`, `AnnotationRecord`,
+`WidgetAnnotation`, `EmbedRecord`, …) are intentionally **not**
+`#[non_exhaustive]`: they are constructed by the pdfmark dispatcher
+in `stet-ops/src/pdfmark_ops.rs` cross-crate from `stet-core`, and
+`#[non_exhaustive]` would block all struct-expression construction
+including functional updates. New fields land additively for read
+paths (consumers should pattern-match with `..` or access fields
+directly); construction sites get updated in lockstep when fields
+are added.
+
 See also:
 
 - `docs/PLAN-PDFMARK-AUTHORING.md` — phase plan including outlines, annotations, named destinations, viewer preferences, AcroForm widgets, embedded files, JavaScript actions, and the deferred Tagged-PDF work.

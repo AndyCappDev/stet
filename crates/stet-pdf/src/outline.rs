@@ -178,6 +178,7 @@ fn destination_to_pdf(dest: &OutlineDestination, page_refs: &[u32]) -> Destinati
             Some(dict) => DestinationEmit::Action(dict),
             None => DestinationEmit::None,
         },
+        _ => DestinationEmit::None,
     }
 }
 
@@ -198,6 +199,7 @@ pub(crate) fn encode_action(action: &OutlineAction, page_refs: &[u32]) -> Option
                     Some(page_ref) => page_view_dest_array(page_ref, view),
                     None => return None,
                 },
+                _ => return None,
             };
             vec![
                 (b"Type".to_vec(), PdfObj::name("Action")),
@@ -215,6 +217,7 @@ pub(crate) fn encode_action(action: &OutlineAction, page_refs: &[u32]) -> Option
             (b"S".to_vec(), PdfObj::name("Named")),
             (b"N".to_vec(), PdfObj::name(name)),
         ],
+        _ => return None,
     }))
 }
 
@@ -271,6 +274,7 @@ fn page_view_dest_array(page_ref: u32, view: &ViewSpec) -> PdfObj {
             elems.push(PdfObj::name("FitBV"));
             elems.push(opt_real(*left));
         }
+        _ => elems.push(PdfObj::name("Fit")),
     }
     PdfObj::Array(elems)
 }

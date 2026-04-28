@@ -419,6 +419,7 @@ fn field_type_name(ft: FieldType) -> &'static str {
         FieldType::Tx => "Tx",
         FieldType::Ch => "Ch",
         FieldType::Sig => "Sig",
+        _ => "Tx",
     }
 }
 
@@ -434,6 +435,7 @@ fn encode_field_value(value: &FieldValue) -> PdfObj {
                 .map(|v| PdfObj::LitString(v.clone().into_bytes()))
                 .collect(),
         ),
+        _ => PdfObj::Null,
     }
 }
 

@@ -68,6 +68,7 @@ pub fn write_annotation(
             // Widgets are owned by the form-fields writer.
             unreachable!("widget annotations are emitted by form_fields::write_form");
         }
+        _ => {}
     }
 
     writer.add_object(&PdfObj::Dict(entries))
@@ -169,6 +170,7 @@ fn subtype_name(subtype: &AnnotationSubtype) -> &'static str {
         AnnotationSubtype::Text { .. } => "Text",
         AnnotationSubtype::FreeText { .. } => "FreeText",
         AnnotationSubtype::Widget(_) => "Widget",
+        _ => "Unknown",
     }
 }
 
@@ -178,6 +180,7 @@ fn highlight_name(h: LinkHighlight) -> &'static str {
         LinkHighlight::Invert => "I",
         LinkHighlight::Outline => "O",
         LinkHighlight::Push => "P",
+        _ => "I",
     }
 }
 
@@ -190,6 +193,7 @@ fn text_icon_name(icon: TextAnnotationIcon) -> &'static str {
         TextAnnotationIcon::NewParagraph => "NewParagraph",
         TextAnnotationIcon::Paragraph => "Paragraph",
         TextAnnotationIcon::Insert => "Insert",
+        _ => "Note",
     }
 }
 
@@ -238,6 +242,7 @@ fn attach_target(
                 entries.push((b"A".to_vec(), dict));
             }
         }
+        _ => {}
     }
 }
 
@@ -287,6 +292,7 @@ fn page_view_dest_array(page_ref: u32, view: &ViewSpec) -> PdfObj {
             elems.push(PdfObj::name("FitBV"));
             elems.push(opt_real(*left));
         }
+        _ => elems.push(PdfObj::name("Fit")),
     }
     PdfObj::Array(elems)
 }

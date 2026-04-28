@@ -21,7 +21,11 @@
 /// type-tag the interpreter recognises (`/DOCINFO`, `/OUT`, `/ANN`, …).
 /// Later phases add variants without disturbing this enum's external API
 /// beyond the new variant itself.
+///
+/// Marked `#[non_exhaustive]`: cross-crate `match` sites need a
+/// wildcard arm so future type-tags (Tagged PDF, etc.) land additively.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum PdfMarkRecord {
     /// `/DOCINFO` — entries to merge into the PDF Info dictionary.
     DocInfo(DocInfoRecord),
@@ -115,6 +119,7 @@ pub struct DocInfoRecord {
 
 /// `/Trapped` value as written to the Info dict.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TrappedState {
     True,
     False,
@@ -162,6 +167,7 @@ impl DocDate {
 /// A document date entry. The writer can either round-trip a raw string
 /// (already in PDF date syntax) or format a parsed [`PdfDate`].
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum DocDate {
     /// Raw string the producer issued — passed through verbatim. Used
     /// when the input is already in PDF date format and round-tripping
@@ -191,6 +197,7 @@ pub struct PdfDate {
 
 /// Sign of a PDF date timezone offset.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TzSign {
     /// `+` — east of UTC.
     East,
@@ -334,6 +341,7 @@ pub struct OutlineRecord {
 
 /// What a bookmark entry navigates to when clicked.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum OutlineDestination {
     /// `/Page N /View [...]` — explicit page + view spec.
     PageView { page: u32, view: ViewSpec },
@@ -348,6 +356,7 @@ pub enum OutlineDestination {
 
 /// Outline view spec, mirroring PDF's `/Dest` array shape.
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub enum ViewSpec {
     /// `[/XYZ left top zoom]` — null components keep the current value.
     Xyz {
@@ -391,6 +400,7 @@ impl Default for ViewSpec {
 /// link annotation `/A`, page `/AA` open / close — because the on-the-
 /// wire shape is identical.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum OutlineAction {
     /// `<< /S /URI /URI (string) >>`.
     Uri(String),
@@ -413,6 +423,7 @@ pub enum OutlineAction {
 
 /// `/GoTo` action target.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum GoToTarget {
     /// `/D /SomeName` — resolved against the document's name tree.
     Named(String),
@@ -581,6 +592,7 @@ pub struct AnnotationRecord {
 /// specific to that subtype; shared keys (rect, color, border, title,
 /// contents, page) live on the parent [`AnnotationRecord`].
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum AnnotationSubtype {
     /// `/Subtype /Link` — clickable region. Target is an action,
     /// explicit page+view, or a named destination; exactly one of the
@@ -658,6 +670,7 @@ pub struct WidgetAnnotation {
 /// Field type per PDF 1.7 spec § 12.7.4. The variant maps directly to
 /// the `/FT` name in the output PDF.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FieldType {
     /// `/Btn` — pushbuttons, checkboxes, radio buttons.
     Btn,
@@ -672,6 +685,7 @@ pub enum FieldType {
 /// Field value — variant shape depends on the field's `/FT`. The
 /// emitter writes the corresponding PDF object kind for each variant.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum FieldValue {
     /// Text string — used for `/Tx` and single-select `/Ch` fields.
     Text(String),
@@ -696,6 +710,7 @@ pub struct ChoiceOption {
 /// `/Link` highlight mode — controls the visual feedback when the
 /// user activates the link region.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum LinkHighlight {
     None,
     Invert,
@@ -706,6 +721,7 @@ pub enum LinkHighlight {
 /// Standard `/Text` annotation icon names. Anything outside this set
 /// falls back to `/Note`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TextAnnotationIcon {
     Comment,
     Note,
@@ -736,6 +752,7 @@ pub struct Border {
 /// kept distinct because annotations can carry richer action data
 /// (e.g. JavaScript) and have their own resolution rules.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum AnnotationTarget {
     /// Explicit `/Page N /View [...]`. `page` is 1-based.
     PageView { page: u32, view: ViewSpec },
@@ -840,6 +857,7 @@ pub struct EmbedRecord {
 /// Whether a [`PageOverrideRecord`] targets one specific page or the
 /// whole document.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PageOverrideScope {
     /// `/PAGE` — single-page override. `1`-based page index.
     Single(u32),
