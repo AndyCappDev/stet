@@ -130,6 +130,7 @@ pub trait OutputDevice {
                         }
                     }
                 }
+                _ => {}
             }
         }
         self.show_page(output_path)
@@ -250,6 +251,7 @@ pub fn replay_to_device(list: &DisplayList, device: &mut dyn OutputDevice) {
                     }
                 }
             }
+            _ => {}
         }
     }
 }

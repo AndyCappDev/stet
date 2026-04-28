@@ -1190,6 +1190,7 @@ fn build_spot_colorspace(
                 PdfObj::Ref(func_ref),
             ])
         }
+        _ => PdfObj::name("DeviceRGB"),
     }
 }
 

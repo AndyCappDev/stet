@@ -210,7 +210,13 @@ impl OcgVisibility {
 }
 
 /// A single recorded drawing operation.
+///
+/// Marked `#[non_exhaustive]` so additional element kinds can land
+/// without breaking third-party renderers; consumers must include a
+/// wildcard arm in their `match` expressions. See
+/// `docs/DISPLAY-LIST.md` ("Stability") for the policy.
 #[derive(Clone)]
+#[non_exhaustive]
 pub enum DisplayElement {
     /// Fill a path.
     Fill { path: PsPath, params: FillParams },

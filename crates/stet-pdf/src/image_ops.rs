@@ -298,6 +298,18 @@ pub fn convert_image(sample_data: &[u8], params: &ImageParams) -> ImageXObject {
                 icc_profile: None,
             }
         }
+        _ => ImageXObject {
+            sample_data: sample_data.to_vec(),
+            smask_data: None,
+            width: params.width,
+            height: params.height,
+            pdf_color_space: PdfColorSpace::DeviceGray,
+            bits_per_component: 8,
+            is_imagemask: false,
+            mask_color: None,
+            color_key_mask: params.mask_color.clone(),
+            icc_profile: None,
+        },
     }
 }
 

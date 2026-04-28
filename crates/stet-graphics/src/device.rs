@@ -78,7 +78,11 @@ pub struct SpotColor {
 }
 
 /// Separation or DeviceN color space with pre-sampled tint function.
+///
+/// Marked `#[non_exhaustive]`; cross-crate `match` expressions need a
+/// wildcard arm.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum SpotColorSpace {
     Separation {
         name: Vec<u8>,
@@ -122,6 +126,10 @@ pub fn cmyk_channel_for_name(name: &[u8]) -> u8 {
 }
 
 /// Parameters for filling a path.
+///
+/// Constructed by interpreter/parser code (stet-ops, stet-pdf-reader)
+/// and read by renderers. New fields may be added without notice; pattern-
+/// matching consumers should use `..` to ignore unmatched fields.
 #[derive(Clone, Debug)]
 pub struct FillParams {
     pub color: DeviceColor,
@@ -166,6 +174,9 @@ pub struct FillParams {
 ///
 /// The PDF device uses these for BT/ET/Tf/Tj text operators.
 /// The raster device ignores them (uses Fill elements for glyph paths).
+///
+/// New fields may be added without notice; pattern-matching consumers
+/// should use `..` to ignore unmatched fields.
 #[derive(Clone, Debug)]
 pub struct TextParams {
     /// Character bytes (or 2-byte CID values for Type 0).
@@ -215,6 +226,9 @@ pub struct TextParams {
 }
 
 /// Parameters for stroking a path.
+///
+/// New fields may be added without notice; pattern-matching consumers
+/// should use `..` to ignore unmatched fields.
 #[derive(Clone, Debug)]
 pub struct StrokeParams {
     pub color: DeviceColor,
@@ -259,6 +273,9 @@ pub struct StrokeParams {
 }
 
 /// Parameters for clipping.
+///
+/// New fields may be added without notice; pattern-matching consumers
+/// should use `..` to ignore unmatched fields.
 #[derive(Clone, Debug)]
 pub struct ClipParams {
     pub fill_rule: FillRule,
@@ -334,7 +351,11 @@ impl TintLookupTable {
 }
 
 /// VM-free color space enum for images stored in the display list.
+///
+/// Marked `#[non_exhaustive]`; cross-crate `match` expressions need a
+/// wildcard arm to remain forward-compatible.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum ImageColorSpace {
     DeviceGray,
     DeviceRGB,
@@ -402,6 +423,9 @@ impl ImageColorSpace {
 }
 
 /// Parameters for drawing an image.
+///
+/// New fields may be added without notice; pattern-matching consumers
+/// should use `..` to ignore unmatched fields.
 #[derive(Clone, Debug)]
 pub struct ImageParams {
     pub width: u32,
@@ -424,7 +448,11 @@ pub struct ImageParams {
 }
 
 /// Color space carried through the display list for native shading output.
+///
+/// Marked `#[non_exhaustive]`; cross-crate `match` expressions need a
+/// wildcard arm.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum ShadingColorSpace {
     DeviceGray,
     DeviceRGB,
@@ -458,6 +486,9 @@ impl ShadingColorSpace {
 }
 
 /// A single color stop in a gradient.
+///
+/// New fields may be added without notice; pattern-matching consumers
+/// should use `..` to ignore unmatched fields.
 #[derive(Clone, Debug)]
 pub struct ColorStop {
     pub position: f64,
@@ -466,6 +497,9 @@ pub struct ColorStop {
 }
 
 /// Parameters for axial (linear) gradient shading (Type 2).
+///
+/// New fields may be added without notice; pattern-matching consumers
+/// should use `..` to ignore unmatched fields.
 #[derive(Clone, Debug)]
 pub struct AxialShadingParams {
     pub x0: f64,
@@ -496,6 +530,9 @@ pub struct AxialShadingParams {
 }
 
 /// Parameters for radial gradient shading (Type 3).
+///
+/// New fields may be added without notice; pattern-matching consumers
+/// should use `..` to ignore unmatched fields.
 #[derive(Clone, Debug)]
 pub struct RadialShadingParams {
     pub x0: f64,
@@ -540,6 +577,9 @@ pub struct ShadingTriangle {
 }
 
 /// Parameters for Gouraud-shaded triangle mesh shading (Types 4 & 5).
+///
+/// New fields may be added without notice; pattern-matching consumers
+/// should use `..` to ignore unmatched fields.
 #[derive(Clone, Debug)]
 pub struct MeshShadingParams {
     pub triangles: Vec<ShadingTriangle>,
@@ -570,6 +610,9 @@ pub struct ShadingPatch {
 }
 
 /// Parameters for Coons/tensor-product patch mesh shading (Types 6 & 7).
+///
+/// New fields may be added without notice; pattern-matching consumers
+/// should use `..` to ignore unmatched fields.
 #[derive(Clone, Debug)]
 pub struct PatchShadingParams {
     pub patches: Vec<ShadingPatch>,
@@ -629,6 +672,236 @@ pub struct PatternFillParams {
     /// PDF overprint mode (0 or 1). When 1, CMYK(0,0,0,0) pixels in tile
     /// images are transparent (no ink = don't paint).
     pub overprint_mode: i32,
+}
+
+// ---------------------------------------------------------------------------
+// Default impls
+//
+// The `Default` impls below pair with `#[non_exhaustive]` on each type:
+// downstream consumers (and other workspace crates) construct values via
+// `FillParams { color, ..Default::default() }`-style functional update so
+// new fields can be added without breaking call sites. The defaults are
+// chosen for ergonomics (alpha = 1.0, blend mode = Normal, identity CTM,
+// solid black colour, no transfer/halftone/spot state) — not as
+// semantically meaningful "blank records".
+// ---------------------------------------------------------------------------
+
+impl Default for FillParams {
+    fn default() -> Self {
+        Self {
+            color: DeviceColor::default(),
+            fill_rule: FillRule::default(),
+            ctm: Matrix::default(),
+            is_text_glyph: false,
+            overprint: false,
+            overprint_mode: 0,
+            opm_paired: false,
+            painted_channels: 0,
+            is_device_cmyk: false,
+            spot_color: None,
+            rendering_intent: 0,
+            transfer: TransferState::default(),
+            halftone: HalftoneState::default(),
+            bg_ucr: BgUcrState::default(),
+            alpha: 1.0,
+            blend_mode: 0,
+            alpha_is_shape: false,
+        }
+    }
+}
+
+impl Default for StrokeParams {
+    fn default() -> Self {
+        Self {
+            color: DeviceColor::default(),
+            line_width: 1.0,
+            line_cap: LineCap::default(),
+            line_join: LineJoin::default(),
+            miter_limit: 10.0,
+            dash_pattern: DashPattern::default(),
+            ctm: Matrix::default(),
+            stroke_adjust: false,
+            is_text_glyph: false,
+            overprint: false,
+            overprint_mode: 0,
+            opm_paired: false,
+            painted_channels: 0,
+            is_device_cmyk: false,
+            spot_color: None,
+            rendering_intent: 0,
+            transfer: TransferState::default(),
+            halftone: HalftoneState::default(),
+            bg_ucr: BgUcrState::default(),
+            alpha: 1.0,
+            blend_mode: 0,
+            alpha_is_shape: false,
+        }
+    }
+}
+
+impl Default for ClipParams {
+    fn default() -> Self {
+        Self {
+            fill_rule: FillRule::default(),
+            ctm: Matrix::default(),
+            stroke_params: None,
+        }
+    }
+}
+
+impl Default for TextParams {
+    fn default() -> Self {
+        Self {
+            text: Vec::new(),
+            start_x: 0.0,
+            start_y: 0.0,
+            font_entity: 0,
+            font_name: Vec::new(),
+            font_type: 1,
+            font_size: 0.0,
+            color: DeviceColor::default(),
+            ctm: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            font_matrix: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            paint_type: 0,
+            stroke_width: 0.0,
+            spot_color: None,
+            rendering_intent: 0,
+            transfer: TransferState::default(),
+            halftone: HalftoneState::default(),
+            bg_ucr: BgUcrState::default(),
+            fill_opacity: 1.0,
+            stroke_opacity: 1.0,
+            blend_mode: 0,
+            alpha_is_shape: false,
+            text_knockout: true,
+        }
+    }
+}
+
+impl Default for ImageColorSpace {
+    fn default() -> Self {
+        ImageColorSpace::DeviceGray
+    }
+}
+
+impl Default for ImageParams {
+    fn default() -> Self {
+        Self {
+            width: 0,
+            height: 0,
+            color_space: ImageColorSpace::default(),
+            bits_per_component: 8,
+            ctm: Matrix::default(),
+            image_matrix: Matrix::default(),
+            interpolate: false,
+            mask_color: None,
+            alpha: 1.0,
+            blend_mode: 0,
+            overprint: false,
+            overprint_mode: 0,
+            opm_paired: false,
+            painted_channels: 0,
+            alpha_is_shape: false,
+        }
+    }
+}
+
+impl Default for ShadingColorSpace {
+    fn default() -> Self {
+        ShadingColorSpace::DeviceRGB
+    }
+}
+
+impl Default for ColorStop {
+    fn default() -> Self {
+        Self {
+            position: 0.0,
+            color: DeviceColor::default(),
+            raw_components: Vec::new(),
+        }
+    }
+}
+
+impl Default for AxialShadingParams {
+    fn default() -> Self {
+        Self {
+            x0: 0.0,
+            y0: 0.0,
+            x1: 0.0,
+            y1: 0.0,
+            color_stops: Vec::new(),
+            extend_start: false,
+            extend_end: false,
+            ctm: Matrix::default(),
+            bbox: None,
+            color_space: ShadingColorSpace::default(),
+            overprint: false,
+            painted_channels: 0,
+            alpha: 1.0,
+            blend_mode: 0,
+            alpha_is_shape: false,
+            spot_tint_blend: false,
+        }
+    }
+}
+
+impl Default for RadialShadingParams {
+    fn default() -> Self {
+        Self {
+            x0: 0.0,
+            y0: 0.0,
+            r0: 0.0,
+            x1: 0.0,
+            y1: 0.0,
+            r1: 0.0,
+            color_stops: Vec::new(),
+            extend_start: false,
+            extend_end: false,
+            ctm: Matrix::default(),
+            bbox: None,
+            color_space: ShadingColorSpace::default(),
+            overprint: false,
+            painted_channels: 0,
+            alpha: 1.0,
+            blend_mode: 0,
+            alpha_is_shape: false,
+            spot_tint_blend: false,
+        }
+    }
+}
+
+impl Default for MeshShadingParams {
+    fn default() -> Self {
+        Self {
+            triangles: Vec::new(),
+            ctm: Matrix::default(),
+            bbox: None,
+            color_space: ShadingColorSpace::default(),
+            overprint: false,
+            painted_channels: 0,
+            color_lut: None,
+            alpha: 1.0,
+            blend_mode: 0,
+            alpha_is_shape: false,
+        }
+    }
+}
+
+impl Default for PatchShadingParams {
+    fn default() -> Self {
+        Self {
+            patches: Vec::new(),
+            ctm: Matrix::default(),
+            bbox: None,
+            color_space: ShadingColorSpace::default(),
+            overprint: false,
+            painted_channels: 0,
+            color_lut: None,
+            alpha: 1.0,
+            blend_mode: 0,
+            alpha_is_shape: false,
+        }
+    }
 }
 
 /// Trait for consuming rendered page pixel data.

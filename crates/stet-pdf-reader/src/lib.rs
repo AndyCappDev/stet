@@ -1222,6 +1222,7 @@ mod tests {
                         );
                         dump(elements, depth + 1);
                     }
+                    _ => {}
                 }
             }
         }

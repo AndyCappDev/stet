@@ -2042,6 +2042,7 @@ fn samples_to_rgba(
             }
             rgba
         }
+        _ => vec![0u8; npixels * 4],
     }
 }
 
@@ -3227,6 +3228,7 @@ fn render_element(
                 render_element(pixmap, band_state, elem, &elem_ctx);
             }
         }
+        _ => {}
     }
 }
 
@@ -6976,6 +6978,7 @@ fn group_content_is_native_cmyk(elements: &DisplayList) -> bool {
                 }
                 found_paint = true;
             }
+            _ => return false,
         }
     }
     found_paint
@@ -9388,6 +9391,7 @@ fn compute_paint_bounds(list: &DisplayList, _dpi: f64) -> Option<BBox2D> {
                 // if the mask form contains OCG layers, the parent bbox cap
                 // provides a sufficient upper bound.
             }
+            _ => {}
         }
     }
     union
@@ -10589,6 +10593,7 @@ fn debug_bbox_lines(list: &DisplayList, dpi: f64, depth: usize, out: &mut Vec<St
             DisplayElement::InitClip => "InitClip",
             DisplayElement::ErasePage => "ErasePage",
             DisplayElement::Text { .. } => "Text",
+            _ => "Unknown",
         };
         let yb = &y_bboxes[i];
         let fb = &full_bboxes[i];

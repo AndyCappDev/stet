@@ -469,3 +469,70 @@ for (i, elem) in list.elements().iter().enumerate() {
     }
 }
 ```
+
+## Stability
+
+The display list IR is intended to be a stable extension point: adding a
+new variant or a new field is meant to be additive, not breaking, for
+third-party renderers that consume `DisplayList`.
+
+### Match surfaces (`#[non_exhaustive]`)
+
+The following enums are marked `#[non_exhaustive]`. New variants may be
+added without notice; cross-crate `match` expressions **must include a
+wildcard arm**:
+
+- `DisplayElement` — the load-bearing element enum
+- `ImageColorSpace` — image color spaces
+- `ShadingColorSpace` — shading color spaces
+- `SpotColorSpace` — Separation / DeviceN color spaces
+
+```rust
+match elem {
+    DisplayElement::Fill { .. } => { /* ... */ }
+    DisplayElement::Stroke { .. } => { /* ... */ }
+    // ... handle the variants you care about ...
+    _ => {} // <- required: future variants land here
+}
+```
+
+### Param structs (open, but extension-tolerant)
+
+The param structs (`FillParams`, `StrokeParams`, `ImageParams`,
+`ClipParams`, `TextParams`, `ColorStop`, the four shading param
+structs) are **not** `#[non_exhaustive]` — they are produced by code
+across multiple stet crates (interpreter, PDF reader, renderer), and
+`#[non_exhaustive]` would block all cross-crate construction including
+`..Default::default()` updates.
+
+Instead, these structs follow the convention that **new fields may be
+added without a major version bump**. To remain forward-compatible:
+
+- Read fields directly: `params.color`, `params.alpha`. Field access
+  doesn't break when fields are added.
+- Pattern-match with `..` to ignore unmatched fields:
+  ```rust
+  let FillParams { color, alpha, .. } = params;
+  ```
+- Don't construct these structs from outside the `stet-graphics` crate
+  if you can avoid it; if you must, accept that adding fields is a
+  source-breaking change for that construction site (but only that
+  site — read paths still compile).
+
+Each marked struct also implements `Default`, so you can use the
+functional-update pattern within a single crate:
+```rust
+let p = FillParams { color, alpha: 0.5, ..FillParams::default() };
+```
+
+### Construction surfaces (open)
+
+User-constructed types stay open (no `#[non_exhaustive]`):
+
+- `Matrix`, `PsPath`, `PathSegment` — geometry primitives
+- `DeviceColor` — color representation
+- `LayerSet`, `Configuration`, `OcgVisibility` — user-driven layer
+  policy types
+
+These are explicitly intended to be built by external code; marking
+them would force a builder API on every caller.

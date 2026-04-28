@@ -59,6 +59,7 @@ fn shading_color_space_to_pdf(writer: &mut PdfWriter, cs: &ShadingColorSpace) ->
             }
             PdfObj::Array(vec![PdfObj::name("CalGray"), PdfObj::Dict(dict_entries)])
         }
+        _ => PdfObj::name("DeviceRGB"),
     }
 }
 

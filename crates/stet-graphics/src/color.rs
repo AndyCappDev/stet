@@ -5,8 +5,9 @@
 //! Color types and CIE color space parameters.
 
 /// Line cap style.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum LineCap {
+    #[default]
     Butt = 0,
     Round = 1,
     Square = 2,
@@ -24,8 +25,9 @@ impl LineCap {
 }
 
 /// Line join style.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum LineJoin {
+    #[default]
     Miter = 0,
     Round = 1,
     Bevel = 2,
@@ -43,8 +45,9 @@ impl LineJoin {
 }
 
 /// Fill rule for path filling.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum FillRule {
+    #[default]
     NonZeroWinding,
     EvenOdd,
 }
@@ -604,6 +607,12 @@ impl DeviceColor {
             params.c_table[idx],
             &params.abc_params,
         )
+    }
+}
+
+impl Default for DeviceColor {
+    fn default() -> Self {
+        Self::black()
     }
 }
 

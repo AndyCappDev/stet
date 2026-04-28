@@ -1260,6 +1260,10 @@ fn replay_form_elements(
             | DisplayElement::OcgGroup { .. } => {
                 // Groups/SoftMasked/OcgGroup are PDF-only; PS display lists don't contain them
             }
+            _ => {
+                // Future variants — pass through unchanged
+                target.push(elem.clone());
+            }
         }
     }
 }

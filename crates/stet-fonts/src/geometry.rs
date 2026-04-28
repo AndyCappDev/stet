@@ -25,6 +25,12 @@ pub struct Matrix {
     pub ty: f64,
 }
 
+impl Default for Matrix {
+    fn default() -> Self {
+        Self::identity()
+    }
+}
+
 impl Matrix {
     /// Identity matrix.
     pub fn identity() -> Self {

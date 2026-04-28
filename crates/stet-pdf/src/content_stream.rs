@@ -508,6 +508,7 @@ pub fn build_content_stream(
             DisplayElement::Group { .. }
             | DisplayElement::SoftMasked { .. }
             | DisplayElement::OcgGroup { .. } => {} // TODO: transparency/layer PDF output
+            _ => {}
         }
     }
 
@@ -802,6 +803,7 @@ pub fn build_tile_content_stream(
             DisplayElement::Group { .. }
             | DisplayElement::SoftMasked { .. }
             | DisplayElement::OcgGroup { .. } => {} // TODO: transparency/layer PDF output
+            _ => {}
         }
     }
 
@@ -940,6 +942,7 @@ fn spot_cs_key(spot: &SpotColor) -> Vec<u8> {
             }
             key
         }
+        _ => b"unknown".to_vec(),
     }
 }
 
