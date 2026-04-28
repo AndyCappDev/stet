@@ -30,6 +30,12 @@ pub enum PdfMarkRecord {
     Outline(OutlineRecord),
     /// `/ANN` — one page annotation (link, sticky note, free-text, …).
     Annotation(AnnotationRecord),
+    /// `/DEST` — one named destination contributing to /Names /Dests.
+    Dest(DestRecord),
+    /// `/PAGE` (single-page override) or `/PAGES` (document-wide
+    /// default for keys that aren't already overridden on a specific
+    /// page).
+    PageOverride(PageOverrideRecord),
 }
 
 /// Buffered `pdfmark` records. Lives on `Context` for the entire job;
@@ -629,6 +635,82 @@ pub enum AnnotationTarget {
     NamedDest(String),
     /// `/Action <<...>>` passthrough.
     Action(OutlineAction),
+}
+
+// ----- Named destinations (Phase 4) ----------------------------------------
+
+/// One `/DEST pdfmark` entry — registers a named destination in the
+/// document's `/Names /Dests` name tree. PDF outline entries and link
+/// annotations resolve the matching `name` against this tree.
+#[derive(Clone, Debug)]
+pub struct DestRecord {
+    /// `/Dest` — the destination name (interned bytes; UTF-8 lossy).
+    pub name: String,
+    /// `/Page` — 1-based target page.
+    pub page: u32,
+    /// `/View` — view spec; default `[/XYZ null null null]`.
+    pub view: ViewSpec,
+}
+
+// ----- Page boxes & page overrides (Phase 4) -------------------------------
+
+/// One `/PAGE` (single-page override) or `/PAGES` (document-wide
+/// default) pdfmark entry. The writer applies the keys to the
+/// per-page dict at build time; `/PAGE` wins over `/PAGES` for
+/// any key that's set on both, and an explicit `/PAGE` for page N
+/// wins over the implicit "current page" target.
+#[derive(Clone, Debug)]
+pub struct PageOverrideRecord {
+    /// Scope of the override.
+    pub scope: PageOverrideScope,
+    /// `/CropBox`, `/BleedBox`, `/TrimBox`, `/ArtBox` rectangles in
+    /// default user space — `[llx, lly, urx, ury]`.
+    pub boxes: PageBoxes,
+    /// `/Rotate` — 0, 90, 180, or 270. Other values land here as-is
+    /// and are dropped at write time.
+    pub rotate: Option<i32>,
+}
+
+/// Whether a [`PageOverrideRecord`] targets one specific page or the
+/// whole document.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PageOverrideScope {
+    /// `/PAGE` — single-page override. `1`-based page index.
+    Single(u32),
+    /// `/PAGES` — document-wide defaults applied to every page that
+    /// doesn't have an explicit `/PAGE` value for that same key.
+    All,
+}
+
+/// Per-page box rectangles. Each entry is `Option<[llx, lly, urx, ury]>`;
+/// `None` means "leave the device default in place".
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PageBoxes {
+    pub crop_box: Option<[f64; 4]>,
+    pub bleed_box: Option<[f64; 4]>,
+    pub trim_box: Option<[f64; 4]>,
+    pub art_box: Option<[f64; 4]>,
+}
+
+impl PageBoxes {
+    /// Merge `other` into `self` — `self`'s entries win when both are
+    /// `Some`. Used by the writer to layer per-page `/PAGE` over
+    /// document-wide `/PAGES` defaults.
+    pub fn merge_over(&self, other: &PageBoxes) -> PageBoxes {
+        PageBoxes {
+            crop_box: self.crop_box.or(other.crop_box),
+            bleed_box: self.bleed_box.or(other.bleed_box),
+            trim_box: self.trim_box.or(other.trim_box),
+            art_box: self.art_box.or(other.art_box),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.crop_box.is_none()
+            && self.bleed_box.is_none()
+            && self.trim_box.is_none()
+            && self.art_box.is_none()
+    }
 }
 
 #[cfg(test)]

@@ -442,6 +442,127 @@ fn annotation_unknown_subtype_no_emit() {
 }
 
 #[test]
+fn dest_named_emits_in_catalog_names_tree() {
+    let pdf = render_one_page_pdf("[ /Dest /chap1 /Page 1 /View [/XYZ 100 700 1.5] /DEST pdfmark");
+    // /Catalog must reference /Names
+    let catalog = objects_containing(&pdf, b"/Type /Catalog");
+    assert_eq!(catalog.len(), 1);
+    let cat_str = String::from_utf8_lossy(&catalog[0]);
+    assert!(
+        cat_str.contains("/Names"),
+        "catalog missing /Names: {cat_str}"
+    );
+    // The leaf names array contains the (chap1) string
+    let leaves = objects_containing(&pdf, b"(chap1)");
+    assert!(!leaves.is_empty(), "expected (chap1) somewhere");
+}
+
+#[test]
+fn dest_outline_can_reference_named_dest() {
+    // An /OUT bookmark with /Dest /chap1 + a /DEST named-dest entry
+    // both end up in the output PDF and a viewer can resolve the
+    // outline against the name tree.
+    let pdf = render_one_page_pdf(
+        "[ /Dest /chap1 /Page 1 /View [/Fit] /DEST pdfmark
+         [ /Title (Chapter 1) /Dest /chap1 /OUT pdfmark",
+    );
+    let outline = objects_containing(&pdf, b"(Chapter 1)");
+    assert_eq!(outline.len(), 1);
+    let outline_body = String::from_utf8_lossy(&outline[0]);
+    assert!(
+        outline_body.contains("/Dest (chap1)"),
+        "outline missing /Dest (chap1): {outline_body}",
+    );
+    // Name tree present
+    let leaves = objects_containing(&pdf, b"(chap1)");
+    assert!(
+        leaves.len() >= 2,
+        "expected (chap1) in both outline + name tree"
+    );
+}
+
+#[test]
+fn page_cropbox_override_applied() {
+    let pdf = render_one_page_pdf("[ /CropBox [36 36 576 756] /Page 1 /PAGE pdfmark");
+    let pages = objects_containing(&pdf, b"/Type /Page\n");
+    assert_eq!(pages.len(), 1);
+    let page_str = String::from_utf8_lossy(&pages[0]);
+    assert!(
+        page_str.contains("/CropBox"),
+        "missing /CropBox on page: {page_str}",
+    );
+    assert!(
+        page_str.contains("36"),
+        "expected llx=36 in /CropBox: {page_str}",
+    );
+    assert!(
+        page_str.contains("576"),
+        "expected urx=576 in /CropBox: {page_str}",
+    );
+}
+
+#[test]
+fn pages_default_overridden_by_page() {
+    // /PAGES sets a doc-wide CropBox; /PAGE for page 1 overrides it.
+    // Render two pages and check page 1 has the override CropBox while
+    // page 2 falls through to the /PAGES default.
+    let mut interp = Interpreter::new();
+    let script = "[ /CropBox [10 10 100 100] /PAGES pdfmark
+         [ /CropBox [200 200 400 400] /Page 1 /PAGE pdfmark
+         showpage
+         showpage";
+    let pdf = interp
+        .render_to_pdf(script.as_bytes(), 72.0)
+        .expect("render");
+    let pages = objects_containing(&pdf, b"/Type /Page\n");
+    assert_eq!(pages.len(), 2);
+    let p1 = String::from_utf8_lossy(&pages[0]);
+    let p2 = String::from_utf8_lossy(&pages[1]);
+    assert!(
+        p1.contains("200") && p1.contains("400"),
+        "page 1 should have /PAGE override (200,400): {p1}",
+    );
+    assert!(
+        p2.contains("10") && p2.contains("100"),
+        "page 2 should have /PAGES default (10,100): {p2}",
+    );
+}
+
+#[test]
+fn page_rotate_emits() {
+    let pdf = render_one_page_pdf("[ /Rotate 90 /Page 1 /PAGE pdfmark");
+    let pages = objects_containing(&pdf, b"/Type /Page\n");
+    let page_str = String::from_utf8_lossy(&pages[0]);
+    assert!(
+        page_str.contains("/Rotate 90"),
+        "expected /Rotate 90: {page_str}",
+    );
+}
+
+#[test]
+fn page_rotate_invalid_dropped() {
+    // /Rotate 45 is not a multiple of 90 — writer drops it silently.
+    let pdf = render_one_page_pdf("[ /Rotate 45 /Page 1 /PAGE pdfmark");
+    let pages = objects_containing(&pdf, b"/Type /Page\n");
+    let page_str = String::from_utf8_lossy(&pages[0]);
+    assert!(
+        !page_str.contains("/Rotate"),
+        "expected no /Rotate when value invalid: {page_str}",
+    );
+}
+
+#[test]
+fn no_dest_records_no_names_in_catalog() {
+    let pdf = render_one_page_pdf("");
+    let catalog = objects_containing(&pdf, b"/Type /Catalog");
+    let cat_str = String::from_utf8_lossy(&catalog[0]);
+    assert!(
+        !cat_str.contains("/Names"),
+        "catalog should have no /Names when no /DEST records: {cat_str}",
+    );
+}
+
+#[test]
 fn unknown_typetag_is_silent() {
     let pdf = render_one_page_pdf("[ /Foo (bar) /SOMENEWTHING pdfmark");
     let info = find_info_dict_bytes(&pdf);

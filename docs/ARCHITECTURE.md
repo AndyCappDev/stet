@@ -230,6 +230,16 @@ number per page up front, then both the annotation writer
 reference `page_refs[N-1]` for `/Page`/`/Dest` targets, and the page
 dict's `/Annots` array references the annotation refs.
 
+Named destinations (`/DEST` records) feed a single-leaf name tree in
+`names.rs` referenced from `/Catalog /Names`. Page-box overrides
+(`/PAGE` per-page, `/PAGES` document-wide) are layered into one
+`EffectivePageOverride` per page by `compute_page_overrides`: per-page
+records take precedence over document-wide defaults key-by-key, with
+later records winning when the same key appears more than once at the
+same scope. The result is a flat per-page table the page builder
+consults when emitting `/CropBox` / `/BleedBox` / `/TrimBox` /
+`/ArtBox` / `/Rotate`.
+
 ## Pipeline: PDF Reading
 
 ```

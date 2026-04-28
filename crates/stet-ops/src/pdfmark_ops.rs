@@ -15,21 +15,23 @@
 //!
 //! Currently recognised type-tags: `/DOCINFO` (document Info dict),
 //! `/OUT` (outline / bookmark entry), `/ANN` (Link / Text / FreeText
-//! annotations). Subsequent phases add `/DEST`, `/PAGE` / `/PAGES`,
-//! `/VIEWERPREFERENCES`, `/Metadata`, `/EMBED`, `/FORM`, `/Widget`
-//! (form fields), and the Tagged-PDF structure-tree set as new arms
-//! in the type-tag match. Unknown type-tags silently no-op (Adobe
-//! convention) so PS code targeting newer features stays runnable on
-//! older interpreters.
+//! annotations), `/DEST` (named destination), `/PAGE` and `/PAGES`
+//! (per-page and document-wide page-box / rotate overrides).
+//! Subsequent phases add `/VIEWERPREFERENCES`, `/Metadata`, `/EMBED`,
+//! `/FORM`, `/Widget` (form fields), and the Tagged-PDF structure-tree
+//! set as new arms in the type-tag match. Unknown type-tags silently
+//! no-op (Adobe convention) so PS code targeting newer features stays
+//! runnable on older interpreters.
 
 use stet_core::context::Context;
 use stet_core::dict::DictKey;
 use stet_core::error::PsError;
 use stet_core::object::{EntityId, PsObject, PsValue};
 use stet_core::pdfmark::{
-    AnnotationRecord, AnnotationSubtype, AnnotationTarget, Border, DocDate, DocInfoRecord,
-    GoToTarget, LinkHighlight, OutlineAction, OutlineDestination, OutlineRecord, PdfMarkRecord,
-    TextAnnotationIcon, TrappedState, ViewSpec,
+    AnnotationRecord, AnnotationSubtype, AnnotationTarget, Border, DestRecord, DocDate,
+    DocInfoRecord, GoToTarget, LinkHighlight, OutlineAction, OutlineDestination, OutlineRecord,
+    PageBoxes, PageOverrideRecord, PageOverrideScope, PdfMarkRecord, TextAnnotationIcon,
+    TrappedState, ViewSpec,
 };
 
 /// `pdfmark`: mark arg1 ... argN typetag → —
@@ -91,6 +93,21 @@ pub fn op_pdfmark(ctx: &mut Context) -> Result<(), PsError> {
         b"ANN" => {
             if let Some(rec) = parse_annotation(ctx, &payload) {
                 ctx.pdfmark_buffer.push(PdfMarkRecord::Annotation(rec));
+            }
+        }
+        b"DEST" => {
+            if let Some(rec) = parse_dest(ctx, &payload) {
+                ctx.pdfmark_buffer.push(PdfMarkRecord::Dest(rec));
+            }
+        }
+        b"PAGE" => {
+            if let Some(rec) = parse_page_override(ctx, &payload, false) {
+                ctx.pdfmark_buffer.push(PdfMarkRecord::PageOverride(rec));
+            }
+        }
+        b"PAGES" => {
+            if let Some(rec) = parse_page_override(ctx, &payload, true) {
+                ctx.pdfmark_buffer.push(PdfMarkRecord::PageOverride(rec));
             }
         }
         // Unknown type-tags silently emit nothing (Adobe convention).
@@ -590,6 +607,86 @@ fn parse_annotation(ctx: &Context, payload: &[PsObject]) -> Option<AnnotationRec
         title,
         contents,
         subtype,
+    })
+}
+
+// ----- Named destinations + page overrides (Phase 4) ----------------------
+
+/// Resolve `/Dest` to a destination name. Accepts both literal names
+/// (`/myname`) and string forms (`(myname)`).
+fn extract_dest_name(ctx: &Context, payload: &[PsObject]) -> Option<String> {
+    if let Some(name) = extract_name(ctx, payload, b"Dest") {
+        return Some(String::from_utf8_lossy(name).into_owned());
+    }
+    extract_string(ctx, payload, b"Dest")
+}
+
+/// Parse a `/DEST pdfmark` payload. Required keys: `/Dest` (name) and
+/// `/Page` (positive integer). `/View` is optional; when absent the
+/// PDF spec default `[/XYZ null null null]` applies.
+fn parse_dest(ctx: &Context, payload: &[PsObject]) -> Option<DestRecord> {
+    let name = extract_dest_name(ctx, payload)?;
+    let page = extract_i32(ctx, payload, b"Page").and_then(|n| u32::try_from(n).ok())?;
+    if page == 0 {
+        return None;
+    }
+    let view = extract_array(ctx, payload, b"View")
+        .as_deref()
+        .map(|el| parse_view_spec_or_default(ctx, el))
+        .unwrap_or_default();
+    Some(DestRecord { name, page, view })
+}
+
+/// Pull a `/Key [llx lly urx ury]` rectangle.
+fn extract_rect_array(ctx: &Context, payload: &[PsObject], key: &[u8]) -> Option<[f64; 4]> {
+    let elements = extract_array(ctx, payload, key)?;
+    if elements.len() < 4 {
+        return None;
+    }
+    Some([
+        elements[0].as_f64()?,
+        elements[1].as_f64()?,
+        elements[2].as_f64()?,
+        elements[3].as_f64()?,
+    ])
+}
+
+/// Parse a `/PAGE` (per-page) or `/PAGES` (document-wide) pdfmark
+/// payload. `is_pages` switches the scope. `/PAGE` records that omit
+/// `/Page` (or `/SrcPg`) target the page being assembled — same
+/// implicit-scoping rule as `/ANN`.
+fn parse_page_override(
+    ctx: &Context,
+    payload: &[PsObject],
+    is_pages: bool,
+) -> Option<PageOverrideRecord> {
+    let scope = if is_pages {
+        PageOverrideScope::All
+    } else {
+        let page = if let Some(n) = extract_i32(ctx, payload, b"Page") {
+            u32::try_from(n).ok().filter(|p| *p > 0)
+        } else if let Some(n) = extract_i32(ctx, payload, b"SrcPg") {
+            u32::try_from(n).ok().filter(|p| *p > 0)
+        } else {
+            None
+        }
+        .unwrap_or(ctx.pdfmark_buffer.current_page + 1);
+        PageOverrideScope::Single(page)
+    };
+    let boxes = PageBoxes {
+        crop_box: extract_rect_array(ctx, payload, b"CropBox"),
+        bleed_box: extract_rect_array(ctx, payload, b"BleedBox"),
+        trim_box: extract_rect_array(ctx, payload, b"TrimBox"),
+        art_box: extract_rect_array(ctx, payload, b"ArtBox"),
+    };
+    let rotate = extract_i32(ctx, payload, b"Rotate");
+    if boxes.is_empty() && rotate.is_none() {
+        return None;
+    }
+    Some(PageOverrideRecord {
+        scope,
+        boxes,
+        rotate,
     })
 }
 
@@ -1142,6 +1239,154 @@ mod tests {
         ctx.o_stack.push(PsObject::name_lit(ann_id)).unwrap();
         op_pdfmark(&mut ctx).unwrap();
         assert!(ctx.pdfmark_buffer.is_empty());
+    }
+
+    #[test]
+    fn dest_simple_page() {
+        let mut ctx = make_ctx();
+        let dest_id = ctx.names.intern(b"Dest");
+        let chap_id = ctx.names.intern(b"chapter1");
+        let page_id = ctx.names.intern(b"Page");
+        let dest_tag_id = ctx.names.intern(b"DEST");
+        ctx.o_stack.push(PsObject::mark()).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(dest_id)).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(chap_id)).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(page_id)).unwrap();
+        ctx.o_stack.push(PsObject::int(7)).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(dest_tag_id)).unwrap();
+        op_pdfmark(&mut ctx).unwrap();
+        let PdfMarkRecord::Dest(rec) = &ctx.pdfmark_buffer.records()[0] else {
+            panic!("expected Dest record");
+        };
+        assert_eq!(rec.name, "chapter1");
+        assert_eq!(rec.page, 7);
+    }
+
+    #[test]
+    fn dest_requires_name_and_page() {
+        // Missing /Page → drop.
+        let mut ctx = make_ctx();
+        let dest_id = ctx.names.intern(b"Dest");
+        let n = ctx.names.intern(b"x");
+        let dest_tag_id = ctx.names.intern(b"DEST");
+        ctx.o_stack.push(PsObject::mark()).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(dest_id)).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(n)).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(dest_tag_id)).unwrap();
+        op_pdfmark(&mut ctx).unwrap();
+        assert!(ctx.pdfmark_buffer.is_empty());
+
+        // Missing /Dest → drop.
+        let page_id = ctx.names.intern(b"Page");
+        ctx.o_stack.push(PsObject::mark()).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(page_id)).unwrap();
+        ctx.o_stack.push(PsObject::int(1)).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(dest_tag_id)).unwrap();
+        op_pdfmark(&mut ctx).unwrap();
+        assert!(ctx.pdfmark_buffer.is_empty());
+    }
+
+    fn alloc_box(ctx: &mut Context, llx: f64, lly: f64, urx: f64, ury: f64) -> PsObject {
+        let entity = ctx.arrays.allocate(4);
+        let elements = vec![
+            PsObject::real(llx),
+            PsObject::real(lly),
+            PsObject::real(urx),
+            PsObject::real(ury),
+        ];
+        let dest = ctx.arrays.get_mut(entity, 0, 4);
+        dest.copy_from_slice(&elements);
+        PsObject::array(entity, 4)
+    }
+
+    #[test]
+    fn page_single_with_cropbox() {
+        let mut ctx = make_ctx();
+        let crop_id = ctx.names.intern(b"CropBox");
+        let page_id = ctx.names.intern(b"Page");
+        let page_tag_id = ctx.names.intern(b"PAGE");
+        let bx = alloc_box(&mut ctx, 36.0, 36.0, 576.0, 756.0);
+        ctx.o_stack.push(PsObject::mark()).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(crop_id)).unwrap();
+        ctx.o_stack.push(bx).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(page_id)).unwrap();
+        ctx.o_stack.push(PsObject::int(2)).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(page_tag_id)).unwrap();
+        op_pdfmark(&mut ctx).unwrap();
+        let PdfMarkRecord::PageOverride(rec) = &ctx.pdfmark_buffer.records()[0] else {
+            panic!("expected PageOverride record");
+        };
+        assert!(matches!(rec.scope, PageOverrideScope::Single(2)));
+        assert_eq!(rec.boxes.crop_box, Some([36.0, 36.0, 576.0, 756.0]));
+    }
+
+    #[test]
+    fn page_implicit_scoping_to_current_page() {
+        // /PAGE without /Page targets the page being assembled
+        // (current_page + 1). Bumping current_page simulates a
+        // completed showpage.
+        let mut ctx = make_ctx();
+        ctx.pdfmark_buffer.current_page = 3;
+        let trim_id = ctx.names.intern(b"TrimBox");
+        let page_tag_id = ctx.names.intern(b"PAGE");
+        let bx = alloc_box(&mut ctx, 0.0, 0.0, 612.0, 792.0);
+        ctx.o_stack.push(PsObject::mark()).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(trim_id)).unwrap();
+        ctx.o_stack.push(bx).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(page_tag_id)).unwrap();
+        op_pdfmark(&mut ctx).unwrap();
+        let PdfMarkRecord::PageOverride(rec) = &ctx.pdfmark_buffer.records()[0] else {
+            panic!("expected PageOverride record");
+        };
+        assert!(matches!(rec.scope, PageOverrideScope::Single(4)));
+        assert!(rec.boxes.trim_box.is_some());
+    }
+
+    #[test]
+    fn pages_global_scope() {
+        let mut ctx = make_ctx();
+        let crop_id = ctx.names.intern(b"CropBox");
+        let pages_tag_id = ctx.names.intern(b"PAGES");
+        let bx = alloc_box(&mut ctx, 0.0, 0.0, 100.0, 100.0);
+        ctx.o_stack.push(PsObject::mark()).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(crop_id)).unwrap();
+        ctx.o_stack.push(bx).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(pages_tag_id)).unwrap();
+        op_pdfmark(&mut ctx).unwrap();
+        let PdfMarkRecord::PageOverride(rec) = &ctx.pdfmark_buffer.records()[0] else {
+            panic!("expected PageOverride record");
+        };
+        assert_eq!(rec.scope, PageOverrideScope::All);
+        assert_eq!(rec.boxes.crop_box, Some([0.0, 0.0, 100.0, 100.0]));
+    }
+
+    #[test]
+    fn page_record_with_no_boxes_or_rotate_is_dropped() {
+        let mut ctx = make_ctx();
+        let page_id = ctx.names.intern(b"Page");
+        let page_tag_id = ctx.names.intern(b"PAGE");
+        ctx.o_stack.push(PsObject::mark()).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(page_id)).unwrap();
+        ctx.o_stack.push(PsObject::int(1)).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(page_tag_id)).unwrap();
+        op_pdfmark(&mut ctx).unwrap();
+        assert!(ctx.pdfmark_buffer.is_empty());
+    }
+
+    #[test]
+    fn page_rotate_recorded() {
+        let mut ctx = make_ctx();
+        let rot_id = ctx.names.intern(b"Rotate");
+        let page_tag_id = ctx.names.intern(b"PAGE");
+        ctx.o_stack.push(PsObject::mark()).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(rot_id)).unwrap();
+        ctx.o_stack.push(PsObject::int(90)).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(page_tag_id)).unwrap();
+        op_pdfmark(&mut ctx).unwrap();
+        let PdfMarkRecord::PageOverride(rec) = &ctx.pdfmark_buffer.records()[0] else {
+            panic!("expected PageOverride record");
+        };
+        assert_eq!(rec.rotate, Some(90));
     }
 
     #[test]

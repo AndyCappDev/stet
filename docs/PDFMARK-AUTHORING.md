@@ -232,6 +232,66 @@ showpage
 Multiple annotations on the same page accumulate in that page's
 `/Annots` array in declaration order.
 
+### `/DEST` — named destinations
+
+```postscript
+[ /Dest /chap1 /Page 5 /View [/XYZ 100 700 1.5] /DEST pdfmark
+```
+
+Registers a named destination in the document's `/Names /Dests` name
+tree. Bookmarks (`/OUT`) and link annotations (`/ANN /Subtype /Link`)
+can then reference the destination by name (`/Dest /chap1`) and PDF
+viewers resolve it through the name tree to land on the right page
++ view.
+
+| Key | Type | Meaning |
+|---|---|---|
+| `/Dest` | name or string | Required — destination name |
+| `/Page` | integer | Required — 1-based target page |
+| `/View` | array | Optional view spec; default `[/XYZ null null null]`. Same eight variants as `/OUT`'s `/View` |
+
+Records targeting a `/Page` outside the rendered range are dropped
+silently. Records that share a name resolve "last wins" (matches the
+`/DOCINFO` and other type-tags' "later record overrides earlier").
+
+The catalog's `/Names` entry is only emitted when at least one valid
+record exists. The current implementation uses a single-leaf name tree
+which is fine for documents with up to ~hundreds of dests; if a use
+case ever needs more, the leaf can be split into `/Kids` without
+changing the operator surface.
+
+### `/PAGE` and `/PAGES` — page-box overrides
+
+```postscript
+[ /CropBox [36 36 576 756] /Page 2 /PAGE pdfmark
+[ /TrimBox [9 9 603 783] /PAGES pdfmark
+```
+
+`/PAGE` overrides keys on a single page. `/PAGES` provides
+document-wide defaults for keys that aren't already set on a specific
+page. Both share the same key set:
+
+| Key | Type | Meaning |
+|---|---|---|
+| `/Page` (only on `/PAGE`) | integer | 1-based target page. Defaults to the page being assembled (= `current_page + 1`) when omitted |
+| `/SrcPg` | integer | Alias for `/Page` |
+| `/CropBox`, `/BleedBox`, `/TrimBox`, `/ArtBox` | 4-array | `[llx lly urx ury]` in default user space |
+| `/Rotate` | integer | 0, 90, 180, 270 (or their negative equivalents). Other values dropped silently |
+
+Resolution rule (per key, per page): the most recent `/PAGE` for that
+specific page wins; if none exists, the most recent `/PAGES` for that
+key applies; otherwise the device default.
+
+```postscript
+% /PAGES sets a doc-wide CropBox; /PAGE for page 1 overrides it.
+% Page 1 → [200 200 400 400]; pages 2..N → [10 10 100 100].
+[ /CropBox [10 10 100 100] /PAGES pdfmark
+[ /CropBox [200 200 400 400] /Page 1 /PAGE pdfmark
+```
+
+A `/PAGE` record with neither any box nor a `/Rotate` is dropped —
+there's nothing to apply.
+
 ### `/DOCINFO` — document Info dictionary
 
 ```postscript

@@ -19,7 +19,10 @@
 //! records land on `Context::pdfmark_buffer` for the PDF output device
 //! to consume. Currently recognised type-tags: `/DOCINFO` (Info dict),
 //! `/OUT` (outline / bookmark), `/ANN` (Link / Text / FreeText
-//! annotations). Unknown type-tags silently no-op (Adobe convention).
+//! annotations), `/DEST` (named destination contributing to
+//! /Names /Dests), `/PAGE` and `/PAGES` (per-page and document-wide
+//! page-box / rotate overrides). Unknown type-tags silently no-op
+//! (Adobe convention).
 //! `pdfmark` and the matching `currentdistillerparams` /
 //! `setdistillerparams` operators are gated behind
 //! [`register_pdf_authoring_ops`] so they only appear in `systemdict` on

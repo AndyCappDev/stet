@@ -247,6 +247,12 @@ impl PdfDevice {
             })
             .unwrap_or_else(|| vec![Vec::new(); page_refs.len()]);
 
+        // Layer /PAGES (document-wide defaults) under /PAGE (per-page
+        // overrides) into one PageOverride per page. Later /PAGE
+        // records override earlier ones key-by-key, matching the same
+        // "later wins" rule we apply to /DOCINFO.
+        let per_page_overrides = compute_page_overrides(ctx, page_refs.len());
+
         // Second pass: build page objects referencing shared font objects
         for (i, (result, page)) in page_results.iter().enumerate() {
             self.build_page(
@@ -258,6 +264,7 @@ impl PdfDevice {
                 &font_obj_map,
                 &mut font_tracker,
                 &per_page_annots[i],
+                &per_page_overrides[i],
             )?;
         }
 
@@ -294,6 +301,20 @@ impl PdfDevice {
             crate::outline::write_outline_tree(&mut writer, &tree, &page_refs)
         });
 
+        // /Names /Dests — name tree built from /DEST pdfmark records.
+        let names_ref = ctx.and_then(|c| {
+            let records: Vec<stet_core::pdfmark::DestRecord> = c
+                .pdfmark_buffer
+                .records()
+                .iter()
+                .filter_map(|r| match r {
+                    stet_core::pdfmark::PdfMarkRecord::Dest(rec) => Some(rec.clone()),
+                    _ => None,
+                })
+                .collect();
+            crate::names::write_names_dict(&mut writer, &records, &page_refs)
+        });
+
         // Catalog
         let mut catalog_entries = vec![
             (b"Type".to_vec(), PdfObj::name("Catalog")),
@@ -302,6 +323,9 @@ impl PdfDevice {
         if let Some(outline_ref) = outlines_ref {
             catalog_entries.push((b"Outlines".to_vec(), PdfObj::Ref(outline_ref)));
             catalog_entries.push((b"PageMode".to_vec(), PdfObj::name("UseOutlines")));
+        }
+        if let Some(names_ref) = names_ref {
+            catalog_entries.push((b"Names".to_vec(), PdfObj::Ref(names_ref)));
         }
 
         writer.set_object(catalog_ref, &PdfObj::Dict(catalog_entries));
@@ -354,6 +378,7 @@ impl PdfDevice {
         font_obj_map: &HashMap<String, u32>,
         font_tracker: &mut FontTracker,
         annot_refs: &[u32],
+        overrides: &EffectivePageOverride,
     ) -> Result<(), String> {
         let ContentStreamResult {
             content,
@@ -662,16 +687,35 @@ impl PdfDevice {
             (b"Contents".to_vec(), PdfObj::Ref(content_ref)),
             (b"Resources".to_vec(), PdfObj::Dict(resources)),
         ];
-        if let Some((llx, lly, urx, ury)) = page.trim_box {
-            page_entries.push((
-                b"TrimBox".to_vec(),
-                PdfObj::Array(vec![
-                    PdfObj::Real(llx),
-                    PdfObj::Real(lly),
-                    PdfObj::Real(urx),
-                    PdfObj::Real(ury),
-                ]),
-            ));
+        // /CropBox / /BleedBox / /TrimBox / /ArtBox: pdfmark /PAGE or
+        // /PAGES wins; otherwise fall back to the device's pending
+        // trim_box (set via PdfDevice::set_trim_box).
+        let effective_trim = overrides.boxes.trim_box.or_else(|| {
+            page.trim_box
+                .map(|(llx, lly, urx, ury)| [llx, lly, urx, ury])
+        });
+        for (name, b) in [
+            (b"CropBox".as_slice(), overrides.boxes.crop_box),
+            (b"BleedBox".as_slice(), overrides.boxes.bleed_box),
+            (b"TrimBox".as_slice(), effective_trim),
+            (b"ArtBox".as_slice(), overrides.boxes.art_box),
+        ] {
+            if let Some([llx, lly, urx, ury]) = b {
+                page_entries.push((
+                    name.to_vec(),
+                    PdfObj::Array(vec![
+                        PdfObj::Real(llx),
+                        PdfObj::Real(lly),
+                        PdfObj::Real(urx),
+                        PdfObj::Real(ury),
+                    ]),
+                ));
+            }
+        }
+        if let Some(rotate) = overrides.rotate
+            && matches!(rotate, 0 | 90 | 180 | 270 | -90 | -180 | -270)
+        {
+            page_entries.push((b"Rotate".to_vec(), PdfObj::Int(rotate as i64)));
         }
         if !annot_refs.is_empty() {
             page_entries.push((
@@ -1427,6 +1471,61 @@ fn build_halftone_ht(
     } else {
         PdfObj::name("Default")
     }
+}
+
+/// Effective per-page override after layering /PAGES under /PAGE.
+#[derive(Default, Clone, Copy)]
+struct EffectivePageOverride {
+    boxes: stet_core::pdfmark::PageBoxes,
+    rotate: Option<i32>,
+}
+
+/// Walk the pdfmark buffer and compute one [`EffectivePageOverride`]
+/// per page in `0..page_count`. Order of precedence per key:
+/// 1. Last `/PAGE` for that specific page (later record wins).
+/// 2. Last `/PAGES` (later document-wide record wins).
+fn compute_page_overrides(ctx: Option<&Context>, page_count: usize) -> Vec<EffectivePageOverride> {
+    use stet_core::pdfmark::{PageOverrideScope, PdfMarkRecord};
+    let mut out = vec![EffectivePageOverride::default(); page_count];
+    let Some(c) = ctx else {
+        return out;
+    };
+    let mut all_boxes = stet_core::pdfmark::PageBoxes::default();
+    let mut all_rotate: Option<i32> = None;
+    let mut per_page_boxes: Vec<stet_core::pdfmark::PageBoxes> =
+        vec![stet_core::pdfmark::PageBoxes::default(); page_count];
+    let mut per_page_rotate: Vec<Option<i32>> = vec![None; page_count];
+
+    for record in c.pdfmark_buffer.records() {
+        let PdfMarkRecord::PageOverride(rec) = record else {
+            continue;
+        };
+        match rec.scope {
+            PageOverrideScope::All => {
+                all_boxes = rec.boxes.merge_over(&all_boxes);
+                if rec.rotate.is_some() {
+                    all_rotate = rec.rotate;
+                }
+            }
+            PageOverrideScope::Single(page) => {
+                let idx = page as usize;
+                if idx == 0 || idx > page_count {
+                    continue;
+                }
+                let i = idx - 1;
+                per_page_boxes[i] = rec.boxes.merge_over(&per_page_boxes[i]);
+                if rec.rotate.is_some() {
+                    per_page_rotate[i] = rec.rotate;
+                }
+            }
+        }
+    }
+
+    for i in 0..page_count {
+        out[i].boxes = per_page_boxes[i].merge_over(&all_boxes);
+        out[i].rotate = per_page_rotate[i].or(all_rotate);
+    }
+    out
 }
 
 /// Convert days since 1970-01-01 to (year, month, day).
