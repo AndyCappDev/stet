@@ -56,6 +56,95 @@ pub use stet_graphics::layer_set::LayerSet;
 
 use crate::PdfDocument;
 
+/// Which audience a render is for.
+///
+/// Drives [`PdfDocument::layer_set_for`]: the resulting [`LayerSet`]
+/// has every `/AS` automatic-state rule whose `/Event` matches this
+/// intent applied on top of the default-configuration starting point.
+///
+/// PDF authors use this to hide print-only watermarks during
+/// interactive viewing, or to surface annotations only for export.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenderIntent {
+    /// `/View` — interactive on-screen display.
+    View,
+    /// `/Print` — printing pipeline.
+    Print,
+    /// `/Export` — conversion or extraction.
+    Export,
+}
+
+impl RenderIntent {
+    fn matches(self, event: AutoStateEvent) -> bool {
+        matches!(
+            (self, event),
+            (RenderIntent::View, AutoStateEvent::View)
+                | (RenderIntent::Print, AutoStateEvent::Print)
+                | (RenderIntent::Export, AutoStateEvent::Export)
+        )
+    }
+}
+
+/// Build a [`LayerSet`] that reflects the document's default
+/// configuration with every `/AS` automatic-state rule for the given
+/// [`RenderIntent`] applied.
+///
+/// Algorithm:
+///
+/// 1. Start from [`layer_set_from_document`].
+/// 2. For each auto-state rule on the default configuration whose
+///    `/Event` matches the requested intent:
+///     - For each OCG listed in the rule's `/OCGs`:
+///         - For each `/Category` in the rule:
+///             - If that category's `/Usage` sub-dict on the OCG
+///               carries an explicit ON/OFF state, override that
+///               OCG's entry in the LayerSet.
+///
+/// PDF spec doesn't define precedence when multiple rules touch the
+/// same OCG; this implementation is **last-wins** in the order rules
+/// appear in `/AS`.
+///
+/// Layers carrying `/Usage` hints with **no** matching `/AS` rule are
+/// untouched — by spec their hints are informational only, not
+/// auto-applied. Some viewers heuristically apply them anyway; stet
+/// does not.
+pub fn layer_set_for(doc: &PdfDocument<'_>, intent: RenderIntent) -> LayerSet {
+    let mut set = layer_set_from_document(doc);
+    let Some(cfg) = doc.default_configuration() else {
+        return set;
+    };
+    for rule in &cfg.auto_state {
+        if !intent.matches(rule.event) {
+            continue;
+        }
+        for &ocg_id in &rule.ocgs {
+            let Some(layer) = doc.layer(ocg_id) else {
+                continue;
+            };
+            for category in &rule.categories {
+                if let Some(state) = usage_state_for_category(&layer.usage, category) {
+                    set.set(ocg_id, matches!(state, UsageState::On));
+                }
+            }
+        }
+    }
+    set
+}
+
+/// Look up an OCG's `/Usage` sub-dict for the given `/Category` name
+/// and return its ON/OFF state, if it carries one. Categories that
+/// don't carry a state (Zoom, Language, User, PageElement,
+/// CreatorInfo) return `None` and are silently skipped by
+/// [`layer_set_for`].
+fn usage_state_for_category(usage: &LayerUsage, category: &str) -> Option<UsageState> {
+    match category {
+        "View" => usage.view.as_ref().map(|v| v.state),
+        "Print" => usage.print.as_ref().map(|p| p.state),
+        "Export" => usage.export.as_ref().map(|e| e.state),
+        _ => None,
+    }
+}
+
 /// Build a [`LayerSet`] populated from a [`PdfDocument`]'s default
 /// configuration (`/OCProperties /D`).
 ///

@@ -340,6 +340,44 @@ Embedded files come from the catalog's `/Names /EmbeddedFiles` name
 tree. Stream bytes are decoded on demand; the table itself only holds
 metadata.
 
+## Layers (Optional Content)
+
+PDFs can mark slices of their content for selective visibility — CAD
+layers, watermarks, multilingual annotations, print-only or
+screen-only overlays. `stet-pdf-reader` exposes the full Optional
+Content Group (OCG) model: per-layer metadata, hierarchy, alternate
+configurations, runtime visibility overrides via [`LayerSet`], OCMD
+membership policies and `/VE` boolean expressions, and intent-driven
+rendering.
+
+```rust
+# use stet_pdf_reader::{PdfDocument, RenderIntent, layers};
+# let doc: PdfDocument = unimplemented!();
+for layer in doc.layers() {
+    println!(
+        "{:>3}  {:<32} default_visible={} locked={}",
+        layer.ocg_id, layer.name, layer.default_visible, layer.locked
+    );
+}
+
+// Render the page hiding any /AS-marked print-off layers.
+let print_set = doc.layer_set_for(RenderIntent::Print);
+let (rgba, w, h) = doc.render_page_to_rgba_with_layers(0, 150.0, &print_set)?;
+
+// Or build a custom override set and toggle one layer.
+let mut custom = layers::layer_set_from_document(&doc);
+custom.set(/* ocg_id */ 42, false);
+let (rgba2, _, _) = doc.render_page_to_rgba_with_layers(0, 150.0, &custom)?;
+# let _ = (rgba, rgba2, w, h);
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+Full reference (types, methods, OCMD semantics, intent-driven
+rendering, `/VE` grammar): see
+[`docs/PDF-LAYERS.md`](PDF-LAYERS.md).
+
+[`LayerSet`]: https://docs.rs/stet-graphics/latest/stet_graphics/layer_set/struct.LayerSet.html
+
 ## Parse warnings
 
 `parse_warnings() -> Ref<'_, [ParseWarning]>`

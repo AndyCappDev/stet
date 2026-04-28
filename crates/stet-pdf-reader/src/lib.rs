@@ -105,6 +105,12 @@
 //!     println!("{name} ({} bytes, {:?})", bytes.len(), file.mime_type);
 //! }
 //!
+//! // Optional Content (layers).
+//! for layer in doc.layers() {
+//!     println!("layer {} {:?} default_visible={}",
+//!         layer.ocg_id, layer.name, layer.default_visible);
+//! }
+//!
 //! // Recoverable parse problems (cycles, dropped entries, etc.).
 //! for w in doc.parse_warnings().iter() {
 //!     eprintln!("[{:?}] {:?}: {}", w.severity, w.phase, w.message);
@@ -131,6 +137,11 @@
 //!   [`default_configuration`](PdfDocument::default_configuration) +
 //!   [`layer_tree`](PdfDocument::layer_tree) — layer hierarchy and
 //!   alternate configurations
+//! - [`layer_set_for`](PdfDocument::layer_set_for) — intent-driven
+//!   `LayerSet` that applies the document's `/AS` automatic-state
+//!   rules; pair with
+//!   [`render_page_to_rgba_with_layers`](PdfDocument::render_page_to_rgba_with_layers)
+//!   for view / print / export rendering
 //! - [`parse_warnings`](PdfDocument::parse_warnings) — diagnostics
 //!
 //! Walkers that recurse over potentially-cyclic structures
@@ -142,7 +153,10 @@
 //! For a longer-form reference with one focused example per accessor,
 //! see the [PDF Reader API
 //! guide](https://github.com/AndyCappDev/stet/blob/main/docs/PDF-READER-API.md)
-//! in the repository.
+//! in the repository. The Optional Content / layer surface
+//! ([`Layer`], [`Configuration`], [`LayerSet`], [`OcgVisibility`],
+//! [`RenderIntent`]) has its own reference at
+//! [`docs/PDF-LAYERS.md`](https://github.com/AndyCappDev/stet/blob/main/docs/PDF-LAYERS.md).
 //!
 //! # Acknowledgements
 //!
@@ -194,8 +208,8 @@ pub use form_fields::{
 pub use layers::{
     AutoStateEvent, AutoStateRule, BaseState, Configuration, CreatorInfo, ExportUsage,
     LanguageUsage, Layer, LayerIntent, LayerSet, LayerTree, LayerTreeNode, LayerUsage, ListMode,
-    MembershipPolicy, OcgVisibility, PageElementSubtype, PrintUsage, UsageState, UserUsage,
-    ViewUsage, VisibilityExpr, ZoomUsage,
+    MembershipPolicy, OcgVisibility, PageElementSubtype, PrintUsage, RenderIntent, UsageState,
+    UserUsage, ViewUsage, VisibilityExpr, ZoomUsage,
 };
 pub use metadata::{DocumentMetadata, PdfDate, TrappedFlag};
 pub use objects::{PdfDict, PdfObj};
@@ -828,6 +842,21 @@ impl<'a> PdfDocument<'a> {
         self.default_configuration()
             .map(|c| c.order.clone())
             .unwrap_or_default()
+    }
+
+    /// Build a [`LayerSet`] for rendering under a specific
+    /// [`RenderIntent`].
+    ///
+    /// Starts from the document's default configuration (every layer
+    /// at its `default_visible` state) and applies every `/AS`
+    /// automatic-state rule whose `/Event` matches the requested
+    /// intent. Pass the result to
+    /// [`render_page_to_rgba_with_layers`](Self::render_page_to_rgba_with_layers)
+    /// (or any other consumer of `LayerSet`) to honour
+    /// "print-only" / "view-only" / "export-only" layer hints in the
+    /// document.
+    pub fn layer_set_for(&self, intent: RenderIntent) -> LayerSet {
+        layers::layer_set_for(self, intent)
     }
 }
 
@@ -3296,6 +3325,126 @@ mod tests {
 
         // Out-of-range index returns None.
         assert!(layers::layer_set_from_configuration(&doc, 99).is_none());
+    }
+
+    /// Build a PDF with three OCGs and a pair of `/AS` rules:
+    ///
+    /// - Layer 5 ("Watermark") has `/Usage /Print /PrintState /OFF`
+    ///   and an `/AS` rule that turns it OFF on `/Print`.
+    /// - Layer 6 ("ScreenOnly") has `/Usage /View /ViewState /ON` and
+    ///   an `/AS` rule that turns it OFF on `/Print`.
+    /// - Layer 7 ("Hint") has `/Usage /Export /ExportState /OFF` but
+    ///   **no** matching `/AS` rule — should stay at default
+    ///   regardless of intent.
+    fn build_pdf_with_auto_state_rules() -> Vec<u8> {
+        let mut pdf = Vec::new();
+        pdf.extend(b"%PDF-1.6\n");
+        let mut offsets: Vec<usize> = Vec::new();
+        let mut push_obj = |buf: &mut Vec<u8>, body: &[u8]| {
+            offsets.push(buf.len());
+            buf.extend(body);
+        };
+
+        let mut cat = Vec::new();
+        cat.extend(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R /OCProperties << ");
+        cat.extend(b"/OCGs [5 0 R 6 0 R 7 0 R] /D << /Order [5 0 R 6 0 R 7 0 R] ");
+        cat.extend(b"/AS [");
+        // Rule 1: on Print, consult /Print category for Watermark + ScreenOnly.
+        cat.extend(b"<< /Event /Print /Category [/Print] /OCGs [5 0 R 6 0 R] >> ");
+        // Rule 2: on Export, consult /Export category for Watermark only.
+        cat.extend(b"<< /Event /Export /Category [/Export] /OCGs [5 0 R] >>");
+        cat.extend(b"] ");
+        cat.extend(b">> >>\nendobj\n");
+        push_obj(&mut pdf, &cat);
+        push_obj(
+            &mut pdf,
+            b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] >>\nendobj\n",
+        );
+        // 4: filler.
+        push_obj(&mut pdf, b"4 0 obj\nnull\nendobj\n");
+        // 5: Watermark — ON by default; /AS Print → OFF.
+        push_obj(
+            &mut pdf,
+            b"5 0 obj\n<< /Type /OCG /Name (Watermark) \
+              /Usage << /Print << /PrintState /OFF /Subtype /Watermark >> \
+                       /Export << /ExportState /OFF >> \
+                    >> >>\nendobj\n",
+        );
+        // 6: ScreenOnly — Usage /View ON, /Print would turn OFF.
+        push_obj(
+            &mut pdf,
+            b"6 0 obj\n<< /Type /OCG /Name (ScreenOnly) \
+              /Usage << /View << /ViewState /ON >> \
+                       /Print << /PrintState /OFF >> \
+                    >> >>\nendobj\n",
+        );
+        // 7: Hint — has /Export usage hint but no matching /AS rule.
+        push_obj(
+            &mut pdf,
+            b"7 0 obj\n<< /Type /OCG /Name (Hint) \
+              /Usage << /Export << /ExportState /OFF >> >> >>\nendobj\n",
+        );
+
+        let xref_offset = pdf.len();
+        pdf.extend(b"xref\n0 8\n");
+        pdf.extend(b"0000000000 65535 f\r\n");
+        for off in &offsets {
+            pdf.extend(format!("{:010} 00000 n\r\n", off).as_bytes());
+        }
+        pdf.extend(b"trailer\n<< /Size 8 /Root 1 0 R >>\n");
+        pdf.extend(format!("startxref\n{xref_offset}\n%%EOF\n").as_bytes());
+        pdf
+    }
+
+    #[test]
+    fn layer_set_for_view_keeps_defaults() {
+        let pdf = build_pdf_with_auto_state_rules();
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+        let set = doc.layer_set_for(RenderIntent::View);
+
+        // No /AS rule fires for View; every layer stays at its default.
+        assert_eq!(set.get(5), Some(true));
+        assert_eq!(set.get(6), Some(true));
+        assert_eq!(set.get(7), Some(true));
+    }
+
+    #[test]
+    fn layer_set_for_print_applies_off_rules() {
+        let pdf = build_pdf_with_auto_state_rules();
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+        let set = doc.layer_set_for(RenderIntent::Print);
+
+        // Rule 1 fired: Watermark and ScreenOnly turn OFF for print.
+        assert_eq!(set.get(5), Some(false));
+        assert_eq!(set.get(6), Some(false));
+        // Hint has /Usage hint but no /AS rule → still default ON.
+        assert_eq!(set.get(7), Some(true));
+    }
+
+    #[test]
+    fn layer_set_for_export_only_touches_listed_ocgs() {
+        let pdf = build_pdf_with_auto_state_rules();
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+        let set = doc.layer_set_for(RenderIntent::Export);
+
+        // Rule 2 fired: Watermark off for export.
+        assert_eq!(set.get(5), Some(false));
+        // ScreenOnly is not listed in any /Export rule → default.
+        assert_eq!(set.get(6), Some(true));
+        // Hint's /Usage is informational only without an /AS rule.
+        assert_eq!(set.get(7), Some(true));
+    }
+
+    #[test]
+    fn layer_set_for_with_no_oc_properties_returns_empty() {
+        let pdf = build_minimal_pdf();
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+        let set = doc.layer_set_for(RenderIntent::Print);
+        assert!(set.is_empty());
     }
 
     /// Build a minimal valid PDF for testing.

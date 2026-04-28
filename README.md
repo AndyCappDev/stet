@@ -93,6 +93,7 @@ renders at different resolutions. See the
 - AcroForm field tree with Button/Text/Choice/Signature kinds, Ff-bit decoding, dotted-path field names, widget cross-references back to annotations
 - All 5 PDF page boxes (MediaBox, CropBox, BleedBox, TrimBox, ArtBox) plus rotation, user unit, presentation hints
 - Embedded files (file attachments) with on-demand byte access and AfRelationship hints
+- Full **Optional Content (layer)** model: per-layer metadata + `/Usage` hints, hierarchy + alternate configurations + `/RBGroups`, runtime `LayerSet` overrides, OCMD `/P` policies (`AllOn` / `AnyOn` / `AllOff` / `AnyOff`), `/VE` boolean expressions (`/And` / `/Or` / `/Not`), and intent-driven rendering (`RenderIntent::View` / `Print` / `Export`) that honours `/AS` automatic-state rules
 - Parse warnings (`ParseWarning`, `ParsePhase`, `Severity`) for cycles, dropped entries, and structural truncations
 
 **Rendering & Output**
@@ -221,6 +222,25 @@ for page in 0..doc.page_count() {
 
 The display lists from the PDF reader and PostScript interpreter are the
 same type (`DisplayList`), so the same rendering pipeline handles both.
+
+For layer-aware rendering, build a `LayerSet` and pass it through:
+
+```rust
+use stet_pdf_reader::{PdfDocument, RenderIntent, layers};
+
+let doc = PdfDocument::from_bytes(&pdf_data)?;
+
+// Hide print-only watermarks for an interactive view.
+let view_set = doc.layer_set_for(RenderIntent::View);
+let (rgba, w, h) = doc.render_page_to_rgba_with_layers(0, 150.0, &view_set)?;
+
+// Or build a custom override set and toggle one layer.
+let mut custom = layers::layer_set_from_document(&doc);
+custom.set(/* ocg_id */ 42, false);
+let (rgba, w, h) = doc.render_page_to_rgba_with_layers(0, 150.0, &custom)?;
+```
+
+Full layer reference: [`docs/PDF-LAYERS.md`](docs/PDF-LAYERS.md).
 
 ### Custom Output Devices
 

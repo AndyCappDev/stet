@@ -199,17 +199,34 @@ parse them.
 | `page_boxes(page)` | `PageBoxes` (value) | inheritable boxes from `PageInfo`, page-local boxes from the page dict |
 | `embedded_files()` | `&HashMap<String, EmbeddedFile>` | catalog `/Names /EmbeddedFiles` name tree |
 | `embedded_file_bytes(name)` | `Result<Vec<u8>, PdfError>` | on-demand stream decode |
+| `layers()` / `layer(ocg_id)` | `&[Layer]` / `Option<&Layer>` | catalog `/OCProperties /OCGs` |
+| `configurations()` / `default_configuration()` / `configuration(idx)` / `layer_tree()` | `&[Configuration]` / `Option<&Configuration>` / `LayerTree` | `/OCProperties /D` + `/Configs`, including `/Order` parsing |
+| `layer_set_for(intent)` | `LayerSet` | default config + `/AS` automatic-state rules for the intent |
 | `parse_warnings()` | `Ref<'_, [ParseWarning]>` | warnings emitted by the structural parsers |
 
-The implementation lives in 9 sibling modules under
+The implementation lives in sibling modules under
 `crates/stet-pdf-reader/src/`: `metadata.rs`, `viewer_prefs.rs`,
 `outline.rs`, `destination.rs`, `name_tree.rs` (generic name-tree walker
 reusable for embedded files and named destinations), `annotations.rs`,
-`form_fields.rs`, `page_boxes.rs`, `embedded_files.rs`, plus
+`form_fields.rs`, `page_boxes.rs`, `embedded_files.rs`, the
+`layers/` module (`metadata.rs`, `configuration.rs`, `ocmd.rs`), plus
 `diagnostics.rs` for the warning sink. Each module is independently
 testable; cross-references are explicit (e.g., a terminal `FormField`
 carries `widget_obj_nums: Vec<u32>` so a consumer can find the matching
 widgets in `page_annotations()`).
+
+Optional Content support spans crates: the display list (in
+`stet-graphics`) carries each `OcgGroup`'s [`OcgVisibility`] predicate
+(Single / Membership / Expression) plus a per-variant `default_visible`
+fallback baked from the document's default configuration. The
+`LayerSet` evaluator (also in `stet-graphics`) lets a consumer
+override visibility per OCG without re-parsing the PDF; `stet-render`
+holds an `Arc<LayerSet>` on `SkiaDevice` and consults it during
+banded / viewport replay. `render_to_rgba_with_layers` and
+`PdfDocument::render_page_to_rgba_with_layers` are the
+LayerSet-aware entry points.
+
+[`OcgVisibility`]: https://docs.rs/stet-graphics/latest/stet_graphics/display_list/enum.OcgVisibility.html
 
 Walkers that recurse over potentially-cyclic PDF structures
 (outline tree, name trees, form-field tree) all bound traversal with a
@@ -217,7 +234,10 @@ visited-set + depth cap; truncations push a `ParseWarning` so the
 absence of data is never silent.
 
 See [`docs/PDF-READER-API.md`](PDF-READER-API.md) for the public API
-reference with examples per accessor.
+reference with examples per accessor, and
+[`docs/PDF-LAYERS.md`](PDF-LAYERS.md) for the layer / OCG model
+(types, `LayerSet` flow, OCMD semantics, `/VE` grammar,
+intent-driven rendering).
 
 ## Output Devices
 
