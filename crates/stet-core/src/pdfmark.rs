@@ -28,6 +28,8 @@ pub enum PdfMarkRecord {
     /// `/OUT` — one bookmark entry, contributing to the document's
     /// outline tree.
     Outline(OutlineRecord),
+    /// `/ANN` — one page annotation (link, sticky note, free-text, …).
+    Annotation(AnnotationRecord),
 }
 
 /// Buffered `pdfmark` records. Lives on `Context` for the entire job;
@@ -37,11 +39,12 @@ pub enum PdfMarkRecord {
 #[derive(Default, Clone, Debug)]
 pub struct PdfMarkBuffer {
     records: Vec<PdfMarkRecord>,
-    /// 1-based count of `showpage` calls so far. Annotations and other
-    /// page-scoped records that omit an explicit `/Page` key default to
-    /// `current_page + 1` — i.e. the page currently being assembled.
-    /// Phase 1 doesn't consume this yet but the field lands now so
-    /// `Context::on_showpage()` and downstream phases can rely on it.
+    /// Count of completed `showpage` calls so far. The interpreter's
+    /// `showpage` continuation increments this. Page-scoped records
+    /// (annotations, page boxes) that omit an explicit `/Page` key
+    /// default to `current_page + 1` — i.e. the page currently being
+    /// assembled. So after N showpages, `current_page == N` and the
+    /// page-being-assembled is `N + 1`.
     pub current_page: u32,
 }
 
@@ -508,6 +511,124 @@ fn attach_children(
     if let Some(p) = parent {
         p.children = children;
     }
+}
+
+// ----- Annotations (Phase 3) ------------------------------------------------
+
+/// One `/ANN pdfmark` entry. Each record contributes a single
+/// annotation (`/Annot`) to one page's `/Annots` array. `page` is
+/// 1-based; `0` is reserved for "no explicit page" (the writer
+/// substitutes the page being assembled at the time the pdfmark fired).
+#[derive(Clone, Debug)]
+pub struct AnnotationRecord {
+    /// Page the annotation lives on (1-based). Set by the operator: an
+    /// explicit `/Page` (or `/SrcPg` alias) wins; otherwise the writer
+    /// falls back to `current_page + 1` from
+    /// [`PdfMarkBuffer::current_page`].
+    pub page: u32,
+    /// `/Rect [llx lly urx ury]` — default user-space bounds. Required
+    /// per PDF spec; defaulted to the empty rect on malformed input so
+    /// the annotation at least has *somewhere* to land.
+    pub rect: [f64; 4],
+    /// Optional `/Color` triple in `[0, 1]` (PDF /C entry).
+    pub color: Option<[f64; 3]>,
+    /// Optional border specification. Translates to /Border on output.
+    pub border: Option<Border>,
+    /// Optional `/Title` (annotator name) — meaningful for `/Text` and
+    /// `/FreeText`.
+    pub title: Option<String>,
+    /// Optional `/Contents` — meaningful for `/Text` and `/FreeText`;
+    /// also accepted as a tooltip on `/Link`.
+    pub contents: Option<String>,
+    /// Subtype-specific payload.
+    pub subtype: AnnotationSubtype,
+}
+
+/// Per-subtype annotation payload. Each variant carries the keys
+/// specific to that subtype; shared keys (rect, color, border, title,
+/// contents, page) live on the parent [`AnnotationRecord`].
+#[derive(Clone, Debug)]
+pub enum AnnotationSubtype {
+    /// `/Subtype /Link` — clickable region. Target is an action,
+    /// explicit page+view, or a named destination; exactly one of the
+    /// three is expected.
+    Link {
+        target: Option<AnnotationTarget>,
+        /// `/H` highlight mode: `/N` (none), `/I` (invert), `/O`
+        /// (outline), `/P` (push). Optional.
+        highlight: Option<LinkHighlight>,
+    },
+    /// `/Subtype /Text` — sticky-note annotation.
+    Text {
+        /// `/Open` (boolean, default false).
+        open: bool,
+        /// `/Name` icon — /Comment, /Note (default), /Key, /Help,
+        /// /NewParagraph, /Paragraph, /Insert.
+        icon: TextAnnotationIcon,
+    },
+    /// `/Subtype /FreeText` — free-floating text annotation rendered
+    /// directly on the page.
+    FreeText {
+        /// `/DA` default appearance string. Optional but most viewers
+        /// require it to render anything; if absent, stet emits a sane
+        /// default (`0 0 0 rg /Helv 10 Tf`).
+        default_appearance: Option<String>,
+        /// `/Q` quadding: 0=left, 1=center, 2=right. Optional.
+        quadding: Option<u32>,
+    },
+}
+
+/// `/Link` highlight mode — controls the visual feedback when the
+/// user activates the link region.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinkHighlight {
+    None,
+    Invert,
+    Outline,
+    Push,
+}
+
+/// Standard `/Text` annotation icon names. Anything outside this set
+/// falls back to `/Note`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextAnnotationIcon {
+    Comment,
+    Note,
+    Key,
+    Help,
+    NewParagraph,
+    Paragraph,
+    Insert,
+}
+
+impl Default for TextAnnotationIcon {
+    fn default() -> Self {
+        TextAnnotationIcon::Note
+    }
+}
+
+/// `/Border` array `[Hradius Vradius Width]`. PDF spec also allows a
+/// dash pattern fourth entry; we capture it but only emit when present.
+#[derive(Clone, Debug, Default)]
+pub struct Border {
+    pub h_radius: f64,
+    pub v_radius: f64,
+    pub width: f64,
+    pub dash: Option<Vec<f64>>,
+}
+
+/// What an annotation activates. Mirrors [`OutlineDestination`] but
+/// kept distinct because annotations can carry richer action data
+/// (e.g. JavaScript) and have their own resolution rules.
+#[derive(Clone, Debug)]
+pub enum AnnotationTarget {
+    /// Explicit `/Page N /View [...]`. `page` is 1-based.
+    PageView { page: u32, view: ViewSpec },
+    /// `/Dest /Name` — named destination resolved against the
+    /// document's name tree.
+    NamedDest(String),
+    /// `/Action <<...>>` passthrough.
+    Action(OutlineAction),
 }
 
 #[cfg(test)]

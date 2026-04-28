@@ -209,6 +209,27 @@ print and stet's CMYK→ICC→sRGB conversion) and direct RGB
 →`setrgbcolor` (designed for Distiller). See `docs/PDFMARK-AUTHORING.md`
 for the operator reference.
 
+Type-tag dispatch is layered: the operator scans the operand stack
+to a `[` mark and reads the type-tag, then the corresponding handler
+(`parse_docinfo`, `parse_outline`, `parse_annotation`, …) walks the
+payload as alternating `/Name value` pairs and emits one record. The
+buffer's `current_page` counter — bumped by the `showpage` continuation
+in `device_ops.rs` — lets page-scoped record handlers (`/ANN`,
+forthcoming `/PAGE`) resolve to the page being assembled when the
+producer omits an explicit `/Page` key.
+
+Consumer side, the `PdfDevice` reads the buffer at end-of-job in
+`build_pdf`. `/Outlines` is wired into `/Catalog` plus `/PageMode
+/UseOutlines` (see `outline.rs`). Annotations need a different shape:
+`/Annots` arrays attach to per-page dicts, which means each annotation
+has to know its target page's indirect ref before the page dict is
+written. The output path therefore pre-allocates one indirect-object
+number per page up front, then both the annotation writer
+(`annotations.rs::collect_per_page`) and the per-page builder
+(`build_page`) consume that same `page_refs` slice — annotations
+reference `page_refs[N-1]` for `/Page`/`/Dest` targets, and the page
+dict's `/Annots` array references the annotation refs.
+
 ## Pipeline: PDF Reading
 
 ```

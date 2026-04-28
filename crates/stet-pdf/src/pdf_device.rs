@@ -219,18 +219,46 @@ impl PdfDevice {
         let font_obj_map: HashMap<String, u32> =
             self.embed_all_fonts(&mut writer, &font_tracker, ctx);
 
+        // Pre-allocate page object numbers so annotations can reference
+        // their target pages by indirect ref before the page dict is
+        // written, and so /Annots arrays can be assembled at build time.
+        let page_refs: Vec<u32> = (0..page_results.len())
+            .map(|_| writer.alloc_obj())
+            .collect();
+
+        // Build per-page annotation objects up front so each page dict
+        // gets its /Annots array. Empty when no /ANN pdfmark records
+        // were issued.
+        let per_page_annots: Vec<Vec<u32>> = ctx
+            .map(|c| {
+                let records: Vec<stet_core::pdfmark::AnnotationRecord> = c
+                    .pdfmark_buffer
+                    .records()
+                    .iter()
+                    .filter_map(|r| match r {
+                        stet_core::pdfmark::PdfMarkRecord::Annotation(rec) => Some(rec.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                if records.is_empty() {
+                    return vec![Vec::new(); page_refs.len()];
+                }
+                crate::annotations::collect_per_page(&mut writer, &records, &page_refs)
+            })
+            .unwrap_or_else(|| vec![Vec::new(); page_refs.len()]);
+
         // Second pass: build page objects referencing shared font objects
-        let mut page_refs = Vec::new();
-        for (result, page) in &page_results {
-            let page_ref = self.build_page(
+        for (i, (result, page)) in page_results.iter().enumerate() {
+            self.build_page(
                 &mut writer,
                 page,
                 pages_ref,
+                page_refs[i],
                 result,
                 &font_obj_map,
                 &mut font_tracker,
+                &per_page_annots[i],
             )?;
-            page_refs.push(page_ref);
         }
 
         // Pages object
@@ -310,16 +338,23 @@ impl PdfDevice {
         map
     }
 
-    /// Build PDF objects for a single page. Returns the page object number.
+    /// Build PDF objects for a single page. The page's indirect object
+    /// number is pre-allocated by the caller (so annotations can target
+    /// the page before its dict is written), and the per-page
+    /// annotation refs are passed in for inclusion in the page's
+    /// `/Annots` array.
+    #[allow(clippy::too_many_arguments)]
     fn build_page(
         &self,
         writer: &mut PdfWriter,
         page: &PageData,
         pages_ref: u32,
+        page_ref: u32,
         result: &ContentStreamResult,
         font_obj_map: &HashMap<String, u32>,
         font_tracker: &mut FontTracker,
-    ) -> Result<u32, String> {
+        annot_refs: &[u32],
+    ) -> Result<(), String> {
         let ContentStreamResult {
             content,
             images,
@@ -638,9 +673,15 @@ impl PdfDevice {
                 ]),
             ));
         }
-        let page_ref = writer.add_object(&PdfObj::Dict(page_entries));
+        if !annot_refs.is_empty() {
+            page_entries.push((
+                b"Annots".to_vec(),
+                PdfObj::Array(annot_refs.iter().map(|r| PdfObj::Ref(*r)).collect()),
+            ));
+        }
+        writer.set_object(page_ref, &PdfObj::Dict(page_entries));
 
-        Ok(page_ref)
+        Ok(())
     }
 
     /// Build a PDF font reference for a tracked font.

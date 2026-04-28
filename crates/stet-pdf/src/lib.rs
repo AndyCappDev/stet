@@ -25,6 +25,7 @@
 //! custom rendering pipeline or capture the PDF bytes in-memory without
 //! touching the filesystem.
 
+mod annotations;
 mod content_stream;
 mod font_embedder;
 mod font_tracker;

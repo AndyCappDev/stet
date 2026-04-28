@@ -154,6 +154,84 @@ disappearing.
 The catalog also gets `/PageMode /UseOutlines` whenever any `/OUT`
 records exist, so PDF viewers open the bookmark pane by default.
 
+### `/ANN` — page annotations (Link, Text, FreeText)
+
+```postscript
+[ /Rect [72 720 540 750]
+  /Subtype /Link
+  /Border [0 0 1]
+  /Action << /S /URI /URI (https://example.org) >>
+  /ANN pdfmark
+```
+
+Each `/ANN pdfmark` records one annotation (`/Annot`) attached to a
+specific page. The writer assembles per-page `/Annots` arrays at
+end-of-job. Annotations whose `/Subtype` is unrecognised, or whose
+`/Page` is out of range, are dropped silently.
+
+#### Shared keys
+
+| Key | Type | Meaning |
+|---|---|---|
+| `/Subtype` | name | Required — `/Link`, `/Text`, `/FreeText`. Other subtypes (Stamp, Widget, ...) ship in later phases |
+| `/Rect` | 4-array | Required — `[llx lly urx ury]` in default user space |
+| `/Page` | integer | 1-based page target. Defaults to the page being assembled (= `current_page + 1` from the buffer's showpage counter) |
+| `/SrcPg` | integer | stet alias for `/Page`; same semantics |
+| `/Color` | 3-array | Optional `[r g b]` in `0..=1` — flows to `/C` |
+| `/Border` | 3-array or 4-array | `[Hradius Vradius Width]` or `[Hradius Vradius Width [dash...]]` |
+| `/Title` | string | Annotator name — flows to `/T` |
+| `/Contents` | string | Body text — flows to `/Contents` |
+
+#### `/Subtype /Link`
+
+| Key | Type | Meaning |
+|---|---|---|
+| `/Action` | dict | Action to fire on click. Same shape as `/OUT`'s `/Action`: `<< /S /URI /URI (string) >>` or `<< /S /GoTo /D <name-or-array> >>` |
+| `/Page` + `/View` | int + array | Internal jump target; same view-spec syntax as `/OUT` |
+| `/Dest` | name or string | Named destination (resolved against the document's name tree once `/DEST pdfmark` lands) |
+| `/H` | name | Highlight mode: `/N` none, `/I` invert, `/O` outline, `/P` push |
+
+`/Action` wins over `/Dest` wins over `/Page`. A link with none of the
+three becomes a non-clickable region (still emits, viewers ignore it).
+
+#### `/Subtype /Text` (sticky note)
+
+| Key | Type | Default |
+|---|---|---|
+| `/Open` | boolean | `false` |
+| `/Name` | name | `/Note` (also accepts `/Comment`, `/Key`, `/Help`, `/NewParagraph`, `/Paragraph`, `/Insert` — anything else falls back to `/Note`) |
+
+#### `/Subtype /FreeText`
+
+| Key | Type | Default |
+|---|---|---|
+| `/DA` | string | `(0 0 0 rg /Helv 10 Tf)` — black 10-pt Helvetica |
+| `/Q` | integer | None — viewer chooses; 0=left, 1=center, 2=right |
+
+The default `/DA` matters because most PDF viewers won't render
+`/FreeText` at all without one. If you supply `/Contents` but no `/DA`,
+stet fills in the default so the annotation is visible.
+
+#### Page scoping
+
+Pdfmark records remember "the page being assembled at the time the
+mark fired". Inside the interpreter, `Context::pdfmark_buffer` keeps a
+`current_page` counter incremented by every `showpage`; when an `/ANN`
+record omits `/Page` (or `/SrcPg`), it scopes to `current_page + 1` —
+i.e. the page that has not yet been finalised.
+
+```postscript
+% Annotation A → page 1
+[ /Rect [...] /Subtype /Text /Contents (a) /ANN pdfmark
+showpage
+% Annotation B → page 2
+[ /Rect [...] /Subtype /Text /Contents (b) /ANN pdfmark
+showpage
+```
+
+Multiple annotations on the same page accumulate in that page's
+`/Annots` array in declaration order.
+
 ### `/DOCINFO` — document Info dictionary
 
 ```postscript

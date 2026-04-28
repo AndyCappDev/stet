@@ -455,6 +455,13 @@ pub fn op_showpage_continue(ctx: &mut Context) -> Result<(), PsError> {
     let page_count = get_pd_int(ctx, b"PageCount").unwrap_or(0) + 1;
     set_pd_int(ctx, b"PageCount", page_count);
 
+    // pdfmark: track completed-showpage count so /ANN pdfmarks issued
+    // without an explicit /Page key can resolve to "the page being
+    // assembled right now" via `current_page + 1`. After N showpages
+    // we are mid-assembly of page N+1; the operator uses that
+    // computation, not raw `current_page`.
+    ctx.pdfmark_buffer.current_page = page_count as u32;
+
     // Check page filter — skip rendering if page not in the selected set
     let in_filter = ctx
         .page_filter

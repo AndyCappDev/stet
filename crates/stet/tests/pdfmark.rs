@@ -290,6 +290,158 @@ fn no_outline_records_no_catalog_reference() {
 }
 
 #[test]
+fn annotation_link_uri_emits_on_page() {
+    let pdf = render_one_page_pdf(
+        "[ /Rect [72 720 540 750] /Subtype /Link /Border [0 0 1]
+            /Action << /S /URI /URI (https://example.org) >>
+            /ANN pdfmark",
+    );
+    // /Annots array on the page dict
+    let pages = objects_containing(&pdf, b"/Type /Page\n");
+    assert_eq!(pages.len(), 1, "expected one page dict");
+    let page_str = String::from_utf8_lossy(&pages[0]);
+    assert!(
+        page_str.contains("/Annots"),
+        "page missing /Annots: {page_str}",
+    );
+    // Link annotation indirect carries /Subtype /Link + /A /URI dict
+    let links = objects_containing(&pdf, b"/Subtype /Link");
+    assert_eq!(links.len(), 1, "expected one /Link annotation");
+    let link_body = String::from_utf8_lossy(&links[0]);
+    assert!(
+        link_body.contains("(https://example.org)"),
+        "link missing URI string: {link_body}",
+    );
+    assert!(
+        link_body.contains("/S /URI"),
+        "link missing /S /URI: {link_body}",
+    );
+    // /Rect round-trip
+    assert!(
+        link_body.contains("/Rect"),
+        "link missing /Rect: {link_body}"
+    );
+}
+
+#[test]
+fn annotation_link_internal_goto() {
+    let mut interp = Interpreter::new();
+    let script = "showpage
+        showpage
+        [ /Rect [50 50 150 80] /Subtype /Link /Page 1
+            /Action << /S /GoTo /D [1 /Fit] >>
+            /ANN pdfmark
+        showpage";
+    let pdf = interp
+        .render_to_pdf(script.as_bytes(), 72.0)
+        .expect("render");
+    let links = objects_containing(&pdf, b"/Subtype /Link");
+    assert_eq!(links.len(), 1);
+    let body = String::from_utf8_lossy(&links[0]);
+    assert!(body.contains("/S /GoTo"), "expected /S /GoTo: {body}",);
+    assert!(body.contains("/Fit"), "expected /Fit view: {body}");
+}
+
+#[test]
+fn annotation_text_sticky_note() {
+    let pdf = render_one_page_pdf(
+        "[ /Rect [400 400 420 420]
+            /Subtype /Text
+            /Contents (Look here)
+            /Name /Note
+            /ANN pdfmark",
+    );
+    let texts = objects_containing(&pdf, b"/Subtype /Text");
+    assert_eq!(texts.len(), 1);
+    let body = String::from_utf8_lossy(&texts[0]);
+    assert!(body.contains("(Look here)"), "missing /Contents: {body}",);
+    assert!(body.contains("/Name /Note"), "missing /Name /Note: {body}",);
+    assert!(
+        body.contains("/Open false"),
+        "expected /Open false default: {body}",
+    );
+}
+
+#[test]
+fn annotation_freetext_default_appearance() {
+    let pdf = render_one_page_pdf(
+        "[ /Rect [100 100 300 150]
+            /Subtype /FreeText
+            /Contents (Visible label)
+            /ANN pdfmark",
+    );
+    let ft = objects_containing(&pdf, b"/Subtype /FreeText");
+    assert_eq!(ft.len(), 1);
+    let body = String::from_utf8_lossy(&ft[0]);
+    assert!(body.contains("/DA "), "FreeText missing /DA: {body}",);
+    // Default appearance string applied when /DA omitted.
+    assert!(
+        body.contains("(0 0 0 rg /Helv 10 Tf)"),
+        "expected default /DA: {body}",
+    );
+}
+
+#[test]
+fn annotation_implicit_page_scoping() {
+    // /ANN with no /Page key scopes to the page being assembled.
+    // Two showpages, one /ANN before the second showpage → it lands
+    // on page 2.
+    let mut interp = Interpreter::new();
+    let script = "showpage
+        [ /Rect [0 0 10 10] /Subtype /Text /Contents (page 2 note) /ANN pdfmark
+        showpage";
+    let pdf = interp
+        .render_to_pdf(script.as_bytes(), 72.0)
+        .expect("render");
+    let annotations = objects_containing(&pdf, b"/Subtype /Text");
+    assert_eq!(annotations.len(), 1);
+    // The annotation's indirect ref appears in page 2's /Annots
+    // (the second /Type /Page object).
+    let pages = objects_containing(&pdf, b"/Type /Page\n");
+    assert_eq!(pages.len(), 2);
+    let page1_str = String::from_utf8_lossy(&pages[0]);
+    let page2_str = String::from_utf8_lossy(&pages[1]);
+    assert!(
+        !page1_str.contains("/Annots"),
+        "page 1 should have no /Annots: {page1_str}",
+    );
+    assert!(
+        page2_str.contains("/Annots"),
+        "page 2 should have /Annots: {page2_str}",
+    );
+}
+
+#[test]
+fn annotation_multiple_per_page_accumulate() {
+    let pdf = render_one_page_pdf(
+        "[ /Rect [0 0 10 10] /Subtype /Text /Contents (one) /ANN pdfmark
+         [ /Rect [20 0 30 10] /Subtype /Text /Contents (two) /ANN pdfmark
+         [ /Rect [40 0 50 10] /Subtype /Text /Contents (three) /ANN pdfmark",
+    );
+    let texts = objects_containing(&pdf, b"/Subtype /Text");
+    assert_eq!(texts.len(), 3);
+    let pages = objects_containing(&pdf, b"/Type /Page\n");
+    let page_str = String::from_utf8_lossy(&pages[0]);
+    assert!(page_str.contains("/Annots"));
+    // /Annots array carries three indirect refs
+    let annots_idx = page_str.find("/Annots").unwrap();
+    let after = &page_str[annots_idx..];
+    let rs: usize = after.matches(" 0 R").count();
+    assert!(rs >= 3, "expected ≥3 indirect refs in /Annots: {page_str}");
+}
+
+#[test]
+fn annotation_unknown_subtype_no_emit() {
+    let pdf = render_one_page_pdf("[ /Rect [0 0 10 10] /Subtype /WeirdThing /ANN pdfmark");
+    let pages = objects_containing(&pdf, b"/Type /Page\n");
+    let page_str = String::from_utf8_lossy(&pages[0]);
+    assert!(
+        !page_str.contains("/Annots"),
+        "page should have no /Annots when subtype unknown: {page_str}",
+    );
+}
+
+#[test]
 fn unknown_typetag_is_silent() {
     let pdf = render_one_page_pdf("[ /Foo (bar) /SOMENEWTHING pdfmark");
     let info = find_info_dict_bytes(&pdf);

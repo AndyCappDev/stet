@@ -13,18 +13,23 @@
 //! on `Context`. The PDF output device drains that buffer at end-of-job;
 //! non-PDF devices simply discard it.
 //!
-//! Phase 1 implements the dispatcher itself plus the `/DOCINFO`
-//! type-tag. Subsequent phases add `/OUT`, `/ANN`, `/DEST`, `/PAGE` /
-//! `/PAGES`, `/VIEWERPREFERENCES`, `/Metadata`, etc., as new arms in
-//! the type-tag match.
+//! Currently recognised type-tags: `/DOCINFO` (document Info dict),
+//! `/OUT` (outline / bookmark entry), `/ANN` (Link / Text / FreeText
+//! annotations). Subsequent phases add `/DEST`, `/PAGE` / `/PAGES`,
+//! `/VIEWERPREFERENCES`, `/Metadata`, `/EMBED`, `/FORM`, `/Widget`
+//! (form fields), and the Tagged-PDF structure-tree set as new arms
+//! in the type-tag match. Unknown type-tags silently no-op (Adobe
+//! convention) so PS code targeting newer features stays runnable on
+//! older interpreters.
 
 use stet_core::context::Context;
 use stet_core::dict::DictKey;
 use stet_core::error::PsError;
 use stet_core::object::{EntityId, PsObject, PsValue};
 use stet_core::pdfmark::{
-    DocDate, DocInfoRecord, GoToTarget, OutlineAction, OutlineDestination, OutlineRecord,
-    PdfMarkRecord, TrappedState, ViewSpec,
+    AnnotationRecord, AnnotationSubtype, AnnotationTarget, Border, DocDate, DocInfoRecord,
+    GoToTarget, LinkHighlight, OutlineAction, OutlineDestination, OutlineRecord, PdfMarkRecord,
+    TextAnnotationIcon, TrappedState, ViewSpec,
 };
 
 /// `pdfmark`: mark arg1 ... argN typetag → —
@@ -81,6 +86,11 @@ pub fn op_pdfmark(ctx: &mut Context) -> Result<(), PsError> {
         b"OUT" => {
             if let Some(rec) = parse_outline(ctx, &payload) {
                 ctx.pdfmark_buffer.push(PdfMarkRecord::Outline(rec));
+            }
+        }
+        b"ANN" => {
+            if let Some(rec) = parse_annotation(ctx, &payload) {
+                ctx.pdfmark_buffer.push(PdfMarkRecord::Annotation(rec));
             }
         }
         // Unknown type-tags silently emit nothing (Adobe convention).
@@ -376,6 +386,210 @@ fn parse_outline(ctx: &Context, payload: &[PsObject]) -> Option<OutlineRecord> {
         outline_level,
         color,
         flags,
+    })
+}
+
+// ----- Annotation parsing (Phase 3) ----------------------------------------
+
+/// Decode a PDF view-spec array but accept any length sub-slice. Used
+/// by both the bookmark and the link-annotation paths.
+fn parse_view_spec_or_default(ctx: &Context, elements: &[PsObject]) -> ViewSpec {
+    parse_view_spec_with_ctx(ctx, elements).unwrap_or_default()
+}
+
+/// Resolve `/Page` + optional `/View`, `/Dest`, or `/Action` keys into
+/// an [`AnnotationTarget`] for `/Link` annotations. Mirrors
+/// [`extract_outline_destination`] but emits the annotation-flavoured
+/// enum so the writer can dispatch differently when needed.
+fn extract_annotation_target(ctx: &Context, payload: &[PsObject]) -> Option<AnnotationTarget> {
+    if let Some(dict) = extract_dict_entity(ctx, payload, b"Action")
+        && let Some(action) = parse_action_dict(ctx, dict)
+    {
+        return Some(AnnotationTarget::Action(action));
+    }
+    if let Some(name) = extract_name(ctx, payload, b"Dest") {
+        return Some(AnnotationTarget::NamedDest(
+            String::from_utf8_lossy(name).into_owned(),
+        ));
+    }
+    if let Some(name) = extract_string(ctx, payload, b"Dest") {
+        return Some(AnnotationTarget::NamedDest(name));
+    }
+    if let Some(page) = extract_i32(ctx, payload, b"Page")
+        && let Ok(page) = u32::try_from(page)
+    {
+        let view = extract_array(ctx, payload, b"View")
+            .as_deref()
+            .map(|el| parse_view_spec_or_default(ctx, el))
+            .unwrap_or_default();
+        return Some(AnnotationTarget::PageView { page, view });
+    }
+    None
+}
+
+/// Pull a `/Border [Hradius Vradius Width [dash...]]` array.
+fn extract_border(ctx: &Context, payload: &[PsObject]) -> Option<Border> {
+    let elements = extract_array(ctx, payload, b"Border")?;
+    if elements.len() < 3 {
+        return None;
+    }
+    let mut border = Border {
+        h_radius: elements[0].as_f64()?,
+        v_radius: elements[1].as_f64()?,
+        width: elements[2].as_f64()?,
+        dash: None,
+    };
+    if elements.len() >= 4 {
+        let (entity, start, len) = match elements[3].value {
+            PsValue::Array { entity, start, len } | PsValue::PackedArray { entity, start, len } => {
+                (entity, start, len)
+            }
+            _ => return Some(border),
+        };
+        let mut dash = Vec::with_capacity(len as usize);
+        for i in 0..len {
+            if let Some(v) = ctx.arrays.get_element(entity, start + i).as_f64() {
+                dash.push(v);
+            } else {
+                return Some(border); // malformed dash → keep base border, drop dash
+            }
+        }
+        border.dash = Some(dash);
+    }
+    Some(border)
+}
+
+fn link_highlight_from_name(name: &[u8]) -> Option<LinkHighlight> {
+    Some(match name {
+        b"N" => LinkHighlight::None,
+        b"I" => LinkHighlight::Invert,
+        b"O" => LinkHighlight::Outline,
+        b"P" => LinkHighlight::Push,
+        _ => return None,
+    })
+}
+
+fn text_icon_from_name(name: &[u8]) -> TextAnnotationIcon {
+    match name {
+        b"Comment" => TextAnnotationIcon::Comment,
+        b"Note" => TextAnnotationIcon::Note,
+        b"Key" => TextAnnotationIcon::Key,
+        b"Help" => TextAnnotationIcon::Help,
+        b"NewParagraph" => TextAnnotationIcon::NewParagraph,
+        b"Paragraph" => TextAnnotationIcon::Paragraph,
+        b"Insert" => TextAnnotationIcon::Insert,
+        // Anything else falls back to /Note per Adobe convention.
+        _ => TextAnnotationIcon::Note,
+    }
+}
+
+/// Pull `/Subtype` and dispatch to the right [`AnnotationSubtype`]
+/// variant.
+fn parse_annotation_subtype(ctx: &Context, payload: &[PsObject]) -> Option<AnnotationSubtype> {
+    let subtype = extract_name(ctx, payload, b"Subtype")?;
+    match subtype {
+        b"Link" => {
+            let target = extract_annotation_target(ctx, payload);
+            let highlight = extract_name(ctx, payload, b"H").and_then(link_highlight_from_name);
+            Some(AnnotationSubtype::Link { target, highlight })
+        }
+        b"Text" => {
+            let open = matches!(extract_name(ctx, payload, b"Open"), Some(b"true"))
+                || extract_bool(ctx, payload, b"Open").unwrap_or(false);
+            let icon = extract_name(ctx, payload, b"Name")
+                .map(text_icon_from_name)
+                .unwrap_or_default();
+            Some(AnnotationSubtype::Text { open, icon })
+        }
+        b"FreeText" => {
+            let default_appearance = extract_string(ctx, payload, b"DA");
+            let quadding = extract_i32(ctx, payload, b"Q").and_then(|n| u32::try_from(n).ok());
+            Some(AnnotationSubtype::FreeText {
+                default_appearance,
+                quadding,
+            })
+        }
+        // Other subtypes (Stamp, Widget, …) land in later phases; for
+        // now treat them as "no record" so unknown subtypes don't
+        // litter the output PDF.
+        _ => None,
+    }
+}
+
+/// Pull a `/Key true|false` entry. PostScript also accepts `/Open
+/// /true` (a name) — that path is handled separately by the caller.
+fn extract_bool(ctx: &Context, payload: &[PsObject], key: &[u8]) -> Option<bool> {
+    let key_id = ctx.names.find(key)?;
+    for (k, v) in pairs_iter(payload) {
+        if k == key_id
+            && let PsValue::Bool(b) = v.value
+        {
+            return Some(b);
+        }
+    }
+    None
+}
+
+/// Pull a `/Rect [llx lly urx ury]`. Returns `None` only when the
+/// array is missing entirely; malformed arrays default to the empty
+/// rect so the writer still produces *some* annotation rather than
+/// silently dropping the record.
+fn extract_rect(ctx: &Context, payload: &[PsObject]) -> Option<[f64; 4]> {
+    let elements = extract_array(ctx, payload, b"Rect")?;
+    if elements.len() < 4 {
+        return Some([0.0; 4]);
+    }
+    Some([
+        elements[0].as_f64().unwrap_or(0.0),
+        elements[1].as_f64().unwrap_or(0.0),
+        elements[2].as_f64().unwrap_or(0.0),
+        elements[3].as_f64().unwrap_or(0.0),
+    ])
+}
+
+/// Resolve the `/Page` (or `/SrcPg`) key, falling back to the page
+/// currently being assembled (`current_page + 1`).
+fn resolve_annotation_page(ctx: &Context, payload: &[PsObject]) -> u32 {
+    if let Some(page) = extract_i32(ctx, payload, b"Page")
+        && let Ok(p) = u32::try_from(page)
+        && p > 0
+    {
+        return p;
+    }
+    if let Some(page) = extract_i32(ctx, payload, b"SrcPg")
+        && let Ok(p) = u32::try_from(page)
+        && p > 0
+    {
+        return p;
+    }
+    ctx.pdfmark_buffer.current_page + 1
+}
+
+/// Parse an `/ANN pdfmark` payload. Records without a recognised
+/// `/Subtype` (or without a `/Rect`) are dropped silently — Adobe
+/// pdfwrite behaves the same way and silently dropping is the only
+/// reasonable behaviour for an annotation that has no on-page footprint.
+fn parse_annotation(ctx: &Context, payload: &[PsObject]) -> Option<AnnotationRecord> {
+    let subtype = parse_annotation_subtype(ctx, payload)?;
+    let rect = extract_rect(ctx, payload)?;
+    let page = resolve_annotation_page(ctx, payload);
+    let color = extract_array(ctx, payload, b"Color").and_then(|el| {
+        if el.len() < 3 {
+            return None;
+        }
+        Some([el[0].as_f64()?, el[1].as_f64()?, el[2].as_f64()?])
+    });
+    let border = extract_border(ctx, payload);
+    let title = extract_string(ctx, payload, b"Title");
+    let contents = extract_string(ctx, payload, b"Contents");
+    Some(AnnotationRecord {
+        page,
+        rect,
+        color,
+        border,
+        title,
+        contents,
+        subtype,
     })
 }
 
@@ -731,6 +945,203 @@ mod tests {
             Some(OutlineDestination::NamedDest(name)) => assert_eq!(name, "chapter1"),
             other => panic!("expected NamedDest, got {other:?}"),
         }
+    }
+
+    /// Build a Rect array entity for tests.
+    fn alloc_rect(ctx: &mut Context, llx: f64, lly: f64, urx: f64, ury: f64) -> PsObject {
+        let entity = ctx.arrays.allocate(4);
+        let elements = vec![
+            PsObject::real(llx),
+            PsObject::real(lly),
+            PsObject::real(urx),
+            PsObject::real(ury),
+        ];
+        let dest = ctx.arrays.get_mut(entity, 0, 4);
+        dest.copy_from_slice(&elements);
+        PsObject::array(entity, 4)
+    }
+
+    #[test]
+    fn annotation_link_to_uri() {
+        let mut ctx = make_ctx();
+        let title_id = ctx.names.intern(b"Title");
+        let rect_id = ctx.names.intern(b"Rect");
+        let subtype_id = ctx.names.intern(b"Subtype");
+        let link_id = ctx.names.intern(b"Link");
+        let action_id = ctx.names.intern(b"Action");
+        let s_id = ctx.names.intern(b"S");
+        let uri_name_id = ctx.names.intern(b"URI");
+        let ann_id = ctx.names.intern(b"ANN");
+
+        let title_str = ctx.strings.allocate_from(b"website");
+        let url_str = ctx.strings.allocate_from(b"https://example.com");
+        let action_dict = ctx.dicts.allocate(4, b"action");
+        ctx.dicts.put(
+            action_dict,
+            DictKey::Name(s_id),
+            PsObject::name_lit(uri_name_id),
+        );
+        ctx.dicts.put(
+            action_dict,
+            DictKey::Name(uri_name_id),
+            PsObject::string(url_str, 19),
+        );
+
+        let rect = alloc_rect(&mut ctx, 72.0, 720.0, 540.0, 750.0);
+        ctx.o_stack.push(PsObject::mark()).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(title_id)).unwrap();
+        ctx.o_stack.push(PsObject::string(title_str, 7)).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(rect_id)).unwrap();
+        ctx.o_stack.push(rect).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(subtype_id)).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(link_id)).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(action_id)).unwrap();
+        ctx.o_stack.push(PsObject::dict(action_dict)).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(ann_id)).unwrap();
+        op_pdfmark(&mut ctx).unwrap();
+
+        let PdfMarkRecord::Annotation(rec) = &ctx.pdfmark_buffer.records()[0] else {
+            panic!("expected Annotation record");
+        };
+        assert_eq!(rec.title.as_deref(), Some("website"));
+        assert_eq!(rec.rect, [72.0, 720.0, 540.0, 750.0]);
+        match &rec.subtype {
+            AnnotationSubtype::Link { target, .. } => match target {
+                Some(AnnotationTarget::Action(OutlineAction::Uri(uri))) => {
+                    assert_eq!(uri, "https://example.com")
+                }
+                other => panic!("expected URI action target, got {other:?}"),
+            },
+            other => panic!("expected Link subtype, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn annotation_text_default_icon_is_note() {
+        let mut ctx = make_ctx();
+        let rect_id = ctx.names.intern(b"Rect");
+        let subtype_id = ctx.names.intern(b"Subtype");
+        let text_id = ctx.names.intern(b"Text");
+        let contents_id = ctx.names.intern(b"Contents");
+        let ann_id = ctx.names.intern(b"ANN");
+        let body_str = ctx.strings.allocate_from(b"A comment");
+
+        let rect = alloc_rect(&mut ctx, 100.0, 100.0, 130.0, 130.0);
+        ctx.o_stack.push(PsObject::mark()).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(rect_id)).unwrap();
+        ctx.o_stack.push(rect).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(subtype_id)).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(text_id)).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(contents_id)).unwrap();
+        ctx.o_stack.push(PsObject::string(body_str, 9)).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(ann_id)).unwrap();
+        op_pdfmark(&mut ctx).unwrap();
+
+        let PdfMarkRecord::Annotation(rec) = &ctx.pdfmark_buffer.records()[0] else {
+            panic!("expected Annotation record");
+        };
+        assert_eq!(rec.contents.as_deref(), Some("A comment"));
+        match &rec.subtype {
+            AnnotationSubtype::Text { open, icon } => {
+                assert!(!*open);
+                assert_eq!(*icon, TextAnnotationIcon::Note);
+            }
+            other => panic!("expected Text subtype, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn annotation_freetext_default_appearance_filled_in_at_write() {
+        let mut ctx = make_ctx();
+        let rect_id = ctx.names.intern(b"Rect");
+        let subtype_id = ctx.names.intern(b"Subtype");
+        let freetext_id = ctx.names.intern(b"FreeText");
+        let q_id = ctx.names.intern(b"Q");
+        let ann_id = ctx.names.intern(b"ANN");
+
+        let rect = alloc_rect(&mut ctx, 50.0, 50.0, 250.0, 100.0);
+        ctx.o_stack.push(PsObject::mark()).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(rect_id)).unwrap();
+        ctx.o_stack.push(rect).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(subtype_id)).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(freetext_id)).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(q_id)).unwrap();
+        ctx.o_stack.push(PsObject::int(1)).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(ann_id)).unwrap();
+        op_pdfmark(&mut ctx).unwrap();
+
+        let PdfMarkRecord::Annotation(rec) = &ctx.pdfmark_buffer.records()[0] else {
+            panic!("expected Annotation record");
+        };
+        match &rec.subtype {
+            AnnotationSubtype::FreeText {
+                default_appearance,
+                quadding,
+            } => {
+                assert!(default_appearance.is_none());
+                assert_eq!(*quadding, Some(1));
+            }
+            other => panic!("expected FreeText subtype, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn annotation_page_defaults_to_current_page_plus_one() {
+        // No /Page → record's page = pdfmark_buffer.current_page + 1.
+        // After zero showpages, the page being assembled is page 1.
+        let mut ctx = make_ctx();
+        let rect_id = ctx.names.intern(b"Rect");
+        let subtype_id = ctx.names.intern(b"Subtype");
+        let text_id = ctx.names.intern(b"Text");
+        let ann_id = ctx.names.intern(b"ANN");
+        let rect = alloc_rect(&mut ctx, 0.0, 0.0, 10.0, 10.0);
+
+        ctx.o_stack.push(PsObject::mark()).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(rect_id)).unwrap();
+        ctx.o_stack.push(rect).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(subtype_id)).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(text_id)).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(ann_id)).unwrap();
+        op_pdfmark(&mut ctx).unwrap();
+
+        let PdfMarkRecord::Annotation(rec) = &ctx.pdfmark_buffer.records()[0] else {
+            panic!("expected Annotation record");
+        };
+        assert_eq!(rec.page, 1);
+
+        // Simulate "showpage finished" → next /ANN scopes to page 2.
+        ctx.pdfmark_buffer.current_page = 1;
+        let rect2 = alloc_rect(&mut ctx, 0.0, 0.0, 10.0, 10.0);
+        ctx.o_stack.push(PsObject::mark()).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(rect_id)).unwrap();
+        ctx.o_stack.push(rect2).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(subtype_id)).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(text_id)).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(ann_id)).unwrap();
+        op_pdfmark(&mut ctx).unwrap();
+        let PdfMarkRecord::Annotation(rec2) = &ctx.pdfmark_buffer.records()[1] else {
+            panic!("expected Annotation record");
+        };
+        assert_eq!(rec2.page, 2);
+    }
+
+    #[test]
+    fn annotation_unknown_subtype_dropped() {
+        let mut ctx = make_ctx();
+        let rect_id = ctx.names.intern(b"Rect");
+        let subtype_id = ctx.names.intern(b"Subtype");
+        let weird_id = ctx.names.intern(b"NotARealSubtype");
+        let ann_id = ctx.names.intern(b"ANN");
+        let rect = alloc_rect(&mut ctx, 0.0, 0.0, 10.0, 10.0);
+
+        ctx.o_stack.push(PsObject::mark()).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(rect_id)).unwrap();
+        ctx.o_stack.push(rect).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(subtype_id)).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(weird_id)).unwrap();
+        ctx.o_stack.push(PsObject::name_lit(ann_id)).unwrap();
+        op_pdfmark(&mut ctx).unwrap();
+        assert!(ctx.pdfmark_buffer.is_empty());
     }
 
     #[test]
