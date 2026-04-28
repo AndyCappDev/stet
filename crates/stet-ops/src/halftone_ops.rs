@@ -1378,7 +1378,7 @@ pub fn op_execform(ctx: &mut Context) -> Result<(), PsError> {
     if let Some(cached) = ctx.form_cache.get(&dict_entity) {
         // Clone to avoid borrow conflict (cached borrows ctx.form_cache)
         let cached_clone = cached.clone();
-        replay_form_elements(&cached_clone, &real_ctm, &mut ctx.display_list);
+        replay_form_elements(&cached_clone, &real_ctm, ctx.current_display_list_mut());
     }
 
     // 6. grestore

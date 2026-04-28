@@ -394,6 +394,9 @@ pub fn op_flushpage(ctx: &mut Context) -> Result<(), PsError> {
 /// Uses the EndPage/BeginPage protocol with reason code 1 if a page device
 /// with EndPage is active. Does NOT call erasepage or initgraphics afterward.
 pub fn op_copypage(ctx: &mut Context) -> Result<(), PsError> {
+    if !ctx.group_stack.is_empty() {
+        return Err(PsError::RangeCheck);
+    }
     if crate::device_ops::is_null_device(ctx) {
         return Ok(());
     }

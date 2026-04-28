@@ -1,0 +1,113 @@
+%% Transparency-group operator tests (PDF extensions Phase 2).
+%%
+%% Exercises begintransparencygroup / endtransparencygroup, including
+%% nesting, error paths, and the GhostScript-style aliases from
+%% pdfextensions.ps. Stack effects only — no rendering correctness here;
+%% visual coverage lives in samples/transparency/.
+
+userdict /$unittest known not {(unit_tests/unittest.ps) run} if
+
+gsave nulldevice
+
+
+%% =============================================================================
+%% basic open + close: empty dict accepted
+%% =============================================================================
+
+%% leaves no operands behind %%
+<< >> begintransparencygroup
+endtransparencygroup
+count [0] assert
+
+
+%% =============================================================================
+%% /Isolated and /Knockout flags accepted as booleans
+%% =============================================================================
+
+<< /Isolated true /Knockout true >> begintransparencygroup
+endtransparencygroup
+
+
+%% =============================================================================
+%% /CS accepts known names
+%% =============================================================================
+
+<< /CS /DeviceGray >> begintransparencygroup
+endtransparencygroup
+
+<< /CS /DeviceRGB >> begintransparencygroup
+endtransparencygroup
+
+<< /CS /DeviceCMYK >> begintransparencygroup
+endtransparencygroup
+
+<< /CS /CalRGB >> begintransparencygroup
+endtransparencygroup
+
+
+%% =============================================================================
+%% /CS unknown name → rangecheck (consumes nothing — dict still on stack)
+%% =============================================================================
+
+/badcs << /CS /BogusColorSpace >> def
+badcs /begintransparencygroup [badcs /rangecheck] assert
+
+
+%% =============================================================================
+%% endtransparencygroup with no group open → rangecheck
+%% =============================================================================
+
+/endtransparencygroup [/rangecheck] assert
+
+
+%% =============================================================================
+%% nesting: groups within groups
+%% =============================================================================
+
+<< >> begintransparencygroup
+  << >> begintransparencygroup
+    << >> begintransparencygroup
+    endtransparencygroup
+  endtransparencygroup
+endtransparencygroup
+
+
+%% =============================================================================
+%% /BBox accepted as a 4-element user-space array
+%% =============================================================================
+
+<< /BBox [0 0 100 100] >> begintransparencygroup
+endtransparencygroup
+
+
+%% =============================================================================
+%% paint inside a group: ops should not error and the page list stays
+%% empty until endtransparencygroup runs (which then emits a Group).
+%% =============================================================================
+
+<< >> begintransparencygroup
+  newpath 10 10 moveto 90 90 lineto stroke
+endtransparencygroup
+
+
+%% =============================================================================
+%% gsave inside the group must be matched before endtransparencygroup;
+%% an unbalanced gsave at end raises rangecheck.
+%% =============================================================================
+
+<< >> begintransparencygroup
+  gsave
+  /endtransparencygroup [/rangecheck] assert
+  grestore
+  endtransparencygroup
+
+
+%% =============================================================================
+%% GhostScript-style aliases from pdfextensions.ps
+%% =============================================================================
+
+<< >> .begintransparencygroup
+.endtransparencygroup
+
+
+grestore     %% pop nulldevice

@@ -2671,9 +2671,14 @@ fn render_show_type3(
             let dx = dev_x - cg.origin_dev_x;
             let dy = dev_y - cg.origin_dev_y;
             let color = &ctx.gstate.color;
-            for elem in &cg.elements {
-                ctx.display_list
-                    .push(recolor_and_translate_element(elem, dx, dy, color));
+            let recolored: Vec<_> = cg
+                .elements
+                .iter()
+                .map(|elem| recolor_and_translate_element(elem, dx, dy, color))
+                .collect();
+            let target = ctx.current_display_list_mut();
+            for elem in recolored {
+                target.push(elem);
             }
             let (wx, wy) = font_matrix.transform_delta(cg.width.0, cg.width.1);
             cur_x += wx + extra_ax;
@@ -2683,8 +2688,9 @@ fn render_show_type3(
             ctx.char_width_mode1 = None;
             ctx.char_cache_mode = None;
 
-            // Record display list position before BuildChar
-            let dl_start = ctx.display_list.len();
+            // Record display list position before BuildChar (on the active
+            // emit target, which may be a transparency group's list).
+            let dl_start = ctx.current_display_list().len();
             // Record device-space origin for cache
             let (origin_dev_x, origin_dev_y) = ctm.transform_point(cur_x, cur_y);
 
@@ -2719,7 +2725,7 @@ fn render_show_type3(
             // Cache if setcachedevice was called (not setcharwidth)
             if ctx.char_cache_mode == Some(Type3CacheMode::Cache) {
                 let elements: Vec<DisplayElement> =
-                    ctx.display_list.elements_from(dl_start).to_vec();
+                    ctx.current_display_list().elements_from(dl_start).to_vec();
                 let cache = ctx.glyph_caches.entry(font_entity).or_default();
                 cache.by_charcode.insert(
                     byte,
@@ -4378,7 +4384,8 @@ fn emit_text_element_with_fm(
         alpha_is_shape: ctx.gstate.alpha_is_shape,
         text_knockout: ctx.gstate.text_knockout,
     };
-    ctx.display_list.push(DisplayElement::Text { params });
+    ctx.current_display_list_mut()
+        .push(DisplayElement::Text { params });
 }
 
 fn push_glyph_element(
@@ -4419,7 +4426,7 @@ fn push_glyph_element(
             blend_mode: ctx.gstate.blend_mode,
             alpha_is_shape: ctx.gstate.alpha_is_shape,
         };
-        ctx.display_list.push(DisplayElement::Stroke {
+        ctx.current_display_list_mut().push(DisplayElement::Stroke {
             path: device_path,
             params,
         });
@@ -4443,7 +4450,7 @@ fn push_glyph_element(
             blend_mode: ctx.gstate.blend_mode,
             alpha_is_shape: ctx.gstate.alpha_is_shape,
         };
-        ctx.display_list.push(DisplayElement::Fill {
+        ctx.current_display_list_mut().push(DisplayElement::Fill {
             path: device_path,
             params,
         });

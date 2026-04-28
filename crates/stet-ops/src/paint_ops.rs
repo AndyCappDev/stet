@@ -197,7 +197,7 @@ fn push_fill_element(ctx: &mut Context, path: PsPath, fill_rule: FillRule) {
             stroke_params: None,
             overprint_mode: 0,
         };
-        ctx.display_list
+        ctx.current_display_list_mut()
             .push(DisplayElement::PatternFill { params });
         return;
     }
@@ -220,7 +220,8 @@ fn push_fill_element(ctx: &mut Context, path: PsPath, fill_rule: FillRule) {
         blend_mode: ctx.gstate.blend_mode,
         alpha_is_shape: ctx.gstate.alpha_is_shape,
     };
-    ctx.display_list.push(DisplayElement::Fill { path, params });
+    ctx.current_display_list_mut()
+        .push(DisplayElement::Fill { path, params });
 }
 
 /// `fill`: — → — (fill current path, non-zero winding)
@@ -307,7 +308,7 @@ fn stroke_native(ctx: &mut Context) -> Result<(), PsError> {
                 blend_mode: ctx.gstate.blend_mode,
                 alpha_is_shape: ctx.gstate.alpha_is_shape,
             };
-            ctx.display_list.push(DisplayElement::Stroke {
+            ctx.current_display_list_mut().push(DisplayElement::Stroke {
                 path: user_path,
                 params,
             });
@@ -347,8 +348,9 @@ fn stroke_native(ctx: &mut Context) -> Result<(), PsError> {
             blend_mode: ctx.gstate.blend_mode,
             alpha_is_shape: ctx.gstate.alpha_is_shape,
         };
-        ctx.display_list.push(DisplayElement::Stroke {
-            path: ctx.gstate.path.clone(),
+        let stroke_path = ctx.gstate.path.clone();
+        ctx.current_display_list_mut().push(DisplayElement::Stroke {
+            path: stroke_path,
             params,
         });
     }
@@ -498,7 +500,7 @@ pub fn op_rectstroke(ctx: &mut Context) -> Result<(), PsError> {
             blend_mode: ctx.gstate.blend_mode,
             alpha_is_shape: ctx.gstate.alpha_is_shape,
         };
-        ctx.display_list
+        ctx.current_display_list_mut()
             .push(DisplayElement::Stroke { path, params });
     } else {
         let path = build_rect_path_device(&ctx.gstate.ctm, &rects);
@@ -536,7 +538,7 @@ pub fn op_rectstroke(ctx: &mut Context) -> Result<(), PsError> {
             blend_mode: ctx.gstate.blend_mode,
             alpha_is_shape: ctx.gstate.alpha_is_shape,
         };
-        ctx.display_list
+        ctx.current_display_list_mut()
             .push(DisplayElement::Stroke { path, params });
     }
     Ok(())
@@ -544,7 +546,8 @@ pub fn op_rectstroke(ctx: &mut Context) -> Result<(), PsError> {
 
 /// `erasepage`: — → — (fill page with white)
 pub fn op_erasepage(ctx: &mut Context) -> Result<(), PsError> {
-    ctx.display_list.push(DisplayElement::ErasePage);
+    ctx.current_display_list_mut()
+        .push(DisplayElement::ErasePage);
     Ok(())
 }
 
@@ -555,6 +558,12 @@ pub fn op_erasepage(ctx: &mut Context) -> Result<(), PsError> {
 /// e_stack so PS procedures execute in the eval loop. Otherwise falls back
 /// to direct rendering.
 pub fn op_showpage(ctx: &mut Context) -> Result<(), PsError> {
+    // Refuse to showpage with an open transparency group — its content
+    // would never be composited into the page output. Per Phase 2 spec,
+    // unclosed groups at showpage are an error.
+    if !ctx.group_stack.is_empty() {
+        return Err(PsError::RangeCheck);
+    }
     // Check for null device
     if crate::device_ops::is_null_device(ctx) {
         return Ok(());

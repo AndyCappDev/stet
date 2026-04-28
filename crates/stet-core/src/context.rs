@@ -8,7 +8,7 @@ use std::io::Write;
 
 use crate::device::OutputDevice;
 use crate::dict::DictKey;
-use crate::display_list::DisplayList;
+use crate::display_list::{DisplayList, GroupParams};
 use crate::dual_array_store::DualArrayStore;
 use crate::dual_dict_store::DualDictStore;
 use crate::dual_string_store::DualStringStore;
@@ -173,6 +173,17 @@ pub struct Context {
     pub gstate_store: Vec<GraphicsState>,
     pub device: Option<Box<dyn OutputDevice>>,
     pub display_list: DisplayList,
+    /// Stack of active transparency-group capture frames. While non-empty,
+    /// paint operators emit into the topmost frame's display list instead
+    /// of `display_list`. `endtransparencygroup` pops the top frame and
+    /// emits a [`stet_graphics::display_list::DisplayElement::Group`] into
+    /// the next-innermost target. See `op_begintransparencygroup` /
+    /// `op_endtransparencygroup` in `stet-ops::transparency_ops`.
+    pub group_stack: Vec<GroupFrame>,
+    /// `group_stack.len()` recorded at each `save`. `restore` consults
+    /// this to refuse a revert that would unwind across an unbalanced
+    /// `begintransparencygroup` / `endtransparencygroup` pair.
+    pub save_group_depths: rustc_hash::FxHashMap<u32, usize>,
     /// When `Some`, each showpage clones the display list here before consuming it.
     /// Used by the WASM frontend to retain display lists for viewport re-rendering.
     /// Each entry is (DisplayList, dpi) where dpi is from the pagedevice HWResolution.
@@ -256,6 +267,26 @@ pub struct Context {
     /// multi-page PostScript documents: page 1 renders while pages 2..N are
     /// still pending interpretation. Requires `interrupt_flag` to be set.
     pub yield_after_showpage: bool,
+}
+
+/// One frame on `Context::group_stack`. Captures paint operators emitted
+/// between `begintransparencygroup` and `endtransparencygroup`.
+pub struct GroupFrame {
+    /// Paint operators emitted while this group is active. On
+    /// `endtransparencygroup`, this becomes the `elements` of a
+    /// `DisplayElement::Group` appended to the next-innermost target.
+    pub display_list: DisplayList,
+    /// Compositing parameters resolved at `begintransparencygroup`.
+    pub params: GroupParams,
+    /// `gstate.clip_path_version` snapshot taken when the group opened —
+    /// not currently consumed but kept so a future fix can detect clip
+    /// state changes that crossed the group boundary.
+    pub saved_clip_path_version: u32,
+    /// `gstate_stack.len()` at the moment the group opened. Used by
+    /// `gsave` / `grestore` to refuse pops that would orphan this frame
+    /// (a `grestore` may not unwind a graphics state created outside the
+    /// group while the group is still open).
+    pub saved_gsave_depth: usize,
 }
 
 impl Context {
@@ -562,6 +593,8 @@ impl Context {
             gstate_store: Vec::new(),
             device: None,
             display_list: DisplayList::new(),
+            group_stack: Vec::new(),
+            save_group_depths: rustc_hash::FxHashMap::default(),
             capture_display_lists: None,
             display_list_sender: None,
             page_width: 612,
@@ -718,6 +751,32 @@ impl Context {
     /// Get a mutable loop state by EntityId.
     pub fn get_loop_mut(&mut self, entity: EntityId) -> &mut LoopState {
         &mut self.loops[entity.0 as usize]
+    }
+
+    /// Return the display list paint operators should currently append to.
+    ///
+    /// While a transparency group is active (`group_stack` non-empty),
+    /// the topmost frame's display list is returned. Otherwise the
+    /// page-level `display_list` is returned. Every paint-emitting
+    /// operator must route through this helper to keep group capture
+    /// correct.
+    #[inline]
+    pub fn current_display_list_mut(&mut self) -> &mut DisplayList {
+        if let Some(frame) = self.group_stack.last_mut() {
+            &mut frame.display_list
+        } else {
+            &mut self.display_list
+        }
+    }
+
+    /// Read-only counterpart to [`Self::current_display_list_mut`].
+    #[inline]
+    pub fn current_display_list(&self) -> &DisplayList {
+        if let Some(frame) = self.group_stack.last() {
+            &frame.display_list
+        } else {
+            &self.display_list
+        }
     }
 
     /// Take the display list, optionally capturing a clone for viewport re-rendering.

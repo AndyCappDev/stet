@@ -79,7 +79,8 @@ pub fn op_clip(ctx: &mut Context) -> Result<(), PsError> {
         ctm: Matrix::identity(),
         stroke_params: None,
     };
-    ctx.display_list.push(DisplayElement::Clip { path, params });
+    ctx.current_display_list_mut()
+        .push(DisplayElement::Clip { path, params });
     // Note: clip does NOT clear the path (unlike fill/stroke)
     Ok(())
 }
@@ -101,7 +102,8 @@ pub fn op_eoclip(ctx: &mut Context) -> Result<(), PsError> {
         ctm: Matrix::identity(),
         stroke_params: None,
     };
-    ctx.display_list.push(DisplayElement::Clip { path, params });
+    ctx.current_display_list_mut()
+        .push(DisplayElement::Clip { path, params });
     Ok(())
 }
 
@@ -162,7 +164,8 @@ pub fn op_initclip(ctx: &mut Context) -> Result<(), PsError> {
     }
     ctx.gstate.clip_path = None;
     ctx.gstate.clip_path_version += 1;
-    ctx.display_list.push(DisplayElement::InitClip);
+    ctx.current_display_list_mut()
+        .push(DisplayElement::InitClip);
     Ok(())
 }
 
@@ -224,7 +227,8 @@ pub fn op_rectclip(ctx: &mut Context) -> Result<(), PsError> {
         ctm: Matrix::identity(),
         stroke_params: None,
     };
-    ctx.display_list.push(DisplayElement::Clip { path, params });
+    ctx.current_display_list_mut()
+        .push(DisplayElement::Clip { path, params });
     // Implicit newpath
     ctx.gstate.path.clear();
     ctx.gstate.current_point = None;
@@ -247,15 +251,16 @@ pub fn op_cliprestore(ctx: &mut Context) -> Result<(), PsError> {
         ctx.gstate.clip_path_version += 1;
         // Restore device clip only if it changed
         if ctx.gstate.clip_path_version != old_version {
-            ctx.display_list.push(DisplayElement::InitClip);
-            if let Some(ref clip) = ctx.gstate.clip_path {
+            ctx.current_display_list_mut()
+                .push(DisplayElement::InitClip);
+            if let Some(clip_path) = ctx.gstate.clip_path.clone() {
                 let params = ClipParams {
                     fill_rule: FillRule::NonZeroWinding,
                     ctm: Matrix::identity(),
                     stroke_params: None,
                 };
-                ctx.display_list.push(DisplayElement::Clip {
-                    path: clip.clone(),
+                ctx.current_display_list_mut().push(DisplayElement::Clip {
+                    path: clip_path,
                     params,
                 });
             }

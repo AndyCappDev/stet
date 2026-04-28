@@ -10,9 +10,11 @@
 //! `docs/PLAN-PDF-EXTENSIONS.md` and the GhostScript-compatible aliases in
 //! `resources/Init/pdfextensions.ps`.
 
-use stet_core::context::Context;
+use stet_core::context::{Context, GroupFrame};
+use stet_core::dict::DictKey;
 use stet_core::error::PsError;
-use stet_core::object::{PsObject, PsValue};
+use stet_core::object::{EntityId, PsObject, PsValue};
+use stet_graphics::display_list::{DisplayElement, DisplayList, GroupColorSpace, GroupParams};
 
 /// `setfillopacity`: num → — (PDF `ca`).
 pub fn op_setfillopacity(ctx: &mut Context) -> Result<(), PsError> {
@@ -168,6 +170,207 @@ pub fn op_currenttextknockout(ctx: &mut Context) -> Result<(), PsError> {
     Ok(())
 }
 
+// ----- Transparency groups (Phase 2) ---------------------------------------
+
+/// Look up a key by name in a dict, returning the raw object.
+fn dict_get(ctx: &Context, dict: EntityId, key: &[u8]) -> Option<PsObject> {
+    let nid = ctx.names.find(key)?;
+    ctx.dicts.get(dict, &DictKey::Name(nid))
+}
+
+/// Read a boolean dict entry; returns `default` when absent or non-bool.
+fn dict_get_bool(ctx: &Context, dict: EntityId, key: &[u8], default: bool) -> bool {
+    match dict_get(ctx, dict, key).map(|o| o.value) {
+        Some(PsValue::Bool(b)) => b,
+        _ => default,
+    }
+}
+
+/// Resolve the `/CS` entry on a transparency-group dict to a
+/// [`GroupColorSpace`]. PostScript's color-space syntax mirrors PDF's;
+/// only the four spec-recognised group color spaces are accepted.
+/// Anything unknown raises `rangecheck`.
+fn resolve_group_cs(ctx: &Context, dict: EntityId) -> Result<GroupColorSpace, PsError> {
+    let Some(obj) = dict_get(ctx, dict, b"CS") else {
+        return Ok(GroupColorSpace::Inherited);
+    };
+    let name = match obj.value {
+        PsValue::Name(n) => Some(ctx.names.get_bytes(n).to_vec()),
+        PsValue::Array { entity, start, len } if len >= 1 => {
+            match ctx.arrays.get_element(entity, start).value {
+                PsValue::Name(n) => Some(ctx.names.get_bytes(n).to_vec()),
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+    match name.as_deref() {
+        Some(b"DeviceGray" | b"CalGray") => Ok(GroupColorSpace::DeviceGray),
+        Some(b"DeviceRGB" | b"CalRGB") => Ok(GroupColorSpace::DeviceRGB),
+        Some(b"DeviceCMYK") => Ok(GroupColorSpace::DeviceCMYK),
+        Some(b"ICCBased") => {
+            // PostScript can't describe an ICC stream inline the way PDF
+            // does, so we accept the name and fall back to inherited;
+            // embedding profiles would require extending the dict shape.
+            Ok(GroupColorSpace::Inherited)
+        }
+        _ => Err(PsError::RangeCheck),
+    }
+}
+
+/// Read `/BBox` from the group dict and transform it through the current
+/// CTM into device space. Returns `None` when the dict has no `/BBox`.
+fn user_bbox_to_device(ctx: &Context, dict: EntityId) -> Result<Option<[f64; 4]>, PsError> {
+    let Some(obj) = dict_get(ctx, dict, b"BBox") else {
+        return Ok(None);
+    };
+    let (entity, start, len) = match obj.value {
+        PsValue::Array { entity, start, len } => (entity, start, len),
+        _ => return Err(PsError::TypeCheck),
+    };
+    if len < 4 {
+        return Err(PsError::RangeCheck);
+    }
+    let mut user = [0.0f64; 4];
+    for (i, slot) in user.iter_mut().enumerate() {
+        *slot = ctx
+            .arrays
+            .get_element(entity, start + i as u32)
+            .as_f64()
+            .ok_or(PsError::TypeCheck)?;
+    }
+    let ctm = &ctx.gstate.ctm;
+    let corners = [
+        ctm.transform_point(user[0], user[1]),
+        ctm.transform_point(user[2], user[1]),
+        ctm.transform_point(user[2], user[3]),
+        ctm.transform_point(user[0], user[3]),
+    ];
+    let xs = corners.map(|(x, _)| x);
+    let ys = corners.map(|(_, y)| y);
+    let xmin = xs.iter().copied().fold(f64::INFINITY, f64::min);
+    let xmax = xs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let ymin = ys.iter().copied().fold(f64::INFINITY, f64::min);
+    let ymax = ys.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    Ok(Some([xmin, ymin, xmax, ymax]))
+}
+
+/// Default group bbox when the dict supplies none. We use the active
+/// device clip path's bbox if there is one; otherwise the page bbox.
+/// Both are already in device space (paths are stored device-space per
+/// stet's convention).
+fn default_device_bbox(ctx: &Context) -> [f64; 4] {
+    if let Some(clip) = ctx.gstate.clip_path.as_ref() {
+        let mut xmin = f64::INFINITY;
+        let mut ymin = f64::INFINITY;
+        let mut xmax = f64::NEG_INFINITY;
+        let mut ymax = f64::NEG_INFINITY;
+        let mut saw = false;
+        for seg in &clip.segments {
+            use stet_fonts::geometry::PathSegment::*;
+            let pts: &[(f64, f64)] = match seg {
+                MoveTo(x, y) | LineTo(x, y) => &[(*x, *y)][..],
+                CurveTo {
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    x3,
+                    y3,
+                } => &[(*x1, *y1), (*x2, *y2), (*x3, *y3)][..],
+                ClosePath => &[][..],
+            };
+            for (x, y) in pts {
+                xmin = xmin.min(*x);
+                ymin = ymin.min(*y);
+                xmax = xmax.max(*x);
+                ymax = ymax.max(*y);
+                saw = true;
+            }
+        }
+        if saw {
+            return [xmin, ymin, xmax, ymax];
+        }
+    }
+    [0.0, 0.0, ctx.page_width as f64, ctx.page_height as f64]
+}
+
+/// `begintransparencygroup`: dict → —
+///
+/// Opens a transparency-group capture frame. Subsequent paint operators
+/// emit into the frame's display list until [`op_endtransparencygroup`]
+/// closes it. Recognised dict keys: `/Isolated`, `/Knockout`, `/CS`,
+/// `/BBox`. `/CS` accepts `/DeviceGray`, `/DeviceRGB`, `/DeviceCMYK`,
+/// `/CalGray`, `/CalRGB`, or a `[/ICCBased …]` array (treated as
+/// inherited). Other names raise `rangecheck`.
+pub fn op_begintransparencygroup(ctx: &mut Context) -> Result<(), PsError> {
+    if ctx.o_stack.is_empty() {
+        return Err(PsError::StackUnderflow);
+    }
+    let dict = match ctx.o_stack.peek(0)?.value {
+        PsValue::Dict(e) => e,
+        _ => return Err(PsError::TypeCheck),
+    };
+    let isolated = dict_get_bool(ctx, dict, b"Isolated", false);
+    let knockout = dict_get_bool(ctx, dict, b"Knockout", false);
+    let color_space = resolve_group_cs(ctx, dict)?;
+    let bbox = match user_bbox_to_device(ctx, dict)? {
+        Some(b) => b,
+        None => default_device_bbox(ctx),
+    };
+    ctx.o_stack.pop()?;
+
+    // alpha/blend_mode are placeholders here; op_endtransparencygroup
+    // overwrites them from the gstate active at end time.
+    let params = GroupParams {
+        bbox,
+        isolated,
+        knockout,
+        blend_mode: 0,
+        alpha: 1.0,
+        color_space,
+    };
+    let saved_clip_path_version = ctx.gstate.clip_path_version;
+    let saved_gsave_depth = ctx.gstate_stack.len();
+    ctx.group_stack.push(GroupFrame {
+        display_list: DisplayList::new(),
+        params,
+        saved_clip_path_version,
+        saved_gsave_depth,
+    });
+    Ok(())
+}
+
+/// `endtransparencygroup`: — → —
+///
+/// Closes the topmost transparency-group capture frame opened by
+/// [`op_begintransparencygroup`] and emits a [`DisplayElement::Group`]
+/// containing everything captured into the next-innermost emit target.
+/// Raises `rangecheck` when no group is open. The compositing alpha and
+/// blend mode are read from the gstate at the moment this operator runs
+/// (matching PDF's "the q/Q around `Do` controls the group composite"
+/// model). `rangecheck` is also raised when the gsave depth at end
+/// differs from begin — a `gsave` made inside the group must be matched
+/// by a `grestore` before close.
+pub fn op_endtransparencygroup(ctx: &mut Context) -> Result<(), PsError> {
+    let Some(mut frame) = ctx.group_stack.pop() else {
+        return Err(PsError::RangeCheck);
+    };
+    if ctx.gstate_stack.len() != frame.saved_gsave_depth {
+        ctx.group_stack.push(frame);
+        return Err(PsError::RangeCheck);
+    }
+    let _ = frame.saved_clip_path_version; // informational
+    frame.params.alpha = ctx.gstate.fill_opacity;
+    frame.params.blend_mode = ctx.gstate.blend_mode;
+    let elements = std::mem::take(&mut frame.display_list);
+    ctx.current_display_list_mut().push(DisplayElement::Group {
+        elements,
+        params: frame.params,
+    });
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -305,6 +508,157 @@ mod tests {
     fn textknockout_default_true() {
         let ctx = make_ctx();
         assert!(ctx.gstate.text_knockout);
+    }
+
+    fn make_dict(ctx: &mut Context, pairs: &[(&[u8], PsObject)]) -> PsObject {
+        let dict_id = ctx.dicts.allocate(pairs.len(), b"<test>");
+        for (k, v) in pairs {
+            let nid = ctx.names.intern(k);
+            ctx.dicts.put(dict_id, DictKey::Name(nid), *v);
+        }
+        PsObject {
+            value: PsValue::Dict(dict_id),
+            flags: stet_core::object::ObjFlags::literal(),
+        }
+    }
+
+    #[test]
+    fn group_open_and_close_emits_group_element() {
+        let mut ctx = make_ctx();
+        let dict = make_dict(&mut ctx, &[]);
+        ctx.o_stack.push(dict).unwrap();
+        op_begintransparencygroup(&mut ctx).unwrap();
+        assert_eq!(ctx.group_stack.len(), 1);
+        assert_eq!(ctx.display_list.len(), 0);
+        op_endtransparencygroup(&mut ctx).unwrap();
+        assert!(ctx.group_stack.is_empty());
+        assert_eq!(ctx.display_list.len(), 1);
+        match &ctx.display_list.elements()[0] {
+            DisplayElement::Group { params, elements } => {
+                assert!(elements.is_empty());
+                assert!(!params.isolated);
+                assert!(!params.knockout);
+            }
+            _ => panic!("expected Group"),
+        }
+    }
+
+    #[test]
+    fn group_isolated_knockout_flags_propagate() {
+        let mut ctx = make_ctx();
+        let dict = make_dict(
+            &mut ctx,
+            &[
+                (b"Isolated", PsObject::bool(true)),
+                (b"Knockout", PsObject::bool(true)),
+            ],
+        );
+        ctx.o_stack.push(dict).unwrap();
+        op_begintransparencygroup(&mut ctx).unwrap();
+        op_endtransparencygroup(&mut ctx).unwrap();
+        match &ctx.display_list.elements()[0] {
+            DisplayElement::Group { params, .. } => {
+                assert!(params.isolated);
+                assert!(params.knockout);
+            }
+            _ => panic!("expected Group"),
+        }
+    }
+
+    #[test]
+    fn group_cs_resolves() {
+        let mut ctx = make_ctx();
+        let cmyk = ctx.names.intern(b"DeviceCMYK");
+        let dict = make_dict(&mut ctx, &[(b"CS", PsObject::name_lit(cmyk))]);
+        ctx.o_stack.push(dict).unwrap();
+        op_begintransparencygroup(&mut ctx).unwrap();
+        op_endtransparencygroup(&mut ctx).unwrap();
+        match &ctx.display_list.elements()[0] {
+            DisplayElement::Group { params, .. } => {
+                assert_eq!(params.color_space, GroupColorSpace::DeviceCMYK);
+            }
+            _ => panic!("expected Group"),
+        }
+    }
+
+    #[test]
+    fn group_cs_unknown_name_rangecheck() {
+        let mut ctx = make_ctx();
+        let bogus = ctx.names.intern(b"NotAColorSpace");
+        let dict = make_dict(&mut ctx, &[(b"CS", PsObject::name_lit(bogus))]);
+        ctx.o_stack.push(dict).unwrap();
+        assert!(matches!(
+            op_begintransparencygroup(&mut ctx),
+            Err(PsError::RangeCheck)
+        ));
+        // Stack unchanged on error.
+        assert_eq!(ctx.o_stack.len(), 1);
+        assert!(ctx.group_stack.is_empty());
+    }
+
+    #[test]
+    fn group_end_without_begin_rangecheck() {
+        let mut ctx = make_ctx();
+        assert!(matches!(
+            op_endtransparencygroup(&mut ctx),
+            Err(PsError::RangeCheck)
+        ));
+    }
+
+    #[test]
+    fn group_nesting_writes_to_inner_list() {
+        let mut ctx = make_ctx();
+        let outer = make_dict(&mut ctx, &[]);
+        ctx.o_stack.push(outer).unwrap();
+        op_begintransparencygroup(&mut ctx).unwrap();
+        let inner = make_dict(&mut ctx, &[]);
+        ctx.o_stack.push(inner).unwrap();
+        op_begintransparencygroup(&mut ctx).unwrap();
+        assert_eq!(ctx.group_stack.len(), 2);
+        op_endtransparencygroup(&mut ctx).unwrap();
+        assert_eq!(ctx.group_stack.len(), 1);
+        // Inner group emitted into outer frame's list, not the page list.
+        assert_eq!(ctx.display_list.len(), 0);
+        assert_eq!(ctx.group_stack.last().unwrap().display_list.len(), 1);
+        op_endtransparencygroup(&mut ctx).unwrap();
+        assert_eq!(ctx.display_list.len(), 1);
+    }
+
+    #[test]
+    fn group_alpha_blend_captured_at_end() {
+        let mut ctx = make_ctx();
+        let dict = make_dict(&mut ctx, &[]);
+        ctx.o_stack.push(dict).unwrap();
+        op_begintransparencygroup(&mut ctx).unwrap();
+        ctx.gstate.fill_opacity = 0.4;
+        ctx.gstate.blend_mode = 1; // Multiply
+        op_endtransparencygroup(&mut ctx).unwrap();
+        match &ctx.display_list.elements()[0] {
+            DisplayElement::Group { params, .. } => {
+                assert!((params.alpha - 0.4).abs() < 1e-9);
+                assert_eq!(params.blend_mode, 1);
+            }
+            _ => panic!("expected Group"),
+        }
+    }
+
+    #[test]
+    fn group_unbalanced_gsave_blocks_close() {
+        let mut ctx = make_ctx();
+        let dict = make_dict(&mut ctx, &[]);
+        ctx.o_stack.push(dict).unwrap();
+        op_begintransparencygroup(&mut ctx).unwrap();
+        // Simulate an unbalanced gsave inside the group.
+        ctx.gstate_stack
+            .push(stet_core::graphics_state::GstateEntry {
+                state: ctx.gstate.clone(),
+                saved_by_save: false,
+            });
+        assert!(matches!(
+            op_endtransparencygroup(&mut ctx),
+            Err(PsError::RangeCheck)
+        ));
+        assert_eq!(ctx.group_stack.len(), 1);
     }
 
     #[test]

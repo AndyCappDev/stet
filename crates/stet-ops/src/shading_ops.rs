@@ -167,26 +167,30 @@ fn build_type2_shading(
         NUM_GRADIENT_SAMPLES,
     )?;
 
-    ctx.display_list.push(DisplayElement::AxialShading {
-        params: AxialShadingParams {
-            x0: coords[0],
-            y0: coords[1],
-            x1: coords[2],
-            y1: coords[3],
-            color_stops,
-            extend_start,
-            extend_end,
-            ctm,
-            bbox,
-            color_space: shading_cs,
-            overprint: false,
-            painted_channels: 0,
-            alpha: ctx.gstate.fill_opacity,
-            blend_mode: ctx.gstate.blend_mode,
-            alpha_is_shape: ctx.gstate.alpha_is_shape,
-            spot_tint_blend: false,
-        },
-    });
+    let gs_alpha = ctx.gstate.fill_opacity;
+    let gs_blend_mode = ctx.gstate.blend_mode;
+    let gs_alpha_is_shape = ctx.gstate.alpha_is_shape;
+    ctx.current_display_list_mut()
+        .push(DisplayElement::AxialShading {
+            params: AxialShadingParams {
+                x0: coords[0],
+                y0: coords[1],
+                x1: coords[2],
+                y1: coords[3],
+                color_stops,
+                extend_start,
+                extend_end,
+                ctm,
+                bbox,
+                color_space: shading_cs,
+                overprint: false,
+                painted_channels: 0,
+                alpha: gs_alpha,
+                blend_mode: gs_blend_mode,
+                alpha_is_shape: gs_alpha_is_shape,
+                spot_tint_blend: false,
+            },
+        });
 
     Ok(())
 }
@@ -230,28 +234,32 @@ fn build_type3_shading(
         NUM_GRADIENT_SAMPLES,
     )?;
 
-    ctx.display_list.push(DisplayElement::RadialShading {
-        params: RadialShadingParams {
-            x0: coords[0],
-            y0: coords[1],
-            r0: coords[2],
-            x1: coords[3],
-            y1: coords[4],
-            r1: coords[5],
-            color_stops,
-            extend_start,
-            extend_end,
-            ctm,
-            bbox,
-            color_space: shading_cs,
-            overprint: false,
-            painted_channels: 0,
-            alpha: ctx.gstate.fill_opacity,
-            blend_mode: ctx.gstate.blend_mode,
-            alpha_is_shape: ctx.gstate.alpha_is_shape,
-            spot_tint_blend: false,
-        },
-    });
+    let gs_alpha = ctx.gstate.fill_opacity;
+    let gs_blend_mode = ctx.gstate.blend_mode;
+    let gs_alpha_is_shape = ctx.gstate.alpha_is_shape;
+    ctx.current_display_list_mut()
+        .push(DisplayElement::RadialShading {
+            params: RadialShadingParams {
+                x0: coords[0],
+                y0: coords[1],
+                r0: coords[2],
+                x1: coords[3],
+                y1: coords[4],
+                r1: coords[5],
+                color_stops,
+                extend_start,
+                extend_end,
+                ctm,
+                bbox,
+                color_space: shading_cs,
+                overprint: false,
+                painted_channels: 0,
+                alpha: gs_alpha,
+                blend_mode: gs_blend_mode,
+                alpha_is_shape: gs_alpha_is_shape,
+                spot_tint_blend: false,
+            },
+        });
 
     Ok(())
 }
@@ -378,7 +386,10 @@ fn build_type1_shading(
     // and bbox clipping happens at the device level
     let _ = bbox;
 
-    ctx.display_list.push(DisplayElement::Image {
+    let gs_alpha = ctx.gstate.fill_opacity;
+    let gs_blend_mode = ctx.gstate.blend_mode;
+    let gs_alpha_is_shape = ctx.gstate.alpha_is_shape;
+    ctx.current_display_list_mut().push(DisplayElement::Image {
         sample_data: std::sync::Arc::new(rgb_data),
         params: ImageParams {
             width: size as u32,
@@ -389,13 +400,13 @@ fn build_type1_shading(
             image_matrix,
             interpolate: false,
             mask_color: None,
-            alpha: ctx.gstate.fill_opacity,
-            blend_mode: ctx.gstate.blend_mode,
+            alpha: gs_alpha,
+            blend_mode: gs_blend_mode,
             overprint: false,
             overprint_mode: 0,
             opm_paired: false,
             painted_channels: 0,
-            alpha_is_shape: ctx.gstate.alpha_is_shape,
+            alpha_is_shape: gs_alpha_is_shape,
         },
     });
 
@@ -437,20 +448,24 @@ fn build_type4_shading(
     };
 
     if !triangles.is_empty() {
-        ctx.display_list.push(DisplayElement::MeshShading {
-            params: MeshShadingParams {
-                triangles,
-                ctm,
-                bbox,
-                color_space: shading_cs,
-                overprint: false,
-                painted_channels: 0,
-                color_lut: None,
-                alpha: ctx.gstate.fill_opacity,
-                blend_mode: ctx.gstate.blend_mode,
-                alpha_is_shape: ctx.gstate.alpha_is_shape,
-            },
-        });
+        let gs_alpha = ctx.gstate.fill_opacity;
+        let gs_blend_mode = ctx.gstate.blend_mode;
+        let gs_alpha_is_shape = ctx.gstate.alpha_is_shape;
+        ctx.current_display_list_mut()
+            .push(DisplayElement::MeshShading {
+                params: MeshShadingParams {
+                    triangles,
+                    ctm,
+                    bbox,
+                    color_space: shading_cs,
+                    overprint: false,
+                    painted_channels: 0,
+                    color_lut: None,
+                    alpha: gs_alpha,
+                    blend_mode: gs_blend_mode,
+                    alpha_is_shape: gs_alpha_is_shape,
+                },
+            });
     }
 
     Ok(())
@@ -489,20 +504,24 @@ fn build_type5_shading(
     };
 
     if !triangles.is_empty() {
-        ctx.display_list.push(DisplayElement::MeshShading {
-            params: MeshShadingParams {
-                triangles,
-                ctm,
-                bbox,
-                color_space: shading_cs,
-                overprint: false,
-                painted_channels: 0,
-                color_lut: None,
-                alpha: ctx.gstate.fill_opacity,
-                blend_mode: ctx.gstate.blend_mode,
-                alpha_is_shape: ctx.gstate.alpha_is_shape,
-            },
-        });
+        let gs_alpha = ctx.gstate.fill_opacity;
+        let gs_blend_mode = ctx.gstate.blend_mode;
+        let gs_alpha_is_shape = ctx.gstate.alpha_is_shape;
+        ctx.current_display_list_mut()
+            .push(DisplayElement::MeshShading {
+                params: MeshShadingParams {
+                    triangles,
+                    ctm,
+                    bbox,
+                    color_space: shading_cs,
+                    overprint: false,
+                    painted_channels: 0,
+                    color_lut: None,
+                    alpha: gs_alpha,
+                    blend_mode: gs_blend_mode,
+                    alpha_is_shape: gs_alpha_is_shape,
+                },
+            });
     }
 
     Ok(())
@@ -541,20 +560,24 @@ fn build_type6_shading(
     };
 
     if !patches.is_empty() {
-        ctx.display_list.push(DisplayElement::PatchShading {
-            params: PatchShadingParams {
-                patches,
-                ctm,
-                bbox,
-                color_space: shading_cs,
-                overprint: false,
-                painted_channels: 0,
-                color_lut: None,
-                alpha: ctx.gstate.fill_opacity,
-                blend_mode: ctx.gstate.blend_mode,
-                alpha_is_shape: ctx.gstate.alpha_is_shape,
-            },
-        });
+        let gs_alpha = ctx.gstate.fill_opacity;
+        let gs_blend_mode = ctx.gstate.blend_mode;
+        let gs_alpha_is_shape = ctx.gstate.alpha_is_shape;
+        ctx.current_display_list_mut()
+            .push(DisplayElement::PatchShading {
+                params: PatchShadingParams {
+                    patches,
+                    ctm,
+                    bbox,
+                    color_space: shading_cs,
+                    overprint: false,
+                    painted_channels: 0,
+                    color_lut: None,
+                    alpha: gs_alpha,
+                    blend_mode: gs_blend_mode,
+                    alpha_is_shape: gs_alpha_is_shape,
+                },
+            });
     }
 
     Ok(())
@@ -591,20 +614,24 @@ fn build_type7_shading(
     };
 
     if !patches.is_empty() {
-        ctx.display_list.push(DisplayElement::PatchShading {
-            params: PatchShadingParams {
-                patches,
-                ctm,
-                bbox,
-                color_space: shading_cs,
-                overprint: false,
-                painted_channels: 0,
-                color_lut: None,
-                alpha: ctx.gstate.fill_opacity,
-                blend_mode: ctx.gstate.blend_mode,
-                alpha_is_shape: ctx.gstate.alpha_is_shape,
-            },
-        });
+        let gs_alpha = ctx.gstate.fill_opacity;
+        let gs_blend_mode = ctx.gstate.blend_mode;
+        let gs_alpha_is_shape = ctx.gstate.alpha_is_shape;
+        ctx.current_display_list_mut()
+            .push(DisplayElement::PatchShading {
+                params: PatchShadingParams {
+                    patches,
+                    ctm,
+                    bbox,
+                    color_space: shading_cs,
+                    overprint: false,
+                    painted_channels: 0,
+                    color_lut: None,
+                    alpha: gs_alpha,
+                    blend_mode: gs_blend_mode,
+                    alpha_is_shape: gs_alpha_is_shape,
+                },
+            });
     }
 
     Ok(())

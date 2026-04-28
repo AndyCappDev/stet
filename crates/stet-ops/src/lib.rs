@@ -731,6 +731,18 @@ pub fn build_system_dict(ctx: &mut Context) {
         "currenttextknockout",
         transparency_ops::op_currenttextknockout,
     );
+    register(
+        ctx,
+        sd,
+        "begintransparencygroup",
+        transparency_ops::op_begintransparencygroup,
+    );
+    register(
+        ctx,
+        sd,
+        "endtransparencygroup",
+        transparency_ops::op_endtransparencygroup,
+    );
 
     // --- Page size no-ops ---
     register(ctx, sd, "letter", font_ops::op_letter);

@@ -11,6 +11,9 @@ use stet_core::object::{ObjFlags, PsObject, PsValue, SaveLevel};
 /// `save`: — → save (snapshot VM state)
 pub fn op_save(ctx: &mut Context) -> Result<(), PsError> {
     let save_obj = ctx.vm_save();
+    if let PsValue::Save(SaveLevel(id)) = save_obj.value {
+        ctx.save_group_depths.insert(id, ctx.group_stack.len());
+    }
     ctx.o_stack.push(save_obj)?;
     Ok(())
 }
@@ -29,6 +32,17 @@ pub fn op_restore(ctx: &mut Context) -> Result<(), PsError> {
     // Pop the save object before scanning stacks
     ctx.o_stack.pop()?;
 
+    // INVALIDRESTORE if the transparency-group nesting at save time
+    // doesn't match now: a `restore` may not unwind across a
+    // begintransparencygroup that hasn't been closed (or close one that
+    // wasn't open at save time).
+    if let Some(&saved_depth) = ctx.save_group_depths.get(&save_id)
+        && ctx.group_stack.len() != saved_depth
+    {
+        let _ = ctx.o_stack.push(save_obj);
+        return Err(PsError::InvalidRestore);
+    }
+
     // INVALIDRESTORE: scan stacks for local composites newer than the save being restored.
     // Per PLRM 3.7.3.2: "If any of those objects is composite and its value is in local VM
     // that is newer than the snapshot being restored, an invalidrestore error occurs."
@@ -42,6 +56,10 @@ pub fn op_restore(ctx: &mut Context) -> Result<(), PsError> {
     let old_clip_version = ctx.gstate.clip_path_version;
 
     ctx.vm_restore(save_id)?;
+    ctx.save_group_depths.remove(&save_id);
+    // Drop any later save records (their saves were invalidated by this
+    // restore — vm_restore handles the actual save_stack truncation).
+    ctx.save_group_depths.retain(|&id, _| id < save_id);
 
     // Clear glyph caches for entities created after the save point
     ctx.glyph_caches.retain(|entity, _| {

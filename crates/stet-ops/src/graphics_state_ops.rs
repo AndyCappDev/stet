@@ -28,7 +28,17 @@ pub fn op_gsave(ctx: &mut Context) -> Result<(), PsError> {
 ///
 /// PLRM: pops the topmost gsave-created entry. If the topmost entry was
 /// created by `save`, grestore restores from it but leaves it on the stack.
+///
+/// While a transparency group is open, `grestore` may not unwind a
+/// graphics state created before the group opened — that would orphan
+/// the group's capture frame. Such a `grestore` is treated as a no-op
+/// (PLRM allows extra grestores; we just refuse to cross the boundary).
 pub fn op_grestore(ctx: &mut Context) -> Result<(), PsError> {
+    if let Some(frame) = ctx.group_stack.last()
+        && ctx.gstate_stack.len() <= frame.saved_gsave_depth
+    {
+        return Ok(());
+    }
     if let Some(top) = ctx.gstate_stack.last() {
         let old_version = ctx.gstate.clip_path_version;
         if top.saved_by_save {
@@ -85,15 +95,17 @@ pub fn restore_device_clip(ctx: &mut Context, old_version: u32) {
     if ctx.gstate.clip_path_version == old_version {
         return; // clip unchanged, skip
     }
-    ctx.display_list.push(DisplayElement::InitClip);
+    ctx.current_display_list_mut()
+        .push(DisplayElement::InitClip);
     if let Some(ref clip) = ctx.gstate.clip_path {
         let params = stet_graphics::device::ClipParams {
             fill_rule: FillRule::NonZeroWinding,
             ctm: stet_fonts::geometry::Matrix::identity(),
             stroke_params: None,
         };
-        ctx.display_list.push(DisplayElement::Clip {
-            path: clip.clone(),
+        let clip_path = clip.clone();
+        ctx.current_display_list_mut().push(DisplayElement::Clip {
+            path: clip_path,
             params,
         });
     }
@@ -344,7 +356,8 @@ pub fn op_initgraphics(ctx: &mut Context) -> Result<(), PsError> {
         ctx.gstate.default_ctm = default_ctm;
     }
 
-    ctx.display_list.push(DisplayElement::InitClip);
+    ctx.current_display_list_mut()
+        .push(DisplayElement::InitClip);
     Ok(())
 }
 
