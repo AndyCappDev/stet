@@ -4,12 +4,15 @@
 
 //! PostScript operator implementations for the stet interpreter.
 //!
-//! This crate provides ~320 native-Rust PostScript Level 3 operators —
+//! This crate provides ~330 native-Rust PostScript Level 3 operators —
 //! stack, math, type/conversion, dictionary, control flow, composite,
 //! string, file, path, painting, clipping, colour, graphics-state, matrix,
 //! font, show, image, halftone, pattern, resource, VM, filter, shading,
 //! and more — and registers them into a `stet_core::context::Context`
-//! via [`build_system_dict`].
+//! via [`build_system_dict`]. The [`transparency_ops`] module also exposes
+//! stet-specific PDF-imaging extensions: constant alpha + blend modes,
+//! transparency groups, soft masks, and optional-content (OCG) layers.
+//! See `docs/PDF-EXTENSIONS.md`.
 //!
 //! Most users should use the [`stet`](https://crates.io/crates/stet) facade
 //! crate rather than depending on `stet-ops` directly. Pull this in only
@@ -63,7 +66,9 @@ use stet_core::dict::DictKey;
 use stet_core::error::PsError;
 use stet_core::object::{OpCode, PsObject, PsValue};
 
-/// Register all Phase 1-6 operators into systemdict and the operator table.
+/// Register every native operator into systemdict and the operator table —
+/// the core PostScript Level 3 surface plus stet's PDF-imaging extensions
+/// (see `docs/PDF-EXTENSIONS.md`).
 pub fn build_system_dict(ctx: &mut Context) {
     let sd = ctx.systemdict;
 

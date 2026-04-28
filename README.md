@@ -64,16 +64,6 @@ renders at different resolutions. See the
 
 ## Features
 
-**PostScript Interpreter**
-- Full PostScript Level 3 with ~320 operators
-- Type 1, CFF/Type 2, TrueType, CID, and Type 3 font rendering
-- All 7 shading types (axial, radial, Gouraud mesh, Coons/tensor patch)
-- CIE color spaces (CIEBasedABC, CIEBasedA, CIEBasedDEF, CIEBasedDEFG)
-- ICC color management with system CMYK profile auto-detection
-- Filters: ASCII85, ASCIIHex, Flate, LZW, RunLength, DCT (JPEG), eexec, SubFile
-- Resource system with embedded fonts (35 URW equivalents of the standard PS fonts)
-- Interactive REPL with `executive`
-
 **PDF Reader**
 - PDF 1.0–2.0 parsing with cross-reference tables and streams
 - Encryption: RC4, AES-128, AES-256
@@ -95,6 +85,17 @@ renders at different resolutions. See the
 - Embedded files (file attachments) with on-demand byte access and AfRelationship hints
 - Full **Optional Content (layer)** model: per-layer metadata + `/Usage` hints, hierarchy + alternate configurations + `/RBGroups`, runtime `LayerSet` overrides, OCMD `/P` policies (`AllOn` / `AnyOn` / `AllOff` / `AnyOff`), `/VE` boolean expressions (`/And` / `/Or` / `/Not`), and intent-driven rendering (`RenderIntent::View` / `Print` / `Export`) that honours `/AS` automatic-state rules
 - Parse warnings (`ParseWarning`, `ParsePhase`, `Severity`) for cycles, dropped entries, and structural truncations
+
+**PostScript Interpreter**
+- Full PostScript Level 3 with ~330 operators
+- Type 1, CFF/Type 2, TrueType, CID, and Type 3 font rendering
+- All 7 shading types (axial, radial, Gouraud mesh, Coons/tensor patch)
+- CIE color spaces (CIEBasedABC, CIEBasedA, CIEBasedDEF, CIEBasedDEFG)
+- ICC color management with system CMYK profile auto-detection
+- Filters: ASCII85, ASCIIHex, Flate, LZW, RunLength, DCT (JPEG), CCITTFax, JBIG2, JPX (JPEG 2000), eexec, SubFile
+- **PDF-imaging extensions**: constant alpha + 16 blend modes, transparency groups, soft masks, optional-content layers — all driven from PostScript with stet-specific operators ([reference](docs/PDF-EXTENSIONS.md))
+- Resource system with embedded fonts (35 URW equivalents of the standard PS fonts)
+- Interactive REPL with `executive`
 
 **Rendering & Output**
 - RGBA rasterization via [`stet-tiny-skia`](https://crates.io/crates/stet-tiny-skia) (banded, multi-threaded)

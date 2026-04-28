@@ -129,12 +129,17 @@ later (e.g., zooming in the viewer) scales the device-space coordinates.
    at a time. Executable names are looked up in the dictionary stack and
    dispatched; procedures are stepped through element by element.
 
-3. **Operators** (`stet-ops`): ~320 native Rust functions that manipulate
+3. **Operators** (`stet-ops`): ~330 native Rust functions that manipulate
    the operand stack, dictionary stack, graphics state, and display list.
    Path-building operators (`moveto`, `lineto`, `curveto`) construct paths
    on the graphics state. Painting operators (`fill`, `stroke`, `image`)
    append `DisplayElement` entries to the display list. `showpage` finalizes
-   the page.
+   the page. The PDF-imaging extension operators
+   (`begintransparencygroup`/`beginsoftmask`/`beginoptionalcontent` and
+   their close partners — see `docs/PDF-EXTENSIONS.md`) push capture
+   frames onto `Context::group_stack`, and paint emits route through
+   `Context::current_display_list_mut()` so they land in the innermost
+   active scope rather than the page-level list.
 
 4. **Context** (`stet-core`): Central state — operand stack, execution stack,
    dictionary stack, graphics state stack, VM stores (strings, arrays, dicts),
@@ -143,6 +148,35 @@ later (e.g., zooming in the viewer) scales the device-space coordinates.
 5. **showpage**: Takes the accumulated display list, passes it to the output
    device via `replay_and_show()`, and captures a clone for viewport
    rendering if display list capture is enabled.
+
+### Group stack (PDF-imaging extension scopes)
+
+The PDF-imaging extension operators
+(`begintransparencygroup` / `endtransparencygroup`,
+`beginsoftmask` / `endsoftmask` / `clearsoftmask`,
+`beginoptionalcontent` / `endoptionalcontent`) capture paint into
+nested scopes via `Context::group_stack: Vec<GroupFrame>`. While
+`group_stack` is non-empty, paint operators emit into the topmost
+frame's `display_list` instead of the page-level
+`Context::display_list`. The new `current_display_list_mut()` /
+`current_display_list()` helpers route every paint emit site
+uniformly — `paint_ops`, `clip_ops`, `graphics_state_ops` (clip
+restoration after `gsave`/`grestore`/`initgraphics`), `image_ops`,
+`shading_ops`, `halftone_ops` form replay, and `show_ops`
+(including the Type 3 BuildChar capture window) all resolve to the
+active list.
+
+Each `GroupFrame` carries a `GroupKind` discriminating
+transparency groups from soft-mask builders (`SoftMask`), implicit
+masked-content scopes (`Masked`, opened by `endsoftmask`), and
+optional-content (OCG) scopes. On close the frame emits a single
+`DisplayElement::Group` / `DisplayElement::SoftMasked` /
+`DisplayElement::OcgGroup` element into the next-innermost
+target. Frames also snapshot `gstate_stack.len()` at open time so
+`grestore`, `restore`, and the close operators refuse to unwind
+across the boundary, and `showpage` / `copypage` raise `rangecheck`
+while a frame is open. See `docs/PDF-EXTENSIONS.md` for the
+operator reference.
 
 ## Pipeline: PDF Reading
 
