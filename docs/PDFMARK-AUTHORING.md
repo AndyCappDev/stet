@@ -154,7 +154,14 @@ disappearing.
 The catalog also gets `/PageMode /UseOutlines` whenever any `/OUT`
 records exist, so PDF viewers open the bookmark pane by default.
 
-### `/ANN` — page annotations (Link, Text, FreeText)
+### `/ANN` — page annotations (Link, Text, FreeText, Widget)
+
+`/ANN` covers Link, Text, and FreeText subtypes here. Form-field
+widgets are also `/ANN` records with `/Subtype /Widget`, but bring
+enough surface area (field tree, field types, AcroForm wiring) that
+they're documented separately in
+[`/ANN /Subtype /Widget`](#ann-subtype-widget--interactive-form-fields)
+below.
 
 ```postscript
 [ /Rect [72 720 540 750]
@@ -354,6 +361,121 @@ extraction).
 When multiple `/Metadata pdfmark` blocks appear, the last one wins —
 the XMP packet is a single stream, not a merged document. Records with
 no string value are dropped silently.
+
+### `/ANN /Subtype /Widget` — interactive form fields
+
+```postscript
+[ /Rect [72 720 320 740]
+  /Subtype /Widget
+  /T (firstname)
+  /FT /Tx
+  /V (Scott)
+  /MaxLen 50
+  /ANN pdfmark
+```
+
+Widget annotations are the form-field face of `/ANN`. Each record
+declares one form field; stet's PDF writer also synthesises an
+`/AcroForm` document-level dict (referenced from `/Catalog`) listing
+the root fields, so downstream viewers (Acrobat, Okular, Firefox PDF
+viewer) treat the output as a fillable form. stet itself does **not**
+render or run forms interactively — Phase 6 is author-only.
+
+| Key | Type | Meaning |
+|---|---|---|
+| `/Subtype` | name | Required — `/Widget` |
+| `/Rect` | 4-array | Required — annotation bounds in default user space |
+| `/T` | string or name | Required — fully qualified field name. Dot-separated segments build a parent chain (see below) |
+| `/FT` | name | Field type: `/Tx` (text), `/Btn` (push / check / radio), `/Ch` (combo / list), `/Sig`. Required on the topmost field; inheritable from parents |
+| `/V` | varies | Field value. Text string for `/Tx` and single-select `/Ch`; name for `/Btn` (`/Yes` / `/Off` / radio kid state); array of strings for multi-select `/Ch` |
+| `/DV` | varies | Default value — same shape as `/V` |
+| `/Ff` | integer | Field flags (PDF 1.7 spec § 12.7.3.1). Pass-through; bit semantics depend on `/FT` |
+| `/MaxLen` | integer | Text-field-only character limit |
+| `/Opt` | array | Choice-field options. Each entry is either `(label)` (display = export) or `[(export) (display)]` |
+| `/Q` | integer | Quadding: 0 = left, 1 = center, 2 = right |
+| `/DA` | string | Default appearance string. Falls back to the form-level `/DA` (or `0 0 0 rg /Helv 10 Tf` when neither is set) at write time |
+
+Plus all the shared `/ANN` keys (`/Page`, `/SrcPg`, `/Color`,
+`/Border`, `/Title`, `/Contents`).
+
+#### Field-tree shape rules
+
+The PDF writer in `crates/stet-pdf/src/form_fields.rs` infers the
+field-tree topology from the producer's `/T` values. Three shapes
+are supported:
+
+- **Single-widget leaf** (one widget with a unique `/T`): the widget
+  annotation dict carries both annotation keys *and* field keys
+  (`/T`, `/FT`, `/V`, `/Ff`, `/MaxLen`, …) on the same dict. PDF
+  readers treat the merged object as both an annotation (via the
+  page's `/Annots`) and a field (via `/AcroForm /Fields` resolution).
+
+- **Radio group** (multiple widgets sharing the same `/T`): the
+  field-level keys are lifted to a synthetic parent field. Each
+  widget keeps only its annotation keys plus `/Parent`; the parent
+  dict carries `/Kids` referencing every widget. Set the Radio bit
+  in `/Ff` (value 32768, bit 16) on each widget so it lifts to the
+  parent. The choice of `/V` on the widgets selects which kid is
+  the "on" state.
+
+  ```postscript
+  [ /Rect [72 700 92 720] /Subtype /Widget /T (answer)
+    /FT /Btn /Ff 32768 /V /A /ANN pdfmark
+  [ /Rect [72 680 92 700] /Subtype /Widget /T (answer)
+    /FT /Btn /Ff 32768 /V /B /ANN pdfmark
+  [ /Rect [72 660 92 680] /Subtype /Widget /T (answer)
+    /FT /Btn /Ff 32768 /V /C /ANN pdfmark
+  ```
+
+- **Dotted field name** (`order.shipping.street`): every prefix
+  becomes an implicit container parent field with `/T` set to that
+  segment (no `/FT`) and `/Kids` referencing the next level. The
+  widget itself sits at the leaf with `/T = street` and `/Parent`
+  pointing at `order.shipping`.
+
+  ```postscript
+  [ /Rect [72 720 320 740] /Subtype /Widget
+    /T (order.shipping.street) /FT /Tx /V (123 Main St) /ANN pdfmark
+  ```
+
+  Produces three field dicts: `order` (root, with `/Kids = [order.shipping]`),
+  `order.shipping` (with `/Parent = order` and `/Kids = [the widget]`),
+  and the widget itself acting as the leaf field with `/T = street`
+  and `/Parent = order.shipping`.
+
+`/AcroForm /Fields` lists exactly the root field refs (top-level
+container parents and standalone single-widget root fields). PDF
+viewers walk down via `/Kids` to find inner fields.
+
+Widget annotations are also added to their target page's `/Annots`
+array so they render in viewers that don't fully implement form
+interaction.
+
+### `/FORM` — document-level AcroForm dict
+
+```postscript
+[ /NeedAppearances false
+  /SigFlags 3
+  /DA (/Helv 12 Tf 0 g)
+  /Q 1
+  /FORM pdfmark
+```
+
+Document-level form options. The `/Fields` array is **not** authored
+here — it's built implicitly from the `/Widget` annotations at write
+time. All keys are optional. Multiple `/FORM pdfmark` blocks merge
+last-wins key-by-key.
+
+| Key | Type | Meaning |
+|---|---|---|
+| `/NeedAppearances` | bool | When true (default), viewers regenerate appearance streams on open. stet doesn't author appearance streams, so leaving this true lets viewers draw fields correctly |
+| `/SigFlags` | integer | Signature flags (PDF 1.7 spec § 12.7.2). Bit 0: `SignaturesExist`. Bit 1: `AppendOnly`. Pass-through |
+| `/CO` | array of strings | Calculate-order field names — fully qualified |
+| `/DA` | string | Document-level default appearance for fields without their own |
+| `/Q` | integer | Document-level quadding default |
+
+`/Catalog /AcroForm` is emitted only when at least one `/Widget`
+annotation exists or a `/FORM` record is present.
 
 ### `/DOCINFO` — document Info dictionary
 

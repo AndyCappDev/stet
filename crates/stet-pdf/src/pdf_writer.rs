@@ -55,6 +55,18 @@ impl PdfWriter {
         n
     }
 
+    /// True when an object number has had its content written via
+    /// [`set_object`](Self::set_object) or [`set_stream`](Self::set_stream).
+    /// The form-fields writer uses this to skip emitting a parent
+    /// field dict twice when multiple widgets contribute to the same
+    /// container.
+    pub fn is_object_set(&self, num: u32) -> bool {
+        self.objects
+            .get(num as usize)
+            .map(|slot| slot.is_some())
+            .unwrap_or(false)
+    }
+
     /// Add a stream object with optional flate compression.
     pub fn add_stream(
         &mut self,

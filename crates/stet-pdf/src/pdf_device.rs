@@ -227,9 +227,11 @@ impl PdfDevice {
             .collect();
 
         // Build per-page annotation objects up front so each page dict
-        // gets its /Annots array. Empty when no /ANN pdfmark records
-        // were issued.
-        let per_page_annots: Vec<Vec<u32>> = ctx
+        // gets its /Annots array. Widget annotations are split off and
+        // emitted by `form_fields::write_form`, which owns the field
+        // tree they sit under; the rest go through the standard
+        // annotation path.
+        let mut per_page_annots: Vec<Vec<u32>> = ctx
             .map(|c| {
                 let records: Vec<stet_core::pdfmark::AnnotationRecord> = c
                     .pdfmark_buffer
@@ -246,6 +248,50 @@ impl PdfDevice {
                 crate::annotations::collect_per_page(&mut writer, &records, &page_refs)
             })
             .unwrap_or_else(|| vec![Vec::new(); page_refs.len()]);
+
+        // Form fields — Widget annotations + /FORM record assembled
+        // into /AcroForm. The output's per-page widget refs merge into
+        // per_page_annots above so each page's /Annots array carries
+        // both standard annotations and widget annotations.
+        let acroform_output = ctx.and_then(|c| {
+            let widgets: Vec<(usize, stet_core::pdfmark::AnnotationRecord)> = c
+                .pdfmark_buffer
+                .records()
+                .iter()
+                .enumerate()
+                .filter_map(|(i, r)| match r {
+                    stet_core::pdfmark::PdfMarkRecord::Annotation(rec)
+                        if matches!(
+                            rec.subtype,
+                            stet_core::pdfmark::AnnotationSubtype::Widget(_)
+                        ) =>
+                    {
+                        Some((i, rec.clone()))
+                    }
+                    _ => None,
+                })
+                .collect();
+            let form_record = c
+                .pdfmark_buffer
+                .records()
+                .iter()
+                .filter_map(|r| match r {
+                    stet_core::pdfmark::PdfMarkRecord::Form(rec) => Some(rec.clone()),
+                    _ => None,
+                })
+                .reduce(|acc, next| next.merge_over(&acc));
+            crate::form_fields::write_form(
+                &mut writer,
+                &widgets,
+                form_record.as_ref(),
+                page_refs.len(),
+            )
+        });
+        if let Some(out) = &acroform_output {
+            for (i, refs) in out.per_page_widget_refs.iter().enumerate() {
+                per_page_annots[i].extend(refs);
+            }
+        }
 
         // Layer /PAGES (document-wide defaults) under /PAGE (per-page
         // overrides) into one PageOverride per page. Later /PAGE
@@ -371,6 +417,9 @@ impl PdfDevice {
         }
         if let Some(metadata_ref) = metadata_ref {
             catalog_entries.push((b"Metadata".to_vec(), PdfObj::Ref(metadata_ref)));
+        }
+        if let Some(out) = &acroform_output {
+            catalog_entries.push((b"AcroForm".to_vec(), PdfObj::Ref(out.acroform_ref)));
         }
 
         writer.set_object(catalog_ref, &PdfObj::Dict(catalog_entries));

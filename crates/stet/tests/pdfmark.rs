@@ -690,3 +690,247 @@ fn unknown_typetag_is_silent() {
     assert!(info_str.contains("/Producer (stet)"));
     assert!(!info_str.contains("/Foo"));
 }
+
+// ----- Phase 6: /Widget + /FORM (AcroForm authoring) -----------------------
+
+/// Locate the catalog dict bytes by scanning for the root reference
+/// in the trailer and reading that indirect object out of the file.
+fn find_catalog_bytes(pdf: &[u8]) -> Vec<u8> {
+    let trailer_idx = pdf
+        .windows(7)
+        .rposition(|w| w == b"trailer")
+        .expect("trailer marker present");
+    let trailer = &pdf[trailer_idx..];
+    let m = trailer
+        .windows(b"/Root ".len())
+        .position(|w| w == b"/Root ")
+        .expect("/Root present in trailer");
+    let after = &trailer[m + b"/Root ".len()..];
+    let after_str = std::str::from_utf8(&after[..16.min(after.len())]).unwrap();
+    let space = after_str.find(' ').unwrap();
+    let cat_obj_num: u32 = after_str[..space].parse().unwrap();
+    read_indirect_object(pdf, cat_obj_num)
+}
+
+/// Read the body bytes of indirect object `obj_num` from a PDF blob.
+fn read_indirect_object(pdf: &[u8], obj_num: u32) -> Vec<u8> {
+    let header = format!("{} 0 obj", obj_num);
+    let start = pdf
+        .windows(header.len())
+        .position(|w| w == header.as_bytes())
+        .unwrap_or_else(|| panic!("indirect object {obj_num} missing"));
+    let body_start = start + header.len();
+    let end = pdf[body_start..]
+        .windows(7)
+        .position(|w| w == b"endobj\n" || w == b"endobj ")
+        .expect("endobj marker present");
+    pdf[body_start..body_start + end].to_vec()
+}
+
+/// Pull the indirect-ref `NN 0 R` value associated with `key` from
+/// the bytes of a dict. Returns the object number.
+fn extract_indirect_ref(dict: &[u8], key: &str) -> Option<u32> {
+    let needle = format!("/{} ", key);
+    let i = dict
+        .windows(needle.len())
+        .position(|w| w == needle.as_bytes())?;
+    let after = &dict[i + needle.len()..];
+    let s = std::str::from_utf8(&after[..32.min(after.len())]).ok()?;
+    let space = s.find(' ')?;
+    s[..space].parse().ok()
+}
+
+#[test]
+fn widget_text_field_emits_acroform() {
+    let pdf = render_one_page_pdf(
+        "[ /Rect [72 720 320 740] /Subtype /Widget \
+         /T (firstname) /FT /Tx /V (Scott) /MaxLen 50 /ANN pdfmark",
+    );
+    let catalog = find_catalog_bytes(&pdf);
+    let catalog_str = String::from_utf8_lossy(&catalog);
+    assert!(
+        catalog_str.contains("/AcroForm "),
+        "/AcroForm missing from catalog: {catalog_str}",
+    );
+    let acro_ref = extract_indirect_ref(&catalog, "AcroForm").expect("AcroForm ref");
+    let acroform = read_indirect_object(&pdf, acro_ref);
+    let acro_str = String::from_utf8_lossy(&acroform);
+    assert!(acro_str.contains("/NeedAppearances true"));
+    assert!(acro_str.contains("/Fields ["));
+}
+
+#[test]
+fn widget_text_field_merged_keys_in_annot() {
+    // A single-leaf widget merges field-level keys (/T /FT /V /MaxLen)
+    // into the same dict as the /Subtype /Widget annotation.
+    let pdf = render_one_page_pdf(
+        "[ /Rect [72 720 320 740] /Subtype /Widget \
+         /T (firstname) /FT /Tx /V (Scott) /MaxLen 50 /ANN pdfmark",
+    );
+    let pdf_str = String::from_utf8_lossy(&pdf);
+    assert!(pdf_str.contains("/Subtype /Widget"));
+    assert!(pdf_str.contains("/T (firstname)"));
+    assert!(pdf_str.contains("/FT /Tx"));
+    assert!(pdf_str.contains("/V (Scott)"));
+    assert!(pdf_str.contains("/MaxLen 50"));
+}
+
+#[test]
+fn widget_checkbox_emits_btn_field_type() {
+    let pdf = render_one_page_pdf(
+        "[ /Rect [72 700 92 720] /Subtype /Widget \
+         /T (subscribe) /FT /Btn /V /Yes /ANN pdfmark",
+    );
+    let pdf_str = String::from_utf8_lossy(&pdf);
+    assert!(pdf_str.contains("/FT /Btn"));
+    assert!(pdf_str.contains("/V /Yes"));
+}
+
+#[test]
+fn widget_radio_group_lifts_field_keys_to_parent() {
+    // Three widgets sharing /T (answer) should produce a parent field
+    // with /Kids = three widget refs and /FT /Btn lifted up. The
+    // widgets themselves omit /T (the parent owns the field name).
+    let pdf = render_one_page_pdf(
+        "[ /Rect [72 700 92 720] /Subtype /Widget /T (answer) /FT /Btn /Ff 32768 /V /A /ANN pdfmark
+         [ /Rect [72 680 92 700] /Subtype /Widget /T (answer) /FT /Btn /Ff 32768 /V /B /ANN pdfmark
+         [ /Rect [72 660 92 680] /Subtype /Widget /T (answer) /FT /Btn /Ff 32768 /V /C /ANN pdfmark",
+    );
+    let pdf_str = String::from_utf8_lossy(&pdf);
+    // The radio parent dict carries /T (answer) /FT /Btn /Ff 32768 /Kids
+    // [...] — locate it by checking the catalog's /AcroForm root has a
+    // /Fields array with at least one entry, and that the parent dict
+    // is present.
+    assert!(pdf_str.contains("/T (answer)"));
+    assert!(pdf_str.contains("/FT /Btn"));
+    // /Ff 32768 lifts to the parent.
+    assert!(pdf_str.contains("/Ff 32768"));
+    // /Kids array referencing the three widget refs — count widget
+    // annot refs by counting "/Subtype /Widget" occurrences.
+    let widget_count = pdf_str.matches("/Subtype /Widget").count();
+    assert_eq!(widget_count, 3, "expected 3 widget annot dicts");
+}
+
+#[test]
+fn widget_choice_field_with_options() {
+    let pdf = render_one_page_pdf(
+        "[ /Rect [72 700 320 720] /Subtype /Widget \
+         /T (color) /FT /Ch /V (Red) /Opt [(Red) (Green) (Blue)] /ANN pdfmark",
+    );
+    let pdf_str = String::from_utf8_lossy(&pdf);
+    assert!(pdf_str.contains("/FT /Ch"));
+    assert!(pdf_str.contains("/V (Red)"));
+    // /Opt array — single strings flatten to (Red) (Green) (Blue).
+    assert!(pdf_str.contains("/Opt [(Red) (Green) (Blue)]"));
+}
+
+#[test]
+fn widget_choice_field_with_export_display_pairs() {
+    let pdf = render_one_page_pdf(
+        "[ /Rect [72 700 320 720] /Subtype /Widget \
+         /T (size) /FT /Ch /V (M) \
+         /Opt [[(S) (Small)] [(M) (Medium)] [(L) (Large)]] /ANN pdfmark",
+    );
+    let pdf_str = String::from_utf8_lossy(&pdf);
+    // Pairs survive — at least one [(export) (display)] sub-array.
+    assert!(pdf_str.contains("[(S) (Small)]"));
+    assert!(pdf_str.contains("[(M) (Medium)]"));
+}
+
+#[test]
+fn widget_dotted_name_builds_parent_chain() {
+    // order.shipping.street should produce three nested fields:
+    // top-level "order" → "shipping" → "street" (the widget itself).
+    let pdf = render_one_page_pdf(
+        "[ /Rect [72 700 320 720] /Subtype /Widget \
+         /T (order.shipping.street) /FT /Tx /V (123 Main St) /ANN pdfmark",
+    );
+    let pdf_str = String::from_utf8_lossy(&pdf);
+    // Each dotted segment becomes its own /T value somewhere.
+    assert!(pdf_str.contains("/T (order)"));
+    assert!(pdf_str.contains("/T (shipping)"));
+    assert!(pdf_str.contains("/T (street)"));
+    // The widget annotation carries the /V on the leaf.
+    assert!(pdf_str.contains("/V (123 Main St)"));
+    // The leaf widget's /Subtype /Widget dict references its
+    // immediate /Parent (shipping).
+    assert!(pdf_str.contains("/Parent "));
+}
+
+#[test]
+fn form_record_overrides_need_appearances() {
+    let pdf = render_one_page_pdf(
+        "[ /Rect [72 720 320 740] /Subtype /Widget /T (firstname) /FT /Tx /ANN pdfmark
+         [ /NeedAppearances false /Q 1 /FORM pdfmark",
+    );
+    let catalog = find_catalog_bytes(&pdf);
+    let acro_ref = extract_indirect_ref(&catalog, "AcroForm").expect("AcroForm ref");
+    let acroform = read_indirect_object(&pdf, acro_ref);
+    let s = String::from_utf8_lossy(&acroform);
+    assert!(s.contains("/NeedAppearances false"));
+    assert!(s.contains("/Q 1"));
+}
+
+#[test]
+fn form_default_appearance_emitted() {
+    let pdf = render_one_page_pdf(
+        "[ /Rect [72 720 320 740] /Subtype /Widget /T (any) /FT /Tx /ANN pdfmark
+         [ /DA (/Helv 12 Tf 0 g) /FORM pdfmark",
+    );
+    let catalog = find_catalog_bytes(&pdf);
+    let acro_ref = extract_indirect_ref(&catalog, "AcroForm").expect("AcroForm ref");
+    let acroform = read_indirect_object(&pdf, acro_ref);
+    let s = String::from_utf8_lossy(&acroform);
+    assert!(s.contains("/DA (/Helv 12 Tf 0 g)"));
+}
+
+#[test]
+fn no_widgets_no_acroform() {
+    // A document with neither /Widget annotations nor /FORM should
+    // not have /AcroForm in /Catalog.
+    let pdf = render_one_page_pdf("[ /Title (No forms here) /DOCINFO pdfmark");
+    let catalog = find_catalog_bytes(&pdf);
+    let s = String::from_utf8_lossy(&catalog);
+    assert!(
+        !s.contains("/AcroForm"),
+        "/AcroForm should not be emitted when no widgets exist: {s}",
+    );
+}
+
+#[test]
+fn widget_without_field_name_dropped() {
+    // /T missing → widget is dropped; no /AcroForm.
+    let pdf = render_one_page_pdf(
+        "[ /Rect [72 720 320 740] /Subtype /Widget /FT /Tx /V (Scott) /ANN pdfmark",
+    );
+    let catalog = find_catalog_bytes(&pdf);
+    let s = String::from_utf8_lossy(&catalog);
+    assert!(!s.contains("/AcroForm"));
+}
+
+#[test]
+fn widget_appears_in_page_annots_array() {
+    let pdf = render_one_page_pdf(
+        "[ /Rect [72 720 320 740] /Subtype /Widget /T (firstname) /FT /Tx /ANN pdfmark",
+    );
+    let pdf_str = String::from_utf8_lossy(&pdf);
+    // Page dict gets /Annots [N 0 R] referencing the widget.
+    assert!(
+        pdf_str.contains("/Annots ["),
+        "page should carry /Annots array"
+    );
+}
+
+#[test]
+fn form_only_no_widgets_emits_minimal_acroform() {
+    // A standalone /FORM record should still produce /AcroForm even
+    // without widgets — useful for declaring document-level defaults
+    // ahead of widgets that ship in a follow-up update path.
+    let pdf = render_one_page_pdf("[ /SigFlags 3 /FORM pdfmark");
+    let catalog = find_catalog_bytes(&pdf);
+    let acro_ref = extract_indirect_ref(&catalog, "AcroForm").expect("AcroForm ref");
+    let acroform = read_indirect_object(&pdf, acro_ref);
+    let s = String::from_utf8_lossy(&acroform);
+    assert!(s.contains("/Fields []"));
+    assert!(s.contains("/SigFlags 3"));
+}

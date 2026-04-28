@@ -29,6 +29,7 @@ mod annotations;
 mod content_stream;
 mod font_embedder;
 mod font_tracker;
+mod form_fields;
 mod image_ops;
 mod metadata;
 mod names;

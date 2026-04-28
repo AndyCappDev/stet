@@ -14,25 +14,27 @@
 //! non-PDF devices simply discard it.
 //!
 //! Currently recognised type-tags: `/DOCINFO` (document Info dict),
-//! `/OUT` (outline / bookmark entry), `/ANN` (Link / Text / FreeText
-//! annotations), `/DEST` (named destination), `/PAGE` and `/PAGES`
-//! (per-page and document-wide page-box / rotate overrides),
+//! `/OUT` (outline / bookmark entry), `/ANN` (Link / Text / FreeText /
+//! Widget annotations), `/DEST` (named destination), `/PAGE` and
+//! `/PAGES` (per-page and document-wide page-box / rotate overrides),
 //! `/VIEWERPREFERENCES` (catalog viewer preferences plus `/PageLayout`
-//! and `/PageMode`), `/Metadata` (XMP stream). Subsequent phases add
-//! `/EMBED`, `/FORM`, `/Widget` (form fields), and the Tagged-PDF
-//! structure-tree set as new arms in the type-tag match. Unknown
-//! type-tags silently no-op (Adobe convention) so PS code targeting
-//! newer features stays runnable on older interpreters.
+//! and `/PageMode`), `/Metadata` (XMP stream), `/FORM` (document-level
+//! AcroForm dict — `/Fields` is implicit, built from `/Widget`
+//! annotations at write time). Subsequent phases add `/EMBED` and the
+//! Tagged-PDF structure-tree set as new arms in the type-tag match.
+//! Unknown type-tags silently no-op (Adobe convention) so PS code
+//! targeting newer features stays runnable on older interpreters.
 
 use stet_core::context::Context;
 use stet_core::dict::DictKey;
 use stet_core::error::PsError;
 use stet_core::object::{EntityId, PsObject, PsValue};
 use stet_core::pdfmark::{
-    AnnotationRecord, AnnotationSubtype, AnnotationTarget, Border, DestRecord, DocDate,
-    DocInfoRecord, GoToTarget, LinkHighlight, MetadataRecord, OutlineAction, OutlineDestination,
-    OutlineRecord, PageBoxes, PageOverrideRecord, PageOverrideScope, PdfMarkRecord,
-    TextAnnotationIcon, TrappedState, ViewSpec, ViewerPrefsRecord,
+    AnnotationRecord, AnnotationSubtype, AnnotationTarget, Border, ChoiceOption, DestRecord,
+    DocDate, DocInfoRecord, FieldType, FieldValue, FormRecord, GoToTarget, LinkHighlight,
+    MetadataRecord, OutlineAction, OutlineDestination, OutlineRecord, PageBoxes,
+    PageOverrideRecord, PageOverrideScope, PdfMarkRecord, TextAnnotationIcon, TrappedState,
+    ViewSpec, ViewerPrefsRecord, WidgetAnnotation,
 };
 
 /// `pdfmark`: mark arg1 ... argN typetag → —
@@ -119,6 +121,11 @@ pub fn op_pdfmark(ctx: &mut Context) -> Result<(), PsError> {
         b"Metadata" => {
             if let Some(rec) = parse_metadata(ctx, &payload) {
                 ctx.pdfmark_buffer.push(PdfMarkRecord::Metadata(rec));
+            }
+        }
+        b"FORM" => {
+            if let Some(rec) = parse_form(ctx, &payload) {
+                ctx.pdfmark_buffer.push(PdfMarkRecord::Form(rec));
             }
         }
         // Unknown type-tags silently emit nothing (Adobe convention).
@@ -537,11 +544,198 @@ fn parse_annotation_subtype(ctx: &Context, payload: &[PsObject]) -> Option<Annot
                 quadding,
             })
         }
-        // Other subtypes (Stamp, Widget, …) land in later phases; for
-        // now treat them as "no record" so unknown subtypes don't
-        // litter the output PDF.
+        b"Widget" => parse_widget_payload(ctx, payload).map(AnnotationSubtype::Widget),
+        // Other subtypes (Stamp, …) land in later phases; for now treat
+        // them as "no record" so unknown subtypes don't litter the
+        // output PDF.
         _ => None,
     }
+}
+
+/// Pull a `/Key` value, accepting either a literal name or a string and
+/// returning the bytes as a UTF-8 lossy `String`. Used wherever the PDF
+/// spec is loose about whether a key is a name or a text string —
+/// notably field names (`/T`), action target names (`/D`), and choice
+/// option strings (`/Opt` entries).
+fn extract_name_or_string(ctx: &Context, payload: &[PsObject], key: &[u8]) -> Option<String> {
+    if let Some(name) = extract_name(ctx, payload, key) {
+        return Some(String::from_utf8_lossy(name).into_owned());
+    }
+    extract_string(ctx, payload, key)
+}
+
+/// Decode an `/FT` name into a [`FieldType`].
+fn parse_field_type(name: &[u8]) -> Option<FieldType> {
+    Some(match name {
+        b"Btn" => FieldType::Btn,
+        b"Tx" => FieldType::Tx,
+        b"Ch" => FieldType::Ch,
+        b"Sig" => FieldType::Sig,
+        _ => return None,
+    })
+}
+
+/// Read a field value (`/V` or `/DV`). PDF accepts strings (text fields,
+/// single-select choice), names (button checkboxes / radio appearance
+/// states), and arrays of strings (multi-select choice). Returns `None`
+/// when the key is missing or the value isn't one of those kinds.
+fn extract_field_value(ctx: &Context, payload: &[PsObject], key: &[u8]) -> Option<FieldValue> {
+    let key_id = ctx.names.find(key)?;
+    for (k, v) in pairs_iter(payload) {
+        if k != key_id {
+            continue;
+        }
+        match v.value {
+            PsValue::String { entity, start, len } => {
+                let bytes = ctx.strings.get(entity, start, len);
+                return Some(FieldValue::Text(
+                    String::from_utf8_lossy(bytes).into_owned(),
+                ));
+            }
+            PsValue::Name(n) => {
+                return Some(FieldValue::Name(
+                    String::from_utf8_lossy(ctx.names.get_bytes(n)).into_owned(),
+                ));
+            }
+            PsValue::Array { entity, start, len } | PsValue::PackedArray { entity, start, len } => {
+                let mut items = Vec::with_capacity(len as usize);
+                for i in 0..len {
+                    let elem = ctx.arrays.get_element(entity, start + i);
+                    match elem.value {
+                        PsValue::String {
+                            entity: se,
+                            start: ss,
+                            len: sl,
+                        } => {
+                            let bytes = ctx.strings.get(se, ss, sl);
+                            items.push(String::from_utf8_lossy(bytes).into_owned());
+                        }
+                        _ => return None,
+                    }
+                }
+                return Some(FieldValue::TextArray(items));
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// Read a `/Opt` array. Each entry is either a single string (display =
+/// export) or `[export display]`. Anything else is dropped.
+fn extract_options(ctx: &Context, payload: &[PsObject]) -> Option<Vec<ChoiceOption>> {
+    let elements = extract_array(ctx, payload, b"Opt")?;
+    let mut out = Vec::with_capacity(elements.len());
+    for elem in &elements {
+        match elem.value {
+            PsValue::String { entity, start, len } => {
+                let bytes = ctx.strings.get(entity, start, len);
+                let s = String::from_utf8_lossy(bytes).into_owned();
+                out.push(ChoiceOption {
+                    export: s.clone(),
+                    display: s,
+                });
+            }
+            PsValue::Array { entity, start, len } | PsValue::PackedArray { entity, start, len }
+                if len >= 2 =>
+            {
+                let take_str = |idx: u32| -> Option<String> {
+                    let e = ctx.arrays.get_element(entity, start + idx);
+                    match e.value {
+                        PsValue::String {
+                            entity: se,
+                            start: ss,
+                            len: sl,
+                        } => {
+                            Some(String::from_utf8_lossy(ctx.strings.get(se, ss, sl)).into_owned())
+                        }
+                        _ => None,
+                    }
+                };
+                if let (Some(export), Some(display)) = (take_str(0), take_str(1)) {
+                    out.push(ChoiceOption { export, display });
+                }
+            }
+            _ => {}
+        }
+    }
+    if out.is_empty() {
+        return None;
+    }
+    Some(out)
+}
+
+/// Parse a `/Subtype /Widget` payload into a [`WidgetAnnotation`].
+/// Returns `None` when `/T` is missing — every form field needs a name
+/// to live under in the field tree, and Adobe pdfwrite drops widgets
+/// that lack one.
+fn parse_widget_payload(ctx: &Context, payload: &[PsObject]) -> Option<WidgetAnnotation> {
+    let field_name = extract_name_or_string(ctx, payload, b"T")?;
+    if field_name.is_empty() {
+        return None;
+    }
+    let field_type = extract_name(ctx, payload, b"FT").and_then(parse_field_type);
+    let value = extract_field_value(ctx, payload, b"V");
+    let default_value = extract_field_value(ctx, payload, b"DV");
+    let flags = extract_i32(ctx, payload, b"Ff");
+    let max_len = extract_i32(ctx, payload, b"MaxLen");
+    let options = extract_options(ctx, payload);
+    let quadding = extract_i32(ctx, payload, b"Q");
+    let default_appearance = extract_string(ctx, payload, b"DA");
+    Some(WidgetAnnotation {
+        field_name,
+        field_type,
+        value,
+        default_value,
+        flags,
+        max_len,
+        options,
+        quadding,
+        default_appearance,
+    })
+}
+
+/// Parse a `/FORM pdfmark` payload into a [`FormRecord`]. All keys are
+/// optional. Returns `None` when the payload sets no recognised key —
+/// stray pdfmarks shouldn't pollute /AcroForm.
+fn parse_form(ctx: &Context, payload: &[PsObject]) -> Option<FormRecord> {
+    let need_appearances = extract_bool(ctx, payload, b"NeedAppearances");
+    let sig_flags = extract_i32(ctx, payload, b"SigFlags");
+    let calc_order = extract_array(ctx, payload, b"CO").and_then(|elements| {
+        let mut names = Vec::with_capacity(elements.len());
+        for elem in &elements {
+            match elem.value {
+                PsValue::String { entity, start, len } => {
+                    names.push(
+                        String::from_utf8_lossy(ctx.strings.get(entity, start, len)).into_owned(),
+                    );
+                }
+                PsValue::Name(n) => {
+                    names.push(String::from_utf8_lossy(ctx.names.get_bytes(n)).into_owned());
+                }
+                _ => return None,
+            }
+        }
+        Some(names)
+    });
+    let default_appearance = extract_string(ctx, payload, b"DA");
+    let quadding = extract_i32(ctx, payload, b"Q");
+
+    let any = need_appearances.is_some()
+        || sig_flags.is_some()
+        || calc_order.is_some()
+        || default_appearance.is_some()
+        || quadding.is_some();
+    if !any {
+        return None;
+    }
+    Some(FormRecord {
+        need_appearances,
+        sig_flags,
+        calc_order,
+        default_appearance,
+        quadding,
+    })
 }
 
 /// Pull a `/Key true|false` entry. PostScript also accepts `/Open

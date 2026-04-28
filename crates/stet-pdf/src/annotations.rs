@@ -11,16 +11,18 @@
 
 use stet_core::pdfmark::{
     AnnotationRecord, AnnotationSubtype, AnnotationTarget, Border, GoToTarget, LinkHighlight,
-    OutlineAction, TextAnnotationIcon, ViewSpec,
+    OutlineAction, TextAnnotationIcon, ViewSpec, WidgetAnnotation,
 };
 
+use crate::form_fields::push_field_level_keys;
 use crate::pdf_objects::PdfObj;
 use crate::pdf_writer::PdfWriter;
 
 /// Write a single annotation indirect object into `writer`. Returns
-/// the object number of the new annotation, or `None` when the
-/// annotation references a `/Page` outside the rendered range and
-/// can't resolve a target ref.
+/// the object number of the new annotation. `Widget` records are
+/// **skipped** here — the AcroForm writer in `form_fields.rs` owns
+/// widget emission so it can pre-allocate the refs that the field
+/// tree's `/Parent` and `/Kids` entries depend on.
 pub fn write_annotation(
     writer: &mut PdfWriter,
     record: &AnnotationRecord,
@@ -34,27 +36,7 @@ pub fn write_annotation(
         ),
         (b"Rect".to_vec(), rect_array(&record.rect)),
     ];
-
-    if let Some([r, g, b]) = record.color {
-        entries.push((
-            b"C".to_vec(),
-            PdfObj::Array(vec![PdfObj::Real(r), PdfObj::Real(g), PdfObj::Real(b)]),
-        ));
-    }
-
-    if let Some(border) = &record.border {
-        entries.push((b"Border".to_vec(), border_array(border)));
-    }
-
-    if let Some(title) = &record.title {
-        entries.push((b"T".to_vec(), PdfObj::LitString(title.clone().into_bytes())));
-    }
-    if let Some(contents) = &record.contents {
-        entries.push((
-            b"Contents".to_vec(),
-            PdfObj::LitString(contents.clone().into_bytes()),
-        ));
-    }
+    push_shared_keys(&mut entries, record);
 
     match &record.subtype {
         AnnotationSubtype::Link { target, highlight } => {
@@ -81,15 +63,86 @@ pub fn write_annotation(
                 entries.push((b"Q".to_vec(), PdfObj::Int(*q as i64)));
             }
         }
+        AnnotationSubtype::Widget(_) => {
+            // Widgets are owned by the form-fields writer.
+            unreachable!("widget annotations are emitted by form_fields::write_form");
+        }
     }
 
     writer.add_object(&PdfObj::Dict(entries))
 }
 
+/// Build the dict body for a `/Widget` annotation, optionally merged
+/// with its leaf field. Used by the AcroForm writer (which has
+/// already pre-allocated this widget's object number) so the returned
+/// entry list can be passed to `writer.set_object`. When
+/// `merge_field_keys` is true, the field-level keys (`/T`, `/FT`,
+/// `/V`, `/Ff`, …) are appended; radio kids set it to false because
+/// those keys live on the synthetic radio-group parent instead.
+pub fn widget_annotation_dict(
+    record: &AnnotationRecord,
+    widget: &WidgetAnnotation,
+    leaf_segment: &str,
+    parent_ref: Option<u32>,
+    merge_field_keys: bool,
+) -> Vec<(Vec<u8>, PdfObj)> {
+    let mut entries: Vec<(Vec<u8>, PdfObj)> = vec![
+        (b"Type".to_vec(), PdfObj::name("Annot")),
+        (b"Subtype".to_vec(), PdfObj::name("Widget")),
+        (b"Rect".to_vec(), rect_array(&record.rect)),
+    ];
+    push_shared_keys(&mut entries, record);
+
+    if let Some(p) = parent_ref {
+        entries.push((b"Parent".to_vec(), PdfObj::Ref(p)));
+    }
+    if merge_field_keys {
+        // The widget IS the leaf field — emit its name segment plus
+        // every field-level key the widget carries.
+        if !leaf_segment.is_empty() {
+            entries.push((
+                b"T".to_vec(),
+                PdfObj::LitString(leaf_segment.as_bytes().to_vec()),
+            ));
+        }
+        push_field_level_keys(&mut entries, widget);
+    }
+    entries
+}
+
+/// Append the keys that every annotation subtype shares — color,
+/// border, title, contents — onto an in-progress dict. Pulled out so
+/// the widget-merged path and the conventional path stay in sync.
+fn push_shared_keys(entries: &mut Vec<(Vec<u8>, PdfObj)>, record: &AnnotationRecord) {
+    if let Some([r, g, b]) = record.color {
+        entries.push((
+            b"C".to_vec(),
+            PdfObj::Array(vec![PdfObj::Real(r), PdfObj::Real(g), PdfObj::Real(b)]),
+        ));
+    }
+
+    if let Some(border) = &record.border {
+        entries.push((b"Border".to_vec(), border_array(border)));
+    }
+
+    if let Some(title) = &record.title {
+        entries.push((b"T".to_vec(), PdfObj::LitString(title.clone().into_bytes())));
+    }
+    if let Some(contents) = &record.contents {
+        entries.push((
+            b"Contents".to_vec(),
+            PdfObj::LitString(contents.clone().into_bytes()),
+        ));
+    }
+}
+
 /// Group annotations by 1-based page number so the page-builder can
 /// inline a `/Annots` array per page in one pass. Returns a map from
 /// `page_num - 1` (zero-based index into `page_refs`) to the list of
-/// annotation indirect refs.
+/// annotation indirect refs. **Widget annotations are skipped** —
+/// `form_fields::write_form` returns the per-page widget refs which
+/// the caller merges into this output before assembling the page
+/// dicts.
 pub fn collect_per_page(
     writer: &mut PdfWriter,
     records: &[AnnotationRecord],
@@ -98,6 +151,9 @@ pub fn collect_per_page(
     let mut per_page: Vec<Vec<u32>> = vec![Vec::new(); page_refs.len()];
     for record in records {
         if record.page == 0 || record.page as usize > page_refs.len() {
+            continue;
+        }
+        if matches!(record.subtype, AnnotationSubtype::Widget(_)) {
             continue;
         }
         let obj_ref = write_annotation(writer, record, page_refs);
@@ -111,6 +167,7 @@ fn subtype_name(subtype: &AnnotationSubtype) -> &'static str {
         AnnotationSubtype::Link { .. } => "Link",
         AnnotationSubtype::Text { .. } => "Text",
         AnnotationSubtype::FreeText { .. } => "FreeText",
+        AnnotationSubtype::Widget(_) => "Widget",
     }
 }
 

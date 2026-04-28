@@ -42,6 +42,10 @@ pub enum PdfMarkRecord {
     ViewerPrefs(ViewerPrefsRecord),
     /// `/Metadata` — XMP metadata stream attached to `/Catalog`.
     Metadata(MetadataRecord),
+    /// `/FORM` — document-level AcroForm dict. Multiple records merge
+    /// last-wins key-by-key; the `/Fields` array is implicit (built from
+    /// `/Widget` annotations at write time).
+    Form(FormRecord),
 }
 
 /// Buffered `pdfmark` records. Lives on `Context` for the entire job;
@@ -588,6 +592,88 @@ pub enum AnnotationSubtype {
         /// `/Q` quadding: 0=left, 1=center, 2=right. Optional.
         quadding: Option<u32>,
     },
+    /// `/Subtype /Widget` — interactive form field. Author-only: stet
+    /// doesn't render or run forms interactively, but it emits the
+    /// PDF AcroForm structure so downstream viewers (Acrobat, Okular,
+    /// pdf.js) can. The widget annotation and its leaf field dict are
+    /// merged into a single PDF object — common when a field has
+    /// exactly one widget — and the field-tree builder in
+    /// `crates/stet-pdf/src/form_fields.rs` handles the multi-widget
+    /// (radio group) and dotted-name parent cases.
+    Widget(WidgetAnnotation),
+}
+
+/// `/Widget` annotation payload — also acts as the field dict when the
+/// widget is a single-leaf field (the common case). Multiple widgets
+/// sharing the same dotted [`field_name`](Self::field_name) become
+/// `/Kids` of an implicit parent field at write time (radio groups).
+#[derive(Clone, Debug, Default)]
+pub struct WidgetAnnotation {
+    /// `/T` — fully qualified field name. Dot-separated segments imply
+    /// nesting (`order.shipping.street` → parents `order` →
+    /// `order.shipping` and a leaf `street`). The PDF emitter renders
+    /// only the last segment as `/T`; PDF resolves the full name by
+    /// walking the `/Parent` chain.
+    pub field_name: String,
+    /// `/FT` field type. Optional — when absent the field inherits its
+    /// type from the parent. Required on root fields.
+    pub field_type: Option<FieldType>,
+    /// `/V` field value — variant shape depends on `/FT`. Optional.
+    pub value: Option<FieldValue>,
+    /// `/DV` default value — same shape rules as `value`.
+    pub default_value: Option<FieldValue>,
+    /// `/Ff` field flags (PDF 1.7 spec § 12.7.3.1). Bit semantics
+    /// vary by `/FT`; passed through verbatim.
+    pub flags: Option<i32>,
+    /// `/MaxLen` — text-field-only character limit.
+    pub max_len: Option<i32>,
+    /// `/Opt` — choice-field options. Each entry is either a single
+    /// display string (export = display) or `[export display]` pair.
+    pub options: Option<Vec<ChoiceOption>>,
+    /// `/Q` quadding: 0=left, 1=center, 2=right.
+    pub quadding: Option<i32>,
+    /// `/DA` default appearance string. Falls back to the form-level
+    /// `/DA` (or `0 0 0 rg /Helv 10 Tf` when neither is set) at write
+    /// time.
+    pub default_appearance: Option<String>,
+}
+
+/// Field type per PDF 1.7 spec § 12.7.4. The variant maps directly to
+/// the `/FT` name in the output PDF.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FieldType {
+    /// `/Btn` — pushbuttons, checkboxes, radio buttons.
+    Btn,
+    /// `/Tx` — text fields.
+    Tx,
+    /// `/Ch` — choice fields (combo boxes, list boxes).
+    Ch,
+    /// `/Sig` — signature fields.
+    Sig,
+}
+
+/// Field value — variant shape depends on the field's `/FT`. The
+/// emitter writes the corresponding PDF object kind for each variant.
+#[derive(Clone, Debug)]
+pub enum FieldValue {
+    /// Text string — used for `/Tx` and single-select `/Ch` fields.
+    Text(String),
+    /// Name — used for `/Btn` checkboxes (`/Yes` / `/Off`) and radio
+    /// groups (the chosen kid's appearance state).
+    Name(String),
+    /// Array of text strings — used for multi-select `/Ch` fields.
+    TextArray(Vec<String>),
+}
+
+/// One `/Opt` entry on a choice field. PDF allows two shapes: a single
+/// string (export = display) or `[export display]` for distinct values.
+#[derive(Clone, Debug)]
+pub struct ChoiceOption {
+    /// Internal value persisted in the PDF when this option is selected.
+    pub export: String,
+    /// Human-readable label shown to the user. Equal to `export` when
+    /// the producer used the single-string form.
+    pub display: String,
 }
 
 /// `/Link` highlight mode — controls the visual feedback when the
@@ -775,6 +861,48 @@ impl ViewerPrefsRecord {
 pub struct MetadataRecord {
     /// Raw XMP XML bytes — round-tripped verbatim.
     pub xmp_bytes: Vec<u8>,
+}
+
+// ----- AcroForm (Phase 6) --------------------------------------------------
+
+/// `/FORM` payload — document-level AcroForm dict. All fields are
+/// optional; `/Fields` is implicit (built from `/Widget` annotations at
+/// write time). Multiple `/FORM` records merge last-wins via
+/// [`FormRecord::merge_over`].
+#[derive(Clone, Debug, Default)]
+pub struct FormRecord {
+    /// `/NeedAppearances` — when true, the viewer regenerates appearance
+    /// streams on open. stet defaults to `true` at write time when the
+    /// producer doesn't set this; that lets viewers (Acrobat, Okular,
+    /// pdf.js) draw form fields without us authoring appearance streams.
+    pub need_appearances: Option<bool>,
+    /// `/SigFlags` — signature flags. Bit 0: SignaturesExist. Bit 1:
+    /// AppendOnly. Pass-through; stet doesn't synthesise signatures.
+    pub sig_flags: Option<i32>,
+    /// `/CO` — calculate-order array of fully-qualified field names.
+    /// Used when calc-script-driven fields depend on each other.
+    pub calc_order: Option<Vec<String>>,
+    /// `/DA` — document-level default appearance string for fields that
+    /// don't set their own.
+    pub default_appearance: Option<String>,
+    /// `/Q` — document-level quadding default.
+    pub quadding: Option<i32>,
+}
+
+impl FormRecord {
+    /// Merge `self` over `other` — `self`'s `Some` fields win.
+    pub fn merge_over(&self, other: &FormRecord) -> FormRecord {
+        FormRecord {
+            need_appearances: self.need_appearances.or(other.need_appearances),
+            sig_flags: self.sig_flags.or(other.sig_flags),
+            calc_order: self.calc_order.clone().or_else(|| other.calc_order.clone()),
+            default_appearance: self
+                .default_appearance
+                .clone()
+                .or_else(|| other.default_appearance.clone()),
+            quadding: self.quadding.or(other.quadding),
+        }
+    }
 }
 
 impl PageBoxes {

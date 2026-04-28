@@ -255,6 +255,30 @@ object with `/Type /Metadata /Subtype /XML` referenced from
 written uncompressed (PDF spec requirement for grep-friendly
 extraction).
 
+Form fields (`/Subtype /Widget` annotations and `/FORM` records) take
+a different shape because the AcroForm needs the field tree to
+predate any individual field object — `/Parent` and `/Kids` cross-
+reference each other. `form_fields.rs::write_form` therefore owns
+widget emission end-to-end: it splits widgets out of the standard
+`/ANN` flow (the conventional annotation writer in `annotations.rs`
+skips Widget records), pre-allocates one object number per widget,
+groups widgets by canonical dotted `/T` to detect radio groups
+(multiple widgets sharing a name), allocates additional refs for
+every dotted-name prefix (implicit container parents), and emits
+each object with the right merged-field-keys vs. radio-kid shape.
+Single-widget leaves merge field keys (`/T`, `/FT`, `/V`, `/Ff`,
+`/MaxLen`, …) into the annotation dict so the same object satisfies
+both `/AcroForm /Fields` resolution and the page's `/Annots` array.
+Radio kids omit field-level keys (those lift to a synthetic radio-
+group parent). The shared `push_field_level_keys` helper is reused
+between the leaf-merge path and the radio-parent path so encoding
+stays consistent. `/AcroForm /Fields` lists exactly the root field
+refs (top-level container parents and standalone single-widget root
+fields); the writer also returns per-page widget refs that
+`pdf_device.rs` merges into the existing `per_page_annots` arrays
+before assembling page dicts. `/Catalog /AcroForm` is wired only
+when at least one widget or a `/FORM` record exists.
+
 ## Pipeline: PDF Reading
 
 ```
