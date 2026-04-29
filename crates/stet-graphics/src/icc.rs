@@ -9,6 +9,7 @@
 //! DeviceCMYK → RGB conversion beyond the naive PLRM formula.
 
 pub mod bpc;
+mod perceptual;
 
 use bpc::{
     BpcParams, apply_bpc_f64, apply_bpc_rgb_u8, compute_bpc_params, detect_source_black_point,
@@ -108,6 +109,20 @@ struct Clut4 {
     /// Flat LUT in order (k, y, m, c) with C fastest, K slowest.
     /// Length = grid_n^4 * 3 bytes (packed sRGB).
     data: Arc<Vec<u8>>,
+}
+
+impl Clut4 {
+    /// Construct a Clut4 from a pre-baked byte buffer with the same memory
+    /// layout `bake_clut4` produces (K outermost, Y, M, C innermost; 3 bytes
+    /// per grid point). Used by [`perceptual::bake_clut4_perceptual`] so its
+    /// output is byte-compatible with [`apply_clut4_cmyk_to_rgb`].
+    fn from_baked(grid_n: u8, data: Vec<u8>) -> Self {
+        debug_assert_eq!(data.len(), (grid_n as usize).pow(4) * 3);
+        Self {
+            grid_n,
+            data: Arc::new(data),
+        }
+    }
 }
 
 /// Cached ICC transform to sRGB (specific to source layout).
@@ -286,10 +301,17 @@ impl IccCache {
         let dst_layout_8 = Layout::Rgb;
         let dst_layout_f64 = Layout::Rgb;
 
-        // Try multiple rendering intents — ICC v4 profiles may only have A2B0 (Perceptual)
+        // Try multiple rendering intents — Perceptual first so the
+        // moxcms-driven `transform_f64` Arc honours the profile's perceptual
+        // table. Most CMYK paths route through the perceptual A2B0 CLUT
+        // (`bake_clut4_perceptual`) instead, but a few sites still call the
+        // f64 transform directly (e.g. `Luminosity` soft-mask conversion in
+        // the renderer); for those sites, picking the Perceptual transform
+        // here keeps the per-pixel result aligned with the CLUT path. ICC v4
+        // profiles may only have A2B0, so this also covers those.
         let intents = [
-            RenderingIntent::RelativeColorimetric,
             RenderingIntent::Perceptual,
+            RenderingIntent::RelativeColorimetric,
             RenderingIntent::AbsoluteColorimetric,
             RenderingIntent::Saturation,
         ];
@@ -367,26 +389,43 @@ impl IccCache {
 
         let is_lab = profile.color_space == DataColorSpace::Lab;
 
-        // BPC parameters for CMYK profiles. Detect the source profile's
-        // "as-mapped" black point by sampling (1,1,1,1) through the 8-bit
-        // transform, then derive per-axis shift coefficients targeting
-        // sRGB's true zero black. Computed before the CLUT bake so the
-        // bake can fold BPC in once and the runtime CLUT lookup stays at
-        // zero per-pixel cost.
-        let bpc_params = if n == 4 && self.bpc_mode.is_enabled() {
-            detect_source_black_point(transform_8bit.as_ref())
-                .map(|sbp| compute_bpc_params(sbp, [0.0; 3], bpc::WP_D50))
-        } else {
-            None
-        };
-
         // For 4-channel (CMYK) profiles, pre-bake a 17^4 CLUT for fast image
-        // conversion. The bake invokes the 8-bit transform once over a regular
-        // grid; subsequent image conversions interpolate the grid at ~30× the
-        // throughput of direct moxcms on LUT-based CMYK profiles. BPC is baked
-        // in here when present, so per-pixel runtime cost stays at zero.
+        // conversion. Two paths produce the same Clut4 layout:
+        //
+        // 1. `bake_clut4_perceptual` samples the profile's own A2B1
+        //    (colorimetric) table directly, decodes the legacy v2 PCS-Lab
+        //    encoding, and clips out-of-gamut colours to the sRGB boundary.
+        //    Output matches lcms2's `cmsDoTransform(RelCol)` to ±1 RGB level.
+        //    Available for v2 mft2 CMYK profiles. BPC is computed inside the
+        //    bake against this sampler's own (1,1,1,1) output so the source
+        //    black-point matches what we're actually producing.
+        // 2. `bake_clut4` invokes the 8-bit moxcms transform on a grid;
+        //    fallback for profiles whose tables are missing or in a shape we
+        //    don't yet handle (mAB, mft1, XYZ-PCS). BPC is calibrated against
+        //    moxcms's transform output (`detect_source_black_point`).
+        //
+        // The runtime CLUT lookup is identical regardless of which path
+        // produced the table.
+        //
+        // `bpc_params` is stored on `CachedTransform` for the moxcms-fallback
+        // path's `convert_color` / `convert_color_readonly` callers when the
+        // bake returned `None`. The hand-rolled sampler folds BPC in directly
+        // and leaves this `None`; the cached `transform_f64` Arc is only
+        // exercised in fallback contexts and shouldn't double-apply BPC.
+        let bpc_enabled = n == 4 && self.bpc_mode.is_enabled();
+        let mut bpc_params: Option<BpcParams> = None;
         let clut4 = if n == 4 {
-            let c = bake_clut4(transform_8bit.as_ref(), 17, bpc_params.as_ref());
+            let c = perceptual::bake_clut4_perceptual(&profile, 17, bpc_enabled).or_else(|| {
+                let params = if bpc_enabled {
+                    detect_source_black_point(transform_8bit.as_ref())
+                        .map(|sbp| compute_bpc_params(sbp, [0.0; 3], bpc::WP_D50))
+                } else {
+                    None
+                };
+                let r = bake_clut4(transform_8bit.as_ref(), 17, params.as_ref());
+                bpc_params = params;
+                r
+            });
             if std::env::var_os("STET_ICC_VERIFY").is_some()
                 && let Some(ref clut) = c
             {
@@ -475,17 +514,27 @@ impl IccCache {
             return Some(cached);
         }
 
-        let mut dst = [0.0f64; 3];
-        if cached.transform_f64.transform(&src, &mut dst).is_err() {
-            return None;
-        }
-
-        let dst = bpc_post_correct(dst, cached.bpc_params.as_ref());
-        let result = (
-            dst[0].clamp(0.0, 1.0),
-            dst[1].clamp(0.0, 1.0),
-            dst[2].clamp(0.0, 1.0),
-        );
+        let result = if n == 4
+            && let Some(clut) = cached.clut4.as_ref()
+        {
+            // Route single-color CMYK through the same baked CLUT image
+            // conversions use, so a flat fill matches the surrounding gradient
+            // stops byte-for-byte. BPC and the perceptual A2B0 sampling are
+            // already folded into the CLUT.
+            let (r, g, b) = sample_clut4_single_f64(clut, src[0], src[1], src[2], src[3]);
+            (r, g, b)
+        } else {
+            let mut dst = [0.0f64; 3];
+            if cached.transform_f64.transform(&src, &mut dst).is_err() {
+                return None;
+            }
+            let dst = bpc_post_correct(dst, cached.bpc_params.as_ref());
+            (
+                dst[0].clamp(0.0, 1.0),
+                dst[1].clamp(0.0, 1.0),
+                dst[2].clamp(0.0, 1.0),
+            )
+        };
 
         // Cache (limit size to avoid unbounded growth)
         if self.color_cache.len() < 65536 {
@@ -519,6 +568,13 @@ impl IccCache {
             } else {
                 v.clamp(0.0, 1.0)
             };
+        }
+
+        if n == 4
+            && let Some(clut) = cached.clut4.as_ref()
+        {
+            let (r, g, b) = sample_clut4_single_f64(clut, src[0], src[1], src[2], src[3]);
+            return Some((r, g, b));
         }
 
         let mut dst = [0.0f64; 3];
@@ -671,6 +727,13 @@ impl IccCache {
             y.clamp(0.0, 1.0),
             k.clamp(0.0, 1.0),
         ];
+        if let Some(clut) = cached.clut4.as_ref() {
+            // Sample the same baked CLUT image conversions use, so a flat fill
+            // matches the surrounding gradient stops byte-for-byte. BPC and the
+            // perceptual A2B0 sampling are already folded into the CLUT.
+            let (r, g, b) = sample_clut4_single_f64(clut, src[0], src[1], src[2], src[3]);
+            return Some((r, g, b));
+        }
         let mut dst = [0.0f64; 3];
         if cached.transform_f64.transform(&src, &mut dst).is_err() {
             return None;
@@ -842,6 +905,96 @@ fn bake_clut4(
         grid_n,
         data: Arc::new(dst),
     })
+}
+
+/// Single-pixel CMYK→sRGB lookup against the baked CLUT, with f64 inputs and
+/// outputs. Performs the same K-bracket × 3D tetrahedral interpolation as the
+/// bulk image path, but in floating point so a flat fill (which would otherwise
+/// quantize the input to u8) matches a gradient stop's byte output to within
+/// the CLUT's grid-interpolation error.
+fn sample_clut4_single_f64(clut: &Clut4, c: f64, m: f64, y: f64, k: f64) -> (f64, f64, f64) {
+    let n = clut.grid_n as usize;
+    let nm1 = (n - 1) as f64;
+    let lut = clut.data.as_slice();
+    let stride_c: usize = 3;
+    let stride_m: usize = n * stride_c;
+    let stride_y: usize = n * stride_m;
+    let stride_k: usize = n * stride_y;
+
+    #[inline]
+    fn axis(v: f64, nm1: f64, n: usize) -> (usize, usize, f64) {
+        let scaled = v.clamp(0.0, 1.0) * nm1;
+        let lo = scaled.floor();
+        let frac = scaled - lo;
+        let lo_i = lo as usize;
+        let hi_i = (lo_i + 1).min(n - 1);
+        (lo_i, hi_i, frac)
+    }
+
+    let (ci, ci1, fc) = axis(c, nm1, n);
+    let (mi, mi1, fm) = axis(m, nm1, n);
+    let (yi, yi1, fy) = axis(y, nm1, n);
+    let (ki, ki1, fk) = axis(k, nm1, n);
+
+    // Pick tetrahedron vertices (Kasson '94) — same logic as the u8 path.
+    let (a_dxmy, b_dxmy, w1, w2, w3) = if fc >= fm {
+        if fm >= fy {
+            ((1, 0, 0), (1, 1, 0), fc, fm, fy)
+        } else if fc >= fy {
+            ((1, 0, 0), (1, 0, 1), fc, fy, fm)
+        } else {
+            ((0, 0, 1), (1, 0, 1), fy, fc, fm)
+        }
+    } else if fc >= fy {
+        ((0, 1, 0), (1, 1, 0), fm, fc, fy)
+    } else if fm >= fy {
+        ((0, 1, 0), (0, 1, 1), fm, fy, fc)
+    } else {
+        ((0, 0, 1), (0, 1, 1), fy, fm, fc)
+    };
+
+    let corner = |d: (u8, u8, u8)| -> usize {
+        let (dc, dm, dy) = d;
+        let cx = if dc == 0 { ci } else { ci1 };
+        let mx = if dm == 0 { mi } else { mi1 };
+        let yx = if dy == 0 { yi } else { yi1 };
+        yx * stride_y + mx * stride_m + cx * stride_c
+    };
+
+    let o000 = corner((0, 0, 0));
+    let o111 = corner((1, 1, 1));
+    let oa = corner(a_dxmy);
+    let ob = corner(b_dxmy);
+
+    let base_lo = ki * stride_k;
+    let base_hi = ki1 * stride_k;
+
+    let tetra_channel = |base: usize, ch: usize| -> f64 {
+        let v000 = lut[base + o000 + ch] as f64;
+        let va = lut[base + oa + ch] as f64;
+        let vb = lut[base + ob + ch] as f64;
+        let v111 = lut[base + o111 + ch] as f64;
+        v000 + (va - v000) * w1 + (vb - va) * w2 + (v111 - vb) * w3
+    };
+
+    let r_lo = tetra_channel(base_lo, 0);
+    let g_lo = tetra_channel(base_lo, 1);
+    let b_lo = tetra_channel(base_lo, 2);
+    let (r_hi, g_hi, b_hi) = if ki == ki1 {
+        (r_lo, g_lo, b_lo)
+    } else {
+        (
+            tetra_channel(base_hi, 0),
+            tetra_channel(base_hi, 1),
+            tetra_channel(base_hi, 2),
+        )
+    };
+
+    let inv_fk = 1.0 - fk;
+    let r = (r_lo * inv_fk + r_hi * fk) / 255.0;
+    let g = (g_lo * inv_fk + g_hi * fk) / 255.0;
+    let b = (b_lo * inv_fk + b_hi * fk) / 255.0;
+    (r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0))
 }
 
 /// Convert an 8-bit packed CMYK buffer to 8-bit packed sRGB using the baked
@@ -1385,6 +1538,87 @@ mod tests {
             .expect("reverse transform should be available");
         for (i, v) in cmyk.iter().enumerate() {
             assert!(*v < 0.05, "expected near-zero ink at chan {i}, got {v}");
+        }
+    }
+
+    /// White CMYK (0,0,0,0) routed through the perceptual CLUT must land at
+    /// pure white sRGB. Catches scaling errors in the PCS-Lab decode (the
+    /// most likely place to introduce a uniform brightness shift).
+    #[test]
+    fn test_perceptual_clut_white_anchor() {
+        let Some(cmyk_bytes) = find_system_cmyk_profile() else {
+            return;
+        };
+        let mut cache = IccCache::new_with_options(IccCacheOptions {
+            bpc_mode: BpcMode::Off,
+            source_cmyk_profile: Some(cmyk_bytes),
+        });
+        let rgb = cache.convert_cmyk(0.0, 0.0, 0.0, 0.0).unwrap();
+        // Tolerate a few u8 levels of grid-interpolation drift; the bound
+        // catches order-of-magnitude bugs (a ~0.5x scale would land at ~127).
+        assert!(
+            rgb.0 > 0.97 && rgb.1 > 0.97 && rgb.2 > 0.97,
+            "CMYK white should map near sRGB white, got {rgb:?}"
+        );
+    }
+
+    /// Single-color CLUT lookup must agree with bulk image conversion to
+    /// within u8 quantization on the same input. Anchors the requirement
+    /// that flat CMYK fills match adjacent gradient stops byte-for-byte.
+    #[test]
+    fn test_perceptual_clut_single_matches_bulk() {
+        let Some(cmyk_bytes) = find_system_cmyk_profile() else {
+            return;
+        };
+        let mut cache = IccCache::new_with_options(IccCacheOptions {
+            bpc_mode: BpcMode::On,
+            source_cmyk_profile: Some(cmyk_bytes),
+        });
+        let hash = *cache.default_cmyk_hash().unwrap();
+        // A handful of saturated and midtone CMYK samples.
+        let samples: &[(u8, u8, u8, u8)] = &[
+            (0, 0, 0, 0),
+            (255, 0, 0, 0),
+            (0, 255, 0, 0),
+            (0, 0, 255, 0),
+            (0, 0, 0, 255),
+            (38, 255, 255, 0), // ≈ (0.15, 1.0, 1.0, 0.0) — the GWG demo input
+            (128, 128, 128, 0),
+        ];
+        let pixels: Vec<u8> = samples
+            .iter()
+            .flat_map(|&(c, m, y, k)| [c, m, y, k])
+            .collect();
+        let bulk = cache
+            .convert_image_8bit(&hash, &pixels, samples.len())
+            .unwrap();
+        for (i, &(c, m, y, k)) in samples.iter().enumerate() {
+            let single = cache
+                .convert_color(
+                    &hash,
+                    &[
+                        c as f64 / 255.0,
+                        m as f64 / 255.0,
+                        y as f64 / 255.0,
+                        k as f64 / 255.0,
+                    ],
+                )
+                .unwrap();
+            let single_u8 = [
+                (single.0 * 255.0).round() as i32,
+                (single.1 * 255.0).round() as i32,
+                (single.2 * 255.0).round() as i32,
+            ];
+            let b = &bulk[i * 3..i * 3 + 3];
+            for ch in 0..3 {
+                let delta = (single_u8[ch] - b[ch] as i32).abs();
+                assert!(
+                    delta <= 2,
+                    "single vs bulk mismatch at sample {i} chan {ch}: \
+                     single={single_u8:?} bulk={:?} delta={delta}",
+                    [b[0], b[1], b[2]]
+                );
+            }
         }
     }
 }
