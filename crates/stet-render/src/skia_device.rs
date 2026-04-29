@@ -7019,6 +7019,31 @@ fn content_list_is_simple_native_cmyk(list: &DisplayList) -> bool {
                 }
                 found_paint = true;
             }
+            // Recurse into a transparency Group only when the group itself is
+            // Normal-blend / full-opacity AND its contents are themselves
+            // simple native CMYK. This lets gradient-feather-style content
+            // (a Group wrapping a single CMYK fill, GWG 16.11) qualify for
+            // CMYK-domain mask blending while the prior outer-glow C
+            // regression (a Group wrapping a Screen-blend white rect, GWG
+            // 16.10) still gets rejected on the inner blend_mode check.
+            DisplayElement::Group { params, elements } => {
+                if params.blend_mode != 0 || params.alpha != 1.0 {
+                    return false;
+                }
+                if !content_list_is_simple_native_cmyk(elements) {
+                    return false;
+                }
+                // A Group whose contents are all clip/text without paint
+                // adds no paint of its own; don't flip `found_paint` here —
+                // the recursive call already counted any inner paints.
+                if elements
+                    .elements()
+                    .iter()
+                    .any(|e| matches!(e, DisplayElement::Fill { .. } | DisplayElement::Stroke { .. }))
+                {
+                    found_paint = true;
+                }
+            }
             _ => return false,
         }
     }
