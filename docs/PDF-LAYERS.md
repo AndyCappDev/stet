@@ -104,6 +104,7 @@ fn dump(nodes: &[LayerTreeNode], depth: usize) {
                 }
                 dump(children, depth + 1);
             }
+            _ => {} // LayerTreeNode is #[non_exhaustive]
         }
     }
 }

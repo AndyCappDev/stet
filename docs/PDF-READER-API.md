@@ -86,6 +86,7 @@ match m.trapped {
     Some(TrappedFlag::True)    => println!("Trapped for press"),
     Some(TrappedFlag::False)   => println!("Not trapped"),
     Some(TrappedFlag::Unknown) => println!("Trap state unknown"),
+    Some(_)                    => {} // TrappedFlag is #[non_exhaustive]
     None                       => {}
 }
 
@@ -128,6 +129,7 @@ match prefs.page_mode {
 match prefs.print_scaling {
     PrintScaling::None       => println!("default: print at 100%"),
     PrintScaling::AppDefault => println!("default: viewer chooses"),
+    _                        => {} // PrintScaling is #[non_exhaustive]
 }
 ```
 
@@ -282,6 +284,7 @@ fn walk(fields: &[stet_pdf_reader::FormField]) {
                 ButtonType::Checkbox  => println!("Check {} = {:?}", f.name, f.value),
                 ButtonType::Radio     => println!("Radio {} (options: {:?})", f.name, bf.options),
                 ButtonType::Pushbutton => println!("Push  {}", f.name),
+                _                     => {} // ButtonType is #[non_exhaustive]
             },
             FieldKind::Choice(cf) => println!(
                 "{} {} = {:?} ({} options)",
@@ -291,6 +294,7 @@ fn walk(fields: &[stet_pdf_reader::FormField]) {
             FieldKind::Signature(_) => println!("Sig   {}", f.name),
             FieldKind::Container    => {} // non-terminal namespace node
             FieldKind::Other { ft } => println!("Other ({}) {}", ft, f.name),
+            _                       => {} // FieldKind is #[non_exhaustive]
         }
         walk(&f.children);
     }
