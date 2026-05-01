@@ -73,6 +73,25 @@ fn main() {
 
     let args: Vec<String> = std::env::args().collect();
 
+    // Top-level `--help` / `--version` short-circuit. Match early so neither
+    // gets treated as a file path by the fall-through arm of the main flag
+    // parser (the parser's `_ =>` silently pushes unrecognised tokens onto
+    // `file_args`, which previously caused `stet --help` to error with
+    // "cannot read '--help'").
+    if let Some(arg1) = args.get(1).map(String::as_str) {
+        match arg1 {
+            "--help" | "-h" | "-?" => {
+                print_help();
+                std::process::exit(0);
+            }
+            "--version" | "-V" => {
+                println!("stet {}", env!("CARGO_PKG_VERSION"));
+                std::process::exit(0);
+            }
+            _ => {}
+        }
+    }
+
     // `stet inspect <file.pdf> [--password <pw>]` — print PDF structure.
     // Dispatch before the main render-flag parser so `inspect` can take its
     // own narrow flag set.
@@ -863,6 +882,71 @@ fn run_viewer_mode(
         );
     }
     std::process::exit(0);
+}
+
+/// Print the top-level usage/help text.
+fn print_help() {
+    println!(
+        "stet {} — PostScript Level 3 interpreter and PDF renderer.
+
+Usage:
+    stet [OPTIONS] <FILE>...
+    stet inspect <FILE.pdf> [--password <PW>]
+    stet --help
+    stet --version
+
+With no FILE, stet launches the interactive viewer.
+
+Output devices:
+    --device png            Render each page to PNG (default for files).
+    --device pdf            Render to PDF (vector output).
+    --device viewer         Launch the interactive desktop viewer.
+    --device viewport-png   Render via the viewport pipeline (audit mode).
+    --device null           No rendering output (test / scripting use).
+
+Common options:
+    --dpi <DPI>             DPI for raster output (default 300).
+    --pages <SPEC>          Page selection: \"3\", \"1-5\", \"1-3,7,10-12\".
+    --width <PX>            Override page width (PDF input only). Cannot
+                            be combined with --dpi.
+    --height <PX>           Override page height (PDF input only). Cannot
+                            be combined with --dpi.
+    --threads <N>           Parallel band-rendering thread count
+                            (default: rayon's default = num_cpus).
+    --no-aa                 Disable anti-aliasing.
+    --password <PW>         Password for encrypted PDF input.
+
+Colour management:
+    --no-icc                Skip system CMYK profile loading; use the
+                            PLRM CMYK→sRGB formulas. Cannot combine
+                            with --cmyk-profile or --bpc.
+    --cmyk-profile <PATH>   Override the system CMYK source profile.
+    --output-profile <PATH> Output ICC profile (forward-compatible
+                            with planned PDF/X-4 work).
+    --use-output-intent     Honour the PDF's OutputIntent profile as
+                            the source CMYK profile (default ON).
+    --no-output-intent      Ignore the PDF's OutputIntent and fall
+                            back to the system CMYK profile.
+    --bpc <on|off|auto>     Black-point compensation mode (default auto).
+
+Subcommands:
+    inspect <FILE.pdf>      Print a structural summary of a PDF
+                            (metadata, outline, annotations, form
+                            fields, embedded files, layers,
+                            warnings). Use `stet inspect --help` for
+                            details.
+
+Examples:
+    stet                                # launch the viewer
+    stet doc.ps                         # render PostScript
+    stet --device png --pages 1 doc.pdf # render PDF page 1 to PNG
+    stet --device pdf in.ps             # PostScript → PDF
+    stet inspect doc.pdf                # show PDF structure
+
+Documentation: https://github.com/AndyCappDev/stet
+Issues:        https://github.com/AndyCappDev/stet/issues",
+        env!("CARGO_PKG_VERSION")
+    );
 }
 
 /// Parse a page range specification into a set of page numbers (1-based).

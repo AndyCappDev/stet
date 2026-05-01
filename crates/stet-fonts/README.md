@@ -29,7 +29,7 @@ renderer. If you're building a stet-family project, the
 
 ```toml
 [dependencies]
-stet-fonts = "0.1"
+stet-fonts = "0.2"
 ```
 
 ### Parse a Type 1 font

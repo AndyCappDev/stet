@@ -12,6 +12,11 @@ call and caches its result.
 
 ## Quick start
 
+A runnable end-to-end example (enumerate layers, render with three
+different `LayerSet`s, write the PNGs) lives at
+[`crates/stet/examples/render_pdf_layers.rs`](../crates/stet/examples/render_pdf_layers.rs);
+run it with `cargo run --example render_pdf_layers -- some.pdf`.
+
 ```rust,no_run
 use stet_pdf_reader::{PdfDocument, RenderIntent};
 

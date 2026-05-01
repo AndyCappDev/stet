@@ -7,11 +7,13 @@ named destinations, viewer preferences, and so on. PostScript code issues
 records on a buffer hanging off the runtime context, and the PDF output
 device drains that buffer at end-of-job.
 
-This document covers the operators currently implemented. The plan in
-`docs/PLAN-PDFMARK-AUTHORING.md` lists the phases still to come — outlines
-(`/OUT`), annotations (`/ANN`), destinations (`/DEST`), page boxes
-(`/PAGE` / `/PAGES`), viewer preferences, XMP metadata, embedded files,
-and AcroForm widgets.
+This document covers every authoring type-tag stet supports today:
+`/DOCINFO`, `/OUT` (outlines), `/ANN` (Link / Text / FreeText
+annotations), `/DEST` (named destinations), `/PAGE` and `/PAGES`
+(per-page-box overrides), `/VIEWERPREFERENCES`, `/Metadata` (XMP),
+`/Widget` and `/FORM` (AcroForm fields), `/EMBED` (embedded files),
+and JavaScript / Named actions. Tagged-PDF authoring remains deferred
+— see `docs/PLAN-TAGGED-PDF.md`.
 
 ## Quick start
 
@@ -549,7 +551,7 @@ both kinds of records exist).
 | `/DataSource` | string | Required — raw file contents. PostScript strings can hold arbitrary bytes, so binary attachments (PNGs, ZIPs, …) round-trip without re-encoding |
 | `/UF` | string | Optional — unicode filename. PDF spec recommends both `/F` and `/UF`; when absent, the writer reuses `/FS` |
 | `/Desc` | string | Optional — human-readable description |
-| `/AFRelationship` | name | Optional — relationship to the document content. Allow-list: `Source`, `Data`, `Alternative`, `Supplement`, `EncryptedPayload`, `Unspecified`, `FormData`. Unknown values dropped silently |
+| `/AFRelationship` | name | Optional — relationship to the document content. Allow-list: `Source`, `Data`, `Alternative`, `Supplement`, `EncryptedPayload`, `FormData`, `Schema`, `Unspecified`. Unknown values dropped silently |
 | `/MIMEType` | string | Optional — MIME type written as the stream's `/Subtype`. Viewers that respect it use it to pick the right "open with" handler |
 
 Records without `/FS` or `/DataSource` are dropped silently. Multiple

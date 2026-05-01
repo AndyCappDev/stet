@@ -66,7 +66,7 @@ stet --device png page1.ps page2.pdf illustration.eps
 stet [OPTIONS] [FILES...]
 
 Options:
-  --device <DEVICE>          Output device: png, pdf, viewer, null
+  --device <DEVICE>          Output device: png, pdf, viewer, viewport-png, null
   --dpi <DPI>                Resolution in dots per inch (overrides device default)
   --pages <RANGE>            Page range, e.g. 1, 1-5, 2,4,6
   --threads <N>              Worker-thread count (default: 75% of cores in viewer

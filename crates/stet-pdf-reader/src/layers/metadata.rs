@@ -113,11 +113,9 @@ impl LayerIntent {
 /// Hints from the OCG `/Usage` sub-dict.
 ///
 /// Every field is optional — a layer with no `/Usage` produces a
-/// fully-`None` value. Phase 5 of the layer plan turns these hints
-/// into automatic [`LayerSet`] adjustments under render intents
-/// (View / Print / Export); Phase 1 just exposes the raw structure.
-///
-/// [`LayerSet`]: <crate-root>::LayerSet
+/// fully-`None` value. Render-intent helpers in `crate::layers`
+/// (e.g. `layer_set_for`) turn these hints into automatic visibility
+/// adjustments under View / Print / Export intents.
 #[derive(Debug, Clone, Default)]
 pub struct LayerUsage {
     /// `/CreatorInfo` sub-dict — application that authored the layer.

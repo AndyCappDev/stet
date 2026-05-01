@@ -50,11 +50,11 @@ direct-rendering pipeline:
   list in chunks. Cancellation between bands is trivial — check a flag
   and bail. There is no deeply-nested interpreter state to unwind.
 
-- **Layer toggling.** The display list architecture makes it straightforward
-  to tag elements with their PDF Optional Content Group (OCG) and filter by
-  layer visibility at render time — no re-interpretation required. (Not yet
-  implemented; the OCG parsing and BDC/EMC tracking infrastructure is in
-  place.)
+- **Layer toggling.** Display-list elements are tagged with their PDF
+  Optional Content Group (OCG) via `DisplayElement::OcgGroup`, and a
+  per-render `LayerSet` (in `stet-graphics`) overrides visibility at
+  render time — no re-interpretation required. See
+  [`docs/PDF-LAYERS.md`](PDF-LAYERS.md) for the runtime visibility model.
 
 - **Caching.** Store the display list and re-render at different
   DPI, zoom, or viewport without re-parsing. The prepare/cache pipeline
@@ -129,7 +129,7 @@ later (e.g., zooming in the viewer) scales the device-space coordinates.
    at a time. Executable names are looked up in the dictionary stack and
    dispatched; procedures are stepped through element by element.
 
-3. **Operators** (`stet-ops`): ~330 native Rust functions that manipulate
+3. **Operators** (`stet-ops`): ~376 native Rust functions that manipulate
    the operand stack, dictionary stack, graphics state, and display list.
    Path-building operators (`moveto`, `lineto`, `curveto`) construct paths
    on the graphics state. Painting operators (`fill`, `stroke`, `image`)
@@ -597,7 +597,7 @@ stet-graphics        Color types, display list, ICC, mesh shading
      │
 stet-core            PS types, Context, VM stores, tokenizer, OutputDevice trait
      │
-stet-ops             ~320 operator implementations
+stet-ops             ~376 operator implementations
      │
 stet-engine          Eval loop, parse_and_exec, exec_sync
      │

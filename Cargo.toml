@@ -4,7 +4,7 @@ exclude = ["crates/stet-wasm"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "Apache-2.0 OR MIT"
 authors = ["Scott Bowman <scott@bowmans.org>"]
@@ -18,13 +18,13 @@ rayon = "1"
 stet-tiny-skia = { path = "crates/stet-tiny-skia", version = "0.11.4" }
 eframe = "0.31"
 egui = "0.31"
-stet-fonts = { path = "crates/stet-fonts", version = "0.1.0" }
-stet-graphics = { path = "crates/stet-graphics", version = "0.1.0" }
-stet-core = { path = "crates/stet-core", version = "0.1.0" }
-stet-ops = { path = "crates/stet-ops", version = "0.1.0" }
-stet-engine = { path = "crates/stet-engine", version = "0.1.0" }
-stet-render = { path = "crates/stet-render", version = "0.1.0" }
-stet-pdf = { path = "crates/stet-pdf", version = "0.1.0" }
-stet-viewer = { path = "crates/stet-viewer", version = "0.1.0" }
-stet-pdf-reader = { path = "crates/stet-pdf-reader", version = "0.1.0" }
-stet = { path = "crates/stet", version = "0.1.2" }
+stet-fonts = { path = "crates/stet-fonts", version = "0.2.0" }
+stet-graphics = { path = "crates/stet-graphics", version = "0.2.0" }
+stet-core = { path = "crates/stet-core", version = "0.2.0" }
+stet-ops = { path = "crates/stet-ops", version = "0.2.0" }
+stet-engine = { path = "crates/stet-engine", version = "0.2.0" }
+stet-render = { path = "crates/stet-render", version = "0.2.0" }
+stet-pdf = { path = "crates/stet-pdf", version = "0.2.0" }
+stet-viewer = { path = "crates/stet-viewer", version = "0.2.0" }
+stet-pdf-reader = { path = "crates/stet-pdf-reader", version = "0.2.0" }
+stet = { path = "crates/stet", version = "0.2.0" }

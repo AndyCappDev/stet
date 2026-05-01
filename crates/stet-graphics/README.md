@@ -39,7 +39,7 @@ for complete element and parameter documentation.
 
 ```toml
 [dependencies]
-stet-graphics = "0.1"
+stet-graphics = "0.2"
 ```
 
 ### ICC colour management

@@ -34,8 +34,8 @@ pub enum Destination {
         view: ViewSpec,
     },
     /// Named destination — resolution against `/Names /Dests` happens
-    /// later (Phase 3) or via [`PdfDocument::resolve_named_destination`]
-    /// once the consumer has the name tree.
+    /// via [`crate::PdfDocument::resolve_named_destination`] once the
+    /// consumer has the name tree.
     NamedDest(String),
 }
 

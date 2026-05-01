@@ -51,7 +51,7 @@ let doc = PdfDocument::from_bytes(&data)?;
 
 println!("Title:  {:?}", doc.metadata().title);
 println!("Pages:  {}",   doc.page_count());
-println!("Layers: {}",   doc.outline().len());
+println!("Outline items: {}", doc.outline().len());
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
@@ -319,9 +319,9 @@ for page in 0..doc.page_count() {
     for annot in doc.page_annotations(page).unwrap_or(&[]) {
         if annot.kind == AnnotationKind::Widget {
             // Match by obj_num via your own bookkeeping; the reader
-            // does not currently expose obj_num on Annotation directly
-            // — Phase 4's annotations are deduplicated against the
-            // page's /Annots array.
+            // does not currently expose obj_num on Annotation directly.
+            // Annotations are deduplicated against the page's /Annots
+            // array.
         }
     }
 }
@@ -464,7 +464,7 @@ document.pdf
 Metadata:
   Title: Annual Report 2026
   Author: Scott Bowman
-  Producer: stet 0.1.2
+  Producer: stet 0.2.0
   Created: 2026-04-27 12:00:00 UTC
 
 Pages: 4

@@ -3,7 +3,7 @@
 <p align="center">A modern, open-source PostScript and PDF rendering engine written in pure Rust.</p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-0.1.2-blue" alt="Version 0.1.2">
+  <img src="https://img.shields.io/badge/Version-0.2.0-blue" alt="Version 0.2.0">
   <img src="https://img.shields.io/badge/License-Apache--2.0_OR_MIT-green" alt="License Apache-2.0 OR MIT">
   <img src="https://img.shields.io/badge/Rust-1.85+-orange" alt="Rust 1.85+">
 </p>
@@ -34,7 +34,7 @@ This is a **capability sampler, not a production viewer**:
 - **Fixed zoom stops** (fit, 75, 150, 300, 600 DPI) rather than
   arbitrary zoom — re-rasterizing at every scroll was too slow in
   single-threaded WASM to feel responsive.
-- **Single-threaded WASM.** No rayon parallelism. Rendering is ~2× slower
+- **Single-threaded WASM.** No rayon parallelism. Rendering is ~2-4× slower
   than native stet.
 
 For production work, use the native crates documented below.
@@ -87,7 +87,7 @@ renders at different resolutions. See the
 - Parse warnings (`ParseWarning`, `ParsePhase`, `Severity`) for cycles, dropped entries, and structural truncations
 
 **PostScript Interpreter**
-- Full PostScript Level 3 with ~330 operators
+- Full PostScript Level 3 with ~376 operators
 - Type 1, CFF/Type 2, TrueType, CID, and Type 3 font rendering
 - All 7 shading types (axial, radial, Gouraud mesh, Coons/tensor patch)
 - CIE color spaces (CIEBasedABC, CIEBasedA, CIEBasedDEF, CIEBasedDEFG)
@@ -145,8 +145,15 @@ these matter more than raw rendering speed.
 
 ```toml
 [dependencies]
-stet = "0.1"
+stet = "0.2"
 ```
+
+> **Upgrading from 0.1.x?** This is a breaking release — Cargo will not
+> auto-bump `stet = "0.1"` to `0.2`. The breaking surface is the
+> `#[non_exhaustive]` markers added to ~40 public match-surface enums
+> (`DisplayElement`, `PsError`, `Destination`, the pdfmark records, …).
+> Downstream `match` sites need a `_ => { ... }` wildcard arm. See the
+> [`[0.2.0]` CHANGELOG entry](CHANGELOG.md) for the full list.
 
 ```rust
 let mut interp = stet::Interpreter::new();
@@ -242,6 +249,8 @@ let (rgba, w, h) = doc.render_page_to_rgba_with_layers(0, 150.0, &custom)?;
 ```
 
 Full layer reference: [`docs/PDF-LAYERS.md`](docs/PDF-LAYERS.md).
+Runnable example: `cargo run --example render_pdf_layers -- some.pdf`
+(see [`crates/stet/examples/render_pdf_layers.rs`](crates/stet/examples/render_pdf_layers.rs)).
 
 ### Custom Output Devices
 
@@ -286,7 +295,7 @@ For the smallest dependency footprint (display lists only):
 
 ```toml
 [dependencies]
-stet = { version = "0.1", default-features = false }
+stet = { version = "0.2", default-features = false }
 ```
 
 ### Configuration
@@ -332,7 +341,7 @@ document.pdf
 Metadata:
   Title: Annual Report 2026
   Author: Scott Bowman
-  Producer: stet 0.1.2
+  Producer: stet 0.2.0
   Created: 2026-04-27 12:00:00 UTC
 
 Pages: 4
@@ -411,7 +420,7 @@ Pass `--password <pw>` for encrypted documents.
 |-------|------|
 | `stet` | Batteries-included library API (facade) |
 | `stet-core` | Interpreter infrastructure: types, VM, tokenizer |
-| `stet-ops` | ~320 PostScript operator implementations |
+| `stet-ops` | ~376 PostScript operator implementations |
 | `stet-engine` | Execution engine (eval loop) |
 | `stet-fonts` | Font parsing: Type 1, CFF/Type 2, TrueType |
 | `stet-graphics` | Display list, color types, ICC color management |
@@ -431,7 +440,7 @@ of how these crates work together.
 
 ```bash
 cargo build                    # Build all crates
-cargo test                     # Run all tests (759 passing)
+cargo test                     # Run all tests (1052 passing)
 cargo run -- file.ps           # Run a PostScript file
 cargo run                      # Interactive REPL
 cargo clippy                   # Lint

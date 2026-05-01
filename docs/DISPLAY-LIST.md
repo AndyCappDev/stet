@@ -134,6 +134,11 @@ the rasterizer (which renders text via Fill elements with glyph outlines).
 | `transfer` | `TransferState` | Pre-sampled transfer function tables |
 | `halftone` | `HalftoneState` | Halftone screen parameters |
 | `bg_ucr` | `BgUcrState` | Black generation / undercolor removal tables |
+| `fill_opacity` | `f64` | Fill opacity (0.0–1.0, default 1.0) — PDF `CA` |
+| `stroke_opacity` | `f64` | Stroke opacity (0.0–1.0, default 1.0) — PDF `ca` |
+| `blend_mode` | `u8` | Blend mode (0 = Normal, 1 = Multiply, …, 15 = Luminosity), default 0 |
+| `alpha_is_shape` | `bool` | Alpha-is-shape (PDF `AIS`), default false |
+| `text_knockout` | `bool` | Text knockout (PDF `TK`), default true |
 
 ### Clip / InitClip
 
@@ -259,12 +264,12 @@ is the fallback used when the `LayerSet` has no explicit override for the
 relevant OCGs. Produced by the PDF reader for `/OC BDC` marked content
 blocks and XObjects with `/OC` entries.
 
-Phase 3 of the layers plan emits only `OcgVisibility::Single`. OCMDs
-(Optional Content Membership Dictionaries) are still emitted as `Single`
-with their static evaluation baked into `default_visible`; Phase 4 will
-upgrade them to `Membership` (with the parsed `/P` policy) or
-`Expression` (for `/VE` boolean expressions) so each layer in the OCMD
-becomes individually toggleable.
+All three variants are emitted: simple `/OC BDC` references produce
+`Single`, OCMDs with `/P` policies produce `Membership`, and OCMDs
+with `/VE` boolean expressions produce `Expression`. Each leaf OCG
+in `Membership` or `Expression` can be individually toggled through
+the `LayerSet`. See [`docs/PDF-LAYERS.md`](PDF-LAYERS.md) for the
+runtime visibility evaluator.
 
 The renderer's clip-op carve-out still applies: `Clip` and `InitClip`
 elements inside an `OcgGroup` always execute even when the group's

@@ -22,7 +22,7 @@ detail — it matters for prepress and proofing workflows.
 
 ```toml
 [dependencies]
-stet = "0.1"
+stet = "0.2"
 ```
 
 ### PostScript / EPS
@@ -50,7 +50,7 @@ PostScript interpreter at all, so PDF-only users don't pay for the VM:
 
 ```toml
 [dependencies]
-stet-pdf-reader = "0.1"
+stet-pdf-reader = "0.2"
 ```
 
 ```rust
@@ -172,7 +172,7 @@ To use only display lists (smallest dependency footprint):
 
 ```toml
 [dependencies]
-stet = { version = "0.1", default-features = false }
+stet = { version = "0.2", default-features = false }
 ```
 
 ## Power User: Direct Context Access
@@ -194,7 +194,7 @@ stet::ps_exec(ctx, b"/greeting (Hello, PostScript!) def greeting print")?;
 |-------|------|
 | `stet` | Batteries-included library API (this crate) |
 | `stet-core` | Interpreter infrastructure: types, VM, tokenizer |
-| `stet-ops` | ~320 PostScript operator implementations |
+| `stet-ops` | ~376 PostScript operator implementations |
 | `stet-engine` | Execution engine (eval loop) |
 | `stet-fonts` | Font parsing (Type 1, CFF, TrueType) |
 | `stet-graphics` | Display list, color types, ICC |

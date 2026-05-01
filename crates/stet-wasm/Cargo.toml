@@ -5,6 +5,9 @@ edition = "2024"
 license = "Apache-2.0 OR MIT"
 authors = ["Scott Bowman <scott@bowmans.org>"]
 description = "WebAssembly bindings for stet PostScript interpreter"
+repository = "https://github.com/AndyCappDev/stet"
+homepage = "https://github.com/AndyCappDev/stet"
+readme = "README.md"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
