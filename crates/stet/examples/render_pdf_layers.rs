@@ -38,7 +38,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let page_count = doc.page_count();
     let layer_list = doc.layers();
 
-    println!("{}: {} page(s), {} layer(s)", path, page_count, layer_list.len());
+    println!(
+        "{}: {} page(s), {} layer(s)",
+        path,
+        page_count,
+        layer_list.len()
+    );
 
     if layer_list.is_empty() {
         println!("(no Optional Content Groups in this document)");

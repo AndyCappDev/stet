@@ -7036,11 +7036,12 @@ fn content_list_is_simple_native_cmyk(list: &DisplayList) -> bool {
                 // A Group whose contents are all clip/text without paint
                 // adds no paint of its own; don't flip `found_paint` here —
                 // the recursive call already counted any inner paints.
-                if elements
-                    .elements()
-                    .iter()
-                    .any(|e| matches!(e, DisplayElement::Fill { .. } | DisplayElement::Stroke { .. }))
-                {
+                if elements.elements().iter().any(|e| {
+                    matches!(
+                        e,
+                        DisplayElement::Fill { .. } | DisplayElement::Stroke { .. }
+                    )
+                }) {
                     found_paint = true;
                 }
             }
