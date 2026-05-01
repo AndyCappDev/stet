@@ -58,6 +58,19 @@ jobs:
         # portability fix; does not block publication.
         run: cargo test --workspace
 
+      # PostScript-level test suite. Runs the entire unit_tests/*.ps corpus
+      # via the meta-runner ps_tests.ps, which writes per-file totals to
+      # `unit_tests/.test_stats.tmp`, prints "Total Errors: N" at the end,
+      # and calls `1 .quitwithcode` if any test failed. The `.quitwithcode`
+      # operator (added alongside this step) propagates the exit code to
+      # the shell so a non-zero exit fails the CI run. Linux only — the
+      # test outcomes are OS-independent and `unit_tests/` writes a temp
+      # file with a fixed relative path that the matrix's other OSes don't
+      # need to redo. Mirrors how PostForge runs its own ps_tests.ps in CI.
+      - name: PostScript unit tests (unit_tests/ps_tests.ps)
+        if: matrix.os == 'ubuntu-latest'
+        run: ./target/release/stet unit_tests/ps_tests.ps
+
   # WASM build — smoke test that the browser-facing crate still compiles.
   # stet-wasm is excluded from the default workspace, so it needs its own
   # step. No tests here — wasm-pack test would need a browser runtime.

@@ -190,6 +190,7 @@ pub fn build_system_dict(ctx: &mut Context) {
     register(ctx, sd, "stop", control_ops::op_stop);
     register(ctx, sd, "stopped", control_ops::op_stopped);
     register(ctx, sd, "quit", control_ops::op_quit);
+    register(ctx, sd, ".quitwithcode", control_ops::op_quitwithcode);
     register(ctx, sd, "countexecstack", control_ops::op_countexecstack);
     register(ctx, sd, "execstack", control_ops::op_execstack);
 

@@ -166,6 +166,12 @@ pub struct Context {
     /// Set by WASM frontend; CLI leaves false to keep DPI under user control.
     pub allow_ps_resolution: bool,
 
+    /// Process exit code requested by the running PS program via the
+    /// `.quitwithcode` operator. `None` means "use the default" (0 on
+    /// success). The CLI reads this on `PsError::Quit` and propagates
+    /// to `std::process::exit`.
+    pub exit_code: Option<i32>,
+
     // Graphics state
     pub gstate: GraphicsState,
     pub gstate_stack: Vec<crate::graphics_state::GstateEntry>,
@@ -645,6 +651,7 @@ impl Context {
             in_error_handler: false,
             initializing: true,
             allow_ps_resolution: false,
+            exit_code: None,
             gstate: GraphicsState::new(),
             gstate_stack: Vec::new(),
             gstate_store: Vec::new(),

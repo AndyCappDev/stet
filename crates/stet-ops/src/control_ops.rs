@@ -310,6 +310,26 @@ pub fn op_quit(_ctx: &mut Context) -> Result<(), PsError> {
     Err(PsError::Quit)
 }
 
+/// `.quitwithcode`: int — (terminate interpreter with shell exit code)
+///
+/// Pops an integer from the operand stack, stores it on the context as the
+/// process exit code, and signals quit. The CLI's quit handler reads
+/// `ctx.exit_code` and forwards it to `std::process::exit`. Used by
+/// `unit_tests/ps_tests.ps` to fail CI when any test fails. Mirrors
+/// PostForge's `.quitwithcode` operator.
+pub fn op_quitwithcode(ctx: &mut Context) -> Result<(), PsError> {
+    if ctx.o_stack.is_empty() {
+        return Err(PsError::StackUnderflow);
+    }
+    let code = match ctx.o_stack.peek(0)?.value {
+        PsValue::Int(n) => n,
+        _ => return Err(PsError::TypeCheck),
+    };
+    ctx.o_stack.pop()?;
+    ctx.exit_code = Some(code);
+    Err(PsError::Quit)
+}
+
 /// `countexecstack`: — → int (return exec stack depth)
 pub fn op_countexecstack(ctx: &mut Context) -> Result<(), PsError> {
     let depth = ctx.e_stack.len() as i32;

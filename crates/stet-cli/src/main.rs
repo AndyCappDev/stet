@@ -1253,6 +1253,14 @@ fn run_file_jobs(
     print_stack(ctx);
     eprintln!("\nexecution stack");
     print_exec_stack(ctx);
+
+    // Honour `.quitwithcode` — the running PS program may have requested
+    // a specific shell exit code (e.g. `unit_tests/ps_tests.ps` exits 1
+    // when any test fails). Propagate to the process now so downstream
+    // tooling and CI gates see the requested status.
+    if let Some(code) = ctx.exit_code {
+        std::process::exit(code);
+    }
 }
 
 /// Run the interactive REPL via PostScript's executive procedure.
