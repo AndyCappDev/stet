@@ -8362,7 +8362,22 @@ fn render_overprint_image(
                 cmyk_buf[ci + 1] = new_m as f32;
                 cmyk_buf[ci + 2] = new_y as f32;
                 cmyk_buf[ci + 3] = new_k as f32;
-                let (r, g, b) = if let Some(icc_cache) = icc {
+                // When the alt space is non-CMYK (e.g., DeviceN with Lab alt),
+                // src_* came from named-colorant extraction and only describes
+                // the named process plates — spot contributions are missing.
+                // For fresh-paper pixels (cur_is_zero), reconstruct the visual
+                // via the tint transform's alt → RGB output instead so the
+                // spot's true colour shows through. Composite cells (cur not
+                // zero) still go through CMYK → RGB on the plate-replaced
+                // values so process plates from the underlay are honoured.
+                let alt_is_non_cmyk = image_cs_alt_is_non_cmyk(&params.color_space);
+                let (r, g, b) = if cur_is_zero
+                    && alt_is_non_cmyk
+                    && let Some(rgb) =
+                        sample_pixel_visual_rgb(sample_data, &params.color_space, iw, row, col)
+                {
+                    rgb
+                } else if let Some(icc_cache) = icc {
                     icc_cache
                         .convert_cmyk_readonly(new_c, new_m, new_y, new_k)
                         .unwrap_or_else(|| cmyk_to_rgb_plrm(new_c, new_m, new_y, new_k))
@@ -8672,15 +8687,25 @@ fn update_cmyk_buffer_for_image(
 /// Image masks always work (they use the fill color's native CMYK).
 /// Other color spaces must be CMYK-resolvable via `sample_pixel_cmyk`.
 fn image_supports_overprint(cs: &ImageColorSpace) -> bool {
+    use stet_graphics::device::cmyk_channel_for_name;
     match cs {
         ImageColorSpace::Mask { .. } => true,
         ImageColorSpace::DeviceCMYK | ImageColorSpace::ICCBased { n: 4, .. } => true,
-        ImageColorSpace::Separation { alt_space, .. }
-        | ImageColorSpace::DeviceN { alt_space, .. } => {
+        ImageColorSpace::Separation {
+            alt_space, name, ..
+        } => {
             matches!(
                 alt_space.as_ref(),
                 ImageColorSpace::DeviceCMYK | ImageColorSpace::ICCBased { n: 4, .. }
-            )
+            ) || cmyk_channel_for_name(name) != 0
+        }
+        ImageColorSpace::DeviceN {
+            alt_space, names, ..
+        } => {
+            matches!(
+                alt_space.as_ref(),
+                ImageColorSpace::DeviceCMYK | ImageColorSpace::ICCBased { n: 4, .. }
+            ) || names.iter().any(|n| cmyk_channel_for_name(n) != 0)
         }
         ImageColorSpace::Indexed { base, .. } => image_supports_overprint(base),
         _ => false,
@@ -8697,41 +8722,191 @@ fn is_cmyk_color_space(cs: &ImageColorSpace) -> bool {
     }
 }
 
-/// True when an image's color space is a Separation/DeviceN with a CMYK
-/// alternate AND at least one non-process spot colorant.  These images
-/// represent paint that affects a virtual spot plate; the per-pixel CMYK
-/// produced by the tint transform must blend multiplicatively with the
-/// tracked CMYK buffer (rather than per-channel REPLACE) so that
-/// underlying CMYK paints survive while same-spot underlying paints are
-/// replaced by the image's "no ink" pixels.
+/// True when an image's color space is a Separation/DeviceN with at least
+/// one non-process spot colorant. These images represent paint that affects
+/// a virtual spot plate; the per-pixel CMYK produced by the tint transform
+/// (when alt is CMYK) — or extracted directly from named process colorants
+/// (when alt is non-CMYK) — must blend with the tracked CMYK buffer per
+/// OPM=1: named process plates are replaced and unnamed plates are preserved.
 fn image_cs_has_spot_tint_transform(cs: &ImageColorSpace) -> bool {
     use stet_graphics::device::cmyk_channel_for_name;
+    let is_cmyk_alt = |alt: &ImageColorSpace| {
+        matches!(
+            alt,
+            ImageColorSpace::DeviceCMYK | ImageColorSpace::ICCBased { n: 4, .. }
+        )
+    };
     match cs {
         ImageColorSpace::Separation {
             name, alt_space, ..
-        } => {
-            cmyk_channel_for_name(name) == 0
-                && matches!(
-                    alt_space.as_ref(),
-                    ImageColorSpace::DeviceCMYK | ImageColorSpace::ICCBased { n: 4, .. }
-                )
-        }
+        } => cmyk_channel_for_name(name) == 0 && is_cmyk_alt(alt_space.as_ref()),
         ImageColorSpace::DeviceN {
             names, alt_space, ..
         } => {
-            matches!(
-                alt_space.as_ref(),
-                ImageColorSpace::DeviceCMYK | ImageColorSpace::ICCBased { n: 4, .. }
-            ) && names.iter().any(|n| cmyk_channel_for_name(n) == 0)
+            let has_spot = names.iter().any(|n| cmyk_channel_for_name(n) == 0);
+            let has_process = names.iter().any(|n| cmyk_channel_for_name(n) != 0);
+            has_spot && (is_cmyk_alt(alt_space.as_ref()) || has_process)
         }
         ImageColorSpace::Indexed { base, .. } => image_cs_has_spot_tint_transform(base),
         _ => false,
     }
 }
 
+/// True when the image's tint transform alt is non-CMYK (Lab/RGB/Gray/etc.).
+/// In that case the per-pixel CMYK from `sample_pixel_cmyk` only carries the
+/// named process colorants extracted directly — it doesn't capture spot
+/// colorant contributions, so visual painting (when the buffer is fresh)
+/// must come from `sample_pixel_visual_rgb` instead of CMYK→RGB conversion.
+fn image_cs_alt_is_non_cmyk(cs: &ImageColorSpace) -> bool {
+    let is_cmyk_alt = |alt: &ImageColorSpace| {
+        matches!(
+            alt,
+            ImageColorSpace::DeviceCMYK | ImageColorSpace::ICCBased { n: 4, .. }
+        )
+    };
+    match cs {
+        ImageColorSpace::Separation { alt_space, .. }
+        | ImageColorSpace::DeviceN { alt_space, .. } => !is_cmyk_alt(alt_space.as_ref()),
+        ImageColorSpace::Indexed { base, .. } => image_cs_alt_is_non_cmyk(base),
+        _ => false,
+    }
+}
+
+/// Sample a pixel's visual RGB (0..1) via the tint-transform → alt-space →
+/// RGB chain. Used by the spot-tint overprint path when the image's alt is
+/// non-CMYK; for those images the named-colorant CMYK extraction loses the
+/// spot contribution, but the tint table still produces the correct visual.
+fn sample_pixel_visual_rgb(
+    sample_data: &[u8],
+    cs: &ImageColorSpace,
+    iw: usize,
+    row: usize,
+    col: usize,
+) -> Option<(f64, f64, f64)> {
+    let to_f64 = |(r, g, b): (u8, u8, u8)| (r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0);
+    match cs {
+        ImageColorSpace::Separation {
+            alt_space,
+            tint_table,
+            ..
+        } => {
+            let si = row * iw + col;
+            if si >= sample_data.len() {
+                return None;
+            }
+            let tint = sample_data[si] as f32 / 255.0;
+            let no = tint_table.num_outputs as usize;
+            let mut comps = vec![0.0f32; no];
+            tint_table.lookup_1d(tint, &mut comps);
+            Some(to_f64(alt_comps_to_rgb(&comps, alt_space)))
+        }
+        ImageColorSpace::DeviceN {
+            alt_space,
+            tint_table,
+            ..
+        } => {
+            let ni = tint_table.num_inputs as usize;
+            let si = (row * iw + col) * ni;
+            if si + ni > sample_data.len() {
+                return None;
+            }
+            let mut inputs = vec![0.0f32; ni];
+            for (c, inp) in inputs.iter_mut().enumerate() {
+                *inp = sample_data[si + c] as f32 / 255.0;
+            }
+            let no = tint_table.num_outputs as usize;
+            let mut comps = vec![0.0f32; no];
+            tint_table.lookup_nd(&inputs, &mut comps);
+            Some(to_f64(alt_comps_to_rgb(&comps, alt_space)))
+        }
+        ImageColorSpace::Indexed {
+            base,
+            hival,
+            lookup,
+        } => {
+            let pi = row * iw + col;
+            if pi >= sample_data.len() {
+                return None;
+            }
+            let idx = (sample_data[pi] as usize).min(*hival as usize);
+            let base_ncomp = base.num_components() as usize;
+            let li = idx * base_ncomp;
+            if li + base_ncomp > lookup.len() {
+                return None;
+            }
+            match base.as_ref() {
+                ImageColorSpace::Separation {
+                    alt_space,
+                    tint_table,
+                    ..
+                } => {
+                    let tint = lookup[li] as f32 / 255.0;
+                    let no = tint_table.num_outputs as usize;
+                    let mut comps = vec![0.0f32; no];
+                    tint_table.lookup_1d(tint, &mut comps);
+                    Some(to_f64(alt_comps_to_rgb(&comps, alt_space)))
+                }
+                ImageColorSpace::DeviceN {
+                    alt_space,
+                    tint_table,
+                    ..
+                } => {
+                    let ni = tint_table.num_inputs as usize;
+                    let mut inputs = vec![0.0f32; ni];
+                    for (c, inp) in inputs.iter_mut().enumerate() {
+                        if c < base_ncomp {
+                            *inp = lookup[li + c] as f32 / 255.0;
+                        }
+                    }
+                    let no = tint_table.num_outputs as usize;
+                    let mut comps = vec![0.0f32; no];
+                    tint_table.lookup_nd(&inputs, &mut comps);
+                    Some(to_f64(alt_comps_to_rgb(&comps, alt_space)))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Extract CMYK values from DeviceN colorant inputs by mapping each named
+/// process colorant directly to its CMYK channel. Spot colorants and `/None`
+/// don't contribute. Used when the DeviceN's alt is non-CMYK so the tint
+/// transform can't produce CMYK; the named-colorant inputs are themselves the
+/// per-pixel ink amounts for the named process plates.
+fn devicen_named_cmyk(names: &[Vec<u8>], inputs: &[u8]) -> (f64, f64, f64, f64) {
+    use stet_graphics::device::{CMYK_C, CMYK_K, CMYK_M, CMYK_Y, cmyk_channel_for_name};
+    let mut c = 0.0;
+    let mut m = 0.0;
+    let mut y = 0.0;
+    let mut k = 0.0;
+    for (i, name) in names.iter().enumerate() {
+        let bit = cmyk_channel_for_name(name);
+        if bit == 0 {
+            continue;
+        }
+        let v = inputs.get(i).copied().unwrap_or(0) as f64 / 255.0;
+        if bit & CMYK_C != 0 {
+            c = v;
+        }
+        if bit & CMYK_M != 0 {
+            m = v;
+        }
+        if bit & CMYK_Y != 0 {
+            y = v;
+        }
+        if bit & CMYK_K != 0 {
+            k = v;
+        }
+    }
+    (c, m, y, k)
+}
+
 /// Sample a single pixel's CMYK values from image data, handling DeviceCMYK,
-/// ICCBased(4), Separation/DeviceN with CMYK alt, and Indexed color spaces.
-/// Returns None for non-CMYK images.
+/// ICCBased(4), Separation/DeviceN (CMYK alt via tint table, or non-CMYK alt
+/// via named-colorant extraction), and Indexed color spaces. Returns None for
+/// non-CMYK images.
 fn sample_pixel_cmyk(
     sample_data: &[u8],
     cs: &ImageColorSpace,
@@ -8739,6 +8914,13 @@ fn sample_pixel_cmyk(
     row: usize,
     col: usize,
 ) -> Option<(f64, f64, f64, f64)> {
+    use stet_graphics::device::cmyk_channel_for_name;
+    let is_cmyk_alt = |alt: &ImageColorSpace| {
+        matches!(
+            alt,
+            ImageColorSpace::DeviceCMYK | ImageColorSpace::ICCBased { n: 4, .. }
+        )
+    };
     match cs {
         ImageColorSpace::DeviceCMYK | ImageColorSpace::ICCBased { n: 4, .. } => {
             let si = (row * iw + col) * 4;
@@ -8756,46 +8938,51 @@ fn sample_pixel_cmyk(
         ImageColorSpace::Separation {
             alt_space,
             tint_table,
-            ..
+            name,
         } => {
-            if !matches!(
-                alt_space.as_ref(),
-                ImageColorSpace::DeviceCMYK | ImageColorSpace::ICCBased { n: 4, .. }
-            ) {
-                return None;
-            }
             let si = row * iw + col;
             if si >= sample_data.len() {
                 return None;
             }
             let tint = sample_data[si] as f32 / 255.0;
-            let mut alt = [0.0f32; 4];
-            tint_table.lookup_1d(tint, &mut alt);
-            Some((alt[0] as f64, alt[1] as f64, alt[2] as f64, alt[3] as f64))
+            if is_cmyk_alt(alt_space.as_ref()) {
+                let mut alt = [0.0f32; 4];
+                tint_table.lookup_1d(tint, &mut alt);
+                return Some((alt[0] as f64, alt[1] as f64, alt[2] as f64, alt[3] as f64));
+            }
+            // Non-CMYK alt: only a named process colorant is recoverable.
+            let bit = cmyk_channel_for_name(name);
+            if bit == 0 {
+                return None;
+            }
+            let names = vec![name.clone()];
+            let inputs = [(tint * 255.0).round() as u8];
+            Some(devicen_named_cmyk(&names, &inputs))
         }
         ImageColorSpace::DeviceN {
             alt_space,
             tint_table,
-            ..
+            names,
         } => {
-            if !matches!(
-                alt_space.as_ref(),
-                ImageColorSpace::DeviceCMYK | ImageColorSpace::ICCBased { n: 4, .. }
-            ) {
-                return None;
-            }
             let ni = tint_table.num_inputs as usize;
             let si = (row * iw + col) * ni;
             if si + ni > sample_data.len() {
                 return None;
             }
-            let mut inputs = vec![0.0f32; ni];
-            for (c, inp) in inputs.iter_mut().enumerate() {
-                *inp = sample_data[si + c] as f32 / 255.0;
+            if is_cmyk_alt(alt_space.as_ref()) {
+                let mut inputs = vec![0.0f32; ni];
+                for (c, inp) in inputs.iter_mut().enumerate() {
+                    *inp = sample_data[si + c] as f32 / 255.0;
+                }
+                let mut alt = [0.0f32; 4];
+                tint_table.lookup_nd(&inputs, &mut alt);
+                return Some((alt[0] as f64, alt[1] as f64, alt[2] as f64, alt[3] as f64));
             }
-            let mut alt = [0.0f32; 4];
-            tint_table.lookup_nd(&inputs, &mut alt);
-            Some((alt[0] as f64, alt[1] as f64, alt[2] as f64, alt[3] as f64))
+            // Non-CMYK alt: extract from named process colorants directly.
+            if !names.iter().any(|n| cmyk_channel_for_name(n) != 0) {
+                return None;
+            }
+            Some(devicen_named_cmyk(names, &sample_data[si..si + ni]))
         }
         ImageColorSpace::Indexed {
             base,
@@ -8825,36 +9012,56 @@ fn sample_pixel_cmyk(
                     ImageColorSpace::Separation {
                         alt_space,
                         tint_table,
-                        ..
-                    } if matches!(
-                        alt_space.as_ref(),
-                        ImageColorSpace::DeviceCMYK | ImageColorSpace::ICCBased { n: 4, .. }
-                    ) =>
-                    {
+                        name,
+                    } => {
                         let tint = lookup[li] as f32 / 255.0;
-                        let mut alt = [0.0f32; 4];
-                        tint_table.lookup_1d(tint, &mut alt);
-                        return Some((alt[0] as f64, alt[1] as f64, alt[2] as f64, alt[3] as f64));
+                        if is_cmyk_alt(alt_space.as_ref()) {
+                            let mut alt = [0.0f32; 4];
+                            tint_table.lookup_1d(tint, &mut alt);
+                            return Some((
+                                alt[0] as f64,
+                                alt[1] as f64,
+                                alt[2] as f64,
+                                alt[3] as f64,
+                            ));
+                        }
+                        // Non-CMYK alt: only named process colorants extractable.
+                        let bit = cmyk_channel_for_name(name);
+                        if bit == 0 {
+                            return None;
+                        }
+                        let names = vec![name.clone()];
+                        let inputs = [(tint * 255.0).round() as u8];
+                        return Some(devicen_named_cmyk(&names, &inputs));
                     }
                     ImageColorSpace::DeviceN {
                         alt_space,
                         tint_table,
-                        ..
-                    } if matches!(
-                        alt_space.as_ref(),
-                        ImageColorSpace::DeviceCMYK | ImageColorSpace::ICCBased { n: 4, .. }
-                    ) =>
-                    {
+                        names,
+                    } => {
                         let ni = tint_table.num_inputs as usize;
-                        let mut inputs = vec![0.0f32; ni];
-                        for (c, inp) in inputs.iter_mut().enumerate() {
-                            if c < base_ncomp {
-                                *inp = lookup[li + c] as f32 / 255.0;
+                        if is_cmyk_alt(alt_space.as_ref()) {
+                            let mut inputs = vec![0.0f32; ni];
+                            for (c, inp) in inputs.iter_mut().enumerate() {
+                                if c < base_ncomp {
+                                    *inp = lookup[li + c] as f32 / 255.0;
+                                }
                             }
+                            let mut alt = [0.0f32; 4];
+                            tint_table.lookup_nd(&inputs, &mut alt);
+                            return Some((
+                                alt[0] as f64,
+                                alt[1] as f64,
+                                alt[2] as f64,
+                                alt[3] as f64,
+                            ));
                         }
-                        let mut alt = [0.0f32; 4];
-                        tint_table.lookup_nd(&inputs, &mut alt);
-                        return Some((alt[0] as f64, alt[1] as f64, alt[2] as f64, alt[3] as f64));
+                        // Non-CMYK alt: extract from named process colorants directly.
+                        if !names.iter().any(|n| cmyk_channel_for_name(n) != 0) {
+                            return None;
+                        }
+                        let take = ni.min(base_ncomp);
+                        return Some(devicen_named_cmyk(names, &lookup[li..li + take]));
                     }
                     _ => {}
                 }
