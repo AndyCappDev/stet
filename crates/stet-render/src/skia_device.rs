@@ -7170,19 +7170,39 @@ fn render_overprint_fill(
         Some(ClipRegion::Mask(clip_mask)) => Some(clip_mask.data()),
     };
 
-    let (src_c, src_m, src_y, src_k) = params.color.native_cmyk.unwrap_or_else(|| {
-        let r = params.color.r;
-        let g = params.color.g;
-        let b = params.color.b;
-        (1.0 - r, 1.0 - g, 1.0 - b, 0.0)
-    });
-
     // Custom spot paints (Separation/DeviceN whose named colorants don't include
     // any process channel) go to a separation plate, not CMYK. In the composite
     // preview we layer the spot's alt-CMYK onto the pixmap via multiplicative
     // ink stacking and leave the cmyk_buffer untouched — otherwise a later OPM 1
     // overprint would see the spot's alt-CMYK as "backdrop" and knock it out.
     let is_custom_spot = params.painted_channels == 0 && !params.is_device_cmyk;
+
+    // Source CMYK preference: for paints with a process colorant in the mix
+    // (Separation /Black, DeviceN [Black, …]), prefer `process_cmyk` — it
+    // carries the named-colorant tint at full f64 precision (e.g. `(0, 0, 0,
+    // 0.5)` for 50% /Black), matching what `update_cmyk_buffer_for_fill` writes
+    // into the process buffer. Without this, the X paint reads native (e.g.
+    // 0.502 from an 8-bit-quantized sampled Function) while the BG wrote
+    // process (0.500), the per-pixel delta clears the 1e-4 no-op skip
+    // threshold, and the X over-paints the spot backdrop with plain ICC-grey
+    // (GWG 3.0 swatches c/i, "50% sep. black over spot").
+    //
+    // Custom spots (no process colorant) keep reading `native_cmyk` — that's
+    // the spot's visual alt-CMYK representation, while `process_cmyk` is
+    // `(0, 0, 0, 0)` for pure spots (the process buffer should not record
+    // their tint). Falling back to native here keeps spot-coloured text
+    // visible (1307.pdf "Business of the Meeting" in PANTONE 7427 C).
+    let (src_c, src_m, src_y, src_k) = if !is_custom_spot && let Some(c) = params.color.process_cmyk
+    {
+        c
+    } else if let Some(c) = params.color.native_cmyk {
+        c
+    } else {
+        let r = params.color.r;
+        let g = params.color.g;
+        let b = params.color.b;
+        (1.0 - r, 1.0 - g, 1.0 - b, 0.0)
+    };
 
     let mut channels = params.painted_channels;
     // Non-CMYK fills (painted_channels=0, e.g. Separation spot colors, RGB, Gray)
@@ -7776,17 +7796,28 @@ fn render_overprint_stroke(
         Some(ClipRegion::Mask(clip_mask)) => Some(clip_mask.data()),
     };
 
-    let (src_c, src_m, src_y, src_k) = params.color.native_cmyk.unwrap_or_else(|| {
-        let r = params.color.r;
-        let g = params.color.g;
-        let b = params.color.b;
-        (1.0 - r, 1.0 - g, 1.0 - b, 0.0)
-    });
-
     // See render_overprint_fill for the rationale: a custom spot stroke must
     // preserve the process CMYK buffer and blend multiplicatively in RGB so
     // later OPM 1 overprints don't knock out the spot's visible colour.
     let is_custom_spot = params.painted_channels == 0 && !params.is_device_cmyk;
+
+    // Source CMYK preference: for paints with a process colorant in the mix,
+    // prefer `process_cmyk` so the no-op-delta skip in the per-pixel loop sees
+    // the same exact value the BG paint wrote into `cmyk_buf`. Custom spots
+    // keep reading `native_cmyk` (the spot's visual alt-CMYK; process_cmyk is
+    // (0,0,0,0) for pure spots). See `render_overprint_fill` for the full
+    // rationale (GWG 3.0 swatches c/i, 1307.pdf spot text).
+    let (src_c, src_m, src_y, src_k) = if !is_custom_spot && let Some(c) = params.color.process_cmyk
+    {
+        c
+    } else if let Some(c) = params.color.native_cmyk {
+        c
+    } else {
+        let r = params.color.r;
+        let g = params.color.g;
+        let b = params.color.b;
+        (1.0 - r, 1.0 - g, 1.0 - b, 0.0)
+    };
 
     let mut channels = params.painted_channels;
     if channels == 0 {
