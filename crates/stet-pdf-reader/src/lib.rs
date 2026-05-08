@@ -508,18 +508,28 @@ impl<'a> PdfDocument<'a> {
         // Check if the page has a DeviceCMYK transparency group — if so,
         // RGB colors need round-tripping through CMYK to match compositing
         // in CMYK space (mutes saturated out-of-gamut RGB colors).
-        let page_group_is_cmyk = if let Ok(page_obj) = self.resolver.resolve(info.obj_num, 0)
+        //
+        // PDF/X-4 files often omit an explicit page /Group but declare a
+        // CMYK destination via /OutputIntents. Treat those as having an
+        // implicit DeviceCMYK group so DeviceGray content (e.g. JBIG2
+        // images marked /ColorSpace /DeviceGray) is K-only-promoted to
+        // match DeviceCMYK [0,0,0,K] fills painted alongside it
+        // (GWG 17.3 JBIG2 compression test).
+        let explicit_cmyk_group = if let Ok(page_obj) = self.resolver.resolve(info.obj_num, 0)
             && let Some(page_dict) = page_obj.as_dict()
             && let Some(group_obj) = page_dict.get(b"Group")
             && let Ok(group_resolved) = self.resolver.deref(group_obj)
             && let Some(group_dict) = group_resolved.as_dict()
             && group_dict.get_name(b"CS") == Some(b"DeviceCMYK")
         {
-            interpreter.set_page_group_cmyk();
             true
         } else {
             false
         };
+        let page_group_is_cmyk = explicit_cmyk_group || self.output_intent_icc.is_some();
+        if page_group_is_cmyk {
+            interpreter.set_page_group_cmyk();
+        }
 
         // Render page content
         if let Err(e) = interpreter.interpret_stream_public(&content_data) {
