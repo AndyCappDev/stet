@@ -7210,14 +7210,14 @@ fn render_overprint_fill(
         }
         // PDF 1.7 §7.6.4.5: OPM 1 with /op true preserves zero-source
         // components — leave `channels = 0` for an all-zero CMYK source only
-        // when /OPM and /op (or /OP) were set together in the same ExtGState
-        // dict, signaling the author deliberately enabled strict-spec
-        // semantics (as Adobe Illustrator emits). When the current /op was
-        // set standalone and OPM was merely inherited, fall back to legacy
-        // knockout so `0 0 0 0 k` still paints white. Matches Adobe Acrobat
-        // behavior: GWG 4.0.1 swatches g/j (paired /OPM+/op in /GS0,/GS3)
-        // preserve the backdrop; pdf_samples/2495.pdf page 5 icon (only /op
-        // on /R20, OPM inherited from /R11) performs the expected knockout.
+        // when the gstate signals "strict overprint": /OPM and /op|/OP were
+        // set together in the same ExtGState dict (as Adobe Illustrator
+        // emits) OR /OP and /op were paired in one dict (legacy old-style
+        // overprint, e.g. GWG 12.0 White Overprint where /GS6 sets both).
+        // When the current /op was set standalone and OPM was merely
+        // inherited (e.g. 2495.pdf page 5 page-icon, where /R20 has only
+        // /op and OPM=1 came from /R11), fall back to legacy knockout so
+        // a `0 0 0 0 k` paint still acts as a white knockout.
         if channels == 0 && !params.opm_paired {
             channels = stet_graphics::device::CMYK_ALL;
         }
@@ -7810,8 +7810,9 @@ fn render_overprint_stroke(
             channels |= stet_graphics::device::CMYK_K;
         }
         // See render_overprint_fill: an all-zero CMYK source preserves the
-        // backdrop only when /OPM and /op|/OP were set together in the same
-        // ExtGState. Inherited-OPM cases fall back to legacy knockout.
+        // backdrop only when /OPM and /op|/OP were set together (paired) in
+        // the same ExtGState. Inherited-OPM cases fall back to legacy
+        // knockout.
         if channels == 0 && !params.opm_paired {
             channels = stet_graphics::device::CMYK_ALL;
         }

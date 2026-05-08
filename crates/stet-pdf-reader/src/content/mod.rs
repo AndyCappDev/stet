@@ -5549,15 +5549,22 @@ impl<'a> ContentInterpreter<'a> {
                 self.gstate.overprint = *op;
             }
         }
-        // Track whether /OPM and /op|/OP were set together in this dict. The
-        // strict OPM-1 "preserve zero-source components" behavior only applies
-        // when both are set together (as Adobe Illustrator emits them). An
-        // inherited OPM=1 paired with a standalone /op true — common in
-        // real-world PDFs where /op is toggled without re-asserting /OPM —
-        // falls back to legacy "zero = knockout" semantics, so a `0 0 0 0 k`
-        // fill still acts as a white knockout. Matches Adobe Acrobat behavior
-        // on files like pdf_samples/2495.pdf page 5 (white icon arrow).
-        if has_opm && has_op_flag {
+        // Track whether the current ExtGState signals "strict overprint",
+        // meaning the strict OPM-1 "zero-source preserves backdrop" rule
+        // applies. Two patterns count as a strict signal:
+        //   1. /OPM together with /op|/OP in the same dict (Adobe Illustrator
+        //      asserts both when emitting overprint).
+        //   2. /OP and /op together in the same dict — legacy "old-style"
+        //      overprint that drove both stroke and fill, used by GWG 12.0
+        //      White Overprint where /GS6 sets `/OP true /op true`.
+        // An /op set in isolation, with OPM merely inherited (e.g. 2495.pdf
+        // page 5 page-icon: /R11 sets /OPM 1, /R20 sets only /op), falls
+        // back to legacy "zero = knockout" semantics so `0 0 0 0 k` paints
+        // still act as a white knockout.
+        let has_op_upper = gs_dict.get(b"OP").is_some();
+        let has_op_lower = gs_dict.get(b"op").is_some();
+        let strict_signal = (has_opm && has_op_flag) || (has_op_upper && has_op_lower);
+        if strict_signal {
             self.gstate.opm_paired = true;
         } else if has_opm || has_op_flag {
             self.gstate.opm_paired = false;
