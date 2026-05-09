@@ -3803,10 +3803,21 @@ fn render_group(
             // isolation"; non-proofing documents (907 p28 et al.) keep
             // the original `parent_group_isolated` requirement.
             let proofing_enabled = ctx.icc.is_some_and(|c| c.proofing_enabled());
+            // Per PDF 1.7 §11.6.6, a transparency group with no `/CS` inherits
+            // its color space from the enclosing group. When the parent has
+            // already allocated a CMYK buffer (the only way `cmyk_buffer` is
+            // `Some` on this band_state when we enter `render_group`), the
+            // parent's effective compositing space is DeviceCMYK and an
+            // `Inherited` child should join it. Without this, GWG 16.4 swatch
+            // groups (no `/CS`) fell back to sRGB blending and the Multiply /
+            // Color Burn blends produced visible X markers.
+            let effective_cs_is_cmyk = params.color_space == GroupColorSpace::DeviceCMYK
+                || (params.color_space == GroupColorSpace::Inherited
+                    && band_state.cmyk_buffer.is_some());
             let cmyk_group_blend = !params.isolated
                 && (ctx.parent_group_isolated || proofing_enabled)
                 && params.blend_mode != 0
-                && params.color_space == GroupColorSpace::DeviceCMYK
+                && effective_cs_is_cmyk
                 && needs_group_cmyk
                 && band_state.cmyk_buffer.is_some()
                 && group_content_is_native_cmyk(elements);
