@@ -2688,8 +2688,18 @@ fn render_element(
             let painted = params.painted_channels;
             let subset_channels = painted != 0 && painted != stet_graphics::device::CMYK_ALL;
             let opm1_cmyk = params.is_device_cmyk && params.overprint_mode == 1;
-            let custom_spot =
-                painted == 0 && !params.is_device_cmyk && params.color.native_cmyk.is_some();
+            // Real Separation/DeviceN custom spots set `process_cmyk` (even pure
+            // spots set it to `(0, 0, 0, 0)`); ICCBased RGB routed through the
+            // proofing chain has `native_cmyk` populated but leaves
+            // `process_cmyk == None`. Per PDF 1.7 §11.7.4.5 a non-process source
+            // colour space (CalGray/CalRGB/Lab/ICCBased) must paint as if /OP
+            // were false — gating on `process_cmyk.is_some()` keeps ICCBased RGB
+            // out of the overprint path so GWG 13.3 (ICC RGB X over CMYK BG)
+            // knocks out instead of preserving the backdrop's CMYK plates.
+            let custom_spot = painted == 0
+                && !params.is_device_cmyk
+                && params.color.native_cmyk.is_some()
+                && params.color.process_cmyk.is_some();
             // A "near-K-only" DeviceCMYK paint under OPM 0 — e.g. `0 0 0 0.5 k`
             // — matches the Black-component plate of a DeviceN [Black, spot]
             // backdrop exactly. Routing it through the per-pixel path lets the
@@ -2833,8 +2843,14 @@ fn render_element(
             let painted = params.painted_channels;
             let subset_channels = painted != 0 && painted != stet_graphics::device::CMYK_ALL;
             let opm1_cmyk = params.is_device_cmyk && params.overprint_mode == 1;
-            let custom_spot =
-                painted == 0 && !params.is_device_cmyk && params.color.native_cmyk.is_some();
+            // Mirror the Fill custom-spot gate: ICCBased RGB (proofing-chain
+            // `native_cmyk`, no `process_cmyk`) must not reach the overprint
+            // path. PDF 1.7 §11.7.4.5: non-process source spaces paint as if
+            // /OP were false.
+            let custom_spot = painted == 0
+                && !params.is_device_cmyk
+                && params.color.native_cmyk.is_some()
+                && params.color.process_cmyk.is_some();
             let is_k_only_cmyk =
                 params.is_device_cmyk && params.overprint_mode == 0 && is_k_only_src(&params.color);
             let needs_overprint = params.overprint
