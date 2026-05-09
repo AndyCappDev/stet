@@ -530,6 +530,19 @@ impl<'a> PdfDocument<'a> {
         if page_group_is_cmyk {
             interpreter.set_page_group_cmyk();
         }
+        // Stricter PDF/X compositing rules (DeviceGray-to-K promotion) only
+        // apply when the document declares an output intent — those documents
+        // opt into the output profile's paper white. Plain `/Group /CS
+        // /DeviceCMYK` without an output intent (e.g. 3000_5.pdf, 2495.pdf)
+        // is just a DeviceCMYK transparency group and must keep DeviceGray
+        // rendering at exact RGB(g, g, g) so a `0.5 g` paint stays the
+        // expected mid-gray instead of picking up the system profile's paper
+        // white. The complementary `in_smask_form` guard inside the
+        // interpreter handles the SMask-source exception that PDF/X documents
+        // need (parse-time suppression mirroring `suspend_default_cmyk`).
+        if self.output_intent_icc.is_some() {
+            interpreter.set_pdfx_cmyk_intent();
+        }
 
         // Render page content
         if let Err(e) = interpreter.interpret_stream_public(&content_data) {

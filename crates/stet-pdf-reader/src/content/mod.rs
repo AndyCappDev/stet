@@ -35,6 +35,7 @@ use stet_fonts::geometry::{Matrix, PathSegment, PsPath};
 use stet_graphics::color::{DashPattern, DeviceColor, FillRule, LineCap, LineJoin};
 use stet_graphics::device::{
     ClipParams, FillParams, ImageColorSpace, ImageParams, PatternFillParams, StrokeParams,
+    TintLookupTable,
 };
 use stet_graphics::display_list::{
     DisplayElement, DisplayList, GroupParams, OcgVisibility, SoftMaskParams, SoftMaskSubtype,
@@ -184,6 +185,35 @@ pub struct ContentInterpreter<'a> {
     /// When true, DeviceRGB colors are round-tripped through the system CMYK
     /// profile (RGB→CMYK→RGB) to match compositing in a DeviceCMYK page group.
     page_group_is_cmyk: bool,
+    /// True only when the document declares a PDF/X-style CMYK output intent
+    /// (`/OutputIntents` with a CMYK profile). Required (along with
+    /// `page_group_is_cmyk`) for the DeviceGray-to-K-only promotion to fire.
+    ///
+    /// Plain `/Group /CS /DeviceCMYK` without an output intent (e.g.
+    /// `pdf_samples/3000_5.pdf`, `pdf_samples/2495.pdf`) signals only that
+    /// compositing happens in CMYK space — it does NOT opt the document into
+    /// the system CMYK profile's paper white, so a `0.5 g` paint must still
+    /// render at exact RGB(128, 128, 128). Documents that DO declare a CMYK
+    /// output intent (PDF/X) accept the profile's paper white as their own
+    /// and expect DeviceGray to map onto the K plate (GWG 23.0). The narrower
+    /// gate matches the existing `cmyk_group_rgb` round-trip's expectation:
+    /// that helper takes RGB and rounds it through CMYK→RGB (range-preserving
+    /// on a non-PDF/X CMYK group), while this gate switches the source space
+    /// from DeviceGray to DeviceCMYK — only correct when the document opts in.
+    pdfx_cmyk_intent: bool,
+    /// True while parsing an SMask source form's content stream. The
+    /// DeviceGray-to-K-only promotion (`gray_paint_for_gstate`,
+    /// `cmyk_group_promote_image`, `cmyk_group_promote_color`) must be
+    /// suppressed in this context: image color conversion happens at render
+    /// time, after the parse-time `suspend_default_cmyk` has been restored,
+    /// so a promoted CMYK-K image emitted from an SMask source would later
+    /// hit the ICC pipeline and shift the SMask's luminosity (g=255 → CMYK
+    /// 0/0/0/0 → ICC RGB ≈ (241,241,241) → alpha ≈ 0.94 instead of 1.0,
+    /// regressed `pdf_samples/2495.pdf`'s right-side images). Mirrors the
+    /// existing `IccCache::suspend_default_cmyk` precedent at the layer where
+    /// the promotion happens — needed even within PDF/X documents (the gate
+    /// above doesn't help there; only the SMask context guard does).
+    in_smask_form: bool,
     /// When false, PDF overprint flags (OP/op) in graphics state dicts are
     /// suppressed — the gstate overprint fields stay false regardless of PDF content.
     overprint_enabled: bool,
@@ -247,6 +277,8 @@ impl<'a> ContentInterpreter<'a> {
             font_provider,
             text_clip_path: None,
             page_group_is_cmyk: false,
+            pdfx_cmyk_intent: false,
+            in_smask_form: false,
             overprint_enabled,
             pattern_cache: std::collections::HashMap::new(),
             ocg_off: ocg_off.clone(),
@@ -263,6 +295,13 @@ impl<'a> ContentInterpreter<'a> {
     /// to match compositing in CMYK space (produces more muted, accurate colors).
     pub fn set_page_group_cmyk(&mut self) {
         self.page_group_is_cmyk = true;
+    }
+
+    /// Mark this document as declaring a PDF/X-style CMYK output intent. Opts
+    /// the document into the DeviceGray-to-K-only promotion required by GWG
+    /// 23.0. Plain `/Group /CS /DeviceCMYK` pages should not call this.
+    pub fn set_pdfx_cmyk_intent(&mut self) {
+        self.pdfx_cmyk_intent = true;
     }
 
     /// Look up a sub-dictionary in the resources, resolving indirect references.
@@ -2086,10 +2125,11 @@ impl<'a> ContentInterpreter<'a> {
     fn op_big_g(&mut self) -> Result<(), PdfError> {
         // G gray: set stroke color to gray
         let g = self.pop_number()?;
-        self.gstate.stroke_color = DeviceColor::from_gray(g);
+        let (color, painted, is_cmyk) = self.gray_paint_for_gstate(g);
+        self.gstate.stroke_color = color;
         self.gstate.stroke_color_space = ColorSpaceRef::DeviceGray;
-        self.gstate.stroke_painted_channels = 0;
-        self.gstate.stroke_is_device_cmyk = false;
+        self.gstate.stroke_painted_channels = painted;
+        self.gstate.stroke_is_device_cmyk = is_cmyk;
         self.gstate.stroke_is_none = false;
         self.gstate.stroke_pattern = None;
         self.gstate.stroke_shading_pattern = None;
@@ -2099,14 +2139,33 @@ impl<'a> ContentInterpreter<'a> {
     fn op_small_g(&mut self) -> Result<(), PdfError> {
         // g gray: set fill color to gray
         let g = self.pop_number()?;
-        self.gstate.fill_color = DeviceColor::from_gray(g);
+        let (color, painted, is_cmyk) = self.gray_paint_for_gstate(g);
+        self.gstate.fill_color = color;
         self.gstate.fill_color_space = ColorSpaceRef::DeviceGray;
-        self.gstate.fill_painted_channels = 0;
-        self.gstate.fill_is_device_cmyk = false;
+        self.gstate.fill_painted_channels = painted;
+        self.gstate.fill_is_device_cmyk = is_cmyk;
         self.gstate.fill_is_none = false;
         self.gstate.fill_pattern = None;
         self.gstate.fill_shading_pattern = None;
         Ok(())
+    }
+
+    /// Build the gstate fields for a DeviceGray paint. In a CMYK page group
+    /// the gray is promoted to a K-only DeviceCMYK paint so the rendering
+    /// pipeline composites it identically to `0 0 0 (1−g) k` — matches PDF/X
+    /// semantics where DeviceGray maps onto the K plate (GWG 23.0). The
+    /// promoted paint still carries `painted_channels = CMYK_K` so the
+    /// overprint dispatcher routes it through the K-only subset path,
+    /// preserving the overprint-vs-spot behaviour the standalone gray
+    /// promotion (GWG 3.0 b/h) needs.
+    fn gray_paint_for_gstate(&mut self, g: f64) -> (DeviceColor, u8, bool) {
+        if self.pdfx_cmyk_intent && !self.in_smask_form {
+            let k = (1.0 - g).clamp(0.0, 1.0);
+            let color = DeviceColor::from_cmyk_icc(0.0, 0.0, 0.0, k, &mut self.icc_cache);
+            (color, stet_graphics::device::CMYK_K, true)
+        } else {
+            (DeviceColor::from_gray(g), 0, false)
+        }
     }
 
     fn op_big_rg(&mut self) -> Result<(), PdfError> {
@@ -2146,6 +2205,165 @@ impl<'a> ContentInterpreter<'a> {
             }
         }
         (r, g, b)
+    }
+
+    /// When the page group is DeviceCMYK, route a DeviceGray-derived image
+    /// (DeviceGray itself, or Separation/DeviceN whose alt is DeviceGray)
+    /// through the K plate so it composites equivalently to a DeviceCMYK
+    /// 0/0/0/(1−g) image. Without this, GWG 23.0's "4 different Grays" test
+    /// shows the right half of an X over its DeviceCMYK BG (left half comes
+    /// from the polygon overpaint, fixed by `cmyk_group_promote_color`).
+    ///
+    /// Returns `(color_space, sample_data)` with the alt promoted to
+    /// DeviceCMYK. For DeviceGray images we expand 1-byte gray samples to
+    /// 4-byte CMYK with K=255−g; for Separation/DeviceN with DeviceGray alt
+    /// we rebuild the tint table to emit `(0, 0, 0, 1−g)` instead of `g`.
+    fn cmyk_group_promote_image(
+        &self,
+        cs: ImageColorSpace,
+        data: Vec<u8>,
+        width: u32,
+        height: u32,
+    ) -> (ImageColorSpace, Vec<u8>) {
+        if !self.pdfx_cmyk_intent || self.in_smask_form {
+            return (cs, data);
+        }
+        match cs {
+            ImageColorSpace::DeviceGray => {
+                let npx = (width as usize) * (height as usize);
+                let take = npx.min(data.len());
+                let mut new_data = vec![0u8; npx * 4];
+                for i in 0..take {
+                    new_data[i * 4 + 3] = 255 - data[i];
+                }
+                (ImageColorSpace::DeviceCMYK, new_data)
+            }
+            ImageColorSpace::Separation {
+                name,
+                alt_space,
+                tint_table,
+            } => {
+                if matches!(alt_space.as_ref(), ImageColorSpace::DeviceGray)
+                    && tint_table.num_outputs == 1
+                {
+                    let samples = tint_table.samples_per_dim as usize;
+                    let mut new_data = Vec::with_capacity(samples * 4);
+                    for i in 0..samples {
+                        let g = tint_table.data[i] as f64;
+                        let k = (1.0 - g).clamp(0.0, 1.0) as f32;
+                        new_data.push(0.0);
+                        new_data.push(0.0);
+                        new_data.push(0.0);
+                        new_data.push(k);
+                    }
+                    let promoted_table = TintLookupTable {
+                        num_inputs: 1,
+                        num_outputs: 4,
+                        samples_per_dim: tint_table.samples_per_dim,
+                        data: new_data,
+                    };
+                    (
+                        ImageColorSpace::Separation {
+                            name,
+                            alt_space: Box::new(ImageColorSpace::DeviceCMYK),
+                            tint_table: Arc::new(promoted_table),
+                        },
+                        data,
+                    )
+                } else {
+                    (
+                        ImageColorSpace::Separation {
+                            name,
+                            alt_space,
+                            tint_table,
+                        },
+                        data,
+                    )
+                }
+            }
+            ImageColorSpace::DeviceN {
+                names,
+                alt_space,
+                tint_table,
+            } => {
+                if matches!(alt_space.as_ref(), ImageColorSpace::DeviceGray)
+                    && tint_table.num_outputs == 1
+                {
+                    let total = tint_table.data.len();
+                    let mut new_data = Vec::with_capacity(total * 4);
+                    for &g in &tint_table.data {
+                        let k = (1.0 - g as f64).clamp(0.0, 1.0) as f32;
+                        new_data.push(0.0);
+                        new_data.push(0.0);
+                        new_data.push(0.0);
+                        new_data.push(k);
+                    }
+                    let promoted_table = TintLookupTable {
+                        num_inputs: tint_table.num_inputs,
+                        num_outputs: 4,
+                        samples_per_dim: tint_table.samples_per_dim,
+                        data: new_data,
+                    };
+                    (
+                        ImageColorSpace::DeviceN {
+                            names,
+                            alt_space: Box::new(ImageColorSpace::DeviceCMYK),
+                            tint_table: Arc::new(promoted_table),
+                        },
+                        data,
+                    )
+                } else {
+                    (
+                        ImageColorSpace::DeviceN {
+                            names,
+                            alt_space,
+                            tint_table,
+                        },
+                        data,
+                    )
+                }
+            }
+            other => (other, data),
+        }
+    }
+
+    /// When the page group is DeviceCMYK, override a paint's RGB with the
+    /// CMYK-ICC rendering of its `native_cmyk` whenever the source RGB is
+    /// itself a flat gray and the CMYK is K-only — matches the PDF/X
+    /// behaviour expected for Separation/DeviceN paints whose alternate space
+    /// is DeviceGray (e.g. Separation /Black tinted via gray=1−tint).
+    fn cmyk_group_promote_color(&mut self, color: &mut DeviceColor) {
+        if !self.pdfx_cmyk_intent || self.in_smask_form {
+            return;
+        }
+        let Some((c, m, y, k)) = color.native_cmyk else {
+            return;
+        };
+        // Only fire for K-only CMYK whose r/g/b currently form a flat gray —
+        // that's the DeviceGray-alt case. DeviceCMYK paints already have ICC-
+        // converted RGB, so the override would be a no-op there; restricting
+        // to flat-gray r/g/b avoids ever touching genuine colour paints.
+        if !(c == 0.0 && m == 0.0 && y == 0.0) {
+            return;
+        }
+        // Skip the all-zero CMYK case. It legitimately encodes "white" for a
+        // DeviceCMYK 0/0/0/0 paint (where r/g/b is already 1/1/1, so the
+        // override would be a no-op), but it also surfaces from the separation
+        // handler's fallback for non-K process colorants like /All — there
+        // `native_cmyk` is set to (0,0,0,0) even when the visual is the alt-
+        // gray result (e.g. Separation /All at tint=1 → gray=0 → black text).
+        // ICC-converting (0,0,0,0) would erase those paints to white.
+        if k == 0.0 {
+            return;
+        }
+        if (color.r - color.g).abs() > f64::EPSILON || (color.r - color.b).abs() > f64::EPSILON {
+            return;
+        }
+        if let Some((r, g, b)) = self.icc_cache.convert_cmyk(0.0, 0.0, 0.0, k) {
+            color.r = r;
+            color.g = g;
+            color.b = b;
+        }
     }
 
     fn op_big_k(&mut self) -> Result<(), PdfError> {
@@ -2269,8 +2487,9 @@ impl<'a> ContentInterpreter<'a> {
             cs,
             ResolvedColorSpace::DeviceCMYK | ResolvedColorSpace::ICCBased { n: 4, .. }
         );
-        self.gstate.stroke_color =
-            components_to_device_color_icc(&cs, &nums, Some(&mut self.icc_cache));
+        let mut color = components_to_device_color_icc(&cs, &nums, Some(&mut self.icc_cache));
+        self.cmyk_group_promote_color(&mut color);
+        self.gstate.stroke_color = color;
         self.gstate.stroke_pattern = None;
         self.gstate.stroke_shading_pattern = None;
         Ok(())
@@ -2299,8 +2518,9 @@ impl<'a> ContentInterpreter<'a> {
             cs,
             ResolvedColorSpace::DeviceCMYK | ResolvedColorSpace::ICCBased { n: 4, .. }
         );
-        self.gstate.fill_color =
-            components_to_device_color_icc(&cs, &nums, Some(&mut self.icc_cache));
+        let mut color = components_to_device_color_icc(&cs, &nums, Some(&mut self.icc_cache));
+        self.cmyk_group_promote_color(&mut color);
+        self.gstate.fill_color = color;
         self.gstate.fill_pattern = None;
         self.gstate.fill_shading_pattern = None;
         Ok(())
@@ -4018,26 +4238,21 @@ impl<'a> ContentInterpreter<'a> {
             sample_data
         };
 
-        // In CMYK page groups, promote 1-BPC DeviceGray images to K-only
-        // DeviceCMYK so they go through the same ICC pipeline as CMYK fills.
-        // This ensures DeviceGray black matches CMYK(0,0,0,1) visually —
-        // required by tests like GWG 17.3 (JBIG2 compression).
-        let (sample_data, color_space, resolved_cs) = if !is_image_mask
-            && bpc == 1
-            && self.page_group_is_cmyk
-            && matches!(color_space, ImageColorSpace::DeviceGray)
-        {
-            let npixels = (width * height) as usize;
-            let mut cmyk = vec![0u8; npixels * 4];
-            for i in 0..npixels {
-                let g = sample_data.get(i).copied().unwrap_or(0);
-                cmyk[i * 4 + 3] = 255 - g; // K = 1 - gray
-            }
-            (
-                cmyk,
-                ImageColorSpace::DeviceCMYK,
-                Some(ResolvedColorSpace::DeviceCMYK),
-            )
+        // In CMYK page groups, route DeviceGray-derived images (DeviceGray
+        // itself, Separation with gray alt, DeviceN with gray alt) through
+        // the K plate so they composite equivalently to DeviceCMYK 0/0/0/(1−g).
+        // Required by GWG 17.3 (JBIG2 compression) and GWG 23.0's "4 different
+        // Grays" test.
+        let (sample_data, color_space, resolved_cs) = if !is_image_mask {
+            let was_device_gray = matches!(color_space, ImageColorSpace::DeviceGray);
+            let (new_cs, new_data) =
+                self.cmyk_group_promote_image(color_space, sample_data, width, height);
+            let new_resolved = if was_device_gray && matches!(new_cs, ImageColorSpace::DeviceCMYK) {
+                Some(ResolvedColorSpace::DeviceCMYK)
+            } else {
+                resolved_cs
+            };
+            (new_data, new_cs, new_resolved)
         } else {
             (sample_data, color_space, resolved_cs)
         };
@@ -5458,6 +5673,15 @@ impl<'a> ContentInterpreter<'a> {
             sample_data
         };
 
+        // PDF/X CMYK group: route DeviceGray / Separation-with-gray-alt /
+        // DeviceN-with-gray-alt images through the K plate so they composite
+        // equivalently to DeviceCMYK 0/0/0/(1−g).
+        let (color_space, sample_data) = if !is_image_mask {
+            self.cmyk_group_promote_image(color_space, sample_data, width, height)
+        } else {
+            (color_space, sample_data)
+        };
+
         // Register ICC profile with the cache so the rasterizer can find it
         // by hash.  Color conversion itself is deferred to samples_to_rgba().
         if !is_image_mask {
@@ -5996,12 +6220,23 @@ impl<'a> ContentInterpreter<'a> {
         // produce exact (0,0,0) for CMYK (0,0,0,1), yielding correct
         // luminosity = 0 for the mask.
         let saved_cmyk_hash = self.icc_cache.suspend_default_cmyk();
+        // Suppress the DeviceGray-to-K-only promotion while parsing the SMask
+        // form. The promotion produces a DeviceCMYK image whose ICC
+        // conversion happens at render time (after the suspension above is
+        // restored), so the parse-time suspend never sees it. Skipping the
+        // promotion here keeps the SMask source's display list in its
+        // original DeviceGray form, which the renderer paints gray-to-gray
+        // without ICC — luminosity = g/255 exactly (regressed
+        // `pdf_samples/2495.pdf`'s right-side SMask images).
+        let saved_in_smask_form = self.in_smask_form;
+        self.in_smask_form = true;
 
         let saved_nested_mask_flush_count = self.nested_mask_flush_count;
         self.depth += 1;
         let _ = self.interpret_stream(&form_data);
         self.depth -= 1;
 
+        self.in_smask_form = saved_in_smask_form;
         self.icc_cache.restore_default_cmyk(saved_cmyk_hash);
 
         // Check if Q handlers flushed any gs-set nested soft mask scopes
