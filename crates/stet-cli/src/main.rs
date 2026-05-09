@@ -599,7 +599,7 @@ fn run_viewer_mode(
     let dl_receiver = interp_end.dl_receiver;
     std::thread::spawn(move || {
         let mut page_num = 1u32;
-        while let Ok((dl, dpi, w, h, cmyk_bytes)) = dl_receiver.recv() {
+        while let Ok((dl, dpi, w, h, cmyk_bytes, cmyk_proofing)) = dl_receiver.recv() {
             // Sentinel: zero dimensions = control message
             if w == 0 && h == 0 {
                 if dpi < 0.0 {
@@ -619,6 +619,7 @@ fn run_viewer_mode(
                 dpi,
                 page_num,
                 cmyk_bytes,
+                cmyk_proofing,
             }));
             page_num += 1;
         }
@@ -658,6 +659,7 @@ fn run_viewer_mode(
                     0,
                     0,
                     None,
+                    false,
                 ));
             }
         } else {
@@ -683,6 +685,7 @@ fn run_viewer_mode(
                             0,
                             0,
                             None,
+                            false,
                         ));
                     }
                 }
@@ -711,6 +714,7 @@ fn run_viewer_mode(
                             0,
                             0,
                             None,
+                            false,
                         ));
                     }
                 }
@@ -725,6 +729,7 @@ fn run_viewer_mode(
                     0,
                     0,
                     None,
+                    false,
                 ));
             }
         }
@@ -761,6 +766,7 @@ fn run_viewer_mode(
                     0,
                     0,
                     None,
+                    false,
                 ));
 
                 if is_pdf_file(&path) {
@@ -793,6 +799,7 @@ fn run_viewer_mode(
                     0,
                     0,
                     None,
+                    false,
                 ));
 
                 // If the job was interrupted by a new drop, the next path is
@@ -1183,7 +1190,7 @@ fn run_file_jobs(
         if job_idx > 0
             && let Some(ref sender) = ctx.display_list_sender
         {
-            let _ = sender.send((DisplayList::new(), 0.0, 0, 0, None));
+            let _ = sender.send((DisplayList::new(), 0.0, 0, 0, None, false));
         }
 
         let job_start = std::time::Instant::now();
@@ -1232,7 +1239,7 @@ fn run_file_jobs(
             && job_idx + 1 < num_jobs
         {
             if let Some(ref sender) = ctx.display_list_sender {
-                let _ = sender.send((DisplayList::new(), -1.0, 0, 0, None));
+                let _ = sender.send((DisplayList::new(), -1.0, 0, 0, None, false));
             }
             // Block until viewer signals advance (or disconnects)
             let _ = adv_rx.recv();
@@ -1751,6 +1758,7 @@ fn render_dropped_pdf(
     // Snapshot the effective CMYK bytes (post-OI-apply) so the viewer's
     // render-time ICC cache matches the one used to bake the display list.
     let effective_cmyk_bytes = doc.icc_cache().system_cmyk_bytes().cloned();
+    let cmyk_proofing = doc.icc_cache().proofing_enabled();
 
     let page_count = doc.page_count();
     eprintln!("PDF: {} ({} pages)", path, page_count);
@@ -1772,6 +1780,7 @@ fn render_dropped_pdf(
                     pixel_w,
                     pixel_h,
                     effective_cmyk_bytes.clone(),
+                    cmyk_proofing,
                 ));
             }
             Err(e) => {

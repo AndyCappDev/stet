@@ -95,6 +95,77 @@ impl TransformExecutor<f64> for GrayToRgbIdentity {
     }
 }
 
+/// `TransformExecutor` adapter that resolves CMYK → sRGB through an existing
+/// `Clut4`. Used as stage 2 of the proofing chain so the chain output goes
+/// through the same hand-rolled colorimetric path as direct DeviceCMYK
+/// conversion, avoiding the moxcms over-saturation cited in
+/// `perceptual.rs`.
+struct Clut4ToRgb {
+    clut4: Clut4,
+}
+
+impl TransformExecutor<u8> for Clut4ToRgb {
+    fn transform(&self, src: &[u8], dst: &mut [u8]) -> Result<(), CmsError> {
+        let pixel_count = dst.len() / 3;
+        let rgb = apply_clut4_cmyk_to_rgb(&self.clut4, src, pixel_count);
+        dst[..rgb.len()].copy_from_slice(&rgb);
+        Ok(())
+    }
+}
+
+impl TransformExecutor<f64> for Clut4ToRgb {
+    fn transform(&self, src: &[f64], dst: &mut [f64]) -> Result<(), CmsError> {
+        let pixel_count = dst.len() / 3;
+        for px in 0..pixel_count {
+            let c = src[px * 4];
+            let m = src[px * 4 + 1];
+            let y = src[px * 4 + 2];
+            let k = src[px * 4 + 3];
+            let (r, g, b) = sample_clut4_single_f64(&self.clut4, c, m, y, k);
+            dst[px * 3] = r;
+            dst[px * 3 + 1] = g;
+            dst[px * 3 + 2] = b;
+        }
+        Ok(())
+    }
+}
+
+/// Two-stage proofing transform: `source → intermediate (OutputIntent) → sRGB`.
+///
+/// PDF/X workflows specify a target device via `/OutputIntents`. Source
+/// colours (DeviceCMYK, ICCBased CMYK/RGB/Gray, etc.) are color-managed
+/// through that target before reaching the simulated display, so every
+/// source space converges through the same final `OutputIntent → sRGB`
+/// stage and a CMYK swatch designed to match a DeviceCMYK background
+/// renders identically to it.
+///
+/// `intermediate_n` is the number of components in the OutputIntent's
+/// colour space (typically 4 for CMYK). The intermediate buffer is sized
+/// per `transform()` call from the destination pixel count.
+struct ChainedTransform<T: Copy + Default + Send + Sync + 'static> {
+    /// First leg: `source → OutputIntent`.
+    stage1: Arc<dyn TransformExecutor<T> + Send + Sync>,
+    /// Second leg: `OutputIntent → sRGB`. Reused from the OutputIntent
+    /// profile's own cached transform so byte-identical output is
+    /// produced for direct DeviceCMYK paints and the proofing chain.
+    stage2: Arc<dyn TransformExecutor<T> + Send + Sync>,
+    /// Number of components in the intermediate (OutputIntent) layout.
+    intermediate_n: usize,
+}
+
+impl<T: Copy + Default + Send + Sync + 'static> TransformExecutor<T> for ChainedTransform<T> {
+    fn transform(&self, src: &[T], dst: &mut [T]) -> Result<(), CmsError> {
+        // Destination is always packed sRGB (3 components). Derive pixel
+        // count from `dst.len()` so we don't have to know the source
+        // component count here.
+        let pixel_count = dst.len() / 3;
+        let mid_len = pixel_count * self.intermediate_n;
+        let mut mid = vec![T::default(); mid_len];
+        self.stage1.transform(src, &mut mid)?;
+        self.stage2.transform(&mid, dst)
+    }
+}
+
 /// Pre-baked 4D CLUT sampling a CMYK ICC transform on a regular grid.
 ///
 /// At profile-registration time we sample moxcms at `grid_n^4` evenly-spaced
@@ -170,6 +241,15 @@ pub struct IccCache {
     /// construction time via [`IccCacheOptions`]; consulted by future BPC
     /// apply paths (commit 2 of `docs/PLAN-BPC.md`).
     bpc_mode: BpcMode,
+    /// Enable PDF/X-style proofing: ICCBased source profiles convert through
+    /// the default CMYK profile (the document's OutputIntent) before going
+    /// to sRGB, so all source colour spaces converge through the same
+    /// `OutputIntent → sRGB` final stage. Set by
+    /// `PdfDocument::apply_output_intent_as_default_cmyk` when the PDF has
+    /// an `/OutputIntents` entry; left `false` when only the system CMYK
+    /// fallback is available, so non-PDF/X documents keep their direct
+    /// `source → sRGB` conversion.
+    proofing_enabled: bool,
 }
 
 impl Default for IccCache {
@@ -213,6 +293,7 @@ impl IccCache {
             srgb_profile: ColorProfile::new_srgb(),
             reverse_cmyk_f64: None,
             bpc_mode: opts.bpc_mode,
+            proofing_enabled: false,
         };
         if let Some(bytes) = opts.source_cmyk_profile {
             cache.load_cmyk_profile_bytes(&bytes);
@@ -389,6 +470,102 @@ impl IccCache {
 
         let is_lab = profile.color_space == DataColorSpace::Lab;
 
+        // PDF/X proofing chain: when proofing is enabled and a non-OutputIntent
+        // profile is being registered, route source colours through the
+        // OutputIntent (`source → OutputIntent → sRGB`) so that an ICCBased
+        // CMYK swatch designed to match a DeviceCMYK background renders
+        // identically to it. The OutputIntent itself is registered with a
+        // direct transform; subsequent profiles are chained.
+        type ChainPair = (
+            Arc<dyn TransformExecutor<u8> + Send + Sync>,
+            Arc<dyn TransformExecutor<f64> + Send + Sync>,
+        );
+        let chain_data: Option<ChainPair> = if self.proofing_enabled
+            && let Some(oi_hash) = self.default_cmyk_hash
+            && oi_hash != hash
+            && let Some(oi_profile) = self.profiles.get(&oi_hash).cloned()
+            && let Some(oi_cached) = self.transforms.get(&oi_hash)
+            && oi_cached.n == 4
+        {
+            // OI is always CMYK in PDF/X workflows; intermediate is 4-component.
+            let oi_layout_8 = Layout::Rgba;
+            let oi_layout_f64 = Layout::Rgba;
+
+            let mut stage1_8bit_opt = None;
+            for &intent in &intents {
+                let options = TransformOptions {
+                    rendering_intent: intent,
+                    ..TransformOptions::default()
+                };
+                if let Ok(t) =
+                    profile.create_transform_8bit(src_layout_8, &oi_profile, oi_layout_8, options)
+                {
+                    stage1_8bit_opt = Some(t);
+                    break;
+                }
+            }
+            let mut stage1_f64_opt = None;
+            for &intent in &intents {
+                let options = TransformOptions {
+                    rendering_intent: intent,
+                    ..TransformOptions::default()
+                };
+                if let Ok(t) = profile.create_transform_f64(
+                    src_layout_f64,
+                    &oi_profile,
+                    oi_layout_f64,
+                    options,
+                ) {
+                    stage1_f64_opt = Some(t);
+                    break;
+                }
+            }
+            match (stage1_8bit_opt, stage1_f64_opt) {
+                (Some(s1_8), Some(s1_f)) => {
+                    // Stage 2 (`OutputIntent → sRGB`): prefer OI's hand-rolled
+                    // CLUT4 over its moxcms transform so chain output matches
+                    // direct DeviceCMYK conversion at the byte level.
+                    let stage2_8bit: Arc<dyn TransformExecutor<u8> + Send + Sync> =
+                        if let Some(oi_clut) = oi_cached.clut4.clone() {
+                            Arc::new(Clut4ToRgb { clut4: oi_clut })
+                        } else {
+                            oi_cached.transform_8bit.clone()
+                        };
+                    let stage2_f64: Arc<dyn TransformExecutor<f64> + Send + Sync> =
+                        if let Some(oi_clut) = oi_cached.clut4.clone() {
+                            Arc::new(Clut4ToRgb { clut4: oi_clut })
+                        } else {
+                            oi_cached.transform_f64.clone()
+                        };
+                    let chain_8: Arc<dyn TransformExecutor<u8> + Send + Sync> =
+                        Arc::new(ChainedTransform {
+                            stage1: s1_8,
+                            stage2: stage2_8bit,
+                            intermediate_n: 4,
+                        });
+                    let chain_f: Arc<dyn TransformExecutor<f64> + Send + Sync> =
+                        Arc::new(ChainedTransform {
+                            stage1: s1_f,
+                            stage2: stage2_f64,
+                            intermediate_n: 4,
+                        });
+                    Some((chain_8, chain_f))
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        // When the chain build succeeded, override the cached transforms with
+        // the chain versions. The CLUT4 below is then baked from the chain
+        // (for CMYK source profiles), so single-color and image conversions
+        // share the same `OutputIntent → sRGB` final stage as DeviceCMYK.
+        let (transform_8bit, transform_f64, chain_active) = match chain_data {
+            Some((c8, cf)) => (c8, cf, true),
+            None => (transform_8bit, transform_f64, false),
+        };
+
         // For 4-channel (CMYK) profiles, pre-bake a 17^4 CLUT for fast image
         // conversion. Two paths produce the same Clut4 layout:
         //
@@ -414,7 +591,9 @@ impl IccCache {
         // exercised in fallback contexts and shouldn't double-apply BPC.
         let bpc_enabled = n == 4 && self.bpc_mode.is_enabled();
         let mut bpc_params: Option<BpcParams> = None;
-        let clut4 = if n == 4 {
+        let clut4 = if n == 4 && !chain_active {
+            // Direct (non-proofing) CMYK profiles: pre-bake a CLUT for fast
+            // image conversion.
             let c = perceptual::bake_clut4_perceptual(&profile, 17, bpc_enabled).or_else(|| {
                 let params = if bpc_enabled {
                     detect_source_black_point(transform_8bit.as_ref())
@@ -433,6 +612,13 @@ impl IccCache {
             }
             c
         } else {
+            // Chain-mode: do NOT pre-bake the source profile's CLUT. A
+            // pre-baked source CLUT would compose two CLUT4 quantizations
+            // (source-bake + stage 2's OutputIntent-bake) and drift a few
+            // sRGB levels relative to direct DeviceCMYK paints. Routing every
+            // call through the chain transform keeps just one CLUT
+            // quantization (OutputIntent's, in stage 2), so a designed-equal
+            // ICCBased CMYK swatch and DeviceCMYK background converge.
             None
         };
 
@@ -688,6 +874,23 @@ impl IccCache {
     pub fn set_system_cmyk(&mut self, bytes: &[u8], hash: ProfileHash) {
         self.system_cmyk_bytes = Some(Arc::new(bytes.to_vec()));
         self.default_cmyk_hash = Some(hash);
+    }
+
+    /// Enable PDF/X-style proofing: ICCBased profiles registered while this
+    /// flag is set route through the default CMYK profile (the OutputIntent)
+    /// before reaching sRGB. See [`Self::proofing_enabled`].
+    pub fn set_proofing_enabled(&mut self, enabled: bool) {
+        self.proofing_enabled = enabled;
+    }
+
+    /// Whether PDF/X-style proofing is enabled. When `true`, source ICC
+    /// profiles other than the default CMYK convert through the default
+    /// CMYK ("OutputIntent") instead of going directly to sRGB. This makes
+    /// per-swatch ICC colours and surrounding DeviceCMYK paints converge
+    /// through the same final `OutputIntent → sRGB` stage. When `false`,
+    /// every profile converts directly (the historical behaviour).
+    pub fn proofing_enabled(&self) -> bool {
+        self.proofing_enabled
     }
 
     /// Set the default CMYK profile hash (used when building render-thread caches).

@@ -403,8 +403,11 @@ impl ViewerApp {
                         }
                         let prepared = stet_render::prepare_display_list(&page.display_list);
                         let cmyk_bytes = page.cmyk_bytes.as_ref().or(system_cmyk_bytes.as_ref());
-                        let icc_cache =
-                            stet_render::build_icc_cache_for_list(&page.display_list, cmyk_bytes);
+                        let icc_cache = stet_render::build_icc_cache_for_list(
+                            &page.display_list,
+                            cmyk_bytes,
+                            page.cmyk_proofing,
+                        );
                         let image_cache = ImageCache::build(&page.display_list, Some(&icc_cache));
                         let stored = StoredPage {
                             display_list: Arc::new(page.display_list),

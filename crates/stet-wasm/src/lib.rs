@@ -686,6 +686,7 @@ macro_rules! ensure_page_caches {
                 $interp.page_icc[$page_idx] = Some(stet_render::build_icc_cache_for_list(
                     &$interp.page_display_lists[$page_idx],
                     Some(&$interp.system_cmyk_bytes),
+                    false,
                 ));
             }
             if $interp.page_image_cache[$page_idx].is_none() {

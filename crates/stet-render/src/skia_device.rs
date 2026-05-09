@@ -1569,15 +1569,23 @@ fn catmull_rom(t: f32) -> f32 {
 ///
 /// Build an `IccCache` from ICC profiles found in a display list.
 ///
-/// Registers all unique ICCBased profiles and optionally the system CMYK profile.
+/// Registers all unique ICCBased profiles and optionally the system CMYK
+/// profile. When `proofing_enabled` is true, ICCBased profiles registered
+/// while scanning the display list are color-managed *through* the system
+/// CMYK (the PDF's OutputIntent), so a render-thread cache built from the
+/// effective OutputIntent matches the bake-time cache that produced the
+/// display list. PostScript callers should pass `false` (no
+/// PDF/X OutputIntent semantics).
 pub fn build_icc_cache_for_list(
     list: &DisplayList,
     system_cmyk_bytes: Option<&std::sync::Arc<Vec<u8>>>,
+    proofing_enabled: bool,
 ) -> IccCache {
     let mut cache = IccCache::new();
     let mut seen = HashSet::new();
 
-    // Register system CMYK profile first
+    // Register system CMYK profile first. Proofing must stay off here: the
+    // OutputIntent itself converts directly to sRGB, not through itself.
     if let Some(cmyk_bytes) = system_cmyk_bytes
         && let Some(hash) = cache.register_profile(cmyk_bytes)
     {
@@ -1589,6 +1597,12 @@ pub fn build_icc_cache_for_list(
         // when populating the parallel CMYK buffer for non-CMYK painters.
         cache.prepare_reverse_cmyk();
     }
+
+    // Enable proofing AFTER the OutputIntent itself is registered so the
+    // chain logic in `register_profile` sees `default_cmyk_hash` set when
+    // subsequent ICCBased profiles arrive — those get chained through the
+    // OutputIntent.
+    cache.set_proofing_enabled(proofing_enabled);
 
     // Scan display list for ICCBased images and shadings (recursing into Groups)
     fn scan_elements(
@@ -6699,7 +6713,7 @@ impl OutputDevice for SkiaDevice {
         // `render_element`, same display list — differs only in how culling
         // and epochs are computed.
         if self.use_viewport_path {
-            let icc_cache = build_icc_cache_for_list(&list, self.system_cmyk_bytes.as_ref());
+            let icc_cache = build_icc_cache_for_list(&list, self.system_cmyk_bytes.as_ref(), false);
             let rgba = render_to_rgba_viewport(
                 &list,
                 page_w,
@@ -6718,7 +6732,7 @@ impl OutputDevice for SkiaDevice {
         let band_h = select_band_height(page_w, page_h);
 
         // Build ICC cache for this page's display list
-        let icc_cache = build_icc_cache_for_list(&list, self.system_cmyk_bytes.as_ref());
+        let icc_cache = build_icc_cache_for_list(&list, self.system_cmyk_bytes.as_ref(), false);
 
         // If banding not worthwhile, render the full page as a single band.
         // This still uses render_element (same as banded path) so that Group

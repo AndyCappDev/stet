@@ -211,9 +211,19 @@ pub struct Context {
     pub capture_display_lists: Option<Vec<(DisplayList, f64)>>,
     /// When `Some`, each showpage sends a clone of the display list through this channel.
     /// Used by the CLI viewer for incremental display list delivery.
-    /// Tuple: (DisplayList, dpi, page_width, page_height).
+    /// Tuple: `(DisplayList, dpi, page_width, page_height,
+    /// effective_cmyk_bytes, cmyk_proofing)`. PostScript pages always pass
+    /// `None`/`false` (no PDF/X concept); PDF pages may set these from the
+    /// document's OutputIntent context.
     pub display_list_sender: Option<
-        std::sync::mpsc::Sender<(DisplayList, f64, u32, u32, Option<std::sync::Arc<Vec<u8>>>)>,
+        std::sync::mpsc::Sender<(
+            DisplayList,
+            f64,
+            u32,
+            u32,
+            Option<std::sync::Arc<Vec<u8>>>,
+            bool,
+        )>,
     >,
     pub page_width: u32,
     pub page_height: u32,
@@ -868,8 +878,9 @@ impl Context {
                 .map(|d| d.page_size())
                 .unwrap_or((self.page_width, self.page_height));
             // PS interpreter output: no PDF-specific CMYK profile in play, so
-            // the viewer uses its CLI-level default.
-            let _ = sender.send((self.display_list.clone(), dpi, w, h, None));
+            // the viewer uses its CLI-level default. PDF/X proofing is a
+            // PDF-only concept; PostScript always sends `false`.
+            let _ = sender.send((self.display_list.clone(), dpi, w, h, None, false));
         }
         // Page-boundary yield: once the display list for this page has been
         // captured (above), signal the eval loop to return so the caller can

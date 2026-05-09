@@ -638,10 +638,22 @@ impl<'a> PdfDocument<'a> {
         let Some(bytes) = self.output_intent_icc.as_deref() else {
             return false;
         };
-        let Some(hash) = self.icc_cache.register_profile(bytes) else {
-            return false;
-        };
+        // Compute the profile hash and install it as the default CMYK BEFORE
+        // registering, so the proofing-chain logic in `register_profile` sees
+        // this profile as the OutputIntent (and skips chaining it through
+        // itself). Then enable proofing for any later ICCBased profiles —
+        // they will be color-managed through this OutputIntent so their
+        // colours converge with DeviceCMYK paints at the final
+        // `OutputIntent → sRGB` stage.
+        let hash = stet_graphics::icc::IccCache::hash_profile(bytes);
         self.icc_cache.set_system_cmyk(bytes, hash);
+        self.icc_cache.set_proofing_enabled(true);
+        if self.icc_cache.register_profile(bytes).is_none() {
+            // Registration failed — undo the partial install so the cache
+            // doesn't claim a profile it can't actually use.
+            self.icc_cache.set_proofing_enabled(false);
+            return false;
+        }
         true
     }
 

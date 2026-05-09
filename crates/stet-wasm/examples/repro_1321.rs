@@ -65,7 +65,7 @@ fn main() {
         let prepared = stet_render::prepare_display_list(&dl);
 
         eprintln!("repro: page {} build_icc_cache_for_list…", page_idx);
-        let _icc = stet_render::build_icc_cache_for_list(&dl, Some(&cmyk_bytes));
+        let _icc = stet_render::build_icc_cache_for_list(&dl, Some(&cmyk_bytes), false);
 
         eprintln!("repro: page {} ImageCache::build…", page_idx);
         let image_cache = ImageCache::build(&dl, Some(&_icc));

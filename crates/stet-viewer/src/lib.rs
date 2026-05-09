@@ -46,7 +46,8 @@ use std::sync::mpsc;
 use stet_graphics::display_list::DisplayList;
 
 /// Raw display list tuple sent by Context at each showpage:
-/// (DisplayList, dpi, page_width, page_height, effective CMYK profile bytes).
+/// `(DisplayList, dpi, page_width, page_height, effective_cmyk_bytes,
+/// cmyk_proofing)`.
 ///
 /// The 5th element carries the CMYK ICC profile that was *effectively* used
 /// to build the display list (e.g. a PDF's OutputIntent when
@@ -54,7 +55,21 @@ use stet_graphics::display_list::DisplayList;
 /// render-time ICC cache so runtime overprint math stays consistent with the
 /// baked RGB values in the display list. `None` means "use the CLI-level
 /// default" (typically the system CMYK profile).
-pub type DisplayListMsg = (DisplayList, f64, u32, u32, Option<std::sync::Arc<Vec<u8>>>);
+///
+/// The 6th element (`cmyk_proofing`) is `true` when the bake-time ICC cache
+/// had PDF/X proofing enabled — i.e. ICCBased profiles in the display list
+/// were color-managed *through* the OutputIntent before reaching sRGB. The
+/// render-thread cache must run with the same flag so its image conversions
+/// produce the same RGB the bake produced for vector fills. PostScript
+/// pages always pass `false` (no PDF/X concept).
+pub type DisplayListMsg = (
+    DisplayList,
+    f64,
+    u32,
+    u32,
+    Option<std::sync::Arc<Vec<u8>>>,
+    bool,
+);
 
 /// Message from interpreter to viewer via the relay thread.
 pub enum ViewerMsg {
@@ -81,6 +96,11 @@ pub struct PageReady {
     /// list, when different from the CLI-level default. The viewer uses these
     /// per-page bytes so overprint math at render time matches the baked RGB.
     pub cmyk_bytes: Option<std::sync::Arc<Vec<u8>>>,
+    /// Whether the bake-time ICC cache had PDF/X proofing enabled. Render
+    /// threads pass this through to `build_icc_cache_for_list` so image
+    /// conversions chain through the OutputIntent the same way bake-time
+    /// vector fills did. See [`DisplayListMsg`].
+    pub cmyk_proofing: bool,
 }
 
 /// Screen information sent from viewer to interpreter for DPI calculation.
