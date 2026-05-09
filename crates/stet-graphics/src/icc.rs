@@ -21,8 +21,33 @@ use moxcms::{
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Re-export so callers in `stet-pdf-reader` (and other consumers
+/// without a direct moxcms dependency) can specify the rendering intent
+/// for [`IccCache::convert_color_with_intent`] etc. without taking a
+/// moxcms dep themselves.
+pub use moxcms::RenderingIntent as IccRenderingIntent;
+
+/// Map a PDF gstate `rendering_intent` byte (0=Perceptual, 1=RelCol,
+/// 2=Saturation, 3=AbsCol — the encoding used by
+/// `stet-pdf-reader::content::graphics_state::PdfGraphicsState`) to the
+/// corresponding [`IccRenderingIntent`]. Unknown values fall back to
+/// Perceptual, matching the PDF spec's default.
+#[inline]
+pub fn intent_from_pdf_byte(b: u8) -> IccRenderingIntent {
+    match b {
+        1 => IccRenderingIntent::RelativeColorimetric,
+        2 => IccRenderingIntent::Saturation,
+        3 => IccRenderingIntent::AbsoluteColorimetric,
+        _ => IccRenderingIntent::Perceptual,
+    }
+}
+
 /// SHA-256 hash used as profile key.
 pub type ProfileHash = [u8; 32];
+
+/// Cache key for per-intent single-colour lookups: `(hash-prefix,
+/// quantized_components, intent_byte)`.
+type IntentColorKey = (u64, [u16; 4], u8);
 
 /// Black Point Compensation mode for CMYK→sRGB conversion.
 ///
@@ -199,10 +224,32 @@ impl Clut4 {
 /// Cached ICC transform to sRGB (specific to source layout).
 #[derive(Clone)]
 struct CachedTransform {
-    /// 8-bit transform for image data.
+    /// 8-bit transform for image data. When proofing is enabled and the
+    /// source is RGB, this is the Perceptual-intent chain so existing
+    /// callers (no intent plumbing yet) keep producing the GWG 13.0
+    /// baseline byte-for-byte.
     transform_8bit: Arc<dyn TransformExecutor<u8> + Send + Sync>,
-    /// f64 transform for single-color conversions.
+    /// f64 transform for single-color conversions. Same intent default
+    /// as `transform_8bit`.
     transform_f64: Arc<dyn TransformExecutor<f64> + Send + Sync>,
+    /// Per-intent proofing chains, indexed by ICC `RenderingIntent`
+    /// discriminant: `[Perceptual=0, RelCol=1, Saturation=2, AbsCol=3]`.
+    /// Populated only for n=3 RGB sources when proofing is enabled and
+    /// the source has a viable A2B / OI B2A pair; `None` slots fall back
+    /// to `transform_*bit` / `transform_*_f64` at lookup time. AbsCol
+    /// currently shares the RelCol tables (pending step 4 BPC + AbsCol
+    /// white-point handling).
+    chain_per_intent_8bit: [Option<Arc<dyn TransformExecutor<u8> + Send + Sync>>; 4],
+    chain_per_intent_f64: [Option<Arc<dyn TransformExecutor<f64> + Send + Sync>>; 4],
+    /// Per-intent stage-1 only sampler (source RGB → OutputIntent CMYK,
+    /// without the trailing CMYK→sRGB stage 2). Same indexing as the
+    /// `chain_per_intent_*` arrays. Used by
+    /// [`IccCache::convert_to_oi_cmyk`] so the PDF reader can record the
+    /// chain's intermediate CMYK as `DeviceColor::native_cmyk`, which
+    /// in turn lets the renderer's `cmyk_group_blend` gate fire on
+    /// ICCBased RGB swatches inside a `/CS DeviceCMYK` page group
+    /// (GWG 16.1).
+    chain_stage1_per_intent: [Option<Arc<perceptual::HandRolledChainStage1Rgb>>; 4],
     /// Number of source components.
     n: u32,
     /// Whether the source profile is Lab (needs value normalization).
@@ -224,9 +271,17 @@ pub struct IccCache {
     profiles: HashMap<ProfileHash, Arc<ColorProfile>>,
     /// Cached transforms: hash → CachedTransform.
     transforms: HashMap<ProfileHash, CachedTransform>,
-    /// Single-color conversion cache: (hash-prefix, quantized_components) → (r, g, b).
-    /// Uses first 8 bytes of hash as u64 key for compactness.
+    /// Single-color conversion cache: `(hash-prefix, quantized_components)
+    /// → (r, g, b)`. Used by [`Self::convert_color`] (the legacy /
+    /// default-Perceptual path). Uses first 8 bytes of hash as u64 key
+    /// for compactness.
     color_cache: HashMap<(u64, [u16; 4]), (f64, f64, f64)>,
+    /// Per-intent single-color conversion cache: `(hash-prefix,
+    /// quantized_components, intent_byte) → (r, g, b)`. Populated by
+    /// [`Self::convert_color_with_intent`] for non-Perceptual intents
+    /// so step 3's per-intent renderer plumbing can stay cheap when a
+    /// page calls the same conversion repeatedly under e.g. Saturation.
+    color_cache_intent: HashMap<IntentColorKey, (f64, f64, f64)>,
     /// Default system CMYK profile hash (if found at startup).
     default_cmyk_hash: Option<ProfileHash>,
     /// Raw bytes of the system CMYK profile (for re-registration in render threads).
@@ -287,6 +342,7 @@ impl IccCache {
             profiles: HashMap::new(),
             transforms: HashMap::new(),
             color_cache: HashMap::new(),
+            color_cache_intent: HashMap::new(),
             default_cmyk_hash: None,
             system_cmyk_bytes: None,
             raw_bytes: HashMap::new(),
@@ -480,6 +536,12 @@ impl IccCache {
             Arc<dyn TransformExecutor<u8> + Send + Sync>,
             Arc<dyn TransformExecutor<f64> + Send + Sync>,
         );
+        let mut chain_per_intent_8bit: [Option<Arc<dyn TransformExecutor<u8> + Send + Sync>>; 4] =
+            Default::default();
+        let mut chain_per_intent_f64: [Option<Arc<dyn TransformExecutor<f64> + Send + Sync>>; 4] =
+            Default::default();
+        let mut chain_stage1_per_intent: [Option<Arc<perceptual::HandRolledChainStage1Rgb>>; 4] =
+            Default::default();
         let chain_data: Option<ChainPair> = if self.proofing_enabled
             && let Some(oi_hash) = self.default_cmyk_hash
             && oi_hash != hash
@@ -491,67 +553,135 @@ impl IccCache {
             let oi_layout_8 = Layout::Rgba;
             let oi_layout_f64 = Layout::Rgba;
 
-            let mut stage1_8bit_opt = None;
-            for &intent in &intents {
-                let options = TransformOptions {
-                    rendering_intent: intent,
-                    ..TransformOptions::default()
+            // Stage 2 (`OutputIntent → sRGB`): prefer OI's hand-rolled
+            // CLUT4 over its moxcms transform so chain output matches
+            // direct DeviceCMYK conversion at the byte level. The same
+            // stage-2 is reused across every intent's chain.
+            let stage2_8bit: Arc<dyn TransformExecutor<u8> + Send + Sync> =
+                if let Some(oi_clut) = oi_cached.clut4.clone() {
+                    Arc::new(Clut4ToRgb { clut4: oi_clut })
+                } else {
+                    oi_cached.transform_8bit.clone()
                 };
-                if let Ok(t) =
-                    profile.create_transform_8bit(src_layout_8, &oi_profile, oi_layout_8, options)
-                {
-                    stage1_8bit_opt = Some(t);
-                    break;
-                }
-            }
-            let mut stage1_f64_opt = None;
-            for &intent in &intents {
-                let options = TransformOptions {
-                    rendering_intent: intent,
-                    ..TransformOptions::default()
+            let stage2_f64: Arc<dyn TransformExecutor<f64> + Send + Sync> =
+                if let Some(oi_clut) = oi_cached.clut4.clone() {
+                    Arc::new(Clut4ToRgb { clut4: oi_clut })
+                } else {
+                    oi_cached.transform_f64.clone()
                 };
-                if let Ok(t) = profile.create_transform_f64(
-                    src_layout_f64,
-                    &oi_profile,
-                    oi_layout_f64,
-                    options,
-                ) {
-                    stage1_f64_opt = Some(t);
-                    break;
-                }
-            }
-            match (stage1_8bit_opt, stage1_f64_opt) {
-                (Some(s1_8), Some(s1_f)) => {
-                    // Stage 2 (`OutputIntent → sRGB`): prefer OI's hand-rolled
-                    // CLUT4 over its moxcms transform so chain output matches
-                    // direct DeviceCMYK conversion at the byte level.
-                    let stage2_8bit: Arc<dyn TransformExecutor<u8> + Send + Sync> =
-                        if let Some(oi_clut) = oi_cached.clut4.clone() {
-                            Arc::new(Clut4ToRgb { clut4: oi_clut })
-                        } else {
-                            oi_cached.transform_8bit.clone()
-                        };
-                    let stage2_f64: Arc<dyn TransformExecutor<f64> + Send + Sync> =
-                        if let Some(oi_clut) = oi_cached.clut4.clone() {
-                            Arc::new(Clut4ToRgb { clut4: oi_clut })
-                        } else {
-                            oi_cached.transform_f64.clone()
-                        };
+
+            // Hand-rolled chain stage 1 for RGB sources. moxcms's
+            // `create_transform` over-saturates sRGB-style first legs by
+            // ~5–15% (visible as the GWG 16.1 "X" marks), so we compose
+            // `source.A2B[i] → OI.B2A[i]` per-pixel using the same
+            // primitives moxcms exposes. Per-pixel composition (vs. an
+            // intermediate 17³ CLUT bake) avoids the quantization layer
+            // that drifts GWG 13.0's BG-vs-X match by ~6 RGB levels. Only
+            // n=3 (RGB) sources go through this path; CMYK sources keep
+            // using moxcms (no diagnostic shows that leg drifting).
+            //
+            // For each of the four ICC rendering intents we try to build
+            // a chain using that intent's tables on both sides. Intents
+            // whose A2B / B2A tables are missing (or whose profile is in
+            // an unsupported shape) skip silently and the slot stays
+            // `None`; lookup-time callers fall back to moxcms.
+            if n == 3 {
+                use moxcms::RenderingIntent;
+                for &intent in &[
+                    RenderingIntent::Perceptual,
+                    RenderingIntent::RelativeColorimetric,
+                    RenderingIntent::Saturation,
+                    RenderingIntent::AbsoluteColorimetric,
+                ] {
+                    let Some(stage1) =
+                        perceptual::HandRolledChainStage1Rgb::new(&profile, &oi_profile, intent)
+                    else {
+                        continue;
+                    };
+                    let stage1_arc = Arc::new(stage1);
                     let chain_8: Arc<dyn TransformExecutor<u8> + Send + Sync> =
                         Arc::new(ChainedTransform {
-                            stage1: s1_8,
-                            stage2: stage2_8bit,
+                            stage1: stage1_arc.clone(),
+                            stage2: stage2_8bit.clone(),
                             intermediate_n: 4,
                         });
                     let chain_f: Arc<dyn TransformExecutor<f64> + Send + Sync> =
                         Arc::new(ChainedTransform {
-                            stage1: s1_f,
-                            stage2: stage2_f64,
+                            stage1: stage1_arc.clone(),
+                            stage2: stage2_f64.clone(),
                             intermediate_n: 4,
                         });
-                    Some((chain_8, chain_f))
+                    let i = intent as usize;
+                    chain_per_intent_8bit[i] = Some(chain_8);
+                    chain_per_intent_f64[i] = Some(chain_f);
+                    chain_stage1_per_intent[i] = Some(stage1_arc);
                 }
-                _ => None,
+            }
+
+            // Default chain (used when the lookup path doesn't yet pass an
+            // intent — the current state of `convert_color`). Picks the
+            // Perceptual hand-rolled chain when available; otherwise falls
+            // back to moxcms's transform-driven build, preserving the
+            // n=4 CMYK source path.
+            let perceptual_idx = moxcms::RenderingIntent::Perceptual as usize;
+            if let (Some(c8), Some(cf)) = (
+                chain_per_intent_8bit[perceptual_idx].clone(),
+                chain_per_intent_f64[perceptual_idx].clone(),
+            ) {
+                Some((c8, cf))
+            } else {
+                let mut stage1_8bit_opt: Option<Arc<dyn TransformExecutor<u8> + Send + Sync>> =
+                    None;
+                let mut stage1_f64_opt: Option<Arc<dyn TransformExecutor<f64> + Send + Sync>> =
+                    None;
+                for &intent in &intents {
+                    let options = TransformOptions {
+                        rendering_intent: intent,
+                        ..TransformOptions::default()
+                    };
+                    if let Ok(t) = profile.create_transform_8bit(
+                        src_layout_8,
+                        &oi_profile,
+                        oi_layout_8,
+                        options,
+                    ) {
+                        stage1_8bit_opt = Some(t);
+                        break;
+                    }
+                }
+                for &intent in &intents {
+                    let options = TransformOptions {
+                        rendering_intent: intent,
+                        ..TransformOptions::default()
+                    };
+                    if let Ok(t) = profile.create_transform_f64(
+                        src_layout_f64,
+                        &oi_profile,
+                        oi_layout_f64,
+                        options,
+                    ) {
+                        stage1_f64_opt = Some(t);
+                        break;
+                    }
+                }
+                match (stage1_8bit_opt, stage1_f64_opt) {
+                    (Some(s1_8), Some(s1_f)) => {
+                        let chain_8: Arc<dyn TransformExecutor<u8> + Send + Sync> =
+                            Arc::new(ChainedTransform {
+                                stage1: s1_8,
+                                stage2: stage2_8bit,
+                                intermediate_n: 4,
+                            });
+                        let chain_f: Arc<dyn TransformExecutor<f64> + Send + Sync> =
+                            Arc::new(ChainedTransform {
+                                stage1: s1_f,
+                                stage2: stage2_f64,
+                                intermediate_n: 4,
+                            });
+                        Some((chain_8, chain_f))
+                    }
+                    _ => None,
+                }
             }
         } else {
             None
@@ -628,6 +758,9 @@ impl IccCache {
             CachedTransform {
                 transform_8bit,
                 transform_f64,
+                chain_per_intent_8bit,
+                chain_per_intent_f64,
+                chain_stage1_per_intent,
                 n,
                 is_lab,
                 clut4,
@@ -652,6 +785,9 @@ impl IccCache {
             CachedTransform {
                 transform_8bit: Arc::new(GrayToRgbIdentity),
                 transform_f64: Arc::new(GrayToRgbIdentity),
+                chain_per_intent_8bit: Default::default(),
+                chain_per_intent_f64: Default::default(),
+                chain_stage1_per_intent: Default::default(),
                 n: 1,
                 is_lab: false,
                 clut4: None,
@@ -659,6 +795,34 @@ impl IccCache {
             },
         );
         Some(hash)
+    }
+
+    /// Convert RGB components through the proofing chain's stage 1 to
+    /// the OutputIntent's CMYK ink values. Returns `None` when no
+    /// hand-rolled chain exists for this profile (the document isn't
+    /// PDF/X, or the profile shape is unsupported), in which case the
+    /// caller should leave `DeviceColor::native_cmyk` as `None` and the
+    /// renderer falls back to its sRGB-derived approximation. The
+    /// `intent` parameter selects which per-intent chain to use; falls
+    /// back to the Perceptual chain when the requested intent slot is
+    /// empty.
+    pub fn convert_to_oi_cmyk(
+        &self,
+        hash: &ProfileHash,
+        components: &[f64],
+        intent: RenderingIntent,
+    ) -> Option<[f64; 4]> {
+        let cached = self.transforms.get(hash)?;
+        if cached.n != 3 {
+            return None;
+        }
+        let stage1 = cached.chain_stage1_per_intent[intent as usize]
+            .as_ref()
+            .or(cached.chain_stage1_per_intent[RenderingIntent::Perceptual as usize].as_ref())?;
+        let r = components.first().copied().unwrap_or(0.0).clamp(0.0, 1.0);
+        let g = components.get(1).copied().unwrap_or(0.0).clamp(0.0, 1.0);
+        let b = components.get(2).copied().unwrap_or(0.0).clamp(0.0, 1.0);
+        Some(stage1.sample_cmyk_f64(r, g, b))
     }
 
     /// Convert a single color through an ICC profile to sRGB.
@@ -730,6 +894,110 @@ impl IccCache {
         Some(result)
     }
 
+    /// Cached single-color conversion under a specific rendering
+    /// intent. Delegates to the legacy [`Self::convert_color`] for
+    /// Perceptual (which uses the Perceptual chain stored in
+    /// `transform_f64` and the Perceptual-keyed cache); for the other
+    /// intents it goes through [`Self::convert_color_readonly_with_intent`]
+    /// and caches per-intent.
+    pub fn convert_color_with_intent(
+        &mut self,
+        hash: &ProfileHash,
+        components: &[f64],
+        intent: RenderingIntent,
+    ) -> Option<(f64, f64, f64)> {
+        if matches!(intent, RenderingIntent::Perceptual) {
+            return self.convert_color(hash, components);
+        }
+        // Quantize for cache key. Have to recompute here because
+        // `convert_color_readonly_with_intent` doesn't return the
+        // quantized buffer. The arithmetic mirrors `convert_color`.
+        let cached = self.transforms.get(hash)?;
+        let n = cached.n as usize;
+        let is_lab = cached.is_lab;
+        let mut src = vec![0.0f64; n];
+        for (i, s) in src.iter_mut().enumerate() {
+            let v = components.get(i).copied().unwrap_or(0.0);
+            *s = if is_lab {
+                match i {
+                    0 => (v / 100.0).clamp(0.0, 1.0),
+                    _ => ((v + 128.0) / 255.0).clamp(0.0, 1.0),
+                }
+            } else {
+                v.clamp(0.0, 1.0)
+            };
+        }
+        let hash_prefix = u64::from_le_bytes(hash[..8].try_into().ok()?);
+        let mut quantized = [0u16; 4];
+        for (i, &c) in src.iter().take(4).enumerate() {
+            quantized[i] = (c * 65535.0).round() as u16;
+        }
+        let cache_key = (hash_prefix, quantized, intent as u8);
+        if let Some(&hit) = self.color_cache_intent.get(&cache_key) {
+            return Some(hit);
+        }
+        let result = self.convert_color_readonly_with_intent(hash, components, intent)?;
+        if self.color_cache_intent.len() < 65536 {
+            self.color_cache_intent.insert(cache_key, result);
+        }
+        Some(result)
+    }
+
+    /// Convert a single color through an ICC profile using a specific
+    /// rendering intent. Falls back to the cached default chain (built
+    /// from the Perceptual tables) when no per-intent chain is
+    /// available — that path matches [`Self::convert_color_readonly`]
+    /// byte-for-byte and is the common case for non-PDF/X documents and
+    /// CMYK source profiles.
+    pub fn convert_color_readonly_with_intent(
+        &self,
+        hash: &ProfileHash,
+        components: &[f64],
+        intent: RenderingIntent,
+    ) -> Option<(f64, f64, f64)> {
+        let cached = self.transforms.get(hash)?;
+        let n = cached.n as usize;
+        let is_lab = cached.is_lab;
+
+        let mut src = vec![0.0f64; n];
+        for (i, s) in src.iter_mut().enumerate() {
+            let v = components.get(i).copied().unwrap_or(0.0);
+            *s = if is_lab {
+                match i {
+                    0 => (v / 100.0).clamp(0.0, 1.0),
+                    _ => ((v + 128.0) / 255.0).clamp(0.0, 1.0),
+                }
+            } else {
+                v.clamp(0.0, 1.0)
+            };
+        }
+
+        // CMYK profiles: route through the pre-baked CLUT4 (no per-intent
+        // variant exists on this path; intent-driven CMYK B2A selection
+        // is deferred until the chain-side per-intent OI bake).
+        if n == 4
+            && let Some(clut) = cached.clut4.as_ref()
+        {
+            let (r, g, b) = sample_clut4_single_f64(clut, src[0], src[1], src[2], src[3]);
+            return Some((r, g, b));
+        }
+
+        let transform = cached.chain_per_intent_f64[intent as usize]
+            .as_ref()
+            .unwrap_or(&cached.transform_f64);
+        let mut dst = [0.0f64; 3];
+        if transform.transform(&src, &mut dst).is_err() {
+            return None;
+        }
+
+        let dst = bpc_post_correct(dst, cached.bpc_params.as_ref());
+        Some((
+            dst[0].clamp(0.0, 1.0),
+            dst[1].clamp(0.0, 1.0),
+            dst[2].clamp(0.0, 1.0),
+        ))
+    }
+
     /// Convert a single color through an ICC profile (read-only, no caching).
     ///
     /// Same as `convert_color` but takes `&self` instead of `&mut self`,
@@ -774,6 +1042,60 @@ impl IccCache {
             dst[1].clamp(0.0, 1.0),
             dst[2].clamp(0.0, 1.0),
         ))
+    }
+
+    /// Bulk-convert 8-bit image samples through an ICC profile to RGB
+    /// using a specific rendering intent. Falls back to the cached
+    /// default 8-bit transform (built from the Perceptual tables) when
+    /// no per-intent chain is available — that path matches
+    /// [`Self::convert_image_8bit`] byte-for-byte.
+    pub fn convert_image_8bit_with_intent(
+        &self,
+        hash: &ProfileHash,
+        samples: &[u8],
+        pixel_count: usize,
+        intent: RenderingIntent,
+    ) -> Option<Vec<u8>> {
+        let cached = self.transforms.get(hash)?;
+        let n = cached.n as usize;
+        let expected_len = pixel_count * n;
+        if samples.len() < expected_len {
+            return None;
+        }
+
+        // CMYK profiles route through the pre-baked CLUT4. Per-intent
+        // CMYK B2A selection on this side of the chain is deferred —
+        // step 4 will revisit when BPC + AbsCol land.
+        if let Some(clut) = &cached.clut4 {
+            return Some(apply_clut4_cmyk_to_rgb(
+                clut,
+                &samples[..expected_len],
+                pixel_count,
+            ));
+        }
+
+        let transform = cached.chain_per_intent_8bit[intent as usize]
+            .as_ref()
+            .unwrap_or(&cached.transform_8bit);
+        let src = &samples[..expected_len];
+        let mut dst = vec![0u8; pixel_count * 3];
+        match transform.transform(src, &mut dst) {
+            Ok(()) => {
+                if let Some(p) = cached.bpc_params.as_ref() {
+                    for px in dst.chunks_exact_mut(3) {
+                        let out = apply_bpc_rgb_u8([px[0], px[1], px[2]], p);
+                        px[0] = out[0];
+                        px[1] = out[1];
+                        px[2] = out[2];
+                    }
+                }
+                Some(dst)
+            }
+            Err(e) => {
+                eprintln!("[ICC] Image transform failed (intent {intent:?}): {e}");
+                None
+            }
+        }
     }
 
     /// Bulk-convert 8-bit image samples through an ICC profile to RGB.

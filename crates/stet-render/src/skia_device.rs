@@ -3773,8 +3773,22 @@ fn render_group(
             // 907 page 28's chart panels, where the existing sRGB
             // contribution-extraction path correctly preserves anti-aliased
             // gray strokes.
+            //
+            // GWG 16.1 ("Transparency Basic Blend Modes — ICCBasedRGB")
+            // exercises the same DeviceCMYK page group but the parent is
+            // *non-isolated*, so the `parent_group_isolated` gate refused
+            // to fire and every separable blend swatch fell back to sRGB
+            // blending (visible as the test's "X" markers). PDF/X
+            // workflows already declare their target compositing space via
+            // `/OutputIntents`, and the proofing chain in
+            // `register_profile_with_n` flips `IccCache::proofing_enabled`
+            // on once that's been honoured. Use that as the PDF/X-specific
+            // signal for "blend in DeviceCMYK regardless of group
+            // isolation"; non-proofing documents (907 p28 et al.) keep
+            // the original `parent_group_isolated` requirement.
+            let proofing_enabled = ctx.icc.is_some_and(|c| c.proofing_enabled());
             let cmyk_group_blend = !params.isolated
-                && ctx.parent_group_isolated
+                && (ctx.parent_group_isolated || proofing_enabled)
                 && params.blend_mode != 0
                 && params.color_space == GroupColorSpace::DeviceCMYK
                 && needs_group_cmyk
@@ -7633,7 +7647,23 @@ fn update_cmyk_buffer_for_fill(
     // under the paint (knockout) so a later overprint sees "no process ink"
     // and falls into the multiplicative-blend branch that preserves the
     // spot's visible contribution in the pixmap.
-    let is_custom_spot = params.painted_channels == 0 && !params.is_device_cmyk;
+    //
+    // The `process_cmyk.is_some()` guard distinguishes "Separation/DeviceN
+    // custom spot" (where `process_cmyk` is `Some((0,0,0,0))` per
+    // `separation_process_cmyk`) from "any other non-CMYK fill that
+    // happens to satisfy `painted_channels == 0 && !is_device_cmyk`" —
+    // notably DeviceRGB, DeviceGray, and ICCBased RGB. The latter need to
+    // deposit their full process CMYK into the buffer (via `native_cmyk`
+    // from the proofing chain or via the ICC reverse) so the
+    // `cmyk_group_blend` composite-back in `composite_non_isolated_cmyk`
+    // can blend them correctly. Without this guard, GWG 16.1's
+    // ICCBased-RGB swatches landed `(0,0,0,0)` in the form's CMYK
+    // buffer; every separable blend then composited the X mark against a
+    // zero source CMYK, painting the X with the form's source pixmap
+    // RGB unchanged and producing the test's "X visible" failure.
+    let is_custom_spot = params.painted_channels == 0
+        && !params.is_device_cmyk
+        && params.color.process_cmyk.is_some();
 
     // A DeviceN/Separation paint leaves "spot contribution" on the pixmap
     // when its full alt-CMYK (`native_cmyk`) differs from the process-only
@@ -8114,8 +8144,13 @@ fn update_cmyk_buffer_for_stroke(
 ) {
     // Custom spot strokes knockout the process CMYK plates — zero the buffer
     // under the stroke so later overprints fall into the multiplicative-blend
-    // branch (see update_cmyk_buffer_for_fill).
-    let is_custom_spot = params.painted_channels == 0 && !params.is_device_cmyk;
+    // branch (see update_cmyk_buffer_for_fill, including the
+    // `process_cmyk.is_some()` carve-out that keeps DeviceRGB / ICCBased-RGB
+    // strokes off this branch so their proofing-chain CMYK reaches the
+    // buffer).
+    let is_custom_spot = params.painted_channels == 0
+        && !params.is_device_cmyk
+        && params.color.process_cmyk.is_some();
     // See update_cmyk_buffer_for_fill for rationale.
     let has_spot_contrib = (is_custom_spot && params.color.native_cmyk.is_some())
         || matches!(

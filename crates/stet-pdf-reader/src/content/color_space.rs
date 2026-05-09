@@ -580,11 +580,33 @@ fn deviceN_process_cmyk(names: &[Vec<u8>], tints: &[f64]) -> Option<(f64, f64, f
     Some((1.0 - c_compl, 1.0 - m_compl, 1.0 - y_compl, 1.0 - k_compl))
 }
 
-/// Convert color components to DeviceColor, with optional ICC profile support.
+/// Convert color components to DeviceColor, with optional ICC profile
+/// support. Equivalent to
+/// [`components_to_device_color_icc_with_intent`] with the default
+/// Perceptual intent — preserved for callers (shading rasterization,
+/// recursive base/alt colour spaces) where the gstate intent isn't
+/// readily threadable.
 pub fn components_to_device_color_icc(
     cs: &ResolvedColorSpace,
     components: &[f64],
+    icc_cache: Option<&mut IccCache>,
+) -> DeviceColor {
+    components_to_device_color_icc_with_intent(cs, components, icc_cache, 0)
+}
+
+/// Convert color components to DeviceColor with an explicit ICC
+/// rendering intent. The `intent` byte mirrors the encoding on
+/// [`crate::content::graphics_state::PdfGraphicsState::rendering_intent`]
+/// (0=Perceptual, 1=RelCol, 2=Saturation, 3=AbsCol). Used by the main
+/// content interpreter so PDF/X rendering picks the per-intent ICC chain
+/// stored on `IccCache` (built in step 2 of the GWG 16.1 plan); for
+/// `intent == 0` (the default) this is byte-for-byte identical to
+/// [`components_to_device_color_icc`].
+pub fn components_to_device_color_icc_with_intent(
+    cs: &ResolvedColorSpace,
+    components: &[f64],
     mut icc_cache: Option<&mut IccCache>,
+    intent: u8,
 ) -> DeviceColor {
     match cs {
         ResolvedColorSpace::DeviceGray => {
@@ -632,7 +654,10 @@ pub fn components_to_device_color_icc(
                         cache.register_profile_with_n(data, Some(*n));
                     }
                 }
-                if let Some((r, g, b)) = cache.convert_color(&hash, components) {
+                let intent_enum = stet_graphics::icc::intent_from_pdf_byte(intent);
+                if let Some((r, g, b)) =
+                    cache.convert_color_with_intent(&hash, components, intent_enum)
+                {
                     // For 4-component (CMYK) ICC profiles, preserve the
                     // source CMYK values in native_cmyk for overprint simulation.
                     if *n == 4 {
@@ -648,12 +673,35 @@ pub fn components_to_device_color_icc(
                             process_cmyk: None,
                         };
                     }
+                    // For 3-component (RGB) ICC profiles in a PDF/X
+                    // proofing context, also stash the chain's
+                    // intermediate OutputIntent CMYK as `native_cmyk`.
+                    // The renderer's `cmyk_group_blend` gate
+                    // (`group_content_is_native_cmyk`) requires every
+                    // fill / stroke in a `/CS DeviceCMYK` group to carry
+                    // a `native_cmyk` value before it'll switch the
+                    // group's blend math from sRGB to CMYK; without this
+                    // GWG 16.1's ICCBasedRGB swatches blend in sRGB and
+                    // their separable-mode X markers stay visible.
+                    if *n == 3
+                        && let Some(cmyk) = cache.convert_to_oi_cmyk(&hash, components, intent_enum)
+                    {
+                        return DeviceColor {
+                            r,
+                            g,
+                            b,
+                            native_cmyk: Some((cmyk[0], cmyk[1], cmyk[2], cmyk[3])),
+                            process_cmyk: None,
+                        };
+                    }
                     return DeviceColor::from_rgb(r, g, b);
                 }
             }
             // Fall back to alternate color space if available (handles Lab, XYZ, etc.)
             if let Some(alt) = alternate {
-                return components_to_device_color_icc(alt, components, icc_cache);
+                return components_to_device_color_icc_with_intent(
+                    alt, components, icc_cache, intent,
+                );
             }
             // Last resort: device space based on component count
             match n {
@@ -691,7 +739,7 @@ pub fn components_to_device_color_icc(
                 let byte = lookup.get(offset + i).copied().unwrap_or(0);
                 base_components.push(byte as f64 / 255.0);
             }
-            components_to_device_color_icc(base, &base_components, icc_cache)
+            components_to_device_color_icc_with_intent(base, &base_components, icc_cache, intent)
         }
         ResolvedColorSpace::Separation {
             alt, tint_fn, name, ..
@@ -704,7 +752,7 @@ pub fn components_to_device_color_icc(
             let tint = components.first().copied().unwrap_or(0.0);
             let mut color = if let Some(func) = tint_fn {
                 let alt_components = func.evaluate(&[tint]);
-                components_to_device_color_icc(alt, &alt_components, icc_cache)
+                components_to_device_color_icc_with_intent(alt, &alt_components, icc_cache, intent)
             } else {
                 // Fallback without tint function
                 match alt.as_ref() {
@@ -750,7 +798,7 @@ pub fn components_to_device_color_icc(
         } => {
             let mut color = if let Some(func) = tint_fn {
                 let alt_components = func.evaluate(components);
-                components_to_device_color_icc(alt, &alt_components, icc_cache)
+                components_to_device_color_icc_with_intent(alt, &alt_components, icc_cache, intent)
             } else {
                 // Fallback: use first component as gray
                 let v = components.first().copied().unwrap_or(0.0);

@@ -21,8 +21,8 @@ use crate::objects::{PdfDict, PdfObj};
 use crate::resolver::Resolver;
 
 use self::color_space::{
-    ResolvedColorSpace, components_to_device_color_icc, painted_channels_for_cs,
-    register_icc_profile, resolve_color_space, resolve_color_space_obj, to_image_color_space,
+    ResolvedColorSpace, painted_channels_for_cs, register_icc_profile, resolve_color_space,
+    resolve_color_space_obj, to_image_color_space,
 };
 use self::graphics_state::{ColorSpaceRef, PdfGraphicsState};
 
@@ -1633,7 +1633,21 @@ impl<'a> ContentInterpreter<'a> {
     }
 
     fn op_ri(&mut self) -> Result<(), PdfError> {
-        // Rendering intent — record but don't enforce
+        // Pop the intent name and translate to the gstate byte code used
+        // by the ICC chain dispatch (matches `IccCache::intent_from_pdf_byte`).
+        let Some(top) = self.operand_stack.pop() else {
+            return Ok(());
+        };
+        let Some(name) = top.as_name() else {
+            return Ok(());
+        };
+        self.gstate.rendering_intent = match name {
+            b"Perceptual" => 0,
+            b"RelativeColorimetric" => 1,
+            b"Saturation" => 2,
+            b"AbsoluteColorimetric" => 3,
+            _ => 0,
+        };
         Ok(())
     }
 
@@ -2487,7 +2501,13 @@ impl<'a> ContentInterpreter<'a> {
             cs,
             ResolvedColorSpace::DeviceCMYK | ResolvedColorSpace::ICCBased { n: 4, .. }
         );
-        let mut color = components_to_device_color_icc(&cs, &nums, Some(&mut self.icc_cache));
+        let intent = self.gstate.rendering_intent;
+        let mut color = color_space::components_to_device_color_icc_with_intent(
+            &cs,
+            &nums,
+            Some(&mut self.icc_cache),
+            intent,
+        );
         self.cmyk_group_promote_color(&mut color);
         self.gstate.stroke_color = color;
         self.gstate.stroke_pattern = None;
@@ -2518,7 +2538,13 @@ impl<'a> ContentInterpreter<'a> {
             cs,
             ResolvedColorSpace::DeviceCMYK | ResolvedColorSpace::ICCBased { n: 4, .. }
         );
-        let mut color = components_to_device_color_icc(&cs, &nums, Some(&mut self.icc_cache));
+        let intent = self.gstate.rendering_intent;
+        let mut color = color_space::components_to_device_color_icc_with_intent(
+            &cs,
+            &nums,
+            Some(&mut self.icc_cache),
+            intent,
+        );
         self.cmyk_group_promote_color(&mut color);
         self.gstate.fill_color = color;
         self.gstate.fill_pattern = None;
@@ -5805,6 +5831,16 @@ impl<'a> ContentInterpreter<'a> {
         if let Some(b) = gs_dict.get_bool(b"TK") {
             self.gstate.text_knockout = b;
         }
+        // Rendering intent — feeds into the per-intent ICC chain dispatch.
+        if let Some(PdfObj::Name(ri)) = gs_dict.get(b"RI") {
+            self.gstate.rendering_intent = match ri.as_slice() {
+                b"Perceptual" => 0,
+                b"RelativeColorimetric" => 1,
+                b"Saturation" => 2,
+                b"AbsoluteColorimetric" => 3,
+                _ => 0,
+            };
+        }
 
         // Blend mode
         if let Some(bm) = gs_dict.get(b"BM") {
@@ -6599,10 +6635,12 @@ impl<'a> ContentInterpreter<'a> {
         for i in 0..n {
             nums.push(self.operand_stack[base + i].as_f64().unwrap_or(0.0));
         }
-        let color = color_space::components_to_device_color_icc(
+        let intent = self.gstate.rendering_intent;
+        let color = color_space::components_to_device_color_icc_with_intent(
             &underlying_cs,
             &nums,
             Some(&mut self.icc_cache),
+            intent,
         );
         if is_stroke {
             self.gstate.stroke_color = color;
