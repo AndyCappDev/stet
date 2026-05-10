@@ -91,6 +91,16 @@ pub struct Interpreter {
     /// ICC cache captured at `open_pdf` time; cloned into a new
     /// `PdfDocument` for each per-page render.
     pdf_icc_cache: Option<IccCache>,
+    /// Effective CMYK profile bytes for the current PDF — the document's
+    /// `/OutputIntents` profile when present, otherwise `None` (callers fall
+    /// back to `system_cmyk_bytes`). Threaded into `build_icc_cache_for_list`
+    /// so band renderers see the same CMYK profile the parse-time fills used.
+    pdf_cmyk_bytes: Option<Arc<Vec<u8>>>,
+    /// Whether the active PDF requested PDF/X-style proofing (the OI was
+    /// applied at parse time). Passed to `build_icc_cache_for_list` so
+    /// ICCBased source profiles in the display list get chained through the
+    /// OI for matching CMYK-group composite-back behaviour.
+    pdf_cmyk_proofing: bool,
     /// Active PostScript streaming session, if any. `render()` installs this
     /// and returns after the first `showpage`; `step_ps_page` uses it to
     /// resume eval for subsequent pages. Cleared when the program completes.
@@ -196,6 +206,8 @@ pub fn create_interpreter() -> Interpreter {
         system_cmyk_bytes: cmyk_bytes,
         pdf_bytes: None,
         pdf_icc_cache: None,
+        pdf_cmyk_bytes: None,
+        pdf_cmyk_proofing: false,
         ps_stream: None,
     }
 }
@@ -253,6 +265,8 @@ pub fn render(interp: &mut Interpreter, ps_data: &[u8], dpi: f64, filename: &str
     // PS rendering doesn't use the lazy-PDF state
     interp.pdf_bytes = None;
     interp.pdf_icc_cache = None;
+    interp.pdf_cmyk_bytes = None;
+    interp.pdf_cmyk_proofing = false;
     abandon_ps_stream(interp);
 
     // Enable display list capture
@@ -537,14 +551,30 @@ pub fn open_pdf(interp: &mut Interpreter, pdf_data: &[u8], dpi: f64) -> Result<J
     interp.reference_dpi = dpi;
     interp.pdf_bytes = None;
     interp.pdf_icc_cache = None;
+    interp.pdf_cmyk_bytes = None;
+    interp.pdf_cmyk_proofing = false;
     abandon_ps_stream(interp);
 
     let mut icc_cache = IccCache::new();
     icc_cache.load_cmyk_profile_bytes(DEFAULT_CMYK_ICC);
 
     // Parse structure only — page content streams are deferred.
-    let doc = stet_pdf_reader::PdfDocument::from_bytes_with_icc(pdf_data, icc_cache.clone())
+    let mut doc = stet_pdf_reader::PdfDocument::from_bytes_with_icc(pdf_data, icc_cache.clone())
         .map_err(|e| JsValue::from_str(&format!("PDF parse error: {}", e)))?;
+
+    // Apply the PDF's `/OutputIntents` profile as the effective default CMYK
+    // so PDF/X documents render through the document's own ISO Coated v2 (or
+    // equivalent) profile instead of the embedded fallback. This also
+    // pre-warms the sRGB→CMYK reverse and per-intent Lab→OI samplers the
+    // band renderers need (without them GWG 13.0 / 22.1 etc. show visible X
+    // markers in the WASM viewer because the proofing chain never fires).
+    // Mirrors the CLI's `render_dropped_pdf` and `run_pdf_input_png` paths.
+    if doc.apply_output_intent_as_default_cmyk() {
+        log("stet: applied PDF OutputIntent as default CMYK");
+    }
+    // Snapshot the now-OI-applied cache so per-page re-parses (in
+    // `ensure_pdf_page_rendered`) inherit the same proofing state.
+    icc_cache = doc.icc_cache().clone();
 
     let count = doc.page_count();
     let scale = dpi / 72.0;
@@ -567,6 +597,8 @@ pub fn open_pdf(interp: &mut Interpreter, pdf_data: &[u8], dpi: f64) -> Result<J
     // PDF parse state is xref + page tree only; there's no mutable render
     // state to preserve, so re-parsing per page is cheap.
     interp.pdf_bytes = Some(pdf_data.to_vec());
+    interp.pdf_cmyk_bytes = icc_cache.system_cmyk_bytes().cloned();
+    interp.pdf_cmyk_proofing = icc_cache.proofing_enabled();
     interp.pdf_icc_cache = Some(icc_cache);
 
     log(&format!("stet: open_pdf complete — {} pages (content streams deferred)", count));
@@ -683,10 +715,21 @@ macro_rules! ensure_page_caches {
                 ));
             }
             if $interp.page_icc[$page_idx].is_none() {
+                // For PDF/X documents we stashed the OutputIntent's CMYK bytes
+                // and the proofing flag in `open_pdf` after applying the OI.
+                // The band renderer's per-page cache must be built from those
+                // — using the embedded `system_cmyk_bytes` with proofing off
+                // would make ICCBased source profiles render through a
+                // different chain than the parse-time `native_cmyk` values
+                // expect, producing GWG 13.0 / 22.1 X markers in the WASM
+                // viewer that don't appear in the CLI.
+                let pdf_cmyk = $interp.pdf_cmyk_bytes.as_ref();
+                let cmyk_bytes = pdf_cmyk.unwrap_or(&$interp.system_cmyk_bytes);
+                let proofing = $interp.pdf_cmyk_proofing;
                 $interp.page_icc[$page_idx] = Some(stet_render::build_icc_cache_for_list(
                     &$interp.page_display_lists[$page_idx],
-                    Some(&$interp.system_cmyk_bytes),
-                    false,
+                    Some(cmyk_bytes),
+                    proofing,
                 ));
             }
             if $interp.page_image_cache[$page_idx].is_none() {
