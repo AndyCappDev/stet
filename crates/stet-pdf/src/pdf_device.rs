@@ -66,6 +66,16 @@ impl PdfDevice {
         self.pending_trim_box = Some((llx, lly, urx, ury));
     }
 
+    /// Set the page dimensions used for the next page. The PS interpreter
+    /// path drives this implicitly through `setpagedevice` + device-factory
+    /// re-creation; direct API users (e.g. PDF→PDF rewriting) call this
+    /// before each `replay_and_show` so per-page sizes can vary across
+    /// pages in the same output PDF.
+    pub fn set_page_size(&mut self, width: u32, height: u32) {
+        self.page_w = width;
+        self.page_h = height;
+    }
+
     /// Set an ICC output profile.
     ///
     /// Previously embedded as a PDF/X-3 OutputIntent, but the emitted output

@@ -215,9 +215,17 @@ pub fn build_content_stream(
     // Track which fonts this page uses (for per-page Resources/Font dict)
     let mut page_font_names: HashSet<String> = HashSet::new();
 
-    // First pass: scan Text elements to register fonts
+    // First pass: scan Text elements to register fonts. Also detect
+    // whether the page carries any Text elements at all — the PS path
+    // emits paired Text + glyph-path Fill elements (Text drives PDF
+    // text operators, the Fill is for the rasterizer); the PDF reader
+    // path emits only glyph-path Fills. Without a Text element to
+    // claim them, the glyph fills are the page's only text and must
+    // be written as paths.
+    let mut has_text_elements = false;
     for element in list.elements() {
         if let DisplayElement::Text { params } = element {
+            has_text_elements = true;
             let name = font_tracker.track(params).to_string();
             page_font_names.insert(name);
         }
@@ -266,9 +274,16 @@ pub fn build_content_stream(
                 continue;
             }
             // Skip glyph fills/strokes without flushing the text batch —
-            // these are interleaved with Text elements in the display list
-            DisplayElement::Fill { params, .. } if params.is_text_glyph => continue,
-            DisplayElement::Stroke { params, .. } if params.is_text_glyph => continue,
+            // these are interleaved with Text elements in the PS path.
+            // When the page has no Text elements (PDF reader input), the
+            // glyph paths are the only representation of the text and
+            // must fall through to be emitted as filled paths.
+            DisplayElement::Fill { params, .. } if params.is_text_glyph && has_text_elements => {
+                continue;
+            }
+            DisplayElement::Stroke { params, .. } if params.is_text_glyph && has_text_elements => {
+                continue;
+            }
             _ => {
                 // Flush any pending text batch before non-text element
                 flush_text_batch(&text_batch, font_tracker, &mut buf, &mut gs);
@@ -288,8 +303,8 @@ pub fn build_content_stream(
                 gs.fill_color = Some(PdfColor::Gray(10000));
             }
             DisplayElement::Fill { path, params } => {
-                // Skip glyph fills when we have Text elements for them
-                if params.is_text_glyph {
+                // Skip glyph fills when Text elements will draw them.
+                if params.is_text_glyph && has_text_elements {
                     continue;
                 }
                 emit_transfer(
@@ -347,8 +362,9 @@ pub fn build_content_stream(
                 }
             }
             DisplayElement::Stroke { path, params } => {
-                // Skip text glyph strokes (PaintType 2) when Text elements cover them
-                if params.is_text_glyph {
+                // Skip text glyph strokes (PaintType 2) when Text elements
+                // will draw them (PS path); emit as paths otherwise.
+                if params.is_text_glyph && has_text_elements {
                     continue;
                 }
                 let has_ctm = !is_identity(&params.ctm);
@@ -572,9 +588,14 @@ pub fn build_tile_content_stream(
     let mut bg_ucr_refs: Vec<BgUcrRef> = Vec::new();
     let mut page_font_names: HashSet<String> = HashSet::new();
 
-    // Register fonts used in tile
+    // Register fonts used in tile; also flag whether any Text element
+    // appears so glyph-path Fills aren't dropped when no Text drives them
+    // (PDF-reader input — see the equivalent comment in
+    // `build_content_stream`).
+    let mut has_text_elements = false;
     for element in list.elements() {
         if let DisplayElement::Text { params } = element {
+            has_text_elements = true;
             let name = font_tracker.track(params).to_string();
             page_font_names.insert(name);
         }
@@ -586,7 +607,7 @@ pub fn build_tile_content_stream(
         match element {
             DisplayElement::ErasePage => {} // skip in tile context
             DisplayElement::Fill { path, params } => {
-                if params.is_text_glyph {
+                if params.is_text_glyph && has_text_elements {
                     continue;
                 }
                 emit_transfer(
@@ -644,7 +665,7 @@ pub fn build_tile_content_stream(
                 }
             }
             DisplayElement::Stroke { path, params } => {
-                if params.is_text_glyph {
+                if params.is_text_glyph && has_text_elements {
                     continue;
                 }
                 let has_ctm = !is_identity(&params.ctm);

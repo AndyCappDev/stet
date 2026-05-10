@@ -391,10 +391,25 @@ fn main() {
             );
         }
         "pdf" => {
-            // `--device pdf` produces PDF from PostScript input — no PDF
-            // input path here, so --password does not apply.
-            let _ = &password;
-            run_pdf_mode(dpi, file_args, &icc_cfg, no_aa, page_filter);
+            // All-PDF inputs → fast path that bypasses the PS interpreter
+            // entirely (PdfDocument → DisplayList → PdfDevice). All-PS
+            // inputs → the existing pdfmark-driven path. A mix is rejected
+            // because the two pipelines aren't composable in one output.
+            let any_pdf = file_args.iter().any(|f| is_pdf_file(f));
+            let all_pdf = !file_args.is_empty() && file_args.iter().all(|f| is_pdf_file(f));
+            if any_pdf && !all_pdf {
+                eprintln!(
+                    "Error: --device pdf requires either all-PostScript or all-PDF inputs, not a mix"
+                );
+                std::process::exit(1);
+            }
+            if all_pdf {
+                run_pdf_input_pdf(&file_args, &icc_cfg, &page_filter, password.as_deref());
+            } else {
+                // PS input → PDF output. --password does not apply here.
+                let _ = &password;
+                run_pdf_mode(dpi, file_args, &icc_cfg, no_aa, page_filter);
+            }
         }
         "null" => {
             run_null_mode(dpi, file_args, &icc_cfg, no_aa, page_filter);
@@ -948,6 +963,7 @@ Examples:
     stet doc.ps                         # render PostScript
     stet --device png --pages 1 doc.pdf # render PDF page 1 to PNG
     stet --device pdf in.ps             # PostScript → PDF
+    stet --device pdf in.pdf            # PDF → PDF (content-fidelity rewrite)
     stet inspect doc.pdf                # show PDF structure
 
 Documentation: https://github.com/AndyCappDev/stet
@@ -1970,6 +1986,143 @@ fn run_pdf_input_png(
 
         eprintln!(
             "PDF render time: {:.3} seconds",
+            start.elapsed().as_secs_f64()
+        );
+    }
+}
+
+/// PDF input → PDF output. Mirrors `run_pdf_input_png`'s shape but feeds
+/// each page's display list directly into `PdfDevice` instead of
+/// rasterising. Content fidelity only — structural data (outline,
+/// annotations, metadata, layers, AcroForm, embedded files) does not
+/// round-trip in this stage.
+fn run_pdf_input_pdf(
+    file_args: &[String],
+    icc_cfg: &IccCliConfig,
+    page_filter: &Option<std::collections::HashSet<i32>>,
+    password: Option<&str>,
+) {
+    use stet_core::device::OutputDevice;
+
+    let icc_cache = build_icc_cache(icc_cfg);
+
+    for filename in file_args {
+        let data = std::fs::read(filename).unwrap_or_else(|e| {
+            eprintln!("Error: cannot read '{}': {}", filename, e);
+            std::process::exit(1);
+        });
+
+        let open_result = match password {
+            Some(pw) => {
+                PdfDocument::from_bytes_with_password(&data, icc_cache.clone(), pw.as_bytes())
+            }
+            None => PdfDocument::from_bytes_with_icc(&data, icc_cache.clone()),
+        };
+        let mut doc = open_result.unwrap_or_else(|e| {
+            match e {
+                stet_pdf_reader::PdfError::PasswordRequired => eprintln!(
+                    "Error: '{}' is password-protected (use --password)",
+                    filename
+                ),
+                _ => eprintln!("Error: cannot parse '{}': {}", filename, e),
+            }
+            std::process::exit(1);
+        });
+        if icc_cfg.use_output_intent
+            && icc_cfg.source_cmyk_path().is_none()
+            && doc.apply_output_intent_as_default_cmyk()
+        {
+            eprintln!("[ICC] Using PDF OutputIntent profile for {}", filename);
+        }
+
+        // Default output path: `<base>-out.pdf` to avoid the default name
+        // colliding with the input. If a user actually feeds us
+        // `foo-out.pdf` the would-be output is `foo-out-out.pdf` which is
+        // safe — the collision check below is the defense-in-depth.
+        let base = filename
+            .strip_suffix(".pdf")
+            .or_else(|| filename.strip_suffix(".PDF"))
+            .unwrap_or(filename);
+        let output_path = format!("{}-out.pdf", base);
+
+        // Refuse to overwrite the input. Compare canonical forms when
+        // both exist on disk; fall back to a string compare otherwise.
+        let same_path = match (
+            std::fs::canonicalize(filename).ok(),
+            std::fs::canonicalize(&output_path).ok(),
+        ) {
+            (Some(a), Some(b)) => a == b,
+            _ => std::path::Path::new(filename) == std::path::Path::new(&output_path),
+        };
+        if same_path {
+            eprintln!(
+                "Error: refusing to overwrite input '{}' (rename the input file)",
+                filename
+            );
+            std::process::exit(1);
+        }
+
+        let start = std::time::Instant::now();
+        let page_count = doc.page_count();
+        eprintln!("\n{}", "=".repeat(60));
+        eprintln!(
+            "Processing PDF: {} ({} pages) → {}",
+            filename, page_count, output_path
+        );
+        eprintln!("{}", "=".repeat(60));
+
+        let mut device = PdfDevice::new(0, 0, 72.0);
+        let mut pages_emitted = 0;
+
+        for page in 0..page_count {
+            let page_1based = page as i32 + 1;
+            if let Some(filter) = page_filter
+                && !filter.contains(&page_1based)
+            {
+                continue;
+            }
+
+            let (w_pts, h_pts) = match doc.page_size(page) {
+                Ok(sz) => sz,
+                Err(e) => {
+                    eprintln!("  Page {}: page_size error: {}", page_1based, e);
+                    continue;
+                }
+            };
+
+            let display_list = match doc.render_page(page, 72.0) {
+                Ok(dl) => dl,
+                Err(e) => {
+                    eprintln!("  Page {}: render error: {}", page_1based, e);
+                    continue;
+                }
+            };
+
+            // dpi=72 above means the DisplayList is in points; treat the
+            // PDF writer's pixel dims as points by keeping the device at
+            // dpi=72 too (scale = 1.0 throughout).
+            device.set_page_size(w_pts.round().max(1.0) as u32, h_pts.round().max(1.0) as u32);
+
+            if let Err(e) = device.replay_and_show(display_list, &output_path) {
+                eprintln!("  Page {}: replay error: {}", page_1based, e);
+                continue;
+            }
+            pages_emitted += 1;
+            eprintln!("  Page {}: {:.0}x{:.0} pts", page_1based, w_pts, h_pts);
+        }
+
+        if pages_emitted == 0 {
+            eprintln!("Error: no pages emitted for '{}'", filename);
+            std::process::exit(1);
+        }
+
+        if let Err(e) = device.finish() {
+            eprintln!("Error: writing '{}': {}", output_path, e);
+            std::process::exit(1);
+        }
+
+        eprintln!(
+            "PDF rewrite time: {:.3} seconds",
             start.elapsed().as_secs_f64()
         );
     }
