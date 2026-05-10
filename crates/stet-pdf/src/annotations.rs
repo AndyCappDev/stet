@@ -4,12 +4,12 @@
 
 //! PDF annotation (`/Annot`) writer.
 //!
-//! Consumes [`stet_core::pdfmark::AnnotationRecord`] entries from
-//! `Context::pdfmark_buffer` and emits one PDF indirect object per
+//! Consumes [`stet_graphics::document_structure::AnnotationRecord`] entries
+//! from `Context::doc_structure` and emits one PDF indirect object per
 //! annotation. Per-page annotations are collected into the page dict's
 //! `/Annots` array at page-build time.
 
-use stet_core::pdfmark::{
+use stet_graphics::document_structure::{
     AnnotationRecord, AnnotationSubtype, AnnotationTarget, Border, LinkHighlight,
     TextAnnotationIcon, ViewSpec, WidgetAnnotation,
 };

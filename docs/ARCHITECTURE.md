@@ -184,13 +184,16 @@ The `pdfmark` operator (Adobe / GhostScript convention) feeds a
 producer/consumer pipeline that's independent of the paint pipeline.
 PostScript code issues `[ … /TYPETAG pdfmark` calls during
 interpretation; the dispatcher in `stet-ops::pdfmark_ops` parses each
-call into a [`stet_core::pdfmark::PdfMarkRecord`] and pushes it onto
-`Context::pdfmark_buffer`. The `PdfDevice` reads that buffer at
-end-of-job (in `build_info_dict()` and forthcoming outline / annotation
-writers) and merges every record into the output PDF's catalog, info
-dictionary, page tree, and so on. Non-PDF output devices simply never
-read the buffer, which keeps `pdfmark` a true no-op for screen / viewer
-rendering.
+call into a [`stet_graphics::document_structure::StructuralRecord`] and
+pushes it onto `Context::doc_structure`. The `PdfDevice` reads that
+buffer at end-of-job (in `build_info_dict()` and the outline / annotation
+/ names / forms / attachments writers) and merges every record into the
+output PDF's catalog, info dictionary, page tree, and so on.
+`Context::doc_structure` is the same `DocumentStructure` type
+`stet-pdf-reader` populates when parsing a PDF, so PDF→PDF round-tripping
+goes through the same writer codepath as PostScript → PDF — there is no
+separate bridge. Non-PDF output devices simply never read the buffer,
+which keeps structural data a true no-op for screen / viewer rendering.
 
 The buffer is **document-global**: `save` / `restore` do not roll it
 back, because pdfmark records are catalog-scoped facts about the PDF

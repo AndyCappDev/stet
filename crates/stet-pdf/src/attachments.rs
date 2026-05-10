@@ -2,20 +2,20 @@
 // Copyright (c) 2026 Scott Bowman
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! `/EMBED` pdfmark writer.
+//! `/EMBED` writer.
 //!
-//! Consumes [`stet_core::pdfmark::EmbedRecord`] entries from
-//! `Context::pdfmark_buffer` and emits one `/Filespec` dict + one
-//! `/EmbeddedFile` stream per record. The writer assembles them into
-//! a single-leaf `/EmbeddedFiles` name tree (sorted by filename) that
-//! the caller plugs into `/Catalog /Names /EmbeddedFiles`.
+//! Consumes [`stet_graphics::document_structure::EmbedRecord`] entries from
+//! `Context::doc_structure` and emits one `/Filespec` dict + one
+//! `/EmbeddedFile` stream per record. The writer assembles them into a
+//! single-leaf `/EmbeddedFiles` name tree (sorted by filename) that the
+//! caller plugs into `/Catalog /Names /EmbeddedFiles`.
 //!
-//! The single-leaf layout is fine for the document sizes pdfmark
-//! authoring targets (handfuls of attachments). If a use case ever
-//! needs deep trees, `build_embedded_files_leaf` can be split into a
-//! `/Kids` hierarchy without changing the caller surface.
+//! The single-leaf layout is fine for the document sizes embed authoring
+//! targets (handfuls of attachments). If a use case ever needs deep trees,
+//! `build_embedded_files_leaf` can be split into a `/Kids` hierarchy
+//! without changing the caller surface.
 
-use stet_core::pdfmark::EmbedRecord;
+use stet_graphics::document_structure::EmbedRecord;
 
 use crate::pdf_objects::PdfObj;
 use crate::pdf_writer::PdfWriter;

@@ -4,16 +4,15 @@
 
 //! PDF `/Names /Dests` name-tree writer.
 //!
-//! Consumes [`stet_core::pdfmark::DestRecord`] entries from
-//! `Context::pdfmark_buffer` and emits a single-leaf name tree that
-//! the PDF reader resolves named destinations against. PDF's name-tree
-//! shape is a B-tree-style hierarchy for efficient lookup at scale; for
-//! MVP-sized documents (~hundreds of dests at most), one flat leaf
-//! suffices and Acrobat / poppler / pdfium handle it correctly. If the
-//! document grows past that, the writer can be extended to split into
-//! intermediate /Kids nodes.
+//! Consumes [`stet_graphics::document_structure::DestRecord`] entries from
+//! `Context::doc_structure` and emits a single-leaf name tree that the PDF
+//! reader resolves named destinations against. PDF's name-tree shape is a
+//! B-tree-style hierarchy for efficient lookup at scale; for MVP-sized
+//! documents (~hundreds of dests at most), one flat leaf suffices and Acrobat
+//! / poppler / pdfium handle it correctly. If the document grows past that,
+//! the writer can be extended to split into intermediate /Kids nodes.
 
-use stet_core::pdfmark::{DestRecord, ViewSpec};
+use stet_graphics::document_structure::{DestRecord, ViewSpec};
 
 use crate::pdf_objects::PdfObj;
 use crate::pdf_writer::PdfWriter;

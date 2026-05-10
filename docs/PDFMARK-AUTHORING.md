@@ -606,8 +606,8 @@ rendering paths leave it out.
 
 ## Buffer lifecycle
 
-`pdfmark` records live on `Context::pdfmark_buffer`
-(`stet_core::pdfmark::PdfMarkBuffer`):
+`pdfmark` records live on `Context::doc_structure`
+(`stet_graphics::document_structure::DocumentStructure`):
 
 - Records are **document-global**, not VM-level. `save` / `restore` do
   not roll the buffer back; pdfmark records issued before a `restore`
@@ -637,12 +637,12 @@ arranged for `pdfmark` to be defined (it shouldn't be — see above).
 
 ## Extending the record surface
 
-The `stet_core::pdfmark` module is a stable extension point. Future
-type-tags (Tagged PDF, more annotation subtypes) will land as new
-variants on `PdfMarkRecord` and friends, so the public enums there
-are marked `#[non_exhaustive]`:
+The `stet_graphics::document_structure` module is a stable extension
+point. Future type-tags (Tagged PDF, more annotation subtypes) will
+land as new variants on `StructuralRecord` and friends, so the public
+enums there are marked `#[non_exhaustive]`:
 
-- `PdfMarkRecord` — top-level record kind dispatched on type-tag
+- `StructuralRecord` — top-level record kind dispatched on type-tag
 - `AnnotationSubtype`, `AnnotationTarget` — annotation kinds and targets
 - `OutlineDestination`, `OutlineAction`, `GoToTarget`, `ViewSpec` —
   destination/action shapes

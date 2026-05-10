@@ -16,7 +16,7 @@
 //!
 //! The [`pdfmark_ops`] module implements Adobe's `pdfmark` authoring
 //! bridge — PostScript code issues `[ … /TYPETAG pdfmark` calls and
-//! records land on `Context::pdfmark_buffer` for the PDF output device
+//! records land on `Context::doc_structure` for the PDF output device
 //! to consume. Currently recognised type-tags: `/DOCINFO` (Info dict),
 //! `/OUT` (outline / bookmark), `/ANN` (Link / Text / FreeText
 //! annotations), `/DEST` (named destination contributing to

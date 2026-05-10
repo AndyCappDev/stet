@@ -58,7 +58,6 @@ pub mod glyph_cache;
 pub mod graphics_state;
 pub mod name;
 pub mod object;
-pub mod pdfmark;
 pub mod save_stack;
 pub mod stack;
 pub mod string_store;

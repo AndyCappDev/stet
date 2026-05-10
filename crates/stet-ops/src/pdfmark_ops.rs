@@ -9,9 +9,10 @@
 //! operand stack down to a `[` mark, treats the topmost item below
 //! `pdfmark` as the type-tag name, and treats everything between the
 //! mark and the type-tag as alternating key/value pairs. The dispatch
-//! routes the parsed payload into [`stet_core::pdfmark::PdfMarkBuffer`]
-//! on `Context`. The PDF output device drains that buffer at end-of-job;
-//! non-PDF devices simply discard it.
+//! routes the parsed payload into
+//! [`stet_graphics::document_structure::DocumentStructure`] on `Context`.
+//! The PDF output device drains that buffer at end-of-job; non-PDF
+//! devices simply discard it.
 //!
 //! Currently recognised type-tags: `/DOCINFO` (document Info dict),
 //! `/OUT` (outline / bookmark entry), `/ANN` (Link / Text / FreeText /
@@ -31,11 +32,11 @@ use stet_core::context::Context;
 use stet_core::dict::DictKey;
 use stet_core::error::PsError;
 use stet_core::object::{EntityId, PsObject, PsValue};
-use stet_core::pdfmark::{
+use stet_graphics::document_structure::{
     AnnotationRecord, AnnotationSubtype, AnnotationTarget, Border, ChoiceOption, DestRecord,
     DocDate, DocInfoRecord, EmbedRecord, FieldType, FieldValue, FormRecord, GoToTarget,
     LinkHighlight, MetadataRecord, OutlineAction, OutlineDestination, OutlineRecord,
-    PageAdditionalActions, PageBoxes, PageOverrideRecord, PageOverrideScope, PdfMarkRecord,
+    PageAdditionalActions, PageBoxes, PageOverrideRecord, PageOverrideScope, StructuralRecord,
     TextAnnotationIcon, TrappedState, ViewSpec, ViewerPrefsRecord, WidgetAnnotation,
 };
 
@@ -87,52 +88,52 @@ pub fn op_pdfmark(ctx: &mut Context) -> Result<(), PsError> {
     match tag_bytes.as_slice() {
         b"DOCINFO" => {
             if let Some(rec) = parse_docinfo(ctx, &payload) {
-                ctx.pdfmark_buffer.push(PdfMarkRecord::DocInfo(rec));
+                ctx.doc_structure.push(StructuralRecord::DocInfo(rec));
             }
         }
         b"OUT" => {
             if let Some(rec) = parse_outline(ctx, &payload) {
-                ctx.pdfmark_buffer.push(PdfMarkRecord::Outline(rec));
+                ctx.doc_structure.push(StructuralRecord::Outline(rec));
             }
         }
         b"ANN" => {
             if let Some(rec) = parse_annotation(ctx, &payload) {
-                ctx.pdfmark_buffer.push(PdfMarkRecord::Annotation(rec));
+                ctx.doc_structure.push(StructuralRecord::Annotation(rec));
             }
         }
         b"DEST" => {
             if let Some(rec) = parse_dest(ctx, &payload) {
-                ctx.pdfmark_buffer.push(PdfMarkRecord::Dest(rec));
+                ctx.doc_structure.push(StructuralRecord::Dest(rec));
             }
         }
         b"PAGE" => {
             if let Some(rec) = parse_page_override(ctx, &payload, false) {
-                ctx.pdfmark_buffer.push(PdfMarkRecord::PageOverride(rec));
+                ctx.doc_structure.push(StructuralRecord::PageOverride(rec));
             }
         }
         b"PAGES" => {
             if let Some(rec) = parse_page_override(ctx, &payload, true) {
-                ctx.pdfmark_buffer.push(PdfMarkRecord::PageOverride(rec));
+                ctx.doc_structure.push(StructuralRecord::PageOverride(rec));
             }
         }
         b"VIEWERPREFERENCES" => {
             if let Some(rec) = parse_viewer_prefs(ctx, &payload) {
-                ctx.pdfmark_buffer.push(PdfMarkRecord::ViewerPrefs(rec));
+                ctx.doc_structure.push(StructuralRecord::ViewerPrefs(rec));
             }
         }
         b"Metadata" => {
             if let Some(rec) = parse_metadata(ctx, &payload) {
-                ctx.pdfmark_buffer.push(PdfMarkRecord::Metadata(rec));
+                ctx.doc_structure.push(StructuralRecord::Metadata(rec));
             }
         }
         b"FORM" => {
             if let Some(rec) = parse_form(ctx, &payload) {
-                ctx.pdfmark_buffer.push(PdfMarkRecord::Form(rec));
+                ctx.doc_structure.push(StructuralRecord::Form(rec));
             }
         }
         b"EMBED" => {
             if let Some(rec) = parse_embed(ctx, &payload) {
-                ctx.pdfmark_buffer.push(PdfMarkRecord::Embed(rec));
+                ctx.doc_structure.push(StructuralRecord::Embed(rec));
             }
         }
         // Unknown type-tags silently emit nothing (Adobe convention).
@@ -819,7 +820,7 @@ fn resolve_annotation_page(ctx: &Context, payload: &[PsObject]) -> u32 {
     {
         return p;
     }
-    ctx.pdfmark_buffer.current_page + 1
+    ctx.doc_structure.current_page + 1
 }
 
 /// Parse an `/ANN pdfmark` payload. Records without a recognised
@@ -910,7 +911,7 @@ fn parse_page_override(
         } else {
             None
         }
-        .unwrap_or(ctx.pdfmark_buffer.current_page + 1);
+        .unwrap_or(ctx.doc_structure.current_page + 1);
         PageOverrideScope::Single(page)
     };
     let boxes = PageBoxes {
@@ -1076,8 +1077,8 @@ mod tests {
         push_docinfo_simple(&mut ctx);
         op_pdfmark(&mut ctx).unwrap();
         assert!(ctx.o_stack.is_empty());
-        assert_eq!(ctx.pdfmark_buffer.records().len(), 1);
-        let PdfMarkRecord::DocInfo(rec) = &ctx.pdfmark_buffer.records()[0] else {
+        assert_eq!(ctx.doc_structure.records().len(), 1);
+        let StructuralRecord::DocInfo(rec) = &ctx.doc_structure.records()[0] else {
             panic!("expected DocInfo record");
         };
         assert_eq!(rec.title.as_deref(), Some("Hello"));
@@ -1100,7 +1101,7 @@ mod tests {
         ctx.o_stack.push(PsObject::name_lit(unknown_id)).unwrap();
         op_pdfmark(&mut ctx).unwrap();
         assert!(ctx.o_stack.is_empty());
-        assert!(ctx.pdfmark_buffer.is_empty());
+        assert!(ctx.doc_structure.is_empty());
     }
 
     #[test]
@@ -1132,8 +1133,8 @@ mod tests {
         ctx.o_stack.push(PsObject::name_lit(docinfo_id)).unwrap();
         op_pdfmark(&mut ctx).unwrap();
         assert!(ctx.o_stack.is_empty());
-        assert_eq!(ctx.pdfmark_buffer.records().len(), 1);
-        let PdfMarkRecord::DocInfo(rec) = &ctx.pdfmark_buffer.records()[0] else {
+        assert_eq!(ctx.doc_structure.records().len(), 1);
+        let StructuralRecord::DocInfo(rec) = &ctx.doc_structure.records()[0] else {
             panic!("expected DocInfo record");
         };
         assert!(rec.title.is_none());
@@ -1154,7 +1155,7 @@ mod tests {
         ctx.o_stack.push(PsObject::name_lit(put_id)).unwrap();
         op_pdfmark(&mut ctx).unwrap();
         assert!(ctx.o_stack.is_empty());
-        assert!(ctx.pdfmark_buffer.is_empty());
+        assert!(ctx.doc_structure.is_empty());
     }
 
     #[test]
@@ -1189,7 +1190,7 @@ mod tests {
         ctx.o_stack.push(PsObject::name_lit(docinfo_id)).unwrap();
 
         op_pdfmark(&mut ctx).unwrap();
-        let PdfMarkRecord::DocInfo(rec) = &ctx.pdfmark_buffer.records()[0] else {
+        let StructuralRecord::DocInfo(rec) = &ctx.doc_structure.records()[0] else {
             panic!("expected DocInfo record");
         };
         assert_eq!(rec.title.as_deref(), Some("T"));
@@ -1221,8 +1222,8 @@ mod tests {
         push_outline_simple(&mut ctx);
         op_pdfmark(&mut ctx).unwrap();
         assert!(ctx.o_stack.is_empty());
-        assert_eq!(ctx.pdfmark_buffer.records().len(), 1);
-        let PdfMarkRecord::Outline(rec) = &ctx.pdfmark_buffer.records()[0] else {
+        assert_eq!(ctx.doc_structure.records().len(), 1);
+        let StructuralRecord::Outline(rec) = &ctx.doc_structure.records()[0] else {
             panic!("expected Outline record");
         };
         assert_eq!(rec.title, "Hello");
@@ -1242,7 +1243,7 @@ mod tests {
         ctx.o_stack.push(PsObject::int(2)).unwrap();
         ctx.o_stack.push(PsObject::name_lit(out_id)).unwrap();
         op_pdfmark(&mut ctx).unwrap();
-        assert!(ctx.pdfmark_buffer.is_empty());
+        assert!(ctx.doc_structure.is_empty());
     }
 
     #[test]
@@ -1259,7 +1260,7 @@ mod tests {
         ctx.o_stack.push(PsObject::int(-3)).unwrap();
         ctx.o_stack.push(PsObject::name_lit(out_id)).unwrap();
         op_pdfmark(&mut ctx).unwrap();
-        let PdfMarkRecord::Outline(rec) = &ctx.pdfmark_buffer.records()[0] else {
+        let StructuralRecord::Outline(rec) = &ctx.doc_structure.records()[0] else {
             panic!("expected Outline record");
         };
         assert_eq!(rec.count, Some(-3));
@@ -1279,7 +1280,7 @@ mod tests {
         ctx.o_stack.push(PsObject::int(-1)).unwrap();
         ctx.o_stack.push(PsObject::name_lit(out_id)).unwrap();
         op_pdfmark(&mut ctx).unwrap();
-        let PdfMarkRecord::Outline(rec) = &ctx.pdfmark_buffer.records()[0] else {
+        let StructuralRecord::Outline(rec) = &ctx.doc_structure.records()[0] else {
             panic!("expected Outline record");
         };
         assert!(rec.outline_level.is_none());
@@ -1315,7 +1316,7 @@ mod tests {
         ctx.o_stack.push(view_obj).unwrap();
         ctx.o_stack.push(PsObject::name_lit(out_id)).unwrap();
         op_pdfmark(&mut ctx).unwrap();
-        let PdfMarkRecord::Outline(rec) = &ctx.pdfmark_buffer.records()[0] else {
+        let StructuralRecord::Outline(rec) = &ctx.doc_structure.records()[0] else {
             panic!("expected Outline record");
         };
         match &rec.destination {
@@ -1363,7 +1364,7 @@ mod tests {
         ctx.o_stack.push(PsObject::dict(action_dict)).unwrap();
         ctx.o_stack.push(PsObject::name_lit(out_id)).unwrap();
         op_pdfmark(&mut ctx).unwrap();
-        let PdfMarkRecord::Outline(rec) = &ctx.pdfmark_buffer.records()[0] else {
+        let StructuralRecord::Outline(rec) = &ctx.doc_structure.records()[0] else {
             panic!("expected Outline record");
         };
         match &rec.destination {
@@ -1391,7 +1392,7 @@ mod tests {
             .unwrap();
         ctx.o_stack.push(PsObject::name_lit(out_id)).unwrap();
         op_pdfmark(&mut ctx).unwrap();
-        let PdfMarkRecord::Outline(rec) = &ctx.pdfmark_buffer.records()[0] else {
+        let StructuralRecord::Outline(rec) = &ctx.doc_structure.records()[0] else {
             panic!("expected Outline record");
         };
         match &rec.destination {
@@ -1453,7 +1454,7 @@ mod tests {
         ctx.o_stack.push(PsObject::name_lit(ann_id)).unwrap();
         op_pdfmark(&mut ctx).unwrap();
 
-        let PdfMarkRecord::Annotation(rec) = &ctx.pdfmark_buffer.records()[0] else {
+        let StructuralRecord::Annotation(rec) = &ctx.doc_structure.records()[0] else {
             panic!("expected Annotation record");
         };
         assert_eq!(rec.title.as_deref(), Some("website"));
@@ -1490,7 +1491,7 @@ mod tests {
         ctx.o_stack.push(PsObject::name_lit(ann_id)).unwrap();
         op_pdfmark(&mut ctx).unwrap();
 
-        let PdfMarkRecord::Annotation(rec) = &ctx.pdfmark_buffer.records()[0] else {
+        let StructuralRecord::Annotation(rec) = &ctx.doc_structure.records()[0] else {
             panic!("expected Annotation record");
         };
         assert_eq!(rec.contents.as_deref(), Some("A comment"));
@@ -1523,7 +1524,7 @@ mod tests {
         ctx.o_stack.push(PsObject::name_lit(ann_id)).unwrap();
         op_pdfmark(&mut ctx).unwrap();
 
-        let PdfMarkRecord::Annotation(rec) = &ctx.pdfmark_buffer.records()[0] else {
+        let StructuralRecord::Annotation(rec) = &ctx.doc_structure.records()[0] else {
             panic!("expected Annotation record");
         };
         match &rec.subtype {
@@ -1540,7 +1541,7 @@ mod tests {
 
     #[test]
     fn annotation_page_defaults_to_current_page_plus_one() {
-        // No /Page → record's page = pdfmark_buffer.current_page + 1.
+        // No /Page → record's page = doc_structure.current_page + 1.
         // After zero showpages, the page being assembled is page 1.
         let mut ctx = make_ctx();
         let rect_id = ctx.names.intern(b"Rect");
@@ -1557,13 +1558,13 @@ mod tests {
         ctx.o_stack.push(PsObject::name_lit(ann_id)).unwrap();
         op_pdfmark(&mut ctx).unwrap();
 
-        let PdfMarkRecord::Annotation(rec) = &ctx.pdfmark_buffer.records()[0] else {
+        let StructuralRecord::Annotation(rec) = &ctx.doc_structure.records()[0] else {
             panic!("expected Annotation record");
         };
         assert_eq!(rec.page, 1);
 
         // Simulate "showpage finished" → next /ANN scopes to page 2.
-        ctx.pdfmark_buffer.current_page = 1;
+        ctx.doc_structure.current_page = 1;
         let rect2 = alloc_rect(&mut ctx, 0.0, 0.0, 10.0, 10.0);
         ctx.o_stack.push(PsObject::mark()).unwrap();
         ctx.o_stack.push(PsObject::name_lit(rect_id)).unwrap();
@@ -1572,7 +1573,7 @@ mod tests {
         ctx.o_stack.push(PsObject::name_lit(text_id)).unwrap();
         ctx.o_stack.push(PsObject::name_lit(ann_id)).unwrap();
         op_pdfmark(&mut ctx).unwrap();
-        let PdfMarkRecord::Annotation(rec2) = &ctx.pdfmark_buffer.records()[1] else {
+        let StructuralRecord::Annotation(rec2) = &ctx.doc_structure.records()[1] else {
             panic!("expected Annotation record");
         };
         assert_eq!(rec2.page, 2);
@@ -1594,7 +1595,7 @@ mod tests {
         ctx.o_stack.push(PsObject::name_lit(weird_id)).unwrap();
         ctx.o_stack.push(PsObject::name_lit(ann_id)).unwrap();
         op_pdfmark(&mut ctx).unwrap();
-        assert!(ctx.pdfmark_buffer.is_empty());
+        assert!(ctx.doc_structure.is_empty());
     }
 
     #[test]
@@ -1611,7 +1612,7 @@ mod tests {
         ctx.o_stack.push(PsObject::int(7)).unwrap();
         ctx.o_stack.push(PsObject::name_lit(dest_tag_id)).unwrap();
         op_pdfmark(&mut ctx).unwrap();
-        let PdfMarkRecord::Dest(rec) = &ctx.pdfmark_buffer.records()[0] else {
+        let StructuralRecord::Dest(rec) = &ctx.doc_structure.records()[0] else {
             panic!("expected Dest record");
         };
         assert_eq!(rec.name, "chapter1");
@@ -1630,7 +1631,7 @@ mod tests {
         ctx.o_stack.push(PsObject::name_lit(n)).unwrap();
         ctx.o_stack.push(PsObject::name_lit(dest_tag_id)).unwrap();
         op_pdfmark(&mut ctx).unwrap();
-        assert!(ctx.pdfmark_buffer.is_empty());
+        assert!(ctx.doc_structure.is_empty());
 
         // Missing /Dest → drop.
         let page_id = ctx.names.intern(b"Page");
@@ -1639,7 +1640,7 @@ mod tests {
         ctx.o_stack.push(PsObject::int(1)).unwrap();
         ctx.o_stack.push(PsObject::name_lit(dest_tag_id)).unwrap();
         op_pdfmark(&mut ctx).unwrap();
-        assert!(ctx.pdfmark_buffer.is_empty());
+        assert!(ctx.doc_structure.is_empty());
     }
 
     fn alloc_box(ctx: &mut Context, llx: f64, lly: f64, urx: f64, ury: f64) -> PsObject {
@@ -1669,7 +1670,7 @@ mod tests {
         ctx.o_stack.push(PsObject::int(2)).unwrap();
         ctx.o_stack.push(PsObject::name_lit(page_tag_id)).unwrap();
         op_pdfmark(&mut ctx).unwrap();
-        let PdfMarkRecord::PageOverride(rec) = &ctx.pdfmark_buffer.records()[0] else {
+        let StructuralRecord::PageOverride(rec) = &ctx.doc_structure.records()[0] else {
             panic!("expected PageOverride record");
         };
         assert!(matches!(rec.scope, PageOverrideScope::Single(2)));
@@ -1682,7 +1683,7 @@ mod tests {
         // (current_page + 1). Bumping current_page simulates a
         // completed showpage.
         let mut ctx = make_ctx();
-        ctx.pdfmark_buffer.current_page = 3;
+        ctx.doc_structure.current_page = 3;
         let trim_id = ctx.names.intern(b"TrimBox");
         let page_tag_id = ctx.names.intern(b"PAGE");
         let bx = alloc_box(&mut ctx, 0.0, 0.0, 612.0, 792.0);
@@ -1691,7 +1692,7 @@ mod tests {
         ctx.o_stack.push(bx).unwrap();
         ctx.o_stack.push(PsObject::name_lit(page_tag_id)).unwrap();
         op_pdfmark(&mut ctx).unwrap();
-        let PdfMarkRecord::PageOverride(rec) = &ctx.pdfmark_buffer.records()[0] else {
+        let StructuralRecord::PageOverride(rec) = &ctx.doc_structure.records()[0] else {
             panic!("expected PageOverride record");
         };
         assert!(matches!(rec.scope, PageOverrideScope::Single(4)));
@@ -1709,7 +1710,7 @@ mod tests {
         ctx.o_stack.push(bx).unwrap();
         ctx.o_stack.push(PsObject::name_lit(pages_tag_id)).unwrap();
         op_pdfmark(&mut ctx).unwrap();
-        let PdfMarkRecord::PageOverride(rec) = &ctx.pdfmark_buffer.records()[0] else {
+        let StructuralRecord::PageOverride(rec) = &ctx.doc_structure.records()[0] else {
             panic!("expected PageOverride record");
         };
         assert_eq!(rec.scope, PageOverrideScope::All);
@@ -1726,7 +1727,7 @@ mod tests {
         ctx.o_stack.push(PsObject::int(1)).unwrap();
         ctx.o_stack.push(PsObject::name_lit(page_tag_id)).unwrap();
         op_pdfmark(&mut ctx).unwrap();
-        assert!(ctx.pdfmark_buffer.is_empty());
+        assert!(ctx.doc_structure.is_empty());
     }
 
     #[test]
@@ -1739,7 +1740,7 @@ mod tests {
         ctx.o_stack.push(PsObject::int(90)).unwrap();
         ctx.o_stack.push(PsObject::name_lit(page_tag_id)).unwrap();
         op_pdfmark(&mut ctx).unwrap();
-        let PdfMarkRecord::PageOverride(rec) = &ctx.pdfmark_buffer.records()[0] else {
+        let StructuralRecord::PageOverride(rec) = &ctx.doc_structure.records()[0] else {
             panic!("expected PageOverride record");
         };
         assert_eq!(rec.rotate, Some(90));
@@ -1766,7 +1767,7 @@ mod tests {
         ctx.o_stack.push(PsObject::name_lit(tcl_id)).unwrap();
         ctx.o_stack.push(PsObject::name_lit(tag_id)).unwrap();
         op_pdfmark(&mut ctx).unwrap();
-        let PdfMarkRecord::ViewerPrefs(rec) = &ctx.pdfmark_buffer.records()[0] else {
+        let StructuralRecord::ViewerPrefs(rec) = &ctx.doc_structure.records()[0] else {
             panic!("expected ViewerPrefs record");
         };
         assert_eq!(rec.hide_toolbar, Some(true));
@@ -1782,7 +1783,7 @@ mod tests {
         ctx.o_stack.push(PsObject::mark()).unwrap();
         ctx.o_stack.push(PsObject::name_lit(tag_id)).unwrap();
         op_pdfmark(&mut ctx).unwrap();
-        assert!(ctx.pdfmark_buffer.is_empty());
+        assert!(ctx.doc_structure.is_empty());
     }
 
     #[test]
@@ -1799,7 +1800,7 @@ mod tests {
             .unwrap();
         ctx.o_stack.push(PsObject::name_lit(tag_id)).unwrap();
         op_pdfmark(&mut ctx).unwrap();
-        let PdfMarkRecord::Metadata(rec) = &ctx.pdfmark_buffer.records()[0] else {
+        let StructuralRecord::Metadata(rec) = &ctx.doc_structure.records()[0] else {
             panic!("expected Metadata record");
         };
         assert_eq!(rec.xmp_bytes, xmp);
@@ -1812,7 +1813,7 @@ mod tests {
         ctx.o_stack.push(PsObject::mark()).unwrap();
         ctx.o_stack.push(PsObject::name_lit(tag_id)).unwrap();
         op_pdfmark(&mut ctx).unwrap();
-        assert!(ctx.pdfmark_buffer.is_empty());
+        assert!(ctx.doc_structure.is_empty());
     }
 
     #[test]
@@ -1826,7 +1827,7 @@ mod tests {
         ctx.o_stack.push(PsObject::name_lit(true_id)).unwrap();
         ctx.o_stack.push(PsObject::name_lit(docinfo_id)).unwrap();
         op_pdfmark(&mut ctx).unwrap();
-        let PdfMarkRecord::DocInfo(rec) = &ctx.pdfmark_buffer.records()[0] else {
+        let StructuralRecord::DocInfo(rec) = &ctx.doc_structure.records()[0] else {
             panic!("expected DocInfo record");
         };
         assert_eq!(rec.trapped, Some(TrappedState::True));

@@ -2,31 +2,36 @@
 // Copyright (c) 2026 Scott Bowman
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! `pdfmark` authoring records and accumulator.
+//! Document-level structural data — the parallel IR to
+//! [`DisplayList`](crate::display_list::DisplayList).
 //!
-//! `pdfmark` is the PostScript-to-PDF authoring bridge. PostScript code
-//! issues `pdfmark` calls during interpretation; the interpreter parks the
-//! resulting [`PdfMarkRecord`]s on a [`PdfMarkBuffer`] hanging off
-//! [`crate::context::Context`]. The PDF output device drains that buffer at
-//! end-of-job (`finish_with_context`) and writes the records into the PDF
-//! catalog, info dictionary, outline tree, page annotation arrays, and so
-//! on. Non-PDF output devices simply ignore the buffer, so `pdfmark` is a
-//! no-op for PNG / viewer output.
+//! Where `DisplayList` carries per-page paint operations, [`DocumentStructure`]
+//! carries the document-scoped metadata that ends up in the PDF catalog, info
+//! dictionary, outline tree, page annotation arrays, and so on:
+//! `/DOCINFO`, `/OUT`, `/ANN`, `/DEST`, `/PAGE`/`/PAGES`,
+//! `/VIEWERPREFERENCES`, `/Metadata`, `/FORM`, `/EMBED`.
 //!
-//! See `docs/PLAN-PDFMARK-AUTHORING.md` for the staged plan and
-//! `docs/PDFMARK-REFERENCE.md` (TBD) for the public reference once the
-//! plan reaches its rollup.
+//! Two producers populate this type:
+//!
+//! - The PostScript interpreter, when `pdfmark` operators fire — see
+//!   `stet-ops/src/pdfmark_ops.rs`. The buffer hangs off
+//!   `stet_core::context::Context::doc_structure`.
+//! - `stet-pdf-reader`, when round-tripping a PDF's structural API into
+//!   an output PDF.
+//!
+//! One consumer: the PDF output device (`stet-pdf::PdfDevice`) drains the
+//! buffer at end-of-job and writes the records into the output PDF. Non-PDF
+//! output devices ignore it, so structural data is a no-op for PNG / viewer
+//! output.
 
-/// One accumulated `pdfmark` record. Each variant corresponds to a
-/// type-tag the interpreter recognises (`/DOCINFO`, `/OUT`, `/ANN`, …).
-/// Later phases add variants without disturbing this enum's external API
-/// beyond the new variant itself.
+/// One accumulated structural record. Each variant corresponds to a
+/// PDF catalog / info / page entry the writer knows how to emit.
 ///
 /// Marked `#[non_exhaustive]`: cross-crate `match` sites need a
-/// wildcard arm so future type-tags (Tagged PDF, etc.) land additively.
+/// wildcard arm so future record types (Tagged PDF, etc.) land additively.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
-pub enum PdfMarkRecord {
+pub enum StructuralRecord {
     /// `/DOCINFO` — entries to merge into the PDF Info dictionary.
     DocInfo(DocInfoRecord),
     /// `/OUT` — one bookmark entry, contributing to the document's
@@ -56,40 +61,46 @@ pub enum PdfMarkRecord {
     Embed(EmbedRecord),
 }
 
-/// Buffered `pdfmark` records. Lives on `Context` for the entire job;
-/// drained once by the PDF output device at end-of-job. The buffer is
-/// document-global (not VM-level), so `save` / `restore` do **not** roll
-/// it back — pdfmark records issued before a `restore` survive.
+/// Document-level structural records, parallel to
+/// [`DisplayList`](crate::display_list::DisplayList).
+///
+/// The PostScript interpreter populates this via `pdfmark` operators; the
+/// PDF reader populates it from a parsed document's structural API. The
+/// buffer is document-global (not VM-level), so `save` / `restore` do
+/// **not** roll it back — records issued before a `restore` survive.
 #[derive(Default, Clone, Debug)]
-pub struct PdfMarkBuffer {
-    records: Vec<PdfMarkRecord>,
+pub struct DocumentStructure {
+    records: Vec<StructuralRecord>,
     /// Count of completed `showpage` calls so far. The interpreter's
     /// `showpage` continuation increments this. Page-scoped records
     /// (annotations, page boxes) that omit an explicit `/Page` key
     /// default to `current_page + 1` — i.e. the page currently being
     /// assembled. So after N showpages, `current_page == N` and the
     /// page-being-assembled is `N + 1`.
+    ///
+    /// PostScript-interpreter concern; non-PS producers can leave this
+    /// at the default `0` and set explicit page indices on each record.
     pub current_page: u32,
 }
 
-impl PdfMarkBuffer {
+impl DocumentStructure {
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Append a record; ordering is preserved.
-    pub fn push(&mut self, record: PdfMarkRecord) {
+    pub fn push(&mut self, record: StructuralRecord) {
         self.records.push(record);
     }
 
     /// Read-only view of accumulated records.
-    pub fn records(&self) -> &[PdfMarkRecord] {
+    pub fn records(&self) -> &[StructuralRecord] {
         &self.records
     }
 
     /// Take ownership of the records, leaving the buffer empty. Used by
     /// the PDF output device once at end of job.
-    pub fn drain(&mut self) -> Vec<PdfMarkRecord> {
+    pub fn drain(&mut self) -> Vec<StructuralRecord> {
         std::mem::take(&mut self.records)
     }
 
@@ -310,10 +321,10 @@ impl PdfDate {
     }
 }
 
-// ----- Outlines (Phase 2) ---------------------------------------------------
+// ----- Outlines ------------------------------------------------------------
 
-/// One `/OUT pdfmark` entry. Each record contributes a bookmark node to
-/// the document outline tree the PDF writer assembles at end-of-job.
+/// One `/OUT` entry. Each record contributes a bookmark node to the
+/// document outline tree the PDF writer assembles at end-of-job.
 #[derive(Clone, Debug)]
 pub struct OutlineRecord {
     /// `/Title` — required user-visible label.
@@ -346,11 +357,9 @@ pub enum OutlineDestination {
     /// `/Page N /View [...]` — explicit page + view spec.
     PageView { page: u32, view: ViewSpec },
     /// `/Dest /Name` — reference to a named destination registered
-    /// elsewhere (in Phase 4 via `/DEST pdfmark`).
+    /// elsewhere.
     NamedDest(String),
-    /// `/Action <<...>>` — passthrough action dict. Phase 1 captures
-    /// the URI subset; richer action types (GoTo, JavaScript, …) land
-    /// as later phases need them.
+    /// `/Action <<...>>` — passthrough action dict.
     Action(OutlineAction),
 }
 
@@ -557,18 +566,18 @@ fn attach_children(
     }
 }
 
-// ----- Annotations (Phase 3) ------------------------------------------------
+// ----- Annotations ---------------------------------------------------------
 
-/// One `/ANN pdfmark` entry. Each record contributes a single
-/// annotation (`/Annot`) to one page's `/Annots` array. `page` is
-/// 1-based; `0` is reserved for "no explicit page" (the writer
-/// substitutes the page being assembled at the time the pdfmark fired).
+/// One `/ANN` entry. Each record contributes a single annotation
+/// (`/Annot`) to one page's `/Annots` array. `page` is 1-based; `0` is
+/// reserved for "no explicit page" (the writer substitutes the page
+/// being assembled at the time the record fired).
 #[derive(Clone, Debug)]
 pub struct AnnotationRecord {
     /// Page the annotation lives on (1-based). Set by the operator: an
     /// explicit `/Page` (or `/SrcPg` alias) wins; otherwise the writer
     /// falls back to `current_page + 1` from
-    /// [`PdfMarkBuffer::current_page`].
+    /// [`DocumentStructure::current_page`].
     pub page: u32,
     /// `/Rect [llx lly urx ury]` — default user-space bounds. Required
     /// per PDF spec; defaulted to the empty rect on malformed input so
@@ -763,11 +772,11 @@ pub enum AnnotationTarget {
     Action(OutlineAction),
 }
 
-// ----- Named destinations (Phase 4) ----------------------------------------
+// ----- Named destinations --------------------------------------------------
 
-/// One `/DEST pdfmark` entry — registers a named destination in the
-/// document's `/Names /Dests` name tree. PDF outline entries and link
-/// annotations resolve the matching `name` against this tree.
+/// One `/DEST` entry — registers a named destination in the document's
+/// `/Names /Dests` name tree. PDF outline entries and link annotations
+/// resolve the matching `name` against this tree.
 #[derive(Clone, Debug)]
 pub struct DestRecord {
     /// `/Dest` — the destination name (interned bytes; UTF-8 lossy).
@@ -778,13 +787,13 @@ pub struct DestRecord {
     pub view: ViewSpec,
 }
 
-// ----- Page boxes & page overrides (Phase 4) -------------------------------
+// ----- Page boxes & page overrides -----------------------------------------
 
 /// One `/PAGE` (single-page override) or `/PAGES` (document-wide
-/// default) pdfmark entry. The writer applies the keys to the
-/// per-page dict at build time; `/PAGE` wins over `/PAGES` for
-/// any key that's set on both, and an explicit `/PAGE` for page N
-/// wins over the implicit "current page" target.
+/// default) entry. The writer applies the keys to the per-page dict
+/// at build time; `/PAGE` wins over `/PAGES` for any key that's set
+/// on both, and an explicit `/PAGE` for page N wins over the implicit
+/// "current page" target.
 #[derive(Clone, Debug)]
 pub struct PageOverrideRecord {
     /// Scope of the override.
@@ -827,9 +836,9 @@ impl PageAdditionalActions {
     }
 }
 
-/// One `/EMBED pdfmark` entry — a single attached file. The writer
-/// emits one `/Filespec` dict + one `/EmbeddedFile` stream per record
-/// and assembles them into a `/Names /EmbeddedFiles` name tree.
+/// One `/EMBED` entry — a single attached file. The writer emits one
+/// `/Filespec` dict + one `/EmbeddedFile` stream per record and assembles
+/// them into a `/Names /EmbeddedFiles` name tree.
 #[derive(Clone, Debug)]
 pub struct EmbedRecord {
     /// `/FS` — file specification string (typically the original
@@ -876,13 +885,13 @@ pub struct PageBoxes {
     pub art_box: Option<[f64; 4]>,
 }
 
-// ----- Viewer prefs + metadata (Phase 5) -----------------------------------
+// ----- Viewer prefs + metadata ---------------------------------------------
 
-/// One `/VIEWERPREFERENCES pdfmark` payload. All keys are optional;
-/// later records override earlier ones key-by-key. The "page layout"
-/// and "page mode" entries technically live on `/Catalog` directly
-/// (not under `/ViewerPreferences`) but Adobe pdfmark groups them with
-/// the rest of the viewer-control bag, so stet does too.
+/// One `/VIEWERPREFERENCES` payload. All keys are optional; later
+/// records override earlier ones key-by-key. The "page layout" and
+/// "page mode" entries technically live on `/Catalog` directly (not
+/// under `/ViewerPreferences`) but Adobe pdfmark groups them with the
+/// rest of the viewer-control bag, so stet does too.
 #[derive(Clone, Debug, Default)]
 pub struct ViewerPrefsRecord {
     pub hide_toolbar: Option<bool>,
@@ -910,7 +919,7 @@ pub struct ViewerPrefsRecord {
 impl ViewerPrefsRecord {
     /// Merge `other` into `self` — `self`'s `Some` values win when both
     /// records set the same key. Used to layer multiple
-    /// `/VIEWERPREFERENCES pdfmark` blocks into one effective record.
+    /// `/VIEWERPREFERENCES` blocks into one effective record.
     pub fn merge_over(&self, other: &ViewerPrefsRecord) -> ViewerPrefsRecord {
         ViewerPrefsRecord {
             hide_toolbar: self.hide_toolbar.or(other.hide_toolbar),
@@ -946,16 +955,16 @@ impl ViewerPrefsRecord {
     }
 }
 
-/// One `/Metadata pdfmark` entry — an XMP stream attached to the
-/// document's `/Catalog`. The writer wraps the bytes in a
-/// `/Type /Metadata /Subtype /XML` stream object.
+/// One `/Metadata` entry — an XMP stream attached to the document's
+/// `/Catalog`. The writer wraps the bytes in a `/Type /Metadata
+/// /Subtype /XML` stream object.
 #[derive(Clone, Debug)]
 pub struct MetadataRecord {
     /// Raw XMP XML bytes — round-tripped verbatim.
     pub xmp_bytes: Vec<u8>,
 }
 
-// ----- AcroForm (Phase 6) --------------------------------------------------
+// ----- AcroForm ------------------------------------------------------------
 
 /// `/FORM` payload — document-level AcroForm dict. All fields are
 /// optional; `/Fields` is implicit (built from `/Widget` annotations at
@@ -1060,9 +1069,9 @@ mod tests {
 
     #[test]
     fn buffer_round_trip() {
-        let mut buf = PdfMarkBuffer::new();
+        let mut buf = DocumentStructure::new();
         assert!(buf.is_empty());
-        buf.push(PdfMarkRecord::DocInfo(DocInfoRecord {
+        buf.push(StructuralRecord::DocInfo(DocInfoRecord {
             title: Some("Hello".into()),
             ..DocInfoRecord::default()
         }));
@@ -1091,8 +1100,6 @@ mod tests {
 
     #[test]
     fn outline_count_based_three_with_two_kids_each() {
-        // Adobe convention: each parent declares a /Count of 2, then
-        // its two children follow immediately.
         let records = vec![
             outline("A", Some(2), None),
             outline("A.1", None, None),
@@ -1116,8 +1123,6 @@ mod tests {
 
     #[test]
     fn outline_count_based_collapsed_negative() {
-        // Negative count = collapsed but topology is the same as
-        // positive: still 2 direct children.
         let records = vec![
             outline("A", Some(-2), None),
             outline("A.1", None, None),
@@ -1130,7 +1135,6 @@ mod tests {
 
     #[test]
     fn outline_count_based_nested_grandchildren() {
-        // A has 1 child A.1 which itself declares 2 grandchildren.
         let records = vec![
             outline("A", Some(1), None),
             outline("A.1", Some(2), None),
@@ -1145,9 +1149,6 @@ mod tests {
 
     #[test]
     fn outline_level_based_1_2_2_1_2_3_3_1() {
-        // Sequence levels 1,2,2,1,2,3,3,1 → three top-level items, the
-        // first with 2 kids, second with 1 kid (which itself has 2),
-        // third a leaf.
         let records = vec![
             outline("A", None, Some(1)),
             outline("A.1", None, Some(2)),
@@ -1172,9 +1173,6 @@ mod tests {
 
     #[test]
     fn outline_level_skip_clamps_to_next_depth() {
-        // A jump from level 1 directly to level 5 is clamped to
-        // level 2 (one deeper than the open root). This stops malformed
-        // input from producing dangling phantom nodes.
         let records = vec![
             outline("Root", None, Some(1)),
             outline("Child", None, Some(5)),
@@ -1187,9 +1185,6 @@ mod tests {
 
     #[test]
     fn outline_mixed_input_uses_level_path() {
-        // Any /OutlineLevel entry switches the whole batch to the
-        // level-based builder. The leading count-only record without
-        // a level falls into the default depth = 1.
         let records = vec![
             outline("Bare", Some(2), None),
             outline("Tagged-1", None, Some(1)),

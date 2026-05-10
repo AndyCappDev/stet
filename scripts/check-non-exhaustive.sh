@@ -24,9 +24,9 @@ FILES=(
     crates/stet-graphics/src/display_list.rs
     crates/stet-graphics/src/device.rs
     crates/stet-graphics/src/color.rs
+    crates/stet-graphics/src/document_structure.rs
     crates/stet-core/src/error.rs
     crates/stet-core/src/file_store.rs
-    crates/stet-core/src/pdfmark.rs
     crates/stet-pdf-reader/src/error.rs
     crates/stet-pdf-reader/src/destination.rs
     crates/stet-pdf-reader/src/annotations.rs

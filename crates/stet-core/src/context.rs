@@ -200,11 +200,13 @@ pub struct Context {
     /// Monotonic counter feeding [`OcgRecord::ocg_id`]. Each call to
     /// `defineocg` increments this; ids never recycle.
     pub next_ocg_id: u32,
-    /// Accumulator for `pdfmark` authoring records. Drained by the PDF
-    /// output device at end-of-job; ignored by non-PDF devices.
-    /// Document-global: `save` / `restore` do not roll this back. See
-    /// [`crate::pdfmark`].
-    pub pdfmark_buffer: crate::pdfmark::PdfMarkBuffer,
+    /// Document-level structural data — outline, annotations, metadata,
+    /// page boxes, etc. — parallel IR to [`display_list`](Self::display_list).
+    /// PostScript `pdfmark` operators populate this; the PDF output device
+    /// drains it at end-of-job; non-PDF devices ignore it. Document-global:
+    /// `save` / `restore` do not roll this back. See
+    /// [`stet_graphics::document_structure`].
+    pub doc_structure: stet_graphics::document_structure::DocumentStructure,
     /// When `Some`, each showpage clones the display list here before consuming it.
     /// Used by the WASM frontend to retain display lists for viewport re-rendering.
     /// Each entry is (DisplayList, dpi) where dpi is from the pagedevice HWResolution.
@@ -671,7 +673,7 @@ impl Context {
             save_group_depths: rustc_hash::FxHashMap::default(),
             ocg_registry: rustc_hash::FxHashMap::default(),
             next_ocg_id: 0,
-            pdfmark_buffer: crate::pdfmark::PdfMarkBuffer::new(),
+            doc_structure: stet_graphics::document_structure::DocumentStructure::new(),
             capture_display_lists: None,
             display_list_sender: None,
             page_width: 612,

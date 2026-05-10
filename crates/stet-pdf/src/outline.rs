@@ -4,15 +4,17 @@
 
 //! PDF outline (`/Outlines`) tree writer.
 //!
-//! Consumes [`stet_core::pdfmark::OutlineNode`] trees produced from
-//! `/OUT pdfmark` records by [`stet_core::pdfmark::build_outline_tree`]
-//! and emits a PDF outline tree: one root `/Outlines` dict plus one
-//! `/Outline` indirect object per node, linked through `/First`,
-//! `/Last`, `/Next`, `/Prev`, `/Parent`, and `/Count`. Returns the root
-//! `/Outlines` dict's object number so the caller can wire it into
-//! `/Catalog /Outlines`.
+//! Consumes [`stet_graphics::document_structure::OutlineNode`] trees produced
+//! from `/OUT` records by
+//! [`stet_graphics::document_structure::build_outline_tree`] and emits a PDF
+//! outline tree: one root `/Outlines` dict plus one `/Outline` indirect object
+//! per node, linked through `/First`, `/Last`, `/Next`, `/Prev`, `/Parent`,
+//! and `/Count`. Returns the root `/Outlines` dict's object number so the
+//! caller can wire it into `/Catalog /Outlines`.
 
-use stet_core::pdfmark::{GoToTarget, OutlineAction, OutlineDestination, OutlineNode, ViewSpec};
+use stet_graphics::document_structure::{
+    GoToTarget, OutlineAction, OutlineDestination, OutlineNode, ViewSpec,
+};
 
 use crate::pdf_objects::PdfObj;
 use crate::pdf_writer::PdfWriter;

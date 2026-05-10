@@ -8,7 +8,7 @@
 //! plain dict; `Metadata` is a stream object with `/Type /Metadata` /
 //! `/Subtype /XML` carrying raw XMP XML.
 
-use stet_core::pdfmark::{MetadataRecord, ViewerPrefsRecord};
+use stet_graphics::document_structure::{MetadataRecord, ViewerPrefsRecord};
 
 use crate::pdf_objects::PdfObj;
 use crate::pdf_writer::PdfWriter;

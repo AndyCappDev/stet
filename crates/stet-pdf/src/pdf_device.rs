@@ -127,7 +127,7 @@ impl PdfDevice {
 
     /// Build the contents of the /Info dict. Starts with device defaults
     /// (Producer + auto-derived Title + UTC CreationDate) and lets any
-    /// `/DOCINFO` pdfmark record on `ctx.pdfmark_buffer` override or
+    /// `/DOCINFO` pdfmark record on `ctx.doc_structure` override or
     /// extend each key. The pdfmark buffer is *not* drained here; phases
     /// past Phase 1 may want to consult it for separate concerns.
     fn build_info_dict(&self, ctx: Option<&Context>) -> Vec<(Vec<u8>, PdfObj)> {
@@ -180,9 +180,9 @@ impl PdfDevice {
 
         if let Some(t) = docinfo.trapped {
             let name: &[u8] = match t {
-                stet_core::pdfmark::TrappedState::True => b"True",
-                stet_core::pdfmark::TrappedState::False => b"False",
-                stet_core::pdfmark::TrappedState::Unknown => b"Unknown",
+                stet_graphics::document_structure::TrappedState::True => b"True",
+                stet_graphics::document_structure::TrappedState::False => b"False",
+                stet_graphics::document_structure::TrappedState::Unknown => b"Unknown",
                 _ => b"Unknown",
             };
             entries.push((b"Trapped".to_vec(), PdfObj::Name(name.to_vec())));
@@ -234,12 +234,14 @@ impl PdfDevice {
         // annotation path.
         let mut per_page_annots: Vec<Vec<u32>> = ctx
             .map(|c| {
-                let records: Vec<stet_core::pdfmark::AnnotationRecord> = c
-                    .pdfmark_buffer
+                let records: Vec<stet_graphics::document_structure::AnnotationRecord> = c
+                    .doc_structure
                     .records()
                     .iter()
                     .filter_map(|r| match r {
-                        stet_core::pdfmark::PdfMarkRecord::Annotation(rec) => Some(rec.clone()),
+                        stet_graphics::document_structure::StructuralRecord::Annotation(rec) => {
+                            Some(rec.clone())
+                        }
                         _ => None,
                     })
                     .collect();
@@ -255,16 +257,16 @@ impl PdfDevice {
         // per_page_annots above so each page's /Annots array carries
         // both standard annotations and widget annotations.
         let acroform_output = ctx.and_then(|c| {
-            let widgets: Vec<(usize, stet_core::pdfmark::AnnotationRecord)> = c
-                .pdfmark_buffer
+            let widgets: Vec<(usize, stet_graphics::document_structure::AnnotationRecord)> = c
+                .doc_structure
                 .records()
                 .iter()
                 .enumerate()
                 .filter_map(|(i, r)| match r {
-                    stet_core::pdfmark::PdfMarkRecord::Annotation(rec)
+                    stet_graphics::document_structure::StructuralRecord::Annotation(rec)
                         if matches!(
                             rec.subtype,
-                            stet_core::pdfmark::AnnotationSubtype::Widget(_)
+                            stet_graphics::document_structure::AnnotationSubtype::Widget(_)
                         ) =>
                     {
                         Some((i, rec.clone()))
@@ -273,11 +275,13 @@ impl PdfDevice {
                 })
                 .collect();
             let form_record = c
-                .pdfmark_buffer
+                .doc_structure
                 .records()
                 .iter()
                 .filter_map(|r| match r {
-                    stet_core::pdfmark::PdfMarkRecord::Form(rec) => Some(rec.clone()),
+                    stet_graphics::document_structure::StructuralRecord::Form(rec) => {
+                        Some(rec.clone())
+                    }
                     _ => None,
                 })
                 .reduce(|acc, next| next.merge_over(&acc));
@@ -332,19 +336,21 @@ impl PdfDevice {
         // pdfmark buffer. Returns `None` when no /OUT records were
         // issued, in which case /Catalog stays free of /Outlines.
         let outlines_ref = ctx.and_then(|c| {
-            let records: Vec<stet_core::pdfmark::OutlineRecord> = c
-                .pdfmark_buffer
+            let records: Vec<stet_graphics::document_structure::OutlineRecord> = c
+                .doc_structure
                 .records()
                 .iter()
                 .filter_map(|r| match r {
-                    stet_core::pdfmark::PdfMarkRecord::Outline(rec) => Some(rec.clone()),
+                    stet_graphics::document_structure::StructuralRecord::Outline(rec) => {
+                        Some(rec.clone())
+                    }
                     _ => None,
                 })
                 .collect();
             if records.is_empty() {
                 return None;
             }
-            let tree = stet_core::pdfmark::build_outline_tree(&records);
+            let tree = stet_graphics::document_structure::build_outline_tree(&records);
             crate::outline::write_outline_tree(&mut writer, &tree, &page_refs)
         });
 
@@ -353,24 +359,28 @@ impl PdfDevice {
         // separately, then `write_names_root` combines them into one
         // catalog-level dict.
         let dests_leaf = ctx.and_then(|c| {
-            let records: Vec<stet_core::pdfmark::DestRecord> = c
-                .pdfmark_buffer
+            let records: Vec<stet_graphics::document_structure::DestRecord> = c
+                .doc_structure
                 .records()
                 .iter()
                 .filter_map(|r| match r {
-                    stet_core::pdfmark::PdfMarkRecord::Dest(rec) => Some(rec.clone()),
+                    stet_graphics::document_structure::StructuralRecord::Dest(rec) => {
+                        Some(rec.clone())
+                    }
                     _ => None,
                 })
                 .collect();
             crate::names::build_dests_leaf(&mut writer, &records, &page_refs)
         });
         let embedded_files_leaf = ctx.and_then(|c| {
-            let records: Vec<stet_core::pdfmark::EmbedRecord> = c
-                .pdfmark_buffer
+            let records: Vec<stet_graphics::document_structure::EmbedRecord> = c
+                .doc_structure
                 .records()
                 .iter()
                 .filter_map(|r| match r {
-                    stet_core::pdfmark::PdfMarkRecord::Embed(rec) => Some(rec.clone()),
+                    stet_graphics::document_structure::StructuralRecord::Embed(rec) => {
+                        Some(rec.clone())
+                    }
                     _ => None,
                 })
                 .collect();
@@ -388,12 +398,14 @@ impl PdfDevice {
 
         // /Metadata — last record wins; emit the stream object.
         let metadata_ref = ctx.and_then(|c| {
-            c.pdfmark_buffer
+            c.doc_structure
                 .records()
                 .iter()
                 .rev()
                 .find_map(|r| match r {
-                    stet_core::pdfmark::PdfMarkRecord::Metadata(rec) => Some(rec.clone()),
+                    stet_graphics::document_structure::StructuralRecord::Metadata(rec) => {
+                        Some(rec.clone())
+                    }
                     _ => None,
                 })
                 .map(|rec| crate::metadata::write_xmp_metadata(&mut writer, &rec))
@@ -1611,9 +1623,9 @@ fn build_halftone_ht(
 /// Effective per-page override after layering /PAGES under /PAGE.
 #[derive(Default, Clone)]
 struct EffectivePageOverride {
-    boxes: stet_core::pdfmark::PageBoxes,
+    boxes: stet_graphics::document_structure::PageBoxes,
     rotate: Option<i32>,
-    additional_actions: Option<stet_core::pdfmark::PageAdditionalActions>,
+    additional_actions: Option<stet_graphics::document_structure::PageAdditionalActions>,
 }
 
 /// Walk the pdfmark buffer and compute one [`EffectivePageOverride`]
@@ -1621,22 +1633,22 @@ struct EffectivePageOverride {
 /// 1. Last `/PAGE` for that specific page (later record wins).
 /// 2. Last `/PAGES` (later document-wide record wins).
 fn compute_page_overrides(ctx: Option<&Context>, page_count: usize) -> Vec<EffectivePageOverride> {
-    use stet_core::pdfmark::{PageOverrideScope, PdfMarkRecord};
+    use stet_graphics::document_structure::{PageOverrideScope, StructuralRecord};
     let mut out = vec![EffectivePageOverride::default(); page_count];
     let Some(c) = ctx else {
         return out;
     };
-    let mut all_boxes = stet_core::pdfmark::PageBoxes::default();
+    let mut all_boxes = stet_graphics::document_structure::PageBoxes::default();
     let mut all_rotate: Option<i32> = None;
-    let mut all_aa: Option<stet_core::pdfmark::PageAdditionalActions> = None;
-    let mut per_page_boxes: Vec<stet_core::pdfmark::PageBoxes> =
-        vec![stet_core::pdfmark::PageBoxes::default(); page_count];
+    let mut all_aa: Option<stet_graphics::document_structure::PageAdditionalActions> = None;
+    let mut per_page_boxes: Vec<stet_graphics::document_structure::PageBoxes> =
+        vec![stet_graphics::document_structure::PageBoxes::default(); page_count];
     let mut per_page_rotate: Vec<Option<i32>> = vec![None; page_count];
-    let mut per_page_aa: Vec<Option<stet_core::pdfmark::PageAdditionalActions>> =
+    let mut per_page_aa: Vec<Option<stet_graphics::document_structure::PageAdditionalActions>> =
         vec![None; page_count];
 
-    for record in c.pdfmark_buffer.records() {
-        let PdfMarkRecord::PageOverride(rec) = record else {
+    for record in c.doc_structure.records() {
+        let StructuralRecord::PageOverride(rec) = record else {
             continue;
         };
         match rec.scope {
@@ -1729,21 +1741,21 @@ fn default_now_pdf_date() -> String {
 /// Merge every `/VIEWERPREFERENCES pdfmark` record into one effective
 /// record. Later records override earlier ones key-by-key, matching
 /// the same "later wins" rule we apply to `/DOCINFO`.
-fn collect_viewer_prefs(ctx: &Context) -> stet_core::pdfmark::ViewerPrefsRecord {
-    use stet_core::pdfmark::{PdfMarkRecord, ViewerPrefsRecord};
+fn collect_viewer_prefs(ctx: &Context) -> stet_graphics::document_structure::ViewerPrefsRecord {
+    use stet_graphics::document_structure::{StructuralRecord, ViewerPrefsRecord};
     let mut acc = ViewerPrefsRecord::default();
-    for record in ctx.pdfmark_buffer.records() {
-        if let PdfMarkRecord::ViewerPrefs(rec) = record {
+    for record in ctx.doc_structure.records() {
+        if let StructuralRecord::ViewerPrefs(rec) = record {
             acc = rec.merge_over(&acc);
         }
     }
     acc
 }
 
-fn collect_docinfo(ctx: &Context) -> stet_core::pdfmark::DocInfoRecord {
-    let mut acc = stet_core::pdfmark::DocInfoRecord::default();
-    for record in ctx.pdfmark_buffer.records() {
-        let stet_core::pdfmark::PdfMarkRecord::DocInfo(rec) = record else {
+fn collect_docinfo(ctx: &Context) -> stet_graphics::document_structure::DocInfoRecord {
+    let mut acc = stet_graphics::document_structure::DocInfoRecord::default();
+    for record in ctx.doc_structure.records() {
+        let stet_graphics::document_structure::StructuralRecord::DocInfo(rec) = record else {
             continue;
         };
         if let Some(v) = &rec.title {

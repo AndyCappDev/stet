@@ -5,8 +5,8 @@
 //! AcroForm writer + field-tree builder.
 //!
 //! Converts the flat list of `/Widget` annotation records on
-//! [`stet_core::pdfmark::PdfMarkBuffer`] into the PDF AcroForm
-//! structure: a tree of field dicts keyed by dotted field name,
+//! [`stet_graphics::document_structure::DocumentStructure`] into the PDF
+//! AcroForm structure: a tree of field dicts keyed by dotted field name,
 //! merged with their widget annotation when the field has exactly one
 //! widget, and a top-level `/AcroForm` dict listing the root fields.
 //!
@@ -37,7 +37,7 @@
 
 use std::collections::BTreeMap;
 
-use stet_core::pdfmark::{
+use stet_graphics::document_structure::{
     AnnotationRecord, AnnotationSubtype, ChoiceOption, FieldType, FieldValue, FormRecord,
     WidgetAnnotation,
 };
@@ -510,7 +510,7 @@ fn collect_kids_for_prefix(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use stet_core::pdfmark::{AnnotationRecord, AnnotationSubtype, FieldType};
+    use stet_graphics::document_structure::{AnnotationRecord, AnnotationSubtype, FieldType};
 
     fn make_widget(name: &str, ft: FieldType) -> AnnotationRecord {
         AnnotationRecord {
