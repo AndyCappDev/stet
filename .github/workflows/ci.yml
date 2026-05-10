@@ -29,6 +29,12 @@ jobs:
         # blockers in PUBLISH-TODO.md. We still want the clippy output in
         # CI logs so new warnings are easy to spot in a diff.
         run: cargo clippy --workspace --all-targets
+      - name: release-version cross-check
+        # Verifies the workspace `Cargo.toml` version matches the README
+        # badge + Producer string and that CHANGELOG.md has an entry.
+        # Catches "bumped Cargo.toml, forgot README/CHANGELOG" before a
+        # tag goes out. See scripts/check-release-versions.sh.
+        run: scripts/check-release-versions.sh
 
   # Cross-platform build + test. Proves the code compiles on each OS and
   # catches portability regressions early. Some file-I/O unit tests
