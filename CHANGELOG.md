@@ -5,6 +5,105 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] — 2026-05-09
+
+Patch release focused on PDF/X CMYK rendering correctness against the
+[Ghent PDF Output Suite](https://gwg.org/pdf-output-suite/) (GWG)
+test corpus. Fixes a family of bugs where ICCBased / Lab / DeviceN
+fills, images, and transparency groups didn't round-trip through the
+document's `/OutputIntents` profile correctly, producing visible "X"
+markers in calibration swatches that should render uniform.
+
+This is an **additive, non-breaking** release. Cargo will auto-bump
+`stet = "0.2"` to `0.2.1`; downstream code does not need to change.
+New public API on `stet-graphics::IccCache` and a new
+`rendering_intent: u8` field on `stet-graphics::ImageParams` are
+documented under "Added" below.
+
+### Highlights
+
+- **GWG 13.3** — ICCBased RGB paints with `/OP true` no longer route
+  into the custom-spot overprint path; per PDF 1.7 §11.7.4.5 they
+  paint as if `/OP` were false.
+- **GWG 16.1** — per-intent PDF/X proofing chain (`source A2B → PCS
+  → OI B2A → CMYK`) is built for every registered ICCBased RGB
+  profile, threaded through `op_ri` / ExtGState `/RI`.
+- **GWG 16.4** — transparency groups with no `/CS` (inherit) now
+  resolve correctly to the parent's CMYK compositing space when
+  the parent is a `/CS DeviceCMYK` group.
+- **GWG 17.2** — ICCBased images now go through the proofing chain
+  via `convert_image_8bit_with_intent` (was bypassing the
+  OutputIntent roundtrip and rendering via direct source→sRGB).
+- **GWG 22.1** — Lab fills populate `DeviceColor::native_cmyk` via a
+  direct `Lab → PCS → OI B2A → CMYK` chain (matches Adobe ACE),
+  and the OutputIntent install path pre-warms the sRGB→CMYK
+  reverse transform so the parallel CMYK buffer never falls back
+  to the PLRM `(1−r, 1−g, 1−b, 0)` formula.
+- **WASM viewer** — `open_pdf` now applies the document's
+  OutputIntent before storing the cached state, so PDF/X documents
+  render in the browser the same way they do in the CLI.
+
+### Added — public API (additive, non-breaking)
+
+`stet-graphics`:
+
+- `IccCache::convert_to_oi_cmyk(hash, components, intent)` — run an
+  RGB ICC color through the proofing chain at the given intent and
+  return the intermediate OutputIntent CMYK.
+- `IccCache::convert_lab_to_oi_cmyk(l, a, b, intent)` — direct
+  `Lab → OI CMYK` via the OI's per-intent B2A LUT.
+- `IccCache::convert_image_8bit_with_intent(hash, samples,
+  pixel_count, intent)` — bulk image conversion with explicit
+  rendering intent.
+- `IccCache::convert_color_with_intent` and
+  `convert_color_readonly_with_intent` — per-intent single-color
+  conversion.
+- `IccCache::prepare_lab_to_oi_cmyk()` — pre-build per-intent
+  Lab→OI samplers; pair with `prepare_reverse_cmyk()`.
+- `IccCache::intent_from_pdf_byte(b: u8)` — map PDF rendering-intent
+  bytes (`0..3`) to `IccRenderingIntent`.
+- `pub use moxcms::RenderingIntent as IccRenderingIntent`.
+- `pub struct LabToCmykSampler` (in `icc::perceptual`) with
+  `pub fn sample_pdf_lab(l, a, b)`.
+- New field `ImageParams::rendering_intent: u8`. Default is `0`
+  (Perceptual). Per the documented "be a reader, not a writer"
+  policy for param structs (CLAUDE.md), this is additive and not
+  treated as a SemVer break.
+
+`stet-pdf-reader`:
+
+- `PdfDocument::apply_output_intent_as_default_cmyk()` now also
+  pre-warms the sRGB→CMYK reverse and per-intent Lab→OI samplers
+  in addition to its previous behaviour. No signature change.
+- Image XObjects with `/Intent` now propagate the per-image
+  rendering intent into `ImageParams.rendering_intent`, overriding
+  the gstate `/RI` per ISO 32000 §11.3.4.
+
+`stet-render`:
+
+- `build_icc_cache_for_list` now also pre-warms the per-intent
+  Lab→OI samplers when proofing is enabled.
+
+### Fixed
+
+- DeviceGray painted in a PDF/X DeviceCMYK page group now routes
+  through the K plate (matches DeviceCMYK 0/0/0/(1−g) byte-for-byte).
+- DeviceN images with a non-CMYK alternate space go through the
+  overprint path so process plates aren't disturbed.
+- Paired `/OP true /op true` ExtGStates are now treated as a
+  "strict overprint" signal (matches Adobe Illustrator's emit).
+- The custom-spot overprint dispatch and the parallel CMYK buffer's
+  `is_custom_spot` heuristic both now require
+  `process_cmyk.is_some()` so proofing-chain ICCBased RGB stays out.
+
+### Crates published at 0.2.1
+
+`stet`, `stet-cli`, `stet-fonts`, `stet-graphics`, `stet-core`,
+`stet-ops`, `stet-engine`, `stet-render`, `stet-viewer`,
+`stet-pdf-reader`, `stet-pdf`. The vendored `stet-tiny-skia` /
+`stet-tiny-skia-path` forks remain at `0.11.4`. `stet-wasm` is
+excluded from crates.io and bumped to `0.1.1` independently.
+
 ## [0.2.0] — 2026-05-01
 
 This release lands a substantial expansion of the `stet-pdf-reader`

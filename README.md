@@ -3,7 +3,7 @@
 <p align="center">A modern, open-source PostScript and PDF rendering engine written in pure Rust.</p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-0.2.0-blue" alt="Version 0.2.0">
+  <img src="https://img.shields.io/badge/Version-0.2.1-blue" alt="Version 0.2.1">
   <img src="https://img.shields.io/badge/License-Apache--2.0_OR_MIT-green" alt="License Apache-2.0 OR MIT">
   <img src="https://img.shields.io/badge/Rust-1.85+-orange" alt="Rust 1.85+">
 </p>
@@ -341,7 +341,7 @@ document.pdf
 Metadata:
   Title: Annual Report 2026
   Author: Scott Bowman
-  Producer: stet 0.2.0
+  Producer: stet 0.2.1
   Created: 2026-04-27 12:00:00 UTC
 
 Pages: 4
