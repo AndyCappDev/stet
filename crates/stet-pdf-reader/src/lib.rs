@@ -654,6 +654,17 @@ impl<'a> PdfDocument<'a> {
             self.icc_cache.set_proofing_enabled(false);
             return false;
         }
+        // Pre-warm the sRGB → CMYK reverse transform so band renderers, which
+        // hold an `&IccCache`, can call `convert_rgb_to_cmyk_readonly` from the
+        // parallel CMYK buffer's non-CMYK painter path. Without this the
+        // readonly call returns `None` and the renderer falls back to the
+        // PLRM `(1-r, 1-g, 1-b, 0)` formula — which produces CMYK with no
+        // K and asymmetric C/M/Y, so a Lab/sRGB neutral gray no longer round-
+        // trips to a neutral gray when a downstream CMYK-group blend (e.g.
+        // GWG 22.1's ColorBurn form over a Lab BG) reads from the buffer.
+        // The viewer's `build_icc_cache_for_list` already calls this; doing
+        // it here keeps the PNG path and the viewer in lockstep.
+        self.icc_cache.prepare_reverse_cmyk();
         true
     }
 
