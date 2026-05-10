@@ -1596,6 +1596,10 @@ pub fn build_icc_cache_for_list(
         // only hold an `&IccCache`, can use `convert_rgb_to_cmyk_readonly`
         // when populating the parallel CMYK buffer for non-CMYK painters.
         cache.prepare_reverse_cmyk();
+        // Pre-build the per-intent Lab → OI CMYK samplers so Lab fills can
+        // populate `native_cmyk` from `&IccCache` (mirrors the PNG path's
+        // `apply_output_intent_as_default_cmyk`). Required for GWG 22.1.
+        cache.prepare_lab_to_oi_cmyk();
     }
 
     // Enable proofing AFTER the OutputIntent itself is registered so the

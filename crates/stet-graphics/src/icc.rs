@@ -305,6 +305,15 @@ pub struct IccCache {
     /// fallback is available, so non-PDF/X documents keep their direct
     /// `source → sRGB` conversion.
     proofing_enabled: bool,
+    /// Per-intent Lab → OutputIntent CMYK samplers. Built lazily by
+    /// [`Self::prepare_lab_to_oi_cmyk`] from the OI's `B2A*` LUTs so
+    /// `convert_lab_to_oi_cmyk` can populate `DeviceColor::native_cmyk`
+    /// for Lab fills with a direct `Lab → PCS → OI B2A → CMYK` value
+    /// (matching Acrobat's ACE) instead of the sRGB→ICC-reverse approximation
+    /// the parallel CMYK buffer would otherwise compute. Surfaced under
+    /// CMYK-group blends — GWG 22.1's ColorBurn form over a Lab BG is the
+    /// canonical case where the indirect path drifts visibly.
+    lab_to_oi_per_intent: [Option<Arc<perceptual::LabToCmykSampler>>; 4],
 }
 
 impl Default for IccCache {
@@ -350,6 +359,7 @@ impl IccCache {
             reverse_cmyk_f64: None,
             bpc_mode: opts.bpc_mode,
             proofing_enabled: false,
+            lab_to_oi_per_intent: [None, None, None, None],
         };
         if let Some(bytes) = opts.source_cmyk_profile {
             cache.load_cmyk_profile_bytes(&bytes);
@@ -1312,6 +1322,61 @@ impl IccCache {
     /// having to mutate state.
     pub fn prepare_reverse_cmyk(&mut self) {
         let _ = self.ensure_reverse_cmyk_transform();
+    }
+
+    /// Pre-build per-intent `Lab → OutputIntent CMYK` samplers from the
+    /// document's OutputIntent profile. Call once after the OI is registered
+    /// so [`Self::convert_lab_to_oi_cmyk`] can run from `&IccCache`.
+    /// No-op when no default CMYK profile is registered, when the profile
+    /// shape doesn't expose B2A LUTs (shaper-matrix CMYK with no LUT, etc.),
+    /// or when proofing is disabled.
+    pub fn prepare_lab_to_oi_cmyk(&mut self) {
+        let Some(hash) = self.default_cmyk_hash else {
+            return;
+        };
+        let Some(profile) = self.profiles.get(&hash).cloned() else {
+            return;
+        };
+        use moxcms::RenderingIntent;
+        for &intent in &[
+            RenderingIntent::Perceptual,
+            RenderingIntent::RelativeColorimetric,
+            RenderingIntent::Saturation,
+            RenderingIntent::AbsoluteColorimetric,
+        ] {
+            let i = intent as usize;
+            if self.lab_to_oi_per_intent[i].is_some() {
+                continue;
+            }
+            if let Some(sampler) = perceptual::LabToCmykSampler::build(&profile, intent) {
+                self.lab_to_oi_per_intent[i] = Some(Arc::new(sampler));
+            }
+        }
+    }
+
+    /// Convert a PDF Lab triplet (L\* ∈ [0, 100], a\*/b\* ∈ [-128, 127]) to
+    /// OutputIntent CMYK using the OI's per-intent B2A table. Returns `None`
+    /// when the per-intent sampler hasn't been built (call
+    /// [`Self::prepare_lab_to_oi_cmyk`] first) or when the intent slot is
+    /// empty (falls back to Perceptual when available).
+    ///
+    /// Used by `lab_to_device_color` to populate `DeviceColor::native_cmyk`
+    /// so the renderer's parallel CMYK buffer holds the same direct
+    /// `Lab → OI CMYK` value Acrobat's ACE produces. Without this, the
+    /// renderer falls back to `convert_rgb_to_cmyk_readonly` (sRGB → ICC
+    /// reverse), which drifts visibly under CMYK-group blends. GWG 22.1's
+    /// ColorBurn form over a Lab BG is the canonical surfacing case.
+    pub fn convert_lab_to_oi_cmyk(
+        &self,
+        l_star: f64,
+        a_star: f64,
+        b_star: f64,
+        intent: IccRenderingIntent,
+    ) -> Option<[f64; 4]> {
+        let sampler = self.lab_to_oi_per_intent[intent as usize]
+            .as_ref()
+            .or(self.lab_to_oi_per_intent[IccRenderingIntent::Perceptual as usize].as_ref())?;
+        Some(sampler.sample_pdf_lab(l_star, a_star, b_star))
     }
 
     /// Convert an sRGB color to CMYK using the system CMYK profile, without

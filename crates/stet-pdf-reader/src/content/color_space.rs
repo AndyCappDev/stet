@@ -818,7 +818,27 @@ pub fn components_to_device_color_icc_with_intent(
             DeviceColor::from_cie_abc(a, b, c, params)
         }
         ResolvedColorSpace::Lab { white_point, range } => {
-            lab_to_device_color(components, white_point, range)
+            let mut color = lab_to_device_color(components, white_point, range);
+            // Populate `native_cmyk` from the OI's `Lab → CMYK` direct sampler
+            // when proofing is enabled. The sRGB pixmap value still comes from
+            // the perceptual `from_lab → from_xyz` path (Lab is perceptually
+            // uniform — the displayed colour shouldn't change), but band
+            // renderers reading the parallel CMYK buffer for a CMYK-group
+            // composite-back now see Acrobat's ACE-style Lab → OI CMYK rather
+            // than the sRGB-derived approximation. GWG 22.1's ColorBurn form
+            // over a Lab BG is the canonical surfacing case.
+            if let Some(cache) = icc_cache.as_deref() {
+                let intent_enum = stet_graphics::icc::intent_from_pdf_byte(intent);
+                let l_star = components.first().copied().unwrap_or(0.0);
+                let a_star = components.get(1).copied().unwrap_or(0.0);
+                let b_star = components.get(2).copied().unwrap_or(0.0);
+                if let Some(cmyk) =
+                    cache.convert_lab_to_oi_cmyk(l_star, a_star, b_star, intent_enum)
+                {
+                    color.native_cmyk = Some((cmyk[0], cmyk[1], cmyk[2], cmyk[3]));
+                }
+            }
+            color
         }
         ResolvedColorSpace::Pattern => DeviceColor::black(),
     }

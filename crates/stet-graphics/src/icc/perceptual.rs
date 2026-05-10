@@ -466,12 +466,12 @@ impl ShaperMatrix {
 }
 
 /// OutputIntent CMYK profile B2A sampler (Lab → CMYK), owned variant.
-struct LabToCmykSampler {
+pub struct LabToCmykSampler {
     lut: OwnedLutSampler,
 }
 
 impl LabToCmykSampler {
-    fn new(profile: &ColorProfile, intent: RenderingIntent) -> Option<Self> {
+    pub(super) fn new(profile: &ColorProfile, intent: RenderingIntent) -> Option<Self> {
         if profile.color_space != DataColorSpace::Cmyk || profile.pcs != DataColorSpace::Lab {
             return None;
         }
@@ -493,8 +493,44 @@ impl LabToCmykSampler {
         Some(LabToCmykSampler { lut })
     }
 
+    pub(super) fn build(
+        profile: &ColorProfile,
+        intent: RenderingIntent,
+    ) -> Option<LabToCmykSampler> {
+        Self::new(profile, intent)
+    }
+
     fn sample_pcs_lab(&self, pcs_lab: [f32; 3]) -> [f32; 4] {
         self.lut.sample_pcs_lab_to_cmyk(pcs_lab)
+    }
+
+    /// Convert a PDF Lab triplet (L\* ∈ [0, 100], a\*/b\* ∈ [-128, 127]) to
+    /// OutputIntent CMYK by encoding to the mft2 PCS-Lab grid the OI's B2A
+    /// curves expect, then sampling the LUT. Used by `IccCache` to populate
+    /// `DeviceColor::native_cmyk` for Lab fills, so the parallel CMYK buffer
+    /// holds the same direct Lab→OI value Acrobat's ACE produces (rather
+    /// than stet's Lab→sRGB→ICC-reverse approximation, which drifts under
+    /// CMYK-group blends — GWG 22.1's ColorBurn form).
+    pub fn sample_pdf_lab(&self, l_star: f64, a_star: f64, b_star: f64) -> [f64; 4] {
+        let l_norm = (l_star / 100.0).clamp(0.0, 1.0) as f32;
+        let a_norm = ((a_star + 128.0) / 255.0).clamp(0.0, 1.0) as f32;
+        let b_norm = ((b_star + 128.0) / 255.0).clamp(0.0, 1.0) as f32;
+        // Re-encode moxcms-Lab to mft2 PCS-Lab format (denom 65280) so the
+        // value lines up with the OI B2A input curves' grid axis. Mirrors
+        // the encoding stage 1's `Shaper`/`OwnedLutSampler` path uses.
+        let scale = PCS_LAB_DENOM / 65535.0;
+        let pcs = [
+            (l_norm * scale).clamp(0.0, 1.0),
+            (a_norm * scale).clamp(0.0, 1.0),
+            (b_norm * scale).clamp(0.0, 1.0),
+        ];
+        let cmyk = self.sample_pcs_lab(pcs);
+        [
+            cmyk[0] as f64,
+            cmyk[1] as f64,
+            cmyk[2] as f64,
+            cmyk[3] as f64,
+        ]
     }
 }
 

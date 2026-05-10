@@ -665,6 +665,11 @@ impl<'a> PdfDocument<'a> {
         // The viewer's `build_icc_cache_for_list` already calls this; doing
         // it here keeps the PNG path and the viewer in lockstep.
         self.icc_cache.prepare_reverse_cmyk();
+        // Also pre-build the `Lab → OI CMYK` samplers so Lab fills can take
+        // a direct ACE-style path through the OI's B2A LUTs, instead of going
+        // through Lab → sRGB → ICC reverse (which drifts under CMYK-group
+        // blends — same GWG 22.1 ColorBurn pattern as above).
+        self.icc_cache.prepare_lab_to_oi_cmyk();
         true
     }
 
