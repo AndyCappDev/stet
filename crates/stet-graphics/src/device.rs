@@ -445,6 +445,14 @@ pub struct ImageParams {
     pub painted_channels: u8,
     /// PDF `AIS` (alpha-is-shape). Default false.
     pub alpha_is_shape: bool,
+    /// Rendering intent that selects which `A2B*`/`B2A*` table the source
+    /// profile and the output-intent profile use when this image flows
+    /// through the proofing chain. Encoded as PDF byte: 0=Perceptual,
+    /// 1=RelativeColorimetric, 2=Saturation, 3=AbsoluteColorimetric.
+    /// Per ISO 32000 §11.3.4 a per-image `/Intent` overrides the gstate
+    /// `/RI`; PDF readers populate this from `/Intent` when present and
+    /// fall back to `gstate.rendering_intent` otherwise.
+    pub rendering_intent: u8,
 }
 
 /// Color space carried through the display list for native shading output.
@@ -802,6 +810,7 @@ impl Default for ImageParams {
             opm_paired: false,
             painted_channels: 0,
             alpha_is_shape: false,
+            rendering_intent: 0,
         }
     }
 }

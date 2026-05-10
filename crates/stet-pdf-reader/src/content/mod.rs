@@ -131,6 +131,10 @@ struct CachedImage {
     painted_channels: u8,
     /// For soft-masked images: (mask_gray_data, mask_width, mask_height, matte).
     smask: Option<(Arc<Vec<u8>>, u32, u32, Option<Vec<f64>>)>,
+    /// The image's `/Intent` (or the gstate `/RI` at first emit if absent).
+    /// Cached so re-emits keep the same intent — the image-level intent is a
+    /// property of the image, not of the gstate at re-use time.
+    rendering_intent: u8,
 }
 
 /// Tracks the scope of an active soft mask in the display list.
@@ -3639,6 +3643,27 @@ impl<'a> ContentInterpreter<'a> {
             dict.get_int(b"BitsPerComponent").unwrap_or(8) as u32
         };
 
+        // Per ISO 32000 §11.3.4 a per-image `/Intent` overrides the gstate
+        // `/RI`. GWG 17.2 (JPEG2000 + ICCBasedRGB) calibrates an Adobe RGB
+        // image colour against a CMYK swatch under `/RelativeColorimetric`;
+        // ignoring this override forces the proofing chain through the
+        // gstate's default Perceptual intent and produces a visibly
+        // different sRGB → the test's "X marker" appears.
+        let gstate_intent = self.gstate.rendering_intent;
+        let image_intent = match dict
+            .get(b"Intent")
+            .and_then(|o| self.resolver.deref(o).ok())
+        {
+            Some(PdfObj::Name(n)) => match n.as_slice() {
+                b"Perceptual" => 0u8,
+                b"RelativeColorimetric" => 1,
+                b"Saturation" => 2,
+                b"AbsoluteColorimetric" => 3,
+                _ => gstate_intent,
+            },
+            _ => gstate_intent,
+        };
+
         // Resolve color space
         let has_explicit_cs = dict.get(b"ColorSpace").is_some();
         let resolved_cs = if is_image_mask {
@@ -3913,6 +3938,7 @@ impl<'a> ContentInterpreter<'a> {
                     opm_paired: false,
                     painted_channels: 0,
                     alpha_is_shape: false,
+                    rendering_intent: 0,
                 },
             });
 
@@ -4013,6 +4039,7 @@ impl<'a> ContentInterpreter<'a> {
                     opm_paired: false,
                     painted_channels: 0,
                     alpha_is_shape: false,
+                    rendering_intent: 0,
                 },
             });
 
@@ -4439,6 +4466,7 @@ impl<'a> ContentInterpreter<'a> {
             opm_paired: self.gstate.opm_paired,
             painted_channels: painted_channels_override,
             alpha_is_shape: self.gstate.alpha_is_shape,
+            rendering_intent: image_intent,
         };
 
         // When an SMask is present, emit as SoftMasked so the renderer scales
@@ -4535,6 +4563,7 @@ impl<'a> ContentInterpreter<'a> {
                         mask_color: image_params.mask_color.clone(),
                         painted_channels: image_params.painted_channels,
                         smask: Some((Arc::clone(&smask_arc), width, height, matte.clone())),
+                        rendering_intent: image_params.rendering_intent,
                     },
                 );
             }
@@ -4561,6 +4590,7 @@ impl<'a> ContentInterpreter<'a> {
                     opm_paired: false,
                     painted_channels: 0,
                     alpha_is_shape: false,
+                    rendering_intent: 0,
                 },
             });
 
@@ -4622,6 +4652,7 @@ impl<'a> ContentInterpreter<'a> {
                         mask_color: image_params.mask_color.clone(),
                         painted_channels: image_params.painted_channels,
                         smask: None,
+                        rendering_intent: image_params.rendering_intent,
                     },
                 );
             }
@@ -4665,6 +4696,7 @@ impl<'a> ContentInterpreter<'a> {
             opm_paired: self.gstate.opm_paired,
             painted_channels: cached.painted_channels,
             alpha_is_shape: self.gstate.alpha_is_shape,
+            rendering_intent: cached.rendering_intent,
         };
 
         if let Some((smask_data, sw, sh, _matte)) = smask {
@@ -4687,6 +4719,7 @@ impl<'a> ContentInterpreter<'a> {
                     opm_paired: false,
                     painted_channels: 0,
                     alpha_is_shape: false,
+                    rendering_intent: 0,
                 },
             });
 
@@ -5638,6 +5671,7 @@ impl<'a> ContentInterpreter<'a> {
                     opm_paired: false,
                     painted_channels: 0,
                     alpha_is_shape: false,
+                    rendering_intent: 0,
                 },
             });
 
@@ -5737,6 +5771,7 @@ impl<'a> ContentInterpreter<'a> {
                     .map(painted_channels_for_cs)
                     .unwrap_or(self.gstate.fill_painted_channels),
                 alpha_is_shape: self.gstate.alpha_is_shape,
+                rendering_intent: 0,
             },
         });
 

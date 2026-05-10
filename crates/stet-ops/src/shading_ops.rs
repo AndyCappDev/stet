@@ -407,6 +407,7 @@ fn build_type1_shading(
             opm_paired: false,
             painted_channels: 0,
             alpha_is_shape: gs_alpha_is_shape,
+            rendering_intent: 0,
         },
     });
 

@@ -1870,10 +1870,21 @@ fn samples_to_rgba(
             profile_hash,
             profile_data,
         } => {
-            // Try ICC-based conversion if cache is available
+            // Try ICC-based conversion if cache is available. Routes through
+            // the proofing chain (`chain_per_intent_8bit[intent]`) when the
+            // chain has been populated for this intent — the proofing chain
+            // is what `convert_color_with_intent` uses for vector paints,
+            // so images need it too to match. Without this, an Adobe-RGB
+            // image renders via the source profile's direct RGB→sRGB while
+            // the surrounding CMYK paint goes through the OutputIntent
+            // CMYK→sRGB; the two sRGB outputs diverge. GWG 17.2 calibrates
+            // both so they match under correct CMS, and the test's "X"
+            // appears whenever the image bypasses the OI roundtrip.
+            let intent = stet_graphics::icc::intent_from_pdf_byte(params.rendering_intent);
             if let Some(cache) = icc
                 && cache.has_profile(profile_hash)
-                && let Some(rgb) = cache.convert_image_8bit(profile_hash, data, npixels)
+                && let Some(rgb) =
+                    cache.convert_image_8bit_with_intent(profile_hash, data, npixels, intent)
             {
                 let mut rgba = vec![255u8; npixels * 4];
                 for i in 0..npixels {
