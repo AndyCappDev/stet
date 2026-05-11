@@ -188,7 +188,12 @@ struct GState {
     miter_limit: f64,
     dash_array: Vec<f64>,
     dash_offset: f64,
-    overprint: bool,
+    /// `None` = no /OP emission yet in this content stream. The first
+    /// paint always force-emits its overprint state so a Form XObject's
+    /// content doesn't silently inherit /OP=true from the calling page
+    /// scope (per PDF 1.7 §7.8.3 a Form inherits the gstate at /Do time,
+    /// but stet's writer treats each Form as a fresh emission context).
+    overprint: Option<bool>,
     /// Overprint mode currently set in the PDF graphics state. -1 = no
     /// /OPM emitted yet (PDF default of 0); otherwise the most-recent
     /// value pushed. Tracked separately from `overprint` because OPM is
@@ -230,7 +235,7 @@ impl GState {
             miter_limit: -1.0,
             dash_array: Vec::new(),
             dash_offset: -1.0,
-            overprint: false,
+            overprint: None,
             overprint_mode: -1,
             fill_alpha: 1.0,
             stroke_alpha: 1.0,
@@ -1621,10 +1626,10 @@ fn emit_overprint(
     } else {
         gs.overprint_mode
     };
-    if gs.overprint == overprint && gs.overprint_mode == effective_mode {
+    if gs.overprint == Some(overprint) && gs.overprint_mode == effective_mode {
         return;
     }
-    gs.overprint = overprint;
+    gs.overprint = Some(overprint);
     gs.overprint_mode = effective_mode;
 
     let key = format!("OP{}-M{}", overprint as u8, effective_mode).into_bytes();
