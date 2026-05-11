@@ -308,6 +308,20 @@ struct Builder<'tracker> {
     /// disagree with reality and skip the operator that would fix the
     /// PDF state (visible as overprint leaking past clip scopes).
     clip_gs_stack: Vec<GState>,
+    /// q-scopes the writer has open. Each scope is the list of clip
+    /// paths added to that scope. Multiple Clips in one scope emit
+    /// `path W n` operations one after another in the same `q...Q` block
+    /// rather than nesting a new q for each — that's what PDF source
+    /// streams typically look like and what avoids round-trip growth
+    /// from the reader's `InitClip + replay-of-outer-clips` pattern.
+    clip_scopes: Vec<Vec<stet_fonts::geometry::PsPath>>,
+    /// Paths queued for skip-on-emit after the most recent InitClip.
+    /// Each InitClip seeds this with the still-active clips (i.e. the
+    /// flattened `clip_scopes`). Subsequent Clip elements consume the
+    /// front of the queue when paths match; once drained or mismatched,
+    /// emission resumes normally — additional clips go into the
+    /// currently-open scope without opening a fresh `q`.
+    pending_replay_clips: std::collections::VecDeque<stet_fonts::geometry::PsPath>,
     gs: GState,
     ext_gstates: Vec<ExtGStateDict>,
     ext_gstate_map: HashMap<Vec<u8>, usize>,
@@ -349,6 +363,8 @@ impl<'tracker> Builder<'tracker> {
             shading_refs: Vec::new(),
             clip_depth: 0,
             clip_gs_stack: Vec::new(),
+            clip_scopes: Vec::new(),
+            pending_replay_clips: std::collections::VecDeque::new(),
             gs: GState::new(),
             ext_gstates: Vec::new(),
             ext_gstate_map: HashMap::new(),
@@ -620,31 +636,64 @@ impl<'tracker> Builder<'tracker> {
                 }
             }
             DisplayElement::Clip { path, params } => {
-                // Snapshot gstate before `q` so the matching InitClip
-                // can restore it. Without this, gstate that changed
-                // inside the clip scope (overprint, alpha, blend mode,
-                // colors) leaks past `Q` in the tracker's view while
-                // PDF has already reverted it.
-                self.clip_gs_stack.push(self.gs.clone());
-                self.buf.extend(b"q\n");
+                // Replay detection: the reader emits one Clip per still-
+                // active clip after every Q (see `restore_clip_from_stack`
+                // in stet-pdf-reader). These are state descriptions, not
+                // new clips. Consume them silently.
+                if let Some(expected) = self.pending_replay_clips.front()
+                    && paths_equal(expected, path)
+                {
+                    self.pending_replay_clips.pop_front();
+                    return;
+                }
+                // Unmatched at this point — discard the rest of the
+                // queue so subsequent real clips don't get accidentally
+                // dropped.
+                self.pending_replay_clips.clear();
+                // Open a fresh q scope only when none is currently open;
+                // additional clips go into the existing scope by emitting
+                // just `path W n`. PDF source streams routinely chain
+                // multiple `W n` operations in a single `q ... Q` block
+                // (e.g. `q W(A) W(B) Q`), and mirroring that here keeps
+                // the round-trip stream-shape-stable.
+                if self.clip_scopes.is_empty() {
+                    self.clip_gs_stack.push(self.gs.clone());
+                    self.buf.extend(b"q\n");
+                    self.clip_depth += 1;
+                    self.clip_scopes.push(Vec::new());
+                }
                 emit_path(&mut self.buf, path);
                 if params.fill_rule == FillRule::EvenOdd {
                     self.buf.extend(b"W* n\n");
                 } else {
                     self.buf.extend(b"W n\n");
                 }
-                self.clip_depth += 1;
+                if let Some(scope) = self.clip_scopes.last_mut() {
+                    scope.push(path.clone());
+                }
             }
             DisplayElement::InitClip => {
-                for _ in 0..self.clip_depth {
+                if let Some(_popped) = self.clip_scopes.pop() {
                     self.buf.extend(b"Q\n");
                     if let Some(prev) = self.clip_gs_stack.pop() {
                         self.gs = prev;
                     } else {
                         self.gs.reset();
                     }
+                    if self.clip_depth > 0 {
+                        self.clip_depth -= 1;
+                    }
                 }
-                self.clip_depth = 0;
+                // Seed the replay queue with all clips still active
+                // (every path in every remaining open scope). The
+                // reader's restore_clip_from_stack emits one Clip per
+                // entry in `clip_stack` (outermost first); the next K
+                // Clip arms consume those.
+                self.pending_replay_clips = self
+                    .clip_scopes
+                    .iter()
+                    .flat_map(|s| s.iter().cloned())
+                    .collect();
             }
             DisplayElement::Image {
                 sample_data,
@@ -1807,6 +1856,56 @@ fn emit_bg_ucr(
         state: state.clone(),
     });
     writeln!(buf, "/GS{} gs", idx).unwrap();
+}
+
+/// Coordinate-wise equality for two paths. Used by the Clip arm to
+/// detect "replay" Clip elements the reader emits after each
+/// `restore_clip_from_stack`. Path segment counts and corresponding
+/// segment shapes/coords must match.
+fn paths_equal(a: &PsPath, b: &PsPath) -> bool {
+    use stet_fonts::geometry::PathSegment;
+    if a.segments.len() != b.segments.len() {
+        return false;
+    }
+    for (sa, sb) in a.segments.iter().zip(b.segments.iter()) {
+        let eq = match (sa, sb) {
+            (PathSegment::MoveTo(x1, y1), PathSegment::MoveTo(x2, y2))
+            | (PathSegment::LineTo(x1, y1), PathSegment::LineTo(x2, y2)) => {
+                (x1 - x2).abs() < 1e-6 && (y1 - y2).abs() < 1e-6
+            }
+            (
+                PathSegment::CurveTo {
+                    x1: a1,
+                    y1: b1,
+                    x2: c1,
+                    y2: d1,
+                    x3: e1,
+                    y3: f1,
+                },
+                PathSegment::CurveTo {
+                    x1: a2,
+                    y1: b2,
+                    x2: c2,
+                    y2: d2,
+                    x3: e2,
+                    y3: f2,
+                },
+            ) => {
+                (a1 - a2).abs() < 1e-6
+                    && (b1 - b2).abs() < 1e-6
+                    && (c1 - c2).abs() < 1e-6
+                    && (d1 - d2).abs() < 1e-6
+                    && (e1 - e2).abs() < 1e-6
+                    && (f1 - f2).abs() < 1e-6
+            }
+            (PathSegment::ClosePath, PathSegment::ClosePath) => true,
+            _ => false,
+        };
+        if !eq {
+            return false;
+        }
+    }
+    true
 }
 
 /// Emit path segments as PDF path operators.
