@@ -526,19 +526,24 @@ impl PdfDevice {
             transfer_refs,
             halftone_refs,
             bg_ucr_refs,
+            soft_mask_refs,
             form_xobjects,
         } = result;
 
         // Build image XObjects and Form XObjects (Group / SoftMasked
         // content). Both share the page's /XObject resource dict; the
         // Forms inherit /Resources from the page per PDF 1.7 § 7.8.3.
+        // Capture each form's indirect ref alongside the resource entries
+        // so the soft-mask /SMask patches below can wire them up.
         let mut xobject_entries: Vec<(Vec<u8>, PdfObj)> = Vec::new();
         for (i, img) in images.iter().enumerate() {
             let img_ref = self.build_image_xobject(writer, img);
             xobject_entries.push((format!("Im{}", i).into_bytes(), PdfObj::Ref(img_ref)));
         }
+        let mut form_obj_refs: Vec<u32> = Vec::with_capacity(form_xobjects.len());
         for (i, form) in form_xobjects.iter().enumerate() {
             let form_ref = build_form_xobject(writer, form);
+            form_obj_refs.push(form_ref);
             xobject_entries.push((format!("X{}", i).into_bytes(), PdfObj::Ref(form_ref)));
         }
 
@@ -586,7 +591,9 @@ impl PdfDevice {
                         let obj = match v {
                             PdfObj::Bool(b) => PdfObj::Bool(*b),
                             PdfObj::Int(n) => PdfObj::Int(*n),
+                            PdfObj::Real(r) => PdfObj::Real(*r),
                             PdfObj::Name(n) => PdfObj::Name(n.clone()),
+                            PdfObj::Ref(r) => PdfObj::Ref(*r),
                             _ => PdfObj::Null,
                         };
                         (k.clone(), obj)
@@ -615,6 +622,35 @@ impl PdfDevice {
                         let func_ref = build_type0_function_signed(writer, ucr);
                         entries.push((b"UCR2".to_vec(), PdfObj::Ref(func_ref)));
                     }
+                }
+
+                // Check if this ExtGState has a soft-mask reference. The
+                // mask form ref was allocated in form_obj_refs above; here
+                // we assemble the /SMask dict and stitch it in.
+                if let Some(sm) = soft_mask_refs.iter().find(|r| r.ext_gstate_idx == i) {
+                    let mask_ref = form_obj_refs[sm.mask_form_idx];
+                    let subtype_name: &[u8] = match sm.subtype {
+                        stet_graphics::display_list::SoftMaskSubtype::Alpha => b"Alpha",
+                        stet_graphics::display_list::SoftMaskSubtype::Luminosity => b"Luminosity",
+                    };
+                    let mut smask_entries: Vec<(Vec<u8>, PdfObj)> = vec![
+                        (b"Type".to_vec(), PdfObj::name("Mask")),
+                        (b"S".to_vec(), PdfObj::Name(subtype_name.to_vec())),
+                        (b"G".to_vec(), PdfObj::Ref(mask_ref)),
+                    ];
+                    if let Some([r, g, b]) = sm.backdrop_color {
+                        smask_entries.push((
+                            b"BC".to_vec(),
+                            PdfObj::Array(vec![PdfObj::Real(r), PdfObj::Real(g), PdfObj::Real(b)]),
+                        ));
+                    }
+                    if sm.transfer_invert {
+                        // Emit /TR { 1 exch sub } as a Type 4 (PostScript)
+                        // function. Inline via an indirect-stream object.
+                        let tr_ref = build_invert_transfer(writer);
+                        smask_entries.push((b"TR".to_vec(), PdfObj::Ref(tr_ref)));
+                    }
+                    entries.push((b"SMask".to_vec(), PdfObj::Dict(smask_entries)));
                 }
 
                 let gs_ref = writer.add_object(&PdfObj::Dict(entries));
@@ -713,7 +749,9 @@ impl PdfDevice {
                                 let obj = match v {
                                     PdfObj::Bool(b) => PdfObj::Bool(*b),
                                     PdfObj::Int(n) => PdfObj::Int(*n),
+                                    PdfObj::Real(r) => PdfObj::Real(*r),
                                     PdfObj::Name(n) => PdfObj::Name(n.clone()),
+                                    PdfObj::Ref(r) => PdfObj::Ref(*r),
                                     _ => PdfObj::Null,
                                 };
                                 (k.clone(), obj)
@@ -1442,6 +1480,25 @@ fn extract_icc_description(data: &[u8]) -> Option<String> {
         break;
     }
     None
+}
+
+/// Build a PDF Type 4 (PostScript calculator) function that inverts its
+/// input: `{ 1 exch sub }`. Used as the `/TR` entry on a SoftMask /SMask
+/// dict when the source transfer was `{ 1 exch sub }` on the PS side.
+/// Returns the indirect object number.
+fn build_invert_transfer(writer: &mut PdfWriter) -> u32 {
+    let dict_entries = vec![
+        (b"FunctionType".to_vec(), PdfObj::Int(4)),
+        (
+            b"Domain".to_vec(),
+            PdfObj::Array(vec![PdfObj::Int(0), PdfObj::Int(1)]),
+        ),
+        (
+            b"Range".to_vec(),
+            PdfObj::Array(vec![PdfObj::Int(0), PdfObj::Int(1)]),
+        ),
+    ];
+    writer.add_stream(dict_entries, b"{ 1 exch sub }", false)
 }
 
 /// Build a PDF Type 0 (sampled) function stream from a 256-entry transfer table.

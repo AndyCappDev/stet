@@ -48,6 +48,10 @@ pub struct ContentStreamResult {
     pub halftone_refs: Vec<HalftoneRef>,
     /// Black generation / undercolor removal references for PDF output.
     pub bg_ucr_refs: Vec<BgUcrRef>,
+    /// Soft-mask references to patch into ExtGState dicts at write time
+    /// (the mask Form XObject's indirect ref is allocated in
+    /// `pdf_device.rs`, not here).
+    pub soft_mask_refs: Vec<SoftMaskRef>,
     /// Form XObjects emitted for `DisplayElement::Group` and the content
     /// portion of `DisplayElement::SoftMasked`. The Forms inherit the
     /// page's `/Resources` (PDF 1.7 § 7.8.3), so they carry no `/Resources`
@@ -102,6 +106,25 @@ pub struct BgUcrRef {
     pub state: BgUcrState,
 }
 
+/// Reference from an ExtGState dict to a soft-mask Form XObject. The
+/// content stream emits a placeholder ExtGState dict (just `/Type`)
+/// during generation, then `pdf_device.rs` patches the dict with a real
+/// `/SMask << /Type /Mask /S /Alpha|/Luminosity /G <form-ref> >>` entry
+/// once the Form XObject's indirect object number is known.
+pub struct SoftMaskRef {
+    /// Index into `ext_gstate_dicts`.
+    pub ext_gstate_idx: usize,
+    /// Index into `form_xobjects` — the mask form.
+    pub mask_form_idx: usize,
+    /// `/S` entry on the `/SMask` dict.
+    pub subtype: stet_graphics::display_list::SoftMaskSubtype,
+    /// `/BC` backdrop color (used only for `/Luminosity` masks).
+    pub backdrop_color: Option<[f64; 3]>,
+    /// True when the mask values should be inverted — emitted as
+    /// `/TR { 1 exch sub }` on the `/SMask` dict.
+    pub transfer_invert: bool,
+}
+
 /// Reference to a tiling pattern that needs a PDF Pattern XObject.
 pub struct PatternRef {
     /// Pre-rendered display list for a single tile.
@@ -150,6 +173,15 @@ struct GState {
     /// `params.overprint_mode` from the DisplayList faithfully (the
     /// previous hardcoded /OPM 1 silently broke GWG K-knockouts).
     overprint_mode: i32,
+    /// Most-recent /ca (non-stroking alpha) emitted. Tracked separately
+    /// from /CA because PDF allows them to be set independently on an
+    /// ExtGState dict.
+    fill_alpha: f64,
+    /// Most-recent /CA (stroking alpha) emitted.
+    stroke_alpha: f64,
+    /// Most-recent /BM (blend mode) emitted. Blend mode is a shared
+    /// graphics-state entry — fills and strokes use the same one.
+    blend_mode: u8,
     /// Current fill color space resource name (e.g., "CS0") for Separation/DeviceN.
     fill_cs_name: Option<String>,
     /// Current stroke color space resource name.
@@ -177,6 +209,9 @@ impl GState {
             dash_offset: -1.0,
             overprint: false,
             overprint_mode: -1,
+            fill_alpha: 1.0,
+            stroke_alpha: 1.0,
+            blend_mode: 0,
             fill_cs_name: None,
             stroke_cs_name: None,
             rendering_intent: 0,
@@ -234,6 +269,7 @@ struct Builder<'tracker> {
     transfer_refs: Vec<TransferFunctionRef>,
     halftone_refs: Vec<HalftoneRef>,
     bg_ucr_refs: Vec<BgUcrRef>,
+    soft_mask_refs: Vec<SoftMaskRef>,
     form_xobjects: Vec<FormXObject>,
     page_font_names: HashSet<String>,
     has_text_elements: bool,
@@ -270,6 +306,7 @@ impl<'tracker> Builder<'tracker> {
             transfer_refs: Vec::new(),
             halftone_refs: Vec::new(),
             bg_ucr_refs: Vec::new(),
+            soft_mask_refs: Vec::new(),
             form_xobjects: Vec::new(),
             page_font_names: HashSet::new(),
             has_text_elements,
@@ -382,6 +419,15 @@ impl<'tracker> Builder<'tracker> {
                     &mut self.ext_gstates,
                     &mut self.ext_gstate_map,
                 );
+                emit_paint_alpha_blend(
+                    &mut self.buf,
+                    false,
+                    params.alpha,
+                    params.blend_mode,
+                    &mut self.gs,
+                    &mut self.ext_gstates,
+                    &mut self.ext_gstate_map,
+                );
                 if let Some(spot) = &params.spot_color {
                     emit_fill_color_spot(
                         &mut self.buf,
@@ -442,6 +488,15 @@ impl<'tracker> Builder<'tracker> {
                     &mut self.buf,
                     params.overprint,
                     params.overprint_mode,
+                    &mut self.gs,
+                    &mut self.ext_gstates,
+                    &mut self.ext_gstate_map,
+                );
+                emit_paint_alpha_blend(
+                    &mut self.buf,
+                    true,
+                    params.alpha,
+                    params.blend_mode,
                     &mut self.gs,
                     &mut self.ext_gstates,
                     &mut self.ext_gstate_map,
@@ -628,9 +683,77 @@ impl<'tracker> Builder<'tracker> {
                 // every cached gstate dedup we've been tracking.
                 self.gs = GState::new();
             }
-            DisplayElement::SoftMasked { .. } | DisplayElement::OcgGroup { .. } => {
-                // Stage C / D — see content_stream.rs TODO for soft mask
-                // and OCG PDF output.
+            DisplayElement::SoftMasked {
+                mask,
+                content,
+                params,
+                ..
+            } => {
+                // Mask → Form XObject (transparency group, /CS DeviceGray
+                // so luminosity extraction works on Luminosity SMasks; the
+                // CS choice is harmless for Alpha SMasks since only the
+                // alpha channel is read).
+                let saved_buf = std::mem::take(&mut self.buf);
+                let saved_gs = std::mem::replace(&mut self.gs, GState::new());
+                let saved_clip_depth = std::mem::replace(&mut self.clip_depth, 0);
+
+                self.emit_list(mask);
+
+                for _ in 0..self.clip_depth {
+                    self.buf.extend(b"Q\n");
+                }
+
+                let mask_content = std::mem::replace(&mut self.buf, saved_buf);
+                self.gs = saved_gs;
+                self.clip_depth = saved_clip_depth;
+
+                let mask_form_idx = self.form_xobjects.len();
+                let mask_group_entries: Vec<(Vec<u8>, PdfObj)> = vec![
+                    (b"Type".to_vec(), PdfObj::name("Group")),
+                    (b"S".to_vec(), PdfObj::name("Transparency")),
+                    (b"CS".to_vec(), PdfObj::name("DeviceGray")),
+                ];
+                self.form_xobjects.push(FormXObject {
+                    content: mask_content,
+                    bbox: params.bbox,
+                    group_dict_entries: Some(mask_group_entries),
+                });
+
+                // Placeholder ExtGState — pdf_device.rs patches in the
+                // real /SMask entry once the mask form's indirect ref
+                // exists.
+                let ext_gstate_idx = self.ext_gstates.len();
+                self.ext_gstates.push(ExtGStateDict {
+                    entries: vec![(b"Type".to_vec(), PdfObj::name("ExtGState"))],
+                });
+                self.soft_mask_refs.push(SoftMaskRef {
+                    ext_gstate_idx,
+                    mask_form_idx,
+                    subtype: params.subtype.clone(),
+                    backdrop_color: params.backdrop_color,
+                    transfer_invert: params.transfer_invert,
+                });
+
+                // Scope: q + /GSn gs (push SMask) + content + Q (pops the
+                // SMask along with the rest of the gstate).
+                self.buf.extend(b"q\n");
+                writeln!(self.buf, "/GS{} gs", ext_gstate_idx).unwrap();
+                let saved_gs = std::mem::replace(&mut self.gs, GState::new());
+                let saved_clip_depth = std::mem::replace(&mut self.clip_depth, 0);
+
+                self.emit_list(content);
+
+                for _ in 0..self.clip_depth {
+                    self.buf.extend(b"Q\n");
+                }
+
+                self.gs = saved_gs;
+                self.clip_depth = saved_clip_depth;
+                self.buf.extend(b"Q\n");
+                self.gs = GState::new();
+            }
+            DisplayElement::OcgGroup { .. } => {
+                // Stage D — see content_stream.rs TODO for OCG output.
             }
             _ => {}
         }
@@ -649,6 +772,7 @@ impl<'tracker> Builder<'tracker> {
             transfer_refs: self.transfer_refs,
             halftone_refs: self.halftone_refs,
             bg_ucr_refs: self.bg_ucr_refs,
+            soft_mask_refs: self.soft_mask_refs,
             form_xobjects: self.form_xobjects,
         }
     }
@@ -676,6 +800,67 @@ fn blend_mode_name(code: u8) -> &'static [u8] {
         15 => b"Luminosity",
         _ => b"Normal",
     }
+}
+
+/// Emit a `/GSn gs` setting `/ca` (non-stroking alpha) or `/CA`
+/// (stroking alpha), and `/BM` when the blend mode changes. Used by
+/// the Fill and Stroke arms so per-paint transparency on the
+/// DisplayList round-trips into the output PDF. Deduplicates so
+/// identical (paint-side, alpha, blend) combos share one ExtGState.
+fn emit_paint_alpha_blend(
+    buf: &mut Vec<u8>,
+    is_stroke: bool,
+    alpha: f64,
+    blend_mode: u8,
+    gs: &mut GState,
+    ext_gstates: &mut Vec<ExtGStateDict>,
+    ext_gstate_map: &mut HashMap<Vec<u8>, usize>,
+) {
+    let cached_alpha = if is_stroke {
+        gs.stroke_alpha
+    } else {
+        gs.fill_alpha
+    };
+    if (cached_alpha - alpha).abs() < 1e-6 && gs.blend_mode == blend_mode {
+        return;
+    }
+    if is_stroke {
+        gs.stroke_alpha = alpha;
+    } else {
+        gs.fill_alpha = alpha;
+    }
+    gs.blend_mode = blend_mode;
+
+    let alpha_q = (alpha.clamp(0.0, 1.0) * 10000.0) as u16;
+    let kind = if is_stroke { b'S' } else { b'F' };
+    let key = format!("PA-{}-a{}-b{}", kind as char, alpha_q, blend_mode).into_bytes();
+
+    let idx = if let Some(&idx) = ext_gstate_map.get(&key) {
+        idx
+    } else {
+        let idx = ext_gstates.len();
+        let mut entries: Vec<(Vec<u8>, PdfObj)> =
+            vec![(b"Type".to_vec(), PdfObj::name("ExtGState"))];
+        if is_stroke {
+            entries.push((b"CA".to_vec(), PdfObj::Real(alpha)));
+        } else {
+            entries.push((b"ca".to_vec(), PdfObj::Real(alpha)));
+        }
+        if blend_mode != 0 {
+            entries.push((
+                b"BM".to_vec(),
+                PdfObj::Name(blend_mode_name(blend_mode).to_vec()),
+            ));
+        } else {
+            // Normal explicitly so re-pushing the same dict doesn't
+            // inherit a stale BM from a previous gstate.
+            entries.push((b"BM".to_vec(), PdfObj::name("Normal")));
+        }
+        ext_gstates.push(ExtGStateDict { entries });
+        ext_gstate_map.insert(key, idx);
+        idx
+    };
+    writeln!(buf, "/GS{} gs", idx).unwrap();
 }
 
 /// Emit a `/GSn gs` setting `/CA`, `/ca`, and `/BM` for a transparency
