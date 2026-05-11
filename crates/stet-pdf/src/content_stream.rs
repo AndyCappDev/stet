@@ -675,9 +675,26 @@ impl<'tracker> Builder<'tracker> {
                     &mut self.ext_gstate_map,
                 );
                 if xobj.is_imagemask
-                    && let Some((r, g, b)) = xobj.mask_color
+                    && let Some(ref mask_color) = xobj.mask_color
                 {
-                    emit_fill_color_rgb(&mut self.buf, r, g, b);
+                    // Emit the imagemask's fill color through the same
+                    // DeviceColor-aware path the regular Fill arm uses, so a
+                    // CMYK source paint (native_cmyk = Some) round-trips as
+                    // `c m y k k` rather than getting downconverted to
+                    // `r g b rg`. Without this the imagemask's color reads
+                    // back as DeviceRGB and OPM-1 overprint with a CMYK
+                    // backdrop misbehaves (visible on PDFX-Output-Test
+                    // GWG 2.0 image / mask cells).
+                    if self.gs.fill_cs_name.is_some() {
+                        self.gs.fill_cs_name = None;
+                        self.gs.fill_color = None;
+                    }
+                    emit_fill_color(
+                        &mut self.buf,
+                        mask_color,
+                        params.painted_channels,
+                        &mut self.gs,
+                    );
                 }
                 writeln!(self.buf, "/Im{} Do Q", img_idx).unwrap();
                 self.gs = pre_q_gs;

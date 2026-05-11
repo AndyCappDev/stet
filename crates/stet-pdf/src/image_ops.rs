@@ -25,8 +25,12 @@ pub struct ImageXObject {
     pub bits_per_component: u32,
     /// True if this is an imagemask (1-bit stencil).
     pub is_imagemask: bool,
-    /// Fill color for imagemask (RGB, 0.0–1.0).
-    pub mask_color: Option<(f64, f64, f64)>,
+    /// Fill color for imagemask. Stored as the full `DeviceColor` so the
+    /// writer can emit it as `k` / `g` / `rg` matching the source paint's
+    /// color space (preserving `native_cmyk` for overprint correctness on
+    /// the round-trip — `r g b rg` would drop the CMYK channels and let
+    /// PDF's OPM-1 painters reinterpret the masked region).
+    pub mask_color: Option<DeviceColor>,
     /// ImageType 4 color key mask ranges.
     pub color_key_mask: Option<Vec<u8>>,
     /// ICC profile data to embed (if ICCBased color space).
@@ -161,6 +165,30 @@ pub fn convert_image(sample_data: &[u8], params: &ImageParams) -> ImageXObject {
                         data: (**profile_data).clone(),
                         n: *n,
                     }),
+                ),
+                ImageColorSpace::Separation {
+                    name,
+                    alt_space,
+                    tint_table,
+                } => (
+                    PdfColorSpace::Separation {
+                        name: name.clone(),
+                        alt: Box::new(image_cs_to_pdf_cs(alt_space)),
+                        tint_table: tint_table.clone(),
+                    },
+                    None,
+                ),
+                ImageColorSpace::DeviceN {
+                    names,
+                    alt_space,
+                    tint_table,
+                } => (
+                    PdfColorSpace::DeviceN {
+                        names: names.clone(),
+                        alt: Box::new(image_cs_to_pdf_cs(alt_space)),
+                        tint_table: tint_table.clone(),
+                    },
+                    None,
                 ),
                 _ => (PdfColorSpace::DeviceRGB, None),
             };
@@ -349,7 +377,7 @@ fn convert_imagemask(
         pdf_color_space: PdfColorSpace::DeviceGray,
         bits_per_component: 1,
         is_imagemask: true,
-        mask_color: Some((color.r, color.g, color.b)),
+        mask_color: Some(color.clone()),
         color_key_mask: None,
         icc_profile: None,
     }
