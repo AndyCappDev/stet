@@ -48,6 +48,31 @@ pub struct ContentStreamResult {
     pub halftone_refs: Vec<HalftoneRef>,
     /// Black generation / undercolor removal references for PDF output.
     pub bg_ucr_refs: Vec<BgUcrRef>,
+    /// Form XObjects emitted for `DisplayElement::Group` and the content
+    /// portion of `DisplayElement::SoftMasked`. The Forms inherit the
+    /// page's `/Resources` (PDF 1.7 § 7.8.3), so they carry no `/Resources`
+    /// dict of their own; whatever fonts / images / ext-gstates the Form's
+    /// content stream references is already in the page-level
+    /// resource lists above.
+    pub form_xobjects: Vec<FormXObject>,
+}
+
+/// A PDF Form XObject — a self-contained content stream wrapped as an
+/// indirect object so it can be invoked via `/Xn Do`. stet emits one for
+/// each `DisplayElement::Group` and for the mask portion of
+/// `DisplayElement::SoftMasked`. The Form's resources are inherited from
+/// the enclosing page, so this struct carries only the per-form data.
+pub struct FormXObject {
+    /// Raw content stream bytes (before compression).
+    pub content: Vec<u8>,
+    /// `/BBox` in the enclosing content stream's user coordinate system
+    /// (device space, the same units the parent's paths use).
+    pub bbox: [f64; 4],
+    /// Entries that go into the `/Group` transparency dict. `None` means
+    /// emit no `/Group` entry — used for the mask Form on a `SoftMasked`
+    /// element (the mask doesn't need its own transparency group), and
+    /// for other Forms that don't need transparency-group semantics.
+    pub group_dict_entries: Option<Vec<(Vec<u8>, PdfObj)>>,
 }
 
 /// Reference from an ExtGState to pre-sampled transfer function tables.
@@ -118,6 +143,13 @@ struct GState {
     dash_array: Vec<f64>,
     dash_offset: f64,
     overprint: bool,
+    /// Overprint mode currently set in the PDF graphics state. -1 = no
+    /// /OPM emitted yet (PDF default of 0); otherwise the most-recent
+    /// value pushed. Tracked separately from `overprint` because OPM is
+    /// a distinct graphics-state entry and stet has to round-trip
+    /// `params.overprint_mode` from the DisplayList faithfully (the
+    /// previous hardcoded /OPM 1 silently broke GWG K-knockouts).
+    overprint_mode: i32,
     /// Current fill color space resource name (e.g., "CS0") for Separation/DeviceN.
     fill_cs_name: Option<String>,
     /// Current stroke color space resource name.
@@ -144,6 +176,7 @@ impl GState {
             dash_array: Vec::new(),
             dash_offset: -1.0,
             overprint: false,
+            overprint_mode: -1,
             fill_cs_name: None,
             stroke_cs_name: None,
             rendering_intent: 0,
@@ -179,6 +212,530 @@ fn color_to_pdf(c: &DeviceColor) -> PdfColor {
     }
 }
 
+/// Stateful builder for one content stream — a page or a tile pattern.
+/// Owns the mutable state per-element emission needs, and exposes
+/// `emit_list` so nested DisplayLists (the children of Group /
+/// SoftMasked / OcgGroup) can be processed recursively with the same
+/// state.
+struct Builder<'tracker> {
+    buf: Vec<u8>,
+    images: Vec<ImageXObject>,
+    shading_refs: Vec<ShadingRef>,
+    clip_depth: u32,
+    gs: GState,
+    ext_gstates: Vec<ExtGStateDict>,
+    ext_gstate_map: HashMap<Vec<u8>, usize>,
+    color_spaces: Vec<(String, SpotColorSpace)>,
+    cs_name_map: HashMap<Vec<u8>, String>,
+    pattern_refs: Vec<PatternRef>,
+    pattern_map: HashMap<u32, usize>,
+    pattern_cs_names: Vec<(String, PdfObj)>,
+    pattern_cs_set: HashSet<String>,
+    transfer_refs: Vec<TransferFunctionRef>,
+    halftone_refs: Vec<HalftoneRef>,
+    bg_ucr_refs: Vec<BgUcrRef>,
+    form_xobjects: Vec<FormXObject>,
+    page_font_names: HashSet<String>,
+    has_text_elements: bool,
+    page_w: u32,
+    page_h: u32,
+    /// True when emitting a Pattern XObject tile. `ErasePage` is a no-op
+    /// in this mode — tiles have no page background.
+    in_tile: bool,
+    font_tracker: &'tracker mut FontTracker,
+}
+
+impl<'tracker> Builder<'tracker> {
+    fn new(
+        font_tracker: &'tracker mut FontTracker,
+        page_w: u32,
+        page_h: u32,
+        has_text_elements: bool,
+        in_tile: bool,
+    ) -> Self {
+        Self {
+            buf: Vec::with_capacity(if in_tile { 1024 } else { 4096 }),
+            images: Vec::new(),
+            shading_refs: Vec::new(),
+            clip_depth: 0,
+            gs: GState::new(),
+            ext_gstates: Vec::new(),
+            ext_gstate_map: HashMap::new(),
+            color_spaces: Vec::new(),
+            cs_name_map: HashMap::new(),
+            pattern_refs: Vec::new(),
+            pattern_map: HashMap::new(),
+            pattern_cs_names: Vec::new(),
+            pattern_cs_set: HashSet::new(),
+            transfer_refs: Vec::new(),
+            halftone_refs: Vec::new(),
+            bg_ucr_refs: Vec::new(),
+            form_xobjects: Vec::new(),
+            page_font_names: HashSet::new(),
+            has_text_elements,
+            page_w,
+            page_h,
+            in_tile,
+            font_tracker,
+        }
+    }
+
+    /// Walk a DisplayList and emit each element. May recurse via the
+    /// Group / SoftMasked / OcgGroup arms.
+    fn emit_list<'a>(&mut self, list: &'a DisplayList) {
+        let mut text_batch: Vec<&'a TextParams> = Vec::new();
+        let mut batch_font: Option<u32> = None;
+        for element in list.elements() {
+            self.emit_element(element, &mut text_batch, &mut batch_font);
+        }
+        flush_text_batch(&text_batch, self.font_tracker, &mut self.buf, &mut self.gs);
+    }
+
+    fn emit_element<'a>(
+        &mut self,
+        element: &'a DisplayElement,
+        text_batch: &mut Vec<&'a TextParams>,
+        batch_font: &mut Option<u32>,
+    ) {
+        // Text-batching prelude. Text accumulates into the current
+        // batch; non-Text elements flush the batch before processing.
+        // Glyph-path Fill/Stroke elements paired with Text in the PS
+        // pipeline get skipped without disturbing the batch; the same
+        // element shapes from the PDF reader (no Text companion) fall
+        // through to the main match.
+        match element {
+            DisplayElement::Text { params } => {
+                if *batch_font == Some(params.font_entity) {
+                    text_batch.push(params);
+                } else {
+                    flush_text_batch(text_batch, self.font_tracker, &mut self.buf, &mut self.gs);
+                    text_batch.clear();
+                    text_batch.push(params);
+                    *batch_font = Some(params.font_entity);
+                }
+                return;
+            }
+            DisplayElement::Fill { params, .. }
+                if params.is_text_glyph && self.has_text_elements =>
+            {
+                return;
+            }
+            DisplayElement::Stroke { params, .. }
+                if params.is_text_glyph && self.has_text_elements =>
+            {
+                return;
+            }
+            _ => {
+                flush_text_batch(text_batch, self.font_tracker, &mut self.buf, &mut self.gs);
+                text_batch.clear();
+                *batch_font = None;
+            }
+        }
+
+        match element {
+            DisplayElement::ErasePage => {
+                if self.in_tile {
+                    // Tiles have no page background — skip.
+                    return;
+                }
+                self.buf.extend(b"1 g 0 0 ");
+                fmt_num(&mut self.buf, self.page_w as f64);
+                self.buf.push(b' ');
+                fmt_num(&mut self.buf, self.page_h as f64);
+                self.buf.extend(b" re f\n");
+                self.gs.fill_color = Some(PdfColor::Gray(10000));
+            }
+            DisplayElement::Fill { path, params } => {
+                if params.is_text_glyph && self.has_text_elements {
+                    return;
+                }
+                emit_transfer(
+                    &mut self.buf,
+                    &params.transfer,
+                    &mut self.gs,
+                    &mut self.ext_gstates,
+                    &mut self.ext_gstate_map,
+                    &mut self.transfer_refs,
+                );
+                emit_halftone(
+                    &mut self.buf,
+                    &params.halftone,
+                    &mut self.gs,
+                    &mut self.ext_gstates,
+                    &mut self.ext_gstate_map,
+                    &mut self.halftone_refs,
+                );
+                emit_bg_ucr(
+                    &mut self.buf,
+                    &params.bg_ucr,
+                    &mut self.gs,
+                    &mut self.ext_gstates,
+                    &mut self.ext_gstate_map,
+                    &mut self.bg_ucr_refs,
+                );
+                emit_rendering_intent(&mut self.buf, params.rendering_intent, &mut self.gs);
+                emit_overprint(
+                    &mut self.buf,
+                    params.overprint,
+                    params.overprint_mode,
+                    &mut self.gs,
+                    &mut self.ext_gstates,
+                    &mut self.ext_gstate_map,
+                );
+                if let Some(spot) = &params.spot_color {
+                    emit_fill_color_spot(
+                        &mut self.buf,
+                        spot,
+                        &mut self.gs,
+                        &mut self.cs_name_map,
+                        &mut self.color_spaces,
+                    );
+                } else {
+                    if self.gs.fill_cs_name.is_some() {
+                        self.gs.fill_cs_name = None;
+                        self.gs.fill_color = None;
+                    }
+                    emit_fill_color(&mut self.buf, &params.color, &mut self.gs);
+                }
+                emit_path(&mut self.buf, path);
+                if params.fill_rule == FillRule::EvenOdd {
+                    self.buf.extend(b"f*\n");
+                } else {
+                    self.buf.extend(b"f\n");
+                }
+            }
+            DisplayElement::Stroke { path, params } => {
+                if params.is_text_glyph && self.has_text_elements {
+                    return;
+                }
+                let has_ctm = !is_identity(&params.ctm);
+                if has_ctm {
+                    self.buf.extend(b"q\n");
+                    emit_cm(&mut self.buf, &params.ctm);
+                }
+                emit_transfer(
+                    &mut self.buf,
+                    &params.transfer,
+                    &mut self.gs,
+                    &mut self.ext_gstates,
+                    &mut self.ext_gstate_map,
+                    &mut self.transfer_refs,
+                );
+                emit_halftone(
+                    &mut self.buf,
+                    &params.halftone,
+                    &mut self.gs,
+                    &mut self.ext_gstates,
+                    &mut self.ext_gstate_map,
+                    &mut self.halftone_refs,
+                );
+                emit_bg_ucr(
+                    &mut self.buf,
+                    &params.bg_ucr,
+                    &mut self.gs,
+                    &mut self.ext_gstates,
+                    &mut self.ext_gstate_map,
+                    &mut self.bg_ucr_refs,
+                );
+                emit_rendering_intent(&mut self.buf, params.rendering_intent, &mut self.gs);
+                emit_overprint(
+                    &mut self.buf,
+                    params.overprint,
+                    params.overprint_mode,
+                    &mut self.gs,
+                    &mut self.ext_gstates,
+                    &mut self.ext_gstate_map,
+                );
+                if let Some(spot) = &params.spot_color {
+                    emit_stroke_color_spot(
+                        &mut self.buf,
+                        spot,
+                        &mut self.gs,
+                        &mut self.cs_name_map,
+                        &mut self.color_spaces,
+                    );
+                } else {
+                    if self.gs.stroke_cs_name.is_some() {
+                        self.gs.stroke_cs_name = None;
+                        self.gs.stroke_color = None;
+                    }
+                    emit_stroke_color(&mut self.buf, &params.color, &mut self.gs);
+                }
+                emit_line_state(&mut self.buf, params, &mut self.gs);
+                emit_path(&mut self.buf, path);
+                self.buf.extend(b"S\n");
+                if has_ctm {
+                    self.buf.extend(b"Q\n");
+                    self.gs = GState::new();
+                }
+            }
+            DisplayElement::Clip { path, params } => {
+                self.buf.extend(b"q\n");
+                emit_path(&mut self.buf, path);
+                if params.fill_rule == FillRule::EvenOdd {
+                    self.buf.extend(b"W* n\n");
+                } else {
+                    self.buf.extend(b"W n\n");
+                }
+                self.clip_depth += 1;
+                // Don't reset gs — colors/line state carry into clip scope.
+            }
+            DisplayElement::InitClip => {
+                for _ in 0..self.clip_depth {
+                    self.buf.extend(b"Q\n");
+                }
+                self.clip_depth = 0;
+                self.gs.reset();
+            }
+            DisplayElement::Image {
+                sample_data,
+                params,
+            } => {
+                let img_idx = self.images.len();
+                let xobj = image_ops::convert_image(sample_data, params);
+                let m = compute_image_matrix(params);
+                self.buf.extend(b"q ");
+                emit_matrix(&mut self.buf, &m);
+                self.buf.extend(b" cm ");
+                if xobj.is_imagemask
+                    && let Some((r, g, b)) = xobj.mask_color
+                {
+                    emit_fill_color_rgb(&mut self.buf, r, g, b);
+                }
+                writeln!(self.buf, "/Im{} Do Q", img_idx).unwrap();
+                self.images.push(xobj);
+            }
+            DisplayElement::AxialShading { params } => {
+                let sh_idx = self.shading_refs.len();
+                self.buf.extend(b"q ");
+                if !is_identity(&params.ctm) {
+                    emit_matrix(&mut self.buf, &params.ctm);
+                    self.buf.extend(b" cm ");
+                }
+                writeln!(self.buf, "/Sh{} sh Q", sh_idx).unwrap();
+                self.shading_refs.push(ShadingRef::Axial(params.clone()));
+            }
+            DisplayElement::RadialShading { params } => {
+                let sh_idx = self.shading_refs.len();
+                self.buf.extend(b"q ");
+                if !is_identity(&params.ctm) {
+                    emit_matrix(&mut self.buf, &params.ctm);
+                    self.buf.extend(b" cm ");
+                }
+                writeln!(self.buf, "/Sh{} sh Q", sh_idx).unwrap();
+                self.shading_refs.push(ShadingRef::Radial(params.clone()));
+            }
+            DisplayElement::MeshShading { params } => {
+                let sh_idx = self.shading_refs.len();
+                self.buf.extend(b"q ");
+                if !is_identity(&params.ctm) {
+                    emit_matrix(&mut self.buf, &params.ctm);
+                    self.buf.extend(b" cm ");
+                }
+                writeln!(self.buf, "/Sh{} sh Q", sh_idx).unwrap();
+                self.shading_refs.push(ShadingRef::Mesh(params.clone()));
+            }
+            DisplayElement::PatchShading { params } => {
+                let sh_idx = self.shading_refs.len();
+                self.buf.extend(b"q ");
+                if !is_identity(&params.ctm) {
+                    emit_matrix(&mut self.buf, &params.ctm);
+                    self.buf.extend(b" cm ");
+                }
+                writeln!(self.buf, "/Sh{} sh Q", sh_idx).unwrap();
+                self.shading_refs.push(ShadingRef::Patch(params.clone()));
+            }
+            DisplayElement::PatternFill { params } => {
+                emit_pattern_fill(
+                    &mut self.buf,
+                    params,
+                    &mut self.gs,
+                    &mut self.pattern_refs,
+                    &mut self.pattern_map,
+                    &mut self.pattern_cs_names,
+                    &mut self.pattern_cs_set,
+                );
+            }
+            DisplayElement::Text { .. } => unreachable!(), // handled in prelude
+            DisplayElement::Group { elements, params } => {
+                // Build the Form XObject's content stream by swapping in
+                // a fresh buffer and recursing. Resources (images, fonts,
+                // ext_gstates, …) stay on the page-level Builder; the
+                // Form inherits the page's /Resources per PDF 1.7
+                // § 7.8.3, so we never have to duplicate them.
+                let saved_buf = std::mem::take(&mut self.buf);
+                let saved_gs = std::mem::replace(&mut self.gs, GState::new());
+                let saved_clip_depth = std::mem::replace(&mut self.clip_depth, 0);
+
+                self.emit_list(elements);
+
+                // Close any clips still open at the end of the form's
+                // content stream — the implicit Q after the form's body
+                // would balance them out anyway, but explicit close keeps
+                // the stream well-formed under viewer inspection.
+                for _ in 0..self.clip_depth {
+                    self.buf.extend(b"Q\n");
+                }
+
+                let form_content = std::mem::replace(&mut self.buf, saved_buf);
+                self.gs = saved_gs;
+                self.clip_depth = saved_clip_depth;
+
+                let form_idx = self.form_xobjects.len();
+                let form_name = format!("X{}", form_idx);
+
+                let mut group_entries: Vec<(Vec<u8>, PdfObj)> = vec![
+                    (b"Type".to_vec(), PdfObj::name("Group")),
+                    (b"S".to_vec(), PdfObj::name("Transparency")),
+                ];
+                if params.isolated {
+                    group_entries.push((b"I".to_vec(), PdfObj::Bool(true)));
+                }
+                if params.knockout {
+                    group_entries.push((b"K".to_vec(), PdfObj::Bool(true)));
+                }
+                let cs_name: Option<&str> = match params.color_space {
+                    stet_graphics::display_list::GroupColorSpace::DeviceGray => Some("DeviceGray"),
+                    stet_graphics::display_list::GroupColorSpace::DeviceRGB => Some("DeviceRGB"),
+                    stet_graphics::display_list::GroupColorSpace::DeviceCMYK => Some("DeviceCMYK"),
+                    stet_graphics::display_list::GroupColorSpace::Inherited => None,
+                };
+                if let Some(name) = cs_name {
+                    group_entries.push((b"CS".to_vec(), PdfObj::name(name)));
+                }
+
+                self.form_xobjects.push(FormXObject {
+                    content: form_content,
+                    bbox: params.bbox,
+                    group_dict_entries: Some(group_entries),
+                });
+
+                // Invoke the Form on the parent stream. Wrap in q/Q so
+                // any /CA/ca/BM ExtGState we push is local to this Do.
+                self.buf.extend(b"q\n");
+                if params.alpha < 1.0 || params.blend_mode != 0 {
+                    emit_group_composite_gs(
+                        &mut self.buf,
+                        params.alpha,
+                        params.blend_mode,
+                        &mut self.ext_gstates,
+                        &mut self.ext_gstate_map,
+                    );
+                }
+                writeln!(self.buf, "/{} Do", form_name).unwrap();
+                self.buf.extend(b"Q\n");
+                // The implicit q at /Do entry and Q on return invalidate
+                // every cached gstate dedup we've been tracking.
+                self.gs = GState::new();
+            }
+            DisplayElement::SoftMasked { .. } | DisplayElement::OcgGroup { .. } => {
+                // Stage C / D — see content_stream.rs TODO for soft mask
+                // and OCG PDF output.
+            }
+            _ => {}
+        }
+    }
+
+    fn finish(self) -> ContentStreamResult {
+        ContentStreamResult {
+            content: self.buf,
+            images: self.images,
+            shading_refs: self.shading_refs,
+            used_font_names: self.page_font_names.into_iter().collect(),
+            ext_gstate_dicts: self.ext_gstates,
+            color_spaces: self.color_spaces,
+            pattern_refs: self.pattern_refs,
+            pattern_cs_entries: self.pattern_cs_names,
+            transfer_refs: self.transfer_refs,
+            halftone_refs: self.halftone_refs,
+            bg_ucr_refs: self.bg_ucr_refs,
+            form_xobjects: self.form_xobjects,
+        }
+    }
+}
+
+/// PDF blend-mode name for `GroupParams::blend_mode` u8 codes. These
+/// match the encoding used by `stet-graphics`'s `BlendMode`.
+fn blend_mode_name(code: u8) -> &'static [u8] {
+    match code {
+        0 => b"Normal",
+        1 => b"Multiply",
+        2 => b"Screen",
+        3 => b"Overlay",
+        4 => b"Darken",
+        5 => b"Lighten",
+        6 => b"ColorDodge",
+        7 => b"ColorBurn",
+        8 => b"HardLight",
+        9 => b"SoftLight",
+        10 => b"Difference",
+        11 => b"Exclusion",
+        12 => b"Hue",
+        13 => b"Saturation",
+        14 => b"Color",
+        15 => b"Luminosity",
+        _ => b"Normal",
+    }
+}
+
+/// Emit a `/GSn gs` setting `/CA`, `/ca`, and `/BM` for a transparency
+/// group's composite. Used before a `/Xn Do` referencing a Form XObject
+/// when alpha != 1.0 or the blend mode is non-Normal. Deduplicates so
+/// identical group composites share one ExtGState resource.
+fn emit_group_composite_gs(
+    buf: &mut Vec<u8>,
+    alpha: f64,
+    blend_mode: u8,
+    ext_gstates: &mut Vec<ExtGStateDict>,
+    ext_gstate_map: &mut HashMap<Vec<u8>, usize>,
+) {
+    let alpha_q = (alpha.clamp(0.0, 1.0) * 10000.0) as u16;
+    let key = format!("GRP-a{}-b{}", alpha_q, blend_mode).into_bytes();
+
+    let idx = if let Some(&idx) = ext_gstate_map.get(&key) {
+        idx
+    } else {
+        let idx = ext_gstates.len();
+        let mut entries: Vec<(Vec<u8>, PdfObj)> =
+            vec![(b"Type".to_vec(), PdfObj::name("ExtGState"))];
+        if alpha < 1.0 {
+            entries.push((b"CA".to_vec(), PdfObj::Real(alpha)));
+            entries.push((b"ca".to_vec(), PdfObj::Real(alpha)));
+        }
+        if blend_mode != 0 {
+            entries.push((
+                b"BM".to_vec(),
+                PdfObj::Name(blend_mode_name(blend_mode).to_vec()),
+            ));
+        }
+        ext_gstates.push(ExtGStateDict { entries });
+        ext_gstate_map.insert(key, idx);
+        idx
+    };
+    writeln!(buf, "/GS{} gs", idx).unwrap();
+}
+
+/// Pre-pass: register fonts referenced by Text elements and detect
+/// whether the list has any Text at all. The page-side path emits paired
+/// `DisplayElement::Text` + glyph-path `Fill`; the PDF reader path emits
+/// only the glyph-path Fill. When the list has no Text, glyph fills fall
+/// through to be emitted as filled paths instead of being skipped.
+fn scan_text_elements(
+    list: &DisplayList,
+    font_tracker: &mut FontTracker,
+    page_font_names: &mut HashSet<String>,
+) -> bool {
+    let mut has_text = false;
+    for element in list.elements() {
+        if let DisplayElement::Text { params } = element {
+            has_text = true;
+            let name = font_tracker.track(params).to_string();
+            page_font_names.insert(name);
+        }
+    }
+    has_text
+}
+
 /// Generate PDF content stream bytes from a display list.
 ///
 /// Uses a shared document-level `FontTracker` to register fonts across pages.
@@ -195,41 +752,8 @@ pub fn build_content_stream(
     let scale = 72.0 / dpi;
     let page_h_pts = page_h as f64 * scale;
 
-    let mut buf = Vec::with_capacity(4096);
-    let mut images: Vec<ImageXObject> = Vec::new();
-    let mut shading_refs: Vec<ShadingRef> = Vec::new();
-    let mut clip_depth: u32 = 0;
-    let mut gs = GState::new();
-    let mut ext_gstates: Vec<ExtGStateDict> = Vec::new();
-    let mut ext_gstate_map: HashMap<Vec<u8>, usize> = HashMap::new();
-    let mut color_spaces: Vec<(String, SpotColorSpace)> = Vec::new();
-    let mut cs_name_map: HashMap<Vec<u8>, String> = HashMap::new();
-    let mut pattern_refs: Vec<PatternRef> = Vec::new();
-    let mut pattern_map: HashMap<u32, usize> = HashMap::new();
-    let mut pattern_cs_names: Vec<(String, PdfObj)> = Vec::new();
-    let mut pattern_cs_set: HashSet<String> = HashSet::new();
-    let mut transfer_refs: Vec<TransferFunctionRef> = Vec::new();
-    let mut halftone_refs: Vec<HalftoneRef> = Vec::new();
-    let mut bg_ucr_refs: Vec<BgUcrRef> = Vec::new();
-
-    // Track which fonts this page uses (for per-page Resources/Font dict)
     let mut page_font_names: HashSet<String> = HashSet::new();
-
-    // First pass: scan Text elements to register fonts. Also detect
-    // whether the page carries any Text elements at all — the PS path
-    // emits paired Text + glyph-path Fill elements (Text drives PDF
-    // text operators, the Fill is for the rasterizer); the PDF reader
-    // path emits only glyph-path Fills. Without a Text element to
-    // claim them, the glyph fills are the page's only text and must
-    // be written as paths.
-    let mut has_text_elements = false;
-    for element in list.elements() {
-        if let DisplayElement::Text { params } = element {
-            has_text_elements = true;
-            let name = font_tracker.track(params).to_string();
-            page_font_names.insert(name);
-        }
-    }
+    let has_text_elements = scan_text_elements(list, font_tracker, &mut page_font_names);
 
     // Pre-compute glyph widths for TJ kern values when Context is available
     if let Some(c) = ctx {
@@ -240,326 +764,43 @@ pub fn build_content_stream(
         }
     }
 
+    let mut builder = Builder::new(font_tracker, page_w, page_h, has_text_elements, false);
+    builder.page_font_names = page_font_names;
+
     // Initial CTM: device space (Y-down, pixels) → PDF space (Y-up, points)
-    fmt_num(&mut buf, scale);
-    buf.extend(b" 0 0 ");
-    fmt_num(&mut buf, -scale);
-    buf.extend(b" 0 ");
-    fmt_num(&mut buf, page_h_pts);
-    buf.extend(b" cm\n");
+    fmt_num(&mut builder.buf, scale);
+    builder.buf.extend(b" 0 0 ");
+    fmt_num(&mut builder.buf, -scale);
+    builder.buf.extend(b" 0 ");
+    fmt_num(&mut builder.buf, page_h_pts);
+    builder.buf.extend(b" cm\n");
 
     // Clip to page bounds (device coordinates). The rasterizer implicitly
     // clips to the pixmap, but PDF has no implicit page clip.
-    buf.extend(b"0 0 ");
-    fmt_num(&mut buf, page_w as f64);
-    buf.push(b' ');
-    fmt_num(&mut buf, page_h as f64);
-    buf.extend(b" re W n\n");
+    builder.buf.extend(b"0 0 ");
+    fmt_num(&mut builder.buf, page_w as f64);
+    builder.buf.push(b' ');
+    fmt_num(&mut builder.buf, page_h as f64);
+    builder.buf.extend(b" re W n\n");
 
-    // Text batch accumulator: consecutive same-font text elements
-    let mut text_batch: Vec<&TextParams> = Vec::new();
-    let mut batch_font: Option<u32> = None;
+    builder.emit_list(list);
 
-    for element in list.elements() {
-        match element {
-            DisplayElement::Text { params } => {
-                if batch_font == Some(params.font_entity) {
-                    text_batch.push(params);
-                } else {
-                    flush_text_batch(&text_batch, font_tracker, &mut buf, &mut gs);
-                    text_batch.clear();
-                    text_batch.push(params);
-                    batch_font = Some(params.font_entity);
-                }
-                continue;
-            }
-            // Skip glyph fills/strokes without flushing the text batch —
-            // these are interleaved with Text elements in the PS path.
-            // When the page has no Text elements (PDF reader input), the
-            // glyph paths are the only representation of the text and
-            // must fall through to be emitted as filled paths.
-            DisplayElement::Fill { params, .. } if params.is_text_glyph && has_text_elements => {
-                continue;
-            }
-            DisplayElement::Stroke { params, .. } if params.is_text_glyph && has_text_elements => {
-                continue;
-            }
-            _ => {
-                // Flush any pending text batch before non-text element
-                flush_text_batch(&text_batch, font_tracker, &mut buf, &mut gs);
-                text_batch.clear();
-                batch_font = None;
-            }
-        }
-
-        match element {
-            DisplayElement::ErasePage => {
-                // Fill entire page with white (device coordinates)
-                buf.extend(b"1 g 0 0 ");
-                fmt_num(&mut buf, page_w as f64);
-                buf.push(b' ');
-                fmt_num(&mut buf, page_h as f64);
-                buf.extend(b" re f\n");
-                gs.fill_color = Some(PdfColor::Gray(10000));
-            }
-            DisplayElement::Fill { path, params } => {
-                // Skip glyph fills when Text elements will draw them.
-                if params.is_text_glyph && has_text_elements {
-                    continue;
-                }
-                emit_transfer(
-                    &mut buf,
-                    &params.transfer,
-                    &mut gs,
-                    &mut ext_gstates,
-                    &mut ext_gstate_map,
-                    &mut transfer_refs,
-                );
-                emit_halftone(
-                    &mut buf,
-                    &params.halftone,
-                    &mut gs,
-                    &mut ext_gstates,
-                    &mut ext_gstate_map,
-                    &mut halftone_refs,
-                );
-                emit_bg_ucr(
-                    &mut buf,
-                    &params.bg_ucr,
-                    &mut gs,
-                    &mut ext_gstates,
-                    &mut ext_gstate_map,
-                    &mut bg_ucr_refs,
-                );
-                emit_rendering_intent(&mut buf, params.rendering_intent, &mut gs);
-                emit_overprint(
-                    &mut buf,
-                    params.overprint,
-                    &mut gs,
-                    &mut ext_gstates,
-                    &mut ext_gstate_map,
-                );
-                if let Some(spot) = &params.spot_color {
-                    emit_fill_color_spot(
-                        &mut buf,
-                        spot,
-                        &mut gs,
-                        &mut cs_name_map,
-                        &mut color_spaces,
-                    );
-                } else {
-                    if gs.fill_cs_name.is_some() {
-                        gs.fill_cs_name = None;
-                        gs.fill_color = None;
-                    }
-                    emit_fill_color(&mut buf, &params.color, &mut gs);
-                }
-                emit_path(&mut buf, path);
-                if params.fill_rule == FillRule::EvenOdd {
-                    buf.extend(b"f*\n");
-                } else {
-                    buf.extend(b"f\n");
-                }
-            }
-            DisplayElement::Stroke { path, params } => {
-                // Skip text glyph strokes (PaintType 2) when Text elements
-                // will draw them (PS path); emit as paths otherwise.
-                if params.is_text_glyph && has_text_elements {
-                    continue;
-                }
-                let has_ctm = !is_identity(&params.ctm);
-                if has_ctm {
-                    buf.extend(b"q\n");
-                    emit_cm(&mut buf, &params.ctm);
-                }
-                emit_transfer(
-                    &mut buf,
-                    &params.transfer,
-                    &mut gs,
-                    &mut ext_gstates,
-                    &mut ext_gstate_map,
-                    &mut transfer_refs,
-                );
-                emit_halftone(
-                    &mut buf,
-                    &params.halftone,
-                    &mut gs,
-                    &mut ext_gstates,
-                    &mut ext_gstate_map,
-                    &mut halftone_refs,
-                );
-                emit_bg_ucr(
-                    &mut buf,
-                    &params.bg_ucr,
-                    &mut gs,
-                    &mut ext_gstates,
-                    &mut ext_gstate_map,
-                    &mut bg_ucr_refs,
-                );
-                emit_rendering_intent(&mut buf, params.rendering_intent, &mut gs);
-                emit_overprint(
-                    &mut buf,
-                    params.overprint,
-                    &mut gs,
-                    &mut ext_gstates,
-                    &mut ext_gstate_map,
-                );
-                if let Some(spot) = &params.spot_color {
-                    emit_stroke_color_spot(
-                        &mut buf,
-                        spot,
-                        &mut gs,
-                        &mut cs_name_map,
-                        &mut color_spaces,
-                    );
-                } else {
-                    if gs.stroke_cs_name.is_some() {
-                        gs.stroke_cs_name = None;
-                        gs.stroke_color = None;
-                    }
-                    emit_stroke_color(&mut buf, &params.color, &mut gs);
-                }
-                emit_line_state(&mut buf, params, &mut gs);
-                emit_path(&mut buf, path);
-                buf.extend(b"S\n");
-                if has_ctm {
-                    buf.extend(b"Q\n");
-                    gs = GState::new();
-                }
-            }
-            DisplayElement::Clip { path, params } => {
-                buf.extend(b"q\n");
-                emit_path(&mut buf, path);
-                if params.fill_rule == FillRule::EvenOdd {
-                    buf.extend(b"W* n\n");
-                } else {
-                    buf.extend(b"W n\n");
-                }
-                clip_depth += 1;
-                // Don't reset gs — colors/line state carry into clip scope
-            }
-            DisplayElement::InitClip => {
-                for _ in 0..clip_depth {
-                    buf.extend(b"Q\n");
-                }
-                clip_depth = 0;
-                gs.reset();
-            }
-            DisplayElement::Image {
-                sample_data,
-                params,
-            } => {
-                let img_idx = images.len();
-                let xobj = image_ops::convert_image(sample_data, params);
-
-                // Compute placement matrix: unit square → device space
-                let m = compute_image_matrix(params);
-
-                buf.extend(b"q ");
-                emit_matrix(&mut buf, &m);
-                buf.extend(b" cm ");
-                if xobj.is_imagemask {
-                    // Set fill color for imagemask
-                    if let Some((r, g, b)) = xobj.mask_color {
-                        emit_fill_color_rgb(&mut buf, r, g, b);
-                    }
-                }
-                writeln!(buf, "/Im{} Do Q", img_idx).unwrap();
-
-                images.push(xobj);
-            }
-            DisplayElement::AxialShading { params } => {
-                let sh_idx = shading_refs.len();
-                buf.extend(b"q ");
-                // Apply shading CTM if not identity
-                if !is_identity(&params.ctm) {
-                    emit_matrix(&mut buf, &params.ctm);
-                    buf.extend(b" cm ");
-                }
-                writeln!(buf, "/Sh{} sh Q", sh_idx).unwrap();
-                shading_refs.push(ShadingRef::Axial(params.clone()));
-            }
-            DisplayElement::RadialShading { params } => {
-                let sh_idx = shading_refs.len();
-                buf.extend(b"q ");
-                if !is_identity(&params.ctm) {
-                    emit_matrix(&mut buf, &params.ctm);
-                    buf.extend(b" cm ");
-                }
-                writeln!(buf, "/Sh{} sh Q", sh_idx).unwrap();
-                shading_refs.push(ShadingRef::Radial(params.clone()));
-            }
-            DisplayElement::MeshShading { params } => {
-                let sh_idx = shading_refs.len();
-                buf.extend(b"q ");
-                if !is_identity(&params.ctm) {
-                    emit_matrix(&mut buf, &params.ctm);
-                    buf.extend(b" cm ");
-                }
-                writeln!(buf, "/Sh{} sh Q", sh_idx).unwrap();
-                shading_refs.push(ShadingRef::Mesh(params.clone()));
-            }
-            DisplayElement::PatchShading { params } => {
-                let sh_idx = shading_refs.len();
-                buf.extend(b"q ");
-                if !is_identity(&params.ctm) {
-                    emit_matrix(&mut buf, &params.ctm);
-                    buf.extend(b" cm ");
-                }
-                writeln!(buf, "/Sh{} sh Q", sh_idx).unwrap();
-                shading_refs.push(ShadingRef::Patch(params.clone()));
-            }
-            DisplayElement::PatternFill { params } => {
-                emit_pattern_fill(
-                    &mut buf,
-                    params,
-                    &mut gs,
-                    &mut pattern_refs,
-                    &mut pattern_map,
-                    &mut pattern_cs_names,
-                    &mut pattern_cs_set,
-                );
-            }
-            DisplayElement::Text { .. } => unreachable!(), // handled above
-            DisplayElement::Group { .. }
-            | DisplayElement::SoftMasked { .. }
-            | DisplayElement::OcgGroup { .. } => {} // TODO: transparency/layer PDF output
-            _ => {}
-        }
+    // Close remaining clips left open at the end of the list.
+    for _ in 0..builder.clip_depth {
+        builder.buf.extend(b"Q\n");
     }
 
-    // Flush any remaining text batch
-    flush_text_batch(&text_batch, font_tracker, &mut buf, &mut gs);
-
-    // Close remaining clips
-    for _ in 0..clip_depth {
-        buf.extend(b"Q\n");
-    }
-
-    // Transform pattern matrices from device pixel space → PDF initial coordinate space.
-    // The content stream's initial `cm` maps device pixels → PDF points. The PDF spec
-    // says Pattern /Matrix maps pattern space → the initial (pre-cm) coordinate system.
-    // So: pdf_matrix = pattern_matrix × initial_cm (row-vector convention).
+    // Transform pattern matrices from device pixel space → PDF initial
+    // coordinate space. The content stream's initial `cm` maps device
+    // pixels → PDF points. The PDF spec says Pattern /Matrix maps pattern
+    // space → the initial (pre-cm) coordinate system. So: pdf_matrix =
+    // pattern_matrix × initial_cm (row-vector convention).
     let initial_cm = Matrix::new(scale, 0.0, 0.0, -scale, 0.0, page_h_pts);
-    for pat_ref in &mut pattern_refs {
+    for pat_ref in &mut builder.pattern_refs {
         pat_ref.pattern_matrix = initial_cm.concat(&pat_ref.pattern_matrix);
     }
 
-    let pattern_cs_entries = pattern_cs_names;
-
-    ContentStreamResult {
-        content: buf,
-        images,
-        shading_refs,
-        used_font_names: page_font_names.into_iter().collect(),
-        ext_gstate_dicts: ext_gstates,
-        color_spaces,
-        pattern_refs,
-        pattern_cs_entries,
-        transfer_refs,
-        halftone_refs,
-        bg_ucr_refs,
-    }
+    builder.finish()
 }
 
 /// Generate PDF content stream bytes from a tile display list (for Pattern XObjects).
@@ -570,282 +811,19 @@ pub fn build_tile_content_stream(
     list: &DisplayList,
     font_tracker: &mut FontTracker,
 ) -> ContentStreamResult {
-    let mut buf = Vec::with_capacity(1024);
-    let mut images: Vec<ImageXObject> = Vec::new();
-    let mut shading_refs: Vec<ShadingRef> = Vec::new();
-    let mut clip_depth: u32 = 0;
-    let mut gs = GState::new();
-    let mut ext_gstates: Vec<ExtGStateDict> = Vec::new();
-    let mut ext_gstate_map: HashMap<Vec<u8>, usize> = HashMap::new();
-    let mut color_spaces: Vec<(String, SpotColorSpace)> = Vec::new();
-    let mut cs_name_map: HashMap<Vec<u8>, String> = HashMap::new();
-    let mut pattern_refs: Vec<PatternRef> = Vec::new();
-    let mut pattern_map: HashMap<u32, usize> = HashMap::new();
-    let mut pattern_cs_names: Vec<(String, PdfObj)> = Vec::new();
-    let mut pattern_cs_set: HashSet<String> = HashSet::new();
-    let mut transfer_refs: Vec<TransferFunctionRef> = Vec::new();
-    let mut halftone_refs: Vec<HalftoneRef> = Vec::new();
-    let mut bg_ucr_refs: Vec<BgUcrRef> = Vec::new();
     let mut page_font_names: HashSet<String> = HashSet::new();
+    let has_text_elements = scan_text_elements(list, font_tracker, &mut page_font_names);
 
-    // Register fonts used in tile; also flag whether any Text element
-    // appears so glyph-path Fills aren't dropped when no Text drives them
-    // (PDF-reader input — see the equivalent comment in
-    // `build_content_stream`).
-    let mut has_text_elements = false;
-    for element in list.elements() {
-        if let DisplayElement::Text { params } = element {
-            has_text_elements = true;
-            let name = font_tracker.track(params).to_string();
-            page_font_names.insert(name);
-        }
+    let mut builder = Builder::new(font_tracker, 0, 0, has_text_elements, true);
+    builder.page_font_names = page_font_names;
+
+    builder.emit_list(list);
+
+    for _ in 0..builder.clip_depth {
+        builder.buf.extend(b"Q\n");
     }
 
-    // No initial CTM, no page clip — tile paths are in pattern space
-
-    for element in list.elements() {
-        match element {
-            DisplayElement::ErasePage => {} // skip in tile context
-            DisplayElement::Fill { path, params } => {
-                if params.is_text_glyph && has_text_elements {
-                    continue;
-                }
-                emit_transfer(
-                    &mut buf,
-                    &params.transfer,
-                    &mut gs,
-                    &mut ext_gstates,
-                    &mut ext_gstate_map,
-                    &mut transfer_refs,
-                );
-                emit_halftone(
-                    &mut buf,
-                    &params.halftone,
-                    &mut gs,
-                    &mut ext_gstates,
-                    &mut ext_gstate_map,
-                    &mut halftone_refs,
-                );
-                emit_bg_ucr(
-                    &mut buf,
-                    &params.bg_ucr,
-                    &mut gs,
-                    &mut ext_gstates,
-                    &mut ext_gstate_map,
-                    &mut bg_ucr_refs,
-                );
-                emit_rendering_intent(&mut buf, params.rendering_intent, &mut gs);
-                emit_overprint(
-                    &mut buf,
-                    params.overprint,
-                    &mut gs,
-                    &mut ext_gstates,
-                    &mut ext_gstate_map,
-                );
-                if let Some(spot) = &params.spot_color {
-                    emit_fill_color_spot(
-                        &mut buf,
-                        spot,
-                        &mut gs,
-                        &mut cs_name_map,
-                        &mut color_spaces,
-                    );
-                } else {
-                    if gs.fill_cs_name.is_some() {
-                        gs.fill_cs_name = None;
-                        gs.fill_color = None;
-                    }
-                    emit_fill_color(&mut buf, &params.color, &mut gs);
-                }
-                emit_path(&mut buf, path);
-                if params.fill_rule == FillRule::EvenOdd {
-                    buf.extend(b"f*\n");
-                } else {
-                    buf.extend(b"f\n");
-                }
-            }
-            DisplayElement::Stroke { path, params } => {
-                if params.is_text_glyph && has_text_elements {
-                    continue;
-                }
-                let has_ctm = !is_identity(&params.ctm);
-                if has_ctm {
-                    buf.extend(b"q\n");
-                    emit_cm(&mut buf, &params.ctm);
-                }
-                emit_transfer(
-                    &mut buf,
-                    &params.transfer,
-                    &mut gs,
-                    &mut ext_gstates,
-                    &mut ext_gstate_map,
-                    &mut transfer_refs,
-                );
-                emit_halftone(
-                    &mut buf,
-                    &params.halftone,
-                    &mut gs,
-                    &mut ext_gstates,
-                    &mut ext_gstate_map,
-                    &mut halftone_refs,
-                );
-                emit_bg_ucr(
-                    &mut buf,
-                    &params.bg_ucr,
-                    &mut gs,
-                    &mut ext_gstates,
-                    &mut ext_gstate_map,
-                    &mut bg_ucr_refs,
-                );
-                emit_rendering_intent(&mut buf, params.rendering_intent, &mut gs);
-                emit_overprint(
-                    &mut buf,
-                    params.overprint,
-                    &mut gs,
-                    &mut ext_gstates,
-                    &mut ext_gstate_map,
-                );
-                if let Some(spot) = &params.spot_color {
-                    emit_stroke_color_spot(
-                        &mut buf,
-                        spot,
-                        &mut gs,
-                        &mut cs_name_map,
-                        &mut color_spaces,
-                    );
-                } else {
-                    if gs.stroke_cs_name.is_some() {
-                        gs.stroke_cs_name = None;
-                        gs.stroke_color = None;
-                    }
-                    emit_stroke_color(&mut buf, &params.color, &mut gs);
-                }
-                emit_line_state(&mut buf, params, &mut gs);
-                emit_path(&mut buf, path);
-                buf.extend(b"S\n");
-                if has_ctm {
-                    buf.extend(b"Q\n");
-                    gs = GState::new();
-                }
-            }
-            DisplayElement::Clip { path, params } => {
-                buf.extend(b"q\n");
-                emit_path(&mut buf, path);
-                if params.fill_rule == FillRule::EvenOdd {
-                    buf.extend(b"W* n\n");
-                } else {
-                    buf.extend(b"W n\n");
-                }
-                clip_depth += 1;
-            }
-            DisplayElement::InitClip => {
-                for _ in 0..clip_depth {
-                    buf.extend(b"Q\n");
-                }
-                clip_depth = 0;
-                gs.reset();
-            }
-            DisplayElement::Image {
-                sample_data,
-                params,
-            } => {
-                let img_idx = images.len();
-                let xobj = image_ops::convert_image(sample_data, params);
-                let m = compute_image_matrix(params);
-                buf.extend(b"q ");
-                emit_matrix(&mut buf, &m);
-                buf.extend(b" cm ");
-                if xobj.is_imagemask
-                    && let Some((r, g, b)) = xobj.mask_color
-                {
-                    emit_fill_color_rgb(&mut buf, r, g, b);
-                }
-                writeln!(buf, "/Im{} Do Q", img_idx).unwrap();
-                images.push(xobj);
-            }
-            DisplayElement::AxialShading { params } => {
-                let sh_idx = shading_refs.len();
-                buf.extend(b"q ");
-                if !is_identity(&params.ctm) {
-                    emit_matrix(&mut buf, &params.ctm);
-                    buf.extend(b" cm ");
-                }
-                writeln!(buf, "/Sh{} sh Q", sh_idx).unwrap();
-                shading_refs.push(ShadingRef::Axial(params.clone()));
-            }
-            DisplayElement::RadialShading { params } => {
-                let sh_idx = shading_refs.len();
-                buf.extend(b"q ");
-                if !is_identity(&params.ctm) {
-                    emit_matrix(&mut buf, &params.ctm);
-                    buf.extend(b" cm ");
-                }
-                writeln!(buf, "/Sh{} sh Q", sh_idx).unwrap();
-                shading_refs.push(ShadingRef::Radial(params.clone()));
-            }
-            DisplayElement::MeshShading { params } => {
-                let sh_idx = shading_refs.len();
-                buf.extend(b"q ");
-                if !is_identity(&params.ctm) {
-                    emit_matrix(&mut buf, &params.ctm);
-                    buf.extend(b" cm ");
-                }
-                writeln!(buf, "/Sh{} sh Q", sh_idx).unwrap();
-                shading_refs.push(ShadingRef::Mesh(params.clone()));
-            }
-            DisplayElement::PatchShading { params } => {
-                let sh_idx = shading_refs.len();
-                buf.extend(b"q ");
-                if !is_identity(&params.ctm) {
-                    emit_matrix(&mut buf, &params.ctm);
-                    buf.extend(b" cm ");
-                }
-                writeln!(buf, "/Sh{} sh Q", sh_idx).unwrap();
-                shading_refs.push(ShadingRef::Patch(params.clone()));
-            }
-            DisplayElement::PatternFill { params } => {
-                emit_pattern_fill(
-                    &mut buf,
-                    params,
-                    &mut gs,
-                    &mut pattern_refs,
-                    &mut pattern_map,
-                    &mut pattern_cs_names,
-                    &mut pattern_cs_set,
-                );
-            }
-            DisplayElement::Text { params } => {
-                let name = font_tracker.track(params).to_string();
-                page_font_names.insert(name);
-                // Simple single-element text emission for tiles
-                text_ops::emit_text_batch(&mut buf, &[params], font_tracker);
-                gs.fill_color = None;
-            }
-            DisplayElement::Group { .. }
-            | DisplayElement::SoftMasked { .. }
-            | DisplayElement::OcgGroup { .. } => {} // TODO: transparency/layer PDF output
-            _ => {}
-        }
-    }
-
-    // Close remaining clips
-    for _ in 0..clip_depth {
-        buf.extend(b"Q\n");
-    }
-
-    ContentStreamResult {
-        content: buf,
-        images,
-        shading_refs,
-        used_font_names: page_font_names.into_iter().collect(),
-        ext_gstate_dicts: ext_gstates,
-        color_spaces,
-        pattern_refs,
-        pattern_cs_entries: pattern_cs_names,
-        transfer_refs,
-        halftone_refs,
-        bg_ucr_refs,
-    }
+    builder.finish()
 }
 
 /// Flush accumulated text batch as optimized BT/ET blocks.
@@ -1084,17 +1062,27 @@ fn emit_line_state(buf: &mut Vec<u8>, params: &StrokeParams, gs: &mut GState) {
 fn emit_overprint(
     buf: &mut Vec<u8>,
     overprint: bool,
+    overprint_mode: i32,
     gs: &mut GState,
     ext_gstates: &mut Vec<ExtGStateDict>,
     ext_gstate_map: &mut HashMap<Vec<u8>, usize>,
 ) {
-    if gs.overprint == overprint {
+    // OPM only affects rendering when overprint is on, but we still
+    // round-trip the requested mode so a subsequent overprint=true
+    // emission picks up the right value. When overprint is off, the
+    // mode entry on the gstate is irrelevant for the next paint.
+    let effective_mode = if overprint {
+        overprint_mode
+    } else {
+        gs.overprint_mode
+    };
+    if gs.overprint == overprint && gs.overprint_mode == effective_mode {
         return;
     }
     gs.overprint = overprint;
+    gs.overprint_mode = effective_mode;
 
-    // Build dedup key
-    let key = format!("OP{}", overprint as u8).into_bytes();
+    let key = format!("OP{}-M{}", overprint as u8, effective_mode).into_bytes();
 
     let idx = if let Some(&idx) = ext_gstate_map.get(&key) {
         idx
@@ -1106,7 +1094,7 @@ fn emit_overprint(
             (b"op".to_vec(), PdfObj::Bool(overprint)),
         ];
         if overprint {
-            entries.push((b"OPM".to_vec(), PdfObj::Int(1)));
+            entries.push((b"OPM".to_vec(), PdfObj::Int(overprint_mode.into())));
         }
         ext_gstates.push(ExtGStateDict { entries });
         ext_gstate_map.insert(key, idx);

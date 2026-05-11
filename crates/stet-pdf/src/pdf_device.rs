@@ -526,13 +526,20 @@ impl PdfDevice {
             transfer_refs,
             halftone_refs,
             bg_ucr_refs,
+            form_xobjects,
         } = result;
 
-        // Build image XObjects
+        // Build image XObjects and Form XObjects (Group / SoftMasked
+        // content). Both share the page's /XObject resource dict; the
+        // Forms inherit /Resources from the page per PDF 1.7 § 7.8.3.
         let mut xobject_entries: Vec<(Vec<u8>, PdfObj)> = Vec::new();
         for (i, img) in images.iter().enumerate() {
             let img_ref = self.build_image_xobject(writer, img);
             xobject_entries.push((format!("Im{}", i).into_bytes(), PdfObj::Ref(img_ref)));
+        }
+        for (i, form) in form_xobjects.iter().enumerate() {
+            let form_ref = build_form_xobject(writer, form);
+            xobject_entries.push((format!("X{}", i).into_bytes(), PdfObj::Ref(form_ref)));
         }
 
         // Build shading objects
@@ -1797,4 +1804,50 @@ fn collect_docinfo(ctx: &Context) -> stet_graphics::document_structure::DocInfoR
         }
     }
     acc
+}
+
+/// Build a PDF Form XObject indirect from a captured Form content stream.
+/// The Form has no /Resources entry — it inherits the enclosing page's
+/// resources (PDF 1.7 § 7.8.3), which is how stet keeps the writer's
+/// per-page resource lists shared across the page and its nested groups.
+fn build_form_xobject(writer: &mut PdfWriter, form: &crate::content_stream::FormXObject) -> u32 {
+    let mut entries: Vec<(Vec<u8>, PdfObj)> = vec![
+        (b"Type".to_vec(), PdfObj::name("XObject")),
+        (b"Subtype".to_vec(), PdfObj::name("Form")),
+        (b"FormType".to_vec(), PdfObj::Int(1)),
+        (
+            b"BBox".to_vec(),
+            PdfObj::Array(vec![
+                PdfObj::Real(form.bbox[0]),
+                PdfObj::Real(form.bbox[1]),
+                PdfObj::Real(form.bbox[2]),
+                PdfObj::Real(form.bbox[3]),
+            ]),
+        ),
+    ];
+    if let Some(group_entries) = &form.group_dict_entries {
+        let entries_clone: Vec<(Vec<u8>, PdfObj)> = group_entries
+            .iter()
+            .map(|(k, v)| (k.clone(), clone_pdfobj_shallow(v)))
+            .collect();
+        entries.push((b"Group".to_vec(), PdfObj::Dict(entries_clone)));
+    }
+    writer.add_stream(entries, &form.content, true)
+}
+
+/// Shallow clone of a PdfObj used for the static keys we emit in /Group
+/// dicts (Bool / Name / Real). Panics on shapes we don't expect to
+/// appear there, so a future change that adds an indirect ref or array
+/// into a group dict gets caught loudly instead of silently dropping
+/// data.
+fn clone_pdfobj_shallow(v: &PdfObj) -> PdfObj {
+    match v {
+        PdfObj::Bool(b) => PdfObj::Bool(*b),
+        PdfObj::Int(n) => PdfObj::Int(*n),
+        PdfObj::Real(r) => PdfObj::Real(*r),
+        PdfObj::Name(n) => PdfObj::Name(n.clone()),
+        PdfObj::Ref(r) => PdfObj::Ref(*r),
+        PdfObj::Null => PdfObj::Null,
+        _ => panic!("clone_pdfobj_shallow: unsupported PdfObj variant in /Group dict"),
+    }
 }
