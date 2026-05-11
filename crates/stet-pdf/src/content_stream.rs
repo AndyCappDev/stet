@@ -52,6 +52,11 @@ pub struct ContentStreamResult {
     /// (the mask Form XObject's indirect ref is allocated in
     /// `pdf_device.rs`, not here).
     pub soft_mask_refs: Vec<SoftMaskRef>,
+    /// Optional-content markers (`/OC /Pn BDC … EMC`) emitted into the
+    /// content stream. `pdf_device.rs` builds the corresponding `/OCG`
+    /// or `/OCMD` indirect objects and wires them through the page's
+    /// `/Resources /Properties` dict + the Catalog's `/OCProperties`.
+    pub ocg_marker_refs: Vec<OcgMarkerRef>,
     /// Form XObjects emitted for `DisplayElement::Group` and the content
     /// portion of `DisplayElement::SoftMasked`. The Forms inherit the
     /// page's `/Resources` (PDF 1.7 § 7.8.3), so they carry no `/Resources`
@@ -104,6 +109,19 @@ pub struct BgUcrRef {
     pub ext_gstate_idx: usize,
     /// BG/UCR state captured at paint time.
     pub state: BgUcrState,
+}
+
+/// One Optional-Content marker `(/OC /Pn BDC … EMC)` recorded by the
+/// content stream. The Builder allocates the resource name `Pn` at
+/// emission time; `pdf_device.rs` resolves the visibility predicate
+/// into the right indirect object (a single `/OCG` for the `Single`
+/// case, an `/OCMD` for `Membership` / `Expression`) and adds it to the
+/// page's `/Resources /Properties` dict.
+pub struct OcgMarkerRef {
+    /// Resource name written into the content stream (`Pn`).
+    pub resource_name: String,
+    /// Visibility predicate from the source DisplayList.
+    pub visibility: stet_graphics::display_list::OcgVisibility,
 }
 
 /// Reference from an ExtGState dict to a soft-mask Form XObject. The
@@ -270,6 +288,7 @@ struct Builder<'tracker> {
     halftone_refs: Vec<HalftoneRef>,
     bg_ucr_refs: Vec<BgUcrRef>,
     soft_mask_refs: Vec<SoftMaskRef>,
+    ocg_marker_refs: Vec<OcgMarkerRef>,
     form_xobjects: Vec<FormXObject>,
     page_font_names: HashSet<String>,
     has_text_elements: bool,
@@ -307,6 +326,7 @@ impl<'tracker> Builder<'tracker> {
             halftone_refs: Vec::new(),
             bg_ucr_refs: Vec::new(),
             soft_mask_refs: Vec::new(),
+            ocg_marker_refs: Vec::new(),
             form_xobjects: Vec::new(),
             page_font_names: HashSet::new(),
             has_text_elements,
@@ -752,8 +772,25 @@ impl<'tracker> Builder<'tracker> {
                 self.buf.extend(b"Q\n");
                 self.gs = GState::new();
             }
-            DisplayElement::OcgGroup { .. } => {
-                // Stage D — see content_stream.rs TODO for OCG output.
+            DisplayElement::OcgGroup {
+                elements,
+                visibility,
+            } => {
+                // Optional-content marker. The visibility predicate is
+                // resolved into an /OCG or /OCMD indirect object by
+                // pdf_device.rs; here we just allocate the resource
+                // name, emit the BDC/EMC bracket inline, and recurse
+                // into the children. Skipping the marker for an empty
+                // child list would still pollute /OCProperties, so we
+                // record the OcgMarkerRef even when `elements` is empty.
+                let resource_name = format!("P{}", self.ocg_marker_refs.len());
+                self.ocg_marker_refs.push(OcgMarkerRef {
+                    resource_name: resource_name.clone(),
+                    visibility: visibility.clone(),
+                });
+                writeln!(self.buf, "/OC /{} BDC", resource_name).unwrap();
+                self.emit_list(elements);
+                self.buf.extend(b"EMC\n");
             }
             _ => {}
         }
@@ -773,6 +810,7 @@ impl<'tracker> Builder<'tracker> {
             halftone_refs: self.halftone_refs,
             bg_ucr_refs: self.bg_ucr_refs,
             soft_mask_refs: self.soft_mask_refs,
+            ocg_marker_refs: self.ocg_marker_refs,
             form_xobjects: self.form_xobjects,
         }
     }

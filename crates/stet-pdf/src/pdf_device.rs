@@ -10,7 +10,7 @@ use stet_fonts::geometry::PsPath;
 use stet_graphics::device::{ClipParams, FillParams, ImageParams, StrokeParams};
 use stet_graphics::display_list::DisplayList;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::content_stream::{self, ContentStreamResult, ShadingRef};
 use crate::font_embedder;
@@ -230,6 +230,38 @@ impl PdfDevice {
         let font_obj_map: HashMap<String, u32> =
             self.embed_all_fonts(&mut writer, &font_tracker, ctx);
 
+        // Collect document-level Optional-Content state from every
+        // page's OcgMarkerRef list and allocate one /OCG indirect per
+        // unique ocg_id. The Catalog's /OCProperties references all of
+        // them; per-page /Properties dicts (built in build_page below)
+        // map the page-local resource names (P0, P1, …) to these refs.
+        let mut ocg_id_to_ref: HashMap<u32, u32> = HashMap::new();
+        let mut ocg_default_off: HashSet<u32> = HashSet::new();
+        let mut ocg_order: Vec<u32> = Vec::new();
+        for (result, _) in &page_results {
+            for marker in &result.ocg_marker_refs {
+                let mut visit = |ocg_id: u32, default_visible: bool| {
+                    if let std::collections::hash_map::Entry::Vacant(e) =
+                        ocg_id_to_ref.entry(ocg_id)
+                    {
+                        let r = writer.add_object(&PdfObj::Dict(vec![
+                            (b"Type".to_vec(), PdfObj::name("OCG")),
+                            (
+                                b"Name".to_vec(),
+                                PdfObj::LitString(format!("Layer {}", ocg_id).into_bytes()),
+                            ),
+                        ]));
+                        e.insert(r);
+                        ocg_order.push(ocg_id);
+                        if !default_visible {
+                            ocg_default_off.insert(ocg_id);
+                        }
+                    }
+                };
+                collect_ocg_ids(&marker.visibility, &mut visit);
+            }
+        }
+
         // Pre-allocate page object numbers so annotations can reference
         // their target pages by indirect ref before the page dict is
         // written, and so /Annots arrays can be assembled at build time.
@@ -326,6 +358,7 @@ impl PdfDevice {
                 &mut font_tracker,
                 &per_page_annots[i],
                 &per_page_overrides[i],
+                &ocg_id_to_ref,
             )?;
         }
 
@@ -426,6 +459,40 @@ impl PdfDevice {
             (b"Type".to_vec(), PdfObj::name("Catalog")),
             (b"Pages".to_vec(), PdfObj::Ref(pages_ref)),
         ];
+
+        // /OCProperties — Optional-Content document state. /OCGs lists
+        // every layer used anywhere in the document; /D is the default
+        // configuration the viewer applies on open (which layers start
+        // on, the display order, base state). Per-marker visibility
+        // decisions live in the per-page /Properties dicts the build_page
+        // loop above wrote, so /OCProperties only describes layers, not
+        // their per-page bracket semantics.
+        if !ocg_id_to_ref.is_empty() {
+            let make_array = || -> Vec<PdfObj> {
+                ocg_order
+                    .iter()
+                    .filter_map(|id| ocg_id_to_ref.get(id).map(|&r| PdfObj::Ref(r)))
+                    .collect()
+            };
+            let off_array: Vec<PdfObj> = ocg_order
+                .iter()
+                .filter(|id| ocg_default_off.contains(id))
+                .filter_map(|id| ocg_id_to_ref.get(id).map(|&r| PdfObj::Ref(r)))
+                .collect();
+            let mut d_entries: Vec<(Vec<u8>, PdfObj)> = vec![
+                (b"Name".to_vec(), PdfObj::LitString(b"Default".to_vec())),
+                (b"BaseState".to_vec(), PdfObj::name("ON")),
+                (b"Order".to_vec(), PdfObj::Array(make_array())),
+            ];
+            if !off_array.is_empty() {
+                d_entries.push((b"OFF".to_vec(), PdfObj::Array(off_array)));
+            }
+            let ocprops = writer.add_object(&PdfObj::Dict(vec![
+                (b"OCGs".to_vec(), PdfObj::Array(make_array())),
+                (b"D".to_vec(), PdfObj::Dict(d_entries)),
+            ]));
+            catalog_entries.push((b"OCProperties".to_vec(), PdfObj::Ref(ocprops)));
+        }
         if let Some(outline_ref) = outlines_ref {
             catalog_entries.push((b"Outlines".to_vec(), PdfObj::Ref(outline_ref)));
         }
@@ -513,6 +580,7 @@ impl PdfDevice {
         font_tracker: &mut FontTracker,
         annot_refs: &[u32],
         overrides: &EffectivePageOverride,
+        ocg_id_to_ref: &HashMap<u32, u32>,
     ) -> Result<(), String> {
         let ContentStreamResult {
             content,
@@ -527,6 +595,7 @@ impl PdfDevice {
             halftone_refs,
             bg_ucr_refs,
             soft_mask_refs,
+            ocg_marker_refs,
             form_xobjects,
         } = result;
 
@@ -688,6 +757,22 @@ impl PdfDevice {
         }
         if !cs_entries.is_empty() {
             resources.push((b"ColorSpace".to_vec(), PdfObj::Dict(cs_entries)));
+        }
+
+        // Build /Properties dict for Optional-Content markers. Each
+        // BDC marker in the content stream names a resource here, which
+        // resolves to either an /OCG (Single visibility) or an /OCMD
+        // (Membership / Expression).
+        if !ocg_marker_refs.is_empty() {
+            let mut props_entries: Vec<(Vec<u8>, PdfObj)> = Vec::new();
+            for marker in ocg_marker_refs {
+                let prop_ref = build_ocg_property_ref(writer, &marker.visibility, ocg_id_to_ref);
+                props_entries.push((
+                    marker.resource_name.clone().into_bytes(),
+                    PdfObj::Ref(prop_ref),
+                ));
+            }
+            resources.push((b"Properties".to_vec(), PdfObj::Dict(props_entries)));
         }
 
         // Build Pattern XObject resources
@@ -1906,5 +1991,130 @@ fn clone_pdfobj_shallow(v: &PdfObj) -> PdfObj {
         PdfObj::Ref(r) => PdfObj::Ref(*r),
         PdfObj::Null => PdfObj::Null,
         _ => panic!("clone_pdfobj_shallow: unsupported PdfObj variant in /Group dict"),
+    }
+}
+
+/// Walk an `OcgVisibility` predicate and call `visit(ocg_id,
+/// default_visible)` for each OCG it references. The `default_visible`
+/// flag is the one attached to the variant; it controls whether the
+/// document-default config lists this OCG under `/OFF`.
+fn collect_ocg_ids<F>(visibility: &stet_graphics::display_list::OcgVisibility, mut visit: F)
+where
+    F: FnMut(u32, bool),
+{
+    use stet_graphics::display_list::OcgVisibility;
+    fn walk_expr(
+        e: &stet_graphics::display_list::VisibilityExpr,
+        v: &mut impl FnMut(u32, bool),
+        default_visible: bool,
+    ) {
+        use stet_graphics::display_list::VisibilityExpr;
+        match e {
+            VisibilityExpr::And(xs) | VisibilityExpr::Or(xs) => {
+                for x in xs {
+                    walk_expr(x, v, default_visible);
+                }
+            }
+            VisibilityExpr::Not(x) => walk_expr(x, v, default_visible),
+            VisibilityExpr::Layer(id) => v(*id, default_visible),
+        }
+    }
+    match visibility {
+        OcgVisibility::Single {
+            ocg_id,
+            default_visible,
+        } => visit(*ocg_id, *default_visible),
+        OcgVisibility::Membership {
+            ocg_ids,
+            default_visible,
+            ..
+        } => {
+            for &id in ocg_ids {
+                visit(id, *default_visible);
+            }
+        }
+        OcgVisibility::Expression {
+            expr,
+            default_visible,
+        } => walk_expr(expr, &mut visit, *default_visible),
+    }
+}
+
+/// Resolve a single `OcgVisibility` predicate into the indirect ref
+/// that goes into a page's `/Properties` entry. The `Single` case
+/// reuses the existing `/OCG` indirect object. `Membership` and
+/// `Expression` allocate fresh `/OCMD` indirect objects (one per
+/// content-stream marker), referencing the underlying `/OCG`s through
+/// `ocg_id_to_ref`.
+fn build_ocg_property_ref(
+    writer: &mut PdfWriter,
+    visibility: &stet_graphics::display_list::OcgVisibility,
+    ocg_id_to_ref: &HashMap<u32, u32>,
+) -> u32 {
+    use stet_graphics::display_list::OcgVisibility;
+    match visibility {
+        OcgVisibility::Single { ocg_id, .. } => *ocg_id_to_ref.get(ocg_id).unwrap_or(&0),
+        OcgVisibility::Membership {
+            ocg_ids, policy, ..
+        } => {
+            use stet_graphics::display_list::MembershipPolicy;
+            let policy_name: &[u8] = match policy {
+                MembershipPolicy::AllOn => b"AllOn",
+                MembershipPolicy::AnyOn => b"AnyOn",
+                MembershipPolicy::AllOff => b"AllOff",
+                MembershipPolicy::AnyOff => b"AnyOff",
+            };
+            let ocgs: Vec<PdfObj> = ocg_ids
+                .iter()
+                .filter_map(|id| ocg_id_to_ref.get(id).map(|&r| PdfObj::Ref(r)))
+                .collect();
+            writer.add_object(&PdfObj::Dict(vec![
+                (b"Type".to_vec(), PdfObj::name("OCMD")),
+                (b"OCGs".to_vec(), PdfObj::Array(ocgs)),
+                (b"P".to_vec(), PdfObj::Name(policy_name.to_vec())),
+            ]))
+        }
+        OcgVisibility::Expression { expr, .. } => {
+            let ve = build_ve_array(writer, expr, ocg_id_to_ref);
+            writer.add_object(&PdfObj::Dict(vec![
+                (b"Type".to_vec(), PdfObj::name("OCMD")),
+                (b"VE".to_vec(), ve),
+            ]))
+        }
+    }
+}
+
+/// Recursively convert a `VisibilityExpr` into the PDF `/VE` array
+/// shape: `[/And expr1 expr2 …]`, `[/Or expr1 expr2 …]`, `[/Not expr]`,
+/// or a bare indirect ref for a leaf `Layer`.
+fn build_ve_array(
+    writer: &mut PdfWriter,
+    expr: &stet_graphics::display_list::VisibilityExpr,
+    ocg_id_to_ref: &HashMap<u32, u32>,
+) -> PdfObj {
+    use stet_graphics::display_list::VisibilityExpr;
+    match expr {
+        VisibilityExpr::And(xs) => {
+            let mut arr = vec![PdfObj::name("And")];
+            for x in xs {
+                arr.push(build_ve_array(writer, x, ocg_id_to_ref));
+            }
+            PdfObj::Array(arr)
+        }
+        VisibilityExpr::Or(xs) => {
+            let mut arr = vec![PdfObj::name("Or")];
+            for x in xs {
+                arr.push(build_ve_array(writer, x, ocg_id_to_ref));
+            }
+            PdfObj::Array(arr)
+        }
+        VisibilityExpr::Not(x) => PdfObj::Array(vec![
+            PdfObj::name("Not"),
+            build_ve_array(writer, x, ocg_id_to_ref),
+        ]),
+        VisibilityExpr::Layer(id) => match ocg_id_to_ref.get(id) {
+            Some(&r) => PdfObj::Ref(r),
+            None => PdfObj::Null,
+        },
     }
 }
