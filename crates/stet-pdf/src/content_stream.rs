@@ -657,6 +657,14 @@ impl<'tracker> Builder<'tracker> {
                 self.buf.extend(b"q ");
                 emit_matrix(&mut self.buf, &m);
                 self.buf.extend(b" cm\n");
+                emit_overprint(
+                    &mut self.buf,
+                    params.overprint,
+                    params.overprint_mode,
+                    &mut self.gs,
+                    &mut self.ext_gstates,
+                    &mut self.ext_gstate_map,
+                );
                 emit_paint_alpha_blend(
                     &mut self.buf,
                     false,
@@ -683,6 +691,14 @@ impl<'tracker> Builder<'tracker> {
                     emit_matrix(&mut self.buf, &params.ctm);
                     self.buf.extend(b" cm\n");
                 }
+                emit_overprint(
+                    &mut self.buf,
+                    params.overprint,
+                    0,
+                    &mut self.gs,
+                    &mut self.ext_gstates,
+                    &mut self.ext_gstate_map,
+                );
                 emit_paint_alpha_blend(
                     &mut self.buf,
                     false,
@@ -704,6 +720,14 @@ impl<'tracker> Builder<'tracker> {
                     emit_matrix(&mut self.buf, &params.ctm);
                     self.buf.extend(b" cm\n");
                 }
+                emit_overprint(
+                    &mut self.buf,
+                    params.overprint,
+                    0,
+                    &mut self.gs,
+                    &mut self.ext_gstates,
+                    &mut self.ext_gstate_map,
+                );
                 emit_paint_alpha_blend(
                     &mut self.buf,
                     false,
@@ -725,6 +749,14 @@ impl<'tracker> Builder<'tracker> {
                     emit_matrix(&mut self.buf, &params.ctm);
                     self.buf.extend(b" cm\n");
                 }
+                emit_overprint(
+                    &mut self.buf,
+                    params.overprint,
+                    0,
+                    &mut self.gs,
+                    &mut self.ext_gstates,
+                    &mut self.ext_gstate_map,
+                );
                 emit_paint_alpha_blend(
                     &mut self.buf,
                     false,
@@ -746,6 +778,14 @@ impl<'tracker> Builder<'tracker> {
                     emit_matrix(&mut self.buf, &params.ctm);
                     self.buf.extend(b" cm\n");
                 }
+                emit_overprint(
+                    &mut self.buf,
+                    params.overprint,
+                    0,
+                    &mut self.gs,
+                    &mut self.ext_gstates,
+                    &mut self.ext_gstate_map,
+                );
                 emit_paint_alpha_blend(
                     &mut self.buf,
                     false,
