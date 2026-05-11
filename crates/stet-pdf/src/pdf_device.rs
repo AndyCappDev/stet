@@ -951,6 +951,29 @@ impl PdfDevice {
             (b"Contents".to_vec(), PdfObj::Ref(content_ref)),
             (b"Resources".to_vec(), PdfObj::Dict(resources)),
         ];
+        // Page-level transparency group. PDF/X-1a sources set a
+        // /Group << /S /Transparency /CS DeviceCMYK >> on the page so
+        // overprint compositing happens in CMYK; without it, the
+        // renderer falls back to RGB compositing and overprint
+        // semantics break (50% K painted on a green spot/CMYK cell no
+        // longer knocks out the cell — visible as residual green or
+        // green-X-shaped strokes leaking past the K paint).
+        let page_cs: Option<&str> = match page.display_list.page_group_color_space() {
+            stet_graphics::display_list::GroupColorSpace::DeviceGray => Some("DeviceGray"),
+            stet_graphics::display_list::GroupColorSpace::DeviceRGB => Some("DeviceRGB"),
+            stet_graphics::display_list::GroupColorSpace::DeviceCMYK => Some("DeviceCMYK"),
+            stet_graphics::display_list::GroupColorSpace::Inherited => None,
+        };
+        if let Some(cs) = page_cs {
+            page_entries.push((
+                b"Group".to_vec(),
+                PdfObj::Dict(vec![
+                    (b"Type".to_vec(), PdfObj::name("Group")),
+                    (b"S".to_vec(), PdfObj::name("Transparency")),
+                    (b"CS".to_vec(), PdfObj::name(cs)),
+                ]),
+            ));
+        }
         // /CropBox / /BleedBox / /TrimBox / /ArtBox: pdfmark /PAGE or
         // /PAGES wins; otherwise fall back to the device's pending
         // trim_box (set via PdfDevice::set_trim_box).

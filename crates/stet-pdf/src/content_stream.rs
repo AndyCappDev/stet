@@ -174,6 +174,7 @@ pub enum ShadingRef {
 }
 
 /// Cached graphics state for suppressing redundant PDF operators.
+#[derive(Clone)]
 struct GState {
     fill_color: Option<PdfColor>,
     stroke_color: Option<PdfColor>,
@@ -275,6 +276,15 @@ struct Builder<'tracker> {
     images: Vec<ImageXObject>,
     shading_refs: Vec<ShadingRef>,
     clip_depth: u32,
+    /// Parallel stack to PDF's q/Q gstate save frames, one entry per
+    /// open `Clip` (each emits `q`). InitClip pops in reverse, restoring
+    /// `self.gs` to the value saved at the matching Clip's `q`. Without
+    /// this, the tracker resets to default after InitClip but PDF's
+    /// real gstate restores to whatever was active at the matching q —
+    /// so the next paint's emit_overprint/emit_paint_alpha_blend
+    /// disagree with reality and skip the operator that would fix the
+    /// PDF state (visible as overprint leaking past clip scopes).
+    clip_gs_stack: Vec<GState>,
     gs: GState,
     ext_gstates: Vec<ExtGStateDict>,
     ext_gstate_map: HashMap<Vec<u8>, usize>,
@@ -313,6 +323,7 @@ impl<'tracker> Builder<'tracker> {
             images: Vec::new(),
             shading_refs: Vec::new(),
             clip_depth: 0,
+            clip_gs_stack: Vec::new(),
             gs: GState::new(),
             ext_gstates: Vec::new(),
             ext_gstate_map: HashMap::new(),
@@ -475,10 +486,21 @@ impl<'tracker> Builder<'tracker> {
                     return;
                 }
                 let has_ctm = !is_identity(&params.ctm);
-                if has_ctm {
+                // PDF `q` saves the gstate and `Q` restores it. Mirror that
+                // in our tracker by snapshotting `self.gs` before `q` and
+                // restoring after `Q` — otherwise state changes we emit
+                // inside the q/Q block (CTM, color, line, overprint, …)
+                // would leak past the `Q` in the tracker's view, making
+                // the next paint think e.g. overprint is still on when
+                // PDF has already popped it.
+                let saved_gs = if has_ctm {
+                    let saved = self.gs.clone();
                     self.buf.extend(b"q\n");
                     emit_cm(&mut self.buf, &params.ctm);
-                }
+                    Some(saved)
+                } else {
+                    None
+                };
                 emit_transfer(
                     &mut self.buf,
                     &params.transfer,
@@ -539,12 +561,18 @@ impl<'tracker> Builder<'tracker> {
                 emit_line_state(&mut self.buf, params, &mut self.gs);
                 emit_path(&mut self.buf, path);
                 self.buf.extend(b"S\n");
-                if has_ctm {
+                if let Some(saved) = saved_gs {
                     self.buf.extend(b"Q\n");
-                    self.gs = GState::new();
+                    self.gs = saved;
                 }
             }
             DisplayElement::Clip { path, params } => {
+                // Snapshot gstate before `q` so the matching InitClip
+                // can restore it. Without this, gstate that changed
+                // inside the clip scope (overprint, alpha, blend mode,
+                // colors) leaks past `Q` in the tracker's view while
+                // PDF has already reverted it.
+                self.clip_gs_stack.push(self.gs.clone());
                 self.buf.extend(b"q\n");
                 emit_path(&mut self.buf, path);
                 if params.fill_rule == FillRule::EvenOdd {
@@ -553,14 +581,17 @@ impl<'tracker> Builder<'tracker> {
                     self.buf.extend(b"W n\n");
                 }
                 self.clip_depth += 1;
-                // Don't reset gs — colors/line state carry into clip scope.
             }
             DisplayElement::InitClip => {
                 for _ in 0..self.clip_depth {
                     self.buf.extend(b"Q\n");
+                    if let Some(prev) = self.clip_gs_stack.pop() {
+                        self.gs = prev;
+                    } else {
+                        self.gs.reset();
+                    }
                 }
                 self.clip_depth = 0;
-                self.gs.reset();
             }
             DisplayElement::Image {
                 sample_data,
@@ -641,6 +672,7 @@ impl<'tracker> Builder<'tracker> {
                 let saved_buf = std::mem::take(&mut self.buf);
                 let saved_gs = std::mem::replace(&mut self.gs, GState::new());
                 let saved_clip_depth = std::mem::replace(&mut self.clip_depth, 0);
+                let saved_clip_gs_stack = std::mem::take(&mut self.clip_gs_stack);
 
                 self.emit_list(elements);
 
@@ -655,6 +687,7 @@ impl<'tracker> Builder<'tracker> {
                 let form_content = std::mem::replace(&mut self.buf, saved_buf);
                 self.gs = saved_gs;
                 self.clip_depth = saved_clip_depth;
+                self.clip_gs_stack = saved_clip_gs_stack;
 
                 let form_idx = self.form_xobjects.len();
                 let form_name = format!("X{}", form_idx);
@@ -686,7 +719,12 @@ impl<'tracker> Builder<'tracker> {
                 });
 
                 // Invoke the Form on the parent stream. Wrap in q/Q so
-                // any /CA/ca/BM ExtGState we push is local to this Do.
+                // any /CA/ca/BM ExtGState we push is local to this /Do.
+                // Snapshot and restore the gs tracker around the q/Q so
+                // the alpha/blend pushed inside (and any state the Form
+                // changed and tried to leak) doesn't fool the tracker
+                // into thinking PDF state changed past the `Q`.
+                let pre_q_gs = self.gs.clone();
                 self.buf.extend(b"q\n");
                 if params.alpha < 1.0 || params.blend_mode != 0 {
                     emit_group_composite_gs(
@@ -699,9 +737,7 @@ impl<'tracker> Builder<'tracker> {
                 }
                 writeln!(self.buf, "/{} Do", form_name).unwrap();
                 self.buf.extend(b"Q\n");
-                // The implicit q at /Do entry and Q on return invalidate
-                // every cached gstate dedup we've been tracking.
-                self.gs = GState::new();
+                self.gs = pre_q_gs;
             }
             DisplayElement::SoftMasked {
                 mask,
@@ -716,6 +752,7 @@ impl<'tracker> Builder<'tracker> {
                 let saved_buf = std::mem::take(&mut self.buf);
                 let saved_gs = std::mem::replace(&mut self.gs, GState::new());
                 let saved_clip_depth = std::mem::replace(&mut self.clip_depth, 0);
+                let saved_clip_gs_stack = std::mem::take(&mut self.clip_gs_stack);
 
                 self.emit_list(mask);
 
@@ -726,6 +763,7 @@ impl<'tracker> Builder<'tracker> {
                 let mask_content = std::mem::replace(&mut self.buf, saved_buf);
                 self.gs = saved_gs;
                 self.clip_depth = saved_clip_depth;
+                self.clip_gs_stack = saved_clip_gs_stack;
 
                 let mask_form_idx = self.form_xobjects.len();
                 let mask_group_entries: Vec<(Vec<u8>, PdfObj)> = vec![
@@ -755,11 +793,15 @@ impl<'tracker> Builder<'tracker> {
                 });
 
                 // Scope: q + /GSn gs (push SMask) + content + Q (pops the
-                // SMask along with the rest of the gstate).
+                // SMask along with the rest of the gstate). After the
+                // outer Q, the gstate tracker has to return to whatever
+                // PDF state existed before the q — snapshot it.
+                let pre_q_gs = self.gs.clone();
                 self.buf.extend(b"q\n");
                 writeln!(self.buf, "/GS{} gs", ext_gstate_idx).unwrap();
-                let saved_gs = std::mem::replace(&mut self.gs, GState::new());
+                self.gs = GState::new();
                 let saved_clip_depth = std::mem::replace(&mut self.clip_depth, 0);
+                let saved_clip_gs_stack = std::mem::take(&mut self.clip_gs_stack);
 
                 self.emit_list(content);
 
@@ -767,10 +809,10 @@ impl<'tracker> Builder<'tracker> {
                     self.buf.extend(b"Q\n");
                 }
 
-                self.gs = saved_gs;
                 self.clip_depth = saved_clip_depth;
+                self.clip_gs_stack = saved_clip_gs_stack;
                 self.buf.extend(b"Q\n");
-                self.gs = GState::new();
+                self.gs = pre_q_gs;
             }
             DisplayElement::OcgGroup {
                 elements,
