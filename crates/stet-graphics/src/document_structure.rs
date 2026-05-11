@@ -59,6 +59,14 @@ pub enum StructuralRecord {
     /// accumulate; the writer assembles a `/Names /EmbeddedFiles`
     /// name tree and references it from `/Catalog`.
     Embed(EmbedRecord),
+    /// `/OUTPUTINTENT` — one `/Catalog /OutputIntents` entry naming the
+    /// destination color rendering condition for this PDF (PDF/X /
+    /// PDF/A). The writer emits one PDF object per record plus an array
+    /// referencing them all from `/Catalog /OutputIntents`. Multiple
+    /// records produce multiple intents — the array's order matches the
+    /// record order, and consumers traditionally honor the first
+    /// matching subtype.
+    OutputIntent(OutputIntentRecord),
 }
 
 /// Document-level structural records, parallel to
@@ -1004,6 +1012,36 @@ impl FormRecord {
             quadding: self.quadding.or(other.quadding),
         }
     }
+}
+
+/// `/OUTPUTINTENT` payload — one PDF/X or PDF/A OutputIntent declaring the
+/// destination color rendering condition for the document. The writer
+/// embeds [`dest_output_profile`] as an `/ICCBased` stream object and
+/// produces an entry in `/Catalog /OutputIntents`.
+///
+/// `subtype` is the `/S` name (e.g. `b"GTS_PDFX"`, `b"GTS_PDFA1"`). It's
+/// stored as raw bytes so the writer can pass through unknown subtypes
+/// verbatim without losing information.
+///
+/// The text fields (`output_condition_identifier`, `output_condition`,
+/// `registry_name`, `info`) are PDF text strings; they round-trip as
+/// raw bytes to preserve any non-UTF-8 encoding the producer used.
+#[derive(Clone, Debug)]
+pub struct OutputIntentRecord {
+    pub subtype: Vec<u8>,
+    pub output_condition_identifier: Option<Vec<u8>>,
+    pub output_condition: Option<Vec<u8>>,
+    pub registry_name: Option<Vec<u8>>,
+    pub info: Option<Vec<u8>>,
+    /// Decompressed ICC profile bytes from the source PDF's
+    /// `/DestOutputProfile` stream. `None` when the source intent had
+    /// no embedded profile (rare for PDF/X but legal per PDF spec).
+    pub dest_output_profile: Option<std::sync::Arc<Vec<u8>>>,
+    /// Number of color components in the destination profile (1 for
+    /// Gray, 3 for RGB, 4 for CMYK). Derived from the ICC header at
+    /// parse time; the writer emits it as the `/N` entry on the
+    /// `/ICCBased` profile stream.
+    pub n: u32,
 }
 
 impl PageBoxes {

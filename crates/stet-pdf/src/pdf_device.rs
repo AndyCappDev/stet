@@ -45,6 +45,10 @@ pub struct PdfDevice {
     /// future PDF/X-4 OutputIntent implementation. Currently unused.
     #[allow(dead_code)]
     output_profile: Option<Vec<u8>>,
+    /// `/Catalog /OutputIntents` records to emit. Populated by PDF→PDF
+    /// round-trip from the source PDF's intents; empty by default for the
+    /// PostScript-interpreter path.
+    output_intents: Vec<stet_graphics::document_structure::OutputIntentRecord>,
 }
 
 impl PdfDevice {
@@ -58,7 +62,21 @@ impl PdfDevice {
             output_path: None,
             pending_trim_box: None,
             output_profile: None,
+            output_intents: Vec::new(),
         }
+    }
+
+    /// Set the `/Catalog /OutputIntents` chain to emit. Replaces any
+    /// previously installed records. Used by PDF→PDF round-trip to carry
+    /// the source PDF's PDF/X / PDF/A OutputIntent over to the output;
+    /// preserving this lets the renderer route DeviceGray / DeviceCMYK /
+    /// ICCBased fills through the same destination profile the source
+    /// declared, so a re-rendered output PDF colour-matches the input.
+    pub fn set_output_intents(
+        &mut self,
+        intents: Vec<stet_graphics::document_structure::OutputIntentRecord>,
+    ) {
+        self.output_intents = intents;
     }
 
     /// Set the trim box for the next page (in PDF points, lower-left origin).
@@ -527,6 +545,19 @@ impl PdfDevice {
         }
         if let Some(out) = &acroform_output {
             catalog_entries.push((b"AcroForm".to_vec(), PdfObj::Ref(out.acroform_ref)));
+        }
+
+        // /Catalog /OutputIntents — emitted before set_object so the
+        // intent dicts and their ICC profile streams land in the writer
+        // first, then the catalog references them.
+        if !self.output_intents.is_empty() {
+            let intent_refs = emit_output_intents(&mut writer, &self.output_intents);
+            if !intent_refs.is_empty() {
+                catalog_entries.push((
+                    b"OutputIntents".to_vec(),
+                    PdfObj::Array(intent_refs.into_iter().map(PdfObj::Ref).collect()),
+                ));
+            }
         }
 
         writer.set_object(catalog_ref, &PdfObj::Dict(catalog_entries));
@@ -1244,6 +1275,51 @@ fn build_pdf_colorspace(
             ])
         }
     }
+}
+
+/// Emit one PDF `/OutputIntent` dict per record, with the
+/// `/DestOutputProfile` ICC stream embedded as a separate object.
+/// Returns the indirect-object numbers for the intent dicts so the
+/// caller can build the `/Catalog /OutputIntents` array.
+fn emit_output_intents(
+    writer: &mut PdfWriter,
+    intents: &[stet_graphics::document_structure::OutputIntentRecord],
+) -> Vec<u32> {
+    let mut refs = Vec::with_capacity(intents.len());
+    for intent in intents {
+        let profile_ref = intent.dest_output_profile.as_ref().map(|bytes| {
+            writer.add_stream(
+                vec![(b"N".to_vec(), PdfObj::Int(intent.n as i64))],
+                bytes,
+                true,
+            )
+        });
+        let mut entries: Vec<(Vec<u8>, PdfObj)> = vec![
+            (b"Type".to_vec(), PdfObj::name("OutputIntent")),
+            (b"S".to_vec(), PdfObj::Name(intent.subtype.clone())),
+        ];
+        if let Some(s) = &intent.output_condition_identifier {
+            entries.push((
+                b"OutputConditionIdentifier".to_vec(),
+                PdfObj::LitString(s.clone()),
+            ));
+        }
+        if let Some(s) = &intent.output_condition {
+            entries.push((b"OutputCondition".to_vec(), PdfObj::LitString(s.clone())));
+        }
+        if let Some(s) = &intent.registry_name {
+            entries.push((b"RegistryName".to_vec(), PdfObj::LitString(s.clone())));
+        }
+        if let Some(s) = &intent.info {
+            entries.push((b"Info".to_vec(), PdfObj::LitString(s.clone())));
+        }
+        if let Some(p_ref) = profile_ref {
+            entries.push((b"DestOutputProfile".to_vec(), PdfObj::Ref(p_ref)));
+        }
+        let intent_ref = writer.add_object(&PdfObj::Dict(entries));
+        refs.push(intent_ref);
+    }
+    refs
 }
 
 /// Build a PDF Type 0 (sampled) function stream from a TintLookupTable.

@@ -227,6 +227,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use stet_fonts::geometry::Matrix;
 use stet_graphics::display_list::DisplayList;
+use stet_graphics::document_structure::OutputIntentRecord;
 use stet_graphics::icc::IccCache;
 
 /// Font data provider: maps a font file name (e.g. "NimbusSans-Regular") to raw .t1 bytes.
@@ -673,6 +674,16 @@ impl<'a> PdfDocument<'a> {
         true
     }
 
+    /// Parse every entry in `/Catalog /OutputIntents` into round-tripable
+    /// records. Unlike [`output_intent_icc`](Self::output_intent_icc), which
+    /// is a renderer optimization that only captures CMYK profile bytes,
+    /// this preserves all output intents (any color space) with their full
+    /// metadata so the PDF writer can emit a faithful `/OutputIntents`
+    /// chain in the output catalog.
+    pub fn output_intents(&self) -> Vec<OutputIntentRecord> {
+        parse_output_intents_full(&self.resolver)
+    }
+
     /// Access the resolver for arbitrary object lookups.
     pub fn resolver(&self) -> &Resolver<'a> {
         &self.resolver
@@ -1031,6 +1042,93 @@ fn parse_output_intent_icc(resolver: &Resolver) -> Option<Vec<u8>> {
         }
     }
     None
+}
+
+/// Parse every entry in `/Catalog /OutputIntents` into
+/// [`OutputIntentRecord`]s, preserving all the descriptive metadata and
+/// any color space (Gray / RGB / CMYK / Lab) of the embedded ICC profile.
+/// The PDF writer uses this to emit a faithful `/OutputIntents` chain
+/// during PDF→PDF round-tripping.
+fn parse_output_intents_full(resolver: &Resolver) -> Vec<OutputIntentRecord> {
+    // Walk the same path as `parse_output_intent_icc` to find the
+    // catalog dict containing /OutputIntents. Returns Vec::new() when no
+    // intents are declared.
+    let catalog_obj = match resolver.trailer().get_ref(b"Root") {
+        Some(root_ref) => match resolver.resolve(root_ref.0, root_ref.1) {
+            Ok(c)
+                if c.as_dict()
+                    .is_some_and(|d| d.get(b"OutputIntents").is_some()) =>
+            {
+                c
+            }
+            _ => match find_catalog(resolver) {
+                Some(c) => c,
+                None => return Vec::new(),
+            },
+        },
+        None => match find_catalog(resolver) {
+            Some(c) => c,
+            None => return Vec::new(),
+        },
+    };
+    let Some(catalog_dict) = catalog_obj.as_dict() else {
+        return Vec::new();
+    };
+    let Some(intents_ref) = catalog_dict.get(b"OutputIntents") else {
+        return Vec::new();
+    };
+    let Ok(intents_obj) = resolver.deref(intents_ref) else {
+        return Vec::new();
+    };
+    let Some(intents_arr) = intents_obj.as_array() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in intents_arr {
+        let intent = match resolver.deref(entry) {
+            Ok(o) => o,
+            Err(_) => continue,
+        };
+        let Some(intent_dict) = intent.as_dict() else {
+            continue;
+        };
+        let subtype = intent_dict
+            .get_name(b"S")
+            .map(|n| n.to_vec())
+            .unwrap_or_else(|| b"GTS_PDFX".to_vec());
+        let (profile_bytes, n) = match intent_dict.get(b"DestOutputProfile") {
+            Some(profile_obj) => match resolver.stream_data_from_obj(profile_obj) {
+                Ok(bytes) if bytes.len() >= 40 && &bytes[36..40] == b"acsp" => {
+                    let n = match &bytes[16..20] {
+                        b"GRAY" => 1,
+                        b"RGB " => 3,
+                        b"CMYK" => 4,
+                        b"Lab " => 3,
+                        _ => 3,
+                    };
+                    (Some(std::sync::Arc::new(bytes)), n)
+                }
+                _ => (None, 0),
+            },
+            None => (None, 0),
+        };
+        let get_string = |key: &[u8]| -> Option<Vec<u8>> {
+            intent_dict.get(key).and_then(|o| match resolver.deref(o) {
+                Ok(PdfObj::Str(s)) => Some(s),
+                _ => None,
+            })
+        };
+        out.push(OutputIntentRecord {
+            subtype,
+            output_condition_identifier: get_string(b"OutputConditionIdentifier"),
+            output_condition: get_string(b"OutputCondition"),
+            registry_name: get_string(b"RegistryName"),
+            info: get_string(b"Info"),
+            dest_output_profile: profile_bytes,
+            n,
+        });
+    }
+    out
 }
 
 /// Scan all objects to find the real Catalog dict (has /Type /Catalog).

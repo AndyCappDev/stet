@@ -2072,6 +2072,10 @@ fn run_pdf_input_pdf(
         eprintln!("{}", "=".repeat(60));
 
         let mut device = PdfDevice::new(0, 0, 72.0);
+        let output_intents = doc.output_intents();
+        if !output_intents.is_empty() {
+            device.set_output_intents(output_intents);
+        }
         let mut pages_emitted = 0;
 
         for page in 0..page_count {
