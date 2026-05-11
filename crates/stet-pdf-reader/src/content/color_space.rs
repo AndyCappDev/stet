@@ -1084,6 +1084,120 @@ fn build_nd_tint_image_cs(
     }
 }
 
+/// Pick a `SimpleColorSpace` to use as the round-trip alternate space for a
+/// Separation/DeviceN paint. The alt's number of components determines the
+/// tint table's output width.
+fn simple_alt_for_spot(
+    alt: &ResolvedColorSpace,
+) -> (stet_graphics::device::SimpleColorSpace, usize) {
+    use stet_graphics::device::SimpleColorSpace;
+    if is_cie_space(alt) {
+        return (SimpleColorSpace::DeviceRGB, 3);
+    }
+    match alt {
+        ResolvedColorSpace::DeviceGray => (SimpleColorSpace::DeviceGray, 1),
+        ResolvedColorSpace::DeviceRGB => (SimpleColorSpace::DeviceRGB, 3),
+        ResolvedColorSpace::DeviceCMYK => (SimpleColorSpace::DeviceCMYK, 4),
+        ResolvedColorSpace::ICCBased { n, .. } => match *n {
+            1 => (SimpleColorSpace::DeviceGray, 1),
+            4 => (SimpleColorSpace::DeviceCMYK, 4),
+            _ => (SimpleColorSpace::DeviceRGB, 3),
+        },
+        _ => (SimpleColorSpace::DeviceRGB, 3),
+    }
+}
+
+/// Sample a tint function into a `TintLookupTable` whose outputs match the
+/// requested `SimpleColorSpace`. CIE alternate spaces produce RGB samples
+/// via `push_cie_converted`; device alternates pass tint outputs through
+/// directly.
+fn sample_tint_table(
+    func: &PdfFunction,
+    n_inputs: usize,
+    alt: &ResolvedColorSpace,
+    n_out: usize,
+) -> TintLookupTable {
+    let cie = is_cie_space(alt);
+    let spd = if n_inputs == 1 {
+        256u32
+    } else {
+        match n_inputs {
+            2 => 64,
+            3 => 17,
+            _ => 9,
+        }
+    };
+    let total: usize = (spd as usize).pow(n_inputs as u32);
+    let mut data = Vec::with_capacity(total * n_out);
+    let mut inputs = vec![0.0f64; n_inputs];
+    for idx in 0..total {
+        let mut rem = idx;
+        for d in (0..n_inputs).rev() {
+            inputs[d] = (rem % spd as usize) as f64 / (spd - 1) as f64;
+            rem /= spd as usize;
+        }
+        let out = func.evaluate(&inputs);
+        if cie {
+            push_cie_converted(alt, &out, &mut data);
+        } else {
+            for j in 0..n_out {
+                data.push(out.get(j).copied().unwrap_or(0.0) as f32);
+            }
+        }
+    }
+    TintLookupTable {
+        num_inputs: n_inputs as u32,
+        num_outputs: n_out as u32,
+        samples_per_dim: spd,
+        data,
+    }
+}
+
+/// Build a `SpotColor` for a Separation/DeviceN paint, capturing both the
+/// tint values from the current `sc`/`scn` operands and a pre-sampled tint
+/// table so the PDF writer can round-trip the color space faithfully.
+/// Returns `None` for non-spot color spaces or when the tint function is
+/// missing.
+pub fn build_spot_color(
+    cs: &ResolvedColorSpace,
+    tint_values: &[f64],
+) -> Option<stet_graphics::device::SpotColor> {
+    use stet_graphics::device::{SpotColor, SpotColorSpace};
+    match cs {
+        ResolvedColorSpace::Separation { name, alt, tint_fn } => {
+            let func = tint_fn.as_ref()?;
+            let (simple_alt, n_out) = simple_alt_for_spot(alt);
+            let table = sample_tint_table(func, 1, alt, n_out);
+            Some(SpotColor {
+                tint_values: tint_values.to_vec(),
+                color_space: SpotColorSpace::Separation {
+                    name: name.clone(),
+                    alt: simple_alt,
+                    tint_table: Arc::new(table),
+                },
+            })
+        }
+        ResolvedColorSpace::DeviceN {
+            names,
+            alt,
+            tint_fn,
+        } => {
+            let func = tint_fn.as_ref()?;
+            let (simple_alt, n_out) = simple_alt_for_spot(alt);
+            let table = sample_tint_table(func, names.len(), alt, n_out);
+            Some(SpotColor {
+                tint_values: tint_values.to_vec(),
+                color_space: SpotColorSpace::DeviceN {
+                    names: names.clone(),
+                    alt: simple_alt,
+                    tint_table: Arc::new(table),
+                },
+            })
+        }
+        _ => None,
+    }
+}
+
 /// Convert tinting function output components (f64, 0..1) to (R, G, B) bytes
 /// through the given alternative color space.
 pub fn alt_comps_to_rgb_f64(comps: &[f64], alt: &ResolvedColorSpace) -> (u8, u8, u8) {

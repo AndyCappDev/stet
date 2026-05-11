@@ -256,8 +256,27 @@ fn quantize(v: f64) -> u16 {
     (v.clamp(0.0, 1.0) * 10000.0) as u16
 }
 
+#[cfg(test)]
 fn color_to_pdf(c: &DeviceColor) -> PdfColor {
+    color_to_pdf_with_channels(c, 0)
+}
+
+/// Same as [`color_to_pdf`] but honors the source paint's CMYK channel mask.
+///
+/// When `painted_channels == CMYK_K` and `native_cmyk = (0, 0, 0, k)`, the
+/// paint originated as DeviceGray and was promoted to K-only DeviceCMYK by
+/// the PDF reader's `gray_paint_for_gstate`. PDF's OPM semantics differ
+/// between DeviceGray and DeviceCMYK (OPM only applies to DeviceCMYK
+/// colorants), so a round-trip must emit it back as `g` — emitting `k`
+/// would let OPM-1 preserve the underlying CMY components and let the
+/// background leak through.
+fn color_to_pdf_with_channels(c: &DeviceColor, painted_channels: u8) -> PdfColor {
+    use stet_graphics::device::CMYK_K;
     if let Some((c_val, m, y, k)) = c.native_cmyk {
+        if painted_channels == CMYK_K && c_val == 0.0 && m == 0.0 && y == 0.0 {
+            let g = (1.0 - k).clamp(0.0, 1.0);
+            return PdfColor::Gray(quantize(g));
+        }
         PdfColor::Cmyk(quantize(c_val), quantize(m), quantize(y), quantize(k))
     } else if c.r == c.g && c.g == c.b {
         PdfColor::Gray(quantize(c.r))
@@ -472,7 +491,12 @@ impl<'tracker> Builder<'tracker> {
                         self.gs.fill_cs_name = None;
                         self.gs.fill_color = None;
                     }
-                    emit_fill_color(&mut self.buf, &params.color, &mut self.gs);
+                    emit_fill_color(
+                        &mut self.buf,
+                        &params.color,
+                        params.painted_channels,
+                        &mut self.gs,
+                    );
                 }
                 emit_path(&mut self.buf, path);
                 if params.fill_rule == FillRule::EvenOdd {
@@ -556,7 +580,12 @@ impl<'tracker> Builder<'tracker> {
                         self.gs.stroke_cs_name = None;
                         self.gs.stroke_color = None;
                     }
-                    emit_stroke_color(&mut self.buf, &params.color, &mut self.gs);
+                    emit_stroke_color(
+                        &mut self.buf,
+                        &params.color,
+                        params.painted_channels,
+                        &mut self.gs,
+                    );
                 }
                 emit_line_state(&mut self.buf, params, &mut self.gs);
                 emit_path(&mut self.buf, path);
@@ -1111,8 +1140,8 @@ fn flush_text_batch(
 }
 
 /// Emit a non-stroking (fill) color command.
-fn emit_fill_color(buf: &mut Vec<u8>, color: &DeviceColor, gs: &mut GState) {
-    let pc = color_to_pdf(color);
+fn emit_fill_color(buf: &mut Vec<u8>, color: &DeviceColor, painted_channels: u8, gs: &mut GState) {
+    let pc = color_to_pdf_with_channels(color, painted_channels);
     if gs.fill_color.as_ref() == Some(&pc) {
         return;
     }
@@ -1154,8 +1183,13 @@ fn emit_fill_color_rgb(buf: &mut Vec<u8>, r: f64, g: f64, b: f64) {
 }
 
 /// Emit a stroking color command.
-fn emit_stroke_color(buf: &mut Vec<u8>, color: &DeviceColor, gs: &mut GState) {
-    let pc = color_to_pdf(color);
+fn emit_stroke_color(
+    buf: &mut Vec<u8>,
+    color: &DeviceColor,
+    painted_channels: u8,
+    gs: &mut GState,
+) {
+    let pc = color_to_pdf_with_channels(color, painted_channels);
     if gs.stroke_color.as_ref() == Some(&pc) {
         return;
     }
