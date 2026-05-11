@@ -68,6 +68,34 @@ pub struct HalftoneState {
     pub color: Option<[Option<Arc<HalftoneScreen>>; 4]>,
 }
 
+/// Native ICCBased fill/stroke color info for PDF output.
+///
+/// Preserves the raw component values from the source `sc`/`scn`
+/// operator plus the ICC profile bytes, so a PDF reader can capture the
+/// exact ICCBased paint at parse time and the PDF writer can emit a
+/// faithful `/CSn cs` + `c1 c2 c3 scn` round-trip — independent of the
+/// `DeviceColor` ICC-converted RGB that's used for rasterizing.
+#[derive(Clone, Debug)]
+pub struct IccColor {
+    /// Raw component values from `sc`/`scn` (length matches `color_space.n`).
+    pub components: Vec<f64>,
+    /// The ICC color space definition.
+    pub color_space: IccColorSpace,
+}
+
+/// Pre-resolved ICCBased color space ready for PDF emission.
+#[derive(Clone, Debug)]
+pub struct IccColorSpace {
+    /// Number of components (1, 3, or 4).
+    pub n: u32,
+    /// Raw ICC profile bytes (Arc-shared so multiple paints can dedup
+    /// to a single PDF stream).
+    pub profile_data: Arc<Vec<u8>>,
+    /// Profile hash, used both as a writer-side dedup key and to keep
+    /// the IccCache lookups in sync with the rasterizer.
+    pub profile_hash: ProfileHash,
+}
+
 /// Native Separation/DeviceN color info for PDF output.
 #[derive(Clone, Debug)]
 pub struct SpotColor {
@@ -153,6 +181,9 @@ pub struct FillParams {
     pub is_device_cmyk: bool,
     /// Separation/DeviceN color for PDF output. None for device color spaces.
     pub spot_color: Option<SpotColor>,
+    /// ICCBased color for PDF output. None for device color spaces and
+    /// for Separation/DeviceN paints (those round-trip through `spot_color`).
+    pub icc_color: Option<IccColor>,
     /// Rendering intent (0=RelativeColorimetric, 1=Absolute, 2=Perceptual, 3=Saturation).
     pub rendering_intent: u8,
     /// Pre-sampled transfer function state for PDF output.
@@ -205,6 +236,9 @@ pub struct TextParams {
     pub stroke_width: f64,
     /// Separation/DeviceN color for PDF output. None for device color spaces.
     pub spot_color: Option<SpotColor>,
+    /// ICCBased color for PDF output. None for device color spaces and
+    /// for Separation/DeviceN paints (those round-trip through `spot_color`).
+    pub icc_color: Option<IccColor>,
     /// Rendering intent (0=RelativeColorimetric, 1=Absolute, 2=Perceptual, 3=Saturation).
     pub rendering_intent: u8,
     /// Pre-sampled transfer function state for PDF output.
@@ -255,6 +289,9 @@ pub struct StrokeParams {
     pub is_device_cmyk: bool,
     /// Separation/DeviceN color for PDF output. None for device color spaces.
     pub spot_color: Option<SpotColor>,
+    /// ICCBased color for PDF output. None for device color spaces and
+    /// for Separation/DeviceN paints (those round-trip through `spot_color`).
+    pub icc_color: Option<IccColor>,
     /// Rendering intent (0=RelativeColorimetric, 1=Absolute, 2=Perceptual, 3=Saturation).
     pub rendering_intent: u8,
     /// Pre-sampled transfer function state for PDF output.
@@ -707,6 +744,7 @@ impl Default for FillParams {
             painted_channels: 0,
             is_device_cmyk: false,
             spot_color: None,
+            icc_color: None,
             rendering_intent: 0,
             transfer: TransferState::default(),
             halftone: HalftoneState::default(),
@@ -736,6 +774,7 @@ impl Default for StrokeParams {
             painted_channels: 0,
             is_device_cmyk: false,
             spot_color: None,
+            icc_color: None,
             rendering_intent: 0,
             transfer: TransferState::default(),
             halftone: HalftoneState::default(),
@@ -773,6 +812,7 @@ impl Default for TextParams {
             paint_type: 0,
             stroke_width: 0.0,
             spot_color: None,
+            icc_color: None,
             rendering_intent: 0,
             transfer: TransferState::default(),
             halftone: HalftoneState::default(),

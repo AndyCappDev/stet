@@ -620,6 +620,7 @@ impl PdfDevice {
             used_font_names,
             ext_gstate_dicts,
             color_spaces,
+            icc_color_spaces,
             pattern_refs,
             pattern_cs_entries,
             transfer_refs,
@@ -765,6 +766,19 @@ impl PdfDevice {
             let cs_obj = build_spot_colorspace(spot_cs, writer);
             cs_entries.push((name.clone().into_bytes(), cs_obj));
         }
+        // ICCBased fill/stroke color space resources. Each emits one
+        // /ICCBased stream object and a `[/ICCBased <ref>]` array.
+        for (name, icc_cs) in icc_color_spaces {
+            let icc_ref = writer.add_stream(
+                vec![(b"N".to_vec(), PdfObj::Int(icc_cs.n as i64))],
+                &icc_cs.profile_data,
+                true,
+            );
+            cs_entries.push((
+                name.clone().into_bytes(),
+                PdfObj::Array(vec![PdfObj::name("ICCBased"), PdfObj::Ref(icc_ref)]),
+            ));
+        }
         // Add uncolored pattern color space entries (e.g., [/Pattern /DeviceRGB])
         for (name, cs_obj) in pattern_cs_entries {
             // Reconstruct PdfObj since it doesn't derive Clone
@@ -909,12 +923,24 @@ impl PdfDevice {
                     tile_resources.push((b"ExtGState".to_vec(), PdfObj::Dict(tile_gs)));
                 }
 
-                // Tile color spaces
-                if !tile_result.color_spaces.is_empty() {
+                // Tile color spaces (Separation/DeviceN + ICCBased)
+                if !tile_result.color_spaces.is_empty() || !tile_result.icc_color_spaces.is_empty()
+                {
                     let mut tile_cs: Vec<(Vec<u8>, PdfObj)> = Vec::new();
                     for (name, spot_cs) in &tile_result.color_spaces {
                         let cs_obj = build_spot_colorspace(spot_cs, writer);
                         tile_cs.push((name.clone().into_bytes(), cs_obj));
+                    }
+                    for (name, icc_cs) in &tile_result.icc_color_spaces {
+                        let icc_ref = writer.add_stream(
+                            vec![(b"N".to_vec(), PdfObj::Int(icc_cs.n as i64))],
+                            &icc_cs.profile_data,
+                            true,
+                        );
+                        tile_cs.push((
+                            name.clone().into_bytes(),
+                            PdfObj::Array(vec![PdfObj::name("ICCBased"), PdfObj::Ref(icc_ref)]),
+                        ));
                     }
                     tile_resources.push((b"ColorSpace".to_vec(), PdfObj::Dict(tile_cs)));
                 }

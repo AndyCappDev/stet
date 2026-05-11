@@ -676,6 +676,7 @@ impl<'a> ContentInterpreter<'a> {
                                 painted_channels: 0,
                                 is_device_cmyk: false,
                                 spot_color: None,
+                                icc_color: None,
                                 rendering_intent: 0,
                                 transfer: Default::default(),
                                 halftone: Default::default(),
@@ -718,6 +719,7 @@ impl<'a> ContentInterpreter<'a> {
                                 painted_channels: 0,
                                 is_device_cmyk: false,
                                 spot_color: None,
+                                icc_color: None,
                                 rendering_intent: 0,
                                 transfer: Default::default(),
                                 halftone: Default::default(),
@@ -763,6 +765,7 @@ impl<'a> ContentInterpreter<'a> {
                                     painted_channels: 0,
                                     is_device_cmyk: false,
                                     spot_color: None,
+                                    icc_color: None,
                                     rendering_intent: 0,
                                     transfer: Default::default(),
                                     halftone: Default::default(),
@@ -811,6 +814,7 @@ impl<'a> ContentInterpreter<'a> {
                                     painted_channels: 0,
                                     is_device_cmyk: false,
                                     spot_color: None,
+                                    icc_color: None,
                                     rendering_intent: 0,
                                     transfer: Default::default(),
                                     halftone: Default::default(),
@@ -858,6 +862,7 @@ impl<'a> ContentInterpreter<'a> {
                                     painted_channels: 0,
                                     is_device_cmyk: false,
                                     spot_color: None,
+                                    icc_color: None,
                                     rendering_intent: 0,
                                     transfer: Default::default(),
                                     halftone: Default::default(),
@@ -908,6 +913,7 @@ impl<'a> ContentInterpreter<'a> {
                             painted_channels: 0,
                             is_device_cmyk: false,
                             spot_color: None,
+                            icc_color: None,
                             rendering_intent: 0,
                             transfer: Default::default(),
                             halftone: Default::default(),
@@ -939,6 +945,7 @@ impl<'a> ContentInterpreter<'a> {
                         painted_channels: 0,
                         is_device_cmyk: false,
                         spot_color: None,
+                        icc_color: None,
                         rendering_intent: 0,
                         transfer: Default::default(),
                         halftone: Default::default(),
@@ -1019,6 +1026,7 @@ impl<'a> ContentInterpreter<'a> {
                             painted_channels: 0,
                             is_device_cmyk: false,
                             spot_color: None,
+                            icc_color: None,
                             rendering_intent: 0,
                             transfer: Default::default(),
                             halftone: Default::default(),
@@ -1050,6 +1058,7 @@ impl<'a> ContentInterpreter<'a> {
                         painted_channels: 0,
                         is_device_cmyk: false,
                         spot_color: None,
+                        icc_color: None,
                         rendering_intent: 0,
                         transfer: Default::default(),
                         halftone: Default::default(),
@@ -2150,6 +2159,7 @@ impl<'a> ContentInterpreter<'a> {
         self.gstate.stroke_is_device_cmyk = is_cmyk;
         self.gstate.stroke_is_none = false;
         self.gstate.stroke_spot_color = None;
+        self.gstate.stroke_icc_color = None;
         self.gstate.stroke_pattern = None;
         self.gstate.stroke_shading_pattern = None;
         Ok(())
@@ -2165,6 +2175,7 @@ impl<'a> ContentInterpreter<'a> {
         self.gstate.fill_is_device_cmyk = is_cmyk;
         self.gstate.fill_is_none = false;
         self.gstate.fill_spot_color = None;
+        self.gstate.fill_icc_color = None;
         self.gstate.fill_pattern = None;
         self.gstate.fill_shading_pattern = None;
         Ok(())
@@ -2198,6 +2209,7 @@ impl<'a> ContentInterpreter<'a> {
         self.gstate.stroke_is_device_cmyk = false;
         self.gstate.stroke_is_none = false;
         self.gstate.stroke_spot_color = None;
+        self.gstate.stroke_icc_color = None;
         self.gstate.stroke_pattern = None;
         self.gstate.stroke_shading_pattern = None;
         Ok(())
@@ -2213,6 +2225,7 @@ impl<'a> ContentInterpreter<'a> {
         self.gstate.fill_is_device_cmyk = false;
         self.gstate.fill_is_none = false;
         self.gstate.fill_spot_color = None;
+        self.gstate.fill_icc_color = None;
         self.gstate.fill_pattern = None;
         self.gstate.fill_shading_pattern = None;
         Ok(())
@@ -2398,6 +2411,7 @@ impl<'a> ContentInterpreter<'a> {
         self.gstate.stroke_is_device_cmyk = true;
         self.gstate.stroke_is_none = false;
         self.gstate.stroke_spot_color = None;
+        self.gstate.stroke_icc_color = None;
         self.gstate.stroke_pattern = None;
         self.gstate.stroke_shading_pattern = None;
         Ok(())
@@ -2413,6 +2427,7 @@ impl<'a> ContentInterpreter<'a> {
         self.gstate.fill_is_device_cmyk = true;
         self.gstate.fill_is_none = false;
         self.gstate.fill_spot_color = None;
+        self.gstate.fill_icc_color = None;
         self.gstate.fill_pattern = None;
         self.gstate.fill_shading_pattern = None;
         Ok(())
@@ -2521,6 +2536,7 @@ impl<'a> ContentInterpreter<'a> {
         self.cmyk_group_promote_color(&mut color);
         self.gstate.stroke_color = color;
         self.gstate.stroke_spot_color = color_space::build_spot_color(&cs, &nums);
+        self.gstate.stroke_icc_color = color_space::build_icc_color(&cs, &nums);
         self.gstate.stroke_pattern = None;
         self.gstate.stroke_shading_pattern = None;
         Ok(())
@@ -2559,6 +2575,7 @@ impl<'a> ContentInterpreter<'a> {
         self.cmyk_group_promote_color(&mut color);
         self.gstate.fill_color = color;
         self.gstate.fill_spot_color = color_space::build_spot_color(&cs, &nums);
+        self.gstate.fill_icc_color = color_space::build_icc_color(&cs, &nums);
         self.gstate.fill_pattern = None;
         self.gstate.fill_shading_pattern = None;
         Ok(())

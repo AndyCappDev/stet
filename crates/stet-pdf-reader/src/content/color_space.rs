@@ -1084,6 +1084,34 @@ fn build_nd_tint_image_cs(
     }
 }
 
+/// Build a round-tripable [`IccColor`] for the current fill/stroke
+/// when the resolved color space is an `ICCBased` profile with an
+/// embedded ICC stream. Returns `None` for device color spaces,
+/// Separation/DeviceN, CIE-only spaces, or ICCBased entries whose
+/// profile bytes are missing (extraction failure at parse time).
+pub fn build_icc_color(
+    cs: &ResolvedColorSpace,
+    components: &[f64],
+) -> Option<stet_graphics::device::IccColor> {
+    use stet_graphics::device::{IccColor, IccColorSpace};
+    match cs {
+        ResolvedColorSpace::ICCBased {
+            n,
+            profile_data: Some(data),
+            profile_hash: Some(hash),
+            ..
+        } => Some(IccColor {
+            components: components.to_vec(),
+            color_space: IccColorSpace {
+                n: *n,
+                profile_data: Arc::clone(data),
+                profile_hash: *hash,
+            },
+        }),
+        _ => None,
+    }
+}
+
 /// Pick a `SimpleColorSpace` to use as the round-trip alternate space for a
 /// Separation/DeviceN paint. The alt's number of components determines the
 /// tint table's output width.

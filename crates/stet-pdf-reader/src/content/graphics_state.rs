@@ -7,7 +7,7 @@
 use stet_fonts::geometry::{Matrix, PsPath};
 use stet_graphics::color::{DashPattern, DeviceColor, FillRule, LineCap, LineJoin};
 use stet_graphics::device::{
-    BgUcrState, FillParams, HalftoneState, SpotColor, StrokeParams, TransferState,
+    BgUcrState, FillParams, HalftoneState, IccColor, SpotColor, StrokeParams, TransferState,
 };
 use stet_graphics::display_list::{DisplayList, SoftMaskSubtype};
 
@@ -160,6 +160,11 @@ pub struct PdfGraphicsState {
     /// Native Separation/DeviceN stroke color (preserved for PDF output round-trip).
     /// `None` when the current stroke color space is a device space.
     pub stroke_spot_color: Option<SpotColor>,
+    /// ICCBased fill color (preserved for PDF output round-trip). `None`
+    /// for device color spaces and for Separation/DeviceN paints.
+    pub fill_icc_color: Option<IccColor>,
+    /// ICCBased stroke color (preserved for PDF output round-trip).
+    pub stroke_icc_color: Option<IccColor>,
     /// True when fill color is Separation/None (produces no visible marks).
     pub fill_is_none: bool,
     /// True when stroke color is Separation/None (produces no visible marks).
@@ -236,6 +241,8 @@ impl PdfGraphicsState {
             stroke_alpha: 1.0,
             fill_spot_color: None,
             stroke_spot_color: None,
+            fill_icc_color: None,
+            stroke_icc_color: None,
             fill_is_none: false,
             stroke_is_none: false,
             blend_mode: 0,
@@ -280,6 +287,7 @@ impl PdfGraphicsState {
             painted_channels: self.fill_painted_channels,
             is_device_cmyk: self.fill_is_device_cmyk,
             spot_color: self.fill_spot_color.clone(),
+            icc_color: self.fill_icc_color.clone(),
             rendering_intent: self.rendering_intent,
             transfer: self.transfer.clone(),
             halftone: HalftoneState::default(),
@@ -322,6 +330,7 @@ impl PdfGraphicsState {
             painted_channels: self.stroke_painted_channels,
             is_device_cmyk: self.stroke_is_device_cmyk,
             spot_color: self.stroke_spot_color.clone(),
+            icc_color: self.stroke_icc_color.clone(),
             rendering_intent: self.rendering_intent,
             transfer: self.transfer.clone(),
             halftone: HalftoneState::default(),
@@ -360,6 +369,7 @@ impl PdfGraphicsState {
             painted_channels: self.stroke_painted_channels,
             is_device_cmyk: self.stroke_is_device_cmyk,
             spot_color: self.stroke_spot_color.clone(),
+            icc_color: self.stroke_icc_color.clone(),
             rendering_intent: self.rendering_intent,
             transfer: self.transfer.clone(),
             halftone: HalftoneState::default(),

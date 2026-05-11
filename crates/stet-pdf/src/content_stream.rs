@@ -38,6 +38,10 @@ pub struct ContentStreamResult {
     /// Color space definitions used in the content stream (Separation/DeviceN).
     /// Vec of (resource_name, SpotColorSpace) pairs.
     pub color_spaces: Vec<(String, SpotColorSpace)>,
+    /// ICCBased color space definitions used in the content stream (one
+    /// per unique source profile, deduped by `IccColorSpace.profile_hash`).
+    /// Vec of (resource_name, IccColorSpace) pairs.
+    pub icc_color_spaces: Vec<(String, stet_graphics::device::IccColorSpace)>,
     /// Tiling pattern references used in the content stream.
     pub pattern_refs: Vec<PatternRef>,
     /// Color space entries for uncolored patterns (e.g., [/Pattern /DeviceRGB]).
@@ -309,6 +313,8 @@ struct Builder<'tracker> {
     ext_gstate_map: HashMap<Vec<u8>, usize>,
     color_spaces: Vec<(String, SpotColorSpace)>,
     cs_name_map: HashMap<Vec<u8>, String>,
+    icc_color_spaces: Vec<(String, stet_graphics::device::IccColorSpace)>,
+    icc_cs_name_map: HashMap<Vec<u8>, String>,
     pattern_refs: Vec<PatternRef>,
     pattern_map: HashMap<u32, usize>,
     pattern_cs_names: Vec<(String, PdfObj)>,
@@ -348,6 +354,8 @@ impl<'tracker> Builder<'tracker> {
             ext_gstate_map: HashMap::new(),
             color_spaces: Vec::new(),
             cs_name_map: HashMap::new(),
+            icc_color_spaces: Vec::new(),
+            icc_cs_name_map: HashMap::new(),
             pattern_refs: Vec::new(),
             pattern_map: HashMap::new(),
             pattern_cs_names: Vec::new(),
@@ -486,6 +494,14 @@ impl<'tracker> Builder<'tracker> {
                         &mut self.cs_name_map,
                         &mut self.color_spaces,
                     );
+                } else if let Some(icc) = &params.icc_color {
+                    emit_fill_color_icc(
+                        &mut self.buf,
+                        icc,
+                        &mut self.gs,
+                        &mut self.icc_cs_name_map,
+                        &mut self.icc_color_spaces,
+                    );
                 } else {
                     if self.gs.fill_cs_name.is_some() {
                         self.gs.fill_cs_name = None;
@@ -574,6 +590,14 @@ impl<'tracker> Builder<'tracker> {
                         &mut self.gs,
                         &mut self.cs_name_map,
                         &mut self.color_spaces,
+                    );
+                } else if let Some(icc) = &params.icc_color {
+                    emit_stroke_color_icc(
+                        &mut self.buf,
+                        icc,
+                        &mut self.gs,
+                        &mut self.icc_cs_name_map,
+                        &mut self.icc_color_spaces,
                     );
                 } else {
                     if self.gs.stroke_cs_name.is_some() {
@@ -930,6 +954,7 @@ impl<'tracker> Builder<'tracker> {
             used_font_names: self.page_font_names.into_iter().collect(),
             ext_gstate_dicts: self.ext_gstates,
             color_spaces: self.color_spaces,
+            icc_color_spaces: self.icc_color_spaces,
             pattern_refs: self.pattern_refs,
             pattern_cs_entries: self.pattern_cs_names,
             transfer_refs: self.transfer_refs,
@@ -1351,6 +1376,66 @@ fn emit_stroke_color_spot(
         gs.stroke_color = None;
     }
     for v in &spot.tint_values {
+        fmt_num(buf, *v);
+        buf.push(b' ');
+    }
+    buf.extend(b"SCN\n");
+}
+
+/// Get or create a color space resource name for an ICCBased color,
+/// deduplicating by profile hash so identical profiles share one
+/// `/ICCBased` stream in the output.
+fn get_or_create_icc_cs_name(
+    icc: &stet_graphics::device::IccColor,
+    cs_map: &mut HashMap<Vec<u8>, String>,
+    icc_color_spaces: &mut Vec<(String, stet_graphics::device::IccColorSpace)>,
+) -> String {
+    let key = icc.color_space.profile_hash.to_vec();
+    if let Some(name) = cs_map.get(&key) {
+        return name.clone();
+    }
+    let name = format!("ICC{}", icc_color_spaces.len());
+    cs_map.insert(key, name.clone());
+    icc_color_spaces.push((name.clone(), icc.color_space.clone()));
+    name
+}
+
+/// Emit a non-stroking ICCBased color: `/ICCn cs` + `c1 c2 c3 scn`.
+fn emit_fill_color_icc(
+    buf: &mut Vec<u8>,
+    icc: &stet_graphics::device::IccColor,
+    gs: &mut GState,
+    icc_cs_map: &mut HashMap<Vec<u8>, String>,
+    icc_color_spaces: &mut Vec<(String, stet_graphics::device::IccColorSpace)>,
+) {
+    let cs_name = get_or_create_icc_cs_name(icc, icc_cs_map, icc_color_spaces);
+    if gs.fill_cs_name.as_deref() != Some(&cs_name) {
+        writeln!(buf, "/{} cs", cs_name).unwrap();
+        gs.fill_cs_name = Some(cs_name);
+        gs.fill_color = None; // force re-emit component values
+    }
+    for v in &icc.components {
+        fmt_num(buf, *v);
+        buf.push(b' ');
+    }
+    buf.extend(b"scn\n");
+}
+
+/// Emit a stroking ICCBased color: `/ICCn CS` + `c1 c2 c3 SCN`.
+fn emit_stroke_color_icc(
+    buf: &mut Vec<u8>,
+    icc: &stet_graphics::device::IccColor,
+    gs: &mut GState,
+    icc_cs_map: &mut HashMap<Vec<u8>, String>,
+    icc_color_spaces: &mut Vec<(String, stet_graphics::device::IccColorSpace)>,
+) {
+    let cs_name = get_or_create_icc_cs_name(icc, icc_cs_map, icc_color_spaces);
+    if gs.stroke_cs_name.as_deref() != Some(&cs_name) {
+        writeln!(buf, "/{} CS", cs_name).unwrap();
+        gs.stroke_cs_name = Some(cs_name);
+        gs.stroke_color = None;
+    }
+    for v in &icc.components {
         fmt_num(buf, *v);
         buf.push(b' ');
     }
