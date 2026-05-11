@@ -1261,7 +1261,12 @@ fn build_pdf_colorspace(
             hival,
             lookup,
         } => {
-            let base_obj = build_pdf_colorspace(base, None, writer);
+            // Pass icc_ref into the base recursion — when the Indexed
+            // base is ICCBased, the parent's icc_ref points at the
+            // embedded profile stream and the base needs it to emit
+            // `[/ICCBased <ref>]`. Dropping it demotes the base to
+            // DeviceRGB and loses the source profile (GWG130 b/d).
+            let base_obj = build_pdf_colorspace(base, icc_ref, writer);
             // Embed lookup table as a hex string stream
             let lookup_ref = writer.add_stream(Vec::new(), lookup, true);
             PdfObj::Array(vec![

@@ -150,10 +150,19 @@ pub fn convert_image(sample_data: &[u8], params: &ImageParams) -> ImageXObject {
             hival,
             lookup,
         } => {
-            let pdf_base = match base.as_ref() {
-                ImageColorSpace::DeviceGray => PdfColorSpace::DeviceGray,
-                ImageColorSpace::DeviceCMYK => PdfColorSpace::DeviceCMYK,
-                _ => PdfColorSpace::DeviceRGB,
+            let (pdf_base, icc_profile) = match base.as_ref() {
+                ImageColorSpace::DeviceGray => (PdfColorSpace::DeviceGray, None),
+                ImageColorSpace::DeviceCMYK => (PdfColorSpace::DeviceCMYK, None),
+                ImageColorSpace::ICCBased {
+                    n, profile_data, ..
+                } => (
+                    PdfColorSpace::ICCBased { n: *n },
+                    Some(IccProfileData {
+                        data: (**profile_data).clone(),
+                        n: *n,
+                    }),
+                ),
+                _ => (PdfColorSpace::DeviceRGB, None),
             };
             ImageXObject {
                 sample_data: sample_data.to_vec(),
@@ -169,7 +178,7 @@ pub fn convert_image(sample_data: &[u8], params: &ImageParams) -> ImageXObject {
                 is_imagemask: false,
                 mask_color: None,
                 color_key_mask: params.mask_color.clone(),
-                icc_profile: None,
+                icc_profile,
             }
         }
         ImageColorSpace::Separation {
