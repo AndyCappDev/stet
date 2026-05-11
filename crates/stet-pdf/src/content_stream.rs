@@ -629,55 +629,110 @@ impl<'tracker> Builder<'tracker> {
                 let img_idx = self.images.len();
                 let xobj = image_ops::convert_image(sample_data, params);
                 let m = compute_image_matrix(params);
+                let pre_q_gs = self.gs.clone();
                 self.buf.extend(b"q ");
                 emit_matrix(&mut self.buf, &m);
-                self.buf.extend(b" cm ");
+                self.buf.extend(b" cm\n");
+                emit_paint_alpha_blend(
+                    &mut self.buf,
+                    false,
+                    params.alpha,
+                    params.blend_mode,
+                    &mut self.gs,
+                    &mut self.ext_gstates,
+                    &mut self.ext_gstate_map,
+                );
                 if xobj.is_imagemask
                     && let Some((r, g, b)) = xobj.mask_color
                 {
                     emit_fill_color_rgb(&mut self.buf, r, g, b);
                 }
                 writeln!(self.buf, "/Im{} Do Q", img_idx).unwrap();
+                self.gs = pre_q_gs;
                 self.images.push(xobj);
             }
             DisplayElement::AxialShading { params } => {
                 let sh_idx = self.shading_refs.len();
-                self.buf.extend(b"q ");
+                let pre_q_gs = self.gs.clone();
+                self.buf.extend(b"q\n");
                 if !is_identity(&params.ctm) {
                     emit_matrix(&mut self.buf, &params.ctm);
-                    self.buf.extend(b" cm ");
+                    self.buf.extend(b" cm\n");
                 }
+                emit_paint_alpha_blend(
+                    &mut self.buf,
+                    false,
+                    params.alpha,
+                    params.blend_mode,
+                    &mut self.gs,
+                    &mut self.ext_gstates,
+                    &mut self.ext_gstate_map,
+                );
                 writeln!(self.buf, "/Sh{} sh Q", sh_idx).unwrap();
+                self.gs = pre_q_gs;
                 self.shading_refs.push(ShadingRef::Axial(params.clone()));
             }
             DisplayElement::RadialShading { params } => {
                 let sh_idx = self.shading_refs.len();
-                self.buf.extend(b"q ");
+                let pre_q_gs = self.gs.clone();
+                self.buf.extend(b"q\n");
                 if !is_identity(&params.ctm) {
                     emit_matrix(&mut self.buf, &params.ctm);
-                    self.buf.extend(b" cm ");
+                    self.buf.extend(b" cm\n");
                 }
+                emit_paint_alpha_blend(
+                    &mut self.buf,
+                    false,
+                    params.alpha,
+                    params.blend_mode,
+                    &mut self.gs,
+                    &mut self.ext_gstates,
+                    &mut self.ext_gstate_map,
+                );
                 writeln!(self.buf, "/Sh{} sh Q", sh_idx).unwrap();
+                self.gs = pre_q_gs;
                 self.shading_refs.push(ShadingRef::Radial(params.clone()));
             }
             DisplayElement::MeshShading { params } => {
                 let sh_idx = self.shading_refs.len();
-                self.buf.extend(b"q ");
+                let pre_q_gs = self.gs.clone();
+                self.buf.extend(b"q\n");
                 if !is_identity(&params.ctm) {
                     emit_matrix(&mut self.buf, &params.ctm);
-                    self.buf.extend(b" cm ");
+                    self.buf.extend(b" cm\n");
                 }
+                emit_paint_alpha_blend(
+                    &mut self.buf,
+                    false,
+                    params.alpha,
+                    params.blend_mode,
+                    &mut self.gs,
+                    &mut self.ext_gstates,
+                    &mut self.ext_gstate_map,
+                );
                 writeln!(self.buf, "/Sh{} sh Q", sh_idx).unwrap();
+                self.gs = pre_q_gs;
                 self.shading_refs.push(ShadingRef::Mesh(params.clone()));
             }
             DisplayElement::PatchShading { params } => {
                 let sh_idx = self.shading_refs.len();
-                self.buf.extend(b"q ");
+                let pre_q_gs = self.gs.clone();
+                self.buf.extend(b"q\n");
                 if !is_identity(&params.ctm) {
                     emit_matrix(&mut self.buf, &params.ctm);
-                    self.buf.extend(b" cm ");
+                    self.buf.extend(b" cm\n");
                 }
+                emit_paint_alpha_blend(
+                    &mut self.buf,
+                    false,
+                    params.alpha,
+                    params.blend_mode,
+                    &mut self.gs,
+                    &mut self.ext_gstates,
+                    &mut self.ext_gstate_map,
+                );
                 writeln!(self.buf, "/Sh{} sh Q", sh_idx).unwrap();
+                self.gs = pre_q_gs;
                 self.shading_refs.push(ShadingRef::Patch(params.clone()));
             }
             DisplayElement::PatternFill { params } => {
