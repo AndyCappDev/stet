@@ -558,6 +558,11 @@ pub struct AxialShadingParams {
     pub bbox: Option<[f64; 4]>,
     pub color_space: ShadingColorSpace,
     pub overprint: bool,
+    /// PDF `OPM` (overprint mode). 0 = standard (KO when a component is set);
+    /// 1 = Illustrator-style (a component explicitly set to 0 is preserved).
+    /// Must round-trip through PDF→DL→PDF or shadings painted onto an
+    /// underlay lose their preserved-component behavior.
+    pub overprint_mode: i32,
     pub painted_channels: u8,
     /// Fill alpha from graphics state (0.0–1.0).
     pub alpha: f64,
@@ -593,6 +598,8 @@ pub struct RadialShadingParams {
     pub bbox: Option<[f64; 4]>,
     pub color_space: ShadingColorSpace,
     pub overprint: bool,
+    /// See [`AxialShadingParams::overprint_mode`].
+    pub overprint_mode: i32,
     pub painted_channels: u8,
     /// Fill alpha from graphics state (0.0–1.0).
     pub alpha: f64,
@@ -632,6 +639,8 @@ pub struct MeshShadingParams {
     pub bbox: Option<[f64; 4]>,
     pub color_space: ShadingColorSpace,
     pub overprint: bool,
+    /// See [`AxialShadingParams::overprint_mode`].
+    pub overprint_mode: i32,
     pub painted_channels: u8,
     /// Pre-sampled color LUT for function-based mesh shadings.
     /// When present, vertex `raw_components[0]` holds a normalized `[0,1]`
@@ -665,6 +674,8 @@ pub struct PatchShadingParams {
     pub bbox: Option<[f64; 4]>,
     pub color_space: ShadingColorSpace,
     pub overprint: bool,
+    /// See [`AxialShadingParams::overprint_mode`].
+    pub overprint_mode: i32,
     pub painted_channels: u8,
     /// When present, vertex `raw_colors[i][0]` holds a normalized `[0,1]`
     /// function input. The renderer interpolates this per-pixel, then
@@ -885,6 +896,7 @@ impl Default for AxialShadingParams {
             bbox: None,
             color_space: ShadingColorSpace::default(),
             overprint: false,
+            overprint_mode: 0,
             painted_channels: 0,
             alpha: 1.0,
             blend_mode: 0,
@@ -910,6 +922,7 @@ impl Default for RadialShadingParams {
             bbox: None,
             color_space: ShadingColorSpace::default(),
             overprint: false,
+            overprint_mode: 0,
             painted_channels: 0,
             alpha: 1.0,
             blend_mode: 0,
@@ -927,6 +940,7 @@ impl Default for MeshShadingParams {
             bbox: None,
             color_space: ShadingColorSpace::default(),
             overprint: false,
+            overprint_mode: 0,
             painted_channels: 0,
             color_lut: None,
             alpha: 1.0,
@@ -944,6 +958,7 @@ impl Default for PatchShadingParams {
             bbox: None,
             color_space: ShadingColorSpace::default(),
             overprint: false,
+            overprint_mode: 0,
             painted_channels: 0,
             color_lut: None,
             alpha: 1.0,

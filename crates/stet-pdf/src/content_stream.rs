@@ -765,7 +765,7 @@ impl<'tracker> Builder<'tracker> {
                 emit_overprint(
                     &mut self.buf,
                     params.overprint,
-                    0,
+                    params.overprint_mode,
                     &mut self.gs,
                     &mut self.ext_gstates,
                     &mut self.ext_gstate_map,
@@ -794,7 +794,7 @@ impl<'tracker> Builder<'tracker> {
                 emit_overprint(
                     &mut self.buf,
                     params.overprint,
-                    0,
+                    params.overprint_mode,
                     &mut self.gs,
                     &mut self.ext_gstates,
                     &mut self.ext_gstate_map,
@@ -823,7 +823,7 @@ impl<'tracker> Builder<'tracker> {
                 emit_overprint(
                     &mut self.buf,
                     params.overprint,
-                    0,
+                    params.overprint_mode,
                     &mut self.gs,
                     &mut self.ext_gstates,
                     &mut self.ext_gstate_map,
@@ -852,7 +852,7 @@ impl<'tracker> Builder<'tracker> {
                 emit_overprint(
                     &mut self.buf,
                     params.overprint,
-                    0,
+                    params.overprint_mode,
                     &mut self.gs,
                     &mut self.ext_gstates,
                     &mut self.ext_gstate_map,

@@ -12402,6 +12402,7 @@ fn render_patch_shading(
             bbox: params.bbox,
             color_space: params.color_space.clone(),
             overprint: params.overprint,
+            overprint_mode: params.overprint_mode,
             painted_channels: params.painted_channels,
             color_lut: params.color_lut.clone(),
             alpha: params.alpha,
