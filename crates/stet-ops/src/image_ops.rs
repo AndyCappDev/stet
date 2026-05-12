@@ -794,7 +794,11 @@ pub fn op_imagemask(ctx: &mut Context) -> Result<(), PsError> {
         ctx.o_stack.pop()?; // width
 
         let data = collect_proc_data(ctx, procedure, total_bytes)?;
-        let cs = ImageColorSpace::Mask { color, polarity };
+        let cs = ImageColorSpace::Mask {
+            color,
+            polarity,
+            spot_color: None,
+        };
         draw_image_to_device(
             ctx,
             data,
@@ -816,7 +820,11 @@ pub fn op_imagemask(ctx: &mut Context) -> Result<(), PsError> {
     ctx.o_stack.pop()?; // width
 
     let color = ctx.gstate.color.clone();
-    let cs = ImageColorSpace::Mask { color, polarity };
+    let cs = ImageColorSpace::Mask {
+        color,
+        polarity,
+        spot_color: None,
+    };
     draw_image_to_device(
         ctx,
         data,
@@ -856,7 +864,11 @@ fn imagemask_dict_form(ctx: &mut Context) -> Result<(), PsError> {
     ctx.o_stack.pop()?; // dict
 
     let color = ctx.gstate.color.clone();
-    let cs = ImageColorSpace::Mask { color, polarity };
+    let cs = ImageColorSpace::Mask {
+        color,
+        polarity,
+        spot_color: None,
+    };
     draw_image_to_device(ctx, data, width, height, cs, &image_matrix, None);
     Ok(())
 }

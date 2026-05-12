@@ -4630,6 +4630,7 @@ fn recolor_and_translate_element(
                         stet_graphics::device::ImageColorSpace::Mask { polarity, .. } => *polarity,
                         _ => true,
                     },
+                    spot_color: None,
                 };
             }
             DisplayElement::Image {

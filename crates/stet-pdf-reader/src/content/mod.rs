@@ -4161,6 +4161,7 @@ impl<'a> ContentInterpreter<'a> {
                 ImageColorSpace::Mask {
                     color: self.gstate.fill_color.clone(),
                     polarity,
+                    spot_color: self.gstate.fill_spot_color.clone(),
                 },
                 sample_data,
             )
@@ -5745,6 +5746,7 @@ impl<'a> ContentInterpreter<'a> {
             ImageColorSpace::Mask {
                 color: self.gstate.fill_color.clone(),
                 polarity,
+                spot_color: self.gstate.fill_spot_color.clone(),
             }
         } else {
             to_image_color_space(resolved_cs.as_ref().unwrap())

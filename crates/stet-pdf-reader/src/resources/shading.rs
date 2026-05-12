@@ -18,7 +18,7 @@ use std::sync::Arc;
 use stet_fonts::geometry::Matrix;
 use stet_graphics::device::{
     AxialShadingParams, ColorStop, ImageColorSpace, ImageParams, MeshShadingParams,
-    PatchShadingParams, RadialShadingParams, ShadingColorSpace,
+    PatchShadingParams, RadialShadingParams, ShadingColorSpace, SimpleColorSpace, SpotTintFunction,
 };
 use stet_graphics::display_list::{DisplayElement, DisplayList};
 use stet_graphics::icc::IccCache;
@@ -719,6 +719,8 @@ fn sample_function_to_stops_icc(
     sample_ts.sort_by(|a, b| a.partial_cmp(b).unwrap());
     sample_ts.dedup_by(|a, b| (*a - *b).abs() < 1e-14);
 
+    let is_spot_with_cmyk_alt = cmyk_tint_fn.is_some();
+
     let mut stops = Vec::with_capacity(sample_ts.len());
     for t in sample_ts {
         let input = d_min + t * span;
@@ -727,22 +729,29 @@ fn sample_function_to_stops_icc(
 
         // For DeviceN/Separation with CMYK alternate, store the tint-transformed
         // 4-component CMYK values so the renderer can populate the CMYK tracking buffer.
-        let raw_components = if let Some(tint) = cmyk_tint_fn {
+        // Also retain the pre-transform `components` as `source_components` so the
+        // PDF writer can emit a /Function whose output dimension matches the
+        // shading's source color space (1 channel for Separation, N for DeviceN).
+        let (raw_components, source_components) = if let Some(tint) = cmyk_tint_fn {
             let cmyk = tint.evaluate(&components);
-            // Ensure we have exactly 4 CMYK components
-            if cmyk.len() >= 4 {
+            let raw = if cmyk.len() >= 4 {
                 cmyk[..4].to_vec()
             } else {
-                components
-            }
+                components.clone()
+            };
+            (raw, components)
+        } else if is_spot_with_cmyk_alt {
+            // unreachable but keeps the type checker happy
+            (components.clone(), components)
         } else {
-            components
+            (components, Vec::new())
         };
 
         stops.push(ColorStop {
             position: t,
             color,
             raw_components,
+            source_components,
         });
     }
     stops
@@ -833,12 +842,85 @@ fn resolved_cs_to_shading_cs(cs: &ResolvedColorSpace) -> ShadingColorSpace {
         },
         // Indexed: use the base color space for the display list element
         ResolvedColorSpace::Indexed { base, .. } => resolved_cs_to_shading_cs(base),
-        // Separation/DeviceN with DeviceCMYK alternate: treat as CMYK for overprint
-        ResolvedColorSpace::Separation { alt, .. } | ResolvedColorSpace::DeviceN { alt, .. }
+        // Separation/DeviceN with DeviceCMYK alternate: preserve the spot
+        // identity so the PDF writer can round-trip the source's spot
+        // /ColorSpace and the re-read display list re-acquires
+        // `spot_tint_blend: true` for correct compositing.
+        ResolvedColorSpace::Separation { name, alt, tint_fn }
             if matches!(**alt, ResolvedColorSpace::DeviceCMYK) =>
         {
-            ShadingColorSpace::DeviceCMYK
+            match tint_fn {
+                Some(tint) => ShadingColorSpace::Separation {
+                    name: name.clone(),
+                    alternate: SimpleColorSpace::DeviceCMYK,
+                    tint_function: sample_tint_function_1d(tint, 16),
+                },
+                None => ShadingColorSpace::DeviceCMYK,
+            }
         }
+        ResolvedColorSpace::DeviceN {
+            names,
+            alt,
+            tint_fn,
+        } if matches!(**alt, ResolvedColorSpace::DeviceCMYK) => match tint_fn {
+            Some(tint) => ShadingColorSpace::DeviceN {
+                names: names.clone(),
+                alternate: SimpleColorSpace::DeviceCMYK,
+                tint_function: sample_tint_function_nd(tint, names.len(), 8),
+            },
+            None => ShadingColorSpace::DeviceCMYK,
+        },
         _ => ShadingColorSpace::DeviceRGB,
+    }
+}
+
+/// Sample a 1-component tint function on a uniform grid in `[0, 1]` and
+/// pack the CMYK outputs into a `SpotTintFunction`. The writer emits this
+/// back as a `FunctionType 0` sampled function inside the shading's
+/// `/ColorSpace [/Separation … <tintFunc>]` array.
+fn sample_tint_function_1d(tint: &PdfFunction, samples_per_dim: usize) -> SpotTintFunction {
+    let mut cmyk_samples = Vec::with_capacity(samples_per_dim * 4);
+    for i in 0..samples_per_dim {
+        let t = i as f64 / (samples_per_dim - 1).max(1) as f64;
+        let out = tint.evaluate(&[t]);
+        for k in 0..4 {
+            cmyk_samples.push(out.get(k).copied().unwrap_or(0.0));
+        }
+    }
+    SpotTintFunction {
+        input_dim: 1,
+        samples_per_dim,
+        cmyk_samples: Arc::new(cmyk_samples),
+    }
+}
+
+/// Sample an N-component tint function on a uniform N-dimensional grid in
+/// `[0, 1]^N`. Output ordering is row-major with the first input axis
+/// varying slowest (matching PDF's SampledFunction convention).
+fn sample_tint_function_nd(
+    tint: &PdfFunction,
+    input_dim: usize,
+    samples_per_dim: usize,
+) -> SpotTintFunction {
+    let total = samples_per_dim.pow(input_dim as u32);
+    let mut cmyk_samples = Vec::with_capacity(total * 4);
+    let mut input = vec![0.0_f64; input_dim];
+    for idx in 0..total {
+        // Decompose `idx` into per-axis indices with first axis as slowest.
+        let mut rem = idx;
+        for axis in (0..input_dim).rev() {
+            let i = rem % samples_per_dim;
+            rem /= samples_per_dim;
+            input[axis] = i as f64 / (samples_per_dim - 1).max(1) as f64;
+        }
+        let out = tint.evaluate(&input);
+        for k in 0..4 {
+            cmyk_samples.push(out.get(k).copied().unwrap_or(0.0));
+        }
+    }
+    SpotTintFunction {
+        input_dim,
+        samples_per_dim,
+        cmyk_samples: Arc::new(cmyk_samples),
     }
 }

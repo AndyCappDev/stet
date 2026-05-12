@@ -2047,7 +2047,9 @@ fn samples_to_rgba(
             }
             rgba
         }
-        ImageColorSpace::Mask { color, polarity } => {
+        ImageColorSpace::Mask {
+            color, polarity, ..
+        } => {
             let mut rgba = vec![0u8; npixels * 4];
             let r = (color.r * 255.0).round().clamp(0.0, 255.0) as u8;
             let g = (color.g * 255.0).round().clamp(0.0, 255.0) as u8;
@@ -8340,7 +8342,10 @@ fn render_overprint_image(
         _ => None,
     };
 
-    let mask_info = if let ImageColorSpace::Mask { color, polarity } = &params.color_space {
+    let mask_info = if let ImageColorSpace::Mask {
+        color, polarity, ..
+    } = &params.color_space
+    {
         let (src_c, src_m, src_y, src_k) = color.native_cmyk.unwrap_or_else(|| {
             let r = color.r;
             let g = color.g;
@@ -8703,7 +8708,10 @@ fn update_cmyk_buffer_for_image(
     let inv_sx = 1.0 / scale_x as f64;
     let inv_sy = 1.0 / scale_y as f64;
 
-    let mask_info = if let ImageColorSpace::Mask { color, polarity } = &params.color_space {
+    let mask_info = if let ImageColorSpace::Mask {
+        color, polarity, ..
+    } = &params.color_space
+    {
         let Some((c, m, y, k)) = color.native_cmyk else {
             return;
         };
@@ -12086,7 +12094,12 @@ fn render_radial_shading(
                     // mismatch never reaches a consumer that would notice.
                     if params.overprint
                         && params.painted_channels != stet_graphics::device::CMYK_ALL
-                        && matches!(params.color_space, ShadingColorSpace::DeviceCMYK)
+                        && matches!(
+                            params.color_space,
+                            ShadingColorSpace::DeviceCMYK
+                                | ShadingColorSpace::Separation { .. }
+                                | ShadingColorSpace::DeviceN { .. }
+                        )
                         && let Some(ref mut buf) = cmyk_buf
                         && ci + 3 < buf.len()
                         && let Some(icc_cache) = icc
@@ -12803,7 +12816,12 @@ fn interpolate_cmyk_from_stops(
     };
 
     match cs {
-        ShadingColorSpace::DeviceCMYK => {
+        // Separation/DeviceN with a CMYK alternate carry tint-transformed CMYK
+        // in `raw_components`, the same shape as DeviceCMYK — handle them on
+        // the same path so spot-shading round-trips render identically.
+        ShadingColorSpace::DeviceCMYK
+        | ShadingColorSpace::Separation { .. }
+        | ShadingColorSpace::DeviceN { .. } => {
             // Interpolate raw CMYK components from stops
             if stops.len() == 1 {
                 let rc = &stops[0].raw_components;
@@ -12876,7 +12894,9 @@ fn interpolate_cmyk_from_vertices(
     };
 
     match cs {
-        ShadingColorSpace::DeviceCMYK => {
+        ShadingColorSpace::DeviceCMYK
+        | ShadingColorSpace::Separation { .. }
+        | ShadingColorSpace::DeviceN { .. } => {
             if v0.raw_components.len() >= 4
                 && v1.raw_components.len() >= 4
                 && v2.raw_components.len() >= 4

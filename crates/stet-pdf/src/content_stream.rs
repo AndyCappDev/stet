@@ -728,27 +728,41 @@ impl<'tracker> Builder<'tracker> {
                     &mut self.ext_gstates,
                     &mut self.ext_gstate_map,
                 );
-                if xobj.is_imagemask
-                    && let Some(ref mask_color) = xobj.mask_color
-                {
-                    // Emit the imagemask's fill color through the same
-                    // DeviceColor-aware path the regular Fill arm uses, so a
-                    // CMYK source paint (native_cmyk = Some) round-trips as
-                    // `c m y k k` rather than getting downconverted to
-                    // `r g b rg`. Without this the imagemask's color reads
-                    // back as DeviceRGB and OPM-1 overprint with a CMYK
-                    // backdrop misbehaves (visible on PDFX-Output-Test
-                    // GWG 2.0 image / mask cells).
-                    if self.gs.fill_cs_name.is_some() {
-                        self.gs.fill_cs_name = None;
-                        self.gs.fill_color = None;
+                if xobj.is_imagemask {
+                    if let Some(ref spot) = xobj.mask_spot_color {
+                        // Spot/DeviceN imagemask fill — emit `/CSn cs + tint scn`
+                        // so the round-trip PDF preserves the spot identity.
+                        // Without this the imagemask paint collapses to its
+                        // alt-CMYK and a spot-over-cmyk overprint loses its
+                        // tint-blend behavior (visible white-X on GWG 2.0
+                        // mask cells in the round-trip).
+                        emit_fill_color_spot(
+                            &mut self.buf,
+                            spot,
+                            &mut self.gs,
+                            &mut self.cs_name_map,
+                            &mut self.color_spaces,
+                        );
+                    } else if let Some(ref mask_color) = xobj.mask_color {
+                        // Emit the imagemask's fill color through the same
+                        // DeviceColor-aware path the regular Fill arm uses, so a
+                        // CMYK source paint (native_cmyk = Some) round-trips as
+                        // `c m y k k` rather than getting downconverted to
+                        // `r g b rg`. Without this the imagemask's color reads
+                        // back as DeviceRGB and OPM-1 overprint with a CMYK
+                        // backdrop misbehaves (visible on PDFX-Output-Test
+                        // GWG 2.0 image / mask cells).
+                        if self.gs.fill_cs_name.is_some() {
+                            self.gs.fill_cs_name = None;
+                            self.gs.fill_color = None;
+                        }
+                        emit_fill_color(
+                            &mut self.buf,
+                            mask_color,
+                            params.painted_channels,
+                            &mut self.gs,
+                        );
                     }
-                    emit_fill_color(
-                        &mut self.buf,
-                        mask_color,
-                        params.painted_channels,
-                        &mut self.gs,
-                    );
                 }
                 writeln!(self.buf, "/Im{} Do Q", img_idx).unwrap();
                 self.gs = pre_q_gs;

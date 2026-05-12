@@ -6,11 +6,61 @@
 
 use stet_graphics::device::{
     AxialShadingParams, ColorStop, MeshShadingParams, PatchShadingParams, RadialShadingParams,
-    ShadingColorSpace,
+    ShadingColorSpace, SimpleColorSpace, SpotTintFunction,
 };
 
 use crate::pdf_objects::PdfObj;
 use crate::pdf_writer::PdfWriter;
+
+/// True for spot-input shading color spaces (Separation, DeviceN). When this
+/// returns true the shading function's output dimension equals the source
+/// space's component count, so the writer must read each stop's
+/// `source_components` instead of the tint-transformed `raw_components`.
+fn is_spot_cs(cs: &ShadingColorSpace) -> bool {
+    matches!(
+        cs,
+        ShadingColorSpace::Separation { .. } | ShadingColorSpace::DeviceN { .. }
+    )
+}
+
+/// Emit a `SimpleColorSpace` as a PDF Name. Used as the alternate space inside
+/// a Separation/DeviceN color space array.
+fn simple_color_space_name(cs: &SimpleColorSpace) -> PdfObj {
+    match cs {
+        SimpleColorSpace::DeviceGray => PdfObj::name("DeviceGray"),
+        SimpleColorSpace::DeviceRGB => PdfObj::name("DeviceRGB"),
+        SimpleColorSpace::DeviceCMYK => PdfObj::name("DeviceCMYK"),
+    }
+}
+
+/// Emit a `SpotTintFunction` as an indirect-referenced FunctionType-0
+/// sampled function. The writer round-trips a spot color space's tint
+/// transform by sampling it on a uniform grid in the reader; this rebuilds
+/// the same grid as a PDF stream.
+fn emit_tint_function(writer: &mut PdfWriter, tint: &SpotTintFunction) -> u32 {
+    let total_samples: usize = tint.samples_per_dim.pow(tint.input_dim as u32);
+    let mut bytes = Vec::with_capacity(total_samples * 4);
+    for v in tint.cmyk_samples.iter().take(total_samples * 4) {
+        bytes.push((v.clamp(0.0, 1.0) * 255.0) as u8);
+    }
+    let domain: Vec<PdfObj> = (0..tint.input_dim)
+        .flat_map(|_| vec![PdfObj::Int(0), PdfObj::Int(1)])
+        .collect();
+    let range: Vec<PdfObj> = (0..4)
+        .flat_map(|_| vec![PdfObj::Int(0), PdfObj::Int(1)])
+        .collect();
+    let size: Vec<PdfObj> = (0..tint.input_dim)
+        .map(|_| PdfObj::Int(tint.samples_per_dim as i64))
+        .collect();
+    let dict_entries = vec![
+        (b"FunctionType".to_vec(), PdfObj::Int(0)),
+        (b"Domain".to_vec(), PdfObj::Array(domain)),
+        (b"Range".to_vec(), PdfObj::Array(range)),
+        (b"Size".to_vec(), PdfObj::Array(size)),
+        (b"BitsPerSample".to_vec(), PdfObj::Int(8)),
+    ];
+    writer.add_stream(dict_entries, &bytes, true)
+}
 
 /// Convert a ShadingColorSpace to a PDF color space object.
 /// For ICCBased, emits the profile stream and returns an array reference.
@@ -25,6 +75,33 @@ fn shading_color_space_to_pdf(writer: &mut PdfWriter, cs: &ShadingColorSpace) ->
             let stream_entries = vec![(b"N".to_vec(), PdfObj::Int(*n as i64))];
             let stream_ref = writer.add_stream(stream_entries, profile_data, true);
             PdfObj::Array(vec![PdfObj::name("ICCBased"), PdfObj::Ref(stream_ref)])
+        }
+        ShadingColorSpace::Separation {
+            name,
+            alternate,
+            tint_function,
+        } => {
+            let tint_ref = emit_tint_function(writer, tint_function);
+            PdfObj::Array(vec![
+                PdfObj::name("Separation"),
+                PdfObj::Name(name.clone()),
+                simple_color_space_name(alternate),
+                PdfObj::Ref(tint_ref),
+            ])
+        }
+        ShadingColorSpace::DeviceN {
+            names,
+            alternate,
+            tint_function,
+        } => {
+            let tint_ref = emit_tint_function(writer, tint_function);
+            let names_arr: Vec<PdfObj> = names.iter().map(|n| PdfObj::Name(n.clone())).collect();
+            PdfObj::Array(vec![
+                PdfObj::name("DeviceN"),
+                PdfObj::Array(names_arr),
+                simple_color_space_name(alternate),
+                PdfObj::Ref(tint_ref),
+            ])
         }
         ShadingColorSpace::CalRGB {
             white_point,
@@ -67,7 +144,12 @@ fn shading_color_space_to_pdf(writer: &mut PdfWriter, cs: &ShadingColorSpace) ->
 /// Returns the shading dict object number.
 pub fn build_axial_shading(writer: &mut PdfWriter, params: &AxialShadingParams) -> u32 {
     let n_comps = params.color_space.num_components();
-    let func_ref = build_sampled_function(writer, &params.color_stops, n_comps);
+    let use_source = is_spot_cs(&params.color_space);
+    let func_ref = if use_source {
+        build_sampled_function_source(writer, &params.color_stops, n_comps)
+    } else {
+        build_sampled_function(writer, &params.color_stops, n_comps)
+    };
     let cs_obj = shading_color_space_to_pdf(writer, &params.color_space);
 
     let mut entries = vec![
@@ -106,7 +188,12 @@ pub fn build_axial_shading(writer: &mut PdfWriter, params: &AxialShadingParams) 
 /// Returns the shading dict object number.
 pub fn build_radial_shading(writer: &mut PdfWriter, params: &RadialShadingParams) -> u32 {
     let n_comps = params.color_space.num_components();
-    let func_ref = build_sampled_function(writer, &params.color_stops, n_comps);
+    let use_source = is_spot_cs(&params.color_space);
+    let func_ref = if use_source {
+        build_sampled_function_source(writer, &params.color_stops, n_comps)
+    } else {
+        build_sampled_function(writer, &params.color_stops, n_comps)
+    };
     let cs_obj = shading_color_space_to_pdf(writer, &params.color_space);
 
     let mut entries = vec![
@@ -297,12 +384,33 @@ pub fn build_patch_shading(writer: &mut PdfWriter, params: &PatchShadingParams) 
 /// Build a Type 0 (sampled) function from color stops.
 /// Samples N-component values and returns the function stream object number.
 fn build_sampled_function(writer: &mut PdfWriter, stops: &[ColorStop], n_comps: usize) -> u32 {
+    build_sampled_function_inner(writer, stops, n_comps, false)
+}
+
+/// Like [`build_sampled_function`] but reads each stop's `source_components`
+/// (the shading function's *source*-space output, e.g. spot tints for
+/// Separation/DeviceN). Used when the shading's `/ColorSpace` is a spot
+/// dictionary so the function output matches the colorspace input dimension.
+fn build_sampled_function_source(
+    writer: &mut PdfWriter,
+    stops: &[ColorStop],
+    n_comps: usize,
+) -> u32 {
+    build_sampled_function_inner(writer, stops, n_comps, true)
+}
+
+fn build_sampled_function_inner(
+    writer: &mut PdfWriter,
+    stops: &[ColorStop],
+    n_comps: usize,
+    use_source: bool,
+) -> u32 {
     let n_samples = 256;
     let mut samples = Vec::with_capacity(n_samples * n_comps);
 
     for i in 0..n_samples {
         let t = i as f64 / (n_samples - 1) as f64;
-        let comps = sample_color_stops_raw(stops, t, n_comps);
+        let comps = sample_color_stops_raw(stops, t, n_comps, use_source);
         for c in comps {
             samples.push((c.clamp(0.0, 1.0) * 255.0) as u8);
         }
@@ -333,16 +441,21 @@ fn build_sampled_function(writer: &mut PdfWriter, stops: &[ColorStop], n_comps: 
 }
 
 /// Interpolate color stops at position t (0..1), returning raw component values.
-/// Falls back to RGB from DeviceColor if raw_components are empty.
-fn sample_color_stops_raw(stops: &[ColorStop], t: f64, n_comps: usize) -> Vec<f64> {
+/// Falls back to RGB from DeviceColor if the chosen component field is empty.
+fn sample_color_stops_raw(
+    stops: &[ColorStop],
+    t: f64,
+    n_comps: usize,
+    use_source: bool,
+) -> Vec<f64> {
     if stops.is_empty() {
         return vec![0.0; n_comps];
     }
     if stops.len() == 1 || t <= stops[0].position {
-        return get_stop_components(&stops[0], n_comps);
+        return get_stop_components(&stops[0], n_comps, use_source);
     }
     if t >= stops[stops.len() - 1].position {
-        return get_stop_components(&stops[stops.len() - 1], n_comps);
+        return get_stop_components(&stops[stops.len() - 1], n_comps, use_source);
     }
 
     // Find the two stops bracketing t
@@ -352,11 +465,11 @@ fn sample_color_stops_raw(stops: &[ColorStop], t: f64, n_comps: usize) -> Vec<f6
         if t >= s0.position && t <= s1.position {
             let range = s1.position - s0.position;
             if range < 1e-10 {
-                return get_stop_components(s1, n_comps);
+                return get_stop_components(s1, n_comps, use_source);
             }
             let f = (t - s0.position) / range;
-            let c0 = get_stop_components(s0, n_comps);
-            let c1 = get_stop_components(s1, n_comps);
+            let c0 = get_stop_components(s0, n_comps, use_source);
+            let c1 = get_stop_components(s1, n_comps, use_source);
             return c0
                 .iter()
                 .zip(c1.iter())
@@ -365,15 +478,20 @@ fn sample_color_stops_raw(stops: &[ColorStop], t: f64, n_comps: usize) -> Vec<f6
         }
     }
 
-    get_stop_components(&stops[stops.len() - 1], n_comps)
+    get_stop_components(&stops[stops.len() - 1], n_comps, use_source)
 }
 
 /// Get raw components from a color stop, falling back to RGB if empty.
-fn get_stop_components(stop: &ColorStop, n_comps: usize) -> Vec<f64> {
-    if !stop.raw_components.is_empty() {
-        return stop.raw_components.clone();
+fn get_stop_components(stop: &ColorStop, n_comps: usize, use_source: bool) -> Vec<f64> {
+    let preferred = if use_source {
+        &stop.source_components
+    } else {
+        &stop.raw_components
+    };
+    if !preferred.is_empty() {
+        return preferred.clone();
     }
-    // Fallback: use DeviceColor RGB
+    // Fallback: use DeviceColor RGB / native CMYK
     match n_comps {
         1 => vec![stop.color.r],
         4 => {

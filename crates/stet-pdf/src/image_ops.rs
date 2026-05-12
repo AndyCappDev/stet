@@ -31,6 +31,11 @@ pub struct ImageXObject {
     /// the round-trip — `r g b rg` would drop the CMYK channels and let
     /// PDF's OPM-1 painters reinterpret the masked region).
     pub mask_color: Option<DeviceColor>,
+    /// Optional Separation/DeviceN paint for an imagemask. When `Some`, the
+    /// writer emits the mask fill as `/CSn cs + tint scn` instead of the
+    /// process-color fallback, preserving the spot identity required for
+    /// correct spot-on-process overprint compositing on the round-trip.
+    pub mask_spot_color: Option<stet_graphics::device::SpotColor>,
     /// ImageType 4 color key mask ranges.
     pub color_key_mask: Option<Vec<u8>>,
     /// ICC profile data to embed (if ICCBased color space).
@@ -92,9 +97,11 @@ pub struct IccProfileData {
 /// Convert raw sample data from a display list image to a PDF-ready XObject.
 pub fn convert_image(sample_data: &[u8], params: &ImageParams) -> ImageXObject {
     match &params.color_space {
-        ImageColorSpace::Mask { color, polarity } => {
-            convert_imagemask(sample_data, params, color, *polarity)
-        }
+        ImageColorSpace::Mask {
+            color,
+            polarity,
+            spot_color,
+        } => convert_imagemask(sample_data, params, color, *polarity, spot_color.as_ref()),
         ImageColorSpace::PreconvertedRGBA => convert_preconverted_rgba(sample_data, params),
         ImageColorSpace::DeviceGray => ImageXObject {
             sample_data: sample_data.to_vec(),
@@ -105,6 +112,7 @@ pub fn convert_image(sample_data: &[u8], params: &ImageParams) -> ImageXObject {
             bits_per_component: 8,
             is_imagemask: false,
             mask_color: None,
+            mask_spot_color: None,
             color_key_mask: params.mask_color.clone(),
             icc_profile: None,
         },
@@ -117,6 +125,7 @@ pub fn convert_image(sample_data: &[u8], params: &ImageParams) -> ImageXObject {
             bits_per_component: 8,
             is_imagemask: false,
             mask_color: None,
+            mask_spot_color: None,
             color_key_mask: params.mask_color.clone(),
             icc_profile: None,
         },
@@ -129,6 +138,7 @@ pub fn convert_image(sample_data: &[u8], params: &ImageParams) -> ImageXObject {
             bits_per_component: 8,
             is_imagemask: false,
             mask_color: None,
+            mask_spot_color: None,
             color_key_mask: params.mask_color.clone(),
             icc_profile: None,
         },
@@ -143,6 +153,7 @@ pub fn convert_image(sample_data: &[u8], params: &ImageParams) -> ImageXObject {
             bits_per_component: 8,
             is_imagemask: false,
             mask_color: None,
+            mask_spot_color: None,
             color_key_mask: params.mask_color.clone(),
             icc_profile: Some(IccProfileData {
                 data: (**profile_data).clone(),
@@ -205,6 +216,7 @@ pub fn convert_image(sample_data: &[u8], params: &ImageParams) -> ImageXObject {
                 bits_per_component: 8,
                 is_imagemask: false,
                 mask_color: None,
+                mask_spot_color: None,
                 color_key_mask: params.mask_color.clone(),
                 icc_profile,
             }
@@ -228,6 +240,7 @@ pub fn convert_image(sample_data: &[u8], params: &ImageParams) -> ImageXObject {
                 bits_per_component: 8,
                 is_imagemask: false,
                 mask_color: None,
+                mask_spot_color: None,
                 color_key_mask: params.mask_color.clone(),
                 icc_profile: None,
             }
@@ -251,6 +264,7 @@ pub fn convert_image(sample_data: &[u8], params: &ImageParams) -> ImageXObject {
                 bits_per_component: 8,
                 is_imagemask: false,
                 mask_color: None,
+                mask_spot_color: None,
                 color_key_mask: params.mask_color.clone(),
                 icc_profile: None,
             }
@@ -278,6 +292,7 @@ pub fn convert_image(sample_data: &[u8], params: &ImageParams) -> ImageXObject {
                 bits_per_component: 8,
                 is_imagemask: false,
                 mask_color: None,
+                mask_spot_color: None,
                 color_key_mask: params.mask_color.clone(),
                 icc_profile: None,
             }
@@ -301,6 +316,7 @@ pub fn convert_image(sample_data: &[u8], params: &ImageParams) -> ImageXObject {
                 bits_per_component: 8,
                 is_imagemask: false,
                 mask_color: None,
+                mask_spot_color: None,
                 color_key_mask: params.mask_color.clone(),
                 icc_profile: None,
             }
@@ -331,6 +347,7 @@ pub fn convert_image(sample_data: &[u8], params: &ImageParams) -> ImageXObject {
                 bits_per_component: 8,
                 is_imagemask: false,
                 mask_color: None,
+                mask_spot_color: None,
                 color_key_mask: params.mask_color.clone(),
                 icc_profile: None,
             }
@@ -344,6 +361,7 @@ pub fn convert_image(sample_data: &[u8], params: &ImageParams) -> ImageXObject {
             bits_per_component: 8,
             is_imagemask: false,
             mask_color: None,
+            mask_spot_color: None,
             color_key_mask: params.mask_color.clone(),
             icc_profile: None,
         },
@@ -356,6 +374,7 @@ fn convert_imagemask(
     params: &ImageParams,
     color: &DeviceColor,
     polarity: bool,
+    spot_color: Option<&stet_graphics::device::SpotColor>,
 ) -> ImageXObject {
     // PDF imagemask Decode: [1 0] means bit=1 paints (our polarity=true).
     // If polarity=false (bit=0 paints), we need Decode [0 1] which is the PDF default,
@@ -378,6 +397,7 @@ fn convert_imagemask(
         bits_per_component: 1,
         is_imagemask: true,
         mask_color: Some(color.clone()),
+        mask_spot_color: spot_color.cloned(),
         color_key_mask: None,
         icc_profile: None,
     }
@@ -421,6 +441,7 @@ fn convert_preconverted_rgba(rgba: &[u8], params: &ImageParams) -> ImageXObject 
         bits_per_component: 8,
         is_imagemask: false,
         mask_color: None,
+        mask_spot_color: None,
         color_key_mask: None,
         icc_profile: None,
     }

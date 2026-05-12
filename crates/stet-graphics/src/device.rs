@@ -435,6 +435,11 @@ pub enum ImageColorSpace {
     Mask {
         color: DeviceColor,
         polarity: bool,
+        /// Optional Separation/DeviceN spot color carried alongside `color` so
+        /// the PDF writer can round-trip the imagemask's fill as `/CSn cs +
+        /// tint scn` instead of collapsing to a process-color paint.
+        /// `None` when the imagemask fill came from a Device/ICC space.
+        spot_color: Option<SpotColor>,
     },
     PreconvertedRGBA,
 }
@@ -492,6 +497,26 @@ pub struct ImageParams {
     pub rendering_intent: u8,
 }
 
+/// A spot/DeviceN tint transform reduced to a uniform sampled grid.
+///
+/// Carries enough information for the PDF writer to round-trip the source's
+/// `/ColorSpace [/Separation … <tintFunc>]` or `/ColorSpace [/DeviceN … <tintFunc>]`
+/// dictionary as a SampledFunction without losing the spot identity.
+#[derive(Clone, Debug)]
+pub struct SpotTintFunction {
+    /// Number of input channels (1 for Separation, N for DeviceN).
+    pub input_dim: usize,
+    /// Samples per input dimension. For Separation this is the length of
+    /// `samples / 4`. For DeviceN this is the per-axis count of a grid of
+    /// total size `samples_per_dim.pow(input_dim)`.
+    pub samples_per_dim: usize,
+    /// Flat row-major grid of CMYK output samples, length
+    /// `samples_per_dim^input_dim * 4`. The reader builds this by evaluating
+    /// the source PDF's tint function at uniform input points; the writer
+    /// emits it back as a FunctionType-0 `/Function`.
+    pub cmyk_samples: Arc<Vec<f64>>,
+}
+
 /// Color space carried through the display list for native shading output.
 ///
 /// Marked `#[non_exhaustive]`; cross-crate `match` expressions need a
@@ -516,6 +541,30 @@ pub enum ShadingColorSpace {
         white_point: [f64; 3],
         gamma: Option<f64>,
     },
+    /// Separation (single spot ink) with a CMYK alternate.
+    ///
+    /// Round-tripping this variant preserves the spot identity in the output
+    /// PDF; without it, the writer emits `/DeviceCMYK` and downstream readers
+    /// can't reconstruct the spot-tint-blend compositing behavior.
+    Separation {
+        /// Spot color name (PDF Name bytes, e.g. `"GWG Green"`).
+        name: Vec<u8>,
+        /// Alternate process color space. Typically `DeviceCMYK`.
+        alternate: SimpleColorSpace,
+        /// Sampled tint transform mapping spot tint `[0,1]` to alternate-space
+        /// components.
+        tint_function: SpotTintFunction,
+    },
+    /// DeviceN (multiple spot inks) with a CMYK alternate.
+    DeviceN {
+        /// Colorant names, in input-channel order.
+        names: Vec<Vec<u8>>,
+        /// Alternate process color space. Typically `DeviceCMYK`.
+        alternate: SimpleColorSpace,
+        /// Sampled tint transform mapping N spot tints to alternate-space
+        /// components.
+        tint_function: SpotTintFunction,
+    },
 }
 
 impl ShadingColorSpace {
@@ -526,6 +575,8 @@ impl ShadingColorSpace {
             ShadingColorSpace::DeviceRGB | ShadingColorSpace::CalRGB { .. } => 3,
             ShadingColorSpace::DeviceCMYK => 4,
             ShadingColorSpace::ICCBased { n, .. } => *n as usize,
+            ShadingColorSpace::Separation { .. } => 1,
+            ShadingColorSpace::DeviceN { names, .. } => names.len(),
         }
     }
 }
@@ -539,6 +590,12 @@ pub struct ColorStop {
     pub position: f64,
     pub color: DeviceColor,
     pub raw_components: Vec<f64>,
+    /// Pre-tint-transform component values, in the shading's *source*
+    /// color space. For a Separation/DeviceN shading this holds the spot
+    /// tint(s) the source `/Function` evaluated to at this stop; the writer
+    /// emits these as the shading function's output so the round-trip PDF
+    /// preserves the spot input dimension. Empty when not applicable.
+    pub source_components: Vec<f64>,
 }
 
 /// Parameters for axial (linear) gradient shading (Type 2).
@@ -878,6 +935,7 @@ impl Default for ColorStop {
             position: 0.0,
             color: DeviceColor::default(),
             raw_components: Vec::new(),
+            source_components: Vec::new(),
         }
     }
 }

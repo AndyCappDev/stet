@@ -893,6 +893,7 @@ fn sample_shading_function(
             position: t_norm,
             color,
             raw_components,
+            source_components: Vec::new(),
         });
     }
 
