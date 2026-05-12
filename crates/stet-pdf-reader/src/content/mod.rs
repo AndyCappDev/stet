@@ -245,6 +245,14 @@ pub struct ContentInterpreter<'a> {
     /// Avoids re-decompressing and re-converting the same image (e.g.,
     /// Type 3 emoji glyphs that reference the same XObject 73 times).
     image_cache: std::collections::HashMap<u32, CachedImage>,
+    /// Cache of pre-sampled spot tint tables, keyed by the colorspace's
+    /// canonical identity (Separation name or DeviceN colorant list). The
+    /// tint function is expensive to sample (up to 256 evaluations for
+    /// Separation, thousands for DeviceN), and many documents paint the same
+    /// spot color hundreds of times per page; without this cache every
+    /// `sc`/`scn` re-evaluates the same function from scratch.
+    spot_tint_table_cache:
+        std::collections::HashMap<Vec<u8>, Arc<stet_graphics::device::TintLookupTable>>,
 }
 
 impl<'a> ContentInterpreter<'a> {
@@ -291,6 +299,7 @@ impl<'a> ContentInterpreter<'a> {
             form_cull_y: None,
             bt_culled: false,
             image_cache: std::collections::HashMap::new(),
+            spot_tint_table_cache: std::collections::HashMap::new(),
         }
     }
 
@@ -2535,7 +2544,8 @@ impl<'a> ContentInterpreter<'a> {
         );
         self.cmyk_group_promote_color(&mut color);
         self.gstate.stroke_color = color;
-        self.gstate.stroke_spot_color = color_space::build_spot_color(&cs, &nums);
+        self.gstate.stroke_spot_color =
+            color_space::build_spot_color(&cs, &nums, &mut self.spot_tint_table_cache);
         self.gstate.stroke_icc_color = color_space::build_icc_color(&cs, &nums);
         self.gstate.stroke_pattern = None;
         self.gstate.stroke_shading_pattern = None;
@@ -2574,7 +2584,8 @@ impl<'a> ContentInterpreter<'a> {
         );
         self.cmyk_group_promote_color(&mut color);
         self.gstate.fill_color = color;
-        self.gstate.fill_spot_color = color_space::build_spot_color(&cs, &nums);
+        self.gstate.fill_spot_color =
+            color_space::build_spot_color(&cs, &nums, &mut self.spot_tint_table_cache);
         self.gstate.fill_icc_color = color_space::build_icc_color(&cs, &nums);
         self.gstate.fill_pattern = None;
         self.gstate.fill_shading_pattern = None;

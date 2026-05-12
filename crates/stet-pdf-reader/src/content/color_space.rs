@@ -1181,27 +1181,65 @@ fn sample_tint_table(
     }
 }
 
+/// Cache key for a spot/DeviceN tint table. Identifies the colorspace by
+/// its canonical name(s); within a page the same name always resolves to
+/// the same tint function, so a single sampled table can serve every paint.
+fn spot_tint_cache_key(cs: &ResolvedColorSpace) -> Option<Vec<u8>> {
+    match cs {
+        ResolvedColorSpace::Separation { name, .. } => {
+            let mut k = b"S:".to_vec();
+            k.extend(name);
+            Some(k)
+        }
+        ResolvedColorSpace::DeviceN { names, .. } => {
+            let mut k = b"N:".to_vec();
+            for (i, n) in names.iter().enumerate() {
+                if i > 0 {
+                    k.push(b'|');
+                }
+                k.extend(n);
+            }
+            Some(k)
+        }
+        _ => None,
+    }
+}
+
 /// Build a `SpotColor` for a Separation/DeviceN paint, capturing both the
 /// tint values from the current `sc`/`scn` operands and a pre-sampled tint
 /// table so the PDF writer can round-trip the color space faithfully.
 /// Returns `None` for non-spot color spaces or when the tint function is
 /// missing.
+///
+/// `cache` is consulted before sampling — every spot paint with the same
+/// colorspace name shares one `Arc<TintLookupTable>`, so a page that paints
+/// the same Separation color hundreds of times does not re-evaluate the
+/// tint function each time.
 pub fn build_spot_color(
     cs: &ResolvedColorSpace,
     tint_values: &[f64],
+    cache: &mut std::collections::HashMap<Vec<u8>, Arc<stet_graphics::device::TintLookupTable>>,
 ) -> Option<stet_graphics::device::SpotColor> {
     use stet_graphics::device::{SpotColor, SpotColorSpace};
+    let key = spot_tint_cache_key(cs)?;
     match cs {
         ResolvedColorSpace::Separation { name, alt, tint_fn } => {
-            let func = tint_fn.as_ref()?;
-            let (simple_alt, n_out) = simple_alt_for_spot(alt);
-            let table = sample_tint_table(func, 1, alt, n_out);
+            let table = if let Some(t) = cache.get(&key) {
+                Arc::clone(t)
+            } else {
+                let func = tint_fn.as_ref()?;
+                let (_, n_out) = simple_alt_for_spot(alt);
+                let t = Arc::new(sample_tint_table(func, 1, alt, n_out));
+                cache.insert(key, Arc::clone(&t));
+                t
+            };
+            let (simple_alt, _) = simple_alt_for_spot(alt);
             Some(SpotColor {
                 tint_values: tint_values.to_vec(),
                 color_space: SpotColorSpace::Separation {
                     name: name.clone(),
                     alt: simple_alt,
-                    tint_table: Arc::new(table),
+                    tint_table: table,
                 },
             })
         }
@@ -1210,15 +1248,22 @@ pub fn build_spot_color(
             alt,
             tint_fn,
         } => {
-            let func = tint_fn.as_ref()?;
-            let (simple_alt, n_out) = simple_alt_for_spot(alt);
-            let table = sample_tint_table(func, names.len(), alt, n_out);
+            let table = if let Some(t) = cache.get(&key) {
+                Arc::clone(t)
+            } else {
+                let func = tint_fn.as_ref()?;
+                let (_, n_out) = simple_alt_for_spot(alt);
+                let t = Arc::new(sample_tint_table(func, names.len(), alt, n_out));
+                cache.insert(key, Arc::clone(&t));
+                t
+            };
+            let (simple_alt, _) = simple_alt_for_spot(alt);
             Some(SpotColor {
                 tint_values: tint_values.to_vec(),
                 color_space: SpotColorSpace::DeviceN {
                     names: names.clone(),
                     alt: simple_alt,
-                    tint_table: Arc::new(table),
+                    tint_table: table,
                 },
             })
         }
