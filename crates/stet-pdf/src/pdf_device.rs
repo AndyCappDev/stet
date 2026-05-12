@@ -49,6 +49,13 @@ pub struct PdfDevice {
     /// round-trip from the source PDF's intents; empty by default for the
     /// PostScript-interpreter path.
     output_intents: Vec<stet_graphics::document_structure::OutputIntentRecord>,
+    /// Whether to emit an implicit `0 0 W H re W n` clip at the top of each
+    /// content stream. Defaults to `true` for the PostScript-interpreter
+    /// path (where DL content can extend past page bounds and the rasterizer
+    /// clips implicitly). PDF→PDF round-trip sets this to `false` because the
+    /// source content was already authored within the page and the implicit
+    /// clip turns into a spurious top-level `Clip` element on re-read.
+    emit_page_box_clip: bool,
 }
 
 impl PdfDevice {
@@ -63,7 +70,16 @@ impl PdfDevice {
             pending_trim_box: None,
             output_profile: None,
             output_intents: Vec::new(),
+            emit_page_box_clip: true,
         }
+    }
+
+    /// Control whether to emit the implicit `0 0 W H re W n` page-box clip
+    /// at the top of each content stream. Default `true`; PDF→PDF round-trip
+    /// should set this to `false` so the writer faithfully reproduces the
+    /// source content without injecting a top-level clip.
+    pub fn set_emit_page_box_clip(&mut self, on: bool) {
+        self.emit_page_box_clip = on;
     }
 
     /// Set the `/Catalog /OutputIntents` chain to emit. Replaces any
@@ -240,6 +256,7 @@ impl PdfDevice {
                 page.dpi,
                 ctx,
                 &mut font_tracker,
+                self.emit_page_box_clip,
             );
             page_results.push((result, page));
         }

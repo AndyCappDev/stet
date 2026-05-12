@@ -1233,6 +1233,7 @@ pub fn build_content_stream(
     dpi: f64,
     ctx: Option<&Context>,
     font_tracker: &mut FontTracker,
+    emit_page_box_clip: bool,
 ) -> ContentStreamResult {
     let scale = 72.0 / dpi;
     let page_h_pts = page_h as f64 * scale;
@@ -1261,12 +1262,18 @@ pub fn build_content_stream(
     builder.buf.extend(b" cm\n");
 
     // Clip to page bounds (device coordinates). The rasterizer implicitly
-    // clips to the pixmap, but PDF has no implicit page clip.
-    builder.buf.extend(b"0 0 ");
-    fmt_num(&mut builder.buf, page_w as f64);
-    builder.buf.push(b' ');
-    fmt_num(&mut builder.buf, page_h as f64);
-    builder.buf.extend(b" re W n\n");
+    // clips to the pixmap, but PDF has no implicit page clip. Suppressed in
+    // PDF→PDF round-trip — the source already constrained content to the page
+    // and the implicit clip would re-parse as a spurious top-level `Clip`
+    // element, perturbing the DisplayList and the renderer's overprint /
+    // transparency-group decisions downstream.
+    if emit_page_box_clip {
+        builder.buf.extend(b"0 0 ");
+        fmt_num(&mut builder.buf, page_w as f64);
+        builder.buf.push(b' ');
+        fmt_num(&mut builder.buf, page_h as f64);
+        builder.buf.extend(b" re W n\n");
+    }
 
     builder.emit_list(list);
 
