@@ -481,6 +481,15 @@ tree so both flat and subdir layouts are picked up. Corpus
 subdirectories are gitignored — nothing third-party lands in a
 commit.
 
+## Commercial Support
+
+stet is built and maintained by Scott Bowman and is free under
+Apache-2.0 OR MIT with no obligations. If your organization runs it in
+production, commercial support and consulting are available — priority
+fixes, integration help, and format-coverage work, including guarantees
+around the specific PostScript, EPS/AI, or PDF edge cases your pipeline
+depends on. Reach out at scott@bowmans.org.
+
 ## Acknowledgements
 
 - **[hayro](https://github.com/LaurenzV/hayro)** — PDF renderer by
