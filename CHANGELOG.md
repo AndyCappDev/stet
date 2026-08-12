@@ -5,6 +5,75 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — 2026-08-12
+
+Minor release adding **PDF→PDF round-trip** through the PDF output
+device. A PDF parsed by `stet-pdf-reader` into the display list can now
+be re-emitted as PDF with its prepress semantics preserved — spot
+(Separation/DeviceN) colors, ICCBased spaces, overprint, soft masks,
+transparency groups, optional-content layers, and `/OutputIntents` all
+survive the round-trip rather than collapsing to flat process color.
+
+This is a `0.x` minor bump. The document-structure IR moved from
+`stet-core` into `stet-graphics` (still re-exported by `stet-core`), so
+code that reaches those types through `stet-core` is unaffected.
+
+### Highlights
+
+- **PDF→PDF round-trip** — `--device pdf` on a PDF input now routes
+  through `PdfDocument` → `PdfDevice`, so a PDF can be read to the
+  display list and written back out as PDF (previously only PS/EPS
+  input reached `PdfDevice`).
+- **Prepress color preserved** — Separation/DeviceN spot colors (and
+  their base spaces, with DeviceGray promotion), ICCBased fill/stroke
+  spaces, and ICCBased bases inside Indexed image spaces all round-trip;
+  `/Catalog /OutputIntents` is carried through so the CMYK-driving ICC
+  profile is retained.
+- **Overprint preserved** — `/OP`/`/op` forced on the first paint of
+  each content stream, `/OPM` carried through the display list, and
+  overprint state emitted for Image and Shading paints.
+- **Transparency & layers emitted from the display list** —
+  `DisplayElement::Group` as a Form XObject, `SoftMasked` with per-paint
+  alpha/blend, and `DisplayElement::OcgGroup` with `/OCProperties`
+  optional-content groups.
+
+### Added
+
+- PDF output: Separation/DeviceN spot color + base round-trip,
+  Separation/DeviceN shadings and spot imagemasks, and CMYK imagemask
+  fill preservation.
+- PDF output: ICCBased fill/stroke color-space round-trip and ICCBased
+  base preservation inside Indexed image color spaces.
+- PDF output: `/Catalog /OutputIntents` round-trip through PDF→PDF.
+- PDF output: `Group` → Form XObject, `SoftMasked` + per-paint
+  alpha/blend, `OcgGroup` → `/OCProperties`, per-paint alpha on the
+  Image and Shading writer arms, overprint state on Image/Shading, and
+  `/OPM` round-trip.
+
+### Changed
+
+- Document-structure IR lifted from `stet-core` into `stet-graphics`
+  (re-exported by `stet-core`).
+- PDF writer: graphics-state tracker restored across `q`/`Q`
+  boundaries; replayed clips collapsed so a round-trip no longer grows
+  the display list; implicit page-box clip skipped on PDF→PDF.
+- `stet-pdf-reader`: spot tint-transform table cached per content
+  stream.
+- README: added a Commercial Support section.
+
+### Fixed
+
+- Removed a dead `emit_fill_color_rgb` helper, superseded by the
+  DeviceColor-aware imagemask fill path (cleared a `dead_code` warning).
+
+### Crates published at 0.3.0
+
+`stet`, `stet-cli`, `stet-fonts`, `stet-graphics`, `stet-core`,
+`stet-ops`, `stet-engine`, `stet-render`, `stet-viewer`,
+`stet-pdf-reader`, `stet-pdf`. The vendored `stet-tiny-skia` /
+`stet-tiny-skia-path` forks remain at `0.11.4`. `stet-wasm` remains at
+`0.1.1` (excluded from crates.io, independent cadence).
+
 ## [0.2.1] — 2026-05-09
 
 Patch release focused on PDF/X CMYK rendering correctness against the
