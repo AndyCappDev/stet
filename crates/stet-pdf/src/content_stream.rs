@@ -1384,16 +1384,6 @@ fn emit_fill_color(buf: &mut Vec<u8>, color: &DeviceColor, painted_channels: u8,
     gs.fill_color = Some(pc);
 }
 
-/// Emit a non-stroking RGB color (for imagemask fill color).
-fn emit_fill_color_rgb(buf: &mut Vec<u8>, r: f64, g: f64, b: f64) {
-    fmt_num(buf, r);
-    buf.push(b' ');
-    fmt_num(buf, g);
-    buf.push(b' ');
-    fmt_num(buf, b);
-    buf.extend(b" rg ");
-}
-
 /// Emit a stroking color command.
 fn emit_stroke_color(
     buf: &mut Vec<u8>,
