@@ -62,3 +62,57 @@ clear
 clear
 { immediate restore } stopped [true] assert   % Should still fail (still invalid)
 clear
+
+
+%% =============================================================================
+%% restore reverts mutations to dictionaries older than the save
+%%
+%% PLRM 3.7.3: restore "resets the values of all composite objects in local VM,
+%% except strings, to their state at the time of the save". Writes the
+%% interpreter makes on a program's behalf are covered by that too -- a font or
+%% resource registered inside the bracket must not survive the restore.
+%% =============================================================================
+
+% findresource leaves the key on the stack when it raises, so normalise to a
+% single boolean rather than asserting on the residue.
+/resgone { %def          % proc -> bool (true if the resource is gone)
+    stopped { clear true } { false } ifelse
+} bind def
+
+%% restore reverts defineresource %%
+/s save def
+    /MyProcSet 10 dict /ProcSet defineresource pop
+s restore
+{ /MyProcSet /ProcSet findresource pop } resgone [true] assert
+
+%% resources defined outside the bracket survive it %%
+/KeepProcSet 10 dict /ProcSet defineresource pop
+/s save def
+    /DropProcSet 10 dict /ProcSet defineresource pop
+s restore
+{ /KeepProcSet /ProcSet findresource pop } resgone [false] assert
+{ /DropProcSet /ProcSet findresource pop } resgone [true] assert
+
+%% restore reverts a font registration in FontDirectory %%
+/s save def
+    /Times-Roman findfont pop
+s restore
+FontDirectory /Times-Roman known [false] assert
+
+%% restore reverts an entry added to a dictionary older than the save %%
+/olddict 10 dict def
+olddict /before 1 put
+/s save def
+    olddict /during 2 put
+    olddict /before 99 put
+s restore
+olddict /during known [false] assert
+olddict /before get [1] assert
+
+%% restore reverts an in-place reverse %%
+/oldarr [1 2 3] def
+/s save def
+    oldarr reverse pop
+s restore
+oldarr 0 get [1] assert
+oldarr 2 get [3] assert
