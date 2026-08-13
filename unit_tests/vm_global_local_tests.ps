@@ -1,0 +1,124 @@
+%% Tests for the PLRM 3.7.2 local/global VM restriction
+%%
+%% "An object in global VM is not allowed to contain a reference to an object
+%%  in local VM. An attempt to store a local object as an element of a global
+%%  object will result in an invalidaccess error."
+%%
+%% The restriction applies only to storing a COMPOSITE object in local VM as
+%% an element of a COMPOSITE object in global VM. All other combinations are
+%% allowed, and simple objects may be stored in either.
+
+userdict /$unittest known not {(unit_tests/unittest.ps) run} if
+
+% Run a procedure and report whether it raised invalidaccess, leaving the
+% operand stack as it was found. Needed for `[ ]` and `<< >>`, which are
+% syntax rather than named operators and so do not fit the `assert` shape.
+/vgtrap { %def          % proc -> bool
+    count 1 sub /vgcount exch def
+    stopped /vgstopped exch def
+    { count vgcount le {exit} if pop } loop      % drop whatever the proc left
+    vgstopped { $error /errorname get /invalidaccess eq } {false} ifelse
+    $error /newerror false put
+} bind def
+
+% Fixtures, mirroring the PLRM 3.7.2 example.
+/lstr (string1) def
+/ldict 10 dict def
+/larr 3 array def
+true setglobal
+/gstr (string2) def
+/gdict 5 dict def
+/garr 3 array def
+false setglobal
+
+
+%% put - the PLRM 3.7.2 table %%
+ldict /a lstr /put [] assert                    % local <- local composite
+gdict /b gstr /put [] assert                    % global <- global composite
+ldict /c gstr /put [] assert                    % local <- global composite
+gdict /e 7 /put [] assert                       % global <- simple
+    % global <- local composite is the one prohibited combination
+    gdict /d lstr  /put [gdict /d lstr  /invalidaccess] assert
+    gdict /d ldict /put [gdict /d ldict /invalidaccess] assert
+    gdict /d larr  /put [gdict /d larr  /invalidaccess] assert
+
+
+%% put - array target %%
+larr 0 lstr /put [] assert                      % local array <- local
+garr 0 gstr /put [] assert                      % global array <- global
+garr 1 7 /put [] assert                         % global array <- simple
+    garr 2 lstr /put [garr 2 lstr /invalidaccess] assert
+
+
+%% putinterval - array target %%
+true setglobal /gi 2 array def false setglobal
+/srcg [gstr] def
+/srcl [lstr] def
+gi 0 srcg /putinterval [] assert
+    gi 0 srcl /putinterval [gi 0 srcl /invalidaccess] assert
+
+
+%% astore %%
+true setglobal /ga2 2 array def false setglobal
+gstr gstr ga2 /astore [ga2] assert
+    lstr gstr ga2 /astore [lstr gstr ga2 /invalidaccess] assert
+
+
+%% def and store into a global dictionary %%
+gdict begin
+    /f gstr /def [] assert
+    /g 42 /def [] assert
+    /h lstr /def [/h lstr /invalidaccess] assert
+    /f lstr /store [/f lstr /invalidaccess] assert
+end
+
+
+%% def into a local dictionary accepts anything %%
+ldict begin
+    /f lstr /def [] assert
+    /g gstr /def [] assert
+end
+
+
+%% array and dict construction under global allocation mode %%
+% The constructed container is global, so a local element must be rejected.
+true setglobal
+    /vg1 {[gstr] pop} vgtrap def
+    /vg2 {[lstr] pop} vgtrap def
+    /vg3 {<< /k gstr >> pop} vgtrap def
+    /vg4 {<< /k lstr >> pop} vgtrap def
+false setglobal
+vg1 [false] assert
+vg2 [true]  assert
+vg3 [false] assert
+vg4 [true]  assert
+
+
+%% the same constructions under local allocation mode are unrestricted %%
+/vg5 {[lstr] pop} vgtrap def
+/vg6 {<< /k lstr >> pop} vgtrap def
+vg5 [false] assert
+vg6 [false] assert
+
+
+%% copy into a global target %%
+true setglobal /gd2 5 dict def false setglobal
+/ld2 5 dict def  ld2 /x lstr put
+    ld2 gd2 /copy [ld2 gd2 /invalidaccess] assert
+/ld3 5 dict def  ld3 /x gstr put
+ld3 gd2 /copy [gd2] assert                      % all-global contents are fine
+
+
+%% gcheck agrees with what may be stored into a global container %%
+lstr /gcheck [false] assert
+gstr /gcheck [true] assert
+7 /gcheck [true] assert
+/aname /gcheck [true] assert
+
+
+%% enforcement consults the entity tag, not the object's flags %%
+% `get` can hand back an object whose flags have lost the global bit, so a
+% flags-based check would wrongly admit this store.
+ldict /y lstr put
+ldict /y get /gcheck [false] assert
+    gdict /z ldict /y get /put [gdict /z lstr /invalidaccess] assert

@@ -248,6 +248,15 @@ false setglobal
     /.error {
         % Pause execution history recording during error handling
         pauseexechistory
+        % The snapshot arrays below hold whatever was on the operand and
+        % dictionary stacks, which may be local objects, so they have to be
+        % allocated in local VM. Remember the caller's VM allocation mode and
+        % put it back before `stop` returns control: an error caught by
+        % `stopped` must not leave the program silently allocating in local VM
+        % when it had selected global. Stashed in $error rather than on the
+        % operand stack, which is snapshotted verbatim below. A boolean is a
+        % simple object, so storing it in the local $error is always legal.
+        //$error /.savedglobal currentglobal put
         false setglobal
         //$error exch /errorname exch put //$error exch /command exch put
         //$error /newerror true put //$error /errorname get /VMError ne
@@ -274,6 +283,7 @@ false setglobal
         //$error /initializing get {
             handleerror
         } if
+        //$error /.savedglobal get setglobal
         stop
     } bind def
 
@@ -290,6 +300,7 @@ false setglobal
     /newerror false def
     /doclose false def
     /ostackarry null def
+    /.savedglobal false def     % VM allocation mode to restore when .error returns
 end % $error
 
 
