@@ -73,7 +73,7 @@ pub fn op_image(ctx: &mut Context) -> Result<(), PsError> {
         ctx.o_stack.pop()?; // width
 
         let data = collect_proc_data(ctx, procedure, total_bytes)?;
-        let samples = unpack_samples(&data, width as u32, height as u32, bps as u32, ncomp, false);
+        let samples = unpack_samples(data, width as u32, height as u32, bps as u32, ncomp, false);
         draw_image_to_device(
             ctx,
             samples,
@@ -97,7 +97,7 @@ pub fn op_image(ctx: &mut Context) -> Result<(), PsError> {
     let data = read_image_data(ctx, src_obj, total_bytes)?;
 
     // Unpack to 8-bit
-    let samples = unpack_samples(&data, width as u32, height as u32, bps as u32, ncomp, false);
+    let samples = unpack_samples(data, width as u32, height as u32, bps as u32, ncomp, false);
 
     // Draw with DeviceGray (5-operand form is always grayscale)
     draw_image_to_device(
@@ -204,7 +204,7 @@ fn image_dict_form(ctx: &mut Context) -> Result<(), PsError> {
 
     // Unpack samples to 8-bit
     let indexed = matches!(ctx.gstate.color_space, ColorSpace::Indexed { .. });
-    let samples = unpack_samples(&data, width, height, bps, ncomp, indexed);
+    let samples = unpack_samples(data, width, height, bps, ncomp, indexed);
 
     // ImageType 4: extract mask color (raw BPC values scaled to 8-bit)
     let mask_color_param = if image_type == 4 {
@@ -397,7 +397,7 @@ fn image_type3_form(
     // Type 3 masked images: convert to RGBA at op time (stencil mask
     // needs alpha compositing, and these images are relatively rare)
     let indexed = matches!(ctx.gstate.color_space, ColorSpace::Indexed { .. });
-    let samples = unpack_samples(&img_data, img_w, img_h, img_bps, ncomp, indexed);
+    let samples = unpack_samples(img_data, img_w, img_h, img_bps, ncomp, indexed);
     let mut rgba = samples_to_rgba(ctx, &samples, img_w, img_h, ncomp, &img_decode);
 
     // Apply stencil mask to alpha channel
@@ -981,7 +981,7 @@ pub fn op_colorimage(ctx: &mut Context) -> Result<(), PsError> {
             );
 
             let samples = unpack_samples(
-                &data,
+                data,
                 width as u32,
                 height as u32,
                 bps as u32,
@@ -1030,7 +1030,7 @@ pub fn op_colorimage(ctx: &mut Context) -> Result<(), PsError> {
             }
             let data = collect_proc_data(ctx, procedure, total_bytes)?;
             let samples = unpack_samples(
-                &data,
+                data,
                 width as u32,
                 height as u32,
                 bps as u32,
@@ -1058,7 +1058,7 @@ pub fn op_colorimage(ctx: &mut Context) -> Result<(), PsError> {
     }
 
     let samples = unpack_samples(
-        &data,
+        data,
         width as u32,
         height as u32,
         bps as u32,
@@ -1222,8 +1222,18 @@ fn read_multi_source_data(
 }
 
 /// Unpack samples from raw data (1/2/4/8/12 bits) to 8-bit values.
+/// Expand packed image samples to one byte per component.
+///
+/// Takes the raw buffer **by value** so the `bps == 8` case — by far the most
+/// common — can hand it straight back instead of cloning it. Copying there
+/// doubled peak memory for every 8-bit image, which is ruinous on large ones:
+/// a 23800x33681 RGB scan (802 Mpx, 2293 MB of samples, as Ghostscript's
+/// `ps2write` inlines it) held both buffers at once and peaked over 4.6 GB.
+///
+/// The narrower `bps` paths still build a second buffer, but there the output
+/// is genuinely a different size from the input.
 fn unpack_samples(
-    raw: &[u8],
+    raw: Vec<u8>,
     width: u32,
     height: u32,
     bps: u32,
@@ -1231,7 +1241,7 @@ fn unpack_samples(
     indexed: bool,
 ) -> Vec<u8> {
     if bps == 8 {
-        return raw.to_vec();
+        return raw;
     }
 
     let total_samples = (width as usize) * (height as usize) * (ncomp as usize);
@@ -2131,15 +2141,33 @@ mod tests {
     #[test]
     fn test_unpack_8bit() {
         let data = vec![0, 128, 255];
-        let result = unpack_samples(&data, 3, 1, 8, 1, false);
+        let result = unpack_samples(data, 3, 1, 8, 1, false);
         assert_eq!(result, vec![0, 128, 255]);
+    }
+
+    /// The 8-bit path must hand back the same allocation, not a copy.
+    ///
+    /// Copying here doubled peak memory for every 8-bit image. On a large one
+    /// that is the difference between running and being OOM-killed: a
+    /// 23800x33681 RGB scan is 2293 MB of samples, and holding the raw buffer
+    /// and its clone together peaked over 4.6 GB.
+    #[test]
+    fn test_unpack_8bit_does_not_copy() {
+        let data = vec![7u8; 4096];
+        let original = data.as_ptr();
+        let result = unpack_samples(data, 1024, 1, 8, 4, false);
+        assert_eq!(
+            result.as_ptr(),
+            original,
+            "8-bit samples should be moved through, not reallocated"
+        );
     }
 
     #[test]
     fn test_unpack_1bit() {
         // 0b10110000 = 0xB0 → samples: 1,0,1,1,0,0,0,0
         let data = vec![0xB0];
-        let result = unpack_samples(&data, 4, 1, 1, 1, false);
+        let result = unpack_samples(data, 4, 1, 1, 1, false);
         // 1 bit: 1→255, 0→0
         assert_eq!(result[0], 255); // bit 1
         assert_eq!(result[1], 0); // bit 0
@@ -2151,7 +2179,7 @@ mod tests {
     fn test_unpack_4bit() {
         // 0xAC → high nibble 0xA=10, low nibble 0xC=12
         let data = vec![0xAC];
-        let result = unpack_samples(&data, 2, 1, 4, 1, false);
+        let result = unpack_samples(data, 2, 1, 4, 1, false);
         // 10/15 * 255 = 170, 12/15 * 255 = 204
         assert_eq!(result[0], 170);
         assert_eq!(result[1], 204);
