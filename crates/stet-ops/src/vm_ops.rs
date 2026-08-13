@@ -222,8 +222,23 @@ pub fn alloc_array(ctx: &mut Context, len: usize) -> stet_core::object::EntityId
 
 /// Helper: allocate an array from initial elements in the current VM mode.
 pub fn alloc_array_from(ctx: &mut Context, items: &[PsObject]) -> stet_core::object::EntityId {
-    let save_level = ctx.save_stack.current_level();
     let global = ctx.vm_alloc_mode;
+    alloc_array_from_in(ctx, items, global)
+}
+
+/// Helper: allocate an array from initial elements in an explicitly chosen VM.
+///
+/// Use this instead of [`alloc_array_from`] when the array is about to be
+/// stored into a container whose VM is already fixed. Allocating per the
+/// ambient `currentglobal` and then storing into a global container violates
+/// PLRM 3.7.2 — the global container ends up referencing local VM, which
+/// `restore` may release out from under it.
+pub fn alloc_array_from_in(
+    ctx: &mut Context,
+    items: &[PsObject],
+    global: bool,
+) -> stet_core::object::EntityId {
+    let save_level = ctx.save_stack.current_level();
     let created = ctx.save_stack.last_save_id();
     let entity = ctx
         .arrays

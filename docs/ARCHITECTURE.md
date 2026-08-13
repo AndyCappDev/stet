@@ -149,6 +149,43 @@ later (e.g., zooming in the viewer) scales the device-space coordinates.
    device via `replay_and_show()`, and captures a clone for viewport
    rendering if display list capture is enabled.
 
+### Local and global VM (PLRM 3.7.2)
+
+Composite objects live in one of two arenas, selected by the
+`currentglobal` allocation mode and recorded in the tag bit of every
+`EntityId`. PLRM 3.7.2 forbids a composite in **global** VM from
+referencing a composite in **local** VM, because `restore` may release
+the local object and leave the global one dangling.
+
+Two mechanisms uphold this:
+
+1. **Operator enforcement.** `put`, `def`, `store`, `astore`,
+   `putinterval`, `copy`, and the `[`…`]` / `<<`…`>>` constructors each
+   raise `invalidaccess` when a PostScript program attempts such a
+   store. These checks consult the `EntityId` tag rather than
+   `ObjFlags`, because an object retrieved via `get` or `currentdict`
+   can have lost its flag bit. `unit_tests/vm_global_local_tests.ps`
+   covers the full PLRM 3.7.2 table.
+
+2. **The VM audit** (`stet_core::vm_audit`). Operator checks only cover
+   stores a *program* makes; the interpreter's own Rust code writes into
+   dictionaries and arrays directly, and `ArrayStore::get_mut` hands out
+   `&mut [PsObject]`, so those writes pass no checkpoint. `audit_global_vm`
+   sweeps both global entity tables and reports every global→local
+   reference regardless of how it got there. Run it via
+   `cargo run --release --example audit_vm -- [--show-permanent] file.ps`.
+
+Not every global→local reference is a defect. PLRM 3.7.5 explicitly
+exempts `systemdict`, which holds the local `userdict`, `errordict`,
+`$error`, `statusdict`, and `FontDirectory`. What makes those safe is
+lifetime, not identity: they are built during bootstrap, before any
+`save`, so no `restore` can reclaim them. The audit classifies on that
+basis — `Violation::target_reclaimable` — and
+`audit_global_vm_unsafe_only` returns just the references that could
+actually dangle. **That set being empty is the invariant which gates
+letting `restore` reclaim local VM at all**; see
+`crates/stet-cli/tests/vm_audit.rs`.
+
 ### Group stack (PDF-imaging extension scopes)
 
 The PDF-imaging extension operators

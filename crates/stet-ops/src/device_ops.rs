@@ -39,8 +39,17 @@ pub fn set_pd_array(ctx: &mut Context, key: &[u8], values: &[f64]) {
     if let Some(pd) = ctx.gstate.page_device {
         let name_id = ctx.names.intern(key);
         let items: Vec<PsObject> = values.iter().map(|&v| PsObject::real(v)).collect();
-        let entity = crate::vm_ops::alloc_array_from(ctx, &items);
-        let arr = crate::vm_ops::make_array_obj(ctx, entity, items.len() as u32);
+        // Allocate in the page device's own VM, not the ambient `currentglobal`.
+        // `setpagedevice` promotes the page device into global VM, so allocating
+        // per the ambient mode would store a local array into a global dict —
+        // a PLRM 3.7.2 violation that leaves the page device pointing at
+        // storage a later `restore` releases.
+        let pd_global = pd.is_global();
+        let entity = crate::vm_ops::alloc_array_from_in(ctx, &items, pd_global);
+        let mut arr = PsObject::array(entity, items.len() as u32);
+        if pd_global {
+            arr.flags = ObjFlags::new(ObjFlags::ACCESS_UNLIMITED, false, true, true);
+        }
         ctx.cow_check_dict(pd);
         ctx.dicts.put(pd, DictKey::Name(name_id), arr);
     }
