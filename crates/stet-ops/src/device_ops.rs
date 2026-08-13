@@ -209,11 +209,24 @@ pub fn op_setpagedevice(ctx: &mut Context) -> Result<(), PsError> {
     // Must be in global VM so save/restore COW doesn't revert PageCount etc.
     // If the dict is local, copy it to a new global dict.
     let base_pd = if !base_pd.is_global() {
-        let new_pd =
-            ctx.dicts
-                .allocate_with(ctx.dicts.max_length(base_pd), b"pagedevice", 0, true, 0);
-        copy_dict(ctx, base_pd, new_pd);
-        new_pd
+        // Deep copy: a shallow one would leave the global page device pointing
+        // at local values (`/PageSize [612 792]` and friends), and PLRM 3.7.2
+        // forbids that precisely because `restore` reclaims local VM out from
+        // under the surviving global dict.
+        let mut seen = std::collections::HashMap::new();
+        let promoted = crate::vm_ops::promote_to_global(
+            ctx,
+            PsObject {
+                value: PsValue::Dict(base_pd),
+                flags: stet_core::object::ObjFlags::literal_composite(),
+            },
+            &mut seen,
+            0,
+        );
+        match promoted.value {
+            PsValue::Dict(e) => e,
+            _ => base_pd,
+        }
     } else {
         base_pd
     };

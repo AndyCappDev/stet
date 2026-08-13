@@ -5,8 +5,9 @@
 //! VM operators: save, restore, vmstatus, setglobal, currentglobal, gcheck, vmreclaim.
 
 use stet_core::context::Context;
+use stet_core::dict::DictKey;
 use stet_core::error::PsError;
-use stet_core::object::{ObjFlags, PsObject, PsValue, SaveLevel};
+use stet_core::object::{EntityId, ObjFlags, PsObject, PsValue, SaveLevel};
 
 /// `save`: — → save (snapshot VM state)
 pub fn op_save(ctx: &mut Context) -> Result<(), PsError> {
@@ -233,6 +234,112 @@ pub fn alloc_array_from(ctx: &mut Context, items: &[PsObject]) -> stet_core::obj
 }
 
 /// Helper: allocate a dict in the current VM mode.
+/// Depth ceiling for [`promote_to_global`]. Beyond it the value is left alone,
+/// which is no worse than the shallow copy this replaces.
+const PROMOTE_MAX_DEPTH: usize = 64;
+
+/// Copy `obj` into global VM, deep-copying every local composite it reaches.
+///
+/// PLRM 3.7.2 forbids a composite in global VM from referencing local VM,
+/// because local VM is what `restore` reclaims: the global object outlives the
+/// restore and is left pointing at storage that no longer exists. Promoting a
+/// value into global VM therefore has to promote everything reachable from it,
+/// not just its top level.
+///
+/// `seen` maps an already-promoted local composite to its global counterpart,
+/// which both terminates cycles (a dict may contain itself) and preserves
+/// sharing, so two references to one object stay one object after promotion.
+pub fn promote_to_global(
+    ctx: &mut Context,
+    obj: PsObject,
+    seen: &mut std::collections::HashMap<(EntityId, u32, u32), PsObject>,
+    depth: usize,
+) -> PsObject {
+    if depth > PROMOTE_MAX_DEPTH {
+        return obj;
+    }
+    let flags = obj.flags;
+    match obj.value {
+        PsValue::String { entity, start, len } if !entity.is_global() => {
+            let key = (entity, start, len);
+            if let Some(done) = seen.get(&key) {
+                return *done;
+            }
+            let bytes = ctx.strings.get(entity, start, len).to_vec();
+            let new_entity =
+                ctx.strings
+                    .allocate_from_with(&bytes, ctx.save_stack.current_level(), true, 0);
+            let promoted = PsObject {
+                value: PsValue::String {
+                    entity: new_entity,
+                    start: 0,
+                    len,
+                },
+                flags,
+            };
+            seen.insert(key, promoted);
+            promoted
+        }
+        PsValue::Array { entity, start, len } | PsValue::PackedArray { entity, start, len }
+            if !entity.is_global() =>
+        {
+            let key = (entity, start, len);
+            if let Some(done) = seen.get(&key) {
+                return *done;
+            }
+            let new_entity =
+                ctx.arrays
+                    .allocate_with(len as usize, ctx.save_stack.current_level(), true, 0);
+            let promoted = PsObject {
+                value: PsValue::Array {
+                    entity: new_entity,
+                    start: 0,
+                    len,
+                },
+                flags,
+            };
+            // Record before descending so a cycle back to this array resolves.
+            seen.insert(key, promoted);
+            for i in 0..len {
+                let elem = ctx.arrays.get_element(entity, start + i);
+                let promoted_elem = promote_to_global(ctx, elem, seen, depth + 1);
+                ctx.arrays.set_element(new_entity, i, promoted_elem);
+            }
+            promoted
+        }
+        PsValue::Dict(entity) if !entity.is_global() => {
+            let key = (entity, 0, 0);
+            if let Some(done) = seen.get(&key) {
+                return *done;
+            }
+            let max_length = ctx.dicts.max_length(entity);
+            let name = ctx.dicts.get_name(entity).to_vec();
+            let new_entity =
+                ctx.dicts
+                    .allocate_with(max_length, &name, ctx.save_stack.current_level(), true, 0);
+            let promoted = PsObject {
+                value: PsValue::Dict(new_entity),
+                flags,
+            };
+            seen.insert(key, promoted);
+            let entries: Vec<(DictKey, PsObject)> = ctx
+                .dicts
+                .entry(entity)
+                .entries
+                .iter()
+                .map(|(k, v)| (k.clone(), *v))
+                .collect();
+            for (k, v) in entries {
+                let promoted_val = promote_to_global(ctx, v, seen, depth + 1);
+                ctx.dicts.put(new_entity, k, promoted_val);
+            }
+            promoted
+        }
+        // Already global, or a simple type that lives in no VM.
+        _ => obj,
+    }
+}
+
 pub fn alloc_dict(
     ctx: &mut Context,
     max_length: usize,
@@ -278,6 +385,149 @@ mod tests {
 
     fn test_ctx() -> Context {
         Context::new()
+    }
+
+    /// Promotion must reach every local composite in the graph, not just the
+    /// top level. A global dict left holding a local array is exactly the
+    /// PLRM 3.7.2 violation this exists to prevent.
+    #[test]
+    fn test_promote_to_global_is_deep() {
+        let mut ctx = test_ctx();
+
+        let inner_arr = ctx
+            .arrays
+            .allocate_from(&[PsObject::int(612), PsObject::int(792)]);
+        let inner_dict = ctx.dicts.allocate(4, b"inner");
+        let s_entity = ctx.strings.allocate_from(b"hello");
+        let k_page = ctx.names.intern(b"PageSize");
+        let k_sub = ctx.names.intern(b"Sub");
+        let k_str = ctx.names.intern(b"Note");
+
+        let outer = ctx.dicts.allocate(8, b"pagedevice");
+        ctx.dicts
+            .put(outer, DictKey::Name(k_page), PsObject::array(inner_arr, 2));
+        ctx.dicts
+            .put(outer, DictKey::Name(k_sub), PsObject::dict(inner_dict));
+        ctx.dicts
+            .put(outer, DictKey::Name(k_str), PsObject::string(s_entity, 5));
+        assert!(!outer.is_global(), "fixture should start local");
+
+        let mut seen = std::collections::HashMap::new();
+        let promoted = promote_to_global(&mut ctx, PsObject::dict(outer), &mut seen, 0);
+
+        let new_dict = match promoted.value {
+            PsValue::Dict(e) => e,
+            other => panic!("expected a dict, got {other:?}"),
+        };
+        assert!(new_dict.is_global(), "the dict itself must be promoted");
+
+        match ctx
+            .dicts
+            .get(new_dict, &DictKey::Name(k_page))
+            .unwrap()
+            .value
+        {
+            PsValue::Array { entity, len, .. } => {
+                assert!(entity.is_global(), "nested array must be promoted");
+                assert_eq!(len, 2);
+                assert_eq!(ctx.arrays.get_element(entity, 0).as_f64(), Some(612.0));
+                assert_eq!(ctx.arrays.get_element(entity, 1).as_f64(), Some(792.0));
+            }
+            other => panic!("expected an array, got {other:?}"),
+        }
+        match ctx
+            .dicts
+            .get(new_dict, &DictKey::Name(k_sub))
+            .unwrap()
+            .value
+        {
+            PsValue::Dict(e) => assert!(e.is_global(), "nested dict must be promoted"),
+            other => panic!("expected a dict, got {other:?}"),
+        }
+        match ctx
+            .dicts
+            .get(new_dict, &DictKey::Name(k_str))
+            .unwrap()
+            .value
+        {
+            PsValue::String { entity, start, len } => {
+                assert!(entity.is_global(), "nested string must be promoted");
+                assert_eq!(ctx.strings.get(entity, start, len), b"hello");
+            }
+            other => panic!("expected a string, got {other:?}"),
+        }
+    }
+
+    /// A dict that contains itself must not send the walk into a loop, and the
+    /// promoted copy must be self-referential in the same way.
+    #[test]
+    fn test_promote_to_global_handles_cycles_and_sharing() {
+        let mut ctx = test_ctx();
+        let d = ctx.dicts.allocate(4, b"cyclic");
+        let k_self = ctx.names.intern(b"Self");
+        ctx.dicts.put(d, DictKey::Name(k_self), PsObject::dict(d));
+
+        // The same array reached by two keys must stay one array afterwards.
+        let shared = ctx.arrays.allocate_from(&[PsObject::int(1)]);
+        let k_a = ctx.names.intern(b"A");
+        let k_b = ctx.names.intern(b"B");
+        ctx.dicts
+            .put(d, DictKey::Name(k_a), PsObject::array(shared, 1));
+        ctx.dicts
+            .put(d, DictKey::Name(k_b), PsObject::array(shared, 1));
+
+        let mut seen = std::collections::HashMap::new();
+        let promoted = promote_to_global(&mut ctx, PsObject::dict(d), &mut seen, 0);
+        let new_dict = match promoted.value {
+            PsValue::Dict(e) => e,
+            other => panic!("expected a dict, got {other:?}"),
+        };
+
+        match ctx
+            .dicts
+            .get(new_dict, &DictKey::Name(k_self))
+            .unwrap()
+            .value
+        {
+            PsValue::Dict(e) => assert_eq!(e, new_dict, "cycle must close on the promoted dict"),
+            other => panic!("expected a dict, got {other:?}"),
+        }
+        let a = ctx.dicts.get(new_dict, &DictKey::Name(k_a)).unwrap().value;
+        let b = ctx.dicts.get(new_dict, &DictKey::Name(k_b)).unwrap().value;
+        match (a, b) {
+            (PsValue::Array { entity: ea, .. }, PsValue::Array { entity: eb, .. }) => {
+                assert!(ea.is_global());
+                assert_eq!(ea, eb, "sharing must be preserved, not duplicated");
+            }
+            other => panic!("expected two arrays, got {other:?}"),
+        }
+    }
+
+    /// Values already in global VM, and simple types, pass through untouched.
+    #[test]
+    fn test_promote_to_global_leaves_globals_and_simples_alone() {
+        let mut ctx = test_ctx();
+        let mut seen = std::collections::HashMap::new();
+
+        let n = PsObject::int(42);
+        assert_eq!(
+            promote_to_global(&mut ctx, n, &mut seen, 0).value,
+            PsValue::Int(42)
+        );
+
+        let g = ctx.dicts.allocate_with(4, b"g", 0, true, 0);
+        let before = ctx.dicts.entity_count();
+        let out = promote_to_global(&mut ctx, PsObject::dict(g), &mut seen, 0);
+        assert_eq!(
+            out.value,
+            PsValue::Dict(g),
+            "already-global dict is returned as is"
+        );
+        assert_eq!(
+            ctx.dicts.entity_count(),
+            before,
+            "promoting a global value must not allocate"
+        );
     }
 
     #[test]
