@@ -116,3 +116,20 @@ olddict /before get [1] assert
 s restore
 oldarr 0 get [1] assert
 oldarr 2 get [3] assert
+
+%% restore reverts an execstack snapshot written into a pre-save array %%
+% `execstack` and `dictstack` overwrite a caller-supplied array in place. The
+% array is typically $error's, allocated once and reused by every error, so it
+% is older than the save and the write has to be undoable.
+/estk 20 array def
+/s save def
+    estk execstack pop
+s restore
+estk 0 get null eq [true] assert
+
+%% restore reverts a dictstack snapshot written into a pre-save array %%
+/dstk 20 array def
+/s save def
+    dstk dictstack pop
+s restore
+dstk 0 get null eq [true] assert

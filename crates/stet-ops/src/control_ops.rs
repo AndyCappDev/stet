@@ -368,6 +368,12 @@ pub fn op_execstack(ctx: &mut Context) -> Result<(), PsError> {
 
     ctx.o_stack.pop()?;
 
+    // The destination is supplied by the caller and may well predate the
+    // current save — `$error /estackarray` is the usual one, allocated once
+    // and reused by every error. Copy-on-write it before overwriting, or
+    // `restore` has no backup and the snapshot outlives the objects it names.
+    ctx.cow_check_array(entity);
+
     // Copy exec stack contents into the array, converting internal
     // markers to PS-visible representations
     let e_slice = ctx.e_stack.as_slice();

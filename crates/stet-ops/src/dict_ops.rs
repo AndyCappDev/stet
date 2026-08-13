@@ -251,6 +251,11 @@ pub fn op_dictstack(ctx: &mut Context) -> Result<(), PsError> {
     let d_stack_copy: Vec<_> = ctx.d_stack.clone();
     ctx.o_stack.pop()?;
 
+    // The destination is supplied by the caller and may well predate the
+    // current save — `$error /dstackarray` is the usual one, allocated once
+    // and reused by every error. Copy-on-write it before overwriting, or
+    // `restore` has no backup and the snapshot outlives the objects it names.
+    ctx.cow_check_array(entity);
     for (i, &dict_id) in d_stack_copy.iter().enumerate() {
         ctx.arrays
             .set_element(entity, i as u32, PsObject::dict(dict_id));
