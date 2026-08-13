@@ -63,3 +63,4 @@ pub mod stack;
 pub mod string_store;
 pub mod system_font_loader;
 pub mod tokenizer;
+pub mod vm_audit;

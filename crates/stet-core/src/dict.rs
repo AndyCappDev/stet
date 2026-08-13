@@ -90,6 +90,25 @@ impl DictStore {
         self.entities.get(entity).offset as usize
     }
 
+    /// Iterate every allocated dictionary in this store as
+    /// `(EntityId, &DictEntry)`.
+    ///
+    /// Used by the VM audit (see [`crate::vm_audit`]) to sweep global VM for
+    /// PLRM 3.7.2 violations. Iterating entities rather than following
+    /// references from a root set is deliberate: it catches dictionaries that
+    /// nothing reachable points at, and it does not depend on writes having
+    /// gone through [`DictStore::put`].
+    pub fn iter_entities(&self) -> impl Iterator<Item = (EntityId, &DictEntry)> {
+        (0..self.entities.len()).map(|i| {
+            let id = if self.entities.get_by_index(i).is_global() {
+                EntityId::global(i as u32)
+            } else {
+                EntityId::local(i as u32)
+            };
+            (id, &self.dicts[self.dict_index(id)])
+        })
+    }
+
     /// Look up a key in a dictionary.
     #[inline]
     pub fn get(&self, entity: EntityId, key: &DictKey) -> Option<PsObject> {

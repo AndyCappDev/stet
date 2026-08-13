@@ -100,6 +100,16 @@ impl EntityTable {
         &mut self.entries[id.raw_index()]
     }
 
+    /// Get metadata by raw table index, without needing a tagged `EntityId`.
+    ///
+    /// Callers that sweep the whole table (the VM audit) do not have an
+    /// `EntityId` in hand — they need the metadata in order to build one with
+    /// the correct global tag.
+    #[inline]
+    pub fn get_by_index(&self, index: usize) -> &EntityMeta {
+        &self.entries[index]
+    }
+
     /// Number of entities allocated.
     pub fn len(&self) -> usize {
         self.entries.len()

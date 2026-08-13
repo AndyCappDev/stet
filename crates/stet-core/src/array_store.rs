@@ -84,6 +84,25 @@ impl ArrayStore {
             .allocate(offset, len as u32, save_level, global, created_after_save)
     }
 
+    /// Iterate every allocated array in this store as `(EntityId, elements)`.
+    ///
+    /// Used by the VM audit (see [`crate::vm_audit`]) to sweep global VM for
+    /// PLRM 3.7.2 violations. Sweeping the entity table rather than following
+    /// references catches arrays written through [`ArrayStore::get_mut`], which
+    /// hands out `&mut [PsObject]` and so bypasses any per-store checkpoint.
+    pub fn iter_entities(&self) -> impl Iterator<Item = (EntityId, &[PsObject])> {
+        (0..self.entities.len()).map(|i| {
+            let meta = self.entities.get_by_index(i);
+            let id = if meta.is_global() {
+                EntityId::global(i as u32)
+            } else {
+                EntityId::local(i as u32)
+            };
+            let base = meta.offset as usize;
+            (id, &self.data[base..base + meta.len as usize])
+        })
+    }
+
     /// Get a slice of array elements via entity table indirection.
     pub fn get(&self, entity: EntityId, start: u32, len: u32) -> &[PsObject] {
         let base = self.entities.get(entity).offset as usize + start as usize;
