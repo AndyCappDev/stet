@@ -77,15 +77,29 @@ pub fn op_restore(ctx: &mut Context) -> Result<(), PsError> {
 
 /// Check if any stack contains local composite objects newer than the save being restored.
 fn check_invalidrestore(ctx: &Context, save_id: u32) -> Result<(), PsError> {
+    // `gstate` objects index `Context::gstate_store`, which `restore` rewinds
+    // to its length at save time. Anything at or above that index is a
+    // composite created after the save, so a surviving reference to one is
+    // exactly the case PLRM 3.7.3.2 describes — and it matters more than most,
+    // because the snapshot behind it names fonts, colour spaces, and the page
+    // device by raw entity id.
+    let gstate_store_floor = ctx
+        .save_stack
+        .levels_ref()
+        .iter()
+        .find(|l| l.save_id == save_id)
+        .map(|l| l.gstate_store_len)
+        .unwrap_or(usize::MAX);
+
     // Check operand stack
     for obj in ctx.o_stack.as_slice() {
-        if is_newer_local(ctx, obj, save_id) {
+        if is_newer_local(ctx, obj, save_id) || is_newer_gstate(obj, gstate_store_floor) {
             return Err(PsError::InvalidRestore);
         }
     }
     // Check execution stack
     for obj in ctx.e_stack.as_slice() {
-        if is_newer_local(ctx, obj, save_id) {
+        if is_newer_local(ctx, obj, save_id) || is_newer_gstate(obj, gstate_store_floor) {
             return Err(PsError::InvalidRestore);
         }
     }
@@ -117,6 +131,14 @@ fn is_newer_local(ctx: &Context, obj: &PsObject, save_id: u32) -> bool {
         }
         _ => false,
     }
+}
+
+/// Check if `obj` is a `gstate` object created after the save being restored.
+///
+/// Kept separate from [`is_newer_local`] because the lifetime test is an index
+/// against `gstate_store` rather than an `EntityMeta` lookup.
+fn is_newer_gstate(obj: &PsObject, gstate_store_floor: usize) -> bool {
+    matches!(obj.value, PsValue::Gstate(idx) if idx as usize >= gstate_store_floor)
 }
 
 /// `vmstatus`: — → level used max (report VM memory state)

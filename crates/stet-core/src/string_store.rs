@@ -123,6 +123,8 @@ impl StringStore {
             created_after_save,
         );
 
+        self.entities.get_mut(copy_id).set_cow_backup();
+
         // Update the original entity to point at the NEW copy
         self.entities.get_mut(entity).offset = new_offset;
 

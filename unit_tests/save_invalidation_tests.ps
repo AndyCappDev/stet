@@ -151,3 +151,26 @@ s restore
 % systemdict is global, so anything the interpreter stores into it must be
 % global too or it is a PLRM 3.7.2 violation the audit would flag.
 version /gcheck [true] assert
+
+%% a gstate object created after the save invalidates the restore %%
+% PLRM 3.7.3.2: a composite in local VM newer than the snapshot, still
+% reachable from a stack, makes restore fail. `gstate` objects index
+% Context::gstate_store, which restore rewinds — so a surviving one would
+% otherwise name a graphics state whose fonts and colour spaces are gone.
+% A failed restore leaves its operands behind, so latch the result before
+% clearing.
+/s save def
+{ gstate s restore } stopped /r exch def
+clear
+r [true] assert
+
+%% a gstate object that does not survive the save leaves restore alone %%
+/s save def
+{ gstate pop s restore } stopped /r exch def
+clear
+r [false] assert
+
+%% gstate outside any save bracket still round-trips %%
+{ gsave gstate setgstate grestore } stopped /r exch def
+clear
+r [false] assert

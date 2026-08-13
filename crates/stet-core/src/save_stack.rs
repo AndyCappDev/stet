@@ -29,6 +29,32 @@ pub struct SaveRecord {
     pub store_type: StoreType,
 }
 
+/// Interpreter state captured by `save` and reinstated by `restore`.
+///
+/// Grouped into a struct rather than passed positionally: every field is
+/// state the interpreter has to rewind, and the set grows as more of the
+/// interpreter learns to participate in save/restore.
+pub struct SaveSnapshot {
+    /// `d_stack` length at save time (for restore validation).
+    pub d_stack_depth: usize,
+    /// Packing mode (`setpacking`/`currentpacking`).
+    pub packing_mode: bool,
+    /// VM allocation mode (`setglobal`/`currentglobal`).
+    pub vm_alloc_mode: bool,
+    /// Binary object format (`setobjectformat`/`currentobjectformat`).
+    pub object_format: i32,
+    /// Graphics state and graphics state stack.
+    pub gstate: GraphicsState,
+    pub gstate_stack: Vec<GstateEntry>,
+    /// `Context::gstate_store` length at save time.
+    ///
+    /// `gstate_store` backs `PsValue::Gstate`, and a `gstate` object is a
+    /// composite in local VM, so `restore` has to reclaim the ones created
+    /// after the save. Without this the store would grow monotonically and
+    /// each stale slot would keep naming entities the restore released.
+    pub gstate_store_len: usize,
+}
+
 /// One save level's state.
 pub struct SaveLevel {
     /// Numeric level (1-based, 0 = no save active).
@@ -50,6 +76,13 @@ pub struct SaveLevel {
     /// Saved graphics state and graphics state stack.
     pub gstate: GraphicsState,
     pub gstate_stack: Vec<GstateEntry>,
+    /// `Context::gstate_store` length at save time.
+    ///
+    /// `gstate_store` backs `PsValue::Gstate`, and a `gstate` object is a
+    /// composite in local VM, so `restore` has to reclaim the ones created
+    /// after the save. Without this the store would grow monotonically and
+    /// each stale slot would keep naming entities the restore released.
+    pub gstate_store_len: usize,
 }
 
 /// The save/restore stack.
@@ -68,15 +101,16 @@ impl SaveStack {
     }
 
     /// Push a new save level. Returns `(level, save_id)`.
-    pub fn save(
-        &mut self,
-        d_stack_depth: usize,
-        packing_mode: bool,
-        vm_alloc_mode: bool,
-        object_format: i32,
-        gstate: GraphicsState,
-        gstate_stack: Vec<GstateEntry>,
-    ) -> (u16, u32) {
+    pub fn save(&mut self, snapshot: SaveSnapshot) -> (u16, u32) {
+        let SaveSnapshot {
+            d_stack_depth,
+            packing_mode,
+            vm_alloc_mode,
+            object_format,
+            gstate,
+            gstate_stack,
+            gstate_store_len,
+        } = snapshot;
         let level = (self.levels.len() + 1) as u16;
         let save_id = self.next_save_id;
         self.next_save_id += 1;
@@ -91,6 +125,7 @@ impl SaveStack {
             object_format,
             gstate,
             gstate_stack,
+            gstate_store_len,
         });
         (level, save_id)
     }
@@ -175,7 +210,15 @@ mod tests {
         assert_eq!(ss.depth(), 0);
         assert_eq!(ss.current_level(), 0);
 
-        let (level, id) = ss.save(3, false, false, 0, GraphicsState::new(), Vec::new());
+        let (level, id) = ss.save(SaveSnapshot {
+            d_stack_depth: 3,
+            packing_mode: false,
+            vm_alloc_mode: false,
+            object_format: 0,
+            gstate: GraphicsState::new(),
+            gstate_stack: Vec::new(),
+            gstate_store_len: 0,
+        });
         assert_eq!(level, 1);
         assert_eq!(id, 1);
         assert_eq!(ss.depth(), 1);
@@ -185,8 +228,24 @@ mod tests {
     #[test]
     fn test_nested_save() {
         let mut ss = SaveStack::new();
-        let (l1, _) = ss.save(3, false, false, 0, GraphicsState::new(), Vec::new());
-        let (l2, _) = ss.save(3, false, false, 0, GraphicsState::new(), Vec::new());
+        let (l1, _) = ss.save(SaveSnapshot {
+            d_stack_depth: 3,
+            packing_mode: false,
+            vm_alloc_mode: false,
+            object_format: 0,
+            gstate: GraphicsState::new(),
+            gstate_stack: Vec::new(),
+            gstate_store_len: 0,
+        });
+        let (l2, _) = ss.save(SaveSnapshot {
+            d_stack_depth: 3,
+            packing_mode: false,
+            vm_alloc_mode: false,
+            object_format: 0,
+            gstate: GraphicsState::new(),
+            gstate_stack: Vec::new(),
+            gstate_store_len: 0,
+        });
         assert_eq!(l1, 1);
         assert_eq!(l2, 2);
         assert_eq!(ss.depth(), 2);
@@ -196,7 +255,15 @@ mod tests {
     #[test]
     fn test_restore() {
         let mut ss = SaveStack::new();
-        let (_, id1) = ss.save(3, false, false, 0, GraphicsState::new(), Vec::new());
+        let (_, id1) = ss.save(SaveSnapshot {
+            d_stack_depth: 3,
+            packing_mode: false,
+            vm_alloc_mode: false,
+            object_format: 0,
+            gstate: GraphicsState::new(),
+            gstate_stack: Vec::new(),
+            gstate_store_len: 0,
+        });
         ss.add_record(SaveRecord {
             src: EntityId(0),
             copy: EntityId(1),
@@ -212,7 +279,15 @@ mod tests {
     #[test]
     fn test_is_valid() {
         let mut ss = SaveStack::new();
-        let (_, id1) = ss.save(3, false, false, 0, GraphicsState::new(), Vec::new());
+        let (_, id1) = ss.save(SaveSnapshot {
+            d_stack_depth: 3,
+            packing_mode: false,
+            vm_alloc_mode: false,
+            object_format: 0,
+            gstate: GraphicsState::new(),
+            gstate_stack: Vec::new(),
+            gstate_store_len: 0,
+        });
         assert!(ss.is_valid(id1));
         ss.restore();
         assert!(!ss.is_valid(id1));
@@ -221,9 +296,33 @@ mod tests {
     #[test]
     fn test_invalidate_newer() {
         let mut ss = SaveStack::new();
-        let (_, id1) = ss.save(3, false, false, 0, GraphicsState::new(), Vec::new());
-        let (_, id2) = ss.save(3, false, false, 0, GraphicsState::new(), Vec::new());
-        let (_, id3) = ss.save(3, false, false, 0, GraphicsState::new(), Vec::new());
+        let (_, id1) = ss.save(SaveSnapshot {
+            d_stack_depth: 3,
+            packing_mode: false,
+            vm_alloc_mode: false,
+            object_format: 0,
+            gstate: GraphicsState::new(),
+            gstate_stack: Vec::new(),
+            gstate_store_len: 0,
+        });
+        let (_, id2) = ss.save(SaveSnapshot {
+            d_stack_depth: 3,
+            packing_mode: false,
+            vm_alloc_mode: false,
+            object_format: 0,
+            gstate: GraphicsState::new(),
+            gstate_stack: Vec::new(),
+            gstate_store_len: 0,
+        });
+        let (_, id3) = ss.save(SaveSnapshot {
+            d_stack_depth: 3,
+            packing_mode: false,
+            vm_alloc_mode: false,
+            object_format: 0,
+            gstate: GraphicsState::new(),
+            gstate_stack: Vec::new(),
+            gstate_store_len: 0,
+        });
 
         ss.invalidate_newer(id1);
         assert!(ss.is_valid(id1));
@@ -234,7 +333,15 @@ mod tests {
     #[test]
     fn test_add_record_to_current() {
         let mut ss = SaveStack::new();
-        ss.save(3, false, false, 0, GraphicsState::new(), Vec::new());
+        ss.save(SaveSnapshot {
+            d_stack_depth: 3,
+            packing_mode: false,
+            vm_alloc_mode: false,
+            object_format: 0,
+            gstate: GraphicsState::new(),
+            gstate_stack: Vec::new(),
+            gstate_store_len: 0,
+        });
         ss.add_record(SaveRecord {
             src: EntityId(0),
             copy: EntityId(1),
@@ -259,7 +366,15 @@ mod tests {
     #[test]
     fn test_d_stack_depth_snapshot() {
         let mut ss = SaveStack::new();
-        ss.save(5, false, false, 0, GraphicsState::new(), Vec::new());
+        ss.save(SaveSnapshot {
+            d_stack_depth: 5,
+            packing_mode: false,
+            vm_alloc_mode: false,
+            object_format: 0,
+            gstate: GraphicsState::new(),
+            gstate_stack: Vec::new(),
+            gstate_store_len: 0,
+        });
         let level = ss.restore().unwrap();
         assert_eq!(level.d_stack_depth, 5);
     }
@@ -267,10 +382,34 @@ mod tests {
     #[test]
     fn test_unique_save_ids() {
         let mut ss = SaveStack::new();
-        let (_, id1) = ss.save(3, false, false, 0, GraphicsState::new(), Vec::new());
-        let (_, id2) = ss.save(3, false, false, 0, GraphicsState::new(), Vec::new());
+        let (_, id1) = ss.save(SaveSnapshot {
+            d_stack_depth: 3,
+            packing_mode: false,
+            vm_alloc_mode: false,
+            object_format: 0,
+            gstate: GraphicsState::new(),
+            gstate_stack: Vec::new(),
+            gstate_store_len: 0,
+        });
+        let (_, id2) = ss.save(SaveSnapshot {
+            d_stack_depth: 3,
+            packing_mode: false,
+            vm_alloc_mode: false,
+            object_format: 0,
+            gstate: GraphicsState::new(),
+            gstate_stack: Vec::new(),
+            gstate_store_len: 0,
+        });
         ss.restore();
-        let (_, id3) = ss.save(3, false, false, 0, GraphicsState::new(), Vec::new());
+        let (_, id3) = ss.save(SaveSnapshot {
+            d_stack_depth: 3,
+            packing_mode: false,
+            vm_alloc_mode: false,
+            object_format: 0,
+            gstate: GraphicsState::new(),
+            gstate_stack: Vec::new(),
+            gstate_store_len: 0,
+        });
         assert_ne!(id1, id2);
         assert_ne!(id2, id3);
         assert_ne!(id1, id3);
@@ -279,11 +418,35 @@ mod tests {
     #[test]
     fn test_save_level_numbers() {
         let mut ss = SaveStack::new();
-        let (l1, _) = ss.save(3, false, false, 0, GraphicsState::new(), Vec::new());
-        let (l2, _) = ss.save(3, false, false, 0, GraphicsState::new(), Vec::new());
+        let (l1, _) = ss.save(SaveSnapshot {
+            d_stack_depth: 3,
+            packing_mode: false,
+            vm_alloc_mode: false,
+            object_format: 0,
+            gstate: GraphicsState::new(),
+            gstate_stack: Vec::new(),
+            gstate_store_len: 0,
+        });
+        let (l2, _) = ss.save(SaveSnapshot {
+            d_stack_depth: 3,
+            packing_mode: false,
+            vm_alloc_mode: false,
+            object_format: 0,
+            gstate: GraphicsState::new(),
+            gstate_stack: Vec::new(),
+            gstate_store_len: 0,
+        });
         ss.restore();
         // After restoring level 2, next save should be level 2 again
-        let (l3, _) = ss.save(3, false, false, 0, GraphicsState::new(), Vec::new());
+        let (l3, _) = ss.save(SaveSnapshot {
+            d_stack_depth: 3,
+            packing_mode: false,
+            vm_alloc_mode: false,
+            object_format: 0,
+            gstate: GraphicsState::new(),
+            gstate_stack: Vec::new(),
+            gstate_store_len: 0,
+        });
         assert_eq!(l1, 1);
         assert_eq!(l2, 2);
         assert_eq!(l3, 2);

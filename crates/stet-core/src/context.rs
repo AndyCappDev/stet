@@ -961,14 +961,15 @@ impl Context {
         let d_depth = self.d_stack.len();
         let gstate_snapshot = self.gstate.clone();
         let gstate_stack_snapshot = self.gstate_stack.clone();
-        let (_level, save_id) = self.save_stack.save(
-            d_depth,
-            self.packing_mode,
-            self.vm_alloc_mode,
-            self.object_format,
-            gstate_snapshot,
-            gstate_stack_snapshot,
-        );
+        let (_level, save_id) = self.save_stack.save(crate::save_stack::SaveSnapshot {
+            d_stack_depth: d_depth,
+            packing_mode: self.packing_mode,
+            vm_alloc_mode: self.vm_alloc_mode,
+            object_format: self.object_format,
+            gstate: gstate_snapshot,
+            gstate_stack: gstate_stack_snapshot,
+            gstate_store_len: self.gstate_store.len(),
+        });
 
         // Implicit gsave: push current gstate marked as save-created (per PLRM).
         // grestoreall stops at this entry; grestore skips it.
@@ -1032,11 +1033,49 @@ impl Context {
         self.gstate = target.gstate.clone();
         self.gstate_stack = target.gstate_stack.clone();
 
+        // Reclaim gstate objects created after the save. `check_invalidrestore`
+        // has already refused the restore if any of them is still reachable, so
+        // truncating here can only drop slots nothing can name.
+        self.gstate_store.truncate(target.gstate_store_len);
+
         // Restore d_stack depth from the target level
         self.d_stack.truncate(target.d_stack_depth);
 
         self.invalidate_name_cache();
+        self.debug_assert_no_dangling_refs();
         Ok(())
+    }
+
+    /// Panic if anything that survived a `restore` names storage the restore
+    /// released.
+    ///
+    /// Reclaiming local VM means retiring entity ids, and an id that outlives
+    /// its storage is a use-after-free that surfaces as a panic deep in an
+    /// unrelated operator. `check_invalidrestore` is supposed to prevent it by
+    /// raising `invalidrestore` first, but it only scans the operand,
+    /// execution, and dictionary stacks — the graphics state, `gstate_store`,
+    /// and the entity-keyed caches are not covered. This turns the gap from an
+    /// argument into something every debug-build test run checks.
+    ///
+    /// Debug builds only: the sweep is O(size of VM), far too expensive for
+    /// release. On a build where `restore` reclaims nothing it can never fire,
+    /// since no entity id is ever retired.
+    #[inline]
+    fn debug_assert_no_dangling_refs(&self) {
+        #[cfg(debug_assertions)]
+        {
+            let dangling = crate::vm_audit::audit_dangling_refs(self);
+            assert!(
+                dangling.is_empty(),
+                "restore left {} dangling reference(s):\n  {}",
+                dangling.len(),
+                dangling
+                    .iter()
+                    .map(|d| d.to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n  ")
+            );
+        }
     }
 
     // --- COW check methods ---
@@ -1335,5 +1374,41 @@ mod tests {
         let mut ctx = Context::new();
         // Restore without save
         assert_eq!(ctx.vm_restore(999), Err(PsError::InvalidRestore));
+    }
+
+    /// The debug-build guard has to actually fire, or it is decoration. On a
+    /// build where `restore` reclaims nothing there is no natural way to
+    /// produce a retired id, so plant one directly: `form_cache` is keyed by
+    /// entity and is not rewound by `restore`.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "dangling reference")]
+    fn vm_restore_rejects_a_dangling_reference() {
+        let mut ctx = Context::new();
+        let save_obj = ctx.vm_save();
+        let save_id = match save_obj.value {
+            PsValue::Save(SaveLevel(id)) => id,
+            _ => panic!("Expected Save"),
+        };
+        let retired = EntityId(ctx.dicts.local.entities.len() as u32);
+        ctx.form_cache.insert(retired, DisplayList::new());
+        let _ = ctx.vm_restore(save_id);
+    }
+
+    /// `gstate` objects index `gstate_store`, which `restore` now rewinds to
+    /// its length at save time.
+    #[test]
+    fn restore_rewinds_gstate_store() {
+        let mut ctx = Context::new();
+        ctx.gstate_store.push(ctx.gstate.clone());
+        let save_obj = ctx.vm_save();
+        let save_id = match save_obj.value {
+            PsValue::Save(SaveLevel(id)) => id,
+            _ => panic!("Expected Save"),
+        };
+        ctx.gstate_store.push(ctx.gstate.clone());
+        assert_eq!(ctx.gstate_store.len(), 2);
+        ctx.vm_restore(save_id).unwrap();
+        assert_eq!(ctx.gstate_store.len(), 1);
     }
 }

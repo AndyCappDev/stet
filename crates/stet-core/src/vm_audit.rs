@@ -234,7 +234,14 @@ impl std::fmt::Display for DanglingRef {
 }
 
 /// Entity table length for the store `obj` lives in, or `None` for simples.
+///
+/// `Gstate` is included even though it indexes `Context::gstate_store` rather
+/// than an entity table: `restore` rewinds that store too, so a surviving
+/// `gstate` object can outlive its slot in exactly the same way.
 fn table_len_for(ctx: &Context, obj: &PsObject) -> Option<(usize, usize)> {
+    if let PsValue::Gstate(idx) = obj.value {
+        return Some((idx as usize, ctx.gstate_store.len()));
+    }
     let (entity, len) = match obj.value {
         PsValue::String { entity, .. } => (
             entity,
@@ -265,6 +272,115 @@ fn table_len_for(ctx: &Context, obj: &PsObject) -> Option<(usize, usize)> {
     Some((entity.raw_index(), len))
 }
 
+/// Walk a colour space for entity references, recursing through the
+/// base/alternative spaces that `Indexed`, `Separation`, and `DeviceN` nest.
+///
+/// The `match` is deliberately exhaustive: adding a `ColorSpace` variant that
+/// carries an `EntityId` or a `PsObject` should fail to compile here rather
+/// than silently escape the audit.
+fn check_color_space(
+    ctx: &Context,
+    cs: &crate::graphics_state::ColorSpace,
+    holder: &str,
+    slot: &str,
+    out: &mut Vec<DanglingRef>,
+) {
+    use crate::graphics_state::ColorSpace as Cs;
+    match cs {
+        Cs::DeviceGray | Cs::DeviceRGB | Cs::DeviceCMYK => {}
+        Cs::Indexed {
+            base, lookup_proc, ..
+        } => {
+            check_color_space(ctx, base, holder, &format!("{slot}.base"), out);
+            if let Some(p) = lookup_proc {
+                check_ref(ctx, p, holder, format!("{slot}.lookup_proc"), out);
+            }
+        }
+        Cs::CIEBasedABC { dict_entity, .. }
+        | Cs::CIEBasedA { dict_entity, .. }
+        | Cs::CIEBasedDEF { dict_entity, .. }
+        | Cs::CIEBasedDEFG { dict_entity, .. }
+        | Cs::ICCBased { dict_entity, .. } => {
+            check_ref(
+                ctx,
+                &PsObject::dict(*dict_entity),
+                holder,
+                format!("{slot}.dict"),
+                out,
+            );
+        }
+        Cs::Separation {
+            alt_space,
+            tint_transform,
+            ..
+        }
+        | Cs::DeviceN {
+            alt_space,
+            tint_transform,
+            ..
+        } => {
+            check_color_space(ctx, alt_space, holder, &format!("{slot}.alt_space"), out);
+            check_ref(
+                ctx,
+                tint_transform,
+                holder,
+                format!("{slot}.tint_transform"),
+                out,
+            );
+        }
+    }
+}
+
+/// Walk one graphics state for entity references.
+///
+/// A `GraphicsState` is the largest non-VM root the interpreter keeps: fonts,
+/// halftone and transfer procedures, the colour space, and the page device
+/// are all VM objects held by raw handle. `restore` reinstates `gstate` and
+/// `gstate_stack` from the save record, but `gstate_store` — the backing
+/// array for `PsValue::Gstate` objects — is not rewound, so a `gstate`
+/// captured after the save keeps whatever was current when it was taken.
+fn check_gstate(
+    ctx: &Context,
+    gs: &crate::graphics_state::GraphicsState,
+    holder: &str,
+    out: &mut Vec<DanglingRef>,
+) {
+    let one = |obj: &Option<PsObject>, slot: &str, out: &mut Vec<DanglingRef>| {
+        if let Some(o) = obj {
+            check_ref(ctx, o, holder, slot.to_string(), out);
+        }
+    };
+    one(&gs.current_font, "current_font", out);
+    one(&gs.root_font, "root_font", out);
+    one(&gs.screen_proc, "screen_proc", out);
+    one(&gs.halftone, "halftone", out);
+    one(&gs.transfer_function, "transfer_function", out);
+    one(&gs.black_generation, "black_generation", out);
+    one(&gs.undercolor_removal, "undercolor_removal", out);
+    one(&gs.color_rendering, "color_rendering", out);
+
+    if let Some(pd) = gs.page_device {
+        check_ref(
+            ctx,
+            &PsObject::dict(pd),
+            holder,
+            "page_device".to_string(),
+            out,
+        );
+    }
+    if let Some(screens) = &gs.color_screen {
+        for (i, (_, _, proc_obj)) in screens.iter().enumerate() {
+            check_ref(ctx, proc_obj, holder, format!("color_screen[{i}]"), out);
+        }
+    }
+    if let Some(transfers) = &gs.color_transfer {
+        for (i, proc_obj) in transfers.iter().enumerate() {
+            check_ref(ctx, proc_obj, holder, format!("color_transfer[{i}]"), out);
+        }
+    }
+    check_color_space(ctx, &gs.color_space, holder, "color_space", out);
+}
+
 /// Record `obj` in `out` if it points past the end of its entity table.
 fn check_ref(
     ctx: &Context,
@@ -288,14 +404,32 @@ fn check_ref(
 
 /// Find every reference to storage that no longer exists.
 ///
-/// Sweeps both VM arenas plus the interpreter roots that outlive a `restore`
-/// — the operand, execution, and dictionary stacks, and the well-known
-/// dictionary handles cached on [`Context`].
+/// Copy-on-write backup entities are skipped. They are allocated by
+/// `cow_copy` purely so `restore` can swap a composite's contents back, and
+/// are unreachable from PostScript in either state — before the restore they
+/// hold the snapshot, after it the discarded post-save data. Sweeping them
+/// reports every `save`-bracketed mutation as a dangling reference.
+///
+/// Sweeps both VM arenas plus every interpreter root that outlives a
+/// `restore`:
+///
+/// - the operand, execution, and dictionary stacks
+/// - the well-known dictionary handles cached on [`Context`]
+/// - the graphics state, the gstate stack, and `gstate_store`
+/// - the entity-keyed caches (`glyph_caches`, `form_cache`)
+///
+/// The display list and `PatternData` need no coverage: they live in
+/// `stet-graphics`, which does not depend on `stet-core`, so they cannot name
+/// an [`EntityId`] at all. That is a property of the crate graph rather than
+/// of any particular type, and `group_stack` inherits it — its frames hold
+/// display lists.
 ///
 /// This is the companion to [`audit_global_vm`]. That one asks whether global
 /// VM *could* come to hold a dangling reference; this one asks whether
 /// anything at all *already does*. On a build where `restore` reclaims
 /// nothing the result is always empty, because no entity id is ever retired.
+/// [`Context::vm_restore`] asserts it is empty in debug builds, so every
+/// `cargo test` run polices the invariant that lets `restore` truncate.
 pub fn audit_dangling_refs(ctx: &Context) -> Vec<DanglingRef> {
     let mut out = Vec::new();
 
@@ -304,11 +438,14 @@ pub fn audit_dangling_refs(ctx: &Context) -> Vec<DanglingRef> {
         (&ctx.dicts.global, "global dict"),
     ] {
         for (entity, entry) in store.iter_entities() {
+            if store.entities.get(entity).is_cow_backup() {
+                continue;
+            }
             let name = String::from_utf8_lossy(&entry.name);
             let holder = if name.is_empty() {
                 format!("{label} #{}", entity.raw_index())
             } else {
-                format!("{label} {name}")
+                format!("{label} {name} #{}", entity.raw_index())
             };
             for (key, value) in &entry.entries {
                 check_ref(ctx, value, &holder, describe_key(ctx, key), &mut out);
@@ -321,6 +458,9 @@ pub fn audit_dangling_refs(ctx: &Context) -> Vec<DanglingRef> {
         (&ctx.arrays.global, "global array"),
     ] {
         for (entity, elements) in store.iter_entities() {
+            if store.entities.get(entity).is_cow_backup() {
+                continue;
+            }
             let holder = format!("{label} #{}", entity.raw_index());
             for (index, value) in elements.iter().enumerate() {
                 check_ref(ctx, value, &holder, index.to_string(), &mut out);
@@ -358,6 +498,7 @@ pub fn audit_dangling_refs(ctx: &Context) -> Vec<DanglingRef> {
         (ctx.category_registry, "CategoryRegistry"),
         (ctx.user_params, "UserParams"),
         (ctx.system_params, "SystemParams"),
+        (ctx.internaldict, "internaldict"),
     ] {
         check_ref(
             ctx,
@@ -368,12 +509,39 @@ pub fn audit_dangling_refs(ctx: &Context) -> Vec<DanglingRef> {
         );
     }
 
-    if let Some(pd) = ctx.gstate.page_device {
+    // The graphics state and everything that clones it. `gstate_store` backs
+    // `PsValue::Gstate`; unlike `gstate` / `gstate_stack` it is not rewound by
+    // `restore`, so it is the one of the three that can outlive its contents.
+    check_gstate(ctx, &ctx.gstate, "graphics state", &mut out);
+    for (index, entry) in ctx.gstate_stack.iter().enumerate() {
+        check_gstate(
+            ctx,
+            &entry.state,
+            &format!("gstate stack #{index}"),
+            &mut out,
+        );
+    }
+    for (index, state) in ctx.gstate_store.iter().enumerate() {
+        check_gstate(ctx, state, &format!("gstate store #{index}"), &mut out);
+    }
+
+    // Caches keyed by entity id. A stale key is not merely a leak: the next
+    // lookup indexes a truncated entity table with it.
+    for entity in ctx.glyph_caches.keys() {
         check_ref(
             ctx,
-            &PsObject::dict(pd),
-            "graphics state",
-            "page_device".to_string(),
+            &PsObject::dict(*entity),
+            "glyph cache",
+            "key".to_string(),
+            &mut out,
+        );
+    }
+    for entity in ctx.form_cache.keys() {
+        check_ref(
+            ctx,
+            &PsObject::dict(*entity),
+            "form cache",
+            "key".to_string(),
             &mut out,
         );
     }
@@ -482,5 +650,98 @@ mod tests {
             flags: ObjFlags::literal(),
         };
         assert_eq!(local_composite_entity(&named), None);
+    }
+
+    /// An id one past the end of the local dict table — what an entity becomes
+    /// the moment a `restore` truncates past it.
+    fn retired_dict(ctx: &Context) -> PsObject {
+        PsObject::dict(EntityId(ctx.dicts.local.entities.len() as u32))
+    }
+
+    #[test]
+    fn bootstrap_context_has_no_dangling_refs() {
+        assert_eq!(audit_dangling_refs(&Context::new()), Vec::new());
+    }
+
+    #[test]
+    fn gstate_font_reference_is_swept() {
+        let mut ctx = Context::new();
+        ctx.gstate.current_font = Some(retired_dict(&ctx));
+        let found = audit_dangling_refs(&ctx);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].holder, "graphics state");
+        assert_eq!(found[0].slot, "current_font");
+    }
+
+    #[test]
+    fn gstate_stack_and_gstate_store_are_swept() {
+        let mut ctx = Context::new();
+        let stale = retired_dict(&ctx);
+        ctx.gstate_stack.push(crate::graphics_state::GstateEntry {
+            state: ctx.gstate.clone(),
+            saved_by_save: false,
+        });
+        ctx.gstate_stack[0].state.page_device = match stale.value {
+            PsValue::Dict(e) => Some(e),
+            _ => unreachable!(),
+        };
+        ctx.gstate_store.push(ctx.gstate.clone());
+        ctx.gstate_store[0].root_font = Some(stale);
+
+        let holders: Vec<&str> = audit_dangling_refs(&ctx)
+            .iter()
+            .map(|d| Box::leak(d.holder.clone().into_boxed_str()) as &str)
+            .collect();
+        assert!(holders.contains(&"gstate stack #0"), "{holders:?}");
+        assert!(holders.contains(&"gstate store #0"), "{holders:?}");
+    }
+
+    /// The colour space walk has to recurse: a `Separation`'s tint transform
+    /// hangs off the alternative space, not off the gstate directly.
+    #[test]
+    fn nested_color_space_reference_is_swept() {
+        use crate::graphics_state::ColorSpace;
+        let mut ctx = Context::new();
+        let stale_entity = EntityId(ctx.dicts.local.entities.len() as u32);
+        ctx.gstate.color_space = ColorSpace::Separation {
+            name: b"Spot".to_vec(),
+            alt_space: Box::new(ColorSpace::ICCBased {
+                dict_entity: stale_entity,
+                n: 4,
+                profile_hash: None,
+            }),
+            tint_transform: PsObject::null(),
+            num_alt_components: 4,
+        };
+        let found = audit_dangling_refs(&ctx);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].slot, "color_space.alt_space.dict");
+    }
+
+    /// `gstate` objects index `gstate_store`, which `restore` rewinds; a
+    /// surviving one is dangling in the same sense as a retired entity id.
+    #[test]
+    fn stale_gstate_object_is_swept() {
+        let mut ctx = Context::new();
+        let stale = PsObject {
+            value: PsValue::Gstate(0),
+            flags: ObjFlags::literal(),
+        };
+        assert_eq!(ctx.gstate_store.len(), 0);
+        ctx.o_stack.push(stale).unwrap();
+        let found = audit_dangling_refs(&ctx);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].value_type, "gstatetype");
+    }
+
+    #[test]
+    fn entity_keyed_caches_are_swept() {
+        let mut ctx = Context::new();
+        let stale_entity = EntityId(ctx.dicts.local.entities.len() as u32);
+        ctx.form_cache
+            .insert(stale_entity, crate::display_list::DisplayList::new());
+        let found = audit_dangling_refs(&ctx);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].holder, "form cache");
     }
 }

@@ -20,7 +20,8 @@ pub struct EntityMeta {
     pub len: u32,
     /// Save level when created or last COW-copied.
     pub save_level: u16,
-    /// Bit 0: is_global, Bit 1: gc_mark (reserved for future use).
+    /// Bit 0: is_global, Bit 1: gc_mark (reserved for future use),
+    /// Bit 2: cow_backup.
     pub flags: u8,
     /// Save ID that was active when this entity was created (0 = before any save).
     /// Used for invalidrestore: entities with created_after_save >= target_save_id
@@ -30,6 +31,7 @@ pub struct EntityMeta {
 
 impl EntityMeta {
     const FLAG_GLOBAL: u8 = 1;
+    const FLAG_COW_BACKUP: u8 = 1 << 2;
 
     /// Check if this entity is in global VM.
     pub fn is_global(&self) -> bool {
@@ -43,6 +45,22 @@ impl EntityMeta {
         } else {
             self.flags &= !Self::FLAG_GLOBAL;
         }
+    }
+
+    /// Whether this entity is a copy-on-write backup rather than live data.
+    ///
+    /// `cow_copy` allocates one of these to hold a composite's pre-mutation
+    /// contents so `restore` can swap them back. It is never reachable from
+    /// PostScript in either state: before the restore it holds the snapshot,
+    /// after it holds the discarded post-save data. Whole-arena sweeps that
+    /// reason about reachability — see [`crate::vm_audit`] — must skip it.
+    pub fn is_cow_backup(&self) -> bool {
+        self.flags & Self::FLAG_COW_BACKUP != 0
+    }
+
+    /// Mark this entity as a copy-on-write backup.
+    pub fn set_cow_backup(&mut self) {
+        self.flags |= Self::FLAG_COW_BACKUP;
     }
 }
 

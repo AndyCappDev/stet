@@ -237,6 +237,8 @@ impl DictStore {
             created_after_save,
         );
 
+        self.entities.get_mut(backup_id).set_cow_backup();
+
         // Original entity now points to new copy
         self.entities.get_mut(entity).offset = new_index;
 
