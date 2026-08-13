@@ -35,6 +35,24 @@ userdict /$unittest known not {(unit_tests/unittest.ps) run} if
 % bind returns same array (modifies in place)
 /myproc {add} def /myproc load bind /myproc load eq [true] assert
 
+% bind terminates on a cyclic procedure graph.
+%
+% The knot-tying idiom below is how a recursive procedure is written under //
+% immediate evaluation: //Name requires Name to be bound already, so a stub is
+% inlined and back-patched once the real procedure exists. Ghostscript's
+% opdfread.ps prolog — emitted into every ps2write/eps2write file — builds
+% exactly this, and a bind that recurses naively never terminates.
+/Rec { 0 exec } bind def
+/Outer { //Rec exec } bind def
+//Rec 0 //Outer put
+/Trigger { //Outer exec } bind def
+{ //Outer exec } bind type /arraytype eq [true] assert
+
+% The cycle must not have disturbed access attributes: PLRM says bind makes
+% nested procedures read-only, but real interpreters leave them writable —
+% the back-patching put above depends on it.
+//Rec wcheck [true] assert
+
 % bind stack underflow
 /bind [/stackunderflow] assert
 

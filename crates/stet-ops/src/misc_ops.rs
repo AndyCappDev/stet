@@ -4,6 +4,7 @@
 
 //! Miscellaneous operators: bind, run, handleerror, join, and internal stubs.
 
+use std::collections::HashSet;
 use std::io::Write;
 
 use stet_core::context::Context;
@@ -27,48 +28,92 @@ pub fn op_bind(ctx: &mut Context) -> Result<(), PsError> {
     }
 }
 
-fn bind_procedure(ctx: &mut Context, entity: stet_core::object::EntityId, start: u32, len: u32) {
-    let mut needs_cow = false;
-    // First pass: check if any names will be replaced
-    for i in 0..len {
-        let elem = ctx.arrays.get_element(entity, start + i);
-        if let PsValue::Name(name_id) = elem.value
-            && elem.flags.is_executable()
-        {
-            let key = DictKey::Name(name_id);
-            if let Some(val) = ctx.dict_load(&key)
-                && matches!(val.value, PsValue::Operator(_))
-            {
-                needs_cow = true;
-                break;
-            }
-        }
-    }
-    if needs_cow {
-        ctx.cow_check_array(entity);
-    }
+/// Walk `proc` and every procedure nested within it, replacing executable
+/// operator names with the operator objects themselves.
+///
+/// The traversal is an explicit worklist rather than native recursion, and
+/// every procedure is visited at most once.
+///
+/// Both properties are load-bearing. A procedure graph may legitimately
+/// contain a *cycle*: the standard idiom for writing a recursive procedure
+/// under `//` immediate evaluation is to inline a stub and back-patch it once
+/// the real procedure exists —
+///
+/// ```postscript
+/// /Rec   { 0 exec }     bind def   % element 0 is a placeholder
+/// /Outer { //Rec exec } bind def   % inlines the Rec array
+/// //Rec 0 //Outer put              % patch Rec[0] := Outer, closing the loop
+/// ```
+///
+/// Ghostscript's `opdfread.ps` prolog — emitted into *every* file produced by
+/// its `ps2write` and `eps2write` devices — uses exactly this construction, so
+/// naive recursion here overflows the native stack on all such input.
+///
+/// PLRM (3rd ed., `bind`) states that bind makes each nested procedure
+/// read-only and thereafter ignores read-only arrays, which would terminate
+/// the walk. Real interpreters do not implement that: under the strict
+/// reading, the `put` above would raise `invalidaccess`, and Ghostscript
+/// demonstrably leaves nested procedures writable and completes the bind. We
+/// follow observable Ghostscript behaviour — terminate on revisiting a
+/// procedure, leave access attributes untouched — because marking read-only
+/// would merely trade a crash for a spurious error on the same files.
+///
+/// Revisiting is safe to skip: binding is idempotent, since a second pass over
+/// an already-bound procedure finds operator objects rather than executable
+/// names and would make no further change.
+fn bind_procedure(ctx: &mut Context, entity: EntityId, start: u32, len: u32) {
+    let mut visited: HashSet<(EntityId, u32, u32)> = HashSet::new();
+    let mut work: Vec<(EntityId, u32, u32)> = Vec::new();
 
-    for i in 0..len {
-        let elem = ctx.arrays.get_element(entity, start + i);
-        match elem.value {
-            PsValue::Name(name_id) if elem.flags.is_executable() => {
-                // Look up in dict stack — if it's an operator, replace
+    visited.insert((entity, start, len));
+    work.push((entity, start, len));
+
+    while let Some((entity, start, len)) = work.pop() {
+        let mut needs_cow = false;
+        // First pass: check if any names will be replaced
+        for i in 0..len {
+            let elem = ctx.arrays.get_element(entity, start + i);
+            if let PsValue::Name(name_id) = elem.value
+                && elem.flags.is_executable()
+            {
                 let key = DictKey::Name(name_id);
                 if let Some(val) = ctx.dict_load(&key)
                     && matches!(val.value, PsValue::Operator(_))
                 {
-                    ctx.arrays.set_element(entity, start + i, val);
+                    needs_cow = true;
+                    break;
                 }
             }
-            PsValue::Array {
-                entity: sub_e,
-                start: sub_s,
-                len: sub_l,
-            } if elem.flags.is_executable() => {
-                // Recursively bind nested procedures
-                bind_procedure(ctx, sub_e, sub_s, sub_l);
+        }
+        if needs_cow {
+            ctx.cow_check_array(entity);
+        }
+
+        for i in 0..len {
+            let elem = ctx.arrays.get_element(entity, start + i);
+            match elem.value {
+                PsValue::Name(name_id) if elem.flags.is_executable() => {
+                    // Look up in dict stack — if it's an operator, replace
+                    let key = DictKey::Name(name_id);
+                    if let Some(val) = ctx.dict_load(&key)
+                        && matches!(val.value, PsValue::Operator(_))
+                    {
+                        ctx.arrays.set_element(entity, start + i, val);
+                    }
+                }
+                PsValue::Array {
+                    entity: sub_e,
+                    start: sub_s,
+                    len: sub_l,
+                } if elem.flags.is_executable() => {
+                    // Queue nested procedures; skip any already walked so a
+                    // cyclic or heavily shared graph terminates.
+                    if visited.insert((sub_e, sub_s, sub_l)) {
+                        work.push((sub_e, sub_s, sub_l));
+                    }
+                }
+                _ => {}
             }
-            _ => {}
         }
     }
 }
@@ -1425,6 +1470,54 @@ mod tests {
         ctx.o_stack.push(PsObject::int(42)).unwrap();
         let err = op_bind(&mut ctx).unwrap_err();
         assert_eq!(err, PsError::TypeCheck);
+    }
+
+    /// `bind` must terminate on a procedure graph that contains a cycle.
+    ///
+    /// Builds the knot Ghostscript's `opdfread.ps` prolog constructs:
+    /// `outer` contains `inner`, and `inner`'s element 0 is `outer`. Before
+    /// the worklist rewrite this recursed until the native stack overflowed,
+    /// aborting the process on every file `ps2write` emits.
+    #[test]
+    fn test_bind_terminates_on_cyclic_procedure() {
+        let mut ctx = test_ctx();
+
+        // inner = { 0 } — element 0 is a placeholder to be patched.
+        let inner = ctx.arrays.allocate_from(&[PsObject::int(0)]);
+        // outer = { inner } — holds inner as a nested executable procedure.
+        let mut inner_proc = PsObject::array(inner, 1);
+        inner_proc.flags = ObjFlags::executable_composite();
+        let outer = ctx.arrays.allocate_from(&[inner_proc]);
+
+        // Close the loop: inner[0] := outer.
+        let mut outer_proc = PsObject::array(outer, 1);
+        outer_proc.flags = ObjFlags::executable_composite();
+        ctx.arrays.set_element(inner, 0, outer_proc);
+
+        ctx.o_stack.push(outer_proc).unwrap();
+        assert!(op_bind(&mut ctx).is_ok());
+        // The procedure is left on the stack, unchanged in identity.
+        assert_eq!(ctx.o_stack.len(), 1);
+    }
+
+    /// A procedure that reaches the same subsidiary procedure by two distinct
+    /// paths must be walked once, not once per path — otherwise a shared
+    /// (acyclic) graph costs exponential time.
+    #[test]
+    fn test_bind_visits_shared_subprocedure_once() {
+        let mut ctx = test_ctx();
+
+        let shared = ctx.arrays.allocate_from(&[PsObject::int(1)]);
+        let mut shared_proc = PsObject::array(shared, 1);
+        shared_proc.flags = ObjFlags::executable_composite();
+
+        let parent = ctx.arrays.allocate_from(&[shared_proc, shared_proc]);
+        let mut parent_proc = PsObject::array(parent, 2);
+        parent_proc.flags = ObjFlags::executable_composite();
+
+        ctx.o_stack.push(parent_proc).unwrap();
+        assert!(op_bind(&mut ctx).is_ok());
+        assert_eq!(ctx.o_stack.len(), 1);
     }
 
     #[test]
