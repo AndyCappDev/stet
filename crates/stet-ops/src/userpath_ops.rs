@@ -321,7 +321,7 @@ pub fn op_upath(ctx: &mut Context) -> Result<(), PsError> {
     }
 
     let len = elems.len() as u32;
-    let entity = ctx.arrays.allocate_from(&elems);
+    let entity = crate::vm_ops::alloc_array_from(ctx, &elems);
     ctx.o_stack.push(PsObject::procedure(entity, len))?;
     Ok(())
 }

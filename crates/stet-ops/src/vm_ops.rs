@@ -192,8 +192,21 @@ pub fn op_vmreclaim(ctx: &mut Context) -> Result<(), PsError> {
 
 /// Helper: allocate a string in the current VM mode (global or local).
 pub fn alloc_string(ctx: &mut Context, bytes: &[u8]) -> stet_core::object::EntityId {
-    let save_level = ctx.save_stack.current_level();
     let global = ctx.vm_alloc_mode;
+    alloc_string_in(ctx, bytes, global)
+}
+
+/// Helper: allocate a string in an explicitly chosen VM.
+///
+/// Use this instead of [`alloc_string`] when the string is about to be stored
+/// into a container whose VM is already fixed. See [`alloc_array_from_in`] for
+/// why following the ambient `currentglobal` is wrong in that case.
+pub fn alloc_string_in(
+    ctx: &mut Context,
+    bytes: &[u8],
+    global: bool,
+) -> stet_core::object::EntityId {
+    let save_level = ctx.save_stack.current_level();
     let created = ctx.save_stack.last_save_id();
     let entity = ctx
         .strings
@@ -214,8 +227,16 @@ pub fn alloc_string_empty(ctx: &mut Context, len: usize) -> stet_core::object::E
 
 /// Helper: allocate an array in the current VM mode.
 pub fn alloc_array(ctx: &mut Context, len: usize) -> stet_core::object::EntityId {
-    let save_level = ctx.save_stack.current_level();
     let global = ctx.vm_alloc_mode;
+    alloc_array_in(ctx, len, global)
+}
+
+/// Helper: allocate a null-filled array in an explicitly chosen VM.
+///
+/// Use this instead of [`alloc_array`] when the array is about to be stored
+/// into a container whose VM is already fixed. See [`alloc_array_from_in`].
+pub fn alloc_array_in(ctx: &mut Context, len: usize, global: bool) -> stet_core::object::EntityId {
+    let save_level = ctx.save_stack.current_level();
     let created = ctx.save_stack.last_save_id();
     ctx.arrays.allocate_with(len, save_level, global, created)
 }
@@ -431,14 +452,14 @@ mod tests {
 
         let inner_arr = ctx
             .arrays
-            .allocate_from(&[PsObject::int(612), PsObject::int(792)]);
-        let inner_dict = ctx.dicts.allocate(4, b"inner");
-        let s_entity = ctx.strings.allocate_from(b"hello");
+            .allocate_from_at_level_zero(&[PsObject::int(612), PsObject::int(792)]);
+        let inner_dict = ctx.dicts.allocate_at_level_zero(4, b"inner");
+        let s_entity = ctx.strings.allocate_from_at_level_zero(b"hello");
         let k_page = ctx.names.intern(b"PageSize");
         let k_sub = ctx.names.intern(b"Sub");
         let k_str = ctx.names.intern(b"Note");
 
-        let outer = ctx.dicts.allocate(8, b"pagedevice");
+        let outer = ctx.dicts.allocate_at_level_zero(8, b"pagedevice");
         ctx.dicts
             .put(outer, DictKey::Name(k_page), PsObject::array(inner_arr, 2));
         ctx.dicts
@@ -498,12 +519,12 @@ mod tests {
     #[test]
     fn test_promote_to_global_handles_cycles_and_sharing() {
         let mut ctx = test_ctx();
-        let d = ctx.dicts.allocate(4, b"cyclic");
+        let d = ctx.dicts.allocate_at_level_zero(4, b"cyclic");
         let k_self = ctx.names.intern(b"Self");
         ctx.dicts.put(d, DictKey::Name(k_self), PsObject::dict(d));
 
         // The same array reached by two keys must stay one array afterwards.
-        let shared = ctx.arrays.allocate_from(&[PsObject::int(1)]);
+        let shared = ctx.arrays.allocate_from_at_level_zero(&[PsObject::int(1)]);
         let k_a = ctx.names.intern(b"A");
         let k_b = ctx.names.intern(b"B");
         ctx.dicts

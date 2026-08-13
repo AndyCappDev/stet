@@ -259,8 +259,15 @@ pub struct Context {
     pub user_params: EntityId,
     pub system_params: EntityId,
 
-    // Internal dict (lazily created for `internaldict` operator)
-    pub internaldict: Option<EntityId>,
+    /// Backing dict for the `internaldict` operator.
+    ///
+    /// Created during bootstrap rather than on first use. `Context` holds the
+    /// `EntityId` for the whole life of the interpreter, so the dict has to
+    /// outlive every `restore`; creating it lazily inside a save bracket would
+    /// leave this handle pointing at storage that `restore` reclaims. Entries
+    /// written into it after a `save` are still reverted normally, by the
+    /// dict's own copy-on-write.
+    pub internaldict: EntityId,
 
     // ICC color profile cache
     pub icc_cache: crate::icc::IccCache,
@@ -443,22 +450,29 @@ impl Context {
         // Only systemdict is pre-allocated in Rust — it's needed to register native
         // operators. All other well-known dicts (globaldict, userdict, errordict, $error,
         // FontDirectory) are created by the init scripts in sysdict.ps.
+        //
+        // `allocate_at_level_zero` is correct here and only here: no `save` can be
+        // outstanding during bootstrap, so `save_level = 0` / `created_after_save = 0`
+        // is the truth rather than a mis-stamp, and these entities sit below every
+        // future save's high-water mark. Everywhere else, use the VM-aware helpers in
+        // `stet_ops::vm_ops`.
         let systemdict = dicts.allocate_with(400, b"systemdict", 0, true, 0);
         let globaldict = dicts.allocate_with(100, b"globaldict", 0, true, 0);
-        let userdict = dicts.allocate(200, b"userdict");
-        let errordict = dicts.allocate(50, b"errordict");
-        let dollar_error = dicts.allocate(20, b"$error");
-        let font_directory = dicts.allocate(50, b"FontDirectory");
+        let userdict = dicts.allocate_at_level_zero(200, b"userdict");
+        let errordict = dicts.allocate_at_level_zero(50, b"errordict");
+        let dollar_error = dicts.allocate_at_level_zero(20, b"$error");
+        let font_directory = dicts.allocate_at_level_zero(50, b"FontDirectory");
 
         // Resource system dicts (global VM)
         let global_resources = dicts.allocate_with(20, b"GlobalResources", 0, true, 0);
-        let local_resources = dicts.allocate(20, b"LocalResources");
+        let local_resources = dicts.allocate_at_level_zero(20, b"LocalResources");
+        let internaldict = dicts.allocate_at_level_zero(50, b"internaldict");
         let category_registry = dicts.allocate_with(30, b"CategoryRegistry", 0, true, 0);
 
         // Parameter dicts — pre-populate user_params with recognized keys.
         // setuserparams only updates existing keys; unknown keys are
         // ignored per PLRM.
-        let user_params = dicts.allocate(25, b"UserParams");
+        let user_params = dicts.allocate_at_level_zero(25, b"UserParams");
         for key_name in [
             "MaxDictStack",
             "MaxExecStack",
@@ -484,7 +498,7 @@ impl Context {
         dicts.put(
             user_params,
             DictKey::Name(names.intern(b"JobName")),
-            PsObject::string(strings.allocate_from(b""), 0),
+            PsObject::string(strings.allocate_from_at_level_zero(b""), 0),
         );
         dicts.put(
             user_params,
@@ -512,7 +526,7 @@ impl Context {
             PsObject::int(0),
         );
 
-        let system_params = dicts.allocate(30, b"SystemParams");
+        let system_params = dicts.allocate_at_level_zero(30, b"SystemParams");
         // Cache size limits (PLRM Table C.2 - system parameters)
         for (key, val) in [
             ("MaxFontCache", 67108864),
@@ -544,25 +558,25 @@ impl Context {
                 PsObject::int(val),
             );
         }
-        let printer_str = strings.allocate_from(b"stet");
+        let printer_str = strings.allocate_from_at_level_zero(b"stet");
         dicts.put(
             system_params,
             DictKey::Name(names.intern(b"PrinterName")),
             PsObject::string(printer_str, 6),
         );
-        let realfmt_str = strings.allocate_from(b"IEE");
+        let realfmt_str = strings.allocate_from_at_level_zero(b"IEE");
         dicts.put(
             system_params,
             DictKey::Name(names.intern(b"RealFormat")),
             PsObject::string(realfmt_str, 3),
         );
-        let pw_str = strings.allocate_from(b"0");
+        let pw_str = strings.allocate_from_at_level_zero(b"0");
         dicts.put(
             system_params,
             DictKey::Name(names.intern(b"SystemParamsPassword")),
             PsObject::string(pw_str, 1),
         );
-        let pw_str2 = strings.allocate_from(b"0");
+        let pw_str2 = strings.allocate_from_at_level_zero(b"0");
         dicts.put(
             system_params,
             DictKey::Name(names.intern(b"StartJobPassword")),
@@ -715,7 +729,7 @@ impl Context {
             resource_base_path: None,
             user_params,
             system_params,
-            internaldict: None,
+            internaldict,
             icc_cache: crate::icc::IccCache::new(),
             exec_sync_fn: None,
             char_width: None,
@@ -1276,7 +1290,7 @@ mod tests {
     fn test_save_restore_string() {
         let mut ctx = Context::new();
 
-        let entity = ctx.strings.allocate_from(b"hello");
+        let entity = ctx.strings.allocate_from_at_level_zero(b"hello");
 
         // Save
         let save_obj = ctx.vm_save();
@@ -1300,7 +1314,7 @@ mod tests {
         let mut ctx = Context::new();
 
         let items = [PsObject::int(1), PsObject::int(2), PsObject::int(3)];
-        let entity = ctx.arrays.allocate_from(&items);
+        let entity = ctx.arrays.allocate_from_at_level_zero(&items);
 
         let save_obj = ctx.vm_save();
         let save_id = match save_obj.value {

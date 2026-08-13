@@ -496,7 +496,7 @@ pub fn op_composefont(ctx: &mut Context) -> Result<(), PsError> {
     {
         e
     } else {
-        let d = ctx.dicts.allocate(20, b"font_res_cat");
+        let d = crate::vm_ops::alloc_dict(ctx, 20, b"font_res_cat");
         ctx.dicts.put(res_dict, font_cat_key, PsObject::dict(d));
         d
     };
@@ -580,9 +580,8 @@ fn copy_font_with_matrix(
 
     // Create a shallow copy of the font dict
     // We copy all entries from the original dict to a new dict
-    let new_dict = ctx
-        .dicts
-        .allocate(ctx.dicts.max_length(font_entity), b"font");
+    let new_max = ctx.dicts.max_length(font_entity);
+    let new_dict = crate::vm_ops::alloc_dict(ctx, new_max, b"font");
 
     // Copy all entries
     let keys: Vec<DictKey> = ctx.dicts.keys(font_entity).cloned().collect();
@@ -598,7 +597,8 @@ fn copy_font_with_matrix(
         .iter()
         .map(|&v| PsObject::real(v))
         .collect();
-    let new_fm_entity = ctx.arrays.allocate_from(&new_fm_items);
+    let new_fm_entity =
+        crate::vm_ops::alloc_array_from_in(ctx, &new_fm_items, new_dict.is_global());
     ctx.dicts
         .put(new_dict, fm_key, PsObject::array(new_fm_entity, 6));
 
@@ -625,12 +625,12 @@ mod tests {
 
     fn make_simple_font(ctx: &mut Context) -> PsObject {
         // Create a minimal font dict for testing
-        let font_dict = ctx.dicts.allocate(20, b"TestFont");
+        let font_dict = ctx.dicts.allocate_at_level_zero(20, b"TestFont");
 
         // FontMatrix [0.001 0 0 0.001 0 0]
         let fm = [0.001, 0.0, 0.0, 0.001, 0.0, 0.0];
         let fm_items: Vec<PsObject> = fm.iter().map(|&v| PsObject::real(v)).collect();
-        let fm_entity = ctx.arrays.allocate_from(&fm_items);
+        let fm_entity = ctx.arrays.allocate_from_at_level_zero(&fm_items);
         ctx.dicts.put(
             font_dict,
             DictKey::Name(ctx.name_cache.n_font_matrix),
@@ -796,7 +796,7 @@ mod tests {
             PsObject::real(0.0),
             PsObject::real(0.0),
         ];
-        let mat_entity = ctx.arrays.allocate_from(&mat_items);
+        let mat_entity = ctx.arrays.allocate_from_at_level_zero(&mat_items);
 
         ctx.o_stack.push(font).unwrap();
         ctx.o_stack.push(PsObject::array(mat_entity, 6)).unwrap();

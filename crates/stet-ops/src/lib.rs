@@ -796,7 +796,7 @@ pub fn build_system_dict(ctx: &mut Context) {
     setup_errordict(ctx);
 
     // --- Version string ---
-    let version_entity = ctx.strings.allocate_from(b"0.1.0");
+    let version_entity = vm_ops::alloc_string_in(ctx, b"0.1.0", true);
     let version_obj = PsObject::string(version_entity, 5);
     let version_name = ctx.names.intern(b"version");
     ctx.dicts.put(sd, DictKey::Name(version_name), version_obj);
@@ -899,7 +899,7 @@ fn setup_errordict(ctx: &mut Context) {
     for name in &error_names {
         let name_id = ctx.names.intern(name.as_bytes());
         // Create a 1-element procedure containing `stop`
-        let entity = ctx.arrays.allocate_from(&[stop_obj]);
+        let entity = vm_ops::alloc_array_from_in(ctx, &[stop_obj], ed.is_global());
         let proc_obj = PsObject::procedure(entity, 1);
         ctx.dicts.put(ed, DictKey::Name(name_id), proc_obj);
     }

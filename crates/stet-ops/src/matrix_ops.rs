@@ -511,7 +511,7 @@ mod tests {
     fn test_identmatrix() {
         let mut ctx = setup();
         // Create a 6-element array with non-identity values
-        let entity = ctx.arrays.allocate_from(&[
+        let entity = ctx.arrays.allocate_from_at_level_zero(&[
             PsObject::real(2.0),
             PsObject::real(0.0),
             PsObject::real(0.0),
@@ -536,7 +536,7 @@ mod tests {
         ctx.gstate.ctm = Matrix::new(2.0, 0.0, 0.0, 3.0, 10.0, 20.0);
 
         // currentmatrix
-        let entity = ctx.arrays.allocate(6);
+        let entity = ctx.arrays.allocate_at_level_zero(6);
         let arr = PsObject::array(entity, 6);
         ctx.o_stack.push(arr).unwrap();
         op_currentmatrix(&mut ctx).unwrap();
@@ -570,7 +570,7 @@ mod tests {
     #[test]
     fn test_translate_matrix_form() {
         let mut ctx = setup();
-        let entity = ctx.arrays.allocate(6);
+        let entity = ctx.arrays.allocate_at_level_zero(6);
         let arr = PsObject::array(entity, 6);
         ctx.o_stack.push(PsObject::real(10.0)).unwrap();
         ctx.o_stack.push(PsObject::real(20.0)).unwrap();
@@ -611,7 +611,7 @@ mod tests {
     #[test]
     fn test_concat() {
         let mut ctx = setup();
-        let entity = ctx.arrays.allocate_from(&[
+        let entity = ctx.arrays.allocate_from_at_level_zero(&[
             PsObject::real(2.0),
             PsObject::real(0.0),
             PsObject::real(0.0),
@@ -631,7 +631,7 @@ mod tests {
     fn test_concatmatrix() {
         let mut ctx = setup();
         // m1 = translate(10, 0)
-        let e1 = ctx.arrays.allocate_from(&[
+        let e1 = ctx.arrays.allocate_from_at_level_zero(&[
             PsObject::real(1.0),
             PsObject::real(0.0),
             PsObject::real(0.0),
@@ -640,7 +640,7 @@ mod tests {
             PsObject::real(0.0),
         ]);
         // m2 = scale(2, 2)
-        let e2 = ctx.arrays.allocate_from(&[
+        let e2 = ctx.arrays.allocate_from_at_level_zero(&[
             PsObject::real(2.0),
             PsObject::real(0.0),
             PsObject::real(0.0),
@@ -648,7 +648,7 @@ mod tests {
             PsObject::real(0.0),
             PsObject::real(0.0),
         ]);
-        let e3 = ctx.arrays.allocate(6);
+        let e3 = ctx.arrays.allocate_at_level_zero(6);
 
         ctx.o_stack.push(PsObject::array(e1, 6)).unwrap();
         ctx.o_stack.push(PsObject::array(e2, 6)).unwrap();
@@ -667,7 +667,7 @@ mod tests {
     #[test]
     fn test_invertmatrix() {
         let mut ctx = setup();
-        let e1 = ctx.arrays.allocate_from(&[
+        let e1 = ctx.arrays.allocate_from_at_level_zero(&[
             PsObject::real(2.0),
             PsObject::real(0.0),
             PsObject::real(0.0),
@@ -675,7 +675,7 @@ mod tests {
             PsObject::real(10.0),
             PsObject::real(20.0),
         ]);
-        let e2 = ctx.arrays.allocate(6);
+        let e2 = ctx.arrays.allocate_at_level_zero(6);
         ctx.o_stack.push(PsObject::array(e1, 6)).unwrap();
         ctx.o_stack.push(PsObject::array(e2, 6)).unwrap();
         op_invertmatrix(&mut ctx).unwrap();
@@ -752,7 +752,7 @@ mod tests {
     #[test]
     fn test_invertmatrix_singular() {
         let mut ctx = setup();
-        let e1 = ctx.arrays.allocate_from(&[
+        let e1 = ctx.arrays.allocate_from_at_level_zero(&[
             PsObject::real(0.0),
             PsObject::real(0.0),
             PsObject::real(0.0),
@@ -760,7 +760,7 @@ mod tests {
             PsObject::real(0.0),
             PsObject::real(0.0),
         ]);
-        let e2 = ctx.arrays.allocate(6);
+        let e2 = ctx.arrays.allocate_at_level_zero(6);
         ctx.o_stack.push(PsObject::array(e1, 6)).unwrap();
         ctx.o_stack.push(PsObject::array(e2, 6)).unwrap();
         assert_eq!(op_invertmatrix(&mut ctx), Err(PsError::UndefinedResult));
@@ -769,7 +769,7 @@ mod tests {
     #[test]
     fn test_transform_matrix_form() {
         let mut ctx = setup();
-        let entity = ctx.arrays.allocate_from(&[
+        let entity = ctx.arrays.allocate_from_at_level_zero(&[
             PsObject::real(2.0),
             PsObject::real(0.0),
             PsObject::real(0.0),

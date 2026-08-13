@@ -4720,7 +4720,7 @@ mod tests {
         };
 
         let hello = b"Hello";
-        let entity = ctx.strings.allocate_from(hello);
+        let entity = ctx.strings.allocate_from_at_level_zero(hello);
         ctx.o_stack
             .push(PsObject::string(entity, hello.len() as u32))
             .unwrap();
@@ -4753,7 +4753,7 @@ mod tests {
         let (start_x, _start_y) = ctx.gstate.current_point.unwrap();
 
         let hello = b"Hello";
-        let entity = ctx.strings.allocate_from(hello);
+        let entity = ctx.strings.allocate_from_at_level_zero(hello);
         ctx.o_stack
             .push(PsObject::string(entity, hello.len() as u32))
             .unwrap();
@@ -4781,7 +4781,7 @@ mod tests {
         assert!(ctx.gstate.path.is_empty());
 
         let a = b"A";
-        let entity = ctx.strings.allocate_from(a);
+        let entity = ctx.strings.allocate_from_at_level_zero(a);
         ctx.o_stack
             .push(PsObject::string(entity, a.len() as u32))
             .unwrap();

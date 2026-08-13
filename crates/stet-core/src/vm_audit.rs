@@ -465,7 +465,7 @@ mod tests {
     fn local_container_holding_local_value_is_clean() {
         // The rule is one-directional: local may reference anything.
         let mut ctx = Context::new();
-        let ldict = ctx.dicts.allocate(4, b"ldict");
+        let ldict = ctx.dicts.allocate_at_level_zero(4, b"ldict");
         let lstr = ctx.strings.allocate_with(5, 0, false, 1);
         let key = DictKey::Name(ctx.names.intern(b"k"));
         ctx.dicts.put(ldict, key, PsObject::string(lstr, 5));

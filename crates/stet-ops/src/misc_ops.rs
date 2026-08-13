@@ -352,7 +352,7 @@ pub fn op_loadsystemfont(ctx: &mut Context) -> Result<(), PsError> {
                 // Return path string + true
                 let path_str = path.to_string_lossy();
                 let path_bytes = path_str.as_bytes();
-                let str_entity = ctx.strings.allocate_from(path_bytes);
+                let str_entity = crate::vm_ops::alloc_string(ctx, path_bytes);
                 ctx.o_stack
                     .push(PsObject::string(str_entity, path_bytes.len() as u32))?;
                 ctx.o_stack.push(PsObject::bool(true))?;
@@ -708,7 +708,8 @@ pub fn op_dot_error(ctx: &mut Context) -> Result<(), PsError> {
     let stack_copy: Vec<PsObject> = (0..stack_len)
         .map(|i| ctx.o_stack.peek(stack_len - 1 - i).unwrap())
         .collect();
-    let ostack_entity = ctx.arrays.allocate_from(&stack_copy);
+    let ostack_entity =
+        crate::vm_ops::alloc_array_from_in(ctx, &stack_copy, ctx.dollar_error.is_global());
     ctx.dicts.put(
         ctx.dollar_error,
         DictKey::Name(ostack_key),
@@ -818,15 +819,7 @@ pub fn op_internaldict(ctx: &mut Context) -> Result<(), PsError> {
         return Err(PsError::InvalidAccess);
     }
 
-    // Lazily create the internal dictionary
-    let entity = match ctx.internaldict {
-        Some(e) => e,
-        None => {
-            let e = ctx.dicts.allocate(50, b"internaldict");
-            ctx.internaldict = Some(e);
-            e
-        }
-    };
+    let entity = ctx.internaldict;
 
     ctx.o_stack.pop()?;
     ctx.o_stack.push(PsObject::dict(entity))?;
@@ -1130,7 +1123,8 @@ pub fn op_defineuserobject(ctx: &mut Context) -> Result<(), PsError> {
             // Array exists but too small — allocate new, copy old, store
             let new_len = needed.max(old_len * 2);
             let old_data: Vec<PsObject> = ctx.arrays.get(entity, 0, old_len).to_vec();
-            let new_entity = ctx.arrays.allocate(new_len as usize);
+            let new_entity =
+                crate::vm_ops::alloc_array_in(ctx, new_len as usize, ctx.userdict.is_global());
             let new_slice = ctx.arrays.get_mut(new_entity, 0, new_len);
             new_slice[..old_len as usize].copy_from_slice(&old_data);
             ctx.arrays.set_element(new_entity, index, obj);
@@ -1142,7 +1136,8 @@ pub fn op_defineuserobject(ctx: &mut Context) -> Result<(), PsError> {
         None => {
             // No UserObjects array — create one
             let new_len = needed.max(4);
-            let new_entity = ctx.arrays.allocate(new_len as usize);
+            let new_entity =
+                crate::vm_ops::alloc_array_in(ctx, new_len as usize, ctx.userdict.is_global());
             ctx.arrays.set_element(new_entity, index, obj);
             let name_id = ctx.names.intern(b"UserObjects");
             let arr_obj = PsObject::array(new_entity, new_len);
@@ -1483,11 +1478,11 @@ mod tests {
         let mut ctx = test_ctx();
 
         // inner = { 0 } — element 0 is a placeholder to be patched.
-        let inner = ctx.arrays.allocate_from(&[PsObject::int(0)]);
+        let inner = ctx.arrays.allocate_from_at_level_zero(&[PsObject::int(0)]);
         // outer = { inner } — holds inner as a nested executable procedure.
         let mut inner_proc = PsObject::array(inner, 1);
         inner_proc.flags = ObjFlags::executable_composite();
-        let outer = ctx.arrays.allocate_from(&[inner_proc]);
+        let outer = ctx.arrays.allocate_from_at_level_zero(&[inner_proc]);
 
         // Close the loop: inner[0] := outer.
         let mut outer_proc = PsObject::array(outer, 1);
@@ -1507,11 +1502,13 @@ mod tests {
     fn test_bind_visits_shared_subprocedure_once() {
         let mut ctx = test_ctx();
 
-        let shared = ctx.arrays.allocate_from(&[PsObject::int(1)]);
+        let shared = ctx.arrays.allocate_from_at_level_zero(&[PsObject::int(1)]);
         let mut shared_proc = PsObject::array(shared, 1);
         shared_proc.flags = ObjFlags::executable_composite();
 
-        let parent = ctx.arrays.allocate_from(&[shared_proc, shared_proc]);
+        let parent = ctx
+            .arrays
+            .allocate_from_at_level_zero(&[shared_proc, shared_proc]);
         let mut parent_proc = PsObject::array(parent, 2);
         parent_proc.flags = ObjFlags::executable_composite();
 
@@ -1524,13 +1521,13 @@ mod tests {
     fn test_join_with_separator() {
         let mut ctx = test_ctx();
         // join: separator array dest → result
-        let sep = ctx.strings.allocate_from(b"/");
-        let s1 = ctx.strings.allocate_from(b"abc");
-        let s2 = ctx.strings.allocate_from(b"def");
+        let sep = ctx.strings.allocate_from_at_level_zero(b"/");
+        let s1 = ctx.strings.allocate_from_at_level_zero(b"abc");
+        let s2 = ctx.strings.allocate_from_at_level_zero(b"def");
         let arr = ctx
             .arrays
-            .allocate_from(&[PsObject::string(s1, 3), PsObject::string(s2, 3)]);
-        let dest = ctx.strings.allocate_from(&[0u8; 256]);
+            .allocate_from_at_level_zero(&[PsObject::string(s1, 3), PsObject::string(s2, 3)]);
+        let dest = ctx.strings.allocate_from_at_level_zero(&[0u8; 256]);
         ctx.o_stack.push(PsObject::string(sep, 1)).unwrap();
         ctx.o_stack.push(PsObject::array(arr, 2)).unwrap();
         ctx.o_stack.push(PsObject::string(dest, 256)).unwrap();
@@ -1546,13 +1543,13 @@ mod tests {
     #[test]
     fn test_join_empty_separator() {
         let mut ctx = test_ctx();
-        let sep = ctx.strings.allocate_from(b"");
-        let s1 = ctx.strings.allocate_from(b"Hello");
-        let s2 = ctx.strings.allocate_from(b"World");
+        let sep = ctx.strings.allocate_from_at_level_zero(b"");
+        let s1 = ctx.strings.allocate_from_at_level_zero(b"Hello");
+        let s2 = ctx.strings.allocate_from_at_level_zero(b"World");
         let arr = ctx
             .arrays
-            .allocate_from(&[PsObject::string(s1, 5), PsObject::string(s2, 5)]);
-        let dest = ctx.strings.allocate_from(&[0u8; 256]);
+            .allocate_from_at_level_zero(&[PsObject::string(s1, 5), PsObject::string(s2, 5)]);
+        let dest = ctx.strings.allocate_from_at_level_zero(&[0u8; 256]);
         ctx.o_stack.push(PsObject::string(sep, 0)).unwrap();
         ctx.o_stack.push(PsObject::array(arr, 2)).unwrap();
         ctx.o_stack.push(PsObject::string(dest, 256)).unwrap();
@@ -1634,7 +1631,7 @@ mod tests {
     #[test]
     fn test_systemundef() {
         let mut ctx = test_ctx();
-        let dict = ctx.dicts.allocate(10, b"test");
+        let dict = ctx.dicts.allocate_at_level_zero(10, b"test");
         let key_name = ctx.names.intern(b"foo");
         ctx.dicts
             .put(dict, DictKey::Name(key_name), PsObject::int(42));

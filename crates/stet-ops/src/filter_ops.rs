@@ -768,7 +768,7 @@ mod tests {
     fn test_filter_ascii_hex_from_string() {
         let mut ctx = setup();
 
-        let data = ctx.strings.allocate_from(b"48656C6C6F>");
+        let data = ctx.strings.allocate_from_at_level_zero(b"48656C6C6F>");
         ctx.o_stack.push(PsObject::string(data, 11)).unwrap();
 
         let name_id = ctx.names.intern(b"ASCIIHexDecode");
@@ -793,7 +793,7 @@ mod tests {
     fn test_filter_ascii85_from_string() {
         let mut ctx = setup();
 
-        let data = ctx.strings.allocate_from(b"9jqo^~>");
+        let data = ctx.strings.allocate_from_at_level_zero(b"9jqo^~>");
         ctx.o_stack.push(PsObject::string(data, 7)).unwrap();
 
         let name_id = ctx.names.intern(b"ASCII85Decode");
@@ -827,7 +827,7 @@ mod tests {
         encoder.write_all(original).unwrap();
         let compressed = encoder.finish().unwrap();
 
-        let data = ctx.strings.allocate_from(&compressed);
+        let data = ctx.strings.allocate_from_at_level_zero(&compressed);
         ctx.o_stack
             .push(PsObject::string(data, compressed.len() as u32))
             .unwrap();
@@ -854,7 +854,7 @@ mod tests {
     fn test_filter_undefined() {
         let mut ctx = setup();
 
-        let data = ctx.strings.allocate_from(b"test");
+        let data = ctx.strings.allocate_from_at_level_zero(b"test");
         ctx.o_stack.push(PsObject::string(data, 4)).unwrap();
 
         let name_id = ctx.names.intern(b"BogusFilter");
@@ -867,7 +867,7 @@ mod tests {
     fn test_filter_typecheck_no_name() {
         let mut ctx = setup();
 
-        let data = ctx.strings.allocate_from(b"test");
+        let data = ctx.strings.allocate_from_at_level_zero(b"test");
         ctx.o_stack.push(PsObject::string(data, 4)).unwrap();
         ctx.o_stack.push(PsObject::int(42)).unwrap();
 
@@ -878,7 +878,7 @@ mod tests {
     fn test_filter_chaining() {
         let mut ctx = setup();
 
-        let hex_data = ctx.strings.allocate_from(b"48656C6C6F>");
+        let hex_data = ctx.strings.allocate_from_at_level_zero(b"48656C6C6F>");
         ctx.o_stack.push(PsObject::string(hex_data, 11)).unwrap();
 
         let name_id = ctx.names.intern(b"ASCIIHexDecode");

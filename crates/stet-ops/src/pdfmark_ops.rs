@@ -1064,7 +1064,7 @@ mod tests {
     fn push_docinfo_simple(ctx: &mut Context) {
         let title_id = ctx.names.intern(b"Title");
         let docinfo_id = ctx.names.intern(b"DOCINFO");
-        let title_str = ctx.strings.allocate_from(b"Hello");
+        let title_str = ctx.strings.allocate_from_at_level_zero(b"Hello");
         ctx.o_stack.push(PsObject::mark()).unwrap();
         ctx.o_stack.push(PsObject::name_lit(title_id)).unwrap();
         ctx.o_stack.push(PsObject::string(title_str, 5)).unwrap();
@@ -1148,7 +1148,7 @@ mod tests {
         // clear the stack without raising.
         let mut ctx = make_ctx();
         let put_id = ctx.names.intern(b"PUT");
-        let str_e = ctx.strings.allocate_from(b"stream-bytes");
+        let str_e = ctx.strings.allocate_from_at_level_zero(b"stream-bytes");
         ctx.o_stack.push(PsObject::mark()).unwrap();
         ctx.o_stack.push(PsObject::int(7)).unwrap();
         ctx.o_stack.push(PsObject::string(str_e, 12)).unwrap();
@@ -1177,7 +1177,7 @@ mod tests {
         ]
         .iter()
         .map(|(s, l)| {
-            let e = ctx.strings.allocate_from(s);
+            let e = ctx.strings.allocate_from_at_level_zero(s);
             PsObject::string(e, *l)
         })
         .collect();
@@ -1207,7 +1207,7 @@ mod tests {
         let title_id = ctx.names.intern(b"Title");
         let page_id = ctx.names.intern(b"Page");
         let out_id = ctx.names.intern(b"OUT");
-        let title_str = ctx.strings.allocate_from(b"Hello");
+        let title_str = ctx.strings.allocate_from_at_level_zero(b"Hello");
         ctx.o_stack.push(PsObject::mark()).unwrap();
         ctx.o_stack.push(PsObject::name_lit(title_id)).unwrap();
         ctx.o_stack.push(PsObject::string(title_str, 5)).unwrap();
@@ -1252,7 +1252,7 @@ mod tests {
         let title_id = ctx.names.intern(b"Title");
         let count_id = ctx.names.intern(b"Count");
         let out_id = ctx.names.intern(b"OUT");
-        let s = ctx.strings.allocate_from(b"Parent");
+        let s = ctx.strings.allocate_from_at_level_zero(b"Parent");
         ctx.o_stack.push(PsObject::mark()).unwrap();
         ctx.o_stack.push(PsObject::name_lit(title_id)).unwrap();
         ctx.o_stack.push(PsObject::string(s, 6)).unwrap();
@@ -1272,7 +1272,7 @@ mod tests {
         let title_id = ctx.names.intern(b"Title");
         let level_id = ctx.names.intern(b"OutlineLevel");
         let out_id = ctx.names.intern(b"OUT");
-        let s = ctx.strings.allocate_from(b"Sub");
+        let s = ctx.strings.allocate_from_at_level_zero(b"Sub");
         ctx.o_stack.push(PsObject::mark()).unwrap();
         ctx.o_stack.push(PsObject::name_lit(title_id)).unwrap();
         ctx.o_stack.push(PsObject::string(s, 3)).unwrap();
@@ -1294,9 +1294,9 @@ mod tests {
         let view_id = ctx.names.intern(b"View");
         let xyz_id = ctx.names.intern(b"XYZ");
         let out_id = ctx.names.intern(b"OUT");
-        let s = ctx.strings.allocate_from(b"WithView");
+        let s = ctx.strings.allocate_from_at_level_zero(b"WithView");
         // Build the View array [/XYZ 100 700 1.5]
-        let view_entity = ctx.arrays.allocate(4);
+        let view_entity = ctx.arrays.allocate_at_level_zero(4);
         let elements = vec![
             PsObject::name_lit(xyz_id),
             PsObject::int(100),
@@ -1343,10 +1343,12 @@ mod tests {
         let s_id = ctx.names.intern(b"S");
         let uri_name_id = ctx.names.intern(b"URI");
         let out_id = ctx.names.intern(b"OUT");
-        let title_s = ctx.strings.allocate_from(b"GoSomewhere");
-        let url_s = ctx.strings.allocate_from(b"https://example.org");
+        let title_s = ctx.strings.allocate_from_at_level_zero(b"GoSomewhere");
+        let url_s = ctx
+            .strings
+            .allocate_from_at_level_zero(b"https://example.org");
         // Action dict: << /S /URI /URI (https://...) >>
-        let action_dict = ctx.dicts.allocate(4, b"action");
+        let action_dict = ctx.dicts.allocate_at_level_zero(4, b"action");
         ctx.dicts.put(
             action_dict,
             DictKey::Name(s_id),
@@ -1382,7 +1384,7 @@ mod tests {
         let dest_id = ctx.names.intern(b"Dest");
         let target_name_id = ctx.names.intern(b"chapter1");
         let out_id = ctx.names.intern(b"OUT");
-        let s = ctx.strings.allocate_from(b"NamedJump");
+        let s = ctx.strings.allocate_from_at_level_zero(b"NamedJump");
         ctx.o_stack.push(PsObject::mark()).unwrap();
         ctx.o_stack.push(PsObject::name_lit(title_id)).unwrap();
         ctx.o_stack.push(PsObject::string(s, 9)).unwrap();
@@ -1403,7 +1405,7 @@ mod tests {
 
     /// Build a Rect array entity for tests.
     fn alloc_rect(ctx: &mut Context, llx: f64, lly: f64, urx: f64, ury: f64) -> PsObject {
-        let entity = ctx.arrays.allocate(4);
+        let entity = ctx.arrays.allocate_at_level_zero(4);
         let elements = vec![
             PsObject::real(llx),
             PsObject::real(lly),
@@ -1427,9 +1429,11 @@ mod tests {
         let uri_name_id = ctx.names.intern(b"URI");
         let ann_id = ctx.names.intern(b"ANN");
 
-        let title_str = ctx.strings.allocate_from(b"website");
-        let url_str = ctx.strings.allocate_from(b"https://example.com");
-        let action_dict = ctx.dicts.allocate(4, b"action");
+        let title_str = ctx.strings.allocate_from_at_level_zero(b"website");
+        let url_str = ctx
+            .strings
+            .allocate_from_at_level_zero(b"https://example.com");
+        let action_dict = ctx.dicts.allocate_at_level_zero(4, b"action");
         ctx.dicts.put(
             action_dict,
             DictKey::Name(s_id),
@@ -1478,7 +1482,7 @@ mod tests {
         let text_id = ctx.names.intern(b"Text");
         let contents_id = ctx.names.intern(b"Contents");
         let ann_id = ctx.names.intern(b"ANN");
-        let body_str = ctx.strings.allocate_from(b"A comment");
+        let body_str = ctx.strings.allocate_from_at_level_zero(b"A comment");
 
         let rect = alloc_rect(&mut ctx, 100.0, 100.0, 130.0, 130.0);
         ctx.o_stack.push(PsObject::mark()).unwrap();
@@ -1644,7 +1648,7 @@ mod tests {
     }
 
     fn alloc_box(ctx: &mut Context, llx: f64, lly: f64, urx: f64, ury: f64) -> PsObject {
-        let entity = ctx.arrays.allocate(4);
+        let entity = ctx.arrays.allocate_at_level_zero(4);
         let elements = vec![
             PsObject::real(llx),
             PsObject::real(lly),
@@ -1792,7 +1796,7 @@ mod tests {
         let meta_key_id = ctx.names.intern(b"Metadata");
         let tag_id = ctx.names.intern(b"Metadata");
         let xmp = b"<?xpacket begin='\xef\xbb\xbf'?><x:xmpmeta/>";
-        let s = ctx.strings.allocate_from(xmp);
+        let s = ctx.strings.allocate_from_at_level_zero(xmp);
         ctx.o_stack.push(PsObject::mark()).unwrap();
         ctx.o_stack.push(PsObject::name_lit(meta_key_id)).unwrap();
         ctx.o_stack

@@ -1183,7 +1183,7 @@ mod tests {
     #[test]
     fn test_print() {
         let (mut ctx, buf) = test_ctx_with_capture();
-        let entity = ctx.strings.allocate_from(b"Hello");
+        let entity = ctx.strings.allocate_from_at_level_zero(b"Hello");
         ctx.o_stack.push(PsObject::string(entity, 5)).unwrap();
         op_print(&mut ctx).unwrap();
         assert_eq!(&*buf.lock().unwrap(), b"Hello");
@@ -1204,8 +1204,8 @@ mod tests {
         let path = path.as_str();
 
         // Open for write
-        let name_ent = ctx.strings.allocate_from(path.as_bytes());
-        let mode_ent = ctx.strings.allocate_from(b"w");
+        let name_ent = ctx.strings.allocate_from_at_level_zero(path.as_bytes());
+        let mode_ent = ctx.strings.allocate_from_at_level_zero(b"w");
         ctx.o_stack
             .push(PsObject::string(name_ent, path.len() as u32))
             .unwrap();
@@ -1214,7 +1214,7 @@ mod tests {
         let file_obj = ctx.o_stack.pop().unwrap();
 
         // Write a string
-        let data_ent = ctx.strings.allocate_from(b"test data");
+        let data_ent = ctx.strings.allocate_from_at_level_zero(b"test data");
         ctx.o_stack.push(file_obj).unwrap();
         ctx.o_stack.push(PsObject::string(data_ent, 9)).unwrap();
         op_writestring(&mut ctx).unwrap();
@@ -1224,8 +1224,8 @@ mod tests {
         op_closefile(&mut ctx).unwrap();
 
         // Open for read
-        let name_ent2 = ctx.strings.allocate_from(path.as_bytes());
-        let mode_ent2 = ctx.strings.allocate_from(b"r");
+        let name_ent2 = ctx.strings.allocate_from_at_level_zero(path.as_bytes());
+        let mode_ent2 = ctx.strings.allocate_from_at_level_zero(b"r");
         ctx.o_stack
             .push(PsObject::string(name_ent2, path.len() as u32))
             .unwrap();
@@ -1234,7 +1234,7 @@ mod tests {
         let rfile = ctx.o_stack.pop().unwrap();
 
         // Readstring
-        let buf_ent = ctx.strings.allocate(9);
+        let buf_ent = ctx.strings.allocate_at_level_zero(9);
         ctx.o_stack.push(rfile).unwrap();
         ctx.o_stack.push(PsObject::string(buf_ent, 9)).unwrap();
         op_readstring(&mut ctx).unwrap();
@@ -1263,7 +1263,7 @@ mod tests {
         let path = tmp_path("stet_test_status.txt");
         let path = path.as_str();
         std::fs::write(path, "x").ok();
-        let ent = ctx.strings.allocate_from(path.as_bytes());
+        let ent = ctx.strings.allocate_from_at_level_zero(path.as_bytes());
         ctx.o_stack
             .push(PsObject::string(ent, path.len() as u32))
             .unwrap();
@@ -1280,7 +1280,7 @@ mod tests {
 
         // Test non-existing file — returns false
         let absent = tmp_path("stet_nonexistent_file_xyz");
-        let ent2 = ctx.strings.allocate_from(absent.as_bytes());
+        let ent2 = ctx.strings.allocate_from_at_level_zero(absent.as_bytes());
         ctx.o_stack
             .push(PsObject::string(ent2, absent.len() as u32))
             .unwrap();
@@ -1313,7 +1313,7 @@ mod tests {
         let path = path.as_str();
         std::fs::write(path, "x").unwrap();
 
-        let ent = ctx.strings.allocate_from(path.as_bytes());
+        let ent = ctx.strings.allocate_from_at_level_zero(path.as_bytes());
         ctx.o_stack
             .push(PsObject::string(ent, path.len() as u32))
             .unwrap();
@@ -1330,8 +1330,8 @@ mod tests {
         let new_path = new_path.as_str();
         std::fs::write(old_path, "x").unwrap();
 
-        let old_ent = ctx.strings.allocate_from(old_path.as_bytes());
-        let new_ent = ctx.strings.allocate_from(new_path.as_bytes());
+        let old_ent = ctx.strings.allocate_from_at_level_zero(old_path.as_bytes());
+        let new_ent = ctx.strings.allocate_from_at_level_zero(new_path.as_bytes());
         ctx.o_stack
             .push(PsObject::string(old_ent, old_path.len() as u32))
             .unwrap();

@@ -186,6 +186,36 @@ actually dangle. **That set being empty is the invariant which gates
 letting `restore` reclaim local VM at all**; see
 `crates/stet-cli/tests/vm_audit.rs`.
 
+#### Allocating from Rust
+
+Every entity carries three stamps: `save_level`, `global`, and
+`created_after_save`. The last one is what `check_invalidrestore` reads
+to decide whether a surviving reference points at a composite the
+`restore` is about to release.
+
+Operator code must therefore allocate through the VM-aware helpers in
+`stet_ops::vm_ops`, which stamp all three from the live `Context`:
+
+| helper | VM |
+|---|---|
+| `alloc_dict`, `alloc_array`, `alloc_array_from`, `alloc_string`, `alloc_string_empty` | follows the ambient `currentglobal` |
+| `alloc_dict_in`, `alloc_array_in`, `alloc_array_from_in`, `alloc_string_in` | explicitly chosen |
+
+Use the ambient form when the object is handed back to the program, and
+the `_in` form when it goes straight into a container whose VM is already
+fixed — allocating per `currentglobal` and then storing into a global
+container is the PLRM 3.7.2 violation above, committed by the
+interpreter rather than by the program.
+
+The raw store methods `allocate_at_level_zero` /
+`allocate_from_at_level_zero` hardcode all three stamps to zero. An
+entity stamped that way claims to predate every outstanding `save` while
+still sitting above that save's high-water mark, so `restore` releases it
+and `check_invalidrestore` never sees it. Only `Context::new` may use
+them, since during bootstrap the claim is true.
+`scripts/check-level-zero-alloc.sh` enforces that, and is wired into CI
+and `.git/hooks/pre-push`.
+
 ### Group stack (PDF-imaging extension scopes)
 
 The PDF-imaging extension operators

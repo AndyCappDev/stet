@@ -29,6 +29,13 @@ jobs:
         # blockers in PUBLISH-TODO.md. We still want the clippy output in
         # CI logs so new warnings are easy to spot in a diff.
         run: cargo clippy --workspace --all-targets
+      - name: VM level-zero allocation audit
+        # Operator code must allocate through stet_ops::vm_ops::alloc_*, which
+        # stamps the current save level and VM mode. The bare
+        # `allocate_at_level_zero` variants hardcode both, producing objects
+        # that `restore` releases but `invalidrestore` cannot see. Only
+        # interpreter bootstrap may use them. See scripts/check-level-zero-alloc.sh.
+        run: scripts/check-level-zero-alloc.sh
       - name: release-version cross-check
         # Verifies the workspace `Cargo.toml` version matches the README
         # badge + Producer string and that CHANGELOG.md has an entry.

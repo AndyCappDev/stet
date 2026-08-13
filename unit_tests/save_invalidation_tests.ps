@@ -133,3 +133,21 @@ estk 0 get null eq [true] assert
     dstk dictstack pop
 s restore
 dstk 0 get null eq [true] assert
+
+%% internaldict exists before any save, so restore reverts its entries %%
+% `internaldict` is created during bootstrap rather than on first use:
+% Context caches its EntityId for the life of the interpreter, so the dict
+% must outlive every restore. Entries written into it after a save are
+% still reverted, by the dict's own copy-on-write.
+1183615869 internaldict /type [/dicttype] assert
+1183615869 internaldict /gcheck [false] assert
+/s save def
+    1183615869 internaldict /probe 42 put
+    1183615869 internaldict /probe known [true] assert
+s restore
+1183615869 internaldict /probe known [false] assert
+
+%% the version string lives in global VM alongside systemdict %%
+% systemdict is global, so anything the interpreter stores into it must be
+% global too or it is a PLRM 3.7.2 violation the audit would flag.
+version /gcheck [true] assert

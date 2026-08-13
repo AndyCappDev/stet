@@ -178,7 +178,7 @@ pub fn op_setpagedevice(ctx: &mut Context) -> Result<(), PsError> {
                 PsObject::name_lit(cat_name_id),
                 PsObject::name_exec(fr_name),
             ];
-            let proc_entity = ctx.arrays.allocate_from(&proc_elements);
+            let proc_entity = crate::vm_ops::alloc_array_from(ctx, &proc_elements);
             let proc_obj = PsObject::procedure(proc_entity, proc_elements.len() as u32);
             let dev_entity = if ctx.exec_sync(proc_obj).is_ok() {
                 ctx.o_stack.pop().ok().and_then(|obj| {
@@ -719,7 +719,7 @@ mod tests {
         let pd = crate::vm_ops::alloc_dict(&mut ctx, 10, b"pd");
         let name_id = ctx.names.intern(b"PageSize");
         let items = [PsObject::real(612.0), PsObject::real(792.0)];
-        let arr = ctx.arrays.allocate_from(&items);
+        let arr = ctx.arrays.allocate_from_at_level_zero(&items);
         ctx.dicts
             .put(pd, DictKey::Name(name_id), PsObject::array(arr, 2));
         ctx.gstate.page_device = Some(pd);

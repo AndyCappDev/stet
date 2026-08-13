@@ -187,8 +187,8 @@ mod tests {
     #[test]
     fn test_anchorsearch_found() {
         let mut ctx = test_ctx();
-        let s = ctx.strings.allocate_from(b"abcdef");
-        let seek = ctx.strings.allocate_from(b"abc");
+        let s = ctx.strings.allocate_from_at_level_zero(b"abcdef");
+        let seek = ctx.strings.allocate_from_at_level_zero(b"abc");
         ctx.o_stack.push(PsObject::string(s, 6)).unwrap();
         ctx.o_stack.push(PsObject::string(seek, 3)).unwrap();
         op_anchorsearch(&mut ctx).unwrap();
@@ -202,8 +202,8 @@ mod tests {
     #[test]
     fn test_search_found() {
         let mut ctx = test_ctx();
-        let s = ctx.strings.allocate_from(b"abcdef");
-        let seek = ctx.strings.allocate_from(b"cd");
+        let s = ctx.strings.allocate_from_at_level_zero(b"abcdef");
+        let seek = ctx.strings.allocate_from_at_level_zero(b"cd");
         ctx.o_stack.push(PsObject::string(s, 6)).unwrap();
         ctx.o_stack.push(PsObject::string(seek, 2)).unwrap();
         op_search(&mut ctx).unwrap();

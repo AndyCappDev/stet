@@ -83,9 +83,8 @@ fn apply_user_params(ctx: &mut Context) {
 /// `currentuserparams`: — → dict (return current user parameters)
 pub fn op_currentuserparams(ctx: &mut Context) -> Result<(), PsError> {
     // Return a copy of user_params
-    let copy = ctx
-        .dicts
-        .allocate(ctx.dicts.max_length(ctx.user_params), b"userparams_copy");
+    let copy_max = ctx.dicts.max_length(ctx.user_params);
+    let copy = crate::vm_ops::alloc_dict(ctx, copy_max, b"userparams_copy");
     let keys: Vec<DictKey> = ctx.dicts.keys(ctx.user_params).cloned().collect();
     for key in keys {
         if let Some(val) = ctx.dicts.get(ctx.user_params, &key) {
@@ -111,9 +110,8 @@ pub fn op_setsystemparams(ctx: &mut Context) -> Result<(), PsError> {
 
 /// `currentsystemparams`: — → dict (return system parameters)
 pub fn op_currentsystemparams(ctx: &mut Context) -> Result<(), PsError> {
-    let copy = ctx
-        .dicts
-        .allocate(ctx.dicts.max_length(ctx.system_params), b"sysparams_copy");
+    let copy_max = ctx.dicts.max_length(ctx.system_params);
+    let copy = crate::vm_ops::alloc_dict(ctx, copy_max, b"sysparams_copy");
     let keys: Vec<DictKey> = ctx.dicts.keys(ctx.system_params).cloned().collect();
     for key in keys {
         if let Some(val) = ctx.dicts.get(ctx.system_params, &key) {
@@ -177,7 +175,7 @@ pub fn op_setdistillerparams(ctx: &mut Context) -> Result<(), PsError> {
 /// streams down the `flushfile cleartomark` path stet can actually
 /// handle. See [`op_setdistillerparams`].
 pub fn op_currentdistillerparams(ctx: &mut Context) -> Result<(), PsError> {
-    let d = ctx.dicts.allocate(8, b"distillerparams");
+    let d = crate::vm_ops::alloc_dict(ctx, 8, b"distillerparams");
     let core = ctx.names.intern(b"CoreDistVersion");
     ctx.dicts.put(d, DictKey::Name(core), PsObject::int(4000));
     let compat = ctx.names.intern(b"CompatibilityLevel");
@@ -197,7 +195,7 @@ pub fn op_currentdevparams(ctx: &mut Context) -> Result<(), PsError> {
         _ => return Err(PsError::TypeCheck),
     }
     ctx.o_stack.pop()?;
-    let d = ctx.dicts.allocate(5, b"devparams");
+    let d = crate::vm_ops::alloc_dict(ctx, 5, b"devparams");
     ctx.o_stack.push(PsObject::dict(d))?;
     Ok(())
 }
@@ -218,7 +216,7 @@ mod tests {
         let mut ctx = test_ctx();
 
         // Create a dict with a param
-        let d = ctx.dicts.allocate(5, b"test");
+        let d = ctx.dicts.allocate_at_level_zero(5, b"test");
         let key = ctx.names.intern(b"MaxDictStack");
         ctx.dicts.put(d, DictKey::Name(key), PsObject::int(500));
 
@@ -239,7 +237,7 @@ mod tests {
     #[test]
     fn test_setsystemparams_no_crash() {
         let mut ctx = test_ctx();
-        let d = ctx.dicts.allocate(5, b"test");
+        let d = ctx.dicts.allocate_at_level_zero(5, b"test");
         ctx.o_stack.push(PsObject::dict(d)).unwrap();
         op_setsystemparams(&mut ctx).unwrap();
         assert!(ctx.o_stack.is_empty());
@@ -248,7 +246,7 @@ mod tests {
     #[test]
     fn test_currentdevparams() {
         let mut ctx = test_ctx();
-        let s = ctx.strings.allocate_from(b"%stdin");
+        let s = ctx.strings.allocate_from_at_level_zero(b"%stdin");
         ctx.o_stack.push(PsObject::string(s, 6)).unwrap();
         op_currentdevparams(&mut ctx).unwrap();
         let result = ctx.o_stack.pop().unwrap();

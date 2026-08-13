@@ -592,7 +592,7 @@ mod tests {
     fn test_length_array() {
         let mut ctx = test_ctx();
         let items = [PsObject::int(1), PsObject::int(2), PsObject::int(3)];
-        let entity = ctx.arrays.allocate_from(&items);
+        let entity = ctx.arrays.allocate_from_at_level_zero(&items);
         ctx.o_stack.push(PsObject::array(entity, 3)).unwrap();
         op_length(&mut ctx).unwrap();
         assert_eq!(ctx.o_stack.pop().unwrap().as_i32(), Some(3));
@@ -601,7 +601,7 @@ mod tests {
     #[test]
     fn test_length_string() {
         let mut ctx = test_ctx();
-        let entity = ctx.strings.allocate_from(b"hello");
+        let entity = ctx.strings.allocate_from_at_level_zero(b"hello");
         ctx.o_stack.push(PsObject::string(entity, 5)).unwrap();
         op_length(&mut ctx).unwrap();
         assert_eq!(ctx.o_stack.pop().unwrap().as_i32(), Some(5));
@@ -611,7 +611,7 @@ mod tests {
     fn test_get_array() {
         let mut ctx = test_ctx();
         let items = [PsObject::int(10), PsObject::int(20), PsObject::int(30)];
-        let entity = ctx.arrays.allocate_from(&items);
+        let entity = ctx.arrays.allocate_from_at_level_zero(&items);
         ctx.o_stack.push(PsObject::array(entity, 3)).unwrap();
         ctx.o_stack.push(PsObject::int(1)).unwrap();
         op_get(&mut ctx).unwrap();
@@ -621,7 +621,7 @@ mod tests {
     #[test]
     fn test_put_array() {
         let mut ctx = test_ctx();
-        let entity = ctx.arrays.allocate(3);
+        let entity = ctx.arrays.allocate_at_level_zero(3);
         ctx.o_stack.push(PsObject::array(entity, 3)).unwrap();
         ctx.o_stack.push(PsObject::int(1)).unwrap();
         ctx.o_stack.push(PsObject::int(99)).unwrap();
@@ -638,7 +638,7 @@ mod tests {
             PsObject::int(30),
             PsObject::int(40),
         ];
-        let entity = ctx.arrays.allocate_from(&items);
+        let entity = ctx.arrays.allocate_from_at_level_zero(&items);
         ctx.o_stack.push(PsObject::array(entity, 4)).unwrap();
         ctx.o_stack.push(PsObject::int(1)).unwrap();
         ctx.o_stack.push(PsObject::int(2)).unwrap();

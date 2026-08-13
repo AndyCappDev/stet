@@ -71,7 +71,7 @@ pub fn op_cff_startdata(ctx: &mut Context) -> Result<(), PsError> {
     ctx.vm_alloc_mode = true;
 
     // Store raw CFF binary as a PS string for PDF embedding
-    let cff_str_entity = ctx.strings.allocate_from(&cff_data);
+    let cff_str_entity = crate::vm_ops::alloc_string(ctx, &cff_data);
     let cff_data_len = cff_data.len() as u32;
 
     for cff_font in &cff_fonts {
@@ -90,7 +90,7 @@ fn register_cff_font(
     cff_data_len: u32,
 ) -> Result<(), PsError> {
     // Create font dictionary
-    let font_entity = ctx.dicts.allocate(16, b"CFF");
+    let font_entity = crate::vm_ops::alloc_dict(ctx, 16, b"CFF");
 
     // FontType = 2
     let ft_key = DictKey::Name(ctx.name_cache.n_font_type);
@@ -110,7 +110,7 @@ fn register_cff_font(
 
     // FontMatrix
     let fm_key = DictKey::Name(ctx.name_cache.n_font_matrix);
-    let fm_entity = ctx.arrays.allocate(6);
+    let fm_entity = crate::vm_ops::alloc_array(ctx, 6);
     for (i, &val) in cff_font.font_matrix.iter().enumerate() {
         ctx.arrays
             .set_element(fm_entity, i as u32, PsObject::real(val));
@@ -130,7 +130,7 @@ fn register_cff_font(
 
     // FontBBox
     let bbox_key = DictKey::Name(ctx.names.intern(b"FontBBox"));
-    let bbox_entity = ctx.arrays.allocate(4);
+    let bbox_entity = crate::vm_ops::alloc_array(ctx, 4);
     for (i, &val) in cff_font.font_bbox.iter().enumerate() {
         ctx.arrays
             .set_element(bbox_entity, i as u32, PsObject::real(val));
@@ -150,7 +150,7 @@ fn register_cff_font(
 
     // Encoding — 256-element array: code → Name
     let enc_key = DictKey::Name(ctx.name_cache.n_encoding);
-    let enc_entity = ctx.arrays.allocate(256);
+    let enc_entity = crate::vm_ops::alloc_array(ctx, 256);
     for code in 0..256u32 {
         let gid = cff_font.encoding[code as usize] as usize;
         let glyph_name = if gid < cff_font.charset.len() {
@@ -184,9 +184,9 @@ fn register_cff_font(
     // CharStrings — dict mapping glyph name → String (raw bytes)
     // For CID fonts, also add int-keyed entries (DictKey::Int(gid)) for CID lookup
     let cs_key = DictKey::Name(ctx.name_cache.n_char_strings);
-    let cs_entity = ctx.dicts.allocate(16, b"CFF");
+    let cs_entity = crate::vm_ops::alloc_dict(ctx, 16, b"CFF");
     for (gid, cs_data) in cff_font.char_strings.iter().enumerate() {
-        let str_entity = ctx.strings.allocate_from(cs_data);
+        let str_entity = crate::vm_ops::alloc_string(ctx, cs_data);
         let cs_obj = PsObject {
             value: PsValue::String {
                 entity: str_entity,
@@ -219,7 +219,7 @@ fn register_cff_font(
 
     // Private dictionary
     let priv_key = DictKey::Name(ctx.name_cache.n_private);
-    let priv_entity = ctx.dicts.allocate(16, b"CFF");
+    let priv_entity = crate::vm_ops::alloc_dict(ctx, 16, b"CFF");
 
     let dwx_key = DictKey::Name(ctx.names.intern(b"defaultWidthX"));
     ctx.dicts.put(
@@ -239,9 +239,9 @@ fn register_cff_font(
     if !cff_font.local_subrs.is_empty() {
         let subrs_key = DictKey::Name(ctx.name_cache.n_subrs);
         let subrs_len = cff_font.local_subrs.len() as u32;
-        let subrs_entity = ctx.arrays.allocate(subrs_len as usize);
+        let subrs_entity = crate::vm_ops::alloc_array(ctx, subrs_len as usize);
         for (i, subr_data) in cff_font.local_subrs.iter().enumerate() {
-            let str_entity = ctx.strings.allocate_from(subr_data);
+            let str_entity = crate::vm_ops::alloc_string(ctx, subr_data);
             ctx.arrays.set_element(
                 subrs_entity,
                 i as u32,
@@ -282,9 +282,9 @@ fn register_cff_font(
     if !cff_font.global_subrs.is_empty() {
         let gs_key = DictKey::Name(ctx.names.intern(b"_cff_global_subrs"));
         let gs_len = cff_font.global_subrs.len() as u32;
-        let gs_entity = ctx.arrays.allocate(gs_len as usize);
+        let gs_entity = crate::vm_ops::alloc_array(ctx, gs_len as usize);
         for (i, subr_data) in cff_font.global_subrs.iter().enumerate() {
-            let str_entity = ctx.strings.allocate_from(subr_data);
+            let str_entity = crate::vm_ops::alloc_string(ctx, subr_data);
             ctx.arrays.set_element(
                 gs_entity,
                 i as u32,
@@ -342,14 +342,14 @@ fn register_cff_font(
 
         // CIDSystemInfo dict from ROS (Registry-Ordering-Supplement)
         if let Some((ref registry, ref ordering, supplement)) = cff_font.ros {
-            let csi_entity = ctx.dicts.allocate(4, b"CFF");
-            let reg_str = ctx.strings.allocate_from(registry.as_bytes());
+            let csi_entity = crate::vm_ops::alloc_dict(ctx, 4, b"CFF");
+            let reg_str = crate::vm_ops::alloc_string(ctx, registry.as_bytes());
             ctx.dicts.put(
                 csi_entity,
                 DictKey::Name(ctx.names.intern(b"Registry")),
                 PsObject::string(reg_str, registry.len() as u32),
             );
-            let ord_str = ctx.strings.allocate_from(ordering.as_bytes());
+            let ord_str = crate::vm_ops::alloc_string(ctx, ordering.as_bytes());
             ctx.dicts.put(
                 csi_entity,
                 DictKey::Name(ctx.names.intern(b"Ordering")),
@@ -374,10 +374,10 @@ fn register_cff_font(
         if !cff_font.fd_array.is_empty() {
             let fda_key = DictKey::Name(ctx.names.intern(b"_cff_fd_array"));
             let fda_len = cff_font.fd_array.len() as u32;
-            let fda_entity = ctx.arrays.allocate(fda_len as usize);
+            let fda_entity = crate::vm_ops::alloc_array(ctx, fda_len as usize);
             for (i, fd_entry) in cff_font.fd_array.iter().enumerate() {
-                let fd_dict = ctx.dicts.allocate(16, b"CFF");
-                let fd_priv = ctx.dicts.allocate(16, b"CFF");
+                let fd_dict = crate::vm_ops::alloc_dict(ctx, 16, b"CFF");
+                let fd_priv = crate::vm_ops::alloc_dict(ctx, 16, b"CFF");
 
                 ctx.dicts.put(
                     fd_priv,
@@ -392,9 +392,9 @@ fn register_cff_font(
 
                 if !fd_entry.local_subrs.is_empty() {
                     let fd_subrs_len = fd_entry.local_subrs.len() as u32;
-                    let fd_subrs_entity = ctx.arrays.allocate(fd_subrs_len as usize);
+                    let fd_subrs_entity = crate::vm_ops::alloc_array(ctx, fd_subrs_len as usize);
                     for (j, subr_data) in fd_entry.local_subrs.iter().enumerate() {
-                        let str_entity = ctx.strings.allocate_from(subr_data);
+                        let str_entity = crate::vm_ops::alloc_string(ctx, subr_data);
                         ctx.arrays.set_element(
                             fd_subrs_entity,
                             j as u32,
@@ -458,7 +458,7 @@ fn register_cff_font(
         if !cff_font.fd_select.is_empty() {
             let fds_key = DictKey::Name(ctx.names.intern(b"_cff_fd_select"));
             let fds_len = cff_font.fd_select.len() as u32;
-            let fds_entity = ctx.arrays.allocate(fds_len as usize);
+            let fds_entity = crate::vm_ops::alloc_array(ctx, fds_len as usize);
             for (i, &fd_idx) in cff_font.fd_select.iter().enumerate() {
                 ctx.arrays
                     .set_element(fds_entity, i as u32, PsObject::int(fd_idx as i32));
@@ -509,14 +509,14 @@ fn register_cff_font(
             match cat_obj.value {
                 PsValue::Dict(e) => e,
                 _ => {
-                    let d = ctx.dicts.allocate(8, b"CIDFont");
+                    let d = crate::vm_ops::alloc_dict_in(ctx, 8, b"CIDFont", true);
                     ctx.dicts
                         .put(ctx.global_resources, cat_key, PsObject::dict(d));
                     d
                 }
             }
         } else {
-            let d = ctx.dicts.allocate(8, b"CIDFont");
+            let d = crate::vm_ops::alloc_dict_in(ctx, 8, b"CIDFont", true);
             ctx.dicts
                 .put(ctx.global_resources, cat_key, PsObject::dict(d));
             d

@@ -463,7 +463,7 @@ mod tests {
         let mut ctx = setup();
         let entity = ctx
             .arrays
-            .allocate_from(&[PsObject::real(5.0), PsObject::real(3.0)]);
+            .allocate_from_at_level_zero(&[PsObject::real(5.0), PsObject::real(3.0)]);
         ctx.o_stack.push(PsObject::array(entity, 2)).unwrap();
         ctx.o_stack.push(PsObject::real(0.0)).unwrap();
         op_setdash(&mut ctx).unwrap();

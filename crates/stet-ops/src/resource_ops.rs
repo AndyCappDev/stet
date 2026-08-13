@@ -660,7 +660,7 @@ mod tests {
         let cat_name = ctx.name_cache.n_category;
         let key_name = ctx.names.intern(b"TestCat");
 
-        let impl_dict = ctx.dicts.allocate(10, b"TestCat");
+        let impl_dict = ctx.dicts.allocate_at_level_zero(10, b"TestCat");
         ctx.o_stack.push(PsObject::name_lit(key_name)).unwrap();
         ctx.o_stack.push(PsObject::dict(impl_dict)).unwrap();
         ctx.o_stack.push(PsObject::name_lit(cat_name)).unwrap();
@@ -684,7 +684,7 @@ mod tests {
 
         // First register a category
         let key_name = ctx.names.intern(b"TestCat");
-        let impl_dict = ctx.dicts.allocate(10, b"TestCat");
+        let impl_dict = ctx.dicts.allocate_at_level_zero(10, b"TestCat");
         ctx.dicts.put(
             ctx.category_registry,
             DictKey::Name(key_name),
@@ -746,7 +746,7 @@ mod tests {
         let font_name = ctx.names.intern(b"Font");
 
         // Register Font as a category with no ResourceStatus proc
-        let font_cat = ctx.dicts.allocate(10, b"FontCat");
+        let font_cat = ctx.dicts.allocate_at_level_zero(10, b"FontCat");
         ctx.dicts.put(
             ctx.category_registry,
             DictKey::Name(font_name),

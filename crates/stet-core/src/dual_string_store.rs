@@ -45,13 +45,31 @@ impl DualStringStore {
 
     // --- Allocation (defaults to local) ---
 
-    /// Allocate `len` zero-filled bytes in local VM.
-    pub fn allocate(&mut self, len: usize) -> EntityId {
+    /// Allocate `len` zero-filled bytes in local VM, stamped as if no `save` were outstanding.
+    ///
+    /// The entity is stamped `save_level = 0`, `global = false`,
+    /// `created_after_save = 0` — it claims to predate every outstanding
+    /// `save`. That is only true during bootstrap, before any `save` can have
+    /// happened. Everywhere else prefer the VM-aware helpers in
+    /// `stet_ops::vm_ops` (`alloc_dict` / `alloc_array` / `alloc_string`, or
+    /// their `_in` variants): an entity mis-stamped this way is invisible to
+    /// the `invalidrestore` check while still being released by the matching
+    /// `restore`.
+    pub fn allocate_at_level_zero(&mut self, len: usize) -> EntityId {
         self.local.allocate(len)
     }
 
-    /// Allocate and copy `bytes` into local VM.
-    pub fn allocate_from(&mut self, bytes: &[u8]) -> EntityId {
+    /// Allocate and copy `bytes` into local VM, stamped as if no `save` were outstanding.
+    ///
+    /// The entity is stamped `save_level = 0`, `global = false`,
+    /// `created_after_save = 0` — it claims to predate every outstanding
+    /// `save`. That is only true during bootstrap, before any `save` can have
+    /// happened. Everywhere else prefer the VM-aware helpers in
+    /// `stet_ops::vm_ops` (`alloc_dict` / `alloc_array` / `alloc_string`, or
+    /// their `_in` variants): an entity mis-stamped this way is invisible to
+    /// the `invalidrestore` check while still being released by the matching
+    /// `restore`.
+    pub fn allocate_from_at_level_zero(&mut self, bytes: &[u8]) -> EntityId {
         self.local.allocate_from(bytes)
     }
 

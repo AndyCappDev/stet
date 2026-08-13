@@ -375,8 +375,9 @@ pub fn op_execstack(ctx: &mut Context) -> Result<(), PsError> {
     ctx.cow_check_array(entity);
 
     // Copy exec stack contents into the array, converting internal
-    // markers to PS-visible representations
-    let e_slice = ctx.e_stack.as_slice();
+    // markers to PS-visible representations. The snapshot is taken up front
+    // because materialising a marker allocates, which needs `ctx` mutably.
+    let e_slice: Vec<PsObject> = ctx.e_stack.as_slice().to_vec();
     for (i, &elem) in e_slice.iter().enumerate() {
         let visible = match elem.value {
             PsValue::ExecArray {
@@ -393,15 +394,15 @@ pub fn op_execstack(ctx: &mut Context) -> Result<(), PsError> {
                 flags: elem.flags,
             },
             PsValue::Stopped => {
-                let s = ctx.strings.allocate_from(b"-stopped-");
+                let s = crate::vm_ops::alloc_string_in(ctx, b"-stopped-", arr_is_global);
                 PsObject::string(s, 9)
             }
             PsValue::Loop(_) => {
-                let s = ctx.strings.allocate_from(b"-loop-");
+                let s = crate::vm_ops::alloc_string_in(ctx, b"-loop-", arr_is_global);
                 PsObject::string(s, 6)
             }
             PsValue::DictEnd(_) => {
-                let s = ctx.strings.allocate_from(b"-dictend-");
+                let s = crate::vm_ops::alloc_string_in(ctx, b"-dictend-", arr_is_global);
                 PsObject::string(s, 9)
             }
             _ => elem,

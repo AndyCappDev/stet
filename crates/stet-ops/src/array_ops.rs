@@ -330,7 +330,7 @@ mod tests {
     fn test_aload() {
         let mut ctx = test_ctx();
         let items = [PsObject::int(10), PsObject::int(20)];
-        let entity = ctx.arrays.allocate_from(&items);
+        let entity = ctx.arrays.allocate_from_at_level_zero(&items);
         ctx.o_stack.push(PsObject::array(entity, 2)).unwrap();
         op_aload(&mut ctx).unwrap();
         // Stack: 10 20 array

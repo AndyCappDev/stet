@@ -923,7 +923,7 @@ fn dict_key_to_object(ctx: &mut Context, key: &DictKey) -> PsObject {
         DictKey::Real(bits) => PsObject::real(f64::from_bits(*bits)),
         DictKey::Bool(v) => PsObject::bool(*v),
         DictKey::String(bytes) => {
-            let entity = ctx.strings.allocate_from(bytes);
+            let entity = stet_ops::vm_ops::alloc_string(ctx, bytes);
             PsObject::string(entity, bytes.len() as u32)
         }
         DictKey::Operator(op) => {

@@ -892,7 +892,7 @@ mod tests {
     }
 
     fn make_dict(ctx: &mut Context, pairs: &[(&[u8], PsObject)]) -> PsObject {
-        let dict_id = ctx.dicts.allocate(pairs.len(), b"<test>");
+        let dict_id = ctx.dicts.allocate_at_level_zero(pairs.len(), b"<test>");
         for (k, v) in pairs {
             let nid = ctx.names.intern(k);
             ctx.dicts.put(dict_id, DictKey::Name(nid), *v);
@@ -1043,7 +1043,7 @@ mod tests {
     }
 
     fn make_array(ctx: &mut Context, elems: &[PsObject]) -> PsObject {
-        let entity = ctx.arrays.allocate_from(elems);
+        let entity = ctx.arrays.allocate_from_at_level_zero(elems);
         PsObject {
             value: PsValue::Array {
                 entity,
@@ -1212,7 +1212,7 @@ mod tests {
         // Build the procedure { 1 exch sub } as an executable array.
         let exch_id = ctx.names.intern(b"exch");
         let sub_id = ctx.names.intern(b"sub");
-        let proc_entity = ctx.arrays.allocate_from(&[
+        let proc_entity = ctx.arrays.allocate_from_at_level_zero(&[
             PsObject::int(1),
             PsObject::name_exec(exch_id),
             PsObject::name_exec(sub_id),
@@ -1322,7 +1322,7 @@ mod tests {
     }
 
     fn make_string(ctx: &mut Context, bytes: &[u8]) -> PsObject {
-        let entity = ctx.strings.allocate_from(bytes);
+        let entity = ctx.strings.allocate_from_at_level_zero(bytes);
         PsObject::string(entity, bytes.len() as u32)
     }
 

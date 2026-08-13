@@ -2254,7 +2254,7 @@ mod tests {
 
     /// Build an executable procedure array from `elems`.
     fn make_proc(ctx: &mut Context, elems: &[PsObject]) -> PsObject {
-        let entity = ctx.arrays.allocate_from(elems);
+        let entity = ctx.arrays.allocate_from_at_level_zero(elems);
         let mut proc = PsObject::array(entity, elems.len() as u32);
         proc.flags = stet_core::object::ObjFlags::executable_composite();
         proc
@@ -2342,10 +2342,10 @@ mod tests {
     #[test]
     fn test_decode_fingerprint_terminates_on_cycle() {
         let mut ctx = setup();
-        let inner = ctx.arrays.allocate_from(&[PsObject::int(0)]);
+        let inner = ctx.arrays.allocate_from_at_level_zero(&[PsObject::int(0)]);
         let mut inner_proc = PsObject::array(inner, 1);
         inner_proc.flags = stet_core::object::ObjFlags::executable_composite();
-        let outer = ctx.arrays.allocate_from(&[inner_proc]);
+        let outer = ctx.arrays.allocate_from_at_level_zero(&[inner_proc]);
         let mut outer_proc = PsObject::array(outer, 1);
         outer_proc.flags = stet_core::object::ObjFlags::executable_composite();
         // Close the loop: inner[0] := outer.
@@ -2359,7 +2359,7 @@ mod tests {
     #[test]
     fn test_decode_fingerprint_bails_on_opaque_value() {
         let mut ctx = setup();
-        let d = ctx.dicts.allocate(4, b"opaque");
+        let d = ctx.dicts.allocate_at_level_zero(4, b"opaque");
         let proc = make_proc(&mut ctx, &[PsObject::dict(d)]);
         assert_eq!(key_of(&mut ctx, proc), None);
     }

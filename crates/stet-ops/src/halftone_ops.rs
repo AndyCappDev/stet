@@ -279,7 +279,7 @@ pub fn op_currentscreen(ctx: &mut Context) -> Result<(), PsError> {
     match ctx.gstate.screen_proc {
         Some(proc_obj) => ctx.o_stack.push(proc_obj)?,
         None => {
-            let entity = ctx.arrays.allocate_from(&[]);
+            let entity = crate::vm_ops::alloc_array_from(ctx, &[]);
             ctx.o_stack.push(PsObject::procedure(entity, 0))?;
         }
     }
@@ -370,7 +370,7 @@ pub fn op_currentcolorscreen(ctx: &mut Context) -> Result<(), PsError> {
         let proc_obj = match ctx.gstate.screen_proc {
             Some(p) => p,
             None => {
-                let entity = ctx.arrays.allocate_from(&[]);
+                let entity = crate::vm_ops::alloc_array_from(ctx, &[]);
                 PsObject::procedure(entity, 0)
             }
         };
@@ -439,7 +439,7 @@ pub fn op_currenttransfer(ctx: &mut Context) -> Result<(), PsError> {
     match ctx.gstate.transfer_function {
         Some(proc_obj) => ctx.o_stack.push(proc_obj)?,
         None => {
-            let entity = ctx.arrays.allocate_from(&[]);
+            let entity = crate::vm_ops::alloc_array_from(ctx, &[]);
             ctx.o_stack.push(PsObject::procedure(entity, 0))?;
         }
     }
@@ -487,7 +487,7 @@ pub fn op_currentcolortransfer(ctx: &mut Context) -> Result<(), PsError> {
         let proc_obj = match ctx.gstate.transfer_function {
             Some(p) => p,
             None => {
-                let entity = ctx.arrays.allocate_from(&[]);
+                let entity = crate::vm_ops::alloc_array_from(ctx, &[]);
                 PsObject::procedure(entity, 0)
             }
         };
@@ -549,7 +549,7 @@ pub fn op_currentblackgeneration(ctx: &mut Context) -> Result<(), PsError> {
     match ctx.gstate.black_generation {
         Some(proc_obj) => ctx.o_stack.push(proc_obj)?,
         None => {
-            let entity = ctx.arrays.allocate_from(&[]);
+            let entity = crate::vm_ops::alloc_array_from(ctx, &[]);
             ctx.o_stack.push(PsObject::procedure(entity, 0))?;
         }
     }
@@ -576,7 +576,7 @@ pub fn op_currentundercolorremoval(ctx: &mut Context) -> Result<(), PsError> {
     match ctx.gstate.undercolor_removal {
         Some(proc_obj) => ctx.o_stack.push(proc_obj)?,
         None => {
-            let entity = ctx.arrays.allocate_from(&[]);
+            let entity = crate::vm_ops::alloc_array_from(ctx, &[]);
             ctx.o_stack.push(PsObject::procedure(entity, 0))?;
         }
     }
@@ -660,7 +660,7 @@ pub fn op_currenthalftone(ctx: &mut Context) -> Result<(), PsError> {
         let proc_obj = match ctx.gstate.screen_proc {
             Some(p) => p,
             None => {
-                let proc_entity = ctx.arrays.allocate_from(&[]);
+                let proc_entity = crate::vm_ops::alloc_array_from(ctx, &[]);
                 PsObject::procedure(proc_entity, 0)
             }
         };
@@ -1410,7 +1410,7 @@ mod tests {
         let mut ctx = setup();
         ctx.o_stack.push(PsObject::real(120.0)).unwrap();
         ctx.o_stack.push(PsObject::real(30.0)).unwrap();
-        let e = ctx.arrays.allocate_from(&[]);
+        let e = ctx.arrays.allocate_from_at_level_zero(&[]);
         ctx.o_stack.push(PsObject::procedure(e, 0)).unwrap();
         op_setscreen(&mut ctx).unwrap();
         assert!(ctx.o_stack.is_empty());
@@ -1435,7 +1435,7 @@ mod tests {
     #[test]
     fn test_settransfer_stores_proc() {
         let mut ctx = setup();
-        let e = ctx.arrays.allocate_from(&[]);
+        let e = ctx.arrays.allocate_from_at_level_zero(&[]);
         ctx.o_stack.push(PsObject::procedure(e, 0)).unwrap();
         op_settransfer(&mut ctx).unwrap();
         assert!(ctx.o_stack.is_empty());
@@ -1445,7 +1445,7 @@ mod tests {
     #[test]
     fn test_currenttransfer_returns_stored() {
         let mut ctx = setup();
-        let e = ctx.arrays.allocate_from(&[]);
+        let e = ctx.arrays.allocate_from_at_level_zero(&[]);
         let proc_obj = PsObject::procedure(e, 0);
         ctx.gstate.transfer_function = Some(proc_obj);
         op_currenttransfer(&mut ctx).unwrap();
