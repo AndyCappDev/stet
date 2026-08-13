@@ -50,7 +50,8 @@ pub fn op_definefont(ctx: &mut Context) -> Result<(), PsError> {
     }
 
     // Register in FontDirectory
-    ctx.dicts.put(ctx.font_directory, dict_key, font_obj);
+    let font_directory = ctx.font_directory;
+    ctx.dict_put_cow(font_directory, dict_key, font_obj);
 
     ctx.o_stack.push(font_obj)?;
     Ok(())
@@ -477,8 +478,8 @@ pub fn op_composefont(ctx: &mut Context) -> Result<(), PsError> {
 
     // Register in FontDirectory
     let font_obj = PsObject::dict(font_entity);
-    ctx.dicts
-        .put(ctx.font_directory, DictKey::Name(font_name_id), font_obj);
+    let font_directory = ctx.font_directory;
+    ctx.dict_put_cow(font_directory, DictKey::Name(font_name_id), font_obj);
 
     // Also register in the Font resource dict so /Font findresource can find it.
     // findfont is defined as { /Font findresource } which searches resource dicts,

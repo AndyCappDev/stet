@@ -202,6 +202,185 @@ pub fn audit_global_vm(ctx: &Context) -> Vec<Violation> {
     out
 }
 
+/// A reference to an entity whose storage no longer exists.
+///
+/// Only possible once `restore` actually releases local VM: truncating an
+/// entity table makes every id at or above the new length invalid. Any
+/// surviving reference to one is a use-after-free, and indexing the table
+/// with it panics.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DanglingRef {
+    /// Where the stale reference lives.
+    pub holder: String,
+    /// Which slot inside the holder: a dict key, an array index, or a stack
+    /// position.
+    pub slot: String,
+    /// PostScript type name of the reference's target.
+    pub value_type: &'static str,
+    /// Entity index the reference points at.
+    pub target_index: usize,
+    /// Current length of the entity table it points into.
+    pub table_len: usize,
+}
+
+impl std::fmt::Display for DanglingRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} [{}] -> {} entity {} (table len {})",
+            self.holder, self.slot, self.value_type, self.target_index, self.table_len
+        )
+    }
+}
+
+/// Entity table length for the store `obj` lives in, or `None` for simples.
+fn table_len_for(ctx: &Context, obj: &PsObject) -> Option<(usize, usize)> {
+    let (entity, len) = match obj.value {
+        PsValue::String { entity, .. } => (
+            entity,
+            if entity.is_global() {
+                ctx.strings.global.entities.len()
+            } else {
+                ctx.strings.local.entities.len()
+            },
+        ),
+        PsValue::Array { entity, .. } | PsValue::PackedArray { entity, .. } => (
+            entity,
+            if entity.is_global() {
+                ctx.arrays.global.entities.len()
+            } else {
+                ctx.arrays.local.entities.len()
+            },
+        ),
+        PsValue::Dict(entity) => (
+            entity,
+            if entity.is_global() {
+                ctx.dicts.global.entities.len()
+            } else {
+                ctx.dicts.local.entities.len()
+            },
+        ),
+        _ => return None,
+    };
+    Some((entity.raw_index(), len))
+}
+
+/// Record `obj` in `out` if it points past the end of its entity table.
+fn check_ref(
+    ctx: &Context,
+    obj: &PsObject,
+    holder: &str,
+    slot: String,
+    out: &mut Vec<DanglingRef>,
+) {
+    if let Some((index, table_len)) = table_len_for(ctx, obj)
+        && index >= table_len
+    {
+        out.push(DanglingRef {
+            holder: holder.to_string(),
+            slot,
+            value_type: std::str::from_utf8(obj.type_name()).unwrap_or("?"),
+            target_index: index,
+            table_len,
+        });
+    }
+}
+
+/// Find every reference to storage that no longer exists.
+///
+/// Sweeps both VM arenas plus the interpreter roots that outlive a `restore`
+/// — the operand, execution, and dictionary stacks, and the well-known
+/// dictionary handles cached on [`Context`].
+///
+/// This is the companion to [`audit_global_vm`]. That one asks whether global
+/// VM *could* come to hold a dangling reference; this one asks whether
+/// anything at all *already does*. On a build where `restore` reclaims
+/// nothing the result is always empty, because no entity id is ever retired.
+pub fn audit_dangling_refs(ctx: &Context) -> Vec<DanglingRef> {
+    let mut out = Vec::new();
+
+    for (store, label) in [
+        (&ctx.dicts.local, "local dict"),
+        (&ctx.dicts.global, "global dict"),
+    ] {
+        for (entity, entry) in store.iter_entities() {
+            let name = String::from_utf8_lossy(&entry.name);
+            let holder = if name.is_empty() {
+                format!("{label} #{}", entity.raw_index())
+            } else {
+                format!("{label} {name}")
+            };
+            for (key, value) in &entry.entries {
+                check_ref(ctx, value, &holder, describe_key(ctx, key), &mut out);
+            }
+        }
+    }
+
+    for (store, label) in [
+        (&ctx.arrays.local, "local array"),
+        (&ctx.arrays.global, "global array"),
+    ] {
+        for (entity, elements) in store.iter_entities() {
+            let holder = format!("{label} #{}", entity.raw_index());
+            for (index, value) in elements.iter().enumerate() {
+                check_ref(ctx, value, &holder, index.to_string(), &mut out);
+            }
+        }
+    }
+
+    for (index, obj) in ctx.o_stack.as_slice().iter().enumerate() {
+        check_ref(ctx, obj, "operand stack", index.to_string(), &mut out);
+    }
+    for (index, obj) in ctx.e_stack.as_slice().iter().enumerate() {
+        check_ref(ctx, obj, "execution stack", index.to_string(), &mut out);
+    }
+    for (index, entity) in ctx.d_stack.iter().enumerate() {
+        check_ref(
+            ctx,
+            &PsObject::dict(*entity),
+            "dictionary stack",
+            index.to_string(),
+            &mut out,
+        );
+    }
+
+    // Well-known handles the interpreter keeps outside VM. A restore that
+    // retires one of these leaves the interpreter itself holding a stale id.
+    for (entity, name) in [
+        (ctx.systemdict, "systemdict"),
+        (ctx.globaldict, "globaldict"),
+        (ctx.userdict, "userdict"),
+        (ctx.errordict, "errordict"),
+        (ctx.dollar_error, "$error"),
+        (ctx.font_directory, "FontDirectory"),
+        (ctx.global_resources, "GlobalResources"),
+        (ctx.local_resources, "LocalResources"),
+        (ctx.category_registry, "CategoryRegistry"),
+        (ctx.user_params, "UserParams"),
+        (ctx.system_params, "SystemParams"),
+    ] {
+        check_ref(
+            ctx,
+            &PsObject::dict(entity),
+            "Context handle",
+            name.to_string(),
+            &mut out,
+        );
+    }
+
+    if let Some(pd) = ctx.gstate.page_device {
+        check_ref(
+            ctx,
+            &PsObject::dict(pd),
+            "graphics state",
+            "page_device".to_string(),
+            &mut out,
+        );
+    }
+
+    out
+}
+
 /// Sweep global VM for references that could actually dangle.
 ///
 /// This is [`audit_global_vm`] minus the permanent-target references that

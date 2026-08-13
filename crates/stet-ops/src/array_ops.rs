@@ -198,10 +198,15 @@ pub fn op_reverse(ctx: &mut Context) -> Result<(), PsError> {
     let obj = ctx.o_stack.peek(0)?;
     match obj.value {
         PsValue::Array { entity, start, len } => {
+            // In-place mutation of an object that may predate the current
+            // save, so it needs copy-on-write first — otherwise `restore` has
+            // no backup to revert to and the reversal survives it.
+            ctx.cow_check_array(entity);
             let slice = ctx.arrays.get_mut(entity, start, len);
             slice.reverse();
         }
         PsValue::String { entity, start, len } => {
+            ctx.cow_check_string(entity);
             let slice = ctx.strings.get_mut(entity, start, len);
             slice.reverse();
         }

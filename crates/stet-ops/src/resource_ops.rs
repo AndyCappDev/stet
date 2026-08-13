@@ -236,22 +236,36 @@ fn defineresource_direct(
         ctx.local_resources
     };
 
+    // LocalResources and GlobalResources are built during bootstrap, so this
+    // is a write to a dictionary older than the current save. Copy-on-write it
+    // first or `restore` will not revert the entry — and once restore reclaims
+    // local VM, that surviving entry points at released storage.
+    ctx.cow_check_dict(res_dict);
+
     // Ensure category dict exists in the resource dict
-    let cat_dict = if let Some(existing) = ctx.dicts.get(res_dict, &cat_key) {
-        match existing.value {
-            PsValue::Dict(e) => e,
-            _ => {
-                let d = ctx.dicts.allocate(20, b"resource_cat");
-                ctx.dicts.put(res_dict, cat_key.clone(), PsObject::dict(d));
-                d
-            }
+    let existing_cat = match ctx.dicts.get(res_dict, &cat_key) {
+        Some(obj) => match obj.value {
+            PsValue::Dict(e) => Some(e),
+            _ => None,
+        },
+        None => None,
+    };
+    let cat_dict = match existing_cat {
+        Some(e) => e,
+        None => {
+            // Allocate via alloc_dict so the category dict records the save
+            // level and VM mode actually in effect. Bare `dicts.allocate`
+            // hardcodes save level 0 / local, which mis-stamps its lifetime:
+            // it reports as older than every save while still being reclaimed
+            // by one, which is precisely the combination that hides the bug.
+            let d = crate::vm_ops::alloc_dict(ctx, 20, b"resource_cat");
+            ctx.dicts.put(res_dict, cat_key, PsObject::dict(d));
+            d
         }
-    } else {
-        let d = ctx.dicts.allocate(20, b"resource_cat");
-        ctx.dicts.put(res_dict, cat_key.clone(), PsObject::dict(d));
-        d
     };
 
+    // The category dict may itself predate this save, for the same reason.
+    ctx.cow_check_dict(cat_dict);
     ctx.dicts.put(cat_dict, key, instance);
     ctx.o_stack.push(instance)?;
     Ok(())
@@ -607,10 +621,17 @@ pub fn op_localresourcedict(ctx: &mut Context) -> Result<(), PsError> {
         return Ok(());
     }
 
-    // Not found — create one and return it
-    let d = ctx.dicts.allocate(20, b"local_res_cat");
-    ctx.dicts
-        .put(ctx.local_resources, cat_key, PsObject::dict(d));
+    // Not found — create one and return it.
+    //
+    // The category dict is local regardless of the ambient `currentglobal`,
+    // since it is going into LocalResources. It has to record the save level
+    // actually in effect, and LocalResources itself predates the save, so it
+    // needs copy-on-write before the write lands — otherwise `restore` leaves
+    // the entry in place, pointing at a category dict it has just released.
+    let local_resources = ctx.local_resources;
+    let d = crate::vm_ops::alloc_dict_in(ctx, 20, b"local_res_cat", false);
+    ctx.cow_check_dict(local_resources);
+    ctx.dicts.put(local_resources, cat_key, PsObject::dict(d));
     ctx.o_stack.push(PsObject::dict(d))?;
     ctx.o_stack.push(PsObject::bool(true))?;
     Ok(())

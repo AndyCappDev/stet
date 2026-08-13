@@ -360,8 +360,28 @@ pub fn alloc_dict(
     max_length: usize,
     name: &[u8],
 ) -> stet_core::object::EntityId {
-    let save_level = ctx.save_stack.current_level();
     let global = ctx.vm_alloc_mode;
+    alloc_dict_in(ctx, max_length, name, global)
+}
+
+/// Helper: allocate a dict in an explicitly chosen VM.
+///
+/// Use this instead of [`alloc_dict`] when the dict is about to be stored into
+/// a container whose VM is already fixed, so the ambient `currentglobal` is the
+/// wrong thing to follow.
+///
+/// Prefer either of these over `ctx.dicts.allocate`, which hardcodes save level
+/// 0 and `created_after_save` 0. A dict stamped that way claims to predate
+/// every `save` while still being released by one, which defeats both the
+/// `invalidrestore` check and the lifetime reasoning in
+/// [`stet_core::vm_audit`].
+pub fn alloc_dict_in(
+    ctx: &mut Context,
+    max_length: usize,
+    name: &[u8],
+    global: bool,
+) -> stet_core::object::EntityId {
+    let save_level = ctx.save_stack.current_level();
     let created = ctx.save_stack.last_save_id();
     ctx.dicts
         .allocate_with(max_length, name, save_level, global, created)

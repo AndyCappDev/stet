@@ -1080,6 +1080,24 @@ impl Context {
     }
 
     /// Check if a dict entity needs COW before mutation.
+    /// Store into a dictionary, copy-on-writing it first.
+    ///
+    /// Prefer this over a bare `ctx.dicts.put` for any write into a dictionary
+    /// the current operation did not itself allocate — `FontDirectory`, the
+    /// resource dictionaries, `userdict`, a caller-supplied dict. Writing
+    /// straight through bypasses save/restore: if the dictionary predates the
+    /// current `save`, no backup is taken and `restore` will not revert the
+    /// entry. That leaves the dictionary holding a value the restore released.
+    ///
+    /// [`cow_check_dict`](Self::cow_check_dict) is cheap and idempotent — it
+    /// returns immediately at save level 0, for global entities, and for
+    /// dictionaries already copied at this level — so there is no reason to
+    /// skip it when in doubt.
+    pub fn dict_put_cow(&mut self, entity: EntityId, key: DictKey, value: PsObject) {
+        self.cow_check_dict(entity);
+        self.dicts.put(entity, key, value);
+    }
+
     pub fn cow_check_dict(&mut self, entity: EntityId) {
         let current_level = self.save_stack.current_level();
         if current_level == 0 {

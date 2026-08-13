@@ -197,8 +197,8 @@ pub fn load_type1_font(ctx: &mut Context, font_data: &[u8]) -> Result<PsObject, 
 
     // Register in FontDirectory under the font name
     let font_obj = PsObject::dict(font_dict);
-    ctx.dicts
-        .put(ctx.font_directory, DictKey::Name(name_id), font_obj);
+    let font_directory = ctx.font_directory;
+    ctx.dict_put_cow(font_directory, DictKey::Name(name_id), font_obj);
 
     Ok(font_obj)
 }
@@ -229,7 +229,8 @@ pub fn find_font(ctx: &mut Context, name_bytes: &[u8]) -> Result<PsObject, Strin
     // from the .t1 file). We need to also register under the requested name.
     let actual_name = get_font_name(ctx, font_obj);
     if actual_name.as_deref() != Some(&*font_name) {
-        ctx.dicts.put(ctx.font_directory, key, font_obj);
+        let font_directory = ctx.font_directory;
+        ctx.dict_put_cow(font_directory, key, font_obj);
     }
 
     Ok(font_obj)
