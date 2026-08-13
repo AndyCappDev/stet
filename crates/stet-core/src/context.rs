@@ -104,6 +104,14 @@ pub enum LoopType {
 /// Set by the engine crate to enable inline PS procedure calls from operators.
 pub type ExecSyncFn = fn(&mut Context, PsObject) -> Result<(), PsError>;
 
+/// Key for [`Context::cie_decode_cache`].
+///
+/// The two leading words are a 128-bit structural fingerprint of the decode
+/// procedure (including whatever the dict stack currently binds its
+/// executable names to); the remainder is the sample count and the endpoints
+/// of the sampled range, as raw bits so the key stays hashable.
+pub type CieDecodeKey = (u64, u64, u32, u64, u64);
+
 pub struct Context {
     // Stacks
     pub o_stack: Stack,
@@ -278,6 +286,23 @@ pub struct Context {
     pub pattern_store: Vec<PatternData>,
     /// Cache of form display lists keyed by dict EntityId.
     pub form_cache: rustc_hash::FxHashMap<EntityId, DisplayList>,
+
+    /// Memo of sampled CIE decode tables, keyed by a structural fingerprint
+    /// of the decode procedure together with the sampled range.
+    ///
+    /// Sampling one table runs the procedure 256 times, and a CIE colour
+    /// space installs up to six of them, so a file that re-installs the same
+    /// space per page (what `pdftops` emits for every ICCBased space) pays
+    /// thousands of `exec_sync` calls per page. Worse, decode procedures
+    /// routinely contain inline array literals, and every evaluation
+    /// allocates a fresh array in the non-reclaiming array arena — turning
+    /// the repeated sampling into unbounded memory growth.
+    ///
+    /// Memoising is sound because the PLRM already requires a CIE decode
+    /// procedure to be a pure function of its single input: sampling it at
+    /// 256 points and interpolating (which this code has always done) is the
+    /// same assumption. See `stet_ops::color_ops::eval_decode_table_range`.
+    pub cie_decode_cache: rustc_hash::FxHashMap<CieDecodeKey, Vec<f64>>,
 
     // Timing
     pub start_time: Option<std::time::Instant>,
@@ -700,6 +725,7 @@ impl Context {
             cshow_pending_cid: None,
             pattern_store: Vec::new(),
             form_cache: rustc_hash::FxHashMap::default(),
+            cie_decode_cache: rustc_hash::FxHashMap::default(),
             #[cfg(not(target_arch = "wasm32"))]
             start_time: Some(std::time::Instant::now()),
             #[cfg(target_arch = "wasm32")]

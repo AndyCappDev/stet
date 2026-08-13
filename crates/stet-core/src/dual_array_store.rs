@@ -23,6 +23,12 @@ impl DualArrayStore {
         }
     }
 
+    /// Combined high-water mark of both arenas, in object slots.
+    /// See [`ArrayStore::allocated_objects`].
+    pub fn allocated_objects(&self) -> usize {
+        self.global.allocated_objects() + self.local.allocated_objects()
+    }
+
     #[inline]
     fn store(&self, entity: EntityId) -> &ArrayStore {
         if entity.is_global() {

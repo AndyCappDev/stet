@@ -26,6 +26,16 @@ impl ArrayStore {
         }
     }
 
+    /// Number of object slots handed out so far.
+    ///
+    /// The backing arena only ever grows — nothing is reclaimed without a
+    /// `restore` — so this doubles as the store's high-water mark. Useful for
+    /// asserting that a code path which evaluates PostScript repeatedly isn't
+    /// allocating a fresh array per evaluation.
+    pub fn allocated_objects(&self) -> usize {
+        self.data.len()
+    }
+
     /// Allocate `len` null-filled slots, returning an `EntityId`.
     pub fn allocate(&mut self, len: usize) -> EntityId {
         let offset = self.data.len() as u32;

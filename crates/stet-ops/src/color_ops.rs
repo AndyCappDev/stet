@@ -1698,9 +1698,251 @@ fn get_cie_decode_proc_single(
     }
 }
 
-/// Evaluate a decode procedure at N evenly-spaced sample points in [0,1].
-/// Evaluate a PostScript decode procedure at `n` evenly spaced points spanning `[lo, hi]`.
+/// Upper bound on memoised decode tables. Each entry is one `Vec<f64>` of
+/// `n` samples (2 KB at the usual n=256), so the ceiling caps the cache at a
+/// few megabytes even on a file with pathologically many distinct CIE spaces.
+/// Past the ceiling, evaluation still succeeds — it just stops being cached,
+/// so this can never turn into its own unbounded-growth path.
+const CIE_DECODE_CACHE_MAX: usize = 4096;
+
+/// Depth ceiling for the fingerprint walk. Beyond it the procedure is treated
+/// as un-fingerprintable and evaluated uncached, which is always correct.
+const FINGERPRINT_MAX_DEPTH: usize = 64;
+
+/// Ceiling on objects examined while fingerprinting one procedure.
+///
+/// Fingerprinting has to be cheaper than the sampling it avoids. Walking a
+/// decode procedure is normally trivial (a few thousand objects even with the
+/// inline lookup tables `pdftops` emits), but a procedure that merely *refers*
+/// to a huge bound table would drag that table into every walk and could cost
+/// more than the 256 evaluations it saves. Exceeding the budget abandons the
+/// fingerprint, so such a procedure is evaluated uncached exactly as before.
+const FINGERPRINT_MAX_OBJECTS: usize = 64 * 1024;
+
+/// Writes the same bytes into two differently-salted hashers, yielding a
+/// 128-bit fingerprint. A collision would silently reuse another procedure's
+/// colour table, so 64 bits is not enough margin to rely on here.
+struct DualHasher {
+    a: std::collections::hash_map::DefaultHasher,
+    b: std::collections::hash_map::DefaultHasher,
+}
+
+impl DualHasher {
+    fn new() -> Self {
+        use std::hash::Hasher;
+        let mut a = std::collections::hash_map::DefaultHasher::new();
+        let mut b = std::collections::hash_map::DefaultHasher::new();
+        a.write_u64(0x9E37_79B9_7F4A_7C15);
+        b.write_u64(0xC2B2_AE3D_27D4_EB4F);
+        Self { a, b }
+    }
+
+    fn tag(&mut self, v: u8) {
+        use std::hash::Hasher;
+        self.a.write_u8(v);
+        self.b.write_u8(v);
+    }
+
+    fn word(&mut self, v: u64) {
+        use std::hash::Hasher;
+        self.a.write_u64(v);
+        self.b.write_u64(v);
+    }
+
+    fn bytes(&mut self, v: &[u8]) {
+        use std::hash::Hasher;
+        self.a.write(v);
+        self.b.write(v);
+    }
+
+    fn finish(&self) -> (u64, u64) {
+        use std::hash::Hasher;
+        (self.a.finish(), self.b.finish())
+    }
+}
+
+/// Normalise a float so equal values hash equally: `-0.0` and `0.0` compare
+/// equal but have different bit patterns, and every NaN is folded to one.
+fn canonical_f64_bits(v: f64) -> u64 {
+    if v == 0.0 {
+        0.0f64.to_bits()
+    } else if v.is_nan() {
+        f64::NAN.to_bits()
+    } else {
+        v.to_bits()
+    }
+}
+
+/// Fold `obj` into the fingerprint, following nested procedures and resolving
+/// executable names through the dict stack.
+///
+/// Sets `ok` to false — meaning "don't cache this" — on anything whose
+/// behaviour can't be pinned down from its contents (files, save objects,
+/// gstates, dicts) or on exceeding the depth ceiling. Bailing out is always
+/// safe: the caller falls back to evaluating uncached.
+fn fingerprint_obj(
+    ctx: &mut Context,
+    obj: PsObject,
+    h: &mut DualHasher,
+    visited: &mut std::collections::HashSet<(EntityId, u32, u32)>,
+    depth: usize,
+    budget: &mut usize,
+    ok: &mut bool,
+) {
+    if !*ok {
+        return;
+    }
+    if depth > FINGERPRINT_MAX_DEPTH || *budget == 0 {
+        *ok = false;
+        return;
+    }
+    *budget -= 1;
+    let executable = obj.flags.is_executable();
+    h.tag(executable as u8);
+
+    match obj.value {
+        PsValue::Null => h.tag(1),
+        PsValue::Mark => h.tag(2),
+        PsValue::DictMark => h.tag(3),
+        PsValue::Bool(v) => {
+            h.tag(4);
+            h.tag(v as u8);
+        }
+        PsValue::Int(v) => {
+            h.tag(5);
+            h.word(v as i64 as u64);
+        }
+        PsValue::Real(v) => {
+            h.tag(6);
+            h.word(canonical_f64_bits(v));
+        }
+        PsValue::Operator(op) => {
+            h.tag(7);
+            h.word(op.0 as u64);
+        }
+        PsValue::String { entity, start, len } => {
+            h.tag(8);
+            h.word(len as u64);
+            let bytes = ctx.strings.get(entity, start, len).to_vec();
+            h.bytes(&bytes);
+        }
+        PsValue::Name(id) => {
+            h.tag(9);
+            let bytes = ctx.names.get_bytes(id).to_vec();
+            h.bytes(&bytes);
+            // A literal name is just data. An executable one is a call whose
+            // meaning comes from the dict stack, so what it resolves to right
+            // now is part of the fingerprint: rebind the name and the
+            // fingerprint changes, which misses the cache and re-evaluates.
+            if executable {
+                match ctx.dict_load(&DictKey::Name(id)) {
+                    Some(bound) => {
+                        h.tag(1);
+                        fingerprint_obj(ctx, bound, h, visited, depth + 1, budget, ok);
+                    }
+                    None => h.tag(0),
+                }
+            }
+        }
+        PsValue::Array { entity, start, len } | PsValue::PackedArray { entity, start, len } => {
+            h.tag(10);
+            h.word(len as u64);
+            // Procedure graphs may legitimately be cyclic — the back-patched
+            // stub idiom Ghostscript's opdfread.ps prolog uses (see op_bind).
+            // Hash a back-edge marker on revisit so the walk terminates.
+            if !visited.insert((entity, start, len)) {
+                h.tag(0xFF);
+                return;
+            }
+            for i in 0..len {
+                let elem = ctx.arrays.get_element(entity, start + i);
+                fingerprint_obj(ctx, elem, h, visited, depth + 1, budget, ok);
+                if !*ok {
+                    return;
+                }
+            }
+        }
+        _ => *ok = false,
+    }
+}
+
+/// Build the cache key for sampling `proc` over `[lo, hi]`, or `None` when the
+/// procedure can't be fingerprinted and must be evaluated uncached.
+///
+/// The key covers the procedure's full program text, every nested procedure,
+/// and — for each executable name — whatever the dict stack binds that name to
+/// at this moment, resolved recursively. Two procedures therefore share a key
+/// only when they would execute the same instructions against the same
+/// bindings.
+///
+/// What the key deliberately does *not* cover is the dict stack itself, so a
+/// procedure that reaches its data through a run-time lookup the static walk
+/// can't follow (`currentdict … get`, `load` of a computed name) could in
+/// principle share a key with one that behaves differently. That is out of
+/// scope by construction: the PLRM requires a CIE decode procedure to be a
+/// pure function of its single numeric input, which is the same assumption
+/// this code has always made by sampling it at `n` points and interpolating
+/// between them. Including the dict stack was measured and rejected — the
+/// per-object dicts `pdftops` pushes differ on every call, which drops the hit
+/// rate to zero and restores the unbounded growth this cache exists to stop.
+fn decode_table_cache_key(
+    ctx: &mut Context,
+    proc: PsObject,
+    n: usize,
+    lo: f64,
+    hi: f64,
+) -> Option<stet_core::context::CieDecodeKey> {
+    let mut h = DualHasher::new();
+    let mut visited = std::collections::HashSet::new();
+    let mut budget = FINGERPRINT_MAX_OBJECTS;
+    let mut ok = true;
+    fingerprint_obj(ctx, proc, &mut h, &mut visited, 0, &mut budget, &mut ok);
+    if !ok {
+        return None;
+    }
+    let (fa, fb) = h.finish();
+    Some((
+        fa,
+        fb,
+        n as u32,
+        canonical_f64_bits(lo),
+        canonical_f64_bits(hi),
+    ))
+}
+
+/// Evaluate a PostScript decode procedure at `n` evenly spaced points spanning
+/// `[lo, hi]`, memoising the result.
+///
+/// The memo is what keeps a file that re-installs the same CIE space on every
+/// page from re-running the procedure thousands of times — and, because each
+/// evaluation can allocate inline array literals into the non-reclaiming array
+/// arena, from growing memory without bound. See [`Context::cie_decode_cache`].
 fn eval_decode_table_range(
+    ctx: &mut Context,
+    proc: PsObject,
+    n: usize,
+    lo: f64,
+    hi: f64,
+) -> Result<Vec<f64>, PsError> {
+    let key = decode_table_cache_key(ctx, proc, n, lo, hi);
+    if let Some(k) = key
+        && let Some(hit) = ctx.cie_decode_cache.get(&k)
+    {
+        return Ok(hit.clone());
+    }
+
+    let table = eval_decode_table_range_uncached(ctx, proc, n, lo, hi)?;
+
+    if let Some(k) = key
+        && ctx.cie_decode_cache.len() < CIE_DECODE_CACHE_MAX
+    {
+        ctx.cie_decode_cache.insert(k, table.clone());
+    }
+    Ok(table)
+}
+
+/// Sample `proc` at `n` evenly spaced points spanning `[lo, hi]`.
+fn eval_decode_table_range_uncached(
     ctx: &mut Context,
     proc: PsObject,
     n: usize,
@@ -2010,6 +2252,118 @@ mod tests {
         ctx
     }
 
+    /// Build an executable procedure array from `elems`.
+    fn make_proc(ctx: &mut Context, elems: &[PsObject]) -> PsObject {
+        let entity = ctx.arrays.allocate_from(elems);
+        let mut proc = PsObject::array(entity, elems.len() as u32);
+        proc.flags = stet_core::object::ObjFlags::executable_composite();
+        proc
+    }
+
+    /// An executable name object, i.e. a call rather than a literal.
+    fn exec_name(ctx: &mut Context, name: &[u8]) -> PsObject {
+        let id = ctx.names.intern(name);
+        PsObject::name_exec(id)
+    }
+
+    fn key_of(ctx: &mut Context, proc: PsObject) -> Option<stet_core::context::CieDecodeKey> {
+        decode_table_cache_key(ctx, proc, 256, 0.0, 1.0)
+    }
+
+    /// Two separately allocated procedures with identical contents must share
+    /// a key — this is what lets a file that re-installs the same CIE space on
+    /// every page reuse one sampled table instead of resampling per page.
+    #[test]
+    fn test_decode_fingerprint_matches_across_identical_procs() {
+        let mut ctx = setup();
+        let a = make_proc(&mut ctx, &[PsObject::real(0.5), PsObject::int(3)]);
+        let b = make_proc(&mut ctx, &[PsObject::real(0.5), PsObject::int(3)]);
+        let (ka, kb) = (key_of(&mut ctx, a), key_of(&mut ctx, b));
+        assert!(ka.is_some());
+        assert_eq!(ka, kb);
+    }
+
+    /// Differing contents must not collide.
+    #[test]
+    fn test_decode_fingerprint_differs_on_content() {
+        let mut ctx = setup();
+        let a = make_proc(&mut ctx, &[PsObject::real(0.5)]);
+        let b = make_proc(&mut ctx, &[PsObject::real(0.25)]);
+        assert_ne!(key_of(&mut ctx, a), key_of(&mut ctx, b));
+    }
+
+    /// The sampled range is part of the key: the same procedure sampled over a
+    /// different interval is a different table.
+    #[test]
+    fn test_decode_fingerprint_includes_range() {
+        let mut ctx = setup();
+        let p = make_proc(&mut ctx, &[PsObject::real(0.5)]);
+        let a = decode_table_cache_key(&mut ctx, p, 256, 0.0, 1.0);
+        let b = decode_table_cache_key(&mut ctx, p, 256, 0.0, 2.0);
+        let c = decode_table_cache_key(&mut ctx, p, 128, 0.0, 1.0);
+        assert!(a.is_some());
+        assert_ne!(a, b);
+        assert_ne!(a, c);
+    }
+
+    /// An executable name is a call, so what the dict stack binds it to is part
+    /// of the fingerprint: rebinding must produce a different key, otherwise a
+    /// stale table would be reused after the procedure's meaning changed.
+    #[test]
+    fn test_decode_fingerprint_tracks_rebinding() {
+        let mut ctx = setup();
+        let called = exec_name(&mut ctx, b"my_cie_helper");
+        let proc = make_proc(&mut ctx, &[called]);
+
+        let unbound = key_of(&mut ctx, proc);
+        assert!(unbound.is_some(), "an unresolved name is still hashable");
+
+        let helper_a = make_proc(&mut ctx, &[PsObject::real(1.0)]);
+        let name_id = ctx.names.intern(b"my_cie_helper");
+        let userdict = ctx.userdict;
+        ctx.dicts.put(userdict, DictKey::Name(name_id), helper_a);
+        ctx.dict_version += 1;
+        let bound_a = key_of(&mut ctx, proc);
+        assert_ne!(unbound, bound_a, "binding the name changes the key");
+
+        let helper_b = make_proc(&mut ctx, &[PsObject::real(2.0)]);
+        ctx.dicts.put(userdict, DictKey::Name(name_id), helper_b);
+        ctx.dict_version += 1;
+        let bound_b = key_of(&mut ctx, proc);
+        assert_ne!(bound_a, bound_b, "rebinding the name changes the key again");
+    }
+
+    /// A cyclic procedure graph must not hang the fingerprint walk.
+    ///
+    /// The back-patched stub idiom that produces such cycles is standard under
+    /// `//` immediate evaluation and appears in Ghostscript's `opdfread.ps`
+    /// prolog; naive recursion here would overflow the stack exactly as it did
+    /// in `op_bind`.
+    #[test]
+    fn test_decode_fingerprint_terminates_on_cycle() {
+        let mut ctx = setup();
+        let inner = ctx.arrays.allocate_from(&[PsObject::int(0)]);
+        let mut inner_proc = PsObject::array(inner, 1);
+        inner_proc.flags = stet_core::object::ObjFlags::executable_composite();
+        let outer = ctx.arrays.allocate_from(&[inner_proc]);
+        let mut outer_proc = PsObject::array(outer, 1);
+        outer_proc.flags = stet_core::object::ObjFlags::executable_composite();
+        // Close the loop: inner[0] := outer.
+        ctx.arrays.set_element(inner, 0, outer_proc);
+
+        assert!(key_of(&mut ctx, outer_proc).is_some());
+    }
+
+    /// Objects whose behaviour can't be pinned down from their contents make
+    /// the procedure un-cacheable, so it falls back to uncached evaluation.
+    #[test]
+    fn test_decode_fingerprint_bails_on_opaque_value() {
+        let mut ctx = setup();
+        let d = ctx.dicts.allocate(4, b"opaque");
+        let proc = make_proc(&mut ctx, &[PsObject::dict(d)]);
+        assert_eq!(key_of(&mut ctx, proc), None);
+    }
+
     #[test]
     fn test_setgray_currentgray() {
         let mut ctx = setup();
@@ -2018,6 +2372,24 @@ mod tests {
         op_currentgray(&mut ctx).unwrap();
         let v = ctx.o_stack.pop().unwrap().as_f64().unwrap();
         assert!((v - 0.5).abs() < 1e-10);
+    }
+
+    /// A procedure too large to fingerprint cheaply is left uncached rather
+    /// than made slower than the sampling the cache exists to avoid.
+    #[test]
+    fn test_decode_fingerprint_bails_over_object_budget() {
+        let mut ctx = setup();
+        let huge: Vec<PsObject> = (0..FINGERPRINT_MAX_OBJECTS + 16)
+            .map(|i| PsObject::int(i as i32))
+            .collect();
+        let proc = make_proc(&mut ctx, &huge);
+        assert_eq!(key_of(&mut ctx, proc), None);
+
+        // A procedure comfortably inside the budget still fingerprints, so the
+        // guard doesn't disable caching for the tables this is meant to fix.
+        let ordinary: Vec<PsObject> = (0..1024).map(PsObject::int).collect();
+        let ok_proc = make_proc(&mut ctx, &ordinary);
+        assert!(key_of(&mut ctx, ok_proc).is_some());
     }
 
     #[test]

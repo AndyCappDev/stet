@@ -636,6 +636,82 @@ fn test_flate_filter() {
     );
 }
 
+/// Re-installing the same CIE colour space must not cost arena memory per
+/// installation.
+///
+/// `setcolorspace` samples each decode procedure 256 times per channel. The
+/// procedures `pdftops` emits for an ICCBased space contain an inline array
+/// literal, so `[` / `]` are executable and every one of those evaluations
+/// builds a fresh array in the array arena — which is never reclaimed without
+/// a `restore`. A file that re-installs the space on each of its pages (the
+/// normal shape of `pdftops` output) therefore grew without bound: a 55 KB
+/// corpus file reached over 3 GB, and running the corpus concurrently
+/// exhausted host memory.
+///
+/// The memo in `Context::cie_decode_cache` collapses the repeats, so arena
+/// growth after the first installation must be negligible.
+#[test]
+fn cie_decode_tables_are_memoised_across_reinstalls() {
+    let mut ctx = render_ctx(64, 64);
+
+    // A DecodeABC whose procedures each build a 64-element array literal and
+    // index it — the construction that made this unbounded.
+    let table: String = (0..64)
+        .map(|i| (i * 4).to_string())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let space = format!(
+        "/cs [ /CIEBasedABC << \
+           /DecodeABC [ \
+             {{ dup 0 lt {{ pop 0 }} if [ {table} ] exch 63 mul cvi get 256 div }} \
+             {{ dup 0 lt {{ pop 0 }} if [ {table} ] exch 63 mul cvi get 256 div }} \
+             {{ dup 0 lt {{ pop 0 }} if [ {table} ] exch 63 mul cvi get 256 div }} \
+           ] \
+           /RangeABC [0 1 0 1 0 1] \
+           /MatrixABC [1 0 0 0 1 0 0 0 1] \
+           /WhitePoint [0.9505 1.0 1.089] \
+         >> ] def\n"
+    );
+    stet_engine::eval::parse_and_exec(&mut ctx, space.as_bytes())
+        .expect("colour space definition should execute");
+
+    let install = b"cs setcolorspace 0.2 0.4 0.6 setcolor\n";
+
+    stet_engine::eval::parse_and_exec(&mut ctx, install).expect("first install");
+    let after_first = ctx.arrays.allocated_objects();
+    let cache_after_first = ctx.cie_decode_cache.len();
+    assert!(
+        cache_after_first > 0,
+        "the first install should populate the decode-table memo"
+    );
+
+    // Re-install many times, as a multi-page document would.
+    const REINSTALLS: usize = 40;
+    for _ in 0..REINSTALLS {
+        stet_engine::eval::parse_and_exec(&mut ctx, install).expect("re-install");
+    }
+    let after_repeats = ctx.arrays.allocated_objects();
+
+    assert_eq!(
+        ctx.cie_decode_cache.len(),
+        cache_after_first,
+        "re-installing an unchanged space must not add cache entries"
+    );
+
+    // Uncached, each re-install re-ran 3 procedures x 256 samples, every one
+    // building a 64-element array: ~49k objects per install. Allow generous
+    // slack for the interpreter's own per-execution allocations while still
+    // failing decisively if the sampling is happening again.
+    let growth = after_repeats - after_first;
+    let per_install_uncached = 3 * 256 * 64;
+    assert!(
+        growth < per_install_uncached,
+        "arena grew {growth} objects over {REINSTALLS} re-installs \
+         (>= {per_install_uncached}, one uncached install) — decode tables \
+         are being resampled instead of reused"
+    );
+}
+
 /// Helper: Write adapter that captures bytes to a shared Vec.
 struct OutputCapture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 
