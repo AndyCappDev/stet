@@ -145,9 +145,16 @@
     } bind
 
     /StartData {
-        % string int StartData -
-        % Handle binary CIDFont data - consume and ignore for now
-        pop pop
+        % (Binary)|(Hex) datalength StartData -
+        %   currentdict is the CIDFont dictionary being built.
+        % .cid_startdata reads the charstring blob out of the current file and
+        % records it as /GlyphData. Reading it is not optional: the blob is
+        % inline in the source, so anything left unread reaches the scanner.
+        .cid_startdata
+        /SubrCache 10 dict def
+        CIDFontName currentdict /CIDFont defineresource pop
+        end     % the CIDFont dictionary
+        end     % the CIDInit ProcSet dictionary
     } bind
 
 >> % CIDInit ProcSet dictionary

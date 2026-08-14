@@ -47,6 +47,7 @@
 
 pub mod array_ops;
 pub mod cff_ops;
+pub mod cid_ops;
 pub mod clip_ops;
 pub mod color_ops;
 pub mod composite_ops;
@@ -296,6 +297,7 @@ pub fn build_system_dict(ctx: &mut Context) {
     register(ctx, sd, ".loadsystemfont", misc_ops::op_loadsystemfont);
     register(ctx, sd, ".loadfont", font_ops::op_dot_loadfont);
     register(ctx, sd, ".cff_startdata", cff_ops::op_cff_startdata);
+    register(ctx, sd, ".cid_startdata", cid_ops::op_cid_startdata);
     register(
         ctx,
         sd,

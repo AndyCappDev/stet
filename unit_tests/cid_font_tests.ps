@@ -1,0 +1,91 @@
+%% CID-keyed font tests
+%% Tests for the CIDInit ProcSet's StartData procedure.
+
+userdict /$unittest known not {(unit_tests/unittest.ps) run} if
+
+% A minimal CIDFont header. `StartData` is what closes it: it reads the
+% charstring blob, defines the resource, and pops both dictionaries.
+/cid_header {
+    /CIDInit /ProcSet findresource begin
+    20 dict begin
+    /CIDFontType 0 def
+    /CIDSystemInfo 3 dict dup begin
+      /Registry (Adobe) def
+      /Ordering (Identity) def
+      /Supplement 0 def
+    end def
+    /FontMatrix [0.001 0 0 0.001 0 0] def
+    /FontBBox [0 0 1000 1000] def
+    /CIDCount 1 def
+    /FDBytes 1 def
+    /GDBytes 3 def
+    /CIDMapOffset 0 def
+    /FDArray 1 array
+    dup 0 10 dict begin
+      /FontType 1 def
+      /FontMatrix [1 0 0 1 0 0] def
+      /PaintType 0 def
+      /Private 32 dict begin
+      currentdict end def
+    currentdict end put
+    def
+} def
+
+/cid_depth0 countdictstack def
+
+
+%% =============================================================================
+%% StartData, hex data
+%% =============================================================================
+
+%% hex charstring data is consumed, not scanned %%
+% The bytes below are not PostScript. If StartData leaves them in the stream
+% the scanner reads them as names and the job dies with `undefined` — which is
+% exactly what a stubbed-out StartData did to every CIDFontType 0 file.
+cid_header
+/CIDFontName /TestCIDHex def
+(Hex) 8 StartData
+0102030405060708>
+/cid_hex_ran true def
+
+%% both dictionaries are popped %%
+countdictstack cid_depth0 {eq} [true] assert
+
+%% the font is registered as a CIDFont resource %%
+{ /TestCIDHex /CIDFont resourcestatus { pop pop true } { false } ifelse }
+  [true] assert
+
+%% execution continues past the data %%
+cid_hex_ran [true] assert
+
+
+%% =============================================================================
+%% StartData, binary data
+%% =============================================================================
+
+%% binary charstring data is consumed by byte count %%
+cid_header
+/CIDFontName /TestCIDBinary def
+(Binary) 8 StartData
+}}}}}}}}
+/cid_bin_ran true def
+
+countdictstack cid_depth0 {eq} [true] assert
+{ /TestCIDBinary /CIDFont resourcestatus { pop pop true } { false } ifelse }
+  [true] assert
+cid_bin_ran [true] assert
+
+
+%% =============================================================================
+%% StartData error conditions
+%% =============================================================================
+
+%% .cid_startdata needs both operands %%
+/.cid_startdata [/stackunderflow] assert
+8 /.cid_startdata [8 /stackunderflow] assert
+
+%% the format operand must be a string %%
+8 8 /.cid_startdata [8 8 /typecheck] assert
+
+%% a negative byte count is a rangecheck %%
+(Binary) -1 /.cid_startdata [(Binary) -1 /rangecheck] assert
