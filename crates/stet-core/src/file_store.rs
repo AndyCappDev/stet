@@ -1426,7 +1426,16 @@ impl FileStore {
                 if !*decoded {
                     // Lazy decode: read all JPEG data from source, then decode
                     let source = state.source;
-                    let jpeg_data = self.read_all(source)?;
+                    let mut jpeg_data = self.read_all(source)?;
+                    // A JPEG stream inside PostScript or PDF routinely arrives
+                    // without its end-of-image marker — the writer stops at the
+                    // stream's length and leaves the two bytes off. Supplying
+                    // one lets the decoder finish instead of running off the
+                    // end of the entropy data, which is what every production
+                    // decoder does and what a bare `decode()` will not.
+                    if !jpeg_data.ends_with(&[0xFF, 0xD9]) {
+                        jpeg_data.extend_from_slice(&[0xFF, 0xD9]);
+                    }
                     let mut decoder = jpeg_decoder::Decoder::new(jpeg_data.as_slice());
                     let pixels = decoder
                         .decode()
@@ -3256,5 +3265,29 @@ mod tests {
         let src = store.create_string_source(b"not a jpeg2000 stream".to_vec());
         let filt = store.create_filter(src, FilterKind::jpx_decode());
         assert!(store.read_byte(filt).is_err());
+    }
+
+    /// A JPEG stream that stops before its end-of-image marker still decodes.
+    ///
+    /// `pdftops` emits these — the writer stops at the PDF stream's declared
+    /// length and the two marker bytes never make it out. Without the missing
+    /// marker supplied, the decoder runs off the end of the entropy data and
+    /// the whole job dies with `ioerror` in `image`.
+    #[test]
+    fn test_dct_decode_without_eoi_marker() {
+        let pixels: Vec<u8> = (0..16 * 16 * 3).map(|i| (i % 251) as u8).collect();
+        let mut jpeg = Vec::new();
+        jpeg_encoder::Encoder::new(&mut jpeg, 80)
+            .encode(&pixels, 16, 16, jpeg_encoder::ColorType::Rgb)
+            .expect("encode");
+        assert!(jpeg.ends_with(&[0xFF, 0xD9]));
+        jpeg.truncate(jpeg.len() - 2);
+
+        let mut store = FileStore::new();
+        let src = store.create_string_source(jpeg);
+        let filt = store.create_filter(src, FilterKind::dct_decode(None));
+        let mut out = vec![0u8; 16 * 16 * 3];
+        let n = store.read_into(filt, &mut out).expect("decode");
+        assert_eq!(n, 16 * 16 * 3);
     }
 }
