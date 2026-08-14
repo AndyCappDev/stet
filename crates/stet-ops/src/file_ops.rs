@@ -212,6 +212,7 @@ pub fn op_read(ctx: &mut Context) -> Result<(), PsError> {
     obj.flags.require_read()?;
     ctx.o_stack.pop()?;
 
+    ctx.pump_proc_sources(entity)?;
     match ctx.files.read_byte(entity).map_err(|_| PsError::IOError)? {
         Some(byte) => {
             ctx.o_stack.push(PsObject::int(byte as i32))?;
@@ -286,6 +287,7 @@ pub fn op_readstring(ctx: &mut Context) -> Result<(), PsError> {
     ctx.o_stack.pop()?;
 
     // Read into a temp buffer to avoid borrow conflict
+    ctx.pump_proc_sources(file_entity)?;
     let mut temp = vec![0u8; str_len as usize];
     let n = ctx
         .files
@@ -368,6 +370,7 @@ pub fn op_readline(ctx: &mut Context) -> Result<(), PsError> {
     ctx.o_stack.pop()?;
     ctx.o_stack.pop()?;
 
+    ctx.pump_proc_sources(file_entity)?;
     let mut temp = vec![0u8; str_len as usize];
     let (n, got_line) = ctx
         .files
@@ -414,6 +417,7 @@ pub fn op_readhexstring(ctx: &mut Context) -> Result<(), PsError> {
     ctx.o_stack.pop()?;
 
     // Read hex digits from file, convert pairs to bytes
+    ctx.pump_proc_sources(file_entity)?;
     let mut result = Vec::with_capacity(str_len as usize);
     let mut nibble_buf: Option<u8> = None;
     let mut eof = false;
@@ -520,6 +524,7 @@ pub fn op_bytesavailable(ctx: &mut Context) -> Result<(), PsError> {
         _ => return Err(PsError::TypeCheck),
     };
 
+    ctx.pump_proc_sources(entity)?;
     let avail = ctx.files.bytes_available(entity);
     ctx.o_stack.pop()?;
     ctx.o_stack.push(PsObject::int(avail))?;
@@ -537,6 +542,9 @@ pub fn op_flushfile(ctx: &mut Context) -> Result<(), PsError> {
         _ => return Err(PsError::TypeCheck),
     };
     ctx.o_stack.pop()?;
+    // `flushfile` on a read filter discards to end of data, which means the
+    // procedure source still has to run.
+    ctx.pump_proc_sources(entity)?;
     ctx.files.flush(entity).map_err(|_| PsError::IOError)?;
     Ok(())
 }
@@ -874,6 +882,9 @@ pub fn op_token(ctx: &mut Context) -> Result<(), PsError> {
 fn token_from_file(ctx: &mut Context, file_entity: EntityId) -> Result<(), PsError> {
     use stet_core::tokenizer::stream_next_token;
 
+    // The tokenizer is handed the FileStore alone and cannot reach the
+    // interpreter, so any procedure data source has to be run before it starts.
+    ctx.pump_proc_sources(file_entity)?;
     match stream_next_token(&mut ctx.files, file_entity)? {
         Some((stet_core::tokenizer::Token::BinaryTokenByte(tag), _newlines)) => {
             let result = stet_core::binary_token::parse_from_stream(ctx, tag, file_entity)?;

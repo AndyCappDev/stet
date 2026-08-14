@@ -859,9 +859,13 @@ fn imagemask_dict_form(ctx: &mut Context) -> Result<(), PsError> {
     let bytes_per_row = bits_per_row.div_ceil(8);
     let total_bytes = bytes_per_row * height as usize;
 
-    let data = read_image_data(ctx, data_source, total_bytes)?;
-
+    // Pop the dict before reading, as `op_image` already does. A procedure
+    // data source runs while the data is read and must see the operand stack
+    // the program set up for it, not this operator's own operand still sitting
+    // on top of it.
     ctx.o_stack.pop()?; // dict
+
+    let data = read_image_data(ctx, data_source, total_bytes)?;
 
     let color = ctx.gstate.color.clone();
     let cs = ImageColorSpace::Mask {
@@ -1125,6 +1129,9 @@ fn read_image_data(
             Ok(data)
         }
         PsValue::File(entity) => {
+            // A filter whose data source is a procedure only runs that
+            // procedure now, with the image operator's operands in place.
+            ctx.pump_proc_sources(entity)?;
             let mut buf = vec![0u8; bytes_needed];
             let n = ctx
                 .files

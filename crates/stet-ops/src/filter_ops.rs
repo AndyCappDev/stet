@@ -99,10 +99,7 @@ pub fn op_filter(ctx: &mut Context) -> Result<(), PsError> {
     }
     ctx.o_stack.pop()?; // source
 
-    // Resolve the source only after the operands are gone: a procedure source
-    // is run synchronously here and must not see our operands on the stack.
-    let is_flate = filter_name == b"FlateDecode";
-    let source_entity = resolve_source(ctx, source_obj, is_flate)?;
+    let source_entity = resolve_source(ctx, source_obj)?;
 
     // Create the appropriate filter
     let filter_entity = create_filter_by_name(
@@ -165,8 +162,7 @@ fn create_subfile_filter(ctx: &mut Context) -> Result<(), PsError> {
     ctx.o_stack.pop()?; // count
     ctx.o_stack.pop()?; // source
 
-    // Resolve after the pops: a procedure source runs synchronously here.
-    let source_entity = resolve_source(ctx, source_obj, false)?;
+    let source_entity = resolve_source(ctx, source_obj)?;
 
     // Determine byte limit: if count > 0, use as byte count; otherwise use EOD string
     let bytes_remaining = if count > 0 && eod_string.is_empty() {
@@ -217,7 +213,11 @@ fn create_reusable_stream(ctx: &mut Context) -> Result<(), PsError> {
     }
     ctx.o_stack.pop()?; // source
 
-    let source_entity = resolve_source(ctx, source_obj, false)?;
+    let source_entity = resolve_source(ctx, source_obj)?;
+
+    // ReusableStreamDecode is defined to read its source eagerly, so a
+    // procedure source is run here rather than deferred to the read path.
+    ctx.pump_proc_sources(source_entity)?;
 
     // Read all data from the source into a buffer
     let mut data = Vec::new();
@@ -251,10 +251,7 @@ fn is_valid_source(obj: &PsObject) -> bool {
 ///
 /// Must be called *after* the `filter` operands have been popped: a procedure
 /// source is executed synchronously and must not see them on the stack.
-///
-/// `flate_hint` is passed through to [`collect_procedure_data`] so that a
-/// procedure feeding `FlateDecode` stops once the deflate stream is complete.
-fn resolve_source(ctx: &mut Context, obj: PsObject, flate_hint: bool) -> Result<EntityId, PsError> {
+fn resolve_source(ctx: &mut Context, obj: PsObject) -> Result<EntityId, PsError> {
     match obj.value {
         PsValue::File(entity) => Ok(entity),
         PsValue::String { entity, start, len } => {
@@ -262,24 +259,11 @@ fn resolve_source(ctx: &mut Context, obj: PsObject, flate_hint: bool) -> Result<
             let data = ctx.strings.get(entity, start, len).to_vec();
             Ok(ctx.files.create_string_source(data))
         }
-        // Procedure data source. PLRM has the filter call the procedure on
-        // demand, as the consumer reads; we drain it up front into a
-        // string-backed source instead.
-        //
-        // KNOWN LIMITATION: draining here runs the procedure against the
-        // operand stack as it stands at the `filter` call, not as it stands
-        // when the data is read. A procedure source that reads its own state
-        // off the stack therefore sees the wrong operands when `filter` is
-        // invoked mid-expression — which `pdftops` does inside an image
-        // dictionary: `/DataSource { pdfImStr } /LZWDecode filter` runs while
-        // the enclosing `<< ... >>` construction is still on the stack, so
-        // `pdfImStr` reads the dictionary key/value pair above it. Fixing that
-        // properly means calling the procedure lazily from the read path,
-        // which needs the interpreter to be re-entrant from inside FileStore.
-        PsValue::Array { .. } if obj.flags.is_executable() => {
-            let data = collect_procedure_data(ctx, obj, flate_hint)?;
-            Ok(ctx.files.create_string_source(data))
-        }
+        // Procedure data source. The procedure is *not* run here: it is run
+        // from the read path by `Context::pump_proc_sources`, so that it sees
+        // the consumer's operand stack rather than whatever `filter` was
+        // called with. See `FileHandle::PendingProc`.
+        PsValue::Array { .. } if obj.flags.is_executable() => Ok(ctx.files.create_proc_source(obj)),
         _ => Err(PsError::TypeCheck),
     }
 }
@@ -658,6 +642,7 @@ fn read_jbig2_globals(
             Ok(Some(ctx.strings.get(entity, start, len).to_vec()))
         }
         PsValue::File(file_entity) => {
+            ctx.pump_proc_sources(file_entity)?;
             let bytes = ctx
                 .files
                 .read_all(file_entity)
@@ -671,74 +656,6 @@ fn read_jbig2_globals(
 /// Check if an object is an executable array (procedure).
 fn is_procedure(obj: &PsObject) -> bool {
     matches!(obj.value, PsValue::Array { .. }) && obj.flags.is_executable()
-}
-
-/// Maximum bytes to collect from a procedure data source (64 MB).
-const MAX_FILTER_PROC_BYTES: usize = 64 * 1024 * 1024;
-
-/// Collect data from a procedure data source by calling it synchronously.
-/// Per PLRM 3.13.1, the procedure pushes a string each call; empty string = end of data.
-/// For FlateDecode, also stops when the deflate stream is complete (handles cycling procs).
-fn collect_procedure_data(
-    ctx: &mut Context,
-    procedure: PsObject,
-    check_flate_end: bool,
-) -> Result<Vec<u8>, PsError> {
-    let mut data = Vec::new();
-
-    loop {
-        ctx.exec_sync(procedure)?;
-
-        // Pop the string result
-        if ctx.o_stack.is_empty() {
-            break;
-        }
-        let result = ctx.o_stack.peek(0)?;
-        match result.value {
-            PsValue::String { entity, start, len } => {
-                let bytes = ctx.strings.get(entity, start, len).to_vec();
-                ctx.o_stack.pop()?;
-                if bytes.is_empty() {
-                    break; // End of data per PLRM
-                }
-                data.extend_from_slice(&bytes);
-
-                // For FlateDecode, stop when the compressed stream is complete
-                if check_flate_end && is_flate_stream_complete(&data) {
-                    break;
-                }
-                if data.len() >= MAX_FILTER_PROC_BYTES {
-                    break;
-                }
-            }
-            _ => break, // Non-string result, treat as end
-        }
-    }
-
-    Ok(data)
-}
-
-/// Check if collected data contains a complete zlib/deflate stream.
-fn is_flate_stream_complete(data: &[u8]) -> bool {
-    let mut decomp = flate2::Decompress::new(true);
-    let mut out = [0u8; 8192];
-    let mut pos = 0;
-    loop {
-        if pos >= data.len() {
-            return false;
-        }
-        match decomp.decompress(&data[pos..], &mut out, flate2::FlushDecompress::None) {
-            Ok(flate2::Status::StreamEnd) => return true,
-            Ok(_) => {
-                let new_pos = decomp.total_in() as usize;
-                if new_pos == pos {
-                    return false;
-                }
-                pos = new_pos;
-            }
-            Err(_) => return false,
-        }
-    }
 }
 
 #[cfg(test)]

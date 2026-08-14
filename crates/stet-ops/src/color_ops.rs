@@ -1220,6 +1220,7 @@ fn extract_icc_profile(
         PsValue::String { entity, start, len } => ctx.strings.get(entity, start, len).to_vec(),
         PsValue::File(file_entity) => {
             // Read all bytes from file/filter
+            ctx.pump_proc_sources(file_entity).ok()?;
             let mut buf = Vec::new();
             loop {
                 match ctx.files.read_byte(file_entity) {

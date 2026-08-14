@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 use std::io::{self, BufReader, IsTerminal, Read, Seek, Write};
 
-use crate::object::EntityId;
+use crate::object::{EntityId, PsObject};
 
 /// State for a RunLengthDecode filter.
 #[derive(Debug)]
@@ -192,6 +192,19 @@ pub enum FileHandle {
     Filter(Box<FilterState>),
     /// In-memory byte source (for string-backed data).
     StringSource { data: Vec<u8>, pos: usize },
+    /// A procedure data source that has not been run yet (PLRM 3.8.4).
+    ///
+    /// This is a *transitional* state. The procedure has to be executed by the
+    /// interpreter, which `FileStore` cannot reach, so the read path leaves it
+    /// alone and `Context::pump_proc_sources` replaces the whole handle with a
+    /// `StringSource` before any read reaches it. Every other part of the store
+    /// therefore only ever sees `StringSource`.
+    ///
+    /// Reading one directly is a bug — a consumer that failed to pump first —
+    /// and falls through to the "not readable" arm rather than quietly
+    /// reporting end-of-file, so the mistake is visible instead of silently
+    /// truncating the stream to nothing.
+    PendingProc { proc: PsObject },
 }
 
 /// Encode a byte slice using PostScript RLE format.
@@ -228,6 +241,13 @@ pub struct FileEntry {
 /// Storage for all open PostScript files.
 pub struct FileStore {
     files: Vec<FileEntry>,
+    /// Number of `FileHandle::PendingProc` handles currently outstanding.
+    ///
+    /// `Context::pump_proc_sources` is called before every file read,
+    /// including from the interpreter's token loop, so it needs an O(1) way to
+    /// answer "nothing to do" — which is the case for essentially every read
+    /// in every job.
+    pending_procs: usize,
     /// Virtual filesystem: maps paths to embedded byte data.
     /// Used in WASM builds to serve resources without real filesystem access.
     embedded_files: HashMap<String, &'static [u8]>,
@@ -243,6 +263,7 @@ impl FileStore {
     pub fn new() -> Self {
         let mut store = Self {
             files: Vec::new(),
+            pending_procs: 0,
             embedded_files: HashMap::new(),
         };
         // Pre-allocate standard streams at known positions
@@ -471,6 +492,100 @@ impl FileStore {
             pending_newlines: 0,
         });
         id
+    }
+
+    /// Create a not-yet-run procedure data source (PLRM 3.8.4).
+    ///
+    /// The procedure is executed by `Context::pump_proc_sources`, which
+    /// replaces this handle with a `StringSource`. See
+    /// [`FileHandle::PendingProc`].
+    pub fn create_proc_source(&mut self, proc: PsObject) -> EntityId {
+        let id = EntityId(self.files.len() as u32);
+        self.pending_procs += 1;
+        self.files.push(FileEntry {
+            handle: FileHandle::PendingProc { proc },
+            name: "%procsource".to_string(),
+            mode: "r".to_string(),
+            line_num: 1,
+            pending_newlines: 0,
+        });
+        id
+    }
+
+    /// Find the first procedure data source underneath `entity` that has not
+    /// been run yet, following the chain of filters down to their sources.
+    ///
+    /// Returns the source's entity, the procedure to run, and whether a
+    /// `FlateDecode` filter sits anywhere above it — see
+    /// `Context::pump_proc_sources` for what that flag is for.
+    pub fn pending_proc_source(&self, entity: EntityId) -> Option<(EntityId, PsObject, bool)> {
+        if self.pending_procs == 0 {
+            return None;
+        }
+        let mut cur = entity;
+        let mut saw_flate = false;
+        // The chain is built by `filter`, one link per nested filter, so it is
+        // short; the bound is only here so a malformed cycle cannot hang.
+        for _ in 0..256 {
+            match self.files.get(cur.0 as usize).map(|e| &e.handle) {
+                Some(FileHandle::PendingProc { proc }) => {
+                    return Some((cur, *proc, saw_flate));
+                }
+                Some(FileHandle::Filter(state)) => {
+                    if matches!(state.kind, FilterKind::FlateDecode { .. }) {
+                        saw_flate = true;
+                    }
+                    cur = state.source;
+                }
+                _ => return None,
+            }
+        }
+        None
+    }
+
+    /// Close a not-yet-run procedure data source whose procedure did not
+    /// survive a `restore`.
+    ///
+    /// PLRM 3.7.3: `restore` closes any file opened since the matching `save`.
+    /// A procedure source created inside the save is exactly that, and its
+    /// procedure lives in the local VM the restore just reclaimed, so the
+    /// handle has to go rather than be left pointing at a retired array.
+    pub fn close_pending_proc(&mut self, entity: EntityId) {
+        let entry = &mut self.files[entity.0 as usize];
+        if matches!(entry.handle, FileHandle::PendingProc { .. }) {
+            entry.handle = FileHandle::Closed;
+            self.pending_procs = self.pending_procs.saturating_sub(1);
+        }
+    }
+
+    /// Every not-yet-run procedure data source, as `(file entity, procedure)`.
+    ///
+    /// `PendingProc` is the only place `FileStore` holds a `PsObject`, so it is
+    /// the only thing here the VM audit has to treat as a root: the procedure
+    /// keeps an array alive that a `restore` would otherwise be free to retire.
+    pub fn pending_proc_handles(&self) -> Vec<(EntityId, PsObject)> {
+        if self.pending_procs == 0 {
+            return Vec::new();
+        }
+        self.files
+            .iter()
+            .enumerate()
+            .filter_map(|(i, e)| match e.handle {
+                FileHandle::PendingProc { proc } => Some((EntityId(i as u32), proc)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Replace a `PendingProc` handle with the bytes its procedure produced.
+    pub fn install_proc_data(&mut self, entity: EntityId, data: Vec<u8>) {
+        let entry = &mut self.files[entity.0 as usize];
+        debug_assert!(
+            matches!(entry.handle, FileHandle::PendingProc { .. }),
+            "install_proc_data on a handle that is not a pending procedure source"
+        );
+        entry.handle = FileHandle::StringSource { data, pos: 0 };
+        self.pending_procs = self.pending_procs.saturating_sub(1);
     }
 
     /// Get remaining unread bytes from a StringSource file as a slice.

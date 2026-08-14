@@ -396,11 +396,135 @@ pub struct OcgRecord {
     pub default_visible: bool,
 }
 
+/// Does `data` contain a complete zlib/deflate stream?
+///
+/// Used to stop draining a procedure data source that feeds `FlateDecode` and
+/// cycles rather than ever returning the empty end-of-data string.
+fn is_flate_stream_complete(data: &[u8]) -> bool {
+    let mut decomp = flate2::Decompress::new(true);
+    let mut out = [0u8; 8192];
+    let mut pos = 0;
+    loop {
+        if pos >= data.len() {
+            return false;
+        }
+        match decomp.decompress(&data[pos..], &mut out, flate2::FlushDecompress::None) {
+            Ok(flate2::Status::StreamEnd) => return true,
+            Ok(_) => {
+                let new_pos = decomp.total_in() as usize;
+                if new_pos == pos {
+                    return false;
+                }
+                pos = new_pos;
+            }
+            Err(_) => return false,
+        }
+    }
+}
+
 impl Context {
     /// Execute a PostScript procedure synchronously and return.
     pub fn exec_sync(&mut self, proc_obj: PsObject) -> Result<(), PsError> {
         let f = self.exec_sync_fn.expect("exec_sync not initialized");
         f(self, proc_obj)
+    }
+
+    /// Run any not-yet-executed procedure data source underneath `entity`,
+    /// replacing it with the bytes it produces.
+    ///
+    /// A filter's data source may be a procedure (PLRM 3.8.4), which the
+    /// filter is supposed to call for more data as the consumer reads. Running
+    /// it when `filter` is *called* instead is observably wrong: the procedure
+    /// runs against whatever is on the operand stack at that moment. `pdftops`
+    /// builds an inline image as
+    ///
+    /// ```postscript
+    /// << /ImageType 1 ... /DataSource { pdfImStr } /LZWDecode filter >> imagemask
+    /// ```
+    ///
+    /// so `filter` is reached while the enclosing `<< ... >>` is still on the
+    /// stack, and `pdfImStr` — which reads its `array index` state off the
+    /// stack — would pick up the half-built dictionary instead.
+    ///
+    /// So the procedure is run here, from the read path, when the consumer's
+    /// operands are the ones in place. **Every entry point that reads from a
+    /// file must call this first**; see [`FileHandle::PendingProc`].
+    ///
+    /// The drain is one-shot rather than incremental: the procedure is run to
+    /// completion and the result installed as a plain byte source. That keeps
+    /// the filters themselves unchanged — none of them has to cope with a
+    /// source that is temporarily dry — while still running the procedure at
+    /// the right moment, which is what the bug above is about.
+    pub fn pump_proc_sources(&mut self, entity: EntityId) -> Result<(), PsError> {
+        // A chain can hold more than one procedure source, so loop until the
+        // walk reports none left. `pending_proc_source` short-circuits on a
+        // counter, so this costs one integer compare on the overwhelmingly
+        // common path where no procedure source exists at all.
+        while let Some((src, proc, flate_above)) = self.files.pending_proc_source(entity) {
+            let data = self.drain_proc_source(proc, flate_above)?;
+            self.files.install_proc_data(src, data);
+        }
+        Ok(())
+    }
+
+    /// Call a procedure data source until it signals end of data.
+    ///
+    /// Per PLRM the procedure pushes a string each call and an empty string
+    /// means end of data. `flate_above` additionally stops once the collected
+    /// bytes form a complete deflate stream: a procedure feeding `FlateDecode`
+    /// may cycle indefinitely rather than ever returning the empty string.
+    ///
+    /// KNOWN LIMITATION: not every procedure signals end of data at all.
+    /// `pdftops` emits paging readers of the form
+    ///
+    /// ```postscript
+    /// { dup 65535 ge { pop 1 add 0 } if 2 index 2 index get 1 index get exch 1 add exch }
+    /// ```
+    ///
+    /// which walk an array of blocks and simply run off the end — they rely on
+    /// the *consumer* to stop asking once the image has all its rows, and a
+    /// full drain has no such stopping point. Running the procedure truly on
+    /// demand, one call per refill, is what those need. That requires
+    /// `refill_filter` to be able to re-enter the interpreter, and every
+    /// `refill_*` to tell "source temporarily dry" apart from EOF so it does
+    /// not latch `eof` on the first short read.
+    fn drain_proc_source(
+        &mut self,
+        procedure: PsObject,
+        flate_above: bool,
+    ) -> Result<Vec<u8>, PsError> {
+        /// Cap on what one procedure data source may produce (64 MB).
+        const MAX_PROC_BYTES: usize = 64 * 1024 * 1024;
+
+        let mut data = Vec::new();
+        loop {
+            let depth_before = self.o_stack.len();
+            self.exec_sync(procedure)?;
+
+            if self.o_stack.len() <= depth_before {
+                break;
+            }
+            let result = self.o_stack.peek(0)?;
+            match result.value {
+                PsValue::String { entity, start, len } => {
+                    let bytes = self.strings.get(entity, start, len).to_vec();
+                    self.o_stack.pop()?;
+                    if bytes.is_empty() {
+                        break; // end of data per PLRM
+                    }
+                    data.extend_from_slice(&bytes);
+                    if flate_above && is_flate_stream_complete(&data) {
+                        break;
+                    }
+                    if data.len() >= MAX_PROC_BYTES {
+                        break;
+                    }
+                }
+                // Anything other than a string is treated as end of data.
+                _ => break,
+            }
+        }
+        Ok(data)
     }
 
     /// Create a new context with empty stacks and stores.
@@ -1086,8 +1210,40 @@ impl Context {
             .truncate_to(marks.dict_slots, marks.dict_entities);
 
         self.invalidate_name_cache();
+        self.close_restored_proc_sources();
         self.debug_assert_no_dangling_refs();
         Ok(())
+    }
+
+    /// Close any procedure data source whose procedure the restore just
+    /// reclaimed.
+    ///
+    /// `filter` may be handed a procedure and the resulting file read only
+    /// later; if a `restore` falls in between, the procedure's array is gone.
+    /// PLRM 3.7.3 has `restore` close files opened since the `save`, which is
+    /// precisely the right outcome — a subsequent read reports end-of-file
+    /// rather than following a retired entity id.
+    fn close_restored_proc_sources(&mut self) {
+        for (entity, proc) in self.files.pending_proc_handles() {
+            if !self.entity_is_live(&proc) {
+                self.files.close_pending_proc(entity);
+            }
+        }
+    }
+
+    /// Does `obj`'s composite still exist, or did a `restore` retire it?
+    fn entity_is_live(&self, obj: &PsObject) -> bool {
+        match obj.value {
+            PsValue::Array { entity, .. } | PsValue::PackedArray { entity, .. } => {
+                let len = if entity.is_global() {
+                    self.arrays.global.entities.len()
+                } else {
+                    self.arrays.local.entities.len()
+                };
+                entity.raw_index() < len
+            }
+            _ => true,
+        }
     }
 
     /// Panic if anything that survived a `restore` names storage the restore

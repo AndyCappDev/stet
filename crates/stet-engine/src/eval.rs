@@ -490,7 +490,10 @@ fn eval_one(ctx: &mut Context, obj: PsObject) -> Result<(), PsError> {
                     }
                 }
             } else if ctx.files.is_readable(file_entity) {
-                // Streaming path: filter/real files — byte-at-a-time tokenization
+                // Streaming path: filter/real files — byte-at-a-time tokenization.
+                // The tokenizer only gets the FileStore, so a filter whose data
+                // source is a procedure has to be run before it starts.
+                ctx.pump_proc_sources(file_entity)?;
                 if let Some((token, newlines)) = stream_next_token(&mut ctx.files, file_entity)? {
                     ctx.current_source_line += newlines;
                     ctx.files.add_pending_newlines(file_entity, newlines);
@@ -645,6 +648,7 @@ fn stream_parse_procedure(ctx: &mut Context, file_entity: EntityId) -> Result<Ps
     let mut elements = Vec::new();
 
     loop {
+        ctx.pump_proc_sources(file_entity)?;
         match stream_next_token(&mut ctx.files, file_entity)? {
             None => return Err(PsError::SyntaxError), // unterminated
             Some((Token::ProcEnd, _)) => break,

@@ -485,6 +485,19 @@ pub fn audit_dangling_refs(ctx: &Context) -> Vec<DanglingRef> {
         );
     }
 
+    // Procedure data sources that have been handed to `filter` but not yet
+    // run. The `FileStore` holds the procedure until the read path pumps it,
+    // so the array behind it must outlive any `restore` in between.
+    for (entity, proc) in ctx.files.pending_proc_handles() {
+        check_ref(
+            ctx,
+            &proc,
+            "pending procedure data source",
+            format!("file #{}", entity.raw_index()),
+            &mut out,
+        );
+    }
+
     // Well-known handles the interpreter keeps outside VM. A restore that
     // retires one of these leaves the interpreter itself holding a stale id.
     for (entity, name) in [

@@ -46,6 +46,7 @@ pub fn op_cff_startdata(ctx: &mut Context) -> Result<(), PsError> {
     };
 
     // Read exactly byte_count bytes from the file
+    ctx.pump_proc_sources(file_entity)?;
     let mut cff_data = Vec::with_capacity(byte_count);
     let mut remaining = byte_count;
     while remaining > 0 {

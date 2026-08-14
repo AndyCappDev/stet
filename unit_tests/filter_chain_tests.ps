@@ -244,6 +244,32 @@ ps_f closefile
 hx_f 32 string readstring pop (Hello) {eq} [true] assert
 hx_f closefile
 
+% The procedure runs when the data is READ, not when `filter` is called.
+% `lz_i` below is defined only after `filter` has already returned, so running
+% the procedure eagerly would fail with `undefined` on it. This is the property
+% pdftops depends on: it calls `filter` inside a `<< ... >>` image dictionary,
+% where the procedure's own state is not yet on top of the operand stack.
+/lz_parts [ (lazy ) (works) ] def
+/lz_src {
+    lz_i lz_parts length lt
+      { lz_parts lz_i get /lz_i lz_i 1 add def }
+      { () }
+    ifelse
+} def
+{lz_src} 0 () /SubFileDecode filter /lz_f exch def
+/lz_i 0 def
+lz_f 32 string readstring pop (lazy works) {eq} [true] assert
+lz_f closefile
+
+% Creating the filter must not have run the procedure even once.
+/lz2_runs 0 def
+/lz2_src { /lz2_runs lz2_runs 1 add def () } def
+{lz2_src} 0 () /SubFileDecode filter /lz2_f exch def
+lz2_runs [0] assert
+lz2_f 8 string readstring pop pop
+lz2_runs 0 gt [true] assert
+lz2_f closefile
+
 %% SubFileDecode EOD modes (PLRM 3.13, "SubFileDecode Filter") %%
 
 % EODCount 0 with a zero-length EODString disables EOD detection entirely:
