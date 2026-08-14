@@ -360,6 +360,39 @@ currentcolor 3 array astore /length [3] assert  % Should have 3 components (reso
 %% Wrong lookup string length (too short)
 [/Indexed /DeviceRGB 2 <FF00>] /setcolorspace [[/Indexed /DeviceRGB 2 <FF00>] /rangecheck] assert
 
+%% Array-form base spaces (PLRM 4.9.3: the base may be any color space other
+%% than another Indexed space or Pattern — pdftops writes indexed images over a
+%% CIE base exactly this way).
+/cie_abc_dict <<
+  /WhitePoint [0.9505 1.0 1.089]
+  /RangeABC [0 1 0 1 0 1]
+>> def
+[/Indexed [/CIEBasedABC cie_abc_dict] 1 <FF0000 00FF00>] /setcolorspace [] assert
+currentcolorspace 0 get /Indexed {eq} [true] assert
+
+/cie_a_dict << /WhitePoint [0.9505 1.0 1.089] /RangeA [0 1] >> def
+[/Indexed [/CIEBasedA cie_a_dict] 2 <00 55 AA>] /setcolorspace [] assert
+
+%% An Indexed space may not be based on another Indexed space.
+[/Indexed [/Indexed /DeviceRGB 1 <FF0000 00FF00>] 1 <0001>] /setcolorspace
+  [[/Indexed [/Indexed /DeviceRGB 1 <FF0000 00FF00>] 1 <0001>] /rangecheck] assert
+
+%% The lookup length requirement follows the base space's component count:
+%% a CIEBasedABC base needs 3 bytes per entry, so 4 bytes is too short for 2.
+[/Indexed [/CIEBasedABC cie_abc_dict] 1 <FF0000 00>] /setcolorspace
+  [[/Indexed [/CIEBasedABC cie_abc_dict] 1 <FF0000 00>] /rangecheck] assert
+
+%% Separation and DeviceN accept an array-form alternate space too
+%% (PLRM 4.9.4/4.9.5).
+[/Separation /Spot [/CIEBasedABC cie_abc_dict] {dup dup}] /setcolorspace [] assert
+currentcolorspace 0 get /Separation {eq} [true] assert
+[/DeviceN [/S1 /S2] [/CIEBasedABC cie_abc_dict] {pop dup dup}] /setcolorspace [] assert
+currentcolorspace 0 get /DeviceN {eq} [true] assert
+
+%% ...but not a special space as the alternate.
+[/Separation /Spot [/Indexed /DeviceRGB 1 <FF0000 00FF00>] {dup dup}] /setcolorspace
+  [[/Separation /Spot [/Indexed /DeviceRGB 1 <FF0000 00FF00>] {dup dup}] /rangecheck] assert
+
 %% Non-numeric setcolor operand in Indexed space
 [/Indexed /DeviceRGB 2 <FF0000 00FF00 0000FF>] setcolorspace
 (string) /setcolor [(string) /typecheck] assert

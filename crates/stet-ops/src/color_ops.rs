@@ -860,11 +860,14 @@ pub fn resolve_color_space_from_obj(
 
 /// Parse `[/Indexed base hival lookup]` from an array.
 fn parse_indexed_colorspace(
-    ctx: &Context,
+    ctx: &mut Context,
     entity: stet_core::object::EntityId,
     start: u32,
 ) -> Result<ColorSpace, PsError> {
-    // Element 1: base color space (must be a device color space name)
+    // Element 1: the base color space. PLRM 4.9.3 allows any color space here
+    // except another Indexed space and Pattern — notably the array forms, which
+    // is how `pdftops` writes an indexed image over a CIE base:
+    // `[/Indexed [/CIEBasedDEFG <<...>>] 255 <lookup>]`.
     let base_obj = ctx.arrays.get_element(entity, start + 1);
     let base = match base_obj.value {
         PsValue::Name(id) => {
@@ -875,6 +878,14 @@ fn parse_indexed_colorspace(
                 b"DeviceCMYK" => ColorSpace::DeviceCMYK,
                 _ => return Err(PsError::RangeCheck),
             }
+        }
+        PsValue::Array { .. } => {
+            let (cs, _) = resolve_color_space_from_obj(ctx, &base_obj)?;
+            // An Indexed space may not be based on another Indexed space.
+            if matches!(cs, ColorSpace::Indexed { .. }) {
+                return Err(PsError::RangeCheck);
+            }
+            cs
         }
         _ => return Err(PsError::TypeCheck),
     };
@@ -904,13 +915,7 @@ fn parse_indexed_colorspace(
 
     if lookup_proc.is_none() {
         // Validate lookup length: must have (hival+1) * components_per_color bytes
-        let components_per_color = match &base {
-            ColorSpace::DeviceGray => 1,
-            ColorSpace::DeviceRGB => 3,
-            ColorSpace::DeviceCMYK => 4,
-            _ => 1,
-        };
-        let required_len = (hival as usize + 1) * components_per_color;
+        let required_len = (hival as usize + 1) * color_space_components(&base);
         if lookup.len() < required_len {
             return Err(PsError::RangeCheck);
         }
@@ -1236,7 +1241,7 @@ fn extract_icc_profile(
 
 /// Parse `[/Separation name alternativeSpace tintTransform]` from an array.
 fn parse_separation_colorspace(
-    ctx: &Context,
+    ctx: &mut Context,
     entity: EntityId,
     start: u32,
 ) -> Result<ColorSpace, PsError> {
@@ -1264,7 +1269,7 @@ fn parse_separation_colorspace(
 
 /// Parse `[/DeviceN names alternativeSpace tintTransform]` from an array.
 fn parse_devicen_colorspace(
-    ctx: &Context,
+    ctx: &mut Context,
     entity: EntityId,
     start: u32,
 ) -> Result<ColorSpace, PsError> {
@@ -1307,7 +1312,7 @@ fn parse_devicen_colorspace(
 }
 
 /// Parse an alternative color space name and return the ColorSpace + component count.
-fn parse_alt_space_name(ctx: &Context, obj: &PsObject) -> Result<(ColorSpace, u32), PsError> {
+fn parse_alt_space_name(ctx: &mut Context, obj: &PsObject) -> Result<(ColorSpace, u32), PsError> {
     match obj.value {
         PsValue::Name(id) => {
             let name = ctx.names.get_bytes(id);
@@ -1317,6 +1322,21 @@ fn parse_alt_space_name(ctx: &Context, obj: &PsObject) -> Result<(ColorSpace, u3
                 b"DeviceCMYK" => Ok((ColorSpace::DeviceCMYK, 4)),
                 _ => Err(PsError::RangeCheck),
             }
+        }
+        // PLRM 4.9.4/4.9.5: the alternate space may be any device or CIE-based
+        // space, which `pdftops` writes in array form — e.g. a spot colour over
+        // `[/CIEBasedABC <<...>>]`. It may not itself be a special space.
+        PsValue::Array { .. } => {
+            let (cs, n) = resolve_color_space_from_obj(ctx, obj)?;
+            if matches!(
+                cs,
+                ColorSpace::Indexed { .. }
+                    | ColorSpace::Separation { .. }
+                    | ColorSpace::DeviceN { .. }
+            ) {
+                return Err(PsError::RangeCheck);
+            }
+            Ok((cs, n as u32))
         }
         _ => Err(PsError::TypeCheck),
     }
@@ -1647,6 +1667,44 @@ pub fn precompute_cie_decode_tables(
                 dict_entity,
             })
         }
+        // An Indexed space is not itself CIE-based, but its base may be, and
+        // the base is what the lookup table's components are interpreted in.
+        ColorSpace::Indexed {
+            base,
+            hival,
+            lookup,
+            lookup_proc,
+        } => Ok(ColorSpace::Indexed {
+            base: Box::new(precompute_cie_decode_tables(ctx, *base)?),
+            hival,
+            lookup,
+            lookup_proc,
+        }),
+        // Likewise the alternate space a tint transform produces colour in.
+        ColorSpace::Separation {
+            name,
+            alt_space,
+            tint_transform,
+            num_alt_components,
+        } => Ok(ColorSpace::Separation {
+            name,
+            alt_space: Box::new(precompute_cie_decode_tables(ctx, *alt_space)?),
+            tint_transform,
+            num_alt_components,
+        }),
+        ColorSpace::DeviceN {
+            names,
+            num_colorants,
+            alt_space,
+            tint_transform,
+            num_alt_components,
+        } => Ok(ColorSpace::DeviceN {
+            names,
+            num_colorants,
+            alt_space: Box::new(precompute_cie_decode_tables(ctx, *alt_space)?),
+            tint_transform,
+            num_alt_components,
+        }),
         // Non-CIE color spaces pass through unchanged
         other => Ok(other),
     }
