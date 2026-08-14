@@ -46,7 +46,7 @@ pub fn op_image(ctx: &mut Context) -> Result<(), PsError> {
     if width <= 0 || height <= 0 {
         return Err(PsError::RangeCheck);
     }
-    if !matches!(bps, 1 | 2 | 4 | 8 | 12) {
+    if !matches!(bps, 1 | 2 | 4 | 8 | 12 | 16) {
         return Err(PsError::RangeCheck);
     }
     let image_matrix = extract_matrix(ctx, mat_obj)?;
@@ -143,7 +143,7 @@ fn image_dict_form(ctx: &mut Context) -> Result<(), PsError> {
     let image_matrix =
         dict_get_matrix(ctx, dict_entity, b"ImageMatrix").ok_or(PsError::Undefined)?;
 
-    if !matches!(bps, 1 | 2 | 4 | 8 | 12) {
+    if !matches!(bps, 1 | 2 | 4 | 8 | 12 | 16) {
         return Err(PsError::RangeCheck);
     }
 
@@ -932,7 +932,7 @@ pub fn op_colorimage(ctx: &mut Context) -> Result<(), PsError> {
     if width <= 0 || height <= 0 {
         return Err(PsError::RangeCheck);
     }
-    if !matches!(bps, 1 | 2 | 4 | 8 | 12) {
+    if !matches!(bps, 1 | 2 | 4 | 8 | 12 | 16) {
         return Err(PsError::RangeCheck);
     }
     let image_matrix = extract_matrix(ctx, mat_obj)?;
@@ -1234,7 +1234,7 @@ fn read_multi_source_data(
     ))
 }
 
-/// Unpack samples from raw data (1/2/4/8/12 bits) to 8-bit values.
+/// Unpack samples from raw data (1/2/4/8/12/16 bits) to 8-bit values.
 /// Expand packed image samples to one byte per component.
 ///
 /// Takes the raw buffer **by value** so the `bps == 8` case — by far the most
@@ -1260,7 +1260,13 @@ fn unpack_samples(
     let total_samples = (width as usize) * (height as usize) * (ncomp as usize);
     let mut result = Vec::with_capacity(total_samples);
 
-    if bps == 12 {
+    if bps == 16 {
+        // 16-bit samples are two big-endian bytes; the high byte is the
+        // 8-bit value, which is what the rest of the pipeline works in.
+        for i in 0..total_samples {
+            result.push(raw.get(i * 2).copied().unwrap_or(0));
+        }
+    } else if bps == 12 {
         // 12-bit samples: each sample is 1.5 bytes
         let bits_per_row = width as usize * ncomp as usize * 12;
         let bytes_per_row = bits_per_row.div_ceil(8);
@@ -2138,6 +2144,7 @@ fn dict_get_mask_color(
 fn scale_mask_value(val: i32, bps: u32) -> i32 {
     match bps {
         8 => val,
+        16 => val >> 8,
         12 => val >> 4,
         1 | 2 | 4 => {
             let max_val = ((1i32 << bps) - 1) as f64;
@@ -2196,6 +2203,24 @@ mod tests {
         // 10/15 * 255 = 170, 12/15 * 255 = 204
         assert_eq!(result[0], 170);
         assert_eq!(result[1], 204);
+    }
+
+    /// 16-bit samples are big-endian pairs; the pipeline works in 8 bits, so
+    /// the high byte is the value. LanguageLevel 3 allows the depth and
+    /// `pdftops` emits it for 16-bit-per-channel scans.
+    #[test]
+    fn test_unpack_16bit() {
+        let data = vec![0x00, 0x00, 0x80, 0xFF, 0xFF, 0x01];
+        let result = unpack_samples(data, 3, 1, 16, 1, false);
+        assert_eq!(result, vec![0x00, 0x80, 0xFF]);
+    }
+
+    /// A short buffer pads with zero rather than panicking.
+    #[test]
+    fn test_unpack_16bit_truncated() {
+        let data = vec![0x12, 0x34, 0x56];
+        let result = unpack_samples(data, 2, 1, 16, 1, false);
+        assert_eq!(result, vec![0x12, 0x56]);
     }
 
     #[test]

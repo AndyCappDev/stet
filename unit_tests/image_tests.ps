@@ -110,7 +110,7 @@ gsave nulldevice
 % image rangecheck - negative height
 { 2 -1 8 [2 0 0 -2 0 2] <FF00> image } should_error [true] assert
 
-% image rangecheck - invalid bits per component (not 1, 2, 4, 8, 12)
+% image rangecheck - invalid bits per component (not 1, 2, 4, 8, 12, 16)
 { 2 2 3 [2 0 0 -2 0 2] <FF00> image } should_error [true] assert
 
 % imagemask - typecheck for non-boolean polarity
@@ -311,6 +311,27 @@ gsave nulldevice
 
 % 12-bit BPC image (2x1, 2 samples * 12 bits = 24 bits = 3 bytes)
 { 2 1 12 [2 0 0 -1 0 1] <FFF000> image } should_error [false] assert
+
+% 16-bit BPC image (LanguageLevel 3; 2x1, 2 samples * 2 bytes)
+{ 2 1 16 [2 0 0 -1 0 1] <0000FFFF> image } should_error [false] assert
+
+% 16-bit BPC through the dictionary form — this is what `pdftops` emits for
+% a 16-bit-per-channel scan, and rejecting it aborted the whole job
+{
+  <<
+    /ImageType 1
+    /Width 2
+    /Height 1
+    /BitsPerComponent 16
+    /ImageMatrix [2 0 0 -1 0 1]
+    /DataSource <0000FFFF>
+    /Decode [0 1]
+  >> image
+} should_error [false] assert
+
+% 16-bit BPC through colorimage
+{ 2 1 16 [2 0 0 -1 0 1] <000000000000FFFFFFFFFFFF> false 3 colorimage }
+  should_error [false] assert
 
 %% ============================================================
 %% Dict form imagemask
