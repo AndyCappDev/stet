@@ -97,10 +97,28 @@ currentfile {readonly rcheck} [true] assert
 -47.8 /cvi [-47] assert
 520.9 /cvi [520] assert
 4 /cvi [4] assert
+    % A string is converted by the scanner, so every number syntax the
+    % scanner accepts works here too (PLRM, cvi). `pdfwrite`'s UnPDFEscape
+    % decodes `#20` escapes with `(16#20) cvi`.
+    (16#20) /cvi [32] assert
+    (8#17) /cvi [15] assert
+    (2#1011) /cvi [11] assert
+    (+5) /cvi [5] assert
+    (.5) /cvi [0] assert
+    (5.) /cvi [5] assert
+    (  42  ) /cvi [42] assert
+    % Only the first token is looked at.
+    (1 2) /cvi [1] assert
     % cvi errors
     /cvi [/stackunderflow] assert
     [] /cvi [[] /typecheck] assert
-    (abc) /cvi [(abc) /syntaxerror] assert
+    % A string that scans to a non-number is a typecheck; one with no token
+    % in it at all is a syntaxerror.
+    (abc) /cvi [(abc) /typecheck] assert
+    (--5) /cvi [(--5) /typecheck] assert
+    (0x10) /cvi [(0x10) /typecheck] assert
+    () /cvi [() /syntaxerror] assert
+    (   ) /cvi [(   ) /syntaxerror] assert
 
 
 %% cvn %%
@@ -117,10 +135,13 @@ currentfile {readonly rcheck} [true] assert
 -47.8 /cvr [-47.8] assert
 520.9 /cvr [520.9] assert
 4 /cvr [4.0] assert
-    % cvi errors
+    (16#20) /cvr [32.0] assert
+    (1E3) /cvr [1000.0] assert
+    % cvr errors
     /cvr [/stackunderflow] assert
     [] /cvr [[] /typecheck] assert
-    (abc) /cvr [(abc) /syntaxerror] assert
+    (abc) /cvr [(abc) /typecheck] assert
+    () /cvr [() /syntaxerror] assert
 
 
 % cvrs %%

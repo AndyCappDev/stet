@@ -10,6 +10,7 @@ use std::io::Write;
 use stet_core::context::Context;
 use stet_core::error::PsError;
 use stet_core::object::{ObjFlags, PsObject, PsValue};
+use stet_core::tokenizer::{Token, Tokenizer};
 
 /// `type`: obj → nametype (pushes the type name as an executable name)
 pub fn op_type(ctx: &mut Context) -> Result<(), PsError> {
@@ -235,6 +236,25 @@ fn format_radix(value: u32, radix: u32) -> String {
     String::from_utf8(result).unwrap()
 }
 
+/// Convert a string to a number the way `cvi` and `cvr` do.
+///
+/// PLRM: both operators convert a string "using the same conversion the
+/// scanner performs", so the string is tokenized rather than hand-parsed —
+/// that is what admits radix numbers (`16#20`), exponents (`1E3`), and the
+/// bare forms `.5` and `5.`, all of which `pdfwrite`'s `UnPDFEscape` relies
+/// on. Only the first token is looked at. A string that scans to something
+/// other than a number is a `typecheck`; a string with no token in it at all
+/// is a `syntaxerror`.
+fn scan_string_number(bytes: &[u8]) -> Result<f64, PsError> {
+    let mut tok = Tokenizer::new(bytes);
+    match tok.next_token()? {
+        Some(Token::Int(v)) => Ok(v as f64),
+        Some(Token::Real(v)) => Ok(v),
+        None | Some(Token::Eof) => Err(PsError::SyntaxError),
+        Some(_) => Err(PsError::TypeCheck),
+    }
+}
+
 /// `cvi`: num/string → int
 pub fn op_cvi(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.o_stack.is_empty() {
@@ -255,19 +275,12 @@ pub fn op_cvi(ctx: &mut Context) -> Result<(), PsError> {
             // Access check: string must be readable
             obj.flags.require_read()?;
             let bytes = ctx.strings.get(entity, start, len);
-            let s = std::str::from_utf8(bytes).map_err(|_| PsError::SyntaxError)?;
-            let s = s.trim();
-            if let Ok(v) = s.parse::<i32>() {
-                PsObject::int(v)
-            } else if let Ok(v) = s.parse::<f64>() {
-                let truncated = v.trunc();
-                if truncated >= i32::MIN as f64 && truncated <= i32::MAX as f64 {
-                    PsObject::int(truncated as i32)
-                } else {
-                    return Err(PsError::RangeCheck);
-                }
+            let v = scan_string_number(bytes)?;
+            let truncated = v.trunc();
+            if truncated >= i32::MIN as f64 && truncated <= i32::MAX as f64 {
+                PsObject::int(truncated as i32)
             } else {
-                return Err(PsError::SyntaxError);
+                return Err(PsError::RangeCheck);
             }
         }
         _ => return Err(PsError::TypeCheck),
@@ -290,9 +303,7 @@ pub fn op_cvr(ctx: &mut Context) -> Result<(), PsError> {
             // Access check: string must be readable
             obj.flags.require_read()?;
             let bytes = ctx.strings.get(entity, start, len);
-            let s = std::str::from_utf8(bytes).map_err(|_| PsError::SyntaxError)?;
-            let v: f64 = s.trim().parse().map_err(|_| PsError::SyntaxError)?;
-            PsObject::real(v)
+            PsObject::real(scan_string_number(bytes)?)
         }
         _ => return Err(PsError::TypeCheck),
     };
@@ -554,6 +565,31 @@ mod tests {
             PsValue::Real(v) => assert_eq!(v, 42.0),
             _ => panic!("Expected Real"),
         }
+    }
+
+    /// `cvi`/`cvr` convert a string through the scanner, so every number
+    /// syntax the scanner accepts works — radix in particular, which is how
+    /// `pdfwrite` decodes `#20` escapes in PDF names.
+    #[test]
+    fn string_to_number_uses_the_scanner() {
+        assert_eq!(scan_string_number(b"16#20"), Ok(32.0));
+        assert_eq!(scan_string_number(b"8#17"), Ok(15.0));
+        assert_eq!(scan_string_number(b"2#1011"), Ok(11.0));
+        assert_eq!(scan_string_number(b"1E3"), Ok(1000.0));
+        assert_eq!(scan_string_number(b"  42  "), Ok(42.0));
+        assert_eq!(scan_string_number(b".5"), Ok(0.5));
+        assert_eq!(scan_string_number(b"5."), Ok(5.0));
+        // Only the first token is looked at.
+        assert_eq!(scan_string_number(b"1 2"), Ok(1.0));
+        // A token that is not a number, versus no token at all.
+        assert_eq!(scan_string_number(b"abc"), Err(PsError::TypeCheck));
+        assert_eq!(scan_string_number(b"0x10"), Err(PsError::TypeCheck));
+        assert_eq!(scan_string_number(b""), Err(PsError::SyntaxError));
+        assert_eq!(scan_string_number(b"   "), Err(PsError::SyntaxError));
+        assert_eq!(
+            scan_string_number(b"% only a comment"),
+            Err(PsError::SyntaxError)
+        );
     }
 
     #[test]
