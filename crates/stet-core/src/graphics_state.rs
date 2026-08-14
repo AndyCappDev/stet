@@ -78,6 +78,15 @@ pub enum ColorSpace {
         tint_transform: crate::object::PsObject,
         num_alt_components: u32,
     },
+    /// Pattern color space: `/Pattern`, `[/Pattern]` or `[/Pattern base]`.
+    ///
+    /// PLRM 4.9.6. `base` is `None` for a space that can only hold colored
+    /// (PaintType 1) patterns, and `Some(space)` for one that also accepts
+    /// uncolored (PaintType 2) patterns, whose color comes from `base`.
+    /// A Pattern space may not itself be used as `base`.
+    Pattern {
+        base: Option<Box<ColorSpace>>,
+    },
 }
 
 impl PartialEq for ColorSpace {
@@ -173,6 +182,7 @@ impl PartialEq for ColorSpace {
                     num_alt_components: n2,
                 },
             ) => names1 == names2 && nc1 == nc2 && a1 == a2 && t1 == t2 && n1 == n2,
+            (Pattern { base: b1 }, Pattern { base: b2 }) => b1 == b2,
             _ => false,
         }
     }
@@ -285,6 +295,14 @@ pub struct GraphicsState {
     pub current_pattern: Option<u32>,
     /// Underlying color for uncolored (PaintType 2) patterns.
     pub pattern_underlying_color: Option<DeviceColor>,
+    /// The pattern dictionary installed by `setpattern` (or by `setcolor` in a
+    /// Pattern color space). PLRM 4.9.6 makes the pattern part of the current
+    /// color, so `currentcolor` has to hand the same object back.
+    pub current_pattern_dict: Option<crate::object::EntityId>,
+    /// Components of the underlying color for an uncolored (PaintType 2)
+    /// pattern, in the Pattern space's base color space. Empty for colored
+    /// patterns; `currentcolor` pushes these ahead of the pattern dictionary.
+    pub pattern_components: Vec<f64>,
 
     // Userpath bounding box (set by setbbox, cleared by newpath)
     pub bbox: Option<[f64; 4]>,
@@ -353,6 +371,8 @@ impl GraphicsState {
             rendering_intent: 0, // RelativeColorimetric
             current_pattern: None,
             pattern_underlying_color: None,
+            current_pattern_dict: None,
+            pattern_components: Vec::new(),
             bbox: None,
             tint_values: None,
             cached_tint_table: None,

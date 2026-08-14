@@ -36,6 +36,76 @@ test_pat 123 /makepattern [test_pat 123 /typecheck] assert
 123 /setpattern [123 /typecheck] assert
 
 
+%% makepattern has no stack effect beyond `pattern matrix -> pattern` %%
+% PaintProc is handed the pattern dictionary and is meant to consume it, but
+% driver-generated PostScript routinely leaves it (and anything else) behind.
+% That residue belongs to the pattern, not to the caller.
+/leaky_pat << /PatternType 1 /PaintType 1 /TilingType 1
+   /BBox [0 0 10 10] /XStep 10 /YStep 10
+   /PaintProc { 42 } >> def
+{ leaky_pat [1 0 0 1 0 0] makepattern type } [/dicttype] assert
+
+
+%% =============================================================================
+%% Pattern color space (PLRM 4.9.6)
+%% =============================================================================
+
+/colored_pat << /PatternType 1 /PaintType 1 /TilingType 1
+   /BBox [0 0 10 10] /XStep 10 /YStep 10
+   /PaintProc { pop } >> def
+/uncolored_pat << /PatternType 1 /PaintType 2 /TilingType 1
+   /BBox [0 0 10 10] /XStep 10 /YStep 10
+   /PaintProc { pop } >> def
+/mkcolored { colored_pat [1 0 0 1 0 0] makepattern } def
+/mkuncolored { uncolored_pat [1 0 0 1 0 0] makepattern } def
+
+%% /Pattern and [/Pattern] name the same space %%
+{ /Pattern setcolorspace currentcolorspace 0 get } [/Pattern] assert
+{ /Pattern setcolorspace currentcolorspace length } [1] assert
+{ [/Pattern] setcolorspace currentcolorspace 0 get } [/Pattern] assert
+
+%% [/Pattern base] keeps its base space %%
+{ [/Pattern /DeviceRGB] setcolorspace currentcolorspace 1 get 0 get } [/DeviceRGB] assert
+
+%% a Pattern space may not be based on another Pattern space %%
+[/Pattern [/Pattern]] /setcolorspace [[/Pattern [/Pattern]] /rangecheck] assert
+
+%% until a pattern is set, the color in a Pattern space is the null pattern %%
+{ [/Pattern] setcolorspace currentcolor type } [/nulltype] assert
+
+%% setcolor installs the pattern and leaves the color space alone %%
+{ [/Pattern /DeviceCMYK] setcolorspace 0 0 0 1 mkuncolored setcolor
+  currentcolorspace 1 get 0 get } [/DeviceCMYK] assert
+{ [/Pattern /DeviceCMYK] setcolorspace 0 0 0 1 mkuncolored setcolor
+  currentcolor type } [0.0 0.0 0.0 1.0 /dicttype] assert
+
+%% setpattern installs a Pattern space over the current one %%
+{ /DeviceRGB setcolorspace mkcolored setpattern currentcolorspace 0 get } [/Pattern] assert
+{ /DeviceRGB setcolorspace mkcolored setpattern
+  currentcolorspace 1 get 0 get } [/DeviceRGB] assert
+
+%% an uncolored pattern consumes the base space's components, not just one %%
+{ /DeviceRGB setcolorspace 1 0 0 mkuncolored setpattern } [] assert
+{ /DeviceCMYK setcolorspace 0 0 0 1 mkuncolored setpattern currentcolor type }
+  [0.0 0.0 0.0 1.0 /dicttype] assert
+
+%% too few components for the base space is an underflow %%
+% The operands are left in place, and one of them is the pattern dictionary,
+% so the error name is checked on its own.
+{ /DeviceRGB setcolorspace 1 0 mkuncolored { setpattern } stopped
+  { clear $error /newerror false put $error /errorname get }
+  { clear /noerror } ifelse } [/stackunderflow] assert
+
+%% a colored pattern takes no components at all %%
+{ /DeviceRGB setcolorspace mkcolored setpattern currentcolor type } [/dicttype] assert
+
+%% setting a non-pattern color drops the pattern %%
+{ /DeviceRGB setcolorspace mkcolored setpattern 0.5 setgray currentcolorspace 0 get }
+  [/DeviceGray] assert
+
+/DeviceGray setcolorspace
+
+
 %% =============================================================================
 %% execform
 %% =============================================================================
@@ -55,6 +125,14 @@ test_pat 123 /makepattern [test_pat 123 /typecheck] assert
   /Matrix [1 0 0 1 0 0]
   /PaintProc { pop }
 >> {execform} stopped [false] assert
+
+%% execform is `form -> -` whatever PaintProc leaves behind %%
+% PaintProc runs on the first invocation only, so residue would make the
+% operator behave differently the second time it is called.
+/leaky_form << /FormType 1 /BBox [0 0 100 100] /Matrix [1 0 0 1 0 0]
+   /PaintProc { 99 } >> def
+{ leaky_form execform count } [0] assert
+{ leaky_form execform count } [0] assert
 
 
 grestore

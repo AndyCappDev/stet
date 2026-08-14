@@ -328,6 +328,11 @@ fn check_color_space(
                 out,
             );
         }
+        Cs::Pattern { base } => {
+            if let Some(base) = base {
+                check_color_space(ctx, base, holder, &format!("{slot}.base"), out);
+            }
+        }
     }
 }
 
@@ -365,6 +370,15 @@ fn check_gstate(
             &PsObject::dict(pd),
             holder,
             "page_device".to_string(),
+            out,
+        );
+    }
+    if let Some(pat) = gs.current_pattern_dict {
+        check_ref(
+            ctx,
+            &PsObject::dict(pat),
+            holder,
+            "current_pattern_dict".to_string(),
             out,
         );
     }

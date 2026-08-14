@@ -15,7 +15,7 @@ use std::sync::Arc;
 use stet_core::context::Context;
 use stet_core::dict::DictKey;
 use stet_core::error::PsError;
-use stet_core::graphics_state::PatternData;
+use stet_core::graphics_state::{ColorSpace, PatternData};
 use stet_core::object::{PsObject, PsValue};
 use stet_fonts::geometry::Matrix;
 use stet_graphics::device::HalftoneScreen;
@@ -975,10 +975,18 @@ pub fn op_makepattern(ctx: &mut Context) -> Result<(), PsError> {
         ctx.gstate.current_point = None;
 
         // Push pattern dict on o_stack for PaintProc to consume
+        let depth_before = ctx.o_stack.len();
         ctx.o_stack.push(PsObject::dict(new_dict))?;
 
         // Execute PaintProc
         let result = ctx.exec_sync(pp);
+
+        // `makepattern` is `pattern matrix → pattern`; whatever PaintProc left
+        // behind is not part of that. A PaintProc that never pops the pattern
+        // dictionary is common in driver-generated PostScript (`pdftops` emits
+        // one for every uncolored pattern), and the operand stack it runs on is
+        // private to the pattern in a real implementation.
+        ctx.o_stack.truncate(depth_before);
 
         // Restore CTM and display list
         ctx.gstate.ctm = saved_ctm;
@@ -1015,8 +1023,27 @@ pub fn op_makepattern(ctx: &mut Context) -> Result<(), PsError> {
 
 /// `setpattern`: pattern → — (colored) or comp... pattern → — (uncolored)
 ///
-/// Sets the current pattern for subsequent fill/stroke operations.
+/// PLRM 4.9.6: `setpattern` is `setcolor` in a Pattern color space whose base
+/// is the color space that was current. It installs that Pattern space as a
+/// side effect, so `currentcolorspace` afterwards reports `[/Pattern base]`.
+/// A Pattern space that is already current keeps its own base.
 pub fn op_setpattern(ctx: &mut Context) -> Result<(), PsError> {
+    let base = match ctx.gstate.color_space.clone() {
+        ColorSpace::Pattern { base } => base,
+        other => Some(Box::new(other)),
+    };
+    install_pattern_color(ctx, base.as_deref())?;
+    ctx.gstate.color_space = ColorSpace::Pattern { base };
+    Ok(())
+}
+
+/// Make a pattern the current color: `comp1 … compn pattern → —`.
+///
+/// Shared by `setpattern` and by `setcolor` in a Pattern color space; the only
+/// difference between them is that `setpattern` also installs the Pattern
+/// space. `base` is that space's underlying color space, which supplies the
+/// color of an uncolored (PaintType 2) pattern and is unused by a colored one.
+pub fn install_pattern_color(ctx: &mut Context, base: Option<&ColorSpace>) -> Result<(), PsError> {
     if ctx.o_stack.is_empty() {
         return Err(PsError::StackUnderflow);
     }
@@ -1043,21 +1070,46 @@ pub fn op_setpattern(ctx: &mut Context) -> Result<(), PsError> {
         .and_then(|o| o.as_i32())
         .unwrap_or(1);
 
-    ctx.o_stack.pop()?; // dict
+    // An uncolored pattern carries no color of its own, so the base space's
+    // components sit under the pattern on the operand stack.
+    let n = if paint_type == 2 {
+        base.map(crate::color_ops::color_space_components)
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    if ctx.o_stack.len() < n + 1 {
+        return Err(PsError::StackUnderflow);
+    }
+    let mut comps = Vec::with_capacity(n);
+    for i in (1..=n).rev() {
+        comps.push(ctx.o_stack.peek(i)?.as_f64().ok_or(PsError::TypeCheck)?);
+    }
 
-    if paint_type == 2 {
-        // Uncolored pattern: pop underlying color components
-        // For now, pop one component (gray) as a simple case
-        if ctx.o_stack.is_empty() {
-            return Err(PsError::StackUnderflow);
-        }
-        let color_val = ctx.o_stack.peek(0)?.as_f64().ok_or(PsError::TypeCheck)?;
+    ctx.o_stack.pop()?; // pattern dict
+    for _ in 0..n {
         ctx.o_stack.pop()?;
-        ctx.gstate.pattern_underlying_color =
-            Some(stet_graphics::color::DeviceColor::from_gray(color_val));
+    }
+
+    // Resolve the underlying color through the base space itself, so that a
+    // Separation base runs its tint transform and a CIE base its decode.
+    if n > 0 {
+        let base = base.expect("a nonzero component count implies a base space");
+        let saved_space = std::mem::replace(&mut ctx.gstate.color_space, base.clone());
+        for &c in &comps {
+            ctx.o_stack.push(PsObject::real(c))?;
+        }
+        let result = crate::color_ops::op_setcolor(ctx);
+        ctx.gstate.color_space = saved_space;
+        result?;
+        ctx.gstate.pattern_underlying_color = Some(ctx.gstate.color.clone());
+    } else {
+        ctx.gstate.pattern_underlying_color = None;
     }
 
     ctx.gstate.current_pattern = Some(pattern_id);
+    ctx.gstate.current_pattern_dict = Some(dict_entity);
+    ctx.gstate.pattern_components = comps;
     Ok(())
 }
 
@@ -1356,6 +1408,7 @@ pub fn op_execform(ctx: &mut Context) -> Result<(), PsError> {
         let saved_dl = std::mem::take(&mut ctx.display_list);
 
         // Push form dict for PaintProc to consume
+        let depth_before = ctx.o_stack.len();
         ctx.o_stack.push(PsObject::dict(dict_entity))?;
 
         let pp_key = DictKey::Name(ctx.names.intern(b"PaintProc"));
@@ -1365,6 +1418,12 @@ pub fn op_execform(ctx: &mut Context) -> Result<(), PsError> {
             .ok_or(PsError::TypeCheck)?;
 
         let result = ctx.exec_sync(paint_proc);
+
+        // `execform` is `form → —`, so a PaintProc that fails to consume the
+        // form dictionary must not turn that into a stack effect — and this
+        // runs only on the first invocation, so any residue would also make
+        // the operator behave differently the second time round.
+        ctx.o_stack.truncate(depth_before);
 
         let captured = std::mem::replace(&mut ctx.display_list, saved_dl);
         result?;

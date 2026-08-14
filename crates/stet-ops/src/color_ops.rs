@@ -15,6 +15,17 @@ use stet_core::graphics_state::ColorSpace;
 use stet_core::object::{EntityId, PsObject, PsValue};
 use stet_graphics::color::{CieAParams, CieAbcParams, CieDefParams, CieDefgParams, DeviceColor};
 
+/// Drop the pattern half of the current color.
+///
+/// Every operator that sets a non-pattern color replaces the whole current
+/// color, so the pattern, its dictionary, and its underlying components all go
+/// with it (PLRM 4.9.6).
+pub fn clear_pattern_color(ctx: &mut Context) {
+    ctx.gstate.current_pattern = None;
+    ctx.gstate.current_pattern_dict = None;
+    ctx.gstate.pattern_components.clear();
+}
+
 /// `setgray`: num → —
 pub fn op_setgray(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.o_stack.is_empty() {
@@ -25,7 +36,7 @@ pub fn op_setgray(ctx: &mut Context) -> Result<(), PsError> {
     ctx.o_stack.pop()?;
     ctx.gstate.color = DeviceColor::from_gray(gray.clamp(0.0, 1.0));
     ctx.gstate.color_space = ColorSpace::DeviceGray;
-    ctx.gstate.current_pattern = None;
+    clear_pattern_color(ctx);
     // UseCIEColor remapping (PLRM 6.2.5)
     if is_use_cie_color(ctx)
         && let Some(cs) = lookup_default_colorspace(ctx, b"DeviceGray")
@@ -59,7 +70,7 @@ pub fn op_setrgbcolor(ctx: &mut Context) -> Result<(), PsError> {
     ctx.gstate.color =
         DeviceColor::from_rgb(r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0));
     ctx.gstate.color_space = ColorSpace::DeviceRGB;
-    ctx.gstate.current_pattern = None;
+    clear_pattern_color(ctx);
     // UseCIEColor remapping (PLRM 6.2.5)
     if is_use_cie_color(ctx)
         && let Some(cs) = lookup_default_colorspace(ctx, b"DeviceRGB")
@@ -102,7 +113,7 @@ pub fn op_setcmykcolor(ctx: &mut Context) -> Result<(), PsError> {
         &mut ctx.icc_cache,
     );
     ctx.gstate.color_space = ColorSpace::DeviceCMYK;
-    ctx.gstate.current_pattern = None;
+    clear_pattern_color(ctx);
     // UseCIEColor remapping (PLRM 6.2.5)
     if is_use_cie_color(ctx)
         && let Some(cs) = lookup_default_colorspace(ctx, b"DeviceCMYK")
@@ -139,7 +150,7 @@ pub fn op_sethsbcolor(ctx: &mut Context) -> Result<(), PsError> {
     ctx.gstate.color =
         DeviceColor::from_hsb(h.clamp(0.0, 1.0), s.clamp(0.0, 1.0), b.clamp(0.0, 1.0));
     ctx.gstate.color_space = ColorSpace::DeviceRGB;
-    ctx.gstate.current_pattern = None;
+    clear_pattern_color(ctx);
     Ok(())
 }
 
@@ -165,6 +176,7 @@ pub fn op_setcolorspace(ctx: &mut Context) -> Result<(), PsError> {
                 b"DeviceGray" => ColorSpace::DeviceGray,
                 b"DeviceRGB" => ColorSpace::DeviceRGB,
                 b"DeviceCMYK" => ColorSpace::DeviceCMYK,
+                b"Pattern" => ColorSpace::Pattern { base: None },
                 _ => return Err(PsError::Undefined),
             };
             ctx.o_stack.pop()?;
@@ -184,7 +196,7 @@ pub fn op_setcolorspace(ctx: &mut Context) -> Result<(), PsError> {
             }
             ctx.gstate.color = default_color_for_space(&cs, ctx);
             ctx.gstate.color_space = cs;
-            ctx.gstate.current_pattern = None;
+            clear_pattern_color(ctx);
             Ok(())
         }
         // Also accept array form [/DeviceGray] or [/Indexed base hival lookup]
@@ -208,6 +220,7 @@ pub fn op_setcolorspace(ctx: &mut Context) -> Result<(), PsError> {
                     b"ICCBased" => parse_iccbased_colorspace(ctx, entity, start, len)?,
                     b"Separation" if len >= 4 => parse_separation_colorspace(ctx, entity, start)?,
                     b"DeviceN" if len >= 4 => parse_devicen_colorspace(ctx, entity, start)?,
+                    b"Pattern" => parse_pattern_colorspace(ctx, entity, start, len)?,
                     _ => return Err(PsError::Undefined),
                 };
                 let cs = precompute_cie_decode_tables(ctx, cs)?;
@@ -232,7 +245,7 @@ pub fn op_setcolorspace(ctx: &mut Context) -> Result<(), PsError> {
                 ctx.o_stack.pop()?;
                 ctx.gstate.color = default_color_for_space(&cs, ctx);
                 ctx.gstate.color_space = cs;
-                ctx.gstate.current_pattern = None;
+                clear_pattern_color(ctx);
                 cache_tint_table(ctx);
                 Ok(())
             } else {
@@ -278,7 +291,19 @@ fn cache_tint_table(ctx: &mut Context) {
 
 /// `currentcolorspace`: — → array
 pub fn op_currentcolorspace(ctx: &mut Context) -> Result<(), PsError> {
-    match &ctx.gstate.color_space {
+    let cs = ctx.gstate.color_space.clone();
+    let obj = colorspace_object(ctx, &cs)?;
+    ctx.o_stack.push(obj)?;
+    Ok(())
+}
+
+/// Rebuild the PostScript array that names a color space.
+///
+/// `currentcolorspace` hands this back to the program, and a Pattern space
+/// embeds the result for its base space, so it has to be able to describe
+/// every variant.
+fn colorspace_object(ctx: &mut Context, cs: &ColorSpace) -> Result<PsObject, PsError> {
+    let obj = match cs {
         ColorSpace::Indexed {
             base,
             hival,
@@ -301,6 +326,7 @@ pub fn op_currentcolorspace(ctx: &mut Context) -> Result<(), PsError> {
                 ColorSpace::ICCBased { .. } => b"ICCBased",
                 ColorSpace::Separation { .. } => b"Separation",
                 ColorSpace::DeviceN { .. } => b"DeviceN",
+                ColorSpace::Pattern { .. } => b"Pattern",
             };
             let base_id = ctx.names.intern(base_name_bytes);
             let base_obj = PsObject::name_lit(base_id);
@@ -314,58 +340,40 @@ pub fn op_currentcolorspace(ctx: &mut Context) -> Result<(), PsError> {
 
             let items = [idx_name, base_obj, hival_obj, str_obj];
             let entity = crate::vm_ops::alloc_array_from(ctx, &items);
-            let arr = crate::vm_ops::make_array_obj(ctx, entity, 4);
-            ctx.o_stack.push(arr)?;
+            crate::vm_ops::make_array_obj(ctx, entity, 4)
         }
         ColorSpace::CIEBasedABC { dict_entity, .. } => {
-            let dict_entity = *dict_entity;
-            let name_id = ctx.names.intern(b"CIEBasedABC");
-            let name_obj = PsObject::name_lit(name_id);
-            let dict_obj = crate::vm_ops::make_dict_obj(ctx, dict_entity);
-            let items = [name_obj, dict_obj];
-            let entity = crate::vm_ops::alloc_array_from(ctx, &items);
-            let arr = crate::vm_ops::make_array_obj(ctx, entity, 2);
-            ctx.o_stack.push(arr)?;
+            cie_space_object(ctx, b"CIEBasedABC", *dict_entity)
         }
         ColorSpace::CIEBasedA { dict_entity, .. } => {
-            let dict_entity = *dict_entity;
-            let name_id = ctx.names.intern(b"CIEBasedA");
-            let name_obj = PsObject::name_lit(name_id);
-            let dict_obj = crate::vm_ops::make_dict_obj(ctx, dict_entity);
-            let items = [name_obj, dict_obj];
-            let entity = crate::vm_ops::alloc_array_from(ctx, &items);
-            let arr = crate::vm_ops::make_array_obj(ctx, entity, 2);
-            ctx.o_stack.push(arr)?;
+            cie_space_object(ctx, b"CIEBasedA", *dict_entity)
         }
         ColorSpace::CIEBasedDEF { dict_entity, .. } => {
-            let dict_entity = *dict_entity;
-            let name_id = ctx.names.intern(b"CIEBasedDEF");
-            let name_obj = PsObject::name_lit(name_id);
-            let dict_obj = crate::vm_ops::make_dict_obj(ctx, dict_entity);
-            let items = [name_obj, dict_obj];
-            let entity = crate::vm_ops::alloc_array_from(ctx, &items);
-            let arr = crate::vm_ops::make_array_obj(ctx, entity, 2);
-            ctx.o_stack.push(arr)?;
+            cie_space_object(ctx, b"CIEBasedDEF", *dict_entity)
         }
         ColorSpace::CIEBasedDEFG { dict_entity, .. } => {
-            let dict_entity = *dict_entity;
-            let name_id = ctx.names.intern(b"CIEBasedDEFG");
-            let name_obj = PsObject::name_lit(name_id);
-            let dict_obj = crate::vm_ops::make_dict_obj(ctx, dict_entity);
-            let items = [name_obj, dict_obj];
-            let entity = crate::vm_ops::alloc_array_from(ctx, &items);
-            let arr = crate::vm_ops::make_array_obj(ctx, entity, 2);
-            ctx.o_stack.push(arr)?;
+            cie_space_object(ctx, b"CIEBasedDEFG", *dict_entity)
         }
         ColorSpace::ICCBased { dict_entity, .. } => {
-            let dict_entity = *dict_entity;
-            let name_id = ctx.names.intern(b"ICCBased");
-            let name_obj = PsObject::name_lit(name_id);
-            let dict_obj = crate::vm_ops::make_dict_obj(ctx, dict_entity);
-            let items = [name_obj, dict_obj];
-            let entity = crate::vm_ops::alloc_array_from(ctx, &items);
-            let arr = crate::vm_ops::make_array_obj(ctx, entity, 2);
-            ctx.o_stack.push(arr)?;
+            cie_space_object(ctx, b"ICCBased", *dict_entity)
+        }
+        // `[/Pattern]` for colored patterns only, `[/Pattern base]` when the
+        // space also accepts uncolored ones (PLRM 4.9.6).
+        ColorSpace::Pattern { base } => {
+            let pat_id = ctx.names.intern(b"Pattern");
+            let pat_name = PsObject::name_lit(pat_id);
+            match base {
+                Some(base) => {
+                    let base = base.as_ref().clone();
+                    let base_obj = colorspace_object(ctx, &base)?;
+                    let entity = crate::vm_ops::alloc_array_from(ctx, &[pat_name, base_obj]);
+                    crate::vm_ops::make_array_obj(ctx, entity, 2)
+                }
+                None => {
+                    let entity = crate::vm_ops::alloc_array_from(ctx, &[pat_name]);
+                    crate::vm_ops::make_array_obj(ctx, entity, 1)
+                }
+            }
         }
         cs => {
             let name_bytes = match cs {
@@ -379,11 +387,19 @@ pub fn op_currentcolorspace(ctx: &mut Context) -> Result<(), PsError> {
             let name_id = ctx.names.intern(name_bytes);
             let name_obj = PsObject::name_lit(name_id);
             let entity = crate::vm_ops::alloc_array_from(ctx, &[name_obj]);
-            let arr = crate::vm_ops::make_array_obj(ctx, entity, 1);
-            ctx.o_stack.push(arr)?;
+            crate::vm_ops::make_array_obj(ctx, entity, 1)
         }
-    }
-    Ok(())
+    };
+    Ok(obj)
+}
+
+/// Build `[/<name> dict]` for the dictionary-parameterised color spaces.
+fn cie_space_object(ctx: &mut Context, name: &[u8], dict_entity: EntityId) -> PsObject {
+    let name_id = ctx.names.intern(name);
+    let name_obj = PsObject::name_lit(name_id);
+    let dict_obj = crate::vm_ops::make_dict_obj(ctx, dict_entity);
+    let entity = crate::vm_ops::alloc_array_from(ctx, &[name_obj, dict_obj]);
+    crate::vm_ops::make_array_obj(ctx, entity, 2)
 }
 
 /// `setcolor`: comp1 ... compn → — (set color using current color space)
@@ -429,7 +445,7 @@ pub fn op_setcolor(ctx: &mut Context) -> Result<(), PsError> {
                             y.clamp(0.0, 1.0),
                             k.clamp(0.0, 1.0),
                         );
-                        ctx.gstate.current_pattern = None;
+                        clear_pattern_color(ctx);
                         Ok(())
                     }
                     _ => Err(PsError::RangeCheck),
@@ -476,6 +492,11 @@ pub fn op_setcolor(ctx: &mut Context) -> Result<(), PsError> {
             ctx.exec_sync(tint_transform)?;
             set_color_from_tint_result(ctx, num_alt_components)
         }
+        // `comp1 … compn pattern setcolor` — same as `setpattern` except that
+        // the color space is already Pattern and stays as it is.
+        ColorSpace::Pattern { base } => {
+            crate::halftone_ops::install_pattern_color(ctx, base.as_deref())
+        }
     }
 }
 
@@ -502,7 +523,7 @@ fn set_color_from_tint_result(ctx: &mut Context, n: u32) -> Result<(), PsError> 
         ),
         _ => DeviceColor::from_gray(0.0),
     };
-    ctx.gstate.current_pattern = None;
+    clear_pattern_color(ctx);
     Ok(())
 }
 
@@ -617,6 +638,23 @@ pub fn op_currentcolor(ctx: &mut Context) -> Result<(), PsError> {
                     ctx.o_stack.push(PsObject::real(ctx.gstate.color.g))?;
                     ctx.o_stack.push(PsObject::real(ctx.gstate.color.b))?;
                 }
+            }
+        }
+        // The pattern is part of the current color, so it comes back with any
+        // base-space components an uncolored pattern was given (PLRM 4.9.6).
+        // Before the first `setcolor` the color is the null pattern.
+        ColorSpace::Pattern { .. } => {
+            let comps = ctx.gstate.pattern_components.clone();
+            let dict = ctx.gstate.current_pattern_dict;
+            for c in comps {
+                ctx.o_stack.push(PsObject::real(c))?;
+            }
+            match dict {
+                Some(entity) => {
+                    let obj = crate::vm_ops::make_dict_obj(ctx, entity);
+                    ctx.o_stack.push(obj)?;
+                }
+                None => ctx.o_stack.push(PsObject::null())?,
             }
         }
     }
@@ -736,7 +774,7 @@ fn set_indexed_color(ctx: &mut Context) -> Result<(), PsError> {
 
     ctx.o_stack.pop()?;
     ctx.gstate.color = color;
-    ctx.gstate.current_pattern = None;
+    clear_pattern_color(ctx);
     Ok(())
 }
 
@@ -808,6 +846,9 @@ fn default_color_for_space(cs: &ColorSpace, ctx: &mut Context) -> DeviceColor {
         // which needs the eval loop. Default to black; setcolor will run the
         // tint transform via continuation to set the actual color.
         ColorSpace::Separation { .. } | ColorSpace::DeviceN { .. } => DeviceColor::black(),
+        // The initial color in a Pattern space is the null pattern, which paints
+        // nothing; the device color only matters once a pattern is installed.
+        ColorSpace::Pattern { .. } => DeviceColor::black(),
     }
 }
 
@@ -824,6 +865,7 @@ pub fn resolve_color_space_from_obj(
                 b"DeviceGray" => Ok((ColorSpace::DeviceGray, 1)),
                 b"DeviceRGB" => Ok((ColorSpace::DeviceRGB, 3)),
                 b"DeviceCMYK" => Ok((ColorSpace::DeviceCMYK, 4)),
+                b"Pattern" => Ok((ColorSpace::Pattern { base: None }, 0)),
                 _ => Err(PsError::Undefined),
             }
         }
@@ -846,6 +888,7 @@ pub fn resolve_color_space_from_obj(
                     b"ICCBased" => parse_iccbased_colorspace(ctx, entity, start, len)?,
                     b"Separation" if len >= 4 => parse_separation_colorspace(ctx, entity, start)?,
                     b"DeviceN" if len >= 4 => parse_devicen_colorspace(ctx, entity, start)?,
+                    b"Pattern" => parse_pattern_colorspace(ctx, entity, start, len)?,
                     _ => return Err(PsError::Undefined),
                 };
                 let n_comps = color_space_components(&cs);
@@ -856,6 +899,32 @@ pub fn resolve_color_space_from_obj(
         }
         _ => Err(PsError::TypeCheck),
     }
+}
+
+/// Parse `[/Pattern]` or `[/Pattern base]` from an array (PLRM 4.9.6).
+///
+/// The optional base is the underlying space that supplies the color of an
+/// uncolored (PaintType 2) pattern. It may be any color space except another
+/// Pattern space.
+fn parse_pattern_colorspace(
+    ctx: &mut Context,
+    entity: stet_core::object::EntityId,
+    start: u32,
+    len: u32,
+) -> Result<ColorSpace, PsError> {
+    if len < 2 {
+        return Ok(ColorSpace::Pattern { base: None });
+    }
+    let base_obj = ctx.arrays.get_element(entity, start + 1);
+    let (base, _) = resolve_color_space_from_obj(ctx, &base_obj)?;
+    if matches!(base, ColorSpace::Pattern { .. }) {
+        return Err(PsError::RangeCheck);
+    }
+    let base = precompute_cie_decode_tables(ctx, base)?;
+    let base = resolve_indexed_proc_lookup(ctx, base)?;
+    Ok(ColorSpace::Pattern {
+        base: Some(Box::new(base)),
+    })
 }
 
 /// Parse `[/Indexed base hival lookup]` from an array.
@@ -1451,7 +1520,7 @@ fn set_cie_abc_color(ctx: &mut Context, params: &Arc<CieAbcParams>) -> Result<()
     ctx.o_stack.pop()?;
     ctx.o_stack.pop()?;
     ctx.gstate.color = DeviceColor::from_cie_abc(a, b, c, params);
-    ctx.gstate.current_pattern = None;
+    clear_pattern_color(ctx);
     Ok(())
 }
 
@@ -1465,7 +1534,7 @@ fn set_cie_a_color(ctx: &mut Context, params: &Arc<CieAParams>) -> Result<(), Ps
 
     ctx.o_stack.pop()?;
     ctx.gstate.color = DeviceColor::from_cie_a(a, params);
-    ctx.gstate.current_pattern = None;
+    clear_pattern_color(ctx);
     Ok(())
 }
 
@@ -1485,7 +1554,7 @@ fn set_cie_def_color(ctx: &mut Context, params: &Arc<CieDefParams>) -> Result<()
     ctx.o_stack.pop()?;
     ctx.o_stack.pop()?;
     ctx.gstate.color = DeviceColor::from_cie_def(d, e, f, params);
-    ctx.gstate.current_pattern = None;
+    clear_pattern_color(ctx);
     Ok(())
 }
 
@@ -1508,7 +1577,7 @@ fn set_cie_defg_color(ctx: &mut Context, params: &Arc<CieDefgParams>) -> Result<
     ctx.o_stack.pop()?;
     ctx.o_stack.pop()?;
     ctx.gstate.color = DeviceColor::from_cie_defg(d, e, f, g, params);
-    ctx.gstate.current_pattern = None;
+    clear_pattern_color(ctx);
     Ok(())
 }
 
@@ -1526,6 +1595,13 @@ pub fn color_space_components(cs: &ColorSpace) -> usize {
         ColorSpace::Indexed { .. } => 1,
         ColorSpace::Separation { .. } => 1,
         ColorSpace::DeviceN { num_colorants, .. } => *num_colorants as usize,
+        // The pattern object itself is not a numeric component. A Pattern space
+        // takes the base space's components (PaintType 2) plus the pattern; with
+        // no base it takes the pattern alone.
+        ColorSpace::Pattern { base } => base
+            .as_ref()
+            .map(|b| color_space_components(b))
+            .unwrap_or(0),
     }
 }
 

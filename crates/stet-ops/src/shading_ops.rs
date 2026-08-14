@@ -1038,6 +1038,14 @@ fn capture_shading_color_space(ctx: &Context, color_space: &ColorSpace) -> Shadi
             // Shouldn't appear in shadings, but handle gracefully
             capture_shading_color_space(ctx, base)
         }
+        ColorSpace::Pattern { base } => {
+            // PLRM 4.9.3 forbids a Pattern space in a shading dictionary; if one
+            // turns up, describe its base rather than failing the whole shading.
+            match base {
+                Some(base) => capture_shading_color_space(ctx, base),
+                None => ShadingColorSpace::DeviceRGB,
+            }
+        }
     }
 }
 

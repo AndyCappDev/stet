@@ -166,6 +166,9 @@ fn image_dict_form(ctx: &mut Context) -> Result<(), PsError> {
             ColorSpace::ICCBased { n, .. } => n,
             ColorSpace::Separation { .. } => 1,
             ColorSpace::DeviceN { num_colorants, .. } => num_colorants,
+            // PLRM 4.10.5: a Pattern space cannot be the current space for an
+            // image. Ghostscript raises rangecheck here; so do we.
+            ColorSpace::Pattern { .. } => return Err(PsError::RangeCheck),
         }
     };
 
@@ -345,6 +348,9 @@ fn image_type3_form(
             ColorSpace::ICCBased { n, .. } => n,
             ColorSpace::Separation { .. } => 1,
             ColorSpace::DeviceN { num_colorants, .. } => num_colorants,
+            // PLRM 4.10.5: a Pattern space cannot be the current space for an
+            // image. Ghostscript raises rangecheck here; so do we.
+            ColorSpace::Pattern { .. } => return Err(PsError::RangeCheck),
         }
     };
 
