@@ -133,6 +133,21 @@ impl EntityTable {
         self.entries.len()
     }
 
+    /// Drop every entity from index `n` onward, so their ids become available
+    /// for reuse.
+    ///
+    /// Only sound when no reachable object still refers to those ids. `restore`
+    /// establishes that: PLRM 3.7.3.2 forbids a surviving reference to a
+    /// composite created after the save (enforced by `check_invalidrestore`),
+    /// and COW reverts any pre-save composite that was mutated to point at one.
+    ///
+    /// Note that this makes `EntityId`s **reusable**. Anything keyed by
+    /// `EntityId` that outlives a restore must be purged in the same step, or a
+    /// later entity reusing the index will collide with the stale entry.
+    pub fn truncate(&mut self, n: usize) {
+        self.entries.truncate(n);
+    }
+
     /// Whether the table is empty.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()

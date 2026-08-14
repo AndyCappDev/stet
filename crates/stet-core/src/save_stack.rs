@@ -29,6 +29,21 @@ pub struct SaveRecord {
     pub store_type: StoreType,
 }
 
+/// High-water marks of **local** VM at the moment of a `save`.
+///
+/// `restore` truncates each local store back to these marks, which is what
+/// makes the memory a save level allocated actually available again. Global VM
+/// is never affected by save/restore, so it has no marks here.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct VmMarks {
+    pub string_data: usize,
+    pub string_entities: usize,
+    pub array_data: usize,
+    pub array_entities: usize,
+    pub dict_slots: usize,
+    pub dict_entities: usize,
+}
+
 /// Interpreter state captured by `save` and reinstated by `restore`.
 ///
 /// Grouped into a struct rather than passed positionally: every field is
@@ -53,6 +68,8 @@ pub struct SaveSnapshot {
     /// after the save. Without this the store would grow monotonically and
     /// each stale slot would keep naming entities the restore released.
     pub gstate_store_len: usize,
+    /// Local-VM high-water marks, for reclamation on restore.
+    pub marks: VmMarks,
 }
 
 /// One save level's state.
@@ -83,6 +100,8 @@ pub struct SaveLevel {
     /// after the save. Without this the store would grow monotonically and
     /// each stale slot would keep naming entities the restore released.
     pub gstate_store_len: usize,
+    /// Local-VM high-water marks, for reclamation on restore.
+    pub marks: VmMarks,
 }
 
 /// The save/restore stack.
@@ -110,6 +129,7 @@ impl SaveStack {
             gstate,
             gstate_stack,
             gstate_store_len,
+            marks,
         } = snapshot;
         let level = (self.levels.len() + 1) as u16;
         let save_id = self.next_save_id;
@@ -126,6 +146,7 @@ impl SaveStack {
             gstate,
             gstate_stack,
             gstate_store_len,
+            marks,
         });
         (level, save_id)
     }
@@ -218,6 +239,7 @@ mod tests {
             gstate: GraphicsState::new(),
             gstate_stack: Vec::new(),
             gstate_store_len: 0,
+            marks: VmMarks::default(),
         });
         assert_eq!(level, 1);
         assert_eq!(id, 1);
@@ -236,6 +258,7 @@ mod tests {
             gstate: GraphicsState::new(),
             gstate_stack: Vec::new(),
             gstate_store_len: 0,
+            marks: VmMarks::default(),
         });
         let (l2, _) = ss.save(SaveSnapshot {
             d_stack_depth: 3,
@@ -245,6 +268,7 @@ mod tests {
             gstate: GraphicsState::new(),
             gstate_stack: Vec::new(),
             gstate_store_len: 0,
+            marks: VmMarks::default(),
         });
         assert_eq!(l1, 1);
         assert_eq!(l2, 2);
@@ -263,6 +287,7 @@ mod tests {
             gstate: GraphicsState::new(),
             gstate_stack: Vec::new(),
             gstate_store_len: 0,
+            marks: VmMarks::default(),
         });
         ss.add_record(SaveRecord {
             src: EntityId(0),
@@ -287,6 +312,7 @@ mod tests {
             gstate: GraphicsState::new(),
             gstate_stack: Vec::new(),
             gstate_store_len: 0,
+            marks: VmMarks::default(),
         });
         assert!(ss.is_valid(id1));
         ss.restore();
@@ -304,6 +330,7 @@ mod tests {
             gstate: GraphicsState::new(),
             gstate_stack: Vec::new(),
             gstate_store_len: 0,
+            marks: VmMarks::default(),
         });
         let (_, id2) = ss.save(SaveSnapshot {
             d_stack_depth: 3,
@@ -313,6 +340,7 @@ mod tests {
             gstate: GraphicsState::new(),
             gstate_stack: Vec::new(),
             gstate_store_len: 0,
+            marks: VmMarks::default(),
         });
         let (_, id3) = ss.save(SaveSnapshot {
             d_stack_depth: 3,
@@ -322,6 +350,7 @@ mod tests {
             gstate: GraphicsState::new(),
             gstate_stack: Vec::new(),
             gstate_store_len: 0,
+            marks: VmMarks::default(),
         });
 
         ss.invalidate_newer(id1);
@@ -341,6 +370,7 @@ mod tests {
             gstate: GraphicsState::new(),
             gstate_stack: Vec::new(),
             gstate_store_len: 0,
+            marks: VmMarks::default(),
         });
         ss.add_record(SaveRecord {
             src: EntityId(0),
@@ -374,6 +404,7 @@ mod tests {
             gstate: GraphicsState::new(),
             gstate_stack: Vec::new(),
             gstate_store_len: 0,
+            marks: VmMarks::default(),
         });
         let level = ss.restore().unwrap();
         assert_eq!(level.d_stack_depth, 5);
@@ -390,6 +421,7 @@ mod tests {
             gstate: GraphicsState::new(),
             gstate_stack: Vec::new(),
             gstate_store_len: 0,
+            marks: VmMarks::default(),
         });
         let (_, id2) = ss.save(SaveSnapshot {
             d_stack_depth: 3,
@@ -399,6 +431,7 @@ mod tests {
             gstate: GraphicsState::new(),
             gstate_stack: Vec::new(),
             gstate_store_len: 0,
+            marks: VmMarks::default(),
         });
         ss.restore();
         let (_, id3) = ss.save(SaveSnapshot {
@@ -409,6 +442,7 @@ mod tests {
             gstate: GraphicsState::new(),
             gstate_stack: Vec::new(),
             gstate_store_len: 0,
+            marks: VmMarks::default(),
         });
         assert_ne!(id1, id2);
         assert_ne!(id2, id3);
@@ -426,6 +460,7 @@ mod tests {
             gstate: GraphicsState::new(),
             gstate_stack: Vec::new(),
             gstate_store_len: 0,
+            marks: VmMarks::default(),
         });
         let (l2, _) = ss.save(SaveSnapshot {
             d_stack_depth: 3,
@@ -435,6 +470,7 @@ mod tests {
             gstate: GraphicsState::new(),
             gstate_stack: Vec::new(),
             gstate_store_len: 0,
+            marks: VmMarks::default(),
         });
         ss.restore();
         // After restoring level 2, next save should be level 2 again
@@ -446,6 +482,7 @@ mod tests {
             gstate: GraphicsState::new(),
             gstate_stack: Vec::new(),
             gstate_store_len: 0,
+            marks: VmMarks::default(),
         });
         assert_eq!(l1, 1);
         assert_eq!(l2, 2);

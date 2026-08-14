@@ -182,9 +182,31 @@ lifetime, not identity: they are built during bootstrap, before any
 `save`, so no `restore` can reclaim them. The audit classifies on that
 basis — `Violation::target_reclaimable` — and
 `audit_global_vm_unsafe_only` returns just the references that could
-actually dangle. **That set being empty is the invariant which gates
-letting `restore` reclaim local VM at all**; see
-`crates/stet-cli/tests/vm_audit.rs`.
+actually dangle. That set being empty is what allowed `restore` to start
+releasing local VM; see `crates/stet-cli/tests/vm_audit.rs`.
+
+#### What `restore` reclaims
+
+`save` records the high-water marks of each local store (`VmMarks`), and
+`restore` truncates the string/array/dict payloads and their entity
+tables back to them, so the memory a save level allocated becomes
+available again. It also rewinds `gstate_store` and purges the
+entity-keyed caches (`glyph_caches`, `form_cache`), since an `EntityId`
+becomes reusable the moment a table shrinks. Global VM is untouched —
+save/restore never affects it.
+
+Truncation is sound because `check_invalidrestore` refuses any `restore`
+that would strand a reachable composite created after the save, and
+because `cow_copy` leaves surviving data at its original offset, below
+the mark, parking the discarded mutated copy above it.
+[`Context::vm_restore`] backs that argument with a debug-build
+assertion — see [`vm_audit::audit_dangling_refs`].
+
+This is **not** garbage collection. `vmreclaim` remains a no-op, and a
+program that allocates in a loop with no `save` in scope still grows
+without bound. In practice that covers most Ghostscript-generated
+PostScript, so reclamation-on-restore is a correctness fix and a bound on
+save/restore loops rather than a general memory improvement.
 
 #### Allocating from Rust
 

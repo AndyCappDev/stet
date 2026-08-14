@@ -53,6 +53,21 @@ impl DictStore {
     }
 
     /// Allocate a new dictionary with the given maximum length and name.
+    /// Number of dict slots handed out so far; the store's high-water mark.
+    pub fn dict_slots(&self) -> usize {
+        self.dicts.len()
+    }
+
+    /// Release every dict slot and entity from the given marks onward.
+    ///
+    /// Used by `restore` to reclaim the objects a save level created. See
+    /// [`crate::entity_table::EntityTable::truncate`] for the safety argument
+    /// and the `EntityId`-reuse caveat.
+    pub fn truncate_to(&mut self, dicts_len: usize, entity_len: usize) {
+        self.dicts.truncate(dicts_len);
+        self.entities.truncate(entity_len);
+    }
+
     pub fn allocate(&mut self, max_length: usize, name: &[u8]) -> EntityId {
         let index = self.dicts.len() as u32;
         self.dicts.push(DictEntry {

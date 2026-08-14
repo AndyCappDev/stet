@@ -426,10 +426,11 @@ fn check_ref(
 ///
 /// This is the companion to [`audit_global_vm`]. That one asks whether global
 /// VM *could* come to hold a dangling reference; this one asks whether
-/// anything at all *already does*. On a build where `restore` reclaims
-/// nothing the result is always empty, because no entity id is ever retired.
-/// [`Context::vm_restore`] asserts it is empty in debug builds, so every
-/// `cargo test` run polices the invariant that lets `restore` truncate.
+/// anything at all *already does* — which became possible to answer in the
+/// affirmative once `restore` started truncating local VM and retiring
+/// entity ids. [`Context::vm_restore`] asserts the result is empty in debug
+/// builds, so every `cargo test` run polices the invariant that makes the
+/// truncation sound.
 pub fn audit_dangling_refs(ctx: &Context) -> Vec<DanglingRef> {
     let mut out = Vec::new();
 

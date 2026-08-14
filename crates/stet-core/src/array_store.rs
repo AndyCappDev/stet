@@ -36,6 +36,16 @@ impl ArrayStore {
         self.data.len()
     }
 
+    /// Release every object slot and entity from the given marks onward.
+    ///
+    /// Used by `restore` to reclaim the objects a save level created. See
+    /// [`crate::entity_table::EntityTable::truncate`] for the safety argument
+    /// and the `EntityId`-reuse caveat.
+    pub fn truncate_to(&mut self, data_len: usize, entity_len: usize) {
+        self.data.truncate(data_len);
+        self.entities.truncate(entity_len);
+    }
+
     /// Allocate `len` null-filled slots, returning an `EntityId`.
     pub fn allocate(&mut self, len: usize) -> EntityId {
         let offset = self.data.len() as u32;

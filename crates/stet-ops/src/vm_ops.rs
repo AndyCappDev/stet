@@ -62,11 +62,9 @@ pub fn op_restore(ctx: &mut Context) -> Result<(), PsError> {
     // restore — vm_restore handles the actual save_stack truncation).
     ctx.save_group_depths.retain(|&id, _| id < save_id);
 
-    // Clear glyph caches for entities created after the save point
-    ctx.glyph_caches.retain(|entity, _| {
-        // Keep caches for entities that existed before this save
-        entity.is_global() || ctx.dicts.entity_meta(*entity).created_after_save < save_id
-    });
+    // Caches keyed by EntityId (glyph_caches, form_cache) are purged inside
+    // vm_restore, which has to do it before it truncates the entity tables --
+    // afterwards those entities no longer exist to be queried.
 
     // Restore device clip in the display list (vm_restore restores the gstate
     // including clip_path, but doesn't update the display list)

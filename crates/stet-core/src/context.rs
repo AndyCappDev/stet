@@ -957,10 +957,23 @@ impl Context {
 
     /// Perform a `save`: snapshot the current VM state.
     /// Returns a Save PsObject.
+    /// Current high-water marks of local VM, for reclamation on restore.
+    fn vm_marks(&self) -> crate::save_stack::VmMarks {
+        crate::save_stack::VmMarks {
+            string_data: self.strings.local.data_len(),
+            string_entities: self.strings.local.entities.len(),
+            array_data: self.arrays.local.allocated_objects(),
+            array_entities: self.arrays.local.entities.len(),
+            dict_slots: self.dicts.local.dict_slots(),
+            dict_entities: self.dicts.local.entities.len(),
+        }
+    }
+
     pub fn vm_save(&mut self) -> PsObject {
         let d_depth = self.d_stack.len();
         let gstate_snapshot = self.gstate.clone();
         let gstate_stack_snapshot = self.gstate_stack.clone();
+        let marks = self.vm_marks();
         let (_level, save_id) = self.save_stack.save(crate::save_stack::SaveSnapshot {
             d_stack_depth: d_depth,
             packing_mode: self.packing_mode,
@@ -969,6 +982,7 @@ impl Context {
             gstate: gstate_snapshot,
             gstate_stack: gstate_stack_snapshot,
             gstate_store_len: self.gstate_store.len(),
+            marks,
         });
 
         // Implicit gsave: push current gstate marked as save-created (per PLRM).
@@ -1041,6 +1055,36 @@ impl Context {
         // Restore d_stack depth from the target level
         self.d_stack.truncate(target.d_stack_depth);
 
+        // Reclaim everything the restored levels allocated in local VM.
+        //
+        // Safe by the same PLRM 3.7.3.2 rule `check_invalidrestore` enforces:
+        // nothing reachable may still refer to a composite created after the
+        // save. The COW swaps above are what make it hold for pre-save objects
+        // that were mutated -- `cow_copy` leaves the surviving data at its
+        // original offset, below the mark, and parks the discarded mutated copy
+        // above it. Global VM is untouched by save/restore, so only local
+        // stores are truncated.
+        let marks = target.marks;
+
+        // EntityIds become reusable the moment the tables shrink, so anything
+        // keyed by one has to be dropped first -- otherwise a future entity
+        // reusing the index would hit a stale entry belonging to a dead object.
+        // Both caches below are keyed by dict entities.
+        let dict_mark = marks.dict_entities;
+        let live_dict = |e: &EntityId| e.is_global() || e.raw_index() < dict_mark;
+        self.glyph_caches.retain(|entity, _| live_dict(entity));
+        self.form_cache.retain(|entity, _| live_dict(entity));
+
+        self.strings
+            .local
+            .truncate_to(marks.string_data, marks.string_entities);
+        self.arrays
+            .local
+            .truncate_to(marks.array_data, marks.array_entities);
+        self.dicts
+            .local
+            .truncate_to(marks.dict_slots, marks.dict_entities);
+
         self.invalidate_name_cache();
         self.debug_assert_no_dangling_refs();
         Ok(())
@@ -1058,8 +1102,9 @@ impl Context {
     /// argument into something every debug-build test run checks.
     ///
     /// Debug builds only: the sweep is O(size of VM), far too expensive for
-    /// release. On a build where `restore` reclaims nothing it can never fire,
-    /// since no entity id is ever retired.
+    /// release. Run the PS suite or a corpus sweep under a debug build when
+    /// touching anything that holds an `EntityId` across a `restore` — the
+    /// release build compiles this out entirely.
     #[inline]
     fn debug_assert_no_dangling_refs(&self) {
         #[cfg(debug_assertions)]
@@ -1376,10 +1421,13 @@ mod tests {
         assert_eq!(ctx.vm_restore(999), Err(PsError::InvalidRestore));
     }
 
-    /// The debug-build guard has to actually fire, or it is decoration. On a
-    /// build where `restore` reclaims nothing there is no natural way to
-    /// produce a retired id, so plant one directly: `form_cache` is keyed by
-    /// entity and is not rewound by `restore`.
+    /// The debug-build guard has to actually fire, or it is decoration.
+    ///
+    /// Planted in `userdict` rather than in one of the entity-keyed caches:
+    /// `userdict` predates the save, so it survives the restore, and writing
+    /// to it without copy-on-write leaves the reference behind with no backup
+    /// to revert. That is the shape of the bug class fixed in 04ddc25, and it
+    /// is a path no amount of cache purging can cover.
     #[test]
     #[cfg(debug_assertions)]
     #[should_panic(expected = "dangling reference")]
@@ -1391,7 +1439,8 @@ mod tests {
             _ => panic!("Expected Save"),
         };
         let retired = EntityId(ctx.dicts.local.entities.len() as u32);
-        ctx.form_cache.insert(retired, DisplayList::new());
+        let key = DictKey::Name(ctx.names.intern(b"stale"));
+        ctx.dicts.put(ctx.userdict, key, PsObject::dict(retired));
         let _ = ctx.vm_restore(save_id);
     }
 
