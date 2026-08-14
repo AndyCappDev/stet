@@ -149,3 +149,27 @@ found_nonmatch [0] assert
 
 %% FontSet category is registered (was already present, but verify)
 {/FontSet /Category findresource pop true} [true] assert
+
+
+%% =============================================================================
+%% Resource files that register themselves
+%% =============================================================================
+
+%% findresource loads a file that calls defineresource itself %%
+% Adobe's CMap and CIDFont files end with
+% `... CMapName currentdict /CMap defineresource pop` and leave nothing on the
+% operand stack. Assuming the file leaves its value there made every built-in
+% CMap impossible to load: `Category defineresource` underflowed instead.
+{/Identity-H /CMap findresource /CMapName get} [/Identity-H] assert
+{/Identity-V /CMap findresource /WMode get} [1] assert
+
+%% a second lookup comes from the resource dictionary, not the file %%
+{/Identity-H /CMap findresource /Identity-H /CMap findresource eq} [true] assert
+
+%% resourcestatus reports a loaded instance %%
+{/Identity-H /CMap resourcestatus {pop pop true} {false} ifelse} [true] assert
+
+%% composefont resolves a CMap that is not loaded yet %%
+% This is the ordinary way to build a CID-keyed font, so it has to be able to
+% reach a CMap that still lives on disk.
+{/CFTestFont /Identity-H [/Courier findfont] composefont /FontType get} [0] assert

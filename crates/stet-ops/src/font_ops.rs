@@ -341,11 +341,11 @@ pub fn op_composefont(ctx: &mut Context) -> Result<(), PsError> {
         PsValue::Dict(_) => cmap_obj,
         PsValue::Name(id) => {
             let name_bytes = ctx.names.get_bytes(id).to_vec();
-            find_resource_direct(ctx, &name_bytes, b"CMap").ok_or(PsError::UndefinedResource)?
+            find_resource_or_load(ctx, &name_bytes, b"CMap").ok_or(PsError::UndefinedResource)?
         }
         PsValue::String { entity, start, len } => {
             let bytes = ctx.strings.get(entity, start, len).to_vec();
-            find_resource_direct(ctx, &bytes, b"CMap").ok_or(PsError::UndefinedResource)?
+            find_resource_or_load(ctx, &bytes, b"CMap").ok_or(PsError::UndefinedResource)?
         }
         _ => return Err(PsError::TypeCheck),
     };
@@ -358,15 +358,15 @@ pub fn op_composefont(ctx: &mut Context) -> Result<(), PsError> {
             PsValue::Dict(_) => resolved_fonts.push(*item),
             PsValue::Name(id) => {
                 let name_bytes = ctx.names.get_bytes(id).to_vec();
-                let font = find_resource_direct(ctx, &name_bytes, b"CIDFont")
-                    .or_else(|| find_resource_direct(ctx, &name_bytes, b"Font"))
+                let font = find_resource_or_load(ctx, &name_bytes, b"CIDFont")
+                    .or_else(|| find_resource_or_load(ctx, &name_bytes, b"Font"))
                     .ok_or(PsError::UndefinedResource)?;
                 resolved_fonts.push(font);
             }
             PsValue::String { entity, start, len } => {
                 let bytes = ctx.strings.get(entity, start, len).to_vec();
-                let font = find_resource_direct(ctx, &bytes, b"CIDFont")
-                    .or_else(|| find_resource_direct(ctx, &bytes, b"Font"))
+                let font = find_resource_or_load(ctx, &bytes, b"CIDFont")
+                    .or_else(|| find_resource_or_load(ctx, &bytes, b"Font"))
                     .ok_or(PsError::UndefinedResource)?;
                 resolved_fonts.push(font);
             }
@@ -533,6 +533,43 @@ fn find_resource_direct(ctx: &mut Context, name: &[u8], category: &[u8]) -> Opti
     }
 
     None
+}
+
+/// Look up a resource instance, loading it from disk if it is not in memory.
+///
+/// [`find_resource_direct`] only sees instances that are already registered.
+/// The standard CMaps ship as resource files, so `composefont /Identity-H …`
+/// — the ordinary way to build a CID-keyed font — has to be able to load one.
+/// That is what the `findresource` operator is for, so call it, rather than
+/// reimplementing the category's own lookup and file-loading rules here.
+fn find_resource_or_load(ctx: &mut Context, name: &[u8], category: &[u8]) -> Option<PsObject> {
+    if let Some(found) = find_resource_direct(ctx, name, category) {
+        return Some(found);
+    }
+    let findresource = ctx.dicts.get(
+        ctx.systemdict,
+        &DictKey::Name(ctx.names.intern(b"findresource")),
+    )?;
+    let name_id = ctx.names.intern(name);
+    let cat_id = ctx.names.intern(category);
+
+    let depth = ctx.o_stack.len();
+    ctx.o_stack.push(PsObject::name_lit(name_id)).ok()?;
+    ctx.o_stack.push(PsObject::name_lit(cat_id)).ok()?;
+    let result = ctx.exec_sync(findresource);
+    if result.is_err() {
+        // `findresource` raises undefinedresource for anything it cannot load.
+        // Its operands are still on the stack in that case; drop them so the
+        // caller sees the stack it had.
+        ctx.o_stack.truncate(depth);
+        return None;
+    }
+    if ctx.o_stack.len() <= depth {
+        return None;
+    }
+    let value = ctx.o_stack.try_pop();
+    ctx.o_stack.truncate(depth);
+    value
 }
 
 // --- Helpers ---
