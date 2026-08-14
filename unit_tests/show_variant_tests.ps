@@ -67,6 +67,27 @@ cx 0 eq [true] assert
 cy 0 eq [true] assert
 
 
+%% cshow on a composite font hands over the character code, not the CID %%
+% PLRM, cshow: when the mapping algorithm selects a CIDFont, "the character
+% code from string (or its last byte, if the code is more than 1 byte long) is
+% put on the stack for proc". Handing over the CID breaks the standard idiom
+% `1 string dup 0 4 3 roll put ... show`, which is what `pdftops` emits for
+% clipped text: any CID above 255 is a rangecheck in `put`.
+/cshow_comp /Identity-H [ /Courier findfont ] composefont pop
+gsave
+  /cshow_comp findfont 12 scalefont setfont
+  0 0 moveto
+  % Identity-H maps code 0x0102 to CID 258; the byte handed to proc is 0x02.
+  /cshow_cid_code -1 def
+  { pop pop /cshow_cid_code exch def } <0102> cshow
+  cshow_cid_code [2] assert
+  % A one-byte code still arrives whole.
+  /cshow_cid_code -1 def
+  { pop pop /cshow_cid_code exch def } <0041> cshow
+  cshow_cid_code [65] assert
+grestore
+
+
 %% =============================================================================
 %% cshow error conditions
 %% =============================================================================

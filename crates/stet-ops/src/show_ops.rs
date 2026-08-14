@@ -334,9 +334,19 @@ pub fn op_cshow(ctx: &mut Context) -> Result<(), PsError> {
 
     if font_type == 0 {
         // Type 0: decode through CMap for proper CID mapping
+        let width = cshow_code_width(ctx, font_entity).max(1);
         let cid_pairs = decode_cmap_bytes(ctx, font_entity, &bytes);
-        for (cid, _font_idx) in cid_pairs {
-            ctx.o_stack.push(PsObject::int(cid))?;
+        for (i, (cid, _font_idx)) in cid_pairs.into_iter().enumerate() {
+            // PLRM, cshow: when the mapping algorithm selects a CIDFont, what
+            // goes on the stack for proc is the character code from the string
+            // — its last byte if the code is longer than one — not the CID.
+            // Handing over the CID breaks the standard idiom
+            // `1 string dup 0 4 3 roll put ... show`, which `pdftops` emits for
+            // every clipped text run: any CID above 255 is a rangecheck in
+            // `put`. The CID is carried out of band instead, so a `show` inside
+            // proc still paints the right glyph.
+            let code = bytes.get((i + 1) * width - 1).copied().unwrap_or(0);
+            ctx.o_stack.push(PsObject::int(code as i32))?;
             ctx.o_stack.push(PsObject::real(0.0))?; // wx
             ctx.o_stack.push(PsObject::real(0.0))?; // wy
 
@@ -356,6 +366,23 @@ pub fn op_cshow(ctx: &mut Context) -> Result<(), PsError> {
     }
 
     Ok(())
+}
+
+/// Bytes per character code for a composite font, as the character-mapping
+/// algorithm consumes them. Mirrors the cases [`decode_cmap_bytes`] handles.
+fn cshow_code_width(ctx: &Context, font_entity: EntityId) -> usize {
+    if let Some((_, byte_width, _)) = decode_cmap_characters(ctx, font_entity) {
+        return byte_width;
+    }
+    let fmap_type = ctx
+        .names
+        .find(b"FMapType")
+        .and_then(|id| ctx.dicts.get(font_entity, &DictKey::Name(id)))
+        .and_then(|obj| obj.as_i32());
+    match fmap_type {
+        Some(2) | Some(5) => 2,
+        _ => 1,
+    }
 }
 
 /// Decode text bytes through a CMap, returning (CID, font_index) pairs.
@@ -3181,7 +3208,14 @@ fn render_charpath_composite(
         };
 
         let cidfont_fm = read_font_matrix(ctx, cidfont_entity);
-        let cids = decode_cmap_bytes(ctx, font_entity_id, bytes);
+        // Inside a `cshow` procedure the character has already been mapped, and
+        // the one-byte string the procedure hands back names the code, not the
+        // CID. Take the CID that was selected for it, exactly as the painting
+        // path does — `pdftops` builds its text clip path this way.
+        let cids = match ctx.cshow_pending_cid.take() {
+            Some(cid) => vec![(cid, 0usize)],
+            None => decode_cmap_bytes(ctx, font_entity_id, bytes),
+        };
 
         let has_sfnts = ctx
             .names
