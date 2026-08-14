@@ -122,3 +122,19 @@ gstr /gcheck [true] assert
 ldict /y lstr put
 ldict /y get /gcheck [false] assert
     gdict /z ldict /y get /put [gdict /z lstr /invalidaccess] assert
+
+
+%% =============================================================================
+%% Shared VM aliases
+%% =============================================================================
+
+%% shareddict is globaldict %%
+% stet has no separate shared VM, so shared VM is global VM — the same aliasing
+% Ghostscript uses. Adobe's AdobeSansMM prolog names shareddict unguarded once
+% it has walked the dictionary stack down to systemdict.
+{shareddict globaldict eq} [true] assert
+
+%% scheck is gcheck %%
+{currentglobal true setglobal 8 dict scheck exch setglobal} [true] assert
+{currentglobal false setglobal 8 dict scheck exch setglobal} [false] assert
+{7 scheck} [true] assert

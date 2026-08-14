@@ -42,6 +42,13 @@ true setglobal
 /SharedFontDirectory GlobalFontDirectory def
 /setshared //setglobal def
 /currentshared //currentglobal def
+%% Shared VM is global VM here, so shareddict is globaldict and scheck is
+%% gcheck — the same aliasing Ghostscript uses. Adobe's AdobeSansMM prolog
+%% names shareddict unguarded once it has reached systemdict.
+%% `put` rather than `def`: `def` renames the dictionary it stores for
+%% display, and globaldict should keep reporting itself as globaldict.
+currentdict /shareddict //globaldict put
+/scheck //gcheck def
 /currentdevice //currentpagedevice def
 false setglobal
 
@@ -440,6 +447,40 @@ true setglobal
 /Generic <<
     /DefineResource //defineresource
     /UndefineResource {currentdict exch undef}
+    /.LoadResource {
+        % key .LoadResource value
+        %
+        % Run the file that holds this resource instance. Most such files just
+        % leave the value on the operand stack for us to register — but Adobe's
+        % CMap and CIDFont files register themselves, ending with
+        % `... currentdict /CMap defineresource pop` and leaving nothing. A mark
+        % under the key tells the two apart; assuming a value is left is what
+        % made every built-in CMap unloadable.
+        mark exch
+        (/) [ResourceDir () [5 index =string cvs ResourceExtension] =string join] =string join
+        dup status {4 {pop} repeat}
+            {pop exch pop /findresource /undefinedresource .error} ifelse
+        run
+        counttomark 2 eq { %ifelse
+            % The file left the instance's value behind — register it.
+            dup type /dicttype eq { dup /__status__ 1 put } if
+            Category defineresource
+        } {
+            % The file registered the instance itself; fetch what it stored.
+            Category globalresourcedict { } { 0 dict } ifelse
+            1 index known { %ifelse
+                Category globalresourcedict pop exch get
+            } {
+                Category localresourcedict { } { 0 dict } ifelse
+                1 index known { %ifelse
+                    Category localresourcedict pop exch get
+                } {
+                    exch pop /findresource /undefinedresource .error
+                } ifelse
+            } ifelse
+        } ifelse
+        exch pop
+    } bind
     /FindResource {
         % is the resource already loaded?
         currentglobal { %ifelse
@@ -449,10 +490,7 @@ true setglobal
                 exch get
             } {
                 pop % pop the resource dict - the resource name is still on the stack
-                % try to load the resource
-                (/) [ResourceDir () [5 index =string cvs ResourceExtension] =string join] =string join
-                dup status {4 {pop} repeat} {/findresource /undefinedresource .error} ifelse
-                run dup type /dicttype eq { dup /__status__ 1 put } if Category defineresource
+                .LoadResource
             } ifelse
         } {
             % search local resource dictionary first
@@ -467,10 +505,7 @@ true setglobal
                     exch get
                 } {
                     pop % pop the resource dict - the resource name is still on the stack
-                    % try to load the resource
-                    (/) [ResourceDir () [5 index =string cvs ResourceExtension] =string join] =string join
-                    dup status {4 {pop} repeat} {pop /findresource /undefinedresource .error} ifelse
-                    run dup type /dicttype eq { dup /__status__ 1 put } if Category defineresource
+                    .LoadResource
                 } ifelse
             } ifelse
         } ifelse
