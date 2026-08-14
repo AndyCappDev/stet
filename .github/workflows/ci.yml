@@ -44,9 +44,9 @@ jobs:
         run: scripts/check-release-versions.sh
 
   # Cross-platform build + test. Proves the code compiles on each OS and
-  # catches portability regressions early. Some file-I/O unit tests
-  # hardcode /tmp paths and will fail on Windows until ported to
-  # std::env::temp_dir() — tracked separately, not a publish blocker.
+  # catches portability regressions early. All three OSes are green,
+  # Windows included — nothing here is allowed to fail, so treat a red
+  # tick as a real regression.
   build-test:
     name: ${{ matrix.os }} / ${{ matrix.rust }}
     runs-on: ${{ matrix.os }}
@@ -66,9 +66,11 @@ jobs:
       - name: cargo build --release --workspace
         run: cargo build --release --workspace
       - name: cargo test --workspace
-        # Tests cover the library surface on every OS. A few file-I/O tests
-        # currently hardcode /tmp paths and fail on Windows — tracked as a
-        # portability fix; does not block publication.
+        # Tests cover the library surface on every OS. This runs the *debug*
+        # profile, so `debug_assertions` is on: `Context::vm_restore`'s
+        # no-dangling-reference audit sweep executes after every `restore`
+        # here, on all three OSes. That is the only place it runs in CI —
+        # the release build compiles it out.
         run: cargo test --workspace
 
       # PostScript-level test suite. Runs the entire unit_tests/*.ps corpus
