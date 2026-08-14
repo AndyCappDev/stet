@@ -1794,8 +1794,9 @@ impl FileStore {
         };
 
         if eod_string.is_empty() {
-            // Byte-count mode
             if let Some(remaining) = bytes_remaining {
+                // Byte-count mode: EODString is empty and EODCount > 0, so the
+                // filter simply passes EODCount bytes of arbitrary data.
                 let target = (*remaining).min(4096) as usize;
                 for _ in 0..target {
                     match self.read_byte(source)? {
@@ -1813,7 +1814,21 @@ impl FileStore {
                     *eof = true;
                 }
             } else {
-                *eof = true;
+                // EODCount 0 and a zero-length EODString: PLRM disables EOD
+                // detection entirely and the filter passes everything through
+                // until the underlying source runs out. This is the form used
+                // to treat a procedure or string data source as a plain input
+                // file — Ghostscript's opdfread.ps reads every embedded PDF
+                // stream through `0 () /SubFileDecode filter`.
+                for _ in 0..4096 {
+                    match self.read_byte(source)? {
+                        Some(b) => out.push(b),
+                        None => {
+                            *eof = true;
+                            return Ok(());
+                        }
+                    }
+                }
             }
         } else {
             // String-search mode: pass data until N occurrences of EOD string found
@@ -1832,10 +1847,17 @@ impl FileStore {
                         if b == eod[match_pos] {
                             match_pos += 1;
                             if match_pos == eod.len() {
-                                found_count += 1;
-                                // Per PLRM: EOD string is included in output
-                                out.extend_from_slice(&eod);
                                 match_pos = 0;
+                                // PLRM: with EODCount 0 the first occurrence is
+                                // consumed but *not* passed through; with
+                                // EODCount > 0 data up to and including the
+                                // count-th occurrence is passed through.
+                                if target_count == 0 {
+                                    *eof = true;
+                                    return Ok(());
+                                }
+                                found_count += 1;
+                                out.extend_from_slice(&eod);
                                 if found_count >= target_count {
                                     *eof = true;
                                     return Ok(());
@@ -2814,6 +2836,47 @@ mod tests {
             }
         }
         assert_eq!(&result, b"Hello");
+    }
+
+    /// Drain a file to EOF, for the SubFileDecode EOD-mode tests below.
+    fn drain(store: &mut FileStore, entity: EntityId) -> Vec<u8> {
+        let mut out = Vec::new();
+        while let Some(b) = store.read_byte(entity).unwrap() {
+            out.push(b);
+        }
+        out
+    }
+
+    #[test]
+    fn test_subfile_passthrough_no_eod_detection() {
+        // PLRM: "If EODCount is 0 and EODString is of length 0, detection of
+        // EOD markers is disabled; the filter will not reach EOD." Everything
+        // passes through until the underlying source is exhausted. This is the
+        // form Ghostscript's opdfread.ps uses to read embedded PDF streams.
+        let mut store = FileStore::new();
+        let src = store.create_string_source(b"abcdef".to_vec());
+        let filt = store.create_filter(src, FilterKind::sub_file_decode(Vec::new(), 0, None));
+        assert_eq!(&drain(&mut store, filt), b"abcdef");
+    }
+
+    #[test]
+    fn test_subfile_eod_count_zero_consumes_without_emitting() {
+        // PLRM: with EODCount 0 the first occurrence of EODString "will be
+        // consumed by the filter, but it will not be passed through".
+        let mut store = FileStore::new();
+        let src = store.create_string_source(b"abcSTOPdef".to_vec());
+        let filt = store.create_filter(src, FilterKind::sub_file_decode(b"STOP".to_vec(), 0, None));
+        assert_eq!(&drain(&mut store, filt), b"abc");
+    }
+
+    #[test]
+    fn test_subfile_eod_count_one_includes_the_marker() {
+        // PLRM: with EODCount > 0, "all input data up to and including that
+        // many occurrences of EODString will be passed through".
+        let mut store = FileStore::new();
+        let src = store.create_string_source(b"abcSTOPdef".to_vec());
+        let filt = store.create_filter(src, FilterKind::sub_file_decode(b"STOP".to_vec(), 1, None));
+        assert_eq!(&drain(&mut store, filt), b"abcSTOP");
     }
 
     // --- FlateDecode tests ---

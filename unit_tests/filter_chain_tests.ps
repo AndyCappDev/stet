@@ -211,6 +211,63 @@ em2_str length [0] assert
 em2_dec closefile
 
 
+%% Procedure data sources (PLRM 3.8.4) %%
+% A filter's data source may be a file, a string, or a procedure. The
+% procedure is called for more data and signals end-of-data with an empty
+% string. Ghostscript's opdfread.ps reads every embedded PDF stream through a
+% procedure source wrapped in SubFileDecode, so this form has to work for all
+% filters, not just the ones that take a parameter dictionary.
+
+% SubFileDecode over a procedure source, reading to EOF (count 0, empty EOD).
+/proc_src_parts [ (Hello, ) (procedure ) (source!) ] def
+/proc_src_i 0 def
+/proc_src {
+    proc_src_i proc_src_parts length lt
+      { proc_src_parts proc_src_i get /proc_src_i proc_src_i 1 add def }
+      { () }
+    ifelse
+} def
+{proc_src} 0 () /SubFileDecode filter /ps_f exch def
+ps_f 64 string readstring pop (Hello, procedure source!) {eq} [true] assert
+ps_f closefile
+
+% The same procedure source feeding a decoding filter.
+/hex_parts [ (48656C6C) (6F) (>) ] def
+/hex_i 0 def
+/hex_src {
+    hex_i hex_parts length lt
+      { hex_parts hex_i get /hex_i hex_i 1 add def }
+      { () }
+    ifelse
+} def
+{hex_src} /ASCIIHexDecode filter /hx_f exch def
+hx_f 32 string readstring pop (Hello) {eq} [true] assert
+hx_f closefile
+
+%% SubFileDecode EOD modes (PLRM 3.13, "SubFileDecode Filter") %%
+
+% EODCount 0 with a zero-length EODString disables EOD detection entirely:
+% everything passes through until the source is exhausted.
+(abcdef) 0 () /SubFileDecode filter /sfd0 exch def
+sfd0 32 string readstring pop (abcdef) {eq} [true] assert
+sfd0 closefile
+
+% EODCount 0 with a real EODString: the first occurrence is consumed by the
+% filter but is not passed through.
+(abcSTOPdef) 0 (STOP) /SubFileDecode filter /sfd1 exch def
+sfd1 32 string readstring pop (abc) {eq} [true] assert
+sfd1 closefile
+
+% EODCount 1: data up to and including that occurrence is passed through.
+(abcSTOPdef) 1 (STOP) /SubFileDecode filter /sfd2 exch def
+sfd2 32 string readstring pop (abcSTOP) {eq} [true] assert
+sfd2 closefile
+
+% Zero-length EODString with EODCount > 0 is byte-count mode.
+(abcdefghij) 4 () /SubFileDecode filter /sfd3 exch def
+sfd3 32 string readstring pop (abcd) {eq} [true] assert
+sfd3 closefile
+
 % Clean up temp files
 {filter_tmp_file deletefile} stopped {pop} if
 {filter_tmp_file2 deletefile} stopped {pop} if

@@ -238,17 +238,26 @@ type /filetype eq} stopped
 %% =============================================================================
 
 %% ReusableStreamDecode: basic read %%
-% Create a string source, wrap in SubFileDecode, then ReusableStreamDecode
-(Hello) 0 (Hello) /SubFileDecode filter
+% Create a string source, wrap in SubFileDecode, then ReusableStreamDecode.
+% EODCount 0 with a zero-length EODString disables EOD detection, which is the
+% form that turns a string or procedure source into a plain input file.
+(Hello) 0 () /SubFileDecode filter
 /ReusableStreamDecode filter
 5 string readstring pop
 (Hello) /eq [true] assert
 
 %% ReusableStreamDecode: read longer data %%
-(The quick brown fox) 0 (The quick brown fox) /SubFileDecode filter
+(The quick brown fox) 0 () /SubFileDecode filter
 /ReusableStreamDecode filter
 19 string readstring pop
 (The quick brown fox) /eq [true] assert
+
+%% ReusableStreamDecode: EODCount 0 consumes the EOD string without emitting it %%
+% Passing the data itself as EODString therefore yields nothing at all.
+(Hello) 0 (Hello) /SubFileDecode filter
+/ReusableStreamDecode filter
+5 string readstring pop
+length [0] assert
 
 
 % Clean up temp file

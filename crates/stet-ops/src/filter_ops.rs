@@ -86,47 +86,11 @@ pub fn op_filter(ctx: &mut Context) -> Result<(), PsError> {
         return Err(PsError::Undefined);
     }
 
-    // Get the data source
+    // Validate the data source type BEFORE popping
     let source_obj = ctx.o_stack.peek(source_idx)?;
-
-    // Check if source is a procedure (executable array) — per PLRM 3.13.1
-    if is_procedure(&source_obj) {
-        let procedure = source_obj;
-
-        // Pop all operands
-        ctx.o_stack.pop()?; // filter name
-        if has_dict {
-            ctx.o_stack.pop()?; // dict
-        }
-        ctx.o_stack.pop()?; // source (procedure)
-
-        // Collect data by calling the procedure synchronously in a loop.
-        // Per PLRM, the procedure pushes a string each call; empty string = end of data.
-        let is_flate = filter_name == b"FlateDecode";
-        let data = collect_procedure_data(ctx, procedure, is_flate)?;
-        let source_entity = ctx.files.create_string_source(data);
-
-        let filter_entity = create_filter_by_name(
-            ctx,
-            &filter_name,
-            source_entity,
-            predictor,
-            columns,
-            colors,
-            bpc,
-            early_change,
-            dict_entity,
-        )?;
-
-        let file_obj = PsObject {
-            value: PsValue::File(filter_entity),
-            flags: ObjFlags::literal_composite(),
-        };
-        ctx.o_stack.push(file_obj)?;
-        return Ok(());
+    if !is_valid_source(&source_obj) {
+        return Err(PsError::TypeCheck);
     }
-
-    let source_entity = resolve_source(ctx, source_obj)?;
 
     // Pop all operands
     ctx.o_stack.pop()?; // filter name
@@ -134,6 +98,11 @@ pub fn op_filter(ctx: &mut Context) -> Result<(), PsError> {
         ctx.o_stack.pop()?; // dict
     }
     ctx.o_stack.pop()?; // source
+
+    // Resolve the source only after the operands are gone: a procedure source
+    // is run synchronously here and must not see our operands on the stack.
+    let is_flate = filter_name == b"FlateDecode";
+    let source_entity = resolve_source(ctx, source_obj, is_flate)?;
 
     // Create the appropriate filter
     let filter_entity = create_filter_by_name(
@@ -162,7 +131,7 @@ pub fn op_filter(ctx: &mut Context) -> Result<(), PsError> {
 ///
 /// - `count`: integer — number of EOD string occurrences before EOF (0 = first match)
 /// - `eodstring`: string — end-of-data marker
-/// - `source`: file or string — data source
+/// - `source`: file, string, or procedure — data source
 fn create_subfile_filter(ctx: &mut Context) -> Result<(), PsError> {
     // Stack: source count (eodstring) /SubFileDecode
     if ctx.o_stack.len() < 4 {
@@ -186,13 +155,18 @@ fn create_subfile_filter(ctx: &mut Context) -> Result<(), PsError> {
 
     // peek(3) = source
     let source_obj = ctx.o_stack.peek(3)?;
-    let source_entity = resolve_source(ctx, source_obj)?;
+    if !is_valid_source(&source_obj) {
+        return Err(PsError::TypeCheck);
+    }
 
     // Pop all 4 operands
     ctx.o_stack.pop()?; // /SubFileDecode
     ctx.o_stack.pop()?; // eod string
     ctx.o_stack.pop()?; // count
     ctx.o_stack.pop()?; // source
+
+    // Resolve after the pops: a procedure source runs synchronously here.
+    let source_entity = resolve_source(ctx, source_obj, false)?;
 
     // Determine byte limit: if count > 0, use as byte count; otherwise use EOD string
     let bytes_remaining = if count > 0 && eod_string.is_empty() {
@@ -233,32 +207,17 @@ fn create_reusable_stream(ctx: &mut Context) -> Result<(), PsError> {
     }
 
     let source_obj = ctx.o_stack.peek(source_idx)?;
-
-    // Handle procedure data sources
-    if is_procedure(&source_obj) {
-        let procedure = source_obj;
-        ctx.o_stack.pop()?; // filter name
-        if has_dict {
-            ctx.o_stack.pop()?; // dict
-        }
-        ctx.o_stack.pop()?; // source
-
-        let data = collect_procedure_data(ctx, procedure, false)?;
-        let entity = ctx.files.create_string_source(data);
-        ctx.o_stack.push(PsObject {
-            value: PsValue::File(entity),
-            flags: ObjFlags::literal_composite(),
-        })?;
-        return Ok(());
+    if !is_valid_source(&source_obj) {
+        return Err(PsError::TypeCheck);
     }
-
-    let source_entity = resolve_source(ctx, source_obj)?;
 
     ctx.o_stack.pop()?; // filter name
     if has_dict {
         ctx.o_stack.pop()?; // dict
     }
     ctx.o_stack.pop()?; // source
+
+    let source_entity = resolve_source(ctx, source_obj, false)?;
 
     // Read all data from the source into a buffer
     let mut data = Vec::new();
@@ -282,13 +241,43 @@ fn create_reusable_stream(ctx: &mut Context) -> Result<(), PsError> {
     Ok(())
 }
 
-/// Resolve a data source object to a FileStore EntityId.
-fn resolve_source(ctx: &mut Context, obj: PsObject) -> Result<EntityId, PsError> {
+/// Is this object usable as a `filter` data source? Per PLRM 3.8.4 a data
+/// source may be a file, a string, or a procedure.
+fn is_valid_source(obj: &PsObject) -> bool {
+    matches!(obj.value, PsValue::File(_) | PsValue::String { .. }) || is_procedure(obj)
+}
+
+/// Resolve a data source object to a `FileStore` `EntityId`.
+///
+/// Must be called *after* the `filter` operands have been popped: a procedure
+/// source is executed synchronously and must not see them on the stack.
+///
+/// `flate_hint` is passed through to [`collect_procedure_data`] so that a
+/// procedure feeding `FlateDecode` stops once the deflate stream is complete.
+fn resolve_source(ctx: &mut Context, obj: PsObject, flate_hint: bool) -> Result<EntityId, PsError> {
     match obj.value {
         PsValue::File(entity) => Ok(entity),
         PsValue::String { entity, start, len } => {
             // Create a string-backed file from the string data
             let data = ctx.strings.get(entity, start, len).to_vec();
+            Ok(ctx.files.create_string_source(data))
+        }
+        // Procedure data source. PLRM has the filter call the procedure on
+        // demand, as the consumer reads; we drain it up front into a
+        // string-backed source instead.
+        //
+        // KNOWN LIMITATION: draining here runs the procedure against the
+        // operand stack as it stands at the `filter` call, not as it stands
+        // when the data is read. A procedure source that reads its own state
+        // off the stack therefore sees the wrong operands when `filter` is
+        // invoked mid-expression — which `pdftops` does inside an image
+        // dictionary: `/DataSource { pdfImStr } /LZWDecode filter` runs while
+        // the enclosing `<< ... >>` construction is still on the stack, so
+        // `pdfImStr` reads the dictionary key/value pair above it. Fixing that
+        // properly means calling the procedure lazily from the read path,
+        // which needs the interpreter to be re-entrant from inside FileStore.
+        PsValue::Array { .. } if obj.flags.is_executable() => {
+            let data = collect_procedure_data(ctx, obj, flate_hint)?;
             Ok(ctx.files.create_string_source(data))
         }
         _ => Err(PsError::TypeCheck),
