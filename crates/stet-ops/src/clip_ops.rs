@@ -6,7 +6,6 @@
 
 use stet_core::context::Context;
 use stet_core::error::PsError;
-use stet_core::object::PsValue;
 use stet_fonts::geometry::{Matrix, PathSegment, PsPath};
 use stet_graphics::color::FillRule;
 use stet_graphics::device::ClipParams;
@@ -169,56 +168,23 @@ pub fn op_initclip(ctx: &mut Context) -> Result<(), PsError> {
     Ok(())
 }
 
-/// `rectclip`: x y width height → —
+/// `rectclip`: `x y width height → —`, or `numarray → —`
+///
+/// The array form takes any multiple of four numbers, and clips to the union
+/// of all the rectangles — not just the first, which is what this used to do.
+/// Zero rectangles is a legal (and empty) region.
 pub fn op_rectclip(ctx: &mut Context) -> Result<(), PsError> {
-    if ctx.o_stack.is_empty() {
-        return Err(PsError::StackUnderflow);
-    }
-    let top = ctx.o_stack.peek(0)?;
-    let (x, y, w, h) = match top.value {
-        PsValue::Array { entity, start, len } => {
-            // Array form: [x y w h]
-            if len < 4 {
-                return Err(PsError::RangeCheck);
-            }
-            let elems = ctx.arrays.get(entity, start, 4);
-            let x = elems[0].as_f64().ok_or(PsError::TypeCheck)?;
-            let y = elems[1].as_f64().ok_or(PsError::TypeCheck)?;
-            let w = elems[2].as_f64().ok_or(PsError::TypeCheck)?;
-            let h = elems[3].as_f64().ok_or(PsError::TypeCheck)?;
-            ctx.o_stack.pop()?;
-            (x, y, w, h)
-        }
-        _ => {
-            // Numeric form: x y w h
-            if ctx.o_stack.len() < 4 {
-                return Err(PsError::StackUnderflow);
-            }
-            let h = ctx.o_stack.peek(0)?.as_f64().ok_or(PsError::TypeCheck)?;
-            let w = ctx.o_stack.peek(1)?.as_f64().ok_or(PsError::TypeCheck)?;
-            let y = ctx.o_stack.peek(2)?.as_f64().ok_or(PsError::TypeCheck)?;
-            let x = ctx.o_stack.peek(3)?.as_f64().ok_or(PsError::TypeCheck)?;
-            ctx.o_stack.pop()?;
-            ctx.o_stack.pop()?;
-            ctx.o_stack.pop()?;
-            ctx.o_stack.pop()?;
-            (x, y, w, h)
-        }
+    let rects = crate::paint_ops::extract_rects(ctx)?;
+
+    let path = if rects.is_empty() {
+        // No rectangles is an empty region, so nothing survives the clip.
+        // A single MoveTo is how the rest of the interpreter spells that.
+        let mut p = PsPath::new();
+        p.segments.push(PathSegment::MoveTo(0.0, 0.0));
+        p
+    } else {
+        crate::paint_ops::build_rect_path_device(&ctx.gstate.ctm, &rects)
     };
-
-    // Transform rect corners to device space
-    let ctm = &ctx.gstate.ctm;
-    let (dx0, dy0) = ctm.transform_point(x, y);
-    let (dx1, dy1) = ctm.transform_point(x + w, y);
-    let (dx2, dy2) = ctm.transform_point(x + w, y + h);
-    let (dx3, dy3) = ctm.transform_point(x, y + h);
-
-    let mut path = PsPath::new();
-    path.segments.push(PathSegment::MoveTo(dx0, dy0));
-    path.segments.push(PathSegment::LineTo(dx1, dy1));
-    path.segments.push(PathSegment::LineTo(dx2, dy2));
-    path.segments.push(PathSegment::LineTo(dx3, dy3));
-    path.segments.push(PathSegment::ClosePath);
 
     ctx.gstate.clip_path = Some(path.clone());
     ctx.gstate.clip_path_version += 1;

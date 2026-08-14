@@ -380,7 +380,11 @@ fn stroke_via_strokepath(ctx: &mut Context) -> Result<(), PsError> {
 /// Builds rect in user space, transforms corners through CTM to device space.
 /// Extract rectangles from operand stack or array argument.
 /// Returns a vec of (x, y, w, h) tuples and pops the consumed operands.
-fn extract_rects(ctx: &mut Context) -> Result<Vec<(f64, f64, f64, f64)>, PsError> {
+///
+/// An empty array is legal and yields no rectangles — zero is a multiple of
+/// four, and `pdftops` emits `[] rectclip` for a page whose clip region is
+/// empty. Ghostscript accepts it for all three rect operators.
+pub(crate) fn extract_rects(ctx: &mut Context) -> Result<Vec<(f64, f64, f64, f64)>, PsError> {
     if ctx.o_stack.is_empty() {
         return Err(PsError::StackUnderflow);
     }
@@ -388,7 +392,7 @@ fn extract_rects(ctx: &mut Context) -> Result<Vec<(f64, f64, f64, f64)>, PsError
     match top.value {
         PsValue::Array { entity, start, len } | PsValue::PackedArray { entity, start, len } => {
             // Array form: array must have length multiple of 4
-            if len % 4 != 0 || len == 0 {
+            if len % 4 != 0 {
                 return Err(PsError::RangeCheck);
             }
             // Validate all elements are numeric before popping
@@ -407,6 +411,10 @@ fn extract_rects(ctx: &mut Context) -> Result<Vec<(f64, f64, f64, f64)>, PsError
             ctx.o_stack.pop()?;
             Ok(rects)
         }
+        // PLRM also allows an encoded number string here. stet does not decode
+        // that format, so reject it as a type error rather than falling
+        // through to the four-number form and reporting a stack underflow.
+        PsValue::String { .. } => Err(PsError::TypeCheck),
         _ => {
             // 4-number form: x y width height
             if ctx.o_stack.len() < 4 {
@@ -430,7 +438,7 @@ fn extract_rects(ctx: &mut Context) -> Result<Vec<(f64, f64, f64, f64)>, PsError
 }
 
 /// Build a device-space path from rectangles, transforming through CTM.
-fn build_rect_path_device(ctm: &Matrix, rects: &[(f64, f64, f64, f64)]) -> PsPath {
+pub(crate) fn build_rect_path_device(ctm: &Matrix, rects: &[(f64, f64, f64, f64)]) -> PsPath {
     let mut path = PsPath::new();
     for &(x, y, w, h) in rects {
         let (dx0, dy0) = ctm.transform_point(x, y);

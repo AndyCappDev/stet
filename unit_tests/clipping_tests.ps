@@ -207,3 +207,31 @@ grestore
 
 
 grestore
+
+
+%% =============================================================================
+%% rectclip array forms
+%% =============================================================================
+
+gsave nulldevice
+
+%% rectclip takes any multiple of four, not just the first rectangle %%
+{gsave [0 0 10 10 20 20 10 10] rectclip grestore} stopped [false] assert
+
+%% zero rectangles is a legal, empty region %%
+% `pdftops` emits `[] rectclip` for a page whose clip is empty. Ghostscript
+% accepts it for rectclip, rectfill and rectstroke alike.
+{gsave [] rectclip grestore} stopped [false] assert
+{gsave [] rectfill grestore} stopped [false] assert
+{gsave [] rectstroke grestore} stopped [false] assert
+
+%% a length that is not a multiple of four is still an error %%
+% The operand is left in place, so it is cleared before asserting.
+gsave [0 0 10] {rectclip} stopped /rc_len_err exch def clear grestore
+rc_len_err [true] assert
+
+%% a string operand is a typecheck (encoded number strings are unsupported) %%
+gsave () {rectclip} stopped /rc_str_err exch def clear grestore
+rc_str_err [true] assert
+
+grestore
