@@ -48,10 +48,41 @@ userdict /$unittest known not {(unit_tests/unittest.ps) run} if
 /Trigger { //Outer exec } bind def
 { //Outer exec } bind type /arraytype eq [true] assert
 
-% The cycle must not have disturbed access attributes: PLRM says bind makes
-% nested procedures read-only, but real interpreters leave them writable —
-% the back-patching put above depends on it.
+% PLRM: bind makes each nested procedure read-only and stores it back into the
+% parent. Access belongs to the *reference*, not the shared array, so it is the
+% slot inside Outer that turns read-only — Rec's dictionary reference stays
+% writable, which is what the back-patching put above writes through.
 //Rec wcheck [true] assert
+/Outer load 0 get wcheck [false] assert
+
+% bind ignores a read-only array: neither its elements nor anything nested
+% below it is examined. Without this, a later bind reaching an already-bound
+% procedure rebinds names that have since acquired an operator definition —
+% which is how Ghostscript's opdfread.ps ends up calling setmiterlimit for the
+% local variable M inside StreamToArray.
+/RoInner {UNDEF_AT_BIND_TIME} def
+/RoOuter [ /RoInner load readonly /exec load ] cvx def
+/UNDEF_AT_BIND_TIME /add load def
+/RoOuter load bind pop
+/RoInner load 0 get type /nametype eq [true] assert
+
+% ...but a writable reference to that same procedure still binds.
+/RwInner {UNDEF2} def
+/UNDEF2 /add load def
+/RwOuter { //RwInner exec } bind def
+/RwInner load 0 get type /operatortype eq [true] assert
+
+% Once bind has marked the slot, a later bind through that slot leaves the
+% procedure alone even though the name now resolves to an operator.
+/DeepInner {LATE_OP} def
+/DeepMid { //DeepInner exec } bind def
+/LATE_OP /sub load def
+/DeepTop { //DeepMid exec } bind def
+/DeepInner load 0 get type /nametype eq [true] assert
+
+% The top-level operand is always processed, marked or not.
+/DeepInner load bind pop
+/DeepInner load 0 get type /operatortype eq [true] assert
 
 % bind stack underflow
 /bind [/stackunderflow] assert

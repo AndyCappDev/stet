@@ -20,7 +20,10 @@ pub fn op_bind(ctx: &mut Context) -> Result<(), PsError> {
     let obj = ctx.o_stack.peek(0)?;
     match obj.value {
         PsValue::Array { entity, start, len } if obj.flags.is_executable() => {
-            bind_procedure(ctx, entity, start, len);
+            // A read-only array is ignored outright — see `bind_procedure`.
+            if obj.flags.access() >= ObjFlags::ACCESS_UNLIMITED {
+                bind_procedure(ctx, entity, start, len);
+            }
             Ok(())
         }
         PsValue::Array { .. } | PsValue::PackedArray { .. } => Ok(()), // literal array: no-op
@@ -49,18 +52,39 @@ pub fn op_bind(ctx: &mut Context) -> Result<(), PsError> {
 /// its `ps2write` and `eps2write` devices — uses exactly this construction, so
 /// naive recursion here overflows the native stack on all such input.
 ///
-/// PLRM (3rd ed., `bind`) states that bind makes each nested procedure
-/// read-only and thereafter ignores read-only arrays, which would terminate
-/// the walk. Real interpreters do not implement that: under the strict
-/// reading, the `put` above would raise `invalidaccess`, and Ghostscript
-/// demonstrably leaves nested procedures writable and completes the bind. We
-/// follow observable Ghostscript behaviour — terminate on revisiting a
-/// procedure, leave access attributes untouched — because marking read-only
-/// would merely trade a crash for a spurious error on the same files.
+/// PLRM (3rd ed., `bind`) requires that for each nested procedure bind
+/// "applies itself recursively to that procedure, makes the procedure
+/// read-only, and stores it back into proc", and that bind "will ignore a
+/// read-only array; that is, it will neither bind elements of the array nor
+/// examine nested procedures".
 ///
-/// Revisiting is safe to skip: binding is idempotent, since a second pass over
-/// an already-bound procedure finds operator objects rather than executable
-/// names and would make no further change.
+/// Access in PostScript is an attribute of the *reference*, not of the shared
+/// array behind it. What bind turns read-only is therefore the slot inside the
+/// parent — the reference held by whatever dictionary defined the procedure
+/// stays writable. So the back-patching `put` above still succeeds: `//Rec`
+/// resolves through `Rec`'s writable dictionary reference, not through the
+/// read-only copy that now sits in `Outer`. Ghostscript behaves exactly this
+/// way; on the idiom above it reports `//Rec wcheck` true and
+/// `/Outer load 0 get wcheck` false.
+///
+/// The marking is load-bearing, not cosmetic. Ghostscript's `opdfread.ps`
+/// defines `/StreamToArray`, which uses `M` as a local variable, long before it
+/// defines the `/Operators` dictionary in which `M` means `setmiterlimit`.
+/// Without the marking, a later `bind` that reaches `StreamToArray` through an
+/// enclosing procedure rebinds that `M` to the operator, and every sampled
+/// (type 0) function in the file then fails with a `typecheck`.
+///
+/// The read-only slot also breaks the cycle above, but the walk keeps its
+/// explicit worklist and visited set regardless: a cycle whose slots are all
+/// still writable — reachable before bind has ever marked them — would
+/// otherwise recurse until the native stack overflows. Revisiting is safe to
+/// skip because binding is idempotent, since a second pass over an
+/// already-bound procedure finds operator objects rather than executable names.
+///
+/// Packed arrays are left alone here, as they were before: PLRM has bind
+/// operate on them despite their access attribute, but stet does not yet build
+/// procedures as packed arrays, so that path is a separate gap rather than part
+/// of this rule.
 fn bind_procedure(ctx: &mut Context, entity: EntityId, start: u32, len: u32) {
     let mut visited: HashSet<(EntityId, u32, u32)> = HashSet::new();
     let mut work: Vec<(EntityId, u32, u32)> = Vec::new();
@@ -69,20 +93,26 @@ fn bind_procedure(ctx: &mut Context, entity: EntityId, start: u32, len: u32) {
     work.push((entity, start, len));
 
     while let Some((entity, start, len)) = work.pop() {
+        // Whether this element will be rewritten in the second pass: either an
+        // executable name that resolves to an operator, or a writable nested
+        // procedure whose slot must be marked read-only.
+        let rewrites = |ctx: &mut Context, elem: PsObject| match elem.value {
+            PsValue::Name(name_id) if elem.flags.is_executable() => ctx
+                .dict_load(&DictKey::Name(name_id))
+                .is_some_and(|val| matches!(val.value, PsValue::Operator(_))),
+            PsValue::Array { .. } if elem.flags.is_executable() => {
+                elem.flags.access() >= ObjFlags::ACCESS_UNLIMITED
+            }
+            _ => false,
+        };
+
+        // First pass: does anything in this procedure actually change?
         let mut needs_cow = false;
-        // First pass: check if any names will be replaced
         for i in 0..len {
             let elem = ctx.arrays.get_element(entity, start + i);
-            if let PsValue::Name(name_id) = elem.value
-                && elem.flags.is_executable()
-            {
-                let key = DictKey::Name(name_id);
-                if let Some(val) = ctx.dict_load(&key)
-                    && matches!(val.value, PsValue::Operator(_))
-                {
-                    needs_cow = true;
-                    break;
-                }
+            if rewrites(ctx, elem) {
+                needs_cow = true;
+                break;
             }
         }
         if needs_cow {
@@ -106,11 +136,21 @@ fn bind_procedure(ctx: &mut Context, entity: EntityId, start: u32, len: u32) {
                     start: sub_s,
                     len: sub_l,
                 } if elem.flags.is_executable() => {
-                    // Queue nested procedures; skip any already walked so a
+                    // A read-only slot is ignored outright: neither its
+                    // elements nor anything nested below it is examined.
+                    if elem.flags.access() < ObjFlags::ACCESS_UNLIMITED {
+                        continue;
+                    }
+                    // Queue the nested procedure; skip any already walked so a
                     // cyclic or heavily shared graph terminates.
                     if visited.insert((sub_e, sub_s, sub_l)) {
                         work.push((sub_e, sub_s, sub_l));
                     }
+                    // ...then store it back read-only, so a later bind that
+                    // reaches this procedure through here leaves it alone.
+                    let mut marked = elem;
+                    marked.flags.set_access(ObjFlags::ACCESS_READ_ONLY);
+                    ctx.arrays.set_element(entity, start + i, marked);
                 }
                 _ => {}
             }
