@@ -11,6 +11,14 @@
 
 use stet::Interpreter;
 
+/// The `/Producer` entry the PDF device writes when no `pdfmark` overrides it.
+///
+/// Built from the crate version rather than hardcoded, so a release bump does
+/// not have to touch these tests.
+fn default_producer_entry() -> String {
+    format!("/Producer (stet {})", env!("CARGO_PKG_VERSION"))
+}
+
 /// Locate the PDF body byte offset of the trailer's `/Info NN 0 R`
 /// reference, then read the referenced indirect object out of the file.
 fn find_info_dict_bytes(pdf: &[u8]) -> Vec<u8> {
@@ -83,7 +91,7 @@ fn docinfo_overrides_default_producer() {
         "expected pdfmark producer to win, got: {info_str}",
     );
     assert!(
-        !info_str.contains("/Producer (stet)"),
+        !info_str.contains("/Producer (stet"),
         "default producer should have been overridden: {info_str}",
     );
 }
@@ -116,7 +124,7 @@ fn no_docinfo_keeps_default_producer() {
     let info = find_info_dict_bytes(&pdf);
     let info_str = String::from_utf8_lossy(&info);
     assert!(
-        info_str.contains("/Producer (stet)"),
+        info_str.contains(&default_producer_entry()),
         "expected default Producer when no pdfmark issued: {info_str}",
     );
     // No pdfmark → no Author / Subject / Keywords
@@ -687,7 +695,7 @@ fn unknown_typetag_is_silent() {
     let info_str = String::from_utf8_lossy(&info);
     // Default info dict is built without crashing; no leak from unknown
     // type-tag.
-    assert!(info_str.contains("/Producer (stet)"));
+    assert!(info_str.contains(&default_producer_entry()));
     assert!(!info_str.contains("/Foo"));
 }
 

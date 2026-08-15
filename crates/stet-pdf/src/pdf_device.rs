@@ -169,6 +169,17 @@ impl PdfDevice {
         Ok(())
     }
 
+    /// The `/Producer` written when no `pdfmark` `/DOCINFO` overrides it.
+    ///
+    /// Carries the version, so a file can be traced to the build that wrote
+    /// it — the convention every other producer follows (Ghostscript writes
+    /// "GPL Ghostscript 10.05.1", Distiller "Acrobat Distiller 20.0"). A bare
+    /// "stet" tells a prepress operator chasing a rendering difference
+    /// nothing at all.
+    fn default_producer() -> String {
+        format!("stet {}", env!("CARGO_PKG_VERSION"))
+    }
+
     /// Build the contents of the /Info dict. Starts with device defaults
     /// (Producer + auto-derived Title + UTC CreationDate) and lets any
     /// `/DOCINFO` pdfmark record on `ctx.doc_structure` override or
@@ -180,7 +191,7 @@ impl PdfDevice {
         let producer = docinfo
             .producer
             .clone()
-            .unwrap_or_else(|| "stet".to_string());
+            .unwrap_or_else(Self::default_producer);
         let mut entries: Vec<(Vec<u8>, PdfObj)> = vec![(
             b"Producer".to_vec(),
             PdfObj::LitString(producer.into_bytes()),

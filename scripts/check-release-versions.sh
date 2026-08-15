@@ -44,14 +44,22 @@ if ! grep -q "alt=\"Version ${ws_version}\"" README.md; then
     errors=$((errors + 1))
 fi
 
-# README.md `stet inspect` sample: `Producer: stet X.Y.Z`. The check is
-# scoped to lines with `Producer:` so unrelated `stet 0.…` references
-# (e.g. install snippets that pin `stet = "0.2"`) don't trigger.
-if grep -q "Producer: stet " README.md && ! grep -q "Producer: stet ${ws_version}" README.md; then
-    echo -e "${RED}check-release-versions: README.md 'Producer:' sample doesn't match 'stet ${ws_version}'${RESET}" >&2
-    grep -n "Producer: stet " README.md | head -3 >&2 || true
-    errors=$((errors + 1))
-fi
+# `stet inspect` sample output: `Producer: stet X.Y.Z`. The device really
+# does write the version now (pdf_device.rs `default_producer`), so these
+# samples are checkable fact, not decoration. The check is scoped to lines
+# with `Producer:` so unrelated `stet 0.…` references (e.g. install snippets
+# that pin `stet = "0.2"`) don't trigger.
+#
+# Every doc carrying the sample is checked, not just README.md —
+# docs/PDF-READER-API.md sat at 0.2.0 through two releases because it wasn't.
+for doc in README.md docs/PDF-READER-API.md; do
+    [ -f "$doc" ] || continue
+    if grep -q "Producer: stet " "$doc" && ! grep -q "Producer: stet ${ws_version}" "$doc"; then
+        echo -e "${RED}check-release-versions: ${doc} 'Producer:' sample doesn't match 'stet ${ws_version}'${RESET}" >&2
+        grep -n "Producer: stet " "$doc" | head -3 >&2 || true
+        errors=$((errors + 1))
+    fi
+done
 
 # CHANGELOG.md: must have an `## [X.Y.Z]` heading.
 if ! grep -q "^## \[${ws_version}\]" CHANGELOG.md; then
