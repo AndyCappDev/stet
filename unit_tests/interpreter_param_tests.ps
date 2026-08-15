@@ -197,6 +197,16 @@ mark -5 /setucacheparams [null -5 /rangecheck] dup 0 mark put assert
 % currentsystemparams dict has known key StartJobPassword
 {currentsystemparams /StartJobPassword known} [true] assert
 
+% String-valued system params must be exactly their own bytes. PrinterName
+% was declared 6 bytes long over a 4-byte allocation, so it read two bytes
+% into whatever was allocated next and came back as (stetIE) — the (IEE) of
+% RealFormat, which was itself missing an E. Assert the lengths, not just the
+% contents: a length that overruns is how the leak went unnoticed.
+{currentsystemparams /PrinterName get} [(stet)] assert
+{currentsystemparams /PrinterName get length} [4] assert
+{currentsystemparams /RealFormat get} [(IEEE)] assert
+{currentsystemparams /RealFormat get length} [4] assert
+
 
 %%% setsystemparams basic %%%
 

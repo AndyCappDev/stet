@@ -693,17 +693,20 @@ impl Context {
                 PsObject::int(val),
             );
         }
-        let printer_str = strings.allocate_from_at_level_zero(b"stet");
+        let printer_name = b"stet";
+        let printer_str = strings.allocate_from_at_level_zero(printer_name);
         dicts.put(
             system_params,
             DictKey::Name(names.intern(b"PrinterName")),
-            PsObject::string(printer_str, 6),
+            PsObject::string(printer_str, printer_name.len() as u32),
         );
-        let realfmt_str = strings.allocate_from_at_level_zero(b"IEE");
+        // PLRM: RealFormat names the internal real representation.
+        let real_format = b"IEEE";
+        let realfmt_str = strings.allocate_from_at_level_zero(real_format);
         dicts.put(
             system_params,
             DictKey::Name(names.intern(b"RealFormat")),
-            PsObject::string(realfmt_str, 3),
+            PsObject::string(realfmt_str, real_format.len() as u32),
         );
         let pw_str = strings.allocate_from_at_level_zero(b"0");
         dicts.put(
