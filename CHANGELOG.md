@@ -5,10 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.1] — 2026-08-15
+
+Patch release. Two `currentsystemparams` values were wrong in every release
+up to and including 0.4.0, and PDFs now record which build wrote them. No API
+changes; no rendering changes.
+
+### Fixed
+
+- **`/PrinterName` returned `(stetIE)` instead of `(stet)`.** The string was
+  allocated with the four bytes of `stet` but declared six bytes long, so
+  reading it ran two bytes into the next allocation — which happened to be
+  `/RealFormat`. Not memory-unsafe (the arena is a single buffer), but it put
+  a neighbouring allocation's bytes into a value any PostScript program can
+  read, and the value would have changed as soon as allocation order did.
+- **`/RealFormat` returned `(IEE)` instead of `(IEEE)`** — a missing `E` in
+  the literal, independent of the overrun above. The PLRM specifies this key
+  as naming the internal real representation, and Ghostscript reports
+  `(IEEE)`.
+
+  Both lengths are now derived from the literal rather than written out
+  twice, which is what allowed them to disagree. The other three
+  allocate-then-declare sites in `Context::new` were audited and are correct.
+  Regression coverage in `unit_tests/interpreter_param_tests.ps` asserts
+  lengths as well as contents — the contents alone read plausibly, and it was
+  the overrun that made them wrong.
 
 ### Changed
 
+- **PDF `/Producer` now carries the version**, e.g. `stet 0.4.1`, where it
+  previously wrote a bare `stet`. Every other producer does this —
+  Ghostscript writes `GPL Ghostscript 10.05.1`, Distiller
+  `Acrobat Distiller 20.0` — and it is the first thing checked when a
+  prepress shop is chasing a rendering difference between two files. A
+  `pdfmark` `/DOCINFO /Producer` override still takes precedence; this
+  changes only the default. Note that this alters bytes in the `/Info` dict
+  of every PDF stet writes, at every release.
 - **Documented MSRV corrected to Rust 1.88.** The README badge had claimed
   1.85 since it was added — a number inferred from `edition = "2024"` and
   never compiled against. The real floor is 1.88: first-party code uses
