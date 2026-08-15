@@ -29,6 +29,13 @@ license = "BSD-3-Clause"
 repository = "https://github.com/AndyCappDev/stet"
 homepage = "https://github.com/AndyCappDev/stet"
 
+# Vendored upstream code — see the matching note in stet-tiny-skia/Cargo.toml.
+# Style and complexity are allowed so the fork stays diffable against upstream;
+# correctness, suspicious, and perf stay on to catch defects in our own edits.
+[lints.clippy]
+style = { level = "allow", priority = -1 }
+complexity = { level = "allow", priority = -1 }
+
 [dependencies.arrayref]
 version = "0.3.6"
 

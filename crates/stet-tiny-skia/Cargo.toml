@@ -27,6 +27,19 @@ license = "BSD-3-Clause"
 repository = "https://github.com/AndyCappDev/stet"
 homepage = "https://github.com/AndyCappDev/stet"
 
+# Vendored upstream code. Style and complexity lints are allowed so the fork
+# stays diffable against upstream tiny-skia — restyling it to satisfy clippy
+# would bury the analytical-AA changes in cosmetic noise. `src/lib.rs` already
+# carries upstream's own per-lint allows, but a crate-root attribute does not
+# reach the `tests/` and `examples/` targets, which is where most of the noise
+# was. A [lints] table applies to every target in the package.
+#
+# correctness, suspicious, and perf stay on: this crate is actively modified,
+# and those are the groups that catch a real defect in a change of ours.
+[lints.clippy]
+style = { level = "allow", priority = -1 }
+complexity = { level = "allow", priority = -1 }
+
 [dependencies.arrayref]
 version = "0.3.6"
 

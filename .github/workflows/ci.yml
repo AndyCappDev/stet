@@ -24,10 +24,15 @@ jobs:
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
       - name: cargo clippy
-        # Clippy runs but doesn't gate on warnings yet — the workspace has
-        # a few hundred pre-existing style warnings documented as non-
-        # blockers in PUBLISH-TODO.md. We still want the clippy output in
-        # CI logs so new warnings are easy to spot in a diff.
+        # Clippy runs but only errors gate; warnings do not fail the build.
+        # The workspace carries a backlog of style warnings — collapsible_if
+        # dominates, mostly because clippy now suggests Rust 2024 let-chains
+        # for code written before they stabilised. None are correctness lints.
+        #
+        # The vendored tiny-skia forks allow the style and complexity groups
+        # in their own Cargo.toml [lints] tables, so what remains here is
+        # first-party code. Fix them opportunistically when touching the
+        # surrounding code; there is no deadline and no tracking file.
         run: cargo clippy --workspace --all-targets
       - name: VM level-zero allocation audit
         # Operator code must allocate through stet_ops::vm_ops::alloc_*, which
