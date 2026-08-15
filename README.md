@@ -455,6 +455,23 @@ cargo run                      # Interactive REPL
 cargo clippy                   # Lint
 ```
 
+### Git hooks
+
+One-time setup after cloning, if you intend to push:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+This enables `.githooks/pre-push`, which runs the same gates as CI's
+lint job — `cargo fmt --check`, clippy errors, the `#[non_exhaustive]`
+and VM level-zero-allocation audits, and the version/MSRV cross-check —
+so a failing tree is caught before it reaches a remote rather than a few
+minutes later in CI. Bypass a single push with `git push --no-verify`.
+
+Git does not enable this automatically, and it fails silently: without
+the command above, pushes simply succeed with nothing checked.
+
 ### WASM Viewer
 
 ```bash

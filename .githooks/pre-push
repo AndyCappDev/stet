@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# Pre-push hook: bail before any commits reach the remote if the tree
+# would fail CI. Mirrors what .github/workflows/ci.yml runs in the
+# "fmt + clippy" job. Bypass with `git push --no-verify` if you need
+# to push something known-broken (e.g. a WIP branch).
+#
+# Tracked in the repo rather than living in .git/hooks, which is local
+# state that no clone inherits. Activate with:
+#
+#     git config core.hooksPath .githooks
+#
+# Without that one command a fresh clone has no gates at all, and the
+# failure is silent — pushes just succeed. See "Building from Source"
+# in README.md.
+#
+# NOT covered here, on purpose: the MSRV build. Compiling the workspace
+# on a second toolchain would add minutes to every push for a rare
+# failure, so the `MSRV 1.88` CI job owns that. What this *does* check is
+# that the MSRV strings agree with each other, via check-release-versions.sh.
+
+set -euo pipefail
+
+# Hooks run from the top of the working tree, but be explicit so the
+# scripts/ paths below still resolve under `git worktree`.
+cd "$(git rev-parse --show-toplevel)"
+
+# Colour helpers — silenced when stdout isn't a terminal.
+if [ -t 1 ]; then
+    RED="\033[31m"
+    GREEN="\033[32m"
+    YELLOW="\033[33m"
+    RESET="\033[0m"
+else
+    RED=""; GREEN=""; YELLOW=""; RESET=""
+fi
+
+# Private temp file rather than a fixed /tmp path: this hook now runs on
+# other people's machines, where a predictable name in a shared /tmp is
+# someone else's to collide with or pre-create as a symlink.
+clippy_log=$(mktemp -t stet-clippy.XXXXXX)
+trap 'rm -f "$clippy_log"' EXIT
+
+echo -e "${YELLOW}pre-push: cargo fmt --check${RESET}"
+if ! cargo fmt --all -- --check; then
+    echo -e "${RED}pre-push: fmt failed. Run 'cargo fmt --all' and re-push.${RESET}" >&2
+    exit 1
+fi
+
+echo -e "${YELLOW}pre-push: cargo clippy (errors only — warnings don't gate)${RESET}"
+if ! cargo clippy --workspace --all-targets --quiet 2>&1 | tee "$clippy_log"; then
+    if grep -q "^error" "$clippy_log"; then
+        echo -e "${RED}pre-push: clippy errors. See output above.${RESET}" >&2
+        exit 1
+    fi
+fi
+
+echo -e "${YELLOW}pre-push: non-exhaustive marker audit${RESET}"
+if ! scripts/check-non-exhaustive.sh; then
+    echo -e "${RED}pre-push: missing #[non_exhaustive] on a stable-extension-point enum.${RESET}" >&2
+    echo -e "${RED}        See docs/PLAN-NON-EXHAUSTIVE.md and the policy in CLAUDE.md.${RESET}" >&2
+    exit 1
+fi
+
+echo -e "${YELLOW}pre-push: VM level-zero allocation audit${RESET}"
+if ! scripts/check-level-zero-alloc.sh; then
+    echo -e "${RED}pre-push: operator code allocating at save level 0.${RESET}" >&2
+    echo -e "${RED}        Use stet_ops::vm_ops::alloc_* instead; see the policy in CLAUDE.md.${RESET}" >&2
+    exit 1
+fi
+
+echo -e "${YELLOW}pre-push: release-version + MSRV cross-check${RESET}"
+if ! scripts/check-release-versions.sh; then
+    echo -e "${RED}pre-push: version or MSRV strings disagree across Cargo.toml,${RESET}" >&2
+    echo -e "${RED}        README badges, CHANGELOG.md, and .github/workflows/ci.yml.${RESET}" >&2
+    exit 1
+fi
+
+echo -e "${GREEN}pre-push: OK${RESET}"
