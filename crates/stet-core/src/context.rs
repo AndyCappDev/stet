@@ -14,7 +14,7 @@ use crate::dual_dict_store::DualDictStore;
 use crate::dual_string_store::DualStringStore;
 use crate::error::PsError;
 use crate::file_store::FileStore;
-use crate::graphics_state::{GraphicsState, Matrix, PathSegment, PatternData};
+use crate::graphics_state::{GraphicsState, Matrix, PathSegment, PatternData, PsPath};
 use crate::name::NameTable;
 use crate::object::{EntityId, NameId, ObjFlags, PsObject, PsValue, SaveLevel};
 use crate::save_stack::{SaveRecord, SaveStack, StoreType};
@@ -287,6 +287,17 @@ pub struct Context {
 
     // CID passed from cshow to nested show call for Type 0 composite fonts
     pub cshow_pending_cid: Option<i32>,
+
+    /// Set while a Type 3 glyph procedure runs under `charpath`.
+    ///
+    /// PLRM: `charpath` "obtains the path for the glyph outlines that would
+    /// result if string were shown"; for a Type 3 font that means running the
+    /// glyph procedure without painting. While this is `Some`, `fill`,
+    /// `eofill` and `stroke` contribute the path they were given here instead
+    /// of marking the page — in particular `stroke` contributes the path as
+    /// constructed, since `charpath`'s own boolean operand, not the glyph
+    /// procedure, decides whether the result gets stroked.
+    pub charpath_capture: Option<PsPath>,
 
     // Pattern/form support
     /// Storage for pattern instances created by `makepattern`.
@@ -861,6 +872,7 @@ impl Context {
             glyph_caches: rustc_hash::FxHashMap::default(),
             char_cache_mode: None,
             cshow_pending_cid: None,
+            charpath_capture: None,
             pattern_store: Vec::new(),
             form_cache: rustc_hash::FxHashMap::default(),
             cie_decode_cache: rustc_hash::FxHashMap::default(),

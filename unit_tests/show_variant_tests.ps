@@ -143,4 +143,119 @@ newpath
 0 0 moveto
 
 
+%% =============================================================================
+%% charpath on a Type 3 font
+%% =============================================================================
+% PLRM: charpath obtains "the path for the glyph outlines that would result if
+% string were shown", so for a Type 3 font the glyph procedure runs and the
+% paths it would have painted become part of the current path. The paths go in
+% as constructed — unclosed, and unstroked for a `stroke`, because charpath's
+% own boolean operand decides whether the result gets stroked. Ghostscript
+% builds exactly the same path for these three glyphs.
+
+/T3CharPath 8 dict def
+T3CharPath begin
+  /FontType 3 def
+  /FontMatrix [0.001 0 0 0.001 0 0] def
+  /FontBBox [0 0 1000 1000] def
+  /Encoding 256 array def
+  0 1 255 { Encoding exch /.notdef put } for
+  Encoding 65 /filled put      % A — a filled triangle
+  Encoding 66 /stroked put     % B — the same three points, stroked
+  Encoding 67 /blank put       % C — marks nothing at all
+  /CharProcs 4 dict def
+  CharProcs begin
+    /.notdef { 0 0 setcharwidth } bind def
+    /filled {
+      1000 0 setcharwidth
+      100 200 moveto 400 200 lineto 400 700 lineto fill
+    } bind def
+    /stroked {
+      1000 0 setcharwidth
+      40 setlinewidth
+      100 200 moveto 400 200 lineto 400 700 lineto stroke
+    } bind def
+    /blank { 1000 0 setcharwidth } bind def
+  end
+  /BuildGlyph {
+    exch /CharProcs get exch
+    2 copy known not { pop /.notdef } if
+    get exec
+  } bind def
+  /BuildChar {
+    1 index /Encoding get exch get
+    1 index /BuildGlyph get exec
+  } bind def
+end
+/T3CharPath T3CharPath definefont pop
+
+/roundedbbox { pathbbox 4 array astore { round cvi } forall } def
+
+%% charpath on a Type 3 font appends the filled outline %%
+gsave
+/T3CharPath findfont 100 scalefont setfont
+{ newpath 0 0 moveto (A) false charpath roundedbbox } [10 20 40 70] assert
+grestore
+
+%% charpath appends a stroked glyph's path unstroked %%
+% A 40-unit line width would widen the box to 8..42 / 18..72 if the glyph's
+% own `stroke` were honoured; charpath contributes the path as constructed.
+gsave
+/T3CharPath findfont 100 scalefont setfont
+{ newpath 0 0 moveto (B) false charpath roundedbbox } [10 20 40 70] assert
+grestore
+
+%% charpath advances the current point by the glyph's width %%
+gsave
+/T3CharPath findfont 100 scalefont setfont
+{ newpath 0 0 moveto (AB) false charpath currentpoint } [200.0 0.0] assert
+grestore
+
+%% a Type 3 glyph that marks nothing contributes no path %%
+% Only the moveto that established the current point is left.
+gsave
+/T3CharPath findfont 100 scalefont setfont
+{ newpath 0 0 moveto (C) false charpath
+  0 { pop pop 1 add } { pop pop 1 add } { 6 { pop } repeat 1 add } { 1 add }
+  pathforall } [1] assert
+grestore
+
+%% a Type 3 glyph that shows text contributes the shown glyph outlines %%
+/T3Nested 8 dict def
+T3Nested begin
+  /FontType 3 def
+  /FontMatrix [0.001 0 0 0.001 0 0] def
+  /FontBBox [0 0 1000 1000] def
+  /Encoding 256 array def
+  0 1 255 { Encoding exch /.notdef put } for
+  Encoding 65 /nested put
+  /CharProcs 2 dict def
+  CharProcs begin
+    /.notdef { 0 0 setcharwidth } bind def
+    /nested {
+      1000 0 setcharwidth
+      /Courier findfont 500 scalefont setfont
+      0 0 moveto (l) show
+    } bind def
+  end
+  /BuildGlyph {
+    exch /CharProcs get exch
+    2 copy known not { pop /.notdef } if
+    get exec
+  } bind def
+  /BuildChar {
+    1 index /Encoding get exch get
+    1 index /BuildGlyph get exec
+  } bind def
+end
+/T3Nested T3Nested definefont pop
+gsave
+/T3Nested findfont 100 scalefont setfont
+{ newpath 0 0 moveto (A) false charpath roundedbbox } [4 0 26 30] assert
+grestore
+
+% Restore currentpoint for any subsequent tests
+0 0 moveto
+
+
 grestore

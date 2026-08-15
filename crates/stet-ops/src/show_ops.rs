@@ -1195,7 +1195,7 @@ fn render_show(
         .unwrap_or(1);
 
     if font_type == 3 {
-        return render_show_type3(ctx, bytes, extra_ax, extra_ay, width_char, cx, cy);
+        return render_show_type3(ctx, bytes, extra_ax, extra_ay, width_char, cx, cy, false);
     }
 
     // Type 0 (composite) and Type 42 (TrueType)
@@ -2627,10 +2627,14 @@ fn render_composite_cff_cids(
     Ok(())
 }
 
-/// Initiate Type 3 font rendering via the continuation pattern.
+/// Run a Type 3 font's BuildChar/BuildGlyph procedure over `bytes`.
 ///
-/// Sets up the first character's BuildChar call and pushes a continuation
-/// that processes subsequent characters.
+/// With `charpath` false this is `show`: the marks the glyph procedure makes
+/// stay on the display list. With `charpath` true the marks are drained off
+/// again and their outlines appended to the current path instead, which is what
+/// `charpath` means for a Type 3 font (PLRM: the glyph procedure runs, and
+/// whatever it would have painted becomes part of the path).
+#[allow(clippy::too_many_arguments)]
 fn render_show_type3(
     ctx: &mut Context,
     bytes: &[u8],
@@ -2639,6 +2643,7 @@ fn render_show_type3(
     width_char: i32,
     cx: f64,
     cy: f64,
+    charpath: bool,
 ) -> Result<(), PsError> {
     let font_obj = ctx.gstate.current_font.ok_or(PsError::InvalidFont)?;
     let font_entity = match font_obj.value {
@@ -2703,9 +2708,13 @@ fn render_show_type3(
                 .iter()
                 .map(|elem| recolor_and_translate_element(elem, dx, dy, color))
                 .collect();
-            let target = ctx.current_display_list_mut();
-            for elem in recolored {
-                target.push(elem);
+            if charpath {
+                append_charpath_outline(ctx, &recolored);
+            } else {
+                let target = ctx.current_display_list_mut();
+                for elem in recolored {
+                    target.push(elem);
+                }
             }
             let (wx, wy) = font_matrix.transform_delta(cg.width.0, cg.width.1);
             cur_x += wx + extra_ax;
@@ -2740,8 +2749,24 @@ fn render_show_type3(
             ctx.o_stack.push(font_obj)?;
             ctx.o_stack.push(PsObject::int(byte as i32))?;
 
-            // Execute BuildChar synchronously
-            ctx.exec_sync(build_char)?;
+            // Execute BuildChar synchronously. In charpath mode the painting
+            // operators divert their paths into `charpath_capture` instead of
+            // marking the page; anything else the procedure emits lands on the
+            // display list and is drained below. A nested `show` leaves the
+            // installed buffer alone, so painting inside it still diverts to
+            // the charpath that is running.
+            let outer_capture = if charpath {
+                ctx.charpath_capture.replace(PsPath::new())
+            } else {
+                None
+            };
+            let build_result = ctx.exec_sync(build_char);
+            let captured = if charpath {
+                std::mem::replace(&mut ctx.charpath_capture, outer_capture)
+            } else {
+                None
+            };
+            build_result?;
 
             // grestore to undo the gsave+translate+concat
             crate::graphics_state_ops::op_grestore(ctx)?;
@@ -2749,10 +2774,24 @@ fn render_show_type3(
             // Get char width set by setcachedevice/setcharwidth during BuildChar
             let char_width = ctx.char_width.take().unwrap_or((0.0, 0.0));
 
+            // In charpath mode the glyph's marks must not reach the page:
+            // take them back off the display list and keep them for the path.
+            let drained: Option<Vec<DisplayElement>> = if charpath {
+                Some(
+                    ctx.current_display_list_mut()
+                        .split_off(dl_start)
+                        .into_elements(),
+                )
+            } else {
+                None
+            };
+
             // Cache if setcachedevice was called (not setcharwidth)
             if ctx.char_cache_mode == Some(Type3CacheMode::Cache) {
-                let elements: Vec<DisplayElement> =
-                    ctx.current_display_list().elements_from(dl_start).to_vec();
+                let elements: Vec<DisplayElement> = match &drained {
+                    Some(elements) => elements.clone(),
+                    None => ctx.current_display_list().elements_from(dl_start).to_vec(),
+                };
                 let cache = ctx.glyph_caches.entry(font_entity).or_default();
                 cache.by_charcode.insert(
                     byte,
@@ -2763,6 +2802,12 @@ fn render_show_type3(
                         width: char_width,
                     },
                 );
+            }
+
+            if let Some(elements) = drained {
+                let mut segments = captured.map(|p| p.segments).unwrap_or_default();
+                collect_painted_segments(&elements, &mut segments);
+                append_charpath_segments(ctx, segments);
             }
 
             let (wx, wy) = font_matrix.transform_delta(char_width.0, char_width.1);
@@ -2783,6 +2828,58 @@ fn render_show_type3(
     ctx.gstate.current_point = Some((dev_x, dev_y));
 
     Ok(())
+}
+
+/// Append the outlines a Type 3 glyph procedure produced to the current path.
+///
+/// Both the captured paths and the display list are already in device space,
+/// as is `gstate.path`, so no transform is needed here.
+fn append_charpath_outline(ctx: &mut Context, elements: &[DisplayElement]) {
+    let mut segments: Vec<PathSegment> = Vec::new();
+    collect_painted_segments(elements, &mut segments);
+    append_charpath_segments(ctx, segments);
+}
+
+/// Append collected device-space segments to the current path.
+fn append_charpath_segments(ctx: &mut Context, segments: Vec<PathSegment>) {
+    // Per PLRM: consecutive movetos replace the previous one, so the first
+    // segment goes through path_moveto rather than straight onto the vector.
+    let mut segs_iter = segments.into_iter();
+    if let Some(first_seg) = segs_iter.next() {
+        if let PathSegment::MoveTo(x, y) = first_seg {
+            crate::path_ops::path_moveto(&mut ctx.gstate.path, x, y);
+        } else {
+            ctx.gstate.path.segments.push(first_seg);
+        }
+        ctx.gstate.path.segments.extend(segs_iter);
+    }
+}
+
+/// Collect the path of every painting element, descending into containers.
+///
+/// `Image` is skipped because PLRM says so outright: "charpath does not produce
+/// results for portions of a glyph defined as images or masks rather than as
+/// paths." `Clip` marks nothing, `Text` duplicates the `Fill`/`Stroke` element
+/// emitted beside it, and the shadings paint through the clip rather than a
+/// path of their own.
+fn collect_painted_segments(elements: &[DisplayElement], out: &mut Vec<PathSegment>) {
+    for elem in elements {
+        match elem {
+            DisplayElement::Fill { path, .. } | DisplayElement::Stroke { path, .. } => {
+                out.extend_from_slice(&path.segments);
+            }
+            DisplayElement::PatternFill { params } => {
+                out.extend_from_slice(&params.path.segments);
+            }
+            DisplayElement::Group { elements, .. } | DisplayElement::OcgGroup { elements, .. } => {
+                collect_painted_segments(elements.elements(), out);
+            }
+            DisplayElement::SoftMasked { content, .. } => {
+                collect_painted_segments(content.elements(), out);
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Measure total string width without rendering.
@@ -2891,6 +2988,10 @@ fn render_charpath(ctx: &mut Context, bytes: &[u8]) -> Result<(), PsError> {
     }
     if font_type == 0 || font_type == 42 {
         return render_charpath_composite(ctx, font_entity_id, bytes);
+    }
+    if font_type == 3 {
+        // No character can equal -1, so no widthshow adjustment applies.
+        return render_show_type3(ctx, bytes, 0.0, 0.0, -1, 0.0, 0.0, true);
     }
 
     let info = get_font_info(ctx)?;

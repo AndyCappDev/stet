@@ -712,6 +712,91 @@ fn cie_decode_tables_are_memoised_across_reinstalls() {
     );
 }
 
+/// A Type 3 font whose `A` glyph fills a triangle and whose `B` glyph strokes
+/// the same three points. `resources/Font` is not needed — the glyph
+/// procedures paint directly.
+const TYPE3_CHARPATH_FONT: &[u8] = b"
+    /T3 8 dict def
+    T3 begin
+      /FontType 3 def
+      /FontMatrix [0.001 0 0 0.001 0 0] def
+      /FontBBox [0 0 1000 1000] def
+      /Encoding 256 array def
+      0 1 255 { Encoding exch /.notdef put } for
+      Encoding 65 /filled put
+      Encoding 66 /stroked put
+      /CharProcs 3 dict def
+      CharProcs begin
+        /.notdef { 0 0 setcharwidth } bind def
+        /filled { 1000 0 setcharwidth
+                  100 200 moveto 400 200 lineto 400 700 lineto fill } bind def
+        /stroked { 1000 0 setcharwidth 40 setlinewidth
+                   100 200 moveto 400 200 lineto 400 700 lineto stroke } bind def
+      end
+      /BuildGlyph { exch /CharProcs get exch
+                    2 copy known not { pop /.notdef } if get exec } bind def
+      /BuildChar { 1 index /Encoding get exch get
+                   1 index /BuildGlyph get exec } bind def
+    end
+    /T3 T3 definefont pop
+    /T3 findfont 100 scalefont setfont
+";
+
+/// `charpath` on a Type 3 font builds the path without marking the page.
+///
+/// The glyph procedure runs for real — that is the only way to learn its
+/// outline — so the check that matters is that nothing it painted survives on
+/// the display list. Ghostscript renders a blank page for the same input.
+#[test]
+fn test_charpath_type3_paints_nothing() {
+    let mut ctx = render_ctx(200, 200);
+    let mut src = TYPE3_CHARPATH_FONT.to_vec();
+    src.extend_from_slice(b"newpath 0 0 moveto (AB) false charpath\n");
+    stet_engine::eval::parse_and_exec(&mut ctx, &src).expect("PS execution failed");
+
+    assert!(
+        ctx.display_list.is_empty(),
+        "a Type 3 charpath must leave no marks, found {} display elements",
+        ctx.display_list.len()
+    );
+    assert!(
+        !ctx.gstate.path.segments.is_empty(),
+        "a Type 3 charpath must append the glyph outlines to the current path"
+    );
+
+    // Both glyphs cover the same 100..400 x 200..700 glyph-space box, at
+    // FontMatrix 0.001 and 100pt that is 10..40 x 20..70 in user space, and
+    // the second glyph sits 100 units to the right. The Y flip in render_ctx
+    // puts device Y at 200 - user Y.
+    let (mut min_x, mut min_y) = (f64::MAX, f64::MAX);
+    let (mut max_x, mut max_y) = (f64::MIN, f64::MIN);
+    for seg in &ctx.gstate.path.segments {
+        let pts: Vec<(f64, f64)> = match *seg {
+            stet_core::graphics_state::PathSegment::MoveTo(x, y) => vec![(x, y)],
+            stet_core::graphics_state::PathSegment::LineTo(x, y) => vec![(x, y)],
+            stet_core::graphics_state::PathSegment::CurveTo {
+                x1,
+                y1,
+                x2,
+                y2,
+                x3,
+                y3,
+            } => vec![(x1, y1), (x2, y2), (x3, y3)],
+            _ => vec![],
+        };
+        for (x, y) in pts {
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = max_x.max(x);
+            max_y = max_y.max(y);
+        }
+    }
+    assert!((min_x - 10.0).abs() < 0.01, "min x was {min_x}");
+    assert!((max_x - 140.0).abs() < 0.01, "max x was {max_x}");
+    assert!((min_y - 130.0).abs() < 0.01, "min y was {min_y}");
+    assert!((max_y - 180.0).abs() < 0.01, "max y was {max_y}");
+}
+
 /// Helper: Write adapter that captures bytes to a shared Vec.
 struct OutputCapture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 

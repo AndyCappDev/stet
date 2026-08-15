@@ -970,6 +970,11 @@ pub fn op_makepattern(ctx: &mut Context) -> Result<(), PsError> {
         let saved_ctm = ctx.gstate.ctm;
         ctx.gstate.ctm = Matrix::identity();
 
+        // The tile is being captured, not painted, so a Type 3 `charpath`
+        // running above must not swallow the PaintProc's paths — they belong
+        // to the tile, not to the glyph outline.
+        let saved_charpath = ctx.charpath_capture.take();
+
         // Clear path for PaintProc
         ctx.gstate.path.clear();
         ctx.gstate.current_point = None;
@@ -988,8 +993,9 @@ pub fn op_makepattern(ctx: &mut Context) -> Result<(), PsError> {
         // private to the pattern in a real implementation.
         ctx.o_stack.truncate(depth_before);
 
-        // Restore CTM and display list
+        // Restore CTM, display list and charpath capture
         ctx.gstate.ctm = saved_ctm;
+        ctx.charpath_capture = saved_charpath;
         let captured = std::mem::replace(&mut ctx.display_list, saved_dl);
 
         result?;
@@ -1407,6 +1413,12 @@ pub fn op_execform(ctx: &mut Context) -> Result<(), PsError> {
         // Save display list, execute PaintProc
         let saved_dl = std::mem::take(&mut ctx.display_list);
 
+        // As in `makepattern`: the form is being captured for the cache, so a
+        // Type 3 `charpath` running above must not divert its paths. The cache
+        // is permanent, so a diverted PaintProc would blank the form for the
+        // rest of the job, not just this invocation.
+        let saved_charpath = ctx.charpath_capture.take();
+
         // Push form dict for PaintProc to consume
         let depth_before = ctx.o_stack.len();
         ctx.o_stack.push(PsObject::dict(dict_entity))?;
@@ -1425,6 +1437,7 @@ pub fn op_execform(ctx: &mut Context) -> Result<(), PsError> {
         // the operator behave differently the second time round.
         ctx.o_stack.truncate(depth_before);
 
+        ctx.charpath_capture = saved_charpath;
         let captured = std::mem::replace(&mut ctx.display_list, saved_dl);
         result?;
 

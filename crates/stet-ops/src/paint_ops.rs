@@ -229,6 +229,9 @@ fn push_fill_element(ctx: &mut Context, path: PsPath, fill_rule: FillRule) {
 ///
 /// Path is already in device space; pass identity transform to device.
 pub fn op_fill(ctx: &mut Context) -> Result<(), PsError> {
+    if capture_charpath(ctx) {
+        return Ok(());
+    }
     let path = close_subpaths(&ctx.gstate.path);
     push_fill_element(ctx, path, FillRule::NonZeroWinding);
     // newpath after fill
@@ -241,6 +244,9 @@ pub fn op_fill(ctx: &mut Context) -> Result<(), PsError> {
 ///
 /// Path is already in device space; pass identity transform to device.
 pub fn op_eofill(ctx: &mut Context) -> Result<(), PsError> {
+    if capture_charpath(ctx) {
+        return Ok(());
+    }
     let path = close_subpaths(&ctx.gstate.path);
     push_fill_element(ctx, path, FillRule::EvenOdd);
     ctx.gstate.path.clear();
@@ -255,11 +261,44 @@ pub fn op_eofill(ctx: &mut Context) -> Result<(), PsError> {
 /// X/Y scaling), inverse-transform the path back to user space and pass the
 /// actual CTM to the device so it handles direction-dependent stroke widths.
 pub fn op_stroke(ctx: &mut Context) -> Result<(), PsError> {
+    if capture_charpath(ctx) {
+        return Ok(());
+    }
     if use_native_stroke(ctx) {
         stroke_native(ctx)
     } else {
         stroke_via_strokepath(ctx)
     }
+}
+
+/// Divert the current path into an in-progress Type 3 `charpath`.
+///
+/// Returns true when the path was captured and the caller must not paint.
+/// The path goes in exactly as constructed: unclosed, and for `stroke`
+/// unstroked, because `charpath`'s boolean operand — not the glyph
+/// procedure — decides whether the result is stroked. Ghostscript builds the
+/// same path.
+fn capture_charpath(ctx: &mut Context) -> bool {
+    if ctx.charpath_capture.is_none() {
+        return false;
+    }
+    let path = std::mem::take(&mut ctx.gstate.path);
+    capture_charpath_path(ctx, &path);
+    ctx.gstate.current_point = None;
+    true
+}
+
+/// Divert an operator-built device-space path into an in-progress Type 3
+/// `charpath`, leaving the current path alone.
+///
+/// The rect operators need this: PLRM says they do not disturb the current
+/// path, so they cannot go through [`capture_charpath`].
+fn capture_charpath_path(ctx: &mut Context, path: &PsPath) -> bool {
+    let Some(captured) = ctx.charpath_capture.as_mut() else {
+        return false;
+    };
+    captured.segments.extend_from_slice(&path.segments);
+    true
 }
 
 /// Check pagedevice StrokeMethod: /NativeStroke uses tiny-skia, /StrokePathFill
@@ -470,6 +509,9 @@ fn build_rect_path_user(rects: &[(f64, f64, f64, f64)]) -> PsPath {
 pub fn op_rectfill(ctx: &mut Context) -> Result<(), PsError> {
     let rects = extract_rects(ctx)?;
     let path = build_rect_path_device(&ctx.gstate.ctm, &rects);
+    if capture_charpath_path(ctx, &path) {
+        return Ok(());
+    }
     push_fill_element(ctx, path, FillRule::NonZeroWinding);
     Ok(())
 }
@@ -480,6 +522,15 @@ pub fn op_rectfill(ctx: &mut Context) -> Result<(), PsError> {
 /// For anisotropic CTMs, builds path in user space and passes CTM to device.
 pub fn op_rectstroke(ctx: &mut Context) -> Result<(), PsError> {
     let rects = extract_rects(ctx)?;
+
+    // Inside a Type 3 `charpath` the rectangles go in as constructed, in
+    // device space — never through the anisotropic branch below, whose path is
+    // in user space.
+    if ctx.charpath_capture.is_some() {
+        let path = build_rect_path_device(&ctx.gstate.ctm, &rects);
+        capture_charpath_path(ctx, &path);
+        return Ok(());
+    }
 
     let spot = capture_spot_color(ctx);
     let transfer = capture_transfer_state(ctx);
