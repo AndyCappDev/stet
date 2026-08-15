@@ -91,6 +91,34 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: ./target/release/stet unit_tests/ps_tests.ps
 
+  # MSRV — the README badge and `[workspace.package] rust-version` both claim
+  # 1.88, and this is what makes that a tested fact rather than a guess. Pin
+  # the toolchain rather than tracking `rust-version`: the point is to fail on
+  # the commit that raises the real floor, which a floating toolchain cannot do.
+  #
+  # It has to *compile*, not just read manifests. Reading declared metadata
+  # would put the floor at 1.87 — hayro-jpeg2000 0.3.4 declares less than it
+  # needs and then fails on let-chains, which only a real build catches.
+  #
+  # `check`, not `build --release` or `test`: this answers "does it compile on
+  # the oldest supported toolchain", and build-test already covers behaviour on
+  # three OSes. When a dependency raises its own MSRV and breaks this job, the
+  # fix is either pinning that dependency back or raising ours deliberately —
+  # bump Cargo.toml, the README badge, and add a CHANGELOG line together.
+  msrv:
+    name: MSRV 1.88
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.88"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv
+      - name: cargo check --workspace --all-targets
+        run: cargo check --workspace --all-targets
+
   # WASM build — smoke test that the browser-facing crate still compiles.
   # stet-wasm is excluded from the default workspace, so it needs its own
   # step. No tests here — wasm-pack test would need a browser runtime.

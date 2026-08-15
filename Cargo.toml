@@ -6,6 +6,12 @@ resolver = "2"
 [workspace.package]
 version = "0.4.0"
 edition = "2024"
+# Verified by compiling, not inferred: the `msrv` CI job builds the workspace
+# on exactly this toolchain. 1.88 is what let-chains need, and first-party
+# code uses them in 282 places. Raising this is allowed in any minor release
+# — see the MSRV note in README.md — but it must be a deliberate edit with a
+# CHANGELOG line, never a silent consequence of a `cargo update`.
+rust-version = "1.88"
 license = "Apache-2.0 OR MIT"
 authors = ["Scott Bowman <scott@bowmans.org>"]
 repository = "https://github.com/AndyCappDev/stet"

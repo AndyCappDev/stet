@@ -5,7 +5,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Version-0.4.0-blue" alt="Version 0.4.0">
   <img src="https://img.shields.io/badge/License-Apache--2.0_OR_MIT-green" alt="License Apache-2.0 OR MIT">
-  <img src="https://img.shields.io/badge/Rust-1.85+-orange" alt="Rust 1.85+">
+  <img src="https://img.shields.io/badge/Rust-1.88+-orange" alt="Rust 1.88+">
 </p>
 
 ## About
@@ -306,6 +306,15 @@ let mut interp = stet::Interpreter::builder()
     .suppress_output()    // silence PS print/==/= operators
     .build();
 ```
+
+## Minimum Supported Rust Version
+
+stet requires **Rust 1.88** or newer. This is verified on every push by a CI
+job that builds the workspace on exactly that toolchain, so the number above
+is a tested fact rather than an estimate.
+
+The MSRV is not covered by semantic versioning: it may be raised in any minor
+release. Any change to it is called out in [CHANGELOG.md](CHANGELOG.md).
 
 ## CLI Usage
 

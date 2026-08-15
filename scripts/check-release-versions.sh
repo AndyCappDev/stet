@@ -61,6 +61,45 @@ for doc in README.md docs/PDF-READER-API.md; do
     fi
 done
 
+# MSRV: `[workspace.package] rust-version` vs the README badge. The badge
+# claimed 1.85 for months while the real floor was 1.88 — first-party code
+# uses let-chains in 282 places — because nothing tied the two together and
+# nothing ever compiled on the claimed toolchain. The `msrv` CI job proves
+# the number is buildable; this proves the README still says the same number.
+ws_msrv=$(awk '
+    /^\[workspace\.package\]/ { in_ws = 1; next }
+    /^\[/ { in_ws = 0 }
+    in_ws && /^rust-version = / { gsub(/rust-version = "|"/, ""); print; exit }
+' Cargo.toml)
+
+if [ -z "$ws_msrv" ]; then
+    echo -e "${RED}check-release-versions: failed to read rust-version from [workspace.package]${RESET}" >&2
+    errors=$((errors + 1))
+else
+    if ! grep -q "Rust-${ws_msrv}+-" README.md; then
+        echo -e "${RED}check-release-versions: README.md badge URL doesn't include 'Rust-${ws_msrv}+-'${RESET}" >&2
+        grep -n "Rust-" README.md | head -3 >&2 || true
+        errors=$((errors + 1))
+    fi
+    if ! grep -q "alt=\"Rust ${ws_msrv}+\"" README.md; then
+        echo -e "${RED}check-release-versions: README.md badge alt text doesn't match 'Rust ${ws_msrv}+'${RESET}" >&2
+        grep -n "alt=\"Rust" README.md | head -3 >&2 || true
+        errors=$((errors + 1))
+    fi
+    # The prose in the MSRV section has to agree with the badge too.
+    if ! grep -q "requires \*\*Rust ${ws_msrv}\*\*" README.md; then
+        echo -e "${RED}check-release-versions: README.md MSRV prose doesn't say 'requires **Rust ${ws_msrv}**'${RESET}" >&2
+        grep -n "requires \*\*Rust" README.md | head -3 >&2 || true
+        errors=$((errors + 1))
+    fi
+    # The CI job pins the toolchain literally; it must pin what we claim.
+    if ! grep -q "toolchain: \"${ws_msrv}\"" .github/workflows/ci.yml; then
+        echo -e "${RED}check-release-versions: ci.yml msrv job doesn't pin toolchain '${ws_msrv}'${RESET}" >&2
+        grep -n "toolchain:" .github/workflows/ci.yml | head -5 >&2 || true
+        errors=$((errors + 1))
+    fi
+fi
+
 # CHANGELOG.md: must have an `## [X.Y.Z]` heading.
 if ! grep -q "^## \[${ws_version}\]" CHANGELOG.md; then
     echo -e "${RED}check-release-versions: CHANGELOG.md is missing a '## [${ws_version}]' entry${RESET}" >&2
@@ -74,4 +113,4 @@ if [ "$errors" -gt 0 ]; then
     exit 1
 fi
 
-echo -e "${GREEN}check-release-versions: OK (workspace ${ws_version} matches README + CHANGELOG)${RESET}"
+echo -e "${GREEN}check-release-versions: OK (workspace ${ws_version} matches README + CHANGELOG; MSRV ${ws_msrv} matches badge + ci.yml)${RESET}"

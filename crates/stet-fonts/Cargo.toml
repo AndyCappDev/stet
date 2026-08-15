@@ -2,6 +2,7 @@
 name = "stet-fonts"
 version = "0.4.0"
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 description = "Pure-Rust Type 1, CFF / Type 2, and TrueType font parsers plus geometry types, usable standalone or inside stet's PostScript and PDF pipelines"

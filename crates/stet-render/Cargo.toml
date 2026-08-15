@@ -2,6 +2,7 @@
 name = "stet-render"
 version = "0.4.0"
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 description = "tiny-skia rasterizer for stet display lists — produces RGBA output from both PostScript and PDF input"

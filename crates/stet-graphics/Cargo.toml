@@ -2,6 +2,7 @@
 name = "stet-graphics"
 version = "0.4.0"
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 description = "Display list, ICC color, and graphics types shared by stet's PostScript interpreter and PDF reader"

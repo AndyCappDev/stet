@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Documented MSRV corrected to Rust 1.88.** The README badge had claimed
+  1.85 since it was added — a number inferred from `edition = "2024"` and
+  never compiled against. The real floor is 1.88: first-party code uses
+  let-chains in 282 places across nine crates, `jpeg-encoder` declares 1.87,
+  and `fearless_simd` declares 1.86. Nothing about what stet requires has
+  changed; only the claim is now true. `rust-version = "1.88"` is declared in
+  `[workspace.package]` and inherited by all eleven first-party crates, so
+  cargo now reports a clear "requires rustc 1.88" instead of failing with a
+  confusing edition parse error on an older toolchain.
+- A pinned `MSRV 1.88` CI job builds the workspace on exactly that toolchain
+  on every push, and `scripts/check-release-versions.sh` now ties the README
+  badge, the README prose, and the CI job's pin to `rust-version` so the four
+  cannot drift apart.
+
 ## [0.4.0] — 2026-08-14
 
 Minor release focused on **memory and PostScript conformance**. `restore`
