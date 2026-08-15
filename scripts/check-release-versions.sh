@@ -98,6 +98,27 @@ else
         grep -n "toolchain:" .github/workflows/ci.yml | head -5 >&2 || true
         errors=$((errors + 1))
     fi
+
+    # Every publishable crate must carry rust-version, or crates.io and
+    # docs.rs show no MSRV for it and cargo can't refuse an old toolchain
+    # on the consumer's behalf. `cargo package` bakes the inherited value
+    # into the published manifest, so inheriting is enough — but a crate
+    # added later that forgets the line would publish silently without it,
+    # which is exactly how 0.4.0 shipped with rust_version: null.
+    #
+    # The vendored tiny-skia forks are skipped: edition 2018, published on
+    # their own cadence, and they carry upstream's much lower floor.
+    for manifest in crates/*/Cargo.toml; do
+        crate=$(basename "$(dirname "$manifest")")
+        case "$crate" in
+            stet-tiny-skia|stet-tiny-skia-path) continue ;;
+        esac
+        if ! grep -qE "^rust-version(\.workspace = true| = \"${ws_msrv}\")" "$manifest"; then
+            echo -e "${RED}check-release-versions: ${crate} has no rust-version — it would publish without an MSRV${RESET}" >&2
+            echo -e "${YELLOW}  Add 'rust-version.workspace = true' to ${manifest}.${RESET}" >&2
+            errors=$((errors + 1))
+        fi
+    done
 fi
 
 # CHANGELOG.md: must have an `## [X.Y.Z]` heading.

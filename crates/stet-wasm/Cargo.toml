@@ -2,6 +2,12 @@
 name = "stet-wasm"
 version = "0.1.1"
 edition = "2024"
+# Spelled out rather than inherited: this crate is `exclude`d from the root
+# workspace, so `rust-version.workspace = true` has nothing to resolve
+# against. It depends on the stet crates by path, so its floor is theirs.
+# check-release-versions.sh asserts this literal matches [workspace.package]
+# rust-version, so the two cannot drift.
+rust-version = "1.88"
 license = "Apache-2.0 OR MIT"
 authors = ["Scott Bowman <scott@bowmans.org>"]
 description = "WebAssembly bindings for stet PostScript interpreter"

@@ -1,7 +1,20 @@
 [workspace]
 members = ["crates/*"]
 exclude = ["crates/stet-wasm"]
-resolver = "2"
+# MSRV-aware resolution (stabilised in Cargo 1.84, well under our 1.88 floor).
+# Under resolver 2 the `rust-version` below is inert for resolution: cargo
+# takes the newest semver-compatible dependency and only refuses afterwards.
+# With 456 packages in the lock, a routine `cargo update` would eventually
+# pull one needing a newer rustc and break the MSRV job. Resolver 3 picks the
+# last version compatible with our rust-version instead, so the `msrv` CI job
+# becomes the backstop rather than the only line of defence.
+#
+# This is already load-bearing, not just insurance: as of 2026-08-15 a plain
+# `cargo update` wants hayro-jpeg2000 0.4.0 (needs 1.92) and moxcms 0.9.0
+# (needs 1.89). Resolver 3 holds both back; resolver 2 would have taken them
+# and broken the floor on the spot. Adopting it left the lockfile
+# byte-identical — the *locked* versions were already MSRV-clean.
+resolver = "3"
 
 [workspace.package]
 version = "0.4.0"

@@ -21,7 +21,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A pinned `MSRV 1.88` CI job builds the workspace on exactly that toolchain
   on every push, and `scripts/check-release-versions.sh` now ties the README
   badge, the README prose, and the CI job's pin to `rust-version` so the four
-  cannot drift apart.
+  cannot drift apart. The script also asserts every publishable crate
+  declares an MSRV, so none can reach crates.io without one.
+- **Switched to `resolver = "3"`** (MSRV-aware dependency resolution). Cargo
+  now prefers dependency versions compatible with the declared
+  `rust-version` rather than always taking the newest, so a routine
+  `cargo update` can no longer silently break the floor. The lockfile was
+  byte-identical on adoption, but this is already doing work: it holds back
+  `hayro-jpeg2000` 0.4.0 (needs 1.92) and `moxcms` 0.9.0 (needs 1.89).
+
+### Note for downstream users
+
+Releases up to and including 0.4.0 published with no `rust-version` in their
+manifests, so crates.io and docs.rs show no MSRV for them and cargo cannot
+warn an old toolchain before it fails to compile. Published versions are
+immutable; this release is the first to carry the metadata.
 
 ## [0.4.0] — 2026-08-14
 
