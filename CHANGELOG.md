@@ -5,6 +5,81 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] — 2026-08-14
+
+Minor release focused on **memory and PostScript conformance**. `restore`
+now reclaims local VM instead of only reverting values, several
+long-standing PLRM 3.7.2/3.7.3 violations in the interpreter's own writes
+are fixed, and a 6384-file PostScript corpus sweep drove the job-abort
+count from 1158 to 147 — of which 116 fail identically in Ghostscript,
+leaving 31 that are genuinely ours.
+
+This is a `0.x` minor bump. No public API was removed; `Context` gained
+fields, which is source-breaking only for code constructing one
+literally (it has no public constructor other than `Context::new`).
+
+### Highlights
+
+- **`restore` reclaims local VM.** Allocations made above a `save`'s
+  high-water mark are released rather than left resident. A
+  save/restore loop that peaked at 2108 MB now peaks at 74 MB.
+- **`restore` actually reverts what it is supposed to.** Several
+  interpreter-internal writes bypassed copy-on-write, so `restore` had
+  no backup to revert to: `defineresource`, `FontDirectory`, `reverse`,
+  `execstack` and `dictstack`. This was a live PLRM 3.7.3 violation, not
+  a theoretical one.
+- **Global/local VM enforcement is no longer silently disabled.**
+  `.error` did not restore `setglobal`, so any caught error left the
+  interpreter in whatever VM mode the failing code had set.
+- **Eleven interpreter defects found by a 6384-file corpus sweep**, each
+  A/B'd against the previous sweep with no regressions: procedure data
+  sources, the Pattern colour space, `bind` on nested procedures,
+  array-form colour spaces, `cvi`/`cvr` string conversion, CIDFontType 0
+  `StartData`, 16-bit image samples, EOI-less JPEG, `shareddict`/`scheck`,
+  self-registering resource files, `rectclip`, `cshow`, and `charpath` on
+  Type 3 fonts.
+
+### Added
+
+- `charpath` support for Type 3 fonts: the glyph procedure runs without
+  marking the page and the paths it would have painted become part of
+  the current path.
+- The `Pattern` colour space — `setcolorspace`/`setcolor`/`currentcolor`
+  with a pattern, including the uncoloured (PaintType 2) base-space form.
+- `shareddict` and `scheck` in `systemdict`.
+- 16 bits per component for `image` / `imagemask` / `colorimage`.
+- `stet_core::vm_audit` and `--example audit_vm`: a machine check for
+  dangling references and PLRM 3.7.2 global/local violations.
+- PostScript corpus build and sweep tooling under `scripts/`.
+
+### Fixed
+
+- `restore` now releases local VM allocated above the save mark, and
+  copy-on-writes the dictionaries and arrays it is required to revert.
+- Every allocation is stamped with its save level and VM mode, so
+  `restore` can tell a surviving reference from a dangling one and raise
+  `invalidrestore` when PLRM requires it.
+- `.error` restores the VM allocation mode; page-device arrays are
+  allocated in the page device's own VM and deep-copied on promotion.
+- `filter` accepts procedure data sources everywhere, runs them when the
+  data is read rather than at `filter` time, and honours SubFileDecode's
+  EOD semantics.
+- `bind` marks nested procedures read-only per PLRM, and terminates on
+  cyclic procedure graphs.
+- `setcolorspace` accepts array-form base and alternate colour spaces.
+- `cvi` and `cvr` convert strings through the scanner, as PLRM specifies.
+- `CIDInit`'s `StartData` consumes its charstring blob instead of
+  leaving it to be scanned as tokens.
+- DCTDecode accepts a JPEG stream that ends before its EOI marker.
+- Resource files that register themselves are loaded once, through a
+  shared `.LoadResource`, so `composefont` can find a CMap on disk.
+- `rectclip` takes every rectangle in a multi-rectangle argument, and
+  accepts an empty array.
+- `cshow` hands its procedure the character code, not the CID.
+- CIE decode tables are memoised, and 8-bit image samples are no longer
+  copied in `unpack_samples` — together these took the corpus from 24
+  out-of-memory jobs to none.
+
 ## [0.3.0] — 2026-08-12
 
 Minor release adding **PDF→PDF round-trip** through the PDF output
