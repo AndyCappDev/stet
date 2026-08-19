@@ -161,3 +161,39 @@ fn parse_external_pdfs() {
         );
     }
 }
+
+// ---------------------------------------------------------------- extraction
+
+#[test]
+fn text_extraction_returns_unicode_runs_with_positions() {
+    // Point STET_EXTRACT_SAMPLE at any text-bearing PDF (embedded fonts).
+    // Skips when unset, like the sample-dependent tests above.
+    let Ok(sample) = std::env::var("STET_EXTRACT_SAMPLE") else {
+        eprintln!("Skipping — set STET_EXTRACT_SAMPLE to a text PDF to run");
+        return;
+    };
+    let data = std::fs::read(&sample).expect("STET_EXTRACT_SAMPLE unreadable");
+    let doc = PdfDocument::from_bytes(&data).unwrap();
+    let (page_w, page_h) = doc.page_size(0).unwrap();
+    let runs = doc.extract_text_runs(0, 72.0).unwrap();
+
+    assert!(!runs.is_empty(), "no text extracted from {sample}");
+    let mut total_chars = 0usize;
+    for run in &runs {
+        assert!(!run.text.trim().is_empty(), "empty run recorded: {run:?}");
+        total_chars += run.text.chars().count();
+        // Boxes live on the page, in device space at 72dpi (1pt = 1unit).
+        assert!(
+            run.x > -5.0
+                && run.y > -5.0
+                && run.x + run.w < page_w + 5.0
+                && run.y + run.h < page_h + 5.0,
+            "run box escapes the page ({page_w}x{page_h}): {run:?}"
+        );
+        assert!(run.w > 0.0 && run.h > 0.0, "degenerate box: {run:?}");
+    }
+    assert!(
+        total_chars > 50,
+        "suspiciously little text ({total_chars} chars) — decoding is broken"
+    );
+}

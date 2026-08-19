@@ -145,6 +145,19 @@ struct SoftMaskScope {
     mask: graphics_state::SoftMask,
 }
 
+/// One text-show operation's worth of extracted text, in device space at the
+/// DPI the page was interpreted at (top-left origin, y down). `x`/`y` are the
+/// top-left of an approximate line box around the baseline; exact glyph
+/// bounds are not computed.
+#[derive(Debug, Clone)]
+pub struct ExtractedRun {
+    pub text: String,
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
 /// PDF content stream interpreter.
 pub struct ContentInterpreter<'a> {
     resolver: &'a Resolver<'a>,
@@ -163,6 +176,11 @@ pub struct ContentInterpreter<'a> {
     d1_color_suppressed: bool,
     font_cache: FontCache,
     current_font: Option<Arc<PdfFont>>,
+    /// When set, `show_text` also records unicode text runs with device-space
+    /// bounds (text extraction). Rendering output is unaffected.
+    collect_text: bool,
+    /// Runs collected while `collect_text` is on.
+    extracted_text: Vec<ExtractedRun>,
     /// CTM at the start of the current content stream (page or form).
     /// PDF pattern Matrix maps to the "default (initial) coordinate system
     /// of the parent content stream" — for patterns inside Form XObjects,
@@ -284,6 +302,8 @@ impl<'a> ContentInterpreter<'a> {
             nested_mask_flush_count: 0,
             font_cache: FontCache::new(),
             current_font: None,
+            collect_text: false,
+            extracted_text: Vec::new(),
             icc_cache: icc_cache.clone(),
             soft_mask_scope: None,
             font_provider,
@@ -2819,6 +2839,9 @@ impl<'a> ContentInterpreter<'a> {
             Some(f) => Arc::clone(f),
             None => return,
         };
+        // Text extraction: the pen position before and after the glyph loop
+        // spans the run; unicode comes from the font tables.
+        let extraction_start_tm = self.gstate.text_matrix;
 
         let font_size = self.gstate.font_size;
         let char_spacing = self.gstate.char_spacing;
@@ -3015,6 +3038,80 @@ impl<'a> ContentInterpreter<'a> {
                 self.gstate.text_matrix = self.gstate.text_matrix.concat(&advance);
             }
         }
+
+        if self.collect_text {
+            self.record_text_run(&font, text, &extraction_start_tm);
+        }
+    }
+
+    /// Turn on text-run collection (see [`ExtractedRun`]).
+    pub fn set_collect_text(&mut self, on: bool) {
+        self.collect_text = on;
+    }
+
+    /// Take the text runs collected so far.
+    pub fn take_extracted_text(&mut self) -> Vec<ExtractedRun> {
+        std::mem::take(&mut self.extracted_text)
+    }
+
+    /// Decode a show-text byte string to unicode through the current font,
+    /// mirroring `show_text`'s code iteration.
+    fn decode_text_unicode(&self, font: &PdfFont, text: &[u8]) -> String {
+        let mut out = String::new();
+        if font.is_composite() {
+            let mut i = 0;
+            while i < text.len() {
+                let code_width = font.code_width(text[i]);
+                let width = if code_width <= 1 {
+                    1
+                } else {
+                    code_width.min(text.len() - i)
+                };
+                let mut raw_code = 0u32;
+                for b in &text[i..i + width] {
+                    raw_code = (raw_code << 8) | (*b as u32);
+                }
+                i += width;
+                let cid = font.resolve_code_to_cid(raw_code) as u16;
+                if let Some(c) = font.composite_to_unicode(raw_code, cid) {
+                    out.push(c);
+                }
+            }
+        } else {
+            for &b in text {
+                if let Some(c) = font.simple_code_to_unicode(b) {
+                    out.push(c);
+                }
+            }
+        }
+        out
+    }
+
+    /// Record one extracted run: pen positions before/after the show-text op
+    /// span the baseline; the box height comes from the font size through the
+    /// same transforms the glyphs went through.
+    fn record_text_run(&mut self, font: &PdfFont, text: &[u8], start_tm: &Matrix) {
+        let decoded = self.decode_text_unicode(font, text);
+        if decoded.trim().is_empty() {
+            return;
+        }
+        let trm_start = self.gstate.ctm.concat(start_tm);
+        let trm_end = self.gstate.ctm.concat(&self.gstate.text_matrix);
+        let (x0, y0) = trm_start.transform_point(0.0, 0.0);
+        let (x1, y1) = trm_end.transform_point(0.0, 0.0);
+        let (hx, hy) = trm_start.transform_delta(0.0, self.gstate.font_size);
+        let height = (hx * hx + hy * hy).sqrt().max(1.0);
+        let x = x0.min(x1);
+        let w = (x1 - x0).abs().max(1.0);
+        // Device space is y-down; glyphs rise above the baseline.
+        let y = y0.min(y1) - height * 0.8;
+        self.extracted_text.push(ExtractedRun {
+            text: decoded,
+            x,
+            y,
+            w,
+            h: height,
+        });
     }
 
     /// Render a single CID glyph and advance the text position.

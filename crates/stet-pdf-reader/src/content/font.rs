@@ -148,6 +148,10 @@ pub struct CidCffPdfFont {
     pub identity_cid_to_gid: bool,
     /// CIDSystemInfo ordering for Unicode→CID width lookup.
     pub ordering: Vec<u8>,
+    /// CID → Unicode mapping from the parent Type 0 font's /ToUnicode CMap.
+    /// Attached after construction (the CFF constructors don't see the
+    /// composite font dict); used for text extraction.
+    pub to_unicode: HashMap<u16, u32>,
     pub font_matrix: Matrix,
     /// First-byte → code length table from the encoding CMap's codespace ranges.
     pub code_lengths: [u8; 256],
@@ -1108,6 +1112,7 @@ fn create_cid_cff_from_otf(
     };
 
     Ok(PdfFont::CidCff(CidCffPdfFont {
+        to_unicode: HashMap::new(),
         font,
         default_width,
         cid_widths,
@@ -1155,6 +1160,7 @@ fn create_cid_cff_from_raw(
     let font_matrix = Matrix::new(fm[0], fm[1], fm[2], fm[3], fm[4], fm[5]);
 
     Ok(PdfFont::CidCff(CidCffPdfFont {
+        to_unicode: HashMap::new(),
         font,
         default_width,
         cid_widths,
@@ -1342,6 +1348,7 @@ fn create_cid_from_ps_cidfont(
     };
 
     Ok(PdfFont::CidCff(CidCffPdfFont {
+        to_unicode: HashMap::new(),
         font: dummy_cff,
         default_width,
         cid_widths,
@@ -1435,6 +1442,7 @@ fn create_cid_from_type1(
     };
 
     Ok(PdfFont::CidCff(CidCffPdfFont {
+        to_unicode: HashMap::new(),
         font: dummy_cff,
         default_width,
         cid_widths,
@@ -2822,32 +2830,38 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                         (cid_to_gid_map, id)
                     };
                     if is_otf_cff {
-                        return create_cid_cff_from_otf(
-                            &font_data,
-                            default_width,
-                            cid_widths,
-                            &ordering,
-                            cid_to_gid_map,
-                            identity,
-                            code_lengths,
-                            code_to_cid.clone(),
-                            wmode,
-                            dw2,
-                            w2.clone(),
+                        return with_to_unicode(
+                            create_cid_cff_from_otf(
+                                &font_data,
+                                default_width,
+                                cid_widths,
+                                &ordering,
+                                cid_to_gid_map,
+                                identity,
+                                code_lengths,
+                                code_to_cid.clone(),
+                                wmode,
+                                dw2,
+                                w2.clone(),
+                            ),
+                            &to_unicode,
                         );
                     } else {
-                        return create_cid_cff_from_raw(
-                            &font_data,
-                            default_width,
-                            cid_widths,
-                            &ordering,
-                            cid_to_gid_map,
-                            identity,
-                            code_lengths,
-                            code_to_cid.clone(),
-                            wmode,
-                            dw2,
-                            w2.clone(),
+                        return with_to_unicode(
+                            create_cid_cff_from_raw(
+                                &font_data,
+                                default_width,
+                                cid_widths,
+                                &ordering,
+                                cid_to_gid_map,
+                                identity,
+                                code_lengths,
+                                code_to_cid.clone(),
+                                wmode,
+                                dw2,
+                                w2.clone(),
+                            ),
+                            &to_unicode,
                         );
                     }
                 }
@@ -2870,18 +2884,21 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                     .or_else(|_| load_cjk_fallback_font(&ordering, &base_font))?;
                 // If the system font is OpenType/CFF, use CFF rendering path
                 if sys_data.len() > 4 && &sys_data[0..4] == b"OTTO" {
-                    return create_cid_cff_from_otf(
-                        &sys_data,
-                        default_width,
-                        cid_widths,
-                        &ordering,
-                        None,
-                        false, // substituted: use cmap, not identity
-                        code_lengths,
-                        code_to_cid.clone(),
-                        wmode,
-                        dw2,
-                        w2.clone(),
+                    return with_to_unicode(
+                        create_cid_cff_from_otf(
+                            &sys_data,
+                            default_width,
+                            cid_widths,
+                            &ordering,
+                            None,
+                            false, // substituted: use cmap, not identity
+                            code_lengths,
+                            code_to_cid.clone(),
+                            wmode,
+                            dw2,
+                            w2.clone(),
+                        ),
+                        &to_unicode,
                     );
                 }
                 sys_data
@@ -3070,18 +3087,21 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                     // charstring index (identity mapping). For true CID-keyed CFF fonts,
                     // the CFF charset provides the CID→GID mapping, or the OTF cmap is used.
                     let cff_is_cid = is_cff_cid_keyed(&font_data);
-                    return create_cid_cff_from_otf(
-                        &font_data,
-                        default_width,
-                        cid_widths,
-                        &ordering,
-                        pdf_cid_to_gid,
-                        !cff_is_cid,
-                        code_lengths,
-                        code_to_cid.clone(),
-                        wmode,
-                        dw2,
-                        w2.clone(),
+                    return with_to_unicode(
+                        create_cid_cff_from_otf(
+                            &font_data,
+                            default_width,
+                            cid_widths,
+                            &ordering,
+                            pdf_cid_to_gid,
+                            !cff_is_cid,
+                            code_lengths,
+                            code_to_cid.clone(),
+                            wmode,
+                            dw2,
+                            w2.clone(),
+                        ),
+                        &to_unicode,
                     );
                 }
                 // PostScript CIDFont programs: "%!PS-Adobe-3.0 Resource-CIDFont"
@@ -3089,15 +3109,18 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                 if font_data.starts_with(b"%!")
                     && font_data.windows(16).any(|w| w == b"Resource-CIDFont")
                 {
-                    return create_cid_from_ps_cidfont(
-                        &font_data,
-                        default_width,
-                        cid_widths,
-                        code_lengths,
-                        code_to_cid.clone(),
-                        wmode,
-                        dw2,
-                        w2.clone(),
+                    return with_to_unicode(
+                        create_cid_from_ps_cidfont(
+                            &font_data,
+                            default_width,
+                            cid_widths,
+                            code_lengths,
+                            code_to_cid.clone(),
+                            wmode,
+                            dw2,
+                            w2.clone(),
+                        ),
+                        &to_unicode,
                     );
                 }
                 // Detect Type 1 font data (ASCII "%!" or PFB 0x80) mislabeled
@@ -3147,6 +3170,7 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                     let fm = font.font_matrix;
                     let font_matrix = Matrix::new(fm[0], fm[1], fm[2], fm[3], fm[4], fm[5]);
                     return Ok(PdfFont::CidCff(CidCffPdfFont {
+                        to_unicode: HashMap::new(),
                         font,
                         default_width,
                         cid_widths,
@@ -3206,18 +3230,21 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                     off + 4 <= sys_data.len() && &sys_data[off..off + 4] == b"OTTO"
                 };
                 if is_otto || is_ttc_cff {
-                    return create_cid_cff_from_otf(
-                        &sys_data,
-                        default_width,
-                        cid_widths,
-                        &ordering,
-                        None,
-                        identity,
-                        code_lengths,
-                        code_to_cid.clone(),
-                        wmode,
-                        dw2,
-                        w2.clone(),
+                    return with_to_unicode(
+                        create_cid_cff_from_otf(
+                            &sys_data,
+                            default_width,
+                            cid_widths,
+                            &ordering,
+                            None,
+                            identity,
+                            code_lengths,
+                            code_to_cid.clone(),
+                            wmode,
+                            dw2,
+                            w2.clone(),
+                        ),
+                        &to_unicode,
                     );
                 }
                 let data = sys_data;
@@ -3545,7 +3572,75 @@ fn strip_pfb(data: &[u8]) -> Vec<u8> {
 
 // === Glyph rendering ===
 
+/// Attach the parent Type 0 font dict's /ToUnicode CMap to a freshly built
+/// CID CFF font. The CFF constructors never see the composite font dict, so
+/// the mapping — needed only for text extraction — is attached here.
+fn with_to_unicode(
+    font: Result<PdfFont, PdfError>,
+    to_unicode: &HashMap<u16, u32>,
+) -> Result<PdfFont, PdfError> {
+    font.map(|mut f| {
+        if let PdfFont::CidCff(cf) = &mut f {
+            cf.to_unicode = to_unicode.clone();
+        }
+        f
+    })
+}
+
 impl PdfFont {
+    /// Unicode for a single-byte character code, for text extraction:
+    /// /ToUnicode CMap first, then the encoding's glyph name through the
+    /// Adobe Glyph List, then WinAnsi as the last resort.
+    pub fn simple_code_to_unicode(&self, byte: u8) -> Option<char> {
+        let to_unicode = match self {
+            PdfFont::TrueType(f) => Some(&f.to_unicode),
+            // Composite fonts use `composite_to_unicode`.
+            PdfFont::CidTrueType(f) => Some(&f.to_unicode),
+            PdfFont::CidCff(f) => Some(&f.to_unicode),
+            _ => None,
+        };
+        if let Some(tu) = to_unicode
+            && let Some(&u) = tu.get(&(byte as u16))
+        {
+            return char::from_u32(u);
+        }
+        let encoding = match self {
+            PdfFont::Type1(f) => Some(&f.encoding),
+            PdfFont::TrueType(f) => Some(&f.encoding),
+            PdfFont::Cff(f) => Some(&f.encoding),
+            _ => None,
+        };
+        if let Some(enc) = encoding
+            && let Some(name) = &enc[byte as usize]
+            && let Some(u) = stet_fonts::agl::glyph_name_to_unicode(name)
+        {
+            return char::from_u32(u as u32);
+        }
+        char::from_u32(winansi_byte_to_unicode(byte) as u32).filter(|c| *c != '\u{0}')
+    }
+
+    /// Unicode for a composite-font code, for text extraction: the
+    /// /ToUnicode CMap is keyed by character code (raw_code); CID and the
+    /// registry ordering (Japan1 etc.) are the fallbacks.
+    pub fn composite_to_unicode(&self, raw_code: u32, cid: u16) -> Option<char> {
+        let (to_unicode, ordering): (Option<&HashMap<u16, u32>>, &[u8]) = match self {
+            PdfFont::CidTrueType(f) => (Some(&f.to_unicode), &f.ordering),
+            PdfFont::CidCff(f) => (Some(&f.to_unicode), &f.ordering),
+            _ => (None, &[]),
+        };
+        if let Some(tu) = to_unicode {
+            if raw_code <= u16::MAX as u32
+                && let Some(&u) = tu.get(&(raw_code as u16))
+            {
+                return char::from_u32(u);
+            }
+            if let Some(&u) = tu.get(&cid) {
+                return char::from_u32(u);
+            }
+        }
+        super::cid_unicode::cid_to_unicode(ordering, cid).and_then(char::from_u32)
+    }
+
     /// Get glyph outline path for a character code (single-byte fonts).
     /// Returns None for Type 3 fonts (they use content streams, not outlines).
     pub fn glyph_path(&self, char_code: u8) -> Option<PsPath> {

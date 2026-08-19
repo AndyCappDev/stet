@@ -171,6 +171,7 @@
 
 pub mod annotations;
 pub mod content;
+pub use content::ExtractedRun;
 pub mod crypto;
 pub mod destination;
 pub mod diagnostics;
@@ -451,6 +452,55 @@ impl<'a> PdfDocument<'a> {
         }
 
         Ok(result)
+    }
+
+    /// Extract the page's text as unicode runs with device-space bounds at
+    /// the given DPI (top-left origin, y down — the display-list space).
+    ///
+    /// Interpretation runs the same content pipeline as `render_page`;
+    /// invisible text (render mode 3, e.g. searchable OCR layers) is
+    /// included, matching what PDF viewers extract. Annotations are not
+    /// walked — this is the page's own text.
+    pub fn extract_text_runs(
+        &self,
+        page: usize,
+        dpi: f64,
+    ) -> Result<Vec<content::ExtractedRun>, PdfError> {
+        let info = self
+            .pages
+            .get(page)
+            .ok_or(PdfError::PageOutOfRange(page, self.pages.len()))?;
+
+        let [llx, lly, urx, ury] = info.crop_box;
+        let (page_w, page_h) = ((urx - llx).abs(), (ury - lly).abs());
+        let scale = dpi / 72.0;
+        let ctm = match info.rotate.rem_euclid(360) {
+            90 => {
+                Matrix::new(0.0, scale, scale, 0.0, 0.0, 0.0).concat(&Matrix::translate(-llx, -lly))
+            }
+            180 => Matrix::new(-scale, 0.0, 0.0, scale, page_w * scale, 0.0)
+                .concat(&Matrix::translate(-llx, -lly)),
+            270 => Matrix::new(0.0, -scale, -scale, 0.0, page_h * scale, page_w * scale)
+                .concat(&Matrix::translate(-llx, -lly)),
+            _ => Matrix::new(scale, 0.0, 0.0, -scale, -llx * scale, ury * scale),
+        };
+
+        let content_data = self.page_contents(page)?;
+        let mut interpreter = ContentInterpreter::new(
+            &self.resolver,
+            info.resources.clone(),
+            ctm,
+            &self.icc_cache,
+            self.font_provider.clone(),
+            self.overprint,
+            &self.ocg_off,
+        );
+        interpreter.set_collect_text(true);
+        if let Err(e) = interpreter.interpret_stream_public(&content_data) {
+            eprintln!("warning: content stream error: {}", e);
+        }
+        interpreter.unwind_gstate_stack();
+        Ok(interpreter.take_extracted_text())
     }
 
     /// Render a page to a DisplayList at the given DPI.
