@@ -244,6 +244,10 @@ pub struct PdfDocument<'a> {
     /// When false (default), PDF overprint flags (OP/op) are suppressed —
     /// skips the expensive CMYK buffer simulation that most viewers omit.
     overprint: bool,
+    /// When false, `render_page` skips annotation appearance streams —
+    /// page content only. Viewers that draw annotations themselves (or
+    /// import them as editable objects) want the raster without them.
+    render_annotations: bool,
     /// Object numbers of Optional Content Groups that are OFF by default.
     /// Parsed from the catalog's /OCProperties /D /OFF array.
     ocg_off: HashSet<u32>,
@@ -368,6 +372,7 @@ impl<'a> PdfDocument<'a> {
             icc_cache,
             font_provider: None,
             overprint: true,
+            render_annotations: true,
             ocg_off,
             output_intent_icc,
             metadata_cache: OnceCell::new(),
@@ -451,6 +456,13 @@ impl<'a> PdfDocument<'a> {
         }
 
         Ok(result)
+    }
+
+    /// Choose whether `render_page` paints annotation appearance streams
+    /// (default: true). Viewers that draw annotations themselves want the
+    /// page content alone.
+    pub fn set_render_annotations(&mut self, on: bool) {
+        self.render_annotations = on;
     }
 
     /// Render a page to a DisplayList at the given DPI.
@@ -553,7 +565,7 @@ impl<'a> PdfDocument<'a> {
         interpreter.unwind_gstate_stack();
 
         // Render annotation appearance streams (form field values, stamps, etc.)
-        if !info.annots.is_empty() {
+        if self.render_annotations && !info.annots.is_empty() {
             interpreter.reset_clip_for_annotations();
             for &(n, g) in &info.annots {
                 let _ = interpreter.render_annotation(n, g);
