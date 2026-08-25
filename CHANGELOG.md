@@ -12,6 +12,15 @@ LCG idiom that programs use for pseudo-randomness and is the reason this is a
 breaking release rather than a patch. Three Type 3 font defects and a
 `clippath` coordinate-space bug are also fixed, and the CLI gains `--page`.
 
+### WebAssembly
+
+- **`stet-wasm` 0.2.0.** Its JavaScript API is unchanged, but the browser
+  build inherits everything below, so rendering output moves: `clippath`
+  backgrounds fill the page, Type 3 fonts that previously raised
+  `invalidfont` render, and PostScript programs using the standard LCG for
+  pseudo-randomness run instead of failing. A minor rather than a patch
+  because the pixels change, not because anything you call does.
+
 ### Breaking
 
 Downstream Rust code that reads PostScript integers needs attention; nothing
