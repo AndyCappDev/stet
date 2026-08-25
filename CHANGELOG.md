@@ -5,6 +5,50 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Type 3 fonts supplying only `BuildGlyph` raised `invalidfont`.** The show
+  path required `BuildChar` unconditionally and pushed the character code.
+  PLRM 5.7 lists `BuildGlyph` as preferred and makes `BuildChar` required only
+  "for LanguageLevel 1 or if `BuildGlyph` is absent", so such a font is
+  well-formed and must be handed the character *name* from `Encoding`.
+  Ghostscript renders these; stet refused them. `xshow`/`yshow`/`xyshow` had
+  the identical defect.
+- **`stringwidth` raised `invalidfont` on every Type 3 font**, `BuildChar`
+  ones included. It branched for font types 2, 0 and 42 and then fell through
+  to the Type 1 path, which looks for `CharStrings` — a Type 3 font has none.
+  There is no width table to consult: the width is whatever the build
+  procedure hands `setcachedevice`/`setcharwidth`, so the procedure now runs
+  inside a `gsave`/`grestore` with its marks drained, and measuring paints
+  nothing.
+- **`glyphshow` raised `invalidfont` on every Type 3 font.** It read
+  `FontType` but never branched on 3, going straight to the `CharStrings`
+  lookup. Per the PLRM it now invokes `BuildGlyph` with the name directly —
+  bypassing `Encoding`, which is what lets `glyphshow` reach glyphs no
+  character code maps to — or, with only `BuildChar`, reverse-searches
+  `Encoding` for the name and pushes the array index, retrying with
+  `/.notdef` and raising `invalidfont` only when neither is encoded.
+
+### Added
+
+- **The CLI reports a page that was painted but never shown.** A program that
+  paints marks and then ends without a matching `showpage` leaves them on a
+  page the device is never asked to emit, and the page is discarded. That is
+  correct — it is what the PLRM specifies and what Ghostscript's file devices
+  do — but it was indistinguishable from a broken renderer: no file appeared
+  and nothing said why. The warning distinguishes a program that produced no
+  output at all from one that lost only its trailing page.
+- **`Interpreter::warnings()`** surfaces the same diagnostic to library
+  callers, where the silence was worse: `render()` returned `Ok(vec![])`, an
+  empty page list that reads as a legitimate result. New public types
+  `ExecWarning` and `ExecWarningKind` in `stet::diagnostics`; the CLI shares
+  the detector, so the two cannot drift.
+- `GlyphCache::by_type3_name`, a name-keyed Type 3 glyph cache. `glyphshow`
+  can name a glyph that no character code maps to, which leaves nothing for
+  the existing code-keyed cache to key on.
+
 ## [0.4.1] — 2026-08-15
 
 Patch release. Two `currentsystemparams` values were wrong in every release
