@@ -61,6 +61,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   empty page list that reads as a legitimate result. New public types
   `ExecWarning` and `ExecWarningKind` in `stet::diagnostics`; the CLI shares
   the detector, so the two cannot drift.
+- **`--page` sets the page size for PostScript/EPS input** — a named size
+  (`letter`, `legal`, `tabloid`, `ledger`, `executive`, `a0`-`a6`, `b4`, `b5`)
+  or `WIDTHxHEIGHT` in points, with an optional `-landscape` / `-portrait`
+  suffix that swaps the dimensions. There was previously no way to render a
+  plain `%!PS` program whose artwork is larger than the default page:
+  `%%BoundingBox` sets the page only for EPS — for a non-EPS document DSC
+  makes it a description of the artwork's extent, not a page-size request, so
+  both stet and Ghostscript fall back to US Letter and clip. `--page`
+  overrides an EPS `%%BoundingBox` when both apply, and is rejected for PDF
+  input, whose pages carry their own size.
 - `GlyphCache::by_type3_name`, a name-keyed Type 3 glyph cache. `glyphshow`
   can name a glyph that no character code maps to, which leaves nothing for
   the existing code-keyed cache to key on.

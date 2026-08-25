@@ -119,10 +119,24 @@ fn main() {
     let mut password: Option<String> = None;
     let mut target_width: Option<u32> = None;
     let mut target_height: Option<u32> = None;
+    let mut page_size: Option<(f64, f64)> = None;
     let mut file_args: Vec<String> = Vec::new();
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
+            "--page" => {
+                if i + 1 < args.len() {
+                    page_size = Some(parse_page_size(&args[i + 1]).unwrap_or_else(|e| {
+                        eprintln!("Error: {}", e);
+                        std::process::exit(1);
+                    }));
+                    i += 2;
+                    continue;
+                } else {
+                    eprintln!("Error: --page requires a value (e.g. 'a4' or '620x1000')");
+                    std::process::exit(1);
+                }
+            }
             "--dpi" => {
                 if i + 1 < args.len() {
                     dpi = Some(args[i + 1].parse().unwrap_or_else(|_| {
@@ -350,6 +364,20 @@ fn main() {
         })
     });
 
+    // `--page` sets the PostScript page device; a PDF carries its own page
+    // sizes, and `--width`/`--height` are the PDF-side scaling knobs.
+    if page_size.is_some() && !file_args.is_empty() && file_args.iter().all(|f| is_pdf_file(f)) {
+        eprintln!(
+            "Error: --page applies to PostScript/EPS input; PDF pages carry their own \
+size (use --width/--height to scale PDF output)"
+        );
+        std::process::exit(1);
+    }
+    if page_size.is_some() && (target_width.is_some() || target_height.is_some()) {
+        eprintln!("Error: --page cannot be combined with --width/--height");
+        std::process::exit(1);
+    }
+
     if (target_width.is_some() || target_height.is_some())
         && !matches!(device.as_str(), "png" | "viewport-png")
     {
@@ -372,6 +400,7 @@ fn main() {
                 password.as_deref(),
                 target_width,
                 target_height,
+                page_size,
             );
         }
         "viewport-png" => {
@@ -388,6 +417,7 @@ fn main() {
                 password.as_deref(),
                 target_width,
                 target_height,
+                page_size,
             );
         }
         "pdf" => {
@@ -408,14 +438,22 @@ fn main() {
             } else {
                 // PS input → PDF output. --password does not apply here.
                 let _ = &password;
-                run_pdf_mode(dpi, file_args, &icc_cfg, no_aa, page_filter);
+                run_pdf_mode(dpi, file_args, &icc_cfg, no_aa, page_filter, page_size);
             }
         }
         "null" => {
-            run_null_mode(dpi, file_args, &icc_cfg, no_aa, page_filter);
+            run_null_mode(dpi, file_args, &icc_cfg, no_aa, page_filter, page_size);
         }
         #[cfg(feature = "viewer")]
-        "viewer" => run_viewer_mode(dpi, file_args, &icc_cfg, no_aa, page_filter, password),
+        "viewer" => run_viewer_mode(
+            dpi,
+            file_args,
+            &icc_cfg,
+            no_aa,
+            page_filter,
+            password,
+            page_size,
+        ),
         #[cfg(not(feature = "viewer"))]
         "viewer" => {
             eprintln!("Error: viewer not available (built without 'viewer' feature)");
@@ -444,6 +482,7 @@ fn run_png_mode(
     password: Option<&str>,
     target_width: Option<u32>,
     target_height: Option<u32>,
+    page_size: Option<(f64, f64)>,
 ) {
     // Check if all files are PDFs — use fast path (no PS interpreter needed)
     if !file_args.is_empty() && file_args.iter().all(|f| is_pdf_file(f)) {
@@ -485,7 +524,15 @@ fn run_png_mode(
     }));
 
     if !file_args.is_empty() {
-        run_file_jobs(&mut ctx, dpi_override, &file_args, "png", None, None);
+        run_file_jobs(
+            &mut ctx,
+            dpi_override,
+            &file_args,
+            "png",
+            page_size,
+            None,
+            None,
+        );
     } else {
         run_repl(&mut ctx);
     }
@@ -498,6 +545,7 @@ fn run_pdf_mode(
     icc_cfg: &IccCliConfig,
     _no_aa: bool,
     page_filter: Option<std::collections::HashSet<i32>>,
+    page_size: Option<(f64, f64)>,
 ) {
     let mut ctx = create_context(icc_cfg);
     ctx.page_filter = page_filter;
@@ -513,7 +561,15 @@ fn run_pdf_mode(
     stet_ops::register_pdf_authoring_ops(&mut ctx);
 
     if !file_args.is_empty() {
-        run_file_jobs(&mut ctx, dpi_override, &file_args, "pdf", None, None);
+        run_file_jobs(
+            &mut ctx,
+            dpi_override,
+            &file_args,
+            "pdf",
+            page_size,
+            None,
+            None,
+        );
     } else {
         eprintln!("Error: PDF device requires input files");
         std::process::exit(1);
@@ -529,6 +585,7 @@ fn run_null_mode(
     icc_cfg: &IccCliConfig,
     _no_aa: bool,
     page_filter: Option<std::collections::HashSet<i32>>,
+    page_size: Option<(f64, f64)>,
 ) {
     use stet_core::device::NullDevice;
 
@@ -537,7 +594,15 @@ fn run_null_mode(
     ctx.device_factory = Some(Box::new(|w, h| Box::new(NullDevice::new(w, h))));
 
     if !file_args.is_empty() {
-        run_file_jobs(&mut ctx, dpi_override, &file_args, "null", None, None);
+        run_file_jobs(
+            &mut ctx,
+            dpi_override,
+            &file_args,
+            "null",
+            page_size,
+            None,
+            None,
+        );
     } else {
         run_repl(&mut ctx);
     }
@@ -556,6 +621,7 @@ fn run_viewer_mode(
     no_aa: bool,
     page_filter: Option<std::collections::HashSet<i32>>,
     cli_password: Option<String>,
+    page_size: Option<(f64, f64)>,
 ) {
     use stet_core::device::NullDevice;
 
@@ -733,7 +799,7 @@ fn run_viewer_mode(
                         ));
                     }
                 }
-                run_file_jobs_viewer(&mut ctx, dpi_override, &ps_files, advance_rx);
+                run_file_jobs_viewer(&mut ctx, dpi_override, &ps_files, page_size, advance_rx);
             }
 
             // CLI files done — send final JobDone
@@ -802,6 +868,7 @@ fn run_viewer_mode(
                         established_dpi,
                         &[path.clone()],
                         "viewer",
+                        page_size,
                         None,
                         None,
                     );
@@ -928,6 +995,16 @@ Output devices:
 
 Common options:
     --dpi <DPI>             DPI for raster output (default 300).
+    --page <SIZE>           Page size for PostScript/EPS input, in points:
+                            a named size (letter, legal, tabloid, ledger,
+                            executive, a0-a6, b4, b5) or WIDTHxHEIGHT, e.g.
+                            \"620x1000\". Append -landscape or -portrait to
+                            orient a named size (\"a4-landscape\"). A plain
+                            %!PS program gets the default page unless it
+                            calls setpagedevice -- %%BoundingBox sets the
+                            page only for EPS -- so this is how to render a
+                            program whose artwork is larger than US Letter.
+                            Overrides an EPS %%BoundingBox when both apply.
     --pages <SPEC>          Page selection: \"3\", \"1-5\", \"1-3,7,10-12\".
     --width <PX>            Override page width (PDF input only). Cannot
                             be combined with --dpi.
@@ -1131,6 +1208,7 @@ fn run_file_jobs_viewer(
     ctx: &mut Context,
     dpi_override: Option<f64>,
     file_args: &[String],
+    page_size: Option<(f64, f64)>,
     advance_rx: std::sync::mpsc::Receiver<()>,
 ) {
     run_file_jobs(
@@ -1138,6 +1216,7 @@ fn run_file_jobs_viewer(
         dpi_override,
         file_args,
         "viewer",
+        page_size,
         None,
         Some(&advance_rx),
     );
@@ -1152,6 +1231,7 @@ fn run_file_jobs(
     dpi_override: Option<f64>,
     file_args: &[String],
     device: &str,
+    page_size: Option<(f64, f64)>,
     viewer_wait: Option<&std::sync::Arc<std::sync::atomic::AtomicU64>>,
     advance_receiver: Option<&std::sync::mpsc::Receiver<()>>,
 ) {
@@ -1214,7 +1294,15 @@ fn run_file_jobs(
             .map(|w| w.load(std::sync::atomic::Ordering::Relaxed))
             .unwrap_or(0);
 
-        let exec_result = execjob(ctx, dpi_override, ps_data, filename, device, is_eps);
+        let exec_result = execjob(
+            ctx,
+            dpi_override,
+            ps_data,
+            filename,
+            device,
+            page_size,
+            is_eps,
+        );
 
         let wait_after = viewer_wait
             .map(|w| w.load(std::sync::atomic::Ordering::Relaxed))
@@ -1307,6 +1395,7 @@ fn execjob(
     ps_data: &[u8],
     filename: &str,
     device_name: &str,
+    page_size: Option<(f64, f64)>,
     is_eps: bool,
 ) -> Result<(), stet_core::error::PsError> {
     use stet_core::error::PsError;
@@ -1344,7 +1433,19 @@ fn execjob(
     ctx.current_operator = None;
 
     // 7. Install device for this job
-    if is_eps {
+    //
+    // `--page` wins over everything: it is the user saying what the page is,
+    // which is the only way to render a plain `%!PS` program whose artwork is
+    // larger than the default page. `%%BoundingBox` cannot serve that purpose
+    // outside EPS — DSC makes it a description of the artwork's extent, not a
+    // page-size request, and a conforming interpreter uses the default page
+    // unless the program calls `setpagedevice`. Ghostscript does the same.
+    if let Some((w, h)) = page_size {
+        install_device_with_size(ctx, dpi_override, w, h, device_name);
+        if let Some(ref mut dev) = ctx.device {
+            dev.set_trim_box(0.0, 0.0, w, h);
+        }
+    } else if is_eps {
         if let Some((llx, lly, urx, ury)) = read_eps_bounding_box(ps_data) {
             let w = urx - llx;
             let h = ury - lly;
@@ -1554,6 +1655,82 @@ fn sync_context_after_init(ctx: &mut Context) {
 ///
 /// If `dpi_override` is `Some`, overwrite the device's HWResolution.
 /// Otherwise, use the HWResolution from the device's .ps resource file.
+/// Named page sizes, in PostScript points (1/72 inch).
+///
+/// The ISO sizes are the exact millimetre dimensions converted to points and
+/// rounded, matching what `setpagedevice` implementations and Ghostscript's
+/// `-sPAPERSIZE` use.
+const NAMED_PAGE_SIZES: &[(&str, f64, f64)] = &[
+    ("letter", 612.0, 792.0),
+    ("legal", 612.0, 1008.0),
+    ("tabloid", 792.0, 1224.0),
+    ("ledger", 1224.0, 792.0),
+    ("executive", 522.0, 756.0),
+    ("a0", 2384.0, 3370.0),
+    ("a1", 1684.0, 2384.0),
+    ("a2", 1191.0, 1684.0),
+    ("a3", 842.0, 1191.0),
+    ("a4", 595.0, 842.0),
+    ("a5", 420.0, 595.0),
+    ("a6", 297.0, 420.0),
+    ("b4", 709.0, 1001.0),
+    ("b5", 499.0, 709.0),
+];
+
+/// Parse a `--page` value: a named size or `WIDTHxHEIGHT` in points.
+///
+/// Accepts an optional `landscape`/`portrait` suffix separated by `-` or `,`
+/// (`a4-landscape`), which swaps the two dimensions rather than rotating the
+/// content — a PostScript program draws into whatever page it is given.
+fn parse_page_size(spec: &str) -> Result<(f64, f64), String> {
+    let lower = spec.trim().to_ascii_lowercase();
+    let (base, orientation) = match lower.rsplit_once(['-', ',']) {
+        Some((b, o)) if o == "landscape" || o == "portrait" => (b, Some(o)),
+        _ => (lower.as_str(), None),
+    };
+
+    let (mut w, mut h) = if let Some(&(_, w, h)) =
+        NAMED_PAGE_SIZES.iter().find(|(name, _, _)| *name == base)
+    {
+        (w, h)
+    } else {
+        let (ws, hs) = base.split_once('x').ok_or_else(|| {
+            format!(
+                "invalid --page value '{}' — expected a named size ({}) or WIDTHxHEIGHT in points, e.g. '620x1000'",
+                spec,
+                NAMED_PAGE_SIZES
+                    .iter()
+                    .map(|(n, _, _)| *n)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })?;
+        let w: f64 = ws
+            .trim()
+            .parse()
+            .map_err(|_| format!("invalid --page width '{}'", ws))?;
+        let h: f64 = hs
+            .trim()
+            .parse()
+            .map_err(|_| format!("invalid --page height '{}'", hs))?;
+        (w, h)
+    };
+
+    if !w.is_finite() || !h.is_finite() || w <= 0.0 || h <= 0.0 {
+        return Err(format!(
+            "--page dimensions must be positive, got {}x{}",
+            w, h
+        ));
+    }
+
+    match orientation {
+        Some("landscape") if h > w => std::mem::swap(&mut w, &mut h),
+        Some("portrait") if w > h => std::mem::swap(&mut w, &mut h),
+        _ => {}
+    }
+    Ok((w, h))
+}
+
 fn install_device(ctx: &mut Context, dpi_override: Option<f64>, device: &str) {
     if device == "null" {
         let _ = parse_and_exec(ctx, b"nulldevice");
@@ -2237,7 +2414,7 @@ fn run_inspect_subcommand(args: &[String]) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::compute_fit_dims;
+    use super::{compute_fit_dims, parse_page_size};
 
     const LETTER_W: f64 = 612.0;
     const LETTER_H: f64 = 792.0;
@@ -2296,5 +2473,57 @@ mod tests {
         assert_eq!(w, 99);
         assert_eq!(h, 128);
         assert!(close(dpi, 128.0 * 72.0 / 792.0)); // ~11.6
+    }
+
+    #[test]
+    fn page_size_named_and_explicit() {
+        assert_eq!(parse_page_size("a4"), Ok((595.0, 842.0)));
+        assert_eq!(parse_page_size("LETTER"), Ok((612.0, 792.0)));
+        assert_eq!(parse_page_size("620x1000"), Ok((620.0, 1000.0)));
+        // Whitespace around the dimensions is tolerated.
+        assert_eq!(parse_page_size(" 620 x 1000 "), Ok((620.0, 1000.0)));
+        // Fractional points are legal — PostScript units are reals.
+        assert_eq!(parse_page_size("100.5x200.25"), Ok((100.5, 200.25)));
+    }
+
+    #[test]
+    fn page_size_orientation_swaps_rather_than_rotates() {
+        assert_eq!(parse_page_size("a4-landscape"), Ok((842.0, 595.0)));
+        assert_eq!(parse_page_size("a4-portrait"), Ok((595.0, 842.0)));
+        // Already in the requested orientation — no double swap.
+        assert_eq!(parse_page_size("a4-landscape"), parse_page_size("842x595"));
+        // `ledger` is landscape `tabloid`; asking for portrait swaps it back.
+        assert_eq!(parse_page_size("ledger"), Ok((1224.0, 792.0)));
+        assert_eq!(parse_page_size("ledger-portrait"), Ok((792.0, 1224.0)));
+    }
+
+    #[test]
+    fn page_size_rejects_bad_input() {
+        // A non-positive or non-finite page has no meaning.
+        assert!(parse_page_size("0x100").is_err());
+        assert!(parse_page_size("-5x10").is_err());
+        assert!(parse_page_size("100x0").is_err());
+        // Unknown name, and malformed WIDTHxHEIGHT.
+        assert!(parse_page_size("bogus").is_err());
+        assert!(parse_page_size("620x").is_err());
+        assert!(parse_page_size("abcxdef").is_err());
+        assert!(parse_page_size("").is_err());
+        // The message names the alternatives, so the user can act on it.
+        let msg = parse_page_size("bogus").unwrap_err();
+        assert!(
+            msg.contains("letter"),
+            "message should list named sizes: {msg}"
+        );
+        assert!(
+            msg.contains("WIDTHxHEIGHT"),
+            "message should show the explicit form: {msg}"
+        );
+    }
+
+    #[test]
+    fn page_size_hyphen_only_special_for_orientation() {
+        // A trailing token that is not an orientation is part of the name,
+        // so it fails as an unknown size rather than being silently dropped.
+        assert!(parse_page_size("a4-sideways").is_err());
     }
 }
