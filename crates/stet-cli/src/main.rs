@@ -1404,6 +1404,20 @@ fn execjob(
 
     // --- Job cleanup (always runs, like a finally-block) ---
 
+    // 0. Diagnose the dropped-final-page case: the program painted marks and
+    //    then ended without a matching `showpage`, so the device was never
+    //    asked to emit that page. PLRM-correct, and what Ghostscript's file
+    //    devices do, but indistinguishable from a broken renderer unless we
+    //    say so — a program with no `showpage` at all writes no file.
+    //    Shares its detection and wording with the library's
+    //    `Interpreter::warnings`, so the two can't drift.
+    if job_result.is_ok()
+        && let Some(w) = stet::diagnostics::dropped_final_page(ctx)
+    {
+        eprintln!("Warning: {} {}.", filename, w);
+        eprintln!("         {}", w.hint());
+    }
+
     // 1. Flush device BEFORE restore (restore reverts gstate.page_device)
     if let Some(mut dev) = ctx.device.take() {
         if let Err(e) = dev.finish_with_context(ctx) {

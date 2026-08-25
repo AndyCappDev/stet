@@ -45,6 +45,7 @@
 //! | `render` | `render()` — RGBA pixel output | `stet-render` (tiny-skia) |
 //! | `pdf-output` | `render_to_pdf()` — PDF output | `stet-pdf` |
 
+pub mod diagnostics;
 pub mod embedded_resources;
 mod init;
 
@@ -57,6 +58,8 @@ use stet_core::error::PsError;
 use stet_core::object::PsValue;
 use stet_engine::eval::parse_and_exec;
 use stet_graphics::display_list::DisplayList;
+
+pub use diagnostics::{ExecWarning, ExecWarningKind};
 
 // Re-exports for power users
 pub use stet_core::context::Context as PsContext;
@@ -113,6 +116,7 @@ pub struct RenderedPage {
 pub struct Interpreter {
     ctx: Context,
     use_icc: bool,
+    warnings: Vec<ExecWarning>,
 }
 
 /// Builder for configuring an [`Interpreter`] before creation.
@@ -195,6 +199,7 @@ impl Interpreter {
         ps_data: &[u8],
         dpi: f64,
     ) -> Result<Vec<DisplayListPage>, StetError> {
+        self.warnings.clear();
         let ps_data = strip_dos_eps_header(ps_data);
         let is_eps = content_is_epsf(ps_data);
 
@@ -220,6 +225,7 @@ impl Interpreter {
     /// Returns the PDF file contents as bytes.
     #[cfg(feature = "pdf-output")]
     pub fn render_to_pdf(&mut self, ps_data: &[u8], dpi: f64) -> Result<Vec<u8>, StetError> {
+        self.warnings.clear();
         let ps_data = strip_dos_eps_header(ps_data);
         let is_eps = content_is_epsf(ps_data);
 
@@ -262,6 +268,8 @@ impl Interpreter {
             parse_and_exec(&mut self.ctx, ps_data).map_err(ps_err)
         };
 
+        self.record_end_of_job_warnings();
+
         // Finish device and extract PDF bytes
         let pdf_bytes = if let Some(mut dev) = self.ctx.device.take() {
             let _ = dev.finish_with_context(&self.ctx);
@@ -302,9 +310,50 @@ impl Interpreter {
         }
     }
 
+    /// Non-fatal problems noticed during the most recent render call.
+    ///
+    /// Cleared at the start of each [`render`], [`render_to_display_list`],
+    /// and [`render_to_pdf`] call, so this always describes the latest one.
+    ///
+    /// The case worth checking for is a program that paints marks and never
+    /// calls `showpage`: the page is discarded, the render returns an empty
+    /// page list, and without this there is nothing to distinguish that from
+    /// a program that legitimately drew nothing.
+    ///
+    /// ```no_run
+    /// let mut interp = stet::Interpreter::new();
+    /// let pages = interp.render(b"%!PS\n0 0 100 100 rectfill", 72.0).unwrap();
+    /// if pages.is_empty() {
+    ///     for w in interp.warnings() {
+    ///         eprintln!("warning: {}\n         {}", w, w.hint());
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// [`exec`] is not covered: it runs on a null device for side effects
+    /// only, where pending marks are expected rather than a problem.
+    ///
+    /// [`render`]: Interpreter::render
+    /// [`render_to_display_list`]: Interpreter::render_to_display_list
+    /// [`render_to_pdf`]: Interpreter::render_to_pdf
+    /// [`exec`]: Interpreter::exec
+    pub fn warnings(&self) -> &[ExecWarning] {
+        &self.warnings
+    }
+
     /// Access the underlying Context for power-user operations.
     pub fn context(&mut self) -> &mut Context {
         &mut self.ctx
+    }
+
+    /// Record a dropped-final-page warning if the job left marks unpainted.
+    ///
+    /// Must be called before `finish_device`/`vm_restore` — the restore tears
+    /// down the page device the check reads `PageCount` from.
+    fn record_end_of_job_warnings(&mut self) {
+        if let Some(w) = diagnostics::dropped_final_page(&self.ctx) {
+            self.warnings.push(w);
+        }
     }
 
     // --- Internal rendering helpers ---
@@ -341,6 +390,7 @@ impl Interpreter {
             Err(e) => Err(StetError::PostScript(e.to_string())),
         };
 
+        self.record_end_of_job_warnings();
         finish_device(&mut self.ctx);
 
         #[cfg(feature = "render")]
@@ -406,6 +456,9 @@ impl Interpreter {
             let _ = parse_and_exec(&mut self.ctx, b"grestore");
         }
 
+        // Runs after the implicit `showpage` above, so it fires only if the
+        // EPS painted more after its own showpage — a real dropped page.
+        self.record_end_of_job_warnings();
         finish_device(&mut self.ctx);
 
         #[cfg(feature = "render")]
@@ -478,6 +531,7 @@ impl InterpreterBuilder {
         Interpreter {
             ctx,
             use_icc: self.use_icc,
+            warnings: Vec::new(),
         }
     }
 }
