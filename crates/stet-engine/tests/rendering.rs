@@ -910,6 +910,134 @@ fn test_type3_stringwidth_measures_without_painting() {
     assert!(wy.abs() < 0.01, "wy was {wy}, expected 0");
 }
 
+/// `glyphshow` on a Type 3 font with `BuildGlyph` hands it the name directly,
+/// bypassing `Encoding`.
+///
+/// The bypass is the point of `glyphshow` (PLRM: "glyphshow bypasses the
+/// current font's Encoding array; it can access any character in the font,
+/// whether or not that character's name is present in the encoding vector"),
+/// so `/unencoded` — which no code maps to — must still reach BuildGlyph.
+#[test]
+fn test_type3_glyphshow_buildglyph_bypasses_encoding() {
+    let mut ctx = render_ctx(200, 200);
+    let mut src = TYPE3_BUILDGLYPH_ONLY_FONT.to_vec();
+    src.extend_from_slice(b"0 0 moveto /square glyphshow /unencoded glyphshow\n");
+    src.extend_from_slice(b"0 1 SeenIdx 1 sub { SeenNames exch get } for\n");
+    stet_engine::eval::parse_and_exec(&mut ctx, &src).expect("Type 3 glyphshow must work");
+
+    let names: Vec<String> = (0..ctx.o_stack.len())
+        .rev()
+        .map(|i| match ctx.o_stack.peek(i).expect("stack entry").value {
+            stet_core::object::PsValue::Name(id) => {
+                String::from_utf8_lossy(ctx.names.get_bytes(id)).into_owned()
+            }
+            other => panic!("expected a name, got {other:?}"),
+        })
+        .collect();
+
+    assert_eq!(
+        names,
+        vec!["square", "unencoded"],
+        "glyphshow must pass the name straight through, including one that is \
+         not in Encoding"
+    );
+}
+
+/// A Type 3 font with only `BuildChar`, for the `glyphshow` reverse-lookup
+/// path. Code 66 is `/bar`; every other code is `/.notdef`.
+const TYPE3_BUILDCHAR_ONLY_FONT: &[u8] = b"
+    /T3C 8 dict def
+    /SeenCodes 8 array def
+    /SeenIdx 0 def
+    T3C begin
+      /FontType 3 def
+      /FontMatrix [0.001 0 0 0.001 0 0] def
+      /FontBBox [0 0 1000 1000] def
+      /Encoding 256 array def
+      0 1 255 { Encoding exch /.notdef put } for
+      Encoding 66 /bar put
+      /BuildChar {
+        exch pop
+        dup SeenCodes SeenIdx 3 -1 roll put
+        /SeenIdx SeenIdx 1 add def
+        600 0 setcharwidth
+        pop 100 100 200 700 rectfill
+      } bind def
+    end
+    /T3C T3C definefont pop
+    /T3C findfont 100 scalefont setfont
+";
+
+/// `glyphshow` on a BuildChar-only Type 3 font reverse-searches `Encoding` for
+/// the name and passes the resulting code.
+///
+/// PLRM: "If there is no BuildGlyph procedure, but only a BuildChar procedure,
+/// glyphshow searches the font's Encoding array for an occurrence of name. If
+/// it finds one, it pushes the font dictionary and the array index". An
+/// unencoded name falls back to searching for `/.notdef`, which this font has
+/// at code 0. Ghostscript produces the same two codes.
+#[test]
+fn test_type3_glyphshow_buildchar_reverse_encoding_lookup() {
+    let mut ctx = render_ctx(200, 200);
+    let mut src = TYPE3_BUILDCHAR_ONLY_FONT.to_vec();
+    src.extend_from_slice(b"0 0 moveto /bar glyphshow /nosuchglyph glyphshow\n");
+    src.extend_from_slice(b"0 1 SeenIdx 1 sub { SeenCodes exch get } for\n");
+    stet_engine::eval::parse_and_exec(&mut ctx, &src).expect("Type 3 glyphshow must work");
+
+    let codes: Vec<i32> = (0..ctx.o_stack.len())
+        .rev()
+        .map(|i| {
+            ctx.o_stack
+                .peek(i)
+                .expect("stack entry")
+                .as_i32()
+                .expect("integer code")
+        })
+        .collect();
+
+    assert_eq!(
+        codes,
+        vec![66, 0],
+        "/bar is encoded at 66; /nosuchglyph falls back to the /.notdef search, \
+         which finds code 0"
+    );
+}
+
+/// With neither the name nor `/.notdef` in `Encoding`, `glyphshow` on a
+/// BuildChar-only Type 3 font raises `invalidfont`.
+///
+/// PLRM: "If .notdef is not present either, an invalidfont error occurs."
+/// Ghostscript raises the same error for the same font.
+#[test]
+fn test_type3_glyphshow_without_notdef_is_invalidfont() {
+    let mut ctx = render_ctx(200, 200);
+    let src = b"
+        /FN 8 dict def
+        FN begin
+          /FontType 3 def
+          /FontMatrix [0.001 0 0 0.001 0 0] def
+          /FontBBox [0 0 1000 1000] def
+          /Encoding 256 array def
+          0 1 255 { Encoding exch /filler put } for
+          /BuildChar { pop pop 600 0 setcharwidth } bind def
+        end
+        /FN FN definefont pop
+        /FN findfont 100 scalefont setfont
+        0 0 moveto /nosuchglyph
+    ";
+    stet_engine::eval::parse_and_exec(&mut ctx, src).expect("font setup should succeed");
+
+    // Invoke the operator directly: this bare context has no init scripts, so
+    // an error raised through the eval loop surfaces only as `Stop` with no
+    // populated $error to inspect. Calling it here gets the typed error.
+    let err = stet_ops::show_ops::op_glyphshow(&mut ctx)
+        .expect_err("glyphshow must fail when neither the name nor /.notdef is encoded");
+    assert!(
+        matches!(err, stet_core::error::PsError::InvalidFont),
+        "expected invalidfont, got {err:?}"
+    );
+}
+
 /// Helper: Write adapter that captures bytes to a shared Vec.
 struct OutputCapture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 

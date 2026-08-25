@@ -254,6 +254,10 @@ gsave
 { newpath 0 0 moveto (A) false charpath roundedbbox } [4 0 26 30] assert
 grestore
 
+% Restore currentpoint for any subsequent tests
+0 0 moveto
+
+
 %% =============================================================================
 %% Type 3 dispatch: BuildGlyph vs BuildChar
 %% =============================================================================
@@ -289,7 +293,29 @@ T3G begin
 end
 /T3G T3G definefont pop
 
+% BuildChar only, for the glyphshow reverse-lookup path.
+/T3C 8 dict def
+/CSeen 8 array def
+/CIdx 0 def
+T3C begin
+  /FontType 3 def
+  /FontMatrix [0.001 0 0 0.001 0 0] def
+  /FontBBox [0 0 1000 1000] def
+  /Encoding 256 array def
+  0 1 255 { Encoding exch /.notdef put } for
+  Encoding 66 /bar put
+  /BuildChar {
+    exch pop
+    dup CSeen CIdx 3 -1 roll put
+    /CIdx CIdx 1 add def
+    600 0 setcharwidth
+    pop
+  } bind def
+end
+/T3C T3C definefont pop
+
 /gseen { 0 1 GIdx 1 sub { GSeen exch get } for } def
+/cseen { 0 1 CIdx 1 sub { CSeen exch get } for } def
 
 %% show on a BuildGlyph-only Type 3 font renders %%
 % Regression: this used to raise invalidfont because BuildChar was required
@@ -326,6 +352,52 @@ newpath
 { (AB) stringwidth pop pop
   0 { pop pop 1 add } { pop pop 1 add } { 6 { pop } repeat 1 add } { 1 add }
   pathforall } [0] assert
+grestore
+
+%% glyphshow reaches BuildGlyph by name, bypassing Encoding %%
+% PLRM: "glyphshow bypasses the current font's Encoding array; it can access
+% any character in the font, whether or not that character's name is present
+% in the font's encoding vector." /unencoded is in no Encoding slot.
+gsave
+/T3G findfont 100 scalefont setfont
+/GIdx 0 def
+{ 0 0 moveto /square glyphshow /unencoded glyphshow gseen }
+  [/square /unencoded] assert
+grestore
+
+%% glyphshow advances the current point by the glyph width %%
+gsave
+/T3G findfont 100 scalefont setfont
+{ 0 0 moveto /square glyphshow /unencoded glyphshow currentpoint }
+  [120.0 0.0] assert
+grestore
+
+%% glyphshow on a BuildChar-only font reverse-searches Encoding %%
+% PLRM: "glyphshow searches the font's Encoding array for an occurrence of
+% name. If it finds one, it pushes the font dictionary and the array index."
+% /nosuchglyph is absent, so the search repeats for /.notdef and finds code 0.
+% Ghostscript passes the same two codes.
+gsave
+/T3C findfont 100 scalefont setfont
+/CIdx 0 def
+{ 0 0 moveto /bar glyphshow /nosuchglyph glyphshow cseen } [66 0] assert
+grestore
+
+%% glyphshow raises invalidfont when neither name nor /.notdef is encoded %%
+% PLRM: "If .notdef is not present either, an invalidfont error occurs."
+/T3NoNotdef 8 dict def
+T3NoNotdef begin
+  /FontType 3 def
+  /FontMatrix [0.001 0 0 0.001 0 0] def
+  /FontBBox [0 0 1000 1000] def
+  /Encoding 256 array def
+  0 1 255 { Encoding exch /filler put } for
+  /BuildChar { pop pop 600 0 setcharwidth } bind def
+end
+/T3NoNotdef T3NoNotdef definefont pop
+gsave
+/T3NoNotdef findfont 100 scalefont setfont
+{ 0 0 moveto /nosuchglyph glyphshow } [/invalidfont] assert
 grestore
 
 % Restore currentpoint for any subsequent tests

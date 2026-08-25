@@ -791,6 +791,11 @@ pub fn op_glyphshow(ctx: &mut Context) -> Result<(), PsError> {
         .and_then(|obj| obj.as_i32())
         .unwrap_or(1);
 
+    // Type 3 has no CharStrings — the glyph is a procedure, not a charstring.
+    if font_type == 3 {
+        return glyphshow_type3(ctx, font_obj, font_entity, glyph_name_id);
+    }
+
     // Get CharStrings dict
     let cs_entity = ctx
         .dicts
@@ -2710,6 +2715,203 @@ fn encoding_name_for_code(
     }
 }
 
+/// How one Type 3 glyph's cached result is keyed.
+///
+/// `show` and its variants select glyphs by character code. `glyphshow`
+/// selects by name and bypasses `Encoding` entirely (PLRM: "glyphshow bypasses
+/// the current font's Encoding array"), so it can reach a glyph no code maps
+/// to — that glyph has no code to key on and needs the name.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Type3CacheKey {
+    Code(u8),
+    Name(stet_core::object::NameId),
+}
+
+/// Look up a Type 3 glyph in the per-font cache.
+fn type3_cache_get(
+    ctx: &Context,
+    font_entity: EntityId,
+    key: Type3CacheKey,
+) -> Option<CachedType3Glyph> {
+    let gc = ctx.glyph_caches.get(&font_entity)?;
+    match key {
+        Type3CacheKey::Code(code) => gc.by_charcode.get(&code).cloned(),
+        Type3CacheKey::Name(name) => gc.by_type3_name.get(&name).cloned(),
+    }
+}
+
+/// Store a Type 3 glyph in the per-font cache.
+fn type3_cache_put(
+    ctx: &mut Context,
+    font_entity: EntityId,
+    key: Type3CacheKey,
+    entry: CachedType3Glyph,
+) {
+    let cache = ctx.glyph_caches.entry(font_entity).or_default();
+    match key {
+        Type3CacheKey::Code(code) => {
+            cache.by_charcode.insert(code, entry);
+        }
+        Type3CacheKey::Name(name) => {
+            cache.by_type3_name.insert(name, entry);
+        }
+    }
+}
+
+/// Replay an already-built Type 3 glyph at `(cur_x, cur_y)` in user space.
+///
+/// `setcachedevice` makes a glyph a stencil (PLRM), so the cached marks are
+/// translated into place and recolored with the *current* colour rather than
+/// the one in force when the glyph was first built. Returns the glyph's width
+/// in glyph space.
+fn replay_cached_type3(
+    ctx: &mut Context,
+    cg: &CachedType3Glyph,
+    cur_x: f64,
+    cur_y: f64,
+    ctm: &Matrix,
+    charpath: bool,
+) -> (f64, f64) {
+    let (dev_x, dev_y) = ctm.transform_point(cur_x, cur_y);
+    let dx = dev_x - cg.origin_dev_x;
+    let dy = dev_y - cg.origin_dev_y;
+    let color = &ctx.gstate.color;
+    let recolored: Vec<_> = cg
+        .elements
+        .iter()
+        .map(|elem| recolor_and_translate_element(elem, dx, dy, color))
+        .collect();
+    if charpath {
+        append_charpath_outline(ctx, &recolored);
+    } else {
+        let target = ctx.current_display_list_mut();
+        for elem in recolored {
+            target.push(elem);
+        }
+    }
+    cg.width
+}
+
+/// Run one Type 3 glyph's build procedure at `(cur_x, cur_y)` in user space.
+///
+/// The procedure runs inside a gsave/grestore with the current position and
+/// `FontMatrix` concatenated, is handed the font dict plus `operand`, and
+/// declares its own width via `setcachedevice`/`setcharwidth`. Glyphs built
+/// with `setcachedevice` are cached under `key`; `setcharwidth` glyphs are
+/// defined as uncacheable and are not.
+///
+/// In `charpath` mode the marks are taken back off the display list and
+/// appended to the current path instead of reaching the page.
+///
+/// Returns the width the procedure declared, in glyph space.
+#[allow(clippy::too_many_arguments)]
+fn build_type3_glyph(
+    ctx: &mut Context,
+    font_obj: PsObject,
+    font_entity: EntityId,
+    build_proc: PsObject,
+    operand: PsObject,
+    key: Type3CacheKey,
+    cur_x: f64,
+    cur_y: f64,
+    ctm: &Matrix,
+    charpath: bool,
+) -> Result<(f64, f64), PsError> {
+    ctx.char_width = None;
+    ctx.char_width_mode1 = None;
+    ctx.char_cache_mode = None;
+
+    // Record display list position before the build procedure (on the active
+    // emit target, which may be a transparency group's list).
+    let dl_start = ctx.current_display_list().len();
+    // Record device-space origin for cache
+    let (origin_dev_x, origin_dev_y) = ctm.transform_point(cur_x, cur_y);
+
+    // gsave, translate to current position, concat FontMatrix
+    crate::graphics_state_ops::op_gsave(ctx)?;
+
+    ctx.o_stack.push(PsObject::real(cur_x))?;
+    ctx.o_stack.push(PsObject::real(cur_y))?;
+    crate::matrix_ops::op_translate(ctx)?;
+
+    // Re-read FontMatrix from dict (in case the procedure modified it)
+    let fm_obj = ctx
+        .dicts
+        .get(font_entity, &DictKey::Name(ctx.name_cache.n_font_matrix))
+        .ok_or(PsError::InvalidFont)?;
+    ctx.o_stack.push(fm_obj)?;
+    crate::matrix_ops::op_concat(ctx)?;
+
+    // The font dict, then the operand the procedure expects — the character
+    // name for BuildGlyph, the character code for BuildChar.
+    ctx.o_stack.push(font_obj)?;
+    ctx.o_stack.push(operand)?;
+
+    // Execute the procedure synchronously. In charpath mode the painting
+    // operators divert their paths into `charpath_capture` instead of
+    // marking the page; anything else the procedure emits lands on the
+    // display list and is drained below. A nested `show` leaves the
+    // installed buffer alone, so painting inside it still diverts to
+    // the charpath that is running.
+    let outer_capture = if charpath {
+        ctx.charpath_capture.replace(PsPath::new())
+    } else {
+        None
+    };
+    let build_result = ctx.exec_sync(build_proc);
+    let captured = if charpath {
+        std::mem::replace(&mut ctx.charpath_capture, outer_capture)
+    } else {
+        None
+    };
+    build_result?;
+
+    // grestore to undo the gsave+translate+concat
+    crate::graphics_state_ops::op_grestore(ctx)?;
+
+    // Get char width set by setcachedevice/setcharwidth during the procedure
+    let char_width = ctx.char_width.take().unwrap_or((0.0, 0.0));
+
+    // In charpath mode the glyph's marks must not reach the page:
+    // take them back off the display list and keep them for the path.
+    let drained: Option<Vec<DisplayElement>> = if charpath {
+        Some(
+            ctx.current_display_list_mut()
+                .split_off(dl_start)
+                .into_elements(),
+        )
+    } else {
+        None
+    };
+
+    // Cache if setcachedevice was called (not setcharwidth)
+    if ctx.char_cache_mode == Some(Type3CacheMode::Cache) {
+        let elements: Vec<DisplayElement> = match &drained {
+            Some(elements) => elements.clone(),
+            None => ctx.current_display_list().elements_from(dl_start).to_vec(),
+        };
+        type3_cache_put(
+            ctx,
+            font_entity,
+            key,
+            CachedType3Glyph {
+                elements,
+                origin_dev_x,
+                origin_dev_y,
+                width: char_width,
+            },
+        );
+    }
+
+    if let Some(elements) = drained {
+        let mut segments = captured.map(|p| p.segments).unwrap_or_default();
+        collect_painted_segments(&elements, &mut segments);
+        append_charpath_segments(ctx, segments);
+    }
+
+    Ok(char_width)
+}
+
 /// Run a Type 3 font's BuildChar/BuildGlyph procedure over `bytes`.
 ///
 /// With `charpath` false this is `show`: the marks the glyph procedure makes
@@ -2765,135 +2967,29 @@ fn render_show_type3(
 
     // Render each character synchronously
     for &byte in bytes {
-        // Check Type 3 glyph cache
-        let cached = ctx
-            .glyph_caches
-            .get(&font_entity)
-            .and_then(|gc| gc.by_charcode.get(&byte))
-            .cloned();
-
-        if let Some(cg) = cached {
-            // Replay cached display list elements, translated to current device position
-            // and recolored with the current color (setcachedevice = stencil cache per PLRM)
-            let (dev_x, dev_y) = ctm.transform_point(cur_x, cur_y);
-            let dx = dev_x - cg.origin_dev_x;
-            let dy = dev_y - cg.origin_dev_y;
-            let color = &ctx.gstate.color;
-            let recolored: Vec<_> = cg
-                .elements
-                .iter()
-                .map(|elem| recolor_and_translate_element(elem, dx, dy, color))
-                .collect();
-            if charpath {
-                append_charpath_outline(ctx, &recolored);
-            } else {
-                let target = ctx.current_display_list_mut();
-                for elem in recolored {
-                    target.push(elem);
-                }
+        let key = Type3CacheKey::Code(byte);
+        let char_width = match type3_cache_get(ctx, font_entity, key) {
+            Some(cg) => replay_cached_type3(ctx, &cg, cur_x, cur_y, &ctm, charpath),
+            None => {
+                let operand = type3_build_operand(ctx, font_entity, build_kind, byte);
+                build_type3_glyph(
+                    ctx,
+                    font_obj,
+                    font_entity,
+                    build_proc,
+                    operand,
+                    key,
+                    cur_x,
+                    cur_y,
+                    &ctm,
+                    charpath,
+                )?
             }
-            let (wx, wy) = font_matrix.transform_delta(cg.width.0, cg.width.1);
-            cur_x += wx + extra_ax;
-            cur_y += wy + extra_ay;
-        } else {
-            ctx.char_width = None;
-            ctx.char_width_mode1 = None;
-            ctx.char_cache_mode = None;
+        };
 
-            // Record display list position before BuildChar (on the active
-            // emit target, which may be a transparency group's list).
-            let dl_start = ctx.current_display_list().len();
-            // Record device-space origin for cache
-            let (origin_dev_x, origin_dev_y) = ctm.transform_point(cur_x, cur_y);
-
-            // gsave, translate to current position, concat FontMatrix
-            crate::graphics_state_ops::op_gsave(ctx)?;
-
-            ctx.o_stack.push(PsObject::real(cur_x))?;
-            ctx.o_stack.push(PsObject::real(cur_y))?;
-            crate::matrix_ops::op_translate(ctx)?;
-
-            // Re-read FontMatrix from dict (in case BuildChar modified it)
-            let fm_obj = ctx
-                .dicts
-                .get(font_entity, &DictKey::Name(ctx.name_cache.n_font_matrix))
-                .ok_or(PsError::InvalidFont)?;
-            ctx.o_stack.push(fm_obj)?;
-            crate::matrix_ops::op_concat(ctx)?;
-
-            // Push the font dict and the operand the procedure expects — the
-            // character name for BuildGlyph, the character code for BuildChar.
-            let operand = type3_build_operand(ctx, font_entity, build_kind, byte);
-            ctx.o_stack.push(font_obj)?;
-            ctx.o_stack.push(operand)?;
-
-            // Execute the procedure synchronously. In charpath mode the painting
-            // operators divert their paths into `charpath_capture` instead of
-            // marking the page; anything else the procedure emits lands on the
-            // display list and is drained below. A nested `show` leaves the
-            // installed buffer alone, so painting inside it still diverts to
-            // the charpath that is running.
-            let outer_capture = if charpath {
-                ctx.charpath_capture.replace(PsPath::new())
-            } else {
-                None
-            };
-            let build_result = ctx.exec_sync(build_proc);
-            let captured = if charpath {
-                std::mem::replace(&mut ctx.charpath_capture, outer_capture)
-            } else {
-                None
-            };
-            build_result?;
-
-            // grestore to undo the gsave+translate+concat
-            crate::graphics_state_ops::op_grestore(ctx)?;
-
-            // Get char width set by setcachedevice/setcharwidth during BuildChar
-            let char_width = ctx.char_width.take().unwrap_or((0.0, 0.0));
-
-            // In charpath mode the glyph's marks must not reach the page:
-            // take them back off the display list and keep them for the path.
-            let drained: Option<Vec<DisplayElement>> = if charpath {
-                Some(
-                    ctx.current_display_list_mut()
-                        .split_off(dl_start)
-                        .into_elements(),
-                )
-            } else {
-                None
-            };
-
-            // Cache if setcachedevice was called (not setcharwidth)
-            if ctx.char_cache_mode == Some(Type3CacheMode::Cache) {
-                let elements: Vec<DisplayElement> = match &drained {
-                    Some(elements) => elements.clone(),
-                    None => ctx.current_display_list().elements_from(dl_start).to_vec(),
-                };
-                let cache = ctx.glyph_caches.entry(font_entity).or_default();
-                cache.by_charcode.insert(
-                    byte,
-                    CachedType3Glyph {
-                        elements,
-                        origin_dev_x,
-                        origin_dev_y,
-                        width: char_width,
-                    },
-                );
-            }
-
-            if let Some(elements) = drained {
-                let mut segments = captured.map(|p| p.segments).unwrap_or_default();
-                collect_painted_segments(&elements, &mut segments);
-                append_charpath_segments(ctx, segments);
-            }
-
-            let (wx, wy) = font_matrix.transform_delta(char_width.0, char_width.1);
-
-            // Advance current position in user space
-            cur_x += wx + extra_ax;
-            cur_y += wy + extra_ay;
-        }
+        let (wx, wy) = font_matrix.transform_delta(char_width.0, char_width.1);
+        cur_x += wx + extra_ax;
+        cur_y += wy + extra_ay;
 
         if byte as i32 == width_char {
             cur_x += cx;
@@ -2906,6 +3002,96 @@ fn render_show_type3(
     ctx.gstate.current_point = Some((dev_x, dev_y));
 
     Ok(())
+}
+
+/// `glyphshow` for a Type 3 font.
+///
+/// PLRM (`glyphshow`): if the font has a `BuildGlyph` procedure, the font dict
+/// and `name` are pushed and `BuildGlyph` invoked directly — the `Encoding`
+/// array is bypassed, which is the whole point of `glyphshow` and lets it
+/// reach glyphs no character code maps to.
+///
+/// With only a `BuildChar` procedure there is no way to pass a name, so
+/// `glyphshow` "searches the font's Encoding array for an occurrence of name.
+/// If it finds one, it pushes the font dictionary and the array index". Failing
+/// that it "substitutes the name .notdef and repeats the search. If .notdef is
+/// not present either, an invalidfont error occurs."
+fn glyphshow_type3(
+    ctx: &mut Context,
+    font_obj: PsObject,
+    font_entity: EntityId,
+    glyph_name_id: stet_core::object::NameId,
+) -> Result<(), PsError> {
+    let (build_proc, build_kind) = resolve_type3_build_proc(ctx, font_entity)?;
+
+    let (operand, key) = match build_kind {
+        Type3BuildProc::Glyph => (
+            PsObject::name_lit(glyph_name_id),
+            Type3CacheKey::Name(glyph_name_id),
+        ),
+        Type3BuildProc::Char => {
+            let code = encoding_code_for_name(ctx, font_entity, glyph_name_id)
+                .or_else(|| encoding_code_for_name(ctx, font_entity, ctx.name_cache.n_notdef))
+                .ok_or(PsError::InvalidFont)?;
+            (PsObject::int(code as i32), Type3CacheKey::Code(code))
+        }
+    };
+
+    let font_matrix = read_font_matrix(ctx, font_entity);
+
+    // Inverse-transform device-space current_point to user space
+    let (dev_cpx, dev_cpy) = ctx.gstate.current_point.ok_or(PsError::NoCurrentPoint)?;
+    let ictm = ctx.gstate.ctm.invert().ok_or(PsError::UndefinedResult)?;
+    let (cur_x, cur_y) = ictm.transform_point(dev_cpx, dev_cpy);
+    let ctm = ctx.gstate.ctm;
+
+    let char_width = match type3_cache_get(ctx, font_entity, key) {
+        Some(cg) => replay_cached_type3(ctx, &cg, cur_x, cur_y, &ctm, false),
+        None => build_type3_glyph(
+            ctx,
+            font_obj,
+            font_entity,
+            build_proc,
+            operand,
+            key,
+            cur_x,
+            cur_y,
+            &ctm,
+            false,
+        )?,
+    };
+
+    let (wx, wy) = font_matrix.transform_delta(char_width.0, char_width.1);
+    let (dev_x, dev_y) = ctm.transform_point(cur_x + wx, cur_y + wy);
+    ctx.gstate.current_point = Some((dev_x, dev_y));
+
+    Ok(())
+}
+
+/// Find the first character code whose `Encoding` entry is `name`.
+///
+/// This is the reverse of [`encoding_name_for_code`], needed by `glyphshow`
+/// when a Type 3 font supplies only `BuildChar` and therefore can only be
+/// handed a code. "First" matters: PLRM says to push *the* array index, and a
+/// name may legitimately appear at several codes.
+fn encoding_code_for_name(
+    ctx: &Context,
+    font_entity: EntityId,
+    name: stet_core::object::NameId,
+) -> Option<u8> {
+    let enc_obj = ctx
+        .dicts
+        .get(font_entity, &DictKey::Name(ctx.name_cache.n_encoding))?;
+    let (entity, start, len) = match enc_obj.value {
+        PsValue::Array { entity, start, len } => (entity, start, len),
+        _ => return None,
+    };
+    let elems = ctx.arrays.get(entity, start, len);
+    elems
+        .iter()
+        .take(256)
+        .position(|obj| matches!(obj.value, PsValue::Name(id) if id == name))
+        .map(|i| i as u8)
 }
 
 /// Append the outlines a Type 3 glyph procedure produced to the current path.

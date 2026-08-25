@@ -51,6 +51,12 @@ pub struct GlyphCache {
     pub by_gid: FxHashMap<u16, CachedGlyph>,
     /// Type 3 glyphs keyed by char code (only setcachedevice glyphs).
     pub by_charcode: FxHashMap<u8, CachedType3Glyph>,
+    /// Type 3 glyphs keyed by glyph name (only setcachedevice glyphs).
+    ///
+    /// Separate from [`Self::by_charcode`] because `glyphshow` bypasses the
+    /// font's `Encoding` and can therefore name a glyph that no character code
+    /// maps to — such a glyph has no code to key on.
+    pub by_type3_name: FxHashMap<NameId, CachedType3Glyph>,
 }
 
 impl GlyphCache {
@@ -60,6 +66,7 @@ impl GlyphCache {
             by_cid: FxHashMap::default(),
             by_gid: FxHashMap::default(),
             by_charcode: FxHashMap::default(),
+            by_type3_name: FxHashMap::default(),
         }
     }
 }
