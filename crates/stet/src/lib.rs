@@ -226,6 +226,7 @@ impl Interpreter {
     #[cfg(feature = "pdf-output")]
     pub fn render_to_pdf(&mut self, ps_data: &[u8], dpi: f64) -> Result<Vec<u8>, StetError> {
         self.warnings.clear();
+        self.ctx.null_device_used = false;
         let ps_data = strip_dos_eps_header(ps_data);
         let is_eps = content_is_epsf(ps_data);
 
@@ -366,6 +367,7 @@ impl Interpreter {
         page_h_pt: f64,
     ) -> Result<Vec<DisplayListPage>, StetError> {
         self.ctx.capture_display_lists = Some(Vec::new());
+        self.ctx.null_device_used = false;
 
         #[cfg(feature = "render")]
         let pages_ref = {
@@ -418,6 +420,7 @@ impl Interpreter {
         h: f64,
     ) -> Result<Vec<DisplayListPage>, StetError> {
         self.ctx.capture_display_lists = Some(Vec::new());
+        self.ctx.null_device_used = false;
 
         #[cfg(feature = "render")]
         let pages_ref = {

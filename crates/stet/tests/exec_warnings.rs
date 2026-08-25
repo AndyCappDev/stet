@@ -44,6 +44,59 @@ fn missing_showpage_yields_no_pages_and_a_warning() {
     assert_eq!(pages_emitted, 0, "nothing was emitted before the drop");
 }
 
+/// A program that installed `nulldevice` is not nagged about unemitted marks.
+///
+/// `nulldevice` is the PLRM-sanctioned way to say "produce no output", so
+/// leftover marks are the point rather than a mistake. Painting under a null
+/// device still accumulates display-list elements — they are simply never
+/// rendered — so the display list alone cannot tell this from a genuinely
+/// dropped page. Every file in `unit_tests/` is this shape.
+#[test]
+fn nulldevice_suppresses_the_dropped_page_warning() {
+    let mut interp = Interpreter::new();
+    let src = b"%!PS-Adobe-3.0\nnulldevice\n0 0 1 setrgbcolor 20 20 100 100 rectfill\n";
+    let _ = interp.render_to_display_list(src, 72.0).unwrap();
+    assert!(
+        interp.warnings().is_empty(),
+        "a nulldevice program must not warn: {:?}",
+        interp.warnings()
+    );
+}
+
+/// The suppression survives a `grestore` back to a real device.
+///
+/// It records intent, not current state: the test suite's files all paint
+/// inside `gsave nulldevice ... grestore`, so a check of the device live at
+/// end of job would miss them and warn anyway.
+#[test]
+fn nulldevice_suppression_survives_grestore() {
+    let mut interp = Interpreter::new();
+    let src =
+        b"%!PS-Adobe-3.0\ngsave nulldevice\n0 0 1 setrgbcolor 20 20 100 100 rectfill\ngrestore\n";
+    let _ = interp.render_to_display_list(src, 72.0).unwrap();
+    assert!(
+        interp.warnings().is_empty(),
+        "grestore must not resurrect the warning: {:?}",
+        interp.warnings()
+    );
+}
+
+/// The suppression is per call, not sticky across an interpreter's lifetime.
+#[test]
+fn nulldevice_suppression_does_not_leak_to_the_next_render() {
+    let mut interp = Interpreter::new();
+    let nulled = b"%!PS-Adobe-3.0\nnulldevice\n0 0 1 setrgbcolor 20 20 100 100 rectfill\n";
+    let _ = interp.render_to_display_list(nulled, 72.0).unwrap();
+    assert!(interp.warnings().is_empty());
+
+    // A plain program on the same interpreter must warn again.
+    let _ = interp.render_to_display_list(NO_SHOWPAGE, 72.0).unwrap();
+    assert!(
+        dropped(&interp).is_some(),
+        "the nulldevice flag must reset per render call"
+    );
+}
+
 #[test]
 fn proper_showpage_is_silent() {
     let mut interp = Interpreter::new();

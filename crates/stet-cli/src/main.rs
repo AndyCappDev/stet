@@ -1429,6 +1429,7 @@ fn execjob(
 
     // 6. Clear transient state
     ctx.display_list.clear();
+    ctx.null_device_used = false;
     ctx.in_error_handler = false;
     ctx.current_operator = None;
 

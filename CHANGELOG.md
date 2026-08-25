@@ -60,7 +60,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   callers, where the silence was worse: `render()` returned `Ok(vec![])`, an
   empty page list that reads as a legitimate result. New public types
   `ExecWarning` and `ExecWarningKind` in `stet::diagnostics`; the CLI shares
-  the detector, so the two cannot drift.
+  the detector, so the two cannot drift. Programs that install `nulldevice`
+  are exempt — that is the PLRM-sanctioned way to ask for no output, so marks
+  left unemitted are the point rather than a mistake.
 - **`--page` sets the page size for PostScript/EPS input** — a named size
   (`letter`, `legal`, `tabloid`, `ledger`, `executive`, `a0`-`a6`, `b4`, `b5`)
   or `WIDTHxHEIGHT` in points, with an optional `-landscape` / `-portrait`

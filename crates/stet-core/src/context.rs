@@ -169,6 +169,17 @@ pub struct Context {
 
     // Error dispatch state
     pub current_operator: Option<NameId>,
+    /// Whether `nulldevice` was installed at any point during this job.
+    ///
+    /// Sticky for the job, and deliberately not cleared by a `grestore` that
+    /// puts a real device back: it records intent, not current state. A
+    /// program that asked for the null device said it wants no output, so
+    /// marks it leaves unemitted at end of job are expected rather than a
+    /// dropped page worth reporting. The PS test suite is the motivating
+    /// case — its files paint into `gsave nulldevice ... grestore` to
+    /// exercise operators, never call `showpage`, and must not be nagged
+    /// about it.
+    pub null_device_used: bool,
     pub in_error_handler: bool,
     /// True during init script execution — relaxes access checks.
     pub initializing: bool,
@@ -839,6 +850,7 @@ impl Context {
             vm_alloc_mode: false,
             object_format: 0,
             current_operator: None,
+            null_device_used: false,
             in_error_handler: false,
             initializing: true,
             allow_ps_resolution: false,

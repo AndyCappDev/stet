@@ -105,6 +105,13 @@ pub fn dropped_final_page(ctx: &Context) -> Option<ExecWarning> {
     if ctx.display_list.is_empty() {
         return None;
     }
+    // A program that installed `nulldevice` asked for no output, so marks it
+    // leaves unemitted are the point rather than a mistake. Painting under a
+    // null device still accumulates display-list elements — they are simply
+    // never rendered — so the list alone cannot tell the two cases apart.
+    if ctx.null_device_used {
+        return None;
+    }
     Some(ExecWarning {
         kind: ExecWarningKind::DroppedFinalPage {
             objects: ctx.display_list.len(),

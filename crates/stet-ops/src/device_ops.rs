@@ -327,6 +327,10 @@ pub fn op_currentpagedevice(ctx: &mut Context) -> Result<(), PsError> {
 
 /// `nulldevice`: — → — (install a null rendering device)
 pub fn op_nulldevice(ctx: &mut Context) -> Result<(), PsError> {
+    // The program has asked for no output; remember it for the job so the
+    // end-of-job dropped-page diagnostic stays quiet (see the field's docs).
+    ctx.null_device_used = true;
+
     // Save current OutputDevice name for recovery
     let prev_device_name = get_pd_value(ctx, b"OutputDevice");
 
