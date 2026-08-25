@@ -1143,7 +1143,7 @@ fn get_metrics_width(
     // Try integer char code (dvips) first, then glyph name (PLRM standard)
     let entry = ctx
         .dicts
-        .get(metrics_entity, &DictKey::Int(char_code as i32))
+        .get(metrics_entity, &DictKey::Int(char_code as i64))
         .or_else(|| ctx.dicts.get(metrics_entity, &DictKey::Name(glyph_name_id)));
 
     let entry = entry?;
@@ -1179,7 +1179,7 @@ fn render_show(
     bytes: &[u8],
     extra_ax: f64,
     extra_ay: f64,
-    width_char: i32,
+    width_char: i64,
     cx: f64,
     cy: f64,
 ) -> Result<(), PsError> {
@@ -1343,7 +1343,7 @@ fn render_show(
         cur_x += wx + extra_ax;
         cur_y += wy + extra_ay;
 
-        if byte as i32 == width_char {
+        if byte as i64 == width_char {
             cur_x += cx;
             cur_y += cy;
         }
@@ -1498,7 +1498,7 @@ fn render_show_type2(
     bytes: &[u8],
     extra_ax: f64,
     extra_ay: f64,
-    width_char: i32,
+    width_char: i64,
     cx: f64,
     cy: f64,
 ) -> Result<(), PsError> {
@@ -1596,7 +1596,7 @@ fn render_show_type2(
         cur_x += wx + extra_ax;
         cur_y += wy + extra_ay;
 
-        if byte as i32 == width_char {
+        if byte as i64 == width_char {
             cur_x += cx;
             cur_y += cy;
         }
@@ -1788,7 +1788,7 @@ fn get_metrics_width_type2(
 ) -> Option<f64> {
     let entry = ctx
         .dicts
-        .get(metrics_entity, &DictKey::Int(char_code as i32))
+        .get(metrics_entity, &DictKey::Int(char_code as i64))
         .or_else(|| ctx.dicts.get(metrics_entity, &DictKey::Name(glyph_name_id)));
 
     let entry = entry?;
@@ -1870,7 +1870,7 @@ fn render_show_composite(
     bytes: &[u8],
     extra_ax: f64,
     extra_ay: f64,
-    width_char: i32,
+    width_char: i64,
     cx: f64,
     cy: f64,
 ) -> Result<(), PsError> {
@@ -2087,7 +2087,7 @@ fn render_show_composite(
                             // Get glyf data: try GlyphDirectory first, then sfnts
                             let glyf_bytes = if let Some(gd_entity) = glyph_dir_entity {
                                 ctx.dicts
-                                    .get(gd_entity, &DictKey::Int(gid as i32))
+                                    .get(gd_entity, &DictKey::Int(gid as i64))
                                     .and_then(|obj| match obj.value {
                                         PsValue::String { entity, start, len } => {
                                             Some(ctx.strings.get(entity, start, len).to_vec())
@@ -2110,7 +2110,7 @@ fn render_show_composite(
                                     let fd_ref = font_data.as_deref();
                                     let resolver = |gid: u16| -> Option<Vec<u8>> {
                                         if let Some(gd_entity) = gd {
-                                            let key = DictKey::Int(gid as i32);
+                                            let key = DictKey::Int(gid as i64);
                                             if let Some(obj) = dicts.get(gd_entity, &key)
                                                 && let PsValue::String { entity, start, len } =
                                                     obj.value
@@ -2175,7 +2175,7 @@ fn render_show_composite(
                 cur_y += extra_ay;
             }
 
-            if byte as i32 == width_char {
+            if byte as i64 == width_char {
                 cur_x += cx;
                 cur_y += cy;
             }
@@ -2199,7 +2199,7 @@ fn render_composite_truetype_cids(
     cur_y: &mut f64,
     extra_ax: f64,
     extra_ay: f64,
-    width_char: i32,
+    width_char: i64,
     cx: f64,
     cy: f64,
     ctm: &Matrix,
@@ -2242,7 +2242,7 @@ fn render_composite_truetype_cids(
         } else {
             let glyf_bytes = if let Some(gd_entity) = glyph_dir_entity {
                 ctx.dicts
-                    .get(gd_entity, &DictKey::Int(cid))
+                    .get(gd_entity, &DictKey::Int(cid as i64))
                     .and_then(|obj| match obj.value {
                         PsValue::String { entity, start, len } => {
                             Some(ctx.strings.get(entity, start, len).to_vec())
@@ -2265,7 +2265,7 @@ fn render_composite_truetype_cids(
                     let fd_ref = font_data.as_deref();
                     let resolver = |gid: u16| -> Option<Vec<u8>> {
                         if let Some(gd_entity) = gd {
-                            let key = DictKey::Int(gid as i32);
+                            let key = DictKey::Int(gid as i64);
                             if let Some(obj) = dicts.get(gd_entity, &key)
                                 && let PsValue::String { entity, start, len } = obj.value
                             {
@@ -2318,7 +2318,7 @@ fn render_composite_truetype_cids(
             *cur_y += wy + extra_ay;
         }
 
-        if cid == width_char {
+        if cid as i64 == width_char {
             *cur_x += cx;
             *cur_y += cy;
         }
@@ -2502,7 +2502,7 @@ fn render_composite_cff_cids(
     cur_y: &mut f64,
     extra_ax: f64,
     extra_ay: f64,
-    width_char: i32,
+    width_char: i64,
     cx: f64,
     cy: f64,
     ctm: &Matrix,
@@ -2548,7 +2548,7 @@ fn render_composite_cff_cids(
             (cg.segments, cg.width_x, cg.width_y)
         } else {
             // Look up charstring by int CID
-            let cs_obj = match ctx.dicts.get(cs_entity, &DictKey::Int(cid)) {
+            let cs_obj = match ctx.dicts.get(cs_entity, &DictKey::Int(cid as i64)) {
                 Some(obj) => obj,
                 None => {
                     // No charstring for this CID — advance by default width
@@ -2563,7 +2563,7 @@ fn render_composite_cff_cids(
                         *cur_x += wx + extra_ax;
                         *cur_y += wy + extra_ay;
                     }
-                    if cid == width_char {
+                    if cid as i64 == width_char {
                         *cur_x += cx;
                         *cur_y += cy;
                     }
@@ -2624,7 +2624,7 @@ fn render_composite_cff_cids(
             *cur_y += wy + extra_ay;
         }
 
-        if cid == width_char {
+        if cid as i64 == width_char {
             *cur_x += cx;
             *cur_y += cy;
         }
@@ -2925,7 +2925,7 @@ fn render_show_type3(
     bytes: &[u8],
     extra_ax: f64,
     extra_ay: f64,
-    width_char: i32,
+    width_char: i64,
     cx: f64,
     cy: f64,
     charpath: bool,
@@ -2991,7 +2991,7 @@ fn render_show_type3(
         cur_x += wx + extra_ax;
         cur_y += wy + extra_ay;
 
-        if byte as i32 == width_char {
+        if byte as i64 == width_char {
             cur_x += cx;
             cur_y += cy;
         }
@@ -3519,7 +3519,7 @@ fn measure_string_width_composite(
 
             for (cid, _) in &cids {
                 let width = if let Some(cs_e) = cs_entity {
-                    if let Some(cs_obj) = ctx.dicts.get(cs_e, &DictKey::Int(*cid)) {
+                    if let Some(cs_obj) = ctx.dicts.get(cs_e, &DictKey::Int(*cid as i64)) {
                         if let PsValue::String { entity, start, len } = cs_obj.value {
                             let cs_bytes = ctx.strings.get(entity, start, len).to_vec();
                             let fd_info = get_cid_fd_info(ctx, cidfont_entity, *cid);
@@ -3684,7 +3684,7 @@ fn render_charpath_composite(
             for (cid, _) in &cids {
                 let glyf_bytes = if let Some(gd_entity) = glyph_dir_entity {
                     ctx.dicts
-                        .get(gd_entity, &DictKey::Int(*cid))
+                        .get(gd_entity, &DictKey::Int(*cid as i64))
                         .and_then(|obj| match obj.value {
                             PsValue::String { entity, start, len } => {
                                 Some(ctx.strings.get(entity, start, len).to_vec())
@@ -3707,7 +3707,7 @@ fn render_charpath_composite(
                         let fd_ref = font_data.as_deref();
                         let resolver = |gid: u16| -> Option<Vec<u8>> {
                             if let Some(gd_entity) = gd {
-                                let key = DictKey::Int(gid as i32);
+                                let key = DictKey::Int(gid as i64);
                                 if let Some(obj) = dicts.get(gd_entity, &key)
                                     && let PsValue::String { entity, start, len } = obj.value
                                 {
@@ -3752,7 +3752,7 @@ fn render_charpath_composite(
             let global_subrs = get_global_subrs(ctx, cidfont_entity);
 
             for (cid, _) in &cids {
-                if let Some(cs_obj) = ctx.dicts.get(cs_entity, &DictKey::Int(*cid))
+                if let Some(cs_obj) = ctx.dicts.get(cs_entity, &DictKey::Int(*cid as i64))
                     && let PsValue::String { entity, start, len } = cs_obj.value
                 {
                     let cs_bytes = ctx.strings.get(entity, start, len).to_vec();
@@ -4122,7 +4122,7 @@ fn render_fmap_type0(
     cur_y: &mut f64,
     extra_ax: f64,
     extra_ay: f64,
-    width_char: i32,
+    width_char: i64,
     cx: f64,
     cy: f64,
     ctm: &Matrix,
@@ -4211,7 +4211,7 @@ fn render_fmap_type0(
 
                 // Apply width_char extra displacement
                 let (mut ax, mut ay) = (extra_ax, extra_ay);
-                if *char_code == width_char {
+                if *char_code as i64 == width_char {
                     ax += cx;
                     ay += cy;
                 }
@@ -4430,7 +4430,7 @@ fn render_show_displaced_composite(
 
                 let glyf_bytes = if let Some(gd_entity) = glyph_dir_entity {
                     ctx.dicts
-                        .get(gd_entity, &DictKey::Int(*cid))
+                        .get(gd_entity, &DictKey::Int(*cid as i64))
                         .and_then(|obj| match obj.value {
                             PsValue::String { entity, start, len } => {
                                 Some(ctx.strings.get(entity, start, len).to_vec())
@@ -4453,7 +4453,7 @@ fn render_show_displaced_composite(
                         let fd_ref = font_data.as_deref();
                         let resolver = |gid: u16| -> Option<Vec<u8>> {
                             if let Some(gd_entity) = gd {
-                                let key = DictKey::Int(gid as i32);
+                                let key = DictKey::Int(gid as i64);
                                 if let Some(obj) = dicts.get(gd_entity, &key)
                                     && let PsValue::String { entity, start, len } = obj.value
                                 {
@@ -4498,7 +4498,7 @@ fn render_show_displaced_composite(
                 emit_text_element(ctx, cid_bytes, font_entity, font_type, Some((dev_x, dev_y)));
 
                 if let Some(cs_e) = cs_entity
-                    && let Some(cs_obj) = ctx.dicts.get(cs_e, &DictKey::Int(*cid))
+                    && let Some(cs_obj) = ctx.dicts.get(cs_e, &DictKey::Int(*cid as i64))
                     && let PsValue::String { entity, start, len } = cs_obj.value
                 {
                     let cs_bytes = ctx.strings.get(entity, start, len).to_vec();
@@ -4578,7 +4578,7 @@ fn render_show_displaced_composite(
                     // Get glyf data: try GlyphDirectory first, then sfnts
                     let glyf_bytes = if let Some(gd_entity) = glyph_dir_entity {
                         ctx.dicts
-                            .get(gd_entity, &DictKey::Int(gid as i32))
+                            .get(gd_entity, &DictKey::Int(gid as i64))
                             .and_then(|obj| match obj.value {
                                 PsValue::String { entity, start, len } => {
                                     Some(ctx.strings.get(entity, start, len).to_vec())
@@ -4601,7 +4601,7 @@ fn render_show_displaced_composite(
                             let fd_ref = font_data.as_deref();
                             let resolver = |gid: u16| -> Option<Vec<u8>> {
                                 if let Some(gd_entity) = gd {
-                                    let key = DictKey::Int(gid as i32);
+                                    let key = DictKey::Int(gid as i64);
                                     if let Some(obj) = dicts.get(gd_entity, &key)
                                         && let PsValue::String { entity, start, len } = obj.value
                                     {

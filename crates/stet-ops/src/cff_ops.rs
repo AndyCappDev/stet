@@ -206,7 +206,7 @@ fn register_cff_font(
 
         // Int-keyed entry for CID fonts (CID = GID for CFF CID fonts)
         if cff_font.is_cid {
-            ctx.dicts.put(cs_entity, DictKey::Int(gid as i32), cs_obj);
+            ctx.dicts.put(cs_entity, DictKey::Int(gid as i64), cs_obj);
         }
     }
     ctx.dicts.put(

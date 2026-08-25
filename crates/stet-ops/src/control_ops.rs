@@ -326,7 +326,7 @@ pub fn op_quitwithcode(ctx: &mut Context) -> Result<(), PsError> {
         _ => return Err(PsError::TypeCheck),
     };
     ctx.o_stack.pop()?;
-    ctx.exit_code = Some(code);
+    ctx.exit_code = Some(code.clamp(i32::MIN as i64, i32::MAX as i64) as i32);
     Err(PsError::Quit)
 }
 

@@ -1634,7 +1634,7 @@ fn reconstruct_truetype(
 
     for gid in 0..num_glyphs {
         loca_offsets.push(glyf_data.len() as u32);
-        if let Some(entry_obj) = ctx.dicts.get(gd_entity, &DictKey::Int(gid as i32))
+        if let Some(entry_obj) = ctx.dicts.get(gd_entity, &DictKey::Int(gid as i64))
             && let PsValue::String { entity, start, len } = entry_obj.value
         {
             let glyph_bytes = ctx.strings.get(entity, start, len);

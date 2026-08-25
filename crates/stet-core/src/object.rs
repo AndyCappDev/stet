@@ -214,7 +214,21 @@ pub enum PsValue {
     /// Dict mark from `<<` — distinguished from `Mark` so `]` only matches `[`-marks.
     DictMark,
     Bool(bool),
-    Int(i32),
+    /// A PostScript integer.
+    ///
+    /// 64-bit, matching Ghostscript. PLRM Appendix B's 32-bit range is stated
+    /// as a limit "typical of PostScript implementations from Adobe Systems"
+    /// running "on 32-bit machines", which "do not necessarily apply to all
+    /// PostScript implementations" — not a conformance requirement. 32 bits
+    /// breaks the standard LCG idiom
+    /// (`seed 1103515245 mul 12345 add 2147483648 mod`) that PostScript
+    /// programs use for pseudo-randomness: the product overflows, promotes to
+    /// `Real`, and `mod` then raises `typecheck`. Widening the fallback is not
+    /// an option — the product needs 55 bits and `f64` carries 53, so the
+    /// sequence would silently diverge from every other interpreter.
+    ///
+    /// Costs nothing: `Real(f64)` already forces an 8-byte payload.
+    Int(i64),
     Real(f64),
 
     // Interned name (index into NameTable)
@@ -281,7 +295,12 @@ pub struct PsObject {
 impl PsObject {
     // --- Convenience constructors ---
 
-    pub fn int(v: i32) -> Self {
+    /// Build an integer object.
+    ///
+    /// Generic over anything that widens losslessly to `i64` so the many
+    /// `i32`/`u8`/`u16` call sites need no cast.
+    pub fn int(v: impl Into<i64>) -> Self {
+        let v: i64 = v.into();
         Self {
             value: PsValue::Int(v),
             flags: ObjFlags::literal(),
@@ -498,8 +517,22 @@ impl PsObject {
         }
     }
 
-    /// Extract as `i32` (Int only).
+    /// Extract as `i32` (Int only), rejecting values outside `i32` range.
+    ///
+    /// PostScript integers are `i64` (see [`PsValue::Int`]), but many callers
+    /// need an `i32` — array and string indices, character codes, operand
+    /// counts. Those are all genuinely bounded, and a value too large to be
+    /// one of them should fail the caller's range check rather than wrap
+    /// silently, so this returns `None` instead of truncating.
     pub fn as_i32(&self) -> Option<i32> {
+        match self.value {
+            PsValue::Int(v) => i32::try_from(v).ok(),
+            _ => None,
+        }
+    }
+
+    /// Extract as `i64` (Int only) — the full PostScript integer range.
+    pub fn as_i64(&self) -> Option<i64> {
         match self.value {
             PsValue::Int(v) => Some(v),
             _ => None,

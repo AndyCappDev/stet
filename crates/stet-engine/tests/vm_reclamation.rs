@@ -29,7 +29,7 @@ fn run(ctx: &mut Context, src: &str) {
         .unwrap_or_else(|e| panic!("PS execution failed: {e:?}\nsource:\n{src}"));
 }
 
-fn top_int(ctx: &mut Context) -> i32 {
+fn top_int(ctx: &mut Context) -> i64 {
     match ctx.o_stack.pop().expect("operand expected").value {
         PsValue::Int(v) => v,
         other => panic!("expected an integer, got {other:?}"),
@@ -137,7 +137,7 @@ fn restore_reverts_mutation_of_pre_save_string_and_dict() {
     run(&mut c, "/s (abc) def\n/d 4 dict def\nd /k 1 put\n");
     run(&mut c, "save s 0 (Z) 0 get put d /k 42 put restore\n");
     run(&mut c, "s 0 get\n");
-    assert_eq!(top_int(&mut c), b'a' as i32, "string put must roll back");
+    assert_eq!(top_int(&mut c), b'a' as i64, "string put must roll back");
     run(&mut c, "d /k get\n");
     assert_eq!(top_int(&mut c), 1, "dict put must roll back");
 }

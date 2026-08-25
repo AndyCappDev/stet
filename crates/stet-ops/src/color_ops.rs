@@ -1945,7 +1945,7 @@ fn fingerprint_obj(
         }
         PsValue::Int(v) => {
             h.tag(5);
-            h.word(v as i64 as u64);
+            h.word(v as u64);
         }
         PsValue::Real(v) => {
             h.tag(6);

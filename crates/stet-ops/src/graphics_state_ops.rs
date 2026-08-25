@@ -183,7 +183,10 @@ pub fn op_setlinecap(ctx: &mut Context) -> Result<(), PsError> {
         PsValue::Int(i) => i,
         _ => return Err(PsError::TypeCheck),
     };
-    let cap = LineCap::from_i32(v).ok_or(PsError::RangeCheck)?;
+    let cap = i32::try_from(v)
+        .ok()
+        .and_then(LineCap::from_i32)
+        .ok_or(PsError::RangeCheck)?;
     ctx.o_stack.pop()?;
     ctx.gstate.line_cap = cap;
     Ok(())
@@ -206,7 +209,10 @@ pub fn op_setlinejoin(ctx: &mut Context) -> Result<(), PsError> {
         PsValue::Int(i) => i,
         _ => return Err(PsError::TypeCheck),
     };
-    let join = LineJoin::from_i32(v).ok_or(PsError::RangeCheck)?;
+    let join = i32::try_from(v)
+        .ok()
+        .and_then(LineJoin::from_i32)
+        .ok_or(PsError::RangeCheck)?;
     ctx.o_stack.pop()?;
     ctx.gstate.line_join = join;
     Ok(())

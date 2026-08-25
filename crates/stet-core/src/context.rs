@@ -140,7 +140,9 @@ pub struct Context {
 
     // State
     pub rand_state: u64,
-    pub rand_seed: i32,
+    /// Last value handed to `srand`, returned by `rrand`. Widened with
+    /// [`PsValue::Int`]: `rrand` must return exactly what `srand` was given.
+    pub rand_seed: i64,
     /// Current source line number (1-based), updated during scanning.
     pub current_source_line: u32,
     /// Packing mode for array/procedure creation (setpacking/currentpacking).

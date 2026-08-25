@@ -14,7 +14,7 @@ use crate::object::EntityId;
 /// A single PostScript token.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
-    Int(i32),
+    Int(i64),
     Real(f64),
     Name(Vec<u8>, bool),    // (bytes, is_executable)
     LiteralName(Vec<u8>),   // /name
@@ -508,11 +508,10 @@ fn try_parse_number_token(token_bytes: &[u8]) -> Option<Token> {
         return s.parse::<f64>().ok().map(Token::Real);
     }
 
-    if let Ok(v) = s.parse::<i32>() {
-        return Some(Token::Int(v));
-    }
+    // A literal too large for i64 becomes a real, per PLRM: "an integer that
+    // would exceed this limit is automatically converted to a real value".
     if let Ok(v) = s.parse::<i64>() {
-        return Some(Token::Real(v as f64));
+        return Some(Token::Int(v));
     }
     s.parse::<f64>().ok().map(Token::Real)
 }
@@ -530,12 +529,10 @@ fn try_parse_radix(token: &[u8]) -> Option<Token> {
     if !(2..=36).contains(&base) {
         return None;
     }
+    // Radix literals are unsigned in source form; `16#FFFFFFFF` is a positive
+    // value that fits i64, so the whole parsed range stays integral.
     let value = i64::from_str_radix(digits_str, base).ok()?;
-    if value >= i32::MIN as i64 && value <= i32::MAX as i64 {
-        Some(Token::Int(value as i32))
-    } else {
-        Some(Token::Real(value as f64))
-    }
+    Some(Token::Int(value))
 }
 
 // ─── Streaming tokenizer (byte-at-a-time from FileStore) ────────────────────

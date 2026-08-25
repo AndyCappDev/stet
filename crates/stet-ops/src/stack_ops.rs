@@ -134,7 +134,7 @@ pub fn op_roll(ctx: &mut Context) -> Result<(), PsError> {
         return Ok(());
     }
 
-    let j = ((j % n as i32) + n as i32) as usize % n;
+    let j = ((j % n as i64) + n as i64) as usize % n;
     if j == 0 {
         return Ok(());
     }

@@ -280,3 +280,60 @@ userdict /$unittest known not {(unit_tests/unittest.ps) run} if
     1 /min [1 /stackunderflow] assert
     1 (a) /min [1 (a) /typecheck] assert
     (a) 1 /min [(a) 1 /typecheck] assert
+
+
+%% =============================================================================
+%% Integer range — 64-bit
+%% =============================================================================
+% PostScript integers are 64-bit, matching Ghostscript. PLRM Appendix B's
+% 32-bit range is stated as a limit "typical" of Adobe implementations running
+% "on 32-bit machines" which "do not necessarily apply to all PostScript
+% implementations", not a conformance requirement.
+%
+% This is not cosmetic. The standard LCG idiom for pseudo-randomness,
+%   /seed seed 1103515245 mul 12345 add 2147483648 mod def
+% overflows 32 bits on its first step. Promoting the product to a real does
+% not rescue it: the exact value needs 55 bits and a real carries 53, so the
+% seed would come out one too high and every later draw would differ from
+% what every other interpreter produces. Ghostscript agrees with each
+% expected value below.
+
+%% crossing the 32-bit boundary stays an integer %%
+2147483647 1 add [2147483648] assert
+{ 2147483647 1 add type } [/integertype] assert
+-2147483648 1 sub [-2147483649] assert
+
+%% the LCG product is exact, not rounded through a real %%
+20260711 1103515245 mul [22358003463039195] assert
+{ 20260711 1103515245 mul type } [/integertype] assert
+
+%% ...so mod sees an integer and the seed matches other interpreters %%
+20260711 1103515245 mul 2147483648 mod [1447897307] assert
+20260711 1103515245 mul 12345 add 2147483648 mod [1447909652] assert
+
+%% overflow past the 64-bit range still promotes to a real %%
+% PLRM: "an integer that would exceed this limit is automatically converted
+% to a real value."
+{ 9223372036854775807 1 add type } [/realtype] assert
+
+%% bitshift is 64-bit wide too %%
+1 40 bitshift [1099511627776] assert
+1 31 bitshift [2147483648] assert
+7 3 bitshift [56] assert          % PLRM example
+142 -3 bitshift [17] assert       % PLRM example
+
+%% integer literals beyond 32 bits parse as integers %%
+{ 4294967296 type } [/integertype] assert
+16#FFFFFFFF [4294967295] assert
+
+%% cvi truncates a real toward zero and stays in range %%
+2147483648.7 cvi [2147483648] assert
+-2147483648.7 cvi [-2147483648] assert
+
+%% cvi on an integer-valued string stays exact %%
+% Regression: the string scanner returned f64, so a 17-digit integer literal
+% came back one too high after the round trip through a 53-bit mantissa.
+(22358003463039195) cvi [22358003463039195] assert
+
+%% cvs round-trips a 64-bit integer %%
+22358003463039195 30 string cvs cvi [22358003463039195] assert

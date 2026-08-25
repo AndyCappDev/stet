@@ -166,14 +166,18 @@ fn create_subfile_filter(ctx: &mut Context) -> Result<(), PsError> {
 
     // Determine byte limit: if count > 0, use as byte count; otherwise use EOD string
     let bytes_remaining = if count > 0 && eod_string.is_empty() {
-        Some(count as i64)
+        Some(count)
     } else {
         None
     };
 
     let filter_entity = ctx.files.create_filter(
         source_entity,
-        FilterKind::sub_file_decode(eod_string, count, bytes_remaining),
+        FilterKind::sub_file_decode(
+            eod_string,
+            i32::try_from(count).map_err(|_| PsError::RangeCheck)?,
+            bytes_remaining,
+        ),
     );
 
     ctx.o_stack.push(PsObject {

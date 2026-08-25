@@ -245,11 +245,32 @@ fn format_radix(value: u32, radix: u32) -> String {
 /// on. Only the first token is looked at. A string that scans to something
 /// other than a number is a `typecheck`; a string with no token in it at all
 /// is a `syntaxerror`.
-fn scan_string_number(bytes: &[u8]) -> Result<f64, PsError> {
+/// A number scanned from a string by `cvi`/`cvr`.
+///
+/// Keeps integers integral rather than collapsing everything to `f64`: a
+/// 17-or-more-digit integer literal does not survive a round trip through
+/// `f64`'s 53-bit mantissa, so `(22358003463039195) cvi` would come back one
+/// too high.
+#[derive(Debug, PartialEq)]
+enum ScannedNumber {
+    Int(i64),
+    Real(f64),
+}
+
+impl ScannedNumber {
+    fn as_f64(&self) -> f64 {
+        match *self {
+            ScannedNumber::Int(v) => v as f64,
+            ScannedNumber::Real(v) => v,
+        }
+    }
+}
+
+fn scan_string_number(bytes: &[u8]) -> Result<ScannedNumber, PsError> {
     let mut tok = Tokenizer::new(bytes);
     match tok.next_token()? {
-        Some(Token::Int(v)) => Ok(v as f64),
-        Some(Token::Real(v)) => Ok(v),
+        Some(Token::Int(v)) => Ok(ScannedNumber::Int(v)),
+        Some(Token::Real(v)) => Ok(ScannedNumber::Real(v)),
         None | Some(Token::Eof) => Err(PsError::SyntaxError),
         Some(_) => Err(PsError::TypeCheck),
     }
@@ -265,8 +286,13 @@ pub fn op_cvi(ctx: &mut Context) -> Result<(), PsError> {
         PsValue::Int(_) => obj,
         PsValue::Real(v) => {
             let truncated = v.trunc();
-            if truncated >= i32::MIN as f64 && truncated <= i32::MAX as f64 {
-                PsObject::int(truncated as i32)
+            // Bound against the integer range (i64), per PLRM cvi: "a
+            // rangecheck error occurs if the result is too large to be
+            // represented as an integer". i64::MAX is not exactly
+            // representable in f64, so compare against the f64 value one
+            // above it and use a strict `<`.
+            if truncated >= i64::MIN as f64 && truncated < i64::MAX as f64 {
+                PsObject::int(truncated as i64)
             } else {
                 return Err(PsError::RangeCheck);
             }
@@ -275,12 +301,18 @@ pub fn op_cvi(ctx: &mut Context) -> Result<(), PsError> {
             // Access check: string must be readable
             obj.flags.require_read()?;
             let bytes = ctx.strings.get(entity, start, len);
-            let v = scan_string_number(bytes)?;
-            let truncated = v.trunc();
-            if truncated >= i32::MIN as f64 && truncated <= i32::MAX as f64 {
-                PsObject::int(truncated as i32)
-            } else {
-                return Err(PsError::RangeCheck);
+            match scan_string_number(bytes)? {
+                // An integer literal is already exact — do not route it
+                // through f64, which would round a long one.
+                ScannedNumber::Int(v) => PsObject::int(v),
+                ScannedNumber::Real(v) => {
+                    let truncated = v.trunc();
+                    if truncated >= i64::MIN as f64 && truncated < i64::MAX as f64 {
+                        PsObject::int(truncated as i64)
+                    } else {
+                        return Err(PsError::RangeCheck);
+                    }
+                }
             }
         }
         _ => return Err(PsError::TypeCheck),
@@ -303,7 +335,7 @@ pub fn op_cvr(ctx: &mut Context) -> Result<(), PsError> {
             // Access check: string must be readable
             obj.flags.require_read()?;
             let bytes = ctx.strings.get(entity, start, len);
-            PsObject::real(scan_string_number(bytes)?)
+            PsObject::real(scan_string_number(bytes)?.as_f64())
         }
         _ => return Err(PsError::TypeCheck),
     };
@@ -572,15 +604,15 @@ mod tests {
     /// `pdfwrite` decodes `#20` escapes in PDF names.
     #[test]
     fn string_to_number_uses_the_scanner() {
-        assert_eq!(scan_string_number(b"16#20"), Ok(32.0));
-        assert_eq!(scan_string_number(b"8#17"), Ok(15.0));
-        assert_eq!(scan_string_number(b"2#1011"), Ok(11.0));
-        assert_eq!(scan_string_number(b"1E3"), Ok(1000.0));
-        assert_eq!(scan_string_number(b"  42  "), Ok(42.0));
-        assert_eq!(scan_string_number(b".5"), Ok(0.5));
-        assert_eq!(scan_string_number(b"5."), Ok(5.0));
+        assert_eq!(scan_string_number(b"16#20").map(|n| n.as_f64()), Ok(32.0));
+        assert_eq!(scan_string_number(b"8#17").map(|n| n.as_f64()), Ok(15.0));
+        assert_eq!(scan_string_number(b"2#1011").map(|n| n.as_f64()), Ok(11.0));
+        assert_eq!(scan_string_number(b"1E3").map(|n| n.as_f64()), Ok(1000.0));
+        assert_eq!(scan_string_number(b"  42  ").map(|n| n.as_f64()), Ok(42.0));
+        assert_eq!(scan_string_number(b".5").map(|n| n.as_f64()), Ok(0.5));
+        assert_eq!(scan_string_number(b"5.").map(|n| n.as_f64()), Ok(5.0));
         // Only the first token is looked at.
-        assert_eq!(scan_string_number(b"1 2"), Ok(1.0));
+        assert_eq!(scan_string_number(b"1 2").map(|n| n.as_f64()), Ok(1.0));
         // A token that is not a number, versus no token at all.
         assert_eq!(scan_string_number(b"abc"), Err(PsError::TypeCheck));
         assert_eq!(scan_string_number(b"0x10"), Err(PsError::TypeCheck));

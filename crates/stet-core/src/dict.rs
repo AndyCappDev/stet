@@ -16,7 +16,7 @@ use crate::object::{EntityId, NameId, ObjFlags, PsObject};
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum DictKey {
     Name(NameId),
-    Int(i32),
+    Int(i64),
     Real(u64), // f64 bits for hashable comparison
     Bool(bool),
     String(Vec<u8>), // String keys are copied (per PLRM)

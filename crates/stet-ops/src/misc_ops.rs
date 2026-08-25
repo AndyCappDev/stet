@@ -923,7 +923,7 @@ pub fn op_setcacheparams(ctx: &mut Context) -> Result<(), PsError> {
     for _ in 0..count {
         let obj = ctx.o_stack.pop()?;
         if let PsValue::Int(i) = obj.value {
-            values.push(i);
+            values.push(i.clamp(i32::MIN as i64, i32::MAX as i64) as i32);
         }
     }
     ctx.o_stack.pop()?; // mark
@@ -1066,7 +1066,7 @@ pub fn op_setucacheparams(ctx: &mut Context) -> Result<(), PsError> {
     for _ in 0..count {
         let obj = ctx.o_stack.pop()?;
         if let PsValue::Int(i) = obj.value {
-            values.push(i);
+            values.push(i.clamp(i32::MIN as i64, i32::MAX as i64) as i32);
         }
     }
     ctx.o_stack.pop()?; // mark
@@ -1456,7 +1456,7 @@ pub fn op_setobjectformat(ctx: &mut Context) -> Result<(), PsError> {
         return Err(PsError::RangeCheck);
     }
     ctx.o_stack.pop()?;
-    ctx.object_format = v;
+    ctx.object_format = i32::try_from(v).map_err(|_| PsError::RangeCheck)?;
     Ok(())
 }
 

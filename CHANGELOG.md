@@ -30,6 +30,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   character code maps to — or, with only `BuildChar`, reverse-searches
   `Encoding` for the name and pushes the array index, retrying with
   `/.notdef` and raising `invalidfont` only when neither is encoded.
+- **PostScript integers are now 64-bit**, matching Ghostscript, which fixes the
+  standard LCG idiom PostScript programs use for pseudo-randomness:
+  `/seed seed 1103515245 mul 12345 add 2147483648 mod def`. On 32-bit integers
+  the product overflowed, promoted to a real, and `mod` — which is
+  integer-only — raised `typecheck`. Widening only the real fallback would not
+  have fixed it: the product needs 55 bits and a real carries 53, so the seed
+  would have come out one too high and every later draw would have diverged
+  silently from what other interpreters produce. PLRM Appendix B's 32-bit
+  range is listed under "Typical Limits" for interpreters "running on 32-bit
+  machines" which "do not necessarily apply to all PostScript
+  implementations", so this is not a conformance change. Overflow past the
+  64-bit range still promotes to a real. `bitshift` is correspondingly 64-bit
+  wide, and `cvi` accepts the wider range.
+- **`cvi` on a long integer-valued string was off by one.** The string scanner
+  returned `f64`, so `(22358003463039195) cvi` came back as `...196` after the
+  round trip through a 53-bit mantissa. Integer literals now stay integral.
 
 ### Added
 

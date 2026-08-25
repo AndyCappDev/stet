@@ -14,7 +14,7 @@ use stet_core::object::{PsObject, PsValue};
 #[inline]
 fn binary_op(
     ctx: &mut Context,
-    int_op: fn(i32, i32) -> Result<PsObject, PsError>,
+    int_op: fn(i64, i64) -> Result<PsObject, PsError>,
     real_op: fn(f64, f64) -> Result<PsObject, PsError>,
 ) -> Result<(), PsError> {
     let data = ctx.o_stack.as_mut_slice();
@@ -421,16 +421,60 @@ mod tests {
         assert_eq!(ctx.o_stack.pop().unwrap().as_i32(), Some(7));
     }
 
+    /// Crossing the 32-bit boundary stays integral — integers are `i64`.
+    ///
+    /// Ghostscript agrees: `2147483647 1 add` is `2147483648`, `integertype`.
+    /// The 32-bit range in PLRM Appendix B is a limit "typical" of
+    /// implementations "on 32-bit machines", not a conformance requirement.
     #[test]
-    fn test_add_overflow() {
+    fn test_add_past_i32_stays_integer() {
         let mut ctx = test_ctx();
         ctx.o_stack.push(PsObject::int(i32::MAX)).unwrap();
         ctx.o_stack.push(PsObject::int(1)).unwrap();
         op_add(&mut ctx).unwrap();
         match ctx.o_stack.pop().unwrap().value {
-            PsValue::Real(v) => assert_eq!(v, i32::MAX as f64 + 1.0),
-            _ => panic!("Expected Real"),
+            PsValue::Int(v) => assert_eq!(v, i32::MAX as i64 + 1),
+            other => panic!("expected Int, got {other:?}"),
         }
+    }
+
+    /// Overflow past `i64` still promotes to real, per PLRM: "an integer that
+    /// would exceed this limit is automatically converted to a real value."
+    #[test]
+    fn test_add_overflow_promotes_to_real() {
+        let mut ctx = test_ctx();
+        ctx.o_stack.push(PsObject::int(i64::MAX)).unwrap();
+        ctx.o_stack.push(PsObject::int(1)).unwrap();
+        op_add(&mut ctx).unwrap();
+        match ctx.o_stack.pop().unwrap().value {
+            PsValue::Real(v) => assert_eq!(v, i64::MAX as f64 + 1.0),
+            other => panic!("expected Real, got {other:?}"),
+        }
+    }
+
+    /// The LCG idiom PostScript programs use for pseudo-randomness. Its
+    /// product needs 55 bits, so on a 32-bit integer it overflowed to real and
+    /// `mod` raised typecheck — and widening only the real fallback would not
+    /// have helped, because `f64` carries 53 bits and the seed would silently
+    /// diverge from every other interpreter.
+    #[test]
+    fn test_lcg_seed_matches_ghostscript() {
+        let mut ctx = test_ctx();
+        ctx.o_stack.push(PsObject::int(20260711i64)).unwrap();
+        ctx.o_stack.push(PsObject::int(1103515245i64)).unwrap();
+        op_mul(&mut ctx).unwrap();
+        assert_eq!(
+            ctx.o_stack.peek(0).unwrap().as_i64(),
+            Some(22358003463039195),
+            "exact product; f64 would give ...196"
+        );
+        ctx.o_stack.push(PsObject::int(2147483648i64)).unwrap();
+        op_mod(&mut ctx).unwrap();
+        assert_eq!(
+            ctx.o_stack.pop().unwrap().as_i64(),
+            Some(1447897307),
+            "Ghostscript gives 1447897307; via f64 it would be 1447897308"
+        );
     }
 
     #[test]

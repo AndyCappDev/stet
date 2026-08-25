@@ -306,19 +306,23 @@ pub fn op_bitshift(ctx: &mut Context) -> Result<(), PsError> {
         _ => return Err(PsError::TypeCheck),
     };
 
+    // 64-bit wide, matching the integer type and Ghostscript: `1 40 bitshift`
+    // is 2^40, not 0. PLRM: "bits shifted in are 0", hence the logical (not
+    // arithmetic) right shift — the same spec paragraph notes the operation
+    // "produces an arithmetically correct result only for positive values of
+    // int1", so the negative case is explicitly undefined.
     let result = if shift_amount > 0 {
-        if shift_amount >= 32 {
+        if shift_amount >= 64 {
             0
         } else {
             value.wrapping_shl(shift_amount as u32)
         }
     } else if shift_amount < 0 {
-        let abs_shift = (-shift_amount) as u32;
-        if abs_shift >= 32 {
+        let abs_shift = shift_amount.unsigned_abs();
+        if abs_shift >= 64 {
             0
         } else {
-            // Logical right shift (unsigned)
-            ((value as u32) >> abs_shift) as i32
+            ((value as u64) >> abs_shift) as i64
         }
     } else {
         value

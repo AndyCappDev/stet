@@ -85,7 +85,7 @@ pub fn get_pd_int(ctx: &Context, key: &[u8]) -> Result<i32, PsError> {
         .get(pd, &DictKey::Name(name_id))
         .ok_or(PsError::Undefined)?;
     match obj.value {
-        PsValue::Int(v) => Ok(v),
+        PsValue::Int(v) => i32::try_from(v).map_err(|_| PsError::RangeCheck),
         _ => Err(PsError::TypeCheck),
     }
 }

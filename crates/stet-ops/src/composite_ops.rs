@@ -48,7 +48,7 @@ pub fn op_get(ctx: &mut Context) -> Result<(), PsError> {
         PsValue::Array { entity, start, len } | PsValue::PackedArray { entity, start, len } => {
             let idx = match idx_obj.value {
                 PsValue::Int(v) => v,
-                PsValue::Real(v) => v as i32,
+                PsValue::Real(v) => v as i64,
                 _ => return Err(PsError::TypeCheck),
             };
             coll_obj.flags.require_read()?;
@@ -63,7 +63,7 @@ pub fn op_get(ctx: &mut Context) -> Result<(), PsError> {
         PsValue::String { entity, start, len } => {
             let idx = match idx_obj.value {
                 PsValue::Int(v) => v,
-                PsValue::Real(v) => v as i32,
+                PsValue::Real(v) => v as i64,
                 _ => return Err(PsError::TypeCheck),
             };
             coll_obj.flags.require_read()?;
@@ -119,7 +119,7 @@ pub fn op_put(ctx: &mut Context) -> Result<(), PsError> {
             // Type check: index must be integer or real (real truncated to int)
             let idx = match idx_obj.value {
                 PsValue::Int(v) => v,
-                PsValue::Real(v) => v as i32,
+                PsValue::Real(v) => v as i64,
                 _ => return Err(PsError::TypeCheck),
             };
             // Access check: array must be writable
@@ -144,7 +144,7 @@ pub fn op_put(ctx: &mut Context) -> Result<(), PsError> {
             // Type check: index must be integer or real (real truncated to int)
             let idx = match idx_obj.value {
                 PsValue::Int(v) => v,
-                PsValue::Real(v) => v as i32,
+                PsValue::Real(v) => v as i64,
                 _ => return Err(PsError::TypeCheck),
             };
             // Access check: string must be writable
