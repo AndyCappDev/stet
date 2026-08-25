@@ -3,7 +3,7 @@
 <p align="center">A modern, open-source PostScript and PDF rendering engine written in pure Rust.</p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-0.4.1-blue" alt="Version 0.4.1">
+  <img src="https://img.shields.io/badge/Version-0.5.0-blue" alt="Version 0.5.0">
   <img src="https://img.shields.io/badge/License-Apache--2.0_OR_MIT-green" alt="License Apache-2.0 OR MIT">
   <img src="https://img.shields.io/badge/Rust-1.88+-orange" alt="Rust 1.88+">
 </p>
@@ -87,7 +87,7 @@ renders at different resolutions. See the
 - Parse warnings (`ParseWarning`, `ParsePhase`, `Severity`) for cycles, dropped entries, and structural truncations
 
 **PostScript Interpreter**
-- Full PostScript Level 3 with ~376 operators
+- Full PostScript Level 3 — 388 operators in `systemdict`
 - Type 1, CFF/Type 2, TrueType, CID, and Type 3 font rendering
 - All 7 shading types (axial, radial, Gouraud mesh, Coons/tensor patch)
 - CIE color spaces (CIEBasedABC, CIEBasedA, CIEBasedDEF, CIEBasedDEFG)
@@ -145,15 +145,17 @@ these matter more than raw rendering speed.
 
 ```toml
 [dependencies]
-stet = "0.2"
+stet = "0.5"
 ```
 
-> **Upgrading from 0.1.x?** This is a breaking release — Cargo will not
-> auto-bump `stet = "0.1"` to `0.2`. The breaking surface is the
-> `#[non_exhaustive]` markers added to ~40 public match-surface enums
-> (`DisplayElement`, `PsError`, `Destination`, the pdfmark records, …).
-> Downstream `match` sites need a `_ => { ... }` wildcard arm. See the
-> [`[0.2.0]` CHANGELOG entry](CHANGELOG.md) for the full list.
+> **Upgrading?** Cargo will not auto-bump across these pre-1.0 minors, each
+> of which is a compatibility boundary. Two breaking surfaces so far:
+> **0.5.0** widened `PsValue::Int` from `i32` to `i64` (so `match` arms bind
+> an `i64`, and `as_i32()` now returns `None` out of range instead of always
+> `Some`), and **0.2.0** added `#[non_exhaustive]` to ~40 public
+> match-surface enums (`DisplayElement`, `PsError`, `Destination`, the
+> pdfmark records, …), so `match` sites need a `_ => { ... }` wildcard arm.
+> See [CHANGELOG.md](CHANGELOG.md) for the details of each.
 
 ```rust
 let mut interp = stet::Interpreter::new();
@@ -193,6 +195,27 @@ for page in &pages {
     }
 }
 ```
+
+### Diagnostics
+
+An empty page list is not necessarily an error. The usual cause is a program
+that painted marks and then ended without calling `showpage` — the page is
+discarded and `render()` returns `Ok(vec![])`, which reads like a legitimate
+result. `warnings()` distinguishes the two:
+
+```rust
+let pages = interp.render(ps_data, 300.0)?;
+if pages.is_empty() {
+    for w in interp.warnings() {
+        eprintln!("warning: {}\n         {}", w, w.hint());
+    }
+}
+```
+
+Warnings describe the most recent render call and are cleared at the start of
+the next one. Programs that install `nulldevice` are exempt — that is the
+PLRM-sanctioned way to ask for no output, so unemitted marks are expected
+there. The CLI prints the same diagnostic to stderr.
 
 ### Viewport Rendering
 
@@ -295,7 +318,7 @@ For the smallest dependency footprint (display lists only):
 
 ```toml
 [dependencies]
-stet = { version = "0.2", default-features = false }
+stet = { version = "0.5", default-features = false }
 ```
 
 ### Configuration
@@ -350,7 +373,7 @@ document.pdf
 Metadata:
   Title: Annual Report 2026
   Author: Scott Bowman
-  Producer: stet 0.4.1
+  Producer: stet 0.5.0
   Created: 2026-04-27 12:00:00 UTC
 
 Pages: 4
@@ -378,13 +401,36 @@ Pass `--password <pw>` for encrypted documents.
 | `--device <TYPE>` | Output: `png`, `pdf`, `viewer` (default), `null` |
 | `--dpi <DPI>` | Resolution (overrides device default; all built-in devices default to 300) |
 | `--pages <RANGE>` | Page filter: `1`, `1-5`, `2,4,6` |
+| `--page <SIZE>` | Page size for PostScript/EPS input: a named size (`letter`, `legal`, `tabloid`, `ledger`, `executive`, `a0`–`a6`, `b4`, `b5`) or `WIDTHxHEIGHT` in points, e.g. `620x1000`. Add `-landscape` / `-portrait` to orient a named size. See [Page size](#page-size). |
+| `--width <PX>` / `--height <PX>` | Scale PDF output to a pixel size (PDF input only; not combinable with `--dpi` or `--page`) |
 | `--threads <N>` | Worker-thread count (default: 75 % of cores in viewer mode, 8 otherwise) |
 | `--no-icc` | Disable ICC color management entirely |
 | `--no-aa` | Disable anti-aliasing |
 | `--output-profile <FILE>` | Generic ICC output profile (also used as source CMYK when `--cmyk-profile` is absent) |
 | `--cmyk-profile <FILE>` | Pin the source CMYK ICC profile for CMYK→sRGB conversion |
-| `--no-output-intent` | Ignore the PDF's embedded OutputIntent (default: honoured) |
+| `--use-output-intent` | Honour the PDF's embedded OutputIntent as the source CMYK profile (default) |
+| `--no-output-intent` | Ignore the PDF's embedded OutputIntent and use the system CMYK profile |
 | `--bpc <on\|off\|auto>` | Black-point compensation (default: `auto`, currently equivalent to `on`) |
+
+### Page size
+
+A PostScript program is rendered onto whatever page the device provides,
+which defaults to US Letter. `%%BoundingBox` does **not** change that for a
+plain `%!PS` document — DSC defines it as a description of the artwork's
+extent, not a page-size request — so a program drawing outside Letter is
+clipped unless it calls `setpagedevice` itself. Ghostscript behaves the same
+way. `--page` is how you supply the size from outside:
+
+```bash
+stet --device png --page 620x1000 broadside.ps   # explicit, in points
+stet --device png --page a4 report.ps            # named size
+stet --device png --page a4-landscape report.ps  # swap the dimensions
+```
+
+EPS is the exception: an `EPSF` header line or a `.eps` extension makes stet
+honour `%%BoundingBox` automatically, and `--page` overrides it when both
+apply. For PDF input the page size comes from the document, so `--page` is
+rejected there — use `--width` / `--height` to scale the output instead.
 
 ## Crate Overview
 
@@ -429,7 +475,7 @@ Pass `--password <pw>` for encrypted documents.
 |-------|------|
 | `stet` | Batteries-included library API (facade) |
 | `stet-core` | Interpreter infrastructure: types, VM, tokenizer |
-| `stet-ops` | ~376 PostScript operator implementations |
+| `stet-ops` | ~331 PostScript operator implementations |
 | `stet-engine` | Execution engine (eval loop) |
 | `stet-fonts` | Font parsing: Type 1, CFF/Type 2, TrueType |
 | `stet-graphics` | Display list, color types, ICC color management |
@@ -449,10 +495,19 @@ of how these crates work together.
 
 ```bash
 cargo build                    # Build all crates
-cargo test                     # Run all tests (1052 passing)
+cargo test                     # Run all tests (1130 passing)
 cargo run -- file.ps           # Run a PostScript file
 cargo run                      # Interactive REPL
 cargo clippy                   # Lint
+```
+
+There is a second suite written in PostScript itself, exercising operator
+behaviour through the interpreter rather than through Rust. CI runs it as its
+own gate and it exits non-zero on failure:
+
+```bash
+cargo build --release
+./target/release/stet unit_tests/ps_tests.ps   # 68 files, 2813 assertions
 ```
 
 ### Git hooks

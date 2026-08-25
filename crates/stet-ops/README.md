@@ -10,29 +10,41 @@ facade crate instead.
 
 ## Contents
 
-~376 PostScript Level 3 operators organized by category:
+331 PostScript Level 3 operator implementations — 328 always registered,
+plus three `pdfmark` operators on the PDF output path:
 
 | Category | Count | Examples |
 |----------|-------|---------|
 | Stack | 11 | `pop`, `dup`, `exch`, `roll`, `mark` |
-| Math | 24 | `add`, `mul`, `sqrt`, `sin`, `atan` |
-| Relational / Boolean | 11 | `eq`, `gt`, `and`, `not`, `bitshift` |
+| Math | 26 | `add`, `mul`, `sqrt`, `sin`, `atan`, `rand` |
+| Relational / Boolean / Bitwise | 11 | `eq`, `gt`, `and`, `not`, `bitshift` |
 | Type / Conversion | 14 | `type`, `cvx`, `cvn`, `cvi`, `cvr` |
-| Dictionary | 14 | `dict`, `begin`, `def`, `load`, `known` |
-| Control | 13 | `exec`, `if`, `for`, `loop`, `stopped` |
-| String / Array | 8 | `get`, `put`, `length`, `getinterval` |
-| File / Output | 24 | `file`, `read`, `write`, `token`, `print` |
-| Path | 13 | `moveto`, `lineto`, `curveto`, `arc`, `closepath` |
-| Graphics State | 18 | `gsave`, `grestore`, `setlinewidth`, `setdash` |
-| Color | 12 | `setgray`, `setrgbcolor`, `setcmykcolor`, `setcolorspace` |
-| Painting | 7 | `fill`, `stroke`, `showpage`, `image` |
+| Dictionary | 15 | `dict`, `begin`, `def`, `load`, `known` |
+| Control flow | 14 | `exec`, `if`, `for`, `loop`, `stopped` |
+| String / Array / Composite | 15 | `get`, `put`, `length`, `getinterval`, `forall` |
+| File / Output / Filter | 28 | `file`, `read`, `write`, `token`, `print`, `filter` |
+| Path construction / query | 21 | `moveto`, `curveto`, `arc`, `pathbbox`, `infill` |
+| Graphics state | 18 | `gsave`, `grestore`, `setlinewidth`, `setdash` |
+| Color / Transfer | 13 | `setgray`, `setrgbcolor`, `setcolorspace`, `settransfer` |
+| Painting | 7 | `fill`, `stroke`, `showpage`, `erasepage` |
 | Clipping | 7 | `clip`, `eoclip`, `rectclip`, `clippath` |
-| Font / Show | 18 | `findfont`, `scalefont`, `show`, `awidthshow`, `glyphshow` |
+| Font / Show | 25 | `findfont`, `scalefont`, `show`, `awidthshow`, `glyphshow` |
 | Matrix | 16 | `translate`, `scale`, `rotate`, `concat` |
-| Filter | 1+ | `filter` (ASCIIHex, ASCII85, Flate, LZW, DCT, etc.) |
-| Shading | 1 | `shfill` (all 7 shading types) |
-| Resource | 8 | `findresource`, `defineresource` |
-| VM | 7 | `save`, `restore`, `vmstatus` |
+| Userpath | 11 | `ufill`, `ustroke`, `uappend`, `upath` |
+| Halftone / Screen | 5 | `setscreen`, `sethalftone`, `setcolorscreen` |
+| Image | 3 | `image`, `imagemask`, `colorimage` |
+| Pattern / Shading | 4 | `makepattern`, `setpattern`, `shfill` |
+| Resource | 5 | `findresource`, `defineresource`, `resourceforall` |
+| VM | 7 | `save`, `restore`, `vmstatus`, `setglobal` |
+| Page device | 7 | `setpagedevice`, `currentpagedevice`, `nulldevice` |
+| PDF-imaging extensions | 5 | `.setalpha`, `.setblendmode`, `.begintransparencygroup` |
+| Misc / internal | 40 | `usertime`, `realtime`, `version`, interpreter internals |
+
+Counts are the `register()` calls in `build_system_dict`, grouped by that
+function's own section comments; they sum to 328. `systemdict` exposes 388
+operators at runtime — the difference is defined by the Init PostScript
+resources. Three more (`pdfmark` and friends) are registered only on the PDF
+output path, via `register_pdf_authoring_ops`.
 
 ## Usage
 

@@ -129,7 +129,7 @@ later (e.g., zooming in the viewer) scales the device-space coordinates.
    at a time. Executable names are looked up in the dictionary stack and
    dispatched; procedures are stepped through element by element.
 
-3. **Operators** (`stet-ops`): ~376 native Rust functions that manipulate
+3. **Operators** (`stet-ops`): ~331 native Rust functions that manipulate
    the operand stack, dictionary stack, graphics state, and display list.
    Path-building operators (`moveto`, `lineto`, `curveto`) construct paths
    on the graphics state. Painting operators (`fill`, `stroke`, `image`)
@@ -252,7 +252,7 @@ frame's `display_list` instead of the page-level
 uniformly — `paint_ops`, `clip_ops`, `graphics_state_ops` (clip
 restoration after `gsave`/`grestore`/`initgraphics`), `image_ops`,
 `shading_ops`, `halftone_ops` form replay, and `show_ops`
-(including the Type 3 BuildChar capture window) all resolve to the
+(including the Type 3 BuildChar/BuildGlyph capture window) all resolve to the
 active list.
 
 Each `GroupFrame` carries a `GroupKind` discriminating
@@ -646,7 +646,7 @@ The PostScript interpreter requires several resource files to function:
 - **ProcSet** (2 files): CIDInit, FontSetInit
 - **ICC profile** (1 file): CC0-licensed CMYK → sRGB conversion profile
 
-The `stet` facade crate embeds all 53 files (4.6 MB) via `include_bytes!()`.
+The `stet` facade crate embeds all 55 files (4.6 MB) via `include_bytes!()`.
 The CLI discovers them relative to the executable. The WASM build embeds
 them in a virtual filesystem.
 
@@ -689,7 +689,7 @@ stet-graphics        Color types, display list, ICC, mesh shading
      │
 stet-core            PS types, Context, VM stores, tokenizer, OutputDevice trait
      │
-stet-ops             ~376 operator implementations
+stet-ops             ~331 operator implementations
      │
 stet-engine          Eval loop, parse_and_exec, exec_sync
      │

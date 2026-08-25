@@ -35,6 +35,26 @@
 //!     .build();
 //! ```
 //!
+//! # Diagnostics
+//!
+//! A render that returns no pages is not necessarily an error. The common
+//! cause is a program that painted marks and then ended without calling
+//! `showpage`: the page is discarded, and the render returns `Ok(vec![])` —
+//! an empty page list that reads like a legitimate result.
+//! [`Interpreter::warnings`] tells the two apart.
+//!
+//! ```no_run
+//! let mut interp = stet::Interpreter::new();
+//! let pages = interp.render(b"%!PS\n0 0 100 100 rectfill", 72.0).unwrap();
+//! if pages.is_empty() {
+//!     for w in interp.warnings() {
+//!         eprintln!("warning: {}\n         {}", w, w.hint());
+//!     }
+//! }
+//! ```
+//!
+//! See [`diagnostics`] for the warning types.
+//!
 //! # Feature Flags
 //!
 //! Both features are enabled by default. Use `default-features = false` for

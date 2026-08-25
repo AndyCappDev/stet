@@ -22,7 +22,7 @@ detail — it matters for prepress and proofing workflows.
 
 ```toml
 [dependencies]
-stet = "0.2"
+stet = "0.5"
 ```
 
 ### PostScript / EPS
@@ -50,7 +50,7 @@ PostScript interpreter at all, so PDF-only users don't pay for the VM:
 
 ```toml
 [dependencies]
-stet-pdf-reader = "0.2"
+stet-pdf-reader = "0.5"
 ```
 
 ```rust
@@ -159,6 +159,27 @@ let mut interp = stet::Interpreter::builder()
     .build();
 ```
 
+## Diagnostics
+
+An empty page list is not necessarily an error. The usual cause is a program
+that painted marks and then ended without calling `showpage` — the page is
+discarded and `render()` returns `Ok(vec![])`, which reads like a legitimate
+result. `warnings()` distinguishes the two:
+
+```rust
+let pages = interp.render(ps_data, 300.0)?;
+if pages.is_empty() {
+    for w in interp.warnings() {
+        eprintln!("warning: {}\n         {}", w, w.hint());
+    }
+}
+```
+
+Warnings describe the most recent render call and are cleared at the start of
+the next one. Programs that install `nulldevice` are exempt — that is the
+PLRM-sanctioned way to ask for no output, so unemitted marks are expected
+there. The CLI prints the same diagnostic to stderr.
+
 ## Features
 
 Both features are enabled by default:
@@ -172,7 +193,7 @@ To use only display lists (smallest dependency footprint):
 
 ```toml
 [dependencies]
-stet = { version = "0.2", default-features = false }
+stet = { version = "0.5", default-features = false }
 ```
 
 ## Power User: Direct Context Access
@@ -194,7 +215,7 @@ stet::ps_exec(ctx, b"/greeting (Hello, PostScript!) def greeting print")?;
 |-------|------|
 | `stet` | Batteries-included library API (this crate) |
 | `stet-core` | Interpreter infrastructure: types, VM, tokenizer |
-| `stet-ops` | ~376 PostScript operator implementations |
+| `stet-ops` | ~331 PostScript operator implementations |
 | `stet-engine` | Execution engine (eval loop) |
 | `stet-fonts` | Font parsing (Type 1, CFF, TrueType) |
 | `stet-graphics` | Display list, color types, ICC |

@@ -5,7 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.5.0] — 2026-08-25
+
+Minor release. PostScript integers are now 64-bit, which fixes the standard
+LCG idiom that programs use for pseudo-randomness and is the reason this is a
+breaking release rather than a patch. Three Type 3 font defects and a
+`clippath` coordinate-space bug are also fixed, and the CLI gains `--page`.
+
+### Breaking
+
+Downstream Rust code that reads PostScript integers needs attention; nothing
+in the PostScript language surface changed incompatibly.
+
+- **`PsValue::Int` now carries `i64` instead of `i32`.** A
+  `match obj.value { PsValue::Int(v) => … }` binds an `i64`, so any use site
+  that needs an `i32` no longer compiles. `DictKey::Int` and `Token::Int`
+  widened with it, as did `Context::rand_seed`.
+- **`PsObject::as_i32()` now range-checks.** It returns `None` for a value
+  outside `i32`, where before it always returned `Some` for an integer. This
+  is the one change with no compiler error behind it — audit call sites that
+  treat `None` as "not an integer". Use the new `as_i64()` for the full
+  range; keep `as_i32()` where the value is genuinely bounded (array and
+  string indices, character codes), since a too-large value should fail those
+  callers' range checks rather than wrap into a valid-looking index.
+- **`PsObject::int()` takes `impl Into<i64>`.** Calls are unaffected; only
+  code coercing it to a `fn(i32) -> PsObject` pointer breaks.
 
 ### Fixed
 
@@ -691,5 +715,6 @@ Initial public release.
   can be used as a standalone PDF parser/renderer without pulling in
   the PostScript VM.
 
+[0.5.0]: https://github.com/AndyCappDev/stet/compare/v0.4.1...v0.5.0
 [0.2.0]: https://github.com/AndyCappDev/stet/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/AndyCappDev/stet/releases/tag/v0.1.0

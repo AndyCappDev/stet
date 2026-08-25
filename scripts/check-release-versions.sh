@@ -121,6 +121,22 @@ else
     done
 fi
 
+# README dependency snippets must name the current minor.
+#
+# These are what a reader copies off crates.io, and nothing checked them:
+# `stet = "0.2"` sat in six places across three releases, telling new users
+# to pin a version two minors behind. Only major.minor is checked — a
+# snippet saying "0.4" stays correct through 0.4.1, which is how cargo
+# resolves it anyway.
+ws_minor="${ws_version%.*}"
+snippet_bad=$(grep -rnE '^[[:space:]]*stet[a-z-]* = "[0-9]+\.[0-9]+"|version = "[0-9]+\.[0-9]+", default-features' \
+    README.md crates/*/README.md 2>/dev/null | grep -v "\"${ws_minor}\"" || true)
+if [ -n "$snippet_bad" ]; then
+    echo -e "${RED}check-release-versions: README dependency snippet(s) not on ${ws_minor}${RESET}" >&2
+    echo "$snippet_bad" >&2
+    errors=$((errors + 1))
+fi
+
 # CHANGELOG.md: must have an `## [X.Y.Z]` heading.
 if ! grep -q "^## \[${ws_version}\]" CHANGELOG.md; then
     echo -e "${RED}check-release-versions: CHANGELOG.md is missing a '## [${ws_version}]' entry${RESET}" >&2
