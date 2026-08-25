@@ -88,6 +88,28 @@ gsave
   {pathbbox pop pop pop pop} stopped [false] assert
 grestore
 
+%% clippath reports the page in current user space, not device space %%
+% The default clip is a fixed region of the device: it does not move when the
+% program transforms its own coordinate system. `clippath pathbbox` therefore
+% has to track the CTM so that `clippath fill` — the standard idiom for
+% painting a background — covers the whole page. Deriving the rectangle with
+% the current CTM instead of the default one dragged it along with the
+% translate, leaving part of the page unpainted. Ghostscript returns exactly
+% these numbers.
+gsave
+  << /PageSize [612 792] >> setpagedevice
+  initclip
+  { newpath clippath pathbbox } [0.0 0.0 612.0 792.0] assert
+  gsave
+    100 200 translate
+    { newpath clippath pathbbox } [-100.0 -200.0 512.0 592.0] assert
+  grestore
+  gsave
+    100 200 translate 2 2 scale
+    { newpath clippath pathbbox } [-50.0 -100.0 256.0 296.0] assert
+  grestore
+grestore
+
 %% clippath - after rectclip %%
 gsave
   10 20 100 200 rectclip

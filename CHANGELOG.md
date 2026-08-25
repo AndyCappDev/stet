@@ -43,6 +43,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   implementations", so this is not a conformance change. Overflow past the
   64-bit range still promotes to a real. `bitshift` is correspondingly 64-bit
   wide, and `cvi` accepts the wider range.
+- **`clippath` returned the page in device space instead of current user
+  space**, so a program that had transformed its coordinate system got a clip
+  rectangle dragged along with the transform. The `clippath fill` idiom for
+  painting a background then filled an offset region and left part of the page
+  bare — visible in the tiger EPS, whose grey backdrop was displaced by its
+  `%%BoundingBox` origin. The default clip is a fixed region of the device, so
+  it is now derived with the default CTM; `pathbbox` and `fill` map it back
+  through the current CTM, which is what puts it in user space for the caller.
+  Ghostscript's values now match exactly under translate, scale and rotate.
 - **`cvi` on a long integer-valued string was off by one.** The string scanner
   returned `f64`, so `(22358003463039195) cvi` came back as `...196` after the
   round trip through a 53-bit mantissa. Integer literals now stay integral.

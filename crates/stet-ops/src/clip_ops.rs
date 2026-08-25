@@ -133,7 +133,15 @@ pub fn op_clippath(ctx: &mut Context) -> Result<(), PsError> {
             (ctx.page_width as f64, ctx.page_height as f64)
         };
 
-        let ctm = &ctx.gstate.ctm;
+        // PageSize is in default user space, so map it with the *default*
+        // CTM. The default clip is the page itself: a fixed region of the
+        // device that does not move when the program transforms its own
+        // coordinate system. Using the current CTM here made `translate`
+        // shift the clip rectangle, so `clippath fill` — the standard idiom
+        // for painting a background — filled an offset region instead of the
+        // page. `pathbbox` and `fill` map this back through the current CTM,
+        // which is what puts the result in user space for the caller.
+        let ctm = &ctx.gstate.default_ctm;
         let (dx0, dy0) = ctm.transform_point(0.0, 0.0);
         let (dx1, dy1) = ctm.transform_point(w, 0.0);
         let (dx2, dy2) = ctm.transform_point(w, h);

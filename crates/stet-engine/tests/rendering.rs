@@ -1038,6 +1038,118 @@ fn test_type3_glyphshow_without_notdef_is_invalidfont() {
     );
 }
 
+/// `clippath` yields the page itself, wherever the program has moved its
+/// coordinate system.
+///
+/// The default clip is a fixed region of the device. Deriving it with the
+/// *current* CTM made `translate` drag the clip rectangle along, so the
+/// `clippath fill` idiom for painting a background filled an offset region
+/// and left part of the page bare. `gstate.path` is device space, so the
+/// invariant is that it spans the whole page no matter the CTM.
+#[test]
+fn clippath_is_the_whole_page_regardless_of_ctm() {
+    for prologue in [
+        &b""[..],
+        &b"50 30 translate"[..],
+        &b"2 2 scale"[..],
+        &b"50 30 translate 2 3 scale 15 rotate"[..],
+    ] {
+        let mut ctx = render_ctx(200, 200);
+        let mut src = prologue.to_vec();
+        src.extend_from_slice(b" clippath\n");
+        stet_engine::eval::parse_and_exec(&mut ctx, &src).expect("PS execution failed");
+
+        let (mut min_x, mut min_y) = (f64::MAX, f64::MAX);
+        let (mut max_x, mut max_y) = (f64::MIN, f64::MIN);
+        for seg in &ctx.gstate.path.segments {
+            let pts: Vec<(f64, f64)> = match *seg {
+                stet_core::graphics_state::PathSegment::MoveTo(x, y)
+                | stet_core::graphics_state::PathSegment::LineTo(x, y) => vec![(x, y)],
+                _ => vec![],
+            };
+            for (x, y) in pts {
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
+            }
+        }
+        let ctm_desc = String::from_utf8_lossy(prologue).to_string();
+        assert!(
+            (min_x).abs() < 0.01 && (min_y).abs() < 0.01,
+            "clip origin moved to ({min_x}, {min_y}) after `{ctm_desc}`"
+        );
+        assert!(
+            (max_x - 200.0).abs() < 0.01 && (max_y - 200.0).abs() < 0.01,
+            "clip extent became ({max_x}, {max_y}) after `{ctm_desc}`"
+        );
+    }
+}
+
+/// `clippath pathbbox` reports the page in *current user space*.
+///
+/// Ghostscript returns [-50 -30 150 170] for a 200x200 page after
+/// `50 30 translate`; the values are what a program uses to size a
+/// background, so they have to track the CTM even though the region does not.
+#[test]
+fn clippath_pathbbox_is_in_current_user_space() {
+    let mut ctx = render_ctx(200, 200);
+    stet_engine::eval::parse_and_exec(&mut ctx, b"50 30 translate clippath pathbbox\n")
+        .expect("PS execution failed");
+
+    let vals: Vec<f64> = (0..4)
+        .rev()
+        .map(|i| ctx.o_stack.peek(i).expect("bbox value").as_f64().unwrap())
+        .collect();
+    let expected = [-50.0, -30.0, 150.0, 170.0];
+    for (got, want) in vals.iter().zip(expected.iter()) {
+        assert!(
+            (got - want).abs() < 0.01,
+            "pathbbox was {vals:?}, expected {expected:?}"
+        );
+    }
+}
+
+/// The bug as it appeared: `clippath fill` after a `translate` must cover the
+/// whole page, not an offset slice of it.
+#[test]
+fn clippath_fill_covers_the_page_after_translate() {
+    let mut ctx = render_ctx(200, 200);
+    stet_engine::eval::parse_and_exec(&mut ctx, b"0.8 setgray 50 30 translate clippath fill\n")
+        .expect("PS execution failed");
+
+    let (mut min_x, mut min_y) = (f64::MAX, f64::MAX);
+    let (mut max_x, mut max_y) = (f64::MIN, f64::MIN);
+    let mut found = false;
+    for elem in ctx.display_list.elements_from(0) {
+        if let stet_core::display_list::DisplayElement::Fill { path, .. } = elem {
+            found = true;
+            for seg in &path.segments {
+                let pts: Vec<(f64, f64)> = match *seg {
+                    stet_core::graphics_state::PathSegment::MoveTo(x, y)
+                    | stet_core::graphics_state::PathSegment::LineTo(x, y) => vec![(x, y)],
+                    _ => vec![],
+                };
+                for (x, y) in pts {
+                    min_x = min_x.min(x);
+                    min_y = min_y.min(y);
+                    max_x = max_x.max(x);
+                    max_y = max_y.max(y);
+                }
+            }
+        }
+    }
+    assert!(found, "expected a Fill element on the display list");
+    assert!(
+        min_x.abs() < 0.01 && min_y.abs() < 0.01,
+        "background fill starts at ({min_x}, {min_y}), leaving the page edge bare"
+    );
+    assert!(
+        (max_x - 200.0).abs() < 0.01 && (max_y - 200.0).abs() < 0.01,
+        "background fill ends at ({max_x}, {max_y}), short of the page"
+    );
+}
+
 /// Helper: Write adapter that captures bytes to a shared Vec.
 struct OutputCapture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 
