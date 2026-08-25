@@ -2627,6 +2627,89 @@ fn render_composite_cff_cids(
     Ok(())
 }
 
+/// Which glyph-construction procedure a Type 3 font supplies, and therefore
+/// what the show operators must hand it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Type3BuildProc {
+    /// `BuildGlyph` (PLRM 5.7.1, LanguageLevel 2) — takes the character *name*,
+    /// obtained by indexing the font's `Encoding` with the character code.
+    Glyph,
+    /// `BuildChar` (PLRM 5.7.2, LanguageLevel 1) — takes the character *code*.
+    Char,
+}
+
+/// Resolve a Type 3 font's glyph-construction procedure.
+///
+/// PLRM 5.7 lists `BuildGlyph` as preferred and `BuildChar` as "required for
+/// LanguageLevel 1 **or if BuildGlyph is absent**" — so a font supplying only
+/// one of the two is well-formed, and `invalidfont` is correct only when
+/// neither is a usable procedure. A `BuildGlyph` entry that is present but not
+/// an executable array falls through to `BuildChar` rather than failing
+/// outright, matching the reference implementation.
+fn resolve_type3_build_proc(
+    ctx: &Context,
+    font_entity: EntityId,
+) -> Result<(PsObject, Type3BuildProc), PsError> {
+    for (key, kind) in [
+        (ctx.name_cache.n_build_glyph, Type3BuildProc::Glyph),
+        (ctx.name_cache.n_build_char, Type3BuildProc::Char),
+    ] {
+        if let Some(proc_obj) = ctx.dicts.get(font_entity, &DictKey::Name(key))
+            && proc_obj.flags.is_executable()
+            && proc_obj.is_array_type()
+        {
+            return Ok((proc_obj, kind));
+        }
+    }
+    Err(PsError::InvalidFont)
+}
+
+/// The operand a Type 3 build procedure expects on top of the font dict.
+///
+/// `BuildChar` gets the raw character code. `BuildGlyph` gets the character
+/// name from the font's `Encoding` array (PLRM 5.7.1 step 1); a code that is
+/// out of range, or maps to a non-name, yields `/.notdef`, which every Type 3
+/// font is required to handle.
+fn type3_build_operand(
+    ctx: &Context,
+    font_entity: EntityId,
+    kind: Type3BuildProc,
+    code: u8,
+) -> PsObject {
+    match kind {
+        Type3BuildProc::Char => PsObject::int(code as i32),
+        Type3BuildProc::Glyph => {
+            let name_id =
+                encoding_name_for_code(ctx, font_entity, code).unwrap_or(ctx.name_cache.n_notdef);
+            PsObject::name_lit(name_id)
+        }
+    }
+}
+
+/// Index a font's `Encoding` array with a character code.
+///
+/// Respects the array's `start`/`len` so a subarray Encoding is indexed from
+/// its own base, and bounds-checks the code against the array's length rather
+/// than reading past it.
+fn encoding_name_for_code(
+    ctx: &Context,
+    font_entity: EntityId,
+    code: u8,
+) -> Option<stet_core::object::NameId> {
+    let enc_obj = ctx
+        .dicts
+        .get(font_entity, &DictKey::Name(ctx.name_cache.n_encoding))?;
+    let (entity, start, len) = match enc_obj.value {
+        PsValue::Array { entity, start, len } => (entity, start, len),
+        _ => return None,
+    };
+    let elems = ctx.arrays.get(entity, start, len);
+    match elems.get(code as usize)?.value {
+        PsValue::Name(id) => Some(id),
+        _ => None,
+    }
+}
+
 /// Run a Type 3 font's BuildChar/BuildGlyph procedure over `bytes`.
 ///
 /// With `charpath` false this is `show`: the marks the glyph procedure makes
@@ -2651,14 +2734,7 @@ fn render_show_type3(
         _ => return Err(PsError::InvalidFont),
     };
 
-    // Get BuildChar procedure
-    let build_char = ctx
-        .dicts
-        .get(font_entity, &DictKey::Name(ctx.name_cache.n_build_char))
-        .ok_or(PsError::InvalidFont)?;
-    if !build_char.flags.is_executable() || !build_char.is_array_type() {
-        return Err(PsError::InvalidFont);
-    }
+    let (build_proc, build_kind) = resolve_type3_build_proc(ctx, font_entity)?;
 
     // Get FontMatrix
     let fm_obj = ctx
@@ -2745,11 +2821,13 @@ fn render_show_type3(
             ctx.o_stack.push(fm_obj)?;
             crate::matrix_ops::op_concat(ctx)?;
 
-            // Push font dict and char code for BuildChar
+            // Push the font dict and the operand the procedure expects — the
+            // character name for BuildGlyph, the character code for BuildChar.
+            let operand = type3_build_operand(ctx, font_entity, build_kind, byte);
             ctx.o_stack.push(font_obj)?;
-            ctx.o_stack.push(PsObject::int(byte as i32))?;
+            ctx.o_stack.push(operand)?;
 
-            // Execute BuildChar synchronously. In charpath mode the painting
+            // Execute the procedure synchronously. In charpath mode the painting
             // operators divert their paths into `charpath_capture` instead of
             // marking the page; anything else the procedure emits lands on the
             // display list and is drained below. A nested `show` leaves the
@@ -2760,7 +2838,7 @@ fn render_show_type3(
             } else {
                 None
             };
-            let build_result = ctx.exec_sync(build_char);
+            let build_result = ctx.exec_sync(build_proc);
             let captured = if charpath {
                 std::mem::replace(&mut ctx.charpath_capture, outer_capture)
             } else {
@@ -2899,6 +2977,9 @@ fn measure_string_width(ctx: &mut Context, bytes: &[u8]) -> Result<(f64, f64), P
     }
     if font_type == 0 || font_type == 42 {
         return measure_string_width_composite(ctx, font_entity_id, bytes);
+    }
+    if font_type == 3 {
+        return measure_string_width_type3(ctx, font_entity_id, bytes);
     }
 
     let info = get_font_info(ctx)?;
@@ -3078,6 +3159,78 @@ fn render_charpath(ctx: &mut Context, bytes: &[u8]) -> Result<(), PsError> {
     let (dev_x, dev_y) = ctm.transform_point(cur_x, cur_y);
     ctx.gstate.current_point = Some((dev_x, dev_y));
     Ok(())
+}
+
+/// Measure string width for a Type 3 font.
+///
+/// A Type 3 font has no width table to consult: the only way to learn a
+/// glyph's width is to run its build procedure and see what it hands
+/// `setcachedevice`/`setcharwidth`. The procedure runs inside a
+/// gsave/grestore and any marks it makes are taken back off the display list,
+/// so measuring paints nothing (PLRM: `stringwidth` does not mark the page).
+///
+/// Unlike the show path this needs no current point, because `stringwidth`
+/// returns a displacement rather than moving anything.
+fn measure_string_width_type3(
+    ctx: &mut Context,
+    font_entity: EntityId,
+    bytes: &[u8],
+) -> Result<(f64, f64), PsError> {
+    let font_obj = ctx.gstate.current_font.ok_or(PsError::InvalidFont)?;
+    let (build_proc, build_kind) = resolve_type3_build_proc(ctx, font_entity)?;
+    let font_matrix = read_font_matrix(ctx, font_entity);
+
+    let mut total_wx = 0.0;
+    let mut total_wy = 0.0;
+
+    for &byte in bytes {
+        // A glyph already shown has its width cached; re-running the
+        // procedure would recompute the same number the slow way.
+        let cached = ctx
+            .glyph_caches
+            .get(&font_entity)
+            .and_then(|gc| gc.by_charcode.get(&byte))
+            .map(|cg| cg.width);
+
+        let (cw_x, cw_y) = match cached {
+            Some(w) => w,
+            None => {
+                ctx.char_width = None;
+                ctx.char_width_mode1 = None;
+                ctx.char_cache_mode = None;
+
+                let dl_start = ctx.current_display_list().len();
+
+                crate::graphics_state_ops::op_gsave(ctx)?;
+                let fm_obj = ctx
+                    .dicts
+                    .get(font_entity, &DictKey::Name(ctx.name_cache.n_font_matrix))
+                    .ok_or(PsError::InvalidFont)?;
+                ctx.o_stack.push(fm_obj)?;
+                crate::matrix_ops::op_concat(ctx)?;
+
+                let operand = type3_build_operand(ctx, font_entity, build_kind, byte);
+                ctx.o_stack.push(font_obj)?;
+                ctx.o_stack.push(operand)?;
+
+                let build_result = ctx.exec_sync(build_proc);
+
+                // Unwind the gsave and drop the marks before propagating, so a
+                // failing glyph procedure can't leave either behind.
+                crate::graphics_state_ops::op_grestore(ctx)?;
+                let _ = ctx.current_display_list_mut().split_off(dl_start);
+                build_result?;
+
+                ctx.char_width.take().unwrap_or((0.0, 0.0))
+            }
+        };
+
+        let (wx, wy) = font_matrix.transform_delta(cw_x, cw_y);
+        total_wx += wx;
+        total_wy += wy;
+    }
+
+    Ok((total_wx, total_wy))
 }
 
 /// Measure string width for Type 0 (composite) and Type 42 (TrueType) fonts.
@@ -4302,14 +4455,7 @@ fn render_show_displaced_type3(
 ) -> Result<(), PsError> {
     let font_obj = ctx.gstate.current_font.ok_or(PsError::InvalidFont)?;
 
-    // Get BuildChar procedure
-    let build_char = ctx
-        .dicts
-        .get(font_entity, &DictKey::Name(ctx.name_cache.n_build_char))
-        .ok_or(PsError::InvalidFont)?;
-    if !build_char.flags.is_executable() || !build_char.is_array_type() {
-        return Err(PsError::InvalidFont);
-    }
+    let (build_proc, build_kind) = resolve_type3_build_proc(ctx, font_entity)?;
 
     let (dev_cpx, dev_cpy) = ctx.gstate.current_point.ok_or(PsError::NoCurrentPoint)?;
     let ictm = ctx.gstate.ctm.invert().ok_or(PsError::UndefinedResult)?;
@@ -4332,12 +4478,14 @@ fn render_show_displaced_type3(
         ctx.o_stack.push(fm_obj)?;
         crate::matrix_ops::op_concat(ctx)?;
 
-        // Push font dict and char code for BuildChar
+        // Push the font dict and the operand the procedure expects — the
+        // character name for BuildGlyph, the character code for BuildChar.
+        let operand = type3_build_operand(ctx, font_entity, build_kind, byte);
         ctx.o_stack.push(font_obj)?;
-        ctx.o_stack.push(PsObject::int(byte as i32))?;
+        ctx.o_stack.push(operand)?;
 
-        // Execute BuildChar synchronously
-        ctx.exec_sync(build_char)?;
+        // Execute the procedure synchronously
+        ctx.exec_sync(build_proc)?;
 
         // grestore
         crate::graphics_state_ops::op_grestore(ctx)?;

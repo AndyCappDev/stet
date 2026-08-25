@@ -797,6 +797,119 @@ fn test_charpath_type3_paints_nothing() {
     assert!((max_y - 180.0).abs() < 0.01, "max y was {max_y}");
 }
 
+/// A Type 3 font supplying **only** `BuildGlyph`, with no `BuildChar`.
+///
+/// PLRM 5.7 makes `BuildChar` required only "for LanguageLevel 1 or if
+/// BuildGlyph is absent", so this font is well-formed. `BuildGlyph` receives
+/// the character *name* from `Encoding`, not the character code — the glyph
+/// procedure here records which name it was handed so tests can check it.
+const TYPE3_BUILDGLYPH_ONLY_FONT: &[u8] = b"
+    /T3G 8 dict def
+    /SeenNames 8 array def
+    /SeenIdx 0 def
+    T3G begin
+      /FontType 3 def
+      /FontMatrix [0.001 0 0 0.001 0 0] def
+      /FontBBox [0 0 1000 1000] def
+      /Encoding 256 array def
+      0 1 255 { Encoding exch /.notdef put } for
+      Encoding 65 /square put
+      Encoding 66 /bar put
+      /BuildGlyph {
+        exch pop
+        dup SeenNames SeenIdx 3 -1 roll put
+        /SeenIdx SeenIdx 1 add def
+        600 0 setcharwidth
+        dup /square eq { 100 100 moveto 400 0 rlineto 0 400 rlineto
+                         -400 0 rlineto closepath fill } if
+        /bar eq { 100 100 moveto 200 0 rlineto 0 700 rlineto
+                  -200 0 rlineto closepath fill } if
+      } bind def
+    end
+    /T3G T3G definefont pop
+    /T3G findfont 100 scalefont setfont
+";
+
+/// A `show` on a Type 3 font that has only `BuildGlyph` must render, not
+/// raise `invalidfont`.
+///
+/// Regression: `render_show_type3` used to require `BuildChar` unconditionally
+/// and push the character code, so a BuildGlyph-only font — which Ghostscript
+/// renders fine — failed outright.
+#[test]
+fn test_type3_buildglyph_without_buildchar_shows() {
+    let mut ctx = render_ctx(200, 200);
+    let mut src = TYPE3_BUILDGLYPH_ONLY_FONT.to_vec();
+    src.extend_from_slice(b"0 0 moveto (AB) show\n");
+    stet_engine::eval::parse_and_exec(&mut ctx, &src)
+        .expect("a BuildGlyph-only Type 3 font must render");
+
+    assert!(
+        !ctx.display_list.is_empty(),
+        "both glyphs should have painted"
+    );
+}
+
+/// `BuildGlyph` receives the character *name* from `Encoding`, not the code.
+///
+/// This is the part that makes BuildGlyph worth having: the demo font that
+/// exposed the bug dispatches on `/leaf` / `/bud` / `/berry`, which only works
+/// if the name reaches the procedure.
+#[test]
+fn test_type3_buildglyph_receives_encoded_name() {
+    let mut ctx = render_ctx(200, 200);
+    let mut src = TYPE3_BUILDGLYPH_ONLY_FONT.to_vec();
+    // Code 65 -> /square, 66 -> /bar, 67 -> /.notdef (unmapped).
+    src.extend_from_slice(b"0 0 moveto (ABC) show\n");
+    src.extend_from_slice(b"0 1 SeenIdx 1 sub { SeenNames exch get } for\n");
+    stet_engine::eval::parse_and_exec(&mut ctx, &src).expect("PS execution failed");
+
+    let names: Vec<String> = (0..ctx.o_stack.len())
+        .rev()
+        .map(|i| {
+            let obj = ctx.o_stack.peek(i).expect("stack entry");
+            match obj.value {
+                stet_core::object::PsValue::Name(id) => {
+                    String::from_utf8_lossy(ctx.names.get_bytes(id)).into_owned()
+                }
+                other => panic!("expected a name on the stack, got {other:?}"),
+            }
+        })
+        .collect();
+
+    assert_eq!(
+        names,
+        vec!["square", "bar", ".notdef"],
+        "BuildGlyph must be handed the Encoding name for each code, \
+         with unmapped codes falling back to /.notdef"
+    );
+}
+
+/// `stringwidth` on a Type 3 font runs the build procedure for its width and
+/// paints nothing.
+///
+/// Regression: `measure_string_width` had no Type 3 branch, so it fell through
+/// to the Type 1 path, looked for `CharStrings`, and raised `invalidfont`.
+#[test]
+fn test_type3_stringwidth_measures_without_painting() {
+    let mut ctx = render_ctx(200, 200);
+    let mut src = TYPE3_BUILDGLYPH_ONLY_FONT.to_vec();
+    src.extend_from_slice(b"(AB) stringwidth\n");
+    stet_engine::eval::parse_and_exec(&mut ctx, &src).expect("Type 3 stringwidth must work");
+
+    assert!(
+        ctx.display_list.is_empty(),
+        "stringwidth must not mark the page, found {} elements",
+        ctx.display_list.len()
+    );
+
+    let wy = ctx.o_stack.peek(0).expect("wy").as_f64().expect("wy real");
+    let wx = ctx.o_stack.peek(1).expect("wx").as_f64().expect("wx real");
+    // setcharwidth 600 per glyph, FontMatrix 0.001, 100pt => 60pt each.
+    assert!((wx - 120.0).abs() < 0.01, "wx was {wx}, expected 120");
+    assert!(wy.abs() < 0.01, "wy was {wy}, expected 0");
+}
+
 /// Helper: Write adapter that captures bytes to a shared Vec.
 struct OutputCapture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 

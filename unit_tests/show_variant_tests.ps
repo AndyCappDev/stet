@@ -254,6 +254,80 @@ gsave
 { newpath 0 0 moveto (A) false charpath roundedbbox } [4 0 26 30] assert
 grestore
 
+%% =============================================================================
+%% Type 3 dispatch: BuildGlyph vs BuildChar
+%% =============================================================================
+% The Type 3 fonts above define both procedures, which is the PLRM 5.7.2
+% compatibility idiom and hides which one the interpreter actually picks. These
+% fonts define exactly one each, so the dispatch is observable.
+%
+% PLRM 5.7: BuildGlyph is preferred and receives the character *name*, taken
+% from Encoding; BuildChar is "required for LanguageLevel 1 or if BuildGlyph is
+% absent" and receives the character *code*. A font supplying only BuildGlyph
+% is well-formed. Ghostscript renders all of these.
+
+% BuildGlyph only. Records each name it is handed so the dispatch can be
+% asserted, and gives every glyph the same 600-unit width.
+/T3G 8 dict def
+/GSeen 8 array def
+/GIdx 0 def
+T3G begin
+  /FontType 3 def
+  /FontMatrix [0.001 0 0 0.001 0 0] def
+  /FontBBox [0 0 1000 1000] def
+  /Encoding 256 array def
+  0 1 255 { Encoding exch /.notdef put } for
+  Encoding 65 /square put      % A
+  Encoding 66 /bar put         % B
+  /BuildGlyph {
+    exch pop
+    dup GSeen GIdx 3 -1 roll put
+    /GIdx GIdx 1 add def
+    600 0 setcharwidth
+    pop
+  } bind def
+end
+/T3G T3G definefont pop
+
+/gseen { 0 1 GIdx 1 sub { GSeen exch get } for } def
+
+%% show on a BuildGlyph-only Type 3 font renders %%
+% Regression: this used to raise invalidfont because BuildChar was required
+% unconditionally.
+gsave
+/T3G findfont 100 scalefont setfont
+/GIdx 0 def
+{ 0 0 moveto (AB) show currentpoint } [120.0 0.0] assert
+grestore
+
+%% show hands BuildGlyph the Encoding name, not the code %%
+% Unencoded codes fall back to /.notdef, which every Type 3 font must handle.
+gsave
+/T3G findfont 100 scalefont setfont
+/GIdx 0 def
+{ 0 0 moveto (ABZ) show gseen } [/square /bar /.notdef] assert
+grestore
+
+%% stringwidth works on a Type 3 font %%
+% Regression: stringwidth had no Type 3 branch, so it fell through to the
+% Type 1 path, looked for CharStrings and raised invalidfont. There is no
+% width table — the only way to learn the width is to run the procedure.
+gsave
+/T3G findfont 100 scalefont setfont
+{ (AB) stringwidth } [120.0 0.0] assert
+grestore
+
+%% stringwidth on a Type 3 font marks nothing %%
+% The glyph procedure runs for real, so the check that matters is that
+% nothing it painted survives on the page.
+gsave
+/T3G findfont 100 scalefont setfont
+newpath
+{ (AB) stringwidth pop pop
+  0 { pop pop 1 add } { pop pop 1 add } { 6 { pop } repeat 1 add } { 1 add }
+  pathforall } [0] assert
+grestore
+
 % Restore currentpoint for any subsequent tests
 0 0 moveto
 
