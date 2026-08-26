@@ -102,6 +102,43 @@ Filter and font parameters are now validated the same way.
 Neither bound rejects anything real: all 691 sample PDFs were re-rendered with
 the predictor fallback instrumented, and none takes it.
 
+The font parsers in `stet-fonts` got the same treatment. Font programs arrive
+embedded in both PDF and PostScript input, so these are attacker controlled in
+the same way a PDF object is.
+
+- **TrueType composite glyph recursion** — a component naming its own glyph,
+  directly or through a ring, recursed until the stack was gone. Now capped at
+  depth 8 with a path set of glyph ids, popped on exit so a font that
+  legitimately reuses one accent twice still renders both copies. A depth cap
+  alone is not sufficient here: a composite naming many components, each itself
+  such a composite, repeats no id on any path, and the work is
+  `fan_out ^ depth` — 64 components at depth 8 is 2.8e14 expansions from a
+  400-byte glyph. A shared expansion budget (4096) bounds the total work.
+- **Type 1 `seac`** re-entered through `execute()`, which restarts the
+  subroutine depth counter at 0, so the existing depth-10 guard never fired on
+  a `seac` naming its own glyph. The depth is now threaded through.
+- **`/Subrs N`** reserved `N` entries before reading any of them;
+  `/Subrs 999999999` panicked with "capacity overflow" (≈24 GB in release).
+  Clamped to the bytes remaining after the marker, since each entry needs at
+  least a `dup i n RD ` introducer.
+- **cmap format 12** walked `for code in start..=end` over raw u32 — 4.3
+  billion iterations for a full-range group — and computed
+  `start_gid + (code - start_char)` as an unchecked u32 add. The span is now
+  clamped to 0xFFFF (past which no glyph id can land in the 16-bit range
+  anyway, so nothing mappable is lost) and the add is checked.
+- **Type 2 `callsubr` / `callgsubr`** computed `idx + bias` as an unchecked
+  i32 add. The number encodings top out at 32767, but Type 2 implements `add`,
+  `sub`, `mul`, and `div`, so a charstring can multiply past `i32::MAX`, where
+  the `as i32` cast saturates and the bias add overflows. Now `checked_add`.
+- **`read_u16` / `read_i16` / `read_u32`** are now internally bounds-checked,
+  returning 0 past the end of the slice. No caller changes: the ~40 call sites
+  already pre-check (confirmed by probing every truncation of a synthetic font
+  and 408 mutations of its offset and count fields, with zero panics), but the
+  invariant was manual and unenforced.
+
+All 691 sample PDFs render byte-identically before and after these font
+changes.
+
 ### Fixed
 
 - Shading color-stop sampling now sorts with `f64::total_cmp` instead of

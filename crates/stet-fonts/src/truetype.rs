@@ -9,27 +9,49 @@
 
 use crate::geometry::{PathSegment, PsPath};
 
+// The three readers below are bounds-checked internally and yield 0 for a
+// read that runs off the end of the slice.
+//
+// Every offset they take is ultimately derived from the font file, so the
+// alternative — indexing directly — makes panic-freedom depend on each of the
+// ~40 call sites having pre-checked its own offset. That invariant is held
+// today (408 single-byte mutations and every truncation of a synthetic font
+// produce no panic), but it is manual and unenforced, and one new caller that
+// forgets is a reachable panic. Returning 0 makes it structural at no cost to
+// any caller: a malformed table already produces no usable glyph, and every
+// consumer here treats a zero field as absent rather than trusting it.
+
 /// Read a big-endian u16 from a byte slice at the given offset.
+///
+/// Returns 0 if the read would run past the end of `data`.
 #[inline]
 pub fn read_u16(data: &[u8], offset: usize) -> u16 {
-    u16::from_be_bytes([data[offset], data[offset + 1]])
+    match data.get(offset..offset + 2) {
+        Some(b) => u16::from_be_bytes([b[0], b[1]]),
+        None => 0,
+    }
 }
 
 /// Read a big-endian i16 from a byte slice at the given offset.
+///
+/// Returns 0 if the read would run past the end of `data`.
 #[inline]
 pub fn read_i16(data: &[u8], offset: usize) -> i16 {
-    i16::from_be_bytes([data[offset], data[offset + 1]])
+    match data.get(offset..offset + 2) {
+        Some(b) => i16::from_be_bytes([b[0], b[1]]),
+        None => 0,
+    }
 }
 
 /// Read a big-endian u32 from a byte slice at the given offset.
+///
+/// Returns 0 if the read would run past the end of `data`.
 #[inline]
 pub fn read_u32(data: &[u8], offset: usize) -> u32 {
-    u32::from_be_bytes([
-        data[offset],
-        data[offset + 1],
-        data[offset + 2],
-        data[offset + 3],
-    ])
+    match data.get(offset..offset + 4) {
+        Some(b) => u32::from_be_bytes([b[0], b[1], b[2], b[3]]),
+        None => 0,
+    }
 }
 
 /// Concatenate sfnts array entries into a single font data buffer.
@@ -356,10 +378,41 @@ fn read_f2dot14(data: &[u8], offset: usize) -> f64 {
     raw as f64 / 16384.0
 }
 
+/// Maximum nesting depth for composite glyphs.
+///
+/// A composite `glyf` entry names component glyphs that may themselves be
+/// composite, and `parse_composite_glyph` recurses once per level. Real fonts
+/// nest one or two levels (a base letter plus an accent, occasionally an
+/// accented letter reused inside another composite); 8 is far past anything
+/// legitimate. Without a cap, a component that reaches itself recurses until
+/// the native stack is gone — an abort, not a panic, so `catch_unwind` cannot
+/// contain it. This is the classic `glyf` attack.
+const MAX_COMPOSITE_DEPTH: u32 = 8;
+
+/// Maximum number of component expansions per top-level glyph.
+///
+/// The depth cap alone is not sufficient, and it is worth being explicit about
+/// why: a composite may name many components, each of which is itself a
+/// composite naming many more. No glyph id repeats on any one path, so the
+/// path set never fires, and the work is `fan_out ^ MAX_COMPOSITE_DEPTH` —
+/// 64 components at depth 8 is 2.8e14 expansions from a 400-byte glyph, which
+/// hangs indefinitely. This budget bounds the total work rather than the
+/// shape of it. Real composites expand a handful of components; 4096 is far
+/// past any legitimate glyph.
+const MAX_COMPOSITE_EXPANSIONS: u32 = 4096;
+
 /// Parse a composite glyph, recursively resolving components.
+///
+/// `active` holds the glyph IDs on the current path so a cycle is rejected.
+/// It is a path set, not a seen-set — IDs are removed on the way out, so a
+/// font that legitimately uses the same accent twice in one composite still
+/// renders both copies.
 fn parse_composite_glyph(
     glyf_data: &[u8],
     resolver: &dyn Fn(u16) -> Option<Vec<u8>>,
+    active: &mut Vec<u16>,
+    depth: u32,
+    budget: &mut u32,
 ) -> Vec<Vec<GlyfPoint>> {
     let mut all_contours = Vec::new();
     let mut offset = 10; // skip header
@@ -441,11 +494,27 @@ fn parse_composite_glyph(
             (1.0, 0.0, 0.0, 1.0)
         };
 
-        // Resolve component glyph
+        // Resolve component glyph. A component already on the current path
+        // would recurse forever, and one past the depth cap is a chain long
+        // enough to be hostile rather than a real font; skip both and carry on
+        // with the remaining components rather than discarding the glyph.
+        if depth >= MAX_COMPOSITE_DEPTH || active.contains(&glyph_index) {
+            if flags & 0x0020 == 0 {
+                break;
+            }
+            continue;
+        }
+        if *budget == 0 {
+            break;
+        }
+        *budget -= 1;
         if let Some(component_data) = resolver(glyph_index)
             && component_data.len() >= 2
         {
-            let child_contours = parse_glyf_to_contours(&component_data, resolver);
+            active.push(glyph_index);
+            let child_contours =
+                parse_glyf_to_contours_at(&component_data, resolver, active, depth + 1, budget);
+            active.pop();
             // Transform and merge
             for contour in child_contours {
                 let transformed: Vec<GlyfPoint> = contour
@@ -474,6 +543,19 @@ fn parse_glyf_to_contours(
     glyf_data: &[u8],
     resolver: &dyn Fn(u16) -> Option<Vec<u8>>,
 ) -> Vec<Vec<GlyfPoint>> {
+    let mut budget = MAX_COMPOSITE_EXPANSIONS;
+    parse_glyf_to_contours_at(glyf_data, resolver, &mut Vec::new(), 0, &mut budget)
+}
+
+/// [`parse_glyf_to_contours`], carrying the composite depth, path set, and
+/// shared expansion budget.
+fn parse_glyf_to_contours_at(
+    glyf_data: &[u8],
+    resolver: &dyn Fn(u16) -> Option<Vec<u8>>,
+    active: &mut Vec<u16>,
+    depth: u32,
+    budget: &mut u32,
+) -> Vec<Vec<GlyfPoint>> {
     if glyf_data.len() < 10 {
         return Vec::new();
     }
@@ -483,7 +565,7 @@ fn parse_glyf_to_contours(
     if num_contours > 0 {
         parse_simple_glyph(glyf_data, num_contours).unwrap_or_default()
     } else if num_contours < 0 {
-        parse_composite_glyph(glyf_data, resolver)
+        parse_composite_glyph(glyf_data, resolver, active, depth, budget)
     } else {
         Vec::new()
     }
@@ -592,6 +674,15 @@ pub fn parse_glyf_to_path(glyf_data: &[u8], resolver: &dyn Fn(u16) -> Option<Vec
     let contours = parse_glyf_to_contours(glyf_data, resolver);
     contours_to_path(contours)
 }
+
+/// Largest span of a single cmap format 12 group that is walked.
+///
+/// Format 12 groups carry 32-bit start and end codes, and the mapping loop is
+/// `for code in start..=end`. A group covering the whole code space is 4.3
+/// billion iterations. Only the first 65536 of any group can yield a glyph id
+/// inside the 16-bit range anyway, so nothing mappable is lost by stopping
+/// there.
+const MAX_CMAP12_GROUP_SPAN: u32 = 0xFFFF;
 
 /// Parse TrueType cmap table, returning a mapping from character code to glyph index.
 ///
@@ -831,10 +922,26 @@ pub fn parse_cmap_with_info(font_data: &[u8]) -> (std::collections::HashMap<u32,
                 let start_char = read_u32(font_data, g);
                 let end_char = read_u32(font_data, g + 4);
                 let start_gid = read_u32(font_data, g + 8);
-                for code in start_char..=end_char {
-                    let gid = start_gid + (code - start_char);
-                    if gid != 0 && gid <= 0xFFFF {
-                        map.insert(code, gid as u16);
+                if end_char < start_char {
+                    continue;
+                }
+                // A group may legitimately be large, but only the first 65536
+                // codes of one can produce a glyph id in range: `gid` rises
+                // with `code`, so past that point every mapping is discarded.
+                // Clamping here is what stops `/EndCharCode 0xFFFFFFFF` from
+                // spinning through 4.3 billion iterations to insert nothing.
+                let span = (end_char - start_char).min(MAX_CMAP12_GROUP_SPAN);
+                for offset in 0..=span {
+                    // `start_gid + offset` is a u32 add on two file-supplied
+                    // values and overflows for large ones.
+                    let Some(gid) = start_gid.checked_add(offset) else {
+                        break;
+                    };
+                    if gid > 0xFFFF {
+                        break;
+                    }
+                    if gid != 0 {
+                        map.insert(start_char + offset, gid as u16);
                     }
                 }
             }

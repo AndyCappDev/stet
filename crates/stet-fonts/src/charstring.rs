@@ -327,7 +327,7 @@ impl<'a> CharstringInterp<'a> {
                     }
                     let b2 = data[pos];
                     pos += 1;
-                    self.execute_escape(b2)?;
+                    self.execute_escape(b2, depth)?;
                 }
                 13 => {
                     // hsbw: sbx wx
@@ -487,7 +487,11 @@ impl<'a> CharstringInterp<'a> {
         Ok(())
     }
 
-    fn execute_escape(&mut self, b2: u8) -> Result<(), String> {
+    /// Handle a two-byte (escape) operator.
+    ///
+    /// `depth` is the caller's subroutine nesting level, threaded through so
+    /// the `seac` handler can keep counting rather than restarting at zero.
+    fn execute_escape(&mut self, b2: u8, depth: usize) -> Result<(), String> {
         match b2 {
             0 => {
                 // dotsection — ignore (hint), no args
@@ -530,12 +534,17 @@ impl<'a> CharstringInterp<'a> {
                     let saved_x = self.x;
                     let saved_y = self.y;
 
-                    // Execute base character charstring
+                    // Execute base character charstring.
+                    //
+                    // `execute_inner`, not `execute`: the latter restarts the
+                    // counter at 0, so the depth guard above never fires and a
+                    // seac naming its own glyph recurses until the native stack
+                    // is gone — an abort rather than a panic.
                     let decrypted = decrypt_charstring(&bchar_data, self.len_iv);
                     self.x = 0.0;
                     self.y = 0.0;
                     self.done = false;
-                    self.execute(&decrypted)?;
+                    self.execute_inner(&decrypted, depth + 1)?;
                     let base_lsb = self.lsb_x;
                     self.done = false;
 
@@ -547,7 +556,8 @@ impl<'a> CharstringInterp<'a> {
                     if let Some(achar_data) = achar_data {
                         let decrypted = decrypt_charstring(&achar_data, self.len_iv);
                         self.seac_accent_offset = Some((adx - asb + base_lsb, ady));
-                        self.execute(&decrypted)?;
+                        // Threaded, for the same reason as the base above.
+                        self.execute_inner(&decrypted, depth + 1)?;
                         self.seac_accent_offset = None;
                     }
 

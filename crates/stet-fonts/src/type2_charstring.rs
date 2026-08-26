@@ -621,9 +621,15 @@ fn op_callsubr(
     if state.stack.is_empty() {
         return Ok(());
     }
+    // `as i32` saturates at the extremes, and Type 2 has arithmetic
+    // operators, so a charstring can drive this to `i32::MAX` and make the
+    // bias add overflow.
     let idx = state.stack.pop().unwrap() as i32;
     let bias = subr_bias(local_subrs.len());
-    let biased = (idx + bias) as usize;
+    let Some(biased) = idx.checked_add(bias) else {
+        return Ok(());
+    };
+    let biased = biased as usize;
     if biased < local_subrs.len() {
         let subr_data = local_subrs[biased].clone();
         execute_bytes(state, &subr_data, local_subrs, global_subrs, depth + 1)?;
@@ -640,9 +646,13 @@ fn op_callgsubr(
     if state.stack.is_empty() {
         return Ok(());
     }
+    // See `op_callsubr` — the same saturating cast and bias add.
     let idx = state.stack.pop().unwrap() as i32;
     let bias = subr_bias(global_subrs.len());
-    let biased = (idx + bias) as usize;
+    let Some(biased) = idx.checked_add(bias) else {
+        return Ok(());
+    };
+    let biased = biased as usize;
     if biased < global_subrs.len() {
         let subr_data = global_subrs[biased].clone();
         execute_bytes(state, &subr_data, local_subrs, global_subrs, depth + 1)?;

@@ -452,6 +452,14 @@ fn parse_subrs(decrypted: &[u8]) -> Vec<Vec<u8>> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
 
+    // `/Subrs N` is a file-declared count, and the reservation happens before
+    // a single entry has been read. Each subroutine needs at least a "dup i n
+    // RD " introducer, so a count larger than the remaining bytes cannot be
+    // honest; clamping to that bound keeps the allocation proportional to the
+    // file instead of to whatever the file claims. `/Subrs 999999999` would
+    // otherwise reserve ~24 GB (or panic with "capacity overflow").
+    let count = count.min(decrypted.len().saturating_sub(subrs_start));
+
     subrs.resize(count, Vec::new());
 
     // Parse entries: dup N M RD <M bytes> NP
