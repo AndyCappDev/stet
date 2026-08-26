@@ -68,11 +68,20 @@ const MAX_IMAGE_DIMENSION: i64 = 100_000;
 /// Largest accepted pixel count (`width * height`) for a single image.
 ///
 /// Bounds the product independently of [`MAX_IMAGE_DIMENSION`], which alone
-/// would still permit 100000x100000. The corpus maximum is 151,022,184 pixels
-/// (`issue16263.pdf`), so this leaves roughly 2.6x headroom. Staying under
-/// 2^32 also keeps `width * height` exact in `u32` for the many sites that
-/// compute it that way.
-const MAX_IMAGE_PIXELS: u64 = 400_000_000;
+/// would still permit 100000x100000.
+///
+/// **Sized for prepress, not for the sample corpus.** The corpus maximum is
+/// 151M pixels, but that is a sample of ordinary documents and is the wrong
+/// thing to calibrate against: a 40x28 inch press sheet at 600 dpi is 403M
+/// pixels, an A0 poster at 600 dpi is 558M, and 60x40 inch grand format at
+/// 1200 dpi is 3.46G. All of those are legitimate images that a RIP must
+/// accept, so the ceiling sits above them.
+///
+/// The value is 4e9 rather than something larger because it must stay under
+/// `2^32`: a dozen sites compute `width * height` in `u32`, and that product
+/// is only exact while it fits. Anything multiplying further by a component
+/// count uses saturating `usize` arithmetic instead.
+const MAX_IMAGE_PIXELS: u64 = 4_000_000_000;
 
 /// Largest accepted `/BitsPerComponent`.
 ///
@@ -3983,7 +3992,7 @@ impl<'a> ContentInterpreter<'a> {
                 };
                 if smask_in_data >= 1 && decoded_comps == n_cs + 1 {
                     // Extract the alpha channel (last component per pixel)
-                    let mut color_data = Vec::with_capacity(pixels * n_cs);
+                    let mut color_data = Vec::with_capacity(pixels.saturating_mul(n_cs));
                     let mut alpha_data = Vec::with_capacity(pixels);
                     for chunk in sample_data.chunks_exact(decoded_comps) {
                         color_data.extend_from_slice(&chunk[..n_cs]);
@@ -3993,7 +4002,7 @@ impl<'a> ContentInterpreter<'a> {
                 } else if decoded_comps > n_cs {
                     // Drop extra components (e.g. ignored alpha) — keep only the
                     // first n_cs samples of each pixel.
-                    let mut color_data = Vec::with_capacity(pixels * n_cs);
+                    let mut color_data = Vec::with_capacity(pixels.saturating_mul(n_cs));
                     for chunk in sample_data.chunks_exact(decoded_comps) {
                         color_data.extend_from_slice(&chunk[..n_cs]);
                     }
@@ -4513,7 +4522,10 @@ impl<'a> ContentInterpreter<'a> {
                 {
                     let n_base = base.num_components() as usize;
                     let n_pixels = (width * height) as usize;
-                    let mut expanded = vec![0u8; n_pixels * n_base];
+                    // `n_pixels` can be up to MAX_IMAGE_PIXELS, so multiplying
+                    // by the component count leaves the u32 range and, on a
+                    // 32-bit `usize` target, the usize range too.
+                    let mut expanded = vec![0u8; n_pixels.saturating_mul(n_base)];
                     for i in 0..n_pixels {
                         let idx = sample_data.get(i).copied().unwrap_or(0) as usize;
                         let idx = idx.min(*hival as usize);
@@ -7258,7 +7270,7 @@ fn merge_rgb_with_smask(
     {
         let n_base = base.num_components() as usize;
         let n_pixels = (width * height) as usize;
-        let mut expanded = vec![0u8; n_pixels * n_base];
+        let mut expanded = vec![0u8; n_pixels.saturating_mul(n_base)];
         for i in 0..n_pixels {
             let idx = image_data.get(i).copied().unwrap_or(0) as usize;
             let idx = idx.min(*hival as usize);
@@ -7279,7 +7291,7 @@ fn merge_rgb_with_smask(
     {
         let n_pixels = (width * height) as usize;
         let no = tint_table.num_outputs as usize;
-        let mut expanded = vec![0u8; n_pixels * no];
+        let mut expanded = vec![0u8; n_pixels.saturating_mul(no)];
         let mut alt_comps = vec![0.0f32; no];
         for i in 0..n_pixels {
             let tint = image_data.get(i).copied().unwrap_or(0) as f32 / 255.0;
@@ -7299,7 +7311,7 @@ fn merge_rgb_with_smask(
         let ni = tint_table.num_inputs as usize;
         let no = tint_table.num_outputs as usize;
         let n_pixels = (width * height) as usize;
-        let mut expanded = vec![0u8; n_pixels * no];
+        let mut expanded = vec![0u8; n_pixels.saturating_mul(no)];
         let mut inputs = vec![0.0f32; ni];
         let mut alt_comps = vec![0.0f32; no];
         for i in 0..n_pixels {

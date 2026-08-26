@@ -109,6 +109,46 @@ pub fn get_pd_value(ctx: &Context, key: &[u8]) -> Option<PsObject> {
 
 // ---------- setpagedevice ----------
 
+/// Largest page dimension a *file* may declare, in points.
+///
+/// 14400 pt is 200 inches — the maximum `/MediaBox` extent in Adobe's PDF 1.7
+/// implementation limits (Table C.1). PostScript sets no limit of its own, but
+/// the same number is applied here so both input paths agree.
+///
+/// This bounds the untrusted half of the page-size calculation only. Render
+/// resolution is deliberately **not** capped: pixel dimensions are
+/// `points * dpi / 72`, and while the points come from the file, the DPI is
+/// the caller's explicit request. A 1200 dpi prepress proof of a large-format
+/// page is a legitimate gigapixel render, and refusing it would be worse than
+/// the denial of service it prevents. Bounding the points alone still rejects
+/// `<< /PageSize [2000000 2000000] >> setpagedevice` — 27,777 inches is not a
+/// page at any resolution.
+const MAX_PAGE_SIZE_POINTS: f64 = 14_400.0;
+
+/// Clamp a file-declared page size to something physically meaningful.
+///
+/// Non-finite and non-positive values fall back to US Letter rather than
+/// propagating: a NaN width would otherwise reach the renderer as a zero or
+/// garbage pixel count.
+fn clamp_page_size(width: f64, height: f64) -> (f64, f64) {
+    fn clamp_one(v: f64, fallback: f64) -> f64 {
+        if !v.is_finite() || v <= 0.0 {
+            fallback
+        } else {
+            v.min(MAX_PAGE_SIZE_POINTS)
+        }
+    }
+    let w = clamp_one(width, 612.0);
+    let h = clamp_one(height, 792.0);
+    if w != width || h != height {
+        eprintln!(
+            "Warning: PageSize [{width} {height}] is outside the supported range; \
+             using [{w} {h}] (limit {MAX_PAGE_SIZE_POINTS} pt per side)"
+        );
+    }
+    (w, h)
+}
+
 /// `setpagedevice`: dict → —
 ///
 /// Merges the request dictionary into the current page device dictionary.
@@ -243,6 +283,7 @@ pub fn op_setpagedevice(ctx: &mut Context) -> Result<(), PsError> {
 
     // Compute MediaSize from PageSize and HWResolution (with sensible defaults)
     let (pw, ph) = get_pd_f64_pair(ctx, b"PageSize").unwrap_or((612.0, 792.0));
+    let (pw, ph) = clamp_page_size(pw, ph);
     let (dpi_x, dpi_y) = get_pd_f64_pair(ctx, b"HWResolution").unwrap_or((72.0, 72.0));
     let media_w = (pw * dpi_x / 72.0).round() as u32;
     let media_h = (ph * dpi_y / 72.0).round() as u32;

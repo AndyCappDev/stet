@@ -133,6 +133,23 @@ impl SkiaDevice {
         height: u32,
         sink_factory: Box<dyn PageSinkFactory>,
     ) -> Self {
+        // Only the lower bound is enforced here, and deliberately so.
+        //
+        // These dimensions are `page_points * dpi / 72`, and the two factors
+        // have different provenance: the points come from the file and are
+        // untrusted, but the DPI is the caller's explicit request. Capping the
+        // product punishes the caller for the file's exaggeration — a 1200 dpi
+        // prepress proof of a large-format page is a legitimate gigapixel
+        // render, and refusing it is worse than the attack it prevents. The
+        // page size is bounded upstream, in points, where the untrusted value
+        // actually enters (see `MAX_PAGE_SIZE_POINTS`).
+        //
+        // Zero, on the other hand, is never meaningful: `Pixmap::new` returns
+        // `None` for a zero dimension and the call below used to `.expect()`
+        // on it, so `<< /PageSize [-1 -1] >> setpagedevice` panicked the
+        // renderer outright.
+        let width = width.max(1);
+        let height = height.max(1);
         // Estimate DPI from page height (assumes ~792pt US Letter as reference).
         // Close enough for hairline width threshold decisions.
         let dpi = height as f64 * 72.0 / 792.0;
@@ -185,8 +202,23 @@ impl SkiaDevice {
     /// Called before non-banded rendering which operates on the full pixmap.
     fn ensure_full_pixmap(&mut self) {
         if self.pixmap.width() != self.page_w || self.pixmap.height() != self.page_h {
-            self.pixmap =
-                Pixmap::new(self.page_w, self.page_h).expect("Failed to create page pixmap");
+            // Dimensions are clamped at construction, so this only fails when
+            // the allocation itself does — a page large enough to exhaust
+            // memory. Keep the existing pixmap and carry on: the page renders
+            // wrong, which is what a page that size was always going to do,
+            // rather than taking the process down.
+            let Some(pixmap) = Pixmap::new(self.page_w, self.page_h) else {
+                eprintln!(
+                    "Warning: could not allocate a {}x{} page pixmap; \
+                     rendering into the existing {}x{} buffer instead",
+                    self.page_w,
+                    self.page_h,
+                    self.pixmap.width(),
+                    self.pixmap.height()
+                );
+                return;
+            };
+            self.pixmap = pixmap;
             self.pixmap.fill(Color::WHITE);
         }
     }

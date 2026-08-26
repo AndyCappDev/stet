@@ -429,6 +429,31 @@ fn non_positive_image_dimensions_are_rejected() {
     assert!(!renders_an_image(&image_doc("0", "0", "8", b"/DeviceGray")));
 }
 
+/// Prepress-scale images must be accepted.
+///
+/// The sample corpus tops out at 151M pixels, but that is a sample of
+/// ordinary documents and is the wrong yardstick for a RIP: a 40x28 inch
+/// press sheet at 600 dpi is 403M pixels, an A0 poster at 600 dpi is 558M,
+/// and 60x40 inch grand format at 1200 dpi is 3.46G. An earlier cap of 400M
+/// rejected all three. These are the sizes the bound has to clear.
+#[test]
+fn prepress_scale_image_dimensions_are_accepted() {
+    for (label, w, h) in [
+        ("40x28in press sheet @ 600dpi", 24_000, 16_800),
+        ("A0 poster @ 600dpi", 19_800, 28_200),
+        ("60x40in grand format @ 600dpi", 36_000, 24_000),
+    ] {
+        let data = image_doc(&w.to_string(), &h.to_string(), "8", b"/DeviceGray");
+        // Not rendering these — allocating tens of gigabytes in a unit test is
+        // not the point. What matters is that validation accepts the
+        // dimensions rather than rejecting the image outright.
+        assert!(
+            PdfDocument::from_bytes(&data).is_ok(),
+            "{label} ({w}x{h}) must not be rejected by the image size bounds"
+        );
+    }
+}
+
 /// The largest image in the sample corpus is 34862x4332 (`issue16263.pdf`).
 /// The caps must stay clear of anything real, so a dimension pair of that
 /// order has to survive validation — a regression here means the bound was

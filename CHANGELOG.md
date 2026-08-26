@@ -68,10 +68,12 @@ Separately, image dictionary integers are now validated before use.
 - Both are fixed by validating at the four points where an image dictionary is
   read (image XObject, inline image, `/SMask`, `/Mask`): dimensions must be
   positive and at most `MAX_IMAGE_DIMENSION` (100,000), and their product at
-  most `MAX_IMAGE_PIXELS` (400,000,000). The largest image in the sample
-  corpus is 34862 x 4332 (151,022,184 pixels), so the caps sit roughly 3x and
-  2.6x above anything real; all 691 sample files were checked and none has an
-  image rejected by them.
+  most `MAX_IMAGE_PIXELS` (4,000,000,000). The ceiling is sized for prepress
+  rather than for the sample corpus: a 40x28 inch press sheet at 600 dpi is
+  403M pixels, an A0 poster at 600 dpi 558M, and 60x40 inch grand format at
+  1200 dpi 3.46G, all of which a RIP must accept. It stays under 2^32 because
+  a dozen sites compute `width * height` in `u32`; anything multiplying
+  further by a component count uses saturating `usize`.
 - **`/BitsPerComponent` is validated too**, to 1..=16. It reaches
   `1u32 << bpc` in `expand_bits_to_bytes`, which panics in debug builds at 32
   or more. That function now also reserves its three-way
@@ -177,6 +179,16 @@ changes.
 
 ### Fixed
 
+- **`setpagedevice` with a degenerate `/PageSize` panicked the renderer.**
+  `<< /PageSize [-1 -1] >>` reached `Pixmap::new(0, 0)`, which returns `None`,
+  through an `.expect()`. The allocation is now non-panicking, and
+  `setpagedevice` clamps a file-declared page to 14400 pt per side (200 in,
+  the Adobe PDF 1.7 `/MediaBox` implementation limit), falling back to US
+  Letter for a non-finite or non-positive value. **Render resolution is
+  deliberately not capped** — pixel dimensions are `points * dpi / 72`, and
+  while the points come from the file, the DPI is the caller's explicit
+  request; a 1200 dpi proof of a large-format page is a legitimate gigapixel
+  render.
 - **Two native-stack recursion vectors in the interpreter.** A `/Separation`
   colour space whose tint transform sets that same colour space re-entered
   `exec_sync` without bound — about 200 bytes of PostScript aborted the
