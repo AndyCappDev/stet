@@ -1,6 +1,10 @@
 [workspace]
 members = ["crates/*"]
-exclude = ["crates/stet-wasm"]
+# `fuzz` is excluded for the same reason as `stet-wasm`: it needs a nightly
+# toolchain (cargo-fuzz builds on libFuzzer), and stet is stable-only with a
+# pinned MSRV. Excluding it keeps `cargo build`, `cargo test`, and the MSRV
+# job from ever seeing it.
+exclude = ["crates/stet-wasm", "fuzz"]
 # MSRV-aware resolution (stabilised in Cargo 1.84, well under our 1.88 floor).
 # Under resolver 2 the `rust-version` below is inert for resolution: cargo
 # takes the newest semver-compatible dependency and only refuses afterwards.

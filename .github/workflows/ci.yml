@@ -141,6 +141,42 @@ jobs:
       - name: cargo test --workspace --profile hardened
         run: cargo test --workspace --profile hardened
 
+  # Fuzzing smoke test.
+  #
+  # `continue-on-error` is deliberate and load-bearing. This job needs a
+  # nightly toolchain, which stet does not otherwise depend on: the workspace
+  # is stable-only with a pinned MSRV, and `resolver = "3"` exists to keep it
+  # that way. A nightly regression or a cargo-fuzz breakage must therefore be
+  # visible without being able to block a PR that has nothing to do with it.
+  #
+  # 60s per target is a smoke test — it proves the harnesses still build and
+  # run, and catches a crash reachable in the first few thousand executions.
+  # It is not a substitute for a real campaign; see SECURITY.md for that.
+  #
+  # Corpora are not committed, so this starts cold. `seed-corpus.sh` fills them
+  # from the in-tree samples, which is what makes a local run worth far more
+  # than this job.
+  fuzz:
+    name: Fuzz smoke (nightly)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: fuzz
+          workspaces: fuzz
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Seed corpora (capped)
+        # libFuzzer replays the whole seed corpus before -max_total_time means
+        # anything, and 703 PDFs under AddressSanitizer is far longer than this
+        # job's budget. Cap it so the 60s is spent fuzzing, not replaying.
+        run: SEED_LIMIT=40 ./fuzz/seed-corpus.sh
+      - name: Run each target for 60s
+        run: ./fuzz/run.sh 60
+
   # WASM build — smoke test that the browser-facing crate still compiles.
   # stet-wasm is excluded from the default workspace, so it needs its own
   # step. No tests here — wasm-pack test would need a browser runtime.

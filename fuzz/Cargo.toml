@@ -1,0 +1,93 @@
+# Fuzz targets for stet's untrusted-input parsers.
+#
+# This crate is NOT a workspace member (see `exclude` in the root
+# `Cargo.toml`), for the same reason `stet-wasm` is not: it needs a nightly
+# toolchain. `cargo-fuzz` builds on libFuzzer, which requires nightly, while
+# stet itself is stable-only with a pinned MSRV. Keeping the fuzz crate out of
+# the workspace means `cargo build`, `cargo test`, and the MSRV job never see
+# it and the stable floor is unaffected.
+#
+# Run with:
+#     cargo +nightly fuzz run fuzz_pdf_parse
+#     cargo +nightly fuzz run fuzz_pdf_parse -- -max_total_time=60
+#
+# Seed corpora live in `fuzz/corpus/<target>/`; `seed-corpus.sh` populates them
+# from the sample trees.
+[package]
+name = "stet-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+stet-pdf-reader = { path = "../crates/stet-pdf-reader" }
+stet-fonts = { path = "../crates/stet-fonts" }
+stet-core = { path = "../crates/stet-core" }
+
+[[bin]]
+name = "fuzz_pdf_parse"
+path = "fuzz_targets/fuzz_pdf_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_font_truetype"
+path = "fuzz_targets/fuzz_font_truetype.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_font_cff"
+path = "fuzz_targets/fuzz_font_cff.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_font_type1"
+path = "fuzz_targets/fuzz_font_type1.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_ps_tokenizer"
+path = "fuzz_targets/fuzz_ps_tokenizer.rs"
+test = false
+doc = false
+bench = false
+
+# Fuzzing wants release codegen with the checks left on: an arithmetic wrap
+# that silently produces an undersized buffer is exactly the bug class these
+# targets exist to find, and without `overflow-checks` libFuzzer never sees it.
+# Mirrors `[profile.hardened]` in the workspace root.
+[profile.release]
+debug = 1
+overflow-checks = true
+debug-assertions = true
+
+# Third-party and vendored crates whose arithmetic is intentionally modular,
+# or whose known overflows are not fixable in this tree. Without these the
+# fuzzer stops at the first one it reaches and never explores past it — the
+# PDF target hit the hayro-jbig2 one within seconds, since the sample that
+# triggers it is in the seed corpus.
+#
+# `hayro-jbig2` 0.1.0 overflows in `region/text.rs` (JBIG2 6.4.5 symbol
+# placement); tracked in SECURITY.md for an upstream report.
+[profile.release.package.hayro-jbig2]
+overflow-checks = false
+
+# SIMD-lane emulation: modular by definition, matching the hardware
+# instructions the aarch64 paths use. Same rationale as the workspace's
+# `[profile.hardened]` overrides.
+[profile.release.package.stet-tiny-skia]
+overflow-checks = false
+
+[profile.release.package.stet-tiny-skia-path]
+overflow-checks = false

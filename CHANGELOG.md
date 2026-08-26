@@ -141,6 +141,30 @@ changes.
 
 ### Added
 
+- **`--timeout <SECONDS>`** and `Context::set_timeout` — a wall-clock deadline
+  for interpretation, raising `PsError::Timeout`. PostScript is
+  Turing-complete, so nothing static bounds how long a program runs, and a
+  deadline is the only thing that stops one which makes progress but never
+  terminates. **There is no limit by default**, preserving existing REPL and
+  CLI behaviour; set one when the input is untrusted. The check counts down a
+  `u32` and consults the clock every 4096 iterations, and short-circuits when
+  no deadline is set, so the default path measures as free (-0.42% on a tight
+  4M-iteration arithmetic loop).
+
+### Added
+
+- **Fuzzing (`fuzz/`)** — five `cargo-fuzz` targets covering the parsers that
+  consume untrusted input: `fuzz_pdf_parse` (open + render + the structural
+  API), `fuzz_font_truetype`, `fuzz_font_cff`, `fuzz_font_type1`, and
+  `fuzz_ps_tokenizer`. `fuzz/seed-corpus.sh` seeds them from the in-tree
+  samples (703 PDFs, 6410 PostScript inputs, 35 Type 1 faces) and
+  `fuzz/run.sh` runs them with settings suited to a sanitizer build. The crate
+  is excluded from the workspace, like `stet-wasm`, because cargo-fuzz needs
+  nightly and stet is stable-only with a pinned MSRV; a `continue-on-error` CI
+  job runs a 60s smoke test per target. See `fuzz/README.md`.
+
+### Added
+
 - **`[profile.hardened]`** — release codegen with `overflow-checks` and
   `debug-assertions` left on, for finding silent arithmetic wraps at release
   speed. Build with `cargo build --profile hardened`. It is a testing profile,
@@ -152,6 +176,21 @@ changes.
   aarch64 paths use.
 
 ### Fixed
+
+- **Two native-stack recursion vectors in the interpreter.** A `/Separation`
+  colour space whose tint transform sets that same colour space re-entered
+  `exec_sync` without bound — about 200 bytes of PostScript aborted the
+  process. `exec_sync` is now capped at depth 100 via `Context::exec_sync_depth`,
+  raising `PsError::ExecStackOverflow`. Separately, `parse_procedure` and
+  `stream_parse_procedure` had no `{`-nesting cap, so 200000 nested braces
+  (a 400 KB file) aborted; both now stop at `MAX_PROC_DEPTH` (100), matching
+  the existing `MAX_BOS_DEPTH`.
+- **Four unchecked `u16` range ends in the CFF parser** (charset formats 1 and
+  2, CID-map formats 1 and 2). `for sid in first..=first + n_left` overflows
+  when a range starts near 0xFFFF — a panic under overflow checks, a wrapped
+  range otherwise. Found by `cargo fuzz` within 60s of a cold start. The same
+  pass fixed `n_glyphs - 1` in both format 0 readers, which underflows `usize`
+  for a font declaring zero glyphs.
 
 - **Octal escapes in PDF literal strings** (`\ddd`) accumulated into a `u8`,
   so a three-digit escape above `\377` overflowed the accumulator. The

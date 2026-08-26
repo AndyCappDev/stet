@@ -28,3 +28,11 @@ crates/stet/output.pdf
 # Bulk PS corpus for gs differential testing (regenerable, lives on /data)
 ps_corpus
 ps_corpus/
+
+# Fuzzing artefacts. Corpora are bulky and machine-generated, and are rebuilt
+# from the in-tree sample sets by fuzz/seed-corpus.sh. Crash reproducers land
+# in fuzz/artifacts — promote an interesting one into a real regression test
+# rather than committing it here.
+/fuzz/corpus/
+/fuzz/artifacts/
+/fuzz/coverage/

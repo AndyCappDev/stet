@@ -22,6 +22,7 @@ pub fn eval(ctx: &mut Context) -> Result<(), PsError> {
         {
             return Err(PsError::Quit);
         }
+        ctx.check_deadline()?;
         // Deferred objects (nested procs from exec_procedure) → push to operand stack
         // Clear the deferred flag so the executable flag is preserved.
         if obj.flags.is_deferred() {
@@ -81,6 +82,30 @@ pub fn eval(ctx: &mut Context) -> Result<(), PsError> {
 /// call PS procedures as callbacks (filter/image data sources, tint
 /// transforms, BuildChar, etc.).
 pub fn exec_sync(ctx: &mut Context, proc_obj: PsObject) -> Result<(), PsError> {
+    // Each nesting level is a native stack frame, and several of the ~47 call
+    // sites are re-entrant from PostScript — a `/Separation` tint transform
+    // that sets its own colour space is roughly 200 bytes and aborts the
+    // process on a stack overflow. `PsError::ExecStackOverflow` is the PLRM
+    // error for exhausting the execution stack, which is what this is.
+    if ctx.exec_sync_depth >= MAX_EXEC_SYNC_DEPTH {
+        return Err(PsError::ExecStackOverflow);
+    }
+    ctx.exec_sync_depth += 1;
+    let result = exec_sync_inner(ctx, proc_obj);
+    // Decrement through every exit, including the error paths inside.
+    ctx.exec_sync_depth -= 1;
+    result
+}
+
+/// Maximum re-entrancy depth for [`exec_sync`].
+///
+/// Mirrors `MAX_BOS_DEPTH` in `stet_core::binary_token`. Legitimate nesting is
+/// shallow: a tint transform inside a pattern inside a form is three levels,
+/// and Type 3 glyphs add one each. 100 is far past that while keeping the
+/// worst-case native stack well inside a default thread.
+const MAX_EXEC_SYNC_DEPTH: u32 = 100;
+
+fn exec_sync_inner(ctx: &mut Context, proc_obj: PsObject) -> Result<(), PsError> {
     let base_depth = ctx.e_stack.len();
     ctx.e_stack.push(proc_obj)?;
 
@@ -90,6 +115,7 @@ pub fn exec_sync(ctx: &mut Context, proc_obj: PsObject) -> Result<(), PsError> {
         {
             return Err(PsError::Quit);
         }
+        ctx.check_deadline()?;
         let Some(mut obj) = ctx.e_stack.try_pop() else {
             break;
         };
@@ -645,6 +671,23 @@ fn dispatch_scanned_token(
 /// Called when the streaming tokenizer returns `ProcBegin`. Reads tokens
 /// from the file byte-by-byte until the matching `}`.
 fn stream_parse_procedure(ctx: &mut Context, file_entity: EntityId) -> Result<PsObject, PsError> {
+    stream_parse_procedure_at(ctx, file_entity, 0)
+}
+
+/// [`stream_parse_procedure`], carrying the `{`-nesting depth.
+///
+/// The streaming reader is a separate recursive descent from
+/// [`parse_procedure`] and needs the same cap; it is the path taken when
+/// PostScript is read from a file rather than an in-memory buffer, which is
+/// the ordinary case for the CLI.
+fn stream_parse_procedure_at(
+    ctx: &mut Context,
+    file_entity: EntityId,
+    depth: u32,
+) -> Result<PsObject, PsError> {
+    if depth >= MAX_PROC_DEPTH {
+        return Err(PsError::LimitCheck);
+    }
     let mut elements = Vec::new();
 
     loop {
@@ -653,7 +696,7 @@ fn stream_parse_procedure(ctx: &mut Context, file_entity: EntityId) -> Result<Ps
             None => return Err(PsError::SyntaxError), // unterminated
             Some((Token::ProcEnd, _)) => break,
             Some((Token::ProcBegin, _)) => {
-                let nested = stream_parse_procedure(ctx, file_entity)?;
+                let nested = stream_parse_procedure_at(ctx, file_entity, depth + 1)?;
                 elements.push(nested);
             }
             Some((Token::BinaryTokenByte(tag), _)) => {
@@ -1080,13 +1123,33 @@ pub fn parse_and_exec_file(ctx: &mut Context, source: &[u8], path: &str) -> Resu
 
 /// Parse a `{ ... }` procedure body (recursive for nested procedures).
 fn parse_procedure(ctx: &mut Context, tokenizer: &mut Tokenizer) -> Result<PsObject, PsError> {
+    parse_procedure_at(ctx, tokenizer, 0)
+}
+
+/// Maximum `{`-nesting depth when parsing a procedure.
+///
+/// `parse_procedure` is recursive descent, so each `{` is a native stack
+/// frame; 200000 of them is 400 KB of input and a stack-overflow abort. Named
+/// to match `MAX_BOS_DEPTH` in `stet_core::binary_token`, which caps the
+/// equivalent nesting in the binary-object-sequence decoder, and set to the
+/// same value: real PostScript nests procedures a handful of levels deep.
+const MAX_PROC_DEPTH: u32 = 100;
+
+fn parse_procedure_at(
+    ctx: &mut Context,
+    tokenizer: &mut Tokenizer,
+    depth: u32,
+) -> Result<PsObject, PsError> {
+    if depth >= MAX_PROC_DEPTH {
+        return Err(PsError::LimitCheck);
+    }
     let mut elements = Vec::new();
 
     loop {
         match tokenizer.next_token()? {
             Some(Token::ProcEnd) => break,
             Some(Token::ProcBegin) => {
-                let nested = parse_procedure(ctx, tokenizer)?;
+                let nested = parse_procedure_at(ctx, tokenizer, depth + 1)?;
                 elements.push(nested);
             }
             Some(Token::BinaryTokenByte(tag)) => {

@@ -559,8 +559,11 @@ fn parse_charset(
 
     match fmt {
         0 => {
-            // Format 0: array of SIDs
-            for _ in 0..n_glyphs - 1 {
+            // Format 0: array of SIDs.
+            //
+            // `n_glyphs - 1` underflows usize when the font declares zero
+            // glyphs, which is a panic rather than an empty loop.
+            for _ in 0..n_glyphs.saturating_sub(1) {
                 if pos + 1 >= data.len() {
                     break;
                 }
@@ -578,11 +581,17 @@ fn parse_charset(
                 let first_sid = u16::from_be_bytes([data[pos], data[pos + 1]]);
                 let n_left = data[pos + 2] as u16;
                 pos += 3;
-                for sid in first_sid..=first_sid + n_left {
+                // `first_sid + n_left` is a u16 add on two file-supplied
+                // values: a range starting near 0xFFFF overflows it. Compute
+                // the bound in u32 so the range is simply clipped at the SID
+                // space instead of wrapping (or panicking under overflow
+                // checks, which is how the fuzzer found this).
+                let last_sid = u32::from(first_sid) + u32::from(n_left);
+                for sid in u32::from(first_sid)..=last_sid.min(u32::from(u16::MAX)) {
                     if names.len() >= n_glyphs {
                         break;
                     }
-                    names.push(get_sid_string(sid, string_index));
+                    names.push(get_sid_string(sid as u16, string_index));
                 }
             }
         }
@@ -595,11 +604,17 @@ fn parse_charset(
                 let first_sid = u16::from_be_bytes([data[pos], data[pos + 1]]);
                 let n_left = u16::from_be_bytes([data[pos + 2], data[pos + 3]]);
                 pos += 4;
-                for sid in first_sid..=first_sid + n_left {
+                // `first_sid + n_left` is a u16 add on two file-supplied
+                // values: a range starting near 0xFFFF overflows it. Compute
+                // the bound in u32 so the range is simply clipped at the SID
+                // space instead of wrapping (or panicking under overflow
+                // checks, which is how the fuzzer found this).
+                let last_sid = u32::from(first_sid) + u32::from(n_left);
+                for sid in u32::from(first_sid)..=last_sid.min(u32::from(u16::MAX)) {
                     if names.len() >= n_glyphs {
                         break;
                     }
-                    names.push(get_sid_string(sid, string_index));
+                    names.push(get_sid_string(sid as u16, string_index));
                 }
             }
         }
@@ -622,7 +637,9 @@ fn build_cid_to_gid(data: &[u8], offset: usize, n_glyphs: usize) -> Result<Vec<u
     let mut pos = offset + 1;
     match fmt {
         0 => {
-            for _ in 0..n_glyphs - 1 {
+            // `n_glyphs - 1` underflows usize when the font declares zero
+            // glyphs, which is a panic rather than an empty loop.
+            for _ in 0..n_glyphs.saturating_sub(1) {
                 if pos + 1 >= data.len() {
                     break;
                 }
@@ -639,11 +656,13 @@ fn build_cid_to_gid(data: &[u8], offset: usize, n_glyphs: usize) -> Result<Vec<u
                 let first = u16::from_be_bytes([data[pos], data[pos + 1]]);
                 let n_left = data[pos + 2] as u16;
                 pos += 3;
-                for cid in first..=first + n_left {
+                // Same unchecked u16 range end as the charset parser above.
+                let last = u32::from(first) + u32::from(n_left);
+                for cid in u32::from(first)..=last.min(u32::from(u16::MAX)) {
                     if gid_to_cid.len() >= n_glyphs {
                         break;
                     }
-                    gid_to_cid.push(cid);
+                    gid_to_cid.push(cid as u16);
                 }
             }
         }
@@ -655,11 +674,13 @@ fn build_cid_to_gid(data: &[u8], offset: usize, n_glyphs: usize) -> Result<Vec<u
                 let first = u16::from_be_bytes([data[pos], data[pos + 1]]);
                 let n_left = u16::from_be_bytes([data[pos + 2], data[pos + 3]]);
                 pos += 4;
-                for cid in first..=first + n_left {
+                // Same unchecked u16 range end as the charset parser above.
+                let last = u32::from(first) + u32::from(n_left);
+                for cid in u32::from(first)..=last.min(u32::from(u16::MAX)) {
                     if gid_to_cid.len() >= n_glyphs {
                         break;
                     }
-                    gid_to_cid.push(cid);
+                    gid_to_cid.push(cid as u16);
                 }
             }
         }

@@ -116,6 +116,9 @@ fn main() {
     // reverts to the system CMYK profile for comparison renders.
     let mut use_output_intent = true;
     let mut pages_spec: Option<String> = None;
+    // No timeout by default: PostScript is Turing-complete and plenty of
+    // legitimate jobs run for minutes. `--timeout` is for untrusted input.
+    let mut timeout_secs: Option<f64> = None;
     let mut password: Option<String> = None;
     let mut target_width: Option<u32> = None;
     let mut target_height: Option<u32> = None;
@@ -238,6 +241,24 @@ fn main() {
                     continue;
                 } else {
                     eprintln!("Error: --bpc requires a value (on|off|auto)");
+                    std::process::exit(1);
+                }
+            }
+            "--timeout" => {
+                if i + 1 < args.len() {
+                    match args[i + 1].parse::<f64>() {
+                        Ok(secs) if secs > 0.0 && secs.is_finite() => {
+                            timeout_secs = Some(secs);
+                            i += 2;
+                            continue;
+                        }
+                        _ => {
+                            eprintln!("Error: --timeout requires a positive number of seconds");
+                            std::process::exit(1);
+                        }
+                    }
+                } else {
+                    eprintln!("Error: --timeout requires a value in seconds");
                     std::process::exit(1);
                 }
             }
@@ -401,6 +422,7 @@ size (use --width/--height to scale PDF output)"
                 target_width,
                 target_height,
                 page_size,
+                timeout_secs,
             );
         }
         "viewport-png" => {
@@ -418,6 +440,7 @@ size (use --width/--height to scale PDF output)"
                 target_width,
                 target_height,
                 page_size,
+                timeout_secs,
             );
         }
         "pdf" => {
@@ -438,11 +461,27 @@ size (use --width/--height to scale PDF output)"
             } else {
                 // PS input → PDF output. --password does not apply here.
                 let _ = &password;
-                run_pdf_mode(dpi, file_args, &icc_cfg, no_aa, page_filter, page_size);
+                run_pdf_mode(
+                    dpi,
+                    file_args,
+                    &icc_cfg,
+                    no_aa,
+                    page_filter,
+                    page_size,
+                    timeout_secs,
+                );
             }
         }
         "null" => {
-            run_null_mode(dpi, file_args, &icc_cfg, no_aa, page_filter, page_size);
+            run_null_mode(
+                dpi,
+                file_args,
+                &icc_cfg,
+                no_aa,
+                page_filter,
+                page_size,
+                timeout_secs,
+            );
         }
         #[cfg(feature = "viewer")]
         "viewer" => run_viewer_mode(
@@ -453,6 +492,7 @@ size (use --width/--height to scale PDF output)"
             page_filter,
             password,
             page_size,
+            timeout_secs,
         ),
         #[cfg(not(feature = "viewer"))]
         "viewer" => {
@@ -483,6 +523,7 @@ fn run_png_mode(
     target_width: Option<u32>,
     target_height: Option<u32>,
     page_size: Option<(f64, f64)>,
+    timeout_secs: Option<f64>,
 ) {
     // Check if all files are PDFs — use fast path (no PS interpreter needed)
     if !file_args.is_empty() && file_args.iter().all(|f| is_pdf_file(f)) {
@@ -508,7 +549,7 @@ fn run_png_mode(
         std::process::exit(1);
     }
 
-    let mut ctx = create_context(icc_cfg);
+    let mut ctx = create_context(icc_cfg, timeout_secs);
     ctx.page_filter = page_filter;
 
     // Register device factory (before setpagedevice)
@@ -546,8 +587,9 @@ fn run_pdf_mode(
     _no_aa: bool,
     page_filter: Option<std::collections::HashSet<i32>>,
     page_size: Option<(f64, f64)>,
+    timeout_secs: Option<f64>,
 ) {
-    let mut ctx = create_context(icc_cfg);
+    let mut ctx = create_context(icc_cfg, timeout_secs);
     ctx.page_filter = page_filter;
     let dpi_val = dpi_override.unwrap_or(300.0);
 
@@ -586,10 +628,11 @@ fn run_null_mode(
     _no_aa: bool,
     page_filter: Option<std::collections::HashSet<i32>>,
     page_size: Option<(f64, f64)>,
+    timeout_secs: Option<f64>,
 ) {
     use stet_core::device::NullDevice;
 
-    let mut ctx = create_context(icc_cfg);
+    let mut ctx = create_context(icc_cfg, timeout_secs);
     ctx.page_filter = page_filter;
     ctx.device_factory = Some(Box::new(|w, h| Box::new(NullDevice::new(w, h))));
 
@@ -622,6 +665,7 @@ fn run_viewer_mode(
     page_filter: Option<std::collections::HashSet<i32>>,
     cli_password: Option<String>,
     page_size: Option<(f64, f64)>,
+    timeout_secs: Option<f64>,
 ) {
     use stet_core::device::NullDevice;
 
@@ -711,12 +755,13 @@ fn run_viewer_mode(
     // Spawn interpreter thread
     let _screen_info_receiver = interp_end.screen_info_receiver;
     let icc_cfg_thread = icc_cfg.clone();
+    let timeout_secs_thread = timeout_secs;
     let interrupt_flag_thread = interrupt_flag.clone();
     let password_response_rx_thread = password_response_rx;
     let page_sender_thread = page_sender_for_interp;
     let cli_password_thread = cli_password;
     std::thread::spawn(move || {
-        let mut ctx = create_context(&icc_cfg_thread);
+        let mut ctx = create_context(&icc_cfg_thread, timeout_secs_thread);
         ctx.page_filter = page_filter;
         ctx.interrupt_flag = Some(interrupt_flag_thread.clone());
 
@@ -1006,6 +1051,9 @@ Common options:
                             program whose artwork is larger than US Letter.
                             Overrides an EPS %%BoundingBox when both apply.
     --pages <SPEC>          Page selection: \"3\", \"1-5\", \"1-3,7,10-12\".
+    --timeout <SECONDS>     Abort a job running longer than this. PostScript is
+                            Turing-complete, so there is no limit by default;
+                            set one when the input is untrusted.
     --width <PX>            Override page width (PDF input only). Cannot
                             be combined with --dpi.
     --height <PX>           Override page height (PDF input only). Cannot
@@ -1169,8 +1217,11 @@ fn validate_cmyk_icc(bytes: &[u8], path: &str) {
 }
 
 /// Create and initialize a Context with the resource system.
-fn create_context(icc_cfg: &IccCliConfig) -> Context {
+fn create_context(icc_cfg: &IccCliConfig, timeout_secs: Option<f64>) -> Context {
     let mut ctx = Context::new();
+    // Armed here rather than at the call sites: each mode builds its context
+    // once per job, so "from now" is the start of the job's interpretation.
+    ctx.set_timeout(timeout_secs.map(std::time::Duration::from_secs_f64));
     // Replace the default IccCache with one configured per the CLI options.
     // This is where `--bpc` lands; commits 2-3 of docs/PLAN-BPC.md will turn
     // the stored mode into actual conversion-time behavior.

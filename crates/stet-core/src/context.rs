@@ -349,6 +349,43 @@ pub struct Context {
     /// user drops a new file.
     pub interrupt_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 
+    /// Current re-entrancy depth of `exec_sync`.
+    ///
+    /// `exec_sync` runs a nested eval loop in a fresh native stack frame, and
+    /// roughly 47 call sites reach it — tint transforms, Type 3 `BuildChar`,
+    /// image data procedures, and most operators that need a procedure's
+    /// result before they can continue. Several of those are re-entrant from
+    /// PostScript: a `/Separation` colour space whose tint transform sets that
+    /// same colour space recurses until the native stack is gone, which is an
+    /// abort rather than a catchable error, from about 200 bytes of input.
+    ///
+    /// Tracked on the context rather than threaded as a parameter because the
+    /// call sites are spread across four crates and the value is genuinely
+    /// interpreter state, not an argument.
+    pub exec_sync_depth: u32,
+
+    /// Wall-clock deadline for interpretation, if one was set.
+    ///
+    /// PostScript is Turing-complete, so no static analysis bounds how long a
+    /// program runs — `{} loop` is three characters. Anything that feeds it
+    /// untrusted input needs a deadline, and a deadline is also the only thing
+    /// that bounds a program which makes progress but never terminates, where
+    /// the recursion and allocation guards elsewhere do not apply: a
+    /// `/Separation` tint transform that re-enters its own colour space hits
+    /// the `exec_sync` depth cap, unwinds, and retries forever.
+    ///
+    /// `None` — the default — means no limit, preserving the behaviour the
+    /// REPL and CLI have always had. Set it with [`Context::set_timeout`].
+    pub deadline: Option<std::time::Instant>,
+
+    /// Iterations remaining before the eval loop next consults the clock.
+    ///
+    /// `Instant::now` is far too expensive to call on every iteration of the
+    /// interpreter's hot loop. Counting down a `u32` and checking the clock
+    /// only when it reaches zero costs one decrement and one
+    /// perfectly-predicted branch, which does not show up in corpus timings.
+    steps_to_deadline_check: u32,
+
     /// When true, each successful `showpage` / `copypage` sets `interrupt_flag`
     /// after capturing the display list, so the eval loop yields back to the
     /// caller one page at a time. The caller clears the flag and re-enters
@@ -446,7 +483,53 @@ fn is_flate_stream_complete(data: &[u8]) -> bool {
     }
 }
 
+/// How many eval-loop iterations pass between wall-clock checks.
+///
+/// Small enough that a deadline is honoured within microseconds, large enough
+/// that the `Instant::now` cost is amortised into nothing.
+const DEADLINE_CHECK_INTERVAL: u32 = 4096;
+
 impl Context {
+    /// Stop interpreting once `limit` has elapsed from now.
+    ///
+    /// Raises [`PsError::Timeout`] from the eval loop when the deadline
+    /// passes. Pass `None` to interpret without a limit, which is the default.
+    ///
+    /// The deadline is absolute, set at the moment of this call: it bounds the
+    /// whole job, not each operator, so re-arm it per job rather than once for
+    /// a long-lived context.
+    pub fn set_timeout(&mut self, limit: Option<std::time::Duration>) {
+        self.deadline = limit.map(|d| std::time::Instant::now() + d);
+        self.steps_to_deadline_check = DEADLINE_CHECK_INTERVAL;
+    }
+
+    /// Check the deadline, cheaply.
+    ///
+    /// Call once per eval-loop iteration. Almost every call decrements a
+    /// counter and returns; only every [`DEADLINE_CHECK_INTERVAL`]th consults
+    /// the clock.
+    #[inline]
+    pub fn check_deadline(&mut self) -> Result<(), PsError> {
+        // Test the deadline before touching the counter. With no timeout set —
+        // the default, and what the REPL and every trusted-input job use —
+        // this is a single well-predicted branch on an already-hot field, and
+        // the read-modify-write below never happens. Decrementing
+        // unconditionally instead cost about 3% on a tight arithmetic loop,
+        // which is the wrong trade for a feature most callers do not enable.
+        if self.deadline.is_none() {
+            return Ok(());
+        }
+        self.steps_to_deadline_check -= 1;
+        if self.steps_to_deadline_check == 0 {
+            self.steps_to_deadline_check = DEADLINE_CHECK_INTERVAL;
+            if let Some(deadline) = self.deadline
+                && std::time::Instant::now() >= deadline
+            {
+                return Err(PsError::Timeout);
+            }
+        }
+        Ok(())
+    }
     /// Execute a PostScript procedure synchronously and return.
     pub fn exec_sync(&mut self, proc_obj: PsObject) -> Result<(), PsError> {
         let f = self.exec_sync_fn.expect("exec_sync not initialized");
@@ -900,6 +983,9 @@ impl Context {
             dict_version: 0,
             name_resolve_cache: Vec::new(),
             interrupt_flag: None,
+            exec_sync_depth: 0,
+            deadline: None,
+            steps_to_deadline_check: DEADLINE_CHECK_INTERVAL,
             yield_after_showpage: false,
         }
     }
