@@ -5,6 +5,111 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security
+
+Five unbounded-recursion vectors in the PDF reader let a small crafted file
+abort the process with a native stack overflow. A stack overflow is not a
+panic, so none of these could be contained by `catch_unwind` — any program
+rendering untrusted PDFs was exposed to an uncatchable denial of service.
+This is the same vulnerability class as RUSTSEC-2026-0187 in `lopdf`.
+
+Three were depth-based, and are now capped:
+
+- **Nested arrays and dictionaries in an object body** (`lexer.rs`).
+  `parse_object_from_token` and `parse_dict_body` are mutually recursive with
+  no bound, so `[[[[…` or `<</A<</A…` in any object exhausted the stack. Both
+  now thread a depth counter and stop at `MAX_OBJECT_DEPTH` (256), returning
+  the new `PdfError::NestingTooDeep`. The existing `parse_object`,
+  `parse_object_from_token`, and `parse_dict_body` signatures are unchanged
+  and enter at depth 0; `parse_object_at_depth`,
+  `parse_object_from_token_at_depth`, and `parse_dict_body_at_depth` are new.
+- **Nested arrays in a content stream** (`content/mod.rs`). Content-stream
+  operands go through a separate parser, `parse_inline_array`, which needed
+  its own cap; it shares `MAX_OBJECT_DEPTH`.
+- **Nested procedures in a Type 4 (PostScript calculator) function**
+  (`resources/function.rs`). `parse_token_sequence` recurses once per `{`
+  body; now capped at `MAX_CALC_DEPTH` (64).
+
+Two were cycle-based, which no depth cap alone can fix — the recursion is
+infinite, so file size is irrelevant (both reproduce in under 1 KB):
+
+- **A Type 3 stitching function that reaches itself through `/Functions`**
+  (`resources/function.rs`), directly or through a ring of siblings.
+  `PdfFunction::parse` now carries a set of the object numbers on the current
+  path and raises `PdfError::CircularReference` on re-entry. It is a path set,
+  not a seen-set — entries are popped on the way out, so the legitimate shape
+  `/Functions [7 0 R 7 0 R]` still parses and renders.
+- **A Type 3 CharProc that shows its own glyph** (`content/mod.rs`), directly
+  or through a pair of fonts naming each other. This path incremented the
+  interpreter's `depth` field but never tested it: the only check lived in
+  `handle_form_xobject`. Type 3 glyphs and soft-mask groups — which likewise
+  re-enter `interpret_stream` without passing through the Form XObject path —
+  now check it too. The bound, `MAX_CONTENT_NESTING`, is 20, the value the
+  Form XObject and pattern guards already used, so nothing that renders today
+  changes.
+
+Added `PdfError::NestingTooDeep`. `PdfError` is `#[non_exhaustive]`, so this
+is not a breaking change.
+
+Separately, image dictionary integers are now validated before use.
+
+- **`/Width` and `/Height` were cast with `as u32` and then multiplied in
+  `u32`.** The product overflowed: 65537 x 65536 is `2^32 + 65536`, so
+  `width * height` came back as 65536 and the buffer allocated from it was far
+  smaller than the loops that filled it — an "attempt to multiply with
+  overflow" panic in debug builds, a silently undersized allocation in
+  release. The truncating cast was wrong on its own too: `/Width 4294967297`
+  became a 1-pixel image rather than an error.
+- **The loop counts alone were a denial of service.** Even where the
+  arithmetic survived, an 800-byte file declaring a 65537 x 65536 image spent
+  9-19 seconds in release. It now completes in 0.1 s.
+- Both are fixed by validating at the four points where an image dictionary is
+  read (image XObject, inline image, `/SMask`, `/Mask`): dimensions must be
+  positive and at most `MAX_IMAGE_DIMENSION` (100,000), and their product at
+  most `MAX_IMAGE_PIXELS` (400,000,000). The largest image in the sample
+  corpus is 34862 x 4332 (151,022,184 pixels), so the caps sit roughly 3x and
+  2.6x above anything real; all 691 sample files were checked and none has an
+  image rejected by them.
+- **`/BitsPerComponent` is validated too**, to 1..=16. It reaches
+  `1u32 << bpc` in `expand_bits_to_bytes`, which panics in debug builds at 32
+  or more. That function now also reserves its three-way
+  `width * height * components` product in `usize`, which overflows a `u32`
+  sooner than the two-way one does.
+
+Filter and font parameters are now validated the same way.
+
+- **`/Columns`, `/Colors`, and `/BitsPerComponent` in `/DecodeParms`** were
+  cast straight to `usize` and multiplied. A zero in any of them drove
+  `row_bytes` to zero and reached `slice::chunks(0)` — "chunk size must be
+  non-zero", which panics in **release** builds, not only debug. A negative
+  became astronomical under the cast and aborted the process on a 2.3-exabyte
+  reservation. Both are now range-checked with the row-size products computed
+  via `checked_mul`; a malformed `/DecodeParms` leaves the stream unchanged
+  rather than failing it, which is what the caller would have had if
+  `/Predictor` were absent.
+- **PS CIDFont header counts** (`/CIDCount`, `/SubrCount`, `/FDBytes`,
+  `/GDBytes`, `/SDBytes`). `/SubrCount` was passed to `Vec::with_capacity`
+  *before* the bounds check that would have rejected it, so a bogus count
+  panicked with "capacity overflow" in release as well as debug. Separately,
+  `FDBytes + GDBytes == 0` made the CID map size zero for any `/CIDCount`, so
+  the "binary data too short" check passed and an 8 TB reservation followed
+  from a 700-byte file. Counts are now bounded against the binary segment
+  actually present rather than against a fixed ceiling, the byte-widths are
+  capped at 8, and the reservation happens after the check.
+
+Neither bound rejects anything real: all 691 sample PDFs were re-rendered with
+the predictor fallback instrumented, and none takes it.
+
+### Fixed
+
+- Shading color-stop sampling now sorts with `f64::total_cmp` instead of
+  `partial_cmp().unwrap()`, and clamps its own sample count so the divisor in
+  `i / (n - 1)` cannot be zero. No crafted file was found that reaches either
+  path — the discontinuity filter excludes NaN and callers already clamp the
+  count — so this is hardening against a future caller, not a live fix.
+
 ## [0.5.0] — 2026-08-25
 
 Minor release. PostScript integers are now 64-bit, which fixes the standard

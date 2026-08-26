@@ -1471,14 +1471,72 @@ pub fn decode_pre_jpx(raw: &[u8], dict: &crate::objects::PdfDict) -> Vec<u8> {
     decode_stream(raw, &filters[..pre_count], &pre_parms, None).unwrap_or_else(|_| raw.to_vec())
 }
 
-/// Apply PNG or TIFF predictor to decoded data.
-fn apply_predictor(data: &[u8], parms: &PdfDict, predictor: i64) -> Result<Vec<u8>, PdfError> {
-    let columns = parms.get_int(b"Columns").unwrap_or(1) as usize;
-    let colors = parms.get_int(b"Colors").unwrap_or(1) as usize;
-    let bpc = parms.get_int(b"BitsPerComponent").unwrap_or(8) as usize;
+/// Largest accepted `/Columns` in `/DecodeParms`.
+///
+/// For an image stream this is the image width, so it is held to the same
+/// ceiling images are; for an xref stream it is a handful of bytes.
+const MAX_PREDICTOR_COLUMNS: i64 = 100_000;
 
-    let bytes_per_pixel = (colors * bpc).div_ceil(8);
-    let row_bytes = (columns * colors * bpc).div_ceil(8);
+/// Largest accepted `/Colors` in `/DecodeParms`.
+///
+/// PDF 32000-1 Table 10 gives 1, 2, 3, or 4. DeviceN can carry more
+/// components, so this allows the 32 that `/DeviceN` itself is capped at
+/// rather than the literal table value.
+const MAX_PREDICTOR_COLORS: i64 = 32;
+
+/// Validate one `/DecodeParms` integer, substituting `default` when absent.
+///
+/// Returns `None` for a value outside `1..=max`. These come straight from the
+/// file and feed the predictor's row-size arithmetic; a negative one becomes
+/// enormous under `as usize`, and a zero makes `row_bytes` zero, which reaches
+/// `slice::chunks(0)` — a panic in release builds as well as debug.
+fn validate_decode_parm(value: Option<i64>, default: i64, max: i64) -> Option<usize> {
+    let v = value.unwrap_or(default);
+    if v >= 1 && v <= max {
+        usize::try_from(v).ok()
+    } else {
+        None
+    }
+}
+
+/// Apply PNG or TIFF predictor to decoded data.
+///
+/// A malformed `/DecodeParms` yields the data unchanged rather than an error:
+/// the predictor is a reversible transform layered on top of an already
+/// decoded stream, so passing it through leaves the caller with the same bytes
+/// it would have had if `/Predictor` were absent, which is the more useful
+/// outcome for a damaged file than failing the whole stream.
+fn apply_predictor(data: &[u8], parms: &PdfDict, predictor: i64) -> Result<Vec<u8>, PdfError> {
+    let (Some(columns), Some(colors), Some(bpc)) = (
+        validate_decode_parm(parms.get_int(b"Columns"), 1, MAX_PREDICTOR_COLUMNS),
+        validate_decode_parm(parms.get_int(b"Colors"), 1, MAX_PREDICTOR_COLORS),
+        validate_decode_parm(
+            parms.get_int(b"BitsPerComponent"),
+            8,
+            crate::content::MAX_BITS_PER_COMPONENT,
+        ),
+    ) else {
+        return Ok(data.to_vec());
+    };
+
+    // Bounded above by 100_000 * 32 * 16, so these cannot overflow; the
+    // checked forms document that rather than relying on the reader to
+    // re-derive it.
+    let Some(bytes_per_pixel) = colors.checked_mul(bpc).map(|b| b.div_ceil(8)) else {
+        return Ok(data.to_vec());
+    };
+    let Some(row_bytes) = columns
+        .checked_mul(colors)
+        .and_then(|c| c.checked_mul(bpc))
+        .map(|b| b.div_ceil(8))
+    else {
+        return Ok(data.to_vec());
+    };
+    // Every predictor below either chunks by `row_bytes` or divides by
+    // `row_bytes + 1`; neither is meaningful at zero.
+    if row_bytes == 0 || bytes_per_pixel == 0 {
+        return Ok(data.to_vec());
+    }
 
     if predictor == 2 {
         // TIFF horizontal differencing

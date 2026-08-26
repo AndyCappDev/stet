@@ -61,6 +61,18 @@ pub enum PdfError {
     #[error("circular reference detected for object {0} {1}")]
     CircularReference(u32, u16),
 
+    /// A recursive-descent parse hit its nesting cap.
+    ///
+    /// Raised instead of letting a crafted file exhaust the native stack,
+    /// which aborts the process rather than unwinding.
+    #[error("{context} nesting exceeded the limit of {limit}")]
+    NestingTooDeep {
+        /// What was being parsed, e.g. `"array/dictionary"`.
+        context: &'static str,
+        /// The cap that was reached.
+        limit: u32,
+    },
+
     #[error("PDF requires a password")]
     PasswordRequired,
 

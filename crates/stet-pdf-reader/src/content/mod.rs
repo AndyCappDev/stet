@@ -16,7 +16,7 @@ pub mod graphics_state;
 mod standard_fonts;
 
 use crate::error::PdfError;
-use crate::lexer::{Lexer, Token};
+use crate::lexer::{Lexer, MAX_OBJECT_DEPTH, Token};
 use crate::objects::{PdfDict, PdfObj};
 use crate::resolver::Resolver;
 
@@ -41,6 +41,80 @@ use stet_graphics::display_list::{
     DisplayElement, DisplayList, GroupParams, OcgVisibility, SoftMaskParams, SoftMaskSubtype,
 };
 use stet_graphics::icc::IccCache;
+
+/// Maximum nesting of re-entrant content streams.
+///
+/// Form XObjects, tiling and shading patterns, Type 3 CharProcs, and soft-mask
+/// groups are all interpreted by re-entering `interpret_stream`, and each can
+/// name itself either directly or through a ring of siblings. A cycle recurses
+/// on the native stack, which overflows into an abort that `catch_unwind`
+/// cannot contain — so every such entry point checks this cap. Legitimate
+/// documents nest a handful of levels; 20 was already the Form XObject limit
+/// and is kept here so the bound does not change for files that render today.
+const MAX_CONTENT_NESTING: u32 = 20;
+
+/// Largest accepted value for an image's `/Width` or `/Height`.
+///
+/// `/Width` and `/Height` are arbitrary file-supplied integers, and every
+/// downstream buffer size and loop bound is derived from them. Two things go
+/// wrong without a ceiling: `width * height` is computed in `u32` and wraps,
+/// yielding a buffer smaller than the loops that fill it; and even where the
+/// arithmetic survives, the loop counts alone are a denial of service — a
+/// 65537x65536 image in an 800-byte file spends ~9s in release doing nothing
+/// useful. The largest image in the sample corpus is 34862x4332, so this
+/// leaves roughly 3x headroom over anything real.
+const MAX_IMAGE_DIMENSION: i64 = 100_000;
+
+/// Largest accepted pixel count (`width * height`) for a single image.
+///
+/// Bounds the product independently of [`MAX_IMAGE_DIMENSION`], which alone
+/// would still permit 100000x100000. The corpus maximum is 151,022,184 pixels
+/// (`issue16263.pdf`), so this leaves roughly 2.6x headroom. Staying under
+/// 2^32 also keeps `width * height` exact in `u32` for the many sites that
+/// compute it that way.
+const MAX_IMAGE_PIXELS: u64 = 400_000_000;
+
+/// Largest accepted `/BitsPerComponent`.
+///
+/// PDF 32000-1 permits 1, 2, 4, 8, and 16. The value reaches `1u32 << bpc` in
+/// `expand_bits_to_bytes`, which panics in debug builds for `bpc >= 32`.
+/// Shared with [`crate::filters`], where the same key appears in
+/// `/DecodeParms` and feeds the predictor row-size arithmetic.
+pub(crate) const MAX_BITS_PER_COMPONENT: i64 = 16;
+
+/// Validate one file-supplied image dimension.
+///
+/// Returns `None` for a missing, non-positive, or out-of-range value, so
+/// callers reject the image rather than truncating it with an `as u32` cast —
+/// `/Width 4294967297` otherwise silently becomes a 1-pixel image.
+fn validate_image_dimension(v: Option<i64>) -> Option<u32> {
+    match v {
+        Some(n) if n > 0 && n <= MAX_IMAGE_DIMENSION => Some(n as u32),
+        _ => None,
+    }
+}
+
+/// Validate a `width`/`height` pair and return the pixel count.
+///
+/// Guarantees `width * height` fits in both `u32` and `usize` (including the
+/// 32-bit `usize` of the wasm32 target), so downstream sites may multiply the
+/// two directly.
+fn validate_image_size(width: u32, height: u32) -> Option<usize> {
+    let pixels = u64::from(width).checked_mul(u64::from(height))?;
+    if pixels == 0 || pixels > MAX_IMAGE_PIXELS {
+        return None;
+    }
+    usize::try_from(pixels).ok()
+}
+
+/// Validate a file-supplied `/BitsPerComponent`, falling back to 8.
+fn validate_bits_per_component(v: Option<i64>) -> Option<u32> {
+    match v {
+        None => Some(8),
+        Some(n) if n > 0 && n <= MAX_BITS_PER_COMPONENT => Some(n as u32),
+        _ => None,
+    }
+}
 
 /// One entry on the marked-content stack. Pushed on every BDC/BMC, popped
 /// on every EMC — so the stack stays balanced regardless of how OC and
@@ -157,6 +231,12 @@ pub struct ContentInterpreter<'a> {
     operand_stack: Vec<Operand>,
     display_list: DisplayList,
     in_text: bool,
+    /// Nesting level of the content stream being interpreted: Form XObjects,
+    /// tiling/shading patterns, Type 3 CharProcs, soft-mask forms, and
+    /// annotation appearance streams each add one. Capped at
+    /// [`MAX_CONTENT_NESTING`] — every one of those constructs can name itself
+    /// (directly or through a ring), and unguarded re-entry aborts the process
+    /// with a stack overflow rather than a catchable panic.
     depth: u32,
     /// True inside a Type 3 CharProc that started with `d1`. Per PDF spec 9.6.5,
     /// color operators must be ignored (glyph uses the current text color).
@@ -1197,7 +1277,25 @@ impl<'a> ContentInterpreter<'a> {
     }
 
     /// Parse an inline array from the content stream.
+    ///
+    /// Nesting is capped at [`MAX_OBJECT_DEPTH`]: this is a recursive-descent
+    /// parser, so an operand like `[[[[…` in a crafted content stream would
+    /// otherwise exhaust the native stack and abort the process.
     fn parse_inline_array(lexer: &mut Lexer) -> Result<Vec<PdfObj>, PdfError> {
+        Self::parse_inline_array_at_depth(lexer, 1)
+    }
+
+    /// [`Self::parse_inline_array`], entered at an explicit nesting depth.
+    ///
+    /// `depth` counts this array itself, matching the convention used by
+    /// [`crate::lexer::parse_dict_body_at_depth`].
+    fn parse_inline_array_at_depth(lexer: &mut Lexer, depth: u32) -> Result<Vec<PdfObj>, PdfError> {
+        if depth > MAX_OBJECT_DEPTH {
+            return Err(PdfError::NestingTooDeep {
+                context: "content-stream array",
+                limit: MAX_OBJECT_DEPTH,
+            });
+        }
         let mut elems = Vec::new();
         loop {
             let tok = lexer.next_token()?;
@@ -1209,11 +1307,17 @@ impl<'a> ContentInterpreter<'a> {
                 Token::LitString(s) | Token::HexString(s) => elems.push(PdfObj::Str(s)),
                 Token::Bool(b) => elems.push(PdfObj::Bool(b)),
                 Token::ArrayBegin => {
-                    let sub = Self::parse_inline_array(lexer)?;
-                    elems.push(PdfObj::Array(sub));
+                    // A nested array past the cap yields an error rather than
+                    // another frame; skip it and keep scanning for `]` so the
+                    // surrounding operand stream stays in sync.
+                    match Self::parse_inline_array_at_depth(lexer, depth + 1) {
+                        Ok(sub) => elems.push(PdfObj::Array(sub)),
+                        Err(_) => continue,
+                    }
                 }
                 Token::DictBegin => {
-                    let d = crate::lexer::parse_dict_body(lexer).unwrap_or_default();
+                    let d = crate::lexer::parse_dict_body_at_depth(lexer, depth + 1)
+                        .unwrap_or_default();
                     elems.push(PdfObj::Dict(d));
                 }
                 Token::Keyword(ref kw) if kw == b"null" => {
@@ -3169,7 +3273,16 @@ impl<'a> ContentInterpreter<'a> {
     }
 
     /// Render a single Type 3 glyph by interpreting its CharProc content stream.
+    ///
+    /// A CharProc may legitimately show text, including text in another Type 3
+    /// font. Nothing stops it from showing *its own* glyph, so this path is
+    /// bounded by [`MAX_CONTENT_NESTING`] like the Form XObject path: the
+    /// increment around `interpret_stream` below is only load-bearing if
+    /// somebody checks it.
     fn show_type3_glyph(&mut self, font: &PdfFont, char_code: u8) {
+        if self.depth >= MAX_CONTENT_NESTING {
+            return;
+        }
         let proc_data = match font.type3_char_proc(char_code) {
             Some(data) => data.to_vec(),
             None => return,
@@ -3656,13 +3769,19 @@ impl<'a> ContentInterpreter<'a> {
             }
         }
 
-        // Width/Height may be indirect references in some PDFs
-        let width = self
-            .resolve_dict_int(dict, b"Width")
-            .ok_or(PdfError::Other("image missing Width".into()))? as u32;
-        let height = self
-            .resolve_dict_int(dict, b"Height")
-            .ok_or(PdfError::Other("image missing Height".into()))? as u32;
+        // Width/Height may be indirect references in some PDFs.
+        //
+        // Both are validated before the cast rather than after: every buffer
+        // size and loop bound below derives from them, and an `as u32` on an
+        // unchecked file integer both truncates (`/Width 4294967297` becomes
+        // 1) and lets `width * height` wrap.
+        let width = validate_image_dimension(self.resolve_dict_int(dict, b"Width"))
+            .ok_or(PdfError::Other("image has missing or invalid Width".into()))?;
+        let height = validate_image_dimension(self.resolve_dict_int(dict, b"Height")).ok_or(
+            PdfError::Other("image has missing or invalid Height".into()),
+        )?;
+        validate_image_size(width, height)
+            .ok_or(PdfError::Other("image dimensions too large".into()))?;
 
         // Check for image mask (1-bit stencil painted with current fill color)
         let is_image_mask = dict
@@ -3676,7 +3795,8 @@ impl<'a> ContentInterpreter<'a> {
         let bpc = if is_image_mask {
             1
         } else {
-            dict.get_int(b"BitsPerComponent").unwrap_or(8) as u32
+            validate_bits_per_component(dict.get_int(b"BitsPerComponent"))
+                .ok_or(PdfError::Other("image has invalid BitsPerComponent".into()))?
         };
 
         // Per ISO 32000 §11.3.4 a per-image `/Intent` overrides the gstate
@@ -4832,12 +4952,19 @@ impl<'a> ContentInterpreter<'a> {
         };
         // Fall back to parent image dimensions when the SMask dict is
         // malformed (e.g. /Height missing — issue19611.pdf).
-        let sw = smask_dict.get_int(b"Width").unwrap_or(image_w as i64) as u32;
-        let sh = smask_dict.get_int(b"Height").unwrap_or(image_h as i64) as u32;
-        if sw == 0 || sh == 0 {
+        let sw =
+            validate_image_dimension(smask_dict.get_int(b"Width").or(Some(i64::from(image_w))));
+        let sh =
+            validate_image_dimension(smask_dict.get_int(b"Height").or(Some(i64::from(image_h))));
+        let (Some(sw), Some(sh)) = (sw, sh) else {
+            return Ok(None);
+        };
+        if validate_image_size(sw, sh).is_none() {
             return Ok(None);
         }
-        let bpc = smask_dict.get_int(b"BitsPerComponent").unwrap_or(8) as u32;
+        let Some(bpc) = validate_bits_per_component(smask_dict.get_int(b"BitsPerComponent")) else {
+            return Ok(None);
+        };
         let data = self.resolver.stream_data_from_obj(&smask_ref)?;
 
         // Expand non-8-bit BPC: sub-byte (1/2/4) are packed bits;
@@ -4901,9 +5028,13 @@ impl<'a> ContentInterpreter<'a> {
             Some(d) => d,
             None => return Ok(None),
         };
-        let mw = mask_dict.get_int(b"Width").unwrap_or(0) as u32;
-        let mh = mask_dict.get_int(b"Height").unwrap_or(0) as u32;
-        if mw == 0 || mh == 0 {
+        let (Some(mw), Some(mh)) = (
+            validate_image_dimension(mask_dict.get_int(b"Width")),
+            validate_image_dimension(mask_dict.get_int(b"Height")),
+        ) else {
+            return Ok(None);
+        };
+        if validate_image_size(mw, mh).is_none() {
             return Ok(None);
         }
         let mask_data = self.resolver.stream_data_from_obj(&mask_ref)?;
@@ -5012,7 +5143,7 @@ impl<'a> ContentInterpreter<'a> {
 
     /// Handle a Form XObject (recursive content stream).
     fn handle_form_xobject(&mut self, obj: &PdfObj, dict: &PdfDict) -> Result<(), PdfError> {
-        if self.depth >= 20 {
+        if self.depth >= MAX_CONTENT_NESTING {
             return Err(PdfError::Other("Form XObject nesting too deep".into()));
         }
 
@@ -5456,13 +5587,19 @@ impl<'a> ContentInterpreter<'a> {
         }
 
         // Read image data until EI
-        let width = dict.get_int(b"Width").unwrap_or(0) as u32;
-        let height = dict.get_int(b"Height").unwrap_or(0) as u32;
+        let width = validate_image_dimension(dict.get_int(b"Width")).unwrap_or(0);
+        let height = validate_image_dimension(dict.get_int(b"Height")).unwrap_or(0);
+        // A rejected dimension lands as 0 here, which the existing
+        // zero-dimension paths below already treat as "no image".
+        let (width, height) = match validate_image_size(width, height) {
+            Some(_) => (width, height),
+            None => (0, 0),
+        };
         let is_image_mask = matches!(dict.get(b"ImageMask"), Some(PdfObj::Bool(true)));
         let bpc = if is_image_mask {
             1
         } else {
-            dict.get_int(b"BitsPerComponent").unwrap_or(8) as u32
+            validate_bits_per_component(dict.get_int(b"BitsPerComponent")).unwrap_or(8)
         };
 
         let has_filter = dict.get(b"Filter").is_some() || dict.get(b"F").is_some();
@@ -6238,6 +6375,14 @@ impl<'a> ContentInterpreter<'a> {
 
     /// Resolve a soft mask dictionary into a SoftMask.
     fn resolve_soft_mask(&mut self, dict: &PdfDict) -> Result<graphics_state::SoftMask, PdfError> {
+        // The mask group's form is interpreted directly below rather than
+        // through `handle_form_xobject`, so it does not inherit that path's
+        // guard. A form whose content re-selects the ExtGState naming this
+        // same mask would otherwise recurse until the stack is exhausted.
+        if self.depth >= MAX_CONTENT_NESTING {
+            return Err(PdfError::Other("soft mask nesting too deep".into()));
+        }
+
         // Parse /S (subtype): Alpha or Luminosity (default Luminosity)
         let subtype = match dict.get_name(b"S") {
             Some(b"Alpha") => SoftMaskSubtype::Alpha,
@@ -6771,7 +6916,7 @@ impl<'a> ContentInterpreter<'a> {
         pat_obj: &PdfObj,
         pat_dict: &PdfDict,
     ) -> Result<TilingPattern, PdfError> {
-        if self.depth >= 20 {
+        if self.depth >= MAX_CONTENT_NESTING {
             return Err(PdfError::Other("pattern recursion limit".into()));
         }
         let paint_type = pat_dict.get_int(b"PaintType").unwrap_or(1) as i32;
@@ -7277,9 +7422,21 @@ fn expand_bits_to_bytes(
         return data.to_vec();
     }
 
+    // `bpc` is validated at every image entry point, but this is a free
+    // function that could be reached from a future caller: a shift of 32 or
+    // more is a panic in debug builds and a masked no-op in release.
+    if bpc >= 32 {
+        return Vec::new();
+    }
     let max_val = ((1u32 << bpc) - 1) as f64;
     let samples_per_row = width * components.max(1);
-    let mut result = Vec::with_capacity((width * height * components.max(1)) as usize);
+    // Reserve in `usize`, not `u32`: the three-way product overflows a `u32`
+    // well before the two-way `width * height` does, and a wrapped capacity
+    // silently under-reserves rather than failing.
+    let capacity = (width as usize)
+        .saturating_mul(height as usize)
+        .saturating_mul(components.max(1) as usize);
+    let mut result = Vec::with_capacity(capacity);
 
     for row in 0..height {
         let row_bit_offset = row as usize * ((samples_per_row * bpc).div_ceil(8) * 8) as usize;

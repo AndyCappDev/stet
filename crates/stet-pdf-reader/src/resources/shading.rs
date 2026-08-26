@@ -704,10 +704,21 @@ fn sample_function_to_stops_icc(
             if t > 0.0 && t < 1.0 { Some(t) } else { None }
         })
         .collect();
-    disc_ts.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    // `total_cmp`, not `partial_cmp().unwrap()`: the filter above happens to
+    // exclude NaN today (a NaN `t` fails both `>` and `<`), so the unwrap is
+    // not currently reachable — but that makes this function's safety depend
+    // on a caller-side invariant, and `total_cmp` costs nothing to be right
+    // unconditionally.
+    disc_ts.sort_by(f64::total_cmp);
     disc_ts.dedup_by(|a, b| (*a - *b).abs() < 1e-12);
 
-    // Build sample positions: uniform grid + discontinuity pairs
+    // Build sample positions: uniform grid + discontinuity pairs.
+    //
+    // `n_samples - 1` is the divisor, so a caller passing 1 would produce
+    // `0.0 / 0.0` — a NaN that then poisons the sort and every stop position.
+    // Callers currently clamp to `[64, 1024]`; clamp here too so the
+    // guarantee is local.
+    let n_samples = n_samples.max(2);
     let mut sample_ts: Vec<f64> = (0..n_samples)
         .map(|i| i as f64 / (n_samples - 1) as f64)
         .collect();
@@ -716,7 +727,7 @@ fn sample_function_to_stops_icc(
         sample_ts.push((dt - eps).max(0.0));
         sample_ts.push(dt);
     }
-    sample_ts.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    sample_ts.sort_by(f64::total_cmp);
     sample_ts.dedup_by(|a, b| (*a - *b).abs() < 1e-14);
 
     let is_spot_with_cmyk_alt = cmyk_tint_fn.is_some();

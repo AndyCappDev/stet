@@ -1172,6 +1172,16 @@ fn create_cid_cff_from_raw(
     }))
 }
 
+/// Largest plausible byte-width for an offset field in a PS CIDFont header
+/// (`/FDBytes`, `/GDBytes`, `/SDBytes`).
+///
+/// These state how many bytes each entry of the CID map and subroutine map
+/// occupies, so they index into the font's binary segment. Eight bytes is
+/// already a 64-bit offset; anything larger is a malformed header, and left
+/// unchecked it overflows the `entry_size` and map-size products computed
+/// from it.
+const MAX_OFFSET_BYTES: usize = 8;
+
 /// Create a CID font from a PostScript CIDFont program (Resource-CIDFont).
 ///
 /// These contain CIDFontType 0 definitions with binary charstring data after
@@ -1197,12 +1207,25 @@ fn create_cid_from_ps_cidfont(
         rest.split_whitespace().next()?.parse().ok()
     };
 
+    // These six drive every allocation and offset below, and all six come
+    // from the font program's own text header. `get_int` parses into `usize`,
+    // so a negative is already rejected — but a value like 2^64-1 parses
+    // fine, and the products it forms overflow. The byte-width fields are
+    // held to `MAX_OFFSET_BYTES` (they index into the binary segment, so a
+    // width past 8 is meaningless), and the counts are bounded below against
+    // the data actually present rather than against a made-up ceiling.
     let cid_count = get_int("CIDCount").unwrap_or(0);
     let fd_bytes = get_int("FDBytes").unwrap_or(0);
     let gd_bytes = get_int("GDBytes").unwrap_or(4);
     let subr_map_offset = get_int("SubrMapOffset").unwrap_or(0);
     let sd_bytes = get_int("SDBytes").unwrap_or(4);
     let subr_count = get_int("SubrCount").unwrap_or(0);
+    if fd_bytes > MAX_OFFSET_BYTES || gd_bytes > MAX_OFFSET_BYTES || sd_bytes > MAX_OFFSET_BYTES {
+        return Err(PdfError::Other(
+            "PS CIDFont: implausible FDBytes/GDBytes/SDBytes".into(),
+        ));
+    }
+
     let len_iv = get_int("lenIV").unwrap_or(4) as u16;
 
     // Extract FontMatrix from the FDArray Private dict
@@ -1248,14 +1271,28 @@ fn create_cid_from_ps_cidfont(
         &font_data[pos + sd_marker.len() + skip..]
     };
 
-    // Parse CID map: CIDCount × (FDBytes + GDBytes) bytes
+    // Parse CID map: CIDCount × (FDBytes + GDBytes) bytes.
+    //
+    // `entry_size` must be at least 1. At zero, `cid_map_size` is zero for any
+    // `cid_count`, so the length check below passes and `CIDCount` stays
+    // completely unbounded — the reservation that follows then tries to
+    // allocate terabytes from a 700-byte file.
     let entry_size = fd_bytes + gd_bytes;
-    let cid_map_size = cid_count * entry_size;
+    if entry_size == 0 {
+        return Err(PdfError::Other(
+            "PS CIDFont: FDBytes + GDBytes is zero".into(),
+        ));
+    }
+    let Some(cid_map_size) = cid_count.checked_mul(entry_size) else {
+        return Err(PdfError::Other("PS CIDFont: CID map size overflows".into()));
+    };
     if binary_data.len() < cid_map_size {
         return Err(PdfError::Other(
             "PS CIDFont: binary data too short for CID map".into(),
         ));
     }
+    // With `entry_size >= 1`, the check above bounds `cid_count` by the length
+    // of the binary segment, so the reservation below is bounded by the file.
 
     // Read charstring offsets for each CID
     let read_be = |data: &[u8], off: usize, n: usize| -> usize {
@@ -1277,9 +1314,25 @@ fn create_cid_from_ps_cidfont(
     // Sentinel: end of last charstring = start of subroutine map
     cid_offsets.push(subr_map_offset);
 
-    // Parse subroutine offsets
-    let mut subrs: Vec<Vec<u8>> = Vec::with_capacity(subr_count);
-    if subr_count > 0 && subr_map_offset + (subr_count + 1) * sd_bytes <= binary_data.len() {
+    // Parse subroutine offsets.
+    //
+    // The bounds check has to happen *before* the reservation, not after:
+    // reserving `subr_count` entries up front is what turns a bogus
+    // `/SubrCount` into a "capacity overflow" panic (in release as well as
+    // debug) or a multi-exabyte allocation, and the check below never gets the
+    // chance to reject it. The arithmetic is checked for the same reason —
+    // `subr_map_offset + (subr_count + 1) * sd_bytes` overflows to a small
+    // number for large inputs, which would make the check *pass*.
+    let subr_map_fits = sd_bytes > 0
+        && subr_count
+            .checked_add(1)
+            .and_then(|n| n.checked_mul(sd_bytes))
+            .and_then(|n| n.checked_add(subr_map_offset))
+            .is_some_and(|end| end <= binary_data.len());
+
+    let mut subrs: Vec<Vec<u8>> = Vec::new();
+    if subr_count > 0 && subr_map_fits {
+        subrs.reserve(subr_count);
         let mut sub_offsets: Vec<usize> = Vec::with_capacity(subr_count + 1);
         for i in 0..=subr_count {
             let off = read_be(binary_data, subr_map_offset + i * sd_bytes, sd_bytes);

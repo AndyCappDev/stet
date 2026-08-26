@@ -8,6 +8,13 @@ use crate::error::PdfError;
 use crate::objects::{PdfDict, PdfObj};
 use crate::resolver::Resolver;
 
+/// Maximum nesting depth when building a function from `/Functions`.
+///
+/// Bounds recursion through inline (non-reference) sub-function dictionaries,
+/// which the cycle guard in [`PdfFunction::parse_guarded`] cannot catch
+/// because they have no object number to track.
+const MAX_FUNCTION_DEPTH: u32 = 32;
+
 /// A parsed PDF function.
 #[derive(Clone, Debug)]
 pub enum PdfFunction {
@@ -106,6 +113,52 @@ pub enum CalcToken {
 impl PdfFunction {
     /// Parse a PDF function from a dict/stream object.
     pub fn parse(obj: &PdfObj, resolver: &Resolver) -> Result<Self, PdfError> {
+        Self::parse_guarded(obj, resolver, &mut Vec::new(), 0)
+    }
+
+    /// [`Self::parse`], carrying the cycle and depth guards for `/Functions`.
+    ///
+    /// A Type 3 stitching function's `/Functions` entries are parsed
+    /// recursively, so a function that references itself — directly or through
+    /// a ring of siblings — would recurse forever and abort the process on a
+    /// stack overflow. `active` holds the object numbers on the current path;
+    /// re-entering one is a cycle. It is a *path* set, not a seen-set: entries
+    /// are popped on the way out, so the legitimate shape
+    /// `/Functions [7 0 R 7 0 R]` still parses.
+    ///
+    /// `depth` separately bounds nesting built from inline (non-reference)
+    /// sub-dictionaries, which cannot cycle but can still nest arbitrarily.
+    fn parse_guarded(
+        obj: &PdfObj,
+        resolver: &Resolver,
+        active: &mut Vec<u32>,
+        depth: u32,
+    ) -> Result<Self, PdfError> {
+        if depth >= MAX_FUNCTION_DEPTH {
+            return Err(PdfError::NestingTooDeep {
+                context: "function",
+                limit: MAX_FUNCTION_DEPTH,
+            });
+        }
+        if let PdfObj::Ref(num, gen_num) = obj {
+            if active.contains(num) {
+                return Err(PdfError::CircularReference(*num, *gen_num));
+            }
+            active.push(*num);
+            let result = Self::parse_resolved(obj, resolver, active, depth);
+            active.pop();
+            return result;
+        }
+        Self::parse_resolved(obj, resolver, active, depth)
+    }
+
+    /// Parse a function object whose reference (if any) is already on `active`.
+    fn parse_resolved(
+        obj: &PdfObj,
+        resolver: &Resolver,
+        active: &mut Vec<u32>,
+        depth: u32,
+    ) -> Result<Self, PdfError> {
         let resolved = resolver.deref(obj)?;
         let dict = resolved
             .as_dict()
@@ -121,7 +174,7 @@ impl PdfFunction {
         match fn_type {
             0 => Self::parse_sampled(dict, obj, domain, range, resolver),
             2 => Self::parse_exponential(dict, domain, range),
-            3 => Self::parse_stitching(dict, domain, range, resolver),
+            3 => Self::parse_stitching(dict, domain, range, resolver, active, depth),
             4 => Self::parse_calculator(obj, domain, range, resolver),
             _ => Err(PdfError::Other(format!(
                 "unsupported function type {fn_type}"
@@ -398,6 +451,8 @@ impl PdfFunction {
         domain: Vec<[f64; 2]>,
         range: Vec<[f64; 2]>,
         resolver: &Resolver,
+        active: &mut Vec<u32>,
+        depth: u32,
     ) -> Result<Self, PdfError> {
         // /Functions, /Bounds, /Encode may be indirect references
         let fn_arr = if let Some(arr) = dict.get_array(b"Functions") {
@@ -417,7 +472,12 @@ impl PdfFunction {
 
         let mut functions = Vec::with_capacity(fn_arr.len());
         for fn_obj in &fn_arr {
-            functions.push(PdfFunction::parse(fn_obj, resolver)?);
+            functions.push(PdfFunction::parse_guarded(
+                fn_obj,
+                resolver,
+                active,
+                depth + 1,
+            )?);
         }
 
         let bounds_arr = if let Some(arr) = dict.get_array(b"Bounds") {
@@ -907,10 +967,27 @@ fn parse_calc_tokens(code: &str) -> Result<Vec<CalcToken>, PdfError> {
         code
     };
 
-    parse_token_sequence(code)
+    parse_token_sequence(code, 0)
 }
 
-fn parse_token_sequence(code: &str) -> Result<Vec<CalcToken>, PdfError> {
+/// Maximum `{`-nesting depth in a Type 4 calculator function.
+///
+/// `parse_token_sequence` recurses once per procedure body, so an unbounded
+/// `{{{{…` would exhaust the native stack and abort the process. PLRM-style
+/// calculator functions are `if`/`ifelse` trees only a few levels deep; 64
+/// leaves ample headroom.
+const MAX_CALC_DEPTH: u32 = 64;
+
+/// Parse a run of calculator tokens.
+///
+/// `depth` counts the enclosing `{` procedure bodies; see [`MAX_CALC_DEPTH`].
+fn parse_token_sequence(code: &str, depth: u32) -> Result<Vec<CalcToken>, PdfError> {
+    if depth >= MAX_CALC_DEPTH {
+        return Err(PdfError::NestingTooDeep {
+            context: "calculator function procedure",
+            limit: MAX_CALC_DEPTH,
+        });
+    }
     let mut tokens = Vec::new();
     let mut chars = code.chars().peekable();
 
@@ -924,7 +1001,7 @@ fn parse_token_sequence(code: &str) -> Result<Vec<CalcToken>, PdfError> {
             chars.next();
             // Find matching }
             let body = collect_brace_body(&mut chars)?;
-            let body_tokens = parse_token_sequence(&body)?;
+            let body_tokens = parse_token_sequence(&body, depth + 1)?;
 
             // Check if next non-ws token is "if" or "ifelse"
             // Skip whitespace
@@ -938,7 +1015,7 @@ fn parse_token_sequence(code: &str) -> Result<Vec<CalcToken>, PdfError> {
                 // This might be the if-body in an ifelse
                 chars.next(); // skip {
                 let else_body = collect_brace_body(&mut chars)?;
-                let else_tokens = parse_token_sequence(&else_body)?;
+                let else_tokens = parse_token_sequence(&else_body, depth + 1)?;
                 // Skip whitespace
                 while chars.peek().is_some_and(|c| c.is_whitespace()) {
                     chars.next();

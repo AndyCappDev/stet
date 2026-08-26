@@ -419,16 +419,58 @@ impl<'a> Lexer<'a> {
     }
 }
 
+/// Maximum nesting depth for arrays and dictionaries within a single object.
+///
+/// `parse_object_from_token` is a recursive-descent parser: every `[` and `<<`
+/// costs a native stack frame. Without a cap, a small crafted file containing
+/// `[[[[…` aborts the process with a stack overflow, which is not a panic and
+/// so cannot be contained by `catch_unwind`. Real PDFs nest a handful of
+/// levels deep (the deepest common shape is a shading dictionary inside a
+/// pattern inside a resource dictionary); 256 is far beyond any legitimate
+/// document while keeping worst-case stack use to a few tens of kilobytes.
+pub const MAX_OBJECT_DEPTH: u32 = 256;
+
 /// Parse a PDF object from the lexer (recursive descent).
 ///
 /// This handles arrays, dicts, and indirect references (`N G R`).
+///
+/// Container nesting is capped at [`MAX_OBJECT_DEPTH`]; beyond that the parse
+/// returns [`PdfError::NestingTooDeep`] rather than exhausting the stack.
 pub fn parse_object(lexer: &mut Lexer) -> Result<PdfObj, PdfError> {
-    let tok = lexer.next_token()?;
-    parse_object_from_token(lexer, tok)
+    parse_object_at_depth(lexer, 0)
 }
 
 /// Parse a PDF object given an already-consumed first token.
+///
+/// Container nesting is capped at [`MAX_OBJECT_DEPTH`].
 pub fn parse_object_from_token(lexer: &mut Lexer, tok: Token) -> Result<PdfObj, PdfError> {
+    parse_object_from_token_at_depth(lexer, tok, 0)
+}
+
+/// [`parse_object`], entered at an explicit container nesting depth.
+pub fn parse_object_at_depth(lexer: &mut Lexer, depth: u32) -> Result<PdfObj, PdfError> {
+    let tok = lexer.next_token()?;
+    parse_object_from_token_at_depth(lexer, tok, depth)
+}
+
+/// [`parse_object_from_token`], entered at an explicit container nesting depth.
+///
+/// `depth` counts the arrays and dictionaries already open around this object.
+pub fn parse_object_from_token_at_depth(
+    lexer: &mut Lexer,
+    tok: Token,
+    depth: u32,
+) -> Result<PdfObj, PdfError> {
+    // Refuse to open another container once the cap is reached. The token has
+    // already been consumed, so the caller's loop resumes on the container's
+    // body; every token inside it is then parsed by a loop at or below the
+    // cap, which terminates without recursing further.
+    if depth >= MAX_OBJECT_DEPTH && matches!(tok, Token::ArrayBegin | Token::DictBegin) {
+        return Err(PdfError::NestingTooDeep {
+            context: "array/dictionary",
+            limit: MAX_OBJECT_DEPTH,
+        });
+    }
     match tok {
         Token::Bool(b) => Ok(PdfObj::Bool(b)),
         Token::Real(f) => Ok(PdfObj::Real(f)),
@@ -460,15 +502,16 @@ pub fn parse_object_from_token(lexer: &mut Lexer, tok: Token) -> Result<PdfObj, 
                 if t == Token::ArrayEnd || t == Token::Eof {
                     break;
                 }
-                match parse_object_from_token(lexer, t) {
-                    Ok(obj) => elems.push(obj),
-                    Err(_) => {} // skip unparseable tokens in arrays (corrupt PDF)
+                // Skip unparseable tokens in arrays (corrupt PDF), and skip a
+                // container that would exceed the depth cap.
+                if let Ok(obj) = parse_object_from_token_at_depth(lexer, t, depth + 1) {
+                    elems.push(obj);
                 }
             }
             Ok(PdfObj::Array(elems))
         }
         Token::DictBegin => {
-            let dict = parse_dict_body(lexer)?;
+            let dict = parse_dict_body_at_depth(lexer, depth + 1)?;
             Ok(PdfObj::Dict(dict))
         }
         _ => Err(PdfError::UnexpectedToken {
@@ -479,7 +522,17 @@ pub fn parse_object_from_token(lexer: &mut Lexer, tok: Token) -> Result<PdfObj, 
 }
 
 /// Parse dictionary entries until `>>`, returning a PdfDict.
+///
+/// Container nesting is capped at [`MAX_OBJECT_DEPTH`].
 pub fn parse_dict_body(lexer: &mut Lexer) -> Result<PdfDict, PdfError> {
+    parse_dict_body_at_depth(lexer, 0)
+}
+
+/// [`parse_dict_body`], entered at an explicit container nesting depth.
+///
+/// `depth` counts this dictionary itself, so it is one greater than the depth
+/// passed to the [`parse_object_from_token_at_depth`] call that opened it.
+pub fn parse_dict_body_at_depth(lexer: &mut Lexer, depth: u32) -> Result<PdfDict, PdfError> {
     let mut dict = PdfDict::new();
     loop {
         // Tolerate garbage bytes between entries: a lexer error here just means
@@ -498,7 +551,7 @@ pub fn parse_dict_body(lexer: &mut Lexer) -> Result<PdfDict, PdfError> {
                 // next token rather than discarding the whole dict. Keeping
                 // already-parsed entries is what lets the Times-Roman /BaseFont
                 // survive a later /Encoding parse failure.
-                match parse_object(lexer) {
+                match parse_object_at_depth(lexer, depth) {
                     Ok(val) => {
                         dict.insert(key, val);
                     }
