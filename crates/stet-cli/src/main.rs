@@ -119,6 +119,9 @@ fn main() {
     // No timeout by default: PostScript is Turing-complete and plenty of
     // legitimate jobs run for minutes. `--timeout` is for untrusted input.
     let mut timeout_secs: Option<f64> = None;
+    // Ceiling on PostScript VM. `None` keeps Context's own default, which is
+    // generous rather than absent — see `Context::max_local_vm`.
+    let mut max_vm_mb: Option<u64> = None;
     let mut password: Option<String> = None;
     let mut target_width: Option<u32> = None;
     let mut target_height: Option<u32> = None;
@@ -241,6 +244,24 @@ fn main() {
                     continue;
                 } else {
                     eprintln!("Error: --bpc requires a value (on|off|auto)");
+                    std::process::exit(1);
+                }
+            }
+            "--max-vm" => {
+                if i + 1 < args.len() {
+                    match args[i + 1].parse::<u64>() {
+                        Ok(mb) if mb > 0 => {
+                            max_vm_mb = Some(mb);
+                            i += 2;
+                            continue;
+                        }
+                        _ => {
+                            eprintln!("Error: --max-vm requires a positive size in megabytes");
+                            std::process::exit(1);
+                        }
+                    }
+                } else {
+                    eprintln!("Error: --max-vm requires a value in megabytes");
                     std::process::exit(1);
                 }
             }
@@ -423,6 +444,7 @@ size (use --width/--height to scale PDF output)"
                 target_height,
                 page_size,
                 timeout_secs,
+                max_vm_mb,
             );
         }
         "viewport-png" => {
@@ -441,6 +463,7 @@ size (use --width/--height to scale PDF output)"
                 target_height,
                 page_size,
                 timeout_secs,
+                max_vm_mb,
             );
         }
         "pdf" => {
@@ -469,6 +492,7 @@ size (use --width/--height to scale PDF output)"
                     page_filter,
                     page_size,
                     timeout_secs,
+                    max_vm_mb,
                 );
             }
         }
@@ -481,6 +505,7 @@ size (use --width/--height to scale PDF output)"
                 page_filter,
                 page_size,
                 timeout_secs,
+                max_vm_mb,
             );
         }
         #[cfg(feature = "viewer")]
@@ -493,6 +518,7 @@ size (use --width/--height to scale PDF output)"
             password,
             page_size,
             timeout_secs,
+            max_vm_mb,
         ),
         #[cfg(not(feature = "viewer"))]
         "viewer" => {
@@ -524,6 +550,7 @@ fn run_png_mode(
     target_height: Option<u32>,
     page_size: Option<(f64, f64)>,
     timeout_secs: Option<f64>,
+    max_vm_mb: Option<u64>,
 ) {
     // Check if all files are PDFs — use fast path (no PS interpreter needed)
     if !file_args.is_empty() && file_args.iter().all(|f| is_pdf_file(f)) {
@@ -549,7 +576,7 @@ fn run_png_mode(
         std::process::exit(1);
     }
 
-    let mut ctx = create_context(icc_cfg, timeout_secs);
+    let mut ctx = create_context(icc_cfg, timeout_secs, max_vm_mb);
     ctx.page_filter = page_filter;
 
     // Register device factory (before setpagedevice)
@@ -588,8 +615,9 @@ fn run_pdf_mode(
     page_filter: Option<std::collections::HashSet<i32>>,
     page_size: Option<(f64, f64)>,
     timeout_secs: Option<f64>,
+    max_vm_mb: Option<u64>,
 ) {
-    let mut ctx = create_context(icc_cfg, timeout_secs);
+    let mut ctx = create_context(icc_cfg, timeout_secs, max_vm_mb);
     ctx.page_filter = page_filter;
     let dpi_val = dpi_override.unwrap_or(300.0);
 
@@ -629,10 +657,11 @@ fn run_null_mode(
     page_filter: Option<std::collections::HashSet<i32>>,
     page_size: Option<(f64, f64)>,
     timeout_secs: Option<f64>,
+    max_vm_mb: Option<u64>,
 ) {
     use stet_core::device::NullDevice;
 
-    let mut ctx = create_context(icc_cfg, timeout_secs);
+    let mut ctx = create_context(icc_cfg, timeout_secs, max_vm_mb);
     ctx.page_filter = page_filter;
     ctx.device_factory = Some(Box::new(|w, h| Box::new(NullDevice::new(w, h))));
 
@@ -666,6 +695,7 @@ fn run_viewer_mode(
     cli_password: Option<String>,
     page_size: Option<(f64, f64)>,
     timeout_secs: Option<f64>,
+    max_vm_mb: Option<u64>,
 ) {
     use stet_core::device::NullDevice;
 
@@ -756,12 +786,13 @@ fn run_viewer_mode(
     let _screen_info_receiver = interp_end.screen_info_receiver;
     let icc_cfg_thread = icc_cfg.clone();
     let timeout_secs_thread = timeout_secs;
+    let max_vm_mb_thread = max_vm_mb;
     let interrupt_flag_thread = interrupt_flag.clone();
     let password_response_rx_thread = password_response_rx;
     let page_sender_thread = page_sender_for_interp;
     let cli_password_thread = cli_password;
     std::thread::spawn(move || {
-        let mut ctx = create_context(&icc_cfg_thread, timeout_secs_thread);
+        let mut ctx = create_context(&icc_cfg_thread, timeout_secs_thread, max_vm_mb_thread);
         ctx.page_filter = page_filter;
         ctx.interrupt_flag = Some(interrupt_flag_thread.clone());
 
@@ -1051,6 +1082,10 @@ Common options:
                             program whose artwork is larger than US Letter.
                             Overrides an EPS %%BoundingBox when both apply.
     --pages <SPEC>          Page selection: \"3\", \"1-5\", \"1-3,7,10-12\".
+    --max-vm <MB>           Ceiling on PostScript VM (strings, arrays, dicts).
+                            Defaults to 8192; exceeding it raises VMerror
+                            rather than aborting. Separate from the renderer's
+                            image and band buffers.
     --timeout <SECONDS>     Abort a job running longer than this. PostScript is
                             Turing-complete, so there is no limit by default;
                             set one when the input is untrusted.
@@ -1217,11 +1252,18 @@ fn validate_cmyk_icc(bytes: &[u8], path: &str) {
 }
 
 /// Create and initialize a Context with the resource system.
-fn create_context(icc_cfg: &IccCliConfig, timeout_secs: Option<f64>) -> Context {
+fn create_context(
+    icc_cfg: &IccCliConfig,
+    timeout_secs: Option<f64>,
+    max_vm_mb: Option<u64>,
+) -> Context {
     let mut ctx = Context::new();
     // Armed here rather than at the call sites: each mode builds its context
     // once per job, so "from now" is the start of the job's interpretation.
     ctx.set_timeout(timeout_secs.map(std::time::Duration::from_secs_f64));
+    if let Some(mb) = max_vm_mb {
+        ctx.max_local_vm = (mb as usize).saturating_mul(1024 * 1024);
+    }
     // Replace the default IccCache with one configured per the CLI options.
     // This is where `--bpc` lands; commits 2-3 of docs/PLAN-BPC.md will turn
     // the stored mode into actual conversion-time behavior.

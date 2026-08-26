@@ -62,6 +62,18 @@ pub fn op_setuserparams(ctx: &mut Context) -> Result<(), PsError> {
 
 /// Apply user parameters from the user_params dict to the context.
 fn apply_user_params(ctx: &mut Context) {
+    // MaxLocalVM (PLRM 3.7.1). Stet applies it to total PostScript VM rather
+    // than local alone, since a local-only ceiling is sidestepped with
+    // `true setglobal`. A value of 0 means "no explicit request" — that is
+    // what the dict is seeded with — and leaves the context default in place.
+    let max_vm_name = ctx.names.intern(b"MaxLocalVM");
+    if let Some(obj) = ctx.dicts.get(ctx.user_params, &DictKey::Name(max_vm_name))
+        && let Some(v) = obj.as_i64()
+        && v > 0
+    {
+        ctx.max_local_vm = v as usize;
+    }
+
     let max_op_name = ctx.names.intern(b"MaxOpStack");
     if let Some(obj) = ctx.dicts.get(ctx.user_params, &DictKey::Name(max_op_name))
         && let Some(v) = obj.as_i32()

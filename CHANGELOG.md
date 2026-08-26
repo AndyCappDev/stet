@@ -143,6 +143,24 @@ changes.
 
 ### Added
 
+- **A ceiling on PostScript VM**, via `Context::max_local_vm`,
+  `setuserparams /MaxLocalVM`, and the CLI's `--max-vm <MB>`. Exceeding it
+  raises `PsError::VMError`, which previously had no producer.
+  **The default is 8 GiB rather than unlimited**: a failed allocation aborts
+  the process, so there is no error to catch afterwards and an opt-in limit
+  would leave the abort reachable by default. `500000000 array` requested
+  16 GB and took stet down; it now raises `VMerror`. This bounds PostScript VM
+  — strings, arrays, dictionaries — which is a separate pool from the
+  renderer's band and image buffers.
+
+  The check measures reserved capacity rather than length, and bounds what may
+  be *requested* rather than what is held: the arena stores grow geometrically,
+  so one sitting at capacity asks the allocator for roughly twice that. Steady
+  growth therefore stops at about half the nominal ceiling; a single large
+  request is bounded by the full one. It also counts global VM, unlike PLRM's
+  local-only `MaxLocalVM`, since a local-only ceiling is sidestepped with
+  `true setglobal`.
+
 - **`--timeout <SECONDS>`** and `Context::set_timeout` — a wall-clock deadline
   for interpretation, raising `PsError::Timeout`. PostScript is
   Turing-complete, so nothing static bounds how long a program runs, and a

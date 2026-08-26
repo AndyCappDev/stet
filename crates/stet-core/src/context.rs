@@ -364,6 +364,22 @@ pub struct Context {
     /// interpreter state, not an argument.
     pub exec_sync_depth: u32,
 
+    /// Ceiling on local VM, in bytes.
+    ///
+    /// PLRM 3.7.1 gives this as the device-dependent `MaxLocalVM` user
+    /// parameter; stet stores it here and exposes it through
+    /// `setuserparams` and the CLI's `--max-vm`.
+    ///
+    /// The default is generous rather than absent. A large allocation that
+    /// fails is not a catchable error — Rust's allocator aborts the process —
+    /// so `500000000 array` asking for 16 GB took stet down rather than
+    /// raising `VMerror`. Refusing before allocating turns that into an
+    /// ordinary PostScript error. 8 GiB is far past any real job: this bounds
+    /// *PostScript* VM — strings, arrays, dictionaries — which is a separate
+    /// pool from the band and image buffers the renderer works in, and those
+    /// are where a large prepress job actually spends memory.
+    pub max_local_vm: usize,
+
     /// Wall-clock deadline for interpretation, if one was set.
     ///
     /// PostScript is Turing-complete, so no static analysis bounds how long a
@@ -489,6 +505,11 @@ fn is_flate_stream_complete(data: &[u8]) -> bool {
 /// that the `Instant::now` cost is amortised into nothing.
 const DEADLINE_CHECK_INTERVAL: u32 = 4096;
 
+/// Default value of [`Context::max_local_vm`]: 8 GiB.
+///
+/// See that field for why there is a default at all rather than no limit.
+const DEFAULT_MAX_LOCAL_VM: usize = 8 * 1024 * 1024 * 1024;
+
 impl Context {
     /// Stop interpreting once `limit` has elapsed from now.
     ///
@@ -501,6 +522,63 @@ impl Context {
     pub fn set_timeout(&mut self, limit: Option<std::time::Duration>) {
         self.deadline = limit.map(|d| std::time::Instant::now() + d);
         self.steps_to_deadline_check = DEADLINE_CHECK_INTERVAL;
+    }
+
+    /// Bytes of local VM currently held by the arena stores.
+    ///
+    /// Read from the stores rather than tracked in a counter, so it cannot
+    /// drift: `restore` truncates the stores directly, and a counter would
+    /// have to be decremented in lockstep at every such site to stay honest.
+    ///
+    /// Measures reserved capacity, not length — see
+    /// [`crate::string_store::StringStore::data_capacity`] for why.
+    pub fn vm_bytes(&self) -> usize {
+        // Local *and* global. PLRM's MaxLocalVM covers local VM only, but a
+        // ceiling that ignored global would be trivially sidestepped with
+        // `true setglobal`, so stet applies it to total PostScript VM. That
+        // is stricter than the spec requires, never looser.
+        let strings = self
+            .strings
+            .local
+            .data_capacity()
+            .saturating_add(self.strings.global.data_capacity());
+        let slots = self
+            .arrays
+            .local
+            .data_capacity()
+            .saturating_add(self.arrays.global.data_capacity());
+        let arrays = slots.saturating_mul(std::mem::size_of::<PsObject>());
+        strings.saturating_add(arrays)
+    }
+
+    /// Refuse an allocation of `bytes` that would exceed [`Self::max_local_vm`].
+    ///
+    /// Call this *before* allocating, from any operator whose allocation size
+    /// comes from the operand stack. Checking beforehand is the whole point:
+    /// an allocation that fails aborts the process, so there is no error to
+    /// catch afterwards.
+    ///
+    /// Catches accumulation as well as single requests — `{ 1000000 string
+    /// pop } loop` never asks for more than a megabyte at a time, and only
+    /// the running total reveals it.
+    pub fn check_vm_alloc(&self, bytes: usize) -> Result<(), PsError> {
+        let held = self.vm_bytes();
+        // The arena stores are `Vec`s and grow geometrically, so one that has
+        // filled its capacity asks the allocator for roughly *twice* what it
+        // currently holds, not for the few bytes being added. Bounding only
+        // `held + bytes` therefore lets a request of `2 * held` through: with
+        // an 8 GiB ceiling, `{ 1000000 string pop } loop` sailed past a
+        // check at 7.6 GiB held and then aborted on a single 16 GB request.
+        //
+        // So the ceiling bounds what may be *asked of the allocator*, which is
+        // the number that decides whether the process survives. The practical
+        // consequence is that steady growth stops at about half the nominal
+        // value; a single large request is bounded by the full one.
+        let worst_case = held.saturating_add(bytes).max(held.saturating_mul(2));
+        if worst_case > self.max_local_vm {
+            return Err(PsError::VMError);
+        }
+        Ok(())
     }
 
     /// Check the deadline, cheaply.
@@ -984,6 +1062,7 @@ impl Context {
             name_resolve_cache: Vec::new(),
             interrupt_flag: None,
             exec_sync_depth: 0,
+            max_local_vm: DEFAULT_MAX_LOCAL_VM,
             deadline: None,
             steps_to_deadline_check: DEADLINE_CHECK_INTERVAL,
             yield_after_showpage: false,

@@ -23,6 +23,10 @@ pub fn op_array(ctx: &mut Context) -> Result<(), PsError> {
         }
         _ => return Err(PsError::TypeCheck),
     };
+    // See `op_string`: checked before allocating, since a failed allocation
+    // aborts rather than returning. Each slot is a `PsObject`, not a byte, so
+    // `500000000 array` is a 16 GB request.
+    ctx.check_vm_alloc(len.saturating_mul(std::mem::size_of::<stet_core::object::PsObject>()))?;
     ctx.o_stack.pop()?;
     let entity = crate::vm_ops::alloc_array(ctx, len);
     let obj = crate::vm_ops::make_array_obj(ctx, entity, len as u32);

@@ -41,6 +41,24 @@ impl ArrayStore {
     /// Used by `restore` to reclaim the objects a save level created. See
     /// [`crate::entity_table::EntityTable::truncate`] for the safety argument
     /// and the `EntityId`-reuse caveat.
+    /// Number of `PsObject` slots currently held.
+    ///
+    /// Used for VM accounting; see [`crate::context::Context::vm_bytes`].
+    pub fn data_len(&self) -> usize {
+        self.data.len()
+    }
+
+    /// Slots currently *reserved*, which is what the allocator actually holds.
+    ///
+    /// VM accounting has to use this rather than the length. The backing
+    /// `Vec` grows geometrically, so a store holding just under the ceiling by
+    /// length asks the allocator for roughly twice that on its next growth —
+    /// which is how `{ 1000000 string pop } loop` still aborted with a 16 GB
+    /// request after a length-based check had passed at 8 GB.
+    pub fn data_capacity(&self) -> usize {
+        self.data.capacity()
+    }
+
     pub fn truncate_to(&mut self, data_len: usize, entity_len: usize) {
         self.data.truncate(data_len);
         self.entities.truncate(entity_len);

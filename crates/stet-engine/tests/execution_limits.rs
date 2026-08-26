@@ -170,3 +170,88 @@ fn prepress_scale_ps_image_is_accepted() {
         "a 24000x16800 image (403M px) is ordinary prepress and must draw"
     );
 }
+
+// === VM ceiling ===========================================================
+//
+// A failed allocation aborts the process — Rust's allocator does not return
+// on OOM — so an oversized request had to be refused *before* it reached the
+// allocator. `500000000 array` asked for 16 GB and took stet down.
+
+/// Run with an explicit VM ceiling, returning whether the program completed
+/// without the interpreter raising an error.
+fn run_with_vm_cap(source: &str, max_local_vm: usize) -> bool {
+    let mut ctx = Context::new();
+    stet_ops::build_system_dict(&mut ctx);
+    ctx.exec_sync_fn = Some(stet_engine::eval::exec_sync);
+    ctx.max_local_vm = max_local_vm;
+    // A tight deadline as a backstop: the point of these cases is memory, and
+    // a regression that turns one into a spin should fail rather than hang.
+    ctx.set_timeout(Some(Duration::from_secs(20)));
+    stet_engine::eval::parse_and_exec(&mut ctx, source.as_bytes()).is_ok()
+}
+
+/// A single enormous request must be refused rather than attempted.
+#[test]
+fn oversized_single_allocation_is_refused() {
+    // 64 MiB ceiling, 256 MB request.
+    assert!(
+        !run_with_vm_cap("256000000 string pop", 64 * 1024 * 1024),
+        "a string far past the ceiling must raise VMerror"
+    );
+    assert!(
+        !run_with_vm_cap("64000000 array pop", 64 * 1024 * 1024),
+        "an array far past the ceiling must raise VMerror"
+    );
+}
+
+/// Accumulation, where no single request is large. Only the running total
+/// reveals this, so a per-allocation check would miss it entirely.
+#[test]
+fn accumulated_allocation_is_refused() {
+    assert!(
+        !run_with_vm_cap("{ 1000000 string pop } loop", 64 * 1024 * 1024),
+        "repeated small allocations must eventually hit the ceiling"
+    );
+}
+
+/// `true setglobal` must not sidestep the ceiling — stet applies it to total
+/// PostScript VM for exactly this reason.
+#[test]
+fn global_vm_does_not_bypass_the_ceiling() {
+    assert!(
+        !run_with_vm_cap(
+            "true setglobal { 1000000 string pop } loop",
+            64 * 1024 * 1024
+        ),
+        "allocating in global VM must still count against the ceiling"
+    );
+}
+
+/// Ordinary allocation well inside the ceiling must be unaffected.
+#[test]
+fn allocation_within_the_ceiling_succeeds() {
+    assert!(
+        run_with_vm_cap("1000000 string pop 100000 array pop", 64 * 1024 * 1024),
+        "a 1 MB string and a 100k array are ordinary and must not be refused"
+    );
+}
+
+/// The shipped default has to leave real work alone. 8 GiB bounds what may be
+/// asked of the allocator; steady growth stops around half that.
+#[test]
+fn default_ceiling_admits_substantial_allocation() {
+    let mut ctx = Context::new();
+    stet_ops::build_system_dict(&mut ctx);
+    ctx.exec_sync_fn = Some(stet_engine::eval::exec_sync);
+    assert!(
+        ctx.max_local_vm >= 8 * 1024 * 1024 * 1024,
+        "default MaxLocalVM should be generous; got {}",
+        ctx.max_local_vm
+    );
+    // 64 MB of strings under the default ceiling.
+    assert!(
+        stet_engine::eval::parse_and_exec(&mut ctx, b"0 1 63 { pop 1000000 string pop } for")
+            .is_ok(),
+        "64 MB of allocation must be fine under the default ceiling"
+    );
+}

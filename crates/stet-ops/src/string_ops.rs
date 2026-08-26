@@ -23,6 +23,10 @@ pub fn op_string(ctx: &mut Context) -> Result<(), PsError> {
         }
         _ => return Err(PsError::TypeCheck),
     };
+    // Checked before the pop, and before allocating: an allocation that fails
+    // aborts the process, so there is nothing to catch afterwards.
+    // `2000000000 string` is a 2 GB request from twenty bytes of PostScript.
+    ctx.check_vm_alloc(len)?;
     ctx.o_stack.pop()?;
     let entity = crate::vm_ops::alloc_string_empty(ctx, len);
     let obj = crate::vm_ops::make_string_obj(ctx, entity, len as u32);
