@@ -41,6 +41,9 @@ use stet_graphics::display_list::{
     DisplayElement, DisplayList, GroupParams, OcgVisibility, SoftMaskParams, SoftMaskSubtype,
 };
 use stet_graphics::icc::IccCache;
+use stet_graphics::image_limits::{
+    validate_bits_per_component, validate_image_dimension, validate_image_size,
+};
 
 /// Maximum nesting of re-entrant content streams.
 ///
@@ -52,78 +55,6 @@ use stet_graphics::icc::IccCache;
 /// documents nest a handful of levels; 20 was already the Form XObject limit
 /// and is kept here so the bound does not change for files that render today.
 const MAX_CONTENT_NESTING: u32 = 20;
-
-/// Largest accepted value for an image's `/Width` or `/Height`.
-///
-/// `/Width` and `/Height` are arbitrary file-supplied integers, and every
-/// downstream buffer size and loop bound is derived from them. Two things go
-/// wrong without a ceiling: `width * height` is computed in `u32` and wraps,
-/// yielding a buffer smaller than the loops that fill it; and even where the
-/// arithmetic survives, the loop counts alone are a denial of service — a
-/// 65537x65536 image in an 800-byte file spends ~9s in release doing nothing
-/// useful. The largest image in the sample corpus is 34862x4332, so this
-/// leaves roughly 3x headroom over anything real.
-const MAX_IMAGE_DIMENSION: i64 = 100_000;
-
-/// Largest accepted pixel count (`width * height`) for a single image.
-///
-/// Bounds the product independently of [`MAX_IMAGE_DIMENSION`], which alone
-/// would still permit 100000x100000.
-///
-/// **Sized for prepress, not for the sample corpus.** The corpus maximum is
-/// 151M pixels, but that is a sample of ordinary documents and is the wrong
-/// thing to calibrate against: a 40x28 inch press sheet at 600 dpi is 403M
-/// pixels, an A0 poster at 600 dpi is 558M, and 60x40 inch grand format at
-/// 1200 dpi is 3.46G. All of those are legitimate images that a RIP must
-/// accept, so the ceiling sits above them.
-///
-/// The value is 4e9 rather than something larger because it must stay under
-/// `2^32`: a dozen sites compute `width * height` in `u32`, and that product
-/// is only exact while it fits. Anything multiplying further by a component
-/// count uses saturating `usize` arithmetic instead.
-const MAX_IMAGE_PIXELS: u64 = 4_000_000_000;
-
-/// Largest accepted `/BitsPerComponent`.
-///
-/// PDF 32000-1 permits 1, 2, 4, 8, and 16. The value reaches `1u32 << bpc` in
-/// `expand_bits_to_bytes`, which panics in debug builds for `bpc >= 32`.
-/// Shared with [`crate::filters`], where the same key appears in
-/// `/DecodeParms` and feeds the predictor row-size arithmetic.
-pub(crate) const MAX_BITS_PER_COMPONENT: i64 = 16;
-
-/// Validate one file-supplied image dimension.
-///
-/// Returns `None` for a missing, non-positive, or out-of-range value, so
-/// callers reject the image rather than truncating it with an `as u32` cast —
-/// `/Width 4294967297` otherwise silently becomes a 1-pixel image.
-fn validate_image_dimension(v: Option<i64>) -> Option<u32> {
-    match v {
-        Some(n) if n > 0 && n <= MAX_IMAGE_DIMENSION => Some(n as u32),
-        _ => None,
-    }
-}
-
-/// Validate a `width`/`height` pair and return the pixel count.
-///
-/// Guarantees `width * height` fits in both `u32` and `usize` (including the
-/// 32-bit `usize` of the wasm32 target), so downstream sites may multiply the
-/// two directly.
-fn validate_image_size(width: u32, height: u32) -> Option<usize> {
-    let pixels = u64::from(width).checked_mul(u64::from(height))?;
-    if pixels == 0 || pixels > MAX_IMAGE_PIXELS {
-        return None;
-    }
-    usize::try_from(pixels).ok()
-}
-
-/// Validate a file-supplied `/BitsPerComponent`, falling back to 8.
-fn validate_bits_per_component(v: Option<i64>) -> Option<u32> {
-    match v {
-        None => Some(8),
-        Some(n) if n > 0 && n <= MAX_BITS_PER_COMPONENT => Some(n as u32),
-        _ => None,
-    }
-}
 
 /// One entry on the marked-content stack. Pushed on every BDC/BMC, popped
 /// on every EMC — so the stack stays balanced regardless of how OC and

@@ -15,8 +15,37 @@ use stet_fonts::geometry::Matrix;
 use stet_graphics::color::DeviceColor;
 use stet_graphics::device::{ImageColorSpace, ImageParams};
 use stet_graphics::display_list::DisplayElement;
+use stet_graphics::image_limits::{validate_image_dimension, validate_image_size};
 
 // ---------- image operator ----------
+
+/// Validate the width and height of a PostScript image.
+///
+/// `image`, `imagemask`, and `colorimage` all take their dimensions straight
+/// off the operand stack, and every buffer size below is derived from them.
+/// Only the lower bound used to be checked, so
+/// `2000000000 2000000000 8 [...] { <00> } image` — sixty bytes of
+/// PostScript — asked for a 4 x 10^18 byte allocation and aborted the
+/// process. `imagemask` and `colorimage` had the same shape.
+///
+/// The bounds are shared with the PDF image path via
+/// [`stet_graphics::image_limits`] so the two cannot drift; see that module
+/// for how they are calibrated against prepress output sizes.
+///
+/// A non-positive dimension is a `rangecheck` per PLRM; exceeding an
+/// implementation ceiling is a `limitcheck`.
+fn check_image_dimensions(width: i32, height: i32) -> Result<(), PsError> {
+    let (Some(w), Some(h)) = (
+        validate_image_dimension(Some(i64::from(width))),
+        validate_image_dimension(Some(i64::from(height))),
+    ) else {
+        return Err(PsError::RangeCheck);
+    };
+    if validate_image_size(w, h).is_none() {
+        return Err(PsError::LimitCheck);
+    }
+    Ok(())
+}
 
 /// `image` — 5-operand form: width height bps matrix datasrc image → —
 /// Dict form: dict image → —
@@ -43,9 +72,7 @@ pub fn op_image(ctx: &mut Context) -> Result<(), PsError> {
     let width = w_obj.as_i32().ok_or(PsError::TypeCheck)?;
     let height = h_obj.as_i32().ok_or(PsError::TypeCheck)?;
     let bps = bps_obj.as_i32().ok_or(PsError::TypeCheck)?;
-    if width <= 0 || height <= 0 {
-        return Err(PsError::RangeCheck);
-    }
+    check_image_dimensions(width, height)?;
     if !matches!(bps, 1 | 2 | 4 | 8 | 12 | 16) {
         return Err(PsError::RangeCheck);
     }
@@ -134,9 +161,7 @@ fn image_dict_form(ctx: &mut Context) -> Result<(), PsError> {
     let width = width_obj.as_i32().ok_or(PsError::TypeCheck)?;
     let height_obj = dict_get_obj(ctx, dict_entity, b"Height").ok_or(PsError::TypeCheck)?;
     let height = height_obj.as_i32().ok_or(PsError::TypeCheck)?;
-    if width <= 0 || height <= 0 {
-        return Err(PsError::RangeCheck);
-    }
+    check_image_dimensions(width, height)?;
     let width = width as u32;
     let height = height as u32;
     let bps = dict_get_int(ctx, dict_entity, b"BitsPerComponent").ok_or(PsError::Undefined)? as u32;
@@ -777,9 +802,7 @@ pub fn op_imagemask(ctx: &mut Context) -> Result<(), PsError> {
         PsValue::Bool(b) => b,
         _ => return Err(PsError::TypeCheck),
     };
-    if width <= 0 || height <= 0 {
-        return Err(PsError::RangeCheck);
-    }
+    check_image_dimensions(width, height)?;
     let image_matrix = extract_matrix(ctx, mat_obj)?;
 
     // Calculate bytes needed: 1 bit per pixel, row-aligned
@@ -929,9 +952,7 @@ pub fn op_colorimage(ctx: &mut Context) -> Result<(), PsError> {
     let width = w_obj.as_i32().ok_or(PsError::TypeCheck)?;
     let height = h_obj.as_i32().ok_or(PsError::TypeCheck)?;
     let bps = bps_obj.as_i32().ok_or(PsError::TypeCheck)?;
-    if width <= 0 || height <= 0 {
-        return Err(PsError::RangeCheck);
-    }
+    check_image_dimensions(width, height)?;
     if !matches!(bps, 1 | 2 | 4 | 8 | 12 | 16) {
         return Err(PsError::RangeCheck);
     }

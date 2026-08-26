@@ -1513,7 +1513,7 @@ fn apply_predictor(data: &[u8], parms: &PdfDict, predictor: i64) -> Result<Vec<u
         validate_decode_parm(
             parms.get_int(b"BitsPerComponent"),
             8,
-            crate::content::MAX_BITS_PER_COMPONENT,
+            stet_graphics::image_limits::MAX_BITS_PER_COMPONENT,
         ),
     ) else {
         return Ok(data.to_vec());

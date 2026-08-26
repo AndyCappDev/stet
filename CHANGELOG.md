@@ -179,6 +179,17 @@ changes.
 
 ### Fixed
 
+- **The PostScript `image`, `imagemask`, and `colorimage` operators had no
+  upper bound on their dimensions.** Only the lower bound was checked, so
+  sixty bytes of PostScript could request a 4 x 10^18 byte allocation, which
+  aborts the process rather than failing catchably. All three now validate
+  against the shared prepress-scale limits: a non-positive dimension raises
+  `rangecheck` and one past the ceiling raises `limitcheck`, per PLRM.
+  A 24000 x 16800 press sheet (403M pixels) still draws normally.
+- **Image size limits moved to `stet_graphics::image_limits`,** shared by the
+  PostScript operators and the PDF image handler. The two crates cannot see
+  each other, and duplicating a prepress-calibrated ceiling would let the two
+  copies drift.
 - **`setpagedevice` with a degenerate `/PageSize` panicked the renderer.**
   `<< /PageSize [-1 -1] >>` reached `Pixmap::new(0, 0)`, which returns `None`,
   through an `.expect()`. The allocation is now non-panicking, and

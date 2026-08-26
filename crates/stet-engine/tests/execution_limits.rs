@@ -100,3 +100,73 @@ fn no_deadline_means_no_limit() {
 fn ordinary_nesting_still_runs() {
     assert!(run("{ { { 1 2 add } exec } exec } exec pop", None).is_ok());
 }
+
+// === PostScript image dimensions ==========================================
+//
+// `image`, `imagemask`, and `colorimage` take their dimensions off the
+// operand stack and derive every buffer size from them. Only the lower bound
+// was checked, so sixty bytes of PostScript could request a 4 x 10^18 byte
+// allocation — which aborts the process rather than failing, since a failed
+// allocation is not a catchable error.
+
+/// Run a program against a real device and report whether any image reached
+/// the display list.
+///
+/// This is the observable that matters: the interpreter handles a
+/// `limitcheck` through its own error handler, so `parse_and_exec` returns
+/// `Ok` whether the image drew or was refused.
+fn draws_an_image(source: &str) -> bool {
+    use stet_core::display_list::DisplayElement;
+
+    let mut ctx = Context::new();
+    stet_ops::build_system_dict(&mut ctx);
+    ctx.exec_sync_fn = Some(stet_engine::eval::exec_sync);
+    let device = stet_render::SkiaDevice::new(64, 64);
+    ctx.device = Some(Box::new(device));
+    let _ = stet_engine::eval::parse_and_exec(&mut ctx, source.as_bytes());
+
+    ctx.display_list
+        .elements()
+        .iter()
+        .any(|e| matches!(e, DisplayElement::Image { .. }))
+}
+
+/// Each operator, asked for an absurd size, must refuse rather than attempt
+/// the allocation. A failed allocation aborts the process and is not
+/// catchable, so a regression here takes the test binary down.
+#[test]
+fn oversized_ps_images_are_refused() {
+    for (label, source) in [
+        (
+            "image",
+            "2000000000 2000000000 8 [1 0 0 1 0 0] { <00> } image",
+        ),
+        (
+            "imagemask",
+            "2000000000 2000000000 true [1 0 0 1 0 0] { <00> } imagemask",
+        ),
+        (
+            "colorimage",
+            "2000000000 2000000000 8 [1 0 0 1 0 0] { <00> } false 3 colorimage",
+        ),
+    ] {
+        assert!(
+            !draws_an_image(source),
+            "{label} must refuse a 2e9 x 2e9 image, not attempt it"
+        );
+    }
+}
+
+/// A prepress-scale image must still be accepted — a 40x28 inch press sheet
+/// at 600 dpi is 403M pixels, and an earlier ceiling of 400M rejected it.
+#[test]
+fn prepress_scale_ps_image_is_accepted() {
+    let source = "\
+        /row 24000 string def\n\
+        0 1 23999 { row exch 128 put } for\n\
+        24000 16800 8 [24000 0 0 -16800 0 16800] { row } image\n";
+    assert!(
+        draws_an_image(source),
+        "a 24000x16800 image (403M px) is ordinary prepress and must draw"
+    );
+}
