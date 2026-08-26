@@ -36,3 +36,4 @@ ps_corpus/
 /fuzz/corpus/
 /fuzz/artifacts/
 /fuzz/coverage/
+/docs/PLAN-SECURITY-HARDENING.md
