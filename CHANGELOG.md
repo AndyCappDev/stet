@@ -139,8 +139,27 @@ the same way a PDF object is.
 All 691 sample PDFs render byte-identically before and after these font
 changes.
 
+### Added
+
+- **`[profile.hardened]`** — release codegen with `overflow-checks` and
+  `debug-assertions` left on, for finding silent arithmetic wraps at release
+  speed. Build with `cargo build --profile hardened`. It is a testing profile,
+  not a shipping one: published binaries stay on `release`, since a trapped
+  overflow is a panic and that is not what a renderer should do to a user over
+  a malformed file. Gated in CI by a new `Overflow checks` job. The vendored
+  `stet-tiny-skia` forks are excluded per-package — their SIMD-lane emulation
+  is modular arithmetic by definition, matching the hardware instructions the
+  aarch64 paths use.
+
 ### Fixed
 
+- **Octal escapes in PDF literal strings** (`\ddd`) accumulated into a `u8`,
+  so a three-digit escape above `\377` overflowed the accumulator. The
+  rendered byte was already correct — PDF 32000-1 7.3.4.2 specifies that
+  high-order overflow is ignored, which is what the release build's silent
+  wrap produced — but the arithmetic was wrong and panicked under overflow
+  checks. Found by sweeping the sample corpus under the new `hardened`
+  profile (`pdf_samples/142.pdf`).
 - Shading color-stop sampling now sorts with `f64::total_cmp` instead of
   `partial_cmp().unwrap()`, and clamps its own sample count so the divisor in
   `i / (n - 1)` cannot be zero. No crafted file was found that reaches either

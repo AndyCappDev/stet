@@ -327,24 +327,34 @@ impl<'a> Lexer<'a> {
                             self.pos += 1;
                         }
                         b'0'..=b'7' => {
-                            // Octal escape (1-3 digits)
-                            let mut val = esc - b'0';
+                            // Octal escape (1-3 digits).
+                            //
+                            // Accumulated in u32, not u8: three octal digits
+                            // reach 0o777 = 511, so `val * 8` overflows a u8
+                            // on the third digit. PDF 32000-1 7.3.4.2 says the
+                            // high-order overflow "shall be ignored", which is
+                            // exactly the truncating cast below — so the
+                            // release build's silent wrap was already the
+                            // correct byte. Only the arithmetic was wrong, and
+                            // it panicked under overflow checks (reached by
+                            // `pdf_samples/142.pdf`).
+                            let mut val: u32 = u32::from(esc - b'0');
                             self.pos += 1;
                             if self.pos < self.data.len()
                                 && self.data[self.pos] >= b'0'
                                 && self.data[self.pos] <= b'7'
                             {
-                                val = val * 8 + (self.data[self.pos] - b'0');
+                                val = val * 8 + u32::from(self.data[self.pos] - b'0');
                                 self.pos += 1;
                                 if self.pos < self.data.len()
                                     && self.data[self.pos] >= b'0'
                                     && self.data[self.pos] <= b'7'
                                 {
-                                    val = val * 8 + (self.data[self.pos] - b'0');
+                                    val = val * 8 + u32::from(self.data[self.pos] - b'0');
                                     self.pos += 1;
                                 }
                             }
-                            result.push(val);
+                            result.push(val as u8);
                         }
                         _ => {
                             // Unknown escape — just include the character

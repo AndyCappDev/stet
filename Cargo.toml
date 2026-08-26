@@ -47,3 +47,34 @@ stet-pdf = { path = "crates/stet-pdf", version = "0.5.0" }
 stet-viewer = { path = "crates/stet-viewer", version = "0.5.0" }
 stet-pdf-reader = { path = "crates/stet-pdf-reader", version = "0.5.0" }
 stet = { path = "crates/stet", version = "0.5.0" }
+
+# Release codegen with arithmetic overflow checking left on.
+#
+# The default `release` profile has `overflow-checks = false`, so an integer
+# overflow wraps silently: the August 2026 hardening sweep found several places
+# where a file-supplied value overflowed a size computation and produced an
+# undersized buffer rather than an error, and every one of them was invisible
+# in release testing while panicking loudly in debug. This profile exists so
+# that class can be found at release speed — fast enough to sweep the whole PDF
+# corpus, strict enough to trap the wrap.
+#
+# It is a testing and CI profile, not a shipping one. Published binaries use
+# `release`; a trapped overflow is a panic, which is not what a renderer should
+# do to a user over a malformed file. Build it with `cargo build --profile hardened`.
+[profile.hardened]
+inherits = "release"
+overflow-checks = true
+debug-assertions = true
+
+# The vendored tiny-skia forks emulate SIMD lanes with scalar arrays. That
+# arithmetic is modular *by definition* — the aarch64 paths call `vsubq_u16` /
+# `vmulq_u16`, and hardware SIMD has no overflow trap — so the scalar fallback
+# must wrap to agree with them. Trapping it would make the two paths disagree
+# and reports a false positive on every gradient the renderer draws. Excluded
+# from the hardened profile's checks rather than rewritten, so the forks stay
+# close to upstream.
+[profile.hardened.package.stet-tiny-skia]
+overflow-checks = false
+
+[profile.hardened.package.stet-tiny-skia-path]
+overflow-checks = false

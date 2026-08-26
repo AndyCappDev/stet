@@ -119,6 +119,28 @@ jobs:
       - name: cargo check --workspace --all-targets
         run: cargo check --workspace --all-targets
 
+  # Arithmetic overflow gate.
+  #
+  # The default release profile wraps on overflow, so a size computation that
+  # overflows a file-supplied value produces an undersized buffer instead of an
+  # error, and stays invisible in release testing. The `hardened` profile is
+  # release codegen with overflow checks left on; running the suite under it
+  # turns that class into a test failure.
+  #
+  # This is a gate on the test suite only. The higher-yield use of the profile
+  # is sweeping the local PDF corpus, which is not in CI — see SECURITY.md.
+  hardened:
+    name: Overflow checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: hardened
+      - name: cargo test --workspace --profile hardened
+        run: cargo test --workspace --profile hardened
+
   # WASM build — smoke test that the browser-facing crate still compiles.
   # stet-wasm is excluded from the default workspace, so it needs its own
   # step. No tests here — wasm-pack test would need a browser runtime.
