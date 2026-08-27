@@ -10,6 +10,34 @@ use stet_core::context::Context;
 use stet_core::error::PsError;
 use stet_core::object::{PsObject, PsValue};
 
+/// Wrap a computed real, raising `undefinedresult` when it is not finite.
+///
+/// PLRM defines the error as covering exactly this case: "A numeric
+/// computation would produce a meaningless result or one that cannot be
+/// represented as a number. Possible causes include numeric overflow or
+/// underflow, division by 0, or inverse transformation of a noninvertible
+/// matrix." Every arithmetic operator that can produce a real lists
+/// `undefinedresult` among its errors.
+///
+/// Without this, `1e308 1e308 mul` yielded `inf` and `inf 0 mul` yielded
+/// `NaN`, and those values then flowed into coordinates, line widths, colour
+/// components, and matrices — none of which have any defined behaviour for
+/// them. Ghostscript raises `undefinedresult` at the equivalent boundary
+/// (`1e38 1e38 mul`, its reals being single-precision); stet's reals are
+/// `f64`, so the boundary differs but the rule is the same.
+///
+/// The boundary is stet's own, exactly as with the `i64` integer width: PLRM
+/// Appendix B lists real limits under "Typical Limits" as properties of the
+/// host architecture, not as a conformance requirement.
+#[inline]
+fn real_result(v: f64) -> Result<PsObject, PsError> {
+    if v.is_finite() {
+        Ok(PsObject::real(v))
+    } else {
+        Err(PsError::UndefinedResult)
+    }
+}
+
 /// Helper: apply a binary numeric operation with type promotion.
 #[inline]
 fn binary_op(
@@ -47,7 +75,7 @@ pub fn op_add(ctx: &mut Context) -> Result<(), PsError> {
             Some(v) => Ok(PsObject::int(v)),
             None => Ok(PsObject::real(a as f64 + b as f64)),
         },
-        |a, b| Ok(PsObject::real(a + b)),
+        |a, b| real_result(a + b),
     )
 }
 
@@ -59,7 +87,7 @@ pub fn op_sub(ctx: &mut Context) -> Result<(), PsError> {
             Some(v) => Ok(PsObject::int(v)),
             None => Ok(PsObject::real(a as f64 - b as f64)),
         },
-        |a, b| Ok(PsObject::real(a - b)),
+        |a, b| real_result(a - b),
     )
 }
 
@@ -71,7 +99,7 @@ pub fn op_mul(ctx: &mut Context) -> Result<(), PsError> {
             Some(v) => Ok(PsObject::int(v)),
             None => Ok(PsObject::real(a as f64 * b as f64)),
         },
-        |a, b| Ok(PsObject::real(a * b)),
+        |a, b| real_result(a * b),
     )
 }
 
@@ -90,9 +118,10 @@ pub fn op_div(ctx: &mut Context) -> Result<(), PsError> {
         return Err(PsError::UndefinedResult);
     }
 
+    let quotient = real_result(av / bv)?;
     ctx.o_stack.pop()?;
     ctx.o_stack.pop()?;
-    ctx.o_stack.push(PsObject::real(av / bv))?;
+    ctx.o_stack.push(quotient)?;
     Ok(())
 }
 
@@ -116,10 +145,15 @@ pub fn op_idiv(ctx: &mut Context) -> Result<(), PsError> {
     if bv == 0 {
         return Err(PsError::UndefinedResult);
     }
+    // `checked_div`, not `av / bv`: the single pair `i64::MIN / -1` overflows,
+    // and integer division overflow *panics in release too* — it is a trap in
+    // Rust's semantics, not something `overflow-checks` turns on. Reachable
+    // from `-9223372036854775808 -1 idiv`, 30 bytes of PostScript.
+    let quotient = av.checked_div(bv).ok_or(PsError::UndefinedResult)?;
 
     ctx.o_stack.pop()?;
     ctx.o_stack.pop()?;
-    ctx.o_stack.push(PsObject::int(av / bv))?;
+    ctx.o_stack.push(PsObject::int(quotient))?;
     Ok(())
 }
 
@@ -143,10 +177,12 @@ pub fn op_mod(ctx: &mut Context) -> Result<(), PsError> {
     if bv == 0 {
         return Err(PsError::UndefinedResult);
     }
+    // See `op_idiv`: `i64::MIN % -1` traps the same way `/` does.
+    let remainder = av.checked_rem(bv).ok_or(PsError::UndefinedResult)?;
 
     ctx.o_stack.pop()?;
     ctx.o_stack.pop()?;
-    ctx.o_stack.push(PsObject::int(av % bv))?;
+    ctx.o_stack.push(PsObject::int(remainder))?;
     Ok(())
 }
 
@@ -274,9 +310,10 @@ pub fn op_exp(ctx: &mut Context) -> Result<(), PsError> {
     }
     let exp = ctx.o_stack.peek(0)?.as_f64().ok_or(PsError::TypeCheck)?;
     let base = ctx.o_stack.peek(1)?.as_f64().ok_or(PsError::TypeCheck)?;
+    let result = real_result(base.powf(exp))?;
     ctx.o_stack.pop()?;
     ctx.o_stack.pop()?;
-    ctx.o_stack.push(PsObject::real(base.powf(exp)))?;
+    ctx.o_stack.push(result)?;
     Ok(())
 }
 

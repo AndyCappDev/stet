@@ -117,11 +117,11 @@ impl<'a> Tokenizer<'a> {
                 Ok(Some(Token::BinaryTokenByte(b)))
             }
             _ => {
-                // Try number first, fall back to name
-                if let Some(tok) = self.try_scan_number() {
-                    Ok(Some(tok))
-                } else {
-                    Ok(Some(self.scan_name()))
+                // Try number first, fall back to name. A number stet cannot
+                // represent propagates as an error rather than becoming a name.
+                match self.try_scan_number()? {
+                    Some(tok) => Ok(Some(tok)),
+                    None => Ok(Some(self.scan_name())),
                 }
             }
         }
@@ -146,14 +146,17 @@ impl<'a> Tokenizer<'a> {
         }
     }
 
-    /// Try to scan a number. Returns `None` if the token at pos is not a valid number.
-    fn try_scan_number(&mut self) -> Option<Token> {
+    /// Try to scan a number.
+    ///
+    /// `Ok(None)` means the token at `pos` is not a number and should be
+    /// scanned as a name. `Err` means it is a number stet cannot represent.
+    fn try_scan_number(&mut self) -> Result<Option<Token>, PsError> {
         let start = self.pos;
         let bytes = self.input;
         let len = bytes.len();
 
         if start >= len {
-            return None;
+            return Ok(None);
         }
 
         // Collect the token (up to whitespace, delimiter, or binary token byte)
@@ -167,16 +170,18 @@ impl<'a> Tokenizer<'a> {
         }
 
         if end == start {
-            return None;
+            return Ok(None);
         }
 
         let token_bytes = &bytes[start..end];
 
-        if let Some(tok) = try_parse_number_token(token_bytes) {
-            self.pos = end;
-            Some(tok)
-        } else {
-            None
+        match try_parse_number_token(token_bytes) {
+            Ok(Some(tok)) => {
+                self.pos = end;
+                Ok(Some(tok))
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(e),
         }
     }
 
@@ -479,17 +484,23 @@ fn decode_ascii85(data: &[u8]) -> Result<Vec<u8>, PsError> {
 }
 
 /// Try to parse a byte sequence as a PostScript number token.
-fn try_parse_number_token(token_bytes: &[u8]) -> Option<Token> {
+///
+/// `Ok(None)` means "not a number, treat it as a name". `Err` is reserved for
+/// a token that *is* syntactically a number but names a value stet cannot
+/// represent — see the `limitcheck` below.
+fn try_parse_number_token(token_bytes: &[u8]) -> Result<Option<Token>, PsError> {
     if token_bytes.is_empty() {
-        return None;
+        return Ok(None);
     }
 
     // Try radix: base#digits
     if let Some(result) = try_parse_radix(token_bytes) {
-        return Some(result);
+        return Ok(Some(result));
     }
 
-    let s = std::str::from_utf8(token_bytes).ok()?;
+    let Ok(s) = std::str::from_utf8(token_bytes) else {
+        return Ok(None);
+    };
 
     let first = token_bytes[0];
     let looks_numeric = first.is_ascii_digit()
@@ -499,21 +510,57 @@ fn try_parse_number_token(token_bytes: &[u8]) -> Option<Token> {
         || (first == b'.' && token_bytes.len() > 1 && token_bytes[1].is_ascii_digit());
 
     if !looks_numeric {
-        return None;
+        return Ok(None);
     }
 
     let is_real = s.contains('.') || s.contains('e') || s.contains('E');
 
     if is_real {
-        return s.parse::<f64>().ok().map(Token::Real);
+        return match s.parse::<f64>() {
+            Ok(v) => finite_real_token(v),
+            Err(_) => Ok(None),
+        };
     }
 
     // A literal too large for i64 becomes a real, per PLRM: "an integer that
     // would exceed this limit is automatically converted to a real value".
     if let Ok(v) = s.parse::<i64>() {
-        return Some(Token::Int(v));
+        return Ok(Some(Token::Int(v)));
     }
-    s.parse::<f64>().ok().map(Token::Real)
+    match s.parse::<f64>() {
+        Ok(v) => finite_real_token(v),
+        Err(_) => Ok(None),
+    }
+}
+
+/// Accept a scanned real, or decline the token if it is not representable.
+///
+/// `"1e999".parse::<f64>()` succeeds and yields `inf`, so without this a
+/// program could introduce a non-finite number by writing one down — no
+/// arithmetic required — and it would go on to reach coordinates, matrices,
+/// and colour components, none of which have defined behaviour for one.
+///
+/// Declining (`Ok(None)`) hands the token to the name scanner, which is what
+/// already happens to `1e999x`. A real program that writes `1e999` as an
+/// operand therefore gets `undefined` rather than a value, so the ingress is
+/// closed either way.
+///
+/// **Ghostscript raises `limitcheck` here instead, and stet deliberately does
+/// not.** That was tried first and it broke a file that renders correctly:
+/// `ps_corpus/files/pdftops-level1/88/882e212be166.ps` carries megabytes of
+/// hex image data, and byte runs like `5657564e574` are syntactically reals
+/// with a 580-digit exponent. They are scanned and discarded harmlessly as
+/// names, but erroring on them killed a 35 MB file that had produced a
+/// correct 2 MB page. (Ghostscript fails that file too — matching it is not
+/// worth losing a page stet can render.) Being more permissive than
+/// Ghostscript where it is safe to be is the same call already documented for
+/// the `i64` integer width.
+fn finite_real_token(v: f64) -> Result<Option<Token>, PsError> {
+    if v.is_finite() {
+        Ok(Some(Token::Real(v)))
+    } else {
+        Ok(None)
+    }
 }
 
 /// Try to parse a radix number: `base#digits`.
@@ -641,7 +688,10 @@ pub fn stream_next_token(
                     Some(b) => token_bytes.push(b),
                 }
             }
-            try_parse_number_token(&token_bytes).unwrap_or(Token::Name(token_bytes, true))
+            match try_parse_number_token(&token_bytes)? {
+                Some(tok) => tok,
+                None => Token::Name(token_bytes, true),
+            }
         }
     };
 
@@ -793,6 +843,60 @@ mod tests {
             tokens.push(tok);
         }
         tokens
+    }
+
+    /// A literal past the `f64` range must not become `inf`. It declines to
+    /// be a number and falls through to the name scanner, so the value never
+    /// enters the number space — see `finite_real_token` for why this is a
+    /// name rather than Ghostscript's `limitcheck`.
+    #[test]
+    fn out_of_range_real_literal_does_not_become_infinity() {
+        for src in [
+            &b"1e999"[..],
+            &b"-1e999"[..],
+            &b"1.5e400"[..],
+            &b"1e309"[..],
+            &b"99999999999999999999999999e999"[..],
+            // The shape that appears in hex image data, which must stay
+            // harmless: erroring on it broke a 35 MB corpus file that renders.
+            &b"5657564e574"[..],
+        ] {
+            let toks = tokenize_all(src);
+            assert!(
+                matches!(toks.as_slice(), [Token::Name(..)]),
+                "expected a name from {:?}, got {toks:?}",
+                String::from_utf8_lossy(src)
+            );
+        }
+    }
+
+    /// The boundary is `f64`'s, not Ghostscript's narrower one: values it
+    /// refuses but stet represents exactly must keep scanning.
+    #[test]
+    fn representable_reals_still_scan() {
+        assert_eq!(tokenize_all(b"1e308"), vec![Token::Real(1e308)]);
+        assert_eq!(tokenize_all(b"-1e308"), vec![Token::Real(-1e308)]);
+        assert_eq!(tokenize_all(b"1e-308"), vec![Token::Real(1e-308)]);
+        assert_eq!(tokenize_all(b"1e38"), vec![Token::Real(1e38)]);
+    }
+
+    /// Underflow to zero is representable and is not an error — PLRM's
+    /// "underflow" wording notwithstanding, `1e-999` is exactly what every
+    /// interpreter yields 0.0 for, and rejecting it would break real files.
+    #[test]
+    fn underflowing_literals_scan_as_zero() {
+        assert_eq!(tokenize_all(b"1e-999"), vec![Token::Real(0.0)]);
+    }
+
+    /// A token that merely looks numeric and is not must still fall through
+    /// to being a name, rather than becoming an error.
+    #[test]
+    fn non_numeric_tokens_are_still_names() {
+        assert!(matches!(
+            tokenize_all(b"1e999x").as_slice(),
+            [Token::Name(..)]
+        ));
+        assert!(matches!(tokenize_all(b"foo").as_slice(), [Token::Name(..)]));
     }
 
     #[test]

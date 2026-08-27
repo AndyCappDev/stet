@@ -12,6 +12,35 @@ use stet_core::error::PsError;
 use stet_core::object::PsObject;
 use stet_fonts::geometry::{Matrix, PathSegment, PsPath};
 
+/// Reject a device-space coordinate pair that is not finite.
+///
+/// Path coordinates are the last point at which a non-finite number can be
+/// stopped before it reaches the display list, the rasterizer, and the PDF
+/// writer, none of which have defined behaviour for one. A `NaN` vertex makes
+/// every comparison against it false, so bounding boxes, band assignment, and
+/// winding all silently take the wrong branch; the result is not a crash but
+/// arbitrary output, which is worse for being quiet.
+///
+/// `undefinedresult` is the error PLRM assigns to this: "A large number of
+/// graphics and font operators can generate an `undefinedresult` error if the
+/// current transformation matrix is not invertible (if it is scaled by 0, for
+/// instance)." A CTM scaled to infinity is the same defect at the other end.
+///
+/// The check belongs here rather than on the matrix operators. Composing a
+/// wild CTM is not itself an error — a program may `scale` extravagantly,
+/// draw nothing, and `grestore` — and erroring at `scale` would reject that.
+/// Erroring here fires only when the program actually tries to draw with it.
+/// Ghostscript guards neither: it admits `NaN` into its CTM and raises
+/// `undefinedresult` only when something later converts the value to text.
+#[inline]
+fn finite_point(x: f64, y: f64) -> Result<(f64, f64), PsError> {
+    if x.is_finite() && y.is_finite() {
+        Ok((x, y))
+    } else {
+        Err(PsError::UndefinedResult)
+    }
+}
+
 /// `newpath`: — → — (clear current path)
 pub fn op_newpath(ctx: &mut Context) -> Result<(), PsError> {
     ctx.gstate.path.clear();
@@ -43,9 +72,10 @@ pub fn op_moveto(ctx: &mut Context) -> Result<(), PsError> {
     let x_obj = ctx.o_stack.peek(1)?;
     let x = x_obj.as_f64().ok_or(PsError::TypeCheck)?;
     let y = y_obj.as_f64().ok_or(PsError::TypeCheck)?;
+    let (tx, ty) = ctx.gstate.ctm.transform_point(x, y);
+    let (dx, dy) = finite_point(tx, ty)?;
     ctx.o_stack.pop()?;
     ctx.o_stack.pop()?;
-    let (dx, dy) = ctx.gstate.ctm.transform_point(x, y);
     // Per PLRM: consecutive movetos replace the previous one
     path_moveto(&mut ctx.gstate.path, dx, dy);
     ctx.gstate.current_point = Some((dx, dy));
@@ -64,11 +94,10 @@ pub fn op_rmoveto(ctx: &mut Context) -> Result<(), PsError> {
     let dx = dx_obj.as_f64().ok_or(PsError::TypeCheck)?;
     let dy = dy_obj.as_f64().ok_or(PsError::TypeCheck)?;
     let (cx, cy) = ctx.gstate.current_point.ok_or(PsError::NoCurrentPoint)?;
-    ctx.o_stack.pop()?;
-    ctx.o_stack.pop()?;
     let (ddx, ddy) = ctx.gstate.ctm.transform_delta(dx, dy);
-    let nx = cx + ddx;
-    let ny = cy + ddy;
+    let (nx, ny) = finite_point(cx + ddx, cy + ddy)?;
+    ctx.o_stack.pop()?;
+    ctx.o_stack.pop()?;
     // Per PLRM: consecutive movetos replace the previous one
     path_moveto(&mut ctx.gstate.path, nx, ny);
     ctx.gstate.current_point = Some((nx, ny));
@@ -102,9 +131,10 @@ pub fn op_lineto(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.gstate.current_point.is_none() {
         return Err(PsError::NoCurrentPoint);
     }
+    let (tx, ty) = ctx.gstate.ctm.transform_point(x, y);
+    let (dx, dy) = finite_point(tx, ty)?;
     ctx.o_stack.pop()?;
     ctx.o_stack.pop()?;
-    let (dx, dy) = ctx.gstate.ctm.transform_point(x, y);
     ctx.gstate.path.segments.push(PathSegment::LineTo(dx, dy));
     ctx.gstate.current_point = Some((dx, dy));
     Ok(())
@@ -122,11 +152,10 @@ pub fn op_rlineto(ctx: &mut Context) -> Result<(), PsError> {
     let dx = dx_obj.as_f64().ok_or(PsError::TypeCheck)?;
     let dy = dy_obj.as_f64().ok_or(PsError::TypeCheck)?;
     let (cx, cy) = ctx.gstate.current_point.ok_or(PsError::NoCurrentPoint)?;
-    ctx.o_stack.pop()?;
-    ctx.o_stack.pop()?;
     let (ddx, ddy) = ctx.gstate.ctm.transform_delta(dx, dy);
-    let nx = cx + ddx;
-    let ny = cy + ddy;
+    let (nx, ny) = finite_point(cx + ddx, cy + ddy)?;
+    ctx.o_stack.pop()?;
+    ctx.o_stack.pop()?;
     ctx.gstate.path.segments.push(PathSegment::LineTo(nx, ny));
     ctx.gstate.current_point = Some((nx, ny));
     Ok(())
@@ -152,12 +181,16 @@ pub fn op_curveto(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.gstate.current_point.is_none() {
         return Err(PsError::NoCurrentPoint);
     }
+    let ctm = ctx.gstate.ctm;
+    let (tx1, ty1) = ctm.transform_point(x1, y1);
+    let (tx2, ty2) = ctm.transform_point(x2, y2);
+    let (tx3, ty3) = ctm.transform_point(x3, y3);
+    let (dx1, dy1) = finite_point(tx1, ty1)?;
+    let (dx2, dy2) = finite_point(tx2, ty2)?;
+    let (dx3, dy3) = finite_point(tx3, ty3)?;
     for _ in 0..6 {
         ctx.o_stack.pop()?;
     }
-    let (dx1, dy1) = ctx.gstate.ctm.transform_point(x1, y1);
-    let (dx2, dy2) = ctx.gstate.ctm.transform_point(x2, y2);
-    let (dx3, dy3) = ctx.gstate.ctm.transform_point(x3, y3);
     ctx.gstate.path.segments.push(PathSegment::CurveTo {
         x1: dx1,
         y1: dy1,
@@ -188,22 +221,26 @@ pub fn op_rcurveto(ctx: &mut Context) -> Result<(), PsError> {
     let dx3 = dx3_obj.as_f64().ok_or(PsError::TypeCheck)?;
     let dy3 = dy3_obj.as_f64().ok_or(PsError::TypeCheck)?;
     let (cx, cy) = ctx.gstate.current_point.ok_or(PsError::NoCurrentPoint)?;
+    // current_point is device-space; deltas are user-space, transformed via transform_delta
+    let ctm = ctx.gstate.ctm;
+    let (ddx1, ddy1) = ctm.transform_delta(dx1, dy1);
+    let (ddx2, ddy2) = ctm.transform_delta(dx2, dy2);
+    let (ddx3, ddy3) = ctm.transform_delta(dx3, dy3);
+    let (px1, py1) = finite_point(cx + ddx1, cy + ddy1)?;
+    let (px2, py2) = finite_point(cx + ddx2, cy + ddy2)?;
+    let (px3, py3) = finite_point(cx + ddx3, cy + ddy3)?;
     for _ in 0..6 {
         ctx.o_stack.pop()?;
     }
-    // current_point is device-space; deltas are user-space, transformed via transform_delta
-    let (ddx1, ddy1) = ctx.gstate.ctm.transform_delta(dx1, dy1);
-    let (ddx2, ddy2) = ctx.gstate.ctm.transform_delta(dx2, dy2);
-    let (ddx3, ddy3) = ctx.gstate.ctm.transform_delta(dx3, dy3);
     ctx.gstate.path.segments.push(PathSegment::CurveTo {
-        x1: cx + ddx1,
-        y1: cy + ddy1,
-        x2: cx + ddx2,
-        y2: cy + ddy2,
-        x3: cx + ddx3,
-        y3: cy + ddy3,
+        x1: px1,
+        y1: py1,
+        x2: px2,
+        y2: py2,
+        x3: px3,
+        y3: py3,
     });
-    ctx.gstate.current_point = Some((cx + ddx3, cy + ddy3));
+    ctx.gstate.current_point = Some((px3, py3));
     Ok(())
 }
 
@@ -458,6 +495,37 @@ fn arc_segments_arcn(
     (end_dx, end_dy)
 }
 
+/// Reject arc parameters that would generate non-finite geometry.
+///
+/// The arc generators build their segments internally, so the per-vertex
+/// check used by `moveto` and friends does not reach them. Validating the
+/// inputs is exact instead of approximate: the arc lies inside the box
+/// `(cx +/- r, cy +/- r)`, and an affine transform maps that bounded set to a
+/// bounded one, so if all four transformed corners are finite then every
+/// point the generator emits is too.
+///
+/// The angles need checking for a separate reason. `arc_segments` normalises
+/// with `while stop < start { stop += 360.0 }`, and `stop` of negative
+/// infinity satisfies the condition forever while the addition never changes
+/// it — an infinite loop, not merely bad geometry. That is unreachable now
+/// that the scanner and the arithmetic operators both refuse non-finite
+/// values, but it costs one comparison to keep it unreachable.
+fn finite_arc(ctm: &Matrix, cx: f64, cy: f64, r: f64, a1: f64, a2: f64) -> Result<(), PsError> {
+    if !(cx.is_finite() && cy.is_finite() && r.is_finite() && a1.is_finite() && a2.is_finite()) {
+        return Err(PsError::UndefinedResult);
+    }
+    for (x, y) in [
+        (cx - r, cy - r),
+        (cx + r, cy - r),
+        (cx - r, cy + r),
+        (cx + r, cy + r),
+    ] {
+        let (dx, dy) = ctm.transform_point(x, y);
+        finite_point(dx, dy)?;
+    }
+    Ok(())
+}
+
 /// `arc`: cx cy r angle1 angle2 → —
 pub fn op_arc(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.o_stack.len() < 5 {
@@ -473,11 +541,12 @@ pub fn op_arc(ctx: &mut Context) -> Result<(), PsError> {
     let r = r_obj.as_f64().ok_or(PsError::TypeCheck)?;
     let a1 = a1_obj.as_f64().ok_or(PsError::TypeCheck)?;
     let a2 = a2_obj.as_f64().ok_or(PsError::TypeCheck)?;
+    let ctm = ctx.gstate.ctm;
+    finite_arc(&ctm, cx, cy, r, a1, a2)?;
     for _ in 0..5 {
         ctx.o_stack.pop()?;
     }
     let has_cp = ctx.gstate.current_point.is_some();
-    let ctm = ctx.gstate.ctm;
     let (ex, ey) = arc_segments(
         cx,
         cy,
@@ -508,11 +577,12 @@ pub fn op_arcn(ctx: &mut Context) -> Result<(), PsError> {
     let r = r_obj.as_f64().ok_or(PsError::TypeCheck)?;
     let a1 = a1_obj.as_f64().ok_or(PsError::TypeCheck)?;
     let a2 = a2_obj.as_f64().ok_or(PsError::TypeCheck)?;
+    let ctm = ctx.gstate.ctm;
+    finite_arc(&ctm, cx, cy, r, a1, a2)?;
     for _ in 0..5 {
         ctx.o_stack.pop()?;
     }
     let has_cp = ctx.gstate.current_point.is_some();
-    let ctm = ctx.gstate.ctm;
     let (ex, ey) = arc_segments(
         cx,
         cy,
@@ -550,11 +620,23 @@ pub fn op_arcto(ctx: &mut Context) -> Result<(), PsError> {
     let (dev_x0, dev_y0) = ctx.gstate.current_point.ok_or(PsError::NoCurrentPoint)?;
     let ictm = ctx.gstate.ctm.invert().ok_or(PsError::UndefinedResult)?;
     let (x0, y0) = ictm.transform_point(dev_x0, dev_y0);
+    let ctm = ctx.gstate.ctm;
+    // The generated arc is tangent to both legs and lies inside the triangle
+    // (x0,y0)-(x1,y1)-(x2,y2), so bounding those three vertices bounds every
+    // point emitted below. `x0,y0` needs checking in its own right: it comes
+    // back through the inverted CTM, which is finite-but-tiny for a
+    // near-singular matrix and sends the inverse to infinity. `arct` delegates
+    // here, so it is covered by the same guard.
+    if !(r.is_finite() && x0.is_finite() && y0.is_finite()) {
+        return Err(PsError::UndefinedResult);
+    }
+    for (x, y) in [(x0, y0), (x1, y1), (x2, y2)] {
+        let (dx, dy) = ctm.transform_point(x, y);
+        finite_point(dx, dy)?;
+    }
     for _ in 0..5 {
         ctx.o_stack.pop()?;
     }
-
-    let ctm = ctx.gstate.ctm;
 
     // Vectors from vertex (x1,y1) toward the other points (user space)
     let u1x = x0 - x1;

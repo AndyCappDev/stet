@@ -178,6 +178,56 @@ unchanged and now decodes under the general ceiling.
 
 All 691 sample PDFs render byte-identically before and after this change.
 
+Non-finite numbers and integer-overflow traps in the PostScript interpreter.
+The backlog listed this as cosmetic — "garbage output rather than a panic" —
+which was wrong in both directions: one case was a release-mode crash, and the
+rest were a PLRM conformance gap rather than a cosmetic one.
+
+- **`-9223372036854775808 -1 idiv` panicked in release.** `i64::MIN / -1` is
+  the one pair that overflows, and integer division overflow is a trap in
+  Rust's semantics rather than something `overflow-checks` enables, so this
+  aborted an optimised build from 30 bytes of PostScript. `idiv` and `mod` now
+  use `checked_div` / `checked_rem` and raise `undefinedresult`.
+- **Real overflow produced `inf` instead of an error.** PLRM: "A numeric
+  computation would produce a meaningless result or one that cannot be
+  represented as a number. Possible causes include numeric overflow or
+  underflow, division by 0…" — and every arithmetic operator that can return a
+  real lists `undefinedresult` among its errors. `1e308 1e308 mul` yielded
+  `inf`, and `inf 0 mul` then yielded `NaN`. `add`, `sub`, `mul`, `div`, and
+  `exp` now raise `undefinedresult` when the result is not finite, matching
+  Ghostscript, which does the same at its own (single-precision) boundary.
+  stet's boundary is `f64`'s, as with the `i64` integer width: PLRM Appendix B
+  lists real limits under "Typical Limits" as properties of the host
+  architecture, not as conformance requirements.
+- **A literal `1e999` scanned straight to `inf`**, introducing a non-finite
+  value with no arithmetic at all — `"1e999".parse::<f64>()` succeeds. The
+  scanner now declines such a token, which falls through to the name scanner
+  exactly as `1e999x` already did, so a program using one gets `undefined`
+  rather than a value. Ghostscript raises `limitcheck` here and stet
+  deliberately does not: that was tried first and it broke a 35 MB corpus file
+  that renders correctly, whose hex image data contains byte runs such as
+  `5657564e574` — syntactically a real with a 580-digit exponent, scanned and
+  discarded harmlessly as a name.
+- **Path construction rejects non-finite device coordinates.** With the two
+  sources above closed, a `NaN` could still arrive through a CTM composed past
+  the representable range (`1e300 1e300 scale` twice). `moveto`, `rmoveto`,
+  `lineto`, `rlineto`, `curveto`, `rcurveto`, `arc`, `arcn`, `arcto`, and
+  `arct` now raise `undefinedresult` instead, which is the error PLRM assigns
+  to graphics operators under an unusable CTM. The check is on the path rather
+  than on the matrix operators because composing a wild CTM is not itself an
+  error — a program may `scale` extravagantly, draw nothing, and `grestore`.
+  This also closes a latent hang: `arc` normalises with
+  `while stop < start { stop += 360.0 }`, which never terminates for a `stop`
+  of negative infinity.
+
+A `NaN` reaching geometry never crashed — it makes every comparison against it
+false, so bounds, banding, and winding quietly take the wrong branch. Silent
+wrong output was the real exposure.
+
+All 691 sample PDFs render byte-identically. The 6268-file PostScript corpus
+has the same 31 failures before and after, with no file newly failing; all 86
+`ps_samples` and the `unit_tests/` suite pass unchanged.
+
 ### Added
 
 - **A ceiling on PostScript VM**, via `Context::max_local_vm`,
