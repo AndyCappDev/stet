@@ -1063,6 +1063,27 @@ marker or be allow-listed with a one-line justification. See the
   seam-free rendering on adjacent clipped regions and full overprint
   simulation.
 
+## [0.1.2] — 2026-04-20
+
+Backfilled 2026-08-27. This release was tagged and published but never written
+up, which `scripts/check-tags.sh` caught when it began requiring a CHANGELOG
+entry for every `vX.Y.Z` tag. Only `stet` and `stet-cli` were bumped; the
+workspace version stayed at 0.1.0, which is why no other crate carries a 0.1.2.
+
+### Fixed
+
+- **`stet-cli` 0.1.0 and 0.1.1 shipped without embedded-resource
+  registration** and were yanked from crates.io. The `stet` binary fell back
+  to a PNG-writing rasterizer whenever a PostScript file was opened in the
+  interactive viewer. 0.1.2 is self-contained; users of the earlier versions
+  needed `cargo install stet-cli --force`. The `stet` library crate, used via
+  `Interpreter`, was never affected.
+- The root `resources/` tree was retired in favour of crate-local trees, then
+  partially restored when `stet-cli` turned out to still read it at runtime;
+  `stet-wasm` was pointed at the crate-local tree in the same pass.
+
+There was no `v0.1.1` tag.
+
 ## [0.1.0] — 2026-04-18
 
 Initial public release.

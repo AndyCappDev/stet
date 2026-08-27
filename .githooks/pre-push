@@ -24,6 +24,12 @@ set -euo pipefail
 # scripts/ paths below still resolve under `git worktree`.
 cd "$(git rev-parse --show-toplevel)"
 
+# git feeds the refs being pushed on stdin, one per line:
+#   <local ref> <local sha> <remote ref> <remote sha>
+# Read it up front: it can only be consumed once, and the checks below run
+# commands that would otherwise swallow it.
+pushed_refs="$(cat)"
+
 # Colour helpers — silenced when stdout isn't a terminal.
 if [ -t 1 ]; then
     RED="\033[31m"
@@ -104,6 +110,45 @@ if rustup target list --installed 2>/dev/null | grep -qx wasm32-unknown-unknown;
 else
     echo -e "${YELLOW}pre-push: wasm32 target not installed, skipping cross-compile${RESET}"
     echo -e "${YELLOW}        rustup target add wasm32-unknown-unknown${RESET}"
+fi
+
+# Release-tag gate. The `v*` namespace is reserved for releases, and this is
+# the check that stops a bad tag leaving the machine — `check-tags.sh` audits
+# what already exists, but only this sees what is being pushed right now.
+#
+# Written because `v0.6.1-perf` and `v0.6.2-perf` sat in the tag list for
+# months, both pointing at one commit from when the workspace was 0.1.0,
+# making it look as though 0.6.0 had shipped and been superseded twice.
+#
+# Deliberately not checked against the *current* workspace version: `git push
+# --tags` re-offers every old tag, and those legitimately name earlier
+# versions. What is enforced is the shape, and that the version was written up.
+tag_errors=0
+while read -r local_ref _local_sha _remote_ref _remote_sha; do
+    case "$local_ref" in
+        refs/tags/v*) ;;
+        *) continue ;;
+    esac
+    tag="${local_ref#refs/tags/}"
+    if ! [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo -e "${RED}pre-push: '$tag' is not a release tag but claims the v* namespace.${RESET}" >&2
+        echo -e "${RED}        Use perf/<name> or exp/<name> for benchmarks and experiments.${RESET}" >&2
+        tag_errors=$((tag_errors + 1))
+        continue
+    fi
+    if ! grep -q "^## \[${tag#v}\]" CHANGELOG.md; then
+        echo -e "${RED}pre-push: '$tag' has no '## [${tag#v}]' entry in CHANGELOG.md.${RESET}" >&2
+        tag_errors=$((tag_errors + 1))
+    fi
+done <<< "$pushed_refs"
+if [ "$tag_errors" -ne 0 ]; then
+    exit 1
+fi
+
+echo -e "${YELLOW}pre-push: tag namespace audit${RESET}"
+if ! scripts/check-tags.sh; then
+    echo -e "${RED}pre-push: a v* tag is malformed or undocumented.${RESET}" >&2
+    exit 1
 fi
 
 echo -e "${GREEN}pre-push: OK${RESET}"
