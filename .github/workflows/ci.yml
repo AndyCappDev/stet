@@ -41,6 +41,13 @@ jobs:
         # that `restore` releases but `invalidrestore` cannot see. Only
         # interpreter bootstrap may use them. See scripts/check-level-zero-alloc.sh.
         run: scripts/check-level-zero-alloc.sh
+      - name: CLI documentation cross-check
+        # Every option the CLI parses must appear in --help and in both
+        # READMEs. crates.io renders crates/stet-cli/README.md, so a flag
+        # documented only in --help cannot be found by anyone deciding
+        # whether to install stet. `--page`, `--password`, `--max-vm`, and
+        # `--timeout` all shipped that way. See scripts/check-cli-docs.sh.
+        run: scripts/check-cli-docs.sh
       - name: release-version cross-check
         # Verifies the workspace `Cargo.toml` version matches the README
         # badge + Producer string and that CHANGELOG.md has an entry.

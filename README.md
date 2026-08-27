@@ -411,6 +411,9 @@ Pass `--password <pw>` for encrypted documents.
 | `--use-output-intent` | Honour the PDF's embedded OutputIntent as the source CMYK profile (default) |
 | `--no-output-intent` | Ignore the PDF's embedded OutputIntent and use the system CMYK profile |
 | `--bpc <on\|off\|auto>` | Black-point compensation (default: `auto`, currently equivalent to `on`) |
+| `--password <PW>` | Password for encrypted PDF input |
+| `--timeout <SECONDS>` | Abort a job running longer than this. No limit by default — PostScript is Turing-complete and legitimate jobs run for minutes. Set one for untrusted input |
+| `--max-vm <MB>` | Ceiling on PostScript VM — strings, arrays, dictionaries (default 8192). Exceeding it raises `VMerror` instead of aborting. Separate from the renderer's image and band buffers, so it does **not** cap rendering resolution |
 
 ### Page size
 
@@ -475,7 +478,7 @@ rejected there — use `--width` / `--height` to scale the output instead.
 |-------|------|
 | `stet` | Batteries-included library API (facade) |
 | `stet-core` | Interpreter infrastructure: types, VM, tokenizer |
-| `stet-ops` | ~331 PostScript operator implementations |
+| `stet-ops` | PostScript operator implementations (388 registered in `systemdict`) |
 | `stet-engine` | Execution engine (eval loop) |
 | `stet-fonts` | Font parsing: Type 1, CFF/Type 2, TrueType |
 | `stet-graphics` | Display list, color types, ICC color management |
@@ -520,9 +523,10 @@ git config core.hooksPath .githooks
 
 This enables `.githooks/pre-push`, which runs the same gates as CI's
 lint job — `cargo fmt --check`, clippy errors, the `#[non_exhaustive]`
-and VM level-zero-allocation audits, and the version/MSRV cross-check —
-so a failing tree is caught before it reaches a remote rather than a few
-minutes later in CI. Bypass a single push with `git push --no-verify`.
+and VM level-zero-allocation audits, the version/MSRV cross-check, and
+the CLI documentation cross-check — so a failing tree is caught before it
+reaches a remote rather than a few minutes later in CI. Bypass a single
+push with `git push --no-verify`.
 
 Git does not enable this automatically, and it fails silently: without
 the command above, pushes simply succeed with nothing checked.

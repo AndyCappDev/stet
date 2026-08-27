@@ -60,29 +60,102 @@ stet                       # no files → REPL; viewer opens when PS calls showp
 stet --device png page1.ps page2.pdf illustration.eps
 ```
 
+### Page size for PostScript input
+
+A plain `%!PS` program is rendered onto whatever page the device provides,
+US Letter by default. `%%BoundingBox` does **not** change that — DSC defines
+it as a description of the artwork, not a page-size request, and Ghostscript
+behaves the same way. `--page` supplies the size from outside:
+
+```bash
+stet --device png --page 620x1000 broadside.ps   # explicit, in points
+stet --device png --page a4 report.ps            # named size
+stet --device png --page a4-landscape report.ps  # swap the dimensions
+```
+
+EPS is the exception: an `EPSF` header or a `.eps` extension makes stet
+honour `%%BoundingBox`, and `--page` overrides it when both apply. For PDF
+input the size comes from the document, so use `--width` / `--height` instead.
+
+### Untrusted input
+
+PostScript is Turing-complete, so there is no time limit by default and a
+hostile program can loop forever. Set one, and cap PostScript VM, when the
+input is not yours:
+
+```bash
+stet --device png --timeout 30 --max-vm 2048 untrusted.ps
+```
+
+Both are ceilings on the interpreter, not on rendering resolution. Run
+untrusted input inside an OS-level sandbox as well.
+
+### Inspecting a PDF
+
+`stet inspect` prints a document's structure — metadata, page boxes, outline,
+annotations, form fields, embedded files, and optional-content layers —
+without rendering it.
+
+```bash
+stet inspect document.pdf
+stet inspect --password secret encrypted.pdf
+```
+
 ## Options
 
 ```
-stet [OPTIONS] [FILES...]
+stet [OPTIONS] <FILE>...
+stet inspect <FILE.pdf> [--password <PW>]
+stet --help
+stet --version
 
-Options:
-  --device <DEVICE>          Output device: png, pdf, viewer, viewport-png, null
-  --dpi <DPI>                Resolution in dots per inch (overrides device default)
-  --pages <RANGE>            Page range, e.g. 1, 1-5, 2,4,6
-  --threads <N>              Worker-thread count (default: 75% of cores in viewer
-                             mode, 8 otherwise)
-  --no-icc                   Disable ICC color management
+Output devices:
+  --device <DEVICE>          png, pdf, viewer, viewport-png, null
+                             (default: viewer for files when built with the
+                             viewer feature, png otherwise)
+
+Common options:
+  --dpi <DPI>                Resolution for raster output (default 300)
+  --page <SIZE>              Page size for PostScript/EPS input, in points:
+                             a named size (letter, legal, tabloid, ledger,
+                             executive, a0-a6, b4, b5) or WIDTHxHEIGHT.
+                             Append -landscape or -portrait to a named size.
+                             Rejected for PDF input
+  --pages <RANGE>            Page selection: 3, 1-5, 1-3,7,10-12
+  --width <PX>               Override page width (PDF input only; not
+                             combinable with --dpi or --page)
+  --height <PX>              Override page height (same restrictions)
+  --threads <N>              Worker-thread count (default: 75% of cores in
+                             viewer mode, 8 otherwise)
+  --password <PW>            Password for encrypted PDF input
   --no-aa                    Disable anti-aliasing
 
+Resource limits (for untrusted input):
+  --timeout <SECONDS>        Abort a job running longer than this. No limit
+                             by default — PostScript is Turing-complete and
+                             legitimate jobs can run for minutes
+  --max-vm <MB>              Ceiling on PostScript VM: strings, arrays, and
+                             dictionaries (default 8192). Exceeding it raises
+                             VMerror instead of aborting. Separate from the
+                             renderer's image and band buffers, so this does
+                             not cap rendering resolution
+
 Colour management:
-  --output-profile <FILE>    ICC output profile (also used as source CMYK when
-                             --cmyk-profile is not set)
+  --no-icc                   Disable ICC colour management; use the PLRM
+                             CMYK→sRGB formulas. Cannot combine with
+                             --cmyk-profile or --bpc
+  --output-profile <FILE>    ICC output profile (also used as source CMYK
+                             when --cmyk-profile is not set)
   --cmyk-profile <FILE>      Pin the source CMYK ICC profile for CMYK→sRGB
-  --no-output-intent         Ignore the PDF's embedded /OutputIntents profile
-                             (default: honoured)
+  --use-output-intent        Honour the PDF's embedded /OutputIntents profile
+                             as the source CMYK profile (default)
+  --no-output-intent         Ignore it and use the system CMYK profile
   --bpc <on|off|auto>        Black-point compensation (default: auto,
                              currently equivalent to on)
 ```
+
+`stet --help` prints the same list; `scripts/check-cli-docs.sh` in the
+repository keeps the two from drifting apart.
 
 PDF reading (`stet-pdf-reader`) is always available. PostScript
 interpretation, `stet-render`, PDF output (`stet-pdf`), and the viewer are

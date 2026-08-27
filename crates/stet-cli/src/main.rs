@@ -1093,8 +1093,9 @@ Common options:
                             be combined with --dpi.
     --height <PX>           Override page height (PDF input only). Cannot
                             be combined with --dpi.
-    --threads <N>           Parallel band-rendering thread count
-                            (default: rayon's default = num_cpus).
+    --threads <N>           Parallel band-rendering thread count. Defaults to
+                            75% of cores in viewer mode and 8 otherwise, where
+                            sequential PNG writing limits the benefit of more.
     --no-aa                 Disable anti-aliasing.
     --password <PW>         Password for encrypted PDF input.
 

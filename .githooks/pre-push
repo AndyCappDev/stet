@@ -75,4 +75,13 @@ if ! scripts/check-release-versions.sh; then
     exit 1
 fi
 
+echo -e "${YELLOW}pre-push: CLI documentation cross-check${RESET}"
+if ! scripts/check-cli-docs.sh; then
+    echo -e "${RED}pre-push: a CLI option is undocumented.${RESET}" >&2
+    echo -e "${RED}        crates/stet-cli/README.md is what crates.io renders,${RESET}" >&2
+    echo -e "${RED}        so a flag missing there is invisible to anyone deciding${RESET}" >&2
+    echo -e "${RED}        whether to install stet.${RESET}" >&2
+    exit 1
+fi
+
 echo -e "${GREEN}pre-push: OK${RESET}"
