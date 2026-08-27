@@ -1,0 +1,64 @@
+name: Fuzz
+
+# Weekly, not per-push.
+#
+# This ran on every push until 2026-08-27, where it was the longest job in the
+# run — mostly `cargo install cargo-fuzz`, a from-source build — while being
+# the one job that could not fail the build. It gated nothing and sat on the
+# critical path of every commit.
+#
+# The value it does have is bit-rot detection: proving the harnesses still
+# compile against a moving nightly and a moving cargo-fuzz. That is worth
+# checking weekly, not hourly.
+#
+# Moving it off the push path also buys a real budget. 60s per target from a
+# cold corpus finds nothing — SECURITY.md records that the first genuine
+# campaign's findings were all false positives bar one known upstream
+# overflow. 300s with a larger seed set is not a substitute for
+# `./fuzz/run.sh 3600` before a release, but it is no longer theatre.
+on:
+  schedule:
+    # Mondays, 06:00 UTC.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: "Seconds per target"
+        required: false
+        default: "300"
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  fuzz:
+    name: Fuzz (nightly)
+    runs-on: ubuntu-latest
+    # No `continue-on-error` here, unlike when this lived in ci.yml. That
+    # existed so a nightly or cargo-fuzz breakage could not block a PR about
+    # something else. On a schedule there is no PR to block, so a genuine
+    # crash should show up red rather than be swallowed.
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: fuzz
+          workspaces: fuzz
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Seed corpora
+        # libFuzzer replays the entire seed corpus before `-max_total_time`
+        # means anything, so this stays capped even with a larger budget —
+        # 703 PDFs under AddressSanitizer would spend the whole run replaying.
+        run: SEED_LIMIT=200 ./fuzz/seed-corpus.sh
+      - name: Run each target
+        run: ./fuzz/run.sh "${{ github.event.inputs.duration || '300' }}"
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts/
+          if-no-files-found: ignore

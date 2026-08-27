@@ -368,8 +368,10 @@ has the same 31 failures before and after, with no file newly failing; all 86
   samples (703 PDFs, 6410 PostScript inputs, 35 Type 1 faces) and
   `fuzz/run.sh` runs them with settings suited to a sanitizer build. The crate
   is excluded from the workspace, like `stet-wasm`, because cargo-fuzz needs
-  nightly and stet is stable-only with a pinned MSRV; a `continue-on-error` CI
-  job runs a 60s smoke test per target. See `fuzz/README.md`.
+  nightly and stet is stable-only with a pinned MSRV. A weekly scheduled
+  workflow (`.github/workflows/fuzz.yml`) runs 300s per target; it is not on
+  the push path, where it gated nothing and dominated the run. See
+  `fuzz/README.md`.
 
 ### Added
 
