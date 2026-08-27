@@ -3,7 +3,7 @@
 <p align="center">A modern, open-source PostScript and PDF rendering engine written in pure Rust.</p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-0.5.0-blue" alt="Version 0.5.0">
+  <img src="https://img.shields.io/badge/Version-0.6.0-blue" alt="Version 0.6.0">
   <img src="https://img.shields.io/badge/License-Apache--2.0_OR_MIT-green" alt="License Apache-2.0 OR MIT">
   <img src="https://img.shields.io/badge/Rust-1.88+-orange" alt="Rust 1.88+">
 </p>
@@ -37,7 +37,114 @@ This is a **capability sampler, not a production viewer**:
 - **Single-threaded WASM.** No rayon parallelism. Rendering is ~2-4× slower
   than native stet.
 
-For production work, use the native crates documented below.
+For production work, install the native binary below.
+
+## Install
+
+```bash
+cargo install stet-cli
+```
+
+That builds the `stet` binary with the interactive viewer included. For a
+headless build, or to work from a checkout, see
+[Building from Source](#building-from-source).
+
+To use stet as a library instead, see [Library Usage](#library-usage).
+
+## CLI Usage
+
+stet auto-detects the input format — PostScript, EPS, or PDF — so the same
+commands work against any of them.
+
+```bash
+stet --device png document.ps          # PostScript → PNG
+stet --device pdf document.ps          # PostScript → PDF
+stet --device png document.pdf         # PDF → PNG
+stet document.ps                       # Interactive viewer
+stet                                   # REPL (viewer opens on first showpage)
+stet inspect document.pdf              # Print PDF structural summary
+```
+
+See the [Viewer Guide](docs/VIEWER-GUIDE.md) for keyboard/mouse controls,
+zoom presets, minimap navigation, and drag-and-drop.
+
+### Options
+
+| Option | Description |
+|--------|------------|
+| `--device <TYPE>` | Output: `png`, `pdf`, `viewer` (default), `null` |
+| `--dpi <DPI>` | Resolution (overrides device default; all built-in devices default to 300) |
+| `--pages <RANGE>` | Page filter: `1`, `1-5`, `2,4,6` |
+| `--page <SIZE>` | Page size for PostScript/EPS input: a named size (`letter`, `legal`, `tabloid`, `ledger`, `executive`, `a0`–`a6`, `b4`, `b5`) or `WIDTHxHEIGHT` in points, e.g. `620x1000`. Add `-landscape` / `-portrait` to orient a named size. See [Page size](#page-size). |
+| `--width <PX>` / `--height <PX>` | Scale PDF output to a pixel size (PDF input only; not combinable with `--dpi` or `--page`) |
+| `--threads <N>` | Worker-thread count (default: 75 % of cores in viewer mode, 8 otherwise) |
+| `--no-icc` | Disable ICC color management entirely |
+| `--no-aa` | Disable anti-aliasing |
+| `--output-profile <FILE>` | Generic ICC output profile (also used as source CMYK when `--cmyk-profile` is absent) |
+| `--cmyk-profile <FILE>` | Pin the source CMYK ICC profile for CMYK→sRGB conversion |
+| `--use-output-intent` | Honour the PDF's embedded OutputIntent as the source CMYK profile (default) |
+| `--no-output-intent` | Ignore the PDF's embedded OutputIntent and use the system CMYK profile |
+| `--bpc <on\|off\|auto>` | Black-point compensation (default: `auto`, currently equivalent to `on`) |
+| `--password <PW>` | Password for encrypted PDF input |
+| `--timeout <SECONDS>` | Abort a job running longer than this. No limit by default — PostScript is Turing-complete and legitimate jobs run for minutes. Set one for untrusted input |
+| `--max-vm <MB>` | Ceiling on PostScript VM — strings, arrays, dictionaries (default 8192). Exceeding it raises `VMerror` instead of aborting. Separate from the renderer's image and band buffers, so it does **not** cap rendering resolution |
+
+### Page size
+
+A PostScript program is rendered onto whatever page the device provides,
+which defaults to US Letter. `%%BoundingBox` does **not** change that for a
+plain `%!PS` document — DSC defines it as a description of the artwork's
+extent, not a page-size request — so a program drawing outside Letter is
+clipped unless it calls `setpagedevice` itself. Ghostscript behaves the same
+way. `--page` is how you supply the size from outside:
+
+```bash
+stet --device png --page 620x1000 broadside.ps   # explicit, in points
+stet --device png --page a4 report.ps            # named size
+stet --device png --page a4-landscape report.ps  # swap the dimensions
+```
+
+EPS is the exception: an `EPSF` header line or a `.eps` extension makes stet
+honour `%%BoundingBox` automatically, and `--page` overrides it when both
+apply. For PDF input the page size comes from the document, so `--page` is
+rejected there — use `--width` / `--height` to scale the output instead.
+
+### `stet inspect <file.pdf>`
+
+Prints a human-readable summary of the document structure: metadata,
+page count and dimensions, outline (bookmark) tree, named destinations,
+per-page annotation counts by subtype, AcroForm field summary, embedded
+file attachments, and any parse warnings. Read-only; never writes to the
+file. See the [PDF Reader API guide](docs/PDF-READER-API.md) for the
+underlying library API.
+
+```
+$ stet inspect document.pdf
+document.pdf
+
+Metadata:
+  Title: Annual Report 2026
+  Author: Scott Bowman
+  Producer: stet 0.6.0
+  Created: 2026-04-27 12:00:00 UTC
+
+Pages: 4
+  Page 1 size: 612.0 × 792.0 pt (8.50 × 11.00 in)
+
+Outline (3 entries):
+  - Chapter 1 → page 1 (fit)
+    - Section 1.1 → page 2 (xyz)
+  - Chapter 2 → page 3 (fit)
+
+Annotations: 3
+  Page 1: 2 Link
+  Page 3: 1 Highlight
+
+Form: 4 terminal fields (4 widgets)
+  By kind: Button: 1, Text: 3
+```
+
+Pass `--password <pw>` for encrypted documents.
 
 ## Display List Architecture
 
@@ -145,7 +252,7 @@ these matter more than raw rendering speed.
 
 ```toml
 [dependencies]
-stet = "0.5"
+stet = "0.6"
 ```
 
 > **Upgrading?** Cargo will not auto-bump across these pre-1.0 minors, each
@@ -318,7 +425,7 @@ For the smallest dependency footprint (display lists only):
 
 ```toml
 [dependencies]
-stet = { version = "0.5", default-features = false }
+stet = { version = "0.6", default-features = false }
 ```
 
 ### Configuration
@@ -338,102 +445,6 @@ is a tested fact rather than an estimate.
 
 The MSRV is not covered by semantic versioning: it may be raised in any minor
 release. Any change to it is called out in [CHANGELOG.md](CHANGELOG.md).
-
-## CLI Usage
-
-```bash
-cargo install stet-cli
-```
-
-```bash
-stet --device png document.ps          # PostScript → PNG
-stet --device pdf document.ps          # PostScript → PDF
-stet --device png document.pdf         # PDF → PNG
-stet document.ps                       # Interactive viewer
-stet                                   # REPL (viewer opens on first showpage)
-stet inspect document.pdf              # Print PDF structural summary
-```
-
-See the [Viewer Guide](docs/VIEWER-GUIDE.md) for keyboard/mouse controls,
-zoom presets, minimap navigation, and drag-and-drop.
-
-### `stet inspect <file.pdf>`
-
-Prints a human-readable summary of the document structure: metadata,
-page count and dimensions, outline (bookmark) tree, named destinations,
-per-page annotation counts by subtype, AcroForm field summary, embedded
-file attachments, and any parse warnings. Read-only; never writes to the
-file. See the [PDF Reader API guide](docs/PDF-READER-API.md) for the
-underlying library API.
-
-```
-$ stet inspect document.pdf
-document.pdf
-
-Metadata:
-  Title: Annual Report 2026
-  Author: Scott Bowman
-  Producer: stet 0.5.0
-  Created: 2026-04-27 12:00:00 UTC
-
-Pages: 4
-  Page 1 size: 612.0 × 792.0 pt (8.50 × 11.00 in)
-
-Outline (3 entries):
-  - Chapter 1 → page 1 (fit)
-    - Section 1.1 → page 2 (xyz)
-  - Chapter 2 → page 3 (fit)
-
-Annotations: 3
-  Page 1: 2 Link
-  Page 3: 1 Highlight
-
-Form: 4 terminal fields (4 widgets)
-  By kind: Button: 1, Text: 3
-```
-
-Pass `--password <pw>` for encrypted documents.
-
-### Options
-
-| Option | Description |
-|--------|------------|
-| `--device <TYPE>` | Output: `png`, `pdf`, `viewer` (default), `null` |
-| `--dpi <DPI>` | Resolution (overrides device default; all built-in devices default to 300) |
-| `--pages <RANGE>` | Page filter: `1`, `1-5`, `2,4,6` |
-| `--page <SIZE>` | Page size for PostScript/EPS input: a named size (`letter`, `legal`, `tabloid`, `ledger`, `executive`, `a0`–`a6`, `b4`, `b5`) or `WIDTHxHEIGHT` in points, e.g. `620x1000`. Add `-landscape` / `-portrait` to orient a named size. See [Page size](#page-size). |
-| `--width <PX>` / `--height <PX>` | Scale PDF output to a pixel size (PDF input only; not combinable with `--dpi` or `--page`) |
-| `--threads <N>` | Worker-thread count (default: 75 % of cores in viewer mode, 8 otherwise) |
-| `--no-icc` | Disable ICC color management entirely |
-| `--no-aa` | Disable anti-aliasing |
-| `--output-profile <FILE>` | Generic ICC output profile (also used as source CMYK when `--cmyk-profile` is absent) |
-| `--cmyk-profile <FILE>` | Pin the source CMYK ICC profile for CMYK→sRGB conversion |
-| `--use-output-intent` | Honour the PDF's embedded OutputIntent as the source CMYK profile (default) |
-| `--no-output-intent` | Ignore the PDF's embedded OutputIntent and use the system CMYK profile |
-| `--bpc <on\|off\|auto>` | Black-point compensation (default: `auto`, currently equivalent to `on`) |
-| `--password <PW>` | Password for encrypted PDF input |
-| `--timeout <SECONDS>` | Abort a job running longer than this. No limit by default — PostScript is Turing-complete and legitimate jobs run for minutes. Set one for untrusted input |
-| `--max-vm <MB>` | Ceiling on PostScript VM — strings, arrays, dictionaries (default 8192). Exceeding it raises `VMerror` instead of aborting. Separate from the renderer's image and band buffers, so it does **not** cap rendering resolution |
-
-### Page size
-
-A PostScript program is rendered onto whatever page the device provides,
-which defaults to US Letter. `%%BoundingBox` does **not** change that for a
-plain `%!PS` document — DSC defines it as a description of the artwork's
-extent, not a page-size request — so a program drawing outside Letter is
-clipped unless it calls `setpagedevice` itself. Ghostscript behaves the same
-way. `--page` is how you supply the size from outside:
-
-```bash
-stet --device png --page 620x1000 broadside.ps   # explicit, in points
-stet --device png --page a4 report.ps            # named size
-stet --device png --page a4-landscape report.ps  # swap the dimensions
-```
-
-EPS is the exception: an `EPSF` header line or a `.eps` extension makes stet
-honour `%%BoundingBox` automatically, and `--page` overrides it when both
-apply. For PDF input the page size comes from the document, so `--page` is
-rejected there — use `--width` / `--height` to scale the output instead.
 
 ## Crate Overview
 

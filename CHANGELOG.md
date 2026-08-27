@@ -5,7 +5,83 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.6.0] — 2026-08-27
+
+A hardening release. The public Rust API is strictly additive — nothing was
+removed and no signature changed — but the interpreter and the PDF reader now
+refuse a number of inputs they previously accepted, which is why this is a
+minor bump rather than a patch.
+
+### Breaking
+
+Nothing here breaks compilation. Every item changes what happens to a *file*,
+so audit these if you render input you do not control the shape of. All were
+previously ways to abort the process, produce silently wrong output, or run
+without bound; each is documented in full under Security below.
+
+- **Numeric overflow now raises `undefinedresult`.** `1e308 1e308 mul`
+  returned `inf` and `inf 0 mul` then returned `NaN`; both now error, per PLRM
+  and matching Ghostscript at its own boundary. A literal `1e999` no longer
+  scans as `inf` — it declines to be a number and becomes an undefined name.
+  A program that relied on either value will now stop.
+- **Non-finite path coordinates raise `undefinedresult`.** Reachable through a
+  CTM composed past the representable range. Previously drew arbitrary output.
+- **`VMerror` now halts execution.** `errordict` registered the handler under
+  a name that could never match, so the interpreter printed the error and
+  carried on past the failed allocation. Programs that appeared to survive an
+  allocation failure will now stop at it.
+- **PostScript VM is capped at 8 GiB by default** (`--max-vm`,
+  `setuserparams /MaxLocalVM`). Jobs above it raise `VMerror` instead of
+  growing until the OS intervenes. Separate from the renderer's image and band
+  buffers, so this does not cap rendering resolution.
+- **Page size is bounded at 14400 pt** (200 in) for PostScript input.
+  Resolution is deliberately *not* capped — 1200 dpi at 11x17 and larger is
+  ordinary prepress.
+- **Image dimensions are bounded** to 100,000 per side and 4e9 pixels total,
+  on both the PostScript and PDF paths, with `/BitsPerComponent` limited to
+  1..=16. Sized for prepress, not for the sample corpus: a 60x40 inch page at
+  1200 dpi is 3.46 Gpx and is accepted.
+- **Decompressed streams are bounded** at 512 MiB, raised to whatever an image
+  raster or an embedded file declares for itself. A chain of decompression
+  filters no longer multiplies without limit.
+- **`i64::MIN -1 idiv`** (and `mod`) raise `undefinedresult` instead of
+  panicking in release.
+
+All 691 sample PDFs render byte-identically across every change above, the
+6268-file PostScript corpus has the same 31 failures with an identical failing
+set, and both visual suites pass.
+
+### Fixed
+
+- **`stet-core` failed to compile for `wasm32-unknown-unknown`.** The 8 GiB VM
+  default is not a large `usize` on a 32-bit target but a const-evaluation
+  error. The default is now computed in `u64`, falling back to `usize::MAX / 4`
+  where 8 GiB does not fit.
+- **`currentuserparams` reported `MaxLocalVM` as 0**, telling a program there
+  was no limit moments before it hit one.
+
+### Added
+
+- `--timeout <SECONDS>` and `--max-vm <MB>` CLI options.
+- `Context::set_timeout`, `Context::check_deadline`, `Context::check_vm_alloc`,
+  `Context::vm_bytes`.
+- `stet_graphics::image_limits` — `MAX_IMAGE_DIMENSION`, `MAX_IMAGE_PIXELS`,
+  `MAX_BITS_PER_COMPONENT`, and validators, shared by the PostScript and PDF
+  paths so two prepress-calibrated numbers cannot drift apart.
+- `stet_pdf_reader::filters::{DecodeBudget, decode_stream_bounded,
+  MAX_DECODED_STREAM_BYTES}`. `decode_stream` is unchanged.
+- `PdfError::NestingTooDeep`. `PdfError` is `#[non_exhaustive]`, so this is
+  not a breaking change.
+- `stet-pdf-reader`'s `parse_object_at_depth`,
+  `parse_object_from_token_at_depth`, `parse_dict_body_at_depth`, and
+  `MAX_OBJECT_DEPTH`. The existing depth-0 entry points are unchanged.
+- `scripts/check-cli-docs.sh`, wired into CI and `.githooks/pre-push`: every
+  CLI option must appear in `--help` and in both READMEs. The crates.io page
+  had been listing ten of nineteen options.
+- `crates/stet-cli/examples/profile_images.rs` and `profile_alloc.rs` —
+  per-stage memory attribution for the render path.
+- Five `cargo-fuzz` targets in `fuzz/`, with seeded corpora and a CI smoke gate.
+- `[profile.hardened]` — release codegen with overflow checks left on.
 
 ### Security
 
