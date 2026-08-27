@@ -141,6 +141,43 @@ the same way a PDF object is.
 All 691 sample PDFs render byte-identically before and after these font
 changes.
 
+Decompressed stream size is now bounded, closing a decompression-bomb vector.
+`decode_stream` applied its filter chain with no ceiling on the output, so the
+amplification was unbounded *and* multiplicative: a single Deflate pass tops
+out near 1032:1 on a run of zeros, but a 707-byte file carrying
+`/Filter [/FlateDecode /FlateDecode /FlateDecode]` measured a 2058 MB peak RSS
+here, and aborted with `memory allocation of N bytes failed` — a core dump, not
+a catchable error — as soon as the address space could not satisfy it. Rust
+aborts on allocation failure, so like the recursion vectors above this had to
+be prevented rather than handled.
+
+- **The whole chain now shares one budget**, rather than each filter starting
+  fresh, which is what stops nesting from multiplying. `FlateDecode`,
+  `LZWDecode`, and `RunLengthDecode` check it from inside their decode loops —
+  checking the finished buffer would mean the allocation the ceiling exists to
+  prevent has already happened — and each stage's result is checked afterwards
+  as well, covering the image codecs that size their own output.
+- **A budget overrun is an error, never a truncation.** `decode_flate`
+  recovers from a genuinely truncated stream by retrying it as raw deflate and
+  keeping the longer result; without care an overrun would have taken that
+  path and come back as a silently truncated success.
+- **The ceiling is raised by what the stream declares about itself.** The
+  general allowance, `MAX_DECODED_STREAM_BYTES`, is 512 MiB, which covers
+  content streams, object and cross-reference streams, font programs, ICC
+  profiles, and sampled-function tables with roughly 4x headroom over the
+  largest of those. A dictionary that declares an image raster (`/Width`,
+  `/Height`, `/BitsPerComponent`, `/ColorSpace`) or an attachment length
+  (`/Params /Size`) gets that instead, so a 60x40 inch grand-format image at
+  1200 dpi — a legitimate 13.8 GB stream — is unaffected. The declared value
+  only ever raises the bound, never lowers it, so a stream that declares
+  nothing, or declares something small, keeps the full general allowance.
+
+New public API: `DecodeBudget`, `decode_stream_bounded`, and
+`MAX_DECODED_STREAM_BYTES` in `stet_pdf_reader::filters`. `decode_stream` is
+unchanged and now decodes under the general ceiling.
+
+All 691 sample PDFs render byte-identically before and after this change.
+
 ### Added
 
 - **A ceiling on PostScript VM**, via `Context::max_local_vm`,

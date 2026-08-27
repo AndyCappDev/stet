@@ -203,7 +203,13 @@ impl<'a> Resolver<'a> {
                     Ok(raw)
                 } else {
                     let jbig2_globals = self.resolve_jbig2_globals(&filter_list, &parms)?;
-                    filters::decode_stream(&raw, &filter_list, &parms, jbig2_globals.as_deref())
+                    filters::decode_stream_bounded(
+                        &raw,
+                        &filter_list,
+                        &parms,
+                        jbig2_globals.as_deref(),
+                        filters::DecodeBudget::for_stream(&dict),
+                    )
                 }?;
 
                 // Cache small streams immediately. For large streams, use
@@ -279,7 +285,13 @@ impl<'a> Resolver<'a> {
                     Ok(raw.to_vec())
                 } else {
                     let jbig2_globals = self.resolve_jbig2_globals(&filter_list, &parms)?;
-                    filters::decode_stream(raw, &filter_list, &parms, jbig2_globals.as_deref())
+                    filters::decode_stream_bounded(
+                        raw,
+                        &filter_list,
+                        &parms,
+                        jbig2_globals.as_deref(),
+                        filters::DecodeBudget::for_stream(&dict),
+                    )
                 }
             }
             _ => Err(PdfError::Other("expected a stream object".into())),
@@ -692,7 +704,13 @@ impl<'a> Resolver<'a> {
         let stream_data = if filter_list.is_empty() {
             raw
         } else {
-            filters::decode_stream(&raw, &filter_list, &parms, None)?
+            filters::decode_stream_bounded(
+                &raw,
+                &filter_list,
+                &parms,
+                None,
+                filters::DecodeBudget::for_stream(&dict),
+            )?
         };
 
         let n = dict.get_int(b"N").ok_or(PdfError::MissingKey("N"))? as usize;

@@ -7,6 +7,165 @@
 use crate::error::PdfError;
 use crate::objects::PdfDict;
 
+/// Ceiling on the decompressed size of a stream that declares nothing about
+/// its own uncompressed contents.
+///
+/// The decompression filters are amplifiers, and `decode_stream` applies them
+/// in sequence, so without a bound the amplification is unbounded *and*
+/// multiplicative. A single Deflate pass tops out near 1032:1 on a run of
+/// zeros — a limit of the format, not a decision anyone made — but nesting the
+/// filter three deep squares and cubes that: a 707-byte file with
+/// `/Filter [/FlateDecode /FlateDecode /FlateDecode]` measured a 2058 MB peak
+/// RSS here, and under a constrained address space it aborted with
+/// `memory allocation of N bytes failed` and dumped core. That is not a
+/// failure a caller can catch — Rust aborts on allocation failure — so it has
+/// to be prevented rather than handled.
+///
+/// # Calibration
+///
+/// This bound only has to cover streams that describe *nothing* about their
+/// decompressed length, because a stream that does declare a length gets that
+/// instead — see [`DecodeBudget::for_stream`]. What is left is content
+/// streams, object and cross-reference streams, embedded font programs, ICC
+/// profiles, and sampled-function tables. The largest of those:
+///
+/// | Stream | Decompressed |
+/// |---|---|
+/// | Type 0 sampled function, `/Size [4096 4096]`, 4 outputs @ 16 bps | 134 MB |
+/// | Heavy vector-art content stream | ~100 MB |
+/// | Embedded CFF or TrueType font program | < 30 MB |
+///
+/// 512 MiB leaves roughly 4x headroom over the largest, while turning the
+/// bomb above into an error instead of an abort.
+pub const MAX_DECODED_STREAM_BYTES: usize = 512 * 1024 * 1024;
+
+/// How much a stream is allowed to decompress to.
+///
+/// The ceiling starts at [`MAX_DECODED_STREAM_BYTES`] and is *raised* — never
+/// lowered — by whatever the stream dictionary declares about its own
+/// uncompressed size. Raising rather than replacing is what keeps this from
+/// rejecting files stet renders correctly today: a stream that declares
+/// nothing, or declares something small, still gets the full general
+/// allowance.
+#[derive(Debug, Clone, Copy)]
+pub struct DecodeBudget {
+    limit: usize,
+}
+
+impl Default for DecodeBudget {
+    fn default() -> Self {
+        Self {
+            limit: MAX_DECODED_STREAM_BYTES,
+        }
+    }
+}
+
+impl DecodeBudget {
+    /// A budget with an explicit ceiling.
+    pub const fn new(limit: usize) -> Self {
+        Self { limit }
+    }
+
+    /// The ceiling, in bytes.
+    pub const fn limit(&self) -> usize {
+        self.limit
+    }
+
+    /// Derive a budget from a stream dictionary.
+    ///
+    /// Two dictionary shapes declare an uncompressed size, and a file that
+    /// legitimately carries a stream larger than the general allowance will be
+    /// one of them:
+    ///
+    /// - An **image XObject** declares `/Width`, `/Height`,
+    ///   `/BitsPerComponent` and `/ColorSpace`, which give the raster size
+    ///   exactly. A 60x40 inch grand-format image at 1200 dpi is 3.46 Gpx, and
+    ///   as 8-bit CMYK that is a legitimate 13.8 GB stream. Refusing it would
+    ///   be precisely the prepress regression an earlier corpus-derived image
+    ///   cap already caused once.
+    /// - An **embedded file** declares `/Params << /Size n >>` (PDF 32000-1
+    ///   7.11.4.2), the attachment's uncompressed length. Attachments are only
+    ///   decoded when a caller explicitly asks for one by name.
+    ///
+    /// Both declared values are themselves bounded — image dimensions by
+    /// [`stet_graphics::image_limits`], attachment size by the file's own
+    /// claim — so a lie is a *bounded* lie, which is the property the general
+    /// ceiling exists to guarantee.
+    pub fn for_stream(dict: &PdfDict) -> Self {
+        let declared = declared_image_bytes(dict)
+            .or_else(|| declared_embedded_file_bytes(dict))
+            .unwrap_or(0);
+        Self {
+            limit: declared.max(MAX_DECODED_STREAM_BYTES),
+        }
+    }
+
+    /// Fail if `produced` bytes exceeds the ceiling.
+    ///
+    /// Called from inside each decompression loop rather than on the finished
+    /// buffer: checking afterwards would mean the allocation the ceiling
+    /// exists to prevent has already happened.
+    fn check(&self, produced: usize) -> Result<(), PdfError> {
+        if produced > self.limit {
+            return Err(PdfError::DecompressionError(format!(
+                "decompressed stream exceeds the {} byte limit",
+                self.limit
+            )));
+        }
+        Ok(())
+    }
+
+    /// Clamp a `Vec::with_capacity` hint to the ceiling.
+    ///
+    /// The hints below are guesses scaled from the compressed length. Left
+    /// unclamped, a guess for a stream that will be refused anyway still
+    /// performs the allocation first.
+    fn reserve_hint(&self, want: usize) -> usize {
+        want.min(self.limit)
+    }
+}
+
+/// Raster size in bytes for a dictionary that describes an image, if it does.
+///
+/// Component count is read from a directly-present `/ColorSpace` name and
+/// otherwise assumed to be 4. Guessing high only widens the allowance, and the
+/// pixel count it multiplies is already bounded, so an unresolvable colour
+/// space cannot turn into an unbounded budget.
+fn declared_image_bytes(dict: &PdfDict) -> Option<usize> {
+    use stet_graphics::image_limits::{
+        validate_bits_per_component, validate_image_dimension, validate_image_size,
+    };
+
+    let width = validate_image_dimension(dict.get_int(b"Width"))?;
+    let height = validate_image_dimension(dict.get_int(b"Height"))?;
+    let pixels = validate_image_size(width, height)?;
+    let bpc = validate_bits_per_component(dict.get_int(b"BitsPerComponent"))? as usize;
+
+    let components = match dict.get_name(b"ColorSpace") {
+        Some(b"DeviceGray" | b"G" | b"CalGray") => 1,
+        Some(b"DeviceRGB" | b"RGB" | b"CalRGB" | b"Lab") => 3,
+        _ => 4,
+    };
+
+    // Rows are padded to a byte boundary, so compute per row rather than
+    // dividing a single product — a 1-bit 9-pixel-wide image is 2 bytes a row,
+    // not 1.125. Saturating, not checked: an image at the top of the permitted
+    // range multiplied by components and depth genuinely can exceed `usize` on
+    // a 32-bit target, and saturating there yields `usize::MAX`, which is the
+    // widest allowance rather than a refusal.
+    let row_bits = (width as usize)
+        .saturating_mul(components)
+        .saturating_mul(bpc);
+    let row_bytes = row_bits.div_ceil(8);
+    Some(row_bytes.saturating_mul(pixels / width as usize))
+}
+
+/// Declared uncompressed length of an embedded file, if the dict carries one.
+fn declared_embedded_file_bytes(dict: &PdfDict) -> Option<usize> {
+    let size = dict.get_dict(b"Params")?.get_int(b"Size")?;
+    usize::try_from(size).ok()
+}
+
 /// A single decode filter.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Filter {
@@ -155,22 +314,49 @@ fn filter_from_name(name: &[u8]) -> Result<Filter, PdfError> {
 }
 
 /// Decode raw stream data through a chain of filters.
+///
+/// Bounds the decompressed size at [`MAX_DECODED_STREAM_BYTES`]. Callers
+/// holding the stream dictionary should prefer [`decode_stream_bounded`] with
+/// [`DecodeBudget::for_stream`], which additionally allows the larger sizes a
+/// dictionary can legitimately declare.
 pub fn decode_stream(
     raw_data: &[u8],
     filters: &[Filter],
     decode_parms: &[Option<PdfDict>],
     jbig2_globals: Option<&[u8]>,
 ) -> Result<Vec<u8>, PdfError> {
+    decode_stream_bounded(
+        raw_data,
+        filters,
+        decode_parms,
+        jbig2_globals,
+        DecodeBudget::default(),
+    )
+}
+
+/// Decode raw stream data through a chain of filters, under an explicit
+/// decompressed-size ceiling.
+///
+/// The budget covers every stage rather than resetting per filter, which is
+/// what stops a chain of decompressors from multiplying their amplification
+/// together.
+pub fn decode_stream_bounded(
+    raw_data: &[u8],
+    filters: &[Filter],
+    decode_parms: &[Option<PdfDict>],
+    jbig2_globals: Option<&[u8]>,
+    budget: DecodeBudget,
+) -> Result<Vec<u8>, PdfError> {
     let mut data = raw_data.to_vec();
 
     for (i, filter) in filters.iter().enumerate() {
         let parms = decode_parms.get(i).and_then(|p| p.as_ref());
         data = match filter {
-            Filter::FlateDecode => decode_flate(&data, parms)?,
-            Filter::LZWDecode => decode_lzw(&data, parms)?,
+            Filter::FlateDecode => decode_flate(&data, parms, budget)?,
+            Filter::LZWDecode => decode_lzw(&data, parms, budget)?,
             Filter::ASCIIHexDecode => decode_ascii_hex(&data)?,
             Filter::ASCII85Decode => decode_ascii85(&data)?,
-            Filter::RunLengthDecode => decode_run_length(&data)?,
+            Filter::RunLengthDecode => decode_run_length(&data, budget)?,
             Filter::DCTDecode => decode_dct(&data)?,
             Filter::CCITTFaxDecode => decode_ccittfax(&data, parms)?,
             #[cfg(feature = "jpx")]
@@ -181,16 +367,24 @@ pub fn decode_stream(
             }
             Filter::JBIG2Decode => decode_jbig2(&data, jbig2_globals)?,
         };
+        // The image codecs (DCT, CCITT, JPX, JBIG2) size their own output from
+        // the dimensions in their own headers and are not covered by the
+        // incremental checks below, so verify each stage's result as well.
+        budget.check(data.len())?;
     }
 
     Ok(data)
 }
 
 /// FlateDecode (zlib/deflate).
-fn decode_flate(data: &[u8], parms: Option<&PdfDict>) -> Result<Vec<u8>, PdfError> {
+fn decode_flate(
+    data: &[u8],
+    parms: Option<&PdfDict>,
+    budget: DecodeBudget,
+) -> Result<Vec<u8>, PdfError> {
     // Try zlib first. If it ends with an error (truncated output),
     // also try raw deflate (skip 2-byte zlib header) and pick the longer result.
-    let (zlib_output, zlib_clean, _) = decode_flate_inner(data, true);
+    let (zlib_output, zlib_clean, _) = decode_flate_inner(data, true, budget);
     let output = if zlib_clean {
         zlib_output?
     } else {
@@ -201,7 +395,7 @@ fn decode_flate(data: &[u8], parms: Option<&PdfDict>) -> Result<Vec<u8>, PdfErro
         // deflate may decode garbage past the stream boundary.
         let zlib_data = zlib_output.unwrap_or_default();
         if data.len() > 2 {
-            let (raw_output, _, _) = decode_flate_inner(&data[2..], false);
+            let (raw_output, _, _) = decode_flate_inner(&data[2..], false, budget);
             let raw_data = raw_output.unwrap_or_default();
             if raw_data.len() > zlib_data.len()
                 && raw_data[..zlib_data.len()] == zlib_data[..]
@@ -261,11 +455,22 @@ fn looks_like_valid_continuation(data: &[u8], start: usize) -> bool {
 /// Inner flate decompression. `zlib` = true uses zlib wrapper, false uses raw deflate.
 /// Returns (Result<data>, clean) where clean=true means StreamEnd was reached normally.
 /// Returns (decompressed_data, clean_finish, bytes_consumed).
-fn decode_flate_inner(data: &[u8], zlib: bool) -> (Result<Vec<u8>, PdfError>, bool, usize) {
+///
+/// A budget overrun is reported as `(Err, clean = true, _)`. The `clean` flag
+/// is what suppresses the raw-deflate retry in the caller, and suppressing it
+/// is right here: the stream is not truncated, it is too large, and decoding
+/// it a second way would allocate just as much again before failing the same
+/// way. It also keeps the overrun from being mistaken for a checksum error and
+/// silently downgraded to a truncated-but-usable result.
+fn decode_flate_inner(
+    data: &[u8],
+    zlib: bool,
+    budget: DecodeBudget,
+) -> (Result<Vec<u8>, PdfError>, bool, usize) {
     use flate2::Decompress;
 
     let mut decompressor = Decompress::new(zlib);
-    let mut output = Vec::with_capacity(data.len() * 3);
+    let mut output = Vec::with_capacity(budget.reserve_hint(data.len().saturating_mul(3)));
     let mut buf = [0u8; 8192];
     let mut input_offset = 0;
 
@@ -282,6 +487,10 @@ fn decode_flate_inner(data: &[u8], zlib: bool) -> (Result<Vec<u8>, PdfError>, bo
         let produced = decompressor.total_out() as usize - before_out;
         input_offset += consumed;
         output.extend_from_slice(&buf[..produced]);
+
+        if let Err(e) = budget.check(output.len()) {
+            return (Err(e), true, input_offset);
+        }
 
         match result {
             Ok(status) => match status {
@@ -311,11 +520,14 @@ fn decode_flate_inner(data: &[u8], zlib: bool) -> (Result<Vec<u8>, PdfError>, bo
 ///
 /// Handles EarlyChange correctly and tolerates premature EOF (missing EOD code),
 /// which is common in real-world PDFs.
-fn decode_lzw(data: &[u8], parms: Option<&PdfDict>) -> Result<Vec<u8>, PdfError> {
+fn decode_lzw(
+    data: &[u8],
+    parms: Option<&PdfDict>,
+    budget: DecodeBudget,
+) -> Result<Vec<u8>, PdfError> {
     let early_change = parms.and_then(|p| p.get_int(b"EarlyChange")).unwrap_or(1) != 0;
 
-    let output = lzw_decode(data, early_change)
-        .ok_or_else(|| PdfError::DecompressionError("lzw: decode failed".into()))?;
+    let output = lzw_decode(data, early_change, budget)?;
 
     // Apply predictor if specified
     if let Some(parms) = parms {
@@ -336,7 +548,14 @@ const LZW_MAX_ENTRIES: usize = 4096;
 const LZW_INITIAL_SIZE: usize = 258;
 
 /// Decode an LZW-compressed byte stream per the PDF spec.
-fn lzw_decode(data: &[u8], early_change: bool) -> Option<Vec<u8>> {
+///
+/// Stops with an error once `budget` is exceeded. LZW amplifies less than
+/// Deflate per pass — table entries cap at 4096 codes — but it amplifies
+/// without bound across a chain, and it is the second decompressor a nested
+/// bomb can reach for.
+fn lzw_decode(data: &[u8], early_change: bool, budget: DecodeBudget) -> Result<Vec<u8>, PdfError> {
+    let failed = || PdfError::DecompressionError("lzw: decode failed".into());
+
     let mut table = LzwTable::new(early_change);
     let mut bit_size = table.code_length();
     let mut reader = LzwBitReader::new(data);
@@ -348,7 +567,7 @@ fn lzw_decode(data: &[u8], early_change: bool) -> Option<Vec<u8>> {
             Some(code) => code as usize,
             None => {
                 // Premature EOF — missing EOD code. Return what we have.
-                return Some(decoded);
+                return Ok(decoded);
             }
         };
 
@@ -358,18 +577,18 @@ fn lzw_decode(data: &[u8], early_change: bool) -> Option<Vec<u8>> {
                 prev = None;
                 bit_size = table.code_length();
             }
-            LZW_EOD => return Some(decoded),
+            LZW_EOD => return Ok(decoded),
             new => {
                 if new > table.size() {
                     // Invalid code — return partial data if we have any
                     if decoded.is_empty() {
-                        return None;
+                        return Err(failed());
                     }
-                    return Some(decoded);
+                    return Ok(decoded);
                 }
 
                 if new < table.size() {
-                    let entry = table.get(new)?;
+                    let entry = table.get(new).ok_or_else(failed)?;
                     let first_byte = entry[0];
                     decoded.extend_from_slice(entry);
 
@@ -379,17 +598,19 @@ fn lzw_decode(data: &[u8], early_change: bool) -> Option<Vec<u8>> {
                 } else if new == table.size() && prev.is_some() {
                     // KwKwK case: code references the entry about to be created
                     let prev_code = prev.unwrap();
-                    let prev_entry = table.get(prev_code)?;
+                    let prev_entry = table.get(prev_code).ok_or_else(failed)?;
                     let first_byte = prev_entry[0];
 
-                    let new_entry = table.register(prev_code, first_byte)?;
+                    let new_entry = table.register(prev_code, first_byte).ok_or_else(failed)?;
                     decoded.extend_from_slice(new_entry);
                 } else {
                     if decoded.is_empty() {
-                        return None;
+                        return Err(failed());
                     }
-                    return Some(decoded);
+                    return Ok(decoded);
                 }
+
+                budget.check(decoded.len())?;
 
                 bit_size = table.code_length();
                 prev = Some(new);
@@ -567,11 +788,15 @@ fn decode_ascii85(data: &[u8]) -> Result<Vec<u8>, PdfError> {
 }
 
 /// RunLengthDecode (PackBits).
-fn decode_run_length(data: &[u8]) -> Result<Vec<u8>, PdfError> {
+///
+/// Amplifies at most 128:1 on its own — two input bytes expand to 128 — which
+/// is modest until it sits on top of a Deflate stage, where the two multiply.
+fn decode_run_length(data: &[u8], budget: DecodeBudget) -> Result<Vec<u8>, PdfError> {
     let mut result = Vec::new();
     let mut i = 0;
 
     while i < data.len() {
+        budget.check(result.len())?;
         let length_byte = data[i];
         i += 1;
         if length_byte < 128 {
@@ -1806,7 +2031,7 @@ mod tests {
         enc.write_all(original).unwrap();
         let compressed = enc.finish().unwrap();
 
-        let decoded = decode_flate(&compressed, None).unwrap();
+        let decoded = decode_flate(&compressed, None, DecodeBudget::default()).unwrap();
         assert_eq!(&decoded, original);
     }
 
@@ -1841,7 +2066,7 @@ mod tests {
     fn run_length_decode() {
         // 2 = copy 3 bytes, then 253 = repeat next byte 4 times, then 128 = EOD
         let data = vec![2, b'A', b'B', b'C', 253, b'X', 128];
-        let decoded = decode_run_length(&data).unwrap();
+        let decoded = decode_run_length(&data, DecodeBudget::default()).unwrap();
         assert_eq!(&decoded, b"ABCXXXX");
     }
 
@@ -1894,5 +2119,186 @@ mod tests {
         let parms = vec![None, None];
         let decoded = decode_stream(hex.as_bytes(), &filters, &parms, None).unwrap();
         assert_eq!(&decoded, original);
+    }
+
+    // --- Decompression-bomb ceiling ---
+
+    fn zlib(data: &[u8]) -> Vec<u8> {
+        use flate2::Compression;
+        use flate2::write::ZlibEncoder;
+        use std::io::Write;
+        let mut enc = ZlibEncoder::new(Vec::new(), Compression::best());
+        enc.write_all(data).unwrap();
+        enc.finish().unwrap()
+    }
+
+    /// The measured attack: a few hundred bytes of nested `/FlateDecode`
+    /// reaching gigabytes. Before the budget this peaked at 2058 MB of RSS
+    /// from a 707-byte file, and aborted outright once the address space was
+    /// too small to satisfy it.
+    ///
+    /// The budget here is deliberately tiny so the test costs nothing; the
+    /// property under test is that the *chain* shares one ceiling, so nesting
+    /// cannot multiply past it.
+    #[test]
+    fn nested_flate_chain_is_refused_rather_than_expanded() {
+        let mut data = zlib(&vec![0u8; 4 << 20]);
+        let mut filters = vec![Filter::FlateDecode];
+        for _ in 0..3 {
+            data = zlib(&data);
+            filters.push(Filter::FlateDecode);
+        }
+        assert!(
+            data.len() < 1024,
+            "the bomb must stay small: {}",
+            data.len()
+        );
+
+        let parms = vec![None; filters.len()];
+        let err =
+            decode_stream_bounded(&data, &filters, &parms, None, DecodeBudget::new(64 * 1024))
+                .unwrap_err();
+        assert!(
+            matches!(err, PdfError::DecompressionError(ref m) if m.contains("exceeds")),
+            "expected a budget refusal, got {err:?}"
+        );
+    }
+
+    /// RunLength stacked on Flate: 128:1 on top of ~1000:1. The RunLength
+    /// decoder grows a byte at a time, so its check has to sit inside the
+    /// loop, not on the finished buffer.
+    #[test]
+    fn run_length_on_flate_is_refused() {
+        let rle = b"\x81\x00".repeat(64 << 10); // -> 8 MB expanded
+        let data = zlib(&rle);
+        let filters = [Filter::FlateDecode, Filter::RunLengthDecode];
+        let parms = vec![None; filters.len()];
+        let err =
+            decode_stream_bounded(&data, &filters, &parms, None, DecodeBudget::new(64 * 1024))
+                .unwrap_err();
+        assert!(matches!(err, PdfError::DecompressionError(_)), "{err:?}");
+    }
+
+    /// A budget overrun must not be mistaken for the truncated-stream case
+    /// that `decode_flate` recovers from by retrying as raw deflate. If it
+    /// were, the bomb would come back as a silently truncated success.
+    #[test]
+    fn flate_budget_overrun_is_an_error_not_a_truncation() {
+        let data = zlib(&vec![0u8; 4 << 20]);
+        let err = decode_flate(&data, None, DecodeBudget::new(4096)).unwrap_err();
+        assert!(matches!(err, PdfError::DecompressionError(ref m) if m.contains("exceeds")));
+    }
+
+    #[test]
+    fn lzw_output_is_bounded() {
+        // A cleared table followed by literal codes: enough output to pass a
+        // 32-byte ceiling without needing a real LZW compressor.
+        let mut bits = Vec::new();
+        let mut acc: u32 = 0;
+        let mut nbits = 0;
+        for code in std::iter::once(LZW_CLEAR_TABLE).chain(std::iter::repeat_n(0usize, 512)) {
+            acc = (acc << 9) | code as u32;
+            nbits += 9;
+            while nbits >= 8 {
+                bits.push((acc >> (nbits - 8)) as u8);
+                nbits -= 8;
+            }
+        }
+        let err = decode_lzw(&bits, None, DecodeBudget::new(32)).unwrap_err();
+        assert!(matches!(err, PdfError::DecompressionError(ref m) if m.contains("exceeds")));
+    }
+
+    /// A stream comfortably under the ceiling is unaffected — the ceiling must
+    /// not be reachable by ordinary content.
+    #[test]
+    fn ordinary_streams_are_unaffected() {
+        let original = b"q 1 0 0 1 10 10 cm BT /F1 12 Tf (hello) Tj ET Q".repeat(1000);
+        let data = zlib(&original);
+        let decoded = decode_stream_bounded(
+            &data,
+            &[Filter::FlateDecode],
+            &[None],
+            None,
+            DecodeBudget::default(),
+        )
+        .unwrap();
+        assert_eq!(decoded, original);
+    }
+
+    // --- Budget derivation ---
+
+    fn dict_from(src: &[u8]) -> PdfDict {
+        let mut lexer = crate::lexer::Lexer::new(src);
+        match crate::lexer::parse_object(&mut lexer).unwrap() {
+            crate::objects::PdfObj::Dict(d) => d,
+            other => panic!("expected a dict, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_dict_declaring_nothing_gets_the_general_ceiling() {
+        let budget = DecodeBudget::for_stream(&dict_from(b"<</Type/ObjStm/N 4/First 20>>"));
+        assert_eq!(budget.limit(), MAX_DECODED_STREAM_BYTES);
+    }
+
+    /// A grand-format image is a legitimately multi-gigabyte stream, and the
+    /// general ceiling must give way to what the dictionary declares. An
+    /// earlier corpus-derived cap rejected exactly this class of file.
+    #[test]
+    fn a_declared_image_raster_raises_the_ceiling() {
+        // 60x40 inch at 1200 dpi, 8-bit CMYK: 72000 x 48000 x 4 = 13.8 GB.
+        let budget = DecodeBudget::for_stream(&dict_from(
+            b"<</Subtype/Image/Width 72000/Height 48000/BitsPerComponent 8/ColorSpace/DeviceCMYK>>",
+        ));
+        assert_eq!(budget.limit(), 72_000usize * 48_000 * 4);
+    }
+
+    /// Declaring a *small* image must not shrink the allowance below the
+    /// general ceiling — the dictionary raises the bound, never lowers it.
+    #[test]
+    fn a_small_declared_image_does_not_lower_the_ceiling() {
+        let budget = DecodeBudget::for_stream(&dict_from(
+            b"<</Subtype/Image/Width 8/Height 8/BitsPerComponent 8/ColorSpace/DeviceGray>>",
+        ));
+        assert_eq!(budget.limit(), MAX_DECODED_STREAM_BYTES);
+    }
+
+    /// Sub-byte depths pad each row to a byte boundary, so the raster is
+    /// computed per row rather than from a single product.
+    #[test]
+    fn sub_byte_rows_are_padded_to_a_byte_boundary() {
+        let bytes = declared_image_bytes(&dict_from(
+            b"<</Width 9/Height 4/BitsPerComponent 1/ColorSpace/DeviceGray>>",
+        ))
+        .unwrap();
+        assert_eq!(bytes, 2 * 4);
+    }
+
+    /// Dimensions outside `stet_graphics::image_limits` are not a licence to
+    /// raise the ceiling — they fall back to the general allowance.
+    #[test]
+    fn out_of_range_dimensions_do_not_raise_the_ceiling() {
+        for src in [
+            &b"<</Width 999999999/Height 999999999/BitsPerComponent 8>>"[..],
+            &b"<</Width -1/Height 10/BitsPerComponent 8>>"[..],
+            &b"<</Width 10/Height 10/BitsPerComponent 999>>"[..],
+        ] {
+            assert_eq!(
+                DecodeBudget::for_stream(&dict_from(src)).limit(),
+                MAX_DECODED_STREAM_BYTES,
+                "{}",
+                String::from_utf8_lossy(src)
+            );
+        }
+    }
+
+    /// An attachment declares its uncompressed length in `/Params /Size`
+    /// (PDF 32000-1 7.11.4.2), and a large one is legitimate.
+    #[test]
+    fn an_embedded_file_size_raises_the_ceiling() {
+        let budget = DecodeBudget::for_stream(&dict_from(
+            b"<</Type/EmbeddedFile/Params<</Size 2000000000>>>>",
+        ));
+        assert_eq!(budget.limit(), 2_000_000_000);
     }
 }
