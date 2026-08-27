@@ -243,8 +243,17 @@ fn default_ceiling_admits_substantial_allocation() {
     let mut ctx = Context::new();
     stet_ops::build_system_dict(&mut ctx);
     ctx.exec_sync_fn = Some(stet_engine::eval::exec_sync);
+    // Compared in u64, not usize: `8 * 1024 * 1024 * 1024` overflows a 32-bit
+    // usize and const evaluation rejects it, which is what broke the wasm32
+    // build. On a 32-bit target the default is a quarter of the address space
+    // instead, since an 8 GiB ceiling there would be no ceiling at all.
+    let expected: u64 = if usize::BITS >= 64 {
+        8 * 1024 * 1024 * 1024
+    } else {
+        (usize::MAX / 4) as u64
+    };
     assert!(
-        ctx.max_local_vm >= 8 * 1024 * 1024 * 1024,
+        ctx.max_local_vm as u64 >= expected,
         "default MaxLocalVM should be generous; got {}",
         ctx.max_local_vm
     );

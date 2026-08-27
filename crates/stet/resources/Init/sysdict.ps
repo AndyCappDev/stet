@@ -266,7 +266,7 @@ false setglobal
         //$error /.savedglobal currentglobal put
         false setglobal
         //$error exch /errorname exch put //$error exch /command exch put
-        //$error /newerror true put //$error /errorname get /VMError ne
+        //$error /newerror true put //$error /errorname get /VMerror ne
         {
             % save snapshots of the operand, execution, and dictionary stacks
             //$error /ostackarry get null eq
@@ -401,7 +401,13 @@ end % $error
         resumeexechistory
     } bind def
 
-    /VMError {/VMError //.error exec} def
+    % PLRM spells this VMerror -- lowercase 'error', unlike every other
+    % name here being all-lowercase. It read /VMError until 2026-08-27,
+    % which silently disabled the handler: PsError::VMError displays as
+    % "VMerror", so the errordict lookup missed and the interpreter fell
+    % through to printing the error and *continuing*. Harmless while the
+    % variant had no producer; reachable once --max-vm started raising it.
+    /VMerror {/VMerror //.error exec} def
     /dictfull {/dictfull //.error exec} def
     /dictstackoverflow {/dictstackoverflow //.error exec} def
     /dictstackunderflow {/dictstackunderflow //.error exec} def

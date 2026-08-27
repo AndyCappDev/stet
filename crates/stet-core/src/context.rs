@@ -505,10 +505,27 @@ fn is_flate_stream_complete(data: &[u8]) -> bool {
 /// that the `Instant::now` cost is amortised into nothing.
 const DEADLINE_CHECK_INTERVAL: u32 = 4096;
 
-/// Default value of [`Context::max_local_vm`]: 8 GiB.
+/// Default value of [`Context::max_local_vm`]: 8 GiB, where that fits.
 ///
 /// See that field for why there is a default at all rather than no limit.
-const DEFAULT_MAX_LOCAL_VM: usize = 8 * 1024 * 1024 * 1024;
+///
+/// **Computed rather than written as a `usize` literal**, because
+/// `8 * 1024 * 1024 * 1024` does not fit a 32-bit `usize` and const evaluation
+/// rejects it outright — `stet-core` failed to compile for
+/// `wasm32-unknown-unknown` until this was expressed in `u64`.
+///
+/// On a 32-bit target the entire address space is 4 GiB, so an 8 GiB ceiling
+/// would be no ceiling at all. `usize::MAX / 4` is a quarter of that space,
+/// derived from the target rather than picked, and leaves the rest for the
+/// renderer's band and image buffers, the module, and the stack.
+const DEFAULT_MAX_LOCAL_VM: usize = {
+    const WANTED: u64 = 8 * 1024 * 1024 * 1024;
+    if WANTED <= usize::MAX as u64 {
+        WANTED as usize
+    } else {
+        usize::MAX / 4
+    }
+};
 
 impl Context {
     /// Stop interpreting once `limit` has elapsed from now.

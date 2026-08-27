@@ -178,6 +178,31 @@ unchanged and now decodes under the general ceiling.
 
 All 691 sample PDFs render byte-identically before and after this change.
 
+The 8 GiB PostScript VM default broke the `wasm32-unknown-unknown` build.
+`8 * 1024 * 1024 * 1024` does not fit a 32-bit `usize`, and const evaluation
+rejects it outright, so `stet-core` failed to compile for that target at all —
+`error[E0080]: attempt to compute 8388608_usize * 1024_usize, which would
+overflow`. The default is now computed in `u64` and falls back to
+`usize::MAX / 4` where 8 GiB does not fit: on a 32-bit target the whole
+address space is 4 GiB, so an 8 GiB ceiling would be no ceiling at all, and a
+quarter of the space leaves the rest for the renderer's buffers, the module,
+and the stack. The 64-bit value is unchanged.
+
+`VMerror` was raised under a name nothing could catch. `errordict` registered
+the handler as `/VMError` while `PsError::VMError` displays as `VMerror` —
+PLRM's spelling, used 35 times there, and Ghostscript's. The lookup missed, so
+the interpreter printed the error and **continued past the failed
+allocation**, leaving the program running as though it had succeeded. That was
+harmless while the variant had no producer and became reachable the moment
+`--max-vm` started raising it. Now `stopped` catches it and `$error
+/errorname` reports `/VMerror`.
+
+`currentuserparams` reported `MaxLocalVM` as 0. The ceiling can be set three
+ways — the built-in default, `--max-vm`, and `setuserparams` — and only the
+last writes the dict the query copied, so a program asking for the limit was
+told there was none moments before hitting one. It now reports the value
+actually in force.
+
 Non-finite numbers and integer-overflow traps in the PostScript interpreter.
 The backlog listed this as cosmetic — "garbage output rather than a panic" —
 which was wrong in both directions: one case was a release-mode crash, and the

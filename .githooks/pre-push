@@ -84,4 +84,26 @@ if ! scripts/check-cli-docs.sh; then
     exit 1
 fi
 
+# The wasm32 build is not part of CI's lint job, but it is the one target
+# where a change compiles everywhere else and fails here: `usize` is 32-bit,
+# so a `usize` constant over 4 GiB is a const-eval error rather than a
+# warning. That is exactly how the 8 GiB VM default broke stet-core for
+# wasm32 and went unnoticed for several commits, because the branch had not
+# been pushed and CI's `wasm32 build` job never ran.
+#
+# Skipped with a warning rather than failing when the target is absent: not
+# every contributor has it installed, and a confusing rustup error is a worse
+# outcome than an unchecked push.
+if rustup target list --installed 2>/dev/null | grep -qx wasm32-unknown-unknown; then
+    echo -e "${YELLOW}pre-push: wasm32 cross-compile${RESET}"
+    if ! (cd crates/stet-wasm && cargo check --target wasm32-unknown-unknown --release --quiet); then
+        echo -e "${RED}pre-push: stet-wasm does not build for wasm32-unknown-unknown.${RESET}" >&2
+        echo -e "${RED}        usize is 32-bit there — check for oversized constants.${RESET}" >&2
+        exit 1
+    fi
+else
+    echo -e "${YELLOW}pre-push: wasm32 target not installed, skipping cross-compile${RESET}"
+    echo -e "${YELLOW}        rustup target add wasm32-unknown-unknown${RESET}"
+fi
+
 echo -e "${GREEN}pre-push: OK${RESET}"

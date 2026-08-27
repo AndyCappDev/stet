@@ -103,6 +103,22 @@ pub fn op_currentuserparams(ctx: &mut Context) -> Result<(), PsError> {
             ctx.dicts.put(copy, key, val);
         }
     }
+
+    // Report the ceiling actually in force, not the dict's seed. `MaxLocalVM`
+    // can be set three ways — the built-in default, the CLI's `--max-vm`, and
+    // `setuserparams` — and only the last writes the dict, so reading the dict
+    // alone answered 0 (the seed) whenever either of the other two applied.
+    // Ghostscript reports its real value here; 0 would tell a program that
+    // asks there is no limit, moments before it hits one.
+    //
+    // Written into the freshly allocated copy rather than into `user_params`,
+    // so a query operator does not mutate interpreter state and no
+    // `dict_put_cow` backup is owed.
+    let max_vm_name = ctx.names.intern(b"MaxLocalVM");
+    let live_max_vm = i64::try_from(ctx.max_local_vm).unwrap_or(i64::MAX);
+    ctx.dicts
+        .put(copy, DictKey::Name(max_vm_name), PsObject::int(live_max_vm));
+
     ctx.o_stack.push(PsObject::dict(copy))?;
     Ok(())
 }
