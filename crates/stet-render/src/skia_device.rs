@@ -12398,6 +12398,174 @@ fn render_mesh_shading(
     }
 }
 
+/// The pixel rectangle a shading is being painted into, in the form needed to
+/// decide whether a piece of geometry can reach it.
+///
+/// [`render_mesh_shading()`] maps a device-space point to pixel space as
+/// `(d as f32 - vp) * scale` and skips any triangle whose pixel bounding box
+/// misses `[0, w) x [0, h)`. [`ShadingCull::rejects()`] applies that same test
+/// to a bounding box using the same arithmetic, so anything it rejects is
+/// something `render_mesh_shading` would also have rejected — rejecting it
+/// earlier avoids building the triangles rather than changing what is painted.
+#[derive(Clone, Copy)]
+struct ShadingCull {
+    ctm: Matrix,
+    vp_x: f32,
+    vp_y: f32,
+    scale_x: f32,
+    scale_y: f32,
+    w: f32,
+    h: f32,
+}
+
+impl ShadingCull {
+    /// `None` when the target is empty or the scale is non-positive, in which
+    /// case the comparisons in `rejects` would not be order-preserving.
+    fn new(
+        ctm: Matrix,
+        vp_x: f32,
+        vp_y: f32,
+        scale_x: f32,
+        scale_y: f32,
+        w: u32,
+        h: u32,
+    ) -> Option<Self> {
+        (scale_x > 0.0 && scale_y > 0.0 && w > 0 && h > 0).then_some(Self {
+            ctm,
+            vp_x,
+            vp_y,
+            scale_x,
+            scale_y,
+            w: w as f32,
+            h: h as f32,
+        })
+    }
+
+    /// True when a device-space bounding box cannot cover any pixel of the
+    /// target. Conversion to `f32` is monotonic and the scale is positive, so
+    /// the projected bounds still bracket those of every point inside the box.
+    fn rejects(&self, x_min: f64, y_min: f64, x_max: f64, y_max: f64) -> bool {
+        let px_min = (x_min as f32 - self.vp_x) * self.scale_x;
+        let px_max = (x_max as f32 - self.vp_x) * self.scale_x;
+        let py_min = (y_min as f32 - self.vp_y) * self.scale_y;
+        let py_max = (y_max as f32 - self.vp_y) * self.scale_y;
+        px_max <= 0.0 || px_min >= self.w || py_max <= 0.0 || py_min >= self.h
+    }
+
+    /// True when a triangle with these three device-space vertices cannot
+    /// cover any pixel of the target.
+    fn rejects_triangle(&self, p0: (f64, f64), p1: (f64, f64), p2: (f64, f64)) -> bool {
+        self.rejects(
+            p0.0.min(p1.0).min(p2.0),
+            p0.1.min(p1.1).min(p2.1),
+            p0.0.max(p1.0).max(p2.0),
+            p0.1.max(p1.1).max(p2.1),
+        )
+    }
+}
+
+/// One axis of the Coons-to-tensor conversion. See [`coons_tensor_net()`].
+///
+/// `c0`/`c2` are the u-direction Bezier coefficients of the two curves running
+/// along u, `d0`/`d1` the v-direction coefficients of the two running along v,
+/// and `corners` is `[p00, p10, p01, p11]`. The result is indexed
+/// `[j * 4 + i]`, `i` stepping along u and `j` along v.
+fn coons_tensor_axis(
+    c0: [f64; 4],
+    c2: [f64; 4],
+    d0: [f64; 4],
+    d1: [f64; 4],
+    corners: [f64; 4],
+) -> [f64; 16] {
+    // Cubic Bernstein coefficients of the linear factors (1 - t) and t, which
+    // is what degree-elevating the Coons blend weights to bicubic produces.
+    const A: [f64; 4] = [1.0, 2.0 / 3.0, 1.0 / 3.0, 0.0];
+    const B: [f64; 4] = [0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0];
+    let [p00, p10, p01, p11] = corners;
+    let mut out = [0.0; 16];
+    for j in 0..4 {
+        for i in 0..4 {
+            let bilinear =
+                A[i] * A[j] * p00 + B[i] * A[j] * p10 + A[i] * B[j] * p01 + B[i] * B[j] * p11;
+            out[j * 4 + i] = A[j] * c0[i] + B[j] * c2[i] + A[i] * d0[j] + B[i] * d1[j] - bilinear;
+        }
+    }
+    out
+}
+
+/// The 16 tensor-product Bernstein coefficients of a Type 6 Coons patch.
+///
+/// A Coons patch is `S(u,v) = c(u,v) + d(u,v) - B(u,v)`, and the `- B` term
+/// carries negative weight, so the surface is **not** confined to the convex
+/// hull of the 12 boundary control points — it can bulge outside them. Written
+/// in the bicubic Bernstein basis, though, the weights are non-negative and
+/// sum to one, so the surface does lie in the hull of these 16 coefficients.
+///
+/// The index and direction conventions match [`eval_coons_patch()`], and
+/// `coons_tensor_net_matches_coons_evaluation` checks the two agree.
+///
+/// Panics if `pts` holds fewer than 12 points.
+fn coons_tensor_net(pts: &[(f64, f64)]) -> [(f64, f64); 16] {
+    let c0 = [pts[0], pts[1], pts[2], pts[3]];
+    // Side 2 runs u: 1 -> 0, so reverse it to share the u parameter with c0.
+    let c2 = [pts[9], pts[8], pts[7], pts[6]];
+    let d0 = [pts[0], pts[11], pts[10], pts[9]];
+    let d1 = [pts[3], pts[4], pts[5], pts[6]];
+    let corners = [pts[0], pts[3], pts[9], pts[6]];
+
+    let xs = coons_tensor_axis(
+        c0.map(|p| p.0),
+        c2.map(|p| p.0),
+        d0.map(|p| p.0),
+        d1.map(|p| p.0),
+        corners.map(|p| p.0),
+    );
+    let ys = coons_tensor_axis(
+        c0.map(|p| p.1),
+        c2.map(|p| p.1),
+        d0.map(|p| p.1),
+        d1.map(|p| p.1),
+        corners.map(|p| p.1),
+    );
+    std::array::from_fn(|k| (xs[k], ys[k]))
+}
+
+/// Device-space bounding box of a patch's control net, guaranteed to contain
+/// every point of the patch surface.
+///
+/// A Type 7 tensor patch is a bicubic Bernstein surface, so it lies in the
+/// convex hull of its 16 control points. A Type 6 Coons patch is converted to
+/// its equivalent tensor net first — see [`coons_tensor_net()`] for why its
+/// own 12 points are not a bound. The `>= 16` split matches the one
+/// [`subdivide_patch_to_triangles()`] uses to pick an evaluator.
+fn patch_hull_bbox(
+    patch: &stet_graphics::device::ShadingPatch,
+    ctm: &Matrix,
+) -> Option<(f64, f64, f64, f64)> {
+    if patch.points.len() < 12 {
+        return None;
+    }
+    let tensor_net;
+    let net: &[(f64, f64)] = if patch.points.len() >= 16 {
+        &patch.points[..16]
+    } else {
+        tensor_net = coons_tensor_net(&patch.points);
+        &tensor_net
+    };
+    let mut x_min = f64::INFINITY;
+    let mut y_min = f64::INFINITY;
+    let mut x_max = f64::NEG_INFINITY;
+    let mut y_max = f64::NEG_INFINITY;
+    for &(px, py) in net {
+        let (dx, dy) = ctm.transform_point(px, py);
+        x_min = x_min.min(dx);
+        y_min = y_min.min(dy);
+        x_max = x_max.max(dx);
+        y_max = y_max.max(dy);
+    }
+    x_min.is_finite().then_some((x_min, y_min, x_max, y_max))
+}
+
 /// Render a Coons/tensor-product patch mesh by subdividing into triangles.
 #[allow(clippy::too_many_arguments)]
 fn render_patch_shading(
@@ -12413,6 +12581,18 @@ fn render_patch_shading(
 ) {
     let mut triangles = Vec::new();
     let scale = scale_x.max(scale_y) as f64;
+    // Every band renders the whole display list, so without this the patches
+    // of a page-spanning shading are triangulated once per band, and with
+    // bands running concurrently that cost scales with the thread count.
+    let cull = ShadingCull::new(
+        params.ctm,
+        vp_x,
+        vp_y,
+        scale_x,
+        scale_y,
+        pixmap.width(),
+        pixmap.height(),
+    );
     for patch in &params.patches {
         if patch.points.len() >= 12 {
             // Compute device-space extent to choose subdivision level
@@ -12430,6 +12610,16 @@ fn render_patch_shading(
             let extent = (x_max - x_min).max(y_max - y_min).abs() * scale;
             // Target ~2 device pixels per boundary segment
             let n = (extent / 2.0).ceil().clamp(8.0, 64.0) as usize;
+            // Skip patches that cannot reach the target pixmap. The bbox above
+            // is over the raw control points and is only a subdivision-level
+            // heuristic; culling needs a bound that provably contains the
+            // surface, which is what `patch_hull_bbox` returns.
+            if let Some(cull) = cull.as_ref()
+                && let Some((hx_min, hy_min, hx_max, hy_max)) = patch_hull_bbox(patch, &params.ctm)
+                && cull.rejects(hx_min, hy_min, hx_max, hy_max)
+            {
+                continue;
+            }
             // Extract ICC profile hash for per-grid-point color conversion
             let icc_profile_hash = match &params.color_space {
                 stet_graphics::device::ShadingColorSpace::ICCBased { profile_hash, .. } => {
@@ -12437,7 +12627,14 @@ fn render_patch_shading(
                 }
                 _ => None,
             };
-            subdivide_patch_to_triangles(patch, &mut triangles, n, icc_profile_hash, icc);
+            subdivide_patch_to_triangles(
+                patch,
+                &mut triangles,
+                n,
+                icc_profile_hash,
+                icc,
+                cull.as_ref(),
+            );
         }
     }
     if !triangles.is_empty() {
@@ -12477,11 +12674,18 @@ fn subdivide_patch_to_triangles(
     n: usize,
     icc_profile_hash: Option<&stet_graphics::icc::ProfileHash>,
     icc_cache: Option<&IccCache>,
+    cull: Option<&ShadingCull>,
 ) {
     // Evaluate patch at grid points.
     // Use tensor-product evaluation when 16 control points are available (Type 7),
     // otherwise fall back to Coons blending (Type 6, 12 points).
     let mut grid: Vec<(f64, f64, DeviceColor, Vec<f64>)> = Vec::with_capacity((n + 1) * (n + 1));
+    // Device-space companions to `grid`, populated only when culling, so a
+    // triangle can be tested without re-running the CTM per vertex.
+    let mut device: Vec<(f64, f64)> = Vec::new();
+    if cull.is_some() {
+        device.reserve((n + 1) * (n + 1));
+    }
     let use_tensor = patch.points.len() >= 16;
     let has_raw = !patch.raw_colors[0].is_empty();
     // Use per-grid-point ICC conversion when profile info is available
@@ -12496,6 +12700,9 @@ fn subdivide_patch_to_triangles(
             } else {
                 eval_coons_patch(patch, u, v)
             };
+            if let Some(cull) = cull {
+                device.push(cull.ctm.transform_point(x, y));
+            }
             let raw = if has_raw {
                 bilinear_raw(&patch.raw_colors, u, v)
             } else {
@@ -12531,52 +12738,71 @@ fn subdivide_patch_to_triangles(
             let i01 = i00 + cols;
             let i11 = i01 + 1;
 
+            // Drop triangles that cannot cover a pixel of the target before
+            // paying for a `ShadingTriangle` — three vertices, each cloning a
+            // colour and a component vector. `render_mesh_shading` performs
+            // the identical rejection, so what survives is unchanged.
+            let (keep_lower, keep_upper) = match cull {
+                Some(cull) => (
+                    !cull.rejects_triangle(device[i00], device[i10], device[i01]),
+                    !cull.rejects_triangle(device[i10], device[i11], device[i01]),
+                ),
+                None => (true, true),
+            };
+            if !keep_lower && !keep_upper {
+                continue;
+            }
+
             let (x00, y00, c00, r00) = &grid[i00];
             let (x10, y10, c10, r10) = &grid[i10];
             let (x01, y01, c01, r01) = &grid[i01];
             let (x11, y11, c11, r11) = &grid[i11];
 
             use stet_graphics::device::ShadingVertex;
-            triangles.push(stet_graphics::device::ShadingTriangle {
-                v0: ShadingVertex {
-                    x: *x00,
-                    y: *y00,
-                    color: c00.clone(),
-                    raw_components: r00.clone(),
-                },
-                v1: ShadingVertex {
-                    x: *x10,
-                    y: *y10,
-                    color: c10.clone(),
-                    raw_components: r10.clone(),
-                },
-                v2: ShadingVertex {
-                    x: *x01,
-                    y: *y01,
-                    color: c01.clone(),
-                    raw_components: r01.clone(),
-                },
-            });
-            triangles.push(stet_graphics::device::ShadingTriangle {
-                v0: ShadingVertex {
-                    x: *x10,
-                    y: *y10,
-                    color: c10.clone(),
-                    raw_components: r10.clone(),
-                },
-                v1: ShadingVertex {
-                    x: *x11,
-                    y: *y11,
-                    color: c11.clone(),
-                    raw_components: r11.clone(),
-                },
-                v2: ShadingVertex {
-                    x: *x01,
-                    y: *y01,
-                    color: c01.clone(),
-                    raw_components: r01.clone(),
-                },
-            });
+            if keep_lower {
+                triangles.push(stet_graphics::device::ShadingTriangle {
+                    v0: ShadingVertex {
+                        x: *x00,
+                        y: *y00,
+                        color: c00.clone(),
+                        raw_components: r00.clone(),
+                    },
+                    v1: ShadingVertex {
+                        x: *x10,
+                        y: *y10,
+                        color: c10.clone(),
+                        raw_components: r10.clone(),
+                    },
+                    v2: ShadingVertex {
+                        x: *x01,
+                        y: *y01,
+                        color: c01.clone(),
+                        raw_components: r01.clone(),
+                    },
+                });
+            }
+            if keep_upper {
+                triangles.push(stet_graphics::device::ShadingTriangle {
+                    v0: ShadingVertex {
+                        x: *x10,
+                        y: *y10,
+                        color: c10.clone(),
+                        raw_components: r10.clone(),
+                    },
+                    v1: ShadingVertex {
+                        x: *x11,
+                        y: *y11,
+                        color: c11.clone(),
+                        raw_components: r11.clone(),
+                    },
+                    v2: ShadingVertex {
+                        x: *x01,
+                        y: *y01,
+                        color: c01.clone(),
+                        raw_components: r01.clone(),
+                    },
+                });
+            }
         }
     }
 }
@@ -12960,6 +13186,198 @@ mod tests {
     use super::*;
     use stet_graphics::color::DashPattern;
     use stet_graphics::device::{BgUcrState, HalftoneState, TransferState};
+
+    /// A deterministic pseudo-random 12-point Coons patch.
+    ///
+    /// The twelve control points are drawn independently over `[-1, 1]` rather
+    /// than being tied to the edges of a quad. Patches built by perturbing a
+    /// square stay inside their own control points, which would leave
+    /// `patch_hull_bbox_contains_the_coons_surface` passing for the wrong
+    /// reason; unconstrained points reach the cases that actually escape.
+    fn sample_coons_patch(seed: u64) -> stet_graphics::device::ShadingPatch {
+        let mut state = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((state >> 33) as f64 / (1u64 << 31) as f64) * 2.0 - 1.0
+        };
+        stet_graphics::device::ShadingPatch {
+            points: (0..12).map(|_| (next(), next())).collect(),
+            colors: std::array::from_fn(|_| DeviceColor::from_rgb(0.5, 0.5, 0.5)),
+            raw_colors: std::array::from_fn(|_| Vec::new()),
+        }
+    }
+
+    /// Evaluate a 4x4 tensor net laid out `[j * 4 + i]` at `(u, v)`.
+    fn eval_tensor_net(net: &[(f64, f64); 16], u: f64, v: f64) -> (f64, f64) {
+        let su = 1.0 - u;
+        let bu = [su * su * su, 3.0 * su * su * u, 3.0 * su * u * u, u * u * u];
+        let sv = 1.0 - v;
+        let bv = [sv * sv * sv, 3.0 * sv * sv * v, 3.0 * sv * v * v, v * v * v];
+        let mut x = 0.0;
+        let mut y = 0.0;
+        for j in 0..4 {
+            for i in 0..4 {
+                let w = bu[i] * bv[j];
+                x += w * net[j * 4 + i].0;
+                y += w * net[j * 4 + i].1;
+            }
+        }
+        (x, y)
+    }
+
+    /// The conversion is only a valid bound if it describes the same surface.
+    #[test]
+    fn coons_tensor_net_matches_coons_evaluation() {
+        for seed in 0..32 {
+            let patch = sample_coons_patch(seed);
+            let net = coons_tensor_net(&patch.points);
+            for iu in 0..=8 {
+                for iv in 0..=8 {
+                    let (u, v) = (iu as f64 / 8.0, iv as f64 / 8.0);
+                    let (ex, ey) = eval_coons_patch(&patch, u, v);
+                    let (tx, ty) = eval_tensor_net(&net, u, v);
+                    assert!(
+                        (ex - tx).abs() < 1e-9 && (ey - ty).abs() < 1e-9,
+                        "seed {seed} at ({u}, {v}): coons ({ex}, {ey}) != tensor ({tx}, {ty})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A worked counterexample to the tempting shortcut of culling on the
+    /// bounding box of a Coons patch's own twelve control points.
+    ///
+    /// Here the control points span x in [-0.9, 0.9], yet the surface reaches
+    /// x = 1.44 — outside by 30% of the box's own width. Culling on that box
+    /// would drop a patch with pixels to paint, which is why
+    /// [`patch_hull_bbox()`] converts to the tensor net first.
+    #[test]
+    fn coons_surface_can_escape_its_boundary_control_points() {
+        let patch = stet_graphics::device::ShadingPatch {
+            points: vec![
+                (-0.5, 0.7),
+                (0.88, 0.05),
+                (0.86, 0.28),
+                (-0.9, -0.49),
+                (0.9, 0.78),
+                (0.01, 0.22),
+                (-0.67, -0.6),
+                (0.83, 0.68),
+                (0.87, -0.7),
+                (-0.53, -0.88),
+                (0.8, 0.76),
+                (0.74, 0.84),
+            ],
+            colors: std::array::from_fn(|_| DeviceColor::from_rgb(0.5, 0.5, 0.5)),
+            raw_colors: std::array::from_fn(|_| Vec::new()),
+        };
+        let control_x_max = patch
+            .points
+            .iter()
+            .fold(f64::NEG_INFINITY, |m, p| m.max(p.0));
+        let (surface_x, _) = eval_coons_patch(&patch, 0.475, 0.45);
+        assert!(
+            surface_x > control_x_max + 0.5,
+            "surface x {surface_x} should escape control-point max {control_x_max}"
+        );
+
+        // The tensor net, and so the hull bound, does contain it.
+        let (_, _, hull_x_max, _) = patch_hull_bbox(&patch, &Matrix::identity()).unwrap();
+        assert!(hull_x_max >= surface_x);
+    }
+
+    /// The whole point of the hull bound: no surface point may fall outside it,
+    /// or culling would drop a patch that had pixels to paint.
+    #[test]
+    fn patch_hull_bbox_contains_the_coons_surface() {
+        let ctm = Matrix {
+            a: 90.0,
+            b: 12.0,
+            c: -7.0,
+            d: -80.0,
+            tx: 15.0,
+            ty: 400.0,
+        };
+        for seed in 0..64 {
+            let patch = sample_coons_patch(seed);
+            let (x_min, y_min, x_max, y_max) = patch_hull_bbox(&patch, &ctm).unwrap();
+            for iu in 0..=16 {
+                for iv in 0..=16 {
+                    let (u, v) = (iu as f64 / 16.0, iv as f64 / 16.0);
+                    let (x, y) = eval_coons_patch(&patch, u, v);
+                    let (dx, dy) = ctm.transform_point(x, y);
+                    assert!(
+                        dx >= x_min - 1e-9
+                            && dx <= x_max + 1e-9
+                            && dy >= y_min - 1e-9
+                            && dy <= y_max + 1e-9,
+                        "seed {seed} at ({u}, {v}): ({dx}, {dy}) outside \
+                         ({x_min}, {y_min})-({x_max}, {y_max})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Culling must not change which triangles get painted, only which get
+    /// built: what survives has to match what an unculled run would have had
+    /// `render_mesh_shading` accept, triangle for triangle.
+    #[test]
+    fn triangle_culling_keeps_exactly_the_paintable_triangles() {
+        let patch = sample_coons_patch(7);
+        let ctm = Matrix {
+            a: 100.0,
+            b: 0.0,
+            c: 0.0,
+            d: 100.0,
+            tx: 20.0,
+            ty: 30.0,
+        };
+        let n = 16;
+
+        let mut all = Vec::new();
+        subdivide_patch_to_triangles(&patch, &mut all, n, None, None, None);
+        assert_eq!(all.len(), 2 * n * n);
+
+        // A target the patch sits entirely inside keeps every triangle. The
+        // patch reaches negative device coordinates, so the target has to
+        // start there too.
+        let wide = ShadingCull::new(ctm, -500.0, -500.0, 1.0, 1.0, 4000, 4000).unwrap();
+        let mut kept = Vec::new();
+        subdivide_patch_to_triangles(&patch, &mut kept, n, None, None, Some(&wide));
+        assert_eq!(kept.len(), all.len());
+
+        // A target far below the patch keeps nothing.
+        let elsewhere = ShadingCull::new(ctm, 0.0, 3000.0, 1.0, 1.0, 200, 140).unwrap();
+        let mut none = Vec::new();
+        subdivide_patch_to_triangles(&patch, &mut none, n, None, None, Some(&elsewhere));
+        assert!(none.is_empty());
+
+        // A band-sized target keeps precisely the triangles that reach it.
+        let band = ShadingCull::new(ctm, -200.0, 0.0, 1.0, 1.0, 600, 40).unwrap();
+        let mut banded = Vec::new();
+        subdivide_patch_to_triangles(&patch, &mut banded, n, None, None, Some(&band));
+        let expected = all
+            .iter()
+            .filter(|tri| {
+                !band.rejects_triangle(
+                    ctm.transform_point(tri.v0.x, tri.v0.y),
+                    ctm.transform_point(tri.v1.x, tri.v1.y),
+                    ctm.transform_point(tri.v2.x, tri.v2.y),
+                )
+            })
+            .count();
+        assert_eq!(banded.len(), expected);
+        assert!(
+            !banded.is_empty() && banded.len() < all.len(),
+            "band should keep some but not all of {} triangles, kept {}",
+            all.len(),
+            banded.len()
+        );
+    }
 
     #[test]
     fn test_create_device() {
