@@ -41,6 +41,15 @@ jobs:
         # that `restore` releases but `invalidrestore` cannot see. Only
         # interpreter bootstrap may use them. See scripts/check-level-zero-alloc.sh.
         run: scripts/check-level-zero-alloc.sh
+      - name: crate independence audit
+        # The narrow-waist architecture only pays off if each half can be
+        # taken without the other: a PDF-only consumer must not link the
+        # PostScript VM, and a PostScript-only consumer must not link the PDF
+        # parser. The facade carries stet-pdf-reader as a dev-dependency for
+        # exactly that reason, and one line in the wrong table would silently
+        # add the whole PDF parser to a consumer's build.
+        # See scripts/check-crate-independence.sh.
+        run: scripts/check-crate-independence.sh
       - name: tag namespace audit
         # The v* namespace is reserved for releases: every v* tag must be
         # exactly vX.Y.Z and have a CHANGELOG entry. Benchmarks and
