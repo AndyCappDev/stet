@@ -510,7 +510,7 @@ dependencies = [
 
 [[package]]
 name = "stet-core"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "fax",
  "flate2",
@@ -532,7 +532,7 @@ dependencies = [
 
 [[package]]
 name = "stet-engine"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "stet-core",
  "stet-ops",
@@ -540,7 +540,7 @@ dependencies = [
 
 [[package]]
 name = "stet-fonts"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "glob",
  "rustc-hash",
@@ -550,7 +550,7 @@ dependencies = [
 
 [[package]]
 name = "stet-graphics"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "glob",
  "moxcms",
@@ -560,7 +560,7 @@ dependencies = [
 
 [[package]]
 name = "stet-ops"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "flate2",
  "glob",
@@ -571,7 +571,7 @@ dependencies = [
 
 [[package]]
 name = "stet-pdf-reader"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "fax",
  "flate2",
@@ -591,7 +591,7 @@ dependencies = [
 
 [[package]]
 name = "stet-render"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "png",
  "stet-core",
