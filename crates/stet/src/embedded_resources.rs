@@ -86,6 +86,10 @@ const ENTRIES: &[(&str, &[u8])] = &[
         include_bytes!("../resources/OutputDevice/png.ps"),
     ),
     (
+        "OutputDevice/null.ps",
+        include_bytes!("../resources/OutputDevice/null.ps"),
+    ),
+    (
         "OutputDevice/pdf.ps",
         include_bytes!("../resources/OutputDevice/pdf.ps"),
     ),

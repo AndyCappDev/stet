@@ -27,6 +27,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`--device null` aborted PostScript programs that query the page device.**
+  The flag is documented for "test / scripting use", but it installed the PLRM
+  `nulldevice` *operator* rather than a page device. That resets the CTM to
+  identity and leaves no page-device parameters, so `currentpagedevice
+  /OutputDevice get` raised `undefined` and `initmatrix` had no device matrix
+  to restore — stet's own PostScript test suite aborted partway through under
+  the flag meant for running it. `--device null` now installs a real page
+  device (a new `OutputDevice/null.ps` resource) that reports itself as
+  `/null`, carries a page size and resolution like any other device, and still
+  produces no output: nothing is rasterized and `/EndPage` never transmits a
+  page. The suite now passes identically on `png`, `pdf` and `null`, and CI
+  runs it on `null` as well so this cannot regress unnoticed.
+
 - **Mesh-shaded PDFs could exhaust memory and fail to render, worse the more
   cores the machine had.** `render_patch_shading` triangulated every patch of
   a shading regardless of which band was being drawn, and bands render

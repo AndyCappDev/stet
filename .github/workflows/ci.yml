@@ -114,6 +114,17 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: ./target/release/stet unit_tests/ps_tests.ps
 
+      # The same suite on the null device. `--device null` is documented for
+      # "test / scripting use", so it has to survive the tests — and until
+      # 2026-08-30 it did not: it installed the PLRM `nulldevice` operator
+      # instead of a page device, leaving `currentpagedevice` with no
+      # /OutputDevice to report and no device matrix to restore, which aborted
+      # the run partway with `undefined`. The step above never caught it
+      # because it only ever exercised the default device.
+      - name: PostScript unit tests on the null device
+        if: matrix.os == 'ubuntu-latest'
+        run: ./target/release/stet --device null unit_tests/ps_tests.ps
+
   # MSRV — the README badge and `[workspace.package] rust-version` both claim
   # 1.88, and this is what makes that a tested fact rather than a guess. Pin
   # the toolchain rather than tracking `rust-version`: the point is to fail on

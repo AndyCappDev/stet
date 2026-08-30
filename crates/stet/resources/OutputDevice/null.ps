@@ -1,0 +1,59 @@
+%% pagedevice dictionary for the null output device
+%%
+%% Discards all output while behaving like a real page device in every other
+%% respect: it reports its own name through /OutputDevice, carries a page size
+%% and resolution, and so establishes a normal (Y-flipped) device matrix.
+%%
+%% That distinction matters. Installing this device is NOT the same as
+%% executing the `nulldevice` operator: `nulldevice` is a PLRM construct that
+%% also resets the CTM to identity and leaves no page-device parameters
+%% behind, which is correct for the operator but leaves a PostScript program
+%% with no usable device to query or restore to. `--device null` is documented
+%% for test and scripting use, so it needs to look like a device.
+%%
+%% Nothing is rasterized: the CLI binds Rust's NullDevice, whose painting
+%% methods are no-ops, and /EndPage returns false so no page is ever
+%% transmitted.
+
+<<
+    /OutputDeviceName (null)
+    /OutputDevice /null
+    /PageSize [612 792]
+    /HWResolution [300 300]
+    /Margins [0.0 0.0]
+    /PageOffset [0 0]
+    /BitsPerPixel 24
+    /NumCopies null
+    /Install {
+        .9 setflat
+        {} settransfer
+        /DeviceRGB setcolorspace
+    } bind
+    /BeginPage {pop} bind
+    /EndPage {
+        %% Never transmit a page, and stay silent doing it — the whole point
+        %% of this device is to produce no output. `erasepage` still runs, so
+        %% page semantics are otherwise unchanged.
+        pop pop false
+    } bind
+    /InputAttributes <<>>
+    /OutputAttributes <<>>
+    /ColorModel /DeviceRGB
+    /ProcessColorModel /DeviceRGB
+    /Policies <<>>
+    /PageCount 0
+    /.IsPageDevice true
+    /Separations false
+    /Supported {}
+    /RedValues 256
+    /GreenValues 256
+    /BlueValues 256
+    /GraphicBlackPt 8
+    /ImageBlackPt 8
+    /TextBlackPt 8
+    /SimulateOverprint false
+    /Colors 3
+    /LineWidthMin 1
+    /TextRenderingMode /GlyphPaths
+    /StrokeMethod /NativeStroke
+>>

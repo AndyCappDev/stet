@@ -646,7 +646,7 @@ The PostScript interpreter requires several resource files to function:
 - **ProcSet** (2 files): CIDInit, FontSetInit
 - **ICC profile** (1 file): CC0-licensed CMYK → sRGB conversion profile
 
-The `stet` facade crate embeds all 55 files (4.6 MB) via `include_bytes!()`.
+The `stet` facade crate embeds all 56 files (4.4 MB) via `include_bytes!()`.
 The CLI discovers them relative to the executable. The WASM build embeds
 them in a virtual filesystem.
 

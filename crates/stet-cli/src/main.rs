@@ -1827,13 +1827,15 @@ fn parse_page_size(spec: &str) -> Result<(f64, f64), String> {
 }
 
 fn install_device(ctx: &mut Context, dpi_override: Option<f64>, device: &str) {
-    if device == "null" {
-        let _ = parse_and_exec(ctx, b"nulldevice");
-        return;
-    }
     let resource_name = match device {
         "viewer" => "viewer",
         "pdf" => "pdf",
+        // Not the `nulldevice` operator: that resets the CTM to identity and
+        // leaves no page-device parameters, so `currentpagedevice` has no
+        // /OutputDevice to report and `initmatrix` has no device matrix to
+        // restore. `--device null` is documented for test and scripting use,
+        // so it installs a real page device that happens to discard output.
+        "null" => "null",
         _ => "png",
     };
     // Copy the resource dict before modifying HWResolution — the original is
@@ -1889,13 +1891,15 @@ fn install_device_with_size(
     height: f64,
     device: &str,
 ) {
-    if device == "null" {
-        let _ = parse_and_exec(ctx, b"nulldevice");
-        return;
-    }
     let resource_name = match device {
         "viewer" => "viewer",
         "pdf" => "pdf",
+        // Not the `nulldevice` operator: that resets the CTM to identity and
+        // leaves no page-device parameters, so `currentpagedevice` has no
+        // /OutputDevice to report and `initmatrix` has no device matrix to
+        // restore. `--device null` is documented for test and scripting use,
+        // so it installs a real page device that happens to discard output.
+        "null" => "null",
         _ => "png",
     };
     // Copy the resource dict before modifying PageSize — the original is in
