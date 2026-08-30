@@ -58,6 +58,7 @@ jobs:
             features: --no-default-features
             archive: tar.gz
             ext: ""
+            cross: false
 
           # Desktop Linux, with the viewer. Built on the OLDEST practical
           # runner on purpose: glibc symbol versioning sets a floor at the
@@ -84,18 +85,36 @@ jobs:
             features: ""
             archive: tar.gz
             ext: ""
+            cross: false
 
           - target: aarch64-apple-darwin
             os: macos-14
             features: ""
             archive: tar.gz
             ext: ""
+            cross: false
 
+          # Cross-built from the arm64 runner rather than natively on
+          # macos-13. macos-13 is GitHub's last Intel image and the scarcest
+          # label in the pool: on the first real run of this workflow it was
+          # never assigned a runner at all, while every other leg finished in
+          # 2-5 minutes. Intel macOS is also on GitHub's deprecation track, so
+          # depending on it means every future release is one capacity crunch
+          # away from being unreleasable.
+          #
+          # Xcode ships both SDKs, so `rustup target add` is all the arm64
+          # runner needs. The cost is that the artifact cannot be executed on
+          # its builder unless Rosetta is present, so `cross: true` softens
+          # the execution checks below to an architecture assertion plus a
+          # best-effort Rosetta run. The real verification is a human on Intel
+          # hardware at the draft-release gate -- which is what that gate is
+          # for, and is stronger evidence than a runner anyway.
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-14
             features: ""
             archive: tar.gz
             ext: ""
+            cross: true
 
           # The MSVC target links the CRT dynamically by default, which makes
           # the binary need VCRUNTIME140.dll present on the machine -- exactly
@@ -105,6 +124,7 @@ jobs:
             features: ""
             archive: zip
             ext: ".exe"
+            cross: false
             rustflags: -C target-feature=+crt-static
 
     steps:
@@ -131,35 +151,75 @@ jobs:
             --target ${{ matrix.target }} \
             ${{ matrix.features }}
 
+      # Assert the binary is actually for the target we asked for. This is
+      # the check that survives cross-compilation, and it catches the failure
+      # mode that matters there: a misconfigured build silently producing a
+      # binary for the host architecture instead. Runs for every target.
+      - name: Verify architecture
+        shell: bash
+        run: |
+          bin="target/${{ matrix.target }}/release/stet${{ matrix.ext }}"
+          test -f "$bin" || { echo "::error::no binary at $bin"; exit 1; }
+          if ! command -v file >/dev/null 2>&1; then
+            echo "::notice::'file' unavailable here; skipped the architecture assertion for ${{ matrix.target }}."
+            exit 0
+          fi
+          desc="$(file -b "$bin")"
+          echo "$desc"
+          case "${{ matrix.target }}" in
+            x86_64-apple-darwin)   want="Mach-O 64-bit executable x86_64" ;;
+            aarch64-apple-darwin)  want="Mach-O 64-bit executable arm64" ;;
+            x86_64-unknown-linux-*) want="ELF 64-bit LSB" ;;
+            x86_64-pc-windows-msvc) want="PE32+" ;;
+            *) want="" ;;
+          esac
+          if [ -n "$want" ] && ! printf '%s' "$desc" | grep -q "$want"; then
+            echo "::error::expected '$want' for ${{ matrix.target }}, got: $desc"
+            exit 1
+          fi
+
       # Catches the mistake of tagging without running the version bump: the
       # tag says one thing and the binary reports another. Cheap here,
       # expensive after the crates are published and immutable.
-      - name: Verify --version agrees with the tag
-        if: startsWith(github.ref, 'refs/tags/v')
-        shell: bash
-        run: |
-          tag_version="${GITHUB_REF_NAME#v}"
-          bin="target/${{ matrix.target }}/release/stet${{ matrix.ext }}"
-          # Cross-built artifacts cannot be executed on the runner; the
-          # aarch64 mac is built on an aarch64 runner, so every target here
-          # is native and this always runs.
-          reported="$("$bin" --version | awk '{print $2}')"
-          if [ "$reported" != "$tag_version" ]; then
-            echo "::error::tag v$tag_version but the binary reports $reported."
-            echo "The version bump did not land in the tagged commit."
-            exit 1
-          fi
-          echo "version OK: $reported"
-
-      # Smoke test. A binary that starts but cannot render is not a release
-      # asset. Renders a page and asserts a non-empty PNG appears.
-      - name: Smoke test
+      #
+      # Also the smoke test: a binary that starts but cannot render is not a
+      # release asset. Both need to *execute* the binary, so a cross-built
+      # target runs them through Rosetta when it is available and otherwise
+      # reports that it could not -- loudly. A green tick that quietly tested
+      # nothing is worse than a visible gap, because it is indistinguishable
+      # from a real pass.
+      - name: Verify version and render
         shell: bash
         run: |
           bin="$PWD/target/${{ matrix.target }}/release/stet${{ matrix.ext }}"
+
+          run_bin() { "$bin" "$@"; }
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            if arch -x86_64 /usr/bin/true 2>/dev/null; then
+              echo "cross-built target: executing under Rosetta"
+              run_bin() { arch -x86_64 "$bin" "$@"; }
+            else
+              echo "::notice::${{ matrix.target }} is cross-built and Rosetta is unavailable here, so it was verified by architecture only. Run it on Intel hardware at the draft-release gate before publishing."
+              exit 0
+            fi
+          fi
+
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            tag_version="${GITHUB_REF_NAME#v}"
+            reported="$(run_bin --version | awk '{print $2}')"
+            if [ "$reported" != "$tag_version" ]; then
+              echo "::error::tag v$tag_version but the binary reports $reported."
+              echo "The version bump did not land in the tagged commit."
+              exit 1
+            fi
+            echo "version OK: $reported"
+          else
+            echo "version: $(run_bin --version)"
+          fi
+
           mkdir -p smoke && cd smoke
           printf '%%!PS\n0.5 setgray 100 100 300 300 rectfill showpage\n' > smoke.ps
-          "$bin" --device png -o out.png smoke.ps
+          run_bin --device png -o out.png smoke.ps
           test -s out.png || { echo "::error::render produced no output"; exit 1; }
           echo "smoke test OK ($(wc -c < out.png) bytes)"
 
