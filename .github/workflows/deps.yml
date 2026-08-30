@@ -1,0 +1,78 @@
+# Weekly check that stet still builds and passes against the LATEST versions
+# of its dependencies, ignoring Cargo.lock.
+#
+# Why this exists: committing Cargo.lock (2026-08-30) made every other job
+# build against pinned dependency versions. That is what we want for CI
+# stability, release reconstruction, and making the MSRV floor's held-back
+# crates visible in a diff rather than inferred from resolver behaviour.
+#
+# But it costs a signal that used to be free. Before the lock, every CI run
+# implicitly proved "latest dependencies still work", because every run
+# re-resolved from scratch. After the lock, an upstream breaking change is
+# invisible until someone runs `cargo update` -- and the longer that gap, the
+# more changes land at once and the harder it is to attribute the breakage.
+#
+# So: pin by default, and check the unpinned world on a schedule. A failure
+# here is information, not an emergency -- main is still green, the lock still
+# builds, and nothing a user consumes has changed.
+name: Dependencies
+
+on:
+  schedule:
+    # Mondays, 07:00 UTC -- an hour after the fuzz job, to keep the two off
+    # each other's runners.
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  latest-deps:
+    name: Build + test against latest dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Deliberately NOT cached. The point is a clean resolution against the
+      # current registry; a warm cache would defeat it.
+
+      - name: cargo update
+        run: |
+          cargo update
+          echo "### Dependency changes" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          git diff --stat Cargo.lock >> "$GITHUB_STEP_SUMMARY" || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          # The actual version moves, which is what someone reading a failure
+          # needs in order to attribute it.
+          git diff Cargo.lock | grep -E '^[+-]version' | sort | uniq -c | head -40 || true
+
+      - name: cargo build --release --workspace
+        run: cargo build --release --workspace
+
+      - name: cargo test --workspace
+        run: cargo test --workspace
+
+      - name: PostScript unit tests
+        run: ./target/release/stet unit_tests/ps_tests.ps
+
+      # The MSRV floor is the reason two crates are held back in the committed
+      # lock, so an unpinned resolve is exactly where a floor violation would
+      # first appear. `resolver = "3"` should prevent it -- this proves that
+      # rather than assuming it.
+      - name: MSRV still resolves and compiles
+        run: |
+          rustup toolchain install 1.88 --profile minimal
+          cargo +1.88 check --workspace
+
+      # Leaves the updated lock downloadable from the run, so a human can
+      # inspect or adopt it without re-resolving locally.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Cargo.lock-latest
+          path: Cargo.lock
+          if-no-files-found: warn

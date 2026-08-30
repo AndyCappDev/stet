@@ -1,5 +1,21 @@
 **/target
-Cargo.lock
+
+# Cargo.lock is committed as of 2026-08-30, for the workspace root and for
+# stet-wasm, which is a separate workspace (root Cargo.toml `exclude`).
+# Pinning makes CI immune to upstream churn, lets a release be reconstructed
+# from its tag, and turns the MSRV floor's held-back crates (hayro-jpeg2000,
+# moxcms) into a visible diff instead of inferred resolver behaviour.
+#
+# Two locks stay ignored, for different reasons:
+#
+#   fuzz/ is excluded from the workspace and deliberately tracks a moving
+#   nightly and a moving cargo-fuzz -- bit-rot detection is the whole point
+#   of the weekly fuzz job, and pinning its dependencies would defeat it.
+fuzz/Cargo.lock
+#   crates/stet-tiny-skia/ IS a workspace member (`members = ["crates/*"]`),
+#   so this lock is a stale artifact from building the vendored fork
+#   standalone. Cargo never reads it; the root lock governs.
+crates/stet-tiny-skia/Cargo.lock
 **/*.rs.bk
 *.pdb
 *.png

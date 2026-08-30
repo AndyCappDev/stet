@@ -143,10 +143,13 @@ jobs:
         env:
           RUSTFLAGS: ${{ matrix.rustflags }}
         run: |
-          # No --locked: Cargo.lock is git-ignored (.gitignore:2), so there
-          # is no lockfile to honour. Release builds therefore resolve
-          # dependencies fresh, exactly as CI does.
-          cargo build --release \
+          # --locked, because Cargo.lock is committed as of 2026-08-30 and a
+          # release is the case that most needs it: the artifact people
+          # download should be reconstructible from the tag, and a resolution
+          # that silently drifted between the tag and the build would make
+          # that false. It also fails loudly if the lock is out of sync with
+          # the manifests rather than quietly resolving something else.
+          cargo build --release --locked \
             -p stet-cli \
             --target ${{ matrix.target }} \
             ${{ matrix.features }}
