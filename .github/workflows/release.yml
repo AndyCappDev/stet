@@ -1,0 +1,263 @@
+# Build and attach prebuilt binaries to a release.
+#
+# Why this exists: through v0.7.0 every release carried zero binary assets, so
+# the only way to try stet was `cargo install stet-cli` -- a Rust toolchain
+# plus a workspace compile including egui. Anyone evaluating a Ghostscript
+# alternative who does not already write Rust could not run it at all.
+#
+# WHO OWNS CREATING THE RELEASE: this workflow does, as a *draft*.
+#
+# The tag is pushed before `cargo publish` in the documented ritual, so a
+# tag-triggered workflow and a manual `gh release create` race each other:
+# whichever loses either fails outright or produces a release with notes but
+# no assets, or assets but no notes. Making the workflow the sole creator
+# removes the race, and making it a draft keeps a human gate in front of it --
+# the artifacts can be downloaded and run somewhere that is not the build
+# machine before anyone else sees them, which is the whole point of shipping
+# binaries. A prebuilt binary that fails to start is worse than none, because
+# it fails at exactly the moment someone is deciding.
+#
+# So the release ritual is: tag, push, verify the draft, publish it, then
+# `cargo publish` the crates. Do NOT run `gh release create` by hand.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  # Lets the packaging be exercised without cutting a release. Builds and
+  # uploads workflow artifacts; never touches a GitHub release.
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One target failing must not cancel the rest: a partial matrix still
+      # tells you which platforms are broken, and the release job will refuse
+      # to assemble an incomplete set anyway.
+      fail-fast: false
+      matrix:
+        include:
+          # The headline download. Fully static, no glibc floor, no runtime
+          # libraries, no GUI, no signing prompt on any platform -- the only
+          # artifact with none of those frictions, and what the
+          # Ghostscript-replacement audience (servers, CI, containers) wants.
+          #
+          # `musl-tools` is deliberately absent: no dependency needs a C
+          # cross-compiler, so `rustup target add` alone suffices. Adding it
+          # would imply a requirement that does not exist.
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            features: --no-default-features
+            archive: tar.gz
+            ext: ""
+
+          # Desktop Linux, with the viewer. Built on the OLDEST practical
+          # runner on purpose: glibc symbol versioning sets a floor at the
+          # build machine's version, and a binary built on a current runner
+          # will not start on most servers. ubuntu-22.04 gives a 2.35 floor,
+          # which reaches Debian 12 (2.36) and Ubuntu 22.04. RHEL 9 (2.34)
+          # is below it -- those users want the musl artifact.
+          #
+          # No X11/Wayland/GL dev packages are installed. The resulting
+          # binary provably links none of them -- winit and glutin dlopen
+          # them at runtime -- so it loads where they are absent and fails
+          # only if the viewer is actually opened. What is NOT yet proven is
+          # whether the *build* needs their headers: it was verified on a
+          # developer machine that already had them. If this leg fails on a
+          # bare runner, add the dev packages here rather than dropping the
+          # viewer. Exercise it with workflow_dispatch before trusting a tag.
+          #
+          # When ubuntu-22.04 retires, move to the oldest image still offered
+          # and update the glibc floor in .github/release-downloads.md and in
+          # the release notes -- the floor is a property of the builder, so it
+          # rises silently when the runner does.
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+            features: ""
+            archive: tar.gz
+            ext: ""
+
+          - target: aarch64-apple-darwin
+            os: macos-14
+            features: ""
+            archive: tar.gz
+            ext: ""
+
+          - target: x86_64-apple-darwin
+            os: macos-13
+            features: ""
+            archive: tar.gz
+            ext: ""
+
+          # The MSVC target links the CRT dynamically by default, which makes
+          # the binary need VCRUNTIME140.dll present on the machine -- exactly
+          # the "download and run" failure this workflow exists to avoid.
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            features: ""
+            archive: zip
+            ext: ".exe"
+            rustflags: -C target-feature=+crt-static
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        shell: bash
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
+        run: |
+          # No --locked: Cargo.lock is git-ignored (.gitignore:2), so there
+          # is no lockfile to honour. Release builds therefore resolve
+          # dependencies fresh, exactly as CI does.
+          cargo build --release \
+            -p stet-cli \
+            --target ${{ matrix.target }} \
+            ${{ matrix.features }}
+
+      # Catches the mistake of tagging without running the version bump: the
+      # tag says one thing and the binary reports another. Cheap here,
+      # expensive after the crates are published and immutable.
+      - name: Verify --version agrees with the tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          bin="target/${{ matrix.target }}/release/stet${{ matrix.ext }}"
+          # Cross-built artifacts cannot be executed on the runner; the
+          # aarch64 mac is built on an aarch64 runner, so every target here
+          # is native and this always runs.
+          reported="$("$bin" --version | awk '{print $2}')"
+          if [ "$reported" != "$tag_version" ]; then
+            echo "::error::tag v$tag_version but the binary reports $reported."
+            echo "The version bump did not land in the tagged commit."
+            exit 1
+          fi
+          echo "version OK: $reported"
+
+      # Smoke test. A binary that starts but cannot render is not a release
+      # asset. Renders a page and asserts a non-empty PNG appears.
+      - name: Smoke test
+        shell: bash
+        run: |
+          bin="$PWD/target/${{ matrix.target }}/release/stet${{ matrix.ext }}"
+          mkdir -p smoke && cd smoke
+          printf '%%!PS\n0.5 setgray 100 100 300 300 rectfill showpage\n' > smoke.ps
+          "$bin" --device png -o out.png smoke.ps
+          test -s out.png || { echo "::error::render produced no output"; exit 1; }
+          echo "smoke test OK ($(wc -c < out.png) bytes)"
+
+      # Nothing but the binary and the licences ships: all 56 resources are
+      # embedded via include_bytes!, so there is no resource directory to
+      # install and no layout for a user to get wrong.
+      - name: Package
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          [ "${{ github.ref_type }}" = "tag" ] || version="dev"
+          name="stet-${version}-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          cp "target/${{ matrix.target }}/release/stet${{ matrix.ext }}" "dist/$name/"
+          cp README.md LICENSE-APACHE LICENSE-MIT "dist/$name/"
+          cd dist
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            7z a -tzip "$name.zip" "$name" > /dev/null
+          else
+            tar czf "$name.tar.gz" "$name"
+          fi
+          ls -la
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*.${{ matrix.archive }}
+          if-no-files-found: error
+
+  release:
+    name: Draft release
+    needs: build
+    # Only a tag produces a release. workflow_dispatch stops after `build`,
+    # which is what makes it safe for exercising the packaging.
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      # `needs: build` already requires every matrix leg to succeed, but
+      # fail-fast is off, so assert the count rather than trusting it: a
+      # release missing the musl artifact is worse than no release.
+      - name: Verify the artifact set is complete
+        run: |
+          cd artifacts
+          ls -la
+          count=$(ls -1 stet-*.tar.gz stet-*.zip 2>/dev/null | wc -l)
+          if [ "$count" -ne 5 ]; then
+            echo "::error::expected 5 artifacts, found $count"
+            exit 1
+          fi
+
+      # Derived from CHANGELOG.md rather than retyped, so the release notes
+      # and the changelog cannot drift. Same extraction CLAUDE.md documents.
+      - name: Extract release notes
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="## [$version]" '
+            index($0, v) == 1 { f = 1; next }
+            /^## \[/ { f = 0 }
+            f
+          ' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then
+            echo "::error::no CHANGELOG.md section for $version."
+            echo "Rename '## [Unreleased]' to '## [$version] — DATE' before tagging."
+            exit 1
+          fi
+          # Platform friction (Gatekeeper, SmartScreen, the glibc floor) is
+          # documented rather than left for people to discover. Kept in its own
+          # file so it can be edited without touching the workflow.
+          cat .github/release-downloads.md >> notes.md
+
+      - name: Generate SHA256SUMS
+        run: |
+          cd artifacts
+          sha256sum stet-*.tar.gz stet-*.zip > SHA256SUMS
+          cat SHA256SUMS
+
+      # Draft, deliberately. See the header comment: this is the human gate
+      # where the artifacts get run somewhere that is not the build machine
+      # before the release becomes visible. Publish with
+      # `gh release edit <tag> --draft=false` once they check out.
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          gh release create "$GITHUB_REF_NAME" \
+            --draft \
+            --title "stet $version" \
+            --notes-file notes.md \
+            artifacts/stet-*.tar.gz \
+            artifacts/stet-*.zip \
+            artifacts/SHA256SUMS
+          echo "Draft release created. Verify the artifacts, then:"
+          echo "  gh release edit $GITHUB_REF_NAME --draft=false"
