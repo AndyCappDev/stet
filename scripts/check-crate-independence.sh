@@ -24,26 +24,14 @@
 # Dev-dependencies are exempt in both directions — they are not part of a
 # consumer's dependency graph, only of ours when running our own tests.
 #
-# KNOWN GAP, deliberately not gated here (2026-08-30). The first promise holds
-# for *direct* dependencies only. `stet-pdf-reader`'s default features include
-# `render`, which pulls `stet-render`, which depends on `stet-core` — so
-# `stet-pdf-reader = "0.6"` with default features does link the VM
-# transitively, and there is currently no configuration giving PDF -> RGBA
-# without it. `stet-render` needs `stet-core` for a single item,
-# `stet_core::device::OutputDevice`. Moving that trait to `stet-graphics`
-# (where the param structs it uses already live) and re-exporting it from
-# `stet-core` would close the gap without breaking downstream implementors,
-# at which point this script should be tightened from direct dependencies to
-# the full runtime closure. Until then `crates/stet/README.md`'s "PDF-only
-# users don't pay for the VM" is true only under `--no-default-features`.
-#
-# This is checked mechanically rather than left to review because the failure
-# is invisible in isolation: adding one line to a `[dependencies]` table
-# compiles fine, passes every test, and quietly breaks the promise. It is also
-# easy to *misread* by hand — `[features]` precedes `[dependencies]` in
-# `crates/stet/Cargo.toml`, so a naive `sed '/^\[dependencies\]/,/^\[features\]/'`
-# range never terminates and reports the dev-dependency as a real one. The
-# manifests are parsed as TOML here for exactly that reason.
+# Both promises are checked twice: against the manifests (a direct dependency
+# in the wrong table) and against the resolved dependency graph (a transitive
+# one). The second check is what catches the interesting case. Until
+# 2026-08-30 `stet-pdf-reader`'s default features pulled `stet-render`, which
+# depended unconditionally on `stet-core` for a single trait — so the reader
+# linked the whole PostScript VM by default while every manifest looked
+# correct. `stet-render` now gates that trait impl behind its `ps-device`
+# feature, and the reader takes the crate with `default-features = false`.
 #
 # Exit status: 0 = both promises hold, 1 = at least one is broken.
 
@@ -115,5 +103,49 @@ for path, (allowed, reason) in RULES.items():
 if failed:
     sys.exit(1)
 
-print("check-crate-independence: PS and PDF-reading halves are independently usable")
+# Manifest checks passed; now verify the resolved graph.
 PY
+
+# The transitive check. `cargo tree` resolves without building; it needs a
+# lockfile, which the repo has. Skipped with a warning if cargo is absent so
+# the script stays usable outside a toolchain.
+if ! command -v cargo >/dev/null 2>&1; then
+    echo "check-crate-independence: cargo not found — skipping the transitive check" >&2
+    echo "check-crate-independence: direct dependencies OK (transitive check skipped)"
+    exit 0
+fi
+
+# crate|forbidden-in-its-default-feature-closure|why
+CLOSURES=(
+    "stet-pdf-reader|stet-core stet-ops stet-engine|a PDF-only consumer must not link the PostScript VM"
+    "stet|stet-pdf-reader|a PostScript-only consumer must not link the PDF parser"
+)
+
+closure_failed=0
+for entry in "${CLOSURES[@]}"; do
+    IFS='|' read -r crate forbidden reason <<< "$entry"
+    tree="$(cargo tree -p "$crate" --edges normal 2>/dev/null || true)"
+    if [ -z "$tree" ]; then
+        echo "check-crate-independence: could not resolve dependencies for $crate" >&2
+        closure_failed=1
+        continue
+    fi
+    for bad in $forbidden; do
+        # Match the crate name as a whole word, so stet-core does not match
+        # a hypothetical stet-core-foo.
+        if grep -qE "(^|[^a-z-])${bad}( |\$)" <<< "$tree"; then
+            echo "check-crate-independence: ${bad} is in ${crate}'s default-feature" >&2
+            echo "  dependency closure. This breaks the promise that ${reason}." >&2
+            echo "  Run: cargo tree -p ${crate} --edges normal -i ${bad}" >&2
+            echo "  to see which edge pulls it in." >&2
+            closure_failed=1
+        fi
+    done
+done
+
+if [ "$closure_failed" -ne 0 ]; then
+    exit 1
+fi
+
+echo "check-crate-independence: PS and PDF-reading halves are independently usable"
+echo "check-crate-independence: verified against manifests and the resolved graph"

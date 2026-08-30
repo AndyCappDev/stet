@@ -493,7 +493,7 @@ release. Any change to it is called out in [CHANGELOG.md](CHANGELOG.md).
 | `stet-engine` | Execution engine (eval loop) |
 | `stet-fonts` | Font parsing: Type 1, CFF/Type 2, TrueType |
 | `stet-graphics` | Display list, color types, ICC color management |
-| `stet-render` | Rasterization backend, PNG output |
+| `stet-render` | Rasterization backend, PNG output. Depends on `stet-core` only for the default `ps-device` feature; without it a consumer rasterizes display lists with no PostScript VM linked |
 | `stet-tiny-skia` | Modified [tiny-skia](https://github.com/RazrFalcon/tiny-skia) fork with stet-specific optimizations (BSD-3-Clause) |
 | `stet-tiny-skia-path` | Companion path/stroker crate for `stet-tiny-skia` (BSD-3-Clause) |
 | `stet-pdf` | PDF output device (PS → PDF) |

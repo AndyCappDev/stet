@@ -215,13 +215,13 @@ stet::ps_exec(ctx, b"/greeting (Hello, PostScript!) def greeting print")?;
 |-------|------|
 | `stet` | Batteries-included library API (this crate) |
 | `stet-core` | Interpreter infrastructure: types, VM, tokenizer |
-| `stet-ops` | ~331 PostScript operator implementations |
+| `stet-ops` | 331 operator implementations (328 always registered, plus 3 on the PDF output path) |
 | `stet-engine` | Execution engine (eval loop) |
 | `stet-fonts` | Font parsing (Type 1, CFF, TrueType) |
 | `stet-graphics` | Display list, color types, ICC |
 | `stet-render` | `stet-tiny-skia` rendering backend |
 | `stet-pdf` | PDF output device (display list → PDF) |
-| `stet-pdf-reader` | PDF input parser (PDF → display list), independent of `stet-core` |
+| `stet-pdf-reader` | PDF input parser (PDF → display list), independent of `stet-core` — no PostScript VM linked, even with rendering enabled |
 | `stet-viewer` | Interactive egui desktop viewer |
 | `stet-cli` | Command-line `stet` binary |
 | `stet-tiny-skia` / `-path` | Vendored tiny-skia fork (BSD-3-Clause) |

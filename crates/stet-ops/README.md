@@ -41,10 +41,26 @@ plus three `pdfmark` operators on the PDF output path:
 | Misc / internal | 40 | `usertime`, `realtime`, `version`, interpreter internals |
 
 Counts are the `register()` calls in `build_system_dict`, grouped by that
-function's own section comments; they sum to 328. `systemdict` exposes 388
-operators at runtime — the difference is defined by the Init PostScript
-resources. Three more (`pdfmark` and friends) are registered only on the PDF
-output path, via `register_pdf_authoring_ops`.
+function's own section comments; they sum to **328**. Three more — `pdfmark`,
+`setdistillerparams` and `currentdistillerparams` — are registered only on the
+PDF output path via `register_pdf_authoring_ops`, giving **331** Rust operator
+implementations in total.
+
+`systemdict` exposes more than either figure, because the Init PostScript
+resources define operators of their own: **388** at runtime on a raster
+device, and **391** with `--device pdf`, where the three authoring operators
+become visible. Re-measure rather than trusting these:
+
+```postscript
+/n 0 def
+systemdict { exch pop type /operatortype eq { /n n 1 add def } if } forall
+(operators: ) print n =
+```
+
+So four numbers describe four different things, and they are consistent:
+328 always-registered, 331 implemented, 388 visible, 391 visible on the PDF
+path. Quote whichever one answers the question being asked, and say which it
+is — an unqualified "~331" next to a "328" reads as a contradiction.
 
 ## Usage
 

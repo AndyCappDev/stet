@@ -129,7 +129,7 @@ later (e.g., zooming in the viewer) scales the device-space coordinates.
    at a time. Executable names are looked up in the dictionary stack and
    dispatched; procedures are stepped through element by element.
 
-3. **Operators** (`stet-ops`): ~331 native Rust functions that manipulate
+3. **Operators** (`stet-ops`): 331 native Rust functions that manipulate
    the operand stack, dictionary stack, graphics state, and display list.
    Path-building operators (`moveto`, `lineto`, `curveto`) construct paths
    on the graphics state. Painting operators (`fill`, `stroke`, `image`)
@@ -688,8 +688,9 @@ stet-fonts           No dependencies (geometry, font parsing, encoding)
 stet-graphics        Color types, display list, ICC, mesh shading
      │
 stet-core            PS types, Context, VM stores, tokenizer, OutputDevice trait
+                     (stet-render needs it only for the `ps-device` feature)
      │
-stet-ops             ~331 operator implementations
+stet-ops             331 operator implementations (328 + 3 PDF-path)
      │
 stet-engine          Eval loop, parse_and_exec, exec_sync
      │
@@ -722,13 +723,21 @@ workspace is layered so you can pick up just the pieces you need.
 | `stet-graphics` | stet-fonts | `DisplayList`, `DeviceColor`, `IccCache`, mesh-shading parser |
 | `stet-pdf-reader` | stet-fonts, stet-graphics | PDF → `DisplayList`; no PS interpreter involved |
 
-**Output / rendering crates** pull in `stet-core` for the `OutputDevice`
-trait, but do **not** pull in the interpreter (`stet-ops`, `stet-engine`):
+**Output / rendering crates** may pull in `stet-core` for the `OutputDevice`
+trait, but never pull in the interpreter (`stet-ops`, `stet-engine`):
 
 | Crate | Internal deps | What it gives you |
 |-------|---------------|-------------------|
-| `stet-render` | stet-fonts, stet-graphics, stet-core, stet-tiny-skia | `DisplayList` → RGBA (banded, viewport, ICC-aware) |
+| `stet-render` | stet-fonts, stet-graphics, stet-tiny-skia, and stet-core **only with the default `ps-device` feature** | `DisplayList` → RGBA (banded, viewport, ICC-aware) |
 | `stet-pdf` | stet-fonts, stet-graphics, stet-core | `DisplayList` → PDF bytes |
+
+`stet-render`'s dependency on `stet-core` exists solely so `SkiaDevice` can
+implement `OutputDevice`, whose `finish_with_context` hands a device the live
+interpreter `Context`. Rasterizing a `DisplayList` never needs it, so that
+impl sits behind the `ps-device` feature and a consumer who only renders can
+switch it off. `stet-pdf` genuinely needs the `Context` — it reads PostScript
+font dictionaries through it to subset and embed fonts — so its dependency is
+unconditional.
 
 **Interpreter-only** crates that rarely make sense to depend on in
 isolation: `stet-core` (PS VM types), `stet-ops` (operator
@@ -738,7 +747,10 @@ viewer), `stet-cli` (binary), `stet-wasm` (wasm-bindgen glue).
 **Useful external combos:**
 
 - **Pure PDF viewer / rasterizer:** `stet-pdf-reader` + `stet-render` —
-  no PostScript VM involved.
+  no PostScript VM involved. `stet-pdf-reader` takes `stet-render` with
+  `default-features = false, features = ["parallel"]`, so `stet-core` is
+  absent from the graph; depending on `stet-pdf-reader` alone gets you this
+  automatically.
 - **PDF → PDF normaliser / rewriter:** `stet-pdf-reader` + `stet-pdf`.
 - **Custom output format (SVG, TIFF, accessibility tree):**
   `stet-pdf-reader` + your own `DisplayElement` iterator — no rendering

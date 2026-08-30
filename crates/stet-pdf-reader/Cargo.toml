@@ -20,7 +20,12 @@ zune-jpeg = "0.5"
 zune-core = "0.5"
 stet-fonts.workspace = true
 stet-graphics.workspace = true
-stet-render = { workspace = true, optional = true }
+# `default-features = false` is load-bearing: it drops `ps-device`, and
+# with it `stet-core`, so a PDF-only consumer never links the PostScript
+# VM. See scripts/check-crate-independence.sh.
+stet-render = { workspace = true, optional = true, default-features = false, features = [
+    "parallel",
+] }
 hayro-jpeg2000 = { version = "0.3.4", optional = true }
 hayro-ccitt = "0.2.0"
 fax = "0.2.6"

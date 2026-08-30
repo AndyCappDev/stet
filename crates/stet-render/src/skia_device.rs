@@ -15,13 +15,16 @@ use stet_tiny_skia::{
     Mask, Paint, PathBuilder, Pixmap, Stroke, StrokeDash, Transform,
 };
 
+#[cfg(feature = "ps-device")]
 use stet_core::device::OutputDevice;
 use stet_fonts::geometry::{Matrix, PathSegment, PsPath};
 use stet_graphics::color::{DeviceColor, FillRule, LineCap, LineJoin};
+#[cfg(feature = "ps-device")]
+use stet_graphics::device::PageSinkFactory;
 use stet_graphics::device::{
     AxialShadingParams, ClipParams, FillParams, ImageColorSpace, ImageParams, MeshShadingParams,
-    PageSinkFactory, PatchShadingParams, RadialShadingParams, ShadingColorSpace, ShadingVertex,
-    StrokeParams, TintLookupTable,
+    PatchShadingParams, RadialShadingParams, ShadingColorSpace, ShadingVertex, StrokeParams,
+    TintLookupTable,
 };
 use stet_graphics::icc::IccCache;
 use stet_graphics::layer_set::LayerSet;
@@ -79,6 +82,11 @@ enum ClipRegion {
 }
 
 /// tiny-skia based raster device.
+// `SkiaDevice` exists only to be driven by the PostScript interpreter
+// through `OutputDevice`; the free rendering entry points work straight
+// from a `DisplayList` and never touch it. Gated with the trait impl so a
+// consumer that only rasterizes drops `stet-core` entirely.
+#[cfg(feature = "ps-device")]
 pub struct SkiaDevice {
     pixmap: Pixmap,
     /// Page dimensions in device pixels. Stored separately so we can shrink
@@ -117,6 +125,7 @@ pub struct SkiaDevice {
     layer_set: LayerSet,
 }
 
+#[cfg(feature = "ps-device")]
 impl SkiaDevice {
     /// Create a new device with the given page dimensions and default PNG output.
     ///
@@ -6457,6 +6466,11 @@ fn clip_path_unified(
         }
     }
 }
+// Only compiled with the `ps-device` feature. The trait lives in `stet-core`
+// and hands the device the live interpreter `Context` at end of job, so
+// implementing it links the PostScript VM. A consumer that only rasterizes a
+// display list needs none of that — see the feature comment in Cargo.toml.
+#[cfg(feature = "ps-device")]
 impl OutputDevice for SkiaDevice {
     fn fill_path(&mut self, path: &PsPath, params: &FillParams) {
         self.ensure_full_pixmap();
@@ -6911,6 +6925,7 @@ impl OutputDevice for SkiaDevice {
     }
 }
 
+#[cfg(feature = "ps-device")]
 impl Drop for SkiaDevice {
     fn drop(&mut self) {
         // Safety net: ensure background render completes before device is destroyed.
@@ -6920,6 +6935,7 @@ impl Drop for SkiaDevice {
     }
 }
 
+#[cfg(feature = "ps-device")]
 impl SkiaDevice {
     /// Wait for the pending background render to complete, if any.
     fn join_pending(&mut self) -> Result<(), String> {
@@ -13184,6 +13200,7 @@ fn interpolate_cmyk_from_vertices(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "ps-device")]
     use stet_graphics::color::DashPattern;
     use stet_graphics::device::{BgUcrState, HalftoneState, TransferState};
 
@@ -13379,12 +13396,14 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "ps-device")]
     #[test]
     fn test_create_device() {
         let dev = SkiaDevice::new(100, 100);
         assert_eq!(dev.page_size(), (100, 100));
     }
 
+    #[cfg(feature = "ps-device")]
     #[test]
     fn test_fill_rect() {
         let mut dev = SkiaDevice::new(100, 100);
@@ -13424,6 +13443,7 @@ mod tests {
         assert_eq!(pixel.blue(), 0);
     }
 
+    #[cfg(feature = "ps-device")]
     #[test]
     fn test_stroke_line() {
         let mut dev = SkiaDevice::new(100, 100);
@@ -13463,6 +13483,7 @@ mod tests {
         assert_eq!(pixel.blue(), 255);
     }
 
+    #[cfg(feature = "ps-device")]
     #[test]
     fn test_clip() {
         let mut dev = SkiaDevice::new(100, 100);
@@ -13522,6 +13543,7 @@ mod tests {
         assert_eq!(right_pixel.green(), 255); // white
     }
 
+    #[cfg(feature = "ps-device")]
     #[test]
     fn test_erase_page() {
         let mut dev = SkiaDevice::new(100, 100);
@@ -13563,6 +13585,7 @@ mod tests {
         assert_eq!(pixel.blue(), 255);
     }
 
+    #[cfg(feature = "ps-device")]
     #[test]
     fn test_show_page() {
         let mut dev = SkiaDevice::new(10, 10);
@@ -13574,6 +13597,7 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
+    #[cfg(feature = "ps-device")]
     #[test]
     fn test_transform() {
         let mut dev = SkiaDevice::new(200, 200);

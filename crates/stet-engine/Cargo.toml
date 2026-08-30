@@ -16,5 +16,5 @@ stet-core.workspace = true
 stet-ops.workspace = true
 
 [dev-dependencies]
-stet-render.workspace = true
+stet-render = { workspace = true, features = ["parallel", "ps-device"] }
 flate2 = "1"

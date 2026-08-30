@@ -35,7 +35,7 @@ both of which drive `stet-render` for you.
 | [`render_region_prepared_parallel`] / `_cancellable` / `_with_progress` | Parallel viewport variants with progress callbacks and cancellation tokens for interactive UIs. |
 | [`ImageCache`] | Pre-converted RGBA image cache, amortizing decode + ICC conversion across repeated viewport renders of the same page. |
 | [`build_icc_cache_for_list`] | Sweep a `DisplayList` and populate an [`IccCache`](https://docs.rs/stet-graphics/latest/stet_graphics/icc/struct.IccCache.html) with every embedded ICC profile it references. |
-| [`SkiaDevice`] | `OutputDevice` implementation — plug it into a `Context` for streaming per-page PS/PDF rendering. |
+| [`SkiaDevice`] | `OutputDevice` implementation — plug it into a `Context` for streaming per-page PS/PDF rendering. Requires the `ps-device` feature (on by default). |
 | [`PngSinkFactory`] | `PageSinkFactory` that streams banded output straight to a PNG file. |
 
 [`render_to_rgba`]: https://docs.rs/stet-render/latest/stet_render/fn.render_to_rgba.html
@@ -52,6 +52,19 @@ both of which drive `stet-render` for you.
 | Feature | Default | Description |
 |---------|---------|------------|
 | `parallel` | yes | Multi-threaded banded rendering via `rayon`. Disable for a single-threaded build. |
+| `ps-device` | yes | [`SkiaDevice`] and its `OutputDevice` implementation, for the PostScript interpreter to paint into. Pulls in `stet-core`. |
+
+Turning `ps-device` off drops `stet-core` — the PostScript VM — from the
+dependency graph entirely. Rendering a `DisplayList` needs none of it, so a
+consumer that only rasterizes (a PDF viewer, say) can take:
+
+```toml
+stet-render = { version = "0.6", default-features = false, features = ["parallel"] }
+```
+
+Note that `default-features = false` also switches off `parallel`, so re-enable
+it by name unless you want single-threaded rendering. `stet-pdf-reader` depends
+on `stet-render` exactly this way.
 
 ## Usage
 

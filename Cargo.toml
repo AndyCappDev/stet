@@ -46,7 +46,10 @@ stet-graphics = { path = "crates/stet-graphics", version = "0.6.0" }
 stet-core = { path = "crates/stet-core", version = "0.6.0" }
 stet-ops = { path = "crates/stet-ops", version = "0.6.0" }
 stet-engine = { path = "crates/stet-engine", version = "0.6.0" }
-stet-render = { path = "crates/stet-render", version = "0.6.0" }
+# `default-features = false` so a member can decline `ps-device` (and with
+# it stet-core). Members that need it name it; see
+# scripts/check-crate-independence.sh.
+stet-render = { path = "crates/stet-render", version = "0.6.0", default-features = false }
 stet-pdf = { path = "crates/stet-pdf", version = "0.6.0" }
 stet-viewer = { path = "crates/stet-viewer", version = "0.6.0" }
 stet-pdf-reader = { path = "crates/stet-pdf-reader", version = "0.6.0" }

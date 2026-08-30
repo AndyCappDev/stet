@@ -22,7 +22,7 @@ stet-graphics.workspace = true
 stet-core.workspace = true
 stet-ops.workspace = true
 stet-engine.workspace = true
-stet-render = { workspace = true, optional = true }
+stet-render = { workspace = true, optional = true, features = ["parallel", "ps-device"] }
 stet-pdf = { workspace = true, optional = true }
 
 [dev-dependencies]

@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`stet-pdf-reader` no longer links the PostScript interpreter.** Its
+  default features pulled `stet-render`, which depended unconditionally on
+  `stet-core` for a single trait, so a PDF-only consumer compiled the whole
+  PostScript VM — contradicting the README's "PDF-only users don't pay for the
+  VM". `stet-render` now gates `SkiaDevice` and its `OutputDevice`
+  implementation behind a new default-on `ps-device` feature, and the reader
+  takes the crate without it. `stet-pdf-reader`'s dependency closure is now
+  `stet-fonts`, `stet-graphics`, `stet-render` and the two tiny-skia forks,
+  with PDF → RGBA rendering and parallelism unchanged.
+
+  **This is additive for existing users**: `stet-render`'s defaults still
+  include `ps-device`, so anything depending on it in the normal way keeps
+  `SkiaDevice` and the trait impl. Only a consumer that opts out with
+  `default-features = false` loses them, and such a consumer must now also
+  re-enable `parallel` by name if it wants multi-threaded rendering.
+
 ### Fixed
 
 - **Mesh-shaded PDFs could exhaust memory and fail to render, worse the more

@@ -6,8 +6,11 @@
 PDF parser and renderer. Reads PDF files and converts pages to display lists
 for rendering.
 
-This crate has **no dependency on stet-core** — it depends only on `stet-fonts`
-and `stet-graphics`, making it usable independently of the PostScript interpreter.
+This crate has **no dependency on stet-core** — it depends only on `stet-fonts`,
+`stet-graphics` and (for the `render` feature) `stet-render`, making it usable
+independently of the PostScript interpreter. That holds with default features
+on: `stet-render` is taken without its `ps-device` feature, so the PostScript
+VM is absent from the dependency graph even when rendering to RGBA.
 
 ## Rendering Correctness
 
@@ -33,7 +36,7 @@ for detail.
 | Feature | Default | Description |
 |---------|---------|------------|
 | `jpx` | yes | JPEG 2000 (JPXDecode) via `hayro-jpeg2000` |
-| `render` | yes | `render_page_to_rgba()` via `stet-render` |
+| `render` | yes | `render_page_to_rgba()` via `stet-render`, taken without its `ps-device` feature so no PostScript VM is linked |
 
 ## Usage
 

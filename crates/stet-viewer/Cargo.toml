@@ -14,7 +14,7 @@ categories = ["gui", "graphics"]
 [dependencies]
 stet-graphics.workspace = true
 stet-core.workspace = true
-stet-render.workspace = true
+stet-render = { workspace = true, features = ["parallel"] }
 eframe.workspace = true
 egui.workspace = true
 rayon.workspace = true

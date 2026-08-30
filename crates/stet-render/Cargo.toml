@@ -12,13 +12,21 @@ keywords = ["postscript", "pdf", "rendering", "rasterizer", "graphics"]
 categories = ["rendering", "graphics"]
 
 [features]
-default = ["parallel"]
+default = ["parallel", "ps-device"]
 parallel = ["rayon"]
+# Implement `stet_core::device::OutputDevice` for `SkiaDevice`, so the
+# PostScript interpreter can paint into it directly. That trait hands a device
+# the live interpreter `Context` at end of job, so implementing it means
+# linking the PostScript VM. Rendering a display list — the path every
+# front-end actually takes — needs none of it, so a consumer that only
+# rasterizes (notably `stet-pdf-reader`) turns this off and drops `stet-core`
+# from its dependency graph entirely.
+ps-device = ["dep:stet-core"]
 
 [dependencies]
 stet-fonts.workspace = true
 stet-graphics.workspace = true
-stet-core.workspace = true
+stet-core = { workspace = true, optional = true }
 stet-tiny-skia.workspace = true
 png.workspace = true
 rayon = { workspace = true, optional = true }
