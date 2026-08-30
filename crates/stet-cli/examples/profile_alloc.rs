@@ -6,9 +6,18 @@
 //!
 //! Wraps the system allocator, records a backtrace for every allocation at or
 //! above `STET_PROFILE_MIN` bytes (default 1 MiB), and snapshots the live set
-//! whenever it reaches a new high-water mark. Small allocations are counted
-//! but not attributed, so the snapshot accounts for the bulk without paying a
-//! backtrace on every `Vec` push.
+//! when it passes the running peak by more than `STET_PROFILE_JUMP` bytes
+//! (default 256 MiB). Small allocations are counted but not attributed, so the
+//! snapshot accounts for the bulk without paying a backtrace on every `Vec`
+//! push.
+//!
+//! **If it reports an empty snapshot against a large peak, lower
+//! `STET_PROFILE_JUMP`.** The default margin is tuned for a peak dominated by
+//! one huge allocation; a peak accumulated out of many mid-sized ones never
+//! clears it, and the tool then says "0 allocations" where the honest answer
+//! is "the peak did not arrive in one step". That reads as "nothing to see"
+//! and is how an investigation gets abandoned early. Attributing `4245.pdf`
+//! at 24 threads needed `STET_PROFILE_JUMP=16777216`.
 //!
 //! Written to investigate `pdf_samples/5447.pdf`, whose rasterization costs
 //! ~140x the size of the canvas it produces.
@@ -30,6 +39,12 @@ static ARMED: AtomicBool = AtomicBool::new(false);
 
 /// Allocations at or above this size get a backtrace.
 static MIN_TRACKED: AtomicUsize = AtomicUsize::new(1 << 20);
+
+/// How far the live set must exceed the running peak before a snapshot is
+/// worth the walk. A single dominant allocation clears this easily; a peak
+/// built out of many mid-sized ones never does, and reports an empty snapshot
+/// against a large peak. Lower it via `STET_PROFILE_JUMP` when that happens.
+static SNAPSHOT_JUMP: AtomicUsize = AtomicUsize::new(256 << 20);
 
 /// Live tracked allocations: pointer -> (size, backtrace).
 static TRACKED: Mutex<Option<HashMap<usize, (usize, String)>>> = Mutex::new(None);
@@ -117,7 +132,7 @@ fn note_dealloc(ptr: usize, size: usize) {
 /// margin to be worth the walk.
 fn maybe_snapshot(live: usize) {
     let peak = PEAK.load(Ordering::Relaxed);
-    if live <= peak.saturating_add(256 << 20) {
+    if live <= peak.saturating_add(SNAPSHOT_JUMP.load(Ordering::Relaxed)) {
         if live > peak {
             PEAK.store(live, Ordering::Relaxed);
         }
@@ -186,6 +201,11 @@ fn main() {
         && let Ok(n) = v.parse()
     {
         MIN_TRACKED.store(n, Ordering::Relaxed);
+    }
+    if let Ok(v) = std::env::var("STET_PROFILE_JUMP")
+        && let Ok(n) = v.parse()
+    {
+        SNAPSHOT_JUMP.store(n, Ordering::Relaxed);
     }
 
     let data = std::fs::read(&path).expect("read input");
