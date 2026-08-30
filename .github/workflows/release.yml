@@ -166,6 +166,12 @@ jobs:
           fi
           desc="$(file -b "$bin")"
           echo "$desc"
+          # These patterns are the word order of each *runner's own* file(1),
+          # which is not portable: macOS prints "Mach-O 64-bit executable
+          # x86_64" while GNU file on Linux prints "Mach-O 64-bit x86_64
+          # executable" for the identical binary. That is fine because each
+          # target is checked on its own platform -- but if these checks ever
+          # move to one host, the Mach-O patterns must be rewritten.
           case "${{ matrix.target }}" in
             x86_64-apple-darwin)   want="Mach-O 64-bit executable x86_64" ;;
             aarch64-apple-darwin)  want="Mach-O 64-bit executable arm64" ;;
