@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Mesh-shaded PDFs could exhaust memory and fail to render, worse the more
+  cores the machine had.** `render_patch_shading` triangulated every patch of
+  a shading regardless of which band was being drawn, and bands render
+  concurrently — one per thread — so the same triangle list was built once per
+  core. Cost scaled with core count rather than with the file. A prepress PDF
+  with a page-spanning Coons mesh at 300 dpi peaked at 2.1 GB on one thread and
+  31.4 GB on sixteen, and on a 24-core machine with less than ~50 GB of RAM it
+  did not render at all. Patches and triangles that cannot reach the band being
+  drawn are now skipped before they are built. The same file now renders in
+  0.94 s at 2.2 GB on 24 threads, and CPU time at 16 threads fell from 99.1 s
+  to 5.8 s — the surplus was duplicated work, so throughput improves alongside
+  memory. Rendered output is byte-identical.
+
 ## [0.6.0] — 2026-08-27
 
 A hardening release. The public Rust API is strictly additive — nothing was
