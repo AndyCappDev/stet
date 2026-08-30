@@ -36,6 +36,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`stet-cli` did not build with `--no-default-features`.** The `viewer`
+  feature was not genuinely optional: `render_dropped_pdf` names viewer
+  channel types in its signature but carried no `#[cfg]`, so a headless build
+  failed to compile even though both of its callers sit inside the
+  viewer-gated `run_viewer_mode`. This is the configuration a server, CI or
+  container install wants, and the one a static musl binary requires.
+
+- **A headless build's `--help` advertised a viewer it does not have.** It
+  listed `--device viewer` — which exits with "viewer not available" — and
+  claimed a bare `stet` launches the viewer, when it starts the REPL. Both
+  lines are now conditional on the feature.
+
 - **A job that requested a non-zero exit status was reported as having
   completed.** `.quitwithcode 1` and the new `--output` failure both end the
   job through `quit`, which printed "completed (quit)" regardless of the code

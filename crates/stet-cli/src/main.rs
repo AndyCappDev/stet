@@ -1147,6 +1147,20 @@ fn run_viewer_mode(
 
 /// Print the top-level usage/help text.
 fn print_help() {
+    // A headless build (`--no-default-features`, which is what the static
+    // musl artifact is) has no viewer, so its help must not offer one — the
+    // device errors out and there is no window for a bare `stet` to open.
+    let viewer_device_line = if cfg!(feature = "viewer") {
+        "    --device viewer         Launch the interactive desktop viewer.\n"
+    } else {
+        ""
+    };
+    let no_file_behaviour = if cfg!(feature = "viewer") {
+        "With no FILE, stet launches the interactive viewer."
+    } else {
+        "With no FILE, stet starts an interactive PostScript REPL.\n\
+         This build has no viewer (compiled without the 'viewer' feature)."
+    };
     println!(
         "stet {} — PostScript Level 3 interpreter and PDF renderer.
 
@@ -1156,13 +1170,12 @@ Usage:
     stet --help
     stet --version
 
-With no FILE, stet launches the interactive viewer.
+{}
 
 Output devices:
     --device png            Render each page to PNG (default for files).
     --device pdf            Render to PDF (vector output).
-    --device viewer         Launch the interactive desktop viewer.
-    --device viewport-png   Render via the viewport pipeline (audit mode).
+{}    --device viewport-png   Render via the viewport pipeline (audit mode).
     --device null           No rendering output (test / scripting use).
 
 Common options:
@@ -1233,7 +1246,9 @@ Examples:
 
 Documentation: https://github.com/AndyCappDev/stet
 Issues:        https://github.com/AndyCappDev/stet/issues",
-        env!("CARGO_PKG_VERSION")
+        env!("CARGO_PKG_VERSION"),
+        no_file_behaviour,
+        viewer_device_line
     );
 }
 
@@ -2102,6 +2117,11 @@ fn is_pdf_file(filename: &str) -> bool {
 /// and `password_response_rx` may be `None` for headless callers (no
 /// viewer) — in that case only `initial_password` is tried and failure
 /// is reported to stderr.
+// Only reachable from `run_viewer_mode`, and its signature names viewer
+// channel types, so it compiles only when the viewer does. Without this the
+// `viewer` feature is not genuinely optional and `--no-default-features`
+// fails to build — which is the configuration a static musl binary needs.
+#[cfg(feature = "viewer")]
 #[allow(clippy::too_many_arguments)]
 fn render_dropped_pdf(
     path: &str,
