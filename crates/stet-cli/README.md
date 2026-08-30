@@ -115,6 +115,12 @@ Output devices:
                              viewer feature, png otherwise)
 
 Common options:
+  -o, --output <PATH>        Write output to PATH instead of alongside the
+                             input. A "%d" token in PATH becomes the page
+                             number ("%03d" zero-pads to three digits);
+                             without one, PATH names a single file and a job
+                             producing a second page is an error. Takes a
+                             single input file
   --dpi <DPI>                Resolution for raster output (default 300)
   --page <SIZE>              Page size for PostScript/EPS input, in points:
                              a named size (letter, legal, tabloid, ledger,

@@ -11,6 +11,7 @@ use stet_core::dict::DictKey;
 use stet_core::error::PsError;
 use stet_core::graphics_state::GraphicsState;
 use stet_core::object::{EntityId, ObjFlags, PsObject, PsValue};
+use stet_core::output_template::{ExpandError, OutputTemplate};
 use stet_fonts::geometry::{Matrix, PathSegment};
 
 // ---------- Page device dict helpers ----------
@@ -538,11 +539,11 @@ pub fn op_showpage_continue(ctx: &mut Context) -> Result<(), PsError> {
     if should_render && in_filter {
         // Replay display list and render
         let list = ctx.take_display_list();
-        if let Some(ref mut device) = ctx.device {
-            let output_path = generate_output_path(ctx.output_path.as_deref(), page_count);
-            if let Err(e) = device.replay_and_show(list, &output_path) {
-                eprintln!("showpage error: {}", e);
-            }
+        let path = resolve_page_output(ctx, page_count)?;
+        if let Some(ref mut device) = ctx.device
+            && let Err(e) = device.replay_and_show(list, &path)
+        {
+            eprintln!("showpage error: {}", e);
         }
     } else {
         ctx.display_list.clear();
@@ -624,11 +625,11 @@ pub fn op_copypage_continue(ctx: &mut Context) -> Result<(), PsError> {
         // Replay display list (copypage preserves page content, but we must
         // transfer ownership for pipelined rendering)
         let list = ctx.take_display_list();
-        if let Some(ref mut device) = ctx.device {
-            let output_path = generate_output_path(ctx.output_path.as_deref(), page_count);
-            if let Err(e) = device.replay_and_show(list, &output_path) {
-                eprintln!("copypage error: {}", e);
-            }
+        let path = resolve_page_output(ctx, page_count)?;
+        if let Some(ref mut device) = ctx.device
+            && let Err(e) = device.replay_and_show(list, &path)
+        {
+            eprintln!("copypage error: {}", e);
         }
     }
 
@@ -689,11 +690,67 @@ fn is_nonempty_proc(obj: &PsObject) -> bool {
     }
 }
 
-/// Generate the output file path for a given page number.
+/// Resolve where the page about to be written should go, and count it.
 ///
-/// Pattern: `{basename}-{pagenum:04d}.png`
-fn generate_output_path(base_path: Option<&str>, page_count: i32) -> String {
-    match base_path {
+/// Shared by `showpage` and `copypage`, which differ in everything except
+/// this. On success the page is recorded as emitted, so the next call sees a
+/// higher index; on failure the job is aborted.
+fn resolve_page_output(ctx: &mut Context, page_number: i32) -> Result<String, PsError> {
+    let emitted_index = ctx.pages_emitted + 1;
+    // A device that accumulates every page into one file (PDF) is served by a
+    // single name however many pages arrive; only a page-per-file device can
+    // collide with itself, so the others always look like the first page.
+    let effective_index = if ctx.device.as_ref().is_none_or(|d| d.writes_file_per_page()) {
+        emitted_index
+    } else {
+        1
+    };
+    match generate_output_path(
+        ctx.output_template.as_ref(),
+        ctx.output_path.as_deref(),
+        page_number,
+        effective_index,
+    ) {
+        Ok(path) => {
+            ctx.pages_emitted = emitted_index;
+            Ok(path)
+        }
+        Err(e) => {
+            // A no-token `--output` on a job that turned out to be
+            // multi-page. Page 1 is already on disk and stays there; abort
+            // rather than overwrite it.
+            //
+            // This is a mistake in the command line, not in the PostScript
+            // program, so it leaves through `exit_code` + `Quit` rather than
+            // raising `ioerror` — the program did nothing wrong, and an
+            // operand-stack dump would only bury the message that says how to
+            // fix the invocation.
+            eprintln!("Error: {}", e);
+            ctx.exit_code = Some(1);
+            Err(PsError::Quit)
+        }
+    }
+}
+
+/// Generate the output file path for a page about to be written.
+///
+/// With an explicit `-o` / `--output` template the template decides: a `%d`
+/// conversion expands to `page_number`, and a template without one names a
+/// single file, which is an error once `emitted_index` passes 1.
+///
+/// Without a template this keeps the historical PostScript convention —
+/// `{basename}-{pagenum:04d}.png`, applied even to a single-page job — because
+/// the visual suites and every existing script depend on those names.
+fn generate_output_path(
+    template: Option<&OutputTemplate>,
+    base_path: Option<&str>,
+    page_number: i32,
+    emitted_index: u32,
+) -> Result<String, ExpandError> {
+    if let Some(template) = template {
+        return template.expand(page_number, emitted_index);
+    }
+    Ok(match base_path {
         Some(path) => {
             // Strip extension, add page number
             let base = if let Some(pos) = path.rfind('.') {
@@ -701,10 +758,10 @@ fn generate_output_path(base_path: Option<&str>, page_count: i32) -> String {
             } else {
                 path
             };
-            format!("{}-{:04}.png", base, page_count)
+            format!("{}-{:04}.png", base, page_number)
         }
-        None => format!("output-{:04}.png", page_count),
-    }
+        None => format!("output-{:04}.png", page_number),
+    })
 }
 
 #[cfg(test)]
@@ -720,12 +777,49 @@ mod tests {
 
     #[test]
     fn test_generate_output_path() {
-        assert_eq!(generate_output_path(Some("test.png"), 1), "test-0001.png");
         assert_eq!(
-            generate_output_path(Some("/tmp/foo.ps.png"), 3),
+            generate_output_path(None, Some("test.png"), 1, 1).unwrap(),
+            "test-0001.png"
+        );
+        assert_eq!(
+            generate_output_path(None, Some("/tmp/foo.ps.png"), 3, 3).unwrap(),
             "/tmp/foo.ps-0003.png"
         );
-        assert_eq!(generate_output_path(None, 1), "output-0001.png");
+        assert_eq!(
+            generate_output_path(None, None, 1, 1).unwrap(),
+            "output-0001.png"
+        );
+    }
+
+    #[test]
+    fn test_generate_output_path_with_template() {
+        // An explicit template overrides the derived name entirely, and a
+        // token expands even for a single-page job.
+        let tok = OutputTemplate::parse("p-%03d.png").unwrap();
+        assert_eq!(
+            generate_output_path(Some(&tok), Some("ignored.png"), 1, 1).unwrap(),
+            "p-001.png"
+        );
+
+        // No token: the first emitted page takes the literal path...
+        let plain = OutputTemplate::parse("out.png").unwrap();
+        assert_eq!(
+            generate_output_path(Some(&plain), Some("ignored.png"), 1, 1).unwrap(),
+            "out.png"
+        );
+        // ...and a second one is refused instead of overwriting it.
+        assert!(generate_output_path(Some(&plain), None, 2, 2).is_err());
+    }
+
+    #[test]
+    fn test_generate_output_path_template_ignores_filtered_pages() {
+        // `--pages 5` renders one file; the logical number is 5 but it is the
+        // first emitted page, so a no-token template is still valid.
+        let plain = OutputTemplate::parse("out.png").unwrap();
+        assert_eq!(
+            generate_output_path(Some(&plain), None, 5, 1).unwrap(),
+            "out.png"
+        );
     }
 
     #[test]

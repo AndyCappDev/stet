@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`-o` / `--output` for the CLI.** Output no longer has to land next to the
+  input. The path is a *template*: a `%d` in it is replaced by the page number
+  and `%0Nd` zero-pads (`p-%03d.png` gives `p-001.png`), while a path without
+  a token names a single file, written exactly as given with no extension
+  mangling. This is the shape `gs -sOutputFile=` uses, so an existing
+  shell-out pipeline can point at stet without restructuring.
+
+  Naming is decided by the template rather than by the page count, which is
+  what makes PostScript and PDF input behave identically — a PostScript page
+  count is not knowable in advance, since pages appear as `showpage` runs.
+  Where Ghostscript resolves that by opening the literal path once and
+  streaming every page into it (leaving several concatenated images in one
+  file, exit 0, no warning), stet **stops with an error on the second page**,
+  names a `%03d` form to use, and leaves page 1 intact. For PDF input the page
+  count is known up front, so the same mistake is refused before anything is
+  rendered.
+
+  `-o` takes one input file, and is rejected for `--device viewer` and
+  `--device null`, which write no file. `--device pdf` collects every page
+  into one file, so a `%d` token there is an error rather than being ignored.
+  Writing to stdout (`-o -`) is not implemented and says so.
+
+  Default naming without `-o` is unchanged: `in-0001.png` for PostScript,
+  `doc.png` / `doc-001.png` for PDF.
+
+### Fixed
+
+- **A job that requested a non-zero exit status was reported as having
+  completed.** `.quitwithcode 1` and the new `--output` failure both end the
+  job through `quit`, which printed "completed (quit)" regardless of the code
+  requested. A non-zero code now prints "FAILED". The process exit status was
+  already correct.
+
 ## [0.7.0] — 2026-08-30
 
 A dependency-hygiene release. A PDF-only consumer no longer compiles the

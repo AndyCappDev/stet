@@ -126,6 +126,7 @@ fn main() {
     let mut target_width: Option<u32> = None;
     let mut target_height: Option<u32> = None;
     let mut page_size: Option<(f64, f64)> = None;
+    let mut output_arg: Option<String> = None;
     let mut file_args: Vec<String> = Vec::new();
     let mut i = 1;
     while i < args.len() {
@@ -303,6 +304,20 @@ fn main() {
                     std::process::exit(1);
                 }
             }
+            "-o" | "--output" => {
+                if i + 1 < args.len() {
+                    if output_arg.is_some() {
+                        eprintln!("Error: --output given more than once");
+                        std::process::exit(1);
+                    }
+                    output_arg = Some(args[i + 1].clone());
+                    i += 2;
+                    continue;
+                } else {
+                    eprintln!("Error: --output requires a path");
+                    std::process::exit(1);
+                }
+            }
             "--width" => {
                 if i + 1 < args.len() {
                     target_width = Some(args[i + 1].parse().unwrap_or_else(|_| {
@@ -353,6 +368,31 @@ fn main() {
     }
     if (target_width.is_some() || target_height.is_some()) && dpi.is_some() {
         eprintln!("Error: --width/--height cannot be combined with --dpi");
+        std::process::exit(1);
+    }
+
+    // Parse and validate `--output` before anything is rendered, so a typo in
+    // the template is reported at the command line rather than at the first
+    // `showpage` with pages already on disk.
+    let output_template = output_arg.as_deref().map(|raw| {
+        if raw == "-" {
+            eprintln!(
+                "Error: --output '-' (write to stdout) is not supported yet; \
+give a file path"
+            );
+            std::process::exit(1);
+        }
+        stet_core::output_template::OutputTemplate::parse(raw).unwrap_or_else(|e| {
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
+        })
+    });
+    if output_template.is_some() && file_args.len() > 1 {
+        eprintln!(
+            "Error: --output takes a single input file (got {}); \
+run stet once per file",
+            file_args.len()
+        );
         std::process::exit(1);
     }
 
@@ -420,6 +460,32 @@ size (use --width/--height to scale PDF output)"
         std::process::exit(1);
     }
 
+    // `--output` names a file; devices that write none have nothing to name.
+    if output_template.is_some() && matches!(device.as_str(), "viewer" | "null") {
+        eprintln!(
+            "Error: --output does not apply to --device {} (it writes no file)",
+            device
+        );
+        std::process::exit(1);
+    }
+    if output_template.is_some() && file_args.is_empty() {
+        eprintln!("Error: --output requires an input file");
+        std::process::exit(1);
+    }
+    // PDF output is a single file containing every page, so there is no page
+    // number for a `%d` to stand for.
+    if device == "pdf"
+        && let Some(t) = output_template.as_ref()
+        && t.has_page_token()
+    {
+        eprintln!(
+            "Error: --output '{}' has a '%d' page-number token, but --device pdf \
+writes all pages to one file",
+            t.raw()
+        );
+        std::process::exit(1);
+    }
+
     if (target_width.is_some() || target_height.is_some())
         && !matches!(device.as_str(), "png" | "viewport-png")
     {
@@ -445,6 +511,7 @@ size (use --width/--height to scale PDF output)"
                 page_size,
                 timeout_secs,
                 max_vm_mb,
+                output_template,
             );
         }
         "viewport-png" => {
@@ -464,6 +531,7 @@ size (use --width/--height to scale PDF output)"
                 page_size,
                 timeout_secs,
                 max_vm_mb,
+                output_template,
             );
         }
         "pdf" => {
@@ -480,7 +548,13 @@ size (use --width/--height to scale PDF output)"
                 std::process::exit(1);
             }
             if all_pdf {
-                run_pdf_input_pdf(&file_args, &icc_cfg, &page_filter, password.as_deref());
+                run_pdf_input_pdf(
+                    &file_args,
+                    &icc_cfg,
+                    &page_filter,
+                    password.as_deref(),
+                    output_template.as_ref(),
+                );
             } else {
                 // PS input → PDF output. --password does not apply here.
                 let _ = &password;
@@ -493,6 +567,7 @@ size (use --width/--height to scale PDF output)"
                     page_size,
                     timeout_secs,
                     max_vm_mb,
+                    output_template,
                 );
             }
         }
@@ -551,6 +626,7 @@ fn run_png_mode(
     page_size: Option<(f64, f64)>,
     timeout_secs: Option<f64>,
     max_vm_mb: Option<u64>,
+    output_template: Option<stet_core::output_template::OutputTemplate>,
 ) {
     // Check if all files are PDFs — use fast path (no PS interpreter needed)
     if !file_args.is_empty() && file_args.iter().all(|f| is_pdf_file(f)) {
@@ -565,6 +641,7 @@ fn run_png_mode(
             password,
             target_width,
             target_height,
+            output_template.as_ref(),
         );
         return;
     }
@@ -578,6 +655,7 @@ fn run_png_mode(
 
     let mut ctx = create_context(icc_cfg, timeout_secs, max_vm_mb);
     ctx.page_filter = page_filter;
+    ctx.output_template = output_template;
 
     // Register device factory (before setpagedevice)
     let cmyk_bytes = ctx.icc_cache.system_cmyk_bytes().cloned();
@@ -606,6 +684,14 @@ fn run_png_mode(
     }
 }
 
+/// Build a `%03d` form of a path, for the "use a template like this" hint.
+fn suggest_page_template(path: &str) -> String {
+    match stet_core::output_template::split_extension(path) {
+        Some((stem, ext)) => format!("{}-%03d{}", stem, ext),
+        None => format!("{}-%03d", path),
+    }
+}
+
 /// Run in PDF output mode — vector PDF output.
 fn run_pdf_mode(
     dpi_override: Option<f64>,
@@ -616,13 +702,23 @@ fn run_pdf_mode(
     page_size: Option<(f64, f64)>,
     timeout_secs: Option<f64>,
     max_vm_mb: Option<u64>,
+    output_template: Option<stet_core::output_template::OutputTemplate>,
 ) {
     let mut ctx = create_context(icc_cfg, timeout_secs, max_vm_mb);
     ctx.page_filter = page_filter;
     let dpi_val = dpi_override.unwrap_or(300.0);
 
+    // PDF output is one file for the whole job, so an explicit `--output`
+    // pins the device's path directly rather than being rederived per page
+    // from the name `showpage` passes down.
+    let pinned_output = output_template.as_ref().map(|t| t.raw().to_string());
+    ctx.output_template = output_template;
     ctx.device_factory = Some(Box::new(move |w, h| {
-        Box::new(PdfDevice::new(w, h, dpi_val))
+        let mut dev = PdfDevice::new(w, h, dpi_val);
+        if let Some(ref path) = pinned_output {
+            dev.set_output_path(path.clone());
+        }
+        Box::new(dev)
     }));
 
     // PDF output: enable pdfmark + distiller-params so prologues see a
@@ -1070,6 +1166,12 @@ Output devices:
     --device null           No rendering output (test / scripting use).
 
 Common options:
+    -o, --output <PATH>     Write output to PATH instead of alongside the
+                            input. A \"%d\" token in PATH is replaced by the
+                            page number (\"%03d\" zero-pads to three digits);
+                            without one, PATH names a single file and a job
+                            that produces a second page is an error. Takes
+                            one input file.
     --dpi <DPI>             DPI for raster output (default 300).
     --page <SIZE>           Page size for PostScript/EPS input, in points:
                             a named size (letter, legal, tabloid, ledger,
@@ -1123,6 +1225,8 @@ Examples:
     stet                                # launch the viewer
     stet doc.ps                         # render PostScript
     stet --device png --pages 1 doc.pdf # render PDF page 1 to PNG
+    stet -o out.png --pages 1 doc.pdf   # render one page to a chosen path
+    stet -o 'p-%03d.png' doc.pdf        # render every page as p-001.png, ...
     stet --device pdf in.ps             # PostScript → PDF
     stet --device pdf in.pdf            # PDF → PDF (content-fidelity rewrite)
     stet inspect doc.pdf                # show PDF structure
@@ -1422,8 +1526,16 @@ fn run_file_jobs(
                     job_duration.as_secs_f64()
                 );
                 match e {
+                    // `quit` covers both a clean early exit and a job that
+                    // asked for a failing status via `.quitwithcode` or a
+                    // fatal `--output` clash. A non-zero requested code means
+                    // the job did not do what was asked.
                     stet_core::error::PsError::Quit => {
-                        eprintln!("Job {} completed (quit): {}", job_idx + 1, display_name);
+                        if ctx.exit_code.unwrap_or(0) != 0 {
+                            eprintln!("Job {} FAILED: {}", job_idx + 1, display_name);
+                        } else {
+                            eprintln!("Job {} completed (quit): {}", job_idx + 1, display_name);
+                        }
                     }
                     _ => {
                         eprintln!("Job {} FAILED: {}", job_idx + 1, display_name);
@@ -2193,6 +2305,7 @@ fn run_pdf_input_png(
     password: Option<&str>,
     target_width: Option<u32>,
     target_height: Option<u32>,
+    output_template: Option<&stet_core::output_template::OutputTemplate>,
 ) {
     let icc_cache = build_icc_cache(icc_cfg);
 
@@ -2238,6 +2351,34 @@ fn run_pdf_input_png(
 
         let start = std::time::Instant::now();
         let page_count = doc.page_count();
+        // Unlike PostScript, a PDF's page count is known before rendering, so
+        // a no-token `--output` on a multi-page selection can be refused up
+        // front rather than after page 1 is already on disk.
+        if let Some(t) = output_template
+            && !t.has_page_token()
+        {
+            let selected = (0..page_count)
+                .filter(|p| {
+                    page_filter
+                        .as_ref()
+                        .is_none_or(|f| f.contains(&(*p as i32 + 1)))
+                })
+                .count();
+            if selected > 1 {
+                eprintln!(
+                    "Error: --output '{}' has no '%d' page-number token, but {} pages \
+were selected from '{}'",
+                    t.raw(),
+                    selected,
+                    filename
+                );
+                eprintln!(
+                    "help: use a template such as '{}', or select one page with --pages",
+                    suggest_page_template(t.raw())
+                );
+                std::process::exit(1);
+            }
+        }
         eprintln!("\n{}", "=".repeat(60));
         eprintln!("Processing PDF: {} ({} pages)", filename, page_count);
         eprintln!("{}", "=".repeat(60));
@@ -2260,10 +2401,15 @@ fn run_pdf_input_png(
                 target_height,
             ) {
                 Ok((rgba, w, h)) => {
-                    let out_path = if page_count == 1 {
-                        format!("{}.png", output_base)
-                    } else {
-                        format!("{}-{:03}.png", output_base, page_1based)
+                    let out_path = match output_template {
+                        // Validated above: without a token exactly one page is
+                        // selected, so the first-emitted index is always 1.
+                        Some(t) => t.expand(page_1based, 1).unwrap_or_else(|e| {
+                            eprintln!("Error: {}", e);
+                            std::process::exit(1);
+                        }),
+                        None if page_count == 1 => format!("{}.png", output_base),
+                        None => format!("{}-{:03}.png", output_base, page_1based),
                     };
                     write_png_file(&out_path, &rgba, w, h);
                     eprintln!("  Page {}: {}x{} → {}", page_1based, w, h, out_path);
@@ -2291,6 +2437,7 @@ fn run_pdf_input_pdf(
     icc_cfg: &IccCliConfig,
     page_filter: &Option<std::collections::HashSet<i32>>,
     password: Option<&str>,
+    output_template: Option<&stet_core::output_template::OutputTemplate>,
 ) {
     use stet_core::device::OutputDevice;
 
@@ -2329,11 +2476,21 @@ fn run_pdf_input_pdf(
         // colliding with the input. If a user actually feeds us
         // `foo-out.pdf` the would-be output is `foo-out-out.pdf` which is
         // safe — the collision check below is the defense-in-depth.
-        let base = filename
-            .strip_suffix(".pdf")
-            .or_else(|| filename.strip_suffix(".PDF"))
-            .unwrap_or(filename);
-        let output_path = format!("{}-out.pdf", base);
+        let output_path = match output_template {
+            // One PDF holds every page, so the template is a plain path; a
+            // `%d` token is rejected at the command line.
+            Some(t) => t.expand(1, 1).unwrap_or_else(|e| {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }),
+            None => {
+                let base = filename
+                    .strip_suffix(".pdf")
+                    .or_else(|| filename.strip_suffix(".PDF"))
+                    .unwrap_or(filename);
+                format!("{}-out.pdf", base)
+            }
+        };
 
         // Refuse to overwrite the input. Compare canonical forms when
         // both exist on disk; fall back to a string compare otherwise.

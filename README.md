@@ -73,6 +73,7 @@ zoom presets, minimap navigation, and drag-and-drop.
 | Option | Description |
 |--------|------------|
 | `--device <TYPE>` | Output: `png`, `pdf`, `viewer` (default), `null` |
+| `-o`, `--output <PATH>` | Write output to `PATH` instead of alongside the input. A `%d` token becomes the page number (`%03d` zero-pads); without one, `PATH` is a single file and a second page is an error. One input file at a time. See [Choosing where output goes](#choosing-where-output-goes). |
 | `--dpi <DPI>` | Resolution (overrides device default; all built-in devices default to 300) |
 | `--pages <RANGE>` | Page filter: `1`, `1-5`, `2,4,6` |
 | `--page <SIZE>` | Page size for PostScript/EPS input: a named size (`letter`, `legal`, `tabloid`, `ledger`, `executive`, `a0`–`a6`, `b4`, `b5`) or `WIDTHxHEIGHT` in points, e.g. `620x1000`. Add `-landscape` / `-portrait` to orient a named size. See [Page size](#page-size). |
@@ -88,6 +89,44 @@ zoom presets, minimap navigation, and drag-and-drop.
 | `--password <PW>` | Password for encrypted PDF input |
 | `--timeout <SECONDS>` | Abort a job running longer than this. No limit by default — PostScript is Turing-complete and legitimate jobs run for minutes. Set one for untrusted input |
 | `--max-vm <MB>` | Ceiling on PostScript VM — strings, arrays, dictionaries (default 8192). Exceeding it raises `VMerror` instead of aborting. Separate from the renderer's image and band buffers, so it does **not** cap rendering resolution |
+
+### Choosing where output goes
+
+By default stet writes next to the input: `doc.pdf` becomes `doc.png`, or
+`doc-001.png`, `doc-002.png`, … when it has several pages. `-o` / `--output`
+puts the result somewhere you choose, which is what a shell-out pipeline
+built around `gs -sOutputFile=` expects:
+
+```bash
+stet --device png -o /tmp/preview.png --pages 1 doc.pdf  # exactly this path
+stet --device png -o '/tmp/p-%03d.png' doc.pdf           # p-001.png, p-002.png, …
+stet --device pdf -o out.pdf in.ps                       # PostScript → chosen PDF
+```
+
+The path is a template, and the `%d` in it — not the number of pages — is
+what decides the naming. `%d` is replaced by the page number and `%0Nd`
+zero-pads it to `N` digits, so `p-%03d.png` yields `p-001.png`. A template
+with no token names one file: the single-page case most people want, written
+to exactly the path given, with no extension mangling.
+
+Deciding from the template rather than the page count is what lets
+PostScript and PDF behave identically here. A PostScript page count is not
+knowable in advance — pages appear as `showpage` runs — so page 1's name has
+to be committed before anyone knows whether a page 2 is coming. Ghostscript
+resolves that by opening the literal path once and streaming every page into
+it, which silently leaves several concatenated images in one file (measured
+against gs 10.05.1: `-sOutputFile=out.png` on a three-page job gives one
+`out.png` holding three PNGs, exit 0, no warning; most viewers stop at the
+first and the other two are invisible). stet accepts the same templates but
+**stops with an error on the second page instead**, naming a `%03d` form to
+use, and leaves page 1 on disk. For PDF input the page count *is* known, so
+the same mistake is caught before anything is rendered.
+
+`-o` takes one input file — with several, which output each belongs to is
+ambiguous — and does not apply to `--device viewer` or `--device null`,
+which write no file. `--device pdf` collects every page into a single PDF, so
+a `%d` token there is rejected rather than silently ignored. Writing to
+stdout (`-o -`) is not supported yet.
 
 ### Page size
 

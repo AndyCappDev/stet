@@ -64,6 +64,18 @@ pub trait OutputDevice {
     /// Only meaningful for PDF output; other devices ignore this.
     fn set_trim_box(&mut self, _llx: f64, _lly: f64, _urx: f64, _ury: f64) {}
 
+    /// Whether each page becomes its own output file.
+    ///
+    /// True for raster devices, which write one image per `showpage`; false
+    /// for devices such as PDF that accumulate every page into a single file
+    /// and only write it at end of job. The distinction decides whether an
+    /// explicit `--output` path without a `%d` page-number token can serve a
+    /// multi-page job: a single-file device is happy with one name, a
+    /// page-per-file device would overwrite its own earlier pages.
+    fn writes_file_per_page(&self) -> bool {
+        true
+    }
+
     /// Page dimensions in device pixels.
     fn page_size(&self) -> (u32, u32);
 

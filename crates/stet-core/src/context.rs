@@ -251,6 +251,16 @@ pub struct Context {
     pub page_width: u32,
     pub page_height: u32,
     pub output_path: Option<String>,
+    /// Explicit `-o` / `--output` template, when the user supplied one.
+    ///
+    /// Takes precedence over the name derived from the input file in
+    /// [`Self::output_path`]. Held parsed so that a malformed template is
+    /// rejected at the command line rather than at the first `showpage`.
+    pub output_template: Option<crate::output_template::OutputTemplate>,
+    /// Count of pages actually written so far, as opposed to the logical page
+    /// number, which advances even for pages excluded by [`Self::page_filter`].
+    /// A no-token `--output` template is only valid while this is 1.
+    pub pages_emitted: u32,
     /// Page filter: if set, only render pages in this set (1-based).
     pub page_filter: Option<std::collections::HashSet<i32>>,
     /// Factory closure for creating raster devices (registered by CLI).
@@ -1048,6 +1058,8 @@ impl Context {
             page_width: 612,
             page_height: 792,
             output_path: None,
+            output_template: None,
+            pages_emitted: 0,
             page_filter: None,
             device_factory: None,
             font_directory,

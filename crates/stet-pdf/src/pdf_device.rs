@@ -169,6 +169,15 @@ impl PdfDevice {
         Ok(())
     }
 
+    /// Pin the file this device writes at end of job.
+    ///
+    /// Set from an explicit `--output` path so the name is used verbatim,
+    /// instead of being derived in [`Self::replay_and_show`] from the
+    /// per-page name the interpreter passes down.
+    pub fn set_output_path(&mut self, path: impl Into<String>) {
+        self.output_path = Some(path.into());
+    }
+
     /// The `/Producer` written when no `pdfmark` `/DOCINFO` overrides it.
     ///
     /// Carries the version, so a file can be traced to the build that wrote
@@ -1556,6 +1565,12 @@ impl OutputDevice for PdfDevice {
 
     fn show_page(&mut self, _output_path: &str) -> Result<(), String> {
         Ok(())
+    }
+
+    /// Every page accumulates into one PDF, written at end of job, so a
+    /// single output name serves a multi-page document.
+    fn writes_file_per_page(&self) -> bool {
+        false
     }
 
     fn draw_image(&mut self, _sample_data: &[u8], _params: &ImageParams) {}
