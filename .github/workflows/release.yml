@@ -109,6 +109,13 @@ jobs:
           # best-effort Rosetta run. The real verification is a human on Intel
           # hardware at the draft-release gate -- which is what that gate is
           # for, and is stronger evidence than a runner anyway.
+          #
+          # Done once, for v0.8.0: the cross-built artifact runs natively on
+          # an Intel Mac, `xattr -l` is empty after a curl install (confirming
+          # the Gatekeeper advice in .github/release-downloads.md), and the
+          # viewer opens -- which is more than CI covers, since Rosetta only
+          # exercised --version and a render. Treat the cross-build as proven
+          # rather than provisional; a spot check per release is enough.
           - target: x86_64-apple-darwin
             os: macos-14
             features: ""
