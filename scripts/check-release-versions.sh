@@ -121,6 +121,30 @@ else
     done
 fi
 
+# Release-asset download URLs must name the exact current version.
+#
+# Unlike a dependency snippet, which stays correct across a patch release
+# because cargo resolves "0.8" to the newest 0.8.x, a download URL names a
+# file that either exists or 404s. `curl -L .../v0.8.0/stet-0.8.0-...tar.gz`
+# is wrong the instant 0.8.1 ships, and it is on the front page, aimed at
+# someone deciding whether stet is worth their time. Full version here, not
+# just the minor.
+url_bad=$(grep -rn 'releases/download/v[0-9]' README.md crates/*/README.md docs/*.md 2>/dev/null \
+    | grep -v "releases/download/v${ws_version}/" || true)
+# Archive *filenames* travel with the URL and carry the version too -- in a
+# shell variable, an unpack command, and the directory it produces. One rule
+# for any `stet-X.Y.Z-<target>` string catches all of them, so a new snippet
+# shape cannot slip past by not being a `cd` line.
+dir_bad=$(grep -rnoE 'stet-[0-9]+\.[0-9]+\.[0-9]+-[a-z0-9_]+' README.md crates/*/README.md docs/*.md 2>/dev/null \
+    | grep -v ":stet-${ws_version}-" || true)
+if [ -n "$url_bad" ] || [ -n "$dir_bad" ]; then
+    echo -e "${RED}check-release-versions: release-asset path(s) not on ${ws_version}${RESET}" >&2
+    [ -n "$url_bad" ] && echo "$url_bad" >&2
+    [ -n "$dir_bad" ] && echo "$dir_bad" >&2
+    echo -e "${YELLOW}  These name a file on the releases page; a stale one 404s.${RESET}" >&2
+    errors=$((errors + 1))
+fi
+
 # README dependency snippets must name the current minor.
 #
 # These are what a reader copies off crates.io, and nothing checked them:

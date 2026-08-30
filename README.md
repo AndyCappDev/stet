@@ -3,7 +3,7 @@
 <p align="center">A modern, open-source PostScript and PDF rendering engine written in pure Rust.</p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-0.7.0-blue" alt="Version 0.7.0">
+  <img src="https://img.shields.io/badge/Version-0.8.0-blue" alt="Version 0.8.0">
   <img src="https://img.shields.io/badge/License-Apache--2.0_OR_MIT-green" alt="License Apache-2.0 OR MIT">
   <img src="https://img.shields.io/badge/Rust-1.88+-orange" alt="Rust 1.88+">
 </p>
@@ -18,6 +18,16 @@ WASM viewer.
 The PostScript interpreter and PDF reader are independent — use either or
 both — but they produce the same display list type, so every output device
 and rendering path works with both sources.
+
+## Getting started
+
+Three ways in. Pick the row that matches what you are doing:
+
+| I want to… | Start here | More |
+|---|---|---|
+| **See what it does, right now** | Open the [browser sampler](https://andycappdev.github.io/stet/) and drop a PS, EPS or PDF file on the page. Nothing to install, nothing uploaded — it renders client-side. | [Try it online](#try-it-online) |
+| **Render files on my machine or in a pipeline** | [Download a prebuilt binary](#download-a-prebuilt-binary) — no Rust toolchain needed — or `cargo install stet-cli`. | [Install](#install) · [CLI usage](#cli-usage) |
+| **Build rendering into my own program** | Add the `stet` crate to your `Cargo.toml`. Pure Rust: no C dependencies and no system libraries to install. | [Library usage](#library-usage) |
 
 ## Try it online
 
@@ -37,19 +47,88 @@ This is a **capability sampler, not a production viewer**:
 - **Single-threaded WASM.** No rayon parallelism. Rendering is ~2-4× slower
   than native stet.
 
-For production work, install the native binary below.
+For production work, use a native binary — see [Install](#install).
 
 ## Install
+
+### Download a prebuilt binary
+
+No Rust toolchain required. Archives for Linux, macOS and Windows are
+attached to each [release](https://github.com/AndyCappDev/stet/releases/latest),
+alongside a `SHA256SUMS` file to check them against.
+
+| Platform | Archive | Notes |
+|---|---|---|
+| Linux — servers, CI, containers | `x86_64-unknown-linux-musl` | Statically linked. No glibc version requirement, no runtime libraries, no GUI. **Start here on a server.** |
+| Linux — desktop | `x86_64-unknown-linux-gnu` | Includes the interactive viewer. Needs glibc 2.35+ (Debian 12, Ubuntu 22.04 or newer) and X11/Wayland + OpenGL to open a window; rendering to files needs neither. |
+| macOS — Apple Silicon | `aarch64-apple-darwin` | |
+| macOS — Intel | `x86_64-apple-darwin` | |
+| Windows | `x86_64-pc-windows-msvc` | `.zip`. Statically linked CRT, so no redistributable to install. |
+
+Everything is embedded in the binary — 35 fonts, init scripts, encodings and
+ICC profiles — so the archive holds the executable and the licences, and
+there is nothing to install alongside it.
+
+**Linux and macOS.** Pick the archive from the table above and drop its name
+in — the rest of the command is the same for all four:
+
+```bash
+ASSET=stet-0.8.0-x86_64-unknown-linux-musl.tar.gz     # see the table above
+
+curl -L "https://github.com/AndyCappDev/stet/releases/download/v0.8.0/$ASSET" | tar xz
+cd "${ASSET%.tar.gz}"
+./stet --version
+```
+
+On macOS, `uname -m` tells you which to take: `arm64` → `aarch64-apple-darwin`,
+`x86_64` → `x86_64-apple-darwin`.
+
+**Use `curl` on macOS rather than a browser.** The binaries are unsigned, and
+Gatekeeper quarantines whatever a browser downloads, so a double-click gives
+"cannot be opened because the developer cannot be verified". The quarantine
+attribute is set by the downloading application and `curl` sets none, which
+sidesteps it entirely. If you already downloaded through a browser, clear the
+flag with `xattr -dr com.apple.quarantine stet`.
+
+**Windows.** PowerShell aliases `curl` to `Invoke-WebRequest`, which takes
+different arguments — so call `curl.exe` explicitly. Windows 10 1803 and later
+ship both it and `tar`:
+
+```powershell
+curl.exe -L -O https://github.com/AndyCappDev/stet/releases/download/v0.8.0/stet-0.8.0-x86_64-pc-windows-msvc.zip
+tar -xf stet-0.8.0-x86_64-pc-windows-msvc.zip
+cd stet-0.8.0-x86_64-pc-windows-msvc
+.\stet.exe --version
+```
+
+SmartScreen warns that the publisher is unknown on first run; choose
+*More info → Run anyway*. Code-signing certificates cost money and stet does
+not have one.
+
+### Install with cargo
 
 ```bash
 cargo install stet-cli
 ```
 
-That builds the `stet` binary with the interactive viewer included. For a
-headless build, or to work from a checkout, see
-[Building from Source](#building-from-source).
+Builds the `stet` binary with the interactive viewer included. Needs a Rust
+toolchain (1.88+), and compiles the workspace including the GUI stack, so it
+takes appreciably longer than downloading a binary.
 
-To use stet as a library instead, see [Library Usage](#library-usage).
+For a headless build with no viewer and no GUI dependencies:
+
+```bash
+cargo install stet-cli --no-default-features
+```
+
+### Build from source
+
+To work from a checkout, see [Building from Source](#building-from-source).
+
+### Use it as a library
+
+To call stet from your own Rust program rather than the command line, see
+[Library Usage](#library-usage).
 
 ## CLI Usage
 
@@ -164,7 +243,7 @@ document.pdf
 Metadata:
   Title: Annual Report 2026
   Author: Scott Bowman
-  Producer: stet 0.7.0
+  Producer: stet 0.8.0
   Created: 2026-04-27 12:00:00 UTC
 
 Pages: 4
@@ -291,7 +370,7 @@ these matter more than raw rendering speed.
 
 ```toml
 [dependencies]
-stet = "0.7"
+stet = "0.8"
 ```
 
 > **Upgrading?** Cargo will not auto-bump across these pre-1.0 minors, each
@@ -464,7 +543,7 @@ For the smallest dependency footprint (display lists only):
 
 ```toml
 [dependencies]
-stet = { version = "0.7", default-features = false }
+stet = { version = "0.8", default-features = false }
 ```
 
 ### Configuration

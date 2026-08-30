@@ -22,7 +22,7 @@ detail — it matters for prepress and proofing workflows.
 
 ```toml
 [dependencies]
-stet = "0.7"
+stet = "0.8"
 ```
 
 ### PostScript / EPS
@@ -50,7 +50,7 @@ PostScript interpreter at all, so PDF-only users don't pay for the VM:
 
 ```toml
 [dependencies]
-stet-pdf-reader = "0.7"
+stet-pdf-reader = "0.8"
 ```
 
 ```rust
@@ -193,7 +193,7 @@ To use only display lists (smallest dependency footprint):
 
 ```toml
 [dependencies]
-stet = { version = "0.7", default-features = false }
+stet = { version = "0.8", default-features = false }
 ```
 
 ## Power User: Direct Context Access

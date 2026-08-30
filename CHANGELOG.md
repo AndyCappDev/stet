@@ -7,7 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-08-30
+
+The release you can download. Every release before this one shipped source
+only, so trying stet meant installing a Rust toolchain and compiling a
+workspace including a GUI stack — a barrier for exactly the people most
+likely to want it, who are replacing a Ghostscript call in a pipeline. This
+one attaches prebuilt binaries for Linux, macOS and Windows, and adds the
+`-o` flag such a pipeline needs to say where output goes.
+
 ### Added
+
+- **Prebuilt binaries on every release.** Linux (static musl and glibc+viewer),
+  macOS (Apple Silicon and Intel) and Windows, with a `SHA256SUMS` file.
+
+  The **static musl build is the one most people want**: no glibc version
+  requirement, no runtime libraries, no GUI, and nothing to install alongside
+  it — all 56 resources are embedded in the binary. The glibc build adds the
+  interactive viewer and needs glibc 2.35 or newer.
+
+  The binaries are unsigned, and the release notes say so rather than letting
+  you find out: macOS Gatekeeper quarantines browser downloads (install with
+  `curl` instead), and Windows SmartScreen warns about an unknown publisher.
 
 - **`-o` / `--output` for the CLI.** Output no longer has to land next to the
   input. The path is a *template*: a `%d` in it is replaced by the page number
