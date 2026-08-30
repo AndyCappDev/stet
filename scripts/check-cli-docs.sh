@@ -49,11 +49,17 @@ help_end="${help_range#*,}"
 
 # Flags the parser actually accepts: a match arm at the start of a line, which
 # excludes the spellings inside the help string and in comments. Long forms
-# only — the short aliases (-h, -V) are not separately documented.
+# only — the short aliases (-h, -V, -o) are not separately documented.
+#
+# An arm may lead with a short alias (`"-x" | "--example" => {`), so match the
+# whole arm and then pull the long forms out of it. Anchoring on `"--` instead
+# skips such an arm entirely and reports its flag as documented when it is in
+# neither README — silently inverting the one thing this script is for.
 mapfile -t flags < <(
   sed -n "1,${help_start}p;${help_end},\$p" "$main" |
-    grep -oE '^[[:space:]]+"--[a-z0-9-]+"' |
-    tr -d ' "' |
+    grep -E '^[[:space:]]+"-[^"]*"([[:space:]]*\|[[:space:]]*"[^"]*")*[[:space:]]*=>' |
+    grep -oE '"--[a-z0-9-]+"' |
+    tr -d '"' |
     sort -u
 )
 
