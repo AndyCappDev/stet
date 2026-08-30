@@ -59,7 +59,7 @@ dependency graph entirely. Rendering a `DisplayList` needs none of it, so a
 consumer that only rasterizes (a PDF viewer, say) can take:
 
 ```toml
-stet-render = { version = "0.6", default-features = false, features = ["parallel"] }
+stet-render = { version = "0.7", default-features = false, features = ["parallel"] }
 ```
 
 Note that `default-features = false` also switches off `parallel`, so re-enable

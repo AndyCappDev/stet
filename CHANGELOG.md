@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-08-30
+
+A dependency-hygiene release. A PDF-only consumer no longer compiles the
+PostScript interpreter, a mesh-shading memory fault that scaled with core
+count is fixed, and `--device null` works for the scripting use it is
+documented for.
+
+### Breaking
+
+One change, affecting only consumers who already opt out of `stet-render`'s
+default features. This is why the bump is minor rather than patch.
+
+- **`stet-render` with `default-features = false` no longer provides
+  `SkiaDevice` or its `OutputDevice` implementation.** They now sit behind the
+  new default-on `ps-device` feature. At 0.6.0, opting out of defaults dropped
+  only `parallel`; it now drops the device as well, so a consumer who declared
+  `stet-render = { version = "0.6", default-features = false }` to get a
+  single-threaded build will fail to compile against 0.7. Add the features you
+  want by name:
+
+  ```toml
+  stet-render = { version = "0.7", default-features = false, features = ["ps-device"] }
+  ```
+
+  Nothing changes for consumers on default features, which is the overwhelming
+  majority: `default = ["parallel", "ps-device"]`.
+
 ### Changed
 
 - **`stet-pdf-reader` no longer links the PostScript interpreter.** Its
@@ -19,11 +46,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `stet-fonts`, `stet-graphics`, `stet-render` and the two tiny-skia forks,
   with PDF → RGBA rendering and parallelism unchanged.
 
-  **This is additive for existing users**: `stet-render`'s defaults still
-  include `ps-device`, so anything depending on it in the normal way keeps
-  `SkiaDevice` and the trait impl. Only a consumer that opts out with
-  `default-features = false` loses them, and such a consumer must now also
-  re-enable `parallel` by name if it wants multi-threaded rendering.
+  Consumers on default features are unaffected; see Breaking above for the
+  one case that is not.
 
 ### Fixed
 
