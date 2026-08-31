@@ -161,6 +161,39 @@ if [ -n "$snippet_bad" ]; then
     errors=$((errors + 1))
 fi
 
+# crates/stet-wasm/Cargo.lock pins the stet crates by version.
+#
+# It goes stale at every bump even though stet-wasm's own version is not
+# moving, and nothing else notices: stet-wasm is `exclude`d from the
+# workspace, so the root `cargo build` never reads that lock, and the rest of
+# this script looks at docs rather than lockfiles. During the 0.8.1 bump it
+# still pinned 0.8.0 across eight crates *after* this script had reported OK;
+# it was found by grep. Refresh with:
+#
+#     cd crates/stet-wasm && cargo update --workspace --offline
+#
+# Only stet's own entries are checked. Third-party pins are cargo's business,
+# and stet-wasm's own `version` is deliberately on an independent cadence, so
+# both are skipped. The root Cargo.lock needs no rule: any `cargo build`
+# refreshes it, so it cannot be stale in a tree that compiles.
+wasm_lock="crates/stet-wasm/Cargo.lock"
+if [ -f "$wasm_lock" ]; then
+    wasm_bad=$(awk -v want="$ws_version" '
+        /^name = "/ { gsub(/name = "|"/, ""); name = $0; next }
+        /^version = / && name ~ /^stet/ && name != "stet-wasm" &&
+        name !~ /^stet-tiny-skia/ {
+            gsub(/version = "|"/, "")
+            if ($0 != want) print "  " name " = " $0
+        }
+    ' "$wasm_lock")
+    if [ -n "$wasm_bad" ]; then
+        echo -e "${RED}check-release-versions: ${wasm_lock} pins stet crates off ${ws_version}${RESET}" >&2
+        echo "$wasm_bad" >&2
+        echo -e "${YELLOW}  Refresh: (cd crates/stet-wasm && cargo update --workspace --offline)${RESET}" >&2
+        errors=$((errors + 1))
+    fi
+fi
+
 # CHANGELOG.md: must have an `## [X.Y.Z]` heading.
 if ! grep -q "^## \[${ws_version}\]" CHANGELOG.md; then
     echo -e "${RED}check-release-versions: CHANGELOG.md is missing a '## [${ws_version}]' entry${RESET}" >&2
@@ -174,4 +207,4 @@ if [ "$errors" -gt 0 ]; then
     exit 1
 fi
 
-echo -e "${GREEN}check-release-versions: OK (workspace ${ws_version} matches README + CHANGELOG; MSRV ${ws_msrv} matches badge + ci.yml)${RESET}"
+echo -e "${GREEN}check-release-versions: OK (workspace ${ws_version} matches README + CHANGELOG + wasm lock; MSRV ${ws_msrv} matches badge + ci.yml)${RESET}"
