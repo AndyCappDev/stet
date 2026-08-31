@@ -236,7 +236,7 @@ still sitting above that save's high-water mark, so `restore` releases it
 and `check_invalidrestore` never sees it. Only `Context::new` may use
 them, since during bootstrap the claim is true.
 `scripts/check-level-zero-alloc.sh` enforces that, and is wired into CI
-and `.git/hooks/pre-push`.
+and `.githooks/pre-push`.
 
 ### Group stack (PDF-imaging extension scopes)
 
