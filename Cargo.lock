@@ -2967,7 +2967,7 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "stet"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "png 0.17.16",
  "stet-core",
@@ -2982,7 +2982,7 @@ dependencies = [
 
 [[package]]
 name = "stet-cli"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "png 0.17.16",
  "rayon",
@@ -3000,7 +3000,7 @@ dependencies = [
 
 [[package]]
 name = "stet-core"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "fax",
  "flate2",
@@ -3022,7 +3022,7 @@ dependencies = [
 
 [[package]]
 name = "stet-engine"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "flate2",
  "stet-core",
@@ -3032,7 +3032,7 @@ dependencies = [
 
 [[package]]
 name = "stet-fonts"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "glob",
  "rustc-hash 2.1.3",
@@ -3042,7 +3042,7 @@ dependencies = [
 
 [[package]]
 name = "stet-graphics"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "glob",
  "moxcms",
@@ -3052,7 +3052,7 @@ dependencies = [
 
 [[package]]
 name = "stet-ops"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "flate2",
  "glob",
@@ -3063,7 +3063,7 @@ dependencies = [
 
 [[package]]
 name = "stet-pdf"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "flate2",
  "stet-core",
@@ -3073,7 +3073,7 @@ dependencies = [
 
 [[package]]
 name = "stet-pdf-reader"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "fax",
  "flate2",
@@ -3095,7 +3095,7 @@ dependencies = [
 
 [[package]]
 name = "stet-render"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "png 0.17.16",
  "rayon",
@@ -3130,7 +3130,7 @@ dependencies = [
 
 [[package]]
 name = "stet-viewer"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "eframe",
  "egui",

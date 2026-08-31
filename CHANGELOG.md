@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.1] — 2026-08-31
+
+A malformed-font crash fix. Font data arrives embedded in a PDF or a
+PostScript program, so it is attacker-controlled in the same way any PDF
+object is, and the affected code shipped in every release to date.
+
 ### Fixed
 
 - **A malformed CFF font no longer panics the process.** The Private DICT

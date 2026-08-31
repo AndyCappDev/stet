@@ -464,7 +464,7 @@ document.pdf
 Metadata:
   Title: Annual Report 2026
   Author: Scott Bowman
-  Producer: stet 0.8.0
+  Producer: stet 0.8.1
   Created: 2026-04-27 12:00:00 UTC
 
 Pages: 4

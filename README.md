@@ -3,7 +3,7 @@
 <p align="center">A modern, open-source PostScript and PDF rendering engine written in pure Rust.</p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-0.8.0-blue" alt="Version 0.8.0">
+  <img src="https://img.shields.io/badge/Version-0.8.1-blue" alt="Version 0.8.1">
   <img src="https://img.shields.io/badge/License-Apache--2.0_OR_MIT-green" alt="License Apache-2.0 OR MIT">
   <img src="https://img.shields.io/badge/Rust-1.88+-orange" alt="Rust 1.88+">
 </p>
@@ -73,9 +73,9 @@ there is nothing to install alongside it.
 in — the rest of the command is the same for all four:
 
 ```bash
-ASSET=stet-0.8.0-x86_64-unknown-linux-musl.tar.gz     # see the table above
+ASSET=stet-0.8.1-x86_64-unknown-linux-musl.tar.gz     # see the table above
 
-curl -L "https://github.com/AndyCappDev/stet/releases/download/v0.8.0/$ASSET" | tar xz
+curl -L "https://github.com/AndyCappDev/stet/releases/download/v0.8.1/$ASSET" | tar xz
 cd "${ASSET%.tar.gz}"
 ./stet --version
 ```
@@ -95,9 +95,9 @@ different arguments — so call `curl.exe` explicitly. Windows 10 1803 and later
 ship both it and `tar`:
 
 ```powershell
-curl.exe -L -O https://github.com/AndyCappDev/stet/releases/download/v0.8.0/stet-0.8.0-x86_64-pc-windows-msvc.zip
-tar -xf stet-0.8.0-x86_64-pc-windows-msvc.zip
-cd stet-0.8.0-x86_64-pc-windows-msvc
+curl.exe -L -O https://github.com/AndyCappDev/stet/releases/download/v0.8.1/stet-0.8.1-x86_64-pc-windows-msvc.zip
+tar -xf stet-0.8.1-x86_64-pc-windows-msvc.zip
+cd stet-0.8.1-x86_64-pc-windows-msvc
 .\stet.exe --version
 ```
 
@@ -243,7 +243,7 @@ document.pdf
 Metadata:
   Title: Annual Report 2026
   Author: Scott Bowman
-  Producer: stet 0.8.0
+  Producer: stet 0.8.1
   Created: 2026-04-27 12:00:00 UTC
 
 Pages: 4
