@@ -14,8 +14,22 @@ name: Fuzz
 # Moving it off the push path also buys a real budget. 60s per target from a
 # cold corpus finds nothing — SECURITY.md records that the first genuine
 # campaign's findings were all false positives bar one known upstream
-# overflow. 300s with a larger seed set is not a substitute for
-# `./fuzz/run.sh 3600` before a release, but it is no longer theatre.
+# overflow.
+#
+# One job per target, in a matrix. Each target then gets its own runner and
+# its own four cores instead of taking turns on one, so the wall clock is a
+# single target's budget rather than five in sequence. That is what pays for
+# the default: 1500s per target, five times the search the sequential version
+# did, in the same ~25 minutes. Actions minutes are free on a public repo, so
+# the five runners cost nothing.
+#
+# `fail-fast: false` because a crash in one target must not cancel the other
+# four — the point of the run is to collect every finding, not the first.
+#
+# This is a search, not a gate, and it cannot be made into one: fuzzing has no
+# completion criterion, and a run that passes says nothing about the next one.
+# The release gate is `./fuzz/replay.sh` (deterministic, ~4 minutes) plus the
+# regression tests every past finding was promoted into. See CLAUDE.md.
 on:
   schedule:
     # Mondays, 06:00 UTC.
@@ -25,16 +39,49 @@ on:
       duration:
         description: "Seconds per target"
         required: false
-        default: "300"
+        default: "1500"
 
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
 jobs:
-  fuzz:
-    name: Fuzz (nightly)
+  # Derive the target list from the fuzz crate's own [[bin]] sections rather
+  # than repeating it here. A sixth target added to `fuzz/Cargo.toml` is then
+  # fuzzed by CI without anyone remembering to edit this file — the failure
+  # mode of a hardcoded matrix is silent, and a target nobody runs is worse
+  # than a target that does not exist.
+  targets:
+    name: Enumerate targets
     runs-on: ubuntu-latest
+    outputs:
+      list: ${{ steps.find.outputs.list }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: find
+        run: |
+          list=$(sed -n 's/^name = "\(fuzz_[a-z0-9_]*\)"$/\1/p' fuzz/Cargo.toml \
+                 | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          echo "found: $list"
+          if [ "$list" = "[]" ]; then
+            echo "::error::no fuzz targets found in fuzz/Cargo.toml"
+            exit 1
+          fi
+          echo "list=$list" >> "$GITHUB_OUTPUT"
+
+  fuzz:
+    name: Fuzz ${{ matrix.target }}
+    needs: targets
+    runs-on: ubuntu-latest
+    # A cancelled job is not a failed one, so the `if: failure()` artifact
+    # upload below never fires on a timeout — the reproducers would be lost
+    # exactly when they matter. Cap the job below GitHub's 6h ceiling so an
+    # over-long dispatch fails cleanly and still uploads.
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.targets.outputs.list) }}
     # No `continue-on-error` here, unlike when this lived in ci.yml. That
     # existed so a nightly or cargo-fuzz breakage could not block a PR about
     # something else. On a schedule there is no PR to block, so a genuine
@@ -53,12 +100,13 @@ jobs:
         # means anything, so this stays capped even with a larger budget —
         # 703 PDFs under AddressSanitizer would spend the whole run replaying.
         run: SEED_LIMIT=200 ./fuzz/seed-corpus.sh
-      - name: Run each target
-        run: ./fuzz/run.sh "${{ github.event.inputs.duration || '300' }}"
+      - name: Run target
+        run: ./fuzz/run.sh "${{ github.event.inputs.duration || '1500' }}" "${{ matrix.target }}"
+      # upload-artifact@v4 requires a unique name per job, so key it by target.
       - name: Upload crash artifacts
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: fuzz-artifacts
+          name: fuzz-artifacts-${{ matrix.target }}
           path: fuzz/artifacts/
           if-no-files-found: ignore
