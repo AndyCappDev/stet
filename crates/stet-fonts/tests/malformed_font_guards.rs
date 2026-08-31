@@ -340,3 +340,100 @@ fn cff_zero_glyph_count_does_not_underflow() {
     let data: Vec<u8> = vec![1, 0, 4, 1, 0, 0, 0, 0, 0, 0, 0, 0];
     let _ = stet_fonts::cff_parser::parse_cff(&data);
 }
+
+// === CFF DICT offset operands =============================================
+
+/// A CFF INDEX holding `items`, with 1-byte offsets.
+fn cff_index(items: &[&[u8]]) -> Vec<u8> {
+    let mut out = (items.len() as u16).to_be_bytes().to_vec();
+    if items.is_empty() {
+        return out;
+    }
+    out.push(1); // offSize
+    let mut off = 1u8;
+    out.push(off);
+    for item in items {
+        off += item.len() as u8;
+        out.push(off);
+    }
+    for item in items {
+        out.extend_from_slice(item);
+    }
+    out
+}
+
+/// A minimal CFF whose single Top DICT is `top_dict`.
+///
+/// Padded past 64 bytes with trailing filler, which the INDEX structures — all
+/// self-describing — ignore. The padding is load-bearing for the overflow test
+/// below: a wrapped `offset + size` lands just *under* the offset, so it only
+/// clears a `<= data.len()` check when the file is at least that long. Without
+/// the padding the wrapped value exceeds the length, the check rejects it, and
+/// the bug goes unnoticed in any build with overflow checks off — which is
+/// every shipped build.
+fn cff_with_top_dict(top_dict: &[u8]) -> Vec<u8> {
+    let mut data = vec![1u8, 0, 4, 1]; // major, minor, hdrSize, offSize
+    data.extend_from_slice(&cff_index(&[b"A"])); // Name INDEX
+    data.extend_from_slice(&cff_index(&[top_dict])); // Top DICT INDEX
+    data.extend_from_slice(&cff_index(&[])); // String INDEX
+    data.extend_from_slice(&cff_index(&[])); // Global Subr INDEX
+    data.resize(64, 0);
+    data
+}
+
+/// Found by `cargo fuzz run fuzz_font_cff` on the 2026-08-31 weekly run.
+///
+/// The Private DICT operator carries `[size, offset]`, and the parser bounded
+/// them with `priv_offset + priv_size <= data.len()`. Both operands are `f64`,
+/// because CFF permits a real-number operand wherever an integer is expected,
+/// and `f64 as usize` saturates rather than wrapping — so the crashing font's
+/// `[1e49, 45]` became `[usize::MAX, 45]` and the bounds check overflowed
+/// before it could reject anything. Three sibling sites had the same shape:
+/// the FD-level Private DICT of a CID font, and both local-Subr offsets, which
+/// are relative to their Private DICT and so are added to it.
+///
+/// Rejecting the operand up front is what fixes it; a wider add would only
+/// move the ceiling.
+#[test]
+fn cff_private_dict_offset_overflow_does_not_panic() {
+    // Private DICT (op 18) with operands [1e49, 45]: a real-number size and a
+    // plausible offset. `1e49` is the CFF real encoding 30 1b 49 ff — nibbles
+    // '1' 'E' '4' '9' and the 0xf terminator — and 45 is the one-byte integer
+    // 45 + 139 = 0xb8.
+    let top_dict: &[u8] = &[0x1e, 0x1b, 0x49, 0xff, 0xb8, 18];
+    let _ = stet_fonts::cff_parser::parse_cff(&cff_with_top_dict(top_dict));
+}
+
+/// The reproducer as the fuzzer minimized it, parsed and then run through the
+/// charstring interpreter exactly as `fuzz_font_cff` does.
+#[test]
+fn cff_private_dict_offset_overflow_reproducer() {
+    const CRASH: &[u8] = &[
+        0x01, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x01, 0x00, 0x95, 0x94, 0x94, 0x94, 0x94, 0x94,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3b, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x93, 0x29, 0x29, 0x29, 0x29, 0x29, 0x29, 0x29, 0x29, 0x29, 0x6b, 0x6b,
+        0x6b, 0x6b, 0x6b, 0x6b, 0x6b, 0x6b, 0x6b, 0x6b, 0x6b, 0x6b, 0x6b, 0x00, 0x00, 0x00, 0x01,
+        0x00, 0x01, 0x01, 0x00, 0x00, 0x04, 0x01, 0x00, 0x00, 0x00, 0x00, 0x1e, 0x01, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x76, 0x00, 0x00, 0x00, 0x00, 0x7a, 0x00, 0x00, 0x20, 0x00, 0x00, 0x01, 0x04,
+        0x01, 0x00, 0xff, 0xb8, 0xff, 0xff, 0x6b, 0x6b, 0x6b, 0x6b, 0x6b, 0x29, 0x29, 0x29, 0x29,
+        0x29, 0x6b, 0x6b, 0x6b, 0x6b, 0x6b, 0x6b, 0x6b, 0x6b, 0x6b, 0x6b, 0x6b, 0x6b, 0x12, 0x00,
+        0x00, 0x01, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x7a, 0x00, 0x00, 0x20,
+        0x00, 0x00, 0x01, 0x04, 0x01, 0x00, 0x76, 0x00, 0x00, 0x00, 0x00, 0x00, 0x7a, 0x00,
+    ];
+    let Ok(fonts) = stet_fonts::cff_parser::parse_cff(CRASH) else {
+        return;
+    };
+    for font in fonts.iter().take(2) {
+        for cs in font.char_strings.iter().take(8) {
+            let _ = execute_type2_charstring(
+                cs,
+                &font.local_subrs,
+                &font.global_subrs,
+                0.0,
+                0.0,
+                false,
+            );
+        }
+    }
+}

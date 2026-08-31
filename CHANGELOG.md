@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A malformed CFF font no longer panics the process.** The Private DICT
+  operator carries `[size, offset]`, and both were bounds-checked with
+  `offset + size <= data.len()`. CFF permits a real-number operand wherever an
+  integer is expected, and `f64 as usize` saturates rather than wrapping, so a
+  font declaring a size of `1e49` reached that check as `usize::MAX` and
+  overflowed the add before it could reject anything. **Shipped release builds
+  are affected**, not only overflow-checked ones: with checks off the add wraps
+  to just below the offset, the `<= data.len()` bound then *passes*, and the
+  slice panics instead. Three sibling sites had the same shape: the per-FD
+  Private DICT of a CID-keyed font, and both local-Subr offsets, which are
+  added to their Private DICT offset. DICT operands destined for an offset or
+  length are now rejected up front unless they are finite, non-negative, and
+  inside what a CFF offset can address.
+
+  Font data is attacker-controlled in the same way any PDF object is — it
+  arrives embedded in a PDF or in a PostScript program — so this was reachable
+  from an untrusted input. Found by the weekly fuzz job.
+
 ### Changed
 
 - Crate descriptions and keywords across all eleven published crates now name

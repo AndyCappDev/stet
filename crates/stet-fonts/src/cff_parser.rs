@@ -193,37 +193,38 @@ pub fn parse_cff(data: &[u8]) -> Result<Vec<CffFont>, String> {
         // Private DICT (op 18: [size, offset])
         if let Some(priv_ops) = dict_get(&top_dict, DictOp::OneByte(18))
             && priv_ops.len() >= 2
+            && let Some(priv_size) = dict_usize(priv_ops[0])
+            && let Some(priv_offset) = dict_usize(priv_ops[1])
+            && priv_size > 0
+            && priv_offset > 0
+            && let Some(priv_end) = priv_offset.checked_add(priv_size)
+            && let Some(priv_data) = data.get(priv_offset..priv_end)
         {
-            let priv_size = priv_ops[0] as usize;
-            let priv_offset = priv_ops[1] as usize;
-            if priv_size > 0 && priv_offset > 0 && priv_offset + priv_size <= data.len() {
-                let priv_data = &data[priv_offset..priv_offset + priv_size];
-                let priv_dict = parse_dict_data(priv_data);
+            let priv_dict = parse_dict_data(priv_data);
 
-                // defaultWidthX (op 20)
-                if let Some(vals) = dict_get(&priv_dict, DictOp::OneByte(20))
-                    && let Some(&v) = vals.first()
-                {
-                    font.default_width_x = v;
-                }
+            // defaultWidthX (op 20)
+            if let Some(vals) = dict_get(&priv_dict, DictOp::OneByte(20))
+                && let Some(&v) = vals.first()
+            {
+                font.default_width_x = v;
+            }
 
-                // nominalWidthX (op 21)
-                if let Some(vals) = dict_get(&priv_dict, DictOp::OneByte(21))
-                    && let Some(&v) = vals.first()
-                {
-                    font.nominal_width_x = v;
-                }
+            // nominalWidthX (op 21)
+            if let Some(vals) = dict_get(&priv_dict, DictOp::OneByte(21))
+                && let Some(&v) = vals.first()
+            {
+                font.nominal_width_x = v;
+            }
 
-                // Local Subr INDEX (op 19, offset relative to Private DICT start)
-                if let Some(vals) = dict_get(&priv_dict, DictOp::OneByte(19))
-                    && let Some(&v) = vals.first()
-                {
-                    let subr_abs_offset = priv_offset + v as usize;
-                    if subr_abs_offset < data.len() {
-                        let (local_subrs, _) = parse_index(data, subr_abs_offset)?;
-                        font.local_subrs = local_subrs;
-                    }
-                }
+            // Local Subr INDEX (op 19, offset relative to Private DICT start)
+            if let Some(vals) = dict_get(&priv_dict, DictOp::OneByte(19))
+                && let Some(&v) = vals.first()
+                && let Some(rel) = dict_usize(v)
+                && let Some(subr_abs_offset) = priv_offset.checked_add(rel)
+                && subr_abs_offset < data.len()
+            {
+                let (local_subrs, _) = parse_index(data, subr_abs_offset)?;
+                font.local_subrs = local_subrs;
             }
         }
 
@@ -258,38 +259,35 @@ pub fn parse_cff(data: &[u8]) -> Result<Vec<CffFont>, String> {
                         // Each FD has its own Private DICT
                         if let Some(fd_priv_ops) = dict_get(&fd_top, DictOp::OneByte(18))
                             && fd_priv_ops.len() >= 2
+                            && let Some(fd_priv_size) = dict_usize(fd_priv_ops[0])
+                            && let Some(fd_priv_offset) = dict_usize(fd_priv_ops[1])
+                            && fd_priv_size > 0
+                            && fd_priv_offset > 0
+                            && let Some(fd_priv_end) = fd_priv_offset.checked_add(fd_priv_size)
+                            && let Some(fd_priv_data) = data.get(fd_priv_offset..fd_priv_end)
                         {
-                            let fd_priv_size = fd_priv_ops[0] as usize;
-                            let fd_priv_offset = fd_priv_ops[1] as usize;
-                            if fd_priv_size > 0
-                                && fd_priv_offset > 0
-                                && fd_priv_offset + fd_priv_size <= data.len()
+                            let fd_priv_dict = parse_dict_data(fd_priv_data);
+
+                            if let Some(vals) = dict_get(&fd_priv_dict, DictOp::OneByte(20))
+                                && let Some(&v) = vals.first()
                             {
-                                let fd_priv_data =
-                                    &data[fd_priv_offset..fd_priv_offset + fd_priv_size];
-                                let fd_priv_dict = parse_dict_data(fd_priv_data);
+                                fd_entry.default_width_x = v;
+                            }
+                            if let Some(vals) = dict_get(&fd_priv_dict, DictOp::OneByte(21))
+                                && let Some(&v) = vals.first()
+                            {
+                                fd_entry.nominal_width_x = v;
+                            }
 
-                                if let Some(vals) = dict_get(&fd_priv_dict, DictOp::OneByte(20))
-                                    && let Some(&v) = vals.first()
-                                {
-                                    fd_entry.default_width_x = v;
-                                }
-                                if let Some(vals) = dict_get(&fd_priv_dict, DictOp::OneByte(21))
-                                    && let Some(&v) = vals.first()
-                                {
-                                    fd_entry.nominal_width_x = v;
-                                }
-
-                                // FD-level local subrs
-                                if let Some(vals) = dict_get(&fd_priv_dict, DictOp::OneByte(19))
-                                    && let Some(&v) = vals.first()
-                                {
-                                    let subr_abs = fd_priv_offset + v as usize;
-                                    if subr_abs < data.len() {
-                                        let (fd_local, _) = parse_index(data, subr_abs)?;
-                                        fd_entry.local_subrs = fd_local;
-                                    }
-                                }
+                            // FD-level local subrs
+                            if let Some(vals) = dict_get(&fd_priv_dict, DictOp::OneByte(19))
+                                && let Some(&v) = vals.first()
+                                && let Some(rel) = dict_usize(v)
+                                && let Some(subr_abs) = fd_priv_offset.checked_add(rel)
+                                && subr_abs < data.len()
+                            {
+                                let (fd_local, _) = parse_index(data, subr_abs)?;
+                                fd_entry.local_subrs = fd_local;
                             }
                         }
 
@@ -366,6 +364,23 @@ fn parse_index(data: &[u8], offset: usize) -> Result<(Vec<Vec<u8>>, usize), Stri
 
     let end_offset = data_start + offsets[count];
     Ok((items, end_offset))
+}
+
+/// Narrow a DICT operand to a `usize` offset or length.
+///
+/// DICT operands are `f64` because CFF permits a real-number operand wherever
+/// an integer is expected (TN#5176 §4), so a hostile font can put `1e30` — or
+/// a negative — where an offset belongs. `f64 as usize` *saturates*: those
+/// become `usize::MAX` and `0`, and `usize::MAX` then overflows the very next
+/// add. Reject anything outside what a CFF offset can actually address
+/// instead; `u32::MAX` is the ceiling because INDEX offSize is at most 4 bytes
+/// and a DICT integer operand is at most 32-bit.
+fn dict_usize(v: f64) -> Option<usize> {
+    if v.is_finite() && v >= 0.0 && v <= f64::from(u32::MAX) {
+        Some(v as usize)
+    } else {
+        None
+    }
 }
 
 /// Read an offset of `off_size` bytes (1–4), big-endian unsigned.
