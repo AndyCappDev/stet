@@ -5,10 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "PostScript Level 3 interpreter and PDF rendering engine — library API"
+description = "Pure-Rust PostScript Level 3 interpreter — renders PostScript and EPS to raster images or PDF, with no C dependencies"
 repository.workspace = true
 homepage.workspace = true
-keywords = ["postscript", "pdf", "interpreter", "rendering", "graphics"]
+keywords = ["postscript", "eps", "interpreter", "rendering", "prepress"]
 categories = ["graphics", "rendering"]
 
 [features]

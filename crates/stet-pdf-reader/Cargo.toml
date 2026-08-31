@@ -5,10 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 license = "Apache-2.0 OR MIT"
 authors.workspace = true
-description = "PDF parser and renderer"
+description = "Pure-Rust PDF parser and renderer — no C dependencies, prepress-grade CMYK and spot colour, plus a read-only structural API"
 repository.workspace = true
 homepage.workspace = true
-keywords = ["pdf", "parser", "rendering", "graphics"]
+keywords = ["pdf", "parser", "rendering", "cmyk", "prepress"]
 categories = ["parser-implementations", "graphics"]
 
 [dependencies]

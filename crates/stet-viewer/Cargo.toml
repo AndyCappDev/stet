@@ -5,10 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Interactive egui desktop viewer for PostScript, EPS, and PDF files"
+description = "Interactive desktop viewer for PostScript, EPS, and PDF — egui/winit, pure Rust, no external renderer"
 repository.workspace = true
 homepage.workspace = true
-keywords = ["postscript", "pdf", "viewer", "gui"]
+keywords = ["postscript", "pdf", "viewer", "gui", "eps"]
 categories = ["gui", "graphics"]
 
 [dependencies]

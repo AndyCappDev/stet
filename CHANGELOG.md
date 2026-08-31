@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Crate descriptions and keywords across all eleven published crates now name
+  what distinguishes stet — pure Rust, no C dependencies, prepress-grade CMYK
+  and spot colour — rather than restating the crate name. `stet-pdf-reader`
+  was previously described as "PDF parser and renderer", five words that fit
+  every PDF crate on the registry.
+- The `stet` facade no longer describes itself as a "PDF rendering engine". It
+  depends on `stet-render` and `stet-pdf` (PDF *output*) and carries
+  `stet-pdf-reader` as a dev-dependency only, so it cannot read a PDF; the old
+  wording promised the one thing the crate does not do. PDF reading is
+  `stet-pdf-reader`.
+
 ## [0.8.0] — 2026-08-30
 
 The release you can download. Every release before this one shipped source

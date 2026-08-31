@@ -5,10 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Display list, ICC color, and graphics types shared by stet's PostScript interpreter and PDF reader"
+description = "Display-list IR, ICC colour management, and graphics types — a stable target for custom PostScript and PDF renderers"
 repository.workspace = true
 homepage.workspace = true
-keywords = ["postscript", "graphics", "color", "icc", "display-list"]
+keywords = ["graphics", "display-list", "icc", "color", "cmyk"]
 categories = ["graphics", "rendering"]
 
 [dependencies]

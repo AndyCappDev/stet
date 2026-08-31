@@ -5,10 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Command-line interface for stet — renders PostScript, EPS, and PDF files"
+description = "Render PostScript, EPS, and PDF to PNG or PDF from the command line — pure Rust, no Ghostscript required"
 repository.workspace = true
 homepage.workspace = true
-keywords = ["postscript", "pdf", "cli", "interpreter", "rendering"]
+keywords = ["postscript", "pdf", "cli", "eps", "rendering"]
 categories = ["command-line-utilities", "graphics"]
 
 [[bin]]

@@ -5,10 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "PostScript operator implementations for stet"
+description = "PostScript Level 3 operator implementations for stet — PLRM-conformant semantics and error handling"
 repository.workspace = true
 homepage.workspace = true
-keywords = ["postscript", "operators", "interpreter"]
+keywords = ["postscript", "operators", "interpreter", "plrm"]
 categories = ["graphics"]
 
 [dependencies]

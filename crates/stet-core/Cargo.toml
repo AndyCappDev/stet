@@ -5,10 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Core type system, storage, tokenizer, and context for stet PostScript interpreter"
+description = "Core type system, arena storage, tokenizer, and VM context for the stet PostScript interpreter"
 repository.workspace = true
 homepage.workspace = true
-keywords = ["postscript", "interpreter", "vm", "graphics"]
+keywords = ["postscript", "interpreter", "vm", "tokenizer"]
 categories = ["graphics"]
 
 [dependencies]

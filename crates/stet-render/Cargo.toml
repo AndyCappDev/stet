@@ -5,10 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "tiny-skia rasterizer for stet display lists — produces RGBA output from both PostScript and PDF input"
+description = "Pure-Rust rasterizer for stet display lists — PostScript and PDF to RGBA, banded and multi-threaded, no C dependencies"
 repository.workspace = true
 homepage.workspace = true
-keywords = ["postscript", "pdf", "rendering", "rasterizer", "graphics"]
+keywords = ["pdf", "postscript", "rasterizer", "rendering", "graphics"]
 categories = ["rendering", "graphics"]
 
 [features]
