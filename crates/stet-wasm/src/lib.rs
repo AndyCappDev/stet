@@ -218,8 +218,18 @@ pub fn create_interpreter() -> Interpreter {
 /// display lists for viewport re-rendering via `render_viewport()`.
 /// The interpreter state is reset after rendering so it can be reused.
 #[wasm_bindgen]
-pub fn render(interp: &mut Interpreter, ps_data: &[u8], dpi: f64, filename: &str) -> Result<JsValue, JsValue> {
-    log(&format!("stet: render() called — {} bytes, dpi={}, file={}", ps_data.len(), dpi, filename));
+pub fn render(
+    interp: &mut Interpreter,
+    ps_data: &[u8],
+    dpi: f64,
+    filename: &str,
+) -> Result<JsValue, JsValue> {
+    log(&format!(
+        "stet: render() called — {} bytes, dpi={}, file={}",
+        ps_data.len(),
+        dpi,
+        filename
+    ));
 
     // Clear previous display lists
     interp.page_display_lists.clear();
@@ -506,7 +516,11 @@ fn abandon_ps_stream(interp: &mut Interpreter) {
 /// Returns the number of pages, or throws on parse error.
 #[wasm_bindgen]
 pub fn open_pdf(interp: &mut Interpreter, pdf_data: &[u8], dpi: f64) -> Result<JsValue, JsValue> {
-    log(&format!("stet: open_pdf() called — {} bytes, dpi={}", pdf_data.len(), dpi));
+    log(&format!(
+        "stet: open_pdf() called — {} bytes, dpi={}",
+        pdf_data.len(),
+        dpi
+    ));
 
     // Clear previous state
     interp.page_display_lists.clear();
@@ -545,9 +559,9 @@ pub fn open_pdf(interp: &mut Interpreter, pdf_data: &[u8], dpi: f64) -> Result<J
     let count = doc.page_count();
     let scale = dpi / 72.0;
     for page_idx in 0..count {
-        let (page_w, page_h) = doc.page_size(page_idx).map_err(|e| {
-            JsValue::from_str(&format!("PDF page {} error: {}", page_idx, e))
-        })?;
+        let (page_w, page_h) = doc
+            .page_size(page_idx)
+            .map_err(|e| JsValue::from_str(&format!("PDF page {} error: {}", page_idx, e)))?;
         interp.page_display_lists.push(DisplayList::new());
         interp.page_prepared.push(None);
         interp.page_icc.push(None);
@@ -567,7 +581,10 @@ pub fn open_pdf(interp: &mut Interpreter, pdf_data: &[u8], dpi: f64) -> Result<J
     interp.pdf_cmyk_proofing = icc_cache.proofing_enabled();
     interp.pdf_icc_cache = Some(icc_cache);
 
-    log(&format!("stet: open_pdf complete — {} pages (content streams deferred)", count));
+    log(&format!(
+        "stet: open_pdf complete — {} pages (content streams deferred)",
+        count
+    ));
     Ok(JsValue::from(count as u32))
 }
 

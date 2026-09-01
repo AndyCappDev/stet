@@ -48,10 +48,7 @@ impl PageSink for NullSink {
             width: self.current_width,
             height: self.current_height,
         };
-        self.pages
-            .lock()
-            .map_err(|e| e.to_string())?
-            .push(page);
+        self.pages.lock().map_err(|e| e.to_string())?.push(page);
         Ok(())
     }
 }

@@ -34,8 +34,8 @@ fn main() {
     icc_cache.load_cmyk_profile_bytes(DEFAULT_CMYK_ICC);
 
     eprintln!("repro: parsing PDF…");
-    let mut doc = stet_pdf_reader::PdfDocument::from_bytes_with_icc(&pdf_data, icc_cache)
-        .expect("PDF parse");
+    let mut doc =
+        stet_pdf_reader::PdfDocument::from_bytes_with_icc(&pdf_data, icc_cache).expect("PDF parse");
     doc.set_font_provider(embedded_resources::build_font_provider());
 
     let cmyk_bytes: std::sync::Arc<Vec<u8>> = std::sync::Arc::new(DEFAULT_CMYK_ICC.to_vec());

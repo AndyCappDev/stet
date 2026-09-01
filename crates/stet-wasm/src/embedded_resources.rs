@@ -41,7 +41,8 @@ const IDENTITY_V_PS: &[u8] = include_bytes!("../../stet/resources/CMap/Identity-
 const NIMBUS_ROMAN_REGULAR: &[u8] =
     include_bytes!("../../stet/resources/Font/NimbusRoman-Regular.t1");
 const NIMBUS_ROMAN_BOLD: &[u8] = include_bytes!("../../stet/resources/Font/NimbusRoman-Bold.t1");
-const NIMBUS_ROMAN_ITALIC: &[u8] = include_bytes!("../../stet/resources/Font/NimbusRoman-Italic.t1");
+const NIMBUS_ROMAN_ITALIC: &[u8] =
+    include_bytes!("../../stet/resources/Font/NimbusRoman-Italic.t1");
 const NIMBUS_ROMAN_BOLD_ITALIC: &[u8] =
     include_bytes!("../../stet/resources/Font/NimbusRoman-BoldItalic.t1");
 const NIMBUS_SANS_REGULAR: &[u8] =
@@ -126,20 +127,14 @@ pub fn register_embedded_resources(files: &mut FileStore) {
         ("Font/NimbusMonoPS-Regular.t1", NIMBUS_MONO_REGULAR),
         ("Font/NimbusMonoPS-Bold.t1", NIMBUS_MONO_BOLD),
         ("Font/NimbusMonoPS-Italic.t1", NIMBUS_MONO_ITALIC),
-        (
-            "Font/NimbusMonoPS-BoldItalic.t1",
-            NIMBUS_MONO_BOLD_ITALIC,
-        ),
+        ("Font/NimbusMonoPS-BoldItalic.t1", NIMBUS_MONO_BOLD_ITALIC),
         ("Font/StandardSymbolsPS.t1", STANDARD_SYMBOLS),
         ("Font/D050000L.t1", DINGBATS),
         (
             "Font/NimbusSansNarrow-Regular.t1",
             NIMBUS_SANS_NARROW_REGULAR,
         ),
-        (
-            "Font/NimbusSansNarrow-Bold.t1",
-            NIMBUS_SANS_NARROW_BOLD,
-        ),
+        ("Font/NimbusSansNarrow-Bold.t1", NIMBUS_SANS_NARROW_BOLD),
         (
             "Font/NimbusSansNarrow-Oblique.t1",
             NIMBUS_SANS_NARROW_OBLIQUE,
@@ -163,14 +158,8 @@ pub fn register_embedded_resources(files: &mut FileStore) {
         ("Font/URWBookman-DemiItalic.t1", URW_BOOKMAN_DEMI_ITALIC),
         ("Font/URWGothic-Book.t1", URW_GOTHIC_BOOK),
         ("Font/URWGothic-Demi.t1", URW_GOTHIC_DEMI),
-        (
-            "Font/URWGothic-BookOblique.t1",
-            URW_GOTHIC_BOOK_OBLIQUE,
-        ),
-        (
-            "Font/URWGothic-DemiOblique.t1",
-            URW_GOTHIC_DEMI_OBLIQUE,
-        ),
+        ("Font/URWGothic-BookOblique.t1", URW_GOTHIC_BOOK_OBLIQUE),
+        ("Font/URWGothic-DemiOblique.t1", URW_GOTHIC_DEMI_OBLIQUE),
         ("Font/Z003-MediumItalic.t1", Z003_MEDIUM_ITALIC),
     ];
 
@@ -204,7 +193,10 @@ pub fn build_font_provider() -> FontProvider {
         ("NimbusSansNarrow-Regular", NIMBUS_SANS_NARROW_REGULAR),
         ("NimbusSansNarrow-Bold", NIMBUS_SANS_NARROW_BOLD),
         ("NimbusSansNarrow-Oblique", NIMBUS_SANS_NARROW_OBLIQUE),
-        ("NimbusSansNarrow-BoldOblique", NIMBUS_SANS_NARROW_BOLD_OBLIQUE),
+        (
+            "NimbusSansNarrow-BoldOblique",
+            NIMBUS_SANS_NARROW_BOLD_OBLIQUE,
+        ),
         ("P052-Roman", P052_ROMAN),
         ("P052-Bold", P052_BOLD),
         ("P052-Italic", P052_ITALIC),
