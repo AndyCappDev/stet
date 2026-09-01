@@ -152,7 +152,7 @@ cargo install stet-cli --no-default-features
 
 ### Build from source
 
-To work from a checkout, see [Building from Source](#building-from-source).
+To work from a checkout, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ### Use it as a library
 
@@ -402,15 +402,6 @@ these matter more than raw rendering speed.
 stet = "0.8"
 ```
 
-> **Upgrading?** Cargo will not auto-bump across these pre-1.0 minors, each
-> of which is a compatibility boundary. Two breaking surfaces so far:
-> **0.5.0** widened `PsValue::Int` from `i32` to `i64` (so `match` arms bind
-> an `i64`, and `as_i32()` now returns `None` out of range instead of always
-> `Some`), and **0.2.0** added `#[non_exhaustive]` to ~40 public
-> match-surface enums (`DisplayElement`, `PsError`, `Destination`, the
-> pdfmark records, …), so `match` sites need a `_ => { ... }` wildcard arm.
-> See [CHANGELOG.md](CHANGELOG.md) for the details of each.
-
 ```rust
 let mut interp = stet::Interpreter::new();
 let pages = interp.render(include_bytes!("document.ps"), 300.0)?;
@@ -421,168 +412,9 @@ let pages = interp.render(include_bytes!("document.ps"), 300.0)?;
 The `stet` crate embeds all required resources (35 fonts, init scripts,
 encodings, ICC color profiles) so there are no external files to ship.
 
-### Output Formats
-
-The interpreter produces a **display list** for each page. The display list
-is the central data structure — every output format is derived from it.
-
-| Method | Output | Use case |
-|--------|--------|----------|
-| `render()` | RGBA pixels + display list | Rasterization, thumbnails, image export |
-| `render_to_pdf()` | PDF document bytes | Print-quality vector output |
-| `render_to_display_list()` | Display list only | Custom renderers, viewport rendering, analysis |
-| `exec()` | Nothing | Test suites, scripting, data extraction |
-
-```rust
-// RGBA pixels at 300 DPI
-let pages = interp.render(ps_data, 300.0)?;
-
-// PDF output
-let pdf_bytes = interp.render_to_pdf(ps_data, 300.0)?;
-std::fs::write("output.pdf", &pdf_bytes)?;
-
-// Display list for custom rendering
-let pages = interp.render_to_display_list(ps_data, 300.0)?;
-for page in &pages {
-    for element in page.display_list.elements() {
-        // Fill, Stroke, Image, Clip, Shading, Text, Group, ...
-    }
-}
-```
-
-### Diagnostics
-
-An empty page list is not necessarily an error. The usual cause is a program
-that painted marks and then ended without calling `showpage` — the page is
-discarded and `render()` returns `Ok(vec![])`, which reads like a legitimate
-result. `warnings()` distinguishes the two:
-
-```rust
-let pages = interp.render(ps_data, 300.0)?;
-if pages.is_empty() {
-    for w in interp.warnings() {
-        eprintln!("warning: {}\n         {}", w, w.hint());
-    }
-}
-```
-
-Warnings describe the most recent render call and are cleared at the start of
-the next one. Programs that install `nulldevice` are exempt — that is the
-PLRM-sanctioned way to ask for no output, so unemitted marks are expected
-there. The CLI prints the same diagnostic to stderr.
-
-### Viewport Rendering
-
-Display lists support efficient viewport rendering — render any rectangular
-region at any zoom level without re-interpreting the PostScript:
-
-```rust
-let pages = interp.render_to_display_list(ps_data, 150.0)?;
-let prepared = stet::prepare_display_list(&pages[0].display_list);
-
-// Render just the top-left quadrant at 2x zoom
-let rgba = stet::render_region_prepared(
-    &pages[0].display_list, &prepared,
-    0.0, 0.0, 500.0, 500.0,     // viewport in device pixels
-    1000, 1000,                   // output pixel dimensions
-    150.0, None, None, false,
-);
-```
-
-### PDF Reader
-
-`stet-pdf-reader` is a separate crate that parses PDF files and converts
-pages to display lists. It does **not** depend on the PostScript interpreter —
-it can be used standalone for PDF rendering:
-
-```rust
-use stet_pdf_reader::PdfDocument;
-
-let doc = PdfDocument::from_bytes(&pdf_data)?;
-for page in 0..doc.page_count() {
-    let display_list = doc.render_page(page, 300.0)?;
-    // Same DisplayList type as the PS interpreter produces
-}
-```
-
-The display lists from the PDF reader and PostScript interpreter are the
-same type (`DisplayList`), so the same rendering pipeline handles both.
-
-For layer-aware rendering, build a `LayerSet` and pass it through:
-
-```rust
-use stet_pdf_reader::{PdfDocument, RenderIntent, layers};
-
-let doc = PdfDocument::from_bytes(&pdf_data)?;
-
-// Hide print-only watermarks for an interactive view.
-let view_set = doc.layer_set_for(RenderIntent::View);
-let (rgba, w, h) = doc.render_page_to_rgba_with_layers(0, 150.0, &view_set)?;
-
-// Or build a custom override set and toggle one layer.
-let mut custom = layers::layer_set_from_document(&doc);
-custom.set(/* ocg_id */ 42, false);
-let (rgba, w, h) = doc.render_page_to_rgba_with_layers(0, 150.0, &custom)?;
-```
-
-Full layer reference: [`docs/PDF-LAYERS.md`](docs/PDF-LAYERS.md).
-Runnable example: `cargo run --example render_pdf_layers -- some.pdf`
-(see [`crates/stet/examples/render_pdf_layers.rs`](crates/stet/examples/render_pdf_layers.rs)).
-
-### Custom Output Devices
-
-The interpreter communicates with output backends through the `OutputDevice`
-trait and the `DisplayList`. You can create custom output formats by
-consuming the display list directly:
-
-```rust
-let pages = interp.render_to_display_list(ps_data, 300.0)?;
-for page in &pages {
-    for element in page.display_list.elements() {
-        match element {
-            DisplayElement::Fill { path, params } => { /* vector fill */ }
-            DisplayElement::Stroke { path, params } => { /* vector stroke */ }
-            DisplayElement::Image { sample_data, params } => { /* raster image */ }
-            DisplayElement::Text { params } => { /* text with font/position */ }
-            DisplayElement::AxialShading { params } => { /* linear gradient */ }
-            // Clip, InitClip, RadialShading, MeshShading, PatchShading,
-            // PatternFill, Group, SoftMasked, ErasePage
-            _ => {}
-        }
-    }
-}
-```
-
-Display list elements include all the information needed to render: paths are
-already transformed to device coordinates, colors are resolved, images contain
-raw sample data, and fonts are referenced by entity ID with glyph paths available.
-
-See the [Architecture Guide](docs/ARCHITECTURE.md) for how the crates fit
-together, and the [Display List Reference](docs/DISPLAY-LIST.md) for
-complete element documentation.
-
-### Feature Flags
-
-| Feature | Default | Description |
-|---------|---------|------------|
-| `render` | yes | RGBA pixel output via `stet-render` (`stet-tiny-skia`) |
-| `pdf-output` | yes | PDF output via `stet-pdf` |
-
-For the smallest dependency footprint (display lists only):
-
-```toml
-[dependencies]
-stet = { version = "0.8", default-features = false }
-```
-
-### Configuration
-
-```rust
-let mut interp = stet::Interpreter::builder()
-    .no_icc()             // disable ICC color management
-    .suppress_output()    // silence PS print/==/= operators
-    .build();
-```
+Output formats, diagnostics, viewport rendering, the PDF reader, custom
+output devices, feature flags, and the pre-1.0 upgrade notes are in
+[docs/LIBRARY-USAGE.md](docs/LIBRARY-USAGE.md).
 
 ## Minimum Supported Rust Version
 
@@ -652,97 +484,11 @@ release. Any change to it is called out in [CHANGELOG.md](CHANGELOG.md).
 See the [Architecture Guide](docs/ARCHITECTURE.md) for a detailed explanation
 of how these crates work together.
 
-## Building from Source
-
-```bash
-cargo build                    # Build all crates
-cargo test                     # Run all tests (1130 passing)
-cargo run -- file.ps           # Run a PostScript file
-cargo run                      # Interactive REPL
-cargo clippy                   # Lint
-```
-
-There is a second suite written in PostScript itself, exercising operator
-behaviour through the interpreter rather than through Rust. CI runs it as its
-own gate and it exits non-zero on failure:
-
-```bash
-cargo build --release
-./target/release/stet unit_tests/ps_tests.ps   # 68 files, 2813 assertions
-```
-
-### Git hooks
-
-One-time setup after cloning, if you intend to push:
-
-```bash
-git config core.hooksPath .githooks
-```
-
-This enables `.githooks/pre-push`, which runs the same gates as CI's
-lint job — `cargo fmt --check`, clippy errors, the `#[non_exhaustive]`
-and VM level-zero-allocation audits, the version/MSRV cross-check, and
-the CLI documentation cross-check, the tag-namespace audit — plus a
-`wasm32` cross-compile, which
-catches the one class of error that passes everywhere else (`usize` is
-32-bit there). The wasm step is skipped with a warning if the target is
-not installed. A failing tree is caught before it reaches a remote rather
-than a few minutes later in CI. Bypass a single
-push with `git push --no-verify`.
-
-Git does not enable this automatically, and it fails silently: without
-the command above, pushes simply succeed with nothing checked.
-
-### Tag naming
-
-**`vX.Y.Z` is reserved for releases** — exactly that shape, with a matching
-`## [X.Y.Z]` entry in `CHANGELOG.md`. Benchmark and experiment markers use a
-`perf/` or `exp/` prefix instead:
-
-```bash
-git tag perf/aa-256x4          # not v0.6.1-perf
-git tag exp/glyph-cache
-```
-
-Git allows the slash, those sort away from `v*`, and they can never be
-mistaken for a version that shipped. `scripts/check-tags.sh` audits existing
-tags and the pre-push hook rejects a malformed one before it reaches a
-remote.
-
-### WASM Viewer
-
-```bash
-cd web && ./build.sh           # Build WASM module
-python3 serve.py               # Serve at localhost:8000
-```
-
 ## Contributing
 
-`cargo test` runs with no extra setup. The PDF visual-regression
-harness (`./pdf_visual_test.sh`) needs a local corpus of test PDFs,
-which the project doesn't ship (most are third-party). To reproduce
-PDF-rendering bugs or check for regressions across a large corpus:
-
-```bash
-# 1. Fetch public test corpora into pdf_samples/ (clones with
-#    sparse-checkout so only the PDFs are pulled).
-./scripts/fetch_test_pdfs.sh            # all corpora
-./scripts/fetch_test_pdfs.sh --list     # see what's available
-
-# 2. Generate your local baseline on a known-good commit
-#    (typically `main` before your changes).
-./pdf_visual_test.sh --baseline
-
-# 3. Switch to your feature branch and compare.
-./pdf_visual_test.sh
-```
-
-Any PDFs you already have at the top level of `pdf_samples/` keep
-working; the fetcher drops new corpora into their own subdirs
-(e.g. `pdf_samples/pdfjs/`) and the visual-test harness walks the
-tree so both flat and subdir layouts are picked up. Corpus
-subdirectories are gitignored — nothing third-party lands in a
-commit.
+`cargo test` runs with no extra setup. Building from a checkout, the git
+hooks, tag naming, the WASM viewer build, and the PDF visual-regression
+corpus are in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Commercial Support
 

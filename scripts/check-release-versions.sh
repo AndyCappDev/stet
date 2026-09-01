@@ -145,18 +145,23 @@ if [ -n "$url_bad" ] || [ -n "$dir_bad" ]; then
     errors=$((errors + 1))
 fi
 
-# README dependency snippets must name the current minor.
+# Dependency snippets must name the current minor.
 #
 # These are what a reader copies off crates.io, and nothing checked them:
 # `stet = "0.2"` sat in six places across three releases, telling new users
 # to pin a version two minors behind. Only major.minor is checked — a
 # snippet saying "0.4" stays correct through 0.4.1, which is how cargo
 # resolves it anyway.
+#
+# `docs/*.md` is in scope because the library docs moved there: the bulk of
+# the README's library section became docs/LIBRARY-USAGE.md, snippets and
+# all. Scanning only the READMEs would have quietly stopped covering them —
+# which is the exact failure this check exists to prevent.
 ws_minor="${ws_version%.*}"
 snippet_bad=$(grep -rnE '^[[:space:]]*stet[a-z-]* = "[0-9]+\.[0-9]+"|version = "[0-9]+\.[0-9]+", default-features' \
-    README.md crates/*/README.md 2>/dev/null | grep -v "\"${ws_minor}\"" || true)
+    README.md crates/*/README.md docs/*.md 2>/dev/null | grep -v "\"${ws_minor}\"" || true)
 if [ -n "$snippet_bad" ]; then
-    echo -e "${RED}check-release-versions: README dependency snippet(s) not on ${ws_minor}${RESET}" >&2
+    echo -e "${RED}check-release-versions: dependency snippet(s) not on ${ws_minor}${RESET}" >&2
     echo "$snippet_bad" >&2
     errors=$((errors + 1))
 fi
