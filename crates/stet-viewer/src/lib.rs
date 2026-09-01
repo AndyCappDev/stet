@@ -154,6 +154,8 @@ pub struct ViewerEnd {
 ///   viewer-app side.
 /// - `password_response_receiver` receives `Some(password)` or `None`
 ///   from the viewer after a `ViewerMsg::PasswordRequired` prompt.
+// Returning a named struct is a breaking change to a public fn.
+#[expect(clippy::type_complexity)]
 pub fn create_channels() -> (
     InterpreterEnd,
     ViewerEnd,

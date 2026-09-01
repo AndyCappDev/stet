@@ -690,6 +690,9 @@ fn load_predefined_cmap(name: &[u8]) -> Option<Vec<u8>> {
     None
 }
 
+// Shares only three values with the resolvers, so a SimpleFontEncoding here
+// would mean passing three fields it never reads. See [`SimpleFontEncoding`].
+#[expect(clippy::too_many_arguments)]
 fn substitute_font(
     base_font: &str,
     encoding: [Option<String>; 256],

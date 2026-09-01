@@ -693,6 +693,8 @@ fn suggest_page_template(path: &str) -> String {
 }
 
 /// Run in PDF output mode — vector PDF output.
+// One parameter per CLI option, matching run_png_mode above.
+#[expect(clippy::too_many_arguments)]
 fn run_pdf_mode(
     dpi_override: Option<f64>,
     file_args: Vec<String>,
@@ -745,6 +747,8 @@ fn run_pdf_mode(
 /// Run in null device mode — no rendering output, no user interaction.
 ///
 /// Useful for running test suites and scripts that don't produce pages.
+// One parameter per CLI option, matching run_png_mode above.
+#[expect(clippy::too_many_arguments)]
 fn run_null_mode(
     dpi_override: Option<f64>,
     file_args: Vec<String>,
@@ -782,6 +786,8 @@ fn run_null_mode(
 /// the viewer via channels. The viewer renders visible viewport regions on
 /// demand using `render_region()`.
 #[cfg(feature = "viewer")]
+// One parameter per CLI option, matching run_png_mode above.
+#[expect(clippy::too_many_arguments)]
 fn run_viewer_mode(
     dpi_override: Option<f64>,
     file_args: Vec<String>,

@@ -238,6 +238,8 @@ pub struct Context {
     /// effective_cmyk_bytes, cmyk_proofing)`. PostScript pages always pass
     /// `None`/`false` (no PDF/X concept); PDF pages may set these from the
     /// document's OutputIntent context.
+    // A named struct here is a breaking change to a public field.
+    #[expect(clippy::type_complexity)]
     pub display_list_sender: Option<
         std::sync::mpsc::Sender<(
             DisplayList,

@@ -52,12 +52,14 @@ if ! cargo fmt --all -- --check; then
     exit 1
 fi
 
-echo -e "${YELLOW}pre-push: cargo clippy (errors only — warnings don't gate)${RESET}"
-if ! cargo clippy --workspace --all-targets --quiet 2>&1 | tee "$clippy_log"; then
-    if grep -q "^error" "$clippy_log"; then
-        echo -e "${RED}pre-push: clippy errors. See output above.${RESET}" >&2
-        exit 1
-    fi
+# Matches CI's lint job: the workspace is clippy-clean, so a new warning is
+# a failure here rather than something that accumulates. Exceptions are
+# #[expect(clippy::...)] at the site with the reason beside them.
+echo -e "${YELLOW}pre-push: cargo clippy (warnings gate)${RESET}"
+if ! cargo clippy --workspace --all-targets --quiet -- -D warnings 2>&1 | tee "$clippy_log"; then
+    echo -e "${RED}pre-push: clippy failed. Fix it, or add an #[expect(clippy::...)]${RESET}" >&2
+    echo -e "${RED}        at the site with a comment saying why.${RESET}" >&2
+    exit 1
 fi
 
 echo -e "${YELLOW}pre-push: non-exhaustive marker audit${RESET}"

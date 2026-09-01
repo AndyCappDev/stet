@@ -1312,6 +1312,9 @@ fn composite_non_isolated_group_cropped(
 ///
 /// The extracted contribution is then composited onto `target` with the
 /// group's blend mode and opacity.
+// Compositing needs both pixmaps, the backdrop, the group params, the clip
+// and the crop origin; none of them group into a smaller concept.
+#[expect(clippy::too_many_arguments)]
 fn composite_non_isolated_extracted(
     target: &mut Pixmap,
     source: &Pixmap,
@@ -5352,6 +5355,9 @@ const MAX_MASK_RASTER_PIXELS: u64 = 64 * 1024 * 1024;
 /// `(device_x - origin_x, device_y - origin_y)`.
 ///
 /// Returns `None` when the mask paints nothing.
+// The mask is rasterised standalone, so it needs the full render
+// configuration passed in rather than read off a device.
+#[expect(clippy::too_many_arguments)]
 fn rasterize_mask(
     mask_list: &DisplayList,
     params: &stet_graphics::display_list::SoftMaskParams,

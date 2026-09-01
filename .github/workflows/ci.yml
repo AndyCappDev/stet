@@ -24,26 +24,26 @@ jobs:
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
       - name: cargo clippy
-        # Clippy runs but only errors gate; warnings do not fail the build.
+        # Warnings gate. The workspace is clippy-clean, so anything new fails
+        # here rather than joining a backlog -- which is the point: the pile of
+        # 154 warnings this replaced had been hiding a real bug for months
+        # (empty_line_after_doc_comments was reporting a doc comment stranded
+        # on the wrong function, and nobody could see it in the noise).
         #
-        # The style backlog was cleared in 607e955 (154 sites down to 24); the
-        # bulk of it was collapsible_if, raised against code written before
-        # Rust 2024 let-chains stabilised. What is left is two design lints --
-        # too_many_arguments and type_complexity -- which want signature
-        # changes rather than a lint fix, so they are a deliberate decision to
-        # take rather than a cleanup to get around to.
+        # Every remaining exception is an #[expect] at the site, with the
+        # reason in a comment beside it. #[expect] rather than #[allow] so a
+        # suppression that stops applying reports itself instead of going
+        # stale; converting the 70 of them found six that already had.
         #
-        # Two suggestions are refused in place, each with its reason in a
-        # comment beside an #[allow]. Do not reapply them in a later sweep:
-        # clamp() in skia_device.rs would panic when a PDF carries more than
-        # 16384 colour stops (min above max), and rewriting the PNG predictor
-        # loops in filters.rs as iterators risks silently wrong image decoding
-        # for no functional gain.
+        # Deliberately NOT a [workspace.lints] allow: allowing a lint
+        # workspace-wide makes every #[expect] of it unfulfilled, which would
+        # undo exactly that.
         #
         # The vendored tiny-skia forks allow the style and complexity groups
-        # in their own Cargo.toml [lints] tables, so what remains here is
-        # first-party code.
-        run: cargo clippy --workspace --all-targets
+        # in their own Cargo.toml [lints] tables, so what this covers is
+        # first-party code. stet-wasm is outside the workspace and so is not
+        # covered here at all -- see the wasm32 job.
+        run: cargo clippy --workspace --all-targets -- -D warnings
       - name: VM level-zero allocation audit
         # Operator code must allocate through stet_ops::vm_ops::alloc_*, which
         # stamps the current save level and VM mode. The bare
