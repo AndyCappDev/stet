@@ -17,6 +17,10 @@ pub struct CMap {
     pub wmode: u8,
 }
 
+/// Resolves a `usecmap` reference: given the referenced CMap's name, returns
+/// that CMap's stream data if it can be located.
+pub type CMapLoader<'a> = &'a dyn Fn(&[u8]) -> Option<Vec<u8>>;
+
 impl CMap {
     /// Create an Identity CMap (code == CID, all 2-byte).
     pub fn identity() -> Self {
@@ -45,10 +49,7 @@ impl CMap {
     }
 
     /// Parse a CMap, optionally resolving `usecmap` with a loader function.
-    pub fn parse_with_loader(
-        data: &[u8],
-        loader: Option<&dyn Fn(&[u8]) -> Option<Vec<u8>>>,
-    ) -> Self {
+    pub fn parse_with_loader(data: &[u8], loader: Option<CMapLoader<'_>>) -> Self {
         let mut code_to_cid = HashMap::new();
         let mut codespace_ranges: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
         let mut wmode: u8 = 0;

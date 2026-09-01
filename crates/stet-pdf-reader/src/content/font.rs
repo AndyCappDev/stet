@@ -249,8 +249,12 @@ pub fn resolve_font(
     // Resolve encoding.  Track whether the PDF dict had a valid /Encoding —
     // embedded CFF fonts that lack one should use the CFF's built-in encoding.
     // Invalid encoding names (e.g. /NULL) are treated as absent.
-    let (encoding, has_valid_encoding, differences, no_base_encoding) =
-        resolve_encoding(font_dict, resolver)?;
+    let ResolvedEncoding {
+        encoding,
+        has_valid_encoding,
+        differences,
+        no_base_encoding,
+    } = resolve_encoding(font_dict, resolver)?;
     let has_explicit_encoding = has_valid_encoding;
 
     // Get FontDescriptor
@@ -434,17 +438,27 @@ fn get_font_descriptor(
 /// For symbolic fonts (ZapfDingbats, Symbol) with no explicit /BaseEncoding,
 /// the font's built-in encoding is used instead of StandardEncoding.
 ///
-/// Returns (encoding, has_valid_encoding, differences):
-/// - `encoding`: fully resolved encoding (base + differences applied)
-/// - `has_valid_encoding`: false when /Encoding is missing or unrecognized
-/// - `differences`: raw (code, name) pairs from /Differences, populated ONLY when
-///   the Encoding is a dict without /BaseEncoding (and not a symbol font). When
-///   non-empty, embedded font resolvers should re-apply these on top of the font's
-///   built-in encoding instead of using `encoding` directly (PDF spec 9.6.6.1).
+/// What `resolve_encoding` worked out from a simple font's `/Encoding`.
+struct ResolvedEncoding {
+    /// Fully resolved encoding (base encoding with `/Differences` applied).
+    encoding: [Option<String>; 256],
+    /// False when `/Encoding` is missing or unrecognised.
+    has_valid_encoding: bool,
+    /// Raw `(code, name)` pairs from `/Differences`, populated ONLY when the
+    /// Encoding is a dict without `/BaseEncoding` (and not a symbol font).
+    /// When non-empty, embedded font resolvers should re-apply these on top of
+    /// the font's built-in encoding rather than using `encoding` directly
+    /// (PDF spec 9.6.6.1).
+    differences: Vec<(usize, String)>,
+    /// The font declared no `/BaseEncoding` and is not a symbol font, so its
+    /// built-in encoding should win over the base one.
+    no_base_encoding: bool,
+}
+
 fn resolve_encoding(
     font_dict: &PdfDict,
     resolver: &Resolver,
-) -> Result<([Option<String>; 256], bool, Vec<(usize, String)>, bool), PdfError> {
+) -> Result<ResolvedEncoding, PdfError> {
     let mut encoding: [Option<String>; 256] = std::array::from_fn(|_| None);
     let mut differences: Vec<(usize, String)> = Vec::new();
 
@@ -526,12 +540,12 @@ fn resolve_encoding(
                 // Signal "no base encoding" only for non-symbol fonts.
                 // Symbol fonts (ZapfDingbats, Symbol) always use their fixed
                 // built-in encoding, so their has_base_encoding is never set.
-                return Ok((
+                return Ok(ResolvedEncoding {
                     encoding,
                     has_valid_encoding,
                     differences,
-                    !has_base_encoding && !is_symbol_font,
-                ));
+                    no_base_encoding: !has_base_encoding && !is_symbol_font,
+                });
             }
             _ => {}
         }
@@ -544,7 +558,12 @@ fn resolve_encoding(
         }
     }
 
-    Ok((encoding, has_valid_encoding, differences, false))
+    Ok(ResolvedEncoding {
+        encoding,
+        has_valid_encoding,
+        differences,
+        no_base_encoding: false,
+    })
 }
 
 fn encoding_table_by_name(name: &[u8]) -> Option<&'static [&'static str; 256]> {
@@ -1068,19 +1087,40 @@ fn is_cff_cid_keyed(otf_data: &[u8]) -> bool {
 
 /// Create a CidCff font from an OpenType/CFF system font (OTTO magic).
 /// Extracts the CFF table and builds a CidCffPdfFont.
-fn create_cid_cff_from_otf(
-    otf_data: &[u8],
+/// The CID metrics and code-to-CID mapping that every CIDFont constructor
+/// needs, regardless of which font program backs it.
+///
+/// These seven values were previously threaded through each constructor
+/// individually, which is what pushed all four over the argument limit.
+struct CidMetrics {
     default_width: f64,
     cid_widths: HashMap<u16, f64>,
+    code_lengths: [u8; 256],
+    code_to_cid: HashMap<u32, u32>,
+    /// Writing mode: 0 horizontal, 1 vertical.
+    wmode: u8,
+    /// Default vertical displacement (`/DW2`).
+    dw2: [f64; 2],
+    /// Per-CID vertical metrics (`/W2`).
+    w2: HashMap<u16, [f64; 3]>,
+}
+
+fn create_cid_cff_from_otf(
+    otf_data: &[u8],
+    metrics: CidMetrics,
     ordering: &[u8],
     pdf_cid_to_gid: Option<Vec<u16>>,
     identity_cid_to_gid: bool,
-    code_lengths: [u8; 256],
-    code_to_cid: HashMap<u32, u32>,
-    wmode: u8,
-    dw2: [f64; 2],
-    w2: HashMap<u16, [f64; 3]>,
 ) -> Result<PdfFont, PdfError> {
+    let CidMetrics {
+        default_width,
+        cid_widths,
+        code_lengths,
+        code_to_cid,
+        wmode,
+        dw2,
+        w2,
+    } = metrics;
     use stet_fonts::truetype::find_table;
 
     // Extract CFF table from OpenType font
@@ -1131,17 +1171,20 @@ fn is_raw_cff(data: &[u8]) -> bool {
 /// Create a CidCff font from raw CFF data (no OpenType wrapper).
 fn create_cid_cff_from_raw(
     cff_data: &[u8],
-    default_width: f64,
-    cid_widths: HashMap<u16, f64>,
+    metrics: CidMetrics,
     ordering: &[u8],
     pdf_cid_to_gid: Option<Vec<u16>>,
     identity_cid_to_gid: bool,
-    code_lengths: [u8; 256],
-    code_to_cid: HashMap<u32, u32>,
-    wmode: u8,
-    dw2: [f64; 2],
-    w2: HashMap<u16, [f64; 3]>,
 ) -> Result<PdfFont, PdfError> {
+    let CidMetrics {
+        default_width,
+        cid_widths,
+        code_lengths,
+        code_to_cid,
+        wmode,
+        dw2,
+        w2,
+    } = metrics;
     let fonts =
         parse_cff(cff_data).map_err(|e| PdfError::Other(format!("CFF parse error: {e}")))?;
     let font = fonts
@@ -1184,16 +1227,16 @@ const MAX_OFFSET_BYTES: usize = 8;
 /// These contain CIDFontType 0 definitions with binary charstring data after
 /// `StartData`. The binary data layout: CID map (GDBytes×CIDCount) followed
 /// by subroutines and charstring data indexed by offsets in the CID map.
-fn create_cid_from_ps_cidfont(
-    font_data: &[u8],
-    default_width: f64,
-    cid_widths: HashMap<u16, f64>,
-    code_lengths: [u8; 256],
-    code_to_cid: HashMap<u32, u32>,
-    wmode: u8,
-    dw2: [f64; 2],
-    w2: HashMap<u16, [f64; 3]>,
-) -> Result<PdfFont, PdfError> {
+fn create_cid_from_ps_cidfont(font_data: &[u8], metrics: CidMetrics) -> Result<PdfFont, PdfError> {
+    let CidMetrics {
+        default_width,
+        cid_widths,
+        code_lengths,
+        code_to_cid,
+        wmode,
+        dw2,
+        w2,
+    } = metrics;
     let text = String::from_utf8_lossy(font_data);
 
     // Extract key parameters from the PS header
@@ -1415,15 +1458,18 @@ fn create_cid_from_ps_cidfont(
 /// executes the charstring, and stores pre-computed paths in a CidCffPdfFont.
 fn create_cid_from_type1(
     font_data: &[u8],
-    default_width: f64,
-    cid_widths: HashMap<u16, f64>,
+    metrics: CidMetrics,
     _to_unicode: &HashMap<u16, u32>,
-    code_lengths: [u8; 256],
-    code_to_cid: HashMap<u32, u32>,
-    wmode: u8,
-    dw2: [f64; 2],
-    w2: HashMap<u16, [f64; 3]>,
 ) -> Result<PdfFont, PdfError> {
+    let CidMetrics {
+        default_width,
+        cid_widths,
+        code_lengths,
+        code_to_cid,
+        wmode,
+        dw2,
+        w2,
+    } = metrics;
     let font =
         parse_type1(font_data).map_err(|e| PdfError::Other(format!("Type1 parse error: {e}")))?;
     let fm = font.font_matrix;
@@ -2076,7 +2122,7 @@ fn resolve_type3(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
         .unwrap_or([0.0, 0.0, 1.0, 1.0]);
 
     // Resolve encoding: maps char codes → glyph names in CharProcs
-    let (encoding, _, _, _) = resolve_encoding(font_dict, resolver)?;
+    let encoding = resolve_encoding(font_dict, resolver)?.encoding;
 
     // Get CharProcs dict: maps glyph names → content streams
     // May be a direct dict or an indirect reference
@@ -2878,30 +2924,34 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                     if is_otf_cff {
                         return create_cid_cff_from_otf(
                             &font_data,
-                            default_width,
-                            cid_widths,
+                            CidMetrics {
+                                default_width,
+                                cid_widths,
+                                code_lengths,
+                                code_to_cid: code_to_cid.clone(),
+                                wmode,
+                                dw2,
+                                w2: w2.clone(),
+                            },
                             &ordering,
                             cid_to_gid_map,
                             identity,
-                            code_lengths,
-                            code_to_cid.clone(),
-                            wmode,
-                            dw2,
-                            w2.clone(),
                         );
                     } else {
                         return create_cid_cff_from_raw(
                             &font_data,
-                            default_width,
-                            cid_widths,
+                            CidMetrics {
+                                default_width,
+                                cid_widths,
+                                code_lengths,
+                                code_to_cid: code_to_cid.clone(),
+                                wmode,
+                                dw2,
+                                w2: w2.clone(),
+                            },
                             &ordering,
                             cid_to_gid_map,
                             identity,
-                            code_lengths,
-                            code_to_cid.clone(),
-                            wmode,
-                            dw2,
-                            w2.clone(),
                         );
                     }
                 }
@@ -2926,16 +2976,18 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                 if sys_data.len() > 4 && &sys_data[0..4] == b"OTTO" {
                     return create_cid_cff_from_otf(
                         &sys_data,
-                        default_width,
-                        cid_widths,
+                        CidMetrics {
+                            default_width,
+                            cid_widths,
+                            code_lengths,
+                            code_to_cid: code_to_cid.clone(),
+                            wmode,
+                            dw2,
+                            w2: w2.clone(),
+                        },
                         &ordering,
                         None,
                         false, // substituted: use cmap, not identity
-                        code_lengths,
-                        code_to_cid.clone(),
-                        wmode,
-                        dw2,
-                        w2.clone(),
                     );
                 }
                 sys_data
@@ -3126,16 +3178,18 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                     let cff_is_cid = is_cff_cid_keyed(&font_data);
                     return create_cid_cff_from_otf(
                         &font_data,
-                        default_width,
-                        cid_widths,
+                        CidMetrics {
+                            default_width,
+                            cid_widths,
+                            code_lengths,
+                            code_to_cid: code_to_cid.clone(),
+                            wmode,
+                            dw2,
+                            w2: w2.clone(),
+                        },
                         &ordering,
                         pdf_cid_to_gid,
                         !cff_is_cid,
-                        code_lengths,
-                        code_to_cid.clone(),
-                        wmode,
-                        dw2,
-                        w2.clone(),
                     );
                 }
                 // PostScript CIDFont programs: "%!PS-Adobe-3.0 Resource-CIDFont"
@@ -3145,13 +3199,15 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                 {
                     return create_cid_from_ps_cidfont(
                         &font_data,
-                        default_width,
-                        cid_widths,
-                        code_lengths,
-                        code_to_cid.clone(),
-                        wmode,
-                        dw2,
-                        w2.clone(),
+                        CidMetrics {
+                            default_width,
+                            cid_widths,
+                            code_lengths,
+                            code_to_cid: code_to_cid.clone(),
+                            wmode,
+                            dw2,
+                            w2: w2.clone(),
+                        },
                     );
                 }
                 // Detect Type 1 font data (ASCII "%!" or PFB 0x80) mislabeled
@@ -3161,14 +3217,16 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                 if is_type1 {
                     return create_cid_from_type1(
                         &font_data,
-                        default_width,
-                        cid_widths,
+                        CidMetrics {
+                            default_width,
+                            cid_widths,
+                            code_lengths,
+                            code_to_cid: code_to_cid.clone(),
+                            wmode,
+                            dw2,
+                            w2: w2.clone(),
+                        },
                         &to_unicode,
-                        code_lengths,
-                        code_to_cid.clone(),
-                        wmode,
-                        dw2,
-                        w2.clone(),
                     );
                 }
                 let fonts = parse_cff(&font_data)
@@ -3262,16 +3320,18 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                 if is_otto || is_ttc_cff {
                     return create_cid_cff_from_otf(
                         &sys_data,
-                        default_width,
-                        cid_widths,
+                        CidMetrics {
+                            default_width,
+                            cid_widths,
+                            code_lengths,
+                            code_to_cid: code_to_cid.clone(),
+                            wmode,
+                            dw2,
+                            w2: w2.clone(),
+                        },
                         &ordering,
                         None,
                         identity,
-                        code_lengths,
-                        code_to_cid.clone(),
-                        wmode,
-                        dw2,
-                        w2.clone(),
                     );
                 }
                 let data = sys_data;

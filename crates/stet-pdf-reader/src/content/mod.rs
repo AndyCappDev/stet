@@ -130,6 +130,20 @@ impl Operand {
     }
 }
 
+/// Grayscale soft-mask samples for an image, with the mask's own dimensions
+/// and the optional `/Matte` pre-multiplication colour (PDF 11.6.5.3).
+///
+/// `D` is the sample buffer, which differs by stage: `Vec<u8>` while the mask
+/// is still being resampled to the image's dimensions, `Arc<Vec<u8>>` once it
+/// is cached and shared with the display list.
+#[derive(Clone)]
+struct ImageSMask<D = Vec<u8>> {
+    data: D,
+    width: u32,
+    height: u32,
+    matte: Option<Vec<f64>>,
+}
+
 /// Cached result of a fully-processed Image XObject.
 /// Keyed by obj_num in the content interpreter's `image_cache`.
 #[derive(Clone)]
@@ -143,8 +157,8 @@ struct CachedImage {
     mask_color: Option<Vec<u8>>,
     /// CMYK painted channels derived from the image's own color space.
     painted_channels: u8,
-    /// For soft-masked images: (mask_gray_data, mask_width, mask_height, matte).
-    smask: Option<(Arc<Vec<u8>>, u32, u32, Option<Vec<f64>>)>,
+    /// For soft-masked images, the mask shared with the display list.
+    smask: Option<ImageSMask<Arc<Vec<u8>>>>,
     /// The image's `/Intent` (or the gstate `/RI` at first emit if absent).
     /// Cached so re-emits keep the same intent — the image-level intent is a
     /// property of the image, not of the gstate at re-use time.
@@ -4420,7 +4434,12 @@ impl<'a> ContentInterpreter<'a> {
             let dict_smask = self.resolve_smask(dict, width, height)?;
             // Use SMaskInData alpha when no explicit /SMask entry exists
             if dict_smask.is_none() {
-                smask_in_data_alpha.map(|alpha| (alpha, width, height, None))
+                smask_in_data_alpha.map(|alpha| ImageSMask {
+                    data: alpha,
+                    width,
+                    height,
+                    matte: None,
+                })
             } else {
                 dict_smask
             }
@@ -4562,7 +4581,13 @@ impl<'a> ContentInterpreter<'a> {
         // When an SMask is present, emit as SoftMasked so the renderer scales
         // image and mask independently, preserving edge detail at hard alpha
         // boundaries that premultiplied-alpha averaging would make invisible.
-        if let Some((smask_data, mw, mh, matte)) = smask_result {
+        if let Some(ImageSMask {
+            data: smask_data,
+            width: mw,
+            height: mh,
+            matte,
+        }) = smask_result
+        {
             // Upscale image to mask dimensions if the mask is larger — this
             // preserves sharp mask edges (e.g. MRC text masks on low-res images).
             // Cap the target pixel count to avoid allocating enormous buffers
@@ -4652,7 +4677,12 @@ impl<'a> ContentInterpreter<'a> {
                         interpolate,
                         mask_color: image_params.mask_color.clone(),
                         painted_channels: image_params.painted_channels,
-                        smask: Some((Arc::clone(&smask_arc), width, height, matte.clone())),
+                        smask: Some(ImageSMask {
+                            data: Arc::clone(&smask_arc),
+                            width,
+                            height,
+                            matte: matte.clone(),
+                        }),
                         rendering_intent: image_params.rendering_intent,
                     },
                 );
@@ -4755,9 +4785,6 @@ impl<'a> ContentInterpreter<'a> {
         Ok(())
     }
 
-    /// Build a CachedImage, pre-downscaling if the image is much larger than
-    /// its device-pixel target size (detected from the current CTM).
-    #[allow(clippy::too_many_arguments)]
     /// Emit a display element from a cached image, applying current graphics state.
     /// The cache already contains pre-downscaled data when applicable.
     fn emit_cached_image(&mut self, cached: CachedImage) -> Result<(), PdfError> {
@@ -4789,7 +4816,13 @@ impl<'a> ContentInterpreter<'a> {
             rendering_intent: cached.rendering_intent,
         };
 
-        if let Some((smask_data, sw, sh, _matte)) = smask {
+        if let Some(ImageSMask {
+            data: smask_data,
+            width: sw,
+            height: sh,
+            ..
+        }) = smask
+        {
             let mut mask_dl = DisplayList::new();
             mask_dl.push(DisplayElement::Image {
                 sample_data: smask_data,
@@ -4873,7 +4906,7 @@ impl<'a> ContentInterpreter<'a> {
         dict: &PdfDict,
         image_w: u32,
         image_h: u32,
-    ) -> Result<Option<(Vec<u8>, u32, u32, Option<Vec<f64>>)>, PdfError> {
+    ) -> Result<Option<ImageSMask>, PdfError> {
         let smask_ref = match dict.get(b"SMask") {
             Some(obj) => obj.clone(),
             None => return Ok(None),
@@ -4938,7 +4971,12 @@ impl<'a> ContentInterpreter<'a> {
             .get_array(b"Matte")
             .map(|arr| arr.iter().filter_map(|o| o.as_f64()).collect::<Vec<_>>());
 
-        Ok(Some((data, sw, sh, matte)))
+        Ok(Some(ImageSMask {
+            data,
+            width: sw,
+            height: sh,
+            matte,
+        }))
     }
 
     /// Resolve an explicit stencil mask (/Mask stream ref) from an image dict.

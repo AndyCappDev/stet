@@ -24,6 +24,17 @@ pub enum XrefEntry {
 }
 
 /// Parsed cross-reference data + trailer.
+/// One cross-reference section collected while following the `/Prev` chain.
+///
+/// `file_offset` is the section's position in the file, used to sort sections
+/// chronologically before merging — sections at higher offsets are newer
+/// revisions and override earlier ones.
+struct XrefSection {
+    entries: Vec<(u32, XrefEntry)>,
+    trailer: PdfDict,
+    file_offset: usize,
+}
+
 #[derive(Clone)]
 pub struct XrefTable {
     /// Map from object number to entry. Index = object number.
@@ -82,7 +93,7 @@ pub fn parse_xref(data: &[u8]) -> Result<XrefTable, PdfError> {
 
     // Follow the /Prev chain, collecting (entries, trailer, file_offset).
     // The file_offset is used to sort sections chronologically for merging.
-    let mut sections: Vec<(Vec<(u32, XrefEntry)>, PdfDict, usize)> = Vec::new();
+    let mut sections: Vec<XrefSection> = Vec::new();
     let mut offset = startxref + header_offset;
     let mut visited = std::collections::HashSet::new();
 
@@ -100,7 +111,11 @@ pub fn parse_xref(data: &[u8]) -> Result<XrefTable, PdfError> {
                 shift_xref_entries(&mut entries, h);
                 visited.insert(try_offset);
                 let prev = trailer.get_int(b"Prev").map(|v| v as usize + h);
-                sections.push((entries, trailer, try_offset));
+                sections.push(XrefSection {
+                    entries,
+                    trailer,
+                    file_offset: try_offset,
+                });
                 if let Some(p) = prev {
                     offset = p;
                 } else {
@@ -119,7 +134,11 @@ pub fn parse_xref(data: &[u8]) -> Result<XrefTable, PdfError> {
         match parse_xref_section(data, offset) {
             Ok((entries, trailer)) => {
                 let prev = trailer.get_int(b"Prev").map(|v| v as usize + header_offset);
-                sections.push((entries, trailer, offset));
+                sections.push(XrefSection {
+                    entries,
+                    trailer,
+                    file_offset: offset,
+                });
                 match prev {
                     Some(p) => offset = p,
                     None => break,
@@ -166,11 +185,14 @@ pub fn parse_xref(data: &[u8]) -> Result<XrefTable, PdfError> {
     // revisions and should override earlier ones. This is more robust than
     // assuming discovery order matches chronological order, which breaks when
     // discover_orphaned_xref_sections finds sections in arbitrary order.
-    sections.sort_by_key(|(_, _, file_offset)| *file_offset);
+    sections.sort_by_key(|s| s.file_offset);
     let mut combined_entries: Vec<Option<XrefEntry>> = Vec::new();
     let mut final_trailer = PdfDict::new();
 
-    for (entries, trailer, _) in sections {
+    for XrefSection {
+        entries, trailer, ..
+    } in sections
+    {
         for (num, entry) in entries {
             let idx = num as usize;
             if idx >= combined_entries.len() {
@@ -219,7 +241,7 @@ pub fn parse_xref(data: &[u8]) -> Result<XrefTable, PdfError> {
 /// /Prev chain dead-ends before reaching the original xref.
 fn discover_orphaned_xref_sections(
     data: &[u8],
-    sections: &mut Vec<(Vec<(u32, XrefEntry)>, PdfDict, usize)>,
+    sections: &mut Vec<XrefSection>,
     visited: &mut std::collections::HashSet<usize>,
     header_offset: usize,
     pdf_headers: &[usize],
@@ -281,7 +303,11 @@ fn discover_orphaned_xref_sections(
                         shift_xref_entries(&mut entries, section_header);
                     }
                     let prev = trailer.get_int(b"Prev").map(|v| v as usize + header_offset);
-                    sections.push((entries, trailer, offset));
+                    sections.push(XrefSection {
+                        entries,
+                        trailer,
+                        file_offset: offset,
+                    });
                     match prev {
                         Some(p) => offset = p,
                         None => break,
