@@ -17,8 +17,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      # Pinned, not @stable. A gate has to be reproducible: clippy adds lints
+      # every six weeks, and on a floating toolchain `-D warnings` turns main
+      # red for a release nobody here made. rustfmt drifts between versions
+      # too, so the same pin covers the format check.
+      #
+      # Bump this deliberately, as its own commit, fixing whatever the newer
+      # clippy has to say. deps.yml runs the floating one weekly and is
+      # allowed to fail, so new lints still surface -- as information rather
+      # than as a blocked push. Same split as the fuzz job: the gate is
+      # deterministic, the search is not.
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.91"
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: cargo fmt --check

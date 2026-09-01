@@ -50,6 +50,15 @@ jobs:
           # needs in order to attribute it.
           git diff Cargo.lock | grep -E '^[+-]version' | sort | uniq -c | head -40 || true
 
+      # The floating half of the lint split: ci.yml gates on a pinned clippy,
+      # so new lints from a newer stable would otherwise go unseen until
+      # someone bumped the pin. This surfaces them weekly as information --
+      # it does not gate, and a finding here is a note to schedule, not a
+      # breakage. Same posture as the weekly fuzz search.
+      - name: cargo clippy on latest stable (informational)
+        continue-on-error: true
+        run: cargo clippy --workspace --all-targets
+
       - name: cargo build --release --workspace
         run: cargo build --release --workspace
 
