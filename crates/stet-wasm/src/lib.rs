@@ -477,11 +477,11 @@ fn drive_ps_eval(interp: &mut Interpreter) -> Result<u32, JsValue> {
 /// `PageData` dimensions from the shared sink buffer. Leaves capture
 /// enabled (with a fresh empty vec) so the next step can collect more.
 fn collect_streaming_pages(interp: &mut Interpreter, pages_ref: &Arc<Mutex<Vec<PageData>>>) {
-    let captured = std::mem::replace(
-        &mut interp.ctx.capture_display_lists,
-        Some(Vec::new()),
-    )
-    .unwrap_or_default();
+    let captured = interp
+        .ctx
+        .capture_display_lists
+        .replace(Vec::new())
+        .unwrap_or_default();
     let pages = extract_pages(pages_ref);
     for (i, (dl, dpi)) in captured.into_iter().enumerate() {
         interp.page_display_lists.push(dl);
@@ -752,6 +752,7 @@ macro_rules! ensure_page_caches {
 ///
 /// Returns a `Page` with the rendered RGBA data.
 #[wasm_bindgen]
+#[expect(clippy::too_many_arguments)]
 pub fn render_viewport(
     interp: &mut Interpreter,
     page_index: u32,
