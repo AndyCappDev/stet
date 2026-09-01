@@ -103,13 +103,13 @@ impl<'a> Resolver<'a> {
                     if !self.cache.borrow().contains_key(&num) {
                         let abs = first + off;
                         let stm = self.objstm_cache.borrow();
-                        if let Some(c) = stm.get(&stm_num) {
-                            if abs < c.data.len() {
-                                let mut l = Lexer::new(&c.data[abs..]);
-                                if let Ok(o) = parse_object(&mut l) {
-                                    drop(stm);
-                                    self.cache.borrow_mut().insert(num, o);
-                                }
+                        if let Some(c) = stm.get(&stm_num)
+                            && abs < c.data.len()
+                        {
+                            let mut l = Lexer::new(&c.data[abs..]);
+                            if let Ok(o) = parse_object(&mut l) {
+                                drop(stm);
+                                self.cache.borrow_mut().insert(num, o);
                             }
                         }
                     }
@@ -216,11 +216,7 @@ impl<'a> Resolver<'a> {
                 // "cache on second sight": first access just marks it as seen,
                 // second access caches it. This avoids caching one-off large
                 // images while caching reused ones (e.g., Type 3 emoji glyphs).
-                if result.len() <= 1_048_576 {
-                    self.stream_cache
-                        .borrow_mut()
-                        .insert(obj_num, result.clone());
-                } else if self.stream_seen.borrow().contains(&obj_num) {
+                if result.len() <= 1_048_576 || self.stream_seen.borrow().contains(&obj_num) {
                     self.stream_cache
                         .borrow_mut()
                         .insert(obj_num, result.clone());
@@ -527,10 +523,10 @@ impl<'a> Resolver<'a> {
         let _gen_num = lexer.next_token()?; // Int
         let _obj_kw = lexer.next_token()?; // Keyword("obj")
 
-        if let Some(expected) = expected_obj_num {
-            if parsed_num != expected {
-                return Err(PdfError::InvalidObject(offset));
-            }
+        if let Some(expected) = expected_obj_num
+            && parsed_num != expected
+        {
+            return Err(PdfError::InvalidObject(offset));
         }
 
         // Parse the object value

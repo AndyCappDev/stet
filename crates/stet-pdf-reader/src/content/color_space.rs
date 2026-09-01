@@ -649,10 +649,10 @@ pub fn components_to_device_color_icc_with_intent(
                 && let Some(hash) = hash
             {
                 // Ensure the profile is registered (first time only)
-                if !cache.has_profile(&hash) {
-                    if let Some(data) = profile_data {
-                        cache.register_profile_with_n(data, Some(*n));
-                    }
+                if !cache.has_profile(&hash)
+                    && let Some(data) = profile_data
+                {
+                    cache.register_profile_with_n(data, Some(*n));
                 }
                 let intent_enum = stet_graphics::icc::intent_from_pdf_byte(intent);
                 if let Some((r, g, b)) =

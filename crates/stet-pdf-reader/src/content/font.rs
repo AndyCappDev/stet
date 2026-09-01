@@ -474,11 +474,9 @@ fn resolve_encoding(
             PdfObj::Name(name) => {
                 // Symbol/ZapfDingbats: keep their fixed encoding, ignore overrides.
                 // Unknown encoding names (e.g. /NULL): skip, keep the default base.
-                if !is_symbol_font {
-                    if let Some(table) = encoding_table_by_name(name) {
-                        base_table = table;
-                        has_valid_encoding = true;
-                    }
+                if !is_symbol_font && let Some(table) = encoding_table_by_name(name) {
+                    base_table = table;
+                    has_valid_encoding = true;
                 }
             }
             PdfObj::Dict(enc_dict) => {
@@ -486,13 +484,12 @@ fn resolve_encoding(
                 // Symbol/ZapfDingbats keep their fixed base encoding.
                 has_valid_encoding = true;
                 let mut has_base_encoding = false;
-                if !is_symbol_font {
-                    if let Some(base_name) = enc_dict.get_name(b"BaseEncoding") {
-                        if let Some(table) = encoding_table_by_name(base_name) {
-                            base_table = table;
-                            has_base_encoding = true;
-                        }
-                    }
+                if !is_symbol_font
+                    && let Some(base_name) = enc_dict.get_name(b"BaseEncoding")
+                    && let Some(table) = encoding_table_by_name(base_name)
+                {
+                    base_table = table;
+                    has_base_encoding = true;
                 }
                 for (i, &name) in base_table.iter().enumerate() {
                     if name != ".notdef" {
@@ -726,10 +723,10 @@ fn substitute_font(
                 (false, false) => "NimbusSans-Regular",
             }
         };
-        if let Some(provider) = font_provider {
-            if let Some(data) = provider(default_name) {
-                return Some(data);
-            }
+        if let Some(provider) = font_provider
+            && let Some(data) = provider(default_name)
+        {
+            return Some(data);
         }
         embedded_font(default_name)
     })?;
@@ -1064,7 +1061,7 @@ fn is_cff_cid_keyed(otf_data: &[u8]) -> bool {
     };
     let cff_data = &otf_data[cff_off..cff_off + cff_len];
     match parse_cff(cff_data) {
-        Ok(fonts) => fonts.first().map_or(false, |f| f.is_cid),
+        Ok(fonts) => fonts.first().is_some_and(|f| f.is_cid),
         Err(_) => false,
     }
 }
@@ -1436,17 +1433,17 @@ fn create_cid_from_type1(
     // The CID directly indexes the Type 1 font's built-in encoding:
     // CID N → encoding[N] → glyph name → charstring → path.
     let mut paths = HashMap::new();
-    for (&cid, _) in &cid_widths {
+    for &cid in cid_widths.keys() {
         let glyph_name = if (cid as usize) < font.encoding.len() {
             font.encoding[cid as usize].as_str()
         } else {
             ".notdef"
         };
-        if let Some(cs) = font.charstrings.get(glyph_name) {
-            if let Ok(result) = execute_charstring(cs, &font.subrs, font.len_iv, false) {
-                let path = result.path.transform(&font_matrix);
-                paths.insert(cid, path);
-            }
+        if let Some(cs) = font.charstrings.get(glyph_name)
+            && let Ok(result) = execute_charstring(cs, &font.subrs, font.len_iv, false)
+        {
+            let path = result.path.transform(&font_matrix);
+            paths.insert(cid, path);
         }
     }
     // Also map CIDs that are in the encoding but not in /W
@@ -1457,13 +1454,12 @@ fn create_cid_from_type1(
         }
         {
             let name = name.as_str();
-            if name != ".notdef" {
-                if let Some(cs) = font.charstrings.get(name) {
-                    if let Ok(result) = execute_charstring(cs, &font.subrs, font.len_iv, false) {
-                        let path = result.path.transform(&font_matrix);
-                        paths.insert(cid, path);
-                    }
-                }
+            if name != ".notdef"
+                && let Some(cs) = font.charstrings.get(name)
+                && let Ok(result) = execute_charstring(cs, &font.subrs, font.len_iv, false)
+            {
+                let path = result.path.transform(&font_matrix);
+                paths.insert(cid, path);
             }
         }
     }
@@ -1539,11 +1535,15 @@ fn sanitize_index_to_loc_format(font_data: &mut [u8]) {
             } else {
                 0i16 // short
             }
+        } else if format != 0 {
+            1
         } else {
-            if format != 0 { 1 } else { 0 }
+            0
         }
+    } else if format != 0 {
+        1
     } else {
-        if format != 0 { 1 } else { 0 }
+        0
     };
     font_data[head_off + 50] = (correct >> 8) as u8;
     font_data[head_off + 51] = correct as u8;
@@ -2426,12 +2426,12 @@ fn resolve_truetype(
     // Validate essential tables are within bounds. Truncated font data
     // (e.g. from corrupt zlib headers) may have table directory entries
     // pointing past the decompressed data.
-    if let Some((off, _)) = find_table(&data, b"head") {
-        if off + 54 > data.len() {
-            return Err(PdfError::Other(
-                "TrueType font head table is out of bounds (truncated data)".into(),
-            ));
-        }
+    if let Some((off, _)) = find_table(&data, b"head")
+        && off + 54 > data.len()
+    {
+        return Err(PdfError::Other(
+            "TrueType font head table is out of bounds (truncated data)".into(),
+        ));
     }
 
     let units_per_em = get_units_per_em(&data) as f64;
@@ -2571,10 +2571,10 @@ fn build_cff_font(
             for &(code, sid) in &stet_fonts::cff_parser::EXPERT_ENCODING_MAP {
                 if enc[code as usize].is_none() {
                     let name = stet_fonts::cff_parser::get_sid_string(sid, &[]);
-                    if let Some(&gid) = name_to_gid.get(name.as_str()) {
-                        if gid > 0 {
-                            enc[code as usize] = Some(font.charset[gid as usize].clone());
-                        }
+                    if let Some(&gid) = name_to_gid.get(name.as_str())
+                        && gid > 0
+                    {
+                        enc[code as usize] = Some(font.charset[gid as usize].clone());
                     }
                 }
             }
@@ -2623,17 +2623,18 @@ fn build_cff_font(
                 .iter()
                 .position(|name| name == glyph_name)
                 .unwrap_or(0);
-            if gid > 0 && gid < font.char_strings.len() {
-                if let Ok(result) = execute_type2_charstring(
+            if gid > 0
+                && gid < font.char_strings.len()
+                && let Ok(result) = execute_type2_charstring(
                     &font.char_strings[gid],
                     &font.local_subrs,
                     &font.global_subrs,
                     font.default_width_x,
                     font.nominal_width_x,
                     true, // width_only
-                ) {
-                    derived[code] = result.width_x * fm[0];
-                }
+                )
+            {
+                derived[code] = result.width_x * fm[0];
             }
         }
         derived
@@ -3792,7 +3793,7 @@ impl Type1PdfFont {
                     return None;
                 }
                 let builtin = self.font.encoding.get(char_code as usize)?;
-                if builtin != ".notdef" && glyph_name.map_or(true, |n| n != builtin) {
+                if builtin != ".notdef" && glyph_name.is_none_or(|n| n != builtin) {
                     self.font.charstrings.get(builtin.as_str())
                 } else {
                     None
@@ -3875,12 +3876,11 @@ impl TrueTypePdfFont {
             // is Unicode-keyed ((3,1), (3,10), or (0,*)).  Non-Unicode cmaps
             // ((1,0) Mac Roman, (3,0) Symbol) in subset fonts map re-encoded
             // char codes directly — looking up Unicode values gives wrong GIDs.
-            if self.cmap_is_unicode {
-                if let Some(unicode) = stet_fonts::agl::glyph_name_to_unicode(glyph_name)
-                    && let Some(&gid) = self.cmap.get(&(unicode as u32))
-                {
-                    return Some(gid);
-                }
+            if self.cmap_is_unicode
+                && let Some(unicode) = stet_fonts::agl::glyph_name_to_unicode(glyph_name)
+                && let Some(&gid) = self.cmap.get(&(unicode as u32))
+            {
+                return Some(gid);
             }
         }
         // ToUnicode CMap → Unicode → cmap GID.  Tried before gNNNN because
@@ -3888,12 +3888,11 @@ impl TrueTypePdfFont {
         // (e.g. SimSun g18331 ≠ NotoSerif GID 18331).
         // Only use when cmap is Unicode-keyed — non-Unicode cmaps map
         // re-encoded char codes, not Unicode values.
-        if self.cmap_is_unicode {
-            if let Some(&unicode) = self.to_unicode.get(&(char_code as u16))
-                && let Some(&gid) = self.cmap.get(&unicode)
-            {
-                return Some(gid);
-            }
+        if self.cmap_is_unicode
+            && let Some(&unicode) = self.to_unicode.get(&(char_code as u16))
+            && let Some(&gid) = self.cmap.get(&unicode)
+        {
+            return Some(gid);
         }
         if let Some(glyph_name) = &self.encoding[char_code as usize] {
             // Try gNNNN pattern → direct GID (for embedded fonts where GIDs match).
@@ -3934,10 +3933,10 @@ impl TrueTypePdfFont {
         // Try AGL name → post table first, then skrifa's charmap (which checks
         // all cmap subtables including ones our parser may not have selected).
         if let Some(&unicode) = self.to_unicode.get(&(char_code as u16)) {
-            if let Some(name) = stet_fonts::system_fonts::unicode_to_glyph_name(unicode) {
-                if let Some(&gid) = self.post_name_to_gid.get(name) {
-                    return Some(gid);
-                }
+            if let Some(name) = stet_fonts::system_fonts::unicode_to_glyph_name(unicode)
+                && let Some(&gid) = self.post_name_to_gid.get(name)
+            {
+                return Some(gid);
             }
             if let Ok(font_ref) = skrifa::FontRef::new(&self.data) {
                 let charmap = font_ref.charmap();
@@ -3962,12 +3961,12 @@ impl TrueTypePdfFont {
                     if mapped.contains(&gid) {
                         continue;
                     }
-                    if let Some(glyf_data) = get_glyf_data(&self.data, gid) {
-                        if glyf_data.len() >= 2 {
-                            let num_contours = stet_fonts::truetype::read_i16(&glyf_data, 0);
-                            if num_contours < 0 {
-                                return Some(gid);
-                            }
+                    if let Some(glyf_data) = get_glyf_data(&self.data, gid)
+                        && glyf_data.len() >= 2
+                    {
+                        let num_contours = stet_fonts::truetype::read_i16(&glyf_data, 0);
+                        if num_contours < 0 {
+                            return Some(gid);
                         }
                     }
                 }
@@ -4138,14 +4137,13 @@ impl CidTrueTypePdfFont {
         // font's actual advance width instead of /DW. Many PDFs only populate
         // /W for a subset of CIDs, and /DW 1000 (full em) is wildly wrong for
         // narrow Latin characters like accented letters.
-        if self.substituted && !self.to_unicode.is_empty() {
-            if let Some(&unicode) = self.to_unicode.get(&cid) {
-                if let Some(&gid) = self.cmap.get(&unicode) {
-                    if let Some(w) = hmtx_advance_width(&self.data, gid, self.units_per_em) {
-                        return w / 1000.0;
-                    }
-                }
-            }
+        if self.substituted
+            && !self.to_unicode.is_empty()
+            && let Some(&unicode) = self.to_unicode.get(&cid)
+            && let Some(&gid) = self.cmap.get(&unicode)
+            && let Some(w) = hmtx_advance_width(&self.data, gid, self.units_per_em)
+        {
+            return w / 1000.0;
         }
         self.default_width
     }

@@ -930,17 +930,17 @@ fn run_viewer_mode(
 
             // Render PDF files first (no interpreter needed)
             for (i, path) in pdf_files.iter().enumerate() {
-                if i > 0 || !ps_files.is_empty() {
-                    if let Some(ref sender) = ctx.display_list_sender {
-                        let _ = sender.send((
-                            stet_graphics::display_list::DisplayList::new(),
-                            0.0,
-                            0,
-                            0,
-                            None,
-                            false,
-                        ));
-                    }
+                if (i > 0 || !ps_files.is_empty())
+                    && let Some(ref sender) = ctx.display_list_sender
+                {
+                    let _ = sender.send((
+                        stet_graphics::display_list::DisplayList::new(),
+                        0.0,
+                        0,
+                        0,
+                        None,
+                        false,
+                    ));
                 }
                 if let Some(ref sender) = ctx.display_list_sender {
                     render_dropped_pdf(
@@ -959,17 +959,17 @@ fn run_viewer_mode(
 
             // Render PS/EPS files through interpreter
             if !ps_files.is_empty() {
-                if !pdf_files.is_empty() {
-                    if let Some(ref sender) = ctx.display_list_sender {
-                        let _ = sender.send((
-                            stet_graphics::display_list::DisplayList::new(),
-                            0.0,
-                            0,
-                            0,
-                            None,
-                            false,
-                        ));
-                    }
+                if !pdf_files.is_empty()
+                    && let Some(ref sender) = ctx.display_list_sender
+                {
+                    let _ = sender.send((
+                        stet_graphics::display_list::DisplayList::new(),
+                        0.0,
+                        0,
+                        0,
+                        None,
+                        false,
+                    ));
                 }
                 run_file_jobs_viewer(&mut ctx, dpi_override, &ps_files, page_size, advance_rx);
             }

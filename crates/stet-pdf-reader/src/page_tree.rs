@@ -104,33 +104,29 @@ pub fn collect_pages(resolver: &Resolver) -> Result<Vec<PageInfo>, PdfError> {
 fn collect_pages_via_catalog_scan(resolver: &Resolver) -> Result<Vec<PageInfo>, PdfError> {
     let xref_len = resolver.xref_len();
     for obj_num in 0..xref_len as u32 {
-        if let Ok(obj) = resolver.resolve(obj_num, 0) {
-            if let Some(dict) = obj.as_dict() {
-                if dict.get_name(b"Type") == Some(b"Catalog") {
-                    if let Some(pages_ref) = dict.get(b"Pages") {
-                        if let Ok(pages_obj) = resolver.deref(pages_ref) {
-                            if let Some(pages_dict) = pages_obj.as_dict() {
-                                let mut pages = Vec::new();
-                                let inherited = Inherited::default();
-                                let mut visited: HashSet<u32> = HashSet::new();
-                                if collect_pages_recursive(
-                                    resolver,
-                                    pages_dict,
-                                    0,
-                                    &inherited,
-                                    &mut pages,
-                                    &mut visited,
-                                    0,
-                                )
-                                .is_ok()
-                                    && !pages.is_empty()
-                                {
-                                    return Ok(pages);
-                                }
-                            }
-                        }
-                    }
-                }
+        if let Ok(obj) = resolver.resolve(obj_num, 0)
+            && let Some(dict) = obj.as_dict()
+            && dict.get_name(b"Type") == Some(b"Catalog")
+            && let Some(pages_ref) = dict.get(b"Pages")
+            && let Ok(pages_obj) = resolver.deref(pages_ref)
+            && let Some(pages_dict) = pages_obj.as_dict()
+        {
+            let mut pages = Vec::new();
+            let inherited = Inherited::default();
+            let mut visited: HashSet<u32> = HashSet::new();
+            if collect_pages_recursive(
+                resolver,
+                pages_dict,
+                0,
+                &inherited,
+                &mut pages,
+                &mut visited,
+                0,
+            )
+            .is_ok()
+                && !pages.is_empty()
+            {
+                return Ok(pages);
             }
         }
     }
@@ -144,31 +140,31 @@ fn collect_pages_by_scan(resolver: &Resolver) -> Result<Vec<PageInfo>, PdfError>
     let xref_len = resolver.xref_len();
 
     for obj_num in 0..xref_len as u32 {
-        if let Ok(obj) = resolver.resolve(obj_num, 0) {
-            if let Some(dict) = obj.as_dict() {
-                if dict.get_name(b"Type") == Some(b"Page") && dict.get(b"Kids").is_none() {
-                    let media_box =
-                        parse_rect(dict, b"MediaBox", resolver).unwrap_or([0.0, 0.0, 612.0, 792.0]);
-                    let crop_box = clamp_box_to_media(
-                        &parse_rect(dict, b"CropBox", resolver).unwrap_or(media_box),
-                        &media_box,
-                    );
-                    let rotate = dict.get_int(b"Rotate").unwrap_or(0) as i32;
-                    let resources = resolve_resources_inherited(dict, resolver);
-                    let contents = parse_contents(dict, resolver)?;
-                    let annots = parse_annots(dict, resolver);
+        if let Ok(obj) = resolver.resolve(obj_num, 0)
+            && let Some(dict) = obj.as_dict()
+            && dict.get_name(b"Type") == Some(b"Page")
+            && dict.get(b"Kids").is_none()
+        {
+            let media_box =
+                parse_rect(dict, b"MediaBox", resolver).unwrap_or([0.0, 0.0, 612.0, 792.0]);
+            let crop_box = clamp_box_to_media(
+                &parse_rect(dict, b"CropBox", resolver).unwrap_or(media_box),
+                &media_box,
+            );
+            let rotate = dict.get_int(b"Rotate").unwrap_or(0) as i32;
+            let resources = resolve_resources_inherited(dict, resolver);
+            let contents = parse_contents(dict, resolver)?;
+            let annots = parse_annots(dict, resolver);
 
-                    pages.push(PageInfo {
-                        obj_num,
-                        media_box,
-                        crop_box,
-                        rotate,
-                        resources,
-                        contents,
-                        annots,
-                    });
-                }
-            }
+            pages.push(PageInfo {
+                obj_num,
+                media_box,
+                crop_box,
+                rotate,
+                resources,
+                contents,
+                annots,
+            });
         }
     }
 
@@ -188,17 +184,16 @@ fn resolve_resources_inherited(dict: &PdfDict, resolver: &Resolver) -> PdfDict {
     // Walk up /Parent chain to find inherited /Resources
     let mut current = dict.clone();
     for _ in 0..10 {
-        if let Some(&PdfObj::Ref(n, g)) = current.get(b"Parent") {
-            if let Ok(parent_obj) = resolver.resolve(n, g) {
-                if let Some(parent_dict) = parent_obj.as_dict() {
-                    let res = resolve_resources(parent_dict, resolver);
-                    if !res.is_empty() {
-                        return res;
-                    }
-                    current = parent_dict.clone();
-                    continue;
-                }
+        if let Some(&PdfObj::Ref(n, g)) = current.get(b"Parent")
+            && let Ok(parent_obj) = resolver.resolve(n, g)
+            && let Some(parent_dict) = parent_obj.as_dict()
+        {
+            let res = resolve_resources(parent_dict, resolver);
+            if !res.is_empty() {
+                return res;
             }
+            current = parent_dict.clone();
+            continue;
         }
         break;
     }
@@ -210,12 +205,11 @@ fn resolve_resources(dict: &PdfDict, resolver: &Resolver) -> PdfDict {
     if let Some(res) = dict.get_dict(b"Resources") {
         return res.clone();
     }
-    if let Some(PdfObj::Ref(n, g)) = dict.get(b"Resources") {
-        if let Ok(resolved) = resolver.resolve(*n, *g) {
-            if let Some(d) = resolved.as_dict() {
-                return d.clone();
-            }
-        }
+    if let Some(PdfObj::Ref(n, g)) = dict.get(b"Resources")
+        && let Ok(resolved) = resolver.resolve(*n, *g)
+        && let Some(d) = resolved.as_dict()
+    {
+        return d.clone();
     }
     PdfDict::default()
 }
@@ -268,7 +262,7 @@ fn collect_pages_recursive(
     let has_kids = node_dict.get(b"Kids").is_some();
     let type_name = node_dict.get_name(b"Type");
 
-    if !has_kids && (matches!(type_name, Some(b"Page")) || (type_name.is_none() && !has_kids)) {
+    if !has_kids && (type_name.is_none() || matches!(type_name, Some(b"Page"))) {
         // Leaf page node
         let media_box = inherited.media_box.unwrap_or([0.0, 0.0, 612.0, 792.0]); // Default US Letter
         // CropBox defaults to MediaBox; clamp to MediaBox if it extends beyond

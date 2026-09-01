@@ -399,9 +399,6 @@ fn is_degenerate_fill(path: &PsPath) -> bool {
     (w < eps && h > eps) || (h < eps && w > eps)
 }
 
-/// Convert a tiny-skia Path back to a PsPath.
-/// Used for overprint stroke handling where we convert a stroked outline to a fill.
-
 /// Convert PostScript FillRule to tiny-skia FillRule.
 fn to_fill_rule(rule: &FillRule) -> SkiaFillRule {
     match rule {
@@ -1680,10 +1677,9 @@ pub fn build_icc_cache_for_list(
                 profile_hash,
                 profile_data,
             }) = shading_cs
+                && seen.insert(*profile_hash)
             {
-                if seen.insert(*profile_hash) {
-                    cache.register_profile_with_n(profile_data, Some(*n));
-                }
+                cache.register_profile_with_n(profile_data, Some(*n));
             }
             // Image color spaces
             if let DisplayElement::Image { params, .. } = element {
@@ -1703,10 +1699,9 @@ pub fn build_icc_cache_for_list(
                             profile_hash,
                             profile_data,
                         } = base.as_ref()
+                            && seen.insert(*profile_hash)
                         {
-                            if seen.insert(*profile_hash) {
-                                cache.register_profile_with_n(profile_data, Some(*n));
-                            }
+                            cache.register_profile_with_n(profile_data, Some(*n));
                         }
                     }
                     _ => {}
@@ -5105,10 +5100,10 @@ fn render_soft_masked(
             }
 
             // Check clip mask (in parent coordinates)
-            if let Some(clip) = clip_ref {
-                if clip.data()[py * ctx.out_w as usize + px] == 0 {
-                    continue;
-                }
+            if let Some(clip) = clip_ref
+                && clip.data()[py * ctx.out_w as usize + px] == 0
+            {
+                continue;
             }
 
             // Sample the mask: inline-rendered values for masks with
@@ -5236,22 +5231,21 @@ fn render_soft_masked(
     // Write content CMYK buffer back to parent. Skip when the CMYK blend
     // loop already updated band_state.cmyk_buffer with mask-blended values
     // — copying the unmodulated content CMYK here would overwrite them.
-    if !use_cmyk_blend {
-        if let (Some(content_cmyk), Some(parent_cmyk)) =
+    if !use_cmyk_blend
+        && let (Some(content_cmyk), Some(parent_cmyk)) =
             (&content_band.cmyk_buffer, &mut band_state.cmyk_buffer)
-        {
-            copy_cmyk_buffer_to_parent(
-                parent_cmyk,
-                content_cmyk,
-                content_pixmap.data(),
-                crop_x as usize,
-                crop_y as usize,
-                eff_w as usize,
-                eff_h as usize,
-                ctx.out_w as usize,
-                ctx.out_h as usize,
-            );
-        }
+    {
+        copy_cmyk_buffer_to_parent(
+            parent_cmyk,
+            content_cmyk,
+            content_pixmap.data(),
+            crop_x as usize,
+            crop_y as usize,
+            eff_w as usize,
+            eff_h as usize,
+            ctx.out_w as usize,
+            ctx.out_h as usize,
+        );
     }
 }
 /// Extract grayscale mask values from rendered RGBA pixels.
@@ -11595,6 +11589,10 @@ fn render_axial_shading(
         let pixel_dx = (dx1 - dx0) * scale_x as f64;
         let pixel_dy = (dy1 - dy0) * scale_y as f64;
         let pixel_axis_len = (pixel_dx * pixel_dx + pixel_dy * pixel_dy).sqrt();
+        // Not `.clamp()`: the lower bound is data-driven, and a PDF with more
+        // than 16384 colour stops would make it exceed the upper bound, which
+        // `clamp` panics on. The max/min chain saturates instead.
+        #[allow(clippy::manual_clamp)]
         let lut_size = (pixel_axis_len as usize)
             .max(params.color_stops.len())
             .max(256)
@@ -11662,10 +11660,10 @@ fn render_axial_shading(
 
             for px in ix_min..ix_max {
                 // Check clip mask
-                if let Some(md) = mask_data {
-                    if md[py as usize * pw as usize + px as usize] == 0 {
-                        continue;
-                    }
+                if let Some(md) = mask_data
+                    && md[py as usize * pw as usize + px as usize] == 0
+                {
+                    continue;
                 }
 
                 // Per-pixel rotated BBox clip
@@ -11690,7 +11688,7 @@ fn render_axial_shading(
                     data[offset + 3] = 255;
                 } else {
                     // Alpha blend: premultiply and composite over existing pixel
-                    let a = alpha as u16;
+                    let a = alpha;
                     let inv_a = 255 - a;
                     data[offset] = ((r as u16 * a + data[offset] as u16 * inv_a + 127) / 255) as u8;
                     data[offset + 1] =
@@ -11991,10 +11989,10 @@ fn render_radial_shading(
             let (ux, uy) = inv_ctm.transform_point(dev_x, dev_y);
 
             // Per-pixel rotated BBox clip
-            if let Some((bx0, by0, bx1, by1)) = rotated_bbox {
-                if ux < bx0 || ux > bx1 || uy < by0 || uy > by1 {
-                    continue;
-                }
+            if let Some((bx0, by0, bx1, by1)) = rotated_bbox
+                && (ux < bx0 || ux > bx1 || uy < by0 || uy > by1)
+            {
+                continue;
             }
 
             let t = solve_radial_t(
@@ -12965,7 +12963,7 @@ fn build_gradient_lut(stops: &[stet_graphics::device::ColorStop], size: usize) -
     }
     let mut si = 0usize; // current stop index
     let last = (size - 1) as f64;
-    for i in 0..size {
+    for (i, entry) in lut.iter_mut().enumerate() {
         let t = i as f64 / last;
         // Advance stop index
         while si + 1 < stops.len() && stops[si + 1].position < t {
@@ -12993,7 +12991,7 @@ fn build_gradient_lut(stops: &[stet_graphics::device::ColorStop], size: usize) -
                 c0.b + frac * (c1.b - c0.b),
             )
         };
-        lut[i] = [
+        *entry = [
             (r * 255.0).round().clamp(0.0, 255.0) as u8,
             (g * 255.0).round().clamp(0.0, 255.0) as u8,
             (b * 255.0).round().clamp(0.0, 255.0) as u8,

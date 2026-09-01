@@ -599,10 +599,10 @@ impl ViewerApp {
 
     /// Save the current page's texture for transition display.
     fn save_transition_texture(&mut self) {
-        if let Some(page) = self.pages.get(self.current_page) {
-            if let Some(ref cached) = page.cached_render {
-                self.transition_texture = Some(cached.texture.clone());
-            }
+        if let Some(page) = self.pages.get(self.current_page)
+            && let Some(ref cached) = page.cached_render
+        {
+            self.transition_texture = Some(cached.texture.clone());
         }
     }
 
@@ -951,18 +951,19 @@ impl ViewerApp {
         let effective_scale = fit * self.zoom;
 
         // Already have a valid buffer?
-        if let Some(ref fp) = page.full_page {
-            if (fp.effective_scale - effective_scale).abs() < 0.001 && (fp.ppp - ppp).abs() < 0.001
-            {
-                return;
-            }
+        if let Some(ref fp) = page.full_page
+            && (fp.effective_scale - effective_scale).abs() < 0.001
+            && (fp.ppp - ppp).abs() < 0.001
+        {
+            return;
         }
 
         // Already rendering at this scale?
-        if let Some((s, p)) = self.fullpage_inflight_scale {
-            if (s - effective_scale).abs() < 0.001 && (p - ppp).abs() < 0.001 {
-                return;
-            }
+        if let Some((s, p)) = self.fullpage_inflight_scale
+            && (s - effective_scale).abs() < 0.001
+            && (p - ppp).abs() < 0.001
+        {
+            return;
         }
 
         // Full-page pixel dimensions at screen resolution.
@@ -1097,11 +1098,7 @@ impl ViewerApp {
                     // cancel the freshly completed render and reset debounce,
                     // which with layout oscillations creates an infinite loop.
                     if let Some((vp, _)) = self.compute_viewport_params(available, ppp) {
-                        if !self.cache_matches(&vp) {
-                            self.render_dirty = true;
-                        } else {
-                            self.render_dirty = false;
-                        }
+                        self.render_dirty = !self.cache_matches(&vp);
                     }
                 }
                 Err(TryRecvError::Empty) => {
@@ -1168,12 +1165,11 @@ impl ViewerApp {
         {
             let fit = self.fit_scale(available, &self.pages[vp.page_idx]);
             let effective_scale = fit * self.zoom;
-            if let Some(ref fp) = self.pages[vp.page_idx].full_page {
-                if (fp.effective_scale - effective_scale).abs() > 0.001
-                    || (fp.ppp - ppp).abs() > 0.001
-                {
-                    self.pages[vp.page_idx].full_page = None;
-                }
+            if let Some(ref fp) = self.pages[vp.page_idx].full_page
+                && ((fp.effective_scale - effective_scale).abs() > 0.001
+                    || (fp.ppp - ppp).abs() > 0.001)
+            {
+                self.pages[vp.page_idx].full_page = None;
             }
         }
 

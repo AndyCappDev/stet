@@ -432,10 +432,10 @@ impl IccCache {
         // Reject profile when its actual component count doesn't match the
         // PDF's /N declaration — the input data won't match the profile's
         // expected input layout.
-        if let Some(expected) = expected_n {
-            if n != expected {
-                return None;
-            }
+        if let Some(expected) = expected_n
+            && n != expected
+        {
+            return None;
         }
 
         let (src_layout_8, src_layout_f64) = match n {

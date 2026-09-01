@@ -609,9 +609,9 @@ pub fn op_exitserver(ctx: &mut Context) -> Result<(), PsError> {
     }
 
     // Print exitserver message (PLRM)
-    let _ = write!(
+    let _ = writeln!(
         ctx.stdout,
-        "%%[exitserver: permanent state may be changed]%%\n"
+        "%%[exitserver: permanent state may be changed]%%"
     );
 
     // Remove serverdict from d_stack if present
@@ -619,14 +619,13 @@ pub fn op_exitserver(ctx: &mut Context) -> Result<(), PsError> {
     if let Some(sd_obj) = ctx
         .dicts
         .get(ctx.systemdict, &DictKey::Name(serverdict_name))
+        && let PsValue::Dict(sd_entity) = sd_obj.value
     {
-        if let PsValue::Dict(sd_entity) = sd_obj.value {
-            // Search from top down, keep bottom 3 (systemdict, globaldict, userdict)
-            for i in (3..ctx.d_stack.len()).rev() {
-                if ctx.d_stack[i] == sd_entity {
-                    ctx.d_stack.remove(i);
-                    break;
-                }
+        // Search from top down, keep bottom 3 (systemdict, globaldict, userdict)
+        for i in (3..ctx.d_stack.len()).rev() {
+            if ctx.d_stack[i] == sd_entity {
+                ctx.d_stack.remove(i);
+                break;
             }
         }
     }

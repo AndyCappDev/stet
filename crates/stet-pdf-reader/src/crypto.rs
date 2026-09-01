@@ -459,14 +459,14 @@ fn aes_encrypt_block(block: &[u8; 16], round_keys: &[[u8; 16]]) -> [u8; 16] {
         state[i] ^= round_keys[0][i];
     }
 
-    for round in 1..nr {
+    for round_key in round_keys.iter().take(nr).skip(1) {
         for b in &mut state {
             *b = SBOX[*b as usize];
         }
         shift_rows(&mut state);
         mix_columns(&mut state);
-        for i in 0..16 {
-            state[i] ^= round_keys[round][i];
+        for (s, k) in state.iter_mut().zip(round_key.iter()) {
+            *s ^= *k;
         }
     }
 

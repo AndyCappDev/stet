@@ -2287,10 +2287,10 @@ impl<'a> ContentInterpreter<'a> {
     /// When the page group is DeviceCMYK, round-trip RGB through the CMYK
     /// profile to simulate compositing in CMYK space.
     fn cmyk_group_rgb(&mut self, r: f64, g: f64, b: f64) -> (f64, f64, f64) {
-        if self.page_group_is_cmyk {
-            if let Some(result) = self.icc_cache.round_trip_rgb_via_cmyk(r, g, b) {
-                return result;
-            }
+        if self.page_group_is_cmyk
+            && let Some(result) = self.icc_cache.round_trip_rgb_via_cmyk(r, g, b)
+        {
+            return result;
         }
         (r, g, b)
     }
@@ -3526,21 +3526,20 @@ impl<'a> ContentInterpreter<'a> {
         // Direct OCG reference — check its object number
         if let Some((obj_num, _)) = ocg_obj.as_ref() {
             // Dereference to see if it's an OCMD wrapper
-            if let Ok(resolved) = self.resolver.deref(ocg_obj) {
-                if let Some(dict) = resolved.as_dict() {
-                    if dict.get_name(b"Type") == Some(b"OCMD") {
-                        return self.is_ocmd_off(dict);
-                    }
-                }
+            if let Ok(resolved) = self.resolver.deref(ocg_obj)
+                && let Some(dict) = resolved.as_dict()
+                && dict.get_name(b"Type") == Some(b"OCMD")
+            {
+                return self.is_ocmd_off(dict);
             }
             // Plain OCG reference
             return self.ocg_off.contains(&obj_num);
         }
         // Inline dict (unusual but possible)
-        if let Some(dict) = ocg_obj.as_dict() {
-            if dict.get_name(b"Type") == Some(b"OCMD") {
-                return self.is_ocmd_off(dict);
-            }
+        if let Some(dict) = ocg_obj.as_dict()
+            && dict.get_name(b"Type") == Some(b"OCMD")
+        {
+            return self.is_ocmd_off(dict);
         }
         false
     }
@@ -3682,18 +3681,17 @@ impl<'a> ContentInterpreter<'a> {
         }
 
         // Close the XObject OCG wrapper if one was opened.
-        if wrapped {
-            if let Some(MarkedContentFrame::Ocg {
+        if wrapped
+            && let Some(MarkedContentFrame::Ocg {
                 parent_list,
                 visibility,
             }) = self.mc_stack.pop()
-            {
-                let ocg_list = std::mem::replace(&mut self.display_list, parent_list);
-                self.display_list.push(DisplayElement::OcgGroup {
-                    elements: ocg_list,
-                    visibility,
-                });
-            }
+        {
+            let ocg_list = std::mem::replace(&mut self.display_list, parent_list);
+            self.display_list.push(DisplayElement::OcgGroup {
+                elements: ocg_list,
+                visibility,
+            });
         }
 
         Ok(())
@@ -3703,10 +3701,10 @@ impl<'a> ContentInterpreter<'a> {
     fn handle_image_xobject(&mut self, obj: &PdfObj, dict: &PdfDict) -> Result<(), PdfError> {
         // Check image cache: if we've already processed this XObject, reuse the
         // decoded data with fresh graphics-state params (CTM, alpha, blend, etc.).
-        if let PdfObj::Ref(obj_num, _) = obj {
-            if let Some(cached) = self.image_cache.get(obj_num).cloned() {
-                return self.emit_cached_image(cached);
-            }
+        if let PdfObj::Ref(obj_num, _) = obj
+            && let Some(cached) = self.image_cache.get(obj_num).cloned()
+        {
+            return self.emit_cached_image(cached);
         }
 
         // Width/Height may be indirect references in some PDFs.
@@ -3912,9 +3910,7 @@ impl<'a> ContentInterpreter<'a> {
         // data length.
         let (resolved_cs, sample_data, smask_in_data_alpha) =
             if !is_image_mask && filter_is_jpx && has_explicit_cs {
-                let n_cs = resolved_cs
-                    .as_ref()
-                    .map_or(3, |cs| cs.num_components() as usize);
+                let n_cs = resolved_cs.as_ref().map_or(3, |cs| cs.num_components());
                 let pixels = width as usize * height as usize;
                 let decoded_comps = if pixels > 0 {
                     sample_data.len() / pixels
@@ -4410,10 +4406,8 @@ impl<'a> ContentInterpreter<'a> {
         // Register the ICC profile with the cache so the rasterizer can find
         // it by hash.  Conversion itself is deferred to samples_to_rgba() so
         // only pixels that actually land on screen pay the color-transform cost.
-        if !is_image_mask {
-            if let Some(ref rcs) = resolved_cs {
-                register_icc_profile(rcs, &mut self.icc_cache);
-            }
+        if !is_image_mask && let Some(ref rcs) = resolved_cs {
+            register_icc_profile(rcs, &mut self.icc_cache);
         }
 
         // Handle SMask (soft mask / alpha channel).
@@ -4426,11 +4420,7 @@ impl<'a> ContentInterpreter<'a> {
             let dict_smask = self.resolve_smask(dict, width, height)?;
             // Use SMaskInData alpha when no explicit /SMask entry exists
             if dict_smask.is_none() {
-                if let Some(alpha) = smask_in_data_alpha {
-                    Some((alpha, width, height, None))
-                } else {
-                    None
-                }
+                smask_in_data_alpha.map(|alpha| (alpha, width, height, None))
             } else {
                 dict_smask
             }
@@ -5069,16 +5059,13 @@ impl<'a> ContentInterpreter<'a> {
     fn is_jpx_rgba(&self, obj: &PdfObj) -> bool {
         #[cfg(feature = "jpx")]
         {
-            if let Ok((raw, filters)) = self.resolver.raw_stream_and_filters(obj) {
-                if filters
+            if let Ok((raw, filters)) = self.resolver.raw_stream_and_filters(obj)
+                && filters
                     .iter()
                     .any(|f| matches!(f, crate::filters::Filter::JPXDecode))
-                {
-                    if let Some((color_channels, has_alpha)) = crate::filters::jpx_color_info(&raw)
-                    {
-                        return color_channels == 3 && has_alpha;
-                    }
-                }
+                && let Some((color_channels, has_alpha)) = crate::filters::jpx_color_info(&raw)
+            {
+                return color_channels == 3 && has_alpha;
             }
         }
         false
@@ -5862,10 +5849,8 @@ impl<'a> ContentInterpreter<'a> {
 
         // Register ICC profile with the cache so the rasterizer can find it
         // by hash.  Color conversion itself is deferred to samples_to_rgba().
-        if !is_image_mask {
-            if let Some(ref rcs) = resolved_cs {
-                register_icc_profile(rcs, &mut self.icc_cache);
-            }
+        if !is_image_mask && let Some(ref rcs) = resolved_cs {
+            register_icc_profile(rcs, &mut self.icc_cache);
         }
 
         self.display_list.push(DisplayElement::Image {
@@ -6214,12 +6199,11 @@ impl<'a> ContentInterpreter<'a> {
         if let Some(cs) = grp.get_name(b"CS") {
             return cs_name_to_comps(cs);
         }
-        if let Some(cs_obj) = grp.get(b"CS") {
-            if let Ok(cs_resolved) = self.resolver.deref(cs_obj) {
-                if let Some(cs) = cs_resolved.as_name() {
-                    return cs_name_to_comps(cs);
-                }
-            }
+        if let Some(cs_obj) = grp.get(b"CS")
+            && let Ok(cs_resolved) = self.resolver.deref(cs_obj)
+            && let Some(cs) = cs_resolved.as_name()
+        {
+            return cs_name_to_comps(cs);
         }
         0
     }
@@ -6825,10 +6809,10 @@ impl<'a> ContentInterpreter<'a> {
         // Cache tiling patterns by indirect reference — ensures the same
         // pattern stream is interpreted only once (with the first caller's
         // graphics state), matching GhostScript's behaviour.
-        if let PdfObj::Ref(obj_num, gen_num) = pat_ref {
-            if let Some(cached) = self.pattern_cache.get(&(*obj_num, *gen_num)) {
-                return Ok(cached.clone());
-            }
+        if let PdfObj::Ref(obj_num, gen_num) = pat_ref
+            && let Some(cached) = self.pattern_cache.get(&(*obj_num, *gen_num))
+        {
+            return Ok(cached.clone());
         }
 
         let pat_ref_clone = pat_ref.clone();
@@ -7263,41 +7247,40 @@ fn merge_rgb_with_smask(
     let n_comps = color_space.num_components();
 
     // For CMYK data, try ICC bulk conversion first (matches samples_to_rgba quality)
-    if n_comps == 4 {
-        if let Some(cache) = icc {
-            if let Some(cmyk_hash) = cache.default_cmyk_hash() {
-                let cmyk_data = if image_data.len() >= n_pixels * 4 {
-                    &image_data[..n_pixels * 4]
+    if n_comps == 4
+        && let Some(cache) = icc
+        && let Some(cmyk_hash) = cache.default_cmyk_hash()
+    {
+        let cmyk_data = if image_data.len() >= n_pixels * 4 {
+            &image_data[..n_pixels * 4]
+        } else {
+            image_data
+        };
+        if let Some(rgb) = cache.convert_image_8bit(cmyk_hash, cmyk_data, n_pixels) {
+            for i in 0..n_pixels {
+                let alpha = smask_data.get(i).copied().unwrap_or(255);
+                let dst = i * 4;
+                let (r, g, b) = (rgb[i * 3], rgb[i * 3 + 1], rgb[i * 3 + 2]);
+                if alpha == 255 {
+                    rgba[dst] = r;
+                    rgba[dst + 1] = g;
+                    rgba[dst + 2] = b;
+                    rgba[dst + 3] = 255;
+                } else if alpha == 0 {
+                    // rgba already zeroed by default 255, need to zero
+                    rgba[dst] = 0;
+                    rgba[dst + 1] = 0;
+                    rgba[dst + 2] = 0;
+                    rgba[dst + 3] = 0;
                 } else {
-                    image_data
-                };
-                if let Some(rgb) = cache.convert_image_8bit(cmyk_hash, cmyk_data, n_pixels) {
-                    for i in 0..n_pixels {
-                        let alpha = smask_data.get(i).copied().unwrap_or(255);
-                        let dst = i * 4;
-                        let (r, g, b) = (rgb[i * 3], rgb[i * 3 + 1], rgb[i * 3 + 2]);
-                        if alpha == 255 {
-                            rgba[dst] = r;
-                            rgba[dst + 1] = g;
-                            rgba[dst + 2] = b;
-                            rgba[dst + 3] = 255;
-                        } else if alpha == 0 {
-                            // rgba already zeroed by default 255, need to zero
-                            rgba[dst] = 0;
-                            rgba[dst + 1] = 0;
-                            rgba[dst + 2] = 0;
-                            rgba[dst + 3] = 0;
-                        } else {
-                            let a = alpha as u16;
-                            rgba[dst] = ((r as u16 * a + 127) / 255) as u8;
-                            rgba[dst + 1] = ((g as u16 * a + 127) / 255) as u8;
-                            rgba[dst + 2] = ((b as u16 * a + 127) / 255) as u8;
-                            rgba[dst + 3] = alpha;
-                        }
-                    }
-                    return rgba;
+                    let a = alpha as u16;
+                    rgba[dst] = ((r as u16 * a + 127) / 255) as u8;
+                    rgba[dst + 1] = ((g as u16 * a + 127) / 255) as u8;
+                    rgba[dst + 2] = ((b as u16 * a + 127) / 255) as u8;
+                    rgba[dst + 3] = alpha;
                 }
             }
+            return rgba;
         }
     }
 

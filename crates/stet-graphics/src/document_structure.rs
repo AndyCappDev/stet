@@ -739,20 +739,16 @@ pub enum LinkHighlight {
 /// falls back to `/Note`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
+#[derive(Default)]
 pub enum TextAnnotationIcon {
     Comment,
+    #[default]
     Note,
     Key,
     Help,
     NewParagraph,
     Paragraph,
     Insert,
-}
-
-impl Default for TextAnnotationIcon {
-    fn default() -> Self {
-        TextAnnotationIcon::Note
-    }
 }
 
 /// `/Border` array `[Hradius Vradius Width]`. PDF spec also allows a

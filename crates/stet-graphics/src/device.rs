@@ -313,7 +313,7 @@ pub struct StrokeParams {
 ///
 /// New fields may be added without notice; pattern-matching consumers
 /// should use `..` to ignore unmatched fields.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct ClipParams {
     pub fill_rule: FillRule,
     pub ctm: Matrix,
@@ -393,7 +393,9 @@ impl TintLookupTable {
 /// wildcard arm to remain forward-compatible.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
+#[derive(Default)]
 pub enum ImageColorSpace {
+    #[default]
     DeviceGray,
     DeviceRGB,
     DeviceCMYK,
@@ -523,8 +525,10 @@ pub struct SpotTintFunction {
 /// wildcard arm.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
+#[derive(Default)]
 pub enum ShadingColorSpace {
     DeviceGray,
+    #[default]
     DeviceRGB,
     DeviceCMYK,
     ICCBased {
@@ -854,16 +858,6 @@ impl Default for StrokeParams {
     }
 }
 
-impl Default for ClipParams {
-    fn default() -> Self {
-        Self {
-            fill_rule: FillRule::default(),
-            ctm: Matrix::default(),
-            stroke_params: None,
-        }
-    }
-}
-
 impl Default for TextParams {
     fn default() -> Self {
         Self {
@@ -894,12 +888,6 @@ impl Default for TextParams {
     }
 }
 
-impl Default for ImageColorSpace {
-    fn default() -> Self {
-        ImageColorSpace::DeviceGray
-    }
-}
-
 impl Default for ImageParams {
     fn default() -> Self {
         Self {
@@ -920,12 +908,6 @@ impl Default for ImageParams {
             alpha_is_shape: false,
             rendering_intent: 0,
         }
-    }
-}
-
-impl Default for ShadingColorSpace {
-    fn default() -> Self {
-        ShadingColorSpace::DeviceRGB
     }
 }
 

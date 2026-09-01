@@ -227,7 +227,7 @@ fn handle_axial(
     }
 
     let function = parse_shading_function(dict, resolver)?;
-    let n_stops = function.min_samples().max(64).min(1024);
+    let n_stops = function.min_samples().clamp(64, 1024);
     let color_stops = sample_function_to_stops_icc(&function, n_stops, resolved_cs, icc_cache);
 
     // Keep coordinates in shading/user space, pass the CTM to the renderer.
@@ -279,7 +279,7 @@ fn handle_radial(
     }
 
     let function = parse_shading_function(dict, resolver)?;
-    let n_stops = function.min_samples().max(64).min(1024);
+    let n_stops = function.min_samples().clamp(64, 1024);
     let color_stops = sample_function_to_stops_icc(&function, n_stops, resolved_cs, icc_cache);
 
     // Keep coordinates in user space; pass the CTM to the renderer so it can
@@ -842,7 +842,7 @@ fn resolved_cs_to_shading_cs(cs: &ResolvedColorSpace) -> ShadingColorSpace {
             profile_data: Some(data),
             ..
         } if *n != 1 && *n != 4 => ShadingColorSpace::ICCBased {
-            n: *n as u32,
+            n: *n,
             profile_hash: *hash,
             profile_data: Arc::clone(data),
         },

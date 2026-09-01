@@ -1122,13 +1122,16 @@ pub(crate) fn jpeg_dimensions_and_components(data: &[u8]) -> Option<(u32, u32, u
             continue;
         }
         let marker = data[pos + 1];
-        if (0xC0..=0xCF).contains(&marker) && marker != 0xC4 && marker != 0xC8 && marker != 0xCC {
-            if pos + 9 < data.len() {
-                let h = ((data[pos + 5] as u32) << 8) | data[pos + 6] as u32;
-                let w = ((data[pos + 7] as u32) << 8) | data[pos + 8] as u32;
-                let n = data[pos + 9];
-                return Some((w, h, n));
-            }
+        if (0xC0..=0xCF).contains(&marker)
+            && marker != 0xC4
+            && marker != 0xC8
+            && marker != 0xCC
+            && pos + 9 < data.len()
+        {
+            let h = ((data[pos + 5] as u32) << 8) | data[pos + 6] as u32;
+            let w = ((data[pos + 7] as u32) << 8) | data[pos + 8] as u32;
+            let n = data[pos + 9];
+            return Some((w, h, n));
         }
         if marker == 0xDA {
             break;
@@ -1154,18 +1157,21 @@ pub fn jpeg_dimensions(data: &[u8]) -> Option<(u32, u32)> {
         }
         let marker = data[pos + 1];
         // SOF markers: 0xC0-0xCF except 0xC4 (DHT), 0xC8 (JPG), 0xCC (DAC)
-        if (0xC0..=0xCF).contains(&marker) && marker != 0xC4 && marker != 0xC8 && marker != 0xCC {
-            if pos + 9 < data.len() {
-                let mut h = ((data[pos + 5] as u32) << 8) | data[pos + 6] as u32;
-                let w = ((data[pos + 7] as u32) << 8) | data[pos + 8] as u32;
-                // SOF height 0 or 0xFFFF means "defined by DNL marker later"
-                if h == 0 || h == 0xFFFF {
-                    if let Some(dnl_h) = find_dnl_height(data) {
-                        h = dnl_h as u32;
-                    }
-                }
-                return Some((w, h));
+        if (0xC0..=0xCF).contains(&marker)
+            && marker != 0xC4
+            && marker != 0xC8
+            && marker != 0xCC
+            && pos + 9 < data.len()
+        {
+            let mut h = ((data[pos + 5] as u32) << 8) | data[pos + 6] as u32;
+            let w = ((data[pos + 7] as u32) << 8) | data[pos + 8] as u32;
+            // SOF height 0 or 0xFFFF means "defined by DNL marker later"
+            if (h == 0 || h == 0xFFFF)
+                && let Some(dnl_h) = find_dnl_height(data)
+            {
+                h = dnl_h as u32;
             }
+            return Some((w, h));
         }
         if marker == 0xDA {
             break; // SOS — no more markers
@@ -1803,6 +1809,10 @@ fn apply_tiff_predictor_subbyte(
         // Extract all samples, undo differencing, re-pack
         let mut prev = vec![0u8; colors];
         for col in 0..columns {
+            // `c` drives sample/byte offset arithmetic as well as indexing
+            // `prev`, inside a loop that breaks early on a short row. Left as an
+            // index loop deliberately.
+            #[allow(clippy::needless_range_loop)]
             for c in 0..colors {
                 let sample_idx = col * colors + c;
                 if sample_idx >= samples_per_row {
@@ -1844,6 +1854,10 @@ fn apply_tiff_predictor_16bit(
         let mut prev = vec![0u16; colors];
 
         for col in 0..columns {
+            // `c` drives sample/byte offset arithmetic as well as indexing
+            // `prev`, inside a loop that breaks early on a short row. Left as an
+            // index loop deliberately.
+            #[allow(clippy::needless_range_loop)]
             for c in 0..colors {
                 let byte_idx = (col * colors + c) * 2;
                 if byte_idx + 1 >= row.len() {

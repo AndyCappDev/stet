@@ -1136,12 +1136,12 @@ fn parse_output_intents_full(resolver: &Resolver) -> Vec<OutputIntentRecord> {
 pub(crate) fn find_catalog(resolver: &Resolver) -> Option<PdfObj> {
     let xref_len = resolver.xref_len();
     for obj_num in 0..xref_len as u32 {
-        if let Ok(obj) = resolver.resolve(obj_num, 0) {
-            if let Some(dict) = obj.as_dict() {
-                if dict.get_name(b"Type") == Some(b"Catalog") && dict.get(b"Pages").is_some() {
-                    return Some(obj);
-                }
-            }
+        if let Ok(obj) = resolver.resolve(obj_num, 0)
+            && let Some(dict) = obj.as_dict()
+            && dict.get_name(b"Type") == Some(b"Catalog")
+            && dict.get(b"Pages").is_some()
+        {
+            return Some(obj);
         }
     }
     None

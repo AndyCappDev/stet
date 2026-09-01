@@ -223,13 +223,11 @@ impl Interpreter {
         let ps_data = strip_dos_eps_header(ps_data);
         let is_eps = content_is_epsf(ps_data);
 
-        if is_eps {
-            if let Some((llx, lly, urx, ury)) = read_eps_bounding_box(ps_data) {
-                let w = urx - llx;
-                let h = ury - lly;
-                if w > 0.0 && h > 0.0 {
-                    return self.render_eps(ps_data, dpi, llx, lly, w, h);
-                }
+        if is_eps && let Some((llx, lly, urx, ury)) = read_eps_bounding_box(ps_data) {
+            let w = urx - llx;
+            let h = ury - lly;
+            if w > 0.0 && h > 0.0 {
+                return self.render_eps(ps_data, dpi, llx, lly, w, h);
             }
         }
 

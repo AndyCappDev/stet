@@ -2811,11 +2811,8 @@ mod tests {
         let src = store.create_string_source(b"48 65 6C 6C 6F>".to_vec());
         let filt = store.create_filter(src, FilterKind::ASCIIHexDecode);
         let mut result = Vec::new();
-        loop {
-            match store.read_byte(filt).unwrap() {
-                Some(b) => result.push(b),
-                None => break,
-            }
+        while let Some(b) = store.read_byte(filt).unwrap() {
+            result.push(b);
         }
         assert_eq!(&result, b"Hello");
     }
@@ -2836,11 +2833,8 @@ mod tests {
         let src = store.create_string_source(b"4 1\n4 2>".to_vec());
         let filt = store.create_filter(src, FilterKind::ASCIIHexDecode);
         let mut result = Vec::new();
-        loop {
-            match store.read_byte(filt).unwrap() {
-                Some(b) => result.push(b),
-                None => break,
-            }
+        while let Some(b) = store.read_byte(filt).unwrap() {
+            result.push(b);
         }
         assert_eq!(&result, &[0x41, 0x42]);
     }
@@ -2854,11 +2848,8 @@ mod tests {
         let src = store.create_string_source(b"9jqo^~>".to_vec());
         let filt = store.create_filter(src, FilterKind::ASCII85Decode { group: Vec::new() });
         let mut result = Vec::new();
-        loop {
-            match store.read_byte(filt).unwrap() {
-                Some(b) => result.push(b),
-                None => break,
-            }
+        while let Some(b) = store.read_byte(filt).unwrap() {
+            result.push(b);
         }
         assert_eq!(&result, b"Man ");
     }
@@ -2869,11 +2860,8 @@ mod tests {
         let src = store.create_string_source(b"z~>".to_vec());
         let filt = store.create_filter(src, FilterKind::ASCII85Decode { group: Vec::new() });
         let mut result = Vec::new();
-        loop {
-            match store.read_byte(filt).unwrap() {
-                Some(b) => result.push(b),
-                None => break,
-            }
+        while let Some(b) = store.read_byte(filt).unwrap() {
+            result.push(b);
         }
         assert_eq!(&result, &[0, 0, 0, 0]);
     }
@@ -2885,11 +2873,8 @@ mod tests {
         let src = store.create_string_source(b"9j~>".to_vec());
         let filt = store.create_filter(src, FilterKind::ASCII85Decode { group: Vec::new() });
         let mut result = Vec::new();
-        loop {
-            match store.read_byte(filt).unwrap() {
-                Some(b) => result.push(b),
-                None => break,
-            }
+        while let Some(b) = store.read_byte(filt).unwrap() {
+            result.push(b);
         }
         assert_eq!(result.len(), 1);
     }
@@ -2908,11 +2893,8 @@ mod tests {
             },
         );
         let mut result = Vec::new();
-        loop {
-            match store.read_byte(filt).unwrap() {
-                Some(b) => result.push(b),
-                None => break,
-            }
+        while let Some(b) = store.read_byte(filt).unwrap() {
+            result.push(b);
         }
         assert_eq!(&result, b"ABC");
     }
@@ -2929,11 +2911,8 @@ mod tests {
             },
         );
         let mut result = Vec::new();
-        loop {
-            match store.read_byte(filt).unwrap() {
-                Some(b) => result.push(b),
-                None => break,
-            }
+        while let Some(b) = store.read_byte(filt).unwrap() {
+            result.push(b);
         }
         assert_eq!(&result, b"XXXX");
     }
@@ -2953,11 +2932,8 @@ mod tests {
             },
         );
         let mut result = Vec::new();
-        loop {
-            match store.read_byte(filt).unwrap() {
-                Some(b) => result.push(b),
-                None => break,
-            }
+        while let Some(b) = store.read_byte(filt).unwrap() {
+            result.push(b);
         }
         assert_eq!(&result, b"Hello");
     }
@@ -3031,11 +3007,8 @@ mod tests {
             },
         );
         let mut result = Vec::new();
-        loop {
-            match store.read_byte(filt).unwrap() {
-                Some(b) => result.push(b),
-                None => break,
-            }
+        while let Some(b) = store.read_byte(filt).unwrap() {
+            result.push(b);
         }
         assert_eq!(&result, original);
     }
@@ -3054,11 +3027,8 @@ mod tests {
         let src = store.create_string_source(compressed);
         let filt = store.create_filter(src, FilterKind::lzw_decode(true));
         let mut result = Vec::new();
-        loop {
-            match store.read_byte(filt).unwrap() {
-                Some(b) => result.push(b),
-                None => break,
-            }
+        while let Some(b) = store.read_byte(filt).unwrap() {
+            result.push(b);
         }
         assert_eq!(&result, original);
     }
@@ -3077,11 +3047,8 @@ mod tests {
         let src = store.open(path, "r").unwrap();
         let dec = store.create_filter(src, FilterKind::lzw_decode(true));
         let mut result = Vec::new();
-        loop {
-            match store.read_byte(dec).unwrap() {
-                Some(b) => result.push(b),
-                None => break,
-            }
+        while let Some(b) = store.read_byte(dec).unwrap() {
+            result.push(b);
         }
         assert_eq!(&result, b"Q");
         std::fs::remove_file(path).ok();
@@ -3106,11 +3073,8 @@ mod tests {
         let src = store.open(path, "r").unwrap();
         let dec = store.create_filter(src, FilterKind::lzw_decode(true));
         let mut result = Vec::new();
-        loop {
-            match store.read_byte(dec).unwrap() {
-                Some(b) => result.push(b),
-                None => break,
-            }
+        while let Some(b) = store.read_byte(dec).unwrap() {
+            result.push(b);
         }
         assert_eq!(&result, original);
         std::fs::remove_file(path).ok();
@@ -3131,11 +3095,8 @@ mod tests {
         let src = store.open(path, "r").unwrap();
         let dec = store.create_filter(src, FilterKind::ascii_hex_decode());
         let mut result = Vec::new();
-        loop {
-            match store.read_byte(dec).unwrap() {
-                Some(b) => result.push(b),
-                None => break,
-            }
+        while let Some(b) = store.read_byte(dec).unwrap() {
+            result.push(b);
         }
         assert_eq!(&result, original);
         std::fs::remove_file(path).ok();
@@ -3156,11 +3117,8 @@ mod tests {
         let src = store.open(path, "r").unwrap();
         let dec = store.create_filter(src, FilterKind::ascii85_decode());
         let mut result = Vec::new();
-        loop {
-            match store.read_byte(dec).unwrap() {
-                Some(b) => result.push(b),
-                None => break,
-            }
+        while let Some(b) = store.read_byte(dec).unwrap() {
+            result.push(b);
         }
         assert_eq!(&result, original);
         std::fs::remove_file(path).ok();
@@ -3181,11 +3139,8 @@ mod tests {
         let src = store.open(path, "r").unwrap();
         let dec = store.create_filter(src, FilterKind::run_length_decode());
         let mut result = Vec::new();
-        loop {
-            match store.read_byte(dec).unwrap() {
-                Some(b) => result.push(b),
-                None => break,
-            }
+        while let Some(b) = store.read_byte(dec).unwrap() {
+            result.push(b);
         }
         assert_eq!(&result, original);
         std::fs::remove_file(path).ok();
@@ -3206,11 +3161,8 @@ mod tests {
         let src = store.open(path, "r").unwrap();
         let dec = store.create_filter(src, FilterKind::flate_decode(1, 1, 1, 8));
         let mut result = Vec::new();
-        loop {
-            match store.read_byte(dec).unwrap() {
-                Some(b) => result.push(b),
-                None => break,
-            }
+        while let Some(b) = store.read_byte(dec).unwrap() {
+            result.push(b);
         }
         assert_eq!(&result, original);
         std::fs::remove_file(path).ok();

@@ -1266,7 +1266,6 @@ exch sub mul 1.000000 cvr exch sub 6 1 roll 5 -1 roll 2 index \
 
     #[test]
     fn devicen_duotone_via_tint_table() {
-        use std::sync::Arc;
         use stet_graphics::device::TintLookupTable;
         let code = "{1.000000 3 1 roll 1.000000 3 1 roll 1.000000 3 1 roll 1 index 1.000000 \
 cvr exch sub 3 1 roll 6 -1 roll 1 index 0.500000 mul 1.000000 cvr \

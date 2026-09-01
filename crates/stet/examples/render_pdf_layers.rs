@@ -7,13 +7,12 @@
 //! Opens a PDF, enumerates its Optional Content Groups (OCGs), and renders
 //! each page three ways:
 //!
-//! 1. **default**       — every layer at its document default visibility.
-//! 2. **print intent**  — `RenderIntent::Print` honours `/AS` automatic-state
-//!                        rules so layers tagged "print only" come on, "view
-//!                        only" come off.
-//! 3. **toggle first**  — same as default, but the first layer is forcibly
-//!                        hidden via a custom `LayerSet`. Drops the
-//!                        first-listed OCG out of the render.
+//! 1. **default** — every layer at its document default visibility.
+//! 2. **print intent** — `RenderIntent::Print` honours `/AS` automatic-state
+//!    rules so layers tagged "print only" come on, "view only" come off.
+//! 3. **toggle first** — same as default, but the first layer is forcibly
+//!    hidden via a custom `LayerSet`. Drops the first-listed OCG out of the
+//!    render.
 //!
 //! Run with: `cargo run --example render_pdf_layers -- input.pdf`
 //!

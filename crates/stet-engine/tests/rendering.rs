@@ -338,7 +338,7 @@ fn test_stringwidth_via_ps() {
     let bytes = output.lock().unwrap().clone();
     let text = String::from_utf8_lossy(&bytes);
     // Should have printed two numbers: wy (likely 0) and wx (positive)
-    let parts: Vec<&str> = text.trim().split_whitespace().collect();
+    let parts: Vec<&str> = text.split_whitespace().collect();
     assert_eq!(parts.len(), 2, "expected 2 values, got: {:?}", parts);
     // First printed is wy (on top), second is wx
     let wy: f64 = parts[0].parse().unwrap_or(999.0);

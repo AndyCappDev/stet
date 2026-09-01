@@ -93,20 +93,20 @@ pub fn parse_xref(data: &[u8]) -> Result<XrefTable, PdfError> {
     if offset < data.len() && parse_xref_section(data, offset).is_err() && pdf_headers.len() > 1 {
         for &h in pdf_headers.iter().skip(1).rev() {
             let try_offset = startxref + h;
-            if try_offset < data.len() {
-                if let Ok((mut entries, trailer)) = parse_xref_section(data, try_offset) {
-                    // Adjust entry offsets: they're relative to this header
-                    shift_xref_entries(&mut entries, h);
-                    visited.insert(try_offset);
-                    let prev = trailer.get_int(b"Prev").map(|v| v as usize + h);
-                    sections.push((entries, trailer, try_offset));
-                    if let Some(p) = prev {
-                        offset = p;
-                    } else {
-                        xref_failed = false;
-                    }
-                    break;
+            if try_offset < data.len()
+                && let Ok((mut entries, trailer)) = parse_xref_section(data, try_offset)
+            {
+                // Adjust entry offsets: they're relative to this header
+                shift_xref_entries(&mut entries, h);
+                visited.insert(try_offset);
+                let prev = trailer.get_int(b"Prev").map(|v| v as usize + h);
+                sections.push((entries, trailer, try_offset));
+                if let Some(p) = prev {
+                    offset = p;
+                } else {
+                    xref_failed = false;
                 }
+                break;
             }
         }
     }
@@ -239,16 +239,16 @@ fn discover_orphaned_xref_sections(
         // Also collect startxref values (point to xref sections from older revisions)
         if pos + 9 < data.len() && &data[pos..pos + 9] == b"startxref" {
             let end = (pos + 50).min(data.len());
-            if let Some(sx_off) = find_int_after_key(&data[pos..end], b"startxref") {
-                if sx_off > 0 {
-                    // startxref values are PDF-internal offsets, need BOM adjustment.
-                    // For concatenated PDFs, also try each %PDF header as base.
-                    candidates.push(sx_off + header_offset);
-                    for &h in pdf_headers.iter().skip(1) {
-                        let adjusted = sx_off + h;
-                        if adjusted < data.len() {
-                            candidates.push(adjusted);
-                        }
+            if let Some(sx_off) = find_int_after_key(&data[pos..end], b"startxref")
+                && sx_off > 0
+            {
+                // startxref values are PDF-internal offsets, need BOM adjustment.
+                // For concatenated PDFs, also try each %PDF header as base.
+                candidates.push(sx_off + header_offset);
+                for &h in pdf_headers.iter().skip(1) {
+                    let adjusted = sx_off + h;
+                    if adjusted < data.len() {
+                        candidates.push(adjusted);
                     }
                 }
             }
@@ -434,28 +434,27 @@ fn rebuild_xref_from_scan(data: &[u8]) -> Result<XrefTable, PdfError> {
         if let XrefEntry::InFile { offset, .. } = entry {
             let search_end = (*offset + 512).min(data.len());
             let slice = &data[*offset..search_end];
-            if slice.windows(10).any(|w| w == b"/Type/XRef")
-                || slice.windows(11).any(|w| w == b"/Type /XRef")
+            if (slice.windows(10).any(|w| w == b"/Type/XRef")
+                || slice.windows(11).any(|w| w == b"/Type /XRef"))
+                && let Ok((xref_entries, xref_trailer)) = parse_xref_stream(data, *offset)
             {
-                if let Ok((xref_entries, xref_trailer)) = parse_xref_stream(data, *offset) {
-                    // Merge entries from xref stream (includes ObjStm refs)
-                    let mut merged = entries;
-                    for (num, xentry) in xref_entries {
-                        let idx = num as usize;
-                        if idx < 100_000 {
-                            if idx >= merged.len() {
-                                merged.resize(idx + 1, None);
-                            }
-                            if merged[idx].is_none() {
-                                merged[idx] = Some(xentry);
-                            }
+                // Merge entries from xref stream (includes ObjStm refs)
+                let mut merged = entries;
+                for (num, xentry) in xref_entries {
+                    let idx = num as usize;
+                    if idx < 100_000 {
+                        if idx >= merged.len() {
+                            merged.resize(idx + 1, None);
+                        }
+                        if merged[idx].is_none() {
+                            merged[idx] = Some(xentry);
                         }
                     }
-                    return Ok(XrefTable {
-                        entries: merged,
-                        trailer: xref_trailer,
-                    });
                 }
+                return Ok(XrefTable {
+                    entries: merged,
+                    trailer: xref_trailer,
+                });
             }
         }
     }
@@ -582,10 +581,9 @@ fn find_catalog_obj(data: &[u8], entries: &[Option<XrefEntry>]) -> Option<u32> {
                 let mut lexer = Lexer::at(slice, obj_start);
                 if let Ok(Token::DictBegin) = lexer.next_token()
                     && let Ok(dict) = parse_dict_body(&mut lexer)
+                    && let Some((root_num, _)) = dict.get_ref(b"Root")
                 {
-                    if let Some((root_num, _)) = dict.get_ref(b"Root") {
-                        return Some(root_num);
-                    }
+                    return Some(root_num);
                 }
             }
         }
@@ -627,14 +625,12 @@ fn parse_xref_section(
                     let scan_start = offset.saturating_sub(256);
                     let scan_end = offset.min(data.len());
                     for search in (scan_start..scan_end).rev() {
-                        if data[search].is_ascii_digit() {
-                            if let Some((_, _, obj_offset)) = try_parse_obj_header(data, search) {
-                                if obj_offset == search {
-                                    if let Ok(result) = parse_xref_stream(data, search) {
-                                        return Ok(result);
-                                    }
-                                }
-                            }
+                        if data[search].is_ascii_digit()
+                            && let Some((_, _, obj_offset)) = try_parse_obj_header(data, search)
+                            && obj_offset == search
+                            && let Ok(result) = parse_xref_stream(data, search)
+                        {
+                            return Ok(result);
                         }
                     }
                     parse_xref_stream(data, offset) // return original error

@@ -195,7 +195,7 @@ impl PdfDevice {
     /// extend each key. The pdfmark buffer is *not* drained here; phases
     /// past Phase 1 may want to consult it for separate concerns.
     fn build_info_dict(&self, ctx: Option<&Context>) -> Vec<(Vec<u8>, PdfObj)> {
-        let docinfo = ctx.map(|c| collect_docinfo(c)).unwrap_or_default();
+        let docinfo = ctx.map(collect_docinfo).unwrap_or_default();
 
         let producer = docinfo
             .producer
@@ -2248,7 +2248,7 @@ fn build_ocg_property_ref(
             ]))
         }
         OcgVisibility::Expression { expr, .. } => {
-            let ve = build_ve_array(writer, expr, ocg_id_to_ref);
+            let ve = build_ve_array(expr, ocg_id_to_ref);
             writer.add_object(&PdfObj::Dict(vec![
                 (b"Type".to_vec(), PdfObj::name("OCMD")),
                 (b"VE".to_vec(), ve),
@@ -2261,7 +2261,6 @@ fn build_ocg_property_ref(
 /// shape: `[/And expr1 expr2 …]`, `[/Or expr1 expr2 …]`, `[/Not expr]`,
 /// or a bare indirect ref for a leaf `Layer`.
 fn build_ve_array(
-    writer: &mut PdfWriter,
     expr: &stet_graphics::display_list::VisibilityExpr,
     ocg_id_to_ref: &HashMap<u32, u32>,
 ) -> PdfObj {
@@ -2270,21 +2269,20 @@ fn build_ve_array(
         VisibilityExpr::And(xs) => {
             let mut arr = vec![PdfObj::name("And")];
             for x in xs {
-                arr.push(build_ve_array(writer, x, ocg_id_to_ref));
+                arr.push(build_ve_array(x, ocg_id_to_ref));
             }
             PdfObj::Array(arr)
         }
         VisibilityExpr::Or(xs) => {
             let mut arr = vec![PdfObj::name("Or")];
             for x in xs {
-                arr.push(build_ve_array(writer, x, ocg_id_to_ref));
+                arr.push(build_ve_array(x, ocg_id_to_ref));
             }
             PdfObj::Array(arr)
         }
-        VisibilityExpr::Not(x) => PdfObj::Array(vec![
-            PdfObj::name("Not"),
-            build_ve_array(writer, x, ocg_id_to_ref),
-        ]),
+        VisibilityExpr::Not(x) => {
+            PdfObj::Array(vec![PdfObj::name("Not"), build_ve_array(x, ocg_id_to_ref)])
+        }
         VisibilityExpr::Layer(id) => match ocg_id_to_ref.get(id) {
             Some(&r) => PdfObj::Ref(r),
             None => PdfObj::Null,

@@ -65,37 +65,36 @@ impl CMap {
             if line.ends_with("usecmap") {
                 let name = line.strip_suffix("usecmap").unwrap_or("").trim();
                 let name = name.strip_prefix('/').unwrap_or(name);
-                if !name.is_empty() {
-                    if let Some(load_fn) = loader {
-                        if let Some(base_data) = load_fn(name.as_bytes()) {
-                            let base = Self::parse_with_loader(&base_data, loader);
-                            // Inherit base mappings (current entries override)
-                            for (k, v) in base.code_to_cid {
-                                code_to_cid.entry(k).or_insert(v);
-                            }
-                            if codespace_ranges.is_empty() {
-                                // Inherit codespace from base if not defined yet
-                                for fb in 0..256u16 {
-                                    let w = base.code_lengths[fb as usize];
-                                    if w > 0 {
-                                        let low = if w == 1 {
-                                            vec![fb as u8]
-                                        } else {
-                                            vec![fb as u8, 0x00]
-                                        };
-                                        let high = if w == 1 {
-                                            vec![fb as u8]
-                                        } else {
-                                            vec![fb as u8, 0xFF]
-                                        };
-                                        codespace_ranges.push((low, high));
-                                    }
-                                }
-                            }
-                            if wmode == 0 {
-                                wmode = base.wmode;
+                if !name.is_empty()
+                    && let Some(load_fn) = loader
+                    && let Some(base_data) = load_fn(name.as_bytes())
+                {
+                    let base = Self::parse_with_loader(&base_data, loader);
+                    // Inherit base mappings (current entries override)
+                    for (k, v) in base.code_to_cid {
+                        code_to_cid.entry(k).or_insert(v);
+                    }
+                    if codespace_ranges.is_empty() {
+                        // Inherit codespace from base if not defined yet
+                        for fb in 0..256u16 {
+                            let w = base.code_lengths[fb as usize];
+                            if w > 0 {
+                                let low = if w == 1 {
+                                    vec![fb as u8]
+                                } else {
+                                    vec![fb as u8, 0x00]
+                                };
+                                let high = if w == 1 {
+                                    vec![fb as u8]
+                                } else {
+                                    vec![fb as u8, 0xFF]
+                                };
+                                codespace_ranges.push((low, high));
                             }
                         }
+                    }
+                    if wmode == 0 {
+                        wmode = base.wmode;
                     }
                 }
             }
@@ -103,10 +102,10 @@ impl CMap {
             // Parse /WMode
             if let Some(rest) = line.strip_prefix("/WMode") {
                 let rest = rest.trim();
-                if let Some(rest) = rest.strip_prefix("def").or(Some(rest)) {
-                    if let Ok(v) = rest.trim().parse::<u8>() {
-                        wmode = v;
-                    }
+                if let Some(rest) = rest.strip_prefix("def").or(Some(rest))
+                    && let Ok(v) = rest.trim().parse::<u8>()
+                {
+                    wmode = v;
                 }
             }
             // Also handle "N /WMode def" pattern
@@ -119,7 +118,7 @@ impl CMap {
 
             // Parse codespace ranges
             if line.ends_with("begincodespacerange") {
-                while let Some(range_line) = lines.next() {
+                for range_line in lines.by_ref() {
                     let range_line = range_line.trim();
                     if range_line == "endcodespacerange" {
                         break;
@@ -141,7 +140,7 @@ impl CMap {
                         code_to_cid.insert(code, cid);
                     }
                 } else if line.ends_with("begincidchar") {
-                    while let Some(char_line) = lines.next() {
+                    for char_line in lines.by_ref() {
                         let char_line = char_line.trim();
                         if char_line == "endcidchar" {
                             break;
@@ -162,7 +161,7 @@ impl CMap {
                         }
                     }
                 } else if line.ends_with("begincidrange") {
-                    while let Some(range_line) = lines.next() {
+                    for range_line in lines.by_ref() {
                         let range_line = range_line.trim();
                         if range_line == "endcidrange" {
                             break;
@@ -183,7 +182,7 @@ impl CMap {
                         code_to_cid.insert(code, unicode);
                     }
                 } else if line.ends_with("beginbfchar") {
-                    while let Some(char_line) = lines.next() {
+                    for char_line in lines.by_ref() {
                         let char_line = char_line.trim();
                         if char_line == "endbfchar" {
                             break;
@@ -203,7 +202,7 @@ impl CMap {
                         }
                     }
                 } else if line.ends_with("beginbfrange") {
-                    while let Some(range_line) = lines.next() {
+                    for range_line in lines.by_ref() {
                         let range_line = range_line.trim();
                         if range_line == "endbfrange" {
                             break;
