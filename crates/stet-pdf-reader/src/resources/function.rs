@@ -578,7 +578,7 @@ fn interpolate(x: f64, x_min: f64, x_max: f64, y_min: f64, y_max: f64) -> f64 {
     y_min + (x - x_min) * (y_max - y_min) / (x_max - x_min)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn evaluate_sampled(
     inputs: &[f64],
     domain: &[[f64; 2]],

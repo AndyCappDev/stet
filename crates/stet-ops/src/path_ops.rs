@@ -298,7 +298,7 @@ fn acute_arc_to_bezier(start: f64, size: f64) -> (f64, f64, f64, f64, f64, f64, 
 /// - `arc` (counterclockwise=false): greedy segments of up to PI/2
 /// - `arcn` (counterclockwise=true): generate forward arc, then reverse
 ///   segment order and swap control points
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn arc_segments(
     cx: f64,
     cy: f64,
@@ -338,7 +338,7 @@ fn arc_segments(
 /// Generate CCW arc segments (the `arc` operator).
 /// Uses greedy segment sizing: each segment is min(remaining, PI/2).
 /// Points are computed in user space, then transformed through CTM to device space.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn arc_segments_arc(
     cx: f64,
     cy: f64,
@@ -412,7 +412,7 @@ fn arc_segments_arc(
 /// Strategy: swap angles, generate the forward (CCW) arc, then reverse
 /// segment order and swap control points within each segment. Points are
 /// computed in user space, then transformed through CTM to device space.
-#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+#[expect(clippy::type_complexity, clippy::too_many_arguments)]
 fn arc_segments_arcn(
     cx: f64,
     cy: f64,
@@ -774,7 +774,7 @@ pub fn op_arcto(ctx: &mut Context) -> Result<(), PsError> {
 /// Generate arc bezier segments for arcto/arct with endpoint snapping.
 /// The last segment's endpoint is snapped to (snap_dx, snap_dy) in device space.
 /// Control points are computed in user space (center+radius), then transformed through CTM.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn arcto_bezier_segments(
     cx: f64,
     cy: f64,

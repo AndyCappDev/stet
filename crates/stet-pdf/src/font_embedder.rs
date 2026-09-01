@@ -291,7 +291,7 @@ fn find_seac_deps(decrypted: &[u8]) -> Vec<String> {
 /// - length1 = cleartext section length
 /// - length2 = eexec encrypted section length
 /// - length3 = footer length (always 522)
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn build_type1_font_file(
     ctx: &Context,
     font_entity: EntityId,
@@ -397,7 +397,7 @@ fn build_type1_font_file(
         if trimmed_len > 0 {
             let return_stub = charstring_encrypt(&[11], len_iv);
             lines.push(format!("/Subrs {} array", trimmed_len).into_bytes());
-            #[allow(clippy::needless_range_loop)]
+            #[expect(clippy::needless_range_loop)]
             for i in 0..trimmed_len {
                 let encrypted = if used_subrs.contains(&i) {
                     charstring_encrypt(&subrs[i], len_iv)

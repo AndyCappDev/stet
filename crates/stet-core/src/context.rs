@@ -264,7 +264,7 @@ pub struct Context {
     /// Page filter: if set, only render pages in this set (1-based).
     pub page_filter: Option<std::collections::HashSet<i32>>,
     /// Factory closure for creating raster devices (registered by CLI).
-    #[allow(clippy::type_complexity)]
+    #[expect(clippy::type_complexity)]
     pub device_factory: Option<Box<dyn Fn(u32, u32) -> Box<dyn OutputDevice>>>,
 
     // Font system

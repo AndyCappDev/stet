@@ -169,7 +169,7 @@ struct Subpath {
 }
 
 /// Flatten a cubic bezier into line segments.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn flatten_cubic(
     x0: f64,
     y0: f64,

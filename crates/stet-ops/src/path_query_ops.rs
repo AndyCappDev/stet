@@ -152,7 +152,7 @@ fn flatten_path(path: &PsPath, flatness: f64) -> PsPath {
 }
 
 /// Recursive de Casteljau subdivision of a cubic bezier to line segments.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn subdivide_cubic(
     x0: f64,
     y0: f64,

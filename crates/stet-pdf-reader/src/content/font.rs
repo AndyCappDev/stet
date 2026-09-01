@@ -2632,7 +2632,7 @@ fn build_cff_font(
             .enumerate()
             .map(|(gid, name)| (name.as_str(), gid as u16))
             .collect();
-        #[allow(clippy::needless_range_loop)]
+        #[expect(clippy::needless_range_loop)]
         for code in 0..256 {
             let gid = font.encoding[code] as usize;
             if gid > 0 && gid < font.charset.len() && font.charset[gid] != ".notdef" {

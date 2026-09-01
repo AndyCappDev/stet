@@ -551,7 +551,7 @@ fn read_type3_interleave1(
 /// InterleaveType 2: data interleaved by row blocks.
 /// Block structure: [mask rows][image rows] repeated.
 /// Mask is always 1 BPS.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn read_type3_interleave2(
     ctx: &mut Context,
     data_source: PsObject,
@@ -611,7 +611,7 @@ fn read_type3_interleave2(
 }
 
 /// InterleaveType 3: separate data sources for image and mask.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn read_type3_interleave3(
     ctx: &mut Context,
     img_data_source: PsObject,
@@ -653,7 +653,7 @@ fn read_type3_interleave3(
 }
 
 /// Apply a stencil mask to RGBA data, setting alpha=0 where mask says "don't paint".
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn apply_stencil_mask(
     rgba: &mut [u8],
     img_w: u32,

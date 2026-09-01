@@ -1491,7 +1491,7 @@ fn get_type2_info(ctx: &Context, font_entity: EntityId) -> Result<Type2Info, PsE
 }
 
 /// Render show for Type 2 (CFF) fonts.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn render_show_type2(
     ctx: &mut Context,
     font_entity: EntityId,
@@ -1863,7 +1863,7 @@ fn concatenate_sfnts_array(ctx: &Context, dict_entity: EntityId) -> Option<Vec<u
 /// For Type 0 fonts with CIDFont Type 42 descendants, parses TrueType glyf
 /// data from GlyphDirectory, converts quadratic B-splines to cubic Bezier
 /// paths, and renders through the existing fill pipeline.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn render_show_composite(
     ctx: &mut Context,
     font_entity: EntityId,
@@ -2188,7 +2188,7 @@ fn render_show_composite(
 }
 
 /// Render CIDs using TrueType (sfnts) data from a CIDFont descriptor.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn render_composite_truetype_cids(
     ctx: &mut Context,
     cidfont_entity: EntityId,
@@ -2491,7 +2491,7 @@ fn get_global_subrs(ctx: &Context, font_entity: EntityId) -> Vec<Vec<u8>> {
 }
 
 /// Render CIDs using CFF (Type 2 charstring) data from a CIDFont descriptor.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn render_composite_cff_cids(
     ctx: &mut Context,
     cidfont_entity: EntityId,
@@ -2804,7 +2804,7 @@ fn replay_cached_type3(
 /// appended to the current path instead of reaching the page.
 ///
 /// Returns the width the procedure declared, in glyph space.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn build_type3_glyph(
     ctx: &mut Context,
     font_obj: PsObject,
@@ -2919,7 +2919,7 @@ fn build_type3_glyph(
 /// again and their outlines appended to the current path instead, which is what
 /// `charpath` means for a Type 3 font (PLRM: the glyph procedure runs, and
 /// whatever it would have painted becomes part of the path).
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn render_show_type3(
     ctx: &mut Context,
     bytes: &[u8],
@@ -4112,7 +4112,7 @@ fn render_show_displaced_type2(
 
 /// Render an FMapType-based Type 0 composite font (non-displaced).
 /// Descendant fonts are regular Type 1 fonts, not CIDFonts.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn render_fmap_type0(
     ctx: &mut Context,
     font_entity: EntityId,
@@ -4228,7 +4228,7 @@ fn render_fmap_type0(
 }
 
 /// Render an FMapType-based Type 0 composite font with per-character displacements.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn render_fmap_type0_displaced(
     ctx: &mut Context,
     font_entity: EntityId,

@@ -636,7 +636,7 @@ impl PdfDevice {
     /// the page before its dict is written), and the per-page
     /// annotation refs are passed in for inclusion in the page's
     /// `/Annots` array.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     fn build_page(
         &self,
         writer: &mut PdfWriter,

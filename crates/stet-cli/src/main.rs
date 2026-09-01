@@ -612,7 +612,7 @@ writes all pages to one file",
 /// through the viewport pipeline (same code path the interactive viewer
 /// uses) instead of the banded full-page pipeline — this is the audit mode
 /// behind `--device viewport-png`.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn run_png_mode(
     dpi_override: Option<f64>,
     file_args: Vec<String>,
@@ -2122,7 +2122,7 @@ fn is_pdf_file(filename: &str) -> bool {
 // `viewer` feature is not genuinely optional and `--no-default-features`
 // fails to build — which is the configuration a static musl binary needs.
 #[cfg(feature = "viewer")]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn render_dropped_pdf(
     path: &str,
     dpi_override: Option<f64>,
@@ -2270,7 +2270,6 @@ fn compute_fit_dims(
     (out_w, out_h, dpi)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_pdf_page_to_rgba(
     doc: &PdfDocument,
     page: usize,
@@ -2314,7 +2313,7 @@ fn render_pdf_page_to_rgba(
     Ok((rgba, pixel_w, pixel_h))
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn run_pdf_input_png(
     dpi: f64,
     file_args: &[String],

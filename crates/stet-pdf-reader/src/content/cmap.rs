@@ -56,7 +56,6 @@ impl CMap {
 
         let text = String::from_utf8_lossy(data);
 
-        #[allow(clippy::while_let_on_iterator)]
         let mut lines = text.lines();
 
         while let Some(line) = lines.next() {

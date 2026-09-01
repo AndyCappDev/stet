@@ -397,7 +397,7 @@ impl FieldDefaults {
     }
 }
 
-#[allow(clippy::too_many_arguments)] // recursive walker; context struct doesn't pay off
+#[expect(clippy::too_many_arguments)] // recursive walker; context struct doesn't pay off
 fn walk_field(
     resolver: &Resolver,
     field_obj: &PdfObj,

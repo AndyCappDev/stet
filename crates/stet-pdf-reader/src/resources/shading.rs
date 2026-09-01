@@ -207,7 +207,7 @@ fn handle_function_based(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn handle_axial(
     dict: &PdfDict,
     gstate: &PdfGraphicsState,
@@ -259,7 +259,7 @@ fn handle_axial(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn handle_radial(
     dict: &PdfDict,
     gstate: &PdfGraphicsState,
@@ -332,7 +332,7 @@ fn cs_has_spot_with_cmyk_alt(cs: &ResolvedColorSpace) -> bool {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn handle_mesh(
     shading_obj: &PdfObj,
     dict: &PdfDict,
@@ -500,7 +500,7 @@ fn handle_mesh(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn handle_patches(
     shading_obj: &PdfObj,
     dict: &PdfDict,

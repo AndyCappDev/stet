@@ -438,7 +438,7 @@ fn validate_dct_decode_params(
 }
 
 /// Extract CCITTFaxDecode parameters from a dict, with PLRM defaults.
-#[allow(clippy::type_complexity)]
+#[expect(clippy::type_complexity)]
 fn extract_ccitt_params(
     ctx: &Context,
     dict_entity: EntityId,
@@ -491,7 +491,7 @@ fn extract_ccitt_params(
 }
 
 /// Create a filter by name, returning the filter EntityId.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn create_filter_by_name(
     ctx: &mut Context,
     name: &[u8],

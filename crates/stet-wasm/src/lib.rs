@@ -818,7 +818,7 @@ pub fn viewport_band_params(pixel_w: u32, pixel_h: u32) -> js_sys::Array {
 /// This is the per-band counterpart to `render_viewport()`. The JS worker
 /// loops over `band_idx` in `0..num_bands`, collecting RGBA strips.
 #[wasm_bindgen]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub fn render_viewport_band(
     interp: &mut Interpreter,
     page_index: u32,

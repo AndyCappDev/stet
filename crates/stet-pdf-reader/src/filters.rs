@@ -1812,7 +1812,7 @@ fn apply_tiff_predictor_subbyte(
             // `c` drives sample/byte offset arithmetic as well as indexing
             // `prev`, inside a loop that breaks early on a short row. Left as an
             // index loop deliberately.
-            #[allow(clippy::needless_range_loop)]
+            #[expect(clippy::needless_range_loop)]
             for c in 0..colors {
                 let sample_idx = col * colors + c;
                 if sample_idx >= samples_per_row {
@@ -1857,7 +1857,7 @@ fn apply_tiff_predictor_16bit(
             // `c` drives sample/byte offset arithmetic as well as indexing
             // `prev`, inside a loop that breaks early on a short row. Left as an
             // index loop deliberately.
-            #[allow(clippy::needless_range_loop)]
+            #[expect(clippy::needless_range_loop)]
             for c in 0..colors {
                 let byte_idx = (col * colors + c) * 2;
                 if byte_idx + 1 >= row.len() {

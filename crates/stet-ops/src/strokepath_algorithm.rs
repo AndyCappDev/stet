@@ -493,7 +493,7 @@ fn normal_raw(p0x: f64, p0y: f64, p1x: f64, p1y: f64) -> (f64, f64) {
 
 /// Offset a cubic Bézier using raw floats. Appends CurveTo elements to result
 /// and returns the offset start point.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn offset_cubic_recursive_raw(
     p0x: f64,
     p0y: f64,
@@ -847,7 +847,7 @@ fn compute_inner_join_point(
     Some(pt)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn make_join(
     prev_end: Point,
     prev_tangent: Point,
@@ -1122,7 +1122,7 @@ fn filter_uturn_segments(
 }
 
 /// Convert a stroked path to filled outline path(s), returned as groups.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub fn strokepath_grouped(
     path: &Path,
     line_width: f64,
@@ -1469,7 +1469,6 @@ fn assemble_closed_outline(
     outline
 }
 
-#[allow(clippy::too_many_arguments)]
 fn assemble_open_outline(
     segments: &[(Point, PathElement)],
     left_offsets: &[(Vec<PathElement>, Point, Point)],

@@ -1294,7 +1294,7 @@ pub fn op_writeobject(ctx: &mut Context) -> Result<(), PsError> {
 }
 
 /// Serialize a PostScript object as a Binary Object Sequence (PLRM 3.14.2).
-#[allow(clippy::only_used_in_recursion)]
+#[expect(clippy::only_used_in_recursion)]
 fn serialize_binary_object(ctx: &Context, obj: PsObject, tag: u8) -> Result<Vec<u8>, PsError> {
     let format = ctx.object_format;
     let big_endian = format == 1 || format == 3;

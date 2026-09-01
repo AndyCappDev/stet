@@ -4146,7 +4146,7 @@ fn render_group(
 ///      ICC system CMYK profile so it sits seamlessly next to the rest of the
 ///      page, and write the result to both the parent pixmap and (when
 ///      present) the parent CMYK buffer.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn composite_non_isolated_cmyk(
     target: &mut Pixmap,
     parent_cmyk: Option<&mut [f32]>,
@@ -4741,7 +4741,7 @@ fn replace_changed_pixels(target: &mut [u8], source: &[u8], backdrop: &[u8]) {
 /// Copy a group's CMYK buffer back to the parent's CMYK buffer after compositing.
 /// Only copies values for pixels where the group offscreen has non-zero alpha,
 /// indicating the group actually painted something at that position.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn copy_cmyk_buffer_to_parent(
     parent_cmyk: &mut [f32],
     group_cmyk: &[f32],
@@ -4813,7 +4813,6 @@ fn replace_changed_cmyk(
 /// 3. Renders content into another offscreen pixmap.
 /// 4. Multiplies content alpha by the mask values.
 /// 5. Composites the masked content onto the parent.
-#[allow(clippy::too_many_arguments)]
 fn render_soft_masked(
     pixmap: &mut Pixmap,
     band_state: &mut BandState,
@@ -5273,7 +5272,7 @@ fn extract_soft_mask_values(
             };
             let backdrop_byte = (backdrop_lum * 255.0 + 0.5) as u8;
 
-            #[allow(clippy::needless_range_loop)]
+            #[expect(clippy::needless_range_loop)]
             for i in 0..pixel_count {
                 let off = i * 4;
                 let a = rgba[off + 3];
@@ -7227,7 +7226,7 @@ fn has_overprint_elements(list: &DisplayList) -> bool {
 
 /// Render an overprint fill: rasterize path to coverage mask, then composite
 /// at the CMYK level, converting the result to RGB for the pixmap.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn render_overprint_fill(
     pixmap: &mut Pixmap,
     cmyk_buf: &mut [f32],
@@ -7665,8 +7664,6 @@ fn cmyk_to_rgb_plrm(c: f64, m: f64, y: f64, k: f64) -> (f64, f64, f64) {
     )
 }
 
-/// Update the CMYK buffer for a non-overprint fill (to track backdrop for future overprints).
-#[allow(clippy::too_many_arguments)]
 /// Compute the device-space bounding box of a tiny-skia path after transform,
 /// clamped to `(0, 0, w, h)`. Returns `(x0, y0, x1, y1)` as pixel indices.
 fn path_device_bbox(
@@ -7713,6 +7710,9 @@ fn path_device_bbox(
     (x0, y0, x1, y1)
 }
 
+/// Update the CMYK buffer for a non-overprint fill, to track the backdrop
+/// for future overprints.
+#[expect(clippy::too_many_arguments)]
 fn update_cmyk_buffer_for_fill(
     cmyk_buf: &mut [f32],
     spot_mask: &mut [u8],
@@ -7853,7 +7853,7 @@ fn update_cmyk_buffer_for_fill(
 /// rasterize a coverage mask, then composite per-pixel in CMYK so the painted
 /// channels of the stroke colour replace the matching backdrop channels and
 /// the result lands in the pixmap as RGB. Mirrors `render_overprint_fill`.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn render_overprint_stroke(
     pixmap: &mut Pixmap,
     cmyk_buf: &mut [f32],
@@ -8214,7 +8214,7 @@ fn render_overprint_stroke(
 /// [`update_cmyk_buffer_for_fill`] but rasterizes a stroked outline path
 /// instead of a filled one. Source-CMYK selection follows the same
 /// native_cmyk → ICC reverse → PLRM cascade.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn update_cmyk_buffer_for_stroke(
     cmyk_buf: &mut [f32],
     spot_mask: &mut [u8],
@@ -8343,7 +8343,7 @@ fn update_cmyk_buffer_for_stroke(
 }
 
 /// Render an overprint image with viewport params.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn render_overprint_image(
     pixmap: &mut Pixmap,
     cmyk_buf: &mut [f32],
@@ -8722,7 +8722,7 @@ fn render_overprint_image(
 /// the system CMYK ICC profile, falling back to the PLRM formula. This keeps
 /// the parallel CMYK buffer faithful for any image painter inside a
 /// CMYK-tracked context.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn update_cmyk_buffer_for_image(
     cmyk_buf: &mut [f32],
     sample_data: &[u8],
@@ -9249,7 +9249,7 @@ fn sample_pixel_cmyk(
 /// Renders the display list in horizontal bands and streams the output
 /// to a `PageSink`. This function is self-contained: it creates its own
 /// band pixmaps, clip state, and streams rows to the sink.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn render_banded_to_sink(
     page_w: u32,
     page_h: u32,
@@ -10240,7 +10240,7 @@ fn preprocess_images_for_bands(
 /// Like [`render_region()`] but skips the three precomputation passes,
 /// using the [`PreparedDisplayList`] instead. Significantly faster for
 /// repeated renders of the same display list (e.g., panning at a fixed zoom).
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub fn render_region_prepared(
     list: &DisplayList,
     prepared: &PreparedDisplayList,
@@ -10325,7 +10325,7 @@ pub fn render_region_prepared(
             }
         }
 
-        #[allow(clippy::needless_range_loop)]
+        #[expect(clippy::needless_range_loop)]
         for i in epoch.start_idx..epoch.end_idx {
             // OcgGroups with Clip/InitClip must always be processed — see
             // the banded renderer for the rationale.
@@ -10396,7 +10396,7 @@ pub fn viewport_band_count(pixel_w: u32, pixel_h: u32) -> (u32, u32) {
 ///
 /// Returns RGBA pixel data for `actual_h` rows (may be less than `band_h` for
 /// the last band).
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub fn render_region_single_band(
     list: &DisplayList,
     prepared: &PreparedDisplayList,
@@ -10506,7 +10506,7 @@ pub fn render_region_single_band(
             }
         }
 
-        #[allow(clippy::needless_range_loop)]
+        #[expect(clippy::needless_range_loop)]
         for i in epoch.start_idx..epoch.end_idx {
             // OcgGroups containing Clip/InitClip must always be processed
             // regardless of this band's bbox — see the full-page banded
@@ -10566,7 +10566,7 @@ pub fn render_region_single_band(
 ///
 /// Requires the `parallel` feature (rayon). Falls back to sequential rendering
 /// if `parallel` is not enabled.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub fn render_region_prepared_parallel(
     list: &DisplayList,
     prepared: &PreparedDisplayList,
@@ -10663,7 +10663,7 @@ pub fn render_region_prepared_parallel(
 ///
 /// The counter is incremented after each chunk of bands completes. The total
 /// number of bands is returned alongside the counter via [`viewport_band_count()`].
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub fn render_region_prepared_parallel_with_progress(
     list: &DisplayList,
     prepared: &PreparedDisplayList,
@@ -10762,7 +10762,7 @@ pub fn render_region_prepared_parallel_with_progress(
 
 /// Like [`render_region_prepared_parallel()`] but checks a cancellation flag
 /// between band chunks. Returns `None` if cancelled.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub fn render_region_prepared_parallel_cancellable(
     list: &DisplayList,
     prepared: &PreparedDisplayList,
@@ -10889,7 +10889,6 @@ pub fn render_to_rgba(
 /// Pass `&LayerSet::new()` (or use [`render_to_rgba`]) to fall back to
 /// each OCG's `default_visible` baked from the document's default
 /// configuration.
-#[allow(clippy::too_many_arguments)]
 pub fn render_to_rgba_with_layers(
     list: &DisplayList,
     pixel_w: u32,
@@ -11197,7 +11196,7 @@ impl stet_graphics::device::PageSink for MemorySink {
 /// - `dpi`: Reference DPI (for hairline width decisions)
 ///
 /// Returns RGBA pixel data of size `pixel_w × pixel_h × 4`.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub fn render_region(
     list: &DisplayList,
     vp_x: f64,
@@ -11384,7 +11383,7 @@ fn clip_polygon_halfplane(
 }
 
 /// Render an axial (linear) gradient shading.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn render_axial_shading(
     pixmap: &mut Pixmap,
     params: &AxialShadingParams,
@@ -11592,7 +11591,7 @@ fn render_axial_shading(
         // Not `.clamp()`: the lower bound is data-driven, and a PDF with more
         // than 16384 colour stops would make it exceed the upper bound, which
         // `clamp` panics on. The max/min chain saturates instead.
-        #[allow(clippy::manual_clamp)]
+        #[expect(clippy::manual_clamp)]
         let lut_size = (pixel_axis_len as usize)
             .max(params.color_stops.len())
             .max(256)
@@ -11907,7 +11906,7 @@ fn render_axial_shading(
 }
 
 /// Render a radial gradient shading.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn render_radial_shading(
     pixmap: &mut Pixmap,
     params: &RadialShadingParams,
@@ -12169,7 +12168,7 @@ fn render_radial_shading(
 ///
 /// Returns the largest root of the circle equation that falls within the valid
 /// domain and has R(t) >= 0. The valid domain is [0,1], extended by extend flags.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn solve_radial_t(
     px: f64,
     py: f64,
@@ -12235,7 +12234,7 @@ fn solve_radial_t(
 }
 
 /// Render a Gouraud-shaded triangle mesh.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn render_mesh_shading(
     pixmap: &mut Pixmap,
     params: &MeshShadingParams,
@@ -12581,7 +12580,7 @@ fn patch_hull_bbox(
 }
 
 /// Render a Coons/tensor-product patch mesh by subdividing into triangles.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn render_patch_shading(
     pixmap: &mut Pixmap,
     params: &PatchShadingParams,
@@ -13138,7 +13137,7 @@ fn interpolate_cmyk_from_stops(
 /// Mirrors [`interpolate_cmyk_from_stops`]: DeviceCMYK source spaces use the
 /// per-vertex `raw_components`, non-CMYK spaces ICC-reverse the interpolated
 /// sRGB color, and PLRM is the last-resort fallback.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn interpolate_cmyk_from_vertices(
     v0: &ShadingVertex,
     v1: &ShadingVertex,
