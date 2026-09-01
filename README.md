@@ -105,6 +105,35 @@ SmartScreen warns that the publisher is unknown on first run; choose
 *More info → Run anyway*. Code-signing certificates cost money and stet does
 not have one.
 
+**Verify the download.** Each release carries a `SHA256SUMS` file listing
+every archive. The quick commands above stream the archive straight into
+`tar`, so nothing is left on disk to check against it — to verify, save the
+file first:
+
+```bash
+ASSET=stet-0.8.1-x86_64-unknown-linux-musl.tar.gz     # see the table above
+URL=https://github.com/AndyCappDev/stet/releases/download/v0.8.1/
+
+curl -L -O "$URL$ASSET"
+curl -L -O "${URL}SHA256SUMS"
+grep "$ASSET" SHA256SUMS | sha256sum -c -             # prints "<file>: OK"
+tar xzf "$ASSET"
+```
+
+macOS ships no `sha256sum`; substitute `shasum -a 256 -c -` in that line.
+
+On Windows, PowerShell has no `sha256sum` either, and `Get-FileHash` returns
+an upper-case digest while `SHA256SUMS` is lower-case, so compare them
+case-folded:
+
+```powershell
+$name = "stet-0.8.1-x86_64-pc-windows-msvc.zip"
+curl.exe -L -O https://github.com/AndyCappDev/stet/releases/download/v0.8.1/SHA256SUMS
+$want = ((Select-String -Path SHA256SUMS -SimpleMatch $name).Line -split '\s+')[0]
+$got  = (Get-FileHash $name -Algorithm SHA256).Hash.ToLower()
+if ($got -eq $want) { "OK" } else { "MISMATCH" }
+```
+
 ### Install with cargo
 
 ```bash
@@ -358,10 +387,10 @@ correctly here:
   relying on it render visibly wrong everywhere: Firefox/pdf.js,
   Okular/poppler, Chromium/pdfium, and most others all show incorrect
   colours on PDF/X-4 files and the Ghent Workgroup (GWG) conformance
-  test suite. Only Adobe Acrobat gets it right — and stet. Overprint
-  support in stet is actively being hardened: the common cases and
-  most GWG conformance files render correctly today, but stet is not
-  yet bug-for-bug Acrobat parity on every edge case.
+  test suite. stet simulates overprint rather than ignoring it, and
+  support is actively being hardened: the common cases and most GWG
+  conformance files render correctly today, but it is not yet
+  bug-for-bug Acrobat parity on every edge case.
 
 If you're doing prepress, proofing, or any color-separated output,
 these matter more than raw rendering speed.
