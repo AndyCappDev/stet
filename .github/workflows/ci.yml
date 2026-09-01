@@ -34,6 +34,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
+      # `--all` means "every workspace member", and stet-wasm is `exclude`d
+      # from the workspace -- so the step above has never once reached it, and
+      # the crate went unformatted from its first commit until 2026-09-01.
+      # Second invocation, same pinned rustfmt: a gate that silently covers
+      # thirteen of fourteen crates is the kind that finds nothing for months.
+      - name: cargo fmt --check (stet-wasm)
+        run: cargo fmt --all --manifest-path crates/stet-wasm/Cargo.toml -- --check
       - name: cargo clippy
         # Warnings gate. The workspace is clippy-clean, so anything new fails
         # here rather than joining a backlog -- which is the point: the pile of

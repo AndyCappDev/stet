@@ -65,6 +65,15 @@ if ! cargo "+$LINT_TOOLCHAIN" fmt --all -- --check; then
     exit 1
 fi
 
+# stet-wasm is `exclude`d from the workspace, so `--all` above does not reach
+# it -- the same blind spot CI's lint job had. Matches the second fmt step
+# there.
+echo -e "${YELLOW}pre-push: cargo fmt --check (stet-wasm)${RESET}"
+if ! cargo "+$LINT_TOOLCHAIN" fmt --all --manifest-path crates/stet-wasm/Cargo.toml -- --check; then
+    echo -e "${RED}pre-push: stet-wasm fmt failed. Run 'cargo +$LINT_TOOLCHAIN fmt --all --manifest-path crates/stet-wasm/Cargo.toml' and re-push.${RESET}" >&2
+    exit 1
+fi
+
 # Matches CI's lint job: the workspace is clippy-clean, so a new warning is
 # a failure here rather than something that accumulates. Exceptions are
 # #[expect(clippy::...)] at the site with the reason beside them.
