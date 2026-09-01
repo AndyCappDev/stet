@@ -25,7 +25,7 @@ use stet_graphics::display_list::DisplayList;
 use stet_graphics::icc::IccCache;
 use stet_render::{ImageCache, PreparedDisplayList, SkiaDevice};
 
-use memory_sink::{NullSinkFactory, PageData, set_sink_callback};
+use memory_sink::{NullSinkFactory, PageData};
 
 /// Embedded GhostScript default CMYK ICC profile for CMYK→sRGB conversion.
 const DEFAULT_CMYK_ICC: &[u8] = include_bytes!("default_cmyk.icc");
@@ -210,40 +210,6 @@ pub fn create_interpreter() -> Interpreter {
         pdf_cmyk_proofing: false,
         ps_stream: None,
     }
-}
-
-/// Register a JS callback for streaming render events.
-///
-/// The callback receives (event, arg1, arg2, arg3, data):
-///   event=0 (begin_page): arg1=index, arg2=width, arg3=height
-///   event=1 (rows): data=Uint8Array of RGBA band pixels
-///   event=2 (end_page): arg1=index
-///
-/// This streams bands directly to JS so WASM never holds a full page
-/// in memory — critical at high DPI where a page can exceed 2 GB.
-#[wasm_bindgen]
-pub fn set_page_callback(callback: &js_sys::Function) {
-    let callback = callback.clone();
-    set_sink_callback(Some(Box::new(move |event, arg1, arg2, arg3, data| {
-        let args = js_sys::Array::new();
-        args.push(&JsValue::from(event));
-        args.push(&JsValue::from(arg1));
-        args.push(&JsValue::from(arg2));
-        args.push(&JsValue::from(arg3));
-        if !data.is_empty() {
-            let arr = js_sys::Uint8Array::from(data);
-            args.push(&arr.into());
-        } else {
-            args.push(&JsValue::NULL);
-        }
-        let _ = callback.apply(&JsValue::NULL, &args);
-    })));
-}
-
-/// Clear the page callback.
-#[wasm_bindgen]
-pub fn clear_page_callback() {
-    set_sink_callback(None);
 }
 
 /// Render PostScript or EPS data at the specified DPI.

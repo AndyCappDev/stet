@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **`stet-wasm`: the `set_page_callback()` / `clear_page_callback()` JS
+  exports.** These registered a callback for streaming rendered bands out of
+  WASM memory. The only sink that ever invoked it, `MemorySink`, stopped
+  being constructed when the browser viewer moved to on-demand viewport
+  rasterization — the change that fixed a 4.6 GB OOM on a 139-page document
+  at 300 DPI. Registering a callback has been a silent no-op ever since, so
+  the exports and the dead sink are removed rather than left looking
+  functional. Nothing in the bundled frontend called them.
+
 ## [0.8.1] — 2026-08-31
 
 A malformed-font crash fix. Font data arrives embedded in a PDF or a
