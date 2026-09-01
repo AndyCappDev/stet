@@ -568,10 +568,10 @@ fn read_type3_interleave2(
 
     // Determine block structure from height ratio
     let (mask_rows_per_block, img_rows_per_block, num_blocks) = if img_h >= mask_h {
-        let ratio = if mask_h > 0 { img_h / mask_h } else { 1 };
+        let ratio = img_h.checked_div(mask_h).unwrap_or(1);
         (1usize, ratio as usize, mask_h as usize)
     } else {
-        let ratio = if img_h > 0 { mask_h / img_h } else { 1 };
+        let ratio = mask_h.checked_div(img_h).unwrap_or(1);
         (ratio as usize, 1usize, img_h as usize)
     };
 
@@ -1668,7 +1668,7 @@ fn apply_decode(samples: &[u8], ncomp: u32, decode: &[f64]) -> Vec<u8> {
 fn rgba_to_rgb(rgba: &[u8]) -> Vec<u8> {
     let npixels = rgba.len() / 4;
     let mut rgb = Vec::with_capacity(npixels * 3);
-    for px in rgba.chunks_exact(4) {
+    for px in rgba.as_chunks::<4>().0 {
         rgb.push(px[0]);
         rgb.push(px[1]);
         rgb.push(px[2]);

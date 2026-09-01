@@ -381,8 +381,20 @@ fn op_vmoveto(state: &mut T2State) {
     do_moveto(state, 0.0, dy);
 }
 
+/// Drain the operand stack into a fresh `Vec` for an operator to consume.
+///
+/// Deliberately `drain(..).collect()` and not `mem::take`, which clippy's
+/// `drain_collect` suggests. `mem::take` would hand the stack's buffer to the
+/// caller and leave `state.stack` at capacity zero, so the next operand push
+/// reallocates -- on every operator, for every glyph. `T2State` reserves 48
+/// slots up front precisely to avoid that, and draining keeps the reservation.
+#[expect(clippy::drain_collect)]
+fn take_args(state: &mut T2State) -> Vec<f64> {
+    state.stack.drain(..).collect()
+}
+
 fn op_rlineto(state: &mut T2State) {
-    let args: Vec<f64> = state.stack.drain(..).collect();
+    let args = take_args(state);
     let mut i = 0;
     while i + 1 < args.len() {
         do_lineto(state, args[i], args[i + 1]);
@@ -391,7 +403,7 @@ fn op_rlineto(state: &mut T2State) {
 }
 
 fn op_hlineto(state: &mut T2State) {
-    let args: Vec<f64> = state.stack.drain(..).collect();
+    let args = take_args(state);
     let mut horizontal = true;
     for val in args {
         if horizontal {
@@ -404,7 +416,7 @@ fn op_hlineto(state: &mut T2State) {
 }
 
 fn op_vlineto(state: &mut T2State) {
-    let args: Vec<f64> = state.stack.drain(..).collect();
+    let args = take_args(state);
     let mut vertical = true;
     for val in args {
         if vertical {
@@ -417,7 +429,7 @@ fn op_vlineto(state: &mut T2State) {
 }
 
 fn op_rrcurveto(state: &mut T2State) {
-    let args: Vec<f64> = state.stack.drain(..).collect();
+    let args = take_args(state);
     let mut i = 0;
     while i + 5 < args.len() {
         do_curveto(
@@ -434,7 +446,7 @@ fn op_rrcurveto(state: &mut T2State) {
 }
 
 fn op_hhcurveto(state: &mut T2State) {
-    let args: Vec<f64> = state.stack.drain(..).collect();
+    let args = take_args(state);
     let mut i = 0;
     let mut dy1_extra = 0.0;
     if !args.len().is_multiple_of(4) {
@@ -453,7 +465,7 @@ fn op_hhcurveto(state: &mut T2State) {
 }
 
 fn op_vvcurveto(state: &mut T2State) {
-    let args: Vec<f64> = state.stack.drain(..).collect();
+    let args = take_args(state);
     let mut i = 0;
     let mut dx1_extra = 0.0;
     if !args.len().is_multiple_of(4) {
@@ -472,12 +484,12 @@ fn op_vvcurveto(state: &mut T2State) {
 }
 
 fn op_hvcurveto(state: &mut T2State) {
-    let args: Vec<f64> = state.stack.drain(..).collect();
+    let args = take_args(state);
     alternating_curves(state, &args, true);
 }
 
 fn op_vhcurveto(state: &mut T2State) {
-    let args: Vec<f64> = state.stack.drain(..).collect();
+    let args = take_args(state);
     alternating_curves(state, &args, false);
 }
 
@@ -523,7 +535,7 @@ fn alternating_curves(state: &mut T2State, args: &[f64], start_horizontal: bool)
 }
 
 fn op_rcurveline(state: &mut T2State) {
-    let args: Vec<f64> = state.stack.drain(..).collect();
+    let args = take_args(state);
     if args.len() < 2 {
         return;
     }
@@ -547,7 +559,7 @@ fn op_rcurveline(state: &mut T2State) {
 }
 
 fn op_rlinecurve(state: &mut T2State) {
-    let args: Vec<f64> = state.stack.drain(..).collect();
+    let args = take_args(state);
     if args.len() < 6 {
         return;
     }

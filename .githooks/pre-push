@@ -46,17 +46,30 @@ fi
 clippy_log=$(mktemp -t stet-clippy.XXXXXX)
 trap 'rm -f "$clippy_log"' EXIT
 
-echo -e "${YELLOW}pre-push: cargo fmt --check${RESET}"
-if ! cargo fmt --all -- --check; then
-    echo -e "${RED}pre-push: fmt failed. Run 'cargo fmt --all' and re-push.${RESET}" >&2
+# Same toolchain as CI's lint job, and pinned for the same reason: clippy and
+# rustfmt both change between releases, so "clean locally" only means anything
+# if it is the same clippy. #[expect] makes this sharper than it sounds -- an
+# expectation that is fulfilled on one version can be unfulfilled on another,
+# so the tree is only warning-free on the pinned one. Keep in step with
+# `toolchain:` in .github/workflows/ci.yml.
+LINT_TOOLCHAIN=1.98
+if ! rustup run "$LINT_TOOLCHAIN" cargo --version >/dev/null 2>&1; then
+    echo -e "${RED}pre-push: toolchain $LINT_TOOLCHAIN is not installed.${RESET}" >&2
+    echo -e "${RED}        rustup toolchain install $LINT_TOOLCHAIN --component clippy,rustfmt${RESET}" >&2
+    exit 1
+fi
+
+echo -e "${YELLOW}pre-push: cargo fmt --check (${LINT_TOOLCHAIN})${RESET}"
+if ! cargo "+$LINT_TOOLCHAIN" fmt --all -- --check; then
+    echo -e "${RED}pre-push: fmt failed. Run 'cargo +$LINT_TOOLCHAIN fmt --all' and re-push.${RESET}" >&2
     exit 1
 fi
 
 # Matches CI's lint job: the workspace is clippy-clean, so a new warning is
 # a failure here rather than something that accumulates. Exceptions are
 # #[expect(clippy::...)] at the site with the reason beside them.
-echo -e "${YELLOW}pre-push: cargo clippy (warnings gate)${RESET}"
-if ! cargo clippy --workspace --all-targets --quiet -- -D warnings 2>&1 | tee "$clippy_log"; then
+echo -e "${YELLOW}pre-push: cargo clippy (warnings gate, ${LINT_TOOLCHAIN})${RESET}"
+if ! cargo "+$LINT_TOOLCHAIN" clippy --workspace --all-targets --quiet -- -D warnings 2>&1 | tee "$clippy_log"; then
     echo -e "${RED}pre-push: clippy failed. Fix it, or add an #[expect(clippy::...)]${RESET}" >&2
     echo -e "${RED}        at the site with a comment saying why.${RESET}" >&2
     exit 1

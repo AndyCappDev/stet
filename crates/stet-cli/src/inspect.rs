@@ -325,7 +325,7 @@ fn print_embedded_files(doc: &PdfDocument) {
     }
     println!("Embedded files: {}", files.len());
     let mut entries: Vec<_> = files.iter().collect();
-    entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+    entries.sort_by_key(|(a, _)| *a);
     for (name, ef) in entries {
         let size = ef
             .size

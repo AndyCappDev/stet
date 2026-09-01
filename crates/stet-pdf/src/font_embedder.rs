@@ -674,14 +674,13 @@ fn extract_charstring_width(decrypted: &[u8], subrs: &[Vec<u8>]) -> Option<f64> 
                                 return Some(stack[stack.len() - 2]);
                             }
                         }
-                        12 => {
+                        12
                             // div: num1 num2 → num1/num2
-                            if stack.len() >= 2 {
+                            if stack.len() >= 2 => {
                                 let b_val = stack.pop().unwrap();
                                 let a_val = stack.pop().unwrap();
                                 stack.push(if b_val != 0.0 { a_val / b_val } else { 0.0 });
                             }
-                        }
                         _ => {} // Other escape ops — don't clear stack
                     }
                 }
@@ -717,17 +716,15 @@ fn extract_charstring_width(decrypted: &[u8], subrs: &[Vec<u8>]) -> Option<f64> 
                     stack.push((-(b as i32 - 251) * 256 - b2 - 108) as f64);
                 }
             }
-            255 => {
-                if i + 3 < decrypted.len() {
-                    let val = i32::from_be_bytes([
-                        decrypted[i],
-                        decrypted[i + 1],
-                        decrypted[i + 2],
-                        decrypted[i + 3],
-                    ]);
-                    i += 4;
-                    stack.push(val as f64);
-                }
+            255 if i + 3 < decrypted.len() => {
+                let val = i32::from_be_bytes([
+                    decrypted[i],
+                    decrypted[i + 1],
+                    decrypted[i + 2],
+                    decrypted[i + 3],
+                ]);
+                i += 4;
+                stack.push(val as f64);
             }
             _ => {
                 // Other opcodes before hsbw/sbw — ignore (don't clear stack,

@@ -417,17 +417,17 @@ fn image_cs_to_pdf_cs(cs: &ImageColorSpace) -> PdfColorSpace {
 fn convert_preconverted_rgba(rgba: &[u8], params: &ImageParams) -> ImageXObject {
     let npixels = (params.width * params.height) as usize;
 
-    let has_alpha = rgba.chunks_exact(4).any(|px| px[3] != 255);
+    let has_alpha = rgba.as_chunks::<4>().0.iter().any(|px| px[3] != 255);
 
     let mut rgb = Vec::with_capacity(npixels * 3);
-    for px in rgba.chunks_exact(4) {
+    for px in rgba.as_chunks::<4>().0 {
         rgb.push(px[0]);
         rgb.push(px[1]);
         rgb.push(px[2]);
     }
 
     let smask_data = if has_alpha {
-        Some(rgba.chunks_exact(4).map(|px| px[3]).collect())
+        Some(rgba.as_chunks::<4>().0.iter().map(|px| px[3]).collect())
     } else {
         None
     };

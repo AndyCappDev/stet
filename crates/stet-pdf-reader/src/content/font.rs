@@ -540,18 +540,16 @@ fn resolve_encoding(
                             let obj = resolver.deref(obj).unwrap_or(obj.clone());
                             match &obj {
                                 PdfObj::Int(n) => code = *n as usize,
-                                PdfObj::Name(name) => {
-                                    if code < 256 {
-                                        let name_str = String::from_utf8_lossy(name).to_string();
-                                        encoding[code] = Some(name_str.clone());
-                                        // Collect differences when no BaseEncoding was
-                                        // specified — embedded fonts need to re-apply
-                                        // these on their built-in encoding (PDF 9.6.6.1).
-                                        if !has_base_encoding && !is_symbol_font {
-                                            differences.push((code, name_str));
-                                        }
-                                        code += 1;
+                                PdfObj::Name(name) if code < 256 => {
+                                    let name_str = String::from_utf8_lossy(name).to_string();
+                                    encoding[code] = Some(name_str.clone());
+                                    // Collect differences when no BaseEncoding was
+                                    // specified — embedded fonts need to re-apply
+                                    // these on their built-in encoding (PDF 9.6.6.1).
+                                    if !has_base_encoding && !is_symbol_font {
+                                        differences.push((code, name_str));
                                     }
+                                    code += 1;
                                 }
                                 _ => {}
                             }
@@ -2918,7 +2916,9 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                     let cid_to_gid_map = if let Some(map_obj) = cid_font_dict.get(b"CIDToGIDMap") {
                         if cid_font_dict.get_name(b"CIDToGIDMap") != Some(b"Identity") {
                             resolver.stream_data_from_obj(map_obj).ok().map(|d| {
-                                d.chunks_exact(2)
+                                d.as_chunks::<2>()
+                                    .0
+                                    .iter()
                                     .map(|p| u16::from_be_bytes([p[0], p[1]]))
                                     .collect()
                             })
@@ -3066,7 +3066,7 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                     match resolver.stream_data_from_obj(map_obj) {
                         Ok(stream_data) => {
                             let mut gid_map = Vec::with_capacity(stream_data.len() / 2);
-                            for pair in stream_data.chunks_exact(2) {
+                            for pair in stream_data.as_chunks::<2>().0 {
                                 gid_map.push(u16::from_be_bytes([pair[0], pair[1]]));
                             }
                             (false, Some(gid_map))
@@ -3192,7 +3192,7 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                         match resolver.stream_data_from_obj(map_obj) {
                             Ok(stream_data) => {
                                 let mut gid_map = Vec::with_capacity(stream_data.len() / 2);
-                                for pair in stream_data.chunks_exact(2) {
+                                for pair in stream_data.as_chunks::<2>().0 {
                                     gid_map.push(u16::from_be_bytes([pair[0], pair[1]]));
                                 }
                                 Some(gid_map)

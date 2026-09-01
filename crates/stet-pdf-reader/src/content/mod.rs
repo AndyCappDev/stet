@@ -751,7 +751,7 @@ impl<'a> ContentInterpreter<'a> {
                     let coords: Vec<f64> = verts.iter().filter_map(|o| o.as_f64()).collect();
                     if coords.len() >= 4 {
                         let mut segs = vec![PathSegment::MoveTo(coords[0], coords[1])];
-                        for pair in coords[2..].chunks_exact(2) {
+                        for pair in coords[2..].as_chunks::<2>().0 {
                             segs.push(PathSegment::LineTo(pair[0], pair[1]));
                         }
                         if subtype == b"Polygon" {
@@ -800,7 +800,7 @@ impl<'a> ContentInterpreter<'a> {
                             stroke_arr.iter().filter_map(|o| o.as_f64()).collect();
                         if coords.len() >= 4 {
                             let mut segs = vec![PathSegment::MoveTo(coords[0], coords[1])];
-                            for pair in coords[2..].chunks_exact(2) {
+                            for pair in coords[2..].as_chunks::<2>().0 {
                                 segs.push(PathSegment::LineTo(pair[0], pair[1]));
                             }
                             let path = PsPath { segments: segs };
@@ -841,7 +841,7 @@ impl<'a> ContentInterpreter<'a> {
                     let pts: Vec<f64> = qp.iter().filter_map(|o| o.as_f64()).collect();
                     // QuadPoints: groups of 8 (x1,y1, x2,y2, x3,y3, x4,y4)
                     // Order: top-left, top-right, bottom-left, bottom-right
-                    for quad in pts.chunks_exact(8) {
+                    for quad in pts.as_chunks::<8>().0 {
                         let (x1, y1) = (quad[0], quad[1]); // top-left
                         let (x2, y2) = (quad[2], quad[3]); // top-right
                         let (x3, y3) = (quad[4], quad[5]); // bottom-left
@@ -3890,11 +3890,7 @@ impl<'a> ContentInterpreter<'a> {
             if !is_image_mask && filter_is_jpx && has_explicit_cs {
                 let n_cs = resolved_cs.as_ref().map_or(3, |cs| cs.num_components());
                 let pixels = width as usize * height as usize;
-                let decoded_comps = if pixels > 0 {
-                    sample_data.len() / pixels
-                } else {
-                    n_cs
-                };
+                let decoded_comps = sample_data.len().checked_div(pixels).unwrap_or(n_cs);
                 if smask_in_data >= 1 && decoded_comps == n_cs + 1 {
                     // Extract the alpha channel (last component per pixel)
                     let mut color_data = Vec::with_capacity(pixels.saturating_mul(n_cs));
@@ -3918,8 +3914,7 @@ impl<'a> ContentInterpreter<'a> {
                 }
             } else if !is_image_mask && !has_explicit_cs {
                 let pixels = width as usize * height as usize;
-                if pixels > 0 {
-                    let n_comps = sample_data.len() / pixels;
+                if let Some(n_comps) = sample_data.len().checked_div(pixels) {
                     // For 4-component JPX images, check JP2 metadata to distinguish
                     // RGBA (sRGB + alpha) from CMYK. Without this, RGBA images get
                     // misidentified as CMYK, producing wrong colors (e.g., orange → blue).
@@ -3928,7 +3923,7 @@ impl<'a> ContentInterpreter<'a> {
                             // SMaskInData: the JP2 alpha channel is the soft mask.
                             // Premultiply alpha (tiny-skia expects premultiplied RGBA).
                             let mut rgba = sample_data;
-                            for chunk in rgba.chunks_exact_mut(4) {
+                            for chunk in rgba.as_chunks_mut::<4>().0 {
                                 let a = chunk[3] as u16;
                                 if a == 0 {
                                     chunk[0] = 0;
@@ -3944,7 +3939,7 @@ impl<'a> ContentInterpreter<'a> {
                         } else {
                             // No embedded mask — strip alpha from RGBA → RGB.
                             let mut rgb = Vec::with_capacity(pixels * 3);
-                            for chunk in sample_data.chunks_exact(4) {
+                            for chunk in sample_data.as_chunks::<4>().0 {
                                 rgb.push(chunk[0]);
                                 rgb.push(chunk[1]);
                                 rgb.push(chunk[2]);

@@ -1234,7 +1234,7 @@ fn build_clip_epochs(list: &DisplayList, bboxes: &[Option<YBBox>]) -> Vec<ClipEp
 /// Composite premultiplied-alpha RGBA pixels onto a white background.
 /// After this, all pixels are fully opaque (alpha=255).
 fn composite_onto_white(data: &mut [u8]) {
-    for pixel in data.chunks_exact_mut(4) {
+    for pixel in data.as_chunks_mut::<4>().0 {
         let a = pixel[3] as u16;
         if a == 255 {
             continue; // fully opaque — no compositing needed
@@ -1274,7 +1274,7 @@ fn composite_non_isolated_group_cropped(
     let src_data = source.data();
     let contrib_data = contribution.data_mut();
 
-    for (i, chunk) in contrib_data.chunks_exact_mut(4).enumerate() {
+    for (i, chunk) in contrib_data.as_chunks_mut::<4>().0.iter_mut().enumerate() {
         let off = i * 4;
         if src_data[off] != backdrop[off]
             || src_data[off + 1] != backdrop[off + 1]
@@ -4922,7 +4922,7 @@ fn render_soft_masked(
             let bd_r = bc.map_or(0u8, |c| (c[0].clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
             let bd_g = bc.map_or(0u8, |c| (c[1].clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
             let bd_b = bc.map_or(0u8, |c| (c[2].clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
-            for chunk in mask_pixmap.data_mut().chunks_exact_mut(4) {
+            for chunk in mask_pixmap.data_mut().as_chunks_mut::<4>().0 {
                 let a = chunk[3] as u16;
                 if a == 255 {
                     continue;
@@ -5465,7 +5465,7 @@ fn rasterize_mask(
         let bd_r = bc.map_or(0u8, |c| (c[0].clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
         let bd_g = bc.map_or(0u8, |c| (c[1].clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
         let bd_b = bc.map_or(0u8, |c| (c[2].clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
-        for chunk in mask_pixmap.data_mut().chunks_exact_mut(4) {
+        for chunk in mask_pixmap.data_mut().as_chunks_mut::<4>().0 {
             let a = chunk[3] as u16;
             if a == 255 {
                 continue;
@@ -6969,10 +6969,8 @@ fn has_cmyk_group(list: &DisplayList) -> bool {
                     return true;
                 }
             }
-            DisplayElement::OcgGroup { elements, .. } => {
-                if has_cmyk_group(elements) {
-                    return true;
-                }
+            DisplayElement::OcgGroup { elements, .. } if has_cmyk_group(elements) => {
+                return true;
             }
             _ => {}
         }
@@ -7219,10 +7217,8 @@ fn has_overprint_elements(list: &DisplayList) -> bool {
                     return true;
                 }
             }
-            DisplayElement::OcgGroup { elements, .. } => {
-                if has_overprint_elements(elements) {
-                    return true;
-                }
+            DisplayElement::OcgGroup { elements, .. } if has_overprint_elements(elements) => {
+                return true;
             }
             _ => {}
         }

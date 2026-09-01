@@ -100,7 +100,7 @@ struct GrayToRgbIdentity;
 
 impl TransformExecutor<u8> for GrayToRgbIdentity {
     fn transform(&self, src: &[u8], dst: &mut [u8]) -> Result<(), CmsError> {
-        for (g, rgb) in src.iter().zip(dst.chunks_exact_mut(3)) {
+        for (g, rgb) in src.iter().zip(dst.as_chunks_mut::<3>().0.iter_mut()) {
             rgb[0] = *g;
             rgb[1] = *g;
             rgb[2] = *g;
@@ -111,7 +111,7 @@ impl TransformExecutor<u8> for GrayToRgbIdentity {
 
 impl TransformExecutor<f64> for GrayToRgbIdentity {
     fn transform(&self, src: &[f64], dst: &mut [f64]) -> Result<(), CmsError> {
-        for (g, rgb) in src.iter().zip(dst.chunks_exact_mut(3)) {
+        for (g, rgb) in src.iter().zip(dst.as_chunks_mut::<3>().0.iter_mut()) {
             rgb[0] = *g;
             rgb[1] = *g;
             rgb[2] = *g;
@@ -1092,7 +1092,7 @@ impl IccCache {
         match transform.transform(src, &mut dst) {
             Ok(()) => {
                 if let Some(p) = cached.bpc_params.as_ref() {
-                    for px in dst.chunks_exact_mut(3) {
+                    for px in dst.as_chunks_mut::<3>().0 {
                         let out = apply_bpc_rgb_u8([px[0], px[1], px[2]], p);
                         px[0] = out[0];
                         px[1] = out[1];
@@ -1144,7 +1144,7 @@ impl IccCache {
                 // whose CLUT bake failed; today no other layouts populate
                 // bpc_params, so this is a no-op for RGB/Gray/Lab).
                 if let Some(p) = cached.bpc_params.as_ref() {
-                    for px in dst.chunks_exact_mut(3) {
+                    for px in dst.as_chunks_mut::<3>().0 {
                         let out = apply_bpc_rgb_u8([px[0], px[1], px[2]], p);
                         px[0] = out[0];
                         px[1] = out[1];
@@ -1483,7 +1483,7 @@ fn bake_clut4(
     // Bake BPC into every grid point so runtime CLUT lookup stays at zero
     // per-pixel cost.
     if let Some(p) = bpc_params {
-        for px in dst.chunks_exact_mut(3) {
+        for px in dst.as_chunks_mut::<3>().0 {
             let out = apply_bpc_rgb_u8([px[0], px[1], px[2]], p);
             px[0] = out[0];
             px[1] = out[1];
@@ -1751,7 +1751,7 @@ fn verify_clut4(
     // Mirror the CLUT bake's BPC step in the reference path so the
     // comparison measures interpolation error, not whether BPC was applied.
     if let Some(p) = bpc_params {
-        for px in reference.chunks_exact_mut(3) {
+        for px in reference.as_chunks_mut::<3>().0 {
             let out = apply_bpc_rgb_u8([px[0], px[1], px[2]], p);
             px[0] = out[0];
             px[1] = out[1];

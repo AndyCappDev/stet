@@ -197,10 +197,10 @@ pub(crate) fn encode_action(action: &OutlineAction, page_refs: &[u32]) -> Option
         OutlineAction::GoTo(target) => {
             let d = match target {
                 GoToTarget::Named(name) => PdfObj::LitString(name.clone().into_bytes()),
-                GoToTarget::Explicit { page, view } => match page_to_ref(*page, page_refs) {
-                    Some(page_ref) => page_view_dest_array(page_ref, view),
-                    None => return None,
-                },
+                GoToTarget::Explicit { page, view } => {
+                    let page_ref = page_to_ref(*page, page_refs)?;
+                    page_view_dest_array(page_ref, view)
+                }
                 _ => return None,
             };
             vec![

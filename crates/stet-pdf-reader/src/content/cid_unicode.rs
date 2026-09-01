@@ -121,7 +121,7 @@ fn load_table(compressed: &[u8]) -> HashMap<u16, u32> {
     }
 
     let mut map = HashMap::with_capacity(raw.len() / 4);
-    for chunk in raw.chunks_exact(4) {
+    for chunk in raw.as_chunks::<4>().0 {
         let cid = u16::from_le_bytes([chunk[0], chunk[1]]);
         let unicode = u16::from_le_bytes([chunk[2], chunk[3]]);
         map.insert(cid, unicode as u32);

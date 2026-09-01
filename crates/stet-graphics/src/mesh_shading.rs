@@ -786,15 +786,13 @@ pub fn build_type4_from_array(values: &[f64], n_comps: usize) -> Vec<ShadingTria
                     triangles.push(ShadingTriangle { v0, v1, v2 });
                 }
             }
-            2 => {
-                if vertices.len() >= 3 {
-                    let len = vertices.len();
-                    let v0 = vertices[len - 3].clone();
-                    let v1 = vertices[len - 1].clone();
-                    vertices.push(vertex);
-                    let v2 = vertices.last().unwrap().clone();
-                    triangles.push(ShadingTriangle { v0, v1, v2 });
-                }
+            2 if vertices.len() >= 3 => {
+                let len = vertices.len();
+                let v0 = vertices[len - 3].clone();
+                let v1 = vertices[len - 1].clone();
+                vertices.push(vertex);
+                let v2 = vertices.last().unwrap().clone();
+                triangles.push(ShadingTriangle { v0, v1, v2 });
             }
             _ => {}
         }

@@ -1355,7 +1355,7 @@ impl ViewerApp {
         painter.rect_stroke(
             vp_rect,
             0.0,
-            egui::Stroke::new(1.5, egui::Color32::from_rgb(60, 140, 255)),
+            egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(60, 140, 255)),
             egui::StrokeKind::Outside,
         );
         painter.rect_filled(vp_rect, 0.0, egui::Color32::from_white_alpha(40));
