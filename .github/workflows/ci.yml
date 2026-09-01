@@ -25,14 +25,24 @@ jobs:
         run: cargo fmt --all -- --check
       - name: cargo clippy
         # Clippy runs but only errors gate; warnings do not fail the build.
-        # The workspace carries a backlog of style warnings — collapsible_if
-        # dominates, mostly because clippy now suggests Rust 2024 let-chains
-        # for code written before they stabilised. None are correctness lints.
+        #
+        # The style backlog was cleared in 607e955 (154 sites down to 24); the
+        # bulk of it was collapsible_if, raised against code written before
+        # Rust 2024 let-chains stabilised. What is left is two design lints --
+        # too_many_arguments and type_complexity -- which want signature
+        # changes rather than a lint fix, so they are a deliberate decision to
+        # take rather than a cleanup to get around to.
+        #
+        # Two suggestions are refused in place, each with its reason in a
+        # comment beside an #[allow]. Do not reapply them in a later sweep:
+        # clamp() in skia_device.rs would panic when a PDF carries more than
+        # 16384 colour stops (min above max), and rewriting the PNG predictor
+        # loops in filters.rs as iterators risks silently wrong image decoding
+        # for no functional gain.
         #
         # The vendored tiny-skia forks allow the style and complexity groups
         # in their own Cargo.toml [lints] tables, so what remains here is
-        # first-party code. Fix them opportunistically when touching the
-        # surrounding code; there is no deadline and no tracking file.
+        # first-party code.
         run: cargo clippy --workspace --all-targets
       - name: VM level-zero allocation audit
         # Operator code must allocate through stet_ops::vm_ops::alloc_*, which
