@@ -279,12 +279,14 @@ pub fn resolve_font(
             match resolve_cff(
                 resolver,
                 &descriptor,
-                encoding.clone(),
-                widths,
-                has_explicit_encoding,
-                has_pdf_widths,
-                &differences,
-                no_base_encoding,
+                SimpleFontEncoding {
+                    encoding: encoding.clone(),
+                    widths,
+                    has_explicit_encoding,
+                    has_pdf_widths,
+                    differences: &differences,
+                    no_base_encoding,
+                },
             ) {
                 Ok(font) => return Ok(font),
                 Err(_) => {
@@ -327,12 +329,14 @@ pub fn resolve_font(
             match resolve_type1(
                 resolver,
                 &descriptor,
-                encoding.clone(),
-                widths,
-                has_explicit_encoding,
-                has_pdf_widths,
-                &differences,
-                no_base_encoding,
+                SimpleFontEncoding {
+                    encoding: encoding.clone(),
+                    widths,
+                    has_explicit_encoding,
+                    has_pdf_widths,
+                    differences: &differences,
+                    no_base_encoding,
+                },
             ) {
                 Ok(font) => return Ok(font),
                 Err(_) => {
@@ -408,12 +412,14 @@ pub fn resolve_font(
         _ => resolve_type1(
             resolver,
             &descriptor,
-            encoding,
-            widths,
-            has_explicit_encoding,
-            has_pdf_widths,
-            &differences,
-            no_base_encoding,
+            SimpleFontEncoding {
+                encoding,
+                widths,
+                has_explicit_encoding,
+                has_pdf_widths,
+                differences: &differences,
+                no_base_encoding,
+            },
         ),
     }
 }
@@ -438,6 +444,21 @@ fn get_font_descriptor(
 /// For symbolic fonts (ZapfDingbats, Symbol) with no explicit /BaseEncoding,
 /// the font's built-in encoding is used instead of StandardEncoding.
 ///
+/// Everything a simple-font resolver needs to decide which encoding and
+/// widths a glyph gets, bundled because `resolve_type1` and `resolve_cff`
+/// take exactly the same six values.
+struct SimpleFontEncoding<'a> {
+    encoding: [Option<String>; 256],
+    widths: [f64; 256],
+    /// The PDF supplied a usable `/Encoding`.
+    has_explicit_encoding: bool,
+    /// The PDF supplied `/Widths`, so they override the font program's.
+    has_pdf_widths: bool,
+    differences: &'a [(usize, String)],
+    /// No `/BaseEncoding`, so the font's built-in encoding wins.
+    no_base_encoding: bool,
+}
+
 /// What `resolve_encoding` worked out from a simple font's `/Encoding`.
 struct ResolvedEncoding {
     /// Fully resolved encoding (base encoding with `/Differences` applied).
@@ -2167,13 +2188,16 @@ fn resolve_type3(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
 fn resolve_type1(
     resolver: &Resolver,
     descriptor: &Option<PdfDict>,
-    encoding: [Option<String>; 256],
-    widths: [f64; 256],
-    has_explicit_encoding: bool,
-    has_pdf_widths: bool,
-    differences: &[(usize, String)],
-    no_base_encoding: bool,
+    enc: SimpleFontEncoding<'_>,
 ) -> Result<PdfFont, PdfError> {
+    let SimpleFontEncoding {
+        encoding,
+        widths,
+        has_explicit_encoding,
+        has_pdf_widths,
+        differences,
+        no_base_encoding,
+    } = enc;
     let desc = descriptor
         .as_ref()
         .ok_or(PdfError::Other("Type1 font missing FontDescriptor".into()))?;
@@ -2537,13 +2561,16 @@ fn resolve_truetype(
 fn resolve_cff(
     resolver: &Resolver,
     descriptor: &Option<PdfDict>,
-    encoding: [Option<String>; 256],
-    widths: [f64; 256],
-    has_explicit_encoding: bool,
-    has_pdf_widths: bool,
-    differences: &[(usize, String)],
-    no_base_encoding: bool,
+    enc: SimpleFontEncoding<'_>,
 ) -> Result<PdfFont, PdfError> {
+    let SimpleFontEncoding {
+        encoding,
+        widths,
+        has_explicit_encoding,
+        has_pdf_widths,
+        differences,
+        no_base_encoding,
+    } = enc;
     let desc = descriptor
         .as_ref()
         .ok_or(PdfError::Other("CFF font missing FontDescriptor".into()))?;

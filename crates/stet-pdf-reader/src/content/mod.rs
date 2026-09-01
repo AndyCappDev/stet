@@ -130,6 +130,20 @@ impl Operand {
     }
 }
 
+/// The text-state values every glyph-drawing helper needs, as of the moment
+/// the glyph is drawn. Constant across one `show_text` call.
+#[derive(Clone, Copy)]
+struct TextDrawState<'a> {
+    font_size: f64,
+    char_spacing: f64,
+    /// Horizontal scaling (`Tz`), as a multiplier.
+    th: f64,
+    text_rise: f64,
+    font_matrix: &'a Matrix,
+    /// Text rendering mode (`Tr`).
+    render_mode: i32,
+}
+
 /// Grayscale soft-mask samples for an image, with the mask's own dimensions
 /// and the optional `/Matte` pre-multiplication colour (PDF 11.6.5.3).
 ///
@@ -2885,6 +2899,14 @@ impl<'a> ContentInterpreter<'a> {
         let th = self.gstate.horizontal_scaling;
         let font_matrix = font.font_matrix();
         let render_mode = self.gstate.text_rendering_mode;
+        let text_state = TextDrawState {
+            font_size,
+            char_spacing,
+            th,
+            text_rise,
+            font_matrix: &font_matrix,
+            render_mode,
+        };
 
         if font.is_composite() {
             // Composite (CID) font: variable-width character codes
@@ -2900,30 +2922,12 @@ impl<'a> ContentInterpreter<'a> {
                     let extra = if raw_code == 0x20 { word_spacing } else { 0.0 };
                     i += 1;
                     let cid = font.resolve_code_to_cid(raw_code) as u16;
-                    self.render_cid_glyph(
-                        &font,
-                        cid,
-                        font_size,
-                        char_spacing,
-                        th,
-                        text_rise,
-                        &font_matrix,
-                        render_mode,
-                        extra,
-                    );
+                    self.render_cid_glyph(&font, cid, text_state, extra);
                 } else if i + 1 >= text.len() {
                     // Incomplete trailing byte in 2-byte font — treat as WinAnsi
                     let byte = text[i];
                     i += 1;
-                    self.render_unicode_glyph(
-                        byte,
-                        font_size,
-                        char_spacing,
-                        th,
-                        text_rise,
-                        &font_matrix,
-                        render_mode,
-                    );
+                    self.render_unicode_glyph(byte, text_state);
                 } else {
                     // Multi-byte code (2, 3, or 4 bytes from codespace ranges).
                     let width = code_width.min(text.len() - i);
@@ -2955,70 +2959,25 @@ impl<'a> ContentInterpreter<'a> {
                     i += consumed;
                     if font.has_cid_glyph(cid) {
                         // CID maps to a valid GID in the font
-                        self.render_cid_glyph(
-                            &font,
-                            cid,
-                            font_size,
-                            char_spacing,
-                            th,
-                            text_rise,
-                            &font_matrix,
-                            render_mode,
-                            extra,
-                        );
+                        self.render_cid_glyph(&font, cid, text_state, extra);
                     } else {
                         // 2-byte CID has no glyph.  Some malformed PDFs encode
                         // single-byte CIDs in 2-byte Identity-H strings with a
                         // padding high byte (e.g. 0x20).  Try the low byte alone.
                         let lo_cid = (raw_code & 0xFF) as u16;
                         if lo_cid > 0 && font.has_cid_glyph(lo_cid) {
-                            self.render_cid_glyph(
-                                &font,
-                                lo_cid,
-                                font_size,
-                                char_spacing,
-                                th,
-                                text_rise,
-                                &font_matrix,
-                                render_mode,
-                                extra,
-                            );
+                            self.render_cid_glyph(&font, lo_cid, text_state, extra);
                         } else if raw_code <= 0xFF {
                             // Low code point with no CID glyph — malformed PDF mixing
                             // 1-byte WinAnsi text in a CID font.  Bypass the CID
                             // machinery and map each byte through WinAnsi→Unicode→cmap.
-                            self.render_unicode_glyph(
-                                text[i - 2],
-                                font_size,
-                                char_spacing,
-                                th,
-                                text_rise,
-                                &font_matrix,
-                                render_mode,
-                            );
-                            self.render_unicode_glyph(
-                                text[i - 1],
-                                font_size,
-                                char_spacing,
-                                th,
-                                text_rise,
-                                &font_matrix,
-                                render_mode,
-                            );
+                            self.render_unicode_glyph(text[i - 2], text_state);
+                            self.render_unicode_glyph(text[i - 1], text_state);
                         } else {
                             // CID glyph not available (e.g. substitute font for CJK).
                             // Use CID width for correct advancement; try Unicode for shape.
                             self.render_cid_glyph_unicode_fallback(
-                                &font,
-                                cid,
-                                raw_code,
-                                font_size,
-                                char_spacing,
-                                th,
-                                text_rise,
-                                &font_matrix,
-                                render_mode,
-                                extra,
+                                &font, cid, raw_code, text_state, extra,
                             );
                         }
                     }
@@ -3080,14 +3039,17 @@ impl<'a> ContentInterpreter<'a> {
         &mut self,
         font: &PdfFont,
         cid: u16,
-        font_size: f64,
-        char_spacing: f64,
-        th: f64,
-        text_rise: f64,
-        font_matrix: &Matrix,
-        render_mode: i32,
+        text: TextDrawState<'_>,
         extra_advance: f64,
     ) {
+        let TextDrawState {
+            font_size,
+            char_spacing,
+            th,
+            text_rise,
+            font_matrix,
+            render_mode,
+        } = text;
         let vertical = font.wmode() == 1;
         if let Some(glyph_path) = font.glyph_path_cid(cid) {
             let text_state_matrix = if vertical {
@@ -3137,14 +3099,17 @@ impl<'a> ContentInterpreter<'a> {
         font: &PdfFont,
         cid: u16,
         unicode: u32,
-        font_size: f64,
-        char_spacing: f64,
-        th: f64,
-        text_rise: f64,
-        font_matrix: &Matrix,
-        render_mode: i32,
+        text: TextDrawState<'_>,
         extra_advance: f64,
     ) {
+        let TextDrawState {
+            font_size,
+            char_spacing,
+            th,
+            text_rise,
+            font_matrix,
+            render_mode,
+        } = text;
         let vertical = font.wmode() == 1;
         // Try to render the glyph shape via Unicode mapping in the substitute font
         if let Some(glyph_path) = font.glyph_path_unicode(unicode as u16) {
@@ -3187,16 +3152,15 @@ impl<'a> ContentInterpreter<'a> {
 
     /// Render a single glyph from a WinAnsi byte via Unicode→cmap, bypassing CID.
     /// Used for malformed PDFs that embed 1-byte literal strings in CID fonts.
-    fn render_unicode_glyph(
-        &mut self,
-        byte: u8,
-        font_size: f64,
-        char_spacing: f64,
-        th: f64,
-        text_rise: f64,
-        font_matrix: &Matrix,
-        render_mode: i32,
-    ) {
+    fn render_unicode_glyph(&mut self, byte: u8, text: TextDrawState<'_>) {
+        let TextDrawState {
+            font_size,
+            char_spacing,
+            th,
+            text_rise,
+            font_matrix,
+            render_mode,
+        } = text;
         let unicode = font::winansi_byte_to_unicode(byte);
         if let Some(glyph_path) = self
             .current_font
