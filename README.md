@@ -587,7 +587,7 @@ let mut interp = stet::Interpreter::builder()
 ## Minimum Supported Rust Version
 
 stet requires **Rust 1.88** or newer. This is verified on every push by a CI
-job that builds the workspace on exactly that toolchain, so the number above
+job that compiles the workspace on exactly that toolchain, so the number above
 is a tested fact rather than an estimate.
 
 The MSRV is not covered by semantic versioning: it may be raised in any minor
