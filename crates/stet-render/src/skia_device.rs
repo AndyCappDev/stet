@@ -123,6 +123,9 @@ pub struct SkiaDevice {
     /// its `default_visible`); a consumer building a layer panel can
     /// install an explicit set via `set_layer_set`.
     layer_set: LayerSet,
+    /// Leave unpainted areas transparent instead of compositing the page onto
+    /// white paper. Output pixels are then straight (non-premultiplied) RGBA.
+    transparent_background: bool,
 }
 
 #[cfg(feature = "ps-device")]
@@ -183,6 +186,7 @@ impl SkiaDevice {
             no_aa: false,
             use_viewport_path: false,
             layer_set: LayerSet::new(),
+            transparent_background: false,
         }
     }
 
@@ -228,7 +232,11 @@ impl SkiaDevice {
                 return;
             };
             self.pixmap = pixmap;
-            self.pixmap.fill(Color::WHITE);
+            self.pixmap.fill(if self.transparent_background {
+                Color::TRANSPARENT
+            } else {
+                Color::WHITE
+            });
         }
     }
 
@@ -245,6 +253,13 @@ impl SkiaDevice {
     /// Disable anti-aliasing for all fill/stroke operations.
     pub fn set_no_aa(&mut self, no_aa: bool) {
         self.no_aa = no_aa;
+    }
+
+    /// Leave unpainted areas transparent instead of white paper, emitting
+    /// straight-alpha RGBA. Applies to the banded and full-page paths; the
+    /// viewport audit path (`set_use_viewport_path`) always composites.
+    pub fn set_transparent_background(&mut self, on: bool) {
+        self.transparent_background = on;
     }
 }
 
@@ -1244,6 +1259,33 @@ fn composite_onto_white(data: &mut [u8]) {
         pixel[1] = (pixel[1] as u16 + inv_a).min(255) as u8;
         pixel[2] = (pixel[2] as u16 + inv_a).min(255) as u8;
         pixel[3] = 255;
+    }
+}
+
+/// Convert premultiplied-alpha RGBA pixels to straight alpha, the form PNG
+/// and most RGBA consumers expect. Fully transparent pixels become (0,0,0,0).
+fn unpremultiply(data: &mut [u8]) {
+    for pixel in data.as_chunks_mut::<4>().0 {
+        let a = pixel[3] as u32;
+        match a {
+            255 => {}
+            0 => pixel[..3].fill(0),
+            _ => {
+                for channel in &mut pixel[..3] {
+                    *channel = ((*channel as u32 * 255 + a / 2) / a).min(255) as u8;
+                }
+            }
+        }
+    }
+}
+
+/// Last step before rendered pixels leave the renderer: composite onto white
+/// paper, or keep the page transparent and convert to straight alpha.
+fn finish_page_pixels(data: &mut [u8], transparent_background: bool) {
+    if transparent_background {
+        unpremultiply(data);
+    } else {
+        composite_onto_white(data);
     }
 }
 
@@ -6620,8 +6662,8 @@ impl OutputDevice for SkiaDevice {
     fn show_page(&mut self, output_path: &str) -> Result<(), String> {
         let w = self.pixmap.width();
         let h = self.pixmap.height();
-        // Composite onto white background before output
-        composite_onto_white(self.pixmap.data_mut());
+        // Composite onto white background (or keep it transparent) before output
+        finish_page_pixels(self.pixmap.data_mut(), self.transparent_background);
         let mut sink = self.sink_factory.create_sink(output_path)?;
         sink.begin_page(w, h)?;
         sink.write_rows(self.pixmap.data(), h)?;
@@ -6900,10 +6942,20 @@ impl OutputDevice for SkiaDevice {
             // interpretation of the next page. Using rayon::spawn avoids OS thread
             // creation overhead and keeps work on the warmed-up pool.
             let no_aa = self.no_aa;
+            let transparent_background = self.transparent_background;
             let (tx, rx) = std::sync::mpsc::sync_channel(1);
             rayon::spawn(move || {
                 let result = render_banded_to_sink(
-                    page_w, page_h, band_h, dpi, &list, &mut *sink, &icc_cache, no_aa, &layer_set,
+                    page_w,
+                    page_h,
+                    band_h,
+                    dpi,
+                    &list,
+                    &mut *sink,
+                    &icc_cache,
+                    no_aa,
+                    transparent_background,
+                    &layer_set,
                 );
                 let _ = tx.send(result);
             });
@@ -6912,7 +6964,16 @@ impl OutputDevice for SkiaDevice {
         #[cfg(not(feature = "parallel"))]
         {
             render_banded_to_sink(
-                page_w, page_h, band_h, dpi, &list, &mut *sink, &icc_cache, self.no_aa, &layer_set,
+                page_w,
+                page_h,
+                band_h,
+                dpi,
+                &list,
+                &mut *sink,
+                &icc_cache,
+                self.no_aa,
+                self.transparent_background,
+                &layer_set,
             )?;
         }
 
@@ -9261,6 +9322,7 @@ fn render_banded_to_sink(
     sink: &mut dyn stet_graphics::device::PageSink,
     icc_cache: &IccCache,
     no_aa: bool,
+    transparent_background: bool,
     layer_set: &LayerSet,
 ) -> Result<(), String> {
     // Precompute Y bounding boxes for culling
@@ -9387,8 +9449,9 @@ fn render_banded_to_sink(
             }
         }
 
-        // Composite content onto white background (premultiplied alpha)
-        composite_onto_white(band_pixmap.data_mut());
+        // Composite content onto white background (premultiplied alpha), or
+        // keep it transparent
+        finish_page_pixels(band_pixmap.data_mut(), transparent_background);
 
         // Extract only the actual band rows (skip overlap)
         let start_byte = band_offset as usize * row_bytes;
@@ -10900,6 +10963,25 @@ pub fn render_to_rgba_with_layers(
     no_aa: bool,
     layer_set: &LayerSet,
 ) -> Vec<u8> {
+    render_to_rgba_with_background(list, pixel_w, pixel_h, dpi, icc, no_aa, layer_set, false)
+}
+
+/// Like [`render_to_rgba_with_layers`] but can leave the page transparent.
+///
+/// With `transparent_background` set, unpainted areas stay at alpha 0 instead
+/// of being composited onto white paper, and the returned pixels are straight
+/// (non-premultiplied) RGBA — for artwork that is placed over other content.
+#[expect(clippy::too_many_arguments)]
+pub fn render_to_rgba_with_background(
+    list: &DisplayList,
+    pixel_w: u32,
+    pixel_h: u32,
+    dpi: f64,
+    icc: Option<&IccCache>,
+    no_aa: bool,
+    layer_set: &LayerSet,
+    transparent_background: bool,
+) -> Vec<u8> {
     if pixel_w == 0 || pixel_h == 0 {
         return vec![0xFF; pixel_w as usize * pixel_h as usize * 4];
     }
@@ -10919,7 +11001,16 @@ pub fn render_to_rgba_with_layers(
 
     let band_h = select_band_height(pixel_w, pixel_h);
     if let Err(e) = render_banded_to_sink(
-        pixel_w, pixel_h, band_h, dpi, list, &mut sink, &icc_cache, no_aa, layer_set,
+        pixel_w,
+        pixel_h,
+        band_h,
+        dpi,
+        list,
+        &mut sink,
+        &icc_cache,
+        no_aa,
+        transparent_background,
+        layer_set,
     ) {
         eprintln!("render_to_rgba: banded render failed: {e}");
         return vec![0xFF; pixel_w as usize * pixel_h as usize * 4];
@@ -13666,6 +13757,39 @@ mod tests {
                 alpha_is_shape: false,
             },
         }
+    }
+
+    #[test]
+    fn test_render_to_rgba_transparent_background_keeps_unpainted_area_clear() {
+        let mut list = DisplayList::new();
+        list.push(make_test_fill_at(0.0, 0.0, 10.0, 20.0)); // left half of a 20×20 page
+        let pixel = |data: &[u8], x: usize, y: usize| {
+            let i = (y * 20 + x) * 4;
+            [data[i], data[i + 1], data[i + 2], data[i + 3]]
+        };
+
+        let paper = render_to_rgba(&list, 20, 20, 72.0, None, false);
+        assert_eq!(pixel(&paper, 15, 10), [255, 255, 255, 255]);
+
+        let clear = render_to_rgba_with_background(
+            &list,
+            20,
+            20,
+            72.0,
+            None,
+            false,
+            &LayerSet::new(),
+            true,
+        );
+        assert_eq!(pixel(&clear, 15, 10), [0, 0, 0, 0]);
+        assert_eq!(pixel(&clear, 5, 10), [0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn test_unpremultiply_restores_straight_alpha() {
+        let mut data = [100u8, 50, 0, 128, 10, 20, 30, 0, 1, 2, 3, 255];
+        unpremultiply(&mut data);
+        assert_eq!(data, [199, 100, 0, 128, 0, 0, 0, 0, 1, 2, 3, 255]);
     }
 
     #[test]

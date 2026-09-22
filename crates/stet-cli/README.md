@@ -135,6 +135,8 @@ Common options:
                              viewer mode, 8 otherwise)
   --password <PW>            Password for encrypted PDF input
   --no-aa                    Disable anti-aliasing
+  --transparent              Leave unpainted areas transparent instead of
+                             white paper (--device png only)
 
 Resource limits (for untrusted input):
   --timeout <SECONDS>        Abort a job running longer than this. No limit
