@@ -3,6 +3,14 @@
 Working on stet itself. For using it — install, CLI options, library API —
 see the [README](README.md) and [docs/LIBRARY-USAGE.md](docs/LIBRARY-USAGE.md).
 
+## Licensing of contributions
+
+stet is dual licensed under [Apache-2.0](LICENSE-APACHE) OR
+[MIT](LICENSE-MIT). Unless you explicitly state otherwise, any
+contribution intentionally submitted for inclusion in the work by you, as
+defined in the Apache-2.0 license, shall be dual licensed as above, without
+any additional terms or conditions.
+
 ## Building from Source
 
 ```bash
