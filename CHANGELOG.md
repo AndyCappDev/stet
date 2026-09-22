@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`--transparent` for `--device png`, and `render_to_rgba_with_background`
+  in `stet-render`.** Pages are rendered onto a transparent backdrop and
+  composited onto white paper only as the last step; the option skips that
+  step and writes straight-alpha RGBA instead, so artwork (EPS, AI, PDF) can
+  be placed over other content with its unpainted areas clear. Both the
+  PostScript and PDF input paths honour it. `render_to_rgba` and
+  `render_to_rgba_with_layers` keep their signatures and white paper.
+
 ### Removed
 
 - **`stet-wasm`: the `set_page_callback()` / `clear_page_callback()` JS
