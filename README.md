@@ -195,6 +195,7 @@ zoom presets, minimap navigation, and drag-and-drop.
 | `--use-output-intent` | Honour the PDF's embedded OutputIntent as the source CMYK profile (default) |
 | `--no-output-intent` | Ignore the PDF's embedded OutputIntent and use the system CMYK profile |
 | `--bpc <on\|off\|auto>` | Black-point compensation (default: `auto`, currently equivalent to `on`) |
+| `--cmyk-intent <perceptual\|relative>` | Which table of the source CMYK profile drives CMYK conversion (default: `relative`). A print profile's perceptual table carries a darker black — what lcms2, Ghostscript and ImageMagick use by default |
 | `--password <PW>` | Password for encrypted PDF input |
 | `--timeout <SECONDS>` | Abort a job running longer than this. No limit by default — PostScript is Turing-complete and legitimate jobs run for minutes. Set one for untrusted input |
 | `--max-vm <MB>` | Ceiling on PostScript VM — strings, arrays, dictionaries (default 8192). Exceeding it raises `VMerror` instead of aborting. Separate from the renderer's image and band buffers, so it does **not** cap rendering resolution |

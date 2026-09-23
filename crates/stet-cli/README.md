@@ -160,6 +160,9 @@ Colour management:
   --no-output-intent         Ignore it and use the system CMYK profile
   --bpc <on|off|auto>        Black-point compensation (default: auto,
                              currently equivalent to on)
+  --cmyk-intent <perceptual|relative>
+                             Which table of the source CMYK profile drives
+                             CMYK conversion (default: relative)
 ```
 
 `stet --help` prints the same list; `scripts/check-cli-docs.sh` in the

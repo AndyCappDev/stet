@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use stet_core::context::Context;
 use stet_core::eps::{content_is_epsf, read_eps_bounding_box, strip_dos_eps_header};
 use stet_engine::eval::{parse_and_exec, parse_and_exec_file};
-use stet_graphics::icc::{BpcMode, IccCacheOptions};
+use stet_graphics::icc::{BpcMode, CmykSourceTable, IccCacheOptions};
 use stet_ops::build_system_dict;
 use stet_pdf::PdfDevice;
 use stet_pdf_reader::PdfDocument;
@@ -25,6 +25,7 @@ struct IccCliConfig {
     output_profile_path: Option<String>,
     cmyk_profile_path: Option<String>,
     bpc_mode: BpcMode,
+    cmyk_source_table: CmykSourceTable,
     /// When true, prefer the PDF's embedded `/OutputIntents[].DestOutputProfile`
     /// over the system-default CMYK profile (unless `--cmyk-profile` is also
     /// set, which always wins). Off by default because it changes the sRGB
@@ -110,6 +111,7 @@ fn main() {
     let mut cmyk_profile_path: Option<String> = None;
     let mut bpc_mode = BpcMode::Auto;
     let mut bpc_explicit = false;
+    let mut cmyk_source_table = CmykSourceTable::default();
     // Default: honour the PDF's declared OutputIntent as the CMYK→sRGB
     // source profile. Matches Acrobat's behaviour for PDF/X files and
     // eliminates profile-approximation artefacts on GWG swatches (e.g.
@@ -229,6 +231,26 @@ fn main() {
                     continue;
                 } else {
                     eprintln!("Error: --cmyk-profile requires a path");
+                    std::process::exit(1);
+                }
+            }
+            "--cmyk-intent" => {
+                if i + 1 < args.len() {
+                    cmyk_source_table = match args[i + 1].as_str() {
+                        "perceptual" => CmykSourceTable::Perceptual,
+                        "relative" => CmykSourceTable::Colorimetric,
+                        other => {
+                            eprintln!(
+                                "Error: --cmyk-intent must be one of: perceptual, relative (got '{}')",
+                                other
+                            );
+                            std::process::exit(1);
+                        }
+                    };
+                    i += 2;
+                    continue;
+                } else {
+                    eprintln!("Error: --cmyk-intent requires a value (perceptual|relative)");
                     std::process::exit(1);
                 }
             }
@@ -408,6 +430,7 @@ run stet once per file",
         output_profile_path,
         cmyk_profile_path,
         bpc_mode,
+        cmyk_source_table,
         use_output_intent,
     };
 
@@ -1254,6 +1277,12 @@ Colour management:
     --no-output-intent      Ignore the PDF's OutputIntent and fall
                             back to the system CMYK profile.
     --bpc <on|off|auto>     Black-point compensation mode (default auto).
+    --cmyk-intent <perceptual|relative>
+                            Which table of the source CMYK profile drives
+                            CMYK conversion (default relative). A print
+                            profile's perceptual table carries a darker
+                            black, and is what lcms2, Ghostscript and
+                            ImageMagick use by default.
 
 Subcommands:
     inspect <FILE.pdf>      Print a structural summary of a PDF
@@ -1339,6 +1368,7 @@ fn build_icc_cache(icc_cfg: &IccCliConfig) -> stet_graphics::icc::IccCache {
     if icc_cfg.no_icc {
         return IccCache::new_with_options(IccCacheOptions {
             bpc_mode: BpcMode::Off,
+            cmyk_source_table: icc_cfg.cmyk_source_table,
             source_cmyk_profile: None,
         });
     }
@@ -1352,6 +1382,7 @@ fn build_icc_cache(icc_cfg: &IccCliConfig) -> stet_graphics::icc::IccCache {
         eprintln!("[ICC] Loaded source CMYK profile: {}", path);
         return IccCache::new_with_options(IccCacheOptions {
             bpc_mode: icc_cfg.bpc_mode,
+            cmyk_source_table: icc_cfg.cmyk_source_table,
             source_cmyk_profile: Some(bytes),
         });
     }
@@ -1368,12 +1399,14 @@ fn build_icc_cache(icc_cfg: &IccCliConfig) -> stet_graphics::icc::IccCache {
         eprintln!("[ICC] Loaded output profile: {}", path);
         return IccCache::new_with_options(IccCacheOptions {
             bpc_mode: icc_cfg.bpc_mode,
+            cmyk_source_table: icc_cfg.cmyk_source_table,
             source_cmyk_profile: Some(bytes),
         });
     }
 
     let mut cache = IccCache::new_with_options(IccCacheOptions {
         bpc_mode: icc_cfg.bpc_mode,
+        cmyk_source_table: icc_cfg.cmyk_source_table,
         source_cmyk_profile: None,
     });
     cache.search_system_cmyk_profile();

@@ -11,6 +11,8 @@
 pub mod bpc;
 mod perceptual;
 
+pub use perceptual::CmykSourceTable;
+
 use bpc::{
     BpcParams, apply_bpc_f64, apply_bpc_rgb_u8, compute_bpc_params, detect_source_black_point,
 };
@@ -92,6 +94,8 @@ pub struct IccCacheOptions {
     /// for invoking [`IccCache::search_system_cmyk_profile`] (or providing
     /// bytes some other way).
     pub source_cmyk_profile: Option<Vec<u8>>,
+    /// Which A2B table of the source CMYK profile drives CMYK→sRGB.
+    pub cmyk_source_table: CmykSourceTable,
 }
 
 /// Identity Gray→RGB transform: maps each gray value to equal R=G=B.
@@ -296,6 +300,8 @@ pub struct IccCache {
     /// construction time via [`IccCacheOptions`]; consulted by future BPC
     /// apply paths (commit 2 of `docs/PLAN-BPC.md`).
     bpc_mode: BpcMode,
+    /// Which A2B table of the source CMYK profile the CLUT bake samples.
+    cmyk_source_table: CmykSourceTable,
     /// Enable PDF/X-style proofing: ICCBased source profiles convert through
     /// the default CMYK profile (the document's OutputIntent) before going
     /// to sRGB, so all source colour spaces converge through the same
@@ -358,6 +364,7 @@ impl IccCache {
             srgb_profile: ColorProfile::new_srgb(),
             reverse_cmyk_f64: None,
             bpc_mode: opts.bpc_mode,
+            cmyk_source_table: opts.cmyk_source_table,
             proofing_enabled: false,
             lab_to_oi_per_intent: [None, None, None, None],
         };
@@ -371,6 +378,12 @@ impl IccCache {
     #[inline]
     pub fn bpc_mode(&self) -> BpcMode {
         self.bpc_mode
+    }
+
+    /// Which A2B table of the source CMYK profile drives CMYK→sRGB.
+    #[inline]
+    pub fn cmyk_source_table(&self) -> CmykSourceTable {
+        self.cmyk_source_table
     }
 
     /// Compute the SHA-256 hash of an ICC profile without registering it.
@@ -734,7 +747,13 @@ impl IccCache {
         let clut4 = if n == 4 && !chain_active {
             // Direct (non-proofing) CMYK profiles: pre-bake a CLUT for fast
             // image conversion.
-            let c = perceptual::bake_clut4_perceptual(&profile, 17, bpc_enabled).or_else(|| {
+            let c = perceptual::bake_clut4_perceptual(
+                &profile,
+                17,
+                bpc_enabled,
+                self.cmyk_source_table,
+            )
+            .or_else(|| {
                 let params = if bpc_enabled {
                     detect_source_black_point(transform_8bit.as_ref())
                         .map(|sbp| compute_bpc_params(sbp, [0.0; 3], bpc::WP_D50))
@@ -1885,9 +1904,25 @@ mod tests {
     }
 
     #[test]
+    fn test_icc_cache_options_cmyk_source_table() {
+        // Colorimetric (A2B1) stays the default: the perceptual table changes
+        // every CMYK pixel, so it is opt-in.
+        assert_eq!(
+            IccCache::new().cmyk_source_table(),
+            CmykSourceTable::Colorimetric
+        );
+        let cache = IccCache::new_with_options(IccCacheOptions {
+            cmyk_source_table: CmykSourceTable::Perceptual,
+            ..Default::default()
+        });
+        assert_eq!(cache.cmyk_source_table(), CmykSourceTable::Perceptual);
+    }
+
+    #[test]
     fn test_icc_cache_options_bpc_off() {
         let cache = IccCache::new_with_options(IccCacheOptions {
             bpc_mode: BpcMode::Off,
+            cmyk_source_table: CmykSourceTable::default(),
             source_cmyk_profile: None,
         });
         assert_eq!(cache.bpc_mode(), BpcMode::Off);
@@ -1902,6 +1937,7 @@ mod tests {
         };
         let cache = IccCache::new_with_options(IccCacheOptions {
             bpc_mode: BpcMode::On,
+            cmyk_source_table: CmykSourceTable::default(),
             source_cmyk_profile: Some(cmyk_bytes.clone()),
         });
         assert!(cache.default_cmyk_hash().is_some());
@@ -1919,6 +1955,7 @@ mod tests {
         // — the profile's as-mapped black projected through moxcms's sRGB B2A.
         let mut off = IccCache::new_with_options(IccCacheOptions {
             bpc_mode: BpcMode::Off,
+            cmyk_source_table: CmykSourceTable::default(),
             source_cmyk_profile: Some(cmyk_bytes.clone()),
         });
         let off_rgb = off.convert_cmyk(0.0, 0.0, 0.0, 1.0).unwrap();
@@ -1930,6 +1967,7 @@ mod tests {
         // visibly darker than the no-BPC baseline by a substantial margin."
         let mut on = IccCache::new_with_options(IccCacheOptions {
             bpc_mode: BpcMode::On,
+            cmyk_source_table: CmykSourceTable::default(),
             source_cmyk_profile: Some(cmyk_bytes),
         });
         let on_rgb = on.convert_cmyk(0.0, 0.0, 0.0, 1.0).unwrap();
@@ -1968,6 +2006,7 @@ mod tests {
         };
         let mut cache = IccCache::new_with_options(IccCacheOptions {
             bpc_mode: BpcMode::On,
+            cmyk_source_table: CmykSourceTable::default(),
             source_cmyk_profile: Some(cmyk_bytes),
         });
         // CMYK white (no ink) must still render as sRGB white under BPC.
@@ -1987,10 +2026,12 @@ mod tests {
         // the per-color path behaviour.
         let off = IccCache::new_with_options(IccCacheOptions {
             bpc_mode: BpcMode::Off,
+            cmyk_source_table: CmykSourceTable::default(),
             source_cmyk_profile: Some(cmyk_bytes.clone()),
         });
         let on = IccCache::new_with_options(IccCacheOptions {
             bpc_mode: BpcMode::On,
+            cmyk_source_table: CmykSourceTable::default(),
             source_cmyk_profile: Some(cmyk_bytes),
         });
         let off_hash = *off.default_cmyk_hash().unwrap();
@@ -2035,6 +2076,7 @@ mod tests {
         };
         let mut cache = IccCache::new_with_options(IccCacheOptions {
             bpc_mode: BpcMode::Off,
+            cmyk_source_table: CmykSourceTable::default(),
             source_cmyk_profile: Some(cmyk_bytes),
         });
         let hash = *cache.default_cmyk_hash().unwrap();
@@ -2141,6 +2183,7 @@ mod tests {
         };
         let mut cache = IccCache::new_with_options(IccCacheOptions {
             bpc_mode: BpcMode::Off,
+            cmyk_source_table: CmykSourceTable::default(),
             source_cmyk_profile: Some(cmyk_bytes),
         });
         let rgb = cache.convert_cmyk(0.0, 0.0, 0.0, 0.0).unwrap();
@@ -2162,6 +2205,7 @@ mod tests {
         };
         let mut cache = IccCache::new_with_options(IccCacheOptions {
             bpc_mode: BpcMode::On,
+            cmyk_source_table: CmykSourceTable::default(),
             source_cmyk_profile: Some(cmyk_bytes),
         });
         let hash = *cache.default_cmyk_hash().unwrap();
