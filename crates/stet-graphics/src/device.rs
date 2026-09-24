@@ -289,16 +289,20 @@ pub struct TextRunParams {
     ///
     /// A glyph's box is the parallelogram spanned by its
     /// [`advance`](ShownGlyph::advance) and by this matrix's linear part
-    /// applied to `(0, descent)` and `(0, ascent)`, placed at its
+    /// applied to `(0, descent)` and `(0, ascent)` — to `(descent, 0)` and
+    /// `(ascent, 0)` for [`vertical`](Self::vertical) runs — placed at its
     /// [`origin`](ShownGlyph::origin). Rotated and skewed text gives a
     /// rotated or skewed box.
     pub glyph_to_device: Matrix,
     /// Font ascent in glyph space (positive; around 800 for a font with
     /// 1000 units per em). From the font descriptor when present, else the
-    /// font bounding box, else 0.8 em.
+    /// font bounding box, else 0.8 em. For a vertical run, the glyph's
+    /// extent to the right of its origin instead: half the em.
     pub ascent: f64,
     /// Font descent in glyph space (negative; around -200 for a font with
-    /// 1000 units per em). Same sources as `ascent`, else -0.2 em.
+    /// 1000 units per em). Same sources as `ascent`, else -0.2 em. For a
+    /// vertical run, the extent to the left of the origin: minus half the
+    /// em.
     pub descent: f64,
     /// The font's name (PDF `/BaseFont`, PostScript `/FontName`), or empty
     /// when it has none.
@@ -308,6 +312,11 @@ pub struct TextRunParams {
     /// because it is text the document contains; a consumer that wants only
     /// visible text drops these runs.
     pub invisible: bool,
+    /// Vertical writing (a CID font with writing mode 1). Each glyph's
+    /// origin is its vertical origin, at the top centre of the glyph, and
+    /// its advance points down the column; `ascent` and `descent` bound
+    /// the glyph across the column rather than above and below a baseline.
+    pub vertical: bool,
 }
 
 /// One glyph of a [`TextRunParams`].
@@ -315,8 +324,9 @@ pub struct TextRunParams {
 pub struct ShownGlyph {
     /// Byte range of this glyph's text within [`TextRunParams::text`].
     ///
-    /// Empty when no Unicode could be found for the glyph — the text is
-    /// never guessed. Several characters for a ligature (`fi`) or a
+    /// Empty when no Unicode could be found for the glyph: no fallback
+    /// encoding is assumed (see [`UnicodeSource`] for what is tried).
+    /// Several characters for a ligature (`fi`) or a
     /// supplementary-plane character. When a PDF `/ActualText` span
     /// replaces its glyphs' text, the span's first glyph carries the whole
     /// replacement and the rest carry empty ranges.
@@ -344,7 +354,9 @@ pub enum UnicodeSource {
     /// The PDF font's `/ToUnicode` CMap: the producer's own statement.
     ToUnicode,
     /// The glyph's name, through the Adobe Glyph List (`Aacute`,
-    /// `uni00C1`, `f_i`).
+    /// `uni00C1`, `f_i`) — or, for a name outside it that spells a
+    /// character code the way dvips names bitmap-font glyphs (`a80`), that
+    /// code read as Latin-1, as Poppler does.
     GlyphName,
     /// The CID, through an Adobe CJK collection's CID → Unicode table
     /// (Japan1, CNS1, GB1, Korea1).

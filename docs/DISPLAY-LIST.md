@@ -160,6 +160,14 @@ it. It nests like the content it describes, so a run inside a layer sits
 inside that layer's `OcgGroup` — walk the list with the `LayerSet` you
 render with to extract only visible layers' text.
 
+The PDF reader records one run per text-showing operator (`Tj`, `TJ`, `'`,
+`"`), placed after the glyphs it draws, and none for text drawn inside a
+Type 3 glyph procedure, a tiling pattern cell or a soft-mask group — that
+text is part of a glyph, a paint or a mask, not of the document. Glyph
+space is 1000 units per em for every font but Type 3, whose glyph space is
+its own `/FontMatrix`'s. (The PostScript interpreter does not record runs
+yet.)
+
 | Field | Type | Description |
 |-------|------|-------------|
 | `text` | `String` | Every glyph's text, concatenated in the order shown |
@@ -169,28 +177,33 @@ render with to extract only visible layers' text.
 | `descent` | `f64` | Font descent in glyph space (≈ -200 for a 1000-unit font) |
 | `font_name` | `String` | PDF `/BaseFont` or PostScript `/FontName`; empty if none |
 | `invisible` | `bool` | Shown but not painted (PDF render modes 3 and 7, e.g. OCR layers) |
+| `vertical` | `bool` | Vertical writing: origins are vertical origins (top centre of the glyph), advances point down the column, and `ascent` / `descent` (±half the em) bound the glyph across the column |
 
 `ShownGlyph`:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `text_range` | `Range<u32>` | Byte range of this glyph's text in `text`; empty when no Unicode was found (text is never guessed) |
+| `text_range` | `Range<u32>` | Byte range of this glyph's text in `text`; empty when no Unicode was found (no fallback encoding is assumed) |
 | `origin` | `(f64, f64)` | Device-space glyph origin |
 | `advance` | `(f64, f64)` | Device-space advance vector (vertical for vertical writing) |
 | `code` | `u32` | The character code shown |
-| `source` | `UnicodeSource` | `ToUnicode`, `GlyphName`, `CidOrdering`, `ActualText` or `Unmapped` (`#[non_exhaustive]`) |
+| `source` | `UnicodeSource` | `ToUnicode`, `GlyphName`, `CidOrdering`, `ActualText` or `Unmapped` (`#[non_exhaustive]`). `GlyphName` includes Poppler's reading of dvips-style numeric names (`a80` → code 80, `P`) |
 
 A glyph's box is the parallelogram spanned by its `advance` and by
 `glyph_to_device`'s linear part applied to `(0, descent)` and
-`(0, ascent)`, placed at its `origin` — so rotated and skewed text gets a
-rotated or skewed box:
+`(0, ascent)` — `(descent, 0)` and `(ascent, 0)` for a vertical run —
+placed at its `origin`, so rotated and skewed text gets a rotated or
+skewed box:
 
 ```rust
 use stet_graphics::device::TextRunParams;
 
 fn glyph_boxes(run: &TextRunParams) -> impl Iterator<Item = [(f64, f64); 4]> + '_ {
-    let up = run.glyph_to_device.transform_delta(0.0, run.ascent);
-    let down = run.glyph_to_device.transform_delta(0.0, run.descent);
+    let extent = |e: f64| if run.vertical { (e, 0.0) } else { (0.0, e) };
+    let (ux, uy) = extent(run.ascent);
+    let (dx, dy) = extent(run.descent);
+    let up = run.glyph_to_device.transform_delta(ux, uy);
+    let down = run.glyph_to_device.transform_delta(dx, dy);
     run.glyphs.iter().map(move |g| {
         let (ox, oy) = g.origin;
         let (ax, ay) = g.advance;

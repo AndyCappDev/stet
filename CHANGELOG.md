@@ -15,14 +15,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   text one show operation displayed, in Unicode, with each glyph's
   device-space origin and advance, its character code, and where its text
   came from; `glyph_to_device`, `ascent` and `descent` give each glyph's
-  box, rotated or skewed like the text. It paints nothing, and every
-  renderer and the PDF writer skip it. Both producers get an off-by-default
-  switch — `InterpreterBuilder::extract_text()` (or `Context::extract_text`)
-  for PostScript and `PdfDocument::set_extract_text(true)` for PDF — and
-  with it off, display lists are unchanged. **No producer records runs yet**;
-  the PDF reader and the show operators start doing so in the changes that
-  follow. Renderers that match on `DisplayElement` already have the
-  wildcard arm the enum's `#[non_exhaustive]` requires.
+  box, rotated or skewed like the text, and `vertical` marks vertical
+  writing. It paints nothing, and every renderer and the PDF writer skip
+  it. Both producers get an off-by-default switch —
+  `InterpreterBuilder::extract_text()` (or `Context::extract_text`) for
+  PostScript and `PdfDocument::set_extract_text(true)` for PDF — and with
+  it off, display lists are unchanged. The PDF reader records runs (below);
+  the PostScript show operators do not yet. Renderers that match on
+  `DisplayElement` already have the wildcard arm the enum's
+  `#[non_exhaustive]` requires.
+- **Text extraction from PDF.** With `PdfDocument::set_extract_text(true)`,
+  every text-showing operator (`Tj`, `TJ`, `'`, `"`) records a `TextRun`
+  beside the glyphs it draws — in forms, annotation appearances, layers and
+  transparency groups, nested like the content, so a viewer extracts only
+  visible layers' text with the `LayerSet` it renders with. A glyph's text
+  comes from the font's `/ToUnicode` CMap, else its glyph name through the
+  Adobe Glyph List, else — for CJK fonts on Adobe's Japan1, CNS1, GB1 and
+  Korea1 collections, or with a `Uni…` encoding CMap — its CID or code;
+  failing all of those it is left empty. One rule is a heuristic, taken
+  from Poppler so TeX documents made with dvips extract: a glyph name
+  outside the AGL that spells a number (`a80`, `g65`) is read as that
+  character code in Latin-1. Invisible text
+  (render modes 3 and 7, as OCR layers use) is recorded and flagged. Text
+  that is not the document's is not recorded: text drawn inside a Type 3
+  glyph procedure (the glyph is the text), in a tiling pattern cell, or in
+  a soft-mask group.
 - **`Debug` for `DisplayList` and `DisplayElement`** (and the param structs
   that lacked it: `PatternFillParams`, `GroupParams`, `SoftMaskParams`), so
   a display list can be printed or compared as text.

@@ -425,7 +425,7 @@ pub fn resolve_font(
 }
 
 /// Get the FontDescriptor dict if present.
-fn get_font_descriptor(
+pub(super) fn get_font_descriptor(
     font_dict: &PdfDict,
     resolver: &Resolver,
 ) -> Result<Option<PdfDict>, PdfError> {
@@ -460,23 +460,23 @@ struct SimpleFontEncoding<'a> {
 }
 
 /// What `resolve_encoding` worked out from a simple font's `/Encoding`.
-struct ResolvedEncoding {
+pub(super) struct ResolvedEncoding {
     /// Fully resolved encoding (base encoding with `/Differences` applied).
-    encoding: [Option<String>; 256],
+    pub(super) encoding: [Option<String>; 256],
     /// False when `/Encoding` is missing or unrecognised.
-    has_valid_encoding: bool,
+    pub(super) has_valid_encoding: bool,
     /// Raw `(code, name)` pairs from `/Differences`, populated ONLY when the
     /// Encoding is a dict without `/BaseEncoding` (and not a symbol font).
     /// When non-empty, embedded font resolvers should re-apply these on top of
     /// the font's built-in encoding rather than using `encoding` directly
     /// (PDF spec 9.6.6.1).
-    differences: Vec<(usize, String)>,
+    pub(super) differences: Vec<(usize, String)>,
     /// The font declared no `/BaseEncoding` and is not a symbol font, so its
     /// built-in encoding should win over the base one.
-    no_base_encoding: bool,
+    pub(super) no_base_encoding: bool,
 }
 
-fn resolve_encoding(
+pub(super) fn resolve_encoding(
     font_dict: &PdfDict,
     resolver: &Resolver,
 ) -> Result<ResolvedEncoding, PdfError> {

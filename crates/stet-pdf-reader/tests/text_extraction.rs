@@ -9,12 +9,15 @@
 //! be identical with it on and off, and with it off no `TextRun` may appear
 //! at all.
 
+use stet_graphics::device::{TextRunParams, UnicodeSource};
 use stet_graphics::display_list::{DisplayElement, DisplayList};
 use stet_pdf_reader::PdfDocument;
 
 /// One page showing text every way a content stream can, and in the places
 /// text can hide: rotated, invisible, in a Type 3 font, in a form XObject,
-/// and in an optional-content layer.
+/// in an optional-content layer, and under a soft mask — plus text that is
+/// not the document's: inside a Type 3 glyph procedure, a tiling pattern
+/// cell and a soft-mask group.
 const CONTENT: &str = "\
 BT /F1 12 Tf 72 700 Td (Tj) Tj ET
 BT /F1 12 Tf 72 680 Td [(T) 120 (J)] TJ ET
@@ -22,59 +25,25 @@ BT /F1 12 Tf 14 TL 72 660 Td (quote) ' ET
 BT /F1 12 Tf 14 TL 72 640 Td 1 2 (dquote) \" ET
 BT /F1 12 Tf 0.866 0.5 -0.5 0.866 72 600 Tm (rotated) Tj ET
 q BT /F1 12 Tf 3 Tr 72 560 Td (invisible) Tj ET Q
-BT /F2 12 Tf 72 540 Td (AAA) Tj ET
+BT /F2 12 Tf 72 540 Td (AAB) Tj ET
+BT /F3 12 Tf 72 520 Td (ABCD) Tj ET
 q 1 0 0 1 72 500 cm /Fm1 Do Q
 /OC /L1 BDC BT /F1 12 Tf 72 460 Td (layer) Tj ET EMC
+q /Pattern cs /P1 scn 72 400 200 40 re f Q
+q /GS1 gs BT /F1 12 Tf 72 360 Td (masked) Tj ET Q
+q /GS1 gs BT /F1 12 Tf 3 Tr 72 340 Td (ocr) Tj ET Q
+BT /F4 12 Tf 72 320 Td (Pa) Tj ET
 ";
 
-fn build_pdf() -> Vec<u8> {
-    let form = "BT /F1 12 Tf 0 5 Td (form) Tj ET";
-    let type3_glyph = "1000 0 0 0 1000 1000 d1 0 0 1000 1000 re f";
-    let objects: Vec<String> = vec![
-        // 1: catalog, with the layer in /OCProperties.
-        "<< /Type /Catalog /Pages 2 0 R \
-         /OCProperties << /OCGs [7 0 R] /D << /Order [7 0 R] >> >> >>"
-            .into(),
-        // 2: pages
-        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
-        // 3: page
-        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R \
-         /Resources << /Font << /F1 5 0 R /F2 6 0 R >> /XObject << /Fm1 8 0 R >> \
-         /Properties << /L1 7 0 R >> >> >>"
-            .into(),
-        // 4: content
-        format!(
-            "<< /Length {} >>\nstream\n{CONTENT}\nendstream",
-            CONTENT.len()
-        ),
-        // 5: a standard-14 font
-        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>".into(),
-        // 6: a Type 3 font with one glyph, /A
-        "<< /Type /Font /Subtype /Type3 /FontBBox [0 0 1000 1000] \
-         /FontMatrix [0.001 0 0 0.001 0 0] /CharProcs << /A 9 0 R >> \
-         /Encoding << /Type /Encoding /Differences [65 /A] >> \
-         /FirstChar 65 /LastChar 65 /Widths [1000] >>"
-            .into(),
-        // 7: the layer
-        "<< /Type /OCG /Name (Layer) >>".into(),
-        // 8: form XObject showing text
-        format!(
-            "<< /Type /XObject /Subtype /Form /BBox [0 0 200 20] \
-             /Resources << /Font << /F1 5 0 R >> >> /Length {} >>\nstream\n{form}\nendstream",
-            form.len()
-        ),
-        // 9: the Type 3 glyph procedure
-        format!(
-            "<< /Length {} >>\nstream\n{type3_glyph}\nendstream",
-            type3_glyph.len()
-        ),
-    ];
-
+/// A PDF of `objects`, numbered from 1, with a cross-reference table.
+fn pdf_from(objects: &[Vec<u8>]) -> Vec<u8> {
     let mut pdf = b"%PDF-1.7\n".to_vec();
     let mut offsets = Vec::new();
     for (i, body) in objects.iter().enumerate() {
         offsets.push(pdf.len());
-        pdf.extend(format!("{} 0 obj\n{body}\nendobj\n", i + 1).as_bytes());
+        pdf.extend(format!("{} 0 obj\n", i + 1).as_bytes());
+        pdf.extend(body);
+        pdf.extend(b"\nendobj\n");
     }
     let xref = pdf.len();
     pdf.extend(format!("xref\n0 {}\n0000000000 65535 f\r\n", objects.len() + 1).as_bytes());
@@ -89,6 +58,110 @@ fn build_pdf() -> Vec<u8> {
         .as_bytes(),
     );
     pdf
+}
+
+/// A stream object with `dict` entries and `data`.
+fn stream(dict: &str, data: impl AsRef<[u8]>) -> Vec<u8> {
+    let data = data.as_ref();
+    let mut out = format!("<< {dict} /Length {} >>\nstream\n", data.len()).into_bytes();
+    out.extend(data);
+    out.extend(b"\nendstream");
+    out
+}
+
+/// A ToUnicode CMap mapping each `(code, destination)` pair, both hex.
+fn to_unicode_cmap(entries: &[(&str, &str)]) -> String {
+    let mut cmap = String::from(
+        "/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n\
+         /CMapName /Test def\n1 begincodespacerange <00> <FF> endcodespacerange\n",
+    );
+    cmap.push_str(&format!("{} beginbfchar\n", entries.len()));
+    for (code, dst) in entries {
+        cmap.push_str(&format!("<{code}> <{dst}>\n"));
+    }
+    cmap.push_str("endbfchar\nendcmap CMapName currentdict /CMap defineresource pop end end");
+    cmap
+}
+
+fn build_pdf() -> Vec<u8> {
+    let helvetica =
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>";
+    let objects: Vec<Vec<u8>> = vec![
+        // 1: catalog, with the layer in /OCProperties.
+        "<< /Type /Catalog /Pages 2 0 R \
+         /OCProperties << /OCGs [7 0 R] /D << /Order [7 0 R] >> >> >>"
+            .into(),
+        // 2: pages
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
+        // 3: page
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R \
+         /Resources << /Font << /F1 5 0 R /F2 6 0 R /F3 10 0 R /F4 16 0 R >> \
+         /XObject << /Fm1 8 0 R >> /Properties << /L1 7 0 R >> \
+         /Pattern << /P1 12 0 R >> /ExtGState << /GS1 13 0 R >> >> >>"
+            .into(),
+        // 4: content
+        stream("", CONTENT),
+        // 5: a standard-14 font
+        helvetica.into(),
+        // 6: a Type 3 font. Glyph /A is a square; glyph /B shows text of
+        // its own, which is part of drawing the glyph, not document text.
+        "<< /Type /Font /Subtype /Type3 /FontBBox [0 0 1000 1000] \
+         /FontMatrix [0.001 0 0 0.001 0 0] /CharProcs << /A 9 0 R /B 11 0 R >> \
+         /Encoding << /Type /Encoding /Differences [65 /A /B] >> \
+         /Resources << /Font << /F1 5 0 R >> >> \
+         /FirstChar 65 /LastChar 66 /Widths [1000 1000] >>"
+            .into(),
+        // 7: the layer
+        "<< /Type /OCG /Name (Layer) >>".into(),
+        // 8: form XObject showing text
+        stream(
+            "/Type /XObject /Subtype /Form /BBox [0 0 200 20] \
+             /Resources << /Font << /F1 5 0 R >> >>",
+            "BT /F1 12 Tf 0 5 Td (form) Tj ET",
+        ),
+        // 9: Type 3 glyph /A
+        stream("", "1000 0 0 0 1000 1000 d1 0 0 1000 1000 re f"),
+        // 10: Helvetica with a ToUnicode CMap that overrides the glyph
+        // names for A, B and C, and leaves D to its name.
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica \
+         /Encoding /WinAnsiEncoding /ToUnicode 14 0 R >>"
+            .into(),
+        // 11: Type 3 glyph /B
+        stream("", "1000 0 d0 BT /F1 500 Tf 0 100 Td (hidden) Tj ET"),
+        // 12: a tiling pattern whose cell shows text
+        stream(
+            "/Type /Pattern /PatternType 1 /PaintType 1 /TilingType 1 \
+             /BBox [0 0 50 20] /XStep 50 /YStep 20 \
+             /Resources << /Font << /F1 5 0 R >> >>",
+            "BT /F1 8 Tf 0 5 Td (cell) Tj ET",
+        ),
+        // 13: a soft mask whose group shows text
+        "<< /Type /ExtGState /SMask << /Type /Mask /S /Luminosity /G 15 0 R >> >>".into(),
+        // 14: the ToUnicode CMap: A → Ω, B → "fi" (two characters),
+        // C → 𠮷 U+20BB7 (a surrogate pair).
+        stream(
+            "",
+            to_unicode_cmap(&[("41", "03A9"), ("42", "00660069"), ("43", "D842DFB7")]),
+        ),
+        // 15: the soft-mask group
+        stream(
+            "/Type /XObject /Subtype /Form /BBox [0 0 612 792] \
+             /Group << /S /Transparency /CS /DeviceGray >> \
+             /Resources << /Font << /F1 5 0 R >> >>",
+            "1 g 0 0 612 792 re f 0 g BT /F1 12 Tf 72 300 Td (mask) Tj ET",
+        ),
+        // 16: a Type 3 font named the way dvips names bitmap fonts' glyphs:
+        // `a` and the character code.
+        format!(
+            "<< /Type /Font /Subtype /Type3 /FontBBox [0 0 1000 1000] \
+             /FontMatrix [0.001 0 0 0.001 0 0] /CharProcs << /a80 9 0 R /a97 9 0 R >> \
+             /Encoding << /Type /Encoding /Differences [80 /a80 97 /a97] >> \
+             /FirstChar 80 /LastChar 97 /Widths [{}] >>",
+            ["1000"; 18].join(" ")
+        )
+        .into(),
+    ];
+    pdf_from(&objects)
 }
 
 fn render(pdf: &[u8], extract: bool) -> DisplayList {
@@ -146,34 +219,323 @@ fn switch_changes_nothing_but_text_runs() {
     let on = render(&pdf, true);
     // With the switch off, not a single TextRun at any depth.
     assert_eq!(format!("{off:?}"), format!("{:?}", without_text_runs(&off)));
-    // With it on, removing the TextRuns gives back the list exactly.
+    // With it on, removing the TextRuns gives back the list exactly —
+    // including the soft-mask scope that holds nothing but invisible text,
+    // which must not become a `SoftMasked` for the run alone.
     assert_eq!(format!("{off:?}"), format!("{:?}", without_text_runs(&on)));
-    // No show operator records a TextRun yet (emission lands in a later
-    // change), so the two lists are identical outright.
-    assert_eq!(format!("{off:?}"), format!("{on:?}"));
+    assert!(!runs(&on).is_empty());
+}
+
+/// Recursive element count.
+fn count(list: &DisplayList, f: &dyn Fn(&DisplayElement) -> bool) -> usize {
+    list.elements()
+        .iter()
+        .map(|e| {
+            let nested = match e {
+                DisplayElement::Group { elements, .. }
+                | DisplayElement::OcgGroup { elements, .. } => count(elements, f),
+                DisplayElement::SoftMasked { mask, content, .. } => {
+                    count(mask, f) + count(content, f)
+                }
+                DisplayElement::PatternFill { params } => count(&params.tile, f),
+                _ => 0,
+            };
+            nested + usize::from(f(e))
+        })
+        .sum()
 }
 
 #[test]
 fn fixture_draws_every_text_construct() {
-    // Guards the test above against a fixture that silently stopped
-    // drawing: each visible string paints glyph fills, and the layer and
-    // form arrive as their own containers.
+    // Guards the tests here against a fixture that silently stopped
+    // drawing: each visible string paints glyph fills, and the layer,
+    // pattern and soft mask arrive as their own elements.
     let list = render(&build_pdf(), false);
-    fn count(list: &DisplayList, f: &dyn Fn(&DisplayElement) -> bool) -> usize {
-        list.elements()
-            .iter()
-            .map(|e| {
-                let nested = match e {
-                    DisplayElement::Group { elements, .. }
-                    | DisplayElement::OcgGroup { elements, .. } => count(elements, f),
-                    _ => 0,
-                };
-                nested + usize::from(f(e))
-            })
-            .sum()
-    }
     let fills = count(&list, &|e| matches!(e, DisplayElement::Fill { .. }));
     let layers = count(&list, &|e| matches!(e, DisplayElement::OcgGroup { .. }));
-    assert!(fills >= 30, "only {fills} fills");
+    let patterns = count(&list, &|e| matches!(e, DisplayElement::PatternFill { .. }));
+    let masks = count(&list, &|e| matches!(e, DisplayElement::SoftMasked { .. }));
+    assert!(fills >= 50, "only {fills} fills");
     assert_eq!(layers, 1);
+    assert_eq!(patterns, 1);
+    // `masked` gets one; the scope holding only invisible `ocr` has
+    // nothing to mask.
+    assert_eq!(masks, 1);
+}
+
+/// Every run in `list`, in order, with the containers it sits in.
+fn runs(list: &DisplayList) -> Vec<(Vec<&'static str>, TextRunParams)> {
+    fn walk(
+        list: &DisplayList,
+        path: &mut Vec<&'static str>,
+        out: &mut Vec<(Vec<&'static str>, TextRunParams)>,
+    ) {
+        for e in list.elements() {
+            match e {
+                DisplayElement::TextRun { params } => out.push((path.clone(), params.clone())),
+                DisplayElement::Group { elements, .. } => {
+                    path.push("group");
+                    walk(elements, path, out);
+                    path.pop();
+                }
+                DisplayElement::OcgGroup { elements, .. } => {
+                    path.push("layer");
+                    walk(elements, path, out);
+                    path.pop();
+                }
+                DisplayElement::SoftMasked { mask, content, .. } => {
+                    path.push("mask");
+                    walk(mask, path, out);
+                    path.pop();
+                    path.push("masked");
+                    walk(content, path, out);
+                    path.pop();
+                }
+                DisplayElement::PatternFill { params } => {
+                    path.push("pattern");
+                    walk(&params.tile, path, out);
+                    path.pop();
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(list, &mut Vec::new(), &mut out);
+    out
+}
+
+/// The text of each glyph of `run`.
+fn glyph_texts(run: &TextRunParams) -> Vec<&str> {
+    run.glyphs
+        .iter()
+        .map(|g| &run.text[g.text_range.start as usize..g.text_range.end as usize])
+        .collect()
+}
+
+fn close(a: (f64, f64), b: (f64, f64)) -> bool {
+    (a.0 - b.0).abs() < 1e-6 && (a.1 - b.1).abs() < 1e-6
+}
+
+#[test]
+fn records_the_document_text_and_nothing_else() {
+    let list = render(&build_pdf(), true);
+    let runs = runs(&list);
+    let texts: Vec<(&str, Vec<&str>)> = runs
+        .iter()
+        .map(|(path, run)| (run.text.as_str(), path.clone()))
+        .collect();
+    // One run per show operator, in content order, nested like the
+    // content. Nothing from the Type 3 glyph procedure (`hidden`), the
+    // pattern cell (`cell`) or the soft-mask group (`mask`).
+    assert_eq!(
+        texts,
+        vec![
+            ("Tj", vec![]),
+            ("TJ", vec![]),
+            ("quote", vec![]),
+            ("dquote", vec![]),
+            ("rotated", vec![]),
+            ("invisible", vec![]),
+            ("AAB", vec![]),
+            ("Ωfi𠮷D", vec![]),
+            ("form", vec![]),
+            ("layer", vec!["layer"]),
+            ("masked", vec!["masked"]),
+            ("ocr", vec![]),
+            ("Pa", vec![]),
+        ]
+    );
+    for (_, run) in &runs {
+        let invisible = matches!(run.text.as_str(), "invisible" | "ocr");
+        assert_eq!(run.invisible, invisible, "{}", run.text);
+        assert!(!run.vertical);
+    }
+}
+
+#[test]
+fn unicode_sources() {
+    let list = render(&build_pdf(), true);
+    let runs = runs(&list);
+    let run = |text: &str| {
+        runs.iter()
+            .map(|(_, r)| r)
+            .find(|r| r.text == text)
+            .unwrap_or_else(|| panic!("no run {text:?}"))
+    };
+
+    // WinAnsi names through the AGL.
+    let tj = run("Tj");
+    assert!(
+        tj.glyphs
+            .iter()
+            .all(|g| g.source == UnicodeSource::GlyphName)
+    );
+    assert_eq!(tj.font_name, "Helvetica");
+
+    // A Type 3 font's /Differences names.
+    let type3 = run("AAB");
+    assert_eq!(glyph_texts(type3), ["A", "A", "B"]);
+    assert!(
+        type3
+            .glyphs
+            .iter()
+            .all(|g| g.source == UnicodeSource::GlyphName)
+    );
+
+    // Glyph names outside the AGL that spell a code, as dvips writes them.
+    let dvips = run("Pa");
+    assert!(
+        dvips
+            .glyphs
+            .iter()
+            .all(|g| g.source == UnicodeSource::GlyphName)
+    );
+
+    // ToUnicode wins over the glyph name, keeps multi-character and
+    // supplementary-plane text whole, and leaves unmapped codes to the name.
+    let mapped = run("Ωfi𠮷D");
+    assert_eq!(glyph_texts(mapped), ["Ω", "fi", "𠮷", "D"]);
+    let sources: Vec<_> = mapped.glyphs.iter().map(|g| g.source).collect();
+    assert_eq!(
+        sources,
+        [
+            UnicodeSource::ToUnicode,
+            UnicodeSource::ToUnicode,
+            UnicodeSource::ToUnicode,
+            UnicodeSource::GlyphName
+        ]
+    );
+    let codes: Vec<u32> = mapped.glyphs.iter().map(|g| g.code).collect();
+    assert_eq!(codes, [0x41, 0x42, 0x43, 0x44]);
+}
+
+#[test]
+fn glyph_positions_are_in_device_space() {
+    // Rendered at 72 dpi, device space is PDF space with y flipped.
+    let list = render(&build_pdf(), true);
+    let runs = runs(&list);
+    let run = |text: &str| &runs.iter().find(|(_, r)| r.text == text).unwrap().1;
+
+    // Helvetica T is 611 units wide, j 222; at 12 pt.
+    let tj = run("Tj");
+    assert!(close(tj.glyphs[0].origin, (72.0, 92.0)));
+    assert!(close(tj.glyphs[0].advance, (611.0 * 0.012, 0.0)));
+    assert!(close(tj.glyphs[1].origin, (72.0 + 611.0 * 0.012, 92.0)));
+    // glyph_to_device: 1000-unit glyph space at 12 pt, y flipped, starting
+    // at the first origin.
+    let m = tj.glyph_to_device;
+    assert!(close((m.a, m.b), (0.012, 0.0)));
+    assert!(close((m.c, m.d), (0.0, -0.012)));
+    assert!(close((m.tx, m.ty), (72.0, 92.0)));
+    // A standard-14 font with no descriptor: the default metrics.
+    assert_eq!((tj.ascent, tj.descent), (800.0, -200.0));
+
+    // TJ: the kerning moves J but is not part of T's advance.
+    let tj_array = run("TJ");
+    assert!(close(tj_array.glyphs[0].advance, (611.0 * 0.012, 0.0)));
+    let j_x = 72.0 + (611.0 - 120.0) * 0.012;
+    assert!(close(tj_array.glyphs[1].origin, (j_x, 112.0)));
+
+    // Rotated 30°: the advance and the box's up vector turn with the text.
+    let rotated = run("rotated");
+    let (ax, ay) = rotated.glyphs[0].advance;
+    let angle = (-ay).atan2(ax).to_degrees();
+    assert!((angle - 30.0).abs() < 0.1, "advance at {angle}°");
+    let (ux, uy) = rotated.glyph_to_device.transform_delta(0.0, 1000.0);
+    let up = (-uy).atan2(ux).to_degrees();
+    assert!((up - 120.0).abs() < 0.1, "up at {up}°");
+
+    // The form's run is placed by the form's CTM.
+    let form = run("form");
+    assert!(close(form.glyphs[0].origin, (72.0, 792.0 - 505.0)));
+
+    // Type 3 glyph space is the font's own: 1000 units at 12 pt again,
+    // with ascent and descent from the /FontBBox. The `"` line's character
+    // spacing of 2 is still in force (text state outlives ET): it moves
+    // the next glyph but is not part of the advance.
+    let type3 = run("AAB");
+    assert!(close(type3.glyphs[0].advance, (12.0, 0.0)));
+    assert!(close(type3.glyphs[1].origin, (72.0 + 12.0 + 2.0, 252.0)));
+    assert_eq!((type3.ascent, type3.descent), (1000.0, 0.0));
+}
+
+/// A page showing CIDs 3851 and 3852 of Adobe-Japan1 (諭, 輸) through
+/// `Identity-H` and again through `Identity-V`, from a font with no
+/// ToUnicode CMap. The descendant embeds a bundled Type 1 font, which the
+/// reader accepts as a CIDFontType0 program, so the font resolves the same
+/// on every machine; it has no glyphs for these CIDs, and only the text
+/// matters here.
+fn build_cid_pdf() -> Vec<u8> {
+    let program = include_bytes!("../fonts/NimbusSans-Regular.t1");
+    let type0 = |encoding: &str| -> Vec<u8> {
+        format!(
+            "<< /Type /Font /Subtype /Type0 /BaseFont /Test /Encoding /{encoding} \
+             /DescendantFonts [6 0 R] >>"
+        )
+        .into()
+    };
+    let objects: Vec<Vec<u8>> = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".into(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R \
+         /Resources << /Font << /F1 5 0 R /F2 7 0 R >> >> >>"
+            .into(),
+        stream(
+            "",
+            "BT /F1 12 Tf 72 700 Td <0F0B0F0C> Tj ET \
+             BT /F2 12 Tf 300 700 Td <0F0B0F0C> Tj ET",
+        ),
+        type0("Identity-H"),
+        "<< /Type /Font /Subtype /CIDFontType0 /BaseFont /Test \
+         /CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) /Supplement 4 >> \
+         /FontDescriptor 8 0 R /DW 1000 >>"
+            .into(),
+        type0("Identity-V"),
+        "<< /Type /FontDescriptor /FontName /Test /Flags 4 /ItalicAngle 0 \
+         /Ascent 880 /Descent -120 /CapHeight 700 /StemV 80 \
+         /FontBBox [0 -120 1000 880] /FontFile 9 0 R >>"
+            .into(),
+        stream("", program),
+    ];
+    pdf_from(&objects)
+}
+
+#[test]
+fn cid_text_from_the_collection() {
+    let pdf = build_cid_pdf();
+    let off = render(&pdf, false);
+    let on = render(&pdf, true);
+    assert_eq!(format!("{off:?}"), format!("{:?}", without_text_runs(&on)));
+
+    let runs = runs(&on);
+    assert_eq!(runs.len(), 2);
+    let (horizontal, vertical) = (&runs[0].1, &runs[1].1);
+    for run in [horizontal, vertical] {
+        assert_eq!(glyph_texts(run), ["諭", "輸"]);
+        let codes: Vec<u32> = run.glyphs.iter().map(|g| g.code).collect();
+        assert_eq!(codes, [3851, 3852]);
+        assert!(
+            run.glyphs
+                .iter()
+                .all(|g| g.source == UnicodeSource::CidOrdering)
+        );
+    }
+
+    // Horizontal: descriptor metrics, advancing right.
+    assert!(!horizontal.vertical);
+    assert_eq!((horizontal.ascent, horizontal.descent), (880.0, -120.0));
+    assert!(close(horizontal.glyphs[1].origin, (84.0, 92.0)));
+
+    // Vertical: origins run down the column (y grows down in device
+    // space), and the cross-column extent is half the em either way.
+    assert!(vertical.vertical);
+    assert_eq!((vertical.ascent, vertical.descent), (500.0, -500.0));
+    assert!(close(vertical.glyphs[0].origin, (300.0, 92.0)));
+    assert!(close(vertical.glyphs[0].advance, (0.0, 12.0)));
+    assert!(close(vertical.glyphs[1].origin, (300.0, 104.0)));
+    let across = vertical
+        .glyph_to_device
+        .transform_delta(vertical.ascent, 0.0);
+    assert!(close(across, (6.0, 0.0)));
 }

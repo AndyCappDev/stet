@@ -399,10 +399,22 @@ impl<'a> PdfDocument<'a> {
     ///
     /// Display lists from [`render_page`](Self::render_page) then also carry
     /// [`DisplayElement::TextRun`](stet_graphics::display_list::DisplayElement::TextRun)
-    /// elements: each string shown, in Unicode, with the device-space
-    /// position of every glyph. They paint nothing, so rendering is
-    /// unchanged. Disabled by default, which keeps display lists free of
-    /// them — worth keeping off for documents that are only drawn.
+    /// elements: one per text-showing operator (`Tj`, `TJ`, `'`, `"`), in
+    /// Unicode, with the device-space position of every glyph. They paint
+    /// nothing, so rendering is unchanged. Disabled by default, which keeps
+    /// display lists free of them — worth keeping off for documents that
+    /// are only drawn.
+    ///
+    /// Runs nest like the content that shows them — inside a layer's
+    /// `OcgGroup`, a transparency group, a soft-masked scope — and include
+    /// text in forms and annotation appearances, and invisible text
+    /// (flagged). A glyph's text comes from the font's `/ToUnicode` CMap,
+    /// else its glyph name through the Adobe Glyph List (or, as in Poppler,
+    /// a number the name spells, for dvips's `a80`-style bitmap fonts),
+    /// else its CID through an Adobe CJK collection; with none of those
+    /// its text is empty. Text drawn inside a Type 3 glyph
+    /// procedure, a tiling pattern cell or a soft-mask group is not the
+    /// document's and is not recorded.
     pub fn set_extract_text(&mut self, enabled: bool) {
         self.extract_text = enabled;
     }

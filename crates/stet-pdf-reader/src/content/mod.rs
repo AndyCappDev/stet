@@ -14,6 +14,7 @@ pub mod font;
 mod gid_maps;
 pub mod graphics_state;
 mod standard_fonts;
+mod text_extract;
 
 use crate::error::PdfError;
 use crate::lexer::{Lexer, MAX_OBJECT_DEPTH, Token};
@@ -32,12 +33,13 @@ use std::sync::{Arc, Mutex};
 
 use self::font::{FontCache, PdfFont};
 use self::graphics_state::{ShadingPatternDL, TilingPattern};
+use self::text_extract::FontText;
 use crate::FontProvider;
 use stet_fonts::geometry::{Matrix, PathSegment, PsPath};
 use stet_graphics::color::{DashPattern, DeviceColor, FillRule, LineCap, LineJoin};
 use stet_graphics::device::{
-    ClipParams, FillParams, ImageColorSpace, ImageParams, PatternFillParams, StrokeParams,
-    TintLookupTable,
+    ClipParams, FillParams, ImageColorSpace, ImageParams, PatternFillParams, ShownGlyph,
+    StrokeParams, TextRunParams, TintLookupTable, UnicodeSource,
 };
 use stet_graphics::display_list::{
     DisplayElement, DisplayList, GroupParams, OcgVisibility, SoftMaskParams, SoftMaskSubtype,
@@ -74,6 +76,18 @@ enum MarkedContentFrame {
     /// Any other BDC (non-OC property reference) or BMC.
     Other,
 }
+
+/// A `TextRun` being recorded by one show operator.
+struct OpenTextRun {
+    params: TextRunParams,
+    /// Where the glyphs' text comes from; `None` for a font with no
+    /// dictionary (a stand-in for a missing font resource).
+    font: Option<Arc<FontText>>,
+}
+
+/// The run a show operator had open when text extraction was suspended:
+/// see [`ContentInterpreter::suspend_text_extraction`].
+struct SuspendedTextRun(Option<OpenTextRun>);
 
 /// Read a numeric array entry, following an indirect reference if needed.
 ///
@@ -275,6 +289,16 @@ pub struct ContentInterpreter<'a> {
     /// When true, show operators also record `TextRun` elements for text
     /// extraction. Off by default; see [`Self::set_extract_text`].
     extract_text: bool,
+    /// Text-extraction data for each font resolved while `extract_text` is
+    /// on, keyed by the font's `Arc` address. The `Arc` is held so the
+    /// address cannot be reused by another font.
+    font_text: std::collections::HashMap<usize, (Arc<PdfFont>, Arc<FontText>)>,
+    /// The `TextRun` the current show operator is recording.
+    text_run: Option<OpenTextRun>,
+    /// Nesting depth of content whose text is not document text — Type 3
+    /// glyph procedures, tiling pattern cells, soft-mask groups. No run is
+    /// recorded while it is non-zero.
+    text_suspended: u32,
     /// Cache of resolved tiling patterns, keyed by PDF indirect reference (obj_num, gen).
     /// Ensures the same pattern stream is interpreted only once, with the graphics
     /// state from the first resolution (matching GhostScript behaviour).
@@ -347,6 +371,9 @@ impl<'a> ContentInterpreter<'a> {
             in_smask_form: false,
             overprint_enabled,
             extract_text: false,
+            font_text: std::collections::HashMap::new(),
+            text_run: None,
+            text_suspended: 0,
             pattern_cache: std::collections::HashMap::new(),
             ocg_off: ocg_off.clone(),
             mc_stack: Vec::new(),
@@ -2835,6 +2862,7 @@ impl<'a> ContentInterpreter<'a> {
         match font::resolve_font(self.resolver, &font_ref, self.font_provider.as_ref()) {
             Ok(font) => {
                 let arc = Arc::new(font);
+                self.register_font_text(&arc, &font_ref, true);
                 // Cache under both the name and object number keys
                 if let PdfObj::Ref(obj_num, _) = &font_ref {
                     self.font_cache
@@ -2857,6 +2885,7 @@ impl<'a> ContentInterpreter<'a> {
                 // Try fallback font on resolution failure too
                 if let Some(fallback) = font::fallback_font(self.font_provider.as_ref()) {
                     let arc = Arc::new(fallback);
+                    self.register_font_text(&arc, &font_ref, false);
                     self.font_cache.insert(name.to_vec(), Arc::clone(&arc));
                     self.current_font = Some(arc);
                 } else {
@@ -2921,7 +2950,9 @@ impl<'a> ContentInterpreter<'a> {
             Some(Operand::Str(s)) => s.clone(),
             _ => return Ok(()),
         };
+        self.begin_text_run();
         self.show_text(&text);
+        self.end_text_run();
         Ok(())
     }
 
@@ -2931,6 +2962,7 @@ impl<'a> ContentInterpreter<'a> {
             _ => return Ok(()),
         };
         let vertical = self.current_font.as_ref().is_some_and(|f| f.wmode() == 1);
+        self.begin_text_run();
         for elem in &arr {
             match elem {
                 PdfObj::Str(s) => self.show_text(s),
@@ -2955,6 +2987,7 @@ impl<'a> ContentInterpreter<'a> {
                 _ => {}
             }
         }
+        self.end_text_run();
         Ok(())
     }
 
@@ -2975,6 +3008,146 @@ impl<'a> ContentInterpreter<'a> {
         // The string is at len-1, which op_tj reads from last()
         self.op_t_star()?;
         self.op_tj()
+    }
+
+    /// Read the text-extraction data of `font`, which `font_ref` names,
+    /// when extraction is on and the font has none yet. `resolved` is false
+    /// when a fallback font stands in for one that failed to resolve.
+    fn register_font_text(&mut self, font: &Arc<PdfFont>, font_ref: &PdfObj, resolved: bool) {
+        if !self.extract_text {
+            return;
+        }
+        let key = Arc::as_ptr(font) as usize;
+        if self.font_text.contains_key(&key) {
+            return;
+        }
+        let Ok(obj) = self.resolver.deref(font_ref) else {
+            return;
+        };
+        let Some(dict) = obj.as_dict() else {
+            return;
+        };
+        let text = FontText::new(self.resolver, dict, resolved.then_some(&**font));
+        self.font_text
+            .insert(key, (Arc::clone(font), Arc::new(text)));
+    }
+
+    /// Stop recording text while interpreting content whose text is not
+    /// the document's: a Type 3 glyph procedure (the glyph it draws is the
+    /// text), a tiling pattern cell (paint, repeated per tile), or a
+    /// soft-mask group (a mask, never seen as text). Sets aside the run a
+    /// show operator may have open; pass the result to
+    /// [`Self::resume_text_extraction`].
+    fn suspend_text_extraction(&mut self) -> SuspendedTextRun {
+        self.text_suspended += 1;
+        SuspendedTextRun(self.text_run.take())
+    }
+
+    /// Undo [`Self::suspend_text_extraction`].
+    fn resume_text_extraction(&mut self, saved: SuspendedTextRun) {
+        self.text_suspended -= 1;
+        self.text_run = saved.0;
+    }
+
+    /// Open a `TextRun` for the show operator about to run, when text
+    /// extraction is on.
+    fn begin_text_run(&mut self) {
+        if !self.extract_text || self.text_suspended > 0 {
+            return;
+        }
+        let Some(font) = self.current_font.clone() else {
+            return;
+        };
+        let text = self
+            .font_text
+            .get(&(Arc::as_ptr(&font) as usize))
+            .map(|(_, text)| Arc::clone(text));
+        let vertical = font.wmode() == 1;
+        let size = self.gstate.font_size;
+        // As the glyph loops build the text rendering matrix, except that
+        // a vertical glyph's displacement from its origin is left out, so
+        // the translation is the first glyph's origin.
+        let text_state = if vertical {
+            Matrix::new(size, 0.0, 0.0, size, 0.0, 0.0)
+        } else {
+            Matrix::new(
+                size * self.gstate.horizontal_scaling,
+                0.0,
+                0.0,
+                size,
+                0.0,
+                self.gstate.text_rise,
+            )
+        };
+        // PDF glyph space: 1000 units per em for every font but Type 3,
+        // whatever matrix the reader draws a font's outlines with.
+        let font_matrix = match &*font {
+            PdfFont::Type3(f) => f.font_matrix,
+            _ => Matrix::new(0.001, 0.0, 0.0, 0.001, 0.0, 0.0),
+        };
+        let glyph_to_device = self
+            .gstate
+            .ctm
+            .concat(&self.gstate.text_matrix)
+            .concat(&text_state)
+            .concat(&font_matrix);
+        let (ascent, descent, font_name) = match &text {
+            Some(text) => (text.ascent, text.descent, text.font_name.clone()),
+            None if vertical => (500.0, -500.0, String::new()),
+            None => (800.0, -200.0, String::new()),
+        };
+        self.text_run = Some(OpenTextRun {
+            params: TextRunParams {
+                glyph_to_device,
+                ascent,
+                descent,
+                font_name,
+                invisible: self.gstate.text_rendering_mode & 3 == 3,
+                vertical,
+                ..TextRunParams::default()
+            },
+            font: text,
+        });
+    }
+
+    /// Close the show operator's `TextRun`, adding it to the display list
+    /// when it recorded a glyph.
+    fn end_text_run(&mut self) {
+        if let Some(run) = self.text_run.take()
+            && !run.params.glyphs.is_empty()
+        {
+            self.display_list
+                .push(DisplayElement::TextRun { params: run.params });
+        }
+    }
+
+    /// Record a glyph in the open `TextRun` at the current text position.
+    /// `code` is the character code shown, `cid` the CID a composite font
+    /// drew, and `width` the glyph's text-space advance before character,
+    /// word and `TJ` spacing.
+    fn record_glyph(&mut self, code: u32, cid: Option<u16>, width: (f64, f64)) {
+        let Some(run) = self.text_run.as_mut() else {
+            return;
+        };
+        let to_device = self.gstate.ctm.concat(&self.gstate.text_matrix);
+        let rise = if run.params.vertical {
+            0.0
+        } else {
+            self.gstate.text_rise
+        };
+        let start = run.params.text.len() as u32;
+        let source = match &run.font {
+            Some(font) => font.append_text(code, cid, &mut run.params.text),
+            None => UnicodeSource::Unmapped,
+        };
+        let end = run.params.text.len() as u32;
+        run.params.glyphs.push(ShownGlyph {
+            text_range: start..end,
+            origin: to_device.transform_point(0.0, rise),
+            advance: to_device.transform_delta(width.0, width.1),
+            code,
+            source,
+        });
     }
 
     /// Render a text string by emitting glyph paths as Fill display elements.
@@ -3014,7 +3187,7 @@ impl<'a> ContentInterpreter<'a> {
                     let extra = if raw_code == 0x20 { word_spacing } else { 0.0 };
                     i += 1;
                     let cid = font.resolve_code_to_cid(raw_code) as u16;
-                    self.render_cid_glyph(&font, cid, text_state, extra);
+                    self.render_cid_glyph(&font, raw_code, cid, text_state, extra);
                 } else if i + 1 >= text.len() {
                     // Incomplete trailing byte in 2-byte font — treat as WinAnsi
                     let byte = text[i];
@@ -3048,17 +3221,24 @@ impl<'a> ContentInterpreter<'a> {
                     } else {
                         0.0
                     };
+                    // The code actually consumed, which is what the font's
+                    // ToUnicode CMap is keyed by.
+                    let code = if consumed == 1 {
+                        text[i] as u32
+                    } else {
+                        raw_code
+                    };
                     i += consumed;
                     if font.has_cid_glyph(cid) {
                         // CID maps to a valid GID in the font
-                        self.render_cid_glyph(&font, cid, text_state, extra);
+                        self.render_cid_glyph(&font, code, cid, text_state, extra);
                     } else {
                         // 2-byte CID has no glyph.  Some malformed PDFs encode
                         // single-byte CIDs in 2-byte Identity-H strings with a
                         // padding high byte (e.g. 0x20).  Try the low byte alone.
                         let lo_cid = (raw_code & 0xFF) as u16;
                         if lo_cid > 0 && font.has_cid_glyph(lo_cid) {
-                            self.render_cid_glyph(&font, lo_cid, text_state, extra);
+                            self.render_cid_glyph(&font, code, lo_cid, text_state, extra);
                         } else if raw_code <= 0xFF {
                             // Low code point with no CID glyph — malformed PDF mixing
                             // 1-byte WinAnsi text in a CID font.  Bypass the CID
@@ -3069,7 +3249,7 @@ impl<'a> ContentInterpreter<'a> {
                             // CID glyph not available (e.g. substitute font for CJK).
                             // Use CID width for correct advancement; try Unicode for shape.
                             self.render_cid_glyph_unicode_fallback(
-                                &font, cid, raw_code, text_state, extra,
+                                &font, code, cid, raw_code, text_state, extra,
                             );
                         }
                     }
@@ -3087,6 +3267,7 @@ impl<'a> ContentInterpreter<'a> {
 
                 let w0_glyph = font.glyph_width(byte);
                 let w0 = w0_glyph * fm.a;
+                self.record_glyph(byte as u32, None, (w0 * font_size * th, 0.0));
                 let mut tx = w0 * font_size + char_spacing;
                 if byte == b' ' {
                     tx += word_spacing;
@@ -3115,6 +3296,7 @@ impl<'a> ContentInterpreter<'a> {
                 }
 
                 let w0 = font.glyph_width(byte);
+                self.record_glyph(byte as u32, None, (w0 * font_size * th, 0.0));
                 let mut tx = w0 * font_size + char_spacing;
                 if byte == b' ' {
                     tx += word_spacing;
@@ -3130,6 +3312,7 @@ impl<'a> ContentInterpreter<'a> {
     fn render_cid_glyph(
         &mut self,
         font: &PdfFont,
+        code: u32,
         cid: u16,
         text: TextDrawState<'_>,
         extra_advance: f64,
@@ -3172,11 +3355,13 @@ impl<'a> ContentInterpreter<'a> {
         }
         if vertical {
             let [w1, _vx, _vy] = font.vertical_metrics_cid(cid);
+            self.record_glyph(code, Some(cid), (0.0, w1 / 1000.0 * font_size));
             let ty = w1 / 1000.0 * font_size + char_spacing + extra_advance;
             let advance = Matrix::translate(0.0, ty);
             self.gstate.text_matrix = self.gstate.text_matrix.concat(&advance);
         } else {
             let w0 = font.glyph_width_cid(cid);
+            self.record_glyph(code, Some(cid), (w0 * font_size * th, 0.0));
             let tx = (w0 * font_size + char_spacing + extra_advance) * th;
             let advance = Matrix::translate(tx, 0.0);
             self.gstate.text_matrix = self.gstate.text_matrix.concat(&advance);
@@ -3189,6 +3374,7 @@ impl<'a> ContentInterpreter<'a> {
     fn render_cid_glyph_unicode_fallback(
         &mut self,
         font: &PdfFont,
+        code: u32,
         cid: u16,
         unicode: u32,
         text: TextDrawState<'_>,
@@ -3231,11 +3417,13 @@ impl<'a> ContentInterpreter<'a> {
         }
         if vertical {
             let [w1, _vx, _vy] = font.vertical_metrics_cid(cid);
+            self.record_glyph(code, Some(cid), (0.0, w1 / 1000.0 * font_size));
             let ty = w1 / 1000.0 * font_size + char_spacing + extra_advance;
             let advance = Matrix::translate(0.0, ty);
             self.gstate.text_matrix = self.gstate.text_matrix.concat(&advance);
         } else {
             let w0 = font.glyph_width_cid(cid);
+            self.record_glyph(code, Some(cid), (w0 * font_size * th, 0.0));
             let tx = (w0 * font_size + char_spacing + extra_advance) * th;
             let advance = Matrix::translate(tx, 0.0);
             self.gstate.text_matrix = self.gstate.text_matrix.concat(&advance);
@@ -3277,6 +3465,7 @@ impl<'a> ContentInterpreter<'a> {
             .as_ref()
             .map(|f| f.glyph_width_unicode(unicode))
             .unwrap_or(0.0);
+        self.record_glyph(byte as u32, None, (w0 * font_size * th, 0.0));
         let tx = (w0 * font_size + char_spacing) * th;
         let advance = Matrix::translate(tx, 0.0);
         self.gstate.text_matrix = self.gstate.text_matrix.concat(&advance);
@@ -3344,9 +3533,11 @@ impl<'a> ContentInterpreter<'a> {
 
         let saved_d1 = self.d1_color_suppressed;
         self.d1_color_suppressed = false;
+        let suspended = self.suspend_text_extraction();
         self.depth += 1;
         let _ = self.interpret_stream(&proc_data);
         self.depth -= 1;
+        self.resume_text_extraction(suspended);
         self.d1_color_suppressed = saved_d1;
         // Collect glyph display elements and append to main display list
         let glyph_elements = std::mem::replace(&mut self.display_list, saved_display_list);
@@ -6111,6 +6302,7 @@ impl<'a> ContentInterpreter<'a> {
                 match font::resolve_font(self.resolver, font_ref, self.font_provider.as_ref()) {
                     Ok(font) => {
                         let arc = Arc::new(font);
+                        self.register_font_text(&arc, font_ref, true);
                         self.font_cache.insert(cache_key, Arc::clone(&arc));
                         self.current_font = Some(arc);
                     }
@@ -6160,8 +6352,19 @@ impl<'a> ContentInterpreter<'a> {
 
     /// Flush the current soft mask scope: wrap accumulated elements in SoftMasked.
     fn flush_soft_mask(&mut self) {
+        // A scope whose only content is `TextRun`s painted nothing (OCR
+        // text, say), and must stay as bare as it would be without text
+        // extraction: no `SoftMasked` for the runs alone.
         if let Some(scope) = self.soft_mask_scope.take()
-            && self.display_list.len() > scope.start_index
+            && self
+                .display_list
+                .elements()
+                .get(scope.start_index..)
+                .is_some_and(|scoped| {
+                    scoped
+                        .iter()
+                        .any(|e| !matches!(e, DisplayElement::TextRun { .. }))
+                })
         {
             let content = self.display_list.split_off(scope.start_index);
 
@@ -6493,9 +6696,11 @@ impl<'a> ContentInterpreter<'a> {
         self.in_smask_form = true;
 
         let saved_nested_mask_flush_count = self.nested_mask_flush_count;
+        let suspended = self.suspend_text_extraction();
         self.depth += 1;
         let _ = self.interpret_stream(&form_data);
         self.depth -= 1;
+        self.resume_text_extraction(suspended);
 
         self.in_smask_form = saved_in_smask_form;
         self.icc_cache.restore_default_cmyk(saved_cmyk_hash);
@@ -7015,9 +7220,11 @@ impl<'a> ContentInterpreter<'a> {
         // fill+stroke or other modes from the parent content stream.
         self.gstate.text_rendering_mode = 0;
 
+        let suspended = self.suspend_text_extraction();
         self.depth += 1;
         let _ = self.interpret_stream(&pattern_data);
         self.depth -= 1;
+        self.resume_text_extraction(suspended);
 
         // Flush any pending soft mask scope from the pattern stream
         self.flush_soft_mask();
