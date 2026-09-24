@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Pre-push hook: bail before any commits reach the remote if the tree
 # would fail CI. Mirrors what .github/workflows/ci.yml runs in the
-# "fmt + clippy" job. Bypass with `git push --no-verify` if you need
-# to push something known-broken (e.g. a WIP branch).
+# "fmt + clippy" job: fmt, clippy, rustdoc and the audit scripts. Bypass
+# with `git push --no-verify` if you need to push something known-broken
+# (e.g. a WIP branch).
 #
 # Tracked in the repo rather than living in .git/hooks, which is local
 # state that no clone inherits. Activate with:
@@ -81,6 +82,19 @@ echo -e "${YELLOW}pre-push: cargo clippy (warnings gate, ${LINT_TOOLCHAIN})${RES
 if ! cargo "+$LINT_TOOLCHAIN" clippy --workspace --all-targets --quiet -- -D warnings 2>&1 | tee "$clippy_log"; then
     echo -e "${RED}pre-push: clippy failed. Fix it, or add an #[expect(clippy::...)]${RESET}" >&2
     echo -e "${RED}        at the site with a comment saying why.${RESET}" >&2
+    exit 1
+fi
+
+# Matches CI's `cargo doc` step. Broken intra-doc links are what docs.rs
+# shows readers of a published crate, and before this nothing built the
+# docs: a link to a struct field written without its path sat broken from
+# May to September 2026. Pinned like clippy, since rustdoc's lints move
+# between releases too.
+echo -e "${YELLOW}pre-push: cargo doc (warnings gate, ${LINT_TOOLCHAIN})${RESET}"
+if ! RUSTDOCFLAGS="-D warnings" cargo "+$LINT_TOOLCHAIN" doc --workspace --no-deps --quiet; then
+    echo -e "${RED}pre-push: rustdoc failed. A link to an item not in scope needs its${RESET}" >&2
+    echo -e "${RED}        path ([\`Name\`](crate::module::Name)); public docs cannot${RESET}" >&2
+    echo -e "${RED}        link to private items at all.${RESET}" >&2
     exit 1
 fi
 

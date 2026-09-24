@@ -1085,11 +1085,12 @@ fn build_nd_tint_image_cs(
     }
 }
 
-/// Build a round-tripable [`IccColor`] for the current fill/stroke
-/// when the resolved color space is an `ICCBased` profile with an
-/// embedded ICC stream. Returns `None` for device color spaces,
-/// Separation/DeviceN, CIE-only spaces, or ICCBased entries whose
-/// profile bytes are missing (extraction failure at parse time).
+/// Build a round-tripable [`IccColor`](stet_graphics::device::IccColor)
+/// for the current fill/stroke when the resolved color space is an
+/// `ICCBased` profile with an embedded ICC stream. Returns `None` for
+/// device color spaces, Separation/DeviceN, CIE-only spaces, or ICCBased
+/// entries whose profile bytes are missing (extraction failure at parse
+/// time).
 pub fn build_icc_color(
     cs: &ResolvedColorSpace,
     components: &[f64],

@@ -39,15 +39,15 @@ git config core.hooksPath .githooks
 ```
 
 This enables `.githooks/pre-push`, which runs the same gates as CI's
-lint job — `cargo fmt --check`, clippy errors, the `#[non_exhaustive]`
-and VM level-zero-allocation audits, the version/MSRV cross-check, and
-the CLI documentation cross-check, the tag-namespace audit — plus a
-`wasm32` cross-compile, which
-catches the one class of error that passes everywhere else (`usize` is
-32-bit there). The wasm step is skipped with a warning if the target is
-not installed. A failing tree is caught before it reaches a remote rather
-than a few minutes later in CI. Bypass a single
-push with `git push --no-verify`.
+lint job — `cargo fmt --check`, clippy and `cargo doc` with warnings
+denied, the `#[non_exhaustive]`, crate-independence and VM
+level-zero-allocation audits, the version/MSRV cross-check, the CLI
+documentation cross-check, and the tag-namespace audit — plus a `wasm32`
+cross-compile, which catches the one class of error that passes
+everywhere else (`usize` is 32-bit there). The wasm step is skipped with
+a warning if the target is not installed. A failing tree is caught before
+it reaches a remote rather than a few minutes later in CI. Bypass a
+single push with `git push --no-verify`.
 
 Git does not enable this automatically, and it fails silently: without
 the command above, pushes simply succeed with nothing checked.

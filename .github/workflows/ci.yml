@@ -62,6 +62,14 @@ jobs:
         # first-party code. stet-wasm is outside the workspace and so is not
         # covered here at all -- see the wasm32 job.
         run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: cargo doc
+        # Broken intra-doc links are what docs.rs shows readers of a published
+        # crate, and nothing built the docs before this step: a link to a
+        # struct field written without its path sat broken from May to
+        # September 2026. Public items only, as docs.rs builds them.
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps
       - name: VM level-zero allocation audit
         # Operator code must allocate through stet_ops::vm_ops::alloc_*, which
         # stamps the current save level and VM mode. The bare

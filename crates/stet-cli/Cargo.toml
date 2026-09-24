@@ -14,6 +14,9 @@ categories = ["command-line-utilities", "graphics"]
 [[bin]]
 name = "stet"
 path = "src/main.rs"
+# Shares its name with the `stet` library, so documenting both would write
+# the same `target/doc/stet/` directory; the CLI has no library docs anyway.
+doc = false
 
 [dependencies]
 stet.workspace = true

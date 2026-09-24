@@ -1012,7 +1012,7 @@ impl FormRecord {
 
 /// `/OUTPUTINTENT` payload — one PDF/X or PDF/A OutputIntent declaring the
 /// destination color rendering condition for the document. The writer
-/// embeds [`dest_output_profile`] as an `/ICCBased` stream object and
+/// embeds [`dest_output_profile`](Self::dest_output_profile) as an `/ICCBased` stream object and
 /// produces an entry in `/Catalog /OutputIntents`.
 ///
 /// `subtype` is the `/S` name (e.g. `b"GTS_PDFX"`, `b"GTS_PDFA1"`). It's

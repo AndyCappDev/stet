@@ -623,8 +623,8 @@ impl Context {
     /// Check the deadline, cheaply.
     ///
     /// Call once per eval-loop iteration. Almost every call decrements a
-    /// counter and returns; only every [`DEADLINE_CHECK_INTERVAL`]th consults
-    /// the clock.
+    /// counter and returns; only one call in `DEADLINE_CHECK_INTERVAL`
+    /// consults the clock.
     #[inline]
     pub fn check_deadline(&mut self) -> Result<(), PsError> {
         // Test the deadline before touching the counter. With no timeout set —
@@ -672,7 +672,8 @@ impl Context {
     ///
     /// So the procedure is run here, from the read path, when the consumer's
     /// operands are the ones in place. **Every entry point that reads from a
-    /// file must call this first**; see [`FileHandle::PendingProc`].
+    /// file must call this first**; see
+    /// [`FileHandle::PendingProc`](crate::file_store::FileHandle::PendingProc).
     ///
     /// The drain is one-shot rather than incremental: the procedure is run to
     /// completion and the result installed as a plain byte source. That keeps
