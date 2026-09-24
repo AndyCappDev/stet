@@ -5,7 +5,7 @@
 //! Shading (sh operator) → DisplayElement conversion.
 
 use crate::content::color_space::{
-    ResolvedColorSpace, components_to_device_color_icc, painted_channels_for_cs,
+    ResolvedColorSpace, components_to_device_color_icc_with_intent, painted_channels_for_cs,
     resolve_color_space_obj,
 };
 use crate::content::graphics_state::PdfGraphicsState;
@@ -48,7 +48,12 @@ pub fn handle_shading(
     // The caller clips the shading to the fill path, so a large rect is fine.
     if let Some(bg_arr) = dict.get_array(b"Background") {
         let comps: Vec<f64> = bg_arr.iter().filter_map(|o| o.as_f64()).collect();
-        let bg_color = components_to_device_color_icc(&resolved_cs, &comps, Some(icc_cache));
+        let bg_color = components_to_device_color_icc_with_intent(
+            &resolved_cs,
+            &comps,
+            Some(icc_cache),
+            gstate.rendering_intent,
+        );
         let mut params = gstate.fill_params(stet_graphics::color::FillRule::NonZeroWinding);
         params.color = bg_color;
         // Large rect in device space — the shading's clip constrains it
@@ -173,7 +178,12 @@ fn handle_function_based(
             let x = domain[0] + (col as f64 + 0.5) / width as f64 * (domain[1] - domain[0]);
             let y = domain[3] - (row as f64 + 0.5) / height as f64 * (domain[3] - domain[2]);
             let components = function.evaluate(&[x, y]);
-            let color = components_to_device_color_icc(resolved_cs, &components, Some(icc_cache));
+            let color = components_to_device_color_icc_with_intent(
+                resolved_cs,
+                &components,
+                Some(icc_cache),
+                gstate.rendering_intent,
+            );
             let idx = ((row * width + col) * 4) as usize;
             rgba[idx] = (color.r * 255.0 + 0.5) as u8;
             rgba[idx + 1] = (color.g * 255.0 + 0.5) as u8;
@@ -228,7 +238,13 @@ fn handle_axial(
 
     let function = parse_shading_function(dict, resolver)?;
     let n_stops = function.min_samples().clamp(64, 1024);
-    let color_stops = sample_function_to_stops_icc(&function, n_stops, resolved_cs, icc_cache);
+    let color_stops = sample_function_to_stops_icc(
+        &function,
+        n_stops,
+        resolved_cs,
+        icc_cache,
+        gstate.rendering_intent,
+    );
 
     // Keep coordinates in shading/user space, pass the CTM to the renderer.
     // The renderer inverse-transforms device pixels to evaluate the gradient,
@@ -280,7 +296,13 @@ fn handle_radial(
 
     let function = parse_shading_function(dict, resolver)?;
     let n_stops = function.min_samples().clamp(64, 1024);
-    let color_stops = sample_function_to_stops_icc(&function, n_stops, resolved_cs, icc_cache);
+    let color_stops = sample_function_to_stops_icc(
+        &function,
+        n_stops,
+        resolved_cs,
+        icc_cache,
+        gstate.rendering_intent,
+    );
 
     // Keep coordinates in user space; pass the CTM to the renderer so it can
     // inverse-transform device pixels back to user space where circles are circular.
@@ -406,8 +428,12 @@ fn handle_mesh(
                 let t = i as f64 / (lut_size - 1) as f64;
                 let input = d_min + t * (d_max - d_min);
                 let components = func.evaluate(&[input]);
-                let color =
-                    components_to_device_color_icc(resolved_cs, &components, Some(icc_cache));
+                let color = components_to_device_color_icc_with_intent(
+                    resolved_cs,
+                    &components,
+                    Some(icc_cache),
+                    gstate.rendering_intent,
+                );
                 lut.push(color);
             }
 
@@ -440,8 +466,12 @@ fn handle_mesh(
                 for v in [&mut t.v0, &mut t.v1, &mut t.v2] {
                     let input = d_min + v.raw_components[0] * (d_max - d_min);
                     let expanded = func.evaluate(&[input]);
-                    let color =
-                        components_to_device_color_icc(resolved_cs, &expanded, Some(icc_cache));
+                    let color = components_to_device_color_icc_with_intent(
+                        resolved_cs,
+                        &expanded,
+                        Some(icc_cache),
+                        gstate.rendering_intent,
+                    );
                     v.color = color;
                 }
             }
@@ -457,12 +487,24 @@ fn handle_mesh(
     if color_lut.is_none() {
         // Convert vertex colors through ICC profile (non-LUT path)
         for t in &mut triangles {
-            t.v0.color =
-                components_to_device_color_icc(resolved_cs, &t.v0.raw_components, Some(icc_cache));
-            t.v1.color =
-                components_to_device_color_icc(resolved_cs, &t.v1.raw_components, Some(icc_cache));
-            t.v2.color =
-                components_to_device_color_icc(resolved_cs, &t.v2.raw_components, Some(icc_cache));
+            t.v0.color = components_to_device_color_icc_with_intent(
+                resolved_cs,
+                &t.v0.raw_components,
+                Some(icc_cache),
+                gstate.rendering_intent,
+            );
+            t.v1.color = components_to_device_color_icc_with_intent(
+                resolved_cs,
+                &t.v1.raw_components,
+                Some(icc_cache),
+                gstate.rendering_intent,
+            );
+            t.v2.color = components_to_device_color_icc_with_intent(
+                resolved_cs,
+                &t.v2.raw_components,
+                Some(icc_cache),
+                gstate.rendering_intent,
+            );
         }
     }
 
@@ -566,8 +608,12 @@ fn handle_patches(
                 let t = i as f64 / (lut_size - 1) as f64;
                 let input = d_min + t * (d_max - d_min);
                 let components = func.evaluate(&[input]);
-                let color =
-                    components_to_device_color_icc(resolved_cs, &components, Some(icc_cache));
+                let color = components_to_device_color_icc_with_intent(
+                    resolved_cs,
+                    &components,
+                    Some(icc_cache),
+                    gstate.rendering_intent,
+                );
                 lut.push(color);
             }
 
@@ -592,10 +638,11 @@ fn handle_patches(
             }
             for p in &mut patches {
                 for i in 0..4 {
-                    p.colors[i] = components_to_device_color_icc(
+                    p.colors[i] = components_to_device_color_icc_with_intent(
                         resolved_cs,
                         &p.raw_colors[i],
                         Some(icc_cache),
+                        gstate.rendering_intent,
                     );
                 }
             }
@@ -605,8 +652,12 @@ fn handle_patches(
         // No function: convert direct corner colors through ICC
         for p in &mut patches {
             for i in 0..4 {
-                p.colors[i] =
-                    components_to_device_color_icc(resolved_cs, &p.raw_colors[i], Some(icc_cache));
+                p.colors[i] = components_to_device_color_icc_with_intent(
+                    resolved_cs,
+                    &p.raw_colors[i],
+                    Some(icc_cache),
+                    gstate.rendering_intent,
+                );
             }
         }
         None
@@ -674,6 +725,7 @@ fn sample_function_to_stops_icc(
     n_samples: usize,
     resolved_cs: &ResolvedColorSpace,
     icc_cache: &mut IccCache,
+    intent: u8,
 ) -> Vec<ColorStop> {
     // For Separation/DeviceN with DeviceCMYK alternate, extract the tint function
     // so we can store tint-transformed CMYK values in raw_components (needed for
@@ -736,7 +788,12 @@ fn sample_function_to_stops_icc(
     for t in sample_ts {
         let input = d_min + t * span;
         let components = function.evaluate(&[input]);
-        let color = components_to_device_color_icc(resolved_cs, &components, Some(icc_cache));
+        let color = components_to_device_color_icc_with_intent(
+            resolved_cs,
+            &components,
+            Some(icc_cache),
+            intent,
+        );
 
         // For DeviceN/Separation with CMYK alternate, store the tint-transformed
         // 4-component CMYK values so the renderer can populate the CMYK tracking buffer.

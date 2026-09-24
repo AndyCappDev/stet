@@ -11,16 +11,73 @@ use stet_graphics::device::{
 };
 use stet_graphics::display_list::{DisplayList, SoftMaskSubtype};
 
+use super::color_space::ResolvedColorSpace;
+use crate::objects::PdfDict;
+use std::sync::Arc;
+
 /// The rendering intent the reader assumes until a content stream selects
 /// one with `ri`, an ExtGState `/RI`, or an image `/Intent`, and the one it
-/// falls back to for an unrecognised intent name. Encoded per
-/// [`stet_graphics::rendering_intent`].
+/// falls back to for an unrecognised intent name: RelativeColorimetric, the
+/// initial value ISO 32000-1 Table 52 gives and the fallback §8.6.5.8
+/// requires. Encoded per [`stet_graphics::rendering_intent`].
 ///
-/// ISO 32000-1 Table 52 gives RelativeColorimetric as the initial value; the
-/// reader has always used Perceptual here. Changing it moves rendered colour
-/// wherever a profile's perceptual and colorimetric tables differ, so it is
-/// kept as its own decision rather than folded into the encoding fix.
-pub(crate) const DEFAULT_RENDERING_INTENT: u8 = stet_graphics::rendering_intent::PERCEPTUAL;
+/// The reader once used Perceptual here. Besides departing from the spec,
+/// that made a PDF-to-PDF rewrite add `/Perceptual ri` to content that never
+/// selected an intent.
+pub(crate) const DEFAULT_RENDERING_INTENT: u8 =
+    stet_graphics::rendering_intent::RELATIVE_COLORIMETRIC;
+
+/// How the current fill or stroke colour was produced, kept so the reader can
+/// convert it again if the rendering intent changes before anything is
+/// painted.
+///
+/// PDF applies the rendering intent in effect when a shape is painted, not
+/// the one in effect when its colour was selected. A content stream may set
+/// a colour first and select an intent afterwards (`60 0 0 sc /Perceptual ri
+/// … f`, as in the Ghent Workgroup's GWG 22.1 output-intent test), so a colour
+/// converted eagerly at `sc` would use the wrong intent. The reader still
+/// converts at `sc`, which keeps the common case cheap, and re-converts from
+/// this record when `ri` or an ExtGState `/RI` changes the intent.
+///
+/// Opaque outside the crate: it is reader bookkeeping, not document data.
+#[derive(Clone)]
+pub struct ColorSource(pub(crate) ColorSourceKind);
+
+#[derive(Clone)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "only ever allocated inside the Arc in ColorSource; boxing the colour space would add a second allocation to every `sc`"
+)]
+pub(crate) enum ColorSourceKind {
+    /// Components in a non-pattern colour space, set by `sc`/`scn`/`SC`/`SCN`
+    /// or as an uncoloured pattern's underlying colour. `group_promote`
+    /// records whether the original conversion went through
+    /// `cmyk_group_promote_color`, so the re-conversion matches it.
+    Components {
+        space: ResolvedColorSpace,
+        components: Vec<f64>,
+        group_promote: bool,
+    },
+    /// A shading pattern, rebuilt with the new intent. `content_stream_ctm`
+    /// is the content stream's CTM when the pattern was selected, which fixes
+    /// the pattern's geometry.
+    ShadingPattern {
+        pattern: PdfDict,
+        content_stream_ctm: Matrix,
+    },
+}
+
+impl std::fmt::Debug for ColorSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.0 {
+            ColorSourceKind::Components { components, .. } => f
+                .debug_struct("ColorSource::Components")
+                .field("components", components)
+                .finish_non_exhaustive(),
+            ColorSourceKind::ShadingPattern { .. } => f.write_str("ColorSource::ShadingPattern"),
+        }
+    }
+}
 
 /// Wrapper for a shading pattern's display list (Debug-friendly).
 #[derive(Clone)]
@@ -176,6 +233,13 @@ pub struct PdfGraphicsState {
     pub fill_icc_color: Option<IccColor>,
     /// ICCBased stroke color (preserved for PDF output round-trip).
     pub stroke_icc_color: Option<IccColor>,
+    /// How the current fill colour was produced, for re-conversion when the
+    /// rendering intent changes before painting (see [`ColorSource`]). `None`
+    /// when the colour does not depend on the intent (`g`, `rg`, `k`, a
+    /// coloured tiling pattern) or cannot be re-derived.
+    pub fill_color_source: Option<Arc<ColorSource>>,
+    /// Stroke counterpart of [`Self::fill_color_source`].
+    pub stroke_color_source: Option<Arc<ColorSource>>,
     /// True when fill color is Separation/None (produces no visible marks).
     pub fill_is_none: bool,
     /// True when stroke color is Separation/None (produces no visible marks).
@@ -254,6 +318,8 @@ impl PdfGraphicsState {
             stroke_spot_color: None,
             fill_icc_color: None,
             stroke_icc_color: None,
+            fill_color_source: None,
+            stroke_color_source: None,
             fill_is_none: false,
             stroke_is_none: false,
             blend_mode: 0,

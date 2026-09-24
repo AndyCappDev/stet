@@ -45,8 +45,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   All producers and consumers now share `stet_graphics::rendering_intent`.
   `stet_pdf_reader::content::color_space::components_to_device_color_icc_with_intent`
-  and `PdfGraphicsState::rendering_intent` use the same encoding. Rendering
-  of PDF input is unchanged.
+  and `PdfGraphicsState::rendering_intent` use the same encoding.
+- **The rendering intent in effect when a shape is painted now applies**, as
+  the PDF specification requires, rather than the one in effect when its
+  colour was set. A content stream that sets a colour and then selects an
+  intent (`60 0 0 sc /Perceptual ri … f`) was converted with the earlier
+  intent. Shadings painted with `sh` ignored the intent entirely, and shading
+  patterns used the intent current when the pattern was selected. Only
+  documents with an output intent are affected; the GWG 22.1 output-intent
+  test is built this way.
+- **PDF content that selects no rendering intent now uses
+  RelativeColorimetric**, the initial value the PDF specification gives,
+  instead of Perceptual; so does an unrecognised intent name. This changes
+  rendered colour only for RGB, gray and Lab ICC-based colour in documents
+  with an output intent, where stet builds a separate conversion chain per
+  intent; other colour is converted as before. PDF-to-PDF rewrites no
+  longer add a rendering intent the source never selected.
 - **PostScript images now honour `setrenderingintent`.** Sampled images and
   rasterized shadings carried a fixed intent whatever the graphics state
   said.

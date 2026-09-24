@@ -1511,13 +1511,13 @@ mod tests {
         assert_eq!(
             intents,
             [
-                crate::content::graphics_state::DEFAULT_RENDERING_INTENT, // none selected
+                ri::RELATIVE_COLORIMETRIC, // none selected: ISO 32000-1 Table 52
                 ri::RELATIVE_COLORIMETRIC,
                 ri::ABSOLUTE_COLORIMETRIC,
                 ri::PERCEPTUAL,
                 ri::SATURATION,
-                crate::content::graphics_state::DEFAULT_RENDERING_INTENT, // unknown name
-                ri::SATURATION,                                           // ExtGState /RI
+                ri::RELATIVE_COLORIMETRIC, // unknown name: ISO 32000-1 §8.6.5.8
+                ri::SATURATION,            // ExtGState /RI
             ]
         );
     }

@@ -24,7 +24,9 @@ use self::color_space::{
     ResolvedColorSpace, painted_channels_for_cs, register_icc_profile, resolve_color_space,
     resolve_color_space_obj, to_image_color_space,
 };
-use self::graphics_state::{ColorSpaceRef, DEFAULT_RENDERING_INTENT, PdfGraphicsState};
+use self::graphics_state::{
+    ColorSource, ColorSourceKind, ColorSpaceRef, DEFAULT_RENDERING_INTENT, PdfGraphicsState,
+};
 
 use std::sync::{Arc, Mutex};
 
@@ -1510,6 +1512,7 @@ impl<'a> ContentInterpreter<'a> {
                 self.d1_color_suppressed = true;
                 self.gstate.stroke_color = self.gstate.fill_color.clone();
                 self.gstate.stroke_color_space = self.gstate.fill_color_space.clone();
+                self.gstate.stroke_color_source = self.gstate.fill_color_source.clone();
                 self.gstate.stroke_pattern = None;
                 self.gstate.stroke_shading_pattern = None;
                 self.gstate.stroke_painted_channels = self.gstate.fill_painted_channels;
@@ -1736,9 +1739,72 @@ impl<'a> ContentInterpreter<'a> {
         let Some(name) = top.as_name() else {
             return Ok(());
         };
-        self.gstate.rendering_intent =
-            rendering_intent::from_name(name).unwrap_or(DEFAULT_RENDERING_INTENT);
+        let intent = rendering_intent::from_name(name).unwrap_or(DEFAULT_RENDERING_INTENT);
+        self.set_rendering_intent(intent);
         Ok(())
+    }
+
+    /// Select a rendering intent (`ri` or an ExtGState `/RI`). PDF applies
+    /// the intent in effect at paint time, but colours are converted when
+    /// they are set, so a change re-converts the current fill and stroke
+    /// colours from their recorded sources (see [`ColorSource`]).
+    fn set_rendering_intent(&mut self, intent: u8) {
+        if self.gstate.rendering_intent == intent {
+            return;
+        }
+        self.gstate.rendering_intent = intent;
+        if let Some(src) = self.gstate.fill_color_source.clone() {
+            self.reapply_color_source(&src, false);
+        }
+        if let Some(src) = self.gstate.stroke_color_source.clone() {
+            self.reapply_color_source(&src, true);
+        }
+    }
+
+    /// Convert a recorded colour source again under the current rendering
+    /// intent. Only the device colour (and a shading pattern's display list)
+    /// depends on the intent; the spot, ICC and channel fields set alongside
+    /// it do not, so they are left as they are.
+    fn reapply_color_source(&mut self, src: &ColorSource, is_stroke: bool) {
+        match &src.0 {
+            ColorSourceKind::Components {
+                space,
+                components,
+                group_promote,
+            } => {
+                let mut color = color_space::components_to_device_color_icc_with_intent(
+                    space,
+                    components,
+                    Some(&mut self.icc_cache),
+                    self.gstate.rendering_intent,
+                );
+                if *group_promote {
+                    self.cmyk_group_promote_color(&mut color);
+                }
+                if is_stroke {
+                    self.gstate.stroke_color = color;
+                } else {
+                    self.gstate.fill_color = color;
+                }
+            }
+            ColorSourceKind::ShadingPattern {
+                pattern,
+                content_stream_ctm,
+            } => {
+                // A shading that fails to rebuild keeps the list it was
+                // selected with, which is what painting would have used.
+                let Ok(shading_dl) = self.resolve_shading_pattern_in(pattern, *content_stream_ctm)
+                else {
+                    return;
+                };
+                let shading = Some(Box::new(ShadingPatternDL(shading_dl)));
+                if is_stroke {
+                    self.gstate.stroke_shading_pattern = shading;
+                } else {
+                    self.gstate.fill_shading_pattern = shading;
+                }
+            }
+        }
     }
 
     fn op_i(&mut self) -> Result<(), PdfError> {
@@ -2232,6 +2298,7 @@ impl<'a> ContentInterpreter<'a> {
         let (color, painted, is_cmyk) = self.gray_paint_for_gstate(g);
         self.gstate.stroke_color = color;
         self.gstate.stroke_color_space = ColorSpaceRef::DeviceGray;
+        self.gstate.stroke_color_source = None;
         self.gstate.stroke_painted_channels = painted;
         self.gstate.stroke_is_device_cmyk = is_cmyk;
         self.gstate.stroke_is_none = false;
@@ -2248,6 +2315,7 @@ impl<'a> ContentInterpreter<'a> {
         let (color, painted, is_cmyk) = self.gray_paint_for_gstate(g);
         self.gstate.fill_color = color;
         self.gstate.fill_color_space = ColorSpaceRef::DeviceGray;
+        self.gstate.fill_color_source = None;
         self.gstate.fill_painted_channels = painted;
         self.gstate.fill_is_device_cmyk = is_cmyk;
         self.gstate.fill_is_none = false;
@@ -2282,6 +2350,7 @@ impl<'a> ContentInterpreter<'a> {
         let (r, g, b) = self.cmyk_group_rgb(n[0], n[1], n[2]);
         self.gstate.stroke_color = DeviceColor::from_rgb(r, g, b);
         self.gstate.stroke_color_space = ColorSpaceRef::DeviceRGB;
+        self.gstate.stroke_color_source = None;
         self.gstate.stroke_painted_channels = 0;
         self.gstate.stroke_is_device_cmyk = false;
         self.gstate.stroke_is_none = false;
@@ -2298,6 +2367,7 @@ impl<'a> ContentInterpreter<'a> {
         let (r, g, b) = self.cmyk_group_rgb(n[0], n[1], n[2]);
         self.gstate.fill_color = DeviceColor::from_rgb(r, g, b);
         self.gstate.fill_color_space = ColorSpaceRef::DeviceRGB;
+        self.gstate.fill_color_source = None;
         self.gstate.fill_painted_channels = 0;
         self.gstate.fill_is_device_cmyk = false;
         self.gstate.fill_is_none = false;
@@ -2484,6 +2554,7 @@ impl<'a> ContentInterpreter<'a> {
         self.gstate.stroke_color =
             DeviceColor::from_cmyk_icc(n[0], n[1], n[2], n[3], &mut self.icc_cache);
         self.gstate.stroke_color_space = ColorSpaceRef::DeviceCMYK;
+        self.gstate.stroke_color_source = None;
         self.gstate.stroke_painted_channels = stet_graphics::device::CMYK_ALL;
         self.gstate.stroke_is_device_cmyk = true;
         self.gstate.stroke_is_none = false;
@@ -2500,6 +2571,7 @@ impl<'a> ContentInterpreter<'a> {
         self.gstate.fill_color =
             DeviceColor::from_cmyk_icc(n[0], n[1], n[2], n[3], &mut self.icc_cache);
         self.gstate.fill_color_space = ColorSpaceRef::DeviceCMYK;
+        self.gstate.fill_color_source = None;
         self.gstate.fill_painted_channels = stet_graphics::device::CMYK_ALL;
         self.gstate.fill_is_device_cmyk = true;
         self.gstate.fill_is_none = false;
@@ -2521,6 +2593,7 @@ impl<'a> ContentInterpreter<'a> {
             .ok_or(PdfError::Other("CS: expected name".into()))?
             .to_vec();
         self.gstate.stroke_color_space = name_to_cs_ref(&name);
+        self.gstate.stroke_color_source = None;
         Ok(())
     }
 
@@ -2533,6 +2606,7 @@ impl<'a> ContentInterpreter<'a> {
             .ok_or(PdfError::Other("cs: expected name".into()))?
             .to_vec();
         self.gstate.fill_color_space = name_to_cs_ref(&name);
+        self.gstate.fill_color_source = None;
         Ok(())
     }
 
@@ -2617,6 +2691,12 @@ impl<'a> ContentInterpreter<'a> {
         self.gstate.stroke_icc_color = color_space::build_icc_color(&cs, &nums);
         self.gstate.stroke_pattern = None;
         self.gstate.stroke_shading_pattern = None;
+        self.gstate.stroke_color_source =
+            Some(Arc::new(ColorSource(ColorSourceKind::Components {
+                space: cs,
+                components: nums,
+                group_promote: true,
+            })));
         Ok(())
     }
 
@@ -2657,6 +2737,11 @@ impl<'a> ContentInterpreter<'a> {
         self.gstate.fill_icc_color = color_space::build_icc_color(&cs, &nums);
         self.gstate.fill_pattern = None;
         self.gstate.fill_shading_pattern = None;
+        self.gstate.fill_color_source = Some(Arc::new(ColorSource(ColorSourceKind::Components {
+            space: cs,
+            components: nums,
+            group_promote: true,
+        })));
         Ok(())
     }
 
@@ -3715,8 +3800,8 @@ impl<'a> ContentInterpreter<'a> {
         // `/RI`. GWG 17.2 (JPEG2000 + ICCBasedRGB) calibrates an Adobe RGB
         // image colour against a CMYK swatch under `/RelativeColorimetric`;
         // ignoring this override forces the proofing chain through the
-        // gstate's default Perceptual intent and produces a visibly
-        // different sRGB → the test's "X marker" appears.
+        // gstate's intent instead and produces a visibly different sRGB →
+        // the test's "X marker" appears.
         let gstate_intent = self.gstate.rendering_intent;
         let image_intent = match dict
             .get(b"Intent")
@@ -5960,8 +6045,8 @@ impl<'a> ContentInterpreter<'a> {
         }
         // Rendering intent — feeds into the per-intent ICC chain dispatch.
         if let Some(PdfObj::Name(ri)) = gs_dict.get(b"RI") {
-            self.gstate.rendering_intent =
-                rendering_intent::from_name(ri).unwrap_or(DEFAULT_RENDERING_INTENT);
+            let intent = rendering_intent::from_name(ri).unwrap_or(DEFAULT_RENDERING_INTENT);
+            self.set_rendering_intent(intent);
         }
 
         // Blend mode
@@ -6629,6 +6714,7 @@ impl<'a> ContentInterpreter<'a> {
         // For uncolored patterns (PaintType 2), the scn operands include
         // underlying color components before the pattern name. Extract them
         // by resolving the underlying color space from the Pattern CS definition.
+        self.gstate.fill_color_source = None;
         self.extract_pattern_underlying_color(false)?;
 
         // Check PatternType before resolving — Type 2 (shading) needs different handling
@@ -6651,6 +6737,11 @@ impl<'a> ContentInterpreter<'a> {
             let shading_dl = self.resolve_shading_pattern(pat_dict)?;
             self.gstate.fill_pattern = None;
             self.gstate.fill_shading_pattern = Some(Box::new(ShadingPatternDL(shading_dl)));
+            self.gstate.fill_color_source =
+                Some(Arc::new(ColorSource(ColorSourceKind::ShadingPattern {
+                    pattern: pat_dict.clone(),
+                    content_stream_ctm: self.content_stream_ctm,
+                })));
         } else {
             let pattern = self.resolve_pattern(&name)?;
             self.gstate.fill_shading_pattern = None;
@@ -6668,6 +6759,7 @@ impl<'a> ContentInterpreter<'a> {
             .to_vec();
 
         // Extract underlying color components for uncolored patterns
+        self.gstate.stroke_color_source = None;
         self.extract_pattern_underlying_color(true)?;
 
         // Check PatternType before resolving — Type 2 (shading) needs different handling
@@ -6690,6 +6782,11 @@ impl<'a> ContentInterpreter<'a> {
             let shading_dl = self.resolve_shading_pattern(pat_dict)?;
             self.gstate.stroke_pattern = None;
             self.gstate.stroke_shading_pattern = Some(Box::new(ShadingPatternDL(shading_dl)));
+            self.gstate.stroke_color_source =
+                Some(Arc::new(ColorSource(ColorSourceKind::ShadingPattern {
+                    pattern: pat_dict.clone(),
+                    content_stream_ctm: self.content_stream_ctm,
+                })));
         } else {
             let pattern = self.resolve_pattern(&name)?;
             self.gstate.stroke_shading_pattern = None;
@@ -6771,10 +6868,17 @@ impl<'a> ContentInterpreter<'a> {
             Some(&mut self.icc_cache),
             intent,
         );
+        let source = Some(Arc::new(ColorSource(ColorSourceKind::Components {
+            space: underlying_cs,
+            components: nums,
+            group_promote: false,
+        })));
         if is_stroke {
             self.gstate.stroke_color = color;
+            self.gstate.stroke_color_source = source;
         } else {
             self.gstate.fill_color = color;
+            self.gstate.fill_color_source = source;
         }
         Ok(())
     }
@@ -6934,6 +7038,16 @@ impl<'a> ContentInterpreter<'a> {
     /// a display list. The caller stores this and emits it at fill time,
     /// clipped to the fill path.
     fn resolve_shading_pattern(&mut self, pat_dict: &PdfDict) -> Result<DisplayList, PdfError> {
+        self.resolve_shading_pattern_in(pat_dict, self.content_stream_ctm)
+    }
+
+    /// Build a shading pattern's display list against `content_stream_ctm`,
+    /// the CTM of the content stream the pattern was selected in.
+    fn resolve_shading_pattern_in(
+        &mut self,
+        pat_dict: &PdfDict,
+        content_stream_ctm: Matrix,
+    ) -> Result<DisplayList, PdfError> {
         let sh_ref = pat_dict
             .get(b"Shading")
             .ok_or(PdfError::Other("shading pattern missing /Shading".into()))?;
@@ -6967,7 +7081,7 @@ impl<'a> ContentInterpreter<'a> {
         // Setting overprint=false here is safe because paint-time code wraps
         // shading patterns in isolated groups, so overprint compositing does
         // not cross the group boundary.
-        let combined_matrix = self.content_stream_ctm.concat(&pattern_matrix);
+        let combined_matrix = content_stream_ctm.concat(&pattern_matrix);
         let saved_ctm = self.gstate.ctm;
         let saved_overprint = self.gstate.overprint;
         let saved_overprint_stroke = self.gstate.overprint_stroke;
