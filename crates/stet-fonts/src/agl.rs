@@ -7,15 +7,26 @@
 //! Used by both PostScript font handling and PDF font decoding.
 //!
 //! Two lookups serve two jobs. [`glyph_name_to_unicode`] returns one BMP
-//! code point and is what glyph selection uses. [`glyph_name_to_text`]
-//! implements the full name-to-text algorithm of the AGL specification —
-//! suffixes, ligature components, supplementary-plane code points — and is
-//! what text extraction uses.
+//! code point from [`GLYPH_TO_UNICODE`], a subset of the list tuned for
+//! glyph selection, and is what rendering uses. [`glyph_name_to_text`] (and
+//! [`zapf_dingbats_glyph_name_to_text`] for that font) implements the full
+//! name-to-text algorithm of the AGL specification over the complete lists
+//! — suffixes, ligature components, supplementary-plane code points — and
+//! is what text extraction uses.
+//!
+//! The complete lists are Adobe's `glyphlist.txt` (AGL 2.0) and
+//! `zapfdingbats.txt`, embedded verbatim with Adobe's BSD-3-Clause notice;
+//! see also `LICENSE-ADOBE-AGL` at the root of this crate.
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
-/// Map from Adobe glyph name to Unicode code point.
+/// Map from Adobe glyph name to Unicode code point, for glyph selection.
+///
+/// A subset of the Adobe Glyph List covering the common names. It departs
+/// from the list in two places, where glyph selection is better served by
+/// the Greek letter than by the math symbol the AGL gives: `Delta` is
+/// U+0394 (AGL: U+2206 INCREMENT) and `Omega` U+03A9 (AGL: U+2126 OHM SIGN).
 pub static GLYPH_TO_UNICODE: LazyLock<HashMap<&'static str, u16>> = LazyLock::new(|| {
     let mut m = HashMap::with_capacity(600);
 
@@ -636,46 +647,112 @@ pub fn glyph_name_to_unicode(name: &str) -> Option<u16> {
     None
 }
 
+/// Adobe Glyph List 2.0, verbatim.
+const AGL_SOURCE: &str = include_str!("glyphlist.txt");
+/// ITC Zapf Dingbats Glyph List, verbatim.
+const ZAPF_DINGBATS_SOURCE: &str = include_str!("zapfdingbats.txt");
+
+/// The full AGL: glyph name → text.
+static AGL: LazyLock<HashMap<&'static str, Box<str>>> =
+    LazyLock::new(|| parse_glyph_list(AGL_SOURCE));
+/// The ZapfDingbats list (`a1` … `a191`): glyph name → text.
+static ZAPF_DINGBATS: LazyLock<HashMap<&'static str, Box<str>>> =
+    LazyLock::new(|| parse_glyph_list(ZAPF_DINGBATS_SOURCE));
+
+/// Parse Adobe's `name;XXXX[ XXXX…]` list format, skipping `#` comments.
+///
+/// Entries whose value lies in the Private Use Area are left out. They are
+/// Adobe's corporate-use assignments for small capitals, old-style figures
+/// and the like (`Asmall` → U+F761), since retired from AGLFN; a PUA
+/// character in extracted text displays as nothing meaningful and matches
+/// nothing a user types, so such a name is treated as carrying no text.
+fn parse_glyph_list(source: &'static str) -> HashMap<&'static str, Box<str>> {
+    let mut map = HashMap::new();
+    for line in source.lines() {
+        if line.starts_with('#') {
+            continue;
+        }
+        let Some((name, values)) = line.split_once(';') else {
+            continue;
+        };
+        let text: Option<String> = values
+            .split_whitespace()
+            .map(|hex| {
+                u32::from_str_radix(hex, 16)
+                    .ok()
+                    .filter(|&cp| !is_private_use(cp))
+                    .and_then(char::from_u32)
+            })
+            .collect();
+        if let Some(text) = text.filter(|t| !t.is_empty()) {
+            map.insert(name, text.into_boxed_str());
+        }
+    }
+    map
+}
+
+fn is_private_use(cp: u32) -> bool {
+    matches!(cp, 0xE000..=0xF8FF | 0xF0000..=0xFFFFD | 0x100000..=0x10FFFD)
+}
+
 /// Unicode text for a glyph name, by the algorithm of the Adobe Glyph List
 /// specification ("Unicode and Glyph Names"), for text extraction.
 ///
 /// - Everything from the first period is dropped: `a.sc` → `a`.
 /// - The rest splits on underscores into components mapped in turn:
 ///   `f_f_i` → `ffi`.
-/// - A component is looked up in the glyph list, else read as
-///   `uniXXXX…` (one or more groups of four hex digits, each a BMP scalar
-///   value), else as `uXXXX` to `uXXXXXX` (one scalar value, which may be
-///   outside the BMP), else maps to nothing.
+/// - A component is looked up in the AGL, else read as `uniXXXX…` (one or
+///   more groups of four hex digits, each a BMP scalar value), else as
+///   `uXXXX` to `uXXXXXX` (one scalar value, which may be outside the BMP),
+///   else maps to nothing.
 ///
 /// Returns `None` when no component maps to anything, as for `.notdef` or
 /// a name like `g123`: the name says nothing about the text, and guessing
 /// would be worse than nothing for search.
 ///
-/// Two deliberate differences from the specification: hex digits may be
+/// Two deliberate differences from the specification. Hex digits may be
 /// lowercase (the specification requires uppercase), matching what
 /// [`glyph_name_to_unicode`] already accepts for glyph selection, so text
-/// is extracted for every glyph name the renderer resolves; and the glyph
-/// list is stet's [`GLYPH_TO_UNICODE`] table, which covers the common
-/// names rather than all of the AGL. The ZapfDingbats-specific list the
-/// specification consults first is not applied, since a name carries no
-/// font.
+/// is extracted for every glyph name the renderer resolves. And AGL entries
+/// in the Private Use Area give no text (see the list parser).
 ///
-/// Ligature glyph names map as the glyph list says — `fi` is U+FB01 — so a
-/// consumer matching against plain text should apply compatibility
+/// Names map as the AGL says, which is not always what
+/// [`glyph_name_to_unicode`] picks for drawing: `Delta` is U+2206
+/// INCREMENT, and ligature names give presentation forms (`fi` is U+FB01),
+/// so a consumer matching against plain text should apply compatibility
 /// normalization.
+///
+/// For glyphs of the ZapfDingbats font use
+/// [`zapf_dingbats_glyph_name_to_text`], whose names (`a20`) mean nothing
+/// in the AGL.
 pub fn glyph_name_to_text(name: &str) -> Option<String> {
+    name_to_text(name, false)
+}
+
+/// [`glyph_name_to_text`] for a glyph of the ZapfDingbats font: each
+/// component is looked up in the ITC Zapf Dingbats Glyph List before the
+/// AGL, as the specification directs, so `a20` is ✔ U+2714.
+pub fn zapf_dingbats_glyph_name_to_text(name: &str) -> Option<String> {
+    name_to_text(name, true)
+}
+
+fn name_to_text(name: &str, zapf_dingbats: bool) -> Option<String> {
     let base = name.split('.').next().unwrap_or("");
     let mut text = String::new();
     for component in base.split('_') {
-        push_component_text(component, &mut text);
+        push_component_text(component, zapf_dingbats, &mut text);
     }
     (!text.is_empty()).then_some(text)
 }
 
 /// Append the text of one underscore-separated glyph-name component.
-fn push_component_text(component: &str, out: &mut String) {
-    if let Some(&cp) = GLYPH_TO_UNICODE.get(component) {
-        out.extend(char::from_u32(cp as u32));
+fn push_component_text(component: &str, zapf_dingbats: bool, out: &mut String) {
+    let listed = zapf_dingbats
+        .then(|| ZAPF_DINGBATS.get(component))
+        .flatten()
+        .or_else(|| AGL.get(component));
+    if let Some(text) = listed {
+        out.push_str(text);
         return;
     }
     if let Some(hex) = component.strip_prefix("uni")
@@ -754,13 +831,60 @@ mod tests {
 
     #[test]
     fn specification_example() {
-        // The worked example from the AGL specification,
-        // `Lcommaaccent_uni20AC0308_u1040C.alternate`, with its first
-        // component swapped for one in stet's table (which lacks
-        // `Lcommaaccent`): every rule applies at once.
+        // The worked example from the AGL specification: every rule at once.
         assert_eq!(
-            text("Lslash_uni20AC0308_u1040C.alternate").as_deref(),
-            Some("\u{141}\u{20AC}\u{308}\u{1040C}")
+            text("Lcommaaccent_uni20AC0308_u1040C.alternate").as_deref(),
+            Some("\u{13B}\u{20AC}\u{308}\u{1040C}")
+        );
+    }
+
+    #[test]
+    fn full_lists_load() {
+        // 4281 entries in AGL 2.0, less the 192 in the Private Use Area.
+        assert_eq!(AGL.len(), 4281 - 192);
+        assert_eq!(ZAPF_DINGBATS.len(), 201);
+    }
+
+    #[test]
+    fn names_beyond_the_rendering_subset() {
+        assert_eq!(text("afii10017").as_deref(), Some("\u{410}"));
+        assert_eq!(text("Gcommaaccent").as_deref(), Some("\u{122}"));
+        // An AGL entry that is a sequence of code points.
+        assert_eq!(text("dalethatafpatah").as_deref(), Some("\u{5D3}\u{5B2}"));
+    }
+
+    #[test]
+    fn private_use_entries_give_no_text() {
+        assert_eq!(text("Asmall"), None);
+        assert_eq!(text("Asmall.sc"), None);
+        // An explicit `uni` name in the PUA is the producer's statement.
+        assert_eq!(text("uniF761").as_deref(), Some("\u{F761}"));
+    }
+
+    #[test]
+    fn delta_and_omega_follow_the_agl() {
+        assert_eq!(text("Delta").as_deref(), Some("\u{2206}"));
+        assert_eq!(text("Omega").as_deref(), Some("\u{2126}"));
+        assert_eq!(text("Deltagreek").as_deref(), Some("\u{394}"));
+        // The glyph-selection lookup deliberately picks the Greek letters.
+        assert_eq!(glyph_name_to_unicode("Delta"), Some(0x394));
+    }
+
+    #[test]
+    fn zapf_dingbats_names_need_the_zapf_dingbats_lookup() {
+        assert_eq!(text("a20"), None);
+        assert_eq!(
+            zapf_dingbats_glyph_name_to_text("a20").as_deref(),
+            Some("\u{2714}")
+        );
+        assert_eq!(
+            zapf_dingbats_glyph_name_to_text("a1").as_deref(),
+            Some("\u{2701}")
+        );
+        // AGL names still resolve for that font.
+        assert_eq!(
+            zapf_dingbats_glyph_name_to_text("space").as_deref(),
+            Some(" ")
         );
     }
 
@@ -785,8 +909,15 @@ mod tests {
     }
 
     #[test]
-    fn agrees_with_the_narrow_lookup_where_that_resolves() {
-        for name in ["A", "Aacute", "fi", "uni00E9", "uni00e9", "u0041", "u20AC"] {
+    fn agrees_with_the_rendering_subset_except_delta_and_omega() {
+        for (&name, &cp) in GLYPH_TO_UNICODE.iter() {
+            if name == "Delta" || name == "Omega" {
+                continue;
+            }
+            let expected = char::from_u32(cp as u32).map(String::from);
+            assert_eq!(text(name), expected, "{name}");
+        }
+        for name in ["uni00E9", "uni00e9", "u0041", "u20AC"] {
             let narrow = glyph_name_to_unicode(name).and_then(|cp| char::from_u32(cp as u32));
             assert_eq!(text(name), narrow.map(String::from), "{name}");
         }

@@ -18,10 +18,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     reader's rendering-side parser, which keeps one BMP code point per code
     for glyph selection, is unchanged.
   - `stet_fonts::agl::glyph_name_to_text` resolves a glyph name to text by
-    the Adobe Glyph List specification's full algorithm — `a.sc` → `a`,
-    `f_f_i` → `ffi`, `uni00660069` → `fi`, `u1D400` → 𝐀 — and returns
-    nothing for names that carry no text, such as `g123`.
-    `glyph_name_to_unicode` is unchanged.
+    the Adobe Glyph List specification's full algorithm over the complete
+    AGL (4,281 names, against the 542 plus letters the renderer's table
+    carries) — `a.sc` → `a`, `f_f_i` → `ffi`, `uni00660069` → `fi`,
+    `u1D400` → 𝐀, `afii10017` → А — and returns nothing for names that
+    carry no text, such as `g123`. `zapf_dingbats_glyph_name_to_text` does
+    the same for the ZapfDingbats font (`a20` → ✔). The lists are Adobe's
+    files, embedded unmodified with their BSD-3-Clause notice
+    (`crates/stet-fonts/LICENSE-ADOBE-AGL`). `glyph_name_to_unicode`, which
+    glyph selection uses, is unchanged.
   - `stet_fonts::cid_unicode`, the CID ↔ Unicode tables for Adobe-Japan1,
     CNS1, GB1 and Korea1, moved here from `stet-pdf-reader` so the
     PostScript interpreter can use them too, with a new `cid_to_text` that

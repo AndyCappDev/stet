@@ -104,7 +104,12 @@ library, look at [`ttf-parser`](https://crates.io/crates/ttf-parser),
 
 ## License
 
-Apache-2.0 OR MIT, except the CID ↔ Unicode tables behind `cid_unicode`
-(`src/cid_*.bin`), which are generated from Adobe's CMap resources and
-are under Adobe's BSD-3-Clause terms; see
-[`LICENSE-ADOBE-CMAP`](LICENSE-ADOBE-CMAP).
+Apache-2.0 OR MIT, except two sets of Adobe data under Adobe's
+BSD-3-Clause terms:
+
+- the CID ↔ Unicode tables behind `cid_unicode` (`src/cid_*.bin`),
+  generated from Adobe's CMap resources — see
+  [`LICENSE-ADOBE-CMAP`](LICENSE-ADOBE-CMAP);
+- the Adobe Glyph List and ITC Zapf Dingbats Glyph List behind `agl`
+  (`src/glyphlist.txt`, `src/zapfdingbats.txt`), embedded unmodified — see
+  [`LICENSE-ADOBE-AGL`](LICENSE-ADOBE-AGL).
