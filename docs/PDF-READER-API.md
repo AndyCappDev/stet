@@ -257,6 +257,27 @@ variants:
 - `Minimal` — for unhandled or rare subtypes (Screen, PrinterMark,
   TrapNet, Watermark, Sound, Movie, Widget, 3D, RichMedia, Other)
 
+### Drawing annotations yourself
+
+`render_page` draws every annotation's appearance — form-field values,
+stamps, highlights, other markups — over the page content, as a viewer
+shows the page. An application that draws annotations itself, as editable
+objects, would then show each one twice. Turn the appearances off and read
+the annotations instead:
+
+```rust
+# let mut doc: stet_pdf_reader::PdfDocument = unimplemented!();
+doc.set_render_annotations(false);
+let content = doc.render_page(0, 150.0)?; // the page content alone
+for annot in doc.page_annotations(0)? {
+    // draw `annot` as an editable object at `annot.rect`
+}
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+It is all or nothing, and on by default. Text inside the appearances is
+not extracted while they are off.
+
 ## Form fields (AcroForm)
 
 `form() -> Option<&FormCatalog>`

@@ -92,6 +92,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   boxes at both and word boxes when glyphs were recorded. It is
   deliberately simple: content order is kept, and columns, tables and
   reading order are not detected.
+- **`PdfDocument::set_render_annotations(bool)`**, to render pages without
+  their annotations' appearances — for an application that draws
+  annotations itself as editable objects, where the baked-in appearances
+  would show twice. On by default; `page_annotations` still reads them.
 - **`DisplayList::remove`**, to take an element out of a display list.
 - **`Debug` for `DisplayList` and `DisplayElement`** (and the param structs
   that lacked it: `PatternFillParams`, `GroupParams`, `SoftMaskParams`), so

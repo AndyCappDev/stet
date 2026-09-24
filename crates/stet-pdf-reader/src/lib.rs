@@ -249,6 +249,9 @@ pub struct PdfDocument<'a> {
     /// How much text rendered display lists record as `TextRun` elements.
     /// Off by default. See [`PdfDocument::set_text_extraction`].
     text_extraction: TextExtraction,
+    /// Whether rendered pages include annotation appearances. On by
+    /// default. See [`PdfDocument::set_render_annotations`].
+    render_annotations: bool,
     /// Object numbers of Optional Content Groups that are OFF by default.
     /// Parsed from the catalog's /OCProperties /D /OFF array.
     ocg_off: HashSet<u32>,
@@ -373,6 +376,7 @@ impl<'a> PdfDocument<'a> {
             icc_cache,
             font_provider: None,
             overprint: true,
+            render_annotations: true,
             text_extraction: TextExtraction::Off,
             ocg_off,
             output_intent_icc,
@@ -395,6 +399,26 @@ impl<'a> PdfDocument<'a> {
     /// are ignored, avoiding CMYK buffer tracking.
     pub fn set_overprint(&mut self, enabled: bool) {
         self.overprint = enabled;
+    }
+
+    /// Draw annotation appearances on rendered pages, or not.
+    ///
+    /// Enabled by default: [`render_page`](Self::render_page) draws each
+    /// annotation's appearance — form-field values, stamps, highlights and
+    /// other markups — over the page content, as a viewer shows the page.
+    /// Disabled, pages carry the content alone. For an application that
+    /// draws annotations itself, as editable objects, so the baked-in
+    /// appearances would show twice; read them with
+    /// [`page_annotations`](Self::page_annotations). Text inside the
+    /// appearances is then not extracted either.
+    pub fn set_render_annotations(&mut self, enabled: bool) {
+        self.render_annotations = enabled;
+    }
+
+    /// Whether annotation appearances are drawn: see
+    /// [`set_render_annotations`](Self::set_render_annotations).
+    pub fn render_annotations(&self) -> bool {
+        self.render_annotations
     }
 
     /// Record the text each page shows, for extraction, at `level`.
@@ -595,7 +619,7 @@ impl<'a> PdfDocument<'a> {
         interpreter.unwind_gstate_stack();
 
         // Render annotation appearance streams (form field values, stamps, etc.)
-        if !info.annots.is_empty() {
+        if self.render_annotations && !info.annots.is_empty() {
             interpreter.reset_clip_for_annotations();
             for &(n, g) in &info.annots {
                 let _ = interpreter.render_annotation(n, g);

@@ -359,7 +359,7 @@ renders at different resolutions. See the
 - All PDF color spaces including ICCBased, Separation, DeviceN, Indexed
 - Transparency groups (isolated, knockout), soft masks, blend modes
 - Font rendering: Type 1, TrueType, CFF, CID with CMap/encoding support
-- Annotations (form fields, stamps)
+- Annotations (form fields, stamps), which a viewer that draws its own can switch off
 - No dependency on the PostScript interpreter — usable standalone
 
 **PDF Structural API** (read-only, on top of the reader)
