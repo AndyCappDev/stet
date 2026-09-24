@@ -1923,7 +1923,7 @@ fn samples_to_rgba(
             // CMYK→sRGB; the two sRGB outputs diverge. GWG 17.2 calibrates
             // both so they match under correct CMS, and the test's "X"
             // appears whenever the image bypasses the OI roundtrip.
-            let intent = stet_graphics::icc::intent_from_pdf_byte(params.rendering_intent);
+            let intent = stet_graphics::icc::intent_from_byte(params.rendering_intent);
             if let Some(cache) = icc
                 && cache.has_profile(profile_hash)
                 && let Some(rgb) =

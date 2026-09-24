@@ -11,7 +11,7 @@ use crate::objects::{PdfDict, PdfObj};
 use crate::resolver::Resolver;
 use crate::resources::function::PdfFunction;
 
-use super::graphics_state::ColorSpaceRef;
+use super::graphics_state::{ColorSpaceRef, DEFAULT_RENDERING_INTENT};
 use stet_graphics::color::{CieAParams, CieAbcParams, DeviceColor};
 use stet_graphics::device::{ImageColorSpace, TintLookupTable};
 use stet_graphics::icc::{IccCache, ProfileHash};
@@ -582,25 +582,26 @@ fn deviceN_process_cmyk(names: &[Vec<u8>], tints: &[f64]) -> Option<(f64, f64, f
 
 /// Convert color components to DeviceColor, with optional ICC profile
 /// support. Equivalent to
-/// [`components_to_device_color_icc_with_intent`] with the default
-/// Perceptual intent — preserved for callers (shading rasterization,
-/// recursive base/alt colour spaces) where the gstate intent isn't
-/// readily threadable.
+/// [`components_to_device_color_icc_with_intent`] with the reader's
+/// default intent (`DEFAULT_RENDERING_INTENT`) — preserved for callers
+/// (shading rasterization, recursive base/alt colour spaces) where the
+/// gstate intent isn't readily threadable.
 pub fn components_to_device_color_icc(
     cs: &ResolvedColorSpace,
     components: &[f64],
     icc_cache: Option<&mut IccCache>,
 ) -> DeviceColor {
-    components_to_device_color_icc_with_intent(cs, components, icc_cache, 0)
+    components_to_device_color_icc_with_intent(cs, components, icc_cache, DEFAULT_RENDERING_INTENT)
 }
 
 /// Convert color components to DeviceColor with an explicit ICC
-/// rendering intent. The `intent` byte mirrors the encoding on
-/// [`crate::content::graphics_state::PdfGraphicsState::rendering_intent`]
-/// (0=Perceptual, 1=RelCol, 2=Saturation, 3=AbsCol). Used by the main
-/// content interpreter so PDF/X rendering picks the per-intent ICC chain
+/// rendering intent. The `intent` byte uses the display-list encoding
+/// ([`stet_graphics::rendering_intent`]: 0=RelCol, 1=AbsCol, 2=Perceptual,
+/// 3=Saturation), the same as
+/// [`crate::content::graphics_state::PdfGraphicsState::rendering_intent`].
+/// Used by the main content interpreter so PDF/X rendering picks the per-intent ICC chain
 /// stored on `IccCache` (built in step 2 of the GWG 16.1 plan); for
-/// `intent == 0` (the default) this is byte-for-byte identical to
+/// `intent == DEFAULT_RENDERING_INTENT` this is byte-for-byte identical to
 /// [`components_to_device_color_icc`].
 pub fn components_to_device_color_icc_with_intent(
     cs: &ResolvedColorSpace,
@@ -654,7 +655,7 @@ pub fn components_to_device_color_icc_with_intent(
                 {
                     cache.register_profile_with_n(data, Some(*n));
                 }
-                let intent_enum = stet_graphics::icc::intent_from_pdf_byte(intent);
+                let intent_enum = stet_graphics::icc::intent_from_byte(intent);
                 if let Some((r, g, b)) =
                     cache.convert_color_with_intent(&hash, components, intent_enum)
                 {
@@ -828,7 +829,7 @@ pub fn components_to_device_color_icc_with_intent(
             // than the sRGB-derived approximation. GWG 22.1's ColorBurn form
             // over a Lab BG is the canonical surfacing case.
             if let Some(cache) = icc_cache.as_deref() {
-                let intent_enum = stet_graphics::icc::intent_from_pdf_byte(intent);
+                let intent_enum = stet_graphics::icc::intent_from_byte(intent);
                 let l_star = components.first().copied().unwrap_or(0.0);
                 let a_star = components.get(1).copied().unwrap_or(0.0);
                 let b_star = components.get(2).copied().unwrap_or(0.0);

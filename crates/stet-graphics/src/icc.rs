@@ -27,11 +27,30 @@ use std::sync::Arc;
 /// moxcms dep themselves.
 pub use moxcms::RenderingIntent as IccRenderingIntent;
 
-/// Map a PDF gstate `rendering_intent` byte (0=Perceptual, 1=RelCol,
-/// 2=Saturation, 3=AbsCol — the encoding used by
-/// `stet-pdf-reader::content::graphics_state::PdfGraphicsState`) to the
-/// corresponding [`IccRenderingIntent`]. Unknown values fall back to
-/// Perceptual, matching the PDF spec's default.
+/// Map a display-list `rendering_intent` byte (see
+/// [`crate::rendering_intent`]) to the corresponding [`IccRenderingIntent`].
+/// A value outside the encoding falls back to RelativeColorimetric, the
+/// initial intent in both PostScript and PDF.
+#[inline]
+pub fn intent_from_byte(b: u8) -> IccRenderingIntent {
+    use crate::rendering_intent as ri;
+    match b {
+        ri::ABSOLUTE_COLORIMETRIC => IccRenderingIntent::AbsoluteColorimetric,
+        ri::PERCEPTUAL => IccRenderingIntent::Perceptual,
+        ri::SATURATION => IccRenderingIntent::Saturation,
+        _ => IccRenderingIntent::RelativeColorimetric,
+    }
+}
+
+/// Map a byte in the PDF reader's former private numbering (0=Perceptual,
+/// 1=RelCol, 2=Saturation, 3=AbsCol) to an [`IccRenderingIntent`].
+///
+/// Display lists no longer carry that numbering; every producer now uses
+/// [`crate::rendering_intent`]. Decode with [`intent_from_byte`] instead.
+#[deprecated(
+    since = "0.8.2",
+    note = "display lists use the `stet_graphics::rendering_intent` encoding; decode with `intent_from_byte`"
+)]
 #[inline]
 pub fn intent_from_pdf_byte(b: u8) -> IccRenderingIntent {
     match b {
@@ -1882,6 +1901,32 @@ mod tests {
         let cache = IccCache::new_with_options(IccCacheOptions::default());
         assert_eq!(cache.bpc_mode(), BpcMode::Auto);
         assert!(cache.default_cmyk_hash.is_none());
+    }
+
+    #[test]
+    fn test_intent_from_byte_decodes_display_list_encoding() {
+        use crate::rendering_intent as ri;
+        assert_eq!(
+            intent_from_byte(ri::RELATIVE_COLORIMETRIC),
+            IccRenderingIntent::RelativeColorimetric
+        );
+        assert_eq!(
+            intent_from_byte(ri::ABSOLUTE_COLORIMETRIC),
+            IccRenderingIntent::AbsoluteColorimetric
+        );
+        assert_eq!(
+            intent_from_byte(ri::PERCEPTUAL),
+            IccRenderingIntent::Perceptual
+        );
+        assert_eq!(
+            intent_from_byte(ri::SATURATION),
+            IccRenderingIntent::Saturation
+        );
+        // Outside the encoding: the PostScript and PDF initial intent.
+        assert_eq!(
+            intent_from_byte(200),
+            IccRenderingIntent::RelativeColorimetric
+        );
     }
 
     #[test]

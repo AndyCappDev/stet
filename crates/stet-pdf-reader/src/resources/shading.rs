@@ -201,7 +201,7 @@ fn handle_function_based(
             opm_paired: false,
             painted_channels: 0,
             alpha_is_shape: false,
-            rendering_intent: 0,
+            rendering_intent: crate::content::graphics_state::DEFAULT_RENDERING_INTENT,
         },
     });
     Ok(())

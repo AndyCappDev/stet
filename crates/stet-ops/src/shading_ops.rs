@@ -391,6 +391,7 @@ fn build_type1_shading(
     let gs_alpha = ctx.gstate.fill_opacity;
     let gs_blend_mode = ctx.gstate.blend_mode;
     let gs_alpha_is_shape = ctx.gstate.alpha_is_shape;
+    let gs_rendering_intent = ctx.gstate.rendering_intent;
     ctx.current_display_list_mut().push(DisplayElement::Image {
         sample_data: std::sync::Arc::new(rgb_data),
         params: ImageParams {
@@ -409,7 +410,7 @@ fn build_type1_shading(
             opm_paired: false,
             painted_channels: 0,
             alpha_is_shape: gs_alpha_is_shape,
-            rendering_intent: 0,
+            rendering_intent: gs_rendering_intent,
         },
     });
 

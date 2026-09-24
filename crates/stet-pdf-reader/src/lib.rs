@@ -1447,6 +1447,81 @@ mod tests {
         pdf
     }
 
+    /// Build a one-page PDF whose content stream is `content`, with an
+    /// ExtGState `/GSsat` that sets `/RI /Saturation`.
+    fn build_pdf_with_content(content: &[u8]) -> Vec<u8> {
+        let objects: [Vec<u8>; 4] = [
+            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 4 0 R \
+              /Resources << /ExtGState << /GSsat << /RI /Saturation >> >> >> >>"
+                .to_vec(),
+            [
+                format!("<< /Length {} >>\nstream\n", content.len()).as_bytes(),
+                content,
+                b"\nendstream",
+            ]
+            .concat(),
+        ];
+        let mut pdf = b"%PDF-1.7\n".to_vec();
+        let mut offsets = Vec::new();
+        for (i, body) in objects.iter().enumerate() {
+            offsets.push(pdf.len());
+            pdf.extend(format!("{} 0 obj\n", i + 1).as_bytes());
+            pdf.extend(body);
+            pdf.extend(b"\nendobj\n");
+        }
+        let xref_offset = pdf.len();
+        pdf.extend(format!("xref\n0 {}\n", objects.len() + 1).as_bytes());
+        pdf.extend(b"0000000000 65535 f\r\n");
+        for off in &offsets {
+            pdf.extend(format!("{off:010} 00000 n\r\n").as_bytes());
+        }
+        pdf.extend(format!("trailer\n<< /Size {} /Root 1 0 R >>\n", objects.len() + 1).as_bytes());
+        pdf.extend(format!("startxref\n{xref_offset}\n%%EOF\n").as_bytes());
+        pdf
+    }
+
+    /// The reader must put the display list's documented intent encoding
+    /// (`stet_graphics::rendering_intent`) into the params it emits. It once
+    /// used a private numbering, so the PDF writer re-emitted every explicit
+    /// intent as a different one and third-party renderers misread them.
+    #[test]
+    fn rendering_intents_use_the_display_list_encoding() {
+        use stet_graphics::display_list::DisplayElement;
+        use stet_graphics::rendering_intent as ri;
+        let content = b"0 0 10 10 re f\n\
+            /RelativeColorimetric ri 0 0 10 10 re f\n\
+            /AbsoluteColorimetric ri 0 0 10 10 re f\n\
+            /Perceptual ri 0 0 10 10 re f\n\
+            /Saturation ri 0 0 10 10 re f\n\
+            /NotAnIntent ri 0 0 10 10 re f\n\
+            /RelativeColorimetric ri /GSsat gs 0 0 10 10 re f\n";
+        let pdf = build_pdf_with_content(content);
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+        let dl = doc.render_page(0, 72.0).unwrap();
+        let intents: Vec<u8> = dl
+            .elements()
+            .iter()
+            .filter_map(|e| match e {
+                DisplayElement::Fill { params, .. } => Some(params.rendering_intent),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            intents,
+            [
+                crate::content::graphics_state::DEFAULT_RENDERING_INTENT, // none selected
+                ri::RELATIVE_COLORIMETRIC,
+                ri::ABSOLUTE_COLORIMETRIC,
+                ri::PERCEPTUAL,
+                ri::SATURATION,
+                crate::content::graphics_state::DEFAULT_RENDERING_INTENT, // unknown name
+                ri::SATURATION,                                           // ExtGState /RI
+            ]
+        );
+    }
+
     #[test]
     fn outline_basic_tree() {
         let pdf = build_pdf_with_outline();

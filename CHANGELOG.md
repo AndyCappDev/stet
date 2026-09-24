@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Deprecated
+
+- **`stet_graphics::icc::intent_from_pdf_byte`.** It decoded the PDF
+  reader's former private intent numbering, which display lists no longer
+  carry. Use `stet_graphics::icc::intent_from_byte`, which decodes the
+  documented encoding, and the constants in the new
+  `stet_graphics::rendering_intent` module.
+
 ### Removed
 
 - **`stet-wasm`: the `set_page_callback()` / `clear_page_callback()` JS
@@ -17,6 +25,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   at 300 DPI. Registering a callback has been a silent no-op ever since, so
   the exports and the dead sink are removed rather than left looking
   functional. Nothing in the bundled frontend called them.
+
+### Fixed
+
+- **Rendering intents are no longer scrambled between the PDF reader and
+  everything downstream of it.** The display list's `rendering_intent` byte
+  is documented as 0=RelativeColorimetric, 1=Absolute, 2=Perceptual,
+  3=Saturation, but the PDF reader wrote its own numbering (0=Perceptual,
+  1=RelativeColorimetric, 2=Saturation, 3=Absolute) and the rasterizer
+  decoded with the reader's. Visible effects:
+  - `--device pdf` on PDF input rewrote every explicit intent as a different
+    one: `/RelativeColorimetric` became `/AbsoluteColorimetric`,
+    `/Saturation` became `/Perceptual`, and so on.
+  - PostScript images in ICC-based colour spaces were converted with the
+    wrong intent; the PostScript default, RelativeColorimetric, was applied
+    as Perceptual.
+  - Third-party renderers that followed `docs/DISPLAY-LIST.md` misread every
+    display list built from PDF input.
+
+  All producers and consumers now share `stet_graphics::rendering_intent`.
+  `stet_pdf_reader::content::color_space::components_to_device_color_icc_with_intent`
+  and `PdfGraphicsState::rendering_intent` use the same encoding. Rendering
+  of PDF input is unchanged.
+- **PostScript images now honour `setrenderingintent`.** Sampled images and
+  rasterized shadings carried a fixed intent whatever the graphics state
+  said.
 
 ## [0.8.1] — 2026-08-31
 

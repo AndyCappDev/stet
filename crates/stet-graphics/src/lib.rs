@@ -35,3 +35,4 @@ pub mod icc;
 pub mod image_limits;
 pub mod layer_set;
 pub mod mesh_shading;
+pub mod rendering_intent;

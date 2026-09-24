@@ -242,7 +242,8 @@ impl GState {
             blend_mode: 0,
             fill_cs_name: None,
             stroke_cs_name: None,
-            rendering_intent: 0,
+            // The initial intent in a PDF content stream, so it needs no `ri`.
+            rendering_intent: stet_graphics::rendering_intent::RELATIVE_COLORIMETRIC,
             transfer_key: Vec::new(),
             halftone_key: Vec::new(),
             bg_ucr_key: Vec::new(),
@@ -1670,14 +1671,10 @@ fn emit_rendering_intent(buf: &mut Vec<u8>, intent: u8, gs: &mut GState) {
     if gs.rendering_intent == intent {
         return;
     }
-    gs.rendering_intent = intent;
-    let name = match intent {
-        0 => b"RelativeColorimetric" as &[u8],
-        1 => b"AbsoluteColorimetric",
-        2 => b"Perceptual",
-        3 => b"Saturation",
-        _ => return,
+    let Some(name) = stet_graphics::rendering_intent::name(intent) else {
+        return;
     };
+    gs.rendering_intent = intent;
     buf.push(b'/');
     buf.extend_from_slice(name);
     buf.extend(b" ri\n");
@@ -2169,5 +2166,33 @@ mod tests {
 
         let rgb = DeviceColor::from_rgb(1.0, 0.0, 0.5);
         assert_eq!(color_to_pdf(&rgb), PdfColor::Rgb(10000, 0, 5000));
+    }
+
+    #[test]
+    fn test_emit_rendering_intent_uses_display_list_encoding() {
+        use stet_graphics::rendering_intent as ri;
+        let mut gs = GState::new();
+        let mut buf = Vec::new();
+
+        // RelativeColorimetric is a content stream's initial intent: no `ri`.
+        emit_rendering_intent(&mut buf, ri::RELATIVE_COLORIMETRIC, &mut gs);
+        assert!(buf.is_empty());
+
+        for intent in [
+            ri::ABSOLUTE_COLORIMETRIC,
+            ri::PERCEPTUAL,
+            ri::SATURATION,
+            ri::SATURATION, // unchanged: nothing emitted
+            ri::RELATIVE_COLORIMETRIC,
+            7, // outside the encoding: ignored, state untouched
+        ] {
+            emit_rendering_intent(&mut buf, intent, &mut gs);
+        }
+        assert_eq!(
+            String::from_utf8(buf).unwrap(),
+            "/AbsoluteColorimetric ri\n/Perceptual ri\n/Saturation ri\n\
+             /RelativeColorimetric ri\n"
+        );
+        assert_eq!(gs.rendering_intent, ri::RELATIVE_COLORIMETRIC);
     }
 }

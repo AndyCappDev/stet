@@ -1857,7 +1857,7 @@ fn draw_image_to_device(
         opm_paired: false,
         painted_channels: 0,
         alpha_is_shape: ctx.gstate.alpha_is_shape,
-        rendering_intent: 0,
+        rendering_intent: ctx.gstate.rendering_intent,
     };
     ctx.current_display_list_mut().push(DisplayElement::Image {
         sample_data: std::sync::Arc::new(sample_data),

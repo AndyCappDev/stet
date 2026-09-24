@@ -11,6 +11,17 @@ use stet_graphics::device::{
 };
 use stet_graphics::display_list::{DisplayList, SoftMaskSubtype};
 
+/// The rendering intent the reader assumes until a content stream selects
+/// one with `ri`, an ExtGState `/RI`, or an image `/Intent`, and the one it
+/// falls back to for an unrecognised intent name. Encoded per
+/// [`stet_graphics::rendering_intent`].
+///
+/// ISO 32000-1 Table 52 gives RelativeColorimetric as the initial value; the
+/// reader has always used Perceptual here. Changing it moves rendered colour
+/// wherever a profile's perceptual and colorimetric tables differ, so it is
+/// kept as its own decision rather than folded into the encoding fix.
+pub(crate) const DEFAULT_RENDERING_INTENT: u8 = stet_graphics::rendering_intent::PERCEPTUAL;
+
 /// Wrapper for a shading pattern's display list (Debug-friendly).
 #[derive(Clone)]
 pub struct ShadingPatternDL(pub DisplayList);
@@ -220,7 +231,7 @@ impl PdfGraphicsState {
             line_join: LineJoin::Miter,
             miter_limit: 10.0,
             dash_pattern: DashPattern::solid(),
-            rendering_intent: 0,
+            rendering_intent: DEFAULT_RENDERING_INTENT,
             stroke_adjust: false,
             overprint: false,
             overprint_stroke: false,

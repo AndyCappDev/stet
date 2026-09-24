@@ -368,7 +368,7 @@ impl GraphicsState {
             sampled_black_generation: None,
             sampled_ucr: None,
             color_rendering: None,
-            rendering_intent: 0, // RelativeColorimetric
+            rendering_intent: stet_graphics::rendering_intent::RELATIVE_COLORIMETRIC,
             current_pattern: None,
             pattern_underlying_color: None,
             current_pattern_dict: None,

@@ -24,7 +24,7 @@ use self::color_space::{
     ResolvedColorSpace, painted_channels_for_cs, register_icc_profile, resolve_color_space,
     resolve_color_space_obj, to_image_color_space,
 };
-use self::graphics_state::{ColorSpaceRef, PdfGraphicsState};
+use self::graphics_state::{ColorSpaceRef, DEFAULT_RENDERING_INTENT, PdfGraphicsState};
 
 use std::sync::{Arc, Mutex};
 
@@ -44,6 +44,7 @@ use stet_graphics::icc::IccCache;
 use stet_graphics::image_limits::{
     validate_bits_per_component, validate_image_dimension, validate_image_size,
 };
+use stet_graphics::rendering_intent;
 
 /// Maximum nesting of re-entrant content streams.
 ///
@@ -734,7 +735,7 @@ impl<'a> ContentInterpreter<'a> {
                                 is_device_cmyk: false,
                                 spot_color: None,
                                 icc_color: None,
-                                rendering_intent: 0,
+                                rendering_intent: DEFAULT_RENDERING_INTENT,
                                 transfer: Default::default(),
                                 halftone: Default::default(),
                                 bg_ucr: Default::default(),
@@ -777,7 +778,7 @@ impl<'a> ContentInterpreter<'a> {
                                 is_device_cmyk: false,
                                 spot_color: None,
                                 icc_color: None,
-                                rendering_intent: 0,
+                                rendering_intent: DEFAULT_RENDERING_INTENT,
                                 transfer: Default::default(),
                                 halftone: Default::default(),
                                 bg_ucr: Default::default(),
@@ -823,7 +824,7 @@ impl<'a> ContentInterpreter<'a> {
                                     is_device_cmyk: false,
                                     spot_color: None,
                                     icc_color: None,
-                                    rendering_intent: 0,
+                                    rendering_intent: DEFAULT_RENDERING_INTENT,
                                     transfer: Default::default(),
                                     halftone: Default::default(),
                                     bg_ucr: Default::default(),
@@ -872,7 +873,7 @@ impl<'a> ContentInterpreter<'a> {
                                     is_device_cmyk: false,
                                     spot_color: None,
                                     icc_color: None,
-                                    rendering_intent: 0,
+                                    rendering_intent: DEFAULT_RENDERING_INTENT,
                                     transfer: Default::default(),
                                     halftone: Default::default(),
                                     bg_ucr: Default::default(),
@@ -920,7 +921,7 @@ impl<'a> ContentInterpreter<'a> {
                                     is_device_cmyk: false,
                                     spot_color: None,
                                     icc_color: None,
-                                    rendering_intent: 0,
+                                    rendering_intent: DEFAULT_RENDERING_INTENT,
                                     transfer: Default::default(),
                                     halftone: Default::default(),
                                     bg_ucr: Default::default(),
@@ -971,7 +972,7 @@ impl<'a> ContentInterpreter<'a> {
                             is_device_cmyk: false,
                             spot_color: None,
                             icc_color: None,
-                            rendering_intent: 0,
+                            rendering_intent: DEFAULT_RENDERING_INTENT,
                             transfer: Default::default(),
                             halftone: Default::default(),
                             bg_ucr: Default::default(),
@@ -1003,7 +1004,7 @@ impl<'a> ContentInterpreter<'a> {
                         is_device_cmyk: false,
                         spot_color: None,
                         icc_color: None,
-                        rendering_intent: 0,
+                        rendering_intent: DEFAULT_RENDERING_INTENT,
                         transfer: Default::default(),
                         halftone: Default::default(),
                         bg_ucr: Default::default(),
@@ -1084,7 +1085,7 @@ impl<'a> ContentInterpreter<'a> {
                             is_device_cmyk: false,
                             spot_color: None,
                             icc_color: None,
-                            rendering_intent: 0,
+                            rendering_intent: DEFAULT_RENDERING_INTENT,
                             transfer: Default::default(),
                             halftone: Default::default(),
                             bg_ucr: Default::default(),
@@ -1116,7 +1117,7 @@ impl<'a> ContentInterpreter<'a> {
                         is_device_cmyk: false,
                         spot_color: None,
                         icc_color: None,
-                        rendering_intent: 0,
+                        rendering_intent: DEFAULT_RENDERING_INTENT,
                         transfer: Default::default(),
                         halftone: Default::default(),
                         bg_ucr: Default::default(),
@@ -1727,21 +1728,16 @@ impl<'a> ContentInterpreter<'a> {
     }
 
     fn op_ri(&mut self) -> Result<(), PdfError> {
-        // Pop the intent name and translate to the gstate byte code used
-        // by the ICC chain dispatch (matches `IccCache::intent_from_pdf_byte`).
+        // Pop the intent name and translate it to the display-list byte
+        // (`stet_graphics::rendering_intent`) the ICC chain dispatch decodes.
         let Some(top) = self.operand_stack.pop() else {
             return Ok(());
         };
         let Some(name) = top.as_name() else {
             return Ok(());
         };
-        self.gstate.rendering_intent = match name {
-            b"Perceptual" => 0,
-            b"RelativeColorimetric" => 1,
-            b"Saturation" => 2,
-            b"AbsoluteColorimetric" => 3,
-            _ => 0,
-        };
+        self.gstate.rendering_intent =
+            rendering_intent::from_name(name).unwrap_or(DEFAULT_RENDERING_INTENT);
         Ok(())
     }
 
@@ -3726,13 +3722,9 @@ impl<'a> ContentInterpreter<'a> {
             .get(b"Intent")
             .and_then(|o| self.resolver.deref(o).ok())
         {
-            Some(PdfObj::Name(n)) => match n.as_slice() {
-                b"Perceptual" => 0u8,
-                b"RelativeColorimetric" => 1,
-                b"Saturation" => 2,
-                b"AbsoluteColorimetric" => 3,
-                _ => gstate_intent,
-            },
+            Some(PdfObj::Name(n)) => {
+                rendering_intent::from_name(n.as_slice()).unwrap_or(gstate_intent)
+            }
             _ => gstate_intent,
         };
 
@@ -4003,7 +3995,7 @@ impl<'a> ContentInterpreter<'a> {
                     opm_paired: false,
                     painted_channels: 0,
                     alpha_is_shape: false,
-                    rendering_intent: 0,
+                    rendering_intent: DEFAULT_RENDERING_INTENT,
                 },
             });
 
@@ -4104,7 +4096,7 @@ impl<'a> ContentInterpreter<'a> {
                     opm_paired: false,
                     painted_channels: 0,
                     alpha_is_shape: false,
-                    rendering_intent: 0,
+                    rendering_intent: DEFAULT_RENDERING_INTENT,
                 },
             });
 
@@ -4669,7 +4661,7 @@ impl<'a> ContentInterpreter<'a> {
                     opm_paired: false,
                     painted_channels: 0,
                     alpha_is_shape: false,
-                    rendering_intent: 0,
+                    rendering_intent: DEFAULT_RENDERING_INTENT,
                 },
             });
 
@@ -4801,7 +4793,7 @@ impl<'a> ContentInterpreter<'a> {
                     opm_paired: false,
                     painted_channels: 0,
                     alpha_is_shape: false,
-                    rendering_intent: 0,
+                    rendering_intent: DEFAULT_RENDERING_INTENT,
                 },
             });
 
@@ -5772,7 +5764,7 @@ impl<'a> ContentInterpreter<'a> {
                     opm_paired: false,
                     painted_channels: 0,
                     alpha_is_shape: false,
-                    rendering_intent: 0,
+                    rendering_intent: DEFAULT_RENDERING_INTENT,
                 },
             });
 
@@ -5871,7 +5863,7 @@ impl<'a> ContentInterpreter<'a> {
                     .map(painted_channels_for_cs)
                     .unwrap_or(self.gstate.fill_painted_channels),
                 alpha_is_shape: self.gstate.alpha_is_shape,
-                rendering_intent: 0,
+                rendering_intent: DEFAULT_RENDERING_INTENT,
             },
         });
 
@@ -5968,13 +5960,8 @@ impl<'a> ContentInterpreter<'a> {
         }
         // Rendering intent — feeds into the per-intent ICC chain dispatch.
         if let Some(PdfObj::Name(ri)) = gs_dict.get(b"RI") {
-            self.gstate.rendering_intent = match ri.as_slice() {
-                b"Perceptual" => 0,
-                b"RelativeColorimetric" => 1,
-                b"Saturation" => 2,
-                b"AbsoluteColorimetric" => 3,
-                _ => 0,
-            };
+            self.gstate.rendering_intent =
+                rendering_intent::from_name(ri).unwrap_or(DEFAULT_RENDERING_INTENT);
         }
 
         // Blend mode

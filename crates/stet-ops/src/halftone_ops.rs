@@ -20,6 +20,7 @@ use stet_core::object::{PsObject, PsValue};
 use stet_fonts::geometry::Matrix;
 use stet_graphics::device::HalftoneScreen;
 use stet_graphics::display_list::DisplayList;
+use stet_graphics::rendering_intent;
 
 // ---------- Halftone pre-computation for PDF output ----------
 
@@ -706,28 +707,6 @@ pub fn op_currentcolorrendering(ctx: &mut Context) -> Result<(), PsError> {
 
 // ---------- Rendering Intent ----------
 
-/// Intent name → u8 encoding.
-fn intent_from_name(name: &[u8]) -> Option<u8> {
-    match name {
-        b"RelativeColorimetric" => Some(0),
-        b"AbsoluteColorimetric" => Some(1),
-        b"Perceptual" => Some(2),
-        b"Saturation" => Some(3),
-        _ => None,
-    }
-}
-
-/// u8 encoding → intent name bytes.
-fn intent_name(intent: u8) -> &'static [u8] {
-    match intent {
-        0 => b"RelativeColorimetric",
-        1 => b"AbsoluteColorimetric",
-        2 => b"Perceptual",
-        3 => b"Saturation",
-        _ => b"RelativeColorimetric",
-    }
-}
-
 /// `setrenderingintent`: name → —
 pub fn op_setrenderingintent(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.o_stack.is_empty() {
@@ -737,7 +716,7 @@ pub fn op_setrenderingintent(ctx: &mut Context) -> Result<(), PsError> {
         PsValue::Name(id) => ctx.names.get_bytes(id).to_vec(),
         _ => return Err(PsError::TypeCheck),
     };
-    let intent = intent_from_name(&name_bytes).ok_or(PsError::RangeCheck)?;
+    let intent = rendering_intent::from_name(&name_bytes).ok_or(PsError::RangeCheck)?;
     ctx.o_stack.pop()?;
     ctx.gstate.rendering_intent = intent;
     Ok(())
@@ -745,7 +724,9 @@ pub fn op_setrenderingintent(ctx: &mut Context) -> Result<(), PsError> {
 
 /// `currentrenderingintent`: — → name
 pub fn op_currentrenderingintent(ctx: &mut Context) -> Result<(), PsError> {
-    let name_id = ctx.names.intern(intent_name(ctx.gstate.rendering_intent));
+    let name =
+        rendering_intent::name(ctx.gstate.rendering_intent).unwrap_or(b"RelativeColorimetric");
+    let name_id = ctx.names.intern(name);
     ctx.o_stack.push(PsObject::name_lit(name_id))?;
     Ok(())
 }

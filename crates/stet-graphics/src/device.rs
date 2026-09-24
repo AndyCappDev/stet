@@ -184,7 +184,8 @@ pub struct FillParams {
     /// ICCBased color for PDF output. None for device color spaces and
     /// for Separation/DeviceN paints (those round-trip through `spot_color`).
     pub icc_color: Option<IccColor>,
-    /// Rendering intent (0=RelativeColorimetric, 1=Absolute, 2=Perceptual, 3=Saturation).
+    /// Rendering intent (0=RelativeColorimetric, 1=Absolute, 2=Perceptual, 3=Saturation);
+    /// see [`crate::rendering_intent`].
     pub rendering_intent: u8,
     /// Pre-sampled transfer function state for PDF output.
     pub transfer: TransferState,
@@ -239,7 +240,8 @@ pub struct TextParams {
     /// ICCBased color for PDF output. None for device color spaces and
     /// for Separation/DeviceN paints (those round-trip through `spot_color`).
     pub icc_color: Option<IccColor>,
-    /// Rendering intent (0=RelativeColorimetric, 1=Absolute, 2=Perceptual, 3=Saturation).
+    /// Rendering intent (0=RelativeColorimetric, 1=Absolute, 2=Perceptual, 3=Saturation);
+    /// see [`crate::rendering_intent`].
     pub rendering_intent: u8,
     /// Pre-sampled transfer function state for PDF output.
     pub transfer: TransferState,
@@ -292,7 +294,8 @@ pub struct StrokeParams {
     /// ICCBased color for PDF output. None for device color spaces and
     /// for Separation/DeviceN paints (those round-trip through `spot_color`).
     pub icc_color: Option<IccColor>,
-    /// Rendering intent (0=RelativeColorimetric, 1=Absolute, 2=Perceptual, 3=Saturation).
+    /// Rendering intent (0=RelativeColorimetric, 1=Absolute, 2=Perceptual, 3=Saturation);
+    /// see [`crate::rendering_intent`].
     pub rendering_intent: u8,
     /// Pre-sampled transfer function state for PDF output.
     pub transfer: TransferState,
@@ -491,8 +494,9 @@ pub struct ImageParams {
     pub alpha_is_shape: bool,
     /// Rendering intent that selects which `A2B*`/`B2A*` table the source
     /// profile and the output-intent profile use when this image flows
-    /// through the proofing chain. Encoded as PDF byte: 0=Perceptual,
-    /// 1=RelativeColorimetric, 2=Saturation, 3=AbsoluteColorimetric.
+    /// through the proofing chain. Same encoding as every other param
+    /// struct: 0=RelativeColorimetric, 1=Absolute, 2=Perceptual,
+    /// 3=Saturation; see [`crate::rendering_intent`].
     /// Per ISO 32000 §11.3.4 a per-image `/Intent` overrides the gstate
     /// `/RI`; PDF readers populate this from `/Intent` when present and
     /// fall back to `gstate.rendering_intent` otherwise.
@@ -817,7 +821,7 @@ impl Default for FillParams {
             is_device_cmyk: false,
             spot_color: None,
             icc_color: None,
-            rendering_intent: 0,
+            rendering_intent: crate::rendering_intent::RELATIVE_COLORIMETRIC,
             transfer: TransferState::default(),
             halftone: HalftoneState::default(),
             bg_ucr: BgUcrState::default(),
@@ -847,7 +851,7 @@ impl Default for StrokeParams {
             is_device_cmyk: false,
             spot_color: None,
             icc_color: None,
-            rendering_intent: 0,
+            rendering_intent: crate::rendering_intent::RELATIVE_COLORIMETRIC,
             transfer: TransferState::default(),
             halftone: HalftoneState::default(),
             bg_ucr: BgUcrState::default(),
@@ -875,7 +879,7 @@ impl Default for TextParams {
             stroke_width: 0.0,
             spot_color: None,
             icc_color: None,
-            rendering_intent: 0,
+            rendering_intent: crate::rendering_intent::RELATIVE_COLORIMETRIC,
             transfer: TransferState::default(),
             halftone: HalftoneState::default(),
             bg_ucr: BgUcrState::default(),
@@ -906,7 +910,7 @@ impl Default for ImageParams {
             opm_paired: false,
             painted_channels: 0,
             alpha_is_shape: false,
-            rendering_intent: 0,
+            rendering_intent: crate::rendering_intent::RELATIVE_COLORIMETRIC,
         }
     }
 }

@@ -130,7 +130,7 @@ the rasterizer (which renders text via Fill elements with glyph outlines).
 | `paint_type` | `i32` | 0 = filled, 2 = stroked |
 | `stroke_width` | `f64` | Device-space stroke width for PaintType 2 |
 | `spot_color` | `Option<SpotColor>` | Separation/DeviceN text color |
-| `rendering_intent` | `u8` | ICC rendering intent |
+| `rendering_intent` | `u8` | 0=RelativeColorimetric, 1=Absolute, 2=Perceptual, 3=Saturation |
 | `transfer` | `TransferState` | Pre-sampled transfer function tables |
 | `halftone` | `HalftoneState` | Halftone screen parameters |
 | `bg_ucr` | `BgUcrState` | Black generation / undercolor removal tables |
@@ -397,8 +397,15 @@ at the time it was created:
   device emits `/OP`/`/op`/`/OPM` ExtGState entries.
 
 - **Rendering intent** (`rendering_intent`): Which ICC rendering intent
-  applies (RelativeColorimetric, AbsoluteColorimetric, Perceptual,
-  Saturation).
+  applies, as a `u8` with one encoding across every param struct:
+  0=RelativeColorimetric, 1=AbsoluteColorimetric, 2=Perceptual,
+  3=Saturation. RelativeColorimetric is the initial intent in both
+  PostScript and PDF. Use the constants and the `from_name` / `name`
+  helpers in `stet_graphics::rendering_intent` rather than bare numbers,
+  and `stet_graphics::icc::intent_from_byte` to decode for ICC
+  conversion. (Before 0.8.2 the PDF reader wrote its own numbering here —
+  0=Perceptual, 1=RelativeColorimetric — so display lists built from PDF
+  input disagreed with this table.)
 
 This data is carried per-element, not as a separate state stack, because
 the display list is flat and may be rendered out of order (banded
