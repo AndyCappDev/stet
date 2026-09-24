@@ -5495,6 +5495,13 @@ impl<'a> ContentInterpreter<'a> {
         // the form's initial coordinate system (CTM after form matrix).
         self.content_stream_ctm = self.gstate.ctm;
 
+        // A form whose content fails to parse part-way (an unterminated
+        // string, say) keeps what it drew, as a truncated page stream does,
+        // and still unwinds everything saved above. Returning the error
+        // early would leave the form's CTM, resources, display list and
+        // nesting depth in force for the rest of the page — and the error
+        // itself is only discarded by the operator dispatcher.
+        let form_result;
         if is_transparency_group {
             // Capture compositing parameters from the current state BEFORE
             // resetting alpha for the group's internal rendering.
@@ -5530,7 +5537,7 @@ impl<'a> ContentInterpreter<'a> {
 
             // Interpret form content into group_list (now in self.display_list)
             self.depth += 1;
-            self.interpret_stream(&form_data)?;
+            form_result = self.interpret_stream(&form_data);
             self.depth -= 1;
 
             // Flush any soft mask scope opened inside the group
@@ -5592,7 +5599,7 @@ impl<'a> ContentInterpreter<'a> {
             }
 
             self.depth += 1;
-            self.interpret_stream(&form_data)?;
+            form_result = self.interpret_stream(&form_data);
             self.depth -= 1;
 
             self.form_cull_y = saved_cull;
@@ -5627,7 +5634,7 @@ impl<'a> ContentInterpreter<'a> {
             }
         }
 
-        Ok(())
+        form_result
     }
 
     /// Check if a Form XObject dict has a /Group dict with /S /Transparency.

@@ -648,3 +648,98 @@ fn ps_cidfont_overflowing_counts_do_not_panic() {
           /SubrCount 0 /SubrMapOffset 0",
     ));
 }
+
+// === Form XObject that fails to parse part-way ============================
+//
+// An error from parsing a form's content (an unterminated string inside an
+// array, here) used to return from the form handler before it restored
+// anything, and the operator dispatcher then discarded the error. The rest
+// of the page drew under the form's CTM and resources; a transparency-group
+// form also left its group list in place of the page's and its nesting
+// level counted, so twenty of them stopped every later form from drawing.
+
+/// A form XObject object whose content stops parsing part-way.
+fn broken_form(group: bool) -> Vec<u8> {
+    let content = b"q 3 0 0 3 0 0 cm 0 0 1 1 re f [ (unterminated";
+    let mut v = format!(
+        "<</Type/XObject/Subtype/Form/BBox[0 0 50 50]{}/Length {}>>\nstream\n",
+        if group {
+            "/Group<</S/Transparency>>"
+        } else {
+            ""
+        },
+        content.len()
+    )
+    .into_bytes();
+    v.extend_from_slice(content);
+    v.extend_from_slice(b"\nendstream");
+    v
+}
+
+/// Device-space bounding box of the last top-level fill in page 0.
+fn last_fill_bbox(pdf: &[u8]) -> Option<(f64, f64, f64, f64)> {
+    use stet_fonts::geometry::PathSegment;
+    use stet_graphics::display_list::DisplayElement;
+    let doc = PdfDocument::from_bytes(pdf).expect("fixture parses");
+    let list = doc.render_page(0, 72.0).expect("fixture renders");
+    list.elements().iter().rev().find_map(|e| {
+        let DisplayElement::Fill { path, .. } = e else {
+            return None;
+        };
+        let pts: Vec<(f64, f64)> = path
+            .segments
+            .iter()
+            .filter_map(|s| match s {
+                PathSegment::MoveTo(x, y) | PathSegment::LineTo(x, y) => Some((*x, *y)),
+                _ => None,
+            })
+            .collect();
+        let xs = pts.iter().map(|p| p.0);
+        let ys = pts.iter().map(|p| p.1);
+        Some((
+            xs.clone().fold(f64::INFINITY, f64::min),
+            ys.clone().fold(f64::INFINITY, f64::min),
+            xs.fold(f64::NEG_INFINITY, f64::max),
+            ys.fold(f64::NEG_INFINITY, f64::max),
+        ))
+    })
+}
+
+#[test]
+fn a_form_that_fails_to_parse_leaves_the_page_state_alone() {
+    for group in [false, true] {
+        let pdf = one_page_doc(
+            b"/Resources<</XObject<</Fm1 5 0 R>>>>",
+            b"q 2 0 0 2 10 10 cm /Fm1 Do Q 20 20 10 10 re f",
+            &[(5, broken_form(group))],
+        );
+        // The rectangle after the form is drawn in page space: x 20..30,
+        // and y 70..80 once flipped on the 100-point page.
+        assert_eq!(
+            last_fill_bbox(&pdf),
+            Some((20.0, 70.0, 30.0, 80.0)),
+            "group form: {group}"
+        );
+    }
+}
+
+#[test]
+fn broken_group_forms_do_not_use_up_the_nesting_limit() {
+    // More broken group forms than MAX_CONTENT_NESTING, then a sound form.
+    let mut contents = b"/Bad Do\n".repeat(25);
+    contents.extend_from_slice(b"/Good Do");
+    let pdf = one_page_doc(
+        b"/Resources<</XObject<</Bad 5 0 R/Good 6 0 R>>>>",
+        &contents,
+        &[
+            (5, broken_form(true)),
+            (
+                6,
+                b"<</Type/XObject/Subtype/Form/BBox[0 0 100 100]/Length 16>>\n\
+                  stream\n20 20 10 10 re f\nendstream"
+                    .to_vec(),
+            ),
+        ],
+    );
+    assert_eq!(last_fill_bbox(&pdf), Some((20.0, 70.0, 30.0, 80.0)));
+}

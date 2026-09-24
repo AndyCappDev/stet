@@ -107,6 +107,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A PDF form XObject whose content fails to parse part-way no longer
+  corrupts the rest of the page.** An error such as an unterminated string
+  inside an array made the reader return from the form before restoring
+  what it had saved, so everything after it on the page drew under the
+  form's transformation and resources — misplaced, or in a fallback font.
+  A form with a transparency group also left its group in place of the
+  page's display list and its nesting level counted, so after twenty such
+  forms no further form, pattern or Type 3 glyph was drawn. The form now
+  keeps what it drew before the error and the page carries on as it was.
 - **Text in a PostScript CMYK transparency group no longer changes how the
   group blends.** A non-isolated `/CS /DeviceCMYK` group with Difference,
   Exclusion or a non-separable blend mode composites in CMYK when all it
