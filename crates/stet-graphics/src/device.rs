@@ -296,7 +296,8 @@ pub struct TextRunParams {
     pub glyph_to_device: Matrix,
     /// Font ascent in glyph space (positive; around 800 for a font with
     /// 1000 units per em). From the font descriptor when present, else the
-    /// font bounding box, else 0.8 em. For a vertical run, the glyph's
+    /// font bounding box — for a PostScript Type 3 font with an empty one,
+    /// the union of its glyphs' `setcachedevice` boxes — else 0.8 em. For a vertical run, the glyph's
     /// extent to the right of its origin instead: half the em.
     pub ascent: f64,
     /// Font descent in glyph space (negative; around -200 for a font with

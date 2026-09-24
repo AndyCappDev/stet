@@ -304,6 +304,10 @@ pub struct Context {
     pub char_width: Option<(f64, f64)>,
     // Mode 1 metrics from setcachedevice2: ((w1x, w1y), (vx, vy))
     pub char_width_mode1: Option<((f64, f64), (f64, f64))>,
+    /// Glyph bounding box `[llx, lly, urx, ury]` from `setcachedevice` /
+    /// `setcachedevice2` during BuildChar execution; `None` after
+    /// `setcharwidth`, which declares none.
+    pub char_bbox: Option<[f64; 4]>,
 
     // Glyph path cache: per-font charstring interpretation results
     pub glyph_caches: rustc_hash::FxHashMap<EntityId, crate::glyph_cache::GlyphCache>,
@@ -468,6 +472,12 @@ pub struct OpenTextRun {
     pub zapf_dingbats: bool,
     /// The font's numeric glyph names are hexadecimal.
     pub hex_glyph_names: bool,
+    /// A Type 3 font with no usable `FontBBox`: the run's ascent and
+    /// descent cover its glyphs' `setcachedevice` boxes instead.
+    pub extent_from_glyphs: bool,
+    /// Whether `params`' ascent and descent come from a glyph's box yet,
+    /// rather than the defaults.
+    pub glyph_box_seen: bool,
 }
 
 /// One frame on `Context::group_stack`. Captures paint operators emitted
@@ -1125,6 +1135,7 @@ impl Context {
             icc_cache: crate::icc::IccCache::new(),
             exec_sync_fn: None,
             char_width: None,
+            char_bbox: None,
             char_width_mode1: None,
             glyph_caches: rustc_hash::FxHashMap::default(),
             char_cache_mode: None,

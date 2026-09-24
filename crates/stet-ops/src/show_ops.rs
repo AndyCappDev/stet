@@ -722,7 +722,7 @@ pub fn op_xyshow(ctx: &mut Context) -> Result<(), PsError> {
 /// `setcachedevice`: wx wy llx lly urx ury → —
 ///
 /// Set cache device parameters. Records the character width (wx, wy)
-/// for Type 3 font BuildChar procedures.
+/// and bounding box for Type 3 font BuildChar procedures.
 pub fn op_setcachedevice(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.o_stack.len() < 6 {
         return Err(PsError::StackUnderflow);
@@ -730,10 +730,20 @@ pub fn op_setcachedevice(ctx: &mut Context) -> Result<(), PsError> {
     // Read wx, wy before popping
     let wx = ctx.o_stack.peek(5)?.as_f64().ok_or(PsError::TypeCheck)?;
     let wy = ctx.o_stack.peek(4)?.as_f64().ok_or(PsError::TypeCheck)?;
+    let bbox = [
+        ctx.o_stack.peek(3)?.as_f64(),
+        ctx.o_stack.peek(2)?.as_f64(),
+        ctx.o_stack.peek(1)?.as_f64(),
+        ctx.o_stack.peek(0)?.as_f64(),
+    ];
     for _ in 0..6 {
         ctx.o_stack.pop()?;
     }
     ctx.char_width = Some((wx, wy));
+    ctx.char_bbox = match bbox {
+        [Some(llx), Some(lly), Some(urx), Some(ury)] => Some([llx, lly, urx, ury]),
+        _ => None,
+    };
     ctx.char_cache_mode = Some(Type3CacheMode::Cache);
     Ok(())
 }
@@ -754,7 +764,12 @@ pub fn op_setcachedevice2(ctx: &mut Context) -> Result<(), PsError> {
     // Read all 10 parameters before popping
     let w0x = ctx.o_stack.peek(9)?.as_f64().unwrap();
     let w0y = ctx.o_stack.peek(8)?.as_f64().unwrap();
-    // llx, lly, urx, ury at peek(7..4) — bounding box, not stored
+    let bbox = [
+        ctx.o_stack.peek(7)?.as_f64().unwrap(),
+        ctx.o_stack.peek(6)?.as_f64().unwrap(),
+        ctx.o_stack.peek(5)?.as_f64().unwrap(),
+        ctx.o_stack.peek(4)?.as_f64().unwrap(),
+    ];
     let w1x = ctx.o_stack.peek(3)?.as_f64().unwrap();
     let w1y = ctx.o_stack.peek(2)?.as_f64().unwrap();
     let vx = ctx.o_stack.peek(1)?.as_f64().unwrap();
@@ -764,6 +779,7 @@ pub fn op_setcachedevice2(ctx: &mut Context) -> Result<(), PsError> {
     }
     ctx.char_width = Some((w0x, w0y));
     ctx.char_width_mode1 = Some(((w1x, w1y), (vx, vy)));
+    ctx.char_bbox = Some(bbox);
     ctx.char_cache_mode = Some(Type3CacheMode::Cache);
     Ok(())
 }
@@ -781,6 +797,7 @@ pub fn op_setcharwidth(ctx: &mut Context) -> Result<(), PsError> {
     ctx.o_stack.pop()?;
     ctx.o_stack.pop()?;
     ctx.char_width = Some((wx, wy));
+    ctx.char_bbox = None;
     ctx.char_cache_mode = Some(Type3CacheMode::NoCache);
     Ok(())
 }
@@ -930,6 +947,7 @@ fn render_glyphshow(
         ctx,
         font_entity,
         &font_matrix,
+        text_record::GlyphMetrics::FontBBox,
         glyph_name_id,
         (cur_x, cur_y),
         (wx, wy),
@@ -946,6 +964,7 @@ fn record_glyphshow(
     ctx: &mut Context,
     font_entity: EntityId,
     font_matrix: &Matrix,
+    metrics: text_record::GlyphMetrics,
     glyph_name_id: stet_core::object::NameId,
     origin: (f64, f64),
     width: (f64, f64),
@@ -955,7 +974,7 @@ fn record_glyphshow(
         text_record::Glyph {
             font: font_entity,
             glyph_space: *font_matrix,
-            metrics: text_record::GlyphMetrics::FontBBox,
+            metrics,
             code: 0,
             text: text_record::GlyphText::Name(glyph_name_id),
             origin,
@@ -3099,7 +3118,7 @@ fn replay_cached_type3(
     cur_y: f64,
     ctm: &Matrix,
     charpath: bool,
-) -> (f64, f64) {
+) -> Type3Metrics {
     let (dev_x, dev_y) = ctm.transform_point(cur_x, cur_y);
     let dx = dev_x - cg.origin_dev_x;
     let dy = dev_y - cg.origin_dev_y;
@@ -3117,7 +3136,18 @@ fn replay_cached_type3(
             target.push(elem);
         }
     }
-    cg.width
+    Type3Metrics {
+        width: cg.width,
+        bbox: cg.bbox,
+    }
+}
+
+/// What a Type 3 glyph procedure declared about its glyph, in glyph space.
+struct Type3Metrics {
+    /// The width from `setcachedevice` / `setcharwidth`.
+    width: (f64, f64),
+    /// The bounding box from `setcachedevice`; `None` after `setcharwidth`.
+    bbox: Option<[f64; 4]>,
 }
 
 /// Run one Type 3 glyph's build procedure at `(cur_x, cur_y)` in user space.
@@ -3131,7 +3161,8 @@ fn replay_cached_type3(
 /// In `charpath` mode the marks are taken back off the display list and
 /// appended to the current path instead of reaching the page.
 ///
-/// Returns the width the procedure declared, in glyph space.
+/// Returns the width and bounding box the procedure declared, in glyph
+/// space.
 #[expect(clippy::too_many_arguments)]
 fn build_type3_glyph(
     ctx: &mut Context,
@@ -3144,9 +3175,10 @@ fn build_type3_glyph(
     cur_y: f64,
     ctm: &Matrix,
     charpath: bool,
-) -> Result<(f64, f64), PsError> {
+) -> Result<Type3Metrics, PsError> {
     ctx.char_width = None;
     ctx.char_width_mode1 = None;
+    ctx.char_bbox = None;
     ctx.char_cache_mode = None;
 
     // Record display list position before the build procedure (on the active
@@ -3203,6 +3235,7 @@ fn build_type3_glyph(
 
     // Get char width set by setcachedevice/setcharwidth during the procedure
     let char_width = ctx.char_width.take().unwrap_or((0.0, 0.0));
+    let bbox = ctx.char_bbox.take();
 
     // In charpath mode the glyph's marks must not reach the page:
     // take them back off the display list and keep them for the path.
@@ -3231,6 +3264,7 @@ fn build_type3_glyph(
                 origin_dev_x,
                 origin_dev_y,
                 width: char_width,
+                bbox,
             },
         );
     }
@@ -3241,7 +3275,10 @@ fn build_type3_glyph(
         append_charpath_segments(ctx, segments);
     }
 
-    Ok(char_width)
+    Ok(Type3Metrics {
+        width: char_width,
+        bbox,
+    })
 }
 
 /// Run a Type 3 font's BuildChar/BuildGlyph procedure over `bytes`.
@@ -3300,7 +3337,7 @@ fn render_show_type3(
     // Render each character synchronously
     for &byte in bytes {
         let key = Type3CacheKey::Code(byte);
-        let char_width = match type3_cache_get(ctx, font_entity, key) {
+        let metrics = match type3_cache_get(ctx, font_entity, key) {
             Some(cg) => replay_cached_type3(ctx, &cg, cur_x, cur_y, &ctm, charpath),
             None => {
                 let operand = type3_build_operand(ctx, font_entity, build_kind, byte);
@@ -3319,7 +3356,7 @@ fn render_show_type3(
             }
         };
 
-        let (wx, wy) = font_matrix.transform_delta(char_width.0, char_width.1);
+        let (wx, wy) = font_matrix.transform_delta(metrics.width.0, metrics.width.1);
         if !charpath && ctx.text_capture.is_some() {
             let text = match encoding_name_for_code(ctx, font_entity, byte) {
                 Some(id) => text_record::GlyphText::Name(id),
@@ -3330,7 +3367,9 @@ fn render_show_type3(
                 text_record::Glyph {
                     font: font_entity,
                     glyph_space: font_matrix,
-                    metrics: text_record::GlyphMetrics::FontBBox,
+                    metrics: text_record::GlyphMetrics::Type3 {
+                        glyph_box: metrics.bbox,
+                    },
                     code: byte as u32,
                     text,
                     origin: (cur_x, cur_y),
@@ -3396,7 +3435,7 @@ fn glyphshow_type3(
     let (cur_x, cur_y) = ictm.transform_point(dev_cpx, dev_cpy);
     let ctm = ctx.gstate.ctm;
 
-    let char_width = match type3_cache_get(ctx, font_entity, key) {
+    let metrics = match type3_cache_get(ctx, font_entity, key) {
         Some(cg) => replay_cached_type3(ctx, &cg, cur_x, cur_y, &ctm, false),
         None => build_type3_glyph(
             ctx,
@@ -3412,11 +3451,14 @@ fn glyphshow_type3(
         )?,
     };
 
-    let (wx, wy) = font_matrix.transform_delta(char_width.0, char_width.1);
+    let (wx, wy) = font_matrix.transform_delta(metrics.width.0, metrics.width.1);
     record_glyphshow(
         ctx,
         font_entity,
         &font_matrix,
+        text_record::GlyphMetrics::Type3 {
+            glyph_box: metrics.bbox,
+        },
         glyph_name_id,
         (cur_x, cur_y),
         (wx, wy),
@@ -5238,6 +5280,7 @@ fn render_show_displaced_type3(
 
     for (i, &byte) in bytes.iter().enumerate() {
         ctx.char_width = None;
+        ctx.char_bbox = None;
 
         // gsave, translate to current position, concat FontMatrix
         crate::graphics_state_ops::op_gsave(ctx)?;
@@ -5281,7 +5324,9 @@ fn render_show_displaced_type3(
                 text_record::Glyph {
                     font: font_entity,
                     glyph_space: font_matrix,
-                    metrics: text_record::GlyphMetrics::FontBBox,
+                    metrics: text_record::GlyphMetrics::Type3 {
+                        glyph_box: ctx.char_bbox,
+                    },
                     code: byte as u32,
                     text,
                     origin: (cur_x, cur_y),

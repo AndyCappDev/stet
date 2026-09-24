@@ -57,7 +57,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one, else from the CID through Adobe's Japan1, CNS1, GB1 or Korea1
   table. PostScript has no ToUnicode, so a font whose glyph names mean
   nothing gives empty text. Glyph space is the font's own, with ascent and
-  descent from its `FontBBox` (a TrueType font's `hhea` table). Text drawn inside a
+  descent from its `FontBBox` (a TrueType font's `hhea` table; for a
+  Type 3 font with an empty `FontBBox`, as dvips writes, its glyphs'
+  `setcachedevice` boxes). Text drawn inside a
   Type 3 `BuildChar` / `BuildGlyph` or a pattern cell is not recorded; a
   `show` inside a `kshow` procedure records its own run between the
   kshow's, and one inside a `cshow` procedure records the whole character

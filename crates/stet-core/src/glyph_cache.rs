@@ -29,6 +29,9 @@ pub struct CachedType3Glyph {
     pub origin_dev_x: f64,
     pub origin_dev_y: f64,
     pub width: (f64, f64),
+    /// The glyph's `setcachedevice` bounding box `[llx, lly, urx, ury]`, in
+    /// glyph space.
+    pub bbox: Option<[f64; 4]>,
 }
 
 /// Cache mode set by setcachedevice/setcharwidth during Type 3 BuildChar.

@@ -18,8 +18,8 @@ use stet_fonts::cid_unicode::UnicodeCMap;
 use stet_graphics::device::{ShownGlyph, TextRunParams, UnicodeSource};
 use stet_graphics::display_list::DisplayElement;
 
-/// Glyph-space ascent and descent for a font with no usable `FontBBox`, in
-/// the 1000-unit glyph space of Type 1 fonts.
+/// Ascent and descent in a 1000-unit em, for a font with no usable
+/// `FontBBox` or `hhea` table.
 const DEFAULT_ASCENT: f64 = 800.0;
 const DEFAULT_DESCENT: f64 = -200.0;
 
@@ -162,6 +162,19 @@ pub(crate) enum GlyphMetrics {
     FontBBox,
     /// Supplied by the caller (a TrueType font's `hhea` table).
     Given { ascent: f64, descent: f64 },
+    /// A Type 3 font's `FontBBox`; when that is empty (dvips writes
+    /// `[0 0 0 0]`), `glyph_box`, the glyph's `setcachedevice` box, with the
+    /// run widened to cover each of its glyphs' boxes; else the defaults.
+    /// A Type 3 font's glyph space is its own, so the defaults, which
+    /// assume 1000 units per em, can be far off.
+    Type3 { glyph_box: Option<[f64; 4]> },
+}
+
+/// The ascent and descent a glyph box `[llx, lly, urx, ury]` gives, if it
+/// has any height.
+fn box_extent(glyph_box: Option<[f64; 4]>) -> Option<(f64, f64)> {
+    let [_, y0, _, y1] = glyph_box?;
+    (y0.max(y1) > y0.min(y1)).then_some((y0.max(y1), y0.min(y1)))
 }
 
 /// One glyph a rendering loop shows.
@@ -207,6 +220,18 @@ pub(crate) fn record_glyph(ctx: &mut Context, glyph: Glyph) {
         capture.run = Some(open_run(ctx, &glyph, linear));
     }
     let run = capture.run.as_mut().expect("a run was just opened");
+    if run.extent_from_glyphs
+        && let GlyphMetrics::Type3 { glyph_box } = glyph.metrics
+        && let Some((ascent, descent)) = box_extent(glyph_box)
+    {
+        if run.glyph_box_seen {
+            run.params.ascent = run.params.ascent.max(ascent);
+            run.params.descent = run.params.descent.min(descent);
+        } else {
+            (run.params.ascent, run.params.descent) = (ascent, descent);
+            run.glyph_box_seen = true;
+        }
+    }
 
     let text = &mut run.params.text;
     let start = text.len() as u32;
@@ -238,11 +263,16 @@ fn open_run(ctx: &Context, glyph: &Glyph, linear: [f64; 4]) -> OpenTextRun {
         .ctm
         .concat(&Matrix::translate(glyph.origin.0, glyph.origin.1))
         .concat(&glyph.glyph_space);
+    let defaults = (DEFAULT_ASCENT, DEFAULT_DESCENT);
+    // Set from the first glyph's box by `record_glyph`.
+    let mut extent_from_glyphs = false;
     let (ascent, descent) = match glyph.metrics {
         GlyphMetrics::Given { ascent, descent } => (ascent, descent),
-        GlyphMetrics::FontBBox => {
-            font_bbox_extent(ctx, glyph.font).unwrap_or((DEFAULT_ASCENT, DEFAULT_DESCENT))
-        }
+        GlyphMetrics::FontBBox => font_bbox_extent(ctx, glyph.font).unwrap_or(defaults),
+        GlyphMetrics::Type3 { .. } => font_bbox_extent(ctx, glyph.font).unwrap_or_else(|| {
+            extent_from_glyphs = true;
+            defaults
+        }),
     };
     let font_name = font_name(ctx, glyph.font);
     let zapf_dingbats = font_name == "ZapfDingbats";
@@ -259,6 +289,8 @@ fn open_run(ctx: &Context, glyph: &Glyph, linear: [f64; 4]) -> OpenTextRun {
         linear,
         zapf_dingbats,
         hex_glyph_names: encoding_names_are_hex(ctx, glyph.font),
+        extent_from_glyphs,
+        glyph_box_seen: false,
     }
 }
 

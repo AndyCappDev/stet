@@ -186,7 +186,9 @@ width. Glyph space is the font's own — 1000 units per em for Type 1 and
 CFF fonts, font units for TrueType-based ones, the `FontMatrix`'s for Type
 3 — with `ascent` and `descent` from the font's `FontBBox` (a TrueType
 font's `hhea` table), else 0.8 / -0.2 of a 1000-unit em; half the em
-either side for vertical writing. Text comes from glyph names, or for a
+either side for vertical writing. A Type 3 font with an empty `FontBBox`
+(dvips writes `[0 0 0 0]`) has a glyph space of its own that no default
+fits, so its runs cover their glyphs' `setcachedevice` boxes instead. Text comes from glyph names, or for a
 CIDFont from a `Uni…` CMap's codes or the CID through Adobe's CJK
 collections: PostScript has no ToUnicode.
 

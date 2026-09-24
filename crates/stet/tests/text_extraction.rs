@@ -385,6 +385,39 @@ showpage
     );
 }
 
+#[test]
+fn type3_fonts_without_a_bbox_use_their_glyph_boxes() {
+    // dvips's bitmap fonts: FontBBox [0 0 0 0] and a glyph space of their
+    // own (here one unit per em), so the 1000-unit defaults would make each
+    // glyph a thousand ems tall. The run covers its glyphs'
+    // `setcachedevice` boxes instead, whether a glyph is built or replayed
+    // from the cache.
+    let ps = r#"%!PS
+/U <<
+  /FontType 3 /FontMatrix [1 0 0 1 0 0] /FontBBox [0 0 0 0]
+  /Encoding 256 array dup 0 1 255 { /.notdef put dup } for pop
+    dup 72 /H put dup 103 /g put
+  /BuildChar {
+    exch pop 72 eq { 0.6 0 0 0 0.6 0.7 } { 0.5 0 0 -0.2 0.5 0.5 } ifelse
+    setcachedevice
+  }
+>> definefont pop
+/U findfont 12 scalefont setfont
+72 700 moveto (Hg) show
+72 680 moveto (Hg) show
+72 660 moveto (H) show
+showpage
+"#;
+    let runs = runs_of(ps);
+    assert_eq!(runs.len(), 3);
+    for run in &runs[..2] {
+        assert!((run.ascent - 0.7).abs() < 1e-9, "{}", run.ascent);
+        assert!((run.descent + 0.2).abs() < 1e-9, "{}", run.descent);
+    }
+    assert!((runs[2].ascent - 0.7).abs() < 1e-9, "{}", runs[2].ascent);
+    assert!(runs[2].descent.abs() < 1e-9, "{}", runs[2].descent);
+}
+
 /// A minimal TrueType font: glyph 1 is 600 units wide in a 1000-unit em,
 /// with ascender 900 and descender -250 in `hhea`. The glyphs have no
 /// outlines, which is all a text-extraction test needs.
