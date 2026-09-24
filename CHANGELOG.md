@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.2] — 2026-09-24
+
 ### Added
 
 - **`DisplayElement::TextRun`, a display-list element for text
@@ -134,6 +136,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fields you need. Reading the struct is unaffected. This is interpreter
   state that is public only because its module is; a later release will mark
   it `#[non_exhaustive]` so outside code cannot construct it directly.
+- **`stet_core::glyph_cache::CachedType3Glyph` has a new field, `bbox`,**
+  the glyph's `setcachedevice` box, which text extraction needs for Type 3
+  fonts with an empty `FontBBox` (see "Text extraction from PostScript"
+  under Added). Code that builds a `CachedType3Glyph` with a struct literal no longer compiles; add
+  `bbox: None`. It is the interpreter's glyph-cache entry, public only
+  because its module is, and will be marked `#[non_exhaustive]` in a later
+  release like `PdfGraphicsState`.
 
 ### Deprecated
 
