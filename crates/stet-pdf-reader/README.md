@@ -30,6 +30,8 @@ for detail.
 - **Crypto** — PDF encryption (RC4, AES-128, AES-256)
 - **Content interpreter** — PDF page content stream → display list conversion
 - **Font handling** — Type 1, TrueType, CFF, CID fonts with encoding/CMap support
+- **Text extraction** — Unicode text with every glyph's device-space position (`set_text_extraction`), assembled into words and lines with `stet_graphics::text`
+- **Structural API** — metadata, outline, annotations, form fields, page boxes, embedded files, layers
 
 ## Features
 
@@ -56,6 +58,29 @@ for page in 0..doc.page_count() {
     println!("  {} display elements", display_list.elements().len());
 }
 ```
+
+### Extracting text
+
+The assembly helpers live in `stet-graphics`, the display-list crate this
+one builds on:
+
+```rust
+use stet_graphics::text::{text_lines, text_runs};
+use stet_pdf_reader::{LayerSet, PdfDocument, TextExtraction};
+
+let mut doc = PdfDocument::from_bytes(&data)?;
+doc.set_text_extraction(TextExtraction::Runs); // or Glyphs, for glyph positions
+let list = doc.render_page(0, 72.0)?;
+for line in text_lines(text_runs(&list, &LayerSet::new())) {
+    println!("{}", line.text);
+}
+```
+
+`TextExtraction::Runs` records each run's text and extent;
+`TextExtraction::Glyphs` adds every glyph's position, for word boxes and
+selection. The runs are `DisplayElement::TextRun` elements, nested like the
+content they came from — see the
+[Display List Reference](https://github.com/AndyCappDev/stet/blob/main/docs/DISPLAY-LIST.md#textrun).
 
 ## Acknowledgements
 

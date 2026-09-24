@@ -27,10 +27,11 @@ If you just want to render PS or PDF, use the
 | Module | Purpose |
 |--------|---------|
 | `color` | `DeviceColor` (sRGB + lossless native CMYK), `LineCap`, `LineJoin`, `FillRule`, `DashPattern`, and `CIEBasedA/ABC/DEF/DEFG` parameter types |
-| `device` | `FillParams`, `StrokeParams`, `ImageParams`, `ClipParams`, `AxialShadingParams`, `RadialShadingParams`, `MeshShadingParams`, `PatchShadingParams`, `PatternFillParams`, `TextParams`, `TransferState`, `HalftoneState`, `BgUcrState`, plus `PageSink` / `PageSinkFactory` traits |
+| `device` | `FillParams`, `StrokeParams`, `ImageParams`, `ClipParams`, `AxialShadingParams`, `RadialShadingParams`, `MeshShadingParams`, `PatchShadingParams`, `PatternFillParams`, `TextParams`, `TextRunParams`, `ShownGlyph`, `UnicodeSource`, `TextExtraction`, `TransferState`, `HalftoneState`, `BgUcrState`, plus `PageSink` / `PageSinkFactory` traits |
 | `display_list` | `DisplayList`, `DisplayElement`, `GroupParams`, `GroupColorSpace`, `SoftMaskParams`, `MaskRaster` — the flat painter-order intermediate representation every stet output device consumes |
 | `icc` | `IccCache`, `BpcMode`, `ProfileHash`, `find_system_cmyk_profile_bytes()` — profile registration, SHA-256 deduplication, cached f64 and 8-bit transforms, black-point compensation |
 | `mesh_shading` | Binary decoders for PDF shading types 4 (free-form mesh), 5 (lattice-form mesh), 6 (Coons patches), 7 (tensor patches) |
+| `text` | Extracted text: the rule that cuts `TextRun`s and finds word gaps (`TextRunParams::step_to`), and `text_runs` / `text_lines` to assemble a page's runs into lines of words |
 
 See the [Display List Reference](https://github.com/AndyCappDev/stet/blob/main/docs/DISPLAY-LIST.md)
 for complete element and parameter documentation.

@@ -360,6 +360,7 @@ renders at different resolutions. See the
 - Transparency groups (isolated, knockout), soft masks, blend modes
 - Font rendering: Type 1, TrueType, CFF, CID with CMap/encoding support
 - Annotations (form fields, stamps), which a viewer that draws its own can switch off
+- **Text extraction**: Unicode text with every glyph's device-space position, from `/ToUnicode`, glyph names, `/ActualText` and Adobe's CJK collections, including invisible OCR text — assembled into words and lines, or printed with [`stet text`](#stet-text-file)
 - No dependency on the PostScript interpreter — usable standalone
 
 **PDF Structural API** (read-only, on top of the reader)
@@ -377,6 +378,7 @@ renders at different resolutions. See the
 **PostScript Interpreter**
 - Full PostScript Level 3 — 388 operators in `systemdict`
 - Type 1, CFF/Type 2, TrueType, CID, and Type 3 font rendering
+- **Text extraction** from every show operator, for simple, composite and CID fonts in horizontal and vertical writing — the same display-list text runs the PDF reader produces
 - All 7 shading types (axial, radial, Gouraud mesh, Coons/tensor patch)
 - CIE color spaces (CIEBasedABC, CIEBasedA, CIEBasedDEF, CIEBasedDEFG)
 - ICC color management with system CMYK profile auto-detection

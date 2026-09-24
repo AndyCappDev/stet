@@ -136,6 +136,45 @@ Full layer reference: [`PDF-LAYERS.md`](PDF-LAYERS.md).
 Runnable example: `cargo run --example render_pdf_layers -- some.pdf`
 (see [`crates/stet/examples/render_pdf_layers.rs`](../crates/stet/examples/render_pdf_layers.rs)).
 
+## Text Extraction
+
+Both the PostScript interpreter and the PDF reader can record the text a
+page shows, in Unicode, as `DisplayElement::TextRun` elements beside the
+glyphs they draw. The elements paint nothing, and with extraction off —
+the default — display lists are unchanged. A `TextExtraction` level picks
+how much is recorded: `Runs` gives each run's text, extent and word breaks;
+`Glyphs` adds every glyph's position, advance, character code and where its
+text came from.
+
+```rust
+use stet::{Interpreter, LayerSet, TextExtraction, text_lines, text_runs};
+
+let mut interp = Interpreter::builder()
+    .text_extraction(TextExtraction::Runs)
+    .build();
+let pages = interp.render_to_display_list(ps_data, 72.0)?;
+let lines = text_lines(text_runs(&pages[0].display_list, &LayerSet::new()));
+```
+
+```rust
+use stet_graphics::text::{text_lines, text_runs};
+use stet_pdf_reader::{LayerSet, PdfDocument, TextExtraction};
+
+let mut doc = PdfDocument::from_bytes(&pdf_data)?;
+doc.set_text_extraction(TextExtraction::Glyphs);
+let list = doc.render_page(0, 72.0)?;
+for line in text_lines(text_runs(&list, &LayerSet::new())) {
+    // line.text, line.bbox; each word's text and, at Glyphs, its bbox
+}
+```
+
+`text_runs` walks groups, soft-masked content and the layers a `LayerSet`
+shows; `text_lines` joins runs into lines and splits them into words. The
+assembly keeps content order and does not detect columns or tables. The
+element and its fields are in
+[`DISPLAY-LIST.md`](DISPLAY-LIST.md#textrun); the CLI equivalent is
+`stet text`.
+
 ## Custom Output Devices
 
 The interpreter communicates with output backends through the `OutputDevice`

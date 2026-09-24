@@ -159,6 +159,28 @@ let mut interp = stet::Interpreter::builder()
     .build();
 ```
 
+## Text Extraction
+
+```rust
+use stet::{Interpreter, LayerSet, TextExtraction, text_lines, text_runs};
+
+let mut interp = Interpreter::builder()
+    .text_extraction(TextExtraction::Runs) // or Glyphs, for glyph positions
+    .build();
+for page in interp.render_to_display_list(ps_data, 72.0)? {
+    for line in text_lines(text_runs(&page.display_list, &LayerSet::new())) {
+        println!("{}", line.text);
+    }
+}
+```
+
+Every show operator records the text it shows, in Unicode, as
+`DisplayElement::TextRun` elements beside the glyphs it draws; they paint
+nothing. PostScript has no ToUnicode, so text comes from glyph names and,
+for CID-keyed fonts, from `Uni…` CMaps or Adobe's CJK collections. The PDF
+reader produces the same runs — see
+[`stet-pdf-reader`](https://crates.io/crates/stet-pdf-reader).
+
 ## Diagnostics
 
 An empty page list is not necessarily an error. The usual cause is a program
