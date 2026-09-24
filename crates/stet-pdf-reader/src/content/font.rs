@@ -4078,7 +4078,7 @@ impl CidTrueTypePdfFont {
         // the code IS a raw Unicode code point that needs mapping to a CID.
         // When a CMap IS loaded, it has already mapped to the correct CID.
         if self.ucs2_encoding && !self.ordering.is_empty() && self.code_to_cid.is_empty() {
-            super::cid_unicode::unicode_to_cid(&self.ordering, code as u32).unwrap_or(code)
+            stet_fonts::cid_unicode::unicode_to_cid(&self.ordering, code as u32).unwrap_or(code)
         } else {
             code
         }
@@ -4106,7 +4106,7 @@ impl CidTrueTypePdfFont {
             }
         } else if self.ucs2_encoding && self.substituted && !self.ordering.is_empty() {
             // CMap was loaded: cid is an Adobe CID, convert back to Unicode for glyph lookup
-            let unicode = super::cid_unicode::cid_to_unicode(&self.ordering, cid)?;
+            let unicode = stet_fonts::cid_unicode::cid_to_unicode(&self.ordering, cid)?;
             *self.cmap.get(&unicode)?
         } else if let Some(ref map) = self.cid_to_gid_map {
             // Explicit CIDToGIDMap stream: look up CID → GID
@@ -4123,7 +4123,7 @@ impl CidTrueTypePdfFont {
             }
         } else if self.substituted && !self.ordering.is_empty() && self.ordering != b"Identity" {
             // Substituted font with Adobe CID registry (CJK): use CID→Unicode table
-            let unicode = super::cid_unicode::cid_to_unicode(&self.ordering, cid)?;
+            let unicode = stet_fonts::cid_unicode::cid_to_unicode(&self.ordering, cid)?;
             *self.cmap.get(&unicode)?
         } else if self.identity_cid_to_gid {
             // Identity CIDToGIDMap: CID = GID directly.
@@ -4347,7 +4347,7 @@ impl CidCffPdfFont {
             // (e.g. Japan1), the CID is from the Adobe registry, not Unicode.
             // Convert CID → Unicode first, then look up in cmap.
             if !self.ordering.is_empty() && self.ordering != b"Identity" {
-                let unicode = super::cid_unicode::cid_to_unicode(&self.ordering, cid)?;
+                let unicode = stet_fonts::cid_unicode::cid_to_unicode(&self.ordering, cid)?;
                 // For CJK substitution, try full-width glyph variants first.
                 // The substitute font may have a proportional glyph for U+00B7
                 // (MIDDLE DOT, narrow) while the original CJK font used a

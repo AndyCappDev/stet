@@ -1,0 +1,166 @@
+// stet - A PostScript Interpreter
+// Copyright (c) 2026 Scott Bowman
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+//! Adobe CID → Unicode mapping tables for CJK character collections.
+//!
+//! Covers the four Adobe CJK registry orderings (Japan1, CNS1, GB1,
+//! Korea1). The PDF reader uses them to pick glyphs from a substitute font
+//! when a CID font uses Identity-H with no `/ToUnicode` CMap; text
+//! extraction uses them to recover Unicode for CID-keyed fonts in both PDF
+//! and PostScript, which is why they live here rather than in either
+//! interpreter.
+//!
+//! Tables are derived from the Adobe UniXXX-UTF32-H CMap files and stored
+//! as zlib-compressed arrays of (u16 CID, u16 Unicode) pairs, so they map
+//! to Basic Multilingual Plane code points only.
+
+use std::collections::HashMap;
+use std::sync::OnceLock;
+
+static JAPAN1: OnceLock<HashMap<u16, u32>> = OnceLock::new();
+static CNS1: OnceLock<HashMap<u16, u32>> = OnceLock::new();
+static GB1: OnceLock<HashMap<u16, u32>> = OnceLock::new();
+static KOREA1: OnceLock<HashMap<u16, u32>> = OnceLock::new();
+
+/// Look up CID → Unicode for a given Adobe CID registry/ordering.
+pub fn cid_to_unicode(ordering: &[u8], cid: u16) -> Option<u32> {
+    let table = match ordering {
+        b"Japan1" => JAPAN1.get_or_init(|| load_table(include_bytes!("cid_japan1.bin"))),
+        b"CNS1" => CNS1.get_or_init(|| load_table(include_bytes!("cid_cns1.bin"))),
+        b"GB1" => GB1.get_or_init(|| load_table(include_bytes!("cid_gb1.bin"))),
+        b"Korea1" => KOREA1.get_or_init(|| load_table(include_bytes!("cid_korea1.bin"))),
+        _ => return None,
+    };
+    table.get(&cid).copied().or_else(|| {
+        // Supplemental mappings for half-width Latin CID ranges that share
+        // Unicode code points with proportional CIDs and are therefore not
+        // in the UniXXX-UTF32-H derived tables.
+        match ordering {
+            b"GB1" => gb1_halfwidth_unicode(cid),
+            b"Japan1" => japan1_halfwidth_unicode(cid),
+            b"CNS1" => cns1_halfwidth_unicode(cid),
+            b"Korea1" => korea1_halfwidth_unicode(cid),
+            _ => None,
+        }
+    })
+}
+
+/// Adobe-GB1 half-width Latin: CIDs 814–907 → U+0021–U+007E, CID 7716 → U+0020.
+fn gb1_halfwidth_unicode(cid: u16) -> Option<u32> {
+    if (814..=907).contains(&cid) {
+        Some(0x0021 + (cid - 814) as u32)
+    } else if cid == 7716 {
+        Some(0x0020)
+    } else {
+        None
+    }
+}
+
+/// Adobe-Japan1 half-width Latin: CIDs 231–324 → U+0020–U+007D.
+fn japan1_halfwidth_unicode(cid: u16) -> Option<u32> {
+    if (231..=324).contains(&cid) {
+        Some(0x0020 + (cid - 231) as u32)
+    } else {
+        None
+    }
+}
+
+/// Adobe-CNS1 half-width Latin: CIDs 1–94 → U+0020–U+007E (proportional range only).
+fn cns1_halfwidth_unicode(cid: u16) -> Option<u32> {
+    if (1..=94).contains(&cid) {
+        Some(0x001F + cid as u32)
+    } else {
+        None
+    }
+}
+
+/// Adobe-Korea1 half-width Latin: CIDs 1–94 → U+0020–U+007E.
+fn korea1_halfwidth_unicode(cid: u16) -> Option<u32> {
+    if (1..=94).contains(&cid) {
+        Some(0x001F + cid as u32)
+    } else {
+        None
+    }
+}
+
+static JAPAN1_REV: OnceLock<HashMap<u32, u16>> = OnceLock::new();
+static CNS1_REV: OnceLock<HashMap<u32, u16>> = OnceLock::new();
+static GB1_REV: OnceLock<HashMap<u32, u16>> = OnceLock::new();
+static KOREA1_REV: OnceLock<HashMap<u32, u16>> = OnceLock::new();
+
+/// Look up Unicode → CID for a given Adobe CID registry/ordering.
+/// Used for UCS2-based CMap encodings (e.g. UniJIS-UCS2-H) where
+/// character codes are Unicode values that need mapping to CIDs.
+pub fn unicode_to_cid(ordering: &[u8], unicode: u32) -> Option<u16> {
+    let table = match ordering {
+        b"Japan1" => JAPAN1_REV.get_or_init(|| invert_table(include_bytes!("cid_japan1.bin"))),
+        b"CNS1" => CNS1_REV.get_or_init(|| invert_table(include_bytes!("cid_cns1.bin"))),
+        b"GB1" => GB1_REV.get_or_init(|| invert_table(include_bytes!("cid_gb1.bin"))),
+        b"Korea1" => KOREA1_REV.get_or_init(|| invert_table(include_bytes!("cid_korea1.bin"))),
+        _ => return None,
+    };
+    table.get(&unicode).copied()
+}
+
+fn invert_table(compressed: &[u8]) -> HashMap<u32, u16> {
+    let forward = load_table(compressed);
+    let mut rev = HashMap::with_capacity(forward.len());
+    for (&cid, &unicode) in &forward {
+        // First CID wins (some Unicode values may have multiple CIDs)
+        rev.entry(unicode).or_insert(cid);
+    }
+    rev
+}
+
+fn load_table(compressed: &[u8]) -> HashMap<u16, u32> {
+    use flate2::read::ZlibDecoder;
+    use std::io::Read;
+
+    let mut decoder = ZlibDecoder::new(compressed);
+    let mut raw = Vec::new();
+    if decoder.read_to_end(&mut raw).is_err() {
+        return HashMap::new();
+    }
+
+    let mut map = HashMap::with_capacity(raw.len() / 4);
+    for chunk in raw.as_chunks::<4>().0 {
+        let cid = u16::from_le_bytes([chunk[0], chunk[1]]);
+        let unicode = u16::from_le_bytes([chunk[2], chunk[3]]);
+        map.insert(cid, unicode as u32);
+    }
+    map
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unknown_ordering_maps_nothing() {
+        assert_eq!(cid_to_unicode(b"Identity", 34), None);
+        assert_eq!(unicode_to_cid(b"Identity", 0x41), None);
+    }
+
+    #[test]
+    fn tables_decompress_for_every_ordering() {
+        for ordering in [&b"Japan1"[..], b"CNS1", b"GB1", b"Korea1"] {
+            // CID 34 is 'A' in each Adobe CJK collection.
+            assert_eq!(cid_to_unicode(ordering, 34), Some(0x41), "{ordering:?}");
+        }
+    }
+
+    #[test]
+    fn halfwidth_supplement_covers_cids_the_table_lacks() {
+        // GB1 CIDs 814–907 are absent from the derived table.
+        assert_eq!(cid_to_unicode(b"GB1", 815), Some(0x22));
+        assert_eq!(cid_to_unicode(b"Japan1", 232), Some(0x21));
+    }
+
+    #[test]
+    fn reverse_lookup_round_trips() {
+        // 敵 is Adobe-Japan1 CID 3106.
+        assert_eq!(unicode_to_cid(b"Japan1", 0x6575), Some(3106));
+        assert_eq!(cid_to_unicode(b"Japan1", 3106), Some(0x6575));
+    }
+}

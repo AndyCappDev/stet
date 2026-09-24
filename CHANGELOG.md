@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Unicode tables for text extraction in `stet-fonts`**, the groundwork for
+  extracting text from both PostScript and PDF input:
+  - `stet_fonts::to_unicode::ToUnicodeMap` parses a PDF `/ToUnicode` CMap
+    without losing text: surrogate pairs decode to one supplementary-plane
+    character, multi-character destinations stay whole (`<00660069>` is
+    `fi`, not U+FB01), and codes up to four bytes stay distinct. The PDF
+    reader's rendering-side parser, which keeps one BMP code point per code
+    for glyph selection, is unchanged.
+  - `stet_fonts::agl::glyph_name_to_text` resolves a glyph name to text by
+    the Adobe Glyph List specification's full algorithm — `a.sc` → `a`,
+    `f_f_i` → `ffi`, `uni00660069` → `fi`, `u1D400` → 𝐀 — and returns
+    nothing for names that carry no text, such as `g123`.
+    `glyph_name_to_unicode` is unchanged.
+  - `stet_fonts::cid_unicode`, the CID ↔ Unicode tables for Adobe-Japan1,
+    CNS1, GB1 and Korea1, moved here from `stet-pdf-reader` so the
+    PostScript interpreter can use them too.
+
 ### Changed
 
 - **`stet_pdf_reader::content::graphics_state::PdfGraphicsState` has two new
@@ -20,6 +39,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Deprecated
 
+- **`stet_pdf_reader::content::cid_unicode::{cid_to_unicode,
+  unicode_to_cid}`.** The tables moved to `stet_fonts::cid_unicode`; the old
+  functions forward there and give the same results.
 - **`stet_graphics::icc::intent_from_pdf_byte`.** It decoded the PDF
   reader's former private intent numbering, which display lists no longer
   carry. Use `stet_graphics::icc::intent_from_byte`, which decodes the

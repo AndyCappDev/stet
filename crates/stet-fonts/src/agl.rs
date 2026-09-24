@@ -5,6 +5,12 @@
 //! Adobe Glyph List (AGL) — glyph name → Unicode mapping.
 //!
 //! Used by both PostScript font handling and PDF font decoding.
+//!
+//! Two lookups serve two jobs. [`glyph_name_to_unicode`] returns one BMP
+//! code point and is what glyph selection uses. [`glyph_name_to_text`]
+//! implements the full name-to-text algorithm of the AGL specification —
+//! suffixes, ligature components, supplementary-plane code points — and is
+//! what text extraction uses.
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -628,4 +634,161 @@ pub fn glyph_name_to_unicode(name: &str) -> Option<u16> {
     }
 
     None
+}
+
+/// Unicode text for a glyph name, by the algorithm of the Adobe Glyph List
+/// specification ("Unicode and Glyph Names"), for text extraction.
+///
+/// - Everything from the first period is dropped: `a.sc` → `a`.
+/// - The rest splits on underscores into components mapped in turn:
+///   `f_f_i` → `ffi`.
+/// - A component is looked up in the glyph list, else read as
+///   `uniXXXX…` (one or more groups of four hex digits, each a BMP scalar
+///   value), else as `uXXXX` to `uXXXXXX` (one scalar value, which may be
+///   outside the BMP), else maps to nothing.
+///
+/// Returns `None` when no component maps to anything, as for `.notdef` or
+/// a name like `g123`: the name says nothing about the text, and guessing
+/// would be worse than nothing for search.
+///
+/// Two deliberate differences from the specification: hex digits may be
+/// lowercase (the specification requires uppercase), matching what
+/// [`glyph_name_to_unicode`] already accepts for glyph selection, so text
+/// is extracted for every glyph name the renderer resolves; and the glyph
+/// list is stet's [`GLYPH_TO_UNICODE`] table, which covers the common
+/// names rather than all of the AGL. The ZapfDingbats-specific list the
+/// specification consults first is not applied, since a name carries no
+/// font.
+///
+/// Ligature glyph names map as the glyph list says — `fi` is U+FB01 — so a
+/// consumer matching against plain text should apply compatibility
+/// normalization.
+pub fn glyph_name_to_text(name: &str) -> Option<String> {
+    let base = name.split('.').next().unwrap_or("");
+    let mut text = String::new();
+    for component in base.split('_') {
+        push_component_text(component, &mut text);
+    }
+    (!text.is_empty()).then_some(text)
+}
+
+/// Append the text of one underscore-separated glyph-name component.
+fn push_component_text(component: &str, out: &mut String) {
+    if let Some(&cp) = GLYPH_TO_UNICODE.get(component) {
+        out.extend(char::from_u32(cp as u32));
+        return;
+    }
+    if let Some(hex) = component.strip_prefix("uni")
+        && !hex.is_empty()
+        && hex.len() % 4 == 0
+        && hex.bytes().all(|b| b.is_ascii_hexdigit())
+    {
+        // Each group must be a BMP scalar value; one surrogate and the
+        // `uni` form does not apply to the component at all.
+        let chars: Option<Vec<char>> = hex
+            .as_bytes()
+            .chunks(4)
+            .map(|group| {
+                let group = std::str::from_utf8(group).ok()?;
+                char::from_u32(u32::from_str_radix(group, 16).ok()?)
+            })
+            .collect();
+        if let Some(chars) = chars {
+            out.extend(chars);
+            return;
+        }
+    }
+    if let Some(hex) = component.strip_prefix('u')
+        && (4..=6).contains(&hex.len())
+        && hex.bytes().all(|b| b.is_ascii_hexdigit())
+        && let Ok(v) = u32::from_str_radix(hex, 16)
+        && let Some(c) = char::from_u32(v)
+    {
+        out.push(c);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text(name: &str) -> Option<String> {
+        glyph_name_to_text(name)
+    }
+
+    #[test]
+    fn glyph_list_names() {
+        assert_eq!(text("A").as_deref(), Some("A"));
+        assert_eq!(text("space").as_deref(), Some(" "));
+        assert_eq!(text("Aacute").as_deref(), Some("\u{C1}"));
+        // Ligature names map to the glyph list's presentation form.
+        assert_eq!(text("fi").as_deref(), Some("\u{FB01}"));
+    }
+
+    #[test]
+    fn suffix_after_period_is_dropped() {
+        assert_eq!(text("a.sc").as_deref(), Some("a"));
+        assert_eq!(text("one.oldstyle.alt").as_deref(), Some("1"));
+        assert_eq!(text("uni0041.ss01").as_deref(), Some("A"));
+    }
+
+    #[test]
+    fn underscore_components_concatenate() {
+        assert_eq!(text("f_f_i").as_deref(), Some("ffi"));
+        assert_eq!(text("f_f_i.liga").as_deref(), Some("ffi"));
+        assert_eq!(text("T_h").as_deref(), Some("Th"));
+    }
+
+    #[test]
+    fn uni_form_with_several_code_points() {
+        assert_eq!(text("uni0066006C").as_deref(), Some("fl"));
+        assert_eq!(text("uni00e9").as_deref(), Some("\u{E9}"));
+    }
+
+    #[test]
+    fn u_form_reaches_beyond_the_bmp() {
+        assert_eq!(text("u1D400").as_deref(), Some("\u{1D400}"));
+        assert_eq!(text("u0041").as_deref(), Some("A"));
+        assert_eq!(text("u10FFFF").as_deref(), Some("\u{10FFFF}"));
+    }
+
+    #[test]
+    fn specification_example() {
+        // The worked example from the AGL specification,
+        // `Lcommaaccent_uni20AC0308_u1040C.alternate`, with its first
+        // component swapped for one in stet's table (which lacks
+        // `Lcommaaccent`): every rule applies at once.
+        assert_eq!(
+            text("Lslash_uni20AC0308_u1040C.alternate").as_deref(),
+            Some("\u{141}\u{20AC}\u{308}\u{1040C}")
+        );
+    }
+
+    #[test]
+    fn surrogates_and_out_of_range_values_map_to_nothing() {
+        assert_eq!(text("uniD800"), None);
+        assert_eq!(text("uni0041D800"), None);
+        assert_eq!(text("uD800"), None);
+        assert_eq!(text("u110000"), None);
+    }
+
+    #[test]
+    fn meaningless_names_map_to_nothing() {
+        assert_eq!(text(".notdef"), None);
+        assert_eq!(text(""), None);
+        assert_eq!(text("g123"), None);
+        assert_eq!(text("glyph42"), None);
+        // `uni` with a digit count that is not a multiple of four.
+        assert_eq!(text("uni004"), None);
+        // One unknown component does not discard the known ones.
+        assert_eq!(text("f_xyzzy").as_deref(), Some("f"));
+    }
+
+    #[test]
+    fn agrees_with_the_narrow_lookup_where_that_resolves() {
+        for name in ["A", "Aacute", "fi", "uni00E9", "uni00e9", "u0041", "u20AC"] {
+            let narrow = glyph_name_to_unicode(name).and_then(|cp| char::from_u32(cp as u32));
+            assert_eq!(text(name), narrow.map(String::from), "{name}");
+        }
+    }
 }

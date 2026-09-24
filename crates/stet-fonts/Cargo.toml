@@ -12,6 +12,7 @@ keywords = ["font", "type1", "cff", "truetype", "postscript"]
 categories = ["graphics", "parser-implementations"]
 
 [dependencies]
+flate2 = "1"
 rustc-hash = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

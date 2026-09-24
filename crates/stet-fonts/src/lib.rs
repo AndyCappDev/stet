@@ -22,6 +22,10 @@
 //! - [`encoding`] — StandardEncoding, ISOLatin1Encoding, SymbolEncoding,
 //!   MacRoman, etc.
 //! - [`agl`] — Adobe Glyph List (glyph name ↔ Unicode)
+//! - [`to_unicode`] — PDF `/ToUnicode` CMap parser for text extraction
+//!   (full UTF-16 destinations, multi-character strings)
+//! - [`cid_unicode`] — Adobe CJK registry orderings (Japan1, CNS1, GB1,
+//!   Korea1) CID ↔ Unicode
 //! - [`system_fonts`] — platform font directory discovery and 35-standard
 //!   PostScript → URW substitution
 //!
@@ -50,9 +54,11 @@
 pub mod agl;
 pub mod cff_parser;
 pub mod charstring;
+pub mod cid_unicode;
 pub mod encoding;
 pub mod geometry;
 pub mod system_fonts;
+pub mod to_unicode;
 pub mod truetype;
 pub mod type1_parser;
 pub mod type2_charstring;

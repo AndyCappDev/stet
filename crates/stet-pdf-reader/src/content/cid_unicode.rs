@@ -1,130 +1,29 @@
-// stet-pdf-reader
+// stet - A PostScript Interpreter
 // Copyright (c) 2026 Scott Bowman
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Adobe CID → Unicode mapping tables for CJK character collections.
 //!
-//! When a CID font uses Identity-H encoding with an Adobe CID registry
-//! (Japan1, CNS1, GB1, Korea1) and no /ToUnicode CMap is present in the
-//! PDF, these tables provide the CID → Unicode mapping needed to render
-//! text with a substitute font.
-//!
-//! Tables are derived from the Adobe UniXXX-UTF32-H CMap files and stored
-//! as zlib-compressed arrays of (u16 CID, u16 Unicode) pairs.
-
-use std::collections::HashMap;
-use std::sync::OnceLock;
-
-static JAPAN1: OnceLock<HashMap<u16, u32>> = OnceLock::new();
-static CNS1: OnceLock<HashMap<u16, u32>> = OnceLock::new();
-static GB1: OnceLock<HashMap<u16, u32>> = OnceLock::new();
-static KOREA1: OnceLock<HashMap<u16, u32>> = OnceLock::new();
+//! The tables moved to [`stet_fonts::cid_unicode`] so the PostScript
+//! interpreter can share them for text extraction. These forwarding
+//! functions keep the path this module was published under working.
 
 /// Look up CID → Unicode for a given Adobe CID registry/ordering.
+#[deprecated(
+    since = "0.8.2",
+    note = "moved to `stet_fonts::cid_unicode::cid_to_unicode`"
+)]
 pub fn cid_to_unicode(ordering: &[u8], cid: u16) -> Option<u32> {
-    let table = match ordering {
-        b"Japan1" => JAPAN1.get_or_init(|| load_table(include_bytes!("cid_japan1.bin"))),
-        b"CNS1" => CNS1.get_or_init(|| load_table(include_bytes!("cid_cns1.bin"))),
-        b"GB1" => GB1.get_or_init(|| load_table(include_bytes!("cid_gb1.bin"))),
-        b"Korea1" => KOREA1.get_or_init(|| load_table(include_bytes!("cid_korea1.bin"))),
-        _ => return None,
-    };
-    table.get(&cid).copied().or_else(|| {
-        // Supplemental mappings for half-width Latin CID ranges that share
-        // Unicode code points with proportional CIDs and are therefore not
-        // in the UniXXX-UTF32-H derived tables.
-        match ordering {
-            b"GB1" => gb1_halfwidth_unicode(cid),
-            b"Japan1" => japan1_halfwidth_unicode(cid),
-            b"CNS1" => cns1_halfwidth_unicode(cid),
-            b"Korea1" => korea1_halfwidth_unicode(cid),
-            _ => None,
-        }
-    })
+    stet_fonts::cid_unicode::cid_to_unicode(ordering, cid)
 }
-
-/// Adobe-GB1 half-width Latin: CIDs 814–907 → U+0021–U+007E, CID 7716 → U+0020.
-fn gb1_halfwidth_unicode(cid: u16) -> Option<u32> {
-    if (814..=907).contains(&cid) {
-        Some(0x0021 + (cid - 814) as u32)
-    } else if cid == 7716 {
-        Some(0x0020)
-    } else {
-        None
-    }
-}
-
-/// Adobe-Japan1 half-width Latin: CIDs 231–324 → U+0020–U+007D.
-fn japan1_halfwidth_unicode(cid: u16) -> Option<u32> {
-    if (231..=324).contains(&cid) {
-        Some(0x0020 + (cid - 231) as u32)
-    } else {
-        None
-    }
-}
-
-/// Adobe-CNS1 half-width Latin: CIDs 1–94 → U+0020–U+007E (proportional range only).
-fn cns1_halfwidth_unicode(cid: u16) -> Option<u32> {
-    if (1..=94).contains(&cid) {
-        Some(0x001F + cid as u32)
-    } else {
-        None
-    }
-}
-
-/// Adobe-Korea1 half-width Latin: CIDs 1–94 → U+0020–U+007E.
-fn korea1_halfwidth_unicode(cid: u16) -> Option<u32> {
-    if (1..=94).contains(&cid) {
-        Some(0x001F + cid as u32)
-    } else {
-        None
-    }
-}
-
-static JAPAN1_REV: OnceLock<HashMap<u32, u16>> = OnceLock::new();
-static CNS1_REV: OnceLock<HashMap<u32, u16>> = OnceLock::new();
-static GB1_REV: OnceLock<HashMap<u32, u16>> = OnceLock::new();
-static KOREA1_REV: OnceLock<HashMap<u32, u16>> = OnceLock::new();
 
 /// Look up Unicode → CID for a given Adobe CID registry/ordering.
 /// Used for UCS2-based CMap encodings (e.g. UniJIS-UCS2-H) where
 /// character codes are Unicode values that need mapping to CIDs.
+#[deprecated(
+    since = "0.8.2",
+    note = "moved to `stet_fonts::cid_unicode::unicode_to_cid`"
+)]
 pub fn unicode_to_cid(ordering: &[u8], unicode: u32) -> Option<u16> {
-    let table = match ordering {
-        b"Japan1" => JAPAN1_REV.get_or_init(|| invert_table(include_bytes!("cid_japan1.bin"))),
-        b"CNS1" => CNS1_REV.get_or_init(|| invert_table(include_bytes!("cid_cns1.bin"))),
-        b"GB1" => GB1_REV.get_or_init(|| invert_table(include_bytes!("cid_gb1.bin"))),
-        b"Korea1" => KOREA1_REV.get_or_init(|| invert_table(include_bytes!("cid_korea1.bin"))),
-        _ => return None,
-    };
-    table.get(&unicode).copied()
-}
-
-fn invert_table(compressed: &[u8]) -> HashMap<u32, u16> {
-    let forward = load_table(compressed);
-    let mut rev = HashMap::with_capacity(forward.len());
-    for (&cid, &unicode) in &forward {
-        // First CID wins (some Unicode values may have multiple CIDs)
-        rev.entry(unicode).or_insert(cid);
-    }
-    rev
-}
-
-fn load_table(compressed: &[u8]) -> HashMap<u16, u32> {
-    use flate2::read::ZlibDecoder;
-    use std::io::Read;
-
-    let mut decoder = ZlibDecoder::new(compressed);
-    let mut raw = Vec::new();
-    if decoder.read_to_end(&mut raw).is_err() {
-        return HashMap::new();
-    }
-
-    let mut map = HashMap::with_capacity(raw.len() / 4);
-    for chunk in raw.as_chunks::<4>().0 {
-        let cid = u16::from_le_bytes([chunk[0], chunk[1]]);
-        let unicode = u16::from_le_bytes([chunk[2], chunk[3]]);
-        map.insert(cid, unicode as u32);
-    }
-    map
+    stet_fonts::cid_unicode::unicode_to_cid(ordering, unicode)
 }

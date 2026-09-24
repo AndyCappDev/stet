@@ -719,7 +719,7 @@ workspace is layered so you can pick up just the pieces you need.
 |-------|---------------|-------------------|
 | `stet-tiny-skia-path` | none | Bezier path primitives (vendored, BSD-3) |
 | `stet-tiny-skia` | stet-tiny-skia-path | Software rasterizer (vendored, BSD-3) |
-| `stet-fonts` | none | Type 1 / CFF / TrueType parsing, `PsPath`, `Matrix`, AGL, encodings |
+| `stet-fonts` | none | Type 1 / CFF / TrueType parsing, `PsPath`, `Matrix`, AGL, encodings, ToUnicode CMaps, CJK CID ↔ Unicode tables |
 | `stet-graphics` | stet-fonts | `DisplayList`, `DeviceColor`, `IccCache`, mesh-shading parser |
 | `stet-pdf-reader` | stet-fonts, stet-graphics | PDF → `DisplayList`; no PS interpreter involved |
 

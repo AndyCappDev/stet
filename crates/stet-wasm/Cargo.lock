@@ -542,6 +542,7 @@ dependencies = [
 name = "stet-fonts"
 version = "0.8.1"
 dependencies = [
+ "flate2",
  "glob",
  "rustc-hash",
  "serde",
