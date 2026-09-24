@@ -1,6 +1,6 @@
 <h1 align="center">stet</h1>
 
-<p align="center">A modern, open-source PostScript and PDF rendering engine written in pure Rust.</p>
+<p align="center">A pure-Rust graphics engine for PDF, PostScript, and EPS.</p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/Version-0.8.1-blue" alt="Version 0.8.1">
@@ -10,14 +10,17 @@
 
 ## About
 
-stet interprets PostScript (Level 3) and parses PDF files, rendering both
-to PNG images, PDF documents, or display lists through a unified pipeline.
-It can also render them in an interactive desktop viewer or a browser-based
-WASM viewer.
+stet combines a full PostScript Level 3 interpreter and a PDF reader with a
+unified graphics pipeline built around a single display-list representation.
+
+Both formats are interpreted into the same display list, so every rendering
+and output path works regardless of the source format. Display lists can be
+rendered to PNG or PDF, inspected and processed by your own code, or shown
+interactively in a native desktop viewer or a browser-based WASM viewer.
 
 The PostScript interpreter and PDF reader are independent — use either or
-both — but they produce the same display list type, so every output device
-and rendering path works with both sources.
+both. The PDF reader also exposes document structure: outlines, annotations,
+form fields, layers, and embedded files.
 
 ## Getting started
 
