@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`stet_pdf_reader::content::graphics_state::PdfGraphicsState` has two new
+  fields, `fill_color_source` and `stroke_color_source`,** which the reader
+  uses to re-convert colours when the rendering intent changes before
+  painting (see Fixed). Code that builds a `PdfGraphicsState` with a struct
+  literal no longer compiles; use `PdfGraphicsState::new(ctm)` and set the
+  fields you need. Reading the struct is unaffected. This is interpreter
+  state that is public only because its module is; a later release will mark
+  it `#[non_exhaustive]` so outside code cannot construct it directly.
+
 ### Deprecated
 
 - **`stet_graphics::icc::intent_from_pdf_byte`.** It decoded the PDF
