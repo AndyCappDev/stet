@@ -146,8 +146,8 @@ the rasterizer (which renders text via Fill elements with glyph outlines).
 TextRun { params: TextRunParams }
 ```
 
-The text one show operation displayed, in Unicode, with the position of
-every glyph — for text extraction, search and selection. Unlike `Text`, it
+A stretch of shown text, in Unicode, with the position of every glyph —
+for text extraction, search and selection. Unlike `Text`, it
 carries no font for re-emission, and **both** producers can record it: the
 PostScript interpreter (`Context::extract_text`, or
 `InterpreterBuilder::extract_text()` on the `stet` facade) and the PDF
@@ -160,8 +160,28 @@ it. It nests like the content it describes, so a run inside a layer sits
 inside that layer's `OcgGroup` — walk the list with the `LayerSet` you
 render with to extract only visible layers' text.
 
-The PDF reader records one run per text-showing operator (`Tj`, `TJ`, `'`,
-`"`), placed after the glyphs it draws, and none for text drawn inside a
+**What a run holds.** Consecutive glyphs of one font at one size,
+orientation and (PDF) visibility that carry on along one baseline —
+whether one show operator displayed them or several did, so a producer
+that shows a glyph at a time still gives one run per stretch of text. A
+glyph that leaves the baseline (a new line, a superscript) or jumps back by
+more than the font's height starts a new run. The rule is
+`TextRunParams::step_to` in `stet_graphics::text`, with its constants
+(`WORD_GAP`, `BASELINE_TOLERANCE`, `BACKWARD_LIMIT`) as fractions of the
+font's height, `ascent - descent`; both producers apply it. Where a glyph
+follows a gap of at least `WORD_GAP` (a tenth of the height) with no space
+shown on either side — TeX sets words apart by distance, not by space
+characters — `word_breaks` marks the byte offset in `text`, which itself
+stays exactly as shown. Inside a PDF `/ActualText` span, whose text the
+author gave, no breaks are marked.
+
+A run is added to the display list when its show operator finishes, after
+the glyphs it draws; a later glyph that carries it on takes it back
+(`DisplayList::remove`) and adds it again after its own. Runs are
+therefore in the order their last glyphs were shown.
+
+The PDF reader records the text of the text-showing operators (`Tj`, `TJ`,
+`'`, `"`), and none for text drawn inside a
 Type 3 glyph procedure, a tiling pattern cell or a soft-mask group — that
 text is part of a glyph, a paint or a mask, not of the document. Inside an
 `/ActualText` span the span's text replaces its glyphs': the first glyph
@@ -172,14 +192,13 @@ drawn figure — has nowhere to put its text and is dropped. Glyph space is
 1000 units per em for every font but Type 3, whose glyph space is its own
 `/FontMatrix`'s.
 
-The PostScript interpreter records one run per string a show operator
-shows (`show`, `ashow`, `widthshow`, `awidthshow`, `kshow`, `xshow`,
-`yshow`, `xyshow`, and `glyphshow`'s single glyph) — or, for a composite
-font, one per stretch of glyphs from the same descendant font —
-and none for text drawn inside a Type 3 font's `BuildChar` / `BuildGlyph`
-or a pattern cell's `PaintProc`. A `show` inside a `kshow` procedure
-records its own run, splitting the kshow's around it, so runs stay in page
-order. `cshow` records nothing itself: the shows its procedure makes do,
+The PostScript interpreter records the text of every show operator
+(`show`, `ashow`, `widthshow`, `awidthshow`, `kshow`, `xshow`, `yshow`,
+`xyshow`, and `glyphshow`'s single glyph) — a composite font's glyphs
+running per descendant font — and none for text drawn inside a Type 3
+font's `BuildChar` / `BuildGlyph` or a pattern cell's `PaintProc`. A
+`show` inside a `kshow` procedure carries on the kshow's run when it
+continues its baseline. `cshow` records nothing itself: the shows its procedure makes do,
 with the whole character code `cshow` selected. The `xshow` family moves
 glyphs by its displacements, but each glyph's `advance` is still its own
 width. Glyph space is the font's own — 1000 units per em for Type 1 and
@@ -196,12 +215,15 @@ collections: PostScript has no ToUnicode.
 |-------|------|-------------|
 | `text` | `String` | Every glyph's text, concatenated in the order shown |
 | `glyphs` | `Vec<ShownGlyph>` | One entry per glyph, in content order |
-| `glyph_to_device` | `Matrix` | Glyph space → device space at the run's start (font matrix, size, horizontal scaling, rise, text matrix, CTM) |
+| `glyph_to_device` | `Matrix` | Glyph space → device space for the run's first glyph (font matrix, size, horizontal scaling, rise, text matrix, CTM); its linear part holds for every glyph |
 | `ascent` | `f64` | Font ascent in glyph space (≈ 800 for a 1000-unit font) |
 | `descent` | `f64` | Font descent in glyph space (≈ -200 for a 1000-unit font) |
 | `font_name` | `String` | PDF `/BaseFont` or PostScript `/FontName`; empty if none |
 | `invisible` | `bool` | Shown but not painted (PDF render modes 3 and 7, e.g. OCR layers) |
 | `vertical` | `bool` | Vertical writing: origins are vertical origins (top centre of the glyph), advances point down the column, and `ascent` / `descent` (±half the em) bound the glyph across the column |
+| `start` | `(f64, f64)` | Device-space origin of the first glyph |
+| `end` | `(f64, f64)` | Device-space point where the last glyph ends (its origin plus its advance) |
+| `word_breaks` | `Vec<u32>` | Ascending byte offsets in `text` where a word's gap separated two glyphs with no space shown; insert a space at each to read words |
 
 `ShownGlyph`:
 

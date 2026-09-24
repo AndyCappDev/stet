@@ -49,6 +49,7 @@ use stet_graphics::image_limits::{
     validate_bits_per_component, validate_image_dimension, validate_image_size,
 };
 use stet_graphics::rendering_intent;
+use stet_graphics::text::GlyphStep;
 
 /// Maximum nesting of re-entrant content streams.
 ///
@@ -89,17 +90,97 @@ struct ActualTextSpan {
     consumed: bool,
 }
 
-/// A `TextRun` being recorded by one show operator.
-struct OpenTextRun {
-    params: TextRunParams,
+/// A show operator's text recording, with what stays fixed while it runs:
+/// its font, text state and rendering mode.
+struct TextShow {
+    /// The run being recorded, once a glyph has been shown.
+    run: Option<OpenTextRun>,
+    /// Glyph space → text space: the text state (font size, horizontal
+    /// scaling, rise) after the glyph space's 1000 units per em — or, for
+    /// Type 3, its font matrix.
+    glyph_to_text: Matrix,
+    /// The font's `Arc` address: a run holds one font's glyphs.
+    font_key: usize,
     /// Where the glyphs' text comes from; `None` for a font with no
     /// dictionary (a stand-in for a missing font resource).
     font: Option<Arc<FontText>>,
+    ascent: f64,
+    descent: f64,
+    font_name: String,
+    invisible: bool,
+    vertical: bool,
 }
 
-/// The run a show operator had open when text extraction was suspended:
-/// see [`ContentInterpreter::suspend_text_extraction`].
-struct SuspendedTextRun(Option<OpenTextRun>);
+/// A `TextRun` being recorded.
+struct OpenTextRun {
+    params: TextRunParams,
+    /// Where the glyphs' text comes from, as [`TextShow::font`].
+    font: Option<Arc<FontText>>,
+    /// As [`TextShow::font_key`].
+    font_key: usize,
+    /// The glyph just recorded followed a word's gap; the next text
+    /// appended, if it does not start or follow a space, is a new word.
+    pending_word_break: bool,
+}
+
+/// A run added to the display list, kept so that a later glyph carrying on
+/// from where it ended can reopen it: runs span show operators.
+struct FlushedTextRun {
+    /// Its index in the display list it was added to.
+    index: usize,
+    /// The run's `end`, text length and glyph count, which the element at
+    /// `index` must still have for it to be this run — the list in use may
+    /// since have changed (a transparency group, a soft mask, a layer).
+    end: (f64, f64),
+    text_len: usize,
+    glyph_count: usize,
+    /// The run, its `params` moved into the display list.
+    run: OpenTextRun,
+}
+
+/// The recording a show operator had open when text extraction was
+/// suspended: see [`ContentInterpreter::suspend_text_extraction`].
+struct SuspendedTextRun(Option<TextShow>);
+
+/// Whether a glyph of `show`, with glyph-space → device linear part
+/// `linear`, is in the font (`font_key`), size, orientation and rendering
+/// mode of the run `params` describes.
+fn text_run_accepts(
+    font_key: usize,
+    params: &TextRunParams,
+    show: &TextShow,
+    linear: [f64; 4],
+) -> bool {
+    let m = &params.glyph_to_device;
+    font_key == show.font_key
+        && params.invisible == show.invisible
+        && params.vertical == show.vertical
+        && [m.a, m.b, m.c, m.d]
+            .iter()
+            .zip(linear)
+            .all(|(a, b)| (a - b).abs() <= 1e-9 * a.abs().max(b.abs()).max(1.0))
+}
+
+/// Open a run for a glyph of `show` at device-space `origin`, whose glyph
+/// (0, 0) maps to device space by `glyph_to_device`.
+fn open_text_run(show: &TextShow, glyph_to_device: Matrix, origin: (f64, f64)) -> OpenTextRun {
+    OpenTextRun {
+        params: TextRunParams {
+            glyph_to_device,
+            ascent: show.ascent,
+            descent: show.descent,
+            font_name: show.font_name.clone(),
+            invisible: show.invisible,
+            vertical: show.vertical,
+            start: origin,
+            end: origin,
+            ..TextRunParams::default()
+        },
+        font: show.font.clone(),
+        font_key: show.font_key,
+        pending_word_break: false,
+    }
+}
 
 /// Read a numeric array entry, following an indirect reference if needed.
 ///
@@ -305,8 +386,10 @@ pub struct ContentInterpreter<'a> {
     /// on, keyed by the font's `Arc` address. The `Arc` is held so the
     /// address cannot be reused by another font.
     font_text: std::collections::HashMap<usize, (Arc<PdfFont>, Arc<FontText>)>,
-    /// The `TextRun` the current show operator is recording.
-    text_run: Option<OpenTextRun>,
+    /// The current show operator's text recording.
+    text_show: Option<TextShow>,
+    /// The run a show operator last added to the display list.
+    last_text_run: Option<FlushedTextRun>,
     /// The open `/ActualText` span, if any. Kept beside `mc_stack` rather
     /// than in it because a form XObject interpreted inside the span starts
     /// a stack of its own, yet its glyphs are still the span's.
@@ -388,7 +471,8 @@ impl<'a> ContentInterpreter<'a> {
             overprint_enabled,
             extract_text: false,
             font_text: std::collections::HashMap::new(),
-            text_run: None,
+            text_show: None,
+            last_text_run: None,
             actual_text: None,
             text_suspended: 0,
             pattern_cache: std::collections::HashMap::new(),
@@ -3062,16 +3146,16 @@ impl<'a> ContentInterpreter<'a> {
     /// [`Self::resume_text_extraction`].
     fn suspend_text_extraction(&mut self) -> SuspendedTextRun {
         self.text_suspended += 1;
-        SuspendedTextRun(self.text_run.take())
+        SuspendedTextRun(self.text_show.take())
     }
 
     /// Undo [`Self::suspend_text_extraction`].
     fn resume_text_extraction(&mut self, saved: SuspendedTextRun) {
         self.text_suspended -= 1;
-        self.text_run = saved.0;
+        self.text_show = saved.0;
     }
 
-    /// Open a `TextRun` for the show operator about to run, when text
+    /// Start recording text for the show operator about to run, when text
     /// extraction is on.
     fn begin_text_run(&mut self) {
         if !self.extract_text || self.text_suspended > 0 {
@@ -3080,15 +3164,16 @@ impl<'a> ContentInterpreter<'a> {
         let Some(font) = self.current_font.clone() else {
             return;
         };
+        let font_key = Arc::as_ptr(&font) as usize;
         let text = self
             .font_text
-            .get(&(Arc::as_ptr(&font) as usize))
+            .get(&font_key)
             .map(|(_, text)| Arc::clone(text));
         let vertical = font.wmode() == 1;
         let size = self.gstate.font_size;
         // As the glyph loops build the text rendering matrix, except that
         // a vertical glyph's displacement from its origin is left out, so
-        // the translation is the first glyph's origin.
+        // glyph (0, 0) is its origin.
         let text_state = if vertical {
             Matrix::new(size, 0.0, 0.0, size, 0.0, 0.0)
         } else {
@@ -3107,57 +3192,143 @@ impl<'a> ContentInterpreter<'a> {
             PdfFont::Type3(f) => f.font_matrix,
             _ => Matrix::new(0.001, 0.0, 0.0, 0.001, 0.0, 0.0),
         };
-        let glyph_to_device = self
-            .gstate
-            .ctm
-            .concat(&self.gstate.text_matrix)
-            .concat(&text_state)
-            .concat(&font_matrix);
         let (ascent, descent, font_name) = match &text {
             Some(text) => (text.ascent, text.descent, text.font_name.clone()),
             None if vertical => (500.0, -500.0, String::new()),
             None => (800.0, -200.0, String::new()),
         };
-        self.text_run = Some(OpenTextRun {
-            params: TextRunParams {
-                glyph_to_device,
-                ascent,
-                descent,
-                font_name,
-                invisible: self.gstate.text_rendering_mode & 3 == 3,
-                vertical,
-                ..TextRunParams::default()
-            },
+        self.text_show = Some(TextShow {
+            run: None,
+            glyph_to_text: text_state.concat(&font_matrix),
+            font_key,
             font: text,
+            ascent,
+            descent,
+            font_name,
+            invisible: self.gstate.text_rendering_mode & 3 == 3,
+            vertical,
         });
     }
 
-    /// Close the show operator's `TextRun`, adding it to the display list
-    /// when it recorded a glyph.
+    /// Finish the show operator's recording, adding its last run to the
+    /// display list.
     fn end_text_run(&mut self) {
-        if let Some(run) = self.text_run.take()
-            && !run.params.glyphs.is_empty()
-        {
-            self.display_list
-                .push(DisplayElement::TextRun { params: run.params });
+        if let Some(mut show) = self.text_show.take() {
+            self.flush_text_run(&mut show);
         }
     }
 
-    /// Record a glyph in the open `TextRun` at the current text position.
-    /// `code` is the character code shown, `cid` the CID a composite font
-    /// drew, and `width` the glyph's text-space advance before character,
-    /// word and `TJ` spacing.
+    /// Add the show's open run to the display list, if it recorded a
+    /// glyph, and keep it so that a later glyph can reopen it.
+    fn flush_text_run(&mut self, show: &mut TextShow) {
+        let Some(mut run) = show.run.take() else {
+            return;
+        };
+        if run.params.glyphs.is_empty() {
+            return;
+        }
+        let params = std::mem::take(&mut run.params);
+        let (end, text_len, glyph_count) = (params.end, params.text.len(), params.glyphs.len());
+        let index = self.display_list.len();
+        self.display_list.push(DisplayElement::TextRun { params });
+        self.last_text_run = Some(FlushedTextRun {
+            index,
+            end,
+            text_len,
+            glyph_count,
+            run,
+        });
+    }
+
+    /// Take back the run the last show operator added to the display list,
+    /// when a glyph of `show`, with glyph-space → device linear part
+    /// `linear`, at device-space `origin`, carries on from it; with how it
+    /// follows on.
+    fn reopen_text_run(
+        &mut self,
+        show: &TextShow,
+        linear: [f64; 4],
+        origin: (f64, f64),
+    ) -> Option<(OpenTextRun, GlyphStep)> {
+        let last = self.last_text_run.take()?;
+        let Some(DisplayElement::TextRun { params }) = self.display_list.elements().get(last.index)
+        else {
+            return None;
+        };
+        if !text_run_accepts(last.run.font_key, params, show, linear)
+            || params.end != last.end
+            || params.text.len() != last.text_len
+            || params.glyphs.len() != last.glyph_count
+        {
+            return None;
+        }
+        let step = params.step_to(origin);
+        if step == GlyphStep::Leaves {
+            return None;
+        }
+        let DisplayElement::TextRun { params } = self.display_list.remove(last.index) else {
+            unreachable!("the element was just seen to be a TextRun");
+        };
+        let mut run = last.run;
+        run.params = params;
+        Some((run, step))
+    }
+
+    /// Record a glyph at the current text position. `code` is the
+    /// character code shown, `cid` the CID a composite font drew, and
+    /// `width` the glyph's text-space advance before character, word and
+    /// `TJ` spacing. A glyph that leaves the open run's baseline
+    /// ([`TextRunParams::step_to`]) starts a new run — or reopens the one
+    /// the last show operator added, when it carries on from that.
     fn record_glyph(&mut self, code: u32, cid: Option<u16>, width: (f64, f64)) {
-        let Some(run) = self.text_run.as_mut() else {
+        let Some(mut show) = self.text_show.take() else {
             return;
         };
         let to_device = self.gstate.ctm.concat(&self.gstate.text_matrix);
-        let rise = if run.params.vertical {
+        let glyph_to_device = to_device.concat(&show.glyph_to_text);
+        let linear = [
+            glyph_to_device.a,
+            glyph_to_device.b,
+            glyph_to_device.c,
+            glyph_to_device.d,
+        ];
+        let rise = if show.vertical {
             0.0
         } else {
             self.gstate.text_rise
         };
-        let start = run.params.text.len() as u32;
+        let origin = to_device.transform_point(0.0, rise);
+        let advance = to_device.transform_delta(width.0, width.1);
+        let step = match &show.run {
+            Some(run) if text_run_accepts(run.font_key, &run.params, &show, linear) => {
+                run.params.step_to(origin)
+            }
+            _ => GlyphStep::Leaves,
+        };
+        let step = if step == GlyphStep::Leaves {
+            self.flush_text_run(&mut show);
+            let (run, step) = self
+                .reopen_text_run(&show, linear, origin)
+                .unwrap_or_else(|| {
+                    (
+                        open_text_run(&show, glyph_to_device, origin),
+                        GlyphStep::Continues,
+                    )
+                });
+            show.run = Some(run);
+            step
+        } else {
+            step
+        };
+        let run = show.run.as_mut().expect("a run was just opened");
+        // Within an /ActualText span only the span's first glyph, which
+        // carries its text, can begin a word.
+        let span_consumed = self.actual_text.as_ref().is_some_and(|span| span.consumed);
+        if step == GlyphStep::WordBreak && !span_consumed {
+            run.pending_word_break = true;
+        }
+
+        let start = run.params.text.len();
         let source = if let Some(span) = self.actual_text.as_mut() {
             // The span's first glyph carries its whole text; the rest
             // carry none, their text being part of it.
@@ -3172,14 +3343,19 @@ impl<'a> ContentInterpreter<'a> {
                 None => UnicodeSource::Unmapped,
             }
         };
-        let end = run.params.text.len() as u32;
+        if run.pending_word_break && run.params.text.len() > start {
+            run.pending_word_break = false;
+            run.params.push_word_break(start);
+        }
         run.params.glyphs.push(ShownGlyph {
-            text_range: start..end,
-            origin: to_device.transform_point(0.0, rise),
-            advance: to_device.transform_delta(width.0, width.1),
+            text_range: start as u32..run.params.text.len() as u32,
+            origin,
+            advance,
             code,
             source,
         });
+        run.params.end = (origin.0 + advance.0, origin.1 + advance.1);
+        self.text_show = Some(show);
     }
 
     /// Render a text string by emitting glyph paths as Fill display elements.

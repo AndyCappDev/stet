@@ -262,8 +262,15 @@ pub struct TextParams {
 }
 
 /// Parameters for a [`TextRun`](crate::display_list::DisplayElement::TextRun)
-/// element: the text one show operation displayed, in Unicode, with the
-/// position of every glyph — for text extraction, search and selection.
+/// element: a stretch of shown text, in Unicode, with the position of every
+/// glyph — for text extraction, search and selection.
+///
+/// A run holds consecutive glyphs of one font at one size and orientation
+/// that carry on along one baseline, whether one show operation displayed
+/// them or several did: a producer that shows each glyph separately still
+/// gives one run per stretch of text. A glyph that leaves the baseline or
+/// jumps well back starts a new run — the rule is
+/// [`step_to`](Self::step_to), in [`crate::text`].
 ///
 /// Recorded only when a producer is asked to extract text (the PostScript
 /// interpreter's `extract_text` flag, the PDF reader's
@@ -282,10 +289,11 @@ pub struct TextRunParams {
     pub text: String,
     /// One entry per glyph shown, in content order.
     pub glyphs: Vec<ShownGlyph>,
-    /// Glyph space → device space at the start of the run: the font matrix,
-    /// font size, horizontal scaling, text rise, text matrix and CTM
-    /// combined. Its translation is the run's starting point; its linear
-    /// part is the same for every glyph in the run.
+    /// Glyph space → device space for the run's first glyph: the font
+    /// matrix, font size, horizontal scaling, text rise, text matrix and
+    /// CTM combined. Its translation places that glyph's glyph-space
+    /// origin — [`start`](Self::start), unless the font matrix is offset;
+    /// its linear part is the same for every glyph in the run.
     ///
     /// A glyph's box is the parallelogram spanned by its
     /// [`advance`](ShownGlyph::advance) and by this matrix's linear part
@@ -318,6 +326,17 @@ pub struct TextRunParams {
     /// its advance points down the column; `ascent` and `descent` bound
     /// the glyph across the column rather than above and below a baseline.
     pub vertical: bool,
+    /// Device-space origin of the run's first glyph.
+    pub start: (f64, f64),
+    /// Device-space point where the run's last glyph ends: its origin plus
+    /// its advance. From `start` to here, the run spans its baseline.
+    pub end: (f64, f64),
+    /// Byte offsets in `text`, ascending, where a word's gap
+    /// ([`WORD_GAP`](crate::text::WORD_GAP)) separated two glyphs with no
+    /// space shown between them: word boundaries drawn as distance rather
+    /// than as characters, the way TeX spaces words. `text` itself is left
+    /// as shown; insert a space at each offset to read it as words.
+    pub word_breaks: Vec<u32>,
 }
 
 /// One glyph of a [`TextRunParams`].

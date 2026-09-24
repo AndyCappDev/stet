@@ -11,12 +11,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`DisplayElement::TextRun`, a display-list element for text
   extraction,** with `TextRunParams`, `ShownGlyph` and `UnicodeSource` in
-  `stet_graphics::device` (re-exported by the `stet` facade). A run is the
-  text one show operation displayed, in Unicode, with each glyph's
-  device-space origin and advance, its character code, and where its text
-  came from; `glyph_to_device`, `ascent` and `descent` give each glyph's
-  box, rotated or skewed like the text, and `vertical` marks vertical
-  writing. It paints nothing, and every renderer and the PDF writer skip
+  `stet_graphics::device` (re-exported by the `stet` facade). A run is a
+  stretch of shown text in one font along one baseline, however many show
+  operations displayed it, in Unicode, with each glyph's device-space
+  origin and advance, its character code, and where its text came from;
+  `glyph_to_device`, `ascent` and `descent` give each glyph's box, rotated
+  or skewed like the text, `start` and `end` span the run, `vertical` marks
+  vertical writing, and `word_breaks` marks where words were set apart by
+  distance rather than by a space character, as TeX sets them. The rule
+  that cuts runs and finds word gaps is `TextRunParams::step_to`, in the
+  new `stet_graphics::text` module, which both producers share. It paints nothing, and every renderer and the PDF writer skip
   it. Both producers get an off-by-default switch —
   `InterpreterBuilder::extract_text()` (or `Context::extract_text`) for
   PostScript and `PdfDocument::set_extract_text(true)` for PDF — and with
@@ -25,8 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `DisplayElement` already have the wildcard arm the enum's
   `#[non_exhaustive]` requires.
 - **Text extraction from PDF.** With `PdfDocument::set_extract_text(true)`,
-  every text-showing operator (`Tj`, `TJ`, `'`, `"`) records a `TextRun`
-  beside the glyphs it draws — in forms, annotation appearances, layers and
+  the text-showing operators (`Tj`, `TJ`, `'`, `"`) record `TextRun`s
+  beside the glyphs they draw — in forms, annotation appearances, layers and
   transparency groups, nested like the content, so a viewer extracts only
   visible layers' text with the `LayerSet` it renders with. Text inside an
   `/ActualText` marked-content span is the span's text — the author's
@@ -48,7 +52,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Text extraction from PostScript.** With
   `InterpreterBuilder::extract_text()`, every show operator — `show`,
   `ashow`, `widthshow`, `awidthshow`, `kshow`, `xshow`, `yshow`, `xyshow`
-  and `glyphshow` — records a `TextRun` per string for Type 1, CFF, Type 42
+  and `glyphshow` — records `TextRun`s for Type 1, CFF, Type 42
   and Type 3 fonts, and for composite fonts: CID-keyed (CFF and
   TrueType, horizontal and vertical) and FMapType, a new run starting
   wherever the descendant font changes. Text comes from each glyph's name
@@ -61,11 +65,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Type 3 font with an empty `FontBBox`, as dvips writes, its glyphs'
   `setcachedevice` boxes). Text drawn inside a
   Type 3 `BuildChar` / `BuildGlyph` or a pattern cell is not recorded; a
-  `show` inside a `kshow` procedure records its own run between the
-  kshow's, and one inside a `cshow` procedure records the whole character
+  `show` inside a `kshow` procedure carries on the kshow's run, and one
+  inside a `cshow` procedure records the whole character
   code `cshow` selected (its procedure sees only the last byte). Forms
   record once and are placed wherever `execform` draws them. A
   `glyphshow` glyph, shown by name, records code 0.
+- **`DisplayList::remove`**, to take an element out of a display list.
 - **`Debug` for `DisplayList` and `DisplayElement`** (and the param structs
   that lacked it: `PatternFillParams`, `GroupParams`, `SoftMaskParams`), so
   a display list can be printed or compared as text.

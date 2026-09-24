@@ -21,6 +21,7 @@
 //! - [`color`] and [`device`] — colour types, line-style primitives,
 //!   paint-parameter structs, and the [`PageSink`](device::PageSink) /
 //!   [`PageSinkFactory`](device::PageSinkFactory) streaming traits.
+//! - [`text`] — how extracted text's glyphs group into runs and words.
 //!
 //! Most users should use the [`stet`](https://crates.io/crates/stet)
 //! facade crate to render PostScript or PDF, and
@@ -36,3 +37,4 @@ pub mod image_limits;
 pub mod layer_set;
 pub mod mesh_shading;
 pub mod rendering_intent;
+pub mod text;

@@ -284,8 +284,8 @@ pub enum DisplayElement {
         /// scale changes.
         mask_cache: Arc<Mutex<Option<Option<MaskRaster>>>>,
     },
-    /// The text one show operation displayed, in Unicode, with per-glyph
-    /// positions — for text extraction. Recorded only when the producer
+    /// A stretch of shown text along one baseline, in Unicode, with
+    /// per-glyph positions — for text extraction. Recorded only when the producer
     /// was asked to extract text. Paints nothing: renderers and the PDF
     /// writer skip it, and it has no paint extent. Unlike [`Text`], it
     /// carries no font for re-emission, and both the PostScript interpreter
@@ -354,6 +354,16 @@ impl DisplayList {
     /// Returns the number of elements.
     pub fn len(&self) -> usize {
         self.elements.len()
+    }
+
+    /// Remove and return the element at `index`, shifting the ones after it
+    /// down.
+    ///
+    /// # Panics
+    ///
+    /// If `index` is out of bounds.
+    pub fn remove(&mut self, index: usize) -> DisplayElement {
+        self.elements.remove(index)
     }
 
     /// Returns a slice of elements starting from the given index.

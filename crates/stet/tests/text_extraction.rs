@@ -199,7 +199,7 @@ fn runs_of(ps: &str) -> Vec<TextRunParams> {
 }
 
 #[test]
-fn show_operators_record_one_run_per_string() {
+fn show_operators_record_runs_along_each_baseline() {
     let lists = render(true);
     let texts: Vec<(Vec<&str>, String)> = runs(&lists[0])
         .into_iter()
@@ -213,7 +213,12 @@ fn show_operators_record_one_run_per_string() {
         "awidth show",
         "kshow",
         "xshow",
-        "yshow",
+        // yshow moves each glyph off the last one's baseline.
+        "y",
+        "s",
+        "h",
+        "o",
+        "w",
         "xy",
         // glyphshow's /Aacute. cshow records nothing itself, and this
         // cshow's procedure shows nothing.
@@ -231,7 +236,7 @@ fn show_operators_record_one_run_per_string() {
     .collect();
     assert_eq!(texts, expected);
     let all = runs(&lists[0]);
-    let composite: Vec<(&str, &str, u32)> = all[11..13]
+    let composite: Vec<(&str, &str, u32)> = all[15..17]
         .iter()
         .map(|(_, r)| (r.text.as_str(), r.font_name.as_str(), r.glyphs[0].code))
         .collect();
@@ -295,8 +300,9 @@ fn glyph_positions_are_in_device_space() {
     let xshow = run("xshow");
     assert!(close(xshow.glyphs[0].advance, (6.0, 0.0)));
     assert!(close(xshow.glyphs[1].origin, (80.0, 192.0)));
-    let yshow = run("yshow");
-    assert!(close(yshow.glyphs[1].origin, (72.0, 212.0 - 2.0)));
+    // yshow's second glyph is 2 points up, on a baseline of its own.
+    let yshow_s = run("s");
+    assert!(close(yshow_s.glyphs[0].origin, (72.0, 212.0 - 2.0)));
 
     // glyphshow shows by name, so there is no character code.
     let glyphshow = run("Á");
@@ -312,6 +318,76 @@ fn glyph_positions_are_in_device_space() {
     let type3 = run("AAA");
     assert!(close(type3.glyphs[0].advance, (12.0, 0.0)));
     assert_eq!((type3.ascent, type3.descent), (1000.0, 0.0));
+}
+
+#[test]
+fn runs_span_show_operators_along_a_baseline() {
+    // A producer that shows a glyph at a time still gives one run per
+    // stretch of text, and a new line starts a new run.
+    let ps = r#"%!PS
+/Helvetica findfont 12 scalefont setfont
+72 700 moveto (H) show (e) show (y) show
+72 686 moveto (you) show
+showpage
+"#;
+    let runs = runs_of(ps);
+    let texts: Vec<&str> = runs.iter().map(|r| r.text.as_str()).collect();
+    assert_eq!(texts, ["Hey", "you"]);
+    assert_eq!(glyph_texts(&runs[0]), ["H", "e", "y"]);
+    assert!(close(runs[0].start, (72.0, 92.0)));
+    let last = &runs[0].glyphs[2];
+    let expected_end = (last.origin.0 + last.advance.0, last.origin.1);
+    assert!(close(runs[0].end, expected_end));
+    assert!(close(runs[1].start, (72.0, 106.0)));
+    assert!(runs.iter().all(|r| r.word_breaks.is_empty()));
+}
+
+#[test]
+fn word_gaps_are_marked_where_no_space_was_shown() {
+    // TeX's way: words placed apart, no space glyph between them. A kern
+    // is no word gap, and a gap after a shown space adds no break.
+    let ps = r#"%!PS
+/Helvetica findfont 12 scalefont setfont
+72 700 moveto (Paper) show 4 0 rmoveto (Title) show 0.5 0 rmoveto (s) show
+72 680 moveto (Hi ) show 4 0 rmoveto (there) show
+showpage
+"#;
+    let runs = runs_of(ps);
+    let texts: Vec<&str> = runs.iter().map(|r| r.text.as_str()).collect();
+    assert_eq!(texts, ["PaperTitles", "Hi there"]);
+    assert_eq!(runs[0].word_breaks, [5]);
+    assert!(runs[1].word_breaks.is_empty());
+}
+
+#[test]
+fn a_run_is_not_reopened_from_another_display_list() {
+    // Text carrying on inside a transparency group sits in the group's
+    // list, so it starts a run of its own there.
+    let ps = r#"%!PS
+/Helvetica findfont 12 scalefont setfont
+72 700 moveto (ab) show
+<< /Isolated true /BBox [0 0 612 792] >> begintransparencygroup
+(c) show
+endtransparencygroup
+(d) show
+showpage
+"#;
+    let mut interp = Interpreter::builder().extract_text().build();
+    let pages = interp
+        .render_to_display_list(ps.as_bytes(), 72.0)
+        .expect("renders");
+    let found: Vec<(Vec<&str>, String)> = runs(&pages[0].display_list)
+        .into_iter()
+        .map(|(path, run)| (path, run.text))
+        .collect();
+    assert_eq!(
+        found,
+        [
+            (vec![], "ab".to_string()),
+            (vec!["group"], "c".to_string()),
+            (vec![], "d".to_string()),
+        ]
+    );
 }
 
 #[test]
@@ -348,11 +424,9 @@ showpage
         vec![
             // The Type 3 glyphs are the text; what BuildChar shows is not.
             owned("BB", &["B", "B"]),
-            // kshow's procedure shows between the characters: its run
-            // splits the kshow's, in page order.
-            owned("a", &["a"]),
-            owned("-", &["-"]),
-            owned("b", &["b"]),
+            // kshow's procedure shows between the characters, carrying on
+            // along the kshow's baseline: one run, in page order.
+            owned("a-b", &["a", "-", "b"]),
             // The same through xshow, whose Type 3 path is its own.
             owned("BB", &["B", "B"]),
         ]
@@ -622,18 +696,23 @@ fn cid_fonts_through_the_displaced_and_cshow_paths() {
     let runs = runs_of(&cid_font_ps(
         cmap,
         "72 700 moveto <30423042> [0 -20 0 -20] xyshow \
-         72 680 moveto { pop pop 1 string dup 0 4 -1 roll put show } <3042> cshow",
+         72 600 moveto { pop pop 1 string dup 0 4 -1 roll put show } <3042> cshow",
     ));
     let summary: Vec<(&str, Vec<u32>)> = runs
         .iter()
         .map(|r| (r.text.as_str(), r.glyphs.iter().map(|g| g.code).collect()))
         .collect();
+    // xyshow puts its second glyph 20 points down the page, on a
+    // baseline of its own.
     assert_eq!(
         summary,
-        [("ああ", vec![0x3042, 0x3042]), ("あ", vec![0x3042])]
+        [
+            ("あ", vec![0x3042]),
+            ("あ", vec![0x3042]),
+            ("あ", vec![0x3042])
+        ]
     );
-    // xyshow's second glyph is 20 points down the page.
-    assert!(close(runs[0].glyphs[1].origin, (72.0, 112.0)));
+    assert!(close(runs[1].glyphs[0].origin, (72.0, 112.0)));
 }
 
 #[test]

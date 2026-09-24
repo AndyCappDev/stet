@@ -25,6 +25,7 @@ FILES=(
     crates/stet-graphics/src/device.rs
     crates/stet-graphics/src/color.rs
     crates/stet-graphics/src/document_structure.rs
+    crates/stet-graphics/src/text.rs
     crates/stet-core/src/error.rs
     crates/stet-core/src/file_store.rs
     crates/stet-pdf-reader/src/error.rs

@@ -431,10 +431,10 @@ pub struct Context {
     /// still pending interpretation. Requires `interrupt_flag` to be set.
     pub yield_after_showpage: bool,
 
-    /// When true, the show operators also record a
-    /// [`DisplayElement::TextRun`](stet_graphics::display_list::DisplayElement::TextRun)
-    /// for each string shown — its text in Unicode, with per-glyph
-    /// positions — for text extraction.
+    /// When true, the show operators also record
+    /// [`DisplayElement::TextRun`](stet_graphics::display_list::DisplayElement::TextRun)s
+    /// of the text they show — in Unicode, with per-glyph positions — for
+    /// text extraction.
     ///
     /// Off by default, and with it off, display lists are exactly what they
     /// would be without the feature: no memory cost and no rendering
@@ -447,6 +447,10 @@ pub struct Context {
     /// font's `BuildChar` / `BuildGlyph`, where the glyph being built is
     /// the text. No show records while it is non-zero.
     pub text_suspended: u32,
+    /// The run a show operator last added to the display list, which a
+    /// later glyph carrying on from where it ended reopens: runs span show
+    /// operators.
+    pub text_last_run: Option<FlushedTextRun>,
 }
 
 /// A show operator's text recording: see [`Context::text_capture`].
@@ -478,6 +482,25 @@ pub struct OpenTextRun {
     /// Whether `params`' ascent and descent come from a glyph's box yet,
     /// rather than the defaults.
     pub glyph_box_seen: bool,
+    /// The glyph just recorded followed a word's gap; the next text
+    /// appended, if it does not start or follow a space, is a new word.
+    pub pending_word_break: bool,
+}
+
+/// A run added to the display list, whose recording state is kept so a
+/// later glyph can reopen it: see [`Context::text_last_run`].
+#[derive(Debug)]
+pub struct FlushedTextRun {
+    /// Its index in the display list it was added to.
+    pub index: usize,
+    /// The run's `end`, text length and glyph count, which the element at
+    /// `index` must still have for it to be this run — the list in use
+    /// may since have changed (a transparency group, a form, a new page).
+    pub end: (f64, f64),
+    pub text_len: usize,
+    pub glyph_count: usize,
+    /// The run's recording state; its `params` are in the display list.
+    pub run: OpenTextRun,
 }
 
 /// One frame on `Context::group_stack`. Captures paint operators emitted
@@ -1160,6 +1183,7 @@ impl Context {
             extract_text: false,
             text_capture: None,
             text_suspended: 0,
+            text_last_run: None,
         }
     }
 

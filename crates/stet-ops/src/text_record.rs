@@ -10,13 +10,14 @@
 //! [`record_glyph`] just before advancing the current point. With extraction
 //! off, or outside a show operator, `record_glyph` returns at once.
 
-use stet_core::context::{Context, OpenTextRun, TextCapture};
+use stet_core::context::{Context, FlushedTextRun, OpenTextRun, TextCapture};
 use stet_core::dict::DictKey;
 use stet_core::graphics_state::Matrix;
 use stet_core::object::{EntityId, NameId, PsValue};
 use stet_fonts::cid_unicode::UnicodeCMap;
 use stet_graphics::device::{ShownGlyph, TextRunParams, UnicodeSource};
 use stet_graphics::display_list::DisplayElement;
+use stet_graphics::text::GlyphStep;
 
 /// Ascent and descent in a 1000-unit em, for a font with no usable
 /// `FontBBox` or `hhea` table.
@@ -197,8 +198,11 @@ pub(crate) struct Glyph {
     pub vertical: bool,
 }
 
-/// Record `glyph` in the open run, starting a new run when it is the
-/// first, or its font or glyph-space matrix differs from the run's.
+/// Record `glyph` in the open run. A glyph that the run's font, size or
+/// orientation does not fit, or that leaves its baseline
+/// ([`TextRunParams::step_to`]), starts a new run — or reopens the run the
+/// last show operator added, when it carries on from that one: runs span
+/// show operators.
 pub(crate) fn record_glyph(ctx: &mut Context, glyph: Glyph) {
     let Some(mut capture) = ctx.text_capture.take() else {
         return;
@@ -206,19 +210,21 @@ pub(crate) fn record_glyph(ctx: &mut Context, glyph: Glyph) {
     let ctm = ctx.gstate.ctm;
     let to_device = ctm.concat(&glyph.glyph_space);
     let linear = [to_device.a, to_device.b, to_device.c, to_device.d];
-    let joins = capture.run.as_ref().is_some_and(|run| {
-        run.font == glyph.font
-            && run.params.vertical == glyph.vertical
-            && run
-                .linear
-                .iter()
-                .zip(linear)
-                .all(|(a, b)| (a - b).abs() <= 1e-9 * a.abs().max(b.abs()).max(1.0))
-    });
-    if !joins {
+    let origin = ctm.transform_point(glyph.origin.0, glyph.origin.1);
+    let advance = ctm.transform_delta(glyph.width.0, glyph.width.1);
+    let step = match &capture.run {
+        Some(run) if accepts(run, &glyph, linear) => run.params.step_to(origin),
+        _ => GlyphStep::Leaves,
+    };
+    let step = if step == GlyphStep::Leaves {
         flush_run(ctx, &mut capture);
-        capture.run = Some(open_run(ctx, &glyph, linear));
-    }
+        let (run, step) = reopen_run(ctx, &glyph, linear, origin)
+            .unwrap_or_else(|| (open_run(ctx, &glyph, linear, origin), GlyphStep::Continues));
+        capture.run = Some(run);
+        step
+    } else {
+        step
+    };
     let run = capture.run.as_mut().expect("a run was just opened");
     if run.extent_from_glyphs
         && let GlyphMetrics::Type3 { glyph_box } = glyph.metrics
@@ -232,9 +238,12 @@ pub(crate) fn record_glyph(ctx: &mut Context, glyph: Glyph) {
             run.glyph_box_seen = true;
         }
     }
+    if step == GlyphStep::WordBreak {
+        run.pending_word_break = true;
+    }
 
     let text = &mut run.params.text;
-    let start = text.len() as u32;
+    let start = text.len();
     let source = match glyph.text {
         GlyphText::Name(id) => {
             push_name_text(ctx, id, run.zapf_dingbats, run.hex_glyph_names, text)
@@ -242,20 +251,74 @@ pub(crate) fn record_glyph(ctx: &mut Context, glyph: Glyph) {
         GlyphText::Cid { cid, source } => push_cid_text(glyph.code, cid, source, text),
         GlyphText::None => UnicodeSource::Unmapped,
     };
-    let end = text.len() as u32;
+    if run.pending_word_break && text.len() > start {
+        run.pending_word_break = false;
+        run.params.push_word_break(start);
+    }
     run.params.glyphs.push(ShownGlyph {
-        text_range: start..end,
-        origin: ctm.transform_point(glyph.origin.0, glyph.origin.1),
-        advance: ctm.transform_delta(glyph.width.0, glyph.width.1),
+        text_range: start as u32..run.params.text.len() as u32,
+        origin,
+        advance,
         code: glyph.code,
         source,
     });
+    run.params.end = (origin.0 + advance.0, origin.1 + advance.1);
     ctx.text_capture = Some(capture);
 }
 
-/// Open a run for `glyph`, whose glyph space maps to device space with
-/// `linear` (its glyph-space matrix after the CTM).
-fn open_run(ctx: &Context, glyph: &Glyph, linear: [f64; 4]) -> OpenTextRun {
+/// Whether `glyph`, drawn with glyph-space → device linear part `linear`,
+/// is in `run`'s font, size and orientation.
+fn accepts(run: &OpenTextRun, glyph: &Glyph, linear: [f64; 4]) -> bool {
+    run.font == glyph.font
+        && run.params.vertical == glyph.vertical
+        && run
+            .linear
+            .iter()
+            .zip(linear)
+            .all(|(a, b)| (a - b).abs() <= 1e-9 * a.abs().max(b.abs()).max(1.0))
+}
+
+/// Take back the run the last show operator added to the display list,
+/// when `glyph`, at device-space `origin`, carries on from it; with how it
+/// follows on.
+fn reopen_run(
+    ctx: &mut Context,
+    glyph: &Glyph,
+    linear: [f64; 4],
+    origin: (f64, f64),
+) -> Option<(OpenTextRun, GlyphStep)> {
+    let last = ctx.text_last_run.take()?;
+    if !accepts(&last.run, glyph, linear) {
+        return None;
+    }
+    let Some(DisplayElement::TextRun { params }) =
+        ctx.current_display_list().elements().get(last.index)
+    else {
+        return None;
+    };
+    if params.end != last.end
+        || params.text.len() != last.text_len
+        || params.glyphs.len() != last.glyph_count
+    {
+        return None;
+    }
+    let step = params.step_to(origin);
+    if step == GlyphStep::Leaves {
+        return None;
+    }
+    let DisplayElement::TextRun { params } = ctx.current_display_list_mut().remove(last.index)
+    else {
+        unreachable!("the element was just seen to be a TextRun");
+    };
+    let mut run = last.run;
+    run.params = params;
+    Some((run, step))
+}
+
+/// Open a run for `glyph`, at device-space `origin`, whose glyph space
+/// maps to device space with `linear` (its glyph-space matrix after the
+/// CTM).
+fn open_run(ctx: &Context, glyph: &Glyph, linear: [f64; 4], origin: (f64, f64)) -> OpenTextRun {
     // Glyph (0, 0) sits at the glyph's origin, less any translation in
     // the glyph-space matrix (a FontMatrix offset).
     let glyph_to_device = ctx
@@ -283,6 +346,8 @@ fn open_run(ctx: &Context, glyph: &Glyph, linear: [f64; 4]) -> OpenTextRun {
             descent,
             font_name,
             vertical: glyph.vertical,
+            start: origin,
+            end: origin,
             ..TextRunParams::default()
         },
         font: glyph.font,
@@ -291,17 +356,31 @@ fn open_run(ctx: &Context, glyph: &Glyph, linear: [f64; 4]) -> OpenTextRun {
         hex_glyph_names: encoding_names_are_hex(ctx, glyph.font),
         extent_from_glyphs,
         glyph_box_seen: false,
+        pending_word_break: false,
     }
 }
 
-/// Add the open run to the display list, if it recorded a glyph.
+/// Add the open run to the display list, if it recorded a glyph, and keep
+/// its recording state so a later glyph can reopen it.
 fn flush_run(ctx: &mut Context, capture: &mut TextCapture) {
-    if let Some(run) = capture.run.take()
-        && !run.params.glyphs.is_empty()
-    {
-        ctx.current_display_list_mut()
-            .push(DisplayElement::TextRun { params: run.params });
+    let Some(mut run) = capture.run.take() else {
+        return;
+    };
+    if run.params.glyphs.is_empty() {
+        return;
     }
+    let params = std::mem::take(&mut run.params);
+    let (end, text_len, glyph_count) = (params.end, params.text.len(), params.glyphs.len());
+    let list = ctx.current_display_list_mut();
+    let index = list.len();
+    list.push(DisplayElement::TextRun { params });
+    ctx.text_last_run = Some(FlushedTextRun {
+        index,
+        end,
+        text_len,
+        glyph_count,
+        run,
+    });
 }
 
 /// Append the text glyph name `id` gives, and say where it came from.

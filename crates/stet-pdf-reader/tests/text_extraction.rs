@@ -325,7 +325,7 @@ fn records_the_document_text_and_nothing_else() {
         .iter()
         .map(|(path, run)| (run.text.as_str(), path.clone()))
         .collect();
-    // One run per show operator, in content order, nested like the
+    // A run per stretch of text, in content order, nested like the
     // content. Nothing from the Type 3 glyph procedure (`hidden`), the
     // pattern cell (`cell`) or the soft-mask group (`mask`).
     assert_eq!(
@@ -599,19 +599,17 @@ fn actual_text_replaces_the_text_of_its_span() {
         vec![
             // UTF-16 with a byte-order mark.
             ("ff", vec!["ff"]),
-            // Across two text objects: the first glyph takes the whole
-            // text, every later one in the span takes none.
-            ("xyz", vec!["xyz", ""]),
-            ("", vec![""]),
+            // Across two text objects on one baseline: the first glyph
+            // takes the whole text, every later one in the span takes
+            // none, and the gap between them is no word break.
+            ("xyz", vec!["xyz", "", ""]),
             // An empty ActualText says the glyph is not text: a line-end
             // hyphen.
-            ("hy", vec!["h", "y"]),
-            ("", vec![""]),
+            ("hy", vec!["h", "y", ""]),
             // Properties named in the resources.
             ("named", vec!["named"]),
             // The outermost span wins, in one Tj and the next.
-            ("outer", vec!["outer"]),
-            ("", vec![""]),
+            ("outer", vec!["outer", ""]),
             // A form drawn inside a span is covered by it, and the span
             // carries on after the form.
             ("viaform", vec!["viaform", "", "", ""]),
@@ -626,9 +624,101 @@ fn actual_text_replaces_the_text_of_its_span() {
         ]
     );
     let sources = |i: usize| runs[i].glyphs.iter().map(|g| g.source).collect::<Vec<_>>();
-    assert_eq!(sources(1), [UnicodeSource::ActualText; 2]);
-    assert_eq!(sources(2), [UnicodeSource::ActualText]);
-    assert_eq!(sources(3), [UnicodeSource::GlyphName; 2]);
-    assert_eq!(sources(4), [UnicodeSource::ActualText]);
-    assert_eq!(sources(11), [UnicodeSource::GlyphName; 5]);
+    assert_eq!(sources(1), [UnicodeSource::ActualText; 3]);
+    assert_eq!(
+        sources(2),
+        [
+            UnicodeSource::GlyphName,
+            UnicodeSource::GlyphName,
+            UnicodeSource::ActualText
+        ]
+    );
+    assert_eq!(sources(8), [UnicodeSource::GlyphName; 5]);
+}
+
+/// A one-page PDF whose content is `content`, with `/F1` Helvetica.
+fn helvetica_page(content: &str) -> Vec<u8> {
+    pdf_from(&[
+        "<< /Type /Catalog /Pages 2 0 R >>".into(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R \
+         /Resources << /Font << /F1 5 0 R >> >> >>"
+            .into(),
+        stream("", content),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>".into(),
+    ])
+}
+
+fn page_runs(content: &str) -> Vec<TextRunParams> {
+    runs(&render(&helvetica_page(content), true))
+        .into_iter()
+        .map(|(_, r)| r)
+        .collect()
+}
+
+#[test]
+fn runs_span_show_operators_along_a_baseline() {
+    // One glyph per text object, each placed where the last one ended
+    // (Helvetica's H is 722 units wide), then one per Tj: a run each for
+    // the two lines.
+    let runs = page_runs(
+        "BT /F1 12 Tf 1 0 0 1 72 700 Tm (H) Tj ET \
+         BT /F1 12 Tf 1 0 0 1 80.664 700 Tm (e) Tj ET \
+         BT /F1 12 Tf 72 686 Td (y) Tj (o) Tj (u) Tj ET",
+    );
+    let texts: Vec<&str> = runs.iter().map(|r| r.text.as_str()).collect();
+    assert_eq!(texts, ["He", "you"]);
+    assert!(close(runs[0].start, (72.0, 92.0)));
+    let last = &runs[0].glyphs[1];
+    assert!(close(
+        runs[0].end,
+        (last.origin.0 + last.advance.0, last.origin.1)
+    ));
+    assert!(runs.iter().all(|r| r.word_breaks.is_empty()));
+}
+
+#[test]
+fn tj_word_gaps_are_marked_where_no_space_was_shown() {
+    // TeX's way: `[(Paper)-333(Title)]`. A kern is no word gap, and a gap
+    // after a shown space adds no break.
+    let runs = page_runs(
+        "BT /F1 12 Tf 72 700 Td [(Paper) -333 (Title) -30 (s)] TJ ET \
+         BT /F1 12 Tf 72 680 Td [(Hi ) -333 (there)] TJ ET",
+    );
+    let texts: Vec<&str> = runs.iter().map(|r| r.text.as_str()).collect();
+    assert_eq!(texts, ["PaperTitles", "Hi there"]);
+    assert_eq!(runs[0].word_breaks, [5]);
+    assert!(runs[1].word_breaks.is_empty());
+}
+
+#[test]
+fn a_run_starts_at_its_first_glyph() {
+    // TJ's leading adjustment moves the first glyph before it is shown.
+    let runs = page_runs("BT /F1 12 Tf 72 700 Td [-1000 (A)] TJ ET");
+    assert_eq!(runs.len(), 1);
+    assert!(close(runs[0].start, (84.0, 92.0)));
+    assert!(close(runs[0].glyphs[0].origin, (84.0, 92.0)));
+    let m = runs[0].glyph_to_device;
+    assert!(close((m.tx, m.ty), (84.0, 92.0)));
+}
+
+#[test]
+fn runs_split_where_the_rendering_mode_turns_invisible() {
+    let runs = page_runs("BT /F1 12 Tf 72 700 Td (ab) Tj 3 Tr (cd) Tj ET");
+    let found: Vec<(&str, bool)> = runs
+        .iter()
+        .map(|r| (r.text.as_str(), r.invisible))
+        .collect();
+    assert_eq!(found, [("ab", false), ("cd", true)]);
+}
+
+#[test]
+fn no_word_break_inside_an_actual_text_span() {
+    let runs = page_runs(
+        "BT /F1 12 Tf 72 700 Td (A) Tj \
+         /Span << /ActualText (xy) >> BDC [-500 (a) -1000 (b)] TJ EMC ET",
+    );
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].text, "Axy");
+    assert_eq!(runs[0].word_breaks, [1]);
 }

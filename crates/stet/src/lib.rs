@@ -547,8 +547,10 @@ impl InterpreterBuilder {
     /// Record the text each page shows, for extraction.
     ///
     /// Display lists then also carry [`DisplayElement::TextRun`] elements:
-    /// each string shown, in Unicode, with the device-space position of
-    /// every glyph. They paint nothing, so rendering is unchanged. Off by
+    /// the text shown, in Unicode, with the device-space position of every
+    /// glyph — a run for each stretch of text along one baseline in one
+    /// font, and word breaks marked where words are set apart. They paint
+    /// nothing, so rendering is unchanged. Off by
     /// default, which keeps display lists free of them.
     ///
     /// A glyph's text comes from its name through the Adobe Glyph List;

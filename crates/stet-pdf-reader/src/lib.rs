@@ -399,8 +399,10 @@ impl<'a> PdfDocument<'a> {
     ///
     /// Display lists from [`render_page`](Self::render_page) then also carry
     /// [`DisplayElement::TextRun`](stet_graphics::display_list::DisplayElement::TextRun)
-    /// elements: one per text-showing operator (`Tj`, `TJ`, `'`, `"`), in
-    /// Unicode, with the device-space position of every glyph. They paint
+    /// elements: the text the text-showing operators (`Tj`, `TJ`, `'`, `"`)
+    /// display, in Unicode, with the device-space position of every glyph —
+    /// a run for each stretch of text along one baseline in one font, and
+    /// word breaks marked where words are set apart. They paint
     /// nothing, so rendering is unchanged. Disabled by default, which keeps
     /// display lists free of them — worth keeping off for documents that
     /// are only drawn.
