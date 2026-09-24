@@ -1178,7 +1178,8 @@ fn print_help() {
 Usage:
     stet [OPTIONS] <FILE>...
     stet inspect <FILE.pdf> [--password <PW>]
-    stet text <FILE> [--pages <SPEC>] [--password <PW>] [--json [--word-boxes]]
+    stet text <FILE> [-o <PATH>] [--pages <SPEC>] [--password <PW>]
+              [--json [--word-boxes]]
     stet --help
     stet --version
 
@@ -1246,11 +1247,12 @@ Subcommands:
                             warnings). Use `stet inspect --help` for
                             details.
     text <FILE>             Print the text a PDF, PostScript or EPS file
-                            shows, a line at a time; --pages and
-                            --password as above. --json prints JSON with
-                            each line's position in points; --word-boxes
-                            adds each word's. Use `stet text --help` for
-                            details.
+                            shows, a line at a time; -o writes it to a
+                            file (all pages in one), and --pages and
+                            --password work as above. --json prints JSON
+                            with each line's position in points;
+                            --word-boxes adds each word's. Use
+                            `stet text --help` for details.
 
 Examples:
     stet                                # launch the viewer
@@ -1262,6 +1264,7 @@ Examples:
     stet --device pdf in.pdf            # PDF → PDF (content-fidelity rewrite)
     stet inspect doc.pdf                # show PDF structure
     stet text doc.pdf                   # print the text of a PDF
+    stet text -o doc.txt doc.pdf        # write it to doc.txt
     stet text --json --pages 2 doc.ps   # page 2's text, with positions
 
 Documentation: https://github.com/AndyCappDev/stet
@@ -2715,6 +2718,7 @@ fn run_text_subcommand(args: &[String]) -> i32 {
         password: None,
         json: false,
         word_boxes: false,
+        output: None,
     };
     let mut path: Option<String> = None;
     let mut i = 0;
@@ -2741,6 +2745,14 @@ fn run_text_subcommand(args: &[String]) -> i32 {
                     return 1;
                 };
                 options.password = Some(pw.clone());
+                i += 2;
+            }
+            "-o" | "--output" => {
+                let Some(output) = args.get(i + 1) else {
+                    eprintln!("Error: --output requires a value");
+                    return 1;
+                };
+                options.output = Some(output.clone());
                 i += 2;
             }
             "--json" => {
@@ -2772,7 +2784,8 @@ fn run_text_subcommand(args: &[String]) -> i32 {
     let Some(path) = path else {
         eprintln!("Error: `stet text` requires a file path");
         eprintln!(
-            "Usage: stet text <FILE> [--pages <SPEC>] [--password <PW>] [--json [--word-boxes]]"
+            "Usage: stet text <FILE> [-o <PATH>] [--pages <SPEC>] [--password <PW>] \
+             [--json [--word-boxes]]"
         );
         return 1;
     };

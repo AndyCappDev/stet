@@ -111,19 +111,22 @@ order is kept, and columns, tables and reading order are not detected.
 
 ```bash
 stet text document.pdf
+stet text -o document.txt document.pdf
 stet text --pages 2-3 document.ps
 stet text --json --word-boxes document.pdf
 ```
 
 `--json` prints each line with its position — points from the page's
-top-left corner, y downward — and `--word-boxes` adds each word's.
+top-left corner, y downward — and `--word-boxes` adds each word's. `-o`
+writes to a file instead of stdout, every selected page in one file.
 
 ## Options
 
 ```
 stet [OPTIONS] <FILE>...
 stet inspect <FILE.pdf> [--password <PW>]
-stet text <FILE> [--pages <SPEC>] [--password <PW>] [--json [--word-boxes]]
+stet text <FILE> [-o <PATH>] [--pages <SPEC>] [--password <PW>]
+          [--json [--word-boxes]]
 stet --help
 stet --version
 

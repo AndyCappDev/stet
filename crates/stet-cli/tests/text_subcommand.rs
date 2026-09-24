@@ -130,9 +130,39 @@ fn text_of_a_pdf() {
 }
 
 #[test]
+fn output_goes_to_a_file() {
+    let input = TempFile::new("two.ps", TWO_PAGES.as_bytes());
+    let output = TempFile(input.0.with_extension("txt"));
+    let path = output.0.to_str().expect("UTF-8 temp path");
+    // Written whole, with nothing on stdout.
+    assert_eq!(stdout(&stet_text(&["-o", path], &input)), "");
+    assert_eq!(
+        std::fs::read_to_string(&output.0).expect("output written"),
+        "Paper Title\nsecond line\n\x0cPage two\n\x0c"
+    );
+    std::fs::remove_file(&output.0).expect("remove output");
+
+    // Input that fails leaves no empty file behind.
+    let broken = TempFile::new("broken.pdf", b"%PDF-1.7\nnot a pdf");
+    let result = stet_text(&["--output", path], &broken);
+    assert!(!result.status.success());
+    assert!(!output.0.exists());
+
+    // Nor does a file that cannot be created succeed.
+    let result = stet_text(&["-o", "/nonexistent-dir/out.txt"], &input);
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("/nonexistent-dir/out.txt"));
+}
+
+#[test]
 fn bad_arguments_fail() {
     let input = TempFile::new("two.ps", TWO_PAGES.as_bytes());
-    for args in [&["--word-boxes"][..], &["--pages", "0"], &["--bogus"]] {
+    for args in [
+        &["--word-boxes"][..],
+        &["--pages", "0"],
+        &["--bogus"],
+        &["-o"],
+    ] {
         let output = stet_text(args, &input);
         assert!(!output.status.success(), "{args:?}");
         assert!(output.stdout.is_empty(), "{args:?}");

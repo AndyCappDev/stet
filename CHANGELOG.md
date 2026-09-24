@@ -79,7 +79,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   separated, invisible OCR text is included, and layers hidden by default
   are left out. `--json` prints JSON with each line's position in points
   from the page's top-left corner, and `--word-boxes` adds each word's;
-  `--pages` and `--password` work as for rendering.
+  `-o` / `--output` writes every selected page to one file instead of
+  stdout, and `--pages` and `--password` work as for rendering.
 - **Assembling extracted text into words and lines**, in
   `stet_graphics::text` and re-exported by the `stet` facade (with
   `LayerSet`). `text_runs` collects a page's `TextRun`s in content order,

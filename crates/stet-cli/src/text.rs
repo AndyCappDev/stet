@@ -27,6 +27,8 @@ pub struct TextOptions {
     pub json: bool,
     /// In JSON, give every word its box, which needs every glyph recorded.
     pub word_boxes: bool,
+    /// Write to this file instead of stdout.
+    pub output: Option<String>,
 }
 
 /// One page's text.
@@ -68,7 +70,21 @@ pub fn run_text(path: &str, options: &TextOptions) -> i32 {
         return 1;
     };
 
-    let mut out = std::io::stdout().lock();
+    // Created only now, so a file that fails to open or parse leaves no
+    // empty output behind.
+    let (mut out, destination): (Box<dyn Write>, String) = match &options.output {
+        Some(output) => match std::fs::File::create(output) {
+            Ok(file) => (
+                Box::new(std::io::BufWriter::new(file)),
+                format!("'{output}'"),
+            ),
+            Err(e) => {
+                eprintln!("Error: cannot create '{output}': {e}");
+                return 1;
+            }
+        },
+        None => (Box::new(std::io::stdout().lock()), "the text".into()),
+    };
     let written = if options.json {
         write_json(&mut out, &pages)
     } else {
@@ -77,9 +93,9 @@ pub fn run_text(path: &str, options: &TextOptions) -> i32 {
     match written.and_then(|()| out.flush()) {
         Ok(()) => 0,
         // A closed pipe (`stet text doc.pdf | head`) is not an error.
-        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => 0,
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe && options.output.is_none() => 0,
         Err(e) => {
-            eprintln!("Error: cannot write the text: {e}");
+            eprintln!("Error: cannot write {destination}: {e}");
             1
         }
     }
@@ -186,7 +202,7 @@ fn ps_pages(
 /// What `stet text --help` prints.
 pub fn print_text_help() {
     println!(
-        "stet text <FILE> [--pages <SPEC>] [--password <PW>] [--json [--word-boxes]]
+        "stet text <FILE> [-o <PATH>] [--pages <SPEC>] [--password <PW>] [--json [--word-boxes]]
 
 Prints the text a PDF, PostScript or EPS file shows, a line at a time in
 the order the file draws it, each page ending with a form feed.
@@ -197,6 +213,9 @@ tables and reading order are not detected. Invisible text (an OCR layer)
 is included; text in layers hidden by default is not.
 
 Options:
+    -o, --output <PATH>
+                     Write to PATH instead of stdout: every page selected, in
+                     one file (\"%d\" is not a page template here).
     --pages <SPEC>   Pages to print: \"3\", \"1-5\", \"1-3,7,10-12\".
     --password <PW>  Password for encrypted PDF input.
     --json           Print JSON instead: {{\"pages\": [{{\"page\", \"width\",

@@ -185,7 +185,7 @@ zoom presets, minimap navigation, and drag-and-drop.
 | Option | Description |
 |--------|------------|
 | `--device <TYPE>` | Output: `png`, `pdf`, `viewer` (default), `null` |
-| `-o`, `--output <PATH>` | Write output to `PATH` instead of alongside the input. A `%d` token becomes the page number (`%03d` zero-pads); without one, `PATH` is a single file and a second page is an error. One input file at a time. See [Choosing where output goes](#choosing-where-output-goes). |
+| `-o`, `--output <PATH>` | Write output to `PATH` instead of alongside the input. A `%d` token becomes the page number (`%03d` zero-pads); without one, `PATH` is a single file and a second page is an error. One input file at a time. See [Choosing where output goes](#choosing-where-output-goes). With [`stet text`](#stet-text-file), the file for the text: every page in one, `%d` not a template. |
 | `--dpi <DPI>` | Resolution (overrides device default; all built-in devices default to 300) |
 | `--pages <RANGE>` | Page filter: `1`, `1-5`, `2,4,6` |
 | `--page <SIZE>` | Page size for PostScript/EPS input: a named size (`letter`, `legal`, `tabloid`, `ledger`, `executive`, `a0`–`a6`, `b4`, `b5`) or `WIDTHxHEIGHT` in points, e.g. `620x1000`. Add `-landscape` / `-portrait` to orient a named size. See [Page size](#page-size). |
@@ -311,6 +311,7 @@ detected.
 
 ```bash
 stet text document.pdf                       # plain text, every page
+stet text -o document.txt document.pdf       # written to a file
 stet text --pages 2-3 document.ps            # pages 2 and 3
 stet text --json document.pdf                # with each line's position
 stet text --json --word-boxes document.pdf   # and each word's
@@ -320,8 +321,10 @@ stet text --json --word-boxes document.pdf   # and each word's
 "bbox", "vertical", "words": [{"text"}]}]}]}`, with positions in points
 from the page's top-left corner, y downward, and each `bbox` as
 `[x0, y0, x1, y1]`. `--word-boxes` adds a `bbox` to every word; it records
-every glyph's position, which takes more memory. `--pages` and
-`--password` work as for rendering. The same text is available to library
+every glyph's position, which takes more memory. `-o` / `--output`
+writes to a file instead of stdout — every selected page in one file, so
+`%d` is not a page template here — and `--pages` and `--password` work as
+for rendering. The same text is available to library
 users: see [Display List Architecture](docs/DISPLAY-LIST.md#textrun).
 
 ## Display List Architecture
