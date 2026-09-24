@@ -272,9 +272,10 @@ pub struct TextParams {
 /// jumps well back starts a new run — the rule is
 /// [`step_to`](Self::step_to), in [`crate::text`].
 ///
-/// Recorded only when a producer is asked to extract text (the PostScript
-/// interpreter's `extract_text` flag, the PDF reader's
-/// `set_extract_text`). It paints nothing: renderers and the PDF writer
+/// Recorded only when a producer is asked to extract text, at a
+/// [`TextExtraction`] level (the PostScript interpreter's
+/// `text_extraction`, the PDF reader's `set_text_extraction`). It paints
+/// nothing: renderers and the PDF writer
 /// skip it, and the glyphs themselves are drawn by the elements that
 /// accompany it.
 ///
@@ -389,6 +390,31 @@ pub enum UnicodeSource {
     /// Nothing gave the glyph any text; its range is empty.
     #[default]
     Unmapped,
+}
+
+/// How much text a producer records as
+/// [`TextRun`](crate::display_list::DisplayElement::TextRun)s.
+///
+/// Marked `#[non_exhaustive]`: new levels may be added, so `match` on it
+/// with a wildcard arm.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum TextExtraction {
+    /// Record no text: display lists carry no `TextRun`s. The default.
+    #[default]
+    Off,
+    /// Record runs without their glyphs: each run's text, font, extent
+    /// ([`start`](TextRunParams::start), [`end`](TextRunParams::end),
+    /// [`glyph_to_device`](TextRunParams::glyph_to_device), `ascent`,
+    /// `descent`) and word breaks, with
+    /// [`glyphs`](TextRunParams::glyphs) empty. The runs are those of
+    /// [`Glyphs`](Self::Glyphs), cut the same way, in about half the
+    /// memory — enough to search, index or copy a page's text and to find
+    /// its lines, but not to place a glyph or a word within a run.
+    Runs,
+    /// Record runs with every glyph: its position, advance, character code
+    /// and where its text came from.
+    Glyphs,
 }
 
 /// Parameters for stroking a path.

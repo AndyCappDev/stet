@@ -230,7 +230,7 @@ pub fn op_kshow(ctx: &mut Context) -> Result<(), PsError> {
 }
 
 /// Run a show operator's rendering with text recording around it (when
-/// `Context::extract_text` is on), closing the recording whether or not the
+/// `Context::text_extraction` is on), closing the recording whether or not the
 /// rendering succeeds.
 fn recorded_show(
     ctx: &mut Context,

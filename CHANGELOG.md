@@ -20,15 +20,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   vertical writing, and `word_breaks` marks where words were set apart by
   distance rather than by a space character, as TeX sets them. The rule
   that cuts runs and finds word gaps is `TextRunParams::step_to`, in the
-  new `stet_graphics::text` module, which both producers share. It paints nothing, and every renderer and the PDF writer skip
-  it. Both producers get an off-by-default switch —
-  `InterpreterBuilder::extract_text()` (or `Context::extract_text`) for
-  PostScript and `PdfDocument::set_extract_text(true)` for PDF — and with
-  it off, display lists are unchanged. Both record runs (below). Renderers
-  that match on
+  new `stet_graphics::text` module, which both producers share. It paints
+  nothing, and every renderer and the PDF writer skip it. Both producers
+  take a `TextExtraction` level, `Off` by default —
+  `InterpreterBuilder::text_extraction` (or `Context::text_extraction`) for
+  PostScript and `PdfDocument::set_text_extraction` for PDF. With it off,
+  display lists are unchanged; `Glyphs` records runs with every glyph, and
+  `Runs` the same runs with `glyphs` left empty, in about half the memory,
+  for callers that want a page's text and lines but not each glyph's
+  place. Both record runs (below). Renderers that match on
   `DisplayElement` already have the wildcard arm the enum's
   `#[non_exhaustive]` requires.
-- **Text extraction from PDF.** With `PdfDocument::set_extract_text(true)`,
+- **Text extraction from PDF.** With `PdfDocument::set_text_extraction`,
   the text-showing operators (`Tj`, `TJ`, `'`, `"`) record `TextRun`s
   beside the glyphs they draw — in forms, annotation appearances, layers and
   transparency groups, nested like the content, so a viewer extracts only
@@ -50,7 +53,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   glyph procedure (the glyph is the text), in a tiling pattern cell, or in
   a soft-mask group.
 - **Text extraction from PostScript.** With
-  `InterpreterBuilder::extract_text()`, every show operator — `show`,
+  `InterpreterBuilder::text_extraction`, every show operator — `show`,
   `ashow`, `widthshow`, `awidthshow`, `kshow`, `xshow`, `yshow`, `xyshow`
   and `glyphshow` — records `TextRun`s for Type 1, CFF, Type 42
   and Type 3 fonts, and for composite fonts: CID-keyed (CFF and

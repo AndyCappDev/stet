@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Recording `TextRun` elements from the show operators, for text
-//! extraction (`Context::extract_text`).
+//! extraction (`Context::text_extraction`).
 //!
 //! A show operator brackets its work with [`begin_show`] / [`end_show`], and
 //! each rendering loop reports every glyph it shows through
@@ -15,7 +15,7 @@ use stet_core::dict::DictKey;
 use stet_core::graphics_state::Matrix;
 use stet_core::object::{EntityId, NameId, PsValue};
 use stet_fonts::cid_unicode::UnicodeCMap;
-use stet_graphics::device::{ShownGlyph, TextRunParams, UnicodeSource};
+use stet_graphics::device::{ShownGlyph, TextExtraction, TextRunParams, UnicodeSource};
 use stet_graphics::display_list::DisplayElement;
 use stet_graphics::text::GlyphStep;
 
@@ -39,7 +39,7 @@ pub(crate) struct ShowRecording {
 /// outer run so far — its glyphs precede this operator's on the page — and
 /// sets the outer recording aside until [`end_show`].
 pub(crate) fn begin_show(ctx: &mut Context) -> ShowRecording {
-    if !ctx.extract_text || ctx.text_suspended > 0 {
+    if ctx.text_extraction == TextExtraction::Off || ctx.text_suspended > 0 {
         return ShowRecording {
             active: false,
             outer: None,
@@ -255,13 +255,15 @@ pub(crate) fn record_glyph(ctx: &mut Context, glyph: Glyph) {
         run.pending_word_break = false;
         run.params.push_word_break(start);
     }
-    run.params.glyphs.push(ShownGlyph {
-        text_range: start as u32..run.params.text.len() as u32,
-        origin,
-        advance,
-        code: glyph.code,
-        source,
-    });
+    if ctx.text_extraction == TextExtraction::Glyphs {
+        run.params.glyphs.push(ShownGlyph {
+            text_range: start as u32..run.params.text.len() as u32,
+            origin,
+            advance,
+            code: glyph.code,
+            source,
+        });
+    }
     run.params.end = (origin.0 + advance.0, origin.1 + advance.1);
     ctx.text_capture = Some(capture);
 }
@@ -360,15 +362,13 @@ fn open_run(ctx: &Context, glyph: &Glyph, linear: [f64; 4], origin: (f64, f64)) 
     }
 }
 
-/// Add the open run to the display list, if it recorded a glyph, and keep
-/// its recording state so a later glyph can reopen it.
+/// Add the open run to the display list — a run is opened by its first
+/// glyph, so it has one — and keep its recording state so a later glyph
+/// can reopen it.
 fn flush_run(ctx: &mut Context, capture: &mut TextCapture) {
     let Some(mut run) = capture.run.take() else {
         return;
     };
-    if run.params.glyphs.is_empty() {
-        return;
-    }
     let params = std::mem::take(&mut run.params);
     let (end, text_len, glyph_count) = (params.end, params.text.len(), params.glyphs.len());
     let list = ctx.current_display_list_mut();

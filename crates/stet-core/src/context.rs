@@ -431,16 +431,15 @@ pub struct Context {
     /// still pending interpretation. Requires `interrupt_flag` to be set.
     pub yield_after_showpage: bool,
 
-    /// When true, the show operators also record
-    /// [`DisplayElement::TextRun`](stet_graphics::display_list::DisplayElement::TextRun)s
-    /// of the text they show — in Unicode, with per-glyph positions — for
-    /// text extraction.
+    /// How much of the text the show operators show they record as
+    /// [`DisplayElement::TextRun`](stet_graphics::display_list::DisplayElement::TextRun)s,
+    /// for text extraction: none, runs, or runs with every glyph.
     ///
     /// Off by default, and with it off, display lists are exactly what they
     /// would be without the feature: no memory cost and no rendering
     /// change. Not VM state, so `save`/`restore` leave it alone.
-    pub extract_text: bool,
-    /// The recording a show operator has open while `extract_text` is on;
+    pub text_extraction: stet_graphics::device::TextExtraction,
+    /// The recording a show operator has open while `text_extraction` is on;
     /// `None` outside show operators and while recording is suspended.
     pub text_capture: Option<TextCapture>,
     /// Nesting depth of content whose text is not the document's — a Type 3
@@ -1180,7 +1179,7 @@ impl Context {
             deadline: None,
             steps_to_deadline_check: DEADLINE_CHECK_INTERVAL,
             yield_after_showpage: false,
-            extract_text: false,
+            text_extraction: stet_graphics::device::TextExtraction::Off,
             text_capture: None,
             text_suspended: 0,
             text_last_run: None,

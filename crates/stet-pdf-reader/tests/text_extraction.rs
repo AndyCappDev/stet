@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Scott Bowman
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Text extraction from PDF: `PdfDocument::set_extract_text`.
+//! Text extraction from PDF: `PdfDocument::set_text_extraction`.
 //!
 //! The switch only adds `DisplayElement::TextRun` elements. Everything else
 //! in the display list — and so everything rendered or written to PDF — must
@@ -11,7 +11,7 @@
 
 use stet_graphics::device::{TextRunParams, UnicodeSource};
 use stet_graphics::display_list::{DisplayElement, DisplayList};
-use stet_pdf_reader::PdfDocument;
+use stet_pdf_reader::{PdfDocument, TextExtraction};
 
 /// One page showing text every way a content stream can, and in the places
 /// text can hide: rotated, invisible, in a Type 3 font, in a form XObject,
@@ -164,9 +164,9 @@ fn build_pdf() -> Vec<u8> {
     pdf_from(&objects)
 }
 
-fn render(pdf: &[u8], extract: bool) -> DisplayList {
+fn render(pdf: &[u8], level: TextExtraction) -> DisplayList {
     let mut doc = PdfDocument::from_bytes(pdf).expect("fixture parses");
-    doc.set_extract_text(extract);
+    doc.set_text_extraction(level);
     doc.render_page(0, 72.0).expect("fixture renders")
 }
 
@@ -215,15 +215,35 @@ fn without_text_runs(list: &DisplayList) -> DisplayList {
 #[test]
 fn switch_changes_nothing_but_text_runs() {
     let pdf = build_pdf();
-    let off = render(&pdf, false);
-    let on = render(&pdf, true);
+    let off = render(&pdf, TextExtraction::Off);
     // With the switch off, not a single TextRun at any depth.
     assert_eq!(format!("{off:?}"), format!("{:?}", without_text_runs(&off)));
-    // With it on, removing the TextRuns gives back the list exactly —
-    // including the soft-mask scope that holds nothing but invisible text,
-    // which must not become a `SoftMasked` for the run alone.
-    assert_eq!(format!("{off:?}"), format!("{:?}", without_text_runs(&on)));
-    assert!(!runs(&on).is_empty());
+    for level in [TextExtraction::Runs, TextExtraction::Glyphs] {
+        let on = render(&pdf, level);
+        // With it on, removing the TextRuns gives back the list exactly —
+        // including the soft-mask scope that holds nothing but invisible
+        // text, which must not become a `SoftMasked` for the run alone.
+        assert_eq!(format!("{off:?}"), format!("{:?}", without_text_runs(&on)));
+        assert!(!runs(&on).is_empty());
+    }
+}
+
+#[test]
+fn runs_level_records_the_same_runs_without_glyphs() {
+    for pdf in [build_pdf(), build_cid_pdf(), build_actual_text_pdf()] {
+        let glyphs = runs(&render(&pdf, TextExtraction::Glyphs));
+        let light = runs(&render(&pdf, TextExtraction::Runs));
+        assert_eq!(glyphs.len(), light.len());
+        for ((path, full), (light_path, light)) in glyphs.iter().zip(&light) {
+            assert_eq!(path, light_path);
+            assert!(light.glyphs.is_empty());
+            let without_glyphs = TextRunParams {
+                glyphs: Vec::new(),
+                ..full.clone()
+            };
+            assert_eq!(format!("{without_glyphs:?}"), format!("{light:?}"));
+        }
+    }
 }
 
 /// Recursive element count.
@@ -250,7 +270,7 @@ fn fixture_draws_every_text_construct() {
     // Guards the tests here against a fixture that silently stopped
     // drawing: each visible string paints glyph fills, and the layer,
     // pattern and soft mask arrive as their own elements.
-    let list = render(&build_pdf(), false);
+    let list = render(&build_pdf(), TextExtraction::Off);
     let fills = count(&list, &|e| matches!(e, DisplayElement::Fill { .. }));
     let layers = count(&list, &|e| matches!(e, DisplayElement::OcgGroup { .. }));
     let patterns = count(&list, &|e| matches!(e, DisplayElement::PatternFill { .. }));
@@ -319,7 +339,7 @@ fn close(a: (f64, f64), b: (f64, f64)) -> bool {
 
 #[test]
 fn records_the_document_text_and_nothing_else() {
-    let list = render(&build_pdf(), true);
+    let list = render(&build_pdf(), TextExtraction::Glyphs);
     let runs = runs(&list);
     let texts: Vec<(&str, Vec<&str>)> = runs
         .iter()
@@ -355,7 +375,7 @@ fn records_the_document_text_and_nothing_else() {
 
 #[test]
 fn unicode_sources() {
-    let list = render(&build_pdf(), true);
+    let list = render(&build_pdf(), TextExtraction::Glyphs);
     let runs = runs(&list);
     let run = |text: &str| {
         runs.iter()
@@ -413,7 +433,7 @@ fn unicode_sources() {
 #[test]
 fn glyph_positions_are_in_device_space() {
     // Rendered at 72 dpi, device space is PDF space with y flipped.
-    let list = render(&build_pdf(), true);
+    let list = render(&build_pdf(), TextExtraction::Glyphs);
     let runs = runs(&list);
     let run = |text: &str| &runs.iter().find(|(_, r)| r.text == text).unwrap().1;
 
@@ -504,8 +524,8 @@ fn build_cid_pdf() -> Vec<u8> {
 #[test]
 fn cid_text_from_the_collection() {
     let pdf = build_cid_pdf();
-    let off = render(&pdf, false);
-    let on = render(&pdf, true);
+    let off = render(&pdf, TextExtraction::Off);
+    let on = render(&pdf, TextExtraction::Glyphs);
     assert_eq!(format!("{off:?}"), format!("{:?}", without_text_runs(&on)));
 
     let runs = runs(&on);
@@ -585,8 +605,8 @@ fn build_actual_text_pdf() -> Vec<u8> {
 #[test]
 fn actual_text_replaces_the_text_of_its_span() {
     let pdf = build_actual_text_pdf();
-    let off = render(&pdf, false);
-    let on = render(&pdf, true);
+    let off = render(&pdf, TextExtraction::Off);
+    let on = render(&pdf, TextExtraction::Glyphs);
     assert_eq!(format!("{off:?}"), format!("{:?}", without_text_runs(&on)));
 
     let runs: Vec<TextRunParams> = runs(&on).into_iter().map(|(_, r)| r).collect();
@@ -650,7 +670,7 @@ fn helvetica_page(content: &str) -> Vec<u8> {
 }
 
 fn page_runs(content: &str) -> Vec<TextRunParams> {
-    runs(&render(&helvetica_page(content), true))
+    runs(&render(&helvetica_page(content), TextExtraction::Glyphs))
         .into_iter()
         .map(|(_, r)| r)
         .collect()

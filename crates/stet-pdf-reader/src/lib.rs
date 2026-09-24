@@ -216,6 +216,8 @@ pub use objects::{PdfDict, PdfObj};
 pub use outline::{OutlineItem, OutlineStyle};
 pub use page_boxes::PageBoxes;
 pub use page_tree::PageInfo;
+/// The level for [`PdfDocument::set_text_extraction`], from `stet-graphics`.
+pub use stet_graphics::device::TextExtraction;
 pub use viewer_prefs::{
     Duplex, PageLayout, PageMode, PrintScaling, ReadingDirection, ViewerPreferences,
 };
@@ -244,9 +246,9 @@ pub struct PdfDocument<'a> {
     /// When false (default), PDF overprint flags (OP/op) are suppressed —
     /// skips the expensive CMYK buffer simulation that most viewers omit.
     overprint: bool,
-    /// When true, rendered display lists also carry `TextRun` elements for
-    /// text extraction. Off by default. See [`PdfDocument::set_extract_text`].
-    extract_text: bool,
+    /// How much text rendered display lists record as `TextRun` elements.
+    /// Off by default. See [`PdfDocument::set_text_extraction`].
+    text_extraction: TextExtraction,
     /// Object numbers of Optional Content Groups that are OFF by default.
     /// Parsed from the catalog's /OCProperties /D /OFF array.
     ocg_off: HashSet<u32>,
@@ -371,7 +373,7 @@ impl<'a> PdfDocument<'a> {
             icc_cache,
             font_provider: None,
             overprint: true,
-            extract_text: false,
+            text_extraction: TextExtraction::Off,
             ocg_off,
             output_intent_icc,
             metadata_cache: OnceCell::new(),
@@ -395,14 +397,15 @@ impl<'a> PdfDocument<'a> {
         self.overprint = enabled;
     }
 
-    /// Record the text each page shows, for extraction.
+    /// Record the text each page shows, for extraction, at `level`.
     ///
     /// Display lists from [`render_page`](Self::render_page) then also carry
     /// [`DisplayElement::TextRun`](stet_graphics::display_list::DisplayElement::TextRun)
     /// elements: the text the text-showing operators (`Tj`, `TJ`, `'`, `"`)
-    /// display, in Unicode, with the device-space position of every glyph —
-    /// a run for each stretch of text along one baseline in one font, and
-    /// word breaks marked where words are set apart. They paint
+    /// display, in Unicode — a run for each stretch of text along one
+    /// baseline in one font, with word breaks marked where words are set
+    /// apart — and, at [`TextExtraction::Glyphs`], the device-space
+    /// position of every glyph. They paint
     /// nothing, so rendering is unchanged. Disabled by default, which keeps
     /// display lists free of them — worth keeping off for documents that
     /// are only drawn.
@@ -420,8 +423,13 @@ impl<'a> PdfDocument<'a> {
     /// its text is empty. Text drawn inside a Type 3 glyph
     /// procedure, a tiling pattern cell or a soft-mask group is not the
     /// document's and is not recorded.
-    pub fn set_extract_text(&mut self, enabled: bool) {
-        self.extract_text = enabled;
+    pub fn set_text_extraction(&mut self, level: TextExtraction) {
+        self.text_extraction = level;
+    }
+
+    /// The level set by [`set_text_extraction`](Self::set_text_extraction).
+    pub fn text_extraction(&self) -> TextExtraction {
+        self.text_extraction
     }
 
     /// Set a font data provider for environments without filesystem access.
@@ -577,7 +585,7 @@ impl<'a> PdfDocument<'a> {
         if self.output_intent_icc.is_some() {
             interpreter.set_pdfx_cmyk_intent();
         }
-        interpreter.set_extract_text(self.extract_text);
+        interpreter.set_text_extraction(self.text_extraction);
 
         // Render page content
         if let Err(e) = interpreter.interpret_stream_public(&content_data) {

@@ -2,14 +2,16 @@
 // Copyright (c) 2026 Scott Bowman
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Text extraction from PostScript: `InterpreterBuilder::extract_text()`.
+//! Text extraction from PostScript: `InterpreterBuilder::text_extraction`.
 //!
 //! The switch only adds `DisplayElement::TextRun` elements. Everything else
 //! in the display list — and so everything rendered or written to PDF — must
 //! be identical with it on and off, and with it off no `TextRun` may appear
 //! at all.
 
-use stet::{DisplayElement, Interpreter, PsDisplayList, TextRunParams, UnicodeSource};
+use stet::{
+    DisplayElement, Interpreter, PsDisplayList, TextExtraction, TextRunParams, UnicodeSource,
+};
 
 /// Every show operator, plus the places text can hide: a composite font,
 /// a Type 3 font, a pattern cell, a form, and a clip.
@@ -59,12 +61,8 @@ gsave 0 0 100 100 rectclip 72 480 moveto (clipped) show grestore
 showpage
 "#;
 
-fn render(extract: bool) -> Vec<PsDisplayList> {
-    let mut builder = Interpreter::builder();
-    if extract {
-        builder = builder.extract_text();
-    }
-    let mut interp = builder.build();
+fn render(level: TextExtraction) -> Vec<PsDisplayList> {
+    let mut interp = Interpreter::builder().text_extraction(level).build();
     interp
         .render_to_display_list(SHOW_FAMILY.as_bytes(), 72.0)
         .expect("fixture renders")
@@ -117,16 +115,34 @@ fn without_text_runs(list: &PsDisplayList) -> PsDisplayList {
 
 #[test]
 fn switch_changes_nothing_but_text_runs() {
-    let off = render(false);
-    let on = render(true);
+    let off = render(TextExtraction::Off);
     assert_eq!(off.len(), 1);
-    assert_eq!(on.len(), off.len());
-    for (off, on) in off.iter().zip(&on) {
-        // With the switch off, not a single TextRun at any depth.
-        assert_eq!(format!("{off:?}"), format!("{:?}", without_text_runs(off)));
-        // With it on, removing the TextRuns gives back the list exactly.
-        assert_eq!(format!("{off:?}"), format!("{:?}", without_text_runs(on)));
-        assert!(!runs(on).is_empty());
+    for level in [TextExtraction::Runs, TextExtraction::Glyphs] {
+        let on = render(level);
+        assert_eq!(on.len(), off.len());
+        for (off, on) in off.iter().zip(&on) {
+            // With the switch off, not a single TextRun at any depth.
+            assert_eq!(format!("{off:?}"), format!("{:?}", without_text_runs(off)));
+            // With it on, removing the TextRuns gives back the list exactly.
+            assert_eq!(format!("{off:?}"), format!("{:?}", without_text_runs(on)));
+            assert!(!runs(on).is_empty());
+        }
+    }
+}
+
+#[test]
+fn runs_level_records_the_same_runs_without_glyphs() {
+    let glyphs = runs(&render(TextExtraction::Glyphs)[0]);
+    let light = runs(&render(TextExtraction::Runs)[0]);
+    assert_eq!(glyphs.len(), light.len());
+    for ((path, full), (light_path, light)) in glyphs.iter().zip(&light) {
+        assert_eq!(path, light_path);
+        assert!(light.glyphs.is_empty());
+        let without_glyphs = TextRunParams {
+            glyphs: Vec::new(),
+            ..full.clone()
+        };
+        assert_eq!(format!("{without_glyphs:?}"), format!("{light:?}"));
     }
 }
 
@@ -134,7 +150,7 @@ fn switch_changes_nothing_but_text_runs() {
 fn fixture_exercises_the_show_family() {
     // Guards the test above against a fixture that silently stopped
     // showing text: every show operator records a `Text` element.
-    let lists = render(false);
+    let lists = render(TextExtraction::Off);
     let texts = lists[0]
         .elements()
         .iter()
@@ -188,7 +204,9 @@ fn close(a: (f64, f64), b: (f64, f64)) -> bool {
 
 /// Render `ps` with extraction on and return page 0's runs.
 fn runs_of(ps: &str) -> Vec<TextRunParams> {
-    let mut interp = Interpreter::builder().extract_text().build();
+    let mut interp = Interpreter::builder()
+        .text_extraction(TextExtraction::Glyphs)
+        .build();
     let pages = interp
         .render_to_display_list(ps.as_bytes(), 72.0)
         .expect("renders");
@@ -200,7 +218,7 @@ fn runs_of(ps: &str) -> Vec<TextRunParams> {
 
 #[test]
 fn show_operators_record_runs_along_each_baseline() {
-    let lists = render(true);
+    let lists = render(TextExtraction::Glyphs);
     let texts: Vec<(Vec<&str>, String)> = runs(&lists[0])
         .into_iter()
         .map(|(path, run)| (path, run.text))
@@ -260,7 +278,7 @@ fn show_operators_record_runs_along_each_baseline() {
 fn glyph_positions_are_in_device_space() {
     // At 72 dpi device space is user space with y flipped on the 792-point
     // page. Helvetica's s, h, a are 500, 556, 556 units wide.
-    let lists = render(true);
+    let lists = render(TextExtraction::Glyphs);
     let all = runs(&lists[0]);
     let run = |text: &str| &all.iter().find(|(_, r)| r.text == text).unwrap().1;
 
@@ -372,7 +390,9 @@ endtransparencygroup
 (d) show
 showpage
 "#;
-    let mut interp = Interpreter::builder().extract_text().build();
+    let mut interp = Interpreter::builder()
+        .text_extraction(TextExtraction::Glyphs)
+        .build();
     let pages = interp
         .render_to_display_list(ps.as_bytes(), 72.0)
         .expect("renders");

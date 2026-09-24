@@ -39,7 +39,7 @@ use stet_fonts::geometry::{Matrix, PathSegment, PsPath};
 use stet_graphics::color::{DashPattern, DeviceColor, FillRule, LineCap, LineJoin};
 use stet_graphics::device::{
     ClipParams, FillParams, ImageColorSpace, ImageParams, PatternFillParams, ShownGlyph,
-    StrokeParams, TextRunParams, TintLookupTable, UnicodeSource,
+    StrokeParams, TextExtraction, TextRunParams, TintLookupTable, UnicodeSource,
 };
 use stet_graphics::display_list::{
     DisplayElement, DisplayList, GroupParams, OcgVisibility, SoftMaskParams, SoftMaskSubtype,
@@ -379,11 +379,11 @@ pub struct ContentInterpreter<'a> {
     /// When false, PDF overprint flags (OP/op) in graphics state dicts are
     /// suppressed — the gstate overprint fields stay false regardless of PDF content.
     overprint_enabled: bool,
-    /// When true, show operators also record `TextRun` elements for text
-    /// extraction. Off by default; see [`Self::set_extract_text`].
-    extract_text: bool,
-    /// Text-extraction data for each font resolved while `extract_text` is
-    /// on, keyed by the font's `Arc` address. The `Arc` is held so the
+    /// How much text show operators record as `TextRun` elements. Off by
+    /// default; see [`Self::set_text_extraction`].
+    text_extraction: TextExtraction,
+    /// Text-extraction data for each font resolved while `text_extraction`
+    /// is on, keyed by the font's `Arc` address. The `Arc` is held so the
     /// address cannot be reused by another font.
     font_text: std::collections::HashMap<usize, (Arc<PdfFont>, Arc<FontText>)>,
     /// The current show operator's text recording.
@@ -469,7 +469,7 @@ impl<'a> ContentInterpreter<'a> {
             pdfx_cmyk_intent: false,
             in_smask_form: false,
             overprint_enabled,
-            extract_text: false,
+            text_extraction: TextExtraction::Off,
             font_text: std::collections::HashMap::new(),
             text_show: None,
             last_text_run: None,
@@ -493,11 +493,11 @@ impl<'a> ContentInterpreter<'a> {
         self.page_group_is_cmyk = true;
     }
 
-    /// Record `TextRun` elements for text extraction alongside what the
-    /// content stream paints. Off by default, which keeps display lists
-    /// free of them.
-    pub fn set_extract_text(&mut self, enabled: bool) {
-        self.extract_text = enabled;
+    /// Record `TextRun` elements for text extraction, at `level`,
+    /// alongside what the content stream paints. Off by default, which
+    /// keeps display lists free of them.
+    pub fn set_text_extraction(&mut self, level: TextExtraction) {
+        self.text_extraction = level;
     }
 
     /// Mark this document as declaring a PDF/X-style CMYK output intent. Opts
@@ -3120,7 +3120,7 @@ impl<'a> ContentInterpreter<'a> {
     /// when extraction is on and the font has none yet. `resolved` is false
     /// when a fallback font stands in for one that failed to resolve.
     fn register_font_text(&mut self, font: &Arc<PdfFont>, font_ref: &PdfObj, resolved: bool) {
-        if !self.extract_text {
+        if self.text_extraction == TextExtraction::Off {
             return;
         }
         let key = Arc::as_ptr(font) as usize;
@@ -3158,7 +3158,7 @@ impl<'a> ContentInterpreter<'a> {
     /// Start recording text for the show operator about to run, when text
     /// extraction is on.
     fn begin_text_run(&mut self) {
-        if !self.extract_text || self.text_suspended > 0 {
+        if self.text_extraction == TextExtraction::Off || self.text_suspended > 0 {
             return;
         }
         let Some(font) = self.current_font.clone() else {
@@ -3218,15 +3218,13 @@ impl<'a> ContentInterpreter<'a> {
         }
     }
 
-    /// Add the show's open run to the display list, if it recorded a
-    /// glyph, and keep it so that a later glyph can reopen it.
+    /// Add the show's open run to the display list — a run is opened by
+    /// its first glyph, so it has one — and keep it so that a later glyph
+    /// can reopen it.
     fn flush_text_run(&mut self, show: &mut TextShow) {
         let Some(mut run) = show.run.take() else {
             return;
         };
-        if run.params.glyphs.is_empty() {
-            return;
-        }
         let params = std::mem::take(&mut run.params);
         let (end, text_len, glyph_count) = (params.end, params.text.len(), params.glyphs.len());
         let index = self.display_list.len();
@@ -3347,13 +3345,15 @@ impl<'a> ContentInterpreter<'a> {
             run.pending_word_break = false;
             run.params.push_word_break(start);
         }
-        run.params.glyphs.push(ShownGlyph {
-            text_range: start as u32..run.params.text.len() as u32,
-            origin,
-            advance,
-            code,
-            source,
-        });
+        if self.text_extraction == TextExtraction::Glyphs {
+            run.params.glyphs.push(ShownGlyph {
+                text_range: start as u32..run.params.text.len() as u32,
+                origin,
+                advance,
+                code,
+                source,
+            });
+        }
         run.params.end = (origin.0 + advance.0, origin.1 + advance.1);
         self.text_show = Some(show);
     }
@@ -4005,7 +4005,10 @@ impl<'a> ContentInterpreter<'a> {
     /// new span: text extraction is on and recording, and no span is open
     /// already (the outermost span's text covers everything inside it).
     fn actual_text_of(&self, props: &Operand) -> Option<String> {
-        if !self.extract_text || self.text_suspended > 0 || self.actual_text.is_some() {
+        if self.text_extraction == TextExtraction::Off
+            || self.text_suspended > 0
+            || self.actual_text.is_some()
+        {
             return None;
         }
         let named;

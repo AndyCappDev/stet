@@ -84,7 +84,7 @@ pub use diagnostics::{ExecWarning, ExecWarningKind};
 // Re-exports for power users
 pub use stet_core::context::Context as PsContext;
 pub use stet_engine::eval::parse_and_exec as ps_exec;
-pub use stet_graphics::device::{ShownGlyph, TextRunParams, UnicodeSource};
+pub use stet_graphics::device::{ShownGlyph, TextExtraction, TextRunParams, UnicodeSource};
 pub use stet_graphics::display_list::{DisplayElement, DisplayList as PsDisplayList};
 pub use stet_graphics::icc::IccCache;
 
@@ -144,7 +144,7 @@ pub struct Interpreter {
 pub struct InterpreterBuilder {
     use_icc: bool,
     suppress_output: bool,
-    extract_text: bool,
+    text_extraction: TextExtraction,
 }
 
 impl Interpreter {
@@ -161,7 +161,7 @@ impl Interpreter {
         InterpreterBuilder {
             use_icc: true,
             suppress_output: false,
-            extract_text: false,
+            text_extraction: TextExtraction::Off,
         }
     }
 
@@ -544,22 +544,23 @@ impl InterpreterBuilder {
         self
     }
 
-    /// Record the text each page shows, for extraction.
+    /// Record the text each page shows, for extraction, at `level`.
     ///
     /// Display lists then also carry [`DisplayElement::TextRun`] elements:
-    /// the text shown, in Unicode, with the device-space position of every
-    /// glyph — a run for each stretch of text along one baseline in one
-    /// font, and word breaks marked where words are set apart. They paint
-    /// nothing, so rendering is unchanged. Off by
-    /// default, which keeps display lists free of them.
+    /// the text shown, in Unicode — a run for each stretch of text along
+    /// one baseline in one font, with word breaks marked where words are
+    /// set apart — and, at [`TextExtraction::Glyphs`], the device-space
+    /// position of every glyph. They paint nothing, so rendering is
+    /// unchanged. [`TextExtraction::Off`] by default, which keeps display
+    /// lists free of them.
     ///
     /// A glyph's text comes from its name through the Adobe Glyph List;
     /// PostScript has no ToUnicode, so a font whose glyph names mean
     /// nothing gives empty text. Text drawn inside a Type 3 font's
     /// `BuildChar` / `BuildGlyph` or a pattern cell is not the document's
     /// and is not recorded.
-    pub fn extract_text(mut self) -> Self {
-        self.extract_text = true;
+    pub fn text_extraction(mut self, level: TextExtraction) -> Self {
+        self.text_extraction = level;
         self
     }
 
@@ -567,7 +568,7 @@ impl InterpreterBuilder {
     pub fn build(self) -> Interpreter {
         let mut ctx = init::create_initialized_context(self.use_icc, self.suppress_output)
             .expect("interpreter initialization failed");
-        ctx.extract_text = self.extract_text;
+        ctx.text_extraction = self.text_extraction;
         Interpreter {
             ctx,
             use_icc: self.use_icc,

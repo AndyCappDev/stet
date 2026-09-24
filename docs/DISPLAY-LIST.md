@@ -149,10 +149,16 @@ TextRun { params: TextRunParams }
 A stretch of shown text, in Unicode, with the position of every glyph —
 for text extraction, search and selection. Unlike `Text`, it
 carries no font for re-emission, and **both** producers can record it: the
-PostScript interpreter (`Context::extract_text`, or
-`InterpreterBuilder::extract_text()` on the `stet` facade) and the PDF
-reader (`PdfDocument::set_extract_text(true)`). With the switch off — the
-default — no `TextRun` is recorded and display lists are unchanged.
+PostScript interpreter (`Context::text_extraction`, or
+`InterpreterBuilder::text_extraction` on the `stet` facade) and the PDF
+reader (`PdfDocument::set_text_extraction`). Both take a
+`TextExtraction` level:
+
+| Level | Records |
+|-------|---------|
+| `Off` (default) | Nothing: no `TextRun`, display lists unchanged |
+| `Runs` | Runs with their text, font, extent and word breaks; `glyphs` empty. The same runs as `Glyphs`, in about half the memory |
+| `Glyphs` | Runs with every glyph's position, advance, code and text source |
 
 It paints nothing and has no paint extent: renderers and the PDF writer
 skip it, and the glyphs are drawn by the `Fill` / `Stroke` elements beside
