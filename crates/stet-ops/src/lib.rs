@@ -81,6 +81,8 @@ pub mod type_ops;
 pub mod userpath_ops;
 pub mod vm_ops;
 
+mod text_record;
+
 use stet_core::context::{Context, OpEntry};
 use stet_core::dict::DictKey;
 use stet_core::error::PsError;

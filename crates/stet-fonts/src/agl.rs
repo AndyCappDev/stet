@@ -745,6 +745,66 @@ fn name_to_text(name: &str, zapf_dingbats: bool) -> Option<String> {
     (!text.is_empty()).then_some(text)
 }
 
+/// The character a glyph name outside the Adobe Glyph List spells as a
+/// number, by the rule Poppler (after xpdf) applies to simple fonts: a
+/// heuristic, for use only after [`glyph_name_to_text`] finds nothing. It is
+/// there for the bitmap Type 3 fonts dvips writes (`a80` for code 80, `P`), and
+/// fonts named like them: `nn` (two to four digits), `Ann` and `ABnn`
+/// (decimal after one or two characters), and, when `hex`, `xx` and `Axx`
+/// (two hex digits). The number is a Latin-1 code point; control
+/// characters, which such a name gives for codes below 32 (`g12`), are
+/// dropped rather than invented as text.
+pub fn numeric_glyph_name_to_char(name: &str, hex: bool) -> Option<char> {
+    let b = name.as_bytes();
+    let n = b.len();
+    let digit = |i: usize| b.get(i).is_some_and(u8::is_ascii_digit);
+    // `atoi`: the leading decimal digits of `s`.
+    let leading = |s: &str| -> Option<u32> {
+        let end = s
+            .bytes()
+            .position(|c| !c.is_ascii_digit())
+            .unwrap_or(s.len());
+        s[..end].parse().ok()
+    };
+    let code = if hex
+        && n == 3
+        && b[0].is_ascii_alphabetic()
+        && b[1..].iter().all(u8::is_ascii_hexdigit)
+    {
+        u32::from_str_radix(&name[1..], 16).ok()
+    } else if hex && n == 2 && b.iter().all(u8::is_ascii_hexdigit) {
+        u32::from_str_radix(name, 16).ok()
+    } else if !hex && (2..=4).contains(&n) && digit(0) && digit(1) {
+        leading(name)
+    } else if (3..=5).contains(&n) && digit(1) && digit(2) && name.is_char_boundary(1) {
+        leading(&name[1..])
+    } else if (4..=6).contains(&n) && digit(2) && digit(3) && name.is_char_boundary(2) {
+        leading(&name[2..])
+    } else {
+        None
+    }?;
+    char::from_u32(code)
+        .filter(|_| code <= 0xFF)
+        .filter(|c| !c.is_control())
+}
+
+/// Whether a font's numeric glyph names, given all of its `names`, are
+/// hexadecimal for [`numeric_glyph_name_to_char`]: some name is a letter and
+/// two hex digits with at least one of those a letter (`a1f`), as Poppler
+/// decides it.
+pub fn glyph_names_are_hex<'a>(names: impl IntoIterator<Item = &'a str>) -> bool {
+    names.into_iter().any(looks_hex)
+}
+
+/// A letter and two hex digits, at least one of them a letter.
+fn looks_hex(name: &str) -> bool {
+    let b = name.as_bytes();
+    b.len() == 3
+        && b[0].is_ascii_alphabetic()
+        && b[1..].iter().all(u8::is_ascii_hexdigit)
+        && b[1..].iter().any(u8::is_ascii_alphabetic)
+}
+
 /// Append the text of one underscore-separated glyph-name component.
 fn push_component_text(component: &str, zapf_dingbats: bool, out: &mut String) {
     let listed = zapf_dingbats
@@ -787,6 +847,34 @@ fn push_component_text(component: &str, zapf_dingbats: bool, out: &mut String) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn numeric_glyph_names() {
+        let dec = |name| numeric_glyph_name_to_char(name, false);
+        // dvips bitmap fonts: `a` and the code.
+        assert_eq!(dec("a80"), Some('P'));
+        assert_eq!(dec("a116"), Some('t'));
+        // `nn`, `Ann`, `ABnn`.
+        assert_eq!(dec("65"), Some('A'));
+        assert_eq!(dec("g65"), Some('A'));
+        assert_eq!(dec("cs233"), Some('é'));
+        assert_eq!(dec("G233x"), Some('é'));
+        // Control characters and codes past Latin-1 give nothing.
+        assert_eq!(dec("g12"), None);
+        assert_eq!(dec("a300"), None);
+        // Not numeric names.
+        assert_eq!(dec("Aring"), None);
+        assert_eq!(dec("cid12345"), None);
+        assert_eq!(dec("a"), None);
+        // Hex fonts: `xx` and `Axx`; decimal `nn` no longer applies.
+        let hex = |name| numeric_glyph_name_to_char(name, true);
+        assert_eq!(hex("a41"), Some('A'));
+        assert_eq!(hex("41"), Some('A'));
+        assert_eq!(hex("ce9"), Some('é'));
+        assert_eq!(hex("123"), None);
+        assert!(glyph_names_are_hex(["a80", "a1f"]));
+        assert!(!glyph_names_are_hex(["a80", "a1g", "space"]));
+    }
+
     use super::*;
 
     fn text(name: &str) -> Option<String> {

@@ -170,8 +170,18 @@ with source `ActualText`. The outermost span wins, forms drawn inside a
 span are covered by it, and a span that shows no glyph — ActualText on a
 drawn figure — has nowhere to put its text and is dropped. Glyph space is
 1000 units per em for every font but Type 3, whose glyph space is its own
-`/FontMatrix`'s. (The PostScript interpreter does not record runs
-yet.)
+`/FontMatrix`'s.
+
+The PostScript interpreter records one run per string a show operator
+shows (`show`, `ashow`, `widthshow`, `awidthshow`, `kshow`), and none for
+text drawn inside a Type 3 font's `BuildChar` / `BuildGlyph` or a pattern
+cell's `PaintProc`. A `show` inside a `kshow` procedure records its own
+run, splitting the kshow's around it, so runs stay in page order. Glyph
+space is the font's own — 1000 units per em for Type 1 and CFF fonts, font
+units for Type 42, the `FontMatrix`'s for Type 3 — with `ascent` and
+`descent` from the font's `FontBBox` (a Type 42 font's `hhea` table), else
+0.8 / -0.2 of a 1000-unit em. Text comes from glyph names only: PostScript
+has no ToUnicode.
 
 | Field | Type | Description |
 |-------|------|-------------|

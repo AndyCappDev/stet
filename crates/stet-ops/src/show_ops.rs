@@ -20,6 +20,8 @@ use stet_graphics::color::{DashPattern, DeviceColor, FillRule, LineCap, LineJoin
 use stet_graphics::device::{FillParams, StrokeParams, TextParams};
 use stet_graphics::display_list::DisplayElement;
 
+use crate::text_record;
+
 /// `show`: string → —
 ///
 /// Render each character at the current point, advancing by glyph width.
@@ -42,8 +44,7 @@ pub fn op_show(ctx: &mut Context) -> Result<(), PsError> {
     let bytes = ctx.strings.get(entity, start, len).to_vec();
     ctx.o_stack.pop()?;
 
-    render_show(ctx, &bytes, 0.0, 0.0, -1, 0.0, 0.0)?;
-    Ok(())
+    recorded_show(ctx, |ctx| render_show(ctx, &bytes, 0.0, 0.0, -1, 0.0, 0.0))
 }
 
 /// `ashow`: ax ay string → —
@@ -75,8 +76,7 @@ pub fn op_ashow(ctx: &mut Context) -> Result<(), PsError> {
     ctx.o_stack.pop()?;
     ctx.o_stack.pop()?;
 
-    render_show(ctx, &bytes, ax, ay, -1, 0.0, 0.0)?;
-    Ok(())
+    recorded_show(ctx, |ctx| render_show(ctx, &bytes, ax, ay, -1, 0.0, 0.0))
 }
 
 /// `widthshow`: cx cy char string → —
@@ -118,8 +118,9 @@ pub fn op_widthshow(ctx: &mut Context) -> Result<(), PsError> {
     ctx.o_stack.pop()?;
     ctx.o_stack.pop()?;
 
-    render_show(ctx, &bytes, 0.0, 0.0, width_char, cx, cy)?;
-    Ok(())
+    recorded_show(ctx, |ctx| {
+        render_show(ctx, &bytes, 0.0, 0.0, width_char, cx, cy)
+    })
 }
 
 /// `awidthshow`: cx cy char ax ay string → —
@@ -164,8 +165,9 @@ pub fn op_awidthshow(ctx: &mut Context) -> Result<(), PsError> {
         ctx.o_stack.pop()?;
     }
 
-    render_show(ctx, &bytes, ax, ay, width_char, cx, cy)?;
-    Ok(())
+    recorded_show(ctx, |ctx| {
+        render_show(ctx, &bytes, ax, ay, width_char, cx, cy)
+    })
 }
 
 /// `kshow`: proc string → —
@@ -204,23 +206,40 @@ pub fn op_kshow(ctx: &mut Context) -> Result<(), PsError> {
         return Ok(());
     }
 
-    // Show first character
-    render_show(ctx, &bytes[..1], 0.0, 0.0, -1, 0.0, 0.0)?;
+    // One recording for the whole string. A show inside the procedure
+    // records its own run, closing this one's so far (see
+    // `text_record::begin_show`).
+    recorded_show(ctx, |ctx| {
+        // Show first character
+        render_show(ctx, &bytes[..1], 0.0, 0.0, -1, 0.0, 0.0)?;
 
-    // For each subsequent character, call proc then show
-    for i in 1..bytes.len() {
-        let code_shown = bytes[i - 1] as i32;
-        let code_next = bytes[i] as i32;
-        ctx.o_stack.push(PsObject::int(code_shown))?;
-        ctx.o_stack.push(PsObject::int(code_next))?;
+        // For each subsequent character, call proc then show
+        for i in 1..bytes.len() {
+            let code_shown = bytes[i - 1] as i32;
+            let code_next = bytes[i] as i32;
+            ctx.o_stack.push(PsObject::int(code_shown))?;
+            ctx.o_stack.push(PsObject::int(code_next))?;
 
-        let exec_fn = ctx.exec_sync_fn.ok_or(PsError::Unregistered)?;
-        exec_fn(ctx, proc)?;
+            let exec_fn = ctx.exec_sync_fn.ok_or(PsError::Unregistered)?;
+            exec_fn(ctx, proc)?;
 
-        render_show(ctx, &bytes[i..i + 1], 0.0, 0.0, -1, 0.0, 0.0)?;
-    }
+            render_show(ctx, &bytes[i..i + 1], 0.0, 0.0, -1, 0.0, 0.0)?;
+        }
+        Ok(())
+    })
+}
 
-    Ok(())
+/// Run a show operator's rendering with text recording around it (when
+/// `Context::extract_text` is on), closing the recording whether or not the
+/// rendering succeeds.
+fn recorded_show(
+    ctx: &mut Context,
+    render: impl FnOnce(&mut Context) -> Result<(), PsError>,
+) -> Result<(), PsError> {
+    let recording = text_record::begin_show(ctx);
+    let result = render(ctx);
+    text_record::end_show(ctx, recording);
+    result
 }
 
 /// `stringwidth`: string → wx wy
@@ -1340,6 +1359,18 @@ fn render_show(
         } else {
             info.font_matrix.transform_delta(width_x, width_y)
         };
+        text_record::record_glyph(
+            ctx,
+            text_record::Glyph {
+                font: info.font_entity,
+                glyph_space: info.font_matrix,
+                metrics: text_record::GlyphMetrics::FontBBox,
+                code: byte as u32,
+                text: text_record::GlyphText::Name(glyph_name_id),
+                origin: (cur_x, cur_y),
+                width: (wx, wy),
+            },
+        );
         cur_x += wx + extra_ax;
         cur_y += wy + extra_ay;
 
@@ -1593,6 +1624,18 @@ fn render_show_type2(
         } else {
             info.font_matrix.transform_delta(width_x, width_y)
         };
+        text_record::record_glyph(
+            ctx,
+            text_record::Glyph {
+                font: font_entity,
+                glyph_space: info.font_matrix,
+                metrics: text_record::GlyphMetrics::FontBBox,
+                code: byte as u32,
+                text: text_record::GlyphText::Name(glyph_name_id),
+                origin: (cur_x, cur_y),
+                width: (wx, wy),
+            },
+        );
         cur_x += wx + extra_ax;
         cur_y += wy + extra_ay;
 
@@ -2055,12 +2098,15 @@ fn render_show_composite(
             });
 
         for &byte in bytes {
-            let mut rendered = false;
+            // The glyph's width, once found, and its name for its text.
+            let mut width = None;
+            let mut shown_name = None;
 
             // Look up glyph name from Encoding, then GID from CharStrings
             if let (Some(enc_ent), Some(cs_ent)) = (enc_entity, cs_entity) {
                 let glyph_name_obj = ctx.arrays.get_element(enc_ent, byte as u32);
                 if let PsValue::Name(glyph_name_id) = glyph_name_obj.value {
+                    shown_name = Some(glyph_name_id);
                     let cs_key = DictKey::Name(glyph_name_id);
                     if let Some(gid_obj) = ctx.dicts.get(cs_ent, &cs_key) {
                         let gid = gid_obj.as_i32().unwrap_or(0) as u16;
@@ -2079,10 +2125,7 @@ fn render_show_composite(
                                 let device_path = ctm_transform_path(&user_path, &ctm);
                                 push_glyph_element(ctx, device_path, paint_type, stroke_width_dev);
                             }
-                            rendered = true;
-                            let (wx, wy) = combined_fm.transform_delta(cg.width_x, 0.0);
-                            cur_x += wx + extra_ax;
-                            cur_y += wy + extra_ay;
+                            width = Some(combined_fm.transform_delta(cg.width_x, 0.0));
                         } else {
                             // Get glyf data: try GlyphDirectory first, then sfnts
                             let glyf_bytes = if let Some(gd_entity) = glyph_dir_entity {
@@ -2155,25 +2198,40 @@ fn render_show_composite(
 
                             // Advance by actual hmtx width (even if glyf data was
                             // missing or too short — e.g. space has no outlines)
-                            rendered = true;
                             let advance = font_data
                                 .as_ref()
                                 .and_then(|fd| truetype::get_advance_width(fd, gid))
                                 .unwrap_or(500);
-                            let (wx, wy) = combined_fm.transform_delta(advance as f64, 0.0);
-                            cur_x += wx + extra_ax;
-                            cur_y += wy + extra_ay;
+                            width = Some(combined_fm.transform_delta(advance as f64, 0.0));
                         } // close else (cache miss)
                     }
                 }
             }
 
-            if !rendered {
+            let (wx, wy) = match width {
+                Some(width) => width,
                 // Fallback: advance by default width
-                let (wx, _) = combined_fm.transform_delta(500.0, 0.0);
-                cur_x += wx + extra_ax;
-                cur_y += extra_ay;
+                None => (combined_fm.transform_delta(500.0, 0.0).0, 0.0),
+            };
+            if ctx.text_capture.is_some() {
+                text_record::record_glyph(
+                    ctx,
+                    text_record::Glyph {
+                        font: font_entity,
+                        glyph_space: combined_fm,
+                        metrics: text_record::truetype_metrics(font_data.as_deref()),
+                        code: byte as u32,
+                        text: match shown_name {
+                            Some(id) => text_record::GlyphText::Name(id),
+                            None => text_record::GlyphText::None,
+                        },
+                        origin: (cur_x, cur_y),
+                        width: (wx, wy),
+                    },
+                );
             }
+            cur_x += wx + extra_ax;
+            cur_y += wy + extra_ay;
 
             if byte as i64 == width_char {
                 cur_x += cx;
@@ -2858,7 +2916,11 @@ fn build_type3_glyph(
     } else {
         None
     };
+    // What the procedure shows draws the glyph; the glyph itself is the
+    // text, recorded by the caller.
+    let suspended = text_record::suspend(ctx);
     let build_result = ctx.exec_sync(build_proc);
+    text_record::resume(ctx, suspended);
     let captured = if charpath {
         std::mem::replace(&mut ctx.charpath_capture, outer_capture)
     } else {
@@ -2988,6 +3050,24 @@ fn render_show_type3(
         };
 
         let (wx, wy) = font_matrix.transform_delta(char_width.0, char_width.1);
+        if !charpath && ctx.text_capture.is_some() {
+            let text = match encoding_name_for_code(ctx, font_entity, byte) {
+                Some(id) => text_record::GlyphText::Name(id),
+                None => text_record::GlyphText::None,
+            };
+            text_record::record_glyph(
+                ctx,
+                text_record::Glyph {
+                    font: font_entity,
+                    glyph_space: font_matrix,
+                    metrics: text_record::GlyphMetrics::FontBBox,
+                    code: byte as u32,
+                    text,
+                    origin: (cur_x, cur_y),
+                    width: (wx, wy),
+                },
+            );
+        }
         cur_x += wx + extra_ax;
         cur_y += wy + extra_ay;
 

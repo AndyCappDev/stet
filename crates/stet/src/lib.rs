@@ -546,10 +546,16 @@ impl InterpreterBuilder {
 
     /// Record the text each page shows, for extraction.
     ///
-    /// Display lists then also carry
-    /// [`DisplayElement::TextRun`] elements: each string shown, in Unicode, with the device-space
-    /// position of every glyph. They paint nothing, so rendering is
-    /// unchanged. Off by default, which keeps display lists free of them.
+    /// Display lists then also carry [`DisplayElement::TextRun`] elements:
+    /// each string shown, in Unicode, with the device-space position of
+    /// every glyph. They paint nothing, so rendering is unchanged. Off by
+    /// default, which keeps display lists free of them.
+    ///
+    /// A glyph's text comes from its name through the Adobe Glyph List;
+    /// PostScript has no ToUnicode, so a font whose glyph names mean
+    /// nothing gives empty text. Text drawn inside a Type 3 font's
+    /// `BuildChar` / `BuildGlyph` or a pattern cell is not the document's
+    /// and is not recorded.
     pub fn extract_text(mut self) -> Self {
         self.extract_text = true;
         self

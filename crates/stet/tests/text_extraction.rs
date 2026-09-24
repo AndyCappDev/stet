@@ -9,7 +9,7 @@
 //! be identical with it on and off, and with it off no `TextRun` may appear
 //! at all.
 
-use stet::{DisplayElement, Interpreter, PsDisplayList};
+use stet::{DisplayElement, Interpreter, PsDisplayList, TextRunParams, UnicodeSource};
 
 /// Every show operator, plus the places text can hide: a composite font,
 /// a Type 3 font, a pattern cell, a form, and a clip.
@@ -126,9 +126,7 @@ fn switch_changes_nothing_but_text_runs() {
         assert_eq!(format!("{off:?}"), format!("{:?}", without_text_runs(off)));
         // With it on, removing the TextRuns gives back the list exactly.
         assert_eq!(format!("{off:?}"), format!("{:?}", without_text_runs(on)));
-        // No show operator records a TextRun yet (emission lands in a later
-        // change), so the two lists are identical outright.
-        assert_eq!(format!("{off:?}"), format!("{on:?}"));
+        assert!(!runs(on).is_empty());
     }
 }
 
@@ -143,4 +141,292 @@ fn fixture_exercises_the_show_family() {
         .filter(|e| matches!(e, DisplayElement::Text { .. }))
         .count();
     assert!(texts >= 12, "only {texts} Text elements");
+}
+
+/// Every run in `list`, in order, with the containers it sits in.
+fn runs(list: &PsDisplayList) -> Vec<(Vec<&'static str>, TextRunParams)> {
+    fn walk(
+        list: &PsDisplayList,
+        path: &mut Vec<&'static str>,
+        out: &mut Vec<(Vec<&'static str>, TextRunParams)>,
+    ) {
+        for e in list.elements() {
+            let (label, nested): (&'static str, Vec<&PsDisplayList>) = match e {
+                DisplayElement::TextRun { params } => {
+                    out.push((path.clone(), params.clone()));
+                    continue;
+                }
+                DisplayElement::Group { elements, .. } => ("group", vec![elements]),
+                DisplayElement::OcgGroup { elements, .. } => ("layer", vec![elements]),
+                DisplayElement::SoftMasked { mask, content, .. } => ("masked", vec![mask, content]),
+                DisplayElement::PatternFill { params } => ("pattern", vec![&params.tile]),
+                _ => continue,
+            };
+            path.push(label);
+            for list in nested {
+                walk(list, path, out);
+            }
+            path.pop();
+        }
+    }
+    let mut out = Vec::new();
+    walk(list, &mut Vec::new(), &mut out);
+    out
+}
+
+/// The text of each glyph of `run`.
+fn glyph_texts(run: &TextRunParams) -> Vec<&str> {
+    run.glyphs
+        .iter()
+        .map(|g| &run.text[g.text_range.start as usize..g.text_range.end as usize])
+        .collect()
+}
+
+fn close(a: (f64, f64), b: (f64, f64)) -> bool {
+    (a.0 - b.0).abs() < 1e-6 && (a.1 - b.1).abs() < 1e-6
+}
+
+/// Render `ps` with extraction on and return page 0's runs.
+fn runs_of(ps: &str) -> Vec<TextRunParams> {
+    let mut interp = Interpreter::builder().extract_text().build();
+    let pages = interp
+        .render_to_display_list(ps.as_bytes(), 72.0)
+        .expect("renders");
+    runs(&pages[0].display_list)
+        .into_iter()
+        .map(|(_, run)| run)
+        .collect()
+}
+
+#[test]
+fn base_fonts_record_one_run_per_show() {
+    let lists = render(true);
+    let texts: Vec<(Vec<&str>, String)> = runs(&lists[0])
+        .into_iter()
+        .map(|(path, run)| (path, run.text))
+        .collect();
+    // Nothing from the pattern cell (`tile`): its text is paint.
+    let expected: Vec<(Vec<&str>, String)> = [
+        "show",
+        "ashow",
+        "width show",
+        "awidth show",
+        "kshow",
+        "rotated",
+        "clipped",
+        "AAA",
+        "form",
+    ]
+    .iter()
+    .map(|t| (vec![], t.to_string()))
+    .collect();
+    assert_eq!(texts, expected);
+    for (_, run) in runs(&lists[0]) {
+        assert!(!run.invisible && !run.vertical);
+        assert!(
+            run.glyphs
+                .iter()
+                .all(|g| g.source == UnicodeSource::GlyphName),
+            "{}",
+            run.text
+        );
+    }
+}
+
+#[test]
+fn glyph_positions_are_in_device_space() {
+    // At 72 dpi device space is user space with y flipped on the 792-point
+    // page. Helvetica's s, h, a are 500, 556, 556 units wide.
+    let lists = render(true);
+    let all = runs(&lists[0]);
+    let run = |text: &str| &all.iter().find(|(_, r)| r.text == text).unwrap().1;
+
+    let show = run("show");
+    assert!(close(show.glyphs[0].origin, (72.0, 92.0)));
+    assert!(close(show.glyphs[0].advance, (6.0, 0.0)));
+    assert!(close(show.glyphs[1].origin, (78.0, 92.0)));
+    assert_eq!(show.font_name, "Helvetica");
+    let m = show.glyph_to_device;
+    assert!(close((m.a, m.b), (0.012, 0.0)));
+    assert!(close((m.c, m.d), (0.0, -0.012)));
+    assert!(close((m.tx, m.ty), (72.0, 92.0)));
+    // From the font's FontBBox, in its 1000-unit glyph space.
+    assert!(show.ascent > 800.0 && show.descent < -100.0);
+
+    // ashow's extra spacing moves the next glyph but is not in the advance.
+    let ashow = run("ashow");
+    assert!(close(ashow.glyphs[0].advance, (6.672, 0.0)));
+    assert!(close(ashow.glyphs[1].origin, (72.0 + 6.672 + 1.0, 112.0)));
+
+    // widthshow adds its spacing after the space only.
+    let widthshow = run("width show");
+    let space = widthshow.glyphs.iter().position(|g| g.code == 32).unwrap();
+    let after = &widthshow.glyphs[space + 1];
+    let expected_x = widthshow.glyphs[space].origin.0 + widthshow.glyphs[space].advance.0 + 2.0;
+    assert!(close(after.origin, (expected_x, 132.0)));
+
+    // Rotated 30°: advance and up vector turn with the text.
+    let rotated = run("rotated");
+    let (ax, ay) = rotated.glyphs[0].advance;
+    assert!(((-ay).atan2(ax).to_degrees() - 30.0).abs() < 0.1);
+    let (ux, uy) = rotated.glyph_to_device.transform_delta(0.0, 1000.0);
+    assert!(((-uy).atan2(ux).to_degrees() - 120.0).abs() < 0.1);
+
+    // The form is replayed through its CTM: 72 340 translate, 0 5 moveto.
+    let form = run("form");
+    assert!(close(form.glyphs[0].origin, (72.0, 792.0 - 345.0)));
+
+    // Type 3: glyph space is the font's own (1000 units here), with ascent
+    // and descent from its FontBBox.
+    let type3 = run("AAA");
+    assert!(close(type3.glyphs[0].advance, (12.0, 0.0)));
+    assert_eq!((type3.ascent, type3.descent), (1000.0, 0.0));
+}
+
+#[test]
+fn text_that_is_not_the_documents_is_not_recorded() {
+    // A Type 3 glyph procedure that shows text to draw its glyph, and a
+    // kshow whose procedure shows a separator between characters.
+    let ps = r#"%!PS
+/T3 <<
+  /FontType 3 /FontMatrix [0.001 0 0 0.001 0 0] /FontBBox [0 0 1000 1000]
+  /Encoding 256 array dup 0 1 255 { /.notdef put dup } for pop dup 66 /B put
+  /BuildChar { pop pop 1000 0 setcharwidth
+    /Helvetica findfont 800 scalefont setfont 0 0 moveto (hidden) show }
+>> definefont pop
+/T3 findfont 12 scalefont setfont
+72 700 moveto (BB) show
+/Helvetica findfont 12 scalefont setfont
+72 680 moveto { pop pop (-) show } (ab) kshow
+showpage
+"#;
+    let texts: Vec<(String, Vec<String>)> = runs_of(ps)
+        .iter()
+        .map(|r| {
+            (
+                r.text.clone(),
+                glyph_texts(r).into_iter().map(String::from).collect(),
+            )
+        })
+        .collect();
+    let owned = |t: &str, g: &[&str]| (t.to_string(), g.iter().map(|s| s.to_string()).collect());
+    assert_eq!(
+        texts,
+        vec![
+            // The Type 3 glyphs are the text; what BuildChar shows is not.
+            owned("BB", &["B", "B"]),
+            // kshow's procedure shows between the characters: its run
+            // splits the kshow's, in page order.
+            owned("a", &["a"]),
+            owned("-", &["-"]),
+            owned("b", &["b"]),
+        ]
+    );
+}
+
+#[test]
+fn dvips_numeric_glyph_names() {
+    // dvips names bitmap-font glyphs by code (`a65`); read as Latin-1, as
+    // Poppler does.
+    let ps = r#"%!PS
+/D <<
+  /FontType 3 /FontMatrix [0.001 0 0 0.001 0 0] /FontBBox [0 0 1000 1000]
+  /Encoding 256 array dup 0 1 255 { /.notdef put dup } for pop
+    dup 72 /a72 put dup 105 /a105 put
+  /BuildChar { pop pop 600 0 setcharwidth }
+>> definefont pop
+/D findfont 12 scalefont setfont
+72 700 moveto (Hi) show
+showpage
+"#;
+    let runs = runs_of(ps);
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].text, "Hi");
+    assert!(
+        runs[0]
+            .glyphs
+            .iter()
+            .all(|g| g.source == UnicodeSource::GlyphName)
+    );
+}
+
+/// A minimal TrueType font: glyph 1 is 600 units wide in a 1000-unit em,
+/// with ascender 900 and descender -250 in `hhea`. The glyphs have no
+/// outlines, which is all a text-extraction test needs.
+fn minimal_sfnt() -> Vec<u8> {
+    let mut head = vec![0u8; 54];
+    head[12..16].copy_from_slice(&0x5F0F_3CF5u32.to_be_bytes()); // magic
+    head[18..20].copy_from_slice(&1000u16.to_be_bytes()); // unitsPerEm
+    let mut hhea = vec![0u8; 36];
+    hhea[0..4].copy_from_slice(&0x0001_0000u32.to_be_bytes());
+    hhea[4..6].copy_from_slice(&900i16.to_be_bytes());
+    hhea[6..8].copy_from_slice(&(-250i16).to_be_bytes());
+    hhea[34..36].copy_from_slice(&2u16.to_be_bytes()); // numberOfHMetrics
+    let mut hmtx = Vec::new();
+    for advance in [500u16, 600] {
+        hmtx.extend(advance.to_be_bytes());
+        hmtx.extend(0i16.to_be_bytes());
+    }
+    let mut maxp = vec![0u8; 6];
+    maxp[0..4].copy_from_slice(&0x0000_5000u32.to_be_bytes());
+    maxp[4..6].copy_from_slice(&2u16.to_be_bytes());
+    let loca = vec![0u8; 6]; // short offsets: both glyphs empty
+    let glyf = vec![0u8; 4];
+
+    let tables: [(&[u8; 4], &[u8]); 6] = [
+        (b"glyf", &glyf),
+        (b"head", &head),
+        (b"hhea", &hhea),
+        (b"hmtx", &hmtx),
+        (b"loca", &loca),
+        (b"maxp", &maxp),
+    ];
+    let mut font = Vec::new();
+    font.extend(0x0001_0000u32.to_be_bytes());
+    font.extend((tables.len() as u16).to_be_bytes());
+    font.extend([0u8; 6]); // searchRange etc., unused
+    let mut offset = 12 + 16 * tables.len();
+    let mut bodies = Vec::new();
+    for (tag, body) in tables {
+        font.extend(tag);
+        font.extend(0u32.to_be_bytes());
+        font.extend((offset as u32).to_be_bytes());
+        font.extend((body.len() as u32).to_be_bytes());
+        let mut padded = body.to_vec();
+        padded.resize(body.len().div_ceil(4) * 4, 0);
+        offset += padded.len();
+        bodies.extend(padded);
+    }
+    font.extend(bodies);
+    font
+}
+
+#[test]
+fn type42_fonts_use_their_hhea_metrics() {
+    let hex: String = minimal_sfnt().iter().map(|b| format!("{b:02X}")).collect();
+    let ps = format!(
+        r#"%!PS
+/TT <<
+  /FontType 42 /FontMatrix [1 0 0 1 0 0] /FontBBox [0 -0.25 1 0.9] /PaintType 0
+  /Encoding 256 array dup 0 1 255 {{ /.notdef put dup }} for pop dup 65 /A put
+  /CharStrings << /.notdef 0 /A 1 >>
+  /sfnts [<{hex}>]
+>> definefont pop
+/TT findfont 12 scalefont setfont
+72 700 moveto (AA) show
+showpage
+"#
+    );
+    let runs = runs_of(&ps);
+    assert_eq!(runs.len(), 1);
+    let run = &runs[0];
+    assert_eq!(glyph_texts(run), ["A", "A"]);
+    // Glyph space is the font's units: 1000 per em at 12 pt.
+    assert!(close(run.glyphs[0].advance, (7.2, 0.0)));
+    assert!(close(run.glyphs[1].origin, (79.2, 92.0)));
+    assert!(close(
+        (run.glyph_to_device.a, run.glyph_to_device.d),
+        (0.012, -0.012)
+    ));
+    assert_eq!((run.ascent, run.descent), (900.0, -250.0));
 }

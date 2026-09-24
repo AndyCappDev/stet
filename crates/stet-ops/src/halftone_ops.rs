@@ -965,7 +965,11 @@ pub fn op_makepattern(ctx: &mut Context) -> Result<(), PsError> {
         ctx.o_stack.push(PsObject::dict(new_dict))?;
 
         // Execute PaintProc
+        // Text a pattern cell shows is paint, repeated per tile, not the
+        // document's text.
+        let suspended = crate::text_record::suspend(ctx);
         let result = ctx.exec_sync(pp);
+        crate::text_record::resume(ctx, suspended);
 
         // `makepattern` is `pattern matrix → pattern`; whatever PaintProc left
         // behind is not part of that. A PaintProc that never pops the pattern

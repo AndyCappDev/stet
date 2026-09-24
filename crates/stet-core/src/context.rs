@@ -431,6 +431,38 @@ pub struct Context {
     /// would be without the feature: no memory cost and no rendering
     /// change. Not VM state, so `save`/`restore` leave it alone.
     pub extract_text: bool,
+    /// The recording a show operator has open while `extract_text` is on;
+    /// `None` outside show operators and while recording is suspended.
+    pub text_capture: Option<TextCapture>,
+    /// Nesting depth of content whose text is not the document's — a Type 3
+    /// font's `BuildChar` / `BuildGlyph`, where the glyph being built is
+    /// the text. No show records while it is non-zero.
+    pub text_suspended: u32,
+}
+
+/// A show operator's text recording: see [`Context::text_capture`].
+#[derive(Debug, Default)]
+pub struct TextCapture {
+    /// The run being built, if a glyph has been shown yet.
+    pub run: Option<OpenTextRun>,
+}
+
+/// A [`TextRunParams`](stet_graphics::device::TextRunParams) being built,
+/// with what decides whether the next glyph can join it.
+#[derive(Debug)]
+pub struct OpenTextRun {
+    /// The run so far.
+    pub params: stet_graphics::device::TextRunParams,
+    /// The font dictionary whose glyphs the run holds; a glyph from another
+    /// (a composite font's descendant) starts a new run.
+    pub font: EntityId,
+    /// Glyph space → device space, linear part: a glyph whose differs
+    /// starts a new run, since a run has one `glyph_to_device`.
+    pub linear: [f64; 4],
+    /// The font is ZapfDingbats, whose glyph names have their own list.
+    pub zapf_dingbats: bool,
+    /// The font's numeric glyph names are hexadecimal.
+    pub hex_glyph_names: bool,
 }
 
 /// One frame on `Context::group_stack`. Captures paint operators emitted
@@ -1109,6 +1141,8 @@ impl Context {
             steps_to_deadline_check: DEADLINE_CHECK_INTERVAL,
             yield_after_showpage: false,
             extract_text: false,
+            text_capture: None,
+            text_suspended: 0,
         }
     }
 

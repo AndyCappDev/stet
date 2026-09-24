@@ -20,8 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it. Both producers get an off-by-default switch —
   `InterpreterBuilder::extract_text()` (or `Context::extract_text`) for
   PostScript and `PdfDocument::set_extract_text(true)` for PDF — and with
-  it off, display lists are unchanged. The PDF reader records runs (below);
-  the PostScript show operators do not yet. Renderers that match on
+  it off, display lists are unchanged. Both record runs (below). Renderers
+  that match on
   `DisplayElement` already have the wildcard arm the enum's
   `#[non_exhaustive]` requires.
 - **Text extraction from PDF.** With `PdfDocument::set_extract_text(true)`,
@@ -34,8 +34,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   empty, that a glyph such as a line-end hyphen says nothing: the span's
   first glyph carries it all and the rest none, the outermost span wins,
   and forms drawn inside the span are covered by it. Outside a span, a
-  glyph's text comes from the font's `/ToUnicode` CMap, else its glyph name through the
-  Adobe Glyph List, else — for CJK fonts on Adobe's Japan1, CNS1, GB1 and
+  glyph's text comes from the font's `/ToUnicode` CMap, else its glyph
+  name through the Adobe Glyph List, else — for CJK fonts on Adobe's Japan1, CNS1, GB1 and
   Korea1 collections, or with a `Uni…` encoding CMap — its CID or code;
   failing all of those it is left empty. One rule is a heuristic, taken
   from Poppler so TeX documents made with dvips extract: a glyph name
@@ -45,6 +45,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that is not the document's is not recorded: text drawn inside a Type 3
   glyph procedure (the glyph is the text), in a tiling pattern cell, or in
   a soft-mask group.
+- **Text extraction from PostScript.** With
+  `InterpreterBuilder::extract_text()`, `show`, `ashow`, `widthshow`,
+  `awidthshow` and `kshow` record a `TextRun` per string for Type 1, CFF,
+  Type 42 and Type 3 fonts, with text from each glyph's name through the
+  Adobe Glyph List (and the same dvips numeric-name rule as PDF).
+  PostScript has no ToUnicode, so a font whose glyph names mean nothing
+  gives empty text. Glyph space is the font's own, with ascent and descent
+  from its `FontBBox` (a TrueType font's `hhea` table). Text drawn inside a
+  Type 3 `BuildChar` / `BuildGlyph` or a pattern cell is not recorded; a
+  `show` inside a `kshow` procedure records its own run between the
+  kshow's. Forms record once and are placed wherever `execform` draws them.
 - **`Debug` for `DisplayList` and `DisplayElement`** (and the param structs
   that lacked it: `PatternFillParams`, `GroupParams`, `SoftMaskParams`), so
   a display list can be printed or compared as text.

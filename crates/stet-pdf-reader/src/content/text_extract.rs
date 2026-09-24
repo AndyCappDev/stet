@@ -9,6 +9,7 @@
 //! drop text that extraction must keep (see [`stet_fonts::to_unicode`]).
 //! Built only when extraction is switched on.
 
+use stet_fonts::agl::{glyph_names_are_hex, numeric_glyph_name_to_char};
 use stet_fonts::cid_unicode::cid_to_text;
 use stet_fonts::to_unicode::ToUnicodeMap;
 use stet_graphics::device::UnicodeSource;
@@ -47,7 +48,7 @@ pub(crate) struct FontText {
     /// The font is ZapfDingbats, whose glyph names (`a20`) have their own list.
     zapf_dingbats: bool,
     /// The font's numeric glyph names are hexadecimal: see
-    /// [`numeric_glyph_name`].
+    /// [`stet_fonts::agl::numeric_glyph_name_to_char`].
     hex_glyph_names: bool,
     /// Adobe CJK ordering (`Japan1`, …) of a composite font whose CIDs
     /// follow it.
@@ -136,7 +137,7 @@ impl FontText {
         self.hex_glyph_names = self
             .glyph_names
             .as_ref()
-            .is_some_and(|names| names.iter().flatten().any(|n| looks_hex(n)));
+            .is_some_and(|names| glyph_names_are_hex(names.iter().flatten().map(String::as_str)));
 
         if let Some(PdfFont::Type3(f)) = font {
             // Type 3 glyph space is the font's own, and its `/FontBBox` is
@@ -247,7 +248,7 @@ impl FontText {
                 out.push_str(&text);
                 return UnicodeSource::GlyphName;
             }
-            if let Some(ch) = numeric_glyph_name(name, self.hex_glyph_names) {
+            if let Some(ch) = numeric_glyph_name_to_char(name, self.hex_glyph_names) {
                 out.push(ch);
                 return UnicodeSource::GlyphName;
             }
@@ -265,59 +266,6 @@ impl FontText {
         }
         UnicodeSource::Unmapped
     }
-}
-
-/// The character a glyph name outside the Adobe Glyph List spells as a
-/// number, by the rule Poppler (after xpdf) applies to simple fonts — for
-/// the bitmap Type 3 fonts dvips writes (`a80` for code 80, `P`), and
-/// fonts named like them: `nn` (two to four digits), `Ann` and `ABnn`
-/// (decimal after one or two characters), and, when `hex`, `xx` and `Axx`
-/// (two hex digits). The number is a Latin-1 code point; control
-/// characters, which such a name gives for codes below 32 (`g12`), are
-/// dropped rather than invented as text.
-fn numeric_glyph_name(name: &str, hex: bool) -> Option<char> {
-    let b = name.as_bytes();
-    let n = b.len();
-    let digit = |i: usize| b.get(i).is_some_and(u8::is_ascii_digit);
-    // `atoi`: the leading decimal digits of `s`.
-    let leading = |s: &str| -> Option<u32> {
-        let end = s
-            .bytes()
-            .position(|c| !c.is_ascii_digit())
-            .unwrap_or(s.len());
-        s[..end].parse().ok()
-    };
-    let code = if hex
-        && n == 3
-        && b[0].is_ascii_alphabetic()
-        && b[1..].iter().all(u8::is_ascii_hexdigit)
-    {
-        u32::from_str_radix(&name[1..], 16).ok()
-    } else if hex && n == 2 && b.iter().all(u8::is_ascii_hexdigit) {
-        u32::from_str_radix(name, 16).ok()
-    } else if !hex && (2..=4).contains(&n) && digit(0) && digit(1) {
-        leading(name)
-    } else if (3..=5).contains(&n) && digit(1) && digit(2) && name.is_char_boundary(1) {
-        leading(&name[1..])
-    } else if (4..=6).contains(&n) && digit(2) && digit(3) && name.is_char_boundary(2) {
-        leading(&name[2..])
-    } else {
-        None
-    }?;
-    char::from_u32(code)
-        .filter(|_| code <= 0xFF)
-        .filter(|c| !c.is_control())
-}
-
-/// Whether `name` is a letter and two hex digits, at least one of them a
-/// letter (`a1f`) — Poppler's sign that a font's numeric glyph names are
-/// hexadecimal.
-fn looks_hex(name: &str) -> bool {
-    let b = name.as_bytes();
-    b.len() == 3
-        && b[0].is_ascii_alphabetic()
-        && b[1..].iter().all(u8::is_ascii_hexdigit)
-        && b[1..].iter().any(u8::is_ascii_alphabetic)
 }
 
 /// Whether the CIDs a composite font draws are the ones its encoding
@@ -437,35 +385,6 @@ mod tests {
         assert_eq!(text(UnicodeCodes::Utf8, 0x41).as_deref(), Some("A"));
         assert_eq!(text(UnicodeCodes::Utf8, 0xFF), None);
         assert_eq!(text(UnicodeCodes::Utf32, 0x07), None);
-    }
-
-    #[test]
-    fn numeric_glyph_names() {
-        let dec = |name| numeric_glyph_name(name, false);
-        // dvips bitmap fonts: `a` and the code.
-        assert_eq!(dec("a80"), Some('P'));
-        assert_eq!(dec("a116"), Some('t'));
-        // `nn`, `Ann`, `ABnn`.
-        assert_eq!(dec("65"), Some('A'));
-        assert_eq!(dec("g65"), Some('A'));
-        assert_eq!(dec("cs233"), Some('é'));
-        assert_eq!(dec("G233x"), Some('é'));
-        // Control characters and codes past Latin-1 give nothing.
-        assert_eq!(dec("g12"), None);
-        assert_eq!(dec("a300"), None);
-        // Not numeric names.
-        assert_eq!(dec("Aring"), None);
-        assert_eq!(dec("cid12345"), None);
-        assert_eq!(dec("a"), None);
-        // Hex fonts: `xx` and `Axx`; decimal `nn` no longer applies.
-        let hex = |name| numeric_glyph_name(name, true);
-        assert_eq!(hex("a41"), Some('A'));
-        assert_eq!(hex("41"), Some('A'));
-        assert_eq!(hex("ce9"), Some('é'));
-        assert_eq!(hex("123"), None);
-        assert!(looks_hex("a1f"));
-        assert!(!looks_hex("a80"));
-        assert!(!looks_hex("a1g"));
     }
 
     #[test]
