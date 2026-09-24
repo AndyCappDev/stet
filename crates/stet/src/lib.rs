@@ -87,6 +87,8 @@ pub use stet_engine::eval::parse_and_exec as ps_exec;
 pub use stet_graphics::device::{ShownGlyph, TextExtraction, TextRunParams, UnicodeSource};
 pub use stet_graphics::display_list::{DisplayElement, DisplayList as PsDisplayList};
 pub use stet_graphics::icc::IccCache;
+pub use stet_graphics::layer_set::LayerSet;
+pub use stet_graphics::text::{TextLine, TextWord, text_lines, text_runs};
 
 #[cfg(feature = "render")]
 pub use stet_render::{

@@ -10,7 +10,8 @@
 //! at all.
 
 use stet::{
-    DisplayElement, Interpreter, PsDisplayList, TextExtraction, TextRunParams, UnicodeSource,
+    DisplayElement, Interpreter, LayerSet, PsDisplayList, TextExtraction, TextRunParams,
+    UnicodeSource, text_lines, text_runs,
 };
 
 /// Every show operator, plus the places text can hide: a composite font,
@@ -755,4 +756,44 @@ fn an_error_in_a_cshow_procedure_leaves_no_cid_behind() {
     assert_eq!(runs.len(), 1, "{runs:#?}");
     assert_eq!(runs[0].glyphs[0].code, 0);
     assert_eq!(runs[0].glyphs[0].source, UnicodeSource::Unmapped);
+}
+
+#[test]
+fn lines_read_the_same_at_both_levels() {
+    let line_texts = |level| {
+        let lists = render(level);
+        text_lines(text_runs(&lists[0], &LayerSet::new()))
+            .into_iter()
+            .map(|l| l.text)
+            .collect::<Vec<_>>()
+    };
+    let glyphs = line_texts(TextExtraction::Glyphs);
+    assert_eq!(glyphs, line_texts(TextExtraction::Runs));
+    // A line per baseline: yshow's rising glyphs stay within a line of
+    // each other, each two points above the last.
+    assert_eq!(glyphs[0], "show");
+    assert!(glyphs.contains(&"width show".to_string()));
+    assert!(glyphs.contains(&"yshow".to_string()));
+}
+
+#[test]
+fn lines_of_words_placed_apart() {
+    let ps = r#"%!PS
+/Helvetica findfont 12 scalefont setfont
+72 700 moveto (Paper) show 4 0 rmoveto (Title) show
+72 686 moveto (x) show 0 4 rmoveto (2) show 0 -4 rmoveto 4 0 rmoveto (y) show
+showpage
+"#;
+    let mut interp = Interpreter::builder()
+        .text_extraction(TextExtraction::Runs)
+        .build();
+    let pages = interp
+        .render_to_display_list(ps.as_bytes(), 72.0)
+        .expect("renders");
+    let lines: Vec<String> = text_lines(text_runs(&pages[0].display_list, &LayerSet::new()))
+        .into_iter()
+        .map(|l| l.text)
+        .collect();
+    // The superscript joins its line and its word.
+    assert_eq!(lines, ["Paper Title", "x2 y"]);
 }

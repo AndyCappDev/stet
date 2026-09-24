@@ -11,7 +11,8 @@
 
 use stet_graphics::device::{TextRunParams, UnicodeSource};
 use stet_graphics::display_list::{DisplayElement, DisplayList};
-use stet_pdf_reader::{PdfDocument, TextExtraction};
+use stet_graphics::text::{TextLine, text_lines, text_runs};
+use stet_pdf_reader::{LayerSet, PdfDocument, TextExtraction};
 
 /// One page showing text every way a content stream can, and in the places
 /// text can hide: rotated, invisible, in a Type 3 font, in a form XObject,
@@ -741,4 +742,60 @@ fn no_word_break_inside_an_actual_text_span() {
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].text, "Axy");
     assert_eq!(runs[0].word_breaks, [1]);
+}
+
+/// The lines of text `pdf`'s first page shows at `level`, with `layers`.
+fn lines_at(pdf: &[u8], level: TextExtraction, layers: &LayerSet) -> Vec<TextLine> {
+    let list = render(pdf, level);
+    text_lines(text_runs(&list, layers))
+}
+
+#[test]
+fn lines_read_the_same_at_both_levels() {
+    for pdf in [build_pdf(), build_cid_pdf(), build_actual_text_pdf()] {
+        let layers = LayerSet::new();
+        let glyphs = lines_at(&pdf, TextExtraction::Glyphs, &layers);
+        let runs = lines_at(&pdf, TextExtraction::Runs, &layers);
+        assert!(!glyphs.is_empty());
+        let text = |lines: &[TextLine]| lines.iter().map(|l| l.text.clone()).collect::<Vec<_>>();
+        assert_eq!(text(&glyphs), text(&runs));
+        for (g, r) in glyphs.iter().zip(&runs) {
+            assert_eq!(g.bbox, r.bbox);
+            // Word boxes need the glyphs.
+            assert!(g.words.iter().all(|w| w.bbox.is_some()), "{}", g.text);
+            assert!(r.words.iter().all(|w| w.bbox.is_none()));
+        }
+    }
+}
+
+#[test]
+fn lines_of_a_tex_style_page() {
+    let pdf = helvetica_page(
+        "BT /F1 12 Tf 72 700 Td [(Paper) -333 (Title)] TJ \
+         0 -14 Td [(by) -333 (Some) -30 (one)] TJ ( and) Tj ET",
+    );
+    let lines = lines_at(&pdf, TextExtraction::Glyphs, &LayerSet::new());
+    let text: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
+    assert_eq!(text, ["Paper Title", "by Someone and"]);
+    // "Paper" spans its five glyphs: from x 72 to the end of its "r".
+    let paper = lines[0].words[0].bbox.unwrap();
+    assert!((paper[0] - 72.0).abs() < 1e-6);
+    let runs = runs(&render(&pdf, TextExtraction::Glyphs));
+    let r = &runs[0].1.glyphs[4];
+    assert!((paper[2] - (r.origin.0 + r.advance.0)).abs() < 1e-6);
+}
+
+#[test]
+fn text_runs_follow_the_layer_set() {
+    let pdf = build_pdf();
+    let list = render(&pdf, TextExtraction::Runs);
+    let has_layer_text =
+        |layers: &LayerSet| text_runs(&list, layers).iter().any(|r| r.text == "layer");
+    assert!(has_layer_text(&LayerSet::new()));
+    let doc = PdfDocument::from_bytes(&pdf).unwrap();
+    let mut hidden = LayerSet::new();
+    for layer in doc.layers() {
+        hidden.set(layer.ocg_id, false);
+    }
+    assert!(!has_layer_text(&hidden));
 }

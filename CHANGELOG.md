@@ -73,6 +73,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   code `cshow` selected (its procedure sees only the last byte). Forms
   record once and are placed wherever `execform` draws them. A
   `glyphshow` glyph, shown by name, records code 0.
+- **Assembling extracted text into words and lines**, in
+  `stet_graphics::text` and re-exported by the `stet` facade (with
+  `LayerSet`). `text_runs` collects a page's `TextRun`s in content order,
+  skipping layers a `LayerSet` hides; `text_lines` joins them into lines —
+  superscripts and changes of font stay in their line and word — and
+  splits the lines into words at shown spaces and at gaps, which is how
+  TeX output ("PaperTitle", drawn as two placed words) reads as "Paper
+  Title". It gives the same text at both extraction levels, with line
+  boxes at both and word boxes when glyphs were recorded. It is
+  deliberately simple: content order is kept, and columns, tables and
+  reading order are not detected.
 - **`DisplayList::remove`**, to take an element out of a display list.
 - **`Debug` for `DisplayList` and `DisplayElement`** (and the param structs
   that lacked it: `PatternFillParams`, `GroupParams`, `SoftMaskParams`), so

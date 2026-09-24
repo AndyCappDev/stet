@@ -269,6 +269,35 @@ fn glyph_boxes(run: &TextRunParams) -> impl Iterator<Item = [(f64, f64); 4]> + '
 }
 ```
 
+**Words and lines.** `stet_graphics::text` (re-exported by the `stet`
+facade) assembles runs for a consumer. `text_runs(list, &layers)` collects
+a page's runs in content order, through groups and soft-masked content and
+the layers `layers` shows (`LayerSet::new()` shows the document's
+defaults), skipping soft masks. `text_lines(runs)` joins runs into
+`TextLine`s — a run joins the line before it when it is written the same
+way and starts within `LINE_TOLERANCE` (half the font's height) of that
+line's baseline, so superscripts stay in their line — and splits them into
+`TextWord`s at shown spaces, at `word_breaks`, and at gaps of `WORD_GAP`
+between runs. A line's `text` is its words joined by single spaces; each
+word has its byte range in it. Lines have a device-space `bbox` at both
+extraction levels; words have one only at `Glyphs`. The text is identical
+at `Runs` and `Glyphs`.
+
+```rust
+use stet_graphics::layer_set::LayerSet;
+use stet_graphics::text::{text_lines, text_runs};
+
+let page_text: Vec<String> = text_lines(text_runs(&list, &LayerSet::new()))
+    .into_iter()
+    .map(|line| line.text)
+    .collect();
+```
+
+The assembly is deliberately simple and deterministic: it keeps content
+order, sorts nothing, and does not detect columns, tables or reading
+order. Invisible runs are included; filter on `invisible` before
+assembling to keep only visible text.
+
 ### Clip / InitClip
 
 ```rust
