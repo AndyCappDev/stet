@@ -199,7 +199,7 @@ fn runs_of(ps: &str) -> Vec<TextRunParams> {
 }
 
 #[test]
-fn base_fonts_record_one_run_per_show() {
+fn show_operators_record_one_run_per_string() {
     let lists = render(true);
     let texts: Vec<(Vec<&str>, String)> = runs(&lists[0])
         .into_iter()
@@ -214,6 +214,9 @@ fn base_fonts_record_one_run_per_show() {
         "kshow",
         "rotated",
         "clipped",
+        // The FMapType composite: a run per descendant font it switches to.
+        "A",
+        "B",
         "AAA",
         "form",
     ]
@@ -221,7 +224,16 @@ fn base_fonts_record_one_run_per_show() {
     .map(|t| (vec![], t.to_string()))
     .collect();
     assert_eq!(texts, expected);
-    for (_, run) in runs(&lists[0]) {
+    let all = runs(&lists[0]);
+    let composite: Vec<(&str, &str, u32)> = all[7..9]
+        .iter()
+        .map(|(_, r)| (r.text.as_str(), r.font_name.as_str(), r.glyphs[0].code))
+        .collect();
+    assert_eq!(
+        composite,
+        [("A", "Helvetica", 0x0041), ("B", "Times-Roman", 0x0142)]
+    );
+    for (_, run) in all {
         assert!(!run.invisible && !run.vertical);
         assert!(
             run.glyphs
@@ -429,4 +441,113 @@ showpage
         (0.012, -0.012)
     ));
     assert_eq!((run.ascent, run.descent), (900.0, -250.0));
+}
+
+/// A CIDFontType 2 font over [`minimal_sfnt`], in Adobe's Japan1
+/// collection, composed with `cmap` into the Type 0 font `/J`. Its glyphs
+/// have no outlines; only their text and positions matter here.
+fn cid_font_ps(cmap: &str, show: &str) -> String {
+    let hex: String = minimal_sfnt().iter().map(|b| format!("{b:02X}")).collect();
+    format!(
+        r#"%!PS
+/CIDF <<
+  /CIDFontType 2 /CIDFontName /CIDF /FontType 42
+  /CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) /Supplement 4 >>
+  /FontMatrix [1 0 0 1 0 0] /FontBBox [0 -0.25 1 0.9]
+  /CIDCount 65536 /GDBytes 2 /CIDMap 0 /Encoding [] /CharStrings << /.notdef 0 >>
+  /sfnts [<{hex}>]
+>> /CIDFont defineresource pop
+{cmap}
+/J /{cmap_name} [/CIDF /CIDFont findresource] composefont pop
+/J findfont 12 scalefont setfont
+{show}
+showpage
+"#,
+        cmap_name = cmap
+            .split_whitespace()
+            .skip_while(|t| *t != "/CMapName")
+            .nth(1)
+            .map(|n| n.trim_start_matches('/'))
+            .unwrap_or("Identity-H"),
+    )
+}
+
+#[test]
+fn cid_fonts_give_the_collections_text() {
+    // Japan1 CIDs 3851 and 3852 are 諭 and 輸, shown through Identity-H
+    // and then through Identity-V.
+    let ps = cid_font_ps(
+        "",
+        "72 700 moveto <0F0B0F0C> show \
+         /JV /Identity-V [/CIDF /CIDFont findresource] composefont 12 scalefont setfont \
+         300 700 moveto <0F0B0F0C> show",
+    );
+    let runs = runs_of(&ps);
+    assert_eq!(runs.len(), 2, "{runs:#?}");
+    let (horizontal, vertical) = (&runs[0], &runs[1]);
+    for run in [horizontal, vertical] {
+        assert_eq!(glyph_texts(run), ["諭", "輸"]);
+        let codes: Vec<u32> = run.glyphs.iter().map(|g| g.code).collect();
+        assert_eq!(codes, [0x0F0B, 0x0F0C]);
+        assert!(
+            run.glyphs
+                .iter()
+                .all(|g| g.source == UnicodeSource::CidOrdering)
+        );
+    }
+    // Horizontal: 600-unit advances in a 1000-unit em at 12 pt.
+    assert!(!horizontal.vertical);
+    assert!(close(horizontal.glyphs[1].origin, (72.0 + 7.2, 92.0)));
+    assert_eq!((horizontal.ascent, horizontal.descent), (900.0, -250.0));
+    // Vertical: origins run down the column by the default 1000-unit
+    // vertical advance, and the box spans half the em either side.
+    assert!(vertical.vertical);
+    assert!(close(vertical.glyphs[0].origin, (300.0, 92.0)));
+    assert!(close(vertical.glyphs[0].advance, (0.0, 12.0)));
+    assert!(close(vertical.glyphs[1].origin, (300.0, 104.0)));
+    assert_eq!((vertical.ascent, vertical.descent), (500.0, -500.0));
+}
+
+#[test]
+fn unicode_cmaps_give_the_codes_as_text() {
+    // A `Uni…-UCS2-…` CMap's codes are the text, whatever CID they select:
+    // here あ (U+3042) selects CID 1, which Japan1 would read as a space.
+    let cmap = "/CIDInit /ProcSet findresource begin 12 dict begin begincmap \
+        /CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) /Supplement 4 >> def \
+        /CMapName /UniTest-UCS2-H def /CMapType 1 def \
+        1 begincodespacerange <0000> <FFFF> endcodespacerange \
+        1 begincidrange <3042> <3042> 1 endcidrange \
+        endcmap CMapName currentdict /CMap defineresource pop end end";
+    let runs = runs_of(&cid_font_ps(cmap, "72 700 moveto <3042> show"));
+    assert_eq!(runs.len(), 1, "{runs:#?}");
+    assert_eq!(runs[0].text, "あ");
+    assert_eq!(runs[0].glyphs[0].code, 0x3042);
+}
+
+#[test]
+fn cff_cid_fonts_give_the_collections_text() {
+    // A CIDFontType 0 font with two empty Type 2 charstrings, each
+    // `1000 endchar` (a 1000-unit width, no outline), at Japan1 CIDs 3851
+    // and 3852.
+    let ps = r#"%!PS
+/CIDC <<
+  /CIDFontType 0 /CIDFontName /CIDC /FontType 9
+  /CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) /Supplement 4 >>
+  /FontMatrix [0.001 0 0 0.001 0 0] /FontBBox [0 -120 1000 880]
+  /CIDCount 65536 /DW 1000
+  /CharStrings << 3851 <1C03E80E> 3852 <1C03E80E> >>
+>> /CIDFont defineresource pop
+/C /Identity-H [/CIDC /CIDFont findresource] composefont pop
+/C findfont 12 scalefont setfont
+72 700 moveto <0F0B0F0C> show
+showpage
+"#;
+    let runs = runs_of(ps);
+    assert_eq!(runs.len(), 1, "{runs:#?}");
+    let run = &runs[0];
+    assert_eq!(glyph_texts(run), ["諭", "輸"]);
+    assert_eq!(run.font_name, "CIDC");
+    assert_eq!((run.ascent, run.descent), (880.0, -120.0));
+    assert!(close(run.glyphs[0].advance, (12.0, 0.0)));
+    assert!(close(run.glyphs[1].origin, (84.0, 92.0)));
 }

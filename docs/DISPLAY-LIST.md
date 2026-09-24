@@ -173,15 +173,18 @@ drawn figure — has nowhere to put its text and is dropped. Glyph space is
 `/FontMatrix`'s.
 
 The PostScript interpreter records one run per string a show operator
-shows (`show`, `ashow`, `widthshow`, `awidthshow`, `kshow`), and none for
-text drawn inside a Type 3 font's `BuildChar` / `BuildGlyph` or a pattern
-cell's `PaintProc`. A `show` inside a `kshow` procedure records its own
-run, splitting the kshow's around it, so runs stay in page order. Glyph
-space is the font's own — 1000 units per em for Type 1 and CFF fonts, font
-units for Type 42, the `FontMatrix`'s for Type 3 — with `ascent` and
-`descent` from the font's `FontBBox` (a Type 42 font's `hhea` table), else
-0.8 / -0.2 of a 1000-unit em. Text comes from glyph names only: PostScript
-has no ToUnicode.
+shows (`show`, `ashow`, `widthshow`, `awidthshow`, `kshow`) — or, for a
+composite font, one per stretch of glyphs from the same descendant font —
+and none for text drawn inside a Type 3 font's `BuildChar` / `BuildGlyph`
+or a pattern cell's `PaintProc`. A `show` inside a `kshow` procedure
+records its own run, splitting the kshow's around it, so runs stay in page
+order. Glyph space is the font's own — 1000 units per em for Type 1 and
+CFF fonts, font units for TrueType-based ones, the `FontMatrix`'s for Type
+3 — with `ascent` and `descent` from the font's `FontBBox` (a TrueType
+font's `hhea` table), else 0.8 / -0.2 of a 1000-unit em; half the em
+either side for vertical writing. Text comes from glyph names, or for a
+CIDFont from a `Uni…` CMap's codes or the CID through Adobe's CJK
+collections: PostScript has no ToUnicode.
 
 | Field | Type | Description |
 |-------|------|-------------|

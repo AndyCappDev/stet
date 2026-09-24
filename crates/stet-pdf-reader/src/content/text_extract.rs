@@ -10,7 +10,7 @@
 //! Built only when extraction is switched on.
 
 use stet_fonts::agl::{glyph_names_are_hex, numeric_glyph_name_to_char};
-use stet_fonts::cid_unicode::cid_to_text;
+use stet_fonts::cid_unicode::{UnicodeCMap, cid_to_text};
 use stet_fonts::to_unicode::ToUnicodeMap;
 use stet_graphics::device::UnicodeSource;
 
@@ -25,19 +25,6 @@ const DEFAULT_DESCENT: f64 = -200.0;
 
 /// Half the em, either side of a vertical-writing glyph's origin.
 const VERTICAL_HALF_EM: f64 = 500.0;
-
-/// How a composite font's predefined `Uni…` encoding CMap spells Unicode in
-/// its character codes, which then are the text.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum UnicodeCodes {
-    /// `Uni…-UCS2-…` and `Uni…-UTF16-…`: UTF-16 code units, a surrogate
-    /// pair forming one four-byte code.
-    Utf16,
-    /// `Uni…-UTF32-…`: the code is the scalar value.
-    Utf32,
-    /// `Uni…-UTF8-…`: the code's bytes are UTF-8.
-    Utf8,
-}
 
 /// Text-extraction data for one font, read from its dictionary.
 pub(crate) struct FontText {
@@ -54,7 +41,7 @@ pub(crate) struct FontText {
     /// follow it.
     cid_ordering: Option<Vec<u8>>,
     /// Set when a composite font's codes are Unicode themselves.
-    unicode_codes: Option<UnicodeCodes>,
+    unicode_codes: Option<UnicodeCMap>,
     /// `/BaseFont` (or a Type 3 font's `/Name`).
     pub font_name: String,
     /// Glyph-space ascent; for vertical writing, the extent right of the
@@ -166,7 +153,7 @@ impl FontText {
     /// and the descendant font's metrics.
     fn read_composite(&mut self, resolver: &Resolver, font_dict: &PdfDict, font: Option<&PdfFont>) {
         let encoding_name = font_dict.get_name(b"Encoding").unwrap_or(b"");
-        self.unicode_codes = unicode_codes(encoding_name);
+        self.unicode_codes = UnicodeCMap::from_cmap_name(encoding_name);
 
         let Some(cid_font) = deref_entry(resolver, font_dict, b"DescendantFonts")
             .and_then(|obj| obj.as_array().and_then(|a| a.first().cloned()))
@@ -253,9 +240,8 @@ impl FontText {
                 return UnicodeSource::GlyphName;
             }
         }
-        if let Some(kind) = self.unicode_codes
-            && push_unicode_code(kind, code, out)
-        {
+        if let Some(ch) = self.unicode_codes.and_then(|kind| kind.code_to_char(code)) {
+            out.push(ch);
             return UnicodeSource::CidOrdering;
         }
         if let (Some(ordering), Some(cid)) = (&self.cid_ordering, cid)
@@ -288,53 +274,6 @@ fn cids_are_known(font_dict: &PdfDict, font: Option<&PdfFont>) -> bool {
     }
 }
 
-/// How the predefined CMap `name` spells Unicode, if it is one of the
-/// `Uni…` CMaps whose codes are Unicode.
-fn unicode_codes(name: &[u8]) -> Option<UnicodeCodes> {
-    if !name.starts_with(b"Uni") {
-        return None;
-    }
-    let has = |needle: &[u8]| name.windows(needle.len()).any(|w| w == needle);
-    if has(b"-UCS2-") || has(b"-UTF16-") {
-        Some(UnicodeCodes::Utf16)
-    } else if has(b"-UTF32-") {
-        Some(UnicodeCodes::Utf32)
-    } else if has(b"-UTF8-") {
-        Some(UnicodeCodes::Utf8)
-    } else {
-        None
-    }
-}
-
-/// Append the text a `Uni…` CMap's `code` spells; false when it spells
-/// nothing valid.
-fn push_unicode_code(kind: UnicodeCodes, code: u32, out: &mut String) -> bool {
-    let ch = match kind {
-        UnicodeCodes::Utf16 if code > 0xFFFF => {
-            let (hi, lo) = ((code >> 16) as u16, code as u16);
-            match char::decode_utf16([hi, lo]).next() {
-                Some(Ok(c)) => Some(c),
-                _ => None,
-            }
-        }
-        UnicodeCodes::Utf16 | UnicodeCodes::Utf32 => char::from_u32(code),
-        UnicodeCodes::Utf8 => {
-            let bytes = code.to_be_bytes();
-            let start = bytes.iter().position(|&b| b != 0).unwrap_or(3);
-            std::str::from_utf8(&bytes[start..])
-                .ok()
-                .and_then(|s| s.chars().next())
-        }
-    };
-    match ch {
-        Some(c) if !c.is_control() => {
-            out.push(c);
-            true
-        }
-        _ => false,
-    }
-}
-
 /// `name` without a `ABCDEF+` subset prefix.
 fn strip_subset_prefix(name: &[u8]) -> &[u8] {
     if name.len() > 7 && name[6] == b'+' && name[..6].iter().all(u8::is_ascii_uppercase) {
@@ -352,40 +291,6 @@ fn deref_entry(resolver: &Resolver, dict: &PdfDict, key: &[u8]) -> Option<PdfObj
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn unicode_cmap_names() {
-        assert_eq!(unicode_codes(b"UniJIS-UCS2-H"), Some(UnicodeCodes::Utf16));
-        assert_eq!(unicode_codes(b"UniGB-UTF16-V"), Some(UnicodeCodes::Utf16));
-        assert_eq!(unicode_codes(b"UniKS-UTF32-H"), Some(UnicodeCodes::Utf32));
-        assert_eq!(unicode_codes(b"UniCNS-UTF8-H"), Some(UnicodeCodes::Utf8));
-        assert_eq!(
-            unicode_codes(b"UniJIS-UCS2-HW-H"),
-            Some(UnicodeCodes::Utf16)
-        );
-        assert_eq!(unicode_codes(b"90ms-RKSJ-H"), None);
-        assert_eq!(unicode_codes(b"Identity-H"), None);
-    }
-
-    #[test]
-    fn unicode_codes_decode() {
-        let text = |kind, code| {
-            let mut s = String::new();
-            push_unicode_code(kind, code, &mut s).then_some(s)
-        };
-        assert_eq!(text(UnicodeCodes::Utf16, 0x65E5).as_deref(), Some("日"));
-        // U+20BB7 as a surrogate pair.
-        assert_eq!(
-            text(UnicodeCodes::Utf16, 0xD842_DFB7).as_deref(),
-            Some("𠮷")
-        );
-        assert_eq!(text(UnicodeCodes::Utf16, 0xD842), None);
-        assert_eq!(text(UnicodeCodes::Utf32, 0x20BB7).as_deref(), Some("𠮷"));
-        assert_eq!(text(UnicodeCodes::Utf8, 0xE6_97_A5).as_deref(), Some("日"));
-        assert_eq!(text(UnicodeCodes::Utf8, 0x41).as_deref(), Some("A"));
-        assert_eq!(text(UnicodeCodes::Utf8, 0xFF), None);
-        assert_eq!(text(UnicodeCodes::Utf32, 0x07), None);
-    }
 
     #[test]
     fn subset_prefix() {

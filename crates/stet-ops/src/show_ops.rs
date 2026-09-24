@@ -1369,6 +1369,7 @@ fn render_show(
                 text: text_record::GlyphText::Name(glyph_name_id),
                 origin: (cur_x, cur_y),
                 width: (wx, wy),
+                vertical: false,
             },
         );
         cur_x += wx + extra_ax;
@@ -1634,6 +1635,7 @@ fn render_show_type2(
                 text: text_record::GlyphText::Name(glyph_name_id),
                 origin: (cur_x, cur_y),
                 width: (wx, wy),
+                vertical: false,
             },
         );
         cur_x += wx + extra_ax;
@@ -1998,6 +2000,18 @@ fn render_show_composite(
             decode_cmap_bytes(ctx, font_entity, bytes)
         };
         let cids: Vec<i32> = cid_pairs.iter().map(|&(cid, _)| cid).collect();
+        let recording = if ctx.text_capture.is_some() {
+            CidRecording {
+                codes: if pending_cid.is_some() {
+                    vec![bytes.iter().fold(0u32, |a, &b| (a << 8) | b as u32)]
+                } else {
+                    cmap_codes(ctx, font_entity, bytes)
+                },
+                text: text_record::cid_text_source(ctx, font_entity, cidfont_entity),
+            }
+        } else {
+            CidRecording::default()
+        };
 
         // Emit Text element with CID-encoded bytes (2-byte big-endian per CID)
         {
@@ -2024,6 +2038,7 @@ fn render_show_composite(
                 &type0_fm,
                 &cidfont_fm,
                 &cids,
+                &recording,
                 &mut cur_x,
                 &mut cur_y,
                 extra_ax,
@@ -2042,6 +2057,7 @@ fn render_show_composite(
                 &type0_fm,
                 &cidfont_fm,
                 &cids,
+                &recording,
                 &mut cur_x,
                 &mut cur_y,
                 extra_ax,
@@ -2227,6 +2243,7 @@ fn render_show_composite(
                         },
                         origin: (cur_x, cur_y),
                         width: (wx, wy),
+                        vertical: false,
                     },
                 );
             }
@@ -2253,6 +2270,7 @@ fn render_composite_truetype_cids(
     type0_fm: &Matrix,
     cidfont_fm: &Matrix,
     cids: &[i32],
+    recording: &CidRecording,
     cur_x: &mut f64,
     cur_y: &mut f64,
     extra_ax: f64,
@@ -2282,8 +2300,19 @@ fn render_composite_truetype_cids(
     let em_scale = Matrix::scale(1.0 / upm, 1.0 / upm);
     let combined_fm = type0_fm.multiply(cidfont_fm).multiply(&em_scale);
     let (paint_type, stroke_width_dev) = get_paint_info(ctx, cidfont_entity, &combined_fm, ctm);
+    // A vertical glyph's box spans half the em either side of its origin.
+    let metrics = || {
+        if wmode == 1 {
+            text_record::GlyphMetrics::Given {
+                ascent: upm / 2.0,
+                descent: -upm / 2.0,
+            }
+        } else {
+            text_record::truetype_metrics(font_data.as_deref())
+        }
+    };
 
-    for &cid in cids {
+    for (i, &cid) in cids.iter().enumerate() {
         // Check glyph cache by CID
         let cached = ctx
             .glyph_caches
@@ -2363,6 +2392,17 @@ fn render_composite_truetype_cids(
             // DW2 default per PLRM: [880 -1000] (vy_offset, v_advance in glyph units)
             let (_vy_offset, v_advance) = get_dw2(ctx, cidfont_entity).unwrap_or((880.0, -1000.0));
             let (_, wy) = combined_fm.transform_delta(0.0, v_advance);
+            record_cid_glyph(
+                ctx,
+                cidfont_entity,
+                &combined_fm,
+                metrics(),
+                recording,
+                (i, cid),
+                (*cur_x, *cur_y),
+                combined_fm.transform_delta(0.0, v_advance),
+                true,
+            );
             *cur_x += extra_ax;
             *cur_y += wy + extra_ay;
         } else {
@@ -2372,6 +2412,17 @@ fn render_composite_truetype_cids(
                 .and_then(|fd| truetype::get_advance_width(fd, cid as u16))
                 .unwrap_or(500);
             let (wx, wy) = combined_fm.transform_delta(advance as f64, 0.0);
+            record_cid_glyph(
+                ctx,
+                cidfont_entity,
+                &combined_fm,
+                metrics(),
+                recording,
+                (i, cid),
+                (*cur_x, *cur_y),
+                (wx, wy),
+                false,
+            );
             *cur_x += wx + extra_ax;
             *cur_y += wy + extra_ay;
         }
@@ -2382,6 +2433,62 @@ fn render_composite_truetype_cids(
         }
     }
     Ok(())
+}
+
+/// The character codes and text source a CID loop needs to record its
+/// glyphs' text; empty when text extraction is not recording.
+#[derive(Default)]
+struct CidRecording {
+    /// The code each CID was shown with, in order.
+    codes: Vec<u32>,
+    text: text_record::CidText,
+}
+
+/// The character codes in `bytes` for a CMap-keyed Type 0 font, one for
+/// each CID [`decode_cmap_bytes`] decodes from them.
+fn cmap_codes(ctx: &Context, font_entity: EntityId, bytes: &[u8]) -> Vec<u32> {
+    let width = decode_cmap_characters(ctx, font_entity)
+        .map(|(_, width, _)| width)
+        .unwrap_or(1)
+        .max(1);
+    bytes
+        .chunks_exact(width)
+        .map(|code| code.iter().fold(0u32, |a, &b| (a << 8) | b as u32))
+        .collect()
+}
+
+/// Record the `index`th glyph of a CID loop, CID `cid`.
+#[expect(clippy::too_many_arguments)]
+fn record_cid_glyph(
+    ctx: &mut Context,
+    cidfont_entity: EntityId,
+    glyph_space: &Matrix,
+    metrics: text_record::GlyphMetrics,
+    recording: &CidRecording,
+    (index, cid): (usize, i32),
+    origin: (f64, f64),
+    width: (f64, f64),
+    vertical: bool,
+) {
+    if ctx.text_capture.is_none() {
+        return;
+    }
+    text_record::record_glyph(
+        ctx,
+        text_record::Glyph {
+            font: cidfont_entity,
+            glyph_space: *glyph_space,
+            metrics,
+            code: recording.codes.get(index).copied().unwrap_or(cid as u32),
+            text: text_record::GlyphText::Cid {
+                cid,
+                source: recording.text,
+            },
+            origin,
+            width,
+            vertical,
+        },
+    );
 }
 
 /// Get DW2 (default vertical metrics) from a CIDFont dict.
@@ -2556,6 +2663,7 @@ fn render_composite_cff_cids(
     type0_fm: &Matrix,
     cidfont_fm: &Matrix,
     cids: &[i32],
+    recording: &CidRecording,
     cur_x: &mut f64,
     cur_y: &mut f64,
     extra_ax: f64,
@@ -2594,7 +2702,19 @@ fn render_composite_cff_cids(
         .and_then(|obj| obj.as_i32())
         .unwrap_or(1000);
 
-    for &cid in cids {
+    // A vertical glyph's box spans half the em either side of its origin.
+    let metrics = || {
+        if wmode == 1 {
+            text_record::GlyphMetrics::Given {
+                ascent: 500.0,
+                descent: -500.0,
+            }
+        } else {
+            text_record::GlyphMetrics::FontBBox
+        }
+    };
+
+    for (i, &cid) in cids.iter().enumerate() {
         // Check glyph cache by CID
         let cached = ctx
             .glyph_caches
@@ -2614,10 +2734,32 @@ fn render_composite_cff_cids(
                         let (_vy_offset, v_advance) =
                             get_dw2(ctx, cidfont_entity).unwrap_or((880.0, -1000.0));
                         let (_, wy) = combined_fm.transform_delta(0.0, v_advance);
+                        record_cid_glyph(
+                            ctx,
+                            cidfont_entity,
+                            &combined_fm,
+                            metrics(),
+                            recording,
+                            (i, cid),
+                            (*cur_x, *cur_y),
+                            combined_fm.transform_delta(0.0, v_advance),
+                            true,
+                        );
                         *cur_x += extra_ax;
                         *cur_y += wy + extra_ay;
                     } else {
                         let (wx, wy) = combined_fm.transform_delta(dw as f64, 0.0);
+                        record_cid_glyph(
+                            ctx,
+                            cidfont_entity,
+                            &combined_fm,
+                            metrics(),
+                            recording,
+                            (i, cid),
+                            (*cur_x, *cur_y),
+                            (wx, wy),
+                            false,
+                        );
                         *cur_x += wx + extra_ax;
                         *cur_y += wy + extra_ay;
                     }
@@ -2674,10 +2816,32 @@ fn render_composite_cff_cids(
         if wmode == 1 {
             let (_vy_offset, v_advance) = get_dw2(ctx, cidfont_entity).unwrap_or((880.0, -1000.0));
             let (_, wy) = combined_fm.transform_delta(0.0, v_advance);
+            record_cid_glyph(
+                ctx,
+                cidfont_entity,
+                &combined_fm,
+                metrics(),
+                recording,
+                (i, cid),
+                (*cur_x, *cur_y),
+                combined_fm.transform_delta(0.0, v_advance),
+                true,
+            );
             *cur_x += extra_ax;
             *cur_y += wy + extra_ay;
         } else {
             let (wx, wy) = combined_fm.transform_delta(width_x, width_y);
+            record_cid_glyph(
+                ctx,
+                cidfont_entity,
+                &combined_fm,
+                metrics(),
+                recording,
+                (i, cid),
+                (*cur_x, *cur_y),
+                (wx, wy),
+                false,
+            );
             *cur_x += wx + extra_ax;
             *cur_y += wy + extra_ay;
         }
@@ -3065,6 +3229,7 @@ fn render_show_type3(
                     text,
                     origin: (cur_x, cur_y),
                     width: (wx, wy),
+                    vertical: false,
                 },
             );
         }
@@ -4218,6 +4383,15 @@ fn render_fmap_type0(
     };
 
     let chars = decode_cmap_bytes(ctx, font_entity, bytes);
+    // FMapType 2 and 5 codes are two bytes: the font number, then the
+    // character code within that font.
+    let two_byte_codes = matches!(
+        ctx.names
+            .find(b"FMapType")
+            .and_then(|id| ctx.dicts.get(font_entity, &DictKey::Name(id)))
+            .and_then(|obj| obj.as_i32()),
+        Some(2) | Some(5)
+    );
 
     for (char_code, font_idx) in &chars {
         // Get descendant font from FDepVector
@@ -4288,6 +4462,24 @@ fn render_fmap_type0(
 
                 // Advance by glyph width through composed FontMatrix
                 let (wx, wy) = composed_fm.transform_delta(result.width_x, result.width_y);
+                let code = if two_byte_codes {
+                    ((*font_idx as u32) << 8) | *char_code as u32
+                } else {
+                    *char_code as u32
+                };
+                text_record::record_glyph(
+                    ctx,
+                    text_record::Glyph {
+                        font: desc_entity,
+                        glyph_space: composed_fm,
+                        metrics: text_record::GlyphMetrics::FontBBox,
+                        code,
+                        text: text_record::GlyphText::Name(glyph_name_id),
+                        origin: (*cur_x, *cur_y),
+                        width: (wx, wy),
+                        vertical: false,
+                    },
+                );
 
                 // Apply width_char extra displacement
                 let (mut ax, mut ay) = (extra_ax, extra_ay);

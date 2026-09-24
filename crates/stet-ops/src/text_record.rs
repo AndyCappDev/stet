@@ -14,6 +14,7 @@ use stet_core::context::{Context, OpenTextRun, TextCapture};
 use stet_core::dict::DictKey;
 use stet_core::graphics_state::Matrix;
 use stet_core::object::{EntityId, NameId, PsValue};
+use stet_fonts::cid_unicode::UnicodeCMap;
 use stet_graphics::device::{ShownGlyph, TextRunParams, UnicodeSource};
 use stet_graphics::display_list::DisplayElement;
 
@@ -85,8 +86,74 @@ pub(crate) fn resume(ctx: &mut Context, saved: Option<TextCapture>) {
 pub(crate) enum GlyphText {
     /// The glyph's name, through the Adobe Glyph List.
     Name(NameId),
+    /// A CID-keyed font's glyph: its code, when the CMap's codes are
+    /// Unicode, else its CID through the CIDFont's character collection.
+    Cid { cid: i32, source: CidText },
     /// Nothing is known.
     None,
+}
+
+/// What a CID-keyed font offers for its glyphs' text: see
+/// [`cid_text_source`].
+#[derive(Clone, Copy, Default)]
+pub(crate) struct CidText {
+    /// The CMap is a predefined `Uni…` one, whose codes are the text.
+    unicode_cmap: Option<UnicodeCMap>,
+    /// The CIDFont's Adobe character collection (`Japan1`, …), whose table
+    /// gives each CID's text.
+    ordering: Option<&'static [u8]>,
+}
+
+/// The text sources of a Type 0 font `type0` using a CMap, over CIDFont
+/// `cidfont`: the CMap's name, for the `Uni…` CMaps, and the CIDFont's
+/// `CIDSystemInfo`, for Adobe's four CJK collections.
+pub(crate) fn cid_text_source(ctx: &Context, type0: EntityId, cidfont: EntityId) -> CidText {
+    let name_key = |key: &[u8]| ctx.names.find(key).map(DictKey::Name);
+    let bytes_of = |value: PsValue| -> Option<Vec<u8>> {
+        match value {
+            PsValue::Name(id) => Some(ctx.names.get_bytes(id).to_vec()),
+            PsValue::String { entity, start, len } => {
+                Some(ctx.strings.get(entity, start, len).to_vec())
+            }
+            _ => None,
+        }
+    };
+    let unicode_cmap = name_key(b"CMap")
+        .and_then(|key| ctx.dicts.get(type0, &key))
+        .and_then(|cmap| match cmap.value {
+            PsValue::Dict(cmap) => Some(cmap),
+            _ => None,
+        })
+        .and_then(|cmap| ctx.dicts.get(cmap, &name_key(b"CMapName")?))
+        .and_then(|name| bytes_of(name.value))
+        .and_then(|name| UnicodeCMap::from_cmap_name(&name));
+    let system_info = name_key(b"CIDSystemInfo")
+        .and_then(|key| ctx.dicts.get(cidfont, &key))
+        .and_then(|info| match info.value {
+            PsValue::Dict(info) => Some(info),
+            _ => None,
+        });
+    let entry = |key: &[u8]| {
+        system_info
+            .and_then(|info| ctx.dicts.get(info, &name_key(key)?))
+            .and_then(|value| bytes_of(value.value))
+    };
+    let ordering = (entry(b"Registry").as_deref() == Some(b"Adobe"))
+        .then(|| entry(b"Ordering"))
+        .flatten()
+        .and_then(|ordering| -> Option<&'static [u8]> {
+            match &ordering[..] {
+                b"Japan1" => Some(b"Japan1"),
+                b"CNS1" => Some(b"CNS1"),
+                b"GB1" => Some(b"GB1"),
+                b"Korea1" => Some(b"Korea1"),
+                _ => None,
+            }
+        });
+    CidText {
+        unicode_cmap,
+        ordering,
+    }
 }
 
 /// Where a font's ascent and descent come from, in its glyph space.
@@ -110,8 +177,11 @@ pub(crate) struct Glyph {
     pub text: GlyphText,
     /// The glyph's origin in user space.
     pub origin: (f64, f64),
-    /// The glyph's width in user space, before any spacing an operator adds.
+    /// The glyph's width in user space, before any spacing an operator adds:
+    /// its vertical advance in vertical writing.
     pub width: (f64, f64),
+    /// Vertical writing (WMode 1): `origin` is the glyph's vertical origin.
+    pub vertical: bool,
 }
 
 /// Record `glyph` in the open run, starting a new run when it is the
@@ -125,6 +195,7 @@ pub(crate) fn record_glyph(ctx: &mut Context, glyph: Glyph) {
     let linear = [to_device.a, to_device.b, to_device.c, to_device.d];
     let joins = capture.run.as_ref().is_some_and(|run| {
         run.font == glyph.font
+            && run.params.vertical == glyph.vertical
             && run
                 .linear
                 .iter()
@@ -143,6 +214,7 @@ pub(crate) fn record_glyph(ctx: &mut Context, glyph: Glyph) {
         GlyphText::Name(id) => {
             push_name_text(ctx, id, run.zapf_dingbats, run.hex_glyph_names, text)
         }
+        GlyphText::Cid { cid, source } => push_cid_text(glyph.code, cid, source, text),
         GlyphText::None => UnicodeSource::Unmapped,
     };
     let end = text.len() as u32;
@@ -180,6 +252,7 @@ fn open_run(ctx: &Context, glyph: &Glyph, linear: [f64; 4]) -> OpenTextRun {
             ascent,
             descent,
             font_name,
+            vertical: glyph.vertical,
             ..TextRunParams::default()
         },
         font: glyph.font,
@@ -226,19 +299,44 @@ fn push_name_text(
     UnicodeSource::Unmapped
 }
 
-/// The font's `FontName`, or empty.
-fn font_name(ctx: &Context, font: EntityId) -> String {
-    match ctx
-        .dicts
-        .get(font, &DictKey::Name(ctx.name_cache.n_font_name))
-        .map(|obj| obj.value)
-    {
-        Some(PsValue::Name(id)) => String::from_utf8_lossy(ctx.names.get_bytes(id)).into_owned(),
-        Some(PsValue::String { entity, start, len }) => {
-            String::from_utf8_lossy(ctx.strings.get(entity, start, len)).into_owned()
-        }
-        _ => String::new(),
+/// Append the text of CID `cid`, shown as `code`, and say where it came
+/// from.
+fn push_cid_text(code: u32, cid: i32, source: CidText, out: &mut String) -> UnicodeSource {
+    if let Some(ch) = source.unicode_cmap.and_then(|cmap| cmap.code_to_char(code)) {
+        out.push(ch);
+        return UnicodeSource::CidOrdering;
     }
+    if let (Some(ordering), Ok(cid)) = (source.ordering, u16::try_from(cid))
+        && let Some(text) = stet_fonts::cid_unicode::cid_to_text(ordering, cid)
+    {
+        out.push_str(text);
+        return UnicodeSource::CidOrdering;
+    }
+    UnicodeSource::Unmapped
+}
+
+/// The font's `FontName` — a CIDFont's `CIDFontName` — or empty.
+fn font_name(ctx: &Context, font: EntityId) -> String {
+    let keys = [
+        Some(ctx.name_cache.n_font_name),
+        ctx.names.find(b"CIDFontName"),
+    ];
+    for key in keys.into_iter().flatten() {
+        match ctx
+            .dicts
+            .get(font, &DictKey::Name(key))
+            .map(|obj| obj.value)
+        {
+            Some(PsValue::Name(id)) => {
+                return String::from_utf8_lossy(ctx.names.get_bytes(id)).into_owned();
+            }
+            Some(PsValue::String { entity, start, len }) => {
+                return String::from_utf8_lossy(ctx.strings.get(entity, start, len)).into_owned();
+            }
+            _ => {}
+        }
+    }
+    String::new()
 }
 
 /// The y extent of the font's `FontBBox`, when it has a non-empty one.

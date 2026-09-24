@@ -219,8 +219,89 @@ impl<'a> Reader<'a> {
     }
 }
 
+/// How a predefined `Uni…` CMap spells Unicode in its character codes: a
+/// composite font using one shows text whose codes are the text itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum UnicodeCMap {
+    /// `Uni…-UCS2-…` and `Uni…-UTF16-…`: UTF-16 code units, a surrogate
+    /// pair forming one four-byte code.
+    Utf16,
+    /// `Uni…-UTF32-…`: the code is the scalar value.
+    Utf32,
+    /// `Uni…-UTF8-…`: the code's bytes are UTF-8.
+    Utf8,
+}
+
+impl UnicodeCMap {
+    /// The encoding of the predefined CMap `name` (`UniJIS-UCS2-H`,
+    /// `UniGB-UTF16-V`, …), or `None` when its codes are not Unicode.
+    pub fn from_cmap_name(name: &[u8]) -> Option<Self> {
+        if !name.starts_with(b"Uni") {
+            return None;
+        }
+        let has = |needle: &[u8]| name.windows(needle.len()).any(|w| w == needle);
+        if has(b"-UCS2-") || has(b"-UTF16-") {
+            Some(Self::Utf16)
+        } else if has(b"-UTF32-") {
+            Some(Self::Utf32)
+        } else if has(b"-UTF8-") {
+            Some(Self::Utf8)
+        } else {
+            None
+        }
+    }
+
+    /// The character `code` spells, or `None` when it spells no valid
+    /// one — or a control character, which is not text.
+    pub fn code_to_char(self, code: u32) -> Option<char> {
+        let ch = match self {
+            Self::Utf16 if code > 0xFFFF => {
+                let (hi, lo) = ((code >> 16) as u16, code as u16);
+                char::decode_utf16([hi, lo]).next()?.ok()?
+            }
+            Self::Utf16 | Self::Utf32 => char::from_u32(code)?,
+            Self::Utf8 => {
+                let bytes = code.to_be_bytes();
+                let start = bytes.iter().position(|&b| b != 0).unwrap_or(3);
+                std::str::from_utf8(&bytes[start..]).ok()?.chars().next()?
+            }
+        };
+        (!ch.is_control()).then_some(ch)
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unicode_cmap_names() {
+        use UnicodeCMap::*;
+        assert_eq!(UnicodeCMap::from_cmap_name(b"UniJIS-UCS2-H"), Some(Utf16));
+        assert_eq!(UnicodeCMap::from_cmap_name(b"UniGB-UTF16-V"), Some(Utf16));
+        assert_eq!(UnicodeCMap::from_cmap_name(b"UniKS-UTF32-H"), Some(Utf32));
+        assert_eq!(UnicodeCMap::from_cmap_name(b"UniCNS-UTF8-H"), Some(Utf8));
+        assert_eq!(
+            UnicodeCMap::from_cmap_name(b"UniJIS-UCS2-HW-H"),
+            Some(Utf16)
+        );
+        assert_eq!(UnicodeCMap::from_cmap_name(b"90ms-RKSJ-H"), None);
+        assert_eq!(UnicodeCMap::from_cmap_name(b"Identity-H"), None);
+    }
+
+    #[test]
+    fn unicode_cmap_codes() {
+        use UnicodeCMap::*;
+        assert_eq!(Utf16.code_to_char(0x65E5), Some('日'));
+        // U+20BB7 as a surrogate pair.
+        assert_eq!(Utf16.code_to_char(0xD842_DFB7), Some('𠮷'));
+        assert_eq!(Utf16.code_to_char(0xD842), None);
+        assert_eq!(Utf32.code_to_char(0x20BB7), Some('𠮷'));
+        assert_eq!(Utf8.code_to_char(0xE6_97_A5), Some('日'));
+        assert_eq!(Utf8.code_to_char(0x41), Some('A'));
+        assert_eq!(Utf8.code_to_char(0xFF), None);
+        assert_eq!(Utf32.code_to_char(0x07), None);
+    }
+
     use super::*;
 
     const ORDERINGS: [&[u8]; 4] = [b"Japan1", b"CNS1", b"GB1", b"Korea1"];

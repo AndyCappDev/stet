@@ -48,11 +48,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Text extraction from PostScript.** With
   `InterpreterBuilder::extract_text()`, `show`, `ashow`, `widthshow`,
   `awidthshow` and `kshow` record a `TextRun` per string for Type 1, CFF,
-  Type 42 and Type 3 fonts, with text from each glyph's name through the
-  Adobe Glyph List (and the same dvips numeric-name rule as PDF).
-  PostScript has no ToUnicode, so a font whose glyph names mean nothing
-  gives empty text. Glyph space is the font's own, with ascent and descent
-  from its `FontBBox` (a TrueType font's `hhea` table). Text drawn inside a
+  Type 42 and Type 3 fonts, and for composite fonts: CID-keyed (CFF and
+  TrueType, horizontal and vertical) and FMapType, a new run starting
+  wherever the descendant font changes. Text comes from each glyph's name
+  through the Adobe Glyph List (with the same dvips numeric-name rule as
+  PDF); for a CIDFont, from the character code when the CMap is a `Uni…`
+  one, else from the CID through Adobe's Japan1, CNS1, GB1 or Korea1
+  table. PostScript has no ToUnicode, so a font whose glyph names mean
+  nothing gives empty text. Glyph space is the font's own, with ascent and
+  descent from its `FontBBox` (a TrueType font's `hhea` table). Text drawn inside a
   Type 3 `BuildChar` / `BuildGlyph` or a pattern cell is not recorded; a
   `show` inside a `kshow` procedure records its own run between the
   kshow's. Forms record once and are placed wherever `execform` draws them.
