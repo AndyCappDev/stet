@@ -28,8 +28,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every text-showing operator (`Tj`, `TJ`, `'`, `"`) records a `TextRun`
   beside the glyphs it draws — in forms, annotation appearances, layers and
   transparency groups, nested like the content, so a viewer extracts only
-  visible layers' text with the `LayerSet` it renders with. A glyph's text
-  comes from the font's `/ToUnicode` CMap, else its glyph name through the
+  visible layers' text with the `LayerSet` it renders with. Text inside an
+  `/ActualText` marked-content span is the span's text — the author's
+  statement of what ligatures, symbols or drawn characters say, or, when
+  empty, that a glyph such as a line-end hyphen says nothing: the span's
+  first glyph carries it all and the rest none, the outermost span wins,
+  and forms drawn inside the span are covered by it. Outside a span, a
+  glyph's text comes from the font's `/ToUnicode` CMap, else its glyph name through the
   Adobe Glyph List, else — for CJK fonts on Adobe's Japan1, CNS1, GB1 and
   Korea1 collections, or with a `Uni…` encoding CMap — its CID or code;
   failing all of those it is left empty. One rule is a heuristic, taken

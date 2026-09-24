@@ -163,9 +163,14 @@ render with to extract only visible layers' text.
 The PDF reader records one run per text-showing operator (`Tj`, `TJ`, `'`,
 `"`), placed after the glyphs it draws, and none for text drawn inside a
 Type 3 glyph procedure, a tiling pattern cell or a soft-mask group — that
-text is part of a glyph, a paint or a mask, not of the document. Glyph
-space is 1000 units per em for every font but Type 3, whose glyph space is
-its own `/FontMatrix`'s. (The PostScript interpreter does not record runs
+text is part of a glyph, a paint or a mask, not of the document. Inside an
+`/ActualText` span the span's text replaces its glyphs': the first glyph
+shown in the span carries all of it and the rest carry empty ranges, all
+with source `ActualText`. The outermost span wins, forms drawn inside a
+span are covered by it, and a span that shows no glyph — ActualText on a
+drawn figure — has nowhere to put its text and is dropped. Glyph space is
+1000 units per em for every font but Type 3, whose glyph space is its own
+`/FontMatrix`'s. (The PostScript interpreter does not record runs
 yet.)
 
 | Field | Type | Description |

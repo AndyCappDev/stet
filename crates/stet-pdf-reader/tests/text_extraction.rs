@@ -539,3 +539,96 @@ fn cid_text_from_the_collection() {
         .transform_delta(vertical.ascent, 0.0);
     assert!(close(across, (6.0, 0.0)));
 }
+
+/// `/ActualText` spans: the forms they take, where they reach, and where
+/// they stop.
+const ACTUAL_TEXT_CONTENT: &str = "\
+/Span << /ActualText <FEFF00660066> >> BDC BT /F1 12 Tf 72 700 Td (X) Tj ET EMC
+/Span << /ActualText (xyz) >> BDC BT /F1 12 Tf 72 680 Td (ab) Tj ET BT /F1 12 Tf 100 680 Td (c) Tj ET EMC
+BT /F1 12 Tf 72 660 Td (hy) Tj /Span << /ActualText () >> BDC (-) Tj EMC ET
+/Span /P1 BDC BT /F1 12 Tf 72 640 Td (N) Tj ET EMC
+/Span << /ActualText (outer) >> BDC BT /F1 12 Tf 72 620 Td /Span << /ActualText (inner) >> BDC (q) Tj EMC (r) Tj ET EMC
+/Span << /ActualText (viaform) >> BDC q 1 0 0 1 72 600 cm /Fm1 Do Q BT /F1 12 Tf 150 600 Td (s) Tj ET EMC
+q 1 0 0 1 72 580 cm /Fm2 Do Q BT /F1 12 Tf 150 580 Td (after) Tj ET
+/Span << /ActualText (nothing) >> BDC 72 560 m 100 560 l S EMC BT /F1 12 Tf 72 540 Td (plain) Tj ET
+/Artifact BMC BT /F1 12 Tf 72 520 Td (bmc) Tj ET EMC
+";
+
+fn build_actual_text_pdf() -> Vec<u8> {
+    let objects: Vec<Vec<u8>> = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".into(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R \
+         /Resources << /Font << /F1 5 0 R >> /XObject << /Fm1 6 0 R /Fm2 7 0 R >> \
+         /Properties << /P1 8 0 R >> >> >>"
+            .into(),
+        stream("", ACTUAL_TEXT_CONTENT),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>".into(),
+        // 6: a form drawn inside a span: its glyphs are the span's.
+        stream(
+            "/Type /XObject /Subtype /Form /BBox [0 0 200 20] \
+             /Resources << /Font << /F1 5 0 R >> >>",
+            "BT /F1 12 Tf 0 5 Td (form) Tj ET",
+        ),
+        // 7: a form that opens a span and never closes it.
+        stream(
+            "/Type /XObject /Subtype /Form /BBox [0 0 200 20] \
+             /Resources << /Font << /F1 5 0 R >> >>",
+            "/Span << /ActualText (leak) >> BDC BT /F1 12 Tf 0 5 Td (unclosed) Tj ET",
+        ),
+        // 8: named properties
+        "<< /ActualText (named) >>".into(),
+    ];
+    pdf_from(&objects)
+}
+
+#[test]
+fn actual_text_replaces_the_text_of_its_span() {
+    let pdf = build_actual_text_pdf();
+    let off = render(&pdf, false);
+    let on = render(&pdf, true);
+    assert_eq!(format!("{off:?}"), format!("{:?}", without_text_runs(&on)));
+
+    let runs: Vec<TextRunParams> = runs(&on).into_iter().map(|(_, r)| r).collect();
+    let summary: Vec<(&str, Vec<&str>)> = runs
+        .iter()
+        .map(|r| (r.text.as_str(), glyph_texts(r)))
+        .collect();
+    assert_eq!(
+        summary,
+        vec![
+            // UTF-16 with a byte-order mark.
+            ("ff", vec!["ff"]),
+            // Across two text objects: the first glyph takes the whole
+            // text, every later one in the span takes none.
+            ("xyz", vec!["xyz", ""]),
+            ("", vec![""]),
+            // An empty ActualText says the glyph is not text: a line-end
+            // hyphen.
+            ("hy", vec!["h", "y"]),
+            ("", vec![""]),
+            // Properties named in the resources.
+            ("named", vec!["named"]),
+            // The outermost span wins, in one Tj and the next.
+            ("outer", vec!["outer"]),
+            ("", vec![""]),
+            // A form drawn inside a span is covered by it, and the span
+            // carries on after the form.
+            ("viaform", vec!["viaform", "", "", ""]),
+            ("", vec![""]),
+            // A span a form leaves open ends with the form.
+            ("leak", vec!["leak", "", "", "", "", "", "", ""]),
+            ("after", vec!["a", "f", "t", "e", "r"]),
+            // A span with no glyphs gives nothing and ends at its EMC.
+            ("plain", vec!["p", "l", "a", "i", "n"]),
+            // BMC carries no properties.
+            ("bmc", vec!["b", "m", "c"]),
+        ]
+    );
+    let sources = |i: usize| runs[i].glyphs.iter().map(|g| g.source).collect::<Vec<_>>();
+    assert_eq!(sources(1), [UnicodeSource::ActualText; 2]);
+    assert_eq!(sources(2), [UnicodeSource::ActualText]);
+    assert_eq!(sources(3), [UnicodeSource::GlyphName; 2]);
+    assert_eq!(sources(4), [UnicodeSource::ActualText]);
+    assert_eq!(sources(11), [UnicodeSource::GlyphName; 5]);
+}

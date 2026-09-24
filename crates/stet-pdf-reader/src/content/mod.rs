@@ -73,8 +73,20 @@ enum MarkedContentFrame {
         parent_list: DisplayList,
         visibility: OcgVisibility,
     },
+    /// The BDC that opened the current `/ActualText` span: its EMC ends
+    /// the span. A span nested inside another is an `Other` frame, since
+    /// the outer span's text already replaces everything inside it.
+    ActualText,
     /// Any other BDC (non-OC property reference) or BMC.
     Other,
+}
+
+/// An open `/ActualText` marked-content span (PDF 14.9.4): the author's
+/// replacement for the text of every glyph shown inside it.
+struct ActualTextSpan {
+    text: String,
+    /// The span's first glyph has taken the text; the rest take none.
+    consumed: bool,
 }
 
 /// A `TextRun` being recorded by one show operator.
@@ -295,6 +307,10 @@ pub struct ContentInterpreter<'a> {
     font_text: std::collections::HashMap<usize, (Arc<PdfFont>, Arc<FontText>)>,
     /// The `TextRun` the current show operator is recording.
     text_run: Option<OpenTextRun>,
+    /// The open `/ActualText` span, if any. Kept beside `mc_stack` rather
+    /// than in it because a form XObject interpreted inside the span starts
+    /// a stack of its own, yet its glyphs are still the span's.
+    actual_text: Option<ActualTextSpan>,
     /// Nesting depth of content whose text is not document text — Type 3
     /// glyph procedures, tiling pattern cells, soft-mask groups. No run is
     /// recorded while it is non-zero.
@@ -373,6 +389,7 @@ impl<'a> ContentInterpreter<'a> {
             extract_text: false,
             font_text: std::collections::HashMap::new(),
             text_run: None,
+            actual_text: None,
             text_suspended: 0,
             pattern_cache: std::collections::HashMap::new(),
             ocg_off: ocg_off.clone(),
@@ -634,6 +651,7 @@ impl<'a> ContentInterpreter<'a> {
         let saved_stack_depth = self.gstate_stack.len();
         let saved_resources = self.resources.clone();
         let saved_mc_stack = std::mem::take(&mut self.mc_stack);
+        let in_actual_text = self.actual_text.is_some();
         // Set up resources from the form
         if let Some(res_obj) = form_dict.get(b"Resources")
             && let Ok(PdfObj::Dict(d)) = self.resolver.deref(res_obj)
@@ -665,6 +683,7 @@ impl<'a> ContentInterpreter<'a> {
         self.content_stream_ctm = saved_content_stream_ctm;
         self.resources = saved_resources;
         self.mc_stack = saved_mc_stack;
+        self.end_nested_actual_text(in_actual_text);
         self.gstate = saved_gstate;
 
         // Restore clip in display list (annotation may have modified clip state)
@@ -1520,16 +1539,19 @@ impl<'a> ContentInterpreter<'a> {
             }
             b"BDC" => self.op_bdc(),
             b"EMC" => {
-                if let Some(MarkedContentFrame::Ocg {
-                    parent_list,
-                    visibility,
-                }) = self.mc_stack.pop()
-                {
-                    let ocg_list = std::mem::replace(&mut self.display_list, parent_list);
-                    self.display_list.push(DisplayElement::OcgGroup {
-                        elements: ocg_list,
+                match self.mc_stack.pop() {
+                    Some(MarkedContentFrame::Ocg {
+                        parent_list,
                         visibility,
-                    });
+                    }) => {
+                        let ocg_list = std::mem::replace(&mut self.display_list, parent_list);
+                        self.display_list.push(DisplayElement::OcgGroup {
+                            elements: ocg_list,
+                            visibility,
+                        });
+                    }
+                    Some(MarkedContentFrame::ActualText) => self.actual_text = None,
+                    _ => {}
                 }
                 Ok(())
             }
@@ -3136,9 +3158,19 @@ impl<'a> ContentInterpreter<'a> {
             self.gstate.text_rise
         };
         let start = run.params.text.len() as u32;
-        let source = match &run.font {
-            Some(font) => font.append_text(code, cid, &mut run.params.text),
-            None => UnicodeSource::Unmapped,
+        let source = if let Some(span) = self.actual_text.as_mut() {
+            // The span's first glyph carries its whole text; the rest
+            // carry none, their text being part of it.
+            if !span.consumed {
+                run.params.text.push_str(&span.text);
+                span.consumed = true;
+            }
+            UnicodeSource::ActualText
+        } else {
+            match &run.font {
+                Some(font) => font.append_text(code, cid, &mut run.params.text),
+                None => UnicodeSource::Unmapped,
+            }
         };
         let end = run.params.text.len() as u32;
         run.params.glyphs.push(ShownGlyph {
@@ -3525,6 +3557,7 @@ impl<'a> ContentInterpreter<'a> {
         let saved_in_text = self.in_text;
         let saved_content_stream_ctm = self.content_stream_ctm;
         let saved_mc_stack = std::mem::take(&mut self.mc_stack);
+        let in_actual_text = self.actual_text.is_some();
 
         self.gstate.ctm = trm;
         // Pattern Matrix maps pattern space to the "default coordinate system
@@ -3549,6 +3582,7 @@ impl<'a> ContentInterpreter<'a> {
         self.in_text = saved_in_text;
         self.content_stream_ctm = saved_content_stream_ctm;
         self.mc_stack = saved_mc_stack;
+        self.end_nested_actual_text(in_actual_text);
         // Restore state: truncate any extra gstate_stack entries left by
         // unmatched q/Q inside the CharProc (e.g., if the EI parser consumed Q).
         self.gstate_stack.truncate(stack_depth_before + 1);
@@ -3753,7 +3787,17 @@ impl<'a> ContentInterpreter<'a> {
 
         let is_oc = matches!(&tag, Some(Operand::Name(n)) if n == b"OC");
         if !is_oc {
-            self.mc_stack.push(MarkedContentFrame::Other);
+            let frame = match props.as_ref().and_then(|p| self.actual_text_of(p)) {
+                Some(text) => {
+                    self.actual_text = Some(ActualTextSpan {
+                        text,
+                        consumed: false,
+                    });
+                    MarkedContentFrame::ActualText
+                }
+                None => MarkedContentFrame::Other,
+            };
+            self.mc_stack.push(frame);
             return Ok(());
         }
 
@@ -3778,6 +3822,41 @@ impl<'a> ContentInterpreter<'a> {
         }
 
         Ok(())
+    }
+
+    /// The `/ActualText` of a BDC's properties — an inline dictionary, or
+    /// the name of one in the resources' `/Properties` — when it opens a
+    /// new span: text extraction is on and recording, and no span is open
+    /// already (the outermost span's text covers everything inside it).
+    fn actual_text_of(&self, props: &Operand) -> Option<String> {
+        if !self.extract_text || self.text_suspended > 0 || self.actual_text.is_some() {
+            return None;
+        }
+        let named;
+        let dict = match props {
+            Operand::Dict(dict) => dict,
+            Operand::Name(name) => {
+                named = self
+                    .resolve_resource_subdict(b"Properties")?
+                    .get(name)
+                    .and_then(|obj| self.resolver.deref(obj).ok())?;
+                named.as_dict()?
+            }
+            _ => return None,
+        };
+        let text = self.resolver.deref(dict.get(b"ActualText")?).ok()?;
+        Some(crate::metadata::decode_pdf_text_string_pub(text.as_str()?))
+    }
+
+    /// Leave a nested content stream (form, annotation appearance, glyph
+    /// procedure, pattern cell, soft-mask group) that was entered
+    /// `in_actual_text` or not. A span the nested stream opened and left
+    /// unclosed ends with it; an enclosing span stays open, with its
+    /// progress kept — the nested stream may have shown its first glyph.
+    fn end_nested_actual_text(&mut self, in_actual_text: bool) {
+        if !in_actual_text {
+            self.actual_text = None;
+        }
     }
 
     /// Check whether an OCG/OCMD reference is OFF.
@@ -5401,6 +5480,7 @@ impl<'a> ContentInterpreter<'a> {
         let saved_cs_index = self.cs_index.take(); // invalidate — form has its own resources
         let saved_content_stream_ctm = self.content_stream_ctm;
         let saved_mc_stack = std::mem::take(&mut self.mc_stack);
+        let in_actual_text = self.actual_text.is_some();
         // Save and clear current path — forms start with an empty path per PDF spec.
         // Without this, an unconsumed path from the parent content stream leaks into
         // the form and gets painted by the first paint operator inside the form.
@@ -5537,6 +5617,7 @@ impl<'a> ContentInterpreter<'a> {
         self.current_point = saved_point;
         self.subpath_start = saved_subpath;
         self.mc_stack = saved_mc_stack;
+        self.end_nested_actual_text(in_actual_text);
         if let Some(saved) = self.gstate_stack.pop() {
             let old_clip_version = self.gstate.clip_path_version;
             self.gstate = saved;
@@ -6654,6 +6735,7 @@ impl<'a> ContentInterpreter<'a> {
         let saved_scope = self.soft_mask_scope.take();
         let saved_content_stream_ctm = self.content_stream_ctm;
         let saved_mc_stack = std::mem::take(&mut self.mc_stack);
+        let in_actual_text = self.actual_text.is_some();
 
         // Apply form matrix to CTM
         self.gstate.ctm = self.gstate.ctm.concat(&form_matrix);
@@ -6722,6 +6804,7 @@ impl<'a> ContentInterpreter<'a> {
         self.current_font = saved_current_font2;
         self.cs_index = saved_cs_index2;
         self.mc_stack = saved_mc_stack;
+        self.end_nested_actual_text(in_actual_text);
         if let Some(saved) = self.gstate_stack.pop() {
             self.gstate = saved;
         }
@@ -7204,6 +7287,7 @@ impl<'a> ContentInterpreter<'a> {
         let saved_point = self.current_point.take();
         let saved_subpath = self.subpath_start.take();
         let saved_mc_stack = std::mem::take(&mut self.mc_stack);
+        let in_actual_text = self.actual_text.is_some();
 
         self.gstate.ctm = Matrix::identity();
         self.content_stream_ctm = Matrix::identity();
@@ -7236,6 +7320,7 @@ impl<'a> ContentInterpreter<'a> {
         self.current_point = saved_point;
         self.subpath_start = saved_subpath;
         self.mc_stack = saved_mc_stack;
+        self.end_nested_actual_text(in_actual_text);
         if let Some(saved) = self.gstate_stack.pop() {
             self.gstate = saved;
         }

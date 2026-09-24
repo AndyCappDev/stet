@@ -408,7 +408,10 @@ impl<'a> PdfDocument<'a> {
     /// Runs nest like the content that shows them — inside a layer's
     /// `OcgGroup`, a transparency group, a soft-masked scope — and include
     /// text in forms and annotation appearances, and invisible text
-    /// (flagged). A glyph's text comes from the font's `/ToUnicode` CMap,
+    /// (flagged). Inside an `/ActualText` marked-content span the span's
+    /// text is used, carried by its first glyph (the outermost span wins,
+    /// and a span with no glyphs is lost). Otherwise a glyph's text comes
+    /// from the font's `/ToUnicode` CMap,
     /// else its glyph name through the Adobe Glyph List (or, as in Poppler,
     /// a number the name spells, for dvips's `a80`-style bitmap fonts),
     /// else its CID through an Adobe CJK collection; with none of those
