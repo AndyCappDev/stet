@@ -85,6 +85,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Text in a PostScript CMYK transparency group no longer changes how the
+  group blends.** A non-isolated `/CS /DeviceCMYK` group with Difference,
+  Exclusion or a non-separable blend mode composites in CMYK when all it
+  paints is CMYK. The check treated the text element that `show` records
+  as non-CMYK content, so one line of text anywhere in the group switched
+  the whole group to sRGB blending and changed the colour of everything in
+  it. PDF input was unaffected.
 - **Forms drawn with `execform` keep their transparency groups, soft masks
   and layers.** `execform` caches a form's output and replays it at each
   use, and the replay discarded groups, soft masks and layers as if only

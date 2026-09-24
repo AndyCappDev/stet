@@ -7002,8 +7002,11 @@ fn group_only_native_cmyk_fills(elements: &DisplayList) -> bool {
         match elem {
             DisplayElement::InitClip => continue,
             DisplayElement::Clip { .. } => continue,
-            // Paints nothing; must not change which blend path a group takes.
-            DisplayElement::TextRun { .. } => continue,
+            // Paint nothing; must not change which blend path a group takes.
+            // A PostScript `show` records a `Text` beside its glyph fills,
+            // and the fills are what this checks — so text in a CMYK group
+            // used to send the whole group to sRGB blending.
+            DisplayElement::Text { .. } | DisplayElement::TextRun { .. } => continue,
             DisplayElement::Fill { params, .. } => {
                 if params.color.native_cmyk.is_none() {
                     return false;
