@@ -101,11 +101,29 @@ stet inspect document.pdf
 stet inspect --password secret encrypted.pdf
 ```
 
+### Extracting text
+
+`stet text` prints the text a PDF, PostScript or EPS file shows, a line at
+a time in the order the file draws it, each page ending with a form feed.
+Words set apart by distance rather than by a space character — as TeX sets
+them — come out separated. Line assembly is deliberately simple: content
+order is kept, and columns, tables and reading order are not detected.
+
+```bash
+stet text document.pdf
+stet text --pages 2-3 document.ps
+stet text --json --word-boxes document.pdf
+```
+
+`--json` prints each line with its position — points from the page's
+top-left corner, y downward — and `--word-boxes` adds each word's.
+
 ## Options
 
 ```
 stet [OPTIONS] <FILE>...
 stet inspect <FILE.pdf> [--password <PW>]
+stet text <FILE> [--pages <SPEC>] [--password <PW>] [--json [--word-boxes]]
 stet --help
 stet --version
 
@@ -145,6 +163,12 @@ Resource limits (for untrusted input):
                              VMerror instead of aborting. Separate from the
                              renderer's image and band buffers, so this does
                              not cap rendering resolution
+
+Text extraction (stet text):
+  --json                     Print JSON with each line's position instead
+                             of plain text
+  --word-boxes               With --json, give each word its position too
+                             (records every glyph, so takes more memory)
 
 Colour management:
   --no-icc                   Disable ICC colour management; use the PLRM

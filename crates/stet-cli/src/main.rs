@@ -60,6 +60,7 @@ impl std::io::Write for SharedWriter {
 }
 
 mod inspect;
+mod text;
 
 fn main() {
     // winit's Wayland backend (0.30+) doesn't support drag-and-drop.
@@ -97,6 +98,10 @@ fn main() {
     // own narrow flag set.
     if args.get(1).map(String::as_str) == Some("inspect") {
         std::process::exit(run_inspect_subcommand(&args[2..]));
+    }
+    // `stet text <file>` — print the text a file shows. Its own flags, too.
+    if args.get(1).map(String::as_str) == Some("text") {
+        std::process::exit(run_text_subcommand(&args[2..]));
     }
 
     // Parse flags
@@ -1173,6 +1178,7 @@ fn print_help() {
 Usage:
     stet [OPTIONS] <FILE>...
     stet inspect <FILE.pdf> [--password <PW>]
+    stet text <FILE> [--pages <SPEC>] [--password <PW>] [--json [--word-boxes]]
     stet --help
     stet --version
 
@@ -1239,6 +1245,12 @@ Subcommands:
                             fields, embedded files, layers,
                             warnings). Use `stet inspect --help` for
                             details.
+    text <FILE>             Print the text a PDF, PostScript or EPS file
+                            shows, a line at a time; --pages and
+                            --password as above. --json prints JSON with
+                            each line's position in points; --word-boxes
+                            adds each word's. Use `stet text --help` for
+                            details.
 
 Examples:
     stet                                # launch the viewer
@@ -1249,6 +1261,8 @@ Examples:
     stet --device pdf in.ps             # PostScript → PDF
     stet --device pdf in.pdf            # PDF → PDF (content-fidelity rewrite)
     stet inspect doc.pdf                # show PDF structure
+    stet text doc.pdf                   # print the text of a PDF
+    stet text --json --pages 2 doc.ps   # page 2's text, with positions
 
 Documentation: https://github.com/AndyCappDev/stet
 Issues:        https://github.com/AndyCappDev/stet/issues",
@@ -2691,6 +2705,82 @@ fn run_inspect_subcommand(args: &[String]) -> i32 {
         return 1;
     };
     inspect::run_inspect(&path, password.as_deref().map(str::as_bytes))
+}
+
+/// Implementation of the `stet text` subcommand. Parses its own flags
+/// and delegates to [`text::run_text`].
+fn run_text_subcommand(args: &[String]) -> i32 {
+    let mut options = text::TextOptions {
+        pages: None,
+        password: None,
+        json: false,
+        word_boxes: false,
+    };
+    let mut path: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--pages" => {
+                let Some(spec) = args.get(i + 1) else {
+                    eprintln!("Error: --pages requires a value");
+                    return 1;
+                };
+                match parse_page_ranges(spec) {
+                    Ok(pages) => options.pages = Some(pages),
+                    Err(e) => {
+                        eprintln!("Error: {e}");
+                        eprintln!("Expected format: 1-5, 3, 1-3,7,10-12");
+                        return 1;
+                    }
+                }
+                i += 2;
+            }
+            "--password" => {
+                let Some(pw) = args.get(i + 1) else {
+                    eprintln!("Error: --password requires a value");
+                    return 1;
+                };
+                options.password = Some(pw.clone());
+                i += 2;
+            }
+            "--json" => {
+                options.json = true;
+                i += 1;
+            }
+            "--word-boxes" => {
+                options.word_boxes = true;
+                i += 1;
+            }
+            "--help" | "-h" => {
+                text::print_text_help();
+                return 0;
+            }
+            other if other.starts_with('-') => {
+                eprintln!("Error: unknown flag '{other}' for `stet text`");
+                return 1;
+            }
+            _ => {
+                if path.is_some() {
+                    eprintln!("Error: `stet text` accepts a single file path");
+                    return 1;
+                }
+                path = Some(args[i].clone());
+                i += 1;
+            }
+        }
+    }
+    let Some(path) = path else {
+        eprintln!("Error: `stet text` requires a file path");
+        eprintln!(
+            "Usage: stet text <FILE> [--pages <SPEC>] [--password <PW>] [--json [--word-boxes]]"
+        );
+        return 1;
+    };
+    if options.word_boxes && !options.json {
+        eprintln!("Error: --word-boxes applies to --json output");
+        return 1;
+    }
+    text::run_text(&path, &options)
 }
 
 #[cfg(test)]

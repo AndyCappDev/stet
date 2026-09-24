@@ -174,6 +174,7 @@ stet --device png document.pdf         # PDF → PNG
 stet document.ps                       # Interactive viewer
 stet                                   # REPL (viewer opens on first showpage)
 stet inspect document.pdf              # Print PDF structural summary
+stet text document.pdf                 # Print the text a file shows
 ```
 
 See the [Viewer Guide](docs/VIEWER-GUIDE.md) for keyboard/mouse controls,
@@ -199,6 +200,8 @@ zoom presets, minimap navigation, and drag-and-drop.
 | `--bpc <on\|off\|auto>` | Black-point compensation (default: `auto`, currently equivalent to `on`) |
 | `--password <PW>` | Password for encrypted PDF input |
 | `--timeout <SECONDS>` | Abort a job running longer than this. No limit by default — PostScript is Turing-complete and legitimate jobs run for minutes. Set one for untrusted input |
+| `--json` | `stet text` only: print JSON with each line's position instead of plain text. See [`stet text`](#stet-text-file) |
+| `--word-boxes` | `stet text --json` only: give each word its position too |
 | `--max-vm <MB>` | Ceiling on PostScript VM — strings, arrays, dictionaries (default 8192). Exceeding it raises `VMerror` instead of aborting. Separate from the renderer's image and band buffers, so it does **not** cap rendering resolution |
 
 ### Choosing where output goes
@@ -295,6 +298,31 @@ Form: 4 terminal fields (4 widgets)
 ```
 
 Pass `--password <pw>` for encrypted documents.
+
+### `stet text <file>`
+
+Prints the text a PDF, PostScript or EPS file shows, a line at a time in
+the order the file draws it, each page ending with a form feed. Words set
+apart by distance rather than by a space character — as TeX sets them —
+come out separated. Invisible text such as an OCR layer is included; text
+in layers hidden by default is not. Line assembly is deliberately simple:
+content order is kept, and columns, tables and reading order are not
+detected.
+
+```bash
+stet text document.pdf                       # plain text, every page
+stet text --pages 2-3 document.ps            # pages 2 and 3
+stet text --json document.pdf                # with each line's position
+stet text --json --word-boxes document.pdf   # and each word's
+```
+
+`--json` prints `{"pages": [{"page", "width", "height", "lines": [{"text",
+"bbox", "vertical", "words": [{"text"}]}]}]}`, with positions in points
+from the page's top-left corner, y downward, and each `bbox` as
+`[x0, y0, x1, y1]`. `--word-boxes` adds a `bbox` to every word; it records
+every glyph's position, which takes more memory. `--pages` and
+`--password` work as for rendering. The same text is available to library
+users: see [Display List Architecture](docs/DISPLAY-LIST.md#textrun).
 
 ## Display List Architecture
 

@@ -73,6 +73,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   code `cshow` selected (its procedure sees only the last byte). Forms
   record once and are placed wherever `execform` draws them. A
   `glyphshow` glyph, shown by name, records code 0.
+- **`stet text <file>`**, a CLI subcommand that prints the text a PDF,
+  PostScript or EPS file shows, a line at a time in the order the file
+  draws it, each page ending with a form feed. TeX's placed words come out
+  separated, invisible OCR text is included, and layers hidden by default
+  are left out. `--json` prints JSON with each line's position in points
+  from the page's top-left corner, and `--word-boxes` adds each word's;
+  `--pages` and `--password` work as for rendering.
 - **Assembling extracted text into words and lines**, in
   `stet_graphics::text` and re-exported by the `stet` facade (with
   `LayerSet`). `text_runs` collects a page's `TextRun`s in content order,

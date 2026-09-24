@@ -101,11 +101,12 @@ for flag in "${flags[@]}"; do
   has_flag "$flag" "$root_readme" || report "$flag" "$root_readme"
 done
 
-# Subcommands are discoverable the same way and drift the same way.
-for sub in inspect; do
+# Subcommands are discoverable the same way and drift the same way. Matched
+# as `stet <sub>`: a bare word such as `text` appears in any README.
+for sub in inspect text; do
   grep -qE "\"$sub\"" "$main" || continue
-  grep -qF -- "$sub" "$cli_readme" || report "subcommand '$sub'" "$cli_readme"
-  grep -qF -- "$sub" "$root_readme" || report "subcommand '$sub'" "$root_readme"
+  grep -qF -- "stet $sub" "$cli_readme" || report "subcommand '$sub'" "$cli_readme"
+  grep -qF -- "stet $sub" "$root_readme" || report "subcommand '$sub'" "$root_readme"
 done
 
 if [ "$fail" -ne 0 ]; then
