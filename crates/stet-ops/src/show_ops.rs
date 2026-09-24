@@ -2300,6 +2300,7 @@ fn render_composite_truetype_cids(
     let em_scale = Matrix::scale(1.0 / upm, 1.0 / upm);
     let combined_fm = type0_fm.multiply(cidfont_fm).multiply(&em_scale);
     let (paint_type, stroke_width_dev) = get_paint_info(ctx, cidfont_entity, &combined_fm, ctm);
+    let vertical = (wmode == 1).then(|| VerticalMetrics::of(ctx, cidfont_entity, upm));
     // A vertical glyph's box spans half the em either side of its origin.
     let metrics = || {
         if wmode == 1 {
@@ -2313,6 +2314,17 @@ fn render_composite_truetype_cids(
     };
 
     for (i, &cid) in cids.iter().enumerate() {
+        let advance = font_data
+            .as_ref()
+            .and_then(|fd| truetype::get_advance_width(fd, cid as u16))
+            .unwrap_or(500);
+        // Where the outline is drawn from: the current point, or origin 0
+        // in vertical writing.
+        let (gx, gy) = match &vertical {
+            Some(v) => v.origin0(&combined_fm, advance as f64, (*cur_x, *cur_y)),
+            None => (*cur_x, *cur_y),
+        };
+
         // Check glyph cache by CID
         let cached = ctx
             .glyph_caches
@@ -2322,7 +2334,7 @@ fn render_composite_truetype_cids(
 
         if let Some(cg) = cached {
             if !cg.segments.is_empty() {
-                let user_path = transform_segments(&cg.segments, &combined_fm, *cur_x, *cur_y);
+                let user_path = transform_segments(&cg.segments, &combined_fm, gx, gy);
                 let device_path = ctm_transform_path(&user_path, ctm);
                 push_glyph_element(ctx, device_path, paint_type, stroke_width_dev);
             }
@@ -2366,15 +2378,11 @@ fn render_composite_truetype_cids(
 
                 let segments = Arc::new(glyf_path.segments);
                 if !segments.is_empty() {
-                    let user_path = transform_segments(&segments, &combined_fm, *cur_x, *cur_y);
+                    let user_path = transform_segments(&segments, &combined_fm, gx, gy);
                     let device_path = ctm_transform_path(&user_path, ctm);
                     push_glyph_element(ctx, device_path, paint_type, stroke_width_dev);
                 }
                 // Cache with advance width
-                let advance = font_data
-                    .as_ref()
-                    .and_then(|fd| truetype::get_advance_width(fd, cid as u16))
-                    .unwrap_or(500);
                 let cache = ctx.glyph_caches.entry(cidfont_entity).or_default();
                 cache.by_cid.insert(
                     cid,
@@ -2387,11 +2395,9 @@ fn render_composite_truetype_cids(
             }
         }
 
-        if wmode == 1 {
-            // Vertical writing: advance downward
-            // DW2 default per PLRM: [880 -1000] (vy_offset, v_advance in glyph units)
-            let (_vy_offset, v_advance) = get_dw2(ctx, cidfont_entity).unwrap_or((880.0, -1000.0));
-            let (_, wy) = combined_fm.transform_delta(0.0, v_advance);
+        if let Some(v) = &vertical {
+            // Vertical writing: advance down the column.
+            let (_, wy) = v.advance(&combined_fm);
             record_cid_glyph(
                 ctx,
                 cidfont_entity,
@@ -2400,17 +2406,13 @@ fn render_composite_truetype_cids(
                 recording,
                 (i, cid),
                 (*cur_x, *cur_y),
-                combined_fm.transform_delta(0.0, v_advance),
+                v.advance(&combined_fm),
                 true,
             );
             *cur_x += extra_ax;
             *cur_y += wy + extra_ay;
         } else {
             // Horizontal writing (default)
-            let advance = font_data
-                .as_ref()
-                .and_then(|fd| truetype::get_advance_width(fd, cid as u16))
-                .unwrap_or(500);
             let (wx, wy) = combined_fm.transform_delta(advance as f64, 0.0);
             record_cid_glyph(
                 ctx,
@@ -2489,6 +2491,52 @@ fn record_cid_glyph(
             vertical,
         },
     );
+}
+
+/// A CIDFont's writing-mode-1 metrics (PLRM 5.4) in its glyph space.
+///
+/// In writing mode 1 the current point is a glyph's origin 1, and its
+/// outline is drawn from origin 0 = origin 1 − v, where v = (w0 / 2, vy)
+/// for a glyph w0 wide. `vy` and the vertical advance `w1y` come from `DW2`,
+/// else PLRM's defaults 880 and −1000 — both in 1000-unit text space, so
+/// they are scaled into the glyph space (a TrueType CIDFont's is font
+/// units).
+struct VerticalMetrics {
+    vy: f64,
+    w1y: f64,
+}
+
+impl VerticalMetrics {
+    /// `cidfont`'s vertical metrics, for a glyph space of `units_per_em`.
+    fn of(ctx: &Context, cidfont: EntityId, units_per_em: f64) -> Self {
+        let (vy, w1y) = get_dw2(ctx, cidfont).unwrap_or((880.0, -1000.0));
+        let scale = units_per_em / 1000.0;
+        Self {
+            vy: vy * scale,
+            w1y: w1y * scale,
+        }
+    }
+
+    /// Where to draw the outline of a glyph `w0` glyph units wide whose
+    /// origin 1 is at `origin`, with `glyph_space` mapping glyph space to
+    /// user space.
+    fn origin0(&self, glyph_space: &Matrix, w0: f64, origin: (f64, f64)) -> (f64, f64) {
+        let (dx, dy) = glyph_space.transform_delta(w0 / 2.0, self.vy);
+        (origin.0 - dx, origin.1 - dy)
+    }
+
+    /// The vertical advance, in user space.
+    fn advance(&self, glyph_space: &Matrix) -> (f64, f64) {
+        glyph_space.transform_delta(0.0, self.w1y)
+    }
+}
+
+/// Read the `WMode` of a (root) font; 0 when absent.
+fn font_wmode(ctx: &Context, font_entity: EntityId) -> i32 {
+    ctx.dicts
+        .get(font_entity, &DictKey::Name(ctx.name_cache.n_wmode))
+        .and_then(|o| o.as_i32())
+        .unwrap_or(0)
 }
 
 /// Get DW2 (default vertical metrics) from a CIDFont dict.
@@ -2702,6 +2750,7 @@ fn render_composite_cff_cids(
         .and_then(|obj| obj.as_i32())
         .unwrap_or(1000);
 
+    let vertical = (wmode == 1).then(|| VerticalMetrics::of(ctx, cidfont_entity, 1000.0));
     // A vertical glyph's box spans half the em either side of its origin.
     let metrics = || {
         if wmode == 1 {
@@ -2730,10 +2779,8 @@ fn render_composite_cff_cids(
                 Some(obj) => obj,
                 None => {
                     // No charstring for this CID — advance by default width
-                    if wmode == 1 {
-                        let (_vy_offset, v_advance) =
-                            get_dw2(ctx, cidfont_entity).unwrap_or((880.0, -1000.0));
-                        let (_, wy) = combined_fm.transform_delta(0.0, v_advance);
+                    if let Some(v) = &vertical {
+                        let (_, wy) = v.advance(&combined_fm);
                         record_cid_glyph(
                             ctx,
                             cidfont_entity,
@@ -2742,7 +2789,7 @@ fn render_composite_cff_cids(
                             recording,
                             (i, cid),
                             (*cur_x, *cur_y),
-                            combined_fm.transform_delta(0.0, v_advance),
+                            v.advance(&combined_fm),
                             true,
                         );
                         *cur_x += extra_ax;
@@ -2805,17 +2852,20 @@ fn render_composite_cff_cids(
             (segments, result.width_x, result.width_y)
         };
 
-        // Paint glyph path
+        // Paint glyph path, from origin 0 in vertical writing.
         if !segments.is_empty() {
-            let user_path = transform_segments(&segments, &combined_fm, *cur_x, *cur_y);
+            let (gx, gy) = match &vertical {
+                Some(v) => v.origin0(&combined_fm, width_x, (*cur_x, *cur_y)),
+                None => (*cur_x, *cur_y),
+            };
+            let user_path = transform_segments(&segments, &combined_fm, gx, gy);
             let device_path = ctm_transform_path(&user_path, ctm);
             push_glyph_element(ctx, device_path, paint_type, stroke_width_dev);
         }
 
         // Advance: WMode 1 = vertical, WMode 0 = horizontal
-        if wmode == 1 {
-            let (_vy_offset, v_advance) = get_dw2(ctx, cidfont_entity).unwrap_or((880.0, -1000.0));
-            let (_, wy) = combined_fm.transform_delta(0.0, v_advance);
+        if let Some(v) = &vertical {
+            let (_, wy) = v.advance(&combined_fm);
             record_cid_glyph(
                 ctx,
                 cidfont_entity,
@@ -2824,7 +2874,7 @@ fn render_composite_cff_cids(
                 recording,
                 (i, cid),
                 (*cur_x, *cur_y),
-                combined_fm.transform_delta(0.0, v_advance),
+                v.advance(&combined_fm),
                 true,
             );
             *cur_x += extra_ax;
@@ -3722,12 +3772,11 @@ fn measure_string_width_composite(
                 .unwrap_or(1000.0);
             let em_scale = Matrix::scale(1.0 / upm, 1.0 / upm);
             let combined_fm = type0_fm.multiply(&cidfont_fm).multiply(&em_scale);
+            let vertical = VerticalMetrics::of(ctx, cidfont_entity, upm);
 
             for (cid, _) in &cids {
                 if wmode == 1 {
-                    let (_vy_offset, v_advance) =
-                        get_dw2(ctx, cidfont_entity).unwrap_or((880.0, -1000.0));
-                    let (wx, wy) = combined_fm.transform_delta(0.0, v_advance);
+                    let (wx, wy) = vertical.advance(&combined_fm);
                     total_wx += wx;
                     total_wy += wy;
                 } else {
@@ -3907,6 +3956,7 @@ fn render_charpath_composite(
             .find(b"sfnts")
             .and_then(|id| ctx.dicts.get(cidfont_entity, &DictKey::Name(id)))
             .is_some();
+        let wmode = font_wmode(ctx, font_entity_id);
 
         if has_sfnts {
             // TrueType CIDFont charpath
@@ -3917,6 +3967,7 @@ fn render_charpath_composite(
                 .unwrap_or(1000.0);
             let em_scale = Matrix::scale(1.0 / upm, 1.0 / upm);
             let combined_fm = type0_fm.multiply(&cidfont_fm).multiply(&em_scale);
+            let vertical = (wmode == 1).then(|| VerticalMetrics::of(ctx, cidfont_entity, upm));
             let gd_name = ctx.names.intern(b"GlyphDirectory");
             let glyph_dir_entity = ctx
                 .dicts
@@ -3927,6 +3978,10 @@ fn render_charpath_composite(
                 });
 
             for (cid, _) in &cids {
+                let advance = font_data
+                    .as_ref()
+                    .and_then(|fd| truetype::get_advance_width(fd, *cid as u16))
+                    .unwrap_or(500);
                 let glyf_bytes = if let Some(gd_entity) = glyph_dir_entity {
                     ctx.dicts
                         .get(gd_entity, &DictKey::Int(*cid as i64))
@@ -3965,17 +4020,21 @@ fn render_charpath_composite(
                     };
 
                     if !glyf_path.is_empty() {
-                        let user_path = transform_path(&glyf_path, &combined_fm, cur_x, cur_y);
+                        // From origin 0 in vertical writing.
+                        let (gx, gy) = match &vertical {
+                            Some(v) => v.origin0(&combined_fm, advance as f64, (cur_x, cur_y)),
+                            None => (cur_x, cur_y),
+                        };
+                        let user_path = transform_path(&glyf_path, &combined_fm, gx, gy);
                         let device_path = ctm_transform_path(&user_path, &ctm);
                         append_path_to_current(&mut ctx.gstate.path, device_path);
                     }
                 }
 
-                let advance = font_data
-                    .as_ref()
-                    .and_then(|fd| truetype::get_advance_width(fd, *cid as u16))
-                    .unwrap_or(500);
-                let (wx, wy) = combined_fm.transform_delta(advance as f64, 0.0);
+                let (wx, wy) = match &vertical {
+                    Some(v) => v.advance(&combined_fm),
+                    None => combined_fm.transform_delta(advance as f64, 0.0),
+                };
                 cur_x += wx;
                 cur_y += wy;
             }
@@ -3994,6 +4053,7 @@ fn render_charpath_composite(
                 .ok_or(PsError::InvalidFont)?;
 
             let combined_fm = type0_fm.multiply(&cidfont_fm);
+            let vertical = (wmode == 1).then(|| VerticalMetrics::of(ctx, cidfont_entity, 1000.0));
             let global_subrs = get_global_subrs(ctx, cidfont_entity);
 
             for (cid, _) in &cids {
@@ -4012,12 +4072,19 @@ fn render_charpath_composite(
                         false,
                     ) {
                         if !result.path.is_empty() {
-                            let user_path =
-                                transform_path(&result.path, &combined_fm, cur_x, cur_y);
+                            // From origin 0 in vertical writing.
+                            let (gx, gy) = match &vertical {
+                                Some(v) => v.origin0(&combined_fm, result.width_x, (cur_x, cur_y)),
+                                None => (cur_x, cur_y),
+                            };
+                            let user_path = transform_path(&result.path, &combined_fm, gx, gy);
                             let device_path = ctm_transform_path(&user_path, &ctm);
                             append_path_to_current(&mut ctx.gstate.path, device_path);
                         }
-                        let (wx, wy) = combined_fm.transform_delta(result.width_x, result.width_y);
+                        let (wx, wy) = match &vertical {
+                            Some(v) => v.advance(&combined_fm),
+                            None => combined_fm.transform_delta(result.width_x, result.width_y),
+                        };
                         cur_x += wx;
                         cur_y += wy;
                     }
@@ -4667,6 +4734,7 @@ fn render_show_displaced_composite(
 
         let cidfont_fm = read_font_matrix(ctx, cidfont_entity);
         let cids = decode_cmap_bytes(ctx, font_entity, bytes);
+        let wmode = font_wmode(ctx, font_entity);
 
         let has_sfnts = ctx
             .names
@@ -4683,6 +4751,7 @@ fn render_show_displaced_composite(
                 .unwrap_or(1000.0);
             let em_scale = Matrix::scale(1.0 / upm, 1.0 / upm);
             let combined_fm = type0_fm.multiply(&cidfont_fm).multiply(&em_scale);
+            let vertical = (wmode == 1).then(|| VerticalMetrics::of(ctx, cidfont_entity, upm));
             let (paint_type, stroke_width_dev) =
                 get_paint_info(ctx, cidfont_entity, &combined_fm, &ctm);
             let gd_name = ctx.names.intern(b"GlyphDirectory");
@@ -4738,7 +4807,18 @@ fn render_show_displaced_composite(
                     };
 
                     if !glyf_path.is_empty() {
-                        let user_path = transform_path(&glyf_path, &combined_fm, cur_x, cur_y);
+                        // From origin 0 in vertical writing.
+                        let (gx, gy) = match &vertical {
+                            Some(v) => {
+                                let w0 = font_data
+                                    .as_ref()
+                                    .and_then(|fd| truetype::get_advance_width(fd, *cid as u16))
+                                    .unwrap_or(500);
+                                v.origin0(&combined_fm, w0 as f64, (cur_x, cur_y))
+                            }
+                            None => (cur_x, cur_y),
+                        };
+                        let user_path = transform_path(&glyf_path, &combined_fm, gx, gy);
                         let device_path = ctm_transform_path(&user_path, &ctm);
                         push_glyph_element(ctx, device_path, paint_type, stroke_width_dev);
                     }
@@ -4759,6 +4839,7 @@ fn render_show_displaced_composite(
                     _ => None,
                 });
             let combined_fm = type0_fm.multiply(&cidfont_fm);
+            let vertical = (wmode == 1).then(|| VerticalMetrics::of(ctx, cidfont_entity, 1000.0));
             let (paint_type, stroke_width_dev) =
                 get_paint_info(ctx, cidfont_entity, &combined_fm, &ctm);
             let global_subrs = get_global_subrs(ctx, cidfont_entity);
@@ -4784,7 +4865,12 @@ fn render_show_displaced_composite(
                         false,
                     ) && !result.path.is_empty()
                     {
-                        let user_path = transform_path(&result.path, &combined_fm, cur_x, cur_y);
+                        // From origin 0 in vertical writing.
+                        let (gx, gy) = match &vertical {
+                            Some(v) => v.origin0(&combined_fm, result.width_x, (cur_x, cur_y)),
+                            None => (cur_x, cur_y),
+                        };
+                        let user_path = transform_path(&result.path, &combined_fm, gx, gy);
                         let device_path = ctm_transform_path(&user_path, &ctm);
                         push_glyph_element(ctx, device_path, paint_type, stroke_width_dev);
                     }

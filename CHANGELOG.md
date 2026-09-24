@@ -122,6 +122,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **PostScript vertical CJK text (WMode 1) is drawn where PLRM puts it.**
+  A vertical glyph's outline is drawn from its origin 0, the current point
+  less its position vector v (half its width across, 880 units up by
+  default); stet drew it from the current point, so every vertical glyph
+  sat half a character right and most of a character high. That held for
+  `show`, the `xshow` family and `charpath`. Separately, a TrueType
+  CIDFont's default vertical advance and position vector — defined in
+  1000-unit text space — were applied in the font's own units, so a font
+  with 2048 units per em advanced less than half an em per glyph, in
+  `show`, `charpath` and `stringwidth` alike. The PDF reader was already
+  right.
 - **A PDF form XObject whose content fails to parse part-way no longer
   corrupts the rest of the page.** An error such as an unterminated string
   inside an array made the reader return from the form before restoring
