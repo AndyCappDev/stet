@@ -135,6 +135,8 @@ Common options:
                              viewer mode, 8 otherwise)
   --password <PW>            Password for encrypted PDF input
   --no-aa                    Disable anti-aliasing
+  --transparent              Leave unpainted areas transparent instead of
+                             white paper (--device png only)
 
 Resource limits (for untrusted input):
   --timeout <SECONDS>        Abort a job running longer than this. No limit
@@ -158,6 +160,9 @@ Colour management:
   --no-output-intent         Ignore it and use the system CMYK profile
   --bpc <on|off|auto>        Black-point compensation (default: auto,
                              currently equivalent to on)
+  --cmyk-intent <perceptual|relative>
+                             Which table of the source CMYK profile drives
+                             CMYK conversion (default: relative)
 ```
 
 `stet --help` prints the same list; `scripts/check-cli-docs.sh` in the

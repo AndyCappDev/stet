@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`--transparent` for `--device png`, and `render_to_rgba_with_background`
+  in `stet-render`.** Pages are rendered onto a transparent backdrop and
+  composited onto white paper only as the last step; the option skips that
+  step and writes straight-alpha RGBA instead, so artwork (EPS, AI, PDF) can
+  be placed over other content with its unpainted areas clear. Both the
+  PostScript and PDF input paths honour it. `render_to_rgba` and
+  `render_to_rgba_with_layers` keep their signatures and white paper.
+- **`--cmyk-intent perceptual|relative`, and `IccCacheOptions::cmyk_source_table`.**
+  The CLUT bake samples the source CMYK profile's `A2B1` (relative) table,
+  which for a print profile is a good deal lighter in the blacks than the
+  `A2B0` (perceptual) table that lcms2, Ghostscript and ImageMagick use by
+  default: Japan Color 2001 Coated renders K100 as (51,45,43) rather than
+  (35,25,22). The option selects the perceptual table, which reproduces
+  lcms2's default to within 1 RGB level over a 60-patch CMYK sweep. The
+  default is unchanged (relative), and a profile without a perceptual table
+  falls back to the colorimetric one.
+
 ### Removed
 
 - **`stet-wasm`: the `set_page_callback()` / `clear_page_callback()` JS
