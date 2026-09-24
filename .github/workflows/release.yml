@@ -239,9 +239,26 @@ jobs:
           test -s out.png || { echo "::error::render produced no output"; exit 1; }
           echo "smoke test OK ($(wc -c < out.png) bytes)"
 
-      # Nothing but the binary and the licences ships: all 56 resources are
-      # embedded via include_bytes!, so there is no resource directory to
-      # install and no layout for a user to get wrong.
+      # Pinned for the same reason the toolchain in ci.yml is: the notices
+      # are part of the artifact, and a new cargo-about must not change them
+      # between a dispatch run and the tag. rust-cache keeps ~/.cargo/bin, so
+      # this is a no-op after the first run on each target.
+      - name: Install cargo-about
+        shell: bash
+        run: cargo install cargo-about --locked --version 0.9.2 --features cli
+
+      # Nothing but the binary, the licences, and the third-party notices
+      # ships: all 56 resources are embedded via include_bytes!, so there is
+      # no resource directory to install and no layout for a user to get
+      # wrong.
+      #
+      # THIRD-PARTY-NOTICES.txt is required, not decoration. The binary
+      # embeds the URW++ fonts (AGPL-3.0 with a font exception) and Adobe's
+      # CMap and glyph-list data (BSD-3-Clause), and links ~80-180 crates
+      # whose MIT/Apache/BSD/IJG terms all require their notices to travel
+      # with the binary. Through 0.8.1 the archives carried none of them.
+      # It is generated per target with the leg's own feature flags, because
+      # the musl build has no viewer and so a different crate graph.
       - name: Package
         shell: bash
         run: |
@@ -251,6 +268,8 @@ jobs:
           mkdir -p "dist/$name"
           cp "target/${{ matrix.target }}/release/stet${{ matrix.ext }}" "dist/$name/"
           cp README.md LICENSE-APACHE LICENSE-MIT "dist/$name/"
+          scripts/gen-third-party-notices.sh ${{ matrix.target }} ${{ matrix.features }} \
+            > "dist/$name/THIRD-PARTY-NOTICES.txt"
           cd dist
           if [ "${{ matrix.archive }}" = "zip" ]; then
             7z a -tzip "$name.zip" "$name" > /dev/null

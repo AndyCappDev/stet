@@ -71,4 +71,6 @@ factoring them out as reusable crates.
 
 ## License
 
-Apache-2.0 OR MIT
+Apache-2.0 OR MIT, except the 35 embedded URW++ base 35 font programs,
+which are under the GNU AGPL v3 with a font exception — see
+[`LICENSE-URW-FONTS`](LICENSE-URW-FONTS).

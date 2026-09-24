@@ -228,4 +228,6 @@ stet::ps_exec(ctx, b"/greeting (Hello, PostScript!) def greeting print")?;
 
 ## License
 
-Apache-2.0 OR MIT
+Apache-2.0 OR MIT, except the 35 embedded URW++ base 35 font programs,
+which are under the GNU AGPL v3 with a font exception — see
+[`LICENSE-URW-FONTS`](LICENSE-URW-FONTS).

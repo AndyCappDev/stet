@@ -1,0 +1,15 @@
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "IJG",
+    "ISC",
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
+    "Unicode-3.0",
+    "Zlib",
+]
+ignore-build-dependencies = true
+ignore-dev-dependencies = true

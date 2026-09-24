@@ -83,4 +83,6 @@ requested zoom step using pre-captured display lists.
 
 ## License
 
-Apache-2.0 OR MIT
+Apache-2.0 OR MIT, except the 35 embedded (from the `stet` crate's resources) URW++ base 35 font programs,
+which are under the GNU AGPL v3 with a font exception — see
+[`LICENSE-URW-FONTS`](LICENSE-URW-FONTS).

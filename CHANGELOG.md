@@ -68,6 +68,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The licences of third-party material stet ships are now shipped with
+  it.** The `stet`, `stet-pdf-reader` and `stet-wasm` crates embed the
+  URW++ base 35 fonts, which are under the GNU AGPL v3 with a font
+  exception, not stet's Apache-2.0 OR MIT; each crate now carries that
+  licence as `LICENSE-URW-FONTS`. The prebuilt release archives, which
+  shipped only stet's own licence files, now include
+  `THIRD-PARTY-NOTICES.txt`: the font licence, Adobe's terms for the CMap
+  and glyph-list data in `stet-fonts`, and the licence of every Rust crate
+  linked into that binary, generated per target by `cargo about`
+  (`scripts/gen-third-party-notices.sh`). CI fails a change that adds a
+  dependency under a licence not accepted in `about.toml`.
 - **CJK text drawn with a substitute font picks the right glyphs.** When a
   PDF uses a CJK CID font it does not embed, the reader maps each CID to
   Unicode to find a glyph in the substitute font. The table it used was
