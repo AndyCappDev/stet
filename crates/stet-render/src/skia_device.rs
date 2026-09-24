@@ -962,6 +962,9 @@ fn precompute_bboxes(list: &DisplayList, dpi: f64) -> Vec<Option<YBBox>> {
                     None
                 }
             }
+            // Paint nothing, so they have no extent; visiting them in every
+            // band costs nothing because rendering them is a no-op.
+            DisplayElement::Text { .. } | DisplayElement::TextRun { .. } => None,
             _ => None, // Clip, InitClip, ErasePage: always process
         })
         .collect()
@@ -3294,6 +3297,7 @@ fn render_element(
             render_soft_masked(pixmap, band_state, mask, content, params, mask_cache, ctx);
         }
         DisplayElement::Text { .. } => {} // PDF-only, ignored by rasterizer
+        DisplayElement::TextRun { .. } => {} // for text extraction; paints nothing
         DisplayElement::OcgGroup {
             elements,
             visibility,
@@ -3581,7 +3585,8 @@ fn compute_obscured_fill_skips(elements: &DisplayList) -> Vec<usize> {
         let mut clips_ok = true;
         while j < els.len() {
             match &els[j] {
-                DisplayElement::InitClip => {}
+                // Paints nothing; must not decide whether the skip applies.
+                DisplayElement::InitClip | DisplayElement::TextRun { .. } => {}
                 DisplayElement::Clip {
                     path: clip_path, ..
                 } => match ps_path_bbox(clip_path) {
@@ -3630,7 +3635,7 @@ fn compute_obscured_fill_skips(elements: &DisplayList) -> Vec<usize> {
         let mut inner_clips_ok = true;
         while k < inner_els.len() {
             match &inner_els[k] {
-                DisplayElement::InitClip => {}
+                DisplayElement::InitClip | DisplayElement::TextRun { .. } => {}
                 DisplayElement::Clip {
                     path: clip_path, ..
                 } => match ps_path_bbox(clip_path) {
@@ -4544,6 +4549,9 @@ fn render_knockout_group(
             DisplayElement::Clip { .. } | DisplayElement::InitClip => {
                 render_element(&mut offscreen, &mut ko_band, elem, &group_ctx);
             }
+            // Paint nothing: skip the backdrop copy and compare the
+            // single-pass arm below would spend on them.
+            DisplayElement::Text { .. } | DisplayElement::TextRun { .. } => {}
             // Group painters need two-pass rendering. Knockout semantics
             // require each painter to overwrite previous siblings within its
             // coverage area, even when the painter's blend mode happens to
@@ -5955,6 +5963,9 @@ fn render_pattern_fill(
             }
         }
     } else if params.tile.elements().iter().any(|e| {
+        // `TextRun` paints nothing and the fast path skips it, so it must
+        // not push a tile onto the complex path: rendering has to be the
+        // same whether or not text extraction recorded runs.
         !matches!(
             e,
             DisplayElement::Fill { .. }
@@ -5962,6 +5973,7 @@ fn render_pattern_fill(
                 | DisplayElement::Image { .. }
                 | DisplayElement::Clip { .. }
                 | DisplayElement::InitClip
+                | DisplayElement::TextRun { .. }
         )
     }) {
         // Complex tile path: pre-render one tile into a small pixmap using
@@ -6990,6 +7002,8 @@ fn group_only_native_cmyk_fills(elements: &DisplayList) -> bool {
         match elem {
             DisplayElement::InitClip => continue,
             DisplayElement::Clip { .. } => continue,
+            // Paints nothing; must not change which blend path a group takes.
+            DisplayElement::TextRun { .. } => continue,
             DisplayElement::Fill { params, .. } => {
                 if params.color.native_cmyk.is_none() {
                     return false;
@@ -7040,6 +7054,7 @@ fn group_content_is_native_cmyk(elements: &DisplayList) -> bool {
             DisplayElement::InitClip => continue,
             DisplayElement::Clip { .. } => continue,
             DisplayElement::Text { .. } => continue,
+            DisplayElement::TextRun { .. } => continue,
             DisplayElement::ErasePage => continue,
             DisplayElement::Fill { params, .. } => {
                 if params.color.native_cmyk.is_none() {
@@ -7117,6 +7132,7 @@ fn content_list_is_simple_native_cmyk(list: &DisplayList) -> bool {
             DisplayElement::InitClip
             | DisplayElement::Clip { .. }
             | DisplayElement::Text { .. }
+            | DisplayElement::TextRun { .. }
             | DisplayElement::ErasePage => continue,
             DisplayElement::Fill { params, .. } => {
                 if params.color.native_cmyk.is_none() {
@@ -9564,6 +9580,8 @@ fn precompute_full_bboxes(list: &DisplayList, dpi: f64) -> Vec<Option<BBox2D>> {
                     None
                 }
             }
+            // Paint nothing, so they have no extent; see `precompute_bboxes`.
+            DisplayElement::Text { .. } | DisplayElement::TextRun { .. } => None,
             _ => None, // Clip, InitClip, ErasePage: always process
         })
         .collect()
@@ -9796,6 +9814,7 @@ fn compute_paint_bounds(list: &DisplayList, _dpi: f64) -> Option<BBox2D> {
                 );
             }
             DisplayElement::Text { .. } => {} // PDF-only, ignored by rasterizer
+            DisplayElement::TextRun { .. } => {} // paints nothing
             DisplayElement::OcgGroup { .. } => {
                 // OCG groups have no inherent bbox; their children's bounds
                 // are unknown without recursion. Conservative: skip here —
@@ -11003,6 +11022,7 @@ fn debug_bbox_lines(list: &DisplayList, dpi: f64, depth: usize, out: &mut Vec<St
             DisplayElement::InitClip => "InitClip",
             DisplayElement::ErasePage => "ErasePage",
             DisplayElement::Text { .. } => "Text",
+            DisplayElement::TextRun { .. } => "TextRun",
             _ => "Unknown",
         };
         let yb = &y_bboxes[i];

@@ -5107,6 +5107,18 @@ fn recolor_and_translate_element(
                 params,
             }
         }
+        // Positioned like the glyph it was cached with; the text is not
+        // recoloured because it carries no colour.
+        DisplayElement::TextRun { params } => {
+            let mut params = params.clone();
+            params.glyph_to_device.tx += dx;
+            params.glyph_to_device.ty += dy;
+            for glyph in &mut params.glyphs {
+                glyph.origin.0 += dx;
+                glyph.origin.1 += dy;
+            }
+            DisplayElement::TextRun { params }
+        }
         // Other elements shouldn't appear in Type 3 BuildChar output
         other => other.clone(),
     }
@@ -5284,5 +5296,35 @@ mod tests {
         ctx.o_stack.push(PsObject::real(0.0)).unwrap();
         op_setcharwidth(&mut ctx).unwrap();
         assert!(ctx.o_stack.is_empty());
+    }
+
+    #[test]
+    fn type3_cache_replay_translates_text_runs() {
+        use stet_graphics::device::{ShownGlyph, TextRunParams};
+
+        let run = DisplayElement::TextRun {
+            params: TextRunParams {
+                text: "x".into(),
+                glyphs: vec![ShownGlyph {
+                    text_range: 0..1,
+                    origin: (1.0, 2.0),
+                    advance: (5.0, 0.0),
+                    ..ShownGlyph::default()
+                }],
+                glyph_to_device: Matrix::new(1.0, 0.0, 0.0, 1.0, 1.0, 2.0),
+                ..TextRunParams::default()
+            },
+        };
+        let replayed =
+            recolor_and_translate_element(&run, 10.0, 20.0, &DeviceColor::from_gray(0.0));
+        let DisplayElement::TextRun { params } = replayed else {
+            panic!("expected a TextRun");
+        };
+        assert_eq!(
+            (params.glyph_to_device.tx, params.glyph_to_device.ty),
+            (11.0, 22.0)
+        );
+        assert_eq!(params.glyphs[0].origin, (11.0, 22.0));
+        assert_eq!(params.glyphs[0].advance, (5.0, 0.0));
     }
 }

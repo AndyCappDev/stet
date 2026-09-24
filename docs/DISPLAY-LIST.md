@@ -140,6 +140,70 @@ the rasterizer (which renders text via Fill elements with glyph outlines).
 | `alpha_is_shape` | `bool` | Alpha-is-shape (PDF `AIS`), default false |
 | `text_knockout` | `bool` | Text knockout (PDF `TK`), default true |
 
+### TextRun
+
+```rust
+TextRun { params: TextRunParams }
+```
+
+The text one show operation displayed, in Unicode, with the position of
+every glyph — for text extraction, search and selection. Unlike `Text`, it
+carries no font for re-emission, and **both** producers can record it: the
+PostScript interpreter (`Context::extract_text`, or
+`InterpreterBuilder::extract_text()` on the `stet` facade) and the PDF
+reader (`PdfDocument::set_extract_text(true)`). With the switch off — the
+default — no `TextRun` is recorded and display lists are unchanged.
+
+It paints nothing and has no paint extent: renderers and the PDF writer
+skip it, and the glyphs are drawn by the `Fill` / `Stroke` elements beside
+it. It nests like the content it describes, so a run inside a layer sits
+inside that layer's `OcgGroup` — walk the list with the `LayerSet` you
+render with to extract only visible layers' text.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `text` | `String` | Every glyph's text, concatenated in the order shown |
+| `glyphs` | `Vec<ShownGlyph>` | One entry per glyph, in content order |
+| `glyph_to_device` | `Matrix` | Glyph space → device space at the run's start (font matrix, size, horizontal scaling, rise, text matrix, CTM) |
+| `ascent` | `f64` | Font ascent in glyph space (≈ 800 for a 1000-unit font) |
+| `descent` | `f64` | Font descent in glyph space (≈ -200 for a 1000-unit font) |
+| `font_name` | `String` | PDF `/BaseFont` or PostScript `/FontName`; empty if none |
+| `invisible` | `bool` | Shown but not painted (PDF render modes 3 and 7, e.g. OCR layers) |
+
+`ShownGlyph`:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `text_range` | `Range<u32>` | Byte range of this glyph's text in `text`; empty when no Unicode was found (text is never guessed) |
+| `origin` | `(f64, f64)` | Device-space glyph origin |
+| `advance` | `(f64, f64)` | Device-space advance vector (vertical for vertical writing) |
+| `code` | `u32` | The character code shown |
+| `source` | `UnicodeSource` | `ToUnicode`, `GlyphName`, `CidOrdering`, `ActualText` or `Unmapped` (`#[non_exhaustive]`) |
+
+A glyph's box is the parallelogram spanned by its `advance` and by
+`glyph_to_device`'s linear part applied to `(0, descent)` and
+`(0, ascent)`, placed at its `origin` — so rotated and skewed text gets a
+rotated or skewed box:
+
+```rust
+use stet_graphics::device::TextRunParams;
+
+fn glyph_boxes(run: &TextRunParams) -> impl Iterator<Item = [(f64, f64); 4]> + '_ {
+    let up = run.glyph_to_device.transform_delta(0.0, run.ascent);
+    let down = run.glyph_to_device.transform_delta(0.0, run.descent);
+    run.glyphs.iter().map(move |g| {
+        let (ox, oy) = g.origin;
+        let (ax, ay) = g.advance;
+        [
+            (ox + down.0, oy + down.1),
+            (ox + ax + down.0, oy + ay + down.1),
+            (ox + ax + up.0, oy + ay + up.1),
+            (ox + up.0, oy + up.1),
+        ]
+    })
+}
+```
+
 ### Clip / InitClip
 
 ```rust
@@ -474,6 +538,8 @@ for (i, elem) in list.elements().iter().enumerate() {
         DisplayElement::Text { params } =>
             println!("[{}] Text '{}' at ({:.0},{:.0})", i,
                 String::from_utf8_lossy(&params.text), params.start_x, params.start_y),
+        DisplayElement::TextRun { params } =>
+            println!("[{}] TextRun {:?} ({} glyphs)", i, params.text, params.glyphs.len()),
         DisplayElement::Clip { .. } => println!("[{}] Clip", i),
         DisplayElement::InitClip => println!("[{}] InitClip", i),
         DisplayElement::ErasePage => println!("[{}] ErasePage", i),
@@ -498,6 +564,7 @@ wildcard arm**:
 - `ImageColorSpace` — image color spaces
 - `ShadingColorSpace` — shading color spaces
 - `SpotColorSpace` — Separation / DeviceN color spaces
+- `UnicodeSource` — where a `TextRun` glyph's text came from
 
 ```rust
 match elem {
@@ -511,8 +578,8 @@ match elem {
 ### Param structs (open, but extension-tolerant)
 
 The param structs (`FillParams`, `StrokeParams`, `ImageParams`,
-`ClipParams`, `TextParams`, `ColorStop`, the four shading param
-structs) are **not** `#[non_exhaustive]` — they are produced by code
+`ClipParams`, `TextParams`, `TextRunParams`, `ShownGlyph`, `ColorStop`,
+the four shading param structs) are **not** `#[non_exhaustive]` — they are produced by code
 across multiple stet crates (interpreter, PDF reader, renderer), and
 `#[non_exhaustive]` would block all cross-crate construction including
 `..Default::default()` updates.

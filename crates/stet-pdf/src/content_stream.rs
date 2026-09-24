@@ -432,6 +432,10 @@ impl<'tracker> Builder<'tracker> {
                 }
                 return;
             }
+            // Extraction data, not content: writes nothing, and must not
+            // flush the batch either, or recording text runs would split
+            // the BT/ET blocks of PostScript text that is re-emitted.
+            DisplayElement::TextRun { .. } => return,
             DisplayElement::Fill { params, .. }
                 if params.is_text_glyph && self.has_text_elements =>
             {
@@ -897,6 +901,7 @@ impl<'tracker> Builder<'tracker> {
                 );
             }
             DisplayElement::Text { .. } => unreachable!(), // handled in prelude
+            DisplayElement::TextRun { .. } => unreachable!(), // handled in prelude
             DisplayElement::Group { elements, params } => {
                 // Build the Form XObject's content stream by swapping in
                 // a fresh buffer and recursing. Resources (images, fonts,
@@ -1227,6 +1232,9 @@ fn scan_text_elements(
 ) -> bool {
     let mut has_text = false;
     for element in list.elements() {
+        // Only `Text` counts. A `TextRun` carries no font to re-emit, and
+        // the PDF reader records it beside glyph fills that must still be
+        // drawn: counting it would skip those fills and lose the text.
         if let DisplayElement::Text { params } = element {
             has_text = true;
             let name = font_tracker.track(params).to_string();

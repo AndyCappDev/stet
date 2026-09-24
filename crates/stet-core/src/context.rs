@@ -421,6 +421,16 @@ pub struct Context {
     /// multi-page PostScript documents: page 1 renders while pages 2..N are
     /// still pending interpretation. Requires `interrupt_flag` to be set.
     pub yield_after_showpage: bool,
+
+    /// When true, the show operators also record a
+    /// [`DisplayElement::TextRun`](stet_graphics::display_list::DisplayElement::TextRun)
+    /// for each string shown — its text in Unicode, with per-glyph
+    /// positions — for text extraction.
+    ///
+    /// Off by default, and with it off, display lists are exactly what they
+    /// would be without the feature: no memory cost and no rendering
+    /// change. Not VM state, so `save`/`restore` leave it alone.
+    pub extract_text: bool,
 }
 
 /// One frame on `Context::group_stack`. Captures paint operators emitted
@@ -1097,6 +1107,7 @@ impl Context {
             deadline: None,
             steps_to_deadline_check: DEADLINE_CHECK_INTERVAL,
             yield_after_showpage: false,
+            extract_text: false,
         }
     }
 

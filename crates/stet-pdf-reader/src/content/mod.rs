@@ -272,6 +272,9 @@ pub struct ContentInterpreter<'a> {
     /// When false, PDF overprint flags (OP/op) in graphics state dicts are
     /// suppressed — the gstate overprint fields stay false regardless of PDF content.
     overprint_enabled: bool,
+    /// When true, show operators also record `TextRun` elements for text
+    /// extraction. Off by default; see [`Self::set_extract_text`].
+    extract_text: bool,
     /// Cache of resolved tiling patterns, keyed by PDF indirect reference (obj_num, gen).
     /// Ensures the same pattern stream is interpreted only once, with the graphics
     /// state from the first resolution (matching GhostScript behaviour).
@@ -343,6 +346,7 @@ impl<'a> ContentInterpreter<'a> {
             pdfx_cmyk_intent: false,
             in_smask_form: false,
             overprint_enabled,
+            extract_text: false,
             pattern_cache: std::collections::HashMap::new(),
             ocg_off: ocg_off.clone(),
             mc_stack: Vec::new(),
@@ -359,6 +363,13 @@ impl<'a> ContentInterpreter<'a> {
     /// to match compositing in CMYK space (produces more muted, accurate colors).
     pub fn set_page_group_cmyk(&mut self) {
         self.page_group_is_cmyk = true;
+    }
+
+    /// Record `TextRun` elements for text extraction alongside what the
+    /// content stream paints. Off by default, which keeps display lists
+    /// free of them.
+    pub fn set_extract_text(&mut self, enabled: bool) {
+        self.extract_text = enabled;
     }
 
     /// Mark this document as declaring a PDF/X-style CMYK output intent. Opts

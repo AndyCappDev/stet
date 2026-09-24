@@ -98,6 +98,7 @@ pub trait OutputDevice {
                 DisplayElement::PatchShading { params } => self.paint_patch_shading(params),
                 DisplayElement::PatternFill { params } => self.paint_pattern_fill(params),
                 DisplayElement::Text { .. } => {} // PDF-only, ignored by rasterizer
+                DisplayElement::TextRun { .. } => {} // text extraction; paints nothing
                 DisplayElement::Group { .. } | DisplayElement::SoftMasked { .. } => {
                     // Groups/SoftMasked are handled by the banded renderer (SkiaDevice).
                 }
@@ -234,6 +235,7 @@ pub fn replay_to_device(list: &DisplayList, device: &mut dyn OutputDevice) {
                 device.paint_pattern_fill(params);
             }
             DisplayElement::Text { .. } => {}
+            DisplayElement::TextRun { .. } => {} // text extraction; paints nothing
             DisplayElement::Group { elements, .. } => {
                 replay_to_device(elements, device);
             }

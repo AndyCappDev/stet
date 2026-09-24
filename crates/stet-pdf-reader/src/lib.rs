@@ -244,6 +244,9 @@ pub struct PdfDocument<'a> {
     /// When false (default), PDF overprint flags (OP/op) are suppressed —
     /// skips the expensive CMYK buffer simulation that most viewers omit.
     overprint: bool,
+    /// When true, rendered display lists also carry `TextRun` elements for
+    /// text extraction. Off by default. See [`PdfDocument::set_extract_text`].
+    extract_text: bool,
     /// Object numbers of Optional Content Groups that are OFF by default.
     /// Parsed from the catalog's /OCProperties /D /OFF array.
     ocg_off: HashSet<u32>,
@@ -368,6 +371,7 @@ impl<'a> PdfDocument<'a> {
             icc_cache,
             font_provider: None,
             overprint: true,
+            extract_text: false,
             ocg_off,
             output_intent_icc,
             metadata_cache: OnceCell::new(),
@@ -389,6 +393,18 @@ impl<'a> PdfDocument<'a> {
     /// are ignored, avoiding CMYK buffer tracking.
     pub fn set_overprint(&mut self, enabled: bool) {
         self.overprint = enabled;
+    }
+
+    /// Record the text each page shows, for extraction.
+    ///
+    /// Display lists from [`render_page`](Self::render_page) then also carry
+    /// [`DisplayElement::TextRun`](stet_graphics::display_list::DisplayElement::TextRun)
+    /// elements: each string shown, in Unicode, with the device-space
+    /// position of every glyph. They paint nothing, so rendering is
+    /// unchanged. Disabled by default, which keeps display lists free of
+    /// them — worth keeping off for documents that are only drawn.
+    pub fn set_extract_text(&mut self, enabled: bool) {
+        self.extract_text = enabled;
     }
 
     /// Set a font data provider for environments without filesystem access.
@@ -544,6 +560,7 @@ impl<'a> PdfDocument<'a> {
         if self.output_intent_icc.is_some() {
             interpreter.set_pdfx_cmyk_intent();
         }
+        interpreter.set_extract_text(self.extract_text);
 
         // Render page content
         if let Err(e) = interpreter.interpret_stream_public(&content_data) {
@@ -1328,6 +1345,11 @@ mod tests {
                     DisplayElement::PatchShading { .. } => eprintln!("{indent}[{i}] PatchShading"),
                     DisplayElement::PatternFill { .. } => eprintln!("{indent}[{i}] PatternFill"),
                     DisplayElement::Text { .. } => eprintln!("{indent}[{i}] Text"),
+                    DisplayElement::TextRun { params } => eprintln!(
+                        "{indent}[{i}] TextRun {:?} ({} glyphs)",
+                        params.text,
+                        params.glyphs.len()
+                    ),
                     DisplayElement::Group { elements, params } => {
                         eprintln!(
                             "{indent}[{i}] Group iso={} ko={} blend={} a={:.2} bbox=({:.0},{:.0},{:.0},{:.0}) children={}",

@@ -261,6 +261,102 @@ pub struct TextParams {
     pub text_knockout: bool,
 }
 
+/// Parameters for a [`TextRun`](crate::display_list::DisplayElement::TextRun)
+/// element: the text one show operation displayed, in Unicode, with the
+/// position of every glyph — for text extraction, search and selection.
+///
+/// Recorded only when a producer is asked to extract text (the PostScript
+/// interpreter's `extract_text` flag, the PDF reader's
+/// `set_extract_text`). It paints nothing: renderers and the PDF writer
+/// skip it, and the glyphs themselves are drawn by the elements that
+/// accompany it.
+///
+/// All positions are in display-list (device) space, like every other
+/// element, so they map directly onto a raster of the same list.
+///
+/// New fields may be added without notice; pattern-matching consumers
+/// should use `..` to ignore unmatched fields.
+#[derive(Clone, Debug, Default)]
+pub struct TextRunParams {
+    /// The run's text: every glyph's text, concatenated in the order shown.
+    pub text: String,
+    /// One entry per glyph shown, in content order.
+    pub glyphs: Vec<ShownGlyph>,
+    /// Glyph space → device space at the start of the run: the font matrix,
+    /// font size, horizontal scaling, text rise, text matrix and CTM
+    /// combined. Its translation is the run's starting point; its linear
+    /// part is the same for every glyph in the run.
+    ///
+    /// A glyph's box is the parallelogram spanned by its
+    /// [`advance`](ShownGlyph::advance) and by this matrix's linear part
+    /// applied to `(0, descent)` and `(0, ascent)`, placed at its
+    /// [`origin`](ShownGlyph::origin). Rotated and skewed text gives a
+    /// rotated or skewed box.
+    pub glyph_to_device: Matrix,
+    /// Font ascent in glyph space (positive; around 800 for a font with
+    /// 1000 units per em). From the font descriptor when present, else the
+    /// font bounding box, else 0.8 em.
+    pub ascent: f64,
+    /// Font descent in glyph space (negative; around -200 for a font with
+    /// 1000 units per em). Same sources as `ascent`, else -0.2 em.
+    pub descent: f64,
+    /// The font's name (PDF `/BaseFont`, PostScript `/FontName`), or empty
+    /// when it has none.
+    pub font_name: String,
+    /// True when the text was shown but not painted: PDF text render
+    /// modes 3 and 7, used by OCR layers over scanned pages. Included
+    /// because it is text the document contains; a consumer that wants only
+    /// visible text drops these runs.
+    pub invisible: bool,
+}
+
+/// One glyph of a [`TextRunParams`].
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ShownGlyph {
+    /// Byte range of this glyph's text within [`TextRunParams::text`].
+    ///
+    /// Empty when no Unicode could be found for the glyph — the text is
+    /// never guessed. Several characters for a ligature (`fi`) or a
+    /// supplementary-plane character. When a PDF `/ActualText` span
+    /// replaces its glyphs' text, the span's first glyph carries the whole
+    /// replacement and the rest carry empty ranges.
+    pub text_range: std::ops::Range<u32>,
+    /// Device-space position of the glyph's origin.
+    pub origin: (f64, f64),
+    /// Device-space vector from this glyph's origin to where the next
+    /// glyph would start without spacing adjustments: its width, scaled
+    /// and rotated like the text. Vertical for vertical writing.
+    pub advance: (f64, f64),
+    /// The character code shown, for consumers that want their own mapping
+    /// (one byte for simple fonts, one to four for composite fonts).
+    pub code: u32,
+    /// Where the glyph's text came from; lets a consumer judge confidence.
+    pub source: UnicodeSource,
+}
+
+/// How the text of a [`ShownGlyph`] was found.
+///
+/// Marked `#[non_exhaustive]`: new sources may be added, so `match` on it
+/// with a wildcard arm.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum UnicodeSource {
+    /// The PDF font's `/ToUnicode` CMap: the producer's own statement.
+    ToUnicode,
+    /// The glyph's name, through the Adobe Glyph List (`Aacute`,
+    /// `uni00C1`, `f_i`).
+    GlyphName,
+    /// The CID, through an Adobe CJK collection's CID → Unicode table
+    /// (Japan1, CNS1, GB1, Korea1).
+    CidOrdering,
+    /// An enclosing PDF `/ActualText` marked-content span, which replaces
+    /// the text of every glyph inside it.
+    ActualText,
+    /// Nothing gave the glyph any text; its range is empty.
+    #[default]
+    Unmapped,
+}
+
 /// Parameters for stroking a path.
 ///
 /// New fields may be added without notice; pattern-matching consumers
@@ -755,7 +851,7 @@ pub struct PatchShadingParams {
 }
 
 /// Parameters for a tiled pattern fill.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct PatternFillParams {
     /// The path to fill with the pattern.
     pub path: PsPath,

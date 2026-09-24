@@ -1296,6 +1296,18 @@ fn replay_form_elements(
                 ];
                 target.push(DisplayElement::Text { params: new_params });
             }
+            DisplayElement::TextRun { params } => {
+                // Captured in form space like everything else here; map the
+                // glyph matrix, origins and advances through the real CTM
+                // so extracted positions land where the glyphs are drawn.
+                let mut new_params = params.clone();
+                new_params.glyph_to_device = ctm.concat(&params.glyph_to_device);
+                for glyph in &mut new_params.glyphs {
+                    glyph.origin = ctm.transform_point(glyph.origin.0, glyph.origin.1);
+                    glyph.advance = ctm.transform_delta(glyph.advance.0, glyph.advance.1);
+                }
+                target.push(DisplayElement::TextRun { params: new_params });
+            }
             DisplayElement::Group { .. }
             | DisplayElement::SoftMasked { .. }
             | DisplayElement::OcgGroup { .. } => {
@@ -1514,5 +1526,53 @@ mod tests {
         ctx.o_stack.push(PsObject::real(-0.5)).unwrap();
         op_setsmoothness(&mut ctx).unwrap();
         assert!((ctx.gstate.smoothness - 0.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn execform_maps_text_runs_from_form_space() {
+        use stet_graphics::device::{ShownGlyph, TextRunParams};
+        use stet_graphics::display_list::{DisplayElement, DisplayList};
+
+        // A run captured in form space: 10-unit glyphs at the form origin.
+        let mut cached = DisplayList::new();
+        cached.push(DisplayElement::TextRun {
+            params: TextRunParams {
+                text: "ab".into(),
+                glyphs: vec![
+                    ShownGlyph {
+                        text_range: 0..1,
+                        origin: (0.0, 0.0),
+                        advance: (10.0, 0.0),
+                        ..ShownGlyph::default()
+                    },
+                    ShownGlyph {
+                        text_range: 1..2,
+                        origin: (10.0, 0.0),
+                        advance: (10.0, 0.0),
+                        ..ShownGlyph::default()
+                    },
+                ],
+                glyph_to_device: Matrix::new(0.01, 0.0, 0.0, 0.01, 0.0, 0.0),
+                ..TextRunParams::default()
+            },
+        });
+        // Placed on the page scaled by 2 and moved to (100, 50).
+        let ctm = Matrix::new(2.0, 0.0, 0.0, 2.0, 100.0, 50.0);
+        let mut target = DisplayList::new();
+        replay_form_elements(&cached, &ctm, &mut target);
+
+        let [DisplayElement::TextRun { params }] = target.elements() else {
+            panic!("expected one TextRun");
+        };
+        assert_eq!(params.text, "ab");
+        let m = params.glyph_to_device;
+        assert_eq!(
+            (m.a, m.b, m.c, m.d, m.tx, m.ty),
+            (0.02, 0.0, 0.0, 0.02, 100.0, 50.0)
+        );
+        assert_eq!(params.glyphs[0].origin, (100.0, 50.0));
+        assert_eq!(params.glyphs[1].origin, (120.0, 50.0));
+        // Advances scale but do not translate.
+        assert_eq!(params.glyphs[1].advance, (20.0, 0.0));
     }
 }

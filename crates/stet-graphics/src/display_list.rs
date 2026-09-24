@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::device::{
     AxialShadingParams, ClipParams, FillParams, ImageParams, MeshShadingParams, PatchShadingParams,
-    PatternFillParams, RadialShadingParams, StrokeParams, TextParams,
+    PatternFillParams, RadialShadingParams, StrokeParams, TextParams, TextRunParams,
 };
 use stet_fonts::geometry::PsPath;
 
@@ -54,7 +54,7 @@ pub enum SoftMaskSubtype {
 }
 
 /// Parameters for a soft mask compositing operation.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct SoftMaskParams {
     /// How to extract the mask from the rendered form.
     pub subtype: SoftMaskSubtype,
@@ -103,7 +103,7 @@ pub enum GroupColorSpace {
 }
 
 /// Parameters for a transparency group compositing operation.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct GroupParams {
     /// Device-space bounding box [x_min, y_min, x_max, y_max].
     pub bbox: [f64; 4],
@@ -215,7 +215,11 @@ impl OcgVisibility {
 /// without breaking third-party renderers; consumers must include a
 /// wildcard arm in their `match` expressions. See
 /// `docs/DISPLAY-LIST.md` ("Stability") for the policy.
-#[derive(Clone)]
+///
+/// Add new variants at the end: inserting one earlier renumbers the
+/// implicit discriminants of those after it, which `cargo semver-checks`
+/// reports as a breaking change.
+#[derive(Clone, Debug)]
 #[non_exhaustive]
 pub enum DisplayElement {
     /// Fill a path.
@@ -280,10 +284,24 @@ pub enum DisplayElement {
         /// scale changes.
         mask_cache: Arc<Mutex<Option<Option<MaskRaster>>>>,
     },
+    /// The text one show operation displayed, in Unicode, with per-glyph
+    /// positions — for text extraction. Recorded only when the producer
+    /// was asked to extract text. Paints nothing: renderers and the PDF
+    /// writer skip it, and it has no paint extent. Unlike [`Text`], it
+    /// carries no font for re-emission, and both the PostScript interpreter
+    /// and the PDF reader produce it.
+    ///
+    /// Nested like the content it describes: a run inside a layer sits
+    /// inside that layer's [`OcgGroup`], so extracting with the renderer's
+    /// `LayerSet` yields only visible layers' text.
+    ///
+    /// [`Text`]: DisplayElement::Text
+    /// [`OcgGroup`]: DisplayElement::OcgGroup
+    TextRun { params: TextRunParams },
 }
 
 /// An ordered list of drawing operations for a single page.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct DisplayList {
     elements: Vec<DisplayElement>,
     /// Color space of the page-level transparency group, when one is declared.

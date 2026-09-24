@@ -84,6 +84,7 @@ pub use diagnostics::{ExecWarning, ExecWarningKind};
 // Re-exports for power users
 pub use stet_core::context::Context as PsContext;
 pub use stet_engine::eval::parse_and_exec as ps_exec;
+pub use stet_graphics::device::{ShownGlyph, TextRunParams, UnicodeSource};
 pub use stet_graphics::display_list::{DisplayElement, DisplayList as PsDisplayList};
 pub use stet_graphics::icc::IccCache;
 
@@ -143,6 +144,7 @@ pub struct Interpreter {
 pub struct InterpreterBuilder {
     use_icc: bool,
     suppress_output: bool,
+    extract_text: bool,
 }
 
 impl Interpreter {
@@ -159,6 +161,7 @@ impl Interpreter {
         InterpreterBuilder {
             use_icc: true,
             suppress_output: false,
+            extract_text: false,
         }
     }
 
@@ -541,10 +544,22 @@ impl InterpreterBuilder {
         self
     }
 
+    /// Record the text each page shows, for extraction.
+    ///
+    /// Display lists then also carry
+    /// [`DisplayElement::TextRun`] elements: each string shown, in Unicode, with the device-space
+    /// position of every glyph. They paint nothing, so rendering is
+    /// unchanged. Off by default, which keeps display lists free of them.
+    pub fn extract_text(mut self) -> Self {
+        self.extract_text = true;
+        self
+    }
+
     /// Build the interpreter.
     pub fn build(self) -> Interpreter {
-        let ctx = init::create_initialized_context(self.use_icc, self.suppress_output)
+        let mut ctx = init::create_initialized_context(self.use_icc, self.suppress_output)
             .expect("interpreter initialization failed");
+        ctx.extract_text = self.extract_text;
         Interpreter {
             ctx,
             use_icc: self.use_icc,

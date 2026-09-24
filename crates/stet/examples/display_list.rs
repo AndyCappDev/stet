@@ -43,6 +43,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut clips = 0usize;
         let mut images = 0usize;
         let mut texts = 0usize;
+        let mut text_runs = 0usize;
         let mut other = 0usize;
 
         for elem in page.display_list.elements() {
@@ -52,13 +53,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 DisplayElement::Clip { .. } | DisplayElement::InitClip => clips += 1,
                 DisplayElement::Image { .. } => images += 1,
                 DisplayElement::Text { .. } => texts += 1,
+                DisplayElement::TextRun { .. } => text_runs += 1,
                 _ => other += 1,
             }
         }
 
         println!(
-            "  fills={}  strokes={}  clips={}  images={}  texts={}  other={}",
-            fills, strokes, clips, images, texts, other
+            "  fills={}  strokes={}  clips={}  images={}  texts={}  text_runs={}  other={}",
+            fills, strokes, clips, images, texts, text_runs, other
         );
     }
 

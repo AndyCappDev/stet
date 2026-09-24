@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`DisplayElement::TextRun`, a display-list element for text
+  extraction,** with `TextRunParams`, `ShownGlyph` and `UnicodeSource` in
+  `stet_graphics::device` (re-exported by the `stet` facade). A run is the
+  text one show operation displayed, in Unicode, with each glyph's
+  device-space origin and advance, its character code, and where its text
+  came from; `glyph_to_device`, `ascent` and `descent` give each glyph's
+  box, rotated or skewed like the text. It paints nothing, and every
+  renderer and the PDF writer skip it. Both producers get an off-by-default
+  switch — `InterpreterBuilder::extract_text()` (or `Context::extract_text`)
+  for PostScript and `PdfDocument::set_extract_text(true)` for PDF — and
+  with it off, display lists are unchanged. **No producer records runs yet**;
+  the PDF reader and the show operators start doing so in the changes that
+  follow. Renderers that match on `DisplayElement` already have the
+  wildcard arm the enum's `#[non_exhaustive]` requires.
+- **`Debug` for `DisplayList` and `DisplayElement`** (and the param structs
+  that lacked it: `PatternFillParams`, `GroupParams`, `SoftMaskParams`), so
+  a display list can be printed or compared as text.
 - **Unicode tables for text extraction in `stet-fonts`**, the groundwork for
   extracting text from both PostScript and PDF input:
   - `stet_fonts::to_unicode::ToUnicodeMap` parses a PDF `/ToUnicode` CMap
