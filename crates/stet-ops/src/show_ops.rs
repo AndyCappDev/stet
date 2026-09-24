@@ -370,8 +370,11 @@ pub fn op_cshow(ctx: &mut Context) -> Result<(), PsError> {
             ctx.o_stack.push(PsObject::real(0.0))?; // wy
 
             ctx.cshow_pending_cid = Some(cid);
-            ctx.exec_sync(proc)?;
+            let result = ctx.exec_sync(proc);
+            // Cleared whether or not the procedure succeeds: a CID left
+            // behind would be drawn by the next `show` anywhere.
             ctx.cshow_pending_cid = None;
+            result?;
         }
     } else {
         // Simple font: one byte per character

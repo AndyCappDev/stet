@@ -551,3 +551,25 @@ showpage
     assert!(close(run.glyphs[0].advance, (12.0, 0.0)));
     assert!(close(run.glyphs[1].origin, (84.0, 92.0)));
 }
+
+#[test]
+fn an_error_in_a_cshow_procedure_leaves_no_cid_behind() {
+    // The cshow procedure fails before showing; `stopped` catches it. The
+    // CID cshow selected (1, a space in Japan1) must not carry over to the
+    // next show, which shows CID 0 through <0000> — no text at all.
+    let cmap = "/CIDInit /ProcSet findresource begin 12 dict begin begincmap \
+        /CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) /Supplement 4 >> def \
+        /CMapName /Test-H def /CMapType 1 def \
+        1 begincodespacerange <0000> <FFFF> endcodespacerange \
+        1 begincidrange <0000> <0000> 0 endcidrange \
+        1 begincidrange <0041> <0041> 1 endcidrange \
+        endcmap CMapName currentdict /CMap defineresource pop end end";
+    let runs = runs_of(&cid_font_ps(
+        cmap,
+        "72 700 moveto { { pop pop pop stop } <0041> cshow } stopped pop \
+         72 680 moveto <0000> show",
+    ));
+    assert_eq!(runs.len(), 1, "{runs:#?}");
+    assert_eq!(runs[0].glyphs[0].code, 0);
+    assert_eq!(runs[0].glyphs[0].source, UnicodeSource::Unmapped);
+}

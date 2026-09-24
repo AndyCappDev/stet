@@ -122,6 +122,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An error inside a `cshow` procedure no longer changes the next glyph
+  shown.** With a CID-keyed font, `cshow` hands its procedure the
+  character's code and sets aside the CID it selected for a `show` inside
+  the procedure to draw. A procedure that failed — caught by `stopped` —
+  left that CID set aside, so the next `show` anywhere drew it in place of
+  its own first glyph.
 - **PostScript vertical CJK text (WMode 1) is drawn where PLRM puts it.**
   A vertical glyph's outline is drawn from its origin 0, the current point
   less its position vector v (half its width across, 880 units up by
