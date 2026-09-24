@@ -654,9 +654,9 @@ mod tests {
     fn test_ctx() -> Context {
         let mut ctx = Context::new();
         crate::build_system_dict(&mut ctx);
-        let font_dir =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../resources/Font");
-        ctx.font_resource_path = Some(font_dir.to_string_lossy().into_owned());
+        if let Some(font_dir) = crate::test_support::font_dir() {
+            ctx.font_resource_path = Some(font_dir.to_string_lossy().into_owned());
+        }
         ctx
     }
 
@@ -768,13 +768,10 @@ mod tests {
 
     #[test]
     fn test_findfont_loads_from_disk() {
-        let font_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../resources/Font/NimbusSans-Regular.t1");
-        if !font_path.exists() {
-            eprintln!("Skipping test — font file not found");
+        // `test_ctx` points font_resource_path at the bundled fonts.
+        if crate::test_support::font_dir().is_none() {
             return;
         }
-
         let mut ctx = test_ctx();
 
         // findfont Helvetica (should substitute to NimbusSans-Regular)

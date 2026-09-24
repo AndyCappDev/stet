@@ -65,3 +65,32 @@ pub mod string_store;
 pub mod system_font_loader;
 pub mod tokenizer;
 pub mod vm_audit;
+
+/// Test support shared by this crate's unit tests.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::path::{Path, PathBuf};
+
+    /// Directory of the bundled URW fonts, for tests that need a real font.
+    ///
+    /// The fonts live in the `stet` crate's resources, so they are only
+    /// reachable inside the stet workspace. Outside it — a crates.io
+    /// tarball, say — this returns `None` and font tests skip. Inside it, a
+    /// missing font panics rather than skipping: when the fonts moved out of
+    /// the root `resources/` tree on 2026-04-20, every font test here kept
+    /// passing without running for five months.
+    pub(crate) fn font_dir() -> Option<PathBuf> {
+        let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        if !crates.join("stet/Cargo.toml").exists() {
+            eprintln!("skipping: outside the stet workspace, so no bundled fonts");
+            return None;
+        }
+        let dir = crates.join("stet/resources/Font");
+        assert!(
+            dir.join("NimbusSans-Regular.t1").exists(),
+            "bundled fonts not found in {}",
+            dir.display()
+        );
+        Some(dir)
+    }
+}

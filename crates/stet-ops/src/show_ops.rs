@@ -5157,30 +5157,30 @@ mod tests {
     use super::*;
     use stet_core::context::Context;
 
+    /// A context with Helvetica 12 set and a current point, or `None`
+    /// outside the stet workspace (no bundled fonts). Inside it, any
+    /// failure to load the font panics instead of skipping the test.
     fn test_ctx_with_font() -> Option<Context> {
-        let font_dir =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../resources/Font");
+        let font_dir = crate::test_support::font_dir()?;
         let font_path = font_dir.join("NimbusSans-Regular.t1");
-        if !font_path.exists() {
-            return None;
-        }
 
         let mut ctx = Context::new();
         crate::build_system_dict(&mut ctx);
         ctx.font_resource_path = Some(font_dir.to_string_lossy().into_owned());
 
         // Load and scale font: Helvetica 12pt
-        let font_data = std::fs::read(&font_path).ok()?;
-        let font_obj = stet_core::font_loader::load_type1_font(&mut ctx, &font_data).ok()?;
+        let font_data = std::fs::read(&font_path).expect("read bundled font");
+        let font_obj = stet_core::font_loader::load_type1_font(&mut ctx, &font_data)
+            .expect("load bundled font");
 
         // Scale by 12
         if let PsValue::Dict(_font_entity) = font_obj.value {
             let scaled = super::super::font_ops::op_scalefont;
             // Do it manually
-            ctx.o_stack.push(font_obj).ok()?;
-            ctx.o_stack.push(PsObject::real(12.0)).ok()?;
-            scaled(&mut ctx).ok()?;
-            let scaled_font = ctx.o_stack.pop().ok()?;
+            ctx.o_stack.push(font_obj).unwrap();
+            ctx.o_stack.push(PsObject::real(12.0)).unwrap();
+            scaled(&mut ctx).expect("scalefont");
+            let scaled_font = ctx.o_stack.pop().unwrap();
             ctx.gstate.current_font = Some(scaled_font);
         }
 
@@ -5194,10 +5194,7 @@ mod tests {
     fn test_stringwidth() {
         let mut ctx = match test_ctx_with_font() {
             Some(ctx) => ctx,
-            None => {
-                eprintln!("Skipping test — font file not found");
-                return;
-            }
+            None => return,
         };
 
         let hello = b"Hello";
@@ -5225,10 +5222,7 @@ mod tests {
     fn test_show_advances_currentpoint() {
         let mut ctx = match test_ctx_with_font() {
             Some(ctx) => ctx,
-            None => {
-                eprintln!("Skipping test — font file not found");
-                return;
-            }
+            None => return,
         };
 
         let (start_x, _start_y) = ctx.gstate.current_point.unwrap();
@@ -5253,10 +5247,7 @@ mod tests {
     fn test_charpath_appends_to_path() {
         let mut ctx = match test_ctx_with_font() {
             Some(ctx) => ctx,
-            None => {
-                eprintln!("Skipping test — font file not found");
-                return;
-            }
+            None => return,
         };
 
         assert!(ctx.gstate.path.is_empty());

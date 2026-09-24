@@ -267,12 +267,10 @@ mod tests {
 
     #[test]
     fn test_load_real_font() {
-        let font_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../resources/Font/NimbusSans-Regular.t1");
-        if !font_path.exists() {
-            eprintln!("Skipping test — font file not found");
+        let Some(font_dir) = crate::test_support::font_dir() else {
             return;
-        }
+        };
+        let font_path = font_dir.join("NimbusSans-Regular.t1");
 
         let mut ctx = Context::new();
         let font_data = std::fs::read(&font_path).unwrap();

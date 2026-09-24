@@ -870,12 +870,10 @@ mod tests {
     #[test]
     fn test_execute_real_charstring() {
         // Load a real font and execute the 'space' charstring
-        let font_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../resources/Font/NimbusSans-Regular.t1");
-        if !font_path.exists() {
-            eprintln!("Skipping test — font file not found");
+        let Some(font_dir) = crate::test_support::font_dir() else {
             return;
-        }
+        };
+        let font_path = font_dir.join("NimbusSans-Regular.t1");
 
         let data = std::fs::read(&font_path).unwrap();
         let font = crate::type1_parser::parse_type1(&data).unwrap();
@@ -899,12 +897,10 @@ mod tests {
 
     #[test]
     fn test_execute_multiple_glyphs() {
-        let font_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../resources/Font/NimbusSans-Regular.t1");
-        if !font_path.exists() {
-            eprintln!("Skipping test — font file not found");
+        let Some(font_dir) = crate::test_support::font_dir() else {
             return;
-        }
+        };
+        let font_path = font_dir.join("NimbusSans-Regular.t1");
 
         let data = std::fs::read(&font_path).unwrap();
         let font = crate::type1_parser::parse_type1(&data).unwrap();

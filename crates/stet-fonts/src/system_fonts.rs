@@ -1349,11 +1349,10 @@ mod tests {
 
     #[test]
     fn test_extract_ps_name_from_pfa() {
-        let font_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../resources/Font/NimbusSans-Regular.t1");
-        if !font_path.exists() {
+        let Some(font_dir) = crate::test_support::font_dir() else {
             return;
-        }
+        };
+        let font_path = font_dir.join("NimbusSans-Regular.t1");
         let name = extract_ps_name_from_pfa(&font_path);
         assert_eq!(name, Some("NimbusSans-Regular".to_string()));
     }
