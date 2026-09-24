@@ -24,7 +24,7 @@ renderer. If you're building a stet-family project, the
 | `encoding` | `StandardEncoding`, `ISOLatin1Encoding`, `SymbolEncoding`, and other named encodings |
 | `agl` | Adobe Glyph List — glyph name → Unicode, as one BMP code point for glyph selection or as full text (suffixes, `f_f_i` ligature names, supplementary planes) for extraction |
 | `to_unicode` | PDF `/ToUnicode` CMap parser for text extraction — full UTF-16 destinations, multi-character strings, codes up to four bytes |
-| `cid_unicode` | CID ↔ Unicode for the Adobe CJK collections (Japan1, CNS1, GB1, Korea1) |
+| `cid_unicode` | CID ↔ Unicode for the Adobe CJK collections (Japan1, CNS1, GB1, Korea1): a CID's text for extraction, and a code point for picking its glyph from a Unicode-keyed font |
 | `system_fonts` | Platform font directory discovery, substitution of the 35 standard PostScript names to URW equivalents |
 
 ## Standalone use
@@ -104,4 +104,7 @@ library, look at [`ttf-parser`](https://crates.io/crates/ttf-parser),
 
 ## License
 
-Apache-2.0 OR MIT
+Apache-2.0 OR MIT, except the CID ↔ Unicode tables behind `cid_unicode`
+(`src/cid_*.bin`), which are generated from Adobe's CMap resources and
+are under Adobe's BSD-3-Clause terms; see
+[`LICENSE-ADOBE-CMAP`](LICENSE-ADOBE-CMAP).

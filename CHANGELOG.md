@@ -24,7 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `glyph_name_to_unicode` is unchanged.
   - `stet_fonts::cid_unicode`, the CID ↔ Unicode tables for Adobe-Japan1,
     CNS1, GB1 and Korea1, moved here from `stet-pdf-reader` so the
-    PostScript interpreter can use them too.
+    PostScript interpreter can use them too, with a new `cid_to_text` that
+    gives the text Adobe assigns each CID — every CID in the collection,
+    including supplementary-plane characters and variation sequences.
 
 ### Changed
 
@@ -61,6 +63,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **CJK text drawn with a substitute font picks the right glyphs.** When a
+  PDF uses a CJK CID font it does not embed, the reader maps each CID to
+  Unicode to find a glyph in the substitute font. The table it used was
+  built by inverting Adobe's Unicode → CID CMaps, which kept an arbitrary
+  one of the code points that share a CID and dropped every CID that no
+  Unicode encoding reaches, or that lies outside the Basic Multilingual
+  Plane. Visible effects:
+  - Some common ideographs came out as the Kangxi radical sharing their CID
+    (Japan1 CID 3284, 日, as ⽇ U+2F47), which substitute fonts often lack.
+  - Proportional, half-width and other variant glyphs, and characters such
+    as 𠮷, drew nothing — about 6,600 CIDs in Adobe-Japan1 alone.
+
+  The tables are now generated reproducibly
+  (`scripts/gen_cid_unicode_tables.py`) from Adobe's CID → Unicode CMaps
+  for text and its Unicode → CID CMaps for glyph selection, with Adobe's
+  BSD-3-Clause notice alongside in `crates/stet-fonts/LICENSE-ADOBE-CMAP`.
+  The PDF reader's width lookup for UCS2-encoded fonts, which maps Unicode
+  back to a CID, also found no CID for such characters and now does.
 - **Rendering intents are no longer scrambled between the PDF reader and
   everything downstream of it.** The display list's `rendering_intent` byte
   is documented as 0=RelativeColorimetric, 1=Absolute, 2=Perceptual,
