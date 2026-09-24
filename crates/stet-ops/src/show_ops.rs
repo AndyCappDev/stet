@@ -5107,6 +5107,20 @@ fn recolor_and_translate_element(
                 params,
             }
         }
+        // Text shown inside the glyph procedure (a Type 3 font that wraps
+        // another font's `show`). The PDF writer re-emits it as real text
+        // and skips the glyph fills beside it, so it must move and recolour
+        // with them: left in place, every cache hit stacked its text on the
+        // first glyph's position in PDF output.
+        DisplayElement::Text { params } => {
+            let mut params = params.clone();
+            params.color = color.clone();
+            params.start_x += dx;
+            params.start_y += dy;
+            params.ctm[4] += dx;
+            params.ctm[5] += dy;
+            DisplayElement::Text { params }
+        }
         // Positioned like the glyph it was cached with; the text is not
         // recoloured because it carries no colour.
         DisplayElement::TextRun { params } => {

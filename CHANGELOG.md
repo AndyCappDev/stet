@@ -85,6 +85,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **PDF output keeps every glyph of a Type 3 font that wraps another
+  font.** When a Type 3 glyph procedure draws its glyph with `show` (effect
+  fonts that outline or shadow a real font do), the glyph cache replayed
+  each later use of a glyph without moving the text it had recorded. PDF
+  output draws that text rather than the glyph outlines, so every repeat of
+  a character landed on its first occurrence: `AAAA` came out as one `A`.
+  Raster output was unaffected.
 - **The `stet` facade no longer leaves released objects on its stacks at the
   end of a job.** A program that ended with composite objects on the operand
   stack, dictionaries it created still on the dictionary stack, or an
