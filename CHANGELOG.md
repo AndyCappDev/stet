@@ -85,6 +85,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Forms drawn with `execform` keep their transparency groups, soft masks
+  and layers.** `execform` caches a form's output and replays it at each
+  use, and the replay discarded groups, soft masks and layers as if only
+  PDF input could produce them; stet's PostScript transparency operators
+  (`begintransparencygroup`, `beginsoftmask`, `beginoptionalcontent`) make
+  them too, so a form built with them drew nothing. Their bounding boxes are
+  fixed in device space when they are made, which a replay from form space
+  cannot correct, so such a form is now executed afresh at each use instead
+  of being replayed.
 - **PDF output keeps every glyph of a Type 3 font that wraps another
   font.** When a Type 3 glyph procedure draws its glyph with `show` (effect
   fonts that outline or shadow a real font do), the glyph cache replayed

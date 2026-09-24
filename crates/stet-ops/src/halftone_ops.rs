@@ -1311,7 +1311,12 @@ fn replay_form_elements(
             DisplayElement::Group { .. }
             | DisplayElement::SoftMasked { .. }
             | DisplayElement::OcgGroup { .. } => {
-                // Groups/SoftMasked/OcgGroup are PDF-only; PS display lists don't contain them
+                // Never cached: `op_execform` executes a form containing any
+                // of these afresh at each use instead of replaying it.
+                debug_assert!(
+                    false,
+                    "execform cached a form with a group, soft mask or layer"
+                );
             }
             _ => {
                 // Future variants — pass through unchanged
@@ -1337,9 +1342,13 @@ pub fn op_execform(ctx: &mut Context) -> Result<(), PsError> {
         _ => return Err(PsError::TypeCheck),
     };
 
-    // Check if already has Implementation (cached)
+    // `Implementation` is absent before the first invocation, `true` once
+    // the PaintProc's output is cached, and `false` for a form that must be
+    // executed afresh each time (see step 4).
     let impl_key = DictKey::Name(ctx.names.intern(b"Implementation"));
-    let first_invocation = ctx.dicts.get(dict_entity, &impl_key).is_none();
+    let implementation = ctx.dicts.get(dict_entity, &impl_key);
+    let first_invocation = implementation.is_none();
+    let mut direct = matches!(implementation.map(|o| o.value), Some(PsValue::Bool(false)));
 
     if first_invocation {
         // Validate FormType
@@ -1434,19 +1443,52 @@ pub fn op_execform(ctx: &mut Context) -> Result<(), PsError> {
         let captured = std::mem::replace(&mut ctx.display_list, saved_dl);
         result?;
 
-        ctx.form_cache.insert(dict_entity, captured);
-
         // Restore real CTM for replay
         ctx.gstate.ctm = real_ctm;
 
-        // Mark as cached
+        // A transparency group, soft mask or layer cannot be replayed from
+        // form space. Its bounding boxes are resolved in device space when
+        // it is created — from the clip in effect, which during capture is
+        // still the real device-space clip set in step 3 — so no transform
+        // applied at replay can place them correctly. Such a form is
+        // executed afresh at each use instead, under the real CTM and clip.
+        // Caching is only an optimisation, and PLRM requires a PaintProc to
+        // be free of side effects, so running it again (here, once more on
+        // this first use) is sound.
+        direct = captured.elements().iter().any(|e| {
+            use stet_graphics::display_list::DisplayElement;
+            matches!(
+                e,
+                DisplayElement::Group { .. }
+                    | DisplayElement::SoftMasked { .. }
+                    | DisplayElement::OcgGroup { .. }
+            )
+        });
+        if !direct {
+            ctx.form_cache.insert(dict_entity, captured);
+        }
+
+        // Mark as cached, or as executed afresh each time.
         ctx.cow_check_dict(dict_entity);
         let impl_key = DictKey::Name(ctx.names.intern(b"Implementation"));
-        ctx.dicts.put(dict_entity, impl_key, PsObject::bool(true));
+        ctx.dicts
+            .put(dict_entity, impl_key, PsObject::bool(!direct));
     }
 
-    // 5. Replay cached elements transformed through real CTM
-    if let Some(cached) = ctx.form_cache.get(&dict_entity) {
+    if direct {
+        // 5a. Execute the PaintProc under the real CTM and clip.
+        let depth_before = ctx.o_stack.len();
+        ctx.o_stack.push(PsObject::dict(dict_entity))?;
+        let pp_key = DictKey::Name(ctx.names.intern(b"PaintProc"));
+        let paint_proc = ctx
+            .dicts
+            .get(dict_entity, &pp_key)
+            .ok_or(PsError::TypeCheck)?;
+        let result = ctx.exec_sync(paint_proc);
+        ctx.o_stack.truncate(depth_before);
+        result?;
+    } else if let Some(cached) = ctx.form_cache.get(&dict_entity) {
+        // 5. Replay cached elements transformed through real CTM
         // Clone to avoid borrow conflict (cached borrows ctx.form_cache)
         let cached_clone = cached.clone();
         replay_form_elements(&cached_clone, &real_ctm, ctx.current_display_list_mut());
