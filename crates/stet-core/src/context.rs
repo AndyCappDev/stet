@@ -312,6 +312,11 @@ pub struct Context {
 
     // CID passed from cshow to nested show call for Type 0 composite fonts
     pub cshow_pending_cid: Option<i32>,
+    /// The whole character code `cshow` selected [`Self::cshow_pending_cid`]
+    /// with. Its procedure sees only the code's last byte, but text
+    /// extraction records the code a glyph was shown with — and for a
+    /// `Uni…` CMap the code is the text.
+    pub cshow_pending_code: Option<u32>,
 
     /// Set while a Type 3 glyph procedure runs under `charpath`.
     ///
@@ -1124,6 +1129,7 @@ impl Context {
             glyph_caches: rustc_hash::FxHashMap::default(),
             char_cache_mode: None,
             cshow_pending_cid: None,
+            cshow_pending_code: None,
             charpath_capture: None,
             pattern_store: Vec::new(),
             form_cache: rustc_hash::FxHashMap::default(),

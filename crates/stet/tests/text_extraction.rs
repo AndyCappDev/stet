@@ -212,6 +212,12 @@ fn show_operators_record_one_run_per_string() {
         "width show",
         "awidth show",
         "kshow",
+        "xshow",
+        "yshow",
+        "xy",
+        // glyphshow's /Aacute. cshow records nothing itself, and this
+        // cshow's procedure shows nothing.
+        "Á",
         "rotated",
         "clipped",
         // The FMapType composite: a run per descendant font it switches to.
@@ -225,7 +231,7 @@ fn show_operators_record_one_run_per_string() {
     .collect();
     assert_eq!(texts, expected);
     let all = runs(&lists[0]);
-    let composite: Vec<(&str, &str, u32)> = all[7..9]
+    let composite: Vec<(&str, &str, u32)> = all[11..13]
         .iter()
         .map(|(_, r)| (r.text.as_str(), r.font_name.as_str(), r.glyphs[0].code))
         .collect();
@@ -284,6 +290,19 @@ fn glyph_positions_are_in_device_space() {
     let (ux, uy) = rotated.glyph_to_device.transform_delta(0.0, 1000.0);
     assert!(((-uy).atan2(ux).to_degrees() - 120.0).abs() < 0.1);
 
+    // xshow moves by its displacements; each advance is still the
+    // glyph's own width (x is 500 units).
+    let xshow = run("xshow");
+    assert!(close(xshow.glyphs[0].advance, (6.0, 0.0)));
+    assert!(close(xshow.glyphs[1].origin, (80.0, 192.0)));
+    let yshow = run("yshow");
+    assert!(close(yshow.glyphs[1].origin, (72.0, 212.0 - 2.0)));
+
+    // glyphshow shows by name, so there is no character code.
+    let glyphshow = run("Á");
+    assert_eq!(glyphshow.glyphs[0].code, 0);
+    assert!(close(glyphshow.glyphs[0].origin, (72.0, 252.0)));
+
     // The form is replayed through its CTM: 72 340 translate, 0 5 moveto.
     let form = run("form");
     assert!(close(form.glyphs[0].origin, (72.0, 792.0 - 345.0)));
@@ -310,6 +329,8 @@ fn text_that_is_not_the_documents_is_not_recorded() {
 72 700 moveto (BB) show
 /Helvetica findfont 12 scalefont setfont
 72 680 moveto { pop pop (-) show } (ab) kshow
+/T3 findfont 12 scalefont setfont
+72 660 moveto (BB) [20 20] xshow
 showpage
 "#;
     let texts: Vec<(String, Vec<String>)> = runs_of(ps)
@@ -332,6 +353,8 @@ showpage
             owned("a", &["a"]),
             owned("-", &["-"]),
             owned("b", &["b"]),
+            // The same through xshow, whose Type 3 path is its own.
+            owned("BB", &["B", "B"]),
         ]
     );
 }
@@ -550,6 +573,34 @@ showpage
     assert_eq!((run.ascent, run.descent), (880.0, -120.0));
     assert!(close(run.glyphs[0].advance, (12.0, 0.0)));
     assert!(close(run.glyphs[1].origin, (84.0, 92.0)));
+}
+
+#[test]
+fn cid_fonts_through_the_displaced_and_cshow_paths() {
+    let cmap = "/CIDInit /ProcSet findresource begin 12 dict begin begincmap \
+        /CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) /Supplement 4 >> def \
+        /CMapName /UniTest-UCS2-H def /CMapType 1 def \
+        1 begincodespacerange <0000> <FFFF> endcodespacerange \
+        1 begincidrange <3042> <3042> 1 endcidrange \
+        endcmap CMapName currentdict /CMap defineresource pop end end";
+    // xyshow, and cshow with the usual procedure: the procedure gets only
+    // the code's last byte, but the glyph records the whole code, which
+    // for a Uni CMap is the text.
+    let runs = runs_of(&cid_font_ps(
+        cmap,
+        "72 700 moveto <30423042> [0 -20 0 -20] xyshow \
+         72 680 moveto { pop pop 1 string dup 0 4 -1 roll put show } <3042> cshow",
+    ));
+    let summary: Vec<(&str, Vec<u32>)> = runs
+        .iter()
+        .map(|r| (r.text.as_str(), r.glyphs.iter().map(|g| g.code).collect()))
+        .collect();
+    assert_eq!(
+        summary,
+        [("ああ", vec![0x3042, 0x3042]), ("あ", vec![0x3042])]
+    );
+    // xyshow's second glyph is 20 points down the page.
+    assert!(close(runs[0].glyphs[1].origin, (72.0, 112.0)));
 }
 
 #[test]

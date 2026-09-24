@@ -338,7 +338,9 @@ pub struct ShownGlyph {
     /// and rotated like the text. Vertical for vertical writing.
     pub advance: (f64, f64),
     /// The character code shown, for consumers that want their own mapping
-    /// (one byte for simple fonts, one to four for composite fonts).
+    /// (one byte for simple fonts, one to four for composite fonts). 0 for
+    /// a glyph PostScript's `glyphshow` showed, which selects a glyph by
+    /// name rather than by code.
     pub code: u32,
     /// Where the glyph's text came from; lets a consumer judge confidence.
     pub source: UnicodeSource,

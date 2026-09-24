@@ -46,9 +46,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   glyph procedure (the glyph is the text), in a tiling pattern cell, or in
   a soft-mask group.
 - **Text extraction from PostScript.** With
-  `InterpreterBuilder::extract_text()`, `show`, `ashow`, `widthshow`,
-  `awidthshow` and `kshow` record a `TextRun` per string for Type 1, CFF,
-  Type 42 and Type 3 fonts, and for composite fonts: CID-keyed (CFF and
+  `InterpreterBuilder::extract_text()`, every show operator — `show`,
+  `ashow`, `widthshow`, `awidthshow`, `kshow`, `xshow`, `yshow`, `xyshow`
+  and `glyphshow` — records a `TextRun` per string for Type 1, CFF, Type 42
+  and Type 3 fonts, and for composite fonts: CID-keyed (CFF and
   TrueType, horizontal and vertical) and FMapType, a new run starting
   wherever the descendant font changes. Text comes from each glyph's name
   through the Adobe Glyph List (with the same dvips numeric-name rule as
@@ -59,7 +60,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   descent from its `FontBBox` (a TrueType font's `hhea` table). Text drawn inside a
   Type 3 `BuildChar` / `BuildGlyph` or a pattern cell is not recorded; a
   `show` inside a `kshow` procedure records its own run between the
-  kshow's. Forms record once and are placed wherever `execform` draws them.
+  kshow's, and one inside a `cshow` procedure records the whole character
+  code `cshow` selected (its procedure sees only the last byte). Forms
+  record once and are placed wherever `execform` draws them. A
+  `glyphshow` glyph, shown by name, records code 0.
 - **`Debug` for `DisplayList` and `DisplayElement`** (and the param structs
   that lacked it: `PatternFillParams`, `GroupParams`, `SoftMaskParams`), so
   a display list can be printed or compared as text.

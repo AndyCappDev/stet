@@ -173,12 +173,16 @@ drawn figure — has nowhere to put its text and is dropped. Glyph space is
 `/FontMatrix`'s.
 
 The PostScript interpreter records one run per string a show operator
-shows (`show`, `ashow`, `widthshow`, `awidthshow`, `kshow`) — or, for a
-composite font, one per stretch of glyphs from the same descendant font —
+shows (`show`, `ashow`, `widthshow`, `awidthshow`, `kshow`, `xshow`,
+`yshow`, `xyshow`, and `glyphshow`'s single glyph) — or, for a composite
+font, one per stretch of glyphs from the same descendant font —
 and none for text drawn inside a Type 3 font's `BuildChar` / `BuildGlyph`
 or a pattern cell's `PaintProc`. A `show` inside a `kshow` procedure
 records its own run, splitting the kshow's around it, so runs stay in page
-order. Glyph space is the font's own — 1000 units per em for Type 1 and
+order. `cshow` records nothing itself: the shows its procedure makes do,
+with the whole character code `cshow` selected. The `xshow` family moves
+glyphs by its displacements, but each glyph's `advance` is still its own
+width. Glyph space is the font's own — 1000 units per em for Type 1 and
 CFF fonts, font units for TrueType-based ones, the `FontMatrix`'s for Type
 3 — with `ascent` and `descent` from the font's `FontBBox` (a TrueType
 font's `hhea` table), else 0.8 / -0.2 of a 1000-unit em; half the em
@@ -204,7 +208,7 @@ collections: PostScript has no ToUnicode.
 | `text_range` | `Range<u32>` | Byte range of this glyph's text in `text`; empty when no Unicode was found (no fallback encoding is assumed) |
 | `origin` | `(f64, f64)` | Device-space glyph origin |
 | `advance` | `(f64, f64)` | Device-space advance vector (vertical for vertical writing) |
-| `code` | `u32` | The character code shown |
+| `code` | `u32` | The character code shown; 0 for PostScript `glyphshow`, which shows by name |
 | `source` | `UnicodeSource` | `ToUnicode`, `GlyphName`, `CidOrdering`, `ActualText` or `Unmapped` (`#[non_exhaustive]`). `GlyphName` includes Poppler's reading of dvips-style numeric names (`a80` → code 80, `P`) |
 
 A glyph's box is the parallelogram spanned by its `advance` and by

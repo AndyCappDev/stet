@@ -370,10 +370,12 @@ pub fn op_cshow(ctx: &mut Context) -> Result<(), PsError> {
             ctx.o_stack.push(PsObject::real(0.0))?; // wy
 
             ctx.cshow_pending_cid = Some(cid);
+            ctx.cshow_pending_code = bytes
+                .get(i * width..(i + 1) * width)
+                .map(|code| code.iter().fold(0u32, |a, &b| (a << 8) | b as u32));
             let result = ctx.exec_sync(proc);
-            // Cleared whether or not the procedure succeeds: a CID left
-            // behind would be drawn by the next `show` anywhere.
             ctx.cshow_pending_cid = None;
+            ctx.cshow_pending_code = None;
             result?;
         }
     } else {
@@ -634,8 +636,9 @@ pub fn op_xshow(ctx: &mut Context) -> Result<(), PsError> {
     ctx.o_stack.pop()?;
     ctx.o_stack.pop()?;
 
-    render_show_displaced(ctx, &bytes, &displacements, DisplacementMode::X)?;
-    Ok(())
+    recorded_show(ctx, |ctx| {
+        render_show_displaced(ctx, &bytes, &displacements, DisplacementMode::X)
+    })
 }
 
 /// `yshow`: string numarray → —
@@ -672,8 +675,9 @@ pub fn op_yshow(ctx: &mut Context) -> Result<(), PsError> {
     ctx.o_stack.pop()?;
     ctx.o_stack.pop()?;
 
-    render_show_displaced(ctx, &bytes, &displacements, DisplacementMode::Y)?;
-    Ok(())
+    recorded_show(ctx, |ctx| {
+        render_show_displaced(ctx, &bytes, &displacements, DisplacementMode::Y)
+    })
 }
 
 /// `xyshow`: string numarray → —
@@ -710,8 +714,9 @@ pub fn op_xyshow(ctx: &mut Context) -> Result<(), PsError> {
     ctx.o_stack.pop()?;
     ctx.o_stack.pop()?;
 
-    render_show_displaced(ctx, &bytes, &displacements, DisplacementMode::XY)?;
-    Ok(())
+    recorded_show(ctx, |ctx| {
+        render_show_displaced(ctx, &bytes, &displacements, DisplacementMode::XY)
+    })
 }
 
 /// `setcachedevice`: wx wy llx lly urx ury → —
@@ -807,6 +812,18 @@ pub fn op_glyphshow(ctx: &mut Context) -> Result<(), PsError> {
 
     ctx.o_stack.pop()?;
 
+    recorded_show(ctx, |ctx| {
+        render_glyphshow(ctx, font_obj, font_entity, glyph_name_id)
+    })
+}
+
+/// The rendering half of `glyphshow`, after its operand checks.
+fn render_glyphshow(
+    ctx: &mut Context,
+    font_obj: PsObject,
+    font_entity: EntityId,
+    glyph_name_id: stet_core::object::NameId,
+) -> Result<(), PsError> {
     let font_type = ctx
         .dicts
         .get(font_entity, &DictKey::Name(ctx.name_cache.n_font_type))
@@ -909,10 +926,43 @@ pub fn op_glyphshow(ctx: &mut Context) -> Result<(), PsError> {
     }
 
     let (wx, wy) = font_matrix.transform_delta(width_x, width_y);
+    record_glyphshow(
+        ctx,
+        font_entity,
+        &font_matrix,
+        glyph_name_id,
+        (cur_x, cur_y),
+        (wx, wy),
+    );
     let (dev_x, dev_y) = ctm.transform_point(cur_x + wx, cur_y + wy);
     ctx.gstate.current_point = Some((dev_x, dev_y));
 
     Ok(())
+}
+
+/// Record the glyph `glyphshow` showed. It shows by name, not by
+/// character code, so the recorded code is 0.
+fn record_glyphshow(
+    ctx: &mut Context,
+    font_entity: EntityId,
+    font_matrix: &Matrix,
+    glyph_name_id: stet_core::object::NameId,
+    origin: (f64, f64),
+    width: (f64, f64),
+) {
+    text_record::record_glyph(
+        ctx,
+        text_record::Glyph {
+            font: font_entity,
+            glyph_space: *font_matrix,
+            metrics: text_record::GlyphMetrics::FontBBox,
+            code: 0,
+            text: text_record::GlyphText::Name(glyph_name_id),
+            origin,
+            width,
+            vertical: false,
+        },
+    );
 }
 
 // --- Internal rendering helpers ---
@@ -2003,18 +2053,21 @@ fn render_show_composite(
             decode_cmap_bytes(ctx, font_entity, bytes)
         };
         let cids: Vec<i32> = cid_pairs.iter().map(|&(cid, _)| cid).collect();
-        let recording = if ctx.text_capture.is_some() {
-            CidRecording {
-                codes: if pending_cid.is_some() {
-                    vec![bytes.iter().fold(0u32, |a, &b| (a << 8) | b as u32)]
-                } else {
-                    cmap_codes(ctx, font_entity, bytes)
-                },
-                text: text_record::cid_text_source(ctx, font_entity, cidfont_entity),
-            }
-        } else {
-            CidRecording::default()
-        };
+        let recording =
+            if ctx.text_capture.is_some() {
+                CidRecording {
+                    codes: if pending_cid.is_some() {
+                        vec![ctx.cshow_pending_code.take().unwrap_or_else(|| {
+                            bytes.iter().fold(0u32, |a, &b| (a << 8) | b as u32)
+                        })]
+                    } else {
+                        cmap_codes(ctx, font_entity, bytes)
+                    },
+                    text: text_record::cid_text_source(ctx, font_entity, cidfont_entity),
+                }
+            } else {
+                CidRecording::default()
+            };
 
         // Emit Text element with CID-encoded bytes (2-byte big-endian per CID)
         {
@@ -3360,6 +3413,14 @@ fn glyphshow_type3(
     };
 
     let (wx, wy) = font_matrix.transform_delta(char_width.0, char_width.1);
+    record_glyphshow(
+        ctx,
+        font_entity,
+        &font_matrix,
+        glyph_name_id,
+        (cur_x, cur_y),
+        (wx, wy),
+    );
     let (dev_x, dev_y) = ctm.transform_point(cur_x + wx, cur_y + wy);
     ctx.gstate.current_point = Some((dev_x, dev_y));
 
@@ -4279,7 +4340,8 @@ fn render_show_displaced(
             }
         };
 
-        // Render glyph (check cache first)
+        // Render glyph (check cache first), keeping its width.
+        let mut width = None;
         {
             let cached = ctx
                 .glyph_caches
@@ -4288,6 +4350,7 @@ fn render_show_displaced(
                 .cloned();
 
             if let Some(cg) = cached {
+                width = Some((cg.width_x, cg.width_y));
                 if !cg.segments.is_empty() {
                     let user_path =
                         transform_segments(&cg.segments, &info.font_matrix, cur_x, cur_y);
@@ -4307,6 +4370,7 @@ fn render_show_displaced(
                     if let Ok(result) =
                         charstring::execute_charstring(&cs_bytes, &subrs, info.len_iv, false)
                     {
+                        width = Some((result.width_x, result.width_y));
                         let segments = Arc::new(result.path.segments);
                         if !segments.is_empty() {
                             let user_path =
@@ -4326,6 +4390,28 @@ fn render_show_displaced(
                     }
                 }
             }
+        }
+
+        if let Some((width_x, width_y)) = width
+            && ctx.text_capture.is_some()
+        {
+            let width = match get_metrics_width(ctx, &info, glyph_name_id, byte) {
+                Some(metrics_wx) => info.font_matrix.transform_delta(metrics_wx, 0.0),
+                None => info.font_matrix.transform_delta(width_x, width_y),
+            };
+            text_record::record_glyph(
+                ctx,
+                text_record::Glyph {
+                    font: info.font_entity,
+                    glyph_space: info.font_matrix,
+                    metrics: text_record::GlyphMetrics::FontBBox,
+                    code: byte as u32,
+                    text: text_record::GlyphText::Name(glyph_name_id),
+                    origin: (cur_x, cur_y),
+                    width,
+                    vertical: false,
+                },
+            );
         }
 
         // Advance by custom displacement (overrides glyph width)
@@ -4363,7 +4449,8 @@ fn render_show_displaced_type2(
             }
         };
 
-        // Render glyph (check cache first)
+        // Render glyph (check cache first), keeping its width.
+        let mut width = None;
         {
             let cached = ctx
                 .glyph_caches
@@ -4372,6 +4459,7 @@ fn render_show_displaced_type2(
                 .cloned();
 
             if let Some(cg) = cached {
+                width = Some((cg.width_x, cg.width_y));
                 if !cg.segments.is_empty() {
                     let user_path =
                         transform_segments(&cg.segments, &info.font_matrix, cur_x, cur_y);
@@ -4396,6 +4484,7 @@ fn render_show_displaced_type2(
                         info.nominal_width_x,
                         false,
                     ) {
+                        width = Some((result.width_x, result.width_y));
                         let segments = Arc::new(result.path.segments);
                         if !segments.is_empty() {
                             let user_path =
@@ -4415,6 +4504,31 @@ fn render_show_displaced_type2(
                     }
                 }
             }
+        }
+
+        if let Some((width_x, width_y)) = width
+            && ctx.text_capture.is_some()
+        {
+            let metrics_width = info
+                .metrics_entity
+                .and_then(|m| get_metrics_width_type2(ctx, m, glyph_name_id, byte));
+            let width = match metrics_width {
+                Some(mw) => info.font_matrix.transform_delta(mw, 0.0),
+                None => info.font_matrix.transform_delta(width_x, width_y),
+            };
+            text_record::record_glyph(
+                ctx,
+                text_record::Glyph {
+                    font: font_entity,
+                    glyph_space: info.font_matrix,
+                    metrics: text_record::GlyphMetrics::FontBBox,
+                    code: byte as u32,
+                    text: text_record::GlyphText::Name(glyph_name_id),
+                    origin: (cur_x, cur_y),
+                    width,
+                    vertical: false,
+                },
+            );
         }
 
         advance_by_displacement(&mut cur_x, &mut cur_y, displacements, i, &mode);
@@ -4593,6 +4707,15 @@ fn render_fmap_type0_displaced(
     };
 
     let chars = decode_cmap_bytes(ctx, font_entity, bytes);
+    // FMapType 2 and 5 codes are two bytes: the font number, then the
+    // character code within that font.
+    let two_byte_codes = matches!(
+        ctx.names
+            .find(b"FMapType")
+            .and_then(|id| ctx.dicts.get(font_entity, &DictKey::Name(id)))
+            .and_then(|obj| obj.as_i32()),
+        Some(2) | Some(5)
+    );
 
     for (i, (char_code, font_idx)) in chars.iter().enumerate() {
         // Get descendant font from FDepVector
@@ -4658,11 +4781,30 @@ fn render_fmap_type0_displaced(
             let cs_bytes = ctx.strings.get(cs_entity, cs_start, cs_len).to_vec();
             if let Ok(result) =
                 charstring::execute_charstring(&cs_bytes, &subrs, info.len_iv, false)
-                && !result.path.is_empty()
             {
-                let user_path = transform_path(&result.path, &composed_fm, *cur_x, *cur_y);
-                let device_path = ctm_transform_path(&user_path, ctm);
-                push_glyph_element(ctx, device_path, paint_type, stroke_width_dev);
+                if !result.path.is_empty() {
+                    let user_path = transform_path(&result.path, &composed_fm, *cur_x, *cur_y);
+                    let device_path = ctm_transform_path(&user_path, ctm);
+                    push_glyph_element(ctx, device_path, paint_type, stroke_width_dev);
+                }
+                let code = if two_byte_codes {
+                    ((*font_idx as u32) << 8) | *char_code as u32
+                } else {
+                    *char_code as u32
+                };
+                text_record::record_glyph(
+                    ctx,
+                    text_record::Glyph {
+                        font: desc_entity,
+                        glyph_space: composed_fm,
+                        metrics: text_record::GlyphMetrics::FontBBox,
+                        code,
+                        text: text_record::GlyphText::Name(glyph_name_id),
+                        origin: (*cur_x, *cur_y),
+                        width: composed_fm.transform_delta(result.width_x, result.width_y),
+                        vertical: false,
+                    },
+                );
             }
         }
 
@@ -4738,6 +4880,14 @@ fn render_show_displaced_composite(
         let cidfont_fm = read_font_matrix(ctx, cidfont_entity);
         let cids = decode_cmap_bytes(ctx, font_entity, bytes);
         let wmode = font_wmode(ctx, font_entity);
+        let recording = if ctx.text_capture.is_some() {
+            CidRecording {
+                codes: cmap_codes(ctx, font_entity, bytes),
+                text: text_record::cid_text_source(ctx, font_entity, cidfont_entity),
+            }
+        } else {
+            CidRecording::default()
+        };
 
         let has_sfnts = ctx
             .names
@@ -4827,6 +4977,39 @@ fn render_show_displaced_composite(
                     }
                 }
 
+                if ctx.text_capture.is_some() {
+                    let (width, metrics) = match &vertical {
+                        Some(v) => (
+                            v.advance(&combined_fm),
+                            text_record::GlyphMetrics::Given {
+                                ascent: upm / 2.0,
+                                descent: -upm / 2.0,
+                            },
+                        ),
+                        None => {
+                            let w0 = font_data
+                                .as_ref()
+                                .and_then(|fd| truetype::get_advance_width(fd, *cid as u16))
+                                .unwrap_or(500);
+                            (
+                                combined_fm.transform_delta(w0 as f64, 0.0),
+                                text_record::truetype_metrics(font_data.as_deref()),
+                            )
+                        }
+                    };
+                    record_cid_glyph(
+                        ctx,
+                        cidfont_entity,
+                        &combined_fm,
+                        metrics,
+                        &recording,
+                        (i, *cid),
+                        (cur_x, cur_y),
+                        width,
+                        vertical.is_some(),
+                    );
+                }
+
                 advance_by_displacement(&mut cur_x, &mut cur_y, displacements, i, &mode);
             }
         } else {
@@ -4866,16 +5049,41 @@ fn render_show_displaced_composite(
                         fd_info.default_width_x,
                         fd_info.nominal_width_x,
                         false,
-                    ) && !result.path.is_empty()
-                    {
-                        // From origin 0 in vertical writing.
-                        let (gx, gy) = match &vertical {
-                            Some(v) => v.origin0(&combined_fm, result.width_x, (cur_x, cur_y)),
-                            None => (cur_x, cur_y),
+                    ) {
+                        if !result.path.is_empty() {
+                            // From origin 0 in vertical writing.
+                            let (gx, gy) = match &vertical {
+                                Some(v) => v.origin0(&combined_fm, result.width_x, (cur_x, cur_y)),
+                                None => (cur_x, cur_y),
+                            };
+                            let user_path = transform_path(&result.path, &combined_fm, gx, gy);
+                            let device_path = ctm_transform_path(&user_path, &ctm);
+                            push_glyph_element(ctx, device_path, paint_type, stroke_width_dev);
+                        }
+                        let (width, metrics) = match &vertical {
+                            Some(v) => (
+                                v.advance(&combined_fm),
+                                text_record::GlyphMetrics::Given {
+                                    ascent: 500.0,
+                                    descent: -500.0,
+                                },
+                            ),
+                            None => (
+                                combined_fm.transform_delta(result.width_x, result.width_y),
+                                text_record::GlyphMetrics::FontBBox,
+                            ),
                         };
-                        let user_path = transform_path(&result.path, &combined_fm, gx, gy);
-                        let device_path = ctm_transform_path(&user_path, &ctm);
-                        push_glyph_element(ctx, device_path, paint_type, stroke_width_dev);
+                        record_cid_glyph(
+                            ctx,
+                            cidfont_entity,
+                            &combined_fm,
+                            metrics,
+                            &recording,
+                            (i, *cid),
+                            (cur_x, cur_y),
+                            width,
+                            vertical.is_some(),
+                        );
                     }
                 }
                 advance_by_displacement(&mut cur_x, &mut cur_y, displacements, i, &mode);
@@ -4935,6 +5143,26 @@ fn render_show_displaced_composite(
                     && let Some(gid_obj) = ctx.dicts.get(cs_ent, &DictKey::Name(glyph_name_id))
                 {
                     let gid = gid_obj.as_i32().unwrap_or(0) as u16;
+
+                    if ctx.text_capture.is_some() {
+                        let w0 = font_data
+                            .as_ref()
+                            .and_then(|fd| truetype::get_advance_width(fd, gid))
+                            .unwrap_or(500);
+                        text_record::record_glyph(
+                            ctx,
+                            text_record::Glyph {
+                                font: font_entity,
+                                glyph_space: combined_fm,
+                                metrics: text_record::truetype_metrics(font_data.as_deref()),
+                                code: byte as u32,
+                                text: text_record::GlyphText::Name(glyph_name_id),
+                                origin: (cur_x, cur_y),
+                                width: combined_fm.transform_delta(w0 as f64, 0.0),
+                                vertical: false,
+                            },
+                        );
+                    }
 
                     // Get glyf data: try GlyphDirectory first, then sfnts
                     let glyf_bytes = if let Some(gd_entity) = glyph_dir_entity {
@@ -5031,11 +5259,37 @@ fn render_show_displaced_type3(
         ctx.o_stack.push(font_obj)?;
         ctx.o_stack.push(operand)?;
 
-        // Execute the procedure synchronously
-        ctx.exec_sync(build_proc)?;
+        // Execute the procedure synchronously. What it shows draws the
+        // glyph; the glyph itself is the text, recorded below.
+        let suspended = text_record::suspend(ctx);
+        let build_result = ctx.exec_sync(build_proc);
+        text_record::resume(ctx, suspended);
+        build_result?;
 
         // grestore
         crate::graphics_state_ops::op_grestore(ctx)?;
+
+        if ctx.text_capture.is_some() {
+            let font_matrix = read_font_matrix(ctx, font_entity);
+            let (wx, wy) = ctx.char_width.unwrap_or((0.0, 0.0));
+            let text = match encoding_name_for_code(ctx, font_entity, byte) {
+                Some(id) => text_record::GlyphText::Name(id),
+                None => text_record::GlyphText::None,
+            };
+            text_record::record_glyph(
+                ctx,
+                text_record::Glyph {
+                    font: font_entity,
+                    glyph_space: font_matrix,
+                    metrics: text_record::GlyphMetrics::FontBBox,
+                    code: byte as u32,
+                    text,
+                    origin: (cur_x, cur_y),
+                    width: font_matrix.transform_delta(wx, wy),
+                    vertical: false,
+                },
+            );
+        }
 
         // Advance by displacement instead of glyph width
         advance_by_displacement(&mut cur_x, &mut cur_y, displacements, i, &mode);
