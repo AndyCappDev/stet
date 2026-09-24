@@ -68,6 +68,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The `stet` facade no longer leaves released objects on its stacks at the
+  end of a job.** A program that ended with composite objects on the operand
+  stack, dictionaries it created still on the dictionary stack, or an
+  unfinished loop — all common in real PostScript — had them discarded only
+  after the `restore` that released them. Release builds recovered, but in a
+  debug build the dangling-reference audit panicked, so a library user's
+  test suite failed on such a program. `render`, `render_to_display_list`,
+  `render_to_pdf` and `exec` now discard the job's stacks first, as the CLI
+  always has. The WASM viewer had the same order and is fixed too.
 - **The licences of third-party material stet ships are now shipped with
   it.** The `stet`, `stet-pdf-reader` and `stet-wasm` crates embed the
   URW++ base 35 fonts, which are under the GNU AGPL v3 with a font

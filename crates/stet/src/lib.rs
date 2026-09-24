@@ -304,8 +304,7 @@ impl Interpreter {
             Vec::new()
         };
 
-        let _ = self.ctx.vm_restore(save_id);
-        reset_context(&mut self.ctx);
+        end_job(&mut self.ctx, save_id);
 
         exec_result?;
         Ok(pdf_bytes)
@@ -320,8 +319,7 @@ impl Interpreter {
 
         let result = parse_and_exec(&mut self.ctx, ps_data);
 
-        let _ = self.ctx.vm_restore(save_id);
-        reset_context(&mut self.ctx);
+        end_job(&mut self.ctx, save_id);
 
         match result {
             Ok(()) | Err(PsError::Quit) => Ok(()),
@@ -421,8 +419,7 @@ impl Interpreter {
         #[cfg(not(feature = "render"))]
         let result = collect_display_lists_simple(&mut self.ctx, dpi);
 
-        let _ = self.ctx.vm_restore(save_id);
-        reset_context(&mut self.ctx);
+        end_job(&mut self.ctx, save_id);
 
         exec_result?;
         Ok(result)
@@ -490,8 +487,7 @@ impl Interpreter {
         #[cfg(not(feature = "render"))]
         let result = collect_display_lists_simple(&mut self.ctx, dpi);
 
-        let _ = self.ctx.vm_restore(save_id);
-        reset_context(&mut self.ctx);
+        end_job(&mut self.ctx, save_id);
 
         Ok(result)
     }
@@ -738,16 +734,32 @@ fn collect_display_lists_simple(ctx: &mut Context, default_dpi: f64) -> Vec<Disp
         .collect()
 }
 
+/// End a job: discard what it left behind, restore VM to the save taken
+/// before it, and reset the context for the next one.
+///
+/// The order matters. Whatever the job left on the operand, execution and
+/// dictionary stacks, in unfinished loops, and in the graphics state can
+/// refer to objects it created — leftover operands and an unmatched `begin`
+/// are common in real programs — and the restore releases those objects.
+/// Discarding them first means no stack holds a released object, even for
+/// the length of the restore. The CLI's job loop has always done it in this
+/// order.
+fn end_job(ctx: &mut Context, save_id: u32) {
+    ctx.o_stack.clear();
+    ctx.e_stack.clear();
+    ctx.loops.clear();
+    ctx.d_stack.truncate(3);
+    ctx.gstate = stet_core::graphics_state::GraphicsState::new();
+    ctx.gstate_stack.clear();
+    let _ = ctx.vm_restore(save_id);
+    reset_context(ctx);
+}
+
 fn reset_context(ctx: &mut Context) {
     ctx.device = None;
     ctx.output_path = None;
     ctx.display_list.clear();
     ctx.capture_display_lists = None;
-    ctx.o_stack.clear();
-    ctx.e_stack.clear();
-    ctx.gstate = stet_core::graphics_state::GraphicsState::new();
-    ctx.gstate_stack.clear();
-    ctx.d_stack.truncate(3);
     ctx.save_stack = stet_core::save_stack::SaveStack::new();
     ctx.in_error_handler = false;
 }

@@ -311,8 +311,7 @@ pub fn render(
         finish_device(&mut interp.ctx);
         let pages = extract_pages(&pages_ref);
         collect_display_lists(interp, &pages);
-        let _ = interp.ctx.vm_restore(save_id);
-        reset_context(&mut interp.ctx);
+        end_job(&mut interp.ctx, save_id);
         let page_count = interp.page_display_lists.len() as u32;
         return Ok(JsValue::from(page_count));
     }
@@ -484,8 +483,7 @@ fn collect_streaming_pages(interp: &mut Interpreter, pages_ref: &Arc<Mutex<Vec<P
 /// per-render context, drop the streaming state. Idempotent.
 fn finalize_ps_stream(interp: &mut Interpreter, save_id: u32) {
     finish_device(&mut interp.ctx);
-    let _ = interp.ctx.vm_restore(save_id);
-    reset_context(&mut interp.ctx);
+    end_job(&mut interp.ctx, save_id);
     interp.ctx.interrupt_flag = None;
     interp.ctx.yield_after_showpage = false;
     interp.ctx.capture_display_lists = None;
@@ -939,6 +937,23 @@ fn collect_display_lists(interp: &mut Interpreter, pages: &[PageData]) {
 }
 
 /// Reset interpreter state for the next render call.
+/// End a job: discard what it left behind, restore VM to the save taken
+/// before it, and reset the context. Discarding first matters: leftover
+/// operands, an unmatched `begin`, an unfinished loop or the graphics state
+/// can refer to objects the job created, which the restore releases, and no
+/// stack should hold a released object even for the length of the restore.
+/// Mirrors `end_job` in the `stet` facade.
+fn end_job(ctx: &mut Context, save_id: u32) {
+    ctx.o_stack.clear();
+    ctx.e_stack.clear();
+    ctx.loops.clear();
+    ctx.d_stack.truncate(3);
+    ctx.gstate = stet_core::graphics_state::GraphicsState::new();
+    ctx.gstate_stack.clear();
+    let _ = ctx.vm_restore(save_id);
+    reset_context(ctx);
+}
+
 fn reset_context(ctx: &mut Context) {
     ctx.device = None;
     ctx.output_path = None;
