@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`stet-cli`'s crates.io page no longer shows a failing docs.rs badge.**
+  docs.rs documents libraries only, and `stet-cli` is a binary, so its
+  build has failed for every release. The badge is gone and the
+  crate's Documentation link now leads to the command-line usage.
+
 ## [0.8.2] — 2026-09-24
 
 ### Added
