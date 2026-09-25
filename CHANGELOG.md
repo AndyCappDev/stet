@@ -22,6 +22,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   --device viewer", naming a device the command never asked for. `-o`
   now selects `png` unless a device is given, as headless builds
   already did.
+- **The REPL banner shows the real version.** It printed
+  `stet Version 0.1.0 (2026-02-25)` whatever the release, and
+  `revisionstring` and `revisiondate` in `systemdict` held the same stale
+  values, and the integer `revision` was always `1`. They now carry the
+  release version and date; `revision` is the version with two digits
+  each for minor and patch, so 0.8.2 is `802`.
+
 - **`stet-cli`'s crates.io page no longer shows a failing docs.rs badge.**
   docs.rs documents libraries only, and `stet-cli` is a binary, so its
   build has failed for every release. The badge is gone and the

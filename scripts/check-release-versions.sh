@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Verify the workspace `Cargo.toml` version matches the README badge,
-# the README sample-output Producer string, and that CHANGELOG.md has
-# an entry for the current version. Catches the "bumped Cargo.toml,
-# forgot to bump README + CHANGELOG" mistake before it reaches the
-# remote / crates.io.
+# the README sample-output Producer string and sysdict.ps's banner
+# version, that CHANGELOG.md has an entry for the current version, and
+# that sysdict.ps's banner date matches that entry's. Catches the "bumped
+# Cargo.toml, forgot to bump README + CHANGELOG" mistake before it
+# reaches the remote / crates.io.
 #
 # Wired into the pre-push hook and into `.github/workflows/ci.yml`'s
 # fmt+clippy job. Bypass at the hook level with `git push --no-verify`
@@ -206,10 +207,47 @@ if ! grep -q "^## \[${ws_version}\]" CHANGELOG.md; then
     errors=$((errors + 1))
 fi
 
+# sysdict.ps: `revisionstring` and `revisiondate`, which the REPL banner
+# prints (`stet Version X.Y.Z (YYYY-MM-DD)`), and the integer `revision`.
+# All three are readable by PostScript programs. They are plain PostScript
+# in an embedded init file, so no build step can supply them, and the
+# banner said `0.1.0 (2026-02-25)` with `revision 1` from the project
+# rename until 0.8.2. The date must be the one on the CHANGELOG heading for
+# this version, so all three are set in the same release commit.
+#
+# `revision` is the version with two digits each for minor and patch,
+# major*10000 + minor*100 + patch: 0.8.2 is 802 (0.08.02). Plain
+# concatenation would not order: 0.8.10 -> 810 but 0.9.0 -> 90.
+sysdict="crates/stet/resources/Init/sysdict.ps"
+sys_rev=$(sed -nE 's|^[[:space:]]*/revisionstring \((.*)\) def.*|\1|p' "$sysdict" | head -1)
+sys_revnum=$(sed -nE 's|^[[:space:]]*/revision ([0-9]+) def.*|\1|p' "$sysdict" | head -1)
+want_revnum=$(echo "$ws_version" | awk -F. '
+    $2 < 100 && $3 < 100 { print $1 * 10000 + $2 * 100 + $3 }')
+sys_date=$(sed -nE 's|^[[:space:]]*/revisiondate \((.*)\) def.*|\1|p' "$sysdict" | head -1)
+cl_date=$(grep -m1 "^## \[${ws_version}\]" CHANGELOG.md | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}' || true)
+if [ "$sys_rev" != "$ws_version" ]; then
+    echo -e "${RED}check-release-versions: ${sysdict} revisionstring is '${sys_rev}', not '${ws_version}'${RESET}" >&2
+    errors=$((errors + 1))
+fi
+if [ -z "$want_revnum" ]; then
+    echo -e "${RED}check-release-versions: ${ws_version} has a minor or patch over 99, which the revision encoding cannot hold${RESET}" >&2
+    errors=$((errors + 1))
+elif [ "$sys_revnum" != "$want_revnum" ]; then
+    echo -e "${RED}check-release-versions: ${sysdict} revision is '${sys_revnum}', not '${want_revnum}' (${ws_version})${RESET}" >&2
+    errors=$((errors + 1))
+fi
+if [ -z "$cl_date" ]; then
+    echo -e "${RED}check-release-versions: CHANGELOG.md '## [${ws_version}]' heading carries no YYYY-MM-DD date${RESET}" >&2
+    errors=$((errors + 1))
+elif [ "$sys_date" != "$cl_date" ]; then
+    echo -e "${RED}check-release-versions: ${sysdict} revisiondate is '${sys_date}', not the CHANGELOG date '${cl_date}'${RESET}" >&2
+    errors=$((errors + 1))
+fi
+
 if [ "$errors" -gt 0 ]; then
     echo -e "${RED}check-release-versions: ${errors} mismatch(es) found vs Cargo.toml workspace version ${ws_version}${RESET}" >&2
     echo -e "${YELLOW}  Fix the docs and re-push, or bypass with 'git push --no-verify' if you really mean it.${RESET}" >&2
     exit 1
 fi
 
-echo -e "${GREEN}check-release-versions: OK (workspace ${ws_version} matches README + CHANGELOG + wasm lock; MSRV ${ws_msrv} matches badge + ci.yml)${RESET}"
+echo -e "${GREEN}check-release-versions: OK (workspace ${ws_version} matches README + CHANGELOG + wasm lock + sysdict.ps; MSRV ${ws_msrv} matches badge + ci.yml)${RESET}"
