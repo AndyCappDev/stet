@@ -131,8 +131,10 @@ stet --version
 
 Output devices:
   --device <DEVICE>          png, pdf, viewer, viewport-png, null
-                             (default: viewer for files when built with the
-                             viewer feature, png otherwise)
+                             (default: viewer when built with the viewer
+                             feature — with no files, a REPL that opens it
+                             at the first showpage — png otherwise, or when
+                             -o is given)
 
 Common options:
   -o, --output <PATH>        Write output to PATH instead of alongside the
@@ -140,7 +142,7 @@ Common options:
                              number ("%03d" zero-pads to three digits);
                              without one, PATH names a single file and a job
                              producing a second page is an error. Takes a
-                             single input file
+                             single input file. Without --device, selects png
   --dpi <DPI>                Resolution for raster output (default 300)
   --page <SIZE>              Page size for PostScript/EPS input, in points:
                              a named size (letter, legal, tabloid, ledger,

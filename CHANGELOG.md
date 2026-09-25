@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A bare `stet` now opens the viewer when a page is shown.** With no
+  input file, stet starts the PostScript REPL as before, and the first
+  `showpage` opens the viewer on the page drawn. `--help` and both READMEs
+  described this behaviour, but a bare `stet` selected the `png` device,
+  so `showpage` in the REPL wrote nothing and opened no window. A session
+  that never shows a page still opens no window. Builds without the
+  viewer are unchanged.
+- **`-o` without `--device` now writes a PNG in viewer builds.** The
+  `--help` examples `stet -o out.png --pages 1 doc.pdf` and
+  `stet -o 'p-%03d.png' doc.pdf` failed with "--output does not apply to
+  --device viewer", naming a device the command never asked for. `-o`
+  now selects `png` unless a device is given, as headless builds
+  already did.
 - **`stet-cli`'s crates.io page no longer shows a failing docs.rs badge.**
   docs.rs documents libraries only, and `stet-cli` is a binary, so its
   build has failed for every release. The badge is gone and the

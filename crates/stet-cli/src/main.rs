@@ -410,12 +410,15 @@ run stet once per file",
         use_output_intent,
     };
 
-    // Determine the output device
+    // Determine the output device. With the viewer compiled in, it is the
+    // default with or without files: a bare `stet` runs the REPL on the
+    // interpreter thread and opens the viewer window at the first
+    // `showpage` (`run_viewer_mode` waits for a page before creating it),
+    // so a session that never draws anything never opens a window.
+    // `--output` names a file to write, which the viewer never does, so it
+    // selects png instead — the device a headless build defaults to anyway.
     let device = device_name.unwrap_or_else(|| {
-        if file_args.is_empty() {
-            // REPL mode — no rendering device needed
-            "png".to_string()
-        } else if cfg!(feature = "viewer") {
+        if cfg!(feature = "viewer") && output_template.is_none() {
             "viewer".to_string()
         } else {
             "png".to_string()
@@ -1162,15 +1165,29 @@ fn print_help() {
     // musl artifact is) has no viewer, so its help must not offer one — the
     // device errors out and there is no window for a bare `stet` to open.
     let viewer_device_line = if cfg!(feature = "viewer") {
-        "    --device viewer         Launch the interactive desktop viewer.\n"
+        "    --device viewer         Show pages in the interactive desktop viewer\n\
+         \x20                           (default).\n"
     } else {
         ""
     };
+    let png_default = if cfg!(feature = "viewer") {
+        ""
+    } else {
+        " (default)"
+    };
     let no_file_behaviour = if cfg!(feature = "viewer") {
-        "With no FILE, stet launches the interactive viewer."
+        "With no FILE, stet starts an interactive PostScript REPL and opens the\n\
+         viewer at the first showpage."
     } else {
         "With no FILE, stet starts an interactive PostScript REPL.\n\
          This build has no viewer (compiled without the 'viewer' feature)."
+    };
+    let examples_default = if cfg!(feature = "viewer") {
+        "    stet                                # REPL; viewer opens at showpage\n\
+         \x20   stet doc.ps                         # view PostScript\n"
+    } else {
+        "    stet                                # REPL\n\
+         \x20   stet doc.ps                         # render PostScript to PNG\n"
     };
     println!(
         "stet {} — PostScript Level 3 interpreter and PDF renderer.
@@ -1186,7 +1203,7 @@ Usage:
 {}
 
 Output devices:
-    --device png            Render each page to PNG (default for files).
+    --device png            Render each page to PNG{}.
     --device pdf            Render to PDF (vector output).
 {}    --device viewport-png   Render via the viewport pipeline (audit mode).
     --device null           No rendering output (test / scripting use).
@@ -1197,7 +1214,7 @@ Common options:
                             page number (\"%03d\" zero-pads to three digits);
                             without one, PATH names a single file and a job
                             that produces a second page is an error. Takes
-                            one input file.
+                            one input file. Without --device, selects png.
     --dpi <DPI>             DPI for raster output (default 300).
     --page <SIZE>           Page size for PostScript/EPS input, in points:
                             a named size (letter, legal, tabloid, ledger,
@@ -1255,9 +1272,7 @@ Subcommands:
                             `stet text --help` for details.
 
 Examples:
-    stet                                # launch the viewer
-    stet doc.ps                         # render PostScript
-    stet --device png --pages 1 doc.pdf # render PDF page 1 to PNG
+{}    stet --device png --pages 1 doc.pdf # render PDF page 1 to PNG
     stet -o out.png --pages 1 doc.pdf   # render one page to a chosen path
     stet -o 'p-%03d.png' doc.pdf        # render every page as p-001.png, ...
     stet --device pdf in.ps             # PostScript → PDF
@@ -1271,7 +1286,9 @@ Documentation: https://github.com/AndyCappDev/stet
 Issues:        https://github.com/AndyCappDev/stet/issues",
         env!("CARGO_PKG_VERSION"),
         no_file_behaviour,
-        viewer_device_line
+        png_default,
+        viewer_device_line,
+        examples_default
     );
 }
 

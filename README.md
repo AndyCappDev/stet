@@ -184,7 +184,7 @@ zoom presets, minimap navigation, and drag-and-drop.
 
 | Option | Description |
 |--------|------------|
-| `--device <TYPE>` | Output: `png`, `pdf`, `viewer` (default), `null` |
+| `--device <TYPE>` | Output: `png`, `pdf`, `viewer` (default; `png` with `-o`, or in a build without the viewer), `null` |
 | `-o`, `--output <PATH>` | Write output to `PATH` instead of alongside the input. A `%d` token becomes the page number (`%03d` zero-pads); without one, `PATH` is a single file and a second page is an error. One input file at a time. See [Choosing where output goes](#choosing-where-output-goes). With [`stet text`](#stet-text-file), the file for the text: every page in one, `%d` not a template. |
 | `--dpi <DPI>` | Resolution (overrides device default; all built-in devices default to 300) |
 | `--pages <RANGE>` | Page filter: `1`, `1-5`, `2,4,6` |
@@ -238,7 +238,8 @@ the same mistake is caught before anything is rendered.
 
 `-o` takes one input file — with several, which output each belongs to is
 ambiguous — and does not apply to `--device viewer` or `--device null`,
-which write no file. `--device pdf` collects every page into a single PDF, so
+which write no file. Given without `--device`, it selects `png`, so
+`stet -o out.png doc.pdf` writes a file rather than opening the viewer. `--device pdf` collects every page into a single PDF, so
 a `%d` token there is rejected rather than silently ignored. Writing to
 stdout (`-o -`) is not supported yet.
 
