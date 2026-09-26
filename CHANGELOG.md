@@ -54,6 +54,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   overprint turned off entirely on pages small enough to render in one
   piece, so the same file could overprint at 300 dpi and not at 72.
 
+- **Text in CIDFontType 0 fonts built with `StartData` is drawn.** These
+  CID fonts carry Type 1 charstrings reached through a CID map, and pdftops
+  writes every CFF-based CID font this way, Chinese, Japanese and Korean
+  text and subset OpenType fonts included. stet read the glyph data only to
+  skip it, so `show` raised `invalidfont` and the text vanished: 161 files
+  in the test corpus lost some or all of theirs. `show`, `stringwidth`,
+  `charpath` and `xshow`/`yshow`/`xyshow` now draw them, in both writing
+  modes, with each `FDArray` font's own `FontMatrix`, `lenIV` and
+  subroutines. PDF output of these fonts is not yet embedded.
+
 - **Separation and DeviceN colorant names given as strings are now
   recognised.** The PLRM lets a colorant be a name or a string, and
   pdftops writes every one as a string (`(Black)`, `(PANTONE 273 C)`,
