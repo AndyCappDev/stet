@@ -16,7 +16,7 @@ use stet_fonts::charstring;
 use stet_fonts::geometry::{Matrix, PathSegment, PsPath};
 use stet_fonts::truetype;
 use stet_fonts::type2_charstring;
-use stet_graphics::color::{DashPattern, DeviceColor, FillRule, LineCap, LineJoin};
+use stet_graphics::color::{DashPattern, FillRule, LineCap, LineJoin};
 use stet_graphics::device::{FillParams, StrokeParams, TextParams};
 use stet_graphics::display_list::DisplayElement;
 
@@ -3122,11 +3122,11 @@ fn replay_cached_type3(
     let (dev_x, dev_y) = ctm.transform_point(cur_x, cur_y);
     let dx = dev_x - cg.origin_dev_x;
     let dy = dev_y - cg.origin_dev_y;
-    let color = &ctx.gstate.color;
+    let paint = crate::paint_ops::capture_paint_color(ctx);
     let recolored: Vec<_> = cg
         .elements
         .iter()
-        .map(|elem| recolor_and_translate_element(elem, dx, dy, color))
+        .map(|elem| recolor_and_translate_element(elem, dx, dy, &paint))
         .collect();
     if charpath {
         append_charpath_outline(ctx, &recolored);
@@ -5524,13 +5524,13 @@ fn push_glyph_element(
     paint_type: i32,
     stroke_width_device: f64,
 ) {
-    let spot = crate::paint_ops::capture_spot_color(ctx);
+    let paint = crate::paint_ops::capture_paint_color(ctx);
     let transfer = crate::paint_ops::capture_transfer_state(ctx);
     let halftone = crate::paint_ops::capture_halftone_state(ctx);
     let bg_ucr = crate::paint_ops::capture_bg_ucr_state(ctx);
     if paint_type == 2 {
         let params = StrokeParams {
-            color: ctx.gstate.color.clone(),
+            color: paint.color,
             line_width: stroke_width_device,
             line_cap: LineCap::Butt,
             line_join: LineJoin::Round,
@@ -5542,12 +5542,12 @@ fn push_glyph_element(
             ctm: Matrix::identity(),
             stroke_adjust: false,
             is_text_glyph: true,
-            overprint: ctx.gstate.overprint,
+            overprint: paint.overprint,
             overprint_mode: 0,
             opm_paired: false,
-            painted_channels: 0,
-            is_device_cmyk: false,
-            spot_color: spot,
+            painted_channels: paint.painted_channels,
+            is_device_cmyk: paint.is_device_cmyk,
+            spot_color: paint.spot_color,
             icc_color: None,
             rendering_intent: ctx.gstate.rendering_intent,
             transfer,
@@ -5563,16 +5563,16 @@ fn push_glyph_element(
         });
     } else {
         let params = FillParams {
-            color: ctx.gstate.color.clone(),
+            color: paint.color,
             ctm: Matrix::identity(),
             fill_rule: FillRule::NonZeroWinding,
             is_text_glyph: true,
-            overprint: ctx.gstate.overprint,
+            overprint: paint.overprint,
             overprint_mode: 0,
             opm_paired: false,
-            painted_channels: 0,
-            is_device_cmyk: false,
-            spot_color: spot,
+            painted_channels: paint.painted_channels,
+            is_device_cmyk: paint.is_device_cmyk,
+            spot_color: paint.spot_color,
             icc_color: None,
             rendering_intent: ctx.gstate.rendering_intent,
             transfer,
@@ -5721,16 +5721,29 @@ fn transform_segments(
 
 /// Translate and recolor a display element for Type 3 glyph cache replay.
 /// Per PLRM, setcachedevice glyphs are stencils — painted with the current color at show time.
+///
+/// The whole paint of a vector glyph is replaced, not just the colour:
+/// overprint, the painted colorants and the spot colour belong to the colour
+/// in force at show time, and keeping the cached ones would overprint (or
+/// knock out) according to whatever was current when the glyph was first
+/// built. Image-mask glyphs take only the colour, like every PostScript image:
+/// images do not overprint yet, because the renderer's overprint image path
+/// samples nearest-neighbour and loses a downscaled bitmap's smoothing.
 fn recolor_and_translate_element(
     elem: &DisplayElement,
     dx: f64,
     dy: f64,
-    color: &DeviceColor,
+    paint: &crate::paint_ops::PaintColor,
 ) -> DisplayElement {
+    let color = &paint.color;
     match elem {
         DisplayElement::Fill { path, params } => {
             let mut params = params.clone();
             params.color = color.clone();
+            params.overprint = paint.overprint;
+            params.painted_channels = paint.painted_channels;
+            params.is_device_cmyk = paint.is_device_cmyk;
+            params.spot_color = paint.spot_color.clone();
             DisplayElement::Fill {
                 path: translate_path(path, dx, dy),
                 params,
@@ -5739,6 +5752,10 @@ fn recolor_and_translate_element(
         DisplayElement::Stroke { path, params } => {
             let mut params = params.clone();
             params.color = color.clone();
+            params.overprint = paint.overprint;
+            params.painted_channels = paint.painted_channels;
+            params.is_device_cmyk = paint.is_device_cmyk;
+            params.spot_color = paint.spot_color.clone();
             DisplayElement::Stroke {
                 path: translate_path(path, dx, dy),
                 params,
@@ -5775,6 +5792,7 @@ fn recolor_and_translate_element(
         DisplayElement::Text { params } => {
             let mut params = params.clone();
             params.color = color.clone();
+            params.spot_color = paint.spot_color.clone();
             params.start_x += dx;
             params.start_y += dy;
             params.ctm[4] += dx;
@@ -5980,8 +5998,14 @@ mod tests {
                 ..TextRunParams::default()
             },
         };
-        let replayed =
-            recolor_and_translate_element(&run, 10.0, 20.0, &DeviceColor::from_gray(0.0));
+        let paint = crate::paint_ops::PaintColor {
+            color: stet_graphics::color::DeviceColor::from_gray(0.0),
+            overprint: false,
+            painted_channels: 0,
+            is_device_cmyk: false,
+            spot_color: None,
+        };
+        let replayed = recolor_and_translate_element(&run, 10.0, 20.0, &paint);
         let DisplayElement::TextRun { params } = replayed else {
             panic!("expected a TextRun");
         };

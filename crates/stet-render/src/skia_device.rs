@@ -6873,13 +6873,15 @@ impl OutputDevice for SkiaDevice {
                 alpha_extraction_pass: false,
                 layer_set: &self.layer_set,
             };
+            let cmyk_buffer = page_needs_cmyk_buffer(&list)
+                .then(|| vec![0.0f32; page_w as usize * page_h as usize * 4]);
             let mut band_state = BandState {
                 clip_region: None,
                 spare_mask: None,
                 clip_mask_cache: HashMap::new(),
                 clip_mask_seen: HashSet::new(),
                 mask_pool: Vec::new(),
-                cmyk_buffer: None,
+                cmyk_buffer,
                 op_bg_snapshot: None,
                 op_touched: None,
                 spot_mask: None,
@@ -7185,6 +7187,22 @@ fn content_list_is_simple_native_cmyk(list: &DisplayList) -> bool {
         }
     }
     found_paint
+}
+
+/// Whether rendering a page needs the page-level CMYK buffer: overprint
+/// simulation, an explicit DeviceCMYK page-level transparency group (PDF
+/// spec §11.6.7), or any descendant group that declares its own DeviceCMYK
+/// transparency colour space.
+///
+/// Every entry point that starts a page must allocate the buffer from this
+/// one rule. The PostScript device's single-band path once built its own
+/// `BandState` without it, so overprint silently turned off whenever a page
+/// was small enough not to be banded — PostScript overprint then depended on
+/// the page size and resolution.
+fn page_needs_cmyk_buffer(list: &DisplayList) -> bool {
+    has_overprint_elements(list)
+        || list.page_group_color_space() == stet_graphics::display_list::GroupColorSpace::DeviceCMYK
+        || has_cmyk_group(list)
 }
 
 /// Scan a display list for any overprint fill/stroke elements that need CMYK simulation.
@@ -9293,14 +9311,7 @@ fn render_banded_to_sink(
     // Pre-populate clip_mask_seen so repeated clip paths get cached from first band
     let clip_seen = precompute_clip_seen(list);
 
-    // Allocate a CMYK buffer at the page level when CMYK math is needed:
-    // overprint simulation, an explicit DeviceCMYK page-level transparency
-    // group (PDF spec §11.6.7), or any descendant group that declares its own
-    // DeviceCMYK transparency CS.
-    use stet_graphics::display_list::GroupColorSpace;
-    let needs_cmyk_buffer = has_overprint_elements(list)
-        || list.page_group_color_space() == GroupColorSpace::DeviceCMYK
-        || has_cmyk_group(list);
+    let needs_cmyk_buffer = page_needs_cmyk_buffer(list);
 
     // Pre-convert and prescale images once (instead of per-band)
     let preprocessed_images = preprocess_images_for_bands(list, Some(icc_cache));
@@ -10304,10 +10315,7 @@ pub fn render_region_prepared(
     // Start transparent — white background composited after content rendering
     pixmap.fill(Color::TRANSPARENT);
 
-    let cmyk_buf = if has_overprint_elements(list)
-        || list.page_group_color_space() == stet_graphics::display_list::GroupColorSpace::DeviceCMYK
-        || has_cmyk_group(list)
-    {
+    let cmyk_buf = if page_needs_cmyk_buffer(list) {
         Some(vec![0.0f32; pixel_w as usize * render_h as usize * 4])
     } else {
         None
@@ -10486,10 +10494,7 @@ pub fn render_region_single_band(
     let mut pixmap = Pixmap::new(pixel_w, render_h).expect("Failed to create band pixmap");
     pixmap.fill(Color::TRANSPARENT);
 
-    let cmyk_buf = if has_overprint_elements(list)
-        || list.page_group_color_space() == stet_graphics::display_list::GroupColorSpace::DeviceCMYK
-        || has_cmyk_group(list)
-    {
+    let cmyk_buf = if page_needs_cmyk_buffer(list) {
         Some(vec![0.0f32; pixel_w as usize * render_h as usize * 4])
     } else {
         None
@@ -11258,10 +11263,7 @@ pub fn render_region(
     let mut pixmap = Pixmap::new(pixel_w, render_h).expect("Failed to create viewport pixmap");
     pixmap.fill(Color::TRANSPARENT);
 
-    let cmyk_buf = if has_overprint_elements(list)
-        || list.page_group_color_space() == stet_graphics::display_list::GroupColorSpace::DeviceCMYK
-        || has_cmyk_group(list)
-    {
+    let cmyk_buf = if page_needs_cmyk_buffer(list) {
         Some(vec![0.0f32; pixel_w as usize * render_h as usize * 4])
     } else {
         None
@@ -14003,6 +14005,88 @@ mod tests {
             d.push(e);
         }
         d
+    }
+
+    /// A page-sink factory that keeps the last page's RGBA for inspection.
+    #[cfg(feature = "ps-device")]
+    struct CaptureSinkFactory(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    #[cfg(feature = "ps-device")]
+    struct CaptureSink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    #[cfg(feature = "ps-device")]
+    impl stet_graphics::device::PageSink for CaptureSink {
+        fn begin_page(&mut self, _width: u32, _height: u32) -> Result<(), String> {
+            self.0.lock().unwrap().clear();
+            Ok(())
+        }
+        fn write_rows(&mut self, rgba_rows: &[u8], _num_rows: u32) -> Result<(), String> {
+            self.0.lock().unwrap().extend_from_slice(rgba_rows);
+            Ok(())
+        }
+        fn end_page(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    #[cfg(feature = "ps-device")]
+    impl PageSinkFactory for CaptureSinkFactory {
+        fn create_sink(
+            &self,
+            _output_path: &str,
+        ) -> Result<Box<dyn stet_graphics::device::PageSink>, String> {
+            Ok(Box::new(CaptureSink(self.0.clone())))
+        }
+    }
+
+    /// A custom spot overprinting a cyan square: the spot's process
+    /// contribution is zero, so the cyan plate beneath it must survive.
+    fn spot_over_cyan_list() -> DisplayList {
+        let mut cyan = fill(rect_path(10.0, 10.0, 60.0, 60.0), 1.0, 0);
+        if let DisplayElement::Fill { params, .. } = &mut cyan {
+            params.color = DeviceColor::from_cmyk(1.0, 0.0, 0.0, 0.0);
+            params.painted_channels = stet_graphics::device::CMYK_ALL;
+            params.is_device_cmyk = true;
+        }
+        let mut spot = fill(rect_path(40.0, 40.0, 90.0, 90.0), 1.0, 0);
+        if let DisplayElement::Fill { params, .. } = &mut spot {
+            let mut color = DeviceColor::from_cmyk(0.0, 1.0, 0.0, 0.0);
+            color.process_cmyk = Some((0.0, 0.0, 0.0, 0.0));
+            params.color = color;
+            params.overprint = true;
+        }
+        dl(vec![cyan, spot])
+    }
+
+    /// The PostScript device renders a page too small to band as one full
+    /// band. That path built its own `BandState` and never allocated the CMYK
+    /// buffer, so overprint silently turned off whenever the page was small —
+    /// the same file overprinted at 600 dpi and knocked out at 72.
+    #[cfg(feature = "ps-device")]
+    #[test]
+    fn single_band_device_path_simulates_overprint_like_banded() {
+        let list = spot_over_cyan_list();
+        let (w, h) = (100u32, 100u32);
+        assert!(
+            select_band_height(w, h) >= h,
+            "the page must take the single-band path"
+        );
+
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut dev =
+            SkiaDevice::with_sink_factory(w, h, Box::new(CaptureSinkFactory(captured.clone())));
+        dev.replay_and_show(list.clone(), "unused").unwrap();
+        dev.finish().unwrap();
+        let single = captured.lock().unwrap().clone();
+
+        let banded = render_to_rgba(&list, w, h, 72.0, None, false);
+        let px = |buf: &[u8], x: u32, y: u32| {
+            let i = ((y * w + x) * 4) as usize;
+            [buf[i], buf[i + 1], buf[i + 2]]
+        };
+        // Overlap, and the spot alone for contrast.
+        assert_eq!(px(&single, 50, 50), px(&banded, 50, 50));
+        assert_ne!(px(&single, 50, 50), px(&single, 80, 80));
     }
 
     #[test]

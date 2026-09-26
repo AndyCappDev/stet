@@ -14,6 +14,10 @@ use stet_core::error::PsError;
 use stet_core::graphics_state::ColorSpace;
 use stet_core::object::{EntityId, PsObject, PsValue};
 use stet_graphics::color::{CieAParams, CieAbcParams, CieDefParams, CieDefgParams, DeviceColor};
+use stet_graphics::device::{
+    CMYK_C, CMYK_K, CMYK_M, CMYK_Y, cmyk_channel_for_name, devicen_process_cmyk,
+    separation_process_cmyk,
+};
 
 /// Drop the pattern half of the current color.
 ///
@@ -453,6 +457,7 @@ pub fn op_setcolor(ctx: &mut Context) -> Result<(), PsError> {
             }
         }
         ColorSpace::Separation {
+            name,
             tint_transform,
             num_alt_components,
             ..
@@ -464,11 +469,24 @@ pub fn op_setcolor(ctx: &mut Context) -> Result<(), PsError> {
             ctx.o_stack.pop()?;
             let tint_clamped = tint.clamp(0.0, 1.0);
             ctx.gstate.tint_values = Some(vec![tint_clamped]);
+            let process_cmyk = separation_process_cmyk(&name, tint_clamped);
+            // A process colorant is its own ink whatever the alternate space
+            // says, so it keeps CMYK numbers even behind a Gray/RGB
+            // alternate. `All` stays with the alternate-space colour.
+            let single_process = matches!(
+                cmyk_channel_for_name(&name),
+                CMYK_C | CMYK_M | CMYK_Y | CMYK_K
+            );
+            let colorants = ProcessColorants {
+                process_cmyk,
+                native_fallback: if single_process { process_cmyk } else { None },
+            };
             ctx.o_stack.push(PsObject::real(tint_clamped))?;
             ctx.exec_sync(tint_transform)?;
-            set_color_from_tint_result(ctx, num_alt_components)
+            set_color_from_tint_result(ctx, num_alt_components, colorants)
         }
         ColorSpace::DeviceN {
+            names,
             num_colorants,
             tint_transform,
             num_alt_components,
@@ -483,6 +501,10 @@ pub fn op_setcolor(ctx: &mut Context) -> Result<(), PsError> {
                 tints.push(v.clamp(0.0, 1.0));
             }
             ctx.gstate.tint_values = Some(tints.clone());
+            let colorants = ProcessColorants {
+                process_cmyk: devicen_process_cmyk(&names, &tints),
+                native_fallback: None,
+            };
             for _ in 0..num_colorants {
                 ctx.o_stack.pop()?;
             }
@@ -490,7 +512,7 @@ pub fn op_setcolor(ctx: &mut Context) -> Result<(), PsError> {
                 ctx.o_stack.push(PsObject::real(t))?;
             }
             ctx.exec_sync(tint_transform)?;
-            set_color_from_tint_result(ctx, num_alt_components)
+            set_color_from_tint_result(ctx, num_alt_components, colorants)
         }
         // `comp1 … compn pattern setcolor` — same as `setpattern` except that
         // the color space is already Pattern and stays as it is.
@@ -500,8 +522,26 @@ pub fn op_setcolor(ctx: &mut Context) -> Result<(), PsError> {
     }
 }
 
+/// What a Separation/DeviceN colour puts on the process plates, derived from
+/// its colorant names and tints before the tint transform runs.
+///
+/// The tint transform yields only the alternate-space colour, which folds
+/// spot ink into process values; overprint simulation needs the process-only
+/// part to leave the process plates under a spot untouched.
+struct ProcessColorants {
+    /// Stored as [`DeviceColor::process_cmyk`].
+    process_cmyk: Option<(f64, f64, f64, f64)>,
+    /// [`DeviceColor::native_cmyk`] to use when the alternate space supplies
+    /// none (a process colorant behind a Gray/RGB alternate).
+    native_fallback: Option<(f64, f64, f64, f64)>,
+}
+
 /// Pop tint transform results from the stack and set the device color.
-fn set_color_from_tint_result(ctx: &mut Context, n: u32) -> Result<(), PsError> {
+fn set_color_from_tint_result(
+    ctx: &mut Context,
+    n: u32,
+    colorants: ProcessColorants,
+) -> Result<(), PsError> {
     let n = n as usize;
     let mut components = vec![0.0f64; n];
     for i in (0..n).rev() {
@@ -523,6 +563,10 @@ fn set_color_from_tint_result(ctx: &mut Context, n: u32) -> Result<(), PsError> 
         ),
         _ => DeviceColor::from_gray(0.0),
     };
+    if ctx.gstate.color.native_cmyk.is_none() {
+        ctx.gstate.color.native_cmyk = colorants.native_fallback;
+    }
+    ctx.gstate.color.process_cmyk = colorants.process_cmyk;
     clear_pattern_color(ctx);
     Ok(())
 }

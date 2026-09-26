@@ -9,10 +9,10 @@ use stet_core::error::PsError;
 use stet_core::graphics_state::ColorSpace;
 use stet_core::object::{PsObject, PsValue};
 use stet_fonts::geometry::{Matrix, PathSegment, PsPath};
-use stet_graphics::color::{DashPattern, FillRule};
+use stet_graphics::color::{DashPattern, DeviceColor, FillRule};
 use stet_graphics::device::{
-    BgUcrState, FillParams, HalftoneState, PatternFillParams, SimpleColorSpace, SpotColor,
-    SpotColorSpace, StrokeParams, TransferState,
+    BgUcrState, CMYK_ALL, FillParams, HalftoneState, PatternFillParams, SimpleColorSpace,
+    SpotColor, SpotColorSpace, StrokeParams, TransferState, painted_channels_for_colorants,
 };
 use stet_graphics::display_list::DisplayElement;
 
@@ -41,6 +41,57 @@ pub(crate) fn capture_spot_color(ctx: &Context) -> Option<SpotColor> {
         tint_values: tints.clone(),
         color_space: cs,
     })
+}
+
+/// The current colour together with the overprint metadata a renderer needs
+/// to simulate `setoverprint` (PLRM 4.8.5).
+///
+/// Every paint site takes its colour fields from here so that PostScript
+/// paints carry the same overprint information the PDF reader derives from
+/// `/OP`, `/op` and the colour space. PostScript has no overprint mode, so
+/// `overprint_mode` stays 0 (every colorant of the colour space is painted,
+/// including zero-valued DeviceCMYK components).
+pub(crate) struct PaintColor {
+    pub color: DeviceColor,
+    pub overprint: bool,
+    pub painted_channels: u8,
+    pub is_device_cmyk: bool,
+    pub spot_color: Option<SpotColor>,
+}
+
+/// Capture [`PaintColor`] from the graphics state.
+pub(crate) fn capture_paint_color(ctx: &Context) -> PaintColor {
+    let color = ctx.gstate.color.clone();
+    let space = &ctx.gstate.color_space;
+    // PostScript ICCBased CMYK through a profile yields an RGB colour with no
+    // CMYK numbers; claiming DeviceCMYK for it would let the renderer treat
+    // RGB-derived values as ink.
+    let is_device_cmyk = match space {
+        ColorSpace::DeviceCMYK => true,
+        ColorSpace::ICCBased { n: 4, .. } => color.native_cmyk.is_some(),
+        _ => false,
+    };
+    PaintColor {
+        overprint: ctx.gstate.overprint,
+        painted_channels: painted_channels_for_space(space),
+        is_device_cmyk,
+        spot_color: capture_spot_color(ctx),
+        color,
+    }
+}
+
+/// Process channels a paint in `space` marks, as the PDF reader's
+/// `painted_channels_for_cs` computes them: all four for DeviceCMYK, the
+/// named ones for Separation/DeviceN, the base space's for Indexed, and 0
+/// (the renderer's "all process colorants") for everything else.
+pub(crate) fn painted_channels_for_space(space: &ColorSpace) -> u8 {
+    match space {
+        ColorSpace::DeviceCMYK | ColorSpace::ICCBased { n: 4, .. } => CMYK_ALL,
+        ColorSpace::Separation { name, .. } => painted_channels_for_colorants(&[name]),
+        ColorSpace::DeviceN { names, .. } => painted_channels_for_colorants(names),
+        ColorSpace::Indexed { base, .. } => painted_channels_for_space(base),
+        _ => 0,
+    }
 }
 
 /// Build TransferState from current graphics state sampled transfer functions.
@@ -201,17 +252,18 @@ fn push_fill_element(ctx: &mut Context, path: PsPath, fill_rule: FillRule) {
             .push(DisplayElement::PatternFill { params });
         return;
     }
+    let paint = capture_paint_color(ctx);
     let params = FillParams {
-        color: ctx.gstate.color.clone(),
+        color: paint.color,
         fill_rule,
         ctm: Matrix::identity(),
         is_text_glyph: false,
-        overprint: ctx.gstate.overprint,
+        overprint: paint.overprint,
         overprint_mode: 0,
         opm_paired: false,
-        painted_channels: 0,
-        is_device_cmyk: false,
-        spot_color: capture_spot_color(ctx),
+        painted_channels: paint.painted_channels,
+        is_device_cmyk: paint.is_device_cmyk,
+        spot_color: paint.spot_color,
         icc_color: None,
         rendering_intent: ctx.gstate.rendering_intent,
         transfer: capture_transfer_state(ctx),
@@ -317,7 +369,7 @@ fn use_native_stroke(ctx: &Context) -> bool {
 
 /// Native stroke: emit DisplayElement::Stroke for tiny-skia to render.
 fn stroke_native(ctx: &mut Context) -> Result<(), PsError> {
-    let spot = capture_spot_color(ctx);
+    let paint = capture_paint_color(ctx);
     let transfer = capture_transfer_state(ctx);
     let halftone = capture_halftone_state(ctx);
     let bg_ucr = capture_bg_ucr_state(ctx);
@@ -325,7 +377,7 @@ fn stroke_native(ctx: &mut Context) -> Result<(), PsError> {
         if let Some(inv_ctm) = ctx.gstate.ctm.invert() {
             let user_path = inverse_transform_path(&ctx.gstate.path, &inv_ctm);
             let params = StrokeParams {
-                color: ctx.gstate.color.clone(),
+                color: paint.color,
                 line_width: ctx.gstate.line_width,
                 line_cap: ctx.gstate.line_cap,
                 line_join: ctx.gstate.line_join,
@@ -334,12 +386,12 @@ fn stroke_native(ctx: &mut Context) -> Result<(), PsError> {
                 ctm: ctx.gstate.ctm,
                 stroke_adjust: ctx.gstate.stroke_adjust,
                 is_text_glyph: false,
-                overprint: ctx.gstate.overprint,
+                overprint: paint.overprint,
                 overprint_mode: 0,
                 opm_paired: false,
-                painted_channels: 0,
-                is_device_cmyk: false,
-                spot_color: spot,
+                painted_channels: paint.painted_channels,
+                is_device_cmyk: paint.is_device_cmyk,
+                spot_color: paint.spot_color,
                 icc_color: None,
                 rendering_intent: ctx.gstate.rendering_intent,
                 transfer,
@@ -357,7 +409,7 @@ fn stroke_native(ctx: &mut Context) -> Result<(), PsError> {
     } else {
         let scale = ctm_scale_factor(&ctx.gstate.ctm);
         let params = StrokeParams {
-            color: ctx.gstate.color.clone(),
+            color: paint.color,
             line_width: ctx.gstate.line_width * scale,
             line_cap: ctx.gstate.line_cap,
             line_join: ctx.gstate.line_join,
@@ -375,12 +427,12 @@ fn stroke_native(ctx: &mut Context) -> Result<(), PsError> {
             ctm: Matrix::identity(),
             stroke_adjust: ctx.gstate.stroke_adjust,
             is_text_glyph: false,
-            overprint: ctx.gstate.overprint,
+            overprint: paint.overprint,
             overprint_mode: 0,
             opm_paired: false,
-            painted_channels: 0,
-            is_device_cmyk: false,
-            spot_color: spot,
+            painted_channels: paint.painted_channels,
+            is_device_cmyk: paint.is_device_cmyk,
+            spot_color: paint.spot_color,
             icc_color: None,
             rendering_intent: ctx.gstate.rendering_intent,
             transfer,
@@ -532,14 +584,14 @@ pub fn op_rectstroke(ctx: &mut Context) -> Result<(), PsError> {
         return Ok(());
     }
 
-    let spot = capture_spot_color(ctx);
+    let paint = capture_paint_color(ctx);
     let transfer = capture_transfer_state(ctx);
     let halftone = capture_halftone_state(ctx);
     let bg_ucr = capture_bg_ucr_state(ctx);
     if is_anisotropic(&ctx.gstate.ctm) {
         let path = build_rect_path_user(&rects);
         let params = StrokeParams {
-            color: ctx.gstate.color.clone(),
+            color: paint.color,
             line_width: ctx.gstate.line_width,
             line_cap: ctx.gstate.line_cap,
             line_join: ctx.gstate.line_join,
@@ -548,12 +600,12 @@ pub fn op_rectstroke(ctx: &mut Context) -> Result<(), PsError> {
             ctm: ctx.gstate.ctm,
             stroke_adjust: ctx.gstate.stroke_adjust,
             is_text_glyph: false,
-            overprint: ctx.gstate.overprint,
+            overprint: paint.overprint,
             overprint_mode: 0,
             opm_paired: false,
-            painted_channels: 0,
-            is_device_cmyk: false,
-            spot_color: spot,
+            painted_channels: paint.painted_channels,
+            is_device_cmyk: paint.is_device_cmyk,
+            spot_color: paint.spot_color,
             icc_color: None,
             rendering_intent: ctx.gstate.rendering_intent,
             transfer,
@@ -569,7 +621,7 @@ pub fn op_rectstroke(ctx: &mut Context) -> Result<(), PsError> {
         let path = build_rect_path_device(&ctx.gstate.ctm, &rects);
         let scale = ctm_scale_factor(&ctx.gstate.ctm);
         let params = StrokeParams {
-            color: ctx.gstate.color.clone(),
+            color: paint.color,
             line_width: ctx.gstate.line_width * scale,
             line_cap: ctx.gstate.line_cap,
             line_join: ctx.gstate.line_join,
@@ -587,12 +639,12 @@ pub fn op_rectstroke(ctx: &mut Context) -> Result<(), PsError> {
             ctm: Matrix::identity(),
             stroke_adjust: ctx.gstate.stroke_adjust,
             is_text_glyph: false,
-            overprint: ctx.gstate.overprint,
+            overprint: paint.overprint,
             overprint_mode: 0,
             opm_paired: false,
-            painted_channels: 0,
-            is_device_cmyk: false,
-            spot_color: spot,
+            painted_channels: paint.painted_channels,
+            is_device_cmyk: paint.is_device_cmyk,
+            spot_color: paint.spot_color,
             icc_color: None,
             rendering_intent: ctx.gstate.rendering_intent,
             transfer,

@@ -28,6 +28,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   values, and the integer `revision` was always `1`. They now carry the
   release version and date; `revision` is the version with two digits
   each for minor and patch, so 0.8.2 is `802`.
+- **`setoverprint` now works for spot colours in PostScript.** A
+  Separation or DeviceN colour painted with overprint on knocked out the
+  process colours beneath it, where PDF input with the same content
+  overprinted correctly. Now only the colorants the colour space names are
+  painted: a spot over cyan keeps the cyan, and `/Separation /Magenta` or
+  a DeviceN of `[/Yellow …]` leaves the other process plates alone. This
+  covers fills, strokes and text; images and `imagemask` do not overprint
+  yet. DeviceCMYK still paints all four plates, since PostScript has no
+  overprint mode. Two related bugs went with it: a cached Type 3 glyph kept
+  the overprint setting from when it was first drawn, and PostScript
+  overprint turned off entirely on pages small enough to render in one
+  piece, so the same file could overprint at 300 dpi and not at 72.
 
 - **`stet-cli`'s crates.io page no longer shows a failing docs.rs badge.**
   docs.rs documents libraries only, and `stet-cli` is a binary, so its

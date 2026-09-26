@@ -153,6 +153,74 @@ pub fn cmyk_channel_for_name(name: &[u8]) -> u8 {
     }
 }
 
+/// Process channels painted by a Separation or DeviceN paint.
+///
+/// The union of [`cmyk_channel_for_name`] over the colorant names: a
+/// process colorant paints its own channel, `All` paints every channel, and
+/// spot colorants and `None` paint none. `0` therefore means "spot-only";
+/// renderers must not widen it to [`CMYK_ALL`] for a paint that carries a
+/// [`DeviceColor::process_cmyk`], or a spot overprint knocks out the
+/// process plates beneath it.
+pub fn painted_channels_for_colorants<N: AsRef<[u8]>>(names: &[N]) -> u8 {
+    names
+        .iter()
+        .fold(0u8, |acc, n| acc | cmyk_channel_for_name(n.as_ref()))
+}
+
+/// Process-only CMYK contribution of a Separation paint.
+///
+/// A process colorant (`Cyan`, `Magenta`, `Yellow`, `Black`) puts `tint` on
+/// its own channel. A spot colorant or `None` contributes `(0, 0, 0, 0)`, so
+/// the overprint tracker writes nothing to the process plates rather than
+/// the spot's alternate-space CMYK. `All` returns `None`: every plate
+/// receives the tint, which the alternate-space colour already expresses.
+///
+/// This is the value callers store in [`DeviceColor::process_cmyk`].
+pub fn separation_process_cmyk(name: &[u8], tint: f64) -> Option<(f64, f64, f64, f64)> {
+    let tint = tint.clamp(0.0, 1.0);
+    match cmyk_channel_for_name(name) {
+        CMYK_C => Some((tint, 0.0, 0.0, 0.0)),
+        CMYK_M => Some((0.0, tint, 0.0, 0.0)),
+        CMYK_Y => Some((0.0, 0.0, tint, 0.0)),
+        CMYK_K => Some((0.0, 0.0, 0.0, tint)),
+        0 => Some((0.0, 0.0, 0.0, 0.0)),
+        _ => None,
+    }
+}
+
+/// Process-only CMYK contribution of a DeviceN paint.
+///
+/// Each colorant that names a process channel (`Cyan`, `Magenta`, `Yellow`,
+/// `Black`, or `All` for all four) adds its tint to that plate by
+/// subtractive stacking, `1 - Π(1 - tᵢ)`; spot colorants contribute
+/// nothing. Returns `None` when the name and tint counts differ.
+///
+/// This is the value callers store in [`DeviceColor::process_cmyk`].
+pub fn devicen_process_cmyk<N: AsRef<[u8]>>(
+    names: &[N],
+    tints: &[f64],
+) -> Option<(f64, f64, f64, f64)> {
+    if names.len() != tints.len() {
+        return None;
+    }
+    let mut compl = [1.0f64; 4];
+    for (name, &tint) in names.iter().zip(tints) {
+        let keep = 1.0 - tint.clamp(0.0, 1.0);
+        let channels = cmyk_channel_for_name(name.as_ref());
+        for (i, c) in compl.iter_mut().enumerate() {
+            if channels & (1 << i) != 0 {
+                *c *= keep;
+            }
+        }
+    }
+    Some((
+        1.0 - compl[0],
+        1.0 - compl[1],
+        1.0 - compl[2],
+        1.0 - compl[3],
+    ))
+}
+
 /// Parameters for filling a path.
 ///
 /// Constructed by interpreter/parser code (stet-ops, stet-pdf-reader)
@@ -1184,4 +1252,53 @@ pub trait PageSink: Send {
 pub trait PageSinkFactory: Send + Sync {
     /// Create a new sink for a single page.
     fn create_sink(&self, output_path: &str) -> Result<Box<dyn PageSink>, String>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn painted_channels_union_the_process_colorants() {
+        assert_eq!(painted_channels_for_colorants(&[b"Cyan"]), CMYK_C);
+        assert_eq!(
+            painted_channels_for_colorants(&[b"Magenta".as_slice(), b"PANTONE 273 C", b"Black"]),
+            CMYK_M | CMYK_K
+        );
+        assert_eq!(painted_channels_for_colorants(&[b"All"]), CMYK_ALL);
+        assert_eq!(painted_channels_for_colorants(&[b"Spot"]), 0);
+        assert_eq!(painted_channels_for_colorants::<&[u8]>(&[]), 0);
+    }
+
+    #[test]
+    fn separation_process_part_is_zero_for_a_spot() {
+        assert_eq!(
+            separation_process_cmyk(b"Yellow", 0.4),
+            Some((0.0, 0.0, 0.4, 0.0))
+        );
+        assert_eq!(
+            separation_process_cmyk(b"PANTONE 273 C", 1.0),
+            Some((0.0, 0.0, 0.0, 0.0))
+        );
+        assert_eq!(
+            separation_process_cmyk(b"None", 1.0),
+            Some((0.0, 0.0, 0.0, 0.0))
+        );
+        assert_eq!(separation_process_cmyk(b"All", 1.0), None);
+        assert_eq!(
+            separation_process_cmyk(b"Cyan", 1.5),
+            Some((1.0, 0.0, 0.0, 0.0))
+        );
+    }
+
+    #[test]
+    fn devicen_process_part_stacks_subtractively() {
+        let names = [b"Cyan".as_slice(), b"Spot", b"All"];
+        let (c, m, y, k) = devicen_process_cmyk(&names, &[0.5, 1.0, 0.5]).unwrap();
+        assert!((c - 0.75).abs() < 1e-12);
+        assert!((m - 0.5).abs() < 1e-12);
+        assert!((y - 0.5).abs() < 1e-12);
+        assert!((k - 0.5).abs() < 1e-12);
+        assert_eq!(devicen_process_cmyk(&names, &[1.0]), None);
+    }
 }
