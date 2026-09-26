@@ -189,6 +189,27 @@ impl<'a> CharstringInterp<'a> {
         }
     }
 
+    /// Start a subpath at the current point when a drawing operator has none
+    /// to continue: at the start of the glyph, or after `closepath`.
+    ///
+    /// Type 1 does not require an `rmoveto` there. `hsbw` sets the current
+    /// point to the side bearing, and `closepath` — "unlike the closepath
+    /// command in the PostScript language" (Adobe Type 1 Font Format §6.4)
+    /// — leaves the current point where it was. A path whose first segment
+    /// is a line or curve has no start, and the renderer drew it from the
+    /// device origin: charstrings converted from CFF by pdftops rely on it.
+    fn open_subpath(&mut self) {
+        if self.width_only || self.flex_active {
+            return;
+        }
+        if matches!(
+            self.path.segments.last(),
+            None | Some(PathSegment::ClosePath)
+        ) {
+            self.path.segments.push(PathSegment::MoveTo(self.x, self.y));
+        }
+    }
+
     fn execute(&mut self, data: &[u8]) -> Result<(), String> {
         self.execute_inner(data, 0)
     }
@@ -238,6 +259,7 @@ impl<'a> CharstringInterp<'a> {
                     if self.stack.len() < 2 {
                         return Err("rlineto: stack underflow".to_string());
                     }
+                    self.open_subpath();
                     let dy = self.stack.pop().unwrap();
                     let dx = self.stack.pop().unwrap();
                     self.x += dx;
@@ -251,6 +273,7 @@ impl<'a> CharstringInterp<'a> {
                     if self.stack.is_empty() {
                         return Err("hlineto: stack underflow".to_string());
                     }
+                    self.open_subpath();
                     let dx = self.stack.pop().unwrap();
                     self.x += dx;
                     if !self.width_only {
@@ -262,6 +285,7 @@ impl<'a> CharstringInterp<'a> {
                     if self.stack.is_empty() {
                         return Err("vlineto: stack underflow".to_string());
                     }
+                    self.open_subpath();
                     let dy = self.stack.pop().unwrap();
                     self.y += dy;
                     if !self.width_only {
@@ -273,6 +297,7 @@ impl<'a> CharstringInterp<'a> {
                     if self.stack.len() < 6 {
                         return Err("rrcurveto: stack underflow".to_string());
                     }
+                    self.open_subpath();
                     let dy3 = self.stack.pop().unwrap();
                     let dx3 = self.stack.pop().unwrap();
                     let dy2 = self.stack.pop().unwrap();
@@ -392,6 +417,7 @@ impl<'a> CharstringInterp<'a> {
                     if self.stack.len() < 4 {
                         return Err("vhcurveto: stack underflow".to_string());
                     }
+                    self.open_subpath();
                     let dx3 = self.stack.pop().unwrap();
                     let dy2 = self.stack.pop().unwrap();
                     let dx2 = self.stack.pop().unwrap();
@@ -420,6 +446,7 @@ impl<'a> CharstringInterp<'a> {
                     if self.stack.len() < 4 {
                         return Err("hvcurveto: stack underflow".to_string());
                     }
+                    self.open_subpath();
                     let dy3 = self.stack.pop().unwrap();
                     let dy2 = self.stack.pop().unwrap();
                     let dx2 = self.stack.pop().unwrap();
@@ -830,6 +857,46 @@ mod tests {
         interp.execute_inner(&data, 0).unwrap();
         assert!((interp.width_x - 600.0).abs() < 0.01);
         assert!((interp.lsb_x - 0.0).abs() < 0.01);
+    }
+
+    /// A line with no `rmoveto` before it starts from the current point:
+    /// the side bearing after `hsbw`, and after `closepath` the point
+    /// `closepath` left (Type 1 `closepath` does not move it). Without the
+    /// implicit moveto the renderer drew these paths from the device origin.
+    #[test]
+    fn drawing_without_rmoveto_starts_a_subpath_at_the_current_point() {
+        let data = vec![
+            139 + 20, // push 20 (sbx)
+            248,
+            236, // push 600 (wx)
+            13,  // hsbw: current point (20, 0)
+            139 + 50,
+            139,
+            5, // rlineto (50, 0) → (70, 0)
+            139,
+            139 + 50,
+            5, // rlineto (0, 50) → (70, 50)
+            9, // closepath: current point stays (70, 50)
+            139 + 10,
+            139,
+            5,  // rlineto (10, 0) → (80, 50)
+            14, // endchar
+        ];
+        let mut interp = CharstringInterp::new(&[], 4, false, None);
+        interp.execute_inner(&data, 0).unwrap();
+        let segs = &interp.path.segments;
+        assert!(
+            matches!(segs[0], PathSegment::MoveTo(x, y) if x == 20.0 && y == 0.0),
+            "{segs:?}"
+        );
+        assert!(matches!(segs[1], PathSegment::LineTo(x, y) if x == 70.0 && y == 0.0));
+        assert!(matches!(segs[2], PathSegment::LineTo(x, y) if x == 70.0 && y == 50.0));
+        assert!(matches!(segs[3], PathSegment::ClosePath));
+        assert!(
+            matches!(segs[4], PathSegment::MoveTo(x, y) if x == 70.0 && y == 50.0),
+            "{segs:?}"
+        );
+        assert!(matches!(segs[5], PathSegment::LineTo(x, y) if x == 80.0 && y == 50.0));
     }
 
     #[test]

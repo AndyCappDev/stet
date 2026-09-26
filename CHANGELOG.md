@@ -63,6 +63,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `charpath` and `xshow`/`yshow`/`xyshow` now draw them, in both writing
   modes, with each `FDArray` font's own `FontMatrix`, `lenIV` and
   subroutines. PDF output of these fonts is not yet embedded.
+- **Type 1 glyphs that draw without an explicit `rmoveto` no longer
+  sprout lines from the page corner.** The Type 1 format lets a glyph
+  start drawing at the point `hsbw` sets, and `closepath`, unlike
+  PostScript's, leaves the current point in place, so a following line
+  needs no `rmoveto` either. stet began such a path with a line and no
+  move, which the renderer drew from the device origin. This affects Type
+  1 fonts in PostScript and in PDF alike; pdftops' conversions of CFF
+  fonts rely on it.
 
 - **Separation and DeviceN colorant names given as strings are now
   recognised.** The PLRM lets a colorant be a name or a string, and
