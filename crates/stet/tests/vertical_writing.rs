@@ -30,6 +30,25 @@ const CFF_CIDFONT: &str = r#"
 >> /CIDFont defineresource pop
 "#;
 
+/// The same square in a CIDFontType 0 font of Type 1 charstrings reached
+/// through a CID map (`/CIDS`), the form `CIDInit`'s `StartData` builds and
+/// pdftops writes. CID 1 is the unencrypted (`lenIV -1`) charstring
+/// `0 1000 hsbw 0 0 rmoveto 1000 0 rlineto 0 1000 rlineto -1000 0 rlineto
+/// closepath endchar`; the map is three `FDBytes 1` + `GDBytes 1` entries,
+/// with CID 0 empty.
+const TYPE1_CIDFONT: &str = r#"
+/CIDInit /ProcSet findresource begin
+20 dict begin
+/CIDFontName /CIDS def /CIDFontType 0 def
+/CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> def
+/FontMatrix [0.001 0 0 0.001 0 0] def /FontBBox [0 0 1000 1000] def
+/CIDCount 2 def /FDBytes 1 def /GDBytes 1 def /CIDMapOffset 0 def
+/FDArray [ << /FontType 1 /FontMatrix [1 0 0 1 0 0]
+              /Private << /lenIV -1 >> >> ] def
+(Hex) 27 StartData
+00060006001B 8BFA7C0D8B8B15FA7C8B058BFA7C05FE7C8B05090E>
+"#;
+
 /// A TrueType font with `units_per_em` units per em whose glyph 1 is a
 /// square as wide as the em, drawn from (0, 0), and advances one em.
 fn square_sfnt(units_per_em: u16) -> Vec<u8> {
@@ -168,16 +187,17 @@ fn close(a: [f64; 4], b: [f64; 4]) -> bool {
 /// PLRM's placement of the square, in device space.
 const EXPECTED: [f64; 4] = [294.0, 90.56, 306.0, 102.56];
 
-fn both_fonts() -> [(String, &'static str); 2] {
+fn cid_fonts() -> [(String, &'static str); 3] {
     [
         (CFF_CIDFONT.to_string(), "CIDC"),
         (truetype_cidfont(), "CIDT"),
+        (TYPE1_CIDFONT.to_string(), "CIDS"),
     ]
 }
 
 #[test]
 fn show_draws_vertical_glyphs_from_origin_0() {
-    for (fonts, cidfont) in both_fonts() {
+    for (fonts, cidfont) in cid_fonts() {
         let boxes = fills(
             &fonts,
             cidfont,
@@ -192,7 +212,7 @@ fn show_draws_vertical_glyphs_from_origin_0() {
 
 #[test]
 fn xyshow_draws_vertical_glyphs_from_origin_0() {
-    for (fonts, cidfont) in both_fonts() {
+    for (fonts, cidfont) in cid_fonts() {
         let boxes = fills(&fonts, cidfont, "300 700 moveto <0001> [0 -20] xyshow");
         assert_eq!(boxes.len(), 1, "{cidfont}");
         assert!(close(boxes[0], EXPECTED), "{cidfont}: {:?}", boxes[0]);
@@ -201,7 +221,7 @@ fn xyshow_draws_vertical_glyphs_from_origin_0() {
 
 #[test]
 fn charpath_places_and_advances_vertical_glyphs() {
-    for (fonts, cidfont) in both_fonts() {
+    for (fonts, cidfont) in cid_fonts() {
         let boxes = fills(
             &fonts,
             cidfont,
@@ -218,7 +238,7 @@ fn charpath_places_and_advances_vertical_glyphs() {
 
 #[test]
 fn stringwidth_of_vertical_text_is_one_em_per_glyph() {
-    for (fonts, cidfont) in both_fonts() {
+    for (fonts, cidfont) in cid_fonts() {
         let boxes = fills(
             &fonts,
             cidfont,

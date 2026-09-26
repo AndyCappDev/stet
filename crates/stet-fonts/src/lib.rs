@@ -17,6 +17,12 @@
 //!   charstring interpretation (eexec decryption included)
 //! - [`cff_parser`] / [`type2_charstring`] — Compact Font Format parser
 //!   and Type 2 charstring interpreter
+//! - [`cff_writer`] — CID-keyed CFF writer, with a reader and subsetting
+//!   for round trips
+//! - [`type1_to_type2`] — Type 1 → Type 2 charstring conversion that
+//!   keeps hints, hint replacement and flex
+//! - [`cid_type0`] — the glyph data of CIDFontType 0 fonts with Type 1
+//!   charstrings (CID map, subroutine map)
 //! - [`truetype`] — TrueType table accessors, simple + composite glyph
 //!   resolution, `glyf` → [`PsPath`] conversion
 //! - [`encoding`] — StandardEncoding, ISOLatin1Encoding, SymbolEncoding,
@@ -53,7 +59,9 @@
 
 pub mod agl;
 pub mod cff_parser;
+pub mod cff_writer;
 pub mod charstring;
+pub mod cid_type0;
 pub mod cid_unicode;
 pub mod encoding;
 pub mod geometry;
@@ -61,6 +69,7 @@ pub mod system_fonts;
 pub mod to_unicode;
 pub mod truetype;
 pub mod type1_parser;
+pub mod type1_to_type2;
 pub mod type2_charstring;
 
 // Re-export core geometry types at crate root for convenience.

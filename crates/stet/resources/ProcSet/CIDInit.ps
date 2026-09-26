@@ -147,10 +147,11 @@
     /StartData {
         % (Binary)|(Hex) datalength StartData -
         %   currentdict is the CIDFont dictionary being built.
-        % .cid_startdata reads the charstring blob out of the current file and
-        % records it as /GlyphData. Reading it is not optional: the blob is
-        % inline in the source, so anything left unread reaches the scanner.
-        .cid_startdata
+        % .cid_startdata reads the glyph data out of the current file: the
+        % CID map, subroutines and Type 1 charstrings the glyphs are built
+        % from. Reading it is not optional either way: the blob is inline in
+        % the source, so anything left unread reaches the scanner.
+        .cid_startdata /GlyphData exch def
         /SubrCache 10 dict def
         CIDFontName currentdict /CIDFont defineresource pop
         end     % the CIDFont dictionary

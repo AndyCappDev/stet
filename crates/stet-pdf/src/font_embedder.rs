@@ -1790,6 +1790,13 @@ fn build_cid_font(writer: &mut PdfWriter, usage: &FontUsage, ctx: &Context) -> O
         }
     };
 
+    // CIDFontType 0: Type 1 charstrings in GlyphData, or CFF.
+    if concatenate_sfnts(ctx, cidfont_entity).is_none()
+        && crate::cid_type0::handles(ctx, cidfont_entity)
+    {
+        return crate::cid_type0::build(writer, usage, ctx, cidfont_entity);
+    }
+
     // Extract TrueType binary from sfnts array
     let raw_font_data = concatenate_sfnts(ctx, cidfont_entity)?;
 
@@ -2662,6 +2669,9 @@ fn extract_cid_widths(usage: &FontUsage, ctx: &Context) -> HashMap<u16, i32> {
 
     let font_data = match concatenate_sfnts(ctx, cid_entity) {
         Some(d) => d,
+        None if usage.font_type == 0 && crate::cid_type0::handles(ctx, cid_entity) => {
+            return crate::cid_type0::widths(usage, ctx, cid_entity);
+        }
         None => return HashMap::new(),
     };
 

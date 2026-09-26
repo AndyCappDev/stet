@@ -27,6 +27,7 @@
 
 mod annotations;
 mod attachments;
+mod cid_type0;
 mod content_stream;
 mod font_embedder;
 mod font_tracker;

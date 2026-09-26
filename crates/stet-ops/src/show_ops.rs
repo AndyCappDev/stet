@@ -2630,6 +2630,118 @@ fn get_dw2(ctx: &Context, cidfont_entity: EntityId) -> Option<(f64, f64)> {
     }
 }
 
+/// Where a CIDFontType 0 font's glyphs come from.
+///
+/// Two forms share the CIDFontType: CFF Type 2 charstrings keyed by CID in
+/// `CharStrings` (what `FontSetInit`'s `StartData` builds), and Type 1
+/// charstrings reached through the CID map in `GlyphData` (what `CIDInit`'s
+/// `StartData` builds — pdftops writes CFF-based CID fonts this way). Every
+/// path that needs a CID glyph — `show`, `stringwidth`, `charpath` and the
+/// displaced shows — goes through [`Self::glyph`].
+enum CidGlyphSource {
+    Cff {
+        charstrings: EntityId,
+        global_subrs: Vec<Vec<u8>>,
+    },
+    Type1(crate::cid_ops::Type1CidFont),
+}
+
+impl CidGlyphSource {
+    /// Resolve the font's glyph source once per show operation, or `None`
+    /// when it has neither form.
+    fn of(ctx: &Context, cidfont: EntityId) -> Result<Option<Self>, PsError> {
+        if let Some(font) = crate::cid_ops::Type1CidFont::of(ctx, cidfont)? {
+            return Ok(Some(Self::Type1(font)));
+        }
+        let charstrings = ctx
+            .dicts
+            .get(cidfont, &DictKey::Name(ctx.name_cache.n_char_strings))
+            .and_then(|obj| match obj.value {
+                PsValue::Dict(e) => Some(e),
+                _ => None,
+            });
+        Ok(charstrings.map(|charstrings| Self::Cff {
+            charstrings,
+            global_subrs: get_global_subrs(ctx, cidfont),
+        }))
+    }
+
+    /// The glyph shown for `cid`: its own, or CID 0's when the font has
+    /// none for it — "If the CIDFont file is missing glyph data for a
+    /// particular CID, the CID with an index value of 0 (which must have
+    /// glyph data) is used" (Adobe TN 5014 §2.5). `None` only when CID 0 is
+    /// missing too; `Err` when a charstring is broken.
+    fn glyph(
+        &self,
+        ctx: &mut Context,
+        cidfont: EntityId,
+        cid: i32,
+    ) -> Result<Option<CachedGlyph>, PsError> {
+        match self.lookup(ctx, cidfont, cid)? {
+            None if cid != 0 => self.lookup(ctx, cidfont, 0),
+            glyph => Ok(glyph),
+        }
+    }
+
+    /// The glyph for `cid`, from the font's glyph cache or built and cached
+    /// on a miss. `None` when the font has no glyph for it.
+    fn lookup(
+        &self,
+        ctx: &mut Context,
+        cidfont: EntityId,
+        cid: i32,
+    ) -> Result<Option<CachedGlyph>, PsError> {
+        if let Some(cached) = ctx
+            .glyph_caches
+            .get(&cidfont)
+            .and_then(|gc| gc.by_cid.get(&cid))
+        {
+            return Ok(Some(cached.clone()));
+        }
+        let (path, width_x, width_y) = match self {
+            Self::Cff {
+                charstrings,
+                global_subrs,
+            } => {
+                let Some(PsValue::String { entity, start, len }) = ctx
+                    .dicts
+                    .get(*charstrings, &DictKey::Int(cid as i64))
+                    .map(|obj| obj.value)
+                else {
+                    return Ok(None);
+                };
+                let cs_bytes = ctx.strings.get(entity, start, len).to_vec();
+                let fd_info = get_cid_fd_info(ctx, cidfont, cid);
+                let result = type2_charstring::execute_type2_charstring(
+                    &cs_bytes,
+                    &fd_info.local_subrs,
+                    global_subrs,
+                    fd_info.default_width_x,
+                    fd_info.nominal_width_x,
+                    false,
+                )
+                .map_err(|_| PsError::InvalidFont)?;
+                (result.path, result.width_x, result.width_y)
+            }
+            Self::Type1(font) => match font.glyph(ctx, cid)? {
+                Some(result) => (result.path, result.width_x, result.width_y),
+                None => return Ok(None),
+            },
+        };
+        let glyph = CachedGlyph {
+            segments: Arc::new(path.segments),
+            width_x,
+            width_y,
+        };
+        ctx.glyph_caches
+            .entry(cidfont)
+            .or_default()
+            .by_cid
+            .insert(cid, glyph.clone());
+        Ok(Some(glyph))
+    }
+}
+
 /// Extract Type 2 charstring rendering info from a CIDFont's FD array for a given CID.
 struct CidFdInfo {
     default_width_x: f64,
@@ -2797,25 +2909,11 @@ fn render_composite_cff_cids(
     ctm: &Matrix,
     wmode: i32,
 ) -> Result<(), PsError> {
-    // Get CharStrings dict (int-keyed by CID)
-    let cs_entity = ctx
-        .dicts
-        .get(
-            cidfont_entity,
-            &DictKey::Name(ctx.name_cache.n_char_strings),
-        )
-        .and_then(|obj| match obj.value {
-            PsValue::Dict(e) => Some(e),
-            _ => None,
-        })
-        .ok_or(PsError::InvalidFont)?;
+    let source = CidGlyphSource::of(ctx, cidfont_entity)?.ok_or(PsError::InvalidFont)?;
 
     // CFF FontMatrix already handles scaling — no em_scale needed
     let combined_fm = type0_fm.multiply(cidfont_fm);
     let (paint_type, stroke_width_dev) = get_paint_info(ctx, cidfont_entity, &combined_fm, ctm);
-
-    // Get global subrs
-    let global_subrs = get_global_subrs(ctx, cidfont_entity);
 
     // Get DW (default width) from CIDFont
     let dw = ctx
@@ -2839,92 +2937,49 @@ fn render_composite_cff_cids(
     };
 
     for (i, &cid) in cids.iter().enumerate() {
-        // Check glyph cache by CID
-        let cached = ctx
-            .glyph_caches
-            .get(&cidfont_entity)
-            .and_then(|gc| gc.by_cid.get(&cid))
-            .cloned();
-
-        let (segments, width_x, width_y) = if let Some(cg) = cached {
-            (cg.segments, cg.width_x, cg.width_y)
-        } else {
-            // Look up charstring by int CID
-            let cs_obj = match ctx.dicts.get(cs_entity, &DictKey::Int(cid as i64)) {
-                Some(obj) => obj,
-                None => {
-                    // No charstring for this CID — advance by default width
-                    if let Some(v) = &vertical {
-                        let (_, wy) = v.advance(&combined_fm);
-                        record_cid_glyph(
-                            ctx,
-                            cidfont_entity,
-                            &combined_fm,
-                            metrics(),
-                            recording,
-                            (i, cid),
-                            (*cur_x, *cur_y),
-                            v.advance(&combined_fm),
-                            true,
-                        );
-                        *cur_x += extra_ax;
-                        *cur_y += wy + extra_ay;
-                    } else {
-                        let (wx, wy) = combined_fm.transform_delta(dw as f64, 0.0);
-                        record_cid_glyph(
-                            ctx,
-                            cidfont_entity,
-                            &combined_fm,
-                            metrics(),
-                            recording,
-                            (i, cid),
-                            (*cur_x, *cur_y),
-                            (wx, wy),
-                            false,
-                        );
-                        *cur_x += wx + extra_ax;
-                        *cur_y += wy + extra_ay;
-                    }
-                    if cid as i64 == width_char {
-                        *cur_x += cx;
-                        *cur_y += cy;
-                    }
-                    continue;
-                }
-            };
-
-            let cs_bytes = match cs_obj.value {
-                PsValue::String { entity, start, len } => {
-                    ctx.strings.get(entity, start, len).to_vec()
-                }
-                _ => continue,
-            };
-
-            // Get FD info (defaultWidthX, nominalWidthX, local subrs)
-            let fd_info = get_cid_fd_info(ctx, cidfont_entity, cid);
-
-            // Execute Type 2 charstring
-            let result = type2_charstring::execute_type2_charstring(
-                &cs_bytes,
-                &fd_info.local_subrs,
-                &global_subrs,
-                fd_info.default_width_x,
-                fd_info.nominal_width_x,
-                false,
-            )
-            .map_err(|_| PsError::InvalidFont)?;
-
-            let segments = Arc::new(result.path.segments);
-            let cache = ctx.glyph_caches.entry(cidfont_entity).or_default();
-            cache.by_cid.insert(
-                cid,
-                CachedGlyph {
-                    segments: Arc::clone(&segments),
-                    width_x: result.width_x,
-                    width_y: result.width_y,
-                },
-            );
-            (segments, result.width_x, result.width_y)
+        let Some(CachedGlyph {
+            segments,
+            width_x,
+            width_y,
+        }) = source.glyph(ctx, cidfont_entity, cid)?
+        else {
+            // Not even CID 0 has a glyph: advance by the default width.
+            if let Some(v) = &vertical {
+                let (_, wy) = v.advance(&combined_fm);
+                record_cid_glyph(
+                    ctx,
+                    cidfont_entity,
+                    &combined_fm,
+                    metrics(),
+                    recording,
+                    (i, cid),
+                    (*cur_x, *cur_y),
+                    v.advance(&combined_fm),
+                    true,
+                );
+                *cur_x += extra_ax;
+                *cur_y += wy + extra_ay;
+            } else {
+                let (wx, wy) = combined_fm.transform_delta(dw as f64, 0.0);
+                record_cid_glyph(
+                    ctx,
+                    cidfont_entity,
+                    &combined_fm,
+                    metrics(),
+                    recording,
+                    (i, cid),
+                    (*cur_x, *cur_y),
+                    (wx, wy),
+                    false,
+                );
+                *cur_x += wx + extra_ax;
+                *cur_y += wy + extra_ay;
+            }
+            if cid as i64 == width_char {
+                *cur_x += cx;
+                *cur_y += cy;
+            }
+            continue;
         };
 
         // Paint glyph path, from origin 0 in vertical writing.
@@ -3896,20 +3951,10 @@ fn measure_string_width_composite(
                 }
             }
         } else {
-            // CFF CIDFont
-            let cs_entity = ctx
-                .dicts
-                .get(
-                    cidfont_entity,
-                    &DictKey::Name(ctx.name_cache.n_char_strings),
-                )
-                .and_then(|obj| match obj.value {
-                    PsValue::Dict(e) => Some(e),
-                    _ => None,
-                });
+            // CIDFontType 0 (CFF or Type 1 charstrings)
+            let source = CidGlyphSource::of(ctx, cidfont_entity).ok().flatten();
 
             let combined_fm = type0_fm.multiply(&cidfont_fm);
-            let global_subrs = get_global_subrs(ctx, cidfont_entity);
             let dw = ctx
                 .names
                 .find(b"DW")
@@ -3918,32 +3963,11 @@ fn measure_string_width_composite(
                 .unwrap_or(1000);
 
             for (cid, _) in &cids {
-                let width = if let Some(cs_e) = cs_entity {
-                    if let Some(cs_obj) = ctx.dicts.get(cs_e, &DictKey::Int(*cid as i64)) {
-                        if let PsValue::String { entity, start, len } = cs_obj.value {
-                            let cs_bytes = ctx.strings.get(entity, start, len).to_vec();
-                            let fd_info = get_cid_fd_info(ctx, cidfont_entity, *cid);
-                            if let Ok(result) = type2_charstring::execute_type2_charstring(
-                                &cs_bytes,
-                                &fd_info.local_subrs,
-                                &global_subrs,
-                                fd_info.default_width_x,
-                                fd_info.nominal_width_x,
-                                true,
-                            ) {
-                                result.width_x
-                            } else {
-                                dw as f64
-                            }
-                        } else {
-                            dw as f64
-                        }
-                    } else {
-                        dw as f64
-                    }
-                } else {
-                    dw as f64
+                let glyph = match &source {
+                    Some(source) => source.glyph(ctx, cidfont_entity, *cid).ok().flatten(),
+                    None => None,
                 };
+                let (width_x, width_y) = glyph.map_or((dw as f64, 0.0), |g| (g.width_x, g.width_y));
                 if wmode == 1 {
                     let (_vy_offset, v_advance) =
                         get_dw2(ctx, cidfont_entity).unwrap_or((880.0, -1000.0));
@@ -3951,7 +3975,7 @@ fn measure_string_width_composite(
                     total_wx += wx;
                     total_wy += wy;
                 } else {
-                    let (wx, wy) = combined_fm.transform_delta(width, 0.0);
+                    let (wx, wy) = combined_fm.transform_delta(width_x, width_y);
                     total_wx += wx;
                     total_wy += wy;
                 }
@@ -4145,55 +4169,30 @@ fn render_charpath_composite(
                 cur_y += wy;
             }
         } else {
-            // CFF CIDFont charpath
-            let cs_entity = ctx
-                .dicts
-                .get(
-                    cidfont_entity,
-                    &DictKey::Name(ctx.name_cache.n_char_strings),
-                )
-                .and_then(|obj| match obj.value {
-                    PsValue::Dict(e) => Some(e),
-                    _ => None,
-                })
-                .ok_or(PsError::InvalidFont)?;
+            // CIDFontType 0 charpath (CFF or Type 1 charstrings)
+            let source = CidGlyphSource::of(ctx, cidfont_entity)?.ok_or(PsError::InvalidFont)?;
 
             let combined_fm = type0_fm.multiply(&cidfont_fm);
             let vertical = (wmode == 1).then(|| VerticalMetrics::of(ctx, cidfont_entity, 1000.0));
-            let global_subrs = get_global_subrs(ctx, cidfont_entity);
 
             for (cid, _) in &cids {
-                if let Some(cs_obj) = ctx.dicts.get(cs_entity, &DictKey::Int(*cid as i64))
-                    && let PsValue::String { entity, start, len } = cs_obj.value
-                {
-                    let cs_bytes = ctx.strings.get(entity, start, len).to_vec();
-                    let fd_info = get_cid_fd_info(ctx, cidfont_entity, *cid);
-
-                    if let Ok(result) = type2_charstring::execute_type2_charstring(
-                        &cs_bytes,
-                        &fd_info.local_subrs,
-                        &global_subrs,
-                        fd_info.default_width_x,
-                        fd_info.nominal_width_x,
-                        false,
-                    ) {
-                        if !result.path.is_empty() {
-                            // From origin 0 in vertical writing.
-                            let (gx, gy) = match &vertical {
-                                Some(v) => v.origin0(&combined_fm, result.width_x, (cur_x, cur_y)),
-                                None => (cur_x, cur_y),
-                            };
-                            let user_path = transform_path(&result.path, &combined_fm, gx, gy);
-                            let device_path = ctm_transform_path(&user_path, &ctm);
-                            append_path_to_current(&mut ctx.gstate.path, device_path);
-                        }
-                        let (wx, wy) = match &vertical {
-                            Some(v) => v.advance(&combined_fm),
-                            None => combined_fm.transform_delta(result.width_x, result.width_y),
+                if let Ok(Some(glyph)) = source.glyph(ctx, cidfont_entity, *cid) {
+                    if !glyph.segments.is_empty() {
+                        // From origin 0 in vertical writing.
+                        let (gx, gy) = match &vertical {
+                            Some(v) => v.origin0(&combined_fm, glyph.width_x, (cur_x, cur_y)),
+                            None => (cur_x, cur_y),
                         };
-                        cur_x += wx;
-                        cur_y += wy;
+                        let user_path = transform_segments(&glyph.segments, &combined_fm, gx, gy);
+                        let device_path = ctm_transform_path(&user_path, &ctm);
+                        append_path_to_current(&mut ctx.gstate.path, device_path);
                     }
+                    let (wx, wy) = match &vertical {
+                        Some(v) => v.advance(&combined_fm),
+                        None => combined_fm.transform_delta(glyph.width_x, glyph.width_y),
+                    };
+                    cur_x += wx;
+                    cur_y += wy;
                 }
             }
         }
@@ -5055,22 +5054,12 @@ fn render_show_displaced_composite(
                 advance_by_displacement(&mut cur_x, &mut cur_y, displacements, i, &mode);
             }
         } else {
-            // CFF CIDFont
-            let cs_entity = ctx
-                .dicts
-                .get(
-                    cidfont_entity,
-                    &DictKey::Name(ctx.name_cache.n_char_strings),
-                )
-                .and_then(|obj| match obj.value {
-                    PsValue::Dict(e) => Some(e),
-                    _ => None,
-                });
+            // CIDFontType 0 (CFF or Type 1 charstrings)
+            let source = CidGlyphSource::of(ctx, cidfont_entity).ok().flatten();
             let combined_fm = type0_fm.multiply(&cidfont_fm);
             let vertical = (wmode == 1).then(|| VerticalMetrics::of(ctx, cidfont_entity, 1000.0));
             let (paint_type, stroke_width_dev) =
                 get_paint_info(ctx, cidfont_entity, &combined_fm, &ctm);
-            let global_subrs = get_global_subrs(ctx, cidfont_entity);
 
             for (i, (cid, _)) in cids.iter().enumerate() {
                 // Emit per-character Text element with device-space position
@@ -5078,55 +5067,45 @@ fn render_show_displaced_composite(
                 let cid_bytes = vec![(*cid >> 8) as u8, (*cid & 0xFF) as u8];
                 emit_text_element(ctx, cid_bytes, font_entity, font_type, Some((dev_x, dev_y)));
 
-                if let Some(cs_e) = cs_entity
-                    && let Some(cs_obj) = ctx.dicts.get(cs_e, &DictKey::Int(*cid as i64))
-                    && let PsValue::String { entity, start, len } = cs_obj.value
-                {
-                    let cs_bytes = ctx.strings.get(entity, start, len).to_vec();
-                    let fd_info = get_cid_fd_info(ctx, cidfont_entity, *cid);
-                    if let Ok(result) = type2_charstring::execute_type2_charstring(
-                        &cs_bytes,
-                        &fd_info.local_subrs,
-                        &global_subrs,
-                        fd_info.default_width_x,
-                        fd_info.nominal_width_x,
-                        false,
-                    ) {
-                        if !result.path.is_empty() {
-                            // From origin 0 in vertical writing.
-                            let (gx, gy) = match &vertical {
-                                Some(v) => v.origin0(&combined_fm, result.width_x, (cur_x, cur_y)),
-                                None => (cur_x, cur_y),
-                            };
-                            let user_path = transform_path(&result.path, &combined_fm, gx, gy);
-                            let device_path = ctm_transform_path(&user_path, &ctm);
-                            push_glyph_element(ctx, device_path, paint_type, stroke_width_dev);
-                        }
-                        let (width, metrics) = match &vertical {
-                            Some(v) => (
-                                v.advance(&combined_fm),
-                                text_record::GlyphMetrics::Given {
-                                    ascent: 500.0,
-                                    descent: -500.0,
-                                },
-                            ),
-                            None => (
-                                combined_fm.transform_delta(result.width_x, result.width_y),
-                                text_record::GlyphMetrics::FontBBox,
-                            ),
+                let glyph = match &source {
+                    Some(source) => source.glyph(ctx, cidfont_entity, *cid).ok().flatten(),
+                    None => None,
+                };
+                if let Some(glyph) = glyph {
+                    if !glyph.segments.is_empty() {
+                        // From origin 0 in vertical writing.
+                        let (gx, gy) = match &vertical {
+                            Some(v) => v.origin0(&combined_fm, glyph.width_x, (cur_x, cur_y)),
+                            None => (cur_x, cur_y),
                         };
-                        record_cid_glyph(
-                            ctx,
-                            cidfont_entity,
-                            &combined_fm,
-                            metrics,
-                            &recording,
-                            (i, *cid),
-                            (cur_x, cur_y),
-                            width,
-                            vertical.is_some(),
-                        );
+                        let user_path = transform_segments(&glyph.segments, &combined_fm, gx, gy);
+                        let device_path = ctm_transform_path(&user_path, &ctm);
+                        push_glyph_element(ctx, device_path, paint_type, stroke_width_dev);
                     }
+                    let (width, metrics) = match &vertical {
+                        Some(v) => (
+                            v.advance(&combined_fm),
+                            text_record::GlyphMetrics::Given {
+                                ascent: 500.0,
+                                descent: -500.0,
+                            },
+                        ),
+                        None => (
+                            combined_fm.transform_delta(glyph.width_x, glyph.width_y),
+                            text_record::GlyphMetrics::FontBBox,
+                        ),
+                    };
+                    record_cid_glyph(
+                        ctx,
+                        cidfont_entity,
+                        &combined_fm,
+                        metrics,
+                        &recording,
+                        (i, *cid),
+                        (cur_x, cur_y),
+                        width,
+                        vertical.is_some(),
+                    );
                 }
                 advance_by_displacement(&mut cur_x, &mut cur_y, displacements, i, &mode);
             }
