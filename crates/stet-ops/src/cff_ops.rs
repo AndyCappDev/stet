@@ -182,8 +182,13 @@ fn register_cff_font(
         },
     );
 
+    // A CID-keyed font names its glyphs by CID through the charset, which
+    // is the identity only in a complete font: a subset one maps GID 1 to
+    // whichever CID it kept first (TN#5176 §18).
+    let gid_to_cid = cid_font_gid_to_cid(cff_font);
+
     // CharStrings — dict mapping glyph name → String (raw bytes)
-    // For CID fonts, also add int-keyed entries (DictKey::Int(gid)) for CID lookup
+    // For CID fonts, also add int-keyed entries (DictKey::Int(cid)) for CID lookup
     let cs_key = DictKey::Name(ctx.name_cache.n_char_strings);
     let cs_entity = crate::vm_ops::alloc_dict(ctx, 16, b"CFF");
     for (gid, cs_data) in cff_font.char_strings.iter().enumerate() {
@@ -204,9 +209,10 @@ fn register_cff_font(
             ctx.dicts.put(cs_entity, DictKey::Name(name_id), cs_obj);
         }
 
-        // Int-keyed entry for CID fonts (CID = GID for CFF CID fonts)
-        if cff_font.is_cid {
-            ctx.dicts.put(cs_entity, DictKey::Int(gid as i64), cs_obj);
+        // Int-keyed entry for CID fonts
+        if let Some(&cid) = gid_to_cid.get(gid) {
+            ctx.dicts
+                .put(cs_entity, DictKey::Int(i64::from(cid)), cs_obj);
         }
     }
     ctx.dicts.put(
@@ -333,12 +339,13 @@ fn register_cff_font(
         let cid_ft_key = DictKey::Name(ctx.names.intern(b"CIDFontType"));
         ctx.dicts.put(font_entity, cid_ft_key, PsObject::int(0));
 
-        // CIDCount = number of charstrings
+        // CIDCount: one past the highest CID the font has a glyph for.
+        let cid_count = gid_to_cid.iter().max().map_or(0, |&cid| cid + 1);
         let cid_count_key = DictKey::Name(ctx.names.intern(b"CIDCount"));
         ctx.dicts.put(
             font_entity,
             cid_count_key,
-            PsObject::int(cff_font.char_strings.len() as i32),
+            PsObject::int(i64::from(cid_count)),
         );
 
         // CIDSystemInfo dict from ROS (Registry-Ordering-Supplement)
@@ -455,14 +462,20 @@ fn register_cff_font(
             );
         }
 
-        // FDSelect
+        // FDSelect, re-indexed by CID: glyphs are looked up by CID, and
+        // the CFF FDSelect is indexed by GID.
         if !cff_font.fd_select.is_empty() {
             let fds_key = DictKey::Name(ctx.names.intern(b"_cff_fd_select"));
-            let fds_len = cff_font.fd_select.len() as u32;
+            let fds_len = cid_count;
             let fds_entity = crate::vm_ops::alloc_array(ctx, fds_len as usize);
-            for (i, &fd_idx) in cff_font.fd_select.iter().enumerate() {
-                ctx.arrays
-                    .set_element(fds_entity, i as u32, PsObject::int(fd_idx as i32));
+            for i in 0..fds_len {
+                ctx.arrays.set_element(fds_entity, i, PsObject::int(0));
+            }
+            for (gid, &fd_idx) in cff_font.fd_select.iter().enumerate() {
+                if let Some(&cid) = gid_to_cid.get(gid) {
+                    ctx.arrays
+                        .set_element(fds_entity, cid, PsObject::int(fd_idx as i32));
+                }
             }
             ctx.dicts.put(
                 font_entity,
@@ -527,4 +540,23 @@ fn register_cff_font(
     }
 
     Ok(())
+}
+
+/// GID → CID for a CID-keyed font, inverting the parser's CID → GID map;
+/// empty for a name-keyed font. A CID-keyed font without a usable charset
+/// is taken to be complete, GID = CID.
+fn cid_font_gid_to_cid(font: &CffFont) -> Vec<u32> {
+    if !font.is_cid {
+        return Vec::new();
+    }
+    if font.cid_to_gid.is_empty() {
+        return (0..font.char_strings.len() as u32).collect();
+    }
+    let mut gid_to_cid = vec![0u32; font.char_strings.len()];
+    for (cid, &gid) in font.cid_to_gid.iter().enumerate() {
+        if let Some(slot) = gid_to_cid.get_mut(usize::from(gid)) {
+            *slot = cid as u32;
+        }
+    }
+    gid_to_cid
 }

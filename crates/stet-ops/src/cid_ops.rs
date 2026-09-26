@@ -13,12 +13,8 @@ use stet_core::dict::DictKey;
 use stet_core::error::PsError;
 use stet_core::object::{EntityId, PsObject, PsValue};
 use stet_fonts::charstring::{self, CharstringResult};
+use stet_fonts::cid_type0::{self, CidMap};
 use stet_fonts::geometry::Matrix;
-
-/// Largest `FDBytes` / `GDBytes` / `SDBytes`, as in Ghostscript
-/// (`MAX_FDBytes`, `MAX_GDBytes` in `gxfcid.h`). They are the byte widths of
-/// offsets into `GlyphData`, so four already addresses 4 GB.
-const MAX_OFFSET_BYTES: usize = 4;
 
 /// `.cid_startdata`: `(Binary)|(Hex) count → string`
 ///
@@ -161,20 +157,15 @@ struct FdType1 {
 /// A CIDFontType 0 font whose glyphs are Type 1 charstrings in `GlyphData`,
 /// the form `StartData` builds (Adobe TN 5014).
 ///
-/// `GlyphData` begins, at `CIDMapOffset`, with one entry per CID: an FD
-/// index (`FDBytes` wide) and the offset of its charstring (`GDBytes`
-/// wide), both big-endian. A glyph runs to the next entry's offset, and an
-/// empty one is missing. The FD index picks the `FDArray` font whose
+/// `GlyphData` begins, at `CIDMapOffset`, with the CID map
+/// ([`CidMap`]). Each entry's FD index picks the `FDArray` font whose
 /// `Private` dict supplies `lenIV` and subroutines and whose `FontMatrix`
 /// maps the glyph into the CIDFont's font space. Subroutines are optional:
 /// Ghostscript reads them only when `SubrCount` is present
 /// (`gs_cidfn.ps`), and fonts without any omit all three keys.
 pub(crate) struct Type1CidFont {
     glyph_data: (EntityId, u32, u32),
-    cid_count: usize,
-    cid_map_offset: usize,
-    fd_bytes: usize,
-    gd_bytes: usize,
+    map: CidMap,
     fds: Vec<FdType1>,
 }
 
@@ -191,11 +182,10 @@ impl Type1CidFont {
         };
         let fd_bytes = get_usize(ctx, cidfont, b"FDBytes").ok_or(PsError::InvalidFont)?;
         let gd_bytes = get_usize(ctx, cidfont, b"GDBytes").ok_or(PsError::InvalidFont)?;
-        if fd_bytes > MAX_OFFSET_BYTES || gd_bytes == 0 || gd_bytes > MAX_OFFSET_BYTES {
-            return Err(PsError::InvalidFont);
-        }
         let cid_count = get_usize(ctx, cidfont, b"CIDCount").ok_or(PsError::InvalidFont)?;
         let cid_map_offset = get_usize(ctx, cidfont, b"CIDMapOffset").unwrap_or(0);
+        let map = CidMap::new(cid_count, cid_map_offset, fd_bytes, gd_bytes)
+            .map_err(|_| PsError::InvalidFont)?;
 
         let data = ctx.strings.get(glyph_data.0, glyph_data.1, glyph_data.2);
         let fds = match get(ctx, cidfont, b"FDArray").map(|o| o.value) {
@@ -209,10 +199,7 @@ impl Type1CidFont {
         };
         Ok(Some(Self {
             glyph_data,
-            cid_count,
-            cid_map_offset,
-            fd_bytes,
-            gd_bytes,
+            map,
             fds,
         }))
     }
@@ -228,33 +215,13 @@ impl Type1CidFont {
         let Ok(cid) = usize::try_from(cid) else {
             return Ok(None);
         };
-        if cid >= self.cid_count {
-            return Ok(None);
-        }
         let data = ctx
             .strings
             .get(self.glyph_data.0, self.glyph_data.1, self.glyph_data.2);
-        let entry = self.fd_bytes + self.gd_bytes;
-        let Some(base) = cid
-            .checked_mul(entry)
-            .and_then(|o| o.checked_add(self.cid_map_offset))
-        else {
-            return Ok(None);
-        };
-        // This entry and the next: the next one's offset ends the glyph.
-        let Some(map) = base
-            .checked_add(2 * entry)
-            .and_then(|end| data.get(base..end))
-        else {
-            return Ok(None);
-        };
-        let fd = read_be(&map[..self.fd_bytes]);
-        let start = read_be(&map[self.fd_bytes..entry]);
-        let end = read_be(&map[entry + self.fd_bytes..]);
-        if end <= start {
+        let Some((fd, charstring)) = self.map.glyph(data, cid) else {
             return Ok(None); // missing glyph
-        }
-        let (Some(fd), Some(charstring)) = (self.fds.get(fd), data.get(start..end)) else {
+        };
+        let Some(fd) = self.fds.get(fd) else {
             return Ok(None);
         };
         let mut glyph = charstring::execute_charstring(charstring, &fd.subrs, fd.len_iv, false)
@@ -304,36 +271,15 @@ fn fd_type1(ctx: &Context, fd: EntityId, data: &[u8]) -> Result<FdType1, PsError
     })
 }
 
-/// Slice a Private dict's subroutines out of `GlyphData`: `SubrCount + 1`
-/// offsets of `SDBytes` each from `SubrMapOffset`, subroutine *i* running
-/// from offset *i* to offset *i + 1*. None when `SubrCount` is absent.
+/// A Private dict's subroutines, located by its `SubrMapOffset` /
+/// `SDBytes` / `SubrCount`. None when `SubrCount` is absent.
 fn subrs_from_map(ctx: &Context, private: EntityId, data: &[u8]) -> Result<Vec<Vec<u8>>, PsError> {
     let Some(count) = get_usize(ctx, private, b"SubrCount") else {
         return Ok(Vec::new());
     };
     let sd_bytes = get_usize(ctx, private, b"SDBytes").ok_or(PsError::InvalidFont)?;
     let map_offset = get_usize(ctx, private, b"SubrMapOffset").ok_or(PsError::InvalidFont)?;
-    if sd_bytes == 0 || sd_bytes > MAX_OFFSET_BYTES {
-        return Err(PsError::InvalidFont);
-    }
-    // The whole map must be present before anything is sized from `count`,
-    // which comes from the file.
-    let map = count
-        .checked_add(1)
-        .and_then(|n| n.checked_mul(sd_bytes))
-        .and_then(|n| n.checked_add(map_offset))
-        .and_then(|end| data.get(map_offset..end))
-        .ok_or(PsError::InvalidFont)?;
-    let offsets: Vec<usize> = map.chunks_exact(sd_bytes).map(read_be).collect();
-    Ok(offsets
-        .windows(2)
-        .map(|w| data.get(w[0]..w[1]).unwrap_or_default().to_vec())
-        .collect())
-}
-
-/// A big-endian unsigned integer of up to [`MAX_OFFSET_BYTES`] bytes.
-fn read_be(bytes: &[u8]) -> usize {
-    bytes.iter().fold(0, |v, &b| (v << 8) | b as usize)
+    cid_type0::subrs(data, map_offset, sd_bytes, count).map_err(|_| PsError::InvalidFont)
 }
 
 fn get(ctx: &Context, dict: EntityId, key: &[u8]) -> Option<PsObject> {

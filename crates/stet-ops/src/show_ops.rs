@@ -2666,10 +2666,26 @@ impl CidGlyphSource {
         }))
     }
 
-    /// The glyph for `cid`, from the font's glyph cache or built and cached
-    /// on a miss. `None` when the font has no glyph for it; `Err` when its
-    /// charstring is broken.
+    /// The glyph shown for `cid`: its own, or CID 0's when the font has
+    /// none for it — "If the CIDFont file is missing glyph data for a
+    /// particular CID, the CID with an index value of 0 (which must have
+    /// glyph data) is used" (Adobe TN 5014 §2.5). `None` only when CID 0 is
+    /// missing too; `Err` when a charstring is broken.
     fn glyph(
+        &self,
+        ctx: &mut Context,
+        cidfont: EntityId,
+        cid: i32,
+    ) -> Result<Option<CachedGlyph>, PsError> {
+        match self.lookup(ctx, cidfont, cid)? {
+            None if cid != 0 => self.lookup(ctx, cidfont, 0),
+            glyph => Ok(glyph),
+        }
+    }
+
+    /// The glyph for `cid`, from the font's glyph cache or built and cached
+    /// on a miss. `None` when the font has no glyph for it.
+    fn lookup(
         &self,
         ctx: &mut Context,
         cidfont: EntityId,
@@ -2927,7 +2943,7 @@ fn render_composite_cff_cids(
             width_y,
         }) = source.glyph(ctx, cidfont_entity, cid)?
         else {
-            // No glyph for this CID — advance by default width
+            // Not even CID 0 has a glyph: advance by the default width.
             if let Some(v) = &vertical {
                 let (_, wy) = v.advance(&combined_fm);
                 record_cid_glyph(

@@ -318,7 +318,7 @@ pub fn parse_cff(data: &[u8]) -> Result<Vec<CffFont>, String> {
 // ---------------------------------------------------------------------------
 
 /// Parse a CFF INDEX structure. Returns (list of byte slices, offset after INDEX).
-fn parse_index(data: &[u8], offset: usize) -> Result<(Vec<Vec<u8>>, usize), String> {
+pub(crate) fn parse_index(data: &[u8], offset: usize) -> Result<(Vec<Vec<u8>>, usize), String> {
     if offset + 2 > data.len() {
         return Err("INDEX: truncated count".into());
     }
@@ -375,7 +375,7 @@ fn parse_index(data: &[u8], offset: usize) -> Result<(Vec<Vec<u8>>, usize), Stri
 /// add. Reject anything outside what a CFF offset can actually address
 /// instead; `u32::MAX` is the ceiling because INDEX offSize is at most 4 bytes
 /// and a DICT integer operand is at most 32-bit.
-fn dict_usize(v: f64) -> Option<usize> {
+pub(crate) fn dict_usize(v: f64) -> Option<usize> {
     if v.is_finite() && v >= 0.0 && v <= f64::from(u32::MAX) {
         Some(v as usize)
     } else {
@@ -409,26 +409,26 @@ fn read_offset(data: &[u8], offset: usize, off_size: usize) -> usize {
 
 /// DICT operator key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DictOp {
+pub(crate) enum DictOp {
     OneByte(u8),
     TwoByte(u8, u8),
 }
 
 /// A DICT entry: operator key → operands.
-struct DictEntry {
-    op: DictOp,
-    operands: Vec<f64>,
+pub(crate) struct DictEntry {
+    pub(crate) op: DictOp,
+    pub(crate) operands: Vec<f64>,
 }
 
 /// Look up an operator's operands in a parsed DICT.
-fn dict_get(dict: &[DictEntry], op: DictOp) -> Option<&[f64]> {
+pub(crate) fn dict_get(dict: &[DictEntry], op: DictOp) -> Option<&[f64]> {
     dict.iter()
         .find(|e| e.op == op)
         .map(|e| e.operands.as_slice())
 }
 
 /// Parse CFF DICT binary data into a list of entries.
-fn parse_dict_data(data: &[u8]) -> Vec<DictEntry> {
+pub(crate) fn parse_dict_data(data: &[u8]) -> Vec<DictEntry> {
     let mut result = Vec::new();
     let mut operands: Vec<f64> = Vec::new();
     let mut i = 0;
@@ -642,7 +642,11 @@ fn parse_charset(
 /// Build a CID→GID reverse mapping from a CID-keyed CFF charset.
 /// In CID fonts, charset values are CID values. GID 0 always maps to CID 0.
 /// Returns a Vec where index = CID and value = GID.
-fn build_cid_to_gid(data: &[u8], offset: usize, n_glyphs: usize) -> Result<Vec<u16>, String> {
+pub(crate) fn build_cid_to_gid(
+    data: &[u8],
+    offset: usize,
+    n_glyphs: usize,
+) -> Result<Vec<u16>, String> {
     // Parse charset to get GID→CID pairs
     let mut gid_to_cid: Vec<u16> = vec![0]; // GID 0 → CID 0
     if n_glyphs <= 1 || offset >= data.len() {
@@ -877,7 +881,11 @@ fn get_predefined_encoding(
 // ---------------------------------------------------------------------------
 
 /// Parse FDSelect structure. Returns GID-indexed list of FD indices.
-fn parse_fd_select(data: &[u8], offset: usize, n_glyphs: usize) -> Result<Vec<u8>, String> {
+pub(crate) fn parse_fd_select(
+    data: &[u8],
+    offset: usize,
+    n_glyphs: usize,
+) -> Result<Vec<u8>, String> {
     if offset >= data.len() {
         return Err("FDSelect: offset out of bounds".into());
     }
@@ -938,7 +946,7 @@ fn parse_fd_select(data: &[u8], offset: usize, n_glyphs: usize) -> Result<Vec<u8
 // ---------------------------------------------------------------------------
 
 #[rustfmt::skip]
-const STANDARD_STRINGS: [&str; 391] = [
+pub(crate) const STANDARD_STRINGS: [&str; 391] = [
     // SID 0-9
     ".notdef", "space", "exclam", "quotedbl", "numbersign",
     "dollar", "percent", "ampersand", "quoteright", "parenleft",

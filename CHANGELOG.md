@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`stet-fonts` writes CFF and converts Type 1 charstrings to Type 2.**
+  `cff_writer` serialises a CID-keyed CFF font (and `read_cid_font` /
+  `CidFont::subset` read and subset one); `type1_to_type2` converts a
+  Type 1 charstring to Type 2, keeping stem hints, hint replacement (as
+  `hintmask`) and flex; `cid_type0` reads the glyph data of a CIDFontType 0
+  font with Type 1 charstrings. They are what PDF output of those fonts is
+  built on.
 - **`setoverprintmode` and `currentoverprintmode`,** the PostScript
   spelling of PDF's `/OPM`. They are Adobe extensions outside the PLRM,
   which Ghostscript also provides. With `true setoverprintmode` and
@@ -62,7 +69,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in the test corpus lost some or all of theirs. `show`, `stringwidth`,
   `charpath` and `xshow`/`yshow`/`xyshow` now draw them, in both writing
   modes, with each `FDArray` font's own `FontMatrix`, `lenIV` and
-  subroutines. PDF output of these fonts is not yet embedded.
+  subroutines. A CID the font has no glyph for shows CID 0, as the CIDFont
+  specification requires, instead of an empty advance.
+
+  Converting such PostScript to PDF embeds the fonts, subset to the CIDs
+  used, as CFF (`/CIDFontType0C`, the only CIDFont program PDF has for
+  them): each Type 1 charstring is converted to Type 2 with its hints,
+  hint replacement and flex kept. CFF CID fonts loaded through
+  `FontSetInit` are embedded the same way. Both used to fall back to an
+  unembedded simple font, which garbled the text.
+- **Subset CFF CID fonts draw the right glyphs.** A CID-keyed CFF font
+  loaded through `FontSetInit` had its glyphs looked up as if each CID
+  were the glyph's index in the font, which holds only for a complete
+  font; in a subset one, as producers embed them, text drew the wrong
+  glyphs or none.
 - **Type 1 glyphs that draw without an explicit `rmoveto` no longer
   sprout lines from the page corner.** The Type 1 format lets a glyph
   start drawing at the point `hsbw` sets, and `closepath`, unlike

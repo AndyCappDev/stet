@@ -20,6 +20,9 @@ renderer. If you're building a stet-family project, the
 | `charstring` | Type 1 charstring interpreter (`CharString` → `PsPath`) |
 | `cff_parser` | Compact Font Format (CFF) parser — returns every font in the file, including CID-keyed FontSets |
 | `type2_charstring` | Type 2 charstring interpreter for CFF glyphs |
+| `cff_writer` | CID-keyed CFF writer, with a reader (`read_cid_font`) and `CidFont::subset` for round trips — what PDF `/CIDFontType0C` embedding needs |
+| `type1_to_type2` | Type 1 → Type 2 charstring conversion: subroutines inlined, stem hints, hint replacement (as `hintmask`) and flex kept |
+| `cid_type0` | Glyph data of CIDFontType 0 fonts with Type 1 charstrings: the CID map and subroutine map inside the `StartData` block |
 | `truetype` | TrueType table accessors (`head`, `loca`, `glyf`, `hmtx`, `cmap`), simple & composite glyph resolution, `glyf` → `PsPath` conversion |
 | `encoding` | `StandardEncoding`, `ISOLatin1Encoding`, `SymbolEncoding`, and other named encodings |
 | `agl` | Adobe Glyph List — glyph name → Unicode, as one BMP code point for glyph selection or as full text (suffixes, `f_f_i` ligature names, supplementary planes) for extraction |

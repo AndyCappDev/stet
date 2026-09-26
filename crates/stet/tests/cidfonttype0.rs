@@ -13,6 +13,9 @@
 //! (`lenIV` 4) charstring; a subroutine reached through `SubrMapOffset`; and
 //! a CID whose map entry is empty.
 //!
+//! These fonts reach PDF output as embedded CFF (`/CIDFontType0C`); the
+//! last tests check that the PDF draws what the interpreter draws.
+//!
 //! Every glyph is a 100-unit square drawn from (100, 100) that advances 500
 //! units, so through FD 1 it is a 200-unit square from (200, 200) advancing
 //! 1000. Shown at 100 points, a unit is 0.1 point.
@@ -69,10 +72,11 @@ const ENDCHAR: i32 = 14;
 const CALLSUBR: i32 = 10;
 const RETURN: i32 = 11;
 
-/// The glyph data and header of `/T1CID`: CID 1 through FD 0 (identity,
-/// unencrypted), CID 2 through FD 1 (doubled, encrypted, drawn by a
-/// subroutine), CID 3 empty.
+/// The glyph data and header of `/T1CID`: CID 0 an empty `.notdef`
+/// advancing 250, CID 1 through FD 0 (identity, unencrypted), CID 2 through
+/// FD 1 (doubled, encrypted, drawn by a subroutine), CID 3 empty.
 fn font(binary: bool) -> Vec<u8> {
+    let notdef = ops(&[&[0, 250, HSBW], &[ENDCHAR]]);
     let square: &[&[i32]] = &[
         &[0, 500, HSBW],
         &[100, 100, RMOVETO],
@@ -101,12 +105,13 @@ fn font(binary: bool) -> Vec<u8> {
     let map_len = 5 * 3;
     let subr_map = map_len; // one subroutine: two 2-byte offsets
     let subr_at = subr_map + 4;
-    let cid1_at = subr_at + subr.len();
+    let cid0_at = subr_at + subr.len();
+    let cid1_at = cid0_at + notdef.len();
     let cid2_at = cid1_at + cid1.len();
     let end = cid2_at + cid2.len();
     let mut data = Vec::new();
     for (fd, off) in [
-        (0u8, cid1_at),
+        (0u8, cid0_at),
         (0, cid1_at),
         (1, cid2_at),
         (0, end),
@@ -116,8 +121,9 @@ fn font(binary: bool) -> Vec<u8> {
         data.extend((off as u16).to_be_bytes());
     }
     data.extend((subr_at as u16).to_be_bytes());
-    data.extend((cid1_at as u16).to_be_bytes());
+    data.extend((cid0_at as u16).to_be_bytes());
     data.extend(&subr);
+    data.extend(&notdef);
     data.extend(&cid1);
     data.extend(&cid2);
 
@@ -220,13 +226,13 @@ fn binary_glyph_data_reads_like_hex() {
     assert!(close(boxes[1], CID2_AT_60_100), "{:?}", boxes[1]);
 }
 
-/// An empty map entry is a missing glyph: nothing drawn, and the default
-/// width (`DW`, 1000 when absent) advanced — as for a missing CFF CID.
+/// An empty map entry is a missing glyph, shown as CID 0 (Adobe TN 5014
+/// §2.5): here an empty `.notdef`, so nothing drawn and 250 units advanced.
 #[test]
-fn missing_cid_draws_nothing_and_advances_the_default_width() {
+fn missing_cid_shows_cid_0() {
     let boxes = fills(&format!("10 100 moveto <0003> show {MARK}"));
     assert_eq!(boxes.len(), 1, "{boxes:?}");
-    assert_eq!(marker_x(boxes[0]), 110.0);
+    assert_eq!(marker_x(boxes[0]), 35.0);
 }
 
 #[test]
@@ -255,4 +261,161 @@ fn xyshow_draws_the_glyphs() {
     assert_eq!(boxes.len(), 2, "{boxes:?}");
     assert!(close(boxes[0], CID1_AT_10_100), "{:?}", boxes[0]);
     assert!(close(boxes[1], CID2_AT_60_100), "{:?}", boxes[1]);
+}
+
+// ---------------------------------------------------------------------------
+// PDF output
+// ---------------------------------------------------------------------------
+
+/// Device bounding boxes of the fills in the PDF stet writes for `ps`, as
+/// the PDF reader draws them: the embedded font's glyphs and the markers.
+#[cfg(feature = "pdf-output")]
+fn pdf_fills(ps: &[u8]) -> Vec<[f64; 4]> {
+    let pdf = Interpreter::builder()
+        .build()
+        .render_to_pdf(ps, 72.0)
+        .expect("writes a PDF");
+    let text = String::from_utf8_lossy(&pdf);
+    assert!(text.contains("/CIDFontType0C"), "an embedded CFF CIDFont");
+    let doc = stet_pdf_reader::PdfDocument::from_bytes(&pdf).expect("reads back");
+    doc.render_page(0, 72.0)
+        .expect("renders")
+        .elements()
+        .iter()
+        .filter_map(|e| match e {
+            DisplayElement::Fill { path, .. } => Some(bbox(&path.segments)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The interpreter's fills for the same job, for comparison.
+fn ps_fills(ps: &[u8]) -> Vec<[f64; 4]> {
+    let mut interp = Interpreter::builder().build();
+    let pages = interp.render_to_display_list(ps, 72.0).expect("renders");
+    pages[0]
+        .display_list
+        .elements()
+        .iter()
+        .filter_map(|e| match e {
+            DisplayElement::Fill { path, .. } => Some(bbox(&path.segments)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Every fill in `pdf` matches the corresponding one in `ps`.
+fn assert_same_fills(ps: &[[f64; 4]], pdf: &[[f64; 4]]) {
+    assert_eq!(ps.len(), pdf.len(), "PS {ps:?}\nPDF {pdf:?}");
+    for (a, b) in ps.iter().zip(pdf) {
+        assert!(
+            a.iter().zip(b).all(|(a, b)| (a - b).abs() < 0.01),
+            "PS {a:?} PDF {b:?}"
+        );
+    }
+}
+
+/// The GlyphData font becomes a CFF CIDFont: both FDs, the subroutine,
+/// and the missing CID, which shows CID 0 and advances its width.
+#[cfg(feature = "pdf-output")]
+#[test]
+fn pdf_output_draws_glyph_data_fonts_as_the_interpreter_does() {
+    let mut ps = b"%!PS\n<< /PageSize [600 400] >> setpagedevice\n".to_vec();
+    ps.extend(font(false));
+    ps.extend(
+        format!(
+            "/F findfont 100 scalefont setfont\n\
+             10 100 moveto <0001000200030001> show {MARK}\nshowpage\n"
+        )
+        .bytes(),
+    );
+    let expected = ps_fills(&ps);
+    // CID 1, CID 2, then CID 1 again after the 25-point notdef; the marker.
+    assert_eq!(expected.len(), 4, "{expected:?}");
+    assert_eq!(expected[2][0], 20.0 + 50.0 + 100.0 + 25.0);
+    assert_same_fills(&expected, &pdf_fills(&ps));
+}
+
+/// A subset CFF CIDFont, as a producer embeds one: its charset maps GIDs
+/// to scattered CIDs, and its FDSelect picks between two Font DICTs with
+/// different default widths. CID 3 is a 100-unit square at (100, 100),
+/// CID 7 a 200-unit one through FD 1, which advances 800; CID 5 is not in
+/// the font and shows CID 0, an empty glyph advancing 500.
+fn subset_cff_font() -> Vec<u8> {
+    use stet_fonts::cff_writer::{CidFont, FontDict, Glyph, write_cid_font};
+
+    fn square(size: i32) -> Vec<u8> {
+        // 100 100 rmoveto size 0 rlineto 0 size rlineto -size 0 rlineto endchar
+        let n = |v: i32| num(v);
+        [
+            n(100),
+            n(100),
+            vec![21],
+            n(size),
+            n(0),
+            n(0),
+            n(size),
+            n(-size),
+            n(0),
+            vec![5],
+            vec![14],
+        ]
+        .concat()
+    }
+
+    let mut cff = CidFont::new("SubCID", "Adobe", "Identity", 0);
+    cff.cid_count = 10;
+    let mut fd0 = FontDict::default();
+    fd0.private.default_width_x = 500.0;
+    let mut fd1 = FontDict::default();
+    fd1.private.default_width_x = 800.0;
+    cff.font_dicts = vec![fd0, fd1];
+    cff.glyphs = vec![
+        Glyph::new(0, 0, vec![14]),
+        Glyph::new(3, 0, square(100)),
+        Glyph::new(7, 1, square(200)),
+    ];
+    let data = write_cid_font(&cff).unwrap();
+
+    let mut ps = b"%!PS\n<< /PageSize [600 400] >> setpagedevice\n\
+        /FontSetInit /ProcSet findresource begin\n"
+        .to_vec();
+    ps.extend(format!("/SubCID {} StartData ", data.len()).bytes());
+    ps.extend(&data);
+    ps.extend(
+        format!(
+            "\nend\n/F /Identity-H [/SubCID /CIDFont findresource] composefont pop\n\
+             /F findfont 100 scalefont setfont\n\
+             10 100 moveto <000300070005> show {MARK}\nshowpage\n"
+        )
+        .bytes(),
+    );
+    ps
+}
+
+#[test]
+fn a_subset_cff_cidfont_draws_its_cids() {
+    let fills = ps_fills(&subset_cff_font());
+    assert_eq!(fills.len(), 3, "{fills:?}");
+    // CID 3 at x 10: 10 points from 20.
+    assert!(
+        close(fills[0], [20.0, 280.0, 30.0, 290.0]),
+        "{:?}",
+        fills[0]
+    );
+    // CID 7 at x 60: 20 points from 70.
+    assert!(
+        close(fills[1], [70.0, 270.0, 90.0, 290.0]),
+        "{:?}",
+        fills[1]
+    );
+    // 50 + 80 + 50 points on.
+    assert_eq!(marker_x(fills[2]), 190.0);
+}
+
+#[cfg(feature = "pdf-output")]
+#[test]
+fn pdf_output_subsets_cff_cidfonts() {
+    let ps = subset_cff_font();
+    assert_same_fills(&ps_fills(&ps), &pdf_fills(&ps));
 }
