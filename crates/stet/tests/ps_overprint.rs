@@ -300,3 +300,27 @@ showpage
     );
     assert_eq!(page.overlap(0), page.at(85, 10), "overprint was reset");
 }
+
+/// Colorant names may be strings (PLRM 4.8.4), and pdftops writes every one
+/// that way. They used to become an empty name: `(Magenta)` was a nameless
+/// spot rather than the Magenta plate, so it knocked out the cyan beneath.
+#[test]
+fn string_colorant_names_are_colorants() {
+    let page = Page::render(
+        r#"%!PS
+<< /PageSize [800 120] >> setpagedevice
+/bg { false setoverprint 1 0 0 0 setcmykcolor 0 20 60 60 rectfill } def
+/fg { 30 50 60 60 rectfill } def
+gsave   0 0 translate bg true setoverprint
+  [/Separation (Magenta) /DeviceCMYK { 0 exch 0 0 }] setcolorspace 1 setcolor fg grestore
+gsave 100 0 translate bg true setoverprint
+  [/DeviceN [(Yellow) (Test Spot)] /DeviceCMYK { 0 exch 0 0 4 -1 roll 0 0 0 }]
+  setcolorspace 1 0 setcolor fg grestore
+gsave 200 0 translate 1 1 0 0 setcmykcolor fg grestore
+gsave 300 0 translate 1 0 1 0 setcmykcolor fg grestore
+showpage
+"#,
+    );
+    assert_eq!(page.overlap(0), page.paint_alone(2), "(Magenta)");
+    assert_eq!(page.overlap(1), page.paint_alone(3), "(Yellow)");
+}

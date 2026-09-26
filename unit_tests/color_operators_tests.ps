@@ -393,6 +393,15 @@ currentcolorspace 0 get /DeviceN {eq} [true] assert
 [/Separation /Spot [/Indexed /DeviceRGB 1 <FF0000 00FF00>] {dup dup}] /setcolorspace
   [[/Separation /Spot [/Indexed /DeviceRGB 1 <FF0000 00FF00>] {dup dup}] /rangecheck] assert
 
+%% Colorant names may be names or strings, interchangeably (PLRM 4.8.4);
+%% anything else is a typecheck, as in Ghostscript.
+[/Separation (PANTONE 273 C) /DeviceCMYK {0 0 0}] /setcolorspace [] assert
+[/DeviceN [(Cyan) /Spot] /DeviceCMYK {0 0}] /setcolorspace [] assert
+[/Separation 5 /DeviceGray {}] /setcolorspace
+  [[/Separation 5 /DeviceGray {}] /typecheck] assert
+[/DeviceN [/Spot 5] /DeviceGray {pop}] /setcolorspace
+  [[/DeviceN [/Spot 5] /DeviceGray {pop}] /typecheck] assert
+
 %% Non-numeric setcolor operand in Indexed space
 [/Indexed /DeviceRGB 2 <FF0000 00FF00 0000FF>] setcolorspace
 (string) /setcolor [(string) /typecheck] assert

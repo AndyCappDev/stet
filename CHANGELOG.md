@@ -54,6 +54,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   overprint turned off entirely on pages small enough to render in one
   piece, so the same file could overprint at 300 dpi and not at 72.
 
+- **Separation and DeviceN colorant names given as strings are now
+  recognised.** The PLRM lets a colorant be a name or a string, and
+  pdftops writes every one as a string (`(Black)`, `(PANTONE 273 C)`,
+  `(All)`), but stet read any string as an empty name. Under overprint,
+  process colorants were then taken for spots, so `(Black)` or `(Magenta)`
+  knocked out the other plates, and a DeviceN backdrop of `(Black)` plus a
+  spot lost its black. The GWG 3.0 gray-overprint test page converted with
+  pdftops now matches Ghostscript. PDF output carries the real spot names
+  rather than empty ones. A colorant that is neither a name nor a string is
+  now a `typecheck`, as in Ghostscript, instead of being accepted silently.
+
 - **`initgraphics` and `showpage` no longer reset the whole graphics
   state.** The PLRM has `initgraphics` reset the transformation matrix,
   path, clip, colour and line settings only, and leave everything else

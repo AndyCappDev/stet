@@ -1353,6 +1353,22 @@ fn extract_icc_profile(
     ctx.icc_cache.register_profile(&bytes)
 }
 
+/// A Separation or DeviceN colorant name.
+///
+/// PLRM 3e 4.8.4: "Name and string objects can be used interchangeably as
+/// names; a string may be more convenient if the desired name contains
+/// spaces". pdftops writes every colorant as a string (`(Black)`,
+/// `(PANTONE 273 C)`, `(All)`), and these used to become an empty name, so
+/// process colorants were taken for spots and `(All)` for a spot called "".
+/// Anything else is a `typecheck`, as in Ghostscript.
+fn colorant_name(ctx: &Context, obj: &PsObject) -> Result<Vec<u8>, PsError> {
+    match obj.value {
+        PsValue::Name(id) => Ok(ctx.names.get_bytes(id).to_vec()),
+        PsValue::String { entity, start, len } => Ok(ctx.strings.get(entity, start, len).to_vec()),
+        _ => Err(PsError::TypeCheck),
+    }
+}
+
 /// Parse `[/Separation name alternativeSpace tintTransform]` from an array.
 fn parse_separation_colorspace(
     ctx: &mut Context,
@@ -1361,10 +1377,7 @@ fn parse_separation_colorspace(
 ) -> Result<ColorSpace, PsError> {
     // Element 1: colorant name
     let name_obj = ctx.arrays.get_element(entity, start + 1);
-    let name = match name_obj.value {
-        PsValue::Name(id) => ctx.names.get_bytes(id).to_vec(),
-        _ => Vec::new(),
-    };
+    let name = colorant_name(ctx, &name_obj)?;
 
     // Element 2: alternative color space (name)
     let alt_obj = ctx.arrays.get_element(entity, start + 2);
@@ -1398,11 +1411,7 @@ fn parse_devicen_colorspace(
             let mut names = Vec::with_capacity(len as usize);
             for i in 0..len {
                 let elem = ctx.arrays.get_element(name_ent, name_start + i);
-                let name_bytes = match elem.value {
-                    PsValue::Name(id) => ctx.names.get_bytes(id).to_vec(),
-                    _ => Vec::new(),
-                };
-                names.push(name_bytes);
+                names.push(colorant_name(ctx, &elem)?);
             }
             (len, names)
         }
