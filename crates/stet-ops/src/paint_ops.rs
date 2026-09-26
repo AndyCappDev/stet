@@ -48,12 +48,18 @@ pub(crate) fn capture_spot_color(ctx: &Context) -> Option<SpotColor> {
 ///
 /// Every paint site takes its colour fields from here so that PostScript
 /// paints carry the same overprint information the PDF reader derives from
-/// `/OP`, `/op` and the colour space. PostScript has no overprint mode, so
-/// `overprint_mode` stays 0 (every colorant of the colour space is painted,
-/// including zero-valued DeviceCMYK components).
+/// `/OP`, `/op`, `/OPM` and the colour space.
 pub(crate) struct PaintColor {
     pub color: DeviceColor,
     pub overprint: bool,
+    /// From `setoverprintmode`. Under 1 with overprint on, a DeviceCMYK
+    /// paint leaves the colorants whose component is 0 untouched.
+    pub overprint_mode: i32,
+    /// Always true when `overprint_mode` is 1: PostScript sets overprint and
+    /// its mode with separate operators, so there is no PDF-style "same
+    /// ExtGState dict" signal to read, and Ghostscript's `tiffsep` treats an
+    /// all-zero CMYK paint under mode 1 as painting nothing at all.
+    pub opm_paired: bool,
     pub painted_channels: u8,
     pub is_device_cmyk: bool,
     pub spot_color: Option<SpotColor>,
@@ -71,8 +77,11 @@ pub(crate) fn capture_paint_color(ctx: &Context) -> PaintColor {
         ColorSpace::ICCBased { n: 4, .. } => color.native_cmyk.is_some(),
         _ => false,
     };
+    let overprint_mode = ctx.gstate.overprint_mode;
     PaintColor {
         overprint: ctx.gstate.overprint,
+        overprint_mode,
+        opm_paired: overprint_mode == 1,
         painted_channels: painted_channels_for_space(space),
         is_device_cmyk,
         spot_color: capture_spot_color(ctx),
@@ -259,8 +268,8 @@ fn push_fill_element(ctx: &mut Context, path: PsPath, fill_rule: FillRule) {
         ctm: Matrix::identity(),
         is_text_glyph: false,
         overprint: paint.overprint,
-        overprint_mode: 0,
-        opm_paired: false,
+        overprint_mode: paint.overprint_mode,
+        opm_paired: paint.opm_paired,
         painted_channels: paint.painted_channels,
         is_device_cmyk: paint.is_device_cmyk,
         spot_color: paint.spot_color,
@@ -387,8 +396,8 @@ fn stroke_native(ctx: &mut Context) -> Result<(), PsError> {
                 stroke_adjust: ctx.gstate.stroke_adjust,
                 is_text_glyph: false,
                 overprint: paint.overprint,
-                overprint_mode: 0,
-                opm_paired: false,
+                overprint_mode: paint.overprint_mode,
+                opm_paired: paint.opm_paired,
                 painted_channels: paint.painted_channels,
                 is_device_cmyk: paint.is_device_cmyk,
                 spot_color: paint.spot_color,
@@ -428,8 +437,8 @@ fn stroke_native(ctx: &mut Context) -> Result<(), PsError> {
             stroke_adjust: ctx.gstate.stroke_adjust,
             is_text_glyph: false,
             overprint: paint.overprint,
-            overprint_mode: 0,
-            opm_paired: false,
+            overprint_mode: paint.overprint_mode,
+            opm_paired: paint.opm_paired,
             painted_channels: paint.painted_channels,
             is_device_cmyk: paint.is_device_cmyk,
             spot_color: paint.spot_color,
@@ -601,8 +610,8 @@ pub fn op_rectstroke(ctx: &mut Context) -> Result<(), PsError> {
             stroke_adjust: ctx.gstate.stroke_adjust,
             is_text_glyph: false,
             overprint: paint.overprint,
-            overprint_mode: 0,
-            opm_paired: false,
+            overprint_mode: paint.overprint_mode,
+            opm_paired: paint.opm_paired,
             painted_channels: paint.painted_channels,
             is_device_cmyk: paint.is_device_cmyk,
             spot_color: paint.spot_color,
@@ -640,8 +649,8 @@ pub fn op_rectstroke(ctx: &mut Context) -> Result<(), PsError> {
             stroke_adjust: ctx.gstate.stroke_adjust,
             is_text_glyph: false,
             overprint: paint.overprint,
-            overprint_mode: 0,
-            opm_paired: false,
+            overprint_mode: paint.overprint_mode,
+            opm_paired: paint.opm_paired,
             painted_channels: paint.painted_channels,
             is_device_cmyk: paint.is_device_cmyk,
             spot_color: paint.spot_color,

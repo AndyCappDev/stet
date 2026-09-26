@@ -260,6 +260,13 @@ pub fn build_system_dict(ctx: &mut Context) {
     register(ctx, sd, "packedarray", misc_ops::op_packedarray);
     register(ctx, sd, "setoverprint", misc_ops::op_setoverprint);
     register(ctx, sd, "currentoverprint", misc_ops::op_currentoverprint);
+    register(ctx, sd, "setoverprintmode", misc_ops::op_setoverprintmode);
+    register(
+        ctx,
+        sd,
+        "currentoverprintmode",
+        misc_ops::op_currentoverprintmode,
+    );
     register(ctx, sd, "break", misc_ops::op_break);
     register(ctx, sd, "setcacheparams", misc_ops::op_setcacheparams);
     register(

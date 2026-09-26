@@ -237,6 +237,10 @@ pub struct GraphicsState {
     pub flatness: f64,
     pub stroke_adjust: bool,
     pub overprint: bool,
+    /// Overprint mode, 0 or 1, set by `setoverprintmode` (an Adobe
+    /// version-3015 extension; PDF `/OPM`). Under 1, a DeviceCMYK paint with
+    /// overprint on leaves the colorants whose component is 0 untouched.
+    pub overprint_mode: i32,
     pub smoothness: f64,
     pub default_ctm: Matrix,
 
@@ -346,6 +350,7 @@ impl GraphicsState {
             flatness: 1.0,
             stroke_adjust: false,
             overprint: false,
+            overprint_mode: 0,
             smoothness: 1.0,
             default_ctm: Matrix::identity(),
             clip_stack: Vec::new(),

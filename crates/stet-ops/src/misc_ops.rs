@@ -890,6 +890,34 @@ pub fn op_currentoverprint(ctx: &mut Context) -> Result<(), PsError> {
     Ok(())
 }
 
+/// `setoverprintmode`: bool → —
+///
+/// Not in the PLRM: an Adobe version-3015 extension that Ghostscript also
+/// provides (`gs_ll3.ps`), and the PostScript spelling of PDF `/OPM`. `true`
+/// selects mode 1, where a DeviceCMYK paint under `setoverprint` leaves the
+/// colorants whose component is 0 untouched; `false` restores mode 0.
+/// PDF-to-PostScript converters such as pdftops probe for it with `where`,
+/// so without it every `/OPM 1` in the source silently became mode 0.
+pub fn op_setoverprintmode(ctx: &mut Context) -> Result<(), PsError> {
+    if ctx.o_stack.is_empty() {
+        return Err(PsError::StackUnderflow);
+    }
+    let val = match ctx.o_stack.peek(0)?.value {
+        PsValue::Bool(b) => b,
+        _ => return Err(PsError::TypeCheck),
+    };
+    ctx.o_stack.pop()?;
+    ctx.gstate.overprint_mode = i32::from(val);
+    Ok(())
+}
+
+/// `currentoverprintmode`: — → bool
+pub fn op_currentoverprintmode(ctx: &mut Context) -> Result<(), PsError> {
+    ctx.o_stack
+        .push(PsObject::bool(ctx.gstate.overprint_mode != 0))?;
+    Ok(())
+}
+
 /// `setcacheparams`: mark int ... → — (set font cache parameters)
 /// `setcacheparams`: mark ... int(s) → —
 ///

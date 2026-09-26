@@ -5543,8 +5543,8 @@ fn push_glyph_element(
             stroke_adjust: false,
             is_text_glyph: true,
             overprint: paint.overprint,
-            overprint_mode: 0,
-            opm_paired: false,
+            overprint_mode: paint.overprint_mode,
+            opm_paired: paint.opm_paired,
             painted_channels: paint.painted_channels,
             is_device_cmyk: paint.is_device_cmyk,
             spot_color: paint.spot_color,
@@ -5568,8 +5568,8 @@ fn push_glyph_element(
             fill_rule: FillRule::NonZeroWinding,
             is_text_glyph: true,
             overprint: paint.overprint,
-            overprint_mode: 0,
-            opm_paired: false,
+            overprint_mode: paint.overprint_mode,
+            opm_paired: paint.opm_paired,
             painted_channels: paint.painted_channels,
             is_device_cmyk: paint.is_device_cmyk,
             spot_color: paint.spot_color,
@@ -5741,6 +5741,8 @@ fn recolor_and_translate_element(
             let mut params = params.clone();
             params.color = color.clone();
             params.overprint = paint.overprint;
+            params.overprint_mode = paint.overprint_mode;
+            params.opm_paired = paint.opm_paired;
             params.painted_channels = paint.painted_channels;
             params.is_device_cmyk = paint.is_device_cmyk;
             params.spot_color = paint.spot_color.clone();
@@ -5753,6 +5755,8 @@ fn recolor_and_translate_element(
             let mut params = params.clone();
             params.color = color.clone();
             params.overprint = paint.overprint;
+            params.overprint_mode = paint.overprint_mode;
+            params.opm_paired = paint.opm_paired;
             params.painted_channels = paint.painted_channels;
             params.is_device_cmyk = paint.is_device_cmyk;
             params.spot_color = paint.spot_color.clone();
@@ -6001,6 +6005,8 @@ mod tests {
         let paint = crate::paint_ops::PaintColor {
             color: stet_graphics::color::DeviceColor::from_gray(0.0),
             overprint: false,
+            overprint_mode: 0,
+            opm_paired: false,
             painted_channels: 0,
             is_device_cmyk: false,
             spot_color: None,

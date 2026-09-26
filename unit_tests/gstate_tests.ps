@@ -184,6 +184,29 @@ grestoreall
 grestoreall /currentoverprint [false] assert
 
 
+%% setoverprintmode / currentoverprintmode %%
+% Adobe version-3015 extensions (not in the PLRM); Ghostscript agrees with
+% every expectation below.
+/currentoverprintmode [false] assert
+true /setoverprintmode [] assert
+/currentoverprintmode [true] assert
+false setoverprintmode /currentoverprintmode [false] assert
+
+% Part of the graphics state
+true setoverprintmode
+gsave false setoverprintmode /currentoverprintmode [false] assert grestore
+/currentoverprintmode [true] assert
+
+% Independent of setoverprint
+false setoverprint /currentoverprintmode [true] assert
+false setoverprintmode
+
+% Error conditions
+/setoverprintmode [/stackunderflow] assert
+1 /setoverprintmode [1 /typecheck] assert
+/true /setoverprintmode [/true /typecheck] assert
+
+
 %% =============================================================================
 %% GSTATE OBJECT OPERATORS (PostScript Level 2)
 %% =============================================================================

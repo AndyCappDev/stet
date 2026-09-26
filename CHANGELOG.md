@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`setoverprintmode` and `currentoverprintmode`,** the PostScript
+  spelling of PDF's `/OPM`. They are Adobe extensions outside the PLRM,
+  which Ghostscript also provides. With `true setoverprintmode` and
+  overprint on, a DeviceCMYK paint leaves the plates whose component is 0
+  untouched, so `0 1 0 0 setcmykcolor` over cyan gives blue rather than
+  magenta, and `0 0 0 0 setcmykcolor` paints nothing, as in Ghostscript.
+  pdftops output tests for the operator before calling it, so until now
+  every `/OPM 1` in a PDF converted to PostScript was silently treated as
+  mode 0. Converting PostScript to PDF now carries the mode into `/OPM`.
+  As with `setoverprint`, images do not overprint yet.
+
 ### Fixed
 
 - **A bare `stet` now opens the viewer when a page is shown.** With no
@@ -35,8 +48,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   painted: a spot over cyan keeps the cyan, and `/Separation /Magenta` or
   a DeviceN of `[/Yellow …]` leaves the other process plates alone. This
   covers fills, strokes and text; images and `imagemask` do not overprint
-  yet. DeviceCMYK still paints all four plates, since PostScript has no
-  overprint mode. Two related bugs went with it: a cached Type 3 glyph kept
+  yet. DeviceCMYK still paints all four plates unless `setoverprintmode`
+  selects mode 1 (see Added). Two related bugs went with it: a cached Type 3 glyph kept
   the overprint setting from when it was first drawn, and PostScript
   overprint turned off entirely on pages small enough to render in one
   piece, so the same file could overprint at 300 dpi and not at 72.
