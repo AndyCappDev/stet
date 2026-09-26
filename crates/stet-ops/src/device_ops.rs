@@ -308,12 +308,20 @@ pub fn op_setpagedevice(ctx: &mut Context) -> Result<(), PsError> {
     ctx.gstate.ctm = ctm;
     ctx.gstate.default_ctm = ctm;
 
-    // Reset graphics state (preserve page_device and CTM)
+    // PLRM setpagedevice: "reinitializes everything in the graphics state
+    // except the font parameter, including parameters not affected by
+    // initgraphics". The page device and CTM were just computed.
     let page_device = ctx.gstate.page_device;
     let default_ctm = ctx.gstate.default_ctm;
     let saved_ctm = ctx.gstate.ctm;
+    let current_font = ctx.gstate.current_font;
+    let clip_path_version = ctx.gstate.clip_path_version;
     ctx.gstate = GraphicsState::new();
     ctx.gstate.page_device = page_device;
+    ctx.gstate.current_font = current_font;
+    // Advanced, not reset: `grestore` compares versions to decide whether
+    // the device clip needs re-emitting.
+    ctx.gstate.clip_path_version = clip_path_version + 1;
     ctx.gstate.ctm = saved_ctm;
     ctx.gstate.default_ctm = default_ctm;
 
@@ -554,13 +562,10 @@ pub fn op_showpage_continue(ctx: &mut Context) -> Result<(), PsError> {
         device.erase_page();
     }
 
-    // Reset graphics state (preserves page_device and current_font per PLRM)
+    // The equivalent of initgraphics (PLRM showpage, step 3).
+    ctx.gstate.init_graphics();
     let page_device = ctx.gstate.page_device;
     let default_ctm = ctx.gstate.default_ctm;
-    let current_font = ctx.gstate.current_font;
-    ctx.gstate = GraphicsState::new();
-    ctx.gstate.page_device = page_device;
-    ctx.gstate.current_font = current_font;
 
     // initmatrix from page_device
     if page_device.is_some() && !is_null_device(ctx) {

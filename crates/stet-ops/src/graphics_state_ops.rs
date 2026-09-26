@@ -9,7 +9,7 @@
 
 use stet_core::context::Context;
 use stet_core::error::PsError;
-use stet_core::graphics_state::{GraphicsState, GstateEntry};
+use stet_core::graphics_state::GstateEntry;
 use stet_core::object::{PsObject, PsValue};
 use stet_graphics::color::{DashPattern, FillRule, LineCap, LineJoin};
 use stet_graphics::display_list::DisplayElement;
@@ -345,21 +345,11 @@ pub fn op_currentstrokeadjust(ctx: &mut Context) -> Result<(), PsError> {
 /// Preserves the page device dict across the reset. If a page device is active,
 /// recomputes CTM from its HWResolution and PageSize via `initmatrix`.
 pub fn op_initgraphics(ctx: &mut Context) -> Result<(), PsError> {
-    // Per PLRM: initgraphics preserves current font, page_device, and
-    // device-dependent parameters. Only resets CTM, path, clip, color,
-    // line width/cap/join, miter limit, and dash pattern.
-    let page_device = ctx.gstate.page_device;
-    let default_ctm = ctx.gstate.default_ctm;
-    let current_font = ctx.gstate.current_font;
-    ctx.gstate = GraphicsState::new();
-    ctx.gstate.page_device = page_device;
-    ctx.gstate.current_font = current_font;
-
-    if page_device.is_some() {
+    ctx.gstate.init_graphics();
+    if ctx.gstate.page_device.is_some() {
         crate::matrix_ops::op_initmatrix(ctx)?;
     } else {
-        ctx.gstate.ctm = default_ctm;
-        ctx.gstate.default_ctm = default_ctm;
+        ctx.gstate.ctm = ctx.gstate.default_ctm;
     }
 
     ctx.current_display_list_mut()

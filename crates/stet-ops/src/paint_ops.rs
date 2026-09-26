@@ -735,19 +735,12 @@ pub fn op_showpage(ctx: &mut Context) -> Result<(), PsError> {
         ctx.display_list.clear();
     }
 
-    // Reset graphics state (preserves page_device and current_font per PLRM)
-    let page_device = ctx.gstate.page_device;
-    let default_ctm = ctx.gstate.default_ctm;
-    let current_font = ctx.gstate.current_font;
-    ctx.gstate = stet_core::graphics_state::GraphicsState::new();
-    ctx.gstate.page_device = page_device;
-    ctx.gstate.current_font = current_font;
-
-    if page_device.is_some() {
+    // The equivalent of initgraphics (PLRM showpage, step 3).
+    ctx.gstate.init_graphics();
+    if ctx.gstate.page_device.is_some() {
         crate::matrix_ops::op_initmatrix(ctx)?;
     } else {
-        ctx.gstate.ctm = default_ctm;
-        ctx.gstate.default_ctm = default_ctm;
+        ctx.gstate.ctm = ctx.gstate.default_ctm;
     }
 
     if let Some(ref mut device) = ctx.device {

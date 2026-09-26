@@ -388,6 +388,109 @@ impl GraphicsState {
             text_knockout: true,
         }
     }
+
+    /// Reset the parameters `initgraphics` resets, leaving the rest alone.
+    ///
+    /// PLRM 3e (`initgraphics`) lists them: position, path, clipping path,
+    /// color space, color, line width, cap, join, miter limit and dash
+    /// pattern, plus the CTM, which the caller sets because the default
+    /// matrix depends on the page device. "All other graphics state
+    /// parameters are left unchanged. These include the current output
+    /// device, font parameter, stroke adjustment, clipping path stack, and
+    /// all device-dependent parameters": overprint, flatness, smoothness,
+    /// halftone, transfer, black generation and undercolor removal.
+    /// `showpage` performs the equivalent of `initgraphics`, so those
+    /// survive from page to page, as in Ghostscript.
+    ///
+    /// The PDF-imaging extension parameters (opacity, blend mode,
+    /// alpha-is-shape, text knockout) are outside the PLRM; they reset here
+    /// because Ghostscript's `gs_initgraphics` resets them.
+    ///
+    /// Every field is named below, so a new one fails to compile until it
+    /// is sorted into one group or the other.
+    pub fn init_graphics(&mut self) {
+        let GraphicsState {
+            // Reset.
+            color,
+            color_space,
+            path,
+            current_point,
+            clip_path,
+            line_width,
+            line_cap,
+            line_join,
+            miter_limit,
+            dash_pattern,
+            current_pattern,
+            pattern_underlying_color,
+            current_pattern_dict,
+            pattern_components,
+            bbox,
+            tint_values,
+            cached_tint_table,
+            fill_opacity,
+            stroke_opacity,
+            blend_mode,
+            alpha_is_shape,
+            text_knockout,
+            // Set by the caller.
+            ctm: _,
+            // Advanced, not reset: `grestore` compares versions to decide
+            // whether the device clip needs re-emitting.
+            clip_path_version: _,
+            // Left unchanged.
+            default_ctm: _,
+            flatness: _,
+            stroke_adjust: _,
+            overprint: _,
+            overprint_mode: _,
+            smoothness: _,
+            clip_stack: _,
+            current_font: _,
+            root_font: _,
+            page_device: _,
+            screen_freq: _,
+            screen_angle: _,
+            screen_proc: _,
+            color_screen: _,
+            halftone: _,
+            transfer_function: _,
+            color_transfer: _,
+            sampled_transfer: _,
+            sampled_color_transfer: _,
+            precomputed_halftone: _,
+            precomputed_color_halftone: _,
+            black_generation: _,
+            undercolor_removal: _,
+            sampled_black_generation: _,
+            sampled_ucr: _,
+            color_rendering: _,
+            rendering_intent: _,
+        } = GraphicsState::new();
+        self.color = color;
+        self.color_space = color_space;
+        self.path = path;
+        self.current_point = current_point;
+        self.clip_path = clip_path;
+        self.clip_path_version += 1;
+        self.line_width = line_width;
+        self.line_cap = line_cap;
+        self.line_join = line_join;
+        self.miter_limit = miter_limit;
+        self.dash_pattern = dash_pattern;
+        self.current_pattern = current_pattern;
+        self.pattern_underlying_color = pattern_underlying_color;
+        self.current_pattern_dict = current_pattern_dict;
+        self.pattern_components = pattern_components;
+        self.bbox = bbox;
+        self.tint_values = tint_values;
+        self.cached_tint_table = cached_tint_table;
+        self.fill_opacity = fill_opacity;
+        self.stroke_opacity = stroke_opacity;
+        self.blend_mode = blend_mode;
+        self.alpha_is_shape = alpha_is_shape;
+        self.text_knockout = text_knockout;
+    }
 }
 
 impl Default for GraphicsState {
@@ -412,5 +515,35 @@ mod tests {
         assert!(gs.clip_path.is_none());
         assert_eq!(gs.flatness, 1.0);
         assert!(!gs.stroke_adjust);
+    }
+
+    #[test]
+    fn init_graphics_resets_only_what_the_plrm_lists() {
+        let mut gs = GraphicsState::new();
+        gs.line_width = 5.0;
+        gs.line_cap = LineCap::Round;
+        gs.color_space = ColorSpace::DeviceCMYK;
+        gs.current_point = Some((1.0, 2.0));
+        gs.fill_opacity = 0.5;
+        gs.flatness = 7.0;
+        gs.stroke_adjust = true;
+        gs.overprint = true;
+        gs.overprint_mode = 1;
+        gs.smoothness = 0.4;
+        gs.clip_path_version = 3;
+        gs.init_graphics();
+
+        assert_eq!(gs.line_width, 1.0);
+        assert_eq!(gs.line_cap, LineCap::Butt);
+        assert!(matches!(gs.color_space, ColorSpace::DeviceGray));
+        assert!(gs.current_point.is_none());
+        assert_eq!(gs.fill_opacity, 1.0);
+
+        assert_eq!(gs.flatness, 7.0);
+        assert!(gs.stroke_adjust);
+        assert!(gs.overprint);
+        assert_eq!(gs.overprint_mode, 1);
+        assert_eq!(gs.smoothness, 0.4);
+        assert_eq!(gs.clip_path_version, 4, "clip version must advance");
     }
 }

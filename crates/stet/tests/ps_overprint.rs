@@ -58,9 +58,13 @@ struct Page {
 
 impl Page {
     fn render(ps: &str) -> Page {
+        Self::render_page(ps, 0)
+    }
+
+    fn render_page(ps: &str, index: usize) -> Page {
         let mut interp = Interpreter::new();
         let mut pages = interp.render(ps.as_bytes(), 72.0).unwrap();
-        let p = pages.remove(0);
+        let p = pages.remove(index);
         Page {
             width: p.width,
             height: p.height,
@@ -275,4 +279,24 @@ showpage
     let overlap = page.at(145, 55);
     assert_ne!(overlap, magenta_alone, "cached glyph knocked out cyan");
     assert_eq!(overlap, page.at(250, 60), "overlap is not cyan + magenta");
+}
+
+/// Overprint is a device-dependent parameter, which `initgraphics` leaves
+/// alone (PLRM 3e), and `showpage` performs the equivalent of
+/// `initgraphics`: a program that sets it once keeps it on every page, as
+/// in Ghostscript. `showpage` used to rebuild the whole graphics state.
+#[test]
+fn overprint_survives_showpage() {
+    let page = Page::render_page(
+        r#"%!PS
+<< /PageSize [100 120] >> setpagedevice
+true setoverprint true setoverprintmode showpage
+1 0 0 0 setcmykcolor 0 20 60 60 rectfill
+0 1 0 0 setcmykcolor 30 50 60 60 rectfill
+1 1 0 0 setcmykcolor 70 0 30 20 rectfill
+showpage
+"#,
+        1,
+    );
+    assert_eq!(page.overlap(0), page.at(85, 10), "overprint was reset");
 }

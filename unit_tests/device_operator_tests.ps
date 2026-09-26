@@ -54,6 +54,18 @@ gsave
   {<< >> setpagedevice} stopped [false] assert
 grestore
 
+%% setpagedevice - keeps the font, resets the rest %%
+% PLRM 3e: setpagedevice "reinitializes everything in the graphics state
+% except the font parameter, including parameters not affected by
+% initgraphics".
+gsave
+  /Helvetica findfont 12 scalefont setfont
+  5 setlinewidth
+  << >> setpagedevice
+  currentfont /FontName get /Helvetica eq [true] assert
+  /currentlinewidth [1] assert
+grestore
+
 %% setpagedevice - error conditions %%
 /setpagedevice [/stackunderflow] assert
 123 /setpagedevice [123 /typecheck] assert

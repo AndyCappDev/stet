@@ -182,8 +182,10 @@ currentdash pop length 0 eq [true] assert
 (a) /setflat [(a) /typecheck] assert
 true /setflat [true /typecheck] assert
 
-%% setflat - default value %%
-initgraphics /currentflat [1.0] assert
+%% setflat - initgraphics leaves it alone %%
+% Flatness is device-dependent, and initgraphics leaves all device-dependent
+% parameters unchanged (PLRM 3e, initgraphics).
+7 setflat initgraphics /currentflat [7.0] assert
 
 %% setflat - gsave/grestore preservation %%
 1 setflat
@@ -204,7 +206,6 @@ grestore
 2 setlinejoin
 20 setmiterlimit
 5 setlinewidth
-50 setflat
 [3 5] 6 setdash
 
 % Reset
@@ -215,7 +216,6 @@ initgraphics
 /currentlinejoin [0] assert
 /currentmiterlimit [10.0] assert
 /currentlinewidth [1] assert
-/currentflat [1.0] assert
 currentdash pop length 0 eq [true] assert
 
 %% initgraphics resets CTM to default %%
@@ -233,6 +233,51 @@ currentrgbcolor [0.0 0.0 0.0] assert
 initgraphics
 {currentpoint} stopped [true] assert
 clear
+
+%% initgraphics resets the color space %%
+/DeviceCMYK setcolorspace
+initgraphics
+/currentcolorspace [[/DeviceGray]] assert
+
+%% initgraphics leaves the rest of the graphics state alone %%
+% PLRM 3e: "All other graphics state parameters are left unchanged. These
+% include the current output device, font parameter, stroke adjustment,
+% clipping path stack, and all device-dependent parameters." Ghostscript
+% agrees on every one below.
+gsave
+/Helvetica findfont 12 scalefont setfont
+true setstrokeadjust
+true setoverprint
+true setoverprintmode
+0.4 setsmoothness
+{0.5 mul} settransfer
+{0.25 mul} setblackgeneration
+{0.75 mul} setundercolorremoval
+initgraphics
+currentfont /FontName get /Helvetica eq [true] assert
+/currentstrokeadjust [true] assert
+/currentoverprint [true] assert
+/currentoverprintmode [true] assert
+/currentsmoothness [0.4] assert
+1 currenttransfer exec [0.5] assert
+1 currentblackgeneration exec [0.25] assert
+1 currentundercolorremoval exec [0.75] assert
+grestore
+
+%% initgraphics resets the PDF-imaging extension parameters %%
+% Outside the PLRM; Ghostscript's gs_initgraphics resets them.
+gsave
+0.5 setfillopacity
+0.5 setstrokeopacity
+/Multiply setblendmode
+true setalphaisshape
+initgraphics
+/currentfillopacity [1.0] assert
+/currentstrokeopacity [1.0] assert
+currentblendmode /Normal eq [true] assert
+/currentalphaisshape [false] assert
+grestore
+
 
 
 grestore

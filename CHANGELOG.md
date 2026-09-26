@@ -54,6 +54,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   overprint turned off entirely on pages small enough to render in one
   piece, so the same file could overprint at 300 dpi and not at 72.
 
+- **`initgraphics` and `showpage` no longer reset the whole graphics
+  state.** The PLRM has `initgraphics` reset the transformation matrix,
+  path, clip, colour and line settings only, and leave everything else
+  alone: stroke adjustment, the font, and all the device-dependent
+  parameters (overprint, flatness, smoothness, transfer, halftone, black
+  generation and undercolor removal). stet reset all of them, and since
+  `showpage` performs an `initgraphics`, a program that set overprint or a
+  transfer function once lost it from the second page on. Ghostscript
+  keeps them. Two smaller fixes go with it: `setpagedevice` now keeps the
+  current font, as the PLRM requires, and a clip set after `initgraphics`
+  inside a `gsave` is now undone by `grestore`, which could previously
+  leave the inner clip in force.
+
 - **`stet-cli`'s crates.io page no longer shows a failing docs.rs badge.**
   docs.rs documents libraries only, and `stet-cli` is a binary, so its
   build has failed for every release. The badge is gone and the
