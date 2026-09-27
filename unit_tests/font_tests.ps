@@ -36,6 +36,17 @@ definefont pop
 /TestFont2 /Font findresource pop
 FontDirectory /TestFont2 get pop
 
+% definefont associates the KEY with the font (PLRM), not its /FontName:
+% a copy defined under another key must not replace the original, as
+% pdftops' re-encoded font copies would.
+/TestFont3 << /FontType 1 /FontMatrix [0.001 0 0 0.001 0 0] /FontName /TestFont3 >>
+definefont /original exch def
+/TestFont3Copy original dup length dict copy dup /FID undef definefont pop
+{/TestFont3 findfont original eq} [true] assert
+{FontDirectory /TestFont3 get original eq} [true] assert
+{/TestFont3Copy findfont original eq} [false] assert
+{FontDirectory /TestFont3Copy known} [true] assert
+
 
 
 % Test FontType validation - invalid FontType

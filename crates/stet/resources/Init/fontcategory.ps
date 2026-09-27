@@ -109,19 +109,14 @@ true setglobal
             } ifelse
         } ifelse
 
-        % Add to FontDirectory and GlobalFontDirectory
-        dup type /dicttype eq {
-            dup /FontName known {
-                dup /FontName get
-                FontDirectory exch
-                2 index put
-
-                dup gcheck {
-                    dup /FontName get
-                    GlobalFontDirectory exch
-                    2 index put
-                } if
-            } if
+        % Add to FontDirectory and GlobalFontDirectory under the key:
+        % definefont "associates key with font or cidfont in the font
+        % directory" (PLRM). Not under /FontName, which a re-encoded copy
+        % shares with its original: pdftops defines /F1_0 from /Helvetica
+        % that way, and a later /Helvetica findfont must still get Helvetica.
+        FontDirectory 2 index 2 index put
+        dup gcheck {
+            GlobalFontDirectory 2 index 2 index put
         } if
 
         exch pop

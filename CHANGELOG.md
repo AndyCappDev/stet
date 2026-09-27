@@ -78,6 +78,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hint replacement and flex kept. CFF CID fonts loaded through
   `FontSetInit` are embedded the same way. Both used to fall back to an
   unembedded simple font, which garbled the text.
+- **`definefont` no longer replaces the font a copy was made from.** It
+  filed each font in `FontDirectory` under its `/FontName` rather than
+  under the key it was defined with, which the PLRM requires. A re-encoded
+  copy keeps its original's `FontName`, so defining one — pdftops does it
+  for every font a page uses, `/F1_0` from `/Helvetica` — silently
+  replaced the original, and a later `/Helvetica findfont` returned the
+  copy with its encoding.
 - **Subset CFF CID fonts draw the right glyphs.** A CID-keyed CFF font
   loaded through `FontSetInit` had its glyphs looked up as if each CID
   were the glyph's index in the font, which holds only for a complete
