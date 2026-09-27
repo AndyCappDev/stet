@@ -36,6 +36,7 @@ mod skia_device;
 
 pub use png_sink::PngSinkFactory;
 pub use skia_device::ImageCache;
+pub use skia_device::PageBackground;
 pub use skia_device::PreparedDisplayList;
 #[cfg(feature = "ps-device")]
 pub use skia_device::SkiaDevice;

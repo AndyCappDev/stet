@@ -14,7 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   composited onto white paper only as the last step; the option skips that
   step and writes straight-alpha RGBA instead, so artwork (EPS, AI, PDF) can
   be placed over other content with its unpainted areas clear. Both the
-  PostScript and PDF input paths honour it. `render_to_rgba` and
+  PostScript and PDF input paths honour it, on the banded and the full-page
+  path alike. The library says which through `PageBackground::{White,
+  Transparent}`, on `render_to_rgba_with_background` and
+  `SkiaDevice::set_page_background`; `render_to_rgba` and
   `render_to_rgba_with_layers` keep their signatures and white paper.
 - **`--cmyk-intent perceptual|relative`, and `IccCacheOptions::cmyk_source_table`.**
   The CLUT bake samples the source CMYK profile's `A2B1` (relative) table,

@@ -711,7 +711,7 @@ fn run_png_mode(
             dev.set_system_cmyk_bytes(bytes.clone());
         }
         dev.set_no_aa(no_aa);
-        dev.set_transparent_background(transparent);
+        dev.set_page_background(page_background(transparent));
         dev.set_use_viewport_path(use_viewport);
         Box::new(dev)
     }));
@@ -2322,6 +2322,15 @@ fn render_dropped_pdf(
 /// aspect ratio matches the input; when both targets are given, the
 /// smaller of the two scale factors wins (the page fits *inside* the
 /// target box).
+/// The CLI's `--transparent` flag as the renderer's own vocabulary.
+fn page_background(transparent: bool) -> stet_render::PageBackground {
+    if transparent {
+        stet_render::PageBackground::Transparent
+    } else {
+        stet_render::PageBackground::White
+    }
+}
+
 fn compute_fit_dims(
     page_w_pt: f64,
     page_h_pt: f64,
@@ -2389,7 +2398,7 @@ fn render_pdf_page_to_rgba(
             Some(doc.icc_cache()),
             no_aa,
             &stet_graphics::layer_set::LayerSet::new(),
-            transparent,
+            page_background(transparent),
         )
     };
     Ok((rgba, pixel_w, pixel_h))

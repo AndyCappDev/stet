@@ -123,9 +123,35 @@ pub struct SkiaDevice {
     /// its `default_visible`); a consumer building a layer panel can
     /// install an explicit set via `set_layer_set`.
     layer_set: LayerSet,
-    /// Leave unpainted areas transparent instead of compositing the page onto
-    /// white paper. Output pixels are then straight (non-premultiplied) RGBA.
-    transparent_background: bool,
+    /// What the page's unpainted areas are left as.
+    page_background: PageBackground,
+}
+
+/// What a page's unpainted areas are left as.
+///
+/// Rendering always starts from a transparent backdrop; this says whether the
+/// last step composites that onto white paper or converts it to straight
+/// alpha and leaves it clear, which is what placed artwork wants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PageBackground {
+    /// Composite onto white paper. The output is opaque.
+    #[default]
+    White,
+    /// Leave unpainted areas clear. The output is straight-alpha RGBA.
+    Transparent,
+}
+
+impl PageBackground {
+    fn is_transparent(self) -> bool {
+        matches!(self, PageBackground::Transparent)
+    }
+
+    fn paper_color(self) -> Color {
+        match self {
+            PageBackground::White => Color::WHITE,
+            PageBackground::Transparent => Color::TRANSPARENT,
+        }
+    }
 }
 
 #[cfg(feature = "ps-device")]
@@ -186,7 +212,7 @@ impl SkiaDevice {
             no_aa: false,
             use_viewport_path: false,
             layer_set: LayerSet::new(),
-            transparent_background: false,
+            page_background: PageBackground::default(),
         }
     }
 
@@ -232,11 +258,8 @@ impl SkiaDevice {
                 return;
             };
             self.pixmap = pixmap;
-            self.pixmap.fill(if self.transparent_background {
-                Color::TRANSPARENT
-            } else {
-                Color::WHITE
-            });
+            let paper = self.paper_color();
+            self.pixmap.fill(paper);
         }
     }
 
@@ -255,11 +278,19 @@ impl SkiaDevice {
         self.no_aa = no_aa;
     }
 
-    /// Leave unpainted areas transparent instead of white paper, emitting
-    /// straight-alpha RGBA. Applies to the banded and full-page paths; the
-    /// viewport audit path (`set_use_viewport_path`) always composites.
-    pub fn set_transparent_background(&mut self, on: bool) {
-        self.transparent_background = on;
+    /// What the page's unpainted areas are left as. Applies to the banded and
+    /// full-page paths; the viewport audit path (`set_use_viewport_path`)
+    /// always composites onto paper.
+    pub fn set_page_background(&mut self, background: PageBackground) {
+        self.page_background = background;
+    }
+
+    /// The colour a cleared pixmap starts from. Every site that clears one
+    /// reads it: a page erased to white after `showpage` comes back opaque
+    /// however the device was configured, which is what happened to every
+    /// page after the first on the full-page path.
+    fn paper_color(&self) -> Color {
+        self.page_background.paper_color()
     }
 }
 
@@ -1284,8 +1315,8 @@ fn unpremultiply(data: &mut [u8]) {
 
 /// Last step before rendered pixels leave the renderer: composite onto white
 /// paper, or keep the page transparent and convert to straight alpha.
-fn finish_page_pixels(data: &mut [u8], transparent_background: bool) {
-    if transparent_background {
+fn finish_page_pixels(data: &mut [u8], page_background: PageBackground) {
+    if page_background.is_transparent() {
         unpremultiply(data);
     } else {
         composite_onto_white(data);
@@ -6664,7 +6695,8 @@ impl OutputDevice for SkiaDevice {
     fn erase_page(&mut self) {
         // Only fill the full pixmap when it's actually allocated (non-banded path).
         // During banding, self.pixmap is a 1×1 placeholder — filling it is harmless.
-        self.pixmap.fill(Color::WHITE);
+        let paper = self.paper_color();
+        self.pixmap.fill(paper);
         if let Some(ClipRegion::Mask(mask)) = self.clip_region.take() {
             self.spare_mask = Some(mask);
         }
@@ -6675,7 +6707,7 @@ impl OutputDevice for SkiaDevice {
         let w = self.pixmap.width();
         let h = self.pixmap.height();
         // Composite onto white background (or keep it transparent) before output
-        finish_page_pixels(self.pixmap.data_mut(), self.transparent_background);
+        finish_page_pixels(self.pixmap.data_mut(), self.page_background);
         let mut sink = self.sink_factory.create_sink(output_path)?;
         sink.begin_page(w, h)?;
         sink.write_rows(self.pixmap.data(), h)?;
@@ -6954,7 +6986,7 @@ impl OutputDevice for SkiaDevice {
             // interpretation of the next page. Using rayon::spawn avoids OS thread
             // creation overhead and keeps work on the warmed-up pool.
             let no_aa = self.no_aa;
-            let transparent_background = self.transparent_background;
+            let page_background = self.page_background;
             let (tx, rx) = std::sync::mpsc::sync_channel(1);
             rayon::spawn(move || {
                 let result = render_banded_to_sink(
@@ -6966,7 +6998,7 @@ impl OutputDevice for SkiaDevice {
                     &mut *sink,
                     &icc_cache,
                     no_aa,
-                    transparent_background,
+                    page_background,
                     &layer_set,
                 );
                 let _ = tx.send(result);
@@ -6984,7 +7016,7 @@ impl OutputDevice for SkiaDevice {
                 &mut *sink,
                 &icc_cache,
                 self.no_aa,
-                self.transparent_background,
+                self.page_background,
                 &layer_set,
             )?;
         }
@@ -9341,7 +9373,7 @@ fn render_banded_to_sink(
     sink: &mut dyn stet_graphics::device::PageSink,
     icc_cache: &IccCache,
     no_aa: bool,
-    transparent_background: bool,
+    page_background: PageBackground,
     layer_set: &LayerSet,
 ) -> Result<(), String> {
     // Precompute Y bounding boxes for culling
@@ -9470,7 +9502,7 @@ fn render_banded_to_sink(
 
         // Composite content onto white background (premultiplied alpha), or
         // keep it transparent
-        finish_page_pixels(band_pixmap.data_mut(), transparent_background);
+        finish_page_pixels(band_pixmap.data_mut(), page_background);
 
         // Extract only the actual band rows (skip overlap)
         let start_byte = band_offset as usize * row_bytes;
@@ -10985,14 +11017,23 @@ pub fn render_to_rgba_with_layers(
     no_aa: bool,
     layer_set: &LayerSet,
 ) -> Vec<u8> {
-    render_to_rgba_with_background(list, pixel_w, pixel_h, dpi, icc, no_aa, layer_set, false)
+    render_to_rgba_with_background(
+        list,
+        pixel_w,
+        pixel_h,
+        dpi,
+        icc,
+        no_aa,
+        layer_set,
+        PageBackground::White,
+    )
 }
 
 /// Like [`render_to_rgba_with_layers`] but can leave the page transparent.
 ///
-/// With `transparent_background` set, unpainted areas stay at alpha 0 instead
-/// of being composited onto white paper, and the returned pixels are straight
-/// (non-premultiplied) RGBA — for artwork that is placed over other content.
+/// With [`PageBackground::Transparent`], unpainted areas stay at alpha 0
+/// instead of being composited onto white paper, and the returned pixels are
+/// straight (non-premultiplied) RGBA — for artwork placed over other content.
 #[expect(clippy::too_many_arguments)]
 pub fn render_to_rgba_with_background(
     list: &DisplayList,
@@ -11002,10 +11043,20 @@ pub fn render_to_rgba_with_background(
     icc: Option<&IccCache>,
     no_aa: bool,
     layer_set: &LayerSet,
-    transparent_background: bool,
+    page_background: PageBackground,
 ) -> Vec<u8> {
+    // A blank answer still answers what was asked: white paper is opaque, a
+    // transparent page is clear.
+    let blank = |w: u32, h: u32| {
+        let fill = if page_background.is_transparent() {
+            0x00
+        } else {
+            0xFF
+        };
+        vec![fill; w as usize * h as usize * 4]
+    };
     if pixel_w == 0 || pixel_h == 0 {
-        return vec![0xFF; pixel_w as usize * pixel_h as usize * 4];
+        return blank(pixel_w, pixel_h);
     }
 
     let mut icc_cache = match icc {
@@ -11031,11 +11082,11 @@ pub fn render_to_rgba_with_background(
         &mut sink,
         &icc_cache,
         no_aa,
-        transparent_background,
+        page_background,
         layer_set,
     ) {
         eprintln!("render_to_rgba: banded render failed: {e}");
-        return vec![0xFF; pixel_w as usize * pixel_h as usize * 4];
+        return blank(pixel_w, pixel_h);
     }
 
     sink.data
@@ -13802,10 +13853,37 @@ mod tests {
             None,
             false,
             &LayerSet::new(),
-            true,
+            PageBackground::Transparent,
         );
         assert_eq!(pixel(&clear, 15, 10), [0, 0, 0, 0]);
         assert_eq!(pixel(&clear, 5, 10), [0, 0, 0, 255]);
+    }
+
+    /// render_to_rgba_with_background is always banded, so it never reaches
+    /// SkiaDevice's own full-page path — where a page erased after `showpage`
+    /// used to come back on white paper, leaving every page but the first
+    /// opaque. A page small enough to skip banding exercises that path.
+    #[cfg(feature = "ps-device")]
+    #[test]
+    fn test_skia_device_keeps_later_pages_transparent_on_the_full_page_path() {
+        let mut device = SkiaDevice::new(200, 200);
+        device.set_page_background(PageBackground::Transparent);
+        assert_eq!(device.paper_color(), Color::TRANSPARENT);
+
+        device.ensure_full_pixmap();
+        assert_eq!(
+            device.pixmap().pixel(0, 0).map(|p| p.alpha()),
+            Some(0),
+            "the first page starts clear"
+        );
+
+        // What the interpreter does between one showpage and the next.
+        device.erase_page();
+        assert_eq!(
+            device.pixmap().pixel(0, 0).map(|p| p.alpha()),
+            Some(0),
+            "a page erased for the next showpage must stay clear"
+        );
     }
 
     #[test]

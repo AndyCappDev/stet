@@ -71,6 +71,7 @@ It takes a display list, so it works the same for both input paths:
 ```rust
 use stet::Interpreter;
 use stet_graphics::layer_set::LayerSet;
+use stet_render::PageBackground;
 
 // PostScript or EPS
 let mut interp = Interpreter::new();
@@ -83,7 +84,7 @@ let rgba = stet_render::render_to_rgba_with_background(
     None,            // ICC cache
     false,           // no_aa
     &LayerSet::new(),
-    true,            // transparent
+    PageBackground::Transparent,
 );
 
 // PDF, with the document's own ICC cache
@@ -91,7 +92,7 @@ let doc = stet_pdf_reader::PdfDocument::from_bytes(&pdf_data)?;
 let display_list = doc.render_page(0, 300.0)?;
 let rgba = stet_render::render_to_rgba_with_background(
     &display_list, width, height, 300.0,
-    Some(doc.icc_cache()), false, &LayerSet::new(), true,
+    Some(doc.icc_cache()), false, &LayerSet::new(), PageBackground::Transparent,
 );
 ```
 
