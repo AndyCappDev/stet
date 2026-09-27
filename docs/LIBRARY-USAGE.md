@@ -57,6 +57,46 @@ for page in &pages {
 }
 ```
 
+## Transparent Backgrounds
+
+Rendering always starts from a transparent backdrop and composites onto
+white paper as its last step. `render_to_rgba_with_background` skips that
+step and returns straight-alpha RGBA instead, so a page's unpainted areas
+stay clear — what placed artwork (EPS, AI, PDF) needs to sit over other
+content. `render_to_rgba` and `render_to_rgba_with_layers` keep their
+signatures and their white paper.
+
+It takes a display list, so it works the same for both input paths:
+
+```rust
+use stet::Interpreter;
+use stet_graphics::layer_set::LayerSet;
+
+// PostScript or EPS
+let mut interp = Interpreter::new();
+let pages = interp.render_to_display_list(ps_data, 300.0)?;
+let rgba = stet_render::render_to_rgba_with_background(
+    &pages[0].display_list,
+    pages[0].width,
+    pages[0].height,
+    300.0,
+    None,            // ICC cache
+    false,           // no_aa
+    &LayerSet::new(),
+    true,            // transparent
+);
+
+// PDF, with the document's own ICC cache
+let doc = stet_pdf_reader::PdfDocument::from_bytes(&pdf_data)?;
+let display_list = doc.render_page(0, 300.0)?;
+let rgba = stet_render::render_to_rgba_with_background(
+    &display_list, width, height, 300.0,
+    Some(doc.icc_cache()), false, &LayerSet::new(), true,
+);
+```
+
+The CLI exposes the same thing as `--transparent`, for `--device png`.
+
 ## Diagnostics
 
 An empty page list is not necessarily an error. The usual cause is a program
