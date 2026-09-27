@@ -253,10 +253,10 @@ jobs:
       # wrong.
       #
       # THIRD-PARTY-NOTICES.txt is required, not decoration. The binary
-      # embeds the URW++ fonts (AGPL-3.0 with a font exception) and Adobe's
-      # CMap and glyph-list data (BSD-3-Clause), and links ~80-180 crates
-      # whose MIT/Apache/BSD/IJG terms all require their notices to travel
-      # with the binary. Through 0.8.1 the archives carried none of them.
+      # embeds the URW++ fonts (OFL-1.1) and Adobe's CMap and glyph-list
+      # data (BSD-3-Clause), and links ~80-180 crates whose MIT/Apache/
+      # BSD/IJG terms all require their notices to travel with the binary.
+      # Through 0.8.1 the archives carried none of them.
       # It is generated per target with the leg's own feature flags, because
       # the musl build has no viewer and so a different crate graph.
       - name: Package

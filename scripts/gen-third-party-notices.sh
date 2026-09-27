@@ -15,8 +15,8 @@
 #
 # Two sources, because cargo-about only sees crate licences:
 #   1. Third-party data stet embeds with include_bytes!, which a crate's
-#      licence field does not describe: the URW++ fonts (AGPL-3.0 with a
-#      font exception) and Adobe's CMap and glyph-list data (BSD-3-Clause).
+#      licence field does not describe: the URW++ fonts (OFL-1.1) and
+#      Adobe's CMap and glyph-list data (BSD-3-Clause).
 #      Their licence files live next to the data, in the crate that embeds it.
 #   2. Every Rust crate linked into the binary, from cargo-about, using
 #      about.toml (which licences are accepted -- a new one fails the run)

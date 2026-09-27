@@ -557,7 +557,7 @@ depends on. Reach out at scott@bowmans.org.
 ## License
 
 stet's own code is Apache-2.0 OR MIT. The binary also embeds the URW++
-base 35 fonts (GNU AGPL v3 with a font exception) and Adobe's CMap and
+base 35 fonts (SIL Open Font License 1.1) and Adobe's CMap and
 glyph-list data (BSD-3-Clause), and links third-party crates under their
 own permissive licences. Each prebuilt release archive includes
 `THIRD-PARTY-NOTICES.txt` with all of their terms;

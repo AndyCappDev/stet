@@ -27,6 +27,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mode 0. Converting PostScript to PDF now carries the mode into `/OPM`.
   As with `setoverprint`, images do not overprint yet.
 
+### Changed
+
+- **The embedded URW++ base 35 fonts are distributed under the SIL Open
+  Font License 1.1** instead of the GNU AGPL v3 with a font exception. In
+  2017 URW++ licensed the Version 2.0 fonts under a choice of AGPL, LPPL
+  1.3c or OFL 1.1; stet takes the OFL option. The fonts are unchanged. A
+  program that links `stet`, `stet-pdf-reader` or `stet-wasm` no longer
+  carries AGPL-licensed data: the OFL allows bundling the fonts with any
+  software, commercial included, as long as they are not sold on their own
+  and their licence goes with them. `LICENSE-URW-FONTS` in each of those
+  crates, and `THIRD-PARTY-NOTICES.txt` in the release archives, carry the
+  OFL text and the basis for it.
+
 ### Fixed
 
 - **A bare `stet` now opens the viewer when a page is shown.** With no
