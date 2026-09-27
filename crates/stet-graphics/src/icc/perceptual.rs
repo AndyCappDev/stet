@@ -41,7 +41,21 @@ use super::bpc::{WP_D50, apply_bpc_rgb_u8, compute_bpc_params, lab_to_xyz_d50};
 /// the legal range.
 const PCS_LAB_DENOM: f32 = 65280.0;
 
-/// Sample a CMYK profile's `A2B1` (colorimetric) table into a [`Clut4`].
+/// Which of a CMYK profile's A2B tables feeds the CLUT bake.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CmykSourceTable {
+    /// `A2B1`, matching lcms2's `cmsDoTransform(RelCol)`.
+    #[default]
+    Colorimetric,
+    /// `A2B0`, matching lcms2's (and Ghostscript's and ImageMagick's) default
+    /// Perceptual intent. Profiles built for print carry a noticeably darker
+    /// black here: Japan Color 2001 Coated renders K100 as (35,25,22) rather
+    /// than (51,45,43). Falls back to `A2B1` when a profile has no perceptual
+    /// table.
+    Perceptual,
+}
+
+/// Sample a CMYK profile's A2B table into a [`Clut4`].
 ///
 /// Out-of-gamut Lab values clip to the sRGB boundary, matching lcms2's
 /// `cmsDoTransform(RelCol)` behaviour and avoiding the desaturation that
@@ -60,6 +74,7 @@ pub(super) fn bake_clut4_perceptual(
     profile: &ColorProfile,
     grid_n: usize,
     bpc_enabled: bool,
+    source_table: CmykSourceTable,
 ) -> Option<Clut4> {
     if profile.color_space != DataColorSpace::Cmyk || profile.pcs != DataColorSpace::Lab {
         return None;
@@ -68,7 +83,14 @@ pub(super) fn bake_clut4_perceptual(
         return None;
     }
 
-    let colorimetric = SampledLut::from_warehouse(profile.lut_a_to_b_colorimetric.as_ref()?)?;
+    let table = match source_table {
+        CmykSourceTable::Perceptual => profile
+            .lut_a_to_b_perceptual
+            .as_ref()
+            .or(profile.lut_a_to_b_colorimetric.as_ref()),
+        CmykSourceTable::Colorimetric => profile.lut_a_to_b_colorimetric.as_ref(),
+    };
+    let colorimetric = SampledLut::from_warehouse(table?)?;
 
     // BPC is computed against this sampler's own (1,1,1,1) output, not
     // moxcms's transform output, so the source black-point matches what

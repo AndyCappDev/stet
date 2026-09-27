@@ -88,6 +88,7 @@ fn main() {
         let opts = IccCacheOptions {
             bpc_mode: mode,
             source_cmyk_profile: Some(bytes.clone()),
+            ..Default::default()
         };
         let cache = IccCache::new_with_options(opts);
         for &(c, m, y, k) in cases {
