@@ -1229,6 +1229,7 @@ fn scan_text_elements(
     list: &DisplayList,
     font_tracker: &mut FontTracker,
     page_font_names: &mut HashSet<String>,
+    ctx: Option<&Context>,
 ) -> bool {
     let mut has_text = false;
     for element in list.elements() {
@@ -1237,7 +1238,7 @@ fn scan_text_elements(
         // drawn: counting it would skip those fills and lose the text.
         if let DisplayElement::Text { params } = element {
             has_text = true;
-            let name = font_tracker.track(params).to_string();
+            let name = font_tracker.track(params, ctx).to_string();
             page_font_names.insert(name);
         }
     }
@@ -1262,7 +1263,7 @@ pub fn build_content_stream(
     let page_h_pts = page_h as f64 * scale;
 
     let mut page_font_names: HashSet<String> = HashSet::new();
-    let has_text_elements = scan_text_elements(list, font_tracker, &mut page_font_names);
+    let has_text_elements = scan_text_elements(list, font_tracker, &mut page_font_names, ctx);
 
     // Pre-compute glyph widths for TJ kern values when Context is available
     if let Some(c) = ctx {
@@ -1327,7 +1328,9 @@ pub fn build_tile_content_stream(
     font_tracker: &mut FontTracker,
 ) -> ContentStreamResult {
     let mut page_font_names: HashSet<String> = HashSet::new();
-    let has_text_elements = scan_text_elements(list, font_tracker, &mut page_font_names);
+    // Tiles are built after the fonts are embedded, so their fonts can
+    // only join resources that exist: no encoding, no new resource.
+    let has_text_elements = scan_text_elements(list, font_tracker, &mut page_font_names, None);
 
     let mut builder = Builder::new(font_tracker, 0, 0, has_text_elements, true);
     builder.page_font_names = page_font_names;

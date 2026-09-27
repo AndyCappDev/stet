@@ -770,7 +770,7 @@ fn build_type1_font(writer: &mut PdfWriter, usage: &FontUsage, ctx: &Context) ->
     // Collect all CharStrings dicts from all entities. dvips re-encoded instances
     // each have a subset of CharStrings — we need to search all of them.
     let mut charstrings_entities: Vec<EntityId> = Vec::new();
-    for &ent in &usage.all_entities {
+    for &ent in &usage.program_entities {
         if let Some(obj) = ctx
             .dicts
             .get(ent, &DictKey::Name(ctx.name_cache.n_char_strings))

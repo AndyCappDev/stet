@@ -6,7 +6,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use stet_core::object::EntityId;
+use stet_core::context::Context;
+use stet_core::dict::DictKey;
+use stet_core::object::{EntityId, NameId, PsValue};
 use stet_graphics::device::TextParams;
 
 /// Standard 14 PDF font names that don't require embedding.
@@ -38,11 +40,21 @@ pub struct FontUsage {
     pub font_type: i32,
     /// Font dict entity ID (first instance seen — used for CharStrings/Private).
     pub font_entity: EntityId,
-    /// All unique font dict entity IDs seen for this font name.
-    /// dvips creates multiple re-encoded instances of the same base font,
-    /// each with a different encoding subset. We need all of them to build
-    /// a complete ToUnicode map.
+    /// The font dict instances this resource draws with: every instance of
+    /// the font whose encoding agrees with the others'. dvips creates
+    /// several re-encoded instances of one base font, each encoding a
+    /// different subset, so the resource's encoding, widths and ToUnicode
+    /// map merge all of them.
     pub all_entities: Vec<EntityId>,
+    /// Every instance of the font, whatever its encoding: the glyphs to
+    /// embed. Instances whose encodings conflict become separate resources
+    /// but share this set, since a dvips instance may define glyphs another
+    /// one encodes.
+    pub program_entities: Vec<EntityId>,
+    /// The glyph name at each code, merged over `all_entities` (`None`
+    /// where none names a glyph). Empty when the encoding could not be
+    /// read, which agrees with any other.
+    encoding: Vec<Option<NameId>>,
     /// Set of character codes (or CIDs) used.
     pub used_codes: HashSet<u16>,
     /// Whether this is a Standard 14 font (skip embedding).
@@ -55,56 +67,49 @@ pub struct FontUsage {
 }
 
 /// Font deduplication key: (font_name, font_type).
-/// Fonts with the same name and type produce the same embedded font program
-/// regardless of which page or scalefont/makefont created the font dict.
+/// Fonts with the same name and type share one font program regardless of
+/// which page or scalefont/makefont created the font dict.
 type FontKey = (Vec<u8>, i32);
 
 /// Tracks font usage across all pages in a PDF job.
+///
+/// One PDF font resource serves every instance of a font whose encodings
+/// agree. Instances that map some code to different glyphs — pdftops
+/// re-encodes ZapfDingbats beside the standard one, for example — each need
+/// their own resource, since a PDF font has one encoding; they still share
+/// the font program.
 pub struct FontTracker {
-    /// Map from font key → font usage (document-level dedup).
-    fonts: HashMap<FontKey, FontUsage>,
-    /// Map from font entity → PDF name (for fast lookup by entity during content stream gen).
-    entity_to_name: HashMap<EntityId, String>,
-    /// Next font index for naming.
-    next_idx: usize,
+    /// Every font resource, in creation order.
+    fonts: Vec<FontUsage>,
+    /// Font key → indices of its resources in `fonts`.
+    by_key: HashMap<FontKey, Vec<usize>>,
+    /// Font entity → index of its resource (fast lookup during content
+    /// stream generation).
+    entity_to_font: HashMap<EntityId, usize>,
 }
 
 impl FontTracker {
     pub fn new() -> Self {
         Self {
-            fonts: HashMap::new(),
-            entity_to_name: HashMap::new(),
-            next_idx: 0,
+            fonts: Vec::new(),
+            by_key: HashMap::new(),
+            entity_to_font: HashMap::new(),
         }
     }
 
     /// Register a Text element's font and record character usage.
     /// Returns the PDF resource name for this font.
-    pub fn track(&mut self, params: &TextParams) -> &str {
-        let key = (params.font_name.clone(), params.font_type);
+    ///
+    /// `ctx` supplies the font's encoding, which decides whether it can
+    /// share a resource with another instance of the same font; without it
+    /// the instance joins the font's first resource.
+    pub fn track(&mut self, params: &TextParams, ctx: Option<&Context>) -> &str {
         let entity = EntityId(params.font_entity);
-
-        let usage = self.fonts.entry(key).or_insert_with(|| {
-            let idx = self.next_idx;
-            self.next_idx += 1;
-            let is_std14 = STANDARD_14.contains(&params.font_name.as_slice());
-            FontUsage {
-                pdf_name: format!("F{}", idx),
-                font_name: params.font_name.clone(),
-                font_type: params.font_type,
-                font_entity: entity,
-                all_entities: vec![entity],
-                used_codes: HashSet::new(),
-                is_standard_14: is_std14,
-                sample_params: params.clone(),
-                widths: HashMap::new(),
-            }
-        });
-
-        // Track all unique font entities (dvips creates multiple re-encoded instances)
-        if !usage.all_entities.contains(&entity) {
-            usage.all_entities.push(entity);
-        }
+        let idx = match self.entity_to_font.get(&entity) {
+            Some(&idx) => idx,
+            None => self.add_instance(params, entity, ctx),
+        };
+        let usage = &mut self.fonts[idx];
 
         // Record used character codes
         if params.font_type == 0 {
@@ -121,35 +126,128 @@ impl FontTracker {
             }
         }
 
-        // Cache entity→name mapping for fast lookup
-        let name = usage.pdf_name.clone();
-        self.entity_to_name.insert(entity, name);
-
         &usage.pdf_name
+    }
+
+    /// Place a font instance seen for the first time: in the first resource
+    /// of its font whose encoding agrees with it, or in a new one.
+    fn add_instance(
+        &mut self,
+        params: &TextParams,
+        entity: EntityId,
+        ctx: Option<&Context>,
+    ) -> usize {
+        let key = (params.font_name.clone(), params.font_type);
+        // A Type 0 font's Encoding picks descendant fonts, not glyphs.
+        let encoding = match ctx {
+            Some(ctx) if params.font_type != 0 => glyph_encoding(ctx, entity),
+            _ => Vec::new(),
+        };
+        let group = self.by_key.entry(key).or_default();
+        let idx = match group
+            .iter()
+            .copied()
+            .find(|&i| encodings_agree(&self.fonts[i].encoding, &encoding))
+        {
+            Some(i) => {
+                let usage = &mut self.fonts[i];
+                merge_encoding(&mut usage.encoding, &encoding);
+                usage.all_entities.push(entity);
+                i
+            }
+            None => {
+                let idx = self.fonts.len();
+                self.fonts.push(FontUsage {
+                    pdf_name: format!("F{idx}"),
+                    font_name: params.font_name.clone(),
+                    font_type: params.font_type,
+                    font_entity: entity,
+                    all_entities: vec![entity],
+                    program_entities: Vec::new(),
+                    encoding,
+                    used_codes: HashSet::new(),
+                    is_standard_14: STANDARD_14.contains(&params.font_name.as_slice()),
+                    sample_params: params.clone(),
+                    widths: HashMap::new(),
+                });
+                group.push(idx);
+                idx
+            }
+        };
+        // Every resource of the font sees every instance's glyphs; a new
+        // resource starts with those of the instances before it.
+        let program: Vec<EntityId> = group
+            .iter()
+            .flat_map(|&i| self.fonts[i].all_entities.iter().copied())
+            .collect();
+        for &i in group.iter() {
+            self.fonts[i].program_entities.clone_from(&program);
+        }
+        self.entity_to_font.insert(entity, idx);
+        idx
     }
 
     /// Look up the PDF resource name for a font entity.
     pub fn get_pdf_name(&self, entity: EntityId) -> Option<&str> {
-        self.entity_to_name.get(&entity).map(|s| s.as_str())
+        self.entity_to_font
+            .get(&entity)
+            .map(|&i| self.fonts[i].pdf_name.as_str())
     }
 
     /// Iterate over all tracked fonts.
     pub fn fonts(&self) -> impl Iterator<Item = &FontUsage> {
-        self.fonts.values()
+        self.fonts.iter()
     }
 
     /// Iterate over all tracked fonts mutably.
     pub fn fonts_mut(&mut self) -> impl Iterator<Item = &mut FontUsage> {
-        self.fonts.values_mut()
+        self.fonts.iter_mut()
     }
 
     /// Look up a glyph width for a font entity and character code.
     /// Returns width in 1000ths of a unit, or None if unavailable.
     pub fn get_glyph_width(&self, font_entity: EntityId, code: u16) -> Option<i32> {
-        let pdf_name = self.entity_to_name.get(&font_entity)?;
-        self.fonts
-            .values()
-            .find(|u| u.pdf_name == *pdf_name)
-            .and_then(|u| u.widths.get(&code).copied())
+        let &i = self.entity_to_font.get(&font_entity)?;
+        self.fonts[i].widths.get(&code).copied()
+    }
+}
+
+/// The glyph name a font dict's `Encoding` gives each code, `None` for
+/// `.notdef` and anything that is not a name. Empty when the font has no
+/// encoding array.
+fn glyph_encoding(ctx: &Context, font: EntityId) -> Vec<Option<NameId>> {
+    let Some(PsValue::Array { entity, start, len }) = ctx
+        .dicts
+        .get(font, &DictKey::Name(ctx.name_cache.n_encoding))
+        .map(|o| o.value)
+    else {
+        return Vec::new();
+    };
+    let notdef = ctx.names.find(b".notdef");
+    (0..len.min(256))
+        .map(|i| match ctx.arrays.get_element(entity, start + i).value {
+            PsValue::Name(id) if Some(id) != notdef => Some(id),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Whether no code names different glyphs in `a` and `b`.
+fn encodings_agree(a: &[Option<NameId>], b: &[Option<NameId>]) -> bool {
+    a.iter().zip(b).all(|pair| match pair {
+        (Some(x), Some(y)) => x == y,
+        _ => true,
+    })
+}
+
+/// Fill the codes `into` leaves unnamed from `from`.
+fn merge_encoding(into: &mut Vec<Option<NameId>>, from: &[Option<NameId>]) {
+    if into.len() < from.len() {
+        into.resize(from.len(), None);
+    }
+    for (slot, name) in into.iter_mut().zip(from) {
+        if slot.is_none() {
+            *slot = *name;
+        }
     }
 }

@@ -85,6 +85,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for every font a page uses, `/F1_0` from `/Helvetica` — silently
   replaced the original, and a later `/Helvetica findfont` returned the
   copy with its encoding.
+- **PDF output keeps each encoding of a font.** Two instances of one font
+  with different encodings — pdftops writes ZapfDingbats re-encoded beside
+  the standard one — shared one PDF font resource, whose encoding was
+  merged code by code, first come first served, so the second instance
+  drew the first one's glyphs. Each such instance now gets its own
+  resource; instances whose encodings agree, like dvips's re-encoded
+  copies, still share one, and the font program keeps every instance's
+  glyphs.
 - **Subset CFF CID fonts draw the right glyphs.** A CID-keyed CFF font
   loaded through `FontSetInit` had its glyphs looked up as if each CID
   were the glyph's index in the font, which holds only for a complete
