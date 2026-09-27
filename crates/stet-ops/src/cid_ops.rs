@@ -292,3 +292,95 @@ fn get_usize(ctx: &Context, dict: EntityId, key: &[u8]) -> Option<usize> {
         .as_i64()
         .and_then(|v| usize::try_from(v).ok())
 }
+
+/// How a Type 2 (TrueType) CIDFont maps CIDs to glyph indices: its
+/// `CIDMap`.
+///
+/// The PLRM defines `CIDMap` as a table of `GDBytes`-wide glyph indices,
+/// one per CID, in a string or an array of strings (Table 5.17).
+/// Ghostscript also accepts an integer, added to the CID, and a dictionary
+/// from CID to glyph index; so does this. A font with no `CIDMap` maps each
+/// CID to the glyph of the same index, as stet always did.
+///
+/// A CID the map does not define — past `CIDCount`, past the end of the
+/// table — is an undefined glyph, and shows CID 0's (PLRM §5.11.3; Adobe
+/// TN 5014 §2.5).
+pub(crate) struct CidToGid {
+    form: CidMapForm,
+    /// `CIDCount`, when the font gives one.
+    cid_count: Option<usize>,
+}
+
+enum CidMapForm {
+    /// The table, as the strings holding it.
+    Table {
+        strings: Vec<(EntityId, u32, u32)>,
+        gd_bytes: usize,
+    },
+    Offset(i64),
+    Dict(EntityId),
+    Identity,
+}
+
+impl CidToGid {
+    /// Read `cidfont`'s `CIDMap`.
+    pub(crate) fn of(ctx: &Context, cidfont: EntityId) -> Self {
+        let cid_count = get_usize(ctx, cidfont, b"CIDCount");
+        let gd_bytes = get_usize(ctx, cidfont, b"GDBytes").unwrap_or(2);
+        let string = |obj: PsObject| match obj.value {
+            PsValue::String { entity, start, len } => Some((entity, start, len)),
+            _ => None,
+        };
+        let form = match get(ctx, cidfont, b"CIDMap") {
+            Some(obj) => match obj.value {
+                PsValue::String { .. } => CidMapForm::Table {
+                    strings: string(obj).into_iter().collect(),
+                    gd_bytes,
+                },
+                PsValue::Array { entity, start, len }
+                | PsValue::PackedArray { entity, start, len } => CidMapForm::Table {
+                    strings: (0..len)
+                        .filter_map(|i| string(ctx.arrays.get_element(entity, start + i)))
+                        .collect(),
+                    gd_bytes,
+                },
+                PsValue::Int(n) => CidMapForm::Offset(n),
+                PsValue::Dict(d) => CidMapForm::Dict(d),
+                _ => CidMapForm::Identity,
+            },
+            None => CidMapForm::Identity,
+        };
+        Self { form, cid_count }
+    }
+
+    /// The glyph index shown for `cid`: its own, or CID 0's when the map
+    /// does not define it, or glyph 0 when neither is defined.
+    pub(crate) fn gid(&self, ctx: &Context, cid: i32) -> u16 {
+        self.lookup(ctx, cid)
+            .or_else(|| self.lookup(ctx, 0))
+            .unwrap_or(0)
+    }
+
+    fn lookup(&self, ctx: &Context, cid: i32) -> Option<u16> {
+        let cid = usize::try_from(cid).ok()?;
+        if self.cid_count.is_some_and(|n| cid >= n) {
+            return None;
+        }
+        match &self.form {
+            CidMapForm::Table { strings, gd_bytes } => stet_fonts::truetype::cid_map_glyph_index(
+                strings.iter().map(|&(e, s, l)| ctx.strings.get(e, s, l)),
+                *gd_bytes,
+                cid,
+            ),
+            CidMapForm::Offset(n) => (cid as i64)
+                .checked_add(*n)
+                .and_then(|g| u16::try_from(g).ok()),
+            CidMapForm::Dict(d) => ctx
+                .dicts
+                .get(*d, &DictKey::Int(cid as i64))
+                .and_then(|o| o.as_i64())
+                .and_then(|g| u16::try_from(g).ok()),
+            CidMapForm::Identity => u16::try_from(cid).ok(),
+        }
+    }
+}

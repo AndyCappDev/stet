@@ -132,6 +132,41 @@ pub fn get_num_glyphs(font_data: &[u8]) -> u32 {
     0
 }
 
+/// The glyph index a Type 2 CIDFont's `CIDMap` table gives `cid`.
+///
+/// The table is `GDBytes` bytes per CID, high-order byte first, "as a single
+/// string or as an array of strings" (PLRM 3rd ed., Table 5.17): `chunks` are
+/// those strings in order, read as one run of bytes. `None` when `gd_bytes`
+/// is not 1 to 4, when the table ends before `cid`'s entry, or when the
+/// index does not fit a TrueType glyph index.
+pub fn cid_map_glyph_index<'a>(
+    chunks: impl IntoIterator<Item = &'a [u8]>,
+    gd_bytes: usize,
+    cid: usize,
+) -> Option<u16> {
+    if !(1..=4).contains(&gd_bytes) {
+        return None;
+    }
+    let mut skip = cid.checked_mul(gd_bytes)?;
+    let mut value: u32 = 0;
+    let mut need = gd_bytes;
+    for chunk in chunks {
+        if skip >= chunk.len() {
+            skip -= chunk.len();
+            continue;
+        }
+        for &b in &chunk[skip..] {
+            value = (value << 8) | u32::from(b);
+            need -= 1;
+            if need == 0 {
+                return u16::try_from(value).ok();
+            }
+        }
+        skip = 0;
+    }
+    None
+}
+
 /// Get the advance width for a glyph ID from the hmtx table.
 pub fn get_advance_width(font_data: &[u8], gid: u16) -> Option<u16> {
     let (hhea_off, _) = find_table(font_data, b"hhea")?;
@@ -954,6 +989,28 @@ pub fn parse_cmap_with_info(font_data: &[u8]) -> (std::collections::HashMap<u32,
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn cid_map_entries_may_span_strings() {
+        let one: &[u8] = &[0, 5, 0, 0, 1];
+        let two: &[u8] = &[2, 0xFF, 0xFF];
+        let chunks = || [one, two];
+        assert_eq!(cid_map_glyph_index(chunks(), 2, 0), Some(5));
+        assert_eq!(cid_map_glyph_index(chunks(), 2, 1), Some(0));
+        // CID 2's entry is the last byte of one string and the first of
+        // the next.
+        assert_eq!(cid_map_glyph_index(chunks(), 2, 2), Some(0x102));
+        assert_eq!(cid_map_glyph_index(chunks(), 2, 3), Some(0xFFFF));
+        assert_eq!(cid_map_glyph_index(chunks(), 2, 4), None);
+        assert_eq!(cid_map_glyph_index(chunks(), 1, 7), Some(0xFF));
+        // Four-byte entries whose value is no TrueType glyph index.
+        assert_eq!(cid_map_glyph_index([&[0u8, 1, 0, 0][..]], 4, 0), None);
+        assert_eq!(cid_map_glyph_index([&[0u8, 0, 0, 7][..]], 4, 0), Some(7));
+        assert_eq!(cid_map_glyph_index(chunks(), 0, 0), None);
+        assert_eq!(cid_map_glyph_index(chunks(), 5, 0), None);
+        assert_eq!(cid_map_glyph_index(chunks(), 2, usize::MAX), None);
+    }
+
     use super::*;
 
     #[test]

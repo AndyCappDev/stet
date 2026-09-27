@@ -78,6 +78,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hint replacement and flex kept. CFF CID fonts loaded through
   `FontSetInit` are embedded the same way. Both used to fall back to an
   unembedded simple font, which garbled the text.
+- **TrueType CID fonts find their glyphs through `CIDMap`.** A Type 2
+  CIDFont maps each CID to a TrueType glyph through its `CIDMap` table
+  (PLRM Table 5.17), which pdftops writes for every CID-keyed TrueType
+  font it converts. stet used the CID itself as the glyph index, correct
+  only when the map is the identity, so text in subset fonts came out as
+  gibberish (22 files in the test corpus). PDF output did worse: it looked
+  CIDs up in the font's TrueType `cmap` table, which these fonts do not
+  have, so every glyph became `.notdef`. Both now read `CIDMap` in its
+  string and array forms, and in the integer and dictionary forms
+  Ghostscript also accepts; a CID the map does not define shows CID 0's
+  glyph.
 - **`definefont` no longer replaces the font a copy was made from.** It
   filed each font in `FontDirectory` under its `/FontName` rather than
   under the key it was defined with, which the PLRM requires. A re-encoded

@@ -1816,10 +1816,14 @@ fn build_cid_font(writer: &mut PdfWriter, usage: &FontUsage, ctx: &Context) -> O
     let units_per_em = truetype::get_units_per_em(&font_data);
     let scale = 1000.0 / units_per_em as f64;
 
-    // Build CID → GID mapping
-    // For reconstructed fonts (glyf built from GlyphDirectory with CID=GID),
-    // use identity mapping. For normal fonts, parse cmap table.
-    let cid_to_gid = if needs_reconstruction {
+    // Build CID → GID mapping: from the CIDFont's CIDMap, which is where a
+    // Type 2 CIDFont keeps it (PLRM Table 5.17). A font without one maps
+    // CIDs as stet always did — identically for fonts rebuilt from
+    // GlyphDirectory, through the TrueType cmap otherwise.
+    let cid_map = cid_map_gids(ctx, cidfont_entity, &usage.used_codes);
+    let cid_to_gid = if let Some(map) = &cid_map {
+        map.clone()
+    } else if needs_reconstruction {
         // Identity: CID = GID, just map used codes to themselves
         usage
             .used_codes
@@ -1841,7 +1845,7 @@ fn build_cid_font(writer: &mut PdfWriter, usage: &FontUsage, ctx: &Context) -> O
 
     // CIDToGIDMap: for reconstructed fonts use /Identity name (CID=GID),
     // for normal fonts build a binary stream mapping CID→GID via cmap.
-    let cid_to_gid_value = if needs_reconstruction {
+    let cid_to_gid_value = if needs_reconstruction && cid_map.is_none() {
         PdfObj::name("Identity")
     } else {
         let cid_to_gid_data = build_cid_to_gid_stream(&cid_to_gid, max_cid);
@@ -1939,6 +1943,67 @@ fn build_cid_font(writer: &mut PdfWriter, usage: &FontUsage, ctx: &Context) -> O
     }
 
     Some(writer.add_object(&PdfObj::Dict(type0_entries)))
+}
+
+/// The glyph index each of `cids` shows, from a Type 2 CIDFont's `CIDMap`,
+/// or `None` when the font has none.
+///
+/// `CIDMap` is a table of `GDBytes`-wide glyph indices in a string or an
+/// array of strings (PLRM Table 5.17); an integer (added to the CID) and a
+/// CID → glyph index dictionary are accepted too, as Ghostscript does. A CID
+/// the map does not define shows CID 0's glyph, as in the interpreter.
+fn cid_map_gids(
+    ctx: &Context,
+    cidfont: EntityId,
+    cids: &HashSet<u16>,
+) -> Option<HashMap<u16, u16>> {
+    let get = |key: &[u8]| {
+        ctx.names
+            .find(key)
+            .and_then(|n| ctx.dicts.get(cidfont, &DictKey::Name(n)))
+    };
+    let int = |key: &[u8]| get(key).and_then(|o| o.as_i64());
+    let cid_map = get(b"CIDMap")?;
+    let cid_count = int(b"CIDCount").and_then(|n| usize::try_from(n).ok());
+    let gd_bytes = int(b"GDBytes")
+        .and_then(|n| usize::try_from(n).ok())
+        .unwrap_or(2);
+    let strings: Vec<&[u8]> = match cid_map.value {
+        PsValue::String { entity, start, len } => vec![ctx.strings.get(entity, start, len)],
+        PsValue::Array { entity, start, len } | PsValue::PackedArray { entity, start, len } => (0
+            ..len)
+            .filter_map(|i| match ctx.arrays.get_element(entity, start + i).value {
+                PsValue::String { entity, start, len } => Some(ctx.strings.get(entity, start, len)),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    let lookup = |cid: u16| -> Option<u16> {
+        if cid_count.is_some_and(|n| usize::from(cid) >= n) {
+            return None;
+        }
+        match cid_map.value {
+            PsValue::String { .. } | PsValue::Array { .. } | PsValue::PackedArray { .. } => {
+                truetype::cid_map_glyph_index(strings.iter().copied(), gd_bytes, usize::from(cid))
+            }
+            PsValue::Int(n) => i64::from(cid)
+                .checked_add(n)
+                .and_then(|g| u16::try_from(g).ok()),
+            PsValue::Dict(d) => ctx
+                .dicts
+                .get(d, &DictKey::Int(i64::from(cid)))
+                .and_then(|o| o.as_i64())
+                .and_then(|g| u16::try_from(g).ok()),
+            _ => Some(cid),
+        }
+    };
+    let notdef = lookup(0).unwrap_or(0);
+    Some(
+        cids.iter()
+            .map(|&cid| (cid, lookup(cid).unwrap_or(notdef)))
+            .collect(),
+    )
 }
 
 /// Navigate from a Type 0 font dict to its CIDFont descendant (FDepVector[0]).
@@ -2685,7 +2750,8 @@ fn extract_cid_widths(usage: &FontUsage, ctx: &Context) -> HashMap<u16, i32> {
     let mut cid_to_gid: HashMap<u16, u16> = HashMap::new();
 
     if usage.font_type == 0 {
-        cid_to_gid = build_cid_to_gid_from_cmap(&font_data);
+        cid_to_gid = cid_map_gids(ctx, cid_entity, &usage.used_codes)
+            .unwrap_or_else(|| build_cid_to_gid_from_cmap(&font_data));
     }
 
     if usage.font_type == 42 {
