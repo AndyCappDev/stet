@@ -311,6 +311,12 @@ pub struct Context {
 
     // Glyph path cache: per-font charstring interpretation results
     pub glyph_caches: rustc_hash::FxHashMap<EntityId, crate::glyph_cache::GlyphCache>,
+    /// The metrics show operators gave CIDFont glyphs through the font's
+    /// `Metrics2` or `CDevProc` (PLRM 5.9.2), by CIDFont and CID. An output
+    /// device that writes the font rather than its outlines — PDF output —
+    /// needs them, since only the interpreter can run a `CDevProc`. Not VM
+    /// state: `save`/`restore` leave it alone.
+    pub cid_glyph_metrics: rustc_hash::FxHashMap<(EntityId, u32), CidGlyphMetrics>,
     // Type 3 cache mode: set by setcachedevice/setcharwidth during BuildChar
     pub char_cache_mode: Option<crate::glyph_cache::Type3CacheMode>,
 
@@ -450,6 +456,20 @@ pub struct Context {
     /// later glyph carrying on from where it ended reopens: runs span show
     /// operators.
     pub text_last_run: Option<FlushedTextRun>,
+}
+
+/// A CIDFont glyph's metrics as shown, in the font's glyph space — the
+/// space its `FontMatrix` maps to font space: 1000 units to the em in most
+/// CIDFontType 0 fonts, the em itself in a TrueType one. See
+/// [`Context::cid_glyph_metrics`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CidGlyphMetrics {
+    /// The writing-mode-0 width w0.
+    pub w0: [f64; 2],
+    /// The writing-mode-1 width w1 and the vector v from origin 0 to
+    /// origin 1 (PLRM 5.4), or `None` when the glyph has only its mode-0
+    /// metrics and is set with them in either mode.
+    pub vertical: Option<([f64; 2], [f64; 2])>,
 }
 
 /// A show operator's text recording: see [`Context::text_capture`].
@@ -1160,6 +1180,7 @@ impl Context {
             char_bbox: None,
             char_width_mode1: None,
             glyph_caches: rustc_hash::FxHashMap::default(),
+            cid_glyph_metrics: rustc_hash::FxHashMap::default(),
             char_cache_mode: None,
             cshow_pending_cid: None,
             cshow_pending_code: None,

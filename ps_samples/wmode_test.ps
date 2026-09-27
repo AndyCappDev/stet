@@ -5,6 +5,11 @@
 % WMode behavior using two approaches:
 % 1. stringwidth metrics verification via CIDFont + CMap
 % 2. Visual verification using yshow to simulate vertical advancement
+%
+% A glyph gets writing-mode-1 metrics only from its CIDFont's Metrics2 or
+% CDevProc (PLRM 5.9.2). A font with neither has one set of metrics, and
+% "the WMode parameter is ignored" (PLRM 5.4): it advances as in mode 0.
+% DW2 is a PDF key, not a PostScript one, so it gives no vertical metrics.
 
 % ============================================================
 % Part 1: Visual demonstration of horizontal vs vertical text
@@ -107,6 +112,13 @@ end % CIDInit
 /MetricFont-H /TestH [cidfontdict] composefont pop
 /MetricFont-V /TestV [cidfontdict] composefont pop
 
+% The same CIDFont with Adobe's CDevProc for CJK fonts, which gives every
+% glyph vertical metrics: w1 = (0, -1000), v = (w0/2, 880).
+cidfontdict dup length 1 add dict copy
+dup /CDevProc {pop pop pop pop pop 0 -1000 7 index 2 div 880} put
+/cdevfontdict exch def
+/MetricFont-CDev /TestV [cdevfontdict] composefont pop
+
 % ============================================================
 % Part 3: Metric assertions
 % ============================================================
@@ -127,26 +139,44 @@ end % CIDInit
 (  ) show
 hwx 0 gt { (PASS: wx > 0) } { (FAIL: wx should be > 0) } ifelse show
 
-% Test: vertical stringwidth should have zero wx, negative wy
+% Test: without Metrics2 or CDevProc, WMode 1 is ignored — the vertical
+% font advances exactly as the horizontal one does, DW2 notwithstanding.
 /MetricFont-V findfont 36 scalefont setfont
 <004100420043> stringwidth  % 3 chars: ABC
 /vwy exch def /vwx exch def
 
 72 435 moveto
 /NimbusRoman-Regular findfont 12 scalefont setfont
+(No vertical metrics \(DW2 only\): WMode is ignored) show
+72 415 moveto
 (V stringwidth ABC: wx=) show vwx 10 string cvs show
 (  wy=) show vwy 10 string cvs show
 (  ) show
-vwx 0 eq { (PASS: wx = 0) } { (FAIL: wx should be 0) } ifelse show
+vwx hwx eq vwy hwy eq and
+  { (PASS: same as horizontal) } { (FAIL: should equal horizontal) } ifelse show
 
-72 415 moveto
-vwy 0 lt { (PASS: wy < 0 \(advances downward\)) }
+% Test: with a CDevProc, vertical stringwidth has zero wx, negative wy
+/MetricFont-CDev findfont 36 scalefont setfont
+<004100420043> stringwidth  % 3 chars: ABC
+/cwy exch def /cwx exch def
+
+72 385 moveto
+/NimbusRoman-Regular findfont 12 scalefont setfont
+(With Adobe's CDevProc: vertical metrics) show
+72 365 moveto
+(V stringwidth ABC: wx=) show cwx 10 string cvs show
+(  wy=) show cwy 10 string cvs show
+(  ) show
+cwx 0 eq { (PASS: wx = 0) } { (FAIL: wx should be 0) } ifelse show
+
+72 345 moveto
+cwy 0 lt { (PASS: wy < 0 \(advances downward\)) }
           { (FAIL: wy should be < 0) } ifelse show
 
 % Test: vertical advance should be -1000 * 0.001 * 36 * 3 = -108
-72 395 moveto
-(Expected V wy = -108.0, got: ) show vwy 10 string cvs show
+72 325 moveto
+(Expected V wy = -108.0, got: ) show cwy 10 string cvs show
 (  ) show
-vwy -108.0 eq { (PASS) } { (CLOSE) } ifelse show
+cwy -108.0 sub abs 0.001 lt { (PASS) } { (FAIL) } ifelse show
 
 showpage

@@ -141,13 +141,27 @@ pub(crate) fn build(
     if !w.is_empty() {
         cid_font.push((b"W".to_vec(), PdfObj::Array(w)));
     }
+    if usage.wmode == 1 {
+        let w2 = crate::font_embedder::w2_array(
+            ctx,
+            cidfont,
+            &usage.used_codes,
+            &glyph_to_text(ctx, cidfont),
+        );
+        if !w2.is_empty() {
+            cid_font.push((b"W2".to_vec(), PdfObj::Array(w2)));
+        }
+    }
     let cid_font = writer.add_object(&PdfObj::Dict(cid_font));
 
     let mut type0 = vec![
         (b"Type".to_vec(), PdfObj::name("Font")),
         (b"Subtype".to_vec(), PdfObj::name("Type0")),
         (b"BaseFont".to_vec(), PdfObj::Name(usage.font_name.clone())),
-        (b"Encoding".to_vec(), PdfObj::name("Identity-H")),
+        (
+            b"Encoding".to_vec(),
+            crate::font_embedder::identity_cmap(usage),
+        ),
         (
             b"DescendantFonts".to_vec(),
             PdfObj::Array(vec![PdfObj::Ref(cid_font)]),
@@ -245,13 +259,27 @@ fn points(path: &stet_fonts::PsPath) -> Vec<(f64, f64)> {
 }
 
 fn prepare(ctx: &Context, cidfont: EntityId, used: &HashSet<u16>) -> Result<Prepared, String> {
-    if let Some(data) = glyph_data(ctx, cidfont) {
+    let mut font = if let Some(data) = glyph_data(ctx, cidfont) {
         prepare_glyph_data(ctx, cidfont, data, used)
     } else if let Some((data, name)) = cff_data(ctx, cidfont) {
         prepare_cff(data, &name, used)
     } else {
         Err("neither GlyphData nor CFF data".into())
+    }?;
+    // A `CDevProc` may have shown a glyph with another width.
+    let fm = glyph_to_text(ctx, cidfont);
+    for &cid in used {
+        if let Some(w) = crate::font_embedder::shown_width(ctx, cidfont, cid, &fm) {
+            font.widths.insert(cid, w);
+        }
     }
+    Ok(font)
+}
+
+/// The CIDFont's glyph space to text space, its `FontMatrix`: the space
+/// the interpreter's glyph metrics are in.
+fn glyph_to_text(ctx: &Context, cidfont: EntityId) -> Matrix {
+    matrix(ctx, cidfont).unwrap_or(Matrix::scale(0.001, 0.001))
 }
 
 /// One `FDArray` font of a GlyphData CIDFont.

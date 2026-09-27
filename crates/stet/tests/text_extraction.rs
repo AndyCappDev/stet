@@ -626,12 +626,18 @@ showpage
 #[test]
 fn cid_fonts_give_the_collections_text() {
     // Japan1 CIDs 3851 and 3852 are 諭 and 輸, shown through Identity-H
-    // and then through Identity-V.
+    // and then through Identity-V. The font needs writing-mode-1 metrics
+    // for the second to be vertical (PLRM 5.4): Adobe's `CDevProc` for CJK
+    // fonts, in the em a TrueType CIDFont's glyph space counts in.
     let ps = cid_font_ps(
         "",
         "72 700 moveto <0F0B0F0C> show \
          /JV /Identity-V [/CIDF /CIDFont findresource] composefont 12 scalefont setfont \
          300 700 moveto <0F0B0F0C> show",
+    )
+    .replace(
+        "/CIDCount",
+        "/CDevProc {pop pop pop pop pop 0 -1 7 index 2 div 0.88} /CIDCount",
     );
     let runs = runs_of(&ps);
     assert_eq!(runs.len(), 2, "{runs:#?}");

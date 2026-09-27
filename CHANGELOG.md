@@ -89,6 +89,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   string and array forms, and in the integer and dictionary forms
   Ghostscript also accepts; a CID the map does not define shows CID 0's
   glyph.
+- **Vertical CID text follows the PLRM, and PDF output keeps it
+  vertical.** A glyph gets its vertical (writing mode 1) metrics from the
+  CIDFont's `Metrics2` or `CDevProc` (PLRM 5.9.2), which stet now
+  supports; `CDevProc` may change widths in horizontal text too. A font
+  with neither has one set of metrics, and the PLRM ignores the writing
+  mode for it: its text runs horizontally, as in Ghostscript. stet instead
+  gave every CIDFont default vertical metrics, and read `DW2`, which is a
+  PDF key, not a PostScript one; pdftops' conversions of vertical text,
+  whose fonts carry no vertical metrics, now render as Ghostscript renders
+  them. PDF output wrote every CID font with a horizontal CMap, so
+  vertical text ran across the page; it now uses `Identity-V` with `/W2`
+  holding the metrics the interpreter used, and a CIDFont shown in both
+  directions becomes one PDF font per direction.
+- **Text in PDF output keeps its spacing.** Strings on one line are
+  joined into a `TJ` run spaced by the glyph widths, which were looked up
+  byte by byte instead of by 2-byte CID: when the page also used the CIDs
+  matching those bytes (CID `0x0105` read as CIDs 1 and 5), the next
+  string landed in the wrong place. `ashow` and `widthshow` spacing on CID
+  text was dropped altogether. And in any font, each kern in a run was
+  rounded to a thousandth of an em, so a line of separately placed glyphs,
+  as pdftops writes, drifted by a fraction of a point by its end. All
+  three now match the interpreter.
 - **`definefont` no longer replaces the font a copy was made from.** It
   filed each font in `FontDirectory` under its `/FontName` rather than
   under the key it was defined with, which the PLRM requires. A re-encoded

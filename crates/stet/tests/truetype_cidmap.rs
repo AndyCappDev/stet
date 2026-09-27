@@ -230,3 +230,59 @@ fn pdf_output_uses_the_map() {
         assert!(close(*pdf, ps), "PDF {pdf:?} PS {ps:?}");
     }
 }
+
+/// PDF output joins strings on one baseline into a `TJ` run, spacing them
+/// by the widths of their CIDs. It summed the widths of the strings'
+/// bytes, which a 2-byte CID's are not: with CID 0 also on the page,
+/// `<0005>` measured CID 0's 250 plus CID 5's 500, and the string after it
+/// landed 25 points early.
+#[cfg(feature = "pdf-output")]
+#[test]
+fn pdf_output_spaces_runs_by_cid_widths() {
+    let map = format!("<{}>", hex(&cid_map()));
+    let ps = job(
+        &map,
+        &format!(
+            "10 50 moveto <0005> show 65 50 moveto <0007> show 300 20 moveto <0000> show {MARK}"
+        ),
+    );
+    let pdf = Interpreter::builder()
+        .build()
+        .render_to_pdf(&ps, 72.0)
+        .expect("writes a PDF");
+    let doc = stet_pdf_reader::PdfDocument::from_bytes(&pdf).expect("reads back");
+    let fills = boxes(doc.render_page(0, 72.0).expect("renders").elements().iter());
+    let expected = ps_fills(&ps);
+    assert_eq!(fills.len(), expected.len(), "{fills:?}");
+    assert!(
+        close(fills[1], [65.0, 50.0, 165.0, 150.0]),
+        "{:?}",
+        fills[1]
+    );
+    for (pdf, ps) in fills.iter().zip(expected) {
+        assert!(close(*pdf, ps), "PDF {pdf:?} PS {ps:?}");
+    }
+}
+
+/// Strings placed one by one along a line join into one `TJ` run, whose
+/// kerns add up: whole-thousandth kerns drifted 0.03 points a glyph here.
+#[cfg(feature = "pdf-output")]
+#[test]
+fn pdf_output_places_each_string_of_a_run_exactly() {
+    let map = format!("<{}>", hex(&cid_map()));
+    let body: String = (0..7)
+        .map(|i| format!("{} 50 moveto <0005> show\n", 10.0 + f64::from(i) * 50.37))
+        .collect();
+    let ps = job(&map, &body);
+    let pdf = Interpreter::builder()
+        .build()
+        .render_to_pdf(&ps, 72.0)
+        .expect("writes a PDF");
+    let doc = stet_pdf_reader::PdfDocument::from_bytes(&pdf).expect("reads back");
+    let fills = boxes(doc.render_page(0, 72.0).expect("renders").elements().iter());
+    let expected = ps_fills(&ps);
+    assert_eq!(fills.len(), 7, "{fills:?}");
+    for (pdf, ps) in fills.iter().zip(expected) {
+        assert!(close(*pdf, ps), "PDF {pdf:?} PS {ps:?}");
+    }
+}

@@ -18,6 +18,7 @@ use stet_core::context::Context;
 use stet_core::dict::DictKey;
 use stet_core::object::{EntityId, PsValue};
 use stet_fonts::encoding::STANDARD_ENCODING;
+use stet_fonts::geometry::Matrix;
 use stet_fonts::truetype;
 use stet_fonts::type2_charstring;
 
@@ -1777,7 +1778,7 @@ fn calc_table_checksum(data: &[u8]) -> u32 {
 /// Build a CID (Type 0 / Type 42) font resource for PDF.
 ///
 /// Creates the PDF Type 0 → CIDFontType2 → FontFile2 hierarchy
-/// with Identity-H encoding and a ToUnicode CMap.
+/// with an Identity CMap and a ToUnicode CMap.
 fn build_cid_font(writer: &mut PdfWriter, usage: &FontUsage, ctx: &Context) -> Option<u32> {
     let font_entity = usage.font_entity;
 
@@ -1836,7 +1837,14 @@ fn build_cid_font(writer: &mut PdfWriter, usage: &FontUsage, ctx: &Context) -> O
     let max_cid = usage.used_codes.iter().copied().max().unwrap_or(0);
 
     // Build /W array (compact widths)
-    let w_array = build_w_array(&font_data, &usage.used_codes, &cid_to_gid, scale);
+    let widths = truetype_cid_widths(
+        ctx,
+        cidfont_entity,
+        &font_data,
+        &usage.used_codes,
+        &cid_to_gid,
+    );
+    let w_array = build_w_array(&widths);
 
     // Default width (CID 0 / GID 0)
     let default_width = truetype::get_advance_width(&font_data, 0)
@@ -1915,6 +1923,17 @@ fn build_cid_font(writer: &mut PdfWriter, usage: &FontUsage, ctx: &Context) -> O
     if !w_array.is_empty() {
         cid_font_entries.push((b"W".to_vec(), PdfObj::Array(w_array)));
     }
+    if usage.wmode == 1 {
+        let w2 = w2_array(
+            ctx,
+            cidfont_entity,
+            &usage.used_codes,
+            &TRUETYPE_GLYPH_TO_TEXT,
+        );
+        if !w2.is_empty() {
+            cid_font_entries.push((b"W2".to_vec(), PdfObj::Array(w2)));
+        }
+    }
     let cid_font_ref = writer.add_object(&PdfObj::Dict(cid_font_entries));
 
     // Build ToUnicode CMap for 2-byte CID codes
@@ -1932,7 +1951,7 @@ fn build_cid_font(writer: &mut PdfWriter, usage: &FontUsage, ctx: &Context) -> O
         (b"Type".to_vec(), PdfObj::name("Font")),
         (b"Subtype".to_vec(), PdfObj::name("Type0")),
         (b"BaseFont".to_vec(), PdfObj::Name(usage.font_name.clone())),
-        (b"Encoding".to_vec(), PdfObj::name("Identity-H")),
+        (b"Encoding".to_vec(), identity_cmap(usage)),
         (
             b"DescendantFonts".to_vec(),
             PdfObj::Array(vec![PdfObj::Ref(cid_font_ref)]),
@@ -1943,6 +1962,84 @@ fn build_cid_font(writer: &mut PdfWriter, usage: &FontUsage, ctx: &Context) -> O
     }
 
     Some(writer.add_object(&PdfObj::Dict(type0_entries)))
+}
+
+/// The CMap of a Type 0 font resource: the content stream shows 2-byte
+/// CIDs, in the resource's writing mode.
+pub(crate) fn identity_cmap(usage: &FontUsage) -> PdfObj {
+    PdfObj::name(if usage.wmode == 1 {
+        "Identity-V"
+    } else {
+        "Identity-H"
+    })
+}
+
+/// `/W2` for `cidfont` shown in writing mode 1: each used CID's vertical
+/// metrics as the interpreter set it, from the font's `Metrics2` or
+/// `CDevProc` (see [`Context::cid_glyph_metrics`]), in the thousandths of
+/// text space PDF counts in. `glyph_to_text` maps the CIDFont's glyph
+/// space to text space.
+///
+/// A CID set with its mode-0 metrics — `Metrics2` lacks it and there is no
+/// `CDevProc` — gets v zero, so it is drawn from its position; the
+/// interpreter places each glyph of such a show on its own, so the advance
+/// PDF gives it does not matter.
+pub(crate) fn w2_array(
+    ctx: &Context,
+    cidfont: EntityId,
+    used: &HashSet<u16>,
+    glyph_to_text: &Matrix,
+) -> Vec<PdfObj> {
+    let text = |x: f64, y: f64| {
+        let (x, y) = glyph_to_text.transform_delta(x, y);
+        ((x * 1000.0).round() as i64, (y * 1000.0).round() as i64)
+    };
+    let mut cids: Vec<u16> = used.iter().copied().collect();
+    cids.sort_unstable();
+    let mut out = Vec::new();
+    let mut run: Vec<PdfObj> = Vec::new();
+    let mut run_start = 0;
+    let mut prev: Option<u16> = None;
+    for cid in cids {
+        let Some(m) = ctx.cid_glyph_metrics.get(&(cidfont, u32::from(cid))) else {
+            continue;
+        };
+        let (w1y, vx, vy) = match m.vertical {
+            Some((w1, v)) => {
+                let (vx, vy) = text(v[0], v[1]);
+                (text(w1[0], w1[1]).1, vx, vy)
+            }
+            None => (-1000, 0, 0),
+        };
+        if prev.is_none_or(|p| p + 1 != cid) {
+            if !run.is_empty() {
+                out.push(PdfObj::Int(i64::from(run_start)));
+                out.push(PdfObj::Array(std::mem::take(&mut run)));
+            }
+            run_start = cid;
+        }
+        run.extend([PdfObj::Int(w1y), PdfObj::Int(vx), PdfObj::Int(vy)]);
+        prev = Some(cid);
+    }
+    if !run.is_empty() {
+        out.push(PdfObj::Int(i64::from(run_start)));
+        out.push(PdfObj::Array(run));
+    }
+    out
+}
+
+/// `cid`'s width as the interpreter shows it, in thousandths of text space,
+/// when the CIDFont's `Metrics2` or `CDevProc` set its metrics: a
+/// `CDevProc` may change the width. `glyph_to_text` is as for [`w2_array`].
+pub(crate) fn shown_width(
+    ctx: &Context,
+    cidfont: EntityId,
+    cid: u16,
+    glyph_to_text: &Matrix,
+) -> Option<i32> {
+    let m = ctx.cid_glyph_metrics.get(&(cidfont, u32::from(cid)))?;
+    let (w, _) = glyph_to_text.transform_delta(m.w0[0], m.w0[1]);
+    Some((w * 1000.0).round() as i32)
 }
 
 /// The glyph index each of `cids` shows, from a Type 2 CIDFont's `CIDMap`,
@@ -2172,25 +2269,49 @@ fn parse_cmap_format12(font_data: &[u8], offset: usize, map: &mut HashMap<u16, u
     }
 }
 
-/// Build the PDF /W array for CID font widths.
-///
-/// Format: [cid1 [w1 w2 w3 ...] cid2 [w4 w5 ...] ...]
-/// Groups consecutive CIDs that have widths different from the default.
-fn build_w_array(
+/// A TrueType CIDFont's widths for `used_codes`, in thousandths of text
+/// space: its `hmtx` advances, or what a `CDevProc` made of them.
+fn truetype_cid_widths(
+    ctx: &Context,
+    cidfont: EntityId,
     font_data: &[u8],
     used_codes: &HashSet<u16>,
     cid_to_gid: &HashMap<u16, u16>,
-    scale: f64,
-) -> Vec<PdfObj> {
-    // Collect (cid, width) pairs, sorted by CID
-    let mut cid_widths: Vec<(u16, i64)> = Vec::new();
-    for &cid in used_codes {
-        let gid = cid_to_gid.get(&cid).copied().unwrap_or(cid);
-        if let Some(aw) = truetype::get_advance_width(font_data, gid) {
-            let w = (aw as f64 * scale).round() as i64;
-            cid_widths.push((cid, w));
-        }
-    }
+) -> HashMap<u16, i32> {
+    let scale = 1000.0 / f64::from(truetype::get_units_per_em(font_data));
+    used_codes
+        .iter()
+        .filter_map(|&cid| {
+            let width = shown_width(ctx, cidfont, cid, &TRUETYPE_GLYPH_TO_TEXT).or_else(|| {
+                let gid = cid_to_gid.get(&cid).copied().unwrap_or(cid);
+                truetype::get_advance_width(font_data, gid)
+                    .map(|aw| (f64::from(aw) * scale).round() as i32)
+            })?;
+            Some((cid, width))
+        })
+        .collect()
+}
+
+/// A TrueType CIDFont's glyph space, the em, to text space: the widths
+/// above take the CIDFont's `FontMatrix` as the identity.
+const TRUETYPE_GLYPH_TO_TEXT: Matrix = Matrix {
+    a: 1.0,
+    b: 0.0,
+    c: 0.0,
+    d: 1.0,
+    tx: 0.0,
+    ty: 0.0,
+};
+
+/// Build the PDF /W array for CID font widths.
+///
+/// Format: [cid1 [w1 w2 w3 ...] cid2 [w4 w5 ...] ...]
+/// Groups consecutive CIDs.
+fn build_w_array(widths: &HashMap<u16, i32>) -> Vec<PdfObj> {
+    let mut cid_widths: Vec<(u16, i64)> = widths
+        .iter()
+        .map(|(&cid, &w)| (cid, i64::from(w)))
+        .collect();
     cid_widths.sort_by_key(|&(cid, _)| cid);
 
     // Group into consecutive runs
@@ -2792,6 +2913,9 @@ fn extract_cid_widths(usage: &FontUsage, ctx: &Context) -> HashMap<u16, i32> {
         }
     }
 
+    if usage.font_type == 0 {
+        return truetype_cid_widths(ctx, cid_entity, &font_data, &usage.used_codes, &cid_to_gid);
+    }
     let mut widths: HashMap<u16, i32> = HashMap::new();
     for &code in &usage.used_codes {
         let gid = cid_to_gid.get(&code).copied().unwrap_or(code);

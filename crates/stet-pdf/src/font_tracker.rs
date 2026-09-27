@@ -55,6 +55,13 @@ pub struct FontUsage {
     /// where none names a glyph). Empty when the encoding could not be
     /// read, which agrees with any other.
     encoding: Vec<Option<NameId>>,
+    /// Writing mode of a Type 0 font: 1 for vertical, 0 otherwise. A PDF
+    /// font has one, set by its CMap, so the horizontal and vertical
+    /// instances of a CIDFont are separate resources.
+    pub wmode: u8,
+    /// Whether `wmode` came from a font dict, rather than being assumed
+    /// for an instance registered without a [`Context`].
+    wmode_known: bool,
     /// Set of character codes (or CIDs) used.
     pub used_codes: HashSet<u16>,
     /// Whether this is a Standard 14 font (skip embedding).
@@ -100,9 +107,9 @@ impl FontTracker {
     /// Register a Text element's font and record character usage.
     /// Returns the PDF resource name for this font.
     ///
-    /// `ctx` supplies the font's encoding, which decides whether it can
-    /// share a resource with another instance of the same font; without it
-    /// the instance joins the font's first resource.
+    /// `ctx` supplies the font's encoding and writing mode, which decide
+    /// whether it can share a resource with another instance of the same
+    /// font; without it the instance joins the font's first resource.
     pub fn track(&mut self, params: &TextParams, ctx: Option<&Context>) -> &str {
         let entity = EntityId(params.font_entity);
         let idx = match self.entity_to_font.get(&entity) {
@@ -143,15 +150,23 @@ impl FontTracker {
             Some(ctx) if params.font_type != 0 => glyph_encoding(ctx, entity),
             _ => Vec::new(),
         };
+        let wmode = match ctx {
+            Some(ctx) if params.font_type == 0 => Some(writing_mode(ctx, entity)),
+            _ => None,
+        };
         let group = self.by_key.entry(key).or_default();
-        let idx = match group
-            .iter()
-            .copied()
-            .find(|&i| encodings_agree(&self.fonts[i].encoding, &encoding))
-        {
+        let idx = match group.iter().copied().find(|&i| {
+            let usage = &self.fonts[i];
+            encodings_agree(&usage.encoding, &encoding)
+                && (!usage.wmode_known || wmode.is_none_or(|w| w == usage.wmode))
+        }) {
             Some(i) => {
                 let usage = &mut self.fonts[i];
                 merge_encoding(&mut usage.encoding, &encoding);
+                if let Some(w) = wmode {
+                    usage.wmode = w;
+                    usage.wmode_known = true;
+                }
                 usage.all_entities.push(entity);
                 i
             }
@@ -165,6 +180,8 @@ impl FontTracker {
                     all_entities: vec![entity],
                     program_entities: Vec::new(),
                     encoding,
+                    wmode: wmode.unwrap_or(0),
+                    wmode_known: wmode.is_some(),
                     used_codes: HashSet::new(),
                     is_standard_14: STANDARD_14.contains(&params.font_name.as_slice()),
                     sample_params: params.clone(),
@@ -204,6 +221,13 @@ impl FontTracker {
         self.fonts.iter_mut()
     }
 
+    /// The writing mode of a font entity's resource: 1 for vertical.
+    pub fn wmode(&self, font_entity: EntityId) -> u8 {
+        self.entity_to_font
+            .get(&font_entity)
+            .map_or(0, |&i| self.fonts[i].wmode)
+    }
+
     /// Look up a glyph width for a font entity and character code.
     /// Returns width in 1000ths of a unit, or None if unavailable.
     pub fn get_glyph_width(&self, font_entity: EntityId, code: u16) -> Option<i32> {
@@ -230,6 +254,31 @@ fn glyph_encoding(ctx: &Context, font: EntityId) -> Vec<Option<NameId>> {
             _ => None,
         })
         .collect()
+}
+
+/// A Type 0 font's writing mode as the interpreter sets its text: 1 when
+/// the root font's `WMode` is 1 and its CIDFont has writing-mode-1
+/// metrics, a `Metrics2` or a `CDevProc`; else 0. Without them "the WMode
+/// parameter is ignored" (PLRM 5.4), and the text runs horizontally.
+fn writing_mode(ctx: &Context, font: EntityId) -> u8 {
+    let get = |dict: EntityId, key: &[u8]| {
+        ctx.names
+            .find(key)
+            .and_then(|id| ctx.dicts.get(dict, &DictKey::Name(id)))
+    };
+    let wmode = get(font, b"WMode").and_then(|o| o.as_i32());
+    let cidfont = match get(font, b"FDepVector").map(|o| o.value) {
+        Some(PsValue::Array { entity, start, len }) if len > 0 => {
+            match ctx.arrays.get_element(entity, start).value {
+                PsValue::Dict(d) => Some(d),
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+    let vertical_metrics =
+        cidfont.is_some_and(|d| get(d, b"Metrics2").is_some() || get(d, b"CDevProc").is_some());
+    u8::from(wmode == Some(1) && vertical_metrics)
 }
 
 /// Whether no code names different glyphs in `a` and `b`.

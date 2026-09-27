@@ -38,6 +38,9 @@ pub fn emit_text_batch(buf: &mut Vec<u8>, batch: &[&TextParams], font_tracker: &
         .fonts()
         .find(|u| u.font_entity == EntityId(first.font_entity))
         .is_none_or(|u| u.widths.is_empty());
+    // Runs join along the horizontal advance, which vertical text does not
+    // follow: each vertical string is placed on its own.
+    let joins_runs = has_widths && font_tracker.wmode(EntityId(first.font_entity)) == 0;
 
     // Single BT/Tf block for the entire batch — Tf is the same for all
     // entries since they share the same font.
@@ -58,7 +61,7 @@ pub fn emit_text_batch(buf: &mut Vec<u8>, batch: &[&TextParams], font_tracker: &
         // Collect consecutive entries on the same baseline for TJ
         let mut run: Vec<usize> = vec![i];
 
-        if has_widths {
+        if joins_runs {
             let tm_key = TmKey::new(tm_a, tm_b, tm_c, tm_d);
             let adv_len_sq = tm_a * tm_a + tm_b * tm_b;
 
@@ -94,14 +97,7 @@ pub fn emit_text_batch(buf: &mut Vec<u8>, batch: &[&TextParams], font_tracker: &
 
                     // Check along-direction gap (≤ 500 font units)
                     let along_dist = (ndx * tm_a + ndy * tm_b) / adv_len_sq;
-                    let mut prev_text_width = 0.0;
-                    for &byte_val in &prev.text {
-                        if let Some(w) = font_tracker
-                            .get_glyph_width(EntityId(prev.font_entity), byte_val as u16)
-                        {
-                            prev_text_width += w as f64;
-                        }
-                    }
+                    let prev_text_width = text_width(font_tracker, prev, false).unwrap_or(0.0);
                     let gap = (along_dist * 1000.0).abs() - prev_text_width;
                     if gap > 500.0 {
                         break;
@@ -167,23 +163,16 @@ pub fn emit_text_batch(buf: &mut Vec<u8>, batch: &[&TextParams], font_tracker: &
                         // Advance in text-space x units
                         let text_advance = (dx * tm_a + dy * tm_b) / adv_len_sq;
                         // Sum widths of all glyphs in previous text
-                        let mut prev_total_width = 0.0;
-                        let mut all_widths_found = true;
-                        for &b in &prev.text {
-                            if let Some(w) =
-                                font_tracker.get_glyph_width(EntityId(prev.font_entity), b as u16)
-                            {
-                                prev_total_width += w as f64;
-                            } else {
-                                all_widths_found = false;
-                                break;
-                            }
-                        }
-                        if all_widths_found && !prev.text.is_empty() {
-                            let kern = prev_total_width - text_advance * 1000.0;
-                            let kern_rounded = kern.round() as i64;
-                            if kern_rounded != 0 {
-                                tj_parts.push(TjPart::Kern(kern_rounded));
+                        if let Some(prev_total_width) = text_width(font_tracker, prev, true)
+                            && !prev.text.is_empty()
+                        {
+                            // Kept to hundredths: a run adds up its kerns, so
+                            // whole thousandths drift along a line of
+                            // separately placed glyphs.
+                            let kern = ((prev_total_width - text_advance * 1000.0) * 100.0).round()
+                                / 100.0;
+                            if kern != 0.0 {
+                                tj_parts.push(TjPart::Kern(kern));
                             }
                             can_kern = true;
                         }
@@ -213,10 +202,34 @@ pub fn emit_text_batch(buf: &mut Vec<u8>, batch: &[&TextParams], font_tracker: &
     buf.extend(b"ET\n");
 }
 
+/// The advance of `params`'s text in thousandths of text space, summed
+/// from its font's widths: `None` when a glyph has no width and `strict`,
+/// else such glyphs count as zero.
+///
+/// A Type 0 font's text is 2-byte CIDs, and its widths are keyed by CID.
+fn text_width(font_tracker: &FontTracker, params: &TextParams, strict: bool) -> Option<f64> {
+    let entity = EntityId(params.font_entity);
+    let codes: Vec<u16> = if params.font_type == 0 {
+        let (cids, _) = params.text.as_chunks::<2>();
+        cids.iter().map(|&c| u16::from_be_bytes(c)).collect()
+    } else {
+        params.text.iter().map(|&b| u16::from(b)).collect()
+    };
+    let mut total = 0.0;
+    for code in codes {
+        match font_tracker.get_glyph_width(entity, code) {
+            Some(w) => total += f64::from(w),
+            None if strict => return None,
+            None => {}
+        }
+    }
+    Some(total)
+}
+
 /// Part of a TJ array: either a hex string or a kern value.
 enum TjPart<'a> {
     Text(&'a [u8]),
-    Kern(i64),
+    Kern(f64),
 }
 
 /// Emit a TJ array: [<hex1> kern1 <hex2> ...] TJ
@@ -225,7 +238,7 @@ fn emit_tj_array(buf: &mut Vec<u8>, parts: &[TjPart]) {
     for part in parts {
         match part {
             TjPart::Text(text) => emit_text_string(buf, text),
-            TjPart::Kern(k) => write!(buf, "{}", k).unwrap(),
+            TjPart::Kern(k) => fmt_num(buf, *k),
         }
     }
     buf.extend(b"] TJ\n");
