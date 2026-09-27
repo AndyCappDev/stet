@@ -384,7 +384,7 @@ fn subset_cff_font() -> Vec<u8> {
     ps.extend(&data);
     ps.extend(
         format!(
-            "\nend\n/F /Identity-H [/SubCID /CIDFont findresource] composefont pop\n\
+            "\n/F /Identity-H [/SubCID /CIDFont findresource] composefont pop\n\
              /F findfont 100 scalefont setfont\n\
              10 100 moveto <000300070005> show {MARK}\nshowpage\n"
         )

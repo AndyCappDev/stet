@@ -102,6 +102,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   vertical text ran across the page; it now uses `Identity-V` with `/W2`
   holding the metrics the interpreter used, and a CIDFont shown in both
   directions becomes one PDF font per direction.
+- **Loading a CFF FontSet leaves the dictionary stack as it was, and
+  defines the FontSet.** A FontSet file begins the `FontSetInit` ProcSet
+  and has no `end` after its binary data (Adobe TN 5176, Appendix E), so
+  `StartData` must end it, as Ghostscript's does; stet's left the ProcSet
+  on the dictionary stack for the rest of the job. `StartData` also
+  discarded the FontSet's name: it now defines the fonts as that FontSet
+  resource, and `/NimbusRoman-Regular-CFF /FontSet findresource` finds
+  stet's own FontSet, whose file named it differently.
 - **Text in PDF output keeps its spacing.** Strings on one line are
   joined into a `TJ` run spaced by the glyph widths, which were looked up
   byte by byte instead of by 2-byte CID: when the page also used the CIDs

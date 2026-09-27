@@ -10,8 +10,18 @@ userdict /$unittest known not {(unit_tests/unittest.ps) run} if
 % ============================================================
 
 % Load the CFF FontSet file (must not error)
+% StartData pops the FontSetInit ProcSet the file begins: the dictionary
+% stack is as it was.
+countdictstack /cff_dicts exch def
 (resources/FontSet/NimbusRoman-Regular-CFF.ps) run
-end  % Pop FontSetInit ProcSet from d_stack (FontSet file does begin but binary data prevents end)
+countdictstack cff_dicts eq
+[true] assert
+
+% StartData defines the FontSet, holding the font it loaded.
+/NimbusRoman-Regular-CFF /FontSet resourcestatus { pop pop true } { false } ifelse
+[true] assert
+/NimbusRoman-Regular-CFF /FontSet findresource /NimbusRoman-Regular get /FontType get
+[2] assert
 
 % Test that the font has FontType 2
 /NimbusRoman-Regular findfont /FontType get

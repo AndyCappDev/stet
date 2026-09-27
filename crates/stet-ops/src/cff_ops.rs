@@ -6,7 +6,8 @@
 //!
 //! Implements `.cff_startdata` — the internal operator that backs the FontSetInit
 //! ProcSet's `StartData` procedure. Reads binary CFF data from the current file,
-//! parses it with `cff_parser`, and registers each font via `definefont`.
+//! parses it with `cff_parser`, registers each font via `definefont`, and
+//! returns them for `StartData` to define as a FontSet resource.
 
 use stet_core::context::Context;
 use stet_core::dict::DictKey;
@@ -14,15 +15,15 @@ use stet_core::error::PsError;
 use stet_core::object::{ObjFlags, PsObject, PsValue};
 use stet_fonts::cff_parser::{self, CffFont};
 
-/// `.cff_startdata`: byte_count → —
+/// `.cff_startdata`: byte_count → fonts
 ///
 /// Read `byte_count` bytes of CFF binary data from the current file,
 /// parse the CFF data, build PostScript font dictionaries for each
-/// font found, and register them as Font resources.
+/// font found, and register them as Font (or CIDFont) resources. Leaves a
+/// dictionary of the fonts by name, the FontSet the data defines.
 ///
-/// Called via FontSetInit ProcSet's `StartData` procedure.
-/// The PS wrapper does: `fontsetname byte_count StartData`
-/// where `StartData` is `{ exch pop .cff_startdata }`.
+/// Called via FontSetInit ProcSet's `StartData` procedure,
+/// `fontsetname byte_count StartData`, which defines that FontSet.
 pub fn op_cff_startdata(ctx: &mut Context) -> Result<(), PsError> {
     // Validate stack
     if ctx.o_stack.is_empty() {
@@ -75,21 +76,30 @@ pub fn op_cff_startdata(ctx: &mut Context) -> Result<(), PsError> {
     let cff_str_entity = crate::vm_ops::alloc_string(ctx, &cff_data);
     let cff_data_len = cff_data.len() as u32;
 
-    for cff_font in &cff_fonts {
-        register_cff_font(ctx, cff_font, cff_str_entity, cff_data_len)?;
-    }
-
+    let registered: Result<Vec<_>, PsError> = cff_fonts
+        .iter()
+        .map(|cff_font| register_cff_font(ctx, cff_font, cff_str_entity, cff_data_len))
+        .collect();
     ctx.vm_alloc_mode = saved_vm_mode;
+    let registered = registered?;
+
+    // The FontSet: each font by name, in the caller's VM.
+    let font_set = crate::vm_ops::alloc_dict(ctx, registered.len().max(1), b"FontSet");
+    for (name, font) in registered {
+        ctx.dicts.put(font_set, DictKey::Name(name), font);
+    }
+    ctx.o_stack.push(PsObject::dict(font_set))?;
     Ok(())
 }
 
-/// Build a PostScript font dictionary from a parsed CffFont and register it.
+/// Build a PostScript font dictionary from a parsed CffFont and register
+/// it, returning its name and the font `definefont` registered.
 fn register_cff_font(
     ctx: &mut Context,
     cff_font: &CffFont,
     cff_str_entity: stet_core::object::EntityId,
     cff_data_len: u32,
-) -> Result<(), PsError> {
+) -> Result<(stet_core::object::NameId, PsObject), PsError> {
     // Create font dictionary
     let font_entity = crate::vm_ops::alloc_dict(ctx, 16, b"CFF");
 
@@ -539,7 +549,7 @@ fn register_cff_font(
             .put(cat_dict, DictKey::Name(font_name_id), registered_font);
     }
 
-    Ok(())
+    Ok((font_name_id, registered_font))
 }
 
 /// GID → CID for a CID-keyed font, inverting the parser's CID → GID map;

@@ -50,7 +50,7 @@ fn cff_cidfont() -> Vec<u8> {
     let mut ps = b"/FontSetInit /ProcSet findresource begin\n".to_vec();
     ps.extend(format!("/CIDC {} StartData ", data.len()).bytes());
     ps.extend(data);
-    ps.extend(b"\nend\n");
+    ps.extend(b"\n");
     ps
 }
 

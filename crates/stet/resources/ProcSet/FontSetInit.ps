@@ -8,14 +8,18 @@
 % CFF fonts appear in PostScript as:
 %   /FontSetInit /ProcSet findresource begin
 %   /FontSetName byte_count StartData <binary CFF data>
+% with no `end`: StartData pops the ProcSet from the dictionary stack.
 
 <<
     /Title (Font Set Init)
     /Version 1.0
     /Revision 0
 
-    % StartData: read binary CFF data from current file and register fonts
+    % StartData: read binary CFF data from current file, register its
+    % fonts, and define them as the FontSet fontsetname.
     % Stack: fontsetname byte_count StartData -
-    % Pops fontsetname, passes byte_count to .cff_startdata
-    /StartData { exch pop .cff_startdata } bind
+    % A FontSet file (Adobe TN 5176, Appendix E) begins this ProcSet and
+    % has no `end` after the data: StartData ends it, as Ghostscript's
+    % does.
+    /StartData { .cff_startdata end /FontSet defineresource pop } bind
 >>
