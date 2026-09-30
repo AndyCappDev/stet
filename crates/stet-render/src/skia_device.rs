@@ -129,10 +129,15 @@ pub struct SkiaDevice {
 
 /// What a page's unpainted areas are left as.
 ///
-/// Rendering always starts from a transparent backdrop; this says whether the
-/// last step composites that onto white paper or converts it to straight
-/// alpha and leaves it clear, which is what placed artwork wants.
+/// [`White`](Self::White) gives an opaque page on white paper, as printed.
+/// [`Transparent`](Self::Transparent) leaves every pixel no mark covers at
+/// alpha 0 and hands the result back as straight (non-premultiplied) RGBA —
+/// what artwork placed over other content wants.
+///
+/// Marked `#[non_exhaustive]`: other backgrounds may be added, so `match` on
+/// it with a wildcard arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum PageBackground {
     /// Composite onto white paper. The output is opaque.
     #[default]

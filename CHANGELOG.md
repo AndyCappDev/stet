@@ -9,16 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **`--transparent` for `--device png`, and `render_to_rgba_with_background`
-  in `stet-render`.** Pages are rendered onto a transparent backdrop and
-  composited onto white paper only as the last step; the option skips that
-  step and writes straight-alpha RGBA instead, so artwork (EPS, AI, PDF) can
-  be placed over other content with its unpainted areas clear. Both the
-  PostScript and PDF input paths honour it, on the banded and the full-page
-  path alike. The library says which through `PageBackground::{White,
-  Transparent}`, on `render_to_rgba_with_background` and
-  `SkiaDevice::set_page_background`; `render_to_rgba` and
-  `render_to_rgba_with_layers` keep their signatures and white paper.
+- **Transparent page backgrounds: `--transparent` for `--device png`,
+  and `PageBackground` in the library.** Pages normally render onto white
+  paper; with the option, every pixel no mark covers is left at alpha 0 and
+  the output is straight-alpha RGBA, so artwork (EPS, AI, PDF) can be
+  placed over other content with its unpainted areas clear. PostScript and
+  PDF input both honour it, on every page. In the library,
+  `InterpreterBuilder::page_background(PageBackground::Transparent)` makes
+  `Interpreter::render` return clear pages, and `stet-render` adds
+  `render_to_rgba_with_background` and `SkiaDevice::set_page_background`,
+  and `stet-pdf-reader` adds `PdfDocument::render_page_to_rgba_with_background`
+  (with `PageBackground` re-exported); `render_to_rgba`,
+  `render_to_rgba_with_layers` and `render_page_to_rgba` keep their
+  signatures and white paper. Contributed by @jungseohaan (#4).
 - **`stet-fonts` writes CFF and converts Type 1 charstrings to Type 2.**
   `cff_writer` serialises a CID-keyed CFF font (and `read_cid_font` /
   `CidFont::subset` read and subset one); `type1_to_type2` converts a

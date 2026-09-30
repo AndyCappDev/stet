@@ -59,42 +59,39 @@ for page in &pages {
 
 ## Transparent Backgrounds
 
-Rendering always starts from a transparent backdrop and composites onto
-white paper as its last step. `render_to_rgba_with_background` skips that
-step and returns straight-alpha RGBA instead, so a page's unpainted areas
-stay clear — what placed artwork (EPS, AI, PDF) needs to sit over other
-content. `render_to_rgba` and `render_to_rgba_with_layers` keep their
-signatures and their white paper.
-
-It takes a display list, so it works the same for both input paths:
+Pages render onto white paper by default. For artwork placed over other
+content — an EPS, AI or PDF in a page layout — leave the unpainted areas
+clear instead: every pixel no mark covers stays at alpha 0, and the RGBA
+comes back as straight (non-premultiplied) alpha, the form PNG and most
+compositors expect.
 
 ```rust
-use stet::Interpreter;
-use stet_graphics::layer_set::LayerSet;
-use stet_render::PageBackground;
+use stet::PageBackground;
 
-// PostScript or EPS
-let mut interp = Interpreter::new();
-let pages = interp.render_to_display_list(ps_data, 300.0)?;
-let rgba = stet_render::render_to_rgba_with_background(
-    &pages[0].display_list,
-    pages[0].width,
-    pages[0].height,
-    300.0,
-    None,            // ICC cache
-    false,           // no_aa
-    &LayerSet::new(),
-    PageBackground::Transparent,
-);
-
-// PDF, with the document's own ICC cache
-let doc = stet_pdf_reader::PdfDocument::from_bytes(&pdf_data)?;
-let display_list = doc.render_page(0, 300.0)?;
-let rgba = stet_render::render_to_rgba_with_background(
-    &display_list, width, height, 300.0,
-    Some(doc.icc_cache()), false, &LayerSet::new(), PageBackground::Transparent,
-);
+let mut interp = stet::Interpreter::builder()
+    .page_background(PageBackground::Transparent)
+    .build();
+let pages = interp.render(eps_data, 300.0)?;
+// pages[0].rgba — straight-alpha RGBA, clear where nothing was painted
 ```
+
+A PDF page takes the same choice:
+
+```rust
+use stet_pdf_reader::{LayerSet, PageBackground, PdfDocument};
+
+let doc = PdfDocument::from_bytes(&pdf_data)?;
+let (rgba, width, height) = doc.render_page_to_rgba_with_background(
+    0,
+    300.0,
+    &LayerSet::new(), // or a LayerSet with layers switched on or off
+    PageBackground::Transparent,
+)?;
+```
+
+For a display list you rendered yourself, call
+`stet::render_to_rgba_with_background` (or `stet_render::…`) with the list,
+its pixel size, and the background.
 
 The CLI exposes the same thing as `--transparent`, for `--device png`.
 

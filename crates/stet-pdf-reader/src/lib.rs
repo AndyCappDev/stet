@@ -218,6 +218,8 @@ pub use page_boxes::PageBoxes;
 pub use page_tree::PageInfo;
 /// The level for [`PdfDocument::set_text_extraction`], from `stet-graphics`.
 pub use stet_graphics::device::TextExtraction;
+#[cfg(feature = "render")]
+pub use stet_render::PageBackground;
 pub use viewer_prefs::{
     Duplex, PageLayout, PageMode, PrintScaling, ReadingDirection, ViewerPreferences,
 };
@@ -663,6 +665,25 @@ impl<'a> PdfDocument<'a> {
         dpi: f64,
         layer_set: &LayerSet,
     ) -> Result<(Vec<u8>, u32, u32), PdfError> {
+        self.render_page_to_rgba_with_background(page, dpi, layer_set, PageBackground::White)
+    }
+
+    /// Like [`render_page_to_rgba_with_layers`](Self::render_page_to_rgba_with_layers)
+    /// but can leave the page transparent.
+    ///
+    /// With [`PageBackground::Transparent`], every pixel no mark covers is
+    /// left at alpha 0 instead of white paper, and the pixel data is straight
+    /// (non-premultiplied) RGBA — for a PDF placed over other content, such
+    /// as artwork in a page layout. [`PageBackground::White`] renders exactly
+    /// as `render_page_to_rgba_with_layers` does.
+    #[cfg(feature = "render")]
+    pub fn render_page_to_rgba_with_background(
+        &self,
+        page: usize,
+        dpi: f64,
+        layer_set: &LayerSet,
+        background: PageBackground,
+    ) -> Result<(Vec<u8>, u32, u32), PdfError> {
         let (page_w, page_h) = self.page_size(page)?;
         let scale = dpi / 72.0;
         let pixel_w = (page_w * scale).round() as u32;
@@ -670,7 +691,7 @@ impl<'a> PdfDocument<'a> {
 
         let display_list = self.render_page(page, dpi)?;
 
-        let rgba = stet_render::render_to_rgba_with_layers(
+        let rgba = stet_render::render_to_rgba_with_background(
             &display_list,
             pixel_w,
             pixel_h,
@@ -678,6 +699,7 @@ impl<'a> PdfDocument<'a> {
             Some(&self.icc_cache),
             false,
             layer_set,
+            background,
         );
 
         Ok((rgba, pixel_w, pixel_h))
@@ -3238,6 +3260,45 @@ mod tests {
             rgba_default, rgba_with_set,
             "empty LayerSet must render byte-identical to plain render_page_to_rgba"
         );
+    }
+
+    #[cfg(feature = "render")]
+    #[test]
+    fn render_transparent_background_leaves_unpainted_areas_clear() {
+        let pdf = build_pdf_with_layered_content();
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+
+        let (white, w, h) = doc
+            .render_page_to_rgba_with_background(0, 72.0, &LayerSet::new(), PageBackground::White)
+            .unwrap();
+        let (layers, _, _) = doc
+            .render_page_to_rgba_with_layers(0, 72.0, &LayerSet::new())
+            .unwrap();
+        assert_eq!(white, layers, "White must render as the plain call does");
+
+        let (clear, w2, h2) = doc
+            .render_page_to_rgba_with_background(
+                0,
+                72.0,
+                &LayerSet::new(),
+                PageBackground::Transparent,
+            )
+            .unwrap();
+        assert_eq!((w, h), (w2, h2));
+        // Top-left and bottom-right quadrants are unpainted.
+        assert_eq!(sample_pixel(&clear, w, 25, 25), [0, 0, 0, 0]);
+        assert_eq!(sample_pixel(&clear, w, 75, 75), [0, 0, 0, 0]);
+        // The red base rect and the blue layer rect stay opaque.
+        assert_eq!(sample_pixel(&clear, w, 25, 75)[3], 255);
+        assert_eq!(sample_pixel(&clear, w, 75, 25)[3], 255);
+
+        // A hidden layer leaves its area clear, not white.
+        let mut hidden = layers::layer_set_from_document(&doc);
+        hidden.set(5, false);
+        let (clear_off, _, _) = doc
+            .render_page_to_rgba_with_background(0, 72.0, &hidden, PageBackground::Transparent)
+            .unwrap();
+        assert_eq!(sample_pixel(&clear_off, w, 75, 25), [0, 0, 0, 0]);
     }
 
     #[cfg(feature = "render")]

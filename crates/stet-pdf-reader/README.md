@@ -59,6 +59,23 @@ for page in 0..doc.page_count() {
 }
 ```
 
+### Transparent pages
+
+For a PDF placed over other content, leave the unpainted areas clear
+rather than white; the pixels come back as straight-alpha RGBA:
+
+```rust
+use stet_pdf_reader::{LayerSet, PageBackground, PdfDocument};
+
+let doc = PdfDocument::from_bytes(&data)?;
+let (rgba, w, h) = doc.render_page_to_rgba_with_background(
+    0,
+    300.0,
+    &LayerSet::new(),
+    PageBackground::Transparent,
+)?;
+```
+
 ### Extracting text
 
 The assembly helpers live in `stet-graphics`, the display-list crate this

@@ -35,6 +35,17 @@
 //!     .build();
 //! ```
 //!
+//! For artwork placed over other content, leave unpainted areas clear
+//! (straight-alpha RGBA) instead of white:
+//!
+//! ```no_run
+//! # #[cfg(feature = "render")] {
+//! let mut interp = stet::Interpreter::builder()
+//!     .page_background(stet::PageBackground::Transparent)
+//!     .build();
+//! # }
+//! ```
+//!
 //! # Diagnostics
 //!
 //! A render that returns no pages is not necessarily an error. The common
@@ -92,8 +103,9 @@ pub use stet_graphics::text::{TextLine, TextWord, text_lines, text_runs};
 
 #[cfg(feature = "render")]
 pub use stet_render::{
-    ImageCache, PreparedDisplayList, build_icc_cache_for_list, prepare_display_list,
-    render_region_prepared, render_to_rgba, viewport_band_count,
+    ImageCache, PageBackground, PreparedDisplayList, build_icc_cache_for_list,
+    prepare_display_list, render_region_prepared, render_to_rgba, render_to_rgba_with_background,
+    viewport_band_count,
 };
 
 /// Error type for interpreter operations.
@@ -128,6 +140,10 @@ pub struct RenderedPage {
     pub dpi: f64,
     /// RGBA pixel data (4 bytes per pixel, row-major).
     /// Present only when rendered via [`Interpreter::render`].
+    ///
+    /// Opaque on white paper by default; straight (non-premultiplied)
+    /// alpha when built with
+    /// [`page_background(PageBackground::Transparent)`](InterpreterBuilder::page_background).
     #[cfg(feature = "render")]
     pub rgba: Vec<u8>,
 }
@@ -139,6 +155,8 @@ pub struct RenderedPage {
 pub struct Interpreter {
     ctx: Context,
     use_icc: bool,
+    #[cfg(feature = "render")]
+    page_background: PageBackground,
     warnings: Vec<ExecWarning>,
 }
 
@@ -147,6 +165,8 @@ pub struct InterpreterBuilder {
     use_icc: bool,
     suppress_output: bool,
     text_extraction: TextExtraction,
+    #[cfg(feature = "render")]
+    page_background: PageBackground,
 }
 
 impl Interpreter {
@@ -164,6 +184,8 @@ impl Interpreter {
             use_icc: true,
             suppress_output: false,
             text_extraction: TextExtraction::Off,
+            #[cfg(feature = "render")]
+            page_background: PageBackground::White,
         }
     }
 
@@ -192,13 +214,15 @@ impl Interpreter {
 
         let mut pages = Vec::with_capacity(dl_pages.len());
         for p in dl_pages {
-            let rgba = stet_render::render_to_rgba(
+            let rgba = stet_render::render_to_rgba_with_background(
                 &p.display_list,
                 p.width,
                 p.height,
                 p.dpi,
                 icc_cache.as_ref(),
                 false,
+                &LayerSet::new(),
+                self.page_background,
             );
             pages.push(RenderedPage {
                 display_list: p.display_list,
@@ -566,6 +590,19 @@ impl InterpreterBuilder {
         self
     }
 
+    /// Leave the unpainted areas of pages from [`Interpreter::render`]
+    /// transparent, or keep them on white paper (the default).
+    ///
+    /// With [`PageBackground::Transparent`], every pixel no mark covers is
+    /// left at alpha 0 and [`RenderedPage::rgba`] is straight
+    /// (non-premultiplied) RGBA — for artwork placed over other content,
+    /// such as an EPS in a page layout. Display lists are unaffected.
+    #[cfg(feature = "render")]
+    pub fn page_background(mut self, background: PageBackground) -> Self {
+        self.page_background = background;
+        self
+    }
+
     /// Build the interpreter.
     pub fn build(self) -> Interpreter {
         let mut ctx = init::create_initialized_context(self.use_icc, self.suppress_output)
@@ -574,6 +611,8 @@ impl InterpreterBuilder {
         Interpreter {
             ctx,
             use_icc: self.use_icc,
+            #[cfg(feature = "render")]
+            page_background: self.page_background,
             warnings: Vec::new(),
         }
     }

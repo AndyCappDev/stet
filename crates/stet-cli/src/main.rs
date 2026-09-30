@@ -2294,6 +2294,15 @@ fn render_dropped_pdf(
     );
 }
 
+/// The CLI's `--transparent` flag as the renderer's own vocabulary.
+fn page_background(transparent: bool) -> stet_render::PageBackground {
+    if transparent {
+        stet_render::PageBackground::Transparent
+    } else {
+        stet_render::PageBackground::White
+    }
+}
+
 /// Render PDF files to PNG output.
 /// Render a single PDF page to RGBA with configurable anti-aliasing.
 /// When `use_viewport` is true, rendering is routed through the viewport
@@ -2306,15 +2315,6 @@ fn render_dropped_pdf(
 /// aspect ratio matches the input; when both targets are given, the
 /// smaller of the two scale factors wins (the page fits *inside* the
 /// target box).
-/// The CLI's `--transparent` flag as the renderer's own vocabulary.
-fn page_background(transparent: bool) -> stet_render::PageBackground {
-    if transparent {
-        stet_render::PageBackground::Transparent
-    } else {
-        stet_render::PageBackground::White
-    }
-}
-
 fn compute_fit_dims(
     page_w_pt: f64,
     page_h_pt: f64,

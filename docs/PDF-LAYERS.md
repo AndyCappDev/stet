@@ -268,6 +268,7 @@ same layer; this implementation is **last-rule-wins**.
 | `layer_tree()` | `LayerTree` | Default config's `/Order` |
 | `layer_set_for(intent)` | `LayerSet` | Intent-driven LayerSet from `/AS` rules |
 | `render_page_to_rgba_with_layers(page, dpi, &set)` | `(Vec<u8>, u32, u32)` | Render with overrides |
+| `render_page_to_rgba_with_background(page, dpi, &set, background)` | `(Vec<u8>, u32, u32)` | Render with overrides, optionally on a transparent page |
 
 Free functions in `stet_pdf_reader::layers`:
 
