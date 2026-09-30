@@ -110,6 +110,7 @@ fn main() {
     let mut device_name: Option<String> = None;
     let mut no_icc = false;
     let mut no_aa = false;
+    let mut transparent = false;
     let mut output_profile_path: Option<String> = None;
     let mut cmyk_profile_path: Option<String> = None;
     let mut bpc_mode = BpcMode::Auto;
@@ -208,6 +209,11 @@ fn main() {
             }
             "--no-aa" => {
                 no_aa = true;
+                i += 1;
+                continue;
+            }
+            "--transparent" => {
+                transparent = true;
                 i += 1;
                 continue;
             }
@@ -504,6 +510,14 @@ writes all pages to one file",
         std::process::exit(1);
     }
 
+    if transparent && device != "png" {
+        eprintln!(
+            "Error: --transparent is only supported for --device png (got '{}')",
+            device
+        );
+        std::process::exit(1);
+    }
+
     match device.as_str() {
         "png" => {
             run_png_mode(
@@ -511,6 +525,7 @@ writes all pages to one file",
                 file_args,
                 &icc_cfg,
                 no_aa,
+                transparent,
                 page_filter,
                 false,
                 password.as_deref(),
@@ -531,6 +546,7 @@ writes all pages to one file",
                 file_args,
                 &icc_cfg,
                 no_aa,
+                false,
                 page_filter,
                 true,
                 password.as_deref(),
@@ -626,6 +642,7 @@ fn run_png_mode(
     file_args: Vec<String>,
     icc_cfg: &IccCliConfig,
     no_aa: bool,
+    transparent: bool,
     page_filter: Option<std::collections::HashSet<i32>>,
     use_viewport: bool,
     password: Option<&str>,
@@ -644,6 +661,7 @@ fn run_png_mode(
             &file_args,
             &page_filter,
             no_aa,
+            transparent,
             use_viewport,
             icc_cfg,
             password,
@@ -673,6 +691,7 @@ fn run_png_mode(
             dev.set_system_cmyk_bytes(bytes.clone());
         }
         dev.set_no_aa(no_aa);
+        dev.set_page_background(page_background(transparent));
         dev.set_use_viewport_path(use_viewport);
         Box::new(dev)
     }));
@@ -1242,6 +1261,9 @@ Common options:
                             75% of cores in viewer mode and 8 otherwise, where
                             sequential PNG writing limits the benefit of more.
     --no-aa                 Disable anti-aliasing.
+    --transparent           Leave unpainted areas transparent instead of
+                            white paper (--device png only). Pixels are
+                            written as straight-alpha RGBA.
     --password <PW>         Password for encrypted PDF input.
 
 Colour management:
@@ -2284,6 +2306,15 @@ fn render_dropped_pdf(
 /// aspect ratio matches the input; when both targets are given, the
 /// smaller of the two scale factors wins (the page fits *inside* the
 /// target box).
+/// The CLI's `--transparent` flag as the renderer's own vocabulary.
+fn page_background(transparent: bool) -> stet_render::PageBackground {
+    if transparent {
+        stet_render::PageBackground::Transparent
+    } else {
+        stet_render::PageBackground::White
+    }
+}
+
 fn compute_fit_dims(
     page_w_pt: f64,
     page_h_pt: f64,
@@ -2310,11 +2341,13 @@ fn compute_fit_dims(
     (out_w, out_h, dpi)
 }
 
+#[expect(clippy::too_many_arguments)]
 fn render_pdf_page_to_rgba(
     doc: &PdfDocument,
     page: usize,
     dpi: f64,
     no_aa: bool,
+    transparent: bool,
     use_viewport: bool,
     target_width: Option<u32>,
     target_height: Option<u32>,
@@ -2341,13 +2374,15 @@ fn render_pdf_page_to_rgba(
             no_aa,
         )
     } else {
-        stet_render::render_to_rgba(
+        stet_render::render_to_rgba_with_background(
             &display_list,
             pixel_w,
             pixel_h,
             effective_dpi,
             Some(doc.icc_cache()),
             no_aa,
+            &stet_graphics::layer_set::LayerSet::new(),
+            page_background(transparent),
         )
     };
     Ok((rgba, pixel_w, pixel_h))
@@ -2359,6 +2394,7 @@ fn run_pdf_input_png(
     file_args: &[String],
     page_filter: &Option<std::collections::HashSet<i32>>,
     no_aa: bool,
+    transparent: bool,
     use_viewport: bool,
     icc_cfg: &IccCliConfig,
     password: Option<&str>,
@@ -2455,6 +2491,7 @@ were selected from '{}'",
                 page,
                 dpi,
                 no_aa,
+                transparent,
                 use_viewport,
                 target_width,
                 target_height,

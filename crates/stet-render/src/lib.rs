@@ -36,6 +36,7 @@ mod skia_device;
 
 pub use png_sink::PngSinkFactory;
 pub use skia_device::ImageCache;
+pub use skia_device::PageBackground;
 pub use skia_device::PreparedDisplayList;
 #[cfg(feature = "ps-device")]
 pub use skia_device::SkiaDevice;
@@ -50,5 +51,6 @@ pub use skia_device::render_region_prepared_parallel_with_progress;
 pub use skia_device::render_region_single_band;
 pub use skia_device::render_to_rgba;
 pub use skia_device::render_to_rgba_viewport;
+pub use skia_device::render_to_rgba_with_background;
 pub use skia_device::render_to_rgba_with_layers;
 pub use skia_device::viewport_band_count;
